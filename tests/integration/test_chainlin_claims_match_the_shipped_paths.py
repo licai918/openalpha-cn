@@ -15,7 +15,8 @@ dataset reports `authentication`, and `doctor --probe` exits non-zero
 provider. Both clients are real -- ChainLin's has Bearer auth, a per-minute client-side ceiling
 that raises instead of waiting, classified failures and frozen contract tests in
 `tests/contract/providers/` -- and a user's own code can construct either and hand its batch to
-evidence building, so `README.md:1137` and api-02, which put both on the caller's side, are true.
+evidence building, so `README.md`'s sentence that puts 链邻 API and the optional AKShare adapter
+on the caller's or the Provider's side, and api-02, which draws both there, are true.
 If the premise test fails, a client reaches another path, and the sentences this guard holds were
 written for a premise that no longer holds: re-read them, and this guard.
 
@@ -34,9 +35,10 @@ rewritten; there is no allowlist.
 units (`tests/diagram_text.py`): brain-01 and brain-02 drew ChainLin's name on one line of a
 panel and "已实现 · 统一替代入口" on the next, so a panel's strings are read together. A name is
 链邻, ChainLin or AKShare, in any case and as a substring, so `ChainLinDataProvider`,
-`chainlin-data/v1` and `AKShareProvider` count. Before a clause is read, a URL and the name of the
-separately distributed desktop product (`DESKTOP_PRODUCT`) are removed, so "进入 Release 页面"
-beside a `chainlin-desktop` link is no claim. A URL is the printable ASCII after `http(s)://`
+`chainlin-data/v1` and `AKShareProvider` count. Before a clause is read, a URL and the names of the
+separately distributed desktop product (`DESKTOP_PRODUCT`: 链邻桌面…, 链邻涨停复盘…, 链邻安装版,
+链邻 Windows 软件, the ChainLin installer) are removed, so "进入 Release 页面" beside a
+`chainlin-desktop` link is no claim. A URL is the printable ASCII after `http(s)://`
 up to a closing `)`, `]` or `>` (`URL`): whitespace and any character outside ASCII end it, so a
 claim written straight after a link, behind full-width punctuation or not, is still read.
 ChainLin's own contract document, `docs/api/chainlin-data.zh-CN.md`, is read too, and every
@@ -55,8 +57,12 @@ or the clause fails, and they assert two. A clause naming single clocks is not r
 which `test_the_reference_scan_finds_what_its_docstring_says` measures.
 
 - The premise reads names (`_uses_of`): a class or factory reached by a computed name --
-  `getattr(module, "ChainLinDataProvider")`, `importlib` -- is not seen. Every other read
-  counts, not only a call: a dict value, a `functools.partial` argument, another name bound to it.
+  `getattr(module, "ChainLinDataProvider")` -- is not seen. Every other read counts, not only a
+  call: a dict value, a `functools.partial` argument, another name bound to it, an attribute read
+  by name (`importlib.import_module(...).ChainLinDataProvider`), and a name an import binds to it,
+  followed from module to module (`import ... as X` in one, `X` read in another).
+- A claim whose only ChainLin is the desktop product's name: "链邻桌面软件已接入研究链" is not
+  read, because the name goes before the clause is.
 - A claim worded without a marker. The writing boundary's "真实数据调用仍需用户配置服务地址"
   implied shipped calls through a condition alone; it was rewritten by hand, as was §085's copy.
 - A claim split across clauses or blocks, the name in one and the marker in the next: a pronoun
@@ -76,6 +82,9 @@ which `test_the_reference_scan_finds_what_its_docstring_says` measures.
   配置的服务宣传为已连接" was reworded.
 - A link whose path holds text outside ASCII is cut at its first such character, and the rest of
   the path is read as prose: `https://example.com/链邻入口` reads as a claim.
+- The premise follows an alias by its name alone, in every module, so a different symbol that
+  shares an alias's name is counted as a read too: `from httpx import Client` beside an alias
+  `Client` of the class. `test_the_reference_scan_finds_what_its_docstring_says` measures this.
 """
 
 from __future__ import annotations
@@ -147,33 +156,51 @@ def _reads_with_their_function(tree: ast.AST) -> Iterator[tuple[str, ast.expr]]:
     yield from visit(tree, "<module>")
 
 
+def _names_bound_to(name: str, trees: Iterable[ast.AST]) -> frozenset[str]:
+    """`name`, and every name an import binds to it in any of `trees`, followed through each module
+    that imports it again: `from here import name as X` in one module, `from there import X` in
+    the next."""
+    imports = [
+        alias
+        for tree in trees
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    ]
+    names = {name}
+    while added := {
+        alias.asname
+        for alias in imports
+        if alias.name in names and alias.asname and alias.asname not in names
+    }:
+        names |= added
+    return frozenset(names)
+
+
 def _uses_of(name: str, roots: Iterable[Path]) -> list[tuple[str, str]]:
     """Each place under `roots` that reads `name`, as `(path, enclosing function)`.
 
-    A read is `name` itself, a name a `from ... import name as other` bound, or an attribute
-    `module.name`, wherever it is loaded: called, put in a dict, handed to `functools.partial` or
-    bound to another name. The review of `D13` wired ChainLin into `evidence build` in each of the
-    last three ways and a scan of calls alone stayed green. An import and a definition are not
-    reads. The path is relative to the root's parent.
+    A read is `name` itself, a name an import binds to it in any module under `roots`
+    (`_names_bound_to`), or an attribute of either, wherever it is loaded: called, put in a dict,
+    handed to `functools.partial` or bound to another name. The review of `D13` wired ChainLin
+    into `evidence build` in each of the last three ways, and a scan of calls alone stayed green;
+    its final review re-exported the class under an alias in one module and constructed it in
+    another, and a scan of each module's own aliases stayed green. An import and a definition are
+    not reads. The path is relative to the root's parent.
     """
-    found: list[tuple[str, str]] = []
-    for root in roots:
-        for path in sorted(root.rglob("*.py")):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            names = {name} | {
-                alias.asname
-                for node in ast.walk(tree)
-                if isinstance(node, ast.ImportFrom)
-                for alias in node.names
-                if alias.name == name and alias.asname
-            }
-            found.extend(
-                (path.relative_to(root.parent).as_posix(), function)
-                for function, node in _reads_with_their_function(tree)
-                if (isinstance(node, ast.Name) and node.id in names)
-                or (isinstance(node, ast.Attribute) and node.attr == name)
-            )
-    return found
+    parsed = [
+        (root, path, ast.parse(path.read_text(encoding="utf-8"), filename=str(path)))
+        for root in roots
+        for path in sorted(root.rglob("*.py"))
+    ]
+    names = _names_bound_to(name, (tree for _, _, tree in parsed))
+    return [
+        (path.relative_to(root.parent).as_posix(), function)
+        for root, path, tree in parsed
+        for function, node in _reads_with_their_function(tree)
+        if (isinstance(node, ast.Name) and node.id in names)
+        or (isinstance(node, ast.Attribute) and node.attr in names)
+    ]
 
 
 def test_the_two_clients_are_constructed_only_for_doctor() -> None:
@@ -313,10 +340,15 @@ CLIENT_NAMES: Final[dict[str, re.Pattern[str]]] = {
 """The names a clause gives each of `CLIENT_CLASSES`."""
 
 DESKTOP_PRODUCT: Final[re.Pattern[str]] = re.compile(
-    r"链邻\s*(?:桌面|涨停复盘|Windows|安装|软件)|chainlin[-_ ](?:desktop|limit-up|installer)",
+    r"链邻\s*(?:桌面|涨停复盘|Windows\s*软件|安装(?:版|包|程序))"
+    r"|chainlin[-_ ](?:desktop|limit-up|installer)",
     re.IGNORECASE,
 )
-"""The separately distributed desktop product, which is not the data client."""
+"""The separately distributed desktop product's own names, which do not name the data client.
+
+A bare 链邻软件 or 链邻安装 is not one of them. `D13`'s pattern removed 链邻 before any 软件, 安装
+or Windows, and a claim such as "链邻软件接口已接入研究链" lost the only name it had.
+"""
 
 URL: Final[re.Pattern[str]] = re.compile(r"https?://(?:(?![)\]>])[!-~])+")
 """A URL: the printable ASCII after `http(s)://`, up to a closing `)`, `]` or `>`.
@@ -679,9 +711,11 @@ TRUE_SENTENCES: Final[tuple[str, ...]] = (
     "链邻 Provider 已实现客户端合同，面板构建不调用它，证据来自用户文件。",
 )
 """True sentences that name ChainLin, its database, its API, its desktop product or AKShare; each
-must pass. All but the last two are held by this repository. The last two are built so that one
-rule alone keeps each from reading as a claim: the link names ChainLin only inside its URL, and
-构建 and 证据 sit in different comma-separated parts of one clause."""
+must pass. At `20fec55` the first four, the seventh and the ninth stood verbatim in the four
+documents, and the sixth and the eighth shortened sentences of `README.md` and `README.en.md`. The
+fifth and the last two were written for this test: the fifth names the API by its own name, and in
+each of the last two one rule alone keeps it from reading as a claim -- the link names ChainLin
+only inside its URL, and 构建 and 证据 sit in different comma-separated parts of one clause."""
 
 
 def test_true_sentences_about_chainlin_pass() -> None:
@@ -727,6 +761,36 @@ marks, and the ASCII comma after them is the same fault. The last three hold the
 brackets, which end a URL even when ASCII text follows."""
 
 
+CLAIMS_BESIDE_A_DESKTOP_WORD: Final[dict[str, str]] = {
+    "链邻软件": "链邻软件接口已接入研究链。",
+    "链邻安装": "链邻安装后即可接入研究链。",
+}
+"""The final review of `D13` found `DESKTOP_PRODUCT` taking 链邻 with it from any clause where 软件,
+安装 or Windows followed: the only name went, and the claim with it."""
+
+DESKTOP_NAMES_BESIDE_A_MARKER: Final[tuple[str, ...]] = (
+    "进入链邻桌面软件的下载页面。",
+    "进入链邻涨停复盘策略软件的下载页面。",
+    "进入链邻安装版的下载页面。",
+    "进入链邻 Windows 软件的下载页面。",
+    "The ChainLin installer is the entry to the desktop product.",
+)
+"""The desktop product's names as the four documents write them, each beside a marker (进入, or
+"entry"). Each name is removed before the clause is read, so none of these is a claim."""
+
+
+def test_a_desktop_word_does_not_hide_the_client() -> None:
+    """Only the desktop product's own names are removed: 链邻 stays beside a bare 软件 or 安装."""
+    missed = [
+        label
+        for label, sentence in CLAIMS_BESIDE_A_DESKTOP_WORD.items()
+        if "接入" not in _claim_markers(sentence)
+    ]
+    assert not missed, f"a claim beside a desktop word went unread: {missed}"
+    read = {sentence: _claim_markers(sentence) for sentence in DESKTOP_NAMES_BESIDE_A_MARKER}
+    assert not any(read.values()), f"a desktop product's name was read as the client: {read}"
+
+
 def test_a_claim_written_right_after_a_link_is_read() -> None:
     """A URL ends at whitespace, a closing ASCII bracket or the first character outside ASCII."""
     missed = [
@@ -751,6 +815,7 @@ def test_the_stated_limits_are_real() -> None:
             "链邻 Provider 已实现客户端合同。数据随后被固化为不可变证据。\n"
         ),
         "an English claim outside the markers": "ChainLin powers every research run.\n",
+        "a claim whose only name is the desktop product's": "链邻桌面软件已接入研究链。\n",
     }
     two_calls = 'svg.text(1, 2, "链邻数据接口 API")\nsvg.text(1, 3, "已实现 · 统一替代入口")\n'
     flagged_anyway = {
@@ -793,8 +858,12 @@ def test_the_reference_scan_finds_what_its_docstring_says(tmp_path: Path) -> Non
     """`_uses_of` over a synthetic tree, one shape per file.
 
     Found: an alias, an attribute, a nested function, a dict value, a `functools.partial`
-    argument and a binding to another name. Not found: a definition, which is no read, and
-    `getattr` by a string, the blind spot the module docstring states.
+    argument, a binding to another name, an attribute read through `importlib.import_module`, a
+    name re-exported under an alias and read in another module, directly or as an attribute of
+    its package, and -- the over-reach the module docstring states -- an unrelated `Client` that
+    shares the alias's name. Not found: a definition, which is no read, and `getattr` by a
+    string, the blind spot the module docstring states. The factory renamed and re-exported the
+    same way is found where it is called.
     """
     root = tmp_path / "pkg"
     files = {
@@ -827,6 +896,20 @@ def test_the_reference_scan_finds_what_its_docstring_says(tmp_path: Path) -> Non
             "import openalpha_cn.providers as providers\n\n"
             'PROVIDER = getattr(providers, "ChainLinDataProvider")()\n'
         ),
+        "by_importlib.py": (
+            "import importlib\n\n"
+            'PROVIDER = importlib.import_module("openalpha_cn.providers").ChainLinDataProvider()\n'
+        ),
+        "reexport.py": (
+            "from openalpha_cn.providers.chainlin import ChainLinDataProvider as Client\n"
+        ),
+        "through_the_reexport.py": (
+            "from openalpha_cn.providers import Client\n\n\ndef build():\n    return Client()\n"
+        ),
+        "through_the_package.py": (
+            "import openalpha_cn.providers as providers\n\nPROVIDER = providers.Client()\n"
+        ),
+        "unrelated.py": "from httpx import Client\n\n\ndef fetch():\n    return Client()\n",
     }
     root.mkdir()
     for name, text in files.items():
@@ -836,7 +919,25 @@ def test_the_reference_scan_finds_what_its_docstring_says(tmp_path: Path) -> Non
         ("pkg/aliased.py", "build"),
         ("pkg/attribute.py", "<module>"),
         ("pkg/bound.py", "<module>"),
+        ("pkg/by_importlib.py", "<module>"),
         ("pkg/nested.py", "inner"),
         ("pkg/partial.py", "build"),
         ("pkg/registry.py", "build"),
+        ("pkg/through_the_package.py", "<module>"),
+        ("pkg/through_the_reexport.py", "build"),
+        ("pkg/unrelated.py", "fetch"),
     ], f"the reference scan found {found}"
+    renamed = tmp_path / "renamed"
+    renamed.mkdir()
+    (renamed / "commands.py").write_text(
+        "def _default_providers():\n    return []\n", encoding="utf-8"
+    )
+    (renamed / "reexport.py").write_text(
+        "from renamed.commands import _default_providers as defaults\n", encoding="utf-8"
+    )
+    (renamed / "caller.py").write_text(
+        "from renamed.reexport import defaults\n\n\ndef run():\n    return defaults()\n",
+        encoding="utf-8",
+    )
+    callers = _uses_of("_default_providers", [renamed])
+    assert callers == [("renamed/caller.py", "run")], f"the renamed factory was read at {callers}"
