@@ -426,14 +426,18 @@ def pytest_runtest_protocol(
 #     stays so that the two spellings of one rule agree, not because either platform needs it.
 #   - It takes *every* `GIT_*`, not only the ones that point git at a repository (`GIT_DIR`,
 #     `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`). Configuration the environment
-#     carries goes with them -- `GIT_CONFIG_COUNT` with its `GIT_CONFIG_KEY_<n>` and
-#     `GIT_CONFIG_VALUE_<n>` pairs, `GIT_CONFIG_PARAMETERS` (how `git -c` reaches the commands
-#     it starts), `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `GIT_CONFIG_NOSYSTEM` -- and so do
-#     an identity (`GIT_AUTHOR_*`, `GIT_COMMITTER_*`) and every other setting git reads from
-#     its environment. A git a test starts reads its configuration from the files git finds by
-#     itself, so a run that relied on the environment for a setting or an identity has it in no
-#     test; a test that needs one passes it on its own command line. `pytest_unconfigure` hands
-#     every one of them back, not only the four.
+#     carries under that prefix goes with them -- `GIT_CONFIG_COUNT` with its `GIT_CONFIG_KEY_<n>`
+#     and `GIT_CONFIG_VALUE_<n>` pairs, `GIT_CONFIG_PARAMETERS` (how `git -c` reaches the
+#     commands it starts), `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `GIT_CONFIG_NOSYSTEM` -- and
+#     so does an identity given as `GIT_AUTHOR_*` or `GIT_COMMITTER_*`, and every other `GIT_*`.
+#     What git reads from the environment without the prefix stays, and it is not nothing: `EMAIL`
+#     is where git takes an author's and a committer's address from when no `user.email` is
+#     configured, and `HOME` and `XDG_CONFIG_HOME` decide which global configuration file it
+#     reads. Measured under this hook: with `GIT_AUTHOR_EMAIL` and a `GIT_CONFIG_*` `user.email`
+#     both taken, a test's `git var GIT_AUTHOR_IDENT` gave `EMAIL`'s address. None of those three
+#     can point git at another repository, which is the incident this hook exists for, so they
+#     are left; a test that needs a known identity passes it on its own command line, `git -c`.
+#     `pytest_unconfigure` hands back every variable it took, not only the four.
 #
 # A hook and not the function-scoped autouse fixture that is the obvious spelling, for the reason
 # `V2-P5-031` gives above for the offline guard: such a fixture is live for a test's body and its
