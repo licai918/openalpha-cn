@@ -924,7 +924,21 @@ _ALWAYS_VALID_ESCAPES: Final[frozenset[str]] = frozenset("\n\\'\"abfnrtv01234567
 line continuation, `\\\\`, `'`, `\"`, `a`, `b`, `f`, `n`, `r`, `t`, `v`, an octal digit,
 and `x` (the two hex digits `\\x` requires are not backslashes, so this scan never
 needs to count them -- and a malformed one is a distinct, unconditional `SyntaxError`
-raised by `compile()` itself, not the warning this module is about)."""
+raised by `compile()` itself, not the warning this module is about). An octal digit is
+valid to *start* an escape; whether the escape it starts is valid is `_OCTAL_DIGITS`'
+question."""
+
+_OCTAL_DIGITS: Final[frozenset[str]] = frozenset("01234567")
+"""The digits of an octal escape, which takes one to three of them.
+
+Starting one is always valid and its value is not: CPython warns on an octal escape above
+`0o377` -- `invalid octal escape sequence '\\400'`, a `DeprecationWarning` on 3.11 and a
+`SyntaxWarning` from 3.12 -- in `str` and `bytes` alike, and escalated to an error it is an
+escape error like the rest. A review found this scan taking every octal digit for the end of a
+valid escape and returning `None` for `"\\400"` on 3.11.14, 3.12.12 and 3.14.5, so the reader
+got `compile()`'s line (on 3.11, a multi-line literal's first line) beside reasons that did not
+apply. `_first_invalid_escape_line` now reads up to three digits and flags a value above
+`0o377`."""
 
 _STR_ONLY_VALID_ESCAPES: Final[frozenset[str]] = frozenset("NuU")
 """`\\N`, `\\u` and `\\U` introduce a Unicode-only escape (name or code point):
@@ -962,11 +976,13 @@ def _first_invalid_escape_line(token_text: str, start_row: int, *, is_bytes: boo
     none.
 
     Walks `token_text` character by character. On a backslash, the character after it
-    is either part of a valid escape -- in which case both characters are consumed and
+    is either part of a valid escape -- in which case the escape is consumed and
     scanning continues, which is what stops a valid `\\\\q` from being misread as the
     invalid `\\q` it contains as a substring -- or it is the offender, reported
-    immediately. `start_row` (the token's own starting line) plus the newlines already
-    scanned gives the real line even inside a multi-line literal.
+    immediately. An octal escape is consumed whole: its one to three digits are read as
+    a number, and it is the offender when that number is above `0o377` (`_OCTAL_DIGITS`).
+    `start_row` (the token's own starting line) plus the newlines already scanned gives
+    the real line even inside a multi-line literal.
     """
     valid_next_chars = (
         _ALWAYS_VALID_ESCAPES if is_bytes else _ALWAYS_VALID_ESCAPES | _STR_ONLY_VALID_ESCAPES
@@ -978,6 +994,14 @@ def _first_invalid_escape_line(token_text: str, start_row: int, *, is_bytes: boo
         char = token_text[index]
         if char == "\\" and index + 1 < length:
             next_char = token_text[index + 1]
+            if next_char in _OCTAL_DIGITS:
+                end = index + 2
+                while end < min(index + 4, length) and token_text[end] in _OCTAL_DIGITS:
+                    end += 1
+                if int(token_text[index + 1 : end], 8) > 0o377:
+                    return line
+                index = end
+                continue
             if next_char in valid_next_chars:
                 index += 2
                 if next_char == "\n":
@@ -1002,12 +1026,15 @@ def _locate_invalid_escape(source: str) -> tuple[int, int] | None:
     there is no escape processing in a raw string, so `compile()` never warns about one.
 
     `None` is an answer, not an error. It means the offender -- if there is one -- is
-    outside what this scan recognises: a malformed `\\x`, `\\N`, `\\u` or `\\U` escape is
-    `compile()`'s own unconditional `SyntaxError`, and this scan treats those four as
-    valid without checking what follows them; or the `SyntaxError` was not about an
-    escape at all; or `source` does not tokenize. A caller that reports a line must say
-    so when this returns `None` rather than present `compile()`'s number as confirmed --
-    see `_describe_where`.
+    outside what this scan recognises, and the shapes known to be outside it are these,
+    with no claim that there are no others: a malformed `\\x`, `\\N`, `\\u` or `\\U` escape
+    is `compile()`'s own unconditional `SyntaxError`, and this scan treats those four as
+    valid without checking what follows them; the 3.12 f-string limit below; a
+    `SyntaxError` that was not about an escape at all; and `source` that does not
+    tokenize. An octal escape above `0o377` was also outside it until D13's review found
+    it; the scan checks that now. A caller that reports a line must say so when this
+    returns `None` rather than present `compile()`'s number as confirmed -- see
+    `_describe_where`.
 
     Known limit, measured on 3.12.12 and 3.14.5 (an earlier note called it "reasoned
     rather than measured", believing no 3.12 could run here): 3.12 ends an
@@ -1117,12 +1144,14 @@ def _describe_where(source: str, exc: SyntaxError) -> str:
       f_string` uses. "Where the enclosing string literal begins" was printed for those
       too, and was false;
     * the error is about an escape but the scan could not find it -- `compile()`'s number,
-      passed on as exactly that and marked unconfirmed, naming the scan's two known blind
-      spots rather than guessing which one applies. Measured on 3.11.14: `\\x` followed
-      by non-hex on line 2 of a three-line literal makes `compile()` report line 3, the
-      closing quotes. Measured on 3.12.12 and 3.14.5: `f"text\\{x}"` is an ordinary
-      invalid escape the scan misses, which the previous wording blamed on a malformed
-      `\\x`, `\\N`, `\\u` or `\\U` escape.
+      passed on as exactly that and marked unconfirmed, with the shapes the scan is known
+      to miss given as examples rather than as the whole list. Measured on 3.11.14: `\\x`
+      followed by non-hex on line 2 of a three-line literal makes `compile()` report line
+      3, the closing quotes. Measured on 3.12.12 and 3.14.5: `f"text\\{x}"` is an ordinary
+      invalid escape the scan misses, which an earlier wording blamed on a malformed `\\x`,
+      `\\N`, `\\u` or `\\U` escape. The wording after that named those two shapes as if
+      they were all of them, and a review found a third -- an octal escape above `0o377`,
+      which the scan now checks. The list stays open.
 
     Whether an error is "about an escape" is read from `exc.msg`. Measured on 3.11.14,
     every escape error tried says so ("invalid escape sequence '\\q'", "... truncated
@@ -1140,9 +1169,9 @@ def _describe_where(source: str, exc: SyntaxError) -> str:
         return (
             f"line {exc.lineno} as compile() reports it, unconfirmed: this scan did not find "
             "the offending escape, so the line is compile()'s alone and can differ from the "
-            "offender's (the scan does not check what follows \\x, \\N, \\u or \\U, and on "
-            "Python 3.12 and later it misses a backslash right before an f-string's "
-            'replacement field, as in f"text\\{x}")'
+            "offender's (among the shapes the scan is known to miss: what follows \\x, \\N, "
+            "\\u or \\U, and, on Python 3.12 and later, a backslash right before an "
+            'f-string\'s replacement field, as in f"text\\{x}")'
         )
     line, literal_start = located
     if line == exc.lineno:
@@ -1463,6 +1492,89 @@ def test_a_backslash_before_an_f_string_field_is_not_blamed_on_a_malformed_escap
         assert "f-string" in described, described
     else:
         assert described == "line 2"
+
+
+def test_the_scan_flags_an_octal_escape_above_0o377_and_nothing_up_to_it() -> None:
+    """An octal escape above `0o377` is invalid, in `str` and `bytes` alike (review Minor-2).
+
+    Measured on 3.11.14, 3.12.12 and 3.14.5: `compile()` refuses each source in the loop with an
+    "invalid octal escape sequence" error, and before D13 the scan returned `None` for every one
+    of them -- it took any octal digit for the end of a valid escape. On 3.11 the multi-line case
+    then read as "line 1 ... unconfirmed", the literal's first line, for an offender on line 2.
+    The f-string case reaches the scan through `FSTRING_MIDDLE` on 3.12 and later, where
+    `compile()` reports line 5 of a four-line source.
+
+    The boundary is pinned from both sides: `\\377` is the largest valid value and must not stop
+    the scan before the `\\400` after it, and an octal escape is at most three digits, so
+    `\\0400` is `\\040` followed by a `0`, and valid.
+    """
+    for source, line in (
+        ('x = "\\400"\n', 1),
+        ('x = b"\\400"\n', 1),
+        ('x = "\\377"\ny = "\\400"\n', 2),
+        ('x = """line one\n\\400 here\n"""\n', 2),
+        ('y = 1\nx = f"""first {y}\nsecond \\777\n"""\n', 3),
+    ):
+        exc = _syntax_error_from_compiling(source)
+        assert "octal escape" in (exc.msg or ""), exc.msg
+        assert _located_invalid_escape_line(source) == line, source
+
+    valid = 'x = "\\377"\ny = "\\0400"\n'
+    _assert_compiles_without_a_warning(valid)
+    assert _located_invalid_escape_line(valid) is None
+
+    multi_line = 'x = """line one\n\\400 here\n"""\n'
+    exc = _syntax_error_from_compiling(multi_line)
+    if exc.lineno == 2:
+        expected = "line 2"
+    elif exc.lineno == 1:
+        expected = (
+            "line 2 (compile() itself reports line 1, where the enclosing string literal begins)"
+        )
+    else:
+        expected = f"line 2 (compile() itself reports line {exc.lineno})"
+    assert _describe_where(multi_line, exc) == expected
+
+
+def test_the_scan_pins_its_f_string_branches_on_a_fixed_token_stream_on_every_interpreter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The scan's three f-string pieces, pinned without the running interpreter's tokenizer.
+
+    `test_the_scan_finds_an_escape_that_compile_misplaces_inside_a_multi_line_f_string` pins
+    them through the real `tokenize`, so on 3.11 -- where an f-string is one `STRING` token --
+    two of the three cannot be reached, and on 3.12 its verdict rests on how a patch release
+    cuts `FSTRING_MIDDLE`. A review suggested feeding the scan a fixed stream instead, and this
+    is it: `tokenize.generate_tokens` yields the string tokens 3.12.12 produces for that test's
+    source (measured), and the three f-string token types are integers no real token has, on
+    every interpreter. Deleting the `FSTRING_MIDDLE` branch then returns `None`, deleting the
+    raw f-string skip returns the raw `\\p` on line 2, and dropping the backslash-newline count
+    returns line 3 -- on 3.11.14, 3.12.12 and 3.14.5 alike (measured in D13).
+    """
+    start, middle, end = 10_001, 10_002, 10_003
+    monkeypatch.setitem(globals(), "_FSTRING_START", start)
+    monkeypatch.setitem(globals(), "_FSTRING_MIDDLE", middle)
+    monkeypatch.setitem(globals(), "_FSTRING_END", end)
+    lines = (
+        "y = 1\n",
+        'a = rf"raw \\p {y}"\n',
+        'x = f"""first {y} \\\n',
+        "second \\q {y}\n",
+        '"""\n',
+    )
+    stream = [
+        tokenize.TokenInfo(start, 'rf"', (2, 4), (2, 7), lines[1]),
+        tokenize.TokenInfo(middle, "raw \\p ", (2, 7), (2, 14), lines[1]),
+        tokenize.TokenInfo(end, '"', (2, 17), (2, 18), lines[1]),
+        tokenize.TokenInfo(start, 'f"""', (3, 4), (3, 8), lines[2]),
+        tokenize.TokenInfo(middle, "first ", (3, 8), (3, 14), lines[2]),
+        tokenize.TokenInfo(middle, " \\\nsecond \\q ", (3, 17), (4, 10), lines[2] + lines[3]),
+        tokenize.TokenInfo(middle, "\n", (4, 13), (5, 0), lines[3]),
+        tokenize.TokenInfo(end, '"""', (5, 0), (5, 3), lines[4]),
+    ]
+    monkeypatch.setattr(tokenize, "generate_tokens", lambda readline: iter(stream))
+
+    assert _locate_invalid_escape("".join(lines)) == (4, 3)
 
 
 def test_line_of_the_invalid_escape_reports_the_first_of_two_offenders_in_one_literal() -> None:
