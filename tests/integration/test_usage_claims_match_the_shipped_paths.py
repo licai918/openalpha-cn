@@ -936,6 +936,11 @@ def test_the_premise_goes_red_on_the_double_swap_the_review_of_d12_measured() ->
     disk. A call whose callee resolves to one of `SHIPPED_PATH_NAMES` is now a kind of its own
     (`CALLED_KINDS`), so the two constructions are two new sites. Applied in memory, as the
     injections above are.
+
+    It fails on its own. It compares the problems the swap adds to today's and requires exactly
+    the two constructions: a scan that stopped counting calls leaves today's tree with problems of
+    its own, which the premise test fails on, and adds none here, which this test fails on (the
+    review of `D13`, M7).
     """
     sources = dict(_non_test_sources())
     swapped = dict(sources)
@@ -944,9 +949,15 @@ def test_the_premise_goes_red_on_the_double_swap_the_review_of_d12_measured() ->
         swapped[path] = sources[path].replace(entry, "", 1) + construction
     sdk = "src/openalpha_cn/sdk.py"
     swapped[sdk] = sources[sdk] + "\n\nfrom openalpha_cn.agents import DEFAULT_MODEL_AGENT\n"
-    assert _premise_problems(_usage_sites(swapped.items())), (
-        "the premise stayed green on the double swap"
-    )
+    baseline = set(_premise_problems(_usage_sites(sources.items())))
+    added = set(_premise_problems(_usage_sites(swapped.items()))) - baseline
+    constructions = (("models/__init__.py", PROVIDER_NAMED), ("agents/__init__.py", AGENT_NAMED))
+    expected = {
+        f"src/openalpha_cn/{module} :: <module> :: {CALLED_KINDS[kind]}: counted 1, "
+        "USAGE_SITES records 0"
+        for module, kind in constructions
+    }
+    assert added == expected, f"the double swap added {sorted(added)}, not the two constructions"
 
 
 def test_the_premise_scans_stated_blind_spot_is_real() -> None:
