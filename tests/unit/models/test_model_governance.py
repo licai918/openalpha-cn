@@ -161,6 +161,12 @@ def test_provider_gives_up_after_max_attempts_with_capped_exponential_delay(
     capped to 1.5, then 4.0 capped to 1.5. The transport holds more failures than the limit,
     so a loop that ignored the limit would run the list dry and raise `IndexError` instead of
     the transport error this asserts.
+
+    "The last error" is asserted by `request_id`, not by message: all ten queued errors say
+    `unavailable`, so the `match=` alone passes whichever of them propagates -- measured, a
+    provider changed to re-raise the first attempt's error left this test green until the
+    `request_id` assertion was added. The fourth attempt consumes `req-3`, so that is the one
+    that must surface.
     """
     monkeypatch.setenv("MODEL_KEY", "secret")
     transport = SequenceTransport(
@@ -187,9 +193,10 @@ def test_provider_gives_up_after_max_attempts_with_capped_exponential_delay(
         sleeper=sleeps.append,
     )
 
-    with pytest.raises(ModelTransportError, match="unavailable"):
+    with pytest.raises(ModelTransportError, match="unavailable") as caught:
         provider.generate_json(system="s", user="u", schema={"type": "object"})
 
+    assert caught.value.request_id == "req-3", "the last attempt's error must propagate"
     assert transport.calls == 4
     assert sleeps == [1.0, 1.5, 1.5]
 
