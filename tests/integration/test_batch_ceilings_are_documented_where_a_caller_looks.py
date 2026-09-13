@@ -52,6 +52,8 @@ HTTP_DOC: Final[Path] = ROOT / "docs" / "api" / "http.md"
 CHANGELOG: Final[Path] = ROOT / "CHANGELOG.md"
 README: Final[Path] = ROOT / "README.md"
 README_EN: Final[Path] = ROOT / "README.en.md"
+WHY_OPENALPHA: Final[Path] = ROOT / "docs" / "why-openalpha-cn.zh-CN.md"
+MARKETING: Final[Path] = ROOT / "docs" / "marketing" / "openalpha-cn-100-promotion-plans.zh-CN.md"
 NOW: Final[datetime] = datetime(2026, 7, 24, 10, 0, tzinfo=UTC)
 
 
@@ -68,11 +70,6 @@ def changelog() -> str:
 @pytest.fixture
 def readme() -> str:
     return README.read_text(encoding="utf-8")
-
-
-@pytest.fixture
-def readme_en() -> str:
-    return README_EN.read_text(encoding="utf-8")
 
 
 def _batch_body(*, batch_id: str, max_concurrency: int) -> dict[str, object]:
@@ -284,7 +281,7 @@ BATCH_WORKER_RANGE: Final[re.Pattern[str]] = re.compile(
 
 Starting from the item-cap clause's own closing words is what ties this to the one sentence. The
 other places `README.md` states a concurrency range -- its feature table and its feature list --
-use different words; `test_every_worker_range_the_readmes_state_is_the_one_the_api_enforces`
+use different words, and `test_every_worker_range_the_documents_state_is_the_one_the_api_enforces`
 reads those, and this sentence's range again, by a looser rule.
 
 That range went stale once already, in exactly the way the item cap did. It said 1-32 from
@@ -415,15 +412,16 @@ WORKER_RANGE_IN_PROSE: Final[re.Pattern[str]] = re.compile(
 """Any `<a>-<b>` range in ASCII or full-width digits: joined by one of `RANGE_JOINERS`, by 到,
 by 至 or by "to", or written "between <a> and <b>".
 
-Looser than `STATED_RANGE` on purpose: it runs over every README clause about concurrency, and a
-range written `1到8` there must be read and checked rather than skipped. A letter, a digit, `_`
+Looser than `STATED_RANGE` on purpose: it runs over every clause about concurrency in the
+documents `WORKER_RANGE_DOCUMENTS` names, and a range written `1到8` there must be read and
+checked rather than skipped. A letter, a digit, `_`
 or `.` directly beside either number keeps an identifier such as `V2-P4-019` from reading as the
 range 4-19, and a number that a dash joins to a third number -- a date such as 2026-08-18 -- is
 not read as a range at all.
 """
 
 CONCURRENCY_WORDS: Final[tuple[str, ...]] = ("并发", "并行", "concurren", "worker")
-"""What puts a README clause in scope for the worker-range check, matched case-insensitively."""
+"""What puts a clause in scope for the worker-range check, matched case-insensitively."""
 
 
 def _worker_range_mentions(document: str) -> list[tuple[int, int, int, str]]:
@@ -453,48 +451,92 @@ def _worker_range_problems(documents: dict[str, str]) -> list[str]:
     ]
 
 
-def _worker_range_failures(readme: str, readme_en: str) -> list[str]:
-    """Why the two READMEs fail the worker-range check, or an empty list if they pass.
+WORKER_RANGE_DOCUMENTS: Final[tuple[Path, ...]] = (README, README_EN, WHY_OPENALPHA, MARKETING)
+"""The four user-facing documents whose worker ranges are read.
 
-    `README.md` must yield at least one range, and every range in either README must be 1 to
+The READMEs have been read since `D7`. The marketing pack states the range four times, in
+sections 008, 036, 061 and 065, and until `D13` no test read any of them: writing 1-32 into
+section 061 or 065 left this module green (measured on `d4ef5e4`).
+"""
+
+MUST_STATE_A_WORKER_RANGE: Final[frozenset[Path]] = frozenset({README, MARKETING})
+"""The documents that state a range today, so a reader that stops seeing them fails.
+
+`README.en.md` and `docs/why-openalpha-cn.zh-CN.md` state none today. A range either comes to
+state is read and checked like any other, and its absence is not a failure.
+"""
+
+
+def _document_name(path: Path) -> str:
+    return path.relative_to(ROOT).as_posix()
+
+
+def _worker_range_failures(documents: dict[str, str]) -> list[str]:
+    """Why `documents`, keyed by repository path, fail the worker-range check, or `[]`.
+
+    Every document in `MUST_STATE_A_WORKER_RANGE` must yield at least one range -- a missing key
+    counts as a document with none -- and every range in any document must be 1 to
     `MAX_BATCH_WORKERS`.
     """
-    if not _worker_range_mentions(readme):
-        return [
-            "no worker range found in any README.md clause about concurrency; the feature table, "
-            "the feature list and the batch-API sentence each stated 1-8 when this was written"
-        ]
-    return _worker_range_problems({"README.md": readme, "README.en.md": readme_en})
+    blind = [
+        f"no worker range found in any {name} clause about concurrency; it stated one when this "
+        "was written, so either the reader has gone blind or the range was reworded out of reach"
+        for name in sorted(_document_name(path) for path in MUST_STATE_A_WORKER_RANGE)
+        if not _worker_range_mentions(documents.get(name, ""))
+    ]
+    return blind + _worker_range_problems(documents)
 
 
-def test_every_worker_range_the_readmes_state_is_the_one_the_api_enforces(
-    readme: str, readme_en: str
-) -> None:
-    """Every worker range either README states is 1 to `MAX_BATCH_WORKERS`, wherever it sits.
+def _worker_range_documents() -> dict[str, str]:
+    return {
+        _document_name(path): path.read_text(encoding="utf-8") for path in WORKER_RANGE_DOCUMENTS
+    }
 
-    `README.md` states the range three times today -- the feature table, the feature list and the
-    batch-API sentence -- and until `D7` nothing read the first two. A clause is in scope when it
-    names 并发, 并行, "concurren..." or "worker...", and every range in it is read, in any form
-    `WORKER_RANGE_IN_PROSE` reads. `README.en.md` states no worker range today, so it adds
-    nothing until it does.
 
-    Finding no range in `README.md` fails: a change that stops this reader seeing the ranges it
-    sees today has to break the test, not empty it. What it cannot see: a worker count written
-    without a range ("最多 8 路并发", "up to 8 workers"), or a range in a clause that names none
-    of `CONCURRENCY_WORDS`; `test_the_worker_range_reader_reads_what_its_docstring_says`
-    measures both.
+def test_every_worker_range_the_documents_state_is_the_one_the_api_enforces() -> None:
+    """Every worker range the four user-facing documents state is 1 to `MAX_BATCH_WORKERS`.
+
+    `README.md` states the range three times -- the feature table, the feature list and the
+    batch-API sentence -- and until `D7` nothing read the first two. The marketing pack states it
+    four times, and until `D13` nothing read any of them. A clause is in scope when it names 并发,
+    并行, "concurren..." or "worker...", and every range in it is read, in any form
+    `WORKER_RANGE_IN_PROSE` reads. `README.en.md` and `docs/why-openalpha-cn.zh-CN.md` state no
+    worker range today, so they add nothing until they do.
+
+    Finding no range in `README.md` or in the marketing pack fails: a change that stops this
+    reader seeing the ranges it sees today has to break the test, not empty it. What it cannot
+    see: a worker count written without a range ("最多 8 路并发", "up to 8 workers", or section
+    065's hook, "允许 8 并发"), or a range in a clause that names none of `CONCURRENCY_WORDS`;
+    `test_the_worker_range_reader_reads_what_its_docstring_says` measures both.
     """
-    failures = _worker_range_failures(readme, readme_en)
+    failures = _worker_range_failures(_worker_range_documents())
     assert not failures, "\n".join(failures)
+
+
+def test_a_stale_range_planted_in_each_of_the_four_documents_is_reported() -> None:
+    """The test above reads each of the four documents, not only the ones that state a range today.
+
+    A stale range is appended to each real document in turn, in memory, and the check the test
+    above runs must report it in that document. A document dropped from `WORKER_RANGE_DOCUMENTS`
+    fails here instead of passing unread.
+    """
+    documents = _worker_range_documents()
+    planted = f"\n\n持久任务队列支持 1{RANGE_JOINERS[1]}32 并发。\n"
+    unreported: list[str] = []
+    for path in (README, README_EN, WHY_OPENALPHA, MARKETING):
+        name = _document_name(path)
+        failures = _worker_range_failures({**documents, name: documents[name] + planted})
+        if not any(failure.startswith(f"{name}:") for failure in failures):
+            unreported.append(name)
+    assert not unreported, f"a stale range planted in these documents went unreported: {unreported}"
 
 
 def test_the_worker_range_reader_reads_what_its_docstring_says() -> None:
     """Stale ranges in each form must be reported; counts, other ranges and identifiers must not.
 
-    This is what holds the check itself. The real READMEs state 1-8 everywhere and `README.en.md`
-    states no range, so the test above cannot tell a check of both bounds from a check of one,
-    cannot show that `README.en.md` is read at all, and cannot show that a `README.md` with no
-    range fails; the `whole` cases below do.
+    This is what holds the check itself. The real documents state 1-8 wherever they state a
+    range, so the test above cannot tell a check of both bounds from a check of one, and cannot
+    show that a `README.md` or a marketing pack with no range fails; the `whole` cases below do.
     """
     dash = RANGE_JOINERS[1]
     stale = {
@@ -525,15 +567,18 @@ def test_the_worker_range_reader_reads_what_its_docstring_says() -> None:
         if _worker_range_mentions(text)
     }
     valid = f"持久任务队列支持 1{dash}{MAX_BATCH_WORKERS} 并发。"
+    readme, marketing = _document_name(README), _document_name(MARKETING)
     whole = {
-        "a README.md with no range": ("持久任务队列支持并发。", ""),
-        "a stale range in README.en.md": (
-            valid,
-            "- bounded batches of 1-32 concurrent requests;\n",
-        ),
+        "a README.md with no range": {readme: "持久任务队列支持并发。", marketing: valid},
+        "a marketing pack with no range": {readme: valid, marketing: "持久任务队列支持并发。"},
+        "a stale range in README.en.md": {
+            readme: valid,
+            marketing: valid,
+            _document_name(README_EN): "- bounded batches of 1-32 concurrent requests;\n",
+        },
     }
-    unreported = [label for label, (md, en) in whole.items() if not _worker_range_failures(md, en)]
-    clean = _worker_range_failures(valid, "")
+    unreported = [label for label, docs in whole.items() if not _worker_range_failures(docs)]
+    clean = _worker_range_failures({readme: valid, marketing: valid})
     dated = f"自 2026-08-18 起支持 1{dash}{MAX_BATCH_WORKERS} 并发。"
     dated_read = [(floor, ceiling) for _, floor, ceiling, _ in _worker_range_mentions(dated)]
     assert not missed and not wrongly and not unreported and not clean, (
