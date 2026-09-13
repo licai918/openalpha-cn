@@ -11,16 +11,21 @@ found one more clause of two of those classes in the marketing pack's §032; the
 pattern, extended to it, found a second clause in §041, and `D13`'s final round retired both. The
 same round retired three classes its own report had named, in six clauses of the marketing pack:
 a committee every result passes through, a committee outcome written to the DecisionLedger, and
-a risk gate that constrains the portfolio. An entry of `RETIRED_CLAIMS` holds:
+a risk gate that constrains the portfolio. The final review of the whole `D13` batch found those
+three reworded in five more sections that none of their patterns read; `D14` broadened them into
+families of words that occur together, added the classes that review and `D14`'s own sweep of
+the four documents and both generators named, and retired every wording that sweep found. An
+entry of `RETIRED_CLAIMS` holds:
 
 - `pattern`: the family of wordings that was retired, searched in every clause of the four
   documents as `tests/prose_clauses.py` reads them;
 - `refuted_by`: the code fact that makes those wordings false, with file:line at the revision it
-  was checked at: `d4ef5e4`, `c99b46b` for the classes the rebase round added, or `07f5c80` for
-  the three the final round added;
+  was checked at: `d4ef5e4`, `c99b46b` for the classes the rebase round added, `07f5c80` for the
+  three the final round added, or `20fec55` for what `D14` added;
 - `retired`: what it retired, verbatim -- the clause, or the part of it the claim sits in -- as it
-  stood at `d4ef5e4`, or on `16db458` for `D13`'s own five; the pattern must still match each of
-  them, so a pattern cannot be loosened into matching nothing;
+  stood at `d4ef5e4`, on `16db458` for `D13`'s own five, or at `20fec55` for what `D14` retired;
+  the pattern must still match each of them, so a pattern cannot be loosened into matching
+  nothing;
 - `premise`, where the fact is cheap to read off the code: a check that returns a message the day
   the code starts to support the claim, so a claim that has become true is reported as true
   instead of being blocked;
@@ -32,7 +37,9 @@ another verb, another order, or its halves in two clauses -- passes, and
 `test_the_retired_claims_blind_spot_is_real` holds one such paraphrase per entry. A pattern does
 not read negation either: "不能分别启停" is read as the claim it denies. A premise reads one fact,
 not the whole of `refuted_by`, so a premise that stays quiet does not prove the claim still
-false. The diagrams' two generators are read too, one string literal at a time
+false, and the ledger's premise sees a call, a bound alias and a `getattr` with the literal name
+of `append_decision`, never a name built at run time. The diagrams' two generators are read
+too, one string literal at a time
 (`tests/diagram_text.py`'s `diagram_strings`): a claim split across two literals, or computed at
 run time, is not read.
 
@@ -60,6 +67,7 @@ from prose_clauses import clauses
 
 from openalpha_cn.agents.committee import DeliberationCommittee
 from openalpha_cn.batch_contracts import BatchResultRef
+from openalpha_cn.decisions.risk import RiskGate
 from openalpha_cn.domain.portfolio import PortfolioOrder, PortfolioTransition
 from openalpha_cn.domain.report import ResearchReport
 from openalpha_cn.model_view import KNOWN_MODEL_VIEW_LIMITATIONS
@@ -391,32 +399,132 @@ def _the_engine_still_calls_no_committee() -> str | None:
     return None if not reached else f"runtime/engine.py now imports {reached}: re-read the order"
 
 
+def _append_decision_readers(tree: ast.AST) -> bool:
+    """Whether `tree` reads `append_decision`: a call, a bound alias, or `getattr` with the literal.
+
+    Any load of the attribute counts, so `write = store.append_decision` then `write(entry)` is
+    seen at the binding. `getattr(store, "append_decision")` is seen because the name is a
+    literal; a name built at run time (`getattr(store, "append_" + kind)`) is not.
+    """
+    return any(
+        (
+            isinstance(node, ast.Attribute)
+            and node.attr == "append_decision"
+            and isinstance(node.ctx, ast.Load)
+        )
+        or (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value == "append_decision"
+        )
+        for node in ast.walk(tree)
+    )
+
+
 def _only_the_engine_appends_a_decision() -> str | None:
     callers: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
         text = path.read_text(encoding="utf-8")
-        if "append_decision" not in text:
-            continue
-        if any(
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "append_decision"
-            for node in ast.walk(ast.parse(text, filename=str(path)))
+        if "append_decision" in text and _append_decision_readers(
+            ast.parse(text, filename=str(path))
         ):
             callers.append(path.relative_to(SRC).as_posix())
     if callers == ["runtime/engine.py"]:
         return None
-    return f"append_decision is now called from {callers}: re-read who writes a DecisionLedger"
+    return f"append_decision is now read in {callers}: re-read who writes a DecisionLedger"
+
+
+PORTFOLIO_MODULES: Final[tuple[str, ...]] = ("backtest/portfolio.py", "backtest/execution.py")
+"""The simulator and the execution policy it applies, read whole."""
+
+GATE_NAMES: Final[frozenset[str]] = frozenset({"RiskGate", "risk_decision", "final_action"})
+"""The risk gate, and the two fields of a run its verdict reaches."""
+
+
+def _portfolio_scopes() -> dict[str, ast.AST]:
+    """Every place that drives the portfolio simulator, keyed by where it is.
+
+    `PORTFOLIO_MODULES` whole, and whole any other module under `backtest/` that imports from
+    `openalpha_cn.backtest.portfolio` or constructs `PortfolioSimulator` (`multi_day.py`,
+    `paper.py`, ...). In a module outside `backtest/` -- `sdk.py`, `api/app.py`, `cli.py` -- only
+    the functions that construct `PortfolioSimulator` or use a name imported from that module,
+    because those modules also serve routes and commands that read a run's `final_action` on
+    purpose.
+    """
+    scopes: dict[str, ast.AST] = {}
+    for path in sorted(SRC.rglob("*.py")):
+        where = path.relative_to(SRC).as_posix()
+        text = path.read_text(encoding="utf-8")
+        if where not in PORTFOLIO_MODULES and "PortfolioSimulator" not in text:
+            continue
+        tree = ast.parse(text, filename=str(path))
+        imported = {
+            alias.asname or alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module == "openalpha_cn.backtest.portfolio"
+            for alias in node.names
+        }
+        constructs = any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "PortfolioSimulator"
+            for node in ast.walk(tree)
+        )
+        if where in PORTFOLIO_MODULES or (
+            where.startswith("backtest/") and (imported or constructs)
+        ):
+            scopes[where] = tree
+            continue
+        used = imported | {"PortfolioSimulator"}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and any(
+                isinstance(inner, ast.Name) and inner.id in used for inner in ast.walk(node)
+            ):
+                scopes[f"{where}::{node.name}"] = node
+    return scopes
 
 
 def _no_portfolio_module_reads_the_risk_gate() -> str | None:
-    reading = [
-        path.relative_to(SRC).as_posix()
-        for path in sorted(SRC.rglob("*.py"))
-        if re.search(r"portfolio|execution", path.stem)
-        and re.search(r"RiskGate|risk_decision|final_action", path.read_text(encoding="utf-8"))
-    ]
+    reading = sorted(
+        where
+        for where, scope in _portfolio_scopes().items()
+        if any(
+            (isinstance(node, ast.Name) and node.id in GATE_NAMES)
+            or (isinstance(node, ast.Attribute) and node.attr in GATE_NAMES)
+            for node in ast.walk(scope)
+        )
+    )
     return None if not reading else f"{reading} now read the risk gate's decision: re-read them"
+
+
+def _the_gate_still_reads_only_the_flags() -> str | None:
+    parameters = list(inspect.signature(RiskGate.evaluate).parameters)
+    reasons = [
+        field
+        for field in _class_field_names(SRC / "domain" / "decision.py", "DecisionLedger")
+        if "reason" in field
+    ]
+    if parameters == ["self", "signal"] and not reasons:
+        return None
+    return f"RiskGate.evaluate takes {parameters} and DecisionLedger holds {reasons}: re-read them"
+
+
+def _chainlin_is_still_built_only_for_doctor() -> str | None:
+    builders: list[str] = []
+    for path in sorted(SRC.rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        if "ChainLinDataProvider" in text and any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name | ast.Attribute)
+            and (node.func.id if isinstance(node.func, ast.Name) else node.func.attr)
+            == "ChainLinDataProvider"
+            for node in ast.walk(ast.parse(text, filename=str(path)))
+        ):
+            builders.append(path.relative_to(SRC).as_posix())
+    return None if builders == ["cli.py"] else f"ChainLinDataProvider is now built in {builders}"
 
 
 # --- The retired claims -----------------------------------------------------------------------
@@ -529,6 +637,9 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         name="a rejected order is linked to its decision",
         pattern=re.compile(
             rf"拒单(?:也)?关联决策|拒单[，,]\s*记录{_NOT_END}{{0,12}}关联决策"
+            rf"|(?:执行失败|拒单|成交){_NO_COMMA}{{0,6}}纳入证据链"
+            rf"|沿\s*(?:运行\s*|任务\s*)?ID{_NO_COMMA}{{0,6}}(?:找到|定位|返回|回到)"
+            rf"|组合账本{_NO_COMMA}{{0,10}}稳定\s*ID\s*关联|组合执行{_NO_COMMA}{{0,10}}(?:回溯|追溯)"
             r"|reject\w*(?:\s+\w+){0,3}\s+(?:linked|tied)\s+to\s+(?:\w+\s+)?decision",
             re.IGNORECASE,
         ),
@@ -542,6 +653,11 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "停牌、涨跌停锁单、整手、T+1、现金不足或敞口超限都会生成明确拒单，记录原因、时间和关联决策"
             "\N{FULLWIDTH SEMICOLON}",
             "组合层的拒单也关联决策与 A 股规则。",
+            "最终你可以沿运行 ID 找到故障发生在哪一层",
+            "OpenAlpha CN 则把 A 股执行失败纳入证据链",
+            "任何异常都能沿 ID 返回具体节点",
+            "证据、风险决定和组合账本都有稳定 ID 关联",
+            "四时钟、模型与 Prompt 版本、双委员会、风险和组合执行都能沿关联链回溯",
         ),
         paraphrase="每一笔拒单都能追溯到产生它的那个决策。",
         premise=_a_rejection_still_names_no_decision,
@@ -553,6 +669,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             rf"|(?:多日组合|事件统计){_NOT_END}{{0,12}}反馈回报告中心"
             rf"|(?:委员会|风险门|组合){_NOT_END}{{0,16}}结果都能进入报告"
             rf"|(?:委员会|组合验证){_NOT_END}{{0,16}}新结果{_NOT_END}{{0,8}}报告中心"
+            rf"|继续进入{_NO_COMMA}{{0,20}}报告中心|报告{_NO_COMMA}{{0,6}}展示{_NO_COMMA}{{0,8}}实际结果"
         ),
         refuted_by=(
             "ResearchReport holds one research run: run_id, subject, created_at, title, summary, "
@@ -567,6 +684,8 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "最后，多日组合与事件统计把结果反馈回报告中心。",
             "Agent、双委员会、风险门、组合与统计结果都能进入报告。",
             "Agent、Bull/Bear、风险委员会与组合验证产生的新结果，都能通过报告中心沉淀。",
+            "自定义结果继续进入风险门、账本、回放、统计和报告中心",
+            "后续报告与验证再展示这一判断的实际结果",
         ),
         paraphrase="报告中心还会收录组合成交与统计检验。",
         premise=_a_report_still_holds_one_research_run,
@@ -888,8 +1007,10 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     RetiredClaim(
         name="every result passes through the committee",
         pattern=re.compile(
-            rf"还要经过{_NO_COMMA}{{0,20}}委员会"
+            rf"(?:都要|必须|还要|须|需要?)经过{_NO_COMMA}{{0,20}}委员会"
             rf"|所有输出{_NO_COMMA}{{0,12}}进入{_NO_COMMA}{{0,20}}委员会|经过双委员会"
+            rf"|委员会{_NO_COMMA}{{0,2}}(?:与|和)\s*风险门{_NO_COMMA}{{0,4}}审查"
+            rf"|委员会{_NO_COMMA}{{0,6}}给出上游判断|回放{_NOT_END}{{0,30}}委员会则给出"
         ),
         refuted_by=(
             "ResearchEngine.run_cycle routes, runs the agents, aggregates their signals and runs "
@@ -905,13 +1026,26 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "输出还要经过风险委员会与成交模型",
             "所有输出再进入 Bull/Bear、风险委员会与风险门",
             "经过双委员会和风险门，再保存决策与报告",
+            "双委员会与风险门审查结论",
+            "双委员会与风险门继续审查风险",
+            "四时钟证据、Bull/Bear 与风险委员会共同给出上游判断",
+            "数据端的四时钟确保回放只看到当时可知的涨停与公告证据，"
+            "Agent 与风险委员会则给出可追踪判断",
         ),
         paraphrase="每个研究结果都要过一遍委员会。",
         premise=_the_engine_still_calls_no_committee,
     ),
     RetiredClaim(
         name="the committee's outcome is written to the DecisionLedger",
-        pattern=re.compile(rf"委员会{_NOT_END}{{0,24}}写入\s*DecisionLedger"),
+        pattern=re.compile(
+            rf"(?:委员会|讨论|辩论|投票){_NO_COMMA}{{0,24}}"
+            rf"(?:写入|写进|存进|存入|进入|记入|保存)\s*{_NO_COMMA}{{0,6}}"
+            r"(?:DecisionLedger|决策账本|决策记录|不可变(?:决策)?记录|账本)"
+            rf"|委员会{_NOT_END}{{0,24}}(?:最终|随后|再)写入\s*DecisionLedger"
+            rf"|委员会{_NOT_END}{{0,24}}DecisionLedger{_NOT_END}{{0,20}}再把"
+            rf"|所有结果{_NO_COMMA}{{0,6}}进入{_NO_COMMA}{{0,8}}账本"
+            rf"|委员会{_NO_COMMA}{{0,24}}(?:回溯|追溯)"
+        ),
         refuted_by=(
             "A DecisionLedger is built only in ResearchEngine.run_cycle "
             "(runtime/engine.py:144-171), whose routing_path is the agents and then 'risk-gate' "
@@ -920,13 +1054,27 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "DeliberationOutcome back to the caller and store nothing (sdk.py:236-243, "
             "api/app.py:1946-1952)."
         ),
-        retired=("Bull/Bear 和风险委员会也输出结构化结果，最终写入 DecisionLedger",),
-        paraphrase="委员会的投票会存进决策账本。",
+        retired=(
+            "Bull/Bear 和风险委员会也输出结构化结果，最终写入 DecisionLedger",
+            "每次讨论、路由和结论都进入不可变决策记录",
+            "Bull/Bear 和风险委员会负责研究分歧，DecisionLedger 与 PortfolioLedger 再把决定和执行"
+            "分别保存",
+            "最后，所有结果进入决策与报告账本",
+            "四时钟、模型与 Prompt 版本、双委员会、风险和组合执行都能沿关联链回溯",
+        ),
+        paraphrase="决策账本里也能查到委员会的每一票。",
         premise=_only_the_engine_appends_a_decision,
     ),
     RetiredClaim(
         name="the risk gate constrains the portfolio",
-        pattern=re.compile(rf"风险门{_NOT_END}{{0,8}}约束组合"),
+        pattern=re.compile(
+            rf"(?:风险门|风险判断|风控|RiskGate){_NO_COMMA}{{0,8}}"
+            rf"(?:限制|约束|改变|改写|决定|影响){_NO_COMMA}{{0,6}}(?:组合|仓位|订单|持仓)"
+            rf"|(?:组合|仓位|订单|持仓){_NO_COMMA}{{0,6}}受{_NO_COMMA}{{0,4}}(?:风险门|风险判断)"
+            rf"{_NO_COMMA}{{0,4}}(?:约束|限制|控制)"
+            rf"|风险门{_NO_COMMA}{{0,6}}贯穿(?:全链|整条链)"
+            rf"|风险(?:层)?(?:和|与)组合层{_NO_COMMA}{{0,4}}应用{_NO_COMMA}{{0,6}}交易规则"
+        ),
         refuted_by=(
             "RiskGate.evaluate answers pass, reduce or block about a signal "
             "(decisions/risk.py:45-52) inside run_cycle (runtime/engine.py:118); what it decides "
@@ -937,9 +1085,57 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "applies (backtest/portfolio.py:90-99) when a caller executes an order "
             "(sdk.py:1195-1210, api/app.py:2195-2219)."
         ),
-        retired=("Bull/Bear 与三态风控讨论分歧，风险门和 A 股规则约束组合",),
+        retired=(
+            "Bull/Bear 与三态风控讨论分歧，风险门和 A 股规则约束组合",
+            "风险判断真正改变订单结果",
+            "打开 GitHub 下载，就能看到风险门如何贯穿全链",
+            "风险和组合层再应用本地交易规则",
+        ),
         paraphrase="组合仓位由风险门说了算。",
         premise=_no_portfolio_module_reads_the_risk_gate,
+    ),
+    RetiredClaim(
+        name="the risk gate reads the committee and records its reasons",
+        pattern=re.compile(
+            rf"(?:RiskGate|风险门){_NO_COMMA}{{0,20}}"
+            rf"(?:根据|依据|参考|读取|结合|综合){_NO_COMMA}{{0,12}}委员会"
+            rf"|原因{_NO_COMMA}{{0,4}}写入{_NO_COMMA}{{0,4}}(?:决策账本|DecisionLedger)"
+            rf"|(?:RiskGate|风险门){_NO_COMMA}{{0,12}}记录{_NO_COMMA}{{0,24}}原因"
+        ),
+        refuted_by=(
+            "RiskGate.evaluate(signal) reads the signal's risk_flags and nothing else "
+            "(decisions/risk.py:45-52), inside run_cycle, which calls no committee "
+            "(runtime/engine.py:101-118). The DecisionLedger it feeds stores risk_decision and "
+            "final_action and has no reason field (domain/decision.py:54-62)."
+        ),
+        retired=(
+            "OpenAlpha CN 将这些思路落成结构化 RiskGate：根据证据与委员会意见给出 pass、reduce 或 "
+            "block",
+            "并把原因写入决策账本",
+            "RiskGate 记录 pass、reduce、block 及原因",
+        ),
+        paraphrase="风险门会参考辩论的结论。",
+        premise=_the_gate_still_reads_only_the_flags,
+    ),
+    RetiredClaim(
+        name="ChainLin errors reach the research or risk path",
+        pattern=re.compile(
+            rf"链邻\s*Provider\s*的{_NO_COMMA}{{0,12}}(?:错误|修订){_NO_COMMA}{{0,10}}"
+            r"(?:不会被当(?:成|作)|无风险|不会被隐藏)"
+        ),
+        refuted_by=(
+            "The shipped research path never calls ChainLin: ChainLinDataProvider is constructed "
+            "in one place, cli.py's _default_providers (cli.py:542-547), which `openalpha doctor` "
+            "uses to report credentials and probe. Evidence build reads user files, panel build "
+            "reads Tushare, and run_cycle reads the evidence a request carries."
+        ),
+        retired=(
+            "链邻 Provider 的数据错误不会被当成",
+            "链邻 Provider 的认证或服务错误也不会被当作市场无风险",
+            "链邻 Provider 的修订和错误状态不会被隐藏",
+        ),
+        paraphrase="链邻接口出错时研究会自动降级。",
+        premise=_chainlin_is_still_built_only_for_doctor,
     ),
 )
 """Each family of wordings `D13` retired, the code fact that refutes it, and what it retired."""
@@ -1045,6 +1241,16 @@ TRUE_SENTENCES_THAT_SHARE_THE_WORDS: Final[tuple[str, ...]] = (
     "run_cycle 先路由、再生成信号，之后风险门给出 pass、reduce 或 block。",
     "信号还要经过风险门，委员会是之后可选的一次调用。",
     "所有输出进入决策记录，委员会的结果交还调用方。",
+    "委员会的结果交还调用方，只有 run_cycle 写入 DecisionLedger。",
+    "风险门之后，交易规则约束组合。",
+    "每个信号都要经过风险门，委员会可以不调用。",
+    "路由与风险门的结论进入不可变决策记录，委员会的讨论与投票只交还调用方。",
+    "辩论与投票写进返回的 DeliberationOutcome，不进 DecisionLedger。",
+    "风险门决定研究动作，组合由下单时的交易规则约束。",
+    "风险门只读信号的风险标记，账本只记结论。",
+    "组合账本按订单 ID 查询每一次成交与拒单。",
+    "研究异常可沿运行与决策 ID 回到具体节点，订单则按订单 ID 查询。",
+    "链邻 Provider 的错误分类只在 doctor 探测时用到。",
 )
 """True or unrelated sentences that share a retired pattern's words. The review of `D13` measured
 the first six being caught (its M1): client holds cli, 移动平均 holds 移动, and a rejection and a
@@ -1059,9 +1265,16 @@ need not cover the same routes. The two after them are what that review's sugges
 would still catch: 四类入口共享同一 holds the true 同一批服务, and API read as a substring
 holds OpenAPI and FastAPI. The next is why the risk gate's branch for §032 is anchored on 委员会
 rather than on that review's suggested 之后: run_cycle's own order puts 之后 before 风险门给出,
-and that order is true. The last two are what the entry for a committee every result passes
+and that order is true. The two after it are what the entry for a committee every result passes
 through must not catch: a comma closes the phrase a 还要经过 or a 所有输出…进入 is about, and past
-it these two say the committee is optional."""
+it these two say the committee is optional. The final review of the whole `D13` batch measured
+the next two being caught (its I-A): a comma separates a committee's returned result from
+run_cycle's write, and a gate from the trading rules that act after it. The rest are sentences
+`D14` wrote while fixing that finding, each sharing a family's words: a gate every signal
+passes before an optional committee, run_cycle's ledger beside the committee's returned debate,
+a gate that decides research actions and reads only flags, the order ids a portfolio ledger is
+keyed on, run and decision ids that lead back to a research node, and a ChainLin error
+classification that only doctor reads."""
 
 
 def test_the_retired_patterns_pass_the_true_sentences_that_share_their_words() -> None:
@@ -1097,6 +1310,60 @@ REAL_RECREATES: Final[dict[str, str]] = {
     ),
 }
 """The natural ways to make the check a real delete-and-recreate, each added after the restart."""
+
+
+REWRITES_THE_FINAL_REVIEW_MEASURED: Final[tuple[tuple[str, str], ...]] = (
+    ("最终都要经过风险委员会审议", "every result passes through the committee"),
+    ("每个信号必须经过委员会", "every result passes through the committee"),
+    (
+        "委员会的结论会存进 DecisionLedger",
+        "the committee's outcome is written to the DecisionLedger",
+    ),
+    ("风险门限制组合仓位", "the risk gate constrains the portfolio"),
+    ("组合受风险门约束", "the risk gate constrains the portfolio"),
+)
+"""Five natural rewrites of `D13`'s three newest classes, and the entry each belongs to. The final
+review of the whole `D13` batch fed them to all 25 patterns at `20fec55` and none was caught (its
+I-A); `D14` broadened those three entries until each is."""
+
+
+def test_the_rewrites_the_final_review_measured_are_caught_by_their_entry() -> None:
+    by_name = {claim.name: claim for claim in RETIRED_CLAIMS}
+    missed = [
+        f"{name}: {wording!r}"
+        for wording, name in REWRITES_THE_FINAL_REVIEW_MEASURED
+        if not by_name[name].pattern.search(wording)
+    ]
+    assert not missed, "a rewrite the final review measured is not caught:\n" + "\n".join(missed)
+
+
+def test_the_ledger_premise_sees_an_alias_and_a_literal_getattr() -> None:
+    """The final review found the ledger premise read only `x.append_decision(...)` (its m-11).
+
+    It now sees the attribute wherever it is loaded, and `getattr` with the literal name; a name
+    built at run time is the blind spot the module docstring states, and stays one.
+    """
+    planted = {
+        "a call": "store.append_decision(entry)",
+        "a bound alias": "write = store.append_decision\nwrite(entry)",
+        "a literal getattr": 'getattr(store, "append_decision")(entry)',
+    }
+    missed = [
+        name for name, source in planted.items() if not _append_decision_readers(ast.parse(source))
+    ]
+    assert not missed, f"the ledger premise does not see {missed}"
+    assert not _append_decision_readers(ast.parse('getattr(store, "append_" + kind)(entry)'))
+
+
+def test_the_portfolio_premise_reads_every_place_that_drives_the_simulator() -> None:
+    """The final review found the old premise chose modules by file name and missed these three."""
+    scopes = set(_portfolio_scopes())
+    expected = {
+        "backtest/multi_day.py",
+        "sdk.py::execute_portfolio_order",
+        "api/app.py::portfolio_execute",
+    }
+    assert expected <= scopes, f"the portfolio premise no longer reads {sorted(expected - scopes)}"
 
 
 @pytest.mark.parametrize("name", REAL_RECREATES)
