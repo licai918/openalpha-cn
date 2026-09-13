@@ -16,14 +16,21 @@ from pydantic import (
 )
 
 from openalpha_cn.backtest.validation import OutcomeObservation, OutcomeValidator, ValidationStore
+from openalpha_cn.domain.agent_result import AgentResult
+from openalpha_cn.domain.decision import DecisionLedger
 from openalpha_cn.domain.evidence import EvidenceSnapshot, LookAheadViolationError
+from openalpha_cn.domain.run import RunManifest
 from openalpha_cn.domain.run_mode import RunMode
 from openalpha_cn.domain.time import ensure_aware
 from openalpha_cn.runtime.contracts import ResearchRunRequest
 from openalpha_cn.runtime.engine import ResearchEngine
 from openalpha_cn.runtime.memory import InMemoryResearchMemory
 from openalpha_cn.storage.migrations import run_migrations
-from openalpha_cn.storage.recovery import SQLiteRecoveryStore
+from openalpha_cn.storage.recovery import (
+    RecoveryConflictError,
+    RunRecoveryState,
+    SQLiteRecoveryStore,
+)
 from openalpha_cn.storage.sqlite import SQLiteRunRepository
 
 
@@ -91,7 +98,18 @@ class ReplayReport(BaseModel):
     total_cases: int = Field(ge=0)
     succeeded: int = Field(ge=0)
     deterministic_replays: int = Field(ge=0)
+    """Cases whose two runs returned equal results -- see `ReplayRunner.run` for the two runs."""
     look_ahead_violations: int = Field(ge=0)
+    """Cases whose run raised a `LookAheadViolationError` -- which no validated corpus can reach.
+
+    A case whose evidence is not visible at its own `as_of` cannot be put into a corpus:
+    `ReplayCase.validate_point_in_time` refuses it when the corpus is built or loaded, and
+    `ResearchRunRequest` checks the same predicate over the same inputs. So a corpus that
+    reaches `ReplayRunner.run` has no look-ahead case left to count, and this is 0 for every
+    one of them; `tests/unit/backtest/test_replay.py` drives it only through a patched
+    `run_cycle`. It would count a case that skipped validation (a corpus assembled with
+    `model_construct`, say). It is not a detection result and should not be read as one.
+    """
     validation_ids: tuple[str, ...]
     failures: tuple[str, ...]
 
@@ -103,7 +121,11 @@ class ReplayReport(BaseModel):
 
 
 class ReplayRunner:
-    """Run every frozen case twice through the shared deterministic core."""
+    """Run every frozen case twice through the shared research core and compare the results.
+
+    The second run of each case starts from empty stores, so it recomputes the first rather
+    than reading it back; `run`'s docstring has why that matters and what it costs.
+    """
 
     def __init__(
         self,
@@ -167,6 +189,36 @@ class ReplayRunner:
         `sdk.list_validations_by_decision`/`list_validations_by_signal`), with no new
         query surface needed.
 
+        **Each case runs twice, and the second run starts from nothing (D13).** The first
+        `run_cycle` goes through `repository`/`recovery_store` below: it is the run that is
+        persisted, and the one the validation is computed from. The second goes through an
+        engine of its own over an empty, in-memory run repository and recovery store
+        (`_recomputation_engine`), so every agent the router selects runs again and the
+        result is built from what they return this time. Until D13 both runs shared one
+        engine, one `recovery_store` and one `run_id`: the second found the first's
+        `succeeded` recovery state -- `_load_or_start_recovery` returns a stored state
+        unchanged, and a succeeded one has `next_agent_index == len(agent_ids)` -- ran no
+        agent, and rebuilt its result from the rows the first had just written. `first ==
+        second` compared a computation with its own reflection. Measured before the change:
+        a `MarketAgent` whose rationale read the clock still scored 300 of 300 on the frozen
+        corpus, and `tests/replay/test_replay_determinism.py`'s agent that answers
+        differently on every call scored 2 of 2. Both are reported now.
+
+        The comparison itself is unchanged, and so are the second run's `run_id`, clock and
+        request: `ResearchRunResult` carries the `run_id`, and giving the second run another
+        one would make the two unequal by construction instead of by behaviour. Only where
+        the second run keeps its state differs -- nowhere that outlasts the case. It writes
+        no file and no temporary directory, which is more than tidiness: the shipped
+        container runs with a read-only root and a 64 MB `/tmp` that `deploy/compose.yml`
+        records no module under `src/` using. On a repeat against a `state_path` that
+        already holds a case, the first run reuses the stored result (`run_cycle` is
+        idempotent by `run_id`) and the second still recomputes, so a repeat compares what
+        was stored with what the code computes now.
+
+        What the comparison cannot see: randomness `seed_everything(request.random_seed)`
+        controls, which both runs reproduce by design, and anything else that holds still
+        for the length of one process.
+
         `clock` is unrelated to `case.as_of` (used per case below to freeze each research
         run's point-in-time clock): it is the real wall-clock callable `run_migrations`
         needs to timestamp a pre-migration backup and the `schema_migrations` audit trail,
@@ -203,7 +255,7 @@ class ReplayRunner:
                     random_seed=self.random_seed,
                 )
                 first = engine.run_cycle(request)
-                second = engine.run_cycle(request)
+                second = _recomputation_engine(case.as_of).run_cycle(request)
                 if first == second:
                     deterministic += 1
                 else:
@@ -235,6 +287,96 @@ class ReplayRunner:
 
 def _fixed_clock(value: datetime) -> Callable[[], datetime]:
     return lambda: value
+
+
+def _recomputation_engine(as_of: datetime) -> ResearchEngine:
+    """The engine for a case's second run: the same roster and clock, and no state at all.
+
+    Fresh stores per case rather than one pair per `run()`, although `ReplayCorpus` already
+    refuses a repeated `run_id`: a store that lives for one case cannot carry anything into
+    the next, whatever a later corpus validator permits. The memory is its own as well, so
+    the second run shares nothing with the first; `ResearchEngine` only ever appends to it.
+    """
+    return ResearchEngine(
+        repository=_EmptyRunRepository(),
+        memory=InMemoryResearchMemory(),
+        clock=_fixed_clock(as_of),
+        recovery_store=_EmptyRecoveryStore(),
+    )
+
+
+class _EmptyRunRepository:
+    """A `RunRepository` that starts empty and is dropped with its case (D13).
+
+    Dict-backed because the run it records is thrown away: it exists so a case's second run
+    has somewhere to persist that holds nothing from the first. It never replaces a manifest
+    or decision it already holds for a `run_id`, as the Protocol asks, and
+    `ResearchEngine._persist_idempotently` does the comparing -- the same division of labour
+    it has with `SQLiteRunRepository`.
+    """
+
+    def __init__(self) -> None:
+        self._runs: dict[str, RunManifest] = {}
+        self._decisions: dict[str, DecisionLedger] = {}
+
+    def append_run(self, manifest: RunManifest) -> None:
+        self._runs.setdefault(manifest.run_id, manifest)
+
+    def get_run(self, run_id: str) -> RunManifest | None:
+        return self._runs.get(run_id)
+
+    def append_decision(self, decision: DecisionLedger) -> None:
+        self._decisions.setdefault(decision.run_id, decision)
+
+    def get_decision_for_run(self, run_id: str) -> DecisionLedger | None:
+        return self._decisions.get(run_id)
+
+
+class _EmptyRecoveryStore:
+    """A `RecoveryStore` that starts empty and is dropped with its case (D13).
+
+    `append_result` refuses what `SQLiteRecoveryStore.append_result` refuses -- a result for
+    a run with no state, for a position that is not the next one, or for an agent the graph
+    does not declare there -- so the second run is held to the first run's contract rather
+    than a looser one. `save` does not repeat the SQLite store's digest check: within one
+    case the engine only saves states it built from that case's request.
+    """
+
+    def __init__(self) -> None:
+        self._states: dict[str, RunRecoveryState] = {}
+
+    def get(self, run_id: str) -> RunRecoveryState | None:
+        return self._states.get(run_id)
+
+    def save(self, state: RunRecoveryState) -> None:
+        self._states[state.run_id] = state
+
+    def append_result(
+        self,
+        run_id: str,
+        *,
+        position: int,
+        result: AgentResult,
+        updated_at: datetime,
+    ) -> None:
+        state = self._states.get(run_id)
+        if (
+            state is None
+            or position != len(state.completed_results)
+            or state.agent_ids[position : position + 1] != (result.agent_id,)
+        ):
+            raise RecoveryConflictError(
+                f"no unwritten recovery slot for {result.agent_id!r} at position {position} "
+                f"of run {run_id}"
+            )
+        completed = (*state.completed_results, result)
+        self._states[run_id] = state.model_copy(
+            update={
+                "completed_results": completed,
+                "next_agent_index": len(completed),
+                "updated_at": updated_at,
+            }
+        )
 
 
 def _is_look_ahead_violation(error: Exception) -> bool:

@@ -67,7 +67,7 @@ LEDGER_TEST_FILE_COUNTS = {
     "tests/integration": 34,
     "tests/integration/panel": 34,
     "tests/integration/storage": 8,
-    "tests/replay": 1,
+    "tests/replay": 2,
     "tests/unit": 30,
     "tests/unit/agents": 2,
     "tests/unit/backtest": 15,
@@ -81,7 +81,7 @@ LEDGER_TEST_FILE_COUNTS = {
     "web/e2e": 1,
     "web/src": 1,
 }
-LEDGER_TEST_FILE_TOTAL = 188
+LEDGER_TEST_FILE_TOTAL = 189
 
 FIELDNAMES = [
     "feature_id",
