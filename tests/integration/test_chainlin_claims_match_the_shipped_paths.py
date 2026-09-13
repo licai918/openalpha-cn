@@ -31,8 +31,12 @@ distributed desktop product (`DESKTOP_PRODUCT`) are removed, so "进入 Release 
 `chainlin-desktop` link is no claim. A URL ends at whitespace, a closing bracket or full-width
 punctuation (`URL`), so a claim written straight after a link is still read.
 
-**What it cannot see.** `test_the_stated_limits_are_real` measures each of these.
+**What it cannot see.** `test_the_stated_limits_are_real` measures each of these but the first,
+which `test_the_reference_scan_finds_what_its_docstring_says` measures.
 
+- The premise reads names (`_uses_of`): a class or factory reached by a computed name --
+  `getattr(module, "ChainLinDataProvider")`, `importlib` -- is not seen. Every other read
+  counts, not only a call: a dict value, a `functools.partial` argument, another name bound to it.
 - A claim worded without a marker. The writing boundary's "真实数据调用仍需用户配置服务地址"
   implied shipped calls through a condition alone; it was rewritten by hand, as was §085's copy.
 - A claim split across clauses or blocks, the name in one and the marker in the next: a pronoun
@@ -82,12 +86,12 @@ SHIPPED_ROOTS: Final[tuple[Path, ...]] = (ROOT / "src", ROOT / "scripts")
 # --- The premise ------------------------------------------------------------------------------
 
 
-def _calls_with_their_function(tree: ast.AST) -> Iterator[tuple[str, ast.Call]]:
-    """Each call in `tree` with the name of the innermost function around it, or `<module>`."""
+def _reads_with_their_function(tree: ast.AST) -> Iterator[tuple[str, ast.expr]]:
+    """Each name or attribute `tree` reads, with the innermost function around it, or `<module>`."""
 
-    def visit(node: ast.AST, function: str) -> Iterator[tuple[str, ast.Call]]:
+    def visit(node: ast.AST, function: str) -> Iterator[tuple[str, ast.expr]]:
         for child in ast.iter_child_nodes(node):
-            if isinstance(child, ast.Call):
+            if isinstance(child, ast.Name | ast.Attribute) and isinstance(child.ctx, ast.Load):
                 yield function, child
             inner = (
                 child.name
@@ -99,28 +103,31 @@ def _calls_with_their_function(tree: ast.AST) -> Iterator[tuple[str, ast.Call]]:
     yield from visit(tree, "<module>")
 
 
-def _calls_to(callee: str, roots: Iterable[Path]) -> list[tuple[str, str]]:
-    """Each call to `callee` under `roots`, as `(path, enclosing function)`.
+def _uses_of(name: str, roots: Iterable[Path]) -> list[tuple[str, str]]:
+    """Each place under `roots` that reads `name`, as `(path, enclosing function)`.
 
-    A call counts by `callee`'s own name, by a name a `from ... import callee as name` bound, or
-    as an attribute (`module.callee(...)`). The path is relative to the root's parent.
+    A read is `name` itself, a name a `from ... import name as other` bound, or an attribute
+    `module.name`, wherever it is loaded: called, put in a dict, handed to `functools.partial` or
+    bound to another name. The review of `D13` wired ChainLin into `evidence build` in each of the
+    last three ways and a scan of calls alone stayed green. An import and a definition are not
+    reads. The path is relative to the root's parent.
     """
     found: list[tuple[str, str]] = []
     for root in roots:
         for path in sorted(root.rglob("*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            names = {callee} | {
+            names = {name} | {
                 alias.asname
                 for node in ast.walk(tree)
                 if isinstance(node, ast.ImportFrom)
                 for alias in node.names
-                if alias.name == callee and alias.asname
+                if alias.name == name and alias.asname
             }
             found.extend(
                 (path.relative_to(root.parent).as_posix(), function)
-                for function, call in _calls_with_their_function(tree)
-                if (isinstance(call.func, ast.Name) and call.func.id in names)
-                or (isinstance(call.func, ast.Attribute) and call.func.attr == callee)
+                for function, node in _reads_with_their_function(tree)
+                if (isinstance(node, ast.Name) and node.id in names)
+                or (isinstance(node, ast.Attribute) and node.attr == name)
             )
     return found
 
@@ -132,15 +139,15 @@ def test_chainlin_is_constructed_only_for_doctor() -> None:
     were written for a client only `doctor` uses: re-read them and this guard before changing
     the expectation.
     """
-    constructions = _calls_to("ChainLinDataProvider", SHIPPED_ROOTS)
+    constructions = _uses_of("ChainLinDataProvider", SHIPPED_ROOTS)
     assert constructions == [("src/openalpha_cn/cli.py", "_default_providers")], (
-        f"ChainLinDataProvider is constructed at {constructions}; when this was written it was "
-        "constructed only in cli._default_providers"
+        f"ChainLinDataProvider is read at {constructions}; when this was written only "
+        "cli._default_providers read it, to construct it"
     )
-    callers = _calls_to("_default_providers", SHIPPED_ROOTS)
+    callers = _uses_of("_default_providers", SHIPPED_ROOTS)
     assert callers == [("src/openalpha_cn/cli.py", "doctor")], (
-        f"cli._default_providers is called from {callers}; when this was written only doctor "
-        "called it"
+        f"cli._default_providers is read in {callers}; when this was written only doctor read "
+        "it, to call it"
     )
 
 
@@ -451,8 +458,13 @@ def test_the_stated_limits_are_real() -> None:
     assert not passed, f"a stated over-reach no longer happens: {passed}"
 
 
-def test_the_call_scan_finds_what_its_docstring_says(tmp_path: Path) -> None:
-    """`_calls_to` over a synthetic tree: an alias, an attribute, nesting and a definition."""
+def test_the_reference_scan_finds_what_its_docstring_says(tmp_path: Path) -> None:
+    """`_uses_of` over a synthetic tree, one shape per file.
+
+    Found: an alias, an attribute, a nested function, a dict value, a `functools.partial`
+    argument and a binding to another name. Not found: a definition, which is no read, and
+    `getattr` by a string, the blind spot the module docstring states.
+    """
     root = tmp_path / "pkg"
     files = {
         "aliased.py": (
@@ -468,12 +480,32 @@ def test_the_call_scan_finds_what_its_docstring_says(tmp_path: Path) -> None:
             "    return inner\n"
         ),
         "definition.py": "class ChainLinDataProvider:\n    pass\n",
+        "registry.py": (
+            "from openalpha_cn.providers import ChainLinDataProvider\n\n\n"
+            'def build(name):\n    return {"chainlin": ChainLinDataProvider}[name]()\n'
+        ),
+        "partial.py": (
+            "import functools\n\nfrom openalpha_cn.providers import ChainLinDataProvider\n\n\n"
+            "def build():\n    return functools.partial(ChainLinDataProvider, base_url=None)()\n"
+        ),
+        "bound.py": (
+            "from openalpha_cn.providers import ChainLinDataProvider\n\n"
+            "FACTORY = ChainLinDataProvider\n"
+        ),
+        "by_name_string.py": (
+            "import openalpha_cn.providers as providers\n\n"
+            'PROVIDER = getattr(providers, "ChainLinDataProvider")()\n'
+        ),
     }
     root.mkdir()
     for name, text in files.items():
         (root / name).write_text(text, encoding="utf-8")
-    assert sorted(_calls_to("ChainLinDataProvider", [root])) == [
+    found = sorted(_uses_of("ChainLinDataProvider", [root]))
+    assert found == [
         ("pkg/aliased.py", "build"),
         ("pkg/attribute.py", "<module>"),
+        ("pkg/bound.py", "<module>"),
         ("pkg/nested.py", "inner"),
-    ]
+        ("pkg/partial.py", "build"),
+        ("pkg/registry.py", "build"),
+    ], f"the reference scan found {found}"
