@@ -1,25 +1,28 @@
 """No document or diagram may say the replay detects, counts or reports look-ahead violations.
 
 **The premise**, held by `test_a_look_ahead_corpus_is_refused_before_the_replay_runs`. A replay
-case whose evidence is not yet visible at its own `as_of` cannot be built:
-`ReplayCase.validate_point_in_time` raises `LookAheadViolationError` when the case is
-constructed, and `ReplayCorpus.load` validates every case the same way
-(`backtest/replay.py:54-63`, `:87-90`). So a corpus that reaches `ReplayRunner.run` holds no
-look-ahead case, and `ReplayReport.look_ahead_violations` is 0 for every such corpus; its own
-docstring says it is not a detection result. What the replay does check is determinism: each
-case runs twice, the second time from empty stores, and a difference is a failure.
-`README.md:43` says both halves. If the premise test fails, a corpus holding a look-ahead case
-can be built again, and the sentences this guard holds were written for a premise that no longer
-holds: re-read them, and this guard.
+case whose evidence is not yet visible at its own `as_of` fails validation:
+`ReplayCase.validate_point_in_time` raises `LookAheadViolationError`, and `ReplayCorpus.load`
+validates every case. So a corpus that is loaded, or built through validation, holds no
+look-ahead case, and `ReplayReport.look_ahead_violations` is 0 for it. A corpus assembled without
+validation -- `model_copy` with an update, or `model_construct` -- still reaches
+`ReplayRunner.run`, which counts the case (`test_a_corpus_built_without_validation_is_counted`);
+`look_ahead_violations`' own docstring says as much, and that the count is not a detection
+result. What the replay does check is determinism: each case runs twice, the second time from
+empty stores, and a difference is a failure. The 确定性回放 bullet of `README.md` says both
+halves. If the premise test fails, a corpus holding a look-ahead case loads again, and the
+sentences this guard holds were written for a premise that no longer holds: re-read them, and
+this guard.
 
 **The claims.** A clause is a claim when it mentions look-ahead (`LOOK_AHEAD_WORDS`) and either
-names a look-ahead violation (`VIOLATION_WORDS`) beside a count, zero, detection or report word
-(`TALLY_WORDS`) or the numeral 0 standing alone (`ZERO_NUMERAL`, which skips the 0s of 300 and
-0.5), or pairs a check, detection, verification, test, finding or report word (`CHECK_WORDS`)
-with the replay (`REPLAY_WORDS`). At `4a37161` this flagged `README.md:1183`, two
-clauses of marketing §059 and api-05's validation table, all rewritten. Every other look-ahead
-clause and unit it read there says that look-ahead is refused or kept out, which is true, and none
-of them is flagged; `README.md:43` is one.
+names a look-ahead violation or bias (`VIOLATION_WORDS`) beside a count, zero, detection or
+report word (`TALLY_WORDS`) or a zero written as a numeral (`ZERO_NUMERAL`: 0, 0.0, or 0 in full
+width, never the 0s of 300 and 0.5), or pairs a check, detection, verification, test, finding or
+report word (`CHECK_WORDS`) with the replay (`REPLAY_WORDS`). A Chinese word is read as a
+substring and an English one as a word (`_english`). At `4a37161` this flagged `README.md:1183`,
+two clauses of marketing §059 and api-05's validation table, all rewritten. Every other
+look-ahead clause and unit it read there says that look-ahead is refused or kept out, which is
+true, and none of them is flagged; the 确定性回放 bullet of `README.md` is one.
 
 **How it reads.** The four documents as clauses (`tests/prose_clauses.py`), and the diagrams as
 units (`tests/diagram_text.py`). api-05 draws its four validation cards from one data table, a
@@ -30,8 +33,7 @@ tuple of rows no call takes, and each row is a unit: the replay card's "同路�
 
 - A claim worded without these words: "回放能抓出偷看未来的事件" has neither 前视 nor a
   check word, and "回放保证没有前视" has 前视 and the replay but words its check as 保证 and its
-  zero as 没有. English "test" is not a check word, since as a substring it would read "latest":
-  "The replay tests for look-ahead" is not read.
+  zero as 没有.
 - A claim split across clauses, the replay in one and the check in the next: "冻结语料回放很
   严格。它会发现前视问题。"
 - An English claim worded outside the few English words.
@@ -61,7 +63,10 @@ from diagram_text import diagram_units
 from prose_clauses import clauses
 from pydantic import ValidationError
 
-from openalpha_cn.backtest.replay import ReplayCorpus
+from openalpha_cn.backtest.replay import ReplayCase, ReplayCorpus, ReplayRunner
+from openalpha_cn.domain.time import Timeline
+from openalpha_cn.storage.migrations import run_migrations
+from openalpha_cn.storage.validation import SQLiteValidationStore
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 
@@ -88,7 +93,8 @@ FROZEN_CORPUS: Final[Path] = ROOT / "tests" / "fixtures" / "replay" / "a-share-v
 
 def test_a_look_ahead_corpus_is_refused_before_the_replay_runs(tmp_path: Path) -> None:
     """The frozen corpus loads; the same corpus with one case's evidence made visible a day after
-    that case's `as_of` does not, so no replay ever meets a look-ahead case to count."""
+    that case's `as_of` does not, so a replay of a loaded corpus never meets a look-ahead case to
+    count."""
     corpus = json.loads(FROZEN_CORPUS.read_text(encoding="utf-8"))
     case = corpus["cases"][0]
     later = (datetime.fromisoformat(case["as_of"]) + timedelta(days=1)).isoformat()
@@ -102,13 +108,61 @@ def test_a_look_ahead_corpus_is_refused_before_the_replay_runs(tmp_path: Path) -
         ReplayCorpus.load(look_ahead)
 
 
+@pytest.mark.parametrize("build", ["model_copy", "model_construct"])
+def test_a_corpus_built_without_validation_is_counted(tmp_path: Path, build: str) -> None:
+    """The exception the premise states. `model_copy` with an update, and `model_construct`, each
+    build a corpus holding a look-ahead case without validating it; `ReplayRunner.run` takes it,
+    and `look_ahead_violations` counts the case, which fails."""
+    corpus = ReplayCorpus.load(FROZEN_CORPUS)
+    case = corpus.cases[0]
+    evidence = case.evidence[0]
+    later = case.as_of + timedelta(days=1)
+    late = evidence.model_copy(
+        update={
+            "timeline": Timeline(
+                event_time=evidence.timeline.event_time,
+                available_time=later,
+                ingested_time=later,
+                revision_time=later,
+            )
+        }
+    )
+    if build == "model_copy":
+        unvalidated = corpus.model_copy(
+            update={"cases": (case.model_copy(update={"evidence": (late,)}),)}
+        )
+    else:
+        unvalidated = ReplayCorpus.model_construct(
+            schema_version=corpus.schema_version,
+            trading_days=corpus.trading_days,
+            cases=(ReplayCase.model_construct(**{**dict(case), "evidence": (late,)}),),
+        )
+
+    def clock() -> datetime:
+        return case.as_of
+
+    validation_path = tmp_path / "state.sqlite3"
+    run_migrations(validation_path, clock=clock)
+    report = ReplayRunner(
+        code_commit="0123456789abcdef", config_digest="d" * 64, random_seed=7
+    ).run(
+        corpus=unvalidated,
+        state_path=tmp_path / "replay.sqlite3",
+        validation_store=SQLiteValidationStore(validation_path),
+        clock=clock,
+    )
+    assert (report.total_cases, report.look_ahead_violations, report.succeeded) == (1, 1, 0), (
+        f"the unvalidated look-ahead corpus was reported as {report}"
+    )
+
+
 # --- The claims -------------------------------------------------------------------------------
 
 LOOK_AHEAD_WORDS: Final[tuple[str, ...]] = ("前视", "look-ahead", "lookahead", "look ahead")
 """Look-ahead, in Chinese and in three English spellings."""
 
-VIOLATION_WORDS: Final[tuple[str, ...]] = ("前视违规", "look-ahead violation")
-"""A look-ahead violation: what a count or a zero would be of."""
+VIOLATION_WORDS: Final[tuple[str, ...]] = ("前视违规", "前视偏差", "look-ahead violation")
+"""A look-ahead violation or bias: what a count or a zero would be of."""
 
 TALLY_WORDS: Final[tuple[str, ...]] = (
     "零",
@@ -126,31 +180,38 @@ TALLY_WORDS: Final[tuple[str, ...]] = (
 )
 """The words of a count, a zero, a detection or a report of violations."""
 
-ZERO_NUMERAL: Final[re.Pattern[str]] = re.compile(r"(?<![\w.])0(?!\w|\.\d)", re.ASCII)
-"""The numeral 0 standing alone, the other way a zero is written: not the 0 of 300, 2020, 0.5, 05
-or v0. Word characters are ASCII here, so a 0 straight after a Chinese character is read. So is a
-0 that counts nothing, such as T+0 or 第0批; the module docstring lists that as an over-reach."""
+ZERO_NUMERAL: Final[re.Pattern[str]] = re.compile(
+    r"(?<![\w.\uff0e\uff10-\uff19])[0\uff10](?:[.\uff0e][0\uff10]+)?"
+    r"(?![\w\uff10-\uff19]|[.\uff0e][\d\uff10-\uff19])",
+    re.ASCII,
+)
+"""A zero written as a numeral: 0 standing alone, with or without decimal zeros (0.0, 0.00), in
+ASCII or in full width (U+FF10, with the full-width point U+FF0E). Not the 0 of 300, 2020, 0.5,
+0.05, 05, v0 or a full-width ten. Word characters are ASCII here, so a 0 straight after a Chinese
+character is read. So is a 0 that counts nothing, such as T+0 or 第0批; the module docstring lists
+that as an over-reach."""
 
 CHECK_WORDS: Final[tuple[str, ...]] = (
     "检查",
     "检测",
     "验证",
+    "校验",
     "发现",
     "报告",
     "测试",
     "check",
     "detect",
     "verif",
+    "test",
     "find",
     "found",
     "report",
 )
-"""The words of checking, detecting, verifying, testing, finding or reporting. English "test" is
-not one: as a substring it would read "latest"."""
+"""The words of checking, detecting, verifying, testing, finding or reporting."""
 
 REPLAY_WORDS: Final[tuple[str, ...]] = ("回放", "冻结语料", "replay")
-"""The replay, by name. English is read as a substring in any case, so "replay" covers
-`ReplayCorpus` and "replays"."""
+"""The replay, by name: "replay" covers "replays", and `ReplayCorpus` and `CorpusReplay` too,
+since a CamelCase name's capitals start and end its words (`_english`)."""
 
 MARKERS: Final[dict[str, tuple[str, ...]]] = {
     "look-ahead": LOOK_AHEAD_WORDS,
@@ -159,16 +220,30 @@ MARKERS: Final[dict[str, tuple[str, ...]]] = {
     "check": CHECK_WORDS,
     "replay": REPLAY_WORDS,
 }
-"""Every word the claim rule reads, by family, matched as case-insensitive substrings.
-
-An English word is a stem, so "counts", "reported" and "verifies" are read; "found" and "find"
-are both listed because neither is a stem of the other.
+"""Every word the claim rule reads, by family. A Chinese word is matched as a substring and an
+English word as a word (`_english`), in any case: "counts", "reported" and "verifies" are read,
+and foundation, nonetheless and latest are not. "found" and "find" are both listed because
+neither is an inflection of the other.
 """
+
+ENGLISH_SUFFIXES: Final[str] = "s|es|ed|ing|ings|ion|ions|y|ies|ied|ying|ication|ications"
+"""The inflections an English word of `MARKERS` is read with: counts, reported, detection,
+verifies, verification, findings."""
+
+
+def _english(word: str) -> re.Pattern[str]:
+    """`word` read as an English word, in any case: where a word starts (after a non-letter, or at
+    a capital after a lower-case letter, inside a CamelCase name), whole or with one of
+    `ENGLISH_SUFFIXES`, and followed by no lower-case letter (a capital may follow)."""
+    return re.compile(
+        rf"(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))(?i:{re.escape(word)})"
+        rf"(?:(?i:{ENGLISH_SUFFIXES}))?(?![a-z])"
+    )
 
 
 def _holds(text: str, words: Iterable[str]) -> bool:
-    lowered = text.lower()
-    return any(word.lower() in lowered for word in words)
+    """Whether `text` holds one of `words`: an English word as a word, any other as a substring."""
+    return any(_english(word).search(text) if word.isascii() else word in text for word in words)
 
 
 def _is_claim(
@@ -238,8 +313,8 @@ def test_no_document_or_diagram_says_the_replay_detects_look_ahead() -> None:
     claims = _look_ahead_claims(texts)
     assert not claims, (
         "\n".join(claims) + "\nA corpus holding look-ahead evidence is refused when it is loaded, "
-        "so the replay's count is always 0. Say that; fix a diagram in its generator and "
-        "regenerate it."
+        "so the replay of a loaded corpus has none to count. Say that; fix a diagram in its "
+        "generator and regenerate it."
     )
 
 
@@ -304,6 +379,7 @@ MARKER_SENTENCES: Final[dict[tuple[str, str], str]] = {
     ("look-ahead", "lookahead"): "The replay checks lookahead.",
     ("look-ahead", "look ahead"): "The replay checks for look ahead.",
     ("violation", "前视违规"): "系统统计前视违规。",
+    ("violation", "前视偏差"): "前视偏差恒为零。",
     ("violation", "look-ahead violation"): "It counts look-ahead violations.",
     ("tally", "零"): "前视违规恒为零。",
     ("tally", "统计"): "系统统计前视违规。",
@@ -323,6 +399,8 @@ MARKER_SENTENCES: Final[dict[tuple[str, str], str]] = {
     ("check", "发现"): "回放发现前视问题。",
     ("check", "报告"): "回放给出防前视报告。",
     ("check", "测试"): "回放测试前视。",
+    ("check", "校验"): "回放校验前视。",
+    ("check", "test"): "The replay tests look-ahead.",
     ("check", "check"): "The replay checks look-ahead.",
     ("check", "detect"): "The replay detects look-ahead.",
     ("check", "verif"): "The replay verifies look-ahead.",
@@ -362,6 +440,8 @@ def test_every_word_the_rule_reads_is_needed() -> None:
         "前视违规始终为 0。",
         "前视违规为0例。",
         "前视违规率为 0%。",
+        "前视违规率为 0.0%。",
+        "前视违规为\N{FULLWIDTH DIGIT ZERO}例。",
         "Look-ahead violations: 0.",
     )
     for claim in zero_claims:
@@ -373,6 +453,45 @@ def test_every_word_the_rule_reads_is_needed() -> None:
         "加载时就被整体拒绝。"
     )
     assert not _is_claim(numbers), f"a 0 inside another number was read as a zero: {numbers!r}"
+    wide = (
+        "\N{FULLWIDTH DIGIT ONE}\N{FULLWIDTH DIGIT ZERO} 个语料若含前视违规，加载时就被整体拒绝。"
+    )
+    assert not _is_claim(wide), f"the 0 of a full-width ten was read as a zero: {wide!r}"
+    decimals = "阈值 0.05 的语料若含前视违规，加载时就被整体拒绝。"
+    assert not _is_claim(decimals), f"the 0s of 0.05 were read as a zero: {decimals!r}"
+
+
+TRUE_ENGLISH_SENTENCES: Final[dict[str, str]] = {
+    "found in foundation": (
+        "The foundation of the replay is a corpus that refuses a look-ahead violation at load.\n"
+    ),
+    "none in nonetheless": (
+        "Nonetheless, a corpus holding a look-ahead violation is refused at load.\n"
+    ),
+    "test in latest": "The latest replay refuses any corpus that holds look-ahead evidence.\n",
+}
+"""True sentences in which an English word of the rule sits inside another word. The final review
+of `D13` found the rule reading "found" in foundation and "none" in nonetheless, and flagging the
+first two."""
+
+CAMEL_CASE_CLAIMS: Final[tuple[str, ...]] = (
+    "The ReplayCorpus checks look-ahead.",
+    "The CorpusReplay checks look-ahead.",
+)
+"""Claims whose replay is written inside a CamelCase name, at its start and at its end."""
+
+
+def test_an_english_word_is_read_as_a_word() -> None:
+    """An English word of `MARKERS` is read where a word starts, whole or inflected, and at a
+    capital inside a CamelCase name; never inside another word."""
+    flagged = [
+        label
+        for label, text in TRUE_ENGLISH_SENTENCES.items()
+        if _look_ahead_claims(_guarded_texts({label: text}, {}))
+    ]
+    assert not flagged, f"an English word inside another word was read: {flagged}"
+    unread = [text for text in CAMEL_CASE_CLAIMS if not _is_claim(text)]
+    assert not unread, f"a word inside a CamelCase name went unread: {unread}"
 
 
 def test_the_stated_limits_are_real() -> None:
@@ -395,7 +514,6 @@ def test_the_stated_limits_are_real() -> None:
             {"保证 and 没有": "回放保证没有前视。\n"},
             {},
         ),
-        "English 'test'": ({"English test": "The replay tests for look-ahead.\n"}, {}),
         "text computed at run time": (
             {},
             {"run time": 'card = "冻结语料回放"\nsvg.text(1, 2, f"{card} · 检查前视")\n'},
@@ -433,6 +551,6 @@ def test_the_stated_limits_are_real() -> None:
         "a check word on one card of a table and 前视 on another are read together again"
     )
     refused_truth = "含前视证据的语料在加载时就被整体拒绝，不会进入回放。\n"
-    assert not _look_ahead_claims(_guarded_texts({"README.md:43's shape": refused_truth}, {})), (
-        "README.md:43's true sentence is read as a claim"
+    assert not _look_ahead_claims(_guarded_texts({"the bullet's shape": refused_truth}, {})), (
+        "the true sentence of README.md's 确定性回放 bullet is read as a claim"
     )
