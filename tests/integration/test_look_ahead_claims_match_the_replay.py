@@ -14,8 +14,9 @@ holds: re-read them, and this guard.
 
 **The claims.** A clause is a claim when it mentions look-ahead (`LOOK_AHEAD_WORDS`) and either
 names a look-ahead violation (`VIOLATION_WORDS`) beside a count, zero, detection or report word
-(`TALLY_WORDS`), or pairs a check, detection, verification, finding or report word
-(`CHECK_WORDS`) with the replay (`REPLAY_WORDS`). At `4a37161` this flagged `README.md:1183`, two
+(`TALLY_WORDS`) or the numeral 0 standing alone (`ZERO_NUMERAL`, which skips the 0s of 300 and
+0.5), or pairs a check, detection, verification, test, finding or report word (`CHECK_WORDS`)
+with the replay (`REPLAY_WORDS`). At `4a37161` this flagged `README.md:1183`, two
 clauses of marketing §059 and api-05's validation table, all rewritten. Every other look-ahead
 clause and unit it read there says that look-ahead is refused or kept out, which is true, and none
 of them is flagged; `README.md:43` is one.
@@ -28,7 +29,9 @@ tuple no call takes, and such a table is one unit: the replay card's "同路径�
 **What it cannot see.** `test_the_stated_limits_are_real` measures each of these.
 
 - A claim worded without these words: "回放能抓出偷看未来的事件" has neither 前视 nor a
-  check word.
+  check word, and "回放保证没有前视" has 前视 and the replay but words its check as 保证 and its
+  zero as 没有. English "test" is not a check word, since as a substring it would read "latest":
+  "The replay tests for look-ahead" is not read.
 - A claim split across clauses, the replay in one and the check in the next: "冻结语料回放很
   严格。它会发现前视问题。"
 - An English claim worded outside the few English words.
@@ -45,6 +48,7 @@ tuple no call takes, and such a table is one unit: the replay card's "同路径�
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -120,12 +124,17 @@ TALLY_WORDS: Final[tuple[str, ...]] = (
 )
 """The words of a count, a zero, a detection or a report of violations."""
 
+ZERO_NUMERAL: Final[re.Pattern[str]] = re.compile(r"(?<![\w.])0(?!\w|\.\d)", re.ASCII)
+"""The numeral 0 standing alone, the other way a zero is written: not the 0 of 300, 2020, 0.5, 05
+or v0. Word characters are ASCII here, so a 0 straight after a Chinese character is read."""
+
 CHECK_WORDS: Final[tuple[str, ...]] = (
     "检查",
     "检测",
     "验证",
     "发现",
     "报告",
+    "测试",
     "check",
     "detect",
     "verif",
@@ -133,7 +142,8 @@ CHECK_WORDS: Final[tuple[str, ...]] = (
     "found",
     "report",
 )
-"""The words of checking, detecting, verifying, finding or reporting."""
+"""The words of checking, detecting, verifying, testing, finding or reporting. English "test" is
+not one: as a substring it would read "latest"."""
 
 REPLAY_WORDS: Final[tuple[str, ...]] = ("回放", "冻结语料", "replay")
 """The replay, by name. English is read as a substring in any case, so "replay" covers
@@ -158,11 +168,16 @@ def _holds(text: str, words: Iterable[str]) -> bool:
     return any(word.lower() in lowered for word in words)
 
 
-def _is_claim(text: str, markers: dict[str, tuple[str, ...]] = MARKERS) -> bool:
+def _is_claim(
+    text: str,
+    markers: dict[str, tuple[str, ...]] = MARKERS,
+    zero: re.Pattern[str] | None = ZERO_NUMERAL,
+) -> bool:
     """Whether one clause presents the replay as detecting, counting or reporting look-ahead."""
     if not _holds(text, markers["look-ahead"]):
         return False
-    tallied = _holds(text, markers["violation"]) and _holds(text, markers["tally"])
+    counted = _holds(text, markers["tally"]) or bool(zero and zero.search(text))
+    tallied = _holds(text, markers["violation"]) and counted
     checked = _holds(text, markers["check"]) and _holds(text, markers["replay"])
     return tallied or checked
 
@@ -260,6 +275,26 @@ def test_the_guard_flags_the_claims_it_was_written_for() -> None:
     assert len(card) == 1, f"the 4a37161 replay card was read as {card}"
 
 
+CLAIMS_THE_FIX_REVIEW_WROTE: Final[dict[str, str]] = {
+    "the numeral 0": "前视违规始终为 0，冻结语料一次都没漏过。\n",
+    "0 with a counter": "严重前视违规为 0 例。\n",
+    "0 in English": "look-ahead violations: 0\n",
+    "测试": "冻结语料回放测试确定性与防前视。\n",
+}
+"""The review of the `D13` fixes put the first and the last into `README.md`, and the guard
+passed: it read 零 but not the numeral 0, and 检查 but not 测试."""
+
+
+def test_the_claims_the_fix_review_wrote_are_read() -> None:
+    """A zero written as the numeral 0, and a check worded as 测试, are read."""
+    missed = [
+        label
+        for label, text in CLAIMS_THE_FIX_REVIEW_WROTE.items()
+        if not _look_ahead_claims(_guarded_texts({label: text}, {}))
+    ]
+    assert not missed, f"a claim the review of the fixes wrote went unread: {missed}"
+
+
 MARKER_SENTENCES: Final[dict[tuple[str, str], str]] = {
     ("look-ahead", "前视"): "冻结语料回放检查前视问题。",
     ("look-ahead", "look-ahead"): "The replay checks look-ahead.",
@@ -284,6 +319,7 @@ MARKER_SENTENCES: Final[dict[tuple[str, str], str]] = {
     ("check", "验证"): "回放验证防前视。",
     ("check", "发现"): "回放发现前视问题。",
     ("check", "报告"): "回放给出防前视报告。",
+    ("check", "测试"): "回放测试前视。",
     ("check", "check"): "The replay checks look-ahead.",
     ("check", "detect"): "The replay detects look-ahead.",
     ("check", "verif"): "The replay verifies look-ahead.",
@@ -307,7 +343,8 @@ def _without(family: str, word: str) -> dict[str, tuple[str, ...]]:
 
 
 def test_every_word_the_rule_reads_is_needed() -> None:
-    """Dropping any one word from `MARKERS` lets its sentence pass, so every word is pinned."""
+    """Dropping any one word from `MARKERS` lets its sentence pass, so every word is pinned; so
+    does dropping `ZERO_NUMERAL`, and a 0 inside another number is not a zero."""
     listed = {(family, word) for family, words in MARKERS.items() for word in words}
     assert set(MARKER_SENTENCES) == listed, (
         f"MARKER_SENTENCES covers {sorted(MARKER_SENTENCES)}; MARKERS lists {sorted(listed)}"
@@ -318,6 +355,15 @@ def test_every_word_the_rule_reads_is_needed() -> None:
         if not _is_claim(sentence) or _is_claim(sentence, _without(*key))
     ]
     assert not unpinned, f"a word of MARKERS is not needed by its sentence: {unpinned}"
+    for claim in ("前视违规始终为 0。", "前视违规为0例。", "Look-ahead violations: 0."):
+        assert _is_claim(claim) and not _is_claim(claim, zero=None), (
+            f"{claim!r} is not made a claim by ZERO_NUMERAL alone"
+        )
+    numbers = (
+        "阈值 0.5、1.0 版、300 个事件、2020 年起、第 05 批、v0 语料若含前视违规，"
+        "加载时就被整体拒绝。"
+    )
+    assert not _is_claim(numbers), f"a 0 inside another number was read as a zero: {numbers!r}"
 
 
 def test_the_stated_limits_are_real() -> None:
@@ -336,6 +382,11 @@ def test_the_stated_limits_are_real() -> None:
             {"English": "The replay catches peeking ahead.\n"},
             {},
         ),
+        "a check and a zero worded outside the words": (
+            {"保证 and 没有": "回放保证没有前视。\n"},
+            {},
+        ),
+        "English 'test'": ({"English test": "The replay tests for look-ahead.\n"}, {}),
         "text computed at run time": (
             {},
             {"run time": 'card = "冻结语料回放"\nsvg.text(1, 2, f"{card} · 检查前视")\n'},
