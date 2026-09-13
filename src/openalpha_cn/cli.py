@@ -4914,8 +4914,9 @@ def _echo_experiment(record: FactorExperimentRecord, *, write: str) -> None:
 NOTE_WRAP_WIDTH: Final[int] = 96
 """How wide `factor describe` wraps a note, in characters.
 
-The twenty shipped notes run from 705 to 4,830 characters and are written as single paragraphs,
-so a terminal that printed them unwrapped would emit one line per note. 96 leaves room inside a
+The twenty-three shipped notes -- twenty-one on factors, one on the transform and one on the
+neutralisation -- run from 705 to 4,830 characters and are written as single paragraphs, so a
+terminal that printed them unwrapped would emit one line per note. 96 leaves room inside a
 100-column line for the two-space indent that marks the prose apart from the fields above it.
 """
 
