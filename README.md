@@ -31,9 +31,9 @@
 
 - **证据驱动协作**：市场事件、题材催化和资金流智能体经证据感知路由协作，每项输出都引用 `evidence_id`。
 - **结构化决策链**：用 `SignalFrame`、`DecisionLedger`、风险门和显式弃权替代无法审计的自由文本结论。
-- **双委员会研判**：Bull/Bear 研究辩论与激进/中性/保守风险委员会均可独立启停，既保留观点碰撞，也能做消融对照。
+- **双委员会研判**：Bull/Bear 研究辩论与激进/中性/保守三视角风险投票在同一次委员会评审里完成；整个委员会是一次可选的显式调用（`POST /api/v1/research/deliberate`、`OpenAlphaSDK.deliberate`），不能只开其中一方，输出附带消融对照：委员会前后的方向、强度与置信度变化。
 - **批量研究编排**：持久任务队列支持 1–8 并发、逐项进度、协作式取消、失败重试和进程重启恢复。
-- **模型可插拔**：无 LLM 时可确定性运行，出厂路径不调用模型，在 SDK 代码中接入模型 Provider 后才强制结构化输出、Schema 校验和有界重试。
+- **模型可插拔**：无 LLM 时可确定性运行，出厂路径不调用模型，模型只能经由你在代码里构造、以 `agents=` 交给 SDK 的 Agent 进入研究，其中 `StructuredSignalAgent` 按 Schema 校验模型输出，并对不合格的输出做有界重试。
 - **模型治理边界**：模型客户端库定义了能力注册表与能力元数据，但没有代码据此选择端点，出厂路径与接入 Provider 之后都一样；在代码中接入模型 Provider 后对 408/429/5xx 分类重试，出厂路径不调用模型；Token、尝试次数与按用户单价估算的成本有持久账本，但要在构造 Provider 时传入 `usage_store` 才会写入，出厂路径不会自动记账。
 - **安全 BYOK**：内置 OpenAI-compatible Provider 类，可在 SDK 代码中指向 OpenAI、DeepSeek、Qwen、Ollama 或用户自建兼容端点；密钥只从构造时指定的环境变量读取，出厂路径不读取任何模型密钥。
 
@@ -50,7 +50,7 @@
 
 - **合规数据接入**：证据构建读取用户自有 CSV、JSON、JSONL、Parquet，面板构建使用用户自带 Token 的 Tushare；链邻合同型 Provider 只由 `doctor` 调用。
 - **失败必须显式**：Provider 统一声明凭据、来源、许可、时效、限流与失败语义，禁止把数据错误伪装成“空结果成功”。
-- **多入口一致**：同一能力通过 REST API、Python SDK、CLI 和响应式 React 研究工作台开放。
+- **多入口共用服务**：REST API、Python SDK 与 CLI 调用同一批服务，但覆盖的面不同，逐条差异登记在 `tests/unit/test_surface_parity.py`；React 研究工作台只接入其中一部分 REST 接口，不含批量、筛选、观察池与报告。
 - **批量任务中心**：任务、并发上限、逐项进度、取消、重试和重启恢复均持久化。
 - **研究产品接口**：提供结构化筛选、观察池和内容寻址报告中心。
 
@@ -1120,9 +1120,11 @@ OpenAlpha CN 的公开 API 不是一组彼此孤立的地址，而是围绕同�
 
 ### API 关系图 01｜四类入口共享五条功能链
 
-REST、Python SDK、Typer CLI 和 React 工作台最终进入同一 FastAPI 公共边界。请求经过
-Pydantic Schema、请求大小限制与安全响应头后，分别流向证据、研究、研究产品、组合和验证
-五条功能链；运行数据统一沉淀到 Parquet 与 SQLite WAL，而不是由各入口维护不同状态。
+REST 调用方（React 工作台也是其中之一）经过同一 FastAPI 公共边界，请求在那里经过
+Pydantic Schema、请求大小限制与安全响应头；Python SDK 与 CLI 命令不走 HTTP，在进程内直接
+调用同一批服务（`openalpha serve` 只是启动上面这道 REST 边界）。功能分为证据、研究、研究
+产品、组合和验证五条链，各入口覆盖的面不同；运行数据统一沉淀到 Parquet 与 SQLite WAL，
+而不是由各入口维护不同状态。
 
 <p align="center">
   <img
