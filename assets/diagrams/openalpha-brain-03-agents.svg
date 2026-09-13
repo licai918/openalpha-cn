@@ -92,7 +92,7 @@
   <rect x="346" y="254" width="3" height="342" rx="1.5" fill="#A78BFA" />
   <text x="370" y="261" class="micro" fill="#A78BFA" text-anchor="start" opacity="1">ORCHESTRATION KERNEL</text>
   <text x="370" y="294" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">ResearchEngine.run_cycle</text>
-  <text x="370" y="323" class="body" fill="#96A8BE" text-anchor="start" opacity="1">EvidenceLookupTool 只读查询</text>
+  <text x="370" y="323" class="body" fill="#96A8BE" text-anchor="start" opacity="1">读取请求内 as_of 可见证据</text>
   <text x="370" y="347" class="body" fill="#96A8BE" text-anchor="start" opacity="1">AgentRouter 记录 routing_path</text>
   <text x="370" y="371" class="body" fill="#96A8BE" text-anchor="start" opacity="1">按证据类型选择专业角色</text>
   <text x="370" y="395" class="body" fill="#96A8BE" text-anchor="start" opacity="1">汇总 SignalFrame</text>

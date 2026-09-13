@@ -457,7 +457,7 @@ def evidence() -> None:
         lines=(
             "ProviderMetadata / ProviderBatch",
             "认证 · 限流 · 新鲜度",
-            "错误分类与 Retry-After",
+            "五类失败分类",
             "PIT 可见性与修订语义",
             "涨停 / 炸板 / 连板 / 题材",
             "催化 / 公告 / 资金语义",
@@ -481,16 +481,21 @@ def evidence() -> None:
         svg.text(x + 80, 270, title, css="cardTitle", color=TEXT, anchor="middle")
         svg.text(x + 80, 298, code, css="mono", color=CYAN, anchor="middle")
 
+    # The identity formula is `EvidenceSnapshot.evidence_id` (`domain/evidence.py`): a hash of
+    # these five joined with "|", and nothing else -- `source_uri` does not move it. It takes two
+    # lines, so both lower panels are 14 taller than their four-line height and the query band
+    # below them moved down by as much.
     svg.panel(
         658,
         350,
         454,
-        200,
+        214,
         title="EvidenceSnapshot",
         label="CONTENT-ADDRESSED ARTIFACT",
         color=CYAN,
         lines=(
-            "evidence_id = hash(source_uri + content_hash)",
+            "evidence_id = hash(subject | kind | source_id |",
+            "available_time | content_hash)",
             "可见时点 · 哈希 · 来源 · 许可 · 修订",
             "A 股事件语义与原始载荷建立绑定",
             "下游只接收决策时刻已经可知的 evidence_id",
@@ -501,26 +506,26 @@ def evidence() -> None:
         1142,
         350,
         214,
-        200,
+        214,
         title="证据存储",
         label="IMMUTABLE STORE",
         color=BLUE,
-        lines=("Parquet 分区", "DuckDB PIT 查询", "只读证据工具", "内容哈希复核"),
+        lines=("Parquet 分区", "DuckDB PIT 查询", "只追加 · 不改写", "内容哈希复核"),
     )
     svg.arrow(1112, 450, 1142, 450, color=BLUE)
 
     svg.raw(
-        f'  <rect x="658" y="578" width="698" height="92" rx="20" fill="{PANEL_ALT}" stroke="{LINE}" />'
+        f'  <rect x="658" y="592" width="698" height="92" rx="20" fill="{PANEL_ALT}" stroke="{LINE}" />'
     )
-    svg.text(684, 608, "QUERY CONTRACT", css="micro", color=BLUE)
+    svg.text(684, 622, "QUERY CONTRACT", css="micro", color=BLUE)
     svg.text(
         684,
-        646,
+        660,
         "as_of + symbol / event_type → 可见证据集合 → EvidenceSnapshot",
         css="cardTitle",
         color=TEXT,
     )
-    svg.pill(1163, 588, 168, "交付研判脑区 →", color=CYAN)
+    svg.pill(1163, 602, 168, "交付研判脑区 →", color=CYAN)
     svg.finish("openalpha-brain-02-evidence.svg")
 
 
@@ -571,7 +576,7 @@ def agents() -> None:
         label="ORCHESTRATION KERNEL",
         color=VIOLET,
         lines=(
-            "EvidenceLookupTool 只读查询",
+            "读取请求内 as_of 可见证据",
             "AgentRouter 记录 routing_path",
             "按证据类型选择专业角色",
             "汇总 SignalFrame",

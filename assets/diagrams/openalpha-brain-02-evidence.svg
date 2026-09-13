@@ -92,7 +92,7 @@
   <text x="372" y="294" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">Provider Contract</text>
   <text x="372" y="323" class="body" fill="#96A8BE" text-anchor="start" opacity="1">ProviderMetadata / ProviderBatch</text>
   <text x="372" y="347" class="body" fill="#96A8BE" text-anchor="start" opacity="1">认证 · 限流 · 新鲜度</text>
-  <text x="372" y="371" class="body" fill="#96A8BE" text-anchor="start" opacity="1">错误分类与 Retry-After</text>
+  <text x="372" y="371" class="body" fill="#96A8BE" text-anchor="start" opacity="1">五类失败分类</text>
   <text x="372" y="395" class="body" fill="#96A8BE" text-anchor="start" opacity="1">PIT 可见性与修订语义</text>
   <text x="372" y="419" class="body" fill="#96A8BE" text-anchor="start" opacity="1">涨停 / 炸板 / 连板 / 题材</text>
   <text x="372" y="443" class="body" fill="#96A8BE" text-anchor="start" opacity="1">催化 / 公告 / 资金语义</text>
@@ -114,32 +114,33 @@
   <rect x="1195" y="232" width="160" height="92" rx="18" fill="#13243A" stroke="#2DD4BF" stroke-opacity=".28" />
   <text x="1275" y="270" class="cardTitle" fill="#F4F7FB" text-anchor="middle" opacity="1">数据修订</text>
   <text x="1275" y="298" class="mono" fill="#2DD4BF" text-anchor="middle" opacity="1">revision_time</text>
-  <rect x="658" y="350" width="454" height="200" rx="22" fill="#0C1928" stroke="#263A52" filter="url(#shadow)" />
-  <rect x="659" y="351" width="452" height="198" rx="21" fill="none" stroke="#FFFFFF" stroke-opacity=".035" />
-  <rect x="658" y="372" width="3" height="156" rx="1.5" fill="#2DD4BF" />
+  <rect x="658" y="350" width="454" height="214" rx="22" fill="#0C1928" stroke="#263A52" filter="url(#shadow)" />
+  <rect x="659" y="351" width="452" height="212" rx="21" fill="none" stroke="#FFFFFF" stroke-opacity=".035" />
+  <rect x="658" y="372" width="3" height="170" rx="1.5" fill="#2DD4BF" />
   <text x="682" y="379" class="micro" fill="#2DD4BF" text-anchor="start" opacity="1">CONTENT-ADDRESSED ARTIFACT</text>
   <text x="682" y="412" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">EvidenceSnapshot</text>
-  <text x="682" y="441" class="body" fill="#96A8BE" text-anchor="start" opacity="1">evidence_id = hash(source_uri + content_hash)</text>
-  <text x="682" y="465" class="body" fill="#96A8BE" text-anchor="start" opacity="1">可见时点 · 哈希 · 来源 · 许可 · 修订</text>
-  <text x="682" y="489" class="body" fill="#96A8BE" text-anchor="start" opacity="1">A 股事件语义与原始载荷建立绑定</text>
-  <text x="682" y="513" class="body" fill="#96A8BE" text-anchor="start" opacity="1">下游只接收决策时刻已经可知的 evidence_id</text>
+  <text x="682" y="441" class="body" fill="#96A8BE" text-anchor="start" opacity="1">evidence_id = hash(subject | kind | source_id |</text>
+  <text x="682" y="465" class="body" fill="#96A8BE" text-anchor="start" opacity="1">available_time | content_hash)</text>
+  <text x="682" y="489" class="body" fill="#96A8BE" text-anchor="start" opacity="1">可见时点 · 哈希 · 来源 · 许可 · 修订</text>
+  <text x="682" y="513" class="body" fill="#96A8BE" text-anchor="start" opacity="1">A 股事件语义与原始载荷建立绑定</text>
+  <text x="682" y="537" class="body" fill="#96A8BE" text-anchor="start" opacity="1">下游只接收决策时刻已经可知的 evidence_id</text>
   <path d="M622 421L658 421" fill="none" stroke="#2DD4BF" stroke-width="2.2" marker-end="url(#arrow)" />
   <text x="640.0" y="405" class="small" fill="#2DD4BF" text-anchor="middle" opacity="1">固化</text>
-  <rect x="1142" y="350" width="214" height="200" rx="22" fill="#0C1928" stroke="#263A52" filter="url(#shadow)" />
-  <rect x="1143" y="351" width="212" height="198" rx="21" fill="none" stroke="#FFFFFF" stroke-opacity=".035" />
-  <rect x="1142" y="372" width="3" height="156" rx="1.5" fill="#38BDF8" />
+  <rect x="1142" y="350" width="214" height="214" rx="22" fill="#0C1928" stroke="#263A52" filter="url(#shadow)" />
+  <rect x="1143" y="351" width="212" height="212" rx="21" fill="none" stroke="#FFFFFF" stroke-opacity=".035" />
+  <rect x="1142" y="372" width="3" height="170" rx="1.5" fill="#38BDF8" />
   <text x="1166" y="379" class="micro" fill="#38BDF8" text-anchor="start" opacity="1">IMMUTABLE STORE</text>
   <text x="1166" y="412" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">证据存储</text>
   <text x="1166" y="441" class="body" fill="#96A8BE" text-anchor="start" opacity="1">Parquet 分区</text>
   <text x="1166" y="465" class="body" fill="#96A8BE" text-anchor="start" opacity="1">DuckDB PIT 查询</text>
-  <text x="1166" y="489" class="body" fill="#96A8BE" text-anchor="start" opacity="1">只读证据工具</text>
+  <text x="1166" y="489" class="body" fill="#96A8BE" text-anchor="start" opacity="1">只追加 · 不改写</text>
   <text x="1166" y="513" class="body" fill="#96A8BE" text-anchor="start" opacity="1">内容哈希复核</text>
   <path d="M1112 450L1142 450" fill="none" stroke="#38BDF8" stroke-width="2.2" marker-end="url(#arrow)" />
-  <rect x="658" y="578" width="698" height="92" rx="20" fill="#102033" stroke="#263A52" />
-  <text x="684" y="608" class="micro" fill="#38BDF8" text-anchor="start" opacity="1">QUERY CONTRACT</text>
-  <text x="684" y="646" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">as_of + symbol / event_type → 可见证据集合 → EvidenceSnapshot</text>
-  <rect x="1163" y="588" width="168" height="28" rx="14" fill="#2DD4BF" fill-opacity="0.12" stroke="#2DD4BF" stroke-opacity=".38" />
-  <text x="1247.0" y="607" class="small" fill="#2DD4BF" text-anchor="middle" opacity="1">交付研判脑区 →</text>
+  <rect x="658" y="592" width="698" height="92" rx="20" fill="#102033" stroke="#263A52" />
+  <text x="684" y="622" class="micro" fill="#38BDF8" text-anchor="start" opacity="1">QUERY CONTRACT</text>
+  <text x="684" y="660" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">as_of + symbol / event_type → 可见证据集合 → EvidenceSnapshot</text>
+  <rect x="1163" y="602" width="168" height="28" rx="14" fill="#2DD4BF" fill-opacity="0.12" stroke="#2DD4BF" stroke-opacity=".38" />
+  <text x="1247.0" y="621" class="small" fill="#2DD4BF" text-anchor="middle" opacity="1">交付研判脑区 →</text>
   <text x="64" y="785" class="micro" fill="#96A8BE" text-anchor="start" opacity="1">研究闭环导航</text>
   <text x="200" y="785" class="small" fill="#6F829A" text-anchor="start" opacity="1">每一脑区交付一个可验证产物，最终回到下一轮证据与规则</text>
   <rect x="64" y="806" width="240" height="52" rx="16" fill="#0B1726" stroke="#263A52" />
