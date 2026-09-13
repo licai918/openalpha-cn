@@ -782,7 +782,9 @@ def main() -> None:
         "openalpha-api-05-validation-loop.svg": validation_loop(),
     }
     for name, content in diagrams.items():
-        (OUTPUT_DIR / name).write_text(content, encoding="utf-8")
+        # `newline="\n"`: text mode would otherwise write "\r\n" on Windows, and the committed
+        # SVGs are LF everywhere (`.gitattributes`), so the sync test would fail there.
+        (OUTPUT_DIR / name).write_text(content, encoding="utf-8", newline="\n")
     print(f"generated {len(diagrams)} API relationship diagrams in {OUTPUT_DIR}")
 
 

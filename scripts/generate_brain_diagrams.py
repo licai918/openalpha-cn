@@ -289,7 +289,11 @@ class Svg:
         self.navigation()
         self.raw("</svg>")
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        (OUTPUT_DIR / filename).write_text("\n".join(self.parts) + "\n", encoding="utf-8")
+        # `newline="\n"`: text mode would otherwise write "\r\n" on Windows, and the committed
+        # SVGs are LF everywhere (`.gitattributes`), so the sync test would fail there.
+        (OUTPUT_DIR / filename).write_text(
+            "\n".join(self.parts) + "\n", encoding="utf-8", newline="\n"
+        )
 
 
 def overview() -> None:

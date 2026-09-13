@@ -543,6 +543,63 @@ def test_the_diagram_sync_check_reports_a_diagram_that_drifted(
     )
 
 
+def _windows_text_mode_write_text(
+    self: Path,
+    data: str,
+    encoding: str | None = None,
+    errors: str | None = None,
+    newline: str | None = None,
+) -> int:
+    """`Path.write_text` with the line endings it writes on Windows, written as bytes here.
+
+    Text mode translates each "\\n" it writes: to `os.linesep` -- "\\r\\n" on Windows -- when
+    `newline` is None, to `newline` itself when that is neither "" nor "\\n", and not at all
+    otherwise. CPython's C `TextIOWrapper` fixes the Windows separator when it is built, so
+    setting `os.linesep` in a test cannot reach it. This function therefore translates and
+    encodes the string itself and writes the bytes. It never calls the real `write_text`,
+    which on Windows would translate a second time.
+
+    Only the line endings are simulated. An omitted `encoding` falls back to UTF-8 here, where
+    Windows would use its locale encoding, so a generator that dropped `encoding=` would pass.
+    """
+    if newline is None:
+        text = data.replace("\n", "\r\n")
+    elif newline in ("", "\n"):
+        text = data
+    else:
+        text = data.replace("\n", newline)
+    self.write_bytes(text.encode(encoding or "utf-8", errors or "strict"))
+    return len(data)
+
+
+def test_the_committed_diagrams_are_what_their_generators_write_on_windows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sync check above, run with the line endings Windows text mode writes.
+
+    Both Windows legs of CI run the sync check. On Windows, `Path.write_text` writes "\\n" as
+    "\\r\\n" unless its caller passes `newline=`. The committed SVGs are LF on every platform
+    (`.gitattributes`: `* text=auto eol=lf`). So a generator that leaves `newline` unset writes
+    bytes on Windows that differ from every committed diagram, and the sync check fails there
+    while it passes on Linux and macOS. The final review of `d4ef5e4` measured all ten differing.
+
+    `Path.write_text` is replaced by `_windows_text_mode_write_text` for the whole run. The
+    first two assertions show the replacement translates, so that a no-op replacement cannot
+    make this test pass. What it cannot see: a generator that writes some other way than
+    `Path.write_text` (`open()`, `Path.open()`, `os.write`) is not translated here.
+    """
+    probe = tmp_path / "probe.txt"
+    _windows_text_mode_write_text(probe, "a\nb\n", encoding="utf-8")
+    assert probe.read_bytes() == b"a\r\nb\r\n", "the simulated text mode did not translate"
+    _windows_text_mode_write_text(probe, "a\nb\n", encoding="utf-8", newline="\n")
+    assert probe.read_bytes() == b"a\nb\n", "the simulated text mode translated newline='\\n'"
+    monkeypatch.setattr(Path, "write_text", _windows_text_mode_write_text)
+    problems = _diagram_sync_problems(
+        tmp_path / "written", ROOT / "assets" / "diagrams", monkeypatch
+    )
+    assert not problems, "\n".join(problems)
+
+
 def test_marketing_pack_contains_100_distinct_source_grounded_plans() -> None:
     content = (ROOT / "docs" / "marketing" / "openalpha-cn-100-promotion-plans.zh-CN.md").read_text(
         encoding="utf-8"
