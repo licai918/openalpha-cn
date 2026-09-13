@@ -299,16 +299,51 @@ def test_the_real_ledger_has_no_unreviewed_or_unknown_rows() -> None:
 # --- what the notes and the anchors point at (D13, final review M10) ------------------------
 
 _NOTE_NODE_ID: Final = re.compile(
-    r"(?<![\w/.])((?:tests|web)/[\w./-]+\.py::[A-Za-z_]\w*(?:::[A-Za-z_]\w*)?)"
+    r"(?<![\w/.])((?:[\w-]+/)*test_\w*\.py)::([A-Za-z_]\w*(?:::[A-Za-z_]\w*)?)"
 )
-"""A pytest node id written into a notes cell: `tests/...py::name` or `...py::Class::name`."""
+"""A pytest node id written into a notes cell: `test_*.py::name` or `test_*.py::Class::name`.
 
-_NOTE_SYMBOL: Final = re.compile(r"(?<![\w/.])((?:[\w-]+/)*[\w-]+\.py)#([A-Za-z_]\w*)")
-"""A `path.py#symbol` written into a notes cell -- the form `_load` checks in the evidence cells."""
+The path is taken as written, whole (`tests/unit/test_cli.py`) or shortened to its last parts
+(`test_cli.py`, `storage/test_migrations.py`); `_note_node_id_problem` resolves it.
+"""
+
+_NOTE_SYMBOL: Final = re.compile(r"(?<![\w/.])((?:[\w-]+/)*[\w-]+\.py)(#|::)([A-Za-z_]\w*)")
+"""A `path.py#symbol` or `path.py::symbol` written into a notes cell.
+
+`#` is the form `_load` checks in the evidence cells, and the notes also write a source symbol
+the way pytest writes a test (`domain/panel_batch.py::_check_visible_at_as_of`). A `::` after a
+`test_*.py` path is a node id, which `_NOTE_NODE_ID` reads instead.
+"""
+
+_FENCE: Final = re.compile(r" {0,3}(`{3,}|~{3,})")
+"""The start of a line that opens or closes a fenced code block in Markdown."""
 
 
 def _markdown_headings(text: str) -> list[str]:
-    return [line.lstrip("#").strip() for line in text.splitlines() if re.match(r"#{1,6}\s", line)]
+    """Every ATX heading (`#` to `######`) in `text` that is not inside a fenced code block.
+
+    A `#` line inside a fence is code -- a shell or a Python comment -- and D13's version of this
+    rule read it as a heading (SA5's nit in D13's final review). A fence closes on a line of the
+    same character, at least as long as the one that opened it, with nothing after it; a fence
+    that never closes runs to the end of the file.
+    """
+    headings: list[str] = []
+    fence: str | None = None
+    for line in text.splitlines():
+        marker = _FENCE.match(line)
+        if fence is None:
+            if marker:
+                fence = marker.group(1)
+            elif re.match(r"#{1,6}\s", line):
+                headings.append(line.lstrip("#").strip())
+        elif (
+            marker
+            and marker.group(1)[0] == fence[0]
+            and len(marker.group(1)) >= len(fence)
+            and not line[marker.end() :].strip()
+        ):
+            fence = None
+    return headings
 
 
 def _folded(value: str) -> str:
@@ -325,49 +360,139 @@ def _anchor_problem(path: Path, anchor: str) -> str | None:
     return None if anchor in text else "it does not occur in the file"
 
 
+def test_a_hash_line_inside_a_code_fence_is_not_a_heading(tmp_path: Path) -> None:
+    """A Markdown anchor must match a heading, not a `#` comment inside a fenced code block.
+
+    Each fence holds a line that a looser closing rule would take for its end, with a `#` line
+    after it: a marker followed by an info string, a marker of the other character, and a
+    shorter run of the same character. Only the last line of each fence closes it, so the only
+    headings are the first line and the last.
+    """
+    document = tmp_path / "guide.md"
+    document.write_text(
+        "# Guide\n\n"
+        "```bash\n```text\n# Redistribution is not covered here\n```\n\n"
+        "~~~\n````\n# Licensing\n````\n~~~\n\n"
+        "````markdown\n```\n# Attribution\n```\n````\n\n"
+        "## Setup\n",
+        encoding="utf-8",
+    )
+
+    assert _markdown_headings(document.read_text(encoding="utf-8")) == ["Guide", "Setup"]
+    for anchor in ("Redistribution", "Licensing", "Attribution"):
+        assert _anchor_problem(document, anchor) == "no heading contains it", anchor
+    assert _anchor_problem(document, "Setup") is None
+
+
+def _note_node_id_problem(feature_id: str, path: str, name: str) -> str | None:
+    """Why the node id `path::name` in `feature_id`'s notes names no real test, or `None`.
+
+    A `path` that is a file from the repository root is read as it is. Any other is resolved to
+    the files under `tests/` whose path ends with it, and exactly one must: none is a missing
+    file, and more than one is reported rather than guessed at. Measured at D14, the only file
+    name that repeats under `tests/` is `conftest.py`.
+    """
+    root = bfc.ROOT
+    if (root / path).is_file():
+        resolved = [path]
+    else:
+        resolved = sorted(
+            found.relative_to(root).as_posix()
+            for found in (root / "tests").rglob(Path(path).name)
+            if found.relative_to(root).as_posix().endswith(f"/{path}")
+        )
+    written = f"{path}::{name}"
+    if not resolved:
+        return f"{feature_id} notes: {written} (no file under tests/ is or ends with {path})"
+    if len(resolved) > 1:
+        return f"{feature_id} notes: {written} (ambiguous: {resolved} all end with {path})"
+    try:
+        bfc._validate_pytest_acceptance(feature_id, f"{resolved[0]}::{name}")
+    except ValueError as error:
+        return f"{error} (written in the notes as {written})"
+    return None
+
+
+def test_a_shortened_node_id_path_resolves_to_one_file_under_tests_or_is_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_note_node_id_problem` finds the one file a shortened path names, and never guesses."""
+    for directory in ("unit", "integration"):
+        module = tmp_path / "tests" / directory / "test_twice.py"
+        module.parent.mkdir(parents=True, exist_ok=True)
+        module.write_text("def test_here():\n    pass\n", encoding="utf-8")
+    (tmp_path / "tests" / "unit" / "test_once.py").write_text(
+        "def test_here():\n    pass\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(bfc, "ROOT", tmp_path)
+
+    assert _note_node_id_problem("TST-1", "test_once.py", "test_here") is None
+    assert _note_node_id_problem("TST-1", "unit/test_twice.py", "test_here") is None
+    assert _note_node_id_problem("TST-1", "tests/integration/test_twice.py", "test_here") is None
+    gone = _note_node_id_problem("TST-1", "test_once.py", "test_gone")
+    assert gone is not None
+    assert "undefined symbols: [tests/unit/test_once.py::test_gone]" in gone
+    twice = _note_node_id_problem("TST-1", "test_twice.py", "test_here")
+    assert twice is not None
+    assert "ambiguous" in twice
+    absent = _note_node_id_problem("TST-1", "test_absent.py", "test_here")
+    assert absent is not None
+    assert "no file under tests/" in absent
+
+
 def test_every_test_the_notes_name_by_node_id_is_a_real_test() -> None:
-    """A notes cell that names `tests/...py::test_name` names a test that exists.
+    """A notes cell that names a test by its node id names a test that exists.
 
     `_validate_pytest_acceptance` AST-checks the `acceptance_test` of every `pytest` row, and
     the notes were read by nothing: `OA-MODEL-001` went on citing
     `test_no_shipped_path_constructs_the_usage_recording_provider_or_writes_usage_rows` after
     `2f489b0` renamed it to `test_no_shipped_path_calls_a_model_or_records_usage`. This runs
-    the same AST check over every node id written into a notes cell.
+    the same AST check over every `test_*.py::name` and `test_*.py::Class::name` in a notes
+    cell, the path written whole or shortened (`_NOTE_NODE_ID`, `_note_node_id_problem`).
 
-    Blind spot, stated: a bare `test_*` name without its path is not checked. The notes also
-    name test modules by their stem (`test_research_cycle`), so a bare name is not reliably a
-    function, and a renamed test cited that way goes unnoticed here.
+    D13 read only a path written from `tests/` or `web/`, and D13's final review found what
+    that let through: `OA-PANEL-019` cited `test_tushare_adj_factor.py::` and `test_cli.py::`,
+    each followed by a truncated name that nothing defines.
+
+    What this leaves to the two checks below: a `.py::` after a file not named `test_*.py` is a
+    source symbol, read by `test_every_anchor_the_ledger_names_resolves_in_its_file`, and a
+    `test_*` name with no path before it is read by
+    `test_every_bare_test_name_in_the_notes_is_defined_under_tests`. No cell but `notes` is read
+    here.
     """
-    dangling: list[str] = []
-    for row in _rows():
-        for match in _NOTE_NODE_ID.finditer(row["notes"]):
-            try:
-                bfc._validate_pytest_acceptance(row["feature_id"], match.group(1))
-            except ValueError as error:
-                dangling.append(str(error))
+    dangling = [
+        problem
+        for row in _rows()
+        for match in _NOTE_NODE_ID.finditer(row["notes"])
+        if (problem := _note_node_id_problem(row["feature_id"], match.group(1), match.group(2)))
+    ]
 
     assert dangling == [], f"notes name tests that do not exist: {dangling}"
 
 
 def test_every_anchor_the_ledger_names_resolves_in_its_file() -> None:
-    """Every `file#anchor` in the evidence cells and `path.py#symbol` in the notes resolves.
+    """Every `file#anchor` in the evidence cells and every source symbol in the notes resolves.
 
     `_load` AST-checks `path.py#symbol` in the evidence cells and reads nothing after the `#`
     of any other file, so `OA-BOUND-003` cited `docs/data/providers.zh-CN.md#Redistribution`
     -- a word that file does not contain, under headings that are all Chinese -- and `--check`
     exited 0. The rules:
 
-    * a Markdown anchor must be contained in one of the file's headings, compared case-folded
-      with `-` read as a space (`#Non-goals` resolves to `## 13. v1 Non-Goals`);
+    * a Markdown anchor must be contained in one of the file's headings -- an ATX heading, `#`
+      to `######`, outside any fenced code block -- compared case-folded with `-` read as a
+      space (`#Non-goals` resolves to `## 13. v1 Non-Goals`);
     * an anchor into any other non-Python file must occur in it verbatim
       (`deploy/compose.yml#services`);
-    * a `path.py#symbol` in the notes must be declared there by `_module_symbols`, the path
-      read from the repository root and, failing that, from `src/openalpha_cn/` -- the two
-      ways the notes spell a path.
+    * a `path.py#symbol` or `path.py::symbol` in the notes must be declared there by
+      `_module_symbols`, the path read from the repository root and, failing that, from
+      `src/openalpha_cn/` -- the two ways the notes spell a path. A `::` after a `test_*.py`
+      path is a node id, left to the check above.
 
     Blind spots, stated: the Markdown rule accepts any heading that merely contains the
-    anchor, the verbatim rule accepts any occurrence rather than a definition, and a symbol
-    written without a `path.py#` prefix is not read at all.
+    anchor and reads no setext (underlined) heading; the verbatim rule accepts any occurrence
+    rather than a definition; a symbol written without a `path.py#` or `path.py::` before it is
+    not read at all; and a `path.py::symbol` in any cell but the notes -- `feature_description`
+    holds some -- is read by nothing.
     """
     problems: list[str] = []
     for row in _rows():
@@ -381,7 +506,9 @@ def test_every_anchor_the_ledger_names_resolves_in_its_file() -> None:
                 if problem is not None:
                     problems.append(f"{row['feature_id']} {field}: {item} ({problem})")
         for match in _NOTE_SYMBOL.finditer(row["notes"]):
-            relative, symbol = match.group(1), match.group(2)
+            relative, separator, symbol = match.group(1), match.group(2), match.group(3)
+            if separator == "::" and re.fullmatch(r"test_\w*\.py", Path(relative).name):
+                continue  # a node id, which the check above reads
             candidates = (ROOT / relative, ROOT / "src" / "openalpha_cn" / relative)
             found = next((candidate for candidate in candidates if candidate.is_file()), None)
             if found is None:
@@ -447,7 +574,7 @@ def _undefined_bare_test_names() -> set[tuple[str, str]]:
 def test_every_bare_test_name_in_the_notes_is_defined_under_tests() -> None:
     """A `test_*` the notes name without a path is still a function or a module under `tests/`.
 
-    The node-id check above reads only `tests/...py::name`. D13's review counted seven bare
+    The node-id check above reads a name only after `test_*.py::`. D13's review counted seven bare
     names in the notes that no file defines: three were citations gone stale -- `OA-OPS-021` and
     `OA-FACTOR-021` named tests since renamed, `OA-BT-014` a name that never existed -- and four
     are history the notes quote on purpose, pinned in `HISTORICAL_TEST_NAMES`. A name passes
