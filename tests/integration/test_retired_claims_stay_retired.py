@@ -287,7 +287,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         ),
         refuted_by=(
             "sdk.py imports no HTTP client and no part of openalpha_cn.api: every SDK method calls "
-            "a service in process (sdk.py:3-125; run_research at :204-214). cli.py names the REST "
+            "a service in process (sdk.py:3-125; run_research at :196-206). cli.py names the REST "
             "app only as the string `openalpha serve` hands to uvicorn (cli.py:1708-1709). Only "
             "REST callers, the React workbench among them, reach the request-size limit and the "
             "security headers create_app installs (api/app.py)."
@@ -428,10 +428,11 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             re.IGNORECASE,
         ),
         refuted_by=(
-            "scripts/verify_compose_recovery.py::main (:481-529) brings the stack up, builds one "
+            "scripts/verify_compose_recovery.py::main (:481-528) brings the stack up, builds one "
             "evidence batch over REST, runs `compose restart openalpha` and checks that the one "
-            "evidence_id still comes back. It neither removes nor recreates the container, and "
-            "reads no batch, decision or checkpoint."
+            "evidence_id still comes back. Between those steps it neither removes nor recreates "
+            "the container (its `compose down` is the teardown in `finally`, after the check), "
+            "and it reads no batch, decision or checkpoint."
         ),
         retired=(
             "很多开源项目提供 Dockerfile，却没有验证容器删除、重建后任务和状态是否还在。",
