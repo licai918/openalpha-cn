@@ -2713,13 +2713,30 @@ def _scratch_publication_repository(tmp_path: Path) -> Path:
     bytes are not changed, and neither is what it does to the real repository.
 
     The five required metadata files are present, so a scan reports only what a test adds.
-    `core.excludesFile` points at an empty file because a user-level excludes file (git reads
-    `~/.config/git/ignore` when that setting is unset) could otherwise hide a probe from
-    `--exclude-standard` on one machine and not another.
+    Two ways a machine's git setup could hide a probe from `--exclude-standard` -- and so make
+    a refusal fail on one machine and pass on another -- are closed:
+
+    * a template's `info/exclude`: `git init` copies a template directory into the new
+      `.git/` -- the one `--template` names, else `GIT_TEMPLATE_DIR`, else `init.templateDir`,
+      else git's default -- and an `info/exclude` there is read by every scan. `--template`
+      names an empty directory here, which wins over the other three;
+    * a user-level excludes file (`core.excludesFile`, or `~/.config/git/ignore` when that is
+      unset): the repository's own `core.excludesFile` names an empty file, and a repository
+      setting wins over a user one.
+
+    A review measured the first: a template whose `info/exclude` read `*.db` hid `state.db`
+    from the scan, and the `runtime-databases` case failed on its exit code.
+    `test_the_scratch_repository_ignores_a_git_template_and_user_excludes` holds both shut.
     """
     repository = tmp_path / "scratch-repository"
     (repository / "scripts").mkdir(parents=True)
-    subprocess.run(["git", "init", "-q", str(repository)], check=True, capture_output=True)
+    no_template = tmp_path / "no-git-template"
+    no_template.mkdir()
+    subprocess.run(
+        ["git", "init", "-q", f"--template={no_template}", str(repository)],
+        check=True,
+        capture_output=True,
+    )
     no_excludes = tmp_path / "no-excludes"
     no_excludes.write_text("", encoding="utf-8")
     subprocess.run(
@@ -2840,7 +2857,10 @@ _OVERSIZED_BYTES: Final[int] = 50 * 1024 * 1024 + 1
 """One byte over the 50 MiB budget the gate's refusal names ("file exceeds 50 MiB Git budget").
 
 A literal rather than `MAX_GIT_FILE_BYTES + 1`, so raising the budget moves this test's verdict
-instead of moving the probe along with it. The file is written sparse, so it costs no disk.
+instead of moving the probe along with it. The file is extended with `truncate`, which leaves
+it sparse where the filesystem supports that (APFS here, ext4 on CI's Linux legs). On NTFS,
+CI's Windows legs, a file not marked sparse gets its 50 MiB allocated, though never written --
+an earlier note said the probe cost no disk, which is not true there.
 """
 
 _PUBLICATION_REFUSALS: Final[dict[str, dict[str, tuple[bytes | int, str]]]] = {
@@ -2878,8 +2898,9 @@ _PUBLICATION_REFUSALS: Final[dict[str, dict[str, tuple[bytes | int, str]]]] = {
 }
 """What each of `OA-OPS-009`'s four refusals is driven with: file name -> (content, reason).
 
-Content is the bytes to write, or an `int` for a sparse file of that many bytes. The reason is
-the gate's own wording for the blocker it must report for that file.
+Content is the bytes to write, or an `int` for a file of that many bytes extended with
+`truncate` (see `_OVERSIZED_BYTES` for where that is sparse). The reason is the gate's own
+wording for the blocker it must report for that file.
 """
 
 
@@ -2901,7 +2922,7 @@ def test_publication_gate_refuses_secrets_runtime_databases_installers_and_overs
       `storage/migrations.py` writes before a migration;
     * `installers`: `.exe`, `.msi`, `.dmg`, and `.AppImage` spelled as it ships, which the gate
       lowercases before it compares;
-    * `oversized`: a sparse file one byte over 50 MiB.
+    * `oversized`: a file one byte over 50 MiB, sparse where the filesystem supports that.
 
     Measured in D13: deleting any one of those nineteen rules -- a pattern, a suffix or the
     size check -- turns its case red, and so does raising `MAX_GIT_FILE_BYTES` or dropping the
@@ -2913,6 +2934,15 @@ def test_publication_gate_refuses_secrets_runtime_databases_installers_and_overs
     candidate. `OA-BOUND-004` cites this test for its `secrets` case.
     """
     repository = _scratch_publication_repository(tmp_path)
+    expected = _write_refusal_probes(repository, category)
+
+    returncode, report = _publication_scan(repository)
+
+    _assert_refused_exactly(returncode, report, expected)
+
+
+def _write_refusal_probes(repository: Path, category: str) -> list[tuple[str, str]]:
+    """Write one category's probes into `repository`; return the (path, reason) pairs expected."""
     expected: list[tuple[str, str]] = []
     for name, (content, reason) in _PUBLICATION_REFUSALS[category].items():
         path = repository / name
@@ -2922,14 +2952,55 @@ def test_publication_gate_refuses_secrets_runtime_databases_installers_and_overs
         else:
             path.write_bytes(content)
         expected.append((name, reason))
+    return expected
 
-    returncode, report = _publication_scan(repository)
 
+def _assert_refused_exactly(
+    returncode: int, report: dict[str, object], expected: list[tuple[str, str]]
+) -> None:
     assert returncode == 1, report
     assert report["status"] == "blocked"
     blockers = report["blockers"]
     assert isinstance(blockers, list)
     assert sorted((item["path"], item["reason"]) for item in blockers) == sorted(expected)
+
+
+def test_the_scratch_repository_ignores_a_git_template_and_user_excludes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A machine whose git setup would hide the probes still gets the same refusals (Minor-3).
+
+    Both channels a scratch repository can inherit an ignore rule through are made hostile at
+    once, for every git this test and the gate start: `GIT_TEMPLATE_DIR` and `init.templateDir`
+    name a template whose `info/exclude` lists every database probe's suffix, and
+    `GIT_CONFIG_GLOBAL` names a config whose `core.excludesFile` lists them too.
+    `_scratch_publication_repository` has to neutralise both for the `runtime-databases`
+    refusals to come back exactly. Measured before `--template` was passed: the template's
+    `info/exclude` hid all six probes and the gate exited 0.
+    """
+    hiding = "".join(
+        f"*{suffix}\n" for suffix in (".sqlite3", ".sqlite", ".db", ".duckdb", ".parquet", ".bak")
+    )
+    template = tmp_path / "hostile-template"
+    (template / "info").mkdir(parents=True)
+    (template / "info" / "exclude").write_text(hiding, encoding="utf-8")
+    user_excludes = tmp_path / "hostile-user-excludes"
+    user_excludes.write_text(hiding, encoding="utf-8")
+    user_config = tmp_path / "hostile-gitconfig"
+    user_config.write_text(
+        f"[core]\n\texcludesFile = {user_excludes.as_posix()}\n"
+        f"[init]\n\ttemplateDir = {template.as_posix()}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GIT_TEMPLATE_DIR", str(template))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(user_config))
+
+    repository = _scratch_publication_repository(tmp_path)
+    expected = _write_refusal_probes(repository, "runtime-databases")
+
+    returncode, report = _publication_scan(repository)
+
+    _assert_refused_exactly(returncode, report, expected)
 
 
 def test_feature_coverage_artifacts_are_reconciled() -> None:
