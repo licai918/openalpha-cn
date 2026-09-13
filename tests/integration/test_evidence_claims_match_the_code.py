@@ -30,10 +30,18 @@ each diagram literal is read alone (`diagram_strings`). For check 1 each drawing
 are read together (`diagram_units`), because a formula too long for one line of a panel is drawn
 over two of its lines.
 
-**What it cannot see.** `test_the_stated_blind_spots_are_real` measures each of these.
+**What it cannot see.** `test_the_stated_blind_spots_are_real` measures each of these but a library
+that honours the header itself, which no scan of `src/` can show.
 
 - A statement about identity in any shape but the formula -- "evidence_id 由 source_uri 派生" --
-  is not read, and neither is a formula written with full-width parentheses.
+  is not read, and neither is a formula written with full-width parentheses, nor one with a
+  prefix before the function, the way the code builds the ID (`domain/evidence.py:183`):
+  `IDENTITY_FORMULA` wants a function right after the `=`, so neither
+  `evidence_id = "ev_" + sha256(...)` nor `evidence_id = f"ev_{sha256(...)}"` is read.
+- The header spelled without a separator (`RetryAfter`), or with a non-breaking hyphen (U+2011)
+  where `-` goes, is not a mention of it.
+- A tool worded outside `EVIDENCE_TOOL_NAMES` is not a mention of it, such as 只读查询接口 or
+  "lookup 工具".
 - A reader of the header built from pieces (`"Retry" + "-After"`), or a library the code calls
   that honours the header itself, is not seen. And any literal that names the header in a call
   counts as a reader, even one that only logs it.
@@ -46,6 +54,10 @@ over two of its lines.
 - A formula must name the fields by their code names; one written with 主体 or 类型 fails.
 - A mention of the header or the tool fails however it is worded, so a sentence that names
   either only to deny it fails too. Say what the code does instead.
+- A reader of the header through a module constant -- `RETRY_AFTER = "Retry-After"`, then
+  `headers.get(RETRY_AFTER)` -- is not counted, so a true mention of the header would fail.
+- `from openalpha_cn import tools`, then `tools.EvidenceLookupTool`, is not counted as an import
+  of the tool, so a true mention of the tool would fail.
 """
 
 from __future__ import annotations
@@ -552,6 +564,8 @@ def test_the_stated_blind_spots_are_real(tmp_path: Path) -> None:
     unseen_formulas = {
         "prose about identity": "evidence_id 由 source_uri 与 content_hash 派生。",
         "full-width parentheses": "evidence_id = hash（source_uri + content_hash）",
+        "a string prefix joined by +": 'evidence_id = "ev_" + sha256(source_uri + content_hash)',
+        "an f-string, as the code writes it": 'evidence_id = f"ev_{sha256(source_uri)}"',
     }
     read_anyway = {
         label: text
@@ -559,6 +573,20 @@ def test_the_stated_blind_spots_are_real(tmp_path: Path) -> None:
         if _identity_problems([(label, 1, text)], identity)[1]
     }
     assert not read_anyway, f"a stated blind spot of the identity check is now read: {read_anyway}"
+    unseen_mentions = {
+        "RetryAfter": ("Provider 读取 RetryAfter。", _retry_after_mentions),
+        "U+2011": ("Provider 读取 Retry\N{NON-BREAKING HYPHEN}After。", _retry_after_mentions),
+        "只读查询接口": ("Agent 通过只读查询接口获取证据。", _evidence_tool_mentions),
+        "lookup 工具": ("Agent 通过 lookup 工具获取证据。", _evidence_tool_mentions),
+    }
+    mentioned = [
+        label for label, (text, mentions) in unseen_mentions.items() if mentions({"d": text}, {})
+    ]
+    assert not mentioned, f"a stated blind spot of the mention checks is now read: {mentioned}"
+    run_time = 'label = "Retry"\nsvg.text(1, 2, f"{label}-After")\n'
+    assert not _retry_after_mentions({}, {"run time": run_time}), (
+        "a header name a generator computes at run time is now read"
+    )
     package = tmp_path / "openalpha_cn"
     (package / "api").mkdir(parents=True)
     (package / "api" / "pieces.py").write_text(
@@ -585,3 +613,15 @@ def test_the_stated_blind_spots_are_real(tmp_path: Path) -> None:
     }
     passed = [label for label, (text, mentions) in denials.items() if not mentions({"d": text}, {})]
     assert not passed, f"a denial passed, but the docstring says it fails: {passed}"
+    truths = tmp_path / "truths" / "openalpha_cn"
+    (truths / "api").mkdir(parents=True)
+    (truths / "api" / "constant.py").write_text(
+        'RETRY_AFTER = "Retry-After"\nvalue = headers.get(RETRY_AFTER)\n', encoding="utf-8"
+    )
+    (truths / "api" / "package.py").write_text(
+        "from openalpha_cn import tools\n\ntool = tools.EvidenceLookupTool\n", encoding="utf-8"
+    )
+    assert not _retry_after_readers(truths), "a reader through a module constant is now counted"
+    assert not _evidence_tool_importers(truths), (
+        "`from openalpha_cn import tools` is now counted as an import of the tool"
+    )
