@@ -531,11 +531,13 @@ def _root_options(
 def _default_providers() -> list[DataProvider]:
     """Return the built-in providers `doctor` reports on.
 
-    Construction never requires a credential or touches the network: each
-    provider only reads its token lazily, inside `fetch()`. ChainLin's base
-    URL is sourced from `CHAINLIN_API_BASE_URL`; when it is absent or empty
-    the provider is still returned, with `is_configured=False`, instead of
-    ever being pointed at an invented placeholder domain.
+    Construction never requires a credential or touches the network.
+    `TushareProvider` reads `TUSHARE_TOKEN` when it is constructed, but a
+    missing token only fails a fetch; ChainLin reads its key inside
+    `fetch()`, and AKShare takes none. ChainLin's base URL is sourced from
+    `CHAINLIN_API_BASE_URL`; when it is absent or empty the provider is
+    still returned, with `is_configured=False`, instead of ever being
+    pointed at an invented placeholder domain.
     """
     chainlin_base_url = os.environ.get("CHAINLIN_API_BASE_URL", "").strip() or None
     return [
