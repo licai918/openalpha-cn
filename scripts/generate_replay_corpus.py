@@ -1,4 +1,41 @@
-"""Generate the deterministic 60-day / 300-event synthetic replay corpus."""
+"""Generate the deterministic 60-day / 300-event synthetic replay corpus.
+
+`trading_days()` below still uses `weekday() < 5`, and `V2-P1-004` deliberately left it that
+way after building the real calendar (`openalpha_cn.domain.trading_calendar`). The reasoning,
+recorded here so it is not re-litigated by whoever next reads audit finding F49:
+
+- **These are not claims about the Shanghai Stock Exchange.** Every event in this corpus is
+  synthetic (`source_id="synthetic.replay"`, `source_uri="fixture://replay/NNN"`), and the
+  dates exist to give 300 deterministic cases distinct, ordered identities. Nothing here
+  reads a price, and no assertion depends on a session having taken place.
+- **Switching would invalidate the frozen corpus for no correctness gain.** `run_id` is
+  derived from the date (`replay-YYYYMMDD-N`), so a different day set rewrites all 300 ids
+  and every stored artifact keyed by them. The real 2026 calendar closes 2026-02-14 through
+  2026-02-23, which falls inside this corpus's window, so the change would be far from
+  cosmetic -- and `tests/replay/test_frozen_corpus.py`'s 300/300/0 determinism assertion is
+  about *replay*, which the substitution would not make any stronger.
+- **The real cost would be a new dependency for a fixture generator.** Using the calendar
+  here means either a network call at generation time -- in the one script whose entire
+  purpose is determinism -- or a checked-in calendar fixture maintained for a corpus that
+  does not model the exchange in the first place.
+
+What did change is that the approximation is no longer the *only* calendar in the repository,
+which is what F49 actually reported. Anything that needs to know whether the exchange was
+open now asks `TradingCalendar`, and this function's name is the last place `weekday() < 5`
+survives.
+
+**This docstring used to end "`V2-P4-022` will replace this corpus outright with a
+known-signal-to-noise dataset", and that issue landed and did not.** It is a correction rather
+than a deferral: the two corpora answer different questions and neither can stand in for the
+other. What is generated here is 300 agent *events* -- `limit_up`, `disclosure`, `theme` -- with
+no feature column, no label and no model, feeding `tests/replay/test_frozen_corpus.py`'s 300/300/0
+determinism assertion about **replay**. `tests/known_signal_corpus.py` is a labelled feature panel
+whose rank IC is known in closed form, and it fits models. Replacing one with the other would have
+deleted the replay determinism corpus to gain a benchmark nothing on that plane can use, and it
+would have rewritten all 300 `run_id`s for a calendar this corpus still does not model. So
+`weekday() < 5` survives here, and the real calendar is used where a session actually matters --
+which `tests/known_signal_corpus.py` does, through `build_trading_calendar`.
+"""
 
 import json
 from datetime import UTC, date, datetime, time, timedelta

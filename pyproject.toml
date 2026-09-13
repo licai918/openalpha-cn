@@ -24,6 +24,8 @@ dependencies = [
   "duckdb>=1.5,<2",
   "fastapi>=0.135,<1",
   "pydantic>=2.12,<3",
+  "pydantic-settings>=2.15,<3",
+  "python-dotenv>=1.1,<2",
   "pytz>=2025.2",
   "typer>=0.21.0,<1",
   "tzdata>=2025.2",
@@ -46,6 +48,7 @@ akshare = [
 [dependency-groups]
 dev = [
   "httpx2>=2.9.0",
+  "import-linter>=2.13,<3",
   "mypy>=1.19.0,<2",
   "pytest>=9.0.0,<10",
   "pytest-cov>=7.0.0,<8",
@@ -53,8 +56,30 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-addopts = "-ra --strict-config --strict-markers"
+# `-m "not e2e"` is what keeps `uv run pytest` -- the command CI runs -- offline now that
+# `tests/e2e/` exists. Those modules are still collected (an import error in one is still a
+# red build) and every test in them is deselected. A command-line `-m` overrides this one,
+# because pytest keeps the last `-m` it is given, so `uv run pytest -m e2e tests/e2e` is the
+# way in; `OPENALPHA_E2E=1` is then a second switch the marker alone cannot flip, and
+# `tests/conftest.py::_refuse_outbound_connections` is the third and only measured one.
+# See `tests/e2e/conftest.py` for the whole arrangement and `tests/unit/test_offline_suite.py`
+# for the tests that pin it.
+addopts = "-ra --strict-config --strict-markers -m \"not e2e\""
 testpaths = ["tests"]
+# Keep a test's `tmp_path` only when that test failed -- which is the only case anyone reads
+# one. Measured, not tuned: this suite writes **4.9 GB** of `tmp_path` per full run (3,790
+# tests; no single test is large, the biggest is 30 MB and the median is far under 1 MB), and
+# pytest's default `retention_policy = "all"` keeps every passing test's directory too. The
+# default `retention_count = 3` bounds that at roughly 15 GB only for runs that *exit* --
+# a run killed by SIGTERM (parallel suites competing for CPU) or by the OOM/ENOSPC killer
+# never prunes, and its numbered directory is orphaned. This machine reached **106 GB** of
+# `pytest-of-<user>/` that way and ran the volume to zero bytes free, which stops being a
+# test-suite problem the moment it happens in CI or on a research box mid-backtest.
+# `"failed"` makes a green run leave nothing behind, so an orphan costs kilobytes.
+tmp_path_retention_policy = "failed"
+markers = [
+  "e2e: reaches the real Tushare endpoint with a real token. Deselected by default.",
+]
 
 [tool.ruff]
 line-length = 100
@@ -62,15 +87,36 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+# RUF001/2/3 flag characters that *look* like ASCII. The product renders Chinese, so a test
+# or docstring quoting what a user actually sees will carry fullwidth punctuation -- and
+# rewriting the quote to satisfy the linter would make it a paraphrase of the output rather
+# than the output. These four are the ones that appear inside quoted product text; anything
+# else confusable still gets flagged.
+allowed-confusables = ["：", "，", "（", "）"]
 
 [tool.mypy]
 python_version = "3.11"
 strict = true
-packages = ["openalpha_cn"]
+# `files`, not `packages`. Under this repository's `src/` layout a bare `uv run mypy` with
+# `packages = ["openalpha_cn"]` never reads `src/` -- it resolves the *installed* distribution
+# in `.venv`, finds no `py.typed` marker, and exits 2 with "Package 'openalpha_cn' cannot be
+# type checked". CI stayed green because it never used this config: its step spells
+# `uv run mypy src scripts`, and an explicit path list overrides `files`/`packages` entirely.
+# So the strict type gate was live in CI and dead in the obvious command. These two paths are
+# now the same set, and `test_repository_assets.py::
+# test_a_bare_mypy_checks_exactly_what_ci_passes_on_the_command_line` holds them equal.
+files = ["src", "scripts"]
 
 [[tool.mypy.overrides]]
-# Optional AKShare transitive stubs may use the executing interpreter's syntax.
-# Keep the core checked against Python 3.11 without type-checking third-party internals.
+# Optional third-party stubs may use the *executing* interpreter's syntax, while `python_version`
+# above keeps the core checked against 3.11. `follow_imports = "skip"` was written for exactly
+# that, and on Python 3.12 it did not hold: `uv sync` installs `numpy==2.4.6`, whose bundled
+# `numpy/__init__.pyi` spells a PEP 695 `type` statement, and mypy exited 2 with
+# "Type statement is only supported in Python 3.12 and greater  [syntax]" before checking
+# anything of ours. `follow_imports` is not honoured for `.pyi` files unless
+# `follow_imports_for_stubs` says so -- so the exemption named the package and missed the only
+# file the package types itself with. Both are needed, and `numpy` is the one that proves it:
+# the failure is invisible on 3.11, which resolves a numpy whose stub predates the syntax.
 module = [
   "akshare",
   "akshare.*",
@@ -82,6 +128,7 @@ module = [
   "pandas.*",
 ]
 follow_imports = "skip"
+follow_imports_for_stubs = true
 ignore_missing_imports = true
 
 [tool.coverage.run]
@@ -91,3 +138,356 @@ source = ["openalpha_cn"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
+fail_under = 80
+
+# ADR-0001 guardrail: "Domain and provider contracts must not import SQLite or DuckDB
+# implementation types." Any contract below may carry a hand-maintained, shrink-only
+# baseline of pre-existing violations as an `ignore_imports` list; see
+# `docs/architecture/import-layering-baseline.toml` for the human-readable ledger (module,
+# banned import, and the P0.B issue that will close it) and
+# `tests/unit/test_import_layering.py` for the tests that pin this baseline and prove the
+# gate is live. Do not add new `ignore_imports` entries — a new violation must be fixed,
+# not exempted. The baseline is empty today (V2-P0B-012 closed the last 5 entries, all on
+# `storage-no-upward-deps`); no contract below currently declares `ignore_imports` at all.
+[tool.importlinter]
+root_package = "openalpha_cn"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+id = "domain-purity"
+name = "domain imports no numeric/infra library and no sibling openalpha_cn subpackage"
+type = "forbidden"
+source_modules = ["openalpha_cn.domain"]
+forbidden_modules = [
+  "numpy",
+  "pandas",
+  "scipy",
+  "sklearn",
+  "duckdb",
+  "sqlite3",
+  "openalpha_cn.agents",
+  "openalpha_cn.api",
+  "openalpha_cn.backtest",
+  "openalpha_cn.decisions",
+  "openalpha_cn.evidence",
+  "openalpha_cn.models",
+  "openalpha_cn.product",
+  "openalpha_cn.providers",
+  "openalpha_cn.runtime",
+  "openalpha_cn.storage",
+  "openalpha_cn.tools",
+]
+
+[[tool.importlinter.contracts]]
+id = "storage-no-upward-deps"
+name = "storage does not depend upward on agents, runtime, product, or backtest"
+type = "forbidden"
+source_modules = ["openalpha_cn.storage"]
+forbidden_modules = [
+  "openalpha_cn.agents",
+  "openalpha_cn.runtime",
+  "openalpha_cn.product",
+  "openalpha_cn.backtest",
+]
+# V2-P0B-012 fixed all 5 baseline entries: storage/memory.py, storage/batch.py,
+# storage/portfolio.py, storage/recovery.py, and storage/product.py each imported one data
+# contract from above purely to serialize/deserialize it. Those contracts moved to
+# openalpha_cn.domain (four of them) or, for BatchResearchTask/BatchProgressEvent (durable
+# orchestration state, not a domain concept), a new neutral top-level module,
+# openalpha_cn.batch_contracts — see that module's docstring. No exemptions remain: every
+# storage/*.py file has zero direct edges into agents/runtime/product/backtest
+# (tests/unit/test_import_layering.py proves this with grimp directly).
+#
+# V2-P0B-012's first version of this fix also added `allow_indirect_imports = true` here, to
+# tolerate a real two-hop chain, storage.batch -> batch_contracts -> runtime.contracts, that
+# batch_contracts.py needed for ResearchRunRequest. A Critical review rejected that:
+# allow_indirect_imports scopes this contract to a direct-edges-only check instead of
+# import-linter's default full transitive reachability, and a probe proved the gap was real
+# -- a neutral top-level module importing a behavioural product class, reached in turn from a
+# module under storage/, passed the relaxed contract (lint-imports reported it KEPT) while
+# grimp's full reachability check saw the chain plainly (see
+# tests/unit/test_import_layering.py::
+# test_storage_no_upward_deps_contract_rejects_indirect_leak_via_neutral_module,
+# which reproduces that exact probe against this contract). The fix was not to widen the
+# contract but to remove the chain: ResearchRunRequest moved into
+# openalpha_cn.domain.run_request (runtime/contracts.py re-exports it unchanged for existing
+# callers), so openalpha_cn.batch_contracts now depends only on openalpha_cn.domain.* and this
+# contract runs the default full-transitive-reachability check -- no allow_indirect_imports
+# escape hatch.
+
+[[tool.importlinter.contracts]]
+id = "providers-no-infra-imports"
+name = "providers do not import duckdb or sqlite3"
+type = "forbidden"
+source_modules = ["openalpha_cn.providers"]
+forbidden_modules = ["duckdb", "sqlite3"]
+# V2-P0B-011 fixed the sole baseline entry (providers.file -> duckdb); no exemptions remain.
+
+[[tool.importlinter.contracts]]
+id = "models-no-infra-imports"
+name = "models do not import duckdb or sqlite3"
+type = "forbidden"
+source_modules = ["openalpha_cn.models"]
+forbidden_modules = ["duckdb", "sqlite3"]
+# V2-P0B-011 fixed the sole baseline entry (models.governance -> sqlite3); no exemptions remain.
+
+# The three contracts below were added by the P3 technical acceptance, which measured that
+# `openalpha_cn.backtest` appeared in the four contracts above only as a forbidden *target* and
+# never as a source. Eight of P3's nine new modules were in no contract's source set at all, and
+# a probe proved the consequence: a new `backtest/_probe.py` importing duckdb, `panel.store` and
+# `runtime.composition`, plus a `panel.store` import added to `factor_ic.py`, left lint-imports at
+# "4 kept, 0 broken", ruff clean, mypy clean and the layering tests at 39 passed. The sentence
+# "backtest may not import panel or storage" appears five times in P3 source, once inside a
+# KNOWN_EXPERIMENT_LIMITATIONS entry -- load-bearing, and until now enforced by nothing.
+# `tests/unit/test_import_layering.py` pins each contract's source list against the directory and
+# drives a probe file through each one, so a thirteenth `backtest/*.py` cannot arrive
+# unguarded. `V2-P4-004`'s `cross_section.py` was the tenth, `V2-P4-005`'s
+# `candidate_ranking.py` the eleventh and `V2-P4-023`'s `shortlist_gate.py` is the twelfth; all
+# three joined these lists on arrival, which is the property that test exists to create.
+#
+# `V2-P4-012`'s `feature_matrix.py` joined the whole-package contract's *forbidden* list instead,
+# and the direction is the point: it is a top-level module on the panel plane, reading stored
+# factor tiers and the security registry through `panel_factors`, `panel_neutralization` and
+# `panel_ingest`, so a `backtest/` study reaching it would reach DuckDB through `panel/store.py`.
+# `V2-P4-013`'s walk-forward split lives under `backtest/` and consumes what that module
+# *produces* -- a `FeatureCrossSection`, which is in `domain/` -- which is the seam
+# `shortlist_view.py` and `ComponentCrossSection` already stand on: the panel-plane adapter reads
+# the store and hands a study a domain contract, and the study imports neither the adapter nor the
+# store.
+
+[[tool.importlinter.contracts]]
+id = "backtest-no-numeric-stack-or-panel-plane"
+name = "backtest imports no numeric stack, nothing on the panel plane and no face"
+type = "forbidden"
+source_modules = ["openalpha_cn.backtest"]
+forbidden_modules = [
+  "pandas",
+  "scipy",
+  "sklearn",
+  "duckdb",
+  "openalpha_cn.panel",
+  "openalpha_cn.panel_doctor",
+  "openalpha_cn.panel_factors",
+  "openalpha_cn.panel_gate",
+  "openalpha_cn.panel_ingest",
+  "openalpha_cn.panel_neutralization",
+  "openalpha_cn.panel_view",
+  "openalpha_cn.factor_view",
+  "openalpha_cn.feature_matrix",
+  "openalpha_cn.providers",
+  "openalpha_cn.api",
+  "openalpha_cn.product",
+  "openalpha_cn.models",
+  "openalpha_cn.evidence",
+  "openalpha_cn.cli",
+  "openalpha_cn.sdk",
+  "openalpha_cn.shortlist_view",
+  "openalpha_cn.model_view",
+]
+# Whole-package source, no exemptions: nothing under backtest/ reaches any of these today, on
+# full transitive reachability. ADR-0003's decision is that this repository ships no numerical
+# stack, and `backtest/` is where the array-shaped work lives, so this is the contract that makes
+# that decision structural rather than a series of measurements. `numpy` is deliberately NOT here
+# and is in `backtest-studies-touch-no-store` instead: `backtest/replay.py` reaches
+# `runtime/seeding.py`, whose numpy import is a real, guarded optional-determinism hook, so a
+# whole-package numpy ban would be broken on arrival and would have to be relaxed to be added.
+
+[[tool.importlinter.contracts]]
+id = "backtest-studies-touch-no-store"
+name = "every backtest module except the replay harness reaches no store and no numpy"
+type = "forbidden"
+source_modules = [
+  "openalpha_cn.backtest.alpha_baseline",
+  "openalpha_cn.backtest.alpha_model",
+  "openalpha_cn.backtest.alpha_tree",
+  "openalpha_cn.backtest.candidate_ranking",
+  "openalpha_cn.backtest.cross_section",
+  "openalpha_cn.backtest.event_study",
+  "openalpha_cn.backtest.execution",
+  "openalpha_cn.backtest.factor_experiment",
+  "openalpha_cn.backtest.factor_ic",
+  "openalpha_cn.backtest.factor_portfolio",
+  "openalpha_cn.backtest.factor_redundancy",
+  "openalpha_cn.backtest.factor_tradeability",
+  "openalpha_cn.backtest.multi_day",
+  "openalpha_cn.backtest.multiple_testing",
+  "openalpha_cn.backtest.outcome_statistics",
+  "openalpha_cn.backtest.paper",
+  "openalpha_cn.backtest.portfolio",
+  "openalpha_cn.backtest.portfolio_policy",
+  "openalpha_cn.backtest.segmented_reporting",
+  "openalpha_cn.backtest.shortlist_gate",
+  "openalpha_cn.backtest.turnover_variants",
+  "openalpha_cn.backtest.validation",
+  "openalpha_cn.backtest.walk_forward",
+]
+forbidden_modules = [
+  "numpy",
+  "sqlite3",
+  "openalpha_cn.storage",
+  "openalpha_cn.agents",
+  "openalpha_cn.decisions",
+]
+# `backtest/factor_experiment.py`'s KNOWN_EXPERIMENT_LIMITATIONS carries
+# `nothing_in_this_module_stores_an_artifact_or_can_be_made_to`; this contract is what makes that
+# sentence true, and the acceptance probe that added
+# `from openalpha_cn.storage.factor_experiments import FileExperimentStore` to that module now
+# fails here. `factor_view.ExperimentDocumentStore` is a Protocol declared beside the consumer
+# exactly so `storage/factor_experiments.py` satisfies it with no import in either direction, and
+# this contract is what keeps that design from being quietly abandoned.
+#
+# Two exemptions, and neither is a package: `openalpha_cn.backtest` itself (the `__init__`
+# re-exports `ReplayRunner`) and `openalpha_cn.backtest.replay`, which composes a real
+# `ResearchEngine` over `SQLiteRunRepository` and `SQLiteRecoveryStore` because replaying a run is
+# what it does. Both are named in
+# `tests/unit/test_import_layering.py::BACKTEST_MODULES_EXEMPT_FROM_THE_STORE_CONTRACT`, which
+# holds this source list plus those two against the real directory in both directions.
+
+[[tool.importlinter.contracts]]
+id = "backtest-studies-reach-no-composition-root"
+name = "every backtest module except the replay harness and the outcome validator reaches no composition root"
+type = "forbidden"
+source_modules = [
+  "openalpha_cn.backtest.alpha_baseline",
+  "openalpha_cn.backtest.alpha_model",
+  "openalpha_cn.backtest.alpha_tree",
+  "openalpha_cn.backtest.candidate_ranking",
+  "openalpha_cn.backtest.cross_section",
+  "openalpha_cn.backtest.event_study",
+  "openalpha_cn.backtest.execution",
+  "openalpha_cn.backtest.factor_experiment",
+  "openalpha_cn.backtest.factor_ic",
+  "openalpha_cn.backtest.factor_portfolio",
+  "openalpha_cn.backtest.factor_redundancy",
+  "openalpha_cn.backtest.factor_tradeability",
+  "openalpha_cn.backtest.multi_day",
+  "openalpha_cn.backtest.multiple_testing",
+  "openalpha_cn.backtest.outcome_statistics",
+  "openalpha_cn.backtest.paper",
+  "openalpha_cn.backtest.portfolio",
+  "openalpha_cn.backtest.portfolio_policy",
+  "openalpha_cn.backtest.segmented_reporting",
+  "openalpha_cn.backtest.shortlist_gate",
+  "openalpha_cn.backtest.turnover_variants",
+  "openalpha_cn.backtest.walk_forward",
+]
+forbidden_modules = ["openalpha_cn.runtime"]
+# Split from the contract above rather than folded into it because the exemption is one module
+# wider and the two exemptions are not the same kind. `backtest/validation.py` imports
+# `runtime.contracts.ResearchRunResult`, a pydantic result model, and is already one of the four
+# CONTRACT_ONLY_CONSUMERS that `test_import_layering.py` proves never reach `runtime.engine` or
+# the storage modules it owns. Folding the two lists together would have meant either exempting
+# `validation.py` from the store contract it passes, or making `runtime` legal for all ten study
+# modules on the strength of one module's data-contract import.
+
+[[tool.importlinter.contracts]]
+id = "ranking-creates-no-portfolio-order"
+name = "the candidate ranking contracts reach no module that declares or simulates a portfolio order"
+type = "forbidden"
+source_modules = [
+  "openalpha_cn.backtest.candidate_ranking",
+  "openalpha_cn.backtest.shortlist_gate",
+]
+forbidden_modules = [
+  "openalpha_cn.domain.portfolio",
+  "openalpha_cn.backtest.portfolio",
+  "openalpha_cn.backtest.multi_day",
+]
+# V2-P4-005. Decision D16's `绝不直接创建组合订单` is the one guarantee the three contracts above
+# do NOT already give this module. They forbid `storage`, `runtime`, `agents` and `decisions`, so
+# it cannot persist an order and cannot reach the engine that would place one -- which is what
+# `V2-P4-004` meant by "it creates no order and cannot, because backtest/ reaches no store". That
+# sentence is true about storing and not about creating: `domain/portfolio.py` declares
+# `PortfolioOrder` and is a plain data module every `backtest/` study may import, and
+# `backtest/portfolio.py`'s `PortfolioSimulator` and `backtest/multi_day.py`'s runner sit in the
+# same package. Those three are the whole of where a **portfolio** order -- a `PortfolioOrder` --
+# is declared or simulated.
+#
+# `V2-P4-035` narrowed the `name` above to say `portfolio order`, because it said `an order` and
+# that was false. `openalpha_cn.backtest.execution` declares `ExecutionRequest`, whose own
+# docstring is "A simplified cash-equity order intent", and simulates a fill in
+# `AShareExecutionPolicy.execute` ("Simulate a close-price fill after enforcing explicit
+# constraints"). It is **not** forbidden here and **both source modules reach it today**, by
+# `shortlist_gate -> candidate_ranking -> cross_section -> execution`. That is deliberate and
+# cannot be undone: `backtest/cross_section.py` imports the execution policy to decide
+# tradeability, which is `V2-P4-004`'s hard tradeability filter and a shipped feature, so adding
+# `openalpha_cn.backtest.execution` to the list below would have to break a feature to become
+# true -- the same objection that kept this contract out of `backtest-studies-touch-no-store`.
+#
+# So what this contract guarantees is exactly: neither source can **statically import**
+# `PortfolioOrder`, the `PortfolioSimulator`, or the multi-day runner. Together with the two
+# study contracts it also cannot persist an order or reach the engine that would place one.
+#
+# "Statically import" and not "construct", because `V2-P4-047` measured the difference:
+# `importlib.import_module("openalpha_cn." + "domain." + "portfolio")` inside
+# `candidate_ranking.py` built a real `PortfolioOrder` with `lint-imports` at 8 kept / 0 broken.
+# `lint-imports` reads an import graph, so a name assembled at run time is outside what any
+# contract here can see. The narrower sentence is the true one; the ban itself is unchanged.
+#
+# **What this contract does not guarantee** is that a source declares or fills no
+# *single-security* order intent: `ExecutionRequest` is reachable, and a function added to either
+# source could build one and call `.execute(...)` on it without tripping any `lint-imports`
+# contract. That is a real residual gap, stated rather than papered over.
+#
+# What guards it instead is `tests/unit/backtest/test_ranking_sources_fill_no_order.py`, and it
+# is **behavioural** because `V2-P4-047` proved nothing else can be. `V2-P4-035` guarded it with
+# a file-scoped pin on each source's own import list, and that pin was inoperative twice over:
+# it filtered with `line.startswith(("import ", "from "))`, so an indented function-local import
+# of the fill policy was invisible to it while still creating a real `grimp` edge; and, worse,
+# no new import is needed at all -- `backtest/cross_section.py` re-exports `AShareExecutionPolicy`,
+# `ExecutionRequest` and `MarketBar`, and is already first on that allowlist, so adding the three
+# names to the existing `from openalpha_cn.backtest.cross_section import (...)` block leaves every
+# pinned line byte-identical and **adds no edge to the import graph at all**. Both forms filled
+# real orders from both sources at 8 kept / 0 broken. Because the second form adds no edge, no
+# `lint-imports` contract and no `grimp` assertion can ever refuse it, so the replacement is
+# behavioural, and it is backed by identity- and bytecode-level checks that also catch code the
+# pipeline never runs. The two import-list pins remain, now indentation-blind, but they document
+# each module's dependencies rather than carrying the order claim.
+#
+# `V2-P4-053`/`054`/`055` then measured that the first behavioural version claimed more than it
+# checked, and the replacement is narrower on purpose. It asked each fill which files were on
+# **its own thread's** stack, which one `ThreadPoolExecutor` hop defeated; it wrapped
+# `AShareExecutionPolicy.execute` only, which a private subclass's override shadowed; it
+# discovered the machinery with a `not name.startswith("_")` filter, which dropped that subclass
+# from every ban set; its sentinel counted calls rather than fills, so a fixture of suspended bars
+# left it green on 12 calls and 0 fills; and it installed its hooks after collection had already
+# imported both modules, so a fill at **import time** was recorded nowhere. All five are closed
+# and each is pinned by a test that takes the failing branch on every run. What the guard's own
+# docstring now states, rather than claims away, is what still gets past it: a fill in a
+# **subprocess** is in another interpreter and is seen by nothing here, measured; and a callable
+# carrying no code object of the guarded file -- a `functools.partial` over a helper declared
+# elsewhere -- handed at import time to a module the pipeline later calls is seen by neither
+# attribution axis, which needed a callback registry added to `cross_section.py` to arrange
+# because this package has none.
+#
+# `tests/unit/test_import_layering.py::
+# test_every_order_intent_is_forbidden_to_the_ranking_or_disclosed_as_reachable` is what keeps
+# this comment and the list below from drifting apart again: it discovers every order intent in
+# the tree off the AST and requires each to be either forbidden and unreachable, or named in
+# this comment and measurably reachable. `V2-P4-048` fixed two defects in that audit -- it kept
+# its census in a dict keyed by module, so a second intent in an already-listed file was dropped
+# and the verdict depended on where in the source file it sat, and its matcher saw only
+# `ClassDef` nodes with literal docstrings under `*.py`, so seven order intents added to
+# `cross_section.py` (a function, a `.pyi`, an assigned `__doc__`, an f-string docstring, and
+# three synonyms) left it reporting a match. The census is now a set of (module, qualified name)
+# pairs and reads functions, `.pyi` files, f-string docstrings and assigned `__doc__`s; its claim
+# is narrowed to the exact words "order intent", which is a naming convention rather than a
+# detector for the concept, because a synonym hunt in a repository this heavily documented cannot
+# be falsified. The concept is bound behaviourally at the two sources instead.
+#
+# A fourth contract rather than three names added to `backtest-studies-touch-no-store`, because
+# that contract's sources include `backtest/portfolio.py` itself -- the simulator -- so folding
+# would have had to be relaxed to be added, and a contract relaxed on arrival is not one.
+# `tests/unit/backtest/test_candidate_ranking.py::
+# test_the_ranking_contract_cannot_reach_the_three_modules_that_make_an_order` drives a probe
+# through this in both directions: the real module passes, and the same file with one
+# `PortfolioOrder` import added fails.
+#
+# `V2-P4-023` widened the source list to `backtest/shortlist_gate.py` and left the `id` alone,
+# because `tests/unit/backtest/test_candidate_ranking.py` reads that `id` by name. The gate is
+# the module that decides whether a candidate list may be published at all, so a gate able to
+# construct a `PortfolioOrder` would be one module in which "this list was refused" and "an
+# order was made from it" could both be true -- the same gap this contract was added to close
+# for the ranking itself, one step further down the same path. `tests/unit/backtest/
+# test_shortlist_gate.py::test_the_gate_cannot_reach_the_three_modules_that_make_an_order`
+# drives the same both-directions probe over the new source.

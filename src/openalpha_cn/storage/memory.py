@@ -4,13 +4,28 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 
-from openalpha_cn.runtime.memory import MemoryEntry
+from openalpha_cn.domain.memory import MEMORY_ENTRY_VERSIONS, MemoryEntry
+from openalpha_cn.domain.versioning import read_versioned
+from openalpha_cn.storage.connection import open_state_connection
 
 
 class SQLiteResearchMemory:
     """Persist compact decision-linked memory across processes."""
 
     def __init__(self, path: Path) -> None:
+        """Open (or create) the database at `path` and ensure `research_memory` exists.
+
+        The four lines through the WAL pragma are byte-identical to
+        `SQLiteBatchTaskStore.__init__` (`storage/batch.py:91`) -- an AST duplicate sweep
+        flagged the pair (`V2-P5-071`). See that method's docstring for the full reasoning;
+        short version: this is this package's shared store-opening idiom (eight of its ten
+        `state.sqlite3` stores use it), already reasoned about once in `storage/connection.py`
+        (task 21) and deliberately left un-abstracted beyond `open_state_connection()`. What
+        follows immediately -- one table, one index, for a flat, append-once ledger with its
+        own conflict rule -- shares no shape with `SQLiteBatchTaskStore`'s three tables and
+        split-item schema, so there is nothing here for a base class to lift beyond the
+        boilerplate that decision already declined to lift.
+        """
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as connection, connection:
@@ -33,7 +48,7 @@ class SQLiteResearchMemory:
             )
 
     def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.path, timeout=10)
+        return open_state_connection(self.path)
 
     def append(self, entry: MemoryEntry) -> None:
         """Append once per decision ID and reject conflicting replacement."""
@@ -61,7 +76,7 @@ class SQLiteResearchMemory:
                 "SELECT payload FROM research_memory WHERE decision_id = ?",
                 (decision_id,),
             ).fetchone()
-        return None if row is None else MemoryEntry.model_validate_json(row[0])
+        return None if row is None else read_versioned(MEMORY_ENTRY_VERSIONS, row[0])
 
     def list(self, *, subject: str) -> tuple[MemoryEntry, ...]:
         """Return durable subject memory in append order."""
@@ -75,4 +90,4 @@ class SQLiteResearchMemory:
                 """,
                 (subject,),
             ).fetchall()
-        return tuple(MemoryEntry.model_validate_json(row[0]) for row in rows)
+        return tuple(read_versioned(MEMORY_ENTRY_VERSIONS, row[0]) for row in rows)

@@ -289,7 +289,11 @@ class Svg:
         self.navigation()
         self.raw("</svg>")
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        (OUTPUT_DIR / filename).write_text("\n".join(self.parts) + "\n", encoding="utf-8")
+        # `newline="\n"`: text mode would otherwise write "\r\n" on Windows, and the committed
+        # SVGs are LF everywhere (`.gitattributes`), so the sync test would fail there.
+        (OUTPUT_DIR / filename).write_text(
+            "\n".join(self.parts) + "\n", encoding="utf-8", newline="\n"
+        )
 
 
 def overview() -> None:
@@ -307,16 +311,16 @@ def overview() -> None:
         232,
         275,
         438,
-        title="A 股证据入口",
+        title="A 股证据输入",
         label="DATA PLANE",
         color=CYAN,
         lines=(
-            "链邻数据接口 API",
-            "已实现 · 统一替代入口",
-            "用户授权实时 A 股数据",
             "用户自有 CSV / JSONL / Parquet",
             "Provider 合同 · 鉴权 · 限流",
             "来源 / 许可 / 修订语义",
+            "链邻数据接口 API",
+            "客户端合同 · 仅 doctor 使用",
+            "证据与面板构建不调用它",
         ),
     )
     svg.pill(88, 624, 220, "输入不等于证据", color=CYAN)
@@ -342,7 +346,7 @@ def overview() -> None:
             "02",
             "研究编排",
             "ResearchRunResult",
-            ("持久批量队列 · 1–32 并发", "ResearchEngine.run_cycle"),
+            ("持久批量队列 · 1–8 并发", "ResearchEngine.run_cycle"),
             VIOLET,
         ),
         (
@@ -391,7 +395,7 @@ def overview() -> None:
         lines=(
             "RunManifest / DecisionLedger",
             "Checkpoint · SQLite WAL",
-            "Retry / Recovery · 成本账本",
+            "Retry / Recovery · 逐项终态",
             "证据不足时显式 abstain",
             "API / SDK / CLI / Web 同契约",
         ),
@@ -414,7 +418,7 @@ def evidence() -> None:
         index=2,
         eyebrow="证据平面",
         title="先证明“当时可知”，再讨论模型是否聪明",
-        subtitle="所有研究结论先经过授权、限流、四时钟与内容寻址，得到可追溯、可回放的 EvidenceSnapshot。",
+        subtitle="Provider 批次与序列化证据都先经过四时钟与内容寻址，才成为可追溯、可回放的 EvidenceSnapshot。",
         accent=CYAN,
     )
     svg.legend()
@@ -425,9 +429,9 @@ def evidence() -> None:
         250,
         190,
         title="链邻数据接口 API",
-        label="LICENSED DATA",
+        label="CLIENT CONTRACT",
         color=CYAN,
-        lines=("已实现 · 统一替代入口", "Bearer 鉴权 · 客户端限流", "时效 / 精度以链邻服务为准"),
+        lines=("客户端合同 · 仅 doctor 使用", "Bearer 鉴权 · 客户端限流", "证据与面板构建不调用它"),
     )
     svg.panel(
         64,
@@ -453,14 +457,16 @@ def evidence() -> None:
         lines=(
             "ProviderMetadata / ProviderBatch",
             "认证 · 限流 · 新鲜度",
-            "错误分类与 Retry-After",
+            "五类失败分类",
             "PIT 可见性与修订语义",
             "涨停 / 炸板 / 连板 / 题材",
             "催化 / 公告 / 资金语义",
             "统一 schema 后才可进入研究",
         ),
     )
-    svg.arrow(314, 327, 348, 327, color=CYAN)
+    # Dashed, as the legend draws explicit composition: no shipped path takes ChainLin's
+    # batches into the gate (only `doctor` constructs the client); a caller's own code may.
+    svg.arrow(314, 327, 348, 327, color=CYAN, dashed=True)
     svg.arrow(314, 514, 348, 514, color=BLUE)
 
     svg.section_label(670, 214, "C", "四时钟 PIT", CYAN)
@@ -477,16 +483,21 @@ def evidence() -> None:
         svg.text(x + 80, 270, title, css="cardTitle", color=TEXT, anchor="middle")
         svg.text(x + 80, 298, code, css="mono", color=CYAN, anchor="middle")
 
+    # The identity formula is `EvidenceSnapshot.evidence_id` (`domain/evidence.py`): a hash of
+    # these five joined with "|", and nothing else -- `source_uri` does not move it. It takes two
+    # lines, so both lower panels are 14 taller than their four-line height and the query band
+    # below them moved down by as much.
     svg.panel(
         658,
         350,
         454,
-        200,
+        214,
         title="EvidenceSnapshot",
         label="CONTENT-ADDRESSED ARTIFACT",
         color=CYAN,
         lines=(
-            "evidence_id = hash(source_uri + content_hash)",
+            "evidence_id = hash(subject | kind | source_id |",
+            "available_time | content_hash)",
             "可见时点 · 哈希 · 来源 · 许可 · 修订",
             "A 股事件语义与原始载荷建立绑定",
             "下游只接收决策时刻已经可知的 evidence_id",
@@ -497,26 +508,26 @@ def evidence() -> None:
         1142,
         350,
         214,
-        200,
+        214,
         title="证据存储",
         label="IMMUTABLE STORE",
         color=BLUE,
-        lines=("Parquet 分区", "DuckDB PIT 查询", "只读证据工具", "内容哈希复核"),
+        lines=("Parquet 分区", "DuckDB PIT 查询", "只追加 · 不改写", "内容哈希复核"),
     )
     svg.arrow(1112, 450, 1142, 450, color=BLUE)
 
     svg.raw(
-        f'  <rect x="658" y="578" width="698" height="92" rx="20" fill="{PANEL_ALT}" stroke="{LINE}" />'
+        f'  <rect x="658" y="592" width="698" height="92" rx="20" fill="{PANEL_ALT}" stroke="{LINE}" />'
     )
-    svg.text(684, 608, "QUERY CONTRACT", css="micro", color=BLUE)
+    svg.text(684, 622, "QUERY CONTRACT", css="micro", color=BLUE)
     svg.text(
         684,
-        646,
+        660,
         "as_of + symbol / event_type → 可见证据集合 → EvidenceSnapshot",
         css="cardTitle",
         color=TEXT,
     )
-    svg.pill(1163, 588, 168, "交付研判脑区 →", color=CYAN)
+    svg.pill(1163, 602, 168, "交付研判脑区 →", color=CYAN)
     svg.finish("openalpha-brain-02-evidence.svg")
 
 
@@ -546,7 +557,7 @@ def agents() -> None:
         244,
         198,
         title="持久批量任务中心",
-        label="1–32 CONCURRENCY",
+        label="1–8 CONCURRENCY",
         color=VIOLET,
         lines=(
             "进度事件 · 取消 · 重试",
@@ -567,7 +578,7 @@ def agents() -> None:
         label="ORCHESTRATION KERNEL",
         color=VIOLET,
         lines=(
-            "EvidenceLookupTool 只读查询",
+            "读取请求内 as_of 可见证据",
             "AgentRouter 记录 routing_path",
             "按证据类型选择专业角色",
             "汇总 SignalFrame",
@@ -614,7 +625,7 @@ def agents() -> None:
             "evidence_ids / signal_ids / risk_flags",
             "确认条件 / 失效条件",
             "watch / avoid / abstain",
-            "agent_outputs / routing_path / 成本",
+            "agent_outputs / routing_path / 版本",
         ),
     )
     svg.path("M962 287H980V340H1000", color=AMBER)
@@ -628,7 +639,10 @@ def agents() -> None:
         title="模型治理边界",
         label="OPTIONAL MODEL ENHANCEMENT",
         color=CORAL,
-        lines=("能力注册 · Schema 校验 · 408/429/5xx 重试", "Token / 尝试次数 / 估算成本持久化"),
+        lines=(
+            "需代码接入 · Schema 校验 · 408/429/5xx 重试",
+            "Token / 尝试次数账本 · 出厂路径不调用模型",
+        ),
     )
     svg.finish("openalpha-brain-03-agents.svg")
 
@@ -793,7 +807,7 @@ def validation() -> None:
             "同一 AgentRouter",
             "同一 RiskGate",
             "同一 DecisionLedger",
-            "同一成本与恢复语义",
+            "同一 Checkpoint 恢复",
             "输出 ResearchRunResult",
         ),
     )

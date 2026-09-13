@@ -39,13 +39,13 @@
   "description": "One immutable evidence item with stable identity and four time clocks.",
   "properties": {
     "content_hash": {
-      "description": "Return the SHA-256 digest of the canonical structured payload.",
+      "description": "Return the SHA-256 digest of the canonical `payload` -- covers `payload` alone.\n\nEvery other field on this model -- `subject`, `kind`, `source_id`, `source_uri`,\n`source_license`, `redistribution`, `summary`, `schema_version`, and all four\n`timeline` clocks -- can change without moving this digest. `evidence_id` below folds\nthis digest into a wider (but still partial) identity.",
       "readOnly": true,
       "title": "Content Hash",
       "type": "string"
     },
     "evidence_id": {
-      "description": "Return a stable evidence ID derived from provenance and content.",
+      "description": "Return a stable evidence ID over `subject`, `kind`, `source_id`,\n`timeline.available_time`, and `content_hash` -- so, transitively, `payload` too.\n\nNot covered, and so free to change without moving this ID: `schema_version` (a fixed\nliteral today, so this is moot), `summary`, `source_uri`, `source_license`,\n`redistribution`, and `timeline.event_time`/`ingested_time`/`revision_time`. A caller\nthat recomputes and compares this ID -- as `parse_serialized_evidence`\n(`evidence/service.py`) does for a serialized snapshot handed back to the REST research\nroutes -- will not notice an edit confined to those fields; see `docs/api/http.md` for\nwhat that means there.",
       "readOnly": true,
       "title": "Evidence Id",
       "type": "string"

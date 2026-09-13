@@ -4,7 +4,10 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 
-from openalpha_cn.product.research import ResearchReport, WatchlistEntry
+from openalpha_cn.domain.report import RESEARCH_REPORT_VERSIONS, ResearchReport
+from openalpha_cn.domain.versioning import read_versioned
+from openalpha_cn.domain.watchlist import WATCHLIST_ENTRY_VERSIONS, WatchlistEntry
+from openalpha_cn.storage.connection import open_state_connection
 
 
 class SQLiteWatchlistStore:
@@ -14,7 +17,7 @@ class SQLiteWatchlistStore:
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.path, timeout=10)
+        return open_state_connection(self.path)
 
     def _initialize(self) -> None:
         with closing(self._connect()) as connection, connection:
@@ -41,7 +44,7 @@ class SQLiteWatchlistStore:
     def list(self) -> tuple[WatchlistEntry, ...]:
         with closing(self._connect()) as connection:
             rows = connection.execute("SELECT payload FROM watchlist ORDER BY subject").fetchall()
-        return tuple(WatchlistEntry.model_validate_json(row[0]) for row in rows)
+        return tuple(read_versioned(WATCHLIST_ENTRY_VERSIONS, row[0]) for row in rows)
 
     def remove(self, subject: str) -> bool:
         with closing(self._connect()) as connection, connection:
@@ -70,7 +73,7 @@ class SQLiteReportStore:
             )
 
     def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.path, timeout=10)
+        return open_state_connection(self.path)
 
     def append(self, report: ResearchReport) -> None:
         payload = report.model_dump_json(exclude_computed_fields=True)
@@ -97,7 +100,7 @@ class SQLiteReportStore:
                 "SELECT payload FROM research_reports WHERE report_id = ?",
                 (report_id,),
             ).fetchone()
-        return None if row is None else ResearchReport.model_validate_json(row[0])
+        return None if row is None else read_versioned(RESEARCH_REPORT_VERSIONS, row[0])
 
     def list(self, *, subject: str | None = None) -> tuple[ResearchReport, ...]:
         with closing(self._connect()) as connection:
@@ -114,4 +117,4 @@ class SQLiteReportStore:
                     """,
                     (subject,),
                 ).fetchall()
-        return tuple(ResearchReport.model_validate_json(row[0]) for row in rows)
+        return tuple(read_versioned(RESEARCH_REPORT_VERSIONS, row[0]) for row in rows)

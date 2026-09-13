@@ -65,7 +65,7 @@ Proposed 版按"可分发的开源研究平台"撰写。本版按"个人研究�
 它只由 `POST /api/v1/backtests/validate`（`api/app.py:526-539`）返回，无任何写入路径。工作台第 4 页（组合与归因看板，S79）**没有数据源**。
 
 **B6 — 可复现性声明目前部分是空的。**
-`random_seed` 被记录后从未被读取（全库唯一实际播种是 `event_study.py:71`，用的是另一个字段）；`code_commit` 从不从 git 取，真实值是字面量 `"development"`/`"web-development"`；`config_digest` 从不计算，是 `"0"*64`。三者**都是 `decision_id` 的输入** ⇒ 不同代码与不同配置产生相同决策 ID。此外 `DecisionLedger.created_at` 也在 ID 内，而 `engine.py:105` 只在 run 行已存在时复用 `started_at`，故**首次运行无法仅凭输入复现**。
+`random_seed` 被记录后从未被读取（全库唯一实际播种是 `event_study.py:71`，用的是另一个字段）；`code_commit` 从不从 git 取，真实值是字面量 `"development"`/`"web-development"`；`config_digest` 从不计算，是 `"0"*64`。**更正（2026-08 实测）**：三者中只有 `code_commit` 真正进入 `decision_id` —— `DecisionLedger` 的字段表含 `code_commit` 但**不含** `config_digest` 与 `random_seed`，后两者只存在于 `RunManifest`，而 `RunManifest` 根本没有内容寻址身份（`stable_model_id` 仅有 4 个使用者，不含它）。实测：单独改 `code_commit` → ID 变；单独改 `config_digest` 或 `random_seed` → **ID 不变**。所以「不同配置产生相同决策 ID」这一条在 `V2-P0B-009` 之后**依然成立**，需另立 issue 把这两个字段接入某个运行级身份。原判断源自技术审计未经实测，已作废。此外 `DecisionLedger.created_at` 也在 ID 内，而 `engine.py:105` 只在 run 行已存在时复用 `started_at`，故**首次运行无法仅凭输入复现**。
 
 **B7 — 结构地基有三处必须先修的债。**
 ① `storage/` 向上依赖 4 个上层包（唯一的反向依赖），已存在一个被 `TYPE_CHECKING` 掩盖的真实循环（`storage/batch.py:8` ↔ `runtime/batch.py:15-16`），任何 `storage/panel.py` 引用研究契约就立刻成环；② **两个手工同步的组装根**（`api/app.py:254-269` ≡ `sdk.py:63-113`），v2 新增 5 层意味着 10 处装配要人工保持一致；③ `runtime/engine.py` 一个文件承担契约 + 恢复 + 聚合 + 政策四份职责，而 4 个下游**只为契约**而 import 它。
@@ -128,10 +128,36 @@ v1 建立了 A 股原生、证据可追溯、PIT 一致的研究**契约底座**
 ```
 全市场 ~5000 标的
    ↓  面板平面：因子计算 → 横截面打分 → 硬性可交易过滤（纯数值，不进 run_cycle）
-初筛 top N（N 可配置，建议 50~200）
+初筛 top N（N 可配置，实测下界 57，见下方更正）
    ↓  证据平面：只对这 N 个跑 run_cycle
 候选清单：每个候选都有 SignalFrame + DecisionLedger + 证据闭合
 ```
+
+> **更正（`V2-P4-004` 实测，2026-08-14 全市场）：上面原写「建议 50~200」，下限 50 不成立。**
+>
+> 约束 N 的**不是**可交易性折损，也**不是**批量上限，是出厂去极值的**截断块**。
+> `_quantile` 把 q 分位放在 `(n-1)q` 位置，于是恰好
+> `(n-1) − floor((n-1)q)` 个值落在它之上并**被赋予同一个界**。
+> 5,540 只有价证券上五列实测，**每列块内恰好一个不同值**：
+> `turnover_rate` / `ps_ttm` / `total_mv` 各 56，`pb` 55，`pe_ttm` 41。
+>
+> **所以全市场的 N 下界是 57。** 取前 50 是**从一个 56 名的并列里取 50 个** ——
+> 排序完全由 tie-break 决定，与因子无关。roadmap 的起点 100 有 44 名余量。
+> 上界 1,000，来自 `BatchResearchTask.items` 自己的 `max_length`。
+>
+> **中性化档把这个块藏起来而不是消掉，这一条更危险**：同一会话的盈利收益率上，
+> 41 个被截断的名字带着 **41 个互不相同的**残差，跨越整个横截面残差幅度的 **71.2%**，
+> 排名落在 **1、2、3、4、7 … 2,069**，**中性化后前 10 名里有 7 个**。
+> 那 41 个排序携带**零因子信息** —— 它们是行业均值与对数市值的排序，披着那个因子的名字。
+>
+> **另一条把直觉纠正了约 700 倍的**：上面那条链把「硬性可交易过滤」画在缩量的位置上，
+> 而实测一个平常会话 5,543 只上市 → **5,535 只可买**（5 只一字涨停、3 只无 bar），
+> **折损 0.14%**。5,000 → N 的缩减**全部**来自 top-N 那一刀；
+> 硬性过滤是**正确性闸门**，不是缩量闸门。
+>
+> 下界与并列判定由 `backtest/cross_section.py` 强制
+> （落在截断块内的切点报 `cut_inside_the_clip_block`），
+> 并由 `tests/unit/backtest/test_cross_section.py` 钉住。
 
 - 第一段无 per-agent SQLite 写放大，不需要为 5000 标的做引擎性能改造。
 - 第二段完全复用现有引擎，`ResearchRunRequest` 的单标的形状不变。
@@ -243,7 +269,7 @@ Proposed 版按可分发开源平台撰写。个人自用场景下，下列能�
 |---|---|---|---|
 | S36 | Fundamental/valuation/quality/growth/momentum/liquidity/event/regime Agent contracts | **IN-缩减** | 首批 4 类，其余随因子库增长 |
 | S37 | Every Agent emits a validated `SignalFrame` | **IN** | 已有 |
-| S38 | Evidence-family and feature dependencies declared for routing | **IN** | 需扩展到 feature 依赖 |
+| S38 | Evidence-family and feature dependencies declared for routing | **IN** | ~~需扩展到 feature 依赖~~ **已交付（`V2-P4-008`）**：`ResearchAgent.feature_dependencies` 与 `evidence_families` 并列，路由两半都要满足（家族取任一、列取全部），两者皆不声明者具名拒绝 |
 | S39 | Agent reliability measured by horizon and market regime | v2.1 | 需足够长样本外历史 |
 | S40 | Deterministic / learned / LLM-backed Agents distinguishable in manifests | **IN** | |
 | S41 | Bull/Bear and risk committees remain optional | **IN** | `agents/committee.py` 已有 |
@@ -285,7 +311,7 @@ Proposed 版按可分发开源平台撰写。个人自用场景下，下列能�
 | S62 | Confidence intervals, effect sizes and sample counts | **IN** | |
 | S63 | Multiple-testing controls for broad factor and model searches | **IN** | **不可省** |
 | S64 | Performance segmented by industry, size, liquidity and market regime | **IN** | |
-| S65 | Rule, factor, model and Agent attribution reconciled to final result | **IN** | **替换 `validation.py:88-90` 占位实现** |
+| S65 | Rule, factor, model and Agent attribution reconciled to final result | **IN-降级** | 规则类目两项条款 IN；因子/模型/Agent 结构性从不产生而非被收窄，见 `backtest/validation.py` 的 `KNOWN_ATTRIBUTION_LIMITATIONS` |
 | S66 | All validation artifacts linked to their `RunManifest` | **IN** | |
 
 ### 5.9 运维与安全（S67–S72）
@@ -383,7 +409,7 @@ Proposed 版按可分发开源平台撰写。个人自用场景下，下列能�
 31. **【新增】双数据平面强制分离。** 面板数据（价量、财务、日历、股票池、行业、复权）进入按 `dataset/year/` 分区的面板存储，使用**持久** DuckDB catalog；离散可引用事件继续进入 `ParquetEvidenceStore`。禁止面板数据流入证据存储。禁止在面板查询路径上做逐行 pydantic 重建与 hash 重算。
 32. **【新增】Provider 数据集以声明式描述符定义。** Tushare HTTP 为统一信封（`api_name` / `token` / `params` / `fields`），解码逻辑通用。数据集描述符声明：params 形状、标的字段、日期字段、时钟策略（`daily_close` / `announcement` / `calendar_static`）、`kind`、`source_uri` 模板。新增数据集是新增一行描述符，不是新增一个适配器。
 33. **【新增】能力探测先于摄入。** `openalpha doctor` 对每个候选数据集发一次最小请求并记录返回 `code`/`msg`/限流，产出账号实际可取接口的报告。P1 的数据集清单由该报告确定，而不是由假设的积分档位确定。
-34. **【新增】PIT 红队是独立闸门。** P2 必须通过才能进入 P3。注入未来披露、后续修正（`f_ann_date > ann_date`）、未来指数成分、未来行业变更、重叠标签，全部要求 fail-closed 或正确排除；并对 `adj_factor` 自算收益率与 `daily.pct_chg` 逐条交叉对账。
+34. **【新增】PIT 红队是独立闸门。** P2 必须通过才能进入 P3。注入未来披露、后续修正（两种形态：`f_ann_date > ann_date`，以及日期相同仅 `update_flag` 不同 —— 后者经 2026-08 实测确认是真实主流形态）、未来指数成分、未来行业变更、重叠标签，全部要求 fail-closed 或正确排除；并对 `adj_factor` 自算收益率与 `daily.pct_chg` 逐条交叉对账。
 35. **【新增】数值栈边界。** 采用 numpy + pandas。`domain/` 禁止 import 任何数值库；`DataFrame` / `ndarray` 只允许出现在 `panel/`、`factors/`、`models/` 层。ADR-0001 的合同纯度由此规则保护。
 36. **【新增】破坏性契约变更集中一次完成。** `RunManifest.mode` 增加 `paper` / `daily`；`AttributionTerm.category` 增加 `model` 并支持显式残差；`SignalFrame.horizon` 规范化为可比较枚举。三项在 P4 一次性打包升版，避免多轮迁移。
 
@@ -455,4 +481,4 @@ Proposed 版按可分发开源平台撰写。个人自用场景下，下列能�
 - 初始验收使用合成 fixture。进入 Research 或 Daily 档需要使用者配置自有合法数据并显式接受 Provider 条款。
 - **两项待定决策**（不阻塞 P0 启动，但会改变 P0 的 ADR 内容）：
   1. **是否继续维护开源分发。** 仓库为 MIT 且有公开地址与推广文档。本版默认个人研究优先，将 Demo 档位、发布扫描与完整迁移测试降级。若决定对外发布 v2，需加回这三项（约 +3–4 周），且 Demo 冻结数据集须重新设计为不含 Tushare 原始数据。
-  2. ~~**Tushare 积分档位未知。**~~ **已解决（2026-07-30 实测）**：P1 全部候选数据集 16/16 返回 `code=0`，含 `index_weight`、`index_classify`(SW2021 L1)、`index_member_all` 与四张财务表。S11/S19 **不需要降级**，行业中性化可用真实行业分类。`balancesheet` 单标的单期返回 2 行，证实 `ann_date`/`f_ann_date` 修正记录真实存在。明细见 `openalpha-cn-v2-roadmap.md` §6。`V2-P0A-004` 仍需把探测做成 `doctor` 的正式能力，因为限流与积分随账号变化且需在每次 `panel build` 前 fail-closed。
+  2. ~~**Tushare 积分档位未知。**~~ **已解决（2026-07-30 实测）**：P1 全部候选数据集 16/16 返回 `code=0`，含 `index_weight`、`index_classify`(SW2021 L1)、`index_member_all` 与四张财务表。S11/S19 **不需要降级**，行业中性化可用真实行业分类。`balancesheet` 单标的单期返回 2 行，证实修正记录真实存在 —— 但后续实测（roadmap §7）发现这两行的 `ann_date` 与 `f_ann_date` **完全相同**，只有 `update_flag` 不同。明细见 `openalpha-cn-v2-roadmap.md` §6。`V2-P0A-004` 仍需把探测做成 `doctor` 的正式能力，因为限流与积分随账号变化且需在每次 `panel build` 前 fail-closed。

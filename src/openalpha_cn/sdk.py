@@ -1,18 +1,30 @@
 """Local-first Python SDK for OpenAlpha CN's complete research flow."""
 
-from collections.abc import Callable, Sequence
-from datetime import datetime
+from collections.abc import Callable, Mapping, Sequence
+from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 
 from openalpha_cn import __version__
-from openalpha_cn.agents.base import AgentResult, ResearchAgent
+from openalpha_cn.agents.base import AgentResult, FeaturePlane, ResearchAgent
 from openalpha_cn.agents.committee import DeliberationCommittee, DeliberationOutcome
 from openalpha_cn.backtest.event_study import EventStudy, EventStudyReport, EventStudyRequest
 from openalpha_cn.backtest.execution import MarketBar
+from openalpha_cn.backtest.factor_experiment import FactorExperimentRecord, open_experiment
+from openalpha_cn.backtest.factor_ic import ICMethod
 from openalpha_cn.backtest.multi_day import (
     PortfolioBacktestReport,
     PortfolioBacktestRunner,
     PortfolioBacktestStep,
+)
+from openalpha_cn.backtest.multiple_testing import DependenceAssumption
+from openalpha_cn.backtest.outcome_statistics import (
+    OutcomeCohort,
+    OutcomeStatisticsError,
+    OutcomeStatisticsReport,
+    OutcomeStatisticsRequest,
+    outcome_statistics_view,
+    report_outcome_statistics,
 )
 from openalpha_cn.backtest.portfolio import (
     PortfolioLimits,
@@ -21,10 +33,69 @@ from openalpha_cn.backtest.portfolio import (
     PortfolioState,
     PortfolioTransition,
 )
+from openalpha_cn.backtest.portfolio_policy import (
+    ConstructionCandidate,
+    PortfolioConstruction,
+    PortfolioConstructionPolicy,
+    candidates_from_ranking,
+    candidates_from_shortlist_answer,
+    construct_portfolio,
+    construction_view,
+)
 from openalpha_cn.backtest.replay import ReplayCorpus, ReplayReport, ReplayRunner
+from openalpha_cn.backtest.segmented_reporting import (
+    BenchmarkCohort,
+    SegmentationPlan,
+    SegmentedReport,
+    SegmentedReportingError,
+    SegmentedReportRequest,
+    report_segmented_outcomes,
+    segmented_report_view,
+)
+from openalpha_cn.backtest.turnover_variants import (
+    TurnoverCostModel,
+    TurnoverVariantReport,
+    report_turnover_variants,
+    turnover_variant_view,
+)
+from openalpha_cn.backtest.validation import OutcomeObservation, OutcomeValidator
 from openalpha_cn.domain.evidence import EvidenceSnapshot
+from openalpha_cn.domain.factor import FactorNote
+from openalpha_cn.domain.prediction_record import PredictionRecord
 from openalpha_cn.domain.signal import SignalFrame
-from openalpha_cn.evidence.service import build_file_evidence
+from openalpha_cn.domain.validation import ValidationResult
+from openalpha_cn.evidence.service import build_provider_evidence
+from openalpha_cn.factor_view import (
+    ExperimentWrite,
+    FactorBuildReport,
+    build_factor_panels,
+    build_view,
+    experiment_view,
+    factor_build_request,
+    factor_catalog,
+    factor_entry,
+    factor_request,
+    run_factor_experiment,
+)
+from openalpha_cn.model_view import (
+    DailyRunResult,
+    ModelEvaluation,
+    daily_request,
+    daily_view,
+    evaluation_view,
+    feature_columns,
+    held_prediction,
+    held_predictions,
+    model_evaluation_request,
+)
+from openalpha_cn.model_view import evaluate_model as evaluate_model_run
+from openalpha_cn.model_view import run_daily as run_daily_model_run
+from openalpha_cn.panel.catalog import DatasetReadiness
+from openalpha_cn.panel_doctor import PanelHealthReport, panel_health_report
+from openalpha_cn.panel_gate import DependencyClearance, require_datasets
+from openalpha_cn.panel_view import dataset_readiness, panel_request, panel_store
+from openalpha_cn.product.export import ReportExport
+from openalpha_cn.product.export import export_report as build_report_export
 from openalpha_cn.product.research import (
     ResearchReport,
     ResearchReportFactory,
@@ -34,16 +105,24 @@ from openalpha_cn.product.research import (
     WatchlistEntry,
 )
 from openalpha_cn.providers.base import ProviderMetadata, utc_now
+from openalpha_cn.providers.file import FileProvider
 from openalpha_cn.runtime.batch import BatchResearchService, BatchResearchTask
-from openalpha_cn.runtime.engine import ResearchEngine, ResearchRunRequest, ResearchRunResult
+from openalpha_cn.runtime.composition import build_storage
+from openalpha_cn.runtime.contracts import ResearchRunRequest, ResearchRunResult
+from openalpha_cn.runtime.engine import ResearchEngine
 from openalpha_cn.runtime.memory import MemoryEntry
-from openalpha_cn.storage.batch import SQLiteBatchTaskStore
-from openalpha_cn.storage.memory import SQLiteResearchMemory
-from openalpha_cn.storage.parquet import ParquetEvidenceStore
-from openalpha_cn.storage.portfolio import SQLitePortfolioLedger
-from openalpha_cn.storage.product import SQLiteReportStore, SQLiteWatchlistStore
-from openalpha_cn.storage.recovery import RunRecoveryState, SQLiteRecoveryStore
-from openalpha_cn.storage.sqlite import SQLiteRunRepository
+from openalpha_cn.shortlist_compare import compare_held_shortlists
+from openalpha_cn.shortlist_view import (
+    ShortlistEvidence,
+    ShortlistRunResult,
+    held_shortlist,
+    shortlist_components,
+    shortlist_request,
+    shortlist_view,
+)
+from openalpha_cn.shortlist_view import run_shortlist as run_shortlist_run
+from openalpha_cn.storage.parquet import read_parquet_records
+from openalpha_cn.storage.recovery import RunRecoveryState
 
 
 class OpenAlphaSDK:
@@ -55,20 +134,31 @@ class OpenAlphaSDK:
         runtime_dir: Path,
         clock: Callable[[], datetime] = utc_now,
         agents: Sequence[ResearchAgent] | None = None,
+        features: FeaturePlane | None = None,
     ) -> None:
         self.runtime_dir = runtime_dir
-        self.runtime_dir.mkdir(parents=True, exist_ok=True)
         self.clock = clock
         self.agents = None if agents is None else tuple(agents)
-        self.evidence_store = ParquetEvidenceStore(runtime_dir / "evidence")
-        self.repository = SQLiteRunRepository(runtime_dir / "state.sqlite3")
-        self.memory = SQLiteResearchMemory(runtime_dir / "state.sqlite3")
-        self.recovery_store = SQLiteRecoveryStore(runtime_dir / "state.sqlite3")
-        self.batch_store = SQLiteBatchTaskStore(runtime_dir / "state.sqlite3")
-        self.portfolio_ledger = SQLitePortfolioLedger(runtime_dir / "state.sqlite3")
-        self.watchlist_store = SQLiteWatchlistStore(runtime_dir / "state.sqlite3")
-        self.report_store = SQLiteReportStore(runtime_dir / "state.sqlite3")
-        self.batch_store.recover_interrupted(now=self.clock())
+        # V2-P4-008/V2-P4-009: the panel-plane columns every research cycle this SDK runs is
+        # composed with. Beside `agents` and not inside `ResearchRunRequest`, because the
+        # request is `extra="forbid"`, is the REST body, and is digested into
+        # `RunRecoveryState.request_digest` -- see `ResearchEngine.features`. This is the
+        # product path a feature-dependent agent is reachable through:
+        # `tests/integration/test_feature_dependent_routing.py` drives it.
+        self.features = features
+        storage = build_storage(runtime_dir=runtime_dir, clock=clock)
+        self.evidence_store = storage.evidence_store
+        self.repository = storage.repository
+        self.memory = storage.memory
+        self.recovery_store = storage.recovery_store
+        self.batch_store = storage.batch_store
+        self.portfolio_ledger = storage.portfolio_ledger
+        self.watchlist_store = storage.watchlist_store
+        self.report_store = storage.report_store
+        self.validation_store = storage.validation_store
+        self.experiment_store = storage.experiment_store
+        self.shortlist_store = storage.shortlist_store
+        self.prediction_store = storage.prediction_store
 
     def health(self) -> dict[str, str]:
         """Return SDK and package readiness."""
@@ -82,12 +172,13 @@ class OpenAlphaSDK:
         metadata: ProviderMetadata,
     ) -> tuple[EvidenceSnapshot, ...]:
         """Import a user-owned file, normalize evidence, and persist it."""
-        response = build_file_evidence(
+        provider = FileProvider(
             path=path,
-            as_of=as_of,
             metadata=metadata,
             clock=self.clock,
+            parquet_reader=read_parquet_records,
         )
+        response = build_provider_evidence(provider=provider, dataset="events", as_of=as_of)
         if response.items:
             self.evidence_store.append(response.items)
         return response.items
@@ -108,7 +199,9 @@ class OpenAlphaSDK:
             repository=self.repository,
             memory=self.memory,
             clock=self.clock,
+            recovery_store=self.recovery_store,
             agents=self.agents,
+            features=self.features,
         )
         return engine.run_cycle(request)
 
@@ -180,6 +273,925 @@ class OpenAlphaSDK:
         """List generated reports, optionally by subject."""
         return self.report_store.list(subject=subject)
 
+    def export_report(self, report_id: str) -> ReportExport | None:
+        """Assemble one report's shareable form, with restricted payloads withheld.
+
+        `None` -- not an empty export -- when no report has that id, so a caller can tell
+        "there is no such report" from "the report cites nothing this store can produce".
+        `V2-P5-022` and `product/export.py` are where the licence rule itself lives.
+
+        The evidence is fetched at `report.created_at`, which is `decision.created_at`: the
+        clock the report was made against. Any later clock would let evidence that became
+        visible *after* the decision into an artifact describing that decision, which is the
+        look-ahead this repository fails closed on everywhere else.
+
+        **`subject=` is a surviving mutant, reported rather than hidden.** Replacing it with
+        `subject=None` leaves every test green, and it always will: `export_report` filters
+        down to `report.evidence_ids`, so a wider read produces the identical artifact. It is
+        a narrowing for cost, not for correctness, and it is safe only because a report cannot
+        cite evidence outside its own subject -- `ResearchRunRequest` refuses a run whose
+        evidence spans subjects ("all evidence must match the requested subject"), measured
+        while building `tests/integration/test_report_export_interfaces.py`, whose first
+        fixture used two stocks and exited `1`. If that invariant is ever relaxed, this line
+        is the one that has to go with it.
+        """
+        report = self.report_store.get(report_id)
+        if report is None:
+            return None
+        evidence = self.evidence_store.query(as_of=report.created_at, subject=report.subject)
+        return build_report_export(report=report, evidence=evidence)
+
+    def validate_outcome(
+        self,
+        *,
+        research: ResearchRunResult,
+        observation: OutcomeObservation,
+    ) -> ValidationResult:
+        """Validate an observed outcome, persist it, and return the reconciled result.
+
+        The SDK's own outcome-validation entry point (V2-P0B-010): before this, only
+        `POST /api/v1/backtests/validate` and the web UI could reach `OutcomeValidator`
+        (`backtest/validation.py`) -- `sdk.py` never imported `backtest.validation` at
+        all, so a programmatic caller had no way to validate an outcome without going
+        through HTTP, contradicting this module's own "complete research flow" docstring
+        (audit finding F29). Mirrors `create_report`'s shape: compute, then persist via
+        `self.validation_store`, so a result computed through the SDK is durable the same
+        way a result computed through REST is.
+        """
+        result = OutcomeValidator().validate(research=research, observation=observation)
+        self.validation_store.append(result)
+        return result
+
+    def list_validations_by_decision(self, decision_id: str) -> tuple[ValidationResult, ...]:
+        """List validation results for one decision, in append order."""
+        return self.validation_store.list_by_decision(decision_id)
+
+    def list_validations_by_signal(self, signal_id: str) -> tuple[ValidationResult, ...]:
+        """List validation results for one signal, in append order."""
+        return self.validation_store.list_by_signal(signal_id)
+
+    def outcome_statistics(
+        self,
+        *,
+        signal_ids: Sequence[str],
+        family_size: int,
+        false_discovery_rate: float,
+        dependence: DependenceAssumption,
+        confidence_level: float = 0.95,
+        bootstrap_samples: int = 1000,
+        random_seed: int = 0,
+    ) -> OutcomeStatisticsReport:
+        """Report gross, net, cost drag, intervals and BH-controlled q-values over stored outcomes.
+
+        `V2-P5-008`, standing on `V2-P5-007`. One signal is one cohort is one hypothesis, read
+        back through `validation_store.list_by_signal` -- the same rows
+        `GET /api/v1/backtests/validations/by-signal/{id}` serves, so the numbers here are
+        aggregates of results a caller can fetch and check individually.
+
+        **`family_size` is required and is not `len(signal_ids)`.** It is how many cohorts the
+        study actually tested, which is the number a caller who swept forty signals and is
+        reporting five must write down; the only direction that can be checked is that it is not
+        below the number of cohorts tested here, and it is checked. `dependence` is required for
+        the same reason `MultipleTestingRequest` requires it: independence is the assumption
+        that rejects more, so it must not also be the default.
+
+        A signal with nothing stored is refused **by name** rather than being dropped. Dropping
+        it would silently shrink the family the caller declared, which is precisely the failure
+        `V2-P5-007` exists to prevent, and would leave a caller unable to tell "no outcomes were
+        recorded for this signal" from "this signal was never asked about".
+        """
+        empty = tuple(
+            signal_id
+            for signal_id in signal_ids
+            if not self.validation_store.list_by_signal(signal_id)
+        )
+        if empty:
+            raise OutcomeStatisticsError(
+                f"no validation results are stored for {', '.join(empty)}; a cohort with no "
+                "observations is not a cohort with a wide interval"
+            )
+        return report_outcome_statistics(
+            OutcomeStatisticsRequest(
+                cohorts=tuple(
+                    OutcomeCohort(
+                        cohort_id=signal_id,
+                        results=self.validation_store.list_by_signal(signal_id),
+                    )
+                    for signal_id in signal_ids
+                ),
+                family_size=family_size,
+                false_discovery_rate=false_discovery_rate,
+                dependence=dependence,
+                confidence_level=confidence_level,
+                bootstrap_samples=bootstrap_samples,
+                random_seed=random_seed,
+            )
+        )
+
+    def outcome_statistics_view(self, report: OutcomeStatisticsReport) -> dict[str, object]:
+        """Render one outcome-statistics report as data, the bytes `--json` emits."""
+        return dict(outcome_statistics_view(report))
+
+    def segmented_outcomes(
+        self,
+        *,
+        signal_ids: Sequence[str],
+        plan: SegmentationPlan,
+        declared_family_size: int,
+        false_discovery_rate: float,
+        dependence: DependenceAssumption,
+        confidence_level: float = 0.95,
+        bootstrap_samples: int = 1000,
+        random_seed: int = 0,
+    ) -> SegmentedReport:
+        """Cut stored outcomes every declared way, in one family (`V2-P5-009`).
+
+        `outcome_statistics` treats one signal as one cohort as one hypothesis. This cuts the
+        *same* results by industry, market capitalisation, liquidity and market regime, and the
+        thing it exists to get right is that **the cuts do not each get their own family**.
+        Three axes over eight signals is however many buckets result, tested together, because
+        four separate corrections would give four chances to find a rejection at the price of
+        one.
+
+        **Every label is declared and none is derived.** A `ValidationResult` carries a
+        `signal_id` and no ticker, so nothing here can look up an industry or a market
+        capitalisation for a result even though `domain/daily_prices.py` holds `total_mv` and
+        `turnover_rate` -- there is no key to join on. `SegmentationPlan` therefore carries a
+        `definition` and a `source` for every axis, and a signal with no label on a declared
+        axis is refused by name rather than defaulted into an `unknown` bucket, which would
+        invent a segment and then publish statistics for it. See `KNOWN_SEGMENTED_REPORTING_
+        LIMITATIONS.every_segment_label_is_declared_by_the_caller_and_nothing_here_can_check_one`.
+
+        `declared_family_size` is the caller's and is checked only in the direction that can be:
+        not below the buckets this report tests. A benchmark is named by the signal whose stored
+        outcomes are its results, so both arms of every comparison went through the same
+        `OutcomeValidator`, and a benchmark whose observation windows pair with the strategy's
+        also yields a paired difference cohort in the same family.
+
+        A signal with nothing stored is refused by name, `outcome_statistics`' reason exactly.
+        """
+        wanted = tuple(signal_ids) + tuple(benchmark.signal_id for benchmark in plan.benchmarks)
+        empty = tuple(
+            signal_id for signal_id in wanted if not self.validation_store.list_by_signal(signal_id)
+        )
+        if empty:
+            raise SegmentedReportingError(
+                f"no validation results are stored for {', '.join(sorted(set(empty)))}; a "
+                "segment with no observations is not a segment with a wide interval"
+            )
+
+        keys: list[str] = []
+        results: list[ValidationResult] = []
+        for signal_id in signal_ids:
+            for result in self.validation_store.list_by_signal(signal_id):
+                keys.append(signal_id)
+                results.append(result)
+
+        return report_segmented_outcomes(
+            SegmentedReportRequest(
+                results=tuple(results),
+                axes=tuple(axis.expand(keys) for axis in plan.axes),
+                benchmarks=tuple(
+                    BenchmarkCohort(
+                        benchmark_id=benchmark.benchmark_id,
+                        kind=benchmark.kind,
+                        definition=benchmark.definition,
+                        results=self.validation_store.list_by_signal(benchmark.signal_id),
+                    )
+                    for benchmark in plan.benchmarks
+                ),
+                declared_family_size=declared_family_size,
+                false_discovery_rate=false_discovery_rate,
+                dependence=dependence,
+                confidence_level=confidence_level,
+                bootstrap_samples=bootstrap_samples,
+                random_seed=random_seed,
+            )
+        )
+
+    def segmented_report_view(self, report: SegmentedReport) -> dict[str, object]:
+        """Render one segmented report as data, the bytes `--json` emits."""
+        return dict(segmented_report_view(report))
+
+    # --- the panel plane (V2-P1-016) ----------------------------------------------------------
+    #
+    # Three methods paired one-for-one with `GET /api/v1/panel/readiness`, `/health` and
+    # `/gate`, and asserted against them in `tests/integration/test_panel_interfaces.py`. Each
+    # resolves its parameters through `panel_view.panel_request`, so the two faces cannot come
+    # to ask two different questions of one store.
+    #
+    # They hand back the objects rather than a rendering of them -- that is what an in-process
+    # API is for. `PanelHealthReport.findings_with_code`, `DependencyClearance.blocks_for`,
+    # `.unverified` and `.cleared_for` all raise for a code or a dataset the request never
+    # named, which is a guarantee JSON cannot carry.
+    #
+    # `exchange` and `with_calendar` have no defaults, matching `DependencyRequest`'s own rule:
+    # every field that decides how hard the panel is examined is mandatory, because the most
+    # permissive request must not also be the easiest one to build.
+
+    def panel_readiness(
+        self,
+        *,
+        datasets: Sequence[str],
+        years: Sequence[int],
+        as_of: datetime,
+        exchange: str,
+        with_calendar: bool,
+        index_codes: Sequence[str] = (),
+    ) -> tuple[DatasetReadiness, ...]:
+        """Each named dataset's own readiness verdict, in request order.
+
+        No session and no cross-dataset check: this is one dataset's catalog records against
+        the requirement its own reader puts. `DatasetReadiness.checks_waived` is the field to
+        read beside an empty `issues`, because the empty tuple there is the *stronger* claim.
+        """
+        store = panel_store(self.runtime_dir)
+        return dataset_readiness(
+            store,
+            panel_request(
+                store,
+                datasets=datasets,
+                years=years,
+                sessions=(),
+                index_codes=index_codes,
+                as_of=as_of,
+                exchange=exchange,
+                with_calendar=with_calendar,
+            ),
+        )
+
+    def panel_health(
+        self,
+        *,
+        datasets: Sequence[str],
+        years: Sequence[int],
+        sessions: Sequence[date],
+        as_of: datetime,
+        exchange: str,
+        with_calendar: bool,
+        index_codes: Sequence[str] = (),
+    ) -> PanelHealthReport:
+        """What is wrong with the stored panel at `as_of`, as a structured report.
+
+        Answers "is this panel sick", which is a different question from `panel_clearance`'s
+        "may this request read it" -- the two may disagree about one panel and both be right,
+        because the gate has a refusal (`unverified_daily_coverage`) that is not a fault of the
+        panel at all.
+
+        `sessions` names the sessions the day-level cross-checks run on and is not inferred:
+        "check every session" is a whole-corpus scan and "check the last one" is a guess about
+        what the caller cares about.
+        """
+        store = panel_store(self.runtime_dir)
+        request = panel_request(
+            store,
+            datasets=datasets,
+            years=years,
+            sessions=sessions,
+            index_codes=index_codes,
+            as_of=as_of,
+            exchange=exchange,
+            with_calendar=with_calendar,
+        )
+        return panel_health_report(
+            store,
+            as_of=request.as_of,
+            datasets=request.datasets,
+            years=request.years,
+            calendar=request.calendar,
+            index_codes=request.index_codes,
+            cross_section_days=request.sessions,
+        )
+
+    def panel_clearance(
+        self,
+        *,
+        datasets: Sequence[str],
+        years: Sequence[int],
+        sessions: Sequence[date],
+        as_of: datetime,
+        exchange: str,
+        with_calendar: bool,
+        index_codes: Sequence[str] = (),
+    ) -> DependencyClearance:
+        """Whether this request may read the stored panel, and everything the answer rests on.
+
+        The returned `DependencyClearance` is a verdict, not a collection: `bool()`, `len()`
+        and iteration all raise on it **even when it cleared**, which is deliberate -- an
+        accessor that answered on a healthy panel and raised on a sick one would pass every
+        test written against the first and fail only in production. Ask `is_blocked`, read
+        `cleared` (which raises when blocked), or name the merged shape `cleared_or_none`.
+
+        `cleared` hands back `ClearedDataset` records rather than bare names, because the width
+        of the permission is part of it: the years the year-scoped checks covered, the sessions
+        a cross-check actually opened, and the caveats still open outside them.
+        """
+        store = panel_store(self.runtime_dir)
+        return require_datasets(
+            store,
+            panel_request(
+                store,
+                datasets=datasets,
+                years=years,
+                sessions=sessions,
+                index_codes=index_codes,
+                as_of=as_of,
+                exchange=exchange,
+                with_calendar=with_calendar,
+            ),
+        )
+
+    # --- the factor plane (V2-P3-015) -----------------------------------------------------------
+    #
+    # Three methods paired one-for-one with `POST /api/v1/factors/run`,
+    # `GET /api/v1/factors/experiments` and `GET /api/v1/factors/experiments/{id}`, and asserted
+    # against them in `tests/integration/test_factor_interfaces.py`.
+    #
+    # **Not one of the nineteen parameters below has a default, and that is the whole design of
+    # this signature.** Task 39's measured failure was an SDK that hardcoded `exchange` while the
+    # equivalence test fed the same literal to both faces: 1,815 tests stayed green and what was
+    # proved was that two paths agreed, not that either of them carried the caller's value to the
+    # judgement. Every parameter here is forwarded verbatim to `factor_view.factor_request`, which
+    # is the same call `POST /api/v1/factors/run` and `openalpha factor run` make, and
+    # `tests/integration/test_factor_interfaces.py::
+    # test_every_declared_run_parameter_reaches_the_answer` varies each one alone and requires
+    # the answer to move.
+
+    def run_factor_experiment(
+        self,
+        *,
+        factor: str,
+        transform: str,
+        neutralization: str,
+        start: date,
+        end: date,
+        as_of: datetime,
+        exchange: str,
+        horizon: str,
+        ic_method: ICMethod,
+        min_securities: int,
+        min_as_ofs: int,
+        group_count: int,
+        min_securities_per_group: int,
+        position_capital: Decimal,
+        min_periods: int,
+        participation_cap: Decimal,
+        min_rebalances: int,
+        redundancy_threshold: float,
+        retention_floor: float,
+        code_commit: str,
+        note: FactorNote | None = None,
+    ) -> tuple[FactorExperimentRecord, ExperimentWrite]:
+        """Run one factor experiment over a closed range of prediction days, and seal it.
+
+        Hands back the `FactorExperimentRecord` rather than a rendering of it -- that is what an
+        in-process API is for. `FactorExperimentArtifact.attribution(...)` raises for a cell the
+        declared grid does not contain and `tier_report(...)` raises for a tier the artifact does
+        not carry, which is a guarantee JSON cannot make; the HTTP face gets `experiment_view`'s
+        envelope instead, and `tests/integration/test_factor_interfaces.py::
+        test_the_three_faces_seal_one_experiment_from_one_request` asserts the three are one
+        document.
+
+        The second element is what the document store did -- `created` or `unchanged`. A second
+        identical run is a no-op rather than a duplicate, and a second *different* answer under
+        one `experiment_id` is refused; both are `refuse_a_restated_experiment`'s rule enforced at
+        the boundary that actually holds artifacts.
+        """
+        record, write = run_factor_experiment(
+            panel_store(self.runtime_dir),
+            factor_request(
+                factor=factor,
+                transform=transform,
+                neutralization=neutralization,
+                start=start,
+                end=end,
+                as_of=as_of,
+                exchange=exchange,
+                horizon=horizon,
+                ic_method=ic_method,
+                min_securities=min_securities,
+                min_as_ofs=min_as_ofs,
+                group_count=group_count,
+                min_securities_per_group=min_securities_per_group,
+                position_capital=position_capital,
+                min_periods=min_periods,
+                participation_cap=participation_cap,
+                min_rebalances=min_rebalances,
+                redundancy_threshold=redundancy_threshold,
+                retention_floor=retention_floor,
+                code_commit=code_commit,
+            ),
+            built_at=self.clock(),
+            experiments=self.experiment_store,
+            note=note,
+        )
+        return record, write
+
+    def get_factor_experiment(self, experiment_id: str) -> FactorExperimentRecord | None:
+        """Reopen one stored experiment, or `None` when nothing is held under that key.
+
+        Through `open_experiment`, so a document whose content no longer hashes to its own seal
+        does not come back as a record that merely differs -- it raises. That is the boundary
+        `V2-P3-014` built the seal for, and it is why this method returns a record rather than the
+        payload: a caller handed bytes would have to remember to check.
+        """
+        payload = self.experiment_store.get(experiment_id)
+        return None if payload is None else open_experiment(payload)
+
+    def list_factor_experiments(self) -> tuple[str, ...]:
+        """Every held `experiment_id`, ascending."""
+        return self.experiment_store.list_ids()
+
+    def factor_experiment_view(
+        self, record: FactorExperimentRecord, *, write: ExperimentWrite
+    ) -> dict[str, object]:
+        """The record as the HTTP face renders it, for a caller that wants the same bytes."""
+        return experiment_view(record, write=write)
+
+    def factor_catalog(self) -> dict[str, object]:
+        """Every factor, transform and neutralisation this build declares, with their prose.
+
+        `openalpha factor list --json` and `GET /api/v1/factors` are the same call, so the three
+        faces cannot come to describe three builds. Takes no `runtime_dir` and reads no store: a
+        declaration is a property of the build rather than of an installation.
+
+        The **whole** note travels on every entry -- 705 to 4,830 characters each -- because it is
+        what a caller came for. `return_vol_60`'s says in full that it occupies `V2-P3-013`'s
+        residual-volatility slot, is deliberately not named for a residual, and that neither
+        residual is computable in this build; nineteen disclosures of that kind existed in the
+        source and reached no face until `V2-P3-019`.
+        """
+        return factor_catalog()
+
+    def describe_factor(
+        self,
+        *,
+        factor: str | None = None,
+        transform: str | None = None,
+        neutralization: str | None = None,
+    ) -> dict[str, object]:
+        """One declaration and its note, named by exactly one of the three handles.
+
+        The twin of `openalpha factor describe` and of `GET /api/v1/factors?factor=...`. Raises
+        `FactorRequestError` for none, for more than one, and for a handle no registry declares --
+        the refusal names the declared handles rather than their content addresses.
+        """
+        return factor_entry(factor=factor, transform=transform, neutralization=neutralization)
+
+    def build_factor_panels(
+        self,
+        *,
+        factor: str,
+        tier: str,
+        as_ofs: Sequence[datetime],
+        years: Sequence[int],
+        exchange: str,
+        max_staleness_days: int | None,
+        waive_max_staleness: bool,
+        transform: str = "",
+        neutralization: str = "",
+        subjects: Sequence[str] = (),
+        supersedes_raw: Sequence[str] = (),
+        supersedes_processed: Sequence[str] = (),
+        supersedes_neutralized: Sequence[str] = (),
+        code_commit: str,
+    ) -> FactorBuildReport:
+        """Compute this factor's stored tiers at the named instants and write them into the panel.
+
+        The in-process twin of `openalpha factor build`, resolving through the same
+        `factor_view.factor_build_request` and running through the same
+        `factor_view.build_factor_panels`, so the two faces cannot come to build two panels from
+        one declaration. `tests/integration/test_factor_build.py::
+        test_the_two_build_faces_store_one_panel_from_one_request` drives both against one store
+        and requires byte-identical `manifest_id`s.
+
+        **There is deliberately no HTTP twin.** `openalpha panel build` has none either, and the
+        reason is the same one, sharpened: this writes panel partitions, a partition is replaced
+        whole, and the service ships with no authentication of its own ("local-first and has no
+        public multi-tenant authentication"). A `POST` that replaced a stored partition would hand
+        that to whoever could reach the port.
+        `tests/integration/test_factor_build.py::test_no_http_route_builds_a_factor_partition`
+        pins the absence, so it stays a decision rather than an oversight.
+
+        Every parameter has the meaning `openalpha factor build --help` gives it; the four with
+        defaults are the four the command also defaults, and `max_staleness_days` /
+        `waive_max_staleness` are exclusive and one is required -- see `factor_build_request`.
+        """
+        return build_factor_panels(
+            panel_store(self.runtime_dir),
+            factor_build_request(
+                factor=factor,
+                tier=tier,
+                transform=transform,
+                neutralization=neutralization,
+                as_ofs=as_ofs,
+                years=years,
+                exchange=exchange,
+                max_staleness_days=max_staleness_days,
+                waive_max_staleness=waive_max_staleness,
+                subjects=subjects,
+                supersedes_raw=supersedes_raw,
+                supersedes_processed=supersedes_processed,
+                supersedes_neutralized=supersedes_neutralized,
+                code_commit=code_commit,
+            ),
+            built_at=self.clock(),
+        )
+
+    def factor_build_view(self, report: FactorBuildReport) -> dict[str, object]:
+        """One build report as `openalpha factor build --json` renders it."""
+        return build_view(report)
+
+    def run_shortlist(
+        self,
+        *,
+        components: Sequence[Mapping[str, object]],
+        tier: str,
+        shortlist_size: int,
+        position_capital: Decimal | str,
+        as_of: datetime,
+        years: Sequence[int],
+        exchange: str,
+        horizon: str,
+        minimum_tradable_ratio: float,
+        minimum_researched_ratio: float,
+        maximum_ranking_age_days: int,
+        code_commit: str,
+        config_digest: str,
+        transform: str | None = None,
+        neutralization: str | None = None,
+        evidence: Mapping[str, ShortlistEvidence] | None = None,
+    ) -> ShortlistRunResult:
+        """Cut a shortlist out of the stored panel, join the evidence plane, and gate it.
+
+        `V2-P4-033`'s in-process face, resolving through the same `shortlist_view.
+        shortlist_request` and running through the same `shortlist_view.run_shortlist` as
+        `openalpha shortlist run` and `POST /api/v1/shortlists/run`, so the three cannot come to
+        cut three lists from one declaration.
+
+        **Hands back the `ShortlistRunResult` rather than a rendering of it**, which is what an
+        in-process API is for and is the strongest form the blocked/empty distinction takes
+        anywhere in this repository: `result.clearance` is a `ShortlistClearance`, and
+        `bool(clearance)`, `len(clearance)` and iterating it all **raise** -- including when the
+        list cleared. A caller cannot write `if not clearance:` and quietly treat a refusal as an
+        empty list, which is a guarantee JSON cannot make. `shortlist_view(result)` is the HTTP
+        face's bytes for a caller that wants those instead.
+
+        `evidence` is the evidence plane's answers about the shortlisted names, keyed by subject,
+        and is empty by default -- see `the_evidence_plane_is_supplied_rather_than_run_by_this
+        _module` for why this face does not run `run_cycle` itself. With none supplied,
+        `researched_ratio` is `0.0` and any `minimum_researched_ratio` above zero refuses the
+        list, which is the ordinary first answer: the shortlist says which names are worth
+        spending an evidence run on, and the gate refuses to publish them as conclusions until
+        those runs have happened.
+        """
+        return run_shortlist_run(
+            panel_store(self.runtime_dir),
+            shortlist_request(
+                components=shortlist_components(components),
+                tier=tier,
+                shortlist_size=shortlist_size,
+                position_capital=Decimal(str(position_capital)),
+                as_of=as_of,
+                years=years,
+                exchange=exchange,
+                horizon=horizon,
+                minimum_tradable_ratio=minimum_tradable_ratio,
+                minimum_researched_ratio=minimum_researched_ratio,
+                maximum_ranking_age_days=maximum_ranking_age_days,
+                code_commit=code_commit,
+                config_digest=config_digest,
+                transform=transform,
+                neutralization=neutralization,
+                evidence=evidence,
+            ),
+            built_at=self.clock(),
+            runs=self.repository,
+            shortlists=self.shortlist_store,
+        )
+
+    def shortlist_view(self, result: ShortlistRunResult) -> dict[str, object]:
+        """One shortlist run as `openalpha shortlist run --json` and HTTP render it."""
+        return shortlist_view(result)
+
+    def held_shortlist(self, shortlist_id: str) -> dict[str, object]:
+        """One stored shortlist answer, by the `shortlist_id` its own body carried.
+
+        `V2-P4-062`'s in-process read, through the same `shortlist_view.held_shortlist` as
+        `openalpha shortlist get` and `GET /api/v1/shortlists/{shortlist_id}`. Raises
+        `ShortlistNotHeldError` when nothing is held rather than answering `None`, which is the
+        opposite of `get_factor_experiment` one plane over and is that method's own distinction
+        applied: an experiment is looked up by a key a caller composed from a declaration and
+        may legitimately not exist yet, while a `shortlist_id` is an address that was **printed
+        on an answer**, so nothing held under one is a fact about this runtime directory and not
+        about the question.
+        """
+        return held_shortlist(self.shortlist_store, shortlist_id)
+
+    def list_shortlists(self) -> tuple[str, ...]:
+        """Every held `shortlist_id`, ascending."""
+        return self.shortlist_store.list_ids()
+
+    def construct_portfolio(
+        self,
+        *,
+        shortlist_id: str,
+        policy: PortfolioConstructionPolicy,
+        previous: Mapping[str, Decimal] | None = None,
+    ) -> PortfolioConstruction:
+        """Heuristic target weights over one held shortlist's admitted names (`V2-P5-001`).
+
+        The in-process face of `openalpha portfolio construct`, through the same
+        `held_shortlist` read and the same `construct_portfolio` policy, so the two cannot come
+        to weight one list two ways.
+
+        **A refused shortlist has no weights and raises rather than answering.** `admitted` is
+        `null` when the gate turned the list down; building a portfolio out of it would launder
+        the refusal into a set of numbers, which is the "empty success" `V2-P1-013` exists to
+        make unavailable arriving one plane later.
+
+        The answer carries `heuristic, not optimized` on `method` and every limitation the
+        policy declares. `previous` is weights the *caller* states -- this reaches no ledger,
+        see `KNOWN_CONSTRUCTION_LIMITATIONS
+        .the_previous_book_is_declared_by_the_caller_and_never_read_from_a_ledger`.
+        """
+        return construct_portfolio(
+            candidates=candidates_from_shortlist_answer(self.held_shortlist(shortlist_id)),
+            policy=policy,
+            previous=previous,
+        )
+
+    def construct_portfolio_from_ranking(
+        self,
+        *,
+        result: ShortlistRunResult,
+        policy: PortfolioConstructionPolicy,
+        previous: Mapping[str, Decimal] | None = None,
+    ) -> PortfolioConstruction:
+        """The same construction over a run's own `CandidateRanking`, without a round trip.
+
+        Distinct from `construct_portfolio` in exactly one respect, and it is the one that
+        matters for `V2-P5-002`'s industry cap: a `RankedCandidate` can carry a
+        `CandidateExposure`, and a stored answer cannot -- `shortlist_view` renders no industry
+        at all. Today both paths arrive with `industry_code` unset, because the shipped face
+        builds the ranking with `exposures=None`; this method is where a declared industry cap
+        starts working the day that changes, and the other is where it stays refused.
+        """
+        return construct_portfolio(
+            candidates=candidates_from_ranking(result.ranking),
+            policy=policy,
+            previous=previous,
+        )
+
+    def construction_candidates(
+        self, result: ShortlistRunResult
+    ) -> tuple[ConstructionCandidate, ...]:
+        """The narrowed candidate rows a construction reads, for a caller assembling its own.
+
+        The `rank` on these rows is a position in this list, renumbered to `1..n` -- not the
+        rank the name held in the funnel's shortlist (`V2-P5-072`). A caller who edits the list
+        has to keep it that way: `construct_portfolio` refuses a gap, because a gap means the
+        rows carry a rank from some wider list rather than a position in this one.
+        """
+        return candidates_from_ranking(result.ranking)
+
+    def construction_view(self, construction: PortfolioConstruction) -> dict[str, object]:
+        """One construction as `openalpha portfolio construct --json` renders it."""
+        return construction_view(construction)
+
+    def turnover_variants(
+        self,
+        *,
+        shortlist_id: str,
+        policy: PortfolioConstructionPolicy,
+        buffer: Decimal,
+        previous: Mapping[str, Decimal] | None = None,
+        cost_model: TurnoverCostModel | None = None,
+    ) -> TurnoverVariantReport:
+        """The buffered book and the unbuffered one, side by side and never one alone
+        (`V2-P5-024`).
+
+        The same `held_shortlist` read and the same `construct_portfolio` policy
+        `construct_portfolio` uses, so the unbuffered arm here **is** the book that method
+        returns; the buffered arm is that book seen through a no-trade band of `buffer`.
+
+        **There is no argument that returns one arm.** `TurnoverVariantReport` carries both as
+        required fields, because *默认并列出报* is the row: a caller who can ask for the
+        flattering number will, and a high-turnover factor's gross edge read without its
+        turnover beside it is exactly the misreading `V2-P5-024` names.
+
+        **A band is not the turnover budget `V2-P5-001` already has.** `PortfolioLimits
+        .turnover_budget` damps every move proportionally; a band leaves small moves untraded
+        and takes large ones whole. A policy declaring a budget gets the budget first and the
+        band second, and `KNOWN_TURNOVER_VARIANT_LIMITATIONS
+        .the_buffer_is_a_no_trade_band_and_not_the_turnover_budget_v2_p5_001_already_has` says
+        so on every answer.
+
+        `cost_model` is optional and has no default. Without one, the saving is reported in
+        turnover and `cost_absence_reason` says why there is no figure in money -- an invented
+        rate would be multiplied by every turnover number in the report.
+        """
+        return report_turnover_variants(
+            candidates=candidates_from_shortlist_answer(self.held_shortlist(shortlist_id)),
+            policy=policy,
+            buffer=buffer,
+            previous=previous,
+            cost_model=cost_model,
+        )
+
+    def turnover_variant_view(self, report: TurnoverVariantReport) -> dict[str, object]:
+        """One paired report as `openalpha portfolio turnover-variants --json` renders it."""
+        return dict(turnover_variant_view(report))
+
+    def compare_shortlists(self, *, baseline_id: str, current_id: str) -> dict[str, object]:
+        """What changed between two held shortlist answers (`V2-P4-007`, S44, S49).
+
+        The in-process face of `openalpha shortlist compare`, through the same
+        `shortlist_compare.compare_held_shortlists`, so the two cannot come to serve two shapes.
+        `baseline_id` is the answer being compared **against**: `added` is what `current_id` has
+        and it does not. Named rather than inferred because a content-addressed store cannot
+        order two documents -- see `shortlist_compare.KNOWN_COMPARISON_LIMITATIONS
+        .the_store_cannot_say_which_answer_came_first`.
+
+        Raises `ShortlistNotHeldError` for an address nothing is held under and
+        `ShortlistRequestError` for one that is not an address or for two answers to different
+        questions, which is `held_shortlist`'s arrangement and its reason.
+        """
+        return compare_held_shortlists(
+            self.shortlist_store, baseline_id=baseline_id, current_id=current_id
+        )
+
+    def evaluate_model(
+        self,
+        *,
+        features: Sequence[Mapping[str, object]],
+        name: str,
+        family: str,
+        horizon: str,
+        seed: int,
+        start: date,
+        end: date,
+        as_of: datetime,
+        years: Sequence[int],
+        exchange: str,
+        folds: int,
+        test_days_per_fold: int,
+        embargo_sessions: int,
+        minimum_scored_ratio: float,
+        code_commit: str,
+        config_digest: str,
+        shelf_life_days: int | None = None,
+        feature_version: str | None = None,
+        hyperparameters: Sequence[tuple[str, bool | int | float | str]] = (),
+    ) -> ModelEvaluation:
+        """Fit one declaration once per walk-forward fold and report what it ordered.
+
+        `V2-P4-021`'s in-process face, resolving through the same
+        `model_view.model_evaluation_request` and running through the same
+        `model_view.evaluate_model` as `openalpha model evaluate` and
+        `POST /api/v1/models/evaluate`, so the three cannot come to fit three models from one
+        declaration.
+
+        **Hands back the `ModelEvaluation` rather than a rendering of it**, which is what an
+        in-process API is for: `result.folds` is a tuple of `FoldEvaluation`, and each one refuses
+        at construction to carry a `mean_rank_ic` its own coverage says it does not have. A caller
+        reading `fold.mean_rank_ic is None` beside `fold.coverage` can tell "not measured" from
+        "measured at nothing", which is the distinction JSON preserves only because
+        `evaluation_view` is careful to. `self.evaluation_view(result)` is the HTTP face's bytes
+        for a caller that wants those instead.
+
+        It stores nothing. See
+        `an_evaluation_registers_nothing_because_every_record_it_could_write_would_be_unwitnessed`.
+        """
+        return evaluate_model_run(
+            panel_store(self.runtime_dir),
+            model_evaluation_request(
+                columns=feature_columns(features),
+                name=name,
+                family=family,
+                horizon=horizon,
+                seed=seed,
+                start=start,
+                end=end,
+                as_of=as_of,
+                years=years,
+                exchange=exchange,
+                folds=folds,
+                test_days_per_fold=test_days_per_fold,
+                embargo_sessions=embargo_sessions,
+                minimum_scored_ratio=minimum_scored_ratio,
+                shelf_life_days=shelf_life_days,
+                code_commit=code_commit,
+                config_digest=config_digest,
+                feature_version=feature_version,
+                hyperparameters=hyperparameters,
+            ),
+        )
+
+    def evaluation_view(self, result: ModelEvaluation) -> dict[str, object]:
+        """One evaluation as `openalpha model evaluate --json` and HTTP render it."""
+        return evaluation_view(result)
+
+    def run_daily_model(
+        self,
+        *,
+        features: Sequence[Mapping[str, object]],
+        name: str,
+        family: str,
+        horizon: str,
+        seed: int,
+        start: date,
+        end: date,
+        predict_at: datetime,
+        as_of: datetime,
+        years: Sequence[int],
+        exchange: str,
+        minimum_scored_ratio: float,
+        code_commit: str,
+        config_digest: str,
+        shelf_life_days: int | None = None,
+        feature_version: str | None = None,
+        hyperparameters: Sequence[tuple[str, bool | int | float | str]] = (),
+    ) -> DailyRunResult:
+        """Fit on what has already closed, score `predict_at`, and register the answer.
+
+        Story S32's in-process face. `predicted_at` and `started_at` both come from `self.clock`
+        and neither is a parameter, which is deliberate and is the same decision the other two
+        faces take: `FilePredictionStore` is constructed by `build_storage` with this same clock,
+        so the instant the batch claims and the instant the store witnessed are readings of one
+        clock this method's caller does not reach. A caller who wants to drive the three standings
+        constructs the SDK with the clock it wants, which is what a test does.
+
+        **A refused run still registered its prediction**, and `result.record` carries it either
+        way -- Story S32's requirement is unconditional and the floor is about whether the answer
+        may be acted on.
+        """
+        now = self.clock()
+        return run_daily_model_run(
+            panel_store(self.runtime_dir),
+            daily_request(
+                columns=feature_columns(features),
+                name=name,
+                family=family,
+                horizon=horizon,
+                seed=seed,
+                start=start,
+                end=end,
+                predict_at=predict_at,
+                as_of=as_of,
+                years=years,
+                exchange=exchange,
+                minimum_scored_ratio=minimum_scored_ratio,
+                shelf_life_days=shelf_life_days,
+                code_commit=code_commit,
+                config_digest=config_digest,
+                feature_version=feature_version,
+                hyperparameters=hyperparameters,
+            ),
+            predictions=self.prediction_store,
+            runs=self.repository,
+            predicted_at=now,
+            started_at=now,
+        )
+
+    def daily_view(self, result: DailyRunResult) -> dict[str, object]:
+        """One daily run as `openalpha model daily-run --json` and HTTP render it."""
+        return daily_view(result)
+
+    def held_prediction(self, record_id: str) -> PredictionRecord:
+        """One registered prediction, by the `record_id` its own run reported.
+
+        Hands back the `PredictionRecord` rather than a rendering, so a caller reads `standing`
+        off a `computed_field` that is re-derived from the two instants every time -- a provenance
+        a producer stamps is a provenance a producer chooses, and this is the form in which that
+        stays visible. `model_view.prediction_view(record)` is the rendering, and it is the one
+        that carries what the standing does *not* prove.
+
+        Raises `ModelNotHeldError` when nothing is held rather than answering `None`,
+        `held_shortlist`'s distinction: a `record_id` is an address that was printed on an answer.
+        """
+        return held_prediction(self.prediction_store, record_id)
+
+    def list_predictions(self) -> tuple[str, ...]:
+        """Every registered `record_id`, by content address, ascending.
+
+        The store's own filing order, kept as it is: a caller who wants to know *which set* of
+        predictions is held wants a stable key list, and this is it. A caller who wants to know
+        which of them was committed to first wants `held_predictions`, which is what the two
+        product faces now list -- see `V2-P4-098` and `model_view.held_predictions`.
+        """
+        return self.prediction_store.list_ids()
+
+    def held_predictions(self) -> tuple[PredictionRecord, ...]:
+        """Every registered prediction, in the order this store took custody of them.
+
+        Records rather than a rendering, `held_prediction`'s arrangement and its reason: an
+        in-process caller reads `standing` off a `computed_field` re-derived from the two instants
+        every time. `model_view.prediction_index_view(records)` is the rendering the other two
+        faces hand out, and `prediction_index_rows` is the terminal one.
+        """
+        return held_predictions(self.prediction_store)
+
     def execute_portfolio_order(
         self,
         *,
@@ -226,9 +1238,22 @@ class OpenAlphaSDK:
         config_digest: str,
         random_seed: int,
     ) -> ReplayReport:
-        """Run a frozen corpus and return deterministic validation metrics."""
+        """Run a frozen corpus and return deterministic validation metrics.
+
+        `ReplayRunner.run()` keeps its own migrated `sdk-replay.sqlite3` for run/recovery
+        state (see its docstring for why), but persists validation results into
+        `self.validation_store` -- the same store `validate_outcome()` above uses -- so a
+        result produced by replay is retrievable through `list_validations_by_decision`/
+        `list_validations_by_signal` exactly like one produced by `validate_outcome()`
+        (P0.B acceptance review, Finding 1).
+        """
         return ReplayRunner(
             code_commit=code_commit,
             config_digest=config_digest,
             random_seed=random_seed,
-        ).run(corpus=corpus, state_path=self.runtime_dir / "sdk-replay.sqlite3")
+        ).run(
+            corpus=corpus,
+            state_path=self.runtime_dir / "sdk-replay.sqlite3",
+            validation_store=self.validation_store,
+            clock=self.clock,
+        )

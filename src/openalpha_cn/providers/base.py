@@ -16,8 +16,11 @@ from pydantic import (
 )
 
 from openalpha_cn.domain._identity import stable_model_id
-from openalpha_cn.domain.json_value import canonical_json_bytes, freeze_json, thaw_json
+from openalpha_cn.domain.evidence import FreezePayloadMixin
+from openalpha_cn.domain.json_value import canonical_json_bytes, thaw_json
+from openalpha_cn.domain.panel_batch import ColumnarPanelBatch
 from openalpha_cn.domain.time import Timeline, ensure_aware, is_visible_at
+from openalpha_cn.domain.versioning import ContractVersions
 
 ProviderFailureCategory = Literal[
     "authentication",
@@ -55,6 +58,7 @@ class ProviderMetadata(BaseModel):
     source_license: str = Field(min_length=1, max_length=256)
     redistribution: Literal["allowed", "restricted", "unknown"]
     credential_env_vars: tuple[str, ...]
+    supported_datasets: tuple[str, ...] = ()
     caching_policy: Literal["local-permitted", "prohibited", "provider-defined"]
     rate_limit: str = Field(min_length=1, max_length=512)
     freshness: str = Field(min_length=1, max_length=512)
@@ -76,7 +80,12 @@ class ProviderRequest(BaseModel):
         return ensure_aware(value)
 
 
-class ProviderRecord(BaseModel):
+# `ProviderRecord` inherits `freeze_payload` from `FreezePayloadMixin` (`domain/evidence.py`)
+# rather than declaring its own -- see that mixin's docstring for why the shared
+# implementation lives there and not here. Kept out of `ProviderRecord`'s own docstring
+# because Pydantic copies a model's class docstring verbatim into
+# `model_json_schema()["description"]`, which `/openapi.json` and `/docs` expose publicly.
+class ProviderRecord(FreezePayloadMixin, BaseModel):
     """One normalized provider row before evidence-specific interpretation."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
@@ -89,12 +98,6 @@ class ProviderRecord(BaseModel):
     summary: str = Field(min_length=1, max_length=4000)
     payload: JsonValue
 
-    @model_validator(mode="after")
-    def freeze_payload(self) -> Self:
-        canonical_json_bytes(self.payload)
-        object.__setattr__(self, "payload", freeze_json(self.payload))
-        return self
-
     @field_serializer("payload")
     def serialize_payload(self, value: JsonValue) -> JsonValue:
         return thaw_json(value)
@@ -104,6 +107,13 @@ class ProviderRecord(BaseModel):
     def record_id(self) -> str:
         """Return a stable content-derived provider record ID."""
         return stable_model_id(prefix="rec", model=self)
+
+
+PROVIDER_RECORD_VERSIONS: ContractVersions[ProviderRecord] = ContractVersions(
+    name="provider-record",
+    current_version="provider-record/v1",
+    versions={"provider-record/v1": ProviderRecord},
+)
 
 
 class ProviderBatch(BaseModel):
@@ -150,6 +160,13 @@ class ProviderBatch(BaseModel):
         return f"sha256:{sha256(canonical_json_bytes(payloads)).hexdigest()}"
 
 
+PROVIDER_BATCH_VERSIONS: ContractVersions[ProviderBatch] = ContractVersions(
+    name="provider-batch",
+    current_version="provider-batch/v1",
+    versions={"provider-batch/v1": ProviderBatch},
+)
+
+
 class DataProvider(Protocol):
     """The stable extension interface implemented by every data provider."""
 
@@ -159,6 +176,28 @@ class DataProvider(Protocol):
 
     def fetch(self, request: ProviderRequest) -> ProviderBatch:
         """Fetch a point-in-time batch or raise ``ProviderFailure``."""
+
+
+class PanelDataProvider(Protocol):
+    """The panel-plane counterpart of ``DataProvider`` (``V2-P1-002``).
+
+    Identical in spirit to ``DataProvider`` and deliberately separate from it: a provider
+    feeding the panel plane returns a ``ColumnarPanelBatch`` instead of a ``ProviderBatch``,
+    because per-row content addressing is an evidence-plane property that panel-scale data
+    cannot afford (see ``domain/panel_batch.py``'s module docstring for the measurements and
+    ADR-0002 for the plane split). A provider may implement both protocols -- Tushare's
+    ``daily`` output belongs on the panel plane while its event-shaped output does not.
+
+    The returned batch's ``dataset`` and ``as_of`` must equal the request's; the batch
+    enforces its own point-in-time rule against its ``as_of`` either way.
+    """
+
+    @property
+    def metadata(self) -> ProviderMetadata:
+        """Return provider policy metadata."""
+
+    def fetch_panel(self, request: ProviderRequest) -> ColumnarPanelBatch:
+        """Fetch a point-in-time columnar batch or raise ``ProviderFailure``."""
 
 
 def utc_now() -> datetime:

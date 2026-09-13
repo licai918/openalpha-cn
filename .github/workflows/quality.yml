@@ -44,7 +44,10 @@ jobs:
         run: uv run ruff format --check .
 
       - name: Type check
-        run: uv run mypy src
+        run: uv run mypy src scripts
+
+      - name: Check import layering
+        run: uv run lint-imports
 
       - name: Test with coverage
         run: uv run pytest --cov=openalpha_cn --cov-report=term-missing --cov-fail-under=80
@@ -90,6 +93,23 @@ jobs:
       - name: Build
         working-directory: web
         run: pnpm build
+
+      # The `production` Playwright project starts the real ASGI application --
+      # `uv run uvicorn openalpha_cn.api.app:app` -- because that is the only way to assert that
+      # the *shipped* server answers a bookmarked URL, which `V2-P5-027` fixed and the dev server
+      # cannot show. That command needs `uv`, and this job had never installed it: `pnpm test:e2e`
+      # died at `/bin/sh: 1: uv: not found`, exit 127, before a single browser opened. It is
+      # invisible locally, where `uv` is always on `PATH` -- so the suite passed for every
+      # developer and had never once run here.
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.32"
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install locked dependencies
+        run: uv sync --locked --all-extras --dev
 
       - name: Install Chromium
         working-directory: web
@@ -137,7 +157,15 @@ jobs:
   container:
     name: Container persistence recovery
     runs-on: ubuntu-latest
-    needs: [python, web, security]
+    # `python` is deliberately not here (`V2-P5-066`). This job is the only place the shipped
+    # artifact -- the image the `Dockerfile` builds and the stack `deploy/compose.yml` starts --
+    # is ever built or started, and it had never once run: the `python` matrix covers
+    # `windows-latest`, `needs` cannot name a single matrix leg, and Windows had been red on
+    # every dispatch, so the production verification was skipped every time. The dependency was
+    # a cost heuristic ("do not spend build minutes on obviously broken code"), never a
+    # correctness gate -- the signal is this job's own result. `web` and `security` still gate
+    # it, and they run over the same tree.
+    needs: [web, security]
 
     steps:
       - name: Check out source

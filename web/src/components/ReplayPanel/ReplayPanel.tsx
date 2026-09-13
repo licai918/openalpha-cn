@@ -1,19 +1,25 @@
 import type { ChangeEvent } from "react";
 
+import { panelData, type PanelState } from "../../panelState";
+import { PanelNotice } from "../PanelNotice/PanelNotice";
 import type { ReplayReport } from "../../types";
 
 type ReplayPanelProps = {
-  report: ReplayReport | null;
-  loading: boolean;
-  error: string | null;
+  /** V2-P5-019: replaces `report` + `loading` + `error`. The consequential case this
+   * closes is a report with `look_ahead_violations > 0`, which used to arrive as an
+   * ordinary `report` with `error: null` and render the same green progress bar as a
+   * clean run — the release gate's own failure condition, drawn as a success. */
+  state: PanelState<ReplayReport>;
   onRun: (file: File) => void;
 };
 
-export function ReplayPanel({ report, loading, error, onRun }: ReplayPanelProps) {
+export function ReplayPanel({ state, onRun }: ReplayPanelProps) {
   const onFile = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.currentTarget.files?.[0];
     if (file) onRun(file);
   };
+  const loading = state.kind === "loading";
+  const report = panelData(state);
   return (
     <section className="panel replay-panel" aria-labelledby="replay-heading">
       <header className="panel-heading">
@@ -26,14 +32,7 @@ export function ReplayPanel({ report, loading, error, onRun }: ReplayPanelProps)
           <input type="file" accept=".json,application/json" disabled={loading} onChange={onFile} />
         </label>
       </header>
-      {!report && !error && (
-        <p className="empty-state">上传版本化 ReplayCorpus，执行确定性与前视检查。</p>
-      )}
-      {error && (
-        <p className="error-state" role="alert">
-          {error}
-        </p>
-      )}
+      <PanelNotice state={state} idleText="上传版本化 ReplayCorpus，执行确定性与前视检查。" />
       {report && (
         <div className="replay-results">
           <dl className="metric-row">

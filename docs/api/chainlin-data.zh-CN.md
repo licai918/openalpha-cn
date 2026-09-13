@@ -26,8 +26,12 @@ Accept: application/json
 - `subject`、`kind`、`summary`、结构化 `payload`；
 - 可选 `source_uri`。
 
-OpenAlpha 在接收时添加自己的 `ingested_time`，然后仍通过统一
-`ProviderBatch` 和 `EvidenceSnapshot` 管线做 PIT 校验。
+客户端在接收时给每条记录添加自己的 `ingested_time`，返回一个 `ProviderBatch`；批次在构造时，
+只要有一条记录按请求的 `as_of` 不可见，就整批拒绝。只有当调用方代码把这个客户端交给
+`build_provider_evidence`，或把批次交给 `build_evidence` 或 `POST /api/v1/evidence/build` 时，
+记录才会变成 `EvidenceSnapshot`。出厂路径只有 `openalpha doctor` 构造这个客户端：配置了服务
+地址时，`--probe` 对每个数据集发一次最小请求，只报告每次请求以哪一类结果结束，取回的批次
+随即丢弃。
 
 ## 安全、限流和错误
 
@@ -41,4 +45,4 @@ OpenAlpha 在接收时添加自己的 `ingested_time`，然后仍通过统一
 - 空结果必须返回 `records: []` 和明确的 `no_data_reason`。
 
 该合同已经通过完全冻结的传输替身测试；真实服务联调仍需要链邻服务端按照此
-Schema 提供端点，不得把尚未配置的服务宣传为已连接。
+Schema 提供端点，不得把尚未配置的服务说成已经连通。

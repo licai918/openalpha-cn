@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 import pytest
@@ -9,31 +9,38 @@ from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.domain.time import Timeline
 from openalpha_cn.models.base import ModelMetadata
 
-NOW = datetime(2026, 7, 24, 10, 30, tzinfo=UTC)
 
+@pytest.fixture
+def theme_evidence(frozen_now: datetime):
+    """A single, fixed "theme" evidence item -- unlike the suite-wide `evidence(kind,
+    facts)` fixture in `tests/conftest.py`, this one takes no arguments and has a
+    different payload shape, so it stays local to this file rather than sharing that
+    name."""
 
-def evidence() -> EvidenceSnapshot:
-    return EvidenceSnapshot(
-        subject="000001.SZ",
-        kind="theme",
-        timeline=Timeline(
-            event_time=NOW,
-            available_time=NOW,
-            ingested_time=NOW,
-            revision_time=NOW,
-        ),
-        source_id="synthetic",
-        source_uri="fixture://theme",
-        source_license="CC0-1.0",
-        redistribution="allowed",
-        summary="Synthetic theme evidence.",
-        payload={
-            "schema": "a-share-evidence/v1",
-            "family": "theme",
-            "facts": {"theme": "机器人", "score": 0.8},
-            "quality_flags": [],
-        },
-    )
+    def _make() -> EvidenceSnapshot:
+        return EvidenceSnapshot(
+            subject="000001.SZ",
+            kind="theme",
+            timeline=Timeline(
+                event_time=frozen_now,
+                available_time=frozen_now,
+                ingested_time=frozen_now,
+                revision_time=frozen_now,
+            ),
+            source_id="synthetic",
+            source_uri="fixture://theme",
+            source_license="CC0-1.0",
+            redistribution="allowed",
+            summary="Synthetic theme evidence.",
+            payload={
+                "schema": "a-share-evidence/v1",
+                "family": "theme",
+                "facts": {"theme": "机器人", "score": 0.8},
+                "quality_flags": [],
+            },
+        )
+
+    return _make
 
 
 class FakeModelProvider:
@@ -64,26 +71,32 @@ class FakeModelProvider:
         return output
 
 
-def valid_output(item: EvidenceSnapshot) -> dict[str, Any]:
-    return {
-        "signal": {
-            "subject": "000001.SZ",
-            "as_of": NOW.isoformat(),
-            "direction": "bullish",
-            "strength": 0.5,
-            "confidence": 0.7,
-            "horizon": "5d",
-            "evidence_ids": [item.evidence_id],
-            "confirmation_conditions": ["Theme score remains elevated."],
-            "invalidation_conditions": ["Theme score falls below 0.5."],
-            "risk_flags": [],
-        },
-        "rationale": "The visible theme evidence supports a cautious bullish view.",
-    }
+@pytest.fixture
+def valid_output(frozen_now: datetime):
+    def _make(item: EvidenceSnapshot) -> dict[str, Any]:
+        return {
+            "signal": {
+                "subject": "000001.SZ",
+                "as_of": frozen_now.isoformat(),
+                "direction": "bullish",
+                "strength": 0.5,
+                "confidence": 0.7,
+                "horizon": "5d",
+                "evidence_ids": [item.evidence_id],
+                "confirmation_conditions": ["Theme score remains elevated."],
+                "invalidation_conditions": ["Theme score falls below 0.5."],
+                "risk_flags": [],
+            },
+            "rationale": "The visible theme evidence supports a cautious bullish view.",
+        }
+
+    return _make
 
 
-def test_structured_model_agent_retries_invalid_output_then_validates() -> None:
-    item = evidence()
+def test_structured_model_agent_retries_invalid_output_then_validates(
+    theme_evidence, valid_output, frozen_now: datetime
+) -> None:
+    item = theme_evidence()
     invalid = valid_output(item)
     invalid["signal"]["subject"] = "999999.SH"
     provider = FakeModelProvider([invalid, valid_output(item)])
@@ -98,7 +111,7 @@ def test_structured_model_agent_retries_invalid_output_then_validates() -> None:
         AgentContext(
             run_id="run_model",
             subject="000001.SZ",
-            as_of=NOW,
+            as_of=frozen_now,
             evidence=(item,),
         )
     )
@@ -109,8 +122,10 @@ def test_structured_model_agent_retries_invalid_output_then_validates() -> None:
     assert result.agent_id == "model-theme-agent"
 
 
-def test_structured_model_agent_fails_explicitly_after_retry_budget() -> None:
-    item = evidence()
+def test_structured_model_agent_fails_explicitly_after_retry_budget(
+    theme_evidence, valid_output, frozen_now: datetime
+) -> None:
+    item = theme_evidence()
     invalid = valid_output(item)
     invalid["signal"]["evidence_ids"] = ["ev_not_visible"]
     provider = FakeModelProvider([invalid, invalid])
@@ -126,7 +141,7 @@ def test_structured_model_agent_fails_explicitly_after_retry_budget() -> None:
             AgentContext(
                 run_id="run_model",
                 subject="000001.SZ",
-                as_of=NOW,
+                as_of=frozen_now,
                 evidence=(item,),
             )
         )

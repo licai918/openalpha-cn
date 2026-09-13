@@ -9,8 +9,22 @@ from __future__ import annotations
 from html import escape
 from pathlib import Path
 
+from openalpha_cn.config import OpenAlphaConfig
+
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_DIR = ROOT / "assets" / "diagrams"
+
+DEFAULT_REQUEST_MIB = int(OpenAlphaConfig.model_fields["max_request_bytes"].default) // (
+    1024 * 1024
+)
+"""The declared default request ceiling, read from the settings model rather than restated.
+
+This diagram said `8 MiB 默认请求上限` for as long as `V2-P4-043` has been merged -- that row
+raised the default to 32 MiB, and this was a fourth statement of a number that lives in
+`config.py`, and the one that was wrong. The **declared** default is used rather than
+`load_config()`, so the generated asset never depends on the environment of whoever regenerates
+it.
+"""
 
 COLORS = {
     "indigo": "#5968F2",
@@ -218,8 +232,8 @@ class Svg:
 def landscape() -> str:
     svg = Svg(
         index=1,
-        title="API 全景｜四类入口共享五条功能链",
-        subtitle="REST、SDK、CLI 与 React 工作台通过同一 FastAPI 合同进入证据、研究、产品、组合与验证能力。",
+        title="API 全景｜四类入口与五条功能链",
+        subtitle="REST 调用方经同一 FastAPI 边界进入，SDK 与 CLI 在进程内调用同一批服务。",
     )
     svg.section(x=64, y=194, text="调用入口", color=COLORS["slate"])
     for y, label in (
@@ -238,7 +252,7 @@ def landscape() -> str:
         endpoint="GET /health · /docs · /openapi.json",
         lines=(
             "Pydantic 严格 Schema",
-            "8 MiB 默认请求上限",
+            f"{DEFAULT_REQUEST_MIB} MiB 默认请求上限",
             "安全响应头",
             "本机 CORS 白名单",
             "HTTP 只接结构化记录",
@@ -456,8 +470,8 @@ def research_orchestration() -> str:
         title="持久批量研究",
         endpoint="POST /api/v1/research/batches",
         lines=(
-            "1–1000 个不可变请求",
-            "1–32 并发",
+            "1–10000 个不可变请求",
+            "1–8 并发",
             "events / cancel / retry",
             "SQLite 状态与重启恢复",
             "逐项复用同一 runner",
@@ -689,7 +703,7 @@ def validation_loop() -> str:
             64,
             "同路径回放",
             "POST /api/v1/backtests/replay",
-            ("冻结 ReplayCorpus", "ResearchEngine.run_cycle", "确定性 / 防前视报告"),
+            ("冻结 ReplayCorpus", "ResearchEngine.run_cycle", "两遍比对 · 前视语料加载即拒"),
             COLORS["purple"],
         ),
         (
@@ -710,7 +724,7 @@ def validation_loop() -> str:
             1054,
             "结果归因",
             "POST /api/v1/backtests/validate",
-            ("研究结果 + 未来观察", "重算 signal / decision ID", "规则 / 因子 / Agent 归因"),
+            ("研究结果 + 未来观察", "重算 signal / decision ID", "规则类目两项条款 · 显式残差"),
             COLORS["teal"],
         ),
     )
@@ -733,7 +747,7 @@ def validation_loop() -> str:
         title="验证结果汇总层",
         lines=(
             "ReplayReport + PortfolioBacktestReport + EventStudyReport + ValidationResult",
-            "共同回答：当时是否可知？是否可成交？是否显著？哪条规则、因子或 Agent 贡献了结果？",
+            "共同回答：当时是否可知？是否可成交？是否显著？成本与空仓机会成本各占多少、残差多大？",
         ),
         color=COLORS["indigo"],
         fill="#EEF1FF",
@@ -768,7 +782,9 @@ def main() -> None:
         "openalpha-api-05-validation-loop.svg": validation_loop(),
     }
     for name, content in diagrams.items():
-        (OUTPUT_DIR / name).write_text(content, encoding="utf-8")
+        # `newline="\n"`: text mode would otherwise write "\r\n" on Windows, and the committed
+        # SVGs are LF everywhere (`.gitattributes`), so the sync test would fail there.
+        (OUTPUT_DIR / name).write_text(content, encoding="utf-8", newline="\n")
     print(f"generated {len(diagrams)} API relationship diagrams in {OUTPUT_DIR}")
 
 

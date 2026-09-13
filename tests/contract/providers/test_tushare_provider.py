@@ -1,5 +1,4 @@
 from datetime import UTC, datetime
-from typing import Any
 
 import pytest
 
@@ -7,18 +6,8 @@ from openalpha_cn.providers.base import ProviderFailure, ProviderRequest
 from openalpha_cn.providers.tushare import TushareProvider
 
 
-class FakeTransport:
-    def __init__(self, response: dict[str, Any]) -> None:
-        self.response = response
-        self.payload: dict[str, Any] | None = None
-
-    def post(self, payload: dict[str, Any]) -> dict[str, Any]:
-        self.payload = payload
-        return self.response
-
-
-def test_tushare_byot_maps_daily_payload_without_exposing_token() -> None:
-    transport = FakeTransport(
+def test_tushare_byot_maps_daily_payload_without_exposing_token(fake_tushare_transport) -> None:
+    transport = fake_tushare_transport(
         {
             "code": 0,
             "msg": None,
@@ -59,8 +48,8 @@ def test_tushare_byot_maps_daily_payload_without_exposing_token() -> None:
     assert "secret-token" not in repr(batch)
 
 
-def test_tushare_missing_token_is_an_explicit_configuration_failure() -> None:
-    provider = TushareProvider(token="", transport=FakeTransport({}))
+def test_tushare_missing_token_is_an_explicit_configuration_failure(fake_tushare_transport) -> None:
+    provider = TushareProvider(token="", transport=fake_tushare_transport({}))
 
     with pytest.raises(ProviderFailure) as captured:
         provider.fetch(
@@ -74,10 +63,48 @@ def test_tushare_missing_token_is_an_explicit_configuration_failure() -> None:
     assert captured.value.retryable is False
 
 
-def test_tushare_upstream_error_never_becomes_empty_success() -> None:
+def test_tushare_metadata_declares_supported_datasets(fake_tushare_transport) -> None:
+    provider = TushareProvider(token="secret-token", transport=fake_tushare_transport({}))
+
+    # Grows by exactly one entry per row added to TUSHARE_DATASETS; `trade_cal` is
+    # V2-P1-004's, `stock_basic` and `namechange` are V2-P1-005's, `adj_factor` is
+    # V2-P1-006's, `daily_basic` is V2-P1-007's, `suspend_d` and `stk_limit` are V2-P1-008's,
+    # `index_weight` is V2-P1-009's, `index_classify` and `index_member_all` are V2-P1-010's,
+    # `income` / `balancesheet` / `cashflow` / `fina_indicator` are V2-P1-011's, and
+    # `index_daily` is V2-P3-016's -- the sixteenth, and the first added by a P3
+    # issue rather than a P1 one, because it is the regressor V2-P3-013 measured
+    # the absence of.
+    # Still spelled out in full rather than derived
+    # from the table, so that adding a dataset has to be an intentional edit here too.
+    #
+    # "Supported" is not "served on both planes": `stock_basic` and `namechange` declare
+    # `serves_evidence_plane=False`, so `fetch()` refuses them by name while `fetch_panel()`
+    # serves them. They belong in this tuple because the provider does support them -- see
+    # `tests/contract/providers/test_tushare_registry_datasets.py` for both halves.
+    assert provider.metadata.supported_datasets == (
+        "daily",
+        "trade_cal",
+        "stock_basic",
+        "namechange",
+        "adj_factor",
+        "daily_basic",
+        "suspend_d",
+        "stk_limit",
+        "index_weight",
+        "index_daily",
+        "index_classify",
+        "index_member_all",
+        "income",
+        "balancesheet",
+        "cashflow",
+        "fina_indicator",
+    )
+
+
+def test_tushare_upstream_error_never_becomes_empty_success(fake_tushare_transport) -> None:
     provider = TushareProvider(
         token="secret-token",
-        transport=FakeTransport({"code": -2001, "msg": "permission denied", "data": None}),
+        transport=fake_tushare_transport({"code": -2001, "msg": "permission denied", "data": None}),
     )
 
     with pytest.raises(ProviderFailure) as captured:

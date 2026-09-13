@@ -1,6 +1,6 @@
 import csv
 import json
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 
 import duckdb
@@ -12,8 +12,7 @@ from openalpha_cn.providers.base import (
     ProviderRequest,
 )
 from openalpha_cn.providers.file import FileProvider
-
-AS_OF = datetime(2026, 7, 24, 10, 30, tzinfo=UTC)
+from openalpha_cn.storage.parquet import read_parquet_records
 
 
 def rows() -> list[dict[str, object]]:
@@ -41,20 +40,6 @@ def rows() -> list[dict[str, object]]:
             "payload": {"close": 8.2, "board_count": 1},
         },
     ]
-
-
-def metadata() -> ProviderMetadata:
-    return ProviderMetadata(
-        provider_id="user.file",
-        display_name="User-owned file",
-        source_license="user-supplied",
-        redistribution="restricted",
-        credential_env_vars=(),
-        caching_policy="local-permitted",
-        rate_limit="not-applicable",
-        freshness="defined-by-input-file",
-        failure_semantics="Malformed or unreadable inputs raise ProviderFailure.",
-    )
 
 
 def write_fixture(path: Path, format_name: str) -> None:
@@ -133,10 +118,17 @@ def write_fixture(path: Path, format_name: str) -> None:
 def test_file_provider_reads_all_supported_formats_point_in_time(
     tmp_path: Path,
     format_name: str,
+    metadata: ProviderMetadata,
+    frozen_now: datetime,
 ) -> None:
+    AS_OF = frozen_now
     source = tmp_path / f"events.{format_name}"
     write_fixture(source, format_name)
-    provider = FileProvider(path=source, metadata=metadata())
+    # Only `.parquet` ever calls into `parquet_reader`; the other three formats never
+    # touch it, so passing it unconditionally here is harmless for them and lets this one
+    # parametrized construction call cover all four formats, matching the real DuckDB-backed
+    # reader `cli.py`/`sdk.py` inject in production.
+    provider = FileProvider(path=source, metadata=metadata, parquet_reader=read_parquet_records)
 
     batch = provider.fetch(ProviderRequest(dataset="events", as_of=AS_OF, subjects=("000001.SZ",)))
 
@@ -148,10 +140,31 @@ def test_file_provider_reads_all_supported_formats_point_in_time(
     assert batch.payload_digest.startswith("sha256:")
 
 
-def test_file_provider_returns_explicit_no_data_result(tmp_path: Path) -> None:
+def test_file_provider_metadata_supported_datasets_is_caller_defined(tmp_path: Path) -> None:
+    caller_metadata = ProviderMetadata(
+        provider_id="user.file",
+        display_name="User-owned file",
+        source_license="user-supplied",
+        redistribution="restricted",
+        credential_env_vars=(),
+        caching_policy="local-permitted",
+        rate_limit="not-applicable",
+        freshness="defined-by-input-file",
+        failure_semantics="Malformed or unreadable inputs raise ProviderFailure.",
+        supported_datasets=("events",),
+    )
+    provider = FileProvider(path=tmp_path / "events.json", metadata=caller_metadata)
+
+    assert provider.metadata.supported_datasets == ("events",)
+
+
+def test_file_provider_returns_explicit_no_data_result(
+    tmp_path: Path, metadata: ProviderMetadata, frozen_now: datetime
+) -> None:
+    AS_OF = frozen_now
     source = tmp_path / "events.json"
     write_fixture(source, "json")
-    provider = FileProvider(path=source, metadata=metadata())
+    provider = FileProvider(path=source, metadata=metadata)
 
     batch = provider.fetch(ProviderRequest(dataset="events", as_of=AS_OF, subjects=("999999.SH",)))
 
@@ -160,10 +173,40 @@ def test_file_provider_returns_explicit_no_data_result(tmp_path: Path) -> None:
     assert batch.no_data_reason == "No visible records matched the request."
 
 
-def test_file_provider_raises_structured_failure_for_malformed_input(tmp_path: Path) -> None:
+def test_file_provider_raises_structured_failure_for_malformed_input(
+    tmp_path: Path, metadata: ProviderMetadata, frozen_now: datetime
+) -> None:
+    AS_OF = frozen_now
     source = tmp_path / "events.json"
     source.write_text("{not-json", encoding="utf-8")
-    provider = FileProvider(path=source, metadata=metadata())
+    provider = FileProvider(path=source, metadata=metadata)
+
+    with pytest.raises(ProviderFailure) as captured:
+        provider.fetch(ProviderRequest(dataset="events", as_of=AS_OF))
+
+    assert captured.value.category == "invalid_response"
+    assert captured.value.provider_id == "user.file"
+    assert captured.value.retryable is False
+
+
+def test_file_provider_raises_structured_failure_for_malformed_parquet_input(
+    tmp_path: Path, metadata: ProviderMetadata, frozen_now: datetime
+) -> None:
+    """A corrupt `.parquet` file must still raise `ProviderFailure`, not a bare duckdb
+    error. DuckDB's own failure (`duckdb.Error` in the current implementation, or
+    whatever internal type replaces it) is provider-internal machinery -- pinning this
+    behavior at the contract-test level (rather than only relying on the malformed-JSON
+    case above, which never touches DuckDB at all) is what protects V2-P0B-011's move of
+    the DuckDB dependency out of `providers/file.py` from silently losing this failure
+    translation.
+    """
+    AS_OF = frozen_now
+    source = tmp_path / "events.parquet"
+    source.write_bytes(b"not a real parquet file")
+    # Inject the real DuckDB-backed reader (as `cli.py`/`sdk.py` do) so this exercises an
+    # actual duckdb.Error -> ValueError -> ProviderFailure translation, not merely the
+    # "no reader configured" ValueError a provider built without one would raise instead.
+    provider = FileProvider(path=source, metadata=metadata, parquet_reader=read_parquet_records)
 
     with pytest.raises(ProviderFailure) as captured:
         provider.fetch(ProviderRequest(dataset="events", as_of=AS_OF))

@@ -8,8 +8,10 @@ from openalpha_cn.api.app import create_app
 from openalpha_cn.domain.signal import SignalFrame
 
 
-def test_committee_and_event_study_are_public_api_capabilities(tmp_path: Path) -> None:
-    client = TestClient(create_app(runtime_dir=tmp_path))
+def test_committee_and_event_study_are_public_api_capabilities(
+    tmp_path: Path, frozen_now: datetime
+) -> None:
+    client = TestClient(create_app(runtime_dir=tmp_path, clock=lambda: frozen_now))
     now = datetime(2026, 7, 24, 10, 30, tzinfo=UTC)
     signal = SignalFrame(
         subject="000001.SZ",
