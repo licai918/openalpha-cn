@@ -1376,6 +1376,42 @@ def test_a_module_copied_back_with_copy2_is_seen_on_posix(tmp_path: Path) -> Non
     assert changes(before, snapshot(tmp_path)) == ([] if os.name == "nt" else [PUT_BACK])
 
 
+def test_a_chmod_to_the_mode_a_module_had_is_a_change_on_posix(tmp_path: Path) -> None:
+    """D14 fix review m-4: on POSIX, metadata alone is a change, whoever changed it.
+
+    Measured once outside the suite, on macOS: `xattr -w`, a `chmod` to the mode the module
+    already had, and a hard link to it made outside the checkout each left its bytes, size,
+    modification time and inode as they were, moved its change time, and were reported. A test
+    seldom does the first two; an editor, Finder or a backup tool may, and then a run no test
+    wrote fails -- `tests/checkout_guard.py` lists it. An extended attribute has no portable
+    spelling, so it is the one measured and not asserted here.
+    """
+    module = _scratch_checkout(tmp_path)
+    before = snapshot(tmp_path)
+
+    os.chmod(module, module.stat().st_mode)
+
+    assert changes(before, snapshot(tmp_path)) == ([] if os.name == "nt" else [PUT_BACK])
+
+
+def test_a_hard_link_to_a_module_made_outside_the_checkout_is_a_change_on_posix(
+    tmp_path: Path,
+) -> None:
+    """m-4's one metadata change worth reporting whoever made it: a link made in `tmp_path`.
+
+    From then on, writing through the link writes the checkout's module, so the line it gets is
+    not a false one. On Windows the change time is not read and the link is not seen.
+    """
+    checkout = tmp_path / "checkout"
+    module = _scratch_checkout(checkout)
+    before = snapshot(checkout)
+
+    os.link(module, tmp_path / "module.py")
+
+    assert module.stat().st_nlink == 2
+    assert changes(before, snapshot(checkout)) == ([] if os.name == "nt" else [PUT_BACK])
+
+
 def test_a_sourceless_pyc_beside_the_sources_is_a_write(tmp_path: Path) -> None:
     """D14 review m-2: a `.pyc` was ignored wherever it stood, so a planted one went unseen.
 

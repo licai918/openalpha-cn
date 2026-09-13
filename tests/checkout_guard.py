@@ -70,6 +70,11 @@ changed it:
 
 * anything written under `src/` or `tests/` while the session runs: an editor or an IDE saving,
   `touch`, a formatter, `git checkout`, `stash` or `rebase` in this checkout, a second run in it;
+* on POSIX, a change to nothing but the metadata of a file under `src/` or `tests/`, which moves
+  its change time: an extended attribute that Finder, an editor, a backup tool or `xattr -w`
+  writes; a `chmod`, even to the mode the file had; a hard link to it, made anywhere, `tmp_path`
+  included. D14 fix review m-4 measured each reported as `changed ... its change time or inode is
+  not`. The link deserves that line whoever made it: writing through it writes the checkout;
 * a name that appears at the root while the session runs: a concurrent `lint-imports` making its
   cache, `uv build` making `dist/`, `ruff` or `mypy` making theirs the first time;
 * an output of this run that `run_outputs` does not read, such as another plugin's report file.
@@ -326,10 +331,11 @@ def snapshot(root: Path) -> Snapshot:
 def _what_cannot_be_put_back(status: os.stat_result) -> tuple[int, ...]:
     """On POSIX, a file's change time and inode; nothing on Windows.
 
-    A change time moves with every write, `utime`, `chmod` and link, and no user-space call sets
-    it back; an inode is a different one after a file is replaced. On Windows `st_ctime` is the
-    creation time -- Python 3.12 deprecates it there in favour of `st_birthtime` -- so it is not
-    read, and a same-size rewrite with its modification time put back is not seen there.
+    A change time moves with every write, `utime`, `chmod`, link and extended attribute written,
+    and no user-space call sets it back; an inode is a different one after a file is replaced. On
+    Windows `st_ctime` is the creation time -- Python 3.12 deprecates it there in favour of
+    `st_birthtime` -- so it is not read, and a same-size rewrite with its modification time put
+    back is not seen there.
     """
     return () if os.name == "nt" else (status.st_ctime_ns, status.st_ino)
 
