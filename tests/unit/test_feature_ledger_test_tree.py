@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import csv
 import importlib.util
+import re
 from collections import Counter
 from pathlib import Path
 from types import ModuleType
@@ -293,6 +294,102 @@ def test_the_real_ledger_has_no_unreviewed_or_unknown_rows() -> None:
     assert totals["unknown"] == 0
 
 
+# --- what the notes and the anchors point at (D13, final review M10) ------------------------
+
+_NOTE_NODE_ID: Final = re.compile(
+    r"(?<![\w/.])((?:tests|web)/[\w./-]+\.py::[A-Za-z_]\w*(?:::[A-Za-z_]\w*)?)"
+)
+"""A pytest node id written into a notes cell: `tests/...py::name` or `...py::Class::name`."""
+
+_NOTE_SYMBOL: Final = re.compile(r"(?<![\w/.])((?:[\w-]+/)*[\w-]+\.py)#([A-Za-z_]\w*)")
+"""A `path.py#symbol` written into a notes cell -- the form `_load` checks in the evidence cells."""
+
+
+def _markdown_headings(text: str) -> list[str]:
+    return [line.lstrip("#").strip() for line in text.splitlines() if re.match(r"#{1,6}\s", line)]
+
+
+def _folded(value: str) -> str:
+    return value.casefold().replace("-", " ")
+
+
+def _anchor_problem(path: Path, anchor: str) -> str | None:
+    """Why `anchor` does not resolve in the non-Python file `path`, or `None` if it does."""
+    text = path.read_text(encoding="utf-8")
+    if path.suffix == ".md":
+        if any(_folded(anchor) in _folded(heading) for heading in _markdown_headings(text)):
+            return None
+        return "no heading contains it"
+    return None if anchor in text else "it does not occur in the file"
+
+
+def test_every_test_the_notes_name_by_node_id_is_a_real_test() -> None:
+    """A notes cell that names `tests/...py::test_name` names a test that exists.
+
+    `_validate_pytest_acceptance` AST-checks the `acceptance_test` of every `pytest` row, and
+    the notes were read by nothing: `OA-MODEL-001` went on citing
+    `test_no_shipped_path_constructs_the_usage_recording_provider_or_writes_usage_rows` after
+    `2f489b0` renamed it to `test_no_shipped_path_calls_a_model_or_records_usage`. This runs
+    the same AST check over every node id written into a notes cell.
+
+    Blind spot, stated: a bare `test_*` name without its path is not checked. The notes also
+    name test modules by their stem (`test_research_cycle`), so a bare name is not reliably a
+    function, and a renamed test cited that way goes unnoticed here.
+    """
+    dangling: list[str] = []
+    for row in _rows():
+        for match in _NOTE_NODE_ID.finditer(row["notes"]):
+            try:
+                bfc._validate_pytest_acceptance(row["feature_id"], match.group(1))
+            except ValueError as error:
+                dangling.append(str(error))
+
+    assert dangling == [], f"notes name tests that do not exist: {dangling}"
+
+
+def test_every_anchor_the_ledger_names_resolves_in_its_file() -> None:
+    """Every `file#anchor` in the evidence cells and `path.py#symbol` in the notes resolves.
+
+    `_load` AST-checks `path.py#symbol` in the evidence cells and reads nothing after the `#`
+    of any other file, so `OA-BOUND-003` cited `docs/data/providers.zh-CN.md#Redistribution`
+    -- a word that file does not contain, under headings that are all Chinese -- and `--check`
+    exited 0. The rules:
+
+    * a Markdown anchor must be contained in one of the file's headings, compared case-folded
+      with `-` read as a space (`#Non-goals` resolves to `## 13. v1 Non-Goals`);
+    * an anchor into any other non-Python file must occur in it verbatim
+      (`deploy/compose.yml#services`);
+    * a `path.py#symbol` in the notes must be declared there by `_module_symbols`, the path
+      read from the repository root and, failing that, from `src/openalpha_cn/` -- the two
+      ways the notes spell a path.
+
+    Blind spots, stated: the Markdown rule accepts any heading that merely contains the
+    anchor, the verbatim rule accepts any occurrence rather than a definition, and a symbol
+    written without a `path.py#` prefix is not read at all.
+    """
+    problems: list[str] = []
+    for row in _rows():
+        for field in ("local_source_evidence", "test_evidence"):
+            for item in row[field].split(";"):
+                raw_path, separator, anchor = item.partition("#")
+                path = ROOT / raw_path.removeprefix("github:")
+                if not separator or path.suffix == ".py":
+                    continue  # no anchor, or one `_load` already checks by AST
+                problem = _anchor_problem(path, anchor)
+                if problem is not None:
+                    problems.append(f"{row['feature_id']} {field}: {item} ({problem})")
+        for match in _NOTE_SYMBOL.finditer(row["notes"]):
+            relative, symbol = match.group(1), match.group(2)
+            candidates = (ROOT / relative, ROOT / "src" / "openalpha_cn" / relative)
+            found = next((candidate for candidate in candidates if candidate.is_file()), None)
+            if found is None:
+                problems.append(f"{row['feature_id']} notes: {match.group(0)} (no such file)")
+            elif symbol not in bfc._module_symbols(found):
+                problems.append(f"{row['feature_id']} notes: {match.group(0)} (not declared)")
+
+    assert problems == [], f"the ledger points at anchors that are not there: {problems}"
+
+
 # --- the debt this module cannot check, held so it can only shrink (`V2-P5-038`) --------------
 UNVALIDATED_ACCEPTANCE_ROWS: Final[int] = 26
 """How many rows carry `acceptance_kind="legacy-prose"`. It may be lowered. It may not be raised.
@@ -329,8 +426,11 @@ become visible, deliberate edits to a file under review, instead of a silent dri
 
 **The floor is not zero, and pretending otherwise would be the wrong guard.** Three rows --
 `OA-IFACE-006`, `OA-IFACE-007`, `OA-OPS-002` -- name `web/src/App.test.tsx` and
-`web/e2e/golden-flow.spec.ts`, which no `pytest` node id can address. They need a fourth
-acceptance kind or they stay prose; either is a decision this number does not prejudge.
+`web/e2e/golden-flow.spec.ts`, which no `pytest` node id can address. A non-`pytest` kind
+already exists -- `ci-job`, `<workflow>::<job-id>`, which `OA-OPS-005` uses -- but it names a
+whole workflow job. So what these rows lack is either an acceptance finer-grained than a job or
+the decision that a job is fine-grained enough; this number prejudges neither. (An earlier
+version of this paragraph said they needed "a fourth acceptance kind"; `ci-job` is the fourth.)
 """
 
 
