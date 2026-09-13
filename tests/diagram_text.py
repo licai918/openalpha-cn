@@ -18,6 +18,11 @@ A unit is every string argument of one call, searched through tuples and lists b
 nested call, which is a unit of its own; and every tuple literal that is no call's argument and
 sits inside no such tuple, such as one row of the table a loop later draws.
 
+Both readers take the generator's path as `filename`, which `ast.parse` writes into any
+SyntaxError or warning the source raises. The tests read the two generators one after the other,
+so a report without it said `<unknown>` and hid which generator it came from. A caller that
+leaves `filename` out still gets `<unknown>`.
+
 What neither can see: text computed at run time -- an f-string's formatted values, a string built
 from pieces -- and the grouping a loop gives rows it draws into one panel. A module, class or
 function docstring is never read: it is not drawn.
@@ -48,9 +53,12 @@ def _docstring_ids(tree: ast.AST) -> set[int]:
     return found
 
 
-def diagram_strings(source: str) -> list[Clause]:
-    """Every string literal a generator's source holds, one each, with its line; no docstring."""
-    tree = ast.parse(source)
+def diagram_strings(source: str, *, filename: str = "<unknown>") -> list[Clause]:
+    """Every string literal a generator's source holds, one each, with its line; no docstring.
+
+    `filename` is the generator's path, which `ast.parse` names in a SyntaxError or warning.
+    """
+    tree = ast.parse(source, filename=filename)
     docstrings = _docstring_ids(tree)
     return sorted(
         (
@@ -73,9 +81,12 @@ def _strings_in(node: ast.AST) -> list[str]:
     return []
 
 
-def diagram_units(source: str) -> list[Clause]:
-    """What each drawing call or data row draws together, as clauses, each with its first line."""
-    tree = ast.parse(source)
+def diagram_units(source: str, *, filename: str = "<unknown>") -> list[Clause]:
+    """What each drawing call or data row draws together, as clauses, each with its first line.
+
+    `filename` is the generator's path, which `ast.parse` names in a SyntaxError or warning.
+    """
+    tree = ast.parse(source, filename=filename)
     parents = {id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
     in_a_call: set[int] = set()
     units: list[tuple[int, list[str]]] = []

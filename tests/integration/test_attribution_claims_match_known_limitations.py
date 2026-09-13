@@ -77,12 +77,15 @@ Two couplings, both anchored on `KNOWN_ATTRIBUTION_LIMITATIONS` in
 from __future__ import annotations
 
 import re
+import warnings
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final, get_args
 
+import pytest
+from diagram_text import diagram_strings, diagram_units
 from prose_clauses import clauses, holds_unnegated_phrase, marker_pattern
 
 from openalpha_cn.backtest.validation import KNOWN_ATTRIBUTION_LIMITATIONS
@@ -1012,3 +1015,33 @@ def test_the_prd_coupling_refuses_every_way_s65_could_slip_back_to_in() -> None:
         label for label, text in mutations.items() if not _prd_problems(text, READER_TEST_ABSENT)
     ]
     assert not accepted, f"the PRD coupling accepted: {accepted}"
+
+
+# --- The diagram reader -----------------------------------------------------------------------
+
+EXAMPLE_GENERATOR: Final[str] = "scripts/generate_example_diagrams.py"
+"""A generator path no file has, so the name in a report can only have come from `filename=`."""
+
+
+def test_the_diagram_reader_names_the_generator_it_parsed() -> None:
+    """A SyntaxError or warning from `tests/diagram_text.py` must say which generator raised it.
+
+    Its callers read two generators one after the other, and `ast.parse` names a source it was
+    given no `filename=` for `<unknown>`, which hides which of the two a report came from. The
+    final review of `d4ef5e4` found both readers doing this; `1178151` fixed the same kind of
+    call at three loops elsewhere. Each reader is held to both reports: a SyntaxError, and an
+    invalid-escape warning (DeprecationWarning on 3.11, SyntaxWarning from 3.12).
+    """
+    for reader in (diagram_strings, diagram_units):
+        with pytest.raises(SyntaxError) as raised:
+            reader("svg.text(1, 2, 'unclosed'\n", filename=EXAMPLE_GENERATOR)
+        assert raised.value.filename == EXAMPLE_GENERATOR, (
+            f"{reader.__name__}'s SyntaxError names {raised.value.filename!r}"
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            reader('svg.text(1, 2, "\\q")\n', filename=EXAMPLE_GENERATOR)
+        named = [str(warning.filename) for warning in caught]
+        assert named and all(name == EXAMPLE_GENERATOR for name in named), (
+            f"{reader.__name__}'s warnings name {named}"
+        )
