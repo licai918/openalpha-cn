@@ -49,6 +49,7 @@ import pytest
 from prose_clauses import clauses
 
 from openalpha_cn.agents.committee import DeliberationCommittee
+from openalpha_cn.batch_contracts import BatchResultRef
 from openalpha_cn.domain.portfolio import PortfolioOrder, PortfolioTransition
 from openalpha_cn.domain.report import ResearchReport
 from openalpha_cn.model_view import KNOWN_MODEL_VIEW_LIMITATIONS
@@ -315,6 +316,27 @@ def _the_http_contract_still_names_few_boundaries() -> str | None:
         "docs/api/http.md now names every KNOWN_MODEL_VIEW_LIMITATIONS code: the pointer to it "
         "may hold"
     )
+
+
+def _the_portfolio_backtest_still_skips_run_cycle() -> str | None:
+    multi_day = SRC / "backtest" / "multi_day.py"
+    reached = _imports_under(multi_day, ("openalpha_cn.runtime",))
+    if "run_cycle" not in multi_day.read_text(encoding="utf-8") and not reached:
+        return None
+    return f"backtest/multi_day.py now reaches run_cycle ({reached}): re-read what it validates"
+
+
+def _a_batch_result_still_names_only_a_decision() -> str | None:
+    fields = sorted(BatchResultRef.model_fields)
+    if fields == ["decision_id", "final_action", "signal_id"]:
+        return None
+    return f"BatchResultRef now carries {fields}: re-read what a batch item runs"
+
+
+def _a_portfolio_transition_still_names_no_batch() -> str | None:
+    fields = sorted({*PortfolioOrder.model_fields, *PortfolioTransition.model_fields})
+    linked = [field for field in fields if "batch" in field or "task" in field]
+    return None if not linked else f"a portfolio order or transition now carries {linked}"
 
 
 # --- The retired claims -----------------------------------------------------------------------
@@ -688,6 +710,51 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         ),
         paraphrase="The HTTP document is where every named boundary is spelled out.",
         premise=_the_http_contract_still_names_few_boundaries,
+    ),
+    RetiredClaim(
+        name="every validation runs through run_cycle",
+        pattern=re.compile(rf"所有验证{_NOT_END}{{0,12}}同一个\s*`?run_cycle"),
+        refuted_by=(
+            "In backtest/ only replay.py calls run_cycle (backtest/replay.py:263-264); the "
+            "multi-day portfolio backtest drives PortfolioSimulator (backtest/multi_day.py:58-66, "
+            ":204) and never calls it, and the event study is EventStudy().analyze "
+            "(sdk.py:245-247)."
+        ),
+        retired=("所有验证仍使用四时钟证据和同一个 `run_cycle`",),
+        paraphrase="每一种回测都走同一个研究循环。",
+        premise=_the_portfolio_backtest_still_skips_run_cycle,
+    ),
+    RetiredClaim(
+        name="a batch item runs the whole research chain",
+        pattern=re.compile(rf"每个任务仍(?:执行完整|保留){_NOT_END}{{0,24}}(?:双委员会|组合)"),
+        refuted_by=(
+            "A batch item runs runner(item.request) (runtime/batch.py:290), and the shipped "
+            "runners run ResearchEngine.run_cycle alone (api/app.py:1831-1843; sdk.py:216-234 "
+            "through run_research): agents over the request's evidence, the risk gate and the "
+            "decision ledger (runtime/engine.py:87-200). The committee, the portfolio and the "
+            "validations are calls of their own, and an item's result is a decision_id, a "
+            "signal_id and a final_action (batch_contracts.py:132-139)."
+        ),
+        retired=(
+            "每个任务仍执行完整证据、Agent、双委员会、风险、组合与验证链",
+            "每个任务仍保留四时钟证据、结构化信号、风险与组合记录",
+        ),
+        paraphrase="批量里的每一项都会跑完委员会和组合核算。",
+        premise=_a_batch_result_still_names_only_a_decision,
+    ),
+    RetiredClaim(
+        name="portfolio records can be looked up by a batch's task ID",
+        pattern=re.compile(rf"组合记录{_NOT_END}{{0,4}}沿任务\s*ID"),
+        refuted_by=(
+            "GET /api/v1/research/batches/{batch_id} returns the batch's items, each with its "
+            "request, status and result reference -- decision_id, signal_id, final_action "
+            "(api/app.py:2082-2088; batch_contracts.py:132-150, :177-188). The portfolio ledger "
+            "keys its rows on order_id and subject and holds the transition as JSON "
+            "(storage/portfolio.py:22-27): no batch, task or decision ID."
+        ),
+        retired=("证据快照、Agent 输出、风险与组合记录都能沿任务 ID 查询。",),
+        paraphrase="每笔持仓变化都能按批次查到。",
+        premise=_a_portfolio_transition_still_names_no_batch,
     ),
 )
 """Each family of wordings `D13` retired, the code fact that refutes it, and what it retired."""
