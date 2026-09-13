@@ -78,7 +78,7 @@
   <rect x="700" y="386" width="7" height="78" rx="3.5" fill="#E89422" />
   <text x="724" y="417" class="cardTitle">研究产品链</text>
   <text x="908" y="415" class="endpoint">POST /api/v1/screen · /reports</text>
-  <text x="908" y="442" class="body">筛选 → 观察池 → 不可变报告</text>
+  <text x="908" y="442" class="body">筛选 · 观察池 · 不可变报告</text>
   <path d="M 654 425 L 692 425" fill="none" stroke="#E89422" stroke-width="3" marker-end="url(#arrow)" />
   <rect x="700" y="474" width="602" height="78" rx="18" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)" />
   <rect x="700" y="474" width="7" height="78" rx="3.5" fill="#D95D67" />

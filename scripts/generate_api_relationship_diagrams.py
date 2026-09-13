@@ -292,7 +292,7 @@ def landscape() -> str:
             386,
             "研究产品链",
             "POST /api/v1/screen · /reports",
-            "筛选 → 观察池 → 不可变报告",
+            "筛选 · 观察池 · 不可变报告",
             COLORS["orange"],
         ),
         (
@@ -461,7 +461,7 @@ def research_orchestration() -> str:
     svg = Svg(
         index=3,
         title="研究编排链｜单次与批量 API 汇入同一 run_cycle",
-        subtitle="无论 live、replay 还是 backtest，研究请求都经过同一证据路由、Agent 聚合、风险门和持久化路径。",
+        subtitle="单次、批量与回放的研究请求，都经过同一证据路由、Agent 聚合、风险门和持久化路径。",
     )
     svg.card(
         x=64,
@@ -484,7 +484,7 @@ def research_orchestration() -> str:
             "1–10000 个不可变请求",
             "1–8 并发",
             "events / cancel / retry",
-            "SQLite 状态与重启恢复",
+            "SQLite 状态 · 重启后重新排队",
             "逐项复用同一 runner",
         ),
         color=COLORS["indigo"],
@@ -758,7 +758,7 @@ def validation_loop() -> str:
         title="验证结果汇总层",
         lines=(
             "ReplayReport + PortfolioBacktestReport + EventStudyReport + ValidationResult",
-            "共同回答：当时是否可知？是否可成交？是否显著？成本与空仓机会成本各占多少、残差多大？",
+            "共同回答：能否复现？是否可成交？是否显著？成本与空仓机会成本各占多少、残差多大？",
         ),
         color=COLORS["indigo"],
         fill="#EEF1FF",

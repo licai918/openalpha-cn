@@ -357,7 +357,7 @@ def overview() -> None:
             "03",
             "决策约束",
             "DeliberationOutcome",
-            ("Bull / Bear · 三态风控", "显式弃权 · A 股交易约束"),
+            ("Bull / Bear · 三态风控", "显式弃权 · 一次可选调用"),
             AMBER,
         ),
         (
@@ -377,11 +377,11 @@ def overview() -> None:
             x, y, width, height, title=title, label=f"{number} / {label}", color=color, lines=lines
         )
     svg.arrow(696, 331, 716, 331, color=VIOLET)
-    svg.path("M877 418V430H535V440", color=AMBER)
-    svg.arrow(696, 527, 716, 527, color=BLUE)
+    svg.path("M877 418V430H535V440", color=AMBER, dashed=True)
+    svg.arrow(696, 527, 716, 527, color=BLUE, dashed=True)
     svg.path("M877 614V650H535V625", color=AMBER, dashed=True)
     svg.pill(566, 636, 312, "统计证据反哺规则 · 不自动训练模型", color=AMBER)
-    svg.arrow(339, 451, 374, 451, color=CYAN, label="规范化", label_y=435)
+    svg.arrow(339, 331, 374, 331, color=CYAN, label="规范化", label_y=315)
 
     svg.section_label(1081, 214, "C", "系统级保证", CORAL)
     svg.panel(
@@ -397,7 +397,7 @@ def overview() -> None:
             "Checkpoint · SQLite WAL",
             "Retry / Recovery · 逐项终态",
             "证据不足时显式 abstain",
-            "API / SDK / CLI / Web 同契约",
+            "REST 经 FastAPI · SDK / CLI 进程内",
         ),
     )
     svg.panel(
@@ -561,7 +561,7 @@ def agents() -> None:
         color=VIOLET,
         lines=(
             "进度事件 · 取消 · 重试",
-            "Checkpoint · 宕机恢复",
+            "Checkpoint · 重试续跑",
             "每个标的复用同一 runner",
             "无旁路分析逻辑",
         ),
@@ -704,8 +704,8 @@ def decision() -> None:
         f'  <rect x="822" y="260" width="150" height="120" rx="18" fill="{PANEL_SOFT}" stroke="{AMBER}" stroke-opacity=".34" />'
     )
     svg.text(846, 289, "RISK PANEL", css="micro", color=AMBER)
-    svg.text(846, 320, "激进 / 中性", css="body", color=TEXT)
-    svg.text(846, 347, "保守 / 弃权", css="body", color=TEXT)
+    svg.text(846, 320, "激进/中性/保守", css="body", color=TEXT)
+    svg.text(846, 347, "pass/reduce/block", css="small", color=MUTED)
     svg.path("M308 340H346", color=AMBER, dashed=True)
     svg.arrow(578, 320, 596, 320, color=AMBER, dashed=True)
     svg.arrow(804, 320, 822, 320, color=AMBER, dashed=True)
@@ -721,26 +721,26 @@ def decision() -> None:
         anchor="middle",
     )
 
-    svg.section_label(1045, 214, "C", "最终研究裁决", CORAL)
+    svg.section_label(1045, 214, "C", "委员会结果 · 交还调用方", CORAL)
     svg.panel(
         1034,
         232,
         342,
         250,
-        title="RiskGate / DecisionLedger",
-        label="POLICY DECISION",
+        title="DeliberationOutcome",
+        label="RETURNED TO CALLER",
         color=CORAL,
         lines=(
-            "pass · reduce · block",
-            "watch · avoid · abstain",
-            "风险信号保留，不被模型文案覆盖",
-            "证据 / 路由 / 信号 / 裁决全链可追溯",
-            "显式弃权是合法的一等结果",
+            "bull_case / bear_case",
+            "risk_votes：pass · reduce · block",
+            "adjusted_signal / ablation",
+            "不写入 DecisionLedger",
+            "输入的显式弃权原样保留",
         ),
     )
     svg.path("M996 357H1015V340H1034", color=CORAL, dashed=True)
 
-    svg.section_label(357, 524, "D", "组合会计 · 显式 portfolio compose", BLUE)
+    svg.section_label(357, 524, "D", "组合会计 · 显式 portfolio execute", BLUE)
     svg.raw(
         f'  <rect x="346" y="542" width="1030" height="128" rx="22" fill="{PANEL}" stroke="{BLUE}" stroke-opacity=".30" />'
     )
@@ -769,7 +769,7 @@ def validation() -> None:
     svg = Svg(
         index=5,
         eyebrow="验证与反馈",
-        title="用同一路径回答：是否有效、为何有效、下一轮改什么",
+        title="三重验证回答：是否有效、为何有效、下一轮改什么",
         subtitle="实时研究与历史回放共享 run_cycle；统计、组合与产物层只消费可复核账本，反馈必须经人工审阅后进入规则。",
         accent=BLUE,
     )
@@ -783,7 +783,7 @@ def validation() -> None:
         title="实时研究",
         label="LIVE RESEARCH",
         color=CYAN,
-        lines=("API / SDK / CLI / Web", "同一输入与输出契约", "授权 Provider 载荷"),
+        lines=("REST / SDK / CLI / Web 发起", "都汇入同一 run_cycle", "授权 Provider 载荷"),
     )
     svg.panel(
         64,
@@ -835,8 +835,8 @@ def validation() -> None:
         svg.text(x + 22, y + 29, title.upper(), css="micro", color=color)
         svg.text(x + 22, y + 58, headline, css="cardTitle", color=TEXT)
         svg.text(x + 22, y + 84, detail, css="small", color=MUTED)
-    svg.path("M606 360H625V284H644", color=CYAN)
-    svg.arrow(606, 401, 644, 406, color=VIOLET)
+    svg.path("M606 360H625V284H644", color=CYAN, dashed=True)
+    svg.arrow(606, 401, 644, 406, color=VIOLET, dashed=True)
     svg.path("M606 442H625V528H644", color=CORAL)
 
     svg.section_label(1031, 214, "C", "研究产品与交付", AMBER)
@@ -845,21 +845,21 @@ def validation() -> None:
         232,
         356,
         348,
-        title="ValidationResult",
+        title="研究产品",
         label="RESEARCH PRODUCTS",
         color=AMBER,
         lines=(
             "结构化研究筛选",
             "SQLite 持久观察池",
             "内容寻址不可变报告中心",
-            "REST / SDK / CLI / Web",
+            "REST 全部 · SDK 大部分 · CLI 仅报告",
             "Checkpoint · SQLite WAL · 灾难恢复",
             "报告 / 指标 / 归因保留 provenance",
         ),
     )
-    svg.path("M982 284H1002V330H1020", color=AMBER)
-    svg.arrow(982, 406, 1020, 406, color=AMBER)
-    svg.path("M982 528H1002V482H1020", color=AMBER)
+    svg.path("M982 284H1002V330H1020", color=AMBER, dashed=True)
+    svg.arrow(982, 406, 1020, 406, color=AMBER, dashed=True)
+    svg.path("M982 528H1002V482H1020", color=AMBER, dashed=True)
 
     svg.raw(
         f'  <rect x="348" y="608" width="1028" height="62" rx="19" fill="{AMBER}" fill-opacity=".075" stroke="{AMBER}" stroke-opacity=".30" />'

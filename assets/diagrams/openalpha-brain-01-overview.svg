@@ -101,7 +101,7 @@
   <text x="398" y="469" class="micro" fill="#FBBF24" text-anchor="start" opacity="1">03 / 决策约束</text>
   <text x="398" y="502" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">DeliberationOutcome</text>
   <text x="398" y="531" class="body" fill="#96A8BE" text-anchor="start" opacity="1">Bull / Bear · 三态风控</text>
-  <text x="398" y="555" class="body" fill="#96A8BE" text-anchor="start" opacity="1">显式弃权 · A 股交易约束</text>
+  <text x="398" y="555" class="body" fill="#96A8BE" text-anchor="start" opacity="1">显式弃权 · 一次可选调用</text>
   <rect x="716" y="440" width="322" height="174" rx="22" fill="#0C1928" stroke="#263A52" filter="url(#shadow)" />
   <rect x="717" y="441" width="320" height="172" rx="21" fill="none" stroke="#FFFFFF" stroke-opacity=".035" />
   <rect x="716" y="462" width="3" height="130" rx="1.5" fill="#38BDF8" />
@@ -110,13 +110,13 @@
   <text x="740" y="531" class="body" fill="#96A8BE" text-anchor="start" opacity="1">同路径回放 · 事件统计</text>
   <text x="740" y="555" class="body" fill="#96A8BE" text-anchor="start" opacity="1">组合报告 · 结构化筛选</text>
   <path d="M696 331L716 331" fill="none" stroke="#A78BFA" stroke-width="2.2" marker-end="url(#arrow)" />
-  <path d="M877 418V430H535V440" fill="none" stroke="#FBBF24" stroke-width="2.2" marker-end="url(#arrow)" opacity="1" />
-  <path d="M696 527L716 527" fill="none" stroke="#38BDF8" stroke-width="2.2" marker-end="url(#arrow)" />
+  <path d="M877 418V430H535V440" fill="none" stroke="#FBBF24" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow)" opacity="1" />
+  <path d="M696 527L716 527" fill="none" stroke="#38BDF8" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow)" />
   <path d="M877 614V650H535V625" fill="none" stroke="#FBBF24" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow)" opacity="1" />
   <rect x="566" y="636" width="312" height="28" rx="14" fill="#FBBF24" fill-opacity="0.12" stroke="#FBBF24" stroke-opacity=".38" />
   <text x="722.0" y="655" class="small" fill="#FBBF24" text-anchor="middle" opacity="1">统计证据反哺规则 · 不自动训练模型</text>
-  <path d="M339 451L374 451" fill="none" stroke="#2DD4BF" stroke-width="2.2" marker-end="url(#arrow)" />
-  <text x="356.5" y="435" class="small" fill="#2DD4BF" text-anchor="middle" opacity="1">规范化</text>
+  <path d="M339 331L374 331" fill="none" stroke="#2DD4BF" stroke-width="2.2" marker-end="url(#arrow)" />
+  <text x="356.5" y="315" class="small" fill="#2DD4BF" text-anchor="middle" opacity="1">规范化</text>
   <circle cx="1081" cy="210" r="14" fill="#FB7185" fill-opacity=".16" stroke="#FB7185" stroke-opacity=".45" />
   <text x="1081" y="214" class="navNum" fill="#FB7185" text-anchor="middle" opacity="1">C</text>
   <text x="1105" y="214" class="micro" fill="#FB7185" text-anchor="start" opacity="1">系统级保证</text>
@@ -129,7 +129,7 @@
   <text x="1094" y="347" class="body" fill="#96A8BE" text-anchor="start" opacity="1">Checkpoint · SQLite WAL</text>
   <text x="1094" y="371" class="body" fill="#96A8BE" text-anchor="start" opacity="1">Retry / Recovery · 逐项终态</text>
   <text x="1094" y="395" class="body" fill="#96A8BE" text-anchor="start" opacity="1">证据不足时显式 abstain</text>
-  <text x="1094" y="419" class="body" fill="#96A8BE" text-anchor="start" opacity="1">API / SDK / CLI / Web 同契约</text>
+  <text x="1094" y="419" class="body" fill="#96A8BE" text-anchor="start" opacity="1">REST 经 FastAPI · SDK / CLI 进程内</text>
   <rect x="1070" y="526" width="306" height="144" rx="22" fill="#0C1928" stroke="#263A52" filter="url(#shadow)" />
   <rect x="1071" y="527" width="304" height="142" rx="21" fill="none" stroke="#FFFFFF" stroke-opacity=".035" />
   <rect x="1070" y="548" width="3" height="100" rx="1.5" fill="#FBBF24" />

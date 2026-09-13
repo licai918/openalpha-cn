@@ -69,7 +69,7 @@ import pytest
 from diagram_text import diagram_strings
 from prose_clauses import clauses
 
-from openalpha_cn.agents.committee import DeliberationCommittee
+from openalpha_cn.agents.committee import DeliberationCommittee, RiskVote
 from openalpha_cn.batch_contracts import BatchResultRef
 from openalpha_cn.decisions.risk import RiskGate
 from openalpha_cn.domain.portfolio import PortfolioOrder, PortfolioTransition
@@ -666,7 +666,9 @@ PRODUCT_COMMANDS: Final[frozenset[str]] = frozenset({"screen", "watchlist", "bat
 """CLI command or group names that would reach the screening, watchlist or batch services."""
 
 
-def _the_cli_still_has_no_product_command() -> str | None:
+def _cli_command_names() -> set[str]:
+    """What cli.py registers: each add_typer name, each command name, and the function name of a
+    bare `@app.command()` with its underscores as hyphens, the name Typer gives it."""
     tree = ast.parse((SRC / "cli.py").read_text(encoding="utf-8"))
     names: set[str] = set()
     for node in ast.walk(tree):
@@ -685,7 +687,11 @@ def _the_cli_still_has_no_product_command() -> str | None:
                         if isinstance(first, ast.Constant)
                         else node.name.replace("_", "-")
                     )
-    reached = sorted(names & PRODUCT_COMMANDS)
+    return names
+
+
+def _the_cli_still_has_no_product_command() -> str | None:
+    reached = sorted(_cli_command_names() & PRODUCT_COMMANDS)
     return None if not reached else f"the CLI now has the commands {reached}"
 
 
@@ -737,6 +743,37 @@ def _the_routing_path_still_holds_only_ids() -> str | None:
         SRC / "domain" / "decision.py", "DecisionLedger", "routing_path"
     )
     return None if annotation == "tuple[str, ...]" else f"routing_path is now {annotation}"
+
+
+def _a_risk_vote_still_has_no_abstention() -> str | None:
+    perspectives = get_args(RiskVote.model_fields["perspective"].annotation)
+    decisions = get_args(RiskVote.model_fields["decision"].annotation)
+    if perspectives == ("aggressive", "neutral", "conservative") and decisions == (
+        "pass",
+        "reduce",
+        "block",
+    ):
+        return None
+    return f"a RiskVote is now {perspectives} by {decisions}: re-read the risk panel"
+
+
+def _nothing_is_called_portfolio_compose() -> str | None:
+    routes = [
+        node.value
+        for node in ast.walk(ast.parse((SRC / "api" / "app.py").read_text(encoding="utf-8")))
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and node.value.startswith("/api/")
+        and "compose" in node.value
+    ]
+    found = sorted(
+        {
+            *(name for name in _cli_command_names() if "compose" in name),
+            *routes,
+            *(name for name in dir(OpenAlphaSDK) if "compose" in name),
+        }
+    )
+    return None if not found else f"something is called compose now: {found}"
 
 
 # --- The retired claims -----------------------------------------------------------------------
@@ -940,6 +977,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             r"|四类入口共享五条"
             rf"|(?<![A-Za-z])(?:API|SDK|CLI|Web)(?![A-Za-z]){_NOT_END}{{0,12}}共享同一合同"
             r"|(?:同一核心路径|同一路径)贯通\s*(?:API|REST)"
+            r"|(?:API|REST)\s*/\s*SDK\s*/\s*CLI\s*/\s*Web\s*同(?:一)?契约"
         ),
         refuted_by=(
             "tests/unit/test_surface_parity.py::PARITY maps 48 routes: 28 have no CLI command "
@@ -960,6 +998,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "API 全景\N{FULLWIDTH VERTICAL LINE}四类入口共享五条功能链",
             "API、SDK、CLI、Web 共享同一合同",
             "同一核心路径贯通 API、SDK、CLI、Web 与回放",
+            "API / SDK / CLI / Web 同契约",
         ),
         paraphrase="四个入口能做的事一模一样。",
         premise=_the_workbench_still_skips_the_product_routes,
@@ -989,7 +1028,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         name="interrupted batch work continues by itself after a restart",
         pattern=re.compile(
             rf"启动时{_NOT_END}{{0,12}}(?:并|自动)继续(?:处理|执行)"
-            r"|(?:重试|取消|并发|进度|上限)\s*(?:和|与|、)\s*(?:进程)?重启恢复"
+            r"|(?:重试|取消|并发|进度|上限|状态)\s*(?:和|与|、)\s*(?:进程)?重启恢复|宕机恢复"
             r"|(?:进程)?重启后还能恢复|批量任务中断(?:后还能|也能|后可)恢复"
             rf"|中断重启(?:会|就)?{_NO_COMMA}{{0,6}}继续"
             r"|(?:retry|cancellation),?\s+and\s+restart\s+recovery",
@@ -1020,6 +1059,8 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "进程重启后还能恢复",
             "系统同时支持失败重试、并发上限和重启恢复",
             "bounded concurrent batches with progress, cancellation, retry, and restart recovery",
+            "SQLite 状态与重启恢复",
+            "Checkpoint \N{MIDDLE DOT} 宕机恢复",
         ),
         paraphrase="进程重启后，没跑完的批量任务会自己接着跑。",
         premise=_a_restart_still_only_requeues,
@@ -1183,6 +1224,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             rf"所有验证{_NOT_END}{{0,12}}同一个\s*`?run_cycle"
             r"|(?:验证|回测|daily|paper)\s*共用\s*`?run_cycle"
             r"|research core shared by[^.;]{0,40}(?:backtest|paper|daily)"
+            rf"|backtest{_NOT_END}{{0,20}}(?:都经过|共用|共享)同一|用同一路径回答"
         ),
         refuted_by=(
             "In backtest/ only replay.py calls run_cycle (backtest/replay.py:263-264); the "
@@ -1196,6 +1238,9 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "所有验证仍使用四时钟证据和同一个 `run_cycle`",
             "**同一研究内核**：实时研究、历史回放与验证共用 `run_cycle`",
             "one research core shared by the live, replay, backtest, paper and daily modes",
+            "无论 live、replay 还是 backtest，研究请求都经过同一证据路由、"
+            "Agent 聚合、风险门和持久化路径",
+            "用同一路径回答：是否有效、为何有效、下一轮改什么",
         ),
         paraphrase="每一种回测都走同一个研究循环。",
         premise=_the_portfolio_backtest_still_skips_run_cycle,
@@ -1569,6 +1614,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             rf"{_NO_COMMA}{{0,4}}(?:证据|报告)"
             rf"|观察池{_NOT_END}{{0,4}}再由报告中心"
             rf"|观察池后{_NOT_END}{{0,12}}生成{_NO_COMMA}{{0,8}}报告"
+            r"|筛选\s*\N{RIGHTWARDS ARROW}\s*观察池\s*\N{RIGHTWARDS ARROW}"
         ),
         refuted_by=(
             "WatchlistEntry holds subject, tags, note, created_at and updated_at "
@@ -1582,6 +1628,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "OpenAlpha CN 独立实现 SQLite 持久观察池，并把它连接到证据和报告链",
             "筛选结果可以进入持久观察池，再由报告中心固化",
             "筛选结果进入观察池后，还可以继续生成新的版本化报告",
+            "筛选 \N{RIGHTWARDS ARROW} 观察池 \N{RIGHTWARDS ARROW} 不可变报告",
         ),
         paraphrase="加进观察池的股票会自动带上它的证据和报告。",
         premise=_a_watchlist_entry_still_links_nothing,
@@ -1600,6 +1647,44 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         retired=("路由路径被写进决策记录，后续可以检查为何选择某个角色",),
         paraphrase="决策记录里写着每个角色被叫来的理由。",
         premise=_the_routing_path_still_holds_only_ids,
+    ),
+    RetiredClaim(
+        name="the risk committee casts an abstaining vote",
+        pattern=re.compile(r"(?:激进|中性|保守)(?:\s*/\s*(?:激进|中性|保守))*\s*/\s*弃权"),
+        refuted_by=(
+            "A RiskVote's perspective is aggressive, neutral or conservative and its decision is "
+            "pass, reduce or block (agents/committee.py:39-44), and review casts one vote from "
+            "each perspective (:141-153). An abstention reaches the committee only as the input "
+            "signal's own direction, which it carries through (:121-136)."
+        ),
+        retired=("保守 / 弃权", "激进 / 中性 / 保守 / 弃权"),
+        paraphrase="风险委员会里还有一票可以选择不表态。",
+        premise=_a_risk_vote_still_has_no_abstention,
+    ),
+    RetiredClaim(
+        name="a portfolio compose command or route exists",
+        pattern=re.compile(r"portfolio\s+compose", re.IGNORECASE),
+        refuted_by=(
+            "Nothing is called compose: the CLI's portfolio group holds construct and "
+            "turnover-variants (cli.py:6718, :7816), and a transition is made by POST "
+            "/api/v1/portfolio/execute (api/app.py:2196) or OpenAlphaSDK.execute_portfolio_order."
+        ),
+        retired=("组合会计 \N{MIDDLE DOT} 显式 portfolio compose",),
+        paraphrase="组合要用 compose 命令拼出来。",
+        premise=_nothing_is_called_portfolio_compose,
+    ),
+    RetiredClaim(
+        name="the validation reports answer whether the evidence was knowable then",
+        pattern=re.compile(rf"共同回答{_NOT_END}{{0,4}}当时是否可知"),
+        refuted_by=(
+            "Knowability is decided when a replay corpus loads: a case whose evidence is not "
+            "visible at its as_of raises LookAheadViolationError (backtest/replay.py:59-63). "
+            "ReplayReport.look_ahead_violations counts cases whose run raised it, which no "
+            "validated corpus can reach (:103-112); PortfolioBacktestReport, EventStudyReport and "
+            "ValidationResult hold no such answer."
+        ),
+        retired=("共同回答：当时是否可知\N{FULLWIDTH QUESTION MARK}",),
+        paraphrase="四份报告一起告诉你证据在决策时是不是看得到。",
     ),
 )
 """Each family of wordings `D13` retired, the code fact that refutes it, and what it retired."""
@@ -1751,6 +1836,15 @@ TRUE_SENTENCES_THAT_SHARE_THE_WORDS: Final[tuple[str, ...]] = (
     "研究结论受到四时钟和风险门约束，订单再受交易规则约束。",
     "委员会整体可消融，Bull/Bear 与三视角风险投票在一次调用里完成。",
     "双委员会可消融。",
+    "激进 \N{MIDDLE DOT} 中性 \N{MIDDLE DOT} 保守三票，"
+    "每票 pass、reduce 或 block，弃权只来自输入信号。",
+    "组合由 portfolio execute 执行，portfolio construct 负责构建。",
+    "当时是否可知，由加载语料时的前视检查回答。",
+    "backtest 走自己的路径，不经过同一 run_cycle。",
+    "筛选 \N{MIDDLE DOT} 观察池 \N{MIDDLE DOT} 不可变报告",
+    "SQLite 状态 \N{MIDDLE DOT} 重启后重新排队",
+    "REST 经 FastAPI \N{MIDDLE DOT} SDK / CLI 进程内",
+    "三重验证回答：是否有效、为何有效、下一轮改什么",
 )
 """True or unrelated sentences that share a retired pattern's words. The review of `D13` measured
 the first six being caught (its M1): client holds cli, 移动平均 holds 移动, and a rejection and a
@@ -1789,7 +1883,11 @@ name in lower case. The last fourteen probe what its third commit added or broad
 wording of each rewrite, and for each narrowing the sentence it is narrowed against -- 重启恢复
 with no list word before it, a hedge after 调用同一批服务, 不是 before 每次尝试, 关联 with no 并
 before it, a denial inside a routing span, and a comma between a conclusion and the trading
-rules."""
+rules. The last eight probe the diagram texts its fourth commit retired, each the wording the
+generator now draws or the nearest true use of the retired words: three votes that never
+abstain, a portfolio verb that exists, knowability answered at load, a backtest on a path of its
+own, three products drawn apart, a restart that requeues, the faces' transport, and three
+validations."""
 
 
 def test_the_retired_patterns_pass_the_true_sentences_that_share_their_words() -> None:

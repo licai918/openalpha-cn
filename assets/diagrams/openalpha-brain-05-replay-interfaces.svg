@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" role="img" aria-labelledby="title desc">
-  <title id="title">用同一路径回答：是否有效、为何有效、下一轮改什么</title>
+  <title id="title">三重验证回答：是否有效、为何有效、下一轮改什么</title>
   <desc id="desc">实时研究与历史回放共享 run_cycle；统计、组合与产物层只消费可复核账本，反馈必须经人工审阅后进入规则。</desc>
   <defs>
     <linearGradient id="bgGradient" x1="0" y1="0" x2="1" y2="1">
@@ -50,7 +50,7 @@
   <rect width="1440" height="900" fill="url(#grid)" />
   <rect x="64" y="42" width="42" height="4" rx="2" fill="#38BDF8" filter="url(#softGlow)" />
   <text x="64" y="72" class="eyebrow" fill="#38BDF8">OPENALPHA CN · RESEARCH OS / 05</text>
-  <text x="64" y="115" class="title" fill="#F4F7FB">验证与反馈｜用同一路径回答：是否有效、为何有效、下一轮改什么</text>
+  <text x="64" y="115" class="title" fill="#F4F7FB">验证与反馈｜三重验证回答：是否有效、为何有效、下一轮改什么</text>
   <text x="64" y="148" class="subtitle" fill="#96A8BE">实时研究与历史回放共享 run_cycle；统计、组合与产物层只消费可复核账本，反馈必须经人工审阅后进入规则。</text>
   <g transform="translate(1210 50)" opacity=".92">
     <circle cx="44" cy="30" r="28" fill="#38BDF8" opacity=".09" />
@@ -70,8 +70,8 @@
   <rect x="64" y="254" width="3" height="116" rx="1.5" fill="#2DD4BF" />
   <text x="88" y="261" class="micro" fill="#2DD4BF" text-anchor="start" opacity="1">LIVE RESEARCH</text>
   <text x="88" y="294" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">实时研究</text>
-  <text x="88" y="323" class="body" fill="#96A8BE" text-anchor="start" opacity="1">API / SDK / CLI / Web</text>
-  <text x="88" y="347" class="body" fill="#96A8BE" text-anchor="start" opacity="1">同一输入与输出契约</text>
+  <text x="88" y="323" class="body" fill="#96A8BE" text-anchor="start" opacity="1">REST / SDK / CLI / Web 发起</text>
+  <text x="88" y="347" class="body" fill="#96A8BE" text-anchor="start" opacity="1">都汇入同一 run_cycle</text>
   <text x="88" y="371" class="body" fill="#96A8BE" text-anchor="start" opacity="1">授权 Provider 载荷</text>
   <rect x="64" y="414" width="248" height="160" rx="22" fill="#0C1928" stroke="#263A52" filter="url(#shadow)" />
   <rect x="65" y="415" width="246" height="158" rx="21" fill="none" stroke="#FFFFFF" stroke-opacity=".035" />
@@ -111,8 +111,8 @@
   <text x="666" y="505" class="micro" fill="#FB7185" text-anchor="start" opacity="1">内容一致性验证</text>
   <text x="666" y="534" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">ID 重算 · 账本完整性</text>
   <text x="666" y="560" class="small" fill="#96A8BE" text-anchor="start" opacity="1">结果属性与失败原因归因</text>
-  <path d="M606 360H625V284H644" fill="none" stroke="#2DD4BF" stroke-width="2.2" marker-end="url(#arrow)" opacity="1" />
-  <path d="M606 401L644 406" fill="none" stroke="#A78BFA" stroke-width="2.2" marker-end="url(#arrow)" />
+  <path d="M606 360H625V284H644" fill="none" stroke="#2DD4BF" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow)" opacity="1" />
+  <path d="M606 401L644 406" fill="none" stroke="#A78BFA" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow)" />
   <path d="M606 442H625V528H644" fill="none" stroke="#FB7185" stroke-width="2.2" marker-end="url(#arrow)" opacity="1" />
   <circle cx="1031" cy="210" r="14" fill="#FBBF24" fill-opacity=".16" stroke="#FBBF24" stroke-opacity=".45" />
   <text x="1031" y="214" class="navNum" fill="#FBBF24" text-anchor="middle" opacity="1">C</text>
@@ -121,16 +121,16 @@
   <rect x="1021" y="233" width="354" height="346" rx="21" fill="none" stroke="#FFFFFF" stroke-opacity=".035" />
   <rect x="1020" y="254" width="3" height="304" rx="1.5" fill="#FBBF24" />
   <text x="1044" y="261" class="micro" fill="#FBBF24" text-anchor="start" opacity="1">RESEARCH PRODUCTS</text>
-  <text x="1044" y="294" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">ValidationResult</text>
+  <text x="1044" y="294" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">研究产品</text>
   <text x="1044" y="323" class="body" fill="#96A8BE" text-anchor="start" opacity="1">结构化研究筛选</text>
   <text x="1044" y="347" class="body" fill="#96A8BE" text-anchor="start" opacity="1">SQLite 持久观察池</text>
   <text x="1044" y="371" class="body" fill="#96A8BE" text-anchor="start" opacity="1">内容寻址不可变报告中心</text>
-  <text x="1044" y="395" class="body" fill="#96A8BE" text-anchor="start" opacity="1">REST / SDK / CLI / Web</text>
+  <text x="1044" y="395" class="body" fill="#96A8BE" text-anchor="start" opacity="1">REST 全部 · SDK 大部分 · CLI 仅报告</text>
   <text x="1044" y="419" class="body" fill="#96A8BE" text-anchor="start" opacity="1">Checkpoint · SQLite WAL · 灾难恢复</text>
   <text x="1044" y="443" class="body" fill="#96A8BE" text-anchor="start" opacity="1">报告 / 指标 / 归因保留 provenance</text>
-  <path d="M982 284H1002V330H1020" fill="none" stroke="#FBBF24" stroke-width="2.2" marker-end="url(#arrow)" opacity="1" />
-  <path d="M982 406L1020 406" fill="none" stroke="#FBBF24" stroke-width="2.2" marker-end="url(#arrow)" />
-  <path d="M982 528H1002V482H1020" fill="none" stroke="#FBBF24" stroke-width="2.2" marker-end="url(#arrow)" opacity="1" />
+  <path d="M982 284H1002V330H1020" fill="none" stroke="#FBBF24" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow)" opacity="1" />
+  <path d="M982 406L1020 406" fill="none" stroke="#FBBF24" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow)" />
+  <path d="M982 528H1002V482H1020" fill="none" stroke="#FBBF24" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow)" opacity="1" />
   <rect x="348" y="608" width="1028" height="62" rx="19" fill="#FBBF24" fill-opacity=".075" stroke="#FBBF24" stroke-opacity=".30" />
   <text x="374" y="634" class="micro" fill="#FBBF24" text-anchor="start" opacity="1">HUMAN-IN-THE-LOOP FEEDBACK</text>
   <text x="374" y="658" class="body" fill="#F4F7FB" text-anchor="start" opacity="1">人工复核归因 → 调整数据质量规则 / AgentRouter / RiskGate 阈值 → 进入下一轮证据与配置；不自动训练模型</text>

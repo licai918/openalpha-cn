@@ -69,7 +69,7 @@
   <rect x="128" y="540" width="7" height="116" rx="3.5" fill="#5968F2" />
   <text x="152" y="572" class="cardTitle">验证结果汇总层</text>
   <text x="152" y="600" class="body">ReplayReport + PortfolioBacktestReport + EventStudyReport + ValidationResult</text>
-  <text x="152" y="625" class="body">共同回答：当时是否可知？是否可成交？是否显著？成本与空仓机会成本各占多少、残差多大？</text>
+  <text x="152" y="625" class="body">共同回答：能否复现？是否可成交？是否显著？成本与空仓机会成本各占多少、残差多大？</text>
   <path d="M 207 474 L 207 532" fill="none" stroke="#7C5CE7" stroke-width="3" marker-end="url(#arrow)" />
   <path d="M 537 474 L 537 532" fill="none" stroke="#D95D67" stroke-width="3" marker-end="url(#arrow)" />
   <path d="M 867 474 L 867 532" fill="none" stroke="#1688D4" stroke-width="3" marker-end="url(#arrow)" />

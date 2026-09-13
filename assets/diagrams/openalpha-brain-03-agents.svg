@@ -79,7 +79,7 @@
   <text x="88" y="449" class="micro" fill="#A78BFA" text-anchor="start" opacity="1">1–8 CONCURRENCY</text>
   <text x="88" y="482" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">持久批量任务中心</text>
   <text x="88" y="511" class="body" fill="#96A8BE" text-anchor="start" opacity="1">进度事件 · 取消 · 重试</text>
-  <text x="88" y="535" class="body" fill="#96A8BE" text-anchor="start" opacity="1">Checkpoint · 宕机恢复</text>
+  <text x="88" y="535" class="body" fill="#96A8BE" text-anchor="start" opacity="1">Checkpoint · 重试续跑</text>
   <text x="88" y="559" class="body" fill="#96A8BE" text-anchor="start" opacity="1">每个标的复用同一 runner</text>
   <text x="88" y="583" class="body" fill="#96A8BE" text-anchor="start" opacity="1">无旁路分析逻辑</text>
   <rect x="85" y="640" width="202" height="28" rx="14" fill="#A78BFA" fill-opacity="0.12" stroke="#A78BFA" stroke-opacity=".38" />
