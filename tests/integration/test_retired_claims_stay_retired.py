@@ -339,6 +339,45 @@ def _a_portfolio_transition_still_names_no_batch() -> str | None:
     return None if not linked else f"a portfolio order or transition now carries {linked}"
 
 
+def _vote_expressions() -> dict[str, tuple[str, str]]:
+    """Each RiskVote the committee casts, by perspective: its decision and its reasons, as
+    expressions read from agents/committee.py's syntax tree."""
+    source = (SRC / "agents" / "committee.py").read_text(encoding="utf-8")
+    tree = ast.parse(source, filename="agents/committee.py")
+    found: dict[str, tuple[str, str]] = {}
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "RiskVote"
+        ):
+            continue
+        keywords = {keyword.arg: keyword.value for keyword in node.keywords}
+        perspective = keywords.get("perspective")
+        if isinstance(perspective, ast.Constant) and isinstance(perspective.value, str):
+            decision, reasons = (
+                ast.dump(keywords[name]) if name in keywords else ""
+                for name in ("decision", "reasons")
+            )
+            found[perspective.value] = (decision, reasons)
+    return found
+
+
+def _the_neutral_and_conservative_votes_still_agree() -> str | None:
+    votes = _vote_expressions()
+    if "neutral" in votes and votes["neutral"] == votes.get("conservative"):
+        return None
+    return (
+        "the neutral and conservative votes are no longer one expression: re-read what each "
+        "one weighs"
+    )
+
+
+def _the_engine_still_calls_no_committee() -> str | None:
+    reached = _imports_under(SRC / "runtime" / "engine.py", ("openalpha_cn.agents.committee",))
+    return None if not reached else f"runtime/engine.py now imports {reached}: re-read the order"
+
+
 # --- The retired claims -----------------------------------------------------------------------
 
 
@@ -755,6 +794,42 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         retired=("证据快照、Agent 输出、风险与组合记录都能沿任务 ID 查询。",),
         paraphrase="每笔持仓变化都能按批次查到。",
         premise=_a_portfolio_transition_still_names_no_batch,
+    ),
+    RetiredClaim(
+        name="the three risk views weigh different things",
+        pattern=re.compile(
+            rf"保守视角优先{_NOT_END}{{0,8}}(?:回撤|流动性)|中性视角平衡"
+            rf"|风险视角再讨论{_NOT_END}{{0,6}}(?:敞口|流动性)"
+        ),
+        refuted_by=(
+            "The three votes read the same flags (agents/committee.py:137-153): the aggressive "
+            "vote reduces only on a severe flag, and the neutral and conservative votes are one "
+            "expression -- block on a severe flag, reduce on any flag -- with the same reasons "
+            "(:143-152). No vote reads drawdown, liquidity or return."
+        ),
+        retired=(
+            "中性视角平衡收益风险",
+            "保守视角优先回撤与流动性",
+            "激进、中性、保守风险视角再讨论敞口与流动性。",
+        ),
+        paraphrase="保守的那一票更看重回撤。",
+        premise=_the_neutral_and_conservative_votes_still_agree,
+    ),
+    RetiredClaim(
+        name="the risk gate runs after the committee",
+        pattern=re.compile(r"风险门随后执行"),
+        refuted_by=(
+            "The risk gate runs inside ResearchEngine.run_cycle (runtime/engine.py:118), which "
+            "calls no committee; the committee is a later, optional call (sdk.py:236-243, POST "
+            "/api/v1/research/deliberate), and its pass, reduce or block is its own majority, "
+            "DeliberationOutcome.risk_decision (agents/committee.py:154-161)."
+        ),
+        retired=(
+            "风险门随后执行 pass、reduce、block，"
+            "A 股组合层继续检查 T+1、整手、停牌、涨跌停、现金和敞口。",
+        ),
+        paraphrase="委员会投完票，风险门接着把关。",
+        premise=_the_engine_still_calls_no_committee,
     ),
 )
 """Each family of wordings `D13` retired, the code fact that refutes it, and what it retired."""
