@@ -311,16 +311,16 @@ def overview() -> None:
         232,
         275,
         438,
-        title="A 股证据入口",
+        title="A 股证据输入",
         label="DATA PLANE",
         color=CYAN,
         lines=(
-            "链邻数据接口 API",
-            "已实现 · 统一替代入口",
-            "用户授权实时 A 股数据",
             "用户自有 CSV / JSONL / Parquet",
             "Provider 合同 · 鉴权 · 限流",
             "来源 / 许可 / 修订语义",
+            "链邻数据接口 API",
+            "客户端合同 · 仅 doctor 使用",
+            "证据与面板构建不调用它",
         ),
     )
     svg.pill(88, 624, 220, "输入不等于证据", color=CYAN)
@@ -418,7 +418,7 @@ def evidence() -> None:
         index=2,
         eyebrow="证据平面",
         title="先证明“当时可知”，再讨论模型是否聪明",
-        subtitle="所有研究结论先经过授权、限流、四时钟与内容寻址，得到可追溯、可回放的 EvidenceSnapshot。",
+        subtitle="所有研究结论先经过 Provider 合同、四时钟与内容寻址，得到可追溯、可回放的 EvidenceSnapshot。",
         accent=CYAN,
     )
     svg.legend()
@@ -429,9 +429,9 @@ def evidence() -> None:
         250,
         190,
         title="链邻数据接口 API",
-        label="LICENSED DATA",
+        label="CLIENT CONTRACT",
         color=CYAN,
-        lines=("已实现 · 统一替代入口", "Bearer 鉴权 · 客户端限流", "时效 / 精度以链邻服务为准"),
+        lines=("客户端合同 · 仅 doctor 使用", "Bearer 鉴权 · 客户端限流", "证据与面板构建不调用它"),
     )
     svg.panel(
         64,
@@ -464,7 +464,9 @@ def evidence() -> None:
             "统一 schema 后才可进入研究",
         ),
     )
-    svg.arrow(314, 327, 348, 327, color=CYAN)
+    # Dashed, as the legend draws explicit composition: no shipped path takes ChainLin's
+    # batches into the gate (only `doctor` constructs the client); a caller's own code may.
+    svg.arrow(314, 327, 348, 327, color=CYAN, dashed=True)
     svg.arrow(314, 514, 348, 514, color=BLUE)
 
     svg.section_label(670, 214, "C", "四时钟 PIT", CYAN)

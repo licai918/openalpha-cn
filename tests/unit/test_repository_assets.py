@@ -386,7 +386,8 @@ def test_readme_brain_map_series_is_complete_and_ordered() -> None:
         assert "Arial" not in content
 
     assert "链邻数据接口 API" in combined_content
-    assert "已实现 · 统一替代入口" in combined_content
+    assert "客户端合同 · 仅 doctor 使用" in combined_content
+    assert "统一替代入口" not in combined_content
     assert "规划目标" not in combined_content
     assert "目标\uff1a实时获取" not in combined_content
     assert "持久批量任务中心" in combined_content

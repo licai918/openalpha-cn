@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" role="img" aria-labelledby="title desc">
   <title id="title">先证明“当时可知”，再讨论模型是否聪明</title>
-  <desc id="desc">所有研究结论先经过授权、限流、四时钟与内容寻址，得到可追溯、可回放的 EvidenceSnapshot。</desc>
+  <desc id="desc">所有研究结论先经过 Provider 合同、四时钟与内容寻址，得到可追溯、可回放的 EvidenceSnapshot。</desc>
   <defs>
     <linearGradient id="bgGradient" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#091727" />
@@ -51,7 +51,7 @@
   <rect x="64" y="42" width="42" height="4" rx="2" fill="#2DD4BF" filter="url(#softGlow)" />
   <text x="64" y="72" class="eyebrow" fill="#2DD4BF">OPENALPHA CN · RESEARCH OS / 02</text>
   <text x="64" y="115" class="title" fill="#F4F7FB">证据平面｜先证明“当时可知”，再讨论模型是否聪明</text>
-  <text x="64" y="148" class="subtitle" fill="#96A8BE">所有研究结论先经过授权、限流、四时钟与内容寻址，得到可追溯、可回放的 EvidenceSnapshot。</text>
+  <text x="64" y="148" class="subtitle" fill="#96A8BE">所有研究结论先经过 Provider 合同、四时钟与内容寻址，得到可追溯、可回放的 EvidenceSnapshot。</text>
   <g transform="translate(1210 50)" opacity=".92">
     <circle cx="44" cy="30" r="28" fill="#2DD4BF" opacity=".09" />
     <path d="M18 42L40 20L56 32L75 11" fill="none" stroke="#2DD4BF" stroke-width="2.2" />
@@ -68,11 +68,11 @@
   <rect x="64" y="232" width="250" height="190" rx="22" fill="#0C1928" stroke="#263A52" filter="url(#shadow)" />
   <rect x="65" y="233" width="248" height="188" rx="21" fill="none" stroke="#FFFFFF" stroke-opacity=".035" />
   <rect x="64" y="254" width="3" height="146" rx="1.5" fill="#2DD4BF" />
-  <text x="88" y="261" class="micro" fill="#2DD4BF" text-anchor="start" opacity="1">LICENSED DATA</text>
+  <text x="88" y="261" class="micro" fill="#2DD4BF" text-anchor="start" opacity="1">CLIENT CONTRACT</text>
   <text x="88" y="294" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">链邻数据接口 API</text>
-  <text x="88" y="323" class="body" fill="#96A8BE" text-anchor="start" opacity="1">已实现 · 统一替代入口</text>
+  <text x="88" y="323" class="body" fill="#96A8BE" text-anchor="start" opacity="1">客户端合同 · 仅 doctor 使用</text>
   <text x="88" y="347" class="body" fill="#96A8BE" text-anchor="start" opacity="1">Bearer 鉴权 · 客户端限流</text>
-  <text x="88" y="371" class="body" fill="#96A8BE" text-anchor="start" opacity="1">时效 / 精度以链邻服务为准</text>
+  <text x="88" y="371" class="body" fill="#96A8BE" text-anchor="start" opacity="1">证据与面板构建不调用它</text>
   <rect x="64" y="440" width="250" height="150" rx="22" fill="#0C1928" stroke="#263A52" filter="url(#shadow)" />
   <rect x="65" y="441" width="248" height="148" rx="21" fill="none" stroke="#FFFFFF" stroke-opacity=".035" />
   <rect x="64" y="462" width="3" height="106" rx="1.5" fill="#38BDF8" />
@@ -97,7 +97,7 @@
   <text x="372" y="419" class="body" fill="#96A8BE" text-anchor="start" opacity="1">涨停 / 炸板 / 连板 / 题材</text>
   <text x="372" y="443" class="body" fill="#96A8BE" text-anchor="start" opacity="1">催化 / 公告 / 资金语义</text>
   <text x="372" y="467" class="body" fill="#96A8BE" text-anchor="start" opacity="1">统一 schema 后才可进入研究</text>
-  <path d="M314 327L348 327" fill="none" stroke="#2DD4BF" stroke-width="2.2" marker-end="url(#arrow)" />
+  <path d="M314 327L348 327" fill="none" stroke="#2DD4BF" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow)" />
   <path d="M314 514L348 514" fill="none" stroke="#38BDF8" stroke-width="2.2" marker-end="url(#arrow)" />
   <circle cx="670" cy="210" r="14" fill="#2DD4BF" fill-opacity=".16" stroke="#2DD4BF" stroke-opacity=".45" />
   <text x="670" y="214" class="navNum" fill="#2DD4BF" text-anchor="middle" opacity="1">C</text>
