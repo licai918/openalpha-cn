@@ -880,7 +880,7 @@ _FSTRING_END: Final[int | None] = getattr(tokenize, "FSTRING_END", None)
 `tokenize`/`token` simply has no such attribute. `getattr` with a `None` default reads
 whichever shape the running interpreter has without an `AttributeError`, and a real
 token's `.type` is always an `int` and so never equal to `None` -- so the 3.12-only
-branches in `_line_of_the_invalid_escape` below are simply never taken on 3.11."""
+branches in `_locate_invalid_escape` below are simply never taken on 3.11."""
 
 
 def _string_token_prefix(token_text: str) -> str:
@@ -932,15 +932,16 @@ def _first_invalid_escape_line(token_text: str, start_row: int, *, is_bytes: boo
     return None
 
 
-def _located_invalid_escape_line(source: str) -> int | None:
-    """The 1-indexed line of the first invalid escape sequence in `source`'s string
-    literals, or `None` if this scan cannot find one.
+def _locate_invalid_escape(source: str) -> tuple[int, int] | None:
+    """Where the first invalid escape sequence in `source`'s string literals is, as
+    `(offender line, line its enclosing string literal begins on)`, both 1-indexed --
+    or `None` if this scan cannot find one.
 
     Tokenizes `source` (`tokenize.generate_tokens`) and runs `_first_invalid_escape_line`
-    over each string/bytes token's own source text and, on Python 3.12, over each
-    `FSTRING_MIDDLE` chunk of an f-string's literal part. A token whose prefix contains
-    `r`/`R` is skipped: there is no escape processing in a raw string, so `compile()`
-    never warns about one.
+    over each string/bytes token's own source text and, on Python 3.12 and later, over
+    each `FSTRING_MIDDLE` chunk of an f-string's literal part, whose literal begins where
+    its `FSTRING_START` token does. A token whose prefix contains `r`/`R` is skipped:
+    there is no escape processing in a raw string, so `compile()` never warns about one.
 
     `None` is an answer, not an error. It means the offender -- if there is one -- is
     outside what this scan recognises: a malformed `\\x`, `\\N`, `\\u` or `\\U` escape is
@@ -950,41 +951,58 @@ def _located_invalid_escape_line(source: str) -> int | None:
     so when this returns `None` rather than present `compile()`'s number as confirmed --
     see `_describe_where`.
 
-    Known limit, reasoned rather than measured (3.12 cannot run here): 3.12 splits an
-    f-string's literal text into `FSTRING_MIDDLE` chunks that end where a `{` or `}`
-    token begins, so in `f"text\\{expr}"` the chunk can end in a bare backslash, and
-    `_first_invalid_escape_line` never flags a backslash with nothing after it. That
-    `\\{` would then be missed and this returns `None`, which `_describe_where` reports
-    as unlocated rather than as a confirmed line. On 3.11 an f-string is one `STRING`
-    token and `\\{` is found.
+    Known limit, measured on 3.12.12 and 3.14.5 (an earlier note called it "reasoned
+    rather than measured", believing no 3.12 could run here): 3.12 ends an
+    `FSTRING_MIDDLE` chunk where a replacement field's `{` begins, so in `f"text\\{x}"`
+    the chunk ends in a bare backslash, `_first_invalid_escape_line` never flags a
+    backslash with nothing after it, and this returns `None`, which `_describe_where`
+    reports as unlocated rather than as a confirmed line. On 3.11 an f-string is one
+    `STRING` token and the `\\{` is found.
+
+    The same interpreters' `tokenize` itself warns about that `\\{` while tokenizing it.
+    The warnings are silenced for the length of the scan: the source is already known to
+    hold a bad escape, locating it is the whole job, and a test that calls this printed
+    the warning into its run until D13 added this.
     """
-    fstring_raw_stack: list[bool] = []
-    try:
-        for token in tokenize.generate_tokens(io.StringIO(source).readline):
-            if token.type == tokenize.STRING:
-                prefix = _string_token_prefix(token.string)
-                if "r" in prefix or "R" in prefix:
-                    continue
-                line = _first_invalid_escape_line(
-                    token.string, token.start[0], is_bytes="b" in prefix or "B" in prefix
-                )
-                if line is not None:
-                    return line
-            elif token.type == _FSTRING_START:
-                prefix = _string_token_prefix(token.string)
-                fstring_raw_stack.append("r" in prefix or "R" in prefix)
-            elif token.type == _FSTRING_END:
-                if fstring_raw_stack:
-                    fstring_raw_stack.pop()
-            elif token.type == _FSTRING_MIDDLE:
-                if fstring_raw_stack and fstring_raw_stack[-1]:
-                    continue
-                line = _first_invalid_escape_line(token.string, token.start[0], is_bytes=False)
-                if line is not None:
-                    return line
-    except (tokenize.TokenError, SyntaxError):
-        return None
+    open_fstrings: list[tuple[bool, int]] = []
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SyntaxWarning)
+        warnings.simplefilter("ignore", DeprecationWarning)
+        try:
+            for token in tokenize.generate_tokens(io.StringIO(source).readline):
+                if token.type == tokenize.STRING:
+                    prefix = _string_token_prefix(token.string)
+                    if "r" in prefix or "R" in prefix:
+                        continue
+                    line = _first_invalid_escape_line(
+                        token.string, token.start[0], is_bytes="b" in prefix or "B" in prefix
+                    )
+                    if line is not None:
+                        return line, token.start[0]
+                elif token.type == _FSTRING_START:
+                    prefix = _string_token_prefix(token.string)
+                    open_fstrings.append(("r" in prefix or "R" in prefix, token.start[0]))
+                elif token.type == _FSTRING_END:
+                    if open_fstrings:
+                        open_fstrings.pop()
+                elif token.type == _FSTRING_MIDDLE:
+                    is_raw, literal_start = (
+                        open_fstrings[-1] if open_fstrings else (False, token.start[0])
+                    )
+                    if is_raw:
+                        continue
+                    line = _first_invalid_escape_line(token.string, token.start[0], is_bytes=False)
+                    if line is not None:
+                        return line, literal_start
+        except (tokenize.TokenError, SyntaxError):
+            return None
     return None
+
+
+def _located_invalid_escape_line(source: str) -> int | None:
+    """The offender's line from `_locate_invalid_escape`, or `None` where it finds none."""
+    located = _locate_invalid_escape(source)
+    return None if located is None else located[0]
 
 
 def _line_of_the_invalid_escape(source: str, exc: SyntaxError) -> int:
@@ -1004,8 +1022,8 @@ def _line_of_the_invalid_escape(source: str, exc: SyntaxError) -> int:
     substring of the lines `exc.lineno`..`exc.end_lineno` span, and a *valid* escaped
     backslash defeats that: `\\q` is a substring of `\\\\q`, so the search stopped at a
     valid pair one line early. This returns an `int` either way, so a caller that needs
-    to know whether the line was *located* or merely *fallen back to* must call
-    `_located_invalid_escape_line` itself -- `_describe_where` does.
+    to know whether the line was *located* or merely *fallen back to* must call the scan
+    itself -- `_describe_where` calls `_locate_invalid_escape`.
 
     The first invalid escape in source order is also the one `compile()` reports when a
     file has more than one: it raises on the first it finds and never reaches the rest,
@@ -1018,46 +1036,65 @@ def _line_of_the_invalid_escape(source: str, exc: SyntaxError) -> int:
 def _describe_where(source: str, exc: SyntaxError) -> str:
     """Where to send the reader for `exc`, and how sure that line is.
 
-    Four cases, four wordings:
+    Five cases, five wordings, decided in this order:
 
-    * the offender was located and `compile()` agrees -- `line N`;
-    * it was located on a different line from the one `compile()` reports (3.11 and
-      3.12.3 report where the enclosing literal begins; 3.12.10, 3.12.12 and 3.14.5
-      report the escape's own line, which puts them in the first case) -- `line L
-      (compile() itself reports line N, ...)`;
-    * the error is about an escape but `_located_invalid_escape_line` could not find it
-      -- `compile()`'s number, passed on as exactly that and marked unconfirmed. Measured
-      on 3.11.14: `\\x` followed by non-hex on line 2 of a three-line literal makes
-      `compile()` report line 3, the closing quotes, and a bare `line 3` read as
-      confirmed;
     * the error has nothing to do with escapes (an unmatched bracket, say) -- `line N`,
       `compile()`'s own position for an ordinary syntax error, with no escape hypothesis
-      attached. A review found the previous wording pointed such an error at a malformed
-      escape that did not exist.
+      attached. Decided first, from `exc.msg`, even when the scan could find an escape
+      elsewhere in the file: `compile()` stops at the first fault it meets, so for
+      `x = 1)` on line 1 and `y = "\\q"` on line 2 it reports `unmatched ')'` at line 1
+      (measured on 3.11.14, 3.12.12 and 3.14.5). A review found this answering "line 2"
+      there, with a reason that was not the reason; an earlier one found such an error
+      pointed at a malformed escape that did not exist;
+    * the offender was located and `compile()` agrees -- `line N`;
+    * it was located on a different line, and `compile()`'s line is the one the enclosing
+      string literal begins on -- what 3.11 reports, and CI's 3.12.3 for a plain
+      multi-line string -- `line L (compile() itself reports line N, where the enclosing
+      string literal begins)`;
+    * it was located on a different line and `compile()`'s line is not the literal's
+      first -- `line L (compile() itself reports line N)`, with no reason, because none is
+      known. 3.12.12 and 3.14.5 put a multi-line f-string's invalid escape on lines that
+      are neither: measured, line 5 of a four-line file, and line 6 of the five-line
+      source `test_the_scan_finds_an_escape_that_compile_misplaces_inside_a_multi_line_
+      f_string` uses. "Where the enclosing string literal begins" was printed for those
+      too, and was false;
+    * the error is about an escape but the scan could not find it -- `compile()`'s number,
+      passed on as exactly that and marked unconfirmed, naming the scan's two known blind
+      spots rather than guessing which one applies. Measured on 3.11.14: `\\x` followed
+      by non-hex on line 2 of a three-line literal makes `compile()` report line 3, the
+      closing quotes. Measured on 3.12.12 and 3.14.5: `f"text\\{x}"` is an ordinary
+      invalid escape the scan misses, which the previous wording blamed on a malformed
+      `\\x`, `\\N`, `\\u` or `\\U` escape.
 
     Whether an error is "about an escape" is read from `exc.msg`. Measured on 3.11.14,
     every escape error tried says so ("invalid escape sequence '\\q'", "... truncated
     \\xXX escape", "... malformed \\N character escape", "... invalid \\x escape at
-    position 0") and neither ordinary syntax error tried does ("unmatched ')'", "'(' was
-    never closed").
+    position 0"), so does 3.14.5's rewording (`"\\q" is an invalid escape sequence. ...`),
+    and neither ordinary syntax error tried does ("unmatched ')'", "'(' was never
+    closed").
     """
     if exc.lineno is None:
         return "an unreported line (no SyntaxError position available)"
-    located = _located_invalid_escape_line(source)
-    if located is not None:
-        if located != exc.lineno:
-            return (
-                f"line {located} (compile() itself reports line {exc.lineno}, "
-                "where the enclosing string literal begins)"
-            )
-        return f"line {located}"
-    if "escape" in (exc.msg or ""):
+    if "escape" not in (exc.msg or ""):
+        return f"line {exc.lineno}"
+    located = _locate_invalid_escape(source)
+    if located is None:
         return (
-            f"line {exc.lineno} as compile() reports it, unconfirmed: the offending escape "
-            "could not be located more precisely (a malformed \\x, \\N, \\u or \\U escape "
-            "raises its own SyntaxError, at a line that can differ from the offender's)"
+            f"line {exc.lineno} as compile() reports it, unconfirmed: this scan did not find "
+            "the offending escape, so the line is compile()'s alone and can differ from the "
+            "offender's (the scan does not check what follows \\x, \\N, \\u or \\U, and on "
+            "Python 3.12 and later it misses a backslash right before an f-string's "
+            'replacement field, as in f"text\\{x}")'
         )
-    return f"line {exc.lineno}"
+    line, literal_start = located
+    if line == exc.lineno:
+        return f"line {line}"
+    if exc.lineno == literal_start:
+        return (
+            f"line {line} (compile() itself reports line {exc.lineno}, "
+            "where the enclosing string literal begins)"
+        )
+    return f"line {line} (compile() itself reports line {exc.lineno})"
 
 
 def _syntax_error_from_compiling(source: str) -> SyntaxError:
@@ -1065,7 +1102,7 @@ def _syntax_error_from_compiling(source: str) -> SyntaxError:
     errors, the same way `test_no_source_file_raises_a_syntax_or_deprecation_warning_
     when_compiled` below does, and return the `SyntaxError` it raises.
 
-    A test-only helper for `_line_of_the_invalid_escape`'s own unit tests: they need a
+    A test-only helper for the unit tests of the escape helpers above: they need a
     real `SyntaxError` carrying CPython's own `lineno`/`end_lineno`/`msg`, not a
     hand-built stand-in that could silently drift from what `compile()` actually
     produces.
@@ -1080,9 +1117,9 @@ def _syntax_error_from_compiling(source: str) -> SyntaxError:
 
 def _assert_compiles_without_a_warning(source: str) -> None:
     """`compile(source, ...)` must raise neither a `SyntaxError` nor a `Warning`, even
-    with `SyntaxWarning`/`DeprecationWarning` escalated to errors -- used by
-    `_line_of_the_invalid_escape`'s tests for the two shapes that must never be
-    flagged: a raw string, and a well-formed `\\N{...}` in `str`.
+    with `SyntaxWarning`/`DeprecationWarning` escalated to errors -- used by the
+    scan's tests for the two shapes that must never be flagged: a raw string, and a
+    well-formed `\\N{...}` in `str`.
     """
     with warnings.catch_warnings():
         warnings.simplefilter("error", SyntaxWarning)
@@ -1120,8 +1157,8 @@ real invalid escape is here: \q
 
 def test_raw_strings_are_never_flagged_even_with_warnings_escalated_to_errors() -> None:
     """Raw strings never warn -- there is no escape processing inside them at all, so
-    `_line_of_the_invalid_escape`'s own skip of any token whose prefix contains `r`/`R`
-    is answering a question `compile()` never raises for this source in the first
+    the scan's own skip (`_locate_invalid_escape`) of any token whose prefix contains
+    `r`/`R` is answering a question `compile()` never raises for this source in the first
     place. This pins `compile()` alone and never calls the helper;
     `test_the_line_helper_skips_a_raw_string_that_precedes_the_real_offender` is what
     pins the helper's own skip.
@@ -1149,8 +1186,8 @@ b = "\q"
 
 def test_line_of_the_invalid_escape_ignores_a_backslash_written_inside_a_comment() -> None:
     """`# ... \\q` on line 1 is a comment, not a string literal -- `tokenize` yields it
-    as a `COMMENT` token, a type `_line_of_the_invalid_escape` never inspects, so the
-    real offender on line 2 is what gets reported instead of the comment's line.
+    as a `COMMENT` token, a type `_locate_invalid_escape` never inspects, so the real
+    offender on line 2 is what gets reported instead of the comment's line.
     """
     source = r"""# a comment with a backslash that looks like an escape: \q
 x = "\z"
@@ -1173,8 +1210,9 @@ def test_line_of_the_invalid_escape_flags_an_invalid_escape_in_a_bytes_literal()
 def test_backslash_capital_n_is_invalid_in_bytes_but_a_named_escape_in_str() -> None:
     """`\\N` only introduces a named Unicode escape in `str` -- `bytes` has no notion
     of a Unicode name, so the identical two characters are an ordinary invalid escape
-    there. `_line_of_the_invalid_escape` must tell the two apart from the token's own
-    `b` prefix, not from whatever character follows `N`.
+    there. The scan (`_locate_invalid_escape`, through `_first_invalid_escape_line`'s
+    `is_bytes`) must tell the two apart from the token's own `b` prefix, not from
+    whatever character follows `N`.
     """
     bytes_source = r"""x = b"\N"
 """
@@ -1269,31 +1307,117 @@ def test_a_syntax_error_unrelated_to_escapes_carries_no_escape_hypothesis() -> N
     A review fed unmatched brackets to the previous `_describe_where` and got the same
     "unconfirmed ... a malformed \\x, \\N, \\u or \\U escape ..." sentence it prints for a
     real malformed escape -- pointing the reader at an escape that does not exist.
+
+    The third source is the same fault with a real invalid escape after it. `compile()`
+    stops at the first fault it meets and reports `unmatched ')'` at line 1 -- measured on
+    3.11.14, 3.12.12 and 3.14.5 -- while the scan finds the `\\q` on line 2. A later review
+    measured `_describe_where` answering "line 2 (compile() itself reports line 1, where
+    the enclosing string literal begins)" there: the escape compile() never reached, and a
+    reason that was not the reason. An error that is not about an escape is now described
+    as one before the scan is consulted at all.
     """
-    for source in ("x = 1)\n", "x = (1, 2\n"):
+    for source in ("x = 1)\n", "x = (1, 2\n", 'x = 1)\ny = "\\q"\n'):
         exc = _syntax_error_from_compiling(source)
+        assert "escape" not in (exc.msg or ""), exc.msg
         assert _describe_where(source, exc) == f"line {exc.lineno}"
 
 
 def test_line_of_the_invalid_escape_finds_an_offender_in_an_f_strings_literal_part() -> None:
     """On Python 3.11 an f-string tokenizes as one ordinary `STRING` token (prefix
-    `f`), so this exercises the same code path as a plain string and is verified here,
-    locally. On 3.12 the literal part tokenizes separately as `FSTRING_MIDDLE`
-    (`_line_of_the_invalid_escape`'s other branch); this repository's own interpreter
-    here is 3.11, so that branch is exercised only by CI, never by this test.
+    `f`), so this exercises the same code path as a plain string. On 3.12 and later the
+    literal part tokenizes separately as `FSTRING_MIDDLE`, the scan's f-string branch in
+    `_locate_invalid_escape`. This repository's venv is 3.11, so under pytest here only
+    CI's 3.12 legs take that branch; D13 also ran these helpers, extracted, under
+    standalone 3.12.12 and 3.14.5 interpreters.
+
+    Only the direct `_located_invalid_escape_line` assertion depends on that branch. On
+    one line `compile()` already reports the true line 2 -- measured on 3.11.14, 3.12.12
+    and 3.14.5 -- so `_line_of_the_invalid_escape` falls back to the right answer without
+    the scan, which is how a review could delete the branch and keep every test green.
+    The multi-line test below is the one where `compile()` and the scan disagree.
     """
     source = r"""y = 1
 x = f"value={y + 1} but \q is bad"
 """
     exc = _syntax_error_from_compiling(source)
+    assert _located_invalid_escape_line(source) == 2
     assert _line_of_the_invalid_escape(source, exc) == 2
+
+
+def test_the_scan_finds_an_escape_that_compile_misplaces_inside_a_multi_line_f_string() -> None:
+    """The scan's three f-string pieces, each pinned where `compile()` cannot cover for it.
+
+    Line 2 is a raw f-string holding `\\p`; line 3 opens an f-string whose literal text
+    ends in a backslash-newline continuation; the offender `\\q` is on line 4. Measured:
+    3.11.14 reports line 3, where the literal begins, and 3.12.12 and 3.14.5 report line
+    6, past the closing quotes on line 5. On none of the three is `compile()`'s own number
+    the answer, so the located line has to come from the scan:
+
+    * on 3.12 and later, deleting the `FSTRING_MIDDLE` branch makes the scan return `None`;
+    * on 3.12 and later, deleting the raw f-string skip makes it return 2, the raw `\\p`;
+    * on every interpreter, dropping the line count for a backslash-newline makes it 3.
+
+    A review deleted all three in memory and every D1 test of the day stayed green on
+    3.11.14 and 3.12.12. D13 measured each deletion turning this test red: the last on
+    3.11.14, 3.12.12 and 3.14.5, the first two on 3.12.12 and 3.14.5.
+
+    The last assertion is `_describe_where`'s reason, stated only where it is true.
+    3.11's line 3 is where the enclosing literal begins; 3.12+'s line 6 is not, and
+    calling it that was the second false reason the review measured. Each wording is
+    pinned exactly.
+    """
+    source = r'''y = 1
+a = rf"raw \p {y}"
+x = f"""first {y} \
+second \q {y}
+"""
+'''
+    exc = _syntax_error_from_compiling(source)
+    assert _located_invalid_escape_line(source) == 4
+    assert _line_of_the_invalid_escape(source, exc) == 4
+    if exc.lineno == 4:
+        expected = "line 4"
+    elif exc.lineno == 3:
+        expected = (
+            "line 4 (compile() itself reports line 3, where the enclosing string literal begins)"
+        )
+    else:
+        expected = f"line 4 (compile() itself reports line {exc.lineno})"
+    assert _describe_where(source, exc) == expected
+
+
+def test_a_backslash_before_an_f_string_field_is_not_blamed_on_a_malformed_escape() -> None:
+    """`f"text\\{x}"` is an ordinary invalid escape, `\\{`, that the scan misses on 3.12+.
+
+    3.12 ends the literal's `FSTRING_MIDDLE` chunk at the bare backslash, and the `{` that
+    completes the escape is the next token. Measured on 3.12.12 and 3.14.5,
+    `_located_invalid_escape_line` returns `None` here, so `_describe_where` falls back to
+    `compile()`'s number, marked unconfirmed -- and a review found that fallback naming "a
+    malformed \\x, \\N, \\u or \\U escape" as the reason, which it is not. The fallback now
+    names both blind spots it knows of rather than choosing one. On 3.11 the f-string is
+    one `STRING` token, the scan finds the `\\{`, and the line is a confirmed one.
+    """
+    source = 'x = 1\ny = f"text\\{x}"\n'
+    exc = _syntax_error_from_compiling(source)
+    described = _describe_where(source, exc)
+    if _located_invalid_escape_line(source) is None:
+        assert described.startswith(f"line {exc.lineno} as compile() reports it, unconfirmed:")
+        assert "f-string" in described, described
+    else:
+        assert described == "line 2"
 
 
 def test_line_of_the_invalid_escape_reports_the_first_of_two_offenders_in_one_literal() -> None:
     """`compile()` itself stops at the first invalid escape it finds -- `exc.msg` names
-    `'\\q'`, the one on line 2, never `'\\z'` on line 3 -- because one offender per
-    file per run is inherent to `compile()` and is not this helper's to fix. The
-    helper's own scan must agree with `compile()` on which one is "first".
+    `\\q`, the one on line 2, never `\\z` on line 3 -- because one offender per file
+    per run is inherent to `compile()` and is not this helper's to fix. The helper's
+    own scan must agree with `compile()` on which one is "first".
+
+    The message is read for the two characters, not for an interpreter's quoting of
+    them: 3.11 and 3.12 say `invalid escape sequence '\\q'`, 3.14 says `"\\q" is an
+    invalid escape sequence. Did you mean "\\\\q"? ...`. This used to assert `'\\q'`,
+    quotes included, and was red on 3.14.5, which `requires-python` admits; the two
+    assertions below were measured on 3.11.14, 3.12.12 and 3.14.5.
     """
     source = r'''"""
 first invalid: \q
@@ -1301,7 +1425,9 @@ second invalid: \z
 """
 '''
     exc = _syntax_error_from_compiling(source)
-    assert "'\\q'" in (exc.msg or "")
+    message = exc.msg or ""
+    assert "\\q" in message, message
+    assert "\\z" not in message, message
     assert _line_of_the_invalid_escape(source, exc) == 2
 
 
