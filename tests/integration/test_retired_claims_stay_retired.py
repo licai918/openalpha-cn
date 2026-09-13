@@ -6,8 +6,10 @@ rewrote it. The final review had verified the first classes itself (its I4); the
 its sub-audits and were checked against the code before anything was rewritten. The classes its
 rebase round added came from the independent review of `D13` and the rebase brief, checked the
 same way; five of the wordings that round retired were never in `d4ef5e4`, because `D13` had
-written them itself, on its branch before the rebase (`16db458`). An entry of `RETIRED_CLAIMS`
-holds:
+written them itself, on its branch before the rebase (`16db458`). The review of that round
+found one more clause of two of those classes in the marketing pack's §032; the risk gate's
+pattern, extended to it, found a second clause in §041, and `D13`'s final round retired both. An
+entry of `RETIRED_CLAIMS` holds:
 
 - `pattern`: the family of wordings that was retired, searched in every clause of the four
   documents as `tests/prose_clauses.py` reads them;
@@ -813,7 +815,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         name="the three risk views weigh different things",
         pattern=re.compile(
             rf"保守视角优先{_NOT_END}{{0,8}}(?:回撤|流动性)|中性视角平衡"
-            rf"|风险视角再讨论{_NOT_END}{{0,6}}(?:敞口|流动性)"
+            rf"|风险视角再讨论{_NOT_END}{{0,6}}(?:敞口|流动性)|从不同风险偏好"
         ),
         refuted_by=(
             "The three votes read the same flags (agents/committee.py:137-153): the aggressive "
@@ -825,13 +827,14 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "中性视角平衡收益风险",
             "保守视角优先回撤与流动性",
             "激进、中性、保守风险视角再讨论敞口与流动性。",
+            "激进、中性、保守风险委员会再从不同风险偏好评审",
         ),
         paraphrase="保守的那一票更看重回撤。",
         premise=_the_neutral_and_conservative_votes_still_agree,
     ),
     RetiredClaim(
         name="the risk gate runs after the committee",
-        pattern=re.compile(r"风险门随后执行"),
+        pattern=re.compile(rf"风险门随后执行|委员会{_NOT_END}{{0,16}}风险门给出"),
         refuted_by=(
             "The risk gate runs inside ResearchEngine.run_cycle (runtime/engine.py:118), which "
             "calls no committee; the committee is a later, optional call (sdk.py:236-243, POST "
@@ -841,6 +844,9 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         retired=(
             "风险门随后执行 pass、reduce、block，"
             "A 股组合层继续检查 T+1、整手、停牌、涨跌停、现金和敞口。",
+            "之后，激进、中性、保守风险委员会再从不同风险偏好评审，"
+            "风险门给出 pass、reduce 或 block",
+            "Bull/Bear 和三态风险委员会先评审证据，风险门给出通过、降级或阻断",
         ),
         paraphrase="委员会投完票，风险门接着把关。",
         premise=_the_engine_still_calls_no_committee,
@@ -945,6 +951,7 @@ TRUE_SENTENCES_THAT_SHARE_THE_WORDS: Final[tuple[str, ...]] = (
     "四类入口共享的是同一批领域模型，覆盖面各不相同。",
     "四类入口共享同一批服务，覆盖面各不相同。",
     "FastAPI 路由与 OpenAPI 文档共享同一合同。",
+    "run_cycle 先路由、再生成信号，之后风险门给出 pass、reduce 或 block。",
 )
 """True or unrelated sentences that share a retired pattern's words. The review of `D13` measured
 the first six being caught (its M1): client holds cli, 移动平均 holds 移动, and a rejection and a
@@ -952,9 +959,11 @@ report's decision can sit in one clause. The seventh is README.en.md:100's point
 run's named boundaries, which states no count; the first draft of the boundaries pattern caught
 it. The review of the rebase round measured the next two being caught by the four faces' entry
 (its m4): a contract three providers share is not the faces', and faces that share domain models
-need not cover the same routes. The last two are what that review's suggested narrowing would
-still catch: 四类入口共享同一 holds the true 同一批服务, and API read as a substring holds
-OpenAPI and FastAPI."""
+need not cover the same routes. The two after them are what that review's suggested narrowing
+would still catch: 四类入口共享同一 holds the true 同一批服务, and API read as a substring
+holds OpenAPI and FastAPI. The last is why the risk gate's branch for §032 is anchored on 委员会
+rather than on that review's suggested 之后: run_cycle's own order puts 之后 before 风险门给出,
+and that order is true."""
 
 
 def test_the_retired_patterns_pass_the_true_sentences_that_share_their_words() -> None:
