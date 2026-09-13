@@ -1,8 +1,13 @@
+import json
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from openalpha_cn.backtest.replay import ReplayCorpus, ReplayRunner
+from openalpha_cn.domain.evidence import LookAheadViolationError
 from openalpha_cn.storage.migrations import read_status, run_migrations
 from openalpha_cn.storage.sqlite import SQLiteRunRepository
 from openalpha_cn.storage.validation import SQLiteValidationStore
@@ -39,7 +44,6 @@ def test_frozen_corpus_runs_300_events_across_60_trading_days(
     assert report.total_cases == 300
     assert report.succeeded == 300
     assert report.deterministic_replays == 300
-    assert report.look_ahead_violations == 0
     assert report.success_rate == 1.0
     assert len(report.validation_ids) == 300
 
@@ -60,3 +64,21 @@ def test_frozen_corpus_runs_300_events_across_60_trading_days(
     # The replay database itself is migrated -- not permanently stuck at `user_version = 0`
     # (Finding 1's first half, verified by the acceptance reviewer against the pre-fix code).
     assert read_status(state_path).current_version != 0
+
+    # `report.look_ahead_violations == 0` used to be asserted here, and it could not fail: a case
+    # whose evidence is not yet visible at its own `as_of` is refused by
+    # `ReplayCase.validate_point_in_time` while the corpus loads, before the runner sees it, so
+    # the count is 0 for every corpus that reaches `run` (the field's docstring in
+    # backtest/replay.py). What README.md:43 and docs/backtest/a-share-execution.zh-CN.md rely
+    # on is that refusal, so this corpus is checked for the refusal instead: move one case's
+    # clock to a minute before its evidence became visible, and the same corpus no longer loads.
+    document = json.loads(CORPUS_PATH.read_text(encoding="utf-8"))
+    tampered = document["cases"][0]
+    visible_from = datetime.fromisoformat(tampered["evidence"][0]["timeline"]["available_time"])
+    tampered["as_of"] = (visible_from - timedelta(minutes=1)).isoformat()
+    with pytest.raises(ValidationError) as refused:
+        ReplayCorpus.model_validate(document)
+    assert any(
+        isinstance(error.get("ctx", {}).get("error"), LookAheadViolationError)
+        for error in refused.value.errors()
+    )
