@@ -23,7 +23,7 @@ Windows 各 5 个 skip。
 | 现象 | 根因 | 处置 |
 |---|---|---|
 | 24–32 条 `invalid escape sequence '\|'` | `storage/connection.py:34` 模块 docstring 里的 `\|`，**由 `c7958b3` 引入**。3.11 报 DeprecationWarning、3.12 升为 SyntaxWarning，CPython 的走向是硬错误——届时 `openalpha_cn.storage` 无法导入。`pyproject.toml` **没有任何 `filterwarnings`**，所以这一类能静默穿过 CI | D1 |
-| 5 条报在 `<unknown>:1` | 五个 AST 扫描测试 `ast.parse(path.read_text(...))` **不带 `filename=`**；tests/ 里这类调用 22 处带、11 处不带 | D3 |
+| 5 条报在 `<unknown>:1` | 五个 AST 扫描测试 `ast.parse(path.read_text(...))` **不带 `filename=`**。（计划写成时记作"tests/ 里 22 处带、11 处不带"——那是控制方数错了：按 AST 实测，D3 之前全仓 `ast.parse` 51 处带、34 处不带。） | D3 |
 | ubuntu 3.12 独有 7 条 `use of fork() may lead to deadlocks` | `test_panel_store.py` 两个测试与 `test_migrations.py` 一个测试用**平台默认**的 `multiprocessing` 启动方式：Linux 是 `fork`，macOS/Windows 是 `spawn`。四处文档（`test_migrations.py:828`、`test_panel_store.py:186`、`conftest.py:130`、`conftest.py:277`）都按 spawn 语义写，**在 Linux 上都不成立**——`test_catalog_persists_across_a_fresh_process_...` 声称"全新进程"，fork 出来的却是父进程的内存副本 | D2 |
 | Windows 5 个 skip | `test_paper.py:265`（sockaddr_in 仅 BSD/Linux）、`test_offline_suite.py` 四处（无 `sendmsg`、无 `AF_UNIX`） | **合理，不修** |
 | 本地 1 个 numpy skip | `numpy` 经 `akshare` extra → pandas 传递进来；CI 用 `--all-extras`，本地 venv 没带 | D4（控制方） |
@@ -37,14 +37,17 @@ Windows 各 5 个 skip。
 
 ### Task 2（D2）：进程测试显式用 `spawn`，让四处文档在所有平台同时为真
 三个测试改用 `multiprocessing.get_context("spawn")`。这同时消除 3.12 的 fork 警告、消除
-多线程进程里 fork 的死锁隐患、让"全新进程"在 Linux 上也名副其实，并提前适配 3.14 默认启动方式的变化。
-然后核对那四处文档，确认现在逐字为真。**守卫**：一条 AST 审计，要求 tests/ 里每个
-`multiprocessing.Process`/`Queue`/`Barrier` 都经显式 context 构造——这一类缺陷本仓库已出现过
-（「把这台机器当成不变量」，V2-P5-063）。
+多线程进程里 fork 的死锁隐患、让"全新进程"在 Linux 上也名副其实，并提前适配 3.14 默认启动方式的变化
+（3.14 在 Linux 上改为 `forkserver`，不是 `spawn`）。然后核对那四处文档，确认现在逐字为真。
+**守卫**：一条 AST 审计——这一类缺陷本仓库已出现过（「把这台机器当成不变量」，V2-P5-063）。
+最终形态（两轮评审后）：把导入绑定解析成点分路径，扫描 src/tests/scripts；原语只能经 `get_context("spawn")`
+返回的对象构造，`get_context` 必须带字面量 `"spawn"`，`set_start_method` 一律标记，`ProcessPoolExecutor`
+须给非 `None` 的 `mp_context`，`multiprocessing.dummy` 除外；能与不能看见的边界写在审计的 docstring 里。
 
 ### Task 3（D3）：11 处 `ast.parse` 补 `filename=`
 纯可诊断性修复，不改行为。**验证方式**：临时重新引入一个非法转义，确认 warning 报出真实路径而非
-`<unknown>`，再还原。不为此加守卫——它是风格，不是缺陷类。
+`<unknown>`，再还原。不为此加守卫——它是风格，不是缺陷类。（执行中 AST 扫描另见 3 处多文件循环同形，
+一并补上；另 14 处各只解析一个写死文件、6 处解析内存串，刻意不改。）
 
 ### Task 4（D4）：本地 venv 与 CI 同一依赖集（控制方执行）
 `uv sync --locked --all-extras --dev`。验证 numpy skip 消失。
@@ -53,7 +56,8 @@ Windows 各 5 个 skip。
 对照 `batch_contracts.py` 的 `MAX_BATCH_ITEMS` 核实后改正；顺带核对同段其他数字。
 
 ### Task 6（D6）：`docs/why-openalpha-cn.zh-CN.md:26` 与 `docs/specs/v2/openalpha-cn-v2-prd.md:314`
-仍声称 rule/factor/agent/model 归因。why-openalpha 被两个 README 头部链接，属面向用户。
+仍声称 rule/factor/agent/model 归因。why-openalpha 由 `README.md` 链接（:5、:1109；计划原写"被两个
+README 头部链接"有误，`README.en.md` 不链接它），属面向用户。
 PRD 的 S65 行标 `IN`，而同表 S54 已标降级——对齐。
 
 ### Task 7（D7）：marketing 文档约 23 处用量/成本追踪声称
@@ -95,7 +99,39 @@ Debian 的 `adduser --system` 默认给 `/usr/sbin/nologin`、禁用密码、不
 再去掉 `--system` 矛盾（刻画测试保持绿、构建日志里 warning 消失）。
 运行时验证（真实镜像上 `id -u`/`id -g` = 10001、根文件系统不可写、`/proc/self/status` 的 `CapEff` 为 0）应放进
 `verify_compose_recovery.py`：它通过 `_compose()` 驱动唯一服务 `openalpha`。本地 Docker 29.2.1 可用、75 GiB 空闲，可本地构建前后对比。
+（实现时实测推翻了这里的两条建议：去掉 `cap_drop` 后 `CapEff` 仍为 0、只有 `CapBnd` 变，故改查全部五个能力集；
+去掉 `read_only` 后写 `/` 仍失败、只是错误从 EROFS 变成 EACCES，故要求 EROFS。评审又补一条：除 `/data` 外，
+每个持久挂载都必须是 `ro`，按挂载本身判定，不看挂载点目录能否写入。）
+
+### Task 10（D10）：REST 研究请求吞掉了证据的防篡改拒绝（执行中发现）
+由 D8 第 1 块核对台账行 OA-EVID-003 时发现。`ResearchApiRequest.verify_serialized_evidence` 用
+`except ValueError` 包住 `parse_serialized_evidence`，而 pydantic 的 `ValidationError` 是 `ValueError`
+子类——结构错误与防篡改拒绝一起被吞。篡改条目回退后仍以 `extra_forbidden` 被拒：**不是完整性漏洞，是一条
+安全相关检查的报错失真**。修为只原样上抛新增的 `SerializedEvidenceMismatchError`，与 CLI 逐字一致；
+批量路由用同一个请求模型，一并修好；其余响应逐字不变。
+
+### Task 11（D11）：证据标识符的覆盖面写精确，拒绝带下标（执行中发现）
+D10 评审发现 `evidence_id`/`content_hash` 只覆盖 `subject`、`kind`、`source_id`、`available_time`
+与载荷，docstring 却写"由来源与内容派生"。逐字段写明（并用导出器重生成已提交的 schema），
+`docs/api/http.md` 写明这条拒绝；拒绝消息带条目下标，且与条目顺序无关。**不改标识符方案**（见下）。
+
+### Task 12（D12）：把"模型调用"写成出厂能力的声称，以及两个守卫说多了的地方（执行中发现）
+D7 实现者报出、控制方核实：**出厂路径从不发起模型调用**——`src/`、`scripts/` 里没有模型客户端的构造点，
+没有代码读取模型 Provider 的环境变量。于是 README「模型治理」、marketing 里"408/429/5xx 分类重试 / 能力注册"
+的说法、以及嵌在 README 的 brain-03 脑图，按出厂行为读都不成立（数据源客户端的限流重试是真的，逐句区分）；
+`deploy/compose.yml` 与 `.env.example` 里的模型变量是没有读者的配置——如实注明，**不删**（见下）。
+同一任务修 D6/D7 联合评审的三条：用量守卫漏掉 D7 自己删掉的两句声称；前提测试对七种注入写法不敏感；
+两份白名单按摘录豁免整句，追加进去的真声称照样通过——改为按完整规范化子句精确钉住。
 
 ## 不在本批（需要你决定）
 - `TERMINAL_STATUSES` 缺一个表示「已窄化」的值——状态表的设计决定，不是一行能顺手发明的。
 - FK 守卫三条残留（等量替换、别名×不守命名约定相乘、九个 store 只断言 pragma 读回值）——已具名记录，风险低。
+- **证据标识符的覆盖面。** `evidence_id`/`content_hash` 不覆盖 `summary`、`source_uri`、`source_license`、
+  `redistribution` 与另外三个时钟。D10 评审实测的后果：只改存储 Parquet 里的许可/再分发两列，读取时不报完整性错误，
+  `export_report` 照样放出受限载荷；同一文件以不同许可证重建时，存储静默保留旧的许可文本。没有远程利用路径。
+  修法：A 不动身份，补文档并在导出与存储处加廉价防护；B 另加一个覆盖全部字段的摘要（改 schema、迁移存储）；
+  C 把这些字段并入 `evidence_id`（所有 id 都会变，连带 `signal_id`、`report_id` 与存储文件名）。
+- **模型调用要不要接进出厂路径。** 今天出厂路径不调用模型；模型客户端库（能力选择、分类重试、用量账本）只在
+  SDK 层可用。`deploy/compose.yml`、`.env.example` 里的模型 Provider 变量没有读者——接线，或删掉这些变量，二选一。
+- **非 Python 测试文件的验收类型。** OA-IFACE-006、OA-IFACE-007、OA-OPS-002 的真实覆盖在 web / Playwright
+  或 CI 脚本里，台账现有的验收类型装不下，只能留 `legacy-prose`。
