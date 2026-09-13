@@ -98,9 +98,12 @@ everywhere, and the second is the dangerous one** — it is no finding at all, b
 tier in every cell computed nothing, yet it looks like a clean pass to anyone grepping for
 `removed`. `factor run` prints a named warning on stderr when that happens, and
 `document.artifact.tiers[].ic.coverage` is the per-tier truth. See
-[the HTTP contract](docs/api/http.md) for the full argument and for the named boundaries —
-including `V2-P4-026`, which is why the neutralised tier cannot be built at a mid-year
-prediction instant.
+[the HTTP contract](docs/api/http.md) for the full argument. The named boundaries are
+`openalpha factor list --json`'s `run_limitations`, declared in
+[`KNOWN_FACTOR_RUN_LIMITATIONS`](src/openalpha_cn/factor_view.py) — including
+`the_builder_cannot_produce_a_residual_for_a_session_that_has_not_closed`:
+`factor build --tier neutralized` is refused by name, and writes nothing, at a prediction
+instant before that day's own 16:30 close or on a day the exchange was shut.
 
 ## The model plane
 

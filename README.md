@@ -477,11 +477,11 @@ SDK 两个面，与 `panel build` 一致——它写面板分区，而服务本�
 
 ### 有名字的边界（不是遗漏）
 
-- **中性化档在覆盖年内建不出来**（`V2-P4-026` 要修的）。残差只能在「读到的每一年最后一个
-  已存会话」当天或之后的预测时刻上算出来，而分区是整块替换的——所以一个 store 无法同时
-  持有年中的 raw 观测和年末时刻的残差。`factor build --tier neutralized` 在更早的时刻上
-  **按名字拒绝**，并且什么都不写：写了两档、放弃第三档，正好留下让 `factor run` 在下一条
-  命令里以另一个理由拒绝的那种 store 形态。
+- **中性化档只差一个会话**（`V2-P4-026` 与 `V2-P4-028` 之后）。残差必须带处理档面板自己的
+  时刻，两个外部读都按该时刻所在的那一天取，所以只有在那天自己的 16:30 收盘之后、且那天
+  开市，才建得出来。`factor build --tier neutralized` 在更早的时刻上**按名字拒绝**，并且什么
+  都不写：写了两档、放弃第三档，正好留下让 `factor run` 在下一条命令里以另一个理由拒绝的
+  那种 store 形态。代码是 `the_builder_cannot_produce_a_residual_for_a_session_that_has_not_closed`。
 - **出厂变换与中性化的 `min_cross_section=100` 高于稀薄市场**：窄截面上两个派生档每个名字
   只有覆盖码没有值，六格全 `not_measured`。这是那份配置的诚实答案，不是面的缺陷。
 - 完整清单在 `openalpha factor list --json` 的 `run_limitations`，或

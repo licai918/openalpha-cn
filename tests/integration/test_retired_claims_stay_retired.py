@@ -946,7 +946,8 @@ TRUE_SENTENCES_THAT_SHARE_THE_WORDS: Final[tuple[str, ...]] = (
     "移动平均因子的计算流程见 factor list。",
     "资金在板块间移动的流程可以回放。",
     "拒单只记录原因，报告单独关联决策。",
-    "See [the HTTP contract](docs/api/http.md) for the full argument and for the named boundaries.",
+    "The argument is in [the HTTP contract](docs/api/http.md), and `factor list --json` prints "
+    "the named boundaries.",
     "三类数据 Provider 共享同一合同，失败语义一致。",
     "四类入口共享的是同一批领域模型，覆盖面各不相同。",
     "四类入口共享同一批服务，覆盖面各不相同。",
@@ -955,9 +956,12 @@ TRUE_SENTENCES_THAT_SHARE_THE_WORDS: Final[tuple[str, ...]] = (
 )
 """True or unrelated sentences that share a retired pattern's words. The review of `D13` measured
 the first six being caught (its M1): client holds cli, 移动平均 holds 移动, and a rejection and a
-report's decision can sit in one clause. The seventh is README.en.md:100's pointer to a factor
-run's named boundaries, which states no count; the first draft of the boundaries pattern caught
-it. The review of the rebase round measured the next two being caught by the four faces' entry
+report's decision can sit in one clause. The seventh puts http.md and a factor run's named
+boundaries in one clause with no count, as README.en.md:100 did; the first draft of the
+boundaries pattern caught that pointer. The pointer itself was wrong -- the boundaries are
+`run_limitations`, which http.md does not hold -- and `D13`'s final round rewrote it, so the
+sentence here is a true one in the same words. The review of the rebase round measured the next
+two being caught by the four faces' entry
 (its m4): a contract three providers share is not the faces', and faces that share domain models
 need not cover the same routes. The two after them are what that review's suggested narrowing
 would still catch: 四类入口共享同一 holds the true 同一批服务, and API read as a substring
