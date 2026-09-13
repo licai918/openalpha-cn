@@ -52,8 +52,20 @@ class LintAnswer:
 
     exit_code: int
     report: str
-    """Its output with every run of whitespace collapsed to one space, so an edge the console
-    wrapped onto two lines still reads as one."""
+    """Its output with every run of whitespace collapsed to one space, so a line the console broke
+    at a space still reads as one. A break *inside* a word cannot be undone that way, and rich
+    makes one whenever a word is wider than the console -- which is why `lint_copy` gives the child
+    a console no module name can fill (`CHILD_CONSOLE`)."""
+
+
+CHILD_CONSOLE: Final[dict[str, str]] = {"COLUMNS": "4000", "NO_COLOR": "1"}
+"""Set in the linter's environment, with `FORCE_COLOR` taken out, so its report reads as text.
+
+D14 review m-1: the child used to print at whatever width this process had been given. rich takes
+a console that is not a terminal to be `COLUMNS` wide, 80 when that is unset, and folds a word
+longer than that; a caller with `COLUMNS=40` saw one probe test go red, and with `COLUMNS=30` nine
+of the ten -- `openalpha_cn.backtest._layering_gate_probe` alone is 42 characters. The colour half
+is caution rather than a fix: the review measured `FORCE_COLOR=1` leaving every edge name whole."""
 
 
 def copy_package(destination: Path) -> Path:
@@ -73,10 +85,11 @@ def lint_copy(package: Path, *contracts: str) -> LintAnswer:
     if source_root.resolve().is_relative_to(ROOT):
         raise ValueError(f"{package} is inside this checkout; lint a copy_package() result")
     environment = {
-        **os.environ,
+        **{name: value for name, value in os.environ.items() if name != "FORCE_COLOR"},
         "PYTHONPATH": os.pathsep.join(
             [str(source_root), *filter(None, [os.environ.get("PYTHONPATH")])]
         ),
+        **CHILD_CONSOLE,
     }
 
     resolved = subprocess.run(

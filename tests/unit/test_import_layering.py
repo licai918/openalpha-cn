@@ -337,6 +337,28 @@ def test_domain_layer_gate_rejects_a_newly_introduced_cross_subpackage_import(
     ), refused.report
 
 
+def test_an_edge_name_comes_back_whole_however_narrow_the_caller_s_console_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D14 review m-1: `lint_copy`'s child printed at whatever width this process was given.
+
+    import-linter prints through rich, which folds a word longer than the console, and collapsing
+    whitespace afterwards cannot undo a fold made inside a name. Measured with `COLUMNS=40` in this
+    process's environment, one of the ten probe tests went red; with `COLUMNS=30`, nine -- every one
+    that names an edge. The narrower of the two is set here.
+    """
+    monkeypatch.setenv("COLUMNS", "30")
+    package = copy_package(tmp_path)
+    (package / "domain" / "_layering_gate_probe.py").write_text(
+        '"""Temporary probe module for a layering test."""\n\nimport sqlite3\n', encoding="utf-8"
+    )
+
+    refused = lint_copy(package, "domain-purity")
+
+    assert refused.exit_code == 1, refused.report
+    assert "openalpha_cn.domain._layering_gate_probe -> sqlite3" in refused.report, refused.report
+
+
 def _sibling_subpackages_of_domain() -> list[str]:
     """Subpackage directories under `src/openalpha_cn/`, excluding `domain` itself.
 
