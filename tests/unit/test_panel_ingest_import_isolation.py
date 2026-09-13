@@ -42,10 +42,10 @@ message away from a response body.
 
 Each of the four tests above names one module, which was fine for one and is not fine for
 four: `panel_*` is now an established pattern, none of `pyproject.toml`'s `lint-imports`
-contracts makes a `panel_*` module a *source* (the three added for `backtest` name them only as
+contracts makes a `panel_*` module a *source* (the ones added for `backtest` name them only as
 forbidden targets), and the architecture baseline covers `storage`,
 `providers` and `models` -- so a *fifth* one could import `storage` or `providers` and nothing
-in this repository would go red. `V2-P1-016`'s review found that gap. The last two tests in
+in this repository would go red. `V2-P1-016`'s review found that gap. Two tests further down
 this file close it the way `test_import_layering.py` closed the same gap for `domain`'s
 sibling packages: discover the modules from the real directory structure, require each to
 have a row in `PANEL_MODULE_DEPENDENCIES`, and check the live graph rather than a list
@@ -77,7 +77,7 @@ mutations come through, and it is the only one that sees a loader for a dataset 
 already reads.
 
 **`RESEARCH_PLANE_DATASETS` is the second, at dataset granularity.** It records which of the
-panel's fifteen upstream datasets each module can *name*, and which it can *reach* once the
+panel's upstream datasets each module can *name*, and which it can *reach* once the
 seam is followed. This is the door a widening comes through when it does not touch the seam at
 all -- a factor declaring `FactorField(dataset=ADJ_FACTOR_DATASET, ...)`, a `ReadinessRequirement`
 built in place -- which is what `P4`'s walk-forward is most likely to do.
@@ -87,7 +87,7 @@ built in place -- which is what `P4`'s walk-forward is most likely to do.
 The candidates were: scan the `panel_ingest.load_*` calls; scan the `FactorField(dataset=...)`
 literals; scan the `*_DATASET` constants a module references; or make each module declare a list.
 The last was rejected because **the information is already in the tree and a declaration nobody
-recomputes is the drift this repository keeps finding** -- `domain/` binds fifteen `*_DATASET`
+recomputes is the drift this repository keeps finding** -- `domain/` binds the `*_DATASET`
 scalars, the factor registry declares `FactorField(dataset=...)`, and the imports are written
 down, so no `src/` module gains a manifest for this audit and the only `src/` edit is a docstring
 in `panel_neutralization.py` that had said this instrument did not exist. The first two candidates
@@ -107,7 +107,7 @@ Three blind spots, stated rather than discovered later:
 
 1. **A dataset name that is computed is invisible.** The factor planes' own dataset names are
    `FACTOR_OBSERVATION_DATASET_PREFIX + key` and friends, which is why this audit is scoped to
-   the fifteen **upstream** datasets and says so in `UPSTREAM_PANEL_DATASETS`. A module that
+   the **upstream** datasets and says so in `UPSTREAM_PANEL_DATASETS`. A module that
    built `"adj" + "_factor"` would defeat it.
 2. **Naming is not reading, so the instrument over-approximates.** `panel_gate` names `daily`
    once, in `health.freshness.cadence == "daily"` -- a cadence, not a dataset. Counting every
@@ -133,8 +133,8 @@ directions rather than raising, so a declared dataset a module cannot name is as
 undeclared one it can -- and both directions are driven, on mutated copies of the real sources,
 by `test_a_dataset_declared_for_a_module_that_cannot_name_it_turns_this_audit_red` and
 `test_a_seam_name_declared_that_nobody_imports_turns_this_audit_red`. The separating question --
-can it tell a module that reads six datasets from one that reads eight -- is
-`test_the_dataset_instrument_separates_six_datasets_from_eight`, which adds two loaders for two
+can it tell a module that reads seven datasets from one that reads nine -- is
+`test_the_dataset_instrument_separates_seven_datasets_from_nine`, which adds two loaders for two
 datasets the factor engine does not read and reads the answer back.
 """
 
@@ -175,8 +175,9 @@ _ALLOWED_FACTOR_DEPENDENCIES = _ALLOWED_INTERNAL_DEPENDENCIES | {"openalpha_cn.p
 
 It shares all three with `panel_doctor` and shares none of that module's reasons. It reaches
 `domain` for the factor contracts and the columnar batch, `panel` for `PanelStore` and the
-readiness vocabulary, and `panel_ingest` for the three writer helpers that turn a batch into a
-partition (`write_panel_batch`, `merge_panel_batches`, `split_panel_batch_by_year`) -- not for a
+readiness vocabulary, and `panel_ingest` for the four writer helpers that turn a batch into a
+partition (`write_panel_batch`, `merge_panel_batches`, `split_panel_batch_by_year` and
+`V2-P4-071`'s `carry_stored_rows_forward`) -- not for a
 requirement builder, which is the edge it deliberately does not use: `compute_factor` takes each
 input dataset's `ReadinessRequirement` from its caller, so the question the engine puts to
 `daily` is the one `daily_requirement` puts, and an engine that built its own could ask
@@ -235,10 +236,10 @@ PANEL_MODULE_DEPENDENCIES: dict[str, set[str]] = {
 }
 """Every top-level `panel_*` module and the sibling packages it may join.
 
-The six of them are 10,000-odd lines that sit *outside* `openalpha_cn/panel/` precisely so the
+The six of them are 20,000-odd lines that sit *outside* `openalpha_cn/panel/` precisely so the
 package can keep its zero-sibling-edge guarantee, which makes "which packages may this one
 join" the whole justification for each of them being top-level at all. No `lint-imports`
-contract has a `panel_*` module as a *source* -- the three `backtest` contracts name them as
+contract has a `panel_*` module as a *source* -- `backtest`'s contracts name them only as
 forbidden targets, which constrains `backtest` and says nothing about these six -- so this table
 and the tests below are the only thing standing there.
 
@@ -274,7 +275,7 @@ UPSTREAM_PANEL_DATASETS: frozenset[str] = frozenset(
 """The sixteen dataset names the panel ingests from upstream, written out rather than derived.
 
 This is the vocabulary `RESEARCH_PLANE_DATASETS` is written against, and writing it here is what
-makes a sixteenth dataset a red rather than a silent widening of four rows at once:
+makes one more upstream dataset a red rather than a silent widening of four rows at once:
 `test_the_written_dataset_vocabulary_is_the_one_domain_declares` holds this set against every
 `*_DATASET: Final[str]` `domain/` declares, so a new upstream dataset fails there first and the
 rows below have to be re-read before it can pass.
@@ -295,8 +296,8 @@ class DatasetReach(NamedTuple):
     change by editing this module and `reached` is the half that follows from what it imports.
 
     Two fields rather than one because they fail differently. `panel_view` has
-    `named == frozenset()` and reaches all fifteen through `panel_doctor.dataset_health`: its
-    `reached` can never go red, and its `named` goes red the moment that module starts deciding
+    `named == frozenset()` and reaches every upstream dataset through `panel_doctor.dataset_health`:
+    its `reached` can never go red, and its `named` goes red the moment that module starts deciding
     a dataset for itself instead of rendering somebody else's answer. `panel_neutralization` is
     the mirror -- `named` is empty and `reached` is exactly the two foreign datasets `V2-P3-004`
     exists to have made visible, so the difference between the two fields *is* that issue's
@@ -361,8 +362,8 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             # `V2-P5-046`. `stored_calendar` needs to know which exchanges `trade_cal` actually
             # holds before it can offer `--exchange` as a remedy, and the census is taken across
             # this seam rather than in `panel_view` on purpose: this module's row in
-            # `RESEARCH_PLANE_DATASETS` says `named=frozenset()` -- it reaches fifteen datasets
-            # and names none, because it renders other modules' answers -- and a local
+            # `RESEARCH_PLANE_DATASETS` says `named=frozenset()` -- it reaches every upstream
+            # dataset and names none, because it renders other modules' answers -- and a local
             # `read_coverage(TRADING_CALENDAR_DATASET, ...)` would have made that claim false to
             # buy one sentence. So the widening is here, where it is one declared name, instead
             # of in the table that records an architectural property.
@@ -512,21 +513,21 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
 }
 """`PANEL_MODULE_DEPENDENCIES` at the granularity the rows are actually about.
 
-`panel_factors`' three entries are the argument its `_ALLOWED_FACTOR_DEPENDENCIES` docstring
-already makes -- three writer helpers, and deliberately not a requirement builder -- turned from
-prose into a check. That docstring says the engine reaches `panel_ingest` "for the three writer
+`panel_factors`' four entries are the argument its `_ALLOWED_FACTOR_DEPENDENCIES` docstring
+already makes -- four writer helpers, and deliberately not a requirement builder -- turned from
+prose into a check. That docstring says the engine reaches `panel_ingest` "for the four writer
 helpers ... not for a requirement builder, which is the edge it deliberately does not use", and
-until this table existed nothing measured the "not". A fourth name in that row is now a diff.
+until this table existed nothing measured the "not". A fifth name in that row is now a diff.
 
-`panel_neutralization`'s twelve are the row `V2-P3-004` argued for, unrolled. Two of them --
+`panel_neutralization`'s fourteen are the row `V2-P3-004` argued for, unrolled. Two of them --
 `load_daily_valuations` and `load_industry_cross_section` -- are the whole of that issue's
 foreign
-reach, and seven more are the shared vocabulary that made the split cheaper than a second copy.
+reach, and nine more are the shared vocabulary that made the split cheaper than a second copy.
 The seventh, `_refuse_rows_that_are_not_the_answers_their_manifest_addresses`, is `V2-P3-019`'s
 seal check reused rather than re-written on the third tier, and it arrived here as a diff on this
 row -- which is what this table is for.
 
-`factor_view`'s row is the one that has already moved twice. `V2-P3-019` gave it
+`factor_view`'s row has moved more than once. `V2-P3-019` gave it
 `openalpha factor build`, so eleven of its names -- `compute_factor`,
 `apply_factor_transform`, `apply_factor_neutralization`, the three `write_*_panels` writers, the
 two panel types, `load_industry_market_cap_cross_section` and the two requirement builders --
@@ -543,8 +544,8 @@ that was not all `panel_*`; this is the first that is none of it, and the row is
 reached for a loader to re-price something would arrive here before it arrived anywhere else.
 
 The values are `"<sibling module stem>.<name>"` rather than fully qualified, because every
-importer and every import target in this table is a top-level `openalpha_cn.panel_*` module by
-construction and the prefix would be the same fifty-two times.
+importer and every import target in this table is a top-level research-plane module by
+construction and the `openalpha_cn.` prefix would be the same on every one of its names.
 """
 
 RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
@@ -657,9 +658,9 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
         # only module in the discovered set that can say so: it reads two rendered answers
         # out of `ShortlistDocumentStore` and follows `held_shortlist`, whose whole reach is
         # `open_shortlist` and `stable_answer_digest` -- no loader, no dataset name, nothing
-        # to close over. `panel_view` is empty on `named` and reaches all fifteen; this is
-        # empty on both, which is the difference between a face that renders panel data and
-        # one that compares two documents somebody else already produced.
+        # to close over. `panel_view` is empty on `named` and reaches every upstream dataset;
+        # this is empty on both, which is the difference between a face that renders panel
+        # data and one that compares two documents somebody else already produced.
         named=frozenset(),
         reached=frozenset(),
     ),
@@ -692,11 +693,11 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
         ),
     ),
 }
-"""Which of the fifteen upstream datasets each top-level research-plane module can touch.
+"""Which upstream datasets each top-level research-plane module can touch.
 
 Read the five rows that are worth reading:
 
-**`panel_factors` names six and the twenty shipped factors now declare all six.** Until
+**`panel_factors` names seven and the twenty-one shipped factors now declare all seven.** Until
 `V2-P3-017` the module's reach was a *proper* superset of its registry's, and that was correct
 rather than slack: `required_fields` is what `compute_factor` iterates, so the declared five were
 what any *stored* build read, while the sixth -- `fina_indicator` -- was nameable because
@@ -706,11 +707,12 @@ module imports it to decide an axis. The gap was `panel_factors.py`'s own "Nothi
 `test_the_twenty_shipped_factors_declare_every_one_of_the_six_datasets_the_engine_can_name`
 asserted it exactly so that a factor which started reading that endpoint would go red there
 rather than pass silently. `deducted_earnings_yield_ttm` did start reading it, the assertion is
-now an equality, and the row below never had to move -- which is what a reach table being a
-superset is for.
+now an equality, and the row below did not have to move for it -- which is what a reach table
+being a superset is for. The seventh, `index_daily`, arrived later, when `V2-P3-016`'s
+`residual_vol_60` moved the registry and the row together.
 
 **`panel_neutralization` names none and reaches two.** No dataset name appears anywhere in that
-module's 2,172 lines; `daily_basic` and `index_member_all` arrive entirely through
+module's 2,374 lines (at `D13`); `daily_basic` and `index_member_all` arrive entirely through
 `load_daily_valuations` and `load_industry_cross_section`. That difference is `V2-P3-004`'s
 claim as
 a measurement, and it is also why a scan of `FactorField(dataset=...)` literals alone would have
@@ -727,9 +729,9 @@ the gate's `reached` already covers `daily` through `panel_health_report`.
 row is `V2-P3-019`'s doing: when this table was first written the face named *none* and reached
 *eleven*, because it rendered stored tiers and its reach came from the seven `panel_ingest`
 loaders a tradeability label needs. `openalpha factor build` made it a builder as well, so it
-names the same six `panel_factors` does -- it imports `DAILY_DATASET`, `DAILY_BASIC_DATASET` and
-`FINANCIAL_STATEMENT_DATASETS` to state the requirements a build must clear -- and picks up
-`fina_indicator` and `index_member_all` in `reached`, the latter through
+names every dataset `panel_factors` does -- it imports `DAILY_DATASET`, `DAILY_BASIC_DATASET`,
+`INDEX_DAILY_DATASET` and `FINANCIAL_STATEMENT_DATASETS` to state the requirements a build must
+clear -- and picks up `fina_indicator` and `index_member_all` in `reached`, the latter through
 `load_industry_market_cap_cross_section`, which is the industry corpus the neutralisation
 regresses against and which a renderer had no reason to touch.
 
@@ -755,7 +757,7 @@ describing the row is not. It is covered here at all because
 `V2-P3-015` made `factor_*` a second top-level family and the glob above only knew about the
 first; see `RESEARCH_PLANE_PREFIXES`.
 
-**`feature_matrix` names none and reaches two, which is the narrowest row in the table and is
+**`feature_matrix` names none and reaches two, which ties for the narrowest non-empty row and is
 `V2-P4-012`'s whole claim about its own seam.** Every feature value it returns comes out of the
 factor plane's *derived* partitions -- `factor_obs_*`, `factor_proc_*`, `factor_neut*` -- which are
 built by concatenation at run time and are deliberately not in `UPSTREAM_PANEL_DATASETS` at all,
@@ -765,12 +767,12 @@ about, and `stock_basic` to say who was listed on it. A row that grew a price or
 would mean this module had started deciding tradeability, which
 `a_universe_version_says_who_was_listed_and_not_who_was_tradeable` says it does not.
 
-**`panel_ingest`, `panel_doctor`, `panel_gate` and `panel_view` reach all fifteen**, and their
-rows say `UPSTREAM_PANEL_DATASETS` rather than repeating it. That is a derived value in a table
-that is otherwise written by hand, so it is worth being explicit about what it costs: a sixteenth
-upstream dataset would widen those four rows without anybody arguing for it. What stops that is
-`test_the_written_dataset_vocabulary_is_the_one_domain_declares`, which fails on the sixteenth
-dataset before these rows are ever consulted -- one hop, and a red either way.
+**`panel_ingest`, `panel_doctor`, `panel_gate` and `panel_view` reach every upstream dataset**,
+and their rows say `UPSTREAM_PANEL_DATASETS` rather than repeating it. That is a derived value in
+a table that is otherwise written by hand, so it is worth being explicit about what it costs: one
+more upstream dataset would widen those four rows without anybody arguing for it. What stops that
+is `test_the_written_dataset_vocabulary_is_the_one_domain_declares`, which fails on that dataset
+before these rows are ever consulted -- one hop, and a red either way.
 """
 
 
@@ -815,9 +817,9 @@ was written and is not any more: `V2-P3-015` added `factor_view.py`, a *second* 
 with the same justification (it may join packages `openalpha_cn.panel` may not) and none of the
 same discovery. It is covered today only because `test_factor_view_layering.py` names it by hand
 -- so a **second** `factor_*.py`, which is what an issue after `V2-P3-015` would add, would be
-guarded by nothing at all. The two instruments below discover from both prefixes, and
+guarded by nothing at all. The two instruments below discover from every prefix here, and
 `test_every_top_level_module_is_a_declared_leaf_or_a_member_of_a_discovered_family` refuses a
-top-level module that belongs to neither family and has not been declared a leaf.
+top-level module that belongs to no family and has not been declared a leaf.
 
 **`shortlist_` is the third family, and it arrived exactly the way that test predicted it would.**
 `TOP_LEVEL_MODULES_OUTSIDE_EVERY_PLANE_FAMILY`'s docstring names the shape in advance -- "a third
@@ -843,7 +845,7 @@ than a sentence in `TOP_LEVEL_MODULES_OUTSIDE_EVERY_PLANE_FAMILY`, which is the 
 test's own message names first and the one `shortlist_view.py` and `feature_matrix.py` both took.
 
 Its `RESEARCH_PLANE_SEAM_IMPORTS` row is the first that is **not** all `panel_*`: twelve of its
-twenty-five names come off `openalpha_cn.feature_matrix`, a research-plane sibling of its own.
+twenty-six names come off `openalpha_cn.feature_matrix`, a research-plane sibling of its own.
 That is what `_is_research_plane_stem` was widened for at `factor_view`'s arrival, and it is why
 the table is at name granularity -- a face reaching a *producer* is a different edge from a face
 reaching a loader, and both are now diffs on one row.
@@ -904,7 +906,8 @@ def _dataset_naming_constants() -> dict[str, frozenset[str]]:
     of `FINANCIAL_STATEMENT_DATASETS`, which is a tuple of four scalars, and a hand-written map
     from constant to dataset would be one more table to drift. Referring to a constant counts as
     naming everything it resolves to, so `panel_factors` importing `PERIOD_INDEXED_DATASETS`
-    names the four statement endpoints -- which is why its row is six and not five.
+    names the four statement endpoints -- which is why, until `V2-P3-017`, its row was six and
+    not five.
 
     Memoised without regard to the cycle guard because a module-level constant cannot take part
     in one: a cycle among them would be a `NameError` at import rather than a wrong answer here.
@@ -958,7 +961,7 @@ def _is_research_plane_stem(stem: str) -> bool:
 def _seam_imports(tree: ast.Module) -> dict[str, tuple[str, str]]:
     """Local name to `(sibling module, name in it)` for every research-plane sibling import.
 
-    Both families, so `factor_view` taking eighteen names off the panel plane is a row here
+    Every family, so the names `factor_view` takes off the panel plane are a row here
     rather than a blind spot. Only the `from ... import <name>` form, which is the only one in
     the tree and the only one a name-granular table can police;
     `test_no_research_plane_module_takes_a_whole_sibling_module_instead_of_names_from_it` is what
@@ -1015,17 +1018,17 @@ def _research_plane_dataset_reach(sources: Mapping[str, str]) -> dict[str, Datas
     """What each module in `sources` can name, and what it can reach once the seam is followed.
 
     Per symbol rather than per module on the far side of the seam, which is the difference
-    between a useful answer and a vacuous one: `panel_neutralization` imports six names from
+    between a useful answer and a vacuous one: `panel_neutralization` imports nine names from
     `panel_factors`, and closing at module granularity would hand it that module's whole
-    six-dataset reach for the sake of an error class and a column prefix. At symbol granularity
-    those six contribute nothing and its row stays at the two datasets it really takes.
+    seven-dataset reach for the sake of an error class and a column prefix. At symbol granularity
+    those nine contribute nothing and its row stays at the two datasets it really takes.
 
     Symbol-to-symbol edges are resolved by name -- a local variable that shadows a top-level
     function is followed as if it were that function -- so the closure over-approximates in the
     fail-closed direction. It is computed as a fixpoint rather than by recursion because two
     functions in `panel_ingest` may call each other and a depth-first walk would have to carry
-    a cycle guard that silently truncates the answer; the loop reaches its fixpoint in three
-    passes over the current tree.
+    a cycle guard that silently truncates the answer; on the tree as `D13` measured it, the loop
+    reaches its fixpoint in five passes.
     """
     constants = _dataset_naming_constants()
     trees = {module: ast.parse(text, filename=module) for module, text in sources.items()}
@@ -1340,7 +1343,7 @@ def test_every_top_level_panel_module_is_in_this_table_and_stays_inside_its_row(
     first of them.
 
     One graph, built once and shared: `grimp.build_graph` walks the whole package, and this
-    test asks four questions of it.
+    test asks it one question per discovered module.
     """
     discovered = _top_level_panel_modules()
 
@@ -1363,13 +1366,13 @@ def test_every_top_level_panel_module_is_in_this_table_and_stays_inside_its_row(
 
 
 def test_no_top_level_panel_module_reaches_a_composition_root_or_a_credential() -> None:
-    """The other half, stated once for all of them rather than four times.
+    """The other half, stated once for all of them rather than once per module.
 
     Whatever a `panel_*` module joins below, none of them may reach `providers` (a credential
     inside the module that builds response bodies), `storage`/`runtime` (a verdict that
     depended on how the process was wired rather than on what is in the store), or `api`/
     `product`/`agents`/`backtest` (an inversion of the direction the whole plane runs in).
-    Discovered the same way, so the fifth module is covered by this too.
+    Discovered the same way, so the next `panel_*` module is covered by this too.
     """
     forbidden = {
         "openalpha_cn.providers",
@@ -1483,7 +1486,7 @@ TOP_LEVEL_MODULES_OUTSIDE_EVERY_PLANE_FAMILY: dict[str, str] = {
     "openalpha_cn.schema_export": "a build script's entry point, not a research module.",
     "openalpha_cn.sdk": "a face, for `openalpha_cn.cli`'s reason.",
 }
-"""Every top-level module that is neither `panel_*` nor `factor_*`, and why it needs no row.
+"""Every top-level module in no research-plane family, and why it needs no row.
 
 The discovery gap this closes is one level up from the one `RESEARCH_PLANE_PREFIXES` closes.
 Widening the glob to two prefixes makes a second `factor_*.py` arrive red; it does nothing at all
@@ -1541,7 +1544,7 @@ def test_the_written_dataset_vocabulary_is_the_one_domain_declares() -> None:
     """`UPSTREAM_PANEL_DATASETS` against every `*_DATASET` scalar `domain/` binds.
 
     This is the sentinel under the four rows that say `UPSTREAM_PANEL_DATASETS` rather than
-    listing fifteen names. Those rows would widen silently when a sixteenth upstream dataset
+    listing the datasets. Those rows would widen silently when one more upstream dataset
     arrived; this test makes that arrival red one hop earlier, before `RESEARCH_PLANE_DATASETS`
     is consulted at all, and its message says which rows have to be re-read.
 
