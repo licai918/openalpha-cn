@@ -676,7 +676,7 @@ def test_no_top_level_panel_module_can_reach_the_evidence_plane_at_all() -> None
     for the factor engine is `V2-P3-002`'s own and would survive a change to that one's
     forbidden set.
     """
-    graph = grimp.build_graph("openalpha_cn")
+    graph = grimp.build_graph("openalpha_cn", cache_dir=None)
     modules = sorted(
         f"openalpha_cn.{path.stem}"
         for path in SOURCE.glob("panel_*.py")
@@ -695,7 +695,7 @@ def test_the_evidence_store_is_reachable_from_somewhere_so_the_check_above_is_no
     """The sentinel for the assertion above: if `openalpha_cn.storage` had no importer at all,
     or `grimp` had stopped resolving these names, every `assert not ...` would pass while
     proving nothing about the boundary."""
-    graph = grimp.build_graph("openalpha_cn")
+    graph = grimp.build_graph("openalpha_cn", cache_dir=None)
 
     assert graph.direct_import_exists(
         importer="openalpha_cn.sdk", imported="openalpha_cn.storage", as_packages=True

@@ -73,6 +73,7 @@ import grimp
 import pytest
 from import_linter_containment import contained_lint_imports, raw_lint_imports_disables
 from importlinter import api as importlinter_api
+from scratch_package import copy_package, lint_copy
 
 ROOT = Path(__file__).resolve().parents[2]
 BASELINE_PATH = ROOT / "docs" / "architecture" / "import-layering-baseline.toml"
@@ -176,7 +177,7 @@ def test_storage_has_zero_direct_edges_into_agents_runtime_product_or_backtest()
     directly with `grimp` rather than through import-linter's own (now-unexempted)
     evaluation -- an independent measurement of the same property.
     """
-    graph = grimp.build_graph("openalpha_cn")
+    graph = grimp.build_graph("openalpha_cn", cache_dir=None)
     for forbidden in (
         "openalpha_cn.agents",
         "openalpha_cn.runtime",
@@ -193,15 +194,11 @@ def test_each_former_baseline_edge_is_individually_gone() -> None:
     exempt no longer exists -- not merely that some aggregate package-level check passes,
     which could stay green even if one edge had only moved rather than vanished.
     """
-    graph = grimp.build_graph("openalpha_cn")
+    graph = grimp.build_graph("openalpha_cn", cache_dir=None)
     for importer, imported in FORMER_BASELINE_EDGES:
         assert not graph.direct_import_exists(importer=importer, imported=imported), (
             f"{importer} still directly imports {imported}"
         )
-
-
-_LEAKY_HELPER_PATH = ROOT / "src" / "openalpha_cn" / "leaky_helper.py"
-_LEAKY_PROBE_PATH = ROOT / "src" / "openalpha_cn" / "storage" / "_leaky_probe.py"
 
 
 def test_storage_no_upward_deps_contract_does_not_relax_to_direct_edges_only() -> None:
@@ -225,7 +222,9 @@ def test_storage_no_upward_deps_contract_does_not_relax_to_direct_edges_only() -
     )
 
 
-def test_storage_no_upward_deps_contract_rejects_indirect_leak_via_neutral_module() -> None:
+def test_storage_no_upward_deps_contract_rejects_indirect_leak_via_neutral_module(
+    tmp_path: Path,
+) -> None:
     """A Critical-review finding on V2-P0B-012 proved that `allow_indirect_imports = true`
     (once present on this contract) let any future contributor reach a behavioural
     upper-layer class through one neutral top-level module without this gate ever noticing.
@@ -236,43 +235,43 @@ def test_storage_no_upward_deps_contract_rejects_indirect_leak_via_neutral_modul
     `lint-imports` reported `storage-no-upward-deps` KEPT (not broken) for that probe, while
     `grimp`'s full-reachability check saw the two-hop chain plainly. This test reproduces
     that exact probe against the current (fixed) configuration and proves the gate now
-    rejects it, then removes both probe files so the real source tree is left clean.
+    rejects it, naming both hops. The two probe files go into a copy of the package under
+    `tmp_path`, never into the real source tree (D13 I-D, `tests/scratch_package.py`), which is
+    why the real tree is checked on its own rather than once a clean-up has run.
     """
-    assert not _LEAKY_HELPER_PATH.exists(), "probe file must not already exist"
-    assert not _LEAKY_PROBE_PATH.exists(), "probe file must not already exist"
-    _LEAKY_HELPER_PATH.write_text(
-        '"""Temporary probe module for an import-layering leak test."""\n\n'
-        "from openalpha_cn.product.research import ResearchScreener\n\n"
-        '__all__ = ["ResearchScreener"]\n'
-    )
-    _LEAKY_PROBE_PATH.write_text(
-        '"""Temporary probe module for an import-layering leak test."""\n\n'
-        "from openalpha_cn.leaky_helper import ResearchScreener\n\n"
-        '__all__ = ["ResearchScreener"]\n'
-    )
-    try:
-        exit_code = contained_lint_imports(
-            config_filename=str(ROOT / "pyproject.toml"),
-            no_cache=True,
-            limit_to_contracts=("storage-no-upward-deps",),
-        )
-        assert exit_code == 1, (
-            "lint-imports should reject storage/_leaky_probe.py -> leaky_helper -> "
-            "product.research.ResearchScreener as an indirect leak through "
-            "storage-no-upward-deps -- if this passes, the contract has regressed to a "
-            "direct-edges-only check"
-        )
-    finally:
-        _LEAKY_PROBE_PATH.unlink()
-        _LEAKY_HELPER_PATH.unlink()
-
-    # Confirm the gate is green again once both probe files are removed.
     exit_code = contained_lint_imports(
         config_filename=str(ROOT / "pyproject.toml"),
         no_cache=True,
         limit_to_contracts=("storage-no-upward-deps",),
     )
     assert exit_code == 0
+
+    package = copy_package(tmp_path)
+    (package / "leaky_helper.py").write_text(
+        '"""Temporary probe module for an import-layering leak test."""\n\n'
+        "from openalpha_cn.product.research import ResearchScreener\n\n"
+        '__all__ = ["ResearchScreener"]\n',
+        encoding="utf-8",
+    )
+    (package / "storage" / "_leaky_probe.py").write_text(
+        '"""Temporary probe module for an import-layering leak test."""\n\n'
+        "from openalpha_cn.leaky_helper import ResearchScreener\n\n"
+        '__all__ = ["ResearchScreener"]\n',
+        encoding="utf-8",
+    )
+    refused = lint_copy(package, "storage-no-upward-deps")
+
+    assert refused.exit_code == 1, (
+        "lint-imports should reject storage/_leaky_probe.py -> leaky_helper -> "
+        "product.research.ResearchScreener as an indirect leak through "
+        "storage-no-upward-deps -- if this passes, the contract has regressed to a "
+        f"direct-edges-only check: {refused.report}"
+    )
+    for hop in (
+        "openalpha_cn.storage._leaky_probe -> openalpha_cn.leaky_helper",
+        "openalpha_cn.leaky_helper -> openalpha_cn.product.research",
+    ):
+        assert hop in refused.report, refused.report
 
 
 def test_baseline_exemptions_match_import_linter_ignore_imports_configuration_exactly() -> None:
@@ -284,22 +283,14 @@ def test_baseline_exemptions_match_import_linter_ignore_imports_configuration_ex
     assert baseline_pairs == configured_pairs
 
 
-def test_domain_layer_gate_rejects_a_newly_introduced_forbidden_stdlib_import() -> None:
-    """The gate is live: a fresh `import sqlite3` inside `domain/` must fail the check."""
-    probe_path = ROOT / "src" / "openalpha_cn" / "domain" / "_layering_gate_probe.py"
-    assert not probe_path.exists(), "probe file must not already exist in the real source tree"
-    probe_path.write_text('"""Temporary probe module for a layering test."""\n\nimport sqlite3\n')
-    try:
-        exit_code = contained_lint_imports(
-            config_filename=str(ROOT / "pyproject.toml"),
-            no_cache=True,
-            limit_to_contracts=("domain-purity",),
-        )
-        assert exit_code == 1
-    finally:
-        probe_path.unlink()
+def test_domain_layer_gate_rejects_a_newly_introduced_forbidden_stdlib_import(
+    tmp_path: Path,
+) -> None:
+    """The gate is live: a fresh `import sqlite3` inside `domain/` must fail the check.
 
-    # Confirm the gate is green again once the probe is removed.
+    The real `domain/` passes; the probe goes into a copy of the package under `tmp_path`
+    (D13 I-D, `tests/scratch_package.py`), and the refusal has to name the probe's edge.
+    """
     exit_code = contained_lint_imports(
         config_filename=str(ROOT / "pyproject.toml"),
         no_cache=True,
@@ -307,32 +298,43 @@ def test_domain_layer_gate_rejects_a_newly_introduced_forbidden_stdlib_import() 
     )
     assert exit_code == 0
 
+    package = copy_package(tmp_path)
+    (package / "domain" / "_layering_gate_probe.py").write_text(
+        '"""Temporary probe module for a layering test."""\n\nimport sqlite3\n', encoding="utf-8"
+    )
+    refused = lint_copy(package, "domain-purity")
 
-def test_domain_layer_gate_rejects_a_newly_introduced_cross_subpackage_import() -> None:
-    """The gate is live: `domain/` importing any sibling subpackage must fail the check."""
-    probe_path = ROOT / "src" / "openalpha_cn" / "domain" / "_layering_gate_probe.py"
-    assert not probe_path.exists(), "probe file must not already exist in the real source tree"
-    probe_path.write_text(
+    assert refused.exit_code == 1, refused.report
+    assert "openalpha_cn.domain._layering_gate_probe -> sqlite3" in refused.report, refused.report
+
+
+def test_domain_layer_gate_rejects_a_newly_introduced_cross_subpackage_import(
+    tmp_path: Path,
+) -> None:
+    """The gate is live: `domain/` importing any sibling subpackage must fail the check.
+
+    In a copy of the package under `tmp_path`, for the reason the test above gives.
+    """
+    exit_code = contained_lint_imports(
+        config_filename=str(ROOT / "pyproject.toml"),
+        no_cache=True,
+        limit_to_contracts=("domain-purity",),
+    )
+    assert exit_code == 0
+
+    package = copy_package(tmp_path)
+    (package / "domain" / "_layering_gate_probe.py").write_text(
         '"""Temporary probe module for a layering test."""\n\n'
         "from openalpha_cn.providers.base import ProviderMetadata\n\n"
-        '__all__ = ["ProviderMetadata"]\n'
+        '__all__ = ["ProviderMetadata"]\n',
+        encoding="utf-8",
     )
-    try:
-        exit_code = contained_lint_imports(
-            config_filename=str(ROOT / "pyproject.toml"),
-            no_cache=True,
-            limit_to_contracts=("domain-purity",),
-        )
-        assert exit_code == 1
-    finally:
-        probe_path.unlink()
+    refused = lint_copy(package, "domain-purity")
 
-    exit_code = contained_lint_imports(
-        config_filename=str(ROOT / "pyproject.toml"),
-        no_cache=True,
-        limit_to_contracts=("domain-purity",),
-    )
-    assert exit_code == 0
+    assert refused.exit_code == 1, refused.report
+    assert (
+        "openalpha_cn.domain._layering_gate_probe -> openalpha_cn.providers.base" in refused.report
+    ), refused.report
 
 
 def _sibling_subpackages_of_domain() -> list[str]:
@@ -365,7 +367,7 @@ def test_domain_purity_holds_against_every_dynamically_discovered_sibling_subpac
     siblings = _sibling_subpackages_of_domain()
     assert siblings, "expected at least one sibling subpackage under src/openalpha_cn/"
 
-    graph = grimp.build_graph("openalpha_cn")
+    graph = grimp.build_graph("openalpha_cn", cache_dir=None)
     violations = [
         sibling
         for sibling in siblings
@@ -402,7 +404,7 @@ def test_legal_downward_imports_from_runtime_and_backtest_into_storage_are_not_f
     caller-injected parameter, removing `ResearchEngine`'s prior self-construction from
     `repository.path`), so its dependency on `storage.recovery` is new and legitimate too.
     """
-    graph = grimp.build_graph("openalpha_cn")
+    graph = grimp.build_graph("openalpha_cn", cache_dir=None)
     assert graph.direct_import_exists(
         importer="openalpha_cn.runtime.engine", imported="openalpha_cn.storage.recovery"
     )
@@ -453,7 +455,7 @@ ENGINE_OWNED_STORAGE_MODULES = ("openalpha_cn.storage.recovery", "openalpha_cn.s
 def test_runtime_contracts_module_does_not_import_runtime_engine() -> None:
     """`runtime.contracts` must not import `runtime.engine` -- that edge is exactly the
     coupling this split exists to remove; if it reappears, the split is pointless."""
-    graph = grimp.build_graph("openalpha_cn")
+    graph = grimp.build_graph("openalpha_cn", cache_dir=None)
     assert not graph.direct_import_exists(
         importer="openalpha_cn.runtime.contracts", imported="openalpha_cn.runtime.engine"
     )
@@ -462,7 +464,7 @@ def test_runtime_contracts_module_does_not_import_runtime_engine() -> None:
 def test_runtime_contracts_module_does_not_transitively_depend_on_storage() -> None:
     """`runtime.contracts` holds only pydantic request/result models; its own import
     closure must never reach `openalpha_cn.storage` (directly or transitively)."""
-    graph = grimp.build_graph("openalpha_cn")
+    graph = grimp.build_graph("openalpha_cn", cache_dir=None)
     upstream = graph.find_upstream_modules("openalpha_cn.runtime.contracts")
     storage_deps = {
         module
@@ -477,7 +479,7 @@ def test_contract_only_consumers_do_not_import_runtime_engine_directly() -> None
     from `runtime.contracts`, not `runtime.engine`. This is the literal mutation-testing
     target: reverting any one of these four modules' import line back to `runtime.engine`
     must flip this edge back on and fail this test."""
-    graph = grimp.build_graph("openalpha_cn")
+    graph = grimp.build_graph("openalpha_cn", cache_dir=None)
     for module in CONTRACT_ONLY_CONSUMERS:
         assert not graph.direct_import_exists(
             importer=module, imported="openalpha_cn.runtime.engine"
@@ -496,7 +498,7 @@ def test_contract_only_consumers_do_not_transitively_reach_engine_owned_storage_
     pre-existing, and out of this task's scope; `cli.py` is still covered by the direct-edge
     test above, which is the exact edge this task changes.
     """
-    graph = grimp.build_graph("openalpha_cn")
+    graph = grimp.build_graph("openalpha_cn", cache_dir=None)
     storage_targets = set(ENGINE_OWNED_STORAGE_MODULES)
     for module in (
         "openalpha_cn.runtime.batch",
@@ -528,7 +530,7 @@ def test_panel_package_has_zero_direct_edges_into_any_other_openalpha_cn_subpack
     from the real directory structure (`_sibling_subpackages_of_domain()`, which excludes
     only `domain` itself), not a hand-copied list.
     """
-    graph = grimp.build_graph("openalpha_cn")
+    graph = grimp.build_graph("openalpha_cn", cache_dir=None)
     siblings = [name for name in _sibling_subpackages_of_domain() if name != "panel"]
     assert siblings, "expected at least one non-panel sibling subpackage to check against"
     violations = [
@@ -551,7 +553,7 @@ def test_storage_and_domain_have_zero_direct_edges_into_the_new_panel_package() 
     legitimately *used* to import before V2-P0B-012's relocation) -- there is no live edge
     this static list needs to keep permanently rejecting, only one to keep proving absent.
     """
-    graph = grimp.build_graph("openalpha_cn")
+    graph = grimp.build_graph("openalpha_cn", cache_dir=None)
     for importer in ("openalpha_cn.storage", "openalpha_cn.domain"):
         assert not graph.direct_import_exists(
             importer=importer, imported="openalpha_cn.panel", as_packages=True
@@ -571,7 +573,6 @@ def test_storage_and_domain_have_zero_direct_edges_into_the_new_panel_package() 
 # nothing.
 
 BACKTEST_PACKAGE_PATH = ROOT / "src" / "openalpha_cn" / "backtest"
-_BACKTEST_PROBE_PATH = BACKTEST_PACKAGE_PATH / "_layering_gate_probe.py"
 
 BACKTEST_MODULES_EXEMPT_FROM_THE_STORE_CONTRACT: dict[str, str] = {
     "openalpha_cn.backtest": (
@@ -641,11 +642,11 @@ def _contract_forbidden_modules(contract_id: str) -> set[str]:
     return set(forbidden)
 
 
-def _backtest_modules_on_disk() -> set[str]:
-    """Every module `backtest/` holds, `__init__` included and named as the package itself."""
+def _backtest_modules_on_disk(backtest: Path) -> set[str]:
+    """Every module `backtest` holds, `__init__` included and named as the package itself."""
     return {
         "openalpha_cn.backtest" if path.stem == "__init__" else f"openalpha_cn.backtest.{path.stem}"
-        for path in BACKTEST_PACKAGE_PATH.glob("*.py")
+        for path in backtest.glob("*.py")
     }
 
 
@@ -658,7 +659,17 @@ def test_the_two_backtest_study_contracts_cover_every_module_in_the_package() ->
     in neither the list nor the exemption table fails, and an exemption for a module that no
     longer exists fails too.
     """
-    on_disk = _backtest_modules_on_disk()
+    _assert_the_study_contracts_cover(BACKTEST_PACKAGE_PATH)
+
+
+def _assert_the_study_contracts_cover(backtest: Path) -> None:
+    """The check above, over any directory laid out as `backtest/` is.
+
+    A parameter rather than `BACKTEST_PACKAGE_PATH` so that
+    `test_lint_imports_alone_does_not_stop_a_new_backtest_module_reaching_numpy_or_a_store` can
+    ask it of a copy carrying a probe module, and the real directory is never written to ask it.
+    """
+    on_disk = _backtest_modules_on_disk(backtest)
 
     for contract_id, exempt in (
         ("backtest-studies-touch-no-store", BACKTEST_MODULES_EXEMPT_FROM_THE_STORE_CONTRACT),
@@ -683,7 +694,9 @@ def test_the_two_backtest_study_contracts_cover_every_module_in_the_package() ->
         assert not vanished, f"{contract_id} names {vanished}, which is not on disk"
 
 
-def test_lint_imports_alone_does_not_stop_a_new_backtest_module_reaching_numpy_or_a_store() -> None:
+def test_lint_imports_alone_does_not_stop_a_new_backtest_module_reaching_numpy_or_a_store(
+    tmp_path: Path,
+) -> None:
     """`V2-P4-093`: which half of the gate actually catches a *new* file, measured.
 
     The whole-package contract has `openalpha_cn.backtest` as its source, so it covers a new
@@ -701,28 +714,28 @@ def test_lint_imports_alone_does_not_stop_a_new_backtest_module_reaching_numpy_o
     The other direction is asserted in the same breath -- the whole-package contract really does
     reject the probe `test_the_backtest_gate_rejects_a_probe_that_reaches_duckdb_and_the_panel_
     store` writes -- so "the contracts catch nothing new" is not what is being claimed either.
+
+    The probe is a module in a copy of the package under `tmp_path` (D13 I-D,
+    `tests/scratch_package.py`): the whole-package lint and the coverage check both read the
+    copy, and the real `backtest/` is never written.
     """
-    assert not _BACKTEST_PROBE_PATH.exists(), "probe file must not already exist"
-    _BACKTEST_PROBE_PATH.write_text(
+    package = copy_package(tmp_path)
+    (package / "backtest" / "_layering_gate_probe.py").write_text(
         '"""Temporary probe module for a layering test."""\n\n'
         "import numpy\n\n"
         "from openalpha_cn.storage.predictions import FilePredictionStore\n\n"
         '__all__ = ["FilePredictionStore", "numpy"]\n',
         encoding="utf-8",
     )
-    try:
-        assert (
-            contained_lint_imports(config_filename=str(ROOT / "pyproject.toml"), no_cache=True) == 0
-        ), (
-            "if this now fails, a contract has been widened to cover a module it does not "
-            "name, and the sentences pointing at this test are stale in the good direction"
-        )
-        with pytest.raises(AssertionError, match="does not cover"):
-            test_the_two_backtest_study_contracts_cover_every_module_in_the_package()
-    finally:
-        _BACKTEST_PROBE_PATH.unlink()
 
-    assert contained_lint_imports(config_filename=str(ROOT / "pyproject.toml"), no_cache=True) == 0
+    kept = lint_copy(package)
+
+    assert kept.exit_code == 0, (
+        "if this now fails, a contract has been widened to cover a module it does not name, and "
+        f"the sentences pointing at this test are stale in the good direction: {kept.report}"
+    )
+    with pytest.raises(AssertionError, match="does not cover"):
+        _assert_the_study_contracts_cover(package / "backtest")
 
 
 def test_the_backtest_contracts_forbid_the_targets_the_acceptance_probe_reached() -> None:
@@ -750,35 +763,16 @@ def test_the_backtest_contracts_forbid_the_targets_the_acceptance_probe_reached(
     }
 
 
-def test_the_backtest_gate_rejects_a_probe_that_reaches_duckdb_and_the_panel_store() -> None:
+def test_the_backtest_gate_rejects_a_probe_that_reaches_duckdb_and_the_panel_store(
+    tmp_path: Path,
+) -> None:
     """The acceptance probe, reproduced: a new module under `backtest/` reaching both.
 
     This is the exact file the P3 technical acceptance created to prove the gap, and the whole
     package is the contract's source precisely so a *new* module is covered on arrival rather
-    than once somebody adds it to a list.
+    than once somebody adds it to a list. It is written into a copy of the package under
+    `tmp_path` (D13 I-D, `tests/scratch_package.py`), and the refusal has to name both edges.
     """
-    assert not _BACKTEST_PROBE_PATH.exists(), "probe file must not already exist"
-    _BACKTEST_PROBE_PATH.write_text(
-        '"""Temporary probe module for a layering test."""\n\n'
-        "import duckdb\n\n"
-        "from openalpha_cn.panel.store import PanelStore\n\n"
-        '__all__ = ["PanelStore", "duckdb"]\n',
-        encoding="utf-8",
-    )
-    try:
-        exit_code = contained_lint_imports(
-            config_filename=str(ROOT / "pyproject.toml"),
-            no_cache=True,
-            limit_to_contracts=("backtest-no-numeric-stack-or-panel-plane",),
-        )
-        assert exit_code == 1, (
-            "lint-imports should reject backtest/_layering_gate_probe.py -> duckdb and -> "
-            "openalpha_cn.panel.store; if this passes, backtest is a forbidden target again "
-            "and a source of nothing"
-        )
-    finally:
-        _BACKTEST_PROBE_PATH.unlink()
-
     exit_code = contained_lint_imports(
         config_filename=str(ROOT / "pyproject.toml"),
         no_cache=True,
@@ -786,41 +780,45 @@ def test_the_backtest_gate_rejects_a_probe_that_reaches_duckdb_and_the_panel_sto
     )
     assert exit_code == 0
 
+    package = copy_package(tmp_path)
+    (package / "backtest" / "_layering_gate_probe.py").write_text(
+        '"""Temporary probe module for a layering test."""\n\n'
+        "import duckdb\n\n"
+        "from openalpha_cn.panel.store import PanelStore\n\n"
+        '__all__ = ["PanelStore", "duckdb"]\n',
+        encoding="utf-8",
+    )
+    refused = lint_copy(package, "backtest-no-numeric-stack-or-panel-plane")
 
-def test_the_experiment_module_can_no_longer_reach_the_document_store_it_says_it_cannot() -> None:
+    assert refused.exit_code == 1, (
+        "lint-imports should reject backtest/_layering_gate_probe.py -> duckdb and -> "
+        "openalpha_cn.panel.store; if this passes, backtest is a forbidden target again "
+        f"and a source of nothing: {refused.report}"
+    )
+    for edge in (
+        "openalpha_cn.backtest._layering_gate_probe -> duckdb",
+        "openalpha_cn.backtest._layering_gate_probe -> openalpha_cn.panel.store",
+    ):
+        assert edge in refused.report, refused.report
+
+
+def test_the_experiment_module_can_no_longer_reach_the_document_store_it_says_it_cannot(
+    tmp_path: Path,
+) -> None:
     """`nothing_in_this_module_stores_an_artifact_or_can_be_made_to`, made true.
 
     That is a `KNOWN_EXPERIMENT_LIMITATIONS` code in `backtest/factor_experiment.py`, and the P3
     acceptance imported `storage.factor_experiments` into that module and watched 121 tests pass.
-    The import is added here to the real file and removed in `finally`, rather than to a fresh
-    probe module, because `backtest-studies-touch-no-store` lists its sources explicitly -- a new
-    file would not be one, so a probe module would prove nothing about this claim.
+    The import is added here to `factor_experiment.py` itself, rather than to a fresh probe
+    module, because `backtest-studies-touch-no-store` lists its sources explicitly -- a new file
+    would not be one, so a probe module would prove nothing about this claim. It is added to a
+    copy of the package under `tmp_path`: D13 I-D measured the real file coming back as CRLF on
+    Windows from the `finally` that used to restore it (`tests/scratch_package.py`).
 
     `factor_view.ExperimentDocumentStore` is a `Protocol` declared beside the consumer exactly so
     `storage/factor_experiments.py` satisfies it with no import in either direction; this is what
     keeps that design from being abandoned quietly.
     """
-    module_path = BACKTEST_PACKAGE_PATH / "factor_experiment.py"
-    original = module_path.read_text(encoding="utf-8")
-    module_path.write_text(
-        original + "\n\nfrom openalpha_cn.storage.factor_experiments import FileExperimentStore\n\n"
-        '__all__ = ["FileExperimentStore"]\n',
-        encoding="utf-8",
-    )
-    try:
-        exit_code = contained_lint_imports(
-            config_filename=str(ROOT / "pyproject.toml"),
-            no_cache=True,
-            limit_to_contracts=("backtest-studies-touch-no-store",),
-        )
-        assert exit_code == 1, (
-            "backtest/factor_experiment.py importing storage.factor_experiments must break "
-            "backtest-studies-touch-no-store -- otherwise its own "
-            "nothing_in_this_module_stores_an_artifact_or_can_be_made_to is prose"
-        )
-    finally:
-        module_path.write_text(original, encoding="utf-8")
-
     exit_code = contained_lint_imports(
         config_filename=str(ROOT / "pyproject.toml"),
         no_cache=True,
@@ -828,55 +826,79 @@ def test_the_experiment_module_can_no_longer_reach_the_document_store_it_says_it
     )
     assert exit_code == 0
 
+    package = copy_package(tmp_path)
+    module = package / "backtest" / "factor_experiment.py"
+    module.write_text(
+        module.read_text(encoding="utf-8")
+        + "\n\nfrom openalpha_cn.storage.factor_experiments import FileExperimentStore\n\n"
+        '__all__ = ["FileExperimentStore"]\n',
+        encoding="utf-8",
+    )
+    refused = lint_copy(package, "backtest-studies-touch-no-store")
 
-def test_the_study_contracts_reject_numpy_and_a_composition_root_added_to_a_real_study() -> None:
+    assert refused.exit_code == 1, (
+        "backtest/factor_experiment.py importing storage.factor_experiments must break "
+        "backtest-studies-touch-no-store -- otherwise its own "
+        f"nothing_in_this_module_stores_an_artifact_or_can_be_made_to is prose: {refused.report}"
+    )
+    assert (
+        "openalpha_cn.backtest.factor_experiment -> openalpha_cn.storage.factor_experiments"
+        in refused.report
+    ), refused.report
+
+
+def test_the_study_contracts_reject_numpy_and_a_composition_root_added_to_a_real_study(
+    tmp_path: Path,
+) -> None:
     """ADR-0003's decision and the composition-root rule, each driven on a listed source module.
 
     Two separate probes on `factor_ic.py`, and each is checked against *both* study contracts so
     that a contract going red for the wrong reason cannot pass for the right one: `import numpy`
     breaks the store contract and leaves the composition-root one alone, and a
-    `runtime.contracts` import does the reverse.
+    `runtime.contracts` import does the reverse. Both go into a copy of the package under
+    `tmp_path`, never the real file (D13 I-D), and each refusal has to name its probe's edge.
     """
-    module_path = BACKTEST_PACKAGE_PATH / "factor_ic.py"
-    original = module_path.read_text(encoding="utf-8")
+    for contract in (
+        "backtest-studies-touch-no-store",
+        "backtest-studies-reach-no-composition-root",
+    ):
+        assert (
+            contained_lint_imports(
+                config_filename=str(ROOT / "pyproject.toml"),
+                no_cache=True,
+                limit_to_contracts=(contract,),
+            )
+            == 0
+        ), f"{contract} has to hold over the real tree before a probe can mean anything"
 
-    for addition, broken, intact in (
+    package = copy_package(tmp_path)
+    module = package / "backtest" / "factor_ic.py"
+    original = module.read_text(encoding="utf-8")
+
+    for addition, broken, intact, edge in (
         (
             '\n\nimport numpy\n\n__all__ = ["numpy"]\n',
             "backtest-studies-touch-no-store",
             "backtest-studies-reach-no-composition-root",
+            "openalpha_cn.backtest.factor_ic -> numpy",
         ),
         (
             "\n\nfrom openalpha_cn.runtime.contracts import ResearchRunResult\n\n"
             '__all__ = ["ResearchRunResult"]\n',
             "backtest-studies-reach-no-composition-root",
             "backtest-studies-touch-no-store",
+            "openalpha_cn.backtest.factor_ic -> openalpha_cn.runtime.contracts",
         ),
     ):
-        module_path.write_text(original + addition, encoding="utf-8")
-        try:
-            assert (
-                contained_lint_imports(
-                    config_filename=str(ROOT / "pyproject.toml"),
-                    no_cache=True,
-                    limit_to_contracts=(broken,),
-                )
-                == 1
-            ), f"{broken} should have rejected backtest/factor_ic.py{addition!r}"
-            assert (
-                contained_lint_imports(
-                    config_filename=str(ROOT / "pyproject.toml"),
-                    no_cache=True,
-                    limit_to_contracts=(intact,),
-                )
-                == 0
-            ), f"{intact} has nothing to say about {addition!r} and must stay green"
-        finally:
-            module_path.write_text(original, encoding="utf-8")
-
-    assert (
-        contained_lint_imports(config_filename=str(ROOT / "pyproject.toml"), no_cache=True) == 0
-    ), "every contract must be green again once both probes are removed"
+        module.write_text(original + addition, encoding="utf-8")
+        refused = lint_copy(package, broken)
+        assert refused.exit_code == 1, (
+            f"{broken} should have rejected backtest/factor_ic.py{addition!r}: {refused.report}"
+        )
+        assert edge in refused.report, refused.report
+        assert lint_copy(package, intact).exit_code == 0, (
+            f"{intact} has nothing to say about {addition!r} and must stay green"
+        )
 
 
 def test_the_replay_harness_and_the_outcome_validator_keep_the_imports_they_exist_for() -> None:
@@ -887,7 +909,7 @@ def test_the_replay_harness_and_the_outcome_validator_keep_the_imports_they_exis
     stated over the whole package. `replay.py` composing a SQLite-backed engine and
     `validation.py` taking one pydantic result model are what the exemptions buy.
     """
-    graph = grimp.build_graph("openalpha_cn")
+    graph = grimp.build_graph("openalpha_cn", cache_dir=None)
 
     for imported in (
         "openalpha_cn.runtime.engine",
@@ -1497,7 +1519,7 @@ def test_every_order_intent_is_forbidden_to_the_ranking_or_disclosed_as_reachabl
     forbidden = set(contract["forbidden_modules"])  # type: ignore[call-overload]
     sources = set(contract["source_modules"])  # type: ignore[call-overload]
     disclosure = _order_contract_block()
-    graph = grimp.build_graph("openalpha_cn")
+    graph = grimp.build_graph("openalpha_cn", cache_dir=None)
 
     for module, name in sorted(declared):
         reaching = {

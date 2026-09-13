@@ -44,6 +44,7 @@ from typing import Any, Final
 import pytest
 from import_linter_containment import contained_lint_imports
 from pydantic import ValidationError
+from scratch_package import copy_package, lint_copy
 
 from openalpha_cn.backtest.candidate_ranking import (
     CandidateRanking,
@@ -919,7 +920,7 @@ def test_the_lint_wrapper_leaves_the_logging_state_it_found() -> None:
     assert disabled.disabled
 
 
-def test_the_gate_cannot_reach_the_three_modules_that_make_an_order() -> None:
+def test_the_gate_cannot_reach_the_three_modules_that_make_an_order(tmp_path: Path) -> None:
     """D16's `绝不直接创建组合订单` one step further down the same path, driven in both directions.
 
     `V2-P4-005` added `ranking-creates-no-portfolio-order` for `candidate_ranking.py`;
@@ -927,28 +928,36 @@ def test_the_gate_cannot_reach_the_three_modules_that_make_an_order() -> None:
     `PortfolioOrder` would be one place in which "this list was refused" and "an order was made
     from it" could both be true. The real module passes and the same file with one import added
     fails, so the pass cannot be vacuous.
+
+    The import goes into a copy of the package under `tmp_path`, and the refusal has to name the
+    edge planted there -- D13 I-D, for the reason `tests/unit/backtest/test_candidate_ranking.py::
+    test_the_ranking_contract_cannot_reach_the_three_modules_that_make_an_order` gives.
     """
     assert _lint("ranking-creates-no-portfolio-order") == 0
 
-    original = MODULE_PATH.read_text(encoding="utf-8")
-    try:
-        MODULE_PATH.write_text(
-            original.replace(
-                "from openalpha_cn.domain._identity import stable_model_id",
-                "from openalpha_cn.domain.portfolio import PortfolioOrder\n"
-                "from openalpha_cn.domain._identity import stable_model_id\n"
-                "_ORDER = PortfolioOrder",
-            ),
-            encoding="utf-8",
-        )
-        assert _lint("ranking-creates-no-portfolio-order") == 1, (
-            "lint-imports must reject shortlist_gate -> domain.portfolio; if this passes, the "
-            "gate can build the order it just refused to let anybody publish"
-        )
-    finally:
-        MODULE_PATH.write_text(original, encoding="utf-8")
+    package = copy_package(tmp_path)
+    module = package / "backtest" / "shortlist_gate.py"
+    source = module.read_text(encoding="utf-8")
+    anchor = "from openalpha_cn.domain._identity import stable_model_id"
+    assert anchor in source, "the import this probe is planted beside moved; update the anchor"
+    module.write_text(
+        source.replace(
+            anchor,
+            f"from openalpha_cn.domain.portfolio import PortfolioOrder\n{anchor}\n"
+            "_ORDER = PortfolioOrder",
+        ),
+        encoding="utf-8",
+    )
 
-    assert _lint("ranking-creates-no-portfolio-order") == 0
+    refused = lint_copy(package, "ranking-creates-no-portfolio-order")
+
+    assert refused.exit_code == 1, (
+        "lint-imports must reject shortlist_gate -> domain.portfolio; if this passes, the gate "
+        f"can build the order it just refused to let anybody publish: {refused.report}"
+    )
+    assert (
+        "openalpha_cn.backtest.shortlist_gate -> openalpha_cn.domain.portfolio" in refused.report
+    ), refused.report
 
 
 def test_the_gate_reaches_neither_a_store_nor_the_root_that_owns_run_cycle() -> None:

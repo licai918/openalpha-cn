@@ -102,7 +102,7 @@ def test_domain_contract_homes_carry_no_edge_back_into_upper_layers_or_storage()
     task): it used to live in `runtime/contracts.py`, one layer above `domain`, and moving
     it here is exactly the kind of relocation this test exists to double-check.
     """
-    graph = grimp.build_graph("openalpha_cn")
+    graph = grimp.build_graph("openalpha_cn", cache_dir=None)
     for module in (
         "openalpha_cn.domain.agent_result",
         "openalpha_cn.domain.memory",
@@ -133,7 +133,7 @@ def test_batch_contracts_module_does_not_depend_on_agents_product_backtest_or_st
     permanent is gone, and `openalpha_cn.runtime` belongs in the forbidden set like every
     other upward package.
     """
-    graph = grimp.build_graph("openalpha_cn")
+    graph = grimp.build_graph("openalpha_cn", cache_dir=None)
     upstream = graph.find_upstream_modules("openalpha_cn.batch_contracts")
     bad = _touches_any(upstream, _FORBIDDEN_UPWARD_MODULES)
     assert not bad, f"openalpha_cn.batch_contracts transitively depends on {sorted(bad)}"

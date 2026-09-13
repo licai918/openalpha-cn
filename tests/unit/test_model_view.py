@@ -19,6 +19,7 @@ from typing import Final, get_args
 import pytest
 import walk_forward_fixtures
 from import_linter_containment import contained_lint_imports
+from scratch_package import copy_package, lint_copy
 
 from openalpha_cn import cli
 from openalpha_cn.api.app import MODEL_HTTP_STATUS
@@ -68,9 +69,6 @@ def labelled_panel_fixture() -> LabelledPanel:
     with itself about what a window closes at.
     """
     return walk_forward_fixtures.panel(aligned_from=walk_forward_fixtures.ALIGNED_FROM_OVERLAPPING)
-
-
-PROBE: Final[Path] = ROOT / "src" / "openalpha_cn" / "backtest" / "_model_face_probe.py"
 
 
 # --- the registry, bound to this file the way every other one is -------------------------------
@@ -376,54 +374,52 @@ def test_a_command_line_hyperparameter_reads_back_as_the_type_a_json_body_would_
 # --- the layer, and the contract that keeps it there --------------------------------------------
 
 
-def test_the_backtest_contract_names_this_module_and_the_entry_responds() -> None:
+def test_the_backtest_contract_names_this_module_and_the_entry_responds(tmp_path: Path) -> None:
     """`backtest-no-numeric-stack-or-panel-plane` forbids `openalpha_cn.model_view`, measurably.
 
     Adding a name to a contract's forbidden list proves nothing on its own: the list could name a
     module nothing reaches and stay green forever. `V2-P4-033` made the entry for
     `shortlist_view` and measured that it fires; this does the same for the entry this issue
     added, by putting a probe under `backtest/` that imports this module and watching the
-    contract break.
+    contract break -- in a copy of the package under `tmp_path`, never in `src/` (D13 I-D,
+    `tests/scratch_package.py`), and the refusal has to name the edge the probe adds.
 
     The probe is a **new** file rather than an edit to a real one because this contract's source
     is the whole package, so a new module is covered on arrival -- which is the property the P3
     acceptance created it for.
 
-    **Both calls go through `contained_lint_imports`, and `V2-P4-089` is why that sentence is
-    here.** This file used to spell `from importlinter.cli import lint_imports as _lint_imports`
-    -- the raw CLI, wearing the exact name of the containment wrapper one directory over -- and
-    put back `logging.getLogger("importlinter").disabled` afterwards, which is the one logger the
-    linter's own `dictConfig` names and therefore the one it never disables. It read as contained
-    and was not: every other logger in the process stayed disabled, and six `caplog` acceptances
-    in `tests/integration` failed on `assert 0 == 1` whenever this file was collected first.
+    **The call over the real tree goes through `contained_lint_imports`, and `V2-P4-089` is why
+    that sentence is here.** This file used to spell `from importlinter.cli import lint_imports as
+    _lint_imports` -- the raw CLI, wearing the exact name of the containment wrapper one directory
+    over -- and put back `logging.getLogger("importlinter").disabled` afterwards, which is the one
+    logger the linter's own `dictConfig` names and therefore the one it never disables. It read as
+    contained and was not: every other logger in the process stayed disabled, and six `caplog`
+    acceptances in `tests/integration` failed on `assert 0 == 1` whenever this file was collected
+    first. The lint over the copy runs in a child process, which that `dictConfig` cannot reach.
     """
-    assert not PROBE.exists(), "probe file must not already exist"
-    PROBE.write_text(
-        '"""Temporary probe module for a layering test."""\n\n'
-        "from openalpha_cn.model_view import evaluate_model\n\n"
-        '__all__ = ["evaluate_model"]\n',
-        encoding="utf-8",
-    )
-    try:
-        broken = contained_lint_imports(
-            config_filename=str(ROOT / "pyproject.toml"),
-            no_cache=True,
-            limit_to_contracts=("backtest-no-numeric-stack-or-panel-plane",),
-        )
-    finally:
-        PROBE.unlink()
-
-    assert broken == 1, (
-        "a backtest module importing openalpha_cn.model_view must break the contract; if this "
-        "passes, the forbidden entry this issue added is decorative"
-    )
-
     kept = contained_lint_imports(
         config_filename=str(ROOT / "pyproject.toml"),
         no_cache=True,
         limit_to_contracts=("backtest-no-numeric-stack-or-panel-plane",),
     )
     assert kept == 0
+
+    package = copy_package(tmp_path)
+    (package / "backtest" / "_model_face_probe.py").write_text(
+        '"""Temporary probe module for a layering test."""\n\n'
+        "from openalpha_cn.model_view import evaluate_model\n\n"
+        '__all__ = ["evaluate_model"]\n',
+        encoding="utf-8",
+    )
+    broken = lint_copy(package, "backtest-no-numeric-stack-or-panel-plane")
+
+    assert broken.exit_code == 1, (
+        "a backtest module importing openalpha_cn.model_view must break the contract; if this "
+        f"passes, the forbidden entry this issue added is decorative: {broken.report}"
+    )
+    assert "openalpha_cn.backtest._model_face_probe -> openalpha_cn.model_view" in broken.report, (
+        broken.report
+    )
 
 
 def test_this_module_reaches_no_concrete_store() -> None:

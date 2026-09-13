@@ -777,7 +777,7 @@ before these rows are ever consulted -- one hop, and a red either way.
 
 
 def _build_graph() -> grimp.ImportGraph:
-    return grimp.build_graph("openalpha_cn")
+    return grimp.build_graph("openalpha_cn", cache_dir=None)
 
 
 def _direct_internal_dependencies(module: str, graph: grimp.ImportGraph | None = None) -> set[str]:
@@ -1211,7 +1211,7 @@ def test_the_health_report_adds_no_edge_into_the_panel_package() -> None:
     `panel_doctor -> panel` and never back -- `openalpha_cn.panel`'s import closure is
     byte-for-byte what it was before this module existed, and nothing moved out of `panel/`
     to make room for it."""
-    graph = grimp.build_graph("openalpha_cn")
+    graph = grimp.build_graph("openalpha_cn", cache_dir=None)
 
     for importer in ("openalpha_cn.panel", "openalpha_cn.domain", "openalpha_cn.storage"):
         assert not graph.direct_import_exists(
@@ -1244,7 +1244,7 @@ def test_the_dependency_gate_adds_no_edge_into_the_panel_package_either() -> Non
     package's real dependency set is untouched and only moves out of the metric's sight. Here
     the edges run `panel_gate -> panel_doctor -> panel` and never back, so `openalpha_cn.panel`'s
     import closure is what it was before this module existed."""
-    graph = grimp.build_graph("openalpha_cn")
+    graph = grimp.build_graph("openalpha_cn", cache_dir=None)
 
     for importer in (
         "openalpha_cn.panel",
@@ -1307,7 +1307,7 @@ def test_the_shared_face_adds_no_edge_into_anything_it_renders() -> None:
     the guarded package's real dependency set untouched and only moves it out of the metric's
     sight; here every edge runs into `panel_view` from the three faces above it and out of it
     into the plane below, never back."""
-    graph = grimp.build_graph("openalpha_cn")
+    graph = grimp.build_graph("openalpha_cn", cache_dir=None)
 
     for importer in (
         "openalpha_cn.panel",
@@ -1402,7 +1402,7 @@ def test_the_columnar_contract_reaches_no_infrastructure_library() -> None:
     """`domain/panel_batch.py` is where a columnar contract is most tempted to acquire
     numpy/pandas or a DuckDB type vocabulary. It has neither: the DuckDB translation table
     lives in `panel_ingest.py`, on the far side of the seam (ADR-0003)."""
-    graph = grimp.build_graph("openalpha_cn", include_external_packages=True)
+    graph = grimp.build_graph("openalpha_cn", cache_dir=None, include_external_packages=True)
     forbidden = {"numpy", "pandas", "polars", "pyarrow", "duckdb", "sqlite3"}
 
     reachable = graph.find_downstream_modules("openalpha_cn.domain.panel_batch")
@@ -1427,7 +1427,7 @@ def test_providers_gain_the_panel_protocol_without_gaining_an_infrastructure_imp
     protocol. The `providers-no-infra-imports` contract checks full transitive reachability,
     so this would have broken the moment the contract carried a DuckDB dependency -- which
     is the concrete reason the translation table is not in `domain/`."""
-    graph = grimp.build_graph("openalpha_cn", include_external_packages=True)
+    graph = grimp.build_graph("openalpha_cn", cache_dir=None, include_external_packages=True)
 
     for infrastructure in ("duckdb", "sqlite3"):
         assert not graph.direct_import_exists(

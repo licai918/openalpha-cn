@@ -111,7 +111,7 @@ def test_the_factor_face_joins_exactly_the_planes_it_renders() -> None:
     """An equality rather than a subset: a module that stops importing one of the packages it
     exists to join has lost its reason to be top-level, which is
     `test_panel_ingest_depends_only_on_domain_and_panel`'s own argument."""
-    graph = grimp.build_graph("openalpha_cn")
+    graph = grimp.build_graph("openalpha_cn", cache_dir=None)
 
     dependencies = _direct_internal_dependencies("openalpha_cn.factor_view", graph)
 
@@ -161,7 +161,7 @@ def test_every_top_level_factor_module_is_in_this_table_and_stays_inside_its_row
     vanished = sorted(set(FACTOR_MODULE_DEPENDENCIES) - set(discovered))
     assert not vanished, f"FACTOR_MODULE_DEPENDENCIES names {vanished}, which no longer exists"
 
-    graph = grimp.build_graph("openalpha_cn")
+    graph = grimp.build_graph("openalpha_cn", cache_dir=None)
     observed = {module: _direct_internal_dependencies(module, graph) for module in discovered}
 
     assert observed == {module: FACTOR_MODULE_DEPENDENCIES[module] for module in discovered}
@@ -178,7 +178,7 @@ def test_no_top_level_factor_module_reaches_a_composition_root_or_a_credential()
     sentence for the other family, with `openalpha_cn.backtest` additionally forbidden -- the one
     package the difference between the two families is about.
     """
-    graph = grimp.build_graph("openalpha_cn")
+    graph = grimp.build_graph("openalpha_cn", cache_dir=None)
 
     leaked = {
         module: sorted(_direct_internal_dependencies(module, graph) & FORBIDDEN_FOR_A_FACE)
@@ -194,7 +194,7 @@ def test_the_factor_face_reaches_no_composition_root_and_no_credential() -> None
     The equality goes red for any change to the set; this one names *which* forbidden package was
     reached, which is the actionable half when a future edit adds one.
     """
-    graph = grimp.build_graph("openalpha_cn")
+    graph = grimp.build_graph("openalpha_cn", cache_dir=None)
 
     leaked = _direct_internal_dependencies("openalpha_cn.factor_view", graph) & FORBIDDEN_FOR_A_FACE
 
@@ -215,7 +215,7 @@ def test_nothing_below_the_factor_face_imports_it_and_all_three_faces_do() -> No
     against the concrete `FileExperimentStore` rather than against the `Protocol` precisely so
     that this edge stays absent.
     """
-    graph = grimp.build_graph("openalpha_cn")
+    graph = grimp.build_graph("openalpha_cn", cache_dir=None)
     below_it = (ALLOWED_FACTOR_VIEW_DEPENDENCIES | FORBIDDEN_FOR_A_FACE) - {"openalpha_cn.api"}
 
     for below in sorted(below_it):
@@ -237,7 +237,7 @@ def test_the_document_store_reaches_nothing_above_it() -> None:
     directly, so the reason the contract still holds is visible here rather than only in
     `lint-imports`' exit code.
     """
-    graph = grimp.build_graph("openalpha_cn")
+    graph = grimp.build_graph("openalpha_cn", cache_dir=None)
 
     for forbidden in ("openalpha_cn.factor_view", "openalpha_cn.backtest", "openalpha_cn.panel"):
         assert not graph.direct_import_exists(

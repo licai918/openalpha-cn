@@ -22,6 +22,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
+from checkout_guard import Snapshot, changes, snapshot
 from offline_guard import refusing_outbound_traffic
 
 from openalpha_cn.backtest.execution import MarketBar
@@ -415,6 +416,16 @@ def pytest_runtest_protocol(
 #     measurable rests on it: CPython already upper-cases every `os.environ` key on Windows, and
 #     git reads only upper-case names on POSIX, so a mutation that drops `.upper()` survives. It
 #     stays so that the two spellings of one rule agree, not because either platform needs it.
+#   - It takes *every* `GIT_*`, not only the ones that point git at a repository (`GIT_DIR`,
+#     `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`). Configuration the environment
+#     carries goes with them -- `GIT_CONFIG_COUNT` with its `GIT_CONFIG_KEY_<n>` and
+#     `GIT_CONFIG_VALUE_<n>` pairs, `GIT_CONFIG_PARAMETERS` (how `git -c` reaches the commands
+#     it starts), `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `GIT_CONFIG_NOSYSTEM` -- and so do
+#     an identity (`GIT_AUTHOR_*`, `GIT_COMMITTER_*`) and every other setting git reads from
+#     its environment. A git a test starts reads its configuration from the files git finds by
+#     itself, so a run that relied on the environment for a setting or an identity has it in no
+#     test; a test that needs one passes it on its own command line. `pytest_unconfigure` hands
+#     every one of them back, not only the four.
 #
 # A hook and not the function-scoped autouse fixture that is the obvious spelling, for the reason
 # `V2-P5-031` gives above for the offline guard: such a fixture is live for a test's body and its
@@ -440,3 +451,82 @@ def pytest_configure(config: pytest.Config) -> None:
 def pytest_unconfigure(config: pytest.Config) -> None:
     """Hand them back: the run is over, and a process that called `pytest.main` is not ours."""
     os.environ.update(config.stash.get(_INHERITED_GIT_VARIABLES, {}))
+
+
+# --- the checkout is not the tests' to write -----------------------------------------------------
+#
+# D13 I-D. Four tests rewrote tracked modules under `src/` with one more import and wrote the
+# original back with `Path.write_text`, which writes CRLF on Windows: both Windows legs of CI
+# printed `CRLF will be replaced by LF` for those four files after every run, while Linux and macOS
+# got their bytes back and `git status` said nothing. Six more created a probe module under `src/`
+# and deleted it in `finally`, and `grimp.build_graph` left `.grimp_cache/` at the root.
+#
+# `tests/unit/test_no_test_writes_the_checkout.py` reads the test tree for writes like those. The
+# four hooks below measure a run for them instead: a `checkout_guard.snapshot` when the session
+# starts, another when collection has finished and a last one when the session ends, and any
+# `checkout_guard.changes` between them fail the run however its tests went. `tests/
+# checkout_guard.py` says what a snapshot holds, what it ignores and why, and the one thing it
+# cannot tell apart -- another process writing the same checkout meanwhile, which it reports too.
+#
+# The root measured is `config.rootpath`, the project pytest was started on, which is this
+# checkout whenever pytest is run on it. A child pytest a test starts with `-p conftest` and its
+# own `--rootdir` measures that directory instead, which is how
+# `tests/unit/test_no_test_writes_the_checkout.py` drives these hooks without writing here.
+
+_CHECKOUT_SNAPSHOTS = pytest.StashKey[dict[str, Snapshot]]()
+"""The snapshots taken so far in this run, keyed by the instant each was taken at."""
+
+_CHECKOUT_WRITES = pytest.StashKey[list[str]]()
+"""What `pytest_sessionfinish` found, kept for `pytest_terminal_summary` to print."""
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """Snapshot the checkout before collection imports a single test module."""
+    session.config.stash[_CHECKOUT_SNAPSHOTS] = {"start": snapshot(session.config.rootpath)}
+
+
+def pytest_collection_finish(session: pytest.Session) -> None:
+    """Snapshot it again once collection has imported what it is going to import."""
+    taken = session.config.stash.get(_CHECKOUT_SNAPSHOTS, None)
+    if taken is not None:
+        taken["collected"] = snapshot(session.config.rootpath)
+
+
+def pytest_sessionfinish(session: pytest.Session) -> None:
+    """Compare the snapshots, and make a run that wrote the checkout a failed run."""
+    taken = session.config.stash.get(_CHECKOUT_SNAPSHOTS, None)
+    if taken is None:
+        return
+    finished = snapshot(session.config.rootpath)
+    collected = taken.get("collected")
+    if collected is None:
+        written = [
+            f"before collection finished, {change}" for change in changes(taken["start"], finished)
+        ]
+    else:
+        written = [
+            *(f"while collecting, {change}" for change in changes(taken["start"], collected)),
+            *(f"while the tests ran, {change}" for change in changes(collected, finished)),
+        ]
+    if not written:
+        return
+    session.config.stash[_CHECKOUT_WRITES] = written
+    if session.exitstatus in (pytest.ExitCode.OK, pytest.ExitCode.NO_TESTS_COLLECTED):
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
+def pytest_terminal_summary(
+    terminalreporter: pytest.TerminalReporter, config: pytest.Config
+) -> None:
+    """Say what was written and where, under a heading of its own, above the counts."""
+    written = config.stash.get(_CHECKOUT_WRITES, [])
+    if not written:
+        return
+    terminalreporter.section("this run wrote the checkout it ran from", red=True, bold=True)
+    for line in written:
+        terminalreporter.write_line(line, red=True)
+    terminalreporter.write_line(
+        f"(under {config.rootpath}) The run fails for this however its tests went: a test writes "
+        "its tmp_path, never the checkout. A second run, an editor or a formatter writing the "
+        "same checkout meanwhile is reported the same way -- see tests/checkout_guard.py."
+    )

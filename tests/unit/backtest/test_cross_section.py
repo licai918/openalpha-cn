@@ -336,7 +336,7 @@ def test_the_two_stage_funnel_cannot_reach_the_composition_root_that_owns_run_cy
     same fact against the graph so that a reader of this file sees the enforcement, and the
     sentinel below keeps it from being vacuous.
     """
-    graph = grimp.build_graph("openalpha_cn")
+    graph = grimp.build_graph("openalpha_cn", cache_dir=None)
 
     for plane in ("openalpha_cn.runtime", "openalpha_cn.storage", "openalpha_cn.panel"):
         assert not graph.direct_import_exists(

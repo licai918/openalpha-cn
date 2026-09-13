@@ -47,6 +47,7 @@ import grimp
 import pytest
 from import_linter_containment import contained_lint_imports
 from pydantic import ValidationError
+from scratch_package import copy_package, lint_copy
 
 from openalpha_cn.agents.committee import DeliberationCommittee
 from openalpha_cn.backtest.candidate_ranking import (
@@ -392,7 +393,9 @@ def test_the_lint_wrapper_leaves_an_already_enabled_logger_enabled() -> None:
     )
 
 
-def test_the_ranking_contract_cannot_reach_the_three_modules_that_make_an_order() -> None:
+def test_the_ranking_contract_cannot_reach_the_three_modules_that_make_an_order(
+    tmp_path: Path,
+) -> None:
     """D16's `绝不直接创建组合订单`, driven in both directions rather than asserted.
 
     `V2-P4-004` enforced "creates no order" with the two study contracts, which forbid
@@ -402,28 +405,37 @@ def test_the_ranking_contract_cannot_reach_the_three_modules_that_make_an_order(
     `backtest/` study may import. `ranking-creates-no-portfolio-order` is the contract that
     closes that, and this drives the real module through it and then the same file with one
     import added -- so the pass cannot be vacuous.
+
+    The import is added to a copy of the package under `tmp_path`, and the refusal has to name
+    the edge planted there. D13 I-D: this used to rewrite `MODULE_PATH` itself and put it back
+    with `write_text` in `finally`, which on Windows put it back as CRLF, and a run killed in
+    between would have left the import in `src/` (`tests/scratch_package.py`).
     """
     assert _lint("ranking-creates-no-portfolio-order") == 0
 
-    original = MODULE_PATH.read_text(encoding="utf-8")
-    try:
-        MODULE_PATH.write_text(
-            original.replace(
-                "from openalpha_cn.domain.run import RUN_MANIFEST_ID_PATTERN",
-                "from openalpha_cn.domain.portfolio import PortfolioOrder\n"
-                "from openalpha_cn.domain.run import RUN_MANIFEST_ID_PATTERN\n"
-                "_ORDER = PortfolioOrder",
-            ),
-            encoding="utf-8",
-        )
-        assert _lint("ranking-creates-no-portfolio-order") == 1, (
-            "lint-imports must reject candidate_ranking -> domain.portfolio; if this passes, "
-            "D16's ban is a docstring again"
-        )
-    finally:
-        MODULE_PATH.write_text(original, encoding="utf-8")
+    package = copy_package(tmp_path)
+    module = package / "backtest" / "candidate_ranking.py"
+    source = module.read_text(encoding="utf-8")
+    anchor = "from openalpha_cn.domain.run import RUN_MANIFEST_ID_PATTERN"
+    assert anchor in source, "the import this probe is planted beside moved; update the anchor"
+    module.write_text(
+        source.replace(
+            anchor,
+            f"from openalpha_cn.domain.portfolio import PortfolioOrder\n{anchor}\n"
+            "_ORDER = PortfolioOrder",
+        ),
+        encoding="utf-8",
+    )
 
-    assert _lint("ranking-creates-no-portfolio-order") == 0
+    refused = lint_copy(package, "ranking-creates-no-portfolio-order")
+
+    assert refused.exit_code == 1, (
+        "lint-imports must reject candidate_ranking -> domain.portfolio; if this passes, "
+        f"D16's ban is a docstring again: {refused.report}"
+    )
+    assert (
+        "openalpha_cn.backtest.candidate_ranking -> openalpha_cn.domain.portfolio" in refused.report
+    ), refused.report
 
 
 def test_this_ranking_grows_no_import_of_its_own_into_the_order_machinery() -> None:
@@ -499,7 +511,7 @@ def test_the_ranking_contract_reaches_neither_a_store_nor_the_root_that_owns_run
     Read off `grimp` rather than off `lint-imports` so that a reader of this file sees the
     enforcement, and with a sentinel so the assertions cannot prove nothing.
     """
-    graph = grimp.build_graph("openalpha_cn")
+    graph = grimp.build_graph("openalpha_cn", cache_dir=None)
 
     for plane in (
         "openalpha_cn.runtime",
