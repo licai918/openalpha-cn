@@ -123,15 +123,70 @@ D7 实现者报出、控制方核实：**出厂路径从不发起模型调用**�
 同一任务修 D6/D7 联合评审的三条：用量守卫漏掉 D7 自己删掉的两句声称；前提测试对七种注入写法不敏感；
 两份白名单按摘录豁免整句，追加进去的真声称照样通过——改为按完整规范化子句精确钉住。
 
+**结果。**
+- `2f489b0`：前提测试按模块、作用域、类别计数，并解析别名；两份白名单按整句钉住。
+- `8d53724`：README、README.en、why-openalpha 与 marketing 里有关模型调用的说法，改为按出厂行为描述；五个模型变量如实注明没有读取方，未删。
+- `d4ef5e4`：经生成器重新生成内嵌脑图与 API 图的文字；三个守卫开始读图；新增生成器与 SVG 的逐字节同步测试。
+
+D12 独立评审（Important 2 / Minor 8）与整批终审（Critical 1 / Important 5 / Minor 10）的发现，一并转入 D13。
+
+### Task 13（D13）：D12 评审与整批终审的修复轮（执行中发现）
+整批终审的结论是未就绪。
+
+- **Critical。** D12 新增的图同步测试在两条 Windows 腿上必然失败。
+  - 两个生成器的 `write_text` 没传 `newline="\n"`，在 Windows 上写出 CRLF；已提交的 SVG 按 `.gitattributes` 是 LF。
+  - 最终 CI `34732831479` 的结果印证了这一点：两条 Windows 腿各只红这一条，其余五项全绿。
+- **Important。**
+  - 内嵌图仍画着代码不提供的能力：api-05 的因子 / Agent 归因；brain-02 的证据身份公式、Retry-After 与只读证据工具。而归因守卫不读图。
+  - 链邻被写成统一数据入口，出厂路径却只有 `doctor` 构造它。
+  - 台账有三行所引的测试在结构上不可能失败。其中回放确定性的根因在 `src/`：`ReplayRunner.run` 两次 `run_cycle`
+    共用同一 engine、recovery store 与 `run_id`，第二次直接复用存下的结果。
+  - 另有一批与代码不符的说法和过时的数字。
+  - 本计划的待决项有缺漏、有表述不准。
+
+按文件与句子独占，切成三条并行通道，均在隔离的 worktree 里进行：
+- A：图、Windows 换行与链邻；
+- B：面向用户的文字与文字守卫；
+- C：台账、回放确定性、发布门与 D1 测试卫生。
+
+除回放以外不改 `src/`。e2e 不经过 `ReplayRunner.run`，唯一的接触是模块级导入，所以 `737beac` 上的 e2e 结果仍然适用。
+
 ## 不在本批（需要你决定）
-- `TERMINAL_STATUSES` 缺一个表示「已窄化」的值——状态表的设计决定，不是一行能顺手发明的。
-- FK 守卫三条残留（等量替换、别名×不守命名约定相乘、九个 store 只断言 pragma 读回值）——已具名记录，风险低。
+- **`TERMINAL_STATUSES`**（台账 `coverage_status` 的取值集合，`scripts/build_feature_coverage.py:18`）缺一个表示「已窄化」的值。
+  这是状态表的设计决定，不是一行能顺手发明的。
+- **FK 守卫三条残留**（等量替换、别名×不守命名约定相乘、九个 store 只断言 pragma 读回值）：已具名记录，风险低。
 - **证据标识符的覆盖面。** `evidence_id`/`content_hash` 不覆盖 `summary`、`source_uri`、`source_license`、
   `redistribution` 与另外三个时钟。D10 评审实测的后果：只改存储 Parquet 里的许可/再分发两列，读取时不报完整性错误，
   `export_report` 照样放出受限载荷；同一文件以不同许可证重建时，存储静默保留旧的许可文本。没有远程利用路径。
   修法：A 不动身份，补文档并在导出与存储处加廉价防护；B 另加一个覆盖全部字段的摘要（改 schema、迁移存储）；
   C 把这些字段并入 `evidence_id`（所有 id 都会变，连带 `signal_id`、`report_id` 与存储文件名）。
-- **模型调用要不要接进出厂路径。** 今天出厂路径不调用模型；模型客户端库（能力选择、分类重试、用量账本）只在
-  SDK 层可用。`deploy/compose.yml`、`.env.example` 里的模型 Provider 变量没有读者——接线，或删掉这些变量，二选一。
-- **非 Python 测试文件的验收类型。** OA-IFACE-006、OA-IFACE-007、OA-OPS-002 的真实覆盖在 web / Playwright
-  或 CI 脚本里，台账现有的验收类型装不下，只能留 `legacy-prose`。
+- **模型调用要不要接进出厂路径。**
+  - 今天的出厂路径不调用模型。
+  - 模型客户端（分类重试、用量账本）是 `openalpha_cn.models` 里的库代码。`OpenAlphaSDK` 没有任何模型客户端方法，要用户自己写代码构造、接线。
+  - 其中的能力注册表与能力元数据，即使接上也没有读者：Provider 从不查询 `ModelRegistry`，也不按能力选择端点。
+  - `deploy/compose.yml`、`.env.example` 里的模型 Provider 变量没有读取方。要么接线，要么删掉这些变量，二选一。
+  - 删变量须连带改 `tests/unit/test_repository_assets.py::test_compose_passes_through_declared_provider_credentials`，它钉住了这五个变量的透传。
+- **链邻要不要接进出厂数据路径。**
+  - 链邻客户端合同是真的：Bearer 认证、客户端限流、错误分类、冻结合约测试都在。
+  - 但出厂路径只有 `doctor` 构造它（`cli.py` 的 `_default_providers()`）：证据构建用 `FileProvider`，面板构建用 `TushareProvider`，REST 只接收调用方送来的批次。
+  - 文档已按此如实改写。要不要把它接进证据或面板的数据路径，是产品决定。
+- **非 Python 验收的粒度。**
+  - 台账已经有 `ci-job` 验收类型（`scripts/build_feature_coverage.py:38`，OA-OPS-005 在用）。
+  - OA-OPS-002「Frozen install lint test and build pass」正是 `quality.yml` 里 `web` job 的四步；OA-IFACE-006、OA-IFACE-007 的真实覆盖在 web 单测与 Playwright。
+  - 所以要决定的是验收粒度，即以整条 CI job 作为一行的验收是否足够，而不是缺类型。定下来之前，这三行留 `legacy-prose`。
+- **`scripts/generate_brain_diagrams.mjs` 删不删。**
+  - 它写出的五个脑图文件名与 Python 生成器相同，文字却是旧的，其中有已被推翻的「规则 · 因子 · 智能体归因」「验证与三层归因」、EvidenceLookupTool、「统一替代入口」。
+  - 全仓库没有任何地方引用它。
+  - 有人运行它时，图同步测试会变红，但它本身仍会画回旧说法。
+- **Python 支持范围。**
+  - `pyproject.toml` 写的是 `requires-python = ">=3.11"`，没有上限。
+  - CI 的 Python 测试矩阵只有 3.11 与 3.12（ubuntu 与 windows，共四腿；实测补丁版本为 Windows 3.11.9、ubuntu 3.12.3、Windows 3.12.10）。
+  - D1 的一条测试曾只在 3.14.5 上变红（D13 修）。
+  - 两个选择：给 CI 加 3.14 腿，或给 `requires-python` 设上限。
+- **遗留（已具名，低风险）。**
+  - `.dockerignore` 第 15–25 行的文件名模式（`__pycache__`、`*.pyc`、`*.db`、`*.sqlite*`、`*.parquet`、`*.exe`、`.env.*` 等）不带 `**/`，按 Docker 的规则只匹配构建上下文根目录。
+    - 后果：`COPY src/ ./src/`（`Dockerfile:19`）会把本地 `src/` 下嵌套的 `__pycache__` 带进构建阶段，`COPY web/ ./`（`Dockerfile:7`）也会带进 `web/` 下嵌套的同类文件。
+    - CI 的全新 checkout 里没有这些文件，也没有任何文档声称它们会被排除。
+  - 回放报告的「前视违规」计数在结构上恒为 0，因为含前视证据的语料在加载时就被整体拒绝。
+    - Web 回放面板（`web/src/components/ReplayPanel/ReplayPanel.tsx:50-51`）仍展示这个计数。
+    - `web/src/contractState.ts:214` 里「计数大于 0 即判定结果不可用」的分支不可达。
