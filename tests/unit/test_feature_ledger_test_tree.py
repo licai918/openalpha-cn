@@ -30,10 +30,12 @@ named test function exists, and is accepted for the rest.
 
 from __future__ import annotations
 
+import ast
 import csv
 import importlib.util
 import re
 from collections import Counter
+from functools import cache
 from pathlib import Path
 from types import ModuleType
 from typing import Final
@@ -388,6 +390,84 @@ def test_every_anchor_the_ledger_names_resolves_in_its_file() -> None:
                 problems.append(f"{row['feature_id']} notes: {match.group(0)} (not declared)")
 
     assert problems == [], f"the ledger points at anchors that are not there: {problems}"
+
+
+_BARE_TEST_NAME: Final = re.compile(r"(?<![\w:/.])(test_\w+)")
+"""A `test_*` name written into a notes cell without its path -- what the node-id check skips."""
+
+HISTORICAL_TEST_NAMES: Final[dict[tuple[str, str], str]] = {
+    ("OA-OPS-022", "test_migrate_run_a_second_time_reports_up_to_date"): (
+        "the test its successor replaced, named as the one that asserted the Finding 1b lie"
+    ),
+    (
+        "OA-OPS-031",
+        "test_every_determinant_of_this_neutralisation_is_either_in_the_identity_or_exempted_by_name",
+    ): "quoted as the stale reference that row's audit found in panel_neutralization.py",
+    ("OA-FACTOR-003", "test_a_prose_only_edit_moves_the_identity_and_changes_no_number"): (
+        "the test's former name, given beside the name it became"
+    ),
+    ("OA-FACTOR-008", "test_no_stored_statement_projection_carries_a_deducted_profit_column"): (
+        "the assertion that went red when V2-P3-017 stored profit_dedt, beside its successor"
+    ),
+}
+"""Bare `test_*` names the notes quote on purpose, as history, though nothing defines them now.
+
+Pinned as whole (row, name) pairs, so each exemption covers that name in that row and nowhere
+else, and `test_every_historical_test_name_is_still_quoted_and_still_undefined` fails an entry
+that is no longer needed instead of leaving it to excuse a later one.
+"""
+
+
+@cache
+def _defined_test_names() -> frozenset[str]:
+    """Every function name defined anywhere under `tests/`, and every module stem there."""
+    names: set[str] = set()
+    for path in (ROOT / "tests").rglob("*.py"):
+        names.add(path.stem)
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        names.update(
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        )
+    return frozenset(names)
+
+
+def _undefined_bare_test_names() -> set[tuple[str, str]]:
+    """Every (row, bare `test_*` name) in the notes that nothing under `tests/` defines."""
+    defined = _defined_test_names()
+    return {
+        (row["feature_id"], name)
+        for row in _rows()
+        for name in _BARE_TEST_NAME.findall(row["notes"])
+        if name not in defined
+    }
+
+
+def test_every_bare_test_name_in_the_notes_is_defined_under_tests() -> None:
+    """A `test_*` the notes name without a path is still a function or a module under `tests/`.
+
+    The node-id check above reads only `tests/...py::name`. D13's review counted seven bare
+    names in the notes that no file defines: three were citations gone stale -- `OA-OPS-021` and
+    `OA-FACTOR-021` named tests since renamed, `OA-BT-014` a name that never existed -- and four
+    are history the notes quote on purpose, pinned in `HISTORICAL_TEST_NAMES`. A name passes
+    when some file under `tests/` defines a function of that name or is a module of that stem;
+    the notes also cite modules by stem (`test_research_cycle`).
+
+    Blind spots, stated: a bare name defined anywhere under `tests/` passes wherever the row
+    points; a name defined only under `web/` is not looked for; and a module stem passes a
+    sentence that meant a function of the same name.
+    """
+    undefined = sorted(_undefined_bare_test_names() - HISTORICAL_TEST_NAMES.keys())
+
+    assert undefined == [], f"notes name tests that nothing under tests/ defines: {undefined}"
+
+
+def test_every_historical_test_name_is_still_quoted_and_still_undefined() -> None:
+    """An exemption no longer needed -- unquoted, or defined again -- is taken out, not kept."""
+    stale = sorted(HISTORICAL_TEST_NAMES.keys() - _undefined_bare_test_names())
+
+    assert stale == [], f"HISTORICAL_TEST_NAMES exempts pairs that no longer need it: {stale}"
 
 
 # --- the debt this module cannot check, held so it can only shrink (`V2-P5-038`) --------------
