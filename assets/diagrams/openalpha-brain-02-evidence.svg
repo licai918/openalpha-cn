@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" role="img" aria-labelledby="title desc">
   <title id="title">先证明“当时可知”，再讨论模型是否聪明</title>
-  <desc id="desc">所有研究结论先经过 Provider 合同、四时钟与内容寻址，得到可追溯、可回放的 EvidenceSnapshot。</desc>
+  <desc id="desc">Provider 批次与序列化证据都先经过四时钟与内容寻址，才成为可追溯、可回放的 EvidenceSnapshot。</desc>
   <defs>
     <linearGradient id="bgGradient" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#091727" />
@@ -51,7 +51,7 @@
   <rect x="64" y="42" width="42" height="4" rx="2" fill="#2DD4BF" filter="url(#softGlow)" />
   <text x="64" y="72" class="eyebrow" fill="#2DD4BF">OPENALPHA CN · RESEARCH OS / 02</text>
   <text x="64" y="115" class="title" fill="#F4F7FB">证据平面｜先证明“当时可知”，再讨论模型是否聪明</text>
-  <text x="64" y="148" class="subtitle" fill="#96A8BE">所有研究结论先经过 Provider 合同、四时钟与内容寻址，得到可追溯、可回放的 EvidenceSnapshot。</text>
+  <text x="64" y="148" class="subtitle" fill="#96A8BE">Provider 批次与序列化证据都先经过四时钟与内容寻址，才成为可追溯、可回放的 EvidenceSnapshot。</text>
   <g transform="translate(1210 50)" opacity=".92">
     <circle cx="44" cy="30" r="28" fill="#2DD4BF" opacity=".09" />
     <path d="M18 42L40 20L56 32L75 11" fill="none" stroke="#2DD4BF" stroke-width="2.2" />

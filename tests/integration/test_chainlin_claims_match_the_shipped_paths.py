@@ -39,6 +39,12 @@ ChainLin's own contract document, `docs/api/chainlin-data.zh-CN.md`, is read too
 clause of it as naming ChainLin (`CLIENT_DOCUMENTS`), because it speaks of the client's batches
 without writing the client's name.
 
+**Two more checks.** `test_env_example_says_who_reads_the_chainlin_variables` holds the note above
+`.env.example`'s data-provider credentials to naming both ChainLin variables and `openalpha doctor`
+in one sentence. `test_no_document_says_the_contract_tests_hold_clocks_they_do_not_assert` holds a
+clause that names ChainLin and its contract tests and says 四时钟 to what those tests assert: all
+four clocks, or the clause fails, and they assert two. A clause naming single clocks is not read.
+
 **What it cannot see.** `test_the_stated_limits_are_real` measures each of these but the first,
 which `test_the_reference_scan_finds_what_its_docstring_says` measures.
 
@@ -65,6 +71,7 @@ which `test_the_reference_scan_finds_what_its_docstring_says` measures.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import re
 from collections.abc import Iterable, Iterator
 from pathlib import Path
@@ -72,6 +79,8 @@ from typing import Final
 
 from diagram_text import diagram_units
 from prose_clauses import clauses
+
+from openalpha_cn.domain.time import Timeline
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 
@@ -383,6 +392,81 @@ def test_no_document_or_diagram_presents_a_doctor_only_client_as_a_data_source()
         "\n".join(claims) + "\nOnly `openalpha doctor` constructs either client. Say what the "
         "client is, or which path uses it; fix a diagram in its generator and regenerate it."
     )
+
+
+# --- What the contract tests assert -----------------------------------------------------------
+
+CONTRACT_TEST: Final[Path] = ROOT / "tests/contract/providers/test_chainlin_provider.py"
+"""ChainLin's frozen contract tests."""
+
+CLOCKS: Final[frozenset[str]] = frozenset(field.name for field in dataclasses.fields(Timeline))
+"""The four clocks of a `Timeline`."""
+
+FOUR_CLOCKS: Final[re.Pattern[str]] = re.compile(r"四时钟|four[- ]clocks?", re.IGNORECASE)
+"""The four clocks named together."""
+
+CONTRACT_TESTS: Final[re.Pattern[str]] = re.compile(
+    r"合约测试|合同测试|contract tests?", re.IGNORECASE
+)
+"""Contract tests, as the documents name them."""
+
+D4A37161_README_67: Final[str] = (
+    "**链邻数据接口 API** 已具备合同优先的 BYOK 客户端，Bearer 认证、四时钟 PIT、"
+    "数据修订、客户端限流和失败分类都有冻结合约测试。\n"
+)
+"""`README.md:67`'s first sentence at `4a37161`, verbatim."""
+
+
+def _asserted_clocks(path: Path) -> frozenset[str]:
+    """The clocks the `assert` statements of `path` read, as attributes named for them."""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    return frozenset(
+        node.attr
+        for statement in ast.walk(tree)
+        if isinstance(statement, ast.Assert)
+        for node in ast.walk(statement.test)
+        if isinstance(node, ast.Attribute) and node.attr in CLOCKS
+    )
+
+
+def _four_clock_claims(
+    texts: Iterable[tuple[str, int, str]], asserted: frozenset[str]
+) -> list[str]:
+    """Each clause saying ChainLin's contract tests hold the four clocks, unless they assert all
+    four."""
+    if asserted >= CLOCKS:
+        return []
+    return [
+        f"{label}:{line} says ChainLin's contract tests hold the four clocks, and they assert "
+        f"{sorted(asserted)}: {text!r}"
+        for label, line, text in texts
+        if (_clients_named(text) or label in CLIENT_DOCUMENTS)
+        and CONTRACT_TESTS.search(text)
+        and FOUR_CLOCKS.search(text)
+    ]
+
+
+def test_no_document_says_the_contract_tests_hold_clocks_they_do_not_assert() -> None:
+    """A clause naming ChainLin and its contract tests may say 四时钟 only while those tests
+    assert all four clocks.
+
+    `README.md:67` said Bearer auth, "四时钟 PIT" and revisions all had frozen contract tests.
+    `tests/contract/providers/test_chainlin_provider.py` asserts `available_time` and
+    `revision_time`, and its fixture gives event, available and revision time one instant. Only
+    四时钟 is read: a clause naming single clocks the tests do not assert passes, which the last
+    assertion measures.
+    """
+    asserted = _asserted_clocks(CONTRACT_TEST)
+    assert asserted, "no clock is read in ChainLin's contract tests, so the scan has gone blind"
+    claims = _four_clock_claims(_guarded_texts(_documents(), _diagram_sources()), asserted)
+    assert not claims, "\n".join(claims) + "\nName only the clocks the contract tests assert."
+    retired = _guarded_texts({"README.md": D4A37161_README_67}, {})
+    assert _four_clock_claims(retired, asserted), (
+        "README.md:67 at 4a37161 is no longer flagged; if the contract tests now assert all four "
+        "clocks, this check has nothing left to hold"
+    )
+    single = _guarded_texts({"single clocks": "链邻合约测试覆盖事件时间与入库时间。\n"}, {})
+    assert not _four_clock_claims(single, asserted), "a clause naming single clocks is now read"
 
 
 # --- The guard's own tests --------------------------------------------------------------------

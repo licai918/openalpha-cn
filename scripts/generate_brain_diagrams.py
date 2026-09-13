@@ -418,7 +418,7 @@ def evidence() -> None:
         index=2,
         eyebrow="证据平面",
         title="先证明“当时可知”，再讨论模型是否聪明",
-        subtitle="所有研究结论先经过 Provider 合同、四时钟与内容寻址，得到可追溯、可回放的 EvidenceSnapshot。",
+        subtitle="Provider 批次与序列化证据都先经过四时钟与内容寻址，才成为可追溯、可回放的 EvidenceSnapshot。",
         accent=CYAN,
     )
     svg.legend()
