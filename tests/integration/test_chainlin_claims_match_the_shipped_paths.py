@@ -40,11 +40,13 @@ ChainLin's own contract document, `docs/api/chainlin-data.zh-CN.md`, is read too
 clause of it as naming ChainLin (`CLIENT_DOCUMENTS`), because it speaks of the client's batches
 without writing the client's name.
 
-**Two more checks.** `test_env_example_says_who_reads_the_chainlin_variables` holds the note above
-`.env.example`'s data-provider credentials to naming both ChainLin variables and `openalpha doctor`
-in one sentence. `test_no_document_says_the_contract_tests_hold_clocks_they_do_not_assert` holds a
-clause that names ChainLin and its contract tests and says 四时钟 to what those tests assert: all
-four clocks, or the clause fails, and they assert two. A clause naming single clocks is not read.
+**Two more checks.** `test_env_example_says_who_reads_each_provider_credential` holds the note
+above `.env.example`'s data-provider credentials to naming, one sentence each, both ChainLin
+variables with `openalpha doctor`, and `TUSHARE_TOKEN` with `TushareProvider`, the two commands
+that construct it and `--probe`.
+`test_no_document_says_the_contract_tests_hold_clocks_they_do_not_assert` holds a clause that
+names ChainLin and its contract tests and says 四时钟 to what those tests assert: all four clocks,
+or the clause fails, and they assert two. A clause naming single clocks is not read.
 
 **What it cannot see.** `test_the_stated_limits_are_real` measures each of these but the first,
 which `test_the_reference_scan_finds_what_its_docstring_says` measures.
@@ -193,23 +195,32 @@ def test_the_two_clients_are_constructed_only_for_doctor() -> None:
 
 ENV_EXAMPLE: Final[Path] = ROOT / ".env.example"
 
-CHAINLIN_NOTE_WORDS: Final[tuple[str, ...]] = (
-    "CHAINLIN_API_BASE_URL",
-    "CHAINLIN_API_KEY",
-    "openalpha doctor",
-)
-"""What the note above `.env.example`'s data-provider credentials must name."""
+NOTE_SENTENCES: Final[dict[str, tuple[str, ...]]] = {
+    "Tushare": (
+        "TUSHARE_TOKEN",
+        "TushareProvider",
+        "openalpha panel build",
+        "openalpha doctor",
+        "--probe",
+    ),
+    "ChainLin": ("CHAINLIN_API_BASE_URL", "CHAINLIN_API_KEY", "openalpha doctor"),
+}
+"""For each provider, what one sentence of the note above `.env.example`'s data-provider
+credentials must name together."""
 
 
-def test_env_example_says_who_reads_the_chainlin_variables() -> None:
-    """`.env.example` says, right above its data-provider credentials, who reads ChainLin's two.
+def test_env_example_says_who_reads_each_provider_credential() -> None:
+    """`.env.example` says, right above its data-provider credentials, who reads each of them.
 
     The model keys' block has said since `8d53724` that no shipped path reads them; the ChainLin
     variables sat under a header that left a reader to assume a shipped path used them, when only
-    `openalpha doctor` does. The note must be the comment lines directly above the section header,
+    `openalpha doctor` does. The Tushare sentence said only that `openalpha panel build` fetches
+    with the token and that doctor reports it, when `TushareProvider` reads it in its constructor,
+    `panel build` and doctor (`cli._default_providers`) each construct one, and `doctor --probe`
+    sends requests with it. The note must be the comment lines directly above the section header,
     so the section keeps its shape: `test_compose_passes_through_declared_provider_credentials`
-    reads the variables directly below that header. This checks that one sentence of the note
-    names both variables and `openalpha doctor` together, not what that sentence says of them.
+    reads the variables directly below that header. This checks that one sentence names each
+    provider's words together, not what that sentence says of them.
     """
     lines = ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()
     header = lines.index("# User-owned data provider credentials")
@@ -219,9 +230,14 @@ def test_env_example_says_who_reads_the_chainlin_variables() -> None:
             break
         note.insert(0, line.lstrip("#").strip())
     sentences = re.split(r"(?<=\.)\s+", " ".join(note))
-    assert any(all(word in sentence for word in CHAINLIN_NOTE_WORDS) for sentence in sentences), (
-        "no sentence of the comment above .env.example's data-provider credentials names "
-        f"{list(CHAINLIN_NOTE_WORDS)} together: {note}"
+    missing = {
+        provider: words
+        for provider, words in NOTE_SENTENCES.items()
+        if not any(all(word in sentence for word in words) for sentence in sentences)
+    }
+    assert not missing, (
+        "no sentence of the comment above .env.example's data-provider credentials names these "
+        f"together: {missing}; the comment reads {note}"
     )
 
 
