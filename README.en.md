@@ -43,7 +43,7 @@ OpenAlpha CN competes on verifiability rather than the number of agent personas:
 - durable node checkpoints that reject changed requests or graph signatures;
 - bounded concurrent batches with progress, cancellation, retry, and restart recovery;
 - for a model provider you construct in your own code (no shipped path calls a model): classified retry, and a token and configured-cost usage ledger that no shipped path writes to — only a provider built with a usage store records into it;
-- one research core shared by the live, replay, backtest, paper and daily modes;
+- one research core, `run_cycle`, shared by live research and replay (validation, the multi-day portfolio backtest and `model daily-run` take their own paths);
 - A-share T+1, board lot, suspension, limit-lock, and transaction-cost constraints;
 - immutable cash/lot/mark/fee/PnL portfolio transitions with exposure clamps;
 - multi-day portfolio reports and event-study significance inference;
@@ -172,7 +172,8 @@ it says it was: `predicted_at` is whatever the caller passed to `predict`, nothi
 it, and nothing here defends against whoever owns the disk. Every rendered prediction carries both
 sentences in the body, because a one-word badge reads as an attestation this repository cannot
 make. See [the HTTP contract](docs/api/http.md) for the three standings; the sixteen named
-boundaries are the `limitations` every model answer carries, the list
+boundaries are the `limitations` each single model answer carries (an evaluation, a held
+prediction, a daily run; the prediction listing carries none), the list
 `openalpha_cn.model_view.KNOWN_MODEL_VIEW_LIMITATIONS` holds.
 
 ## The outcome plane, and where the three faces are not equal

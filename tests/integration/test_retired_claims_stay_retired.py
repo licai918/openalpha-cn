@@ -34,8 +34,12 @@ entry of `RETIRED_CLAIMS` holds:
 **What it cannot see.** It catches these wordings and nothing else. A pattern is a family of the
 phrasings that were retired, not a detector of the claim: the same claim in other words --
 another verb, another order, or its halves in two clauses -- passes, and
-`test_the_retired_claims_blind_spot_is_real` holds one such paraphrase per entry. A pattern does
-not read negation either: "不能分别启停" is read as the claim it denies. A premise reads one fact,
+`test_the_retired_claims_blind_spot_is_real` holds one such paraphrase per entry. Most patterns
+do not read negation either: "不能分别启停" is read as the claim it denies. A span built from
+`_NO_DENIAL` or `_NO_COMMA_OR_DENIAL` stops at 不, 未 or 没, so the entries that use one pass a
+denial written inside their span; a denial written before a pattern's first word still reads as
+the claim unless the pattern looks behind for it, and a claim whose span holds 不可变 is missed
+by the entries that use one. A premise reads one fact,
 not the whole of `refuted_by`, so a premise that stays quiet does not prove the claim still
 false, and the ledger's premise sees a call, a bound alias and a `getattr` with the literal name
 of `append_decision`, never a name built at run time. The diagrams' two generators are read
@@ -59,7 +63,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Final, get_args
 
 import pytest
 from diagram_text import diagram_strings
@@ -93,6 +97,12 @@ _FACE: Final[str] = r"(?<![A-Za-z])(?:SDK|CLI)(?![A-Za-z])"
 
 _NO_COMMA: Final[str] = r"[^。;\N{FULLWIDTH SEMICOLON}，,]"
 """One character that ends no sentence and no phrase: what a pattern may span inside one phrase."""
+
+_NO_DENIAL: Final[str] = r"[^。;\N{FULLWIDTH SEMICOLON}不未没]"
+"""One character that ends no sentence and denies nothing: a span that stops at 不, 未 or 没."""
+
+_NO_COMMA_OR_DENIAL: Final[str] = r"[^。;\N{FULLWIDTH SEMICOLON}，,不未没]"
+"""The same inside one phrase: a span that stops at a comma too."""
 
 
 # --- Reading the code facts -------------------------------------------------------------------
@@ -527,6 +537,89 @@ def _chainlin_is_still_built_only_for_doctor() -> str | None:
     return None if builders == ["cli.py"] else f"ChainLinDataProvider is now built in {builders}"
 
 
+def _the_manifest_still_records_no_prompt() -> str | None:
+    recorded: list[str] = []
+    for path in sorted(SRC.rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        if "RunManifest(" not in text:
+            continue
+        for node in ast.walk(ast.parse(text, filename=str(path))):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "RunManifest"
+            ):
+                continue
+            recorded.extend(
+                f"{path.relative_to(SRC).as_posix()}:{node.lineno}"
+                for keyword in node.keywords
+                if keyword.arg == "prompt_versions"
+                and not (isinstance(keyword.value, ast.Tuple) and not keyword.value.elts)
+            )
+    return None if not recorded else f"a RunManifest now records prompt versions at {recorded}"
+
+
+def _validation_still_applies_no_trading_rule() -> str | None:
+    reached = _imports_under(SRC / "backtest" / "validation.py", PORTFOLIO_EXECUTION)
+    return None if not reached else f"backtest/validation.py now imports {reached}"
+
+
+def _a_rejected_order_still_makes_a_transition() -> str | None:
+    statuses = get_args(PortfolioTransition.model_fields["status"].annotation)
+    return None if "rejected" in statuses else f"a PortfolioTransition's status is now {statuses}"
+
+
+def _the_prediction_listing_still_carries_no_limitations() -> str | None:
+    tree = ast.parse((SRC / "model_view.py").read_text(encoding="utf-8"))
+    listing = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name in {"prediction_index_view", "_prediction_index_entry"}
+    }
+    carrying = sorted(
+        name
+        for name, node in listing.items()
+        if any(
+            isinstance(inner, ast.Constant) and inner.value == "limitations"
+            for inner in ast.walk(node)
+        )
+    )
+    if len(listing) == 2 and not carrying:
+        return None
+    return f"the prediction listing is {sorted(listing)} and {carrying} carry limitations now"
+
+
+FEATURE_LEDGER: Final[Path] = ROOT / "artifacts" / "openalpha-v1-feature-coverage" / "features.csv"
+"""The feature ledger, whose header says what evidence each feature carries."""
+
+
+def _the_ledger_still_has_no_documentation_column() -> str | None:
+    header = FEATURE_LEDGER.read_text(encoding="utf-8").splitlines()[0]
+    documented = [column for column in header.split(",") if "doc" in column.lower()]
+    return None if not documented else f"features.csv now has the columns {documented}"
+
+
+def _a_missing_chainlin_key_is_still_authentication() -> str | None:
+    tree = ast.parse((SRC / "providers" / "chainlin.py").read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and any(
+                keyword.arg == "category"
+                and isinstance(keyword.value, ast.Constant)
+                and keyword.value.value == "authentication"
+                for keyword in node.keywords
+            )
+            and any(
+                keyword.arg == "message" and "missing" in ast.unparse(keyword.value)
+                for keyword in node.keywords
+            )
+        ):
+            return None
+    return "a missing ChainLin key no longer raises authentication: re-read doctor --probe"
+
+
 # --- The retired claims -----------------------------------------------------------------------
 
 
@@ -670,13 +763,16 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             rf"|(?:委员会|风险门|组合){_NOT_END}{{0,16}}结果都能进入报告"
             rf"|(?:委员会|组合验证){_NOT_END}{{0,16}}新结果{_NOT_END}{{0,8}}报告中心"
             rf"|继续进入{_NO_COMMA}{{0,20}}报告中心|报告{_NO_COMMA}{{0,6}}展示{_NO_COMMA}{{0,8}}实际结果"
+            rf"|统计结果{_NO_COMMA}{{0,4}}都写进{_NO_COMMA}{{0,6}}记录"
         ),
         refuted_by=(
             "ResearchReport holds one research run: run_id, subject, created_at, title, summary, "
             "decision_id, signal_id, final_action, evidence_ids and risk_flags "
             "(domain/report.py:25-37), built by ResearchReportFactory.build from a "
             "ResearchRunResult (product/reporting.py:52-55). No committee outcome, portfolio "
-            "transition or statistic is a field of it."
+            "transition or statistic is a field of it. EventStudyReport and "
+            "PortfolioBacktestReport are handed back to the caller and stored nowhere: no storage "
+            "module names them (backtest/event_study.py:40, backtest/multi_day.py:176)."
         ),
         retired=(
             "研究结论、风险决定、组合执行和统计结果共同写入报告中心，"
@@ -686,6 +782,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "Agent、Bull/Bear、风险委员会与组合验证产生的新结果，都能通过报告中心沉淀。",
             "自定义结果继续进入风险门、账本、回放、统计和报告中心",
             "后续报告与验证再展示这一判断的实际结果",
+            "最终 Agent 输出、风险决策、组合成交和统计结果都写进可追踪记录",
         ),
         paraphrase="报告中心还会收录组合成交与统计检验。",
         premise=_a_report_still_holds_one_research_run,
@@ -716,6 +813,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             r"同一能力通过|工作台共享(?:同一后端能力|证据)|真走同一条链|入口用的是同一套能力"
             r"|四类入口共享五条"
             rf"|(?<![A-Za-z])(?:API|SDK|CLI|Web)(?![A-Za-z]){_NOT_END}{{0,12}}共享同一合同"
+            r"|(?:同一核心路径|同一路径)贯通\s*(?:API|REST)"
         ),
         refuted_by=(
             "tests/unit/test_surface_parity.py::PARITY maps 48 routes: 28 have no CLI command "
@@ -735,6 +833,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "### API 关系图 01\N{FULLWIDTH VERTICAL LINE}四类入口共享五条功能链",
             "API 全景\N{FULLWIDTH VERTICAL LINE}四类入口共享五条功能链",
             "API、SDK、CLI、Web 共享同一合同",
+            "同一核心路径贯通 API、SDK、CLI、Web 与回放",
         ),
         paraphrase="四个入口能做的事一模一样。",
         premise=_the_workbench_still_skips_the_product_routes,
@@ -835,7 +934,9 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         pattern=re.compile(
             r"wired in through the SDK|在\s*SDK\s*代码中接入模型\s*Provider"
             r"|Schema\s*与重试由治理层"
-            rf"|接入{_NOT_END}{{0,30}}模型后[，,]?\s*才有\s*Schema\s*校验",
+            rf"|接入{_NOT_END}{{0,30}}模型后[，,]?\s*才有\s*Schema\s*校验"
+            rf"|接入\s*(?:模型|LLM){_NO_COMMA_OR_DENIAL}{{0,6}}"
+            r"(?:其输出)?(?:才)?强制\s*(?:Schema|结构化输出)",
             re.IGNORECASE,
         ),
         refuted_by=(
@@ -855,6 +956,8 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "模型可以在 SDK 代码中通过 OpenAI-compatible BYOK 接入，Schema 与重试由治理层处理，"
             "出厂路径不调用模型。",
             "在代码中接入 OpenAI-compatible 模型后，才有 Schema 校验和有界重试，出厂路径不调用模型",
+            "在代码中接入模型时其输出强制 Schema",
+            "在代码中接入 LLM 时才强制结构化输出和有界重试",
         ),
         paraphrase="通过 SDK 挂上的模型 Provider 自带 Schema 校验。",
         premise=_the_sdk_still_takes_no_provider,
@@ -882,6 +985,8 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         name="a model reaches a run only through the SDK",
         pattern=re.compile(
             rf"只能经由{_NOT_END}{{0,30}}交给\s*SDK"
+            rf"|包进{_NO_COMMA}{{0,30}}再交给\s*SDK"
+            rf"|(?<!不)只在{_NO_COMMA}{{0,8}}SDK\s*代码(?:里|中)接入"
             r"|only as an agent[^.;]{0,40}pass(?:ed)? to the SDK",
             re.IGNORECASE,
         ),
@@ -896,6 +1001,8 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "模型只能经由你在代码里构造、以 `agents=` 交给 SDK 的 Agent 进入研究",
             "a model reaches a run only as an agent you build in your own code and pass to the SDK "
             "as `agents=`",
+            "模型要包进 `StructuredSignalAgent` 再交给 SDK",
+            "OpenAI-compatible 模型端点只在你自己的 SDK 代码里接入",
         ),
         paraphrase="只有 SDK 能让模型参与研究。",
         premise=_the_engine_still_takes_its_agents,
@@ -907,8 +1014,9 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         ),
         refuted_by=(
             "docs/api/http.md names 3 of the 16 codes of KNOWN_MODEL_VIEW_LIMITATIONS "
-            "(model_view.py:492); every model answer carries the whole list as its limitations "
-            "(model_view.py:2437, :2586, :2760)."
+            "(model_view.py:492); each single model answer -- an evaluation, a held prediction, a "
+            "daily run -- carries the whole list as its limitations (model_view.py:2436, :2585, "
+            ":2759), and the prediction listing carries none (:2625-2669)."
         ),
         retired=(
             "See [the HTTP contract](docs/api/http.md) for the three standings and the nine named "
@@ -921,14 +1029,24 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     ),
     RetiredClaim(
         name="every validation runs through run_cycle",
-        pattern=re.compile(rf"所有验证{_NOT_END}{{0,12}}同一个\s*`?run_cycle"),
+        pattern=re.compile(
+            rf"所有验证{_NOT_END}{{0,12}}同一个\s*`?run_cycle"
+            r"|(?:验证|回测|daily|paper)\s*共用\s*`?run_cycle"
+            r"|research core shared by[^.;]{0,40}(?:backtest|paper|daily)"
+        ),
         refuted_by=(
             "In backtest/ only replay.py calls run_cycle (backtest/replay.py:263-264); the "
             "multi-day portfolio backtest drives PortfolioSimulator (backtest/multi_day.py:58-66, "
             ":204) and never calls it, and the event study is EventStudy().analyze "
-            "(sdk.py:245-247)."
+            "(sdk.py:245-247). `model daily-run` builds its RunManifest(mode=daily) itself "
+            "(model_view.py:2261-2274), and paper and daily have no runtime behaviour "
+            "(domain/run_mode.py:41-43)."
         ),
-        retired=("所有验证仍使用四时钟证据和同一个 `run_cycle`",),
+        retired=(
+            "所有验证仍使用四时钟证据和同一个 `run_cycle`",
+            "**同一研究内核**：实时研究、历史回放与验证共用 `run_cycle`",
+            "one research core shared by the live, replay, backtest, paper and daily modes",
+        ),
         paraphrase="每一种回测都走同一个研究循环。",
         premise=_the_portfolio_backtest_still_skips_run_cycle,
     ),
@@ -1137,6 +1255,118 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         paraphrase="链邻接口出错时研究会自动降级。",
         premise=_chainlin_is_still_built_only_for_doctor,
     ),
+    RetiredClaim(
+        name="a run records its prompt versions",
+        pattern=re.compile(
+            rf"RunManifest{_NO_DENIAL}{{0,40}}Prompt"
+            rf"|Prompt{_NO_DENIAL}{{0,40}}(?:进入|写入)\s*RunManifest"
+            rf"|每次运行保存{_NO_DENIAL}{{0,40}}Prompt"
+            r"|版本化模型与\s*Prompt|模型与\s*Prompt\s*版本"
+        ),
+        refuted_by=(
+            "RunManifest's one construction in a research run puts prompt_versions=() -- a "
+            "literal empty tuple -- on every run (runtime/engine.py:136), and the DecisionLedger "
+            "copies it (:170); nothing in src/ assigns it otherwise. The repository's own prompts "
+            "are string literals pinned by code_commit (model_view.py:2247-2250); a prompt a "
+            "caller's own code sends is recorded nowhere."
+        ),
+        retired=(
+            "`RunManifest` 记录代码、配置、Provider、模型、Prompt、随机种子和环境版本",
+            "RunManifest 记录代码、配置、Provider、模型、Prompt、随机种子和环境",
+            "模型、Prompt、代码、配置、随机种子和证据哈希都进入 RunManifest",
+            "每次运行保存代码提交、配置摘要、Provider 载荷哈希、模型和 Prompt 版本、随机种子与环境",
+            "用冻结 Provider Payload、固定随机种子、版本化模型与 Prompt、"
+            "配置摘要和内容哈希建立复现清单",
+            "四时钟、模型与 Prompt 版本、双委员会、风险和组合执行都能沿关联链回溯",
+            "RunManifest 保存模型、Prompt、代码与配置版本",
+        ),
+        paraphrase="每次运行都会留下提示词的版本。",
+        premise=_the_manifest_still_records_no_prompt,
+    ),
+    RetiredClaim(
+        name="README counts ten key capability classes",
+        pattern=re.compile(r"十类增强能力"),
+        refuted_by=(
+            "The capability table that sentence introduces has seven rows (README.md:13-21 at "
+            "20fec55), and no list of ten exists anywhere in the repository."
+        ),
+        retired=("本轮已经把与高星项目对账后最关键的十类增强能力落到源码和测试中",),
+        paraphrase="下表列出了十项关键增强。",
+    ),
+    RetiredClaim(
+        name="outcome validation applies the A-share trading rules",
+        pattern=re.compile(
+            rf"(?:结果|验证){_NO_COMMA_OR_DENIAL}{{0,8}}(?:统一)?计入\s*A\s*股交易约束"
+        ),
+        refuted_by=(
+            "OutcomeValidator.validate (backtest/validation.py:224-284) attributes the caller's "
+            "transaction_cost and the forgone benchmark and nothing else (:313-346), and "
+            "validation.py imports no execution or portfolio module: T+1, board lot, suspension "
+            "and limit rules are PortfolioSimulator's, applied when a caller executes an order."
+        ),
+        retired=("**结果可解释**：统一计入 A 股交易约束与成本",),
+        paraphrase="结果验证会按 A 股规则重算成交。",
+        premise=_validation_still_applies_no_trading_rule,
+    ),
+    RetiredClaim(
+        name="only an order that passes the checks produces a transition",
+        pattern=re.compile(rf"检查后{_NOT_END}{{0,4}}才产生{_NOT_END}{{0,8}}PortfolioTransition"),
+        refuted_by=(
+            "PortfolioSimulator.execute_order returns a PortfolioTransition with "
+            "status='rejected' and the reason when a check fails (backtest/portfolio.py:310-322), "
+            "and the SDK and REST faces append every transition they get (sdk.py:1209, "
+            "api/app.py:2219-2225)."
+        ),
+        retired=(
+            "通过 T+1、整手、停牌、涨跌停、费用与敞口检查后，才产生不可变 `PortfolioTransition`",
+        ),
+        paraphrase="被拒的订单不会留下任何转移记录。",
+        premise=_a_rejected_order_still_makes_a_transition,
+    ),
+    RetiredClaim(
+        name="every model answer carries the named limitations",
+        pattern=re.compile(r"(?<!not )every\s+model\s+answer\s+carries", re.IGNORECASE),
+        refuted_by=(
+            "evaluation_view, held_prediction_view and daily_view put the whole list under "
+            "'limitations' (model_view.py:2436, :2585, :2759); prediction_index_view and "
+            "_prediction_index_entry, the listing, carry none (:2625-2669)."
+        ),
+        retired=("the sixteen named boundaries are the `limitations` every model answer carries",),
+        paraphrase="Each response from the model plane lists the boundaries.",
+        premise=_the_prediction_listing_still_carries_no_limitations,
+    ),
+    RetiredClaim(
+        name="the feature ledger holds documentation evidence",
+        pattern=re.compile(rf"(?:源码|测试)(?:证据)?{_NO_COMMA_OR_DENIAL}{{0,8}}文档证据"),
+        refuted_by=(
+            "artifacts/openalpha-v1-feature-coverage/features.csv has local_source_evidence, "
+            "test_evidence and entrypoint columns and no documentation column (its header)."
+        ),
+        retired=("每项功能的源码、入口、测试和文档证据",),
+        paraphrase="台账也列出每项功能对应的说明文档。",
+        premise=_the_ledger_still_has_no_documentation_column,
+    ),
+    RetiredClaim(
+        name="doctor reports authentication only when an endpoint rejects a credential",
+        pattern=re.compile(
+            r"凭证被端点拒绝\s*[（(]\s*`?authentication"
+            r"|(?<!不)会对\s*\**每一个\**\s*已声明的数据集"
+        ),
+        refuted_by=(
+            "ChainLinDataProvider.fetch raises category='authentication' when its key is "
+            "missing, before any transport call (providers/chainlin.py:155-162), and "
+            "_probe_report fetches every dataset of a provider whose base URL is set "
+            "(cli.py:669-696). With a ChainLin base URL and no key, doctor --probe sends no "
+            "request, reports authentication for every dataset, and exits non-zero "
+            "(PROBE_FAILURE_STATES, cli.py:634)."
+        ),
+        retired=(
+            "凭证被端点拒绝（`authentication`）时命令**非零退出**",
+            "`openalpha doctor --probe` 会对**每一个**已声明的数据集发一次最小请求",
+        ),
+        paraphrase="doctor 报 authentication 就说明服务器拒绝了你的 key。",
+        premise=_a_missing_chainlin_key_is_still_authentication,
+    ),
 )
 """Each family of wordings `D13` retired, the code fact that refutes it, and what it retired."""
 
@@ -1251,6 +1481,28 @@ TRUE_SENTENCES_THAT_SHARE_THE_WORDS: Final[tuple[str, ...]] = (
     "组合账本按订单 ID 查询每一次成交与拒单。",
     "研究异常可沿运行与决策 ID 回到具体节点，订单则按订单 ID 查询。",
     "链邻 Provider 的错误分类只在 doctor 探测时用到。",
+    "RunManifest 记录模型版本\N{FULLWIDTH SEMICOLON}Prompt 版本字段目前恒为空。",
+    "实时研究与历史回放共用 run_cycle，验证与多日组合回测走各自的路径。",
+    "The research core shared by live research and replay is run_cycle.",
+    "在代码中把模型包进 StructuredSignalAgent 时，输出按 Schema 校验并有界重试。",
+    "模型要包进 StructuredSignalAgent 再以 agents= 交给引擎。",
+    "doctor --probe 在凭证齐全时对每一个已声明的数据集发一次最小请求。",
+    "Each single model answer carries the limitations list; the prediction listing carries none.",
+    "组合执行计入 A 股交易约束与成本。",
+    "台账的每项功能都有源码、入口和测试证据。",
+    "检查后产生不可变 PortfolioTransition，成交与拒单都有。",
+    "实时研究与回放贯通同一核心 run_cycle。",
+    "下表列出七类增强能力。",
+    "RunManifest 不记录 Prompt 版本。",
+    "Prompt 版本目前不写入 RunManifest。",
+    "RunManifest 的 prompt_versions 字段目前恒为空。",
+    "结果验证不计入 A 股交易约束，只计入调用方给出的交易成本。",
+    "Not every model answer carries the limitations: the prediction listing carries none.",
+    "台账只有源码、入口和测试证据而没有文档证据。",
+    "链邻的凭证被端点拒绝时报 authentication，缺 key 时也报。",
+    "链邻缺 key 时 doctor --probe 不会对每一个已声明的数据集发请求。",
+    "接入模型时不强制 Schema，包进 StructuredSignalAgent 才校验。",
+    "模型端点不只在 SDK 代码里接入，引擎也直接接收 Agent。",
 )
 """True or unrelated sentences that share a retired pattern's words. The review of `D13` measured
 the first six being caught (its M1): client holds cli, 移动平均 holds 移动, and a rejection and a
@@ -1274,7 +1526,17 @@ run_cycle's write, and a gate from the trading rules that act after it. The rest
 passes before an optional committee, run_cycle's ledger beside the committee's returned debate,
 a gate that decides research actions and reads only flags, the order ids a portfolio ledger is
 keyed on, run and decision ids that lead back to a research node, and a ChainLin error
-classification that only doctor reads."""
+classification that only doctor reads. After them, one sentence for each family `D14`'s README,
+why and prompt fixes added or broadened, each the true wording its own rewrite used or the
+nearest true use of its words: a manifest whose prompt field is stated empty after a clause end,
+run_cycle shared by live research and replay only, a model wrapped in StructuredSignalAgent and
+handed to an engine, a probe conditioned on credentials, limitations on single answers, trading
+constraints that portfolio execution counts, a ledger with source, entry and test evidence, a
+transition for every order, and a table of seven. The last ten are `D14`'s probes of its own new
+entries, each the most natural true sentence in their words, and each but the last of them was
+caught before its pattern was narrowed: five hold a denial inside the span a pattern crosses,
+three hold one just before a pattern's first word, one names a rejected credential without
+equating it with authentication, and one holds the manifest's field name in lower case."""
 
 
 def test_the_retired_patterns_pass_the_true_sentences_that_share_their_words() -> None:
