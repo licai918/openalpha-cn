@@ -21,7 +21,9 @@ entry of `RETIRED_CLAIMS` holds:
   documents as `tests/prose_clauses.py` reads them;
 - `refuted_by`: the code fact that makes those wordings false, with file:line at the revision it
   was checked at: `d4ef5e4`, `c99b46b` for the classes the rebase round added, `07f5c80` for the
-  three the final round added, or `20fec55` for what `D14` added;
+  three the final round added, `20fec55` for what `D14`'s first two commits added, or `43b40a7`
+  for what its later commits added -- between the two, only `cli.py` from :4914 on and a
+  docstring in `backtest/replay.py` moved;
 - `retired`: what it retired, verbatim -- the clause, or the part of it the claim sits in -- as it
   stood at `d4ef5e4`, on `16db458` for `D13`'s own five, or at `20fec55` for what `D14` retired;
   the pattern must still match each of them, so a pattern cannot be loosened into matching
@@ -34,18 +36,22 @@ entry of `RETIRED_CLAIMS` holds:
 **What it cannot see.** It catches these wordings and nothing else. A pattern is a family of the
 phrasings that were retired, not a detector of the claim: the same claim in other words --
 another verb, another order, or its halves in two clauses -- passes, and
-`test_the_retired_claims_blind_spot_is_real` holds one such paraphrase per entry. Most patterns
-do not read negation either: "不能分别启停" is read as the claim it denies. A span built from
-`_NO_DENIAL` or `_NO_COMMA_OR_DENIAL` stops at 不, 未, 没 or 无, so an entry that uses one passes
-a denial written inside its span; a denial written before a pattern's first word still reads as
-the claim unless the pattern looks behind for it, and a claim whose span holds 不可变 or 无 in
-another sense is missed by the entries that use one. A premise reads one fact,
-not the whole of `refuted_by`, so a premise that stays quiet does not prove the claim still
-false, and the ledger's premise sees a call, a bound alias and a `getattr` with the literal name
-of `append_decision`, never a name built at run time. The diagrams' two generators are read
-too, one string literal at a time
-(`tests/diagram_text.py`'s `diagram_strings`): a claim split across two literals, or computed at
-run time, is not read.
+`test_the_retired_claims_blind_spot_is_real` holds one such paraphrase per entry. The review of
+`D14` wrote 36 natural rewrites of these claims and 30 of them passed. A reworded claim is
+therefore left to review and to the census of the documents, not to a pattern: a pattern is not
+widened to catch a paraphrase whose words a true sentence shares, and when a pattern catches a
+true sentence the pattern is narrowed. Most spans of the entries `D14` added or broadened stop
+at 不, 未, 没 or 无 (`_NO_DENIAL`, `_NO_COMMA_OR_DENIAL`), and some patterns look behind for a
+denial just before their first word; `D13`'s older entries do so only where a true sentence was
+caught. Elsewhere a denial reads as the claim it denies ("不能分别启停"), and a claim whose span
+holds 不可变 or 无 in another sense is missed by the entries that stop at a denial. A premise
+reads one fact, not the whole of `refuted_by`, so a premise that stays quiet does not prove the
+claim still false. The ledger's premise sees a call, a bound alias and a `getattr` with the
+literal name of `append_decision`, never a name built at run time; the portfolio premise reads
+the functions that drive the simulator, not a helper one of them calls. The diagrams' two
+generators are read too, one string literal at a time (`tests/diagram_text.py`'s
+`diagram_strings`): a claim split across two literals, computed at run time, or drawn as a line
+between two boxes, is not read.
 
 **The other direction.** A pattern can also catch a true sentence that shares its words: "REST
 clients" held "cli" until SDK and CLI were matched as words, and 移动平均 held 移动. There is no
@@ -60,7 +66,7 @@ import ast
 import inspect
 import re
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, get_args
@@ -454,47 +460,95 @@ GATE_NAMES: Final[frozenset[str]] = frozenset({"RiskGate", "risk_decision", "fin
 """The risk gate, and the two fields of a run its verdict reaches."""
 
 
+PORTFOLIO_MODULE: Final[str] = "openalpha_cn.backtest.portfolio"
+"""The module whose simulator applies the A-share rules to an order."""
+
+
+def _portfolio_bindings(tree: ast.AST) -> tuple[set[str], set[str]]:
+    """What a module binds from the portfolio module: the names it imports from it, and the
+    names it gives the module itself."""
+    names: set[str] = set()
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.level == 0:
+            if node.module == PORTFOLIO_MODULE:
+                names.update(alias.asname or alias.name for alias in node.names)
+            elif node.module == "openalpha_cn.backtest":
+                for alias in node.names:
+                    if alias.name == "portfolio":
+                        modules.add(alias.asname or alias.name)
+                    elif alias.name == "PortfolioSimulator":
+                        names.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Import):
+            modules.update(
+                alias.asname
+                for alias in node.names
+                if alias.name == PORTFOLIO_MODULE and alias.asname
+            )
+    return names, modules
+
+
+def _drives_the_portfolio(node: ast.AST, names: set[str], modules: set[str]) -> bool:
+    """Whether `node` names the simulator, a name bound from its module, or that module."""
+    if isinstance(node, ast.Name):
+        return node.id in names or node.id == "PortfolioSimulator"
+    if isinstance(node, ast.Attribute):
+        return node.attr == "PortfolioSimulator" or (
+            isinstance(node.value, ast.Name) and node.value.id in modules
+        )
+    return False
+
+
+def _own_nodes(function: ast.AST) -> Iterator[ast.AST]:
+    """The nodes of `function`, outside any function, lambda or class nested in it."""
+    stack = list(ast.iter_child_nodes(function))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef):
+            continue
+        yield node
+        stack.extend(ast.iter_child_nodes(node))
+
+
+def _portfolio_scopes_of(where: str, tree: ast.AST) -> dict[str, ast.AST]:
+    """The scopes of one module the portfolio premise reads; `_portfolio_scopes` has which."""
+    names, modules = _portfolio_bindings(tree)
+    if where in PORTFOLIO_MODULES or (
+        where.startswith("backtest/")
+        and (
+            names
+            or modules
+            or any(_drives_the_portfolio(node, names, modules) for node in ast.walk(tree))
+        )
+    ):
+        return {where: tree}
+    return {
+        f"{where}::{node.name}": node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        and any(_drives_the_portfolio(inner, names, modules) for inner in _own_nodes(node))
+    }
+
+
 def _portfolio_scopes() -> dict[str, ast.AST]:
     """Every place that drives the portfolio simulator, keyed by where it is.
 
-    `PORTFOLIO_MODULES` whole, and whole any other module under `backtest/` that imports from
-    `openalpha_cn.backtest.portfolio` or constructs `PortfolioSimulator` (`multi_day.py`,
-    `paper.py`, ...). In a module outside `backtest/` -- `sdk.py`, `api/app.py`, `cli.py` -- only
-    the functions that construct `PortfolioSimulator` or use a name imported from that module,
-    because those modules also serve routes and commands that read a run's `final_action` on
-    purpose.
+    `PORTFOLIO_MODULES` whole, and whole any other module under `backtest/` whose syntax tree
+    imports the portfolio module or a name from it, or names `PortfolioSimulator` as a name or an
+    attribute: `multi_day.py`, `paper.py`, `portfolio_policy.py` and the package's `__init__.py`.
+    In a module outside `backtest/` -- `sdk.py`, `api/app.py`, `cli.py` -- the innermost functions
+    that name one of those themselves, because those modules also serve routes and commands that
+    read a run's `final_action` on purpose, and `api/app.py` nests every route in `create_app`. A
+    helper such a function calls is not read.
     """
-    scopes: dict[str, ast.AST] = {}
-    for path in sorted(SRC.rglob("*.py")):
-        where = path.relative_to(SRC).as_posix()
-        text = path.read_text(encoding="utf-8")
-        if where not in PORTFOLIO_MODULES and "PortfolioSimulator" not in text:
-            continue
-        tree = ast.parse(text, filename=str(path))
-        imported = {
-            alias.asname or alias.name
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom) and node.module == "openalpha_cn.backtest.portfolio"
-            for alias in node.names
-        }
-        constructs = any(
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "PortfolioSimulator"
-            for node in ast.walk(tree)
-        )
-        if where in PORTFOLIO_MODULES or (
-            where.startswith("backtest/") and (imported or constructs)
-        ):
-            scopes[where] = tree
-            continue
-        used = imported | {"PortfolioSimulator"}
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and any(
-                isinstance(inner, ast.Name) and inner.id in used for inner in ast.walk(node)
-            ):
-                scopes[f"{where}::{node.name}"] = node
-    return scopes
+    return {
+        key: scope
+        for path in sorted(SRC.rglob("*.py"))
+        for key, scope in _portfolio_scopes_of(
+            path.relative_to(SRC).as_posix(),
+            ast.parse(path.read_text(encoding="utf-8"), filename=str(path)),
+        ).items()
+    }
 
 
 def _no_portfolio_module_reads_the_risk_gate() -> str | None:
@@ -797,9 +851,10 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         pattern=re.compile(
             r"(?:独立|分别|单独)(?:启停|开关|关闭)|能单独做对照"
             r"|(?<![A-Za-z])(?:independently|separately|individually)\s+(?:toggl|enabl|disabl|switch)"
-            r"|完整委员会|可消融\s*Bull\s*/\s*Bear"
+            r"|可消融\s*Bull\s*/\s*Bear"
+            rf"|(?:与|和)\s*完整委员会{_NO_COMMA_OR_DENIAL}{{0,8}}消融"
             rf"|(?:Bull\s*/\s*Bear|辩论){_NO_COMMA}{{0,4}}(?:与|和)\s*风险委员会"
-            rf"{_NO_COMMA}{{0,4}}可消融",
+            rf"(?:(?!整体){_NO_COMMA_OR_DENIAL}){{0,4}}可消融",
             re.IGNORECASE,
         ),
         refuted_by=(
@@ -834,9 +889,11 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     RetiredClaim(
         name="the SDK and the CLI pass through the FastAPI boundary",
         pattern=re.compile(
-            rf"{_FACE}{_NO_COMMA}*(?:最终)?(?:进入|经过|通过|走)同一\s*FastAPI"
+            rf"{_FACE}{_NO_COMMA_OR_DENIAL}*(?:最终)?(?:进入|经过|通过|走)同一\s*FastAPI"
             rf"|四类入口{_NO_COMMA}*(?:最终)?(?:进入|经过|通过|走)同一\s*FastAPI"
-            rf"|{_FACE}[^.;,]*(?:through|via|behind)\s+(?:the\s+)?(?:same\s+)?FastAPI",
+            r"|(?<!nor\s)(?<!nor\sthe\s)"
+            rf"{_FACE}(?:(?!\b(?:never|not|no|neither|nor|without)\b)[^.;,])*"
+            r"(?:through|via|behind)\s+(?:the\s+)?(?:same\s+)?FastAPI",
             re.IGNORECASE,
         ),
         refuted_by=(
@@ -894,9 +951,13 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         pattern=re.compile(
             rf"拒单(?:也)?关联决策|拒单[，,]\s*记录{_NOT_END}{{0,12}}关联决策"
             rf"|(?:执行失败|拒单|成交){_NO_COMMA_OR_DENIAL}{{0,6}}纳入证据链"
-            rf"|沿\s*(?:运行\s*|任务\s*)?ID{_NO_COMMA}{{0,6}}(?:找到|定位|返回|回到)"
+            rf"|(?<!并非)(?<!不是)(?:任何|所有|全部|每个)(?:异常|故障|错误|失败)"
+            rf"{_NO_COMMA_OR_DENIAL}{{0,6}}沿\s*(?:运行\s*|任务\s*)?ID"
+            rf"|沿\s*(?:运行\s*|任务\s*)?ID{_NO_COMMA_OR_DENIAL}{{0,6}}"
+            rf"找到{_NO_COMMA}{{0,4}}(?:故障|错误)"
             rf"|组合账本{_NO_COMMA_OR_DENIAL}{{0,10}}稳定\s*ID\s*关联"
-            rf"|组合执行{_NO_COMMA_OR_DENIAL}{{0,10}}(?:回溯|追溯)"
+            rf"|组合执行{_NO_COMMA_OR_DENIAL}{{0,6}}关联链?"
+            rf"{_NO_COMMA_OR_DENIAL}{{0,4}}(?:回溯|追溯)"
             r"|reject\w*(?:\s+\w+){0,3}\s+(?:linked|tied)\s+to\s+(?:\w+\s+)?decision",
             re.IGNORECASE,
         ),
@@ -926,9 +987,10 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             rf"|(?:多日组合|事件统计){_NO_DENIAL}{{0,12}}反馈回报告中心"
             rf"|(?:委员会|风险门|组合){_NOT_END}{{0,16}}结果都能进入报告"
             rf"|(?:委员会|组合验证){_NO_DENIAL}{{0,16}}新结果{_NO_DENIAL}{{0,8}}报告中心"
-            rf"|继续进入{_NO_COMMA}{{0,20}}报告中心"
+            rf"|(?<![不未没无])(?<!不会)继续进入{_NO_COMMA_OR_DENIAL}{{0,20}}"
+            rf"(?:统计|回放|组合){_NO_COMMA_OR_DENIAL}{{0,6}}报告中心"
             rf"|报告{_NO_COMMA_OR_DENIAL}{{0,6}}展示{_NO_COMMA}{{0,8}}实际结果"
-            rf"|统计结果{_NO_COMMA}{{0,4}}都写进{_NO_COMMA}{{0,6}}记录"
+            rf"|统计结果{_NO_COMMA_OR_DENIAL}{{0,4}}都写进{_NO_COMMA}{{0,6}}记录"
         ),
         refuted_by=(
             "ResearchReport holds one research run: run_id, subject, created_at, title, summary, "
@@ -955,8 +1017,8 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     RetiredClaim(
         name="browser flows are tested at mobile width",
         pattern=re.compile(
-            r"(?<!移除)(?<!删除)(?<!去掉)(?<!移除了)(?<!删除了)"
-            rf"移动(?:浏览器|视口|端|设备){_NOT_END}{{0,12}}(?:流程|Playwright)"
+            r"(?<!移除)(?<!删除)(?<!去掉)(?<!移除了)(?<!删除了)(?<!不再有)(?<!没有)"
+            rf"移动(?:浏览器|视口|端|设备){_NO_DENIAL}{{0,12}}流程"
             r"|(?:桌面|desktop)\s*(?:/|和|与|and)\s*(?:移动|mobile)",
             re.IGNORECASE,
         ),
@@ -1009,7 +1071,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     RetiredClaim(
         name="the container recovery check deletes and recreates the container",
         pattern=re.compile(
-            r"容器删除、重建|(?<!没有)(?<!不)(?<!未)删除、重建后|验证关键状态真的能恢复"
+            r"容器删除、重建|(?<!没有)(?<![不未非无])删除、重建后|验证关键状态真的能恢复"
             r"|(?:deleted|removed) and recreated",
             re.IGNORECASE,
         ),
@@ -1032,9 +1094,10 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         name="interrupted batch work continues by itself after a restart",
         pattern=re.compile(
             rf"启动时{_NOT_END}{{0,12}}(?:并|自动)继续(?:处理|执行)"
-            r"|(?:重试|取消|并发|进度|上限|状态)\s*(?:和|与|、)\s*(?:进程)?重启恢复|宕机恢复"
+            r"|(?:重试|取消|并发|进度|上限|状态)\s*(?:和|与|、)\s*(?:进程)?重启恢复"
+            r"|(?:Checkpoint|WAL)\s*\N{MIDDLE DOT}\s*宕机恢复"
             r"|(?:进程)?重启后还能恢复|批量任务中断(?:后还能|也能|后可)恢复"
-            rf"|中断重启(?:会|就)?{_NO_COMMA}{{0,6}}继续"
+            rf"|中断重启(?:会|就)?{_NO_COMMA_OR_DENIAL}{{0,6}}继续"
             r"|(?:retry|cancellation),?\s+and\s+restart\s+recovery",
             re.IGNORECASE,
         ),
@@ -1113,7 +1176,11 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     ),
     RetiredClaim(
         name="the product supplies a permission boundary",
-        pattern=re.compile(rf"(?:补|实现|提供|具备){_NOT_END}{{0,10}}权限边界"),
+        pattern=re.compile(
+            rf"还要自己补{_NO_COMMA}{{0,12}}权限边界"
+            rf"|(?:OpenAlpha(?:\s*CN)?|本服务|本项目){_NO_COMMA_OR_DENIAL}{{0,8}}"
+            rf"(?:实现|提供|具备|补齐|补上)了?{_NO_COMMA_OR_DENIAL}{{0,6}}权限边界"
+        ),
         refuted_by=(
             "The REST service authenticates nobody -- 'this service has no authentication of any "
             "kind' (api/app.py, the GET /api/v1/jobs docstring) -- and README.md asks a deployer "
@@ -1228,7 +1295,8 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         pattern=re.compile(
             rf"所有验证{_NOT_END}{{0,12}}同一个\s*`?run_cycle"
             r"|(?:验证|回测|daily|paper)\s*共用\s*`?run_cycle"
-            r"|research core shared by[^.;]{0,40}(?:backtest|paper|daily)"
+            r"|research core shared by(?:(?!\b(?:not|never|neither|nor)\b)[^.;]){0,40}"
+            r"(?:backtest|paper|daily)"
             rf"|backtest{_NOT_END}{{0,20}}(?:都经过|共用|共享)同一|用同一路径回答"
         ),
         refuted_by=(
@@ -1254,7 +1322,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         name="a batch item runs the whole research chain",
         pattern=re.compile(
             rf"每个任务仍(?:执行完整|保留){_NOT_END}{{0,24}}(?:双委员会|组合)"
-            rf"|研究结论{_NO_COMMA}{{0,6}}受到{_NO_COMMA}{{0,16}}交易规则"
+            rf"|研究结论{_NO_COMMA_OR_DENIAL}{{0,6}}受到{_NO_COMMA}{{0,16}}交易规则"
         ),
         refuted_by=(
             "A batch item runs runner(item.request) (runtime/batch.py:290), and the shipped "
@@ -1331,10 +1399,11 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     RetiredClaim(
         name="every result passes through the committee",
         pattern=re.compile(
-            rf"(?:都要|必须|还要|须|需要?)经过{_NO_COMMA}{{0,20}}委员会"
-            rf"|所有输出{_NO_COMMA}{{0,12}}进入{_NO_COMMA}{{0,20}}委员会|经过双委员会"
+            rf"(?<![不无未没])(?:都要|必须|还要|须|需要?)经过{_NO_COMMA}{{0,20}}委员会"
+            rf"|所有输出{_NO_COMMA_OR_DENIAL}{{0,12}}进入{_NO_COMMA}{{0,20}}委员会"
+            r"|(?<![不无未没])经过双委员会"
             rf"|委员会{_NO_COMMA}{{0,2}}(?:与|和)\s*风险门{_NO_COMMA}{{0,4}}审查"
-            rf"|委员会{_NO_COMMA}{{0,6}}给出上游判断|回放{_NOT_END}{{0,30}}委员会则给出"
+            rf"|委员会{_NO_COMMA_OR_DENIAL}{{0,6}}给出上游判断|回放{_NOT_END}{{0,30}}委员会则给出"
         ),
         refuted_by=(
             "ResearchEngine.run_cycle routes, runs the agents, aggregates their signals and runs "
@@ -1362,13 +1431,13 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     RetiredClaim(
         name="the committee's outcome is written to the DecisionLedger",
         pattern=re.compile(
-            rf"(?:委员会|讨论|辩论|投票){_NO_COMMA}{{0,24}}"
-            rf"(?:写入|写进|存进|存入|进入|记入|保存)\s*{_NO_COMMA}{{0,6}}"
+            rf"(?:委员会|讨论|辩论|投票){_NO_COMMA_OR_DENIAL}{{0,24}}"
+            rf"(?:写入|写进|存进|存入|进入|记入|保存)\s*{_NO_COMMA_OR_DENIAL}{{0,6}}"
             r"(?:DecisionLedger|决策账本|决策记录|不可变(?:决策)?记录|账本)"
             rf"|委员会{_NOT_END}{{0,24}}(?:最终|随后|再)写入\s*DecisionLedger"
             rf"|委员会{_NOT_END}{{0,24}}DecisionLedger{_NOT_END}{{0,20}}再把"
-            rf"|所有结果{_NO_COMMA}{{0,6}}进入{_NO_COMMA}{{0,8}}账本"
-            rf"|委员会{_NO_COMMA}{{0,24}}(?:回溯|追溯)"
+            rf"|(?<!并非)(?<!不是)所有结果{_NO_COMMA_OR_DENIAL}{{0,6}}进入{_NO_COMMA}{{0,8}}账本"
+            rf"|委员会{_NO_COMMA_OR_DENIAL}{{0,24}}(?:回溯|追溯)"
         ),
         refuted_by=(
             "A DecisionLedger is built only in ResearchEngine.run_cycle "
@@ -1392,12 +1461,14 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     RetiredClaim(
         name="the risk gate constrains the portfolio",
         pattern=re.compile(
-            rf"(?:风险门|风险判断|风控|RiskGate){_NO_COMMA}{{0,8}}"
-            rf"(?:限制|约束|改变|改写|决定|影响){_NO_COMMA}{{0,6}}(?:组合|仓位|订单|持仓)"
-            rf"|(?:组合|仓位|订单|持仓){_NO_COMMA}{{0,6}}受{_NO_COMMA}{{0,4}}(?:风险门|风险判断)"
-            rf"{_NO_COMMA}{{0,4}}(?:约束|限制|控制)"
-            rf"|风险门{_NO_COMMA}{{0,6}}贯穿(?:全链|整条链)"
-            rf"|风险(?:层)?(?:和|与)组合层{_NO_COMMA}{{0,4}}应用{_NO_COMMA}{{0,6}}交易规则"
+            rf"(?:风险门|风险判断|风控|RiskGate){_NO_COMMA_OR_DENIAL}{{0,8}}"
+            rf"(?:限制|约束|改变|改写|决定|影响){_NO_COMMA_OR_DENIAL}{{0,6}}"
+            r"(?:组合|仓位|订单|持仓)"
+            rf"|(?:组合|仓位|订单|持仓){_NO_COMMA_OR_DENIAL}{{0,6}}受"
+            rf"{_NO_COMMA}{{0,4}}(?:风险门|风险判断){_NO_COMMA}{{0,4}}(?:约束|限制|控制)"
+            rf"|风险门{_NO_COMMA_OR_DENIAL}{{0,6}}贯穿(?:全链|整条链)"
+            rf"|风险(?:层)?(?:和|与)组合层{_NO_COMMA_OR_DENIAL}{{0,4}}应用"
+            rf"{_NO_COMMA}{{0,6}}交易规则"
         ),
         refuted_by=(
             "RiskGate.evaluate answers pass, reduce or block about a signal "
@@ -1421,10 +1492,10 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     RetiredClaim(
         name="the risk gate reads the committee and records its reasons",
         pattern=re.compile(
-            rf"(?:RiskGate|风险门){_NO_COMMA}{{0,20}}"
+            rf"(?:RiskGate|风险门){_NO_COMMA_OR_DENIAL}{{0,20}}"
             rf"(?:根据|依据|参考|读取|结合|综合){_NO_COMMA}{{0,12}}委员会"
-            rf"|原因{_NO_COMMA}{{0,4}}写入{_NO_COMMA}{{0,4}}(?:决策账本|DecisionLedger)"
-            rf"|(?:RiskGate|风险门){_NO_COMMA}{{0,12}}记录{_NO_COMMA}{{0,24}}原因"
+            rf"|原因{_NO_COMMA_OR_DENIAL}{{0,4}}写入{_NO_COMMA}{{0,4}}(?:决策账本|DecisionLedger)"
+            rf"|(?:RiskGate|风险门){_NO_COMMA_OR_DENIAL}{{0,12}}记录{_NO_COMMA}{{0,24}}原因"
         ),
         refuted_by=(
             "RiskGate.evaluate(signal) reads the signal's risk_flags and nothing else "
@@ -1445,7 +1516,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         name="ChainLin errors reach the research or risk path",
         pattern=re.compile(
             rf"链邻\s*Provider\s*的{_NO_COMMA}{{0,12}}(?:错误|修订){_NO_COMMA}{{0,10}}"
-            r"(?:不会被当(?:成|作)|无风险|不会被隐藏)"
+            r"(?:不会被当(?:成|作)(?!空结果)|无风险|不会被隐藏)"
         ),
         refuted_by=(
             "The shipped research path never calls ChainLin: ChainLinDataProvider is constructed "
@@ -1464,7 +1535,8 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     RetiredClaim(
         name="a run records its prompt versions",
         pattern=re.compile(
-            rf"RunManifest{_NO_DENIAL}{{0,40}}Prompt"
+            rf"RunManifest{_NO_COMMA_OR_DENIAL}{{0,4}}(?:记录|保存|写入|包含)"
+            rf"{_NO_COMMA_OR_DENIAL}{{0,36}}Prompt"
             rf"|Prompt{_NO_DENIAL}{{0,40}}(?:进入|写入)\s*RunManifest"
             rf"|每次运行保存{_NO_DENIAL}{{0,40}}Prompt"
             r"|版本化模型与\s*Prompt|模型与\s*Prompt\s*版本"
@@ -1596,7 +1668,8 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     RetiredClaim(
         name="every attempt of a model call is written to the usage ledger",
         pattern=re.compile(
-            rf"(?<!不是)(?<!并非)每(?:一)?次尝试{_NO_COMMA}{{0,40}}(?:账本|入账|记账|记录|写入)"
+            rf"(?<!不是)(?<!并非)每(?:一)?次尝试{_NO_COMMA_OR_DENIAL}{{0,40}}"
+            r"(?:账本|入账|记账|记录|写入)"
         ),
         refuted_by=(
             "OpenAICompatibleProvider.generate_json retries inside one while loop and calls "
@@ -1614,7 +1687,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     RetiredClaim(
         name="the watchlist links its subjects to evidence and reports",
         pattern=re.compile(
-            rf"观察池{_NOT_END}{{0,16}}接住{_NO_COMMA}{{0,6}}(?:证据|报告)"
+            rf"观察池{_NOT_END}{{0,16}}(?<!不能)(?<![不没])接住{_NO_COMMA}{{0,6}}(?:证据|报告)"
             rf"|观察池{_NOT_END}{{0,6}}并(?:把它)?(?:连接|关联|接入)到?"
             rf"{_NO_COMMA}{{0,4}}(?:证据|报告)"
             rf"|观察池{_NOT_END}{{0,4}}再由报告中心"
@@ -1662,7 +1735,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "each perspective (:141-153). An abstention reaches the committee only as the input "
             "signal's own direction, which it carries through (:121-136)."
         ),
-        retired=("保守 / 弃权", "激进 / 中性 / 保守 / 弃权"),
+        retired=("保守 / 弃权",),
         paraphrase="风险委员会里还有一票可以选择不表态。",
         premise=_a_risk_vote_still_has_no_abstention,
     ),
@@ -1685,7 +1758,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "Knowability is decided when a replay corpus loads: a case whose evidence is not "
             "visible at its as_of raises LookAheadViolationError (backtest/replay.py:59-63). "
             "ReplayReport.look_ahead_violations counts cases whose run raised it, which no "
-            "validated corpus can reach (:103-112); PortfolioBacktestReport, EventStudyReport and "
+            "validated corpus can reach (:103-115); PortfolioBacktestReport, EventStudyReport and "
             "ValidationResult hold no such answer."
         ),
         retired=("共同回答：当时是否可知\N{FULLWIDTH QUESTION MARK}",),
@@ -1869,6 +1942,62 @@ TRUE_SENTENCES_THAT_SHARE_THE_WORDS: Final[tuple[str, ...]] = (
     "大规模批量任务中心已经出厂，图形化 Agent 编排延后。",
     "每张图都对应当前源码里的生成器，由同步测试钉住。",
     "组合记录不能沿任务 ID 查询。",
+    "SDK 与 CLI 不经过同一 FastAPI 边界，而是在进程内调用服务。",
+    "The SDK and the CLI never go through the FastAPI boundary.",
+    "Neither the SDK nor the CLI goes through FastAPI.",
+    "V2-P5-014 已把移动端 Playwright 项目移除。",
+    "移动端的 Playwright 项目已被移除。",
+    "仓库不再有移动端 Playwright 流程。",
+    "风险门不影响组合。",
+    "风险门不会限制仓位，仓位由下单时的交易规则约束。",
+    "组合不受风险门约束。",
+    "RiskGate 从不改变订单。",
+    "委员会的结论不写入 DecisionLedger。",
+    "委员会的投票结果不会存进决策账本。",
+    "委员会的讨论不会回溯到决策账本。",
+    "信号不需要经过委员会。",
+    "研究结果无须经过委员会。",
+    "风险门不读取委员会的意见。",
+    "风险门并不参考委员会意见。",
+    "RiskGate 不记录原因。",
+    "RunManifest 预留了 Prompt 版本字段，目前恒为空。",
+    "每次尝试失败都不会写入账本。",
+    "组合执行可按订单 ID 追溯。",
+    "研究异常沿运行 ID 回到具体节点。",
+    "研究运行的结果可以继续进入报告中心，生成不可变报告。",
+    "链邻 Provider 的认证错误不会被当成空结果成功。",
+    "Bull/Bear 与风险委员会整体可消融，不能只开一方。",
+    "每次调用都运行完整委员会：辩论与三票一起算。",
+    "部署者需要在网关里自己实现权限边界。",
+    "本服务不提供权限边界，请在网关补上鉴权。",
+    "OpenAlpha CN 不具备权限边界，部署时要在前面加网关。",
+    "进程宕机恢复后，被中断的项重新排队。",
+    "SDK 和 CLI 都在进程内调用服务，从来不经过 FastAPI。",
+    "只有 REST 调用方经过同一 FastAPI 边界。",
+    "批量任务在进程重启后不会自动恢复运行，要调用方重试。",
+    "报告只展示研究运行的结论，不展示实际结果。",
+    "决策账本不记录委员会的投票。",
+    "拒单不关联决策。",
+    "被拒订单沿订单 ID 就能找到原因。",
+    "回放无需执行 T+1。",
+    "并非删除、重建后再检查，CI 只重启容器。",
+    "并非任何异常都能沿 ID 回到具体节点。",
+    "沿运行 ID 并不能找到故障发生在哪一层。",
+    "统计结果不都写进记录，事件研究报告只交还调用方。",
+    "自定义结果不会继续进入统计和报告中心。",
+    "研究结论不受到交易规则约束，订单才受。",
+    "所有输出都不必进入委员会。",
+    "研究结果不经过双委员会。",
+    "委员会不给出上游判断，它在研究之后才被调用。",
+    "委员会的投票进入的不是决策账本，而是返回给调用方的结果。",
+    "并非所有结果都进入账本，委员会的结果只交还调用方。",
+    "风险门改变的不是组合，而是研究动作。",
+    "风险门并不贯穿全链，只在 run_cycle 里执行。",
+    "风险层与组合层不会应用同一套交易规则。",
+    "原因不写入决策账本，账本只有风险结论。",
+    "观察池并不能接住证据和报告。",
+    "One research core shared by live research and replay, not by the backtest or daily runs.",
+    "中断重启不会自己继续，要调用方再次运行。",
 )
 """True or unrelated sentences that share a retired pattern's words. The review of `D13` measured
 the first six being caught (its M1): client holds cli, 移动平均 holds 移动, and a rejection and a
@@ -1903,19 +2032,23 @@ entries its second commit added, each the most natural true sentence in their wo
 the one in lower case were caught before the patterns were narrowed: five hold a denial inside
 the span a pattern crosses, three hold one just before a pattern's first word, one names a
 rejected credential without equating it with authentication, and one holds the manifest's field
-name in lower case. The last fourteen probe what its third commit added or broadened: the true
+name in lower case. The next fourteen probe what its third commit added or broadened: the true
 wording of each rewrite, and for each narrowing the sentence it is narrowed against -- 重启恢复
 with no list word before it, a hedge after 调用同一批服务, 不是 before 每次尝试, 关联 with no 并
 before it, a denial inside a routing span, and a comma between a conclusion and the trading
-rules. The last eight probe the diagram texts its fourth commit retired, each the wording the
+rules. The next eight probe the diagram texts its fourth commit retired, each the wording the
 generator now draws or the nearest true use of the retired words: three votes that never
 abstain, a portfolio verb that exists, knowability answered at load, a backtest on a path of its
 own, three products drawn apart, a restart that requeues, the faces' transport, and three
-validations. The last eighteen are its fifth commit's probes of the older entries, each a
+validations. The next eighteen are its fifth commit's probes of the older entries, each a
 natural true sentence in their words that its pattern caught until the pattern was narrowed:
 the review's two (an in-process SDK and CLI, a removed mobile project) in three and two
 wordings, then denials inside a replay, rejection, report, container or portfolio-record span,
-a comma after a batch center that shipped, and a diagram tied to its generator."""
+a comma after a batch center that shipped, and a diagram tied to its generator. The last
+fifty-six come from the review of `D14` (its m-2): its thirty-nine true sentences, verbatim, of
+which it measured thirty-one being caught, and seventeen natural denials `D14`'s fix round wrote
+for the spans those thirty-nine did not reach. All of them but the review's eight that passed
+were caught until their patterns were narrowed."""
 
 
 def test_the_retired_patterns_pass_the_true_sentences_that_share_their_words() -> None:
@@ -2005,6 +2138,42 @@ def test_the_portfolio_premise_reads_every_place_that_drives_the_simulator() -> 
         "api/app.py::portfolio_execute",
     }
     assert expected <= scopes, f"the portfolio premise no longer reads {sorted(expected - scopes)}"
+
+
+def test_the_portfolio_premise_reads_importers_and_only_the_routes_that_drive_it() -> None:
+    """The review of `D14` (its m-3) measured the premise skipping `paper.py` and
+    `portfolio_policy.py`, which import from the portfolio module without naming
+    `PortfolioSimulator`; reading the whole of `create_app`, whose other routes read
+    `final_action` on purpose; and missing a construction through the module."""
+    scopes = set(_portfolio_scopes())
+    assert {"backtest/paper.py", "backtest/portfolio_policy.py"} <= scopes, sorted(scopes)
+    assert "api/app.py::create_app" not in scopes, "the premise reads every route of create_app"
+    planted = _portfolio_scopes_of(
+        "backtest/planted.py",
+        ast.parse("from openalpha_cn.backtest import portfolio as p\np.PortfolioSimulator()\n"),
+    )
+    assert "backtest/planted.py" in planted, "a construction through the module went unread"
+    through_the_package = _portfolio_scopes_of(
+        "sdk.py",
+        ast.parse(
+            "import openalpha_cn.backtest.portfolio\n"
+            "def run():\n"
+            "    return openalpha_cn.backtest.portfolio.PortfolioSimulator()\n"
+        ),
+    )
+    assert set(through_the_package) == {"sdk.py::run"}, sorted(through_the_package)
+    nested = _portfolio_scopes_of(
+        "api/app.py",
+        ast.parse(
+            "from openalpha_cn.backtest.portfolio import PortfolioSimulator\n"
+            "def create_app():\n"
+            "    def portfolio_execute():\n"
+            "        return PortfolioSimulator()\n"
+            "    def research_route():\n"
+            "        return final_action\n"
+        ),
+    )
+    assert set(nested) == {"api/app.py::portfolio_execute"}, sorted(nested)
 
 
 @pytest.mark.parametrize("name", REAL_RECREATES)
