@@ -1347,7 +1347,9 @@ def test_every_top_level_panel_module_is_in_this_table_and_stays_inside_its_row(
     """
     discovered = _top_level_panel_modules()
 
-    assert len(discovered) >= 4, f"expected the four known panel_* modules, found {discovered}"
+    assert len(discovered) >= 4, (
+        f"expected at least the four panel_* modules this audit was written for, found {discovered}"
+    )
     undeclared = sorted(set(discovered) - set(PANEL_MODULE_DEPENDENCIES))
     assert not undeclared, (
         f"{undeclared} is a top-level panel module with no row in "
@@ -1875,6 +1877,6 @@ def test_the_shipped_factors_declare_every_dataset_the_engine_can_name() -> None
     assert declared == engine.named, "the module names exactly what its factors declare"
     assert declared <= UPSTREAM_PANEL_DATASETS
     assert engine.named == engine.reached, (
-        "the factor engine takes three writer helpers across the seam and no reader, so "
+        "the factor engine takes only writer helpers across the seam and no reader, so "
         "following the seam must add nothing to what it can already name"
     )
