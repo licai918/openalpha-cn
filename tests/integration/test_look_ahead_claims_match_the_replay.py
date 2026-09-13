@@ -43,6 +43,9 @@ tuple no call takes, and such a table is one unit: the replay card's "同路径�
   word. Say what happens instead: a corpus holding look-ahead evidence is refused at load.
 - A data table is one unit, so a check word on one of its cards, with 前视 and the replay on
   another, makes a claim no single card makes.
+- A 0 that counts nothing is read as a zero beside a violation: "T+0 交易下前视违规被整体拒绝"
+  is true and fails, as does a clause with 0% or 第0批 beside one. `ZERO_NUMERAL` skips only the
+  0s inside other numbers, and 0% cannot be skipped: "前视违规率为 0%" is a claim.
 """
 
 from __future__ import annotations
@@ -126,7 +129,8 @@ TALLY_WORDS: Final[tuple[str, ...]] = (
 
 ZERO_NUMERAL: Final[re.Pattern[str]] = re.compile(r"(?<![\w.])0(?!\w|\.\d)", re.ASCII)
 """The numeral 0 standing alone, the other way a zero is written: not the 0 of 300, 2020, 0.5, 05
-or v0. Word characters are ASCII here, so a 0 straight after a Chinese character is read."""
+or v0. Word characters are ASCII here, so a 0 straight after a Chinese character is read. So is a
+0 that counts nothing, such as T+0 or 第0批; the module docstring lists that as an over-reach."""
 
 CHECK_WORDS: Final[tuple[str, ...]] = (
     "检查",
@@ -355,7 +359,13 @@ def test_every_word_the_rule_reads_is_needed() -> None:
         if not _is_claim(sentence) or _is_claim(sentence, _without(*key))
     ]
     assert not unpinned, f"a word of MARKERS is not needed by its sentence: {unpinned}"
-    for claim in ("前视违规始终为 0。", "前视违规为0例。", "Look-ahead violations: 0."):
+    zero_claims = (
+        "前视违规始终为 0。",
+        "前视违规为0例。",
+        "前视违规率为 0%。",
+        "Look-ahead violations: 0.",
+    )
+    for claim in zero_claims:
         assert _is_claim(claim) and not _is_claim(claim, zero=None), (
             f"{claim!r} is not made a claim by ZERO_NUMERAL alone"
         )
@@ -408,6 +418,15 @@ def test_the_stated_limits_are_real() -> None:
                     '(394, "结果归因", ("验证结果",)))\n'
                 )
             },
+        ),
+        "a 0 that counts nothing: T+0": ({"T+0": "T+0 交易下前视违规被整体拒绝。\n"}, {}),
+        "a 0 that counts nothing: a 0% position": (
+            {"0%": "仓位为 0% 时，含前视违规的语料同样在加载时被整体拒绝。\n"},
+            {},
+        ),
+        "a 0 that counts nothing: an ordinal": (
+            {"第0批": "第0批语料若含前视违规，加载时就被整体拒绝。\n"},
+            {},
         ),
     }
     passed = [
