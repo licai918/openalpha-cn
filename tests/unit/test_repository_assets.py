@@ -2700,6 +2700,22 @@ _PUBLIC_METADATA: Final[tuple[str, ...]] = (
 """The five files `verify_publication.py` refuses to publish without, as its `required` list."""
 
 
+def _without_git_variables() -> dict[str, str]:
+    """This process's environment with every `GIT_*` variable removed, for git in a scratch repo.
+
+    `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` and `GIT_CONFIG_PARAMETERS`
+    carry configuration that outranks a repository's own, and `GIT_DIR`/`GIT_WORK_TREE` point
+    git at another repository; a scratch repository answers to none of them. Names are compared
+    upper-cased because Windows does not distinguish the case of environment variable names.
+    Imported here rather than at the top of the module, whose import block other channels edit.
+    """
+    import os
+
+    return {
+        name: value for name, value in os.environ.items() if not name.upper().startswith("GIT_")
+    }
+
+
 def _scratch_publication_repository(tmp_path: Path) -> Path:
     """A throwaway git repository under `tmp_path` holding a copy of the gate and nothing else.
 
@@ -2713,29 +2729,39 @@ def _scratch_publication_repository(tmp_path: Path) -> Path:
     bytes are not changed, and neither is what it does to the real repository.
 
     The five required metadata files are present, so a scan reports only what a test adds.
-    Two ways a machine's git setup could hide a probe from `--exclude-standard` -- and so make
-    a refusal fail on one machine and pass on another -- are closed:
+    Three ways a machine's git setup could hide a probe from `--exclude-standard` -- and so
+    make a refusal fail on one machine and pass on another -- are closed:
 
     * a template's `info/exclude`: `git init` copies a template directory into the new
       `.git/` -- the one `--template` names, else `GIT_TEMPLATE_DIR`, else `init.templateDir`,
       else git's default -- and an `info/exclude` there is read by every scan. `--template`
       names an empty directory here, which wins over the other three;
-    * a user-level excludes file (`core.excludesFile`, or `~/.config/git/ignore` when that is
-      unset): the repository's own `core.excludesFile` names an empty file, and a repository
-      setting wins over a user one.
+    * an excludes file from the user's or the system's config (`core.excludesFile`, or
+      `~/.config/git/ignore` when that is unset): the repository's own `core.excludesFile`
+      names an empty file, and a repository setting wins over a user or system one;
+    * configuration the environment carries: `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_<n>`/
+      `GIT_CONFIG_VALUE_<n>` and `GIT_CONFIG_PARAMETERS` -- how `git -c` reaches its children --
+      outrank the repository's own settings, and `GIT_DIR`/`GIT_WORK_TREE`, which git exports
+      to the hooks it runs, would send these commands to another repository. Every git here,
+      and the gate `_publication_scan` starts, runs without any `GIT_*` variable
+      (`_without_git_variables`).
 
-    A review measured the first: a template whose `info/exclude` read `*.db` hid `state.db`
-    from the scan, and the `runtime-databases` case failed on its exit code.
-    `test_the_scratch_repository_ignores_a_git_template_and_user_excludes` holds both shut.
+    Reviews measured the first and the third: a template whose `info/exclude` read `*.db`, and
+    a `core.excludesFile` injected through `GIT_CONFIG_COUNT`, each hid `state.db` from the
+    scan, and the `runtime-databases` case failed on its exit code.
+    `test_the_scratch_repository_ignores_git_templates_user_excludes_and_git_environment`
+    holds all three shut.
     """
     repository = tmp_path / "scratch-repository"
     (repository / "scripts").mkdir(parents=True)
     no_template = tmp_path / "no-git-template"
     no_template.mkdir()
+    git_environment = _without_git_variables()
     subprocess.run(
         ["git", "init", "-q", f"--template={no_template}", str(repository)],
         check=True,
         capture_output=True,
+        env=git_environment,
     )
     no_excludes = tmp_path / "no-excludes"
     no_excludes.write_text("", encoding="utf-8")
@@ -2743,6 +2769,7 @@ def _scratch_publication_repository(tmp_path: Path) -> Path:
         ["git", "-C", str(repository), "config", "core.excludesFile", str(no_excludes)],
         check=True,
         capture_output=True,
+        env=git_environment,
     )
     shutil.copyfile(
         ROOT / "scripts" / "verify_publication.py",
@@ -2754,13 +2781,18 @@ def _scratch_publication_repository(tmp_path: Path) -> Path:
 
 
 def _publication_scan(repository: Path) -> tuple[int, dict[str, object]]:
-    """Run the gate copy inside `repository` the way CI runs the real one, and parse its report."""
+    """Run the gate copy inside `repository` the way CI runs the real one, and parse its report.
+
+    Started without `GIT_*` variables, so the `git ls-files` the gate runs inherits none of them
+    either -- see `_scratch_publication_repository` for what they would otherwise do.
+    """
     result = subprocess.run(
         [sys.executable, "scripts/verify_publication.py", "--json"],
         cwd=repository,
         capture_output=True,
         text=True,
         check=False,
+        env=_without_git_variables(),
     )
     report: dict[str, object] = json.loads(result.stdout)
     return result.returncode, report
@@ -2793,7 +2825,12 @@ def test_publication_gate_survives_a_nested_checkout_and_says_it_skipped_it(
     """
     repository = _scratch_publication_repository(tmp_path)
     nested = repository / "publication-gate-probe"
-    subprocess.run(["git", "init", "-q", str(nested)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "init", "-q", str(nested)],
+        check=True,
+        capture_output=True,
+        env=_without_git_variables(),
+    )
     (nested / "decoy.parquet").write_bytes(b"a blocked suffix the outer scan must not see")
 
     returncode, report = _publication_scan(repository)
@@ -2965,18 +3002,33 @@ def _assert_refused_exactly(
     assert sorted((item["path"], item["reason"]) for item in blockers) == sorted(expected)
 
 
-def test_the_scratch_repository_ignores_a_git_template_and_user_excludes(
+def test_the_scratch_repository_ignores_git_templates_user_excludes_and_git_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A machine whose git setup would hide the probes still gets the same refusals (Minor-3).
+    """A machine whose git setup would hide the probes still gets the same refusals.
 
-    Both channels a scratch repository can inherit an ignore rule through are made hostile at
-    once, for every git this test and the gate start: `GIT_TEMPLATE_DIR` and `init.templateDir`
-    name a template whose `info/exclude` lists every database probe's suffix, and
-    `GIT_CONFIG_GLOBAL` names a config whose `core.excludesFile` lists them too.
-    `_scratch_publication_repository` has to neutralise both for the `runtime-databases`
-    refusals to come back exactly. Measured before `--template` was passed: the template's
-    `info/exclude` hid all six probes and the gate exited 0.
+    Three channels a scratch repository could inherit an ignore rule through are made hostile
+    at once, for every git this test and the gate start, each hiding every database probe:
+
+    * the user's own config, read through `HOME` (with `XDG_CONFIG_HOME` pointed beside it):
+      `init.templateDir` names a template whose `info/exclude` hides the probes, and
+      `core.excludesFile` a file that does;
+    * the same two again through `GIT_TEMPLATE_DIR` and `GIT_CONFIG_GLOBAL`;
+    * configuration injected through the environment -- `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_0`
+      and `GIT_CONFIG_VALUE_0`, how `git -c` reaches its children -- which outranks a
+      repository's own settings.
+
+    `_scratch_publication_repository` and `_publication_scan` close each with a different part:
+    `--template` names an empty template, the repository's own `core.excludesFile` names an
+    empty file, and every git they start, the gate's own `git ls-files` included, runs with no
+    `GIT_*` variable at all. Measured before `--template` was passed (the D13 review's
+    Minor-3): the template hid all six probes and the gate exited 0. Measured before the `GIT_*`
+    variables were removed (the re-review's Minor-B): the injected `core.excludesFile` did the
+    same.
+
+    Not made hostile: the system-wide config file, which this test cannot write without leaving
+    `tmp_path`. Its `init.templateDir` and `core.excludesFile` rank below `--template` and the
+    repository's own setting, the same two parts that close the user-level channel.
     """
     hiding = "".join(
         f"*{suffix}\n" for suffix in (".sqlite3", ".sqlite", ".db", ".duckdb", ".parquet", ".bak")
@@ -2984,16 +3036,24 @@ def test_the_scratch_repository_ignores_a_git_template_and_user_excludes(
     template = tmp_path / "hostile-template"
     (template / "info").mkdir(parents=True)
     (template / "info" / "exclude").write_text(hiding, encoding="utf-8")
-    user_excludes = tmp_path / "hostile-user-excludes"
-    user_excludes.write_text(hiding, encoding="utf-8")
-    user_config = tmp_path / "hostile-gitconfig"
-    user_config.write_text(
-        f"[core]\n\texcludesFile = {user_excludes.as_posix()}\n"
-        f"[init]\n\ttemplateDir = {template.as_posix()}\n",
-        encoding="utf-8",
+    hiding_file = tmp_path / "hostile-excludes"
+    hiding_file.write_text(hiding, encoding="utf-8")
+    hostile_config = (
+        f"[core]\n\texcludesFile = {hiding_file.as_posix()}\n"
+        f"[init]\n\ttemplateDir = {template.as_posix()}\n"
     )
+    home = tmp_path / "hostile-home"
+    home.mkdir()
+    (home / ".gitconfig").write_text(hostile_config, encoding="utf-8")
+    user_config = tmp_path / "hostile-gitconfig"
+    user_config.write_text(hostile_config, encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
     monkeypatch.setenv("GIT_TEMPLATE_DIR", str(template))
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(user_config))
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.excludesFile")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", str(hiding_file))
 
     repository = _scratch_publication_repository(tmp_path)
     expected = _write_refusal_probes(repository, "runtime-databases")
