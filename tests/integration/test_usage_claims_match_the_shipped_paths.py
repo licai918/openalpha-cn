@@ -1,6 +1,6 @@
-"""User-facing prose may not present model usage recording as something a shipped path does.
+"""User-facing prose may not present a model call, or model usage recording, as shipped.
 
-**The code fact this guard stands on**, measured at `2d197af`, re-measured at `ea88999`, and held
+**The code fact these guards stand on**, measured at `2d197af`, re-measured at `ea88999`, and held
 by the premise test below rather than by this paragraph. The usage ledger exists: `build_storage`
 constructs `SQLiteModelUsageStore` for every runtime directory, so every shipped path -- CLI, REST,
 SDK -- creates its `model_usage` table in `state.sqlite3`. Nothing shipped writes a row to it. The
@@ -15,32 +15,41 @@ model at all. The one model call under `src/` is `StructuredSignalAgent.analyze`
 pass in, as `OpenAlphaSDK(agents=...)` accepts. So "Token and estimated cost are recorded" is
 true of a component a deployer can wire, and false of the product as it ships.
 
-Two couplings:
+Three couplings, all standing on that one fact:
 
 1. **The premise.** `test_no_shipped_path_calls_a_model_or_records_usage` reads the syntax tree
    of every `.py` file under `src/` and `scripts/`, counts the places that could make a model
    call or usage recording reachable -- per module, enclosing scope and kind -- and holds the
    counts equal to `USAGE_SITES`, where each place carries the reason it neither calls a model
    nor records usage. The day a shipped path starts doing either in a way the scan reads, that
-   test fails and asks for the documents to be rewritten -- and for this guard to be retired or
-   inverted -- instead of this guard silently blocking claims that have become true. The ways
-   the scan cannot read are listed below; a change made one of those ways passes it.
+   test fails and asks for the documents to be rewritten -- and for the two prose guards below
+   to be retired or inverted -- instead of those guards silently blocking claims that have
+   become true. The ways the scan cannot read are listed below; a change made one of those ways
+   passes it.
 
-2. **The prose.** `README.md`, `README.en.md`, `docs/why-openalpha-cn.zh-CN.md` and
-   `docs/marketing/openalpha-cn-100-promotion-plans.zh-CN.md` may not present Token, usage or
-   cost recording, or billing, as something the product does unless the same clause says no
+2. **Usage recording in prose.** `README.md`, `README.en.md`, `docs/why-openalpha-cn.zh-CN.md`
+   and `docs/marketing/openalpha-cn-100-promotion-plans.zh-CN.md` may not present Token, usage
+   or cost recording, or billing, as something the product does unless the same clause says no
    shipped path does it. Section 057 of the marketing pack is the model of a true sentence:
    "模型调用的 Token 与估算成本另有账本，但要接入自带用量追踪的 Provider 才会写入，
    出厂路径不会自动生成账单。"
    `d4af27c` corrected that one sentence without a test; this module is the test.
 
-**How the guard in (2) reads a document.**
+3. **A model call in prose.** The same four files may not present what a model client does
+   once called -- classified retry, backoff, capability registration, schema validation of a
+   model's output, a hallucination to diagnose -- as something the product does, unless the
+   same clause says no shipped path calls a model. `README.md`'s model bullets are the model of
+   a true sentence: they say what happens once a model provider is wired in code, and that no
+   shipped path calls one.
+
+**How the guards in (2) and (3) read a document.**
 
 - *Blocks and clauses* come from `tests/prose_clauses.py`, the reader
   `test_attribution_claims_match_known_limitations.py` shares; its docstring states how a block
   is folded and where a clause ends. A heading, a hook and a table row are each read.
 - *Usage markers.* A clause names usage recording when any one of these holds:
-  - it holds one of `USAGE_TERMS`;
+  - it holds one of `USAGE_TERMS` -- 经济账 among them, since section 037 closed on 算经济账,
+    which does not contain 算账;
   - it matches `MODEL_COST` (模型, at most four characters with no punctuation between, then
     成本: 模型成本, 模型能力与成本);
   - it names a token -- "Token" in any case as an English word, plural included -- beside one of
@@ -52,24 +61,34 @@ Two couplings:
     (比较, 分析, 增加了多少, 多花, 记下, 记录, 追踪, 统计, 核算). This is the shape of section
     037's two per-configuration cost claims, which the first version of this guard missed;
   - it holds `ENGLISH_COST` ("cost", "costs", "spend") beside one of `ENGLISH_RECORDING`
-    (record, track, account, meter, ledger, persist, as word starts: "recorded" counts).
-- *Claims.* A clause that names usage recording is a claim unless it holds one of
-  `SHIPPED_PATH_CONDITIONS`, not directly negated (`prose_clauses.holds_unnegated_phrase`). The
-  condition exempts only the clause it sits in.
-- *`ALLOWLIST`* holds the true non-claims the markers catch -- a statement about the test suite,
-  a topic named as a channel suggestion -- each pinned to one clause by that clause's whole text
-  as the shared reader produces it (soft wraps folded, runs of whitespace collapsed), with a
-  short excerpt that only finds the clause, and the reason the clause is true. A clause is exempt
-  only while its text equals the pinned text, so any change to its words -- a claim appended, a
-  word swapped -- ends the exemption and the prose test fails on it until someone re-reads the
-  clause and re-pins it or rewrites it, which
-  `test_a_claim_written_into_an_allowlisted_clause_ends_its_exemption` measures. The test
-  `test_every_usage_allowlist_entry_exempts_exactly_one_flagged_clause` fails on an entry whose
-  excerpt finds no clause or several, whose clause no longer reads as pinned, or whose clause
-  the guard no longer flags. With the prose test that makes the allowlist the census: every
-  clause the guard flags in the four files is either rewritten or listed there.
+    (record, track, account, meter, ledger, persist, as word starts: "recorded" counts);
+  - it holds "usage" as an English word beside one of `ENGLISH_RECORDING`. "Usage" alone is
+    ordinary README English: a `## Usage` heading, a `usage: openalpha [-h]` line.
+- *Model-call markers.* A clause names a model call when it names a model (`MODEL_WORDS`: 模型,
+  or "LLM" or "model" as an English word) and one of `MODEL_CALL_BEHAVIOURS`: 401, 408, 429 or
+  5xx, 重试, 退避, 能力注册, 注册表, 幻觉, or "retry", "backoff", "registry", "schema".
+- *Claims.* A clause that names usage recording is a claim unless it holds `USAGE_CONDITION`
+  or `MODEL_CALL_CONDITION`; a clause that names a model call is a claim unless it holds
+  `MODEL_CALL_CONDITION`. A condition counts only where no negation directly precedes it
+  (`prose_clauses.holds_unnegated_match`), and only as a whole phrase -- 出厂路径, 不, then the
+  verb for what the path does not do -- so a clause that only begins 出厂路径不需要 states no
+  condition, which the first version of the usage guard accepted. A condition exempts only the
+  clause it sits in.
+- *Allowlists.* `ALLOWLIST` and `MODEL_CALL_ALLOWLIST` hold the true non-claims each guard's
+  markers catch -- a statement about the test suite, a topic named as a channel suggestion, a
+  list of questions, a general statement about multi-agent systems -- each pinned to one clause
+  by that clause's whole text as the shared reader produces it (soft wraps folded, runs of
+  whitespace collapsed), with a short excerpt that only finds the clause, and the reason the
+  clause is true. A clause is exempt only while its text equals the pinned text, so any change
+  to its words -- a claim appended, a word swapped -- ends the exemption and the guard's prose
+  test fails on it until someone re-reads the clause and re-pins it or rewrites it, which
+  `test_a_claim_written_into_an_allowlisted_clause_ends_its_exemption` measures for both
+  guards. `test_every_allowlist_entry_exempts_exactly_one_flagged_clause` fails on an entry
+  whose excerpt finds no clause or several, whose clause no longer reads as pinned, or whose
+  clause the guard no longer flags. With each prose test, that makes each allowlist a census:
+  every clause a guard flags in the four files is either rewritten or listed there.
 
-**What the prose guard cannot see.** `test_the_usage_guards_stated_blind_spots_are_real`
+**What the usage guard cannot see.** `test_the_usage_guards_stated_blind_spots_are_real`
 measures each of these.
 
 - A clause naming none of the markers is never a claim, however plainly it implies recording:
@@ -81,7 +100,23 @@ measures each of these.
 - The other direction: a credential token beside an accounting word is read as usage
   ("Token 持久保存在环境变量里。" is flagged), a transaction cost spelled other than 交易成本
   beside a bearer and a measuring verb is read as a model cost ("佣金成本随每个 Agent 的成交一起
-  记录。" is flagged), and a condition worded outside `SHIPPED_PATH_CONDITIONS` is read as a claim.
+  记录。" is flagged), and a condition worded outside `USAGE_CONDITION` and
+  `MODEL_CALL_CONDITION` is read as a claim.
+
+**What the model-call guard cannot see.**
+`test_the_model_call_guards_stated_blind_spots_are_real` measures each of these.
+
+- A claim whose model word sits in another clause. Section 097 named the models in one clause
+  ("让所有模型共享同一 A 股 EvidenceSnapshot、SignalFrame、风险和回放合同") and put its registry
+  and retry claim in the next ("能力注册表描述结构化输出支持，408、429、5xx 分类重试，401 立即
+  失败"), which names no model; it was rewritten by hand.
+- A model presupposed without a behaviour word passes: "用户无法判断是模型限流还是任务卡死。", and
+  so do governance named without one ("模型治理也能通过公开接口管理。") and structured output named
+  without the word schema ("模型输出统一为结构化结果。").
+- A claim split across two blocks is read as two halves, each innocent.
+- The other direction: a retry of something else beside an unrelated model word is read as a
+  model call ("批量队列支持失败重试，RunManifest 记录模型版本。" is flagged), and a condition
+  worded outside `MODEL_CALL_CONDITION` is read as a claim.
 
 **What the premise test reads.** Seven names, `SHIPPED_PATH_NAMES` -- `OpenAICompatibleProvider`,
 `ModelUsageRecord`, `StructuredSignalAgent`, `ModelRegistry`, `generate_json`, the provider's
@@ -129,13 +164,15 @@ from __future__ import annotations
 
 import ast
 import re
+import sys
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final
 
-from prose_clauses import clauses, holds_unnegated_phrase, marker_pattern
+import pytest
+from prose_clauses import clauses, holds_unnegated_match, marker_pattern
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 
@@ -463,7 +500,7 @@ def _premise_problems(found: Counter[UsageSite]) -> list[str]:
 
 
 def test_no_shipped_path_calls_a_model_or_records_usage() -> None:
-    """The premise of the prose guard below, read off the code rather than remembered.
+    """The premise of both prose guards below, read off the code rather than remembered.
 
     Equal counts, not a subset: a site that disappears fails too, so a scan that stopped finding
     anything cannot pass as a clean one, and a second occurrence in a counted scope fails as a
@@ -473,11 +510,11 @@ def test_no_shipped_path_calls_a_model_or_records_usage() -> None:
     assert not problems, (
         "\n".join(problems) + "\nIf a shipped path now calls a model, builds "
         "OpenAICompatibleProvider or StructuredSignalAgent, hands a provider a usage store or "
-        "writes model_usage rows, the prose guard's premise is false: rewrite the model and "
+        "writes model_usage rows, the prose guards' premise is false: rewrite the model and "
         "usage sentences in the four guarded documents to say what the shipped path does now, "
-        "and retire or invert test_user_facing_docs_do_not_present_usage_recording_as_shipped. "
-        "If the place calls and records nothing, record it in USAGE_SITES with its count and "
-        "the reason."
+        "and retire or invert test_user_facing_docs_do_not_present_a_model_call_as_shipped and "
+        "test_user_facing_docs_do_not_present_usage_recording_as_shipped. If the place calls "
+        "and records nothing, record it in USAGE_SITES with its count and the reason."
     )
 
 
@@ -758,7 +795,7 @@ def test_the_premise_goes_red_on_each_injection_the_review_measured() -> None:
     assert not passed, f"the premise stayed green on: {passed}"
 
 
-# --- Part 2: user-facing prose may not present usage recording as shipped --------------------
+# --- Part 2: user-facing prose may not present usage recording or a model call as shipped -----
 
 USAGE_TERMS: Final[tuple[str, ...]] = (
     "用量",
@@ -769,10 +806,13 @@ USAGE_TERMS: Final[tuple[str, ...]] = (
     "账单",
     "计费",
     "算账",
-    "usage",
+    "经济账",
     "billing",
 )
-"""Words that name usage recording on their own, matched by `prose_clauses.marker_pattern`."""
+"""Words that name usage recording on their own, matched by `prose_clauses.marker_pattern`.
+
+English "usage" is not among them: it names usage recording only beside a recording word (see
+`_names_usage_recording`), so a `## Usage` heading or a `usage: openalpha [-h]` line is none."""
 
 USAGE_TERM_PATTERNS: Final[tuple[re.Pattern[str], ...]] = tuple(
     marker_pattern(term) for term in USAGE_TERMS
@@ -808,17 +848,31 @@ ENGLISH_COST: Final[re.Pattern[str]] = re.compile(
     r"(?<![A-Za-z])(?:costs?|spend(?:s|ing)?)(?![A-Za-z])", re.IGNORECASE
 )
 
+ENGLISH_USAGE: Final[re.Pattern[str]] = marker_pattern("usage")
+
 ENGLISH_RECORDING: Final[re.Pattern[str]] = re.compile(
     r"(?<![A-Za-z])(?:record|track|account|meter|ledger|persist)", re.IGNORECASE
 )
-"""English words that present a cost as kept, matched as word starts."""
+"""English words that present a cost or a usage as kept, matched as word starts."""
 
-SHIPPED_PATH_CONDITIONS: Final[tuple[str, ...]] = ("出厂路径不", "出厂路径都不", "no shipped path")
-"""The wordings these documents use to say no shipped path records usage.
+USAGE_CONDITION: Final[re.Pattern[str]] = re.compile(
+    r"出厂路径(?:都)?不(?:会)?(?:替你)?(?:自动)?(?:记账|生成账单|写入|记录|入账)"
+    r"|no shipped path (?:writes|records)",
+    re.IGNORECASE,
+)
+"""A statement that no shipped path records usage: 出厂路径, 不, then a recording verb (记账,
+生成账单, 写入, 记录, 入账), with 都, 会, 替你 or 自动 allowed between; or "no shipped path writes"
+or "... records". A whole phrase, not a prefix, so 出厂路径不需要额外配置 states nothing. The
+wordings these documents used when this was written, not a general detector."""
 
-A fixed list measured against the rewritten sentences, not a general detector: a caveat worded
-any other way is read as a claim.
-"""
+MODEL_CALL_CONDITION: Final[re.Pattern[str]] = re.compile(
+    r"出厂路径(?:都)?不(?:会)?(?:调用|发起)(?:任何)?(?:大)?模型"
+    r"|no shipped path (?:calls|makes|sends) (?:a |any )?(?:model|llm)",
+    re.IGNORECASE,
+)
+"""A statement that no shipped path calls a model: 出厂路径, 不, 调用 or 发起, then 模型; or
+"no shipped path calls a model" and its near variants. It exempts a usage marker too, since a
+path that calls no model records no usage."""
 
 
 def _names_usage_recording(clause: str) -> bool:
@@ -834,35 +888,68 @@ def _names_usage_recording(clause: str) -> bool:
         or (
             ENGLISH_COST.search(clause) is not None and ENGLISH_RECORDING.search(clause) is not None
         )
+        or (
+            ENGLISH_USAGE.search(clause) is not None
+            and ENGLISH_RECORDING.search(clause) is not None
+        )
     )
 
 
 def _is_usage_claim(clause: str) -> bool:
     """Whether one clause presents usage recording without saying no shipped path does it."""
-    return _names_usage_recording(clause) and not holds_unnegated_phrase(
-        clause, SHIPPED_PATH_CONDITIONS
+    return _names_usage_recording(clause) and not (
+        holds_unnegated_match(clause, USAGE_CONDITION)
+        or holds_unnegated_match(clause, MODEL_CALL_CONDITION)
     )
+
+
+MODEL_WORDS: Final[re.Pattern[str]] = re.compile(
+    r"模型|(?<![A-Za-z])(?:llm|model)s?(?![A-Za-z])", re.IGNORECASE
+)
+"""模型 (大模型 included) as a substring; "LLM" and "model" as English words, plural included,
+so "AlphaModel" and "LLMOps" name no model."""
+
+MODEL_CALL_BEHAVIOURS: Final[re.Pattern[str]] = re.compile(
+    r"(?<![0-9])(?:401|408|429|5xx)(?![0-9])|重试|退避|能力注册|注册表|幻觉"
+    r"|(?<![A-Za-z])(?:retr(?:y|ies|ied)|backoff|registry|schema)",
+    re.IGNORECASE,
+)
+"""What a model client does once it is called: the HTTP statuses it classifies, retry and
+backoff, the capability registry, schema validation, and a hallucination to diagnose."""
+
+
+def _names_model_call(clause: str) -> bool:
+    return (
+        MODEL_WORDS.search(clause) is not None and MODEL_CALL_BEHAVIOURS.search(clause) is not None
+    )
+
+
+def _is_model_call_claim(clause: str) -> bool:
+    """Whether one clause presents model-call behaviour without saying no shipped path calls."""
+    return _names_model_call(clause) and not holds_unnegated_match(clause, MODEL_CALL_CONDITION)
 
 
 @dataclass(frozen=True, slots=True)
 class FlaggedClause:
-    """A clause the guard reads as a usage claim, with the 1-based line it starts on."""
+    """A clause a guard reads as a claim, with the 1-based line it starts on."""
 
     line: int
     text: str
 
 
-def _flagged_clauses(document: str) -> list[FlaggedClause]:
+def _flagged_clauses(
+    document: str, is_claim: Callable[[str], bool] = _is_usage_claim
+) -> list[FlaggedClause]:
     return [
         FlaggedClause(clause.line, clause.text)
         for clause in clauses(document)
-        if _is_usage_claim(clause.text)
+        if is_claim(clause.text)
     ]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AllowedClause:
-    """A clause the guard flags that is true as written, pinned by its whole text, and why.
+    """A clause a guard flags that is true as written, pinned by its whole text, and why.
 
     `clause` is the clause exactly as `prose_clauses.clauses` reads it -- soft wraps folded,
     runs of whitespace collapsed -- so re-wrapping the paragraph keeps the pin and changing any
@@ -898,58 +985,176 @@ ALLOWLIST: Final[tuple[AllowedClause, ...]] = (
         ),
     ),
 )
-"""The guarded files' true non-claims. An entry is for a clause that is true as written, never
+"""The usage guard's true non-claims. An entry is for a clause that is true as written, never
 for a claim waiting to be rewritten.
 
-After the D7 rewrite the guard flagged exactly these two clauses in the four files.
+After the D7 rewrite the usage guard flagged exactly these two clauses in the four files.
 """
+
+MODEL_CALL_ALLOWLIST: Final[tuple[AllowedClause, ...]] = (
+    AllowedClause(
+        path=MARKETING,
+        excerpt="哪个模型、哪条提示词、哪一步重试",
+        clause=(
+            "**推广正文：** TradingAgents 和 AI Hedge Fund 展示了多智能体投研的想象力，"
+            "但多数用户真正踩坑的地方，不是角色不够多，而是结果出来后无法回答：用了哪批数据、"
+            "哪个版本、哪个模型、哪条提示词、哪一步重试、为什么最终通过风险门。"
+        ),
+        reason=(
+            "Section 007 lists the questions users cannot answer about a result. The model and "
+            "the retry are two separate items of that list, and neither is presented as a model "
+            "call this product makes; the section's next sentence names RunManifest, which "
+            "does record model and prompt versions (model_versions, prompt_versions)."
+        ),
+    ),
+    AllowedClause(
+        path=MARKETING,
+        excerpt="数据为空、模型超时、Schema 解析失败",
+        clause=(
+            "**推广正文：** 多智能体系统链路越长，排错越难：数据为空、模型超时、Schema 解析失败、"
+            "风险门阻断、成交规则拒单，都可能表现成"
+            "\N{LEFT DOUBLE QUOTATION MARK}没有结果\N{RIGHT DOUBLE QUOTATION MARK}。"
+        ),
+        reason=(
+            "Section 029 opens on a general statement about multi-agent systems: a model "
+            "timeout is one of five failures that can look like no result. The section's claim "
+            "about this product's model layer is a clause of its own, which states that no "
+            "shipped path calls a model."
+        ),
+    ),
+)
+"""The model-call guard's true non-claims, pinned the same way as `ALLOWLIST`.
+
+When this guard was written it flagged 29 clauses in the four files: these two, and 27 claims,
+which were rewritten -- two of them only matched 结构化输出, which named the agents' SignalFrame
+output and is not among `MODEL_CALL_BEHAVIOURS`, so they are no longer flagged at all.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class ProseGuard:
+    """One prose guard over `GUARDED_FILES`: what it reads as a claim, and what it pins."""
+
+    claim: str
+    is_claim: Callable[[str], bool]
+    allowlist: tuple[AllowedClause, ...]
+    remedy: str
+
+
+USAGE_GUARD: Final[ProseGuard] = ProseGuard(
+    claim="usage recording",
+    is_claim=_is_usage_claim,
+    allowlist=ALLOWLIST,
+    remedy=(
+        "Say in the same clause that no shipped path records it -- USAGE_CONDITION, as section "
+        "057 does, or MODEL_CALL_CONDITION -- or reword the claim."
+    ),
+)
+
+MODEL_CALL_GUARD: Final[ProseGuard] = ProseGuard(
+    claim="a model call",
+    is_claim=_is_model_call_claim,
+    allowlist=MODEL_CALL_ALLOWLIST,
+    remedy=(
+        "Say in the same clause that no shipped path calls a model -- MODEL_CALL_CONDITION, as "
+        "README.md's model bullets do -- or reword the claim."
+    ),
+)
+
+GUARDS: Final[dict[str, ProseGuard]] = {"usage": USAGE_GUARD, "model-call": MODEL_CALL_GUARD}
 
 
 def _guarded_documents() -> dict[Path, str]:
     return {path: path.read_text(encoding="utf-8") for path in GUARDED_FILES}
 
 
-def _usage_violations(documents: dict[Path, str]) -> list[str]:
-    """One message per flagged clause of `documents` that no `ALLOWLIST` entry pins."""
+def _violations(documents: dict[Path, str], guard: ProseGuard) -> list[str]:
+    """One message per clause of `documents` that `guard` flags and no entry of it pins."""
     violations: list[str] = []
     for path, document in documents.items():
-        pinned = {entry.clause for entry in ALLOWLIST if entry.path == path}
-        for flagged in _flagged_clauses(document):
+        pinned = {entry.clause for entry in guard.allowlist if entry.path == path}
+        for flagged in _flagged_clauses(document, guard.is_claim):
             if flagged.text not in pinned:
                 violations.append(
-                    f"{path.relative_to(ROOT)}:{flagged.line} presents usage recording as "
+                    f"{path.relative_to(ROOT)}:{flagged.line} presents {guard.claim} as "
                     f"shipped: {flagged.text!r}"
                 )
     return violations
 
 
 def test_user_facing_docs_do_not_present_usage_recording_as_shipped() -> None:
-    """Every clause the guard flags in the four files is a violation unless `ALLOWLIST` pins it.
+    """Every clause the usage guard flags in the four files is a violation unless `ALLOWLIST`
+    pins it.
 
     A flagged clause is exempt only when an entry for its file pins exactly its text. Written
     against the 23 usage lines the D7 brief counted in the marketing pack, the extra ones its
     review found, and `README.md`'s and `README.en.md`'s model-governance bullets -- each
     presented Token, attempt or cost recording as a shipped capability.
     """
-    violations = _usage_violations(_guarded_documents())
+    violations = _violations(_guarded_documents(), USAGE_GUARD)
     assert not violations, (
-        "\n".join(violations) + "\nSay in the same clause that no shipped path records it -- "
-        "one of SHIPPED_PATH_CONDITIONS, as section 057 does -- or reword the claim. Pin an "
-        "ALLOWLIST entry only for a clause that is true as written."
+        "\n".join(violations) + f"\n{USAGE_GUARD.remedy} Pin an ALLOWLIST entry only for a "
+        "clause that is true as written."
     )
 
 
+def test_user_facing_docs_do_not_present_a_model_call_as_shipped() -> None:
+    """Every clause the model-call guard flags is a violation unless `MODEL_CALL_ALLOWLIST` pins
+    it.
+
+    Written against 27 clauses that presented classified retry, capability registration, schema
+    validation or a model to diagnose as what the product does: `README.md`'s model rows and
+    bullets and its fourth advantage, `README.en.md`'s two model bullets, `why-openalpha`'s
+    研究运行 row, and 20 clauses of the marketing pack, section 097's hook among them. No shipped
+    path calls a model -- the premise test above holds that -- so each is true only of a
+    provider a user wires in code.
+    """
+    violations = _violations(_guarded_documents(), MODEL_CALL_GUARD)
+    assert not violations, (
+        "\n".join(violations) + f"\n{MODEL_CALL_GUARD.remedy} Pin a MODEL_CALL_ALLOWLIST entry "
+        "only for a clause that is true as written."
+    )
+
+
+@pytest.mark.parametrize("name", GUARDS)
+def test_each_prose_test_fails_on_a_claim_it_exists_to_catch(
+    name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A prose test that stopped reading its guard's verdicts would still pass on today's
+    documents, which hold no claim. This hands each prose test the real documents plus one claim
+    of its kind -- `README.md`'s model row as it stood before `D7` or before `D12` -- appended to
+    `README.md`, and requires the prose test to fail."""
+    claim, prose_test = {
+        "usage": (
+            PRE_D7_CLAIMS["README.md:17"],
+            test_user_facing_docs_do_not_present_usage_recording_as_shipped,
+        ),
+        "model-call": (
+            PRE_D12_MODEL_CALL_CLAIMS["README.md:17"],
+            test_user_facing_docs_do_not_present_a_model_call_as_shipped,
+        ),
+    }[name]
+    documents = _guarded_documents()
+    documents[README] += f"\n{claim}"
+    monkeypatch.setattr(sys.modules[__name__], "_guarded_documents", lambda: documents)
+    with pytest.raises(AssertionError):
+        prose_test()
+
+
 def _allowlist_problems(
-    documents: dict[Path, str], allowlist: Iterable[AllowedClause] = ALLOWLIST
+    documents: dict[Path, str],
+    guard: ProseGuard,
+    allowlist: Iterable[AllowedClause] | None = None,
 ) -> list[str]:
-    """Why each `ALLOWLIST` entry no longer describes exactly one flagged clause of `documents`.
+    """Why each entry of `guard`'s allowlist no longer describes one flagged clause.
 
     The excerpt must find exactly one clause of the entry's file, that clause must still read
-    exactly as pinned, and the guard must still flag it.
+    exactly as pinned, and the guard must still flag it. `allowlist` replaces the guard's own
+    entries, for the self-test below.
     """
     problems: list[str] = []
-    for entry in allowlist:
-        label = f"ALLOWLIST entry {entry.excerpt!r} ({entry.path.relative_to(ROOT)})"
+    for entry in guard.allowlist if allowlist is None else allowlist:
+        label = f"allowlist entry {entry.excerpt!r} ({entry.path.relative_to(ROOT)})"
         if entry.path not in documents:
             problems.append(f"{label} is for a file the guard does not read")
             continue
@@ -970,7 +1175,7 @@ def _allowlist_problems(
                 "entry"
             )
             continue
-        if not _is_usage_claim(found.text):
+        if not guard.is_claim(found.text):
             problems.append(
                 f"{label} exempts the clause at line {found.line}, which the guard no longer "
                 "flags; remove the entry"
@@ -978,13 +1183,14 @@ def _allowlist_problems(
     return problems
 
 
-def test_every_usage_allowlist_entry_exempts_exactly_one_flagged_clause() -> None:
-    """An `ALLOWLIST` entry is a statement about one clause; this holds it to that clause.
+@pytest.mark.parametrize("name", GUARDS)
+def test_every_allowlist_entry_exempts_exactly_one_flagged_clause(name: str) -> None:
+    """An allowlist entry is a statement about one clause; this holds it to that clause.
 
     A pinned clause that was reworded, fixed, deleted or copied fails here; one that was
-    reworded fails the prose test as well, because its new text is pinned by no entry.
+    reworded fails the guard's prose test as well, because its new text is pinned by no entry.
     """
-    problems = _allowlist_problems(_guarded_documents())
+    problems = _allowlist_problems(_guarded_documents(), GUARDS[name])
     assert not problems, "\n".join(problems)
 
 
@@ -1011,56 +1217,68 @@ def test_the_allowlist_check_reports_each_way_an_entry_can_go_stale() -> None:
             {MARKETING: f"{unflagged}\n"},
         ),
     }
-    assert not _allowlist_problems(documents, [entry]), "a current entry was reported"
+    assert not _allowlist_problems(documents, USAGE_GUARD, [entry]), "a current entry was reported"
     unreported = [
-        label for label, (bad, docs) in stale.items() if not _allowlist_problems(docs, [bad])
+        label
+        for label, (bad, docs) in stale.items()
+        if not _allowlist_problems(docs, USAGE_GUARD, [bad])
     ]
     assert not unreported, f"the allowlist check did not report: {unreported}"
 
 
-ALLOWLIST_INSERTIONS: Final[dict[str, str]] = {
-    "zh": "，每次运行的 Token 与估算成本都会自动入账",
-    "en": ", and every run's token usage and cost are recorded",
+ALLOWLIST_INSERTIONS: Final[dict[str, dict[str, str]]] = {
+    "usage": {
+        "zh": "，每次运行的 Token 与估算成本都会自动入账",
+        "en": ", and every run's token usage and cost are recorded",
+    },
+    "model-call": {
+        "zh": "，模型调用按 408、429 与 5xx 分类重试",
+        "en": ", and every model call is retried on 408, 429 and 5xx",
+    },
 }
-"""A usage claim to write into a pinned clause, straight after its excerpt, by the clause's
-language. Neither holds a clause end, so the claim lands inside the pinned clause."""
+"""A claim of each guard's kind to write into a pinned clause, straight after its excerpt, by
+the clause's language. None holds a clause end, so the claim lands inside the pinned clause."""
 
 
-def test_a_claim_written_into_an_allowlisted_clause_ends_its_exemption() -> None:
-    """The review of `D7` wrote a claim into each pinned clause and both tests stayed green.
+@pytest.mark.parametrize("name", GUARDS)
+def test_a_claim_written_into_an_allowlisted_clause_ends_its_exemption(name: str) -> None:
+    """The review of `D7` wrote a claim into each pinned usage clause and both tests stayed green.
 
-    For each entry, the claim in `ALLOWLIST_INSERTIONS` is written into the real document right
-    after the entry's excerpt; the prose test and the allowlist test must then both fail. While
-    the exemption was granted by excerpt, both passed.
+    For each entry, a claim from `ALLOWLIST_INSERTIONS` is written into the real document right
+    after the entry's excerpt; the guard's prose test and allowlist test must then both fail.
+    While the exemption was granted by excerpt, both passed.
     """
+    guard = GUARDS[name]
     documents = _guarded_documents()
     still_exempt: list[str] = []
-    for entry in ALLOWLIST:
-        insertion = ALLOWLIST_INSERTIONS["en" if entry.clause.isascii() else "zh"]
+    for entry in guard.allowlist:
+        insertion = ALLOWLIST_INSERTIONS[name]["en" if entry.clause.isascii() else "zh"]
         edited = documents[entry.path].replace(entry.excerpt, entry.excerpt + insertion, 1)
         assert edited != documents[entry.path], f"{entry.excerpt!r} is not in its document"
         changed = {**documents, entry.path: edited}
-        if not _usage_violations(changed) or not _allowlist_problems(changed):
+        if not _violations(changed, guard) or not _allowlist_problems(changed, guard):
             still_exempt.append(entry.excerpt)
     assert not still_exempt, (
         f"a claim written into these pinned clauses went unreported: {still_exempt}"
     )
 
 
-# --- The classifier's own tests ---------------------------------------------------------------
+# --- The classifiers' own tests ---------------------------------------------------------------
 
 
-def _flagged_texts(document: str) -> list[str]:
-    return [flagged.text for flagged in _flagged_clauses(document)]
+def _flagged_texts(document: str, is_claim: Callable[[str], bool] = _is_usage_claim) -> list[str]:
+    return [flagged.text for flagged in _flagged_clauses(document, is_claim)]
 
 
 def test_the_usage_guard_tells_a_claim_from_a_stated_condition() -> None:
-    """Minimal clauses in the shapes the guard exists to tell apart, each judged alone.
+    """Minimal clauses in the shapes the usage guard exists to tell apart, each judged alone.
 
-    The four claims after the negated condition are the review of `D7`'s false negatives. The
-    four non-claims after the credential are the lines that review required the cost rule to
-    leave alone, and the two after them hold each half of the cost rules to its other half: a
-    cost beside a measuring verb with no bearer, and an English cost with no recording word.
+    The four claims after the negated condition are the review of `D7`'s false negatives, and
+    the three after them its Minor finding M-1: a prefix of a condition that states no
+    condition. Among the non-claims, the four after the credential are the lines that review
+    required the cost rule to leave alone, the two after them hold each half of the cost rules
+    to its other half, and the last three are its Minor finding M-2 and the model-call
+    condition that exempts a usage marker.
     """
     claims = (
         "Token 与估算成本持续入账。",
@@ -1075,6 +1293,9 @@ def test_the_usage_guard_tells_a_claim_from_a_stated_condition() -> None:
         "每次调用的 Token 消耗可追踪。",
         "Model costs are recorded for every run.",
         "classified model retry plus persistent configured-cost accounting;",
+        "Token 与估算成本持续入账，出厂路径不需要额外配置。",
+        "出厂路径不依赖大模型密钥，接入模型后 Token 与估算成本持续入账。",
+        "No shipped path needs an API key, and every call's token usage is recorded.",
     )
     non_claims = (
         "模型调用的 Token 与估算成本另有账本，但要接入自带用量追踪的 Provider 才会写入，"
@@ -1095,9 +1316,51 @@ def test_the_usage_guard_tells_a_claim_from_a_stated_condition() -> None:
         "佣金、过户费和印花税计入交易成本。",
         "研究结果由调用方显式送入委员会、筛选、报告、观察池或组合核算。",
         "对提示词工程、模型路由、成本优化和 Agent 评测都很有价值。",
+        "## Usage",
+        "usage: openalpha [-h] [--json]",
+        "Token 与估算成本另有账本，出厂路径不调用模型。",
     )
     missed = [claim for claim in claims if not _is_usage_claim(claim)]
     wrongly = [text for text in non_claims if _is_usage_claim(text)]
+    assert not missed and not wrongly, f"read as no claim: {missed}; read as a claim: {wrongly}"
+
+
+def test_the_model_call_guard_tells_a_claim_from_a_stated_condition() -> None:
+    """Minimal clauses in the shapes the model-call guard exists to tell apart, each alone.
+
+    The four claims after the English ones each name a single behaviour -- a status code, 退避,
+    能力注册, 注册表 -- so dropping any one of those markers shows here. The last three claims
+    carry a condition that does not count: negated, a prefix that states no condition, and an
+    English sentence that says something else about the shipped path.
+    """
+    claims = (
+        "模型调用按 408、429、5xx 分类重试。",
+        "模型侧对 429 等错误进行分类退避。",
+        "Classified model retries on 408, 429 and 5xx.",
+        "The LLM's output gets schema validation and bounded retries.",
+        "模型请求遇到 429 时自动等待。",
+        "模型调用失败时指数退避。",
+        "模型侧还有能力注册。",
+        "模型注册表区分能力。",
+        "模型能力注册表描述结构化输出支持。",
+        "你可以判断失败来自模型幻觉。",
+        "并非出厂路径不调用模型，模型调用按 429 退避。",
+        "出厂路径不依赖模型密钥，模型调用按 429 退避。",
+        "No shipped path needs a model key, and model calls retry on 429.",
+    )
+    non_claims = (
+        "在代码中接入模型 Provider 后，对 408、429、5xx 分类重试，出厂路径不调用模型。",
+        "a model provider wired in through the SDK gets bounded retries: "
+        "no shipped path calls a model.",
+        "Tushare 请求失败会有界重试，频率超限时等待配额窗口。",
+        "SQLite 批量队列支持并发、进度、取消、重试和重启恢复。",
+        "RunManifest 记录代码、配置、Provider、模型、Prompt、随机种子和环境。",
+        "对提示词工程、模型路由、成本优化和 Agent 评测都很有价值。",
+        "AlphaModel 的预测批次按 schema 校验。",
+        "OpenAlpha CN 保存每个 Agent 的结构化输出，因子、智能体与模型份额结构性不产生。",
+    )
+    missed = [claim for claim in claims if not _is_model_call_claim(claim)]
+    wrongly = [text for text in non_claims if _is_model_call_claim(text)]
     assert not missed and not wrongly, f"read as no claim: {missed}; read as a claim: {wrongly}"
 
 
@@ -1128,6 +1391,9 @@ PRE_D7_CLAIMS: Final[dict[str, str]] = {
         "最终，模型表现不再只有\N{LEFT DOUBLE QUOTATION MARK}感觉更聪明"
         "\N{RIGHT DOUBLE QUOTATION MARK}，还可以与成本、稳定性和结果增量一起分析。\n"
     ),
+    "marketing:306, the closing promise": (
+        "想看多智能体如何真正算经济账，现在就下载 OpenAlpha CN。\n"
+    ),
     "marketing:322": (
         "模型调用的 Token、尝试次数和估算成本同时入账，事件研究与多日组合报告再评价结果。\n"
     ),
@@ -1139,14 +1405,85 @@ PRE_D7_CLAIMS: Final[dict[str, str]] = {
     "marketing:822": "批量、恢复、模型成本、筛选、观察池和报告中心又让系统可以长期使用。\n",
 }
 """Usage claims as they stood at `2d197af`, verbatim: whole lines for the READMEs and the hook,
-and for the marketing bodies the clause (or two) the claim sits in. The two section 037 cost
-claims were missed by this guard's first version, which the review of `D7` measured."""
+and for the marketing bodies the clause (or two) the claim sits in. The first version of this
+guard missed the three from section 037, which the review of `D7` measured; the closing promise
+also stood unchanged after `D7`, until `D12`."""
 
 
 def test_the_usage_claims_this_guard_was_written_for_are_flagged() -> None:
     """The guard's retroactive power, held: every pre-D7 claim must still be flagged."""
     missed = [label for label, text in PRE_D7_CLAIMS.items() if not _flagged_clauses(text)]
     assert not missed, f"the guard no longer flags a pre-D7 usage claim: {missed}"
+
+
+PRE_D12_MODEL_CALL_CLAIMS: Final[dict[str, str]] = {
+    "README.md:17": (
+        "| 模型治理 | 模型能力注册、408/429/5xx 分类重试\N{FULLWIDTH SEMICOLON}"
+        "Token/尝试次数/估算成本账本要接入自带用量追踪的 Provider 才会写入，"
+        "出厂路径不会自动记账 |\n"
+    ),
+    "README.md:36": (
+        "- **模型可插拔**：无 LLM 时可确定性运行\N{FULLWIDTH SEMICOLON}"
+        "接入模型后强制结构化输出、Schema 校验和有界重试。\n"
+    ),
+    "README.md:37": (
+        "- **模型治理与核算**：按模型能力选择兼容端点，对 408/429/5xx 分类重试"
+        "\N{FULLWIDTH SEMICOLON}Token、尝试次数与按用户单价估算的成本有持久账本，"
+        "但要接入自带用量追踪的 Provider 才会写入，出厂路径不会自动记账。\n"
+    ),
+    "README.md:1105": (
+        "4. 无 LLM 也能确定性运行，接入 LLM 时强制结构化输出和有界重试\N{FULLWIDTH SEMICOLON}\n"
+    ),
+    "README.en.md:42": (
+        "- deterministic operation without an LLM, plus schema validation and bounded retries "
+        "when a model is used;\n"
+    ),
+    "README.en.md:45": (
+        "- classified model retry, plus a token and configured-cost usage ledger that no "
+        "shipped path writes to: only a provider built with a usage store records into it;\n"
+    ),
+    "why-openalpha:24": (
+        "| 研究运行 | 无 LLM 也可确定性运行\N{FULLWIDTH SEMICOLON}模型输出强制 Schema | "
+        "降低模型漂移、解析失败和演示式功能 |\n"
+    ),
+    "marketing:68": (
+        "模型注册表区分能力，对 408、429、5xx 分类重试，对认证错误立即失败\N{FULLWIDTH SEMICOLON}\n"
+    ),
+    "marketing:118": "模型侧也区分 408、429、5xx 和 401，决定重试还是立即终止。\n",
+    "marketing:290": (
+        "模型能力注册表描述是否支持结构化输出等能力，408、429、5xx 按策略重试，"
+        "401 立即失败\N{FULLWIDTH SEMICOLON}\n"
+    ),
+    "marketing:298": (
+        "OpenAlpha CN 将模型错误分类：408、429 与 5xx 执行有界指数退避，认证失败立即终止，"
+        "避免无意义重试\N{FULLWIDTH SEMICOLON}\n"
+    ),
+    "marketing:494": (
+        "你可以判断失败来自数据延迟、模型幻觉、风险门过严、A 股不可成交，"
+        "还是策略本身没有超额，而不是简单删除一次不好看的回测。\n"
+    ),
+    "marketing:504": (
+        "模型侧还有能力注册与分类退避，防止批量运行变成不可控调用风暴，"
+        "Token 与成本账本则要接入自带用量追踪的 Provider 才会写入，出厂路径不会自动记账。\n"
+    ),
+    "marketing:528": "链邻数据接入、模型重试、风险决定和组合账本都有稳定 ID 关联。\n",
+    "marketing:634": "模型可以通过 OpenAI-compatible BYOK 接入，Schema 与重试由治理层处理。\n",
+    "marketing:796": (
+        "**开场钩子：** 模型工程师别错过，这里不只比答案，还能在同一实验台上比能力、重试和增量。\n"
+    ),
+}
+"""Model-call claims as they stood at `ea88999`, verbatim: whole lines for the READMEs, the
+table rows and the hook, and for the marketing bodies the clause the claim sits in."""
+
+
+def test_the_model_call_claims_this_guard_was_written_for_are_flagged() -> None:
+    """The model-call guard's retroactive power, held: every pre-D12 claim must be flagged."""
+    missed = [
+        label
+        for label, text in PRE_D12_MODEL_CALL_CLAIMS.items()
+        if not _flagged_clauses(text, _is_model_call_claim)
+    ]
+    assert not missed, f"the guard no longer flags a pre-D12 model-call claim: {missed}"
 
 
 WRAPPED_CLAIMS: Final[dict[str, str]] = {
@@ -1195,7 +1532,7 @@ def test_the_usage_guards_stated_blind_spots_are_real() -> None:
     flagged = {
         "a credential token beside an accounting word": "Token 持久保存在环境变量里。",
         "a transaction cost not spelled 交易成本": "佣金成本随每个 Agent 的成交一起记录。",
-        "a condition worded outside SHIPPED_PATH_CONDITIONS": (
+        "a condition worded outside USAGE_CONDITION and MODEL_CALL_CONDITION": (
             "Token 与估算成本持续入账，但默认不开启。"
         ),
     }
@@ -1203,6 +1540,47 @@ def test_the_usage_guards_stated_blind_spots_are_real() -> None:
         label: _flagged_texts(text) for label, text in unflagged.items() if _flagged_texts(text)
     }
     opened = [label for label, text in flagged.items() if not _flagged_texts(text)]
+    assert not closed and not opened, (
+        f"a stated blind spot is now flagged: {closed}; a stated misreading no longer happens: "
+        f"{opened} -- update the docstring with it"
+    )
+
+
+def test_the_model_call_guards_stated_blind_spots_are_real() -> None:
+    """Each limit the module docstring states for the model-call guard, measured.
+
+    The first `unflagged` row is section 097's body as it stood at `ea88999`: its registry and
+    retry claim sat one clause after its model word, and was rewritten by hand.
+    """
+    unflagged = {
+        "a claim whose model word is in the clause before": (
+            "OpenAlpha CN 让所有模型共享同一 A 股 EvidenceSnapshot、SignalFrame、风险和回放合同"
+            "\N{FULLWIDTH SEMICOLON}能力注册表描述结构化输出支持，408、429、5xx 分类重试，"
+            "401 立即失败\N{FULLWIDTH SEMICOLON}"
+        ),
+        "a model failure presupposed without a behaviour word": (
+            "用户无法判断是模型限流还是任务卡死。"
+        ),
+        "structured output without the word schema": "模型输出统一为结构化结果。",
+        "governance named without a behaviour": "模型治理也能通过公开接口管理。",
+        "a claim split across a blank line": "模型调用\n\n按 429 分类退避。\n",
+    }
+    flagged = {
+        "a batch retry beside an unrelated model word": (
+            "批量队列支持失败重试，RunManifest 记录模型版本。"
+        ),
+        "a condition worded outside MODEL_CALL_CONDITION": (
+            "模型调用按 429 分类退避，但默认不开启。"
+        ),
+    }
+    closed = {
+        label: _flagged_texts(text, _is_model_call_claim)
+        for label, text in unflagged.items()
+        if _flagged_texts(text, _is_model_call_claim)
+    }
+    opened = [
+        label for label, text in flagged.items() if not _flagged_texts(text, _is_model_call_claim)
+    ]
     assert not closed and not opened, (
         f"a stated blind spot is now flagged: {closed}; a stated misreading no longer happens: "
         f"{opened} -- update the docstring with it"

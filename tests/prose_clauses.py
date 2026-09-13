@@ -7,8 +7,15 @@ the code never produces may be presented as delivered) and
 presented as something a shipped path does). Each guard decides what a *claim* is. This module
 decides only what a *clause* is and how a marker word or a negated phrase is matched, so a change
 to either is made in one place and moves both guards at once. Its mechanics are measured by the
-attribution guard's reader tests -- block forms, every wrap width, clause ends, glued and
-hyphenated English words, negation -- which drive it through that guard's classifier.
+attribution guard's reader tests, which drive it through that guard's classifier: each block
+form folded back across a line break; each list marker (`-`, `*`, `+`, `1.`, `1)`), headings of
+level 2, 4 and 6, and both fence forms opening a block of their own; every wrap width from 20 to
+80; each clause end; glued and hyphenated English words; and negation -- 非, 不是, "not", "n't"
+and "never" directly before a phrase, a negation elsewhere in the clause, and a second copy of
+the phrase. The one space a fold leaves between two ASCII words is held by `README.en.md`'s
+pinned four-clock sentence, which a second space would stop matching. Not measured: whitespace
+at a clause's edges, and a list item directly after a quote, which the recursive grouping of the
+quote's own lines splits off whether or not the item closes the quote first.
 
 - *Blocks.* A paragraph, a list item and a blockquote are each one block, with their
   soft-wrapped continuation lines folded back in: indented or lazy (unindented)
@@ -27,7 +34,8 @@ hyphenated English words, negation -- which drive it through that guard's classi
   under it. The lookarounds also let "per-agent" and "agent_id" name `agent`.
 - *Negated phrases.* `holds_unnegated_phrase` finds a phrase only where no negation (非, 不是,
   "not", "never", "n't") ends directly before it: 并非结构性不产生 says the opposite of
-  结构性不产生.
+  结构性不产生. `holds_unnegated_match` does the same for a pattern, so a condition can be a
+  family of phrasings rather than a fixed list.
 
 **What it cannot see.** A claim split across two blocks -- a blank line, a heading, a table row or
 two lines of a code block between its halves -- or across two clauses is read as two halves, and
@@ -74,6 +82,20 @@ def holds_unnegated_phrase(text: str, phrases: Iterable[str]) -> bool:
                 return True
             found = lowered.find(phrase.lower(), found + 1)
     return False
+
+
+def holds_unnegated_match(text: str, pattern: re.Pattern[str]) -> bool:
+    """Whether `pattern` matches `text`, lowered, somewhere no negation directly precedes.
+
+    The pattern form of `holds_unnegated_phrase`, for a condition written as a family of
+    phrasings rather than a fixed list. `pattern` runs over the lowered text, so it must be
+    lower case or compiled with `re.IGNORECASE`.
+    """
+    lowered = text.lower()
+    return any(
+        NEGATION_BEFORE.search(lowered, 0, match.start()) is None
+        for match in pattern.finditer(lowered)
+    )
 
 
 _FENCE: Final[re.Pattern[str]] = re.compile(r"\s*(?:```|~~~)")

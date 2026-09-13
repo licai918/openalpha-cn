@@ -12,8 +12,13 @@ whether a whole-market request can be *put*, and the `413` never named it.
 
 **Why the doc assertions are pinned to the live constants rather than to literals.** A test that
 grepped for the string `"8"` would keep passing after someone changed the ceiling and left the
-prose behind -- which is precisely the failure mode this row *is*. Every number asserted here is
-read from `batch_contracts`/`config` at run time and then required to appear in the prose.
+prose behind -- which is precisely the failure mode this row *is*. Every current ceiling asserted
+here is read from `batch_contracts`/`config` at run time and then required to appear in the
+prose. The numbers written here as literals are not current ceilings: `"32"`, the worker
+ceiling's former value, which the prose has to state
+(`test_the_http_doc_gives_the_reason_the_worker_ceiling_was_lowered`); `9_840_054`,
+`V2-P4-043`'s measured size of a whole-market batch; and the floor `1` of every worker range,
+the `ge=1` both `max_concurrency` fields declare.
 
 **Which ceilings a real request drives, and where.** Only the worker ceiling is driven through
 the API in this module: `test_the_worker_ceiling_the_api_enforces_is_the_one_the_http_doc_states`
@@ -115,7 +120,7 @@ def test_the_worker_ceiling_the_api_enforces_is_the_one_the_http_doc_states(
 
     assert "max_concurrency" in http_doc, "the HTTP reference never mentions the field"
     assert str(MAX_BATCH_WORKERS) in http_doc
-    assert str(MAX_BATCH_ITEMS) in http_doc or "10,000" in http_doc
+    assert str(MAX_BATCH_ITEMS) in http_doc or f"{MAX_BATCH_ITEMS:,}" in http_doc
 
 
 def test_the_http_doc_gives_the_reason_the_worker_ceiling_was_lowered(http_doc: str) -> None:
@@ -257,9 +262,9 @@ as a missing sentence.
 
 **Why `README.md` needs its own check.**
 `test_the_worker_ceiling_the_api_enforces_is_the_one_the_http_doc_states` asserts only
-``str(MAX_BATCH_ITEMS) in http_doc or "10,000" in http_doc``: true the moment the right digits
-appear *anywhere* in `docs/api/http.md`, including two paragraphs away from a stale claim. And
-until `e758f0a` nothing in this module read `README.md` at all.
+``str(MAX_BATCH_ITEMS) in http_doc or f"{MAX_BATCH_ITEMS:,}" in http_doc``: true the moment the
+right digits appear *anywhere* in `docs/api/http.md`, including two paragraphs away from a stale
+claim. And until `e758f0a` nothing in this module read `README.md` at all.
 
 **The stale claim was real.** The sentence said "最多 1000 个" from the day it was written
 (`8d13065`, 2026-07-27), and it was true then: the cap was the literal `max_length=1000` on the
@@ -299,11 +304,14 @@ would read `1,0000` as 10000 -- a number the sentence does not state -- and woul
 `ValueError` on a bare `,`.
 """
 
-RANGE_JOINERS: Final[str] = "".join(("-", chr(0x2013), chr(0x2014), "~", chr(0xFF5E)))
-"""A hyphen, an en dash, an em dash, a tilde and a full-width tilde.
+RANGE_JOINERS: Final[str] = "".join(
+    ("-", chr(0x2013), chr(0x2014), "~", chr(0xFF5E), chr(0x2012), chr(0x2212), chr(0x301C))
+)
+"""A hyphen, an en dash, an em dash, a tilde, a full-width tilde, a figure dash, a minus sign
+and a wave dash.
 
-Spelled with `chr` because ruff's RUF001 refuses the literal dash and full-width tilde as
-look-alikes of `-` and `~`.
+Spelled with `chr` because ruff's RUF001 refuses the literal dashes and tildes as look-alikes of
+`-` and `~`.
 """
 
 STATED_RANGE: Final[re.Pattern[str]] = re.compile(
@@ -386,18 +394,34 @@ def test_the_readme_batch_api_sentence_states_the_current_worker_ceiling(readme:
     assert not problems, "\n".join(problems)
 
 
+_FULL_WIDTH_DIGITS: Final[str] = f"{chr(0xFF10)}-{chr(0xFF19)}"
+"""The full-width digits as a character-class range, spelled with `chr` because RUF001 refuses
+them as look-alikes of ASCII digits; `int()` reads them as it reads ASCII ones."""
+
+_DIGIT: Final[str] = f"[0-9{_FULL_WIDTH_DIGITS}]"
+
+_NOT_BESIDE: Final[str] = f"[A-Za-z0-9_.{_FULL_WIDTH_DIGITS}]"
+
+_JOINER: Final[str] = f"[{re.escape(RANGE_JOINERS)}]"
+
 WORKER_RANGE_IN_PROSE: Final[re.Pattern[str]] = re.compile(
-    rf"(?<![A-Za-z0-9_.])([0-9]+)\s*(?:[{re.escape(RANGE_JOINERS)}]|到|至)\s*([0-9]+)"
-    r"(?![A-Za-z0-9_.])"
+    rf"(?<!{_NOT_BESIDE})(?<!{_DIGIT}{_JOINER})"
+    rf"(?:between\s+({_DIGIT}+)\s+and\s+({_DIGIT}+)"
+    rf"|({_DIGIT}+)\s*(?:{_JOINER}|到|至|\s+to\s+)\s*({_DIGIT}+))"
+    rf"(?!{_NOT_BESIDE})(?!\s*{_JOINER}\s*{_DIGIT})",
+    re.IGNORECASE,
 )
-"""Any `<a>-<b>` range in ASCII digits, joined by one of `RANGE_JOINERS`, by 到 or by 至.
+"""Any `<a>-<b>` range in ASCII or full-width digits: joined by one of `RANGE_JOINERS`, by 到,
+by 至 or by "to", or written "between <a> and <b>".
 
 Looser than `STATED_RANGE` on purpose: it runs over every README clause about concurrency, and a
-range written `1到8` there must be read and checked rather than skipped. The ASCII-only
-lookarounds keep an identifier such as `V2-P4-019` from reading as the range 4-19.
+range written `1到8` there must be read and checked rather than skipped. A letter, a digit, `_`
+or `.` directly beside either number keeps an identifier such as `V2-P4-019` from reading as the
+range 4-19, and a number that a dash joins to a third number -- a date such as 2026-08-18 -- is
+not read as a range at all.
 """
 
-CONCURRENCY_WORDS: Final[tuple[str, ...]] = ("并发", "concurren", "worker")
+CONCURRENCY_WORDS: Final[tuple[str, ...]] = ("并发", "并行", "concurren", "worker")
 """What puts a README clause in scope for the worker-range check, matched case-insensitively."""
 
 
@@ -410,10 +434,9 @@ def _worker_range_mentions(document: str) -> list[tuple[int, int, int, str]]:
     found: list[tuple[int, int, int, str]] = []
     for clause in clauses(document):
         if any(word in clause.text.lower() for word in CONCURRENCY_WORDS):
-            found.extend(
-                (clause.line, int(match[1]), int(match[2]), clause.text)
-                for match in WORKER_RANGE_IN_PROSE.finditer(clause.text)
-            )
+            for match in WORKER_RANGE_IN_PROSE.finditer(clause.text):
+                floor, ceiling = (int(bound) for bound in match.groups() if bound is not None)
+                found.append((clause.line, floor, ceiling, clause.text))
     return found
 
 
@@ -450,8 +473,9 @@ def test_every_worker_range_the_readmes_state_is_the_one_the_api_enforces(
 
     `README.md` states the range three times today -- the feature table, the feature list and the
     batch-API sentence -- and until `D7` nothing read the first two. A clause is in scope when it
-    names 并发, "concurren..." or "worker...", and every range in it is read. `README.en.md`
-    states no worker range today, so it adds nothing until it does.
+    names 并发, 并行, "concurren..." or "worker...", and every range in it is read, in any form
+    `WORKER_RANGE_IN_PROSE` reads. `README.en.md` states no worker range today, so it adds
+    nothing until it does.
 
     Finding no range in `README.md` fails: a change that stops this reader seeing the ranges it
     sees today has to break the test, not empty it. What it cannot see: a worker count written
@@ -477,6 +501,15 @@ def test_the_worker_range_reader_reads_what_its_docstring_says() -> None:
         "a stale floor": f"持久任务队列支持 2{dash}8 并发。",
         "a range written with 到": "持久任务队列支持 1到32 路并发。",
         "English, soft-wrapped": "- bounded batches of 1-32\n  concurrent requests;\n",
+        "English 'to'": "- bounded concurrent batches of 1 to 32 requests;\n",
+        "English 'between ... and'": "Between 1 and 32 workers run at once.\n",
+        "并行 instead of 并发": f"持久任务队列支持 1{dash}32 路并行。",
+        "a minus sign": f"持久任务队列支持 1{chr(0x2212)}32 并发。",
+        "a figure dash": f"持久任务队列支持 1{chr(0x2012)}32 并发。",
+        "a wave dash": f"持久任务队列支持 1{chr(0x301C)}32 并发。",
+        "full-width digits": (
+            f"持久任务队列支持 {chr(0xFF11)}{dash}{chr(0xFF13)}{chr(0xFF12)} 并发。"
+        ),
     }
     missed = [label for label, text in stale.items() if not _worker_range_problems({label: text})]
     ignored = {
@@ -500,7 +533,12 @@ def test_the_worker_range_reader_reads_what_its_docstring_says() -> None:
     }
     unreported = [label for label, (md, en) in whole.items() if not _worker_range_failures(md, en)]
     clean = _worker_range_failures(valid, "")
+    dated = f"自 2026-08-18 起支持 1{dash}{MAX_BATCH_WORKERS} 并发。"
+    dated_read = [(floor, ceiling) for _, floor, ceiling, _ in _worker_range_mentions(dated)]
     assert not missed and not wrongly and not unreported and not clean, (
         f"missed stale ranges: {missed}; misread: {wrongly}; whole-check cases not reported: "
         f"{unreported}; a clean pair reported: {clean}"
+    )
+    assert dated_read == [(1, MAX_BATCH_WORKERS)], (
+        f"a date beside a valid range was read as {dated_read}, not the one range it holds"
     )

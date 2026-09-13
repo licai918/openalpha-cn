@@ -52,7 +52,10 @@ Invoke-RestMethod http://127.0.0.1:8000/health
 
 `deploy/compose.yml` 会把上述 Provider 凭据变量，以及 `.env.example` 中"Optional model
 providers"下列出的模型密钥（`OPENAI_API_KEY` 等），原样透传进容器；容器内未设置时即为空
-字符串，`doctor` 据此报告缺失，不会因此报错。
+字符串，不会因此报错。数据 Provider 凭据缺失时由 `doctor` 报告；模型密钥则没有任何读取方：
+`src/` 中没有代码读取这五个变量，出厂路径（CLI、REST API、Web 工作台、SDK 默认配置）不调用
+模型，只有你自己的 SDK 代码构造 `OpenAICompatibleProvider(api_key_env=...)` 时才会读到其中
+一个。
 
 `Dockerfile` 的 `ENV OPENALPHA_HOST=0.0.0.0` / `OPENALPHA_PORT=8000` 现在由容器
 `CMD` 实际读取（`--host "${OPENALPHA_HOST:-0.0.0.0}" --port "${OPENALPHA_PORT:-8000}"`），

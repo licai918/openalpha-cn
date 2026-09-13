@@ -29,7 +29,11 @@ services:
       TUSHARE_TOKEN: ${TUSHARE_TOKEN:-}
       CHAINLIN_API_BASE_URL: ${CHAINLIN_API_BASE_URL:-}
       CHAINLIN_API_KEY: ${CHAINLIN_API_KEY:-}
-      # Optional model providers (see .env.example)
+      # Optional model providers (see .env.example). Nothing in this image reads these five:
+      # no module under src/ names any of them, and no shipped path -- CLI, REST API, Web
+      # workbench, SDK defaults -- calls a model. A key is read only by an
+      # OpenAICompatibleProvider built with `api_key_env` naming it, and only code a deployer
+      # writes builds one. They are passed through, with a safe default, for such code.
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       QWEN_API_KEY: ${QWEN_API_KEY:-}

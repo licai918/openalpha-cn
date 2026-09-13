@@ -742,7 +742,9 @@ def test_an_absence_phrase_exempts_only_its_own_clause_and_only_unnegated() -> N
     Each presents factor and Agent attribution as delivered beside an absence phrase that
     disclaims something else: in the next clause (the first, second and fourth), or negated in
     the same one (the third, 并非). The fifth and sixth negate an English and a second Chinese
-    phrase; the last two end the claim's clause with a full-width exclamation or question mark.
+    phrase; the seventh and eighth end the claim's clause with a full-width exclamation or
+    question mark. The last two negate with "n't" and "never": the review of `D7` found that no
+    case held either, so dropping them from `NEGATION_BEFORE` went unnoticed.
     """
     claims = (
         "归因覆盖规则、因子与 Agent 三类\N{FULLWIDTH SEMICOLON}模型类目结构性从不产生而非被收窄。",
@@ -753,6 +755,8 @@ def test_an_absence_phrase_exempts_only_its_own_clause_and_only_unnegated() -> N
         "因子与 Agent 归因不是结构性不产出的。",
         "提供因子与 Agent 归因\N{FULLWIDTH EXCLAMATION MARK}模型结构性从不产生而非被收窄。",
         "提供因子与 Agent 归因\N{FULLWIDTH QUESTION MARK}模型结构性从不产生而非被收窄。",
+        "Factor and agent attribution isn't structurally absent.",
+        "Factor and agent attribution is never structurally absent.",
     )
     missed = [claim for claim in claims if _flagged_categories(claim) != {"agent", "factor"}]
     assert not missed, f"read as caveated, but each claims factor and agent: {missed}"
@@ -818,6 +822,58 @@ def test_every_block_form_is_read_with_its_continuation_lines_folded_back() -> N
         if _flagged_categories(text) != {"agent", "factor"}
     ]
     assert not missed, f"a claim split over lines was not read whole in: {missed}"
+
+
+def test_a_negation_negates_only_the_phrase_it_directly_precedes() -> None:
+    """A negation elsewhere in the clause, or before another copy of the phrase, negates nothing.
+
+    Each clause states a true absence. In the first two a negation stands earlier in the clause
+    but not directly before the absence phrase; in the third the phrase appears twice, negated
+    once and stated once. Each must read as caveated, so none may be flagged.
+    """
+    caveated = (
+        "因子与 Agent 归因不是被收窄，而是结构性不产生。",
+        "Factor and agent attribution is not narrowed: it is structurally absent.",
+        "有人说因子与 Agent 归因并非结构性不产生，但它们确实结构性不产生。",
+    )
+    wrongly = {
+        text: sorted(_flagged_categories(text)) for text in caveated if _flagged_categories(text)
+    }
+    assert not wrongly, f"a caveated clause was read as a claim: {wrongly}"
+
+
+_CAVEAT_LINE: Final[str] = "因子与 Agent 归因结构性不产生，"
+_CLAIM_LINE: Final[str] = "验证层提供因子与 Agent 归因。"
+
+BLOCK_BOUNDARIES: Final[dict[str, str]] = {
+    "a '-' item after a paragraph line": f"{_CAVEAT_LINE}\n- {_CLAIM_LINE}\n",
+    "a '*' item after a paragraph line": f"{_CAVEAT_LINE}\n* {_CLAIM_LINE}\n",
+    "a '+' item after a paragraph line": f"{_CAVEAT_LINE}\n+ {_CLAIM_LINE}\n",
+    "a '1.' item after a paragraph line": f"{_CAVEAT_LINE}\n1. {_CLAIM_LINE}\n",
+    "a '1)' item after a paragraph line": f"{_CAVEAT_LINE}\n1) {_CLAIM_LINE}\n",
+    "a '####' heading above a paragraph": f"#### {_CAVEAT_LINE}\n{_CLAIM_LINE}\n",
+    "a '######' heading above a paragraph": f"###### {_CAVEAT_LINE}\n{_CLAIM_LINE}\n",
+    "two lines of a '~~~' fence": f"~~~\n{_CAVEAT_LINE}\n{_CLAIM_LINE}\n~~~\n",
+    "a list item after a quote": f"> {_CAVEAT_LINE}\n- {_CLAIM_LINE}\n",
+}
+"""A claim on the second line, and on the first a caveat that would exempt it if the two lines
+were folded into one clause. The first line ends in a comma, so only the block boundary keeps
+them apart."""
+
+
+def test_a_list_item_heading_or_fence_line_never_folds_into_the_line_above() -> None:
+    """Each marker, heading level and fence form must open a block of its own.
+
+    `TWO_LINE_CLAIMS` cannot show this for `+`, `1)`, `####` or `~~~`: its lines fold into a
+    plain paragraph and are still flagged when the marker is not recognised. Here a missed
+    boundary folds the claim into the caveat above it, and the claim goes unflagged.
+    """
+    missed = [
+        form
+        for form, text in BLOCK_BOUNDARIES.items()
+        if _flagged_categories(text) != {"agent", "factor"}
+    ]
+    assert not missed, f"a block boundary was folded away in: {missed}"
 
 
 def test_the_guards_stated_blind_spots_are_real() -> None:
