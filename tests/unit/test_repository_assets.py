@@ -2380,6 +2380,41 @@ def test_publication_gate_blocks_sqlite_backup_files() -> None:
     assert ".bak" in module.BLOCKED_SUFFIXES
 
 
+def test_publication_gate_blocks_a_file_shaped_like_a_leaked_credential(tmp_path: Path) -> None:
+    """`test_publication_gate_accepts_tracked_release_sources` only drives the pass branch: it
+    proves today's tracked files hold nothing `SECRET_PATTERNS` recognizes, which is exactly the
+    result a scanner that matched nothing at all would also give. This drives the reject branch:
+    an untracked probe file at the repository root, holding a string shaped like a real AWS
+    access key, and asserts the scanner actually refuses it.
+
+    The probe string is assembled by concatenation (`"AKIA" + "FAKE" * 4`) precisely so this
+    module's own source text never carries `SECRET_PATTERNS["aws-access-key"]`'s match as one
+    contiguous literal -- `verify_publication.py` scans this very file on every tracked-source
+    run, `test_publication_gate_accepts_tracked_release_sources` included, and a literal fake key
+    sitting here would trip that test rather than this one.
+    """
+    probe = ROOT / "publication-gate-secret-probe.txt"
+    fake_access_key = "AKIA" + "FAKE" * 4  # 20 chars: AKIA + 16 of [0-9A-Z], never a real key
+    probe.write_text(f"not a real key: {fake_access_key}\n", encoding="utf-8")
+    try:
+        result = subprocess.run(
+            [sys.executable, "scripts/verify_publication.py", "--json"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        report = json.loads(result.stdout)
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert report["status"] == "blocked"
+        assert {
+            "path": "publication-gate-secret-probe.txt",
+            "reason": "matched aws-access-key",
+        } in report["blockers"]
+    finally:
+        probe.unlink(missing_ok=True)
+
+
 def test_feature_coverage_artifacts_are_reconciled() -> None:
     result = subprocess.run(
         [sys.executable, "scripts/build_feature_coverage.py", "--check"],
