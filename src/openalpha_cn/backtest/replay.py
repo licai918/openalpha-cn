@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 from datetime import date, datetime
+from functools import partial
 from pathlib import Path
 from typing import Self
 
@@ -213,7 +214,11 @@ class ReplayRunner:
         records no module under `src/` using. On a repeat against a `state_path` that
         already holds a case, the first run reuses the stored result (`run_cycle` is
         idempotent by `run_id`) and the second still recomputes, so a repeat compares what
-        was stored with what the code computes now.
+        was stored with what the code computes now. A mismatch there is reported as `stored
+        run differs from a fresh recomputation`, not `nondeterministic replay`, because that
+        is all this call observed: one side was read back, and one call cannot tell a code
+        path that changed since the earlier replay from one that is flaky. The case counts as
+        stored when its recovery state existed before this call's first run.
 
         What the comparison cannot see: randomness `seed_everything(request.random_seed)`
         controls, which both runs reproduce by design, and anything else that holds still
@@ -238,10 +243,10 @@ class ReplayRunner:
 
         for case in corpus.cases:
             try:
-                engine = ResearchEngine(
+                configured = partial(ResearchEngine, clock=_fixed_clock(case.as_of))
+                engine = configured(
                     repository=repository,
                     memory=memory,
-                    clock=_fixed_clock(case.as_of),
                     recovery_store=recovery_store,
                 )
                 request = ResearchRunRequest(
@@ -254,12 +259,17 @@ class ReplayRunner:
                     config_digest=self.config_digest,
                     random_seed=self.random_seed,
                 )
+                stored_before_this_call = recovery_store.get(case.run_id) is not None
                 first = engine.run_cycle(request)
-                second = _recomputation_engine(case.as_of).run_cycle(request)
+                second = _recomputation_engine(configured).run_cycle(request)
                 if first == second:
                     deterministic += 1
                 else:
-                    failures.append(f"{case.run_id}: nondeterministic replay")
+                    failures.append(
+                        f"{case.run_id}: stored run differs from a fresh recomputation"
+                        if stored_before_this_call
+                        else f"{case.run_id}: nondeterministic replay"
+                    )
                     continue
                 validation = validator.validate(research=first, observation=case.outcome)
                 validation_store.append(validation)
@@ -289,18 +299,25 @@ def _fixed_clock(value: datetime) -> Callable[[], datetime]:
     return lambda: value
 
 
-def _recomputation_engine(as_of: datetime) -> ResearchEngine:
-    """The engine for a case's second run: the same roster and clock, and no state at all.
+def _recomputation_engine(configured: partial[ResearchEngine]) -> ResearchEngine:
+    """The engine for a case's second run: the first run's configuration, and no state at all.
+
+    `configured` is the one `partial` both runs of a case are built from, so whatever the
+    first run is given besides storage -- today only its clock, tomorrow perhaps `agents=`,
+    `router=`, `risk_gate=` or `features=` -- the second run is given too, as the same objects
+    rather than equal ones. A review found the two engines agreeing only because both spelled
+    the same defaults, which a roster handed to one of them would have ended without a sound
+    (`tests/replay/test_replay_determinism.py::
+    test_both_runs_of_a_case_are_built_from_one_engine_configuration`).
 
     Fresh stores per case rather than one pair per `run()`, although `ReplayCorpus` already
     refuses a repeated `run_id`: a store that lives for one case cannot carry anything into
     the next, whatever a later corpus validator permits. The memory is its own as well, so
     the second run shares nothing with the first; `ResearchEngine` only ever appends to it.
     """
-    return ResearchEngine(
+    return configured(
         repository=_EmptyRunRepository(),
         memory=InMemoryResearchMemory(),
-        clock=_fixed_clock(as_of),
         recovery_store=_EmptyRecoveryStore(),
     )
 
@@ -335,11 +352,19 @@ class _EmptyRunRepository:
 class _EmptyRecoveryStore:
     """A `RecoveryStore` that starts empty and is dropped with its case (D13).
 
-    `append_result` refuses what `SQLiteRecoveryStore.append_result` refuses -- a result for
-    a run with no state, for a position that is not the next one, or for an agent the graph
-    does not declare there -- so the second run is held to the first run's contract rather
-    than a looser one. `save` does not repeat the SQLite store's digest check: within one
-    case the engine only saves states it built from that case's request.
+    `append_result` refuses everything `SQLiteRecoveryStore.append_result` refuses -- a
+    result for a run with no state, for a slot already written, or for an agent the graph does
+    not declare at that position -- and one write the SQLite store takes: a result for a later
+    slot while an earlier one is still empty. The SQLite store keys its `UPDATE` on the
+    position, the agent and an unwritten payload, so it stores that result and then cannot
+    read the run back (`validate_progress` refuses a completed set that is not a prefix of the
+    graph); this store refuses it at the write. So the second run's store is stricter than the
+    first run's, never looser. The engine only ever appends in graph order, so no replay
+    reaches the difference, and `tests/replay/test_replay_determinism.py::
+    test_the_second_runs_recovery_store_refuses_what_sqlite_refuses_and_a_skipped_slot`
+    measures both stores against the four writes. `save` does not repeat the SQLite store's
+    digest check: within one case the engine only saves states it built from that case's
+    request.
     """
 
     def __init__(self) -> None:

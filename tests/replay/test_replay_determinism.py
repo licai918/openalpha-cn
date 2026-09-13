@@ -25,9 +25,11 @@ from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta
 from itertools import count
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+import openalpha_cn.backtest.replay as replay_module
 import openalpha_cn.runtime.engine as engine_module
 from openalpha_cn.agents.base import AgentContext, AgentProvenance, AgentResult, ResearchAgent
 from openalpha_cn.agents.baseline import baseline_agents
@@ -36,7 +38,13 @@ from openalpha_cn.backtest.validation import OutcomeObservation
 from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.domain.time import Timeline
+from openalpha_cn.runtime.engine import ResearchEngine
 from openalpha_cn.storage.migrations import run_migrations
+from openalpha_cn.storage.recovery import (
+    RecoveryConflictError,
+    RunRecoveryState,
+    SQLiteRecoveryStore,
+)
 from openalpha_cn.storage.validation import SQLiteValidationStore
 
 
@@ -230,3 +238,162 @@ def test_replaying_a_corpus_again_compares_the_stored_first_pass_with_a_fresh_se
     assert again.deterministic_replays == 2
     assert again.succeeded == 2
     assert again.failures == ()
+
+
+class _RewordedAgent:
+    """A real baseline agent whose rationale the next version of the code words differently."""
+
+    def __init__(self, inner: ResearchAgent) -> None:
+        self._inner = inner
+        self.agent_id = inner.agent_id
+        self.evidence_families = inner.evidence_families
+        self.feature_dependencies = inner.feature_dependencies
+        self.provenance = inner.provenance
+
+    def analyze(self, context: AgentContext) -> AgentResult:
+        result = self._inner.analyze(context)
+        return result.model_copy(update={"rationale": f"{result.rationale} Reworded."})
+
+
+def test_a_stored_run_the_code_no_longer_reproduces_is_not_reported_as_nondeterministic(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    frozen_now: datetime,
+    migration_clock: Callable[[], datetime],
+) -> None:
+    """A repeat that disagrees with an earlier replay's stored run is named for that (Minor-5).
+
+    The replay database outlives the call -- `sdk-replay.sqlite3`, `api-replay.sqlite3` -- and
+    the first run of a repeated case is the stored one, so a repeat compares yesterday's result
+    with what the code computes today. Here the code changed in between: every baseline agent
+    words its rationale differently, with the same roster, so the request digest and graph
+    signature still match and nothing refuses the reuse. Neither run is flaky; the stored one is
+    simply no longer what this code produces, and a failure that said `nondeterministic replay`
+    sent the reader after randomness that is not there. Measured before the change: both cases
+    were reported as `nondeterministic replay`.
+    """
+    corpus = _two_case_corpus(frozen_now)
+    _replay(corpus, tmp_path, migration_clock)
+    monkeypatch.setattr(
+        engine_module,
+        "baseline_agents",
+        lambda: tuple(_RewordedAgent(agent) for agent in baseline_agents()),
+    )
+
+    again = _replay(corpus, tmp_path, migration_clock)
+
+    assert again.deterministic_replays == 0
+    assert again.succeeded == 0
+    assert again.failures == tuple(
+        f"{case.run_id}: stored run differs from a fresh recomputation" for case in corpus.cases
+    )
+
+
+def test_both_runs_of_a_case_are_built_from_one_engine_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    frozen_now: datetime,
+    migration_clock: Callable[[], datetime],
+) -> None:
+    """The second run is configured by the first run's configuration, not beside it (Minor-6).
+
+    Every construction of `ResearchEngine` during the replay is recorded. For each case the two
+    must have been given the same keywords, and every keyword that is not storage must be the
+    very same object -- so an `agents=`, `router=`, `risk_gate=` or `features=` given to one run
+    reaches the other, instead of the second quietly recomputing with the defaults. Measured
+    before the change: the keys agreed and no value was shared -- each run got its own
+    `_fixed_clock(case.as_of)` -- so the two engines matched only because both spelled the same
+    defaults.
+    """
+    built: list[dict[str, Any]] = []
+
+    class _RecordingEngine(ResearchEngine):
+        def __init__(self, **kwargs: Any) -> None:
+            built.append(kwargs)
+            super().__init__(**kwargs)
+
+    monkeypatch.setattr(replay_module, "ResearchEngine", _RecordingEngine)
+
+    report = _replay(_two_case_corpus(frozen_now), tmp_path, migration_clock)
+
+    assert report.deterministic_replays == 2
+    assert len(built) == 4, "two engines per case"
+    storage = {"repository", "recovery_store", "memory"}
+    for first, second in (built[0:2], built[2:4]):
+        assert first.keys() == second.keys()
+        configuration = sorted(first.keys() - storage)
+        assert configuration, "the engines were given nothing but storage"
+        unshared = [name for name in configuration if first[name] is not second[name]]
+        assert unshared == [], f"the second run was configured on its own for {unshared}"
+
+
+def _abstaining(agent_id: str, at: datetime) -> AgentResult:
+    return AgentResult(
+        agent_id=agent_id,
+        signal=SignalFrame(
+            subject="000001.SZ",
+            as_of=at,
+            direction="abstain",
+            strength=0,
+            confidence=0,
+            horizon="5d",
+            abstention_reason="Nothing to read.",
+        ),
+        rationale="Nothing to read.",
+    )
+
+
+def test_the_second_runs_recovery_store_refuses_what_sqlite_refuses_and_a_skipped_slot(
+    tmp_path: Path, frozen_now: datetime
+) -> None:
+    """What `_EmptyRecoveryStore`'s docstring says about itself, measured against the SQLite store.
+
+    A review found the docstring claiming the two refuse the same writes. They do not: the
+    SQLite store's `_claim_slot` keys on the position, the agent and an unwritten payload, so it
+    also accepts a result for a later slot while an earlier one is still empty -- and then cannot
+    read the run back, because `validate_progress` refuses a completed set that is not a prefix of
+    the graph. The in-memory store refuses that write outright. The engine only ever appends in
+    order, so no replay can tell the difference; this pins the difference the docstring states.
+    """
+
+    def stores(name: str) -> tuple[SQLiteRecoveryStore, Any]:
+        state = RunRecoveryState(
+            run_id="run",
+            request_digest="a" * 64,
+            graph_signature="b" * 64,
+            agent_ids=("first-agent", "second-agent"),
+            next_agent_index=0,
+            started_at=frozen_now,
+            updated_at=frozen_now,
+        )
+        sqlite_store = SQLiteRecoveryStore(tmp_path / f"{name}.sqlite3")
+        memory_store = replay_module._EmptyRecoveryStore()
+        sqlite_store.save(state)
+        memory_store.save(state)
+        return sqlite_store, memory_store
+
+    def write(store: Any, run_id: str, position: int, agent_id: str) -> None:
+        store.append_result(
+            run_id,
+            position=position,
+            result=_abstaining(agent_id, frozen_now),
+            updated_at=frozen_now,
+        )
+
+    for store in stores("no-state"):
+        with pytest.raises(RecoveryConflictError):
+            write(store, "a-run-with-no-state", 0, "first-agent")
+    for store in stores("wrong-agent"):
+        with pytest.raises(RecoveryConflictError):
+            write(store, "run", 0, "second-agent")
+    for store in stores("rewrite"):
+        write(store, "run", 0, "first-agent")
+        with pytest.raises(RecoveryConflictError):
+            write(store, "run", 0, "first-agent")
+
+    sqlite_store, memory_store = stores("skip")
+    write(sqlite_store, "run", 1, "second-agent")
+    with pytest.raises(ValueError, match="graph prefix"):
+        sqlite_store.get("run")
+    with pytest.raises(RecoveryConflictError):
+        write(memory_store, "run", 1, "second-agent")
