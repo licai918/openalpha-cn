@@ -8,13 +8,16 @@ rebase round added came from the independent review of `D13` and the rebase brie
 same way; five of the wordings that round retired were never in `d4ef5e4`, because `D13` had
 written them itself, on its branch before the rebase (`16db458`). The review of that round
 found one more clause of two of those classes in the marketing pack's §032; the risk gate's
-pattern, extended to it, found a second clause in §041, and `D13`'s final round retired both. An
-entry of `RETIRED_CLAIMS` holds:
+pattern, extended to it, found a second clause in §041, and `D13`'s final round retired both. The
+same round retired three classes its own report had named, in six clauses of the marketing pack:
+a committee every result passes through, a committee outcome written to the DecisionLedger, and
+a risk gate that constrains the portfolio. An entry of `RETIRED_CLAIMS` holds:
 
 - `pattern`: the family of wordings that was retired, searched in every clause of the four
   documents as `tests/prose_clauses.py` reads them;
 - `refuted_by`: the code fact that makes those wordings false, with file:line at the revision it
-  was checked at: `d4ef5e4`, or `c99b46b` for the classes the rebase round added;
+  was checked at: `d4ef5e4`, `c99b46b` for the classes the rebase round added, or `07f5c80` for
+  the three the final round added;
 - `retired`: what it retired, verbatim -- the clause, or the part of it the claim sits in -- as it
   stood at `d4ef5e4`, or on `16db458` for `D13`'s own five; the pattern must still match each of
   them, so a pattern cannot be loosened into matching nothing;
@@ -79,6 +82,9 @@ _NOT_END: Final[str] = r"[^。;\N{FULLWIDTH SEMICOLON}]"
 
 _FACE: Final[str] = r"(?<![A-Za-z])(?:SDK|CLI)(?![A-Za-z])"
 """SDK or CLI as a word of its own, so client, clients and Click are not read as CLI."""
+
+_NO_COMMA: Final[str] = r"[^。;\N{FULLWIDTH SEMICOLON}，,]"
+"""One character that ends no sentence and no phrase: what a pattern may span inside one phrase."""
 
 
 # --- Reading the code facts -------------------------------------------------------------------
@@ -383,6 +389,34 @@ def _the_neutral_and_conservative_votes_still_agree() -> str | None:
 def _the_engine_still_calls_no_committee() -> str | None:
     reached = _imports_under(SRC / "runtime" / "engine.py", ("openalpha_cn.agents.committee",))
     return None if not reached else f"runtime/engine.py now imports {reached}: re-read the order"
+
+
+def _only_the_engine_appends_a_decision() -> str | None:
+    callers: list[str] = []
+    for path in sorted(SRC.rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        if "append_decision" not in text:
+            continue
+        if any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "append_decision"
+            for node in ast.walk(ast.parse(text, filename=str(path)))
+        ):
+            callers.append(path.relative_to(SRC).as_posix())
+    if callers == ["runtime/engine.py"]:
+        return None
+    return f"append_decision is now called from {callers}: re-read who writes a DecisionLedger"
+
+
+def _no_portfolio_module_reads_the_risk_gate() -> str | None:
+    reading = [
+        path.relative_to(SRC).as_posix()
+        for path in sorted(SRC.rglob("*.py"))
+        if re.search(r"portfolio|execution", path.stem)
+        and re.search(r"RiskGate|risk_decision|final_action", path.read_text(encoding="utf-8"))
+    ]
+    return None if not reading else f"{reading} now read the risk gate's decision: re-read them"
 
 
 # --- The retired claims -----------------------------------------------------------------------
@@ -851,6 +885,62 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         paraphrase="委员会投完票，风险门接着把关。",
         premise=_the_engine_still_calls_no_committee,
     ),
+    RetiredClaim(
+        name="every result passes through the committee",
+        pattern=re.compile(
+            rf"还要经过{_NO_COMMA}{{0,20}}委员会"
+            rf"|所有输出{_NO_COMMA}{{0,12}}进入{_NO_COMMA}{{0,20}}委员会|经过双委员会"
+        ),
+        refuted_by=(
+            "ResearchEngine.run_cycle routes, runs the agents, aggregates their signals and runs "
+            "the risk gate (runtime/engine.py:101-118), and calls no committee. The Bull/Bear "
+            "debate and the three risk votes are one later, optional call a caller makes with "
+            "the run's signal and agent results -- OpenAlphaSDK.deliberate (sdk.py:236-243) or "
+            "POST /api/v1/research/deliberate (api/app.py:1946-1952); the CLI has no command for "
+            "it -- and the A-share trading rules apply only when a caller executes an order "
+            "(sdk.py:1195-1210)."
+        ),
+        retired=(
+            "最终还要经过 Bull/Bear 辩论、三态风险委员会和 A 股成交约束",
+            "输出还要经过风险委员会与成交模型",
+            "所有输出再进入 Bull/Bear、风险委员会与风险门",
+            "经过双委员会和风险门，再保存决策与报告",
+        ),
+        paraphrase="每个研究结果都要过一遍委员会。",
+        premise=_the_engine_still_calls_no_committee,
+    ),
+    RetiredClaim(
+        name="the committee's outcome is written to the DecisionLedger",
+        pattern=re.compile(rf"委员会{_NOT_END}{{0,24}}写入\s*DecisionLedger"),
+        refuted_by=(
+            "A DecisionLedger is built only in ResearchEngine.run_cycle "
+            "(runtime/engine.py:144-171), whose routing_path is the agents and then 'risk-gate' "
+            "(:163), and it is stored by the one append_decision call there is (:400). "
+            "OpenAlphaSDK.deliberate and POST /api/v1/research/deliberate hand the "
+            "DeliberationOutcome back to the caller and store nothing (sdk.py:236-243, "
+            "api/app.py:1946-1952)."
+        ),
+        retired=("Bull/Bear 和风险委员会也输出结构化结果，最终写入 DecisionLedger",),
+        paraphrase="委员会的投票会存进决策账本。",
+        premise=_only_the_engine_appends_a_decision,
+    ),
+    RetiredClaim(
+        name="the risk gate constrains the portfolio",
+        pattern=re.compile(rf"风险门{_NOT_END}{{0,8}}约束组合"),
+        refuted_by=(
+            "RiskGate.evaluate answers pass, reduce or block about a signal "
+            "(decisions/risk.py:45-52) inside run_cycle (runtime/engine.py:118); what it decides "
+            "is the run's final_action -- block makes it abstain (:486-497) -- which the ledger, "
+            "screening, reports and validation read. No portfolio or execution module reads "
+            "RiskGate, risk_decision or final_action. The A-share rules are "
+            "AShareExecutionPolicy's (backtest/execution.py:268-274), which PortfolioSimulator "
+            "applies (backtest/portfolio.py:90-99) when a caller executes an order "
+            "(sdk.py:1195-1210, api/app.py:2195-2219)."
+        ),
+        retired=("Bull/Bear 与三态风控讨论分歧，风险门和 A 股规则约束组合",),
+        paraphrase="组合仓位由风险门说了算。",
+        premise=_no_portfolio_module_reads_the_risk_gate,
+    ),
 )
 """Each family of wordings `D13` retired, the code fact that refutes it, and what it retired."""
 
@@ -953,6 +1043,8 @@ TRUE_SENTENCES_THAT_SHARE_THE_WORDS: Final[tuple[str, ...]] = (
     "四类入口共享同一批服务，覆盖面各不相同。",
     "FastAPI 路由与 OpenAPI 文档共享同一合同。",
     "run_cycle 先路由、再生成信号，之后风险门给出 pass、reduce 或 block。",
+    "信号还要经过风险门，委员会是之后可选的一次调用。",
+    "所有输出进入决策记录，委员会的结果交还调用方。",
 )
 """True or unrelated sentences that share a retired pattern's words. The review of `D13` measured
 the first six being caught (its M1): client holds cli, 移动平均 holds 移动, and a rejection and a
@@ -965,9 +1057,11 @@ two being caught by the four faces' entry
 (its m4): a contract three providers share is not the faces', and faces that share domain models
 need not cover the same routes. The two after them are what that review's suggested narrowing
 would still catch: 四类入口共享同一 holds the true 同一批服务, and API read as a substring
-holds OpenAPI and FastAPI. The last is why the risk gate's branch for §032 is anchored on 委员会
+holds OpenAPI and FastAPI. The next is why the risk gate's branch for §032 is anchored on 委员会
 rather than on that review's suggested 之后: run_cycle's own order puts 之后 before 风险门给出,
-and that order is true."""
+and that order is true. The last two are what the entry for a committee every result passes
+through must not catch: a comma closes the phrase a 还要经过 or a 所有输出…进入 is about, and past
+it these two say the committee is optional."""
 
 
 def test_the_retired_patterns_pass_the_true_sentences_that_share_their_words() -> None:
