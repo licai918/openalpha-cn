@@ -4,8 +4,11 @@
 `ChainLinDataProvider` and `AKShareProvider` are each constructed at exactly one place under
 `src/` and `scripts/`: `cli._default_providers`, "the built-in providers `doctor` reports on",
 whose only caller is `doctor`. So configuring `CHAINLIN_*` changes one thing a shipped path does:
-`openalpha doctor` reports whether the key is present and, with `--probe`, sends one minimal
-request per dataset and reports how each ended. The AKShare adapter takes no credential, and
+`openalpha doctor` reports whether the key is present and, with `--probe`, calls the client once
+per dataset and reports how each call ended. With the base URL and the key each call sends one
+minimal request; with the base URL alone the client refuses before sending anything, every
+dataset reports `authentication`, and `doctor --probe` exits non-zero
+(`test_the_probe_sends_nothing_without_the_key`). The AKShare adapter takes no credential, and
 `doctor` is the only path that constructs it too. Evidence building reads the user's files
 (`FileProvider`, in `cli.py` and `sdk.py`), panel building reads Tushare,
 `POST /api/v1/evidence/build` takes the batch its caller sends, and a shipped batch item calls no
@@ -82,10 +85,13 @@ from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Final
 
+import pytest
 from diagram_text import diagram_units
 from prose_clauses import clauses
 
+from openalpha_cn.cli import PROBE_FAILURE_STATES, _probe_report
 from openalpha_cn.domain.time import Timeline
+from openalpha_cn.providers.chainlin import ChainLinDataProvider
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 
@@ -190,6 +196,55 @@ def test_the_two_clients_are_constructed_only_for_doctor() -> None:
     assert callers == [("src/openalpha_cn/cli.py", "doctor")], (
         f"cli._default_providers is read in {callers}; when this was written only doctor read "
         "it, to call it"
+    )
+
+
+class _CountingTransport:
+    """A ChainLin transport that counts the requests reaching it and answers each with no data."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def get_json(self, **kwargs: object) -> dict[str, object]:
+        self.calls += 1
+        return {"schema_version": "chainlin-data/v1", "records": [], "no_data_reason": "probe"}
+
+
+def _probed(transport: _CountingTransport) -> dict[str, str]:
+    """`doctor --probe`'s report on a ChainLin client that has a base URL, over `transport`."""
+    provider = ChainLinDataProvider(
+        base_url="https://data.chainlin.example/v1",
+        api_key_env="CHAINLIN_API_KEY",
+        source_license="user-held ChainLin subscription",
+        transport=transport,
+    )
+    return _probe_report(provider)
+
+
+def test_the_probe_sends_nothing_without_the_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """What ChainLin's contract document says `doctor --probe` does, measured on the client.
+
+    With the base URL and no key, every dataset reports `authentication` and no request reaches
+    the transport; `authentication` is one of `PROBE_FAILURE_STATES`, so `doctor --probe` exits
+    non-zero. With the key, each dataset's one request reaches it.
+    """
+    monkeypatch.delenv("CHAINLIN_API_KEY", raising=False)
+    keyless = _CountingTransport()
+    outcomes = _probed(keyless)
+    assert set(outcomes.values()) == {"authentication"}, (
+        f"without the key the probe reported {outcomes}"
+    )
+    assert keyless.calls == 0, f"without the key {keyless.calls} requests reached the transport"
+    assert "authentication" in PROBE_FAILURE_STATES, (
+        f"PROBE_FAILURE_STATES is {sorted(PROBE_FAILURE_STATES)}, so the keyless probe no longer "
+        "makes doctor --probe exit non-zero"
+    )
+    monkeypatch.setenv("CHAINLIN_API_KEY", "secret")
+    keyed = _CountingTransport()
+    outcomes = _probed(keyed)
+    assert set(outcomes.values()) == {"ok"}, f"with the key the probe reported {outcomes}"
+    assert keyed.calls == len(outcomes), (
+        f"with the key {keyed.calls} requests reached the transport for {len(outcomes)} datasets"
     )
 
 

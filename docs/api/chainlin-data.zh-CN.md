@@ -29,9 +29,11 @@ Accept: application/json
 客户端在接收时给每条记录添加自己的 `ingested_time`，返回一个 `ProviderBatch`；批次在构造时，
 只要有一条记录按请求的 `as_of` 不可见，就整批拒绝。只有当调用方代码把这个客户端交给
 `build_provider_evidence`，或把批次交给 `build_evidence` 或 `POST /api/v1/evidence/build` 时，
-记录才会变成 `EvidenceSnapshot`。出厂路径只有 `openalpha doctor` 构造这个客户端：配置了服务
-地址时，`--probe` 对每个数据集发一次最小请求，只报告每次请求以哪一类结果结束，取回的批次
-随即丢弃。
+记录才会变成 `EvidenceSnapshot`。出厂路径只有 `openalpha doctor` 构造这个客户端。配置了服务地址
+和密钥时，`--probe` 对每个数据集发一次最小请求，只报告每次请求以哪一类结果结束，取回的批次随即
+丢弃。只配服务地址、不配密钥时，客户端在发出请求之前就报 `authentication`：所有数据集都报
+`authentication`，一个请求也不发，`openalpha doctor --probe` 以非零状态退出。没配服务地址时（有没有
+密钥都一样），`--probe` 不调用客户端，各数据集都报 `not_configured`。
 
 ## 安全、限流和错误
 
