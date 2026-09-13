@@ -909,9 +909,12 @@ def _line_of_the_invalid_escape(source: str, exc: SyntaxError) -> int:
 
     Escalating that warning to an error and letting `compile()` raise it reports where
     the *enclosing string literal starts* (`exc.lineno`), not the line the backslash is
-    actually on, on Python 3.11. Measured against this repository's own instance before
-    `19ed73b` fixed it -- `storage/connection.py`'s `\\|` on line 34, inside a docstring
-    that opens on line 1 -- 3.11's `exc.lineno` was 1 and 3.12's the true 34.
+    actually on, on some interpreters. Measured against this repository's own instance
+    before `19ed73b` fixed it -- `storage/connection.py`'s `\\|` on line 34, inside a
+    docstring that opens on line 1 -- 3.11's `exc.lineno` was 1 and a later 3.12's the
+    true 34. Which 3.12 matters: 3.12.3 (CI's ubuntu leg) still reports the literal's
+    start, while 3.12.10, 3.12.12 and 3.14.5 report the escape's own line, measured with
+    the multi-line source of the `..._not_fooled_by_a_valid_escape_containing_it` test.
 
     Returns `_located_invalid_escape_line(source)` when that finds the offender, and
     `exc.lineno` otherwise. An earlier version matched `exc.msg`'s quoted text as a
@@ -935,9 +938,10 @@ def _describe_where(source: str, exc: SyntaxError) -> str:
     Four cases, four wordings:
 
     * the offender was located and `compile()` agrees -- `line N`;
-    * it was located on a different line from the one `compile()` reports (3.11 reports
-      where the enclosing literal begins) -- `line L (compile() itself reports line N,
-      ...)`;
+    * it was located on a different line from the one `compile()` reports (3.11 and
+      3.12.3 report where the enclosing literal begins; 3.12.10, 3.12.12 and 3.14.5
+      report the escape's own line, which puts them in the first case) -- `line L
+      (compile() itself reports line N, ...)`;
     * the error is about an escape but `_located_invalid_escape_line` could not find it
       -- `compile()`'s number, passed on as exactly that and marked unconfirmed. Measured
       on 3.11.14: `\\x` followed by non-hex on line 2 of a three-line literal makes
@@ -1009,10 +1013,16 @@ def test_line_of_the_invalid_escape_is_not_fooled_by_a_valid_escape_containing_i
     looks for the offending text as a substring of the reported line range stops one
     line early, at the valid pair, instead of the real offender.
 
-    True line: 3. `compile()` itself reports `lineno=1, end_lineno=4` (the enclosing
-    docstring starts on line 1), and `exc.msg` names `'\\q'` on both -- the same
-    evidence a plain substring search would use to (wrongly) match line 2. Measured
-    against the helper before this fix: it returned 2, not 3.
+    True line: 3. Where `compile()` itself says the error is depends on the interpreter,
+    and both answers occur on this repository's CI matrix. Measured: 3.11.14 locally and
+    3.12.3 on CI's ubuntu leg report `lineno=1, end_lineno=4`, the enclosing literal, with
+    `exc.msg` naming `'\\q'` -- the evidence a plain substring search used to (wrongly)
+    match line 2; measured against the helper before its fix, it returned 2, not 3.
+    3.12.10 on CI's Windows leg, and 3.12.12 and 3.14.5 locally, report the true line
+    (`3, 3`). This test once asserted the first answer alone and went red on the Windows
+    3.12 leg for it. It now accepts exactly the two known answers, so a third still turns
+    it red and gets looked at, and it pins the helper's line on every interpreter: the
+    helper finds the escape with its own tokenizer scan, whatever `compile()` reports.
     """
     source = r'''"""
 line with a valid escaped backslash then q: \\q
@@ -1020,7 +1030,8 @@ real invalid escape is here: \q
 """
 '''
     exc = _syntax_error_from_compiling(source)
-    assert (exc.lineno, exc.end_lineno) == (1, 4)
+    assert (exc.lineno, exc.end_lineno) in {(1, 4), (3, 3)}
+    assert _located_invalid_escape_line(source) == 3
     assert _line_of_the_invalid_escape(source, exc) == 3
 
 
