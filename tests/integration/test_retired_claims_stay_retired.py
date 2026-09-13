@@ -1,19 +1,21 @@
 """Claims the code refutes may not come back into the four user-facing documents.
 
-`D13` found each of these in `README.md`, `README.en.md`, `docs/why-openalpha-cn.zh-CN.md` or the
-marketing pack at `d4ef5e4`, checked it against the code, and rewrote it. The final review had
-verified the first classes itself (its I4); the rest came from its sub-audits and were checked
-against the code before anything was rewritten. The classes its rebase round added came from the
-independent review of `D13` and the rebase brief, checked the same way. An entry of
-`RETIRED_CLAIMS` holds:
+`D13` found most of these in `README.md`, `README.en.md`, `docs/why-openalpha-cn.zh-CN.md`, the
+marketing pack or the API diagrams' generator at `d4ef5e4`, checked each against the code, and
+rewrote it. The final review had verified the first classes itself (its I4); the rest came from
+its sub-audits and were checked against the code before anything was rewritten. The classes its
+rebase round added came from the independent review of `D13` and the rebase brief, checked the
+same way; five of the wordings that round retired were never in `d4ef5e4`, because `D13` had
+written them itself, on its branch before the rebase (`16db458`). An entry of `RETIRED_CLAIMS`
+holds:
 
 - `pattern`: the family of wordings that was retired, searched in every clause of the four
   documents as `tests/prose_clauses.py` reads them;
-- `refuted_by`: the code fact that makes those wordings false, with file:line at the revision
-  where `D13` found them: `d4ef5e4`, or `c99b46b` for what its rebase round added;
-- `retired`: what it retired, verbatim from that revision -- the clause, or the part of it the
-  claim sits in -- each of which the pattern must still match, so a pattern cannot be loosened
-  into matching nothing;
+- `refuted_by`: the code fact that makes those wordings false, with file:line at the revision it
+  was checked at: `d4ef5e4`, or `c99b46b` for the classes the rebase round added;
+- `retired`: what it retired, verbatim -- the clause, or the part of it the claim sits in -- as it
+  stood at `d4ef5e4`, or on `16db458` for `D13`'s own five; the pattern must still match each of
+  them, so a pattern cannot be loosened into matching nothing;
 - `premise`, where the fact is cheap to read off the code: a check that returns a message the day
   the code starts to support the claim, so a claim that has become true is reported as true
   instead of being blocked;
@@ -557,7 +559,8 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         name="the four faces offer one and the same set of capabilities",
         pattern=re.compile(
             r"同一能力通过|工作台共享(?:同一后端能力|证据)|真走同一条链|入口用的是同一套能力"
-            r"|四类入口共享|共享同一合同"
+            r"|四类入口共享五条"
+            rf"|(?<![A-Za-z])(?:API|SDK|CLI|Web)(?![A-Za-z]){_NOT_END}{{0,12}}共享同一合同"
         ),
         refuted_by=(
             "tests/unit/test_surface_parity.py::PARITY maps 48 routes: 28 have no CLI command "
@@ -938,11 +941,20 @@ TRUE_SENTENCES_THAT_SHARE_THE_WORDS: Final[tuple[str, ...]] = (
     "资金在板块间移动的流程可以回放。",
     "拒单只记录原因，报告单独关联决策。",
     "See [the HTTP contract](docs/api/http.md) for the full argument and for the named boundaries.",
+    "三类数据 Provider 共享同一合同，失败语义一致。",
+    "四类入口共享的是同一批领域模型，覆盖面各不相同。",
+    "四类入口共享同一批服务，覆盖面各不相同。",
+    "FastAPI 路由与 OpenAPI 文档共享同一合同。",
 )
 """True or unrelated sentences that share a retired pattern's words. The review of `D13` measured
 the first six being caught (its M1): client holds cli, 移动平均 holds 移动, and a rejection and a
-report's decision can sit in one clause. The last is README.en.md:100's pointer to a factor run's
-named boundaries, which states no count; the first draft of the boundaries pattern caught it."""
+report's decision can sit in one clause. The seventh is README.en.md:100's pointer to a factor
+run's named boundaries, which states no count; the first draft of the boundaries pattern caught
+it. The review of the rebase round measured the next two being caught by the four faces' entry
+(its m4): a contract three providers share is not the faces', and faces that share domain models
+need not cover the same routes. The last two are what that review's suggested narrowing would
+still catch: 四类入口共享同一 holds the true 同一批服务, and API read as a substring holds
+OpenAPI and FastAPI."""
 
 
 def test_the_retired_patterns_pass_the_true_sentences_that_share_their_words() -> None:
