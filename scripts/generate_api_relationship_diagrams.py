@@ -470,8 +470,8 @@ def research_orchestration() -> str:
         title="持久批量研究",
         endpoint="POST /api/v1/research/batches",
         lines=(
-            "1–1000 个不可变请求",
-            "1–32 并发",
+            "1–10000 个不可变请求",
+            "1–8 并发",
             "events / cancel / retry",
             "SQLite 状态与重启恢复",
             "逐项复用同一 runner",

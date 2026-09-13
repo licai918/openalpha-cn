@@ -460,6 +460,89 @@ def test_readme_api_relationship_map_series_is_complete_and_source_grounded() ->
     assert "服务端自动抓取数据" not in combined_content
 
 
+DIAGRAM_GENERATORS: Final[tuple[str, ...]] = (
+    "scripts/generate_brain_diagrams.py",
+    "scripts/generate_api_relationship_diagrams.py",
+)
+"""The two generators that write `assets/diagrams/`'s ten SVGs."""
+
+
+def _diagram_sync_problems(
+    output_root: Path, committed_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> list[str]:
+    """Why the SVGs in `committed_dir` are not what the generators write, or an empty list.
+
+    Each generator is imported by path, pointed at `output_root` through its `OUTPUT_DIR`, and run
+    through its `main()`; every SVG it writes is compared byte for byte with the one of the same
+    name in `committed_dir`, and between them the generators must write every SVG found there.
+    """
+    problems: list[str] = []
+    written: list[str] = []
+    for relative in DIAGRAM_GENERATORS:
+        path = ROOT / relative
+        spec = importlib.util.spec_from_file_location(f"diagram_generator_{path.stem}", path)
+        assert spec is not None
+        assert spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        output = output_root / path.stem
+        monkeypatch.setattr(module, "OUTPUT_DIR", output)
+        module.main()
+        for svg in sorted(output.glob("*.svg")):
+            written.append(svg.name)
+            committed = committed_dir / svg.name
+            if not committed.is_file():
+                problems.append(f"{relative} writes {svg.name}, which is not committed")
+            elif svg.read_bytes() != committed.read_bytes():
+                problems.append(
+                    f"assets/diagrams/{svg.name} is not what {relative} writes; regenerate it "
+                    f"with `uv run python {relative}`"
+                )
+    committed_names = sorted(svg.name for svg in committed_dir.glob("*.svg"))
+    if sorted(written) != committed_names:
+        problems.append(
+            f"the generators wrote {sorted(written)}; the directory holds {committed_names}"
+        )
+    return problems
+
+
+def test_the_committed_diagrams_are_what_their_generators_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every committed SVG must be exactly what its generator writes today.
+
+    The prose guards read the diagrams' words from the generators' source (`tests/diagram_text.py`),
+    so an SVG edited by hand, or a generator edited without regenerating, would leave the guards
+    reading words the README does not show.
+    """
+    problems = _diagram_sync_problems(tmp_path, ROOT / "assets" / "diagrams", monkeypatch)
+    assert not problems, "\n".join(problems)
+
+
+def test_the_diagram_sync_check_reports_a_diagram_that_drifted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The committed diagrams agree with their generators, so the test above cannot show that its
+    comparison reports anything. Against a copy with one diagram changed by a byte, one removed
+    and one stray SVG added, all three must be reported."""
+    committed = tmp_path / "committed"
+    shutil.copytree(ROOT / "assets" / "diagrams", committed)
+    drifted = committed / "openalpha-brain-03-agents.svg"
+    drifted.write_bytes(drifted.read_bytes() + b"\n")
+    (committed / "openalpha-api-01-landscape.svg").unlink()
+    (committed / "stray.svg").write_text("<svg/>\n", encoding="utf-8")
+    problems = _diagram_sync_problems(tmp_path / "written", committed, monkeypatch)
+    assert any("openalpha-brain-03-agents.svg is not what" in problem for problem in problems), (
+        f"a drifted diagram went unreported: {problems}"
+    )
+    assert any(
+        "openalpha-api-01-landscape.svg, which is not committed" in problem for problem in problems
+    ), f"a diagram a generator writes but nobody committed went unreported: {problems}"
+    assert any("stray.svg" in problem for problem in problems), (
+        f"an SVG no generator writes went unreported: {problems}"
+    )
+
+
 def test_marketing_pack_contains_100_distinct_source_grounded_plans() -> None:
     content = (ROOT / "docs" / "marketing" / "openalpha-cn-100-promotion-plans.zh-CN.md").read_text(
         encoding="utf-8"

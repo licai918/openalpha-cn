@@ -89,7 +89,7 @@
   <text x="372" y="377" class="body" fill="#96A8BE" text-anchor="start" opacity="1">同一 AgentRouter</text>
   <text x="372" y="401" class="body" fill="#96A8BE" text-anchor="start" opacity="1">同一 RiskGate</text>
   <text x="372" y="425" class="body" fill="#96A8BE" text-anchor="start" opacity="1">同一 DecisionLedger</text>
-  <text x="372" y="449" class="body" fill="#96A8BE" text-anchor="start" opacity="1">同一成本与恢复语义</text>
+  <text x="372" y="449" class="body" fill="#96A8BE" text-anchor="start" opacity="1">同一 Checkpoint 恢复</text>
   <text x="372" y="473" class="body" fill="#96A8BE" text-anchor="start" opacity="1">输出 ResearchRunResult</text>
   <path d="M312 312L348 344" fill="none" stroke="#2DD4BF" stroke-width="2.2" marker-end="url(#arrow)" />
   <path d="M312 494L348 458" fill="none" stroke="#38BDF8" stroke-width="2.2" marker-end="url(#arrow)" />

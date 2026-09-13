@@ -93,7 +93,7 @@
   <rect x="716" y="266" width="3" height="130" rx="1.5" fill="#A78BFA" />
   <text x="740" y="273" class="micro" fill="#A78BFA" text-anchor="start" opacity="1">02 / 研究编排</text>
   <text x="740" y="306" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">ResearchRunResult</text>
-  <text x="740" y="335" class="body" fill="#96A8BE" text-anchor="start" opacity="1">持久批量队列 · 1–32 并发</text>
+  <text x="740" y="335" class="body" fill="#96A8BE" text-anchor="start" opacity="1">持久批量队列 · 1–8 并发</text>
   <text x="740" y="359" class="body" fill="#96A8BE" text-anchor="start" opacity="1">ResearchEngine.run_cycle</text>
   <rect x="374" y="440" width="322" height="174" rx="22" fill="#0C1928" stroke="#263A52" filter="url(#shadow)" />
   <rect x="375" y="441" width="320" height="172" rx="21" fill="none" stroke="#FFFFFF" stroke-opacity=".035" />
@@ -127,7 +127,7 @@
   <text x="1094" y="294" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">可复现与可审计</text>
   <text x="1094" y="323" class="body" fill="#96A8BE" text-anchor="start" opacity="1">RunManifest / DecisionLedger</text>
   <text x="1094" y="347" class="body" fill="#96A8BE" text-anchor="start" opacity="1">Checkpoint · SQLite WAL</text>
-  <text x="1094" y="371" class="body" fill="#96A8BE" text-anchor="start" opacity="1">Retry / Recovery · 成本账本</text>
+  <text x="1094" y="371" class="body" fill="#96A8BE" text-anchor="start" opacity="1">Retry / Recovery · 逐项终态</text>
   <text x="1094" y="395" class="body" fill="#96A8BE" text-anchor="start" opacity="1">证据不足时显式 abstain</text>
   <text x="1094" y="419" class="body" fill="#96A8BE" text-anchor="start" opacity="1">API / SDK / CLI / Web 同契约</text>
   <rect x="1070" y="526" width="306" height="144" rx="22" fill="#0C1928" stroke="#263A52" filter="url(#shadow)" />

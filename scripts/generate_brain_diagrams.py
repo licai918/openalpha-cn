@@ -342,7 +342,7 @@ def overview() -> None:
             "02",
             "研究编排",
             "ResearchRunResult",
-            ("持久批量队列 · 1–32 并发", "ResearchEngine.run_cycle"),
+            ("持久批量队列 · 1–8 并发", "ResearchEngine.run_cycle"),
             VIOLET,
         ),
         (
@@ -391,7 +391,7 @@ def overview() -> None:
         lines=(
             "RunManifest / DecisionLedger",
             "Checkpoint · SQLite WAL",
-            "Retry / Recovery · 成本账本",
+            "Retry / Recovery · 逐项终态",
             "证据不足时显式 abstain",
             "API / SDK / CLI / Web 同契约",
         ),
@@ -546,7 +546,7 @@ def agents() -> None:
         244,
         198,
         title="持久批量任务中心",
-        label="1–32 CONCURRENCY",
+        label="1–8 CONCURRENCY",
         color=VIOLET,
         lines=(
             "进度事件 · 取消 · 重试",
@@ -614,7 +614,7 @@ def agents() -> None:
             "evidence_ids / signal_ids / risk_flags",
             "确认条件 / 失效条件",
             "watch / avoid / abstain",
-            "agent_outputs / routing_path / 成本",
+            "agent_outputs / routing_path / 版本",
         ),
     )
     svg.path("M962 287H980V340H1000", color=AMBER)
@@ -628,7 +628,10 @@ def agents() -> None:
         title="模型治理边界",
         label="OPTIONAL MODEL ENHANCEMENT",
         color=CORAL,
-        lines=("能力注册 · Schema 校验 · 408/429/5xx 重试", "Token / 尝试次数 / 估算成本持久化"),
+        lines=(
+            "需代码接入 · Schema 校验 · 408/429/5xx 重试",
+            "Token / 尝试次数账本 · 出厂路径不调用模型",
+        ),
     )
     svg.finish("openalpha-brain-03-agents.svg")
 
@@ -793,7 +796,7 @@ def validation() -> None:
             "同一 AgentRouter",
             "同一 RiskGate",
             "同一 DecisionLedger",
-            "同一成本与恢复语义",
+            "同一 Checkpoint 恢复",
             "输出 ResearchRunResult",
         ),
     )

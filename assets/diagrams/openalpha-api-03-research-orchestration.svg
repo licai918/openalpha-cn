@@ -46,8 +46,8 @@
   <text x="88" y="446" class="cardTitle">持久批量研究</text>
   <rect x="86" y="456" width="248" height="27" rx="9" fill="#5968F2" opacity=".10" />
   <text x="96" y="475" class="endpoint">POST /api/v1/research/batches</text>
-  <text x="88" y="510" class="body">1–1000 个不可变请求</text>
-  <text x="88" y="535" class="body">1–32 并发</text>
+  <text x="88" y="510" class="body">1–10000 个不可变请求</text>
+  <text x="88" y="535" class="body">1–8 并发</text>
   <text x="88" y="560" class="body">events / cancel / retry</text>
   <text x="88" y="585" class="body">SQLite 状态与重启恢复</text>
   <text x="88" y="610" class="body">逐项复用同一 runner</text>

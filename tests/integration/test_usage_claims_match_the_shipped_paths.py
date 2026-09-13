@@ -172,6 +172,7 @@ from pathlib import Path
 from typing import Final
 
 import pytest
+from diagram_text import diagram_strings, diagram_units
 from prose_clauses import clauses, holds_unnegated_match, marker_pattern
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[2]
@@ -1585,3 +1586,132 @@ def test_the_model_call_guards_stated_blind_spots_are_real() -> None:
         f"a stated blind spot is now flagged: {closed}; a stated misreading no longer happens: "
         f"{opened} -- update the docstring with it"
     )
+
+
+# --- The embedded diagrams --------------------------------------------------------------------
+
+DIAGRAM_GENERATORS: Final[tuple[Path, ...]] = (
+    ROOT / "scripts" / "generate_brain_diagrams.py",
+    ROOT / "scripts" / "generate_api_relationship_diagrams.py",
+)
+"""The generators of the ten diagrams `README.md` embeds; `tests/unit/test_repository_assets.py`
+holds every committed SVG equal to what they write."""
+
+
+def _diagram_sources() -> dict[str, str]:
+    return {
+        path.relative_to(ROOT).as_posix(): path.read_text(encoding="utf-8")
+        for path in DIAGRAM_GENERATORS
+    }
+
+
+def _diagram_violations(guard: ProseGuard, sources: dict[str, str]) -> list[str]:
+    """One message per clause of a drawing call or data row that `guard` reads as a claim."""
+    return [
+        f"{label}:{unit.line} draws {guard.claim} as shipped: {unit.text!r}"
+        for label, source in sources.items()
+        for unit in diagram_units(source)
+        if guard.is_claim(unit.text)
+    ]
+
+
+@pytest.mark.parametrize("name", GUARDS)
+def test_the_embedded_diagrams_do_not_present_a_model_call_or_usage_recording_as_shipped(
+    name: str,
+) -> None:
+    """Both prose guards over the words the embedded diagrams draw, one unit per drawing call.
+
+    Written against brain-03's 模型治理边界 box, which read "能力注册 · Schema 校验 · 408/429/5xx
+    重试" and "Token / 尝试次数 / 估算成本持久化" as system behaviour. No allowlist applies here.
+    That box must still be read, so a reader or generator list gone blind fails rather than
+    passes. Three other cost words the diagrams drew as shipped -- "agent_outputs / routing_path
+    / 成本" in brain-03, "Retry / Recovery · 成本账本" in brain-01 and "同一成本与恢复语义" in
+    brain-05 -- carry no marker either guard reads, and were rewritten by hand.
+    """
+    guard = GUARDS[name]
+    sources = _diagram_sources()
+    assert any(
+        "模型治理边界" in unit.text for source in sources.values() for unit in diagram_units(source)
+    ), "brain-03's 模型治理边界 panel, which this test was written against, is no longer read"
+    violations = _diagram_violations(guard, sources)
+    assert not violations, (
+        "\n".join(violations) + f"\n{guard.remedy} Fix the generator, then regenerate the SVG "
+        "with the generator itself."
+    )
+
+
+PRE_D12_DIAGRAM_BOX: Final[str] = (
+    "svg.panel(\n"
+    "    1000,\n"
+    "    532,\n"
+    "    376,\n"
+    "    138,\n"
+    '    title="模型治理边界",\n'
+    '    label="OPTIONAL MODEL ENHANCEMENT",\n'
+    "    color=CORAL,\n"
+    '    lines=("能力注册 \N{MIDDLE DOT} Schema 校验 \N{MIDDLE DOT} 408/429/5xx 重试", '
+    '"Token / 尝试次数 / 估算成本持久化"),\n'
+    ")\n"
+)
+"""brain-03's 模型治理边界 box as `scripts/generate_brain_diagrams.py` drew it at `ea88999`."""
+
+
+@pytest.mark.parametrize("name", GUARDS)
+def test_the_diagram_guards_flag_the_box_they_were_written_for(name: str) -> None:
+    """Each guard's retroactive power over the diagrams, held: the pre-D12 box is one claim."""
+    violations = _diagram_violations(GUARDS[name], {"ea88999 box": PRE_D12_DIAGRAM_BOX})
+    assert len(violations) == 1, f"the pre-D12 box was read as {violations}"
+
+
+DIAGRAM_SOURCE: Final[
+    str
+] = '''"""A generator's docstring names 模型 and 408 重试, and is never drawn."""
+
+STAGES = [
+    (1, "02", "研究编排", ("持久批量队列 1-8 并发", "run_cycle")),
+]
+
+
+def draw(svg):
+    """Nor is a function's."""
+    svg.panel(1, 2, title="模型治理边界", lines=("Schema 校验 408 重试", "出厂路径不调用模型"))
+    svg.text(3, 4, "第一句。第二句")
+    svg.pill(5, 6, svg.label("内层"), "外层")
+'''
+"""A synthetic generator holding each shape `tests/diagram_text.py` reads, and a docstring."""
+
+
+def test_the_diagram_reader_reads_what_its_docstring_says() -> None:
+    """A data row with its nested lines is one unit; a panel's title and lines are one unit; a
+    sentence end splits a unit; a nested call is a unit of its own; no docstring is read.
+
+    `diagram_strings` returns every literal alone, docstrings excepted.
+    """
+    units = sorted(clause.text for clause in diagram_units(DIAGRAM_SOURCE))
+    expected_units = sorted(
+        (
+            "02，研究编排，持久批量队列 1-8 并发，run_cycle",
+            "模型治理边界，Schema 校验 408 重试，出厂路径不调用模型",
+            "第一句。",
+            "第二句",
+            "外层",
+            "内层",
+        )
+    )
+    strings = sorted(clause.text for clause in diagram_strings(DIAGRAM_SOURCE))
+    expected_strings = sorted(
+        (
+            "02",
+            "研究编排",
+            "持久批量队列 1-8 并发",
+            "run_cycle",
+            "模型治理边界",
+            "Schema 校验 408 重试",
+            "出厂路径不调用模型",
+            "第一句。第二句",
+            "内层",
+            "外层",
+        )
+    )
+    assert units == expected_units, f"diagram_units read {units}"
+    assert strings == expected_strings, f"diagram_strings read {strings}"

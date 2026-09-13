@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Final
 
 import pytest
+from diagram_text import diagram_strings
 from fastapi.testclient import TestClient
 from prose_clauses import clauses
 
@@ -542,3 +543,83 @@ def test_the_worker_range_reader_reads_what_its_docstring_says() -> None:
     assert dated_read == [(1, MAX_BATCH_WORKERS)], (
         f"a date beside a valid range was read as {dated_read}, not the one range it holds"
     )
+
+
+DIAGRAM_GENERATORS: Final[tuple[Path, ...]] = (
+    ROOT / "scripts" / "generate_brain_diagrams.py",
+    ROOT / "scripts" / "generate_api_relationship_diagrams.py",
+)
+"""The generators of the ten diagrams `README.md` embeds; `tests/unit/test_repository_assets.py`
+holds every committed SVG equal to what they write."""
+
+ITEM_RANGE_IN_DIAGRAMS: Final[re.Pattern[str]] = re.compile(
+    rf"(?<!{_NOT_BESIDE})1\s*{_JOINER}\s*({_DIGIT}+)\s*个不可变请求"
+)
+"""A batch item range as the diagrams draw it: `1-<n> 个不可变请求`."""
+
+
+def _diagram_ceiling_problems(sources: dict[str, str]) -> list[str]:
+    """Every batch ceiling the diagram `sources` draw that is not the one the API enforces.
+
+    Each string literal is read alone (`diagram_strings`): a worker range in one that names 并发,
+    并行, "concurren..." or "worker...", and an item range in one that reads `1-<n> 个不可变请求`.
+    Finding neither kind fails too, so a reader gone blind cannot pass.
+    """
+    worker_ranges: list[tuple[str, int, int, int]] = []
+    item_caps: list[tuple[str, int, int]] = []
+    for name, source in sources.items():
+        for string in diagram_strings(source):
+            if any(word in string.text.lower() for word in CONCURRENCY_WORDS):
+                for match in WORKER_RANGE_IN_PROSE.finditer(string.text):
+                    floor, ceiling = (int(bound) for bound in match.groups() if bound is not None)
+                    worker_ranges.append((name, string.line, floor, ceiling))
+            item_caps.extend(
+                (name, string.line, int(match[1]))
+                for match in ITEM_RANGE_IN_DIAGRAMS.finditer(string.text)
+            )
+    problems: list[str] = []
+    if not worker_ranges:
+        problems.append("no diagram string draws a worker range; three did when this was written")
+    if not item_caps:
+        problems.append("no diagram string draws a batch item range; one did when this was written")
+    problems.extend(
+        f"{name}:{line} draws a batch concurrency range of {floor}-{ceiling}, but "
+        f"max_concurrency accepts 1-{MAX_BATCH_WORKERS}"
+        for name, line, floor, ceiling in worker_ranges
+        if (floor, ceiling) != (1, MAX_BATCH_WORKERS)
+    )
+    problems.extend(
+        f"{name}:{line} draws a batch item cap of {cap}, but MAX_BATCH_ITEMS is {MAX_BATCH_ITEMS}"
+        for name, line, cap in item_caps
+        if cap != MAX_BATCH_ITEMS
+    )
+    return problems
+
+
+def test_every_batch_ceiling_the_diagrams_draw_is_the_one_the_api_enforces() -> None:
+    """The embedded diagrams draw the batch ceilings too, and nothing read them until `D12`.
+
+    brain-01, brain-03 and api-03 drew the worker range as 1-32 and api-03 drew the item cap as
+    1-1000, the numbers `README.md` carried before `74cee0f` and `e758f0a` corrected its prose.
+    """
+    sources = {
+        path.relative_to(ROOT).as_posix(): path.read_text(encoding="utf-8")
+        for path in DIAGRAM_GENERATORS
+    }
+    problems = _diagram_ceiling_problems(sources)
+    assert not problems, (
+        "\n".join(problems) + "\nFix the generator, then regenerate the SVG with the generator "
+        "itself."
+    )
+
+
+def test_the_diagram_ceiling_reader_reports_what_its_docstring_says() -> None:
+    """Stale ceilings are reported, current ones are not, and drawing neither kind fails."""
+    current = (
+        f'svg.card(lines=("1-{MAX_BATCH_ITEMS} 个不可变请求", "1-{MAX_BATCH_WORKERS} 并发"))\n'
+    )
+    stale = 'svg.card(lines=("1-1000 个不可变请求", "1-32 CONCURRENCY"))\n'
+    blind = 'svg.card(lines=("持久批量研究",))\n'
+    assert not _diagram_ceiling_problems({"current.py": current}), "current ceilings reported"
+    assert len(_diagram_ceiling_problems({"stale.py": stale})) == 2, "a stale ceiling unreported"
+    assert len(_diagram_ceiling_problems({"blind.py": blind})) == 2, "an empty read passed"
