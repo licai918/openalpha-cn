@@ -45,18 +45,25 @@ What it ignores, because the interpreter and the runner write these as a matter 
 * at the root only, `.pytest_cache`, `.coverage` and `.coverage.*`: the cache and the coverage data
   the runner writes there itself;
 * what this run writes because its own options told it to (`run_outputs`): the report
-  `--junitxml` names; the basetemp `--basetemp` names, which pytest empties and makes again, so
-  the directory holding it is not asked about a created-and-removed entry either; pytest's
-  `cache_dir`; and pytest-cov's data file and file reports -- `html`, `xml`, `json`, `lcov`,
-  `markdown` and `markdown-append` at the destination given after `:`, or where coverage.py's
-  configuration puts them when none is (`htmlcov/`, `coverage.xml`, `coverage.json`,
-  `coverage.lcov` by default), and `annotate`'s `*,cover` beside each source. D14 I-1: before these
-  were read, each failed a run whose every test had passed the first time its target appeared in
-  the checkout, and a basetemp under `tests/` failed every run. So do the directories one of them
-  needs and the session began without, which its writer makes on the way -- those directories
-  themselves, not whatever else turns up in them. D14 fix review m-1: until they did,
-  `--junitxml=reports/junit.xml` failed every run in a fresh checkout with `created reports at the
-  checkout root`, and `--junitxml=tests/reports/junit.xml` with `created directory tests/reports/`.
+  `--junitxml` names; the basetemp `--basetemp` names; pytest's `cache_dir`; and pytest-cov's data
+  file and file reports -- `html`, `xml`, `json`, `lcov`, `markdown` and `markdown-append` at the
+  destination given after `:`, or where coverage.py's configuration puts them when none is
+  (`htmlcov/`, `coverage.xml`, `coverage.json`, `coverage.lcov` by default), and `annotate`'s
+  `*,cover` beside each source. D14 I-1: before these were read, each failed a run whose every test
+  had passed the first time its target appeared in the checkout, and a basetemp under `tests/`
+  failed every run;
+* the directories one of those needs and the session began without, which its writer makes on the
+  way -- those directories themselves, not whatever else turns up in them. D14 fix review m-1:
+  until they were, `--junitxml=reports/junit.xml` failed every run in a fresh checkout with
+  `created reports at the checkout root`, and `--junitxml=tests/reports/junit.xml` with `created
+  directory tests/reports/`;
+* the created-and-removed shape in the directory directly holding a basetemp or coverage.py's
+  data file that stood there as the session began: pytest empties the one and makes it again,
+  pytest-cov saves a data file of its own beside the other and combines it in, and either leaves
+  that directory's listing as it was and its modification time moved. Only those two: D14 fix
+  review m-2 measured what exempting the directory of any output cost -- a junit or coverage
+  report written over one an earlier run left, or a basetemp named and never made, hid a module a
+  test created and removed in `tests/` for the whole session.
 
 What fails a session although no test caused it -- the guard sees that a path changed, never who
 changed it:
@@ -65,9 +72,9 @@ changed it:
   `touch`, a formatter, `git checkout`, `stash` or `rebase` in this checkout, a second run in it;
 * a name that appears at the root while the session runs: a concurrent `lint-imports` making its
   cache, `uv build` making `dist/`, `ruff` or `mypy` making theirs the first time;
-* an output of this run that `run_outputs` does not read: another plugin's report file, or the
-  parallel data files coverage.py writes beside a data file its configuration moved out of the
-  root.
+* an output of this run that `run_outputs` does not read, such as another plugin's report file.
+  Not the data file pytest-cov saves beside coverage.py's and combines in: it is gone before the
+  last snapshot, and a run with the data file moved into `tests/` measured silent.
 
 A run during which `src/` changed did not test one tree, so failing it is the right default even
 when the writer was not a test, and every line names its path so the reader can tell which it
@@ -79,11 +86,13 @@ the tests. The default is `fail`, CI sets nothing, and any other value is a usag
 What it cannot see: a write made after the last snapshot, by a process a test started and left
 running -- measured, the session passed and the file appeared two seconds later; a file directly
 under the root rewritten in place; on Windows, a same-size rewrite with its modification time put
-back; and anything outside `src/`, `tests/` and the root's own listing -- a test that rewrote a
-file under `docs/`, or wrote inside a directory that already stands at the root, such as
-`runtime/`. That last is the one place the other half decides: the reading sees such a write when
-its path is one the reading follows -- `(ROOT / "docs" / "notes.md").write_text(...)` is a case of
-its own test -- and not when a subprocess, or a path it does not follow, makes it.
+back; a file created and removed in a directory whose listing changed in the same window, or
+beside a basetemp or data file the run remade (both above); and anything outside `src/`, `tests/`
+and the root's own listing -- a test that rewrote a file under `docs/`, or wrote inside a
+directory that already stands at the root, such as `runtime/`. That last is the one place the
+other half decides: the reading sees such a write when its path is one the reading follows --
+`(ROOT / "docs" / "notes.md").write_text(...)` is a case of its own test -- and not when a
+subprocess, or a path it does not follow, makes it.
 """
 
 from __future__ import annotations
@@ -159,6 +168,11 @@ class RunOutputs:
     in one that is not among `paths` is still a change.
     """
 
+    remade: frozenset[str] = frozenset()
+    """Those of `paths` that stood there as the session began and that their writer remakes: the
+    basetemp, which pytest empties and makes again, and coverage.py's data file, beside which
+    pytest-cov saves a data file of its own and then combines it in."""
+
     def cover(self, path: str) -> bool:
         """Whether `path` is one of these outputs, lies inside one, or was made to hold one."""
         return (
@@ -167,13 +181,14 @@ class RunOutputs:
             or any(path == output or path.startswith(f"{output}/") for output in self.paths)
         )
 
-    def one_is_directly_in(self, directory: str) -> bool:
-        """Whether one of these outputs sits directly inside `directory`.
+    def remade_directly_in(self, directory: str) -> bool:
+        """Whether one of `remade` sits directly inside `directory`.
 
-        Emptying a basetemp and making it again moves its parent's modification time and leaves
-        the parent's listing as it was, which is exactly the shape of a file created and removed.
+        Remaking one moves that directory's modification time and leaves its listing as it was,
+        which is exactly the shape of a file created and removed. A report written over the one an
+        earlier run left moves neither, and a basetemp named and never made remakes nothing.
         """
-        return any(PurePosixPath(output).parent.as_posix() == directory for output in self.paths)
+        return any(PurePosixPath(output).parent.as_posix() == directory for output in self.remade)
 
 
 NOTHING_OF_ITS_OWN: Final[RunOutputs] = RunOutputs()
@@ -202,16 +217,20 @@ def run_outputs(config: pytest.Config) -> RunOutputs:
     cache plugin is off (`-p no:cacheprovider`), and then writes nothing. A target outside the
     root is nothing this guard watches. The directories a target inside it needs and does not have
     yet, as they stand when this is called -- as the session starts -- are the run's as well
-    (`RunOutputs.made_for_them`).
+    (`RunOutputs.made_for_them`), and so, of the basetemp and the data file, is whichever stands
+    there already (`RunOutputs.remade`).
     """
     started = config.invocation_params.dir
     targets: list[Path] = []
+    remade: list[Path] = []
     if config.pluginmanager.hasplugin("cacheprovider"):
         targets.append(_target(str(config.getini("cache_dir")), config.rootpath))
-    for option in ("xmlpath", "basetemp"):
-        value = getattr(config.option, option, None)
-        if value:
-            targets.append(_target(str(value), started))
+    xmlpath = getattr(config.option, "xmlpath", None)
+    if xmlpath:
+        targets.append(_target(str(xmlpath), started))
+    basetemp = getattr(config.option, "basetemp", None)
+    if basetemp:
+        remade.append(_target(str(basetemp), started))
     suffixes: set[str] = set()
     coverage = config.pluginmanager.getplugin("_cov")
     reports = getattr(getattr(coverage, "options", None), "cov_report", None)
@@ -228,13 +247,9 @@ def run_outputs(config: pytest.Config) -> RunOutputs:
                 suffixes.add(ANNOTATED_SOURCE)
     data_file = getattr(settings, "data_file", None)
     if data_file:
-        targets.append(_target(str(data_file), started))
+        remade.append(_target(str(data_file), started))
     root = Path(os.path.realpath(config.rootpath))
-    inside = [
-        real
-        for real in (Path(os.path.realpath(target)) for target in targets)
-        if real != root and real.is_relative_to(root)
-    ]
+    inside = _inside(root, [*targets, *remade])
     return RunOutputs(
         paths=frozenset(real.relative_to(root).as_posix() for real in inside),
         suffixes=frozenset(suffixes),
@@ -243,12 +258,24 @@ def run_outputs(config: pytest.Config) -> RunOutputs:
             for real in inside
             for directory in _directories_to_make(real, root)
         ),
+        remade=frozenset(
+            real.relative_to(root).as_posix() for real in _inside(root, remade) if real.exists()
+        ),
     )
 
 
 def _target(value: str, base: Path) -> Path:
     candidate = Path(os.path.expandvars(os.path.expanduser(value)))
     return candidate if candidate.is_absolute() else base / candidate
+
+
+def _inside(root: Path, targets: list[Path]) -> list[Path]:
+    """Each of `targets` that lies below `root`, as a real path."""
+    return [
+        real
+        for real in (Path(os.path.realpath(target)) for target in targets)
+        if real != root and real.is_relative_to(root)
+    ]
 
 
 def _directories_to_make(path: Path, root: Path) -> list[Path]:
@@ -335,7 +362,7 @@ def changes(
             found.append(f"created directory {path}/")
         elif holds is None:
             found.append(f"deleted directory {path}/")
-        elif held[0] != holds[0] and held[1] == holds[1] and not outputs.one_is_directly_in(path):
+        elif held[0] != holds[0] and held[1] == holds[1] and not outputs.remade_directly_in(path):
             found.append(
                 f"created and removed something in {path}/ -- its modification time moved and "
                 "its listing did not"

@@ -1583,6 +1583,83 @@ def test_a_directory_made_for_a_report_is_the_run_s_own_and_nothing_else_is(
     ], output
 
 
+CREATES_AND_REMOVES_BESIDE_ITSELF: Final[str] = textwrap.dedent(
+    """
+    from pathlib import Path
+
+
+    def test_plants_a_probe_module_beside_itself_and_deletes_it():
+        probe = Path(__file__).resolve().parent / "_layering_gate_probe.py"
+        probe.write_text("import sqlite3\\n", encoding="utf-8")
+        probe.unlink()
+    """
+)
+"""A test whose one write is a module in `tests/`, created and removed; it takes no `tmp_path`."""
+
+CREATED_AND_REMOVED_IN_TESTS: Final[str] = (
+    "while the tests ran, created and removed something in tests/ -- its modification time moved "
+    "and its listing did not"
+)
+
+
+@pytest.mark.parametrize(
+    ("options", "left_by_an_earlier_run"),
+    [
+        ((), None),
+        (("--junitxml=tests/junit.xml",), "tests/junit.xml"),
+        (("--cov=tests", "--cov-report=xml:tests/coverage.xml"), "tests/coverage.xml"),
+        (("--basetemp=tests/bt",), None),
+    ],
+    ids=["no-output-there", "junit-report", "coverage-report", "basetemp-never-made"],
+)
+def test_an_output_standing_in_tests_does_not_hide_a_module_created_and_removed_there(
+    tmp_path: Path, options: tuple[str, ...], left_by_an_earlier_run: str | None
+) -> None:
+    """D14 fix review m-2: any output directly in a watched directory used to exempt it.
+
+    Measured on the code before this, each run but the first here was green: a junit or coverage
+    report rewritten over the one an earlier run left, or a basetemp named and never made -- this
+    probe takes no `tmp_path` -- kept `tests/` from being asked about the module the probe
+    created and removed there, for the whole session. The first, with no output in `tests/`, is
+    the control, and named it. The exemption is for a directory a writer's own remaking moves:
+    a basetemp pytest empties and makes again, and coverage.py's data file.
+    """
+    if left_by_an_earlier_run is not None:
+        earlier = tmp_path / "checkout" / left_by_an_earlier_run
+        earlier.parent.mkdir(parents=True)
+        earlier.write_bytes(b"left by an earlier run\n")
+
+    finished = _run_the_hooks_over(tmp_path, CREATES_AND_REMOVES_BESIDE_ITSELF, *options)
+    output = finished.stdout + finished.stderr
+
+    assert finished.returncode == 1, output
+    assert "1 passed" in output, output
+    assert _reported(output) == [CREATED_AND_REMOVED_IN_TESTS], output
+
+
+def test_coverage_s_data_file_kept_in_tests_is_made_and_appended_to_without_failing_a_run(
+    tmp_path: Path,
+) -> None:
+    """The other writer the created-and-removed exemption is kept for: coverage.py's data file.
+
+    pytest-cov saves a data file of its own beside the configured one and combines it in. On a
+    first run that leaves the configured file standing where nothing stood, which the listing
+    shows; with `--cov-append` the configured file stood there as the session began and stays,
+    so the directory's listing is what it was and its modification time moved.
+    """
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / ".coveragerc").write_text("[run]\ndata_file = tests/.coverage\n", encoding="utf-8")
+
+    first = _run_the_hooks_over(tmp_path, TMP_PATH_PROBE, "--cov=tests")
+    appended = _run_the_hooks_over(tmp_path, TMP_PATH_PROBE, "--cov=tests", "--cov-append")
+    outputs = [run.stdout + run.stderr for run in (first, appended)]
+
+    assert [_reported(output) for output in outputs] == [[], []], outputs
+    assert [run.returncode for run in (first, appended)] == [0, 0], outputs
+    assert (checkout / "tests" / ".coverage").is_file()
+
+
 FAILING_TEST: Final[str] = textwrap.dedent(
     """
 
