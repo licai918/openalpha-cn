@@ -33,8 +33,9 @@ panel and "已实现 · 统一替代入口" on the next, so a panel's strings ar
 链邻, ChainLin or AKShare, in any case and as a substring, so `ChainLinDataProvider`,
 `chainlin-data/v1` and `AKShareProvider` count. Before a clause is read, a URL and the name of the
 separately distributed desktop product (`DESKTOP_PRODUCT`) are removed, so "进入 Release 页面"
-beside a `chainlin-desktop` link is no claim. A URL ends at whitespace, a closing bracket or
-full-width punctuation (`URL`), so a claim written straight after a link is still read.
+beside a `chainlin-desktop` link is no claim. A URL is the printable ASCII after `http(s)://`
+up to a closing `)`, `]` or `>` (`URL`): whitespace and any character outside ASCII end it, so a
+claim written straight after a link, behind full-width punctuation or not, is still read.
 ChainLin's own contract document, `docs/api/chainlin-data.zh-CN.md`, is read too, and every
 clause of it as naming ChainLin (`CLIENT_DOCUMENTS`), because it speaks of the client's batches
 without writing the client's name.
@@ -66,6 +67,8 @@ which `test_the_reference_scan_finds_what_its_docstring_says` measures.
 - Any clause of ChainLin's contract document that holds a marker, whatever its subject: every
   clause there is read as naming ChainLin, so a semicolon does not help. Its caution "不得把尚未
   配置的服务宣传为已连接" was reworded.
+- A link whose path holds text outside ASCII is cut at its first such character, and the rest of
+  the path is read as prose: `https://example.com/链邻入口` reads as a claim.
 """
 
 from __future__ import annotations
@@ -242,14 +245,14 @@ DESKTOP_PRODUCT: Final[re.Pattern[str]] = re.compile(
 )
 """The separately distributed desktop product, which is not the data client."""
 
-URL: Final[re.Pattern[str]] = re.compile(
-    "https?://[^\\s)\\]>，。、"
-    "\N{FULLWIDTH SEMICOLON}\N{FULLWIDTH EXCLAMATION MARK}\N{FULLWIDTH QUESTION MARK}]+"
-)
-"""A URL, ending at whitespace, a closing bracket or full-width punctuation.
+URL: Final[re.Pattern[str]] = re.compile(r"https?://(?:(?![)\]>])[!-~])+")
+"""A URL: the printable ASCII after `http(s)://`, up to a closing `)`, `]` or `>`.
 
-Chinese puts no space after a link, so a URL that ran on to the next whitespace took the claim
-written right after it with it; `test_a_claim_written_right_after_a_link_is_read` holds this.
+Whitespace and every character outside ASCII end it, so full-width punctuation does, and so does
+the first Chinese character after an ASCII comma. Chinese puts no space after a link, and a URL
+that ran on to the next whitespace took the claim written right after it with it;
+`test_a_claim_written_right_after_a_link_is_read` holds this. A link whose path holds text outside
+ASCII is cut at its first such character, and the rest of the path is read as prose.
 """
 
 _WITHIN_A_CLAUSE: Final[str] = "[^，。\N{FULLWIDTH SEMICOLON}]*"
@@ -619,13 +622,40 @@ CLAIMS_RIGHT_AFTER_A_LINK: Final[dict[str, str]] = {
     "a bare URL, then a comma and the claim": (
         "链邻 Provider 文档见 https://example.com/x，已接入研究链。"
     ),
+    "a full-width right parenthesis": "链邻 Provider 文档见 https://example.com/x）已接入研究链。",
+    "a full-width colon": "链邻 Provider 文档见 https://example.com/x：已接入研究链。",
+    "a corner bracket": (
+        "链邻 Provider 文档见\N{LEFT CORNER BRACKET}https://example.com/x"
+        "\N{RIGHT CORNER BRACKET}已接入研究链。"
+    ),
+    "a double angle bracket": (
+        "链邻 Provider 文档见\N{LEFT DOUBLE ANGLE BRACKET}https://example.com/x"
+        "\N{RIGHT DOUBLE ANGLE BRACKET}已接入研究链。"
+    ),
+    "a lenticular bracket": (
+        "链邻 Provider 文档见\N{LEFT BLACK LENTICULAR BRACKET}https://example.com/x"
+        "\N{RIGHT BLACK LENTICULAR BRACKET}已接入研究链。"
+    ),
+    "a closing quotation mark": (
+        "链邻 Provider 文档见\N{LEFT DOUBLE QUOTATION MARK}https://example.com/x"
+        "\N{RIGHT DOUBLE QUOTATION MARK}已接入研究链。"
+    ),
+    "an ASCII comma, then the claim": "链邻 Provider 文档见 https://example.com/x,已接入研究链。",
+    "an ASCII parenthesis, then the name": "[文档](https://example.com/x)ChainLin 已接入研究链。",
+    "an ASCII square bracket, then the name": "[https://example.com/x]ChainLin 已接入研究链。",
+    "an autolink, then the name": "<https://example.com/x>ChainLin 已接入研究链。",
 }
-"""The review of `D13` put the first into `README.md`, and the guard passed: `\\S+` ran the URL
-on to the next whitespace, and Chinese puts none after a link."""
+"""Claims written straight after a link, each of which must be read.
+
+The review of `D13` put the first into `README.md`, and the guard passed: `\\S+` ran the URL on to
+the next whitespace, and Chinese puts none after a link. The review of the fixes found the URL
+still ran on through the full-width punctuation its list left out; the next six probes are those
+marks, and the ASCII comma after them is the same fault. The last three hold the ASCII closing
+brackets, which end a URL even when ASCII text follows."""
 
 
 def test_a_claim_written_right_after_a_link_is_read() -> None:
-    """A URL ends at a closing bracket, whitespace or full-width punctuation, not at a space."""
+    """A URL ends at whitespace, a closing ASCII bracket or the first character outside ASCII."""
     missed = [
         label
         for label, sentence in CLAIMS_RIGHT_AFTER_A_LINK.items()
@@ -668,6 +698,7 @@ def test_the_stated_limits_are_real() -> None:
         "another subject's marker": (
             "链邻 Provider 负责认证、限流和错误分类，四时钟保证 Agent 只读当时可见信息。\n"
         ),
+        "a URL whose path is not ASCII": "文档见 https://example.com/链邻入口。\n",
     }
     passed = [
         label
