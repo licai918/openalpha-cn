@@ -402,41 +402,92 @@ _NOT_BESIDE: Final[str] = f"[A-Za-z0-9_.{_FULL_WIDTH_DIGITS}]"
 
 _JOINER: Final[str] = f"[{re.escape(RANGE_JOINERS)}]"
 
+_NUMBER_IN_PROSE: Final[str] = f"{_DIGIT}{{1,3}}(?:,{_DIGIT}{{3}})+|{_DIGIT}+"
+"""A number as prose writes it, in ASCII or full-width digits: grouped in threes by `,`, so
+`10,000` is one number rather than `10`, or not grouped."""
+
 WORKER_RANGE_IN_PROSE: Final[re.Pattern[str]] = re.compile(
     rf"(?<!{_NOT_BESIDE})(?<!{_DIGIT}{_JOINER})"
-    rf"(?:between\s+({_DIGIT}+)\s+and\s+({_DIGIT}+)"
-    rf"|({_DIGIT}+)\s*(?:{_JOINER}|到|至|\s+to\s+)\s*({_DIGIT}+))"
+    rf"(?:between\s+({_NUMBER_IN_PROSE})\s+and\s+({_NUMBER_IN_PROSE})"
+    rf"|({_NUMBER_IN_PROSE})\s*(?:{_JOINER}|到|至|\s+to\s+)\s*({_NUMBER_IN_PROSE}))"
     rf"(?!{_NOT_BESIDE})(?!\s*{_JOINER}\s*{_DIGIT})",
     re.IGNORECASE,
 )
-"""Any `<a>-<b>` range in ASCII or full-width digits: joined by one of `RANGE_JOINERS`, by 到,
-by 至 or by "to", or written "between <a> and <b>".
+"""Any `<a>-<b>` range in ASCII or full-width digits, each number grouped by commas or not:
+joined by one of `RANGE_JOINERS`, by 到, by 至 or by "to", or written "between <a> and <b>".
 
 Looser than `STATED_RANGE` on purpose: it runs over every clause about concurrency in the
 documents `WORKER_RANGE_DOCUMENTS` names, and a range written `1到8` there must be read and
 checked rather than skipped. A letter, a digit, `_`
 or `.` directly beside either number keeps an identifier such as `V2-P4-019` from reading as the
 range 4-19, and a number that a dash joins to a third number -- a date such as 2026-08-18 -- is
-not read as a range at all.
+not read as a range at all. Until the review of `D13` a grouped `1-10,000` was read as the range
+1-10 (its m-11).
 """
 
 CONCURRENCY_WORDS: Final[tuple[str, ...]] = ("并发", "并行", "concurren", "worker")
 """What puts a clause in scope for the worker-range check, matched case-insensitively."""
 
+PERCENT_AFTER: Final[re.Pattern[str]] = re.compile(
+    r"\s*(?:%|\N{FULLWIDTH PERCENT SIGN}|percent(?![A-Za-z]))", re.IGNORECASE
+)
+"""What makes the range before it a percentage: a percent sign, full-width or not, or
+"percent"."""
+
+THROUGHPUT_WORDS: Final[tuple[str, ...]] = ("吞吐", "throughput")
+"""What makes a range inside the accepted one a measured setting: throughput, named in the same
+clause, matched case-insensitively."""
+
+
+def _worker_ranges(text: str) -> list[tuple[int, int]]:
+    """Each worker range `text` states, as `(floor, ceiling)`.
+
+    Every range `WORKER_RANGE_IN_PROSE` reads in a text that names one of `CONCURRENCY_WORDS`,
+    except three that state something else, which the review of `D13` found reported as stale
+    worker ranges (its m-11):
+
+    - a range `PERCENT_AFTER` follows, a percentage;
+    - 1 to `MAX_BATCH_ITEMS`, the item cap, which `BATCH_ITEM_CAP` and `ITEM_RANGE_IN_DIAGRAMS`
+      read;
+    - in a text that names throughput (`THROUGHPUT_WORDS`), a range above the floor and within
+      the ceiling, a measured setting rather than the accepted range.
+
+    What that leaves: a stale floor beside throughput passes ("实测 2-8 路并发吞吐持平。"); a
+    range from the floor or above the ceiling beside throughput is read, true or not ("实测 1-4
+    路并发时吞吐近似线性。"); and so is a range of anything else beside a concurrency word ("以
+    1-8 并发处理每批 1-500 个请求。").
+    `test_the_limits_of_what_is_not_read_as_a_worker_range_are_real` measures each.
+    """
+    lowered = text.lower()
+    if not any(word in lowered for word in CONCURRENCY_WORDS):
+        return []
+    beside_throughput = any(word in lowered for word in THROUGHPUT_WORDS)
+    ranges: list[tuple[int, int]] = []
+    for match in WORKER_RANGE_IN_PROSE.finditer(text):
+        if PERCENT_AFTER.match(text, match.end()):
+            continue
+        floor, ceiling = (
+            int(bound.replace(",", "")) for bound in match.groups() if bound is not None
+        )
+        if (floor, ceiling) == (1, MAX_BATCH_ITEMS):
+            continue
+        if beside_throughput and 1 < floor <= ceiling <= MAX_BATCH_WORKERS:
+            continue
+        ranges.append((floor, ceiling))
+    return ranges
+
 
 def _worker_range_mentions(document: str) -> list[tuple[int, int, int, str]]:
-    """Every range in a clause of `document` that names concurrency: line, floor, ceiling, clause.
+    """Every worker range in a clause of `document`: line, floor, ceiling, clause.
 
     Clauses come from `tests/prose_clauses.py`, so a range and its 并发 split by a soft wrap are
-    read as one clause.
+    read as one clause, and `_worker_ranges` decides which of a clause's ranges are worker ranges.
     """
-    found: list[tuple[int, int, int, str]] = []
-    for clause in clauses(document):
-        if any(word in clause.text.lower() for word in CONCURRENCY_WORDS):
-            for match in WORKER_RANGE_IN_PROSE.finditer(clause.text):
-                floor, ceiling = (int(bound) for bound in match.groups() if bound is not None)
-                found.append((clause.line, floor, ceiling, clause.text))
-    return found
+    return [
+        (clause.line, floor, ceiling, clause.text)
+        for clause in clauses(document)
+        for floor, ceiling in _worker_ranges(clause.text)
+    ]
 
 
 def _worker_range_problems(documents: dict[str, str]) -> list[str]:
@@ -500,14 +551,19 @@ def test_every_worker_range_the_documents_state_is_the_one_the_api_enforces() ->
     batch-API sentence -- and until `D7` nothing read the first two. The marketing pack states it
     four times, and until `D13` nothing read any of them. A clause is in scope when it names 并发,
     并行, "concurren..." or "worker...", and every range in it is read, in any form
-    `WORKER_RANGE_IN_PROSE` reads. `README.en.md` and `docs/why-openalpha-cn.zh-CN.md` state no
-    worker range today, so they add nothing until they do.
+    `WORKER_RANGE_IN_PROSE` reads, except the three `_worker_ranges` leaves out as no worker
+    range: a percentage, the item cap, and a sub-range of the accepted one beside throughput.
+    `README.en.md` and `docs/why-openalpha-cn.zh-CN.md` state no worker range today, so they add
+    nothing until they do.
 
     Finding no range in `README.md` or in the marketing pack fails: a change that stops this
     reader seeing the ranges it sees today has to break the test, not empty it. What it cannot
     see: a worker count written without a range ("最多 8 路并发", "up to 8 workers", or section
     065's hook, "允许 8 并发"), or a range in a clause that names none of `CONCURRENCY_WORDS`;
-    `test_the_worker_range_reader_reads_what_its_docstring_says` measures both.
+    `test_the_worker_range_reader_reads_what_its_docstring_says` measures both. What the three
+    exceptions leave -- a stale floor beside throughput passes, and a true range of anything else
+    beside a concurrency word is still read -- is in `_worker_ranges`' docstring, and
+    `test_the_limits_of_what_is_not_read_as_a_worker_range_are_real` measures it.
     """
     failures = _worker_range_failures(_worker_range_documents())
     assert not failures, "\n".join(failures)
@@ -590,6 +646,97 @@ def test_the_worker_range_reader_reads_what_its_docstring_says() -> None:
     )
 
 
+def test_a_range_that_is_not_the_worker_range_is_not_read_as_one() -> None:
+    """A range beside a concurrency word that states something else, held in both directions.
+
+    The review of `D13` (its m-11) found ranges in a concurrency clause that are no worker range
+    reported as stale ones: the item cap, `4-8` measured workers, and a percentage. Each true
+    clause below was reported at `20fec55`, and none is now. The batch API takes 1 to
+    `MAX_BATCH_ITEMS` requests (`min_length=1`). `MAX_BATCH_WORKERS`'s docstring measures a 10ms
+    runner near-linear to 4 workers and flat inside the noise band from there, and the real runner
+    at 116 items a second with 2 workers and 116 to 124 with 4 to 32, 0-7% more. Each stale
+    clause is still reported, once.
+    """
+    dash = RANGE_JOINERS[1]
+    workers = f"1{dash}{MAX_BATCH_WORKERS}"
+    true = {
+        "the item cap": (
+            f"批量 API 每批接受 1{dash}{MAX_BATCH_ITEMS} 个请求，以 {workers} 的受控并发执行。"
+        ),
+        "the item cap, grouped": (
+            f"批量 API 每批接受 1{dash}{MAX_BATCH_ITEMS:,} 个请求，以 {workers} 的受控并发执行。"
+        ),
+        "a sub-range beside throughput": (
+            f"用 10ms 模拟调用时，4{dash}8 路并发的吞吐落在同一噪声带内。"
+        ),
+        "a sub-range beside throughput, in English": (
+            f"Throughput at 4{dash}8 workers stayed inside the noise band."
+        ),
+        "a percentage": f"真实 runner 从 2 路加到 32 路并发，吞吐只多 0{dash}7%。",
+        "a full-width percentage": (
+            f"真实 runner 从 2 路加到 32 路并发，吞吐只多 0{dash}7\N{FULLWIDTH PERCENT SIGN}。"
+        ),
+        "a percentage, in English": (
+            f"Past 2 concurrent workers, throughput rose by only 0{dash}7 percent."
+        ),
+    }
+    stale = {
+        "a stale ceiling beside throughput": f"实测吞吐最高时支持 1{dash}32 路并发。",
+        "a stale item cap beside a concurrency word": (
+            f"每批 1{dash}1000 个请求以 {workers} 并发执行。"
+        ),
+        "a stale range beside a percentage": (
+            f"持久任务队列支持 1{dash}32 并发，吞吐提升 5{dash}8%。"
+        ),
+    }
+    reported = {
+        label: problems
+        for label, text in true.items()
+        if (problems := _worker_range_problems({label: text}))
+    }
+    miscounted = {
+        label: problems
+        for label, text in stale.items()
+        if len(problems := _worker_range_problems({label: text})) != 1
+    }
+    assert not reported and not miscounted, (
+        f"true clauses reported: {reported}; stale clauses not reported once: {miscounted}"
+    )
+
+
+def test_the_limits_of_what_is_not_read_as_a_worker_range_are_real() -> None:
+    """Each limit the module's docstrings state for the ranges `_worker_ranges` leaves out.
+
+    A change that makes one of these read otherwise has moved a stated limit: update the entry
+    and the docstring together.
+    """
+    dash = RANGE_JOINERS[1]
+    limits = {
+        "a stale floor beside throughput passes": (
+            f"实测 2{dash}{MAX_BATCH_WORKERS} 路并发吞吐持平。",
+            False,
+        ),
+        "a range from the floor beside throughput is reported": (
+            f"实测 1{dash}4 路并发时吞吐近似线性。",
+            True,
+        ),
+        "a range above the ceiling beside throughput is reported": (
+            f"实测吞吐在 4{dash}32 路并发之间持平。",
+            True,
+        ),
+        "a range of something else beside a concurrency word is reported": (
+            f"以 1{dash}{MAX_BATCH_WORKERS} 并发处理每批 1{dash}500 个请求。",
+            True,
+        ),
+    }
+    moved = {
+        label: text
+        for label, (text, reported) in limits.items()
+        if bool(_worker_range_problems({label: text})) is not reported
+    }
+    assert not moved, f"a stated limit moved: {moved} -- update the docstring with it"
+
+
 DIAGRAM_GENERATORS: Final[tuple[Path, ...]] = (
     ROOT / "scripts" / "generate_brain_diagrams.py",
     ROOT / "scripts" / "generate_api_relationship_diagrams.py",
@@ -606,19 +753,21 @@ ITEM_RANGE_IN_DIAGRAMS: Final[re.Pattern[str]] = re.compile(
 def _diagram_ceiling_problems(sources: dict[str, str]) -> list[str]:
     """Every batch ceiling the diagram `sources` draw that is not the one the API enforces.
 
-    Each string literal is read alone (`diagram_strings`): a worker range in one that names 并发,
-    并行, "concurren..." or "worker...", and an item range in one that reads `1-<n> 个不可变请求`.
-    Finding neither kind fails too, so a reader gone blind cannot pass. Each generator is read with
-    its path as `filename`, so one that stops parsing is named in the SyntaxError.
+    Each string literal is read alone (`diagram_strings`): its worker ranges as `_worker_ranges`
+    reads a clause's -- in one that names 并发, 并行, "concurren..." or "worker...", less a
+    percentage, the item cap and a sub-range beside throughput -- and an item range in one that
+    reads `1-<n> 个不可变请求`. Finding neither kind fails too, so a reader gone blind cannot
+    pass. Each generator is read with its path as `filename`, so one that stops parsing is named
+    in the SyntaxError.
     """
     worker_ranges: list[tuple[str, int, int, int]] = []
     item_caps: list[tuple[str, int, int]] = []
     for name, source in sources.items():
         for string in diagram_strings(source, filename=name):
-            if any(word in string.text.lower() for word in CONCURRENCY_WORDS):
-                for match in WORKER_RANGE_IN_PROSE.finditer(string.text):
-                    floor, ceiling = (int(bound) for bound in match.groups() if bound is not None)
-                    worker_ranges.append((name, string.line, floor, ceiling))
+            worker_ranges.extend(
+                (name, string.line, floor, ceiling)
+                for floor, ceiling in _worker_ranges(string.text)
+            )
             item_caps.extend(
                 (name, string.line, int(match[1]))
                 for match in ITEM_RANGE_IN_DIAGRAMS.finditer(string.text)
@@ -660,15 +809,24 @@ def test_every_batch_ceiling_the_diagrams_draw_is_the_one_the_api_enforces() -> 
 
 
 def test_the_diagram_ceiling_reader_reports_what_its_docstring_says() -> None:
-    """Stale ceilings are reported, current ones are not, and drawing neither kind fails."""
+    """Stale ceilings are reported, current ones are not, and drawing neither kind fails. The
+    diagrams read ranges as the pages do, so the item cap and a percentage drawn beside a
+    concurrency word are no worker range."""
     current = (
         f'svg.card(lines=("1-{MAX_BATCH_ITEMS} 个不可变请求", "1-{MAX_BATCH_WORKERS} 并发"))\n'
     )
     stale = 'svg.card(lines=("1-1000 个不可变请求", "1-32 CONCURRENCY"))\n'
     blind = 'svg.card(lines=("持久批量研究",))\n'
+    beside = (
+        f'svg.card(lines=("1-{MAX_BATCH_ITEMS} 个不可变请求，1-{MAX_BATCH_WORKERS} 并发，'
+        '吞吐多 0-7%",))\n'
+    )
     assert not _diagram_ceiling_problems({"current.py": current}), "current ceilings reported"
     assert len(_diagram_ceiling_problems({"stale.py": stale})) == 2, "a stale ceiling unreported"
     assert len(_diagram_ceiling_problems({"blind.py": blind})) == 2, "an empty read passed"
+    assert not _diagram_ceiling_problems({"beside.py": beside}), (
+        "the item cap or a percentage drawn beside a concurrency word was read as workers"
+    )
 
 
 def test_the_diagram_ceiling_read_names_the_generator_it_could_not_parse() -> None:
