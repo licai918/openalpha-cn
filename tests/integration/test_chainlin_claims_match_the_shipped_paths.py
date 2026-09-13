@@ -1,35 +1,39 @@
-"""No user-facing document or diagram may present ChainLin as a data source a shipped path uses.
+"""No document or diagram may present ChainLin or AKShare as a data source a shipped path uses.
 
-**The premise**, held by `test_chainlin_is_constructed_only_for_doctor`. `ChainLinDataProvider`
-is constructed at exactly one place under `src/` and `scripts/`: `cli._default_providers`, "the
-built-in providers `doctor` reports on", whose only caller is `doctor`. So configuring
-`CHAINLIN_*` changes one thing a shipped path does: `openalpha doctor` reports whether the key is
-present and, with `--probe`, sends one minimal request per dataset and reports how each ended.
-Evidence building reads the user's files (`FileProvider`, in `cli.py` and `sdk.py`), panel
-building reads Tushare, `POST /api/v1/evidence/build` takes the batch its caller sends, and a
-shipped batch item calls no provider. The client itself is real -- Bearer auth, a per-minute
-client-side ceiling that raises instead of waiting, classified failures, frozen contract tests in
-`tests/contract/providers/` -- and a user's own code can construct it and hand its batch to
-evidence building. If the premise test fails, ChainLin reaches another path, and the sentences
-this guard holds were written for a premise that no longer holds: re-read them, and this guard.
+**The premise**, held by `test_the_two_clients_are_constructed_only_for_doctor`.
+`ChainLinDataProvider` and `AKShareProvider` are each constructed at exactly one place under
+`src/` and `scripts/`: `cli._default_providers`, "the built-in providers `doctor` reports on",
+whose only caller is `doctor`. So configuring `CHAINLIN_*` changes one thing a shipped path does:
+`openalpha doctor` reports whether the key is present and, with `--probe`, sends one minimal
+request per dataset and reports how each ended. The AKShare adapter takes no credential, and
+`doctor` is the only path that constructs it too. Evidence building reads the user's files
+(`FileProvider`, in `cli.py` and `sdk.py`), panel building reads Tushare,
+`POST /api/v1/evidence/build` takes the batch its caller sends, and a shipped batch item calls no
+provider. Both clients are real -- ChainLin's has Bearer auth, a per-minute client-side ceiling
+that raises instead of waiting, classified failures and frozen contract tests in
+`tests/contract/providers/` -- and a user's own code can construct either and hand its batch to
+evidence building, so `README.md:1137` and api-02, which put both on the caller's side, are true.
+If the premise test fails, a client reaches another path, and the sentences this guard holds were
+written for a premise that no longer holds: re-read them, and this guard.
 
-**The claims.** A clause is a claim when it names ChainLin and holds one of `CLAIM_MARKERS`: the
-words this repository used to put ChainLin on a data path. They present it as an entry (入口) or
-a unified one (统一); as what connects (接入, 连接, 衔接, 可接) or carries data in (送入, 带入,
-纳入, 进入, and 经过 a contract); as what builds, generates or guarantees evidence (构建, 生成,
-保证, 确保) or provides data; as honoured by the batch path (尊重); as usable once configured
-(即可); or name "ChainLin data" (链邻数据) as something the product holds. English words of the
-same kinds are markers too, though no English sentence here used one. Every such clause at
-`d4ef5e4` was rewritten in `D13`; there is no allowlist.
+**The claims.** A clause is a claim when it names ChainLin or AKShare (`CLIENT_NAMES`) and holds
+one of `CLAIM_MARKERS`: the words this repository used to put either on a data path. They present
+it as an entry (入口) or a unified one (统一); as what connects (接入, 连接, 衔接, 可接) or carries
+data in (送入, 带入, 纳入, 进入, and 经过 a contract); as what builds, generates or guarantees
+evidence (构建, 生成, 保证, 确保) or provides data; as honoured by the batch path (尊重); as usable
+once configured (即可) or supported by default (默认支持); or name "ChainLin data" (链邻数据) as
+something the product holds. English words of the same kinds are markers too; "accepts" is the one
+an English sentence used, README.en.md's AKShare line at `4a37161`. Every such clause -- at
+`d4ef5e4` for ChainLin, at `4a37161` for AKShare -- was rewritten; there is no allowlist.
 
 **How it reads.** The four documents as clauses (`tests/prose_clauses.py`), and the diagrams as
 units (`tests/diagram_text.py`): brain-01 and brain-02 drew ChainLin's name on one line of a
 panel and "已实现 · 统一替代入口" on the next, so a panel's strings are read together. A name is
-链邻 or ChainLin, in any case and as a substring, so `ChainLinDataProvider` and
-`chainlin-data/v1` count. Before a clause is read, a URL and the name of the separately
-distributed desktop product (`DESKTOP_PRODUCT`) are removed, so "进入 Release 页面" beside a
-`chainlin-desktop` link is no claim. A URL ends at whitespace, a closing bracket or full-width
-punctuation (`URL`), so a claim written straight after a link is still read.
+链邻, ChainLin or AKShare, in any case and as a substring, so `ChainLinDataProvider`,
+`chainlin-data/v1` and `AKShareProvider` count. Before a clause is read, a URL and the name of the
+separately distributed desktop product (`DESKTOP_PRODUCT`) are removed, so "进入 Release 页面"
+beside a `chainlin-desktop` link is no claim. A URL ends at whitespace, a closing bracket or
+full-width punctuation (`URL`), so a claim written straight after a link is still read.
 
 **What it cannot see.** `test_the_stated_limits_are_real` measures each of these but the first,
 which `test_the_reference_scan_finds_what_its_docstring_says` measures.
@@ -46,7 +50,7 @@ which `test_the_reference_scan_finds_what_its_docstring_says` measures.
 
 **What it refuses that is true.** The same test measures these.
 
-- A clause that names ChainLin with a marker fails even when it denies the claim ("链邻不是统一
+- A clause that names a client with a marker fails even when it denies the claim ("链邻不是统一
   入口"), or when the marker belongs to another subject of the same clause. `D13` split such
   clauses with a semicolon.
 """
@@ -81,6 +85,9 @@ holds every committed SVG equal to what they write."""
 
 SHIPPED_ROOTS: Final[tuple[Path, ...]] = (ROOT / "src", ROOT / "scripts")
 """Where a shipped path's code lives."""
+
+CLIENT_CLASSES: Final[tuple[str, ...]] = ("ChainLinDataProvider", "AKShareProvider")
+"""The two data clients only `doctor` constructs."""
 
 
 # --- The premise ------------------------------------------------------------------------------
@@ -132,18 +139,24 @@ def _uses_of(name: str, roots: Iterable[Path]) -> list[tuple[str, str]]:
     return found
 
 
-def test_chainlin_is_constructed_only_for_doctor() -> None:
-    """ChainLin reaches no shipped path but `doctor`, which is what this guard's sentences say.
+def test_the_two_clients_are_constructed_only_for_doctor() -> None:
+    """ChainLin and AKShare reach no shipped path but `doctor`, which is what this guard's
+    sentences say.
 
-    A failure here means ChainLin now reaches another path. The documents' ChainLin sentences
+    A failure here means a client now reaches another path. The documents' sentences about it
     were written for a client only `doctor` uses: re-read them and this guard before changing
     the expectation.
     """
-    constructions = _uses_of("ChainLinDataProvider", SHIPPED_ROOTS)
-    assert constructions == [("src/openalpha_cn/cli.py", "_default_providers")], (
-        f"ChainLinDataProvider is read at {constructions}; when this was written only "
-        "cli._default_providers read it, to construct it"
+    assert len(CLIENT_CLASSES) == len(CLIENT_NAMES), (
+        f"CLIENT_CLASSES holds {CLIENT_CLASSES} for the clients {sorted(CLIENT_NAMES)}; every "
+        "client the documents are held to must have its class held by this premise"
     )
+    for client in CLIENT_CLASSES:
+        reads = _uses_of(client, SHIPPED_ROOTS)
+        assert reads == [("src/openalpha_cn/cli.py", "_default_providers")], (
+            f"{client} is read at {reads}; when this was written only cli._default_providers "
+            "read it, to construct it"
+        )
     callers = _uses_of("_default_providers", SHIPPED_ROOTS)
     assert callers == [("src/openalpha_cn/cli.py", "doctor")], (
         f"cli._default_providers is read in {callers}; when this was written only doctor read "
@@ -155,6 +168,15 @@ def test_chainlin_is_constructed_only_for_doctor() -> None:
 
 CHAINLIN_NAME: Final[re.Pattern[str]] = re.compile(r"链邻|chainlin", re.IGNORECASE)
 """链邻 or ChainLin, in any case, as a substring."""
+
+AKSHARE_NAME: Final[re.Pattern[str]] = re.compile(r"akshare", re.IGNORECASE)
+"""AKShare in any case, as a substring, so `AKShareProvider` and `--extra akshare` count."""
+
+CLIENT_NAMES: Final[dict[str, re.Pattern[str]]] = {
+    "ChainLin": CHAINLIN_NAME,
+    "AKShare": AKSHARE_NAME,
+}
+"""The names a clause gives each of `CLIENT_CLASSES`."""
 
 DESKTOP_PRODUCT: Final[re.Pattern[str]] = re.compile(
     r"链邻\s*(?:桌面|涨停复盘|Windows|安装|软件)|chainlin[-_ ](?:desktop|limit-up|installer)",
@@ -191,6 +213,7 @@ CLAIM_MARKERS: Final[dict[str, re.Pattern[str]]] = {
     "连接": re.compile("连接"),
     "可接": re.compile("可接"),
     "即可": re.compile("即可"),
+    "默认支持": re.compile("默认支持"),
     "统一": re.compile("统一"),
     "尊重": re.compile("尊重"),
     "保证": re.compile("保证"),
@@ -209,21 +232,33 @@ CLAIM_MARKERS: Final[dict[str, re.Pattern[str]]] = {
     "connects": _english("connects?"),
     "plugs into": _english("plugs? into"),
     "ready to use": _english("ready to use"),
+    "accepts": _english("accepts?"),
     "ChainLin data": re.compile(r"chainlin data(?! api)", re.IGNORECASE),
     "provides data": _english(r"provides?[^,.;]*(?<![A-Za-z])(?:data|input)"),
 }
-"""The words that make a clause naming ChainLin a claim, each named for the report.
+"""The words that make a clause naming a client a claim, each named for the report.
 
 `确保` skips 明确保留 ("explicitly kept"), which holds it by accident; 链邻数据 skips 链邻数据库 and
 链邻数据接口, the database the repository does not ship and the API's own name.
 """
 
 
+def _readable(text: str) -> str:
+    """`text` with its URLs and the desktop product's name removed."""
+    return DESKTOP_PRODUCT.sub(" ", URL.sub(" ", text))
+
+
+def _clients_named(text: str) -> list[str]:
+    """Which of `CLIENT_NAMES` a clause names, once its URLs and the desktop product are gone."""
+    readable = _readable(text)
+    return [client for client, name in CLIENT_NAMES.items() if name.search(readable)]
+
+
 def _claim_markers(text: str) -> list[str]:
-    """The markers a clause holds when it names ChainLin, after URLs and the desktop product go."""
-    readable = DESKTOP_PRODUCT.sub(" ", URL.sub(" ", text))
-    if not CHAINLIN_NAME.search(readable):
+    """The markers a clause holds when it names a client, after URLs and the desktop product go."""
+    if not _clients_named(text):
         return []
+    readable = _readable(text)
     return [marker for marker, pattern in CLAIM_MARKERS.items() if pattern.search(readable)]
 
 
@@ -242,9 +277,10 @@ def _guarded_texts(
     ]
 
 
-def _chainlin_claims(texts: Iterable[tuple[str, int, str]]) -> list[str]:
+def _client_claims(texts: Iterable[tuple[str, int, str]]) -> list[str]:
     return [
-        f"{label}:{line} presents ChainLin as a data source ({', '.join(markers)}): {text!r}"
+        f"{label}:{line} presents {' and '.join(_clients_named(text))} as a data source "
+        f"({', '.join(markers)}): {text!r}"
         for label, line, text in texts
         if (markers := _claim_markers(text))
     ]
@@ -264,23 +300,28 @@ def _diagram_sources() -> dict[str, str]:
     }
 
 
-def test_no_document_or_diagram_presents_chainlin_as_a_data_source() -> None:
-    """Every clause and diagram unit that names ChainLin may hold none of `CLAIM_MARKERS`.
+def test_no_document_or_diagram_presents_a_doctor_only_client_as_a_data_source() -> None:
+    """Every clause and diagram unit that names ChainLin or AKShare may hold none of
+    `CLAIM_MARKERS`.
 
-    ChainLin must still be read in both, so a reader gone blind fails rather than passes:
-    `README.md` names it, and brain-01 and brain-02 draw it.
+    Both must still be read, so a reader gone blind fails rather than passes: `README.md` names
+    both, brain-01 and brain-02 draw ChainLin, and api-02 draws AKShare.
     """
-    documents, sources = _documents(), _diagram_sources()
-    texts = _guarded_texts(documents, sources)
-    named = {label for label, _, text in texts if CHAINLIN_NAME.search(text)}
-    assert {"README.md", "scripts/generate_brain_diagrams.py"} <= named, (
-        f"ChainLin is named only in {sorted(named)}; README.md and brain-01/02 named it when "
-        "this was written, so the reader has gone blind"
-    )
-    claims = _chainlin_claims(texts)
+    texts = _guarded_texts(_documents(), _diagram_sources())
+    expected = {
+        "ChainLin": {"README.md", "scripts/generate_brain_diagrams.py"},
+        "AKShare": {"README.md", "scripts/generate_api_relationship_diagrams.py"},
+    }
+    for client, labels in expected.items():
+        named = {label for label, _, text in texts if CLIENT_NAMES[client].search(text)}
+        assert labels <= named, (
+            f"{client} is named only in {sorted(named)}; {sorted(labels)} named it when this "
+            "was written, so the reader has gone blind"
+        )
+    claims = _client_claims(texts)
     assert not claims, (
-        "\n".join(claims) + "\nChainLin's client is used by `openalpha doctor` alone. Say what "
-        "the client is, or which path uses it; fix a diagram in its generator and regenerate it."
+        "\n".join(claims) + "\nOnly `openalpha doctor` constructs either client. Say what the "
+        "client is, or which path uses it; fix a diagram in its generator and regenerate it."
     )
 
 
@@ -301,7 +342,19 @@ D4EF5E4_CLAIMS: Final[dict[str, str]] = {
         "链邻 Provider 的限流和错误分类也会被尊重。\n"
     ),
 }
-"""Three claims as they stood at `d4ef5e4`, verbatim."""
+"""Three ChainLin claims as they stood at `d4ef5e4`, verbatim."""
+
+D4A37161_CLAIMS: Final[dict[str, str]] = {
+    "README.md:274": (
+        "默认支持用户自有 CSV、JSON、JSONL、Parquet，用户自带 Token 的 Tushare Pro，"
+        "以及可选、受限的 AKShare Adapter。\n"
+    ),
+    "README.en.md:56": (
+        "The project accepts user-owned CSV, JSON, JSONL, and Parquet data, BYOT Tushare, and an "
+        "optional constrained AKShare adapter.\n"
+    ),
+}
+"""AKShare's two claims as they stood at `4a37161`, verbatim."""
 
 D4EF5E4_PANELS: Final[str] = (
     'svg.panel(title="A 股证据入口", label="DATA PLANE", lines=("链邻数据接口 API", '
@@ -314,14 +367,14 @@ the same kind with the layout arguments left out."""
 
 
 def test_the_guard_flags_the_claims_it_was_written_for() -> None:
-    """The retroactive power, held: each `d4ef5e4` claim and both panels are flagged."""
+    """The retroactive power, held: each retired claim and both panels are flagged."""
     missed = [
         label
-        for label, text in D4EF5E4_CLAIMS.items()
-        if not _chainlin_claims(_guarded_texts({label: text}, {}))
+        for label, text in {**D4EF5E4_CLAIMS, **D4A37161_CLAIMS}.items()
+        if not _client_claims(_guarded_texts({label: text}, {}))
     ]
-    panels = _chainlin_claims(_guarded_texts({}, {"d4ef5e4 brain": D4EF5E4_PANELS}))
-    assert not missed, f"a d4ef5e4 claim is no longer flagged: {missed}"
+    panels = _client_claims(_guarded_texts({}, {"d4ef5e4 brain": D4EF5E4_PANELS}))
+    assert not missed, f"a retired claim is no longer flagged: {missed}"
     assert len(panels) == 2, f"the two d4ef5e4 panels were read as {panels}"
 
 
@@ -336,6 +389,7 @@ MARKER_SENTENCES: Final[dict[str, str]] = {
     "连接": "链邻连接授权服务。",
     "可接": "链邻可接授权行情。",
     "即可": "配好链邻即可研究。",
+    "默认支持": "默认支持 AKShare。",
     "统一": "链邻是统一方案。",
     "尊重": "链邻的限流会被尊重。",
     "保证": "链邻保证行情一致。",
@@ -354,6 +408,7 @@ MARKER_SENTENCES: Final[dict[str, str]] = {
     "connects": "The workbench connects to ChainLin.",
     "plugs into": "ChainLin plugs into research.",
     "ready to use": "ChainLin is ready to use.",
+    "accepts": "The project accepts AKShare.",
     "ChainLin data": "ChainLin data is complete.",
     "provides data": "ChainLin provides quotes and data.",
 }
@@ -384,13 +439,14 @@ TRUE_SENTENCES: Final[tuple[str, ...]] = (
     "无法下载：进入 [Release 页面]"
     "(https://github.com/ss8875/openalpha-cn/releases/tag/chainlin-desktop-v1.0.9) 重新下载。",
     "Third-party data and the ChainLin installer retain their own licensing boundaries.",
+    "链邻 API、用户文件、Tushare 和可选 AKShare Adapter 位于调用方或 Provider 侧。",
     "进入 [版本页面](https://github.com/ss8875/openalpha-cn/releases/tag/chainlin-v1.0.9) 查看。",
     "链邻 Provider 已实现客户端合同，面板构建不调用它，证据来自用户文件。",
 )
-"""True sentences that name ChainLin, its database, its API or its desktop product; each must
-pass. All but the last two are held by this repository. The last two are built so that one rule
-alone keeps each from reading as a claim: the link names ChainLin only inside its URL, and 构建
-and 证据 sit in different comma-separated parts of one clause."""
+"""True sentences that name ChainLin, its database, its API, its desktop product or AKShare; each
+must pass. All but the last two are held by this repository. The last two are built so that one
+rule alone keeps each from reading as a claim: the link names ChainLin only inside its URL, and
+构建 and 证据 sit in different comma-separated parts of one clause."""
 
 
 def test_true_sentences_about_chainlin_pass() -> None:
@@ -438,10 +494,10 @@ def test_the_stated_limits_are_real() -> None:
     flagged_anyway = {
         label: claims
         for label, text in unseen.items()
-        if (claims := _chainlin_claims(_guarded_texts({label: text}, {})))
+        if (claims := _client_claims(_guarded_texts({label: text}, {})))
     }
     assert not flagged_anyway, f"a stated blind spot is now flagged: {flagged_anyway}"
-    assert not _chainlin_claims(_guarded_texts({}, {"two calls": two_calls})), (
+    assert not _client_claims(_guarded_texts({}, {"two calls": two_calls})), (
         "a name and a claim drawn by two calls are now read together"
     )
     refused = {
@@ -453,7 +509,7 @@ def test_the_stated_limits_are_real() -> None:
     passed = [
         label
         for label, text in refused.items()
-        if not _chainlin_claims(_guarded_texts({label: text}, {}))
+        if not _client_claims(_guarded_texts({label: text}, {}))
     ]
     assert not passed, f"a stated over-reach no longer happens: {passed}"
 

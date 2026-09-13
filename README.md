@@ -271,7 +271,7 @@ OpenAlpha CN 不把“多接几个行情 API”当作数据优势。优势落在
 → 同路径回放、结果验证与归因
 ```
 
-默认支持用户自有 CSV、JSON、JSONL、Parquet，用户自带 Token 的 Tushare Pro，以及可选、受限的 AKShare Adapter。项目提供数据接入接口，但不提供商业数据转售代理，也不把受限原始数据放进 GitHub。
+证据构建读取用户自有 CSV、JSON、JSONL、Parquet，面板构建使用用户自带 Token 的 Tushare Pro；可选、受限的 AKShare Adapter 已实现，但出厂路径只有 `openalpha doctor` 构造它。项目提供数据接入接口，但不提供商业数据转售代理，也不把受限原始数据放进 GitHub。
 
 详见[数据接口与合规边界](docs/api/data-interface.zh-CN.md)。
 

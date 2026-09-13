@@ -53,7 +53,7 @@ OpenAlpha CN competes on verifiability rather than the number of agent personas:
   attribution are structurally never produced, not merely narrowed, with the remainder
   named as an explicit unexplained residual.
 
-The project accepts user-owned CSV, JSON, JSONL, and Parquet data, BYOT Tushare, and an optional constrained AKShare adapter. It does not redistribute commercial raw datasets or expose a hosted data resale proxy.
+Evidence building reads user-owned CSV, JSON, JSONL, and Parquet files, and panel building reads Tushare with your own token; an optional, constrained AKShare adapter is implemented, but only `openalpha doctor` constructs it. The project does not redistribute commercial raw datasets or expose a hosted data resale proxy.
 
 ## The factor plane
 
