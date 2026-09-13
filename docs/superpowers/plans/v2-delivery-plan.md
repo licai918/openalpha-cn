@@ -149,7 +149,86 @@ D12 独立评审（Important 2 / Minor 8）与整批终审（Critical 1 / Import
 - B：面向用户的文字与文字守卫；
 - C：台账、回放确定性、发布门与 D1 测试卫生。
 
-除回放以外不改 `src/`。e2e 不经过 `ReplayRunner.run`，唯一的接触是模块级导入，所以 `737beac` 上的 e2e 结果仍然适用。
+除回放以外不改 `src/` 的行为（`145e9c1` 另改了 `cli.py` 的一处 docstring，AST 不变）。e2e 不经过 `ReplayRunner.run`，唯一的接触是模块级导入，所以 `737beac` 上的 e2e 结果仍然适用。
+
+**结果。** 三条通道各自经过独立评审与复审，按 cherry-pick 合进主分支，每次合并后的门禁都全绿。
+
+- **C 通道：台账、回放确定性、发布门、D1。**
+  - 提交：
+    - 首轮：`211b8ee`、`4402af9`、`54c3284`、`57f50d4`、`1099010`、`17b667b`；
+    - 修复轮：`249edd1`、`3d78ef9`、`933603d`、`1f7b417`、`b38d081`；
+    - 小修：`73b13cc`、`52efabb`。
+  - **回放确定性。** 每个 case 的第二遍改在新 engine 与空的内存存储上重算，两遍由同一份配置构造；已存结果与重算结果不一致时，按实情标注。
+    - 实测：rationale 读时钟的 agent，修复前冻结语料 300/300，修复后 171/300。
+    - 这是本批 `src/` 唯一的行为改动。
+  - **冻结语料。** 改为检验「前视证据在加载时即被拒绝」，替换原先恒为 0 的计数。
+  - **发布门。** 四类拒绝都在临时 git 仓库里逐条驱动，不再写本 checkout。临时仓库剔除 `GIT_*`，并中和 git 模板与全局 excludes。
+  - **台账。**
+    - notes 里的 node-id、锚点与裸测试名都必须真实存在。这条检查抓出了 MODEL-001、BOUND-003、BOUND-005、OPS-024，以及三个失效的测试名。
+    - OPS-009、BOUND-004、BT-003、AGENT-009 改为引用会失败的测试。
+    - 另有七行按代码改正或收窄。
+  - **D1。** 断言与 Python 版本无关；大于 0o377 的八进制转义能定位；人造 token 序列在每个解释器上都钉住 3.12 的三处分支。
+- **A 通道：图、Windows 换行、链邻 / AKShare、证据、前视。**
+  - 提交：
+    - 首轮：`01e4ec2`、`b631bcd`、`7068aa6`、`dc50a26`、`4a37161`；
+    - 修复轮九个：`5d48a56` 至 `c99b46b`；
+    - 小修：`8f30e3e`、`7284fb4`、`1618188`、`0ccc873`；
+    - 收尾：`7caedd5`。
+  - **Windows 换行。** 生成器写文件时传 `newline="\n"`，另加模拟 Windows 换行的同步测试。
+  - **图的文字。** api-05、brain-01/02/03 按代码改写；归因守卫开始读图。
+  - **新守卫。**
+    - 证据：身份字段逐个扰动实测；Retry-After 必须有读取方；EvidenceLookupTool 必须有出厂导入方。
+    - 链邻与 AKShare：AST 前提看得见注册表、partial 与别名；读四份文档、图，以及 `docs/api/chainlin-data.zh-CN.md`。
+    - 前视：前提为 `ReplayCorpus.load` 拒绝前视语料。
+  - **其他。** `.env.example` 写明每个凭据由谁读取；链邻合约测试的夹具改用三个互不相同的时刻。
+- **B 通道：面向用户的文字与文字守卫。**
+  - 提交：
+    - 首轮经三次 rebase，连同修复共 14 个：`a475b0d` 至 `56b5a6c`；
+    - 最后一轮：`8167931`、`d914f7b`、`778bddc`、`6456589`；
+    - 委员会小修：`20fec55`。
+  - **守卫。**
+    - 用量守卫不再豁免能力声称与用量声称，能力选择另起一个守卫。
+    - 过时数字守卫从代码、台账与 pyproject 推出 17 个计数。
+    - 退役声称守卫在 `20fec55` 上共 25 条，每条都带从代码读出的前提，并读图的文字。
+    - 另加 README 指向检查。
+  - **文字。** marketing 改动 40 余节，正文长度仍在 [300, 420]。api-01 的画面改为只有 REST 与工作台进入 FastAPI。
+- **执行中发现并修复：测试继承 `GIT_*`（`399127d`）。**
+  - **起因。** 一条通道在 `git rebase --exec` 里跑门禁，测试继承了 `GIT_DIR`，把共享的 `.git/config` 写成 `core.bare=true`，并写入测试用的 `user.*`。事后已逐项恢复并核实。
+  - **为什么要修。** 用户在 git hook 里跑测试时，会遇到同样的问题。
+  - **修法。** `tests/conftest.py` 的 `pytest_configure` 在收集之前剥离全部 `GIT_*`，会话结束时归还。
+  - **验证。** 元测试在模拟 hook 的环境下运行会启动 git 的测试，并盯住一个哨兵仓库。
+  - 这个 hook 在 e2e 会话里同样生效，但它只动环境变量。
+- **控制方的提交。**
+  - `7c055ea`：本计划书；
+  - `145e9c1`：只改 docstring；
+  - `278ed84`：把 `import os` 移到文件顶部；
+  - `0ecb16a`、`2f97a63`：导入隔离测试的说明文字与两条断言提示。
+- **验证。** 早期 CI `34749055324`（`56b5a6c`）七项全绿：
+  - ubuntu 3.11.15 / 3.12.3：各 5905 passed，0 skip，0 warning；
+  - Windows 3.11.9 / 3.12.10：各 5900 passed，5 个具名的平台 skip；
+  - D1 的多行 f-string 测试在 3.12.3 上通过，C1 在真实 Windows 上确认修好。
+
+D13 整批终审（`final-review-d13.md`，Critical 0 / Important 4 / Minor 11）的发现转入 D14。
+
+### Task 14（D14）：D13 整批终审的修复轮（执行中发现）
+- **I-A / I-B / I-C（第 4 条）。**
+  - 刚退役的三类说法换了措辞，仍留在五节。
+  - 文档说「RunManifest 记录 Prompt」，而 `prompt_versions` 被写死为空。
+  - 两份 README 把 `run_cycle` 写成验证、回测、paper、daily 共用的内核。
+  - 三者的机制相同：守卫只认被点名的原句，修文时没有把同类说法在全文里再搜一遍。所以本轮除了逐条改正，还要对每一族说法，在四份文档与图里做一遍全文清扫。
+- **I-D（第 1 条）。**
+  - **现象。** 两条 Windows 腿最后一步 `git diff --exit-code` 打出 4 条 git warning。
+  - **原因。** 几个测试在真实 checkout 里就地改写 `src/` 下被跟踪的源文件，再以文本模式写回，Windows 上写回的就是 CRLF。
+  - **为什么现在才看到。** 这是批前就有的问题，`74cee0f` 的全绿 run 里已经有。但本批的 Windows 腿一直卡在 C1，直到早期 CI 才走到这一步。
+  - **同类问题。** 另有测试在 `src/` 下临时建探针模块；`build_graph` 会把 `.grimp_cache/` 写进仓库根目录。
+  - **修法。** 改为在临时副本上运行，并加静态审计与会话级检查。
+- **Minor。** 11 条按文件分给 A、B、C 与控制方。
+- **分工**（均在隔离 worktree，基线 `20fec55`）：
+  - B1：面向用户的文字、退役守卫与图的文字，外加全文清扫；
+  - B2：其余文字守卫；
+  - A：链邻合约文档与 A 的守卫；
+  - C：台账、D1 与两处过时的 docstring；
+  - 另一代理：修改写 checkout 的测试。
 
 ## 不在本批（需要你决定）
 - **`TERMINAL_STATUSES`**（台账 `coverage_status` 的取值集合，`scripts/build_feature_coverage.py:18`）缺一个表示「已窄化」的值。
@@ -166,16 +245,28 @@ D12 独立评审（Important 2 / Minor 8）与整批终审（Critical 1 / Import
   - 其中的能力注册表与能力元数据，即使接上也没有读者：Provider 从不查询 `ModelRegistry`，也不按能力选择端点。
   - `deploy/compose.yml`、`.env.example` 里的模型 Provider 变量没有读取方。要么接线，要么删掉这些变量，二选一。
   - 删变量须连带改 `tests/unit/test_repository_assets.py::test_compose_passes_through_declared_provider_credentials`，它钉住了这五个变量的透传。
-- **链邻要不要接进出厂数据路径。**
-  - 链邻客户端合同是真的：Bearer 认证、客户端限流、错误分类、冻结合约测试都在。
-  - 但出厂路径只有 `doctor` 构造它（`cli.py` 的 `_default_providers()`）：证据构建用 `FileProvider`，面板构建用 `TushareProvider`，REST 只接收调用方送来的批次。
-  - 文档已按此如实改写。要不要把它接进证据或面板的数据路径，是产品决定。
+- **Prompt 版本要不要真正记录。**
+  - `RunManifest` 有 `prompt_versions` 字段，但唯一的构造点把它写死成空元组（`runtime/engine.py:136`），`AgentProvenance` 也没有 Prompt 字段。
+  - 仓库内的 prompt 由 `code_commit` 钉住；用户自己接入的 prompt 钉不住。
+  - 文档已改为不声称记录 Prompt。要不要实现记录，是产品决定。
+- **链邻与 AKShare 要不要接进出厂数据路径。**
+  - 链邻客户端合同是真的：Bearer 认证、客户端限流、错误分类、冻结合约测试都在。AKShare Adapter 也已实现。
+  - 但出厂路径只有 `doctor` 构造它们（`cli.py` 的 `_default_providers()`）：证据构建用 `FileProvider`，面板构建用 `TushareProvider`，REST 只接收调用方送来的批次。
+  - 文档已按此如实改写。要不要把它们接进证据或面板的数据路径，是产品决定。
+- **链邻只配地址、不配 key 时的探测。**
+  - 链邻的 `fetch` 在发请求之前先查 key，缺 key 就抛 `authentication`（`providers/chainlin.py:155-162`），于是 `doctor --probe` 非零退出。
+  - 而 `PROBE_FAILURE_STATES` 的 docstring 说 authentication 是「端点拒绝了一个已有的凭据」，缺凭据不应让命令失败（`cli.py:634-655`）。
+  - 二选一：缺 key 改报 `configuration`，或让 doctor 区分这两种情况。文档已按今天的行为如实写明。
 - **非 Python 验收的粒度。**
   - 台账已经有 `ci-job` 验收类型（`scripts/build_feature_coverage.py:38`，OA-OPS-005 在用）。
   - OA-OPS-002「Frozen install lint test and build pass」正是 `quality.yml` 里 `web` job 的四步；OA-IFACE-006、OA-IFACE-007 的真实覆盖在 web 单测与 Playwright。
   - 所以要决定的是验收粒度，即以整条 CI job 作为一行的验收是否足够，而不是缺类型。定下来之前，这三行留 `legacy-prose`。
 - **`scripts/generate_brain_diagrams.mjs` 删不删。**
-  - 它写出的五个脑图文件名与 Python 生成器相同，文字却是旧的，其中有已被推翻的「规则 · 因子 · 智能体归因」「验证与三层归因」、EvidenceLookupTool、「统一替代入口」。
+  - 它写出的五个脑图文件名与 Python 生成器相同，但文字是旧的，其中包括：
+    - 已被推翻的「规则 · 因子 · 智能体归因」「验证与三层归因」；
+    - EvidenceLookupTool；
+    - 仓库里并不存在的类名 `StructuredModelAgent`；
+    - 「规划：替代分散第三方接口」「目标：实时获取 / 更精准」这类规划文字。
   - 全仓库没有任何地方引用它。
   - 有人运行它时，图同步测试会变红，但它本身仍会画回旧说法。
 - **Python 支持范围。**
