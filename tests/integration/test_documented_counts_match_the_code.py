@@ -41,7 +41,7 @@ import re
 import tomllib
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final, get_args
 
@@ -61,6 +61,7 @@ README_EN: Final[Path] = ROOT / "README.en.md"
 WHY_OPENALPHA: Final[Path] = ROOT / "docs" / "why-openalpha-cn.zh-CN.md"
 MARKETING: Final[Path] = ROOT / "docs" / "marketing" / "openalpha-cn-100-promotion-plans.zh-CN.md"
 LEDGER_SUMMARY: Final[Path] = ROOT / "artifacts" / "openalpha-v1-feature-coverage" / "summary.json"
+ROADMAP: Final[Path] = ROOT / "docs" / "specs" / "v2" / "openalpha-cn-v2-roadmap.md"
 
 GUARDED_FILES: Final[tuple[Path, ...]] = (README, README_EN, WHY_OPENALPHA, MARKETING)
 
@@ -367,12 +368,17 @@ DOCUMENTED_COUNTS: Final[tuple[DocumentedCount, ...]] = (
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class UnderivedCount:
-    """A count nothing this test can read derives, so no document may state it."""
+    """A count nothing this test can read derives, so no document may state it.
+
+    `source`, where `reason` speaks for one file, is that file: every number `reason` cites must
+    occur in it (`test_a_reason_cites_only_figures_its_source_holds`).
+    """
 
     name: str
     pattern: re.Pattern[str]
     reason: str
     example: str
+    source: Path | None = None
 
 
 UNDERIVED_COUNTS: Final[tuple[UnderivedCount, ...]] = (
@@ -400,10 +406,12 @@ UNDERIVED_COUNTS: Final[tuple[UnderivedCount, ...]] = (
         name="how many issues the roadmap lists",
         pattern=re.compile(r"[0-9]+\s*个\s*issues?", re.IGNORECASE),
         reason=(
-            "The roadmap keeps its own count and grows it (its line 26 records 110 becoming 113); "
-            "README.md said 110 where the phases sum to 119."
+            "README.md said 110. The roadmap gives no one figure to derive it from: it records its "
+            "own total moving from 110 to 113, and its overview table and its issue tables count "
+            "different things."
         ),
         example="七个阶段 110 个 issue。",
+        source=ROADMAP,
     ),
 )
 """Counts the documents stopped stating instead of this test guarding a copy of them."""
@@ -495,6 +503,39 @@ def test_no_document_states_a_count_nothing_derives() -> None:
     """A count no code answers is written without its number, not guarded as a copy."""
     statements = _underived_statements(_guarded_documents())
     assert not statements, "\n".join(statements)
+
+
+FIGURE: Final[re.Pattern[str]] = re.compile(r"(?<![0-9])(?<![0-9]\.)[0-9]+(?![0-9])(?!\.[0-9])")
+"""A whole number standing alone: not part of a decimal such as 51.36, and not cut short by a
+sentence's full stop."""
+
+
+def _uncited_figures(count: UnderivedCount) -> list[str]:
+    """The numbers `count.reason` cites that its `source` does not contain, standing alone."""
+    if count.source is None:
+        return []
+    text = count.source.read_text(encoding="utf-8")
+    return [
+        figure
+        for figure in FIGURE.findall(count.reason)
+        if re.search(rf"(?<![0-9]){figure}(?![0-9])", text) is None
+    ]
+
+
+def test_a_reason_cites_only_figures_its_source_holds() -> None:
+    """A reason that speaks for a file may cite only numbers that file contains.
+
+    The roadmap entry once gave README.md's 110 as standing "where the phases sum to 119", and the
+    roadmap holds no 119 at all (the review of `D13`, M2). A planted reason citing a number no
+    source holds, at the end of its sentence as 119 was, is reported, so the check cannot pass by
+    reading nothing.
+    """
+    sourced = [count for count in UNDERIVED_COUNTS if count.source is not None]
+    assert sourced, "no underived count names the file its reason speaks for"
+    planted = replace(sourced[0], reason="the phases sum to 9999999.")
+    assert _uncited_figures(planted) == ["9999999"], "a figure its source does not hold passed"
+    uncited = {count.name: figures for count in sourced if (figures := _uncited_figures(count))}
+    assert not uncited, f"a reason cites figures its source does not hold: {uncited}"
 
 
 def test_the_number_reader_reads_what_its_docstring_says() -> None:
