@@ -23,8 +23,8 @@ of them is flagged; `README.md:43` is one.
 
 **How it reads.** The four documents as clauses (`tests/prose_clauses.py`), and the diagrams as
 units (`tests/diagram_text.py`). api-05 draws its four validation cards from one data table, a
-tuple no call takes, and such a table is one unit: the replay card's "同路径回放" and its
-"确定性 / 防前视报告" were read together.
+tuple of rows no call takes, and each row is a unit: the replay card's "同路径回放" and its
+"确定性 / 防前视报告" were read together, as one card.
 
 **What it cannot see.** `test_the_stated_limits_are_real` measures each of these.
 
@@ -35,14 +35,13 @@ tuple no call takes, and such a table is one unit: the replay card's "同路径�
 - A claim split across clauses, the replay in one and the check in the next: "冻结语料回放很
   严格。它会发现前视问题。"
 - An English claim worded outside the few English words.
-- Text a generator computes at run time, which `tests/diagram_text.py` does not read.
+- Text a generator computes at run time -- an f-string's formatted values, a string built with
+  `+` or `%`, a name -- which `tests/diagram_text.py` does not read into a unit.
 
 **What it refuses that is true.** The same test measures these.
 
 - A denial in the same words fails: "回放不检测前视违规" names a violation beside a detection
   word. Say what happens instead: a corpus holding look-ahead evidence is refused at load.
-- A data table is one unit, so a check word on one of its cards, with 前视 and the replay on
-  another, makes a claim no single card makes.
 - A 0 that counts nothing is read as a zero beside a violation: "T+0 交易下前视违规被整体拒绝"
   is true and fails, as does a clause with 0% or 第0批 beside one. `ZERO_NUMERAL` skips only the
   0s inside other numbers, and 0% cannot be skipped: "前视违规率为 0%" is a claim.
@@ -410,15 +409,6 @@ def test_the_stated_limits_are_real() -> None:
     assert not flagged_anyway, f"a stated blind spot is now flagged: {flagged_anyway}"
     refused = {
         "a denial": ({"a denial": "回放不检测前视违规。\n"}, {}),
-        "a check word on another card of one table": (
-            {},
-            {
-                "one table": (
-                    'columns = ((64, "同路径回放", ("两遍比对", "前视语料加载即拒")), '
-                    '(394, "结果归因", ("验证结果",)))\n'
-                )
-            },
-        ),
         "a 0 that counts nothing: T+0": ({"T+0": "T+0 交易下前视违规被整体拒绝。\n"}, {}),
         "a 0 that counts nothing: a 0% position": (
             {"0%": "仓位为 0% 时，含前视违规的语料同样在加载时被整体拒绝。\n"},
@@ -435,6 +425,13 @@ def test_the_stated_limits_are_real() -> None:
         if not _look_ahead_claims(_guarded_texts(documents, sources))
     ]
     assert not passed, f"a stated over-reach no longer happens: {passed}"
+    two_cards = (
+        'columns = ((64, "同路径回放", ("两遍比对", "前视语料加载即拒")), '
+        '(394, "结果归因", ("验证结果",)))\n'
+    )
+    assert not _look_ahead_claims(_guarded_texts({}, {"two cards": two_cards})), (
+        "a check word on one card of a table and 前视 on another are read together again"
+    )
     refused_truth = "含前视证据的语料在加载时就被整体拒绝，不会进入回放。\n"
     assert not _look_ahead_claims(_guarded_texts({"README.md:43's shape": refused_truth}, {})), (
         "README.md:43's true sentence is read as a claim"

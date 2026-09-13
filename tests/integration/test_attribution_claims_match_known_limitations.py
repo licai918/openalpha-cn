@@ -1195,3 +1195,74 @@ def test_the_diagram_reader_names_the_generator_it_parsed() -> None:
         assert named and all(name == EXAMPLE_GENERATOR for name in named), (
             f"{reader.__name__}'s warnings name {named}"
         )
+
+
+READ_THROUGH: Final[dict[str, str]] = {
+    "a tuple": 'svg.text(1, 2, ("链邻", "已接入研究链"))\n',
+    "a list": 'svg.text(1, 2, ["链邻", "已接入研究链"])\n',
+    "an f-string's literal parts": 'svg.text(1, 2, f"链邻{mark}已接入研究链")\n',
+    "both branches of a conditional": 'svg.text(1, 2, "已接入研究链" if wide else "链邻")\n',
+    "a format template and its literal arguments": (
+        'svg.text(1, 2, "链邻{}".format("已接入研究链"))\n'
+    ),
+    "a tuple no call takes": 'PAIR = ("链邻", "已接入研究链")\n',
+    "a row of a table": 'ROWS = (\n    (1, "链邻", "已接入研究链"),\n    (2, "回放", "无"),\n)\n',
+}
+"""One source per shape `tests/diagram_text.py` says `diagram_units` reads, each drawing 链邻 and
+已接入 in one unit."""
+
+UNREAD_BY_UNITS: Final[dict[str, str]] = {
+    "an f-string's formatted value": 'NAME = "链邻"\nsvg.text(1, 2, f"{NAME}已接入研究链")\n',
+    "a string built with +": 'svg.text(1, 2, "链邻" + "已接入研究链")\n',
+    "a string built with %": 'svg.text(1, 2, "链邻%s" % "已接入研究链")\n',
+    "a name bound once to a literal": 'LABEL = "链邻已接入研究链"\nsvg.text(1, 2, LABEL)\n',
+    "a name bound in the drawing function": (
+        'def draw(svg):\n    label = "链邻已接入研究链"\n    svg.text(1, 2, label)\n'
+    ),
+    "an attribute": (
+        'class Labels:\n    chainlin = "链邻已接入研究链"\n\n\nsvg.text(1, 2, Labels.chainlin)\n'
+    ),
+    "a subscript": 'LABELS = {"k": "链邻已接入研究链"}\nsvg.text(1, 2, LABELS["k"])\n',
+    "a list drawn in a loop": (
+        'LINES = ["链邻已接入研究链"]\nfor line in LINES:\n    svg.text(1, 2, line)\n'
+    ),
+    "rows a loop draws into one panel": (
+        'ROWS = (\n    ("链邻",),\n    ("已接入研究链",),\n)\n'
+        "for row in ROWS:\n    svg.text(1, 2, *row)\n"
+    ),
+}
+"""One source per shape the same docstring says `diagram_units` cannot see: 链邻 and 已接入 are
+drawn, but never read into one unit."""
+
+
+def _joined(source: str) -> bool:
+    """Whether some unit of `source` holds both 链邻 and 已接入."""
+    return any("链邻" in unit.text and "已接入" in unit.text for unit in diagram_units(source))
+
+
+def test_diagram_units_read_through_what_their_docstring_says() -> None:
+    """Each shape `tests/diagram_text.py` says a unit reads through is read into one unit.
+
+    The final review of `D13` put the same claim in an f-string, a conditional expression, a
+    name and a `.format` template, and `diagram_units` read none of them. It now reads all but the
+    name, which `test_diagram_units_leave_unread_what_their_docstring_says` holds unread.
+    """
+    missed = [label for label, source in READ_THROUGH.items() if not _joined(source)]
+    assert not missed, f"diagram_units did not read through: {missed}"
+
+
+def test_diagram_units_leave_unread_what_their_docstring_says() -> None:
+    """Each shape `tests/diagram_text.py` says `diagram_units` cannot see is still unread, and
+    `diagram_strings` reads the literal in every one of them.
+
+    A case that starts being read has closed a blind spot: change that docstring with it. The
+    last one holds a table read row by row, which a table read whole would join.
+    """
+    read = [label for label, source in UNREAD_BY_UNITS.items() if _joined(source)]
+    assert not read, f"a stated blind spot of diagram_units is now read: {read}"
+    unread = [
+        label
+        for label, source in UNREAD_BY_UNITS.items()
+        if not any("已接入" in string.text for string in diagram_strings(source))
+    ]
+    assert not unread, f"diagram_strings missed a literal in: {unread}"

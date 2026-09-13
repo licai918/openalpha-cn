@@ -61,7 +61,9 @@ which `test_the_reference_scan_finds_what_its_docstring_says` measures.
   implied shipped calls through a condition alone; it was rewritten by hand, as was §085's copy.
 - A claim split across clauses or blocks, the name in one and the marker in the next: a pronoun
   ("它", "数据随后") carries a claim past this guard.
-- In the diagrams, a name and a claim drawn by two different calls, and text computed at run time.
+- In the diagrams, a name and a claim drawn by two different calls, and text a generator computes
+  at run time -- an f-string's formatted values, a string built with `+` or `%`, a name -- which
+  `tests/diagram_text.py` does not read into a unit.
 - An English claim worded outside the few English markers.
 
 **What it refuses that is true.** The same test measures these.
@@ -763,6 +765,10 @@ def test_the_stated_limits_are_real() -> None:
     run_time = 'name = "链邻数据接口 API"\nsvg.text(1, 2, f"{name} · 统一替代入口")\n'
     assert not _client_claims(_guarded_texts({}, {"run time": run_time})), (
         "text a generator computes at run time is now read"
+    )
+    two_rows = 'ROWS = (\n    (1, "链邻数据接口 API"),\n    (2, "统一替代入口"),\n)\n'
+    assert not _client_claims(_guarded_texts({}, {"two rows": two_rows})), (
+        "a name in one row of a table and a marker in another are read together again"
     )
     refused = {
         "a denial": "链邻不是统一入口。\n",
