@@ -236,18 +236,24 @@ def landscape() -> str:
         subtitle="REST 调用方经同一 FastAPI 边界进入，SDK 与 CLI 在进程内调用同一批服务。",
     )
     svg.section(x=64, y=194, text="调用入口", color=COLORS["slate"])
-    for y, label in (
-        (220, "REST / OpenAPI"),
-        (284, "Python SDK"),
-        (348, "Typer CLI"),
-        (412, "React 工作台"),
-    ):
+    # Only an HTTP caller crosses the FastAPI boundary: a REST client, and the React workbench,
+    # which is one. The SDK and the CLI import the services themselves, so their arrows run
+    # beneath the card, dashed as a caller's own composition, to the same service layer.
+    for y, label in ((220, "REST / OpenAPI"), (284, "React 工作台")):
         svg.pill(x=64, y=y, width=196, text=label, color=COLORS["indigo"])
+        svg.arrow(path=f"M 262 {y + 18} L 294 {y + 18}")
+    for y, label in ((500, "Python SDK"), (564, "Typer CLI")):
+        svg.pill(x=64, y=y, width=196, text=label, color=COLORS["indigo"])
+        svg.arrow(path=f"M 262 {y + 18} L 630 {y + 18}", color=COLORS["orange"], dashed=True)
+    svg.raw(
+        '  <text x="446" y="555" class="arrowLabel" text-anchor="middle">'
+        "进程内调用，不经 FastAPI</text>"
+    )
     svg.card(
         x=302,
         y=220,
-        width=250,
-        height=330,
+        width=292,
+        height=250,
         title="FastAPI 公共边界",
         endpoint="GET /health · /docs · /openapi.json",
         lines=(
@@ -260,8 +266,13 @@ def landscape() -> str:
         ),
         color=COLORS["indigo"],
     )
-    svg.arrow(path="M 262 350 L 294 350")
-    svg.section(x=606, y=194, text="五条公开功能链", color=COLORS["slate"])
+    svg.arrow(path="M 598 345 L 630 345")
+    svg.section(x=622, y=194, text="服务层", color=COLORS["slate"])
+    svg.raw(
+        f'  <rect x="638" y="210" width="12" height="430" rx="6" fill="{COLORS["slate"]}" '
+        'opacity=".28" />'
+    )
+    svg.section(x=700, y=194, text="五条公开功能链", color=COLORS["slate"])
     lanes = (
         (
             210,
@@ -271,28 +282,28 @@ def landscape() -> str:
             COLORS["teal"],
         ),
         (
-            302,
+            298,
             "研究链",
             "POST /api/v1/research/run",
             "路由 → Agent → Signal → 风险门",
             COLORS["purple"],
         ),
         (
-            394,
+            386,
             "研究产品链",
             "POST /api/v1/screen · /reports",
             "筛选 → 观察池 → 不可变报告",
             COLORS["orange"],
         ),
         (
-            486,
+            474,
             "组合链",
             "POST /api/v1/portfolio/execute",
             "A 股约束 → 转移 → 不可变账本",
             COLORS["red"],
         ),
         (
-            578,
+            562,
             "验证链",
             "POST /api/v1/backtests/replay",
             "同路径回放 → 统计 → 归因",
@@ -301,14 +312,14 @@ def landscape() -> str:
     )
     for y, title, endpoint, line, color in lanes:
         svg.raw(
-            f'  <rect x="628" y="{y}" width="674" height="78" rx="18" '
+            f'  <rect x="700" y="{y}" width="602" height="78" rx="18" '
             'fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)" />'
         )
-        svg.raw(f'  <rect x="628" y="{y}" width="7" height="78" rx="3.5" fill="{color}" />')
-        svg.raw(f'  <text x="652" y="{y + 31}" class="cardTitle">{escape(title)}</text>')
-        svg.raw(f'  <text x="836" y="{y + 29}" class="endpoint">{escape(endpoint)}</text>')
-        svg.raw(f'  <text x="836" y="{y + 56}" class="body">{escape(line)}</text>')
-        svg.arrow(path=f"M 554 385 C 590 385, 584 {y + 39}, 620 {y + 39}", color=color)
+        svg.raw(f'  <rect x="700" y="{y}" width="7" height="78" rx="3.5" fill="{color}" />')
+        svg.raw(f'  <text x="724" y="{y + 31}" class="cardTitle">{escape(title)}</text>')
+        svg.raw(f'  <text x="908" y="{y + 29}" class="endpoint">{escape(endpoint)}</text>')
+        svg.raw(f'  <text x="908" y="{y + 56}" class="body">{escape(line)}</text>')
+        svg.arrow(path=f"M 654 {y + 39} L 692 {y + 39}", color=color)
     svg.card(
         x=1040,
         y=650,
@@ -320,7 +331,7 @@ def landscape() -> str:
         fill="#F2F4F8",
     )
     svg.arrow(
-        path="M 960 656 C 960 700, 1000 685, 1032 685",
+        path="M 960 640 C 960 684, 1000 685, 1032 685",
         color=COLORS["slate"],
         label="证据 / 运行 / 账本",
         label_x=930,
