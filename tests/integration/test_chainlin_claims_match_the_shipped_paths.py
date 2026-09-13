@@ -50,8 +50,16 @@ above `.env.example`'s data-provider credentials to naming, one sentence each, b
 variables with `openalpha doctor`, and `TUSHARE_TOKEN` with `TushareProvider`, the two commands
 that construct it and `--probe`.
 `test_no_document_says_the_contract_tests_hold_clocks_they_do_not_assert` holds a clause that
-names ChainLin and its contract tests and says 四时钟 to what those tests assert: all four clocks,
-or the clause fails, and they assert two. A clause naming single clocks is not read.
+names ChainLin and its contract tests and names the four clocks to what those tests assert: all
+four clocks, or the clause fails, and they assert two. The four clocks are read as 四时钟,
+四个时钟 or 4 个时钟, with PIT before 时钟 or not, and as "four clocks", "4 clocks" or "four PIT
+clocks" (`FOUR_CLOCKS`); the contract tests as 合约测试, 合同测试, 契约测试 or "contract
+test(s)", hyphenated or not (`CONTRACT_TESTS`). Not read: single clocks; the clocks by another
+word (四个时间戳, "four timestamps") or with a word other than PIT before "clocks" ("four
+point-in-time clocks"); all the clocks without the number (全部时钟); the contract tests by
+another name (冻结测试). Refused though true: a clause naming the four clocks to say the tests
+assert only some of them, "链邻合约测试只断言四时钟中的两个".
+`test_the_four_clock_check_reads_what_its_docstring_says` measures each.
 
 **What it cannot see.** `test_the_stated_limits_are_real` measures each of these but the first,
 which `test_the_reference_scan_finds_what_its_docstring_says` measures.
@@ -510,13 +518,17 @@ CONTRACT_TEST: Final[Path] = ROOT / "tests/contract/providers/test_chainlin_prov
 CLOCKS: Final[frozenset[str]] = frozenset(field.name for field in dataclasses.fields(Timeline))
 """The four clocks of a `Timeline`."""
 
-FOUR_CLOCKS: Final[re.Pattern[str]] = re.compile(r"四时钟|four[- ]clocks?", re.IGNORECASE)
-"""The four clocks named together."""
+FOUR_CLOCKS: Final[re.Pattern[str]] = re.compile(
+    r"[四4]\s*(?:个\s*)?(?:PIT\s*)?时钟|(?:four|4)[- ](?:PIT[- ])?clocks?", re.IGNORECASE
+)
+"""The four clocks named together: 四时钟, 四个时钟 or 4 个时钟, with PIT before 时钟 or not, and
+"four clocks", "4 clocks" or "four PIT clocks", with a space or a hyphen."""
 
 CONTRACT_TESTS: Final[re.Pattern[str]] = re.compile(
-    r"合约测试|合同测试|contract tests?", re.IGNORECASE
+    r"合约测试|合同测试|契约测试|contract[- ]tests?", re.IGNORECASE
 )
-"""Contract tests, as the documents name them."""
+"""Contract tests: 合约测试, 合同测试 or 契约测试, and "contract test(s)" with a space or a hyphen,
+as in "contract-test suite"."""
 
 D4A37161_README_67: Final[str] = (
     "**链邻数据接口 API** 已具备合同优先的 BYOK 客户端，Bearer 认证、四时钟 PIT、"
@@ -555,14 +567,14 @@ def _four_clock_claims(
 
 
 def test_no_document_says_the_contract_tests_hold_clocks_they_do_not_assert() -> None:
-    """A clause naming ChainLin and its contract tests may say 四时钟 only while those tests
-    assert all four clocks.
+    """A clause naming ChainLin's contract tests may name the four clocks only while those tests
+    assert all four.
 
-    `README.md:67` said Bearer auth, "四时钟 PIT" and revisions all had frozen contract tests.
-    `tests/contract/providers/test_chainlin_provider.py` asserts `available_time` and
-    `revision_time`, against a fixture that gives event, available and revision time an instant
-    each, so a client that swaps two of them fails there. Only 四时钟 is read: a clause naming
-    single clocks the tests do not assert passes, which the last assertion measures.
+    At `4a37161`, `README.md` said Bearer auth, "四时钟 PIT" and revisions all had frozen
+    contract tests. `tests/contract/providers/test_chainlin_provider.py` asserts
+    `available_time` and `revision_time`, against a fixture that gives event, available and
+    revision time an instant each, so a client that swaps two of them fails there.
+    `test_the_four_clock_check_reads_what_its_docstring_says` measures which wordings are read.
     """
     asserted = _asserted_clocks(CONTRACT_TEST)
     assert asserted, "no clock is read in ChainLin's contract tests, so the scan has gone blind"
@@ -573,8 +585,64 @@ def test_no_document_says_the_contract_tests_hold_clocks_they_do_not_assert() ->
         "README.md:67 at 4a37161 is no longer flagged; if the contract tests now assert all four "
         "clocks, this check has nothing left to hold"
     )
-    single = _guarded_texts({"single clocks": "链邻合约测试覆盖事件时间与入库时间。\n"}, {})
-    assert not _four_clock_claims(single, asserted), "a clause naming single clocks is now read"
+
+
+FOUR_CLOCK_CLAIMS: Final[dict[str, str]] = {
+    "四时钟": "链邻合约测试覆盖四时钟。\n",
+    "四个时钟": "链邻合约测试覆盖全部四个时钟。\n",
+    "4 个时钟": "链邻合约测试覆盖 4 个时钟。\n",
+    "四个 PIT 时钟": "链邻合约测试覆盖四个 PIT 时钟。\n",
+    "four clocks": "ChainLin's contract tests hold the four clocks.\n",
+    "all 4 clocks": "ChainLin's contract tests hold all 4 clocks.\n",
+    "all four PIT clocks": "ChainLin's contract tests hold all four PIT clocks.\n",
+    "合同测试": "链邻合同测试覆盖四时钟。\n",
+    "契约测试": "链邻契约测试覆盖四时钟。\n",
+    "contract-test suite": "ChainLin's contract-test suite holds the four clocks.\n",
+}
+"""Claims beside ChainLin that between them use every wording of the four clocks and of the
+contract tests the module docstring says is read. SA3, auditing this guard for the final review
+of `D13`, found five of them unread: 四个时钟, 4 个时钟, 契约测试, "all four PIT clocks" and
+"contract-test suite"."""
+
+FOUR_CLOCKS_UNREAD: Final[dict[str, str]] = {
+    "single clocks": "链邻合约测试覆盖事件时间与入库时间。\n",
+    "the clocks by another word": "链邻合约测试覆盖四个时间戳。\n",
+    "the clocks by another English word": "ChainLin's contract tests hold all four timestamps.\n",
+    "a word other than PIT between the number and the clocks": (
+        "ChainLin's contract tests hold the four point-in-time clocks.\n"
+    ),
+    "all the clocks, without the number": "链邻合约测试覆盖全部时钟。\n",
+    "the contract tests by another name": "链邻冻结测试覆盖四时钟。\n",
+}
+"""Claims beside ChainLin the four-clock check does not read, one for each kind the module
+docstring names."""
+
+SOME_OF_THE_FOUR: Final[str] = "链邻合约测试只断言四时钟中的两个。\n"
+"""True, and refused: it names the four clocks to say the contract tests assert only some."""
+
+
+def _four_clocks_read(label: str, text: str) -> bool:
+    """Whether the four-clock check flags `text`, were the contract tests to assert no clock."""
+    return bool(_four_clock_claims(_guarded_texts({label: text}, {}), frozenset()))
+
+
+def test_the_four_clock_check_reads_what_its_docstring_says() -> None:
+    """Every wording the module docstring says the four-clock check reads is flagged beside
+    ChainLin; every kind it says goes unread passes; and the true clause it says is refused is.
+
+    A clause of `FOUR_CLOCKS_UNREAD` that starts being flagged has closed a blind spot, and
+    `SOME_OF_THE_FOUR` passing has closed the over-reach: change the docstring with it.
+    """
+    missed = [
+        label for label, text in FOUR_CLOCK_CLAIMS.items() if not _four_clocks_read(label, text)
+    ]
+    assert not missed, f"a wording of the four clocks or the contract tests went unread: {missed}"
+    read = [label for label, text in FOUR_CLOCKS_UNREAD.items() if _four_clocks_read(label, text)]
+    assert not read, f"a stated blind spot of the four-clock check is now read: {read}"
+    assert _four_clocks_read("some of the four", SOME_OF_THE_FOUR), (
+        "a clause saying the contract tests assert only some of the four clocks is no longer "
+        "refused"
+    )
 
 
 # --- The guard's own tests --------------------------------------------------------------------
