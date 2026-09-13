@@ -72,17 +72,24 @@ Four couplings. The first three stand on that one fact, the fourth on a narrower
     (比较, 分析, 增加了多少, 多花, 记下, 记录, 追踪, 统计, 核算). This is the shape of section
     037's two per-configuration cost claims, which the first version of this guard missed;
   - it holds `ENGLISH_COST` ("cost", "costs", "spend") beside one of `ENGLISH_RECORDING`
-    (record, track, account, meter, ledger, persist, as word starts: "recorded" counts);
+    (record, track, account, meter, ledger, persist, as word starts: "recorded" counts),
+    unless the cost is a transaction cost ("transaction cost", `transaction_cost`) -- `COST`'s
+    交易成本 in English, which the review of `D13` found read as usage in true sentences about
+    the validation layer's and the portfolio's transaction costs (its m-11);
   - it holds "usage" as an English word beside one of `ENGLISH_RECORDING`. "Usage" alone is
     ordinary README English: a `## Usage` heading, a `usage: openalpha [-h]` line.
 - *Model-call markers.* A clause names a model call when it names a model (`MODEL_WORDS`: 模型,
   or "LLM" or "model" as an English word) and one of `MODEL_CALL_BEHAVIOURS`: 401, 408, 429 or
-  5xx, 重试, 退避, 幻觉, or "retry", "backoff", "schema".
+  5xx, 重试, 退避, 幻觉, or "retry", "backoff", "schema". "model" directly followed by an
+  underscore or by "answer(s)" -- `model_view`, the answers it builds -- is no model word: the
+  review of `D13` found both read as a model (its m-11).
 - *Capability markers.* A clause names capability selection when it holds `CAPABILITY_CLAIM`
   -- 能力 and 注册 within eight characters, so 模型能力由治理层注册 counts; 注册 then 能力;
   注册表; 按 ... 能力 ... 选; 能力选择; "registry"; or "capability" before a word of selecting or
-  registering -- and names a model or a capability (`CAPABILITY_CONTEXT`), so the
-  `pnpm audit --registry` line in `README.md` names none.
+  registering -- and names a model (`MODEL_WORDS`), or a capability (`CAPABILITY_WORDS`) and no
+  data provider or dataset (`DATA_PROVIDER_WORDS`). So the `pnpm audit --registry` line in
+  `README.md` names none, and neither does `doctor --probe` choosing its datasets by what a
+  data provider declares, which the review of `D13` found read as a model's (its m-11).
 - *Claims.* A clause that names usage recording is a claim unless it holds `USAGE_CONDITION`, a
   clause that names a model call unless it holds `MODEL_CALL_CONDITION`, and a clause that
   names capability selection unless it holds `CAPABILITY_CONDITION`; each condition exempts its
@@ -124,8 +131,10 @@ measures each of these.
 - The other direction: a credential token beside an accounting word is read as usage
   ("Token 持久保存在环境变量里。" is flagged), a transaction cost spelled other than 交易成本
   beside a bearer and a measuring verb is read as a model cost ("佣金成本随每个 Agent 的成交一起
-  记录。" is flagged), and a condition worded outside `USAGE_CONDITION` is read as a claim --
-  since `D13` that includes 出厂路径不调用模型 on its own.
+  记录。" is flagged), and so is an English one spelled other than "transaction cost" beside a
+  recording word ("Commission costs are recorded with every fill." is flagged;
+  `test_the_limits_the_d13_narrowings_leave_are_real` measures it). A condition worded outside
+  `USAGE_CONDITION` is read as a claim -- since `D13` that includes 出厂路径不调用模型 on its own.
 
 **What the model-call guard cannot see.**
 `test_the_model_call_guards_stated_blind_spots_are_real` measures each of these.
@@ -144,6 +153,10 @@ measures each of these.
   "OpenAI-compatible Provider"; the review of `D12` found no clause of these shapes in the four
   files (its M-3).
 - A claim split across two blocks is read as two halves, each innocent.
+- A claim worded around "model answer", or naming a model only through an identifier, passes
+  since the review of `D13` narrowed `MODEL_WORDS` (its m-11): "Model answers are retried on
+  429." and "`model_provider` retries on 429." both pass;
+  `test_the_limits_the_d13_narrowings_leave_are_real` measures them.
 - The other direction: a retry of something else beside an unrelated model word is read as a
   model call ("批量队列支持失败重试，RunManifest 记录模型版本。" is flagged), and a condition
   worded outside `MODEL_CALL_CONDITION` is read as a claim.
@@ -154,6 +167,9 @@ measures each of these.
 - A choice made by capability, worded without a marker: "模型元数据决定调用哪个端点。" passes.
 - A claim split across two clauses is read as two halves, each innocent:
   "模型侧维护一份能力清单。注册后按它选端点。" passes.
+- A claim in a clause that names a data provider or a dataset and no model passes since the
+  review of `D13` (its m-11): "数据 Provider 与端点都按能力注册表选择。" passes;
+  `test_the_limits_the_d13_narrowings_leave_are_real` measures it.
 - The other direction: a registry of something else beside a model word is read as a claim
   ("模型版本登记在 RunManifest 的注册表里。" is flagged), and a condition worded outside
   `CAPABILITY_CONDITION` is read as a claim.
@@ -180,8 +196,13 @@ measures each of these.
   changes that scope's count and fails exactly as a new scope does.
 - *Calls.* A call whose callee is one of the seven -- bare, through an import binding, or as an
   attribute -- counts again as a kind of its own (`CALLED_KINDS`), so a construction is a site
-  its bare name is not. An `__all__` entry traded for a construction in the same scope used to
-  leave the count unchanged (the review of `D12`, M-1).
+  its bare name is not. So does a call whose callee is an attribute of one of them -- a
+  classmethod (`ModelUsageRecord.model_validate(...)`) or a store's method
+  (`self.usage_store.append(...)`) -- or a `functools.partial` over one of them
+  (`functools.partial(OpenAICompatibleProvider, ...)(...)`). An `__all__` entry traded for a
+  construction in the same scope used to leave the count unchanged (the review of `D12`, M-1),
+  and so did one written through a classmethod or `functools.partial` (the review of `D13`,
+  m-11).
 
 **What the premise test cannot see.** It reads names and literals, never values or behaviour.
 
@@ -192,7 +213,10 @@ measures each of these.
   import DEFAULT_MODEL_AGENT` binds nothing the scan tracks, whatever that name holds.
   `record_type = governance.ModelUsageRecord` is counted where the attribute is named, and
   `record_type(**fields)` is not counted at all, so a call through a local binding adds nothing
-  to its scope's count.
+  to its scope's count. A `functools.partial` bound to a name before it is called is the same
+  case: `DEFAULT_PROVIDER = functools.partial(OpenAICompatibleProvider, ...)` names the
+  provider once and `DEFAULT_PROVIDER()` adds nothing;
+  `test_the_premise_does_not_see_a_partial_bound_to_a_name_first` measures it.
 - A use traded for another in the same scope when neither is a call: an `__all__` entry removed
   and `PROVIDERS = {"openai-compatible": OpenAICompatibleProvider}` added keeps the scope's
   count of the name, and a caller that builds through `PROVIDERS[...](...)` names nothing
@@ -210,7 +234,9 @@ review of `D7` measured -- seven of which the first version of this scan passed 
 model-call entry point to a real module under `src/`, and a usage write to one under
 `scripts/`, and requires the premise to fail every time;
 `test_the_premise_goes_red_on_the_double_swap_the_review_of_d12_measured` does the same for
-the review of `D12`'s double swap across three real modules.
+the review of `D12`'s double swap across three real modules, and
+`test_the_premise_goes_red_on_a_double_swap_through_partial_or_a_classmethod` for that swap
+written the two ways the review of `D13` measured.
 """
 
 from __future__ import annotations
@@ -380,14 +406,43 @@ class _ShippedPathScan(ast.NodeVisitor):
                 return SHIPPED_PATH_NAMES[last]
         return None
 
+    def _reference_kind(self, node: ast.expr) -> str | None:
+        """The kind `node` names when it is one of the names -- bare, through an import binding,
+        or as an attribute -- or None."""
+        if isinstance(node, ast.Name):
+            return self._name_kind(node.id)
+        if isinstance(node, ast.Attribute):
+            return SHIPPED_PATH_NAMES.get(node.attr)
+        return None
+
+    def _is_partial(self, node: ast.expr) -> bool:
+        """Whether `node` is `functools.partial`: a name an import binds to it, or `partial` as an
+        attribute of a name an import binds to `functools`."""
+        if isinstance(node, ast.Name):
+            return "functools.partial" in self.bound.get(node.id, ())
+        return (
+            isinstance(node, ast.Attribute)
+            and node.attr == "partial"
+            and isinstance(node.value, ast.Name)
+            and "functools" in self.bound.get(node.value.id, ())
+        )
+
     def visit_Call(self, node: ast.Call) -> None:
-        """A call of one of the names counts as `CALLED_KINDS`' kind too, on top of the name."""
+        """A call of one of the names counts as `CALLED_KINDS`' kind too, on top of the name.
+
+        Its callee is one of them -- bare, through an import binding, or as an attribute -- or an
+        attribute of one of them: a classmethod (`ModelUsageRecord.model_validate(...)`) or a
+        method of a store (`self.usage_store.append(...)`). Or it is a `functools.partial` over one
+        of them, called: `functools.partial(OpenAICompatibleProvider, ...)(...)`.
+        """
         callee = node.func
         kind: str | None = None
         if isinstance(callee, ast.Name):
             kind = self._name_kind(callee.id)
         elif isinstance(callee, ast.Attribute):
-            kind = SHIPPED_PATH_NAMES.get(callee.attr)
+            kind = SHIPPED_PATH_NAMES.get(callee.attr) or self._reference_kind(callee.value)
+        elif isinstance(callee, ast.Call) and callee.args and self._is_partial(callee.func):
+            kind = self._reference_kind(callee.args[0])
         if kind is not None:
             self._found(CALLED_KINDS[kind])
         self.generic_visit(node)
@@ -530,6 +585,15 @@ USAGE_SITES: Final[dict[UsageSite, Counted]] = {
         "OpenAICompatibleProvider._record_usage",
         CALLED_KINDS[RECORD_NAMED],
     ): Counted(1, "The same construction of the one writer's record, counted again as a call."),
+    _site(
+        "models/openai_compatible.py",
+        "OpenAICompatibleProvider._record_usage",
+        CALLED_KINDS[PROVIDER_STORE_NAMED],
+    ): Counted(
+        1,
+        "`self.usage_store.append(...)`, the one write, counted again as a call of the store: a "
+        "method of one of the names counts as its call since the review of D13 (its m-11).",
+    ),
     _site("runtime/composition.py", "StorageContainer", RUNTIME_STORE_NAMED): Counted(
         1,
         "The container's field. No CLI command, REST route or SDK method reads it: no other "
@@ -567,6 +631,12 @@ USAGE_SITES: Final[dict[UsageSite, Counted]] = {
         2,
         "The return annotation, and `ModelUsageRecord.model_validate_json`, which rebuilds what "
         "was stored and writes nothing.",
+    ),
+    _site("storage/models.py", "SQLiteModelUsageStore.list", CALLED_KINDS[RECORD_NAMED]): Counted(
+        1,
+        "`ModelUsageRecord.model_validate_json(...)`, counted again as a call: a classmethod of "
+        "one of the names counts as its call since the review of D13 (its m-11). It rebuilds "
+        "what was stored.",
     ),
     _site("storage/models.py", "SQLiteModelUsageStore.list", TABLE_NAMED): Counted(
         2, "The two `SELECT`s that read rows back."
@@ -661,7 +731,32 @@ SCAN_CASES: Final[dict[str, tuple[str, Counter[UsageSite]]]] = {
         "class Meter:\n"
         "    def log(self, store, fields):\n"
         "        store.append(ModelUsageRecord.model_validate(fields))\n",
-        _counted(("Meter.log", RECORD_NAMED, 1)),
+        _counted(("Meter.log", RECORD_NAMED, 1), ("Meter.log", CALLED_KINDS[RECORD_NAMED], 1)),
+    ),
+    "a provider built through functools.partial, imported either way": (
+        "import functools\n"
+        "from functools import partial as bind\n\n"
+        "def build():\n"
+        "    first = functools.partial(OpenAICompatibleProvider, provider_id='p')(model='m')\n"
+        "    second = bind(OpenAICompatibleProvider, provider_id='p')(model='m')\n"
+        "    return first, second\n",
+        _counted(("build", PROVIDER_NAMED, 2), ("build", CALLED_KINDS[PROVIDER_NAMED], 2)),
+    ),
+    "a partial that is not functools.partial": (
+        "import mylib\n"
+        "from mylib import partial\n\n"
+        "def build():\n"
+        "    first = partial(OpenAICompatibleProvider)(model='m')\n"
+        "    second = mylib.partial(OpenAICompatibleProvider)(model='m')\n"
+        "    return first, second\n",
+        _counted(("build", PROVIDER_NAMED, 2)),
+    ),
+    "a method of a usage store called": (
+        "class Provider:\n    def record(self, row):\n        self.usage_store.append(row)\n",
+        _counted(
+            ("Provider.record", PROVIDER_STORE_NAMED, 1),
+            ("Provider.record", CALLED_KINDS[PROVIDER_STORE_NAMED], 1),
+        ),
     ),
     "a record built through a module": (
         "from openalpha_cn.models import governance\n\n"
@@ -960,6 +1055,90 @@ def test_the_premise_goes_red_on_the_double_swap_the_review_of_d12_measured() ->
     assert added == expected, f"the double swap added {sorted(added)}, not the two constructions"
 
 
+PARTIAL_OR_CLASSMETHOD_SWAPS: Final[dict[str, dict[str, str]]] = {
+    "functools.partial": {
+        "src/openalpha_cn/models/__init__.py": (
+            "\n\nimport functools\n\n"
+            "DEFAULT_PROVIDER = functools.partial(OpenAICompatibleProvider, provider_id='p',\n"
+            "    model='m', base_url='https://example.test', api_key_env=None)()\n"
+        ),
+        "src/openalpha_cn/agents/__init__.py": (
+            "\n\nimport functools\n\n"
+            "DEFAULT_MODEL_AGENT = functools.partial(StructuredSignalAgent, agent_id='a',\n"
+            "    evidence_families=frozenset(), provider=None)()\n"
+        ),
+    },
+    "a classmethod": {
+        "src/openalpha_cn/models/__init__.py": (
+            "\n\nDEFAULT_PROVIDER = OpenAICompatibleProvider.from_settings(provider_id='p')\n"
+        ),
+        "src/openalpha_cn/agents/__init__.py": (
+            "\n\nDEFAULT_MODEL_AGENT = StructuredSignalAgent.from_settings(agent_id='a')\n"
+        ),
+    },
+}
+"""`DOUBLE_SWAP` again, with each construction written the two ways the review of `D13` measured
+passing (its m-11): through `functools.partial`, and through a classmethod. Neither class has a
+`from_settings`; the scan reads names, not values, so the classmethod's name does not matter."""
+
+
+@pytest.mark.parametrize("shape", PARTIAL_OR_CLASSMETHOD_SWAPS)
+def test_the_premise_goes_red_on_a_double_swap_through_partial_or_a_classmethod(
+    shape: str,
+) -> None:
+    """`DOUBLE_SWAP`, with each construction called through `functools.partial` or a classmethod.
+
+    The review of `D13` measured both staying green (its m-11): the callee was a call of
+    `functools.partial` or an attribute of the class, neither counted as a construction, and each
+    scope kept its count of every name. A call of an attribute of one of `SHIPPED_PATH_NAMES`, or
+    of a `functools.partial` over one, now counts as `CALLED_KINDS`' kind, so each swap adds
+    exactly the two constructions.
+    """
+    sources = dict(_non_test_sources())
+    swapped = dict(sources)
+    for path, construction in PARTIAL_OR_CLASSMETHOD_SWAPS[shape].items():
+        entry, _ = DOUBLE_SWAP[path]
+        assert sources[path].count(entry) == 1, f"{entry!r} is not in {path} exactly once"
+        swapped[path] = sources[path].replace(entry, "", 1) + construction
+    sdk = "src/openalpha_cn/sdk.py"
+    swapped[sdk] = sources[sdk] + "\n\nfrom openalpha_cn.agents import DEFAULT_MODEL_AGENT\n"
+    baseline = set(_premise_problems(_usage_sites(sources.items())))
+    added = set(_premise_problems(_usage_sites(swapped.items()))) - baseline
+    constructions = (("models/__init__.py", PROVIDER_NAMED), ("agents/__init__.py", AGENT_NAMED))
+    expected = {
+        f"src/openalpha_cn/{module} :: <module> :: {CALLED_KINDS[kind]}: counted 1, "
+        "USAGE_SITES records 0"
+        for module, kind in constructions
+    }
+    assert added == expected, f"the {shape} swap added {sorted(added)}, not the two constructions"
+
+
+def test_the_premise_does_not_see_a_partial_bound_to_a_name_first() -> None:
+    """The limit the module docstring states for `functools.partial`, measured: a partial bound to
+    a name and called later is the local-binding blind spot again.
+
+    `models/__init__.py` trades its `__all__` entry for `DEFAULT_PROVIDER = functools.partial(...)`,
+    which names the provider once, and `sdk.py` builds the provider through `DEFAULT_PROVIDER()`,
+    which names nothing the scan tracks. A change that turns this red has closed the blind spot:
+    delete this test and the sentence in the module docstring together.
+    """
+    sources = dict(_non_test_sources())
+    models, sdk = "src/openalpha_cn/models/__init__.py", "src/openalpha_cn/sdk.py"
+    entry, _ = DOUBLE_SWAP[models]
+    assert sources[models].count(entry) == 1, f"{entry!r} is not in {models} exactly once"
+    swapped = {
+        **sources,
+        models: sources[models].replace(entry, "", 1) + "\n\nimport functools\n\n"
+        "DEFAULT_PROVIDER = functools.partial(OpenAICompatibleProvider, provider_id='p',\n"
+        "    model='m', base_url='https://example.test', api_key_env=None)\n",
+        sdk: sources[sdk] + "\n\nfrom openalpha_cn.models import DEFAULT_PROVIDER\n\n"
+        "_PROBE = DEFAULT_PROVIDER()\n",
+    }
+    assert not _premise_problems(_usage_sites(swapped.items())), (
+        "a partial bound to a name is now seen: update the module docstring and delete this test"
+    )
+
+
 def test_the_premise_scans_stated_blind_spot_is_real() -> None:
     """The trade the module docstring says the scan cannot see, measured: a re-export swapped for
     a table entry in the same scope, and a caller that reaches the provider through the table.
@@ -1036,8 +1215,13 @@ COST_MEASURES: Final[re.Pattern[str]] = re.compile(
 """Verbs that present such a cost as measured or kept."""
 
 ENGLISH_COST: Final[re.Pattern[str]] = re.compile(
-    r"(?<![A-Za-z])(?:costs?|spend(?:s|ing)?)(?![A-Za-z])", re.IGNORECASE
+    r"(?<![A-Za-z])(?<!transaction )(?<!transaction_)(?:costs?|spend(?:s|ing)?)(?![A-Za-z])",
+    re.IGNORECASE,
 )
+"""An English cost word -- "cost", "costs" or "spend" -- except a transaction cost ("transaction
+cost", `transaction_cost`), the twin of `COST`'s 交易成本: the validation layer attributes the one
+a caller gives it and a portfolio state adds up each fill's, and the review of `D13` found both
+read as usage (its m-11)."""
 
 ENGLISH_USAGE: Final[re.Pattern[str]] = marker_pattern("usage")
 
@@ -1118,10 +1302,12 @@ def _is_usage_claim(clause: str) -> bool:
 
 
 MODEL_WORDS: Final[re.Pattern[str]] = re.compile(
-    r"模型|(?<![A-Za-z])(?:llm|model)s?(?![A-Za-z])", re.IGNORECASE
+    r"模型|(?<![A-Za-z])(?:llms?|models?(?!\s+answers?(?![A-Za-z])))(?![A-Za-z_])", re.IGNORECASE
 )
 """模型 (大模型 included) as a substring; "LLM" and "model" as English words, plural included,
-so "AlphaModel" and "LLMOps" name no model."""
+so "AlphaModel" and "LLMOps" name no model. Nor does "model" directly followed by an underscore
+(`model_view`, pydantic's `model_validate`) or by "answer" or "answers", the answers `model_view`
+builds: the review of `D13` found both read as a model (its m-11)."""
 
 MODEL_CALL_BEHAVIOURS: Final[re.Pattern[str]] = re.compile(
     r"(?<![0-9])(?:401|408|429|5xx)(?![0-9])|重试|退避|幻觉"
@@ -1164,11 +1350,15 @@ The markers: 能力 and 注册 within eight characters (能力注册, 模型能�
 能力, 注册表, 按 ... 能力 ... 选, 能力选择, "registry", and "capability" followed by a word of
 selecting, choosing, resolving, routing or registering."""
 
-CAPABILITY_CONTEXT: Final[re.Pattern[str]] = re.compile(
-    r"模型|能力|(?<![A-Za-z])(?:llms?|models?|capabilit(?:y|ies))(?![A-Za-z])", re.IGNORECASE
+CAPABILITY_WORDS: Final[re.Pattern[str]] = re.compile(
+    r"能力|(?<![A-Za-z])capabilit(?:y|ies)(?![A-Za-z])", re.IGNORECASE
 )
-"""What makes a registry a model's: a model or a capability named in the same clause, so
-`pnpm audit --registry https://registry.npmjs.org` names none."""
+"""A capability named: 能力, or "capability" or "capabilities" as an English word."""
+
+DATA_PROVIDER_WORDS: Final[re.Pattern[str]] = re.compile(
+    r"数据\s*provider|数据集|(?<![A-Za-z])(?:data\s+provider|dataset)s?(?![A-Za-z])", re.IGNORECASE
+)
+"""A data provider or a dataset named: 数据 Provider, 数据集, "data provider" or "dataset"."""
 
 CAPABILITY_CONDITION: Final[re.Pattern[str]] = re.compile(
     r"没有(?:任何)?代码(?:会)?据此(?:选择|挑选|路由)"
@@ -1182,9 +1372,20 @@ wiring a provider in code registers nothing and selects nothing."""
 
 
 def _names_capability_selection(clause: str) -> bool:
+    """Whether `clause` holds `CAPABILITY_CLAIM` about a model's capabilities.
+
+    It is a model's when the clause names a model (`MODEL_WORDS`), or names a capability
+    (`CAPABILITY_WORDS`) and no data provider or dataset (`DATA_PROVIDER_WORDS`). So
+    `pnpm audit --registry https://registry.npmjs.org` names none, and neither does `doctor
+    --probe` choosing its datasets by what a data provider declares, which the review of `D13`
+    found read as a model's (its m-11).
+    """
+    if CAPABILITY_CLAIM.search(clause) is None:
+        return False
+    if MODEL_WORDS.search(clause) is not None:
+        return True
     return (
-        CAPABILITY_CLAIM.search(clause) is not None
-        and CAPABILITY_CONTEXT.search(clause) is not None
+        CAPABILITY_WORDS.search(clause) is not None and DATA_PROVIDER_WORDS.search(clause) is None
     )
 
 
@@ -1768,6 +1969,98 @@ def test_the_capability_guard_tells_a_claim_from_a_stated_condition() -> None:
     missed = [claim for claim in claims if not _is_capability_claim(claim)]
     wrongly = [text for text in non_claims if _is_capability_claim(text)]
     assert not missed and not wrongly, f"read as no claim: {missed}; read as a claim: {wrongly}"
+
+
+D13_TRUE_SENTENCES: Final[dict[str, tuple[str, ...]]] = {
+    "usage": (
+        "Validation accounts for the transaction cost the caller supplies.",
+        "Each portfolio state tracks the transaction costs paid so far in `fees_paid`.",
+        "Validation records `transaction_cost` as its own contribution.",
+    ),
+    "model-call": (
+        "The evaluation and daily model answers carry a schema_version.",
+        "`model_view` gives each evaluation and daily answer the same schema version.",
+    ),
+    "capability": (
+        "`doctor --probe` 按数据 Provider 声明的能力选择探测范围。",
+        "`doctor --probe` 按声明的能力选择要探测的数据集。",
+        "Each data provider's declared capabilities select what `doctor --probe` probes.",
+        "Declared capabilities select which datasets `doctor --probe` probes.",
+    ),
+}
+"""True sentences each guard read as a claim at `20fec55`, one kind of misreading per guard, as
+the review of `D13` named them (its m-11). A validation observation's `transaction_cost` is
+attributed as a contribution of its own (`backtest/validation.py`), and a portfolio state's
+`fees_paid` adds up each fill's `total_cost` (`backtest/portfolio.py`). `model_view`'s evaluation
+and daily answers both carry `MODEL_VIEW_SCHEMA_VERSION`. `doctor --probe` probes each dataset a
+data provider declares in `supported_datasets`, which `doctor` reports among that provider's
+capabilities (`cli.py`). Each capability sentence names one data-provider word, so each word is
+held alone."""
+
+D13_CLAIMS_BESIDE_THEM: Final[dict[str, tuple[str, ...]]] = {
+    "usage": ("Transaction costs and model costs are both recorded per run.",),
+    "model-call": ("The model's answer is validated against its schema.",),
+    "capability": ("模型与数据 Provider 都按能力注册表选择端点。",),
+}
+"""A claim beside each narrowing, so a narrowing that swallowed a whole clause shows."""
+
+
+@pytest.mark.parametrize("name", GUARDS)
+def test_the_true_sentences_the_review_of_d13_found_flagged_are_not_claims(name: str) -> None:
+    """Each guard's narrowing since the review of `D13` (its m-11), held in both directions.
+
+    The usage guard read a transaction cost beside "record", "track" or "account" as usage, the
+    model-call guard read `model_view` and "model answer" as naming a model, and the capability
+    guard read a data provider's capabilities as a model's. Each sentence of `D13_TRUE_SENTENCES`
+    was flagged, and none is now; each claim beside them is still flagged.
+    """
+    is_claim = GUARDS[name].is_claim
+    flagged = [text for text in D13_TRUE_SENTENCES[name] if is_claim(text)]
+    missed = [text for text in D13_CLAIMS_BESIDE_THEM[name] if not is_claim(text)]
+    assert not flagged and not missed, f"read as a claim: {flagged}; read as no claim: {missed}"
+
+
+D13_NARROWING_LIMITS: Final[dict[str, dict[str, tuple[str, bool]]]] = {
+    "usage": {
+        "a transaction cost spelled otherwise is still read as usage": (
+            "Commission costs are recorded with every fill.",
+            True,
+        ),
+    },
+    "model-call": {
+        "a claim worded around 'model answer' passes": (
+            "Model answers are retried on 429.",
+            False,
+        ),
+        "a model named only by an identifier passes": (
+            "`model_provider` retries on 429.",
+            False,
+        ),
+    },
+    "capability": {
+        "a claim in a clause that names a data provider and no model passes": (
+            "数据 Provider 与端点都按能力注册表选择。",
+            False,
+        ),
+    },
+}
+"""What each narrowing leaves, as the module docstring states it: a text, and whether the guard
+flags it."""
+
+
+@pytest.mark.parametrize("name", GUARDS)
+def test_the_limits_the_d13_narrowings_leave_are_real(name: str) -> None:
+    """Each limit the module docstring states for a narrowing since the review of `D13`, measured.
+
+    A change that makes one of these read otherwise has moved a stated limit: update the entry
+    and the sentence in the module docstring together.
+    """
+    moved = {
+        label: text
+        for label, (text, flagged) in D13_NARROWING_LIMITS[name].items()
+        if GUARDS[name].is_claim(text) is not flagged
+    }
+    assert not moved, f"a stated limit moved: {moved} -- update the module docstring with it"
 
 
 PRE_D7_CLAIMS: Final[dict[str, str]] = {
