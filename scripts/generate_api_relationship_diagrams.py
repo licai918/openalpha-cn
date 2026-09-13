@@ -232,8 +232,8 @@ class Svg:
 def landscape() -> str:
     svg = Svg(
         index=1,
-        title="API 全景｜四类入口共享五条功能链",
-        subtitle="REST、SDK、CLI 与 React 工作台通过同一 FastAPI 合同进入证据、研究、产品、组合与验证能力。",
+        title="API 全景｜四类入口与五条功能链",
+        subtitle="REST 调用方经同一 FastAPI 边界进入，SDK 与 CLI 在进程内调用同一批服务。",
     )
     svg.section(x=64, y=194, text="调用入口", color=COLORS["slate"])
     for y, label in (

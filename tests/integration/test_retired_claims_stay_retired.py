@@ -25,7 +25,9 @@ another verb, another order, or its halves in two clauses -- passes, and
 `test_the_retired_claims_blind_spot_is_real` holds one such paraphrase per entry. A pattern does
 not read negation either: "不能分别启停" is read as the claim it denies. A premise reads one fact,
 not the whole of `refuted_by`, so a premise that stays quiet does not prove the claim still
-false. The embedded diagrams are not read.
+false. The diagrams' two generators are read too, one string literal at a time
+(`tests/diagram_text.py`'s `diagram_strings`): a claim split across two literals, or computed at
+run time, is not read.
 
 **The other direction.** A pattern can also catch a true sentence that shares its words: "REST
 clients" held "cli" until SDK and CLI were matched as words, and 移动平均 held 移动. There is no
@@ -46,6 +48,7 @@ from pathlib import Path
 from typing import Final
 
 import pytest
+from diagram_text import diagram_strings
 from prose_clauses import clauses
 
 from openalpha_cn.agents.committee import DeliberationCommittee
@@ -441,7 +444,11 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "REST callers, the React workbench among them, reach the request-size limit and the "
             "security headers create_app installs (api/app.py)."
         ),
-        retired=("REST、Python SDK、Typer CLI 和 React 工作台最终进入同一 FastAPI 公共边界。",),
+        retired=(
+            "REST、Python SDK、Typer CLI 和 React 工作台最终进入同一 FastAPI 公共边界。",
+            "REST、SDK、CLI 与 React 工作台通过同一 FastAPI 合同进入证据、研究、产品、"
+            "组合与验证能力。",
+        ),
         paraphrase="SDK 与 CLI 的请求同样要过 FastAPI 那道边界。",
         premise=_the_sdk_and_the_cli_still_call_in_process,
     ),
@@ -550,6 +557,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         name="the four faces offer one and the same set of capabilities",
         pattern=re.compile(
             r"同一能力通过|工作台共享(?:同一后端能力|证据)|真走同一条链|入口用的是同一套能力"
+            r"|四类入口共享|共享同一合同"
         ),
         refuted_by=(
             "tests/unit/test_surface_parity.py::PARITY maps 48 routes: 28 have no CLI command "
@@ -566,6 +574,9 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "OpenAlpha CN 的 REST API、Python SDK、Typer CLI 和 React 工作台共享证据、研究、回放、"
             "批量、组合与产品服务。",
             "### 075\N{FULLWIDTH VERTICAL LINE}四个入口用的是同一套能力",
+            "### API 关系图 01\N{FULLWIDTH VERTICAL LINE}四类入口共享五条功能链",
+            "API 全景\N{FULLWIDTH VERTICAL LINE}四类入口共享五条功能链",
+            "API、SDK、CLI、Web 共享同一合同",
         ),
         paraphrase="四个入口能做的事一模一样。",
         premise=_the_workbench_still_skips_the_product_routes,
@@ -985,3 +996,58 @@ def test_the_compose_premise_reports_a_real_delete_and_recreate(
     script.write_text(recreated, encoding="utf-8")
     monkeypatch.setattr(sys.modules[__name__], "ROOT", tmp_path)
     assert _compose_recovery_still_only_restarts() is not None, f"the premise missed {name}"
+
+
+GENERATORS: Final[tuple[Path, ...]] = (
+    ROOT / "scripts" / "generate_brain_diagrams.py",
+    ROOT / "scripts" / "generate_api_relationship_diagrams.py",
+)
+"""The generators of the diagrams `README.md` embeds. Each SVG is held equal to what its generator
+writes, so a generator's string literals are the words the diagrams draw."""
+
+
+def _retired_claim_drawings(sources: dict[str, str]) -> list[str]:
+    """One message per string literal of the generator `sources` that an entry's pattern finds,
+    each generator read with its path as `filename`."""
+    return [
+        f"{label}:{string.line} draws the retired claim {claim.name!r}: {string.text!r}"
+        for label, source in sources.items()
+        for string in diagram_strings(source, filename=label)
+        for claim in RETIRED_CLAIMS
+        if claim.pattern.search(string.text)
+    ]
+
+
+def _generator_sources() -> dict[str, str]:
+    return {
+        path.relative_to(ROOT).as_posix(): path.read_text(encoding="utf-8") for path in GENERATORS
+    }
+
+
+def test_no_diagram_draws_a_retired_claim() -> None:
+    """Every string literal the two generators hold, searched with every entry's pattern.
+
+    Written against api-01, whose subtitle sent the SDK and the CLI through the FastAPI contract
+    and whose title had the four entrances share the five chains. Fix the generator, then
+    regenerate the SVG with the generator itself.
+    """
+    drawings = _retired_claim_drawings(_generator_sources())
+    assert not drawings, "\n".join(drawings)
+
+
+def test_a_retired_claim_drawn_into_a_generator_is_reported() -> None:
+    """Each entry's first retired wording, appended to a generator as a string literal, must be
+    reported under that entry, so a drawing check that stopped reading cannot pass."""
+    sources = _generator_sources()
+    label = GENERATORS[1].relative_to(ROOT).as_posix()
+    unreported = [
+        claim.name
+        for claim in RETIRED_CLAIMS
+        if not any(
+            f"retired claim {claim.name!r}" in drawing
+            for drawing in _retired_claim_drawings(
+                {**sources, label: f"{sources[label]}\nPLANTED = {claim.retired[0]!r}\n"}
+            )
+        )
+    ]
+    assert not unreported, f"a retired wording drawn into a generator went unreported: {unreported}"
