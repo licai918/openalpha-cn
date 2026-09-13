@@ -703,7 +703,7 @@ def validation_loop() -> str:
             64,
             "同路径回放",
             "POST /api/v1/backtests/replay",
-            ("冻结 ReplayCorpus", "ResearchEngine.run_cycle", "确定性 / 防前视报告"),
+            ("冻结 ReplayCorpus", "ResearchEngine.run_cycle", "两遍比对 · 前视语料加载即拒"),
             COLORS["purple"],
         ),
         (
