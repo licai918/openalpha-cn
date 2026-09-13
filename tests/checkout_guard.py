@@ -17,21 +17,30 @@ are all seen here and not by the reading.
 
 What a snapshot holds, under the root it is given:
 
-* every file below `src/` and `tests/`, by size and modification time -- so a write that put back
-  the very bytes it found is still a write;
+* every file below `src/` and `tests/`, by size and modification time, and on POSIX by change time
+  and inode as well -- so a write that put back the very bytes it found is still a write, and so
+  is one that put the modification time back too: no user-space call sets a change time back,
+  and `os.utime` and `shutil.copy2` both move it. D14 review m-2 measured both of those unseen
+  before the change time was read. On Windows `st_ctime` is the creation time and is not read, so
+  there they still are;
 * every directory below them, by modification time and the names it holds -- so a file created
   and deleted between two snapshots is still seen: the directory's modification time moves and
   its listing does not;
-* the names directly under the root -- so a cache directory a tool leaves there is seen.
+* the names directly under the root -- so a cache directory a tool leaves there is seen. Only the
+  names: a file standing directly under the root, `pyproject.toml` say, rewritten in place is not.
 
 What it ignores, because the interpreter and the runner write these as a matter of course:
 
-* everything inside `__pycache__`, and `*.pyc` anywhere: importing a module writes its bytecode;
-* a directory whose listing changed only by a `__pycache__` appearing, which is what the first
-  import of a package does to its directory. **This also hides a file created and deleted in the
-  same directory between the same two snapshots**, and it is why `tests/conftest.py` takes the
-  middle snapshot: collection is when nearly every package is first imported, so the window the
-  tests themselves run in seldom has a `__pycache__` appear in it;
+* everything inside `__pycache__`, which is where importing a module writes its bytecode and the
+  only place CPython writes it. A `.pyc` anywhere else is a change: D14 review m-2 planted a
+  sourceless `src/package/evil.pyc` while `*.pyc` was ignored wherever it stood, and imported it
+  after a green run;
+* a directory's moved modification time whenever its listing changed too, because the entry that
+  came or went accounts for it. **Any** such change therefore hides a file created and deleted in
+  the same directory between the same two snapshots -- a `__pycache__` appearing the first time a
+  package is imported, a `.DS_Store`, an entry a test left behind. It is why `tests/conftest.py`
+  takes the middle snapshot: collection is when nearly every package is first imported, so the
+  window the tests themselves run in seldom has a `__pycache__` appear in it;
 * `.DS_Store`, which Finder writes into any directory somebody opens;
 * at the root only, `.pytest_cache`, `.coverage` and `.coverage.*`: the cache and the coverage data
   the runner writes there itself;
@@ -63,9 +72,12 @@ and the offline guard with it: run a suite you mean to edit during in a worktree
 set `OPENALPHA_CHECKOUT_GUARD=report`, which prints the same section and leaves the exit status to
 the tests. The default is `fail`, CI sets nothing, and any other value is a usage error.
 
-It sees nothing outside `src/`, `tests/` and the root's own listing: a test that rewrote a file
-under `docs/`, or wrote inside a directory that already stands at the root, such as `runtime/`, is
-seen by neither half.
+What it cannot see: a write made after the last snapshot, by a process a test started and left
+running -- measured, the session passed and the file appeared two seconds later; a file directly
+under the root rewritten in place; on Windows, a same-size rewrite with its modification time put
+back; and anything outside `src/`, `tests/` and the root's own listing -- a test that rewrote a
+file under `docs/`, or wrote inside a directory that already stands at the root, such as
+`runtime/`, is seen by neither half.
 """
 
 from __future__ import annotations
@@ -112,8 +124,9 @@ ANNOTATED_SOURCE: Final[str] = ",cover"
 class Snapshot:
     """One instant of the checkout: see this module's docstring for what is held and why."""
 
-    files: Mapping[str, tuple[int, int]]
-    """Relative POSIX path -> (modification time in ns, size in bytes)."""
+    files: Mapping[str, tuple[int, ...]]
+    """Relative POSIX path -> (modification time in ns, size in bytes), followed on POSIX by
+    (change time in ns, inode)."""
 
     directories: Mapping[str, tuple[int, frozenset[str]]]
     """Relative POSIX path -> (modification time in ns, the names it held)."""
@@ -218,7 +231,7 @@ def snapshot(root: Path) -> Snapshot:
     A path that disappears between being listed and being read is left out rather than raised
     about: whatever removed it is a change the next snapshot reports.
     """
-    files: dict[str, tuple[int, int]] = {}
+    files: dict[str, tuple[int, ...]] = {}
     directories: dict[str, tuple[int, frozenset[str]]] = {}
     for tree in WATCHED_TREES:
         for current, names, filenames in os.walk(root / tree):
@@ -233,7 +246,7 @@ def snapshot(root: Path) -> Snapshot:
             )
             names[:] = [name for name in names if name != BYTECODE]
             for name in filenames:
-                if name in UNWATCHED_NAMES or name.endswith(".pyc"):
+                if name in UNWATCHED_NAMES:
                     continue
                 try:
                     status = os.stat(here / name)
@@ -242,8 +255,20 @@ def snapshot(root: Path) -> Snapshot:
                 files[(here / name).relative_to(root).as_posix()] = (
                     status.st_mtime_ns,
                     status.st_size,
+                    *_what_cannot_be_put_back(status),
                 )
     return Snapshot(files=files, directories=directories, top_level=frozenset(os.listdir(root)))
+
+
+def _what_cannot_be_put_back(status: os.stat_result) -> tuple[int, ...]:
+    """On POSIX, a file's change time and inode; nothing on Windows.
+
+    A change time moves with every write, `utime`, `chmod` and link, and no user-space call sets
+    it back; an inode is a different one after a file is replaced. On Windows `st_ctime` is the
+    creation time -- Python 3.12 deprecates it there in favour of `st_birthtime` -- so it is not
+    read, and a same-size rewrite with its modification time put back is not seen there.
+    """
+    return () if os.name == "nt" else (status.st_ctime_ns, status.st_ino)
 
 
 def changes(
@@ -259,8 +284,13 @@ def changes(
             found.append(f"created {path}")
         elif now is None:
             found.append(f"deleted {path}")
-        elif was != now:
+        elif was[:2] != now[:2]:
             found.append(f"rewrote {path}")
+        elif was != now:
+            found.append(
+                f"changed {path} -- its size and modification time are what they were, its "
+                "change time or inode is not"
+            )
     for path in sorted(before.directories.keys() | after.directories.keys()):
         if outputs.cover(path):
             continue

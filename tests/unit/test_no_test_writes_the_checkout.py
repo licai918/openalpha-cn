@@ -50,6 +50,7 @@ from __future__ import annotations
 import ast
 import itertools
 import os
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -958,6 +959,101 @@ def test_bytecode_and_the_runner_s_own_output_are_not_changes_and_a_cache_is(
     (tmp_path / ".grimp_cache").mkdir()
 
     assert changes(before, snapshot(tmp_path)) == ["created .grimp_cache at the checkout root"]
+
+
+PUT_BACK: Final[str] = (
+    "changed src/package/module.py -- its size and modification time are what they were, its "
+    "change time or inode is not"
+)
+"""What a snapshot says of a file whose size and modification time came back and nothing else."""
+
+
+def test_a_same_size_rewrite_with_its_modification_time_put_back_is_seen_on_posix(
+    tmp_path: Path,
+) -> None:
+    """D14 review m-2: `x = 1` became `x = 9`, and `os.utime` put the old time back.
+
+    Size and modification time were all a snapshot held, so the review measured the module left
+    changed for good and the run green. No user-space call sets a change time back -- a write, a
+    `utime` or a rename each moves it -- so on POSIX a snapshot holds it, with the inode. On
+    Windows `st_ctime` is when the file was created and is not read, and this stays a blind spot
+    the module docstring states; asserted both ways, so the day either side changes, this does.
+    """
+    module = _scratch_checkout(tmp_path)
+    held = module.stat()
+    before = snapshot(tmp_path)
+
+    module.write_bytes(b"x = 9\n")
+    os.utime(module, ns=(held.st_atime_ns, held.st_mtime_ns))
+
+    assert (module.stat().st_size, module.stat().st_mtime_ns) == (held.st_size, held.st_mtime_ns)
+    assert changes(before, snapshot(tmp_path)) == ([] if os.name == "nt" else [PUT_BACK])
+
+
+def test_a_module_copied_back_with_copy2_is_seen_on_posix(tmp_path: Path) -> None:
+    """The review's second route to the same blind spot: plant an import, `copy2` the original back.
+
+    `shutil.copy2` restores the modification time with the bytes, so a probe that set the module
+    aside, planted one import in it and copied it back left nothing a size and a modification time
+    could see. On POSIX the change time has moved; on Windows this is not seen.
+    """
+    module = _scratch_checkout(tmp_path)
+    aside = tmp_path / "module.py.aside"
+    shutil.copy2(module, aside)
+    before = snapshot(tmp_path)
+
+    module.write_text(
+        "from openalpha_cn.domain.portfolio import PortfolioOrder\n", encoding="utf-8"
+    )
+    shutil.copy2(aside, module)
+
+    assert changes(before, snapshot(tmp_path)) == ([] if os.name == "nt" else [PUT_BACK])
+
+
+def test_a_sourceless_pyc_beside_the_sources_is_a_write(tmp_path: Path) -> None:
+    """D14 review m-2: a `.pyc` was ignored wherever it stood, so a planted one went unseen.
+
+    The review put `src/package/evil.pyc` there and imported it after the run. CPython writes into
+    `__pycache__` and nowhere else, which is now the only place a `.pyc` is ignored.
+    """
+    module = _scratch_checkout(tmp_path)
+    before = snapshot(tmp_path)
+
+    (module.parent / "evil.pyc").write_bytes(b"planted")
+
+    assert changes(before, snapshot(tmp_path)) == ["created src/package/evil.pyc"]
+
+
+def test_any_listing_change_in_the_window_hides_a_module_created_and_removed_there(
+    tmp_path: Path,
+) -> None:
+    """A stated blind spot, measured: not only a `__pycache__` appearing masks a probe.
+
+    A directory's modification time is read as a created-and-removed entry only while its listing
+    is what it was, and a `.DS_Store` appearing -- or any other entry -- changes the listing.
+    """
+    module = _scratch_checkout(tmp_path)
+    before = snapshot(tmp_path)
+
+    (module.parent / ".DS_Store").write_bytes(b"")
+    probe = module.parent / "_layering_gate_probe.py"
+    probe.write_text("import sqlite3\n", encoding="utf-8")
+    probe.unlink()
+
+    assert changes(before, snapshot(tmp_path)) == []
+
+
+def test_a_file_directly_under_the_root_is_watched_by_its_name_only(tmp_path: Path) -> None:
+    """A stated blind spot, measured: the root's listing is held, not its files' contents."""
+    _scratch_checkout(tmp_path)
+    manifest = tmp_path / "pyproject.toml"
+    manifest.write_text("[project]\n", encoding="utf-8")
+    _aged(manifest)
+    before = snapshot(tmp_path)
+
+    manifest.write_text("[project]\nname = 'rewritten'\n", encoding="utf-8")
+
+    assert changes(before, snapshot(tmp_path)) == []
 
 
 WRITING_PROBE: Final[str] = textwrap.dedent(
