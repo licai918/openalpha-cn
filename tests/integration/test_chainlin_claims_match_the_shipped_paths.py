@@ -28,7 +28,8 @@ panel and "已实现 · 统一替代入口" on the next, so a panel's strings ar
 链邻 or ChainLin, in any case and as a substring, so `ChainLinDataProvider` and
 `chainlin-data/v1` count. Before a clause is read, a URL and the name of the separately
 distributed desktop product (`DESKTOP_PRODUCT`) are removed, so "进入 Release 页面" beside a
-`chainlin-desktop` link is no claim.
+`chainlin-desktop` link is no claim. A URL ends at whitespace, a closing bracket or full-width
+punctuation (`URL`), so a claim written straight after a link is still read.
 
 **What it cannot see.** `test_the_stated_limits_are_real` measures each of these.
 
@@ -154,7 +155,15 @@ DESKTOP_PRODUCT: Final[re.Pattern[str]] = re.compile(
 )
 """The separately distributed desktop product, which is not the data client."""
 
-URL: Final[re.Pattern[str]] = re.compile(r"https?://\S+")
+URL: Final[re.Pattern[str]] = re.compile(
+    "https?://[^\\s)\\]>，。、"
+    "\N{FULLWIDTH SEMICOLON}\N{FULLWIDTH EXCLAMATION MARK}\N{FULLWIDTH QUESTION MARK}]+"
+)
+"""A URL, ending at whitespace, a closing bracket or full-width punctuation.
+
+Chinese puts no space after a link, so a URL that ran on to the next whitespace took the claim
+written right after it with it; `test_a_claim_written_right_after_a_link_is_read` holds this.
+"""
 
 _WITHIN_A_CLAUSE: Final[str] = "[^，。\N{FULLWIDTH SEMICOLON}]*"
 """Any run of characters that crosses no comma, full stop or semicolon."""
@@ -381,6 +390,26 @@ def test_true_sentences_about_chainlin_pass() -> None:
     """URLs, the desktop product, 明确保留 and the API's own name are not read as claims."""
     wrongly = {sentence: _claim_markers(sentence) for sentence in TRUE_SENTENCES}
     assert not any(wrongly.values()), f"a true sentence was read as a claim: {wrongly}"
+
+
+CLAIMS_RIGHT_AFTER_A_LINK: Final[dict[str, str]] = {
+    "a markdown link, then the claim": "[链邻数据接口](https://example.com/api)已接入研究链。",
+    "a bare URL, then a comma and the claim": (
+        "链邻 Provider 文档见 https://example.com/x，已接入研究链。"
+    ),
+}
+"""The review of `D13` put the first into `README.md`, and the guard passed: `\\S+` ran the URL
+on to the next whitespace, and Chinese puts none after a link."""
+
+
+def test_a_claim_written_right_after_a_link_is_read() -> None:
+    """A URL ends at a closing bracket, whitespace or full-width punctuation, not at a space."""
+    missed = [
+        label
+        for label, sentence in CLAIMS_RIGHT_AFTER_A_LINK.items()
+        if "接入" not in _claim_markers(sentence)
+    ]
+    assert not missed, f"a claim right after a link went unread: {missed}"
 
 
 def test_the_stated_limits_are_real() -> None:
