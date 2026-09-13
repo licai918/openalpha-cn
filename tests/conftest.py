@@ -16,6 +16,7 @@ V2-P0B-013.
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable, Generator, Iterator
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -384,3 +385,58 @@ def pytest_runtest_protocol(
 
     with refusing_outbound_traffic():
         return (yield)
+
+
+# --- no inherited git variables ------------------------------------------------------------
+#
+# D13. Another lane gated each commit with `git rebase --exec`, and git exported `GIT_DIR` to the
+# gate -- a hook gets `GIT_WORK_TREE` and `GIT_INDEX_FILE` as well. Every test that builds a
+# throwaway repository then aimed its `git init`/`config`/`add`/`commit` at the real one: the
+# shared `.git/config` came back with `core.bare=true` and `user.email=test@example.com`, the
+# detached HEAD with a test commit, the index with `file.txt`. A pre-commit or pre-push hook that
+# runs this suite is the same environment, and the repository is then the user's.
+#
+# `pytest_configure` below takes every `GIT_*` variable out of this process before a single test
+# module is imported, so no import, no fixture of any scope, no test and no process any of them
+# starts can inherit one. Its limits, stated rather than implied:
+#
+#   - A test may still set `GIT_*` itself, and the git it starts sees what it set.
+#     `tests/unit/test_repository_assets.py::
+#     test_the_scratch_repository_ignores_git_templates_user_excludes_and_git_environment` sets
+#     five on purpose, and `_without_git_variables` in that file is what keeps them out of its
+#     scratch repository -- which is why that helper stays.
+#   - It changes nothing git discovers from a working directory. A test that runs git inside this
+#     checkout reads this checkout -- the publication gate's `git ls-files`, and
+#     `resolve_code_commit()` anchored at the installed package -- and is meant to.
+#   - Only pytest's own start-up and this module's imports run before it, and neither starts git.
+#     `--noconftest` removes this file and the protection with it, which is exactly what
+#     `tests/unit/test_inherited_git_variables.py` uses as its control.
+#   - A name is compared upper-cased, the spelling `_without_git_variables` uses too. Nothing
+#     measurable rests on it: CPython already upper-cases every `os.environ` key on Windows, and
+#     git reads only upper-case names on POSIX, so a mutation that drops `.upper()` survives. It
+#     stays so that the two spellings of one rule agree, not because either platform needs it.
+#
+# A hook and not the function-scoped autouse fixture that is the obvious spelling, for the reason
+# `V2-P5-031` gives above for the offline guard: such a fixture is live for a test's body and its
+# function-scoped fixtures, and a module-scoped fixture that builds a throwaway repository -- the
+# natural "build it once" -- is set up before it. `tests/unit/test_inherited_git_variables.py`
+# measures every phase, and the hand-back in `pytest_unconfigure`.
+
+_INHERITED_GIT_VARIABLES = pytest.StashKey[dict[str, str]]()
+"""What `pytest_configure` took out, kept on the run's own `Config` for `pytest_unconfigure`."""
+
+
+def _is_git_variable(name: str) -> bool:
+    return name.upper().startswith("GIT_")
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Take every `GIT_*` variable this run inherited out of the environment, before collection."""
+    config.stash[_INHERITED_GIT_VARIABLES] = {
+        name: os.environ.pop(name) for name in list(os.environ) if _is_git_variable(name)
+    }
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    """Hand them back: the run is over, and a process that called `pytest.main` is not ours."""
+    os.environ.update(config.stash.get(_INHERITED_GIT_VARIABLES, {}))

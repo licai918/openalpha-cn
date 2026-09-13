@@ -2708,6 +2708,12 @@ def _without_git_variables() -> dict[str, str]:
     carry configuration that outranks a repository's own, and `GIT_DIR`/`GIT_WORK_TREE` point
     git at another repository; a scratch repository answers to none of them. Names are compared
     upper-cased because Windows does not distinguish the case of environment variable names.
+
+    `tests/conftest.py` takes every `GIT_*` the run *inherited* out of the environment before any
+    test starts (D13), and that does not make this redundant: what this removes now is what a
+    test sets in its own body, and
+    `test_the_scratch_repository_ignores_git_templates_user_excludes_and_git_environment` sets
+    five of them on purpose, after the conftest has run.
     """
     return {
         name: value for name, value in os.environ.items() if not name.upper().startswith("GIT_")
