@@ -46,12 +46,19 @@ Two couplings, both anchored on `KNOWN_ATTRIBUTION_LIMITATIONS` in
 - *Threshold one.* One absent category is enough. Marketing's attribution claims mostly name a
   single category (the review of `9eb8368` measured this), and a threshold of two cannot see
   one.
-- *`ALLOWLIST`* holds the guarded files' true non-claims: each is pinned to one clause by a
-  distinctive excerpt, limited to the categories it may exempt, and carries the reason it is
-  true. `test_every_allowlist_entry_exempts_exactly_one_flagged_clause` fails on an entry that
-  matches no clause, matches several, or exempts a category its clause no longer presents, so
-  stale entries cannot pile up. With the prose test, that makes the allowlist the census:
-  every clause the guard flags in the guarded files is either fixed or listed there.
+- *`ALLOWLIST`* holds the guarded files' true non-claims. Each is pinned to one clause by that
+  clause's whole text as the shared reader produces it (soft wraps folded, runs of whitespace
+  collapsed), found by a short excerpt, limited to the categories it may exempt, and carries
+  the reason it is true. A clause is exempt only while its text equals the pinned text, so any
+  change to its words ends the exemption and the prose test fails on it until someone re-reads
+  the clause, which `test_a_claim_written_into_an_allowlisted_clause_ends_its_exemption`
+  measures. The category limit covers the other way a verdict can move: a change in the guard's
+  own reading of a clause whose words did not change.
+  `test_every_allowlist_entry_exempts_exactly_one_flagged_clause` fails on an entry whose
+  excerpt finds no clause or several, whose clause no longer reads as pinned, or which exempts
+  a category its clause no longer presents, so stale entries cannot pile up. With the prose
+  test, that makes the allowlist the census: every clause the guard flags in the guarded files
+  is either fixed or listed there.
 
 **What it cannot see.** `test_the_guards_stated_blind_spots_are_real` measures each of these.
 
@@ -72,7 +79,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final, get_args
 
@@ -327,10 +334,16 @@ def _flagged_clauses(document: str, absent: frozenset[str]) -> list[FlaggedClaus
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AllowedClause:
-    """A clause the guard flags that is true as written, and why."""
+    """A clause the guard flags that is true as written, pinned by its whole text, and why.
+
+    `clause` is the clause exactly as `prose_clauses.clauses` reads it -- soft wraps folded,
+    runs of whitespace collapsed -- so re-wrapping the paragraph keeps the pin and changing any
+    word breaks it. `excerpt` only finds the clause, so a broken pin can say which one it was.
+    """
 
     path: Path
     excerpt: str
+    clause: str
     categories: frozenset[str]
     reason: str
 
@@ -339,6 +352,7 @@ ALLOWLIST: Final[tuple[AllowedClause, ...]] = (
     AllowedClause(
         path=README,
         excerpt="`factor run` 打三行档位和六格归因",
+        clause="`factor run` 打三行档位和六格归因。",
         categories=frozenset({"factor"}),
         reason=(
             "`factor run` is a command's name, and its 六格归因 is the factor experiment's "
@@ -350,12 +364,21 @@ ALLOWLIST: Final[tuple[AllowedClause, ...]] = (
     AllowedClause(
         path=README_EN,
         excerpt="`factor run` prints three tier rows and a six-cell attribution grid",
+        clause="`factor run` prints three tier rows and a six-cell attribution grid.",
         categories=frozenset({"factor"}),
         reason="The same six-cell step grid as README.md's 六格归因, in English.",
     ),
     AllowedClause(
         path=README_EN,
         excerpt="OpenAlpha CN provides four-clock point-in-time evidence",
+        clause=(
+            "OpenAlpha CN provides four-clock point-in-time evidence, A-share event semantics, "
+            "deterministic baseline agents, a secure OpenAI-compatible BYOK model boundary, typed "
+            "signals and decisions, durable per-agent resume and research memory, A-share "
+            "execution and portfolio constraints, same-path replay, reconciled attribution, "
+            "durable batch research, a ChainLin contract Provider, screening, watchlists, "
+            "reports, REST, Python SDK, CLI, and a responsive research workbench."
+        ),
         categories=frozenset({"agent", "model"}),
         reason=(
             "One sentence listing eighteen features, which the block folding reads whole. "
@@ -378,24 +401,18 @@ rather than listed.
 """
 
 
-def test_user_facing_docs_do_not_present_an_absent_attribution_category_as_delivered() -> None:
-    """The four `GUARDED_FILES` must not present an absent category as delivered attribution.
+def _guarded_documents() -> dict[Path, str]:
+    return {path: path.read_text(encoding="utf-8") for path in GUARDED_FILES}
 
-    Every clause the guard flags in them is a violation unless an `ALLOWLIST` entry for that
-    file matches it, and then only for the categories the entry names. `why-openalpha`'s 验证改进
-    row was the violation this was first written against: "规则/因子/Agent 归因对账", factor and
-    Agent presented as delivered with no caveat, until `9eb8368`.
-    """
-    assert ABSENT_CATEGORIES, (
-        "the derivation found no absent category, so there is nothing to guard; retire this test "
-        "rather than leave it passing"
-    )
+
+def _attribution_violations(documents: dict[Path, str]) -> list[str]:
+    """One message per flagged clause of `documents` with a category no pinned entry exempts."""
     violations: list[str] = []
-    for path in GUARDED_FILES:
+    for path, document in documents.items():
         entries = [entry for entry in ALLOWLIST if entry.path == path]
-        for flagged in _flagged_clauses(path.read_text(encoding="utf-8"), ABSENT_CATEGORIES):
+        for flagged in _flagged_clauses(document, ABSENT_CATEGORIES):
             exempt = frozenset().union(
-                *(entry.categories for entry in entries if entry.excerpt in flagged.text)
+                *(entry.categories for entry in entries if entry.clause == flagged.text)
             )
             remaining = flagged.categories - exempt
             if remaining:
@@ -403,34 +420,50 @@ def test_user_facing_docs_do_not_present_an_absent_attribution_category_as_deliv
                     f"{path.relative_to(ROOT)}:{flagged.line} presents {sorted(remaining)} as "
                     f"delivered attribution: {flagged.text!r}"
                 )
+    return violations
+
+
+def test_user_facing_docs_do_not_present_an_absent_attribution_category_as_delivered() -> None:
+    """The four `GUARDED_FILES` must not present an absent category as delivered attribution.
+
+    Every clause the guard flags in them is a violation unless an `ALLOWLIST` entry for that
+    file pins exactly its text, and then only for the categories the entry names.
+    `why-openalpha`'s 验证改进 row was the violation this was first written against:
+    "规则/因子/Agent 归因对账", factor and Agent presented as delivered with no caveat, until
+    `9eb8368`.
+    """
+    assert ABSENT_CATEGORIES, (
+        "the derivation found no absent category, so there is nothing to guard; retire this test "
+        "rather than leave it passing"
+    )
+    violations = _attribution_violations(_guarded_documents())
     assert not violations, (
         "\n".join(violations) + "\nState the absence in the same clause with one of "
-        "ABSENCE_PHRASES, or reword the claim. Add an ALLOWLIST entry only for a clause that is "
+        "ABSENCE_PHRASES, or reword the claim. Pin an ALLOWLIST entry only for a clause that is "
         "true as written."
     )
 
 
-def test_every_allowlist_entry_exempts_exactly_one_flagged_clause() -> None:
-    """An `ALLOWLIST` entry is a statement about one clause; this holds it to that clause.
+def _allowlist_problems(
+    documents: dict[Path, str], allowlist: Iterable[AllowedClause] = ALLOWLIST
+) -> list[str]:
+    """Why each `ALLOWLIST` entry no longer describes exactly one flagged clause of `documents`.
 
-    Each entry must belong to a guarded file, exempt at least one category, match exactly one of
-    its file's clauses, and exempt only categories that clause is flagged for. An entry whose
-    clause was reworded, fixed, deleted or copied fails here instead of lingering as a silent
-    exemption.
+    Each entry must belong to a guarded file and exempt at least one category; its excerpt must
+    find exactly one of its file's clauses, that clause must still read exactly as pinned, and
+    the entry may exempt only categories that clause is flagged for.
     """
     problems: list[str] = []
-    for entry in ALLOWLIST:
+    for entry in allowlist:
         label = f"ALLOWLIST entry {entry.excerpt!r} ({entry.path.relative_to(ROOT)})"
-        if entry.path not in GUARDED_FILES:
+        if entry.path not in documents:
             problems.append(f"{label} is for a file the guard does not read")
             continue
         if not entry.categories:
             problems.append(f"{label} exempts no category")
             continue
         matches = [
-            clause
-            for clause in clauses(entry.path.read_text(encoding="utf-8"))
-            if entry.excerpt in clause.text
+            clause for clause in clauses(documents[entry.path]) if entry.excerpt in clause.text
         ]
         if len(matches) != 1:
             problems.append(
@@ -438,14 +471,102 @@ def test_every_allowlist_entry_exempts_exactly_one_flagged_clause() -> None:
                 "it must match exactly one"
             )
             continue
-        flagged = _overclaimed_categories(matches[0].text, ABSENT_CATEGORIES)
+        found = matches[0]
+        if found.text != entry.clause:
+            problems.append(
+                f"{label}: the clause at line {found.line} now reads {found.text!r}, not the "
+                f"pinned {entry.clause!r}; re-read it, then fix it, re-pin it or remove the entry"
+            )
+            continue
+        flagged = _overclaimed_categories(found.text, ABSENT_CATEGORIES)
         if not entry.categories <= flagged:
             problems.append(
                 f"{label} exempts {sorted(entry.categories - flagged)}, which its clause at line "
-                f"{matches[0].line} no longer presents (flagged: {sorted(flagged)}); remove or "
-                "narrow the entry"
+                f"{found.line} no longer presents (flagged: {sorted(flagged)}); remove or narrow "
+                "the entry"
             )
+    return problems
+
+
+def test_every_allowlist_entry_exempts_exactly_one_flagged_clause() -> None:
+    """An `ALLOWLIST` entry is a statement about one clause; this holds it to that clause.
+
+    An entry whose clause was reworded, fixed, deleted or copied fails here instead of lingering
+    as a silent exemption; a reworded clause fails the prose test as well, because its new text
+    is pinned by no entry.
+    """
+    problems = _allowlist_problems(_guarded_documents())
     assert not problems, "\n".join(problems)
+
+
+def test_the_allowlist_check_reports_each_way_an_entry_can_go_stale() -> None:
+    """`_allowlist_problems` held to entries whose defect is known, one per way to go stale.
+
+    Every real entry is current, so the test above cannot show that any of these checks
+    reports anything; these entries can.
+    """
+    clause = "`factor run` 打三行档位和六格归因。"
+    entry = AllowedClause(
+        path=README,
+        excerpt="`factor run`",
+        clause=clause,
+        categories=frozenset({"factor"}),
+        reason="measured",
+    )
+    documents = {README: f"{clause}\n"}
+    stale = {
+        "a file the guard does not read": (replace(entry, path=PRD), documents),
+        "an entry that exempts no category": (replace(entry, categories=frozenset()), documents),
+        "an excerpt that finds no clause": (replace(entry, excerpt="`agent run`"), documents),
+        "an excerpt that finds two clauses": (entry, {README: f"{clause}\n\n{clause}\n"}),
+        "a clause that no longer reads as pinned": (
+            entry,
+            {README: "`factor run` 打三行档位和六格因子归因。\n"},
+        ),
+        "a category its clause does not present": (
+            replace(entry, categories=frozenset({"agent", "factor"})),
+            documents,
+        ),
+    }
+    assert not _allowlist_problems(documents, [entry]), "a current entry was reported"
+    unreported = [
+        label for label, (bad, docs) in stale.items() if not _allowlist_problems(docs, [bad])
+    ]
+    assert not unreported, f"the allowlist check did not report: {unreported}"
+
+
+def _claim_for(entry: AllowedClause) -> str:
+    """A delivered-attribution claim naming only the categories `entry` exempts, in its language.
+
+    Only those categories, because that is the claim the excerpt rule missed: a claim naming
+    another category was already reported through the category limit. It holds no clause end,
+    so written after the excerpt it lands inside the pinned clause.
+    """
+    names = sorted(entry.categories)
+    if entry.clause.isascii():
+        return ", and " + " and ".join(names) + " attribution is delivered"
+    return "，并交付" + "与".join(CATEGORY_MARKERS[name][1] for name in names) + "归因"
+
+
+def test_a_claim_written_into_an_allowlisted_clause_ends_its_exemption() -> None:
+    """The review of `D6`'s fix wrote a claim into a pinned clause and both tests stayed green.
+
+    For each entry, `_claim_for(entry)` is written into the real document right after the
+    entry's excerpt; the prose test and the allowlist test must then both fail. While the
+    exemption was granted by excerpt, both passed: the review measured it on `README.md`'s
+    `factor run` line and on `README.en.md`'s four-clock sentence.
+    """
+    documents = _guarded_documents()
+    still_exempt: list[str] = []
+    for entry in ALLOWLIST:
+        edited = documents[entry.path].replace(entry.excerpt, entry.excerpt + _claim_for(entry), 1)
+        assert edited != documents[entry.path], f"{entry.excerpt!r} is not in its document"
+        changed = {**documents, entry.path: edited}
+        if not _attribution_violations(changed) or not _allowlist_problems(changed):
+            still_exempt.append(entry.excerpt)
+    assert not still_exempt, (
+        f"a claim written into these pinned clauses went unreported: {still_exempt}"
+    )
 
 
 # --- The reader's own tests -------------------------------------------------------------------
