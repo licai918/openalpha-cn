@@ -243,8 +243,8 @@ uv run openalpha serve
 ```
 
 `openalpha doctor --probe` 会对**每一个**已声明的数据集发一次最小请求，并按数据集记录结果
-（Tushare 现为 15/15；面板专供的四个走 `fetch_panel`，需要 `index_code`/`ts_code`/报告期年
-的五个由 provider 自己给出最小主体）。凭证被端点拒绝（`authentication`）时命令**非零退出**，
+（Tushare 现为 16/16；面板专供的四个走 `fetch_panel`，需要 `index_code`/`ts_code`/报告期年
+的六个由 provider 自己给出最小主体）。凭证被端点拒绝（`authentication`）时命令**非零退出**，
 `--json` 也一样——它不再在打印完 payload 之后直接返回；而「这个接口这个账号取不到」
 （`upstream`）和「限流」（`rate_limit`）按数据集如实上报且**不**影响退出码，因为那正是这份
 报告要交付的内容本身。
@@ -302,7 +302,7 @@ fail-closed 依赖门。
 让 notice 非零等于让每次诚实体检都失败，然后这个命令会在第一条流水线里被 `|| true` 掉。
 
 ```bash
-# 构建：十三个目标，按依赖序执行，与 --dataset 出现顺序无关
+# 构建：十四个目标，按依赖序执行，与 --dataset 出现顺序无关
 uv run openalpha panel build --dataset trade_cal --dataset price --year 2026
 
 # 行业分类（P3 中性化的前置）：树按 vintage 年落盘，成分按 l1_code 切片全量扫描
@@ -391,12 +391,12 @@ uv run openalpha data-check --dataset daily --dataset adj_factor --year 2026 \
 
 ## 因子库与三档因子实验（P3）
 
-面板平面之上是**因子平面**：19 个声明因子（动量反转 5 / 波动流动性 4 / 价值 3 / 质量 4 /
+面板平面之上是**因子平面**：21 个声明因子（动量反转 5 / 波动流动性 5 / 价值 4 / 质量 4 /
 成长 3）、1 个截面变换、1 个行业与市值中性化，以及把三档拿去打分并密封成不可变产物的
 实验流程。四个命令，按操作者遇到它们的顺序：
 
 ```bash
-# 1. 这个 build 声明了什么 —— 19 个因子的 handle、各自读哪些列、六个判决各是什么意思
+# 1. 这个 build 声明了什么 —— 21 个因子的 handle、各自读哪些列、六个判决各是什么意思
 uv run openalpha factor list
 
 # 2. 一条声明的全文，含它自己承认不度量什么（每条注解 705～4830 字符，一字不删）
@@ -1263,7 +1263,7 @@ uv run python scripts/verify_compose_recovery.py
 | 文档 | 内容 |
 |---|---|
 | [PRD](docs/specs/v2/openalpha-cn-v2-prd.md) | 范围、实测基线与实现决策 |
-| [开发路线图](docs/specs/v2/openalpha-cn-v2-roadmap.md) | 七个阶段 110 个 issue，含依赖、闸门与需求映射 |
+| [开发路线图](docs/specs/v2/openalpha-cn-v2-roadmap.md) | 分阶段列出全部 issue，含依赖、闸门与需求映射 |
 | [四缝审计](docs/specs/v2/openalpha-cn-v2-seam-audit.md) | 103 条带 `file:line` 证据的 finding，逐条对应关闭 issue |
 
 参与开发前先读 [AGENTS.md](AGENTS.md) 的 v2 硬性规则与 [CONTRIBUTING.md](CONTRIBUTING.md)。

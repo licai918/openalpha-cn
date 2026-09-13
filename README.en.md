@@ -57,7 +57,7 @@ Evidence building reads user-owned CSV, JSON, JSONL, and Parquet files, and pane
 
 ## The factor plane
 
-Above the point-in-time panel sits a factor library — 19 declared factors (5 momentum/reversal, 4 volatility/liquidity, 3 value, 4 quality, 3 growth), one cross-sectional transform, one industry-and-size neutralisation — and a three-tier experiment that scores all three tiers and seals the result into an immutable, content-addressed record. Four commands, in the order you meet them:
+Above the point-in-time panel sits a factor library — 21 declared factors (5 momentum/reversal, 5 volatility/liquidity, 4 value, 4 quality, 3 growth), one cross-sectional transform, one industry-and-size neutralisation — and a three-tier experiment that scores all three tiers and seals the result into an immutable, content-addressed record. Four commands, in the order you meet them:
 
 ```bash
 uv run openalpha factor list                              # what this build declares
@@ -168,7 +168,7 @@ before the instant the outcome became knowable. It does **not** mean the batch w
 it says it was: `predicted_at` is whatever the caller passed to `predict`, nothing here can check
 it, and nothing here defends against whoever owns the disk. Every rendered prediction carries both
 sentences in the body, because a one-word badge reads as an attestation this repository cannot
-make. See [the HTTP contract](docs/api/http.md) for the three standings and the nine named
+make. See [the HTTP contract](docs/api/http.md) for the three standings and the sixteen named
 boundaries.
 
 ## The outcome plane, and where the three faces are not equal
