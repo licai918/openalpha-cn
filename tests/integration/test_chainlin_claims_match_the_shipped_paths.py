@@ -24,7 +24,8 @@ evidence (构建, 生成, 保证, 确保) or provides data; as honoured by the b
 once configured (即可) or supported by default (默认支持); or name "ChainLin data" (链邻数据) as
 something the product holds. English words of the same kinds are markers too; "accepts" is the one
 an English sentence used, README.en.md's AKShare line at `4a37161`. Every such clause -- at
-`d4ef5e4` for ChainLin, at `4a37161` for AKShare -- was rewritten; there is no allowlist.
+`d4ef5e4` for ChainLin, at `4a37161` for AKShare and in ChainLin's contract document -- was
+rewritten; there is no allowlist.
 
 **How it reads.** The four documents as clauses (`tests/prose_clauses.py`), and the diagrams as
 units (`tests/diagram_text.py`): brain-01 and brain-02 drew ChainLin's name on one line of a
@@ -34,6 +35,9 @@ panel and "已实现 · 统一替代入口" on the next, so a panel's strings ar
 separately distributed desktop product (`DESKTOP_PRODUCT`) are removed, so "进入 Release 页面"
 beside a `chainlin-desktop` link is no claim. A URL ends at whitespace, a closing bracket or
 full-width punctuation (`URL`), so a claim written straight after a link is still read.
+ChainLin's own contract document, `docs/api/chainlin-data.zh-CN.md`, is read too, and every
+clause of it as naming ChainLin (`CLIENT_DOCUMENTS`), because it speaks of the client's batches
+without writing the client's name.
 
 **What it cannot see.** `test_the_stated_limits_are_real` measures each of these but the first,
 which `test_the_reference_scan_finds_what_its_docstring_says` measures.
@@ -53,6 +57,9 @@ which `test_the_reference_scan_finds_what_its_docstring_says` measures.
 - A clause that names a client with a marker fails even when it denies the claim ("链邻不是统一
   入口"), or when the marker belongs to another subject of the same clause. `D13` split such
   clauses with a semicolon.
+- Any clause of ChainLin's contract document that holds a marker, whatever its subject: every
+  clause there is read as naming ChainLin, so a semicolon does not help. Its caution "不得把尚未
+  配置的服务宣传为已连接" was reworded.
 """
 
 from __future__ import annotations
@@ -82,6 +89,14 @@ DIAGRAM_GENERATORS: Final[tuple[Path, ...]] = (
 )
 """The generators of the ten diagrams `README.md` embeds; `tests/unit/test_repository_assets.py`
 holds every committed SVG equal to what they write."""
+
+CLIENT_DOCUMENTS: Final[dict[str, str]] = {"docs/api/chainlin-data.zh-CN.md": "ChainLin"}
+"""Documents about one client, each clause of which is read as naming it.
+
+ChainLin's contract document said of the client's batches, without writing ChainLin's name, that
+they "仍通过统一 `ProviderBatch` 和 `EvidenceSnapshot` 管线做 PIT 校验": the subject was the
+document's. No shipped path but `doctor --probe` fetches such a batch, and the probe discards it.
+"""
 
 SHIPPED_ROOTS: Final[tuple[Path, ...]] = (ROOT / "src", ROOT / "scripts")
 """Where a shipped path's code lives."""
@@ -266,14 +281,15 @@ CLAIM_MARKERS: Final[dict[str, re.Pattern[str]]] = {
     "connects": _english("connects?"),
     "plugs into": _english("plugs? into"),
     "ready to use": _english("ready to use"),
-    "accepts": _english("accepts?"),
+    "accepts": _english("accepts?(?!:)"),
     "ChainLin data": re.compile(r"chainlin data(?! api)", re.IGNORECASE),
     "provides data": _english(r"provides?[^,.;]*(?<![A-Za-z])(?:data|input)"),
 }
 """The words that make a clause naming a client a claim, each named for the report.
 
 `确保` skips 明确保留 ("explicitly kept"), which holds it by accident; 链邻数据 skips 链邻数据库 and
-链邻数据接口, the database the repository does not ship and the API's own name.
+链邻数据接口, the database the repository does not ship and the API's own name. Fenced code is
+read as prose too, so "accepts" skips `Accept:`, the header of the contract document's request.
 """
 
 
@@ -288,9 +304,10 @@ def _clients_named(text: str) -> list[str]:
     return [client for client, name in CLIENT_NAMES.items() if name.search(readable)]
 
 
-def _claim_markers(text: str) -> list[str]:
-    """The markers a clause holds when it names a client, after URLs and the desktop product go."""
-    if not _clients_named(text):
+def _claim_markers(text: str, subject: str | None = None) -> list[str]:
+    """The markers a clause holds when it names a client, or sits in `subject`'s own document,
+    after URLs and the desktop product go."""
+    if not (_clients_named(text) or subject):
         return []
     readable = _readable(text)
     return [marker for marker, pattern in CLAIM_MARKERS.items() if pattern.search(readable)]
@@ -312,18 +329,22 @@ def _guarded_texts(
 
 
 def _client_claims(texts: Iterable[tuple[str, int, str]]) -> list[str]:
-    return [
-        f"{label}:{line} presents {' and '.join(_clients_named(text))} as a data source "
-        f"({', '.join(markers)}): {text!r}"
-        for label, line, text in texts
-        if (markers := _claim_markers(text))
-    ]
+    claims: list[str] = []
+    for label, line, text in texts:
+        subject = CLIENT_DOCUMENTS.get(label)
+        if markers := _claim_markers(text, subject):
+            clients = _clients_named(text) or [str(subject)]
+            claims.append(
+                f"{label}:{line} presents {' and '.join(clients)} as a data source "
+                f"({', '.join(markers)}): {text!r}"
+            )
+    return claims
 
 
 def _documents() -> dict[str, str]:
     return {
         path.relative_to(ROOT).as_posix(): path.read_text(encoding="utf-8")
-        for path in GUARDED_FILES
+        for path in (*GUARDED_FILES, *(ROOT / label for label in CLIENT_DOCUMENTS))
     }
 
 
@@ -339,11 +360,16 @@ def test_no_document_or_diagram_presents_a_doctor_only_client_as_a_data_source()
     `CLAIM_MARKERS`.
 
     Both must still be read, so a reader gone blind fails rather than passes: `README.md` names
-    both, brain-01 and brain-02 draw ChainLin, and api-02 draws AKShare.
+    both, ChainLin's contract document names ChainLin, brain-01 and brain-02 draw it, and api-02
+    draws AKShare.
     """
     texts = _guarded_texts(_documents(), _diagram_sources())
     expected = {
-        "ChainLin": {"README.md", "scripts/generate_brain_diagrams.py"},
+        "ChainLin": {
+            "README.md",
+            "docs/api/chainlin-data.zh-CN.md",
+            "scripts/generate_brain_diagrams.py",
+        },
         "AKShare": {"README.md", "scripts/generate_api_relationship_diagrams.py"},
     }
     for client, labels in expected.items():
@@ -390,6 +416,12 @@ D4A37161_CLAIMS: Final[dict[str, str]] = {
 }
 """AKShare's two claims as they stood at `4a37161`, verbatim."""
 
+D4A37161_CONTRACT_DOCUMENT: Final[str] = (
+    "OpenAlpha 在接收时添加自己的 `ingested_time`，然后仍通过统一\n"
+    "`ProviderBatch` 和 `EvidenceSnapshot` 管线做 PIT 校验。\n"
+)
+"""`docs/api/chainlin-data.zh-CN.md:29-30` at `4a37161`, verbatim; it never names ChainLin."""
+
 D4EF5E4_PANELS: Final[str] = (
     'svg.panel(title="A 股证据入口", label="DATA PLANE", lines=("链邻数据接口 API", '
     '"已实现 · 统一替代入口", "用户授权实时 A 股数据"))\n'
@@ -410,6 +442,15 @@ def test_the_guard_flags_the_claims_it_was_written_for() -> None:
     panels = _client_claims(_guarded_texts({}, {"d4ef5e4 brain": D4EF5E4_PANELS}))
     assert not missed, f"a retired claim is no longer flagged: {missed}"
     assert len(panels) == 2, f"the two d4ef5e4 panels were read as {panels}"
+    contract = {"docs/api/chainlin-data.zh-CN.md": D4A37161_CONTRACT_DOCUMENT}
+    elsewhere = {"README.md": D4A37161_CONTRACT_DOCUMENT}
+    assert _client_claims(_guarded_texts(contract, {})), (
+        "the contract document's unnamed pipeline claim is no longer flagged"
+    )
+    assert not _client_claims(_guarded_texts(elsewhere, {})), (
+        "the same sentence is flagged outside ChainLin's own document, so it is not the "
+        "document's subject that reads it"
+    )
 
 
 MARKER_SENTENCES: Final[dict[str, str]] = {
@@ -534,6 +575,10 @@ def test_the_stated_limits_are_real() -> None:
     assert not _client_claims(_guarded_texts({}, {"two calls": two_calls})), (
         "a name and a claim drawn by two calls are now read together"
     )
+    run_time = 'name = "链邻数据接口 API"\nsvg.text(1, 2, f"{name} · 统一替代入口")\n'
+    assert not _client_claims(_guarded_texts({}, {"run time": run_time})), (
+        "text a generator computes at run time is now read"
+    )
     refused = {
         "a denial": "链邻不是统一入口。\n",
         "another subject's marker": (
@@ -546,6 +591,10 @@ def test_the_stated_limits_are_real() -> None:
         if not _client_claims(_guarded_texts({label: text}, {}))
     ]
     assert not passed, f"a stated over-reach no longer happens: {passed}"
+    caution = {"docs/api/chainlin-data.zh-CN.md": "不得把尚未配置的服务宣传为已连接。\n"}
+    assert _client_claims(_guarded_texts(caution, {})), (
+        "a true caution in ChainLin's contract document is no longer refused"
+    )
 
 
 def test_the_reference_scan_finds_what_its_docstring_says(tmp_path: Path) -> None:
