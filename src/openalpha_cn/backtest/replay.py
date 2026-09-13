@@ -103,13 +103,15 @@ class ReplayReport(BaseModel):
     look_ahead_violations: int = Field(ge=0)
     """Cases whose run raised a `LookAheadViolationError` -- which no validated corpus can reach.
 
-    A case whose evidence is not visible at its own `as_of` cannot be put into a corpus:
-    `ReplayCase.validate_point_in_time` refuses it when the corpus is built or loaded, and
-    `ResearchRunRequest` checks the same predicate over the same inputs. So a corpus that
-    reaches `ReplayRunner.run` has no look-ahead case left to count, and this is 0 for every
-    one of them; `tests/unit/backtest/test_replay.py` drives it only through a patched
-    `run_cycle`. It would count a case that skipped validation (a corpus assembled with
-    `model_construct`, say). It is not a detection result and should not be read as one.
+    A case whose evidence is not visible at its own `as_of` fails validation:
+    `ReplayCase.validate_point_in_time` refuses it when a corpus is loaded or constructed with
+    validation, and `ResearchRunRequest` checks the same predicate over the same inputs. So a
+    validated corpus holds no look-ahead case, and this is 0 for it. A corpus assembled without
+    validation -- `model_copy` with an update, or `model_construct` -- still reaches
+    `ReplayRunner.run`, and a look-ahead case in it is counted here. One such corpus, built each
+    way, is counted once in `tests/integration/test_look_ahead_claims_match_the_replay.py`;
+    `tests/unit/backtest/test_replay.py` drives this count through a patched `run_cycle`. It is
+    not a detection result and should not be read as one.
     """
     validation_ids: tuple[str, ...]
     failures: tuple[str, ...]
