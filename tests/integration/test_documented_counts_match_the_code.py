@@ -579,9 +579,13 @@ GENERATORS: Final[tuple[Path, ...]] = (
 )
 
 DRAWN_COUNT: Final[re.Pattern[str]] = re.compile(
-    r"(?P<n>[一二两三四五六七八九十]|\d+)\s*(?:级|重|类|条|项)"
+    r"(?P<n>[一二两三四五六七八九十]|\d+)\s*(?:级|重|类|条|项|个)"
 )
-"""A count a drawing states about the things beside it: 五级, 三重, 四类, 五条, 两项."""
+"""A count a drawing states about the things beside it: 五级, 三重, 四类, 五条, 两项, 五个.
+
+`个` was left out for a round and cost one reading: `api-01`'s 五个 v2 平面 stands beside the
+five lanes that function builds, and nothing checked that the two agreed.
+"""
 
 COUNTS_THAT_NAME_NO_LIST: Final[MappingProxyType[str, str]] = MappingProxyType(
     {
@@ -594,7 +598,7 @@ COUNTS_THAT_NAME_NO_LIST: Final[MappingProxyType[str, str]] = MappingProxyType(
 """Counts a generator states that name something other than a list it draws, and what they name.
 
 The rule below reads a function's own list literals, so a true count of something else -- the
-provider failure kinds, the four faces, the batch ceiling -- has no list to match and is
+provider failure kinds, the four faces, the two rule terms -- has no list to match and is
 declared here instead. An entry is a statement about one phrase; a phrase that starts matching
 a list again, or stops being drawn, is reported by the test that follows.
 """

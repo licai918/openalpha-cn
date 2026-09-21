@@ -508,6 +508,32 @@ def _diagram_sync_problems(
     return problems
 
 
+def _generator_module(stem: str) -> ModuleType:
+    """Import one diagram generator by path, the way the sync test does."""
+    path = ROOT / "scripts" / f"{stem}.py"
+    spec = importlib.util.spec_from_file_location(f"diagram_generator_{stem}", path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_a_numeral_outside_the_table_is_refused_rather_than_wrapped() -> None:
+    """`_numeral` writes a count taken from a list's length, so a wrong index must not read.
+
+    Python's negative indexing made `_numeral(0)` answer 十 and would have let an empty list
+    label itself as ten of something -- silently, which is the failure this batch spent its
+    rounds removing. Eleven and beyond have no numeral here and must say so too.
+    """
+    module = _generator_module("generate_brain_diagrams")
+
+    assert [module._numeral(value) for value in (1, 4, 10)] == ["一", "四", "十"]
+    for out_of_range in (0, -1, 11):
+        with pytest.raises(ValueError, match="numeral"):
+            module._numeral(out_of_range)
+
+
 def test_the_committed_diagrams_are_what_their_generators_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

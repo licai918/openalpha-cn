@@ -61,6 +61,8 @@ def _numeral(value: int) -> str:
     stage has existed, because the label was a literal beside the list rather than a reading of
     it. A count of something drawn here is written from the thing drawn.
     """
+    if not 1 <= value <= 10:
+        raise ValueError(f"no numeral here for {value}: this table holds one through ten")
     return "一二三四五六七八九十"[value - 1]
 
 
