@@ -234,8 +234,8 @@ D13 整批终审（`final-review-d13.md`，Critical 0 / Important 4 / Minor 11�
 
 - **合并。** 先合 C、A（含后续）、B2 与「写 checkout 的测试」修复（11 个提交，只改 `tests/`），主分支到 `68a15f3`；随后合 B1 的 15 个提交，主分支到 `f194365`。每次合并前后都跑门禁。
 - **声称普查。** 六个只读普查员以 `29e26f3` 为准，逐节通读 marketing 100 节、`README.md`、`README.en.md`、`docs/why-openalpha-cn.zh-CN.md` 与两个图生成器的文字。主表 88 条，另有 21 条补充意见。88 条全部处理，判为不成立 0，悬置 0；另有一条文档级裁定保留并写明依据（`why:5`）。由此发现一族新问题：修订数据的前视，见下节。
-- **B1 七轮，15 个提交。** 修轮（守卫先收窄）→ 普查主表 → 改派项与修轮 Minor → 普查评审的 1 Critical / 5 Important / 7 Minor 与台账三行 → 终审两条 Important → 收尾三条 Minor → 提交信息更正与图的几何规则。
-- **六轮独立评审加两次图子审计**：0/0/7、1/5/7、0/2/7、0/0/3、0/1/3、0/0/1；图子审计另报 0/2/6。
+- **B1 九轮，17 个提交。** 修轮（守卫先收窄）→ 普查主表 → 改派项与修轮 Minor → 普查评审的 1 Critical / 5 Important / 7 Minor 与台账三行 → 终审两条 Important → 收尾三条 Minor → 提交信息更正与图的几何规则 → 整批终审的 5 Important 与 12 Minor → 新守卫自身的两条 Minor。
+- **八轮独立评审加两次图子审计**：0/0/7、1/5/7、0/2/7、0/0/3、0/1/3、0/0/1、整批终审 0/5/12、闭环复核 0/0/2；图子审计另报 0/2/6。
 - **本批查实并改掉的实质错误（举其要）：**
   - 四份文档、`docs/api/data-interface.zh-CN.md` 与功能台账 `OA-TIME-003` 都声称四个时钟共同决定历史可见性，而代码只比较 `available_time`；
   - 「408/429/5xx 重试」，而代码只把六个状态码标为可重试，共 10 处；
@@ -246,7 +246,9 @@ D13 整批终审（`final-review-d13.md`，Critical 0 / Important 4 / Minor 11�
   - 十张图的箭头因依赖 SVG 2 的 `context-stroke`，在本机渲染中共 126 个变成纯黑。
 - **守卫终态。** 46 条目、208 条退役措辞、339 句真句、42 条 premise。否定处理收到「命中所在的逗号分段」，并把三条真实整句收进 `retired` 作为回归防线。
 - **`src/` 改动。** 本批 `src/` 只有 `backtest/replay.py` 的行为改动（早于 B1 各轮），其余全是文字：`cli.py` 的 docstring 示例、`runtime/router.py` 的 detail、`shortlist_view.py` 两条 limitation、`domain/panel_batch.py` 的函数 docstring。AST 比对确认零逻辑改动。
-- **合并门禁（`f194365`）：** `tests/unit` 3536；九个文档守卫与四个点名文件、`tests/replay`、链邻合约共 432；五道静态门全 0；台账 185 / 180 / legacy 26 / unknown 0 / unreviewed 0；会话级 checkout 检查零报告，工作区干净，无 `.grimp_cache`。
+- **合并门禁（终态 `69014a1`）：** `tests/unit` 3537；九个文档守卫与四个点名文件、`tests/replay`、链邻合约共 434；五道静态门全 0；台账 185 / 180 / legacy 26 / unknown 0 / unreviewed 0；会话级 checkout 检查零报告，工作区干净，无 `.grimp_cache`。
+- **本地全量（`69014a1`，全新字节码，与 CI 同一依赖集）：** 6095 passed / 60 deselected（e2e）/ 0 failed / 0 skipped / 0 warnings，退出码 0，17m56s。
+- **最终 CI（run `35570889594`，`69014a1`）：** 七个 job 全绿。两条 ubuntu 腿各 6095 passed、0 skipped；两条 Windows 腿各 6090 passed、5 skipped，五个 skip 都具名且平台固有（BSD/Linux 专用的 `sockaddr_in` 布局、Windows 无 `sendmsg`、无 `AF_UNIX`）。四条 Python 腿都没有 warnings summary，两条 Windows 腿的最后一步不再出现 `CRLF will be replaced` —— I-D 的修复在 CI 上得到验证。
 - **过程教训（供后续批次用）：**
   - 守卫只认被点名的原句，所以每一族都要做全文清扫，而且要由独立的人做第二遍；
   - 模式测试若只喂 `retired` 片段，就测不出「整句上漏检」这类回归，要按分句喂；
