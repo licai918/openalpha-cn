@@ -1,4 +1,10 @@
-"""Generate the five source-grounded OpenAlpha CN research-system diagrams."""
+"""Generate the five OpenAlpha CN research-system diagrams.
+
+Every string here is prose about the code and is read as such by
+`tests/integration/test_retired_claims_stay_retired.py`, one literal at a time. What no
+guard does is check a drawing against the code it describes, so nothing here calls itself
+source-grounded.
+"""
 
 # SVG copy intentionally uses Chinese full-width punctuation.
 # ruff: noqa: RUF001, E501
@@ -46,6 +52,16 @@ ends stays its own colour -- measured on a two-line probe, `(251,191,36)` for th
 and `(0,0,0)` for the context one. On these dark panels a black head is nearly invisible, and
 the head is what carries the direction, so each colour gets its own marker with a literal fill.
 """
+
+
+def _numeral(value: int) -> str:
+    """One through ten as this drawing writes them, for a count taken from a list's length.
+
+    `brain-01` said 五级专业流水线 over a `stages` list holding four for as long as the fourth
+    stage has existed, because the label was a literal beside the list rather than a reading of
+    it. A count of something drawn here is written from the thing drawn.
+    """
+    return "一二三四五六七八九十"[value - 1]
 
 
 def _marker_defs() -> str:
@@ -308,9 +324,8 @@ class Svg:
         dashed: bool = False,
         arrow: bool = True,
         opacity: float = 1,
-        short_arrow: bool = False,
     ) -> None:
-        """One polyline. `short_arrow` picks the 5-unit marker for a link with a short last leg.
+        """One polyline, with the head its last leg can hold.
 
         The default marker is `markerWidth="11"` at `markerUnits="strokeWidth"`, so at this
         file's 2.2 stroke it is 24.2 units long with 19.8 of them behind the tip. A link whose
@@ -319,7 +334,7 @@ class Svg:
         11 units long with 8.8 behind the tip, which fits inside that leg.
         """
         dash = ' stroke-dasharray="8 8"' if dashed else ""
-        short = short_arrow or _head_for(d, 2.2)
+        short = _head_for(d, 2.2)
         marker = f' marker-end="url(#{_marker(color, short=short)})"' if arrow else ""
         self.raw(
             f'  <path d="{d}" fill="none" stroke="{color}" stroke-width="2.2"{dash}{marker} opacity="{opacity}" />'
@@ -416,7 +431,6 @@ def overview() -> None:
     )
     svg.pill(88, 624, 220, "输入不等于证据", color=CYAN)
 
-    svg.section_label(385, 214, "B", "五级专业流水线", VIOLET)
     stages = [
         (
             374,
@@ -463,13 +477,14 @@ def overview() -> None:
             BLUE,
         ),
     ]
+    svg.section_label(385, 214, "B", f"{_numeral(len(stages))}级专业流水线", VIOLET)
     for x, y, width, height, number, label, title, lines, color in stages:
         svg.panel(
             x, y, width, height, title=title, label=f"{number} / {label}", color=color, lines=lines
         )
     svg.arrow(696, 331, 716, 331, color=VIOLET)
     svg.path("M877 418V430H535V440", color=AMBER, dashed=True)
-    svg.path("M1002 418V429H944V440", color=BLUE, dashed=True, short_arrow=True)
+    svg.path("M1002 418V429H944V440", color=BLUE, dashed=True)
     svg.path("M780 614V676H1054V331H1038", color=AMBER, dashed=True)
     svg.pill(790, 636, 250, "人工复核后调整规则 · 不自动训练模型", color=AMBER)
     svg.arrow(339, 331, 374, 331, color=CYAN, label="规范化", label_y=315)
@@ -614,7 +629,7 @@ def evidence() -> None:
     svg.text(
         684,
         660,
-        "as_of + symbol / event_type → 可见证据集合 → EvidenceSnapshot",
+        "as_of + subject / kind → 可见证据集合 → EvidenceSnapshot",
         css="cardTitle",
         color=TEXT,
     )
@@ -807,7 +822,7 @@ def decision() -> None:
     svg.text(
         671,
         435,
-        "DeliberationOutcome · 分歧摘要 / 风险调整信号 / 消融对照",
+        "DeliberationOutcome · 分歧摘要 / 辩论调整信号 / 消融对照",
         css="small",
         color=AMBER,
         anchor="middle",

@@ -178,7 +178,7 @@
   <path d="M1112 450L1142 450" fill="none" stroke="#38BDF8" stroke-width="2.2" marker-end="url(#arrow-38BDF8)" />
   <rect x="658" y="592" width="698" height="92" rx="20" fill="#102033" stroke="#263A52" />
   <text x="684" y="622" class="micro" fill="#38BDF8" text-anchor="start" opacity="1">QUERY CONTRACT</text>
-  <text x="684" y="660" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">as_of + symbol / event_type → 可见证据集合 → EvidenceSnapshot</text>
+  <text x="684" y="660" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">as_of + subject / kind → 可见证据集合 → EvidenceSnapshot</text>
   <rect x="1163" y="602" width="168" height="28" rx="14" fill="#2DD4BF" fill-opacity="0.12" stroke="#2DD4BF" stroke-opacity=".38" />
   <text x="1247.0" y="621" class="small" fill="#2DD4BF" text-anchor="middle" opacity="1">交付研判脑区 →</text>
   <text x="64" y="785" class="micro" fill="#96A8BE" text-anchor="start" opacity="1">研究闭环导航</text>

@@ -1,4 +1,10 @@
-"""Generate the five source-grounded public API relationship diagrams."""
+"""Generate the five public API relationship diagrams.
+
+Every string here is prose about the code and is read as such by
+`tests/integration/test_retired_claims_stay_retired.py`, one literal at a time. What no guard
+does is check a drawing against the code it describes, so nothing here calls itself
+source-grounded.
+"""
 
 # SVG copy intentionally uses Chinese full-width punctuation, and some serialized
 # element strings are clearer when kept as one line.

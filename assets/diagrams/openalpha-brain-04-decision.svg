@@ -144,7 +144,7 @@
   <path d="M578 320L596 320" fill="none" stroke="#FBBF24" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrowShort-FBBF24)" />
   <path d="M804 320L822 320" fill="none" stroke="#FBBF24" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrowShort-FBBF24)" />
   <rect x="370" y="404" width="602" height="50" rx="16" fill="#FBBF24" fill-opacity=".10" stroke="#FBBF24" stroke-opacity=".35" />
-  <text x="671" y="435" class="small" fill="#FBBF24" text-anchor="middle" opacity="1">DeliberationOutcome · 分歧摘要 / 风险调整信号 / 消融对照</text>
+  <text x="671" y="435" class="small" fill="#FBBF24" text-anchor="middle" opacity="1">DeliberationOutcome · 分歧摘要 / 辩论调整信号 / 消融对照</text>
   <circle cx="1045" cy="210" r="14" fill="#FB7185" fill-opacity=".16" stroke="#FB7185" stroke-opacity=".45" />
   <text x="1045" y="214" class="navNum" fill="#FB7185" text-anchor="middle" opacity="1">C</text>
   <text x="1069" y="214" class="micro" fill="#FB7185" text-anchor="start" opacity="1">委员会结果 · 交还调用方</text>

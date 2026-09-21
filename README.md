@@ -968,8 +968,8 @@ uv run openalpha portfolio construct sla_0123456789abcdef01234567 \
 `validation statistics` 对没有存量的 signal 是具名拒绝——正确，且在没有可达写面时是唯一答案。
 
 ```bash
-# evidence.json 是 openalpha evidence build 打印的那份载荷；--subject 与 --as-of 没有默认值，
-# 留空会被这条命令自己拒掉。一次 research run 的完整输出就是 --research 要的那份 JSON，一字不改
+# evidence.json 是 openalpha evidence build 打印的那份载荷；--subject 与 --as-of 留空
+# 会被这条命令自己拒掉。一次 research run 的完整输出就是 --research 要的那份 JSON，一字不改
 uv run openalpha research run ./evidence.json --subject 000001.SZ \
   --as-of 2026-01-16T09:00:00+00:00 --runtime-dir ./runtime > run.json
 

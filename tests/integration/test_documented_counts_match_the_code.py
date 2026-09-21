@@ -49,6 +49,7 @@ other word.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import tomllib
@@ -56,6 +57,7 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final, get_args
 
 from prose_clauses import clauses
@@ -569,6 +571,91 @@ def _count_failures(documents: dict[Path, str]) -> list[str]:
         if found[(count.name, path)] != count.stated.get(path, 0)
     ]
     return problems + stated_nowhere + off_census
+
+
+GENERATORS: Final[tuple[Path, ...]] = (
+    ROOT / "scripts" / "generate_brain_diagrams.py",
+    ROOT / "scripts" / "generate_api_relationship_diagrams.py",
+)
+
+DRAWN_COUNT: Final[re.Pattern[str]] = re.compile(
+    r"(?P<n>[一二两三四五六七八九十]|\d+)\s*(?:级|重|类|条|项)"
+)
+"""A count a drawing states about the things beside it: 五级, 三重, 四类, 五条, 两项."""
+
+COUNTS_THAT_NAME_NO_LIST: Final[MappingProxyType[str, str]] = MappingProxyType(
+    {
+        "五类失败分类": "ProviderFailure's five kinds (providers/base.py), not a list drawn here",
+        "四类入口": "REST, SDK, CLI and the web workbench, which this function draws as cards "
+        "rather than as one list",
+        "两项条款": "the two rule terms a validation claims (backtest/validation.py:313-346)",
+    }
+)
+"""Counts a generator states that name something other than a list it draws, and what they name.
+
+The rule below reads a function's own list literals, so a true count of something else -- the
+provider failure kinds, the four faces, the batch ceiling -- has no list to match and is
+declared here instead. An entry is a statement about one phrase; a phrase that starts matching
+a list again, or stops being drawn, is reported by the test that follows.
+"""
+
+
+def _drawn_counts(path: Path) -> list[tuple[int, str, int, set[int]]]:
+    """Every count a generator's functions state, with the lengths of that function's lists."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    found: list[tuple[int, str, int, set[int]]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        lengths = {
+            len(child.value.elts)
+            for child in ast.walk(node)
+            if isinstance(child, ast.Assign) and isinstance(child.value, ast.List | ast.Tuple)
+        }
+        if not lengths:
+            continue
+        for child in ast.walk(node):
+            if not (isinstance(child, ast.Constant) and isinstance(child.value, str)):
+                continue
+            for match in DRAWN_COUNT.finditer(child.value):
+                phrase = child.value[match.start() : match.end() + 4].strip()
+                found.append((child.lineno, phrase, _number(match.group("n")), lengths))
+    return found
+
+
+def test_a_count_a_diagram_states_is_the_length_of_the_list_it_draws() -> None:
+    """`brain-01` said 五级专业流水线 over a `stages` list holding four, and the four were drawn.
+
+    A count in a drawing is a claim like any other, and this is the one kind no other guard
+    reads: the retired-claims guard takes a generator one string literal at a time, and the
+    counts above read the documents rather than the drawings. The rule is the cheapest one that
+    holds: a count stated inside a function that builds a list must be one of that function's
+    list lengths, or be declared in `COUNTS_THAT_NAME_NO_LIST` with what it does name.
+    """
+    problems: list[str] = []
+    for path in GENERATORS:
+        for line, phrase, stated, lengths in _drawn_counts(path):
+            if any(phrase.startswith(known) for known in COUNTS_THAT_NAME_NO_LIST):
+                continue
+            if stated not in lengths:
+                problems.append(
+                    f"{path.relative_to(ROOT)}:{line} draws {phrase!r}, and the lists this "
+                    f"function builds hold {sorted(lengths)}"
+                )
+
+    assert not problems, "\n".join(problems)
+
+
+def test_every_declared_diagram_count_is_still_drawn() -> None:
+    """A declaration outlives its phrase the moment the phrase is reworded; this says so."""
+    drawn = {phrase for path in GENERATORS for _, phrase, _, _ in _drawn_counts(path)}
+    unused = [
+        known
+        for known in COUNTS_THAT_NAME_NO_LIST
+        if not any(phrase.startswith(known) for phrase in drawn)
+    ]
+
+    assert not unused, f"{unused} is declared here and drawn nowhere"
 
 
 def test_every_count_the_documents_state_is_the_one_the_code_holds() -> None:

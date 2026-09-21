@@ -74,7 +74,7 @@ available_time <= as_of
 `event_time`、`ingested_time` 与 `revision_time` 随证据保存，但不参与可见性判断：研究请求、回放语料、
 Provider 批次和证据库查询都只比较 `available_time`（`domain/time.py` 的 `is_visible_at`，以及
 `storage/parquet.py` 查询里的 `WHERE available_time <= ?`）。修订时间晚于可得时间的记录，构建时带上
-`revised_after_initial_availability` 风险标记，风险门据此把研究动作降为 `reduce`；修订时间晚于
+`revised_after_initial_availability` 风险标记，风险门据此答 `reduce` 而不是 `block`——最终动作（`watch`/`avoid`/`abstain`）不因此改变；修订时间晚于
 `as_of` 的记录照样可见，不会只因为修订较晚就被挡在门外。
 
 后来修订的数据以新 Evidence Snapshot 进入，不覆盖旧内容。内容变化会生成新的哈希和 ID。
