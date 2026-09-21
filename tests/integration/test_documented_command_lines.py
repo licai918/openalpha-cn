@@ -79,6 +79,7 @@ from typer.testing import CliRunner
 
 from openalpha_cn.cli import app
 from openalpha_cn.panel.store import PanelStore
+from openalpha_cn.storage.shortlists import SHORTLIST_ID_PATTERN
 
 REPOSITORY_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 
@@ -123,8 +124,8 @@ NOT_EXECUTED: Final[MappingProxyType[str, str]] = MappingProxyType(
         "serve": "starts the server; a test that ran it would not return",
         "evidence build": "takes an events file the surrounding prose describes rather than "
         "ships, and both copies are PowerShell blocks in `docs/api/`",
-        "research run": "`evidence build`'s reason: its argument is an `./events.json` the "
-        "prose describes rather than ships",
+        "research run": "`evidence build`'s reason one step on: its argument is the "
+        "`./evidence.json` that command prints, and neither file is shipped",
         "validation record": "`--research ./run.json` is the file the `research run` line "
         "above it writes, so it is unreachable here for that line's reason. Driven end to end "
         "instead by `tests/integration/test_validation_and_report_writer_faces.py`, which "
@@ -140,7 +141,9 @@ NOT_EXECUTED: Final[MappingProxyType[str, str]] = MappingProxyType(
         "assert nothing the empty listing does not already",
         "model prediction": "its argument is the placeholder `prd_0123456789abcdef01234567`",
         "portfolio construct": "its argument is the placeholder `sla_0123456789abcdef01234567`",
-        "portfolio turnover-variants": "its argument is the placeholder `sl_2026_03_02`",
+        "portfolio turnover-variants": "`portfolio construct`'s reason: its argument is the "
+        "placeholder `sla_0123456789abcdef01234567`, which is a shape the store could have "
+        "issued and no answer it holds",
         "validation statistics": "its `--signal` arguments are the placeholders "
         "`sig_0123456789abcdef01234567` and `sig_89abcdef0123456701234567`",
         "validation segmented": "`validation statistics`'s reason, plus a `--plan "
@@ -329,6 +332,41 @@ def test_every_documented_line_names_a_command_that_exists_and_parses(
     assert not undeclared, (
         f"{line.document}:{line.line_number} `openalpha {named}` does not declare "
         f"{', '.join(undeclared)}: {line.raw}"
+    )
+
+
+@pytest.mark.parametrize("line", DOCUMENTED, ids=str)
+def test_a_documented_shortlist_address_has_the_shape_the_store_issues(
+    line: DocumentedLine,
+) -> None:
+    """A placeholder address still has to be an address this deployment could have issued.
+
+    The test above reads option **names** and the executed cases read exit codes, and a line
+    excused into `NOT_EXECUTED` for being illustrative falls between them: `openalpha portfolio
+    turnover-variants sl_2026_03_02` parsed, declared every option it used, and named an address
+    `FileShortlistStore` refuses on sight, because `stable_answer_digest` issues
+    `sla_` + 24 hex digits and nothing else. A reader following that line gets
+    `shortlist_id ... is not a shortlist address` rather than the report the section describes.
+
+    Derived rather than declared, twice over: the addresses are found by asking the live command
+    for the parameter it calls `shortlist_id`, and the shape is the store's own
+    `SHORTLIST_ID_PATTERN`, matched as the store matches it. So this follows a rename of either
+    without being told about it, and it says nothing about commands that take no address.
+    """
+    command, rest, named = _resolve(list(line.argv))
+    if _is_group(command):
+        return  # `test_every_documented_line_names_a_command_that_exists_and_parses`'s assertion
+
+    context = command.make_context(  # type: ignore[attr-defined]
+        named, list(rest), resilient_parsing=True
+    )
+    address = context.params.get("shortlist_id")
+    if address is None:
+        return
+
+    assert SHORTLIST_ID_PATTERN.fullmatch(str(address)), (
+        f"{line.document}:{line.line_number} names {address!r}, which "
+        f"{SHORTLIST_ID_PATTERN.pattern} refuses, so the line cannot be followed: {line.raw}"
     )
 
 

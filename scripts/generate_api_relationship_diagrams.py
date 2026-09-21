@@ -195,7 +195,7 @@ class Svg:
     def finish(self) -> str:
         self.raw(
             '  <text x="64" y="780" class="navCaption">API 关系导航｜'
-            "从数据合同到验证反馈的五层公开能力</text>"
+            "从数据合同到验证反馈的五条 v1 研究链</text>"
         )
         start_x = 64
         width = 216
@@ -232,8 +232,8 @@ class Svg:
 def landscape() -> str:
     svg = Svg(
         index=1,
-        title="API 全景｜四类入口与五条功能链",
-        subtitle="REST 调用方经同一 FastAPI 边界进入，SDK 与 CLI 在进程内调用同一批服务。",
+        title="API 全景｜四类入口与五条 v1 研究功能链",
+        subtitle="REST 调用方经同一 FastAPI 边界进入，SDK 与 CLI 在进程内调用同一批服务；面板、因子、候选榜、模型与调度的 v2 路由未画入。",
     )
     svg.section(x=64, y=194, text="调用入口", color=COLORS["slate"])
     # Only an HTTP caller crosses the FastAPI boundary: a REST client, and the React workbench,
@@ -405,7 +405,7 @@ def evidence_dataflow() -> str:
             "evidence_id + content_hash",
             "event / available / ingested / revision",
             "source_id / URI / license",
-            "只保留 as_of 时刻可见事实",
+            "只保留可得时间不晚于 as_of 的事实",
         ),
         color=COLORS["purple"],
     )
@@ -714,7 +714,7 @@ def validation_loop() -> str:
             64,
             "同路径回放",
             "POST /api/v1/backtests/replay",
-            ("冻结 ReplayCorpus", "ResearchEngine.run_cycle", "两遍比对 · 前视语料加载即拒"),
+            ("冻结 ReplayCorpus", "ResearchEngine.run_cycle", "两遍比对 · 可得晚于 as_of 即拒"),
             COLORS["purple"],
         ),
         (

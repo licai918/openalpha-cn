@@ -106,12 +106,12 @@
   <rect x="644" y="374" width="3" height="64" rx="1.5" fill="#A78BFA" />
   <text x="666" y="383" class="micro" fill="#A78BFA" text-anchor="start" opacity="1">多日组合报告</text>
   <text x="666" y="412" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">收益 · 基准 · 主动收益 · 换手</text>
-  <text x="666" y="438" class="small" fill="#96A8BE" text-anchor="start" opacity="1">容量 · 暴露 · 标的归因</text>
+  <text x="666" y="438" class="small" fill="#96A8BE" text-anchor="start" opacity="1">最大单笔成交额 · 最大总敞口 · 标的已实现盈亏</text>
   <rect x="644" y="476" width="338" height="104" rx="19" fill="#0C1928" stroke="#263A52" />
   <rect x="644" y="496" width="3" height="64" rx="1.5" fill="#FB7185" />
   <text x="666" y="505" class="micro" fill="#FB7185" text-anchor="start" opacity="1">内容一致性验证</text>
   <text x="666" y="534" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">ID 重算 · 账本完整性</text>
-  <text x="666" y="560" class="small" fill="#96A8BE" text-anchor="start" opacity="1">结果属性与失败原因归因</text>
+  <text x="666" y="560" class="small" fill="#96A8BE" text-anchor="start" opacity="1">成本与空仓机会成本 · 显式残差</text>
   <path d="M606 360H625V284H644" fill="none" stroke="#2DD4BF" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow)" opacity="1" />
   <path d="M606 401L644 406" fill="none" stroke="#A78BFA" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow)" />
   <path d="M606 442H625V528H644" fill="none" stroke="#FB7185" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow)" opacity="1" />

@@ -906,7 +906,8 @@ def test_the_stated_limits_are_real() -> None:
     refused = {
         "a denial": "链邻不是统一入口。\n",
         "another subject's marker": (
-            "链邻 Provider 负责认证、限流和错误分类，四时钟保证 Agent 只读当时可见信息。\n"
+            "链邻 Provider 负责认证、限流和错误分类，"
+            "可得时间保证 Agent 只读决策时刻已可得的证据。\n"
         ),
         "a URL whose path is not ASCII": "文档见 https://example.com/链邻入口。\n",
     }

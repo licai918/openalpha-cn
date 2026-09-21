@@ -318,8 +318,10 @@ entries say what the join between the panel plane and the two-stage funnel canno
 that the winsorizer's clip block is reconstructed from a tie at the maximum and therefore
 over-reports in the safe direction, that the cross section it screens is the newest one
 *visible* at the `as_of` and may be older than it, that the evidence plane's answers are
-supplied rather than run (this repository stores no `SignalFrame`, so a face that researched
-every shortlisted name would make `researched_ratio` unable to be anything but `1.0`), and
+supplied rather than run (no store this face reads holds the frame a run produced -- the
+aggregate `SignalFrame` is never persisted, only its ID in `decisions.signal_ids` -- and what
+keeps `run_cycle` out is layering: a panel-plane screen would also become an agent invocation),
+and
 that a neutralized-tier screen needs an exposure cross section this face does not load. It
 moved the totals from 225 / 69 to 229 / 69.
 

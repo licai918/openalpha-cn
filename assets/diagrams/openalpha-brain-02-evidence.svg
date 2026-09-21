@@ -124,7 +124,7 @@
   <text x="682" y="465" class="body" fill="#96A8BE" text-anchor="start" opacity="1">available_time | content_hash)</text>
   <text x="682" y="489" class="body" fill="#96A8BE" text-anchor="start" opacity="1">可见时点 · 哈希 · 来源 · 许可 · 修订</text>
   <text x="682" y="513" class="body" fill="#96A8BE" text-anchor="start" opacity="1">A 股事件语义与原始载荷建立绑定</text>
-  <text x="682" y="537" class="body" fill="#96A8BE" text-anchor="start" opacity="1">下游只接收决策时刻已经可知的 evidence_id</text>
+  <text x="682" y="537" class="body" fill="#96A8BE" text-anchor="start" opacity="1">下游只接收可得时间不晚于决策时刻的 evidence_id</text>
   <path d="M622 421L658 421" fill="none" stroke="#2DD4BF" stroke-width="2.2" marker-end="url(#arrow)" />
   <text x="640.0" y="405" class="small" fill="#2DD4BF" text-anchor="middle" opacity="1">固化</text>
   <rect x="1142" y="350" width="214" height="214" rx="22" fill="#0C1928" stroke="#263A52" filter="url(#shadow)" />

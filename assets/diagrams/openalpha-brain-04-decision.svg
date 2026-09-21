@@ -91,11 +91,11 @@
   <text x="671" y="250" class="small" fill="#FBBF24" text-anchor="middle" opacity="1">Bull / Bear 辩论</text>
   <rect x="370" y="260" width="208" height="120" rx="18" fill="#13243A" stroke="#A3E635" stroke-opacity=".34" />
   <text x="394" y="289" class="micro" fill="#A3E635" text-anchor="start" opacity="1">BULL / 正方</text>
-  <text x="394" y="322" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">收益证据链</text>
-  <text x="394" y="352" class="body" fill="#96A8BE" text-anchor="start" opacity="1">机会 · 催化 · 确认条件</text>
+  <text x="394" y="322" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">看多证据</text>
+  <text x="394" y="352" class="body" fill="#96A8BE" text-anchor="start" opacity="1">看多 Agent · 证据 · 得分</text>
   <rect x="596" y="260" width="208" height="120" rx="18" fill="#13243A" stroke="#FB7185" stroke-opacity=".34" />
   <text x="620" y="289" class="micro" fill="#FB7185" text-anchor="start" opacity="1">BEAR / 反方</text>
-  <text x="620" y="322" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">风险证据链</text>
+  <text x="620" y="322" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">看空证据</text>
   <text x="620" y="352" class="body" fill="#96A8BE" text-anchor="start" opacity="1">看空 Agent · 证据 · 得分</text>
   <rect x="822" y="260" width="150" height="120" rx="18" fill="#13243A" stroke="#FBBF24" stroke-opacity=".34" />
   <text x="846" y="289" class="micro" fill="#FBBF24" text-anchor="start" opacity="1">RISK PANEL</text>

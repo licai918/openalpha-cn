@@ -16,20 +16,20 @@
 | 规模化研判 | SQLite 持久批量队列；1–8 并发、逐项进度、协作式取消与重试，进程重启后被中断的项重新排队 |
 | 模型治理 | 能力注册表与能力元数据只是模型客户端库里的定义，没有代码据此选择端点；408/429/5xx 分类重试要在代码中接入模型 Provider 才会用上，出厂路径不调用模型；Token/尝试次数/估算成本账本要在构造 Provider 时传入 `usage_store` 才会写入，出厂路径不会自动记账 |
 | 辩论与风控 | Bull/Bear 研究辩论与激进/中性/保守风险委员会，整体作为一次可选调用，输出调用前后的对照 |
-| 组合与验证 | 订单/成交/拒单不可变账本；多日收益、基准、主动收益、换手、容量与暴露归因 |
+| 组合与验证 | 订单/成交/拒单不可变账本；多日收益、基准、主动收益、换手、最大单笔成交额与按标的已实现盈亏 |
 | 统计可信度 | CAR、t 统计量与确定性 Bootstrap 置信区间 |
 | 研究产品 | 结构化筛选、持久观察池、内容寻址且关联证据的不可变报告中心 |
 
 ### 🇨🇳 A 股原生证据体系
 
 - **本土市场语义**：原生规范化涨停、炸板、连板、题材、催化、公告和资金观察，不把海外市场字段生硬套用到 A 股。
-- **四时钟防前视**：分别记录事件发生、首次可知、系统入库和数据修订时间，历史研究只能读取决策时刻已经可见的证据。
+- **四时钟防前视**：分别记录事件发生、首次可知、系统入库和数据修订时间；可见性只看首次可知时间，历史研究只能读取决策时刻已经可得的证据；修订晚于首次可知的记录带 `revised_after_initial_availability` 标记、被风险门降级，不会只因修订晚于决策时刻就被挡在门外。
 - **交易规则内建**：覆盖 T+1、100 股整手、停牌、涨跌停锁单和交易成本约束。
 - **链邻客户端合同**：已实现 `chainlin-data/v1` 合同型 Provider（Bearer 认证、客户端限流、错误分类、冻结合约测试）；出厂路径只有 `openalpha doctor` 用它报告凭据、探测连通性，证据与面板构建都不调用它。
 
 ### 🤖 可验证的多智能体决策
 
-- **证据驱动协作**：市场事件、题材催化和资金流智能体经证据感知路由协作，每项输出都引用 `evidence_id`。
+- **证据驱动协作**：市场事件、题材催化和资金流智能体经证据感知路由协作，每项方向性输出都引用 `evidence_id`，弃权写明原因。
 - **结构化决策链**：用 `SignalFrame`、`DecisionLedger`、风险门和显式弃权替代无法审计的自由文本结论。
 - **双委员会研判**：Bull/Bear 研究辩论与激进/中性/保守三视角风险投票在同一次委员会评审里完成；整个委员会是一次可选的显式调用（`POST /api/v1/research/deliberate`、`OpenAlphaSDK.deliberate`），不能只开其中一方，输出附带消融对照：委员会前后的方向、强度与置信度变化。
 - **批量研究编排**：持久任务队列支持 1–8 并发、逐项进度、协作式取消和失败重试；进程重启后，被中断的项重新排队，调用方再发一次重试才继续。
@@ -43,7 +43,7 @@
 - **确定性回放**：内置 60 个交易日、300 个合成事件的冻结语料；每个事件跑两遍，第二遍用空的存储从头重算，两遍结果不一致即记为失败。证据在该事件决策时刻尚不可见（前视）的语料，在加载时就被整体拒绝，不会进入回放。
 - **结果可解释**：结果验证只计入调用方给出的交易成本，不重放 A 股交易规则（那些规则由组合执行与多日组合回测施加）；归因只产出规则类目下的两项条款（交易成本、空仓相对基准的机会成本），因子、智能体与模型三类结构性从不产生而非被收窄，未被认领的部分记为显式残差 `unexplained_return`，不摊进任何一项。
 - **不可变组合账本**：订单、成交、拒单和持仓转移全部追加记录；同时维护现金、持仓批次、估值、费用和已实现盈亏。
-- **多日组合报告**：统一输出收益、基准、主动收益、换手、最大订单容量和标的暴露归因。
+- **多日组合报告**：统一输出收益、基准、主动收益、换手、最大单笔成交额、最大总敞口和按标的已实现盈亏。
 - **事件统计检验**：提供 CAR、t 统计量和可复现的 Bootstrap 置信区间，不用单条收益曲线代替显著性。
 
 ### 🔌 开放的数据与使用接口
@@ -114,7 +114,7 @@ OpenAlpha CN 不是把智能体角色堆在一起，而是把 **A 股事实、�
   />
 </p>
 
-### 05｜验证反馈：回答是否有效、为何有效、下一轮应该改什么
+### 05｜验证反馈：回答是否显著、组合表现如何、记录是否一致
 
 <p align="center">
   <img
@@ -301,7 +301,7 @@ fail-closed 依赖门。
 `5` 与 `1` 分开是刻意的：没有它，CLI 自身的异常会走 Typer 默认处理并以 `1` 退出，
 「CLI 崩了」和「面板体检不过」在 CI 里就是同一个数字。
 
-`panel doctor` 只在报告 `is_clean` 为假时非零退出 —— 即出现 `blocking` 或 `warning`。
+`panel doctor` 只在报告 `is_clean` 为假时以 `1` 退出 —— 即出现 `blocking` 或 `warning`。
 `notice` 永不非零：`ambiguous_filing` 在真实财报上命中 8.15%/1.29%/15.80%/13.70% 的申报，
 让 notice 非零等于让每次诚实体检都失败，然后这个命令会在第一条流水线里被 `|| true` 掉。
 
@@ -364,7 +364,7 @@ uv run openalpha data-check --dataset daily --dataset adj_factor --year 2026 \
   （早于最新分区的最后一行 → `not_yet_knowable`，不早于它 → 旧分区 `date_gap`）。
   每次构建都会把用到的时刻打印出来（`--json` 里的 `as_of`，人类输出里的 `AS-OF` 行），
   之后单独重取某一个目标时把它传回来即可；而 `_refuse_split_horizon` 会在**取第一个会话
-  之前**拒绝一个会造成这种分裂的构建，并给出能修好它的那个 `--as-of`。要把面板整体往前推
+  之前**拒绝一个会造成这种分裂的构建，并给出补法：在一次调用里一起建所有会话级目标；库里的同级分区彼此一致时，还会给出能钉住的那个 `--as-of`。要把面板整体往前推
   一天，就在**一次调用里**同时点名所有会话级目标（分区是整体替换，没有追加）。
 - 每个抓取循环都往 **stderr** 打进度（`FETCHING <目标> 40/145 sessions elapsed=89s
   eta=233s`），间隔是 `max(10, ceil(总数/40))` —— 145 个交易日仍然每 10 个一行，5,881 只
@@ -387,8 +387,10 @@ uv run openalpha data-check --dataset daily --dataset adj_factor --year 2026 \
   没有任何输出提到 2025 被丢掉了。年份按从老到新执行。
 - **`--resume` 是年粒度的断点续传，证据是数据本身而不是进度文件。** 某一年的某个目标，
   只要它写的每个会话级数据集都已经覆盖到这次构建会取到的最后一个会话，就跳过；写时的
-  会话普查（`_session_census`）已经保证了这样的分区从 1 月 1 日起没有洞。`trade_cal` 与
-  `stock_basic` 永不跳过（各一次请求）。**年内没有断点续传**：分区是整体写入、没有追加，
+  会话普查（`_session_census`）已经保证了这样的分区从 1 月 1 日起没有洞。`index_weight` 与
+  三张按公告年归档的财报另有一条更弱的规则：分区已登记就跳过，不核对其中有哪些证券，所以被
+  `--subject` 缩窄过的年份会一直是窄的。`trade_cal`、`stock_basic`、`namechange` 与三个跨年目标
+  永不跳过（前三个各一次请求）。**年内没有断点续传**：分区是整体写入、没有追加，
   半年份只能落成第二套磁盘格式，而它最坏的失败形态正是「看起来完整的半截」。
 - 凭证不经过 CLI：`TushareProvider` 在自己的构造函数里解析 `TUSHARE_TOKEN`，
   `ProviderFailure` 的原始消息（可能带着 token 或整条 query string）永不打印、永不入日志。
@@ -433,17 +435,19 @@ uv run openalpha factor run --factor reversal_1d/v1 \
 **第 3 步必须跑两次，这一点以前没写（`V2-P5-048`）。** 上面两条命令曾经是一条：只有
 `--tier processed` 那条。它 exit 0，而第 4 步随即 exit 1——`No neutralized partition of this
 factor is registered in this panel at all`。因为第 4 步给了 `--neutralization`，它读的是第三档，
-而第 3 步从没写过第三档。**`--tier` 是「写到哪档」而不是「写到哪档为止」**，这是本节自己那句
-「--tier 指到哪档就写到哪档」的实际后果，先前只有描述没有示例。
+而第 3 步从没写过第三档。**`--tier` 写到它点名的那一档为止**（processed 写 raw 与 processed，不写 neutralized）；第 4 步
+要读第三档，所以第 3 步得再以 neutralized 跑一次，先前只有描述没有示例。
 
 **第 4 步的 `--as-of` 也是新加的，理由和 `V2-P4-094` 给 `model` 面的一样。** 省掉它就取墙钟，
 于是同一份面板、同一条命令，一月跑得通、八月跑不通：分区门按**整个分区里最新的那一行**判定，
 墙钟落在它之前就是 `not_yet_knowable`，落在最后一个已建会话之后就是 `date_gap`。可达区间是两者
 的交集，而墙钟不在任何一个「没建到今天」的面板的区间里。示例读的是 2026 全年，所以站在它之后。
 
-这两条现在都由 `tests/integration/test_documented_command_lines.py` **逐字执行**：它把本文件和
-`docs/` 里每一行 `openalpha …` 解析出来，能跑的逐字跑并要求 exit 0。一条没跑过的文档命令和其他
-任何断言一样，只是一个声明。
+这两条现在都由 `tests/integration/test_documented_command_lines.py` 执行：它读本文件与 `docs/`
+围栏代码块里的每一行 `openalpha …`（带省略号的行除外），逐条核对命令与选项；
+`factor list/describe/build/run` 与 `model evaluate/daily-run/predictions` 在生成的面板上运行
+（追加 `--runtime-dir` 与 `--exchange`），并要求 exit 0。一条没跑过的文档命令和其他任何断言一样，
+只是一个声明。
 
 `factor list` 与 `factor run` 三面等价：`openalpha factor list` + `openalpha factor run` ／
 `GET /api/v1/factors` + `POST /api/v1/factors/run` ／ `OpenAlphaSDK.factor_catalog()` +
@@ -551,10 +555,12 @@ it, extend the factor series over the window -- `openalpha panel build --dataset
   `V2-P4-059`／`V2-P4-060` 之前这两件事分别表现为：5,545 只的 store 上只筛了 11 只并 `exit 0`，
   以及一次普通的年中退市让 `factor build` 抛出未捕获异常。补救方式**不是**把早年份也写进
   `--year`：一个 `--year` 同时约束三个数据集，`--year 2026 --year 2010` 会去要 2010 年的
-  交易日历分区和行情分区，而把它们建出来是 `panel build --help` 标价「以天计而不是以小时计」的
-  约 282,000 次请求 —— 只为算一个**一日**反转。
-- **`--max-staleness-days N` 与 `--waive-max-staleness` 二选一，没有默认值。**
-  `panel_ingest` 的每个 requirement builder 都拒绝替调用者选这个界，理由写在各自的 docstring
+  交易日历分区和行情分区，也就是再建一整年面板（行情一年约 2,900 次请求），只为算一个**一日**
+  反转。
+- **必须用 `--max-staleness-days N` 声明这个界，没有默认值。** `--waive-max-staleness` 只是让请求
+  合同能表达「既不声明也不两个都给」，`V2-P4-100` 实测它以 exit 1 被拒：`compute_factor` 对因子
+  读到的每个数据集都拒绝被弃权的 `max_staleness`。`panel_ingest` 的每个 requirement
+  builder 都拒绝替调用者选这个界，理由写在各自的 docstring
   里：一个最新会话是一个月前的行情面板，已经错过了一个月的市场。
 - 不给 `--subject` 时，主体是登记簿知道的**全部**代码（含已退市的），universe 是当天的上市
   横截面 —— 于是退市名会被评估并落成 `not_in_universe`，而不是从普查里静默消失。
@@ -638,9 +644,9 @@ namechange --year <year>` -- and ask this run for that year too.
 `as_of`，全部 `exit 1`，两种拒绝之间没有任何缝隙。
 
 **这也不只是「隔夜」，而这是这条最值得读两遍的地方。** 那个窗口从零点一直到 16:30，所以一个
-上海时间上午九点、开盘前建出来的横截面，同样一次都筛不出来。按半小时步长扫过 2026 全年
-16,735 个时刻：新规则**没有一次**晚于旧规则，8,518 个时刻两者相同，8,217 个不同——而这 8,217
-个里**没有一个**是旧规则本来就能作答的会话。也就是说，全年将近一半的时刻，建出来的横截面是
+上海时间上午九点、开盘前建出来的横截面，同样一次都筛不出来。按半小时步长扫过 2026-01-05 至 2026-12-20
+的 16,735 个时刻：新规则**没有一次**晚于旧规则，8,518 个时刻两者相同，8,217 个不同——而这 8,217
+个里**没有一个**是旧规则本来就能作答的会话。也就是说，这段时间里将近一半的时刻，建出来的横截面是
 永久不可筛的。
 
 **前视那道闸一步都没松。** `_read_visible_price_session` 依然拒绝任何越过
@@ -716,8 +722,11 @@ namechange --year <year>` -- and ask this run for that year too.
 和「压根没给证据」完全一样，并且会具名回在 `evidence_without_a_stored_run` 里。是丢掉而不是报错，
 因为一个在一整年 `as_of` 上循环的调用者必须能越过它继续跑。
 
-**这条性质证明了什么、没证明什么：被解析的是那次运行，不是它旁边的信号。** 本仓库不存
-`SignalFrame`，没有东西可以拿来对信号；一个手里有真实 `run_manifest_id` 的调用者，仍然可以在它
+**这条性质证明了什么、没证明什么：被解析的是那次运行，不是它旁边的信号。** 这条路能读到的存储里
+没有那次运行产出的 `SignalFrame`——运行仓库存的是 `RunManifest` 与 `DecisionLedger`，报告存的是
+`signal_id`，而一次运行汇总出的那个 `SignalFrame` 根本不落库，只有它的 ID 记在 `decisions.signal_ids`
+里（整份 `SignalFrame` 只在恢复平面的节点 Checkpoint 里存过）；没有东西可以拿来对信号，
+一个手里有真实 `run_manifest_id` 的调用者，仍然可以在它
 名下填一个杜撰的结论。交付的性质是「发出去的 `run_manifest_id` 能解析到本部署持有的一次运行」，
 不是「它旁边的结论是那次运行跑出来的」。
 
@@ -928,7 +937,7 @@ uv run openalpha portfolio construct sla_0123456789abcdef01234567 \
 ### 被拒绝的榜没有权重
 
 `admitted` 为 `null` 是「闸门拒了这张榜」，为 `[]` 是「闸门放行了、但一个名字都没有」——这是
-`V2-P4-032` 特意分开的两个答案。对第一种构建组合，等于把一次拒绝洗成一组数字，所以两个面都具名
+`V2-P4-032` 特意分开的两个答案。对第一种构建组合，等于把一次拒绝洗成一组数字，所以三个面都具名
 拒绝。
 
 ### 行业上限在这条路上会被拒绝，而这是量出来的
@@ -948,7 +957,7 @@ uv run openalpha portfolio construct sla_0123456789abcdef01234567 \
 
 ## 结果的统计口径：家族有多大，区间假设了什么（P5，`V2-P5-007`/`V2-P5-008`）
 
-组合平面之上是**结果平面**。`openalpha validation statistics` 把已经落库的 `ValidationResult`
+与组合平面并列的是**结果平面**：它读研究结果与观测，不读组合。`openalpha validation statistics` 把已经落库的 `ValidationResult`
 按 signal 聚成同期群，每个同期群就是一个假设。
 
 **先把结果落库——这条命令以前不存在（`V2-P5-047`）。** 下面的聚合命令读的是一个 store，而在
@@ -957,8 +966,10 @@ uv run openalpha portfolio construct sla_0123456789abcdef01234567 \
 `validation statistics` 对没有存量的 signal 是具名拒绝——正确，且在没有可达写面时是唯一答案。
 
 ```bash
-# 一次 research run 的完整输出就是 --research 要的那份 JSON，一字不改
-uv run openalpha research run ./events.json --runtime-dir ./runtime > run.json
+# evidence.json 是 openalpha evidence build 打印的那份载荷；--subject 与 --as-of 没有默认值，
+# 留空会被这条命令自己拒掉。一次 research run 的完整输出就是 --research 要的那份 JSON，一字不改
+uv run openalpha research run ./evidence.json --subject 000001.SZ \
+  --as-of 2026-01-16T09:00:00+00:00 --runtime-dir ./runtime > run.json
 
 # --observation 是 OutcomeObservation 自己的字段：窗口、两个价格、基准收益、交易成本
 uv run openalpha validation record --research ./run.json --observation ./outcome.json \
@@ -967,9 +978,10 @@ uv run openalpha validation record --research ./run.json --observation ./outcome
 
 **两个入参都是文件而不是一堆旗标**，`validation segmented --plan` 的理由：一次观测的窗口、两个
 价格、基准与成本**只有放在一起才有意义**，逐旗标拼出的半份观测会逼这条命令为每个缺口发明一个
-默认值，而这里每个默认值都是一句关于市场的断言。三个面读同一份 `parse_research_result`：内容
-寻址的三个 id 都会被重新推导并校验，一份手改过的记录**按名字**被拒，而那句拒绝在三个面上
-**逐字节相同**（`tests/integration/test_validation_and_report_writer_faces.py` 钉住）。
+默认值，而这里每个默认值都是一句关于市场的断言。路由与命令行读同一份 `parse_research_result`：内容
+寻址的三个 id 都会被重新推导并校验，一份手改过的记录**按名字**被拒，而那句拒绝在这两个面上
+**逐字节相同**（`tests/integration/test_validation_and_report_writer_faces.py` 钉住）；SDK 收的是
+`ResearchRunResult` 对象，三个 id 由它自己推导，不经这道解析。
 
 ```bash
 # signal ID 来自 openalpha research run；--family-size 是「一共检验了几个」，不是 --signal 的个数
@@ -1075,7 +1087,7 @@ family 里最宽的临界值是 `reported * rate / (family_size * penalty)`。**
 重。两臂都是必填字段，**单臂报告在类型上不可表达**——能只要好看那一半的调用方迟早会只要。
 
 ```bash
-uv run openalpha portfolio turnover-variants sl_2026_03_02 \
+uv run openalpha portfolio turnover-variants sla_0123456789abcdef01234567 \
   --tier-weight 0.5 --tier-weight 0.3 --tier-weight 0.2 \
   --buffer 0.01 --previous-weight 000001.SZ=0.05
 ```
@@ -1124,7 +1136,7 @@ OpenAlpha CN 的公开 API 不是一组彼此孤立的地址，而是围绕同�
 图中**实线表示服务端自动调用或持久化**，**虚线表示调用方显式组合或人工反馈**。这个区别
 非常重要：研究结果不会自动变成组合订单，验证结果也不会自动训练模型。
 
-### API 关系图 01｜四类入口与五条功能链
+### API 关系图 01｜四类入口与五条 v1 研究功能链
 
 REST 调用方（React 工作台也是其中之一）经过同一 FastAPI 公共边界，请求在那里经过
 Pydantic Schema、请求大小限制与安全响应头；Python SDK 与 CLI 命令不经这道 HTTP 边界，在进程内直接
@@ -1146,7 +1158,7 @@ JSON 文档；回放写进 SDK 与 REST 各自的回放库。
 链邻 API、用户文件、Tushare 和可选 AKShare Adapter 位于调用方或 Provider 侧。
 `POST /api/v1/evidence/build` 只接收结构化 `ProviderMetadata + ProviderBatch`，不会在
 服务端自动抓取数据。记录通过 Schema、四时钟 PIT 和 A 股事件规范化后生成内容寻址的
-`EvidenceSnapshot`，写入 Parquet，再由证据、市场事件和题材查询接口按 `as_of` 提供给研究。
+`EvidenceSnapshot`，写入 Parquet；证据、市场事件和题材接口按 `as_of` 把可见证据返回给调用方，研究时由调用方把证据放进请求体，研究路由不读证据库。
 
 <p align="center">
   <img
@@ -1191,7 +1203,7 @@ Bull/Bear 与三视角风险委员会，把完整研究结果送入筛选或不�
 
 冻结语料回放把每个事件跑两遍同一 `run_cycle`（第二遍用空存储从头重算）以检查确定性；
 含前视证据的语料在加载时就被整体拒绝；多日组合 API 计算
-收益、基准、换手、容量和暴露；事件研究 API 给出 CAR、t 统计量和确定性 Bootstrap
+收益、基准、换手、最大单笔成交额和最大总敞口；事件研究 API 给出 CAR、t 统计量和确定性 Bootstrap
 置信区间；结果验证 API 则先复核内容派生 ID，再把未来观察拆分为规则类目下的两项条款，其余（含因子与 Agent 层面）记为显式残差，结构性不产生而非被收窄。
 这些结果由研究者审阅后用于调整数据质量、路由、风险阈值和筛选条件，不会自动修改模型。
 
@@ -1271,7 +1283,7 @@ uv run python scripts/verify_compose_recovery.py
 |---|---|
 | [PRD](docs/specs/v2/openalpha-cn-v2-prd.md) | 范围、实测基线与实现决策 |
 | [开发路线图](docs/specs/v2/openalpha-cn-v2-roadmap.md) | 分阶段列出全部 issue，含依赖、闸门与需求映射 |
-| [四缝审计](docs/specs/v2/openalpha-cn-v2-seam-audit.md) | 103 条带 `file:line` 证据的 finding，逐条对应关闭 issue |
+| [四缝审计](docs/specs/v2/openalpha-cn-v2-seam-audit.md) | 103 条带 `file:line` 证据的 finding；101 条对应关闭 issue，F27 归到 P1–P5 全部，F93 只记录不修 |
 
 参与开发前先读 [AGENTS.md](AGENTS.md) 的 v2 硬性规则与 [CONTRIBUTING.md](CONTRIBUTING.md)。
 

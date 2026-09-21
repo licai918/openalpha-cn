@@ -17,18 +17,28 @@ families of words that occur together, added the classes that review and `D14`'s
 the four documents and both generators named, and retired every wording that sweep found. The
 review of `D14` found more wordings of those families, in the documents and in the generators, and
 one class none of them held, a custom agent's research replayed; `D14`'s fix round retired them
-and added that class. An entry of `RETIRED_CLAIMS` holds:
+and added that class. The census of the four documents and both generators at `29e26f3` named
+eighty-eight passages no pattern read; four of its families are entries here, each added with a
+premise and each red on the documents before they were rewritten -- a historical read that sees
+only the version knowable at the time, a multi-day report that measures capacity and attributes
+exposure, Tool/Risk/Validator as versioned extension contracts, and every agent signal citing
+evidence -- and two older entries were extended by one branch each, for a batch item that keeps
+a structured signal and a risk decision, and for models sharing one replay contract. An entry of
+`RETIRED_CLAIMS` holds:
 
 - `pattern`: the family of wordings that was retired, searched in every clause of the four
   documents as `tests/prose_clauses.py` reads them;
 - `refuted_by`: the code fact that makes those wordings false, with file:line at the revision it
   was checked at: `d4ef5e4`, `c99b46b` for the classes the rebase round added, `07f5c80` for the
   three the final round added, `20fec55` for what `D14`'s first two commits added, or `43b40a7`
-  for what its later commits and its fix round added -- between the two, only `cli.py` from
-  :4914 on and a docstring in `backtest/replay.py` moved;
+  for what its later commits, its fix round and the census round added -- between the two, only
+  `cli.py` from :4914 on and a docstring in `backtest/replay.py` moved, and `src/` is unchanged
+  from `43b40a7` through `1be62ce`, where the census round's four were read;
 - `retired`: what it retired, verbatim -- the clause, or the part of it the claim sits in -- as it
   stood at `d4ef5e4`, on `16db458` for `D13`'s own five, or at `20fec55` for what `D14` retired,
   and at `29e26f3` for the four wordings its fix round retired that `D14` had written itself;
+  every wording the census round retired stood at `20fec55` and at `29e26f3`, and all but two of
+  them at `1be62ce` as well -- the two the fix round had already rewritten there;
   the pattern must still match each of them, so a pattern cannot be loosened into matching
   nothing;
 - `premise`, where the fact is cheap to read off the code: a check that returns a message the day
@@ -75,6 +85,7 @@ import re
 import sys
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final, get_args
 
@@ -83,11 +94,13 @@ from diagram_text import diagram_strings
 from prose_clauses import clauses
 
 from openalpha_cn.agents.committee import DeliberationCommittee, RiskVote
+from openalpha_cn.backtest.multi_day import PortfolioBacktestReport, SubjectAttribution
 from openalpha_cn.backtest.replay import ReplayRunner
 from openalpha_cn.batch_contracts import BatchResultRef
 from openalpha_cn.decisions.risk import RiskGate
 from openalpha_cn.domain.portfolio import PortfolioOrder, PortfolioTransition
 from openalpha_cn.domain.report import ResearchReport
+from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.model_view import KNOWN_MODEL_VIEW_LIMITATIONS
 from openalpha_cn.runtime.batch import BatchResearchService
 from openalpha_cn.runtime.engine import ResearchEngine
@@ -852,6 +865,72 @@ def _replay_still_runs_only_the_built_in_agents() -> str | None:
     return f"ReplayRunner now takes {built} and runs with {run}: re-read which agents it runs"
 
 
+def _visibility_still_reads_only_the_availability_clock() -> str | None:
+    """`is_visible_at` reads `available_time` alone, and the evidence store's query filters on
+    it alone -- read from `domain/time.py`'s syntax tree and from the query's WHERE clauses."""
+    tree = ast.parse((SRC / "domain" / "time.py").read_text(encoding="utf-8"))
+    visible = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "is_visible_at"
+    )
+    read = sorted(
+        {
+            node.attr
+            for node in ast.walk(visible)
+            if isinstance(node, ast.Attribute) and node.attr.endswith("_time")
+        }
+    )
+    query = (SRC / "storage" / "parquet.py").read_text(encoding="utf-8")
+    filtered = sorted(
+        {
+            clock
+            for where in re.findall(r"WHERE(.*?)ORDER BY", query, re.DOTALL)
+            for clock in re.findall(r"(\w+_time)\s*<=", where)
+        }
+    )
+    if read == ["available_time"] and filtered == ["available_time"]:
+        return None
+    return (
+        f"is_visible_at reads {read} and the evidence query filters on {filtered}: re-read "
+        "whether a record revised after as_of is still visible"
+    )
+
+
+def _the_multi_day_report_still_estimates_no_capacity() -> str | None:
+    fields = sorted(PortfolioBacktestReport.model_fields)
+    capacity = [field for field in fields if "capacity" in field or "exposure_" in field]
+    attribution = sorted(SubjectAttribution.model_fields)
+    if not capacity and attribution == ["pnl", "subject"]:
+        return None
+    return (
+        f"PortfolioBacktestReport now holds {capacity} and SubjectAttribution {attribution}: "
+        "re-read what the multi-day report measures"
+    )
+
+
+def _the_sdk_still_takes_no_tool_risk_or_validator() -> str | None:
+    parameters = [*inspect.signature(OpenAlphaSDK.__init__).parameters]
+    taken = [name for name in parameters if any(word in name for word in ("tool", "risk", "valid"))]
+    return None if not taken else f"OpenAlphaSDK now takes {taken}"
+
+
+def _an_abstention_still_cites_no_evidence() -> str | None:
+    try:
+        SignalFrame(
+            subject="000001.SZ",
+            as_of=datetime(2026, 1, 16, 9, tzinfo=UTC),
+            direction="abstain",
+            strength=0,
+            confidence=0,
+            horizon="5d",
+            abstention_reason="the evidence supports no direction",
+        )
+    except ValueError as error:
+        return f"an abstaining SignalFrame that cites no evidence is now refused: {error}"
+    return None
+
+
 # --- The retired claims -----------------------------------------------------------------------
 
 
@@ -1384,7 +1463,8 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     RetiredClaim(
         name="a batch item runs the whole research chain",
         pattern=re.compile(
-            rf"每个任务仍(?:执行完整|保留){_NO_COMMA_OR_DENIAL}{{0,24}}(?:双委员会|组合)"
+            rf"每个任务仍(?:执行完整|保留){_NO_COMMA_OR_DENIAL}{{0,24}}"
+            r"(?:双委员会|组合|结构化信号|风险决定)"
             rf"|研究结论{_NO_COMMA_OR_DENIAL}{{0,6}}受到{_NO_COMMA}{{0,16}}交易规则"
         ),
         refuted_by=(
@@ -1401,6 +1481,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "每个任务仍执行完整证据、Agent、双委员会、风险、组合与验证链",
             "每个任务仍保留四时钟证据、结构化信号、风险与组合记录",
             "研究结论继续受到四时钟、风险门和交易规则约束",
+            "每个任务仍保留四时钟证据、结构化信号与风险决定",
         ),
         paraphrase="批量里的每一项都会跑完委员会和组合核算。",
         premise=_a_batch_result_still_names_only_a_decision,
@@ -1864,6 +1945,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         pattern=re.compile(
             rf"自定义\s*(?:结果|Agent){_NO_COMMA_OR_DENIAL}{{0,16}}(?:并)?可回放"
             rf"|输出仍会进入{_NO_COMMA_OR_DENIAL}{{0,16}}回放链"
+            rf"|所有模型{_NO_COMMA_OR_DENIAL}{{0,48}}回放合同"
         ),
         refuted_by=(
             "ReplayRunner takes code_commit, config_digest and random_seed and no agents "
@@ -1876,9 +1958,130 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         retired=(
             "自定义结果同样经过风险门、写进账本并可回放",
             "输出仍会进入统一证据、风险、账本和回放链",
+            "让你在代码中接入的所有模型共享同一 A 股 EvidenceSnapshot、SignalFrame、风险和回放合同",
         ),
         paraphrase="你写的 Agent 也能拿冻结语料重放一遍。",
         premise=_replay_still_runs_only_the_built_in_agents,
+    ),
+    RetiredClaim(
+        name="a historical read sees only the version knowable at the time",
+        pattern=re.compile(
+            rf"(?<![不未没无])(?:只|仅)能?(?:读到|读取|返回|接收|收){_NO_COMMA_OR_DENIAL}{{0,6}}"
+            r"(?:当时|决策时刻)(?:已经)?(?:可知|可见)的?\s*(?:版本|evidence_id)"
+            rf"|选择{_NO_COMMA_OR_DENIAL}{{0,4}}可见版本"
+            rf"|不受{_NO_COMMA}{{0,6}}修订{_NO_COMMA}{{0,2}}干扰"
+            rf"|四时钟{_NO_COMMA_OR_DENIAL}{{0,4}}(?:避免|阻止|防止)把?{_NO_COMMA}{{0,4}}修订"
+            rf"|修订语义{_NO_COMMA_OR_DENIAL}{{0,4}}(?:保证|确保){_NO_COMMA}{{0,10}}不偷看"
+            rf"|四时钟{_NO_COMMA_OR_DENIAL}{{0,6}}(?:约束|保证|确保|阻止){_NO_COMMA}{{0,12}}"
+            r"(?:可见|可知|只读|只看到|未来信息)"
+            r"|不会偷看后来才(?:知道|可知)|恢复当时的?信息边界"
+            r"|(?<!no\s)(?<!not\s)strict\s+anti-look-ahead",
+            re.IGNORECASE,
+        ),
+        refuted_by=(
+            "Visibility is available_time <= as_of and nothing else: is_visible_at "
+            "(domain/time.py:34-36), which requests, replay corpora and provider batches call, and "
+            "the evidence store's WHERE available_time <= ? (storage/parquet.py:104). A record "
+            "revised after as_of is therefore still visible. The builder only marks one whose "
+            "revision_time is later than its available_time as revised_after_initial_availability "
+            "(evidence/builder.py:134-135), a reduced flag (domain/risk_flag.py:167) the risk gate "
+            "answers with reduce (decisions/risk.py:41-51), and reduce leaves final_action as it "
+            "was (runtime/engine.py:486-497)."
+        ),
+        retired=(
+            "历史回放只能读取当时已经可知的版本",
+            "历史查询只能读到当时可知的版本",
+            "A 股数据进入 EvidenceSnapshot 后，历史研究只读取当时可见版本",
+            "PIT 查询只返回决策时刻已经可知的版本",
+            "下游只接收决策时刻已经可知的 evidence_id",
+            "历史查询按决策时刻选择可见版本",
+            "回放也能验证当时版本，不受后来修订干扰",
+            "四时钟避免把修订结果提前放进历史研究",
+            "PIT 与修订语义保证历史研究不偷看未来",
+            "四时钟约束历史可见性",
+            "四时钟保证 Agent 只读当时可见信息",
+            "数据端的四时钟确保回放只看到当时可知的涨停与公告证据",
+            "四时钟阻止未来信息进入样本",
+            "历史研究不会偷看后来才知道的信息",
+            "OpenAlpha CN 通过四时钟和 PIT 查询恢复当时信息边界",
+            "content-addressed evidence and strict anti-look-ahead rules",
+        ),
+        paraphrase="回测里拿不到之后才改过的数字。",
+        premise=_visibility_still_reads_only_the_availability_clock,
+    ),
+    RetiredClaim(
+        name="the multi-day report measures capacity and attributes exposure",
+        pattern=re.compile(
+            rf"换手{_NO_COMMA}{{0,2}}(?:最大订单)?容量"
+            r"|(?<![不无未没])最大订单容量"
+            r"|容量\s*(?:与|和|、|\N{MIDDLE DOT})\s*(?:标的)?(?:暴露|归因)"
+            r"|(?<!没有)(?<![不无未没])(?:标的)?暴露归因"
+        ),
+        refuted_by=(
+            "PortfolioBacktestReport holds the total, benchmark and active returns, turnover, "
+            "max_order_notional -- the largest single fill -- max_gross_exposure, and an "
+            "attribution that is each traded subject's realized PnL (backtest/multi_day.py:"
+            "167-192, :248-253, :283-286). It estimates no capacity, and it attributes no return "
+            "to an exposure; a fill is taken whole at the close, whatever its size "
+            "(backtest/execution.py:285, :305)."
+        ),
+        retired=(
+            "多日报告同时给出基准、主动收益、换手、容量和暴露归因",
+            "多日收益、基准、主动收益、换手、容量与暴露归因",
+            "统一输出收益、基准、主动收益、换手、最大订单容量和标的暴露归因",
+            "多日组合报告同时给出基准、主动收益、换手、容量与标的暴露归因",
+            "容量 \N{MIDDLE DOT} 暴露 \N{MIDDLE DOT} 标的归因",
+            "多日组合报告持续展示换手、收益、基准、主动收益、容量和暴露",
+            "多日报告再汇总换手、容量、收益、基准和主动收益",
+        ),
+        paraphrase="多日组合报告还会估算这笔资金最多能做多大。",
+        premise=_the_multi_day_report_still_estimates_no_capacity,
+    ),
+    RetiredClaim(
+        name="Tool, Risk and Validator are versioned extension contracts",
+        pattern=re.compile(r"(?:Provider|ResearchAgent|Agent)\s*[、/]\s*Tool\s*[、/]\s*Risk"),
+        refuted_by=(
+            "OpenAlphaSDK takes runtime_dir, clock, agents and features (sdk.py:131-138), and a "
+            "DataProvider is the other interface a caller implements (providers/base.py:170-178). "
+            "ResearchTool is a Protocol satisfied only by EvidenceLookupTool, which no shipped "
+            "path constructs or calls (tools/base.py:54, tools/evidence.py:7, "
+            "runtime/router.py:70-86); RiskGate and OutcomeValidator are concrete classes the "
+            "engine, the SDK and the routes construct themselves (runtime/engine.py:73, "
+            "sdk.py:321, api/app.py:2345). None of the three carries a version: ContractVersions "
+            "registers the evidence, signal, decision ledger, run manifest, validation result, "
+            "prediction record, provider record and batch, and recovery state documents."
+        ),
+        retired=(
+            "Provider、Tool、Risk 和 Validator 也有明确边界",
+            "OpenAlpha CN 用 Provider、ResearchAgent、Tool、Risk、Validator 等版本化合同划分边界",
+            "再允许扩展 Provider、Agent、Tool、Risk 与 Validator",
+            "稳定、版本化的 Provider / Agent / Tool / Risk / Validator 合同",
+        ),
+        paraphrase="风险规则和验证器都能像 Agent 一样插进来。",
+        premise=_the_sdk_still_takes_no_tool_risk_or_validator,
+    ),
+    RetiredClaim(
+        name="every signal an agent emits cites evidence",
+        pattern=re.compile(
+            r"(?<!方向性)(?<!方向性\s)SignalFrame\s*必须(?:携带\s*evidence_ids|写明证据引用)"
+            r"|(?<!并非)(?<!不是)所有输出必须引用\s*`?evidence_id"
+            r"|(?<!并非)(?<!不是)每项输出都引用\s*`?evidence_id"
+        ),
+        refuted_by=(
+            "SignalFrame.validate_conclusion demands evidence_ids of a directional signal only; an "
+            "abstention needs a reason and zero strength and may cite nothing (domain/signal.py:"
+            "85-97), and both of run_cycle's abstaining aggregates cite none (runtime/engine.py:"
+            "412-450). Confirmation conditions, invalidation conditions and risk flags default "
+            "to empty tuples (domain/signal.py:48-51)."
+        ),
+        retired=(
+            "SignalFrame 必须携带 evidence_ids",
+            "所有输出必须引用 evidence_id",
+            "市场事件、题材催化和资金流智能体经证据感知路由协作，每项输出都引用 `evidence_id`",
+            "SignalFrame 必须写明证据引用、确认条件、失效条件、风险标记和弃权原因",
+        ),
+        paraphrase="智能体给出的每个结论都附带证据编号。",
+        premise=_an_abstention_still_cites_no_evidence,
     ),
 )
 """Each family of wordings `D13` retired, the code fact that refutes it, and what it retired."""
@@ -2157,6 +2360,179 @@ TRUE_SENTENCES_THAT_SHARE_THE_WORDS: Final[tuple[str, ...]] = (
     "回放的 run_cycle 之后不会再叠加 T+1。",
     "自定义 Agent 的输出仍会进入统一的证据链，但不会进入回放链。",
     "这不是可消融风险委员会，三票不进消融差值。",
+    "链邻 Provider 负责认证、限流和错误分类，可得时间保证 Agent 只读决策时刻已可得的证据。",
+    "回放会拒收当时还不可得的证据，但不会把修订过的记录挡在门外。",
+    "四时钟都会记录，只有可得时间决定证据在某一时刻是否可见。",
+    "修订时间晚于决策时刻的记录照样可见，只多一个 revised_after_initial_availability 标记，"
+    "风险门据此降级。",
+    "历史查询按可得时间筛选，不按修订时间挑版本。",
+    "回放只检查可得时间，修订时间不参与可见性判断。",
+    "修订前后载荷不同，evidence_id 也不同。",
+    "多日报告没有容量模型，也没有暴露归因。",
+    "多日报告给出基准收益、主动收益、换手、最大单笔成交额与按标的已实现盈亏。",
+    "只有方向性 SignalFrame 必须携带 evidence_ids，弃权信号可以一条都不带。",
+    "确认条件、失效条件和风险标记是 SignalFrame 的可选字段。",
+    "实时研究与历史回放共用 run_cycle\N{FULLWIDTH SEMICOLON}"
+    "回放只跑内置基线 Agent，状态写进独立的回放库。",
+    "多日组合回测不经过 run_cycle，只执行调用方给的订单。",
+    "风险门只读信号的风险标记，不读证据 ID。",
+    "面板平面按批次存列，不给每一行生成 evidence_id。",
+    "EvidenceBuilder 只规范化七类事件，daily、quote 这类行情记录会被拒收。",
+    "事件研究只收调用方给的收益窗口，不读研究结果。",
+    "批量里的每一项只跑 run_cycle，结果只有 decision_id、signal_id 与 final_action。",
+    "委员会的讨论与投票不写进决策账本，只交还调用方。",
+    "风险门的结论不会改变订单，组合层只按交易规则检查。",
+    "RunManifest 只记录模型版本，Prompt 版本字段为空。",
+    "历史研究只收首次可知时间不晚于 as_of 的证据，修订时钟不参与这一判断。",
+    "可见性只看首次可知时间，修订时钟不参与判断。",
+    "出厂 Agent 只读取请求携带、且在 as_of 时刻可见的证据。",
+    "决策与报告只引用证据 ID，Agent 读取请求携带的完整快照。",
+    "后续结果验证把实际观察、基准和成本接回原决策 ID。",
+    "回放把冻结语料里的结果观察接到它重算出的决策上，接不回原来的实时决策。",
+    "验证结果按决策 ID 查询，回放产生的验证挂在回放自己的决策上。",
+    "每次运行只看请求携带的证据，研究记忆不会喂回下一次研究。",
+    "研究记忆只写不读：引擎每次运行只追加一条摘要，Agent 看不到它。",
+    "多日组合报告按标的归集已实现盈亏，敞口只有整本账户的最高值。",
+    "用量账本只在端点同时返回请求 ID 与用量时记一行。",
+    "中断后用同一个 run_id 再跑，已完成的 Agent 节点不会重跑。",
+    "Web 工作台每次研究都生成新的 run_id，所以从 Web 重跑不会续跑。",
+    "委员会的结果只交还调用方，不写入 DecisionLedger。",
+    "决策账本记下路由和风险门结论，委员会的讨论与投票不进账本。",
+    "RiskGate 只给研究动作定级，下单后的约束来自 PortfolioSimulator。",
+    "组合层要等调用方下单才检查 T+1、整手、停牌、涨跌停、现金和敞口。",
+    "拒单也会生成 PortfolioTransition，状态为 rejected。",
+    "PortfolioTransition 不带决策 ID，也不带运行 ID。",
+    "SDK 与 REST 的多日组合回测都把每笔成交与拒单写进组合账本。",
+    "激进一票只在严重标记时减仓，中性与保守规则相同。",
+    "可按运行 ID 读到恢复状态里失败的 Agent 与异常类型。",
+    "Provider 失败分认证、限流、配置、响应无效和上游错误，从不变成空结果。",
+    "回放验证复用四时钟证据和同一个 `run_cycle`\N{FULLWIDTH SEMICOLON}"
+    "T+1、涨跌停与费用约束由多日组合回测按日施加。",
+    "A 股 T+1、整手、停牌、涨跌停与成本不在回放里执行，而由多日组合回测按日推演组合状态时施加。",
+    "每个任务只跑 `run_cycle`（证据、Agent 与风险门），委员会、组合与验证另行调用。",
+    "进程重启后被中断的项重新排队、再发一次重试就能继续。",
+    "启动时把被中断的项重新排队，调用方再发一次重试就从节点 Checkpoint 继续。",
+    "证据与风险决定按稳定 ID 关联，组合账本按订单 ID 记录。",
+    "每一项的请求与证据、状态、决策 ID 与最终动作都能沿任务 ID 查询。",
+    "含前视证据的语料在加载时就被整体拒绝。",
+    "它不是\N{LEFT DOUBLE QUOTATION MARK}能打包成镜像\N{RIGHT DOUBLE QUOTATION MARK}"
+    "就算完成，而是验证写入的证据在容器重启后仍能读回。",
+    "筛选、观察池与报告的接口 REST 全都提供，Python SDK 提供大部分，CLI 只有报告的创建与导出，"
+    "Web 工作台暂未接入。",
+    "委员会作为一次可选调用，也输出调用前后的对照。",
+    "归因只认领交易成本与空仓机会成本两项，因子、智能体与模型份额结构性不产生，其余记为显式残差。",
+    "重启应用后观察池仍在，同一标的再次加入会更新原条目。",
+    "图形化任意 Agent Flow Builder 仍明确标记为 Deferred。",
+    "组合执行和统计结果由各自的接口给出，不写入报告中心。",
+    "T+1、整手、停牌与涨跌停都不在回放里执行。",
+    "验证不共用 run_cycle。",
+    "拒单不关联决策，只记原因。",
+    "Compose 恢复检查不删除、重建容器，只重启后读回一条证据。",
+    "批量任务中断后不会自己恢复，要调用方再发一次重试。",
+    "移动端宽度不在 Playwright 的测试范围内。",
+    "移动端 Playwright 项目已在 V2-P5-014 移除。",
+    "风险门不约束组合\N{FULLWIDTH SEMICOLON}A 股规则只在调用方下单时施加。",
+    "本服务不提供权限边界，跨机器开放要在前置网关补上认证。",
+    "evidence build 打印的载荷可以直接交给 research run。",
+    "`openalpha replay run` 读取一份冻结语料，与刚跑过的研究无关。",
+    "CLI 能做证据构建、研究运行与回放，委员会、批量、筛选和观察池只有 SDK 或 REST。",
+    "先固定 EvidenceSnapshot、SignalFrame、DecisionLedger、RunManifest 和 ValidationResult "
+    "等核心合同。",
+    "ResearchAgent 与 ResearchTool 没有版本号\N{FULLWIDTH SEMICOLON}"
+    "RiskGate 和 OutcomeValidator 是具体类，SDK 不接收它们。",
+    "Tool 合同已声明，只有 EvidenceLookupTool 实现它，研究引擎从不调用任何 Tool。",
+    "风险门可在直接构造 ResearchEngine 时换成子类，SDK、REST 与 CLI 都不开放这一项。",
+    "Agent 要声明 agent_id、evidence_families、feature_dependencies 与 provenance，"
+    "并返回带理由的 AgentResult。",
+    "源码环境只需 Python 与 uv，SQLite 与 DuckDB 随依赖装好，不需要另起数据库服务。",
+    "台账里唯一未完成的一行是延后的 Flow Builder。",
+    "审计文档按八个能力域对账三套上游，锁定了各自的 Commit。",
+    "功能台账中的\N{LEFT DOUBLE QUOTATION MARK}已完成\N{RIGHT DOUBLE QUOTATION MARK}"
+    "都同时写有源码证据与测试证据。",
+    "桌面视口的关键流程通过 Playwright 自动测试。",
+    "双委员会没有 CLI 命令，要经 SDK 或 REST 另行调用。",
+    "委员会是一次可选调用，结果只交还调用方，不写入 `DecisionLedger`\N{FULLWIDTH SEMICOLON}"
+    "`run_cycle` 的 `routing_path` 以 `risk-gate` 结尾，不含委员会。",
+    "风险门只读 `SignalFrame.risk_flags`，不读委员会意见，也不改订单\N{FULLWIDTH SEMICOLON}"
+    "A 股交易规则只在 `execute_portfolio_order` 与 `/portfolio/execute` 施加。",
+    "批量里的每一项都由同一个 `run_cycle` 执行（REST 经 `run_one`，SDK 经 `run_research`），"
+    "单批最多 10,000 项，并发 1\N{EN DASH}8。",
+    "进程重启时只把运行中的项改回排队，不会自动接着跑，要调用方再发一次 retry。",
+    "`RunManifest` 预留了 `prompt_versions`，`run_cycle` 把它写成空元组。",
+    "出厂路径里只有 `openalpha doctor` 构造链邻与 AKShare Provider\N{FULLWIDTH SEMICOLON}"
+    "`evidence build`、`panel build` 与 REST 证据路由都不调用它们。",
+    "`POST /api/v1/research/run` 不读证据库，证据随请求体一起提交。",
+    "回放每个案例跑两遍，第二遍用新引擎和空存储从头重算\N{FULLWIDTH SEMICOLON}"
+    "前视语料在加载时就被整体拒绝，不进入回放。",
+    "冻结回放语料放在 `tests/fixtures/replay/`，`openalpha replay run` 要调用方传入语料路径。",
+    "`--resume` 对 `index_weight` 与三张财报只看分区是否已登记，不核对其中有哪些证券。",
+    "`panel build` 只有命令行一个面，没有 SDK 方法，也没有路由。",
+    "`factor describe` 与 `factor build` 都有命令行与 SDK 两个面，都没有路由。",
+    "Web 工作台调用研究与回放接口，但不调用批量、筛选、观察池与报告接口。",
+    "候选榜、预测记录与因子实验存成运行目录下的 JSON 文档，而不是 `state.sqlite3` 里的表。",
+    "候选榜闸口只把 `run_manifest_id` 对到已完成的运行，"
+    "不拿提交信号的 `signal_id` 去比对 `decisions.signal_ids`。",
+    "`model daily-run` 直接写一条 `mode=daily` 的 `RunManifest`，"
+    "不经过 `run_cycle`\N{FULLWIDTH SEMICOLON}"
+    "多日组合回测、事件研究与结果验证也都不经过 `run_cycle`。",
+    "`doctor --probe` 的探测结果里，只有 `authentication` 会让命令非零退出\N{FULLWIDTH SEMICOLON}"
+    "`upstream` 与 `rate_limit` 按数据集上报，不影响退出码。",
+    "`--waive-max-staleness` 仍是 `factor build` 接受的旗标，"
+    "但实测每一档都以 exit 1 被引擎按名拒绝。",
+    "整个委员会是一次可选的显式调用（`POST /api/v1/research/deliberate`、"
+    "`OpenAlphaSDK.deliberate`），不能只开其中一方。",
+    "实时研究与历史回放共用 `run_cycle`，避免线上逻辑和回放逻辑各走一套\N{FULLWIDTH SEMICOLON}"
+    "结果验证、多日组合回测与 `model daily-run` 走各自的路径。",
+    "React 研究工作台只接入其中一部分 REST 接口，不含批量、筛选、观察池与报告。",
+    "可选、受限的 AKShare Adapter 已实现，但出厂路径只有 `openalpha doctor` 构造它。",
+    "通过的是成交，未通过的是写明原因的拒单，二者都写进账本\N{FULLWIDTH SEMICOLON}"
+    "它不会根据研究结论自动下单，也不连接实盘券商。",
+    "bounded concurrent batches with progress, cancellation and retry, whose interrupted items "
+    "are requeued after a restart",
+    "no shipped path calls a model, and a model reaches a run only inside an agent you build in "
+    "your own code",
+    "a token and configured-cost usage ledger that no shipped path writes to \N{EM DASH} only a "
+    "provider built with a usage store records into it",
+    "one research core, `run_cycle`, shared by live research and replay (validation, the "
+    "multi-day portfolio backtest and `model daily-run` take their own paths)",
+    "durable node checkpoints that reject changed requests or graph signatures",
+    "an optional, constrained AKShare adapter is implemented, but only `openalpha doctor` "
+    "constructs it",
+    "`factor build` is on the command line and in the SDK only: it writes panel partitions and "
+    "the service ships with no authentication of its own.",
+    "the sixteen named boundaries are the `limitations` each single model answer carries (an "
+    "evaluation, a held prediction, a daily run; the prediction listing carries none)",
+    "`openalpha validation statistics` and `validation segmented` are `CLI_ONLY`: their SDK "
+    "twins exist and no route does yet",
+    "实时与回放共用同一研究内核\N{FULLWIDTH SEMICOLON}"
+    "T+1、整手、停牌、涨跌停锁单由组合执行与多日组合回测施加",
+    "持久批量任务中心已经出厂，不在延后之列",
+    "不写入 DecisionLedger",
+    "输入的显式弃权原样保留",
+    "客户端合同 \N{MIDDLE DOT} 仅 doctor 使用",
+    "证据与面板构建不调用它",
+    "REST 全部 \N{MIDDLE DOT} SDK 大部分 \N{MIDDLE DOT} CLI 仅报告",
+    "RiskGate 已执行",
+    "研究结果不会自动下单",
+    "每次组合由调用方发起",
+    "能否复现\N{FULLWIDTH QUESTION MARK}",
+    "历史回放只接受可得时间不晚于决策时刻的证据，事后修订过的记录只被标记降级、不会被剔除。",
+    "PIT 查询只返回可得时间不晚于决策时刻的证据，事后修订过的记录带着降级标记。",
+    "四时钟单独记下修订时间，修订过的证据会被风险门降级。",
+    "下游只接收可得时间不晚于决策时刻的 evidence_id",
+    "四时钟分别记录在案，其中可得时间约束历史可见性。",
+    "四时钟并不阻止修订过的记录进入历史研究，只给它降级标记。",
+    "PIT 查询并不只返回当时可知的版本，修订过的记录也会返回。",
+    "修订语义并不保证历史研究不偷看未来，只保证修订被标记。",
+    "A record revised after as_of stays visible and carries revised_after_initial_availability; "
+    "there is no strict anti-look-ahead on revisions.",
+    "因子实验算周转与容量、冗余，六格归因。",
+    "最大单笔成交额 \N{MIDDLE DOT} 最大总敞口 \N{MIDDLE DOT} 标的已实现盈亏",
+    "Tool 合同尚无调用方，SDK 也不开放风险门与验证器的替换。",
+    "方向性 SignalFrame 必须携带 evidence_ids，弃权须写明原因。",
+    "并非所有输出必须引用 evidence_id，弃权可以一条都不带。",
+    "不是每项输出都引用 evidence_id，弃权不带证据。",
+    "每项方向性输出都引用 evidence_id，弃权写明原因。",
 )
 """True or unrelated sentences that share a retired pattern's words. The review of `D13` measured
 the first six being caught (its M1): client holds cli, 移动平均 holds 移动, and a rejection and a
@@ -2211,10 +2587,15 @@ were caught until their patterns were narrowed. The next seven probe what the fi
 for that review's I-1 and I-2, each a true wording beside a retired one; one of them, 委员会与风险门
 不审查组合, was caught by the older 审查 branch until that branch took the new one's span, which
 stops at a denial. The next seventeen are the census's, at `29e26f3`: true sentences its six
-reports wrote in the families' words, which the patterns caught until each was narrowed. The last
+reports wrote in the families' words, which the patterns caught until each was narrowed. The next
 sixteen probe what the fix round added or narrowed beyond those: each is the wording a rewrite now
 uses, a true sentence holding both of a branch's words, or a denial a span or a lookbehind must
-stop at."""
+stop at. The last hundred and forty-one come from the census round: first the census's own true
+sentences, verbatim -- every one its six reports wrote in their second parts that is not pinned
+above, a hundred and twenty-five, which the patterns passed before and after that round's four
+families were added -- then sixteen probes of those families, each a rewrite's wording or a
+denial; one of them, a denial before strict anti-look-ahead, was caught until that branch looked
+behind for no and not."""
 
 
 def test_the_retired_patterns_pass_the_true_sentences_that_share_their_words() -> None:

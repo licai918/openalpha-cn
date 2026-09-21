@@ -38,7 +38,7 @@ OpenAlpha CN competes on verifiability rather than the number of agent personas:
 
 - A-share-native limit-up, broken-board, consecutive-board, theme, catalyst, disclosure, and capital evidence;
 - separate event, availability, ingestion, and revision clocks;
-- content-addressed evidence and strict anti-look-ahead rules;
+- content-addressed evidence, visible from its availability time on: a record revised later, even after `as_of`, stays visible, carries `revised_after_initial_availability`, and the risk gate reduces rather than blocks it;
 - deterministic operation without an LLM: no shipped path calls a model, and a model reaches a run only inside an agent you build in your own code (one you pass to the SDK as `agents=`, for instance) — `StructuredSignalAgent` validates the reply against its schema and retries an invalid one within a bounded budget;
 - durable node checkpoints that reject changed requests or graph signatures;
 - bounded concurrent batches with progress, cancellation and retry, whose interrupted items are requeued after a restart;
@@ -79,7 +79,10 @@ the `processed` line, the build exits `0` and `factor run --neutralization …` 
 `No neutralized partition of this factor is registered in this panel at all`. `factor run` also
 needs an explicit `--as-of` — omitted, it reads the panel at the wall clock, so whether the
 example works depends on the day you run it. `tests/integration/test_documented_command_lines.py`
-now executes every runnable command line in this file and in `docs/`.
+now checks every command line in the fenced blocks of this file and of `docs/` against the live
+CLI, and runs those of `factor list/describe/build/run` and `model evaluate/daily-run/predictions`
+on a generated panel with `--runtime-dir` and `--exchange` appended; every other command is named
+with its reason in `NOT_EXECUTED`.
 
 `factor list` and `factor run` answer on three faces: `openalpha factor list` /
 `openalpha factor run`, `GET /api/v1/factors` plus `POST /api/v1/factors/run`, and
@@ -111,7 +114,8 @@ instant before that day's own 16:30 close or on a day the exchange was shut.
 Above the factor tiers sits the model chain: a versioned feature matrix, a walk-forward split
 with purge and embargo, two stdlib baselines (a cross-sectional rank model and gradient-boosted
 rank trees, no numerical dependency), a content-addressed artifact, and a store that holds a
-prediction **before its outcome is known**. Two commands:
+prediction **before its outcome is known**. Four commands, two that fit and register and two that
+read back:
 
 ```bash
 uv run openalpha model evaluate --feature reversal_1d/v1@raw \
@@ -179,12 +183,12 @@ prediction, a daily run; the prediction listing carries none), the list
 
 ## The outcome plane, and where the three faces are not equal
 
-Above the portfolio sits the outcome plane: an observed outcome validated against the decision
+Beside the portfolio, reading research results rather than the portfolio, sits the outcome plane: an observed outcome validated against the decision
 that predicted it, and those stored results aggregated with the family size and dependence
 assumption stated. The whole loop runs in a terminal, which it did not before `V2-P5-047`:
 
 ```text
-openalpha research run ./events.json > run.json
+openalpha research run ./evidence.json --subject 000001.SZ --as-of 2026-01-16T09:00:00+00:00 > run.json
 openalpha validation record --research ./run.json --observation ./outcome.json
 openalpha validation statistics --signal sig_… --family-size 40 --dependence arbitrary
 
@@ -194,8 +198,9 @@ openalpha report export rpt_…
 
 **`openalpha validation` shipped with two aggregate readers and no writer**, and `openalpha
 report` with an exporter and no writer, so a CLI-only operator read two stores nothing they could
-run had ever filled. Both writers now exist on all three faces and refuse a tampered
-content-address in byte-identical words.
+run had ever filled. Both writers now exist on all three faces; the route and the CLI command refuse a tampered
+content-address in byte-identical words, and the SDK takes a `ResearchRunResult` object whose
+identifiers it derives rather than reads.
 
 **Where the faces are still not equal, they say so in a test rather than in a paragraph.**
 `tests/unit/test_surface_parity.py` holds the three surfaces as **equalities** — every route with

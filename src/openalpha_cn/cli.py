@@ -1328,7 +1328,8 @@ def report_create_command(
     `report export` therefore refused every id a CLI-only operator could think of, correctly and
     unhelpfully. The whole loop now closes in a terminal::
 
-        openalpha research run ./events.json --runtime-dir ./runtime > run.json
+        openalpha research run ./evidence.json --subject 000001.SZ \
+          --as-of 2026-01-16T09:00:00+00:00 --runtime-dir ./runtime > run.json
         openalpha report create --research ./run.json --runtime-dir ./runtime
         openalpha report export rpt_0123456789abcdef --runtime-dir ./runtime
 
@@ -7755,7 +7756,8 @@ def validation_record_command(
     is the correct answer and, with no reachable writer, the only one. The loop now closes in a
     terminal::
 
-        openalpha research run ./events.json --runtime-dir ./runtime > run.json
+        openalpha research run ./evidence.json --subject 000001.SZ \
+          --as-of 2026-01-16T09:00:00+00:00 --runtime-dir ./runtime > run.json
         openalpha validation record --research ./run.json --observation ./outcome.json \
           --runtime-dir ./runtime
         openalpha validation statistics --signal sig_… --family-size 1 \
@@ -7850,7 +7852,7 @@ def portfolio_turnover_variants_command(
 
     The usual invocation, against a shortlist `openalpha shortlist run` held::
 
-        openalpha portfolio turnover-variants sl_2026_03_02 \
+        openalpha portfolio turnover-variants sla_0123456789abcdef01234567 \
           --tier-weight 0.5 --tier-weight 0.3 --tier-weight 0.2 \
           --buffer 0.01 --previous-weight 000001.SZ=0.05 --runtime-dir ./runtime
 

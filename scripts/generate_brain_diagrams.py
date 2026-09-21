@@ -380,8 +380,8 @@ def overview() -> None:
     svg.arrow(696, 331, 716, 331, color=VIOLET)
     svg.path("M877 418V430H535V440", color=AMBER, dashed=True)
     svg.arrow(958, 418, 958, 440, color=BLUE, dashed=True)
-    svg.path("M877 614V650H535V625", color=AMBER, dashed=True)
-    svg.pill(566, 636, 312, "统计证据反哺规则 · 不自动训练模型", color=AMBER)
+    svg.path("M780 614V650H1054V331H1038", color=AMBER, dashed=True)
+    svg.pill(790, 636, 250, "人工复核后调整规则 · 不自动训练模型", color=AMBER)
     svg.arrow(339, 331, 374, 331, color=CYAN, label="规范化", label_y=315)
 
     svg.section_label(1081, 214, "C", "系统级保证", CORAL)
@@ -501,7 +501,7 @@ def evidence() -> None:
             "available_time | content_hash)",
             "可见时点 · 哈希 · 来源 · 许可 · 修订",
             "A 股事件语义与原始载荷建立绑定",
-            "下游只接收决策时刻已经可知的 evidence_id",
+            "下游只接收可得时间不晚于决策时刻的 evidence_id",
         ),
     )
     svg.arrow(622, 421, 658, 421, color=CYAN, label="固化", label_y=405)
@@ -693,13 +693,13 @@ def decision() -> None:
         f'  <rect x="370" y="260" width="208" height="120" rx="18" fill="{PANEL_SOFT}" stroke="{LIME}" stroke-opacity=".34" />'
     )
     svg.text(394, 289, "BULL / 正方", css="micro", color=LIME)
-    svg.text(394, 322, "收益证据链", css="cardTitle", color=TEXT)
-    svg.text(394, 352, "机会 · 催化 · 确认条件", css="body", color=MUTED)
+    svg.text(394, 322, "看多证据", css="cardTitle", color=TEXT)
+    svg.text(394, 352, "看多 Agent · 证据 · 得分", css="body", color=MUTED)
     svg.raw(
         f'  <rect x="596" y="260" width="208" height="120" rx="18" fill="{PANEL_SOFT}" stroke="{CORAL}" stroke-opacity=".34" />'
     )
     svg.text(620, 289, "BEAR / 反方", css="micro", color=CORAL)
-    svg.text(620, 322, "风险证据链", css="cardTitle", color=TEXT)
+    svg.text(620, 322, "看空证据", css="cardTitle", color=TEXT)
     svg.text(620, 352, "看空 Agent · 证据 · 得分", css="body", color=MUTED)
     svg.raw(
         f'  <rect x="822" y="260" width="150" height="120" rx="18" fill="{PANEL_SOFT}" stroke="{AMBER}" stroke-opacity=".34" />'
@@ -824,10 +824,17 @@ def validation() -> None:
             354,
             "多日组合报告",
             "收益 · 基准 · 主动收益 · 换手",
-            "容量 · 暴露 · 标的归因",
+            "最大单笔成交额 · 最大总敞口 · 标的已实现盈亏",
             VIOLET,
         ),
-        (644, 476, "内容一致性验证", "ID 重算 · 账本完整性", "结果属性与失败原因归因", CORAL),
+        (
+            644,
+            476,
+            "内容一致性验证",
+            "ID 重算 · 账本完整性",
+            "成本与空仓机会成本 · 显式残差",
+            CORAL,
+        ),
     ]
     for x, y, title, headline, detail, color in validation_cards:
         svg.raw(
