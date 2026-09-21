@@ -8,29 +8,56 @@
     <marker id="arrow-5968F2" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
       <path d="M0,0 L10,5 L0,10 z" fill="#5968F2" />
     </marker>
+    <marker id="arrowShort-5968F2" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L5,2.5 L0,5 z" fill="#5968F2" />
+    </marker>
     <marker id="arrow-0F9F8F" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
       <path d="M0,0 L10,5 L0,10 z" fill="#0F9F8F" />
+    </marker>
+    <marker id="arrowShort-0F9F8F" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L5,2.5 L0,5 z" fill="#0F9F8F" />
     </marker>
     <marker id="arrow-7C5CE7" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
       <path d="M0,0 L10,5 L0,10 z" fill="#7C5CE7" />
     </marker>
+    <marker id="arrowShort-7C5CE7" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L5,2.5 L0,5 z" fill="#7C5CE7" />
+    </marker>
     <marker id="arrow-E89422" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
       <path d="M0,0 L10,5 L0,10 z" fill="#E89422" />
+    </marker>
+    <marker id="arrowShort-E89422" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L5,2.5 L0,5 z" fill="#E89422" />
     </marker>
     <marker id="arrow-1688D4" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
       <path d="M0,0 L10,5 L0,10 z" fill="#1688D4" />
     </marker>
+    <marker id="arrowShort-1688D4" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L5,2.5 L0,5 z" fill="#1688D4" />
+    </marker>
     <marker id="arrow-D95D67" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
       <path d="M0,0 L10,5 L0,10 z" fill="#D95D67" />
+    </marker>
+    <marker id="arrowShort-D95D67" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L5,2.5 L0,5 z" fill="#D95D67" />
     </marker>
     <marker id="arrow-64748B" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
       <path d="M0,0 L10,5 L0,10 z" fill="#64748B" />
     </marker>
+    <marker id="arrowShort-64748B" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L5,2.5 L0,5 z" fill="#64748B" />
+    </marker>
     <marker id="arrow-0F172A" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
       <path d="M0,0 L10,5 L0,10 z" fill="#0F172A" />
     </marker>
+    <marker id="arrowShort-0F172A" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L5,2.5 L0,5 z" fill="#0F172A" />
+    </marker>
     <marker id="arrow-C5CDDA" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
       <path d="M0,0 L10,5 L0,10 z" fill="#C5CDDA" />
+    </marker>
+    <marker id="arrowShort-C5CDDA" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L5,2.5 L0,5 z" fill="#C5CDDA" />
     </marker>
     <pattern id="dots" width="28" height="28" patternUnits="userSpaceOnUse">
       <circle cx="2" cy="2" r="1.5" fill="#D8DEEB" />
@@ -99,7 +126,7 @@
   <text x="772" y="516" class="body">调用方选择入池标的</text>
   <text x="772" y="541" class="body">GET 列表 / remove</text>
   <text x="772" y="566" class="body">SQLite 本地持久化</text>
-  <path d="M 340 320 C 360 180, 650 170, 720 170 L 720 280 L 740 280" fill="none" stroke="#0F9F8F" stroke-width="3" stroke-dasharray="8 7" marker-end="url(#arrow-0F9F8F)" />
+  <path d="M 340 320 C 360 180, 650 170, 720 170 L 720 280 L 740 280" fill="none" stroke="#0F9F8F" stroke-width="3" stroke-dasharray="8 7" marker-end="url(#arrowShort-0F9F8F)" />
   <path d="M 696 510 L 740 510" fill="none" stroke="#0F9F8F" stroke-width="3" stroke-dasharray="8 7" marker-end="url(#arrow-0F9F8F)" />
   <text x="718" y="492" class="arrowLabel" text-anchor="middle">显式选择入池</text>
   <rect x="1088" y="190" width="276" height="180" rx="18" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)" />

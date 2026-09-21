@@ -151,9 +151,9 @@
   <text x="666" y="505" class="micro" fill="#FB7185" text-anchor="start" opacity="1">内容一致性验证</text>
   <text x="666" y="534" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">ID 重算 · 账本完整性</text>
   <text x="666" y="560" class="small" fill="#96A8BE" text-anchor="start" opacity="1">成本与空仓机会成本 · 显式残差</text>
-  <path d="M606 360H625V284H644" fill="none" stroke="#2DD4BF" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow-2DD4BF)" opacity="1" />
+  <path d="M606 360H625V284H644" fill="none" stroke="#2DD4BF" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrowShort-2DD4BF)" opacity="1" />
   <path d="M606 401L644 406" fill="none" stroke="#A78BFA" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow-A78BFA)" />
-  <path d="M606 442H625V528H644" fill="none" stroke="#FB7185" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow-FB7185)" opacity="1" />
+  <path d="M606 442H625V528H644" fill="none" stroke="#FB7185" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrowShort-FB7185)" opacity="1" />
   <circle cx="1031" cy="210" r="14" fill="#FBBF24" fill-opacity=".16" stroke="#FBBF24" stroke-opacity=".45" />
   <text x="1031" y="214" class="navNum" fill="#FBBF24" text-anchor="middle" opacity="1">C</text>
   <text x="1055" y="214" class="micro" fill="#FBBF24" text-anchor="start" opacity="1">研究产品与交付</text>
@@ -180,19 +180,19 @@
   <rect x="64" y="806" width="240" height="52" rx="16" fill="#0B1726" stroke="#263A52" />
   <text x="86" y="838" class="navNum" fill="#647890" text-anchor="start" opacity="1">01</text>
   <text x="119" y="838" class="nav" fill="#B7C4D4" text-anchor="start" opacity="1">系统总览</text>
-  <path d="M309 832H315" stroke="#263A52" stroke-width="1.7" marker-end="url(#arrow-263A52)" />
+  <path d="M307 832H317" stroke="#263A52" stroke-width="1.7" marker-end="url(#arrowShort-263A52)" />
   <rect x="320" y="806" width="240" height="52" rx="16" fill="#0B1726" stroke="#263A52" />
   <text x="342" y="838" class="navNum" fill="#647890" text-anchor="start" opacity="1">02</text>
   <text x="375" y="838" class="nav" fill="#B7C4D4" text-anchor="start" opacity="1">证据平面</text>
-  <path d="M565 832H571" stroke="#263A52" stroke-width="1.7" marker-end="url(#arrow-263A52)" />
+  <path d="M563 832H573" stroke="#263A52" stroke-width="1.7" marker-end="url(#arrowShort-263A52)" />
   <rect x="576" y="806" width="240" height="52" rx="16" fill="#0B1726" stroke="#263A52" />
   <text x="598" y="838" class="navNum" fill="#647890" text-anchor="start" opacity="1">03</text>
   <text x="631" y="838" class="nav" fill="#B7C4D4" text-anchor="start" opacity="1">研究编排</text>
-  <path d="M821 832H827" stroke="#263A52" stroke-width="1.7" marker-end="url(#arrow-263A52)" />
+  <path d="M819 832H829" stroke="#263A52" stroke-width="1.7" marker-end="url(#arrowShort-263A52)" />
   <rect x="832" y="806" width="240" height="52" rx="16" fill="#0B1726" stroke="#263A52" />
   <text x="854" y="838" class="navNum" fill="#647890" text-anchor="start" opacity="1">04</text>
   <text x="887" y="838" class="nav" fill="#B7C4D4" text-anchor="start" opacity="1">决策约束</text>
-  <path d="M1077 832H1083" stroke="#263A52" stroke-width="1.7" marker-end="url(#arrow-263A52)" />
+  <path d="M1075 832H1085" stroke="#263A52" stroke-width="1.7" marker-end="url(#arrowShort-263A52)" />
   <rect x="1088" y="806" width="240" height="52" rx="16" fill="url(#activeNav)" stroke="#38BDF8" stroke-opacity=".64" />
   <text x="1110" y="838" class="navNum" fill="#38BDF8" text-anchor="start" opacity="1">05</text>
   <text x="1143" y="838" class="nav" fill="#F4F7FB" text-anchor="start" opacity="1">验证反馈</text>

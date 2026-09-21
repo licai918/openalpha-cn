@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import math
+import re
 from html import escape
 from pathlib import Path
 
@@ -55,18 +57,56 @@ def _marker_defs() -> str:
     (measured on a two-line probe: `(251,191,36)` against `(0,0,0)`). The head is what carries
     the direction, so it is drawn in the line's own colour rather than inherited.
     """
-    return "\n".join(
-        f'    <marker id="arrow-{color.lstrip("#")}" markerWidth="10" markerHeight="10" '
-        f'refX="8" refY="5" orient="auto" markerUnits="strokeWidth">\n'
-        f'      <path d="M0,0 L10,5 L0,10 z" fill="{color}" />\n'
-        f"    </marker>"
-        for color in COLORS.values()
-    )
+    parts: list[str] = []
+    for color in COLORS.values():
+        key = color.lstrip("#")
+        parts.append(
+            f'    <marker id="arrow-{key}" markerWidth="10" markerHeight="10" '
+            f'refX="8" refY="5" orient="auto" markerUnits="strokeWidth">\n'
+            f'      <path d="M0,0 L10,5 L0,10 z" fill="{color}" />\n'
+            f"    </marker>"
+        )
+        parts.append(
+            f'    <marker id="arrowShort-{key}" markerWidth="5" markerHeight="5" '
+            f'refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">\n'
+            f'      <path d="M0,0 L5,2.5 L0,5 z" fill="{color}" />\n'
+            f"    </marker>"
+        )
+    return "\n".join(parts)
 
 
-def _marker(color: str) -> str:
+def _marker(color: str, *, short: bool = False) -> str:
     """The marker id for one stroke colour, or the nearest one this file emits."""
-    return f"arrow-{(color if color in COLORS.values() else COLORS['slate']).lstrip('#')}"
+    key = (color if color in COLORS.values() else COLORS["slate"]).lstrip("#")
+    return f"arrow{'Short' if short else ''}-{key}"
+
+
+def _last_leg(d: str) -> float | None:
+    """The final straight segment's length, or `None` when the path ends in a curve."""
+    tokens = re.findall(r"([MLHVC])\s*(-?[\d.]+)(?:[ ,]+(-?[\d.]+))?", d)
+    x = y = 0.0
+    last: float | None = None
+    for command, first, second in tokens:
+        if command == "M":
+            x, y = float(first), float(second or 0)
+        elif command == "L":
+            nx, ny = float(first), float(second or 0)
+            last, x, y = math.hypot(nx - x, ny - y), nx, ny
+        elif command == "H":
+            nx = float(first)
+            last, x = abs(nx - x), nx
+        elif command == "V":
+            ny = float(first)
+            last, y = abs(ny - y), ny
+        elif command == "C":
+            last = None
+    return last
+
+
+def _head_for(d: str, width: float = 3) -> bool:
+    """Whether the short head is the one that fits: `refX` is 8 long and 4 short, in stroke units."""
+    leg = _last_leg(d)
+    return leg is not None and leg < 8 * width
 
 
 class Svg:
@@ -187,7 +227,7 @@ class Svg:
         dash = ' stroke-dasharray="8 7"' if dashed else ""
         self.raw(
             f'  <path d="{path}" fill="none" stroke="{color}" stroke-width="3"'
-            f'{dash} marker-end="url(#{_marker(color)})" />'
+            f'{dash} marker-end="url(#{_marker(color, short=_head_for(path))})" />'
         )
         if label:
             self.raw(
@@ -805,7 +845,7 @@ def validation_loop() -> str:
         color=COLORS["orange"],
     )
     svg.arrow(
-        path="M 720 658 L 720 662",
+        path="M 720 656 L 720 670",
         color=COLORS["orange"],
         dashed=True,
     )

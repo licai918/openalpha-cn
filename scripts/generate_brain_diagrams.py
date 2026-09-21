@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import math
+import re
 from html import escape
 from pathlib import Path
 from typing import Final
@@ -70,6 +72,38 @@ def _marker(color: str, *, short: bool = False) -> str:
     """The marker id for one stroke colour, or the nearest one this file emits."""
     key = (color if color in ARROW_COLORS else LINE).lstrip("#")
     return f"arrow{'Short' if short else ''}-{key}"
+
+
+def _last_leg(d: str) -> float:
+    """The length of a polyline's final segment, for the `M`/`H`/`V`/`L` paths written here."""
+    tokens = re.findall(r"([MLHV])\s*(-?[\d.]+)(?:[ ,]+(-?[\d.]+))?", d)
+    x = y = 0.0
+    last = 0.0
+    for command, first, second in tokens:
+        if command == "M":
+            x, y = float(first), float(second or 0)
+        elif command == "L":
+            nx, ny = float(first), float(second or 0)
+            last = math.hypot(nx - x, ny - y)
+            x, y = nx, ny
+        elif command == "H":
+            nx = float(first)
+            last, x = abs(nx - x), nx
+        elif command == "V":
+            ny = float(first)
+            last, y = abs(ny - y), ny
+    return last
+
+
+def _head_for(d: str, width: float) -> bool:
+    """Whether this line needs the short head: `True` when the long one would overrun.
+
+    The default marker's `refX` is 9 and the short one's is 4, both in `strokeWidth` units, so
+    the ink behind the tip is `9 * width` and `4 * width`. A head longer than the leg it sits on
+    is drawn across the corner before it -- 9.8 units of it for the 02->03 link, which is how
+    this rule arrived -- so the leg decides the head rather than the caller.
+    """
+    return _last_leg(d) < 9 * width
 
 
 class Svg:
@@ -243,8 +277,10 @@ class Svg:
         label_y: float | None = None,
     ) -> None:
         dash = ' stroke-dasharray="8 8"' if dashed else ""
+        d = f"M{x1} {y1}L{x2} {y2}"
+        head = _marker(color, short=_head_for(d, 2.2))
         self.raw(
-            f'  <path d="M{x1} {y1}L{x2} {y2}" fill="none" stroke="{color}" stroke-width="2.2"{dash} marker-end="url(#{_marker(color)})" />'
+            f'  <path d="{d}" fill="none" stroke="{color}" stroke-width="2.2"{dash} marker-end="url(#{head})" />'
         )
         if label:
             self.text(
@@ -275,7 +311,8 @@ class Svg:
         11 units long with 8.8 behind the tip, which fits inside that leg.
         """
         dash = ' stroke-dasharray="8 8"' if dashed else ""
-        marker = f' marker-end="url(#{_marker(color, short=short_arrow)})"' if arrow else ""
+        short = short_arrow or _head_for(d, 2.2)
+        marker = f' marker-end="url(#{_marker(color, short=short)})"' if arrow else ""
         self.raw(
             f'  <path d="{d}" fill="none" stroke="{color}" stroke-width="2.2"{dash}{marker} opacity="{opacity}" />'
         )
@@ -328,7 +365,7 @@ class Svg:
             self.text(x + 55, y + 32, label, css="nav", color=label_color)
             if position < len(NAVIGATION):
                 self.raw(
-                    f'  <path d="M{x + width + 5} {y + 26}H{x + width + gap - 5}" stroke="{self.accent if position == self.index else LINE}" stroke-width="1.7" marker-end="url(#{_marker(self.accent if position == self.index else LINE)})" />'
+                    f'  <path d="M{x + width + 3} {y + 26}H{x + width + gap - 3}" stroke="{self.accent if position == self.index else LINE}" stroke-width="1.7" marker-end="url(#{_marker(self.accent if position == self.index else LINE, short=True)})" />'
                 )
 
     def finish(self, filename: str) -> None:
