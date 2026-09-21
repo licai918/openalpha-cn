@@ -355,6 +355,14 @@ def evidence_dataflow() -> str:
         (370, "AKShare · 可选研究"),
     ):
         svg.pill(x=64, y=y, width=246, text=label, color=COLORS["teal"])
+    for offset, note in enumerate(
+        (
+            "出厂路径：证据只由本地文件构建",
+            "Tushare 经 panel build 建面板分区",
+            "链邻与 AKShare 仅 doctor 探测",
+        )
+    ):
+        svg.raw(f'  <text x="64" y="{430 + offset * 22}" class="small">{escape(note)}</text>')
     svg.card(
         x=352,
         y=220,
@@ -461,7 +469,7 @@ def research_orchestration() -> str:
     svg = Svg(
         index=3,
         title="研究编排链｜单次与批量 API 汇入同一 run_cycle",
-        subtitle="单次与批量研究请求经过同一证据路由、Agent 聚合、风险门和持久化路径；回放走同一 run_cycle，但写进独立的回放库。",
+        subtitle="单次与批量研究请求经过同一证据路由、Agent 聚合、风险门和持久化路径；回放走同一 run_cycle，运行与恢复状态写进独立的回放库，验证结果仍入共用验证库。",
     )
     svg.card(
         x=64,
@@ -492,7 +500,7 @@ def research_orchestration() -> str:
     svg.card(
         x=410,
         y=246,
-        width=300,
+        width=336,
         height=352,
         title="ResearchEngine.run_cycle",
         lines=(
@@ -564,10 +572,10 @@ def research_orchestration() -> str:
         x=1098,
         y=562,
         width=266,
-        height=100,
+        height=124,
         title="可选委员会 API",
         endpoint="POST /api/v1/research/deliberate",
-        lines=("调用方显式传入 signal + agent_results",),
+        lines=("调用方显式传入", "signal + agent_results"),
         color=COLORS["orange"],
     )
     svg.arrow(

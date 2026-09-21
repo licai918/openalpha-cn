@@ -1,7 +1,9 @@
 """`V2-P4-009`: the handle `AgentContext` gained, and the measurement that chose its shape.
 
 The row proposes reusing `tools/base.py:54-62 ResearchTool` -- the extension point the seam
-audit lists as declared, satisfied by exactly one class and imported by no module under `src/`.
+audit lists as declared and satisfied by exactly one class, which nothing under `src/`
+constructs or calls; the one module that imports the name is `tools/__init__.py`, to re-export
+it (`test_the_declared_tool_seam_says_what_the_import_graph_says` measures both).
 This file is where that proposal was tested rather than taken, and the two measurements below
 are the whole of the answer: the request type cannot express a real `feature_id` and the result
 type cannot carry a number. What shipped instead is `FeaturePlane`, a second Protocol declared
@@ -9,12 +11,16 @@ beside its consumer in `agents/base.py`, which `domain/alpha_model.py::FeatureCr
 already satisfies with no adapter and no edit.
 """
 
+import ast
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Final
 
 import pytest
 from pydantic import ValidationError
 
+import openalpha_cn
 from openalpha_cn.agents.base import AgentContext, FeaturePlane
 from openalpha_cn.agents.feature import CLAMP, DIRECTION_THRESHOLD, FeatureScoreAgent
 from openalpha_cn.domain.alpha_model import FeatureCrossSection, FeatureRow
@@ -57,6 +63,52 @@ def test_the_registry_names_every_boundary_this_arm_declares() -> None:
 
     assert declared == ROUTING_LIMITATION_CODES
     assert len(KNOWN_ROUTING_LIMITATIONS) == len(ROUTING_LIMITATION_CODES)
+
+
+SRC: Final[Path] = Path(openalpha_cn.__file__).resolve().parent.parent
+
+
+def _modules_importing(name: str) -> list[str]:
+    """Every module under `src/` whose syntax tree imports `name`, by path."""
+    found: list[str] = []
+    for path in sorted(SRC.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and any(alias.name == name for alias in node.names):
+                found.append(path.relative_to(SRC).as_posix())
+                break
+    return found
+
+
+def test_the_declared_tool_seam_says_what_the_import_graph_says() -> None:
+    """Who imports `ResearchTool`, read off the tree rather than restated in prose.
+
+    The limitation's detail is the only place this repository says how unused the seam is, and
+    it has to survive a re-export: `tools/__init__.py` imports the name to put it in `__all__`,
+    so a detail saying no module imports it is false as written. What is measured here is the
+    import set and the construction set, and the detail has to name every module in the first
+    and claim nothing more than the second supports.
+    """
+    importers = _modules_importing("ResearchTool")
+    builders = [
+        path.relative_to(SRC).as_posix()
+        for path in sorted(SRC.rglob("*.py"))
+        if "EvidenceLookupTool(" in path.read_text(encoding="utf-8")
+    ]
+    detail = next(
+        limitation.detail
+        for limitation in KNOWN_ROUTING_LIMITATIONS
+        if limitation.code
+        == "the_declared_research_tool_seam_cannot_carry_a_feature_id_or_a_number"
+    )
+
+    assert importers == ["openalpha_cn/tools/__init__.py"]
+    assert builders == []
+    for importer in importers:
+        assert importer.removeprefix("openalpha_cn/") in detail, (
+            f"{importer} imports ResearchTool and the limitation's detail does not name it: "
+            f"{detail}"
+        )
 
 
 def test_a_real_neutralized_feature_id_is_longer_than_a_tool_request_can_carry() -> None:

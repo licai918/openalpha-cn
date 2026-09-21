@@ -71,8 +71,9 @@ KNOWN_ROUTING_LIMITATIONS: Final[tuple[RoutingLimitation, ...]] = (
         code="the_declared_research_tool_seam_cannot_carry_a_feature_id_or_a_number",
         detail=(
             "KNOWN_ROUTING_TOOL: `V2-P4-009`'s row proposes reusing `tools/base.py:54-62 "
-            "ResearchTool` -- declared, satisfied only by `EvidenceLookupTool`, imported by no "
-            "module under `src/` -- as the feature handle, and it was measured rather than "
+            "ResearchTool` -- declared, satisfied only by `EvidenceLookupTool`, and imported "
+            "under `src/` by `tools/__init__.py` alone, which re-exports the name; nothing "
+            "constructs or calls either -- as the feature handle, and it was measured rather than "
             "adopted. `ToolRequest.kind` is `max_length=64`; the neutralized spelling of this "
             "build's longest registered factor key is "
             "`deducted_earnings_yield_ttm/v1@neutralized:cross_section_standard/v1:"
@@ -82,7 +83,8 @@ KNOWN_ROUTING_LIMITATIONS: Final[tuple[RoutingLimitation, ...]] = (
             "a number, and `status='success'` requires a non-empty `evidence_ids`, so a read "
             "that produced a value and no evidence id could only be reported as `no_data`. "
             "`FeaturePlane` is therefore a second Protocol beside `ResearchTool` and not a "
-            "widening of it. `ResearchTool` still has no importer in `src/`."
+            "widening of it. `ResearchTool` still has no caller in `src/`: its one import there "
+            "is the package's own re-export."
         ),
     ),
     RoutingLimitation(

@@ -42,6 +42,9 @@
   <text x="187" y="344" class="pill" text-anchor="middle" fill="#0F9F8F">Tushare · 用户 Token</text>
   <rect x="64" y="370" width="246" height="36" rx="18" fill="#FFFFFF" stroke="#0F9F8F" />
   <text x="187" y="394" class="pill" text-anchor="middle" fill="#0F9F8F">AKShare · 可选研究</text>
+  <text x="64" y="430" class="small">出厂路径：证据只由本地文件构建</text>
+  <text x="64" y="452" class="small">Tushare 经 panel build 建面板分区</text>
+  <text x="64" y="474" class="small">链邻与 AKShare 仅 doctor 探测</text>
   <rect x="352" y="220" width="252" height="220" rx="18" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)" />
   <rect x="352" y="220" width="7" height="220" rx="3.5" fill="#0F9F8F" />
   <text x="376" y="252" class="cardTitle">统一 Provider 合同</text>

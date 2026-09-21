@@ -389,9 +389,10 @@ ALLOWLIST: Final[tuple[AllowedClause, ...]] = (
     ),
     AllowedClause(
         path=README_EN,
-        excerpt="OpenAlpha CN provides four-clock point-in-time evidence",
+        excerpt="OpenAlpha CN provides four-clock evidence",
         clause=(
-            "OpenAlpha CN provides four-clock point-in-time evidence, A-share event semantics, "
+            "OpenAlpha CN provides four-clock evidence that is point-in-time on its availability "
+            "clock, A-share event semantics, "
             "deterministic baseline agents, a secure OpenAI-compatible BYOK model boundary, typed "
             "signals and decisions, durable per-agent resume and research memory, A-share "
             "execution and portfolio constraints, same-path replay, reconciled attribution, "
@@ -400,7 +401,9 @@ ALLOWLIST: Final[tuple[AllowedClause, ...]] = (
         ),
         categories=frozenset({"agent", "model"}),
         reason=(
-            "One sentence listing eighteen features, which the block folding reads whole. "
+            "One sentence listing eighteen features, which the block folding reads whole. Its "
+            "first item says four clocks are recorded and that visibility is decided on one of "
+            "them, which is what `is_visible_at` does (domain/time.py:34-36). "
             "'deterministic baseline agents', 'a secure OpenAI-compatible BYOK model boundary' "
             "and 'durable per-agent resume' are three of them and 'reconciled attribution' is "
             "another; the sentence attributes nothing to an agent or a model. Reconciled "

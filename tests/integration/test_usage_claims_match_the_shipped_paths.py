@@ -1508,8 +1508,8 @@ USAGE_DIAGRAM_ALLOWLIST: Final[tuple[AllowedClause, ...]] = (
         path=ROOT / "scripts" / "generate_brain_diagrams.py",
         excerpt="Token / 尝试次数账本",
         clause=(
-            "模型治理边界，OPTIONAL MODEL ENHANCEMENT，需代码接入 \N{MIDDLE DOT} Schema 校验 "
-            "\N{MIDDLE DOT} 408/429/5xx 重试，Token / 尝试次数账本 \N{MIDDLE DOT} "
+            "模型治理边界，OPTIONAL MODEL ENHANCEMENT，需代码接入 \N{MIDDLE DOT} Schema 校验，"
+            "408/429/500/502/503/504 有界重试，Token / 尝试次数账本 \N{MIDDLE DOT} "
             "出厂路径不调用模型"
         ),
         reason=(
@@ -1517,7 +1517,9 @@ USAGE_DIAGRAM_ALLOWLIST: Final[tuple[AllowedClause, ...]] = (
             "出厂路径不调用模型 and promises nothing about when a row is written, so it is true as "
             "drawn. Since D13 MODEL_CALL_CONDITION no longer exempts a usage marker, so the usage "
             "guard reads it as a claim. Rewording the box into a USAGE_CONDITION form, such as "
-            "出厂路径不记账, retires this entry."
+            "出厂路径不记账, retires this entry. The retry line names the six codes "
+            "`_post` marks retryable (models/openai_compatible.py:81) rather than every 5xx, "
+            "which is what it said before this round."
         ),
     ),
 )

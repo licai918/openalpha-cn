@@ -16,7 +16,8 @@ docker compose -f deploy/compose.yml up -d --build
 
 Open `http://127.0.0.1:8000`. Runtime evidence and ledgers live in a dedicated persistent volume.
 
-OpenAlpha CN provides four-clock point-in-time evidence, A-share event semantics,
+OpenAlpha CN provides four-clock evidence that is point-in-time on its availability
+clock, A-share event semantics,
 deterministic baseline agents, a secure OpenAI-compatible BYOK model boundary,
 typed signals and decisions, durable per-agent resume and research memory,
 A-share execution and portfolio constraints, same-path replay, reconciled

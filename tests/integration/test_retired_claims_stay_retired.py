@@ -16,8 +16,14 @@ three reworded in five more sections that none of their patterns read; `D14` bro
 families of words that occur together, added the classes that review and `D14`'s own sweep of
 the four documents and both generators named, and retired every wording that sweep found. The
 review of `D14` found more wordings of those families, in the documents and in the generators, and
-one class none of them held, a custom agent's research replayed; `D14`'s fix round retired them
-and added that class. The census of the four documents and both generators at `29e26f3` named
+one class none of them held, a custom agent's research replayed; `D14`'s fix round added that
+class and retired the wordings whose family a pattern can hold without catching a true sentence.
+Nine of the wordings that review named are not pinned and no pattern stops them -- §011, §015,
+§052's portfolio clause, §093's hook, brain:857's provenance line, §077's schema clause,
+README:1106, api:464 and brain:360 -- because a pattern wide enough for them would catch
+ordinary true sentences about trading rules and optional calls; all nine read correctly today,
+and holding them is the census's job rather than a pattern's. The census of the four documents
+and both generators at `29e26f3` named
 eighty-eight passages no pattern read; four of its families are entries here, each added with a
 premise and each red on the documents before they were rewritten -- a historical read that sees
 only the version knowable at the time, a multi-day report that measures capacity and attributes
@@ -1366,7 +1372,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     RetiredClaim(
         name="the SDK and the CLI make no HTTP request",
         pattern=re.compile(
-            rf"{_FACE}{_NOT_END}{{0,12}}不走\s*HTTP"
+            rf"{_FACE}{_NOT_END}{{0,12}}不走\s*HTTP(?!\s*边界)"
             rf"|{_FACE}[^.;]{{0,30}}(?:makes?|sends?)\s+no\s+HTTP",
             re.IGNORECASE,
         ),
@@ -2533,6 +2539,7 @@ TRUE_SENTENCES_THAT_SHARE_THE_WORDS: Final[tuple[str, ...]] = (
     "并非所有输出必须引用 evidence_id，弃权可以一条都不带。",
     "不是每项输出都引用 evidence_id，弃权不带证据。",
     "每项方向性输出都引用 evidence_id，弃权写明原因。",
+    "Python SDK 的调用从不走 HTTP 边界。",
 )
 """True or unrelated sentences that share a retired pattern's words. The review of `D13` measured
 the first six being caught (its M1): client holds cli, 移动平均 holds 移动, and a rejection and a
@@ -2579,7 +2586,7 @@ validations. The next eighteen are its fifth commit's probes of the older entrie
 natural true sentence in their words that its pattern caught until the pattern was narrowed:
 the review's two (an in-process SDK and CLI, a removed mobile project) in three and two
 wordings, then denials inside a replay, rejection, report, container or portfolio-record span,
-a comma after a batch center that shipped, and a diagram tied to its generator. The last
+a comma after a batch center that shipped, and a diagram tied to its generator. The next
 fifty-six come from the review of `D14` (its m-2): its thirty-nine true sentences, verbatim, of
 which it measured thirty-one being caught, and seventeen natural denials `D14`'s fix round wrote
 for the spans those thirty-nine did not reach. All of them but the review's eight that passed
@@ -2595,7 +2602,9 @@ sentences, verbatim -- every one its six reports wrote in their second parts tha
 above, a hundred and twenty-five, which the patterns passed before and after that round's four
 families were added -- then sixteen probes of those families, each a rewrite's wording or a
 denial; one of them, a denial before strict anti-look-ahead, was caught until that branch looked
-behind for no and not."""
+behind for no and not. The last one is the fix round's review (its third minor): an SDK call
+that skips the HTTP boundary, true with 边界 and false without it, which entry 15 -- a `D13`
+entry, unchanged since -- caught until it looked ahead for that word."""
 
 
 def test_the_retired_patterns_pass_the_true_sentences_that_share_their_words() -> None:
