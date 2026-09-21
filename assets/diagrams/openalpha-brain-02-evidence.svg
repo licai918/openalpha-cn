@@ -26,11 +26,47 @@
     <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
       <path d="M32 0H0V32" fill="none" stroke="#6D87A3" stroke-width=".55" opacity=".12" />
     </pattern>
-    <marker id="arrow" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
-      <path d="M0 0L11 5.5L0 11Z" fill="context-stroke" />
+    <marker id="arrow-2DD4BF" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L11 5.5L0 11Z" fill="#2DD4BF" />
     </marker>
-    <marker id="arrowShort" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
-      <path d="M0 0L5 2.5L0 5Z" fill="context-stroke" />
+    <marker id="arrowShort-2DD4BF" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L5 2.5L0 5Z" fill="#2DD4BF" />
+    </marker>
+    <marker id="arrow-38BDF8" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L11 5.5L0 11Z" fill="#38BDF8" />
+    </marker>
+    <marker id="arrowShort-38BDF8" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L5 2.5L0 5Z" fill="#38BDF8" />
+    </marker>
+    <marker id="arrow-A78BFA" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L11 5.5L0 11Z" fill="#A78BFA" />
+    </marker>
+    <marker id="arrowShort-A78BFA" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L5 2.5L0 5Z" fill="#A78BFA" />
+    </marker>
+    <marker id="arrow-FBBF24" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L11 5.5L0 11Z" fill="#FBBF24" />
+    </marker>
+    <marker id="arrowShort-FBBF24" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L5 2.5L0 5Z" fill="#FBBF24" />
+    </marker>
+    <marker id="arrow-FB7185" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L11 5.5L0 11Z" fill="#FB7185" />
+    </marker>
+    <marker id="arrowShort-FB7185" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L5 2.5L0 5Z" fill="#FB7185" />
+    </marker>
+    <marker id="arrow-A3E635" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L11 5.5L0 11Z" fill="#A3E635" />
+    </marker>
+    <marker id="arrowShort-A3E635" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L5 2.5L0 5Z" fill="#A3E635" />
+    </marker>
+    <marker id="arrow-263A52" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L11 5.5L0 11Z" fill="#263A52" />
+    </marker>
+    <marker id="arrowShort-263A52" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L5 2.5L0 5Z" fill="#263A52" />
     </marker>
     <style>
       text { font-family: Geist, "Plus Jakarta Sans", "Noto Sans SC", "Microsoft YaHei", sans-serif; }
@@ -62,9 +98,9 @@
     <circle cx="18" cy="42" r="4" fill="#2DD4BF" /><circle cx="40" cy="20" r="4" fill="#2DD4BF" />
     <circle cx="56" cy="32" r="4" fill="#2DD4BF" /><circle cx="75" cy="11" r="4" fill="#2DD4BF" />
   </g>
-  <line x1="898" y1="171" x2="938" y2="171" stroke="#2DD4BF" stroke-width="2.2" marker-end="url(#arrow)" />
+  <line x1="898" y1="171" x2="938" y2="171" stroke="#2DD4BF" stroke-width="2.2" marker-end="url(#arrow-2DD4BF)" />
   <text x="948" y="175" class="small" fill="#96A8BE" text-anchor="start" opacity="1">自动执行 / 持久化</text>
-  <line x1="1108" y1="171" x2="1148" y2="171" stroke="#FBBF24" stroke-width="2.2" stroke-dasharray="7 7" marker-end="url(#arrow)" />
+  <line x1="1108" y1="171" x2="1148" y2="171" stroke="#FBBF24" stroke-width="2.2" stroke-dasharray="7 7" marker-end="url(#arrow-FBBF24)" />
   <text x="1158" y="175" class="small" fill="#96A8BE" text-anchor="start" opacity="1">显式组合 / 人工反馈</text>
   <circle cx="76" cy="210" r="14" fill="#2DD4BF" fill-opacity=".16" stroke="#2DD4BF" stroke-opacity=".45" />
   <text x="76" y="214" class="navNum" fill="#2DD4BF" text-anchor="middle" opacity="1">A</text>
@@ -101,8 +137,8 @@
   <text x="372" y="419" class="body" fill="#96A8BE" text-anchor="start" opacity="1">涨停 / 炸板 / 连板 / 题材</text>
   <text x="372" y="443" class="body" fill="#96A8BE" text-anchor="start" opacity="1">催化 / 公告 / 资金语义</text>
   <text x="372" y="467" class="body" fill="#96A8BE" text-anchor="start" opacity="1">统一 schema 后才可进入研究</text>
-  <path d="M314 327L348 327" fill="none" stroke="#2DD4BF" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow)" />
-  <path d="M314 514L348 514" fill="none" stroke="#38BDF8" stroke-width="2.2" marker-end="url(#arrow)" />
+  <path d="M314 327L348 327" fill="none" stroke="#2DD4BF" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow-2DD4BF)" />
+  <path d="M314 514L348 514" fill="none" stroke="#38BDF8" stroke-width="2.2" marker-end="url(#arrow-38BDF8)" />
   <circle cx="670" cy="210" r="14" fill="#2DD4BF" fill-opacity=".16" stroke="#2DD4BF" stroke-opacity=".45" />
   <text x="670" y="214" class="navNum" fill="#2DD4BF" text-anchor="middle" opacity="1">C</text>
   <text x="694" y="214" class="micro" fill="#2DD4BF" text-anchor="start" opacity="1">可得时间 PIT · 四时钟</text>
@@ -128,7 +164,7 @@
   <text x="682" y="489" class="body" fill="#96A8BE" text-anchor="start" opacity="1">可见时点 · 哈希 · 来源 · 许可 · 修订</text>
   <text x="682" y="513" class="body" fill="#96A8BE" text-anchor="start" opacity="1">A 股事件语义与原始载荷建立绑定</text>
   <text x="682" y="537" class="body" fill="#96A8BE" text-anchor="start" opacity="1">下游只接收可得时间不晚于决策时刻的 evidence_id</text>
-  <path d="M622 421L658 421" fill="none" stroke="#2DD4BF" stroke-width="2.2" marker-end="url(#arrow)" />
+  <path d="M622 421L658 421" fill="none" stroke="#2DD4BF" stroke-width="2.2" marker-end="url(#arrow-2DD4BF)" />
   <text x="640.0" y="405" class="small" fill="#2DD4BF" text-anchor="middle" opacity="1">固化</text>
   <rect x="1142" y="350" width="214" height="214" rx="22" fill="#0C1928" stroke="#263A52" filter="url(#shadow)" />
   <rect x="1143" y="351" width="212" height="212" rx="21" fill="none" stroke="#FFFFFF" stroke-opacity=".035" />
@@ -139,7 +175,7 @@
   <text x="1166" y="465" class="body" fill="#96A8BE" text-anchor="start" opacity="1">DuckDB PIT 查询</text>
   <text x="1166" y="489" class="body" fill="#96A8BE" text-anchor="start" opacity="1">只追加 · 不改写</text>
   <text x="1166" y="513" class="body" fill="#96A8BE" text-anchor="start" opacity="1">内容哈希复核</text>
-  <path d="M1112 450L1142 450" fill="none" stroke="#38BDF8" stroke-width="2.2" marker-end="url(#arrow)" />
+  <path d="M1112 450L1142 450" fill="none" stroke="#38BDF8" stroke-width="2.2" marker-end="url(#arrow-38BDF8)" />
   <rect x="658" y="592" width="698" height="92" rx="20" fill="#102033" stroke="#263A52" />
   <text x="684" y="622" class="micro" fill="#38BDF8" text-anchor="start" opacity="1">QUERY CONTRACT</text>
   <text x="684" y="660" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">as_of + symbol / event_type → 可见证据集合 → EvidenceSnapshot</text>
@@ -150,19 +186,19 @@
   <rect x="64" y="806" width="240" height="52" rx="16" fill="#0B1726" stroke="#263A52" />
   <text x="86" y="838" class="navNum" fill="#647890" text-anchor="start" opacity="1">01</text>
   <text x="119" y="838" class="nav" fill="#B7C4D4" text-anchor="start" opacity="1">系统总览</text>
-  <path d="M309 832H315" stroke="#263A52" stroke-width="1.7" marker-end="url(#arrow)" />
+  <path d="M309 832H315" stroke="#263A52" stroke-width="1.7" marker-end="url(#arrow-263A52)" />
   <rect x="320" y="806" width="240" height="52" rx="16" fill="url(#activeNav)" stroke="#2DD4BF" stroke-opacity=".64" />
   <text x="342" y="838" class="navNum" fill="#2DD4BF" text-anchor="start" opacity="1">02</text>
   <text x="375" y="838" class="nav" fill="#F4F7FB" text-anchor="start" opacity="1">证据平面</text>
-  <path d="M565 832H571" stroke="#2DD4BF" stroke-width="1.7" marker-end="url(#arrow)" />
+  <path d="M565 832H571" stroke="#2DD4BF" stroke-width="1.7" marker-end="url(#arrow-2DD4BF)" />
   <rect x="576" y="806" width="240" height="52" rx="16" fill="#0B1726" stroke="#263A52" />
   <text x="598" y="838" class="navNum" fill="#647890" text-anchor="start" opacity="1">03</text>
   <text x="631" y="838" class="nav" fill="#B7C4D4" text-anchor="start" opacity="1">研究编排</text>
-  <path d="M821 832H827" stroke="#263A52" stroke-width="1.7" marker-end="url(#arrow)" />
+  <path d="M821 832H827" stroke="#263A52" stroke-width="1.7" marker-end="url(#arrow-263A52)" />
   <rect x="832" y="806" width="240" height="52" rx="16" fill="#0B1726" stroke="#263A52" />
   <text x="854" y="838" class="navNum" fill="#647890" text-anchor="start" opacity="1">04</text>
   <text x="887" y="838" class="nav" fill="#B7C4D4" text-anchor="start" opacity="1">决策约束</text>
-  <path d="M1077 832H1083" stroke="#263A52" stroke-width="1.7" marker-end="url(#arrow)" />
+  <path d="M1077 832H1083" stroke="#263A52" stroke-width="1.7" marker-end="url(#arrow-263A52)" />
   <rect x="1088" y="806" width="240" height="52" rx="16" fill="#0B1726" stroke="#263A52" />
   <text x="1110" y="838" class="navNum" fill="#647890" text-anchor="start" opacity="1">05</text>
   <text x="1143" y="838" class="nav" fill="#B7C4D4" text-anchor="start" opacity="1">验证反馈</text>

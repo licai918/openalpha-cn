@@ -142,7 +142,16 @@ _NO_COMMA_OR_DENIAL: Final[str] = r"[^。;\N{FULLWIDTH SEMICOLON}，,不未没�
 _SEGMENT: Final[str] = r"[^，,。;\N{FULLWIDTH SEMICOLON}]"
 """One character inside one comma-separated segment: neither a comma nor a sentence end."""
 
-_NO_EARLIER_DENIAL: Final[str] = rf"(?:\A|(?<=[，,])){_SEGMENT.replace(']', '不未没无非]')}*?"
+_SEGMENT_WITHOUT_DENIAL: Final[str] = r"[^，,。;\N{FULLWIDTH SEMICOLON}不未没无非]"
+"""`_SEGMENT` minus the five denial characters, written out rather than spelled out of it.
+
+The two were one expression for a round -- `_SEGMENT.replace(']', '不未没无非]')` -- which is
+correct only while `_SEGMENT` ends in a class and holds no other `]`. A later hand widening
+`_SEGMENT` would get a silently different class here, so both are literals and
+`test_the_two_segment_classes_agree` holds them to each other.
+"""
+
+_NO_EARLIER_DENIAL: Final[str] = rf"(?:\A|(?<=[，,])){_SEGMENT_WITHOUT_DENIAL}*?"
 """Nothing denied before the claim **in its own segment**: the prefix crosses no denial.
 
 A span class stops a pattern inside its own words. It cannot see 「PIT 查询**不会**只返回当时可知的
@@ -2675,6 +2684,62 @@ review (its I-1): the sentences a reader writes to record what a report does *no
 that round's four families caught until their denial guards were added. One comes from the
 final round's review (its N-2): 不受后来修订干扰 as the subject of a sentence that denies it,
 which the revision family caught until that branch refused a nominalising 这件事 after it."""
+
+
+DENIAL_IN_AN_EARLIER_SEGMENT: Final[tuple[tuple[str, str], ...]] = (
+    (
+        "a historical read sees only the version knowable at the time",
+        "出厂路径不调用模型，四时钟保证 Agent 只读当时可见信息。",
+    ),
+    (
+        "the multi-day report measures capacity and attributes exposure",
+        "出厂路径不调用模型，多日报告同时给出基准、换手、容量和暴露归因。",
+    ),
+    (
+        "Tool, Risk and Validator are versioned extension contracts",
+        "出厂路径不调用模型，OpenAlpha CN 用 Provider、Agent、Tool、Risk 与 Validator "
+        "等版本化合同划分边界。",
+    ),
+    (
+        "every signal an agent emits cites evidence",
+        "出厂路径不调用模型，所有输出必须引用 evidence_id。",
+    ),
+)
+"""One false claim per denial-guarded family, each behind a denial about something else.
+
+Written by the review of the round that introduced those guards, and kept because the mistake
+they catch is cheap to make again: reading the denial over the whole clause rather than over the
+claim's own comma segment switches all four families off wherever a sentence denies anything
+at all, and a third of this repository's Chinese clauses do. Each of these is caught today and
+escapes under a clause-wide guard, so this is where that choice is held rather than in a review.
+"""
+
+
+def test_the_two_segment_classes_agree() -> None:
+    """`_SEGMENT_WITHOUT_DENIAL` is `_SEGMENT` minus the denials, checked rather than derived."""
+    segment = re.compile(_SEGMENT)
+    without = re.compile(_SEGMENT_WITHOUT_DENIAL)
+    sample = "abc 中文，,。;\N{FULLWIDTH SEMICOLON}不未没无非"
+
+    assert [c for c in sample if segment.fullmatch(c)] == [
+        c for c in sample if c not in "，,。;\N{FULLWIDTH SEMICOLON}"
+    ]
+    assert [c for c in sample if without.fullmatch(c)] == [
+        c for c in sample if segment.fullmatch(c) and c not in "不未没无非"
+    ]
+
+
+@pytest.mark.parametrize(("name", "sentence"), DENIAL_IN_AN_EARLIER_SEGMENT, ids=lambda x: x[:24])
+def test_a_denial_about_something_else_does_not_hide_the_claim_beside_it(
+    name: str, sentence: str
+) -> None:
+    """A claim in its own segment is read whatever an earlier segment denies."""
+    entry = next(claim for claim in RETIRED_CLAIMS if claim.name == name)
+
+    assert entry.pattern.search(sentence), (
+        f"{name} no longer reads {sentence!r}: a denial in an earlier segment is hiding the "
+        "claim beside it, which is what the segment-scoped guards are for"
+    )
 
 
 def test_the_retired_patterns_pass_the_true_sentences_that_share_their_words() -> None:

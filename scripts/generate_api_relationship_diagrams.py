@@ -35,6 +35,7 @@ COLORS = {
     "red": "#D95D67",
     "slate": "#64748B",
     "ink": "#0F172A",
+    "rule": "#C5CDDA",
 }
 
 NAVIGATION = (
@@ -44,6 +45,28 @@ NAVIGATION = (
     ("04", "决策产品"),
     ("05", "验证闭环"),
 )
+
+
+def _marker_defs() -> str:
+    """One `<marker>` per arrow colour, each with a literal fill.
+
+    `fill="context-stroke"` is one marker for every colour and is not supported everywhere:
+    rendered through QuickLook the head comes out `rgb(0,0,0)` while its line keeps its colour
+    (measured on a two-line probe: `(251,191,36)` against `(0,0,0)`). The head is what carries
+    the direction, so it is drawn in the line's own colour rather than inherited.
+    """
+    return "\n".join(
+        f'    <marker id="arrow-{color.lstrip("#")}" markerWidth="10" markerHeight="10" '
+        f'refX="8" refY="5" orient="auto" markerUnits="strokeWidth">\n'
+        f'      <path d="M0,0 L10,5 L0,10 z" fill="{color}" />\n'
+        f"    </marker>"
+        for color in COLORS.values()
+    )
+
+
+def _marker(color: str) -> str:
+    """The marker id for one stroke colour, or the nearest one this file emits."""
+    return f"arrow-{(color if color in COLORS.values() else COLORS['slate']).lstrip('#')}"
 
 
 class Svg:
@@ -62,9 +85,7 @@ class Svg:
     <filter id="shadow" x="-20%" y="-20%" width="140%" height="160%">
       <feDropShadow dx="0" dy="7" stdDeviation="9" flood-color="#27324A" flood-opacity=".10" />
     </filter>
-    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L10,5 L0,10 z" fill="context-stroke" />
-    </marker>
+{markers}
     <pattern id="dots" width="28" height="28" patternUnits="userSpaceOnUse">
       <circle cx="2" cy="2" r="1.5" fill="#D8DEEB" />
     </pattern>
@@ -83,7 +104,7 @@ class Svg:
       .navNumber { font-size: 15px; font-weight: 800; }
       .navLabel { font-size: 17px; font-weight: 720; }
     </style>
-  </defs>""",
+  </defs>""".replace("{markers}", _marker_defs()),
             '  <rect width="1440" height="900" fill="#F7F8FC" />',
             '  <rect width="1440" height="900" fill="url(#dots)" opacity=".36" />',
             (f'  <rect x="64" y="42" width="188" height="34" rx="17" fill="{COLORS["indigo"]}" />'),
@@ -166,7 +187,7 @@ class Svg:
         dash = ' stroke-dasharray="8 7"' if dashed else ""
         self.raw(
             f'  <path d="{path}" fill="none" stroke="{color}" stroke-width="3"'
-            f'{dash} marker-end="url(#arrow)" />'
+            f'{dash} marker-end="url(#{_marker(color)})" />'
         )
         if label:
             self.raw(
@@ -177,12 +198,13 @@ class Svg:
     def legend(self, *, y: int = 732) -> None:
         self.raw(
             f'  <path d="M 72 {y} L 126 {y}" fill="none" stroke="{COLORS["indigo"]}" '
-            'stroke-width="3" marker-end="url(#arrow)" />'
+            f'stroke-width="3" marker-end="url(#{_marker(COLORS["indigo"])})" />'
         )
         self.raw(f'  <text x="140" y="{y + 5}" class="small">服务端自动调用 / 持久化</text>')
         self.raw(
             f'  <path d="M 380 {y} L 434 {y}" fill="none" stroke="{COLORS["orange"]}" '
-            'stroke-width="3" stroke-dasharray="8 7" marker-end="url(#arrow)" />'
+            f'stroke-width="3" stroke-dasharray="8 7" '
+            f'marker-end="url(#{_marker(COLORS["orange"])})" />'
         )
         self.raw(f'  <text x="448" y="{y + 5}" class="small">调用方显式组合 / 反馈</text>')
         self.raw(
@@ -223,7 +245,7 @@ class Svg:
             if position < len(NAVIGATION):
                 self.arrow(
                     path=f"M {x + width + 6} 831 L {x + width + gap - 12} 831",
-                    color=COLORS["indigo"] if active else "#C5CDDA",
+                    color=COLORS["indigo"] if active else COLORS["rule"],
                 )
         self.raw("</svg>")
         return "\n".join(self.parts) + "\n"

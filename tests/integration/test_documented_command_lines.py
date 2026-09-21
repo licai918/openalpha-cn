@@ -89,6 +89,15 @@ INVOCATION: Final[re.Pattern[str]] = re.compile(r"^(?:uv run )?openalpha ")
 ELISION: Final[tuple[str, ...]] = ("...", "…")
 """What makes a line prose about a command rather than a command: an argument left unwritten."""
 
+ADDRESS_ATTEMPT: Final[re.Pattern[str]] = re.compile(r"sla?_")
+"""What a token has to open with to be read as an attempt at a shortlist address.
+
+`sla_` is what `stable_answer_digest` issues; `sl_` is what a documented line said for one
+round (`sl_2026_03_02`), which `FileShortlistStore` refuses on sight. Matching both is what
+makes the near miss visible: a token that opens like an address and is not one is the defect,
+and a token that does not open like one belongs to some other argument.
+"""
+
 PLACEHOLDER: Final[re.Pattern[str]] = re.compile(r"<[^>]*>")
 """The other spelling of an unwritten argument, inside an otherwise whole line.
 
@@ -224,6 +233,17 @@ def _invocations(body: str, language: str) -> list[str]:
         for line in joined.splitlines()
         if INVOCATION.match(line.strip())
     ]
+
+
+def _flat(values: object) -> list[str]:
+    """Every string in a parsed parameter set, with a tuple parameter's members unpacked."""
+    found: list[str] = []
+    for value in values:  # type: ignore[union-attr]
+        if isinstance(value, str):
+            found.append(value)
+        elif isinstance(value, tuple | list):
+            found.extend(member for member in value if isinstance(member, str))
+    return found
 
 
 def _is_group(command: object) -> bool:
@@ -399,10 +419,13 @@ def test_a_documented_shortlist_address_has_the_shape_the_store_issues(
     `sla_` + 24 hex digits and nothing else. A reader following that line gets
     `shortlist_id ... is not a shortlist address` rather than the report the section describes.
 
-    Derived rather than declared, twice over: the addresses are found by asking the live command
-    for the parameter it calls `shortlist_id`, and the shape is the store's own
-    `SHORTLIST_ID_PATTERN`, matched as the store matches it. So this follows a rename of either
-    without being told about it, and it says nothing about commands that take no address.
+    Derived rather than declared, and derived from the **value** rather than from a parameter's
+    name: the line is parsed by the live command, and every parsed value that opens like a
+    shortlist address has to be one. Keying on the name `shortlist_id` -- which this check did
+    for one round -- left `shortlist compare`'s two arguments unchecked, because the command
+    calls them `baseline_id` and `current_id`; a rename is exactly the way a check like this
+    stops working, so the name is not what it reads. The shape is the store's own
+    `SHORTLIST_ID_PATTERN`, matched as the store matches it.
 
     **The other defect of the same round has no such check, and the reason is measured.**
     `README.md`'s `openalpha research run` line left `--subject` and `--as-of` at their defaults,
@@ -422,14 +445,17 @@ def test_a_documented_shortlist_address_has_the_shape_the_store_issues(
     context = command.make_context(  # type: ignore[attr-defined]
         named, list(rest), resilient_parsing=True
     )
-    address = context.params.get("shortlist_id")
-    if address is None or PLACEHOLDER.search(str(address)):
-        return  # `sla_<yesterday>` is a stand-in; the line's command and options are still read
+    addressed = [
+        value
+        for value in _flat(context.params.values())
+        if ADDRESS_ATTEMPT.match(value) and not PLACEHOLDER.search(value)
+    ]
 
-    assert SHORTLIST_ID_PATTERN.fullmatch(str(address)), (
-        f"{line.document}:{line.line_number} names {address!r}, which "
-        f"{SHORTLIST_ID_PATTERN.pattern} refuses, so the line cannot be followed: {line.raw}"
-    )
+    for address in addressed:
+        assert SHORTLIST_ID_PATTERN.fullmatch(address), (
+            f"{line.document}:{line.line_number} names {address!r}, which "
+            f"{SHORTLIST_ID_PATTERN.pattern} refuses, so the line cannot be followed: {line.raw}"
+        )
 
 
 def test_every_documented_command_is_executed_or_declared() -> None:

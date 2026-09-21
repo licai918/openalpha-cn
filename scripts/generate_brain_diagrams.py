@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from html import escape
 from pathlib import Path
+from typing import Final
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_DIR = ROOT / "assets" / "diagrams"
@@ -32,6 +33,43 @@ NAVIGATION = (
     ("04", "决策约束"),
     ("05", "验证反馈"),
 )
+
+
+ARROW_COLORS: Final[tuple[str, ...]] = (CYAN, BLUE, VIOLET, AMBER, CORAL, LIME, LINE)
+"""Every stroke colour an arrow is drawn in, which is one marker each.
+
+`fill="context-stroke"` is the one-marker way to do this and it is not supported everywhere:
+rendered through QuickLook, a `context-stroke` head comes out `rgb(0,0,0)` while the line it
+ends stays its own colour -- measured on a two-line probe, `(251,191,36)` for the literal fill
+and `(0,0,0)` for the context one. On these dark panels a black head is nearly invisible, and
+the head is what carries the direction, so each colour gets its own marker with a literal fill.
+"""
+
+
+def _marker_defs() -> str:
+    """The `<marker>` elements, two sizes for every arrow colour."""
+    parts: list[str] = []
+    for color in ARROW_COLORS:
+        key = color.lstrip("#")
+        parts.append(
+            f'    <marker id="arrow-{key}" markerWidth="11" markerHeight="11" refX="9" '
+            f'refY="5.5" orient="auto" markerUnits="strokeWidth">\n'
+            f'      <path d="M0 0L11 5.5L0 11Z" fill="{color}" />\n'
+            f"    </marker>"
+        )
+        parts.append(
+            f'    <marker id="arrowShort-{key}" markerWidth="5" markerHeight="5" refX="4" '
+            f'refY="2.5" orient="auto" markerUnits="strokeWidth">\n'
+            f'      <path d="M0 0L5 2.5L0 5Z" fill="{color}" />\n'
+            f"    </marker>"
+        )
+    return "\n".join(parts)
+
+
+def _marker(color: str, *, short: bool = False) -> str:
+    """The marker id for one stroke colour, or the nearest one this file emits."""
+    key = (color if color in ARROW_COLORS else LINE).lstrip("#")
+    return f"arrow{'Short' if short else ''}-{key}"
 
 
 class Svg:
@@ -77,12 +115,7 @@ class Svg:
     <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
       <path d="M32 0H0V32" fill="none" stroke="#6D87A3" stroke-width=".55" opacity=".12" />
     </pattern>
-    <marker id="arrow" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
-      <path d="M0 0L11 5.5L0 11Z" fill="context-stroke" />
-    </marker>
-    <marker id="arrowShort" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
-      <path d="M0 0L5 2.5L0 5Z" fill="context-stroke" />
-    </marker>
+{markers}
     <style>
       text { font-family: Geist, "Plus Jakarta Sans", "Noto Sans SC", "Microsoft YaHei", sans-serif; }
       .eyebrow { font-size: 13px; font-weight: 760; letter-spacing: 1.8px; }
@@ -98,7 +131,7 @@ class Svg:
       .nav { font-size: 13px; font-weight: 680; }
       .navNum { font-size: 12px; font-weight: 800; }
     </style>
-  </defs>""".replace("ACCENT", accent),
+  </defs>""".replace("ACCENT", accent).replace("{markers}", _marker_defs()),
             f'  <rect width="1440" height="900" fill="{BG}" />',
             '  <rect width="1440" height="900" fill="url(#bgGradient)" />',
             '  <rect width="1440" height="900" fill="url(#ambient)" />',
@@ -211,7 +244,7 @@ class Svg:
     ) -> None:
         dash = ' stroke-dasharray="8 8"' if dashed else ""
         self.raw(
-            f'  <path d="M{x1} {y1}L{x2} {y2}" fill="none" stroke="{color}" stroke-width="2.2"{dash} marker-end="url(#arrow)" />'
+            f'  <path d="M{x1} {y1}L{x2} {y2}" fill="none" stroke="{color}" stroke-width="2.2"{dash} marker-end="url(#{_marker(color)})" />'
         )
         if label:
             self.text(
@@ -242,8 +275,7 @@ class Svg:
         11 units long with 8.8 behind the tip, which fits inside that leg.
         """
         dash = ' stroke-dasharray="8 8"' if dashed else ""
-        head = "arrowShort" if short_arrow else "arrow"
-        marker = f' marker-end="url(#{head})"' if arrow else ""
+        marker = f' marker-end="url(#{_marker(color, short=short_arrow)})"' if arrow else ""
         self.raw(
             f'  <path d="{d}" fill="none" stroke="{color}" stroke-width="2.2"{dash}{marker} opacity="{opacity}" />'
         )
@@ -257,11 +289,11 @@ class Svg:
 
     def legend(self) -> None:
         self.raw(
-            f'  <line x1="898" y1="171" x2="938" y2="171" stroke="{CYAN}" stroke-width="2.2" marker-end="url(#arrow)" />'
+            f'  <line x1="898" y1="171" x2="938" y2="171" stroke="{CYAN}" stroke-width="2.2" marker-end="url(#{_marker(CYAN)})" />'
         )
         self.text(948, 175, "自动执行 / 持久化", css="small", color=MUTED)
         self.raw(
-            f'  <line x1="1108" y1="171" x2="1148" y2="171" stroke="{AMBER}" stroke-width="2.2" stroke-dasharray="7 7" marker-end="url(#arrow)" />'
+            f'  <line x1="1108" y1="171" x2="1148" y2="171" stroke="{AMBER}" stroke-width="2.2" stroke-dasharray="7 7" marker-end="url(#{_marker(AMBER)})" />'
         )
         self.text(1158, 175, "显式组合 / 人工反馈", css="small", color=MUTED)
 
@@ -296,7 +328,7 @@ class Svg:
             self.text(x + 55, y + 32, label, css="nav", color=label_color)
             if position < len(NAVIGATION):
                 self.raw(
-                    f'  <path d="M{x + width + 5} {y + 26}H{x + width + gap - 5}" stroke="{self.accent if position == self.index else LINE}" stroke-width="1.7" marker-end="url(#arrow)" />'
+                    f'  <path d="M{x + width + 5} {y + 26}H{x + width + gap - 5}" stroke="{self.accent if position == self.index else LINE}" stroke-width="1.7" marker-end="url(#{_marker(self.accent if position == self.index else LINE)})" />'
                 )
 
     def finish(self, filename: str) -> None:
