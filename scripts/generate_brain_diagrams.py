@@ -74,24 +74,31 @@ def _marker(color: str, *, short: bool = False) -> str:
     return f"arrow{'Short' if short else ''}-{key}"
 
 
-def _last_leg(d: str) -> float:
-    """The length of a polyline's final segment, for the `M`/`H`/`V`/`L` paths written here."""
-    tokens = re.findall(r"([MLHV])\s*(-?[\d.]+)(?:[ ,]+(-?[\d.]+))?", d)
+def _last_leg(d: str) -> float | None:
+    """The final straight segment's length, or `None` when the path ends in a curve.
+
+    Reads `M`, `L`, `H`, `V` and `C`, the same set `generate_api_relationship_diagrams.py`
+    reads. No drawing here ends in a curve today, and a measurement that silently skipped a
+    `C` would report the straight leg before it instead -- which is a wrong number rather than
+    no number, so the curve is recognised and answered with `None`.
+    """
+    tokens = re.findall(r"([MLHVC])\s*(-?[\d.]+)(?:[ ,]+(-?[\d.]+))?", d)
     x = y = 0.0
-    last = 0.0
+    last: float | None = 0.0
     for command, first, second in tokens:
         if command == "M":
             x, y = float(first), float(second or 0)
         elif command == "L":
             nx, ny = float(first), float(second or 0)
-            last = math.hypot(nx - x, ny - y)
-            x, y = nx, ny
+            last, x, y = math.hypot(nx - x, ny - y), nx, ny
         elif command == "H":
             nx = float(first)
             last, x = abs(nx - x), nx
         elif command == "V":
             ny = float(first)
             last, y = abs(ny - y), ny
+        elif command == "C":
+            last = None
     return last
 
 
@@ -103,7 +110,8 @@ def _head_for(d: str, width: float) -> bool:
     is drawn across the corner before it -- 9.8 units of it for the 02->03 link, which is how
     this rule arrived -- so the leg decides the head rather than the caller.
     """
-    return _last_leg(d) < 9 * width
+    leg = _last_leg(d)
+    return leg is not None and leg < 9 * width
 
 
 class Svg:

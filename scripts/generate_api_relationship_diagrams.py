@@ -103,8 +103,12 @@ def _last_leg(d: str) -> float | None:
     return last
 
 
-def _head_for(d: str, width: float = 3) -> bool:
-    """Whether the short head is the one that fits: `refX` is 8 long and 4 short, in stroke units."""
+def _head_for(d: str, width: float) -> bool:
+    """Whether the short head is the one that fits: `refX` is 8 long and 4 short, in stroke units.
+
+    The width is passed rather than defaulted: every arrow in this file is stroked 3 today, and
+    a default would answer for a fourth width as if it were that one.
+    """
     leg = _last_leg(d)
     return leg is not None and leg < 8 * width
 
@@ -227,7 +231,7 @@ class Svg:
         dash = ' stroke-dasharray="8 7"' if dashed else ""
         self.raw(
             f'  <path d="{path}" fill="none" stroke="{color}" stroke-width="3"'
-            f'{dash} marker-end="url(#{_marker(color, short=_head_for(path))})" />'
+            f'{dash} marker-end="url(#{_marker(color, short=_head_for(path, 3))})" />'
         )
         if label:
             self.raw(
