@@ -90,7 +90,7 @@ OpenAlpha CN 不是把智能体角色堆在一起，而是把 **A 股事实、�
 <p align="center">
   <img
     src="./assets/diagrams/openalpha-brain-02-evidence.svg"
-    alt="OpenAlpha CN 授权数据、Provider 治理、四时钟 PIT 与 EvidenceSnapshot 证据平面图"
+    alt="OpenAlpha CN 授权数据、Provider 治理、四时钟记录、可得时间可见性与 EvidenceSnapshot 证据平面图"
     width="1200"
   />
 </p>
@@ -1159,7 +1159,7 @@ JSON 文档；回放写进 SDK 与 REST 各自的回放库。
 
 链邻 API、用户文件、Tushare 和可选 AKShare Adapter 位于调用方或 Provider 侧。
 `POST /api/v1/evidence/build` 只接收结构化 `ProviderMetadata + ProviderBatch`，不会在
-服务端自动抓取数据。记录通过 Schema、四时钟 PIT 和 A 股事件规范化后生成内容寻址的
+服务端自动抓取数据。记录通过 Schema、四时钟校验、可得时间可见性和 A 股事件规范化后生成内容寻址的
 `EvidenceSnapshot`，写入 Parquet；证据、市场事件和题材接口按 `as_of` 把可见证据返回给调用方，研究时由调用方把证据放进请求体，研究路由不读证据库。
 
 <p align="center">

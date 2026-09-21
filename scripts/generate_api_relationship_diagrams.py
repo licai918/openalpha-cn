@@ -393,7 +393,7 @@ def evidence_dataflow() -> str:
         endpoint="POST /api/v1/evidence/build",
         lines=(
             "Schema / aware datetime",
-            "四时钟 PIT",
+            "可得时间 PIT · 四时钟",
             "涨停 / 炸板 / 连板规范化",
             "题材 / 催化 / 公告 / 资金",
         ),
@@ -452,7 +452,7 @@ def evidence_dataflow() -> str:
         lines=(
             "ResearchRunRequest.evidence",
             "subject / as_of 一致性",
-            "Evidence ID 全链引用",
+            "方向性输出引用 evidence_id",
         ),
         color=COLORS["purple"],
     )
@@ -500,7 +500,7 @@ def research_orchestration() -> str:
     svg.card(
         x=410,
         y=246,
-        width=336,
+        width=300,
         height=352,
         title="ResearchEngine.run_cycle",
         lines=(
@@ -509,7 +509,7 @@ def research_orchestration() -> str:
             "3  节点级 checkpoint / resume",
             "4  聚合结构化 SignalFrame",
             "5  RiskGate：pass / reduce / block",
-            "6  final_action：watch / avoid / abstain",
+            "6  final_action：watch/avoid/abstain",
         ),
         color=COLORS["purple"],
     )
@@ -571,8 +571,8 @@ def research_orchestration() -> str:
     svg.card(
         x=1098,
         y=562,
-        width=266,
-        height=124,
+        width=300,
+        height=142,
         title="可选委员会 API",
         endpoint="POST /api/v1/research/deliberate",
         lines=("调用方显式传入", "signal + agent_results"),

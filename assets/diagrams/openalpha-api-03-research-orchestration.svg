@@ -51,7 +51,7 @@
   <text x="88" y="560" class="body">events / cancel / retry</text>
   <text x="88" y="585" class="body">SQLite 状态 · 重启后重新排队</text>
   <text x="88" y="610" class="body">逐项复用同一 runner</text>
-  <rect x="410" y="246" width="336" height="352" rx="18" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)" />
+  <rect x="410" y="246" width="300" height="352" rx="18" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)" />
   <rect x="410" y="246" width="7" height="352" rx="3.5" fill="#7C5CE7" />
   <text x="434" y="278" class="cardTitle">ResearchEngine.run_cycle</text>
   <text x="434" y="306" class="body">1  校验 subject / as_of / PIT</text>
@@ -59,7 +59,7 @@
   <text x="434" y="356" class="body">3  节点级 checkpoint / resume</text>
   <text x="434" y="381" class="body">4  聚合结构化 SignalFrame</text>
   <text x="434" y="406" class="body">5  RiskGate：pass / reduce / block</text>
-  <text x="434" y="431" class="body">6  final_action：watch / avoid / abstain</text>
+  <text x="434" y="431" class="body">6  final_action：watch/avoid/abstain</text>
   <path d="M 356 294 L 402 294" fill="none" stroke="#7C5CE7" stroke-width="3" marker-end="url(#arrow)" />
   <path d="M 356 520 C 386 520, 380 470, 402 470" fill="none" stroke="#5968F2" stroke-width="3" marker-end="url(#arrow)" />
   <rect x="770" y="206" width="280" height="140" rx="18" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)" />
@@ -92,10 +92,10 @@
   <text x="1122" y="366" class="body">请求摘要 / 图签名隔离</text>
   <text x="1122" y="391" class="body">SQLite WAL</text>
   <path d="M 1052 610 C 1076 610, 1072 510, 1090 510" fill="none" stroke="#64748B" stroke-width="3" marker-end="url(#arrow)" />
-  <rect x="1098" y="562" width="266" height="124" rx="18" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)" />
-  <rect x="1098" y="562" width="7" height="124" rx="3.5" fill="#E89422" />
+  <rect x="1098" y="562" width="300" height="142" rx="18" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)" />
+  <rect x="1098" y="562" width="7" height="142" rx="3.5" fill="#E89422" />
   <text x="1122" y="594" class="cardTitle">可选委员会 API</text>
-  <rect x="1120" y="604" width="224" height="27" rx="9" fill="#E89422" opacity=".10" />
+  <rect x="1120" y="604" width="258" height="27" rx="9" fill="#E89422" opacity=".10" />
   <text x="1130" y="623" class="endpoint">POST /api/v1/research/deliberate</text>
   <text x="1122" y="658" class="body">调用方显式传入</text>
   <text x="1122" y="683" class="body">signal + agent_results</text>

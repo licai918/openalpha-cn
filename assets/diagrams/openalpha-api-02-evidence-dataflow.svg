@@ -62,7 +62,7 @@
   <rect x="692" y="262" width="258" height="27" rx="9" fill="#5968F2" opacity=".10" />
   <text x="702" y="281" class="endpoint">POST /api/v1/evidence/build</text>
   <text x="694" y="316" class="body">Schema / aware datetime</text>
-  <text x="694" y="341" class="body">四时钟 PIT</text>
+  <text x="694" y="341" class="body">可得时间 PIT · 四时钟</text>
   <text x="694" y="366" class="body">涨停 / 炸板 / 连板规范化</text>
   <text x="694" y="391" class="body">题材 / 催化 / 公告 / 资金</text>
   <path d="M 606 330 L 662 330" fill="none" stroke="#5968F2" stroke-width="3" marker-end="url(#arrow)" />
@@ -93,7 +93,7 @@
   <text x="1036" y="532" class="cardTitle">下游研究输入</text>
   <text x="1036" y="560" class="body">ResearchRunRequest.evidence</text>
   <text x="1036" y="585" class="body">subject / as_of 一致性</text>
-  <text x="1036" y="610" class="body">Evidence ID 全链引用</text>
+  <text x="1036" y="610" class="body">方向性输出引用 evidence_id</text>
   <path d="M 972 580 L 1004 580" fill="none" stroke="#E89422" stroke-width="3" stroke-dasharray="8 7" marker-end="url(#arrow)" />
   <path d="M 72 732 L 126 732" fill="none" stroke="#5968F2" stroke-width="3" marker-end="url(#arrow)" />
   <text x="140" y="737" class="small">服务端自动调用 / 持久化</text>

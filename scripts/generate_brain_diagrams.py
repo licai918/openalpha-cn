@@ -80,6 +80,9 @@ class Svg:
     <marker id="arrow" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
       <path d="M0 0L11 5.5L0 11Z" fill="context-stroke" />
     </marker>
+    <marker id="arrowShort" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L5 2.5L0 5Z" fill="context-stroke" />
+    </marker>
     <style>
       text { font-family: Geist, "Plus Jakarta Sans", "Noto Sans SC", "Microsoft YaHei", sans-serif; }
       .eyebrow { font-size: 13px; font-weight: 760; letter-spacing: 1.8px; }
@@ -228,9 +231,19 @@ class Svg:
         dashed: bool = False,
         arrow: bool = True,
         opacity: float = 1,
+        short_arrow: bool = False,
     ) -> None:
+        """One polyline. `short_arrow` picks the 5-unit marker for a link with a short last leg.
+
+        The default marker is `markerWidth="11"` at `markerUnits="strokeWidth"`, so at this
+        file's 2.2 stroke it is 24.2 units long with 19.8 of them behind the tip. A link whose
+        last leg is shorter than that draws its head across the corner before it -- the 02->04
+        link crosses a 22-unit gap, so its last leg can be 11 units at most. The short marker is
+        11 units long with 8.8 behind the tip, which fits inside that leg.
+        """
         dash = ' stroke-dasharray="8 8"' if dashed else ""
-        marker = ' marker-end="url(#arrow)"' if arrow else ""
+        head = "arrowShort" if short_arrow else "arrow"
+        marker = f' marker-end="url(#{head})"' if arrow else ""
         self.raw(
             f'  <path d="{d}" fill="none" stroke="{color}" stroke-width="2.2"{dash}{marker} opacity="{opacity}" />'
         )
@@ -336,7 +349,7 @@ def overview() -> None:
             "01",
             "证据成像",
             "EvidenceSnapshot",
-            ("四时钟 PIT", "内容寻址 · 来源与许可"),
+            ("可得时间 PIT · 四时钟", "内容寻址 · 来源与许可"),
             CYAN,
         ),
         (
@@ -379,7 +392,7 @@ def overview() -> None:
         )
     svg.arrow(696, 331, 716, 331, color=VIOLET)
     svg.path("M877 418V430H535V440", color=AMBER, dashed=True)
-    svg.path("M1002 418V429H944V440", color=BLUE, dashed=True)
+    svg.path("M1002 418V429H944V440", color=BLUE, dashed=True, short_arrow=True)
     svg.path("M780 614V676H1054V331H1038", color=AMBER, dashed=True)
     svg.pill(790, 636, 250, "人工复核后调整规则 · 不自动训练模型", color=AMBER)
     svg.arrow(339, 331, 374, 331, color=CYAN, label="规范化", label_y=315)
@@ -470,7 +483,7 @@ def evidence() -> None:
     svg.arrow(314, 327, 348, 327, color=CYAN, dashed=True)
     svg.arrow(314, 514, 348, 514, color=BLUE)
 
-    svg.section_label(670, 214, "C", "四时钟 PIT", CYAN)
+    svg.section_label(670, 214, "C", "可得时间 PIT · 四时钟", CYAN)
     clocks = [
         (658, "事件发生", "event_time"),
         (837, "首次可知", "available_time"),

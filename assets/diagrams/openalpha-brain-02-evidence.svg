@@ -29,6 +29,9 @@
     <marker id="arrow" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
       <path d="M0 0L11 5.5L0 11Z" fill="context-stroke" />
     </marker>
+    <marker id="arrowShort" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L5 2.5L0 5Z" fill="context-stroke" />
+    </marker>
     <style>
       text { font-family: Geist, "Plus Jakarta Sans", "Noto Sans SC", "Microsoft YaHei", sans-serif; }
       .eyebrow { font-size: 13px; font-weight: 760; letter-spacing: 1.8px; }
@@ -102,7 +105,7 @@
   <path d="M314 514L348 514" fill="none" stroke="#38BDF8" stroke-width="2.2" marker-end="url(#arrow)" />
   <circle cx="670" cy="210" r="14" fill="#2DD4BF" fill-opacity=".16" stroke="#2DD4BF" stroke-opacity=".45" />
   <text x="670" y="214" class="navNum" fill="#2DD4BF" text-anchor="middle" opacity="1">C</text>
-  <text x="694" y="214" class="micro" fill="#2DD4BF" text-anchor="start" opacity="1">四时钟 PIT</text>
+  <text x="694" y="214" class="micro" fill="#2DD4BF" text-anchor="start" opacity="1">可得时间 PIT · 四时钟</text>
   <rect x="658" y="232" width="160" height="92" rx="18" fill="#13243A" stroke="#2DD4BF" stroke-opacity=".28" />
   <text x="738" y="270" class="cardTitle" fill="#F4F7FB" text-anchor="middle" opacity="1">事件发生</text>
   <text x="738" y="298" class="mono" fill="#2DD4BF" text-anchor="middle" opacity="1">event_time</text>

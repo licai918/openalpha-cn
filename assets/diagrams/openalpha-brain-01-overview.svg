@@ -29,6 +29,9 @@
     <marker id="arrow" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
       <path d="M0 0L11 5.5L0 11Z" fill="context-stroke" />
     </marker>
+    <marker id="arrowShort" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L5 2.5L0 5Z" fill="context-stroke" />
+    </marker>
     <style>
       text { font-family: Geist, "Plus Jakarta Sans", "Noto Sans SC", "Microsoft YaHei", sans-serif; }
       .eyebrow { font-size: 13px; font-weight: 760; letter-spacing: 1.8px; }
@@ -87,7 +90,7 @@
   <rect x="374" y="266" width="3" height="130" rx="1.5" fill="#2DD4BF" />
   <text x="398" y="273" class="micro" fill="#2DD4BF" text-anchor="start" opacity="1">01 / 证据成像</text>
   <text x="398" y="306" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">EvidenceSnapshot</text>
-  <text x="398" y="335" class="body" fill="#96A8BE" text-anchor="start" opacity="1">四时钟 PIT</text>
+  <text x="398" y="335" class="body" fill="#96A8BE" text-anchor="start" opacity="1">可得时间 PIT · 四时钟</text>
   <text x="398" y="359" class="body" fill="#96A8BE" text-anchor="start" opacity="1">内容寻址 · 来源与许可</text>
   <rect x="716" y="244" width="322" height="174" rx="22" fill="#0C1928" stroke="#263A52" filter="url(#shadow)" />
   <rect x="717" y="245" width="320" height="172" rx="21" fill="none" stroke="#FFFFFF" stroke-opacity=".035" />
@@ -112,7 +115,7 @@
   <text x="740" y="555" class="body" fill="#96A8BE" text-anchor="start" opacity="1">组合报告 · 结构化筛选</text>
   <path d="M696 331L716 331" fill="none" stroke="#A78BFA" stroke-width="2.2" marker-end="url(#arrow)" />
   <path d="M877 418V430H535V440" fill="none" stroke="#FBBF24" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow)" opacity="1" />
-  <path d="M1002 418V429H944V440" fill="none" stroke="#38BDF8" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow)" opacity="1" />
+  <path d="M1002 418V429H944V440" fill="none" stroke="#38BDF8" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrowShort)" opacity="1" />
   <path d="M780 614V676H1054V331H1038" fill="none" stroke="#FBBF24" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow)" opacity="1" />
   <rect x="790" y="636" width="250" height="28" rx="14" fill="#FBBF24" fill-opacity="0.12" stroke="#FBBF24" stroke-opacity=".38" />
   <text x="915.0" y="655" class="small" fill="#FBBF24" text-anchor="middle" opacity="1">人工复核后调整规则 · 不自动训练模型</text>

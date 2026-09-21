@@ -29,6 +29,9 @@
     <marker id="arrow" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
       <path d="M0 0L11 5.5L0 11Z" fill="context-stroke" />
     </marker>
+    <marker id="arrowShort" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L5 2.5L0 5Z" fill="context-stroke" />
+    </marker>
     <style>
       text { font-family: Geist, "Plus Jakarta Sans", "Noto Sans SC", "Microsoft YaHei", sans-serif; }
       .eyebrow { font-size: 13px; font-weight: 760; letter-spacing: 1.8px; }

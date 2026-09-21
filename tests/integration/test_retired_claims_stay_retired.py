@@ -139,25 +139,33 @@ _NO_DENIAL: Final[str] = r"[^。;\N{FULLWIDTH SEMICOLON}不未没无]"
 _NO_COMMA_OR_DENIAL: Final[str] = r"[^。;\N{FULLWIDTH SEMICOLON}，,不未没无]"
 """The same inside one phrase: a span that stops at a comma too."""
 
-_NO_EARLIER_DENIAL: Final[str] = r"\A[^不未没无]*?"
-"""Nothing denied before the claim: a prefix that reaches the claim only across no 不, 未, 没, 无.
+_SEGMENT: Final[str] = r"[^，,。;\N{FULLWIDTH SEMICOLON}]"
+"""One character inside one comma-separated segment: neither a comma nor a sentence end."""
 
-A span class stops a pattern *inside* its own words. It cannot see 「PIT 查询**不会**只返回当时可
-知的版本」, where the denial sits before the first word a pattern reads. Anchoring at the clause's
-start and crossing no denial to get there is what sees it, and it is the weakest guard that does:
-a family whose own retired wordings open with a denial (「不受后来修订干扰」) still matches, because
-the prefix may cross nothing at all.
+_NO_EARLIER_DENIAL: Final[str] = rf"(?:\A|(?<=[，,])){_SEGMENT.replace(']', '不未没无非]')}*?"
+"""Nothing denied before the claim **in its own segment**: the prefix crosses no denial.
+
+A span class stops a pattern inside its own words. It cannot see 「PIT 查询**不会**只返回当时可知的
+版本」, where the denial sits before the first word a pattern reads. Starting at a comma or at the
+clause's start and crossing no 不, 未, 没, 无 or 非 to get there is what sees it, and the segment --
+not the clause -- is the scope, because a clause of this marketing pack holds three or four
+comma-separated segments and a denial in one of them says nothing about another.
 """
 
-_NO_DENIAL_IN_CLAUSE: Final[str] = r"\A(?![\s\S]*[不未没无])[\s\S]*?"
-"""Nothing denied anywhere in the clause: for families whose retired wordings hold no denial.
+_NO_DENIAL_IN_CLAUSE: Final[str] = rf"(?:\A|(?<=[，,]))(?!{_SEGMENT}*[不未没无非]){_SEGMENT}*?"
+"""No denial anywhere in the claim's own segment, for families whose retired wordings hold none.
 
-「换手、容量这两个词在报告里都**找不到**。」 denies the claim after the words a pattern reads, so no
-prefix can see it. These three families -- the multi-day report, the versioned extension
-contracts, and every signal citing evidence -- retired twenty wordings between them and not one
-holds 不, 未, 没 or 无, so a clause that holds one is not a wording of theirs.
+「换手、容量这两个词在报告里都**找不到**。」 denies the claim after the words a pattern reads, so
+`_NO_EARLIER_DENIAL` cannot see it; this refuses the segment outright. The scope is the segment
+and not the clause, and that is measured rather than argued: the census review re-ran the
+clause-wide version over `1be62ce`'s documents and the multi-day family lost three of its
+fifteen findings -- 「结果报告给出的**不只是**收益，还有…容量和暴露。」 and two like it, each
+denying something else in another segment. Three of that entry's `retired` wordings are now
+those whole clauses, so the same hole goes red here rather than in a review. Over a third of this
+repository's Chinese clauses hold one of these five characters (`README.md` 37.2%,
+`docs/why-openalpha-cn.zh-CN.md` 41.2%, the marketing pack 36.3%), which is the size of what a
+clause-wide guard would switch off.
 """
-
 
 # --- Reading the code facts -------------------------------------------------------------------
 
@@ -1997,7 +2005,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             rf"(?:只|仅)能?(?:读到|读取|返回|接收|收){_NO_COMMA_OR_DENIAL}{{0,6}}"
             r"(?:当时|决策时刻)(?:已经)?(?:可知|可见)的?\s*(?:版本|evidence_id)"
             rf"|选择{_NO_COMMA_OR_DENIAL}{{0,4}}可见版本"
-            rf"|不受{_NO_COMMA}{{0,6}}修订{_NO_COMMA}{{0,2}}干扰"
+            rf"|不受{_NO_COMMA}{{0,6}}修订{_NO_COMMA}{{0,2}}干扰(?!这件事|这一点|这种说法|的说法)"
             rf"|四时钟{_NO_COMMA_OR_DENIAL}{{0,4}}(?:避免|阻止|防止)把?{_NO_COMMA}{{0,4}}修订"
             rf"|修订语义{_NO_COMMA_OR_DENIAL}{{0,4}}(?:保证|确保){_NO_COMMA}{{0,10}}不偷看"
             rf"|四时钟{_NO_COMMA_OR_DENIAL}{{0,6}}(?:约束|保证|确保|阻止){_NO_COMMA}{{0,12}}"
@@ -2060,6 +2068,13 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "容量 \N{MIDDLE DOT} 暴露 \N{MIDDLE DOT} 标的归因",
             "多日组合报告持续展示换手、收益、基准、主动收益、容量和暴露",
             "多日报告再汇总换手、容量、收益、基准和主动收益",
+            # The three below are whole clauses of `1be62ce` rather than the fragment a
+            # pattern reads, because the census review measured this entry losing all three
+            # on the round that added a clause-wide denial guard: each holds a denial that
+            # denies something else (不只是, 不现实, 不把), and a fragment could not see it.
+            "结果报告给出的不只是收益，还有基准、主动收益、换手、容量和暴露。",
+            "多日组合报告计算基准、主动收益、换手、容量和暴露，帮助识别策略是否依赖不现实的资金使用。",
+            "多日组合报告同时给出基准、主动收益、换手、容量与标的暴露归因，不把市场上涨算成策略能力。",
         ),
         paraphrase="多日组合报告还会估算这笔资金最多能做多大。",
         premise=_the_multi_day_report_still_estimates_no_capacity,
@@ -2099,7 +2114,8 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             rf"{_NO_DENIAL_IN_CLAUSE}(?:"
             r"(?<!方向性)(?<!方向性\s)SignalFrame\s*必须(?:携带\s*evidence_ids|写明证据引用)"
             r"|(?<!并非)(?<!不是)所有输出必须引用\s*`?evidence_id"
-            r"|(?<!并非)(?<!不是)每项输出都引用\s*`?evidence_id)"
+            r"|(?<!并非)(?<!不是)每项输出都引用\s*`?evidence_id"
+            r"|(?<!方向性)(?<!方向性\s)(?:Evidence ID|证据 ID)\s*全链引用)"
         ),
         refuted_by=(
             "SignalFrame.validate_conclusion demands evidence_ids of a directional signal only; an "
@@ -2113,6 +2129,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "所有输出必须引用 evidence_id",
             "市场事件、题材催化和资金流智能体经证据感知路由协作，每项输出都引用 `evidence_id`",
             "SignalFrame 必须写明证据引用、确认条件、失效条件、风险标记和弃权原因",
+            "Evidence ID 全链引用",
         ),
         paraphrase="智能体给出的每个结论都附带证据编号。",
         premise=_an_abstention_still_cites_no_evidence,
@@ -2568,6 +2585,7 @@ TRUE_SENTENCES_THAT_SHARE_THE_WORDS: Final[tuple[str, ...]] = (
     "不是每项输出都引用 evidence_id，弃权不带证据。",
     "每项方向性输出都引用 evidence_id，弃权写明原因。",
     "Python SDK 的调用从不走 HTTP 边界。",
+    "不受后来修订干扰这件事，代码并没有做到。",
     "多日报告给出换手，没有最大订单容量。",
     "多日报告不给最大订单容量，也不给标的暴露归因。",
     "换手、容量这两个词在报告里都找不到。",
@@ -2639,18 +2657,24 @@ stops at a denial. The next seventeen are the census's, at `29e26f3`: true sente
 reports wrote in the families' words, which the patterns caught until each was narrowed. The next
 sixteen probe what the fix round added or narrowed beyond those: each is the wording a rewrite now
 uses, a true sentence holding both of a branch's words, or a denial a span or a lookbehind must
-stop at. The last hundred and forty-one come from the census round: first the census's own true
-sentences, verbatim -- every one its six reports wrote in their second parts that is not pinned
-above, a hundred and twenty-five, which the patterns passed before and after that round's four
-families were added -- then sixteen probes of those families, each a rewrite's wording or a
-denial; one of them, a denial before strict anti-look-ahead, was caught until that branch looked
-behind for no and not. The last one is the fix round's review (its third minor): an SDK call
-that skips the HTTP boundary, true with 边界 and false without it, which entry 15 -- a `D13`
-entry, unchanged since -- caught until it looked ahead for that word. The last fourteen are
-the census round's review (its I-1): the sentences a reader writes to record what a report
-does *not* do, which the census round's four families caught until two clause-level guards
-were added -- no denial before the claim, and, for the three families whose retired wordings
-hold no denial at all, none anywhere in the clause."""
+stop at. **The groups after this one are named by where they came from and not by where they
+sit**, because three rounds in a row appended a group and left the one before it saying "last":
+`D14`'s m-4, its fix round's review and the census round's review each reported the same
+sentence. A count is a fact about a group; a position is a fact about the file, and this file
+grows.
+
+A hundred and forty-one come from the census round: first the census's own true sentences,
+verbatim -- every one its six reports wrote in their second parts that is not pinned above, a
+hundred and twenty-five, which the patterns passed before and after that round's four families
+were added -- then sixteen probes of those families, each a rewrite's wording or a denial; one
+of them, a denial before strict anti-look-ahead, was caught until that branch looked behind for
+no and not. One comes from the fix round's review (its third minor): an SDK call that skips the
+HTTP boundary, true with 边界 and false without it, which entry 15 -- a `D13` entry, unchanged
+since -- caught until it looked ahead for that word. Fourteen come from the census round's
+review (its I-1): the sentences a reader writes to record what a report does *not* do, which
+that round's four families caught until their denial guards were added. One comes from the
+final round's review (its N-2): 不受后来修订干扰 as the subject of a sentence that denies it,
+which the revision family caught until that branch refused a nominalising 这件事 after it."""
 
 
 def test_the_retired_patterns_pass_the_true_sentences_that_share_their_words() -> None:

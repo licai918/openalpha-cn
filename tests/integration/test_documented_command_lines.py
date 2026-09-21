@@ -86,12 +86,16 @@ REPOSITORY_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 
 FENCE: Final[re.Pattern[str]] = re.compile(r"^```(\w*)\s*$")
 INVOCATION: Final[re.Pattern[str]] = re.compile(r"^(?:uv run )?openalpha ")
-ELISION: Final[tuple[str, ...]] = ("...", "…", "<")
-"""What makes a line prose about a command rather than a command.
+ELISION: Final[tuple[str, ...]] = ("...", "…")
+"""What makes a line prose about a command rather than a command: an argument left unwritten."""
 
-`...` and `…` stand for arguments the prose does not give; `<` opens the other spelling of
-the same thing -- `--year <year>`, `sla_<yesterday>` -- which only `src/` docstrings use, and
-which would otherwise be read as a shortlist address the store never issued.
+PLACEHOLDER: Final[re.Pattern[str]] = re.compile(r"<[^>]*>")
+"""The other spelling of an unwritten argument, inside an otherwise whole line.
+
+`openalpha panel build --dataset trade_cal --year <year>` names a command and five real
+options; only the value is a stand-in. Dropping the whole line for it -- which this file did
+for one round -- took 11 of the 29 lines in `src/` docstrings out of every check, so a rename
+of `--dataset` would have gone unseen there. The line is read; the value is what a check skips.
 """
 
 runner = CliRunner()
@@ -144,6 +148,9 @@ NOT_EXECUTED: Final[MappingProxyType[str, str]] = MappingProxyType(
         "is honest: no evidence run has been made against the generated names, and the "
         "documented line assumes the research plane the section before it describes",
         "shortlist get": "its argument is the placeholder `sla_0123456789abcdef01234567`",
+        "shortlist compare": "`shortlist get`'s reason twice over: the two addresses its "
+        "`--help` prints are `sla_<yesterday>` and `sla_<today>`, stand-ins for two runs "
+        "of a command this fixture cannot make",
         "shortlist list": "reads a store the placeholder above never filled, so `0` here would "
         "assert nothing the empty listing does not already",
         "model prediction": "its argument is the placeholder `prd_0123456789abcdef01234567`",
@@ -416,8 +423,8 @@ def test_a_documented_shortlist_address_has_the_shape_the_store_issues(
         named, list(rest), resilient_parsing=True
     )
     address = context.params.get("shortlist_id")
-    if address is None:
-        return
+    if address is None or PLACEHOLDER.search(str(address)):
+        return  # `sla_<yesterday>` is a stand-in; the line's command and options are still read
 
     assert SHORTLIST_ID_PATTERN.fullmatch(str(address)), (
         f"{line.document}:{line.line_number} names {address!r}, which "
