@@ -63,13 +63,15 @@ and drawings. A reworded claim is
 therefore left to review and to the census of the documents, not to a pattern: a pattern is not
 widened to catch a paraphrase whose words a true sentence shares, and when a pattern catches a
 true sentence the pattern is narrowed. Most spans of the entries `D14` added or broadened stop
-at 不, 未, 没 or 无 (`_NO_DENIAL`, `_NO_COMMA_OR_DENIAL`), and some patterns look behind for a
-denial just before their first word; `D13`'s older entries do so only where a true sentence was
-caught. Elsewhere a denial reads as the claim it denies ("不能分别启停"), and a claim whose span
-holds 不可变 or 无 in another sense is missed by the entries that stop at a denial. A premise
-reads one fact, not the whole of `refuted_by`, so a premise that stays quiet does not prove the
-claim still false. The ledger's premise sees a call, a bound alias and a `getattr` with the
-literal name of `append_decision`, never a name built at run time; the portfolio premise reads
+at 不, 未, 没 or 无 (`_NO_DENIAL`, `_NO_COMMA_OR_DENIAL`), the census round's four families
+read the whole clause for one (`_NO_EARLIER_DENIAL`, `_NO_DENIAL_IN_CLAUSE`), and some
+patterns look behind for a denial just before their first word; `D13`'s older entries do so
+only where a true sentence was caught. Elsewhere a denial reads as the claim it denies
+("不能分别启停"), and a claim whose span holds 不可变 or 无 in another sense is missed by the
+entries that stop at a denial. A premise reads one fact, not the whole of `refuted_by`, so a
+premise that stays quiet does not prove the claim still false. The ledger's premise sees a
+call, a bound alias and a `getattr` with the literal name of `append_decision`, never a name
+built at run time; the portfolio premise reads
 the functions that drive the simulator, not a helper one of them calls. The diagrams' two
 generators are read too, one string literal at a time (`tests/diagram_text.py`'s
 `diagram_strings`): a claim split across two literals, computed at run time, or drawn as a line
@@ -136,6 +138,25 @@ _NO_DENIAL: Final[str] = r"[^。;\N{FULLWIDTH SEMICOLON}不未没无]"
 
 _NO_COMMA_OR_DENIAL: Final[str] = r"[^。;\N{FULLWIDTH SEMICOLON}，,不未没无]"
 """The same inside one phrase: a span that stops at a comma too."""
+
+_NO_EARLIER_DENIAL: Final[str] = r"\A[^不未没无]*?"
+"""Nothing denied before the claim: a prefix that reaches the claim only across no 不, 未, 没, 无.
+
+A span class stops a pattern *inside* its own words. It cannot see 「PIT 查询**不会**只返回当时可
+知的版本」, where the denial sits before the first word a pattern reads. Anchoring at the clause's
+start and crossing no denial to get there is what sees it, and it is the weakest guard that does:
+a family whose own retired wordings open with a denial (「不受后来修订干扰」) still matches, because
+the prefix may cross nothing at all.
+"""
+
+_NO_DENIAL_IN_CLAUSE: Final[str] = r"\A(?![\s\S]*[不未没无])[\s\S]*?"
+"""Nothing denied anywhere in the clause: for families whose retired wordings hold no denial.
+
+「换手、容量这两个词在报告里都**找不到**。」 denies the claim after the words a pattern reads, so no
+prefix can see it. These three families -- the multi-day report, the versioned extension
+contracts, and every signal citing evidence -- retired twenty wordings between them and not one
+holds 不, 未, 没 or 无, so a clause that holds one is not a wording of theirs.
+"""
 
 
 # --- Reading the code facts -------------------------------------------------------------------
@@ -1972,7 +1993,8 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     RetiredClaim(
         name="a historical read sees only the version knowable at the time",
         pattern=re.compile(
-            rf"(?<![不未没无])(?:只|仅)能?(?:读到|读取|返回|接收|收){_NO_COMMA_OR_DENIAL}{{0,6}}"
+            rf"{_NO_EARLIER_DENIAL}(?:"
+            rf"(?:只|仅)能?(?:读到|读取|返回|接收|收){_NO_COMMA_OR_DENIAL}{{0,6}}"
             r"(?:当时|决策时刻)(?:已经)?(?:可知|可见)的?\s*(?:版本|evidence_id)"
             rf"|选择{_NO_COMMA_OR_DENIAL}{{0,4}}可见版本"
             rf"|不受{_NO_COMMA}{{0,6}}修订{_NO_COMMA}{{0,2}}干扰"
@@ -1981,7 +2003,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             rf"|四时钟{_NO_COMMA_OR_DENIAL}{{0,6}}(?:约束|保证|确保|阻止){_NO_COMMA}{{0,12}}"
             r"(?:可见|可知|只读|只看到|未来信息)"
             r"|不会偷看后来才(?:知道|可知)|恢复当时的?信息边界"
-            r"|(?<!no\s)(?<!not\s)strict\s+anti-look-ahead",
+            r"|(?<!no\s)(?<!not\s)strict\s+anti-look-ahead)",
             re.IGNORECASE,
         ),
         refuted_by=(
@@ -2018,10 +2040,9 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     RetiredClaim(
         name="the multi-day report measures capacity and attributes exposure",
         pattern=re.compile(
+            rf"{_NO_DENIAL_IN_CLAUSE}(?:"
             rf"换手{_NO_COMMA}{{0,2}}(?:最大订单)?容量"
-            r"|(?<![不无未没])最大订单容量"
-            r"|容量\s*(?:与|和|、|\N{MIDDLE DOT})\s*(?:标的)?(?:暴露|归因)"
-            r"|(?<!没有)(?<![不无未没])(?:标的)?暴露归因"
+            r"|容量\s*(?:与|和|、|\N{MIDDLE DOT})\s*(?:标的)?(?:暴露|归因))"
         ),
         refuted_by=(
             "PortfolioBacktestReport holds the total, benchmark and active returns, turnover, "
@@ -2045,13 +2066,19 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     ),
     RetiredClaim(
         name="Tool, Risk and Validator are versioned extension contracts",
-        pattern=re.compile(r"(?:Provider|ResearchAgent|Agent)\s*[、/]\s*Tool\s*[、/]\s*Risk"),
+        pattern=re.compile(
+            rf"{_NO_DENIAL_IN_CLAUSE}"
+            r"(?:Provider|ResearchAgent|Agent)\s*[、/]\s*Tool\s*[、/]\s*Risk"
+            r"\s*(?:[、/]|和|与)\s*Validator"
+        ),
         refuted_by=(
             "OpenAlphaSDK takes runtime_dir, clock, agents and features (sdk.py:131-138), and a "
             "DataProvider is the other interface a caller implements (providers/base.py:170-178). "
-            "ResearchTool is a Protocol satisfied only by EvidenceLookupTool, which no shipped "
-            "path constructs or calls (tools/base.py:54, tools/evidence.py:7, "
-            "runtime/router.py:70-86); RiskGate and OutcomeValidator are concrete classes the "
+            "ResearchTool is a Protocol satisfied only by EvidenceLookupTool "
+            "(tools/base.py:54, tools/evidence.py:7), which no shipped path constructs or "
+            "calls -- run_cycle reaches an agent and nothing else (runtime/engine.py:87-200) "
+            "-- and whose one import under src/ is the package re-export "
+            "(tools/__init__.py:3); RiskGate and OutcomeValidator are concrete classes the "
             "engine, the SDK and the routes construct themselves (runtime/engine.py:73, "
             "sdk.py:321, api/app.py:2345). None of the three carries a version: ContractVersions "
             "registers the evidence, signal, decision ledger, run manifest, validation result, "
@@ -2069,9 +2096,10 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
     RetiredClaim(
         name="every signal an agent emits cites evidence",
         pattern=re.compile(
+            rf"{_NO_DENIAL_IN_CLAUSE}(?:"
             r"(?<!方向性)(?<!方向性\s)SignalFrame\s*必须(?:携带\s*evidence_ids|写明证据引用)"
             r"|(?<!并非)(?<!不是)所有输出必须引用\s*`?evidence_id"
-            r"|(?<!并非)(?<!不是)每项输出都引用\s*`?evidence_id"
+            r"|(?<!并非)(?<!不是)每项输出都引用\s*`?evidence_id)"
         ),
         refuted_by=(
             "SignalFrame.validate_conclusion demands evidence_ids of a directional signal only; an "
@@ -2484,7 +2512,7 @@ TRUE_SENTENCES_THAT_SHARE_THE_WORDS: Final[tuple[str, ...]] = (
     "`doctor --probe` 的探测结果里，只有 `authentication` 会让命令非零退出\N{FULLWIDTH SEMICOLON}"
     "`upstream` 与 `rate_limit` 按数据集上报，不影响退出码。",
     "`--waive-max-staleness` 仍是 `factor build` 接受的旗标，"
-    "但实测每一档都以 exit 1 被引擎按名拒绝。",
+    "`V2-P4-100` 实测它以 exit 1 被引擎按名拒绝。",
     "整个委员会是一次可选的显式调用（`POST /api/v1/research/deliberate`、"
     "`OpenAlphaSDK.deliberate`），不能只开其中一方。",
     "实时研究与历史回放共用 `run_cycle`，避免线上逻辑和回放逻辑各走一套\N{FULLWIDTH SEMICOLON}"
@@ -2540,6 +2568,20 @@ TRUE_SENTENCES_THAT_SHARE_THE_WORDS: Final[tuple[str, ...]] = (
     "不是每项输出都引用 evidence_id，弃权不带证据。",
     "每项方向性输出都引用 evidence_id，弃权写明原因。",
     "Python SDK 的调用从不走 HTTP 边界。",
+    "多日报告给出换手，没有最大订单容量。",
+    "多日报告不给最大订单容量，也不给标的暴露归因。",
+    "换手、容量这两个词在报告里都找不到。",
+    "报告里既没有容量与暴露归因，也没有容量模型。",
+    "Agent、Tool、Risk 都不是版本化合同。",
+    "ResearchAgent/Tool/Risk 没有版本号。",
+    "Provider、Tool、Risk 三个合同里只有 Provider 可以扩展。",
+    "稳定、版本化的 Provider / Agent / Tool / Risk / Validator 合同并不存在。",
+    "并非 SignalFrame 必须携带 evidence_ids，弃权可以不带。",
+    "所有输出必须引用 evidence_id 的说法不成立。",
+    "PIT 查询不会只返回当时可知的版本，修订过的记录照样返回。",
+    "历史研究并不能只读到当时可知的版本。",
+    "该仓库没有 strict anti-look-ahead 规则。",
+    "系统不会恢复当时的信息边界，只恢复可得边界。",
 )
 """True or unrelated sentences that share a retired pattern's words. The review of `D13` measured
 the first six being caught (its M1): client holds cli, 移动平均 holds 移动, and a rejection and a
@@ -2604,7 +2646,11 @@ families were added -- then sixteen probes of those families, each a rewrite's w
 denial; one of them, a denial before strict anti-look-ahead, was caught until that branch looked
 behind for no and not. The last one is the fix round's review (its third minor): an SDK call
 that skips the HTTP boundary, true with 边界 and false without it, which entry 15 -- a `D13`
-entry, unchanged since -- caught until it looked ahead for that word."""
+entry, unchanged since -- caught until it looked ahead for that word. The last fourteen are
+the census round's review (its I-1): the sentences a reader writes to record what a report
+does *not* do, which the census round's four families caught until two clause-level guards
+were added -- no denial before the claim, and, for the three families whose retired wordings
+hold no denial at all, none anywhere in the clause."""
 
 
 def test_the_retired_patterns_pass_the_true_sentences_that_share_their_words() -> None:

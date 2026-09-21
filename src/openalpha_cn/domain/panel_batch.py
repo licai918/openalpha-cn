@@ -562,7 +562,7 @@ class ColumnarPanelBatch:
                 )
 
     def _check_visible_at_as_of(self) -> None:
-        """The four-clock point-in-time contract, enforced in one step.
+        """The point-in-time contract of the four-clock batch, enforced in one step.
 
         `all(available_time <= as_of)` holds iff `max(available_time) <= as_of`, and the
         maximum is attained by a real row, so a single late row cannot hide among compliant

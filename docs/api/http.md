@@ -703,7 +703,8 @@ find out why the run broke.
 
 What that proves and what it does not: the run is resolved, the **signal** is not. No store
 this route reads holds the frame a run produced — the aggregate `SignalFrame` is never
-persisted, only its ID in `decisions.signal_ids`, and a whole frame is stored only in the
+persisted, only its ID in `decisions.signal_ids` and only when it is not an abstention,
+and a whole frame is stored only in the
 recovery plane's node checkpoints — so there is nothing to resolve one against, and a
 caller holding a real `run_manifest_id` can still file an invented conclusion under it. The
 property delivered is that a published `run_manifest_id` resolves to a run this deployment

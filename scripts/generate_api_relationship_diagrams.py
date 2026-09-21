@@ -233,7 +233,7 @@ def landscape() -> str:
     svg = Svg(
         index=1,
         title="API 全景｜四类入口与五条 v1 研究功能链",
-        subtitle="REST 调用方经同一 FastAPI 边界进入，SDK 与 CLI 在进程内调用同一批服务；面板、因子、候选榜、模型与调度的 v2 路由未画入。",
+        subtitle="REST 调用方经同一 FastAPI 边界进入，SDK 与 CLI 在进程内调用同一批服务；面板、因子、候选榜、模型与调度五个 v2 平面的路由未画入，它们同样在 /api/v1 下。",
     )
     svg.section(x=64, y=194, text="调用入口", color=COLORS["slate"])
     # Only an HTTP caller crosses the FastAPI boundary: a REST client, and the React workbench,

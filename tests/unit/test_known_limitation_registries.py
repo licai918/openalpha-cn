@@ -319,7 +319,8 @@ that the winsorizer's clip block is reconstructed from a tie at the maximum and 
 over-reports in the safe direction, that the cross section it screens is the newest one
 *visible* at the `as_of` and may be older than it, that the evidence plane's answers are
 supplied rather than run (no store this face reads holds the frame a run produced -- the
-aggregate `SignalFrame` is never persisted, only its ID in `decisions.signal_ids` -- and what
+aggregate `SignalFrame` is never persisted, only its ID in `decisions.signal_ids`, and not
+even that when it abstains -- and what
 keeps `run_cycle` out is layering: a panel-plane screen would also become an agent invocation),
 and
 that a neutralized-tier screen needs an exposure cross section this face does not load. It

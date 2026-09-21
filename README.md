@@ -23,7 +23,7 @@
 ### 🇨🇳 A 股原生证据体系
 
 - **本土市场语义**：原生规范化涨停、炸板、连板、题材、催化、公告和资金观察，不把海外市场字段生硬套用到 A 股。
-- **四时钟防前视**：分别记录事件发生、首次可知、系统入库和数据修订时间；可见性只看首次可知时间，历史研究只能读取决策时刻已经可得的证据；修订晚于首次可知的记录带 `revised_after_initial_availability` 标记、被风险门降级，不会只因修订晚于决策时刻就被挡在门外。
+- **四时钟与可见性**：分别记录事件发生、首次可知、系统入库和数据修订时间；可见性只看首次可知时间，历史研究只能读取决策时刻已经可得的证据；修订晚于首次可知的记录带 `revised_after_initial_availability` 标记、被风险门降级，不会只因修订晚于决策时刻就被挡在门外。
 - **交易规则内建**：覆盖 T+1、100 股整手、停牌、涨跌停锁单和交易成本约束。
 - **链邻客户端合同**：已实现 `chainlin-data/v1` 合同型 Provider（Bearer 认证、客户端限流、错误分类、冻结合约测试）；出厂路径只有 `openalpha doctor` 用它报告凭据、探测连通性，证据与面板构建都不调用它。
 
@@ -271,8 +271,8 @@ OpenAlpha CN 不把“多接几个行情 API”当作数据优势。优势落在
 合法来源 / 用户自有数据
 → event_time / available_time / ingested_time / revision_time
 → 内容寻址 Evidence Snapshot
-→ 仅使用决策时刻可见信息
-→ 智能体、风险与决策完整引用 evidence_id
+→ 仅使用可得时间不晚于决策时刻的证据
+→ 智能体的方向性输出与决策引用 evidence_id，风险门读风险标记
 → 同路径回放、结果验证与归因
 ```
 
@@ -726,7 +726,8 @@ namechange --year <year>` -- and ask this run for that year too.
 **这条性质证明了什么、没证明什么：被解析的是那次运行，不是它旁边的信号。** 这条路能读到的存储里
 没有那次运行产出的 `SignalFrame`——运行仓库存的是 `RunManifest` 与 `DecisionLedger`，报告存的是
 `signal_id`，而一次运行汇总出的那个 `SignalFrame` 根本不落库，只有它的 ID 记在 `decisions.signal_ids`
-里（整份 `SignalFrame` 只在恢复平面的节点 Checkpoint 里存过）；没有东西可以拿来对信号，
+里，弃权的运行连这个 ID 也不记（整份 `SignalFrame` 只在恢复平面的节点 Checkpoint 里存过）；
+没有东西可以拿来对信号，
 一个手里有真实 `run_manifest_id` 的调用者，仍然可以在它
 名下填一个杜撰的结论。交付的性质是「发出去的 `run_manifest_id` 能解析到本部署持有的一次运行」，
 不是「它旁边的结论是那次运行跑出来的」。

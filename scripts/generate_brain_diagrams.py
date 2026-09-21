@@ -380,7 +380,7 @@ def overview() -> None:
     svg.arrow(696, 331, 716, 331, color=VIOLET)
     svg.path("M877 418V430H535V440", color=AMBER, dashed=True)
     svg.path("M1002 418V429H944V440", color=BLUE, dashed=True)
-    svg.path("M780 614V650H1054V331H1038", color=AMBER, dashed=True)
+    svg.path("M780 614V676H1054V331H1038", color=AMBER, dashed=True)
     svg.pill(790, 636, 250, "人工复核后调整规则 · 不自动训练模型", color=AMBER)
     svg.arrow(339, 331, 374, 331, color=CYAN, label="规范化", label_y=315)
 

@@ -58,6 +58,7 @@ paid.
 
 from __future__ import annotations
 
+import ast
 import re
 import shlex
 from datetime import UTC, date, datetime
@@ -85,7 +86,13 @@ REPOSITORY_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 
 FENCE: Final[re.Pattern[str]] = re.compile(r"^```(\w*)\s*$")
 INVOCATION: Final[re.Pattern[str]] = re.compile(r"^(?:uv run )?openalpha ")
-ELISION: Final[tuple[str, ...]] = ("...", "…")
+ELISION: Final[tuple[str, ...]] = ("...", "…", "<")
+"""What makes a line prose about a command rather than a command.
+
+`...` and `…` stand for arguments the prose does not give; `<` opens the other spelling of
+the same thing -- `--year <year>`, `sla_<yesterday>` -- which only `src/` docstrings use, and
+which would otherwise be read as a shortlist address the store never issued.
+"""
 
 runner = CliRunner()
 
@@ -140,6 +147,9 @@ NOT_EXECUTED: Final[MappingProxyType[str, str]] = MappingProxyType(
         "shortlist list": "reads a store the placeholder above never filled, so `0` here would "
         "assert nothing the empty listing does not already",
         "model prediction": "its argument is the placeholder `prd_0123456789abcdef01234567`",
+        "report export": "`report create`'s reason: the `rpt_0123456789abcdef` its "
+        "`--help` prints is a placeholder, and the store a real id would resolve in is the "
+        "one `report create` fills",
         "portfolio construct": "its argument is the placeholder `sla_0123456789abcdef01234567`",
         "portfolio turnover-variants": "`portfolio construct`'s reason: its argument is the "
         "placeholder `sla_0123456789abcdef01234567`, which is a shape the store could have "
@@ -262,20 +272,54 @@ def _undeclared_options(command: object, rest: list[str]) -> list[str]:
     ]
 
 
+def _docstring_blocks(path: Path) -> list[tuple[str, int, str]]:
+    """Every docstring of one module, as `("python", first line number, text)`.
+
+    A command line printed by `--help` is documentation a reader follows exactly as they follow
+    one in `README.md`, and until this existed nothing read it: `V2-P4-100`'s row is the story
+    of a fix applied to a `--help` example and not to its copies, and this repository has just
+    had the reverse -- `cli.py`'s three printed examples carried `sl_2026_03_02` and an
+    `openalpha research run` line missing the two options its own body refuses, while the
+    README copies were being fixed. Read off the syntax tree rather than by a fence, because a
+    docstring's block is marked with `::` and indentation, which no fence scanner would find.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    blocks: list[tuple[str, int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        text = ast.get_docstring(node, clean=False)
+        if not text or "openalpha " not in text:
+            continue
+        first = node.body[0]
+        blocks.append(("python", first.lineno, text))
+    return blocks
+
+
 def _documented_lines() -> tuple[DocumentedLine, ...]:
-    """Every documented invocation in the two READMEs and `docs/`, in document order.
+    """Every documented invocation in the two READMEs, `docs/` and `src/`, in document order.
 
     Lines carrying an elision (`...`, `…`) are dropped rather than declared, because they are
     prose about a command rather than a command: `openalpha model prediction prd_…` names no
     argument at all. Everything else is here, and `test_the_documents_still_carry_command_lines`
     pins the count so that a fence renamed to `text` cannot silently empty this file.
+
+    `src/**/*.py` is read for its docstrings rather than for fences (`_docstring_blocks`), so a
+    command line a reader meets through `--help` is held to the same two checks as one in a
+    README: the command and its options exist, and an address has the shape its store issues.
     """
     documents = [REPOSITORY_ROOT / "README.md", REPOSITORY_ROOT / "README.en.md"]
     documents += sorted(REPOSITORY_ROOT.joinpath("docs").rglob("*.md"))
+    modules = sorted(REPOSITORY_ROOT.joinpath("src").rglob("*.py"))
 
     found: list[DocumentedLine] = []
-    for path in documents:
-        for language, number, body in _fenced_blocks(path.read_text(encoding="utf-8")):
+    for path in [*documents, *modules]:
+        blocks = (
+            _docstring_blocks(path)
+            if path.suffix == ".py"
+            else _fenced_blocks(path.read_text(encoding="utf-8"))
+        )
+        for language, number, body in blocks:
             for raw in _invocations(body, language):
                 if any(mark in raw for mark in ELISION):
                     continue
@@ -352,6 +396,17 @@ def test_a_documented_shortlist_address_has_the_shape_the_store_issues(
     for the parameter it calls `shortlist_id`, and the shape is the store's own
     `SHORTLIST_ID_PATTERN`, matched as the store matches it. So this follows a rename of either
     without being told about it, and it says nothing about commands that take no address.
+
+    **The other defect of the same round has no such check, and the reason is measured.**
+    `README.md`'s `openalpha research run` line left `--subject` and `--as-of` at their defaults,
+    which the command's own body refuses (`cli.py:1201-1207`) -- and no rule over the parameter
+    list can see it. Twelve commands declare an `--as-of`: `evidence build` and `factor build`
+    require it, and the other ten default to `""`, so `click` refuses none of them and a check
+    keyed on `Parameter.required` reads every one as satisfied. Whether an empty value is then
+    refused is a fact about each body rather than about its signature -- `research run`'s
+    refuses it, and `panel doctor`'s reads it as the wall clock, which is why that command sits
+    in `NOT_EXECUTED` above. What a check here could see is a value that is *given* and does not
+    parse, which is not the defect this file met.
     """
     command, rest, named = _resolve(list(line.argv))
     if _is_group(command):
