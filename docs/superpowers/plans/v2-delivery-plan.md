@@ -230,7 +230,39 @@ D13 整批终审（`final-review-d13.md`，Critical 0 / Important 4 / Minor 11�
   - C：台账、D1 与两处过时的 docstring；
   - 另一代理：修改写 checkout 的测试。
 
+#### D14 结果
+
+- **合并。** 先合 C、A（含后续）、B2 与「写 checkout 的测试」修复（11 个提交，只改 `tests/`），主分支到 `68a15f3`；随后合 B1 的 15 个提交，主分支到 `f194365`。每次合并前后都跑门禁。
+- **声称普查。** 六个只读普查员以 `29e26f3` 为准，逐节通读 marketing 100 节、`README.md`、`README.en.md`、`docs/why-openalpha-cn.zh-CN.md` 与两个图生成器的文字。主表 88 条，另有 21 条补充意见。88 条全部处理，判为不成立 0，悬置 0；另有一条文档级裁定保留并写明依据（`why:5`）。由此发现一族新问题：修订数据的前视，见下节。
+- **B1 七轮，15 个提交。** 修轮（守卫先收窄）→ 普查主表 → 改派项与修轮 Minor → 普查评审的 1 Critical / 5 Important / 7 Minor 与台账三行 → 终审两条 Important → 收尾三条 Minor → 提交信息更正与图的几何规则。
+- **六轮独立评审加两次图子审计**：0/0/7、1/5/7、0/2/7、0/0/3、0/1/3、0/0/1；图子审计另报 0/2/6。
+- **本批查实并改掉的实质错误（举其要）：**
+  - 四份文档、`docs/api/data-interface.zh-CN.md` 与功能台账 `OA-TIME-003` 都声称四个时钟共同决定历史可见性，而代码只比较 `available_time`；
+  - 「408/429/5xx 重试」，而代码只把六个状态码标为可重试，共 10 处；
+  - 「本仓库不存 SignalFrame」，而恢复平面整份保存、一次运行汇总出的帧只存 ID，共 4 处（含 `src/` 两条 limitation）；
+  - README 两条命令照抄跑不通（缺参数、地址形状非法），并补上了能抓住这类缺陷的检查；
+  - 图上把 `/api/v1` 的路由说成「v2 路由」；
+  - 退役守卫自己也抄了一句错话（`ResearchTool` 在 `src/` 无导入者，而 `tools/__init__.py:3` 就导入了）；
+  - 十张图的箭头因依赖 SVG 2 的 `context-stroke`，在本机渲染中共 126 个变成纯黑。
+- **守卫终态。** 46 条目、208 条退役措辞、339 句真句、42 条 premise。否定处理收到「命中所在的逗号分段」，并把三条真实整句收进 `retired` 作为回归防线。
+- **`src/` 改动。** 本批 `src/` 只有 `backtest/replay.py` 的行为改动（早于 B1 各轮），其余全是文字：`cli.py` 的 docstring 示例、`runtime/router.py` 的 detail、`shortlist_view.py` 两条 limitation、`domain/panel_batch.py` 的函数 docstring。AST 比对确认零逻辑改动。
+- **合并门禁（`f194365`）：** `tests/unit` 3536；九个文档守卫与四个点名文件、`tests/replay`、链邻合约共 432；五道静态门全 0；台账 185 / 180 / legacy 26 / unknown 0 / unreviewed 0；会话级 checkout 检查零报告，工作区干净，无 `.grimp_cache`。
+- **过程教训（供后续批次用）：**
+  - 守卫只认被点名的原句，所以每一族都要做全文清扫，而且要由独立的人做第二遍；
+  - 模式测试若只喂 `retired` 片段，就测不出「整句上漏检」这类回归，要按分句喂；
+  - 几何改动会互相牵连：加宽一张卡片使一条连线的起点落进卡内，是本批自己引入又自己抓到的回归；
+  - 按抽样点去量 24u 见方的箭头头部会得出相反的结论，需要整幅逐像素比对。
+
+
 ## 不在本批（需要你决定）
+- **修订过的数据，要不要按 as_of 挡掉。**
+  - 可见性只比较 `available_time`：`domain/time.py:34-36` 的 `is_visible_at`，以及证据存储的查询 `storage/parquet.py:104`。
+  - `revision_time` 晚于 `available_time` 的快照，会被 `evidence/builder.py:134-135` 标上 `revised_after_initial_availability`。这个标记的严重度是 `reduced`（`domain/risk_flag.py:167`），风险门对它给出 reduce，不给 block（`decisions/risk.py:48-51`）。
+  - 所以，as_of 之后才修订的版本，在 as_of 当时照样可见，只是带着标记、被降一级。
+  - 四份面向用户的文档、`docs/api/data-interface.zh-CN.md` 与功能台账 `OA-TIME-003` 原先都声称四个时钟共同决定可见性，现已全部改为如实描述。
+  - 二选一：
+    - 保持今天的「标记加降级」；
+    - 在可见性判断里加上 `revision_time <= as_of`。若修订前的版本没有另存为独立快照，这样做等于在修订生效之前把整条数据藏起来；它会改变研究与回放的结果，需要重跑 e2e。
 - **`TERMINAL_STATUSES`**（台账 `coverage_status` 的取值集合，`scripts/build_feature_coverage.py:18`）缺一个表示「已窄化」的值。
   这是状态表的设计决定，不是一行能顺手发明的。
 - **FK 守卫三条残留**（等量替换、别名×不守命名约定相乘、九个 store 只断言 pragma 读回值）：已具名记录，风险低。
