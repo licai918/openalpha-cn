@@ -23,7 +23,7 @@
 ### 🇨🇳 A 股原生证据体系
 
 - **本土市场语义**：原生规范化涨停、炸板、连板、题材、催化、公告和资金观察，不把海外市场字段生硬套用到 A 股。
-- **四时钟与可见性**：分别记录事件发生、首次可知、系统入库和数据修订时间；可见性只看首次可知时间，历史研究只能读取决策时刻已经可得的证据；修订晚于首次可知的记录带 `revised_after_initial_availability` 标记、被风险门降级，不会只因修订晚于决策时刻就被挡在门外。
+- **四时钟与可见性**：分别记录事件发生、首次可知、系统入库和数据修订时间；可见性要求首次可知与修订时间都不晚于决策时刻，修订晚于决策时刻的记录在决策时刻不可见；决策前修订过的记录带 `revised_after_initial_availability` 标记、被风险门降级。两处剩余缺口：同日只差 `update_flag` 的财报更正对，时钟分不开；面板只存了更正后那一版的，在 `[ann_date, f_ann_date)` 内该期不可见——是缺失，不是前视。
 - **交易规则内建**：覆盖 T+1、100 股整手、停牌、涨跌停锁单和交易成本约束。
 - **链邻客户端合同**：已实现 `chainlin-data/v1` 合同型 Provider（Bearer 认证、客户端限流、错误分类、冻结合约测试）；出厂路径只有 `openalpha doctor` 用它报告凭据、探测连通性，证据与面板构建都不调用它。
 
@@ -90,7 +90,7 @@ OpenAlpha CN 不是把智能体角色堆在一起，而是把 **A 股事实、�
 <p align="center">
   <img
     src="./assets/diagrams/openalpha-brain-02-evidence.svg"
-    alt="OpenAlpha CN 授权数据、Provider 治理、四时钟记录、可得时间可见性与 EvidenceSnapshot 证据平面图"
+    alt="OpenAlpha CN 授权数据、Provider 治理、四时钟记录、可得与修订时间可见性与 EvidenceSnapshot 证据平面图"
     width="1200"
   />
 </p>
@@ -271,7 +271,7 @@ OpenAlpha CN 不把“多接几个行情 API”当作数据优势。优势落在
 合法来源 / 用户自有数据
 → event_time / available_time / ingested_time / revision_time
 → 内容寻址 Evidence Snapshot
-→ 仅使用可得时间不晚于决策时刻的证据
+→ 仅使用可得时间与修订时间都不晚于决策时刻的证据
 → 智能体的方向性输出与决策引用 evidence_id，风险门读风险标记
 → 同路径回放、结果验证与归因
 ```
@@ -661,7 +661,7 @@ namechange --year <year>` -- and ask this run for that year too.
 ——命令行把 `""` 当成「没给」，于是发出去的榜盖着一个调用者从没声明过的 commit。
 
 **读的是哪个横截面，什么时候读的。** 因子档按你给的 `--as-of` 读，`read_visible_at` 会把
-`available_time` 晚于它的行滤掉；而**打分之后用来定价的一切**——日历、登记簿、K 线、涨跌停
+`available_time` 或 `revision_time` 晚于它的行滤掉；而**打分之后用来定价的一切**——日历、登记簿、K 线、涨跌停
 带、停牌、名称历史——按解析出来的那个横截面**自己的时刻**读。所以一个两周前建的横截面，是拿
 它自己那个交易日的市场去撮合的，绝不会被丢到一个它的因子值从没见过的更晚的会话上。
 `cross_section.as_of` 与 `cross_section.pricing_session` 出现在每一个答案里。
@@ -1159,7 +1159,7 @@ JSON 文档；回放写进 SDK 与 REST 各自的回放库。
 
 链邻 API、用户文件、Tushare 和可选 AKShare Adapter 位于调用方或 Provider 侧。
 `POST /api/v1/evidence/build` 只接收结构化 `ProviderMetadata + ProviderBatch`，不会在
-服务端自动抓取数据。记录通过 Schema、四时钟校验、可得时间可见性和 A 股事件规范化后生成内容寻址的
+服务端自动抓取数据。记录通过 Schema、四时钟校验、可得与修订时间可见性和 A 股事件规范化后生成内容寻址的
 `EvidenceSnapshot`，写入 Parquet；证据、市场事件和题材接口按 `as_of` 把可见证据返回给调用方，研究时由调用方把证据放进请求体，研究路由不读证据库。
 
 <p align="center">

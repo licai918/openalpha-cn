@@ -29,8 +29,14 @@ premise and each red on the documents before they were rewritten -- a historical
 only the version knowable at the time, a multi-day report that measures capacity and attributes
 exposure, Tool/Risk/Validator as versioned extension contracts, and every agent signal citing
 evidence -- and two older entries were extended by one branch each, for a batch item that keeps
-a structured signal and a risk decision, and for models sharing one replay contract. An entry of
-`RETIRED_CLAIMS` holds:
+a structured signal and a risk decision, and for models sharing one replay contract. When
+visibility began to wait for the revision clock, the first of those four kept its entry and
+changed its reason: its premise had read the one fact that change reversed, so it now reads the
+one that still refutes the claim, a same-day correction's clocks. The wordings the change made
+false -- a record revised after `as_of` staying visible, or visibility read off the availability
+clock alone -- became an entry of their own, red on the four documents before they were
+rewritten, and the thirteen sentences that had pinned them as true left the list of true
+sentences for its `retired`. An entry of `RETIRED_CLAIMS` holds:
 
 - `pattern`: the family of wordings that was retired, searched in every clause of the four
   documents as `tests/prose_clauses.py` reads them;
@@ -39,7 +45,8 @@ a structured signal and a risk decision, and for models sharing one replay contr
   three the final round added, `20fec55` for what `D14`'s first two commits added, or `43b40a7`
   for what its later commits, its fix round and the census round added -- between the two, only
   `cli.py` from :4914 on and a docstring in `backtest/replay.py` moved, and `src/` is unchanged
-  from `43b40a7` through `1be62ce`, where the census round's four were read;
+  from `43b40a7` through `1be62ce`, where the census round's four were read; the two entries
+  the revision-clock round rewrote or added cite `src/` as that round left it;
 - `retired`: what it retired, verbatim -- the clause, or the part of it the claim sits in -- as it
   stood at `d4ef5e4`, on `16db458` for `D13`'s own five, or at `20fec55` for what `D14` retired,
   and at `29e26f3` for the four wordings its fix round retired that `D14` had written itself;
@@ -936,6 +943,44 @@ def _a_same_day_correction_still_has_no_instant_of_its_own() -> str | None:
         f"a same-day update_flag correction now gets clocks of its own ({correction} against "
         f"{original}): re-read whether a historical read still sees more than the version "
         "knowable at the time"
+    )
+
+
+def _visibility_still_waits_for_the_revision_clock() -> str | None:
+    """`is_visible_at` reads `available_time` and `revision_time`, and the evidence store's query
+    filters on both -- read from `domain/time.py`'s syntax tree and from the query's WHERE clauses.
+
+    The inverse of the premise the version family carried until visibility began to wait for the
+    revision clock: that one reported the day the second clock arrived, and this one reports the
+    day it leaves, which is the day a record revised after `as_of` would be visible again.
+    """
+    tree = ast.parse((SRC / "domain" / "time.py").read_text(encoding="utf-8"))
+    visible = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "is_visible_at"
+    )
+    read = sorted(
+        {
+            node.attr
+            for node in ast.walk(visible)
+            if isinstance(node, ast.Attribute) and node.attr.endswith("_time")
+        }
+    )
+    query = (SRC / "storage" / "parquet.py").read_text(encoding="utf-8")
+    filtered = sorted(
+        {
+            clock
+            for where in re.findall(r"WHERE(.*?)ORDER BY", query, re.DOTALL)
+            for clock in re.findall(r"(\w+_time)\s*<=", where)
+        }
+    )
+    both = ["available_time", "revision_time"]
+    if read == both and filtered == both:
+        return None
+    return (
+        f"is_visible_at reads {read} and the evidence query filters on {filtered}: re-read "
+        "whether a record revised after as_of is visible again"
     )
 
 
@@ -2059,6 +2104,79 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         premise=_a_same_day_correction_still_has_no_instant_of_its_own,
     ),
     RetiredClaim(
+        name="a record revised after as_of stays visible",
+        pattern=re.compile(
+            r"可见性只看(?:首次可知|可得)时间"
+            r"|只有可得时间决定"
+            r"|只检查可得时间"
+            r"|修订(?:时间|时钟)不参与"
+            r"|不按修订时间"
+            r"|按可得时间(?:返回|筛)"
+            rf"|修订{_NO_COMMA_OR_DENIAL}{{0,16}}照样(?:可见|返回)"
+            rf"|不会(?:把|只因)修订{_NO_COMMA}{{0,14}}挡在门外"
+            rf"|事后修订过的(?:记录|证据)?{_NO_COMMA}{{0,4}}(?:带|会带|只被)"
+            r"|不阻止修订过的记录"
+            r"|只保证修订被标记"
+            r"|四时钟只是分别记录"
+            r"|修订版本不会被隐藏"
+            r"|revised\b[^.;:]{0,40}?\bstays\s+visible"
+            r"|visible\s+from\s+its\s+availability\s+time"
+            r"|point-in-time\s+on\s+its\s+availability\s+clock(?!s)"
+            r"|no\s+strict\s+anti-look-ahead\s+on\s+revisions",
+            re.IGNORECASE,
+        ),
+        refuted_by=(
+            "is_visible_at requires available_time <= as_of and revision_time <= as_of "
+            "(domain/time.py:34-47). A request or replay case carrying a record revised after "
+            "as_of is refused whole (domain/run_request.py:83, backtest/replay.py:59); a provider "
+            "batch holding one is refused (providers/base.py:149, domain/panel_batch.py:573); "
+            "the file and Tushare providers drop such a row before batching (providers/file.py:"
+            "180, providers/tushare.py:4004 and :4061); the evidence store's query filters on both "
+            "clocks (storage/parquet.py:112-113); and the panel's filtered read withholds the row "
+            "and counts it (panel/store.py:2062-2075, :2112). Only a record revised at or before "
+            "as_of is visible, and that is the one evidence/builder.py:134-135 marks "
+            "revised_after_initial_availability."
+        ),
+        retired=(
+            "可见性只看首次可知时间，历史研究只能读取决策时刻已经可得的证据",
+            "修订晚于首次可知的记录带 `revised_after_initial_availability` 标记、被风险门降级，"
+            "不会只因修订晚于决策时刻就被挡在门外",
+            "OpenAlpha CN provides four-clock evidence that is point-in-time on its availability "
+            "clock",
+            "content-addressed evidence, visible from its availability time on: a record revised "
+            "later, even after `as_of`, stays visible, carries "
+            "`revised_after_initial_availability`, and the risk gate reduces rather than blocks it",
+            "历史研究只看可得时间不晚于决策时刻的证据\N{FULLWIDTH SEMICOLON}"
+            "决策后才修订的记录照样可见，带降级标记，"
+            "风险门对它答 `reduce` 而不是 `block`",
+            "PIT 查询按可得时间返回决策时刻已可得的证据，修订过的记录照样返回并带降级标记",
+            "历史回放只接受可得时间不晚于决策时刻的证据，事后修订过的记录只被标记降级、不会被剔除",
+            "PIT 查询只返回可得时间不晚于决策时刻的证据，事后修订过的记录带着降级标记",
+            "历史查询只返回可得时间不晚于决策时刻的记录，事后修订过的会带降级标记",
+            "历史查询按可得时间筛出决策时刻已可得的记录，修订过的会带降级标记",
+            "通过可得时间的 PIT 查询恢复当时的可得边界（四时钟只是分别记录），"
+            "修订过的证据另带降级标记",
+            "历史研究只收可得时间不晚于 as_of 的证据，修订晚于 as_of 的照样可见、只多一个修订标记"
+            "并被风险门降级",
+            "上游 Agent 结论来自当时可见证据，证据的修订版本不会被隐藏",
+            "回放会拒收当时还不可得的证据，但不会把修订过的记录挡在门外。",
+            "四时钟都会记录，只有可得时间决定证据在某一时刻是否可见。",
+            "修订时间晚于决策时刻的记录照样可见，只多一个 revised_after_initial_availability 标记，"
+            "风险门据此降级。",
+            "历史查询按可得时间筛选，不按修订时间挑版本。",
+            "回放只检查可得时间，修订时间不参与可见性判断。",
+            "历史研究只收首次可知时间不晚于 as_of 的证据，修订时钟不参与这一判断。",
+            "可见性只看首次可知时间，修订时钟不参与判断。",
+            "四时钟并不阻止修订过的记录进入历史研究，只给它降级标记。",
+            "修订语义并不保证历史研究不偷看未来，只保证修订被标记。",
+            "A record revised after as_of stays visible and carries "
+            "revised_after_initial_availability; there is no strict anti-look-ahead on revisions.",
+            "PIT 查询不会只返回当时可知的版本，修订过的记录照样返回。",
+        ),
+        paraphrase="决策之后才改过的数字，回测里照旧能读到。",
+        premise=_visibility_still_waits_for_the_revision_clock,
+    ),
+    RetiredClaim(
         name="the multi-day report measures capacity and attributes exposure",
         pattern=re.compile(
             rf"{_NO_DENIAL_IN_CLAUSE}(?:"
@@ -2425,12 +2543,6 @@ TRUE_SENTENCES_THAT_SHARE_THE_WORDS: Final[tuple[str, ...]] = (
     "自定义 Agent 的输出仍会进入统一的证据链，但不会进入回放链。",
     "这不是可消融风险委员会，三票不进消融差值。",
     "链邻 Provider 负责认证、限流和错误分类，可得时间保证 Agent 只读决策时刻已可得的证据。",
-    "回放会拒收当时还不可得的证据，但不会把修订过的记录挡在门外。",
-    "四时钟都会记录，只有可得时间决定证据在某一时刻是否可见。",
-    "修订时间晚于决策时刻的记录照样可见，只多一个 revised_after_initial_availability 标记，"
-    "风险门据此降级。",
-    "历史查询按可得时间筛选，不按修订时间挑版本。",
-    "回放只检查可得时间，修订时间不参与可见性判断。",
     "修订前后载荷不同，evidence_id 也不同。",
     "多日报告没有容量模型，也没有暴露归因。",
     "多日报告给出基准收益、主动收益、换手、最大单笔成交额与按标的已实现盈亏。",
@@ -2447,8 +2559,6 @@ TRUE_SENTENCES_THAT_SHARE_THE_WORDS: Final[tuple[str, ...]] = (
     "委员会的讨论与投票不写进决策账本，只交还调用方。",
     "风险门的结论不会改变订单，组合层只按交易规则检查。",
     "RunManifest 只记录模型版本，Prompt 版本字段为空。",
-    "历史研究只收首次可知时间不晚于 as_of 的证据，修订时钟不参与这一判断。",
-    "可见性只看首次可知时间，修订时钟不参与判断。",
     "出厂 Agent 只读取请求携带、且在 as_of 时刻可见的证据。",
     "决策与报告只引用证据 ID，Agent 读取请求携带的完整快照。",
     "后续结果验证把实际观察、基准和成本接回原决策 ID。",
@@ -2580,16 +2690,10 @@ TRUE_SENTENCES_THAT_SHARE_THE_WORDS: Final[tuple[str, ...]] = (
     "研究结果不会自动下单",
     "每次组合由调用方发起",
     "能否复现\N{FULLWIDTH QUESTION MARK}",
-    "历史回放只接受可得时间不晚于决策时刻的证据，事后修订过的记录只被标记降级、不会被剔除。",
-    "PIT 查询只返回可得时间不晚于决策时刻的证据，事后修订过的记录带着降级标记。",
     "四时钟单独记下修订时间，修订过的证据会被风险门降级。",
-    "下游只接收可得时间不晚于决策时刻的 evidence_id",
-    "四时钟分别记录在案，其中可得时间约束历史可见性。",
-    "四时钟并不阻止修订过的记录进入历史研究，只给它降级标记。",
-    "PIT 查询并不只返回当时可知的版本，修订过的记录也会返回。",
-    "修订语义并不保证历史研究不偷看未来，只保证修订被标记。",
-    "A record revised after as_of stays visible and carries revised_after_initial_availability; "
-    "there is no strict anti-look-ahead on revisions.",
+    "下游只接收可得与修订时间都不晚于决策时刻的 evidence_id",
+    "四时钟分别记录在案，其中可得时间与修订时间约束历史可见性。",
+    "PIT 查询并不只返回当时可知的版本，同日只差 update_flag 的更正对两版都会返回。",
     "因子实验算周转与容量、冗余，六格归因。",
     "最大单笔成交额 \N{MIDDLE DOT} 最大总敞口 \N{MIDDLE DOT} 标的已实现盈亏",
     "Tool 合同尚无调用方，SDK 也不开放风险门与验证器的替换。",
@@ -2609,10 +2713,30 @@ TRUE_SENTENCES_THAT_SHARE_THE_WORDS: Final[tuple[str, ...]] = (
     "稳定、版本化的 Provider / Agent / Tool / Risk / Validator 合同并不存在。",
     "并非 SignalFrame 必须携带 evidence_ids，弃权可以不带。",
     "所有输出必须引用 evidence_id 的说法不成立。",
-    "PIT 查询不会只返回当时可知的版本，修订过的记录照样返回。",
     "历史研究并不能只读到当时可知的版本。",
     "该仓库没有 strict anti-look-ahead 规则。",
-    "系统不会恢复当时的信息边界，只恢复可得边界。",
+    "系统不会恢复当时的信息边界，只恢复可得与修订边界。",
+    "可见性要求首次可知与修订时间都不晚于决策时刻，修订晚于决策时刻的记录在决策时刻不可见"
+    "\N{FULLWIDTH SEMICOLON}"
+    "决策前修订过的记录带 revised_after_initial_availability 标记、被风险门降级。",
+    "同日只差 update_flag 的财报更正对，时钟分不开\N{FULLWIDTH SEMICOLON}面板只存了更正后那一版的，"
+    "在 [ann_date, f_ann_date) 内该期不可见——是缺失，不是前视。",
+    "content-addressed evidence, visible once both its availability and its revision time are at "
+    "or before as_of: a record revised after as_of is not visible at as_of, and one revised before "
+    "it carries revised_after_initial_availability, which the risk gate reduces rather than "
+    "blocks.",
+    "历史研究只看可得时间与修订时间都不晚于决策时刻的证据\N{FULLWIDTH SEMICOLON}"
+    "决策后才修订的记录在决策时刻不可见，"
+    "决策前修订过的带降级标记。",
+    "历史回放只接受可得时间与修订时间都不晚于决策时刻的证据，决策后才修订的会被挡在门外、"
+    "决策前修订过的带降级标记。",
+    "通过可得与修订时间的 PIT 查询恢复当时的可见边界，决策前修订过的证据另带降级标记。",
+    "历史查询按可得与修订时间筛出当时可见的记录，决策前修订过的带降级标记。",
+    "修订时间也参与可见性判断，修订晚于决策时刻的记录在当时不可见。",
+    "A record revised after as_of is not visible until its revision; one revised before carries "
+    "revised_after_initial_availability.",
+    "冻结载荷里的修订时钟照样保留，不会被掩盖。",
+    "证据快照保留四个时钟，因此能看出这条证据在决策时刻是否可得、事后是否被修订过。",
 )
 """True or unrelated sentences that share a retired pattern's words. The review of `D13` measured
 the first six being caught (its M1): client holds cli, 移动平均 holds 移动, and a rejection and a
@@ -2687,7 +2811,19 @@ since -- caught until it looked ahead for that word. Fourteen come from the cens
 review (its I-1): the sentences a reader writes to record what a report does *not* do, which
 that round's four families caught until their denial guards were added. One comes from the
 final round's review (its N-2): 不受后来修订干扰 as the subject of a sentence that denies it,
-which the revision family caught until that branch refused a nominalising 这件事 after it."""
+which the revision family caught until that branch refused a nominalising 这件事 after it.
+
+**The revision-clock round took thirteen of the sentences counted above out, and the counts above
+are what each round added, not what is left of it.** Visibility began to wait for the revision
+clock, which made those thirteen false -- each said, in its own words, that a record revised after
+the decision stays visible or that the availability clock alone decides -- and they are the
+`retired` wordings of `a record revised after as_of stays visible` now. Four more were reworded in
+place, because each was true only of the availability clock: the downstream `evidence_id` filter,
+the clock that constrains visibility, the versions a PIT query returns, and the boundary the
+system restores. Eleven were added last: each rewritten document's new wording, the gaps they
+state, and probes of the new family's branches -- 修订 and 照样 in one clause about a clock that
+is kept, 事后 before a revision that is only observed, and a revision time that takes part rather
+than stays out."""
 
 
 DENIAL_IN_AN_EARLIER_SEGMENT: Final[tuple[tuple[str, str], ...]] = (

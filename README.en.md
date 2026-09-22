@@ -17,7 +17,7 @@ docker compose -f deploy/compose.yml up -d --build
 Open `http://127.0.0.1:8000`. Runtime evidence and ledgers live in a dedicated persistent volume.
 
 OpenAlpha CN provides four-clock evidence that is point-in-time on its availability
-clock, A-share event semantics,
+and revision clocks, A-share event semantics,
 deterministic baseline agents, a secure OpenAI-compatible BYOK model boundary,
 typed signals and decisions, durable per-agent resume and research memory,
 A-share execution and portfolio constraints, same-path replay, reconciled
@@ -39,7 +39,7 @@ OpenAlpha CN competes on verifiability rather than the number of agent personas:
 
 - A-share-native limit-up, broken-board, consecutive-board, theme, catalyst, disclosure, and capital evidence;
 - separate event, availability, ingestion, and revision clocks;
-- content-addressed evidence, visible from its availability time on: a record revised later, even after `as_of`, stays visible, carries `revised_after_initial_availability`, and the risk gate reduces rather than blocks it;
+- content-addressed evidence, visible once both its availability and its revision time are at or before `as_of`: a record revised after `as_of` is not visible at `as_of`, and one revised before it carries `revised_after_initial_availability`, which the risk gate reduces rather than blocks. Two gaps remain: a same-day statement correction told apart only by `update_flag` has no instant of its own, so the clocks cannot separate it; and a statement the panel stores only in its corrected form is missing, not early, between its `ann_date` and its `f_ann_date`;
 - deterministic operation without an LLM: no shipped path calls a model, and a model reaches a run only inside an agent you build in your own code (one you pass to the SDK as `agents=`, for instance) — `StructuredSignalAgent` validates the reply against its schema and retries an invalid one within a bounded budget;
 - durable node checkpoints that reject changed requests or graph signatures;
 - bounded concurrent batches with progress, cancellation and retry, whose interrupted items are requeued after a restart;
