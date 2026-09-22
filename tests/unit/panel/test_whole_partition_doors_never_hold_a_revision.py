@@ -29,6 +29,7 @@ fails the others.
 from __future__ import annotations
 
 import ast
+import textwrap
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -58,9 +59,12 @@ def _whole_partition_readers(tree: ast.AST) -> set[str]:
     """Every function that reads through a scope's `read`, which is the whole-partition door.
 
     `AssessedPanelRead.read` is the door; `read_visible_at` on the same scope is the filtered
-    one. Matched on the receiver: a name bound from `<store>.assessed(...)` whose `.read(...)`
-    is then called, so a file read or an unrelated `read` elsewhere is not counted. A direct
-    `read_if_ready` call anywhere is counted too, though `panel_ingest` makes none today.
+    one. Matched on the receiver of `.read(...)`: a name bound from `<store>.assessed(...)`, or
+    an `.assessed(...)` call the read is chained onto -- `test_the_matcher_reads_a_chained_
+    assessed_read_as_well_as_a_bound_one` holds both, and the chained spelling was invisible
+    here until the review of this round (its M-7) measured it. A file read or an unrelated
+    `read` elsewhere is not counted. A direct `read_if_ready` call anywhere is counted too,
+    though `panel_ingest` makes none today.
     """
     found: set[str] = set()
     for function in ast.walk(tree):
@@ -80,11 +84,12 @@ def _whole_partition_readers(tree: ast.AST) -> set[str]:
             if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
                 continue
             receiver = node.func.value
-            if node.func.attr == "read_if_ready" or (
-                node.func.attr == "read"
-                and isinstance(receiver, ast.Name)
-                and receiver.id in scopes
-            ):
+            on_a_scope = (isinstance(receiver, ast.Name) and receiver.id in scopes) or (
+                isinstance(receiver, ast.Call)
+                and isinstance(receiver.func, ast.Attribute)
+                and receiver.func.attr == "assessed"
+            )
+            if node.func.attr == "read_if_ready" or (node.func.attr == "read" and on_a_scope):
                 found.add(function.name)
     return found
 
@@ -153,6 +158,37 @@ def _revises(clock: ClockStrategy, date_field: str) -> bool:
     }
     timeline = _CLOCK_BUILDERS[clock](row, date_field, datetime(2026, 1, 9, tzinfo=UTC))
     return timeline.revision_time > timeline.available_time
+
+
+def test_the_matcher_reads_a_chained_assessed_read_as_well_as_a_bound_one() -> None:
+    """`.read(...)`'s receiver is a name in one spelling and a call in the other, and both are
+    the whole-partition door.
+
+    `panel/store.py::read_if_ready` writes `self.assessed(requirement).read(...)` and this sweep
+    excludes that file by path, so nothing in `src/` exercised the chained form when the matcher
+    was written. The review of this round (its M-7) measured what that costs: a chained read
+    added anywhere else would be counted neither for `panel_ingest` nor by `elsewhere`, and the
+    file below is where that would have been seen. `read_visible_at` on the same scope is the
+    filtered door and stays out; a `read()` on something that is not a scope stays out too.
+    """
+    source = textwrap.dedent(
+        """
+        def bound(store, requirement):
+            scope = store.assessed(requirement)
+            return scope.read(year=2026, columns=("subject",))
+
+        def chained(store, requirement):
+            return store.assessed(requirement).read(year=2026, columns=("subject",))
+
+        def filtered(store, requirement):
+            return store.read_visible_at(requirement, year=2026, columns=("subject",))
+
+        def unrelated(path):
+            return path.read()
+        """
+    )
+
+    assert _whole_partition_readers(ast.parse(source)) == {"bound", "chained"}
 
 
 def test_every_whole_partition_loader_is_classified_here() -> None:

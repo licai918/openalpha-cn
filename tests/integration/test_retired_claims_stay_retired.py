@@ -147,6 +147,14 @@ _NO_DENIAL: Final[str] = r"[^。;\N{FULLWIDTH SEMICOLON}不未没无]"
 _NO_COMMA_OR_DENIAL: Final[str] = r"[^。;\N{FULLWIDTH SEMICOLON}，,不未没无]"
 """The same inside one phrase: a span that stops at a comma too."""
 
+_NO_COMMA_OR_DENIAL_OR_AFTER: Final[str] = r"[^。;\N{FULLWIDTH SEMICOLON}，,不未没无后]"
+"""`_NO_COMMA_OR_DENIAL` and no 后: a span that also stops where the clause says *after*.
+
+The revision family's 照样 branch needs it. 「修订过的证据在修订之后照样可见」 is true -- a revised
+record is visible from its revision on -- and differs from the claim that branch retired only by
+that 之后; the review of this round (its M-2) measured the branch catching it.
+"""
+
 _SEGMENT: Final[str] = r"[^，,。;\N{FULLWIDTH SEMICOLON}]"
 """One character inside one comma-separated segment: neither a comma nor a sentence end."""
 
@@ -2112,14 +2120,14 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             r"|修订(?:时间|时钟)不参与"
             r"|不按修订时间"
             r"|按可得时间(?:返回|筛)"
-            rf"|修订{_NO_COMMA_OR_DENIAL}{{0,16}}照样(?:可见|返回)"
+            rf"|(?<!前)修订{_NO_COMMA_OR_DENIAL_OR_AFTER}{{0,16}}照样(?:可见|返回)"
             rf"|不会(?:把|只因)修订{_NO_COMMA}{{0,14}}挡在门外"
             rf"|事后修订过的(?:记录|证据)?{_NO_COMMA}{{0,4}}(?:带|会带|只被)"
             r"|不阻止修订过的记录"
             r"|只保证修订被标记"
             r"|四时钟只是分别记录"
             r"|修订版本不会被隐藏"
-            r"|revised\b[^.;:]{0,40}?\bstays\s+visible"
+            r"|revised\b(?!\s+(?:at or )?before)[^.;:]{0,40}?\bstays\s+visible"
             r"|visible\s+from\s+its\s+availability\s+time"
             r"|point-in-time\s+on\s+its\s+availability\s+clock(?!s)"
             r"|no\s+strict\s+anti-look-ahead\s+on\s+revisions",
@@ -2737,6 +2745,9 @@ TRUE_SENTENCES_THAT_SHARE_THE_WORDS: Final[tuple[str, ...]] = (
     "revised_after_initial_availability.",
     "冻结载荷里的修订时钟照样保留，不会被掩盖。",
     "事后修订过的记录在修订生效之前不可见。",
+    "修订过的证据在修订之后照样可见，只多一个降级标记。",
+    "决策前修订过的记录照样可见，只多一个降级标记。",
+    "A record revised before as_of stays visible and carries revised_after_initial_availability.",
 )
 """True or unrelated sentences that share a retired pattern's words. The review of `D13` measured
 the first six being caught (its M1): client holds cli, 移动平均 holds 移动, and a rejection and a
@@ -2823,7 +2834,20 @@ the clock that constrains visibility, the versions a PIT query returns, and the 
 system restores. Eleven were added last: each rewritten document's new wording, the gaps they
 state, and probes of the new family's branches -- 修订 and 照样 in one clause about a clock that
 is kept, 事后 before a revision that keeps its record out, and a revision time that takes part
-rather than stays out."""
+rather than stays out. **That round's own review (its M-2) added three more**, and they are the
+reason the family's two `stays visible` branches now read *when* the revision happened: a record
+revised **before** the decision does stay visible, with a flag, and the branches caught both
+Chinese wordings of that and the English one until 之后 left the span and `before` was looked
+ahead for.
+
+Two of the sentences the design named for review (`:2597` and `:2610` at `34d500b`) are kept word
+for word, and the judgement is recorded here rather than left implicit. 不受后来修订干扰这件事，
+代码并没有做到 stays true on the same three counts its entry's `refuted_by` names: a same-day
+correction pair shares its original's clocks, `trade_cal` dates a whole year from 1 January, and a
+panel partition holds only the version the endpoint serves now. 该仓库没有 strict anti-look-ahead
+规则 stays true for the same reason and is narrower than it was: requests, replay corpora and
+provider batches now refuse a record revised after `as_of` outright, so what is left is the panel
+plane and those three counts -- which is what keeps the sentence, and its entry, true."""
 
 
 DENIAL_IN_AN_EARLIER_SEGMENT: Final[tuple[tuple[str, str], ...]] = (

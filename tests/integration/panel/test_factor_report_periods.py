@@ -58,6 +58,7 @@ same `as_of` -- so the field is separable from `lookback_periods` rather than me
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -202,6 +203,25 @@ quarter-grid one -- the whole content of "a build's verdict about a security mus
 the rest of the cross section".
 """
 
+REANNOUNCED_AFTER_AS_OF: Final[_Filing] = ("000001.SZ", RESTATED_PERIOD, date(2025, 5, 12), 222.0)
+"""A third version of the restated period, announced before `AS_OF` and re-announced after it.
+
+The axis the engine/domain audit could not see until the round's review asked for it (its M-5):
+with every `f_ann_date` equal to its `ann_date`, that audit compared two readers over a corpus
+where the revision clock never moves. This row moves it -- the engine drops the row in
+`read_visible_at`'s predicate and the domain drops it in `filings_on`, and if either stopped,
+this filing's 222.0 would answer the restated period on one side and not the other.
+"""
+
+REANNOUNCED_ON: Final[date] = date(2025, 5, 28)
+"""Its `f_ann_date`: after `AS_OF` and at or before `BUILT_AT`.
+
+After `AS_OF` so the stored version is not readable there on either side, and at or before the
+build's own clock because `ColumnarPanelBatch` refuses a batch carrying a version revised after
+the `as_of` it was fetched at -- a row like this one reaches a partition only through a fetch
+late enough to have seen the re-announcement.
+"""
+
 CROSS_YEAR_RESTATEMENT: Final[_Filing] = ("000001.SZ", date(2024, 3, 31), date(2025, 4, 21), 999.0)
 """`000001.SZ` restating its 2024 Q1 in the **next** announcement year.
 
@@ -294,13 +314,27 @@ def _batch(
     )
 
 
-def _written(tmp_path: Path, *, dataset: str, rows: tuple[_Filing, ...] = CORPUS) -> PanelStore:
-    """`rows` on disk under `dataset`, one partition per announcement year."""
+def _written(
+    tmp_path: Path,
+    *,
+    dataset: str,
+    rows: tuple[_Filing, ...] = CORPUS,
+    reannounced: Mapping[_Filing, date] | None = None,
+) -> PanelStore:
+    """`rows` on disk under `dataset`, one partition per announcement year.
+
+    `reannounced` gives a filing a later `f_ann_date`, which is where `_batch` puts its revision
+    clock -- the row is available from its announcement and its stored version only from the
+    re-announcement.
+    """
     store = PanelStore(tmp_path / dataset)
     for year in YEARS:
         year_rows = tuple(item for item in rows if item[2].year == year)
         if year_rows:
-            write_panel_batch(store, _batch(dataset, year_rows), year=year)
+            revised = (
+                None if reannounced is None else tuple(reannounced.get(item) for item in year_rows)
+            )
+            write_panel_batch(store, _batch(dataset, year_rows, revised=revised), year=year)
     return store
 
 
@@ -585,7 +619,7 @@ def test_the_same_day_verdict_does_not_depend_on_the_order_the_partition_returns
     assert panel.values() == {}
 
 
-def test_the_engines_period_selection_is_the_domains_filing_for(store: PanelStore) -> None:
+def test_the_engines_period_selection_is_the_domains_filing_for(tmp_path: Path) -> None:
     """The engine's selection rule against the domain's, over one corpus rather than two
     docstrings.
 
@@ -603,7 +637,23 @@ def test_the_engines_period_selection_is_the_domains_filing_for(store: PanelStor
     half is `test_a_read_that_skips_a_stored_announcement_year_is_refused_where_the_domain_
     refuses` below, and it is a separate test rather than more assertions here because the two
     sides do not merely disagree there: one of them refuses.
+
+    **What the corpus varies since the revision clock joined visibility**: `REANNOUNCED_AFTER_
+    AS_OF` is a third version of the restated period, announced before `AS_OF` and re-announced
+    after it. Both sides must drop it, each by its own rule -- the engine because
+    `read_visible_at` never hands the row over, the domain because `filings_on` keys a version on
+    the later of its two announcement dates -- and it is the greatest announcement for its
+    period, so either side keeping it would answer 222.0 where the other answers 111.0. Every
+    other row of this corpus has `f_ann_date == ann_date`, which is what the audit compared
+    before and what made the revision axis invisible to it.
     """
+    filings = (*CORPUS, REANNOUNCED_AFTER_AS_OF)
+    store = _written(
+        tmp_path,
+        dataset=INCOME_DATASET,
+        rows=filings,
+        reannounced={REANNOUNCED_AFTER_AS_OF: REANNOUNCED_ON},
+    )
     captured: dict[str, FactorWindow] = {}
 
     def capture(window: FactorWindow) -> float | None:
@@ -616,11 +666,11 @@ def test_the_engines_period_selection_is_the_domains_filing_for(store: PanelStor
             item[0],
             item[1].isoformat(),
             item[2].isoformat(),
-            item[2].isoformat(),
+            (REANNOUNCED_ON if item == REANNOUNCED_AFTER_AS_OF else item[2]).isoformat(),
             "1",
             *(item[3] if name == "revenue" else 1.0 for name in INCOME_DATA_COLUMNS),
         )
-        for item in CORPUS
+        for item in filings
     ]
     histories = statement_histories_from_panel_rows(
         dataset=INCOME_DATASET,
@@ -638,8 +688,10 @@ def test_the_engines_period_selection_is_the_domains_filing_for(store: PanelStor
         history.filing_for(period, day).value_of("revenue") for period in window.periods
     )
     assert history.filing_for(RESTATED_PERIOD, day).announced_on == LATER_ANNOUNCEMENT
+    assert history.filing_for(RESTATED_PERIOD, day).value_of("revenue") == RESTATED_REVENUE
     assert RESTATED_REVENUE in window.series(INCOME_DATASET, "revenue")
     assert FIRST_REVENUE not in window.series(INCOME_DATASET, "revenue")
+    assert REANNOUNCED_AFTER_AS_OF[3] not in window.series(INCOME_DATASET, "revenue")
 
 
 def test_a_read_that_skips_a_stored_announcement_year_is_refused_where_the_domain_refuses(

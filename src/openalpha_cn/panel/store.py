@@ -2167,6 +2167,14 @@ def _build_visible_census_sql(
     the same pass for the reason the reach is: a second statement could answer about a
     different selection. On every dataset whose provider never revises a row it is empty, and a
     list aggregate over no rows is NULL, which the caller reads as empty.
+
+    **Its length is the one unbounded thing on this path, and the bound is the number of rows
+    held back for their revision alone.** The round's review measured this statement over
+    2,000,000 rows: 3.9ms before the revision clock joined it, 8.1ms after, and 1,152ms with
+    633,348 datetimes handed back to Python when half the partition was revised after `as_of`.
+    Today only the four statement datasets revise at all, and an announcement year of the whole
+    market carries a late `f_ann_date` on about 1.4% of its rows, so the list is short. A
+    dataset that revises in bulk would need this counted or bounded instead.
     """
     clauses, values = _equality_clauses(filters)
     where_sql = "" if not clauses else " WHERE " + " AND ".join(clauses)
