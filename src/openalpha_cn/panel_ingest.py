@@ -1480,8 +1480,7 @@ def carry_stored_rows_forward(
     two callers in `src/` allowed to take it (`tests/unit/panel/test_query_callers.py` is the
     allowlist). A point-in-time read here would be the fail-open, not the safe choice: a carry-
     forward that filtered by the visibility clocks would carry only the rows knowable at some
-    instant
-    and would then hand the store a partition **missing** the withheld ones -- which
+    instant and would then hand the store a partition **missing** the withheld ones -- which
     `write_partition` would commit, destroying exactly the data this function exists to preserve.
     The rows are not being *answered with*; they are being put back where they were found.
 

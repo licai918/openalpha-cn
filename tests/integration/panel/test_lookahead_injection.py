@@ -5,9 +5,10 @@ cannot yet know about, and prove the read refuses because of that row.** The wri
 refuses one (`tests/contract/panel/test_columnar_batch_parity.py` injects a one-microsecond
 late row anywhere in a 64-row batch and both contracts reject it; four provider contracts
 assert `no_data` with a reason that separates "not knowable" from "not there"). What had no
-assertion anywhere was the **read** side: `PanelStore.query()`'s scan carries no
-`available_time` predicate, so the only point-in-time gate a reader passes through is
-`panel/catalog.py::evaluate_readiness`' partition-level `not_yet_knowable`, and no test drove a
+assertion anywhere was the **read** side: `PanelStore.query()`'s scan carries no row-level
+predicate, so the only point-in-time gate a reader passed through **then** was
+`panel/catalog.py::evaluate_readiness`' partition-level `not_yet_knowable` -- the row-filtered
+door arrived with `V2-P3-002` -- and no test drove a
 future row into a partition and then asked a loader for it.
 
 ## The pairing is the whole method

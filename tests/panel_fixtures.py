@@ -1541,8 +1541,7 @@ def _read_instant(last_session: date) -> datetime:
     two equal. Derived rather than duplicated because `generate_panel(window=...)` can price into
     December, and a read instant fixed in January would make every row after it invisible: the
     panel reads filter on `available_time` and `revision_time`, so a partition written and then
-    unreadable is
-    the shape a fixture must not be able to produce.
+    unreadable is the shape a fixture must not be able to produce.
     """
     following = last_session + timedelta(days=1)
     return datetime(following.year, following.month, following.day, 4, 0, tzinfo=UTC)

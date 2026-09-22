@@ -723,12 +723,15 @@ class IndustryMarketCapCrossSection:
     can tell the two apart, because at this layer there is no store to re-derive them from. The
     obstacle is one layer up and it is the ordinary one:
     `panel_neutralization.load_industry_market_cap_cross_section` is the *only* builder in `src/`,
-    it reads both datasets through `PanelStore.read_if_ready` -- the unfiltered, fail-closed door,
-    which refuses a partition whose newest row post-dates `as_of` rather than filtering it -- and
-    `tests/unit/panel/test_visible_read_callers.py` is why a second builder taking the filtered
-    door would be a reviewed act. So the neutralisation opens **no new visibility door at all**;
-    it consumes the two that `V2-P1-010` and `V2-P1-002` already built, at their strictest
-    setting.
+    and it reads both datasets through doors this plane did not open: `load_industry_cross_section`
+    and `load_daily_valuations`, which since `V2-P4-026` and `V2-P4-027`/`028` reach rows through
+    `PanelStore.read_visible_at` -- the row-filtered door, which withholds a row that was not
+    knowable at `as_of` and counts it, where `read_if_ready` refused the partition whole. (This
+    paragraph said both datasets were read through `read_if_ready` until the two issues above
+    moved them; `factor_view.py` and `backtest/factor_experiment.py` record the same retraction.)
+    `tests/unit/panel/test_visible_read_callers.py` is why either loader changing door again
+    would be a reviewed act. So the neutralisation opens **no new visibility door at all**; it
+    consumes the two that `V2-P1-010` and `V2-P1-002` already built.
     """
 
     as_of: datetime

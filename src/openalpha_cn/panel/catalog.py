@@ -184,8 +184,8 @@ behaviour and carries the same disclosure next to the assertions.
 
 **P3 took the decision the section above left open, and took neither of the two options it was
 posed as.** `read_if_ready` is unchanged -- it promises exactly what it promised, every one of
-its fourteen callers is untouched, and `not_yet_knowable` still refuses a whole partition
-there. What `V2-P3-002` added is a *second*, differently named read on the same store,
+its callers is untouched, and `not_yet_knowable` still refuses a whole partition there.
+What `V2-P3-002` added is a *second*, differently named read on the same store,
 `PanelStore.read_visible_at`, which runs the identical rule table and then, **only** when every
 issue it found is in `ROW_FILTERABLE_ISSUE_CODES` (that is: only `not_yet_knowable`), scans the
 partition with a `WHERE available_time <= as_of AND revision_time <= as_of` predicate instead of

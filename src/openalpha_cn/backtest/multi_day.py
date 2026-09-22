@@ -20,10 +20,11 @@ three reproduced on the pre-`V2-P5-003` runner with a two-name book:
 
 So a step now carries the session's date, the session's bars, and the orders placed into them.
 The runner **marks the book to the session's closes before it executes that session's orders**,
-which is what makes (3) go away: the cap sees today's prices. `tests/unit/backtest/
-test_multi_day.py::test_the_days_re_mark_lands_before_the_days_orders_so_the_cap_sees_todays
-_price` is that ordering as two different answers on one fixture -- refused when marked first,
-filled when marked afterwards.
+which is what makes (3) go away: the cap sees today's prices.
+`tests/unit/backtest/test_multi_day.py::
+test_the_days_re_mark_lands_before_the_days_orders_so_the_cap_sees_todays_price` is that
+ordering as two different answers on one fixture -- refused when marked first, filled when
+marked afterwards.
 
 **A held name with no bar on the session keeps its mark, and is named for keeping it.** An
 A-share halt serves no daily row, so a missing bar is a real shape and refusing it would make a

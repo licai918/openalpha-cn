@@ -132,7 +132,7 @@ test_the_factor_planes_datasets_are_derived_and_therefore_have_no_cadence` pins 
 live `FACTOR_DEFINITIONS`, so a factor added by `V2-P3-009`..`013` is covered without anybody
 remembering to extend a list. `V2-P3-014`/`015` own the factor-side health report itself.
 
-## The one thing this module reads differently from every other reader
+## The door this module reads through, and why it is not the whole-partition one
 
 `panel_ingest`'s whole-partition loaders read through `PanelStore.read_if_ready` -- spelled
 `assessed(...).read(...)` at every call site -- whose `not_yet_knowable` check is judged per
@@ -152,9 +152,9 @@ door is taken by six of `panel_ingest`'s fourteen loaders today -- `load_trading
 `load_industry_cross_section` reaches the same reader through `_read_visible_membership_rows`
 (`V2-P4-027`/`028`). `tests/unit/panel/test_query_callers.py` holds `GATED_READERS`, which
 records the door each `panel_ingest` reader opens -- the six loaders above and the two shared
-readers the other eight reach rows through -- and `tests/unit/test_source_counts_match_the_tree.
-py` holds the two numbers in this paragraph against the tree. Everything this section says about
-this module is unchanged.) See
+readers the other eight reach rows through -- and
+`tests/unit/test_source_counts_match_the_tree.py` holds every number in this paragraph against
+the tree. Everything this section says about this module is unchanged.) See
 that method's docstring for the full argument, `panel/catalog.py::ROW_FILTERABLE_ISSUE_CODES`
 for why exactly one code is compensable, and `tests/unit/panel/test_visible_read_callers.py`
 for the allowlist that keeps the path from spreading silently.

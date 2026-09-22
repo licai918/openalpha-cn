@@ -792,10 +792,11 @@ def observation_digest(observations: Sequence[FactorObservation]) -> str:
     `FactorPanel`s carrying the same `manifest_id` and different observations are constructible
     -- `compute_factor` will not produce them, but nothing in this layer receives its output from
     `compute_factor` rather than from a caller. Without this field, a transform's identity would
-    be blind to the very numbers it transformed, and `tests/integration/panel/
-    test_factor_transforms.py`'s determinant audit would be exempting the `panel` argument on a
-    promise instead of measuring it -- `test_a_source_panel_whose_numbers_moved_moves_the_
-    transform_identity` is the measurement, built by hand because `compute_factor` will not
+    be blind to the very numbers it transformed, and
+    `tests/integration/panel/test_factor_transforms.py`'s determinant audit would be exempting
+    the `panel` argument on a promise instead of measuring it --
+    `test_a_source_panel_whose_numbers_moved_moves_the_transform_identity` is the measurement,
+    built by hand because `compute_factor` will not
     produce that state and `FactorPanel` is a public frozen dataclass that can.
 
     Sorted by subject and de-duplicated by refusal rather than by dropping, because a repeated

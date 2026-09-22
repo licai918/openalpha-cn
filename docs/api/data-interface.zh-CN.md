@@ -87,12 +87,18 @@ available_time <= as_of AND revision_time <= as_of
 - 财报：`StatementHistory.filings_on` 让一版从 `max(ann_date, f_ann_date)` 起可读，与面板上这一行
   的修订时钟是同一天。
 
-唯一**不**执行这条规则的是面板的整分区门（`PanelStore.read_if_ready`，调用处一律写作
+两处**不**执行这条规则。一处是面板的整分区门（`PanelStore.read_if_ready`，调用处一律写作
 `assessed(...).read(...)`）：它只判分区的 `max_available_time`、不读修订时钟，只对修订时钟恒等于
 可得时钟的数据集才等同于完整可见性。四张财报不是这样的数据集——对它们，这道门会交出 `as_of` 之后
 才重新公告的那一版；`src/` 里没有读者对财报走这道门（由
 `tests/unit/panel/test_whole_partition_doors_never_hold_a_revision.py` 钉住），库的直接调用者
 请改用 `read_visible_at`。
+
+另一处是公开的 `PanelStore.query()`：它不收 `as_of`、不查就绪判决、也没有任何行级谓词，把分区的
+每一行都交出去——实测一个真实的 `stock_basic` 2024 分区返回 152 行，其中 92 行在 2024-07-01 还不
+可知。`src/` 里只有两个调用者（`AssessedPanelRead.read` 与 `panel_ingest.carry_stored_rows_forward`，
+后者读了只为原样写回），由 `tests/unit/panel/test_query_callers.py` 钉成允许清单；库的直接调用者
+不应拿它作答。这条也写在每份 `panel doctor` 报告的已披露限制里。
 
 修订时间晚于 `as_of` 的记录在 `as_of` 时不可见。首次可得之后、`as_of` 之前修订过的记录
 （`revision_time > available_time`）照常可见，构建时带上 `revised_after_initial_availability`

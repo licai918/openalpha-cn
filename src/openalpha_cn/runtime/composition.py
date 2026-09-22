@@ -180,8 +180,9 @@ class StorageContainer:
     different gap from `job_store`'s: `job_store` names its own two-step history above (shipped
     unwired by `V2-P5-010`, wired by `V2-P5-013`, both in that field's own docstring); no
     equivalent second step was ever recorded for this one. It surfaced twice, independently:
-    once when the foreign-key-enforcement registry (`tests/integration/storage/
-    test_foreign_key_enforcement.py`) turned out to cover eight of what are now ten
+    once when the foreign-key-enforcement registry
+    (`tests/integration/storage/test_foreign_key_enforcement.py`) turned out to cover eight of
+    what are now ten
     `state.sqlite3` stores it discovers by name, `SQLiteModelUsageStore` being one of the two
     missing entries -- registered there before this field existed, so it has been checked for
     `PRAGMA foreign_keys` all along, construction site or not -- and again here, where

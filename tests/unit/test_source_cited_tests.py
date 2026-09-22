@@ -268,6 +268,37 @@ def test_the_two_citation_forms_cannot_both_match_one_span() -> None:
     assert CITATION.findall(CONTINUATION.sub("::", wrapped)) == ["test_a_name"]
 
 
+BROKEN_PATH: Final[re.Pattern[str]] = re.compile(
+    r"tests/[\w./-]*(?<!\.py)\n\s*(?:py\b|[\w./-]*\.py)"
+)
+"""A test path broken across a line **before** it reaches `.py`.
+
+Such a fragment is not a citation to `CITATION`, so it resolves against nothing and is checked by
+nothing -- which is exactly what happened to the one citation of the counted-claims guard
+(`panel_factors.py`, measured by the closure review's N-7: swapping the path for a file that does
+not exist left this audit green). The judgement taken here is to refuse the form rather than to
+teach `CONTINUATION` to rejoin it: a break inside a filename cannot be told from a citation that
+ends there followed by prose, which is the same reason a break inside an identifier is refused,
+and the repair is one a writer can always make -- move the whole path onto one line, or break
+straight after the `::`.
+"""
+
+
+def test_no_source_docstring_breaks_a_test_path_before_it_reaches_py() -> None:
+    """A citation nothing can resolve is worse than one that is wrong: nothing reads it at all."""
+    broken = [
+        f"{path.relative_to(REPO_ROOT)}: {' '.join(match.group(0).split())}"
+        for path in sorted(SOURCE_ROOT.rglob("*.py"))
+        for match in BROKEN_PATH.finditer(path.read_text(encoding="utf-8"))
+    ]
+
+    assert broken == [], (
+        "\n".join(broken)
+        + "\nA test path wrapped before its `.py` is invisible to this audit; keep the path on "
+        "one line, or break straight after the `::`."
+    )
+
+
 def test_a_citation_wrapped_inside_its_identifier_does_not_resolve() -> None:
     """The rule the module docstring states, driven rather than described.
 

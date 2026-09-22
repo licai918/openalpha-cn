@@ -1323,7 +1323,9 @@ class PanelStore:
         its siblings' staleness currently blocks. Neither is a speed-up; both are different
         answers. This is the third option the row asked for, and it moves nothing: `read_if_ready`
         and `read_visible_at` are now one line each on top of it, still one assessment plus one
-        read, so their twelve callers see no change at all.
+        read, so their ten callers see no change at all. The reader that takes a scope directly
+        rather than through them -- `panel_ingest._read_visible_event_dated_rows` -- is the shape
+        this row added, and it is the one place the change is visible at all.
 
         **What a caller gives up by opening a scope, stated rather than left to be found.**
         `_partition_states` reads three facts from the *file* -- that it is present, that it
@@ -1464,7 +1466,7 @@ class PanelStore:
 
         A flag on `read_if_ready` was the obvious shape and is the wrong one, for the reason
         `query(..., unchecked=True)` was rejected one method over: a keyword that changes what a
-        method *promises* leaves fourteen existing call sites reading as if nothing had changed.
+        method *promises* leaves every existing call site reading as if nothing had changed.
         A separate name and a separate return type keep the two promises apart -- though **not
         as strongly as `V2-P3-002` first claimed**: `PanelVisibleReadOutcome.rows` and
         `PanelReadOutcome.rows` have the identical static type, so the type checker stops a
@@ -2017,8 +2019,10 @@ def _scan_failures_as_storage_errors(dataset: str, year: int) -> Iterator[None]:
     same misclassification `SuspensionError` was added to `cli._PANEL_WRITE_REFUSALS` to close,
     one plane over.
 
-    Not a correctness hole -- every supported read goes through `read_if_ready`, which refuses
-    this state before it scans -- but `query()` is public and this is what it owed its callers.
+    Not a correctness hole -- every supported read goes through one of the two gated doors, and
+    `partition_file_missing` is outside `ROW_FILTERABLE_ISSUE_CODES`, so `read_visible_at`
+    refuses this state whole exactly as `read_if_ready` does, before either scans -- but
+    `query()` is public and this is what it owed its callers.
 
     ## Only `IOException`, and the narrowness is load-bearing rather than timid
 

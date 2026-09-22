@@ -1365,8 +1365,9 @@ def test_all_three_price_loaders_answer_a_published_session_from_inside_the_year
 
     At `MID_WINDOW` each 2026 price partition's newest `available_time` is 2026-06-15T08:30Z, so
     `read_if_ready` refuses the whole of it -- and the 10th's own rows published five days
-    earlier. All three loaders read the session under a `WHERE available_time <= as_of` predicate
-    instead, so all three answer.
+    earlier. All three loaders read the session under a row-level visibility predicate --
+    `available_time` and `revision_time` both at or before `as_of` -- instead, so all three
+    answer.
 
     **This test used to assert the opposite half.** It read
     `the_valuations_answer_a_published_session_from_inside_the_year_the_bars_still_refuse`, and

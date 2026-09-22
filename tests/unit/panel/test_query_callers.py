@@ -211,7 +211,7 @@ UNGATED_READERS: dict[str, tuple[str, ...]] = {
 
 **The file-level entry above is too coarse for this one file, and `V2-P4-081` is what it cost.**
 `QUERY_CALLERS` answers *which files may* -- the right granularity for `panel/store.py`, which is
-the gate's own implementation and whose single `self.query(...)` is what
+the gate's own implementation and whose single `self.store.query(...)` is what
 `AssessedPanelRead.read` runs after `assess_readiness` has answered -- `read_if_ready` is a
 one-line forward to it. It is the wrong granularity for `panel_ingest.py`:
 `V2-P4-071` put that file on the list for one function's sake, and the permission it actually
