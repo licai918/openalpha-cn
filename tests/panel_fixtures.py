@@ -1540,7 +1540,8 @@ def _read_instant(last_session: date) -> datetime:
     `test_panel_fixtures.py::test_the_default_window_still_reads_at_the_as_of_constant` pins the
     two equal. Derived rather than duplicated because `generate_panel(window=...)` can price into
     December, and a read instant fixed in January would make every row after it invisible: the
-    panel reads filter on `available_time <= as_of`, so a partition written and then unreadable is
+    panel reads filter on `available_time` and `revision_time`, so a partition written and then
+    unreadable is
     the shape a fixture must not be able to produce.
     """
     following = last_session + timedelta(days=1)

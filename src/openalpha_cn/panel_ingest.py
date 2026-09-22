@@ -4125,9 +4125,10 @@ def _read_visible_event_dated_rows(
     """Every row of `requirement.years` that was knowable at `as_of`, reconciled per event date.
 
     **The only door onto a whole-year partition of an event-driven dataset, since `V2-P4-076`.**
-    Five callers take it -- `load_industry_cross_section`, `load_stock_universe`,
-    `load_suspensions`, `load_name_histories` and, since `V2-P4-083`,
-    `load_statement_histories` -- and it is one function rather than five because
+    It is taken by five loaders -- `load_stock_universe`, `load_suspensions`,
+    `load_name_histories`, `load_statement_histories` since `V2-P4-083`, and
+    `load_industry_cross_section` through `_read_visible_membership_rows` -- and it is one
+    function rather than five because
     `_read_visible_price_session`'s own docstring records what two doors onto one question cost
     the last time there were two.
 

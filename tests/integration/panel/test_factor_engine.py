@@ -266,7 +266,7 @@ def test_every_computed_value_is_the_return_over_the_last_two_visible_sessions(
     store: PanelStore, panel: GeneratedPanel
 ) -> None:
     """The magnitude. Each expected number is derived from the fixture's own close arithmetic
-    over the sessions the availability filter left, so an engine that used the last two
+    over the sessions the visible read left, so an engine that used the last two
     *stored* sessions (2026-01-15 and 2026-01-16) would produce a different number for every
     security and fail here rather than pass with a plausible one."""
     result = _compute(store, panel)

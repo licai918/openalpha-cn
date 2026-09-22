@@ -73,7 +73,7 @@ available_time <= as_of AND revision_time <= as_of
 
 记录首次可知的时刻，和手里这一版内容发布（修订）的时刻，都不能晚于 `as_of`。`event_time` 与
 `ingested_time` 随证据保存，不参与可见性判断。规则本身是 `domain/time.py` 的 `is_visible_at`；
-下面各处按它执行，证据库与面板在 SQL 里照写同一个条件：
+下面是按它执行的各处（证据库与面板在 SQL 里照写同一个条件），之后是唯一不执行它的那道门：
 
 - 研究请求与回放语料：带着不可见证据的请求或案例整条拒绝；
 - Provider 批次：行式 `ProviderBatch` 与面板的 `ColumnarPanelBatch` 都整批拒绝。文件与 Tushare
@@ -84,14 +84,15 @@ available_time <= as_of AND revision_time <= as_of
   在构造时就按 `EvidenceSnapshot.visible_at` 整条拒绝（上面第一条），Agent 自己不再过滤；
 - 面板读取：`read_visible_at` 在 SQL 里对两个时钟同时过滤，并把因修订被扣下的行计入
   `withheld_row_count`；
-- 面板还有一道整分区门（`PanelStore.read_if_ready`，调用处一律写作 `assessed(...).read(...)`），
-  它**不在**这条规则上：它只判分区的 `max_available_time`、不读修订时钟，只对修订时钟恒等于可得
-  时钟的数据集才等同于完整可见性。四张财报不是这样的数据集——对它们，这道门会交出 `as_of` 之后
-  才重新公告的那一版；`src/` 里没有读者对财报走这道门（`tests/unit/panel/
-  test_whole_partition_doors_never_hold_a_revision.py` 钉住），库的直接调用者请改用
-  `read_visible_at`；
 - 财报：`StatementHistory.filings_on` 让一版从 `max(ann_date, f_ann_date)` 起可读，与面板上这一行
   的修订时钟是同一天。
+
+唯一**不**执行这条规则的是面板的整分区门（`PanelStore.read_if_ready`，调用处一律写作
+`assessed(...).read(...)`）：它只判分区的 `max_available_time`、不读修订时钟，只对修订时钟恒等于
+可得时钟的数据集才等同于完整可见性。四张财报不是这样的数据集——对它们，这道门会交出 `as_of` 之后
+才重新公告的那一版；`src/` 里没有读者对财报走这道门（由
+`tests/unit/panel/test_whole_partition_doors_never_hold_a_revision.py` 钉住），库的直接调用者
+请改用 `read_visible_at`。
 
 修订时间晚于 `as_of` 的记录在 `as_of` 时不可见。首次可得之后、`as_of` 之前修订过的记录
 （`revision_time > available_time`）照常可见，构建时带上 `revised_after_initial_availability`

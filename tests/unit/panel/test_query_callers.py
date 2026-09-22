@@ -6,9 +6,9 @@ which 92 were not knowable at 2024-07-01. The gates are `read_if_ready()` -- spe
 `assessed(...).read(...)` at every call site -- and `read_visible_at()`, and both are
 **opt-in**. Nothing about `query()`'s type, name or signature stops a caller reaching past
 them. The first of the two is also narrower than visibility: it judges a partition's
-`max_available_time` and never reads `revision_time` (`panel/store.py::query`'s own docstring
-carries the measurement, and `tests/unit/panel/test_whole_partition_doors_never_hold_a_revision.
-py` keeps `src/` off that door for the datasets that revise).
+`max_available_time` and never reads `revision_time`: `panel/store.py::query`'s own docstring
+carries the measurement, and the datasets that revise are kept off that door by
+`tests/unit/panel/test_whole_partition_doors_never_hold_a_revision.py`.
 
 That is a live seam rather than a tidiness worry, and P2's technical acceptance named it as the
 most dangerous one left for P3, in these terms: `V2-P3-002`'s factor engine faces the cost of
@@ -31,7 +31,8 @@ one trade this plane is built not to make. See
 
 **Making the danger a required argument** (`query(..., unchecked=True)`) would put the warning at
 every call site, which is the right instinct and the wrong instrument: it is a breaking change to
-a published `1.0.0` API for a method with exactly one caller in `src/`, and a keyword a caller
+a published `1.0.0` API for a method whose only callers in `src/` are `AssessedPanelRead.read`
+and `panel_ingest.carry_stored_rows_forward`, and a keyword a caller
 types once stops being read the second time.
 
 What is left is the thing the acceptance actually asked for -- *something* auditing it. This
@@ -58,10 +59,11 @@ be an exemption for the read.
 QUERY_CALLERS: frozenset[str] = frozenset({"panel/store.py", "panel_ingest.py"})
 """Every `src/` file allowed to call one of `UNGATED_READS`, relative to `src/openalpha_cn`.
 
-The first is `PanelStore` itself: `read_if_ready()` calls `query()` *after* `assess_readiness()`
-has answered, which is the whole point of the method. Every reader in the tree -- all fourteen
-`panel_ingest` loaders, `panel_doctor`'s cross-checks, `panel_gate`, `panel_view`, the CLI, the
-HTTP app and the SDK -- reaches rows through `read_if_ready()`, and
+The first is `PanelStore` itself: `AssessedPanelRead.read` calls `query()` *after*
+`assess_readiness()` has answered, which is the whole point of the method. Every reader in the
+tree -- all fourteen `panel_ingest` loaders, `panel_doctor`'s cross-checks, `panel_gate`,
+`panel_view`, the CLI, the HTTP app and the SDK -- reaches rows through one of the two gated
+doors, and
 `test_the_gated_read_is_what_the_rest_of_the_tree_uses` below is what keeps that from being
 vacuously true.
 
@@ -209,8 +211,9 @@ UNGATED_READERS: dict[str, tuple[str, ...]] = {
 
 **The file-level entry above is too coarse for this one file, and `V2-P4-081` is what it cost.**
 `QUERY_CALLERS` answers *which files may* -- the right granularity for `panel/store.py`, which is
-the gate's own implementation and whose single `self.query(...)` is what `read_if_ready` runs
-after `assess_readiness` has answered. It is the wrong granularity for `panel_ingest.py`:
+the gate's own implementation and whose single `self.query(...)` is what
+`AssessedPanelRead.read` runs after `assess_readiness` has answered -- `read_if_ready` is a
+one-line forward to it. It is the wrong granularity for `panel_ingest.py`:
 `V2-P4-071` put that file on the list for one function's sake, and the permission it actually
 granted covers every function in it, the fourteen loaders included. Every argument in
 `QUERY_CALLERS`' second paragraph is about `carry_stored_rows_forward` and none of it is true of

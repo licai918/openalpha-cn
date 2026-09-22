@@ -1064,13 +1064,16 @@ class PanelStore:
         It takes no `as_of`, consults no readiness verdict and carries no row-level
         visibility predicate: it hands back **every** row of the resolved partition. On a
         real `stock_basic` 2024 partition that is 152 rows, of which 92 were not knowable at
-        2024-07-01. Two gated doors stand in front of it, and every reader in `src/` takes
-        one of them: the whole-partition `read_if_ready()` -- which every caller spells
-        `assessed(...).read(...)`, so the method itself has no call site outside this class --
-        and the row-filtered `read_visible_at()`. Both are opt-in rather than structural;
+        2024-07-01. Two gated doors stand in front of it, and every reader in `src/` that
+        answers with what it reads takes one of them: the whole-partition `read_if_ready()` --
+        which every caller spells `assessed(...).read(...)`, so `read_if_ready` itself has no
+        call site in `src/` and is a one-line forward to the scope -- and the row-filtered
+        `read_visible_at()`. The one exception is allowlisted and answers with nothing:
+        `panel_ingest.carry_stored_rows_forward` reads a year's stored rows to put them back.
+        Both doors are opt-in rather than structural;
         `tests/unit/panel/test_query_callers.py` is what keeps them taken, by failing when a
-        module that is not this one calls `query()` directly, and its `GATED_READERS` map says
-        which loader takes which door.
+        module that is not this one calls `query()` directly, and its `GATED_READERS` map
+        records the door each `panel_ingest` reader opens.
 
         **The whole-partition door is narrower than visibility**, and has been since the
         revision clock joined it: it judges a partition's `max_available_time` and never reads
@@ -1320,7 +1323,7 @@ class PanelStore:
         its siblings' staleness currently blocks. Neither is a speed-up; both are different
         answers. This is the third option the row asked for, and it moves nothing: `read_if_ready`
         and `read_visible_at` are now one line each on top of it, still one assessment plus one
-        read, so their fourteen callers see no change at all.
+        read, so their twelve callers see no change at all.
 
         **What a caller gives up by opening a scope, stated rather than left to be found.**
         `_partition_states` reads three facts from the *file* -- that it is present, that it

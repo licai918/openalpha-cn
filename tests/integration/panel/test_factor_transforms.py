@@ -16,7 +16,7 @@ one that decodes into the wrong field, becomes visible.
    `load_factor_observations` rather than described, and the value it lands on is the one the
    transform's arithmetic used.
 3. **The cross section is point-in-time because it is the source panel's.** The processed values
-   at a mid-year `as_of` are derived by hand from the closes the availability filter left, so a
+   at a mid-year `as_of` are derived by hand from the closes the visible read left, so a
    transform that ever consulted a later session would produce different numbers; and the
    subjects of the output are exactly the subjects of the input.
 4. **What determines the answers is either in the identity or exempted by name**, audited off
@@ -178,7 +178,7 @@ def test_the_processed_values_at_a_mid_year_as_of_are_the_ones_the_visible_windo
 ) -> None:
     """The point-in-time claim, as numbers rather than as a structural argument.
 
-    Every expected z-score is derived from the closes the *availability filter* left at
+    Every expected z-score is derived from the closes the *visible read* left at
     `MID_WINDOW` -- sessions 1-5 of ten -- through the fixture's own close arithmetic, and then
     standardized by hand. A transform that consulted a later session, or one whose participants
     were not exactly the raw panel's `computed` observations, would produce a different number for
