@@ -1064,17 +1064,33 @@ class PanelStore:
         It takes no `as_of`, consults no readiness verdict and carries no row-level
         visibility predicate: it hands back **every** row of the resolved partition. On a
         real `stock_basic` 2024 partition that is 152 rows, of which 92 were not knowable at
-        2024-07-01. The gate is `read_if_ready()`, which is opt-in rather than structural, and
-        every reader in `src/` goes through it -- `tests/unit/panel/test_query_callers.py` is
-        what keeps that true, by failing when a module that is not this one calls `query()`
-        directly.
+        2024-07-01. Two gated doors stand in front of it, and every reader in `src/` takes
+        one of them: the whole-partition `read_if_ready()` -- which every caller spells
+        `assessed(...).read(...)`, so the method itself has no call site outside this class --
+        and the row-filtered `read_visible_at()`. Both are opt-in rather than structural;
+        `tests/unit/panel/test_query_callers.py` is what keeps them taken, by failing when a
+        module that is not this one calls `query()` directly, and its `GATED_READERS` map says
+        which loader takes which door.
+
+        **The whole-partition door is narrower than visibility**, and has been since the
+        revision clock joined it: it judges a partition's `max_available_time` and never reads
+        `revision_time`, so it equals visibility only on a dataset whose revision clock never
+        leaves its availability clock. Measured on one `income` row announced 2024-04-20 and
+        re-announced 2024-11-10, an assessed read at 2024-08-30 hands back the 2024-11-10
+        version while `read_visible_at` withholds it and counts it. The four statement datasets
+        are the ones that revise; no `src/` reader takes this door to them
+        (`tests/unit/panel/test_whole_partition_doors_never_hold_a_revision.py`), and a library
+        caller reading one should take `read_visible_at()`. The same disclosure rides on every
+        `panel doctor` report as `KNOWN_STORAGE_LIMITATIONS.
+        panel_store_query_is_public_and_passes_no_point_in_time_gate`.
 
         That test exists because of a specific, named risk rather than as tidiness. A caller
         that finds `read_if_ready()` too coarse -- P3's factor engine will, because
         `not_yet_knowable` is judged per partition and a partition is a year -- will reach for
-        `query()` and filter by `available_time` itself, and the point-in-time guarantee then
-        lives in that caller with nothing auditing it. Adding the predicate here instead was
-        considered twice and declined both times, for a reason that is about the consumers and
+        `query()` and filter by the two visibility clocks itself, and the point-in-time
+        guarantee then lives in that caller with nothing auditing it. Adding the predicate here
+        instead was considered twice and declined both times, for a reason that is about the
+        consumers and
         not about the grammar: a filtered read hands back a *short* partition, and every
         consumer above this plane reads shortness as missing data rather than as withheld data
         (`build_index_membership` refuses a gap in the month sequence,

@@ -80,15 +80,23 @@ available_time <= as_of AND revision_time <= as_of
   在组批之前先按同一谓词丢掉当时不可见的行，所以修订晚于 `as_of` 的一行不会让整次导入失败；
   链邻客户端不自行过滤，由批次整批拒绝；
 - 证据库查询（证据、市场事件与题材接口都经过它）：`storage/parquet.py` 的
-  `WHERE available_time <= ? AND revision_time <= ?`；出厂 Agent 读的是请求携带的证据，按
-  `EvidenceSnapshot.visible_at` 过滤；
+  `WHERE available_time <= ? AND revision_time <= ?`；出厂 Agent 读的是请求携带的证据，而请求本身
+  在构造时就按 `EvidenceSnapshot.visible_at` 整条拒绝（上面第一条），Agent 自己不再过滤；
 - 面板读取：`read_visible_at` 在 SQL 里对两个时钟同时过滤，并把因修订被扣下的行计入
   `withheld_row_count`；
+- 面板还有一道整分区门（`PanelStore.read_if_ready`，调用处一律写作 `assessed(...).read(...)`），
+  它**不在**这条规则上：它只判分区的 `max_available_time`、不读修订时钟，只对修订时钟恒等于可得
+  时钟的数据集才等同于完整可见性。四张财报不是这样的数据集——对它们，这道门会交出 `as_of` 之后
+  才重新公告的那一版；`src/` 里没有读者对财报走这道门（`tests/unit/panel/
+  test_whole_partition_doors_never_hold_a_revision.py` 钉住），库的直接调用者请改用
+  `read_visible_at`；
 - 财报：`StatementHistory.filings_on` 让一版从 `max(ann_date, f_ann_date)` 起可读，与面板上这一行
   的修订时钟是同一天。
 
-修订时间晚于 `as_of` 的记录在 `as_of` 时不可见。修订不晚于 `as_of` 的记录照常可见，构建时带上
-`revised_after_initial_availability` 风险标记，风险门据此答 `reduce` 而不是 `block`——最终动作（`watch`/`avoid`/`abstain`）不因此改变。
+修订时间晚于 `as_of` 的记录在 `as_of` 时不可见。首次可得之后、`as_of` 之前修订过的记录
+（`revision_time > available_time`）照常可见，构建时带上 `revised_after_initial_availability`
+风险标记，风险门据此答 `reduce` 而不是 `block`——最终动作（`watch`/`avoid`/`abstain`）不因此改变。
+从未修订过的记录（`revision_time == available_time`）不带这个标记。
 
 后来修订的数据以新 Evidence Snapshot 进入，不覆盖旧内容。内容变化会生成新的哈希和 ID。但旧版本
 只有当初入过库才存在：先入库原版、修订后再入库一次，`as_of` 落在修订之前时返回原版；第一次入库

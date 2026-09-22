@@ -134,16 +134,23 @@ remembering to extend a list. `V2-P3-014`/`015` own the factor-side health repor
 
 ## The one thing this module reads differently from every other reader
 
-Every loader in `panel_ingest` reads through `PanelStore.read_if_ready`, whose
-`not_yet_knowable` check is judged per partition -- and a partition is a year. Roadmap section
-11 records what that costs here: a factor cannot be evaluated at a mid-year `as_of` at all,
-because the year's own December rows block the whole partition for every `as_of` inside it.
-This module therefore reads through `PanelStore.read_visible_at`, which runs the identical rule
-table and substitutes a row-level visibility predicate -- `available_time` and `revision_time`
-both at or before `as_of` -- for that one code.
-(`V2-P4-026` made the first sentence one loader less than universal: `load_daily_valuations` now
-takes the filtered door too, one session at a time. Every *other* `panel_ingest` loader is
-unchanged, and so is everything this section says about this module.) See
+`panel_ingest`'s whole-partition loaders read through `PanelStore.read_if_ready` -- spelled
+`assessed(...).read(...)` at every call site -- whose `not_yet_knowable` check is judged per
+partition, and a partition is a year. Roadmap section 11 records what that costs here: a factor
+cannot be evaluated at a mid-year `as_of` at all, because the year's own December rows block the
+whole partition for every `as_of` inside it. This module therefore reads through
+`PanelStore.read_visible_at`, which runs the identical rule table and substitutes a row-level
+visibility predicate -- `available_time` and `revision_time` both at or before `as_of` -- for
+that one code.
+(**Six of `panel_ingest`'s thirteen loaders take the whole-partition door today**, not all of
+them: `load_trading_calendar`, `load_adjustment_histories`, `load_index_membership`,
+`load_index_prices`, `load_industry_histories` and `load_industry_trees`. The other seven take a
+filtered one -- `V2-P4-026` moved the three session-dated price loaders onto
+`_read_visible_price_session`, `V2-P4-076` moved `load_stock_universe`, `load_name_histories`
+and `load_suspensions` onto `_read_visible_event_dated_rows`, and `V2-P4-083` moved
+`load_statement_histories` there too. `tests/unit/panel/test_query_callers.py` holds the map,
+`GATED_READERS`, and reads it off the tree. Everything this section says about this module is
+unchanged.) See
 that method's docstring for the full argument, `panel/catalog.py::ROW_FILTERABLE_ISSUE_CODES`
 for why exactly one code is compensable, and `tests/unit/panel/test_visible_read_callers.py`
 for the allowlist that keeps the path from spreading silently.
@@ -6509,8 +6516,9 @@ def _refuse_rows_that_are_not_the_answers_their_manifest_addresses(
       impossible.
 
     The comparison is by build rather than over the whole read, and that is what makes it usable
-    at all: `read_visible_at` filters on `available_time`, every row of one build carries that
-    build's own `as_of` in all four clocks, so a build is either wholly visible or wholly absent
+    at all: `read_visible_at` filters on `available_time` and `revision_time`, every row of one
+    build carries that build's own `as_of` in all four clocks, so a build is either wholly
+    visible or wholly absent
     and its stored rows are exactly the cross section its digest was taken over. A read narrowed
     to some years simply sees fewer builds; it never sees half of one.
     """

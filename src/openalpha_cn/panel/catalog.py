@@ -171,7 +171,7 @@ through a year while reading that year's partition, because every step inside th
 
 The design is deliberate and fail-closed: `evaluate_readiness` is pure over catalog metadata
 and has no access to rows, so a row-level answer would mean promising something about rows it
-never filtered. Splitting this into a partition-level gate plus a row-level `available_time`
+never filtered. Splitting this into a partition-level gate plus a row-level visibility
 filter is the obvious alternative, and it changes what `read_if_ready` *promises* rather than
 only what it refuses. **P2 considered it and declined**: a filtered read hands back a short
 partition, and every consumer above this plane reads shortness as missing data rather than as
@@ -571,11 +571,13 @@ KNOWN_STORAGE_LIMITATIONS: Final[tuple[StorageLimitation, ...]] = (
             "PanelStore.query() takes no as_of, consults no readiness verdict and carries no "
             "row-level visibility predicate: it returns every row of the resolved "
             "partition. Measured on a real stock_basic 2024 partition it returns 152 rows, of "
-            "which 92 were not knowable at 2024-07-01. The point-in-time gate is read_if_ready"
-            "(), which is opt-in rather than structural, and every src/ reader goes through "
-            "it -- pinned by tests/unit/panel/test_query_callers.py, which fails when a new "
-            "module calls query() directly, because a caller that filtered by available_time "
-            "itself would move the guarantee out of this plane with nothing auditing it. "
+            "which 92 were not knowable at 2024-07-01. Two gated doors stand in front of it "
+            "and every src/ reader takes one of them: the whole-partition read_if_ready(), "
+            "which every caller spells assessed(...).read(...), and the row-filtered "
+            "read_visible_at(). Both are opt-in rather than structural -- pinned by "
+            "tests/unit/panel/test_query_callers.py, which fails when a new module calls "
+            "query() directly, because a caller that filtered by the visibility clocks itself "
+            "would move the guarantee out of this plane with nothing auditing it. "
             "THAT GATE IS NARROWER THAN VISIBILITY, and has been since the revision clock "
             "joined it: read_if_ready() judges a partition's max_available_time alone, so it "
             "equals visibility only on a dataset whose revision clock never leaves its "

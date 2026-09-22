@@ -1,9 +1,14 @@
 """Who may read a partition without a point-in-time verdict, as an allowlist rather than a hope.
 
 `PanelStore.query()` is public, takes no `as_of`, consults no readiness verdict and carries no
-row-level `available_time` predicate: on a real `stock_basic` 2024 partition it returns 152
-rows, of which 92 were not knowable at 2024-07-01. The gate is `read_if_ready()`, and it is
-**opt-in**. Nothing about `query()`'s type, name or signature stops a caller reaching past it.
+row-level visibility predicate: on a real `stock_basic` 2024 partition it returns 152 rows, of
+which 92 were not knowable at 2024-07-01. The gates are `read_if_ready()` -- spelled
+`assessed(...).read(...)` at every call site -- and `read_visible_at()`, and both are
+**opt-in**. Nothing about `query()`'s type, name or signature stops a caller reaching past
+them. The first of the two is also narrower than visibility: it judges a partition's
+`max_available_time` and never reads `revision_time` (`panel/store.py::query`'s own docstring
+carries the measurement, and `tests/unit/panel/test_whole_partition_doors_never_hold_a_revision.
+py` keeps `src/` off that door for the datasets that revise).
 
 That is a live seam rather than a tidiness worry, and P2's technical acceptance named it as the
 most dangerous one left for P3, in these terms: `V2-P3-002`'s factor engine faces the cost of
@@ -65,8 +70,8 @@ opposite argument from the one this file was built to refuse. **Nothing it reads
 with.** A derived partition is written whole and has no append, so a build that adds one instant
 to a year has to put the year's existing rows back in front of its own or destroy them; that
 function reads them and hands them straight to `write_partition`. A point-in-time read there
-would be the fail-open rather than the safe choice: filtering by `available_time` would carry
-only the rows knowable at some instant and would commit a partition **missing** the withheld
+would be the fail-open rather than the safe choice: filtering by the visibility clocks would
+carry only the rows knowable at some instant and would commit a partition **missing** the withheld
 ones, which is data destruction with a safety argument in front of it. The guarantee this file
 protects is about what a caller may *learn*; a byte put back where it was found teaches nobody
 anything.

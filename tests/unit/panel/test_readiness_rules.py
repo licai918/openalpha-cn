@@ -327,7 +327,7 @@ def test_not_yet_knowable_is_partition_level_so_an_as_of_inside_a_year_reads_not
     - **P4 walk-forward** cannot step an `as_of` through a year and read that same year's
       partition at each step; a walk-forward inside one year sees `blocked` at every step.
 
-    Splitting the judgement into a partition-level gate plus a row-level `available_time`
+    Splitting the judgement into a partition-level gate plus a row-level visibility
     filter is the obvious alternative and is **not** done here. It was P2's first design
     decision and P2 declined it: a filtered read hands back a *short* partition, and every
     consumer above this plane reads shortness as missing data rather than as withheld data,
