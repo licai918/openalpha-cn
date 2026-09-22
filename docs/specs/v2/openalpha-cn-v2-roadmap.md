@@ -166,7 +166,7 @@ P3 结束即可独立使用（Jupyter 直连面板 + 因子）
 | ID | 标题 | 依赖 | 注入内容 | PRD |
 |---|---|---|---|---|
 | `V2-P2-001` | 未来披露注入 | P1 | `available_time > as_of` 的披露 | S9, S93 |
-| `V2-P2-002` | 后续修正注入（两种形态：`f_ann_date > ann_date`，**以及日期相同仅 `update_flag` 不同**） | P1-011 | 要求按 as-of 返回修正前的值；第二种形态今天无法区分，见 §7 | S9, S93 |
+| `V2-P2-002` | 后续修正注入（两种形态：`f_ann_date > ann_date`，**以及日期相同仅 `update_flag` 不同**） | P1-011 | 要求修正生效（`f_ann_date`）之前不返回修正后的值：存有修正前那一行的，按 as-of 返回它；只存了修正版的，窗口内该期缺失而不是前视（2026-09-22 起的规则，见 `docs/superpowers/plans/v2-delivery-plan.md`「修订时间纳入可见性」）；第二种形态今天无法区分，见 §7 | S9, S93 |
 | `V2-P2-003` | 未来指数成分变更注入 | P1-009 | 要求按 as-of 解析成分 | S11, S93 |
 | `V2-P2-004` | 未来行业分类变更注入 | P1-010 | 同上 | S11, S93 |
 | `V2-P2-005` | 重叠标签检测 | P1 | 要求显式拒绝或标注 | S28, S93 |
@@ -589,6 +589,9 @@ PRD 中 83 条 IN / IN-降级 story，逐条落到 issue。
 `revision_time` 都无法区分二者。下游 `ProviderBatch` 对 `(subject, kind, date)` 无唯一性约束，
 两行会共存；PIT 消费者取"当前值"时只能依赖 Tushare 的响应顺序，而那不是契约。
 `evidence/builder.py` 的 `revised_after_initial_availability` 质量标记也永不触发。
+（这一句只对同日更正对成立：`f_ann_date` 晚于 `ann_date` 的行，修订时钟晚于可得时钟，面板上按时钟数出的
+`revised_row_count` 实测为 55 / 59 / 23 / 0，见 `domain/financial_statements.py` 模块说明；2026-09-22 起
+这类行在 `f_ann_date` 之前不可见。）
 
 **已做**：`_announcement_timeline` 的 docstring 记录了实测数字；
 `test_announcement_clock_cannot_yet_distinguish_restatement_via_update_flag` 把这个缺口钉成测试，

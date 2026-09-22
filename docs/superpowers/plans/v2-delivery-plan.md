@@ -237,7 +237,7 @@ D13 整批终审（`final-review-d13.md`，Critical 0 / Important 4 / Minor 11�
 - **B1 九轮，17 个提交。** 修轮（守卫先收窄）→ 普查主表 → 改派项与修轮 Minor → 普查评审的 1 Critical / 5 Important / 7 Minor 与台账三行 → 终审两条 Important → 收尾三条 Minor → 提交信息更正与图的几何规则 → 整批终审的 5 Important 与 12 Minor → 新守卫自身的两条 Minor。
 - **八轮独立评审加两次图子审计**：0/0/7、1/5/7、0/2/7、0/0/3、0/1/3、0/0/1、整批终审 0/5/12、闭环复核 0/0/2；图子审计另报 0/2/6。
 - **本批查实并改掉的实质错误（举其要）：**
-  - 四份文档、`docs/api/data-interface.zh-CN.md` 与功能台账 `OA-TIME-003` 都声称四个时钟共同决定历史可见性，而代码只比较 `available_time`；
+  - 四份文档、`docs/api/data-interface.zh-CN.md` 与功能台账 `OA-TIME-003` 都声称四个时钟共同决定历史可见性，而代码只比较 `available_time`（2026-09-22 起也比较 `revision_time`，见下节）；
   - 「408/429/5xx 重试」，而代码只把六个状态码标为可重试，共 10 处；
   - 「本仓库不存 SignalFrame」，而恢复平面整份保存、一次运行汇总出的帧只存 ID，共 4 处（含 `src/` 两条 limitation）；
   - README 两条命令照抄跑不通（缺参数、地址形状非法），并补上了能抓住这类缺陷的检查；
@@ -256,15 +256,30 @@ D13 整批终审（`final-review-d13.md`，Critical 0 / Important 4 / Minor 11�
   - 按抽样点去量 24u 见方的箭头头部会得出相反的结论，需要整幅逐像素比对。
 
 
+## 修订时间纳入可见性（已决定，2026-09-22）
+
+- **决定：** 可见性要求 `available_time <= as_of` 且 `revision_time <= as_of`。财报的 `f_ann_date` 算修订时钟（分叉 F1 选 A）。
+- **依据：** 在线探查（15 只大盘股、66 次请求）找到 21 行 `f_ann_date` 晚于 `ann_date` 的财报。有可比版本的 19 行里，18 行的数值与 `ann_date` 当天公开的版本不同。例：`000001.SZ` 2005 年中报 2005-08-19 公布净利润 207,486,792，2006-07-05 更正为 157,834,800。所以晚到的 `f_ann_date` 标记的是一次真实的数值修订；不算它，就是在 `ann_date` 当天给出之后才公布的数。样本不大（15 只、21 行），但信号一边倒。证据：`.superpowers/sdd/fann-probe-findings.md`。
+- **落地：**
+  - 同一个谓词用在九处：`is_visible_at`、列式批次（改为取修订时钟的最大值那一行）、证据库查询、面板三条 SQL、File 与 Tushare 两处入库过滤；
+  - 请求、回放语料与链邻批次对修订晚于 as_of 的证据整条拒绝；
+  - 事件日对账把「只因修订被扣下」的行算作已解释的扣留；
+  - `StatementHistory.filings_on` 按 `max(ann_date, f_ann_date)` 判定一版何时可读；
+  - `panel build` 的三张财报改为按构建时钟取数，年份作请求参数，免得跨年修订的行被永久丢掉；
+  - 整分区门仍只看 `max_available_time`，由结构测试钉住：走这道门的数据集都不会修订；
+  - AkShare 保留按可得时间过滤：它把修订时钟记成可得时钟，先建时间线反而会把晚于抓取时刻的 K 线变成报错，已用测试钉住；
+  - 文字：四份面向用户的文档、四份 API 与数据文档、四张图、台账五行改为如实描述；退役守卫新增一族「a record revised after as_of stays visible」，原「只读当时可知的版本」一族保留，前提改为同日更正对的时钟。
+- **剩余的有损情形：**
+  - 上游只给现行版本。面板只存了更正后那一版的，在 `[ann_date, f_ann_date)` 内该期不可见——是缺失，不是前视。只有同键还留着较早 `f_ann_date` 那一行的，窗口内才能答出旧版（样本中 income 5 个键、balancesheet 5 个键）。要补上这部分，需另外入库调整前版本（`report_type=5`），属后续改进。
+  - 同日只差 `update_flag` 的更正对，四个时钟逐字节相同，谓词分不开，两版同时可见、按字段拒答。
+  - 证据平面的旧版本，只有当初入过库才能拿回。
+- **次要项按默认：**
+  - F2：风险标记 `revised_after_initial_availability` 保留字符串与 `reduced`，只改说明；
+  - F3：整分区门用结构测试钉住，不升目录 schema；
+  - F4：`revision_time` 仍不在 `evidence_id` 里，并入下面的待决项「证据标识符的覆盖面」。
+- **影响：** 这是行为改动。e2e 面板不建财报，其余数据集的修订时钟恒等于可得时钟，预计结果不变；按计划合并后由控制方重跑 e2e。
+
 ## 不在本批（需要你决定）
-- **修订过的数据，要不要按 as_of 挡掉。**
-  - 可见性只比较 `available_time`：`domain/time.py:34-36` 的 `is_visible_at`，以及证据存储的查询 `storage/parquet.py:104`。
-  - `revision_time` 晚于 `available_time` 的快照，会被 `evidence/builder.py:134-135` 标上 `revised_after_initial_availability`。这个标记的严重度是 `reduced`（`domain/risk_flag.py:167`），风险门对它给出 reduce，不给 block（`decisions/risk.py:48-51`）。
-  - 所以，as_of 之后才修订的版本，在 as_of 当时照样可见，只是带着标记、被降一级。
-  - 四份面向用户的文档、`docs/api/data-interface.zh-CN.md` 与功能台账 `OA-TIME-003` 原先都声称四个时钟共同决定可见性，现已全部改为如实描述。
-  - 二选一：
-    - 保持今天的「标记加降级」；
-    - 在可见性判断里加上 `revision_time <= as_of`。若修订前的版本没有另存为独立快照，这样做等于在修订生效之前把整条数据藏起来；它会改变研究与回放的结果，需要重跑 e2e。
 - **`TERMINAL_STATUSES`**（台账 `coverage_status` 的取值集合，`scripts/build_feature_coverage.py:18`）缺一个表示「已窄化」的值。
   这是状态表的设计决定，不是一行能顺手发明的。
 - **FK 守卫三条残留**（等量替换、别名×不守命名约定相乘、九个 store 只断言 pragma 读回值）：已具名记录，风险低。
@@ -273,6 +288,7 @@ D13 整批终审（`final-review-d13.md`，Critical 0 / Important 4 / Minor 11�
   `export_report` 照样放出受限载荷；同一文件以不同许可证重建时，存储静默保留旧的许可文本。没有远程利用路径。
   修法：A 不动身份，补文档并在导出与存储处加廉价防护；B 另加一个覆盖全部字段的摘要（改 schema、迁移存储）；
   C 把这些字段并入 `evidence_id`（所有 id 都会变，连带 `signal_id`、`report_id` 与存储文件名）。
+  另：`revision_time` 自 2026-09-22 起参与可见性，却仍不在 `evidence_id` 里。改它能改变一条证据何时可见，而身份不变；与许可列同类，没有远程利用路径（`docs/api/http.md`）。
 - **模型调用要不要接进出厂路径。**
   - 今天的出厂路径不调用模型。
   - 模型客户端（分类重试、用量账本）是 `openalpha_cn.models` 里的库代码。`OpenAlphaSDK` 没有任何模型客户端方法，要用户自己写代码构造、接线。
