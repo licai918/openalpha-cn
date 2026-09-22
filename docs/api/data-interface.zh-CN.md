@@ -65,16 +65,34 @@ API 默认只绑定 `127.0.0.1`，没有多租户认证。若要在局域网或�
 
 ## 时间和修订规则
 
-证据在某一时刻是否可见，只看一个条件：
+证据在某一时刻是否可见，要同时满足两个条件：
 
 ```text
-available_time <= as_of
+available_time <= as_of AND revision_time <= as_of
 ```
 
-`event_time`、`ingested_time` 与 `revision_time` 随证据保存，但不参与可见性判断：研究请求、回放语料、
-Provider 批次和证据库查询都只比较 `available_time`（`domain/time.py` 的 `is_visible_at`，以及
-`storage/parquet.py` 查询里的 `WHERE available_time <= ?`）。修订时间晚于可得时间的记录，构建时带上
-`revised_after_initial_availability` 风险标记，风险门据此答 `reduce` 而不是 `block`——最终动作（`watch`/`avoid`/`abstain`）不因此改变；修订时间晚于
-`as_of` 的记录照样可见，不会只因为修订较晚就被挡在门外。
+记录首次可知的时刻，和手里这一版内容发布（修订）的时刻，都不能晚于 `as_of`。`event_time` 与
+`ingested_time` 随证据保存，不参与可见性判断。同一条规则在五处执行（`domain/time.py` 的
+`is_visible_at`）：
 
-后来修订的数据以新 Evidence Snapshot 进入，不覆盖旧内容。内容变化会生成新的哈希和 ID。
+- 研究请求与回放语料：带着不可见证据的请求或案例整条拒绝；
+- Provider 批次：整批拒绝。文件与 Tushare 在组批之前先按同一谓词丢掉当时不可见的行，所以修订
+  晚于 `as_of` 的一行不会让整次导入失败；链邻客户端不自行过滤，由批次整批拒绝；
+- 证据库查询：`storage/parquet.py` 的 `WHERE available_time <= ? AND revision_time <= ?`；
+- 面板读取：`read_visible_at` 在 SQL 里对两个时钟同时过滤，并把因修订被扣下的行计入
+  `withheld_row_count`。
+
+修订时间晚于 `as_of` 的记录在 `as_of` 时不可见。修订不晚于 `as_of` 的记录照常可见，构建时带上
+`revised_after_initial_availability` 风险标记，风险门据此答 `reduce` 而不是 `block`——最终动作（`watch`/`avoid`/`abstain`）不因此改变。
+
+后来修订的数据以新 Evidence Snapshot 进入，不覆盖旧内容。内容变化会生成新的哈希和 ID。但旧版本
+只有当初入过库才存在：先入库原版、修订后再入库一次，`as_of` 落在修订之前时返回原版；第一次入库
+拿到的就已是修订版的，修订生效之前就没有这条证据。
+
+面板分区整体覆盖，没有版本历史，所以还有两处剩余缺口：
+
+- 财报只存了更正后那一版的（`f_ann_date` 晚于 `ann_date`），在 `[ann_date, f_ann_date)` 内该期
+  不可见——是缺失，不是前视。上游只提供现行版本，只有同一键下还留有较早 `f_ann_date` 那一行的，
+  窗口内才能答出较早的版本；
+- 同日只差 `update_flag` 的更正对，两行的四个时钟逐字节相同，可见性谓词分不开它们：两版在
+  `ann_date` 当天同时可见，按字段有分歧时读取拒答（`ReportFiling.value_of`）。

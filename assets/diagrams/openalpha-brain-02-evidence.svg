@@ -141,7 +141,7 @@
   <path d="M314 514L348 514" fill="none" stroke="#38BDF8" stroke-width="2.2" marker-end="url(#arrow-38BDF8)" />
   <circle cx="670" cy="210" r="14" fill="#2DD4BF" fill-opacity=".16" stroke="#2DD4BF" stroke-opacity=".45" />
   <text x="670" y="214" class="navNum" fill="#2DD4BF" text-anchor="middle" opacity="1">C</text>
-  <text x="694" y="214" class="micro" fill="#2DD4BF" text-anchor="start" opacity="1">可得时间 PIT · 四时钟</text>
+  <text x="694" y="214" class="micro" fill="#2DD4BF" text-anchor="start" opacity="1">可得与修订时间 PIT · 四时钟</text>
   <rect x="658" y="232" width="160" height="92" rx="18" fill="#13243A" stroke="#2DD4BF" stroke-opacity=".28" />
   <text x="738" y="270" class="cardTitle" fill="#F4F7FB" text-anchor="middle" opacity="1">事件发生</text>
   <text x="738" y="298" class="mono" fill="#2DD4BF" text-anchor="middle" opacity="1">event_time</text>
@@ -163,7 +163,7 @@
   <text x="682" y="465" class="body" fill="#96A8BE" text-anchor="start" opacity="1">available_time | content_hash)</text>
   <text x="682" y="489" class="body" fill="#96A8BE" text-anchor="start" opacity="1">可见时点 · 哈希 · 来源 · 许可 · 修订</text>
   <text x="682" y="513" class="body" fill="#96A8BE" text-anchor="start" opacity="1">A 股事件语义与原始载荷建立绑定</text>
-  <text x="682" y="537" class="body" fill="#96A8BE" text-anchor="start" opacity="1">下游只接收可得时间不晚于决策时刻的 evidence_id</text>
+  <text x="682" y="537" class="body" fill="#96A8BE" text-anchor="start" opacity="1">下游只接收可得与修订时间都不晚于决策时刻的 evidence_id</text>
   <path d="M622 421L658 421" fill="none" stroke="#2DD4BF" stroke-width="2.2" marker-end="url(#arrow-2DD4BF)" />
   <text x="640.0" y="405" class="small" fill="#2DD4BF" text-anchor="middle" opacity="1">固化</text>
   <rect x="1142" y="350" width="214" height="214" rx="22" fill="#0C1928" stroke="#263A52" filter="url(#shadow)" />

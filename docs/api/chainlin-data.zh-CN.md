@@ -27,7 +27,9 @@ Accept: application/json
 - 可选 `source_uri`。
 
 客户端在接收时给每条记录添加自己的 `ingested_time`，返回一个 `ProviderBatch`；批次在构造时，
-只要有一条记录按请求的 `as_of` 不可见，就整批拒绝。只有当调用方代码把这个客户端交给
+只要有一条记录按请求的 `as_of` 不可见，就整批拒绝。这里的「不可见」包括 `available_time` 或
+`revision_time` 晚于 `as_of`：一条在 `as_of` 之后才修订的记录会让整批被拒，客户端不替服务端挑版本，
+也不丢行。只有当调用方代码把这个客户端交给
 `build_provider_evidence`，或把批次交给 `build_evidence` 或 `POST /api/v1/evidence/build` 时，
 记录才会变成 `EvidenceSnapshot`。出厂路径只有 `openalpha doctor` 构造这个客户端。配置了服务地址
 和密钥时，`--probe` 对每个数据集发一次最小请求，只报告每次请求以哪一类结果结束，取回的批次随即

@@ -404,7 +404,7 @@ def test_readme_brain_map_series_is_complete_and_ordered() -> None:
     assert "DeliberationOutcome" in combined_content
     assert "PortfolioTransition" in combined_content
     assert "ValidationResult" in combined_content
-    assert "可得时间 PIT" in combined_content
+    assert "可得与修订时间 PIT" in combined_content
     assert "显式弃权" in combined_content
     assert "不自动下单" in combined_content
     assert "不自动训练模型" in combined_content
@@ -445,7 +445,7 @@ def test_readme_api_relationship_map_series_is_complete_and_source_grounded() ->
         "POST /api/v1/evidence/build",
         "ProviderMetadata + ProviderBatch",
         "EvidenceSnapshot",
-        "可得时间 PIT",
+        "可得与修订时间 PIT",
         "POST /api/v1/research/run",
         "ResearchEngine.run_cycle",
         "POST /api/v1/research/batches",

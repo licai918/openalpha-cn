@@ -15,7 +15,8 @@ OpenAlpha CN 只提供数据接入能力，不出售、不打包转售第三方�
 - `payload`（JSON/JSONL）或 `payload_json`（CSV/Parquet）
 - 可选 `source_uri`
 
-历史查询只返回 `available_time <= as_of` 的记录。格式错误会抛出结构化
+历史查询只返回 `available_time` 与 `revision_time` 都不晚于 `as_of` 的记录；修订晚于 `as_of`
+的行在组批前就被丢掉，不会让整次导入失败。格式错误会抛出结构化
 `ProviderFailure`，不会伪装成“成功但没有数据”。
 
 ### Tushare Pro（BYOT）

@@ -85,6 +85,12 @@ filesystem path. Local file access remains a CLI responsibility.
   edited item truly does reproduce the same values, because those fields were never part of
   either identity. That is a property of the identity scheme, not a gap in this check, and
   changing which fields the scheme covers is a separate decision this fix does not make.
+  Of those fields, `revision_time` is the one that now decides visibility too: a request is
+  refused when an item's `revision_time` is after `as_of`, so an item whose `revision_time` a
+  client moved earlier passes a request its original would not, under the same two
+  identifiers. The client supplies the evidence in either case, so this opens nothing a client
+  could not already do by sending evidence of its own; it belongs to the same open decision
+  about which fields the identity covers (`docs/superpowers/plans/v2-delivery-plan.md`).
 
   `docs/api/schemas/evidence-snapshot-v1.json` marks both fields `readOnly`. That still holds —
   a client never computes either one, and nothing here asks it to — but it is not a statement

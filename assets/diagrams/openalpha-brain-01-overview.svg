@@ -126,7 +126,7 @@
   <rect x="374" y="266" width="3" height="130" rx="1.5" fill="#2DD4BF" />
   <text x="398" y="273" class="micro" fill="#2DD4BF" text-anchor="start" opacity="1">01 / 证据成像</text>
   <text x="398" y="306" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">EvidenceSnapshot</text>
-  <text x="398" y="335" class="body" fill="#96A8BE" text-anchor="start" opacity="1">可得时间 PIT · 四时钟</text>
+  <text x="398" y="335" class="body" fill="#96A8BE" text-anchor="start" opacity="1">可得与修订时间 PIT · 四时钟</text>
   <text x="398" y="359" class="body" fill="#96A8BE" text-anchor="start" opacity="1">内容寻址 · 来源与许可</text>
   <rect x="716" y="244" width="322" height="174" rx="22" fill="#0C1928" stroke="#263A52" filter="url(#shadow)" />
   <rect x="717" y="245" width="320" height="172" rx="21" fill="none" stroke="#FFFFFF" stroke-opacity=".035" />

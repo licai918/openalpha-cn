@@ -465,7 +465,7 @@ def evidence_dataflow() -> str:
         endpoint="POST /api/v1/evidence/build",
         lines=(
             "Schema / aware datetime",
-            "可得时间 PIT · 四时钟",
+            "可得与修订时间 PIT · 四时钟",
             "涨停 / 炸板 / 连板规范化",
             "题材 / 催化 / 公告 / 资金",
         ),
@@ -485,7 +485,7 @@ def evidence_dataflow() -> str:
             "evidence_id + content_hash",
             "event / available / ingested / revision",
             "source_id / URI / license",
-            "只保留可得时间不晚于 as_of 的事实",
+            "只保留可得与修订都不晚于 as_of 的事实",
         ),
         color=COLORS["purple"],
     )
@@ -794,7 +794,7 @@ def validation_loop() -> str:
             64,
             "同路径回放",
             "POST /api/v1/backtests/replay",
-            ("冻结 ReplayCorpus", "ResearchEngine.run_cycle", "两遍比对 · 可得晚于 as_of 即拒"),
+            ("冻结 ReplayCorpus", "ResearchEngine.run_cycle", "两遍比对 · as_of 时不可见即拒"),
             COLORS["purple"],
         ),
         (

@@ -113,7 +113,7 @@
   <rect x="692" y="262" width="258" height="27" rx="9" fill="#5968F2" opacity=".10" />
   <text x="702" y="281" class="endpoint">POST /api/v1/evidence/build</text>
   <text x="694" y="316" class="body">Schema / aware datetime</text>
-  <text x="694" y="341" class="body">可得时间 PIT · 四时钟</text>
+  <text x="694" y="341" class="body">可得与修订时间 PIT · 四时钟</text>
   <text x="694" y="366" class="body">涨停 / 炸板 / 连板规范化</text>
   <text x="694" y="391" class="body">题材 / 催化 / 公告 / 资金</text>
   <path d="M 606 330 L 662 330" fill="none" stroke="#5968F2" stroke-width="3" marker-end="url(#arrow-5968F2)" />
@@ -123,7 +123,7 @@
   <text x="1036" y="280" class="body">evidence_id + content_hash</text>
   <text x="1036" y="305" class="body">event / available / ingested / revision</text>
   <text x="1036" y="330" class="body">source_id / URI / license</text>
-  <text x="1036" y="355" class="body">只保留可得时间不晚于 as_of 的事实</text>
+  <text x="1036" y="355" class="body">只保留可得与修订都不晚于 as_of 的事实</text>
   <path d="M 972 330 L 1004 330" fill="none" stroke="#7C5CE7" stroke-width="3" marker-end="url(#arrow-7C5CE7)" />
   <rect x="352" y="500" width="252" height="162" rx="18" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)" />
   <rect x="352" y="500" width="7" height="162" rx="3.5" fill="#1688D4" />

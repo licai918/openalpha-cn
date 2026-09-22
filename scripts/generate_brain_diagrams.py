@@ -442,7 +442,7 @@ def overview() -> None:
             "01",
             "证据成像",
             "EvidenceSnapshot",
-            ("可得时间 PIT · 四时钟", "内容寻址 · 来源与许可"),
+            ("可得与修订时间 PIT · 四时钟", "内容寻址 · 来源与许可"),
             CYAN,
         ),
         (
@@ -577,7 +577,7 @@ def evidence() -> None:
     svg.arrow(314, 327, 348, 327, color=CYAN, dashed=True)
     svg.arrow(314, 514, 348, 514, color=BLUE)
 
-    svg.section_label(670, 214, "C", "可得时间 PIT · 四时钟", CYAN)
+    svg.section_label(670, 214, "C", "可得与修订时间 PIT · 四时钟", CYAN)
     clocks = [
         (658, "事件发生", "event_time"),
         (837, "首次可知", "available_time"),
@@ -608,7 +608,7 @@ def evidence() -> None:
             "available_time | content_hash)",
             "可见时点 · 哈希 · 来源 · 许可 · 修订",
             "A 股事件语义与原始载荷建立绑定",
-            "下游只接收可得时间不晚于决策时刻的 evidence_id",
+            "下游只接收可得与修订时间都不晚于决策时刻的 evidence_id",
         ),
     )
     svg.arrow(622, 421, 658, 421, color=CYAN, label="固化", label_y=405)
