@@ -1423,7 +1423,23 @@ def test_a_cross_section_earlier_than_the_registrys_own_availability_withholds_r
     )
     assert built["as_ofs"] == [earlier_instant.isoformat()]
     assert built["subject_count"] == UNIVERSE_SIZE
-    assert built["coverage"]["raw"] == {"computed": UNIVERSE_SIZE}
+    # Not `{"computed": UNIVERSE_SIZE}`. The universe is the sixty most traded on the panel's
+    # newest session, and a name that listed after `earlier_instant` is not in the universe *at*
+    # that instant -- the same per-row withholding this test just read off the registry, stated
+    # over the build instead. The first paid run held no such name and the literal sixty passed;
+    # the rebuild of 2026-09-21 held one, 601091.SH, which listed on 2026-09-17, four sessions
+    # before the newest and after `earlier_instant`. A count taken off live listings is what this
+    # module's docstring forbids asserting, so the expectation is derived from `withheld`, which
+    # the loop above has already checked holds only securities that had not listed by
+    # `earlier_sessions[-1]`. A name dropped for any other reason still fails here.
+    withheld_from_the_universe = [code for code in private_panel.universes[0] if code in withheld]
+    expected_coverage = {"computed": UNIVERSE_SIZE - len(withheld_from_the_universe)}
+    if withheld_from_the_universe:
+        expected_coverage["not_in_universe"] = len(withheld_from_the_universe)
+    assert built["coverage"]["raw"] == expected_coverage, (
+        f"the build covered {built['coverage']['raw']} over a universe of {UNIVERSE_SIZE} whose "
+        f"names withheld at {earlier_instant.isoformat()} are {withheld_from_the_universe}"
+    )
     observations = next(
         name.split("@", 1)[0] for name in built["partitions"] if name.startswith("factor_obs_")
     )
@@ -1453,15 +1469,28 @@ def _assert_no_session_later_than(
     path = catalogued_path(screened.store, dataset=dataset, year=screened.year)
     with duckdb.connect() as connection:
         rows = connection.execute(
-            "SELECT DISTINCT input_session_first, input_session_last, available_time "
-            f"FROM read_parquet('{path}')",
+            "SELECT DISTINCT input_session_first, input_session_last, available_time, "
+            f"input_row_count, coverage FROM read_parquet('{path}')",
         ).fetchall()
     stamped = [row for row in rows if row[2] == instant]
     assert stamped, (
         f"no stored observation carries available_time {instant.isoformat()}; the partition holds "
         f"{sorted({str(row[2]) for row in rows})}"
     )
-    for first_session, last_session, _stamp in stamped:
+    for first_session, last_session, _stamp, row_count, coverage in stamped:
+        if last_session is None:
+            # A subject the universe did not hold at `instant`: the build stores the row anyway,
+            # saying `not_in_universe` with `input_row_count` 0 and no value, which is how a
+            # missing name stays visible instead of vanishing from the partition. Such a row read
+            # no bar at all, so there is no session that could be later than `through` -- but it
+            # only gets past this check if it really did consume nothing and does not claim to
+            # have been computed.
+            assert first_session is None and row_count == 0 and coverage != "computed", (
+                f"an observation stamped {instant.isoformat()} carries no last session but "
+                f"reports coverage {coverage!r} over {row_count} rows, first session "
+                f"{first_session}"
+            )
+            continue
         assert date.fromisoformat(str(last_session)) <= through, (
             f"an observation stamped {instant.isoformat()} read {last_session}, later than "
             f"{through.isoformat()}, which is the newest session that instant could know"
