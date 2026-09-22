@@ -110,6 +110,7 @@ from openalpha_cn.domain.portfolio import PortfolioOrder, PortfolioTransition
 from openalpha_cn.domain.report import ResearchReport
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.model_view import KNOWN_MODEL_VIEW_LIMITATIONS
+from openalpha_cn.providers.tushare import _CLOCK_BUILDERS, ClockStrategy
 from openalpha_cn.runtime.batch import BatchResearchService
 from openalpha_cn.runtime.engine import ResearchEngine
 from openalpha_cn.sdk import OpenAlphaSDK
@@ -909,35 +910,32 @@ def _replay_still_runs_only_the_built_in_agents() -> str | None:
     return f"ReplayRunner now takes {built} and runs with {run}: re-read which agents it runs"
 
 
-def _visibility_still_reads_only_the_availability_clock() -> str | None:
-    """`is_visible_at` reads `available_time` alone, and the evidence store's query filters on
-    it alone -- read from `domain/time.py`'s syntax tree and from the query's WHERE clauses."""
-    tree = ast.parse((SRC / "domain" / "time.py").read_text(encoding="utf-8"))
-    visible = next(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == "is_visible_at"
-    )
-    read = sorted(
-        {
-            node.attr
-            for node in ast.walk(visible)
-            if isinstance(node, ast.Attribute) and node.attr.endswith("_time")
-        }
-    )
-    query = (SRC / "storage" / "parquet.py").read_text(encoding="utf-8")
-    filtered = sorted(
-        {
-            clock
-            for where in re.findall(r"WHERE(.*?)ORDER BY", query, re.DOTALL)
-            for clock in re.findall(r"(\w+_time)\s*<=", where)
-        }
-    )
-    if read == ["available_time"] and filtered == ["available_time"]:
+def _a_same_day_correction_still_has_no_instant_of_its_own() -> str | None:
+    """`_announcement_timeline` gives an `update_flag` correction the clocks of the original it
+    shares `ann_date` and `f_ann_date` with, so no visibility rule can tell the two apart.
+
+    The fact `tests/contract/providers/test_tushare_dataset_descriptors.py::
+    test_announcement_clock_cannot_yet_distinguish_restatement_via_update_flag` pins as a
+    decision, read here as the one that still refutes "a historical read sees only the version
+    knowable at the time" now that visibility waits for the revision clock: both versions are
+    visible from the original's `ann_date`, whenever the correction was really published.
+    """
+    clock = _CLOCK_BUILDERS[ClockStrategy.announcement]
+    filing = {
+        "ts_code": "000001.SZ",
+        "end_date": "20231231",
+        "ann_date": "20240315",
+        "f_ann_date": "20240315",
+    }
+    ingested_at = datetime(2024, 4, 1, tzinfo=UTC)
+    original = clock({**filing, "update_flag": "0"}, "ann_date", ingested_at)
+    correction = clock({**filing, "update_flag": "1"}, "ann_date", ingested_at)
+    if original == correction:
         return None
     return (
-        f"is_visible_at reads {read} and the evidence query filters on {filtered}: re-read "
-        "whether a record revised after as_of is still visible"
+        f"a same-day update_flag correction now gets clocks of its own ({correction} against "
+        f"{original}): re-read whether a historical read still sees more than the version "
+        "knowable at the time"
     )
 
 
@@ -2024,14 +2022,20 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             re.IGNORECASE,
         ),
         refuted_by=(
-            "Visibility is available_time <= as_of and nothing else: is_visible_at "
-            "(domain/time.py:34-36), which requests, replay corpora and provider batches call, and "
-            "the evidence store's WHERE available_time <= ? (storage/parquet.py:104). A record "
-            "revised after as_of is therefore still visible. The builder only marks one whose "
-            "revision_time is later than its available_time as revised_after_initial_availability "
-            "(evidence/builder.py:134-135), a reduced flag (domain/risk_flag.py:167) the risk gate "
-            "answers with reduce (decisions/risk.py:41-51), and reduce leaves final_action as it "
-            "was (runtime/engine.py:486-497)."
+            "Visibility waits for available_time and revision_time (domain/time.py:34-47): the "
+            "evidence store filters on both (storage/parquet.py:112-113), the panel's "
+            "read_visible_at applies both (panel/store.py:2062-2075), and a request or replay "
+            "case carrying a version revised after as_of is refused (domain/run_request.py:83, "
+            "backtest/replay.py:59). A historical read still sees more than the version "
+            "knowable at the time. providers/tushare.py::_announcement_timeline (:2704-2786) "
+            "gives a same-day correction -- the update_flag pairs, which share ann_date and "
+            "f_ann_date on all but 5 of income's 633 and 5 of balancesheet's 1,244 duplicate "
+            "keys -- clocks byte-equal to its original's, so both versions are visible from the "
+            "original's ann_date whenever the correction was really published; and trade_cal "
+            "dates an amended session as available from 1 January of its year "
+            "(domain/trading_calendar.py:209, KNOWN_CALENDAR_LOOKAHEAD). A panel partition also "
+            "stores only the version the endpoint serves now, so a statement stored only in its "
+            "corrected form has no version a read inside [ann_date, f_ann_date) can answer with."
         ),
         retired=(
             "历史回放只能读取当时已经可知的版本",
@@ -2052,7 +2056,7 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
             "content-addressed evidence and strict anti-look-ahead rules",
         ),
         paraphrase="回测里拿不到之后才改过的数字。",
-        premise=_visibility_still_reads_only_the_availability_clock,
+        premise=_a_same_day_correction_still_has_no_instant_of_its_own,
     ),
     RetiredClaim(
         name="the multi-day report measures capacity and attributes exposure",

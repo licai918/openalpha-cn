@@ -90,6 +90,32 @@ def test_evidence_visibility_uses_information_availability() -> None:
     assert item.visible_at(datetime(2026, 7, 24, 9, 35, tzinfo=UTC)) is True
 
 
+def test_evidence_visibility_waits_for_its_revision() -> None:
+    """`OA-TIME-003`'s revision half: a snapshot revised after it first became available is not
+    visible before its revision instant, and is visible from that instant on."""
+    first = timeline()
+    item = EvidenceSnapshot(
+        subject="000001.SZ",
+        kind="limit_up",
+        timeline=Timeline(
+            event_time=first.event_time,
+            available_time=first.available_time,
+            ingested_time=datetime(2026, 7, 26, 9, 1, tzinfo=UTC),
+            revision_time=datetime(2026, 7, 26, 9, 0, tzinfo=UTC),
+        ),
+        source_id="synthetic.limit-up",
+        source_uri="fixture://limit-up/2026-07-24/000001.SZ",
+        source_license="CC0-1.0",
+        redistribution="allowed",
+        summary="The stock reached its daily price limit.",
+        payload={"price": 12.34},
+    )
+
+    assert item.visible_at(first.available_time) is False
+    assert item.visible_at(datetime(2026, 7, 26, 8, 59, tzinfo=UTC)) is False
+    assert item.visible_at(datetime(2026, 7, 26, 9, 0, tzinfo=UTC)) is True
+
+
 def test_freeze_payload_is_one_implementation_both_hosts_inherit() -> None:
     """`ProviderRecord.freeze_payload` (`providers/base.py`) and `EvidenceSnapshot.freeze_payload`
     (this module) were two function bodies an AST comparison found byte-identical. `V2-P5-071`

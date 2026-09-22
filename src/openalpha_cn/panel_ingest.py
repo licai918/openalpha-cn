@@ -4171,8 +4171,15 @@ def _read_visible_event_dated_rows(
     four statement endpoints are `ClockStrategy.announcement`, where `_announcement_timeline`
     sets `available_time == event_time ==` midnight of the row's own `ann_date` -- the same
     equality `calendar_static` makes, arrived at from a different column, so the same bound.
-    (`f_ann_date` moves `revision_time` and nothing this read consults; `filings_on` reads
-    `ann_date` and only `ann_date`, deliberately.)
+
+    **The statement endpoints are also the one place a row is withheld for its revision.** A
+    later `f_ann_date` moves `revision_time`, and the visibility predicate waits for it, so inside
+    `[ann_date, f_ann_date)` such a row is counted by the census on its `ann_date` and removed by
+    the predicate. `read_visible_at` lists those rows' event instants (`revision_withheld`) and the
+    reconciliation below credits them date by date -- they are withheld for a reason this read
+    can see -- while a row withheld for its availability still refuses. `filings_on` keys a
+    version on the same later date, so the domain and this read agree on the day a version
+    becomes readable.
 
     **What the census cannot do is separate two rows of one subject from two of two**, and that
     is the boundary `V2-P4-079` measured rather than the one it hit. `PartitionCoverage.dates`
@@ -4248,6 +4255,14 @@ def _read_visible_event_dated_rows(
                 if entry.event_date <= census_day
             }
         )
+        revised_later: Counter[date] = Counter(
+            day
+            for day in (
+                _visible_event_date(instant, dataset=requirement.dataset, year=year, zone=zone)
+                for instant in outcome.revision_withheld
+            )
+            if day <= census_day
+        )
         _refuse_a_slice_the_census_disagrees_with(
             visible,
             happened,
@@ -4257,6 +4272,7 @@ def _read_visible_event_dated_rows(
             census_day=census_day,
             withheld_row_count=outcome.withheld_row_count,
             availability_rule=availability_rule,
+            revision_withheld=revised_later,
         )
         rows.extend(tuple(row[1:]) for row in outcome.rows)
     return tuple(rows)
@@ -4294,6 +4310,7 @@ def _refuse_a_slice_the_census_disagrees_with(
     census_day: date,
     withheld_row_count: int,
     availability_rule: str,
+    revision_withheld: Counter[date] | None = None,
 ) -> None:
     """Hold the visible rows' event dates against the partition's census, date by date.
 
@@ -4323,7 +4340,19 @@ def _refuse_a_slice_the_census_disagrees_with(
     callers' rules genuinely differ -- a floor at a taxonomy's effective date, a midnight, and a
     16:30 close. The message has to name the rule it is holding the partition to, or a reader
     handed "those two numbers should be equal" has no way to check whether they should.
+
+    ## A row held back for its revision is withheld, not absent
+
+    `revision_withheld` counts, per event date, the rows the visibility predicate removed only
+    because the version stored for them was revised after `as_of` -- available by then, and so
+    counted by the census on their own event date. They are withheld for a reason this read
+    **can** see, so the equation is `visible + revision_withheld == census` on every date. Before
+    the revision clock took part in visibility it was `visible == census`, and a statement
+    partition holding one row with a later `f_ann_date` then refused every read inside that
+    row's window for the whole year. Nothing else is credited: a row withheld for its
+    availability still leaves its date short and still refuses.
     """
+    held: Counter[date] = Counter() if revision_withheld is None else revision_withheld
     ahead = sorted(day for day in visible if day > census_day)
     if ahead:
         day = ahead[0]
@@ -4335,19 +4364,26 @@ def _refuse_a_slice_the_census_disagrees_with(
             "before its own event carries an availability this panel's model does not allow. The "
             "answer it feeds would carry a fact from after the instant the read stands at"
         )
-    disagreed = sorted(day for day in set(visible) | set(happened) if visible[day] != happened[day])
+    disagreed = sorted(
+        day
+        for day in set(visible) | set(happened) | set(held)
+        if visible[day] + held[day] != happened[day]
+    )
     if not disagreed:
         return
     day = disagreed[0]
+    credited = (
+        f", and {held[day]} more held back until a revision published after it" if held[day] else ""
+    )
     raise PanelStorageError(
         f"{dataset} year={year} cannot be read at {as_of.isoformat()}: its date census counts "
         f"{happened[day]} row(s) dated {day.isoformat()}, whose event had already happened, and "
-        f"the visible slice carries {visible[day]} of them ({withheld_row_count} row(s) withheld "
-        f"in all). {availability_rule}, so on a partition this read may answer from those two "
-        "numbers are equal on every event date one at a time -- not merely in sum, which two "
-        "errors in opposite directions cancel in. Where they differ, a row is being withheld for "
-        "a reason this read cannot see and an answer short by it is indistinguishable from one "
-        "where the row does not exist"
+        f"the visible slice carries {visible[day]} of them{credited} ({withheld_row_count} "
+        f"row(s) withheld in all). {availability_rule}, so on a partition this read may answer "
+        "from those numbers agree on every event date one at a time -- not merely in sum, which "
+        "two errors in opposite directions cancel in. Where they differ, a row is being withheld "
+        "for a reason this read cannot see and an answer short by it is indistinguishable from "
+        "one where the row does not exist"
     )
 
 

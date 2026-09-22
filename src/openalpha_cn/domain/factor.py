@@ -1090,8 +1090,9 @@ class FactorInputRef(BaseModel):
       `(dataset, year, column names and SQL types, rows)`. It answers "is this the same write",
       and it is exactly stable across a re-fetch that changed nothing.
     - `visible_row_count` and `withheld_row_count` are the two halves of the point-in-time read:
-      how many rows of the partition were at or before `as_of` on the availability clock, and
-      how many were held back. Both are functions of the content and of `as_of`. The second is
+      how many rows of the partition were at or before `as_of` on both the availability and
+      the revision clock, and how many were held back. Both are functions of the content and of
+      `as_of`. The second is
       the number that makes a short read *stated* rather than inferred -- see
       `panel/store.py::PanelStore.read_visible_at`.
 

@@ -51,6 +51,36 @@ def test_akshare_research_adapter_is_allowlisted_and_point_in_time() -> None:
     }
 
 
+def test_the_availability_filter_is_the_visibility_predicate_because_nothing_here_is_revised() -> (
+    None
+):
+    """Why this adapter filters on `available_time` rather than calling `is_visible_at`, and what
+    keeps the two the same filter.
+
+    `_decode` drops a bar whose availability is after `as_of` *before* it builds the record's
+    `Timeline`. Building it first, to hand it to `is_visible_at`, would turn a bar dated after
+    the fetch's own clock into an error -- `Timeline` refuses an `ingested_time` before its
+    `available_time` -- where today it is dropped and the fetch answers `no_data`. The two
+    filters agree only because every record this adapter stamps carries
+    `revision_time == available_time`, so `is_visible_at` reduces to the availability test.
+    Both halves are pinned: the equality, and the early fetch that must stay `no_data`.
+    """
+    after_the_close = datetime(2026, 7, 24, 10, 0, tzinfo=UTC)
+    before_the_close = datetime(2026, 7, 24, 6, 0, tzinfo=UTC)
+    request = ProviderRequest(
+        dataset="stock_zh_a_hist", as_of=after_the_close, subjects=("000001.SZ",)
+    )
+
+    batch = AKShareProvider(client=FakeAKShare(), clock=lambda: after_the_close).fetch(request)
+    early = AKShareProvider(client=FakeAKShare(), clock=lambda: before_the_close).fetch(
+        request.model_copy(update={"as_of": before_the_close})
+    )
+
+    (record,) = batch.records
+    assert record.timeline.revision_time == record.timeline.available_time
+    assert early.status == "no_data"
+
+
 def test_akshare_metadata_declares_supported_datasets() -> None:
     provider = AKShareProvider(client=FakeAKShare())
 

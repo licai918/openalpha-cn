@@ -188,7 +188,11 @@ its fourteen callers is untouched, and `not_yet_knowable` still refuses a whole 
 there. What `V2-P3-002` added is a *second*, differently named read on the same store,
 `PanelStore.read_visible_at`, which runs the identical rule table and then, **only** when every
 issue it found is in `ROW_FILTERABLE_ISSUE_CODES` (that is: only `not_yet_knowable`), scans the
-partition with a `WHERE available_time <= as_of` predicate instead of refusing it.
+partition with a `WHERE available_time <= as_of AND revision_time <= as_of` predicate instead of
+refusing it. The revision half arrived later, when visibility began to wait for the revision
+clock, and the predicate applies it on every read whatever the verdict said -- `not_yet_knowable`
+is still judged on availability alone, because no dataset read whole carries a revision
+(`tests/unit/panel/test_whole_partition_doors_never_hold_a_revision.py`).
 
 **`V2-P4-026` extended that to one ingested dataset, and the paragraph above about P4 is
 narrowed rather than retracted.** `panel_ingest.load_daily_valuations` now reads `daily_basic`
@@ -403,13 +407,13 @@ drives the evaluator into every branch and asserts the emitted set equals this o
 """
 
 ROW_FILTERABLE_ISSUE_CODES: Final[frozenset[str]] = frozenset({"not_yet_knowable"})
-"""The one issue a row-level `available_time` predicate can answer better than a refusal.
+"""The one issue a row-level visibility predicate can answer better than a refusal.
 
 `PanelStore.read_visible_at` (`V2-P3-002`) is allowed to proceed over a partition whose *only*
-readiness issue is one of these, replacing the refusal with a `WHERE available_time <= as_of`
-scan. Every other code stays a refusal, and the rule is written as this set difference rather
-than as a second rule table, so `evaluate_readiness` is still the one place a verdict is
-computed and a code added there arrives blocking on both paths.
+readiness issue is one of these, replacing the refusal with a `WHERE available_time <= as_of AND
+revision_time <= as_of` scan. Every other code stays a refusal, and the rule is written as this
+set difference rather than as a second rule table, so `evaluate_readiness` is still the one place
+a verdict is computed and a code added there arrives blocking on both paths.
 
 **Exactly one member, and each of the other twelve is excluded for a reason a filter cannot
 touch.** `partition_missing` / `partition_file_missing` / `partition_file_unreadable` /
@@ -565,7 +569,7 @@ KNOWN_STORAGE_LIMITATIONS: Final[tuple[StorageLimitation, ...]] = (
         code="panel_store_query_is_public_and_passes_no_point_in_time_gate",
         detail=(
             "PanelStore.query() takes no as_of, consults no readiness verdict and carries no "
-            "row-level available_time predicate: it returns every row of the resolved "
+            "row-level visibility predicate: it returns every row of the resolved "
             "partition. Measured on a real stock_basic 2024 partition it returns 152 rows, of "
             "which 92 were not knowable at 2024-07-01. The point-in-time gate is read_if_ready"
             "(), which is opt-in rather than structural, and every src/ reader goes through "
@@ -581,14 +585,17 @@ KNOWN_STORAGE_LIMITATIONS: Final[tuple[StorageLimitation, ...]] = (
         code="a_visibility_filtered_read_replays_a_partition_that_was_not_there_yet",
         detail=(
             "read_visible_at() answers a mid-year as_of by scanning the year partition with a "
-            "row-level available_time <= as_of predicate instead of refusing it, and reports "
-            "how many rows it withheld. What it reconstructs is what the STORED partition says "
-            "was knowable then -- not what a fetch made at that instant would have returned. "
-            "The two differ wherever the upstream is not append-only: a partition is written "
-            "whole and once, months after the sessions in it, so a filing that was later "
-            "restated is stored only in its restated form (roadmap section 7 measured "
-            "fina_indicator carrying two rows for 81.7% of its keys with identical four-clock "
-            "timelines, so no available_time separates the versions), a security absent from "
+            "row-level predicate on available_time and revision_time instead of refusing it, "
+            "and reports how many rows it withheld. What it reconstructs is what the STORED "
+            "partition says was knowable then -- not what a fetch made at that instant would "
+            "have returned. The two differ wherever the upstream is not append-only: a "
+            "partition is written whole and once, months after the sessions in it, so a filing "
+            "that was later restated is stored only in its restated form. Where the "
+            "restatement carries a later f_ann_date the revision clock withholds it until then, "
+            "so inside that window the filing is MISSING rather than early; where it does not "
+            "(roadmap section 7 measured fina_indicator carrying two rows for 81.7% of its keys "
+            "with identical four-clock timelines, and a same-day update_flag correction shares "
+            "its original's clocks), no clock separates the versions. A security absent from "
             "the registry snapshot the partition was built from is absent at every as_of "
             "inside it, and a row the upstream served then and does not serve now is not "
             "there at all. Nothing on this plane can close that: it needs a revision history "
@@ -596,7 +603,9 @@ KNOWN_STORAGE_LIMITATIONS: Final[tuple[StorageLimitation, ...]] = (
             "on fina_indicator the affected share of keys is 81.7%, so for that dataset the "
             "replay is wrong about the majority of what it replays, and it is wrong in one "
             "direction -- every such key reads back at its restated value, which is the value "
-            "a backtest would not have had. AND THIS PATH IS WHERE THAT BIAS FIRST BECOMES "
+            "a backtest would not have had; a restatement with its own later f_ann_date is "
+            "withheld instead, and costs the filing rather than leaking it. AND THIS PATH IS "
+            "WHERE THAT BIAS FIRST BECOMES "
             "REACHABLE AT ALL: read_if_ready refuses a year partition at every as_of inside "
             "it, so before read_visible_at existed a mid-year replay was not something this "
             "store could do wrongly -- it was something it could not do. The entry describes "
@@ -1024,8 +1033,8 @@ class PanelVisibleReadOutcome:
     ## What it promises that `PanelReadOutcome` does not
 
     `rows` here is not the partition. It is the partition minus every row whose
-    `available_time` post-dates `as_of` (or is absent), and **two numbers describe what that
-    did**, because one of them alone is misleading:
+    `available_time` or `revision_time` post-dates `as_of` (or is absent), and **two numbers
+    describe what that did**, because one of them alone is misleading:
 
     - `withheld_row_count` -- how many rows the predicate removed. P2 declined a row-level
       filter on the ground that "a filtered read hands back a *short* partition, and every
@@ -1095,6 +1104,16 @@ class PanelVisibleReadOutcome:
     withheld_row_count_or_none: int | None
     visible_last_event_time_or_none: datetime | None = None
     visible_slice_issues: tuple[ReadinessIssue, ...] = ()
+    revision_withheld_or_none: tuple[datetime | None, ...] | None = None
+    """The `event_time` of every row held back **only** for its revision, one entry per row.
+
+    A row whose availability instant is at or before `as_of` and whose stored version was
+    revised after it: part of `withheld_row_count`, and the part a per-event-date census can
+    account for, because the census counts such a row on its own event date whatever its
+    revision clock says. `_read_visible_event_dated_rows` reconciles `visible + this == census`
+    date by date and still refuses everything else; see its docstring. `None` on a blocked
+    outcome; read it through `revision_withheld`, which raises there.
+    """
 
     @property
     def is_blocked(self) -> bool:
@@ -1127,7 +1146,7 @@ class PanelVisibleReadOutcome:
 
     @property
     def withheld_row_count(self) -> int:
-        """How many rows the availability predicate held back, or an error if blocked."""
+        """How many rows the visibility predicate held back, or an error if blocked."""
         if self.withheld_row_count_or_none is None:
             raise PanelStorageError(
                 f"{self.readiness.dataset} is blocked at {self.as_of.isoformat()}, so nothing "
@@ -1156,16 +1175,39 @@ class PanelVisibleReadOutcome:
         return self.visible_last_event_time_or_none
 
     @property
+    def revision_withheld(self) -> tuple[datetime | None, ...]:
+        """The event instants of the rows held back for their revision alone, or an error if
+        blocked.
+
+        A subset of what `withheld_row_count` counts, and a different fact: those rows had been
+        published by `as_of` in some version, just not in the one stored here. Empty on every
+        dataset whose provider clock never revises a row, and on an outcome built by hand
+        without it -- which reads as "nothing to account for", so a reconciliation over such an
+        outcome refuses a revision-withheld row rather than excusing it.
+        """
+        if self.rows_or_none is None:
+            raise PanelStorageError(
+                f"{self.readiness.dataset} is blocked at {self.as_of.isoformat()}, so nothing "
+                "was read and 'which rows were held back for their revision' has no answer; use "
+                "`revision_withheld_or_none` to handle blocked and empty together on purpose"
+            )
+        return self.revision_withheld_or_none or ()
+
+    @property
     def visible_row_count(self) -> int:
         return len(self.rows)
 
     @property
     def compensated_issue_codes(self) -> tuple[str, ...]:
-        """The refusals the availability predicate answered, in sorted order.
+        """The refusals the visibility predicate answered, in sorted order.
 
         Empty on a partition the rule table cleared outright -- which is the honest answer,
-        because then nothing was compensated and the predicate removed nothing. Non-empty on a
-        read that was blocked and is now answered, so a caller (or a report) can say *why* the
+        because then nothing was compensated and the availability half of the predicate removed
+        nothing. The revision half can still withhold rows there -- a row available by `as_of`
+        whose stored version was revised after it -- and that is a fact about rows rather than a
+        refusal the predicate answered, which is what `withheld_row_count` and
+        `revision_withheld` carry. Non-empty on a read that was blocked and is now answered, so a
+        caller (or a report) can say *why* the
         rows it holds are a filtered subset rather than having to infer it from
         `withheld_row_count` being greater than zero, which is a different fact: a partition can
         be refused for `not_yet_knowable` and still withhold nothing from a narrow enough
@@ -1238,7 +1280,7 @@ VISIBLE_SLICE_SCOPE: Final[str] = " restricted to the rows its requested years r
 """What `read_visible_at` answers with, and therefore what its re-decided checks judge.
 
 Deliberately *not* "the rows visible at that `as_of`", which would be one qualifier short. The
-selection these checks are decided over is the availability predicate **and the caller's own
+selection these checks are decided over is the visibility predicate **and the caller's own
 `filters`**, exactly as `withheld_row_count` is -- `_equality_clauses` is shared between the
 statements so the two cannot answer about different row sets. A caller that filters to one
 security while requiring two is therefore refused with `subject_missing`, and that is the
@@ -1331,7 +1373,7 @@ def subject_gap_issue(
     """Is every subject the caller named actually here? Asked once, for the same reason.
 
     The partition path passes the coverage census; `read_visible_at` passes the subjects that
-    survived the availability predicate. Same set difference, same code, same `missing_items`
+    survived the visibility predicate. Same set difference, same code, same `missing_items`
     payload -- so a consumer that reads `issue.missing_items` to say *which* securities are
     absent keeps working on both, and the `scope` suffix is what tells a reader whether they are
     absent from the partition or only from the answer. `PARTITION_SCOPE` is empty, so the

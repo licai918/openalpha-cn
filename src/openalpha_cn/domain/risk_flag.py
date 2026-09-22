@@ -165,7 +165,15 @@ class RiskFlag(StrEnum):
     """The record carries no `source_uri`, so the claim cannot be traced back."""
 
     revised_after_initial_availability = ("revised_after_initial_availability", "reduced")
-    """The record was revised after it first became available."""
+    """The record was revised after it first became available.
+
+    Only a record revised at or before the decision time can carry it: visibility waits for the
+    revision clock, so one revised after `as_of` is not visible then and never reaches a request,
+    a replay case or a provider batch. What the flag says is that the version in hand is a
+    correction -- the source moved after it first published -- and it keeps its name and its
+    `reduced` severity: the name is in `signal-frame-v1.json` and in every stored `signal_id`,
+    and the severity decides what `product/governance.py`'s gates answer.
+    """
 
     committee_disagreement = ("committee-disagreement", "reduced")
     """The deliberation committee could not separate the bull and bear cases.

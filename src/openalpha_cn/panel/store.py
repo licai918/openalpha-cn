@@ -469,7 +469,7 @@ from openalpha_cn.panel.catalog import (
 )
 
 AVAILABILITY_COLUMN: Final[str] = "available_time"
-"""The clock column every panel partition carries, and the only one this module compares.
+"""The clock column every panel partition carries, and one of the two this module compares.
 
 `domain/panel_batch.py::CLOCK_COLUMN_NAMES` declares it as one of the four columns
 `ColumnarPanelBatch` writes on every row of every dataset, and `RESERVED_COLUMN_NAMES` stops
@@ -480,6 +480,14 @@ for the reason `_utc_now` is a local definition and
 subpackage at all. `tests/unit/panel/test_visible_read_callers.py::
 test_the_availability_column_this_module_filters_on_is_the_one_the_batch_contract_writes`
 pins the two copies together.
+"""
+
+REVISION_COLUMN: Final[str] = "revision_time"
+"""The second clock a filtered read compares: the instant the stored version was published.
+
+Restated and pinned for `AVAILABILITY_COLUMN`'s reason, by
+`tests/unit/panel/test_visible_read_callers.py::
+test_the_revision_column_this_module_filters_on_is_the_one_the_batch_contract_writes`.
 """
 
 EVENT_TIME_COLUMN: Final[str] = "event_time"
@@ -663,6 +671,7 @@ class _VisibleSummary:
     withheld_row_count: int
     last_event_time: datetime | None
     subjects: frozenset[str] | None
+    revision_withheld: tuple[datetime | None, ...] = ()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -1053,7 +1062,7 @@ class PanelStore:
         ## This method passes no point-in-time gate, and that is not a detail
 
         It takes no `as_of`, consults no readiness verdict and carries no row-level
-        `available_time` predicate: it hands back **every** row of the resolved partition. On a
+        visibility predicate: it hands back **every** row of the resolved partition. On a
         real `stock_basic` 2024 partition that is 152 rows, of which 92 were not knowable at
         2024-07-01. The gate is `read_if_ready()`, which is opt-in rather than structural, and
         every reader in `src/` goes through it -- `tests/unit/panel/test_query_callers.py` is
@@ -1365,11 +1374,12 @@ class PanelStore:
         It runs the **same** `evaluate_readiness` over the **same** `PartitionState`s, and then
         makes one substitution: if every issue the rule table found is in
         `ROW_FILTERABLE_ISSUE_CODES` -- today that means `not_yet_knowable` and nothing else --
-        it scans the partition with `WHERE available_time <= as_of` instead of refusing it, and
-        counts what the predicate removed. Any other issue, alone or alongside, blocks exactly
-        as `read_if_ready` blocks. There is no second rule table and no readiness argument to
-        weaken: a code added to `evaluate_readiness` tomorrow arrives blocking on both paths,
-        and making it filterable is a deliberate edit to a named constant.
+        it scans the partition with `WHERE available_time <= as_of AND revision_time <= as_of`
+        instead of refusing it, and counts what the predicate removed. Any other issue, alone or
+        alongside, blocks exactly as `read_if_ready` blocks. There is no second rule table and no
+        readiness argument to weaken: a code added to `evaluate_readiness` tomorrow arrives
+        blocking on both paths, and making it filterable is a deliberate edit to a named
+        constant.
 
         ## The second gate, and why one was not enough
 
@@ -1468,8 +1478,16 @@ class PanelStore:
         a_visibility_filtered_read_replays_a_partition_that_was_not_there_yet` rather than left
         to be inferred from this paragraph.
 
-        `columns` need not include `available_time`: the predicate is applied in SQL, over the
-        stored column, whether or not the caller projects it.
+        `columns` need not include either clock: the predicate is applied in SQL, over the
+        stored columns, whether or not the caller projects them.
+
+        **The predicate reads two clocks, and readiness reads one.** A row is visible once it had
+        first become available and the version stored for it had been published --
+        `domain/time.py::is_visible_at`'s rule -- so a row available by `as_of` whose stored
+        version was revised after it is withheld and counted, and its event instant is listed in
+        `revision_withheld` for a caller that reconciles against a per-date census. The verdict
+        above is still taken on `max_available_time` alone; the revision half is applied on every
+        read, including one the rule table cleared outright.
 
         **One assessment plus one read since `V2-P4-069`**, for `read_if_ready`'s reason and with
         the same guarantee: the body is `AssessedPanelRead.read_visible_at` and this is its
@@ -1540,10 +1558,10 @@ class PanelStore:
                     "catalog; the catalog changed underneath this read"
                 )
             visible_sql, visible_parameters = _build_visible_scan_sql(
-                partition_path, columns, filters
+                partition_path, columns, filters, as_of=as_of
             )
             with _scan_failures_as_storage_errors(dataset, year):
-                scanned = connection.execute(visible_sql, [*visible_parameters, as_of]).fetchall()
+                scanned = connection.execute(visible_sql, visible_parameters).fetchall()
             partition = self._summarise_visible(
                 connection,
                 partition_path,
@@ -1621,6 +1639,7 @@ class PanelStore:
             withheld_row_count=int(cast(int, census[0])),
             last_event_time=cast(datetime | None, census[1]),
             subjects=subjects,
+            revision_withheld=tuple(cast(list[datetime | None] | None, census[2]) or ()),
         )
 
     def _probe_visible_subjects(
@@ -1632,7 +1651,7 @@ class PanelStore:
         filters: Mapping[str, object] | None,
         probe_subjects: Sequence[str] | None,
     ) -> frozenset[str] | None:
-        """Which of the subjects the caller *required* survived the availability predicate.
+        """Which of the subjects the caller *required* survived the visibility predicate.
 
         `None` when nothing was required, which is the only shape `evaluate_visible_slice`
         accepts a missing probe in. An empty `frozenset()` is a different answer -- "you named
@@ -1947,6 +1966,7 @@ class AssessedPanelRead:
             rows_or_none=scan.rows,
             withheld_row_count_or_none=scan.partition.withheld_row_count,
             visible_last_event_time_or_none=scan.partition.last_event_time,
+            revision_withheld_or_none=scan.partition.revision_withheld,
         )
 
 
@@ -2039,12 +2059,31 @@ def _equality_clauses(filters: Mapping[str, object] | None) -> tuple[list[str], 
     return clauses, list(filters.values())
 
 
-def _build_visible_scan_sql(
-    partition_path: Path, columns: Sequence[str], filters: Mapping[str, object] | None
-) -> tuple[str, list[object]]:
-    """`read_visible_at`'s projection, with the availability predicate **in the statement**.
+def _visible_clauses() -> list[str]:
+    """The visibility predicate as `WHERE` clauses, each taking `as_of` as one bound `?`.
 
-    The predicate is last in the `WHERE` list and is a bound `?`, never interpolated, so an
+    `domain/time.py::is_visible_at`'s rule, spelled in SQL: a row is visible when it had first
+    become available **and** the version stored here had been published by `as_of`. One place,
+    shared by the projection and the subject probe, so the rows handed back and the subjects
+    re-decided over them are chosen by the same predicate. The census cannot take this list: it
+    needs the complement, and `_build_visible_census_sql` spells that out beside the reach.
+    """
+    return [
+        f"{_quote_identifier(AVAILABILITY_COLUMN)} <= ?",
+        f"{_quote_identifier(REVISION_COLUMN)} <= ?",
+    ]
+
+
+def _build_visible_scan_sql(
+    partition_path: Path,
+    columns: Sequence[str],
+    filters: Mapping[str, object] | None,
+    *,
+    as_of: datetime,
+) -> tuple[str, list[object]]:
+    """`read_visible_at`'s projection, with the visibility predicate **in the statement**.
+
+    The predicate comes last in the `WHERE` list as bound `?`s, never interpolated, so an
     `as_of` cannot become SQL. It is added unconditionally rather than only when the readiness
     verdict said `not_yet_knowable`: a partition whose newest row predates `as_of` is filtered
     by a predicate that removes nothing, and a conditional predicate would mean the point-in-
@@ -2052,15 +2091,21 @@ def _build_visible_scan_sql(
     That is the difference between a filter and a hope, and
     `tests/integration/panel/test_visibility_filtered_read.py` mutates the comparison to prove
     the assertions can see it.
+
+    The revision half matters for the same reason, and more: readiness judges only the newest
+    *availability* instant, so a partition whose rows are all available by `as_of` clears the
+    rule table outright while still holding a row whose stored version was revised after it.
+    Nothing but this predicate withholds that row.
     """
     if not columns:
         raise PanelStorageError("must request at least one column")
     column_list = ", ".join(_quote_identifier(name) for name in columns)
     clauses, values = _equality_clauses(filters)
-    clauses.append(f"{_quote_identifier(AVAILABILITY_COLUMN)} <= ?")
+    visible = _visible_clauses()
+    clauses.extend(visible)
     return (
         f"SELECT {column_list} FROM read_parquet(?) WHERE {' AND '.join(clauses)}",
-        [str(partition_path), *values],
+        [str(partition_path), *values, *(as_of for _ in visible)],
     )
 
 
@@ -2069,6 +2114,17 @@ def _build_visible_census_sql(
 ) -> tuple[str, list[object]]:
     """One aggregate over the caller's selection: how much was withheld, and how far the rest
     reaches.
+
+    ## Two clocks, one complement
+
+    A row is withheld when it had not become available by `as_of` **or** the version stored
+    here had not been published by then, so the withheld count is the complement of the
+    visibility predicate over both clocks: `available > ? OR available IS NULL OR revision > ?
+    OR revision IS NULL`. Every disjunct is needed for `visible + withheld == row_count` to hold,
+    and each `IS NULL` is needed for the reason the next section gives. The reach is taken over
+    the visible rows, by the same two `<=` the projection applies, so a revised row's event
+    instant is not counted as reach until its revision -- the `stale` recheck reads this, and a
+    row the caller is not handed must not make the slice it is handed look fresher.
 
     ## The complement is spelled `> ? OR IS NULL`, and the `OR` is the fix rather than noise
 
@@ -2100,16 +2156,29 @@ def _build_visible_census_sql(
     There is deliberately **no** visible `count(*)` here. `visible_row_count` is `len(rows)` off
     the projection statement, and asking SQL for the same number twice would be a value that can
     disagree with the rows actually returned while looking authoritative.
+
+    ## The rows held back for their revision alone ride along too
+
+    The third aggregate is the `event_time` of every row that was available by `as_of` and
+    whose stored version was revised after it -- a subset of the withheld count, listed rather
+    than counted because the one reader that needs it (`panel_ingest.
+    _read_visible_event_dated_rows`) reconciles against a census keyed by event date. Taken in
+    the same pass for the reason the reach is: a second statement could answer about a
+    different selection. On every dataset whose provider never revises a row it is empty, and a
+    list aggregate over no rows is NULL, which the caller reads as empty.
     """
     clauses, values = _equality_clauses(filters)
     where_sql = "" if not clauses else " WHERE " + " AND ".join(clauses)
     available = _quote_identifier(AVAILABILITY_COLUMN)
+    revision = _quote_identifier(REVISION_COLUMN)
     event = _quote_identifier(EVENT_TIME_COLUMN)
     return (
-        f"SELECT count(*) FILTER (WHERE {available} > ? OR {available} IS NULL), "
-        f"max({event}) FILTER (WHERE {available} <= ?) "
+        f"SELECT count(*) FILTER (WHERE {available} > ? OR {available} IS NULL "
+        f"OR {revision} > ? OR {revision} IS NULL), "
+        f"max({event}) FILTER (WHERE {available} <= ? AND {revision} <= ?), "
+        f"list({event}) FILTER (WHERE {available} <= ? AND {revision} > ?) "
         f"FROM read_parquet(?){where_sql}",
-        [as_of, as_of, str(partition_path), *values],
+        [as_of, as_of, as_of, as_of, as_of, as_of, str(partition_path), *values],
     )
 
 
@@ -2131,11 +2200,12 @@ def _build_visible_subject_probe_sql(
     clauses, values = _equality_clauses(filters)
     subject = _quote_identifier(SUBJECT_COLUMN)
     placeholders = ", ".join("?" for _ in wanted)
-    clauses.append(f"{_quote_identifier(AVAILABILITY_COLUMN)} <= ?")
+    visible = _visible_clauses()
+    clauses.extend(visible)
     clauses.append(f"{subject} IN ({placeholders})")
     return (
         f"SELECT DISTINCT {subject} FROM read_parquet(?) WHERE {' AND '.join(clauses)}",
-        [str(partition_path), *values, as_of, *wanted],
+        [str(partition_path), *values, *(as_of for _ in visible), *wanted],
     )
 
 
@@ -2166,6 +2236,7 @@ def _pool_visible_summaries(left: _VisibleSummary, right: _VisibleSummary) -> _V
         withheld_row_count=left.withheld_row_count + right.withheld_row_count,
         last_event_time=max(reaches) if reaches else None,
         subjects=pooled_subjects,
+        revision_withheld=(*left.revision_withheld, *right.revision_withheld),
     )
 
 

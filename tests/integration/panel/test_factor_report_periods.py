@@ -225,25 +225,39 @@ def _midnight(day: date) -> datetime:
 
 
 def _batch(
-    dataset: str, rows: tuple[_Filing, ...], *, available: tuple[datetime, ...] | None = None
+    dataset: str,
+    rows: tuple[_Filing, ...],
+    *,
+    available: tuple[datetime, ...] | None = None,
+    revised: tuple[date | None, ...] | None = None,
 ) -> ColumnarPanelBatch:
     """One announcement year's filings, through `income`'s own projection and its own clock.
 
-    All four clocks are the announcement instant, which is what
-    `providers/tushare.py::_announcement_timeline` does for every statement row and why two
-    versions of one filing cannot be told apart by any of them.
+    Every clock but ingestion is the announcement instant, which is what
+    `providers/tushare.py::_announcement_timeline` does for every statement row whose
+    `f_ann_date` is not later than its `ann_date` -- and why two versions of one filing cannot be
+    told apart by any of them.
 
-    `available` overrides that on the availability clock alone, and is used by exactly one test:
-    the engine's period selection reads `event_time` while the visible read decides on
-    `available_time`, and a corpus where the two are byte-equal cannot show which one a value came
-    from. Nothing a provider in this repository writes can produce a row like that -- which is why
-    a test has to build one by hand for the engine's refusal to be measurable at all.
+    `revised` gives a row a later `f_ann_date` (`None` keeps its own announcement), which moves
+    its revision clock to that day the way `_announcement_timeline` does: the row is available
+    from its announcement and its stored version is knowable only from the re-announcement.
+
+    `available` overrides the availability clock -- and the revision clock with it, so the row
+    is never revised -- and is used by exactly one test: the engine's period selection reads
+    `event_time` while the visible read decides on the availability and revision clocks, and a
+    corpus where they are byte-equal cannot show which one a value came from. Nothing a provider
+    in this repository writes can produce a row like that -- which is why a test has to build
+    one by hand for the engine's refusal to be measurable at all.
     """
     announced = tuple(_midnight(item[2]) for item in rows)
+    first = tuple(
+        item[2] if revised is None or revised[index] is None else revised[index]
+        for index, item in enumerate(rows)
+    )
     columns = (
         PanelColumn(REPORT_PERIOD_COLUMN, "string", tuple(item[1].isoformat() for item in rows)),
         PanelColumn("ann_date", "string", tuple(item[2].isoformat() for item in rows)),
-        PanelColumn("f_ann_date", "string", tuple(item[2].isoformat() for item in rows)),
+        PanelColumn("f_ann_date", "string", tuple(day.isoformat() for day in first)),
         PanelColumn("update_flag", "string", tuple("1" for _ in rows)),
         *(
             PanelColumn(
@@ -267,7 +281,14 @@ def _batch(
             event_time=announced,
             available_time=announced if available is None else available,
             ingested_time=tuple(max(BUILT_AT, moment) for moment in announced),
-            revision_time=announced,
+            revision_time=(
+                tuple(
+                    max(moment, _midnight(day))
+                    for moment, day in zip(announced, first, strict=True)
+                )
+                if available is None
+                else available
+            ),
         ),
         columns=columns,
     )
@@ -734,19 +755,25 @@ def test_a_row_whose_event_time_is_after_as_of_is_refused_rather_than_winning_it
 ) -> None:
     """Three clocks decide three things, and they agree only because one provider makes them.
 
-    The visible read decides what a caller may see from `available_time`; the engine indexes and
-    orders on `event_time`; the domain's `filing_for` orders on the `ann_date` **column**.
-    `providers/tushare.py::_announcement_timeline` gives every statement row the same instant on
-    all four clocks, so nothing this repository writes can tell them apart -- which is exactly the
-    kind of agreement that stops being true one provider later, and exactly the kind an audit over
-    a byte-equal corpus is structurally unable to see.
+    The visible read decides what a caller may see from `available_time` and `revision_time`;
+    the engine indexes and orders on `event_time`; the domain's `filing_for` orders on the
+    `ann_date` **column**. `providers/tushare.py::_announcement_timeline` gives every statement
+    row the same instant on its event and availability clocks, so nothing this repository writes
+    can tell those apart -- which is exactly the kind of agreement that stops being true one
+    provider later, and exactly the kind an audit over a byte-equal corpus is structurally unable
+    to see.
 
-    So the corpus is built by hand: the later announcement is made *available* a day before the
-    earlier one while keeping its own announcement date. At an `as_of` two months before it was
-    announced, the engine used to take it -- `computed 999.0`, a restatement that had not happened
-    winning its period. It now refuses, and the refusal names both clocks, because a partition
-    whose clocks disagree is a property of the partition rather than of this security's
-    fundamentals.
+    So the corpus is built by hand: the later announcement is made *available* -- and never
+    revised -- a day before the earlier one while keeping its own announcement date. At an
+    `as_of` two months before it was announced, the engine used to take it -- `computed 999.0`, a
+    restatement that had not happened winning its period. It now refuses, and the refusal names
+    both clocks, because a partition whose clocks disagree is a property of the partition rather
+    than of this security's fundamentals.
+
+    The row's revision clock is set to its availability on purpose. Left at the announcement,
+    the visible read would withhold the row for its revision before the engine ever saw it, and
+    this test would stop reaching the `event_time` refusal it exists for; the revision half has
+    its own test below.
     """
     skewed: tuple[_Filing, ...] = (
         ("000002.SZ", date(2024, 3, 31), date(2024, 4, 22), 200.0),
@@ -776,6 +803,72 @@ def test_a_row_whose_event_time_is_after_as_of_is_refused_rather_than_winning_it
             universe=frozenset({"000002.SZ"}),
             requirements={INCOME_DATASET: requirement},
         )
+
+
+REVISED_ON: Final[date] = LATER_ANNOUNCEMENT
+"""The re-announcement both revised rows below are stored at, after `CLOCK_SKEW_AS_OF`."""
+
+
+def test_a_version_revised_after_as_of_is_withheld_counted_and_can_leave_the_slice_stale(
+    tmp_path: Path,
+) -> None:
+    """A filing stored as a version re-announced after `as_of` is withheld by the visible read,
+    counted in the input reference, and taken out of the slice's reach -- all three at once.
+
+    Three rows of `000002.SZ`, the shapes a live probe on 2026-09-22 found on real statements:
+
+    - its 2024 Q1, announced 2024-04-22, in **two** versions under one key -- the one public that
+      day (200.0) and one stored with a later `f_ann_date` (999.0), as 5 of `income`'s 633
+      duplicate keys are;
+    - its 2024 interim, announced 2024-08-26 and stored only as the version re-announced on
+      2024-11-10 (210.0) -- the lossy shape, with nothing older to answer from.
+
+    At `CLOCK_SKEW_AS_OF` (2024-08-30) neither revised version was knowable. With a bound wide
+    enough to read at all, the engine answers the Q1 version that was public (200.0) rather than
+    refusing the filing as ambiguous or answering the interim, and the reference counts the two
+    withheld rows. Under the file's 120-day bound the same read is refused as stale: the interim
+    was the only filing that reached past 2024-04-22, and a row the caller is not handed does not
+    count as reach. That refusal is a real cost of withholding a version with nothing older
+    behind it, and it is asserted as one rather than bounded away.
+    """
+    rows: tuple[_Filing, ...] = (
+        ("000002.SZ", date(2024, 3, 31), date(2024, 4, 22), 200.0),
+        ("000002.SZ", date(2024, 3, 31), date(2024, 4, 22), 999.0),
+        ("000002.SZ", date(2024, 6, 30), date(2024, 8, 26), 210.0),
+    )
+    store = PanelStore(tmp_path / "revised_after_as_of")
+    write_panel_batch(
+        store, _batch(INCOME_DATASET, rows, revised=(None, REVISED_ON, REVISED_ON)), year=2024
+    )
+
+    def build(bound: timedelta) -> FactorPanel:
+        return _compute(
+            store,
+            _definition(key="probe_one_period", lookback_periods=1, max_window_periods=1),
+            evaluator=lambda window: window.series(INCOME_DATASET, "revenue")[-1],
+            as_of=CLOCK_SKEW_AS_OF,
+            subjects=("000002.SZ",),
+            universe=frozenset({"000002.SZ"}),
+            requirements={
+                INCOME_DATASET: financial_statement_requirement(
+                    dataset=INCOME_DATASET,
+                    years=(2024,),
+                    as_of=CLOCK_SKEW_AS_OF,
+                    max_staleness=bound,
+                )
+            },
+        )
+
+    with pytest.raises(FactorEngineError, match=r"\['stale'\]"):
+        build(STALENESS)
+    panel = build(timedelta(days=200))
+
+    (observation,) = panel.observations
+    (reference,) = panel.manifest.inputs
+    assert observation.coverage == "computed"
+    assert observation.value == pytest.approx(200.0)
+    assert observation.input_period_last == date(2024, 3, 31)
+    assert (reference.visible_row_count, reference.withheld_row_count) == (1, 2)
 
 
 def test_the_later_announcement_wins_whichever_order_the_partition_returns_them_in(

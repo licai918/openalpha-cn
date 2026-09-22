@@ -95,14 +95,23 @@ Two encoding details are load-bearing:
 ## Point-in-time, and why the batch-level check is not weaker
 
 `ProviderBatch.validate_result` rejects a batch containing any record that was not yet
-available at the request's `as_of`. This contract makes the same check in one step:
-`all(t <= as_of)` holds **iff** `max(t) <= as_of`, and the maximum is attained by an actual
-row, so a single late row among thousands still fails -- the maximum *is* that row. The
-implementation then hands that exact row's reconstructed `Timeline` to the same
-`is_visible_at` the row-wise contract calls, rather than re-implementing the comparison, and
-names the offending row index in the error (which `ProviderBatch` does not).
-`tests/contract/panel/test_columnar_batch_parity.py` proves the equivalence by running both
-contracts over the same corpus, including 200 randomised cases and every boundary.
+knowable at the request's `as_of` -- not yet available, or carrying a version revised after it.
+This contract makes the same check in one step, over the **revision** column: every row's
+`revision_time` is at or after its own `available_time` (`TimelineColumns` enforces it row for
+row), so `all(available <= as_of and revision <= as_of)` holds **iff** `max(revision) <= as_of`,
+and the maximum is attained by an actual row, so a single late row among thousands still fails
+-- the maximum *is* that row. The implementation then hands that exact row's reconstructed
+`Timeline` to the same `is_visible_at` the row-wise contract calls, rather than re-implementing
+the comparison, and names the offending row index and the clock that was late in the error
+(which `ProviderBatch` does not). `tests/contract/panel/test_columnar_batch_parity.py` proves the
+equivalence by running both contracts over the same corpus, including 200 randomised cases that
+move the two clocks independently and every boundary.
+
+The maximum used to be taken over `available_time`, when that was the only clock visibility
+read. Once visibility also waits for the revision clock, a row revised after `as_of` that was
+not the newest row to become *available* would have been waved through by a check that looked
+at the newest-available row alone -- so the column the maximum is taken over is the one whose
+maximum bounds both clocks.
 
 ## Why plain dataclasses and not pydantic
 
@@ -564,22 +573,31 @@ class ColumnarPanelBatch:
     def _check_visible_at_as_of(self) -> None:
         """The point-in-time contract of the four-clock batch, enforced in one step.
 
-        `all(available_time <= as_of)` holds iff `max(available_time) <= as_of`, and the
-        maximum is attained by a real row, so a single late row cannot hide among compliant
-        ones. That row is then handed to the same `is_visible_at` the row-wise contract
-        calls -- the comparison is never re-implemented here.
+        Every row's `revision_time` is at or after its own `available_time`, so
+        `all(available_time <= as_of and revision_time <= as_of)` holds iff
+        `max(revision_time) <= as_of`, and the maximum is attained by a real row, so a single
+        late row cannot hide among compliant ones -- whether it is late on its availability or
+        only on its revision. That row is then handed to the same `is_visible_at` the row-wise
+        contract calls -- the comparison is never re-implemented here.
         """
-        available = self.timeline.available_time
-        if not available:
+        revision = self.timeline.revision_time
+        if not revision:
             return
-        index = available.index(max(available))
-        if not is_visible_at(self.timeline.row_timeline(index), self.as_of):
-            raise PanelBatchError(
-                f"row {index} of this batch became available at "
-                f"{available[index].isoformat()}, after the requested as_of "
-                f"{self.as_of.isoformat()}: a point-in-time batch may not contain "
-                "information that was not yet knowable"
-            )
+        index = revision.index(max(revision))
+        row = self.timeline.row_timeline(index)
+        if is_visible_at(row, self.as_of):
+            return
+        if row.available_time > self.as_of:
+            late = f"became available at {row.available_time.isoformat()}"
+            earlier = ""
+        else:
+            late = f"carries a version revised at {row.revision_time.isoformat()}"
+            earlier = f", although it first became available at {row.available_time.isoformat()}"
+        raise PanelBatchError(
+            f"row {index} of this batch {late}, after the requested as_of "
+            f"{self.as_of.isoformat()}{earlier}: a point-in-time batch may not contain "
+            "information that was not yet knowable"
+        )
 
     def _compute_digest(self) -> str:
         digest = sha256()

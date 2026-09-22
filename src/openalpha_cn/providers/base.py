@@ -147,7 +147,10 @@ class ProviderBatch(BaseModel):
             if self.no_data_reason is None:
                 raise ValueError("no_data requires no_data_reason")
         if any(not is_visible_at(record.timeline, self.request.as_of) for record in self.records):
-            raise ValueError("provider batch contains records unavailable at request as_of")
+            raise ValueError(
+                "provider batch contains records not visible at request as_of: not yet "
+                "available, or carrying a version revised after it"
+            )
         return self
 
     @computed_field(return_type=str)  # type: ignore[prop-decorator]

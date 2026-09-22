@@ -353,7 +353,7 @@ from openalpha_cn.domain.stock_universe import (
     STOCK_BASIC_DATASET,
     UNIVERSE_EXCHANGE_COLUMN,
 )
-from openalpha_cn.domain.time import Timeline
+from openalpha_cn.domain.time import Timeline, is_visible_at
 from openalpha_cn.domain.trading_calendar import (
     CALENDAR_DATE_COLUMN,
     CALENDAR_OPEN_COLUMN,
@@ -938,6 +938,19 @@ def _financial_statement_params(request: ProviderRequest) -> dict[str, str]:
     The year is `as_of`'s year *in Asia/Shanghai*: 2024-12-31 17:00Z is already 2025 in
     Shanghai. `_trade_cal_params`, `_namechange_params` and `_index_weight_params` take the same
     care for the same reason.
+
+    ## The year may be named instead, and a backfill has to name it
+
+    A second subject, when it is a four-digit year, is the window and `as_of` then only bounds
+    what was knowable -- `_financial_indicator_params`' split, for a reason that arrived with the
+    revision clock. A row filed in announcement year *Y* is served as the version its
+    `f_ann_date` published, and that date can be in a later year (`000001.SZ`'s 2005 interim was
+    announced 2005-08-19 and re-announced 2006-07-05). Visibility now waits for that date, so a
+    request whose `as_of` both selects *Y* and bounds the fetch drops the row at every `as_of`
+    inside *Y* -- and a backfill that always asks at *Y*'s end would never store it at all. A
+    build therefore names *Y* and fetches at its own clock; the stored row is then withheld by
+    the read inside `[ann_date, f_ann_date)` and answered after it. A second subject that is not
+    a year is still refused as a second security.
     """
     year = _require_one_security_year(request)
     return {
@@ -1006,8 +1019,15 @@ def _financial_indicator_params(request: ProviderRequest) -> dict[str, str]:
 
 
 def _require_one_security_year(request: ProviderRequest) -> int:
-    """The window year, after refusing a request that does not name exactly one security."""
-    if len(request.subjects) != 1:
+    """The window year, after refusing a request that does not name exactly one security.
+
+    The year is a second subject when one is named as four digits, and `as_of`'s Asia/Shanghai
+    year otherwise; see `_financial_statement_params` for why a backfill names it.
+    """
+    subjects = request.subjects
+    if len(subjects) == 2 and len(subjects[1]) == 4 and subjects[1].isdigit():
+        return int(subjects[1])
+    if len(subjects) != 1:
         raise ProviderFailure(
             provider_id=_PROVIDER_ID,
             category="configuration",
@@ -2658,10 +2678,10 @@ def _daily_close_timeline(row: dict[str, Any], date_field: str, ingested_at: dat
     The repair is the one `_calendar_static_timeline` already documents, so see that docstring
     for the full argument. In short: lowering `available_time` would invent a publication, while
     raising `ingested_time` overstates the one clock no point-in-time filter reads
-    (`is_visible_at` reads `available_time`), and the raise exists **only so the row can be
-    represented long enough to be discarded** -- `_decode_panel_rows` bounds its filter at the
-    earlier of the request's `as_of` and the instant the fetch ran, so a row whose availability
-    runs past that instant never reaches a partition.
+    (`is_visible_at` reads `available_time` and `revision_time`), and the raise exists **only so
+    the row can be represented long enough to be discarded** -- `_decode_panel_rows` bounds its
+    filter at the earlier of the request's `as_of` and the instant the fetch ran, so a row whose
+    availability runs past that instant never reaches a partition.
 
     `panel build` *can* reach this branch, and an earlier version of this docstring said it
     could not ("`_build_sessions` stops a day before its own clock, so every session it asks
@@ -2723,6 +2743,20 @@ def _announcement_timeline(row: dict[str, Any], date_field: str, ingested_at: da
     ``test_announcement_clock_cannot_yet_distinguish_restatement_via_update_flag`` therefore
     still passes, and now pins a decision rather than a deficiency.
 
+    ## A later ``f_ann_date`` is the instant the stored version became readable
+
+    ``revision_time`` is the later of the two dates, and visibility waits for it
+    (``domain/time.py::is_visible_at``). A live probe on 2026-09-22 compared 19 rows whose
+    ``f_ann_date`` post-dates their ``ann_date`` with the version public on the ``ann_date`` and
+    found 18 carrying different numbers -- ``000001.SZ``'s 2005 interim, announced 2005-08-19,
+    is served as the version re-announced 2006-07-05 -- so before its ``f_ann_date`` such a row
+    is a version nobody had read. ``_decode_panel_rows`` and ``_decode_rows`` therefore drop it at
+    any ``as_of`` inside ``[ann_date, f_ann_date)``, the panel's read withholds it there, and
+    ``StatementHistory.filings_on`` keys the version on the same date. The endpoint serves no
+    earlier version, so inside that window the filing is missing rather than early. A same-day
+    correction, told apart only by ``update_flag``, still gets its original's clocks: the
+    section above is why.
+
     ``ingested_time`` is raised to the announcement when the latter runs ahead of the fetch, for
     ``_calendar_static_timeline``'s reason: ``Timeline`` refuses an ``ingested_time`` before its
     ``available_time``, and the row has to be representable long enough for
@@ -2776,10 +2810,10 @@ def _calendar_static_timeline(
     readable -- the dangerous direction, and an invented fact.
 
     Raising ``ingested_time`` to the availability instant overstates only the one clock no
-    point-in-time filter consults (``is_visible_at`` reads ``available_time``, and
-    ``PartitionCoverage`` summarises event, availability and revision). That is why the repair
-    is on this side. It is still an overstatement, so it is not allowed to survive: the raise
-    exists **only so the row can be represented long enough to be discarded**.
+    point-in-time filter consults (``is_visible_at`` reads ``available_time`` and
+    ``revision_time``, and ``PartitionCoverage`` summarises event, availability and revision).
+    That is why the repair is on this side. It is still an overstatement, so it is not allowed to
+    survive: the raise exists **only so the row can be represented long enough to be discarded**.
     ``TushareProvider._decode_panel_rows`` bounds its point-in-time filter at
     ``min(as_of, clock())``, so any row whose availability runs past the fetch instant is
     dropped there, and the raised clock never reaches a stored partition -- not for an
@@ -3967,7 +4001,7 @@ class TushareProvider:
         kept: list[tuple[date, dict[str, Any], Timeline]] = []
         for row in expanded:
             timeline = _CLOCK_BUILDERS[descriptor.clock](row, descriptor.date_field, ingested_at)
-            if timeline.available_time > knowable_by:
+            if not is_visible_at(timeline, knowable_by):
                 continue
             kept.append((_parse_tushare_date(row[descriptor.date_field]), row, timeline))
         kept.sort(key=lambda entry: entry[0])
@@ -4013,12 +4047,18 @@ class TushareProvider:
         items: list[dict[str, Any]],
         request: ProviderRequest,
     ) -> tuple[ProviderRecord, ...]:
-        """Point-in-time filter already-decoded response rows into evidence records."""
+        """Point-in-time filter already-decoded response rows into evidence records.
+
+        The filter is `is_visible_at`, the predicate `ProviderBatch` enforces, so a row the
+        batch would refuse -- not yet available, or stored as a version revised after
+        `as_of`, which is what a statement row with a later `f_ann_date` is inside its window
+        -- is dropped here rather than failing the whole fetch.
+        """
         ingested_at = self._stamp()
         records: list[ProviderRecord] = []
         for row in items:
             timeline = _CLOCK_BUILDERS[descriptor.clock](row, descriptor.date_field, ingested_at)
-            if timeline.available_time > request.as_of:
+            if not is_visible_at(timeline, request.as_of):
                 continue
             subject = _resolve_subject(descriptor, row)
             date_value = _parse_tushare_date(row[descriptor.date_field])

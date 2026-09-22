@@ -1,6 +1,6 @@
 import csv
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import duckdb
@@ -170,6 +170,60 @@ def test_file_provider_returns_explicit_no_data_result(
 
     assert batch.status == "no_data"
     assert batch.records == ()
+    assert batch.no_data_reason == "No visible records matched the request."
+
+
+def _revised_after(as_of: datetime) -> dict[str, object]:
+    """A row that first became available half an hour before `as_of` and carries a version
+    revised a quarter of an hour after it."""
+    return {
+        "subject": "000003.SZ",
+        "kind": "limit_up",
+        "event_time": (as_of - timedelta(hours=1)).isoformat(),
+        "available_time": (as_of - timedelta(minutes=30)).isoformat(),
+        "ingested_time": (as_of + timedelta(minutes=16)).isoformat(),
+        "revision_time": (as_of + timedelta(minutes=15)).isoformat(),
+        "source_uri": "fixture://000003.SZ",
+        "summary": "Available before the request clock, revised after it.",
+        "payload": {"close": 9.1, "board_count": 1},
+    }
+
+
+def test_a_row_revised_after_as_of_is_dropped_rather_than_failing_the_import(
+    tmp_path: Path, metadata: ProviderMetadata, frozen_now: datetime
+) -> None:
+    """The file is filtered with the same predicate the batch contract enforces, so a row the
+    batch would refuse never reaches it: the import keeps what was visible at `as_of` and
+    drops the version nobody could have read then, exactly as it drops a row not yet available.
+
+    Filtering on availability alone while the batch checks both clocks made one such row fail
+    the whole import -- a `ValidationError` from the batch contract, outside this provider's
+    own failure translation -- for every historical `as_of` inside a revision window.
+    """
+    source = tmp_path / "events.json"
+    source.write_text(json.dumps([rows()[0], _revised_after(frozen_now)]), encoding="utf-8")
+    provider = FileProvider(path=source, metadata=metadata)
+
+    batch = provider.fetch(ProviderRequest(dataset="events", as_of=frozen_now))
+    later = provider.fetch(
+        ProviderRequest(dataset="events", as_of=frozen_now + timedelta(minutes=15))
+    )
+
+    assert batch.status == "success"
+    assert [record.subject for record in batch.records] == ["000001.SZ"]
+    assert [record.subject for record in later.records] == ["000001.SZ", "000003.SZ"]
+
+
+def test_a_file_whose_only_row_is_revised_after_as_of_is_no_data(
+    tmp_path: Path, metadata: ProviderMetadata, frozen_now: datetime
+) -> None:
+    source = tmp_path / "events.json"
+    source.write_text(json.dumps([_revised_after(frozen_now)]), encoding="utf-8")
+    provider = FileProvider(path=source, metadata=metadata)
+
+    batch = provider.fetch(ProviderRequest(dataset="events", as_of=frozen_now))
+
+    assert batch.status == "no_data"
     assert batch.no_data_reason == "No visible records matched the request."
 
 

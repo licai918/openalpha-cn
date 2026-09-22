@@ -1683,8 +1683,9 @@ def dataset_health(
                 datasets=(dataset,),
                 detail=(
                     f"{revised} stored row(s) of {dataset} carry a revision_time after the "
-                    "instant they became available, so an earlier read of them answered "
-                    "something else"
+                    "instant they became available, so a read standing between the two instants "
+                    "withholds them; the stored row is the revised version, and where the upstream "
+                    "serves no earlier one there is nothing to answer with until the revision"
                 ),
                 count=revised,
             )

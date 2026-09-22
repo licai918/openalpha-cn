@@ -200,8 +200,10 @@ class ExtraTargetTransport:
         assigns: bool = True,
         assigned_securities: tuple[str, ...] = SECURITIES,
         vintage_override: str | None = None,
+        late_revision: str | None = None,
     ) -> None:
         self._assigned_securities = assigned_securities
+        self._late_revision = late_revision
         self.payloads: list[dict[str, Any]] = []
         self._weight_gap_months = weight_gap_months
         self._superseded = superseded
@@ -246,7 +248,11 @@ class ExtraTargetTransport:
                 continue
             keys: list[Any] = [code, period, announced]
             if dataset != FINANCIAL_INDICATOR_DATASET:
-                keys.extend([announced, "1"])
+                # `late_revision` re-announces the third interim on that day, which is how a
+                # real restated filing arrives: under its own `ann_date`, stored as the version
+                # its later `f_ann_date` published.
+                revised = self._late_revision is not None and period.endswith("0930")
+                keys.extend([self._late_revision if revised else announced, "1"])
             rows.append([*keys, *values])
         return rows
 
@@ -482,6 +488,54 @@ def test_the_token_reaches_the_transport_and_appears_in_no_output(
 
 
 # --- the request each target builds -------------------------------------------------------------
+
+
+REVISED_IN_THE_NEXT_YEAR: str = "20260105"
+"""The day the frame's third interim is re-announced: after its announcement year ended and
+before `EXTRA_CLOCK`."""
+
+
+def test_a_statement_revised_after_its_announcement_year_ended_is_stored_by_a_later_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A filing announced in 2025 and stored as the version re-announced on 2026-01-05 belongs
+    to the 2025 partition, and a build run on 2026-01-08 must store it.
+
+    The request window is the announcement year, and until the revision clock took part in
+    visibility the window and the point-in-time bound could share one instant -- the end of that
+    year. They cannot any more: at 2025-12-31 the stored version of that interim was not yet
+    knowable, so a bound at the year's end drops it, and every later rebuild of 2025 asks at the
+    same year-end instant and drops it again. The filing would be missing at every `as_of`,
+    including every one after its revision. So the year is a request subject and the bound is
+    the build's own clock; the stored partition then holds the row, and a read inside
+    `[ann_date, f_ann_date)` withholds it.
+
+    The pinned build is the other half: `--as-of` inside the window bounds the fetch there, and
+    the version it cannot yet have seen is dropped rather than stored early.
+    """
+    transport = _install(monkeypatch, ExtraTargetTransport(late_revision=REVISED_IN_THE_NEXT_YEAR))
+
+    later = build(tmp_path / "later", STOCK_BASIC_DATASET, INCOME_DATASET)
+    pinned = build(
+        tmp_path / "pinned",
+        STOCK_BASIC_DATASET,
+        INCOME_DATASET,
+        extra=["--as-of", "2026-01-02T12:00:00+08:00"],
+    )
+
+    assert later.exit_code == PanelExit.ok, later.output
+    assert pinned.exit_code == PanelExit.ok, pinned.output
+    stored = PanelStore(tmp_path / "later" / "panel").read_coverage(INCOME_DATASET, EXTRA_YEAR)
+    early = PanelStore(tmp_path / "pinned" / "panel").read_coverage(INCOME_DATASET, EXTRA_YEAR)
+    assert stored is not None and early is not None
+    # Per security: the 2024 annual announced in 2025 plus three interims.
+    assert stored.row_count == 4 * len(SECURITIES)
+    assert stored.revised_row_count == len(SECURITIES)
+    assert early.row_count == 3 * len(SECURITIES)
+    assert early.revised_row_count == 0
+    assert {str(entry["start_date"]) for entry in transport.requests_for(INCOME_DATASET)} == {
+        f"{EXTRA_YEAR}0101"
+    }
 
 
 def test_namechange_asks_for_the_year_it_was_given_at_an_instant_that_can_see_it(

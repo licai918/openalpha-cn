@@ -9,7 +9,7 @@ from typing import Final, Protocol, cast
 
 from pydantic import JsonValue
 
-from openalpha_cn.domain.time import Timeline
+from openalpha_cn.domain.time import Timeline, is_visible_at
 from openalpha_cn.providers.base import (
     ProviderBatch,
     ProviderFailure,
@@ -155,6 +155,12 @@ class FileProvider:
         own base class, so every fault this used to translate still translates, and it also
         covers `MissingColumnsError`, which states the column contract where a bare `KeyError`
         stated one absent column's `repr`.
+
+        The filter is `is_visible_at` itself -- the predicate `ProviderBatch` enforces -- so a
+        row the batch would refuse is dropped here instead: one not yet available at `as_of`,
+        and one whose stored version was revised after it. Filtering on availability alone let
+        the second kind through to the batch, which refused the whole import with a
+        `ValidationError` from outside this method's failure translation.
         """
         try:
             raw_records = self._read()
@@ -171,7 +177,7 @@ class FileProvider:
         visible = tuple(
             record
             for record in records
-            if record.timeline.available_time <= request.as_of
+            if is_visible_at(record.timeline, request.as_of)
             and (not subject_filter or record.subject in subject_filter)
         )
         if not visible:

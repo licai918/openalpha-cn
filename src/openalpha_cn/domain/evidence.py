@@ -183,7 +183,8 @@ class EvidenceSnapshot(FreezePayloadMixin, BaseModel):
         return f"ev_{sha256(identity.encode()).hexdigest()[:24]}"
 
     def visible_at(self, as_of: datetime) -> bool:
-        """Return whether this evidence was available at ``as_of``."""
+        """Return whether this evidence was visible at ``as_of``: first available, and revised
+        into the version held here, by then (``domain/time.py::is_visible_at``)."""
         return is_visible_at(self.timeline, as_of)
 
 

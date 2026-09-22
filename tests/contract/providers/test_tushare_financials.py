@@ -339,6 +339,35 @@ def test_the_request_window_is_one_calendar_year_of_the_named_security(
     }
 
 
+def test_a_named_announcement_year_is_the_window_and_as_of_only_bounds_it(
+    fake_tushare_transport,
+) -> None:
+    """The year a build asks for is a request subject, so `as_of` can be the build's own clock.
+
+    `000001.SZ`'s 2005 interim was announced in 2005 and is stored as the version re-announced
+    on 2006-07-05. Taking the window from `as_of` forces `as_of` into 2005, where that version
+    was not yet knowable -- so the one request that can return the row is the one that must drop
+    it. Named as a second subject, the year selects the window and a present-day `as_of` keeps
+    the row. The stored subject is still the security: the year never reaches the partition.
+    """
+    provider, transport = _provider(
+        fake_tushare_transport, _response(INCOME_FIELDS, (PINGAN_2005H1,)), clock=AS_OF
+    )
+
+    batch = provider.fetch_panel(
+        ProviderRequest(dataset=INCOME_DATASET, as_of=AS_OF, subjects=("000001.SZ", "2005"))
+    )
+
+    assert transport.payload is not None
+    assert transport.payload["params"] == {
+        "ts_code": "000001.SZ",
+        "start_date": "20050101",
+        "end_date": "20051231",
+    }
+    assert batch.status == "success"
+    assert batch.subjects == ("000001.SZ",)
+
+
 def test_the_window_year_is_asia_shanghais_rather_than_utcs(fake_tushare_transport) -> None:
     """2024-12-31 17:00Z is already 2025 in Shanghai; asking UTC would fetch the wrong year for
     every late-evening request on a year boundary."""
@@ -560,6 +589,53 @@ def test_a_first_announcement_after_the_announcement_is_still_a_revision(
     (available,) = batch.timeline.available_time
     assert revision > available
     assert revision.astimezone(SHANGHAI).date().isoformat() == "2006-07-05"
+
+
+INSIDE_THE_REVISION_WINDOW = datetime(2006, 1, 1, 4, 0, tzinfo=UTC)
+"""Noon Asia/Shanghai on 2006-01-01: after `PINGAN_2005H1`'s `ann_date` (2005-08-19) and before
+its `f_ann_date` (2006-07-05)."""
+
+AT_THE_REVISION = datetime(2006, 7, 5, 0, 0, tzinfo=SHANGHAI)
+
+
+def test_a_filing_revised_after_the_as_of_is_dropped_by_both_planes_rather_than_refused(
+    fake_tushare_transport,
+) -> None:
+    """`000001.SZ`'s 2005 interim was announced on 2005-08-19 and is stored as the version
+    re-announced on 2006-07-05, with a different net profit -- a live probe on 2026-09-22 found
+    18 of 19 comparable late-`f_ann_date` rows carrying numbers other than the ones public on
+    their `ann_date`. Inside that window the stored version was not knowable, so both fetches
+    drop it, the way they drop a filing not yet announced, and say so as `no_data` with the row
+    counted as served.
+
+    Dropping it here, rather than letting the batch contracts refuse it, is what keeps a
+    historical build from failing whole for one such row. From the re-announcement on, the
+    row is served.
+    """
+    provider, _ = _provider(
+        fake_tushare_transport, _response(INCOME_FIELDS, (PINGAN_2005H1,)), clock=AS_OF
+    )
+
+    def panel(as_of: datetime) -> Any:
+        return provider.fetch_panel(
+            ProviderRequest(dataset=INCOME_DATASET, as_of=as_of, subjects=("000001.SZ",))
+        )
+
+    def evidence(as_of: datetime) -> Any:
+        return provider.fetch(
+            ProviderRequest(dataset=INCOME_DATASET, as_of=as_of, subjects=("000001.SZ",))
+        )
+
+    withheld = panel(INSIDE_THE_REVISION_WINDOW)
+    assert withheld.status == "no_data"
+    assert withheld.no_data_reason is not None
+    assert "served 1 income row(s), none of which was yet knowable" in withheld.no_data_reason
+    assert evidence(INSIDE_THE_REVISION_WINDOW).status == "no_data"
+
+    served = panel(AT_THE_REVISION)
+    assert served.status == "success"
+    assert served.row_count == 1
+    assert [record.subject for record in evidence(AT_THE_REVISION).records] == ["000001.SZ"]
 
 
 def test_a_filing_announced_after_the_as_of_is_dropped_rather_than_stored(

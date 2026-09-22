@@ -139,7 +139,8 @@ Every loader in `panel_ingest` reads through `PanelStore.read_if_ready`, whose
 11 records what that costs here: a factor cannot be evaluated at a mid-year `as_of` at all,
 because the year's own December rows block the whole partition for every `as_of` inside it.
 This module therefore reads through `PanelStore.read_visible_at`, which runs the identical rule
-table and substitutes a row-level `available_time <= as_of` predicate for that one code.
+table and substitutes a row-level visibility predicate -- `available_time` and `revision_time`
+both at or before `as_of` -- for that one code.
 (`V2-P4-026` made the first sentence one loader less than universal: `load_daily_valuations` now
 takes the filtered door too, one session at a time. Every *other* `panel_ingest` loader is
 unchanged, and so is everything this section says about this module.) See
@@ -5012,8 +5013,9 @@ def _read_dataset(
     build succeeded, which is the worse of the two to leave in.
 
     A row whose `event_time` resolves after `as_of` raises here too, on both axes. The visible
-    read decides what a caller may see from `available_time` alone, and this engine orders and
-    indexes on `event_time`; when a partition's clocks disagree the two questions have different
+    read decides what a caller may see from `available_time` and `revision_time`, and this engine
+    orders and indexes on `event_time`; when a partition's clocks disagree the two questions have
+    different
     answers, and the one that reaches the window is `event_time`'s. Measured with the later
     announcement of a period given an `available_time` before the earlier one's: the engine took
     the restatement at an `as_of` two months before it was announced. `_announcement_timeline`
@@ -5083,10 +5085,10 @@ def _read_dataset(
                 raise FactorEngineError(
                     f"{dataset} carries a row for {subject} whose event_time resolves to "
                     f"{announcement.isoformat()}, after the as_of {as_of_day.isoformat()} this "
-                    "build reads at; the visible read cleared it on available_time while this "
-                    "engine orders and indexes on event_time, so the two clocks disagree about "
-                    "whether it had happened and a filing announced after as_of could win its "
-                    "period"
+                    "build reads at; the visible read cleared it on its availability and revision "
+                    "clocks while this engine orders and indexes on event_time, so they disagree "
+                    "about whether it had happened and a filing announced after as_of could win "
+                    "its period"
                 )
             point = (
                 _report_period(row[2], dataset=dataset, subject=subject)

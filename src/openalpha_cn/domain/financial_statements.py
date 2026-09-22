@@ -176,6 +176,14 @@ than assumed:
   pre-existing rule and the dataset could not be fetched at all; see `_announcement_timeline`
   for the one-word fix and
   `KNOWN_FINANCIAL_STATEMENT_LIMITATIONS.the_two_announcement_dates_are_not_ordered`.
+- **A later `f_ann_date` is when the stored version became readable.** `revision_time` is
+  `max(ann_date, f_ann_date)`, and visibility waits for it (`domain/time.py::is_visible_at`): a
+  live probe on 2026-09-22 found 18 of 19 comparable late-`f_ann_date` rows carrying numbers
+  other than the ones public on their `ann_date`. So the panel's read withholds such a row inside
+  `[ann_date, f_ann_date)` and `filings_on` keys the version on the same date. The endpoint
+  serves no earlier version, so there the filing is missing rather than early -- see
+  `KNOWN_FINANCIAL_STATEMENT_LIMITATIONS.
+  a_version_is_readable_from_the_later_of_its_two_announcement_dates`.
 
 ## A restatement with its own date is a different thing, and is answerable
 
@@ -195,7 +203,7 @@ subject column name -- the placement `domain/industry_classification.py` and
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from math import isfinite
 from types import MappingProxyType
@@ -590,29 +598,29 @@ KNOWN_FINANCIAL_STATEMENT_LIMITATIONS: Final[tuple[FinancialStatementLimitation,
         ),
     ),
     FinancialStatementLimitation(
-        code="f_ann_date_is_deliberately_not_a_point_in_time_filter",
+        code="a_version_is_readable_from_the_later_of_its_two_announcement_dates",
         detail=(
             "filings_on -- and therefore filing_for, latest_filing_on and periods_on, which are "
-            "all built on it -- reads ann_date and ONLY ann_date. f_ann_date is parsed, is part "
-            "of a version's identity, and is reported by announcement_is_ambiguous, but it "
-            "never gates when a filing becomes readable. That is a decision with two measured "
-            "halves and not an omission. First, f_ann_date is the FIRST announcement, so it is "
-            "the earlier date wherever the two differ in the common direction, and filtering on "
-            "it would be look-ahead: 000001.SZ's income carries end_date=20060331 with "
-            "ann_date=20070426 and f_ann_date=20060426 (live probe 2026-08-11, 2 of the 8 rows "
-            "in that two-year window), so a reader standing on 2006-04-26 would see a filing "
-            "announced 365 days later. Second, f_ann_date is not ordered against ann_date at "
-            "all -- 116 violations of f_ann_date >= ann_date in the 53-security sample against "
-            "55 / 59 / 23 rows where it is genuinely later -- so neither min nor max of the two "
-            "is a clock either. The decisive reason is agreement with the layer above: "
-            "providers/tushare.py::_announcement_timeline sets available_time from ann_date "
-            "alone and uses max(ann_date, f_ann_date) only for revision_time, so a filings_on "
-            "keyed on anything else would make a row visible to the domain on a day the panel's "
-            "own point-in-time filter hides it, or the reverse. The cost, stated plainly: "
-            "V2-P2-002's second restatement form -- a correction whose f_ann_date post-dates "
-            "its ann_date -- has no point-in-time consequence here. It is visible as a "
-            "distinct version and as PartitionCoverage.revised_row_count, and not as a "
-            "different answer before and after a date."
+            "all built on it -- makes a version readable from max(ann_date, f_ann_date), the "
+            "revision_time providers/tushare.py::_announcement_timeline stamps on the stored row "
+            "and the panel's point-in-time read waits for, so the domain and the panel agree on "
+            "the day a version appears. Neither date alone is a clock. f_ann_date is sometimes "
+            "the EARLIER date -- 000001.SZ's income carries end_date=20060331 with "
+            "ann_date=20070426 and f_ann_date=20060426 (live probe 2026-08-11), and 116 rows of "
+            "the 53-security sample have f_ann_date before ann_date -- and filtering on it alone "
+            "would show that filing 365 days early. Where it is LATER (55 / 59 / 23 rows of "
+            "income / balancesheet / cashflow in that sample), the stored row is the version "
+            "published then: a live probe on 2026-09-22 compared 19 such rows with the version "
+            "public on their ann_date and found 18 carrying different numbers, e.g. 000001.SZ's "
+            "2005 interim, announced 2005-08-19 with net profit 207,486,792 and stored as the "
+            "2006-07-05 version, 157,834,800. Keying on ann_date alone would answer that later "
+            "number for the 320 days before it existed. THE COST, stated plainly: the endpoint "
+            "serves the version current now and no earlier one, so inside [ann_date, f_ann_date) "
+            "such a filing has nothing readable -- it is missing rather than early. Only a key "
+            "that also carries a row with the earlier f_ann_date (5 of income's 633 and 5 of "
+            "balancesheet's 1,244 duplicate keys) answers from that row there. And a correction "
+            "that shares its original's ann_date and f_ann_date -- the update_flag pairs -- has "
+            "no date to be ordered by at all: see a_correction_carries_no_instant_of_its_own."
         ),
     ),
     FinancialStatementLimitation(
@@ -728,6 +736,13 @@ class ReportVersion:
     values: Mapping[str, float | None]
     labels: tuple[str, ...] = ()
     first_announced_on: date | None = None
+    row_count: int = 1
+    """How many served rows carried this version -- `ReportFiling.row_count` is their sum.
+
+    Kept per version so that a filing narrowed to the versions readable on some day
+    (`ReportFiling.readable_on`) can say how many rows stand behind what it still holds; the
+    labels cannot, because they are de-duplicated and `fina_indicator` has none.
+    """
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -756,6 +771,35 @@ class ReportFiling:
     def collapsed_versions(self) -> int:
         """Rows that folded away because they said exactly the same thing."""
         return self.row_count - len(self.versions)
+
+    def readable_on(self, day: date) -> ReportFiling | None:
+        """This filing as a reader standing on `day` could have read it, or `None` if they
+        could read none of it.
+
+        A version is readable from the **later** of `announced_on` and its own
+        `first_announced_on` -- `max(ann_date, f_ann_date)`, the `revision_time`
+        `providers/tushare.py::_announcement_timeline` stamps on the stored row and the panel's
+        visible read waits for. A version whose `f_ann_date` is later than the filing's
+        `ann_date` was published on that later day, and before it nobody had read it; one whose
+        `f_ann_date` is earlier is not brought forward, because the filing itself was not
+        announced yet. Returns `self` when every version is readable, and otherwise a filing
+        holding only the readable ones, with `row_count` counting the rows behind them.
+        """
+        readable = tuple(
+            version
+            for version in self.versions
+            if self.announced_on <= day
+            and (version.first_announced_on is None or version.first_announced_on <= day)
+        )
+        if not readable:
+            return None
+        if len(readable) == len(self.versions):
+            return self
+        return replace(
+            self,
+            versions=readable,
+            row_count=sum(version.row_count for version in readable),
+        )
 
     @property
     def is_ambiguous(self) -> bool:
@@ -857,26 +901,36 @@ class StatementHistory:
 
     @property
     def covered_from(self) -> date:
-        """The first day this history can answer for -- its earliest announcement."""
-        return self.filings[0].announced_on
+        """The first day this history can answer for -- the earliest day any version it holds
+        was readable, which is its earliest announcement unless that filing is stored only as a
+        version first announced later."""
+        return min(
+            max(filing.announced_on, version.first_announced_on or filing.announced_on)
+            for filing in self.filings
+            for version in filing.versions
+        )
 
     def filings_on(self, day: date) -> tuple[ReportFiling, ...]:
-        """Every filing announced on or before `day`, in stored order.
+        """Every filing readable on `day`, holding the versions readable then, in stored order.
 
         The plain point-in-time filter, and the thing every other reader here is built from --
         so the `answerable_through` bound is checked here once rather than in each of the three
         readers built on it.
 
-        `announced_on` is `ann_date` and **`f_ann_date` is deliberately not consulted**, which
-        is a decision rather than an oversight: it is the *first* announcement, so on the real
-        rows where the two differ it is the earlier one, and a filter that read it would make
-        `000001.SZ`'s 2006Q1 income visible on 2006-04-26 against an `ann_date` of 2007-04-26.
-        `KNOWN_FINANCIAL_STATEMENT_LIMITATIONS` carries the measurement and what it costs, under
-        `f_ann_date_is_deliberately_not_a_point_in_time_filter`.
+        A version is readable from `max(ann_date, f_ann_date)` (`ReportFiling.readable_on`), and
+        a filing none of whose versions is readable yet is not returned, so an earlier
+        announcement of the same period answers instead, or nothing does. Neither date alone
+        would do: `f_ann_date` alone makes `000001.SZ`'s 2006Q1 income visible on 2006-04-26
+        against an `ann_date` of 2007-04-26, and `ann_date` alone answers a version re-announced
+        months later on the day of the original announcement -- the look-ahead the panel's read
+        refuses. `KNOWN_FINANCIAL_STATEMENT_LIMITATIONS` carries the measurement and what the
+        rule costs, under `a_version_is_readable_from_the_later_of_its_two_announcement_dates`.
         """
         _require_plain_date(day, "day")
         self._require_year_was_read(day)
-        return tuple(filing for filing in self.filings if filing.announced_on <= day)
+        return tuple(
+            readable for filing in self.filings if (readable := filing.readable_on(day)) is not None
+        )
 
     def _require_year_was_read(self, day: date) -> None:
         """Refuse a day past the last announcement year this read can speak for."""
@@ -992,6 +1046,7 @@ def _collapse(
     """One key's rows, with the byte-identical ones folded together and their labels kept."""
     versions: list[ReportVersion] = []
     labels: list[list[str]] = []
+    counts: list[int] = []
     for row in rows:
         for index, version in enumerate(versions):
             if (
@@ -1000,6 +1055,7 @@ def _collapse(
             ):
                 if row.revision_label is not None and row.revision_label not in labels[index]:
                     labels[index].append(row.revision_label)
+                counts[index] += 1
                 break
         else:
             versions.append(
@@ -1009,6 +1065,7 @@ def _collapse(
                 )
             )
             labels.append([row.revision_label] if row.revision_label is not None else [])
+            counts.append(1)
     return ReportFiling(
         security=security,
         period=period,
@@ -1019,8 +1076,9 @@ def _collapse(
                 values=version.values,
                 labels=tuple(sorted(label_group)),
                 first_announced_on=version.first_announced_on,
+                row_count=count,
             )
-            for version, label_group in zip(versions, labels, strict=True)
+            for version, label_group, count in zip(versions, labels, counts, strict=True)
         ),
     )
 

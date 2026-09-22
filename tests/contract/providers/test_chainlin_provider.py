@@ -97,6 +97,38 @@ def test_chainlin_contract_preserves_pit_license_and_bearer_auth(
     assert "secret" not in batch.model_dump_json()
 
 
+def test_a_record_revised_after_the_request_as_of_fails_the_whole_batch(
+    monkeypatch: pytest.MonkeyPatch,
+    payload,
+    frozen_now: datetime,
+) -> None:
+    """ChainLin does not filter for itself: its contract asks the service to answer with the
+    version current at the request's `as_of`, and the batch refuses a response that did not.
+    A record available before `as_of` but revised after it is such a response, so the whole
+    batch is refused as a contract violation -- strictly, rather than by dropping the record.
+    At the revision instant the same response is accepted.
+    """
+    monkeypatch.setenv("CHAINLIN_API_KEY", "secret")
+    provider = ChainLinDataProvider(
+        base_url="https://data.chainlin.example/v1",
+        api_key_env="CHAINLIN_API_KEY",
+        source_license="user-held ChainLin subscription",
+        transport=FakeChainLinTransport(payload()),
+        clock=lambda: frozen_now,
+    )
+    between = frozen_now - (AVAILABLE_BEFORE_NOW + REVISED_BEFORE_NOW) / 2
+
+    with pytest.raises(ProviderFailure) as captured:
+        provider.fetch(ProviderRequest(dataset="limit_up", as_of=between))
+    accepted = provider.fetch(
+        ProviderRequest(dataset="limit_up", as_of=frozen_now - REVISED_BEFORE_NOW)
+    )
+
+    assert captured.value.category == "invalid_response"
+    assert captured.value.retryable is False
+    assert accepted.status == "success"
+
+
 def test_chainlin_metadata_declares_supported_datasets() -> None:
     provider = ChainLinDataProvider(
         base_url="https://data.chainlin.example/v1",

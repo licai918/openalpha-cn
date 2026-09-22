@@ -765,24 +765,28 @@ def test_two_rows_carrying_the_same_update_flag_are_still_two_versions() -> None
     assert filing.value_of("n_income_attr_p") == 209556865.25
 
 
-def test_a_first_announcement_date_never_moves_the_day_a_filing_becomes_readable() -> None:
-    """`V2-P2-002`'s second restatement form, pinned as a **decision** rather than left as a
-    gap the next reader has to rediscover.
+def test_an_earlier_first_announcement_never_brings_a_filing_forward_and_a_later_one_holds_it() -> (
+    None
+):
+    """`V2-P2-002`'s second restatement form, and the day a version becomes readable.
 
-    The two rows are real and were re-probed live on 2026-08-11: `000001.SZ`'s `income` returns
-    8 rows for 2006..2007 and 2 of them carry an `f_ann_date` a full year *before* their
-    `ann_date` -- `end_date=20060331` announced 2007-04-26 with `f_ann_date=20060426`, and
-    `end_date=20051231` announced 2007-03-22 with `f_ann_date=20060401`.
+    The earlier-`f_ann_date` rows are real and were re-probed live on 2026-08-11:
+    `000001.SZ`'s `income` returns 8 rows for 2006..2007 and 2 of them carry an `f_ann_date` a
+    full year *before* their `ann_date` -- `end_date=20060331` announced 2007-04-26 with
+    `f_ann_date=20060426`, and `end_date=20051231` announced 2007-03-22 with
+    `f_ann_date=20060401`. A filter that read `f_ann_date` alone would be look-ahead by 365 days
+    on the first, so nothing is readable before its `ann_date` however early `f_ann_date` is.
 
-    So `f_ann_date` is the **first** announcement, and a point-in-time filter that consulted it
-    would be look-ahead by 365 days on the first of these. Both directions are asserted here:
-    nothing is readable before its `ann_date` however early `f_ann_date` is, and everything is
-    readable on its `ann_date` however late `f_ann_date` is. The column is not discarded -- it
-    survives onto the version, which is what `announcement_is_ambiguous` reads -- it simply
-    does not gate visibility, and `filings_on` is the single place that would have to change.
+    The later-`f_ann_date` direction is the one that changed. A live probe on 2026-09-22 compared
+    19 such rows against the version public on their `ann_date` and found 18 carrying different
+    numbers: the stored version is the re-announced one. So a version is readable from the
+    **later** of its two dates -- `max(ann_date, f_ann_date)`, which is exactly the
+    `revision_time` `providers/tushare.py::_announcement_timeline` stamps and the panel's read
+    waits for -- and between the two days the filing is not there to be read. `600739.SH`'s 2024
+    annual here was announced 2025-04-26 and is stored as a version first announced 2026-04-25.
 
-    Deleting either half of this leaves a `filings_on` keyed on `min(...)` or `max(...)` of the
-    two dates passing every other test in this file.
+    Deleting either half of this leaves a `filings_on` keyed on `ann_date` alone, or on
+    `f_ann_date` alone, passing every other test in this file.
     """
     history = build_statement_history(
         security="000001.SZ",
@@ -812,16 +816,62 @@ def test_a_first_announcement_date_never_moves_the_day_a_filing_becomes_readable
         2007, 4, 26
     )
 
-    # The later `f_ann_date` does not hold the filing back either.
-    on_its_own_day = history.filing_for(date(2024, 12, 31), date(2025, 4, 26))
-    assert on_its_own_day.value_of("revenue") == 10769999495.94
-    assert history.periods_on(date(2025, 4, 26)) == (date(2006, 3, 31), date(2024, 12, 31))
-    assert history.periods_on(date(2025, 4, 25)) == (date(2006, 3, 31),)
+    # The later `f_ann_date` holds this version back until that day.
+    with pytest.raises(FinancialStatementHorizonError, match="had not announced its 2024-12-31"):
+        history.filing_for(date(2024, 12, 31), date(2025, 4, 26))
+    assert history.periods_on(date(2025, 4, 26)) == (date(2006, 3, 31),)
+    assert history.periods_on(date(2026, 4, 24)) == (date(2006, 3, 31),)
+    on_its_later_day = history.filing_for(date(2024, 12, 31), date(2026, 4, 25))
+    assert on_its_later_day.value_of("revenue") == 10769999495.94
+    assert history.periods_on(date(2026, 4, 25)) == (date(2006, 3, 31), date(2024, 12, 31))
 
     # And the column is carried rather than dropped, so the disagreement stays visible.
     assert [
         version.first_announced_on for filing in history.filings for version in filing.versions
     ] == [date(2006, 4, 26), date(2026, 4, 25)]
+
+
+def test_the_version_public_on_the_announcement_answers_until_the_later_one_is_published() -> None:
+    """One key, two versions, two first-announcement dates: the 5 of `income`'s 633 duplicate
+    keys whose rows disagree about `f_ann_date` have this shape, and `600739.SH`'s 2024 annual is
+    one of them -- both rows announced 2025-04-26, one first announced that day and one on
+    2026-04-25, disagreeing about revenue.
+
+    Between the two days only the first version had been published, so the filing answers with it
+    and is not ambiguous; `row_count` counts the rows behind the versions a reader could see, so
+    nothing withheld is reported as collapsed. From 2026-04-25 both are readable and the revenue
+    read refuses, which is the store's answer about this key ever after.
+    """
+    history = build_statement_history(
+        security="600739.SH",
+        dataset=INCOME_DATASET,
+        rows=[
+            ReportRow(
+                period=date(2024, 12, 31),
+                announced_on=date(2025, 4, 26),
+                first_announced_on=first_announced_on,
+                revision_label="1",
+                values=values,
+            )
+            for first_announced_on, values in (
+                (date(2025, 4, 26), LIAONING_2024_A),
+                (date(2026, 4, 25), LIAONING_2024_B),
+            )
+        ],
+    )
+
+    before = history.filing_for(date(2024, 12, 31), date(2026, 4, 24))
+    after = history.filing_for(date(2024, 12, 31), date(2026, 4, 25))
+
+    assert not before.is_ambiguous
+    assert before.value_of("revenue") == 11289276631.83
+    assert (before.row_count, before.collapsed_versions) == (1, 0)
+    assert after.is_ambiguous
+    assert (after.row_count, after.collapsed_versions) == (2, 0)
+    with pytest.raises(AmbiguousReportError, match=r"'revenue'"):
+        after.value_of("revenue")
+    (stored,) = history.filings
+    assert stored.row_count == 2
 
 
 def test_versions_that_differ_only_in_the_first_announcement_date_stay_apart() -> None:
@@ -1062,13 +1112,20 @@ def test_the_restated_period_is_still_reachable_by_name_on_its_own_announcement_
 
 def test_filings_are_ordered_however_the_endpoint_served_the_rows() -> None:
     """`_income_920403_rows` is in response order, newest announcement first, and the ordering
-    is not cosmetic: `covered_from` reads `filings[0]`, so a history that kept the response
-    order would report a security's coverage as beginning at its most recent filing."""
+    is not cosmetic: every reader returns filings in stored order, so a history that kept the
+    response order would hand a caller its most recent filing first.
+
+    `covered_from` is the first day any stored version was readable, and here that is not the
+    first announcement: the 2022 annual announced 2023-03-14 is stored only as the version first
+    announced 2023-04-29, so nothing in this history answers before then -- the real shape of a
+    filing that is missing, rather than early, inside `[ann_date, f_ann_date)`."""
     history = build_statement_history(
         security="920403.BJ", dataset=INCOME_DATASET, rows=_income_920403_rows()
     )
 
-    assert history.covered_from == date(2023, 3, 14)
+    assert history.covered_from == date(2023, 4, 29)
+    with pytest.raises(FinancialStatementHorizonError, match="its first is 2023-04-29"):
+        history.latest_filing_on(date(2023, 4, 28))
     assert [filing.announced_on for filing in history.filings] == [
         date(2023, 3, 14),
         date(2023, 8, 1),
@@ -1479,7 +1536,7 @@ def test_the_known_limitations_are_named_rather_than_argued_away() -> None:
         "update_flag_does_not_say_which_version_is_current",
         "an_announcement_date_carries_no_time_of_day",
         "the_two_announcement_dates_are_not_ordered",
-        "f_ann_date_is_deliberately_not_a_point_in_time_filter",
+        "a_version_is_readable_from_the_later_of_its_two_announcement_dates",
         "the_corpus_starts_before_the_exchanges_did",
         "a_partial_year_read_answers_from_inside_its_window",
         "only_the_consolidated_report_is_served",

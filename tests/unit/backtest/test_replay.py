@@ -335,6 +335,56 @@ def test_replay_case_with_invisible_evidence_raises_look_ahead_violation_error(
     assert isinstance(underlying, LookAheadViolationError)
 
 
+def test_replay_case_with_evidence_revised_after_its_as_of_is_refused_at_load(
+    evidence,
+    frozen_now: datetime,
+) -> None:
+    """A frozen case carrying a version revised after the case's own `as_of` is a look-ahead
+    even though the record first became available before it, and the corpus refuses it at load
+    with the same typed violation -- the message says "look-ahead violation", which is what a
+    version the case could not yet have seen is. At the revision instant the same case loads.
+    """
+    base: EvidenceSnapshot = evidence(
+        kind="limit_up",
+        facts={"close": 10.5, "pct_change": 9.99, "board_count": 1},
+    )
+    revised_later = base.model_copy(
+        update={
+            "timeline": Timeline(
+                event_time=frozen_now - timedelta(hours=2),
+                available_time=frozen_now - timedelta(hours=1),
+                ingested_time=frozen_now + timedelta(hours=1),
+                revision_time=frozen_now + timedelta(hours=1),
+            )
+        }
+    )
+
+    def case(as_of: datetime) -> ReplayCase:
+        return ReplayCase(
+            run_id="replay_case_revised_later",
+            trading_day=date(2026, 7, 24),
+            subject="000001.SZ",
+            as_of=as_of,
+            evidence=(revised_later,),
+            outcome=OutcomeObservation(
+                observation_start=frozen_now + timedelta(hours=1),
+                observation_end=frozen_now + timedelta(hours=2),
+                start_price=10.0,
+                end_price=10.5,
+                benchmark_return=0.01,
+                transaction_cost=0.001,
+            ),
+        )
+
+    with pytest.raises(
+        ValidationError, match="replay corpus contains a look-ahead violation"
+    ) as caught:
+        case(frozen_now)
+
+    assert isinstance(caught.value.errors()[0]["ctx"]["error"], LookAheadViolationError)
+    assert case(frozen_now + timedelta(hours=1)).evidence == (revised_later,)
+
+
 # --- P0.B acceptance review Finding 1: the replay database is migrated, and replay-
 # produced validation results are persisted and retrievable ---------------------------
 

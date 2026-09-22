@@ -77,7 +77,15 @@ class ParquetEvidenceStore:
         subject: str | None = None,
         kind: str | None = None,
     ) -> tuple[EvidenceSnapshot, ...]:
-        """Return evidence available by ``as_of``, ordered deterministically."""
+        """Return the evidence visible at ``as_of``, ordered deterministically.
+
+        Visible means what ``domain/time.py::is_visible_at`` means: the record had first become
+        available **and** the version stored here had been published by ``as_of`` -- so a
+        version revised after ``as_of`` is withheld until its revision instant. The store is
+        append-only and chooses between nothing, so the version before a revision answers
+        inside that window only where it was itself stored; a store whose first sight of a
+        record was the revised version has nothing to answer with until the revision.
+        """
         files = [str(path) for path in sorted(self.root.glob("*.parquet"))]
         if not files:
             return ()
@@ -102,11 +110,12 @@ class ParquetEvidenceStore:
                     content_hash
                 FROM read_parquet(?)
                 WHERE available_time <= ?
+                  AND revision_time <= ?
                   AND (? IS NULL OR subject = ?)
                   AND (? IS NULL OR kind = ?)
                 ORDER BY available_time, evidence_id
                 """,
-                [files, point_in_time, subject, subject, kind, kind],
+                [files, point_in_time, point_in_time, subject, subject, kind, kind],
             ).fetchall()
         return tuple(self._deserialize(cast(tuple[object, ...], row)) for row in rows)
 

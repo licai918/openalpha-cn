@@ -38,10 +38,17 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 import pytest
 
+from openalpha_cn.domain.financial_statements import (
+    INCOME_DATA_COLUMNS,
+    INCOME_DATASET,
+    REPORT_PERIOD_COLUMN,
+    FinancialStatementHorizonError,
+    statement_panel_columns,
+)
 from openalpha_cn.domain.name_history import (
     NAMECHANGE_DATASET,
 )
@@ -51,6 +58,7 @@ from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET
 from openalpha_cn.panel.store import PanelStorageError, PanelStore
 from openalpha_cn.panel_ingest import (
     load_name_histories,
+    load_statement_histories,
     load_stock_universe,
     load_suspensions,
     write_panel_batch,
@@ -388,6 +396,177 @@ def test_a_withheld_rename_is_refused_rather_than_answered_with_the_previous_nam
     assert "its date census counts 1 row(s) dated 2026-01-14" in message
     assert "the visible slice carries 0 of them" in message
     assert "A rename's availability is midnight on its own announcement date" in message
+
+
+# --- income: a row withheld for its revision is withheld, not absent --------------------------
+
+STATEMENT_YEAR: Final[int] = 2024
+
+INSIDE_THE_REVISIONS: Final[datetime] = datetime(2024, 8, 30, 4, 0, tzinfo=UTC)
+"""Noon Asia/Shanghai on 2024-08-30: after every announcement below and before both revisions."""
+
+REVISED_ON: Final[date] = date(2024, 11, 10)
+
+_Statement = tuple[str, date, date, date, float]
+"""`(security, period, ann_date, f_ann_date, revenue)`."""
+
+REVISED_STATEMENTS: Final[tuple[_Statement, ...]] = (
+    ("000001.SZ", date(2024, 3, 31), date(2024, 4, 20), date(2024, 4, 20), 100.0),
+    ("000001.SZ", date(2024, 3, 31), date(2024, 4, 20), REVISED_ON, 999.0),
+    ("000001.SZ", date(2024, 6, 30), date(2024, 8, 26), REVISED_ON, 210.0),
+    ("600000.SH", date(2024, 3, 31), date(2024, 4, 25), date(2024, 4, 25), 300.0),
+)
+"""Two securities' filings in the shapes the live probe of 2026-09-22 found:
+
+- `000001.SZ`'s Q1 in two versions under one `(period, ann_date)` key -- the one public on its
+  announcement day and one stored with a later `f_ann_date`, as on 5 of `income`'s 633
+  duplicate keys;
+- its interim stored only as the version re-announced later, with nothing older behind it;
+- `600000.SH`'s Q1, never revised, so a read has something ordinary to answer beside them.
+"""
+
+
+def _statement_batch(rows: tuple[_Statement, ...]) -> ColumnarPanelBatch:
+    """`income` rows under `_announcement_timeline`'s clock: available and happened at midnight
+    on `ann_date`, revised at midnight on the later of the two dates."""
+    announced = tuple(_midnight(row[2]) for row in rows)
+    revised = tuple(_midnight(max(row[2], row[3])) for row in rows)
+    fetched = max(revised)
+    columns = (
+        PanelColumn(REPORT_PERIOD_COLUMN, "string", tuple(row[1].isoformat() for row in rows)),
+        PanelColumn("ann_date", "string", tuple(row[2].isoformat() for row in rows)),
+        PanelColumn("f_ann_date", "string", tuple(row[3].isoformat() for row in rows)),
+        PanelColumn("update_flag", "string", tuple("1" for _ in rows)),
+        *(
+            PanelColumn(name, "float", tuple(row[4] if name == "revenue" else 1.0 for row in rows))
+            for name in INCOME_DATA_COLUMNS
+        ),
+    )
+    assert tuple(column.name for column in columns) == statement_panel_columns(INCOME_DATASET)
+    return ColumnarPanelBatch(
+        provider_id="openalpha-cn/revision-probe",
+        dataset=INCOME_DATASET,
+        kind=INCOME_DATASET,
+        as_of=fetched,
+        fetched_at=fetched,
+        status="success",
+        subjects=tuple(row[0] for row in rows),
+        timeline=TimelineColumns(
+            event_time=announced,
+            available_time=announced,
+            ingested_time=revised,
+            revision_time=revised,
+        ),
+        columns=columns,
+    )
+
+
+def _statement_store(root: Path, rows: tuple[_Statement, ...]) -> PanelStore:
+    store = PanelStore(root / "panel")
+    write_panel_batch(store, _statement_batch(rows), year=STATEMENT_YEAR)
+    return store
+
+
+def test_a_filing_stored_as_a_later_revision_is_withheld_and_the_version_public_that_day_answers(
+    tmp_path: Path,
+) -> None:
+    """Inside a revision window the statement read answers from what was public, not refuses.
+
+    At 2024-08-30 the census counts two `000001.SZ` rows on 2024-04-20 and one on 2024-08-26, and
+    the visibility predicate withholds the two stored as versions re-announced on 2024-11-10. The
+    per-date reconciliation used to read that as a row withheld for a reason it could not see and
+    refused the whole year -- every statement read inside any revision window of any filing in
+    the partition. It now counts a row the predicate held back **for its revision** as withheld
+    rather than absent, so the read answers: the Q1 version public that day, no interim yet, and
+    the other security untouched. After the revision instant both versions are back and the Q1
+    filing is ambiguous again, which is the answer the store has always given there.
+    """
+    store = _statement_store(tmp_path, REVISED_STATEMENTS)
+
+    def history(as_of: datetime, security: str) -> Any:
+        return load_statement_histories(
+            store,
+            dataset=INCOME_DATASET,
+            years=(STATEMENT_YEAR,),
+            as_of=as_of,
+            max_staleness=None,
+        )[security]
+
+    inside = history(INSIDE_THE_REVISIONS, "000001.SZ")
+    day = date(2024, 8, 30)
+    q1 = inside.filing_for(date(2024, 3, 31), day)
+    assert not q1.is_ambiguous
+    assert q1.value_of("revenue") == 100.0
+    with pytest.raises(FinancialStatementHorizonError, match="had not announced its 2024-06-30"):
+        inside.filing_for(date(2024, 6, 30), day)
+    assert (
+        history(INSIDE_THE_REVISIONS, "600000.SH")
+        .filing_for(date(2024, 3, 31), day)
+        .value_of("revenue")
+        == 300.0
+    )
+
+    after = history(_midnight(REVISED_ON) + timedelta(hours=12), "000001.SZ")
+    later = REVISED_ON + timedelta(days=1)
+    assert after.filing_for(date(2024, 3, 31), later).values_of("revenue") == (100.0, 999.0)
+    assert after.filing_for(date(2024, 6, 30), later).value_of("revenue") == 210.0
+
+
+def test_a_row_withheld_for_its_availability_is_still_refused_beside_the_revised_ones(
+    tmp_path: Path,
+) -> None:
+    """The reconciliation explains a shortfall by the revision clock and by nothing else.
+
+    A fifth row is doctored to become available two weeks after its own announcement, which
+    `_announcement_timeline` cannot produce. At 2024-08-30 its event date is inside the census
+    and the predicate withholds it for its **availability**, so the date it sits on disagrees
+    even after the revision-withheld rows are counted -- and the read refuses, naming that date,
+    exactly as it refused before the revision clock took part in visibility. A reconciliation
+    that credited every withheld row rather than the revision-withheld ones would answer here.
+    """
+    doctored = _statement_batch(
+        (
+            *REVISED_STATEMENTS,
+            ("600000.SH", date(2024, 6, 30), date(2024, 8, 20), date(2024, 8, 20), 310.0),
+        )
+    )
+    late = _midnight(date(2024, 9, 3))
+    available = (*doctored.timeline.available_time[:-1], late)
+    revised = (*doctored.timeline.revision_time[:-1], late)
+    store = PanelStore(tmp_path / "panel")
+    write_panel_batch(
+        store,
+        ColumnarPanelBatch(
+            provider_id=doctored.provider_id,
+            dataset=doctored.dataset,
+            kind=doctored.kind,
+            as_of=doctored.as_of,
+            fetched_at=doctored.fetched_at,
+            status="success",
+            subjects=doctored.subjects,
+            timeline=TimelineColumns(
+                event_time=doctored.timeline.event_time,
+                available_time=available,
+                ingested_time=revised,
+                revision_time=revised,
+            ),
+            columns=doctored.columns,
+        ),
+        year=STATEMENT_YEAR,
+    )
+
+    with pytest.raises(PanelStorageError) as refusal:
+        load_statement_histories(
+            store,
+            dataset=INCOME_DATASET,
+            years=(STATEMENT_YEAR,),
+            as_of=INSIDE_THE_REVISIONS,
+            max_staleness=None,
+        )
+
+    message = str(refusal.value)
+    assert "its date census counts 1 row(s) dated 2024-08-20" in message
+    assert "the visible slice carries 0 of them" in message
 
 
 # --- the look-ahead half, which is a different refusal and is reported first ------------------

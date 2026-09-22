@@ -75,6 +75,7 @@ from openalpha_cn.panel.catalog import (
 from openalpha_cn.panel.store import (
     AVAILABILITY_COLUMN,
     EVENT_TIME_COLUMN,
+    REVISION_COLUMN,
     SUBJECT_COLUMN,
     ColumnSpec,
     PanelStorageError,
@@ -985,9 +986,148 @@ def test_a_row_with_no_availability_instant_is_withheld_and_still_counted(
     other row, and it is counted as withheld so the halves add up. `write_partition` with raw
     rows is the only door to this shape -- `TimelineColumns` refuses a missing clock -- so the
     partition is built that way here on purpose.
+
+    The revision clock is the second clock the predicate reads, so it gets the same treatment:
+    a row available early whose `revision_time` is NULL has no instant at which its stored
+    version became knowable, and is withheld and counted exactly like the NULL-availability
+    row. The complement is spelled with both `IS NULL`s; dropping either one loses its row from
+    both halves again.
     """
     store = PanelStore(tmp_path / "panel")
     dataset = "probe_null_clock"
+    early = datetime(2026, 1, 5, 8, 30, tzinfo=UTC)
+    later = datetime(2026, 6, 1, 8, 30, tzinfo=UTC)
+    store.write_partition(
+        dataset,
+        YEAR,
+        (
+            ColumnSpec(SUBJECT_COLUMN, "VARCHAR"),
+            ColumnSpec(EVENT_TIME_COLUMN, "TIMESTAMPTZ"),
+            ColumnSpec(AVAILABILITY_COLUMN, "TIMESTAMPTZ"),
+            ColumnSpec(REVISION_COLUMN, "TIMESTAMPTZ"),
+        ),
+        (
+            ("000001.SZ", early, early, early),
+            ("000002.SZ", early, later, later),
+            ("000003.SZ", early, None, early),
+            ("000004.SZ", early, early, None),
+        ),
+    )
+    _record_probe_coverage(store, dataset=dataset, row_count=4, subjects=("000001.SZ",))
+
+    for as_of in (early, datetime(2027, 1, 1, tzinfo=UTC)):
+        outcome = store.read_visible_at(
+            _probe_requirement(dataset, as_of, subjects=None), year=YEAR, columns=(SUBJECT_COLUMN,)
+        )
+        visible = {str(row[0]) for row in outcome.rows}
+        assert "000003.SZ" not in visible
+        assert "000004.SZ" not in visible
+        assert outcome.visible_row_count + outcome.withheld_row_count == 4
+
+
+REVISED_PROBE_SUBJECTS: Final[tuple[str, ...]] = ("000001.SZ", "000002.SZ", "000003.SZ")
+REVISED_AT: Final[datetime] = datetime(2026, 1, 20, 8, 30, tzinfo=UTC)
+"""After `MID_WINDOW`: the instant `000002.SZ`'s stored row was revised."""
+
+
+def _write_revised_probe(store: PanelStore, *, dataset: str) -> None:
+    """Three rows, one per security, through the real batch writer:
+
+    - `000001.SZ` published 2026-01-05 and never revised -- visible at `MID_WINDOW`;
+    - `000002.SZ` published 2026-01-06 and stored as a version revised at `REVISED_AT` --
+      available at `MID_WINDOW`, and still not knowable in the form stored here;
+    - `000003.SZ` published 2026-01-15 -- not yet available at `MID_WINDOW`, which is what makes
+      `not_yet_knowable` fire and the filtered read the one taken.
+    """
+    written = datetime(2026, 12, 31, 12, 0, tzinfo=UTC)
+    event = (
+        datetime(2026, 1, 5, 7, 0, tzinfo=UTC),
+        datetime(2026, 1, 6, 7, 0, tzinfo=UTC),
+        datetime(2026, 1, 15, 7, 0, tzinfo=UTC),
+    )
+    available = tuple(moment.replace(hour=8, minute=30) for moment in event)
+    write_panel_batch(
+        store,
+        ColumnarPanelBatch(
+            provider_id="synthetic",
+            dataset=dataset,
+            kind="probe",
+            as_of=written,
+            fetched_at=written,
+            status="success",
+            subjects=REVISED_PROBE_SUBJECTS,
+            timeline=TimelineColumns(
+                event_time=event,
+                available_time=available,
+                ingested_time=(available[0], REVISED_AT, available[2]),
+                revision_time=(available[0], REVISED_AT, available[2]),
+            ),
+            columns=(PanelColumn("score", "float", (1.0, 2.0, 3.0)),),
+        ),
+        year=YEAR,
+    )
+
+
+def test_a_row_revised_after_as_of_is_withheld_counted_and_out_of_the_slice_checks(
+    tmp_path: Path,
+) -> None:
+    """The revision clock, through every statement the filtered read runs.
+
+    `000002.SZ` first became available on 2026-01-06, before `MID_WINDOW`, and the partition
+    stores it as a version revised on 2026-01-20. At `MID_WINDOW` that version was not
+    knowable, so the row must be absent from the projection, counted in `withheld_row_count`,
+    left out of the reach the `stale` recheck reads, and left out of the probe the
+    `subject_missing` recheck reads -- one assertion per statement, so a predicate dropped from
+    any one of the three goes red here. From the revision instant on, the row is answered.
+    """
+    store = PanelStore(tmp_path / "panel")
+    dataset = "probe_revised"
+    _write_revised_probe(store, dataset=dataset)
+
+    outcome = store.read_visible_at(
+        _probe_requirement(dataset, MID_WINDOW, subjects=None),
+        year=YEAR,
+        columns=(SUBJECT_COLUMN, EVENT_TIME_COLUMN),
+    )
+    required = store.read_visible_at(
+        _probe_requirement(dataset, MID_WINDOW, subjects=("000002.SZ",)),
+        year=YEAR,
+        columns=(SUBJECT_COLUMN,),
+    )
+    just_before = store.read_visible_at(
+        _probe_requirement(
+            dataset, REVISED_AT - timedelta(microseconds=1), subjects=("000002.SZ",)
+        ),
+        year=YEAR,
+        columns=(SUBJECT_COLUMN,),
+    )
+    revised = store.read_visible_at(
+        _probe_requirement(dataset, REVISED_AT, subjects=("000002.SZ",)),
+        year=YEAR,
+        columns=(SUBJECT_COLUMN,),
+    )
+
+    assert [str(row[0]) for row in outcome.rows] == ["000001.SZ"]
+    assert outcome.withheld_row_count == 2
+    assert outcome.visible_row_count + outcome.withheld_row_count == len(REVISED_PROBE_SUBJECTS)
+    assert outcome.visible_last_event_time == datetime(2026, 1, 5, 7, 0, tzinfo=UTC)
+    assert required.is_blocked
+    assert [issue.code for issue in required.visible_slice_issues] == ["subject_missing"]
+    assert [issue.code for issue in just_before.visible_slice_issues] == ["subject_missing"]
+    assert sorted(str(row[0]) for row in revised.rows) == list(REVISED_PROBE_SUBJECTS)
+    assert revised.withheld_row_count == 0
+
+
+def test_a_partition_with_no_revision_column_is_refused_rather_than_read_as_unrevised(
+    tmp_path: Path,
+) -> None:
+    """A raw partition written without `revision_time` cannot say whether a row's stored version
+    was knowable at `as_of`, so the filtered read refuses it rather than treating the missing
+    column as "never revised". Only `write_partition` with raw rows can produce one --
+    `ColumnarPanelBatch` writes all four clocks on every row -- which is why the refusal is a
+    storage error naming the column rather than a readiness code."""
+    store = PanelStore(tmp_path / "panel")
+    dataset = "probe_no_revision_column"
     early = datetime(2026, 1, 5, 8, 30, tzinfo=UTC)
     store.write_partition(
         dataset,
@@ -997,20 +1137,14 @@ def test_a_row_with_no_availability_instant_is_withheld_and_still_counted(
             ColumnSpec(EVENT_TIME_COLUMN, "TIMESTAMPTZ"),
             ColumnSpec(AVAILABILITY_COLUMN, "TIMESTAMPTZ"),
         ),
-        (
-            ("000001.SZ", early, early),
-            ("000002.SZ", early, datetime(2026, 6, 1, 8, 30, tzinfo=UTC)),
-            ("000003.SZ", early, None),
-        ),
+        (("000001.SZ", early, early),),
     )
-    _record_probe_coverage(store, dataset=dataset, row_count=3, subjects=("000001.SZ",))
+    _record_probe_coverage(store, dataset=dataset, row_count=1, subjects=("000001.SZ",))
 
-    for as_of in (early, datetime(2027, 1, 1, tzinfo=UTC)):
-        outcome = store.read_visible_at(
-            _probe_requirement(dataset, as_of, subjects=None), year=YEAR, columns=(SUBJECT_COLUMN,)
+    with pytest.raises(PanelStorageError, match=REVISION_COLUMN):
+        store.read_visible_at(
+            _probe_requirement(dataset, early, subjects=None), year=YEAR, columns=(SUBJECT_COLUMN,)
         )
-        assert "000003.SZ" not in {str(row[0]) for row in outcome.rows}
-        assert outcome.visible_row_count + outcome.withheld_row_count == 3
 
 
 def test_the_date_gap_recheck_would_be_a_no_op_on_every_requirement_that_states_dates(

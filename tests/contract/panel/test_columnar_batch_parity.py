@@ -3,12 +3,14 @@ one, and its point-in-time guarantee is *exactly as strong*.
 
 `ProviderBatch.validate_result` (`providers/base.py:148`) is the enforcement point of the
 four-clock PIT contract: `any(not is_visible_at(record.timeline, self.request.as_of) for
-record in self.records)` rejects a batch the moment a single record was not yet available at
-`as_of`. `ColumnarPanelBatch` replaces that per-record scan with a single `max()` over the
-`available_time` column, which is exactly equivalent -- `all(t <= as_of)` holds iff
-`max(t) <= as_of` -- but "exactly equivalent" is a claim, so the tests below prove it by
-running both contracts over the same corpus and asserting they accept and reject the *same*
-inputs, including corpora where exactly one row out of many is a microsecond late.
+record in self.records)` rejects a batch the moment a single record was not yet knowable at
+`as_of` -- not yet available, or carrying a version revised after it. `ColumnarPanelBatch`
+replaces that per-record scan with a single `max()` over the `revision_time` column, which is
+exactly equivalent: every row's revision is at or after its own availability, so
+`all(available <= as_of and revision <= as_of)` holds iff `max(revision) <= as_of`. But "exactly
+equivalent" is a claim, so the tests below prove it by running both contracts over the same
+corpus and asserting they accept and reject the *same* inputs, including corpora where exactly
+one row out of many is a microsecond late, and corpora whose revision clock moves on its own.
 
 The cost side is asserted four times, deliberately, because no one of them is sufficient on
 its own -- one structural assertion per distinct cost claim, plus a wall-clock backstop:
@@ -68,16 +70,31 @@ def _availables(
     return values
 
 
-def _clocks(availables: list[datetime]) -> tuple[list[datetime], ...]:
+def _clocks(
+    availables: list[datetime], revisions: list[datetime] | None = None
+) -> tuple[list[datetime], ...]:
     """`Timeline` forbids `ingested_time`/`revision_time` before `available_time`, so both
     are pinned at or after each row's own `available_time` -- keeping every corpus below
-    legal for reasons *other* than the visibility rule under test."""
+    legal for reasons *other* than the visibility rule under test.
+
+    `revisions`, when given, moves the revision clock on its own: each row's revision is the
+    later of its entry there and its own availability. Without it the revision rides with the
+    ingestion clock, which never passes `as_of` unless the availability does -- a corpus that
+    cannot tell a batch-level check on the availability column from one on the revision
+    column, because it never separates the two."""
     ingested = [max(INGESTED, value) for value in availables]
-    return ([EVENT] * len(availables), availables, ingested, list(ingested))
+    revised = (
+        list(ingested)
+        if revisions is None
+        else [max(revision, value) for revision, value in zip(revisions, availables, strict=True)]
+    )
+    return ([EVENT] * len(availables), availables, ingested, revised)
 
 
-def _row_wise_rejects(availables: list[datetime], as_of: datetime) -> bool:
-    event, available, ingested, revision = _clocks(availables)
+def _row_wise_rejects(
+    availables: list[datetime], as_of: datetime, revisions: list[datetime] | None = None
+) -> bool:
+    event, available, ingested, revision = _clocks(availables, revisions)
     records = tuple(
         ProviderRecord(
             subject=f"{index:06d}.SZ",
@@ -106,8 +123,10 @@ def _row_wise_rejects(availables: list[datetime], as_of: datetime) -> bool:
     return False
 
 
-def _columnar_rejects(availables: list[datetime], as_of: datetime) -> bool:
-    event, available, ingested, revision = _clocks(availables)
+def _columnar_rejects(
+    availables: list[datetime], as_of: datetime, revisions: list[datetime] | None = None
+) -> bool:
+    event, available, ingested, revision = _clocks(availables, revisions)
     try:
         _columnar_batch(event, available, ingested, revision, as_of)
     except ValueError:
@@ -155,8 +174,8 @@ def test_a_batch_whose_every_row_was_available_before_as_of_is_accepted_by_both(
 
 
 def test_a_row_available_exactly_at_as_of_is_accepted_by_both() -> None:
-    """`is_visible_at` is `available_time <= as_of`; the boundary belongs to the accepted
-    side, and `max()` must land on the same side of it."""
+    """`is_visible_at` asks `available_time <= as_of` (and the same of `revision_time`); the
+    boundary belongs to the accepted side, and `max()` must land on the same side of it."""
     availables = _availables(16, late_index=7, lateness=timedelta(0))
 
     assert _row_wise_rejects(availables, AS_OF) is False
@@ -174,9 +193,50 @@ def test_one_late_row_anywhere_in_a_64_row_batch_is_rejected_by_both(late_index:
     assert _columnar_rejects(availables, AS_OF) is True
 
 
+def test_a_revision_after_as_of_is_rejected_by_both_on_a_row_that_is_not_the_newest() -> None:
+    """The case a check on the **availability** column cannot see, which is why the batch-level
+    maximum is taken over the revision column.
+
+    Row 5 first became available four hours before `as_of` and carries a version revised a
+    microsecond after it; row 63 is the newest row to become available and was never revised.
+    `max(available_time)` lands on row 63, which is visible, so a check that consulted only that
+    row would accept a batch holding a version nobody could have read at `as_of`.
+    `ProviderBatch` rejects it record by record, and the columnar contract must agree.
+    """
+    availables = _availables(64, lateness=timedelta(0))
+    revisions = list(availables)
+    revisions[5] = AS_OF + timedelta(microseconds=1)
+
+    assert availables.index(max(availables)) == 63
+    assert _row_wise_rejects(availables, AS_OF, revisions) is True
+    assert _columnar_rejects(availables, AS_OF, revisions) is True
+
+
+def test_a_revision_exactly_at_as_of_is_accepted_by_both() -> None:
+    """The revision clock's boundary, on the accepted side like the availability clock's."""
+    availables = _availables(16, lateness=timedelta(0))
+    revisions = list(availables)
+    revisions[3] = AS_OF
+
+    assert _row_wise_rejects(availables, AS_OF, revisions) is False
+    assert _columnar_rejects(availables, AS_OF, revisions) is False
+
+
+def test_the_columnar_rejection_names_the_revision_clock_when_that_is_what_is_late() -> None:
+    """A rejection that said "became available at ..." about a row that became available four
+    hours before `as_of` would send its reader to the wrong clock."""
+    availables = _availables(64, lateness=timedelta(0))
+    revisions = list(availables)
+    revisions[5] = AS_OF + timedelta(hours=1)
+    event, available, ingested, revision = _clocks(availables, revisions)
+
+    with pytest.raises(ValueError, match=r"row 5 .*revised at .*after the requested as_of"):
+        _columnar_batch(event, available, ingested, revision, AS_OF)
+
+
 def test_the_columnar_rejection_names_the_offending_row() -> None:
     """Better than the row-wise message, not merely as good: `ProviderBatch` raises
-    "provider batch contains records unavailable at request as_of" without saying which."""
+    "provider batch contains records not visible at request as_of" without saying which."""
     availables = _availables(64, late_index=41, lateness=timedelta(microseconds=1))
     event, available, ingested, revision = _clocks(availables)
 
@@ -185,29 +245,52 @@ def test_the_columnar_rejection_names_the_offending_row() -> None:
 
 
 def test_the_two_contracts_agree_on_a_randomised_corpus() -> None:
-    """200 seeded cases, each with a random row count and a random number of rows nudged to
-    either side of `as_of` by a random margin -- including the exact-equality boundary."""
+    """200 seeded cases, each with a random row count, a random number of rows nudged to either
+    side of `as_of` by a random margin -- including the exact-equality boundary -- and, on a
+    draw of its own, a random number of rows whose *revision* is nudged the same way.
+
+    The revision clock is moved independently of the availability clock, because a corpus that
+    moves them together cannot tell a batch-level check on one column from a check on the
+    other. The last assertion keeps that true: some rejected cases must have been rejected by a
+    revision alone, with every row available by `as_of`.
+    """
     rng = random.Random(20260808)
-    disagreements: list[tuple[int, list[float]]] = []
+    disagreements: list[tuple[int, list[float], list[float]]] = []
     rejected_cases = 0
+    rejected_by_a_revision_alone = 0
+    margins = [-1000, -1, 0, 1, 1000, 86_400_000_000]
 
     for case in range(200):
         count = rng.randint(1, 40)
         availables = _availables(count, lateness=timedelta(0))
         for index in range(count):
-            if rng.random() < 0.15:
-                micros = rng.choice([-1000, -1, 0, 1, 1000, 86_400_000_000])
-                availables[index] = AS_OF + timedelta(microseconds=micros)
-        row_wise = _row_wise_rejects(availables, AS_OF)
-        columnar = _columnar_rejects(availables, AS_OF)
+            if rng.random() < 0.08:
+                availables[index] = AS_OF + timedelta(microseconds=rng.choice(margins))
+        revisions = list(availables)
+        for index in range(count):
+            if rng.random() < 0.08:
+                revisions[index] = AS_OF + timedelta(microseconds=rng.choice(margins))
+        row_wise = _row_wise_rejects(availables, AS_OF, revisions)
+        columnar = _columnar_rejects(availables, AS_OF, revisions)
         rejected_cases += int(row_wise)
+        rejected_by_a_revision_alone += int(row_wise and max(availables) <= AS_OF)
         if row_wise != columnar:
-            disagreements.append((case, [(value - AS_OF).total_seconds() for value in availables]))
+            disagreements.append(
+                (
+                    case,
+                    [(value - AS_OF).total_seconds() for value in availables],
+                    [(value - AS_OF).total_seconds() for value in revisions],
+                )
+            )
 
     assert not disagreements, f"row-wise and columnar disagreed on {disagreements[:3]}"
     assert 20 < rejected_cases < 180, (
         f"corpus is degenerate: only {rejected_cases}/200 cases were rejected, so the "
         "agreement above would be trivially satisfiable"
+    )
+    assert rejected_by_a_revision_alone > 10, (
+        f"only {rejected_by_a_revision_alone} cases were rejected by a revision alone, so the "
+        "corpus barely separates the revision clock from the availability clock"
     )
 
 

@@ -7,7 +7,7 @@ the one `domain/` is allowed to raise without any upward import -- uses
 `LookAheadViolationError`, not a bare `ValueError`.
 """
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 from pydantic import ValidationError
@@ -64,3 +64,46 @@ def test_evidence_not_visible_at_as_of_raises_look_ahead_violation_error(
 
     underlying = exc_info.value.errors()[0]["ctx"]["error"]
     assert isinstance(underlying, LookAheadViolationError)
+
+
+def test_evidence_revised_after_as_of_is_refused_as_a_look_ahead(evidence, frozen_now) -> None:
+    """A record that first became available an hour before `as_of` but carries a version revised
+    an hour after it is not what the request could have seen, so the whole request is refused --
+    with the same typed violation and the same sentence as a record not yet available at all.
+
+    "not visible" is still the accurate word: visibility now waits for both clocks, and the
+    refusal is a statement about visibility rather than about which clock was late. The same
+    record is accepted at its revision instant, so the refusal is attributable to the revision.
+    """
+    base: EvidenceSnapshot = evidence(
+        kind="limit_up",
+        facts={"close": 10.5, "pct_change": 9.99, "board_count": 1},
+    )
+    revised_later = base.model_copy(
+        update={
+            "timeline": Timeline(
+                event_time=frozen_now - timedelta(hours=2),
+                available_time=frozen_now - timedelta(hours=1),
+                ingested_time=frozen_now + timedelta(hours=1),
+                revision_time=frozen_now + timedelta(hours=1),
+            )
+        }
+    )
+
+    def request(as_of: datetime) -> ResearchRunRequest:
+        return ResearchRunRequest(
+            run_id="run_revised_later",
+            mode="replay",
+            subject="000001.SZ",
+            as_of=as_of,
+            evidence=(revised_later,),
+            code_commit="0123456789abcdef",
+            config_digest="d" * 64,
+            random_seed=7,
+        )
+
+    with pytest.raises(ValidationError, match="evidence is not visible at request as_of") as caught:
+        request(frozen_now)
+
+    assert isinstance(caught.value.errors()[0]["ctx"]["error"], LookAheadViolationError)
+    assert request(frozen_now + timedelta(hours=1)).evidence == (revised_later,)

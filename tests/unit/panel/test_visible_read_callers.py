@@ -62,7 +62,12 @@ from openalpha_cn.domain.panel_batch import (
     RESERVED_COLUMN_NAMES,
     SUBJECT_COLUMN_NAME,
 )
-from openalpha_cn.panel.store import AVAILABILITY_COLUMN, EVENT_TIME_COLUMN, SUBJECT_COLUMN
+from openalpha_cn.panel.store import (
+    AVAILABILITY_COLUMN,
+    EVENT_TIME_COLUMN,
+    REVISION_COLUMN,
+    SUBJECT_COLUMN,
+)
 
 ROOT = Path(__file__).resolve().parents[3]
 SOURCE = ROOT / "src" / "openalpha_cn"
@@ -644,6 +649,20 @@ def test_the_availability_column_this_module_filters_on_is_the_one_the_batch_con
     """
     assert AVAILABILITY_COLUMN in CLOCK_COLUMN_NAMES
     assert AVAILABILITY_COLUMN in RESERVED_COLUMN_NAMES
+
+
+def test_the_revision_column_this_module_filters_on_is_the_one_the_batch_contract_writes() -> None:
+    """The second clock the filtered read compares, pinned the way the first is.
+
+    `read_visible_at` withholds a row whose stored version was revised after `as_of`, by the
+    literal name `revision_time` in all three of its statements. A name no panel row carries
+    would refuse every partition; a name a provider column could shadow would filter on the
+    provider's column instead of the clock. So the restated copy must be one of the four clock
+    columns every batch writes, and one of the names the batch contract reserves.
+    """
+    assert REVISION_COLUMN in CLOCK_COLUMN_NAMES
+    assert REVISION_COLUMN in RESERVED_COLUMN_NAMES
+    assert REVISION_COLUMN != AVAILABILITY_COLUMN
 
 
 def test_the_two_columns_the_second_gate_reads_are_pinned_the_same_way() -> None:

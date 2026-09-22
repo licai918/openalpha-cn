@@ -2541,12 +2541,17 @@ def _year_as_of(year: int) -> datetime:
 def _year_end_as_of(year: int, now: datetime) -> datetime:
     """The last instant of `year` in the panel's zone, never later than this build's clock.
 
-    What `namechange`, `income`, `balancesheet` and `cashflow` are asked at, and it has to be
-    the *end* of the year rather than `_year_as_of`'s start. All four take a `{start_date,
-    end_date}` window that the provider derives from `as_of`'s Asia/Shanghai year, and all four
-    are clocked at the **announcement**: a row announced on 14 June is available from that day
-    and no earlier, so a request made at 1 January fetches exactly the right window and
-    `_decode_panel_rows` then drops every row in it except any announced on 1 January itself.
+    What `namechange` and `index_daily` are asked at, and it has to be the *end* of the year
+    rather than `_year_as_of`'s start. Both take a `{start_date, end_date}` window that the
+    provider derives from `as_of`'s Asia/Shanghai year, and `namechange` is clocked at the
+    **announcement**: a row announced on 14 June is available from that day and no earlier, so a
+    request made at 1 January fetches exactly the right window and `_decode_panel_rows` then
+    drops every row in it except any announced on 1 January itself.
+
+    `income`, `balancesheet` and `cashflow` used to be asked here too, and were moved to
+    `_announcement_year_bound` when visibility began to wait for the revision clock: their rows
+    can carry a revision instant in a later year, which a year-end bound would put after `as_of`
+    and drop from the partition for good.
     `trade_cal` is the contrast that makes this a per-dataset choice rather than a global one:
     `_calendar_publication_timeline` dates a whole year's sessions as available from the start of
     that year, so `_year_as_of` is right there and would be wrong here. Measured 2026-08-11:
@@ -2564,13 +2569,43 @@ def _year_end_as_of(year: int, now: datetime) -> datetime:
     be caught only by `_audit_written_partitions`' misfiled-year check, which would report a
     fetch fault for what is a plain fact about the calendar.
     """
+    _refuse_a_year_that_has_not_begun(year, now)
+    return min(datetime(year, 12, 31, 23, 59, 59, tzinfo=PANEL_DATE_ZONE), now)
+
+
+def _announcement_year_bound(year: int, now: datetime) -> datetime:
+    """The instant an announcement-year statement window is fetched at: this build's own clock.
+
+    `income`, `balancesheet` and `cashflow` name their window year as a request subject
+    (`_financial_statement_params`), so `as_of` does only its own job -- bounding what was
+    knowable -- which is the split `fina_indicator` already has. It cannot be the end of the
+    year any more: a statement row is visible only once the version stored for it was
+    published, which for a row whose `f_ann_date` falls in a later year is after that year
+    ended, so a year-end bound drops it from the partition at every rebuild and the filing is
+    missing at every `as_of`, including every one after its revision. Bounded at the clock, the
+    row is stored, and the read withholds it inside `[ann_date, f_ann_date)` and answers it
+    after.
+
+    Refuses a year that has not begun, for `_year_end_as_of`'s reason.
+    """
+    _refuse_a_year_that_has_not_begun(year, now)
+    return now
+
+
+def _refuse_a_year_that_has_not_begun(year: int, now: datetime) -> None:
+    """Refuse a `--year` whose first instant is after this build's clock.
+
+    `_build_sessions`' reason at the other end of the same question: without it, `--year 2030`
+    would fetch this year's window, store this year's partition, and be caught only by
+    `_audit_written_partitions`' misfiled-year check, which would report a fetch fault for what
+    is a plain fact about the calendar.
+    """
     opens_on = datetime(year, 1, 1, tzinfo=PANEL_DATE_ZONE)
     if now < opens_on:
         raise _panel_fail(
             PanelExit.bad_request,
             f"{year} had not begun at {now.isoformat()}; there is nothing to build yet",
         )
-    return min(datetime(year, 12, 31, 23, 59, 59, tzinfo=PANEL_DATE_ZONE), now)
 
 
 def _month_end_as_of(year: int, month: int, now: datetime) -> datetime | None:
@@ -2955,9 +2990,11 @@ def _subject_batches(
     filter is on the whole loop rather than on a named dataset, and what stands behind it is the
     caller's own refusal when *nothing at all* came back (see `_build_statement_panel`).
 
-    `extra` carries the second subject `fina_indicator` needs, the report-period year. It is a
-    request subject and never a stored one -- `subject_field` reads `ts_code` off the row -- which
-    is the arrangement `index_member_all` already has for `is_new`.
+    `extra` carries the second subject the statement endpoints are asked with -- the
+    report-period year `fina_indicator` needs, and the announcement year the other three are
+    windowed by. It is a request subject and never a stored one -- `subject_field` reads
+    `ts_code` off the row -- which is the arrangement `index_member_all` already has for
+    `is_new`.
     """
     collected: list[ColumnarPanelBatch] = []
     _echo_budget(label, len(subjects), "requests", reason)
@@ -3592,15 +3629,18 @@ def _build_panel(
                     provider,
                     dataset=dataset,
                     subjects=universe,
-                    # The **end** of the announcement year: these three filter `ann_date`, so a
-                    # window taken at 1 January fetches the right year and the point-in-time
-                    # filter then drops every row in it. See `_year_end_as_of`.
-                    as_of=_year_end_as_of(year, now),
+                    # The build's own clock, with the announcement year as a request subject.
+                    # These three filter `ann_date`, so the window is that year; and a row filed
+                    # in it can be stored as a version re-announced in a later year, which a
+                    # bound at the year's end would drop from this partition at every rebuild.
+                    # See `_financial_statement_params`.
+                    as_of=_announcement_year_bound(year, now),
                     label=f"{dataset} year={year}",
                     reason=(
                         f"one per security; ts_code is mandatory on {dataset} and there is no "
                         "cross-section fetch"
                     ),
+                    extra=(str(year),),
                 ),
             )
         )
