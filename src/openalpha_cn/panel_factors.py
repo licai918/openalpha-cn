@@ -195,8 +195,9 @@ eight-period window can need four announcement years named in `requirement.years
 ## Two axes, because a filing does not live on the session one
 
 `V2-P3-009`..`011` are all built on filings, and `providers/tushare.py::_announcement_timeline`
-dates every statement row at `ann_date` on all four clocks -- so a filing's `event_time` is the
-day it was *disclosed*, and disclosure days are neither one-per-period nor one-period-per-day.
+dates every statement row's `event_time` and `available_time` at `ann_date` (its
+`revision_time` is `max(ann_date, f_ann_date)`) -- so a filing's `event_time` is the day it was
+*disclosed*, and disclosure days are neither one-per-period nor one-period-per-day.
 An A-share issuer routinely discloses its annual report and its Q1 report together, which under
 a session index is two rows of one `(subject, event_time)` key and therefore a refusal of the
 whole build; and one period announced twice fills two slots of a window that was meant to count
@@ -4479,7 +4480,7 @@ def compute_factor(
     date_timezone: str = DEFAULT_DATE_TIMEZONE,
     evaluators: Mapping[str, FactorEvaluator] | None = None,
 ) -> FactorPanel:
-    """Evaluate `definition` for `subjects` at `as_of`, reading only what was knowable then.
+    """Evaluate `definition` for `subjects` at `as_of`, reading only rows visible at `as_of`.
 
     ## The arguments with no defaults, and why each one refuses to have one
 
@@ -5015,12 +5016,12 @@ def _read_dataset(
     A row whose `event_time` resolves after `as_of` raises here too, on both axes. The visible
     read decides what a caller may see from `available_time` and `revision_time`, and this engine
     orders and indexes on `event_time`; when a partition's clocks disagree the two questions have
-    different
-    answers, and the one that reaches the window is `event_time`'s. Measured with the later
-    announcement of a period given an `available_time` before the earlier one's: the engine took
-    the restatement at an `as_of` two months before it was announced. `_announcement_timeline`
-    makes all four clocks equal for every statement row, so nothing today can construct it --
-    which is exactly why it is checked rather than assumed.
+    different answers, and the one that reaches the window is `event_time`'s. Measured with the
+    later announcement of a period given an `available_time` before the earlier one's: the engine
+    took the restatement at an `as_of` two months before it was announced.
+    `_announcement_timeline` sets `event_time` and `available_time` to the same `ann_date`
+    instant for every statement row, so nothing today can construct it -- which is exactly why
+    it is checked rather than assumed.
 
     The selection is a second statement of `filing_for`'s rule rather than a call into it:
     `statement_histories_from_panel_rows` requires the dataset's **whole** projected column set,

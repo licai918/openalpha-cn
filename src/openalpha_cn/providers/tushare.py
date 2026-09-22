@@ -2747,13 +2747,15 @@ def _announcement_timeline(row: dict[str, Any], date_field: str, ingested_at: da
 
     ``revision_time`` is the later of the two dates, and visibility waits for it
     (``domain/time.py::is_visible_at``). A live probe on 2026-09-22 compared 19 rows whose
-    ``f_ann_date`` post-dates their ``ann_date`` with the version public on the ``ann_date`` and
-    found 18 carrying different numbers -- ``000001.SZ``'s 2005 interim, announced 2005-08-19,
+    ``f_ann_date`` post-dates their ``ann_date`` with an earlier published version (an earlier row
+    of the same key, or the pre-adjustment statement, ``report_type=5``) and found 18 carrying
+    different numbers -- ``000001.SZ``'s 2005 interim, announced 2005-08-19,
     is served as the version re-announced 2006-07-05 -- so before its ``f_ann_date`` such a row
     is a version nobody had read. ``_decode_panel_rows`` and ``_decode_rows`` therefore drop it at
     any ``as_of`` inside ``[ann_date, f_ann_date)``, the panel's read withholds it there, and
-    ``StatementHistory.filings_on`` keys the version on the same date. The endpoint serves no
-    earlier version, so inside that window the filing is missing rather than early. A same-day
+    ``StatementHistory.filings_on`` keys the version on the same date. The endpoint usually
+    serves no earlier version, and then inside that window the filing is missing rather than
+    early. A same-day
     correction, told apart only by ``update_flag``, still gets its original's clocks: the
     section above is why.
 

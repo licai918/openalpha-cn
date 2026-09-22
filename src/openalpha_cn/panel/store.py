@@ -2149,9 +2149,10 @@ def _build_visible_census_sql(
 
     `max(event_time)` over the visible rows is what `evaluate_visible_slice` needs to re-decide
     `stale`, and taking it in this statement costs one aggregate rather than one more scan. It
-    is `FILTER (WHERE available_time <= ?)` rather than a second `WHERE`, so the withheld count
-    and the reach are read from the same pass over the same selection and cannot disagree about
-    which rows the caller asked for -- the property `_equality_clauses` exists for.
+    is `FILTER (WHERE available_time <= ? AND revision_time <= ?)` rather than a second
+    `WHERE`, so the withheld count and the reach are read from the same pass over the same
+    selection and cannot disagree about which rows the caller asked for -- the property
+    `_equality_clauses` exists for.
 
     There is deliberately **no** visible `count(*)` here. `visible_row_count` is `len(rows)` off
     the projection statement, and asking SQL for the same number twice would be a value that can

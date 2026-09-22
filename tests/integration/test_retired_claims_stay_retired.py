@@ -2736,7 +2736,7 @@ TRUE_SENTENCES_THAT_SHARE_THE_WORDS: Final[tuple[str, ...]] = (
     "A record revised after as_of is not visible until its revision; one revised before carries "
     "revised_after_initial_availability.",
     "冻结载荷里的修订时钟照样保留，不会被掩盖。",
-    "证据快照保留四个时钟，因此能看出这条证据在决策时刻是否可得、事后是否被修订过。",
+    "事后修订过的记录在修订生效之前不可见。",
 )
 """True or unrelated sentences that share a retired pattern's words. The review of `D13` measured
 the first six being caught (its M1): client holds cli, 移动平均 holds 移动, and a rejection and a
@@ -2822,8 +2822,8 @@ place, because each was true only of the availability clock: the downstream `evi
 the clock that constrains visibility, the versions a PIT query returns, and the boundary the
 system restores. Eleven were added last: each rewritten document's new wording, the gaps they
 state, and probes of the new family's branches -- 修订 and 照样 in one clause about a clock that
-is kept, 事后 before a revision that is only observed, and a revision time that takes part rather
-than stays out."""
+is kept, 事后 before a revision that keeps its record out, and a revision time that takes part
+rather than stays out."""
 
 
 DENIAL_IN_AN_EARLIER_SEGMENT: Final[tuple[tuple[str, str], ...]] = (

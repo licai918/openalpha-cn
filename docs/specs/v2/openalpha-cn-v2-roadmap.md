@@ -589,9 +589,11 @@ PRD 中 83 条 IN / IN-降级 story，逐条落到 issue。
 `revision_time` 都无法区分二者。下游 `ProviderBatch` 对 `(subject, kind, date)` 无唯一性约束，
 两行会共存；PIT 消费者取"当前值"时只能依赖 Tushare 的响应顺序，而那不是契约。
 `evidence/builder.py` 的 `revised_after_initial_availability` 质量标记也永不触发。
-（这一句只对同日更正对成立：`f_ann_date` 晚于 `ann_date` 的行，修订时钟晚于可得时钟，面板上按时钟数出的
-`revised_row_count` 实测为 55 / 59 / 23 / 0，见 `domain/financial_statements.py` 模块说明；2026-09-22 起
-这类行在 `f_ann_date` 之前不可见。）
+（补注，2026-09-22：上面这句对所有财报行都成立，与更正形态无关——`evidence/builder.py` 只规范化
+七类事件，财报行在打标记之前就被拒收。「逐字段相等」才只对共用同一 `f_ann_date` 的更正对成立。面板上按
+时钟数修订的是 `PartitionCoverage.revised_row_count`，实测 55 / 59 / 23 / 0，正是 `f_ann_date` 晚于
+`ann_date` 的行，见 `domain/financial_statements.py` 模块说明；自 2026-09-22 起，这类行在 `f_ann_date`
+之前不可见。）
 
 **已做**：`_announcement_timeline` 的 docstring 记录了实测数字；
 `test_announcement_clock_cannot_yet_distinguish_restatement_via_update_flag` 把这个缺口钉成测试，

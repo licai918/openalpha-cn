@@ -2943,8 +2943,9 @@ def load_daily_valuations(
     loaders now take one door and this one carries no asymmetry of read at all.
 
     Where `read_if_ready` answered, this answers the identical rows: a partition with no issue
-    has `max_available_time <= as_of`, so the predicate removes nothing. What changes is only the
-    partitions that door refused whole.
+    has `max_available_time <= as_of`, and `daily_basic` stamps each row's `revision_time` at its
+    `available_time`, so the predicate removes nothing. What changes is only the partitions that
+    door refused whole.
     """
     requirement = daily_basic_requirement(
         calendar,

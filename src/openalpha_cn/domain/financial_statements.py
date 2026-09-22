@@ -179,9 +179,10 @@ than assumed:
 - **A later `f_ann_date` is when the stored version became readable.** `revision_time` is
   `max(ann_date, f_ann_date)`, and visibility waits for it (`domain/time.py::is_visible_at`): a
   live probe on 2026-09-22 found 18 of 19 comparable late-`f_ann_date` rows carrying numbers
-  other than the ones public on their `ann_date`. So the panel's read withholds such a row inside
+  other than an earlier published version's (an earlier row of the same key, or the
+  pre-adjustment statement, `report_type=5`). So the panel's read withholds such a row inside
   `[ann_date, f_ann_date)` and `filings_on` keys the version on the same date. The endpoint
-  serves no earlier version, so there the filing is missing rather than early -- see
+  usually serves no earlier version, and then the filing is missing there rather than early -- see
   `KNOWN_FINANCIAL_STATEMENT_LIMITATIONS.
   a_version_is_readable_from_the_later_of_its_two_announcement_dates`.
 
@@ -471,11 +472,13 @@ KNOWN_FINANCIAL_STATEMENT_LIMITATIONS: Final[tuple[FinancialStatementLimitation,
             "than dating one later. Anything else would be inventing the instant. The "
             "consequence is that a point-in-time read cannot ask 'what did this look like "
             "before the correction' -- see V2-P2-002, which owns that question -- and that "
-            "PartitionCoverage.revised_row_count counts NONE of these corrections. That count "
-            "is not zero corpus-wide (it reads 55 / 59 / 23 rows over full histories, and 0 for "
-            "fina_indicator only because it has no f_ann_date at all); what is structural is "
-            "that it can only ever see a row whose f_ann_date genuinely post-dates its "
-            "ann_date, which no same-day correction does. That is why "
+            "PartitionCoverage.revised_row_count cannot tell a correction from its original. "
+            "That count is not zero corpus-wide (it reads 55 / 59 / 23 rows over full histories, "
+            "and 0 for fina_indicator only because it has no f_ann_date at all); what is "
+            "structural is that it can only ever see a row whose f_ann_date genuinely post-dates "
+            "its ann_date, and a same-day pair has either no such row or, sharing a later "
+            "f_ann_date, two that look alike -- four such pairs in a live probe on 2026-09-22, "
+            "e.g. 600036.SH's 2012 annual balance sheet. That is why "
             "PartitionCoverage.revisions (the update_flag label census) exists beside it."
         ),
     ),
@@ -610,15 +613,17 @@ KNOWN_FINANCIAL_STATEMENT_LIMITATIONS: Final[tuple[FinancialStatementLimitation,
             "the 53-security sample have f_ann_date before ann_date -- and filtering on it alone "
             "would show that filing 365 days early. Where it is LATER (55 / 59 / 23 rows of "
             "income / balancesheet / cashflow in that sample), the stored row is the version "
-            "published then: a live probe on 2026-09-22 compared 19 such rows with the version "
-            "public on their ann_date and found 18 carrying different numbers, e.g. 000001.SZ's "
+            "published then: a live probe on 2026-09-22 compared 19 such rows with an earlier "
+            "published version (an earlier row of the same key, or the pre-adjustment statement, "
+            "report_type=5) and found 18 carrying different numbers, e.g. 000001.SZ's "
             "2005 interim, announced 2005-08-19 with net profit 207,486,792 and stored as the "
             "2006-07-05 version, 157,834,800. Keying on ann_date alone would answer that later "
             "number for the 320 days before it existed. THE COST, stated plainly: the endpoint "
-            "serves the version current now and no earlier one, so inside [ann_date, f_ann_date) "
-            "such a filing has nothing readable -- it is missing rather than early. Only a key "
-            "that also carries a row with the earlier f_ann_date (5 of income's 633 and 5 of "
-            "balancesheet's 1,244 duplicate keys) answers from that row there. And a correction "
+            "usually serves only the version current now, so inside [ann_date, f_ann_date) such "
+            "a filing has nothing readable -- it is missing rather than early. Only a key that "
+            "also carries a row with an earlier f_ann_date answers from that row there -- at "
+            "most 5 of income's 633 and 5 of balancesheet's 1,244 duplicate keys in the "
+            "2026-08-09 sample. And a correction "
             "that shares its original's ann_date and f_ann_date -- the update_flag pairs -- has "
             "no date to be ordered by at all: see a_correction_carries_no_instant_of_its_own."
         ),

@@ -225,8 +225,8 @@ payload whose content no longer hashes to the seal it carries. Any byte store ca
 caller asked for" and `V2-P4-026` retracted it.** The forcing was
 `load_daily_valuations` taking `read_if_ready`, which refuses a `daily_basic` year at every
 `as_of` inside it; `panel_ingest._read_visible_price_session` replaced that with a session-level
-`WHERE available_time <= as_of` read, so the neutralised tier can now be built on the same
-schedule the raw and processed ones are.
+read filtered on `available_time` and `revision_time` at or before `as_of`, so the neutralised
+tier can now be built on the same schedule the raw and processed ones are.
 
 What is unchanged is the stamping rule:
 `panel_neutralization.neutralized_observation_batch` puts the build's own `as_of` on all four
@@ -464,8 +464,9 @@ KNOWN_EXPERIMENT_LIMITATIONS: Final[tuple[ExperimentLimitation, ...]] = (
             "be a point-in-time series at all, because load_daily_valuations took read_if_ready "
             "and a build's as_of was therefore forced to be at or after the year's last session. "
             "V2-P4-026 removed the forcing: panel_ingest._read_visible_price_session reads one "
-            "daily_basic session under a WHERE available_time <= as_of predicate, so the "
-            "neutralised tier CAN be built on the same schedule the other two are, and "
+            "daily_basic session under a WHERE available_time <= as_of AND revision_time <= "
+            "as_of predicate, so the neutralised tier CAN be built on the same schedule the "
+            "other two are, and "
             "PanelStore.read_visible_at hands its rows back at the as_of they were stamped at. "
             "What survives "
             "is the stamping rule, which is unchanged: "

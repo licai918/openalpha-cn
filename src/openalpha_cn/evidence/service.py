@@ -37,7 +37,7 @@ class EvidenceStore(Protocol):
         subject: str | None = None,
         kind: str | None = None,
     ) -> tuple[EvidenceSnapshot, ...]:
-        """Return evidence available by ``as_of``, ordered deterministically."""
+        """Return evidence visible at ``as_of`` (``is_visible_at``), ordered deterministically."""
 
 
 class EvidenceBuildRequest(BaseModel):
