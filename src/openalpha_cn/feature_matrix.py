@@ -163,9 +163,14 @@ per prediction instant... it would stop being right on a walk-forward with hundr
 
 `build_feature_matrix` is that walk-forward's producer, so this is where that sentence comes due.
 It is filed against `PanelStore` rather than worked around here, for the reason given there: the
-remedy is one assessment plus N reads, which is a change to `read_if_ready`'s contract shared with
-fourteen callers, and doing it locally would mean stepping around the fail-closed door every other
-loader takes. Nothing here caches, and a matrix over hundreds of instants will be slow before it
+remedy is one assessment plus N reads, which is a change to the whole-partition door's contract.
+That door is `read_if_ready`, which has no call site of its own in `src/` -- every caller spells
+it `assessed(...).read(...)` -- and it is taken by six of `panel_ingest`'s fourteen loaders; the
+other eight take the row-filtered door instead. Doing it locally would mean stepping around a
+fail-closed door rather than changing it. (This paragraph said the contract was "shared with
+fourteen callers" and that the fail-closed door was the one "every other loader takes": the first
+number counted loaders rather than callers, and the second half is false for the eight above.)
+Nothing here caches, and a matrix over hundreds of instants will be slow before it
 is wrong -- which is the direction to be slow in.
 
 ## What is deliberately left to a named issue

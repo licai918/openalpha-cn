@@ -715,9 +715,10 @@ def test_a_factor_value_stamped_after_the_requested_as_of_never_reaches_the_cros
 
     One partition holds a cross section at 09:00Z and another at 13:00Z on 2026-01-16, and
     `EARLY_AS_OF` sits between them. The 13:00Z values are **in the file** at both reads; the only
-    thing that keeps them out of the first answer is the `available_time` filter
-    `load_factor_observations` applies through `read_visible_at`, and the instant resolution this
-    face does on top of it.
+    thing that keeps them out of the first answer is the visibility filter
+    `load_factor_observations` applies through `read_visible_at` -- both clocks, which on a factor
+    observation are stamped at the same instant -- and the instant resolution this face does on
+    top of it.
 
     Three assertions, and each is needed. That the early answer carries the early instant would
     pass on an adapter that ignored the later build entirely; that the late answer carries the

@@ -153,8 +153,10 @@ door is taken by six of `panel_ingest`'s fourteen loaders today -- `load_trading
 (`V2-P4-027`/`028`). `tests/unit/panel/test_query_callers.py` holds `GATED_READERS`, which
 records the door each `panel_ingest` reader opens -- the six loaders above and the two shared
 readers the other eight reach rows through -- and
-`tests/unit/test_source_counts_match_the_tree.py` holds every number in this paragraph against
-the tree. Everything this section says about this module is unchanged.) See
+`tests/unit/test_source_counts_match_the_tree.py` holds each of these counts against the tree:
+every number here is either a claim registered in that file or a turn of phrase declared there,
+and its own docstring states what that still leaves outside. Everything this section says about
+this module is unchanged.) See
 that method's docstring for the full argument, `panel/catalog.py::ROW_FILTERABLE_ISSUE_CODES`
 for why exactly one code is compensable, and `tests/unit/panel/test_visible_read_callers.py`
 for the allowlist that keeps the path from spreading silently.

@@ -50,7 +50,7 @@ ALLOWED_FACTOR_VIEW_DEPENDENCIES: Final[set[str]] = {
 
 Each is there for its own reason and not by family resemblance: `backtest` for the five factor
 leaves and the execution policy, `panel_factors` and `panel_neutralization` for the three stored
-tiers, `panel_ingest` for the six loaders a label needs, `panel` for `PanelStore`, `panel_view`
+tiers, `panel_ingest` for the seven loaders a label needs, `panel` for `PanelStore`, `panel_view`
 for the one definition of where a panel lives, and `domain` for every contract underneath.
 
 **`openalpha_cn.storage` is the absence that matters**, and it is not an accident of the current

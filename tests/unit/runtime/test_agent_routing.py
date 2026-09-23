@@ -4,8 +4,9 @@ The defect this file is written against, measured on `be262ea` before anything m
 `AgentRouter.route` was `agent.evidence_families & families`, so an agent whose whole
 dependency is a *feature* column -- and which therefore declares no evidence family --
 intersected the empty set with the run's families and was dropped. Not refused, not recorded
-in the manifest, not visible in `routing_path`: dropped. `tests/unit/runtime/
-test_agent_routing.py::test_the_defect_this_row_closes_is_that_an_empty_declaration_was_silent`
+in the manifest, not visible in `routing_path`: dropped.
+`tests/unit/runtime/test_agent_routing.py::
+test_the_defect_this_row_closes_is_that_an_empty_declaration_was_silent`
 below drives the old rule by hand so the shape of what was fixed stays executable.
 
 The two quantifiers are not the same, and that is the one design decision here worth reading.

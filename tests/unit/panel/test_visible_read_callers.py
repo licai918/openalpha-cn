@@ -5,8 +5,9 @@ than by a sentence in a docstring.
 
 ## 1. The filtered read is an allowlist, exactly as `query()` is
 
-`PanelStore.read_visible_at` hands back a partition **minus** every row whose `available_time`
-post-dates `as_of`. That is a deliberately short answer, and P2 declined to make `query()` do
+`PanelStore.read_visible_at` hands back a partition **minus** every row that was not visible at
+`as_of` -- one whose `available_time` post-dates it, and equally one whose stored `revision_time`
+does. That is a deliberately short answer, and P2 declined to make `query()` do
 it for a reason that has not stopped being true: "a filtered read hands back a short partition,
 and every consumer above this plane reads shortness as missing data rather than as withheld
 data" -- `build_index_membership` refuses a gap in the month sequence,
@@ -264,8 +265,8 @@ withheld and none visible raises rather than answering `{}`, and a session with 
 raises too, because that mixture is the all-or-nothing property failing and a partial session is
 what would be indistinguishable from a thin one. Both refusals are named separately from the
 readiness codes, and a session whose 16:30 has not arrived at `as_of` is refused before any
-partition is touched. `tests/integration/panel/test_daily_panel_ingest.py` drives all four
-doors.
+partition is touched. `tests/integration/panel/test_daily_panel_ingest.py` drives every one of
+those refusals.
 
 The second is `_read_visible_event_dated_rows`, and it passes **no** `filters` at all -- there is
 no filter that would make an event-driven dataset all-or-nothing, because a partial partition is

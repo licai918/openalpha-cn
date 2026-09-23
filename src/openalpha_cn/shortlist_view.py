@@ -1288,8 +1288,9 @@ def load_shortlist_cross_section(
     **Every read is an existing loader, and there are exactly two `as_of`s in this function.**
     Nothing here opens a partition. The *factor tiers* are read at the caller's `as_of`, because
     that is the question -- "what was knowable when I asked" -- and `read_visible_at` filters an
-    observation out by its `available_time`. Everything the screen then **prices** with is read at
-    the resolved cross section's own instant, which is at or before it:
+    observation out by its `available_time` and its `revision_time` alike. Everything the
+    screen then **prices** with is read at the resolved cross section's own instant, which is at
+    or before it:
 
         factor tiers ....... request.as_of      (what was knowable when you asked)
         calendar, registry,

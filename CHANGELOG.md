@@ -2524,7 +2524,8 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   once and hands back the per-year reads it licenses; the seven `panel_ingest` loaders that walk
   years take it. After: 36 partitions cost 36 lookups and 0.727 s, and 72 cost 72 and 1.256 s —
   linear, not a smaller constant. `read_if_ready` and `read_visible_at` are unchanged for their
-  fourteen callers, being one line each on top of it. **Two docstrings that called this
+  ten callers (this entry said fourteen, which is `panel_ingest`'s loader count and not the two
+  methods' callers), being one line each on top of it. **Two docstrings that called this
   "milliseconds" are corrected with numbers**: `load_stock_universe`'s, and `load_daily_bars`',
   where a caller walking a year of 244 sessions spends **5.367 s** re-assessing (22 ms a call)
   against 3.025 s of the `query` calls it wanted — that one is linear rather than quadratic and

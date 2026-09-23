@@ -4338,7 +4338,7 @@ def _refuse_a_slice_the_census_disagrees_with(
     test_two_census_errors_below_the_census_day_are_refused_rather_than_cancelling_out`.
 
     `availability_rule` is the caller's own sentence about how its dataset's `available_time`
-    follows from its event date, and it is an argument rather than a constant because the four
+    follows from its event date, and it is an argument rather than a constant because the five
     callers' rules genuinely differ -- a floor at a taxonomy's effective date, a midnight, and a
     16:30 close. The message has to name the rule it is holding the partition to, or a reader
     handed "those two numbers should be equal" has no way to check whether they should.

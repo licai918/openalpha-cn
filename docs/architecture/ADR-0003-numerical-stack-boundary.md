@@ -383,8 +383,10 @@ even if one were stored. A single-factor time-series regression is *univariate* 
 `O(n)`, no matrix — so had the regressor existed this section's conclusion would have carried
 over unchanged. The blocker is the data and the window's shape, not the numerical stack. The
 measurement lives in `panel_factors.py`'s module docstring and is held by
-`tests/unit/test_factor_volatility_liquidity.py::test_the_reason_no_residual_ships_is_a_property_of_the_panel_and_of_the_window`,
-which turns red the day an index price series arrives. The open question that remains for this
+`tests/unit/test_factor_volatility_liquidity.py::
+test_exactly_one_dataset_carries_a_level_and_exactly_one_channel_reaches_it`, which was written
+as `test_the_reason_no_residual_ships_is_a_property_of_the_panel_and_of_the_window`, turned red
+the day an index price series arrived (`V2-P3-016`) and now pins the same two facts inverted. The open question that remains for this
 ADR is `V2-P3-004`'s: a risk model with *k* correlated continuous regressors has no closed form.
 
 ## Update, 2026-08-12 (`V2-P3-005`): the rank correlation did not need it either

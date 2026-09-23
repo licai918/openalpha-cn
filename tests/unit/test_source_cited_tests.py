@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import ast
 import re
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Final
 
@@ -140,22 +141,46 @@ def _cited_names() -> dict[Path, set[str]]:
     declared: dict[Path, set[str]] = {}
     for path in sorted(TEST_ROOT.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        declared[path] = {
+        names = {
             node.name
             for node in ast.walk(tree)
             if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
         }
+        # A table is as citable as a test, and the roadmap cites one by name
+        # (`test_panel_ingest_import_isolation.py::RESEARCH_PLANE_SEAM_IMPORTS`). Module-level
+        # assignments only: a name bound inside a function is not something a citation can mean.
+        for node in tree.body:
+            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                names.add(node.target.id)
+            elif isinstance(node, ast.Assign):
+                names.update(target.id for target in node.targets if isinstance(target, ast.Name))
+        declared[path] = names
     return declared
 
 
-def _citations() -> list[tuple[Path, str, str | None]]:
-    """Every `(source file, cited path, cited name)` in the package, line breaks rejoined."""
+def _citations_in(paths: Iterable[Path]) -> list[tuple[Path, str, str | None]]:
+    """Every `(file, cited path, cited name)` in `paths`, line breaks rejoined."""
     found: list[tuple[Path, str, str | None]] = []
-    for path in sorted(SOURCE_ROOT.rglob("*.py")):
+    for path in paths:
         text = CONTINUATION.sub("::", path.read_text(encoding="utf-8"))
         for match in CITATION.finditer(text):
             found.append((path, match.group(0).split("::")[0], match.group(1)))
     return found
+
+
+def _citations() -> list[tuple[Path, str, str | None]]:
+    """The package's own citations."""
+    return _citations_in(sorted(SOURCE_ROOT.rglob("*.py")))
+
+
+def _unresolved(citations: list[tuple[Path, str, str | None]]) -> list[str]:
+    declared = _cited_names()
+    return [
+        f"{source.relative_to(REPO_ROOT)} cites {cited}" + (f"::{name}" if name is not None else "")
+        for source, cited, name in citations
+        if REPO_ROOT / cited not in declared
+        or (name is not None and name not in declared[REPO_ROOT / cited])
+    ]
 
 
 def test_every_test_a_source_docstring_cites_exists_under_that_name() -> None:
@@ -166,17 +191,30 @@ def test_every_test_a_source_docstring_cites_exists_under_that_name() -> None:
     repairs are different: a moved test needs its citation's path corrected, and a renamed one
     needs its name corrected.
     """
-    declared = _cited_names()
-    unresolved = [
-        f"{source.relative_to(REPO_ROOT)} cites {cited}" + (f"::{name}" if name is not None else "")
-        for source, cited, name in _citations()
-        if REPO_ROOT / cited not in declared
-        or (name is not None and name not in declared[REPO_ROOT / cited])
-    ]
+    unresolved = _unresolved(_citations())
 
     assert unresolved == [], (
         "a source docstring cites a test that does not exist under that name; correct the "
         "citation, and if it wraps, break the line straight after the `::`"
+    )
+
+
+def test_every_test_a_document_cites_exists_under_that_name() -> None:
+    """The same audit over `docs/`, where a citation has exactly the same job and no reader.
+
+    `src/` was the whole scope until the closure review measured what that left out (its P-9):
+    three citations in `docs/` -- two ADRs and the roadmap -- name tests that no longer exist
+    under those names, and nothing was reading them. `tests/` stays outside on purpose: several
+    modules build a deliberately unresolvable citation as a sentinel for this very audit
+    (`test_a_citation_wrapped_inside_its_identifier_does_not_resolve` is one), so a resolution
+    check over them would be a check against its own fixtures.
+    """
+    documents = sorted(path for path in (REPO_ROOT / "docs").rglob("*.md"))
+    unresolved = _unresolved(_citations_in(documents))
+
+    assert unresolved == [], (
+        "a document cites a test that does not exist under that name; correct the citation, or "
+        "say in the document that the test it names was renamed or removed"
     )
 
 
@@ -268,8 +306,21 @@ def test_the_two_citation_forms_cannot_both_match_one_span() -> None:
     assert CITATION.findall(CONTINUATION.sub("::", wrapped)) == ["test_a_name"]
 
 
+WRAPPED_ROOTS: Final[tuple[Path, ...]] = (
+    REPO_ROOT / "src",
+    REPO_ROOT / "tests",
+    REPO_ROOT / "docs",
+)
+"""Where a wrapped test path is looked for: `src/`, and the two trees the first rule left out.
+
+The two paths the round before this one had to repair were in `docs/api/data-interface.zh-CN.md`
+and `tests/unit/panel/test_query_callers.py`, and the rule written to stop the next one looked
+only at `src/openalpha_cn/` -- which is how five more of them stood in `tests/` while the check
+was green (measured by the closure review, its P-9).
+"""
+
 BROKEN_PATH: Final[re.Pattern[str]] = re.compile(
-    r"tests/[\w./-]*(?<!\.py)\n\s*(?:py\b|[\w./-]*\.py)"
+    r"tests(?:/[\w.-]+)*[\w./-]*(?<!\.py)(?:\n\s*[\w./-]*)*\n\s*(?:py\b|[\w./-]*\.py)"
 )
 """A test path broken across a line **before** it reaches `.py`.
 
@@ -284,11 +335,18 @@ straight after the `::`.
 """
 
 
-def test_no_source_docstring_breaks_a_test_path_before_it_reaches_py() -> None:
-    """A citation nothing can resolve is worse than one that is wrong: nothing reads it at all."""
+def test_no_docstring_or_document_breaks_a_test_path_before_it_reaches_py() -> None:
+    """A citation nothing can resolve is worse than one that is wrong: nothing reads it at all.
+
+    Three widenings the closure review measured as escapes (its C3, C4, C6): the break may sit
+    anywhere inside the path rather than only after `tests/`, it may run over more than one
+    line, and it counts in `tests/` and `docs/` as well as in `src/`.
+    """
     broken = [
         f"{path.relative_to(REPO_ROOT)}: {' '.join(match.group(0).split())}"
-        for path in sorted(SOURCE_ROOT.rglob("*.py"))
+        for root in WRAPPED_ROOTS
+        for path in sorted(root.rglob("*"))
+        if path.is_file() and path.suffix in {".py", ".md"}
         for match in BROKEN_PATH.finditer(path.read_text(encoding="utf-8"))
     ]
 

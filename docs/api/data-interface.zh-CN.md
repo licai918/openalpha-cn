@@ -73,7 +73,7 @@ available_time <= as_of AND revision_time <= as_of
 
 记录首次可知的时刻，和手里这一版内容发布（修订）的时刻，都不能晚于 `as_of`。`event_time` 与
 `ingested_time` 随证据保存，不参与可见性判断。规则本身是 `domain/time.py` 的 `is_visible_at`；
-下面是按它执行的各处（证据库与面板在 SQL 里照写同一个条件），之后是唯一不执行它的那道门：
+下面是按它执行的各处（证据库与面板在 SQL 里照写同一个条件），之后是不执行它的那两处：
 
 - 研究请求与回放语料：带着不可见证据的请求或案例整条拒绝；
 - Provider 批次：行式 `ProviderBatch` 与面板的 `ColumnarPanelBatch` 都整批拒绝。文件与 Tushare

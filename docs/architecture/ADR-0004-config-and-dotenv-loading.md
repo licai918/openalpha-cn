@@ -30,9 +30,12 @@ settings were read with 9 scattered `os.getenv`/`os.environ` calls spread across
   what the user had just written into `.env`. P0.A's end-to-end acceptance review
   rated this Important. Task 3 fixed the README's wording (documenting the gap
   honestly) and left a canary test,
-  `tests/unit/test_repository_assets.py::test_no_dotenv_dependency_or_usage_exists_yet`,
-  that pinned "no `.env` parser exists yet" and was explicitly written to break
-  the moment this task implemented one.
+  `test_no_dotenv_dependency_or_usage_exists_yet`, that pinned "no `.env` parser
+  exists yet" and was explicitly written to break the moment this task
+  implemented one. It did, and
+  `tests/unit/test_repository_assets.py::
+  test_dotenv_loading_is_a_single_deliberate_module_not_scattered_parsing`
+  supersedes it, pinning the shape of the implementation instead of its absence.
 
 ## Decision
 

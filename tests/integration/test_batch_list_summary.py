@@ -377,8 +377,9 @@ def test_a_batch_still_stored_in_the_pre_split_shape_is_counted_and_not_reported
 
     `reassemble_task` handles this shape and says why: a database whose
     `split_batch_task_items` migration has not run, because an earlier-ordered migration
-    deferred on a table it happens not to have. `tests/integration/storage/
-    test_batch_item_split_migration.py` drives the same shape through `get()`/`list()`; this is
+    deferred on a table it happens not to have.
+    `tests/integration/storage/test_batch_item_split_migration.py` drives the same shape through
+    `get()`/`list()`; this is
     the listing's half of it, and without it a store in that state reports **every batch as
     empty** -- a wrong answer rather than a refused one, and the worst kind for a listing whose
     only content is counts.

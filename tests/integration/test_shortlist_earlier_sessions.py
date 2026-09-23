@@ -26,7 +26,7 @@ same refusal; only what it tells the reader changed.)
 hours later, so that each run's `as_of` lands on a *different* session from the cross section it
 resolves; `EARLIER_AS_OF` says why that matters and what it separates.)
 
-`load_daily_bars` and `load_price_limits` read through `read_if_ready`, which decides
+`load_daily_bars` and `load_price_limits` then read through `read_if_ready`, which decides
 `not_yet_knowable` on a **partition's** newest `available_time` -- and a partition is a calendar
 year. So one session added to the panel makes every earlier cross section in that year
 unscreenable: two days' shortlists cannot be compared, yesterday's cannot be re-run, and nothing

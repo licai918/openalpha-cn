@@ -1,8 +1,9 @@
 """Unit-test `FileProvider`'s injected `parquet_reader` dependency directly.
 
 `tests/contract/providers/test_file_provider.py` exercises the real, DuckDB-backed
-`storage.parquet.read_parquet_records` end to end; `tests/unit/providers/
-test_file_provider_import_isolation.py` proves `duckdb` is unreachable from a fresh
+`storage.parquet.read_parquet_records` end to end;
+`tests/unit/providers/test_file_provider_import_isolation.py` proves `duckdb` is unreachable
+from a fresh
 process. This module fills the gap between them: fast, in-process tests of the DI wiring
 itself (a fake `parquet_reader`, never DuckDB) -- that `fetch()` calls the injected reader
 with `self.path`, that its return value flows through unchanged, that a reader's own

@@ -210,9 +210,11 @@ def measured_history_read(monkeypatch: pytest.MonkeyPatch) -> Callable[..., _Rea
 def door(request: pytest.FixtureRequest) -> Iterator[str]:
     """Both doors, because both run the same whole-requirement assessment per call.
 
-    `V2-P4-076` moved five loaders from the first onto the second and recorded that it left the
-    quadratic untouched and made it fractionally worse -- one partition-scope assessment before
-    the loop plus one census read per year, 1,332 coverage lookups against 1,296. Fixing only
+    `V2-P4-076` moved `load_stock_universe`, `load_suspensions` and `load_name_histories` from
+    the first onto the second -- named rather than counted, because the count of what is on the
+    second door has moved twice since -- and recorded that it left the quadratic untouched and
+    made it fractionally worse: one partition-scope assessment before the loop plus one census
+    read per year, 1,332 coverage lookups against 1,296. Fixing only
     the door named in the row would therefore have left the measured caller -- the 36-year
     registry read, which is now on `read_visible_at` -- exactly as slow as it was.
     """

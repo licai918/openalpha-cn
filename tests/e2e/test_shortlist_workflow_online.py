@@ -22,11 +22,18 @@ securities with real listings, real delistings and a real calendar, priced out o
 The generated version screens two *consecutive sessions*. **On a real panel it cannot**, and
 finding out why is the first thing this file does rather than the last.
 
-`load_shortlist_cross_section` reads the registry, the adjustment histories, the halt corpus and
-the rename corpus at the cross section's own instant, and all four go through `read_if_ready` --
-which refuses a whole partition whose newest `available_time` is later than the `as_of`
-(`panel/catalog.py`'s "Disclosure" section, which states the rule and names P3 and P4 as the
-phases it constrains). Measured on the panel this suite fetched on 2026-08-19:
+`load_shortlist_cross_section` reads the trading calendar, the registry, the daily bars, the
+price limits, the halt corpus and the rename corpus at the cross section's own instant. **This
+paragraph said it read "the registry, the adjustment histories, the halt corpus and the rename
+corpus" and that "all four go through `read_if_ready`", and neither half is true today.** The
+chain does not reach the adjustment histories at all -- that is the one plane `V2-P4-076`
+deliberately left behind, noted again in the re-measurement below -- and of the six loaders it
+does reach, only `load_trading_calendar` still takes `read_if_ready`: `V2-P4-026`/`061` moved the
+three price loaders and `V2-P4-076` moved the registry, the halts and the renames onto the
+row-filtered door. The transcripts in this section are the pre-`076` reading and are kept as
+that. `read_if_ready` refuses a whole partition whose newest `available_time` is later than the
+`as_of` (`panel/catalog.py`'s "Disclosure" section, which states the rule and names P3 and P4 as
+the phases it constrains). Measured on the panel this suite fetched on 2026-08-19:
 
     trade_cal     knowable from 2026-01-01T00:00+08:00
     stock_basic   knowable from 2026-08-19T00:00+08:00   (two securities listed that day)
@@ -316,9 +323,14 @@ FETCHED_BLOCKING_DATASETS: Final[tuple[str, ...]] = (
     ADJ_FACTOR_DATASET,
     SUSPENSION_DATASET,
 )
-"""The partitions `e2e_support.BUILD_TARGETS` fetches that the shortlist chain reads through
-`read_if_ready`, and therefore the ones whose own availability instants bound every prediction
-instant below.
+"""The partitions `e2e_support.BUILD_TARGETS` fetches whose own availability instants bound every
+prediction instant below.
+
+**The bound is conservative rather than required, and this docstring said otherwise.** It read
+"the partitions the shortlist chain reads through `read_if_ready`", which was the shape before
+`V2-P4-076`: that fix moved `stock_basic` and `suspend_d` onto the row-filtered door, and the
+chain does not reach `adj_factor` on any path. `_prediction_instants` measures what the bound now
+costs and says why it was left standing.
 
 `daily`, `daily_basic` and `stk_limit` are **not** here, and their absence is the measurement
 rather than an omission: `V2-P4-026` and `V2-P4-061` moved all three onto
@@ -395,8 +407,11 @@ class Screened:
     name whichever partition happened to be latest instead."""
 
     knowable_from_every_blocking_partition: datetime
-    """The earliest instant every partition this chain reads through `read_if_ready` may be read
-    at. Both instants below are at or after it, which is what makes them screenable at all."""
+    """The earliest instant every partition in `FETCHED_BLOCKING_DATASETS` may be read at *whole*.
+
+    Both instants below are at or after it, which is what makes them screenable at all -- and
+    since `V2-P4-076` more than makes them: see `FETCHED_BLOCKING_DATASETS` for why this bound is
+    now wider than the chain requires."""
 
     session: date
     """The one session this panel may be screened about: its newest. See the docstring."""
@@ -460,7 +475,7 @@ def _prediction_instants(
             )
         return session, (first, second)
     raise E2EEnvironmentError(
-        f"every partition this chain reads through read_if_ready first became knowable at "
+        f"every partition this module bounds by first became knowable at "
         f"{knowable.isoformat()}, and the newest session this panel stores is "
         f"{sessions[-1].isoformat()}, whose evening ends before it. No instant this panel can "
         "price is one its own registry may be read at, so no shortlist can be cut from it at "

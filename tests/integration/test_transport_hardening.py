@@ -71,8 +71,9 @@ REQUIRED_HEADERS: Final[dict[str, str]] = {
 }
 """Every hardening header, with the three `F102` named last.
 
-The first six are asserted alongside the new three deliberately: `tests/integration/
-test_evidence_interfaces.py` checks three of them on `/health`, and a middleware rewritten to add
+The first six are asserted alongside the new three deliberately:
+`tests/integration/test_evidence_interfaces.py` checks three of them on `/health`, and a
+middleware rewritten to add
 headers is exactly the change that could drop one on the way.
 """
 

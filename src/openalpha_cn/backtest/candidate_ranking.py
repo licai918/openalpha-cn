@@ -172,7 +172,7 @@ It is *split*, and the split is the one `RunManifest.run_manifest_id` cites:
 **And nothing else gets one.** `CandidateRanking` itself is a frozen dataclass holding both, and a
 third address over "manifest plus funnel plus candidates" would be a fourth statement of two facts
 -- the shape `FactorNeutralizationManifest` refuses `industry_taxonomy` for. `stable_model_id` is
-the hasher for the manifest because it is a pydantic model and that function has fourteen call
+the hasher for the manifest because it is a pydantic model and that function has nineteen call
 sites and no competitor; `ranking_content_digest` follows `set_digest`'s and
 `characteristic_digest`'s form because it addresses a *sequence of rows* rather than a model, which
 is the one case this repository has always spelled as a `*_digest` free function on the same

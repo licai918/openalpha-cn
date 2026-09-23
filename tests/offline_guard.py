@@ -5,8 +5,9 @@ proves the guard is live (`tests/unit/test_offline_suite.py`) has to import the 
 raises, and `import conftest` is ambiguous the moment a second `conftest.py` exists anywhere
 on the collection path: pytest imports each one under its own basename, so which module that
 name resolves to depends on collection order. `tests/e2e/conftest.py` made that concrete --
-the import returned the e2e conftest and the unit test failed to collect. `tests/panel_fixtures
-.py` is the precedent for a plain shared module at the `tests/` root, and this follows it.
+the import returned the e2e conftest and the unit test failed to collect.
+`tests/panel_fixtures.py` is the precedent for a plain shared module at the `tests/` root, and
+this follows it.
 
 `V2-P4-039` moved the patching itself here too, and that is a second reason of the same kind.
 While it lived inside an autouse fixture there was no moment at which any test could look at

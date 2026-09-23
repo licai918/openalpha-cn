@@ -723,8 +723,9 @@ class IndustryMarketCapCrossSection:
     can tell the two apart, because at this layer there is no store to re-derive them from. The
     obstacle is one layer up and it is the ordinary one:
     `panel_neutralization.load_industry_market_cap_cross_section` is the *only* builder in `src/`,
-    and it reads both datasets through doors this plane did not open: `load_industry_cross_section`
-    and `load_daily_valuations`, which since `V2-P4-026` and `V2-P4-027`/`028` reach rows through
+    and it reads both datasets through doors this plane did not open: `load_daily_valuations`
+    and `load_industry_cross_section`, which since `V2-P4-026` and `V2-P4-027`/`028` respectively
+    reach rows through
     `PanelStore.read_visible_at` -- the row-filtered door, which withholds a row that was not
     knowable at `as_of` and counts it, where `read_if_ready` refused the partition whole. (This
     paragraph said both datasets were read through `read_if_ready` until the two issues above
