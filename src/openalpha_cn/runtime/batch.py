@@ -2,101 +2,159 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from threading import RLock
-from typing import TYPE_CHECKING, Literal, Self
+from typing import Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from openalpha_cn.batch_contracts import (
+    BATCH_ITEM_STATUSES,
+    BATCH_PROGRESS_EVENT_VERSIONS,
+    BATCH_RESEARCH_TASK_VERSIONS,
+    DEFAULT_BATCH_PAGE_SIZE,
+    MAX_BATCH_ITEMS,
+    MAX_BATCH_PAGE_SIZE,
+    MAX_BATCH_WORKERS,
+    BatchItemCensus,
+    BatchItemStatus,
+    BatchProgressEvent,
+    BatchResearchTask,
+    BatchResultRef,
+    BatchTaskItem,
+    BatchTaskPage,
+    BatchTaskSummary,
+)
+from openalpha_cn.domain.risk_flag import UndeclaredRiskFlagError
+from openalpha_cn.runtime.contracts import ResearchRunRequest, ResearchRunResult
 
-from openalpha_cn.runtime.engine import ResearchRunRequest, ResearchRunResult
+logger = logging.getLogger(__name__)
 
-if TYPE_CHECKING:
-    from openalpha_cn.storage.batch import SQLiteBatchTaskStore
+DISCLOSABLE_ITEM_FAULTS: tuple[type[Exception], ...] = (UndeclaredRiskFlagError,)
+"""The faults whose own message may be written into a batch's durable progress record.
 
+## Why the list exists rather than `str(error)` on everything (`V2-P4-102`)
 
-class BatchResultRef(BaseModel):
-    """Compact immutable reference to one completed research result."""
+A failed item used to record `type(error).__name__` in both places it can say anything, so a
+batch reported `{"status": "failed", "error_type": "ValueError"}` -- the least informative name
+in Python -- and an `item_failed` event whose `detail` was the same word again. For an
+undeclared risk flag that discards the entire diagnostic `parse_risk_flag`'s docstring promises:
+the producer of a whole-market batch learns that one of five thousand items failed and has no
+way at all to find out which flag it spelled wrong.
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+The tempting repair is `detail=str(error)` unconditionally, and it is refused here for
+`cli._panel_command`'s reason, stated at this module's own durability boundary: an
+*unanticipated* exception carries whatever the frame it escaped was holding -- a filesystem path,
+a query, a credential read out of the environment -- and a progress event is **append-only and
+durable**, so a leak into one cannot be taken back. An allow-list inverts the default: a message
+is written only where somebody has decided it is disclosable, and everything else still records
+its type alone, exactly as before.
 
-    decision_id: str
-    signal_id: str
-    final_action: Literal["watch", "avoid", "abstain"]
+`UndeclaredRiskFlagError` qualifies because every part of its message is data the caller sent or
+this build publishes: the offending string came out of their own request body, and the ten
+declared flags are in `docs/api/schemas/signal-frame-v1.json`. Nothing in it is ours to leak.
 
+A tuple rather than a `Protocol` or a marker base class because there is one entry and the check
+is `isinstance`; a new entry is a deliberate line in this file, which is where the decision that
+a message may cross this boundary should have to be written down.
+"""
 
-class BatchTaskItem(BaseModel):
-    """One independently recoverable request inside a batch."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    request: ResearchRunRequest
-    status: Literal["queued", "running", "succeeded", "failed", "cancelled"] = "queued"
-    result: BatchResultRef | None = None
-    error_type: str | None = Field(default=None, max_length=256)
-
-    @model_validator(mode="after")
-    def validate_terminal_state(self) -> Self:
-        if self.status == "succeeded" and self.result is None:
-            raise ValueError("succeeded batch item requires result")
-        if self.status != "succeeded" and self.result is not None:
-            raise ValueError("only succeeded batch item may contain result")
-        if self.status == "failed" and self.error_type is None:
-            raise ValueError("failed batch item requires error_type")
-        if self.status != "failed" and self.error_type is not None:
-            raise ValueError("only failed batch item may contain error_type")
-        return self
-
-
-class BatchResearchTask(BaseModel):
-    """Latest durable state of a bounded research batch."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    batch_id: str = Field(min_length=1, max_length=128)
-    items: tuple[BatchTaskItem, ...] = Field(min_length=1, max_length=1000)
-    status: Literal["queued", "running", "succeeded", "partial", "failed", "cancelled"]
-    max_concurrency: int = Field(ge=1, le=32)
-    cancellation_requested: bool = False
-    created_at: datetime
-    updated_at: datetime
-
-    @field_validator("created_at", "updated_at")
-    @classmethod
-    def normalize_datetimes(cls, value: datetime) -> datetime:
-        from openalpha_cn.domain.time import ensure_aware
-
-        return ensure_aware(value)
+__all__ = [
+    "BATCH_ITEM_STATUSES",
+    "BATCH_PROGRESS_EVENT_VERSIONS",
+    "BATCH_RESEARCH_TASK_VERSIONS",
+    "DEFAULT_BATCH_PAGE_SIZE",
+    "MAX_BATCH_ITEMS",
+    "MAX_BATCH_PAGE_SIZE",
+    "MAX_BATCH_WORKERS",
+    "BatchItemCensus",
+    "BatchItemStatus",
+    "BatchProgressEvent",
+    "BatchResearchService",
+    "BatchResearchTask",
+    "BatchResultRef",
+    "BatchTaskItem",
+    "BatchTaskPage",
+    "BatchTaskStore",
+    "BatchTaskSummary",
+]
 
 
-class BatchProgressEvent(BaseModel):
-    """Append-only progress event for polling, SSE, or audit consumers."""
+def _item_failure_detail(error: Exception) -> str:
+    """What one failed item writes into its append-only `item_failed` event.
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    The whole message for a fault `DISCLOSABLE_ITEM_FAULTS` names, and the bare type for
+    everything else. `BatchProgressEvent.detail` is a free `str | None` that already exists for
+    exactly this, so making the reason durable needed no change to a stored contract and no
+    migration -- which is the reason it is carried here rather than as a new field on
+    `BatchTaskItem`, where `extra="forbid"` makes an added key a breaking change (AGENTS.md,
+    v2 hard rule 3).
 
-    sequence: int = Field(ge=1)
-    batch_id: str
-    kind: Literal[
-        "submitted",
-        "started",
-        "item_started",
-        "item_succeeded",
-        "item_failed",
-        "cancellation_requested",
-        "recovered",
-        "finished",
-    ]
-    occurred_at: datetime
-    run_id: str | None = None
-    detail: str | None = None
+    `type(error).__name__` is prefixed even for a disclosed message, so a reader of the event
+    stream gets the same word `BatchTaskItem.error_type` holds and can line the two up without
+    parsing prose.
+    """
+    name = type(error).__name__
+    if isinstance(error, DISCLOSABLE_ITEM_FAULTS):
+        return f"{name}: {error}"
+    return name
 
-    @field_validator("occurred_at")
-    @classmethod
-    def normalize_occurred_at(cls, value: datetime) -> datetime:
-        from openalpha_cn.domain.time import ensure_aware
 
-        return ensure_aware(value)
+class BatchTaskStore(Protocol):
+    """Extension contract for durable batch-task storage consumed by BatchResearchService.
+
+    Mirrors the `runtime.memory.ResearchMemory` precedent: the Protocol lives on the
+    consumer side (`runtime/`), not in `storage/`. Its method set is exactly the methods
+    `BatchResearchService` calls on `self.store` -- not `SQLiteBatchTaskStore`'s full public
+    surface, which also includes `list`, `list_events`, and `recover_interrupted` for callers
+    (`sdk.py`, `api/app.py`) that hold the concrete store directly and never go through this
+    service.
+
+    It grew from three methods to seven at `V2-P4-019`, and the four new ones all say the
+    same thing: the per-item hot path must not be able to express O(N) work. `get`/`save`
+    read and write every item and stay, because `run`, `cancel` and `_finish` genuinely act
+    on the whole task; `get_item`/`update_item`/`update_status`/`is_cancellation_requested`
+    are what the 2N item transitions use, and every one of them is O(1). Before the split,
+    the only way to record one item's transition was `get()` + `save()` -- which is exactly
+    how a batch came to cost O(N^2); see `storage/batch.py`'s module docstring.
+    """
+
+    def get(self, batch_id: str) -> BatchResearchTask | None:
+        """Return the latest batch state."""
+
+    def save(self, task: BatchResearchTask) -> None:
+        """Insert or atomically replace the latest state of one batch."""
+
+    def get_item(self, *, batch_id: str, index: int) -> BatchTaskItem | None:
+        """Return one item's latest state."""
+
+    def update_item(
+        self,
+        *,
+        batch_id: str,
+        index: int,
+        item: BatchTaskItem,
+        updated_at: datetime,
+    ) -> None:
+        """Persist one item's transition without touching the other N-1."""
+
+    def update_status(self, *, batch_id: str, status: str, updated_at: datetime) -> None:
+        """Move one batch's aggregate status without rewriting its items."""
+
+    def is_cancellation_requested(self, batch_id: str) -> bool:
+        """Return whether cooperative cancellation was requested for this batch."""
+
+    def append_event(
+        self,
+        *,
+        batch_id: str,
+        kind: str,
+        occurred_at: datetime,
+        run_id: str | None = None,
+        detail: str | None = None,
+    ) -> BatchProgressEvent:
+        """Append and return one monotonic progress event."""
 
 
 class BatchResearchService:
@@ -105,7 +163,7 @@ class BatchResearchService:
     def __init__(
         self,
         *,
-        store: SQLiteBatchTaskStore,
+        store: BatchTaskStore,
         runner: Callable[[ResearchRunRequest], ResearchRunResult],
         clock: Callable[[], datetime],
     ) -> None:
@@ -135,6 +193,14 @@ class BatchResearchService:
         )
         self.store.save(task)
         self.store.append_event(batch_id=batch_id, kind="submitted", occurred_at=now)
+        logger.info(
+            "batch_submitted",
+            extra={
+                "batch_id": batch_id,
+                "item_count": len(requests),
+                "max_concurrency": max_concurrency,
+            },
+        )
         return task
 
     def run(self, batch_id: str) -> BatchResearchTask:
@@ -142,17 +208,23 @@ class BatchResearchService:
         task = self._required(batch_id)
         if task.status == "cancelled":
             return task
-        self._replace(task.model_copy(update={"status": "running", "updated_at": self.clock()}))
+        # A batch previously left "failed"/"partial" being run() again is, by
+        # definition, a retry -- `run()` has no separate entry point for it (see
+        # `api/app.py`'s `batch_retry` route, which just calls this same method).
+        is_retry = task.status in {"failed", "partial"}
+        self.store.update_status(batch_id=batch_id, status="running", updated_at=self.clock())
         self.store.append_event(batch_id=batch_id, kind="started", occurred_at=self.clock())
+        logger.info("batch_run_started", extra={"batch_id": batch_id, "retry": is_retry})
+        # Read from the `task` already in hand rather than re-reading. `update_status` moved
+        # only the header, and no worker exists yet to move an item, so a second full read
+        # here could not observe anything this one did not -- it would only pay O(N) again.
         indexes = [
-            index
-            for index, item in enumerate(self._required(batch_id).items)
-            if item.status in {"queued", "failed"}
+            index for index, item in enumerate(task.items) if item.status in {"queued", "failed"}
         ]
         # Python executor contract:
         # https://docs.python.org/3.11/library/concurrent.futures.html#threadpoolexecutor
         with ThreadPoolExecutor(
-            max_workers=self._required(batch_id).max_concurrency,
+            max_workers=task.max_concurrency,
             thread_name_prefix="openalpha-batch",
         ) as executor:
             tuple(executor.map(lambda index: self._run_item(batch_id, index), indexes))
@@ -182,15 +254,32 @@ class BatchResearchService:
                 kind="cancellation_requested",
                 occurred_at=self.clock(),
             )
+            logger.info("batch_cancel_requested", extra={"batch_id": batch_id})
             return updated
 
     def _run_item(self, batch_id: str, index: int) -> None:
+        """Run one item, persisting each of its transitions in O(1).
+
+        Every store call here reads or writes exactly this item, or one boolean off the
+        header -- never the whole task. That is the entire difference between a batch that
+        costs O(N) and one that costs O(N^2), and it is why `is_cancellation_requested`
+        exists instead of the `get()` this used to do just to read one flag.
+
+        `self._lock` still wraps each transition, so an item's read-modify-write and the
+        progress event that announces it cannot interleave with `cancel()`'s whole-task
+        rewrite. It is now held for a fraction of a millisecond instead of for a full
+        serialize-and-reparse of every item in the batch, which is what makes
+        `max_concurrency` mean something at all.
+        """
         with self._lock:
-            task = self._required(batch_id)
-            if task.cancellation_requested:
+            if self.store.is_cancellation_requested(batch_id):
                 return
-            item = task.items[index].model_copy(update={"status": "running", "error_type": None})
-            self._set_item(task, index, item)
+            item = self._required_item(batch_id, index).model_copy(
+                update={"status": "running", "error_type": None}
+            )
+            self.store.update_item(
+                batch_id=batch_id, index=index, item=item, updated_at=self.clock()
+            )
             self.store.append_event(
                 batch_id=batch_id,
                 kind="item_started",
@@ -200,23 +289,29 @@ class BatchResearchService:
         try:
             result = self.runner(item.request)
         except Exception as error:
+            # V2-P4-102: `error_type` is the *specific* class either way -- `ValueError` was
+            # never this code's choice, it was the base class the risk-flag refusal happened to
+            # raise, and naming the subclass costs nothing and separates a misspelled flag from
+            # a bad price at a glance. `detail` carries the whole reason only for the faults
+            # DISCLOSABLE_ITEM_FAULTS names; see that constant for why the default is the type
+            # alone on an append-only durable record.
             with self._lock:
-                task = self._required(batch_id)
-                failed = task.items[index].model_copy(
+                failed = self._required_item(batch_id, index).model_copy(
                     update={"status": "failed", "error_type": type(error).__name__}
                 )
-                self._set_item(task, index, failed)
+                self.store.update_item(
+                    batch_id=batch_id, index=index, item=failed, updated_at=self.clock()
+                )
                 self.store.append_event(
                     batch_id=batch_id,
                     kind="item_failed",
                     occurred_at=self.clock(),
                     run_id=item.request.run_id,
-                    detail=type(error).__name__,
+                    detail=_item_failure_detail(error),
                 )
             return
         with self._lock:
-            task = self._required(batch_id)
-            completed = task.items[index].model_copy(
+            completed = self._required_item(batch_id, index).model_copy(
                 update={
                     "status": "succeeded",
                     "result": BatchResultRef(
@@ -226,7 +321,9 @@ class BatchResearchService:
                     ),
                 }
             )
-            self._set_item(task, index, completed)
+            self.store.update_item(
+                batch_id=batch_id, index=index, item=completed, updated_at=self.clock()
+            )
             self.store.append_event(
                 batch_id=batch_id,
                 kind="item_succeeded",
@@ -247,25 +344,28 @@ class BatchResearchService:
             else:
                 status = "partial"
             completed = task.model_copy(update={"status": status, "updated_at": self.clock()})
-            self.store.save(completed)
+            # Only the aggregate status moved. `save()` here would rewrite all N item rows
+            # with the values this `get()` just read back out of them.
+            self.store.update_status(
+                batch_id=batch_id, status=status, updated_at=completed.updated_at
+            )
             self.store.append_event(
                 batch_id=batch_id,
                 kind="finished",
                 occurred_at=self.clock(),
                 detail=status,
             )
+            logger.info("batch_finished", extra={"batch_id": batch_id, "status": status})
             return completed
-
-    def _set_item(self, task: BatchResearchTask, index: int, item: BatchTaskItem) -> None:
-        items = list(task.items)
-        items[index] = item
-        self._replace(task.model_copy(update={"items": tuple(items), "updated_at": self.clock()}))
-
-    def _replace(self, task: BatchResearchTask) -> None:
-        self.store.save(task)
 
     def _required(self, batch_id: str) -> BatchResearchTask:
         task = self.store.get(batch_id)
         if task is None:
             raise KeyError(f"unknown batch: {batch_id}")
         return task
+
+    def _required_item(self, batch_id: str, index: int) -> BatchTaskItem:
+        item = self.store.get_item(batch_id=batch_id, index=index)
+        if item is None:
+            raise KeyError(f"unknown batch item: {batch_id}[{index}]")
+        return item

@@ -77,7 +77,15 @@ class ParquetEvidenceStore:
         subject: str | None = None,
         kind: str | None = None,
     ) -> tuple[EvidenceSnapshot, ...]:
-        """Return evidence available by ``as_of``, ordered deterministically."""
+        """Return the evidence visible at ``as_of``, ordered deterministically.
+
+        Visible means what ``domain/time.py::is_visible_at`` means: the record had first become
+        available **and** the version stored here had been published by ``as_of`` -- so a
+        version revised after ``as_of`` is withheld until its revision instant. The store is
+        append-only and chooses between nothing, so the version before a revision answers
+        inside that window only where it was itself stored; a store whose first sight of a
+        record was the revised version has nothing to answer with until the revision.
+        """
         files = [str(path) for path in sorted(self.root.glob("*.parquet"))]
         if not files:
             return ()
@@ -102,11 +110,12 @@ class ParquetEvidenceStore:
                     content_hash
                 FROM read_parquet(?)
                 WHERE available_time <= ?
+                  AND revision_time <= ?
                   AND (? IS NULL OR subject = ?)
                   AND (? IS NULL OR kind = ?)
                 ORDER BY available_time, evidence_id
                 """,
-                [files, point_in_time, subject, subject, kind, kind],
+                [files, point_in_time, point_in_time, subject, subject, kind, kind],
             ).fetchall()
         return tuple(self._deserialize(cast(tuple[object, ...], row)) for row in rows)
 
@@ -160,3 +169,31 @@ class ParquetEvidenceStore:
         if item.evidence_id != stored_id or item.content_hash != stored_hash:
             raise StorageIntegrityError(f"evidence integrity check failed: {stored_id}")
         return item
+
+
+def read_parquet_records(path: Path) -> list[dict[str, object]]:
+    """Read every row of a Parquet file as plain dicts, via DuckDB.
+
+    The concrete implementation behind `providers.file.ParquetReader` -- see that
+    Protocol's docstring for why `providers/file.py` cannot import this module, or
+    `duckdb`, at all (a prior attempt to have `providers/file.py` import this exact
+    function was rejected by import-linter's `forbidden` contract for
+    `providers-no-infra-imports`: `providers.file -> storage.parquet -> duckdb` is
+    flagged as transitive `duckdb` reachability, identically to a direct
+    `providers.file -> duckdb` import). Instead, `FileProvider`'s composition sites --
+    `cli.py`'s `evidence_build` command and `sdk.py`'s `OpenAlphaSDK.build_file_evidence`,
+    neither of which falls under that contract's `source_modules` -- import this function
+    directly and pass it in as `parquet_reader`.
+
+    `duckdb.Error` is translated to a plain `ValueError` here (matching the translation
+    this logic used to perform inline inside `providers/file.py`, before V2-P0B-011),
+    so callers can catch a generic, storage-agnostic failure without importing `duckdb`
+    themselves.
+    """
+    try:
+        with duckdb.connect(":memory:") as connection:
+            cursor = connection.execute("SELECT * FROM read_parquet(?)", [str(path)])
+            columns = [item[0] for item in cursor.description]
+            return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
+    except duckdb.Error as error:
+        raise ValueError(f"cannot read parquet file {path.name}: {error}") from error

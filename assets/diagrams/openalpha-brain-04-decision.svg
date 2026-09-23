@@ -26,8 +26,47 @@
     <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
       <path d="M32 0H0V32" fill="none" stroke="#6D87A3" stroke-width=".55" opacity=".12" />
     </pattern>
-    <marker id="arrow" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
-      <path d="M0 0L11 5.5L0 11Z" fill="context-stroke" />
+    <marker id="arrow-2DD4BF" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L11 5.5L0 11Z" fill="#2DD4BF" />
+    </marker>
+    <marker id="arrowShort-2DD4BF" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L5 2.5L0 5Z" fill="#2DD4BF" />
+    </marker>
+    <marker id="arrow-38BDF8" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L11 5.5L0 11Z" fill="#38BDF8" />
+    </marker>
+    <marker id="arrowShort-38BDF8" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L5 2.5L0 5Z" fill="#38BDF8" />
+    </marker>
+    <marker id="arrow-A78BFA" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L11 5.5L0 11Z" fill="#A78BFA" />
+    </marker>
+    <marker id="arrowShort-A78BFA" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L5 2.5L0 5Z" fill="#A78BFA" />
+    </marker>
+    <marker id="arrow-FBBF24" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L11 5.5L0 11Z" fill="#FBBF24" />
+    </marker>
+    <marker id="arrowShort-FBBF24" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L5 2.5L0 5Z" fill="#FBBF24" />
+    </marker>
+    <marker id="arrow-FB7185" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L11 5.5L0 11Z" fill="#FB7185" />
+    </marker>
+    <marker id="arrowShort-FB7185" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L5 2.5L0 5Z" fill="#FB7185" />
+    </marker>
+    <marker id="arrow-A3E635" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L11 5.5L0 11Z" fill="#A3E635" />
+    </marker>
+    <marker id="arrowShort-A3E635" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L5 2.5L0 5Z" fill="#A3E635" />
+    </marker>
+    <marker id="arrow-263A52" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L11 5.5L0 11Z" fill="#263A52" />
+    </marker>
+    <marker id="arrowShort-263A52" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L5 2.5L0 5Z" fill="#263A52" />
     </marker>
     <style>
       text { font-family: Geist, "Plus Jakarta Sans", "Noto Sans SC", "Microsoft YaHei", sans-serif; }
@@ -36,6 +75,7 @@
       .subtitle { font-size: 16px; font-weight: 480; }
       .micro { font-size: 11px; font-weight: 760; letter-spacing: 1.25px; }
       .cardTitle { font-size: 20px; font-weight: 720; }
+      .cardTitleTight { font-size: 17px; font-weight: 720; }
       .body { font-size: 14px; font-weight: 490; }
       .small { font-size: 12px; font-weight: 520; }
       .mono { font-size: 12px; font-weight: 680; font-family: Geist Mono, "Noto Sans Mono CJK SC", monospace; }
@@ -58,9 +98,9 @@
     <circle cx="18" cy="42" r="4" fill="#FBBF24" /><circle cx="40" cy="20" r="4" fill="#FBBF24" />
     <circle cx="56" cy="32" r="4" fill="#FBBF24" /><circle cx="75" cy="11" r="4" fill="#FBBF24" />
   </g>
-  <line x1="898" y1="171" x2="938" y2="171" stroke="#2DD4BF" stroke-width="2.2" marker-end="url(#arrow)" />
+  <line x1="898" y1="171" x2="938" y2="171" stroke="#2DD4BF" stroke-width="2.2" marker-end="url(#arrow-2DD4BF)" />
   <text x="948" y="175" class="small" fill="#96A8BE" text-anchor="start" opacity="1">自动执行 / 持久化</text>
-  <line x1="1108" y1="171" x2="1148" y2="171" stroke="#FBBF24" stroke-width="2.2" stroke-dasharray="7 7" marker-end="url(#arrow)" />
+  <line x1="1108" y1="171" x2="1148" y2="171" stroke="#FBBF24" stroke-width="2.2" stroke-dasharray="7 7" marker-end="url(#arrow-FBBF24)" />
   <text x="1158" y="175" class="small" fill="#96A8BE" text-anchor="start" opacity="1">显式组合 / 人工反馈</text>
   <circle cx="76" cy="210" r="14" fill="#A78BFA" fill-opacity=".16" stroke="#A78BFA" stroke-opacity=".45" />
   <text x="76" y="214" class="navNum" fill="#A78BFA" text-anchor="middle" opacity="1">A</text>
@@ -90,47 +130,47 @@
   <text x="671" y="250" class="small" fill="#FBBF24" text-anchor="middle" opacity="1">Bull / Bear 辩论</text>
   <rect x="370" y="260" width="208" height="120" rx="18" fill="#13243A" stroke="#A3E635" stroke-opacity=".34" />
   <text x="394" y="289" class="micro" fill="#A3E635" text-anchor="start" opacity="1">BULL / 正方</text>
-  <text x="394" y="322" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">收益证据链</text>
-  <text x="394" y="352" class="body" fill="#96A8BE" text-anchor="start" opacity="1">机会 · 催化 · 确认条件</text>
+  <text x="394" y="322" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">看多证据</text>
+  <text x="394" y="352" class="body" fill="#96A8BE" text-anchor="start" opacity="1">看多 Agent · 证据 · 得分</text>
   <rect x="596" y="260" width="208" height="120" rx="18" fill="#13243A" stroke="#FB7185" stroke-opacity=".34" />
   <text x="620" y="289" class="micro" fill="#FB7185" text-anchor="start" opacity="1">BEAR / 反方</text>
-  <text x="620" y="322" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">风险证据链</text>
-  <text x="620" y="352" class="body" fill="#96A8BE" text-anchor="start" opacity="1">反例 · 失效 · 流动性</text>
+  <text x="620" y="322" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">看空证据</text>
+  <text x="620" y="352" class="body" fill="#96A8BE" text-anchor="start" opacity="1">看空 Agent · 证据 · 得分</text>
   <rect x="822" y="260" width="150" height="120" rx="18" fill="#13243A" stroke="#FBBF24" stroke-opacity=".34" />
   <text x="846" y="289" class="micro" fill="#FBBF24" text-anchor="start" opacity="1">RISK PANEL</text>
-  <text x="846" y="320" class="body" fill="#F4F7FB" text-anchor="start" opacity="1">激进 / 中性</text>
-  <text x="846" y="347" class="body" fill="#F4F7FB" text-anchor="start" opacity="1">保守 / 弃权</text>
-  <path d="M308 340H346" fill="none" stroke="#FBBF24" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow)" opacity="1" />
-  <path d="M578 320L596 320" fill="none" stroke="#FBBF24" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow)" />
-  <path d="M804 320L822 320" fill="none" stroke="#FBBF24" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow)" />
+  <text x="846" y="320" class="body" fill="#F4F7FB" text-anchor="start" opacity="1">激进/中性/保守</text>
+  <text x="846" y="347" class="small" fill="#96A8BE" text-anchor="start" opacity="1">pass/reduce/block</text>
+  <path d="M308 340H346" fill="none" stroke="#FBBF24" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow-FBBF24)" opacity="1" />
+  <path d="M578 320L596 320" fill="none" stroke="#FBBF24" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrowShort-FBBF24)" />
+  <path d="M804 320L822 320" fill="none" stroke="#FBBF24" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrowShort-FBBF24)" />
   <rect x="370" y="404" width="602" height="50" rx="16" fill="#FBBF24" fill-opacity=".10" stroke="#FBBF24" stroke-opacity=".35" />
-  <text x="671" y="435" class="small" fill="#FBBF24" text-anchor="middle" opacity="1">DeliberationOutcome · 分歧摘要 / 风险调整信号 / 消融对照</text>
+  <text x="671" y="435" class="small" fill="#FBBF24" text-anchor="middle" opacity="1">DeliberationOutcome · 分歧摘要 / 辩论调整信号 / 消融对照</text>
   <circle cx="1045" cy="210" r="14" fill="#FB7185" fill-opacity=".16" stroke="#FB7185" stroke-opacity=".45" />
   <text x="1045" y="214" class="navNum" fill="#FB7185" text-anchor="middle" opacity="1">C</text>
-  <text x="1069" y="214" class="micro" fill="#FB7185" text-anchor="start" opacity="1">最终研究裁决</text>
+  <text x="1069" y="214" class="micro" fill="#FB7185" text-anchor="start" opacity="1">委员会结果 · 交还调用方</text>
   <rect x="1034" y="232" width="342" height="250" rx="22" fill="#0C1928" stroke="#263A52" filter="url(#shadow)" />
   <rect x="1035" y="233" width="340" height="248" rx="21" fill="none" stroke="#FFFFFF" stroke-opacity=".035" />
   <rect x="1034" y="254" width="3" height="206" rx="1.5" fill="#FB7185" />
-  <text x="1058" y="261" class="micro" fill="#FB7185" text-anchor="start" opacity="1">POLICY DECISION</text>
-  <text x="1058" y="294" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">RiskGate / DecisionLedger</text>
-  <text x="1058" y="323" class="body" fill="#96A8BE" text-anchor="start" opacity="1">pass · reduce · block</text>
-  <text x="1058" y="347" class="body" fill="#96A8BE" text-anchor="start" opacity="1">watch · avoid · abstain</text>
-  <text x="1058" y="371" class="body" fill="#96A8BE" text-anchor="start" opacity="1">风险信号保留，不被模型文案覆盖</text>
-  <text x="1058" y="395" class="body" fill="#96A8BE" text-anchor="start" opacity="1">证据 / 路由 / 信号 / 裁决全链可追溯</text>
-  <text x="1058" y="419" class="body" fill="#96A8BE" text-anchor="start" opacity="1">显式弃权是合法的一等结果</text>
-  <path d="M996 357H1015V340H1034" fill="none" stroke="#FB7185" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow)" opacity="1" />
+  <text x="1058" y="261" class="micro" fill="#FB7185" text-anchor="start" opacity="1">RETURNED TO CALLER</text>
+  <text x="1058" y="294" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">DeliberationOutcome</text>
+  <text x="1058" y="323" class="body" fill="#96A8BE" text-anchor="start" opacity="1">bull_case / bear_case</text>
+  <text x="1058" y="347" class="body" fill="#96A8BE" text-anchor="start" opacity="1">risk_votes：pass · reduce · block</text>
+  <text x="1058" y="371" class="body" fill="#96A8BE" text-anchor="start" opacity="1">adjusted_signal / ablation</text>
+  <text x="1058" y="395" class="body" fill="#96A8BE" text-anchor="start" opacity="1">不写入 DecisionLedger</text>
+  <text x="1058" y="419" class="body" fill="#96A8BE" text-anchor="start" opacity="1">输入的显式弃权原样保留</text>
+  <path d="M996 357H1015V340H1034" fill="none" stroke="#FB7185" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrowShort-FB7185)" opacity="1" />
   <circle cx="357" cy="520" r="14" fill="#38BDF8" fill-opacity=".16" stroke="#38BDF8" stroke-opacity=".45" />
   <text x="357" y="524" class="navNum" fill="#38BDF8" text-anchor="middle" opacity="1">D</text>
-  <text x="381" y="524" class="micro" fill="#38BDF8" text-anchor="start" opacity="1">组合会计 · 显式 portfolio compose</text>
+  <text x="381" y="524" class="micro" fill="#38BDF8" text-anchor="start" opacity="1">组合会计 · 显式 portfolio execute</text>
   <rect x="346" y="542" width="1030" height="128" rx="22" fill="#0C1928" stroke="#38BDF8" stroke-opacity=".30" />
   <text x="370" y="574" class="micro" fill="#A78BFA" text-anchor="start" opacity="1">输入状态</text>
   <text x="370" y="603" class="body" fill="#F4F7FB" text-anchor="start" opacity="1">PortfolioState</text>
   <text x="370" y="631" class="body" fill="#96A8BE" text-anchor="start" opacity="1">Order / MarketBar / Limits</text>
-  <path d="M630 606L664 606" fill="none" stroke="#A78BFA" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow)" />
+  <path d="M630 606L664 606" fill="none" stroke="#A78BFA" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow-A78BFA)" />
   <text x="650" y="574" class="micro" fill="#FBBF24" text-anchor="start" opacity="1">A 股约束</text>
   <text x="650" y="603" class="body" fill="#F4F7FB" text-anchor="start" opacity="1">T+1 · 100 股整手</text>
   <text x="650" y="631" class="body" fill="#96A8BE" text-anchor="start" opacity="1">停牌 · 涨跌停 · 费用</text>
-  <path d="M960 606L994 606" fill="none" stroke="#FBBF24" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow)" />
+  <path d="M960 606L994 606" fill="none" stroke="#FBBF24" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow-FBBF24)" />
   <text x="980" y="574" class="micro" fill="#38BDF8" text-anchor="start" opacity="1">PortfolioTransition</text>
   <text x="980" y="603" class="body" fill="#F4F7FB" text-anchor="start" opacity="1">订单 → 成交 / 拒单</text>
   <text x="980" y="631" class="body" fill="#96A8BE" text-anchor="start" opacity="1">持仓 / 现金 / FIFO / 暴露</text>
@@ -140,19 +180,19 @@
   <rect x="64" y="806" width="240" height="52" rx="16" fill="#0B1726" stroke="#263A52" />
   <text x="86" y="838" class="navNum" fill="#647890" text-anchor="start" opacity="1">01</text>
   <text x="119" y="838" class="nav" fill="#B7C4D4" text-anchor="start" opacity="1">系统总览</text>
-  <path d="M309 832H315" stroke="#263A52" stroke-width="1.7" marker-end="url(#arrow)" />
+  <path d="M307 832H317" stroke="#263A52" stroke-width="1.7" marker-end="url(#arrowShort-263A52)" />
   <rect x="320" y="806" width="240" height="52" rx="16" fill="#0B1726" stroke="#263A52" />
   <text x="342" y="838" class="navNum" fill="#647890" text-anchor="start" opacity="1">02</text>
   <text x="375" y="838" class="nav" fill="#B7C4D4" text-anchor="start" opacity="1">证据平面</text>
-  <path d="M565 832H571" stroke="#263A52" stroke-width="1.7" marker-end="url(#arrow)" />
+  <path d="M563 832H573" stroke="#263A52" stroke-width="1.7" marker-end="url(#arrowShort-263A52)" />
   <rect x="576" y="806" width="240" height="52" rx="16" fill="#0B1726" stroke="#263A52" />
   <text x="598" y="838" class="navNum" fill="#647890" text-anchor="start" opacity="1">03</text>
   <text x="631" y="838" class="nav" fill="#B7C4D4" text-anchor="start" opacity="1">研究编排</text>
-  <path d="M821 832H827" stroke="#263A52" stroke-width="1.7" marker-end="url(#arrow)" />
+  <path d="M819 832H829" stroke="#263A52" stroke-width="1.7" marker-end="url(#arrowShort-263A52)" />
   <rect x="832" y="806" width="240" height="52" rx="16" fill="url(#activeNav)" stroke="#FBBF24" stroke-opacity=".64" />
   <text x="854" y="838" class="navNum" fill="#FBBF24" text-anchor="start" opacity="1">04</text>
   <text x="887" y="838" class="nav" fill="#F4F7FB" text-anchor="start" opacity="1">决策约束</text>
-  <path d="M1077 832H1083" stroke="#FBBF24" stroke-width="1.7" marker-end="url(#arrow)" />
+  <path d="M1075 832H1085" stroke="#FBBF24" stroke-width="1.7" marker-end="url(#arrowShort-FBBF24)" />
   <rect x="1088" y="806" width="240" height="52" rx="16" fill="#0B1726" stroke="#263A52" />
   <text x="1110" y="838" class="navNum" fill="#647890" text-anchor="start" opacity="1">05</text>
   <text x="1143" y="838" class="nav" fill="#B7C4D4" text-anchor="start" opacity="1">验证反馈</text>

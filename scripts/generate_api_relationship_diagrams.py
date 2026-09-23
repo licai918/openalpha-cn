@@ -1,4 +1,10 @@
-"""Generate the five source-grounded public API relationship diagrams."""
+"""Generate the five public API relationship diagrams.
+
+Every string here is prose about the code and is read as such by
+`tests/integration/test_retired_claims_stay_retired.py`, one literal at a time. What no guard
+does is check a drawing against the code it describes, so nothing here calls itself
+source-grounded.
+"""
 
 # SVG copy intentionally uses Chinese full-width punctuation, and some serialized
 # element strings are clearer when kept as one line.
@@ -6,11 +12,27 @@
 
 from __future__ import annotations
 
+import math
+import re
 from html import escape
 from pathlib import Path
 
+from openalpha_cn.config import OpenAlphaConfig
+
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_DIR = ROOT / "assets" / "diagrams"
+
+DEFAULT_REQUEST_MIB = int(OpenAlphaConfig.model_fields["max_request_bytes"].default) // (
+    1024 * 1024
+)
+"""The declared default request ceiling, read from the settings model rather than restated.
+
+This diagram said `8 MiB 默认请求上限` for as long as `V2-P4-043` has been merged -- that row
+raised the default to 32 MiB, and this was a fourth statement of a number that lives in
+`config.py`, and the one that was wrong. The **declared** default is used rather than
+`load_config()`, so the generated asset never depends on the environment of whoever regenerates
+it.
+"""
 
 COLORS = {
     "indigo": "#5968F2",
@@ -21,6 +43,7 @@ COLORS = {
     "red": "#D95D67",
     "slate": "#64748B",
     "ink": "#0F172A",
+    "rule": "#C5CDDA",
 }
 
 NAVIGATION = (
@@ -30,6 +53,70 @@ NAVIGATION = (
     ("04", "决策产品"),
     ("05", "验证闭环"),
 )
+
+
+def _marker_defs() -> str:
+    """One `<marker>` per arrow colour, each with a literal fill.
+
+    `fill="context-stroke"` is one marker for every colour and is not supported everywhere:
+    rendered through QuickLook the head comes out `rgb(0,0,0)` while its line keeps its colour
+    (measured on a two-line probe: `(251,191,36)` against `(0,0,0)`). The head is what carries
+    the direction, so it is drawn in the line's own colour rather than inherited.
+    """
+    parts: list[str] = []
+    for color in COLORS.values():
+        key = color.lstrip("#")
+        parts.append(
+            f'    <marker id="arrow-{key}" markerWidth="10" markerHeight="10" '
+            f'refX="8" refY="5" orient="auto" markerUnits="strokeWidth">\n'
+            f'      <path d="M0,0 L10,5 L0,10 z" fill="{color}" />\n'
+            f"    </marker>"
+        )
+        parts.append(
+            f'    <marker id="arrowShort-{key}" markerWidth="5" markerHeight="5" '
+            f'refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">\n'
+            f'      <path d="M0,0 L5,2.5 L0,5 z" fill="{color}" />\n'
+            f"    </marker>"
+        )
+    return "\n".join(parts)
+
+
+def _marker(color: str, *, short: bool = False) -> str:
+    """The marker id for one stroke colour, or the nearest one this file emits."""
+    key = (color if color in COLORS.values() else COLORS["slate"]).lstrip("#")
+    return f"arrow{'Short' if short else ''}-{key}"
+
+
+def _last_leg(d: str) -> float | None:
+    """The final straight segment's length, or `None` when the path ends in a curve."""
+    tokens = re.findall(r"([MLHVC])\s*(-?[\d.]+)(?:[ ,]+(-?[\d.]+))?", d)
+    x = y = 0.0
+    last: float | None = None
+    for command, first, second in tokens:
+        if command == "M":
+            x, y = float(first), float(second or 0)
+        elif command == "L":
+            nx, ny = float(first), float(second or 0)
+            last, x, y = math.hypot(nx - x, ny - y), nx, ny
+        elif command == "H":
+            nx = float(first)
+            last, x = abs(nx - x), nx
+        elif command == "V":
+            ny = float(first)
+            last, y = abs(ny - y), ny
+        elif command == "C":
+            last = None
+    return last
+
+
+def _head_for(d: str, width: float) -> bool:
+    """Whether the short head is the one that fits: `refX` is 8 long and 4 short, in stroke units.
+
+    The width is passed rather than defaulted: every arrow in this file is stroked 3 today, and
+    a default would answer for a fourth width as if it were that one.
+    """
+    leg = _last_leg(d)
+    return leg is not None and leg < 8 * width
 
 
 class Svg:
@@ -48,9 +135,7 @@ class Svg:
     <filter id="shadow" x="-20%" y="-20%" width="140%" height="160%">
       <feDropShadow dx="0" dy="7" stdDeviation="9" flood-color="#27324A" flood-opacity=".10" />
     </filter>
-    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L10,5 L0,10 z" fill="context-stroke" />
-    </marker>
+{markers}
     <pattern id="dots" width="28" height="28" patternUnits="userSpaceOnUse">
       <circle cx="2" cy="2" r="1.5" fill="#D8DEEB" />
     </pattern>
@@ -69,7 +154,7 @@ class Svg:
       .navNumber { font-size: 15px; font-weight: 800; }
       .navLabel { font-size: 17px; font-weight: 720; }
     </style>
-  </defs>""",
+  </defs>""".replace("{markers}", _marker_defs()),
             '  <rect width="1440" height="900" fill="#F7F8FC" />',
             '  <rect width="1440" height="900" fill="url(#dots)" opacity=".36" />',
             (f'  <rect x="64" y="42" width="188" height="34" rx="17" fill="{COLORS["indigo"]}" />'),
@@ -152,7 +237,7 @@ class Svg:
         dash = ' stroke-dasharray="8 7"' if dashed else ""
         self.raw(
             f'  <path d="{path}" fill="none" stroke="{color}" stroke-width="3"'
-            f'{dash} marker-end="url(#arrow)" />'
+            f'{dash} marker-end="url(#{_marker(color, short=_head_for(path, 3))})" />'
         )
         if label:
             self.raw(
@@ -163,12 +248,13 @@ class Svg:
     def legend(self, *, y: int = 732) -> None:
         self.raw(
             f'  <path d="M 72 {y} L 126 {y}" fill="none" stroke="{COLORS["indigo"]}" '
-            'stroke-width="3" marker-end="url(#arrow)" />'
+            f'stroke-width="3" marker-end="url(#{_marker(COLORS["indigo"])})" />'
         )
         self.raw(f'  <text x="140" y="{y + 5}" class="small">服务端自动调用 / 持久化</text>')
         self.raw(
             f'  <path d="M 380 {y} L 434 {y}" fill="none" stroke="{COLORS["orange"]}" '
-            'stroke-width="3" stroke-dasharray="8 7" marker-end="url(#arrow)" />'
+            f'stroke-width="3" stroke-dasharray="8 7" '
+            f'marker-end="url(#{_marker(COLORS["orange"])})" />'
         )
         self.raw(f'  <text x="448" y="{y + 5}" class="small">调用方显式组合 / 反馈</text>')
         self.raw(
@@ -181,7 +267,7 @@ class Svg:
     def finish(self) -> str:
         self.raw(
             '  <text x="64" y="780" class="navCaption">API 关系导航｜'
-            "从数据合同到验证反馈的五层公开能力</text>"
+            "从数据合同到验证反馈的五条 v1 研究链</text>"
         )
         start_x = 64
         width = 216
@@ -209,7 +295,7 @@ class Svg:
             if position < len(NAVIGATION):
                 self.arrow(
                     path=f"M {x + width + 6} 831 L {x + width + gap - 12} 831",
-                    color=COLORS["indigo"] if active else "#C5CDDA",
+                    color=COLORS["indigo"] if active else COLORS["rule"],
                 )
         self.raw("</svg>")
         return "\n".join(self.parts) + "\n"
@@ -218,27 +304,33 @@ class Svg:
 def landscape() -> str:
     svg = Svg(
         index=1,
-        title="API 全景｜四类入口共享五条功能链",
-        subtitle="REST、SDK、CLI 与 React 工作台通过同一 FastAPI 合同进入证据、研究、产品、组合与验证能力。",
+        title="API 全景｜四类入口与五条 v1 研究功能链",
+        subtitle="REST 调用方经同一 FastAPI 边界进入，SDK 与 CLI 在进程内调用同一批服务；面板、因子、候选榜、模型与调度五个 v2 平面的路由未画入，它们同样在 /api/v1 下。",
     )
     svg.section(x=64, y=194, text="调用入口", color=COLORS["slate"])
-    for y, label in (
-        (220, "REST / OpenAPI"),
-        (284, "Python SDK"),
-        (348, "Typer CLI"),
-        (412, "React 工作台"),
-    ):
+    # Only an HTTP caller crosses the FastAPI boundary: a REST client, and the React workbench,
+    # which is one. The SDK and the CLI import the services themselves, so their arrows run
+    # beneath the card, dashed as a caller's own composition, to the same service layer.
+    for y, label in ((220, "REST / OpenAPI"), (284, "React 工作台")):
         svg.pill(x=64, y=y, width=196, text=label, color=COLORS["indigo"])
+        svg.arrow(path=f"M 262 {y + 18} L 294 {y + 18}")
+    for y, label in ((500, "Python SDK"), (564, "Typer CLI")):
+        svg.pill(x=64, y=y, width=196, text=label, color=COLORS["indigo"])
+        svg.arrow(path=f"M 262 {y + 18} L 630 {y + 18}", color=COLORS["orange"], dashed=True)
+    svg.raw(
+        '  <text x="446" y="555" class="arrowLabel" text-anchor="middle">'
+        "进程内调用，不经 FastAPI</text>"
+    )
     svg.card(
         x=302,
         y=220,
-        width=250,
-        height=330,
+        width=292,
+        height=250,
         title="FastAPI 公共边界",
         endpoint="GET /health · /docs · /openapi.json",
         lines=(
             "Pydantic 严格 Schema",
-            "8 MiB 默认请求上限",
+            f"{DEFAULT_REQUEST_MIB} MiB 默认请求上限",
             "安全响应头",
             "本机 CORS 白名单",
             "HTTP 只接结构化记录",
@@ -246,8 +338,13 @@ def landscape() -> str:
         ),
         color=COLORS["indigo"],
     )
-    svg.arrow(path="M 262 350 L 294 350")
-    svg.section(x=606, y=194, text="五条公开功能链", color=COLORS["slate"])
+    svg.arrow(path="M 598 345 L 630 345")
+    svg.section(x=622, y=194, text="服务层", color=COLORS["slate"])
+    svg.raw(
+        f'  <rect x="638" y="210" width="12" height="430" rx="6" fill="{COLORS["slate"]}" '
+        'opacity=".28" />'
+    )
+    svg.section(x=700, y=194, text="五条公开功能链", color=COLORS["slate"])
     lanes = (
         (
             210,
@@ -257,28 +354,28 @@ def landscape() -> str:
             COLORS["teal"],
         ),
         (
-            302,
+            298,
             "研究链",
             "POST /api/v1/research/run",
             "路由 → Agent → Signal → 风险门",
             COLORS["purple"],
         ),
         (
-            394,
+            386,
             "研究产品链",
             "POST /api/v1/screen · /reports",
-            "筛选 → 观察池 → 不可变报告",
+            "筛选 · 观察池 · 不可变报告",
             COLORS["orange"],
         ),
         (
-            486,
+            474,
             "组合链",
             "POST /api/v1/portfolio/execute",
             "A 股约束 → 转移 → 不可变账本",
             COLORS["red"],
         ),
         (
-            578,
+            562,
             "验证链",
             "POST /api/v1/backtests/replay",
             "同路径回放 → 统计 → 归因",
@@ -287,14 +384,14 @@ def landscape() -> str:
     )
     for y, title, endpoint, line, color in lanes:
         svg.raw(
-            f'  <rect x="628" y="{y}" width="674" height="78" rx="18" '
+            f'  <rect x="700" y="{y}" width="602" height="78" rx="18" '
             'fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)" />'
         )
-        svg.raw(f'  <rect x="628" y="{y}" width="7" height="78" rx="3.5" fill="{color}" />')
-        svg.raw(f'  <text x="652" y="{y + 31}" class="cardTitle">{escape(title)}</text>')
-        svg.raw(f'  <text x="836" y="{y + 29}" class="endpoint">{escape(endpoint)}</text>')
-        svg.raw(f'  <text x="836" y="{y + 56}" class="body">{escape(line)}</text>')
-        svg.arrow(path=f"M 554 385 C 590 385, 584 {y + 39}, 620 {y + 39}", color=color)
+        svg.raw(f'  <rect x="700" y="{y}" width="7" height="78" rx="3.5" fill="{color}" />')
+        svg.raw(f'  <text x="724" y="{y + 31}" class="cardTitle">{escape(title)}</text>')
+        svg.raw(f'  <text x="908" y="{y + 29}" class="endpoint">{escape(endpoint)}</text>')
+        svg.raw(f'  <text x="908" y="{y + 56}" class="body">{escape(line)}</text>')
+        svg.arrow(path=f"M 654 {y + 39} L 692 {y + 39}", color=color)
     svg.card(
         x=1040,
         y=650,
@@ -306,7 +403,7 @@ def landscape() -> str:
         fill="#F2F4F8",
     )
     svg.arrow(
-        path="M 960 656 C 960 700, 1000 685, 1032 685",
+        path="M 960 640 C 960 684, 1000 685, 1032 685",
         color=COLORS["slate"],
         label="证据 / 运行 / 账本",
         label_x=930,
@@ -330,6 +427,14 @@ def evidence_dataflow() -> str:
         (370, "AKShare · 可选研究"),
     ):
         svg.pill(x=64, y=y, width=246, text=label, color=COLORS["teal"])
+    for offset, note in enumerate(
+        (
+            "出厂路径：证据只由本地文件构建",
+            "Tushare 经 panel build 建面板分区",
+            "链邻与 AKShare 仅 doctor 探测",
+        )
+    ):
+        svg.raw(f'  <text x="64" y="{430 + offset * 22}" class="small">{escape(note)}</text>')
     svg.card(
         x=352,
         y=220,
@@ -360,7 +465,7 @@ def evidence_dataflow() -> str:
         endpoint="POST /api/v1/evidence/build",
         lines=(
             "Schema / aware datetime",
-            "四时钟 PIT",
+            "可得与修订时间 PIT · 四时钟",
             "涨停 / 炸板 / 连板规范化",
             "题材 / 催化 / 公告 / 资金",
         ),
@@ -380,7 +485,7 @@ def evidence_dataflow() -> str:
             "evidence_id + content_hash",
             "event / available / ingested / revision",
             "source_id / URI / license",
-            "只保留 as_of 时刻可见事实",
+            "只保留可得与修订都不晚于 as_of 的事实",
         ),
         color=COLORS["purple"],
     )
@@ -419,7 +524,7 @@ def evidence_dataflow() -> str:
         lines=(
             "ResearchRunRequest.evidence",
             "subject / as_of 一致性",
-            "Evidence ID 全链引用",
+            "方向性输出引用 evidence_id",
         ),
         color=COLORS["purple"],
     )
@@ -436,7 +541,7 @@ def research_orchestration() -> str:
     svg = Svg(
         index=3,
         title="研究编排链｜单次与批量 API 汇入同一 run_cycle",
-        subtitle="无论 live、replay 还是 backtest，研究请求都经过同一证据路由、Agent 聚合、风险门和持久化路径。",
+        subtitle="单次与批量研究请求经过同一证据路由、Agent 聚合、风险门和持久化路径；回放走同一 run_cycle，运行与恢复状态写进独立的回放库，验证结果仍入共用验证库。",
     )
     svg.card(
         x=64,
@@ -456,10 +561,10 @@ def research_orchestration() -> str:
         title="持久批量研究",
         endpoint="POST /api/v1/research/batches",
         lines=(
-            "1–1000 个不可变请求",
-            "1–32 并发",
+            "1–10000 个不可变请求",
+            "1–8 并发",
             "events / cancel / retry",
-            "SQLite 状态与重启恢复",
+            "SQLite 状态 · 重启后重新排队",
             "逐项复用同一 runner",
         ),
         color=COLORS["indigo"],
@@ -476,7 +581,7 @@ def research_orchestration() -> str:
             "3  节点级 checkpoint / resume",
             "4  聚合结构化 SignalFrame",
             "5  RiskGate：pass / reduce / block",
-            "6  final_action：watch / avoid / abstain",
+            "6  final_action：watch/avoid/abstain",
         ),
         color=COLORS["purple"],
     )
@@ -538,11 +643,11 @@ def research_orchestration() -> str:
     svg.card(
         x=1098,
         y=562,
-        width=266,
-        height=100,
+        width=300,
+        height=142,
         title="可选委员会 API",
         endpoint="POST /api/v1/research/deliberate",
-        lines=("调用方显式传入 signal + agent_results",),
+        lines=("调用方显式传入", "signal + agent_results"),
         color=COLORS["orange"],
     )
     svg.arrow(
@@ -689,7 +794,7 @@ def validation_loop() -> str:
             64,
             "同路径回放",
             "POST /api/v1/backtests/replay",
-            ("冻结 ReplayCorpus", "ResearchEngine.run_cycle", "确定性 / 防前视报告"),
+            ("冻结 ReplayCorpus", "ResearchEngine.run_cycle", "两遍比对 · as_of 时不可见即拒"),
             COLORS["purple"],
         ),
         (
@@ -710,7 +815,7 @@ def validation_loop() -> str:
             1054,
             "结果归因",
             "POST /api/v1/backtests/validate",
-            ("研究结果 + 未来观察", "重算 signal / decision ID", "规则 / 因子 / Agent 归因"),
+            ("研究结果 + 未来观察", "重算 signal / decision ID", "规则类目两项条款 · 显式残差"),
             COLORS["teal"],
         ),
     )
@@ -730,16 +835,16 @@ def validation_loop() -> str:
         y=540,
         width=1184,
         height=116,
-        title="验证结果汇总层",
+        title="四份报告各自返回 · 由调用方对照阅读",
         lines=(
             "ReplayReport + PortfolioBacktestReport + EventStudyReport + ValidationResult",
-            "共同回答：当时是否可知？是否可成交？是否显著？哪条规则、因子或 Agent 贡献了结果？",
+            "共同回答：能否复现？是否可成交？是否显著？成本与空仓机会成本各占多少、残差多大？",
         ),
         color=COLORS["indigo"],
         fill="#EEF1FF",
     )
     for x, _, _, _, color in columns:
-        svg.arrow(path=f"M {x + 143} 474 L {x + 143} 532", color=color)
+        svg.arrow(path=f"M {x + 143} 474 L {x + 143} 532", color=color, dashed=True)
     svg.card(
         x=394,
         y=670,
@@ -750,7 +855,7 @@ def validation_loop() -> str:
         color=COLORS["orange"],
     )
     svg.arrow(
-        path="M 720 658 L 720 662",
+        path="M 720 656 L 720 670",
         color=COLORS["orange"],
         dashed=True,
     )
@@ -768,7 +873,9 @@ def main() -> None:
         "openalpha-api-05-validation-loop.svg": validation_loop(),
     }
     for name, content in diagrams.items():
-        (OUTPUT_DIR / name).write_text(content, encoding="utf-8")
+        # `newline="\n"`: text mode would otherwise write "\r\n" on Windows, and the committed
+        # SVGs are LF everywhere (`.gitattributes`), so the sync test would fail there.
+        (OUTPUT_DIR / name).write_text(content, encoding="utf-8", newline="\n")
     print(f"generated {len(diagrams)} API relationship diagrams in {OUTPUT_DIR}")
 
 

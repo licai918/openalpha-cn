@@ -32,5 +32,16 @@ class Timeline:
 
 
 def is_visible_at(timeline: Timeline, as_of: datetime) -> bool:
-    """Return whether the information was available to a researcher at ``as_of``."""
-    return timeline.available_time <= ensure_aware(as_of)
+    """Return whether this version of the information was knowable to a researcher at ``as_of``.
+
+    Two clocks decide it: the record must have first become available, and the version carried
+    here must have been published, by ``as_of``. A record revised after ``as_of`` is therefore
+    not visible at ``as_of`` -- what a reader could have seen then is the version before the
+    revision, which is visible only where it was stored as a record of its own.
+
+    ``Timeline`` already refuses a ``revision_time`` before its ``available_time``, so the
+    second comparison alone would decide the same answer. Both are written out so that the
+    rule does not depend on a reader knowing that invariant.
+    """
+    point = ensure_aware(as_of)
+    return timeline.available_time <= point and timeline.revision_time <= point

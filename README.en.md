@@ -16,7 +16,8 @@ docker compose -f deploy/compose.yml up -d --build
 
 Open `http://127.0.0.1:8000`. Runtime evidence and ledgers live in a dedicated persistent volume.
 
-OpenAlpha CN provides four-clock point-in-time evidence, A-share event semantics,
+OpenAlpha CN provides four-clock evidence that is point-in-time on its availability
+and revision clocks, A-share event semantics,
 deterministic baseline agents, a secure OpenAI-compatible BYOK model boundary,
 typed signals and decisions, durable per-agent resume and research memory,
 A-share execution and portfolio constraints, same-path replay, reconciled
@@ -38,19 +39,177 @@ OpenAlpha CN competes on verifiability rather than the number of agent personas:
 
 - A-share-native limit-up, broken-board, consecutive-board, theme, catalyst, disclosure, and capital evidence;
 - separate event, availability, ingestion, and revision clocks;
-- content-addressed evidence and strict anti-look-ahead rules;
-- deterministic operation without an LLM, plus schema validation and bounded retries when a model is used;
+- content-addressed evidence, visible once both its availability and its revision time are at or before `as_of`: a record revised after `as_of` is not visible at `as_of`, and one revised before it carries `revised_after_initial_availability`, which the risk gate reduces rather than blocks. Gaps remain: a same-day statement correction told apart only by `update_flag` has no instant of its own, so the clocks cannot separate it; on the panel plane, a statement stored only in its corrected form is missing, not early, between its `ann_date` and its `f_ann_date`; and on the evidence plane, a record first stored in its revised form is likewise missing, not early, before its revision;
+- deterministic operation without an LLM: no shipped path calls a model, and a model reaches a run only inside an agent you build in your own code (one you pass to the SDK as `agents=`, for instance) — `StructuredSignalAgent` validates the reply against its schema and retries an invalid one within a bounded budget;
 - durable node checkpoints that reject changed requests or graph signatures;
-- bounded concurrent batches with progress, cancellation, retry, and restart recovery;
-- classified model retry plus persistent token and configured-cost accounting;
-- one research core shared by live, replay, and backtest modes;
+- bounded concurrent batches with progress, cancellation and retry, whose interrupted items are requeued after a restart;
+- for a model provider you construct in your own code (no shipped path calls a model): classified retry, and a token and configured-cost usage ledger that no shipped path writes to — only a provider built with a usage store records into it;
+- one research core, `run_cycle`, shared by live research and replay (validation, the multi-day portfolio backtest and `model daily-run` take their own paths);
 - A-share T+1, board lot, suspension, limit-lock, and transaction-cost constraints;
 - immutable cash/lot/mark/fee/PnL portfolio transitions with exposure clamps;
 - multi-day portfolio reports and event-study significance inference;
-- ablatable bull/bear and three-perspective risk committee;
-- evidence-linked decisions and reconciled rule/factor/agent attribution.
+- an optional bull/bear and three-perspective risk committee, run as one call: its ablation reports how far the debate moved the signal, and the three risk votes are returned beside it rather than inside that comparison;
+- evidence-linked decisions with attribution limited to two exact rule-category terms
+  (transaction cost, forgone-benchmark opportunity cost); factor, agent, and model
+  attribution are structurally never produced, not merely narrowed, with the remainder
+  named as an explicit unexplained residual.
 
-The project accepts user-owned CSV, JSON, JSONL, and Parquet data, BYOT Tushare, and an optional constrained AKShare adapter. It does not redistribute commercial raw datasets or expose a hosted data resale proxy.
+Evidence building reads user-owned CSV, JSON, JSONL, and Parquet files, and panel building reads Tushare with your own token; an optional, constrained AKShare adapter is implemented, but only `openalpha doctor` constructs it. The project does not redistribute commercial raw datasets or expose a hosted data resale proxy.
+
+## The factor plane
+
+Above the point-in-time panel sits a factor library — 21 declared factors (5 momentum/reversal, 5 volatility/liquidity, 4 value, 4 quality, 3 growth), one cross-sectional transform, one industry-and-size neutralisation — and a three-tier experiment that scores all three tiers and seals the result into an immutable, content-addressed record. Four commands, in the order you meet them:
+
+```bash
+uv run openalpha factor list                              # what this build declares
+uv run openalpha factor describe --factor return_vol_60/v1  # one declaration, whole, with its note
+uv run openalpha factor build --factor reversal_1d/v1 --tier processed \
+  --transform cross_section_standard/v1 \
+  --as-of 2026-01-08T09:00:00+00:00 --as-of 2026-01-09T09:00:00+00:00 \
+  --year 2026 --max-staleness-days 30     # writes raw + processed, and nothing else
+uv run openalpha factor build --factor reversal_1d/v1 --tier neutralized \
+  --transform cross_section_standard/v1 --neutralization industry_and_size/v1 \
+  --as-of 2026-01-08T09:00:00+00:00 --as-of 2026-01-09T09:00:00+00:00 \
+  --year 2026 --max-staleness-days 30     # the third tier, which `factor run` reads
+uv run openalpha factor run --factor reversal_1d/v1 --start 2026-01-08 --end 2026-01-09 ...
+```
+
+**`factor build` has to run once per tier, and this block said otherwise until `V2-P5-048`
+executed it.** `--tier` names the tier that is *written*, not the tier that is reached: with only
+the `processed` line, the build exits `0` and `factor run --neutralization …` then exits `1` with
+`No neutralized partition of this factor is registered in this panel at all`. `factor run` also
+needs an explicit `--as-of` — omitted, it reads the panel at the wall clock, so whether the
+example works depends on the day you run it. `tests/integration/test_documented_command_lines.py`
+now checks every command line in the fenced blocks of this file and of `docs/` against the live
+CLI, and runs those of `factor list/describe/build/run` and `model evaluate/daily-run/predictions`
+on a generated panel with `--runtime-dir` and `--exchange` appended; every other command is named
+with its reason in `NOT_EXECUTED`.
+
+`factor list` and `factor run` answer on three faces: `openalpha factor list` /
+`openalpha factor run`, `GET /api/v1/factors` plus `POST /api/v1/factors/run`, and
+`OpenAlphaSDK.factor_catalog()` / `.run_factor_experiment()`. `factor build` is on the
+command line and in the SDK only: it writes panel partitions and the service ships with no
+authentication of its own. `factor describe` is on the command line and in the SDK
+(`describe_factor`) with no route, and `panel build` is on the command line alone.
+
+`factor run` prints three tier rows and a six-cell attribution grid. **The six cells are
+not equals**: `processed->neutralized` is the step the acceptance criterion is read off —
+a statistic that vanishes there was the industry and size exposure. The six verdicts are
+`survives`, `removed`, `reversed`, `amplified`, `no_baseline` and `not_measured`;
+`openalpha factor list` prints what each one means.
+
+**Exit `0` covers a grid that is `removed` everywhere *and* one that is `not_measured`
+everywhere, and the second is the dangerous one** — it is no finding at all, because one
+tier in every cell computed nothing, yet it looks like a clean pass to anyone grepping for
+`removed`. `factor run` prints a named warning on stderr when that happens, and
+`document.artifact.tiers[].ic.coverage` is the per-tier truth. See
+[the HTTP contract](docs/api/http.md) for the full argument. The named boundaries are
+`openalpha factor list --json`'s `run_limitations`, declared in
+[`KNOWN_FACTOR_RUN_LIMITATIONS`](src/openalpha_cn/factor_view.py) — including
+`the_builder_cannot_produce_a_residual_for_a_session_that_has_not_closed`:
+`factor build --tier neutralized` is refused by name, and writes nothing, at a prediction
+instant before that day's own 16:30 close or on a day the exchange was shut.
+
+## The model plane
+
+Above the factor tiers sits the model chain: a versioned feature matrix, a walk-forward split
+with purge and embargo, two stdlib baselines (a cross-sectional rank model and gradient-boosted
+rank trees, no numerical dependency), a content-addressed artifact, and a store that holds a
+prediction **before its outcome is known**. Four commands, two that fit and register and two that
+read back:
+
+```bash
+uv run openalpha model evaluate --feature reversal_1d/v1@raw \
+  --name reversal-rank --family cross_sectional_rank --horizon 1d --seed 7 \
+  --start 2026-01-06 --end 2026-01-14 --year 2026 \
+  --folds 2 --test-days-per-fold 2 --embargo-sessions 0 \
+  --min-scored-ratio 0.5 --as-of 2027-01-01T00:00:00+08:00
+
+uv run openalpha model daily-run --feature reversal_1d/v1@raw \
+  --name reversal-rank --family cross_sectional_rank --horizon 5d --seed 7 \
+  --start 2026-01-06 --end 2026-01-14 --year 2026 \
+  --predict-at 2026-01-16T09:00:00+00:00 --min-scored-ratio 0.5 \
+  --as-of 2027-01-01T00:00:00+08:00
+
+uv run openalpha model predictions          # every registered address
+uv run openalpha model prediction prd_…     # one of them, as it was registered
+```
+
+**These two carried `V2-P4-094`'s broken form until `V2-P5-048` ran them.** That row fixed the
+examples `--help` prints and left the copies here, in `README.md` and in
+`docs/HANDOFF_CURRENT.md` untouched: `--horizon 5d` purges the first fold's training set to
+nothing over these seven prediction days, `--as-of 2026-01-20T04:00:00+00:00` is refused by the
+partition gate, and `daily-run` named no `--as-of` at all. A fix applied to an example's source
+and not to its copies is three of the four documentation defects that row found.
+
+Three faces again: `openalpha model *`, `POST /api/v1/models/{evaluate,daily-run}` plus
+`GET /api/v1/predictions[/{record_id}]`, and `OpenAlphaSDK.evaluate_model()` /
+`.run_daily_model()`. All three resolve and run through `model_view`, so they cannot fit three
+models from one declaration.
+
+**These commands need `adj_factor` and the shortlist does not.** A label is a return *between two
+sessions*, so the labeller requires an adjustment series; conversely the shortlist needs
+`namechange` for every bar's risk-warning flag and these commands never build a bar. A panel built
+for one face is short for the other, in both directions, and each refusal names the `panel build`
+line that repairs it.
+
+**`--min-scored-ratio` has no default, and refused is not empty.** It is the floor under
+`scored / offered`, and it exists because abstaining on the hard names is otherwise a free way to
+win. Above it: exit `0` / `200` with `admitted` carrying what the run stands behind. Below it:
+exit `1` / `409` with `"admitted": null` and both sides of the bar under `blocks` — while the
+`measurement` object is byte-identical across the pair. It is a coverage verdict and never a
+quality one.
+
+**A refused `daily-run` still registered its prediction.** Story S32 is about a prediction being
+persisted before its outcome is known, which is unconditional; the floor is about whether the
+answer may be acted on, which is not.
+
+**`--shelf-life-days` makes a stale model abstain out loud.** How many days past its training
+cutoff a fit may still be asked; beyond it every security abstains with a stated reason instead of
+being scored, and the answer says which span was declared (`declaration.shelf_life_days`, `null`
+when none was). It is wall time, not sessions — a horizon counts open sessions and this
+repository refuses to convert the one into the other. And it refuses nothing on its own: an
+expired run reads `scored_ratio: 0.0`, which is `--min-scored-ratio`'s to reject, so the two flags
+are one mechanism.
+
+**What a `forward` standing proves, and what it does not.** It means this store held the bytes
+before the instant the outcome became knowable. It does **not** mean the batch was produced when
+it says it was: `predicted_at` is whatever the caller passed to `predict`, nothing here can check
+it, and nothing here defends against whoever owns the disk. Every rendered prediction carries both
+sentences in the body, because a one-word badge reads as an attestation this repository cannot
+make. See [the HTTP contract](docs/api/http.md) for the three standings; the sixteen named
+boundaries are the `limitations` each single model answer carries (an evaluation, a held
+prediction, a daily run; the prediction listing carries none), the list
+`openalpha_cn.model_view.KNOWN_MODEL_VIEW_LIMITATIONS` holds.
+
+## The outcome plane, and where the three faces are not equal
+
+Beside the portfolio, reading research results rather than the portfolio, sits the outcome plane: an observed outcome validated against the decision
+that predicted it, and those stored results aggregated with the family size and dependence
+assumption stated. The whole loop runs in a terminal, which it did not before `V2-P5-047`:
+
+```text
+openalpha research run ./evidence.json --subject 000001.SZ --as-of 2026-01-16T09:00:00+00:00 > run.json
+openalpha validation record --research ./run.json --observation ./outcome.json
+openalpha validation statistics --signal sig_… --family-size 40 --dependence arbitrary
+
+openalpha report create --research ./run.json
+openalpha report export rpt_…
+```
+
+**`openalpha validation` shipped with two aggregate readers and no writer**, and `openalpha
+report` with an exporter and no writer, so a CLI-only operator read two stores nothing they could
+run had ever filled. Both writers now exist on all three faces; the route and the CLI command refuse a tampered
+content-address in byte-identical words, and the SDK takes a `ResearchRunResult` object whose
+identifiers it derives rather than reads.
+
+**Where the faces are still not equal, they say so in a test rather than in a paragraph.**
+`tests/unit/test_surface_parity.py` holds the three surfaces as **equalities** — every route with
+the SDK method and CLI command that reach it, plus `SDK_ONLY` and `CLI_ONLY` naming each
+deliberate asymmetry with its reason. `openalpha validation statistics` and `validation
+segmented` are `CLI_ONLY`: their SDK twins exist and no route does yet. `panel build`, `doctor`,
+`jobs register` and `jobs run` must **not** become routes while this API is unauthenticated. A
+command added without updating that table is red and names itself; prose about a gap is not.
 
 ## Development gates
 

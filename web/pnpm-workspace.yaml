@@ -1,2 +1,13 @@
 overrides:
-  brace-expansion: 5.0.8
+  # Three transitive *dev* advisories, all patch-level, none reachable from the production
+  # bundle: `undici` through `vitest > jsdom`, `brace-expansion` through `eslint > minimatch`,
+  # `nanoid` through `vite > postcss`.
+  #
+  # `brace-expansion` was already pinned here, at 5.0.8, when that was the fixed version. The
+  # advisory has since moved to `>=5.0.9`, so the override that was added to close this gate is
+  # what was holding it open -- a pin is a claim about a moment, and nothing re-reads it. The
+  # gate itself (`pnpm audit --audit-level high`, CI's `web` job) is what catches that, and it
+  # was exiting 1 on the untouched baseline.
+  brace-expansion: ^5.0.9
+  undici: ^7.29.0
+  nanoid: ^3.3.18

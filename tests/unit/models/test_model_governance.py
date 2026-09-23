@@ -1,7 +1,10 @@
+import io
 from datetime import UTC, datetime
 from decimal import Decimal
+from email.message import Message
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
 
 import pytest
 
@@ -10,12 +13,13 @@ from openalpha_cn.models.governance import (
     ModelRegistry,
     ModelRetryPolicy,
     ModelUsageRecord,
-    SQLiteModelUsageStore,
 )
 from openalpha_cn.models.openai_compatible import (
     ModelTransportError,
     OpenAICompatibleProvider,
+    UrllibJsonTransport,
 )
+from openalpha_cn.storage.models import SQLiteModelUsageStore
 
 
 class SequenceTransport:
@@ -144,3 +148,132 @@ def test_provider_does_not_retry_authentication_failure(
     with pytest.raises(ModelTransportError, match="unauthorized"):
         provider.generate_json(system="s", user="u", schema={"type": "object"})
     assert transport.calls == 1
+
+
+def test_provider_gives_up_after_max_attempts_with_capped_exponential_delay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OA-MODEL-003's "bounded exponential delay" and "no unbounded retry", driven to the bound.
+
+    Every attempt fails with a retryable error, so only the attempt limit can end the loop:
+    exactly `max_attempts` calls, then the last error propagates. Between attempts the delay
+    doubles from `base_delay_seconds` and is capped at `max_delay_seconds` -- 1.0, then 2.0
+    capped to 1.5, then 4.0 capped to 1.5. The transport holds more failures than the limit,
+    so a loop that ignored the limit would run the list dry and raise `IndexError` instead of
+    the transport error this asserts.
+
+    "The last error" is asserted by `request_id`, not by message: all ten queued errors say
+    `unavailable`, so the `match=` alone passes whichever of them propagates -- measured, a
+    provider changed to re-raise the first attempt's error left this test green until the
+    `request_id` assertion was added. The fourth attempt consumes `req-3`, so that is the one
+    that must surface.
+    """
+    monkeypatch.setenv("MODEL_KEY", "secret")
+    transport = SequenceTransport(
+        [
+            ModelTransportError(
+                "unavailable",
+                status_code=503,
+                retryable=True,
+                request_id=f"req-{attempt}",
+            )
+            for attempt in range(10)
+        ]
+    )
+    sleeps: list[float] = []
+    provider = OpenAICompatibleProvider(
+        provider_id="test",
+        model="model",
+        base_url="https://example.invalid/v1",
+        api_key_env="MODEL_KEY",
+        transport=transport,
+        retry_policy=ModelRetryPolicy(
+            max_attempts=4, base_delay_seconds=1.0, max_delay_seconds=1.5
+        ),
+        sleeper=sleeps.append,
+    )
+
+    with pytest.raises(ModelTransportError, match="unavailable") as caught:
+        provider.generate_json(system="s", user="u", schema={"type": "object"})
+
+    assert caught.value.request_id == "req-3", "the last attempt's error must propagate"
+    assert transport.calls == 4
+    assert sleeps == [1.0, 1.5, 1.5]
+
+
+@pytest.mark.parametrize(
+    ("status", "retryable"),
+    [
+        (408, True),
+        (429, True),
+        (500, True),
+        (502, True),
+        (503, True),
+        (504, True),
+        (400, False),
+        (401, False),
+        (403, False),
+        (404, False),
+        (422, False),
+        (501, False),
+    ],
+)
+def test_the_urllib_transport_classifies_each_http_status_as_retryable_or_not(
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    retryable: bool,
+) -> None:
+    """The HTTP-status half of OA-MODEL-003, which the provider tests above cannot reach.
+
+    Those tests hand the provider a `ModelTransportError` whose `retryable` flag is already set.
+    Which statuses are transient is decided one layer down, in `UrllibJsonTransport.post_json`:
+    408, 429, 500, 502, 503 and 504 are retryable and every other status is not. `urlopen` is
+    replaced with a function that raises the HTTP error directly, so no socket is ever opened.
+    """
+    headers = Message()
+    headers["x-request-id"] = "req-classify"
+
+    def refuse(request: object, timeout: float) -> object:
+        raise HTTPError(
+            "https://example.invalid/v1/chat/completions",
+            status,
+            "refused",
+            headers,
+            io.BytesIO(b""),
+        )
+
+    monkeypatch.setattr("openalpha_cn.models.openai_compatible.urlopen", refuse)
+
+    with pytest.raises(ModelTransportError) as caught:
+        UrllibJsonTransport().post_json(
+            url="https://example.invalid/v1/chat/completions",
+            headers={},
+            payload={},
+            timeout_seconds=1.0,
+        )
+
+    assert caught.value.status_code == status
+    assert caught.value.retryable is retryable
+    assert caught.value.request_id == "req-classify"
+
+
+def test_the_urllib_transport_treats_a_network_failure_as_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request that never got an HTTP status -- refused, unreachable, timed out -- is retried."""
+
+    def refuse(request: object, timeout: float) -> object:
+        raise URLError("connection refused")
+
+    monkeypatch.setattr("openalpha_cn.models.openai_compatible.urlopen", refuse)
+
+    with pytest.raises(ModelTransportError) as caught:
+        UrllibJsonTransport().post_json(
+            url="https://example.invalid/v1/chat/completions",
+            headers={},
+            payload={},
+            timeout_seconds=1.0,
+        )
+
+    assert caught.value.retryable is True
+    assert caught.value.status_code is None

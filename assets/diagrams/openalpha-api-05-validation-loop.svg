@@ -5,8 +5,59 @@
     <filter id="shadow" x="-20%" y="-20%" width="140%" height="160%">
       <feDropShadow dx="0" dy="7" stdDeviation="9" flood-color="#27324A" flood-opacity=".10" />
     </filter>
-    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L10,5 L0,10 z" fill="context-stroke" />
+    <marker id="arrow-5968F2" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 z" fill="#5968F2" />
+    </marker>
+    <marker id="arrowShort-5968F2" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L5,2.5 L0,5 z" fill="#5968F2" />
+    </marker>
+    <marker id="arrow-0F9F8F" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 z" fill="#0F9F8F" />
+    </marker>
+    <marker id="arrowShort-0F9F8F" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L5,2.5 L0,5 z" fill="#0F9F8F" />
+    </marker>
+    <marker id="arrow-7C5CE7" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 z" fill="#7C5CE7" />
+    </marker>
+    <marker id="arrowShort-7C5CE7" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L5,2.5 L0,5 z" fill="#7C5CE7" />
+    </marker>
+    <marker id="arrow-E89422" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 z" fill="#E89422" />
+    </marker>
+    <marker id="arrowShort-E89422" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L5,2.5 L0,5 z" fill="#E89422" />
+    </marker>
+    <marker id="arrow-1688D4" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1688D4" />
+    </marker>
+    <marker id="arrowShort-1688D4" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L5,2.5 L0,5 z" fill="#1688D4" />
+    </marker>
+    <marker id="arrow-D95D67" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 z" fill="#D95D67" />
+    </marker>
+    <marker id="arrowShort-D95D67" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L5,2.5 L0,5 z" fill="#D95D67" />
+    </marker>
+    <marker id="arrow-64748B" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64748B" />
+    </marker>
+    <marker id="arrowShort-64748B" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L5,2.5 L0,5 z" fill="#64748B" />
+    </marker>
+    <marker id="arrow-0F172A" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 z" fill="#0F172A" />
+    </marker>
+    <marker id="arrowShort-0F172A" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L5,2.5 L0,5 z" fill="#0F172A" />
+    </marker>
+    <marker id="arrow-C5CDDA" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 z" fill="#C5CDDA" />
+    </marker>
+    <marker id="arrowShort-C5CDDA" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L5,2.5 L0,5 z" fill="#C5CDDA" />
     </marker>
     <pattern id="dots" width="28" height="28" patternUnits="userSpaceOnUse">
       <circle cx="2" cy="2" r="1.5" fill="#D8DEEB" />
@@ -40,7 +91,7 @@
   <text x="96" y="281" class="endpoint">POST /api/v1/backtests/replay</text>
   <text x="88" y="316" class="body">冻结 ReplayCorpus</text>
   <text x="88" y="341" class="body">ResearchEngine.run_cycle</text>
-  <text x="88" y="366" class="body">确定性 / 防前视报告</text>
+  <text x="88" y="366" class="body">两遍比对 · as_of 时不可见即拒</text>
   <rect x="394" y="220" width="286" height="252" rx="18" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)" />
   <rect x="394" y="220" width="7" height="252" rx="3.5" fill="#D95D67" />
   <text x="418" y="252" class="cardTitle">多日组合</text>
@@ -64,45 +115,45 @@
   <text x="1086" y="281" class="endpoint">POST /api/v1/backtests/validate</text>
   <text x="1078" y="316" class="body">研究结果 + 未来观察</text>
   <text x="1078" y="341" class="body">重算 signal / decision ID</text>
-  <text x="1078" y="366" class="body">规则 / 因子 / Agent 归因</text>
+  <text x="1078" y="366" class="body">规则类目两项条款 · 显式残差</text>
   <rect x="128" y="540" width="1184" height="116" rx="18" fill="#EEF1FF" stroke="#D9DFEA" filter="url(#shadow)" />
   <rect x="128" y="540" width="7" height="116" rx="3.5" fill="#5968F2" />
-  <text x="152" y="572" class="cardTitle">验证结果汇总层</text>
+  <text x="152" y="572" class="cardTitle">四份报告各自返回 · 由调用方对照阅读</text>
   <text x="152" y="600" class="body">ReplayReport + PortfolioBacktestReport + EventStudyReport + ValidationResult</text>
-  <text x="152" y="625" class="body">共同回答：当时是否可知？是否可成交？是否显著？哪条规则、因子或 Agent 贡献了结果？</text>
-  <path d="M 207 474 L 207 532" fill="none" stroke="#7C5CE7" stroke-width="3" marker-end="url(#arrow)" />
-  <path d="M 537 474 L 537 532" fill="none" stroke="#D95D67" stroke-width="3" marker-end="url(#arrow)" />
-  <path d="M 867 474 L 867 532" fill="none" stroke="#1688D4" stroke-width="3" marker-end="url(#arrow)" />
-  <path d="M 1197 474 L 1197 532" fill="none" stroke="#0F9F8F" stroke-width="3" marker-end="url(#arrow)" />
+  <text x="152" y="625" class="body">共同回答：能否复现？是否可成交？是否显著？成本与空仓机会成本各占多少、残差多大？</text>
+  <path d="M 207 474 L 207 532" fill="none" stroke="#7C5CE7" stroke-width="3" stroke-dasharray="8 7" marker-end="url(#arrow-7C5CE7)" />
+  <path d="M 537 474 L 537 532" fill="none" stroke="#D95D67" stroke-width="3" stroke-dasharray="8 7" marker-end="url(#arrow-D95D67)" />
+  <path d="M 867 474 L 867 532" fill="none" stroke="#1688D4" stroke-width="3" stroke-dasharray="8 7" marker-end="url(#arrow-1688D4)" />
+  <path d="M 1197 474 L 1197 532" fill="none" stroke="#0F9F8F" stroke-width="3" stroke-dasharray="8 7" marker-end="url(#arrow-0F9F8F)" />
   <rect x="394" y="670" width="652" height="62" rx="18" fill="#FFFFFF" stroke="#D9DFEA" filter="url(#shadow)" />
   <rect x="394" y="670" width="7" height="62" rx="3.5" fill="#E89422" />
   <text x="418" y="702" class="cardTitle">下一轮显式改进</text>
   <text x="418" y="730" class="body">人工调整数据质量、路由、风险阈值和筛选；不自动训练模型</text>
-  <path d="M 720 658 L 720 662" fill="none" stroke="#E89422" stroke-width="3" stroke-dasharray="8 7" marker-end="url(#arrow)" />
-  <path d="M 72 754 L 126 754" fill="none" stroke="#5968F2" stroke-width="3" marker-end="url(#arrow)" />
+  <path d="M 720 656 L 720 670" fill="none" stroke="#E89422" stroke-width="3" stroke-dasharray="8 7" marker-end="url(#arrowShort-E89422)" />
+  <path d="M 72 754 L 126 754" fill="none" stroke="#5968F2" stroke-width="3" marker-end="url(#arrow-5968F2)" />
   <text x="140" y="759" class="small">服务端自动调用 / 持久化</text>
-  <path d="M 380 754 L 434 754" fill="none" stroke="#E89422" stroke-width="3" stroke-dasharray="8 7" marker-end="url(#arrow)" />
+  <path d="M 380 754 L 434 754" fill="none" stroke="#E89422" stroke-width="3" stroke-dasharray="8 7" marker-end="url(#arrow-E89422)" />
   <text x="448" y="759" class="small">调用方显式组合 / 反馈</text>
   <rect x="746" y="739" width="16" height="16" rx="4" fill="#64748B" opacity=".16" stroke="#64748B" />
   <text x="774" y="759" class="small">SQLite / Parquet 持久状态</text>
   <text x="1060" y="759" class="small">边界：不连接实盘券商</text>
-  <text x="64" y="780" class="navCaption">API 关系导航｜从数据合同到验证反馈的五层公开能力</text>
+  <text x="64" y="780" class="navCaption">API 关系导航｜从数据合同到验证反馈的五条 v1 研究链</text>
   <rect x="64" y="802" width="216" height="58" rx="18" fill="#FFFFFF" stroke="#D7DDE8" />
   <text x="98" y="838" class="navNumber" text-anchor="middle" fill="#64748B">01</text>
   <text x="134" y="837" class="navLabel" fill="#0F172A">API 全景</text>
-  <path d="M 286 831 L 316 831" fill="none" stroke="#C5CDDA" stroke-width="3" marker-end="url(#arrow)" />
+  <path d="M 286 831 L 316 831" fill="none" stroke="#C5CDDA" stroke-width="3" marker-end="url(#arrow-C5CDDA)" />
   <rect x="328" y="802" width="216" height="58" rx="18" fill="#FFFFFF" stroke="#D7DDE8" />
   <text x="362" y="838" class="navNumber" text-anchor="middle" fill="#64748B">02</text>
   <text x="398" y="837" class="navLabel" fill="#0F172A">证据数据</text>
-  <path d="M 550 831 L 580 831" fill="none" stroke="#C5CDDA" stroke-width="3" marker-end="url(#arrow)" />
+  <path d="M 550 831 L 580 831" fill="none" stroke="#C5CDDA" stroke-width="3" marker-end="url(#arrow-C5CDDA)" />
   <rect x="592" y="802" width="216" height="58" rx="18" fill="#FFFFFF" stroke="#D7DDE8" />
   <text x="626" y="838" class="navNumber" text-anchor="middle" fill="#64748B">03</text>
   <text x="662" y="837" class="navLabel" fill="#0F172A">研究编排</text>
-  <path d="M 814 831 L 844 831" fill="none" stroke="#C5CDDA" stroke-width="3" marker-end="url(#arrow)" />
+  <path d="M 814 831 L 844 831" fill="none" stroke="#C5CDDA" stroke-width="3" marker-end="url(#arrow-C5CDDA)" />
   <rect x="856" y="802" width="216" height="58" rx="18" fill="#FFFFFF" stroke="#D7DDE8" />
   <text x="890" y="838" class="navNumber" text-anchor="middle" fill="#64748B">04</text>
   <text x="926" y="837" class="navLabel" fill="#0F172A">决策产品</text>
-  <path d="M 1078 831 L 1108 831" fill="none" stroke="#C5CDDA" stroke-width="3" marker-end="url(#arrow)" />
+  <path d="M 1078 831 L 1108 831" fill="none" stroke="#C5CDDA" stroke-width="3" marker-end="url(#arrow-C5CDDA)" />
   <rect x="1120" y="802" width="216" height="58" rx="18" fill="#5968F2" stroke="#5968F2" filter="url(#shadow)" />
   <text x="1154" y="838" class="navNumber" text-anchor="middle" fill="#FFFFFF">05</text>
   <text x="1190" y="837" class="navLabel" fill="#FFFFFF">验证闭环</text>

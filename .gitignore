@@ -57,3 +57,7 @@ release-staging/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Agent worktrees and session scratch created by the coding harness. Never publishable, and
+# a `git add -A` that catches one commits an embedded repository rather than the file it meant.
+.claude/

@@ -26,8 +26,16 @@ Accept: application/json
 - `subject`、`kind`、`summary`、结构化 `payload`；
 - 可选 `source_uri`。
 
-OpenAlpha 在接收时添加自己的 `ingested_time`，然后仍通过统一
-`ProviderBatch` 和 `EvidenceSnapshot` 管线做 PIT 校验。
+客户端在接收时给每条记录添加自己的 `ingested_time`，返回一个 `ProviderBatch`；批次在构造时，
+只要有一条记录按请求的 `as_of` 不可见，就整批拒绝。这里的「不可见」包括 `available_time` 或
+`revision_time` 晚于 `as_of`：一条在 `as_of` 之后才修订的记录会让整批被拒，客户端不替服务端挑版本，
+也不丢行。只有当调用方代码把这个客户端交给
+`build_provider_evidence`，或把批次交给 `build_evidence` 或 `POST /api/v1/evidence/build` 时，
+记录才会变成 `EvidenceSnapshot`。出厂路径只有 `openalpha doctor` 构造这个客户端。配置了服务地址
+和密钥时，`--probe` 对每个数据集发一次最小请求，只报告每次请求以哪一类结果结束，取回的批次随即
+丢弃。只配服务地址、不配密钥时，客户端在发出请求之前就报 `authentication`：所有数据集都报
+`authentication`，一个请求也不发，`openalpha doctor --probe` 以非零状态退出。没配服务地址时（有没有
+密钥都一样），`--probe` 不调用客户端，各数据集都报 `not_configured`。
 
 ## 安全、限流和错误
 
@@ -41,4 +49,4 @@ OpenAlpha 在接收时添加自己的 `ingested_time`，然后仍通过统一
 - 空结果必须返回 `records: []` 和明确的 `no_data_reason`。
 
 该合同已经通过完全冻结的传输替身测试；真实服务联调仍需要链邻服务端按照此
-Schema 提供端点，不得把尚未配置的服务宣传为已连接。
+Schema 提供端点，不得把尚未配置的服务说成已经连通。

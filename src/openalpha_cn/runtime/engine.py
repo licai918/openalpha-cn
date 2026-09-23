@@ -4,66 +4,50 @@ import hashlib
 import platform
 from collections.abc import Callable, Sequence
 from datetime import datetime
-from typing import Literal, Self
+from typing import Final, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-
-from openalpha_cn.agents.base import AgentContext, AgentResult, ResearchAgent
+from openalpha_cn.agents.base import (
+    AgentContext,
+    AgentProvenance,
+    AgentResult,
+    FeaturePlane,
+    ResearchAgent,
+)
 from openalpha_cn.agents.baseline import baseline_agents
 from openalpha_cn.decisions.risk import RiskGate
 from openalpha_cn.domain.decision import AgentDecision, DecisionLedger
-from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.domain.json_value import canonical_json_bytes
-from openalpha_cn.domain.run import ArtifactDigest, RunManifest, VersionRef
+from openalpha_cn.domain.run import AgentVersion, ArtifactDigest, RunManifest, VersionRef
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.domain.time import ensure_aware
+from openalpha_cn.runtime.contracts import ResearchRunRequest, ResearchRunResult, RunConflictError
 from openalpha_cn.runtime.memory import MemoryEntry, ResearchMemory
+from openalpha_cn.runtime.recovery import RecoveryStore
+from openalpha_cn.runtime.repository import RunRepository
 from openalpha_cn.runtime.router import AgentRouter
-from openalpha_cn.storage.recovery import RunRecoveryState, SQLiteRecoveryStore
-from openalpha_cn.storage.sqlite import SQLiteRunRepository
+from openalpha_cn.runtime.seeding import seed_everything
+from openalpha_cn.storage.recovery import RunRecoveryState
 
+NO_AGENT_WAS_ROUTED: Final[str] = "No supported point-in-time evidence was available."
+"""Why a cycle abstained when `AgentRouter` selected nobody.
 
-class RunConflictError(RuntimeError):
-    """Raised when a run ID is reused with different immutable inputs."""
+Verbatim what this engine has always emitted for the empty roster, because it is user-visible
+text: a caller branching on the sentence keeps working. It is a named constant rather than a
+literal only so that the *second* abstention reason below cannot be written to say the same
+thing -- `tests/integration/test_abstaining_agent_aggregate.py` asserts they differ, and two
+literals in one function is how they would have come to agree.
+"""
 
+EVERY_ROUTED_AGENT_ABSTAINED: Final[str] = (
+    "Every agent that ran abstained, so no conclusion cites any evidence."
+)
+"""Why a cycle abstained when agents ran and none of them concluded anything (`V2-P4-008`).
 
-class ResearchRunRequest(BaseModel):
-    """All deterministic inputs to one research cycle."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
-
-    run_id: str = Field(min_length=1, max_length=128)
-    mode: Literal["live", "replay", "backtest"]
-    subject: str = Field(min_length=1, max_length=128)
-    as_of: datetime
-    evidence: tuple[EvidenceSnapshot, ...]
-    code_commit: str = Field(min_length=7, max_length=64)
-    config_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
-    random_seed: int
-
-    @field_validator("as_of")
-    @classmethod
-    def normalize_as_of(cls, value: datetime) -> datetime:
-        return ensure_aware(value)
-
-    @model_validator(mode="after")
-    def validate_evidence(self) -> Self:
-        if any(item.subject != self.subject for item in self.evidence):
-            raise ValueError("all evidence must match the requested subject")
-        if any(not item.visible_at(self.as_of) for item in self.evidence):
-            raise ValueError("evidence is not visible at request as_of")
-        return self
-
-
-class ResearchRunResult(BaseModel):
-    """Signal, decision, manifest, and agent outputs from one cycle."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    signal: SignalFrame
-    decision: DecisionLedger
-    manifest: RunManifest
-    agent_results: tuple[AgentResult, ...]
+A different fact from the one above and a different remedy: the first is fixed by supplying
+evidence or composing a feature plane, and this one by looking at why the agents that did run
+declined -- which `DecisionLedger.agent_outputs` carries per agent, and which is empty in the
+first case.
+"""
 
 
 class ResearchEngine:
@@ -72,13 +56,14 @@ class ResearchEngine:
     def __init__(
         self,
         *,
-        repository: SQLiteRunRepository,
+        repository: RunRepository,
         memory: ResearchMemory,
         clock: Callable[[], datetime],
+        recovery_store: RecoveryStore,
         agents: Sequence[ResearchAgent] | None = None,
         router: AgentRouter | None = None,
         risk_gate: RiskGate | None = None,
-        recovery_store: SQLiteRecoveryStore | None = None,
+        features: FeaturePlane | None = None,
     ) -> None:
         self.repository = repository
         self.memory = memory
@@ -86,18 +71,36 @@ class ResearchEngine:
         self.agents = tuple(agents or baseline_agents())
         self.router = router or AgentRouter()
         self.risk_gate = risk_gate or RiskGate()
-        self.recovery_store = recovery_store or SQLiteRecoveryStore(repository.path)
+        self.recovery_store = recovery_store
+        self.features = features
+        """The panel-plane columns this engine was composed with (`V2-P4-008`/`V2-P4-009`).
+
+        Composed rather than requested, and that is a constraint rather than a preference.
+        `ResearchRunRequest` is `extra="forbid"`, it is the body of `POST /api/v1/research/run`,
+        and `_load_or_start_recovery` digests `request.model_dump(mode="json")` into
+        `RunRecoveryState.request_digest` -- so a field added here would move the digest of every
+        request and make every stored recovery row conflict with the request that produced it.
+        A feature plane is also not the kind of thing a JSON body can carry: it is ~5,500 rows
+        read out of the panel store by whoever wired this engine up.
+        """
 
     def run_cycle(self, request: ResearchRunRequest) -> ResearchRunResult:
         """Execute the same evidence-to-decision path for every run mode."""
+        # V2-P0B-009: the one call site that actually threads `random_seed` into
+        # anything. See `runtime/seeding.py`'s module docstring for what this does and
+        # does not affect today -- nothing downstream of this call reads randomness yet.
+        seed_everything(request.random_seed)
         existing_manifest = self.repository.get_run(request.run_id)
         context = AgentContext(
             run_id=request.run_id,
             subject=request.subject,
             as_of=request.as_of,
             evidence=request.evidence,
+            features=self.features,
         )
-        selected = self.router.route(agents=self.agents, evidence=request.evidence)
+        selected = self.router.route(
+            agents=self.agents, evidence=request.evidence, features=self.features
+        )
         recovery = self._load_or_start_recovery(
             request=request,
             selected=selected,
@@ -128,11 +131,10 @@ class ResearchEngine:
                 ArtifactDigest(name=item.evidence_id, sha256=item.content_hash)
                 for item in request.evidence
             ),
-            model_versions=tuple(
-                VersionRef(component=result.agent_id, version="baseline/v1")
-                for result in agent_results
-            ),
+            agent_versions=self._agent_versions(selected=selected, results=agent_results),
+            model_versions=self._model_versions(selected=selected, results=agent_results),
             prompt_versions=(),
+            alpha_model_versions=(),
             random_seed=request.random_seed,
             environment=(VersionRef(component="python", version=platform.python_version()),),
             started_at=run_time,
@@ -141,6 +143,13 @@ class ResearchEngine:
         )
         decision = DecisionLedger(
             run_id=request.run_id,
+            # V2-P4-025: the manifest is built first precisely so its content address can be
+            # carried here. Roadmap section 9 measured `config_digest` and `random_seed`
+            # failing to reach `decision_id`; this one field is how they reach it now, and
+            # `tests/integration/test_run_identity.py::
+            # test_changing_config_digest_alone_moves_the_run_level_id_and_the_decision_id`
+            # is that experiment re-run against this line.
+            run_manifest_id=manifest.run_manifest_id,
             created_at=run_time,
             agent_outputs=tuple(
                 AgentDecision(
@@ -189,6 +198,72 @@ class ResearchEngine:
             )
         )
         return result
+
+    @staticmethod
+    def _provenance(
+        *,
+        selected: tuple[ResearchAgent, ...],
+        results: tuple[AgentResult, ...],
+    ) -> tuple[tuple[str, AgentProvenance], ...]:
+        """Pair each executed agent's id with what that agent declares about itself.
+
+        Keyed by `agent_id` rather than zipped positionally, because `results` and `selected`
+        are not guaranteed to line up: `_run_agents_with_recovery` starts from
+        `state.completed_results` after an interrupted run and continues from
+        `next_agent_index`, so a resumed cycle's results are assembled from two sources. Zipping
+        would silently attach one agent's declaration to another agent's result on exactly the
+        path where nobody is watching -- and the resulting manifest would be wrong about which
+        model produced which signal while still validating.
+
+        A result whose agent is not in `selected` is refused rather than skipped, for the same
+        reason `_run_agents_with_recovery` refuses a result whose `agent_id` does not match the
+        agent that produced it: the manifest would otherwise under-report the roster, and an
+        under-reported roster is a run declaration that does not describe the run.
+        """
+        declared = {agent.agent_id: agent.provenance for agent in selected}
+        paired: list[tuple[str, AgentProvenance]] = []
+        for result in results:
+            provenance = declared.get(result.agent_id)
+            if provenance is None:
+                raise ValueError(f"agent result has no declared provenance: {result.agent_id}")
+            paired.append((result.agent_id, provenance))
+        return tuple(paired)
+
+    @classmethod
+    def _agent_versions(
+        cls,
+        *,
+        selected: tuple[ResearchAgent, ...],
+        results: tuple[AgentResult, ...],
+    ) -> tuple[AgentVersion, ...]:
+        """The agent plane: who ran, and of what kind (`V2-P4-010`, S40)."""
+        return tuple(
+            AgentVersion(agent_id=agent_id, kind=provenance.kind)
+            for agent_id, provenance in cls._provenance(selected=selected, results=results)
+        )
+
+    @classmethod
+    def _model_versions(
+        cls,
+        *,
+        selected: tuple[ResearchAgent, ...],
+        results: tuple[AgentResult, ...],
+    ) -> tuple[VersionRef, ...]:
+        """The LLM plane: which vendor models this run actually called.
+
+        De-duplicated while keeping first-call order, because two agents pointed at the same
+        endpoint and model are one model version and not two -- the manifest is recording what
+        the run depended on, not how many times it depended on it. `dict.fromkeys` rather than
+        `sorted(set(...))` for the same reason `agent_versions` is unsorted: the order runs
+        happened in is a fact about the declaration, and sorting would discard it.
+        """
+        return tuple(
+            dict.fromkeys(
+                provenance.model
+                for _, provenance in cls._provenance(selected=selected, results=results)
+                if provenance.model is not None
+            )
+        )
 
     def _load_or_start_recovery(
         self,
@@ -241,6 +316,27 @@ class ResearchEngine:
         selected: tuple[ResearchAgent, ...],
         recovery: RunRecoveryState,
     ) -> tuple[AgentResult, ...]:
+        """Run the graph from where it stopped, recording each agent as it finishes.
+
+        **`V2-P4-020`: the loop no longer rebuilds `state`.** It used to derive a fresh
+        `RunRecoveryState` after every agent -- `model_dump(mode="python")` of everything
+        completed so far, then `model_validate` of everything plus one -- and hand the whole
+        document to `save()`. Both halves grew with what the run had already done, so `N`
+        agents cost `N(N+1)/2` result serialisations twice over. Measured at `be262ea` on
+        empty agents: 78 for `N=12`, 20,100 and 11.74 MB for `N=200`, 80,200 and 46.68 MB for
+        `N=400`; the dump-and-revalidate half alone was 0.327 s at `N=400`.
+
+        `state` is now the state this attempt *started* from and is not reassigned, because
+        nothing in the loop needs a whole one: `append_result` takes the single result and the
+        position the graph declares it at, and the two places that do need a whole state --
+        resuming a failed attempt and recording a failure -- happen at most once per run and
+        build it from `results` explicitly. That also fixes what the failure path was reading:
+        it took `state.completed_results`, which was only right because the previous iteration
+        had just written that field, and it now names `tuple(results)` directly.
+
+        `tests/integration/test_recovery_write_amplification.py` is the measurement kept as
+        the gate, and it counts operations rather than seconds for the usual reason.
+        """
         state = recovery
         if state.status == "failed":
             state = self._updated_recovery(
@@ -260,6 +356,8 @@ class ResearchEngine:
                 self.recovery_store.save(
                     self._updated_recovery(
                         state,
+                        completed_results=tuple(results),
+                        next_agent_index=len(results),
                         status="failed",
                         error_type=type(error).__name__,
                         updated_at=ensure_aware(self.clock()),
@@ -271,15 +369,12 @@ class ResearchEngine:
                     f"agent result ID mismatch: expected {agent.agent_id}, got {result.agent_id}"
                 )
             results.append(result)
-            state = self._updated_recovery(
-                state,
-                completed_results=tuple(results),
-                next_agent_index=index + 1,
-                status="running",
-                error_type=None,
+            self.recovery_store.append_result(
+                state.run_id,
+                position=index,
+                result=result,
                 updated_at=ensure_aware(self.clock()),
             )
-            self.recovery_store.save(state)
         return tuple(results)
 
     @staticmethod
@@ -322,17 +417,41 @@ class ResearchEngine:
                 strength=0,
                 confidence=0,
                 horizon="5d",
-                abstention_reason="No supported point-in-time evidence was available.",
+                abstention_reason=NO_AGENT_WAS_ROUTED,
+            )
+        evidence_ids = tuple(
+            dict.fromkeys(
+                evidence_id for result in results for evidence_id in result.signal.evidence_ids
+            )
+        )
+        risk_flags = tuple(
+            sorted({item for result in results for item in result.signal.risk_flags})
+        )
+        if not evidence_ids:
+            # V2-P4-008 found this, and `be262ea` had it: `direction` was computed from the
+            # mean strength before anything looked at `evidence_ids`, so a cycle in which every
+            # routed agent abstained built a `neutral` frame citing nothing and
+            # `SignalFrame.validate_conclusion` raised `directional signal requires evidence`
+            # straight out of `run_cycle`. `V2-P4-029` settled the same question for
+            # `DeliberationCommittee.review`: an abstention is the claim that the evidence
+            # supports no direction, and overruling it means minting a directional conclusion
+            # from a frame that cites nothing. So this abstains, and the risk flags the
+            # abstaining agents raised travel with it -- an agent that declined *because* the
+            # data was suspect has said something the gate should still hear.
+            return SignalFrame(
+                subject=request.subject,
+                as_of=request.as_of,
+                direction="abstain",
+                strength=0,
+                confidence=0,
+                horizon="5d",
+                risk_flags=risk_flags,
+                abstention_reason=EVERY_ROUTED_AGENT_ABSTAINED,
             )
         strength = sum(result.signal.strength for result in results) / len(results)
         confidence = sum(result.signal.confidence for result in results) / len(results)
         direction: Literal["bullish", "bearish", "neutral"] = (
             "bullish" if strength > 0.15 else "bearish" if strength < -0.15 else "neutral"
-        )
-        evidence_ids = tuple(
-            dict.fromkeys(
-                evidence_id for result in results for evidence_id in result.signal.evidence_ids
-            )
         )
         return SignalFrame(
             subject=request.subject,
@@ -352,9 +471,7 @@ class ResearchEngine:
                     item for result in results for item in result.signal.invalidation_conditions
                 )
             ),
-            risk_flags=tuple(
-                sorted({item for result in results for item in result.signal.risk_flags})
-            ),
+            risk_flags=risk_flags,
         )
 
     @staticmethod

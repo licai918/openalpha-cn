@@ -1,12 +1,21 @@
-"""Generate the five source-grounded OpenAlpha CN research-system diagrams."""
+"""Generate the five OpenAlpha CN research-system diagrams.
+
+Every string here is prose about the code and is read as such by
+`tests/integration/test_retired_claims_stay_retired.py`, one literal at a time. What no
+guard does is check a drawing against the code it describes, so nothing here calls itself
+source-grounded.
+"""
 
 # SVG copy intentionally uses Chinese full-width punctuation.
 # ruff: noqa: RUF001, E501
 
 from __future__ import annotations
 
+import math
+import re
 from html import escape
 from pathlib import Path
+from typing import Final
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_DIR = ROOT / "assets" / "diagrams"
@@ -32,6 +41,95 @@ NAVIGATION = (
     ("04", "决策约束"),
     ("05", "验证反馈"),
 )
+
+
+ARROW_COLORS: Final[tuple[str, ...]] = (CYAN, BLUE, VIOLET, AMBER, CORAL, LIME, LINE)
+"""Every stroke colour an arrow is drawn in, which is one marker each.
+
+`fill="context-stroke"` is the one-marker way to do this and it is not supported everywhere:
+rendered through QuickLook, a `context-stroke` head comes out `rgb(0,0,0)` while the line it
+ends stays its own colour -- measured on a two-line probe, `(251,191,36)` for the literal fill
+and `(0,0,0)` for the context one. On these dark panels a black head is nearly invisible, and
+the head is what carries the direction, so each colour gets its own marker with a literal fill.
+"""
+
+
+def _numeral(value: int) -> str:
+    """One through ten as this drawing writes them, for a count taken from a list's length.
+
+    `brain-01` said 五级专业流水线 over a `stages` list holding four for as long as the fourth
+    stage has existed, because the label was a literal beside the list rather than a reading of
+    it. A count of something drawn here is written from the thing drawn.
+    """
+    if not 1 <= value <= 10:
+        raise ValueError(f"no numeral here for {value}: this table holds one through ten")
+    return "一二三四五六七八九十"[value - 1]
+
+
+def _marker_defs() -> str:
+    """The `<marker>` elements, two sizes for every arrow colour."""
+    parts: list[str] = []
+    for color in ARROW_COLORS:
+        key = color.lstrip("#")
+        parts.append(
+            f'    <marker id="arrow-{key}" markerWidth="11" markerHeight="11" refX="9" '
+            f'refY="5.5" orient="auto" markerUnits="strokeWidth">\n'
+            f'      <path d="M0 0L11 5.5L0 11Z" fill="{color}" />\n'
+            f"    </marker>"
+        )
+        parts.append(
+            f'    <marker id="arrowShort-{key}" markerWidth="5" markerHeight="5" refX="4" '
+            f'refY="2.5" orient="auto" markerUnits="strokeWidth">\n'
+            f'      <path d="M0 0L5 2.5L0 5Z" fill="{color}" />\n'
+            f"    </marker>"
+        )
+    return "\n".join(parts)
+
+
+def _marker(color: str, *, short: bool = False) -> str:
+    """The marker id for one stroke colour, or the nearest one this file emits."""
+    key = (color if color in ARROW_COLORS else LINE).lstrip("#")
+    return f"arrow{'Short' if short else ''}-{key}"
+
+
+def _last_leg(d: str) -> float | None:
+    """The final straight segment's length, or `None` when the path ends in a curve.
+
+    Reads `M`, `L`, `H`, `V` and `C`, the same set `generate_api_relationship_diagrams.py`
+    reads. No drawing here ends in a curve today, and a measurement that silently skipped a
+    `C` would report the straight leg before it instead -- which is a wrong number rather than
+    no number, so the curve is recognised and answered with `None`.
+    """
+    tokens = re.findall(r"([MLHVC])\s*(-?[\d.]+)(?:[ ,]+(-?[\d.]+))?", d)
+    x = y = 0.0
+    last: float | None = 0.0
+    for command, first, second in tokens:
+        if command == "M":
+            x, y = float(first), float(second or 0)
+        elif command == "L":
+            nx, ny = float(first), float(second or 0)
+            last, x, y = math.hypot(nx - x, ny - y), nx, ny
+        elif command == "H":
+            nx = float(first)
+            last, x = abs(nx - x), nx
+        elif command == "V":
+            ny = float(first)
+            last, y = abs(ny - y), ny
+        elif command == "C":
+            last = None
+    return last
+
+
+def _head_for(d: str, width: float) -> bool:
+    """Whether this line needs the short head: `True` when the long one would overrun.
+
+    The default marker's `refX` is 9 and the short one's is 4, both in `strokeWidth` units, so
+    the ink behind the tip is `9 * width` and `4 * width`. A head longer than the leg it sits on
+    is drawn across the corner before it -- 9.8 units of it for the 02->03 link, which is how
+    this rule arrived -- so the leg decides the head rather than the caller.
+    """
+    leg = _last_leg(d)
+    return leg is not None and leg < 9 * width
 
 
 class Svg:
@@ -77,9 +175,7 @@ class Svg:
     <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
       <path d="M32 0H0V32" fill="none" stroke="#6D87A3" stroke-width=".55" opacity=".12" />
     </pattern>
-    <marker id="arrow" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
-      <path d="M0 0L11 5.5L0 11Z" fill="context-stroke" />
-    </marker>
+{markers}
     <style>
       text { font-family: Geist, "Plus Jakarta Sans", "Noto Sans SC", "Microsoft YaHei", sans-serif; }
       .eyebrow { font-size: 13px; font-weight: 760; letter-spacing: 1.8px; }
@@ -87,6 +183,7 @@ class Svg:
       .subtitle { font-size: 16px; font-weight: 480; }
       .micro { font-size: 11px; font-weight: 760; letter-spacing: 1.25px; }
       .cardTitle { font-size: 20px; font-weight: 720; }
+      .cardTitleTight { font-size: 17px; font-weight: 720; }
       .body { font-size: 14px; font-weight: 490; }
       .small { font-size: 12px; font-weight: 520; }
       .mono { font-size: 12px; font-weight: 680; font-family: Geist Mono, "Noto Sans Mono CJK SC", monospace; }
@@ -94,7 +191,7 @@ class Svg:
       .nav { font-size: 13px; font-weight: 680; }
       .navNum { font-size: 12px; font-weight: 800; }
     </style>
-  </defs>""".replace("ACCENT", accent),
+  </defs>""".replace("ACCENT", accent).replace("{markers}", _marker_defs()),
             f'  <rect width="1440" height="900" fill="{BG}" />',
             '  <rect width="1440" height="900" fill="url(#bgGradient)" />',
             '  <rect width="1440" height="900" fill="url(#ambient)" />',
@@ -206,8 +303,10 @@ class Svg:
         label_y: float | None = None,
     ) -> None:
         dash = ' stroke-dasharray="8 8"' if dashed else ""
+        d = f"M{x1} {y1}L{x2} {y2}"
+        head = _marker(color, short=_head_for(d, 2.2))
         self.raw(
-            f'  <path d="M{x1} {y1}L{x2} {y2}" fill="none" stroke="{color}" stroke-width="2.2"{dash} marker-end="url(#arrow)" />'
+            f'  <path d="{d}" fill="none" stroke="{color}" stroke-width="2.2"{dash} marker-end="url(#{head})" />'
         )
         if label:
             self.text(
@@ -228,8 +327,17 @@ class Svg:
         arrow: bool = True,
         opacity: float = 1,
     ) -> None:
+        """One polyline, with the head its last leg can hold.
+
+        The default marker is `markerWidth="11"` at `markerUnits="strokeWidth"`, so at this
+        file's 2.2 stroke it is 24.2 units long with 19.8 of them behind the tip. A link whose
+        last leg is shorter than that draws its head across the corner before it -- the 02->04
+        link crosses a 22-unit gap, so its last leg can be 11 units at most. The short marker is
+        11 units long with 8.8 behind the tip, which fits inside that leg.
+        """
         dash = ' stroke-dasharray="8 8"' if dashed else ""
-        marker = ' marker-end="url(#arrow)"' if arrow else ""
+        short = _head_for(d, 2.2)
+        marker = f' marker-end="url(#{_marker(color, short=short)})"' if arrow else ""
         self.raw(
             f'  <path d="{d}" fill="none" stroke="{color}" stroke-width="2.2"{dash}{marker} opacity="{opacity}" />'
         )
@@ -243,11 +351,11 @@ class Svg:
 
     def legend(self) -> None:
         self.raw(
-            f'  <line x1="898" y1="171" x2="938" y2="171" stroke="{CYAN}" stroke-width="2.2" marker-end="url(#arrow)" />'
+            f'  <line x1="898" y1="171" x2="938" y2="171" stroke="{CYAN}" stroke-width="2.2" marker-end="url(#{_marker(CYAN)})" />'
         )
         self.text(948, 175, "自动执行 / 持久化", css="small", color=MUTED)
         self.raw(
-            f'  <line x1="1108" y1="171" x2="1148" y2="171" stroke="{AMBER}" stroke-width="2.2" stroke-dasharray="7 7" marker-end="url(#arrow)" />'
+            f'  <line x1="1108" y1="171" x2="1148" y2="171" stroke="{AMBER}" stroke-width="2.2" stroke-dasharray="7 7" marker-end="url(#{_marker(AMBER)})" />'
         )
         self.text(1158, 175, "显式组合 / 人工反馈", css="small", color=MUTED)
 
@@ -282,14 +390,18 @@ class Svg:
             self.text(x + 55, y + 32, label, css="nav", color=label_color)
             if position < len(NAVIGATION):
                 self.raw(
-                    f'  <path d="M{x + width + 5} {y + 26}H{x + width + gap - 5}" stroke="{self.accent if position == self.index else LINE}" stroke-width="1.7" marker-end="url(#arrow)" />'
+                    f'  <path d="M{x + width + 3} {y + 26}H{x + width + gap - 3}" stroke="{self.accent if position == self.index else LINE}" stroke-width="1.7" marker-end="url(#{_marker(self.accent if position == self.index else LINE, short=True)})" />'
                 )
 
     def finish(self, filename: str) -> None:
         self.navigation()
         self.raw("</svg>")
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        (OUTPUT_DIR / filename).write_text("\n".join(self.parts) + "\n", encoding="utf-8")
+        # `newline="\n"`: text mode would otherwise write "\r\n" on Windows, and the committed
+        # SVGs are LF everywhere (`.gitattributes`), so the sync test would fail there.
+        (OUTPUT_DIR / filename).write_text(
+            "\n".join(self.parts) + "\n", encoding="utf-8", newline="\n"
+        )
 
 
 def overview() -> None:
@@ -307,21 +419,20 @@ def overview() -> None:
         232,
         275,
         438,
-        title="A 股证据入口",
+        title="A 股证据输入",
         label="DATA PLANE",
         color=CYAN,
         lines=(
-            "链邻数据接口 API",
-            "已实现 · 统一替代入口",
-            "用户授权实时 A 股数据",
             "用户自有 CSV / JSONL / Parquet",
             "Provider 合同 · 鉴权 · 限流",
             "来源 / 许可 / 修订语义",
+            "链邻数据接口 API",
+            "客户端合同 · 仅 doctor 使用",
+            "证据与面板构建不调用它",
         ),
     )
     svg.pill(88, 624, 220, "输入不等于证据", color=CYAN)
 
-    svg.section_label(385, 214, "B", "五级专业流水线", VIOLET)
     stages = [
         (
             374,
@@ -331,7 +442,7 @@ def overview() -> None:
             "01",
             "证据成像",
             "EvidenceSnapshot",
-            ("四时钟 PIT", "内容寻址 · 来源与许可"),
+            ("可得与修订时间 PIT · 四时钟", "内容寻址 · 来源与许可"),
             CYAN,
         ),
         (
@@ -342,7 +453,7 @@ def overview() -> None:
             "02",
             "研究编排",
             "ResearchRunResult",
-            ("持久批量队列 · 1–32 并发", "ResearchEngine.run_cycle"),
+            ("持久批量队列 · 1–8 并发", "ResearchEngine.run_cycle"),
             VIOLET,
         ),
         (
@@ -353,7 +464,7 @@ def overview() -> None:
             "03",
             "决策约束",
             "DeliberationOutcome",
-            ("Bull / Bear · 三态风控", "显式弃权 · A 股交易约束"),
+            ("Bull / Bear · 三态风控", "输入弃权原样保留 · 一次可选调用"),
             AMBER,
         ),
         (
@@ -368,16 +479,17 @@ def overview() -> None:
             BLUE,
         ),
     ]
+    svg.section_label(385, 214, "B", f"{_numeral(len(stages))}级专业流水线", VIOLET)
     for x, y, width, height, number, label, title, lines, color in stages:
         svg.panel(
             x, y, width, height, title=title, label=f"{number} / {label}", color=color, lines=lines
         )
     svg.arrow(696, 331, 716, 331, color=VIOLET)
-    svg.path("M877 418V430H535V440", color=AMBER)
-    svg.arrow(696, 527, 716, 527, color=BLUE)
-    svg.path("M877 614V650H535V625", color=AMBER, dashed=True)
-    svg.pill(566, 636, 312, "统计证据反哺规则 · 不自动训练模型", color=AMBER)
-    svg.arrow(339, 451, 374, 451, color=CYAN, label="规范化", label_y=435)
+    svg.path("M877 418V430H535V440", color=AMBER, dashed=True)
+    svg.path("M1002 418V429H944V440", color=BLUE, dashed=True)
+    svg.path("M780 614V676H1054V331H1038", color=AMBER, dashed=True)
+    svg.pill(790, 636, 250, "人工复核后调整规则 · 不自动训练模型", color=AMBER)
+    svg.arrow(339, 331, 374, 331, color=CYAN, label="规范化", label_y=315)
 
     svg.section_label(1081, 214, "C", "系统级保证", CORAL)
     svg.panel(
@@ -391,9 +503,9 @@ def overview() -> None:
         lines=(
             "RunManifest / DecisionLedger",
             "Checkpoint · SQLite WAL",
-            "Retry / Recovery · 成本账本",
+            "Retry / Recovery · 逐项终态",
             "证据不足时显式 abstain",
-            "API / SDK / CLI / Web 同契约",
+            "REST 经 FastAPI · SDK / CLI 进程内",
         ),
     )
     svg.panel(
@@ -414,7 +526,7 @@ def evidence() -> None:
         index=2,
         eyebrow="证据平面",
         title="先证明“当时可知”，再讨论模型是否聪明",
-        subtitle="所有研究结论先经过授权、限流、四时钟与内容寻址，得到可追溯、可回放的 EvidenceSnapshot。",
+        subtitle="Provider 批次与序列化证据都先经过四时钟与内容寻址，才成为可追溯、可回放的 EvidenceSnapshot。",
         accent=CYAN,
     )
     svg.legend()
@@ -425,9 +537,9 @@ def evidence() -> None:
         250,
         190,
         title="链邻数据接口 API",
-        label="LICENSED DATA",
+        label="CLIENT CONTRACT",
         color=CYAN,
-        lines=("已实现 · 统一替代入口", "Bearer 鉴权 · 客户端限流", "时效 / 精度以链邻服务为准"),
+        lines=("客户端合同 · 仅 doctor 使用", "Bearer 鉴权 · 客户端限流", "证据与面板构建不调用它"),
     )
     svg.panel(
         64,
@@ -453,17 +565,19 @@ def evidence() -> None:
         lines=(
             "ProviderMetadata / ProviderBatch",
             "认证 · 限流 · 新鲜度",
-            "错误分类与 Retry-After",
+            "五类失败分类",
             "PIT 可见性与修订语义",
             "涨停 / 炸板 / 连板 / 题材",
             "催化 / 公告 / 资金语义",
             "统一 schema 后才可进入研究",
         ),
     )
-    svg.arrow(314, 327, 348, 327, color=CYAN)
+    # Dashed, as the legend draws explicit composition: no shipped path takes ChainLin's
+    # batches into the gate (only `doctor` constructs the client); a caller's own code may.
+    svg.arrow(314, 327, 348, 327, color=CYAN, dashed=True)
     svg.arrow(314, 514, 348, 514, color=BLUE)
 
-    svg.section_label(670, 214, "C", "四时钟 PIT", CYAN)
+    svg.section_label(670, 214, "C", "可得与修订时间 PIT · 四时钟", CYAN)
     clocks = [
         (658, "事件发生", "event_time"),
         (837, "首次可知", "available_time"),
@@ -477,19 +591,24 @@ def evidence() -> None:
         svg.text(x + 80, 270, title, css="cardTitle", color=TEXT, anchor="middle")
         svg.text(x + 80, 298, code, css="mono", color=CYAN, anchor="middle")
 
+    # The identity formula is `EvidenceSnapshot.evidence_id` (`domain/evidence.py`): a hash of
+    # these five joined with "|", and nothing else -- `source_uri` does not move it. It takes two
+    # lines, so both lower panels are 14 taller than their four-line height and the query band
+    # below them moved down by as much.
     svg.panel(
         658,
         350,
         454,
-        200,
+        214,
         title="EvidenceSnapshot",
         label="CONTENT-ADDRESSED ARTIFACT",
         color=CYAN,
         lines=(
-            "evidence_id = hash(source_uri + content_hash)",
+            "evidence_id = hash(subject | kind | source_id |",
+            "available_time | content_hash)",
             "可见时点 · 哈希 · 来源 · 许可 · 修订",
             "A 股事件语义与原始载荷建立绑定",
-            "下游只接收决策时刻已经可知的 evidence_id",
+            "下游只接收可得与修订时间都不晚于决策时刻的 evidence_id",
         ),
     )
     svg.arrow(622, 421, 658, 421, color=CYAN, label="固化", label_y=405)
@@ -497,26 +616,26 @@ def evidence() -> None:
         1142,
         350,
         214,
-        200,
+        214,
         title="证据存储",
         label="IMMUTABLE STORE",
         color=BLUE,
-        lines=("Parquet 分区", "DuckDB PIT 查询", "只读证据工具", "内容哈希复核"),
+        lines=("Parquet 分区", "DuckDB PIT 查询", "只追加 · 不改写", "内容哈希复核"),
     )
     svg.arrow(1112, 450, 1142, 450, color=BLUE)
 
     svg.raw(
-        f'  <rect x="658" y="578" width="698" height="92" rx="20" fill="{PANEL_ALT}" stroke="{LINE}" />'
+        f'  <rect x="658" y="592" width="698" height="92" rx="20" fill="{PANEL_ALT}" stroke="{LINE}" />'
     )
-    svg.text(684, 608, "QUERY CONTRACT", css="micro", color=BLUE)
+    svg.text(684, 622, "QUERY CONTRACT", css="micro", color=BLUE)
     svg.text(
         684,
-        646,
-        "as_of + symbol / event_type → 可见证据集合 → EvidenceSnapshot",
+        660,
+        "as_of + subject / kind → 可见证据集合 → EvidenceSnapshot",
         css="cardTitle",
         color=TEXT,
     )
-    svg.pill(1163, 588, 168, "交付研判脑区 →", color=CYAN)
+    svg.pill(1163, 602, 168, "交付研判脑区 →", color=CYAN)
     svg.finish("openalpha-brain-02-evidence.svg")
 
 
@@ -525,7 +644,7 @@ def agents() -> None:
         index=3,
         eyebrow="研究编排",
         title="把证据规模化为可反驳、可审计的结构化观点",
-        subtitle="单次与批量任务复用同一研究内核；角色由证据类型路由，模型只在治理边界内增强，不替代确定性基线。",
+        subtitle="单次与批量任务复用同一研究内核；角色由证据类型路由，模型只在治理边界内增强；不传入 Agent 时运行确定性基线。",
         accent=VIOLET,
     )
     svg.legend()
@@ -546,11 +665,11 @@ def agents() -> None:
         244,
         198,
         title="持久批量任务中心",
-        label="1–32 CONCURRENCY",
+        label="1–8 CONCURRENCY",
         color=VIOLET,
         lines=(
             "进度事件 · 取消 · 重试",
-            "Checkpoint · 宕机恢复",
+            "Checkpoint · 重试续跑",
             "每个标的复用同一 runner",
             "无旁路分析逻辑",
         ),
@@ -567,7 +686,7 @@ def agents() -> None:
         label="ORCHESTRATION KERNEL",
         color=VIOLET,
         lines=(
-            "EvidenceLookupTool 只读查询",
+            "读取请求内 as_of 可见证据",
             "AgentRouter 记录 routing_path",
             "按证据类型选择专业角色",
             "汇总 SignalFrame",
@@ -614,7 +733,7 @@ def agents() -> None:
             "evidence_ids / signal_ids / risk_flags",
             "确认条件 / 失效条件",
             "watch / avoid / abstain",
-            "agent_outputs / routing_path / 成本",
+            "agent_outputs / routing_path / 版本",
         ),
     )
     svg.path("M962 287H980V340H1000", color=AMBER)
@@ -624,11 +743,15 @@ def agents() -> None:
         1000,
         532,
         376,
-        138,
+        162,
         title="模型治理边界",
         label="OPTIONAL MODEL ENHANCEMENT",
         color=CORAL,
-        lines=("能力注册 · Schema 校验 · 408/429/5xx 重试", "Token / 尝试次数 / 估算成本持久化"),
+        lines=(
+            "需代码接入 · Schema 校验",
+            "408/429/500/502/503/504 有界重试",
+            "Token / 尝试次数账本 · 出厂路径不调用模型",
+        ),
     )
     svg.finish("openalpha-brain-03-agents.svg")
 
@@ -678,20 +801,20 @@ def decision() -> None:
         f'  <rect x="370" y="260" width="208" height="120" rx="18" fill="{PANEL_SOFT}" stroke="{LIME}" stroke-opacity=".34" />'
     )
     svg.text(394, 289, "BULL / 正方", css="micro", color=LIME)
-    svg.text(394, 322, "收益证据链", css="cardTitle", color=TEXT)
-    svg.text(394, 352, "机会 · 催化 · 确认条件", css="body", color=MUTED)
+    svg.text(394, 322, "看多证据", css="cardTitle", color=TEXT)
+    svg.text(394, 352, "看多 Agent · 证据 · 得分", css="body", color=MUTED)
     svg.raw(
         f'  <rect x="596" y="260" width="208" height="120" rx="18" fill="{PANEL_SOFT}" stroke="{CORAL}" stroke-opacity=".34" />'
     )
     svg.text(620, 289, "BEAR / 反方", css="micro", color=CORAL)
-    svg.text(620, 322, "风险证据链", css="cardTitle", color=TEXT)
-    svg.text(620, 352, "反例 · 失效 · 流动性", css="body", color=MUTED)
+    svg.text(620, 322, "看空证据", css="cardTitle", color=TEXT)
+    svg.text(620, 352, "看空 Agent · 证据 · 得分", css="body", color=MUTED)
     svg.raw(
         f'  <rect x="822" y="260" width="150" height="120" rx="18" fill="{PANEL_SOFT}" stroke="{AMBER}" stroke-opacity=".34" />'
     )
     svg.text(846, 289, "RISK PANEL", css="micro", color=AMBER)
-    svg.text(846, 320, "激进 / 中性", css="body", color=TEXT)
-    svg.text(846, 347, "保守 / 弃权", css="body", color=TEXT)
+    svg.text(846, 320, "激进/中性/保守", css="body", color=TEXT)
+    svg.text(846, 347, "pass/reduce/block", css="small", color=MUTED)
     svg.path("M308 340H346", color=AMBER, dashed=True)
     svg.arrow(578, 320, 596, 320, color=AMBER, dashed=True)
     svg.arrow(804, 320, 822, 320, color=AMBER, dashed=True)
@@ -701,32 +824,32 @@ def decision() -> None:
     svg.text(
         671,
         435,
-        "DeliberationOutcome · 分歧摘要 / 风险调整信号 / 消融对照",
+        "DeliberationOutcome · 分歧摘要 / 辩论调整信号 / 消融对照",
         css="small",
         color=AMBER,
         anchor="middle",
     )
 
-    svg.section_label(1045, 214, "C", "最终研究裁决", CORAL)
+    svg.section_label(1045, 214, "C", "委员会结果 · 交还调用方", CORAL)
     svg.panel(
         1034,
         232,
         342,
         250,
-        title="RiskGate / DecisionLedger",
-        label="POLICY DECISION",
+        title="DeliberationOutcome",
+        label="RETURNED TO CALLER",
         color=CORAL,
         lines=(
-            "pass · reduce · block",
-            "watch · avoid · abstain",
-            "风险信号保留，不被模型文案覆盖",
-            "证据 / 路由 / 信号 / 裁决全链可追溯",
-            "显式弃权是合法的一等结果",
+            "bull_case / bear_case",
+            "risk_votes：pass · reduce · block",
+            "adjusted_signal / ablation",
+            "不写入 DecisionLedger",
+            "输入的显式弃权原样保留",
         ),
     )
     svg.path("M996 357H1015V340H1034", color=CORAL, dashed=True)
 
-    svg.section_label(357, 524, "D", "组合会计 · 显式 portfolio compose", BLUE)
+    svg.section_label(357, 524, "D", "组合会计 · 显式 portfolio execute", BLUE)
     svg.raw(
         f'  <rect x="346" y="542" width="1030" height="128" rx="22" fill="{PANEL}" stroke="{BLUE}" stroke-opacity=".30" />'
     )
@@ -755,8 +878,8 @@ def validation() -> None:
     svg = Svg(
         index=5,
         eyebrow="验证与反馈",
-        title="用同一路径回答：是否有效、为何有效、下一轮改什么",
-        subtitle="实时研究与历史回放共享 run_cycle；统计、组合与产物层只消费可复核账本，反馈必须经人工审阅后进入规则。",
+        title="三重验证回答：是否显著、组合表现如何、记录是否一致",
+        subtitle="实时研究与历史回放共享 run_cycle；事件统计与多日组合用调用方提供的收益与订单，反馈经人工审阅后进入规则。",
         accent=BLUE,
     )
     svg.legend()
@@ -769,7 +892,7 @@ def validation() -> None:
         title="实时研究",
         label="LIVE RESEARCH",
         color=CYAN,
-        lines=("API / SDK / CLI / Web", "同一输入与输出契约", "授权 Provider 载荷"),
+        lines=("REST / SDK / CLI / Web 发起", "都汇入同一 run_cycle", "授权 Provider 载荷"),
     )
     svg.panel(
         64,
@@ -789,11 +912,12 @@ def validation() -> None:
         title="ResearchEngine.run_cycle",
         label="SAME EXECUTION PATH",
         color=VIOLET,
+        title_size="cardTitleTight",
         lines=(
             "同一 AgentRouter",
             "同一 RiskGate",
             "同一 DecisionLedger",
-            "同一成本与恢复语义",
+            "同一 Checkpoint 恢复",
             "输出 ResearchRunResult",
         ),
     )
@@ -808,10 +932,17 @@ def validation() -> None:
             354,
             "多日组合报告",
             "收益 · 基准 · 主动收益 · 换手",
-            "容量 · 暴露 · 标的归因",
+            "最大单笔成交额 · 最大总敞口 · 标的已实现盈亏",
             VIOLET,
         ),
-        (644, 476, "内容一致性验证", "ID 重算 · 账本完整性", "结果属性与失败原因归因", CORAL),
+        (
+            644,
+            476,
+            "内容一致性验证",
+            "ID 重算 · 账本完整性",
+            "成本与空仓机会成本 · 显式残差",
+            CORAL,
+        ),
     ]
     for x, y, title, headline, detail, color in validation_cards:
         svg.raw(
@@ -821,9 +952,9 @@ def validation() -> None:
         svg.text(x + 22, y + 29, title.upper(), css="micro", color=color)
         svg.text(x + 22, y + 58, headline, css="cardTitle", color=TEXT)
         svg.text(x + 22, y + 84, detail, css="small", color=MUTED)
-    svg.path("M606 360H625V284H644", color=CYAN)
-    svg.arrow(606, 401, 644, 406, color=VIOLET)
-    svg.path("M606 442H625V528H644", color=CORAL)
+    svg.path("M606 360H625V284H644", color=CYAN, dashed=True)
+    svg.arrow(606, 401, 644, 406, color=VIOLET, dashed=True)
+    svg.path("M606 442H625V528H644", color=CORAL, dashed=True)
 
     svg.section_label(1031, 214, "C", "研究产品与交付", AMBER)
     svg.panel(
@@ -831,21 +962,20 @@ def validation() -> None:
         232,
         356,
         348,
-        title="ValidationResult",
+        title="研究产品",
         label="RESEARCH PRODUCTS",
         color=AMBER,
         lines=(
             "结构化研究筛选",
             "SQLite 持久观察池",
             "内容寻址不可变报告中心",
-            "REST / SDK / CLI / Web",
-            "Checkpoint · SQLite WAL · 灾难恢复",
-            "报告 / 指标 / 归因保留 provenance",
+            "REST 全部 · SDK 大部分 · CLI 仅报告",
+            "SQLite WAL · 同一 runtime_dir",
+            "Compose 部署时落在持久卷",
+            "筛选与报告带 run / decision / signal ID",
+            "观察池只存标的 · 标签 · 备注",
         ),
     )
-    svg.path("M982 284H1002V330H1020", color=AMBER)
-    svg.arrow(982, 406, 1020, 406, color=AMBER)
-    svg.path("M982 528H1002V482H1020", color=AMBER)
 
     svg.raw(
         f'  <rect x="348" y="608" width="1028" height="62" rx="19" fill="{AMBER}" fill-opacity=".075" stroke="{AMBER}" stroke-opacity=".30" />'
