@@ -40,6 +40,23 @@ ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 SRC: Final[Path] = ROOT / "src" / "openalpha_cn"
 INGEST: Final[Path] = SRC / "panel_ingest.py"
 STORE: Final[Path] = SRC / "panel" / "store.py"
+LEDGER: Final[Path] = ROOT / "artifacts" / "openalpha-v1-feature-coverage" / "features.csv"
+"""The feature ledger, which this table holds for its *twins* of counts written in `src/`.
+
+Two reviews four rounds apart found the same defect in it: the sentence in `src/` was
+corrected and the copy here was not (`OA-FACTOR-004`, then `OA-FACTOR-007`). The cheap
+rule is the one that closes it -- a count this table already derives is registered at
+**every** wording, and the ledger is one of the places a wording lives.
+
+It is registered for `CLAIMS` only. The two coverage checks skip it, and this is the
+measured reason rather than an oversight: the file is one CSV row per feature, so its
+"paragraphs" are 185 blocks of up to 25,714 characters, and most numbers in them are
+readings with their own time on them ("27 mutants killed", "1,296 coverage lookups").
+Sweeping those for unregistered counts reddens hundreds of correct sentences, which is a
+guard that gets switched off. `tests/unit/test_ledger_claims_carry_their_time.py` is the
+rule that reads this file instead, and it matches a sentence's shape rather than a
+number.
+"""
 
 _WORDS: Final[tuple[str, ...]] = (
     "no",
@@ -69,6 +86,16 @@ _WORDS: Final[tuple[str, ...]] = (
 
 def _spell(count: int) -> str:
     return _WORDS[count] if count < len(_WORDS) else str(count)
+
+
+def _unspell(word: str) -> str:
+    """The figure behind a spelling, so a claim rendered in digits moves when the fact moves.
+
+    It has to read the rendered word rather than the fact itself: the stale-count self-test
+    below renders every claim one higher, and a digits claim that went back to the facts for its
+    number would render today's count and pass that test while proving nothing.
+    """
+    return word if word.isdigit() else str(_WORDS.index(word.lower()))
 
 
 def _module_functions(path: Path) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
@@ -193,6 +220,42 @@ def _call_sites(attribute: str, *, outside: Path | None = None, on_a_scope: bool
                 continue
             total += 1
     return total
+
+
+def _declared_factors() -> int:
+    """`FACTOR_DEFINITIONS`' own size, imported rather than parsed.
+
+    The registry is assembled from per-family tuples, so an AST count of `FactorDefinition(`
+    inside its assignment finds none of them -- measured, and the reason this one fact is read
+    by import while the rest of this table is read from the syntax tree.
+    """
+    from openalpha_cn.panel_factors import FACTOR_DEFINITIONS
+
+    return len(FACTOR_DEFINITIONS.definitions)
+
+
+def _panel_datasets() -> int:
+    """How many datasets `providers/tushare.py` declares, by the tuple's own length."""
+    from openalpha_cn.providers.tushare import TUSHARE_DATASETS
+
+    return len(TUSHARE_DATASETS)
+
+
+def _filtered_read_caller_files() -> int:
+    """The `src/` files that take the row-filtered door, which is what the ledger's allowlist
+    sentence counts. `panel/store.py` is excluded because it defines the method."""
+    files: set[str] = set()
+    for path in sorted(SRC.rglob("*.py")):
+        if path == STORE:
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "read_visible_at"
+            ):
+                files.add(path.name)
+    return len(files)
 
 
 def _imported_loaders(module: str) -> int:
@@ -322,6 +385,9 @@ FACTS: Final[dict[str, Callable[[], int]]] = {
     "stable_model_id_call_sites": lambda: _name_call_sites("stable_model_id"),
     "feature_matrix_loaders": lambda: _imported_loaders("feature_matrix.py"),
     "event_dated_callers": lambda: len(_direct_callers("_read_visible_event_dated_rows")),
+    "declared_factors": _declared_factors,
+    "panel_datasets": _panel_datasets,
+    "filtered_read_caller_files": _filtered_read_caller_files,
     "whole_partition_loaders": lambda: len(_loaders_by_door()["whole"]),
     "filtered_loaders": lambda: len(_loaders_by_door()["filtered"]),
     "event_dated_loaders": lambda: len(_reaching("_read_visible_event_dated_rows")),
@@ -342,6 +408,14 @@ class CountedClaim:
 
     path: Path
     template: str
+    digits: bool = False
+    """Render this claim's numbers in figures rather than in words.
+
+    `_spell` picks one spelling, and prose here spells a count up to twenty. A ledger cell that
+    mirrors an executable assertion writes the assertion's own figures instead -- `16 datasets`
+    beside `assert len(report.datasets) == 16` -- and a claim that rendered `sixteen` there would
+    be pinning a sentence nobody wrote.
+    """
 
 
 CLAIMS: Final[tuple[CountedClaim, ...]] = (
@@ -435,6 +509,27 @@ CLAIMS: Final[tuple[CountedClaim, ...]] = (
     CountedClaim(
         SRC / "panel_ingest.py",
         "because the {event_dated_callers} callers' rules genuinely differ",
+    ),
+    CountedClaim(
+        LEDGER,
+        "the src/ callers allowed to take it -- {filtered_read_caller_files} files today",
+    ),
+    CountedClaim(
+        LEDGER,
+        "driven over all {declared_factors} through build_factor_experiment",
+    ),
+    CountedClaim(
+        LEDGER,
+        "and {declared_factors} pairwise distinct experiment_ids",
+    ),
+    CountedClaim(
+        LEDGER,
+        "The factor catalog: the {declared_factors} declarations",
+    ),
+    CountedClaim(
+        LEDGER,
+        "panel_health_report ({panel_datasets} datasets, 12 waiving required_dates",
+        digits=True,
     ),
 )
 """Every counted sentence this file holds, **including a second wording of a number already here**.
@@ -563,6 +658,11 @@ NUMBERS_MEANING_SOMETHING_ELSE: Final[tuple[tuple[Path, str, str], ...]] = (
         "the caller this sentence then names, not a count",
     ),
     (
+        SRC / "panel_factors.py",
+        "The contracts, the four estimators",
+        "the transform plane's estimators, which no fact in this table counts",
+    ),
+    (
         SRC / "panel_ingest.py",
         "a function of two arguments the caller supplied",
         "a function's arity, not a count of callers",
@@ -600,11 +700,19 @@ def _flat(text: str) -> str:
     return " ".join(text.split())
 
 
+def _render(claim: CountedClaim, spelled: dict[str, str]) -> str:
+    """The claim's sentence with the tree's own answer in it, spelled the way that file spells."""
+    if not claim.digits:
+        return claim.template.format(**spelled)
+    figures = {name: _unspell(word) for name, word in spelled.items()}
+    return claim.template.format(**figures)
+
+
 def _drifted(claims: tuple[CountedClaim, ...], spelled: dict[str, str]) -> list[str]:
     return [
         f"{claim.path.relative_to(ROOT)} no longer says: {rendered}"
         for claim in claims
-        if _flat(rendered := claim.template.format(**spelled))
+        if _flat(rendered := _render(claim, spelled))
         not in _flat(claim.path.read_text(encoding="utf-8"))
     ]
 
@@ -621,6 +729,8 @@ def _pinned_paragraphs(
     held: dict[Path, list[tuple[str, tuple[str, ...]]]] = {}
     rendered_by_path: dict[Path, list[str]] = {}
     for claim in CLAIMS:
+        if claim.path == LEDGER:
+            continue
         rendered_by_path.setdefault(claim.path, []).append(claim.template.format(**spelled))
     for path, rendered in rendered_by_path.items():
         for paragraph in _paragraphs(path):
@@ -640,7 +750,7 @@ def _spans(haystack: str, needle: str) -> list[tuple[int, int]]:
 
 
 NUMBER_TOKEN: Final[re.Pattern[str]] = re.compile(
-    rf"(?<![\w\-/`.,])(?:{'|'.join(_WORDS[1:])}|\d{{1,3}})(?![\w\-/`,])", re.IGNORECASE
+    rf"(?<![\w\-/`.,:])(?:{'|'.join(_WORDS[1:])}|\d{{1,3}})(?![\w\-/`,:])", re.IGNORECASE
 )
 """A number as prose writes it: any case, any punctuation around it, spelled or in digits.
 
@@ -707,7 +817,7 @@ def _uncounted_door_counts(spelled: dict[str, str]) -> list[str]:
     declared.
     """
     uncovered: list[str] = []
-    for path in sorted({claim.path for claim in CLAIMS}):
+    for path in sorted({claim.path for claim in CLAIMS} - {LEDGER}):
         rendered = [
             _flat(claim.template.format(**spelled)) for claim in CLAIMS if claim.path == path
         ]

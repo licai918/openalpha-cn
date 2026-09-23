@@ -249,7 +249,8 @@ uv run openalpha serve
 
 `openalpha doctor --probe` 对已配置的 provider（链邻要配服务地址，AKShare 要装 akshare extra，否则按数据集报 `not_configured` 或 `configuration`）在凭证齐全时对它声明的**每一个**数据集发一次最小请求，并按数据集记录结果
 （Tushare 现为 16/16；面板专供的四个走 `fetch_panel`，需要 `index_code`/`ts_code`/报告期年
-的六个由 provider 自己给出最小主体）。报 `authentication` 时命令**非零退出**（端点拒绝了凭证会这样；链邻只配服务地址、没配 key 时也这样，而且一个请求都不发），
+的六个由 provider 自己给出最小主体，另有两个也自带主体但不是为这三类键：`index_classify`
+要一个分类年份、`index_member_all` 要一个 l1 行业码，合计八个）。报 `authentication` 时命令**非零退出**（端点拒绝了凭证会这样；链邻只配服务地址、没配 key 时也这样，而且一个请求都不发），
 `--json` 也一样——它不再在打印完 payload 之后直接返回；而「这个接口这个账号取不到」
 （`upstream`）和「限流」（`rate_limit`）按数据集如实上报且**不**影响退出码，因为那正是这份
 报告要交付的内容本身。
@@ -303,8 +304,12 @@ fail-closed 依赖门。
 「CLI 崩了」和「面板体检不过」在 CI 里就是同一个数字。
 
 `panel doctor` 只在报告 `is_clean` 为假时以 `1` 退出 —— 即出现 `blocking` 或 `warning`。
-`notice` 永不非零：`ambiguous_filing` 在真实财报上命中 8.15%/1.29%/15.80%/13.70% 的申报，
-让 notice 非零等于让每次诚实体检都失败，然后这个命令会在第一条流水线里被 `|| true` 掉。
+`notice` 永不非零：`ambiguous_filing` 在真实财报上很常见 —— `V2-P1-011` 的 53 只证券语料上
+命中 8.15%/1.29%/15.80%/13.70% 的申报，后来 185 只的第二次抽样读到
+8.51%/0.95%/17.11%/11.80%（并排表在 `docs/specs/v2/openalpha-cn-v2-roadmap.md:1771`，
+`cashflow` 那一格比先前记录的更差）。两组都是抽样的属性而不是数据集的常数，但在两组数下
+结论一样：让 notice 非零等于让每次诚实体检都失败，然后这个命令会在第一条流水线里被
+`|| true` 掉。
 
 ```bash
 # 构建：十四个目标，按依赖序执行，与 --dataset 出现顺序无关
