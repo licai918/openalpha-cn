@@ -283,6 +283,7 @@ forbidden_modules = [
   "openalpha_cn.sdk",
   "openalpha_cn.shortlist_view",
   "openalpha_cn.model_view",
+  "openalpha_cn.strategy_view",
 ]
 # Whole-package source, no exemptions: nothing under backtest/ reaches any of these today, on
 # full transitive reachability. ADR-0003's decision is that this repository ships no numerical
@@ -317,6 +318,7 @@ source_modules = [
   "openalpha_cn.backtest.portfolio_policy",
   "openalpha_cn.backtest.segmented_reporting",
   "openalpha_cn.backtest.shortlist_gate",
+  "openalpha_cn.backtest.strategy_backtest",
   "openalpha_cn.backtest.turnover_variants",
   "openalpha_cn.backtest.validation",
   "openalpha_cn.backtest.walk_forward",
@@ -368,6 +370,7 @@ source_modules = [
   "openalpha_cn.backtest.portfolio_policy",
   "openalpha_cn.backtest.segmented_reporting",
   "openalpha_cn.backtest.shortlist_gate",
+  "openalpha_cn.backtest.strategy_backtest",
   "openalpha_cn.backtest.turnover_variants",
   "openalpha_cn.backtest.walk_forward",
 ]

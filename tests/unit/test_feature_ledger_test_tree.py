@@ -63,7 +63,7 @@ bfc = _load_module()
 # `_ledger_test_files()` and `Counter(Path(p).parent.as_posix() for p in ...)`. Every entry moving
 # is a legitimate edit; the point is that it cannot happen *silently*.
 LEDGER_TEST_FILE_COUNTS = {
-    "tests": 2,
+    "tests": 3,
     "tests/contract/panel": 1,
     "tests/contract/providers": 14,
     "tests/e2e": 3,
@@ -71,9 +71,9 @@ LEDGER_TEST_FILE_COUNTS = {
     "tests/integration/panel": 34,
     "tests/integration/storage": 8,
     "tests/replay": 2,
-    "tests/unit": 30,
+    "tests/unit": 32,
     "tests/unit/agents": 2,
-    "tests/unit/backtest": 15,
+    "tests/unit/backtest": 16,
     "tests/unit/domain": 25,
     "tests/unit/evidence": 1,
     "tests/unit/models": 2,
@@ -84,7 +84,7 @@ LEDGER_TEST_FILE_COUNTS = {
     "web/e2e": 1,
     "web/src": 1,
 }
-LEDGER_TEST_FILE_TOTAL = 189
+LEDGER_TEST_FILE_TOTAL = 193
 
 FIELDNAMES = [
     "feature_id",

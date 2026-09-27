@@ -477,6 +477,29 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_view.without_store_path",
         }
     ),
+    "openalpha_cn.strategy_view": frozenset(
+        {
+            "factor_view.FactorRequestError",
+            "factor_view.resolve_factor",
+            "panel_factors.FACTOR_TRANSFORMS",
+            "panel_factors.FactorEngineError",
+            "panel_factors.load_factor_observations",
+            "panel_factors.load_processed_factor_observations",
+            "panel_ingest.load_adjustment_histories",
+            "panel_ingest.load_daily_bars",
+            "panel_ingest.load_index_prices",
+            "panel_ingest.load_industry_cross_section",
+            "panel_ingest.load_price_limits",
+            "panel_ingest.load_suspensions",
+            "panel_ingest.load_trading_calendar",
+            "panel_ingest.session_publication_instant",
+            "panel_neutralization.FACTOR_NEUTRALIZATIONS",
+            "panel_neutralization.NeutralizationEngineError",
+            "panel_neutralization.load_neutralized_factor_observations",
+            "panel_view.PANEL_STORE_PLACEHOLDER",
+            "panel_view.without_store_path",
+        }
+    ),
     "openalpha_cn.shortlist_compare": frozenset(
         {
             "shortlist_view.SHORTLIST_VIEW_SCHEMA_VERSION",
@@ -653,6 +676,30 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
             }
         ),
     ),
+    "openalpha_cn.strategy_view": DatasetReach(
+        # V2-P6-007. It names exactly one dataset, `index_member_all`, and only to ask the
+        # store which membership years it holds before an industry cap reads them; everything
+        # else arrives through the loaders it takes across the seam. It reaches neither
+        # `namechange` (a published band decides the price limit, so no ST flag is read) nor
+        # `stock_basic` (the book trades what the priced cross section offers).
+        named=frozenset({"index_member_all"}),
+        reached=frozenset(
+            {
+                "adj_factor",
+                "balancesheet",
+                "cashflow",
+                "daily",
+                "daily_basic",
+                "fina_indicator",
+                "income",
+                "index_daily",
+                "index_member_all",
+                "stk_limit",
+                "suspend_d",
+                "trade_cal",
+            }
+        ),
+    ),
     "openalpha_cn.shortlist_compare": DatasetReach(
         # V2-P4-007. The only row in this table that is empty in both directions, and the
         # only module in the discovered set that can say so: it reads two rendered answers
@@ -809,8 +856,8 @@ def _top_level_panel_modules() -> list[str]:
     )
 
 
-RESEARCH_PLANE_PREFIXES = ("panel_", "factor_", "shortlist_", "feature_", "model_")
-"""The five top-level module families the research plane is built out of.
+RESEARCH_PLANE_PREFIXES = ("panel_", "factor_", "shortlist_", "feature_", "model_", "strategy_")
+"""The six top-level module families the research plane is built out of.
 
 `_top_level_panel_modules()` above globs `panel_*.py` alone, which was the whole plane when it
 was written and is not any more: `V2-P3-015` added `factor_view.py`, a *second* top-level family
@@ -849,6 +896,12 @@ twenty-six names come off `openalpha_cn.feature_matrix`, a research-plane siblin
 That is what `_is_research_plane_stem` was widened for at `factor_view`'s arrival, and it is why
 the table is at name granularity -- a face reaching a *producer* is a different edge from a face
 reaching a loader, and both are now diffs on one row.
+
+**`strategy_` is the sixth, and `V2-P6-007`'s `strategy_view.py` took the same remedy.** It reads
+the stored factor tiers, the price and halt corpus, the published bands, the adjustment factors,
+the index levels and -- when an industry cap is declared -- the industry cross section, and hands
+them to `backtest/strategy_backtest.py` as plain inputs, which is the join
+`backtest-no-numeric-stack-or-panel-plane` forbids that study to make for itself.
 """
 
 

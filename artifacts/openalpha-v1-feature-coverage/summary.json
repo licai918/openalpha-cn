@@ -1,7 +1,7 @@
 {
   "category_distribution": {
     "agent": 9,
-    "backtest": 17,
+    "backtest": 18,
     "batch": 4,
     "boundary": 7,
     "decision": 9,
@@ -31,13 +31,13 @@
     "DEFERRED": 1,
     "ENHANCED_REPLACEMENT": 20,
     "EXCLUDED": 4,
-    "NATIVE_COMPLETE": 159
+    "NATIVE_COMPLETE": 160
   },
   "totals": {
-    "all_features": 185,
+    "all_features": 186,
     "legacy_acceptance_rows": 26,
-    "true_completed_features": 180,
-    "true_completion_rate_pct": 97.3,
+    "true_completed_features": 181,
+    "true_completion_rate_pct": 97.31,
     "unknown": 0,
     "unreviewed": 0
   }

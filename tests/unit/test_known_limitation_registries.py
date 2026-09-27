@@ -148,6 +148,7 @@ from openalpha_cn.backtest.segmented_reporting import (
     KNOWN_SEGMENTED_REPORTING_LIMITATIONS,
 )
 from openalpha_cn.backtest.shortlist_gate import KNOWN_SHORTLIST_GATE_LIMITATIONS
+from openalpha_cn.backtest.strategy_backtest import KNOWN_STRATEGY_BACKTEST_LIMITATIONS
 from openalpha_cn.backtest.turnover_variants import KNOWN_TURNOVER_VARIANT_LIMITATIONS
 from openalpha_cn.backtest.validation import KNOWN_ATTRIBUTION_LIMITATIONS
 from openalpha_cn.backtest.walk_forward import KNOWN_WALK_FORWARD_LIMITATIONS
@@ -211,6 +212,7 @@ LIMITATION_REGISTRIES: Final[dict[str, Sequence[_Limitation]]] = {
     "KNOWN_SHORTLIST_GATE_LIMITATIONS": KNOWN_SHORTLIST_GATE_LIMITATIONS,
     "KNOWN_SEGMENTED_REPORTING_LIMITATIONS": KNOWN_SEGMENTED_REPORTING_LIMITATIONS,
     "KNOWN_TURNOVER_VARIANT_LIMITATIONS": KNOWN_TURNOVER_VARIANT_LIMITATIONS,
+    "KNOWN_STRATEGY_BACKTEST_LIMITATIONS": KNOWN_STRATEGY_BACKTEST_LIMITATIONS,
     "KNOWN_WALK_FORWARD_LIMITATIONS": KNOWN_WALK_FORWARD_LIMITATIONS,
     "KNOWN_BASELINE_LIMITATIONS": KNOWN_BASELINE_LIMITATIONS,
     "KNOWN_TREE_LIMITATIONS": KNOWN_TREE_LIMITATIONS,
@@ -548,7 +550,7 @@ def test_the_registry_table_is_every_known_registry_in_the_source_tree() -> None
     }
 
     assert found == set(LIMITATION_REGISTRIES) | set(CODELESS_REGISTRIES)
-    assert len(LIMITATION_REGISTRIES) == 41
+    assert len(LIMITATION_REGISTRIES) == 42
     assert set(LIMITATION_REGISTRIES) & set(CODELESS_REGISTRIES) == set()
 
 
@@ -626,8 +628,11 @@ CODES_THAT_RECUR_ACROSS_REGISTRIES: Final[dict[str, frozenset[str]]] = {
             "KNOWN_EXPERIMENT_LIMITATIONS",
         }
     ),
+    "the_exit_leg_is_priced_on_the_entry_share_count": frozenset(
+        {"KNOWN_QUANTILE_PORTFOLIO_LIMITATIONS", "KNOWN_STRATEGY_BACKTEST_LIMITATIONS"}
+    ),
 }
-"""The three codes that are written by hand into more than one registry, and where.
+"""The four codes that are written by hand into more than one registry, and where.
 
 Per-registry uniqueness has been asserted since `V2-P2-007`'s binding was widened; **across**
 registries nothing was asserted at all, and `V2-P4-038` is what that cost. The binding one
@@ -640,7 +645,7 @@ entry left `tests/unit` at 2816 passed and the seven integration and contract mo
 touch a limitation registry at 233 passed.
 
 So this is a table rather than a bare "no code appears twice", because global uniqueness is
-**false today and rightly so**, in three places and for three different reasons:
+**false today and rightly so**, in four places and for four different reasons:
 
 - `silent_truncation_at_the_response_cap` names one defect that really does recur at four
   different response caps, which is the reason `DERIVED_REGISTRY` gives for
@@ -651,6 +656,9 @@ So this is a table rather than a bare "no code appears twice", because global un
   neutralised tier restated on each of the three studies that read it, and it is the entry
   `V2-P4-026` **renamed** rather than appended around -- so all three had to move together and
   a table that pins where it lives is what makes the next such rename visible.
+- `the_exit_leg_is_priced_on_the_entry_share_count` is one fact about `adj_factor` -- it cannot
+  tell a cash dividend from a share change, so a sale's true share count is not reconstructible
+  -- met by the quantile study's round trip and by `V2-P6-007`'s rolling book alike.
 
 The value is the exact set of registries, not a count, so a recurrence that *moves* to a
 different registry is as red as one that appears. `KNOWN_PANEL_LIMITATIONS` is excluded on
@@ -675,6 +683,7 @@ REGISTRY_ENTRY_COUNTS: Final[dict[str, int]] = {
     "KNOWN_CONSTRUCTION_LIMITATIONS": 7,
     "KNOWN_SEGMENTED_REPORTING_LIMITATIONS": 7,
     "KNOWN_TURNOVER_VARIANT_LIMITATIONS": 6,
+    "KNOWN_STRATEGY_BACKTEST_LIMITATIONS": 13,
     "KNOWN_PAPER_LIMITATIONS": 8,
     "KNOWN_WALK_FORWARD_LIMITATIONS": 11,
     "KNOWN_BASELINE_LIMITATIONS": 10,
@@ -743,11 +752,11 @@ no longer written in prose at all. `DOCSTRING_TOTALS` below holds them as an equ
 
 DOCSTRING_TOTALS: Final[Mapping[str, int]] = MappingProxyType(
     {
-        "registries": 41,
-        "entries": 368,
+        "registries": 42,
+        "entries": 381,
         "derived_entries": 70,
-        "table_rows": 40,
-        "table_entries": 298,
+        "table_rows": 41,
+        "table_entries": 311,
     }
 )
 """Every number this module would otherwise have stated in prose, as an equality.
@@ -840,7 +849,7 @@ def test_no_code_recurs_across_two_registries_except_where_it_is_declared_to() -
     """`V2-P4-038`'s second half: per-registry uniqueness was asserted, global uniqueness was not.
 
     Equality against `CODES_THAT_RECUR_ACROSS_REGISTRIES` rather than a bare "no code twice",
-    because three codes genuinely recur and each has a reason recorded beside it. The value is the
+    because four codes genuinely recur and each has a reason recorded beside it. The value is the
     exact set of registries, so a recurrence that moves is as red as one that appears -- and a
     foreign code arriving in a registry it does not belong to, which is the measured probe, is a
     key the table does not have.

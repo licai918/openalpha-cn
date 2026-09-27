@@ -4,8 +4,8 @@
 
 ## 对账结论
 
-- 功能总数: 185
-- 当前真实完成: 180 (97.3%)
+- 功能总数: 186
+- 当前真实完成: 181 (97.31%)
 - `UNREVIEWED=0`
 - `UNKNOWN=0`
 - `legacy_acceptance_rows=26` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
@@ -18,7 +18,7 @@
 | `DEFERRED` | 1 |
 | `ENHANCED_REPLACEMENT` | 20 |
 | `EXCLUDED` | 4 |
-| `NATIVE_COMPLETE` | 159 |
+| `NATIVE_COMPLETE` | 160 |
 
 ## 功能明细
 
@@ -209,6 +209,7 @@
 | `OA-RANK-005` | ranking | The stored panel reaches the two-stage funnel, and the funnel reaches a user: one adapter and three faces | `NATIVE_COMPLETE` | `src/openalpha_cn/shortlist_view.py#load_shortlist_cross_section;src/openalpha_cn/shortlist_view.py#run_shortlist;src/openalpha_cn/shortlist_view.py#shortlist_request;src/openalpha_cn/shortlist_view.py#shortlist_view;src/openalpha_cn/shortlist_view.py#clipped_from_the_tie_at_the_top;src/openalpha_cn/shortlist_view.py#SHORTLIST_VIEW_LIMITATION_CODES;src/openalpha_cn/cli.py#shortlist_run_command;src/openalpha_cn/cli.py#SHORTLIST_EXIT;src/openalpha_cn/api/app.py#SHORTLIST_HTTP_STATUS;src/openalpha_cn/sdk.py#run_shortlist` | `tests/integration/test_shortlist_interfaces.py;tests/unit/test_shortlist_view.py` | `pytest` | `tests/integration/test_shortlist_interfaces.py::test_a_blocked_shortlist_and_a_legitimately_empty_one_are_two_different_answers` |
 | `OA-PORT-001` | backtest | Heuristic target-weight construction: tiered ranking, cap trimming, turnover budget | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/portfolio_policy.py#construct_portfolio;src/openalpha_cn/backtest/portfolio_policy.py#PortfolioConstructionPolicy;src/openalpha_cn/backtest/portfolio_policy.py#PortfolioConstruction;src/openalpha_cn/backtest/portfolio_policy.py#TargetWeight;src/openalpha_cn/backtest/portfolio_policy.py#ConstructionCandidate;src/openalpha_cn/backtest/portfolio_policy.py#candidates_from_shortlist_answer;src/openalpha_cn/backtest/portfolio_policy.py#candidates_from_ranking;src/openalpha_cn/backtest/portfolio_policy.py#construction_view;src/openalpha_cn/backtest/portfolio_policy.py#KNOWN_CONSTRUCTION_LIMITATIONS;src/openalpha_cn/cli.py#portfolio_construct_command;src/openalpha_cn/api/app.py#PortfolioConstructionApiRequest;src/openalpha_cn/sdk.py#OpenAlphaSDK` | `tests/unit/backtest/test_portfolio_policy.py;tests/integration/test_portfolio_construction_interfaces.py` | `pytest` | `tests/integration/test_portfolio_construction_interfaces.py::test_the_cli_weights_a_stored_shortlist_and_labels_the_answer_a_heuristic` |
 | `OA-PORT-002` | backtest | PortfolioOrder carries its target weight; PortfolioLimits carries industry, turnover and cash bounds | `NATIVE_COMPLETE` | `src/openalpha_cn/domain/portfolio.py#PortfolioOrder;src/openalpha_cn/backtest/portfolio.py#PortfolioLimits;src/openalpha_cn/backtest/portfolio.py#LIMITS_ENFORCED_BY_THE_SIMULATOR;src/openalpha_cn/backtest/portfolio_policy.py#LIMITS_ENFORCED_BY_THE_CONSTRUCTION_POLICY` | `tests/unit/backtest/test_portfolio.py;tests/unit/backtest/test_portfolio_policy.py` | `pytest` | `tests/unit/backtest/test_portfolio_policy.py::test_every_declared_limit_is_enforced_by_the_simulator_or_by_the_construction_policy` |
+| `OA-BT-015` | backtest | Multi-year net-of-cost strategy backtest of a composite score: signal at T's close, trade at T+1's open | `NATIVE_COMPLETE` | `src/openalpha_cn/backtest/strategy_backtest.py#run_strategy_backtest;src/openalpha_cn/backtest/strategy_backtest.py#StrategySpec;src/openalpha_cn/backtest/strategy_backtest.py#ScoreSource;src/openalpha_cn/backtest/strategy_backtest.py#PeriodResult;src/openalpha_cn/backtest/strategy_backtest.py#StrategyBacktest;src/openalpha_cn/backtest/strategy_backtest.py#KNOWN_STRATEGY_BACKTEST_LIMITATIONS;src/openalpha_cn/strategy_view.py#strategy_request;src/openalpha_cn/strategy_view.py#backtest_strategy;src/openalpha_cn/strategy_view.py#load_strategy_inputs;src/openalpha_cn/cli.py#strategy_backtest_command;src/openalpha_cn/cli.py#STRATEGY_EXIT;src/openalpha_cn/sdk.py#OpenAlphaSDK;tests/strategy_fixtures.py#write_strategy_corpus` | `tests/unit/backtest/test_strategy_backtest.py;tests/unit/test_strategy_view.py;tests/unit/test_cli_strategy_backtest.py` | `pytest` | `tests/unit/backtest/test_strategy_backtest.py::test_a_two_period_backtest_matches_the_hand_computed_ledger` |
 
 ## 边界
 

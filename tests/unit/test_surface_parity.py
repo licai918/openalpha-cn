@@ -191,6 +191,8 @@ SDK_ONLY: Final[MappingProxyType[str, str]] = MappingProxyType(
         "outcome_statistics": "`V2-P5-008`'s gross/net table; `openalpha outcome statistics`'s "
         "twin, no route yet",
         "outcome_statistics_view": "a renderer, not a capability",
+        "run_strategy_backtest": "`V2-P6-007`'s multi-year net-of-cost strategy backtest; "
+        "`openalpha strategy backtest`'s twin, no route yet",
         "segmented_outcomes": "`V2-P5-009`'s segmented table over stored validations; "
         "its whole input is a declared SegmentationPlan and the CLI twin takes it as a "
         "file, no route yet",
@@ -225,6 +227,8 @@ CLI_ONLY: Final[MappingProxyType[str, str]] = MappingProxyType(
         "panel build": "reaches a paid provider; not exposed unauthenticated",
         "serve": "starts the server, so it cannot be a route on it",
         "shortlist compare": "`compare_shortlists` is the SDK twin; no route",
+        "strategy backtest": "`V2-P6-007`'s strategy backtest; `run_strategy_backtest` is the "
+        "SDK twin and no route does it yet",
         "validation segmented": "`V2-P5-009`'s segmented table -- industry, size, "
         "liquidity and regime buckets tested in one family; the SDK twin exists and no "
         "route does yet",
@@ -625,6 +629,10 @@ def test_the_measured_surface_counts_are_the_ones_this_file_was_written_against(
     two `None`s became commands. This test is how that arrived -- it went red naming
     `cli_commands` the moment the two commands registered, which is the whole reason the count
     is pinned rather than derived.
+
+    `V2-P6-007` moved `sdk_methods` and `cli_commands` by one each and nothing else:
+    `OpenAlphaSDK.run_strategy_backtest` and `openalpha strategy backtest` shipped as a twin pair
+    with no route, declared in `SDK_ONLY` and `CLI_ONLY`.
     """
     measured = {
         "routes": len(_routes()),
@@ -636,8 +644,8 @@ def test_the_measured_surface_counts_are_the_ones_this_file_was_written_against(
 
     assert measured == {
         "routes": 48,
-        "sdk_methods": 55,
-        "cli_commands": 35,
+        "sdk_methods": 56,
+        "cli_commands": 36,
         "without_sdk": 11,
         "rest_only": 9,
     }

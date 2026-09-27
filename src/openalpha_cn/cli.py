@@ -24,6 +24,7 @@ import uvicorn
 from pydantic import ValidationError
 
 from openalpha_cn import __version__
+from openalpha_cn.backtest.execution import CostSchedule
 from openalpha_cn.backtest.factor_experiment import FactorExperimentRecord
 from openalpha_cn.backtest.factor_ic import MINIMUM_IC_SECURITIES, ICMethod
 from openalpha_cn.backtest.factor_redundancy import MINIMUM_REDUNDANCY_SECURITIES
@@ -263,6 +264,17 @@ from openalpha_cn.storage.parquet import read_parquet_records
 from openalpha_cn.storage.predictions import FilePredictionStore, PredictionStoreError
 from openalpha_cn.storage.shortlists import FileShortlistStore, ShortlistStoreError
 from openalpha_cn.storage.sqlite import SQLiteRunRepository
+from openalpha_cn.strategy_view import (
+    PROTOCOL_BENCHMARKS,
+    PROTOCOL_COSTS,
+    PROTOCOL_PARTICIPATION_CAP,
+    PROTOCOL_POSITION_CAPITAL,
+    PROTOCOL_SLIPPAGE_RATE,
+    StrategyViewError,
+    backtest_strategy,
+    backtest_view,
+    strategy_request,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -461,6 +473,22 @@ over factors, screens and models. The plane here is the *outcome* plane -- resul
 Deliberately not a flag on anything that produces one validation. A single result has no sample
 size, no interval and no family, so a `--statistics` switch would have to answer a question its
 own input cannot pose; the aggregate is a different verb over a different number of rows.
+"""
+
+
+strategy_app = typer.Typer(
+    help=(
+        "Backtest a composite score as a rolling, net-of-cost portfolio over many years: signal "
+        "at the close, trade at the next open, A-share execution rules, benchmarks side by side. "
+        "Start with `openalpha strategy backtest --help`."
+    )
+)
+app.add_typer(strategy_app, name="strategy")
+"""`V2-P6-007`'s command is `openalpha strategy backtest`.
+
+A sub-app for `model`'s reason: `backtest` alone would not say which plane it runs on, and this
+repository already backtests replays and portfolios. The plane here is a *strategy* -- a score, a
+book and a rebalance rule -- which is what `strategy_view.py` joins to the panel.
 """
 
 
@@ -8207,3 +8235,256 @@ def portfolio_turnover_variants_command(
             )
         else:
             _echo_turnover_variants(report)
+
+
+STRATEGY_EXIT: Final[Mapping[str, PanelExit]] = MappingProxyType(
+    {
+        "answered": PanelExit.ok,
+        "blocked": PanelExit.unhealthy,
+        "panel_unreadable": PanelExit.unhealthy,
+        "bad_request": PanelExit.bad_request,
+        "internal_error": PanelExit.internal_error,
+    }
+)
+"""What `openalpha strategy backtest` exits with for each situation, `MODEL_EXIT`'s arrangement.
+
+`blocked` is the book refusing what the panel holds -- a score row built after its signal
+instant, a signal day with no cross section, a benchmark with a gap -- and it is `unhealthy`, not
+`ok`: a backtest that silently skipped those would be the look-ahead or the empty success this
+repository exists to refuse.
+"""
+
+
+def _strategy_fail(error: StrategyViewError) -> typer.Exit:
+    """One `strategy_view` fault, enveloped by the row of `STRATEGY_EXIT` it names."""
+    return _panel_fail(STRATEGY_EXIT[error.reason], error.disclosable)
+
+
+_STRATEGY_COMPONENT_HELP: Final[str] = (
+    "One score component, as `<factor>@<tier>` or `<factor>@<tier>=<weight>` "
+    "(`reversal_1d/v1@raw`, `book_to_price/v1@neutralized=0.5`); the weight is 1 when omitted. "
+    "Repeatable. The tier is raw, processed or neutralized -- all three are accepted. A "
+    "lower_is_better factor is negated before combining, so a weight never repairs a direction. "
+    "Give --component or --prediction, not both."
+)
+_STRATEGY_PREDICTION_HELP: Final[str] = (
+    "A registered prediction (`prd_...`) to rank on instead of stored factor tiers. Repeatable; "
+    "each is filed under the day its `as_of` falls on. A prediction recorded after that day's "
+    "signal instant is refused as look-ahead, whatever its scores."
+)
+_STRATEGY_COMBINE_HELP: Final[str] = (
+    "How components combine: `zscore_sum` (weighted sum of cross-sectional z-scores) or "
+    "`rank_sum` (weighted sum of average ranks over the cross section size). No default."
+)
+_STRATEGY_TRANSFORM_HELP: Final[str] = (
+    "The transform the processed and neutralized tiers were built under "
+    "(`cross_section_standard/v1`). Required when a component reads either tier, refused "
+    "otherwise."
+)
+_STRATEGY_NEUTRALIZATION_HELP: Final[str] = (
+    "The neutralization the neutralized tier was built under (`industry_and_size/v1`). "
+    "Required when a component reads that tier, refused otherwise."
+)
+_STRATEGY_START_HELP: Final[str] = (
+    "The first session of the backtest (YYYY-MM-DD), which is also its first signal day. "
+    "Every score cross section the book trades on must be built on a signal day at or before "
+    "that day's 16:30 Asia/Shanghai publication instant."
+)
+_STRATEGY_END_HELP: Final[str] = "The last session of the backtest (YYYY-MM-DD)."
+_STRATEGY_AS_OF_HELP: Final[str] = (
+    "The instant every panel read is made at, at or after --end's 16:30 publication instant. "
+    "Defaults to now."
+)
+_STRATEGY_REBALANCE_HELP: Final[str] = (
+    "Sessions between signal days. A signal at session T's close trades at T+1's open."
+)
+_STRATEGY_HOLDING_HELP: Final[str] = "How many names the book holds, equal capital at entry."
+_STRATEGY_BUFFER_HELP: Final[str] = (
+    "Keep a held name while it ranks at or above this; at least --holding-count. Omit for no "
+    "buffer (a held name leaves the moment it drops out of the top --holding-count)."
+)
+_STRATEGY_INDUSTRY_HELP: Final[str] = (
+    "Cap each level-one industry at floor(weight x holding count) names, read at each signal "
+    "instant from index_member_all. Omit for no cap."
+)
+_STRATEGY_CAPITAL_HELP: Final[str] = (
+    "Capital per new position in yuan, notional plus fees. The research protocol's measurement "
+    "setting is the default; changing it changes what the commission floor costs."
+)
+_STRATEGY_PARTICIPATION_HELP: Final[str] = (
+    "Largest fraction of the signal session's turnover one order may be. Protocol default."
+)
+_STRATEGY_RATE_HELP: Final[str] = "A cost rate as a decimal fraction. Protocol default."
+_STRATEGY_BENCHMARK_HELP: Final[str] = (
+    "A benchmark, repeatable: an index code stored in index_daily (`000905.SH`) or "
+    "`equal_weight_all_a`. Defaults to the protocol's two, side by side."
+)
+
+
+def _strategy_components(declared: Sequence[str]) -> tuple[tuple[str, str, Decimal], ...]:
+    """`--component <factor>@<tier>[=<weight>]` as `(factor, tier, weight)` triples."""
+    parsed: list[tuple[str, str, Decimal]] = []
+    for token in declared:
+        body, separator, raw_weight = token.partition("=")
+        factor, at, tier = body.partition("@")
+        if not at or not factor.strip() or not tier.strip():
+            raise _panel_fail(
+                PanelExit.bad_request,
+                f"--component {token!r} is not `<factor>@<tier>[=<weight>]`",
+            )
+        weight = _strategy_decimal(raw_weight, flag="--component") if separator else Decimal(1)
+        parsed.append((factor.strip(), tier.strip(), weight))
+    return tuple(parsed)
+
+
+def _strategy_decimal(value: str, *, flag: str) -> Decimal:
+    """One decimal option, refused as `bad_request` rather than letting `InvalidOperation` out."""
+    try:
+        parsed = Decimal(value.strip())
+    except ArithmeticError as error:
+        raise _panel_fail(
+            PanelExit.bad_request, f"{flag} expects a decimal number; got {value!r}"
+        ) from error
+    if not parsed.is_finite():
+        raise _panel_fail(PanelExit.bad_request, f"{flag} must be finite; got {value!r}")
+    return parsed
+
+
+@strategy_app.command("backtest")
+def strategy_backtest_command(
+    combine: Annotated[str, typer.Option("--combine", help=_STRATEGY_COMBINE_HELP)],
+    start: Annotated[str, typer.Option("--start", help=_STRATEGY_START_HELP)],
+    end: Annotated[str, typer.Option("--end", help=_STRATEGY_END_HELP)],
+    rebalance_every_sessions: Annotated[
+        int, typer.Option("--rebalance-every-sessions", help=_STRATEGY_REBALANCE_HELP)
+    ],
+    holding_count: Annotated[int, typer.Option("--holding-count", help=_STRATEGY_HOLDING_HELP)],
+    component: Annotated[
+        list[str] | None, typer.Option("--component", help=_STRATEGY_COMPONENT_HELP)
+    ] = None,
+    prediction: Annotated[
+        list[str] | None, typer.Option("--prediction", help=_STRATEGY_PREDICTION_HELP)
+    ] = None,
+    transform: Annotated[
+        str | None, typer.Option("--transform", help=_STRATEGY_TRANSFORM_HELP)
+    ] = None,
+    neutralization: Annotated[
+        str | None, typer.Option("--neutralization", help=_STRATEGY_NEUTRALIZATION_HELP)
+    ] = None,
+    buffer_rank: Annotated[
+        int | None, typer.Option("--buffer-rank", help=_STRATEGY_BUFFER_HELP)
+    ] = None,
+    max_industry_weight: Annotated[
+        str | None, typer.Option("--max-industry-weight", help=_STRATEGY_INDUSTRY_HELP)
+    ] = None,
+    position_capital: Annotated[
+        str, typer.Option("--position-capital", help=_STRATEGY_CAPITAL_HELP)
+    ] = str(PROTOCOL_POSITION_CAPITAL),
+    participation_cap: Annotated[
+        str, typer.Option("--participation-cap", help=_STRATEGY_PARTICIPATION_HELP)
+    ] = str(PROTOCOL_PARTICIPATION_CAP),
+    commission_rate: Annotated[
+        str, typer.Option("--commission-rate", help=_STRATEGY_RATE_HELP)
+    ] = str(PROTOCOL_COSTS.commission_rate),
+    minimum_commission: Annotated[
+        str, typer.Option("--minimum-commission", help="Commission floor in yuan per order.")
+    ] = str(PROTOCOL_COSTS.minimum_commission),
+    transfer_fee_rate: Annotated[
+        str, typer.Option("--transfer-fee-rate", help=_STRATEGY_RATE_HELP)
+    ] = str(PROTOCOL_COSTS.transfer_fee_rate),
+    stamp_duty_rate: Annotated[
+        str, typer.Option("--stamp-duty-rate", help=_STRATEGY_RATE_HELP)
+    ] = str(PROTOCOL_COSTS.sell_stamp_duty_rate),
+    slippage_rate: Annotated[str, typer.Option("--slippage-rate", help=_STRATEGY_RATE_HELP)] = str(
+        PROTOCOL_SLIPPAGE_RATE
+    ),
+    benchmark: Annotated[
+        list[str] | None, typer.Option("--benchmark", help=_STRATEGY_BENCHMARK_HELP)
+    ] = None,
+    as_of: Annotated[str, typer.Option("--as-of", help=_STRATEGY_AS_OF_HELP)] = "",
+    exchange: Annotated[
+        str, typer.Option("--exchange", help=_FACTOR_EXCHANGE_HELP)
+    ] = TRADING_CALENDAR_DEFAULT_EXCHANGE,
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit the whole backtest as data.")
+    ] = False,
+) -> None:
+    """Backtest a composite score as a rolling, net-of-cost A-share portfolio.
+
+    Signal at each signal day's close, trade at the next session's open, under
+    `AShareExecutionPolicy`'s rules (limit-up not bought, limit-down not sold, halted not
+    traded, lots, T+1), with the research protocol's costs and a participation cap. Every period
+    reports gross, cost and net return beside the benchmarks, and every order the market refused
+    is counted.
+
+    Every score cross section the book trades on has to be built at or before its signal day's
+    16:30 Asia/Shanghai instant (`openalpha factor build --as-of`); a later build is refused as
+    look-ahead with exit 1. The price side needs the calendar, the bars and halts, the published
+    bands, the adjustment factors and, for an index benchmark, `index_daily`.
+
+    **Exit `0` is not "this strategy works".** It is one draw from however many configurations
+    were tried; `limitations` on `--json` names what the number does not control for.
+    """
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+
+    with _panel_command("strategy backtest", json_output=json_output):
+        costs = CostSchedule(
+            commission_rate=_strategy_decimal(commission_rate, flag="--commission-rate"),
+            minimum_commission=_strategy_decimal(minimum_commission, flag="--minimum-commission"),
+            transfer_fee_rate=_strategy_decimal(transfer_fee_rate, flag="--transfer-fee-rate"),
+            sell_stamp_duty_rate=_strategy_decimal(stamp_duty_rate, flag="--stamp-duty-rate"),
+        )
+        try:
+            request = strategy_request(
+                components=_strategy_components(component or []),
+                combine=combine,
+                prediction_ids=tuple(prediction or ()),
+                transform=transform,
+                neutralization=neutralization,
+                start=_model_day(start, flag="--start"),
+                end=_model_day(end, flag="--end"),
+                as_of=_panel_as_of(as_of),
+                exchange=exchange,
+                rebalance_every_sessions=rebalance_every_sessions,
+                holding_count=holding_count,
+                buffer_rank=buffer_rank,
+                max_industry_weight=(
+                    None
+                    if max_industry_weight is None
+                    else _strategy_decimal(max_industry_weight, flag="--max-industry-weight")
+                ),
+                position_capital=_strategy_decimal(position_capital, flag="--position-capital"),
+                participation_cap=_strategy_decimal(participation_cap, flag="--participation-cap"),
+                costs=costs,
+                slippage_rate=_strategy_decimal(slippage_rate, flag="--slippage-rate"),
+                benchmarks=tuple(benchmark or PROTOCOL_BENCHMARKS),
+            )
+            predictions = FilePredictionStore(runtime_dir / "predictions", clock=_panel_clock)
+            result = backtest_strategy(
+                _panel_store(runtime_dir), request, predictions=predictions.get
+            )
+        except StrategyViewError as error:
+            raise _strategy_fail(error) from error
+        except PredictionStoreError as error:
+            raise _panel_fail(PanelExit.unhealthy, str(error)) from error
+
+        if json_output:
+            typer.echo(json.dumps(backtest_view(result), ensure_ascii=False, sort_keys=True))
+            return
+        typer.echo(
+            f"{len(result.periods)} period(s), {result.spec.holding_count} names, "
+            f"rebalanced every {result.spec.rebalance_every_sessions} session(s)"
+        )
+        for period in result.periods:
+            benchmarks = "  ".join(
+                f"{name} {value}" for name, value in sorted(period.benchmark_returns.items())
+            )
+            typer.echo(
+                f"{period.start.isoformat()}..{period.end.isoformat()}  net {period.net_return}  "
+                f"cost {period.cost}  turnover {period.turnover}  "
+                f"rejected {period.rejected_orders}  {benchmarks}"
+            )
+        typer.echo(f"limitations: {', '.join(result.limitations)}")

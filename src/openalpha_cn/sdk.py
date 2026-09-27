@@ -9,7 +9,7 @@ from openalpha_cn import __version__
 from openalpha_cn.agents.base import AgentResult, FeaturePlane, ResearchAgent
 from openalpha_cn.agents.committee import DeliberationCommittee, DeliberationOutcome
 from openalpha_cn.backtest.event_study import EventStudy, EventStudyReport, EventStudyRequest
-from openalpha_cn.backtest.execution import MarketBar
+from openalpha_cn.backtest.execution import CostSchedule, MarketBar
 from openalpha_cn.backtest.factor_experiment import FactorExperimentRecord, open_experiment
 from openalpha_cn.backtest.factor_ic import ICMethod
 from openalpha_cn.backtest.multi_day import (
@@ -52,6 +52,7 @@ from openalpha_cn.backtest.segmented_reporting import (
     report_segmented_outcomes,
     segmented_report_view,
 )
+from openalpha_cn.backtest.strategy_backtest import StrategyBacktest
 from openalpha_cn.backtest.turnover_variants import (
     TurnoverCostModel,
     TurnoverVariantReport,
@@ -123,6 +124,15 @@ from openalpha_cn.shortlist_view import (
 from openalpha_cn.shortlist_view import run_shortlist as run_shortlist_run
 from openalpha_cn.storage.parquet import read_parquet_records
 from openalpha_cn.storage.recovery import RunRecoveryState
+from openalpha_cn.strategy_view import (
+    PROTOCOL_BENCHMARKS,
+    PROTOCOL_COSTS,
+    PROTOCOL_PARTICIPATION_CAP,
+    PROTOCOL_POSITION_CAPITAL,
+    PROTOCOL_SLIPPAGE_RATE,
+    backtest_strategy,
+    strategy_request,
+)
 
 
 class OpenAlphaSDK:
@@ -1229,6 +1239,65 @@ class OpenAlphaSDK:
             limits=limits,
             ledger=self.portfolio_ledger,
         ).run(initial=initial, steps=steps)
+
+    def run_strategy_backtest(
+        self,
+        *,
+        combine: str,
+        start: date,
+        end: date,
+        as_of: datetime,
+        exchange: str,
+        rebalance_every_sessions: int,
+        holding_count: int,
+        buffer_rank: int | None,
+        max_industry_weight: Decimal | None,
+        components: Sequence[tuple[str, str, Decimal]] = (),
+        prediction_ids: Sequence[str] = (),
+        transform: str | None = None,
+        neutralization: str | None = None,
+        position_capital: Decimal = PROTOCOL_POSITION_CAPITAL,
+        participation_cap: Decimal = PROTOCOL_PARTICIPATION_CAP,
+        costs: CostSchedule = PROTOCOL_COSTS,
+        slippage_rate: Decimal = PROTOCOL_SLIPPAGE_RATE,
+        benchmarks: Sequence[str] = PROTOCOL_BENCHMARKS,
+    ) -> StrategyBacktest:
+        """Backtest a composite score as a rolling, net-of-cost portfolio (`V2-P6-007`).
+
+        `openalpha strategy backtest`'s in-process twin: both resolve through
+        `strategy_view.strategy_request` and run through `strategy_view.backtest_strategy`, so
+        one request is one answer on both faces. The measurement settings default to the research
+        protocol's; the portfolio rules have no default. Registered predictions named by
+        `prediction_ids` are read from this installation's prediction store.
+
+        Hands back the `StrategyBacktest` rather than a rendering, so a caller reads every
+        `Decimal` exactly; `strategy_view.backtest_view(result)` is the CLI's `--json` body.
+        Raises a `strategy_view.StrategyViewError` subclass for a request that cannot be put,
+        a panel that cannot be read, or a backtest the book refuses (look-ahead included).
+        """
+        request = strategy_request(
+            components=components,
+            combine=combine,
+            prediction_ids=prediction_ids,
+            transform=transform,
+            neutralization=neutralization,
+            start=start,
+            end=end,
+            as_of=as_of,
+            exchange=exchange,
+            rebalance_every_sessions=rebalance_every_sessions,
+            holding_count=holding_count,
+            buffer_rank=buffer_rank,
+            max_industry_weight=max_industry_weight,
+            position_capital=position_capital,
+            participation_cap=participation_cap,
+            costs=costs,
+            slippage_rate=slippage_rate,
+            benchmarks=benchmarks,
+        )
+        return backtest_strategy(
+            panel_store(self.runtime_dir), request, predictions=self.prediction_store.get
+        )
 
     def replay(
         self,
