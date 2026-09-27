@@ -3208,12 +3208,49 @@ def _sweep_window_opens(window: str) -> datetime:
     return datetime(int(window[:4]), int(window[4:6]), day, tzinfo=PANEL_DATE_ZONE)
 
 
+STATUTORY_DISCLOSURE_DEADLINES: Final[Mapping[str, tuple[int, str]]] = MappingProxyType(
+    {
+        "0331": (0, "0430"),
+        "0630": (0, "0831"),
+        "0930": (0, "1031"),
+        "1231": (1, "0430"),
+    }
+)
+"""The last day a report period may be disclosed on, as `(years after the period, MMDD)`.
+
+The rule is 《上市公司信息披露管理办法》's: the annual report within four months of the fiscal
+year's end, the half-year report within two months of the first half's end, and the first- and
+third-quarter reports within one month of their quarters' ends -- so Q1 by 30 April, H1 by 31
+August, Q3 by 31 October, and the annual by 30 April of the following year.
+
+What it decides is when a whole-market `fina_indicator_vip` answer of **nothing** for a period
+stops being "not filed yet" and becomes a failed fetch (`_sweep_window_refuses_empty_from`). The
+period's own end is the wrong trigger: every period is empty for days after it ends, so a refusal
+there would fail every daily update for about two weeks after each quarter end. After the
+deadline, a whole market with not one filing for the period is not a timetable.
+"""
+
+
 def _sweep_window_closes(window: str) -> datetime:
-    """The instant a sweep window has ended: the midnight after its month's last day, or after its
-    report period's last day."""
+    """The instant a month window has ended: the midnight after its last day."""
     year, month = int(window[:4]), int(window[4:6])
-    last = date(year, month, int(window[6:]) if len(window) == 8 else monthrange(year, month)[1])
+    last = date(year, month, monthrange(year, month)[1])
     return datetime.combine(last + timedelta(days=1), time(0, 0), tzinfo=PANEL_DATE_ZONE)
+
+
+def _sweep_window_refuses_empty_from(window: str) -> datetime:
+    """The instant from which an empty whole-market answer for `window` is refused.
+
+    A month (`YYYYMM`): the moment it has ended -- measured, no ended month of 2015 or 2024 was
+    empty. A report period (`YYYYMMDD`): the midnight after its statutory disclosure deadline
+    (`STATUTORY_DISCLOSURE_DEADLINES`), in Asia/Shanghai, so the deadline day itself still counts
+    as "may not have filed yet".
+    """
+    if len(window) != 8:
+        return _sweep_window_closes(window)
+    years_after, month_day = STATUTORY_DISCLOSURE_DEADLINES[window[4:]]
+    deadline = date(int(window[:4]) + years_after, int(month_day[:2]), int(month_day[2:]))
+    return datetime.combine(deadline + timedelta(days=1), time(0, 0), tzinfo=PANEL_DATE_ZONE)
 
 
 def _sweep_statement_batches(
@@ -3250,10 +3287,14 @@ def _sweep_statement_batches(
     security-year to a whole month of the market. Such a window is asked once more, which rules
     out a transient empty answer and is counted on the `SWEPT` line; empty again, the build is
     refused with `_build_statement_panel`'s exit code, naming the dataset and the window. A
-    report period that has ended is held to the same rule, even in the weeks after its end in
-    which nobody has filed yet: a build of the current period year then waits for the first
-    filing. A window that has begun and not ended may be empty -- nothing has been announced in
-    it *yet* -- and is ordinary; one that has not begun is not asked for.
+    month that has begun and not ended may be empty -- nothing has been announced in it *yet* --
+    and is ordinary; one that has not begun is not asked for.
+
+    A **report period** is held to the rule only once its statutory disclosure deadline has
+    passed (`STATUTORY_DISCLOSURE_DEADLINES`), not once the period has ended: every period is
+    empty for days after its end, and refusing then would fail the daily update for weeks after
+    each quarter. Before the deadline an empty period is ordinary, whether or not it has ended.
+    The one place this is decided is `_sweep_window_refuses_empty_from`.
     """
     windows = tuple(
         window
@@ -3276,14 +3317,15 @@ def _sweep_statement_batches(
     stride = _progress_stride(len(windows))
     for index, window in enumerate(windows, start=1):
         batch = _fetch_panel(provider, dataset, as_of=as_of, subjects=(window,), sweep=True)
-        if batch.status == "no_data" and _sweep_window_closes(window) <= as_of:
+        if batch.status == "no_data" and _sweep_window_refuses_empty_from(window) <= as_of:
             rerequested += 1
             batch = _fetch_panel(provider, dataset, as_of=as_of, subjects=(window,), sweep=True)
             if batch.status == "no_data":
                 raise _panel_fail(
                     PanelExit.unhealthy,
-                    f"{label}: the whole-market {dataset} window {window} ended before "
-                    f"{as_of.isoformat()} and served no row that could be stored, asked twice. "
+                    f"{label}: the whole-market {dataset} window {window} had ended (a report "
+                    f"period: its disclosure deadline had passed) before {as_of.isoformat()} and "
+                    "served no row that could be stored, asked twice. "
                     "One security with nothing to report is ordinary and a whole market with "
                     "nothing in a closed window is not, so this is a fetch to investigate "
                     "rather than a partition to write without that window",
@@ -4300,11 +4342,11 @@ def panel_build(
     cost 8. One request per registered security would have been 5,908 x 2 = 11,816 for each of
     the four datasets over those two years, 47,264 for all four. So `--start 2015 --end 2026` is
     at most 480 windows (432 months and 48 report periods; a window that has not begun at the
-    build's clock is not asked for), plus the halvings and one repeat of any ended window that
-    answered nothing, rather than ~282,000 requests. Every fetch loop still states its size
-    before it starts
-    (`_echo_budget`, in windows for a sweep) and reports progress with an `eta` while it runs, and
-    `--subject` still selects the per-security route for a named handful.
+    build's clock is not asked for), plus the halvings and one repeat of any ended month or
+    past-deadline report period that answered nothing, rather than ~282,000 requests. Every fetch
+    loop still states its size before it starts (`_echo_budget`, in windows for a sweep) and
+    reports progress with an `eta` while it runs, and `--subject` still selects the per-security
+    route for a named handful.
     """
     runtime_dir = _resolved_runtime_dir(runtime_dir)
 

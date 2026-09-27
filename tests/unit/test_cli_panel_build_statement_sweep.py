@@ -134,8 +134,11 @@ class Market:
     filter `end_date` -- the asymmetry `_financial_indicator_params` records.
     """
 
-    def __init__(self, filings: Sequence[tuple[str, str, str, str, str, float]]) -> None:
+    def __init__(
+        self, filings: Sequence[tuple[str, str, str, str, str, float]], *, listed: str = "20260102"
+    ) -> None:
         self.filings = tuple(filings)
+        self.listed = listed
         self.payloads: list[dict[str, Any]] = []
 
     def api_names(self) -> list[str]:
@@ -160,7 +163,7 @@ class Market:
                         "delist_date",
                     ],
                     "items": [
-                        [code, code, "SSE", "主板", "L", "20260102", None] for code in REGISTERED
+                        [code, code, "SSE", "主板", "L", self.listed, None] for code in REGISTERED
                     ],
                     "has_more": False,
                 },
@@ -202,10 +205,10 @@ def _small_caps(monkeypatch: pytest.MonkeyPatch) -> None:
         )
 
 
-def _install(monkeypatch: pytest.MonkeyPatch, market: Market) -> Market:
+def _install(monkeypatch: pytest.MonkeyPatch, market: Market, *, clock: datetime = CLOCK) -> Market:
     monkeypatch.setenv("TUSHARE_TOKEN", TOKEN)
     monkeypatch.setattr(cli, "_panel_transport", lambda: market)
-    monkeypatch.setattr(cli, "_panel_clock", lambda: CLOCK)
+    monkeypatch.setattr(cli, "_panel_clock", lambda: clock)
     return market
 
 
@@ -367,7 +370,7 @@ def test_a_year_in_which_nothing_was_announced_is_refused_by_both_routes_alike(
 
     assert by_subject.exit_code == PanelExit.unhealthy
     assert swept.exit_code == PanelExit.unhealthy
-    assert f"window {YEAR}01 ended before" in swept.output
+    assert f"window {YEAR}01 had ended" in swept.output
     assert PanelStore(tmp_path / "sweep" / "panel").registered_years(INCOME_DATASET) == ()
 
 
@@ -488,3 +491,50 @@ def test_windows_after_the_clock_are_not_asked_and_an_open_empty_month_is_ordina
     ]
     assert starts == [f"{YEAR + 1}0101", f"{YEAR + 1}0201", f"{YEAR + 1}0301"]
     assert f"BUDGET {INCOME_DATASET} year={YEAR + 1} 3 windows" in result.stderr
+
+
+# --- a report period is refused empty only after its statutory deadline ---------------------------
+
+
+def _noon(day: str) -> datetime:
+    """12:00 Asia/Shanghai on a `YYYYMMDD` day, as the UTC instant the fake clock returns."""
+    return datetime(int(day[:4]), int(day[4:6]), int(day[6:]), 4, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("period", "clock", "listed", "refused"),
+    [
+        # Q3: due by 31 October. Ended, not yet due: an empty market is a timetable.
+        (f"{YEAR}0930", f"{YEAR}1015", f"{YEAR}0102", False),
+        (f"{YEAR}0930", f"{YEAR}1101", f"{YEAR}0102", True),
+        # Annual: due by 30 April of the following year.
+        (f"{YEAR}1231", f"{YEAR + 1}0331", f"{YEAR + 1}0102", False),
+        (f"{YEAR}1231", f"{YEAR + 1}0501", f"{YEAR + 1}0102", True),
+    ],
+)
+def test_an_empty_report_period_is_refused_only_after_its_disclosure_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    period: str,
+    clock: str,
+    listed: str,
+    refused: bool,
+) -> None:
+    """The period's own end is the wrong trigger: every period is empty for days after it, and a
+    refusal there would fail the daily update for weeks after each quarter end."""
+    market = _install(
+        monkeypatch,
+        Market([f for f in FILINGS if f[1] != period], listed=listed),
+        clock=_noon(clock),
+    )
+
+    result = _build(tmp_path, *_swept(FINANCIAL_INDICATOR_DATASET, years=("--year", str(YEAR))))
+
+    asked = _asked(market, "fina_indicator_vip", "period", period)
+    if refused:
+        assert result.exit_code == PanelExit.unhealthy
+        assert f"window {period}" in result.output
+        assert asked == 2
+    else:
+        assert result.exit_code == PanelExit.ok, result.output
+        assert asked == 1
