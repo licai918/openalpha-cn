@@ -276,6 +276,7 @@ from openalpha_cn.domain.daily_prices import (
     DAILY_BASIC_NULLABLE_COLUMNS,
     DAILY_DATA_COLUMNS,
     DAILY_DATASET,
+    DAILY_INCOMPLETE_BAR_COLUMNS,
     DAILY_PRICE_COLUMNS,
     PRICE_DATE_COLUMN,
     SESSION_CLOSE_TIME,
@@ -1923,12 +1924,26 @@ def _price_panel_column(name: str) -> TusharePanelColumn:
     response field name for both datasets -- unlike `adj_factor`, which renames `trade_date` to
     `factor_date` because two datasets storing a column of that name would mean two different
     things by it. Here they mean the same thing.
+
+    **`pre_close` and `pct_chg` decode a null as `None`** (`DAILY_INCOMPLETE_BAR_COLUMNS`,
+    `V2-P6-013`), and every other value is parsed exactly as before -- a zero, a negative or a
+    non-finite `pre_close` is still refused here. The upstream publishes both as null on a bar
+    that has no previous close because it predates the security's listing (four back-mapped
+    Beijing codes on 2014-01-24), and a cell parser cannot tell that from a malformed bar: the
+    listing date is in the stored registry, not in the row. So the incomplete bar is carried to
+    the one place that can decide it, and it has exactly two ways out:
+    `panel_ingest.reconcile_pre_listing_rows` drops it when the registry places it before the
+    listing, and `write_daily_panel` refuses any that is left -- a bar with no `pre_close` is
+    never stored.
     """
     if name == PRICE_DATE_COLUMN:
         return TusharePanelColumn(
             name=name, kind="string", source_field=name, parse=_calendar_date_text
         )
-    if name in DAILY_PRICE_COLUMNS:
+    if name in DAILY_INCOMPLETE_BAR_COLUMNS:
+        # `V2-P6-013`: the one place a bar may arrive incomplete, and it is not a waiver.
+        parse = _optional_positive_level if name in DAILY_PRICE_COLUMNS else _optional_number
+    elif name in DAILY_PRICE_COLUMNS:
         parse = _positive_price
     elif name in DAILY_BASIC_NULLABLE_COLUMNS:
         parse = _optional_number

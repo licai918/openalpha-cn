@@ -235,6 +235,18 @@ therefore the third witness `session_returns` reconciles against -- and the only
 DAILY_PANEL_COLUMNS: Final[tuple[str, ...]] = (SUBJECT_COLUMN_NAME, *DAILY_DATA_COLUMNS)
 """What a reader asks `PanelStore.query` for, and the positional contract of the rows back."""
 
+DAILY_INCOMPLETE_BAR_COLUMNS: Final[frozenset[str]] = frozenset({PRE_CLOSE_COLUMN, "pct_chg"})
+"""The two `daily` columns a *decoded* bar may carry as `None` and a stored one never may.
+
+`V2-P6-013`.
+
+The upstream publishes both as null on a bar that predates its security's listing -- trading on
+another venue back-mapped onto today's Beijing code, `920476.BJ` on 2014-01-24 among four. The
+decoder hands such a bar on rather than refusing the session; `panel_ingest` drops it under
+`bar_before_listing` or `write_daily_panel` refuses it. `DAILY_PRICE_COLUMNS`' claim stands for
+every stored row.
+"""
+
 DAILY_BASIC_DATA_COLUMNS: Final[tuple[str, ...]] = (
     PRICE_DATE_COLUMN,
     CLOSE_COLUMN,
@@ -1000,17 +1012,17 @@ def close_disagreements(
     `daily_basic` republishes `close`, so the two fetches a session needs already cross-check
     each other and the check costs no request. Measured first across five sessions from
     2023-01-03 to 2026-08-07 (24,188 shared rows): zero disagreements. That sample was not the
-    history. A census of every session from 2013-01-04 through 2021-08-10 (2,092 of the 3,335
-    sessions to 2026-09-25, comparing both datasets on `(ts_code, close)`, live on 2026-09-26,
-    still running) found disagreements on 7 sessions: 91 valuations with no bar (one on
-    2013-11-14, `000022.SZ`; ninety on 2020-09-18, halted A shares and B shares) and 14 closes
-    that differ (one each on 2013-07-15, 2019-04-19, 2020-03-18 and 2020-10-19, ten on
-    2020-10-23, most a cent or a few apart). Those checked are the upstream's own: they
-    reproduce on a re-fetch, and where a close differs the next session's `pre_close`
-    corroborates the `daily` bar -- `002357.SZ` on 2013-07-15 closed at 6.8 in `daily` and 6.62,
-    the previous close, in `daily_basic`. This function still reports every disagreement; what
-    happens next is `panel_ingest.reconcile_price_disagreements`' decision (`V2-P6-013`), not
-    this function's.
+    history. A census of every session from 2013-01-04 through 2026-09-24 (3,335 sessions,
+    comparing both datasets on `(ts_code, close)`, live, completed 2026-09-26) found
+    disagreements on 11 sessions: 91 valuations with no bar (one on 2013-11-14, `000022.SZ`;
+    ninety on 2020-09-18, halted A shares and B shares) and 237 closes that differ (one each on
+    2013-07-15, 2019-04-19, 2020-03-18, 2020-10-19 and 2023-11-07; ten on 2020-10-23; 56, 58 and
+    108 on 2021-11-16, 2021-11-22 and 2022-10-31, every one a `.BJ` code, most a cent or two
+    apart). All 237 were re-fetched on 2026-09-26 and every one reproduced, with the next
+    session's `pre_close` equal to the `daily` close -- the valuation is the side that is wrong;
+    `002357.SZ` on 2013-07-15 closed at 6.8 in `daily` and at 6.62, the previous close, in
+    `daily_basic`. This function still reports every disagreement; what happens next is
+    `panel_ingest.reconcile_price_disagreements`' decision (`V2-P6-013`), not this function's.
 
     Keyed by `(ts_code, trade_date)` rather than by security, so the same rule serves a single
     cross section on the read side and a whole year on the write side. A rule stated once is a

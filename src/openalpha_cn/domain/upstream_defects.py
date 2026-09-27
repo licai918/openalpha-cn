@@ -27,6 +27,11 @@ them refuses a whole year of every other security's data along with them. Measur
 - 2020-09-18 has ninety `daily_basic` rows with no bar: halted A shares (`000029.SZ`, an untimed
   `S` in `suspend_d`) and B shares (`200011.SZ` and others, with no `suspend_d` row and no bar
   all week). They are `valuation_without_bar`, with no halt requirement.
+- `920476.BJ`, `920564.BJ`, `920425.BJ` and `920556.BJ` have `daily` rows on 2014-01-24 with a
+  null `pre_close` and `pct_chg`. They are trading on another venue before these securities
+  listed -- the stored registry's `list_date`s are 2022-10-14, 2022-06-17, 2023-01-30 and
+  2023-03-17 -- back-mapped onto today's Beijing codes. A row before its security's listing is
+  outside the listed A-share universe the panel models, null or not (`bar_before_listing`).
 - `000509.SZ` on 2014-01-09 has a `stk_limit` row with `up_limit=0.0, down_limit=0.0`, is
   halted all session in `suspend_d`, and has no `daily` or `daily_basic` row. Zero/zero is how
   the upstream publishes "no band" for a halted security on that history.
@@ -34,9 +39,11 @@ them refuses a whole year of every other security's data along with them. Measur
 ## What a rule here is, and what it is not
 
 Each `DefectKind` is a **named** rule with a precondition narrow enough that a fetch fault
-cannot satisfy it by accident, and each one only ever **drops** the upstream's wrong row. Nothing
-here edits a bar or a valuation, fills a gap from another dataset or another provider, or
-invents a value. A disagreement no rule names is still refused, by the same guard as before.
+cannot satisfy it by accident, and each one only ever **drops** the upstream's wrong row -- a
+bar only under `bar_before_listing`, which is decided by the stored registry and not by the
+row. Nothing here edits a bar or a valuation, fills a gap from another dataset or another
+provider, or invents a value. A disagreement no rule names is still refused, by the same guard
+as before.
 
 Every dropped row is recorded in the `upstream_defects` panel dataset
 (`panel_ingest.UPSTREAM_DEFECTS_DATASET`), one partition per year,
@@ -53,8 +60,10 @@ from datetime import date
 from math import isfinite
 from typing import Final, Literal, get_args
 
+from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
 from openalpha_cn.domain.daily_prices import (
     DAILY_BASIC_DATASET,
+    DAILY_DATASET,
     MAX_PUBLISHED_RETURN_DISAGREEMENT,
     PRICE_DATE_COLUMN,
 )
@@ -62,16 +71,20 @@ from openalpha_cn.domain.panel_batch import SUBJECT_COLUMN_NAME
 from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET
 
 DefectKind = Literal[
-    "valuation_without_bar", "valuation_contradicts_corroborated_bar", "limit_placeholder_on_halt"
+    "valuation_without_bar",
+    "valuation_contradicts_corroborated_bar",
+    "limit_placeholder_on_halt",
+    "bar_before_listing",
 ]
 """The named rules. See `close_disagreement_kind` and `limit_placeholder_kind`."""
 
 DEFECT_KINDS: Final[frozenset[str]] = frozenset(get_args(DefectKind))
 
 DEFECT_SOURCE_DATASETS: Final[frozenset[str]] = frozenset(
-    {DAILY_BASIC_DATASET, PRICE_LIMIT_DATASET}
+    {DAILY_DATASET, DAILY_BASIC_DATASET, ADJ_FACTOR_DATASET, PRICE_LIMIT_DATASET}
 )
-"""The datasets a rule may drop a row from. `daily` is not one of them: no rule drops a bar."""
+"""The datasets a rule may drop a row from. `daily` and `adj_factor` only under
+`bar_before_listing`; no other rule drops a bar."""
 
 SOURCE_DATASET_COLUMN: Final[str] = "source_dataset"
 DEFECT_KIND_COLUMN: Final[str] = "defect_kind"
@@ -81,6 +94,7 @@ PREVIOUS_BAR_CLOSE_COLUMN: Final[str] = "previous_bar_close"
 DEFECT_UP_LIMIT_COLUMN: Final[str] = "up_limit"
 DEFECT_DOWN_LIMIT_COLUMN: Final[str] = "down_limit"
 REPEATS_PREVIOUS_CLOSE_COLUMN: Final[str] = "valuation_repeats_previous_close"
+LIST_DATE_COLUMN: Final[str] = "list_date"
 
 UPSTREAM_DEFECT_DATA_COLUMNS: Final[tuple[str, ...]] = (
     PRICE_DATE_COLUMN,
@@ -92,6 +106,7 @@ UPSTREAM_DEFECT_DATA_COLUMNS: Final[tuple[str, ...]] = (
     DEFECT_UP_LIMIT_COLUMN,
     DEFECT_DOWN_LIMIT_COLUMN,
     REPEATS_PREVIOUS_CLOSE_COLUMN,
+    LIST_DATE_COLUMN,
 )
 """The stored columns after `subject`, in order.
 
@@ -106,6 +121,9 @@ the two shapes of a contradicted valuation apart:
   `False` for a valuation that equals neither close (2020-10-23), `None` when there is no
   previous bar to compare with.
 - `limit_placeholder_on_halt`: `up_limit` and `down_limit`, both `0.0`.
+- `bar_before_listing`: `list_date` (ISO), from the stored registry, and the dropped row's own
+  close (`bar_close` for `daily`, `valuation_close` for `daily_basic`) or band (`stk_limit`);
+  an `adj_factor` row records only the date.
 """
 
 UPSTREAM_DEFECT_NUMBER_COLUMNS: Final[tuple[str, ...]] = UPSTREAM_DEFECT_DATA_COLUMNS[3:8]
@@ -136,6 +154,7 @@ class UpstreamDefect:
     up_limit: float | None = None
     down_limit: float | None = None
     valuation_repeats_previous_close: bool | None = None
+    list_date: date | None = None
 
     def values(self) -> tuple[float | None, ...]:
         """The five numbers in `UPSTREAM_DEFECT_NUMBER_COLUMNS` order."""
@@ -234,6 +253,16 @@ def limit_placeholder_kind(
     return None
 
 
+def before_listing(*, trade_date: date, list_date: date | None) -> bool:
+    """Whether a row dated `trade_date` precedes its security's listing (`bar_before_listing`).
+
+    `list_date` comes from the stored `stock_basic` registry. A security the registry does not
+    know (`None`) is **not** before its listing -- nothing says so -- and its rows go on to be
+    stored or refused exactly as before. On or after `list_date` a row is inside the universe.
+    """
+    return list_date is not None and trade_date < list_date
+
+
 def upstream_defects_from_panel_rows(
     rows: Iterable[Sequence[object]],
 ) -> tuple[UpstreamDefect, ...]:
@@ -245,7 +274,7 @@ def upstream_defects_from_panel_rows(
                 f"row {index} has {len(row)} values, expected "
                 f"{len(UPSTREAM_DEFECT_PANEL_COLUMNS)} ({', '.join(UPSTREAM_DEFECT_PANEL_COLUMNS)})"
             )
-        subject, day_text, source, kind, *numbers, repeats = row
+        subject, day_text, source, kind, *numbers, repeats, listed_text = row
         if type(subject) is not str or not subject:
             raise UpstreamDefectError(f"row {index}: subject must be a non-empty string")
         if type(day_text) is not str:
@@ -276,6 +305,16 @@ def upstream_defects_from_panel_rows(
                 f"row {index}: {REPEATS_PREVIOUS_CLOSE_COLUMN} must be a boolean or null, got "
                 f"{type(repeats).__name__} {repeats!r}"
             )
+        listed: date | None = None
+        if listed_text is not None:
+            if type(listed_text) is not str:
+                raise UpstreamDefectError(f"row {index}: {LIST_DATE_COLUMN} must be an ISO date")
+            try:
+                listed = date.fromisoformat(listed_text)
+            except ValueError as error:
+                raise UpstreamDefectError(
+                    f"row {index}: {LIST_DATE_COLUMN} is not an ISO date: {listed_text!r}"
+                ) from error
         bar_close, valuation_close, previous_bar_close, up_limit, down_limit = numbers
         defects.append(
             UpstreamDefect(
@@ -289,6 +328,7 @@ def upstream_defects_from_panel_rows(
                 up_limit=up_limit,  # type: ignore[arg-type]
                 down_limit=down_limit,  # type: ignore[arg-type]
                 valuation_repeats_previous_close=repeats,
+                list_date=listed,
             )
         )
     return tuple(defects)

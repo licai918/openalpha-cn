@@ -58,7 +58,11 @@ from openalpha_cn.backtest.turnover_variants import (
 )
 from openalpha_cn.backtest.validation import OutcomeObservation
 from openalpha_cn.config import ConfigError, load_config, load_dotenv, load_log_level
-from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET, AdjustmentError
+from openalpha_cn.domain.adjustment import (
+    ADJ_FACTOR_DATASET,
+    ADJUSTMENT_DATE_COLUMN,
+    AdjustmentError,
+)
 from openalpha_cn.domain.daily_prices import (
     DAILY_AVAILABILITY_TIME,
     DAILY_BASIC_DATASET,
@@ -175,6 +179,7 @@ from openalpha_cn.panel_gate import (
 from openalpha_cn.panel_ingest import (
     UPSTREAM_DEFECTS_DATASET,
     _sessions_published_through,
+    combine_defect_records,
     keep_panel_subjects,
     load_industry_trees,
     load_stock_universe,
@@ -183,6 +188,7 @@ from openalpha_cn.panel_ingest import (
     load_upstream_defects,
     merge_panel_batches,
     reconcile_limit_placeholders,
+    reconcile_pre_listing_rows,
     reconcile_price_disagreements,
     session_publication_instant,
     split_panel_batch_by_year,
@@ -3077,6 +3083,7 @@ def _build_price_panel(
     year: int,
     now: datetime,
     halts: bool,
+    listings: Mapping[str, date] | None,
 ) -> str:
     """Fetch the three price datasets session by session, then write them in dependency order.
 
@@ -3114,20 +3121,27 @@ def _build_price_panel(
                 "record that this build waives that guard",
             )
         corpus = load_suspensions(store, years=(year,), as_of=now, max_staleness=None)
+    listed_bars = reconcile_pre_listing_rows(collected[DAILY_DATASET], listings=listings)
+    listed_valuations = reconcile_pre_listing_rows(
+        collected[DAILY_BASIC_DATASET], listings=listings
+    )
     reconciled = reconcile_price_disagreements(
-        collected[DAILY_DATASET],
-        collected[DAILY_BASIC_DATASET],
+        listed_bars.batches,
+        listed_valuations.batches,
         refetch=lambda day, codes: _refetch_price_session(provider, day, codes),
     )
     recorded = write_upstream_defects(
-        store, reconciled.record, year=year, source_dataset=DAILY_BASIC_DATASET
+        store,
+        combine_defect_records(listed_bars.record, listed_valuations.record, reconciled.record),
+        year=year,
+        source_datasets=frozenset({DAILY_DATASET, DAILY_BASIC_DATASET}),
     )
     if recorded is not None:
         written.append(recorded)
     written.extend(
         write_daily_panel(
             store,
-            bars=collected[DAILY_DATASET],
+            bars=listed_bars.batches,
             fundamentals=reconciled.batches,
             calendar=calendar,
             halts=corpus,
@@ -3164,6 +3178,22 @@ def _refetch_price_session(
         _fetch_panel(provider, DAILY_DATASET, as_of=as_of, subjects=subjects),
         _fetch_panel(provider, DAILY_BASIC_DATASET, as_of=as_of, subjects=subjects),
     )
+
+
+def _registry_listings(store: PanelStore, *, now: datetime) -> Mapping[str, date] | None:
+    """Every security's `list_date` in the **stored** `stock_basic` registry, or `None`.
+
+    What `bar_before_listing` (`V2-P6-013`) decides from, and the only thing: a row is dropped as
+    pre-listing when this says its session precedes the listing, never on the row's own say-so.
+    `None` when no registry is stored, which drops nothing. No `require_years_through`, unlike
+    `_stored_universe`: a security the registry has not caught up with is absent here, and absent
+    is the safe direction -- its rows are stored or refused exactly as before.
+    """
+    years = store.registered_years(STOCK_BASIC_DATASET)
+    if not years:
+        return None
+    universe = load_stock_universe(store, years=years, as_of=now, max_staleness=None)
+    return {entry.ts_code: entry.listed_on for entry in universe.securities}
 
 
 def _stored_halts(
@@ -3208,6 +3238,7 @@ def _defect_entry(defect: UpstreamDefect) -> dict[str, object]:
         "up_limit": defect.up_limit,
         "down_limit": defect.down_limit,
         "valuation_repeats_previous_close": defect.valuation_repeats_previous_close,
+        "list_date": None if defect.list_date is None else defect.list_date.isoformat(),
     }
 
 
@@ -3915,6 +3946,13 @@ def _build_panel(
         # `price`. `_NEEDS_STORED_CALENDAR` sits at the same seam one line down for the same
         # reason.
         universe = tuple(subjects) or _stored_universe(store, now=now)
+    # `V2-P6-013`: read once, after the `stock_basic` branch above so a registry this invocation
+    # wrote is the one decided from, and only for the targets whose rows it can drop.
+    listings = (
+        _registry_listings(store, now=now)
+        if targets & {ADJ_FACTOR_DATASET, "price", PRICE_LIMIT_DATASET}
+        else None
+    )
     if targets & _NEEDS_STORED_CALENDAR:
         calendar = _stored_calendar(store, exchange=exchange, years=(year,), as_of=now)
         sessions = _build_sessions(calendar, year, now)
@@ -3929,13 +3967,21 @@ def _build_panel(
         )
     if ADJ_FACTOR_DATASET in targets:
         assert calendar is not None  # guaranteed by `_NEEDS_STORED_CALENDAR` above
-        written.setdefault(ADJ_FACTOR_DATASET, []).append(
-            write_adjustment_factors(
-                store,
-                _session_batches(provider, (ADJ_FACTOR_DATASET,), sessions)[ADJ_FACTOR_DATASET],
-                calendar=calendar,
-            )
+        factors = reconcile_pre_listing_rows(
+            _session_batches(provider, (ADJ_FACTOR_DATASET,), sessions)[ADJ_FACTOR_DATASET],
+            listings=listings,
+            date_column=ADJUSTMENT_DATE_COLUMN,
         )
+        factor_refs = written.setdefault(ADJ_FACTOR_DATASET, [])
+        recorded = write_upstream_defects(
+            store,
+            factors.record,
+            year=year,
+            source_datasets=frozenset({ADJ_FACTOR_DATASET}),
+        )
+        if recorded is not None:
+            factor_refs.append(recorded)
+        factor_refs.append(write_adjustment_factors(store, factors.batches, calendar=calendar))
     if "price" in targets:
         assert calendar is not None  # guaranteed by `_NEEDS_STORED_CALENDAR` above
         halt_state = _build_price_panel(
@@ -3947,18 +3993,25 @@ def _build_panel(
             year=year,
             now=now,
             halts=halts,
+            listings=listings,
         )
     if PRICE_LIMIT_DATASET in targets:
         assert calendar is not None  # guaranteed by `_NEEDS_STORED_CALENDAR` above
         # `V2-P6-013`: the upstream's zero/zero band on a whole-day halt is dropped and recorded
         # before the writer sees it; every other zero upper limit is refused by name.
-        limits = reconcile_limit_placeholders(
+        listed_limits = reconcile_pre_listing_rows(
             _session_batches(provider, (PRICE_LIMIT_DATASET,), sessions)[PRICE_LIMIT_DATASET],
-            halts=lambda: _stored_halts(store, year=year, now=now),
+            listings=listings,
+        )
+        limits = reconcile_limit_placeholders(
+            listed_limits.batches, halts=lambda: _stored_halts(store, year=year, now=now)
         )
         limit_refs = written.setdefault(PRICE_LIMIT_DATASET, [])
         recorded = write_upstream_defects(
-            store, limits.record, year=year, source_dataset=PRICE_LIMIT_DATASET
+            store,
+            combine_defect_records(listed_limits.record, limits.record),
+            year=year,
+            source_datasets=frozenset({PRICE_LIMIT_DATASET}),
         )
         if recorded is not None:
             limit_refs.append(recorded)
@@ -4711,7 +4764,8 @@ def panel_build(
                     f"valuation_close={defect['valuation_close']} "
                     f"previous_bar_close={defect['previous_bar_close']} "
                     f"up_limit={defect['up_limit']} down_limit={defect['down_limit']} "
-                    f"repeats_previous_close={defect['valuation_repeats_previous_close']})"
+                    f"repeats_previous_close={defect['valuation_repeats_previous_close']} "
+                    f"list_date={defect['list_date']})"
                 )
         for landed_ref in _all_refs(span_written):
             typer.echo(

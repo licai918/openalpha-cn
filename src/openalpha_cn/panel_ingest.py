@@ -332,6 +332,7 @@ from openalpha_cn.domain.daily_prices import (
     DAILY_BASIC_DATASET,
     DAILY_BASIC_PANEL_COLUMNS,
     DAILY_DATASET,
+    DAILY_INCOMPLETE_BAR_COLUMNS,
     DAILY_PANEL_COLUMNS,
     MIN_SESSION_ROW_SHARE,
     PRE_CLOSE_COLUMN,
@@ -430,6 +431,7 @@ from openalpha_cn.domain.trading_calendar import (
 from openalpha_cn.domain.upstream_defects import (
     DEFECT_KIND_COLUMN,
     DEFECT_SOURCE_DATASETS,
+    LIST_DATE_COLUMN,
     REPEATS_PREVIOUS_CLOSE_COLUMN,
     SOURCE_DATASET_COLUMN,
     UPSTREAM_DEFECT_DATA_COLUMNS,
@@ -437,6 +439,7 @@ from openalpha_cn.domain.upstream_defects import (
     UPSTREAM_DEFECT_PANEL_COLUMNS,
     BarWitness,
     UpstreamDefect,
+    before_listing,
     close_disagreement_kind,
     limit_placeholder_kind,
     repeats_previous_close,
@@ -2319,9 +2322,9 @@ def _refuse_close_disagreement(bars: ColumnarPanelBatch, fundamentals: ColumnarP
     `daily_basic` republishes `close`, so the two fetches one session already needs cross-check
     each other with no extra request -- measured across five sessions from 2023-01-03 to
     2026-08-07, zero disagreements in 24,188 shared rows; the 2013..2026 census that
-    `close_disagreements` cites has found them on 7 of the first 2,092 sessions, in the
-    upstream's own data. Making it a **write** guard rather than a report is what stops a
-    partition that contradicts its sibling from existing at all. Since `V2-P6-013` the CLI runs
+    `close_disagreements` cites found them on 11 of 3,335 sessions, in the upstream's own
+    data. Making it a **write** guard rather than a report is what stops a partition that
+    contradicts its sibling from existing at all. Since `V2-P6-013` the CLI runs
     `reconcile_price_disagreements` first, which drops a `daily_basic` row only under a named
     rule after a re-fetch reproduces it; this guard then refuses whatever is left, exactly as
     before.
@@ -2451,6 +2454,7 @@ def write_daily_panel(
             f"are year {fundamentals_year}; the two partitions of one set of sessions have to "
             "be written together or they will disagree about which sessions exist"
         )
+    _refuse_incomplete_bars(merged_bars)
     _refuse_missing_price_sessions(merged_bars, calendar, year, date_timezone=date_timezone)
     _refuse_missing_price_sessions(merged_fundamentals, calendar, year, date_timezone=date_timezone)
     _refuse_thin_price_sessions(merged_bars)
@@ -3430,6 +3434,9 @@ def reconcile_price_disagreements(
         witness: BarWitness | None = None
         previous_close: float | None = None
         next_pre_close: float | None = None
+        if key in bar_rows and None in (pre_closes[bar_rows[key]], pct_chgs[bar_rows[key]]):
+            # An incomplete bar corroborates nothing; `write_daily_panel` refuses it by name.
+            _refuse_incomplete_bars(_select_rows(merged_bars, [bar_rows[key]]))
         if key in bar_rows:
             index = bar_rows[key]
             witness = BarWitness(
@@ -3487,6 +3494,128 @@ def reconcile_price_disagreements(
         defects=tuple(defects),
         record=_defect_record(merged_fundamentals, positions, defects),
     )
+
+
+def reconcile_pre_listing_rows(
+    batches: Sequence[ColumnarPanelBatch],
+    *,
+    listings: Mapping[str, date] | None,
+    date_column: str = PRICE_DATE_COLUMN,
+) -> ReconciledRows:
+    """Drop every row dated before its security's listing in the stored registry
+    (`bar_before_listing`, `V2-P6-013`).
+
+    The upstream back-maps trading on another venue onto today's Beijing codes: `920476.BJ`
+    listed on 2022-10-14 and has sparse `daily` bars from 2014, the first with a null
+    `pre_close`. A row before its security's `list_date` is outside the listed A-share universe
+    the panel models whether or not it decodes, so it is dropped -- from `daily`, `daily_basic`,
+    `adj_factor` and `stk_limit` alike -- and recorded with the list date.
+
+    Decided from `listings` alone, which the CLI reads from the **stored** `stock_basic`
+    registry. A security the registry does not know is not dropped, and neither is a row on or
+    after its list date: both go on to their writer exactly as before, where an incomplete bar
+    (`DAILY_INCOMPLETE_BAR_COLUMNS`) is refused by `write_daily_panel`. `listings=None` -- no
+    registry stored -- drops nothing.
+
+    Per batch, and only the batches holding a security whose listing is later than the batch's
+    earliest session are read row by row, so a year with no pre-listing row costs one set
+    intersection per session.
+    """
+    kept = tuple(batches)
+    if not listings:
+        return ReconciledRows(batches=kept, defects=(), record=None)
+    defects: list[UpstreamDefect] = []
+    records: list[ColumnarPanelBatch] = []
+    dropped: set[tuple[str, date]] = set()
+    for batch in kept:
+        if batch.status != "success":
+            continue
+        dates = _column_values(batch, date_column)
+        earliest = date.fromisoformat(str(min(str(value) for value in dates)))
+        # The same rule as the per-row test below, applied to the batch's earliest session: a
+        # security listed on or before it cannot have a pre-listing row in this batch.
+        late = {
+            subject
+            for subject in set(batch.subjects)
+            if before_listing(trade_date=earliest, list_date=listings.get(subject))
+        }
+        if not late:
+            continue
+        found: list[UpstreamDefect] = []
+        positions: list[int] = []
+        for index, (subject, day) in enumerate(_row_keys(batch, date_column)):
+            if subject not in late or not before_listing(
+                trade_date=day, list_date=listings[subject]
+            ):
+                continue
+            found.append(_pre_listing_defect(batch, index, subject, day, listings[subject]))
+            positions.append(index)
+            dropped.add((subject, day))
+        record = _defect_record(batch, positions, found)
+        if record is not None:
+            defects.extend(found)
+            records.append(record)
+    return ReconciledRows(
+        batches=_without_rows(kept, dropped, date_column),
+        defects=tuple(defects),
+        record=combine_defect_records(*records),
+    )
+
+
+def _pre_listing_defect(
+    batch: ColumnarPanelBatch, index: int, subject: str, day: date, listed: date
+) -> UpstreamDefect:
+    """The record of one pre-listing row, carrying the value that row had to say."""
+
+    def number(column: str) -> float | None:
+        return cast(float | None, _column_values(batch, column)[index])
+
+    values: dict[str, float | None] = {}
+    if batch.dataset == DAILY_DATASET:
+        values["bar_close"] = number(CLOSE_COLUMN)
+    elif batch.dataset == DAILY_BASIC_DATASET:
+        values["valuation_close"] = number(CLOSE_COLUMN)
+    elif batch.dataset == PRICE_LIMIT_DATASET:
+        values["up_limit"] = number(UP_LIMIT_COLUMN)
+        values["down_limit"] = number(DOWN_LIMIT_COLUMN)
+    return UpstreamDefect(
+        ts_code=subject,
+        trade_date=day,
+        source_dataset=batch.dataset,
+        kind="bar_before_listing",
+        list_date=listed,
+        **values,  # type: ignore[arg-type]
+    )
+
+
+def combine_defect_records(*records: ColumnarPanelBatch | None) -> ColumnarPanelBatch | None:
+    """Several reconciliations' records as one, for one `write_upstream_defects` call."""
+    present = tuple(record for record in records if record is not None)
+    return merge_panel_batches(present) if present else None
+
+
+def _refuse_incomplete_bars(batch: ColumnarPanelBatch) -> None:
+    """Refuse a `daily` year holding a bar with no `pre_close` or `pct_chg` (`V2-P6-013`).
+
+    The decoder carries such a bar on (`DAILY_INCOMPLETE_BAR_COLUMNS`) so that
+    `reconcile_pre_listing_rows` can drop it when the stored registry places it before its
+    security's listing. Whatever that did not drop is a malformed bar -- on or after its list date,
+    or for a security the registry does not know -- and is refused here, so a bar with no
+    `pre_close` is never stored.
+    """
+    for column in sorted(DAILY_INCOMPLETE_BAR_COLUMNS):
+        values = _column_values(batch, column)
+        if None not in values:
+            continue
+        index = values.index(None)
+        ts_code, day = _row_keys(batch)[index]
+        raise PanelBatchError(
+            f"{DAILY_DATASET} carries {ts_code} on {day.isoformat()} with no {column} (and "
+            f"{values.count(None)} such row(s) in all). A bar with no pre_close is dropped only "
+            "under bar_before_listing -- dated before the security's list_date in the stored "
+            "stock_basic registry -- and this one is not: it is on or after its listing, or the "
+            "registry does not know the security. Storing it would divide a return by nothing"
+        )
 
 
 def reconcile_limit_placeholders(
@@ -3603,17 +3732,17 @@ def write_upstream_defects(
     record: ColumnarPanelBatch | None,
     *,
     year: int,
-    source_dataset: str,
+    source_datasets: frozenset[str],
     date_timezone: str = DEFAULT_DATE_TIMEZONE,
 ) -> PartitionRef | None:
-    """Store one source dataset's defects for `year`, keeping every other source's rows.
+    """Store one build target's defects for `year`, keeping every other target's rows.
 
-    ## One dataset, one partition per year, and two writers of it
+    ## One dataset, one partition per year, and three writers of it
 
-    Both `daily_basic` (through `reconcile_price_disagreements`) and `stk_limit` (through
-    `reconcile_limit_placeholders`) drop rows, and they are built by two different targets. A
-    whole-partition replace from either would destroy the other's record, so each call owns the
-    rows whose `source_dataset` is its own and puts the others back with them -- the same
+    The price target drops `daily` and `daily_basic` rows, the `stk_limit` target `stk_limit`
+    rows and the `adj_factor` target `adj_factor` rows, and a whole-partition replace from any
+    of them would destroy the others' record. So each call owns the rows whose `source_dataset`
+    is in its `source_datasets` and puts the others back with them -- the same
     un-gated read-and-put-back `carry_stored_rows_forward` makes, for its reason: nothing read
     here is answered with. Rows are sorted by `(trade_date, subject, source_dataset)`, so the
     partition's content hash does not depend on which target ran first.
@@ -3629,20 +3758,20 @@ def write_upstream_defects(
 
     Returns the partition written, or `None` when there was nothing to write or to change.
     """
-    if source_dataset not in DEFECT_SOURCE_DATASETS:
+    if not source_datasets or not source_datasets <= DEFECT_SOURCE_DATASETS:
         raise PanelBatchError(
-            f"{source_dataset!r} is not one of the datasets a defect rule may drop a row from "
-            f"({sorted(DEFECT_SOURCE_DATASETS)})"
+            f"{sorted(source_datasets)} is not a set of the datasets a defect rule may drop a row "
+            f"from ({sorted(DEFECT_SOURCE_DATASETS)})"
         )
     if record is not None:
         if record.dataset != UPSTREAM_DEFECTS_DATASET:
             raise PanelBatchError(
                 f"expected the {UPSTREAM_DEFECTS_DATASET!r} dataset, got {record.dataset!r}"
             )
-        foreign = set(_column_values(record, SOURCE_DATASET_COLUMN)) - {source_dataset}
+        foreign = set(_column_values(record, SOURCE_DATASET_COLUMN)) - source_datasets
         if foreign:
             raise PanelBatchError(
-                f"this write owns {source_dataset}'s defects and the record carries "
+                f"this write owns {sorted(source_datasets)}'s defects and the record carries "
                 f"{sorted(map(str, foreign))}'s too; each source is written by its own target"
             )
         record_year = panel_partition_year(record, date_timezone=date_timezone)
@@ -3658,15 +3787,16 @@ def write_upstream_defects(
         else []
     )
     source_at = UPSTREAM_DEFECT_STORAGE_COLUMNS.index(SOURCE_DATASET_COLUMN)
-    others = [row for row in stored if row[source_at] != source_dataset]
-    owned = [row for row in stored if row[source_at] == source_dataset]
+    others = [row for row in stored if row[source_at] not in source_datasets]
+    owned = [row for row in stored if row[source_at] in source_datasets]
     if record is None:
         if not owned:
             return None
         if not others:
             dropped = sorted(f"{row[0]}@{row[len(CLOCK_COLUMN_NAMES) + 1]}" for row in owned)
             raise PanelBatchError(
-                f"{UPSTREAM_DEFECTS_DATASET} year={year} records {len(owned)} {source_dataset} "
+                f"{UPSTREAM_DEFECTS_DATASET} year={year} records {len(owned)} "
+                f"{sorted(source_datasets)} "
                 f"row(s) as dropped ({dropped}) and this build no longer reproduces any of them. "
                 "The record cannot be emptied -- the panel store has no partition delete and an "
                 "empty partition cannot be written -- and leaving it would claim a row was "
@@ -3732,9 +3862,11 @@ def load_upstream_defects(
     )
 
 
-def _row_keys(batch: ColumnarPanelBatch) -> tuple[tuple[str, date], ...]:
-    """Every row's `(subject, trade_date)`, in row order."""
-    dates = _stored_dates(_column_values(batch, PRICE_DATE_COLUMN), PRICE_DATE_COLUMN)
+def _row_keys(
+    batch: ColumnarPanelBatch, date_column: str = PRICE_DATE_COLUMN
+) -> tuple[tuple[str, date], ...]:
+    """Every row's `(subject, session)`, in row order."""
+    dates = _stored_dates(_column_values(batch, date_column), date_column)
     return tuple(zip(batch.subjects, dates, strict=True))
 
 
@@ -3783,14 +3915,19 @@ def _refuse_a_refetch_that_differs(
 
 
 def _without_rows(
-    batches: tuple[ColumnarPanelBatch, ...], dropped: set[tuple[str, date]]
+    batches: tuple[ColumnarPanelBatch, ...],
+    dropped: set[tuple[str, date]],
+    date_column: str = PRICE_DATE_COLUMN,
 ) -> tuple[ColumnarPanelBatch, ...]:
     """`batches` with every row keyed in `dropped` removed; a batch left empty is left out."""
     if not dropped:
         return batches
     kept: list[ColumnarPanelBatch] = []
     for batch in batches:
-        keys = _row_keys(batch)
+        if batch.status != "success":
+            kept.append(batch)
+            continue
+        keys = _row_keys(batch, date_column)
         indices = [index for index, key in enumerate(keys) if key not in dropped]
         if len(indices) == len(keys):
             kept.append(batch)
@@ -3841,6 +3978,14 @@ def _defect_record(
                 "boolean",
                 tuple(defect.valuation_repeats_previous_close for defect in defects),
             ),
+            PanelColumn(
+                LIST_DATE_COLUMN,
+                "string",
+                tuple(
+                    None if defect.list_date is None else defect.list_date.isoformat()
+                    for defect in defects
+                ),
+            ),
         ),
     )
 
@@ -3866,6 +4011,7 @@ def _stored_defect_batch(
         DEFECT_KIND_COLUMN: "string",
         **{name: "float" for name in UPSTREAM_DEFECT_NUMBER_COLUMNS},
         REPEATS_PREVIOUS_CLOSE_COLUMN: "boolean",
+        LIST_DATE_COLUMN: "string",
     }
     return ColumnarPanelBatch(
         provider_id=coverage.provider_id,

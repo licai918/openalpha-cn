@@ -88,6 +88,27 @@ RESUMED = "600006.SH"
 FILLERS: tuple[str, ...] = tuple(f"{600000 + index}.SH" for index in range(17))
 SECURITIES: tuple[str, ...] = (NO_BAR, HALTED, STALE, *FILLERS)
 
+# `V2-P6-013` round 2: `920476.BJ` traded on another venue years before it listed (2022-10-14),
+# and the upstream back-maps those trades onto today's code -- sparse bars, the first with a null
+# `pre_close` and `pct_chg`. Here: a null-field bar on the 13th and an ordinary one on the 14th.
+PRELISTED = "920476.BJ"
+PRELISTED_DAYS: tuple[date, ...] = (date(2013, 11, 13), date(2013, 11, 14))
+LIST_DATE_BY_SCENARIO: Mapping[str, str | None] = {
+    "before": "20221014",
+    "after": "20131101",
+    "absent": None,
+}
+REGISTRY_FIELDS = [
+    "ts_code",
+    "name",
+    "exchange",
+    "market",
+    "list_status",
+    "list_date",
+    "delist_date",
+]
+FACTOR_FIELDS = ["ts_code", "trade_date", "adj_factor"]
+
 # `002357.SZ`'s own measured shape, moved onto this frame's sessions: 6.62 through the 12th, a
 # 2.72% day to 6.8 on the 13th, and 6.8 after it.
 STALE_CLOSES: Mapping[date, float] = {
@@ -168,6 +189,8 @@ class Frame:
     contradicted_valuation: bool = False
     refetch_differs: bool = False
     uncorroborated_mismatch: bool = False
+    pre_listing: str | None = None
+    """`None` for no `920476.BJ` at all, else a key of `LIST_DATE_BY_SCENARIO`."""
 
 
 class ScriptedUpstream:
@@ -199,8 +222,18 @@ class ScriptedUpstream:
     def _traded(self, code: str, day: date) -> bool:
         return not (self.frame.limit_placeholder and code == HALTED and day == HALT_DAY)
 
+    def _prelisted(self, day: date) -> bool:
+        return self.frame.pre_listing is not None and day in PRELISTED_DAYS
+
     def _bars(self, day: date, *, refetch: bool) -> list[list[Any]]:
-        rows = []
+        rows: list[list[Any]] = []
+        if self._prelisted(day):
+            first = day == PRELISTED_DAYS[0]
+            rows.append(
+                [PRELISTED, _compact(day), 18.0, 18.0, 18.0, 18.0]
+                + ([None, None] if first else [18.0, 0.0])
+                + [300.0, 540.0]
+            )
         for code in SECURITIES:
             if not self._traded(code, day):
                 continue
@@ -247,8 +280,23 @@ class ScriptedUpstream:
             rows.append([HALTED, _compact(day), "S", None])
         return rows
 
+    def _factors(self, day: date) -> list[list[Any]]:
+        rows = [[code, _compact(day), 1.0] for code in SECURITIES]
+        if self._prelisted(day):
+            rows.append([PRELISTED, _compact(day), 1.0])
+        return rows
+
+    def _registry(self) -> list[list[Any]]:
+        rows = [[code, code, "SSE", "主板", "L", "20100104", None] for code in SECURITIES]
+        listed = LIST_DATE_BY_SCENARIO.get(self.frame.pre_listing or "")
+        if listed is not None:
+            rows.append([PRELISTED, PRELISTED, "BSE", "北交所", "L", listed, None])
+        return rows
+
     def _limits(self, day: date) -> list[list[Any]]:
         rows: list[list[Any]] = []
+        if self._prelisted(day):
+            rows.append([PRELISTED, _compact(day), 19.8, 16.2])
         for code in SECURITIES:
             close = self._pre_close(code, day)
             band = [round(close * 1.1, 2), round(close * 0.9, 2)]
@@ -272,6 +320,8 @@ class ScriptedUpstream:
                     previous = _compact(day)
                 day += timedelta(days=1)
             return _response(CALENDAR_FIELDS, items)
+        if api_name == "stock_basic":
+            return _response(REGISTRY_FIELDS, self._registry())
         day = datetime.strptime(params["trade_date"], "%Y%m%d").date()
         # A second request for the same (dataset, session) is a re-fetch, whether it names a
         # security or asks for the whole session again.
@@ -289,6 +339,9 @@ class ScriptedUpstream:
         elif api_name == PRICE_LIMIT_DATASET:
             rows = self._limits(day)
             fields = LIMIT_FIELDS
+        elif api_name == "adj_factor":
+            rows = self._factors(day)
+            fields = FACTOR_FIELDS
         else:
             raise AssertionError(f"unscripted dataset {api_name}")
         if "ts_code" in params:
@@ -365,6 +418,7 @@ def test_a_valuation_the_bar_never_had_is_dropped_and_recorded(
             "up_limit": None,
             "down_limit": None,
             "valuation_repeats_previous_close": None,
+            "list_date": None,
         }
     ]
     assert {"dataset": UPSTREAM_DEFECTS_DATASET, "year": YEAR, "row_count": 1} in build[
@@ -579,15 +633,68 @@ def test_a_recorded_defect_a_rebuild_no_longer_reproduces_is_not_silently_kept(
 
     with pytest.raises(PanelBatchError, match="no longer reproduces"):
         write_upstream_defects(
-            _store(tmp_path), None, year=YEAR, source_dataset=DAILY_BASIC_DATASET
+            _store(tmp_path), None, year=YEAR, source_datasets=frozenset({DAILY_BASIC_DATASET})
         )
     # A source that recorded nothing is untouched by another source's empty write.
     assert (
         write_upstream_defects(
-            _store(tmp_path), None, year=YEAR, source_dataset=PRICE_LIMIT_DATASET
+            _store(tmp_path), None, year=YEAR, source_datasets=frozenset({PRICE_LIMIT_DATASET})
         )
         is None
     )
+
+
+# --- bar_before_listing (round 2) --------------------------------------------------------------
+
+
+def test_rows_before_the_registrys_list_date_are_dropped_and_recorded_null_or_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`920476.BJ`'s 2013 rows -- a null-`pre_close` bar, an ordinary bar, their bands and their
+    factors -- all precede its 2022-10-14 listing in the stored registry, so every one of them is
+    outside the universe and is dropped with the list date recorded."""
+    frame = Frame(pre_listing="before")
+    result, _ = _build(
+        tmp_path, frame, monkeypatch, "stock_basic", "adj_factor", "price", "stk_limit"
+    )
+
+    assert result.exit_code == PanelExit.ok, result.output
+    recorded = [
+        (d.source_dataset, d.trade_date, d.kind, d.list_date, d.bar_close)
+        for d in _defects(tmp_path)
+    ]
+    listed = date(2022, 10, 14)
+    assert sorted(recorded) == sorted(
+        [
+            (dataset, day, "bar_before_listing", listed, 18.0 if dataset == DAILY_DATASET else None)
+            for dataset in (DAILY_DATASET, "adj_factor", PRICE_LIMIT_DATASET)
+            for day in PRELISTED_DAYS
+        ]
+    )
+    for dataset, columns in (
+        (DAILY_DATASET, ("subject", "trade_date")),
+        (PRICE_LIMIT_DATASET, PRICE_LIMIT_PANEL_COLUMNS),
+    ):
+        assert PRELISTED not in {key[0] for key in _stored_keys(tmp_path, dataset, columns)}
+    assert all(
+        entry["kind"] == "bar_before_listing"
+        for entry in json.loads(result.stdout)["builds"][0]["defects"]
+    )
+
+
+@pytest.mark.parametrize("scenario", ["after", "absent"])
+def test_a_null_field_bar_the_registry_does_not_place_before_listing_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: str
+) -> None:
+    """On or after its list date, or for a security the registry does not know, a bar with no
+    `pre_close` is what it always was: a malformed row. It is refused by name and never stored."""
+    result, _ = _build(tmp_path, Frame(pre_listing=scenario), monkeypatch, "stock_basic", "price")
+
+    assert result.exit_code == PanelExit.unhealthy, result.output
+    assert PRELISTED in result.output
+    assert PRELISTED_DAYS[0].isoformat() in result.output
+    assert "pre_close" in result.output
+    assert _store(tmp_path).registered_years(DAILY_DATASET) == ()
 
 
 # --- the decoder -------------------------------------------------------------------------------
