@@ -6,6 +6,7 @@ import os
 import platform
 import sys
 import textwrap
+from calendar import monthrange
 from collections.abc import Iterator, Mapping, Sequence, Set
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -3207,6 +3208,14 @@ def _sweep_window_opens(window: str) -> datetime:
     return datetime(int(window[:4]), int(window[4:6]), day, tzinfo=PANEL_DATE_ZONE)
 
 
+def _sweep_window_closes(window: str) -> datetime:
+    """The instant a sweep window has ended: the midnight after its month's last day, or after its
+    report period's last day."""
+    year, month = int(window[:4]), int(window[4:6])
+    last = date(year, month, int(window[6:]) if len(window) == 8 else monthrange(year, month)[1])
+    return datetime.combine(last + timedelta(days=1), time(0, 0), tzinfo=PANEL_DATE_ZONE)
+
+
 def _sweep_statement_batches(
     provider: TushareProvider,
     dataset: str,
@@ -3232,6 +3241,19 @@ def _sweep_statement_batches(
     write different partitions and would put a subject in a statement partition that no universe
     read can name. What is set aside is counted on the `SWEPT` line rather than dropped in
     silence.
+
+    **A closed window that answers nothing is refused** (the review of `50c89ed`). One security
+    with no filing in a year is ordinary; the *whole market* with none in a month that has ended
+    is not -- none of the 72 months of 2015 and 2024 swept live on 2026-09-26 held fewer than 30
+    stored rows (cashflow, June 2024), and the per-security route's refusal only fires when every
+    security of a year is empty, so accepting an empty month would widen a silent loss from one
+    security-year to a whole month of the market. Such a window is asked once more, which rules
+    out a transient empty answer and is counted on the `SWEPT` line; empty again, the build is
+    refused with `_build_statement_panel`'s exit code, naming the dataset and the window. A
+    report period that has ended is held to the same rule, even in the weeks after its end in
+    which nobody has filed yet: a build of the current period year then waits for the first
+    filing. A window that has begun and not ended may be empty -- nothing has been announced in
+    it *yet* -- and is ordinary; one that has not begun is not asked for.
     """
     windows = tuple(
         window
@@ -3249,10 +3271,23 @@ def _sweep_statement_batches(
     )
     collected: list[ColumnarPanelBatch] = []
     served: set[str] = set()
+    rerequested = 0
     started = monotonic()
     stride = _progress_stride(len(windows))
     for index, window in enumerate(windows, start=1):
         batch = _fetch_panel(provider, dataset, as_of=as_of, subjects=(window,), sweep=True)
+        if batch.status == "no_data" and _sweep_window_closes(window) <= as_of:
+            rerequested += 1
+            batch = _fetch_panel(provider, dataset, as_of=as_of, subjects=(window,), sweep=True)
+            if batch.status == "no_data":
+                raise _panel_fail(
+                    PanelExit.unhealthy,
+                    f"{label}: the whole-market {dataset} window {window} ended before "
+                    f"{as_of.isoformat()} and served no row that could be stored, asked twice. "
+                    "One security with nothing to report is ordinary and a whole market with "
+                    "nothing in a closed window is not, so this is a fetch to investigate "
+                    "rather than a partition to write without that window",
+                )
         if batch.status == "success":
             served.update(batch.subjects)
             kept = keep_panel_subjects(batch, registry)
@@ -3264,16 +3299,16 @@ def _sweep_statement_batches(
     typer.echo(
         f"SWEPT {label} {sum(batch.row_count for batch in collected)} rows from "
         f"{len(served & registry)} registered securities; {len(outside)} securities outside "
-        "the stored registry not stored",
+        f"the stored registry not stored; {rerequested} empty closed window(s) re-requested",
         err=True,
     )
     if not collected:
         raise _panel_fail(
             PanelExit.unhealthy,
             f"{label}: none of the {len(windows)} {unit} windows served a filing by a security "
-            f"in the stored registry ({len(outside)} outside it did). A window with nothing "
-            "announced is ordinary and a whole year of them is not, so this is a fetch to "
-            "investigate rather than an empty partition to write",
+            f"in the stored registry ({len(outside)} outside it did). A window that has not "
+            "ended may have nothing announced yet, and a year with nothing from any registered "
+            "security is a fetch to investigate rather than an empty partition to write",
         )
     return collected
 
@@ -4262,9 +4297,12 @@ def panel_build(
     `providers.tushare._statement_sweep_descriptor`). Measured on 2026-09-26: announcement years
     2015 and 2024 cost 42 `income`, 30 `balancesheet` and 42 `cashflow` requests (72 month
     windows, 114 requests, about four minutes), and `fina_indicator`'s period years 2015 and 2023
-    cost 8, where one request per registered security would have been 5,908 x 8 = 47,264. So
-    `--start 2015 --end 2026` is 480 windows (432 months and 48 report periods) plus the halvings,
-    rather than ~282,000 requests. Every fetch loop still states its size before it starts
+    cost 8. One request per registered security would have been 5,908 x 2 = 11,816 for each of
+    the four datasets over those two years, 47,264 for all four. So `--start 2015 --end 2026` is
+    at most 480 windows (432 months and 48 report periods; a window that has not begun at the
+    build's clock is not asked for), plus the halvings and one repeat of any ended window that
+    answered nothing, rather than ~282,000 requests. Every fetch loop still states its size
+    before it starts
     (`_echo_budget`, in windows for a sweep) and reports progress with an `eta` while it runs, and
     `--subject` still selects the per-security route for a named handful.
     """

@@ -209,9 +209,11 @@ def test_the_weaker_resume_rule_names_its_members_rather_than_being_a_fallback()
     The session rule reads a census the writers already validated. This set is skipped on a
     registered partition alone, because its datasets have no session census at all -- a security
     that announced nothing in a year is absent and indistinguishable from one never fetched. That
-    is worth having at 5,881 requests a year and it is worth *naming*, so a future target cannot
-    acquire the weaker rule by falling through a condition. `namechange` is deliberately outside
-    it: one request a year, so `trade_cal`'s argument applies instead.
+    was worth having at 5,881 requests a year when fetched one security at a time, is still worth
+    having at a dozen-plus whole-market requests per dataset-year (`V2-P6-002`), and it is worth
+    *naming*, so a future target cannot acquire the weaker rule by falling through a condition.
+    `namechange` is deliberately outside it: one request a year, so `trade_cal`'s argument applies
+    instead.
     """
     assert set(_REGISTERED_PARTITION_RESUME) == {
         INDEX_WEIGHT_DATASET,

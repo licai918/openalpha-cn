@@ -3910,8 +3910,13 @@ class TushareProvider:
         **A single day that does not fit is refused**, not paged and not stored short. There is
         no narrower `ann_date` window, and paging is measured unsound here. At the caps measured
         on 2026-09-26 the busiest day of each swept year fitted (this issue's report records the
-        live sweeps); a market that outgrows that is a refusal naming the day, and `--subject`
-        is still the per-security route for the securities that matter to the caller.
+        live sweeps). A market that outgrows that is a `TushareResponseTruncated` whose message
+        names the day -- but only the category reaches a terminal: `cli._fetch_panel` withholds
+        every `ProviderFailure` message, because one can carry the credential, and prints
+        "refused dataset income: upstream". The day is recoverable from the provider in-process
+        (the failure object), not from the CLI's output; a category of its own would be a change
+        to `ProviderFailure`'s closed vocabulary for one message. `--subject` is still the
+        per-security route for the securities that matter to the caller.
         """
         try:
             return _response_rows(

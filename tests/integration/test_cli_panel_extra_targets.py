@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -98,6 +98,11 @@ SWEEP = "_vip"
 """The suffix of a statement dataset's whole-market endpoint (`V2-P6-002`)."""
 
 MONTH_STARTS: tuple[str, ...] = tuple(f"{EXTRA_YEAR}{month:02d}01" for month in range(1, 13))
+
+UNREGISTERED_FILER: str = "900009.SH"
+"""Files in every whole-market window and is not in the registry; see `_sweep_rows`."""
+
+ONE_DAY = timedelta(days=1)
 
 
 def _statement_fields(dataset: str) -> list[str]:
@@ -272,12 +277,17 @@ class ExtraTargetTransport:
         `income`'s three siblings filter `ann_date` on `start_date`/`end_date`; `fina_indicator`
         takes a `period` and filters `end_date`, the asymmetry `_financial_indicator_params`
         records.
+
+        Plus one row from `UNREGISTERED_FILER` in every window: a closed whole-market window that
+        answers nothing is refused, and a real market has no such month. Neither route stores it
+        -- the per-security route never asks for it and the sweep keeps registered securities --
+        so every partition this module asserts on is unchanged by it.
         """
         window = str(params.get("period") or params["start_date"])
         year = window[:4]
         whole_year = {"start_date": f"{year}0101", "end_date": f"{year}1231"}
         assert "offset" not in params, "the statement sweeps are never paged"
-        return [
+        rows = [
             row
             for code in SECURITIES
             for row in self._statement_rows(dataset, {"ts_code": code, **whole_year})
@@ -287,6 +297,15 @@ class ExtraTargetTransport:
                 else str(params["start_date"]) <= row[2] <= str(params["end_date"])
             )
         ]
+        if "period" in params:
+            period = str(params["period"])
+            filed = _compact(date(int(period[:4]), int(period[4:6]), int(period[6:])) + ONE_DAY)
+        else:
+            period, filed = f"{int(year) - 1}1231", str(params["start_date"])
+        keys: list[Any] = [UNREGISTERED_FILER, period, filed]
+        if dataset != FINANCIAL_INDICATOR_DATASET:
+            keys.extend([filed, "1"])
+        return [*rows, [*keys, *([1.0] * len(STATEMENT_DATA_COLUMNS[dataset]))]]
 
     # -- the transport -------------------------------------------------------------------------
 
@@ -1013,9 +1032,10 @@ def test_the_statement_sweep_states_its_size_before_it_makes_a_request(
 ) -> None:
     """A budget line on stderr, before the first round trip.
 
-    The sweep counts windows, and says so: a window is one request per page and its page count
-    is not known until the endpoint answers. It has to be stderr, because `--json` promises a
-    parseable stdout.
+    The sweep counts windows, and says so: a window is never paged, but one that reaches the
+    endpoint's cap is halved by date until each half fits, so its request count is not known
+    until the endpoint answers. It has to be stderr, because `--json` promises a parseable
+    stdout.
     """
     result = build(tmp_path, STOCK_BASIC_DATASET, INCOME_DATASET, extra=["--json"])
 

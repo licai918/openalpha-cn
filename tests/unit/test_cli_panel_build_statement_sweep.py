@@ -50,6 +50,12 @@ UNREGISTERED: Final[str] = "900001.SH"
 """Files in the whole market and is not in `stock_basic`. The per-security route never asks for
 it, so the sweep must not store it either -- otherwise the two partitions differ by a security."""
 
+FILLER: Final[str] = "900002.SH"
+"""Another unregistered security, filing in every month and every report period the registered
+three leave empty. A closed whole-market window that answers nothing is refused (the review of
+`50c89ed`), and the live market has no empty closed month in 2015 or 2024; this keeps every window
+of the frame non-empty while storing nothing, since neither route keeps an unregistered row."""
+
 FILINGS: Final[tuple[tuple[str, str, str, str, str, float], ...]] = (
     # ts_code, end_date, ann_date, f_ann_date, update_flag, value
     ("000001.SZ", "20241231", "20250315", "20250315", "1", 11.0),
@@ -65,10 +71,32 @@ FILINGS: Final[tuple[tuple[str, str, str, str, str, float], ...]] = (
     ("000002.SZ", "20250331", "20250429", "20250429", "1", 31.0),
     ("000002.SZ", "20251231", "20260315", "20260315", "1", 32.0),
     (UNREGISTERED, "20250331", "20250428", "20250428", "1", 91.0),
+    ("000001.SZ", "20251231", "20260120", "20260120", "1", 15.0),
+    *(
+        (FILLER, period, announced, announced, "1", 81.0)
+        for period, announced in (
+            ("20240331", "20240425"),
+            ("20240630", "20240825"),
+            ("20240930", "20241025"),
+            # Late and revised reports of earlier periods, spread so that no report period
+            # reaches `CAP`: a period has no finer window to halve into.
+            ("20240930", "20250115"),
+            ("20241231", "20250215"),
+            ("20241231", "20250515"),
+            ("20240630", "20250615"),
+            ("20250630", "20250715"),
+            ("20250630", "20250915"),
+            ("20250930", "20251115"),
+            ("20250930", "20251215"),
+            ("20251231", "20260115"),
+            ("20251231", "20260215"),
+            ("20251231", "20260310"),
+        )
+    ),
 )
 """April 2025 holds six rows, five of them on 28 April, so at a cap of six April is halved four
-times before every window fits; February, May, June, July, September, November and December
-hold none."""
+times before every window fits. The registered securities announce nothing in January, February,
+May, June, July, September, November and December 2025; `FILLER` does."""
 
 CAP: Final[int] = 6
 
@@ -330,8 +358,8 @@ def test_the_sweep_asks_each_month_once_and_halves_the_busy_one(
 def test_a_year_in_which_nothing_was_announced_is_refused_by_both_routes_alike(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An empty month is ordinary -- eight of this market's twelve are -- and an empty year is a
-    fetch that did not work, refused before it reaches the writer on either route."""
+    """An empty year is a fetch that did not work, refused before it reaches the writer on either
+    route and with the same exit code; the sweep refuses at its first closed empty month."""
     _install(monkeypatch, Market(()))
 
     swept = _build(tmp_path / "sweep", *_swept(INCOME_DATASET))
@@ -339,7 +367,7 @@ def test_a_year_in_which_nothing_was_announced_is_refused_by_both_routes_alike(
 
     assert by_subject.exit_code == PanelExit.unhealthy
     assert swept.exit_code == PanelExit.unhealthy
-    assert "none of the 12 month windows served a filing" in swept.output
+    assert f"window {YEAR}01 ended before" in swept.output
     assert PanelStore(tmp_path / "sweep" / "panel").registered_years(INCOME_DATASET) == ()
 
 
@@ -364,3 +392,99 @@ def test_the_sweep_still_needs_the_registry_it_filters_by(
     assert result.exit_code == PanelExit.unhealthy
     assert "--dataset stock_basic" in result.output
     assert market.payloads == []
+
+
+# --- an empty whole-market window (the review of 50c89ed) ----------------------------------------
+
+
+class FlakyMarket(Market):
+    """`Market`, except that the first request for each window in `empty_once` answers nothing."""
+
+    def __init__(
+        self, filings: Sequence[tuple[str, str, str, str, str, float]], empty_once: set[str]
+    ) -> None:
+        super().__init__(filings)
+        self.empty_once = set(empty_once)
+
+    def post(self, payload: dict[str, Any]) -> dict[str, Any]:
+        params: Mapping[str, str] = payload["params"]
+        window = str(params.get("period") or params.get("start_date", ""))
+        if str(payload["api_name"]).endswith("_vip") and window in self.empty_once:
+            self.empty_once.discard(window)
+            self.payloads.append(payload)
+            return _envelope(str(payload["api_name"]).removesuffix("_vip"), [])
+        return super().post(payload)
+
+
+def _asked(market: Market, api: str, key: str, value: str) -> int:
+    return sum(
+        1
+        for entry in market.payloads
+        if entry["api_name"] == api and str(entry["params"].get(key)) == value
+    )
+
+
+def test_an_empty_closed_month_is_refused_after_one_re_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """June 2025 closed long before the clock and the whole market answers nothing for it, twice.
+    That is not a quiet month -- none of 2015's or 2024's 72 live months held fewer than 30 stored
+    rows -- it is a month of filings the partition would silently lack."""
+    market = _install(monkeypatch, Market([f for f in FILINGS if not f[2].startswith(f"{YEAR}06")]))
+
+    result = _build(tmp_path, *_swept(INCOME_DATASET))
+
+    assert result.exit_code == PanelExit.unhealthy
+    assert f"{INCOME_DATASET} year={YEAR}" in result.output
+    assert f"window {YEAR}06" in result.output
+    assert _asked(market, "income_vip", "start_date", f"{YEAR}0601") == 2
+    assert PanelStore(tmp_path / "panel").registered_years(INCOME_DATASET) == ()
+
+
+def test_a_transient_empty_answer_is_re_requested_once_and_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    market = _install(monkeypatch, FlakyMarket(FILINGS, {f"{YEAR}0601"}))
+
+    result = _build(tmp_path, *_swept(INCOME_DATASET))
+
+    assert result.exit_code == PanelExit.ok, result.output
+    assert _asked(market, "income_vip", "start_date", f"{YEAR}0601") == 2
+    assert "1 empty closed window(s) re-requested" in result.stderr
+
+
+def test_an_empty_closed_report_period_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    market = _install(monkeypatch, Market([f for f in FILINGS if f[1] != f"{YEAR - 1}0630"]))
+
+    result = _build(
+        tmp_path,
+        *_swept(FINANCIAL_INDICATOR_DATASET, years=("--start", str(YEAR - 1), "--end", str(YEAR))),
+    )
+
+    assert result.exit_code == PanelExit.unhealthy
+    assert f"window {YEAR - 1}0630" in result.output
+    assert _asked(market, "fina_indicator_vip", "period", f"{YEAR - 1}0630") == 2
+
+
+def test_windows_after_the_clock_are_not_asked_and_an_open_empty_month_is_ordinary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """At 2026-03-20, April 2026 onwards has not begun and is never asked for. March has begun
+    and not ended, so a whole market that has announced nothing in it yet is a fact about the
+    clock, not a lost month -- asked once and not refused."""
+    market = _install(
+        monkeypatch, Market([f for f in FILINGS if not f[2].startswith(f"{YEAR + 1}03")])
+    )
+
+    result = _build(tmp_path, *_swept(INCOME_DATASET, years=("--year", str(YEAR + 1))))
+
+    assert result.exit_code == PanelExit.ok, result.output
+    starts = [
+        str(entry["params"]["start_date"])
+        for entry in market.payloads
+        if entry["api_name"] == "income_vip"
+    ]
+    assert starts == [f"{YEAR + 1}0101", f"{YEAR + 1}0201", f"{YEAR + 1}0301"]
+    assert f"BUDGET {INCOME_DATASET} year={YEAR + 1} 3 windows" in result.stderr
