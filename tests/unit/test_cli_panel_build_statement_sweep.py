@@ -135,10 +135,15 @@ class Market:
     """
 
     def __init__(
-        self, filings: Sequence[tuple[str, str, str, str, str, float]], *, listed: str = "20260102"
+        self,
+        filings: Sequence[tuple[str, str, str, str, str, float]],
+        *,
+        listed: str = "20260102",
+        cap: int = CAP,
     ) -> None:
         self.filings = tuple(filings)
         self.listed = listed
+        self.cap = cap
         self.payloads: list[dict[str, Any]] = []
 
     def api_names(self) -> list[str]:
@@ -177,12 +182,15 @@ class Market:
                 chosen = [
                     f for f in self.filings if params["start_date"] <= f[2] <= params["end_date"]
                 ]
+            if "ts_code" in params:
+                listed = set(str(params["ts_code"]).split(","))
+                chosen = [f for f in chosen if f[0] in listed]
             chosen.reverse()
             assert "offset" not in params and "limit" not in params, params
             return _envelope(
                 dataset,
-                [_item(dataset, f) for f in chosen[:CAP]],
-                more=len(chosen) > CAP,
+                [_item(dataset, f) for f in chosen[: self.cap]],
+                more=len(chosen) > self.cap,
             )
         column = 1 if dataset == FINANCIAL_INDICATOR_DATASET else 2
         chosen = [
@@ -538,3 +546,51 @@ def test_an_empty_report_period_is_refused_only_after_its_disclosure_deadline(
     else:
         assert result.exit_code == PanelExit.ok, result.output
         assert asked == 1
+
+
+# --- a capped report period is re-fetched in registry chunks (fix round 3) ------------------------
+
+
+def test_a_capped_report_period_stores_what_an_uncapped_answer_stores(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """At a cap of three, 20250331 (five rows) and three other periods reach the cap; each is
+    re-fetched as chunks of the stored registry's codes, halving a chunk that is itself capped.
+    The partitions must be the ones a cap of six, where every period fits in one answer, stores."""
+    span = ("--start", str(YEAR - 1), "--end", str(YEAR))
+    wide = _install(monkeypatch, Market(FILINGS))
+    uncapped = _build(tmp_path / "uncapped", *_swept(FINANCIAL_INDICATOR_DATASET, years=span))
+    uncapped_requests = sum(1 for entry in wide.payloads if entry["api_name"].endswith("_vip"))
+
+    sweep = tushare._TUSHARE_SWEEPS_BY_NAME[FINANCIAL_INDICATOR_DATASET]
+    monkeypatch.setitem(
+        tushare._TUSHARE_SWEEPS_BY_NAME,
+        FINANCIAL_INDICATOR_DATASET,
+        sweep.model_copy(update={"max_rows_per_response": 3}),
+    )
+    narrow = _install(monkeypatch, Market(FILINGS, cap=3))
+    capped = _build(tmp_path / "capped", *_swept(FINANCIAL_INDICATOR_DATASET, years=span))
+
+    assert uncapped.exit_code == PanelExit.ok, uncapped.output
+    assert capped.exit_code == PanelExit.ok, capped.output
+    for year in (YEAR, YEAR + 1):
+        assert _stored(tmp_path / "capped", FINANCIAL_INDICATOR_DATASET, year) == _stored(
+            tmp_path / "uncapped", FINANCIAL_INDICATOR_DATASET, year
+        )
+    chunked = [
+        str(entry["params"]["ts_code"])
+        for entry in narrow.payloads
+        if entry["api_name"] == "fina_indicator_vip" and "ts_code" in entry["params"]
+    ]
+    assert chunked, "no period was re-fetched in chunks"
+    assert all(set(chunk.split(",")) <= set(REGISTERED) for chunk in chunked)
+    capped_requests = sum(1 for entry in narrow.payloads if entry["api_name"].endswith("_vip"))
+    assert capped_requests > uncapped_requests == 8
+    # The SWEPT lines report the requests the sweep actually made, chunks included.
+    assert f"SWEPT {FINANCIAL_INDICATOR_DATASET} period-year={YEAR}" in capped.stderr
+    swept_requests = sum(
+        int(line.split(" requests")[0].rsplit(" ", 1)[1])
+        for line in capped.stderr.splitlines()
+        if line.startswith("SWEPT")
+    )
+    assert swept_requests == capped_requests

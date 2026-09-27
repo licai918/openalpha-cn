@@ -218,6 +218,7 @@ from openalpha_cn.providers.tushare import (
     SUPERSEDED_INDUSTRY_MEMBERSHIP,
     TRADING_CALENDAR_DEFAULT_EXCHANGE,
     TUSHARE_STATEMENT_SWEEP_ROW_CAPS,
+    TUSHARE_TS_CODE_LIST_LIMIT,
     TushareProvider,
     TushareTransport,
     UrllibTushareTransport,
@@ -2860,6 +2861,7 @@ def _fetch_panel(
     as_of: datetime,
     subjects: tuple[str, ...] = (),
     sweep: bool = False,
+    codes: tuple[str, ...] = (),
 ) -> ColumnarPanelBatch:
     """One panel-plane fetch, reporting a refusal without ever echoing its message.
 
@@ -2869,12 +2871,13 @@ def _fetch_panel(
     print or log.
 
     `sweep` sends the request down `TushareProvider.fetch_panel_sweep`, the statement datasets'
-    whole-market route, and through this same boundary rather than a second copy of it.
+    whole-market route, and through this same boundary rather than a second copy of it; `codes`
+    are the securities that route may chunk a capped window by.
     """
     request = ProviderRequest(dataset=dataset, as_of=as_of, subjects=subjects)
     try:
         if sweep:
-            return provider.fetch_panel_sweep(request)
+            return provider.fetch_panel_sweep(request, codes=codes)
         return provider.fetch_panel(request)
     except ProviderFailure as failure:
         logger.warning(
@@ -3330,24 +3333,34 @@ def _sweep_statement_batches(
         if _sweep_window_opens(window) <= as_of
     )
     unit = "report-period" if dataset == FINANCIAL_INDICATOR_DATASET else "month"
+    codes = tuple(sorted(registry))
+    chunks = -(-len(codes) // TUSHARE_TS_CODE_LIST_LIMIT)
+    narrowest = "report period" if dataset == FINANCIAL_INDICATOR_DATASET else "single day"
     _echo_budget(
         label,
         len(windows),
         "windows",
         f"whole-market {dataset}{STATEMENT_SWEEP_ENDPOINT_SUFFIX}, one {unit} per window and one "
         f"request each; a window at the {TUSHARE_STATEMENT_SWEEP_ROW_CAPS[dataset]}-row cap is "
-        "halved until each half fits",
+        f"halved by date until each half fits, and a {narrowest} still at the cap is re-fetched "
+        f"as {chunks} chunk(s) of the stored registry's {len(codes)} codes, "
+        f"<= {TUSHARE_TS_CODE_LIST_LIMIT} each",
     )
     collected: list[ColumnarPanelBatch] = []
     served: set[str] = set()
     rerequested = 0
+    requests_before = provider.request_count
     started = monotonic()
     stride = _progress_stride(len(windows))
     for index, window in enumerate(windows, start=1):
-        batch = _fetch_panel(provider, dataset, as_of=as_of, subjects=(window,), sweep=True)
+        batch = _fetch_panel(
+            provider, dataset, as_of=as_of, subjects=(window,), sweep=True, codes=codes
+        )
         if batch.status == "no_data" and _sweep_window_refuses_empty_from(window) <= as_of:
             rerequested += 1
-            batch = _fetch_panel(provider, dataset, as_of=as_of, subjects=(window,), sweep=True)
+            batch = _fetch_panel(
+                provider, dataset, as_of=as_of, subjects=(window,), sweep=True, codes=codes
+            )
             if batch.status == "no_data":
                 raise _panel_fail(
                     PanelExit.unhealthy,
@@ -3366,10 +3379,13 @@ def _sweep_statement_batches(
         if index % stride == 0 or index == len(windows):
             _echo_progress((dataset,), index, len(windows), started, unit="windows")
     outside = served - registry
+    requests = provider.request_count - requests_before
     typer.echo(
         f"SWEPT {label} {sum(batch.row_count for batch in collected)} rows from "
         f"{len(served & registry)} registered securities; {len(outside)} securities outside "
-        f"the stored registry not stored; {rerequested} empty closed window(s) re-requested",
+        f"the stored registry not stored; {rerequested} empty closed window(s) re-requested; "
+        f"{requests} requests for {len(windows)} windows (the rest are date halvings, registry "
+        "chunks and re-requests)",
         err=True,
     )
     if not collected:
@@ -4364,14 +4380,19 @@ def panel_build(
     and `cashflow`, four report-period windows per period year for `fina_indicator`, one request
     each, and a month at the endpoint's cap halved until every half fits -- never paged, because
     `offset` paging on those endpoints was measured to serve rows twice and skip others (see
-    `providers.tushare._statement_sweep_descriptor`). Measured on 2026-09-26: announcement years
+    `providers.tushare._statement_sweep_descriptor`). A single day or a report period still at
+    the cap is re-fetched as chunks of the stored registry's codes, at most 1,000 to a
+    comma-joined `ts_code` (`TushareProvider._narrowest_rows`): `fina_indicator`'s 2021 annual
+    period answers its 12,000-row cap in one request and six chunks on 2026-09-27. Measured on
+    2026-09-26: announcement years
     2015 and 2024 cost 42 `income`, 30 `balancesheet` and 42 `cashflow` requests (72 month
     windows, 114 requests, about four minutes), and `fina_indicator`'s period years 2015 and 2023
     cost 8. One request per registered security would have been 5,908 x 2 = 11,816 for each of
     the four datasets over those two years, 47,264 for all four. So `--start 2015 --end 2026` is
     at most 480 windows (432 months and 48 report periods; a window that has not begun at the
-    build's clock is not asked for), plus the halvings and one repeat of any ended month or
-    past-deadline report period that answered nothing, rather than ~282,000 requests. Every fetch
+    build's clock is not asked for), plus the halvings, the registry chunks of any window no
+    date can narrow, and one repeat of any ended month or past-deadline report period that
+    answered nothing, rather than ~282,000 requests. Every fetch
     loop still states its size before it starts (`_echo_budget`, in windows for a sweep) and
     reports progress with an `eta` while it runs, and `--subject` still selects the per-security
     route for a named handful.

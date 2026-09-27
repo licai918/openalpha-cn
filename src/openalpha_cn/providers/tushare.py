@@ -2776,6 +2776,14 @@ little early, and the window is narrowed one step further than it had to be.
 """
 
 
+TUSHARE_TS_CODE_LIST_LIMIT: Final[int] = 1000
+"""The most codes a `*_vip` endpoint takes in one comma-joined `ts_code`, measured 2026-09-27.
+
+Above it the endpoint answers `code=50101` (列表个数超过限制1000个). It bounds a chunk in
+`TushareProvider._narrowest_rows`, the fallback for a window no date can narrow.
+"""
+
+
 def _statement_sweep_descriptor(dataset: str) -> TushareDatasetDescriptor:
     """`dataset`'s own descriptor, re-pointed at its `*_vip` endpoint.
 
@@ -3662,6 +3670,7 @@ class TushareProvider:
         self._clock = clock
         self._stamped_at = stamped_at
         self._attempts = attempts
+        self._request_count = 0
         self._sleep = sleep
         self._jitter = jitter
         """`sleep` and `jitter` are injected for the same reason `clock` is: a bounded backoff
@@ -3855,7 +3864,9 @@ class TushareProvider:
             )
         return self._panel_batch(descriptor, request, self._request_rows)
 
-    def fetch_panel_sweep(self, request: ProviderRequest) -> ColumnarPanelBatch:
+    def fetch_panel_sweep(
+        self, request: ProviderRequest, *, codes: Sequence[str] = ()
+    ) -> ColumnarPanelBatch:
         """One whole-market window of a statement dataset, through its `*_vip` endpoint.
 
         `fetch_panel`'s contract with a different request (`V2-P6-002`): `request.subjects` is one
@@ -3867,28 +3878,49 @@ class TushareProvider:
         Never paged -- see `_statement_sweep_descriptor` for the measurement -- so every response
         is judged by `_check_response_completeness` exactly as a one-shot response always has
         been: `has_more` must be the boolean `False` and the row count under the measured cap. An
-        announcement-date window that fails either is halved (`_halved_rows`); a report period,
-        which has no finer date axis, is refused.
+        announcement-date window that fails either is halved (`_halved_rows`). A window that is
+        already as narrow as dates go -- one announcement day, or a report period, which has no
+        date axis of its own -- and is still at the cap is re-fetched as chunks of `codes`
+        (`_narrowest_rows`), and refused if `codes` is empty. `codes` is the caller's list of the
+        securities it keeps; rows of any other security are not fetched on that path, which is
+        the same row set a caller that keeps only `codes` stores.
         """
         descriptor = self._sweep_descriptor(request)
-        return self._panel_batch(descriptor, request, self._swept_rows)
+        chunk_codes = tuple(sorted(set(codes)))
+        return self._panel_batch(
+            descriptor,
+            request,
+            lambda chosen, asked: self._swept_rows(chosen, asked, chunk_codes),
+        )
+
+    @property
+    def request_count(self) -> int:
+        """How many round trips this provider has sent, retries included.
+
+        A reading for a caller's cost line (`cli._sweep_statement_batches`' `SWEPT` line): a
+        sweep window's request count depends on how many halvings and chunks the endpoint forced,
+        which only the provider sees.
+        """
+        return self._request_count
 
     def _swept_rows(
-        self, descriptor: TushareDatasetDescriptor, request: ProviderRequest
+        self,
+        descriptor: TushareDatasetDescriptor,
+        request: ProviderRequest,
+        codes: tuple[str, ...],
     ) -> list[dict[str, Any]]:
-        """Every row of one sweep window: one response, or the halves of a date window."""
+        """Every row of one sweep window: one response, the halves of a date window, or chunks."""
         params = descriptor.params_builder(request)
         if "start_date" not in params:
-            return _response_rows(
-                descriptor,
-                self._post(descriptor, request, params=params),
-                self.metadata.provider_id,
+            return self._narrowest_rows(
+                descriptor, request, params, codes, what=f"report period {params['period']}"
             )
         return self._halved_rows(
             descriptor,
             request,
             _parse_tushare_date(params["start_date"]),
             _parse_tushare_date(params["end_date"]),
+            codes,
         )
 
     def _halved_rows(
@@ -3897,6 +3929,7 @@ class TushareProvider:
         request: ProviderRequest,
         first: date,
         last: date,
+        codes: tuple[str, ...],
     ) -> list[dict[str, Any]]:
         """The rows announced in `[first, last]`, halving the window until each response fits.
 
@@ -3907,44 +3940,119 @@ class TushareProvider:
         on its own. A month is one request unless it is a disclosure peak; April, when every
         issuer publishes its annual and first-quarter reports, costs a handful.
 
-        **A single day that does not fit is refused**, not paged and not stored short. There is
-        no narrower `ann_date` window, and paging is measured unsound here. At the caps measured
-        on 2026-09-26 the busiest day of each swept year fitted (this issue's report records the
-        live sweeps). A market that outgrows that is a `TushareResponseTruncated` whose message
-        names the day -- but only the category reaches a terminal: `cli._fetch_panel` withholds
-        every `ProviderFailure` message, because one can carry the credential, and prints
-        "refused dataset income: upstream". The day is recoverable from the provider in-process
-        (the failure object), not from the CLI's output; a category of its own would be a change
-        to `ProviderFailure`'s closed vocabulary for one message. `--subject` is still the
-        per-security route for the securities that matter to the caller.
+        **A single day** has no narrower `ann_date` window and paging is measured unsound here, so
+        it goes to `_narrowest_rows`: its one answer, or chunks of `codes` at the cap, or a
+        refusal when there are no codes.
+        """
+        window = {"start_date": f"{first:%Y%m%d}", "end_date": f"{last:%Y%m%d}"}
+        if first >= last:
+            return self._narrowest_rows(
+                descriptor, request, window, codes, what=f"single announcement day {first:%Y%m%d}"
+            )
+        try:
+            return _response_rows(
+                descriptor,
+                self._post(descriptor, request, params=window),
+                self.metadata.provider_id,
+            )
+        except TushareResponseTruncated:
+            pass
+        middle = first + (last - first) // 2
+        return [
+            *self._halved_rows(descriptor, request, first, middle, codes),
+            *self._halved_rows(descriptor, request, middle + timedelta(days=1), last, codes),
+        ]
+
+    def _narrowest_rows(
+        self,
+        descriptor: TushareDatasetDescriptor,
+        request: ProviderRequest,
+        params: dict[str, str],
+        codes: tuple[str, ...],
+        *,
+        what: str,
+    ) -> list[dict[str, Any]]:
+        """One window no date can narrow: its one answer, or -- at the cap -- chunks of `codes`.
+
+        Measured live (V2-P6-002, fix round 3): `fina_indicator_vip period=20211231` answered
+        exactly its 12,000-row cap with `has_more=True`, and `start_date`/`end_date` on that
+        endpoint filter `end_date`, not `ann_date`, so a period has no date axis to halve along.
+        What the `*_vip` endpoints do accept is a comma-joined `ts_code` of at most
+        `TUSHARE_TS_CODE_LIST_LIMIT` codes -- measured for `fina_indicator_vip` by period (the 2020
+        annual in chunks is multiset-equal to its single 11,917-row answer) and for `income_vip`
+        and `cashflow_vip` inside one `ann_date` day (multiset-equal to the full day's answer
+        filtered to the same codes; `balancesheet_vip`'s per-code counts equal the stored sweep's).
+        The per-security endpoints answer such a list with zero rows
+        (`_financial_statement_params`); their VIP twins do not.
+
+        So the codes are the last axis. Chunks are disjoint and cover `codes`, and a row carries
+        exactly one `ts_code`, so no row is served twice or missed among them; a chunk that is
+        itself at the cap is halved (`_code_rows`), and a single code at the cap is refused.
+        Without `codes` -- a caller that did not say which securities it keeps -- the window is
+        refused, never stored short. As with every refusal here, the message names the window but
+        only the category reaches a terminal: `cli._fetch_panel` withholds every
+        `ProviderFailure` message because one can carry the credential.
         """
         try:
             return _response_rows(
                 descriptor,
-                self._post(
-                    descriptor,
-                    request,
-                    params={"start_date": f"{first:%Y%m%d}", "end_date": f"{last:%Y%m%d}"},
-                ),
+                self._post(descriptor, request, params=params),
                 self.metadata.provider_id,
             )
         except TushareResponseTruncated:
-            if first >= last:
+            if not codes:
                 raise TushareResponseTruncated(
                     provider_id=self.metadata.provider_id,
                     category="upstream",
                     message=(
-                        f"{descriptor.endpoint} served its cap for the single announcement day "
-                        f"{first:%Y%m%d}; a day cannot be narrowed and this endpoint's offset "
-                        "paging is measured unsound, so the day is refused rather than stored "
-                        "short"
+                        f"{descriptor.endpoint} served its cap for the {what}, which no date "
+                        "window can narrow and no list of codes was given to chunk it by; this "
+                        "endpoint's offset paging is measured unsound, so it is refused rather "
+                        "than stored short"
                     ),
                     retryable=False,
                 ) from None
-        middle = first + (last - first) // 2
+        limit = TUSHARE_TS_CODE_LIST_LIMIT
         return [
-            *self._halved_rows(descriptor, request, first, middle),
-            *self._halved_rows(descriptor, request, middle + timedelta(days=1), last),
+            row
+            for start in range(0, len(codes), limit)
+            for row in self._code_rows(
+                descriptor, request, params, codes[start : start + limit], what=what
+            )
+        ]
+
+    def _code_rows(
+        self,
+        descriptor: TushareDatasetDescriptor,
+        request: ProviderRequest,
+        params: dict[str, str],
+        chunk: tuple[str, ...],
+        *,
+        what: str,
+    ) -> list[dict[str, Any]]:
+        """`chunk`'s rows of one window, halving the chunk until each response fits."""
+        try:
+            return _response_rows(
+                descriptor,
+                self._post(descriptor, request, params={**params, "ts_code": ",".join(chunk)}),
+                self.metadata.provider_id,
+            )
+        except TushareResponseTruncated:
+            if len(chunk) == 1:
+                raise TushareResponseTruncated(
+                    provider_id=self.metadata.provider_id,
+                    category="upstream",
+                    message=(
+                        f"{descriptor.endpoint} served its cap for {chunk[0]} alone in the "
+                        f"{what}; one security cannot be narrowed further, so it is refused "
+                        "rather than stored short"
+                    ),
+                    retryable=False,
+                ) from None
+        middle = len(chunk) // 2
+        return [
+            *self._code_rows(descriptor, request, params, chunk[:middle], what=what),
+            *self._code_rows(descriptor, request, params, chunk[middle:], what=what),
         ]
 
     def _panel_batch(
@@ -4096,6 +4204,7 @@ class TushareProvider:
         }
         for attempt in range(self._attempts):
             try:
+                self._request_count += 1
                 response = self._transport.post(dict(envelope))
                 # Inside the `try`, and that placement is the fix rather than a detail: Tushare
                 # answers a quota breach with HTTP 200 and `code=40203` in the body, so the one

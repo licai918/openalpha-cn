@@ -91,6 +91,11 @@ class CappedMarket:
             window = [
                 row for row in self.rows if params["start_date"] <= row[2] <= params["end_date"]
             ]
+        if "ts_code" in params:
+            # Measured on the VIP endpoints (2026-09-26/27): a comma-joined list of up to 1,000
+            # codes filters the window to exactly those securities' rows.
+            listed = set(str(params["ts_code"]).split(","))
+            window = [row for row in window if row[0] in listed]
         return {
             "code": 0,
             "msg": "",
@@ -373,3 +378,101 @@ def test_a_dataset_without_a_sweep_is_refused_by_name() -> None:
 
     assert raised.value.category == "configuration"
     assert "daily" in str(raised.value)
+
+
+# --- a window at the cap that cannot be narrowed by date: registry chunks (fix round 3) ----------
+
+
+def _codes(transport: CappedMarket) -> list[str | None]:
+    return [entry["params"].get("ts_code") for entry in transport.payloads]
+
+
+def _list_limit(monkeypatch: pytest.MonkeyPatch, limit: int) -> None:
+    """Shrink the measured 1,000-code list limit, for `_cap`'s reason."""
+    monkeypatch.setattr(tushare, "TUSHARE_TS_CODE_LIST_LIMIT", limit)
+
+
+def test_a_capped_report_period_is_refetched_in_chunks_of_the_given_codes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`fina_indicator_vip period=20211231` answered exactly its 12,000-row cap live; a period has
+    no date axis to halve along, so the codes are the axis: disjoint chunks, one row set."""
+    _cap(monkeypatch, FINANCIAL_INDICATOR_DATASET, 3)
+    _list_limit(monkeypatch, 2)
+    codes = ("000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ", "000005.SZ")
+    rows = [
+        _row(FINANCIAL_INDICATOR_DATASET, code, "20211231", "20220420", float(index))
+        for index, code in enumerate(codes)
+    ]
+    transport = CappedMarket(FINANCIAL_INDICATOR_DATASET, rows, cap=3)
+
+    batch = _provider(transport).fetch_panel_sweep(
+        _request(FINANCIAL_INDICATOR_DATASET, "20211231"), codes=tuple(reversed(codes))
+    )
+
+    assert batch.row_count == 5
+    assert sorted(batch.subjects) == list(codes)
+    # One capped answer, then the codes in sorted order, two at a time.
+    assert _codes(transport) == [
+        None,
+        "000001.SZ,000002.SZ",
+        "000003.SZ,000004.SZ",
+        "000005.SZ",
+    ]
+    assert all(entry["params"]["period"] == "20211231" for entry in transport.payloads)
+
+
+def test_a_capped_chunk_is_halved_until_each_half_fits(monkeypatch: pytest.MonkeyPatch) -> None:
+    _cap(monkeypatch, FINANCIAL_INDICATOR_DATASET, 3)
+    codes = ("000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ")
+    rows = [_row(FINANCIAL_INDICATOR_DATASET, code, "20211231", "20220420", 1.0) for code in codes]
+    transport = CappedMarket(FINANCIAL_INDICATOR_DATASET, rows, cap=3)
+
+    batch = _provider(transport).fetch_panel_sweep(
+        _request(FINANCIAL_INDICATOR_DATASET, "20211231"), codes=codes
+    )
+
+    assert batch.row_count == 4
+    assert _codes(transport) == [
+        None,
+        "000001.SZ,000002.SZ,000003.SZ,000004.SZ",
+        "000001.SZ,000002.SZ",
+        "000003.SZ,000004.SZ",
+    ]
+
+
+def test_a_single_code_at_the_cap_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    _cap(monkeypatch, FINANCIAL_INDICATOR_DATASET, 3)
+    rows = [
+        _row(FINANCIAL_INDICATOR_DATASET, "000001.SZ", "20211231", f"2022042{day}", 1.0)
+        for day in (1, 2, 3)
+    ]
+    transport = CappedMarket(FINANCIAL_INDICATOR_DATASET, rows, cap=3)
+
+    with pytest.raises(TushareResponseTruncated) as raised:
+        _provider(transport).fetch_panel_sweep(
+            _request(FINANCIAL_INDICATOR_DATASET, "20211231"), codes=("000001.SZ",)
+        )
+
+    assert "000001.SZ" in str(raised.value)
+
+
+def test_a_capped_single_day_is_refetched_in_chunks_of_the_given_codes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The statement endpoints' narrowest date window is one day; measured live, their VIP twins
+    honour a comma-joined `ts_code` inside it (unlike the per-security endpoints, which answer a
+    list with zero rows), so a capped day takes the same fallback instead of refusing."""
+    _cap(monkeypatch, INCOME_DATASET, 3)
+    codes = ("000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ", "000005.SZ")
+    rows = [_row(INCOME_DATASET, code, "20240331", "20240428", 1.0) for code in codes]
+    transport = CappedMarket(INCOME_DATASET, rows, cap=3)
+
+    batch = _provider(transport).fetch_panel_sweep(_request(INCOME_DATASET, "202404"), codes=codes)
+
+    assert batch.row_count == 5
+    chunked = [entry["params"] for entry in transport.payloads if "ts_code" in entry["params"]]
+    assert {(entry["start_date"], entry["end_date"]) for entry in chunked} == {
+        ("20240428", "20240428")
+    }
+    assert {code for entry in chunked for code in entry["ts_code"].split(",")} == set(codes)
