@@ -7,7 +7,9 @@ computed:
 * **The stages and their windows.** `STAGES` is the protocol's closed vocabulary and
   `PROTOCOL_STAGE_WINDOWS` its segments: discovery and composition 2015-01-05..2021-12-31,
   validation 2022-01-04..2023-12-29, holdout 2024-01-02 onwards; forward starts the day after the
-  registration's commit date (`registry.forward_after`). `run_grid` reads a configuration's
+  committed registration's commit date, which only `registry.run_forward` derives (through the
+  same admission as the holdout guard) -- `run_grid` refuses the forward stage, because a boundary
+  a caller could type would reopen the holdout window. `run_grid` reads a configuration's
   measured window from its `start` and `end` keys and nowhere else (an `as_of` clock legitimately
   sits years later), extends `end` by the configuration's label length in sessions, and refuses a
   window that leaves its stage **before measuring it**: the refusal is a row, so it counts in the
@@ -87,7 +89,11 @@ from openalpha_cn.backtest.strategy_backtest import (
 )
 from openalpha_cn.strategy_view import StrategyViewError
 
-LEDGER_SCHEMA: Final[str] = "openalpha-research-ledger/v1"
+LEDGER_SCHEMA: Final[str] = "openalpha-research-ledger/v2"
+"""v2 rows carry a `kind` (`measurement` or `holdout_claim`)."""
+RETIRED_LEDGER_SCHEMAS: Final[tuple[str, ...]] = ("openalpha-research-ledger/v1",)
+"""Row versions this module refuses by name. v1 had no `kind`; no v1 research ledger was ever used
+for research, so there is no migration: a v1 ledger is re-run."""
 
 STAGES: Final[tuple[str, ...]] = ("discovery", "composition", "validation", "holdout", "forward")
 """The protocol's stages, and the only stage labels the ledger accepts."""
@@ -115,8 +121,8 @@ PROTOCOL_STAGE_WINDOWS: Final[Mapping[str, StageWindow]] = {
     "validation": StageWindow(date(2022, 1, 4), date(2023, 12, 29)),
     "holdout": StageWindow(date(2024, 1, 2), None),
 }
-"""Section 2's segments. Forward has no fixed window: it starts the day after the registration's
-commit date, which `run_grid` takes as `forward_after`."""
+"""Section 2's segments. Forward has no fixed window: it starts the day after the committed
+registration's commit date, which `registry.run_forward` derives and passes to `_run_grid`."""
 
 PROTOCOL_BOOTSTRAP_SAMPLES: Final[int] = 100_000
 PROTOCOL_RANDOM_SEED: Final[int] = 20_260_926
@@ -264,6 +270,11 @@ def read_ledger(path: Path) -> tuple[LedgerRow, ...]:
 
 def _parse_row(number: int, line: str) -> LedgerRow:
     body = json.loads(line)
+    if isinstance(body, dict) and body.get("schema") in RETIRED_LEDGER_SCHEMAS:
+        raise ValueError(
+            f"a {body['schema']} row predates the row kind; this ledger must be re-run into a "
+            f"{LEDGER_SCHEMA} ledger (there is no migration)"
+        )
     if not isinstance(body, dict) or body.get("schema") != LEDGER_SCHEMA:
         raise ValueError(f"expected an object whose schema is {LEDGER_SCHEMA!r}")
     stage, kind, identity = body["stage"], body["kind"], body["config_id"]
@@ -758,7 +769,6 @@ def run_grid(
     *,
     label_sessions: Callable[[Mapping[str, object]], int],
     sessions: Sequence[date] = (),
-    forward_after: date | None = None,
     refusals: tuple[type[Exception], ...] = DEFAULT_REFUSALS,
     clock: Callable[[], datetime] | None = None,
 ) -> GridRun:
@@ -767,10 +777,13 @@ def run_grid(
     Before measuring, each configuration's measured window (`measured_window`, with
     `label_sessions(config)` sessions of `sessions` past `end`) must lie inside the stage's window;
     one that does not is a refused row and is never measured. A configuration `measure` refuses
-    (one of `refusals`) is a row whose result is its error. Both count in the family. The holdout
-    stage is refused: it runs through `registry.run_holdout`. `label_sessions` has no default
-    because a label's length is the one thing about a window a configuration's dates do not say;
-    `strategy_label_sessions` is the strategy backtest's.
+    (one of `refusals`) is a row whose result is its error. Both count in the family.
+    `label_sessions` has no default because a label's length is the one thing about a window a
+    configuration's dates do not say; `strategy_label_sessions` is the strategy backtest's.
+
+    Two stages are refused here. The holdout runs through `registry.run_holdout`. The forward
+    stage runs through `registry.run_forward`, which derives its boundary from the committed
+    registration: a boundary a caller could type is a way back into the holdout window.
     """
     stage = _checked_stage(stage)
     if stage == HOLDOUT_STAGE:
@@ -778,6 +791,40 @@ def run_grid(
             f"the {HOLDOUT_STAGE!r} stage runs once, through registry.run_holdout behind its "
             "registration guard, and never from a grid"
         )
+    if stage == FORWARD_STAGE:
+        raise ResearchLedgerError(
+            f"the {FORWARD_STAGE!r} stage runs through registry.run_forward, which takes its "
+            "boundary from the committed registration rather than from a caller"
+        )
+    return _run_grid(
+        ledger,
+        stage,
+        configs,
+        measure,
+        label_sessions=label_sessions,
+        sessions=sessions,
+        forward_after=None,
+        refusals=refusals,
+        clock=clock,
+    )
+
+
+def _run_grid(
+    ledger: Path,
+    stage: str,
+    configs: Sequence[Mapping[str, object]],
+    measure: Measure,
+    *,
+    label_sessions: Callable[[Mapping[str, object]], int],
+    sessions: Sequence[date],
+    forward_after: date | None,
+    refusals: tuple[type[Exception], ...],
+    clock: Callable[[], datetime] | None,
+) -> GridRun:
+    """`run_grid`'s body, for it and for `registry.run_forward` (which alone passes
+    `forward_after`, derived from a committed registration)."""
+    if _checked_stage(stage) == HOLDOUT_STAGE:
+        raise ResearchLedgerError("the holdout stage runs through registry.run_holdout only")
     stage_window(stage, forward_after=forward_after)
     now = _utc_now if clock is None else clock
     existing = list(read_ledger(ledger))

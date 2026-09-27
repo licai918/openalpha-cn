@@ -55,6 +55,9 @@ GIT_LAUNCHING_TESTS: Final[dict[str, tuple[str, ...]]] = {
     ),
     # V2-P6-008, after the census: the holdout guard reads a throwaway repository's history.
     "tests/unit/scripts/test_research_registry.py": (),
+    "tests/unit/scripts/test_research_grid.py": (
+        "test_the_runner_drives_the_sdk_and_ledgers_net_excess_and_its_sign_flip",
+    ),
 }
 """Every test under `tests/unit/` the D13 census found starting git, by module; `()` is all of it.
 

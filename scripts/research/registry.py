@@ -17,8 +17,14 @@ own exception:
    treated as not after it.
 3. `HoldoutAlreadyRanError` -- the ledger already holds a holdout row: a measurement, or a claim
    left by a run that crashed. The holdout runs once, and a started run is that once.
-4. `SourceChangedError` -- `src/` at `HEAD`, or in the working tree, is not `src/` at the
-   registration's `code_commit`: the code that would measure is not the code that was registered.
+4. `SourceChangedError` -- the bound code (`REGISTERED_PATHS`: `src/`, `scripts/research/`,
+   `pyproject.toml`, `uv.lock`) at `HEAD`, or in the working tree, is not what it was at the
+   registration's `code_commit`. `src/` is the package; `scripts/research/` computes every holdout
+   metric (the complete-period filter, `p_excess`, the one-sided conversion, the information ratio,
+   the annualisation); the two project files decide which libraries run them.
+5. `ForeignPackageError` -- the `openalpha_cn` this process imported is not the one under the
+   repository's `src/`: a worktree run can import the main checkout's package, and then the code
+   measuring is not the code the diff checked.
 
 `run_holdout` then refuses, before writing anything, a configuration that is not the registered
 one or whose measured window leaves the holdout window (`HoldoutConfigurationError`), and a measure
@@ -26,6 +32,11 @@ whose settings -- seed, sign-flip samples, excess benchmark, annualisation -- ar
 ones (`HoldoutSettingsError`). It writes a `holdout_claim` row carrying the registration's digest,
 commit and settings **before** measuring, then the measurement row with the same binding. A crash
 between the two leaves the claim, and the guard's third refusal then holds.
+
+`run_forward` is the forward stage's only runner. It runs the same committed-registration admission
+as the guard's first refusal and takes the forward boundary from the registration's commit date
+(`forward_after`); a caller cannot name one, so a forward window cannot reach back into the
+holdout's years.
 
 What this does not establish. A commit time is what the committer's clock (or
 `GIT_COMMITTER_DATE`) said, and a ledger row's `recorded_at` is what this machine's clock said;
@@ -42,7 +53,7 @@ import json
 import os
 import re
 import subprocess
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -51,14 +62,18 @@ from zoneinfo import ZoneInfo
 
 from grid import (
     DEFAULT_REFUSALS,
+    FORWARD_STAGE,
     HOLDOUT_CLAIM,
     HOLDOUT_STAGE,
     MEASUREMENT,
     PROTOCOL_DEPENDENCE,
     PROTOCOL_FALSE_DISCOVERY_RATE,
+    GridRun,
+    Measure,
     ResearchLedgerError,
     SettledMeasure,
     _append_holdout,
+    _run_grid,
     check_window,
     config_id,
     measured_window,
@@ -67,12 +82,15 @@ from grid import (
     to_json_value,
 )
 
+import openalpha_cn
 from openalpha_cn.runtime.provenance import resolve_code_commit
 
 REGISTRATION_SCHEMA: Final[str] = "openalpha-research-registration/v1"
 SESSION_TIMEZONE: Final[ZoneInfo] = ZoneInfo("Asia/Shanghai")
-REGISTERED_SOURCE: Final[str] = "src"
-"""The tree whose bytes must be the registration's code commit's when the holdout runs."""
+REGISTERED_PATHS: Final[tuple[str, ...]] = ("src", "scripts/research", "pyproject.toml", "uv.lock")
+"""The pathspecs whose bytes must be the registration's code commit's when the holdout runs."""
+PACKAGE_ROOT: Final[str] = "src"
+"""Where, under the repository, the imported `openalpha_cn` must live."""
 _FULL_COMMIT: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{40}")
 _GIT_TIMEOUT_SECONDS: Final[int] = 60
 
@@ -98,7 +116,11 @@ class HoldoutAlreadyRanError(HoldoutRefusedError):
 
 
 class SourceChangedError(HoldoutRefusedError):
-    """`src/` is not what it was at the registration's code commit."""
+    """The bound code is not what it was at the registration's code commit."""
+
+
+class ForeignPackageError(HoldoutRefusedError):
+    """The imported `openalpha_cn` is not the repository's own."""
 
 
 class HoldoutConfigurationError(HoldoutRefusedError):
@@ -137,6 +159,12 @@ def register(
     checked out to reproduce the run. Writing the same registration again returns the same
     digest; a different one at an existing path is refused. Committing the file is the caller's
     step, and the guard's first check.
+
+    **Pass `code_commit` explicitly.** The default resolves this checkout's `HEAD` at the moment
+    of writing, which the registration's own commit then moves -- and a registration file inside
+    the repository makes the tree dirty until it is committed -- so a second `register` call with
+    the default names a different commit (or refuses) and the idempotence above does not hold.
+    Resolve the commit once, before writing, and pass it.
     """
     commit = (
         resolve_code_commit(anchor=Path(__file__).resolve().parent)
@@ -236,19 +264,37 @@ def _committed_registration(registration: Path, repo: Path) -> tuple[Path, _Admi
 def _refuse_a_changed_source(root: Path, code_commit: object) -> None:
     if not isinstance(code_commit, str) or not _FULL_COMMIT.fullmatch(code_commit):
         raise SourceChangedError(f"the registration names no full code commit: {code_commit!r}")
-    committed = _git(root, "diff", "--quiet", code_commit, "HEAD", "--", REGISTERED_SOURCE)
+    bound = ", ".join(REGISTERED_PATHS)
+    committed = _git(root, "diff", "--quiet", code_commit, "HEAD", "--", *REGISTERED_PATHS)
     if committed.returncode != 0:
         detail = "differs from" if committed.returncode == 1 else "cannot be compared with"
         raise SourceChangedError(
-            f"{REGISTERED_SOURCE}/ at HEAD {detail} {REGISTERED_SOURCE}/ at the registered code "
-            f"commit {code_commit}; the holdout measures with the registered code only"
+            f"the bound code ({bound}) at HEAD {detail} the registered code commit "
+            f"{code_commit}; the holdout measures with the registered code only"
         )
-    working = _git(root, "status", "--porcelain", "--untracked-files=all", "--", REGISTERED_SOURCE)
+    working = _git(root, "status", "--porcelain", "--untracked-files=all", "--", *REGISTERED_PATHS)
     if working.returncode != 0 or working.stdout.strip():
         raise SourceChangedError(
-            f"{REGISTERED_SOURCE}/ in the working tree is not {REGISTERED_SOURCE}/ at HEAD: "
+            f"the bound code ({bound}) in the working tree is not what HEAD holds: "
             f"{working.stdout.decode(errors='replace').strip() or 'git status failed'}"
         )
+
+
+def _imported_package() -> Path:
+    """Where this process imported `openalpha_cn` from."""
+    return Path(openalpha_cn.__file__).resolve()
+
+
+def _refuse_a_foreign_package(root: Path) -> None:
+    package = _imported_package()
+    try:
+        package.relative_to(root / PACKAGE_ROOT)
+    except ValueError as error:
+        raise ForeignPackageError(
+            f"this process imported openalpha_cn from {package}, which is not under "
+            f"{root / PACKAGE_ROOT}; the code measuring would not be the code the registration "
+            "binds (set PYTHONPATH to this repository's src)"
+        ) from error
 
 
 def _holdout_allowed(registration: Path, ledger: Path, repo: Path) -> _Admitted:
@@ -273,6 +319,7 @@ def _holdout_allowed(registration: Path, ledger: Path, repo: Path) -> _Admitted:
             "holdout runs once"
         )
     _refuse_a_changed_source(root, admitted.registered.get("code_commit"))
+    _refuse_a_foreign_package(root)
     return admitted
 
 
@@ -304,6 +351,10 @@ def run_holdout(
     are not the registration's. Writes the claim, measures, and writes the measurement; a refusal
     the measure raises (`grid.DEFAULT_REFUSALS`) is the measurement's recorded error, and any other
     error propagates and leaves the claim.
+
+    The window check reads no label past `end` (`label_sessions=0`), which is right for the
+    strategy backtest the holdout runs: its last period is marked at `end`. A measure that reads a
+    forward label would need its label length here.
     """
     now = _utc_now if clock is None else clock
     admitted = _holdout_allowed(registration, ledger, repo)
@@ -340,6 +391,37 @@ def run_holdout(
     row = {**result, **binding, "started_at": started_at}
     _append_holdout(ledger, MEASUREMENT, config, row, recorded_at=now())
     return row
+
+
+def run_forward(
+    registration: Path,
+    ledger: Path,
+    repo: Path,
+    configs: Sequence[Mapping[str, object]],
+    measure: Measure,
+    *,
+    label_sessions: Callable[[Mapping[str, object]], int],
+    sessions: Sequence[date] = (),
+    refusals: tuple[type[Exception], ...] = DEFAULT_REFUSALS,
+    clock: Callable[[], datetime] | None = None,
+) -> GridRun:
+    """Run the forward stage: `grid.run_grid`'s runner, bounded by the committed registration.
+
+    The registration must pass the guard's first check (committed, bytes as `HEAD` holds them);
+    without one the forward stage does not run. The boundary is `forward_after` -- the commit's
+    Shanghai date -- and a configuration whose `start` is on or before it is a refused row.
+    """
+    return _run_grid(
+        ledger,
+        FORWARD_STAGE,
+        configs,
+        measure,
+        label_sessions=label_sessions,
+        sessions=sessions,
+        forward_after=forward_after(registration, repo),
+        refusals=refusals,
+        clock=clock,
+    )
 
 
 def _utc_now() -> datetime:

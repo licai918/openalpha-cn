@@ -24,6 +24,7 @@ from typing import Any, Final
 
 import pytest
 from panel_fixtures import EXCHANGE, GeneratedPanel
+from research_repo import commit_file, git
 from strategy_fixtures import READ_AT, REVERSAL, write_strategy_corpus
 
 from openalpha_cn.backtest.multiple_testing import (
@@ -53,6 +54,7 @@ def _research_module(name: str) -> ModuleType:
 
 
 grid = _research_module("grid")
+registry = _research_module("registry")
 
 AT: Final[datetime] = datetime(2026, 9, 26, 12, 0, tzinfo=UTC)
 WINDOW: Final[dict[str, object]] = {"start": date(2015, 1, 5), "end": date(2015, 6, 30)}
@@ -460,16 +462,43 @@ def test_a_configuration_starting_before_its_stage_is_refused(tmp_path: Path) ->
     assert _rows(ledger)[0]["result"]["error"].startswith("StageWindowError: ")
 
 
-def test_the_forward_stage_needs_its_start_and_refuses_a_window_before_it(tmp_path: Path) -> None:
+def test_the_runner_will_not_run_the_forward_stage_on_a_date_the_caller_names(
+    tmp_path: Path,
+) -> None:
+    """The forward boundary is the committed registration's date, which only
+    `registry.run_forward` derives; a caller-typed date could reopen the holdout window."""
     ledger = tmp_path / "ledger.jsonl"
-    early = {"start": date(2026, 9, 26), "end": date(2026, 10, 30)}
-    later = {"start": date(2026, 9, 28), "end": date(2026, 10, 30)}
+    covering_2024 = {"start": date(2024, 1, 2), "end": date(2025, 6, 30)}
 
-    with pytest.raises(grid.ResearchLedgerError, match="forward_after"):
-        _run_one(ledger, "forward", later, label_sessions=NO_LABEL)
-    after = {"label_sessions": NO_LABEL, "forward_after": date(2026, 9, 27)}
-    assert _run_one(ledger, "forward", early, **after) == []
-    assert _run_one(ledger, "forward", later, **after) == [later]
+    with pytest.raises(grid.ResearchLedgerError, match="run_forward"):
+        _run_one(ledger, "forward", covering_2024, label_sessions=NO_LABEL)
+    with pytest.raises(TypeError):
+        _run_one(
+            ledger,
+            "forward",
+            covering_2024,
+            label_sessions=NO_LABEL,
+            forward_after=date(2023, 12, 31),
+        )
+    assert not ledger.exists()
+
+
+def test_a_ledger_of_the_first_row_version_is_refused_by_name(tmp_path: Path) -> None:
+    """v1 rows had no `kind`; there is no v1 research ledger to migrate, so it is re-run."""
+    ledger = tmp_path / "ledger.jsonl"
+    v1 = {
+        "schema": "openalpha-research-ledger/v1",
+        "stage": "discovery",
+        "config_id": "0" * 64,
+        "config": {},
+        "result": {},
+        "recorded_at": "2026-09-26T12:00:00+00:00",
+    }
+    ledger.write_text(json.dumps(v1) + "\n", encoding="utf-8")
+
+    assert grid.LEDGER_SCHEMA == "openalpha-research-ledger/v2"
+    with pytest.raises(grid.ResearchLedgerError, match=r"line 1.*ledger/v1.*re-run"):
+        grid.stage_family(ledger, "discovery")
 
 
 @pytest.mark.parametrize(
@@ -542,7 +571,7 @@ def test_the_runner_drives_the_sdk_and_ledgers_net_excess_and_its_sign_flip(
     runtime: tuple[Path, GeneratedPanel], tmp_path: Path
 ) -> None:
     """The generated panel's sessions are in January 2026, so the grid is run as the forward stage
-    after a registration dated the day before them."""
+    after a registration committed on the eve of the first of them (Shanghai date 2026-01-04)."""
     root, panel = runtime
     sdk = OpenAlphaSDK(runtime_dir=root)
     configs = tuple(
@@ -551,14 +580,21 @@ def test_the_runner_drives_the_sdk_and_ledgers_net_excess_and_its_sign_flip(
     )
     measure = grid.strategy_measure(sdk.run_strategy_backtest, excess_benchmark="000905.SH")
     ledger = tmp_path / "ledger.jsonl"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q", "--template=")
+    registration = repo / "registration.json"
+    registry.register({}, {}, registration, code_commit="0" * 40)
+    commit_file(repo, registration, "register", at=datetime(2026, 1, 4, 0, 0, tzinfo=UTC))
+    assert registry.forward_after(registration, repo) < panel.sessions[1]
 
-    run = grid.run_grid(
+    run = registry.run_forward(
+        registration,
         ledger,
-        "forward",
+        repo,
         configs,
         measure,
         label_sessions=NO_LABEL,
-        forward_after=panel.sessions[0],
         clock=lambda: AT,
     )
 

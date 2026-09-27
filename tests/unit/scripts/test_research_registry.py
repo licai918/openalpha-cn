@@ -28,16 +28,15 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
-import os
-import subprocess
 import sys
 from collections.abc import Mapping
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Final
 
 import pytest
+from research_repo import commit_file, git, head
 
 from openalpha_cn.strategy_view import StrategyRequestError
 
@@ -53,6 +52,7 @@ def _research_module(name: str) -> ModuleType:
 
 grid = _research_module("grid")
 registry = _research_module("registry")
+REAL_IMPORTED_PACKAGE: Final = registry._imported_package
 
 COMMITTED: Final[datetime] = datetime(2026, 9, 26, 12, 0, tzinfo=UTC)
 CODE_COMMIT: Final[str] = "0123456789abcdef0123456789abcdef01234567"
@@ -67,53 +67,41 @@ CRITERIA: Final[dict[str, object]] = {
     "one_sided_sign_flip_p_below": "0.05",
     "max_relative_drawdown_multiple_of_validation": "2",
 }
-
-
-def _git(repo: Path, *args: str, at: datetime | None = None) -> str:
-    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
-    env.update(
-        {
-            "GIT_CONFIG_GLOBAL": os.devnull,
-            "GIT_CONFIG_NOSYSTEM": "1",
-            "GIT_AUTHOR_NAME": "Research",
-            "GIT_AUTHOR_EMAIL": "research@example.invalid",
-            "GIT_COMMITTER_NAME": "Research",
-            "GIT_COMMITTER_EMAIL": "research@example.invalid",
-        }
-    )
-    if at is not None:
-        env["GIT_COMMITTER_DATE"] = at.isoformat()
-        env["GIT_AUTHOR_DATE"] = at.isoformat()
-    result = subprocess.run(
-        ["git", *args], cwd=repo, env=env, capture_output=True, text=True, check=True
-    )
-    return result.stdout
-
-
 SOURCE: Final[str] = "src/openalpha_cn/strategy.py"
+BOUND: Final[tuple[str, ...]] = (
+    SOURCE,
+    "scripts/research/grid.py",
+    "pyproject.toml",
+    "uv.lock",
+)
+"""One file under each pathspec the holdout binds to its registered code commit."""
+_git = git
+_head = head
 
 
 @pytest.fixture
-def tmp_git_repo(tmp_path: Path) -> Path:
+def tmp_git_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A repository holding one file under each bound pathspec, whose `src/` is where the guard is
+    told `openalpha_cn` was imported from (the real import is this checkout's, not the fixture's;
+    `test_a_package_imported_from_outside_the_repository_refuses_the_holdout` drops the patch)."""
     repo = tmp_path / "repo"
-    (repo / "src" / "openalpha_cn").mkdir(parents=True)
+    repo.mkdir()
     _git(repo, "init", "-q", "--template=")
-    (repo / SOURCE).write_text("RULES = 1\n", encoding="utf-8")
-    _git(repo, "add", SOURCE)
+    for name in BOUND:
+        (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / name).write_text("RULES = 1\n", encoding="utf-8")
+        _git(repo, "add", name)
     _git(repo, "commit", "-q", "-m", "initial", at=COMMITTED - timedelta(days=1))
+    package = repo / "src" / "openalpha_cn" / "__init__.py"
+    monkeypatch.setattr(registry, "_imported_package", lambda: package)
     return repo
 
 
-def _head(repo: Path) -> str:
-    return _git(repo, "rev-parse", "HEAD").strip()
-
-
-def _registered(repo: Path, *, commit_at: datetime | None) -> Path:
+def _registered(repo: Path, *, commit_at: datetime | None, commit: str | None = None) -> Path:
     path = repo / "docs" / "research" / "p6-registration.json"
-    registry.register(CONFIG, CRITERIA, path, code_commit=_head(repo))
+    registry.register(CONFIG, CRITERIA, path, code_commit=commit or _head(repo))
     if commit_at is not None:
-        _git(repo, "add", path.relative_to(repo).as_posix())
-        _git(repo, "commit", "-q", "-m", "register the holdout", at=commit_at)
+        commit_file(repo, path, "register the holdout", at=commit_at)
     return path
 
 
@@ -278,26 +266,96 @@ def test_holdout_is_refused_the_second_time(tmp_git_repo: Path) -> None:
     assert grid.stage_family(ledger, grid.HOLDOUT_STAGE) == 1
 
 
-def test_a_committed_source_change_after_the_registration_refuses_the_holdout(
-    tmp_git_repo: Path,
+@pytest.mark.parametrize("bound", BOUND)
+def test_a_committed_change_to_bound_code_after_the_registration_refuses_the_holdout(
+    tmp_git_repo: Path, bound: str
+) -> None:
+    """`src/` is the package; `scripts/research/` computes every holdout metric; `pyproject.toml`
+    and `uv.lock` decide which libraries run them. Any change to one changes the measurement."""
+    ledger = tmp_git_repo / "ledger.jsonl"
+    registration = _registered(tmp_git_repo, commit_at=COMMITTED)
+    (tmp_git_repo / bound).write_text("RULES = 2\n", encoding="utf-8")
+    commit_file(tmp_git_repo, tmp_git_repo / bound, "tune", at=COMMITTED + timedelta(minutes=5))
+
+    with pytest.raises(registry.SourceChangedError, match="differs from"):
+        registry.assert_holdout_allowed(registration, ledger, tmp_git_repo)
+
+
+@pytest.mark.parametrize("bound", BOUND)
+def test_an_uncommitted_change_to_bound_code_refuses_the_holdout(
+    tmp_git_repo: Path, bound: str
 ) -> None:
     ledger = tmp_git_repo / "ledger.jsonl"
     registration = _registered(tmp_git_repo, commit_at=COMMITTED)
-    (tmp_git_repo / SOURCE).write_text("RULES = 2\n", encoding="utf-8")
-    _git(tmp_git_repo, "add", SOURCE)
-    _git(tmp_git_repo, "commit", "-q", "-m", "tune", at=COMMITTED + timedelta(minutes=5))
+    (tmp_git_repo / bound).write_text("RULES = 3\n", encoding="utf-8")
 
-    with pytest.raises(registry.SourceChangedError, match="src"):
+    with pytest.raises(registry.SourceChangedError, match="working tree"):
         registry.assert_holdout_allowed(registration, ledger, tmp_git_repo)
 
 
-def test_an_uncommitted_source_change_refuses_the_holdout(tmp_git_repo: Path) -> None:
+def test_an_untracked_file_in_bound_code_refuses_the_holdout(tmp_git_repo: Path) -> None:
     ledger = tmp_git_repo / "ledger.jsonl"
     registration = _registered(tmp_git_repo, commit_at=COMMITTED)
-    (tmp_git_repo / "src" / "openalpha_cn" / "new.py").write_text("X = 1\n", encoding="utf-8")
+    (tmp_git_repo / "scripts" / "research" / "helper.py").write_text("X = 1\n", encoding="utf-8")
 
-    with pytest.raises(registry.SourceChangedError, match="src"):
+    with pytest.raises(registry.SourceChangedError, match="working tree"):
         registry.assert_holdout_allowed(registration, ledger, tmp_git_repo)
+
+
+def test_a_change_outside_the_bound_code_does_not_refuse_the_holdout(tmp_git_repo: Path) -> None:
+    ledger = tmp_git_repo / "ledger.jsonl"
+    registration = _registered(tmp_git_repo, commit_at=COMMITTED)
+    (tmp_git_repo / "docs" / "notes.md").write_text("later prose\n", encoding="utf-8")
+    commit_file(
+        tmp_git_repo,
+        tmp_git_repo / "docs" / "notes.md",
+        "prose",
+        at=COMMITTED + timedelta(minutes=5),
+    )
+
+    registry.assert_holdout_allowed(registration, ledger, tmp_git_repo)
+
+
+def test_a_registered_code_commit_the_repository_does_not_hold_cannot_be_compared(
+    tmp_git_repo: Path,
+) -> None:
+    ledger = tmp_git_repo / "ledger.jsonl"
+    registration = _registered(tmp_git_repo, commit_at=COMMITTED, commit="f" * 40)
+
+    with pytest.raises(registry.SourceChangedError, match="cannot be compared"):
+        registry.assert_holdout_allowed(registration, ledger, tmp_git_repo)
+
+
+def test_a_package_imported_from_outside_the_repository_refuses_the_holdout(
+    tmp_git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A worktree run can import the main checkout's `openalpha_cn`; the code measuring would then
+    not be the code the diff checked. The real import in this test run is this checkout's."""
+    ledger = tmp_git_repo / "ledger.jsonl"
+    registration = _registered(tmp_git_repo, commit_at=COMMITTED)
+    monkeypatch.setattr(registry, "_imported_package", REAL_IMPORTED_PACKAGE)
+
+    with pytest.raises(registry.ForeignPackageError, match="openalpha_cn"):
+        registry.assert_holdout_allowed(registration, ledger, tmp_git_repo)
+
+
+def test_a_commit_time_in_shanghai_is_ordered_against_utc_ledger_rows(tmp_git_repo: Path) -> None:
+    """20:00 +08:00 is 12:00 UTC: a claim at 11:30 UTC predates the commit and one at 12:30 UTC
+    follows it. Comparing wall-clock digits would order both the other way round."""
+    shanghai = timezone(timedelta(hours=8))
+    registration = _registered(
+        tmp_git_repo, commit_at=datetime(2026, 9, 26, 20, 0, tzinfo=shanghai)
+    )
+
+    before = tmp_git_repo / "before.jsonl"
+    _claim(before, datetime(2026, 9, 26, 11, 30, tzinfo=UTC))
+    with pytest.raises(registry.RegistrationAfterHoldoutError):
+        registry.assert_holdout_allowed(registration, before, tmp_git_repo)
+
+    after = tmp_git_repo / "after.jsonl"
+    _claim(after, datetime(2026, 9, 26, 12, 30, tzinfo=UTC))
+    with pytest.raises(registry.HoldoutAlreadyRanError):
+        registry.assert_holdout_allowed(registration, after, tmp_git_repo)
 
 
 def test_a_committed_registration_before_any_holdout_row_is_allowed(tmp_git_repo: Path) -> None:
@@ -433,6 +491,61 @@ def test_the_forward_stage_starts_after_the_registration_commit_date_in_shanghai
     registration = _registered(tmp_git_repo, commit_at=datetime(2026, 9, 26, 17, 0, tzinfo=UTC))
 
     assert registry.forward_after(registration, tmp_git_repo) == date(2026, 9, 27)
+
+
+# --- the forward stage --------------------------------------------------------------------------
+
+
+def _forward(registration: Path, ledger: Path, repo: Path, config: Mapping[str, object]) -> list:
+    measured: list[Mapping[str, object]] = []
+
+    def measure(value: Mapping[str, object]) -> Mapping[str, object]:
+        measured.append(value)
+        return {"p_excess": 0.5}
+
+    registry.run_forward(
+        registration,
+        ledger,
+        repo,
+        (config,),
+        measure,
+        label_sessions=grid.strategy_label_sessions,
+        clock=lambda: COMMITTED,
+    )
+    return measured
+
+
+FORWARD_COVERING_2024: Final[dict[str, object]] = {
+    "start": date(2024, 1, 2),
+    "end": date(2025, 6, 30),
+    "holding_count": 50,
+}
+
+
+def test_a_forward_run_without_a_committed_registration_is_refused(tmp_git_repo: Path) -> None:
+    """The forward boundary is the registration's commit date and nothing a caller types: with no
+    committed registration there is no boundary, and a window covering 2024 is not measured."""
+    ledger = tmp_git_repo / "ledger.jsonl"
+    registration = _registered(tmp_git_repo, commit_at=None)
+
+    with pytest.raises(registry.RegistrationNotCommittedError):
+        _forward(registration, ledger, tmp_git_repo, FORWARD_COVERING_2024)
+    assert _rows(ledger) == []
+
+
+def test_a_forward_window_on_or_before_the_registration_date_is_a_refused_row(
+    tmp_git_repo: Path,
+) -> None:
+    ledger = tmp_git_repo / "ledger.jsonl"
+    registration = _registered(tmp_git_repo, commit_at=COMMITTED)  # Shanghai date 2026-09-26
+    on_the_day = {"start": date(2026, 9, 26), "end": date(2026, 10, 30)}
+    after = {"start": date(2026, 9, 28), "end": date(2026, 10, 30)}
+
+    assert _forward(registration, ledger, tmp_git_repo, FORWARD_COVERING_2024) == []
+    assert _forward(registration, ledger, tmp_git_repo, on_the_day) == []
+    assert _forward(registration, ledger, tmp_git_repo, after) == [after]
+    errors = [row["result"].get("error", "") for row in _rows(ledger)]
+    assert [error.startswith("StageWindowError: ") for error in errors] == [True, True, False]
 
 
 def test_the_guard_reads_git_without_an_inherited_git_variable(
