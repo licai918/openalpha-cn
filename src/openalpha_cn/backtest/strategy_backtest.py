@@ -52,19 +52,44 @@ holding_count` in cash, and a new position's notional plus its fees is bounded b
 `position_capital`, by the cash on hand after the same session's sales, and its notional by
 `participation_cap` times the signal session's turnover. See
 `KNOWN_STRATEGY_BACKTEST_LIMITATIONS` for what those choices leave out.
+
+## Four kinds of score source, and the two whose scores are reconstructed (`V2-P6-014`)
+
+A `ScoreSource` is exactly one of: stored factor tiers under **static** weights; registered
+**predictions**; stored factor tiers weighted by each factor's **trailing IC**; or a
+**walk-forward** model refitted on a schedule. The last two are computed now, over history, and
+each has one point-in-time rule this module enforces rather than trusts:
+
+- **Trailing IC.** At signal day `d`, factor `i`'s weight is the mean of its ICs over the
+  prediction days `t` among the `ic_window_sessions` calendar sessions ending at `d` whose
+  `ICObservation.known_at` -- the later of the build's instant and the 16:30 of the session the
+  label's window exits on -- is at or before `d`'s signal instant (`_ICIndex.weights`). Fewer
+  than `min_ic_observations` known ICs is an abstention (weight 0); a day on which every factor
+  weighs 0 has no scores and the book **holds**.
+- **Walk-forward model.** A fit on refit session `r` trains on the prediction days among the
+  `train_sessions` sessions ending at `r` whose label is known **strictly before** the signal
+  instant of the session `embargo_sessions` before `r` (`walk_forward_fits`). The fit in use on
+  `d` is the newest one refitted on or before `d`, and the book **refuses** a fit whose own
+  artifact's training cutoff is not known strictly before the session `embargo_sessions` before
+  `d` (`_refuse_a_fit_not_closed_by_the_embargo`). No fit yet is no scores, and the book holds.
+
+Both are walk-forward reconstructions made now, not predictions registered before their
+outcomes; every answer from either kind says so (`limitation_codes_for`).
 """
 
 from __future__ import annotations
 
 import math
 import statistics
+from bisect import bisect_left, bisect_right
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
-from typing import Final, Literal, Self
+from itertools import pairwise
+from typing import Final, Literal, Self, get_args
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from openalpha_cn.backtest.execution import (
     AShareExecutionPolicy,
@@ -73,23 +98,37 @@ from openalpha_cn.backtest.execution import (
     ExecutionResult,
     MarketBar,
 )
-from openalpha_cn.backtest.factor_ic import average_ranks
+from openalpha_cn.backtest.factor_ic import MINIMUM_IC_SECURITIES, average_ranks
 from openalpha_cn.backtest.factor_portfolio import (
     BOARD_MINIMUM_QUANTITY,
     SHARE_LOT,
     position_quantity,
 )
+from openalpha_cn.domain.alpha_model import (
+    AlphaModel,
+    AlphaModelArtifact,
+    AlphaModelError,
+    FittedAlphaModel,
+    TrainingExample,
+    TrainingSet,
+)
 
 __all__ = [
+    "DYNAMIC_SOURCE_KINDS",
     "EQUAL_WEIGHT_ALL_A",
     "KNOWN_STRATEGY_BACKTEST_LIMITATIONS",
+    "MODEL_COMPONENT",
     "PREDICTION_COMPONENT",
     "RETURN_QUANTUM",
+    "SCORE_SOURCE_KINDS",
     "STRATEGY_BACKTEST_LIMITATION_CODES",
     "STRATEGY_TIERS",
+    "ICObservation",
+    "ModelFit",
     "PeriodResult",
     "ScoreRow",
     "ScoreSource",
+    "ScoreSourceKind",
     "SessionQuote",
     "StrategyBacktest",
     "StrategyBacktestError",
@@ -98,9 +137,24 @@ __all__ = [
     "StrategyInputs",
     "StrategyRejection",
     "StrategySpec",
+    "TrailingICWeight",
+    "TrailingICWeights",
+    "WalkForwardFit",
+    "WalkForwardModel",
     "component_key",
+    "limitation_codes_for",
     "run_strategy_backtest",
+    "trailing_ic_weights",
+    "usable_fit",
+    "walk_forward_fits",
 ]
+
+ScoreSourceKind = Literal["static", "prediction", "trailing_ic", "walk_forward"]
+SCORE_SOURCE_KINDS: Final[tuple[ScoreSourceKind, ...]] = get_args(ScoreSourceKind)
+"""The four mutually exclusive kinds a `ScoreSource` can be."""
+
+DYNAMIC_SOURCE_KINDS: Final[frozenset[str]] = frozenset({"trailing_ic", "walk_forward"})
+"""The two kinds whose scores this repository reconstructs over history rather than reads."""
 
 StrategyTier = Literal["raw", "processed", "neutralized"]
 STRATEGY_TIERS: Final[tuple[str, ...]] = ("raw", "processed", "neutralized")
@@ -113,6 +167,9 @@ EQUAL_WEIGHT_ALL_A: Final[str] = "equal_weight_all_a"
 
 PREDICTION_COMPONENT: Final[str] = "prediction"
 """The one component key a `ScoreSource` built from `prediction_ids` has."""
+
+MODEL_COMPONENT: Final[str] = "walk_forward_model"
+"""The one component key a walk-forward `ScoreSource` has: the fitted model's score."""
 
 RETURN_QUANTUM: Final[Decimal] = Decimal("0.0000000001")
 """Ten decimal places: every return, cost fraction and turnover is quantized to this."""
@@ -128,10 +185,22 @@ class StrategyBacktestError(ValueError):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class StrategyBacktestLimitation:
-    """One named boundary on what a strategy backtest's numbers can be trusted to mean."""
+    """One named boundary on what a strategy backtest's numbers can be trusted to mean.
+
+    `applies_to` is the source kinds the entry speaks for, so an answer carries the entries
+    about its own kind and not a reconstruction warning on a run that reconstructed nothing.
+    """
 
     code: str
     detail: str
+    applies_to: frozenset[str] = frozenset(SCORE_SOURCE_KINDS)
+
+    def __post_init__(self) -> None:
+        if not self.applies_to or not self.applies_to <= set(SCORE_SOURCE_KINDS):
+            raise ValueError(
+                f"{self.code} applies to {sorted(self.applies_to)}; the kinds are "
+                f"{list(SCORE_SOURCE_KINDS)}"
+            )
 
 
 KNOWN_STRATEGY_BACKTEST_LIMITATIONS: Final[tuple[StrategyBacktestLimitation, ...]] = (
@@ -274,6 +343,124 @@ KNOWN_STRATEGY_BACKTEST_LIMITATIONS: Final[tuple[StrategyBacktestLimitation, ...
             "well here is still a candidate list."
         ),
     ),
+    StrategyBacktestLimitation(
+        code="a_dynamic_score_is_a_walk_forward_reconstruction_made_now",
+        detail=(
+            "A trailing-IC weight and a walk-forward model's score are computed now, over "
+            "history, from inputs each rule proves were visible at the signal instant -- they "
+            "are not predictions anybody registered before the outcome was known, and nothing "
+            "here can show that the configuration itself was chosen without looking at the "
+            "period it is run over. The score rows carry the signal instant on both clocks "
+            "because that is the instant their inputs were visible at, not because anything was "
+            "recorded then. Forward evidence is what the forward period and registered "
+            "predictions are for; a result here stays a candidate."
+        ),
+        applies_to=DYNAMIC_SOURCE_KINDS,
+    ),
+    StrategyBacktestLimitation(
+        code="the_labels_behind_a_dynamic_score_are_read_at_the_backtests_as_of",
+        detail=(
+            "The forward returns an IC or a fit is measured against are priced by the same "
+            "label construction factor run and model evaluate use (build_label_window and "
+            "label_outcome over the stored bars, bands, halts, registry and adjustment "
+            "factors), and every one of those reads is made at the backtest's as_of rather than "
+            "at each signal instant. Which labels a signal day may USE is decided by each "
+            "label's own exit session against that day's 16:30, so no outcome is read before it "
+            "closed; what is not point-in-time is the corpus's shape -- a bar restated after the "
+            "fact is read in its restated form, and the registry and calendar are today's. "
+            "model_view's the_evaluation_reads_its_labels_at_one_as_of_and_that_is_not_a_point_"
+            "in_time_fit is the same boundary on the model plane."
+        ),
+        applies_to=DYNAMIC_SOURCE_KINDS,
+    ),
+    StrategyBacktestLimitation(
+        code="a_lookback_reaching_before_the_stored_calendar_is_shorter_rather_than_refused",
+        detail=(
+            "A trailing window or a training window that starts before the backtest's first "
+            "session reads the sessions in front of it from the contiguous run of registered "
+            "trade_cal years ending the year before --start, as far back as the window needs. "
+            "Where the stored calendar stops earlier the window is shorter than declared, and "
+            "the shortfall shows up as fewer IC observations (an abstention under "
+            "min_ic_observations) or a fit on fewer prediction days (ModelFit."
+            "prediction_day_count), not as a refusal. A factor, price or adjustment year the "
+            "calendar reaches and the panel does not hold is refused as panel_unreadable."
+        ),
+        applies_to=DYNAMIC_SOURCE_KINDS,
+    ),
+    StrategyBacktestLimitation(
+        code="a_signal_day_whose_source_answers_nothing_is_held_rather_than_traded",
+        detail=(
+            "A signal day on which every trailing-IC factor weighs zero, or on which no "
+            "walk-forward fit is in use yet (or the fit in use abstained on every security), "
+            "has no scores: the book neither buys nor sells, keeps what it holds, and marks the "
+            "period held. That is the only arrangement that does not invent a ranking, and it "
+            "makes an early period's return a return on cash and on whatever was already held. "
+            "A run on which EVERY signal day is held is refused rather than reported as a flat "
+            "result, because it answers nothing about the source."
+        ),
+        applies_to=DYNAMIC_SOURCE_KINDS,
+    ),
+    StrategyBacktestLimitation(
+        code="a_trailing_ic_weight_is_the_mean_of_the_ics_known_at_the_signal",
+        detail=(
+            "A factor's weight on signal day d is the plain mean of its daily ICs (FactorICStudy "
+            "under the declared ic_method and min_ic_securities, oriented so a lower_is_better "
+            "factor's working IC is positive) over the prediction days among the "
+            "ic_window_sessions calendar sessions ending at d whose IC was knowable by d's 16:30: "
+            "the later of the build's instant and the 16:30 of the session its label window "
+            "exits on. An IC day whose cross section was too thin or degenerate is not an "
+            "observation. The mean is not shrunk, not scaled by its dispersion and not tested "
+            "for significance, so a factor with three noisy ICs weighs as confidently as one "
+            "with three hundred; min_ic_observations is the only guard. clip_to_zero turns a "
+            "negative mean into an abstention; keep_sign trades the factor reversed. A weight "
+            "of zero, abstained or clipped, takes the factor out of that day's ranking."
+        ),
+        applies_to=frozenset({"trailing_ic"}),
+    ),
+    StrategyBacktestLimitation(
+        code="a_walk_forward_fit_trains_on_labels_closed_before_the_embargo_deadline",
+        detail=(
+            "A fit on refit session r trains on the prediction days among the train_sessions "
+            "sessions ending at r whose label is known strictly before the 16:30 of the session "
+            "embargo_sessions before r, so at least embargo_sessions + horizon_sessions + 1 of "
+            "the most recent sessions never train. Refits fall every refit_every_sessions "
+            "sessions from the backtest's first session, and the fit in use on a signal day is "
+            "the newest one refitted on or before it; the book refuses any fit whose own "
+            "training cutoff is not known strictly before the session embargo_sessions before "
+            "the signal. The feature cross section a fit scores is read at the signal instant. "
+            "Hyperparameters are passed through, never selected here: choosing among grid "
+            "configurations by their results is a model selection the research protocol has "
+            "to account for."
+        ),
+        applies_to=frozenset({"walk_forward"}),
+    ),
+    StrategyBacktestLimitation(
+        code="a_refit_the_model_refuses_leaves_the_previous_fit_in_use",
+        detail=(
+            "A refit with no closed label in its window, or one the model refuses (too few "
+            "securities, a column no day could measure), is reported on the answer's model_fits "
+            "with its reason and is not used; the newest successful earlier fit stays in use, "
+            "which is what a live schedule would do and which ages the model past its declared "
+            "refit interval. Each period's model_fit names the refit session it traded on, so a "
+            "stale fit is visible rather than silent."
+        ),
+        applies_to=frozenset({"walk_forward"}),
+    ),
+    StrategyBacktestLimitation(
+        code="a_walk_forward_model_reads_no_neutralized_feature",
+        detail=(
+            "A neutralized-tier feature is refused, by model_view.feature_columns, the one "
+            "resolver the model faces share. The reason that function states -- a residual can "
+            "only be built at its year's last stored session -- no longer holds (V2-P4-026 and "
+            "V2-P4-028 retracted it; factor_view's "
+            "the_three_tiers_must_have_been_built_at_the_same_instants says so). A reason that "
+            "does hold keeps the refusal: no industry cross section before 2021-12-13 can be "
+            "assembled, so a neutralized column is empty over the whole 2015-2021 walk-forward "
+            "period the research protocol runs this over, and a fit on it would be a fit on "
+            "nothing. The trailing-IC and static sources read the neutralized tier."
+        ),
+        applies_to=frozenset({"walk_forward"}),
+    ),
 )
 """What a strategy backtest does not answer, as a closed registry rather than as prose."""
 
@@ -282,33 +469,158 @@ STRATEGY_BACKTEST_LIMITATION_CODES: Final[frozenset[str]] = frozenset(
 )
 
 
+def limitation_codes_for(kind: str) -> tuple[str, ...]:
+    """The registry's codes that speak for a source of `kind`, in registry order."""
+    if kind not in SCORE_SOURCE_KINDS:
+        raise ValueError(f"{kind!r} is not a score source kind; the kinds are {SCORE_SOURCE_KINDS}")
+    return tuple(
+        item.code for item in KNOWN_STRATEGY_BACKTEST_LIMITATIONS if kind in item.applies_to
+    )
+
+
 def component_key(factor: str, tier: str) -> str:
     """The key a score row names its component by: `<factor>@<tier>`."""
     return f"{factor}@{tier}"
 
 
-class ScoreSource(BaseModel):
-    """Where the scores come from: stored factor tiers combined, or registered predictions.
+class TrailingICWeights(BaseModel):
+    """Stored factor tiers weighted, each signal day, by their own trailing mean IC.
 
-    Exactly one of `components` and `prediction_ids` is non-empty. A component is `(factor key,
-    tier, weight)`; the view orients every stored value so that higher is better before it
-    reaches `combine` (a `lower_is_better` factor is negated), so a weight's sign is a statement
-    about the combination and never a repair of a factor's direction. A prediction source is
-    one component, `PREDICTION_COMPONENT`, with weight one.
+    Plain configuration (`V2-P6-014`): a research grid passes it as data. See
+    `a_trailing_ic_weight_is_the_mean_of_the_ics_known_at_the_signal` for the rule and
+    `_ICIndex.weights` for the line that enforces it. `min_ic_securities` is `FactorICSpec
+    .min_securities` -- the floor a day's cross section must clear to have an IC at all -- and
+    has no default for that contract's reason.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    components: tuple[tuple[str, StrategyTier, Decimal], ...]
+    components: tuple[tuple[str, StrategyTier], ...] = Field(min_length=1)
+    ic_window_sessions: int = Field(ge=1)
+    min_ic_observations: int = Field(ge=1)
+    ic_method: Literal["spearman", "pearson"]
+    horizon_sessions: int = Field(ge=1)
+    negative_ic: Literal["clip_to_zero", "keep_sign"]
+    min_ic_securities: int = Field(ge=MINIMUM_IC_SECURITIES)
+
+    @model_validator(mode="after")
+    def validate_weighable(self) -> Self:
+        seen: set[tuple[str, str]] = set()
+        for factor, tier in self.components:
+            if not factor.strip():
+                raise ValueError("a trailing-IC component must name a factor")
+            if (factor, tier) in seen:
+                raise ValueError(f"component {factor}@{tier} is declared twice")
+            seen.add((factor, tier))
+        if self.min_ic_observations > self.ic_window_sessions:
+            raise ValueError(
+                f"min_ic_observations {self.min_ic_observations} exceeds ic_window_sessions "
+                f"{self.ic_window_sessions}; no window that short can hold that many ICs, so "
+                "every factor would abstain on every day"
+            )
+        return self
+
+    @property
+    def component_keys(self) -> tuple[str, ...]:
+        """Each component's `<factor>@<tier>` key, in declared order."""
+        return tuple(component_key(factor, tier) for factor, tier in self.components)
+
+
+class WalkForwardModel(BaseModel):
+    """An `AlphaModelDeclaration`-shaped model refitted on a schedule, every fit point-in-time.
+
+    `family` is one of `model_view.MODEL_FAMILIES`' keys and `features` are
+    `<factor>@<tier>[:<transform>]` tokens; both are resolved by the view against the model
+    faces' own tables. `hyperparameters` pass through to the declaration unchanged; a mapping is
+    accepted and sorted by name. `code_commit` reaches the fitted artifact's address and is the
+    caller's to state, since this module cannot read git (rule 8: a reproducibility claim must be
+    real).
+
+    The schedule's one arithmetic floor is `train_sessions >= embargo_sessions +
+    horizon_sessions + 3`: a label entered on the session after its prediction day and exiting
+    `horizon_sessions` later is known strictly before the session `embargo_sessions` before a
+    refit only for prediction days at least that many sessions back, so a shorter window can
+    never hold a training day.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    family: str = Field(min_length=1)
+    features: tuple[str, ...] = Field(min_length=1)
+    hyperparameters: tuple[tuple[str, bool | int | float | str], ...] = ()
+    seed: int = Field(ge=0)
+    code_commit: str = Field(min_length=7, max_length=64)
+    train_sessions: int = Field(ge=1)
+    refit_every_sessions: int = Field(ge=1)
+    embargo_sessions: int = Field(ge=0)
+    horizon_sessions: int = Field(ge=1)
+    missing: Literal["abstain", "drop_security", "cross_section_median"] = "abstain"
+
+    @field_validator("hyperparameters", mode="before")
+    @classmethod
+    def accept_a_mapping(cls, value: object) -> object:
+        if isinstance(value, Mapping):
+            return tuple(sorted(value.items(), key=lambda pair: str(pair[0])))
+        return value
+
+    @model_validator(mode="after")
+    def validate_point_in_time_schedule(self) -> Self:
+        if any(not token.strip() or "@" not in token for token in self.features):
+            raise ValueError(
+                f"features {list(self.features)} must each be <factor>@<tier>[:<transform>]"
+            )
+        if len(set(self.features)) != len(self.features):
+            raise ValueError("a feature is declared twice; a fit would weight it twice")
+        if self.embargo_sessions < self.horizon_sessions:
+            raise ValueError(
+                f"embargo_sessions {self.embargo_sessions} is shorter than horizon_sessions "
+                f"{self.horizon_sessions}; an embargo inside one label's own window lets a "
+                "training label overlap the returns the signal it feeds is scored on"
+            )
+        floor = self.embargo_sessions + self.horizon_sessions + 3
+        if self.train_sessions < floor:
+            raise ValueError(
+                f"train_sessions {self.train_sessions} is below {floor} (embargo_sessions + "
+                "horizon_sessions + 3), so no prediction day in the window could have a label "
+                "known before the embargo deadline"
+            )
+        return self
+
+
+class ScoreSource(BaseModel):
+    """Where the scores come from: exactly one of four kinds (`ScoreSourceKind`).
+
+    - `components` (**static**): `(factor key, tier, weight)` triples. The view orients every
+      stored value so that higher is better before it reaches `combine` (a `lower_is_better`
+      factor is negated), so a weight's sign is a statement about the combination and never a
+      repair of a factor's direction.
+    - `prediction_ids`: registered predictions, one component `PREDICTION_COMPONENT` weighing 1.
+    - `trailing_ic` (`V2-P6-014`): stored tiers weighted per signal day by their trailing IC.
+    - `walk_forward` (`V2-P6-014`): one component `MODEL_COMPONENT`, a refitted model's score.
+
+    Not persisted anywhere: a field added here is configuration, not a stored contract.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    components: tuple[tuple[str, StrategyTier, Decimal], ...] = ()
     combine: Literal["zscore_sum", "rank_sum"]
     prediction_ids: tuple[str, ...] = ()
+    trailing_ic: TrailingICWeights | None = None
+    walk_forward: WalkForwardModel | None = None
 
     @model_validator(mode="after")
     def validate_one_series(self) -> Self:
-        if bool(self.components) == bool(self.prediction_ids):
+        named = (
+            bool(self.components)
+            + bool(self.prediction_ids)
+            + (self.trailing_ic is not None)
+            + (self.walk_forward is not None)
+        )
+        if named != 1:
             raise ValueError(
-                "a score source names exactly one of components and prediction_ids; both or "
-                "neither is not a series anyone could rank on"
+                "a score source names exactly one of components, prediction_ids, trailing_ic "
+                "and walk_forward; two or none is not a series anyone could rank on"
             )
         seen: set[tuple[str, str]] = set()
         for factor, tier, weight in self.components:
@@ -329,8 +641,27 @@ class ScoreSource(BaseModel):
         return self
 
     @property
+    def kind(self) -> ScoreSourceKind:
+        """Which of the four kinds this source is."""
+        if self.trailing_ic is not None:
+            return "trailing_ic"
+        if self.walk_forward is not None:
+            return "walk_forward"
+        return "prediction" if self.prediction_ids else "static"
+
+    @property
+    def component_keys(self) -> tuple[str, ...]:
+        """Every component key a score row of this source may name."""
+        if self.trailing_ic is not None:
+            return self.trailing_ic.component_keys
+        if self.walk_forward is not None:
+            return (MODEL_COMPONENT,)
+        return tuple(self.weights)
+
+    @property
     def weights(self) -> Mapping[str, Decimal]:
-        """Each component key's weight."""
+        """Each component key's fixed weight; empty for the two dynamic kinds, whose weights
+        are decided per signal day."""
         if self.prediction_ids:
             return {PREDICTION_COMPONENT: Decimal(1)}
         return {component_key(factor, tier): weight for factor, tier, weight in self.components}
@@ -428,12 +759,48 @@ class StrategyRejection(BaseModel):
     reason: str
 
 
+class TrailingICWeight(BaseModel):
+    """One factor's trailing-IC weight on one signal day, with what it was computed from.
+
+    `observations` counts the ICs known at the signal instant inside the window, and `mean_ic`
+    is their mean (`None` when there were none); `weight` is `0.0` when the factor abstained
+    (fewer than `min_ic_observations`) or was clipped.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    component: str
+    observations: int = Field(ge=0)
+    mean_ic: float | None
+    weight: float
+
+
+class ModelFit(BaseModel):
+    """One walk-forward refit as the answer reports it: the fit, or why there is none.
+
+    `labels_known_at` is the signal instant of the session the newest training label exited
+    on; `training_cutoff` is the artifact's own (that session's 15:00 close).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    refit_day: date
+    refusal: str | None
+    artifact_id: str | None
+    training_cutoff: datetime | None
+    labels_known_at: datetime | None
+    example_count: int = Field(ge=0)
+    prediction_day_count: int = Field(ge=0)
+
+
 class PeriodResult(BaseModel):
     """One rebalance period, from one signal close to the next.
 
     The brief's eight fields, plus the ledger that makes each of them re-derivable:
     `sessions`, `start_value`/`end_value`, `cost_yuan`, `capped_orders`, `holdings` and the
-    fills and rejections themselves.
+    fills and rejections themselves. `V2-P6-014` adds three: `held` (the source had no scores on
+    the signal day, so nothing traded), `ic_weights` (a trailing-IC source's weights that day)
+    and `model_fit` (the walk-forward fit in use that day).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -454,6 +821,9 @@ class PeriodResult(BaseModel):
     holdings: tuple[str, ...]
     fills: tuple[StrategyFill, ...]
     rejections: tuple[StrategyRejection, ...]
+    held: bool = False
+    ic_weights: tuple[TrailingICWeight, ...] = ()
+    model_fit: ModelFit | None = None
 
     @model_validator(mode="after")
     def validate_ledger(self) -> Self:
@@ -463,11 +833,16 @@ class PeriodResult(BaseModel):
             raise ValueError("rejected_orders must count the rejections")
         if self.end <= self.start:
             raise ValueError("a period ends after it starts")
+        if self.held and (self.fills or self.rejections):
+            raise ValueError("a held period placed no order")
         return self
 
 
 class StrategyBacktest(BaseModel):
-    """The whole answer: the rules, the score source, every period, and what it cannot say."""
+    """The whole answer: the rules, the score source, every period, and what it cannot say.
+
+    `model_fits` is every walk-forward refit of the run, fitted or refused, in refit order.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -475,6 +850,7 @@ class StrategyBacktest(BaseModel):
     source: ScoreSource
     periods: tuple[PeriodResult, ...]
     limitations: tuple[str, ...]
+    model_fits: tuple[ModelFit, ...] = ()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -525,13 +901,84 @@ class SessionQuote:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class ICObservation:
+    """One component's IC on one prediction day, and the instant it became knowable.
+
+    `ic` is `FactorICStudy.measure`'s oriented IC, or `None` when that day's cross section was
+    too thin or degenerate to have one. `known_at` is the later of the build's instant and the
+    signal instant of the session the label window exits on: before it, nobody could have
+    computed this number.
+    """
+
+    component: str
+    prediction_day: date
+    known_at: datetime
+    ic: float | None
+
+    def __post_init__(self) -> None:
+        if self.known_at.tzinfo is None or self.known_at.utcoffset() is None:
+            raise StrategyBacktestError("an IC observation's known_at must be timezone-aware")
+        if self.ic is not None and not (math.isfinite(self.ic) and -1.0 <= self.ic <= 1.0):
+            raise StrategyBacktestError(
+                f"{self.component}'s IC on {self.prediction_day.isoformat()} is {self.ic!r}, "
+                "which is not a correlation"
+            )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class WalkForwardFit:
+    """One refit: the fitted model and what it trained on, or the reason there is none.
+
+    `labels_known_at` is the signal instant of the session the newest training label exited on.
+    The book does not trust it: its guard re-derives the same instant from `artifact
+    .training_cutoff`, which the model computed from the training set itself.
+    """
+
+    refit_day: date
+    fitted: FittedAlphaModel | None
+    artifact: AlphaModelArtifact | None
+    refusal: str | None
+    labels_known_at: datetime | None
+    example_count: int
+    prediction_day_count: int
+
+    def __post_init__(self) -> None:
+        if (self.fitted is None) != (self.refusal is not None) or (self.fitted is None) != (
+            self.artifact is None
+        ):
+            raise StrategyBacktestError(
+                f"the refit on {self.refit_day.isoformat()} must carry a fitted model and its "
+                "artifact, or a refusal, and not both"
+            )
+
+    @property
+    def record(self) -> ModelFit:
+        """This refit as the answer reports it."""
+        return ModelFit(
+            refit_day=self.refit_day,
+            refusal=self.refusal,
+            artifact_id=None if self.artifact is None else self.artifact.artifact_id,
+            training_cutoff=None if self.artifact is None else self.artifact.training_cutoff,
+            labels_known_at=self.labels_known_at,
+            example_count=self.example_count,
+            prediction_day_count=self.prediction_day_count,
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class StrategyInputs:
     """Everything a backtest reads, already out of the panel.
 
     `sessions` are the open sessions of the range, ascending; the first is the first signal
-    day. `signal_instants` is each session's signal instant. `quotes` is per session per
-    security; `benchmark_returns` is per benchmark name per session; `industries` is per signal
-    day per security and is read only when the spec caps industries.
+    day. `signal_instants` is each session's signal instant -- the lookback's too, when there is
+    one. `quotes` is per session per security; `benchmark_returns` is per benchmark name per
+    session; `industries` is per signal day per security and is read only when the spec caps
+    industries.
+
+    The two dynamic kinds (`V2-P6-014`) read three more. `lookback_sessions` are the open
+    sessions before `sessions[0]` a trailing or training window may reach, ascending.
+    `ic_observations` are a trailing-IC source's daily ICs. `model_fits` is every refit of a
+    walk-forward source and `fit_for_day` the one each signal day's model rows were scored by.
     """
 
     source: ScoreSource
@@ -541,17 +988,26 @@ class StrategyInputs:
     quotes: Mapping[date, Mapping[str, SessionQuote]]
     benchmark_returns: Mapping[str, Mapping[date, Decimal]]
     industries: Mapping[date, Mapping[str, str]] = field(default_factory=dict)
+    lookback_sessions: tuple[date, ...] = ()
+    ic_observations: tuple[ICObservation, ...] = ()
+    model_fits: tuple[WalkForwardFit, ...] = ()
+    fit_for_day: Mapping[date, WalkForwardFit] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if len(self.sessions) < 2:
             raise StrategyBacktestError(
                 "a backtest needs at least two sessions: a signal and the session it trades on"
             )
-        if any(
-            later <= earlier
-            for earlier, later in zip(self.sessions, self.sessions[1:], strict=False)
-        ):
-            raise StrategyBacktestError("sessions must be strictly ascending")
+        calendar = self.calendar
+        if any(later <= earlier for earlier, later in pairwise(calendar)):
+            raise StrategyBacktestError(
+                "sessions must be strictly ascending, and every lookback session before them"
+            )
+
+    @property
+    def calendar(self) -> tuple[date, ...]:
+        """The lookback sessions and the range's sessions, one ascending calendar."""
+        return self.lookback_sessions + self.sessions
 
 
 def run_strategy_backtest(inputs: StrategyInputs, spec: StrategySpec) -> StrategyBacktest:
@@ -561,8 +1017,10 @@ def run_strategy_backtest(inputs: StrategyInputs, spec: StrategySpec) -> Strateg
     follows to trade on, where `R = spec.rebalance_every_sessions`. Refuses, with
     `StrategyBacktestError`: a signal day with no signal instant, a score row that was not
     visible at its signal day's instant, a row naming a component the source does not declare,
-    a signal day on which some component has no cross section or a degenerate one, and a
-    benchmark with no return for some session a period spans.
+    a signal day on which some weighted component has no cross section or a degenerate one, and
+    a benchmark with no return for some session a period spans. For the two dynamic kinds it
+    also refuses a walk-forward fit not closed by its signal's embargo deadline, model rows on a
+    day no fit is named for, and a run on which every signal day is held.
     """
     missing = [name for name in spec.benchmarks if name not in inputs.benchmark_returns]
     if missing:
@@ -570,7 +1028,7 @@ def run_strategy_backtest(inputs: StrategyInputs, spec: StrategySpec) -> Strateg
     sessions = inputs.sessions
     signal_indices = tuple(range(0, len(sessions) - 1, spec.rebalance_every_sessions))
     signal_days = frozenset(sessions[index] for index in signal_indices)
-    scores = _combined_scores(inputs, signal_days)
+    signals = _signals(inputs, signal_days)
     book = _Book(spec=spec, cash=spec.initial_capital)
     periods: list[PeriodResult] = []
     for index in signal_indices:
@@ -582,38 +1040,145 @@ def run_strategy_backtest(inputs: StrategyInputs, spec: StrategySpec) -> Strateg
                 book,
                 signal_index=index,
                 end_index=end_index,
-                ranked=scores[sessions[index]],
+                signal=signals[sessions[index]],
             )
         )
     return StrategyBacktest(
         spec=spec,
         source=inputs.source,
         periods=tuple(periods),
-        limitations=tuple(item.code for item in KNOWN_STRATEGY_BACKTEST_LIMITATIONS),
+        limitations=limitation_codes_for(inputs.source.kind),
+        model_fits=tuple(fit.record for fit in inputs.model_fits),
     )
 
 
 # --- scores -------------------------------------------------------------------------------------
 
 
-def _combined_scores(
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Signal:
+    """One signal day's decision input: the ranking, or `None` for a day the book holds."""
+
+    ranked: tuple[str, ...] | None
+    ic_weights: tuple[TrailingICWeight, ...] = ()
+    model_fit: ModelFit | None = None
+
+
+def _signals(inputs: StrategyInputs, signal_days: frozenset[date]) -> dict[date, _Signal]:
+    """Each signal day's ranking under the source's kind, after every point-in-time guard."""
+    source = inputs.source
+    by_day = _cross_sections(inputs, signal_days)
+    ordered = sorted(signal_days)
+    if source.trailing_ic is not None:
+        index = _ICIndex(source.trailing_ic, inputs.ic_observations, calendar=inputs.calendar)
+        signals: dict[date, _Signal] = {}
+        for day in ordered:
+            weights = index.weights(day, instant=_instant(inputs, day))
+            active = {item.component: item.weight for item in weights if item.weight != 0.0}
+            ranked = _rank(day, by_day[day], active, source.combine) if active else None
+            signals[day] = _Signal(ranked=ranked, ic_weights=weights)
+    elif source.walk_forward is not None:
+        signals = {
+            day: _model_signal(inputs, source.walk_forward, day, by_day[day]) for day in ordered
+        }
+    else:
+        fixed = {key: float(weight) for key, weight in source.weights.items()}
+        return {
+            day: _Signal(ranked=_rank(day, by_day[day], fixed, source.combine)) for day in ordered
+        }
+    if all(signal.ranked is None for signal in signals.values()):
+        raise StrategyBacktestError(
+            f"the {source.kind} source has no scores on any of the {len(signals)} signal days, "
+            "so there is no signal day it ranked; a backtest that held cash throughout answers "
+            "nothing about the source -- lengthen the lookback, lower the floors or move the "
+            "range later"
+        )
+    return signals
+
+
+def _instant(inputs: StrategyInputs, day: date) -> datetime:
+    instant = inputs.signal_instants.get(day)
+    if instant is None:
+        raise StrategyBacktestError(f"session {day.isoformat()} has no signal instant")
+    return instant
+
+
+def _model_signal(
+    inputs: StrategyInputs,
+    spec: WalkForwardModel,
+    day: date,
+    components: Mapping[str, Mapping[str, float]],
+) -> _Signal:
+    fit = inputs.fit_for_day.get(day)
+    rows = components.get(MODEL_COMPONENT)
+    if fit is not None:
+        _refuse_a_fit_not_closed_by_the_embargo(inputs, spec, fit, day)
+    if rows and fit is None:
+        raise StrategyBacktestError(
+            f"model scores are supplied for {day.isoformat()} and no fit is named for that "
+            "day, so nothing says which training labels produced them"
+        )
+    ranked = _rank(day, components, {MODEL_COMPONENT: 1.0}, "zscore_sum") if rows else None
+    return _Signal(ranked=ranked, model_fit=None if fit is None else fit.record)
+
+
+def _embargo_deadline(inputs: StrategyInputs, day: date, embargo_sessions: int) -> datetime:
+    """The signal instant of the session `embargo_sessions` before `day` on the calendar."""
+    calendar = inputs.calendar
+    position = calendar.index(day) - embargo_sessions
+    if position < 0:
+        raise StrategyBacktestError(
+            f"the calendar supplied does not reach {embargo_sessions} session(s) before "
+            f"{day.isoformat()}, so no fit can be shown to be embargoed from it"
+        )
+    return _instant(inputs, calendar[position])
+
+
+def _refuse_a_fit_not_closed_by_the_embargo(
+    inputs: StrategyInputs, spec: WalkForwardModel, fit: WalkForwardFit, day: date
+) -> None:
+    """The walk-forward rule at the point of use: every training label closed strictly before
+    the signal instant of the session `embargo_sessions` before `day`.
+
+    Read off the artifact's own `training_cutoff` -- the newest exit session any training
+    example's window closed on, computed by the model's `TrainingSet` -- rather than off
+    `WalkForwardFit.labels_known_at`, which the producer of the fit wrote.
+    """
+    if fit.artifact is None:
+        raise StrategyBacktestError(
+            f"the fit named for {day.isoformat()} was refused ({fit.refusal}); a refused refit "
+            "scores nothing"
+        )
+    deadline = _embargo_deadline(inputs, day, spec.embargo_sessions)
+    exit_day = fit.artifact.training_cutoff.astimezone(deadline.tzinfo).date()
+    known = _instant(inputs, exit_day)
+    if not known < deadline:
+        raise StrategyBacktestError(
+            f"the fit refitted on {fit.refit_day.isoformat()} trained on a label that closed on "
+            f"{exit_day.isoformat()} (knowable {known.isoformat()}), and on "
+            f"{day.isoformat()} every training label must have closed strictly before "
+            f"{deadline.isoformat()}, the signal instant {spec.embargo_sessions} session(s) "
+            "earlier (the embargo). Scoring with it would be look-ahead"
+        )
+
+
+def _cross_sections(
     inputs: StrategyInputs, signal_days: frozenset[date]
-) -> dict[date, tuple[str, ...]]:
-    """Each signal day's securities, best first, after the look-ahead guard and the combiner.
+) -> dict[date, dict[str, dict[str, float]]]:
+    """Each signal day's cross section per component, after the look-ahead guard.
 
     Rows dated on a session that is not a signal day are never read: no rebalance happens there,
-    so nothing could trade on them. Ties in the combined score are broken by security code,
-    ascending, so one input has one answer.
+    so nothing could trade on them.
     """
-    weights = inputs.source.weights
+    keys = inputs.source.component_keys
     by_day: dict[date, dict[str, dict[str, float]]] = {day: {} for day in signal_days}
     for row in inputs.scores:
         if row.signal_day not in signal_days:
             continue
-        if row.component not in weights:
+        if row.component not in keys:
             raise StrategyBacktestError(
                 f"a score row names component {row.component!r} and the source declares no "
-                f"component by that key; it declares {sorted(weights)}"
+                f"component by that key; it declares {sorted(keys)}"
             )
         instant = inputs.signal_instants.get(row.signal_day)
         if instant is None:
@@ -634,17 +1199,16 @@ def _combined_scores(
                 f"{row.subject} has two {row.component} scores on {row.signal_day.isoformat()}"
             )
         cross_section[row.subject] = row.value
-    return {
-        day: _rank(day, by_day[day], weights, inputs.source.combine) for day in sorted(signal_days)
-    }
+    return by_day
 
 
 def _rank(
     day: date,
     components: Mapping[str, Mapping[str, float]],
-    weights: Mapping[str, Decimal],
+    weights: Mapping[str, float],
     combine: Literal["zscore_sum", "rank_sum"],
 ) -> tuple[str, ...]:
+    """The securities carrying every weighted component, best first; ties by code, ascending."""
     absent = sorted(key for key in weights if not components.get(key))
     if absent:
         raise StrategyBacktestError(
@@ -666,7 +1230,7 @@ def _rank(
             )
         standardized = _zscores(values) if combine == "zscore_sum" else _rank_fractions(values)
         for subject, value in zip(subjects, standardized, strict=True):
-            total[subject] += float(weight) * value
+            total[subject] += weight * value
     return tuple(sorted(subjects, key=lambda subject: (-total[subject], subject)))
 
 
@@ -681,6 +1245,211 @@ def _zscores(values: Sequence[float]) -> tuple[float, ...]:
 def _rank_fractions(values: Sequence[float]) -> tuple[float, ...]:
     size = len(values)
     return tuple(rank / size for rank in average_ranks(values))
+
+
+# --- trailing-IC weights (V2-P6-014) ------------------------------------------------------------
+
+
+class _ICIndex:
+    """One trailing-IC source's observations, indexed by component and calendar position.
+
+    Built once per backtest so each signal day reads only its own window; the rule itself is
+    `weights`, and `trailing_ic_weights` is the same rule for one day.
+    """
+
+    def __init__(
+        self,
+        spec: TrailingICWeights,
+        observations: Sequence[ICObservation],
+        *,
+        calendar: Sequence[date],
+    ) -> None:
+        self._spec = spec
+        self._position = {day: index for index, day in enumerate(calendar)}
+        entries: dict[str, list[tuple[int, datetime, float | None]]] = {
+            key: [] for key in spec.component_keys
+        }
+        seen: set[tuple[str, date]] = set()
+        for item in observations:
+            if item.component not in entries:
+                raise StrategyBacktestError(
+                    f"an IC observation names component {item.component!r} and the source "
+                    f"declares no component by that key; it declares {sorted(entries)}"
+                )
+            position = self._position.get(item.prediction_day)
+            if position is None:
+                raise StrategyBacktestError(
+                    f"{item.component}'s IC is dated {item.prediction_day.isoformat()}, which is "
+                    "not a session of the calendar the trailing window is counted on"
+                )
+            if (item.component, item.prediction_day) in seen:
+                raise StrategyBacktestError(
+                    f"{item.component} carries two ICs on {item.prediction_day.isoformat()}"
+                )
+            seen.add((item.component, item.prediction_day))
+            entries[item.component].append((position, item.known_at, item.ic))
+        self._entries = {key: sorted(rows, key=lambda row: row[0]) for key, rows in entries.items()}
+        self._positions = {
+            key: [position for position, _known, _ic in rows] for key, rows in self._entries.items()
+        }
+
+    def weights(self, day: date, *, instant: datetime) -> tuple[TrailingICWeight, ...]:
+        """Each component's weight on `day`: the mean of the ICs in its window known by `instant`.
+
+        The window is the `ic_window_sessions` calendar sessions ending at `day`; an IC counts
+        only when its `known_at` is AT OR BEFORE the signal instant -- the look-ahead rule, and
+        the one line below that enforces it.
+        """
+        position = self._position.get(day)
+        if position is None:
+            raise StrategyBacktestError(f"{day.isoformat()} is not a session of the calendar")
+        spec = self._spec
+        first = position - spec.ic_window_sessions + 1
+        answer: list[TrailingICWeight] = []
+        for key, rows in self._entries.items():
+            positions = self._positions[key]
+            window = rows[bisect_left(positions, first) : bisect_right(positions, position)]
+            known = [
+                ic for _position, known_at, ic in window if ic is not None and known_at <= instant
+            ]
+            mean = statistics.fmean(known) if known else None
+            if mean is None or len(known) < spec.min_ic_observations:
+                weight = 0.0
+            elif spec.negative_ic == "clip_to_zero":
+                weight = max(mean, 0.0)
+            else:
+                weight = mean
+            answer.append(
+                TrailingICWeight(
+                    component=key, observations=len(known), mean_ic=mean, weight=weight
+                )
+            )
+        return tuple(answer)
+
+
+def trailing_ic_weights(
+    spec: TrailingICWeights,
+    observations: Sequence[ICObservation],
+    *,
+    calendar: Sequence[date],
+    signal_day: date,
+    instant: datetime,
+) -> tuple[TrailingICWeight, ...]:
+    """Each declared component's trailing-IC weight on one signal day, in declared order."""
+    return _ICIndex(spec, observations, calendar=calendar).weights(signal_day, instant=instant)
+
+
+# --- walk-forward fits (V2-P6-014) --------------------------------------------------------------
+
+
+def walk_forward_fits(
+    model: AlphaModel,
+    examples: Sequence[TrainingExample],
+    *,
+    feature_ids: tuple[str, ...],
+    spec: WalkForwardModel,
+    calendar: Sequence[date],
+    instants: Mapping[date, datetime],
+    refit_days: Sequence[date],
+) -> tuple[WalkForwardFit, ...]:
+    """Fit `model` once per refit session, each on labels known before its embargo deadline.
+
+    A refit on `r` takes the examples whose prediction day is among the `train_sessions`
+    calendar sessions ending at `r` and whose label is known -- the signal instant of the session
+    its window exits on -- STRICTLY BEFORE the signal instant of the session `embargo_sessions`
+    before `r`. A refit with no such example, or one the model refuses, is a `WalkForwardFit`
+    carrying the refusal rather than an exception: it is a fact about that point in history.
+    """
+    position = {day: index for index, day in enumerate(calendar)}
+    by_position: dict[int, list[TrainingExample]] = {}
+    for example in examples:
+        day = example.label.window.prediction_day
+        if day not in position:
+            raise StrategyBacktestError(
+                f"a training example is dated {day.isoformat()}, which is not a session of the "
+                "calendar the training window is counted on"
+            )
+        by_position.setdefault(position[day], []).append(example)
+    fits: list[WalkForwardFit] = []
+    for refit_day in refit_days:
+        if refit_day not in position:
+            raise StrategyBacktestError(f"refit day {refit_day.isoformat()} is not a session")
+        at = position[refit_day]
+        if at - spec.embargo_sessions < 0:
+            fits.append(_refused(refit_day, "the calendar does not reach the embargo deadline"))
+            continue
+        deadline = instants[calendar[at - spec.embargo_sessions]]
+        chosen: list[tuple[TrainingExample, datetime]] = []
+        for index in range(max(0, at - spec.train_sessions + 1), at + 1):
+            for example in by_position.get(index, ()):
+                known = _label_known_at(example, calendar=calendar, instants=instants)
+                if known is not None and known < deadline:
+                    chosen.append((example, known))
+        if not chosen:
+            fits.append(
+                _refused(
+                    refit_day,
+                    f"no training example in the {spec.train_sessions} sessions ending "
+                    f"{refit_day.isoformat()} had a label known before {deadline.isoformat()}",
+                )
+            )
+            continue
+        try:
+            fitted = model.fit(
+                TrainingSet(
+                    feature_ids=feature_ids, examples=tuple(example for example, _ in chosen)
+                )
+            )
+        except AlphaModelError as error:
+            fits.append(_refused(refit_day, f"the model refused the fit: {error}"))
+            continue
+        fits.append(
+            WalkForwardFit(
+                refit_day=refit_day,
+                fitted=fitted,
+                artifact=fitted.artifact,
+                refusal=None,
+                labels_known_at=max(known for _, known in chosen),
+                example_count=len(chosen),
+                prediction_day_count=len(
+                    {example.label.window.prediction_day for example, _ in chosen}
+                ),
+            )
+        )
+    return tuple(fits)
+
+
+def _refused(refit_day: date, reason: str) -> WalkForwardFit:
+    return WalkForwardFit(
+        refit_day=refit_day,
+        fitted=None,
+        artifact=None,
+        refusal=reason,
+        labels_known_at=None,
+        example_count=0,
+        prediction_day_count=0,
+    )
+
+
+def _label_known_at(
+    example: TrainingExample, *, calendar: Sequence[date], instants: Mapping[date, datetime]
+) -> datetime | None:
+    """The signal instant of the session `example`'s window exits on; `None` past the calendar."""
+    exit_day = example.label.window.exit_day
+    known = instants.get(exit_day)
+    if known is None:
+        if exit_day > calendar[-1]:
+            return None
+        raise StrategyBacktestError(
+            f"{exit_day.isoformat()}, the exit of a training label, has no signal instant"
+        )
+    return known
+
+
+def usable_fit(fits: Sequence[WalkForwardFit], *, signal_day: date) -> WalkForwardFit | None:
+    """The newest successful fit refitted on or before `signal_day`, or `None` (no fit yet)."""
+    candidates = [fit for fit in fits if fit.fitted is not None and fit.refit_day <= signal_day]
+    return max(candidates, key=lambda fit: fit.refit_day, default=None)
 
 
 # --- the book -----------------------------------------------------------------------------------
@@ -736,7 +1505,7 @@ def _run_period(
     *,
     signal_index: int,
     end_index: int,
-    ranked: tuple[str, ...],
+    signal: _Signal,
 ) -> PeriodResult:
     sessions = inputs.sessions
     signal_day = sessions[signal_index]
@@ -745,15 +1514,16 @@ def _run_period(
     start_value = book.value()
     if start_value <= 0:
         raise StrategyBacktestError(f"the book is worth {start_value} on {signal_day.isoformat()}")
-    keep, buy = _decide(inputs, spec, book, signal_day=signal_day, ranked=ranked)
     ledger = _Ledger()
-    policy = AShareExecutionPolicy(spec.costs)
-    signal_quotes = inputs.quotes.get(signal_day, {})
-    trade_quotes = inputs.quotes.get(trade_day, {})
-    for subject in sorted(set(book.holdings) - keep):
-        _sell(book, ledger, policy, spec, subject, trade_day, signal_quotes, trade_quotes)
-    for subject in buy[: max(spec.holding_count - len(book.holdings), 0)]:
-        _buy(book, ledger, policy, spec, subject, trade_day, signal_quotes, trade_quotes)
+    if signal.ranked is not None:
+        keep, buy = _decide(inputs, spec, book, signal_day=signal_day, ranked=signal.ranked)
+        policy = AShareExecutionPolicy(spec.costs)
+        signal_quotes = inputs.quotes.get(signal_day, {})
+        trade_quotes = inputs.quotes.get(trade_day, {})
+        for subject in sorted(set(book.holdings) - keep):
+            _sell(book, ledger, policy, spec, subject, trade_day, signal_quotes, trade_quotes)
+        for subject in buy[: max(spec.holding_count - len(book.holdings), 0)]:
+            _buy(book, ledger, policy, spec, subject, trade_day, signal_quotes, trade_quotes)
     for index in range(signal_index + 1, end_index + 1):
         book.mark(inputs.quotes.get(sessions[index], {}))
     end_value = book.value()
@@ -779,6 +1549,9 @@ def _run_period(
         holdings=tuple(sorted(book.holdings)),
         fills=tuple(ledger.fills),
         rejections=tuple(ledger.rejections),
+        held=signal.ranked is None,
+        ic_weights=signal.ic_weights,
+        model_fit=signal.model_fit,
     )
 
 

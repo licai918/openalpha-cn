@@ -52,7 +52,11 @@ from openalpha_cn.backtest.segmented_reporting import (
     report_segmented_outcomes,
     segmented_report_view,
 )
-from openalpha_cn.backtest.strategy_backtest import StrategyBacktest
+from openalpha_cn.backtest.strategy_backtest import (
+    StrategyBacktest,
+    TrailingICWeights,
+    WalkForwardModel,
+)
 from openalpha_cn.backtest.turnover_variants import (
     TurnoverCostModel,
     TurnoverVariantReport,
@@ -1261,6 +1265,8 @@ class OpenAlphaSDK:
         costs: CostSchedule = PROTOCOL_COSTS,
         slippage_rate: Decimal = PROTOCOL_SLIPPAGE_RATE,
         benchmarks: Sequence[str] = PROTOCOL_BENCHMARKS,
+        trailing_ic: TrailingICWeights | Mapping[str, object] | None = None,
+        walk_forward: WalkForwardModel | Mapping[str, object] | None = None,
     ) -> StrategyBacktest:
         """Backtest a composite score as a rolling, net-of-cost portfolio (`V2-P6-007`).
 
@@ -1274,6 +1280,11 @@ class OpenAlphaSDK:
         `Decimal` exactly; `strategy_view.backtest_view(result)` is the CLI's `--json` body.
         Raises a `strategy_view.StrategyViewError` subclass for a request that cannot be put,
         a panel that cannot be read, or a backtest the book refuses (look-ahead included).
+
+        `trailing_ic` and `walk_forward` (`V2-P6-014`) are the two dynamic score sources --
+        trailing-IC weights and a walk-forward model -- as a model or as a plain mapping, in
+        place of `components` or `prediction_ids`. The command line does not offer them; a
+        research grid passes them here as data.
         """
         request = strategy_request(
             components=components,
@@ -1294,6 +1305,8 @@ class OpenAlphaSDK:
             costs=costs,
             slippage_rate=slippage_rate,
             benchmarks=benchmarks,
+            trailing_ic=trailing_ic,
+            walk_forward=walk_forward,
         )
         return backtest_strategy(
             panel_store(self.runtime_dir), request, predictions=self.prediction_store.get

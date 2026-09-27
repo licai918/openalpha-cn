@@ -23,7 +23,7 @@ from typer.testing import CliRunner
 
 from openalpha_cn import strategy_view
 from openalpha_cn.backtest.execution import CostSchedule
-from openalpha_cn.backtest.strategy_backtest import STRATEGY_BACKTEST_LIMITATION_CODES
+from openalpha_cn.backtest.strategy_backtest import limitation_codes_for
 from openalpha_cn.cli import STRATEGY_EXIT, PanelExit, app
 from openalpha_cn.panel_ingest import session_publication_instant
 from openalpha_cn.sdk import OpenAlphaSDK
@@ -104,7 +104,7 @@ def test_the_command_line_and_the_sdk_answer_one_request_with_the_same_bytes(
     )
     body = json.loads(outcome.stdout)
     assert len(body["periods"]) == 3
-    assert set(body["limitations"]) == STRATEGY_BACKTEST_LIMITATION_CODES
+    assert set(body["limitations"]) == set(limitation_codes_for("static"))
     assert body["spec"]["costs"]["commission_rate"] == "0.00025"
 
 
@@ -197,7 +197,11 @@ def test_a_refusal_raised_while_the_inputs_are_assembled_is_blocked_not_internal
 
     def not_a_number(*_: object) -> list[strategy_view._Observed]:
         instant = session_publication_instant(panel.sessions[1])
-        return [strategy_view._Observed(subject=panel.securities[0], as_of=instant, value=nan)]
+        return [
+            strategy_view._Observed(
+                subject=panel.securities[0], as_of=instant, value=nan, coverage="computed"
+            )
+        ]
 
     monkeypatch.setattr(strategy_view, "_tier_rows", not_a_number)
     outcome = runner.invoke(app, [*_arguments(root, panel), "--json"])
@@ -243,6 +247,75 @@ def test_an_empty_runtime_directory_is_panel_unreadable(tmp_path: Path) -> None:
 
     assert outcome.exit_code == int(PanelExit.unhealthy), outcome.output
     assert json.loads(outcome.stdout)["exit_code"] == int(PanelExit.unhealthy)
+
+
+TRAILING_IC: Final[dict[str, Any]] = {
+    "components": [[REVERSAL.qualified_key, "raw"]],
+    "ic_window_sessions": 5,
+    "min_ic_observations": 1,
+    "ic_method": "spearman",
+    "horizon_sessions": 1,
+    "negative_ic": "keep_sign",
+    "min_ic_securities": 3,
+}
+WALK_FORWARD: Final[dict[str, Any]] = {
+    "family": "cross_sectional_rank",
+    "features": [f"{REVERSAL.qualified_key}@raw"],
+    "seed": 0,
+    "code_commit": "abcdef1234567",
+    "train_sessions": 5,
+    "refit_every_sessions": 2,
+    "embargo_sessions": 1,
+    "horizon_sessions": 1,
+}
+
+
+@pytest.mark.parametrize(
+    ("source", "kind", "held"),
+    [
+        ({"trailing_ic": TRAILING_IC}, "trailing_ic", [True, False, False, False]),
+        ({"walk_forward": WALK_FORWARD}, "walk_forward", [True, True, False, False]),
+    ],
+)
+def test_the_sdk_takes_a_dynamic_source_as_plain_configuration(
+    runtime: tuple[Path, GeneratedPanel], source: dict[str, Any], kind: str, held: list[bool]
+) -> None:
+    """`V2-P6-014`: the research grid passes a source as JSON-shaped data, lists and all."""
+    root, panel = runtime
+    arguments = {**_sdk_arguments(panel), "components": (), "rebalance_every_sessions": 2}
+    result = OpenAlphaSDK(runtime_dir=root).run_strategy_backtest(**arguments, **source)
+
+    assert result.source.kind == kind
+    assert [period.held for period in result.periods] == held
+    assert set(result.limitations) == set(limitation_codes_for(kind))
+    echoed = json.loads(json.dumps(backtest_view(result), sort_keys=True))["source"][kind]
+    assert echoed["horizon_sessions"] == 1
+
+
+@pytest.mark.parametrize(
+    ("source", "message"),
+    [
+        ({"trailing_ic": {**TRAILING_IC, "ic_method": "kendall"}}, "ic_method"),
+        (
+            {
+                "walk_forward": {
+                    **WALK_FORWARD,
+                    "features": [f"{REVERSAL.qualified_key}@neutralized"],
+                }
+            },
+            "neutralized",
+        ),
+        ({"walk_forward": {**WALK_FORWARD, "embargo_sessions": 0}}, "embargo"),
+        ({"trailing_ic": TRAILING_IC, "walk_forward": WALK_FORWARD}, "exactly one"),
+    ],
+)
+def test_the_sdk_refuses_a_dynamic_source_that_cannot_be_put_as_a_request_error(
+    runtime: tuple[Path, GeneratedPanel], source: dict[str, Any], message: str
+) -> None:
+    root, panel = runtime
+    arguments = {**_sdk_arguments(panel), "components": ()}
+    with pytest.raises(StrategyRequestError, match=message):
+        OpenAlphaSDK(runtime_dir=root).run_strategy_backtest(**arguments, **source)
 
 
 def test_every_strategy_view_fault_has_a_row_in_the_exit_table() -> None:

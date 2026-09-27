@@ -100,6 +100,7 @@ def outcome_label(
     target: float,
     horizon: str = "1d",
     halt_the_exit: bool = False,
+    calendar: TradingCalendar | None = None,
 ) -> OutcomeLabel:
     """One real label whose `realized_return` is `target`, or a refused one.
 
@@ -107,13 +108,14 @@ def outcome_label(
     window's sessions after the entry) and the factor path (`close_exit * f / close_entry * f`)
     come out identical: every session's `pre_close` is the previous session's `close`, and the
     factor never moves. `halt_the_exit` deletes the exit session's bar, which is how the real
-    pipeline produces an unlabelled window.
+    pipeline produces an unlabelled window. `calendar` defaults to June 2026; a test whose
+    prediction days lie elsewhere passes the calendar they lie on.
     """
     window = build_label_window(
         as_of=datetime.combine(prediction_day, time(9, 0), tzinfo=SHANGHAI),
         zone=SHANGHAI,
         horizon=parse_horizon(horizon),
-        calendar=trading_calendar(),
+        calendar=trading_calendar() if calendar is None else calendar,
     )
     sessions = window.sessions
     step = (1.0 + target) ** (1.0 / (len(sessions) - 1))
@@ -160,11 +162,16 @@ def training_example(
     features: Sequence[float | None],
     target: float,
     horizon: str = "1d",
+    calendar: TradingCalendar | None = None,
 ) -> TrainingExample:
     """One labelled row: a real outcome, and the feature values that preceded it."""
     return TrainingExample(
         label=outcome_label(
-            ts_code=ts_code, prediction_day=prediction_day, target=target, horizon=horizon
+            ts_code=ts_code,
+            prediction_day=prediction_day,
+            target=target,
+            horizon=horizon,
+            calendar=calendar,
         ),
         features=tuple(features),
     )

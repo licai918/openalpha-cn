@@ -278,6 +278,7 @@ __all__ = [
     "AlphaModelFactory",
     "DailyRunRequest",
     "DailyRunResult",
+    "LabelReach",
     "ModelEvaluation",
     "ModelNotHeldError",
     "ModelPanelUnreadableError",
@@ -287,6 +288,7 @@ __all__ = [
     "ModelRunRequest",
     "ModelViewError",
     "ModelViewLimitation",
+    "OutcomeLabels",
     "PredictionWriteLike",
     "ResearchRunWriter",
     "daily_request",
@@ -298,6 +300,7 @@ __all__ = [
     "evaluation_rows",
     "evaluation_view",
     "feature_columns",
+    "feature_cross_section",
     "held_prediction",
     "held_prediction_view",
     "held_predictions",
@@ -310,6 +313,7 @@ __all__ = [
     "prediction_view",
     "run_daily",
     "trainable_at",
+    "training_panel",
 ]
 
 MODEL_VIEW_SCHEMA_VERSION: Final[str] = "model-view/v1"
@@ -1618,11 +1622,24 @@ class _LabelInputs:
     the narrowing is the point: nothing here builds a `MarketBar`, so no name history is read and
     `namechange` is not on `MODEL_PANEL_DATASETS`. Every read goes through `_read`, so a partition
     this panel does not hold is `panel_unreadable` with the `panel build` line that repairs it.
+
+    `V2-P6-014` reuses it, as `OutcomeLabels`, for the strategy backtest's trailing IC and
+    walk-forward model, so their forward returns are this plane's and `factor run`'s rather than a
+    third derivation. `request` is anything carrying the reading `as_of`, the years and the
+    exchange (`LabelReach`); `cached_sessions` bounds the per-session caches, oldest session out
+    first, for a caller that walks many years forward and never looks back.
     """
 
-    def __init__(self, store: PanelStore, request: ModelRunRequest) -> None:
+    def __init__(
+        self,
+        store: PanelStore,
+        request: ModelRunRequest | LabelReach,
+        *,
+        cached_sessions: int | None = None,
+    ) -> None:
         self._store = store
         self._as_of = request.as_of
+        self._cached_sessions = cached_sessions
         self._bars: dict[date, Mapping[str, DailyBar]] = {}
         self._limits: dict[date, Mapping[str, PriceLimit]] = {}
         years = request.years
@@ -1672,6 +1689,7 @@ class _LabelInputs:
                 what=f"the price bars for {day.isoformat()}",
                 dataset=DAILY_DATASET,
             )
+            self._bound(self._bars)
         return self._bars[day]
 
     def limits_on(self, day: date) -> Mapping[str, PriceLimit]:
@@ -1688,7 +1706,14 @@ class _LabelInputs:
                 what=f"the published limit bands for {day.isoformat()}",
                 dataset=PRICE_LIMIT_DATASET,
             )
+            self._bound(self._limits)
         return self._limits[day]
+
+    def _bound(self, cache: dict[date, _T]) -> None:
+        """Drop the oldest-read sessions past `cached_sessions`; unbounded when it is `None`."""
+        if self._cached_sessions is not None:
+            while len(cache) > self._cached_sessions:
+                del cache[next(iter(cache))]
 
     def window(self, instant: datetime, *, horizon: ResearchHorizon) -> LabelWindow:
         """The sessions one prediction instant's outcome is measured over.
@@ -1761,6 +1786,57 @@ class _LabelInputs:
                     f"{_without_store_path(str(error), self._store)}"
                 ),
             ) from error
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class LabelReach:
+    """What `OutcomeLabels` needs of a caller that is not a model run: where and when to read.
+
+    `as_of` is the one instant every label read is made at, `years` the partitions the calendar,
+    registry, halts and adjustment factors are read over, and `exchange` the calendar's.
+    """
+
+    as_of: datetime
+    years: tuple[int, ...]
+    exchange: str
+
+
+OutcomeLabels = _LabelInputs
+"""The label reader this plane prices every training outcome with, for a caller outside it.
+
+`V2-P6-014`'s strategy backtest prices its trailing ICs and its walk-forward training labels
+through this rather than restating `label_outcome`'s inputs a third time."""
+
+
+def training_panel(
+    store: PanelStore,
+    run: ModelRunRequest,
+    *,
+    deadline: datetime,
+    cached_sessions: int | None = None,
+) -> LabelledPanel | None:
+    """Every stored cross section in `run`'s range whose outcome had closed by `deadline`,
+    joined to its labels -- `run_daily`'s training assembly, without the fit or the store.
+
+    `V2-P6-014`'s walk-forward model draws each refit's examples from this panel, narrowing it
+    further by its own embargo rule. `None` when no cross section's outcome had closed, which is
+    a statement about history (no fit is possible yet) rather than a refusal.
+    """
+    matrix = _matrix(store, run, as_ofs=_prediction_instants(store, run))
+    inputs = _LabelInputs(store, run, cached_sessions=cached_sessions)
+    closed = _cross_sections_whose_outcome_had_closed(
+        inputs, sections=matrix.sections, horizon=run.horizon, deadline=deadline
+    )
+    if not closed:
+        return None
+    return _labelled(inputs, sections=closed, horizon=run.horizon)
+
+
+def feature_cross_section(
+    store: PanelStore, run: ModelRunRequest, *, as_of: datetime
+) -> FeatureMatrixSection:
+    """The declared columns' cross section visible at `as_of`: the one a fit scores then."""
+    return _section(store, run, as_of=as_of)
 
 
 def _prediction_instants(store: PanelStore, request: ModelRunRequest) -> tuple[datetime, ...]:

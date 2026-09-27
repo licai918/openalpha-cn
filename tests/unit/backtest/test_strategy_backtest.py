@@ -22,12 +22,16 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Final
 
 import pytest
+from alpha_model_fixtures import training_example
 
+from openalpha_cn.backtest.alpha_baseline import BASELINE_FAMILY, CrossSectionalRankModel
 from openalpha_cn.backtest.execution import CostSchedule, MarketBar
 from openalpha_cn.backtest.strategy_backtest import (
     EQUAL_WEIGHT_ALL_A,
     KNOWN_STRATEGY_BACKTEST_LIMITATIONS,
+    MODEL_COMPONENT,
     STRATEGY_BACKTEST_LIMITATION_CODES,
+    ICObservation,
     PeriodResult,
     ScoreRow,
     ScoreSource,
@@ -35,7 +39,20 @@ from openalpha_cn.backtest.strategy_backtest import (
     StrategyBacktestError,
     StrategyInputs,
     StrategySpec,
+    TrailingICWeights,
+    WalkForwardFit,
+    WalkForwardModel,
+    limitation_codes_for,
     run_strategy_backtest,
+    trailing_ic_weights,
+    usable_fit,
+    walk_forward_fits,
+)
+from openalpha_cn.domain.alpha_model import AlphaModelDeclaration, TrainingExample
+from openalpha_cn.domain.trading_calendar import (
+    CalendarDay,
+    TradingCalendar,
+    build_trading_calendar,
 )
 
 SHANGHAI: Final[timezone] = timezone(timedelta(hours=8))
@@ -705,12 +722,43 @@ def test_a_score_source_that_names_no_single_series_is_refused(
 
 
 def test_the_answer_carries_every_known_limitation_by_code() -> None:
+    """A static source's answer carries every entry that is not about a dynamic source.
+
+    `V2-P6-014` added eight entries that speak only for the trailing-IC and walk-forward
+    kinds; `test_a_dynamic_answer_names_the_reconstruction_and_a_static_one_does_not` holds
+    those. The whole registry is the first set literal below, the static answer the second.
+    """
     result = run_strategy_backtest(HAND_FIXTURE_INPUTS, HAND_FIXTURE_SPEC)
 
-    assert result.limitations == tuple(item.code for item in KNOWN_STRATEGY_BACKTEST_LIMITATIONS)
+    assert result.limitations == tuple(
+        item.code for item in KNOWN_STRATEGY_BACKTEST_LIMITATIONS if "static" in item.applies_to
+    )
+    assert {
+        "fills_are_at_the_open_print_judged_as_a_one_price_bar",
+        "slippage_is_a_flat_rate_and_not_a_market_impact_model",
+        "the_participation_cap_reads_the_signal_sessions_turnover",
+        "a_rejected_buy_leaves_its_slot_in_cash_until_the_next_rebalance",
+        "a_retained_position_is_not_resized_to_equal_weight",
+        "the_exit_leg_is_priced_on_the_entry_share_count",
+        "dividends_are_reinvested_through_the_adjustment_factor",
+        "the_industry_cap_counts_names_and_is_applied_at_the_signal",
+        "a_holding_that_cannot_trade_is_marked_at_its_last_close",
+        "the_last_period_may_be_shorter_than_the_rebalance_interval",
+        "an_intraday_halt_makes_the_whole_session_untradeable_at_the_open",
+        "the_equal_weight_benchmark_is_every_priced_name_and_is_not_investable",
+        "a_passing_backtest_is_not_evidence_that_a_signal_is_real",
+        "a_dynamic_score_is_a_walk_forward_reconstruction_made_now",
+        "the_labels_behind_a_dynamic_score_are_read_at_the_backtests_as_of",
+        "a_lookback_reaching_before_the_stored_calendar_is_shorter_rather_than_refused",
+        "a_signal_day_whose_source_answers_nothing_is_held_rather_than_traded",
+        "a_trailing_ic_weight_is_the_mean_of_the_ics_known_at_the_signal",
+        "a_walk_forward_fit_trains_on_labels_closed_before_the_embargo_deadline",
+        "a_refit_the_model_refuses_leaves_the_previous_fit_in_use",
+        "a_walk_forward_model_reads_no_neutralized_feature",
+    } == STRATEGY_BACKTEST_LIMITATION_CODES
     assert (
         set(result.limitations)
-        == STRATEGY_BACKTEST_LIMITATION_CODES
+        == set(limitation_codes_for("static"))
         == {
             "fills_are_at_the_open_print_judged_as_a_one_price_bar",
             "slippage_is_a_flat_rate_and_not_a_market_impact_model",
@@ -868,3 +916,521 @@ def test_a_star_remainder_under_200_shares_is_never_sold_in_part() -> None:
     assert last.fills == ()
     assert [(r.subject, r.side) for r in last.rejections] == [(STAR, "sell")]
     assert last.holdings == (STAR,)
+
+
+# --- V2-P6-014: the two dynamic score sources ---------------------------------------------------
+#
+# Both are held on the hand fixture above with a February lookback in front of it: twenty
+# weekday sessions (2026-02-02 .. 2026-02-27) before D1, on one synthetic weekday calendar that
+# runs to the end of March so every label window the tests build closes inside it.
+
+FEB_MAR_CALENDAR: Final[TradingCalendar] = build_trading_calendar(
+    "SZSE",
+    [
+        CalendarDay(calendar_date=day, is_trading=day.weekday() < 5)
+        for day in (date(2026, 2, 1) + timedelta(days=offset) for offset in range(59))
+    ],
+)
+LOOKBACK: Final[tuple[date, ...]] = tuple(day for day in FEB_MAR_CALENDAR.trading_days if day < D1)
+CALENDAR: Final[tuple[date, ...]] = LOOKBACK + SESSIONS
+SECOND: Final[str] = "second/v1"
+F1: Final[str] = f"{FACTOR}@raw"
+F2: Final[str] = f"{SECOND}@raw"
+SECOND_SCORES: Final[dict[date, dict[str, float]]] = {
+    D1: {A: 1.0, B: 2.0, C: 4.0, D: 3.0},
+    D4: {A: 5.0, B: 1.0, C: 2.0, D: 3.0},
+}
+COMMIT: Final[str] = "0123456789abcdef"
+
+
+def trailing(
+    components: tuple[tuple[str, str], ...] = ((FACTOR, "raw"),),
+    *,
+    window: int = 10,
+    min_obs: int = 1,
+    negative: str = "keep_sign",
+) -> ScoreSource:
+    return ScoreSource.model_validate(
+        {
+            "combine": "zscore_sum",
+            "trailing_ic": {
+                "components": components,
+                "ic_window_sessions": window,
+                "min_ic_observations": min_obs,
+                "ic_method": "spearman",
+                "horizon_sessions": 1,
+                "negative_ic": negative,
+                "min_ic_securities": 3,
+            },
+        }
+    )
+
+
+def ic(
+    component: str,
+    day: date,
+    value: float | None,
+    *,
+    known_on: date | None = None,
+    known_at: datetime | None = None,
+) -> ICObservation:
+    if known_at is None:
+        assert known_on is not None
+        known_at = signal_instant(known_on)
+    return ICObservation(component=component, prediction_day=day, known_at=known_at, ic=value)
+
+
+def dynamic_inputs(
+    source: ScoreSource,
+    *,
+    scores: tuple[ScoreRow, ...],
+    ics: Sequence[ICObservation] = (),
+    fits: Sequence[WalkForwardFit] = (),
+    fit_for_day: Mapping[date, WalkForwardFit] | None = None,
+) -> StrategyInputs:
+    return StrategyInputs(
+        source=source,
+        sessions=SESSIONS,
+        signal_instants={day: signal_instant(day) for day in CALENDAR},
+        scores=scores,
+        quotes=build_quotes(),
+        benchmark_returns=BENCHMARK_RETURNS,
+        lookback_sessions=LOOKBACK,
+        ic_observations=tuple(ics),
+        model_fits=tuple(fits),
+        fit_for_day=fit_for_day or {},
+    )
+
+
+def _weights(period: PeriodResult) -> list[tuple[str, int, float | None, float]]:
+    return [(w.component, w.observations, w.mean_ic, w.weight) for w in period.ic_weights]
+
+
+def test_a_factor_whose_ic_is_perfect_only_on_labels_closing_after_the_signal_weighs_zero() -> None:
+    """The brief's look-ahead case, on the ledger the static book was held to by hand.
+
+    F1's two ICs (0.3) had closed by D1. F2's IC is 1.0 on every prediction day, and every one
+    of those labels closes AFTER D1's 16:30 (known on D2 and D3). At D1 F2 therefore has no
+    known IC and abstains -- weight 0 -- so the ranking is F1's alone and D1 buys A and B, the
+    static F1 book's first period, to the hand ledger's last digit. At D4 both of F2's labels
+    have closed and it weighs 1.0.
+    """
+    ics = [
+        ic(F1, LOOKBACK[-3], 0.3, known_on=LOOKBACK[-1]),
+        ic(F1, LOOKBACK[-2], 0.3, known_on=D1),
+        ic(F2, LOOKBACK[-1], 1.0, known_on=D2),
+        ic(F2, D1, 1.0, known_on=D3),
+    ]
+    source = trailing(((FACTOR, "raw"), (SECOND, "raw")))
+    rows = score_rows() + score_rows(SECOND_SCORES, component=F2)
+    result = run_strategy_backtest(dynamic_inputs(source, scores=rows, ics=ics), HAND_FIXTURE_SPEC)
+
+    first, second = result.periods
+    assert _weights(first) == [(F1, 2, 0.3, 0.3), (F2, 0, None, 0.0)]
+    assert first.holdings == (A, B)
+    assert first.net_return == Decimal("0.0506187500")
+    assert _weights(second) == [(F1, 2, 0.3, 0.3), (F2, 2, 1.0, 1.0)]
+
+
+def test_an_ic_known_exactly_at_the_signal_instant_counts_and_a_microsecond_later_does_not() -> (
+    None
+):
+    """`known_at <= instant`: at-or-before, the same inequality the row look-ahead guard uses."""
+    source = trailing()
+    at = signal_instant(D1)
+    ics = [
+        ic(F1, LOOKBACK[-2], -0.2, known_at=at),
+        ic(F1, LOOKBACK[-1], 0.9, known_at=at + timedelta(microseconds=1)),
+    ]
+    assert source.trailing_ic is not None
+    weights = trailing_ic_weights(
+        source.trailing_ic, ics, calendar=CALENDAR, signal_day=D1, instant=at
+    )
+
+    assert [(w.component, w.observations, w.mean_ic, w.weight) for w in weights] == [
+        (F1, 1, -0.2, -0.2)
+    ]
+
+
+def test_the_trailing_window_counts_calendar_sessions_ending_at_the_signal_day() -> None:
+    """`ic_window_sessions=2` at D1 is {2026-02-27, D1}: an IC dated 02-25 is outside it."""
+    source = trailing(window=2)
+    ics = [
+        ic(F1, LOOKBACK[-3], 0.8, known_on=LOOKBACK[-2]),
+        ic(F1, LOOKBACK[-1], 0.1, known_on=D1),
+    ]
+    assert source.trailing_ic is not None
+    weights = trailing_ic_weights(
+        source.trailing_ic, ics, calendar=CALENDAR, signal_day=D1, instant=signal_instant(D1)
+    )
+
+    assert [(w.observations, w.mean_ic) for w in weights] == [(1, 0.1)]
+
+
+def test_an_unmeasured_ic_is_not_an_observation() -> None:
+    """A point whose cross section was too thin or degenerate carries `ic=None` and is skipped."""
+    source = trailing()
+    ics = [
+        ic(F1, LOOKBACK[-3], None, known_on=LOOKBACK[-1]),
+        ic(F1, LOOKBACK[-2], 0.4, known_on=D1),
+    ]
+    assert source.trailing_ic is not None
+    weights = trailing_ic_weights(
+        source.trailing_ic, ics, calendar=CALENDAR, signal_day=D1, instant=signal_instant(D1)
+    )
+
+    assert [(w.observations, w.mean_ic, w.weight) for w in weights] == [(1, 0.4, 0.4)]
+
+
+def test_fewer_known_ics_than_the_floor_abstains_and_the_book_holds_that_period() -> None:
+    """`min_ic_observations=2`: one known IC at D1, so F1 abstains and nothing is ranked.
+
+    The book trades nothing on D2 -- no fill, no rejection, cash untouched -- and says so with
+    `held`. The second IC closes before D4, so D4 ranks and buys D and B as the static book does.
+    """
+    ics = [
+        ic(F1, LOOKBACK[-3], 0.5, known_on=LOOKBACK[-1]),
+        ic(F1, LOOKBACK[-1], 0.5, known_on=D3),
+    ]
+    result = run_strategy_backtest(
+        dynamic_inputs(trailing(min_obs=2), scores=score_rows(), ics=ics), HAND_FIXTURE_SPEC
+    )
+
+    first, second = result.periods
+    assert first.held is True
+    assert (first.fills, first.rejections, first.holdings) == ((), (), ())
+    assert first.net_return == Decimal("0")
+    assert first.end_value == first.start_value == HAND_FIXTURE_SPEC.initial_capital
+    assert _weights(first) == [(F1, 1, 0.5, 0.0)]
+    assert second.held is False
+    assert second.holdings == (B, D)
+
+
+def test_a_run_on_which_every_signal_day_abstains_is_refused_rather_than_reported_flat() -> None:
+    with pytest.raises(StrategyBacktestError, match="no signal day"):
+        run_strategy_backtest(
+            dynamic_inputs(trailing(min_obs=3), scores=score_rows(), ics=()), HAND_FIXTURE_SPEC
+        )
+
+
+@pytest.mark.parametrize(
+    ("negative", "first_weight", "first_holdings", "held"),
+    [("clip_to_zero", 0.0, (), True), ("keep_sign", -0.3, (C, D), False)],
+)
+def test_a_negative_trailing_ic_is_clipped_or_kept_as_declared(
+    negative: str, first_weight: float, first_holdings: tuple[str, ...], held: bool
+) -> None:
+    """D1 knows one IC of -0.3. Clipped, F1 weighs nothing and D1 is held; kept, the ranking is
+    reversed and D1 buys the two it ranks lowest, C and D. By D4 a 0.9 has closed: mean 0.3."""
+    ics = [
+        ic(F1, LOOKBACK[-3], -0.3, known_on=LOOKBACK[-1]),
+        ic(F1, D1, 0.9, known_on=D3),
+    ]
+    result = run_strategy_backtest(
+        dynamic_inputs(trailing(negative=negative), scores=score_rows(), ics=ics),
+        HAND_FIXTURE_SPEC,
+    )
+
+    first, second = result.periods
+    assert _weights(first) == [(F1, 1, -0.3, first_weight)]
+    assert (first.held, first.holdings) == (held, first_holdings)
+    assert _weights(second)[0][1:3] == (2, pytest.approx(0.3))
+
+
+def test_a_constant_trailing_ic_is_the_static_source_with_those_weights() -> None:
+    """ICs of exactly 0.5 and 0.25 on every lookback day make the same book, period for period,
+    as a static source weighting the two components 0.5 and 0.25."""
+    ics = [
+        ic(component, day, value, known_on=CALENDAR[CALENDAR.index(day) + 2])
+        for component, value in ((F1, 0.5), (F2, 0.25))
+        for day in LOOKBACK[:-2]
+    ]
+    rows = score_rows() + score_rows(SECOND_SCORES, component=F2)
+    static = ScoreSource(
+        components=((FACTOR, "raw", Decimal("0.5")), (SECOND, "raw", Decimal("0.25"))),
+        combine="zscore_sum",
+    )
+    dynamic = run_strategy_backtest(
+        dynamic_inputs(trailing(((FACTOR, "raw"), (SECOND, "raw"))), scores=rows, ics=ics),
+        HAND_FIXTURE_SPEC,
+    )
+    fixed = run_strategy_backtest(build_inputs(source=static, scores=rows), HAND_FIXTURE_SPEC)
+
+    assert [p.model_dump(exclude={"ic_weights"}) for p in dynamic.periods] == [
+        p.model_dump(exclude={"ic_weights"}) for p in fixed.periods
+    ]
+    assert [w.weight for w in dynamic.periods[0].ic_weights] == [0.5, 0.25]
+
+
+def test_an_ic_for_a_component_the_source_does_not_declare_is_refused() -> None:
+    with pytest.raises(StrategyBacktestError, match="declares no component"):
+        run_strategy_backtest(
+            dynamic_inputs(
+                trailing(), scores=score_rows(), ics=[ic(F2, LOOKBACK[-3], 0.3, known_on=D1)]
+            ),
+            HAND_FIXTURE_SPEC,
+        )
+
+
+def wf_spec(**overrides: object) -> WalkForwardModel:
+    fields: dict[str, object] = {
+        "family": BASELINE_FAMILY,
+        "features": (f"{FACTOR}@raw",),
+        "seed": 0,
+        "code_commit": COMMIT,
+        "train_sessions": 10,
+        "refit_every_sessions": 3,
+        "embargo_sessions": 1,
+        "horizon_sessions": 1,
+    }
+    return WalkForwardModel.model_validate({**fields, **overrides})
+
+
+def wf_source(**overrides: object) -> ScoreSource:
+    return ScoreSource(combine="zscore_sum", walk_forward=wf_spec(**overrides))
+
+
+XS: Final[str] = "x_feature"
+
+
+def wf_examples(days: Sequence[date]) -> list[TrainingExample]:
+    """Four securities a day; the feature and the target both rise with the code."""
+    return [
+        training_example(
+            ts_code=code,
+            prediction_day=day,
+            features=(float(position),),
+            target=0.01 * (position + 1),
+            calendar=FEB_MAR_CALENDAR,
+        )
+        for day in days
+        for position, code in enumerate((A, B, C, D))
+    ]
+
+
+WF_EXAMPLES: Final[list[TrainingExample]] = wf_examples(CALENDAR[:23])
+WF_MODEL: Final[CrossSectionalRankModel] = CrossSectionalRankModel(
+    declaration=AlphaModelDeclaration(
+        name="wf",
+        family=BASELINE_FAMILY,
+        horizon="1d",
+        feature_version="features/v1",
+        seed=0,
+        code_commit=COMMIT,
+    )
+)
+
+
+def fits_at(*refit_days: date, spec: WalkForwardModel | None = None) -> tuple[WalkForwardFit, ...]:
+    return walk_forward_fits(
+        WF_MODEL,
+        WF_EXAMPLES,
+        feature_ids=(XS,),
+        spec=wf_spec() if spec is None else spec,
+        calendar=CALENDAR,
+        instants={day: signal_instant(day) for day in CALENDAR},
+        refit_days=refit_days,
+    )
+
+
+def test_a_walk_forward_fit_trains_only_on_labels_closed_strictly_before_refit_minus_embargo() -> (
+    None
+):
+    """Refit on D1 (calendar index 20), embargo 1, horizon 1: the deadline is 02-27's 16:30.
+
+    A prediction day t's 1d label enters on t+1 and exits on t+2, so it is known strictly
+    before 02-27's 16:30 only when t+2 <= 02-26, i.e. t <= 02-24 (index 16). The 10-session
+    window ending at D1 starts at index 11 (02-17): six prediction days, 02-17 .. 02-24, four
+    names each. The newest label the fit consumed exits on 02-26.
+    """
+    (fit,) = fits_at(D1)
+
+    assert fit.refusal is None
+    assert fit.prediction_day_count == 6
+    assert fit.example_count == 24
+    assert fit.labels_known_at == signal_instant(date(2026, 2, 26))
+    assert fit.artifact is not None
+    assert fit.artifact.training_cutoff.date() == date(2026, 2, 26)
+
+
+def test_the_training_window_is_train_sessions_calendar_sessions_ending_at_the_refit() -> None:
+    """`train_sessions=7` ending at D1 starts at 02-20 (index 14): 02-20, 02-23, 02-24."""
+    (fit,) = fits_at(D1, spec=wf_spec(train_sessions=7))
+
+    assert fit.prediction_day_count == 3
+
+
+def test_a_refit_with_no_closed_label_in_its_window_is_a_stated_refusal_not_a_fit() -> None:
+    (fit,) = fits_at(LOOKBACK[3])
+
+    assert fit.fitted is None
+    assert fit.artifact is None
+    assert fit.refusal is not None
+    assert "no training example" in fit.refusal
+
+
+def test_the_fit_in_use_on_a_signal_day_is_the_latest_one_refitted_on_or_before_it() -> None:
+    early, late = fits_at(D1, D4)
+
+    assert usable_fit((early, late), signal_day=D3) is early
+    assert usable_fit((early, late), signal_day=D4) is late
+    assert usable_fit((early, late), signal_day=LOOKBACK[-1]) is None
+    refused = replace(late, fitted=None, artifact=None, refusal="the fit refused")
+    assert usable_fit((early, refused), signal_day=D6) is early
+
+
+def model_rows(scores: Mapping[date, Mapping[str, float]] = SCORES) -> tuple[ScoreRow, ...]:
+    return score_rows(scores, component=MODEL_COMPONENT)
+
+
+def test_a_walk_forward_source_trades_the_models_scores_under_the_fit_in_use() -> None:
+    early, late = fits_at(D1, D4)
+    result = run_strategy_backtest(
+        dynamic_inputs(
+            wf_source(),
+            scores=model_rows(),
+            fits=(early, late),
+            fit_for_day={D1: early, D4: late},
+        ),
+        HAND_FIXTURE_SPEC,
+    )
+
+    assert [p.holdings for p in result.periods] == [(A, B), (B, D)]
+    assert [p.model_fit.refit_day if p.model_fit else None for p in result.periods] == [D1, D4]
+    assert [fit.refit_day for fit in result.model_fits] == [D1, D4]
+
+
+def test_a_fit_whose_labels_close_after_the_signal_minus_embargo_is_refused() -> None:
+    """D4's fit consumed a label exiting on 03-03; used on D1 it would be look-ahead."""
+    early, late = fits_at(D1, D4)
+
+    with pytest.raises(StrategyBacktestError, match="embargo"):
+        run_strategy_backtest(
+            dynamic_inputs(
+                wf_source(), scores=model_rows(), fits=(early, late), fit_for_day={D1: late}
+            ),
+            HAND_FIXTURE_SPEC,
+        )
+
+
+def test_a_fit_whose_newest_label_closes_exactly_at_the_embargo_deadline_is_refused() -> None:
+    """Built under embargo 1, D1's fit's newest label exits on 02-26. Declared at embargo 2,
+    D1's deadline is 02-26's own 16:30 -- equal, not strictly before -- so it is refused."""
+    (early,) = fits_at(D1)
+
+    with pytest.raises(StrategyBacktestError, match="embargo"):
+        run_strategy_backtest(
+            dynamic_inputs(
+                wf_source(embargo_sessions=2, train_sessions=11),
+                scores=model_rows({D1: SCORES[D1]}),
+                fits=(early,),
+                fit_for_day={D1: early},
+            ),
+            HAND_FIXTURE_SPEC,
+        )
+
+
+def test_no_fit_yet_is_no_scores_and_the_book_holds() -> None:
+    (late,) = fits_at(D4)
+    result = run_strategy_backtest(
+        dynamic_inputs(
+            wf_source(),
+            scores=model_rows({D4: SCORES[D4]}),
+            fits=(late,),
+            fit_for_day={D4: late},
+        ),
+        HAND_FIXTURE_SPEC,
+    )
+
+    first, second = result.periods
+    assert (first.held, first.model_fit, first.fills) == (True, None, ())
+    assert (second.held, second.holdings) == (False, (B, D))
+
+
+def test_model_scores_on_a_day_no_fit_is_named_for_are_refused() -> None:
+    with pytest.raises(StrategyBacktestError, match="no fit"):
+        run_strategy_backtest(
+            dynamic_inputs(wf_source(), scores=model_rows(), fits=(), fit_for_day={}),
+            HAND_FIXTURE_SPEC,
+        )
+
+
+def test_a_dynamic_source_beside_a_static_one_is_refused() -> None:
+    source = trailing()
+    with pytest.raises(ValueError, match="exactly one"):
+        ScoreSource.model_validate(
+            {
+                "combine": "zscore_sum",
+                "components": ((FACTOR, "raw", Decimal("1")),),
+                "trailing_ic": source.trailing_ic,
+            }
+        )
+    with pytest.raises(ValueError, match="exactly one"):
+        ScoreSource(combine="zscore_sum", trailing_ic=source.trailing_ic, walk_forward=wf_spec())
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"embargo_sessions": 0}, "embargo"),
+        ({"train_sessions": 4}, "train_sessions"),
+        ({"features": ()}, "features"),
+        ({"features": (f"{FACTOR}@raw", f"{FACTOR}@raw")}, "twice"),
+        ({"horizon_sessions": 0}, "horizon_sessions"),
+        ({"refit_every_sessions": 0}, "refit_every_sessions"),
+        ({"surprise": 1}, "surprise"),
+    ],
+)
+def test_a_walk_forward_model_that_cannot_be_point_in_time_is_refused(
+    overrides: dict[str, object], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        wf_spec(**overrides)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"components": ()}, "components"),
+        ({"components": ((FACTOR, "raw"), (FACTOR, "raw"))}, "twice"),
+        ({"min_ic_observations": 11}, "min_ic_observations"),
+        ({"min_ic_securities": 2}, "min_ic_securities"),
+        ({"ic_method": "kendall"}, "ic_method"),
+        ({"negative_ic": "abs"}, "negative_ic"),
+    ],
+)
+def test_a_trailing_ic_declaration_that_cannot_weigh_anything_is_refused(
+    overrides: dict[str, object], message: str
+) -> None:
+    source = trailing()
+    assert source.trailing_ic is not None
+    with pytest.raises(ValueError, match=message):
+        TrailingICWeights.model_validate({**source.trailing_ic.model_dump(), **overrides})
+
+
+def test_a_dynamic_answer_names_the_reconstruction_and_a_static_one_does_not() -> None:
+    ics = [ic(F1, LOOKBACK[-3], 0.3, known_on=D1)]
+    dynamic = run_strategy_backtest(
+        dynamic_inputs(trailing(), scores=score_rows(), ics=ics), HAND_FIXTURE_SPEC
+    )
+    static = run_strategy_backtest(HAND_FIXTURE_INPUTS, HAND_FIXTURE_SPEC)
+    early, late = fits_at(D1, D4)
+    model = run_strategy_backtest(
+        dynamic_inputs(
+            wf_source(), scores=model_rows(), fits=(early, late), fit_for_day={D1: early, D4: late}
+        ),
+        HAND_FIXTURE_SPEC,
+    )
+
+    reconstruction = "a_dynamic_score_is_a_walk_forward_reconstruction_made_now"
+    trailing_rule = "a_trailing_ic_weight_is_the_mean_of_the_ics_known_at_the_signal"
+    fit_rule = "a_walk_forward_fit_trains_on_labels_closed_before_the_embargo_deadline"
+    assert reconstruction in dynamic.limitations
+    assert reconstruction in model.limitations
+    assert reconstruction not in static.limitations
+    assert trailing_rule in dynamic.limitations
+    assert trailing_rule not in model.limitations
+    assert fit_rule in model.limitations
+    assert set(static.limitations) == set(limitation_codes_for("static"))
+    assert set(dynamic.limitations) == set(limitation_codes_for("trailing_ic"))
+    assert set(model.limitations) == set(limitation_codes_for("walk_forward"))

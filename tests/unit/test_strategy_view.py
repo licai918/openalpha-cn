@@ -19,6 +19,7 @@ from typing import Any, Final
 import pytest
 from panel_fixtures import EXCHANGE, GeneratedPanel
 from strategy_fixtures import (
+    COMMIT,
     INDEX_LEVELS,
     PROBE_NEUTRALIZATION,
     PROBE_NEUTRALIZATIONS,
@@ -32,10 +33,12 @@ from strategy_fixtures import (
     write_tiered_corpus,
 )
 
+from openalpha_cn.backtest.factor_ic import average_ranks
 from openalpha_cn.backtest.strategy_backtest import (
     EQUAL_WEIGHT_ALL_A,
     STRATEGY_BACKTEST_LIMITATION_CODES,
     component_key,
+    limitation_codes_for,
 )
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_ingest import load_daily_bars, load_trading_calendar
@@ -199,7 +202,7 @@ def test_a_backtest_over_the_stored_panel_trades_at_the_next_sessions_stored_ope
         panel.sessions[7],
     ]
     assert result.periods[-1].end == panel.sessions[-1]
-    assert set(result.limitations) == STRATEGY_BACKTEST_LIMITATION_CODES
+    assert set(result.limitations) == set(limitation_codes_for("static"))
     for period in result.periods:
         trade_day = calendar.next_trading_day(period.start)
         stored = load_daily_bars(
@@ -369,3 +372,192 @@ def test_the_industry_cap_reads_the_stored_membership_at_each_signal(
     assert len(backtest_strategy(store, capped).periods[0].holdings) == 1
     uncapped = _request(panel, holding_count=4)
     assert len(backtest_strategy(store, uncapped).periods[0].holdings) == 4
+
+
+# --- V2-P6-014: the two dynamic sources over the stored panel ------------------------------------
+#
+# The range is s1..s9 (2026-01-06 .. 01-16), signals every two sessions: s1, s3, s5, s7. The
+# panel holds no calendar year before 2026, so there is no lookback and every window starts at
+# s1. A 1d label for prediction day t enters on t+1 and exits on t+2, so it is known at the
+# 16:30 of s_k only when t <= s_(k-2).
+
+TRAILING: Final[dict[str, Any]] = {
+    "components": ((REVERSAL.qualified_key, "raw"),),
+    "ic_window_sessions": 5,
+    "min_ic_observations": 1,
+    "ic_method": "spearman",
+    "horizon_sessions": 1,
+    "negative_ic": "keep_sign",
+    "min_ic_securities": 3,
+}
+WALK_FORWARD: Final[dict[str, Any]] = {
+    "family": "cross_sectional_rank",
+    "features": (f"{REVERSAL.qualified_key}@raw",),
+    "seed": 0,
+    "code_commit": COMMIT,
+    "train_sessions": 5,
+    "refit_every_sessions": 2,
+    "embargo_sessions": 1,
+    "horizon_sessions": 1,
+}
+
+
+def _dynamic(panel: GeneratedPanel, **source: Any) -> Any:
+    return _request(panel, components=(), rebalance_every_sessions=2, **source)
+
+
+def _independent_rank_ic(store: PanelStore, panel: GeneratedPanel, index: int) -> float:
+    """The oriented 1d rank IC of the build on `panel.sessions[index]`, computed without the
+    module: stored values against close-to-close returns read straight off `load_daily_bars`,
+    ranked by `average_ranks` and correlated by `statistics.correlation`."""
+    calendar = load_trading_calendar(store, exchange=EXCHANGE, years=(2026,), as_of=READ_AT)
+    entry, exit_ = panel.sessions[index + 1], panel.sessions[index + 2]
+    first = load_daily_bars(store, day=entry, calendar=calendar, as_of=READ_AT, max_staleness=None)
+    last = load_daily_bars(store, day=exit_, calendar=calendar, as_of=READ_AT, max_staleness=None)
+    names = [name for name in panel.securities if name in first and name in last]
+    values = [stored_value(tuple(panel.securities), name, index) for name in names]
+    returns = [last[name].close / first[name].close - 1.0 for name in names]
+    raw = statistics.correlation(list(average_ranks(values)), list(average_ranks(returns)))
+    return -raw if REVERSAL.direction == "lower_is_better" else raw
+
+
+def test_a_trailing_ic_weight_counts_exactly_the_labels_closed_by_each_signal(
+    corpus: tuple[PanelStore, GeneratedPanel],
+) -> None:
+    """Known ICs at s1, s3, s5, s7 in a 5-session window: none; s1's; s1..s3; s3..s5.
+
+    s1 has nothing to weigh, so the first period is held. s3's weight is s1's IC alone, which is
+    held against a rank IC computed here from the stored bars rather than by the module.
+    """
+    store, panel = corpus
+    result = backtest_strategy(store, _dynamic(panel, trailing_ic=TRAILING))
+
+    counts = [period.ic_weights[0].observations for period in result.periods]
+    assert counts == [0, 1, 3, 3]
+    assert [period.held for period in result.periods] == [True, False, False, False]
+    assert result.periods[1].ic_weights[0].mean_ic == pytest.approx(
+        _independent_rank_ic(store, panel, 1), abs=1e-12
+    )
+    assert "a_trailing_ic_weight_is_the_mean_of_the_ics_known_at_the_signal" in (result.limitations)
+
+
+def test_every_trailing_ic_is_dated_no_earlier_than_its_labels_exit(
+    corpus: tuple[PanelStore, GeneratedPanel],
+) -> None:
+    """Each observation's `known_at` is the 16:30 of the session two after its prediction day;
+    only days whose label can exit by the last signal (s7) are priced at all: s1 .. s5."""
+    store, panel = corpus
+    inputs = load_strategy_inputs(store, _dynamic(panel, trailing_ic=TRAILING))
+
+    days = [item.prediction_day for item in inputs.ic_observations]
+    assert days == list(panel.sessions[1:6])
+    for item in inputs.ic_observations:
+        exit_day = panel.sessions[panel.sessions.index(item.prediction_day) + 2]
+        assert item.known_at == inputs.signal_instants[exit_day]
+    assert inputs.lookback_sessions == ()
+
+
+def test_a_walk_forward_model_holds_until_its_first_fit_and_then_ranks_the_column(
+    corpus: tuple[PanelStore, GeneratedPanel],
+) -> None:
+    """Refits on s1, s3, s5, s7 with a 5-session window, embargo 1, horizon 1.
+
+    A refit at calendar position p may train only on prediction day p-4, so s1 and s3 cannot
+    fit (no calendar before s1; no closed label), s5 trains on s1 and s7 on s3. On s5 and s7 the
+    one-column `cross_sectional_rank` fit orders the market exactly by the stored column, in the
+    orientation its learned coefficient says, and every score row carries the signal instant.
+    """
+    store, panel = corpus
+    request = _dynamic(panel, walk_forward=WALK_FORWARD)
+    inputs = load_strategy_inputs(store, request)
+    result = backtest_strategy(store, request)
+    s1, s3, s5, s7 = (panel.sessions[index] for index in (1, 3, 5, 7))
+
+    assert [fit.refit_day for fit in result.model_fits] == [s1, s3, s5, s7]
+    assert [fit.refusal is None for fit in result.model_fits] == [False, False, True, True]
+    assert [period.held for period in result.periods] == [True, True, False, False]
+    assert [p.model_fit.refit_day if p.model_fit else None for p in result.periods] == [
+        None,
+        None,
+        s5,
+        s7,
+    ]
+    subjects = tuple(panel.securities)
+    for day in (s5, s7):
+        fit = inputs.fit_for_day[day]
+        assert fit.artifact is not None
+        (coefficient,) = (value for _, value in fit.artifact.parameters)
+        rows = [row for row in inputs.scores if row.signal_day == day]
+        assert {(row.available_time, row.revision_time) for row in rows} == {
+            (inputs.signal_instants[day], inputs.signal_instants[day])
+        }
+        index = panel.sessions.index(day)
+        by_score = [row.subject for row in sorted(rows, key=lambda row: -row.value)]
+        by_column = sorted(
+            (row.subject for row in rows),
+            key=lambda name: stored_value(subjects, name, index),
+            reverse=coefficient > 0,
+        )
+        assert by_score == by_column
+        embargo_day = panel.sessions[index - 1]
+        assert fit.labels_known_at is not None
+        assert fit.labels_known_at < inputs.signal_instants[embargo_day]
+
+
+def test_a_walk_forward_fit_trains_on_exactly_one_prediction_day_here(
+    corpus: tuple[PanelStore, GeneratedPanel],
+) -> None:
+    """s5's fit trains on s1 alone (all eight names labelled); s7's on s3 alone."""
+    store, panel = corpus
+    result = backtest_strategy(store, _dynamic(panel, walk_forward=WALK_FORWARD))
+    fitted = [fit for fit in result.model_fits if fit.refusal is None]
+
+    assert [fit.prediction_day_count for fit in fitted] == [1, 1]
+    assert [fit.labels_known_at for fit in fitted] == [
+        load_strategy_inputs(store, _dynamic(panel, walk_forward=WALK_FORWARD)).signal_instants[
+            panel.sessions[index]
+        ]
+        for index in (3, 5)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("walk_forward", "message"),
+    [
+        ({"features": (f"{REVERSAL.qualified_key}@neutralized:x:y",)}, "neutralized"),
+        ({"family": "linear"}, "linear"),
+        (
+            {"family": "boosted_rank_trees", "hyperparameters": {"tree_count": 50}},
+            "cannot be declared",
+        ),
+        ({"features": ("nonexistent/v1@raw",)}, "nonexistent"),
+    ],
+)
+def test_a_walk_forward_model_that_cannot_be_declared_is_a_bad_request(
+    corpus: tuple[PanelStore, GeneratedPanel], walk_forward: dict[str, Any], message: str
+) -> None:
+    _, panel = corpus
+    with pytest.raises(StrategyRequestError, match=message):
+        _dynamic(panel, walk_forward={**WALK_FORWARD, **walk_forward})
+
+
+def test_a_request_level_transform_beside_a_walk_forward_source_is_refused(
+    corpus: tuple[PanelStore, GeneratedPanel],
+) -> None:
+    _, panel = corpus
+    with pytest.raises(StrategyRequestError, match="each feature names its own transform"):
+        _dynamic(
+            panel,
+            walk_forward=WALK_FORWARD,
+            transform=PROBE_TRANSFORM.qualified_key,
+            transforms=PROBE_TRANSFORMS,
+        )
+
+
+def test_a_trailing_ic_run_that_never_knows_an_ic_is_blocked_not_reported_flat(
+    corpus: tuple[PanelStore, GeneratedPanel],
+) -> None:
+    store, panel = corpus
+    never = {**TRAILING, "min_ic_observations": 5}
+    with pytest.raises(StrategyRunBlockedError, match="no scores on any"):
+        backtest_strategy(store, _dynamic(panel, trailing_ic=never))

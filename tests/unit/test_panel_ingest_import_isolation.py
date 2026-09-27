@@ -481,6 +481,23 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
         {
             "factor_view.FactorRequestError",
             "factor_view.resolve_factor",
+            # V2-P6-014. The walk-forward source resolves its features and family through the
+            # model faces' own tables and prices its training labels, and the trailing-IC
+            # source its ICs, through the model plane's label reader -- so no outcome is
+            # derived a third way.
+            "feature_matrix.FeatureColumn",
+            "feature_matrix.FeatureMatrixError",
+            "feature_matrix.feature_spec",
+            "model_view.LabelReach",
+            "model_view.MODEL_FAMILIES",
+            "model_view.ModelRequestError",
+            "model_view.ModelRunRequest",
+            "model_view.ModelViewError",
+            "model_view.OutcomeLabels",
+            "model_view.declared_hyperparameters",
+            "model_view.feature_columns",
+            "model_view.feature_cross_section",
+            "model_view.training_panel",
             "panel_factors.FACTOR_TRANSFORMS",
             "panel_factors.FactorEngineError",
             "panel_factors.load_factor_observations",
@@ -677,12 +694,14 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
         ),
     ),
     "openalpha_cn.strategy_view": DatasetReach(
-        # V2-P6-007. It names exactly one dataset, `index_member_all`, and only to ask the
-        # store which membership years it holds before an industry cap reads them; everything
-        # else arrives through the loaders it takes across the seam. It reaches neither
-        # `namechange` (a published band decides the price limit, so no ST flag is read) nor
-        # `stock_basic` (the book trades what the priced cross section offers).
-        named=frozenset({"index_member_all"}),
+        # V2-P6-007. It names `index_member_all` only to ask the store which membership years
+        # it holds before an industry cap reads them; everything else arrives through the
+        # loaders it takes across the seam. It reaches no `namechange` (a published band
+        # decides the price limit, so no ST flag is read). V2-P6-014 names `trade_cal` for the
+        # same kind of question -- which calendar years a lookback may read -- and reaches
+        # `stock_basic` through the model plane's label reader and feature matrix, whose
+        # labels and universes the two dynamic sources reuse rather than restate.
+        named=frozenset({"index_member_all", "trade_cal"}),
         reached=frozenset(
             {
                 "adj_factor",
@@ -695,6 +714,7 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
                 "index_daily",
                 "index_member_all",
                 "stk_limit",
+                "stock_basic",
                 "suspend_d",
                 "trade_cal",
             }
