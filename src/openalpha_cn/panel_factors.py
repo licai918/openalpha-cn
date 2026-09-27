@@ -831,9 +831,10 @@ an upstream's publication cadence, and `DATASET_CADENCE` has no honest entry for
 
 import bisect
 import math
+from collections import defaultdict
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from types import MappingProxyType
 from typing import Final, Literal, Protocol, TypeVar, cast
 from zoneinfo import ZoneInfo
@@ -5058,16 +5059,30 @@ def _read_dataset(
     _refuse_a_read_that_cannot_see_what_as_of_holds(
         store, dataset=dataset, requirement=requirement, as_of_day=as_of_day
     )
-    points: dict[str, list[date]] = {}
+    points: defaultdict[str, list[date]] = defaultdict(list)
     values: dict[tuple[str, date], tuple[float | None, ...]] = {}
     announced: dict[tuple[str, date], date] = {}
-    filed: set[tuple[str, date, date]] = set()
     stated: dict[tuple[str, date, date], tuple[float | None, ...]] = {}
     ambiguous: dict[str, set[date]] = {}
     references: list[FactorInputRef] = []
     provenance: list[FactorInputProvenance] = []
+    # `V2-P6-005`: the per-row work that does not depend on the row, done once. A year of `daily`
+    # is 675,148 rows over about 250 distinct `event_time` instants, and every row paid for a zone
+    # twice: DuckDB attached the host's zone to each cell through `pytz` (two lookups, a
+    # `localize` and a `fromutc` per row -- 3.78 M lookups over two instants in the 2026-09-26
+    # profile), and `_session_date` then converted it again. Now the store hands `event_time`
+    # back as UTC wall time with no zone (`event_time_as_naive_utc`), and `session_of` resolves
+    # each distinct instant once, through `_session_date`, so the date and every refusal it can
+    # raise are the ones the per-row call produced. Keyed by the naive UTC value, which names
+    # exactly one instant. `isfinite` is `_numeric`'s own acceptance test for the one case that
+    # is nearly every cell -- a stored finite float, which `_numeric` returns as `float(value)`,
+    # i.e. unchanged -- and every other cell still goes through `_numeric` and its refusals.
+    session_of: dict[object, date] = {}
+    isfinite = math.isfinite
     for year in sorted(set(requirement.years)):
-        outcome = store.read_visible_at(requirement, year=year, columns=projection)
+        outcome = store.read_visible_at(
+            requirement, year=year, columns=projection, event_time_as_naive_utc=True
+        )
         if outcome.is_blocked:
             raise FactorEngineError(
                 f"{dataset} year={year} cannot be read at {requirement.as_of.isoformat()}: "
@@ -5094,7 +5109,11 @@ def _read_dataset(
         )
         for row in outcome.rows:
             subject = str(row[0])
-            announcement = _session_date(row[1], dataset=dataset, zone=zone)
+            stamp = row[1]
+            announcement = session_of.get(stamp)
+            if announcement is None:
+                announcement = _session_date(stamp, dataset=dataset, zone=zone)
+                session_of[stamp] = announcement
             if announcement > as_of_day:
                 raise FactorEngineError(
                     f"{dataset} carries a row for {subject} whose event_time resolves to "
@@ -5110,37 +5129,45 @@ def _read_dataset(
                 else announcement
             )
             cells = tuple(
-                _numeric(value, dataset=dataset, column=name, subject=subject, point=point)
-                for name, value in zip(columns, row[offset:], strict=True)
+                [
+                    value
+                    if type(value) is float and isfinite(value)
+                    else _numeric(value, dataset=dataset, column=name, subject=subject, point=point)
+                    for name, value in zip(columns, row[offset:], strict=True)
+                ]
             )
-            filing = (subject, point, announcement)
-            if period_indexed:
-                # The period axis keeps every version's projected cells, because "one fact stated
-                # twice" is decided by comparing them. The session axis keeps only the key: no
-                # session-indexed dataset here has versions, so a second row is a fault and the
-                # values would be a per-row cost with no reader -- at 675,148 rows for one
-                # whole-market `daily` year, which is the scale this loop is measured at.
-                previous = stated.get(filing)
-                if previous is not None:
-                    if _columns_two_versions_disagree_about(previous, cells, columns=columns):
-                        ambiguous.setdefault(subject, set()).add(point)
-                    continue
-                stated[filing] = cells
-            elif filing in filed:
-                raise FactorEngineError(
-                    f"{dataset} carries more than one row for {subject} on "
-                    f"{point.isoformat()}; this engine reads one row per security per "
-                    f"{axis}, so a dataset with several versions of one observation needs a "
-                    "reducer chosen for it before a factor may read it"
-                )
-            else:
-                filed.add(filing)
             key = (subject, point)
+            if not period_indexed:
+                # The session axis has no versions, so a second row is a fault and there is
+                # nothing to keep but the cells. A session row's point *is* its announcement, so
+                # the filing `(subject, point, announcement)` and the key `(subject, point)` name
+                # the same row and one lookup answers "seen before?" -- the second set that used
+                # to hold the triple was a per-row copy of `values`' keys, at 675,148 rows for one
+                # whole-market `daily` year.
+                if key in values:
+                    raise FactorEngineError(
+                        f"{dataset} carries more than one row for {subject} on "
+                        f"{point.isoformat()}; this engine reads one row per security per "
+                        f"{axis}, so a dataset with several versions of one observation needs a "
+                        "reducer chosen for it before a factor may read it"
+                    )
+                points[subject].append(point)
+                values[key] = cells
+                continue
+            # The period axis keeps every version's projected cells, because "one fact stated
+            # twice" is decided by comparing them.
+            filing = (subject, point, announcement)
+            previous = stated.get(filing)
+            if previous is not None:
+                if _columns_two_versions_disagree_about(previous, cells, columns=columns):
+                    ambiguous.setdefault(subject, set()).add(point)
+                continue
+            stated[filing] = cells
             if key in values:
                 if announcement < announced[key]:
                     continue
             else:
-                points.setdefault(subject, []).append(point)
+                points[subject].append(point)
             announced[key] = announcement
             values[key] = cells
     return (
@@ -5282,12 +5309,30 @@ def _refuse_a_read_that_cannot_see_what_as_of_holds(
 
 
 def _session_date(value: object, *, dataset: str, zone: ZoneInfo) -> date:
+    """The date in `zone` of one stored `event_time`, read back as its UTC wall-clock time.
+
+    `_read_dataset` asks the store for `event_time` with no zone attached
+    (`PanelStore.read_visible_at(..., event_time_as_naive_utc=True)`, `V2-P6-005`), so the value
+    here is the instant's UTC wall time and `UTC` is attached before converting. That is the same
+    instant the aware value named, so the date is the one `value.astimezone(zone).date()` gave
+    when DuckDB attached the host's zone itself -- once per row, through `pytz`.
+
+    A value that *does* carry a zone is refused rather than trusted: it would mean the read was
+    not the one this function is written for, and a naive value misread as UTC, or an aware one
+    re-labelled, lands on the wrong day at every instant within eight hours of midnight.
+    """
     if not isinstance(value, datetime):
         raise FactorEngineError(
             f"{dataset}.{EVENT_TIME_COLUMN} read back as {type(value).__name__}, not a "
             "datetime; the engine resolves a session date from it and cannot from anything else"
         )
-    return value.astimezone(zone).date()
+    if value.tzinfo is not None:
+        raise FactorEngineError(
+            f"{dataset}.{EVENT_TIME_COLUMN} read back carrying the zone {value.tzinfo!r}; this "
+            "engine reads it as UTC wall-clock time with no zone attached, and a value that "
+            "carries one was not read that way"
+        )
+    return value.replace(tzinfo=UTC).astimezone(zone).date()
 
 
 FISCAL_QUARTER_ENDS: Final[tuple[tuple[int, int], ...]] = ((3, 31), (6, 30), (9, 30), (12, 31))

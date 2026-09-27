@@ -1436,6 +1436,7 @@ class PanelStore:
         year: int,
         columns: Sequence[str],
         filters: Mapping[str, object] | None = None,
+        event_time_as_naive_utc: bool = False,
     ) -> PanelVisibleReadOutcome:
         """Read the rows of a partition that were knowable at `requirement.as_of`, and say how
         many were not (`V2-P3-002`).
@@ -1565,9 +1566,25 @@ class PanelStore:
         single-read spelling. Only the partition-scope verdict is shareable across a scope; the
         slice re-checks and the census aggregate are answers about a row set and still run per
         year.
+
+        **`event_time_as_naive_utc` changes how one column is spelled, not which rows come
+        back** (`V2-P6-005`). DuckDB builds every `TIMESTAMP WITH TIME ZONE` cell it hands to
+        Python as an aware datetime in the connection's zone -- the host's, by default -- through
+        two `pytz.timezone` lookups, a `localize` and a `fromutc` per cell. For a caller that
+        only ever resolves `event_time` to a date in a zone of its own choosing, that is all
+        per-row cost with no reader: measured on the 2026 `daily` partition at a 2026-06-01
+        `as_of` (526,069 visible rows), 1.085 s to fetch with the instant as an aware datetime and
+        0.075 s without it. With the flag set, `event_time` is projected as the same instant's
+        UTC wall-clock time with no zone attached -- `timezone('UTC', event_time)`, microsecond
+        for microsecond -- and the caller attaches `UTC` itself, once per distinct instant rather
+        than once per row. The predicate, the census, the readiness verdict and the slice
+        re-checks do not read the projection and are untouched.
         """
         return self.assessed(requirement).read_visible_at(
-            year=year, columns=columns, filters=filters
+            year=year,
+            columns=columns,
+            filters=filters,
+            event_time_as_naive_utc=event_time_as_naive_utc,
         )
 
     def _scan_visible(
@@ -1580,6 +1597,7 @@ class PanelStore:
         columns: Sequence[str],
         filters: Mapping[str, object] | None,
         probe_subjects: Sequence[str] | None,
+        event_time_as_naive_utc: bool = False,
     ) -> _VisibleScan:
         """The visible rows of `year`, and everything the second gate needs to judge them.
 
@@ -1629,7 +1647,11 @@ class PanelStore:
                     "catalog; the catalog changed underneath this read"
                 )
             visible_sql, visible_parameters = _build_visible_scan_sql(
-                partition_path, columns, filters, as_of=as_of
+                partition_path,
+                columns,
+                filters,
+                as_of=as_of,
+                event_time_as_naive_utc=event_time_as_naive_utc,
             )
             with _scan_failures_as_storage_errors(dataset, year):
                 scanned = connection.execute(visible_sql, visible_parameters).fetchall()
@@ -1977,6 +1999,7 @@ class AssessedPanelRead:
         year: int,
         columns: Sequence[str],
         filters: Mapping[str, object] | None = None,
+        event_time_as_naive_utc: bool = False,
     ) -> PanelVisibleReadOutcome:
         """`PanelStore.read_visible_at`'s body, against a verdict already taken.
 
@@ -2010,6 +2033,7 @@ class AssessedPanelRead:
                 columns=columns,
                 filters=filters,
                 probe_subjects=requirement.required_subjects,
+                event_time_as_naive_utc=event_time_as_naive_utc,
             )
         except PanelStorageError:
             raise
@@ -2153,6 +2177,7 @@ def _build_visible_scan_sql(
     filters: Mapping[str, object] | None,
     *,
     as_of: datetime,
+    event_time_as_naive_utc: bool = False,
 ) -> tuple[str, list[object]]:
     """`read_visible_at`'s projection, with the visibility predicate **in the statement**.
 
@@ -2169,10 +2194,16 @@ def _build_visible_scan_sql(
     *availability* instant, so a partition whose rows are all available by `as_of` clears the
     rule table outright while still holding a row whose stored version was revised after it.
     Nothing but this predicate withholds that row.
+
+    `event_time_as_naive_utc` rewrites one projected column and nothing else; see
+    `PanelStore.read_visible_at`. The rewrite keeps the column's own quoted name as its alias, so
+    a hostile name still reaches the binder as one quoted identifier.
     """
     if not columns:
         raise PanelStorageError("must request at least one column")
-    column_list = ", ".join(_quote_identifier(name) for name in columns)
+    column_list = ", ".join(
+        _projected(name, event_time_as_naive_utc=event_time_as_naive_utc) for name in columns
+    )
     clauses, values = _equality_clauses(filters)
     visible = _visible_clauses()
     clauses.extend(visible)
@@ -2180,6 +2211,19 @@ def _build_visible_scan_sql(
         f"SELECT {column_list} FROM read_parquet(?) WHERE {' AND '.join(clauses)}",
         [str(partition_path), *values, *(as_of for _ in visible)],
     )
+
+
+def _projected(name: str, *, event_time_as_naive_utc: bool) -> str:
+    """One column of a visible scan's projection, quoted; `event_time` in UTC wall time if asked.
+
+    `timezone('UTC', <timestamptz>)` is the instant's wall-clock time in UTC as a `TIMESTAMP`
+    with no zone, exact to the microsecond the column stores, which DuckDB hands to Python as a
+    naive datetime without consulting `pytz` at all.
+    """
+    quoted = _quote_identifier(name)
+    if event_time_as_naive_utc and name == EVENT_TIME_COLUMN:
+        return f"timezone('UTC', {quoted}) AS {quoted}"
+    return quoted
 
 
 def _build_visible_census_sql(
