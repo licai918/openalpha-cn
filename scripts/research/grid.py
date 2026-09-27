@@ -6,10 +6,14 @@ computed:
 
 * **The stages and their windows.** `STAGES` is the protocol's closed vocabulary and
   `PROTOCOL_STAGE_WINDOWS` its segments: discovery and composition 2015-01-05..2021-12-31,
-  validation 2022-01-04..2023-12-29, holdout 2024-01-02 onwards; forward starts the day after the
-  committed registration's commit date, which only `registry.run_forward` derives (through the
-  same admission as the holdout guard) -- `run_grid` refuses the forward stage, because a boundary
-  a caller could type would reopen the holdout window. `run_grid` reads a configuration's
+  validation 2022-01-04..2023-12-29, holdout 2024-01-02 onwards. The holdout window is
+  open-ended, so every date from 2024-01-02 on belongs to it and is measured only by
+  `registry.run_holdout`, once. **There is no forward stage here.** The protocol evaluates the
+  forward period only through predictions registered before their outcomes are known (the daily
+  command, V2-P6-011, and the forward report, V2-P6-012); a grid run over those dates would be a
+  second look at the holdout's years with no run-once limit and no registration binding, so the
+  grid refuses it by construction rather than by a boundary someone supplies. `run_grid` reads a
+  configuration's
   measured window from its `start` and `end` keys and nowhere else (an `as_of` clock legitimately
   sits years later), extends `end` by the configuration's label length in sessions, and refuses a
   window that leaves its stage **before measuring it**: the refusal is a row, so it counts in the
@@ -69,7 +73,7 @@ import statistics
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final, Literal, Protocol
@@ -95,10 +99,7 @@ RETIRED_LEDGER_SCHEMAS: Final[tuple[str, ...]] = ("openalpha-research-ledger/v1"
 """Row versions this module refuses by name. v1 had no `kind`; no v1 research ledger was ever used
 for research, so there is no migration: a v1 ledger is re-run."""
 
-STAGES: Final[tuple[str, ...]] = ("discovery", "composition", "validation", "holdout", "forward")
-"""The protocol's stages, and the only stage labels the ledger accepts."""
 HOLDOUT_STAGE: Final[str] = "holdout"
-FORWARD_STAGE: Final[str] = "forward"
 
 RowKind = Literal["measurement", "holdout_claim"]
 MEASUREMENT: Final[RowKind] = "measurement"
@@ -121,8 +122,11 @@ PROTOCOL_STAGE_WINDOWS: Final[Mapping[str, StageWindow]] = {
     "validation": StageWindow(date(2022, 1, 4), date(2023, 12, 29)),
     "holdout": StageWindow(date(2024, 1, 2), None),
 }
-"""Section 2's segments. Forward has no fixed window: it starts the day after the committed
-registration's commit date, which `registry.run_forward` derives and passes to `_run_grid`."""
+"""Section 2's segments. No forward entry: forward evaluation is registered predictions, not
+this grid (see the module docstring)."""
+
+STAGES: Final[tuple[str, ...]] = tuple(PROTOCOL_STAGE_WINDOWS)
+"""The protocol's research stages, and the only stage labels the ledger accepts."""
 
 PROTOCOL_BOOTSTRAP_SAMPLES: Final[int] = 100_000
 PROTOCOL_RANDOM_SEED: Final[int] = 20_260_926
@@ -531,21 +535,14 @@ def measured_window(
     return first, calendar[at_or_before[-1] + label_sessions]
 
 
-def stage_window(stage: str, *, forward_after: date | None = None) -> StageWindow:
-    """The window a stage may measure; the forward stage's starts the day after `forward_after`."""
-    if _checked_stage(stage) == FORWARD_STAGE:
-        if forward_after is None:
-            raise ResearchLedgerError(
-                "the forward stage starts after the registration's commit date; pass it as "
-                "forward_after (registry.forward_after)"
-            )
-        return StageWindow(forward_after + timedelta(days=1), None)
-    return PROTOCOL_STAGE_WINDOWS[stage]
+def stage_window(stage: str) -> StageWindow:
+    """The window a stage may measure."""
+    return PROTOCOL_STAGE_WINDOWS[_checked_stage(stage)]
 
 
-def check_window(stage: str, first: date, last: date, *, forward_after: date | None = None) -> None:
+def check_window(stage: str, first: date, last: date) -> None:
     """Raise `StageWindowError` unless `first..last` lies inside `stage`'s window."""
-    window = stage_window(stage, forward_after=forward_after)
+    window = stage_window(stage)
     if first < window.first or (window.last is not None and last > window.last):
         bound = "onwards" if window.last is None else f"to {window.last}"
         raise StageWindowError(
@@ -776,14 +773,12 @@ def run_grid(
 
     Before measuring, each configuration's measured window (`measured_window`, with
     `label_sessions(config)` sessions of `sessions` past `end`) must lie inside the stage's window;
-    one that does not is a refused row and is never measured. A configuration `measure` refuses
-    (one of `refusals`) is a row whose result is its error. Both count in the family.
-    `label_sessions` has no default because a label's length is the one thing about a window a
-    configuration's dates do not say; `strategy_label_sessions` is the strategy backtest's.
-
-    Two stages are refused here. The holdout runs through `registry.run_holdout`. The forward
-    stage runs through `registry.run_forward`, which derives its boundary from the committed
-    registration: a boundary a caller could type is a way back into the holdout window.
+    one that does not is a refused row and is never measured. Because the holdout window is
+    open-ended, that refuses every window reaching 2024-01-02 or later in every stage this runner
+    accepts. A configuration `measure` refuses (one of `refusals`) is a row whose result is its
+    error. Both count in the family. `label_sessions` has no default because a label's length is
+    the one thing about a window a configuration's dates do not say; `strategy_label_sessions` is
+    the strategy backtest's. The holdout stage is refused: it runs through `registry.run_holdout`.
     """
     stage = _checked_stage(stage)
     if stage == HOLDOUT_STAGE:
@@ -791,44 +786,10 @@ def run_grid(
             f"the {HOLDOUT_STAGE!r} stage runs once, through registry.run_holdout behind its "
             "registration guard, and never from a grid"
         )
-    if stage == FORWARD_STAGE:
-        raise ResearchLedgerError(
-            f"the {FORWARD_STAGE!r} stage runs through registry.run_forward, which takes its "
-            "boundary from the committed registration rather than from a caller"
-        )
-    return _run_grid(
-        ledger,
-        stage,
-        configs,
-        measure,
-        label_sessions=label_sessions,
-        sessions=sessions,
-        forward_after=None,
-        refusals=refusals,
-        clock=clock,
-    )
-
-
-def _run_grid(
-    ledger: Path,
-    stage: str,
-    configs: Sequence[Mapping[str, object]],
-    measure: Measure,
-    *,
-    label_sessions: Callable[[Mapping[str, object]], int],
-    sessions: Sequence[date],
-    forward_after: date | None,
-    refusals: tuple[type[Exception], ...],
-    clock: Callable[[], datetime] | None,
-) -> GridRun:
-    """`run_grid`'s body, for it and for `registry.run_forward` (which alone passes
-    `forward_after`, derived from a committed registration)."""
-    if _checked_stage(stage) == HOLDOUT_STAGE:
-        raise ResearchLedgerError("the holdout stage runs through registry.run_holdout only")
-    stage_window(stage, forward_after=forward_after)
     now = _utc_now if clock is None else clock
     existing = list(read_ledger(ledger))
     ran = skipped = 0
+    recorded: tuple[type[Exception], ...] = (StageWindowError, *refusals)
     for config in configs:
         identity = config_id(config)
         if any(
@@ -840,9 +801,8 @@ def _run_grid(
         first, last = measured_window(
             config, label_sessions=label_sessions(config), sessions=sessions
         )
-        recorded: tuple[type[Exception], ...] = (StageWindowError, *refusals)
         try:
-            check_window(stage, first, last, forward_after=forward_after)
+            check_window(stage, first, last)
             result = dict(measure(config))
         except recorded as error:
             result = {"error": f"{type(error).__name__}: {error}"}

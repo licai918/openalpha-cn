@@ -53,6 +53,7 @@ def _research_module(name: str) -> ModuleType:
 grid = _research_module("grid")
 registry = _research_module("registry")
 REAL_IMPORTED_PACKAGE: Final = registry._imported_package
+REAL_IMPORTED_SCRIPTS: Final = registry._imported_scripts
 
 COMMITTED: Final[datetime] = datetime(2026, 9, 26, 12, 0, tzinfo=UTC)
 CODE_COMMIT: Final[str] = "0123456789abcdef0123456789abcdef01234567"
@@ -94,6 +95,10 @@ def tmp_git_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     _git(repo, "commit", "-q", "-m", "initial", at=COMMITTED - timedelta(days=1))
     package = repo / "src" / "openalpha_cn" / "__init__.py"
     monkeypatch.setattr(registry, "_imported_package", lambda: package)
+    research = repo / "scripts" / "research"
+    monkeypatch.setattr(
+        registry, "_imported_scripts", lambda: (research / "grid.py", research / "registry.py")
+    )
     return repo
 
 
@@ -339,6 +344,19 @@ def test_a_package_imported_from_outside_the_repository_refuses_the_holdout(
         registry.assert_holdout_allowed(registration, ledger, tmp_git_repo)
 
 
+def test_research_scripts_imported_from_outside_the_repository_refuse_the_holdout(
+    tmp_git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`grid.py` computes every holdout metric and `registry.py` is the guard; imported from
+    another checkout, neither is the code the diff over `scripts/research` checked."""
+    ledger = tmp_git_repo / "ledger.jsonl"
+    registration = _registered(tmp_git_repo, commit_at=COMMITTED)
+    monkeypatch.setattr(registry, "_imported_scripts", REAL_IMPORTED_SCRIPTS)
+
+    with pytest.raises(registry.ForeignScriptsError, match="scripts/research"):
+        registry.assert_holdout_allowed(registration, ledger, tmp_git_repo)
+
+
 def test_a_commit_time_in_shanghai_is_ordered_against_utc_ledger_rows(tmp_git_repo: Path) -> None:
     """20:00 +08:00 is 12:00 UTC: a claim at 11:30 UTC predates the commit and one at 12:30 UTC
     follows it. Comparing wall-clock digits would order both the other way round."""
@@ -482,70 +500,6 @@ def test_the_holdout_refuses_a_registered_configuration_outside_the_holdout_wind
     with pytest.raises(registry.HoldoutConfigurationError, match="window"):
         registry.run_holdout(path, ledger, tmp_git_repo, early, _Measure(), clock=lambda: COMMITTED)
     assert _rows(ledger) == []
-
-
-def test_the_forward_stage_starts_after_the_registration_commit_date_in_shanghai(
-    tmp_git_repo: Path,
-) -> None:
-    """17:00 UTC on 26 September is 01:00 on the 27th in Shanghai, the calendar the sessions use."""
-    registration = _registered(tmp_git_repo, commit_at=datetime(2026, 9, 26, 17, 0, tzinfo=UTC))
-
-    assert registry.forward_after(registration, tmp_git_repo) == date(2026, 9, 27)
-
-
-# --- the forward stage --------------------------------------------------------------------------
-
-
-def _forward(registration: Path, ledger: Path, repo: Path, config: Mapping[str, object]) -> list:
-    measured: list[Mapping[str, object]] = []
-
-    def measure(value: Mapping[str, object]) -> Mapping[str, object]:
-        measured.append(value)
-        return {"p_excess": 0.5}
-
-    registry.run_forward(
-        registration,
-        ledger,
-        repo,
-        (config,),
-        measure,
-        label_sessions=grid.strategy_label_sessions,
-        clock=lambda: COMMITTED,
-    )
-    return measured
-
-
-FORWARD_COVERING_2024: Final[dict[str, object]] = {
-    "start": date(2024, 1, 2),
-    "end": date(2025, 6, 30),
-    "holding_count": 50,
-}
-
-
-def test_a_forward_run_without_a_committed_registration_is_refused(tmp_git_repo: Path) -> None:
-    """The forward boundary is the registration's commit date and nothing a caller types: with no
-    committed registration there is no boundary, and a window covering 2024 is not measured."""
-    ledger = tmp_git_repo / "ledger.jsonl"
-    registration = _registered(tmp_git_repo, commit_at=None)
-
-    with pytest.raises(registry.RegistrationNotCommittedError):
-        _forward(registration, ledger, tmp_git_repo, FORWARD_COVERING_2024)
-    assert _rows(ledger) == []
-
-
-def test_a_forward_window_on_or_before_the_registration_date_is_a_refused_row(
-    tmp_git_repo: Path,
-) -> None:
-    ledger = tmp_git_repo / "ledger.jsonl"
-    registration = _registered(tmp_git_repo, commit_at=COMMITTED)  # Shanghai date 2026-09-26
-    on_the_day = {"start": date(2026, 9, 26), "end": date(2026, 10, 30)}
-    after = {"start": date(2026, 9, 28), "end": date(2026, 10, 30)}
-
-    assert _forward(registration, ledger, tmp_git_repo, FORWARD_COVERING_2024) == []
-    assert _forward(registration, ledger, tmp_git_repo, on_the_day) == []
-    assert _forward(registration, ledger, tmp_git_repo, after) == [after]
-    errors = [row["result"].get("error", "") for row in _rows(ledger)]
-    assert [error.startswith("StageWindowError: ") for error in errors] == [True, True, False]
 
 
 def test_the_guard_reads_git_without_an_inherited_git_variable(

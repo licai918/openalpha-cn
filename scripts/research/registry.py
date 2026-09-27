@@ -25,6 +25,14 @@ own exception:
 5. `ForeignPackageError` -- the `openalpha_cn` this process imported is not the one under the
    repository's `src/`: a worktree run can import the main checkout's package, and then the code
    measuring is not the code the diff checked.
+6. `ForeignScriptsError` -- the `grid` and `registry` modules this process imported are not the
+   ones under the repository's `scripts/research/`, for the same reason: `grid` computes the
+   holdout's metrics and `registry` is this guard.
+
+`uv.lock` in the binding proves the lock file did not change since the registration. It does not
+prove the running virtual environment matches the lock: a venv synced from another lock, or edited
+by hand, passes. Only `uv sync --locked` before the run (or checking installed versions against the
+lock) would establish that, and nothing here does.
 
 `run_holdout` then refuses, before writing anything, a configuration that is not the registered
 one or whose measured window leaves the holdout window (`HoldoutConfigurationError`), and a measure
@@ -33,10 +41,10 @@ ones (`HoldoutSettingsError`). It writes a `holdout_claim` row carrying the regi
 commit and settings **before** measuring, then the measurement row with the same binding. A crash
 between the two leaves the claim, and the guard's third refusal then holds.
 
-`run_forward` is the forward stage's only runner. It runs the same committed-registration admission
-as the guard's first refusal and takes the forward boundary from the registration's commit date
-(`forward_after`); a caller cannot name one, so a forward window cannot reach back into the
-holdout's years.
+There is no forward runner. The holdout window is open-ended, so every date from 2024-01-02 on is
+measured by `run_holdout` once or not at all; the forward period is evaluated through predictions
+registered before their outcomes (the daily command, V2-P6-011, and the forward report,
+V2-P6-012), which this module neither runs nor replaces.
 
 What this does not establish. A commit time is what the committer's clock (or
 `GIT_COMMITTER_DATE`) said, and a ledger row's `recorded_at` is what this machine's clock said;
@@ -53,27 +61,23 @@ import json
 import os
 import re
 import subprocess
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
-from zoneinfo import ZoneInfo
 
+import grid as _grid
 from grid import (
     DEFAULT_REFUSALS,
-    FORWARD_STAGE,
     HOLDOUT_CLAIM,
     HOLDOUT_STAGE,
     MEASUREMENT,
     PROTOCOL_DEPENDENCE,
     PROTOCOL_FALSE_DISCOVERY_RATE,
-    GridRun,
-    Measure,
     ResearchLedgerError,
     SettledMeasure,
     _append_holdout,
-    _run_grid,
     check_window,
     config_id,
     measured_window,
@@ -86,10 +90,11 @@ import openalpha_cn
 from openalpha_cn.runtime.provenance import resolve_code_commit
 
 REGISTRATION_SCHEMA: Final[str] = "openalpha-research-registration/v1"
-SESSION_TIMEZONE: Final[ZoneInfo] = ZoneInfo("Asia/Shanghai")
 REGISTERED_PATHS: Final[tuple[str, ...]] = ("src", "scripts/research", "pyproject.toml", "uv.lock")
 """The pathspecs whose bytes must be the registration's code commit's when the holdout runs."""
 PACKAGE_ROOT: Final[str] = "src"
+SCRIPTS_ROOT: Final[str] = "scripts/research"
+"""Where, under the repository, the imported `grid` and `registry` modules must live."""
 """Where, under the repository, the imported `openalpha_cn` must live."""
 _FULL_COMMIT: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{40}")
 _GIT_TIMEOUT_SECONDS: Final[int] = 60
@@ -121,6 +126,10 @@ class SourceChangedError(HoldoutRefusedError):
 
 class ForeignPackageError(HoldoutRefusedError):
     """The imported `openalpha_cn` is not the repository's own."""
+
+
+class ForeignScriptsError(HoldoutRefusedError):
+    """The imported research scripts are not the repository's own."""
 
 
 class HoldoutConfigurationError(HoldoutRefusedError):
@@ -297,6 +306,23 @@ def _refuse_a_foreign_package(root: Path) -> None:
         ) from error
 
 
+def _imported_scripts() -> tuple[Path, ...]:
+    """Where this process imported the research scripts from: `grid`, then this module."""
+    return (Path(_grid.__file__).resolve(), Path(__file__).resolve())
+
+
+def _refuse_foreign_scripts(root: Path) -> None:
+    for script in _imported_scripts():
+        try:
+            script.relative_to(root / SCRIPTS_ROOT)
+        except ValueError as error:
+            raise ForeignScriptsError(
+                f"this process imported {script.name} from {script}, which is not under "
+                f"{root / SCRIPTS_ROOT}; the holdout's metrics and guard would not be the code the "
+                "registration binds"
+            ) from error
+
+
 def _holdout_allowed(registration: Path, ledger: Path, repo: Path) -> _Admitted:
     root, admitted = _committed_registration(registration, repo)
     rows = [row for row in read_ledger(ledger) if row.stage == HOLDOUT_STAGE]
@@ -320,19 +346,13 @@ def _holdout_allowed(registration: Path, ledger: Path, repo: Path) -> _Admitted:
         )
     _refuse_a_changed_source(root, admitted.registered.get("code_commit"))
     _refuse_a_foreign_package(root)
+    _refuse_foreign_scripts(root)
     return admitted
 
 
 def assert_holdout_allowed(registration: Path, ledger: Path, repo: Path) -> None:
     """Raise a `HoldoutRefusedError` unless the holdout may run now; see the module docstring."""
     _holdout_allowed(registration, ledger, repo)
-
-
-def forward_after(registration: Path, repo: Path) -> date:
-    """The committed registration's commit date on the exchange's calendar (Asia/Shanghai); the
-    forward stage measures only after it (`grid.run_grid(..., forward_after=...)`)."""
-    _, admitted = _committed_registration(registration, repo)
-    return admitted.committed_at.astimezone(SESSION_TIMEZONE).date()
 
 
 def run_holdout(
@@ -354,7 +374,7 @@ def run_holdout(
 
     The window check reads no label past `end` (`label_sessions=0`), which is right for the
     strategy backtest the holdout runs: its last period is marked at `end`. A measure that reads a
-    forward label would need its label length here.
+    label past `end` would need its label length here.
     """
     now = _utc_now if clock is None else clock
     admitted = _holdout_allowed(registration, ledger, repo)
@@ -391,37 +411,6 @@ def run_holdout(
     row = {**result, **binding, "started_at": started_at}
     _append_holdout(ledger, MEASUREMENT, config, row, recorded_at=now())
     return row
-
-
-def run_forward(
-    registration: Path,
-    ledger: Path,
-    repo: Path,
-    configs: Sequence[Mapping[str, object]],
-    measure: Measure,
-    *,
-    label_sessions: Callable[[Mapping[str, object]], int],
-    sessions: Sequence[date] = (),
-    refusals: tuple[type[Exception], ...] = DEFAULT_REFUSALS,
-    clock: Callable[[], datetime] | None = None,
-) -> GridRun:
-    """Run the forward stage: `grid.run_grid`'s runner, bounded by the committed registration.
-
-    The registration must pass the guard's first check (committed, bytes as `HEAD` holds them);
-    without one the forward stage does not run. The boundary is `forward_after` -- the commit's
-    Shanghai date -- and a configuration whose `start` is on or before it is a refused row.
-    """
-    return _run_grid(
-        ledger,
-        FORWARD_STAGE,
-        configs,
-        measure,
-        label_sessions=label_sessions,
-        sessions=sessions,
-        forward_after=forward_after(registration, repo),
-        refusals=refusals,
-        clock=clock,
-    )
 
 
 def _utc_now() -> datetime:

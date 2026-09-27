@@ -24,7 +24,7 @@ from typing import Any, Final
 
 import pytest
 from panel_fixtures import EXCHANGE, GeneratedPanel
-from research_repo import commit_file, git
+from research_repo import commit_file, git, head
 from strategy_fixtures import READ_AT, REVERSAL, write_strategy_corpus
 
 from openalpha_cn.backtest.multiple_testing import (
@@ -415,13 +415,12 @@ def _run_one(ledger: Path, stage: str, config: Mapping[str, object], **kwargs: A
 
 
 def test_the_protocol_segments_are_code() -> None:
-    assert grid.STAGES == ("discovery", "composition", "validation", "holdout", "forward")
+    assert grid.STAGES == ("discovery", "composition", "validation", "holdout")
     windows = grid.PROTOCOL_STAGE_WINDOWS
     assert windows["discovery"] == grid.StageWindow(date(2015, 1, 5), date(2021, 12, 31))
     assert windows["composition"] == windows["discovery"]
     assert windows["validation"] == grid.StageWindow(date(2022, 1, 4), date(2023, 12, 29))
     assert windows["holdout"] == grid.StageWindow(date(2024, 1, 2), None)
-    assert "forward" not in windows  # it starts after the registration's commit date
 
 
 def test_a_configuration_reaching_into_the_holdout_is_refused_before_it_is_measured(
@@ -462,25 +461,46 @@ def test_a_configuration_starting_before_its_stage_is_refused(tmp_path: Path) ->
     assert _rows(ledger)[0]["result"]["error"].startswith("StageWindowError: ")
 
 
-def test_the_runner_will_not_run_the_forward_stage_on_a_date_the_caller_names(
-    tmp_path: Path,
-) -> None:
-    """The forward boundary is the committed registration's date, which only
-    `registry.run_forward` derives; a caller-typed date could reopen the holdout window."""
+def test_there_is_no_forward_stage_in_the_research_tooling(tmp_path: Path) -> None:
+    """The forward period is evaluated only through predictions registered before their outcomes
+    (V2-P6-011's daily command, V2-P6-012's forward report), never through this grid."""
     ledger = tmp_path / "ledger.jsonl"
     covering_2024 = {"start": date(2024, 1, 2), "end": date(2025, 6, 30)}
 
-    with pytest.raises(grid.ResearchLedgerError, match="run_forward"):
+    assert "forward" not in grid.STAGES
+    with pytest.raises(grid.ResearchLedgerError, match="stage"):
         _run_one(ledger, "forward", covering_2024, label_sessions=NO_LABEL)
+    with pytest.raises(grid.ResearchLedgerError, match="stage"):
+        grid.append_ledger(ledger, "forward", covering_2024, {"p_excess": 0.5})
     with pytest.raises(TypeError):
         _run_one(
             ledger,
-            "forward",
+            "discovery",
             covering_2024,
             label_sessions=NO_LABEL,
             forward_after=date(2023, 12, 31),
         )
+    assert not hasattr(registry, "run_forward")
+    assert not hasattr(registry, "forward_after")
     assert not ledger.exists()
+
+
+@pytest.mark.parametrize("stage", ["discovery", "composition", "validation"])
+def test_no_stage_but_the_holdout_measures_anything_from_2024_on(
+    tmp_path: Path, stage: str
+) -> None:
+    """The holdout window is open-ended, so every date from 2024-01-02 on -- 2026 included --
+    belongs to it and is measured only by `registry.run_holdout`."""
+    ledger = tmp_path / "ledger.jsonl"
+    window = grid.PROTOCOL_STAGE_WINDOWS[stage]
+    reaching_2026 = {"start": window.first, "end": date(2026, 8, 28)}
+    inside_2026 = {"start": date(2026, 1, 5), "end": date(2026, 8, 28)}
+
+    assert _run_one(ledger, stage, reaching_2026, label_sessions=NO_LABEL) == []
+    assert _run_one(ledger, stage, inside_2026, label_sessions=NO_LABEL) == []
+    errors = [row["result"]["error"] for row in _rows(ledger)]
+    assert all(error.startswith("StageWindowError: ") for error in errors)
+    assert len(errors) == 2
 
 
 def test_a_ledger_of_the_first_row_version_is_refused_by_name(tmp_path: Path) -> None:
@@ -567,39 +587,37 @@ def _base_config(panel: GeneratedPanel) -> dict[str, object]:
     }
 
 
-def test_the_runner_drives_the_sdk_and_ledgers_net_excess_and_its_sign_flip(
-    runtime: tuple[Path, GeneratedPanel], tmp_path: Path
+def test_the_holdout_drives_the_sdk_and_ledgers_net_excess_and_its_sign_flip(
+    runtime: tuple[Path, GeneratedPanel], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The generated panel's sessions are in January 2026, so the grid is run as the forward stage
-    after a registration committed on the eve of the first of them (Shanghai date 2026-01-04)."""
+    """The generated panel's sessions are in January 2026, inside the holdout window, so the one
+    stage that may measure them is the holdout: registered, committed, then run once."""
     root, panel = runtime
     sdk = OpenAlphaSDK(runtime_dir=root)
-    configs = tuple(
-        {**_base_config(panel), **point}
-        for point in grid.expand_grid({"holding_count": (2, 3), "rebalance_every_sessions": (3,)})
-    )
+    configs = ({**_base_config(panel), "holding_count": 2, "rebalance_every_sessions": 3},)
     measure = grid.strategy_measure(sdk.run_strategy_backtest, excess_benchmark="000905.SH")
     ledger = tmp_path / "ledger.jsonl"
     repo = tmp_path / "repo"
     repo.mkdir()
     git(repo, "init", "-q", "--template=")
+    (repo / "README.md").write_text("research\n", encoding="utf-8")
+    commit_file(repo, repo / "README.md", "initial", at=datetime(2026, 1, 3, 0, 0, tzinfo=UTC))
     registration = repo / "registration.json"
-    registry.register({}, {}, registration, code_commit="0" * 40)
+    registry.register(
+        configs[0], {}, registration, code_commit=head(repo), settings=measure.settings
+    )
     commit_file(repo, registration, "register", at=datetime(2026, 1, 4, 0, 0, tzinfo=UTC))
-    assert registry.forward_after(registration, repo) < panel.sessions[1]
-
-    run = registry.run_forward(
-        registration,
-        ledger,
-        repo,
-        configs,
-        measure,
-        label_sessions=NO_LABEL,
-        clock=lambda: AT,
+    research = repo / "scripts" / "research"
+    monkeypatch.setattr(
+        registry, "_imported_package", lambda: repo / "src" / "openalpha_cn" / "__init__.py"
+    )
+    monkeypatch.setattr(
+        registry, "_imported_scripts", lambda: (research / "grid.py", research / "registry.py")
     )
 
-    assert run.ran == 2
-    rows = _rows(ledger)
+    registry.run_holdout(registration, ledger, repo, configs[0], measure, clock=lambda: AT)
+
+    rows = [row for row in _rows(ledger) if row["kind"] == "measurement"]
     for config, row in zip(configs, rows, strict=True):
         backtest = sdk.run_strategy_backtest(**config)
         excess = tuple(
@@ -630,7 +648,7 @@ def test_the_runner_drives_the_sdk_and_ledgers_net_excess_and_its_sign_flip(
             mean / statistics.stdev(values) * math.sqrt(per_year), rel=1e-12
         )
         assert result["annualized_mean_net_excess"] == pytest.approx(mean * per_year, rel=1e-12)
-    assert grid.fdr_table(ledger, "forward", 0.10).family_size == 2
+    assert grid.stage_family(ledger, grid.HOLDOUT_STAGE) == 1
 
 
 def test_a_backtest_with_no_complete_period_is_refused() -> None:
