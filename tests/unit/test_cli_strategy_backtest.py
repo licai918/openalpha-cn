@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 from datetime import date
 from decimal import Decimal
+from math import nan
 from pathlib import Path
 from typing import Any, Final
 
@@ -20,8 +21,11 @@ from panel_fixtures import EXCHANGE, GeneratedPanel
 from strategy_fixtures import READ_AT, REVERSAL, write_strategy_corpus
 from typer.testing import CliRunner
 
+from openalpha_cn import strategy_view
+from openalpha_cn.backtest.execution import CostSchedule
 from openalpha_cn.backtest.strategy_backtest import STRATEGY_BACKTEST_LIMITATION_CODES
 from openalpha_cn.cli import STRATEGY_EXIT, PanelExit, app
+from openalpha_cn.panel_ingest import session_publication_instant
 from openalpha_cn.sdk import OpenAlphaSDK
 from openalpha_cn.strategy_view import (
     StrategyPanelUnreadableError,
@@ -149,6 +153,57 @@ def test_a_request_that_cannot_be_put_exits_bad_request(
 
     assert outcome.exit_code == int(PanelExit.bad_request), outcome.output
     assert message in json.loads(outcome.stdout)["detail"]
+
+
+@pytest.mark.parametrize(
+    "flag",
+    ["--commission-rate", "--minimum-commission", "--transfer-fee-rate", "--stamp-duty-rate"],
+)
+def test_a_negative_cost_exits_bad_request(runtime: tuple[Path, GeneratedPanel], flag: str) -> None:
+    """A negative fee would make the backtest look better; it is refused, not priced."""
+    root, panel = runtime
+    outcome = runner.invoke(app, [*_arguments(root, panel, flag, "-0.001"), "--json"])
+
+    assert outcome.exit_code == int(PanelExit.bad_request), outcome.output
+    assert json.loads(outcome.stdout)["exit_code"] == int(PanelExit.bad_request)
+
+
+def test_the_sdk_refuses_a_negative_cost_as_a_request_error(
+    runtime: tuple[Path, GeneratedPanel],
+) -> None:
+    """The SDK takes a `CostSchedule` object; one built without validation is still refused."""
+    root, panel = runtime
+    rebate = CostSchedule.model_construct(
+        commission_rate=Decimal("-0.001"),
+        minimum_commission=Decimal("5.00"),
+        transfer_fee_rate=Decimal("0"),
+        sell_stamp_duty_rate=Decimal("0.0005"),
+    )
+    with pytest.raises(StrategyRequestError, match="negative"):
+        OpenAlphaSDK(runtime_dir=root).run_strategy_backtest(**_sdk_arguments(panel), costs=rebate)
+
+
+def test_a_refusal_raised_while_the_inputs_are_assembled_is_blocked_not_internal(
+    runtime: tuple[Path, GeneratedPanel], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stored score the book's own `ScoreRow` refuses (here a NaN) is a refusal, exit 1.
+
+    The stored tier is replaced at the one seam that reads it, so every other step -- the
+    orientation, the `ScoreRow` constructor that raises, the envelope -- is the shipped code.
+    Before the fix the `StrategyBacktestError` escaped `backtest_strategy`'s refusal boundary
+    and the command exited `internal_error`.
+    """
+    root, panel = runtime
+
+    def not_a_number(*_: object) -> list[strategy_view._Observed]:
+        instant = session_publication_instant(panel.sessions[1])
+        return [strategy_view._Observed(subject=panel.securities[0], as_of=instant, value=nan)]
+
+    monkeypatch.setattr(strategy_view, "_tier_rows", not_a_number)
+    outcome = runner.invoke(app, [*_arguments(root, panel), "--json"])
+
+    assert outcome.exit_code == int(PanelExit.unhealthy), outcome.output
+    assert "non-finite" in json.loads(outcome.stdout)["detail"]
 
 
 def test_a_malformed_component_exits_bad_request(runtime: tuple[Path, GeneratedPanel]) -> None:

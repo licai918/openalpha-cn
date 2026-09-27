@@ -75,8 +75,11 @@ from openalpha_cn.backtest.strategy_backtest import (
 from openalpha_cn.domain.adjustment import AdjustmentHistory, AdjustmentHorizonError
 from openalpha_cn.domain.daily_prices import DailyBar, PriceDataError
 from openalpha_cn.domain.factor import FactorDefinition
-from openalpha_cn.domain.factor_neutralization import FactorNeutralizationSpec
-from openalpha_cn.domain.factor_transform import FactorTransformSpec
+from openalpha_cn.domain.factor_neutralization import (
+    FactorNeutralizationRegistry,
+    FactorNeutralizationSpec,
+)
+from openalpha_cn.domain.factor_transform import FactorTransformRegistry, FactorTransformSpec
 from openalpha_cn.domain.index_prices import IndexPriceError, index_session_returns
 from openalpha_cn.domain.industry_classification import (
     INDUSTRY_MEMBERSHIP_DATASET,
@@ -236,6 +239,8 @@ def strategy_request(
     costs: CostSchedule = PROTOCOL_COSTS,
     slippage_rate: Decimal = PROTOCOL_SLIPPAGE_RATE,
     benchmarks: Sequence[str] = PROTOCOL_BENCHMARKS,
+    transforms: FactorTransformRegistry = FACTOR_TRANSFORMS,
+    neutralizations: FactorNeutralizationRegistry = FACTOR_NEUTRALIZATIONS,
 ) -> StrategyRequest:
     """Resolve one face's parameters into the request both faces ask. Touches no store.
 
@@ -245,7 +250,10 @@ def strategy_request(
 
     `transform` is required exactly when a component reads the `processed` or `neutralized`
     tier, `neutralization` exactly when one reads `neutralized`, and both apply to every
-    component on those tiers.
+    component on those tiers. The two registries default to the build's own, which is what both
+    faces resolve against; they are parameters so a study over a probe transform or
+    neutralisation can be driven without a second resolver -- `factor_view.factor_request`'s
+    arrangement and its reason.
     """
     try:
         source = ScoreSource.model_validate(
@@ -288,9 +296,9 @@ def strategy_request(
             "refused otherwise"
         )
     try:
-        transform_spec = None if transform is None else FACTOR_TRANSFORMS.get(transform.strip())
+        transform_spec = None if transform is None else transforms.get(transform.strip())
         neutralization_spec = (
-            None if neutralization is None else FACTOR_NEUTRALIZATIONS.get(neutralization.strip())
+            None if neutralization is None else neutralizations.get(neutralization.strip())
         )
     except ValueError as error:
         raise StrategyRequestError(str(error)) from error
@@ -346,10 +354,13 @@ def backtest_strategy(
 
     `predictions` looks a registered prediction up by id; it is required exactly when the
     source names `prediction_ids`. A `StrategyBacktestError` -- look-ahead, a signal day with no
-    cross section, a benchmark gap -- is `blocked`.
+    cross section, a benchmark gap -- is `blocked`, and that holds for one raised while the
+    inputs are ASSEMBLED as much as for one raised while the book runs: a stored score that
+    `ScoreRow`'s own contract refuses (a non-finite value, a naive clock) is the same kind of
+    refusal and must not reach a face as an unanticipated error.
     """
-    inputs = load_strategy_inputs(store, request, predictions=predictions)
     try:
+        inputs = load_strategy_inputs(store, request, predictions=predictions)
         return _read(
             lambda: run_strategy_backtest(inputs, request.spec),
             store=store,

@@ -9,31 +9,57 @@ The panel is `panel_fixtures.generate_panel`'s ten-session, eight-security corpu
 move between sessions, plus two things that generator has no synthetic form for: an `index_daily`
 partition (000300.SH, which the level read requires, and 000905.SH, the protocol's benchmark) and
 raw `reversal_1d/v1` cross sections built through the real engine at each session's 16:30
-publication instant. Everything is written at test time; nothing is checked in.
+publication instant. `write_tiered_corpus` adds the processed and neutralized tiers under probe
+specs an eight-name panel clears. Everything is written at test time; nothing is checked in.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import dataclasses
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Final
 
-from panel_fixtures import GeneratedPanel, generate_panel, write_generated_panel
+from panel_fixtures import (
+    DAILY_BASIC_DATASET,
+    GeneratedPanel,
+    generate_panel,
+    write_generated_panel,
+)
 
+from openalpha_cn.backtest.factor_ic import TIER_ADMITTED_CODES
+from openalpha_cn.domain.factor_neutralization import (
+    FactorNeutralizationRegistry,
+    FactorNeutralizationSpec,
+)
+from openalpha_cn.domain.factor_transform import (
+    FactorTransformRegistry,
+    FactorTransformSpec,
+    MissingValuePolicy,
+    WinsorizationPolicy,
+)
 from openalpha_cn.domain.index_prices import INDEX_DAILY_DATA_COLUMNS, INDEX_DAILY_DATASET
 from openalpha_cn.domain.panel_batch import ColumnarPanelBatch, PanelColumn, TimelineColumns
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import (
     FACTOR_DEFINITIONS,
     FactorPanel,
+    apply_factor_transform,
     compute_factor,
     write_factor_panels,
+    write_processed_factor_panels,
 )
 from openalpha_cn.panel_ingest import (
     daily_requirement,
     session_publication_instant,
     write_index_prices,
+)
+from openalpha_cn.panel_neutralization import (
+    apply_factor_neutralization,
+    load_industry_market_cap_cross_section,
+    write_neutralized_factor_panels,
 )
 
 REVERSAL: Final = FACTOR_DEFINITIONS.get("reversal_1d/v1")
@@ -166,3 +192,136 @@ def write_strategy_corpus(
         )
     write_factor_panels(store, builds)
     return panel
+
+
+# --- the processed and neutralized tiers ---------------------------------------------------------
+
+PROBE_TRANSFORM: Final[FactorTransformSpec] = FactorTransformSpec(
+    key="probe_zscore",
+    version=1,
+    winsorization=WinsorizationPolicy(method="none"),
+    standardization="zscore",
+    missing_values=MissingValuePolicy(
+        not_in_universe="exclude",
+        insufficient_history="exclude",
+        ambiguous_filing="exclude",
+        input_missing="exclude",
+        undefined_value="exclude",
+    ),
+    min_cross_section=1,
+)
+"""A transform whose floor an eight-name panel clears; the shipped one needs fifty names.
+
+`tests/integration/panel/test_factor_neutralizations.py::_transform_spec`'s probe, restated with
+the same settings because that helper lives in a test module no other file may import."""
+
+PROBE_NEUTRALIZATION: Final[FactorNeutralizationSpec] = FactorNeutralizationSpec(
+    key="probe_neutral",
+    version=1,
+    industry_level="L1",
+    market_cap_measure="total_mv",
+    market_cap_scale="log",
+    participation="measured_only",
+    min_industry_members=2,
+    min_cross_section=2,
+)
+"""A neutralisation whose floors an eight-name panel clears (`industry_and_size/v1` needs 100)."""
+
+PROBE_TRANSFORMS: Final[FactorTransformRegistry] = FactorTransformRegistry((PROBE_TRANSFORM,))
+PROBE_NEUTRALIZATIONS: Final[FactorNeutralizationRegistry] = FactorNeutralizationRegistry(
+    (PROBE_NEUTRALIZATION,)
+)
+
+CAP_BASE: Final[float] = 2_000_000.0
+CAP_STEP: Final[float] = 750_000.0
+
+
+def _with_market_caps(panel: GeneratedPanel) -> GeneratedPanel:
+    """The generated panel with a `total_mv` that varies, so the size regressor is not flat.
+
+    The generator writes `1.0` on every row, a design with no dispersion that the neutralisation
+    refuses as degenerate; `test_factor_neutralizations._with_market_caps`' substitution.
+    """
+    batch = panel.batch(DAILY_BASIC_DATASET)
+    order = tuple(panel.securities)
+    caps = tuple(CAP_BASE + CAP_STEP * order.index(str(subject)) for subject in batch.subjects)
+    columns = tuple(
+        PanelColumn(column.name, column.kind, caps) if column.name == "total_mv" else column
+        for column in batch.columns
+    )
+    replaced = dataclasses.replace(batch, columns=columns)
+    return dataclasses.replace(panel, batches={**panel.batches, DAILY_BASIC_DATASET: replaced})
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TieredCorpus:
+    """What `write_tiered_corpus` stored, so a read can be held against the writer's rows."""
+
+    panel: GeneratedPanel
+    processed: Mapping[date, Mapping[str, float]]
+    """Each build session's stored processed value per security, admitted rows only."""
+    neutralized: Mapping[date, Mapping[str, float]]
+    """Each build session's stored residual per security, admitted rows only."""
+
+
+def write_tiered_corpus(root: Path) -> TieredCorpus:
+    """The strategy panel with all three tiers of `reversal_1d/v1` written through the real writers.
+
+    Every session but the first gets a raw build at its 16:30 instant, the probe transform of it
+    and the probe neutralisation of that, each written by its own plane's writer
+    (`write_factor_panels`, `write_processed_factor_panels`, `write_neutralized_factor_panels`).
+    """
+    store = PanelStore(root / "panel")
+    panel = _with_market_caps(generate_panel(shapes=("daily.close_moves_between_sessions",)))
+    write_generated_panel(store, panel)
+    write_index_prices(store, [_index_batch(panel.sessions)])
+    raw, processed, neutralized = [], [], []
+    for session in panel.sessions[1:]:
+        source = _build(store, panel, session, late=False)
+        transformed = apply_factor_transform(
+            source, PROBE_TRANSFORM, code_commit=COMMIT, built_at=source.built_at
+        )
+        section = load_industry_market_cap_cross_section(
+            store,
+            PROBE_NEUTRALIZATION,
+            subjects=panel.securities,
+            day=session,
+            as_of=build_instant(session),
+            calendar=panel.calendar(),
+            membership_years=(session.year,),
+            max_staleness=None,
+        )
+        raw.append(source)
+        processed.append(transformed)
+        neutralized.append(
+            apply_factor_neutralization(
+                transformed,
+                PROBE_NEUTRALIZATION,
+                section,
+                code_commit=COMMIT,
+                built_at=source.built_at,
+            )
+        )
+    write_factor_panels(store, raw)
+    write_processed_factor_panels(store, processed)
+    write_neutralized_factor_panels(store, neutralized)
+    zone = session_publication_instant(panel.sessions[0]).tzinfo
+    return TieredCorpus(
+        panel=panel,
+        processed={
+            build.observations[0].as_of.astimezone(zone).date(): {
+                row.subject: row.value
+                for row in build.observations
+                if row.coverage in TIER_ADMITTED_CODES["processed"] and row.value is not None
+            }
+            for build in processed
+        },
+        neutralized={
+            build.observations[0].as_of.astimezone(zone).date(): {
+                row.subject: row.value
+                for row in build.observations
+                if row.coverage in TIER_ADMITTED_CODES["neutralized"] and row.value is not None
+            }
+            for build in neutralized
+        },
+    )

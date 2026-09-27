@@ -18,7 +18,19 @@ from typing import Any, Final
 
 import pytest
 from panel_fixtures import EXCHANGE, GeneratedPanel
-from strategy_fixtures import INDEX_LEVELS, READ_AT, REVERSAL, stored_value, write_strategy_corpus
+from strategy_fixtures import (
+    INDEX_LEVELS,
+    PROBE_NEUTRALIZATION,
+    PROBE_NEUTRALIZATIONS,
+    PROBE_TRANSFORM,
+    PROBE_TRANSFORMS,
+    READ_AT,
+    REVERSAL,
+    TieredCorpus,
+    stored_value,
+    write_strategy_corpus,
+    write_tiered_corpus,
+)
 
 from openalpha_cn.backtest.strategy_backtest import (
     EQUAL_WEIGHT_ALL_A,
@@ -242,6 +254,50 @@ def test_a_later_rebuild_on_a_signal_day_is_not_traded_in_place_of_the_on_time_b
         assert row.available_time == inputs.signal_instants[row.signal_day]
         assert row.value == -stored_value(subjects, row.subject, index)
     assert backtest_strategy(store, _request(panel)).periods
+
+
+@pytest.fixture(scope="module")
+def tiered(tmp_path_factory: pytest.TempPathFactory) -> tuple[PanelStore, TieredCorpus]:
+    root = tmp_path_factory.mktemp("strategy-view-tiers")
+    corpus = write_tiered_corpus(root)
+    return PanelStore(root / "panel"), corpus
+
+
+@pytest.mark.parametrize("tier", ["processed", "neutralized"])
+def test_a_processed_or_neutralized_tier_is_read_end_to_end_and_traded(
+    tiered: tuple[PanelStore, TieredCorpus], tier: str
+) -> None:
+    """Each derived tier, written by its own plane's writer, read back by the view and traded.
+
+    The scores the book receives are held to the writer's own rows -- negated, because
+    `reversal_1d/v1` is `lower_is_better` -- on exactly the signal days, and the first rebalance
+    buys from the top of that ranking. The processed tier needs the transform, the neutralized
+    tier needs both; the probe specs are the ones an eight-name panel clears.
+    """
+    store, corpus = tiered
+    panel = corpus.panel
+    request = _request(
+        panel,
+        components=((REVERSAL.qualified_key, tier, Decimal("1")),),
+        transform=PROBE_TRANSFORM.qualified_key,
+        neutralization=PROBE_NEUTRALIZATION.qualified_key if tier == "neutralized" else None,
+        transforms=PROBE_TRANSFORMS,
+        neutralizations=PROBE_NEUTRALIZATIONS,
+    )
+    written = corpus.processed if tier == "processed" else corpus.neutralized
+    inputs = load_strategy_inputs(store, request)
+    signal_days = [inputs.sessions[index] for index in (0, 3, 6)]
+
+    assert {(row.signal_day, row.subject): row.value for row in inputs.scores} == {
+        (day, subject): -value for day in signal_days for subject, value in written[day].items()
+    }
+    assert all(row.component == f"{REVERSAL.qualified_key}@{tier}" for row in inputs.scores)
+    assert len(written[signal_days[0]]) >= 3
+
+    first = backtest_strategy(store, request).periods[0]
+    best = sorted(written[signal_days[0]], key=lambda subject: written[signal_days[0]][subject])
+    assert {fill.subject for fill in first.fills if fill.side == "buy"} <= set(best[:3])
+    assert first.fills
 
 
 def test_the_rendered_answer_carries_every_number_as_a_string_and_every_limitation(

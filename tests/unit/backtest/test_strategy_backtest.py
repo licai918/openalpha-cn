@@ -177,6 +177,7 @@ def build_quotes(
     suspended: frozenset[tuple[str, date]] = frozenset(),
     first_previous_close: Mapping[str, str] = FIRST_PREVIOUS_CLOSE,
     turnover: Mapping[str, Decimal] = TURNOVER_YUAN,
+    turnover_on: Mapping[tuple[str, date], Decimal] | None = None,
 ) -> dict[date, dict[str, SessionQuote]]:
     quotes: dict[date, dict[str, SessionQuote]] = {day: {} for day in SESSIONS}
     for subject, series in prices.items():
@@ -192,7 +193,7 @@ def build_quotes(
                     close=close,
                     suspended=(subject, day) in suspended,
                 ),
-                turnover_yuan=turnover[subject],
+                turnover_yuan=(turnover_on or {}).get((subject, day), turnover[subject]),
                 adj_factor=Decimal("1"),
             )
             previous = close
@@ -726,3 +727,144 @@ def test_the_answer_carries_every_known_limitation_by_code() -> None:
             "a_passing_backtest_is_not_evidence_that_a_signal_is_real",
         }
     )
+
+
+# --- fix round 1: capped counting and board-legal sale sizes --------------------------------------
+
+STAR: Final[str] = "688001.SH"
+
+
+def _star_inputs(
+    price: str,
+    scores: Mapping[date, Mapping[str, float]],
+    turnover_on: Mapping[tuple[str, date], Decimal],
+) -> StrategyInputs:
+    """A (the main-board name) beside one STAR name trading flat at `price` every session."""
+    prices = {A: PRICES[A], STAR: tuple((price, price) for _ in SESSIONS)}
+    return build_inputs(
+        scores=score_rows(scores),
+        quotes=build_quotes(
+            prices,
+            first_previous_close={A: "9.90", STAR: price},
+            turnover={A: TURNOVER_YUAN[A], STAR: Decimal("20000000")},
+            turnover_on=turnover_on,
+        ),
+    )
+
+
+ONE_NAME: Final[StrategySpec] = HAND_FIXTURE_SPEC.model_copy(update={"holding_count": 1})
+
+
+def test_a_capped_sale_the_market_then_refuses_is_a_rejection_and_not_a_capped_order() -> None:
+    """A traded only 3,000,000 on D4 and opens D5 at its limit-down price, 10.80 x 0.9 = 9.72.
+
+    The cap sizes the sale down (1% x 3,000,000 = 30,000 < 9,900 x 9.72 = 96,228) and the
+    policy then refuses it at the limit. Nothing filled, so nothing was capped: one rejection,
+    zero capped orders, no fill. `capped_orders` counts orders that FILLED smaller, on both
+    sides.
+    """
+    prices = dict(PRICES)
+    prices[A] = (*PRICES[A][:4], ("9.72", "9.72"), ("9.72", "9.72"))
+    quotes = build_quotes(prices, turnover_on={(A, D4): Decimal("3000000")})
+    second = run_strategy_backtest(build_inputs(quotes=quotes), HAND_FIXTURE_SPEC).periods[1]
+
+    assert second.fills == ()
+    assert [(r.subject, r.side) for r in second.rejections] == [(A, "sell")]
+    assert (second.rejected_orders, second.capped_orders) == (1, 0)
+
+
+def test_a_capped_star_sale_below_200_shares_is_refused_rather_than_sent_as_an_odd_lot() -> None:
+    """STAR at 399.00: 100,000 buys 250 shares (99,750.00 + 24.94 + 99.75 = 99,874.69).
+
+    D4 turnover 4,788,000 caps the D5 sale at 1% = 47,880 = 120 shares. A STAR sale must be at
+    least 200 shares while the position holds 200 or more, so 120 (or a main-board 100) is not a
+    legal order: the sale is refused, nothing fills, all 250 shares are carried.
+    """
+    scores = {D1: {STAR: 2.0, A: 1.0}, D4: {A: 2.0, STAR: 1.0}}
+    inputs = _star_inputs("399.00", scores, {(STAR, D4): Decimal("4788000")})
+    first, second = run_strategy_backtest(inputs, ONE_NAME).periods
+
+    assert [(f.subject, f.quantity) for f in first.fills] == [(STAR, 250)]
+    assert second.fills == ()
+    assert [(r.subject, r.side) for r in second.rejections] == [(STAR, "sell")]
+    assert "participation" in second.rejections[0].reason
+    assert second.holdings == (STAR,)
+    assert second.capped_orders == 0
+
+
+def test_a_capped_star_sale_above_200_shares_is_sized_in_single_shares() -> None:
+    """The same position with D4 turnover 8,379,000: the cap is 83,790 = 210 shares at 399.00.
+
+    Above the 200-share floor STAR trades in single shares, so the sale is 210 -- not the
+    main-board lot floor of 200 -- leaving 40 carried, and it is one capped order.
+    """
+    scores = {D1: {STAR: 2.0, A: 1.0}, D4: {A: 2.0, STAR: 1.0}}
+    inputs = _star_inputs("399.00", scores, {(STAR, D4): Decimal("8379000")})
+    second = run_strategy_backtest(inputs, ONE_NAME).periods[1]
+
+    assert [(f.subject, f.side, f.quantity) for f in second.fills] == [(STAR, "sell", 210)]
+    assert second.capped_orders == 1
+    assert second.holdings == (STAR,)
+
+
+def _star_remainder_inputs(d5_turnover: Decimal) -> StrategyInputs:
+    """STAR at 285.00 over three rebalances (every two sessions), holding one name.
+
+    D1 buys 350 shares (99,750.00 + 24.94 + 99.75 = 99,874.69). D3's turnover 5,700,000 caps
+    the D4 sale at 57,000 = 200 shares, leaving a 150-share remainder; the book is full, so
+    nothing is bought. D5 wants the remainder gone.
+    """
+    scores = {D1: {STAR: 2.0, A: 1.0}, D3: {A: 2.0, STAR: 1.0}, D5: {A: 2.0, STAR: 1.0}}
+    return _star_inputs(
+        "285.00",
+        scores,
+        {(STAR, D3): Decimal("5700000"), (STAR, D5): d5_turnover},
+    )
+
+
+def test_a_star_remainder_under_200_shares_is_sold_in_full_when_a_sale_is_due() -> None:
+    spec = ONE_NAME.model_copy(update={"rebalance_every_sessions": 2})
+    periods = run_strategy_backtest(_star_remainder_inputs(Decimal("20000000")), spec).periods
+
+    assert [(f.subject, f.quantity) for f in periods[0].fills] == [(STAR, 350)]
+    assert [(f.subject, f.side, f.quantity) for f in periods[1].fills] == [(STAR, "sell", 200)]
+    assert periods[1].holdings == (STAR,)
+    assert [(f.subject, f.side, f.quantity) for f in periods[2].fills] == [
+        (STAR, "sell", 150),
+        (A, "buy", 8_900),
+    ]
+
+
+@pytest.mark.parametrize(
+    "field", ["commission_rate", "minimum_commission", "transfer_fee_rate", "sell_stamp_duty_rate"]
+)
+def test_a_negative_cost_is_refused_by_the_cost_schedule_itself(field: str) -> None:
+    """A negative fee is a rebate nobody pays, and it would make every backtest look better."""
+    with pytest.raises(ValueError, match=field):
+        CostSchedule(**{field: Decimal("-0.001")})  # type: ignore[arg-type]
+
+
+def test_a_spec_refuses_a_negative_cost_that_skipped_validation() -> None:
+    """`model_construct` builds a `CostSchedule` without validating it; the spec checks again."""
+    rebate = CostSchedule.model_construct(
+        commission_rate=Decimal("-0.001"),
+        minimum_commission=Decimal("5.00"),
+        transfer_fee_rate=Decimal("0"),
+        sell_stamp_duty_rate=Decimal("0.0005"),
+    )
+    with pytest.raises(ValueError, match="negative"):
+        StrategySpec.model_validate({**HAND_FIXTURE_SPEC.model_dump(), "costs": rebate})
+
+
+def test_a_star_remainder_under_200_shares_is_never_sold_in_part() -> None:
+    """D5 turnover 2,850,000 caps the sale at 28,500 = 100 shares of the 150 held.
+
+    A remainder under 200 shares must go in one order, so 100 is illegal and the sale is
+    refused; the 150 shares are carried and the book, still full, buys nothing.
+    """
+    spec = ONE_NAME.model_copy(update={"rebalance_every_sessions": 2})
+    last = run_strategy_backtest(_star_remainder_inputs(Decimal("2850000")), spec).periods[2]
+
+    assert last.fills == ()
+    assert [(r.subject, r.side) for r in last.rejections] == [(STAR, "sell")]
+    assert last.holdings == (STAR,)

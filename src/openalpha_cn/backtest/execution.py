@@ -255,14 +255,22 @@ class ExecutionRequest(BaseModel):
 
 
 class CostSchedule(BaseModel):
-    """Configurable transaction-cost assumptions, expressed as decimal rates."""
+    """Configurable transaction-cost assumptions, expressed as decimal rates.
+
+    Every field is bounded `ge=0` (`V2-P6-007`'s review): a negative rate or floor is a rebate no
+    broker pays, and fed to a backtest it makes every net return look better than any account
+    could have earned. No caller in this repository constructs one with a negative value -- the
+    measured set at the time was this module's default, `strategy_view.PROTOCOL_COSTS`, the
+    `strategy backtest` command's options and the test suites' non-negative schedules -- so the
+    bound is a refusal of a mistake rather than of a use.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    commission_rate: Decimal = Decimal("0.0003")
-    minimum_commission: Decimal = Decimal("5.00")
-    transfer_fee_rate: Decimal = Decimal("0.00001")
-    sell_stamp_duty_rate: Decimal = Decimal("0.0005")
+    commission_rate: Decimal = Field(default=Decimal("0.0003"), ge=0)
+    minimum_commission: Decimal = Field(default=Decimal("5.00"), ge=0)
+    transfer_fee_rate: Decimal = Field(default=Decimal("0.00001"), ge=0)
+    sell_stamp_duty_rate: Decimal = Field(default=Decimal("0.0005"), ge=0)
 
 
 class AShareExecutionPolicy:

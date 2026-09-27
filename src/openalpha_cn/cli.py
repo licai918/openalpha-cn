@@ -8431,12 +8431,20 @@ def strategy_backtest_command(
     runtime_dir = _resolved_runtime_dir(runtime_dir)
 
     with _panel_command("strategy backtest", json_output=json_output):
-        costs = CostSchedule(
-            commission_rate=_strategy_decimal(commission_rate, flag="--commission-rate"),
-            minimum_commission=_strategy_decimal(minimum_commission, flag="--minimum-commission"),
-            transfer_fee_rate=_strategy_decimal(transfer_fee_rate, flag="--transfer-fee-rate"),
-            sell_stamp_duty_rate=_strategy_decimal(stamp_duty_rate, flag="--stamp-duty-rate"),
-        )
+        try:
+            costs = CostSchedule(
+                commission_rate=_strategy_decimal(commission_rate, flag="--commission-rate"),
+                minimum_commission=_strategy_decimal(
+                    minimum_commission, flag="--minimum-commission"
+                ),
+                transfer_fee_rate=_strategy_decimal(transfer_fee_rate, flag="--transfer-fee-rate"),
+                sell_stamp_duty_rate=_strategy_decimal(stamp_duty_rate, flag="--stamp-duty-rate"),
+            )
+        except ValidationError as error:
+            raise _panel_fail(
+                PanelExit.bad_request,
+                f"a cost option is refused -- a negative fee is a rebate no broker pays: {error}",
+            ) from error
         try:
             request = strategy_request(
                 components=_strategy_components(component or []),

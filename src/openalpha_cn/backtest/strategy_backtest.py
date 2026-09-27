@@ -164,7 +164,11 @@ KNOWN_STRATEGY_BACKTEST_LIMITATIONS: Final[tuple[StrategyBacktestLimitation, ...
             "execution session's own turnover is not known at its open. A name with no bar on "
             "T has no turnover and every order in it is refused. A capped buy is filled smaller "
             "and counted in capped_orders; a cap below one board lot is a rejection. A capped "
-            "sell leaves the remainder held until a later rebalance."
+            "sale is cut to a size the board accepts -- whole lots off STAR, at least 200 shares "
+            "in single-share steps on STAR -- and leaves the remainder held until a later "
+            "rebalance; a remainder under its board's minimum may only be sold whole, so a cap "
+            "that does not reach all of it refuses the sale. capped_orders counts only orders "
+            "that FILLED smaller than they would have without the cap, on both sides."
         ),
     ),
     StrategyBacktestLimitation(
@@ -353,6 +357,14 @@ class StrategySpec(BaseModel):
 
     @model_validator(mode="after")
     def validate_portfolio(self) -> Self:
+        negative = sorted(
+            name for name, value in self.costs.model_dump().items() if Decimal(value) < 0
+        )
+        if negative:
+            raise ValueError(
+                f"costs.{', costs.'.join(negative)} is negative; a rebate no broker pays would "
+                "make every net return look better than an account could have earned"
+            )
         if self.buffer_rank is not None and self.buffer_rank < self.holding_count:
             raise ValueError(
                 f"buffer_rank {self.buffer_rank} is inside holding_count {self.holding_count}; "
@@ -851,6 +863,24 @@ def _record_fill(
     return fees
 
 
+def _legal_sale(held: int, *, limit: Decimal, bar: MarketBar) -> int:
+    """The largest sale of `held` shares the cap allows and the board accepts, or `0`.
+
+    The whole position is always a legal sale, so when the cap reaches it the answer is `held`.
+    Otherwise the sale is a part of the position, and a part is legal only in the shape a buy of
+    that board is: whole 100-share lots off STAR, and on STAR at least 200 shares in single-share
+    steps -- `position_quantity` sized at the cap, the same helper and the same
+    `BOARD_MINIMUM_QUANTITY` the buy side uses. A position smaller than its board's minimum is an
+    odd remainder that may only be sold whole, so a cap that does not reach all of it allows
+    nothing.
+    """
+    if held * bar.open <= limit:
+        return held
+    if held < BOARD_MINIMUM_QUANTITY[bar.board] or limit <= 0:
+        return 0
+    return min(position_quantity(capital=limit, market=bar), held)
+
+
 def _sell(
     book: _Book,
     ledger: _Ledger,
@@ -871,19 +901,23 @@ def _sell(
         ledger.reject(day, subject, "sell", "no signal-session turnover for the participation cap")
         return
     bar = _at_the_open(quote.bar)
-    quantity = holding.shares
-    if quantity * bar.open > limit:
-        quantity = int(limit // (bar.open * SHARE_LOT)) * SHARE_LOT
-        if quantity <= 0:
-            ledger.reject(day, subject, "sell", "the participation cap is below one board lot")
-            return
-        ledger.capped += 1
+    quantity = _legal_sale(holding.shares, limit=limit, bar=bar)
+    if quantity <= 0:
+        ledger.reject(
+            day,
+            subject,
+            "sell",
+            "the participation cap does not reach a sale the board accepts from this position",
+        )
+        return
     result = policy.execute(
         ExecutionRequest(side="sell", quantity=quantity, position_open_date=holding.opened), bar
     )
     if result.status != "filled":
         ledger.reject(day, subject, "sell", result.reason or "rejected")
         return
+    if quantity < holding.shares:
+        ledger.capped += 1
     fees = _record_fill(ledger, spec, result, subject=subject, day=day, price=bar.open)
     proceeds = (quantity * bar.open * quote.adj_factor / holding.entry_adj).quantize(
         _CENT, rounding=ROUND_HALF_UP
@@ -893,6 +927,31 @@ def _sell(
     holding.shares -= quantity
     if holding.shares == 0:
         del book.holdings[subject]
+
+
+def _sized_buy(
+    policy: AShareExecutionPolicy,
+    spec: StrategySpec,
+    bar: MarketBar,
+    *,
+    capital: Decimal,
+    budget: Decimal,
+) -> tuple[int, ExecutionResult] | str | None:
+    """The largest board-legal buy whose notional fits `capital` and whose outlay fits `budget`.
+
+    Returns the quantity and its fill, the policy's refusal reason when the market refuses the
+    order at any size, or `None` when no legal size fits.
+    """
+    quantity = position_quantity(capital=capital, market=bar) if capital > 0 else 0
+    step = 1 if bar.board == "star" else SHARE_LOT
+    while quantity >= BOARD_MINIMUM_QUANTITY[bar.board]:
+        result = policy.execute(ExecutionRequest(side="buy", quantity=quantity), bar)
+        if result.status != "filled":
+            return result.reason or "rejected"
+        if result.notional + result.total_cost + _slippage(spec, result.notional) <= budget:
+            return quantity, result
+        quantity -= step
+    return None
 
 
 def _buy(
@@ -915,31 +974,23 @@ def _buy(
         return
     bar = _at_the_open(quote.bar)
     budget = min(spec.position_capital, book.cash)
-    capped = limit < budget
-    sizing = min(budget, limit)
-    quantity = position_quantity(capital=sizing, market=bar) if sizing > 0 else 0
-    step = 1 if bar.board == "star" else SHARE_LOT
-    result: ExecutionResult | None = None
-    while quantity > 0:
-        result = policy.execute(ExecutionRequest(side="buy", quantity=quantity), bar)
-        if result.status != "filled":
-            ledger.reject(day, subject, "buy", result.reason or "rejected")
-            return
-        if result.notional + result.total_cost + _slippage(spec, result.notional) <= budget:
-            break
-        quantity -= step
-        if quantity < BOARD_MINIMUM_QUANTITY[bar.board]:
-            quantity = 0
-    if quantity <= 0 or result is None:
+    sized = _sized_buy(policy, spec, bar, capital=min(budget, limit), budget=budget)
+    if isinstance(sized, str):
+        ledger.reject(day, subject, "buy", sized)
+        return
+    if sized is None:
         reason = (
             "the participation cap is below one board lot"
-            if capped
+            if limit < budget
             else "the budget is below one board lot after costs"
         )
         ledger.reject(day, subject, "buy", reason)
         return
-    if capped:
-        ledger.capped += 1
+    quantity, result = sized
+    if limit < budget:
+        uncapped = _sized_buy(policy, spec, bar, capital=budget, budget=budget)
+        if isinstance(uncapped, tuple) and quantity < uncapped[0]:
+            ledger.capped += 1
     fees = _record_fill(ledger, spec, result, subject=subject, day=day, price=bar.open)
     book.cash -= result.notional + fees
     ledger.bought += result.notional
