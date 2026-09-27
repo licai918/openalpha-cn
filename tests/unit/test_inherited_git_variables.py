@@ -53,6 +53,8 @@ GIT_LAUNCHING_TESTS: Final[dict[str, tuple[str, ...]]] = {
         "test_multi_subject_evidence_names_the_subjects_and_the_flag_that_selects_one",
         "test_the_second_subject_researched_under_the_default_run_id_names_that_flag",
     ),
+    # V2-P6-008, after the census: the holdout guard reads a throwaway repository's history.
+    "tests/unit/scripts/test_research_registry.py": (),
 }
 """Every test under `tests/unit/` the D13 census found starting git, by module; `()` is all of it.
 
