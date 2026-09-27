@@ -910,6 +910,57 @@ class _CatalogAccess:
                 self._condition.notify_all()
 
 
+_INSERT_CHUNK_ROWS: Final[int] = 20_000
+"""Rows per columnar `INSERT` statement in `_insert_columnar`.
+
+Chosen to bound one statement's parameter-list memory (`_INSERT_CHUNK_ROWS` Python lists,
+each `len(rows)` long) without giving up the columnar win on the scale this module actually
+sees (~2,440 rows per single-security history, up to ~1.35e7 rows across a whole panel); see
+`V2-P6-004`'s benchmark in the module's insert-path comment below.
+"""
+
+
+def _insert_columnar(
+    connection: duckdb.DuckDBPyConnection,
+    columns: Sequence[ColumnSpec],
+    rows: Sequence[tuple[object, ...]],
+) -> None:
+    """Insert `rows` into `staging` one column-list per parameter, `_INSERT_CHUNK_ROWS` rows
+    at a time, instead of one bound statement per row (`V2-P6-004`).
+
+    `executemany()` bound one row per statement and, per a factor-build profile taken
+    2026-09-26, was 53% of the build's wall clock. A standalone benchmark (116,880 rows x 10
+    columns) measured `executemany` at 10.84 s against 0.88 s here, with identical rows read
+    back afterwards -- about a twelfth of the cost for the same partition on disk.
+
+    The mechanism: bind each column as one `?`-parameter carrying a whole Python list, cast
+    it to a typed DuckDB array (`?::{type}[]`), `unnest` it back into a column, and let
+    positional `SELECT` zip the unnested columns back into rows in the same order the caller
+    gave them -- DuckDB's array functions are columnar internally, so this is one bulk copy
+    per chunk rather than `len(rows)` round trips through the row-at-a-time bind/execute
+    path. `zip(*chunk, strict=True)` is what transposes a chunk of row-tuples into one
+    per-column list; `strict=True` means a short row raises here, in Python, rather than
+    DuckDB silently zip-truncating the transposed columns.
+
+    Row arity is checked explicitly, before transposition, and raises the same
+    `duckdb.InvalidInputException` the pre-`V2-P6-004` `executemany` call raised for a
+    wrong-arity row (confirmed against the unmodified code: `executemany` reports "Prepared
+    statement needs N parameters, M given") -- not `PanelStorageError` -- so no caller
+    catching that exception type today silently stops catching it after this change.
+    `zip(..., strict=True)` alone would raise a bare `ValueError` instead, which is why the
+    check comes first.
+    """
+    arity = len(columns)
+    for row in rows:
+        if len(row) != arity:
+            raise duckdb.InvalidInputException(f"a row has {len(row)} values for {arity} columns")
+    selects = ", ".join(f"unnest(?::{column.duckdb_type}[])" for column in columns)
+    statement = f"INSERT INTO staging SELECT {selects}"
+    for start in range(0, len(rows), _INSERT_CHUNK_ROWS):
+        chunk = rows[start : start + _INSERT_CHUNK_ROWS]
+        connection.execute(statement, [list(values) for values in zip(*chunk, strict=True)])
+
+
 class PanelStore:
     """`dataset/year/`-partitioned Parquet store with a persistent DuckDB catalog.
 
@@ -999,10 +1050,9 @@ class PanelStore:
         column_ddl = ", ".join(
             f"{_quote_identifier(column.name)} {column.duckdb_type}" for column in columns
         )
-        placeholders = ", ".join("?" for _ in columns)
         with duckdb.connect(":memory:") as staging:
             staging.execute(f"CREATE TABLE staging ({column_ddl})")
-            staging.executemany(f"INSERT INTO staging VALUES ({placeholders})", rows)
+            _insert_columnar(staging, columns, rows)
             staging.execute(
                 "COPY staging TO ? (FORMAT PARQUET, COMPRESSION ZSTD)", [str(temporary)]
             )
