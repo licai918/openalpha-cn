@@ -436,13 +436,16 @@ KNOWN_PRICE_LIMITATIONS: Final[tuple[PriceLimitation, ...]] = (
     PriceLimitation(
         code="daily_basic_omits_the_beijing_board_before_2024",
         detail=(
-            "daily_basic is a subset of daily, never a superset, and the gap is one board. "
+            "On the sessions below daily_basic is a subset of daily and the gap is one board. "
             "Measured: 2015-07-08 daily 1,489 / daily_basic 1,467 (22 missing), 2018-01-02 "
             "3,282 / 3,252 (30), 2020-03-02 3,843 / 3,783 (60), 2022-04-25 4,836 / 4,780 (56), "
             "and 2024-06-28 / 2026-08-07 with zero difference. Every missing code on every one "
             "of those sessions ends in .BJ. So a historical partition legitimately carries "
             "prices without market caps for Beijing-board names, and close_disagreements "
-            "tolerates that direction while refusing the other."
+            "tolerates that direction while reporting the other. The other direction is real but "
+            "rare: a 2013..2026 census found 91 valuations with no bar on two sessions "
+            "(000022.SZ on 2013-11-14; ninety halted A and B shares on 2020-09-18), reproduced by "
+            "a re-fetch and recorded as upstream_defects rows."
         ),
     ),
     PriceLimitation(
@@ -721,9 +724,11 @@ class PricedCrossSection:
 class CloseDisagreement:
     """One security whose `daily` and `daily_basic` rows do not tell the same story.
 
-    `bar_close` is `None` when `daily_basic` carried a security `daily` did not, which is the
-    direction that has never been observed and is therefore a contradiction rather than sparse
-    data. The other direction -- a bar with no valuation -- is real (see
+    `bar_close` is `None` when `daily_basic` carried a security `daily` did not, which is a
+    contradiction rather than sparse data: it was never observed on the sessions first probed,
+    and the 2013..2026 census found it on two sessions, in the upstream's own data (`000022.SZ`
+    on 2013-11-14, ninety halted A and B shares on 2020-09-18; see `close_disagreements`). The
+    other direction -- a bar with no valuation -- is real (see
     `daily_basic_omits_the_beijing_board_before_2024`) and is not reported here.
     """
 
@@ -993,17 +998,29 @@ def close_disagreements(
     """Every `(security, session)` whose two datasets disagree about the close, ascending.
 
     `daily_basic` republishes `close`, so the two fetches a session needs already cross-check
-    each other and the check costs no request. Measured across five sessions from 2023-01-03 to
-    2026-08-07 (24,188 shared rows): zero disagreements.
+    each other and the check costs no request. Measured first across five sessions from
+    2023-01-03 to 2026-08-07 (24,188 shared rows): zero disagreements. That sample was not the
+    history. A census of every session from 2013-01-04 through 2021-08-10 (2,092 of the 3,335
+    sessions to 2026-09-25, comparing both datasets on `(ts_code, close)`, live on 2026-09-26,
+    still running) found disagreements on 7 sessions: 91 valuations with no bar (one on
+    2013-11-14, `000022.SZ`; ninety on 2020-09-18, halted A shares and B shares) and 14 closes
+    that differ (one each on 2013-07-15, 2019-04-19, 2020-03-18 and 2020-10-19, ten on
+    2020-10-23, most a cent or a few apart). Those checked are the upstream's own: they
+    reproduce on a re-fetch, and where a close differs the next session's `pre_close`
+    corroborates the `daily` bar -- `002357.SZ` on 2013-07-15 closed at 6.8 in `daily` and 6.62,
+    the previous close, in `daily_basic`. This function still reports every disagreement; what
+    happens next is `panel_ingest.reconcile_price_disagreements`' decision (`V2-P6-013`), not
+    this function's.
 
     Keyed by `(ts_code, trade_date)` rather than by security, so the same rule serves a single
     cross section on the read side and a whole year on the write side. A rule stated once is a
     rule that cannot be stated two ways.
 
     Direction is asymmetric, and the asymmetry is measured rather than assumed. A **valuation
-    with no bar** is reported, because `daily_basic` was a subset of `daily` on every session
-    probed and never a superset, so that direction is a contradiction. A **bar with no
-    valuation** is not reported, because it is the ordinary shape of a historical partition:
+    with no bar** is reported, because it is a contradiction: `daily_basic` was a subset of
+    `daily` on the five sessions first probed, and the census above found the superset direction
+    on two sessions, where the upstream publishes it on a re-fetch too. A **bar with
+    no valuation** is not reported, because it is the ordinary shape of a historical partition:
     all 60 of 2020-03-02's missing names are Beijing-board codes. Refusing it would refuse every
     pre-2024 year.
     """

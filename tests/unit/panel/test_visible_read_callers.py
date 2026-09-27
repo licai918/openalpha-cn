@@ -107,6 +107,10 @@ FILTERED_READ_REACHERS: dict[str, frozenset[str]] = {
             "load_statement_histories",
             "load_stock_universe",
             "load_suspensions",
+            # `V2-P6-013`: the upstream-defects record, one row per dropped upstream row. Each
+            # row carries its dropped row's own `daily_close` clocks, so it takes
+            # `_read_visible_event_dated_rows` with `load_suspensions`' census bound.
+            "load_upstream_defects",
         }
     ),
 }

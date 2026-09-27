@@ -96,6 +96,7 @@ from openalpha_cn.domain.panel_batch import ColumnarPanelBatch, PanelBatchError
 from openalpha_cn.domain.price_limits import (
     PRICE_LIMIT_DATASET,
     SUSPENSION_DATASET,
+    SuspensionDay,
     SuspensionError,
 )
 from openalpha_cn.domain.risk_flag import UndeclaredRiskFlagError
@@ -106,6 +107,7 @@ from openalpha_cn.domain.trading_calendar import (
     TradingCalendar,
     TradingCalendarError,
 )
+from openalpha_cn.domain.upstream_defects import UpstreamDefect
 from openalpha_cn.evidence.service import build_provider_evidence, parse_serialized_evidence
 from openalpha_cn.factor_view import (
     ACCEPTANCE_STEP,
@@ -171,13 +173,17 @@ from openalpha_cn.panel_gate import (
     require_datasets,
 )
 from openalpha_cn.panel_ingest import (
+    UPSTREAM_DEFECTS_DATASET,
     _sessions_published_through,
     keep_panel_subjects,
     load_industry_trees,
     load_stock_universe,
     load_suspensions,
     load_trading_calendar,
+    load_upstream_defects,
     merge_panel_batches,
+    reconcile_limit_placeholders,
+    reconcile_price_disagreements,
     session_publication_instant,
     split_panel_batch_by_year,
     write_adjustment_factors,
@@ -192,6 +198,7 @@ from openalpha_cn.panel_ingest import (
     write_stock_universe,
     write_suspensions,
     write_trading_calendar,
+    write_upstream_defects,
 )
 from openalpha_cn.panel_view import (
     PanelRequestError,
@@ -3083,6 +3090,14 @@ def _build_price_panel(
     `suspend_d` partition is stored *before* `write_daily_panel` is even called: a refusal from
     that writer leaves a real partition behind, and a list that only exists on the success path
     cannot say so. See `_stored_so_far`.
+
+    **A disagreement the upstream itself publishes is resolved before the writer sees it**
+    (`V2-P6-013`). `reconcile_price_disagreements` re-fetches each disagreeing
+    `(security, session)` on its own -- two requests each, reported on stderr -- and drops a
+    `daily_basic` row only under a named rule. The drop is recorded in `upstream_defects` before
+    `write_daily_panel` runs, so a later refusal still leaves the record of what the upstream got
+    wrong, which is true whatever happens to the year. Anything unexplained is refused exactly
+    as before.
     """
     collected = _session_batches(provider, PANEL_BUILD_TARGETS["price"], sessions)
     halt_batches = collected[SUSPENSION_DATASET]
@@ -3099,16 +3114,101 @@ def _build_price_panel(
                 "record that this build waives that guard",
             )
         corpus = load_suspensions(store, years=(year,), as_of=now, max_staleness=None)
+    reconciled = reconcile_price_disagreements(
+        collected[DAILY_DATASET],
+        collected[DAILY_BASIC_DATASET],
+        refetch=lambda day, codes: _refetch_price_session(provider, day, codes),
+    )
+    recorded = write_upstream_defects(
+        store, reconciled.record, year=year, source_dataset=DAILY_BASIC_DATASET
+    )
+    if recorded is not None:
+        written.append(recorded)
     written.extend(
         write_daily_panel(
             store,
             bars=collected[DAILY_DATASET],
-            fundamentals=collected[DAILY_BASIC_DATASET],
+            fundamentals=reconciled.batches,
             calendar=calendar,
             halts=corpus,
         )
     )
     return "corroborated" if corpus is not None else "waived"
+
+
+def _refetch_price_session(
+    provider: TushareProvider, day: date, ts_codes: tuple[str, ...]
+) -> tuple[ColumnarPanelBatch, ColumnarPanelBatch]:
+    """One session's `daily` and `daily_basic` again, for the securities they disagreed about.
+
+    The re-fetch `reconcile_price_disagreements` compares against the year's whole-market fetch
+    (`V2-P6-013`), and it is **two requests per disputed session, whatever the count**:
+
+    - one disputed security is asked for on its own (`ts_code` filter), which is a differently
+      shaped request than the one that produced the disagreement and so the stronger witness;
+    - several are answered by the whole session again, because asking each on its own costs two
+      requests per security -- 180 for 2020-09-18's ninety valuations with no bar -- to learn what
+      the two whole-session responses already carry, row for row.
+
+    Same session instant, same provider, same credential boundary (`_fetch_panel`). A row that
+    differs between the two fetches is a fetch fault, and a row that does not is what the
+    upstream publishes.
+    """
+    as_of = _session_as_of(day)
+    subjects = ts_codes if len(ts_codes) == 1 else ()
+    shape = ts_codes[0] if subjects else f"whole session, {len(ts_codes)} disputed"
+    typer.echo(
+        f"REFETCH {day.isoformat()} {shape} ({DAILY_DATASET}+{DAILY_BASIC_DATASET})", err=True
+    )
+    return (
+        _fetch_panel(provider, DAILY_DATASET, as_of=as_of, subjects=subjects),
+        _fetch_panel(provider, DAILY_BASIC_DATASET, as_of=as_of, subjects=subjects),
+    )
+
+
+def _stored_halts(
+    store: PanelStore, *, year: int, now: datetime
+) -> Mapping[date, SuspensionDay] | None:
+    """The year's stored `suspend_d` corpus, or `None` when this store has none for it.
+
+    Read only when `stk_limit` actually carries a zero upper limit (`reconcile_limit_placeholders`
+    calls it lazily), so an ordinary year never opens the halt partition. `None` makes a zero/zero
+    band a refusal that names the price target as the way to store the corpus.
+    """
+    if year not in store.registered_years(SUSPENSION_DATASET):
+        return None
+    return load_suspensions(store, years=(year,), as_of=now, max_staleness=None)
+
+
+def _recorded_defects(
+    store: PanelStore, refs: Sequence[PartitionRef], *, now: datetime
+) -> list[dict[str, object]]:
+    """The year's `upstream_defects` record, when this build wrote it, as report entries.
+
+    The whole partition rather than the rows this build added: two targets write it, and the
+    reader of a build report needs the year's record rather than one target's share of it.
+    """
+    years = sorted({ref.year for ref in refs if ref.dataset == UPSTREAM_DEFECTS_DATASET})
+    if not years:
+        return []
+    return [
+        _defect_entry(defect) for defect in load_upstream_defects(store, years=years, as_of=now)
+    ]
+
+
+def _defect_entry(defect: UpstreamDefect) -> dict[str, object]:
+    return {
+        "ts_code": defect.ts_code,
+        "trade_date": defect.trade_date.isoformat(),
+        "source_dataset": defect.source_dataset,
+        "kind": defect.kind,
+        "bar_close": defect.bar_close,
+        "valuation_close": defect.valuation_close,
+        "previous_bar_close": defect.previous_bar_close,
+        "up_limit": defect.up_limit,
+        "down_limit": defect.down_limit,
+        "valuation_repeats_previous_close": defect.valuation_repeats_previous_close,
+    }
 
 
 def _stored_universe(store: PanelStore, *, now: datetime) -> tuple[str, ...]:
@@ -3850,13 +3950,19 @@ def _build_panel(
         )
     if PRICE_LIMIT_DATASET in targets:
         assert calendar is not None  # guaranteed by `_NEEDS_STORED_CALENDAR` above
-        written.setdefault(PRICE_LIMIT_DATASET, []).append(
-            write_price_limits(
-                store,
-                _session_batches(provider, (PRICE_LIMIT_DATASET,), sessions)[PRICE_LIMIT_DATASET],
-                calendar=calendar,
-            )
+        # `V2-P6-013`: the upstream's zero/zero band on a whole-day halt is dropped and recorded
+        # before the writer sees it; every other zero upper limit is refused by name.
+        limits = reconcile_limit_placeholders(
+            _session_batches(provider, (PRICE_LIMIT_DATASET,), sessions)[PRICE_LIMIT_DATASET],
+            halts=lambda: _stored_halts(store, year=year, now=now),
         )
+        limit_refs = written.setdefault(PRICE_LIMIT_DATASET, [])
+        recorded = write_upstream_defects(
+            store, limits.record, year=year, source_dataset=PRICE_LIMIT_DATASET
+        )
+        if recorded is not None:
+            limit_refs.append(recorded)
+        limit_refs.append(write_price_limits(store, limits.batches, calendar=calendar))
     if NAMECHANGE_DATASET in targets:
         written.setdefault(NAMECHANGE_DATASET, []).append(
             write_name_history(
@@ -4476,6 +4582,7 @@ def panel_build(
                         now=now,
                     )
                     sessions = sessions or covered
+                defects = _recorded_defects(store, _all_refs(written), now=now)
             except _PANEL_WRITE_REFUSALS as error:
                 raise _panel_fail(
                     PanelExit.unhealthy,
@@ -4512,6 +4619,10 @@ def panel_build(
                         {"dataset": ref.dataset, "year": ref.year, "row_count": ref.row_count}
                         for ref in landed
                     ],
+                    # `V2-P6-013`: every row the upstream published wrong for this year and the
+                    # named rule that dropped it -- the year's whole `upstream_defects` record
+                    # whenever this build wrote it, empty otherwise.
+                    "defects": defects,
                 }
             )
 
@@ -4593,6 +4704,15 @@ def panel_build(
                 typer.echo(f"RESUMED {name} year={entry['year']} ({_resume_evidence(name)})")
             for ref in cast(Sequence[Mapping[str, object]], entry["partitions"]):
                 typer.echo(f"WROTE {ref['dataset']} year={ref['year']} rows={ref['row_count']}")
+            for defect in cast(Sequence[Mapping[str, object]], entry["defects"]):
+                typer.echo(
+                    f"DEFECT {defect['kind']} {defect['source_dataset']} {defect['ts_code']} "
+                    f"{defect['trade_date']} dropped (bar_close={defect['bar_close']} "
+                    f"valuation_close={defect['valuation_close']} "
+                    f"previous_bar_close={defect['previous_bar_close']} "
+                    f"up_limit={defect['up_limit']} down_limit={defect['down_limit']} "
+                    f"repeats_previous_close={defect['valuation_repeats_previous_close']})"
+                )
         for landed_ref in _all_refs(span_written):
             typer.echo(
                 f"WROTE {landed_ref.dataset} year={landed_ref.year} "

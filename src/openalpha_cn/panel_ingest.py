@@ -309,7 +309,7 @@ straddles a year boundary, is answered with an error instead of a silent choice.
 import operator
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from statistics import median
 from types import MappingProxyType
@@ -334,6 +334,7 @@ from openalpha_cn.domain.daily_prices import (
     DAILY_DATASET,
     DAILY_PANEL_COLUMNS,
     MIN_SESSION_ROW_SHARE,
+    PRE_CLOSE_COLUMN,
     PRICE_DATE_COLUMN,
     DailyBar,
     DailyValuation,
@@ -398,6 +399,7 @@ from openalpha_cn.domain.panel_batch import (
     TimelineColumns,
 )
 from openalpha_cn.domain.price_limits import (
+    DOWN_LIMIT_COLUMN,
     EXPLAINED_SESSION_HALF_WINDOW,
     MIN_EXPLAINED_SESSION_SHARE,
     PRICE_LIMIT_DATASET,
@@ -406,6 +408,7 @@ from openalpha_cn.domain.price_limits import (
     SUSPENSION_DATA_COLUMNS,
     SUSPENSION_DATASET,
     SUSPENSION_PANEL_COLUMNS,
+    UP_LIMIT_COLUMN,
     PriceLimit,
     SuspensionDay,
     price_limits_from_panel_rows,
@@ -423,6 +426,21 @@ from openalpha_cn.domain.trading_calendar import (
     TradingCalendar,
     TradingCalendarError,
     trading_calendar_from_panel_rows,
+)
+from openalpha_cn.domain.upstream_defects import (
+    DEFECT_KIND_COLUMN,
+    DEFECT_SOURCE_DATASETS,
+    REPEATS_PREVIOUS_CLOSE_COLUMN,
+    SOURCE_DATASET_COLUMN,
+    UPSTREAM_DEFECT_DATA_COLUMNS,
+    UPSTREAM_DEFECT_NUMBER_COLUMNS,
+    UPSTREAM_DEFECT_PANEL_COLUMNS,
+    BarWitness,
+    UpstreamDefect,
+    close_disagreement_kind,
+    limit_placeholder_kind,
+    repeats_previous_close,
+    upstream_defects_from_panel_rows,
 )
 from openalpha_cn.panel.catalog import (
     DEFAULT_DATE_TIMEZONE,
@@ -1477,7 +1495,7 @@ def carry_stored_rows_forward(
     ## The read is un-gated, and it has to be
 
     `PanelStore.query` takes no `as_of` and filters no row by availability, and this is one of the
-    two callers in `src/` allowed to take it (`tests/unit/panel/test_query_callers.py` is the
+    three callers in `src/` allowed to take it (`tests/unit/panel/test_query_callers.py` is the
     allowlist). A point-in-time read here would be the fail-open, not the safe choice: a carry-
     forward that filtered by the visibility clocks would carry only the rows knowable at some
     instant and would then hand the store a partition **missing** the withheld ones -- which
@@ -1941,7 +1959,7 @@ def load_adjustment_histories(
     `AdjustmentHorizonError`, which is not a smaller wall but a differently shaped one.
 
     **The census cannot repair it, and that is the load-bearing measurement.** The reconciliation
-    the five callers on that door rely on works because `PartitionCoverage.dates` says how many
+    the six callers on that door rely on works because `PartitionCoverage.dates` says how many
     rows each event date is due; its entries carry `event_date` and `row_count` and **no subject
     axis**. The
     horizon question is per security -- `KNOWN_ADJUSTMENT_LIMITATIONS.suspension_is_invisible`
@@ -2300,8 +2318,13 @@ def _refuse_close_disagreement(bars: ColumnarPanelBatch, fundamentals: ColumnarP
 
     `daily_basic` republishes `close`, so the two fetches one session already needs cross-check
     each other with no extra request -- measured across five sessions from 2023-01-03 to
-    2026-08-07, zero disagreements in 24,188 shared rows. Making it a **write** guard rather
-    than a report is what stops a partition that contradicts its sibling from existing at all.
+    2026-08-07, zero disagreements in 24,188 shared rows; the 2013..2026 census that
+    `close_disagreements` cites has found them on 7 of the first 2,092 sessions, in the
+    upstream's own data. Making it a **write** guard rather than a report is what stops a
+    partition that contradicts its sibling from existing at all. Since `V2-P6-013` the CLI runs
+    `reconcile_price_disagreements` first, which drops a `daily_basic` row only under a named
+    rule after a re-fetch reproduces it; this guard then refuses whatever is left, exactly as
+    before.
 
     Direction is asymmetric and measured; see `domain/daily_prices.py::close_disagreements`.
     """
@@ -3162,6 +3185,9 @@ def write_price_limits(
       price panel's is -- a halted security still gets a published band (all 26 of 2024-06-28's
       halts are in `stk_limit`), so a halt explains nothing about a missing band.
     - `_refuse_to_drop_stored_subjects`: a rewrite that loses a security is a partial read.
+    - `_refuse_zero_upper_limits` (`V2-P6-013`): an `up_limit` of `0.0`, which the decoder now
+      admits so that `reconcile_limit_placeholders` can drop the upstream's zero/zero placeholder
+      on a whole-day halt. Whatever that reconciliation did not drop is refused here.
 
     Note what is **not** checked: that every bar has a band. It does not hold on history --
     60 bars had no published limit on 2020-03-02, all `.BJ` -- so the join is asked per security
@@ -3174,6 +3200,7 @@ def write_price_limits(
             f"expected the {PRICE_LIMIT_DATASET!r} dataset, got {merged.dataset!r}"
         )
     year = panel_partition_year(merged, date_timezone=date_timezone)
+    _refuse_zero_upper_limits(merged)
     _refuse_missing_price_sessions(merged, calendar, year, date_timezone=date_timezone)
     _refuse_thin_price_sessions(merged)
     _refuse_to_drop_stored_subjects(
@@ -3265,6 +3292,610 @@ def load_price_limits(
         date_timezone=date_timezone,
     )
     return price_limits_from_panel_rows(rows)
+
+
+# --- upstream defects (`V2-P6-013`) -----------------------------------------------------------
+
+UPSTREAM_DEFECTS_DATASET: Final[str] = "upstream_defects"
+"""The panel dataset (and partition directory) the recorded upstream defects are stored under.
+
+A dataset of its own rather than a column on the dataset whose row was dropped: a new column
+on `daily_basic` or `stk_limit` would make every stored partition of theirs and the new build
+unreadable to each other (hard rule 3), while a new dataset changes nothing that exists.
+
+Declared here rather than in `domain/upstream_defects.py`, for the reason the derived factor
+planes' names live in `panel_factors`: every `*_DATASET` scalar `domain/` binds is an
+*upstream* dataset (`tests/unit/test_panel_ingest_import_isolation.py` holds that), and this
+one is written by this module out of rows the upstream sent, never fetched.
+"""
+
+PriceRefetch = Callable[[date, tuple[str, ...]], tuple[ColumnarPanelBatch, ColumnarPanelBatch]]
+"""A re-fetch of one session's disputed securities: its `daily` batch, then its `daily_basic`.
+
+Called once per session that has a disagreement, with every disputed security of that session,
+and the batches it returns must carry each of those securities' rows (or their absence) -- they
+may carry more. Injected rather than performed here because this module is pinned to importing
+`domain` and `panel` only: `cli._refetch_price_session` asks for exactly that security when one
+is disputed and for the whole session when several are, and a test passes one built on a fake
+transport.
+"""
+
+HaltCorpusSource = Callable[[], Mapping[date, SuspensionDay] | None]
+"""The year's `suspend_d` corpus, read only when a zero upper limit is actually present.
+
+A callable rather than a mapping so that the ordinary year -- every year but a handful of
+2013..2014 sessions -- never reads the halt partition at all. `None` means there is no corpus
+to consult, and a zero/zero band is then refused, because "not halted" cannot be told from
+"never checked".
+"""
+
+UPSTREAM_DEFECT_STORAGE_COLUMNS: Final[tuple[str, ...]] = (
+    SUBJECT_COLUMN_NAME,
+    *CLOCK_COLUMN_NAMES,
+    *UPSTREAM_DEFECT_DATA_COLUMNS,
+)
+"""A defects partition's stored columns, in `ColumnarPanelBatch.storage_columns()` order."""
+
+_PCT_CHG_COLUMN: Final[str] = "pct_chg"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ReconciledRows:
+    """One dataset's batches with the upstream's wrong rows removed, and the record of them.
+
+    `batches` is what the dataset's writer is then given, unchanged except for the dropped rows.
+    `record` is the `upstream_defects` batch `write_upstream_defects` stores, carrying each
+    dropped row's own four clocks; it is `None` exactly when `defects` is empty.
+    """
+
+    batches: tuple[ColumnarPanelBatch, ...]
+    defects: tuple[UpstreamDefect, ...]
+    record: ColumnarPanelBatch | None
+
+
+def reconcile_price_disagreements(
+    bars: Sequence[ColumnarPanelBatch],
+    fundamentals: Sequence[ColumnarPanelBatch],
+    *,
+    refetch: PriceRefetch,
+) -> ReconciledRows:
+    """Resolve every `daily`/`daily_basic` close disagreement of one year, or refuse the year.
+
+    `_refuse_close_disagreement` is right to refuse a disagreement it cannot explain: a partial
+    or mismatched fetch looks exactly like one. The backfill found disagreements that are
+    neither -- they are in the upstream's own data (see `domain/upstream_defects.py`) -- and
+    refusing them refuses every other security's year along with them. This runs *before*
+    `write_daily_panel` and hands it the `daily_basic` batches with the explained rows removed,
+    so that writer's guard stays exactly as fail-closed as it was for everything else.
+
+    1. **Re-fetch every session that has a disagreement**, both datasets, once per session
+       (`refetch`) -- two requests for a session whether it has one disputed security or ninety,
+       as 2020-09-18 has. A re-fetched row that differs from the year's fetch -- a value, or
+       present where it was absent, or the reverse -- is a partial fetch and the year is refused,
+       as before. Only a disagreement the upstream publishes twice goes on.
+    2. **Name the rule** (`close_disagreement_kind`): `valuation_without_bar` when there is no
+       bar; `valuation_contradicts_corroborated_bar` when the bar is corroborated by the
+       security's next stored bar (or, on the last session available, by its own `pct_chg`).
+       A bar nothing corroborates is refused, naming the security, the session and both closes.
+    3. **Drop the valuation row, and only it.** No bar is edited or invented and nothing is
+       filled from anywhere; the dropped row is recorded with its own clocks in `record`, and a
+       contradicted valuation also records whether it repeats the previous bar close.
+
+    No disagreement means no re-fetch and the batches back unchanged.
+    """
+    kept = tuple(fundamentals)
+    merged_bars = merge_panel_batches(bars)
+    merged_fundamentals = merge_panel_batches(fundamentals)
+    findings = close_disagreements(_close_index(merged_bars), _close_index(merged_fundamentals))
+    if not findings:
+        return ReconciledRows(batches=kept, defects=(), record=None)
+    bar_rows = {key: index for index, key in enumerate(_row_keys(merged_bars))}
+    valuation_rows = {key: index for index, key in enumerate(_row_keys(merged_fundamentals))}
+    disputed = {finding.ts_code for finding in findings}
+    bar_days: dict[str, list[date]] = {}
+    for subject, day in bar_rows:
+        if subject in disputed:
+            bar_days.setdefault(subject, []).append(day)
+    for days in bar_days.values():
+        days.sort()
+    last_session = max(day for _, day in bar_rows)
+    closes = _column_values(merged_bars, CLOSE_COLUMN)
+    pre_closes = _column_values(merged_bars, PRE_CLOSE_COLUMN)
+    pct_chgs = _column_values(merged_bars, _PCT_CHG_COLUMN)
+
+    by_session: dict[date, list[str]] = {}
+    for finding in findings:
+        by_session.setdefault(finding.trade_date, []).append(finding.ts_code)
+    for session, codes in sorted(by_session.items()):
+        refetched_bars, refetched_valuations = refetch(session, tuple(codes))
+        for code in codes:
+            key = (code, session)
+            _refuse_a_refetch_that_differs(
+                key,
+                DAILY_DATASET,
+                _row_values(merged_bars, bar_rows.get(key)),
+                _refetched_row(refetched_bars, key, DAILY_DATASET),
+            )
+            _refuse_a_refetch_that_differs(
+                key,
+                DAILY_BASIC_DATASET,
+                _row_values(merged_fundamentals, valuation_rows.get(key)),
+                _refetched_row(refetched_valuations, key, DAILY_BASIC_DATASET),
+            )
+
+    defects: list[UpstreamDefect] = []
+    positions: list[int] = []
+    for finding in findings:
+        key = (finding.ts_code, finding.trade_date)
+        witness: BarWitness | None = None
+        previous_close: float | None = None
+        next_pre_close: float | None = None
+        if key in bar_rows:
+            index = bar_rows[key]
+            witness = BarWitness(
+                close=cast(float, closes[index]),
+                pre_close=cast(float, pre_closes[index]),
+                pct_chg=cast(float, pct_chgs[index]),
+            )
+            days = bar_days[finding.ts_code]
+            position = days.index(finding.trade_date)
+            if position > 0:
+                previous_close = cast(
+                    float, closes[bar_rows[(finding.ts_code, days[position - 1])]]
+                )
+            if position + 1 < len(days):
+                next_key = (finding.ts_code, days[position + 1])
+                next_pre_close = cast(float, pre_closes[bar_rows[next_key]])
+        kind = close_disagreement_kind(
+            bar=witness,
+            next_bar_pre_close=next_pre_close,
+            is_last_session=finding.trade_date == last_session,
+        )
+        if kind is None:
+            raise PanelBatchError(
+                f"{finding.ts_code} on {finding.trade_date.isoformat()} closed at "
+                f"{finding.bar_close!r} in {DAILY_DATASET} and {finding.valuation_close!r} in "
+                f"{DAILY_BASIC_DATASET}, and a re-fetch published the same pair. No named rule "
+                "explains it: the bar is not corroborated -- its next stored session's pre_close "
+                f"is {next_pre_close!r}, and without a next session only the year's last one may "
+                "lean on its own pct_chg. Storing either side would leave two partitions that "
+                "answer differently, so the year is refused"
+            )
+        contradicted = kind == "valuation_contradicts_corroborated_bar"
+        defects.append(
+            UpstreamDefect(
+                ts_code=finding.ts_code,
+                trade_date=finding.trade_date,
+                source_dataset=DAILY_BASIC_DATASET,
+                kind=kind,
+                bar_close=finding.bar_close,
+                valuation_close=finding.valuation_close,
+                previous_bar_close=previous_close if contradicted else None,
+                valuation_repeats_previous_close=(
+                    repeats_previous_close(
+                        valuation_close=finding.valuation_close,
+                        previous_bar_close=previous_close,
+                    )
+                    if contradicted
+                    else None
+                ),
+            )
+        )
+        positions.append(valuation_rows[key])
+    return ReconciledRows(
+        batches=_without_rows(kept, {(defect.ts_code, defect.trade_date) for defect in defects}),
+        defects=tuple(defects),
+        record=_defect_record(merged_fundamentals, positions, defects),
+    )
+
+
+def reconcile_limit_placeholders(
+    batches: Sequence[ColumnarPanelBatch], *, halts: HaltCorpusSource
+) -> ReconciledRows:
+    """Drop `stk_limit`'s zero/zero no-band placeholders on whole-day halts, or refuse the year.
+
+    The decoder admits an `up_limit` of exactly `0.0` since `V2-P6-013` (see
+    `providers/tushare.py::_upper_limit_price`), because it cannot see the row it is in: on
+    2014-01-09 the upstream published `0.0/0.0` for `000509.SZ`, halted all session, and a
+    refusal there exited the whole 2014 build. What the decoder no longer refuses is decided
+    here, per row, against the year's halt corpus:
+
+    - both limits `0.0` **and** the security halted for the whole session in `suspend_d`
+      (`limit_placeholder_kind`): the row is dropped and recorded;
+    - both limits `0.0` on a session it is not halted, or with no corpus to ask: refused;
+    - an `up_limit` of `0.0` beside a non-zero `down_limit`: refused.
+
+    A zero *lower* limit beside a positive upper one is untouched -- it is the Beijing board's
+    published "no lower bound" and has been stored since `V2-P1-008`. `write_price_limits` still
+    refuses any zero upper limit it is handed, so a caller that skips this cannot store one.
+    """
+    kept = tuple(batches)
+    # A `no_data` batch has no columns to look in; it goes to the writer unchanged, whose merge
+    # refuses it with the message `_EMPTY_SESSION_IS_ORDINARY` is pinned against.
+    if not any(
+        batch.status == "success" and 0.0 in _column_values(batch, UP_LIMIT_COLUMN)
+        for batch in kept
+    ):
+        return ReconciledRows(batches=kept, defects=(), record=None)
+    merged = merge_panel_batches(kept)
+    keys = _row_keys(merged)
+    ups = _column_values(merged, UP_LIMIT_COLUMN)
+    downs = _column_values(merged, DOWN_LIMIT_COLUMN)
+    corpus = halts()
+    defects: list[UpstreamDefect] = []
+    positions: list[int] = []
+    for index, up in enumerate(ups):
+        if up != 0.0:
+            continue
+        ts_code, day = keys[index]
+        down = cast(float, downs[index])
+        halted = corpus is not None and day in corpus and corpus[day].is_halted(ts_code)
+        kind = limit_placeholder_kind(up_limit=0.0, down_limit=down, halted=halted)
+        if kind is None:
+            raise PanelBatchError(
+                _placeholder_refusal(ts_code, day, down, corpus_present=corpus is not None)
+            )
+        defects.append(
+            UpstreamDefect(
+                ts_code=ts_code,
+                trade_date=day,
+                source_dataset=PRICE_LIMIT_DATASET,
+                kind=kind,
+                up_limit=0.0,
+                down_limit=down,
+            )
+        )
+        positions.append(index)
+    return ReconciledRows(
+        batches=_without_rows(kept, {(defect.ts_code, defect.trade_date) for defect in defects}),
+        defects=tuple(defects),
+        record=_defect_record(merged, positions, defects),
+    )
+
+
+def _placeholder_refusal(ts_code: str, day: date, down: float, *, corpus_present: bool) -> str:
+    where = f"{ts_code} on {day.isoformat()}: {PRICE_LIMIT_DATASET} published up_limit 0.0"
+    if down != 0.0:
+        return (
+            f"{where} beside down_limit {down!r}. Only a band with both limits exactly 0.0 on a "
+            "whole-day halt is the upstream's no-band placeholder; a zero upper bound beside a "
+            "real lower one refuses every order and is not a shape the upstream is known to "
+            "publish, so it is refused rather than stored or dropped"
+        )
+    if not corpus_present:
+        return (
+            f"{where} and down_limit 0.0, and there is no {SUSPENSION_DATASET} corpus for the "
+            "year to check it against. A zero/zero band is dropped only on a whole-day halt, and "
+            "'not halted' cannot be told from 'never checked': build the price target, which "
+            f"stores {SUSPENSION_DATASET}, for this year first"
+        )
+    return (
+        f"{where} and down_limit 0.0 on a session the year's {SUSPENSION_DATASET} corpus has it "
+        "not halted for the whole session. A zero/zero band is the upstream's placeholder only "
+        "for a security that did not trade; beside a trading session it is a malformed band, "
+        "and storing it would refuse every order on both sides"
+    )
+
+
+def _refuse_zero_upper_limits(batch: ColumnarPanelBatch) -> None:
+    """Refuse a `stk_limit` year still holding an `up_limit` of `0.0` (`V2-P6-013`).
+
+    The decoder admits exactly `0.0` so that `reconcile_limit_placeholders` can see the row it is
+    in; this is what keeps that admission from reaching storage when a caller skips the
+    reconciliation. The reader (`price_limits_from_panel_rows`) refuses a non-positive upper
+    limit too, so without this the store would accept a partition it can never return.
+    """
+    ups = _column_values(batch, UP_LIMIT_COLUMN)
+    if 0.0 not in ups:
+        return
+    index = ups.index(0.0)
+    ts_code, day = _row_keys(batch)[index]
+    raise PanelBatchError(
+        f"{PRICE_LIMIT_DATASET} carries {ts_code} on {day.isoformat()} with up_limit 0.0; a zero "
+        "upper bound refuses every order and the reader refuses to rebuild it. Run "
+        "reconcile_limit_placeholders over the year first, which drops the upstream's zero/zero "
+        "placeholder on a whole-day halt and refuses every other zero by name"
+    )
+
+
+def write_upstream_defects(
+    store: PanelStore,
+    record: ColumnarPanelBatch | None,
+    *,
+    year: int,
+    source_dataset: str,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> PartitionRef | None:
+    """Store one source dataset's defects for `year`, keeping every other source's rows.
+
+    ## One dataset, one partition per year, and two writers of it
+
+    Both `daily_basic` (through `reconcile_price_disagreements`) and `stk_limit` (through
+    `reconcile_limit_placeholders`) drop rows, and they are built by two different targets. A
+    whole-partition replace from either would destroy the other's record, so each call owns the
+    rows whose `source_dataset` is its own and puts the others back with them -- the same
+    un-gated read-and-put-back `carry_stored_rows_forward` makes, for its reason: nothing read
+    here is answered with. Rows are sorted by `(trade_date, subject, source_dataset)`, so the
+    partition's content hash does not depend on which target ran first.
+
+    ## A source whose defects went away
+
+    `record=None` means this source dropped nothing this time. If the stored partition still
+    holds rows of this source, the rebuild no longer reproduces them -- the upstream corrected
+    them, or they were never what they looked like -- and the record would otherwise go on
+    claiming a row was dropped that the rebuilt partition now holds. With another source's rows
+    left the partition is rewritten without this one's; with none left it is refused, because
+    `PanelStore` has no way to delete a partition and an empty one cannot be written.
+
+    Returns the partition written, or `None` when there was nothing to write or to change.
+    """
+    if source_dataset not in DEFECT_SOURCE_DATASETS:
+        raise PanelBatchError(
+            f"{source_dataset!r} is not one of the datasets a defect rule may drop a row from "
+            f"({sorted(DEFECT_SOURCE_DATASETS)})"
+        )
+    if record is not None:
+        if record.dataset != UPSTREAM_DEFECTS_DATASET:
+            raise PanelBatchError(
+                f"expected the {UPSTREAM_DEFECTS_DATASET!r} dataset, got {record.dataset!r}"
+            )
+        foreign = set(_column_values(record, SOURCE_DATASET_COLUMN)) - {source_dataset}
+        if foreign:
+            raise PanelBatchError(
+                f"this write owns {source_dataset}'s defects and the record carries "
+                f"{sorted(map(str, foreign))}'s too; each source is written by its own target"
+            )
+        record_year = panel_partition_year(record, date_timezone=date_timezone)
+        if record_year != year:
+            raise PanelBatchError(
+                f"the defects are dated {record_year} and the write is for {year}; a defect is "
+                "filed with the partition its dropped row would have been stored in"
+            )
+    coverage = store.read_coverage(UPSTREAM_DEFECTS_DATASET, year)
+    stored = (
+        store.query(UPSTREAM_DEFECTS_DATASET, year=year, columns=UPSTREAM_DEFECT_STORAGE_COLUMNS)
+        if coverage is not None
+        else []
+    )
+    source_at = UPSTREAM_DEFECT_STORAGE_COLUMNS.index(SOURCE_DATASET_COLUMN)
+    others = [row for row in stored if row[source_at] != source_dataset]
+    owned = [row for row in stored if row[source_at] == source_dataset]
+    if record is None:
+        if not owned:
+            return None
+        if not others:
+            dropped = sorted(f"{row[0]}@{row[len(CLOCK_COLUMN_NAMES) + 1]}" for row in owned)
+            raise PanelBatchError(
+                f"{UPSTREAM_DEFECTS_DATASET} year={year} records {len(owned)} {source_dataset} "
+                f"row(s) as dropped ({dropped}) and this build no longer reproduces any of them. "
+                "The record cannot be emptied -- the panel store has no partition delete and an "
+                "empty partition cannot be written -- and leaving it would claim a row was "
+                "dropped that the rebuilt partition now holds. Investigate the upstream "
+                "correction before removing the partition by hand"
+            )
+    carried = (
+        _stored_defect_batch(others, coverage=coverage) if others and coverage is not None else None
+    )
+    pieces = tuple(piece for piece in (carried, record) if piece is not None)
+    merged = merge_panel_batches(pieces)
+    return write_panel_batch(store, _sorted_defects(merged), year=year, date_timezone=date_timezone)
+
+
+def upstream_defects_requirement(*, years: Sequence[int], as_of: datetime) -> ReadinessRequirement:
+    """What the defects record must satisfy before it is read back.
+
+    `required_dates` and `required_subjects` are waived because a defect has no schedule and
+    names whichever security the upstream got wrong; `max_staleness` is waived because the
+    newest defect of a year can be months old on a complete record.
+    """
+    return ReadinessRequirement(
+        dataset=UPSTREAM_DEFECTS_DATASET,
+        as_of=as_of,
+        years=tuple(sorted(set(years))),
+        required_dates=None,
+        required_subjects=None,
+        required_fields=UPSTREAM_DEFECT_PANEL_COLUMNS,
+        max_staleness=None,
+    )
+
+
+def load_upstream_defects(
+    store: PanelStore, *, years: Sequence[int], as_of: datetime
+) -> tuple[UpstreamDefect, ...]:
+    """Every recorded upstream defect of `years` that was knowable at `as_of`, in stored order.
+
+    A year with no partition is refused rather than answered empty, for `load_suspensions`'
+    reason: "the source got nothing wrong" and "nobody built this year" must not read the same.
+    A caller asking about a year that had no defects checks
+    `store.registered_years(UPSTREAM_DEFECTS_DATASET)` first.
+
+    Each row carries its dropped row's own clocks -- `ClockStrategy.daily_close`, knowable at
+    16:30 on its own `trade_date` -- so the census bound is `_sessions_published_through`,
+    exactly as for `suspend_d`.
+    """
+    requested = tuple(sorted(set(years)))
+    if not requested:
+        raise PanelBatchError("load_upstream_defects needs at least one year")
+    return upstream_defects_from_panel_rows(
+        _read_visible_event_dated_rows(
+            store,
+            upstream_defects_requirement(years=requested, as_of=as_of),
+            UPSTREAM_DEFECT_PANEL_COLUMNS,
+            as_of=as_of,
+            what=f"the {UPSTREAM_DEFECTS_DATASET} record",
+            availability_rule=(
+                "A defect carries the dropped row's own clocks, so it is knowable when that "
+                f"row was: {DAILY_AVAILABILITY_TIME.isoformat()} on its own trade_date"
+            ),
+            census_through=_sessions_published_through,
+        )
+    )
+
+
+def _row_keys(batch: ColumnarPanelBatch) -> tuple[tuple[str, date], ...]:
+    """Every row's `(subject, trade_date)`, in row order."""
+    dates = _stored_dates(_column_values(batch, PRICE_DATE_COLUMN), PRICE_DATE_COLUMN)
+    return tuple(zip(batch.subjects, dates, strict=True))
+
+
+def _row_values(batch: ColumnarPanelBatch, index: int | None) -> tuple[object, ...] | None:
+    """One row's data columns, or `None` for a row that is not there."""
+    if index is None:
+        return None
+    return tuple(column.values[index] for column in batch.columns)
+
+
+def _refetched_row(
+    batch: ColumnarPanelBatch, key: tuple[str, date], dataset: str
+) -> tuple[object, ...] | None:
+    """The re-fetched row for `key`, `None` when the re-fetch has none, refusing two of them."""
+    if batch.dataset != dataset:
+        raise PanelBatchError(
+            f"the re-fetch of {key[0]} on {key[1].isoformat()} was expected to be {dataset} and "
+            f"is {batch.dataset}"
+        )
+    if batch.status != "success":
+        return None
+    matches = [index for index, row_key in enumerate(_row_keys(batch)) if row_key == key]
+    if len(matches) > 1:
+        raise PanelBatchError(
+            f"the re-fetch of {key[0]} on {key[1].isoformat()} from {dataset} carried the row "
+            f"{len(matches)} times; a session has one row per security"
+        )
+    return _row_values(batch, matches[0]) if matches else None
+
+
+def _refuse_a_refetch_that_differs(
+    key: tuple[str, date],
+    dataset: str,
+    first: tuple[object, ...] | None,
+    again: tuple[object, ...] | None,
+) -> None:
+    if first == again:
+        return
+    raise PanelBatchError(
+        f"a targeted re-fetch of {key[0]} on {key[1].isoformat()} from {dataset} returned "
+        f"{'no row' if again is None else list(again)} where the year's fetch had "
+        f"{'no row' if first is None else list(first)}. The upstream did not publish the same "
+        "row twice, so this disagreement is a partial or mismatched fetch rather than an "
+        "upstream defect, and the year is refused as before: re-run the build"
+    )
+
+
+def _without_rows(
+    batches: tuple[ColumnarPanelBatch, ...], dropped: set[tuple[str, date]]
+) -> tuple[ColumnarPanelBatch, ...]:
+    """`batches` with every row keyed in `dropped` removed; a batch left empty is left out."""
+    if not dropped:
+        return batches
+    kept: list[ColumnarPanelBatch] = []
+    for batch in batches:
+        keys = _row_keys(batch)
+        indices = [index for index, key in enumerate(keys) if key not in dropped]
+        if len(indices) == len(keys):
+            kept.append(batch)
+        elif indices:
+            kept.append(_select_rows(batch, indices))
+    return tuple(kept)
+
+
+def _defect_record(
+    source: ColumnarPanelBatch, positions: Sequence[int], defects: Sequence[UpstreamDefect]
+) -> ColumnarPanelBatch | None:
+    """The `upstream_defects` batch for `defects`, each carrying its dropped row's clocks."""
+    if not defects:
+        return None
+    timeline = source.timeline
+    return ColumnarPanelBatch(
+        provider_id=source.provider_id,
+        dataset=UPSTREAM_DEFECTS_DATASET,
+        kind=UPSTREAM_DEFECTS_DATASET,
+        as_of=source.as_of,
+        fetched_at=source.fetched_at,
+        status="success",
+        subjects=tuple(defect.ts_code for defect in defects),
+        timeline=TimelineColumns(
+            **{
+                name: tuple(getattr(timeline, name)[index] for index in positions)
+                for name in CLOCK_COLUMN_NAMES
+            }
+        ),
+        columns=(
+            PanelColumn(
+                PRICE_DATE_COLUMN,
+                "string",
+                tuple(defect.trade_date.isoformat() for defect in defects),
+            ),
+            PanelColumn(
+                SOURCE_DATASET_COLUMN,
+                "string",
+                tuple(defect.source_dataset for defect in defects),
+            ),
+            PanelColumn(DEFECT_KIND_COLUMN, "string", tuple(defect.kind for defect in defects)),
+            *(
+                PanelColumn(name, "float", tuple(defect.values()[offset] for defect in defects))
+                for offset, name in enumerate(UPSTREAM_DEFECT_NUMBER_COLUMNS)
+            ),
+            PanelColumn(
+                REPEATS_PREVIOUS_CLOSE_COLUMN,
+                "boolean",
+                tuple(defect.valuation_repeats_previous_close for defect in defects),
+            ),
+        ),
+    )
+
+
+def _stored_defect_batch(
+    rows: Sequence[tuple[object, ...]],
+    *,
+    coverage: PartitionCoverage,
+) -> ColumnarPanelBatch:
+    """Stored defect rows as a batch again, to be put back beside a new source's rows.
+
+    `provider_id`, `as_of` and `fetched_at` come off the stored partition's own coverage record,
+    for `carry_stored_rows_forward`'s reason; `merge_panel_batches` then refuses a provider that
+    disagrees with the arriving record's.
+    """
+    held = {
+        name: tuple(row[index] for row in rows)
+        for index, name in enumerate(UPSTREAM_DEFECT_STORAGE_COLUMNS)
+    }
+    kinds: dict[str, PanelColumnKind] = {
+        PRICE_DATE_COLUMN: "string",
+        SOURCE_DATASET_COLUMN: "string",
+        DEFECT_KIND_COLUMN: "string",
+        **{name: "float" for name in UPSTREAM_DEFECT_NUMBER_COLUMNS},
+        REPEATS_PREVIOUS_CLOSE_COLUMN: "boolean",
+    }
+    return ColumnarPanelBatch(
+        provider_id=coverage.provider_id,
+        dataset=UPSTREAM_DEFECTS_DATASET,
+        kind=UPSTREAM_DEFECTS_DATASET,
+        as_of=coverage.as_of,
+        fetched_at=coverage.fetched_at,
+        status="success",
+        subjects=tuple(str(value) for value in held[SUBJECT_COLUMN_NAME]),
+        timeline=TimelineColumns(
+            **{
+                name: tuple(cast(datetime, value) for value in held[name])
+                for name in CLOCK_COLUMN_NAMES
+            }
+        ),
+        columns=tuple(
+            PanelColumn(name, kinds[name], held[name]) for name in UPSTREAM_DEFECT_DATA_COLUMNS
+        ),
+    )
+
+
+def _sorted_defects(batch: ColumnarPanelBatch) -> ColumnarPanelBatch:
+    """`batch` ordered by `(trade_date, subject, source_dataset)`, whatever wrote it first."""
+    dates = _column_values(batch, PRICE_DATE_COLUMN)
+    sources = _column_values(batch, SOURCE_DATASET_COLUMN)
+    order = sorted(
+        range(batch.row_count),
+        key=lambda index: (str(dates[index]), batch.subjects[index], str(sources[index])),
+    )
+    return _select_rows(batch, order)
 
 
 def write_index_weights(
@@ -4124,10 +4755,10 @@ def _read_visible_event_dated_rows(
     """Every row of `requirement.years` that was knowable at `as_of`, reconciled per event date.
 
     **The only door onto a whole-year partition of an event-driven dataset, since `V2-P4-076`.**
-    It is taken by five loaders -- `load_stock_universe`, `load_suspensions`,
-    `load_name_histories`, `load_statement_histories` since `V2-P4-083`, and
-    `load_industry_cross_section` through `_read_visible_membership_rows` -- and it is one
-    function rather than five because
+    It is taken by six loaders -- `load_stock_universe`, `load_suspensions`,
+    `load_name_histories`, `load_statement_histories` since `V2-P4-083`,
+    `load_upstream_defects` since `V2-P6-013`, and `load_industry_cross_section` through
+    `_read_visible_membership_rows` -- and it is one function rather than six because
     `_read_visible_price_session`'s own docstring records what two doors onto one question cost
     the last time there were two.
 
@@ -4338,7 +4969,7 @@ def _refuse_a_slice_the_census_disagrees_with(
     test_two_census_errors_below_the_census_day_are_refused_rather_than_cancelling_out`.
 
     `availability_rule` is the caller's own sentence about how its dataset's `available_time`
-    follows from its event date, and it is an argument rather than a constant because the five
+    follows from its event date, and it is an argument rather than a constant because the six
     callers' rules genuinely differ -- a floor at a taxonomy's effective date, a midnight, and a
     16:30 close. The message has to name the rule it is holding the partition to, or a reader
     handed "those two numbers should be equal" has no way to check whether they should.

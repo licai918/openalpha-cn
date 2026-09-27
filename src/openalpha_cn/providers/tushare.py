@@ -1573,6 +1573,33 @@ def _lower_limit_price(value: object) -> object:
     raise ValueError(f"must be a finite non-negative number, got {type(value).__name__} {value!r}")
 
 
+def _upper_limit_price(value: object) -> object:
+    """Parse a published ``up_limit`` into a finite positive ``float``, or exactly ``0.0``.
+
+    Positive, as `_positive_price` requires, with **one** admitted exception (`V2-P6-013`):
+    exactly ``0.0``. On 2014-01-09 the upstream published ``up_limit=0.0, down_limit=0.0`` for
+    ``000509.SZ``, which `suspend_d` has halted all session and which has no `daily` or
+    `daily_basic` row -- a no-band placeholder for a security that did not trade -- and a
+    refusal here exited the whole 2014 build with ``invalid_response``.
+
+    A cell parser cannot see the row it is in, so it cannot tell that placeholder from a
+    malformed zero. It admits the value and leaves the decision to
+    `panel_ingest.reconcile_limit_placeholders`, which drops a zero/zero band only on a
+    whole-day halt and refuses every other zero upper limit by name; `write_price_limits`
+    refuses any that reaches it, and the reader refuses to rebuild one. Negatives, the
+    non-finites, ``None`` and ``bool`` are still refused here.
+    """
+    if (type(value) is float or type(value) is int) and value == 0:
+        return 0.0
+    try:
+        return _positive_price(value)
+    except ValueError:
+        raise ValueError(
+            "must be a finite positive number, or exactly 0.0 (the no-band placeholder), got "
+            f"{type(value).__name__} {value!r}"
+        ) from None
+
+
 def _constituent_weight(value: object) -> object:
     """Parse a published index weight into a real, usable `float`.
 
@@ -1972,15 +1999,17 @@ def _price_limit_panel_column(name: str) -> TusharePanelColumn:
     against the previous close, by `PriceLimit.is_bounded`.
 
     **The two sides take different parses**, which is the one place this dataset's asymmetry
-    shows up in code. An `up_limit` is strictly positive; a `down_limit` may be exactly `0.0`,
-    because that is how the Beijing board publishes "no lower bound". See `_lower_limit_price`
-    for the 235 sessions that ride on it.
+    shows up in code. A `down_limit` may be any non-negative value, because `0.0` is how the
+    Beijing board publishes "no lower bound" -- see `_lower_limit_price` for the 235 sessions that
+    ride on it. An `up_limit` is positive or exactly `0.0`, the upstream's zero/zero no-band
+    placeholder for a halted security, which is decided per row downstream -- see
+    `_upper_limit_price`.
     """
     if name == PRICE_DATE_COLUMN:
         return TusharePanelColumn(
             name=name, kind="string", source_field=name, parse=_calendar_date_text
         )
-    parse = _lower_limit_price if name == DOWN_LIMIT_COLUMN else _positive_price
+    parse = _lower_limit_price if name == DOWN_LIMIT_COLUMN else _upper_limit_price
     return TusharePanelColumn(
         name=name, kind="float", source_field=name, parse=_named_parser(name, parse)
     )

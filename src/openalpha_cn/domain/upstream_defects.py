@@ -1,0 +1,294 @@
+"""Rows the upstream itself published wrong, and the named rule each one was handled by
+(`V2-P6-013`).
+
+## Why this module exists
+
+The panel's write-time guards refuse a year on the first contradiction, and they are right to:
+a partial or mismatched fetch looks exactly like a contradiction, and storing one is the failure
+they exist to prevent. The 2013..2026 backfill then found contradictions that are **not** fetch
+faults -- they are in Tushare's own data, they reproduce on a targeted re-fetch, and refusing
+them refuses a whole year of every other security's data along with them. Measured live on
+2026-09-26:
+
+- `000022.SZ` on 2013-11-14 has a `daily_basic` row (close 13.75) and no `daily` bar, and a
+  per-security range request for 2013-11-11..18 omits the bar too. It traded: 2013-11-15's
+  `pre_close` is 13.75, `adj_factor` and `stk_limit` have rows for the 14th, and `suspend_d` has
+  none.
+- `002357.SZ` on 2013-07-15 closed at 6.8 in `daily` and 6.62 in `daily_basic`. The bar is
+  corroborated by its own neighbour (2013-07-16's `pre_close` is 6.8, and `pct_chg` 2.72 is
+  6.8/6.62 - 1), while the valuation row repeats 2013-07-12's close **and** 2013-07-12's
+  `total_mv` exactly -- a stale valuation row carried forward a session.
+- 2020-10-23 has ten securities whose two closes differ by a cent or a few (`600079.SH` 31.06
+  against 31.05, `603268.SH` 16.21 against 16.17, `600898.SH` 5.97 against 5.98, ...). In every
+  case checked the next session's `pre_close` equals the `daily` close and `pct_chg` matches it,
+  while the `daily_basic` close equals neither the bar nor the previous close. So the stale
+  shape above is one case of a wider one -- a valuation that contradicts a bar its own next
+  session corroborates -- and the rule is stated at that width, with the stale case recorded.
+- 2020-09-18 has ninety `daily_basic` rows with no bar: halted A shares (`000029.SZ`, an untimed
+  `S` in `suspend_d`) and B shares (`200011.SZ` and others, with no `suspend_d` row and no bar
+  all week). They are `valuation_without_bar`, with no halt requirement.
+- `000509.SZ` on 2014-01-09 has a `stk_limit` row with `up_limit=0.0, down_limit=0.0`, is
+  halted all session in `suspend_d`, and has no `daily` or `daily_basic` row. Zero/zero is how
+  the upstream publishes "no band" for a halted security on that history.
+
+## What a rule here is, and what it is not
+
+Each `DefectKind` is a **named** rule with a precondition narrow enough that a fetch fault
+cannot satisfy it by accident, and each one only ever **drops** the upstream's wrong row. Nothing
+here edits a bar or a valuation, fills a gap from another dataset or another provider, or
+invents a value. A disagreement no rule names is still refused, by the same guard as before.
+
+Every dropped row is recorded in the `upstream_defects` panel dataset
+(`panel_ingest.UPSTREAM_DEFECTS_DATASET`), one partition per year,
+with the values that disagreed and the dropped row's own four clocks, so a reader can see
+every row the source got wrong and when it was fetched.
+
+Pure rules and a row decoder only: `panel_ingest` owns the batches, the re-fetch and the
+partition, and this module imports no numerical or storage library (hard rule 2).
+"""
+
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from datetime import date
+from math import isfinite
+from typing import Final, Literal, get_args
+
+from openalpha_cn.domain.daily_prices import (
+    DAILY_BASIC_DATASET,
+    MAX_PUBLISHED_RETURN_DISAGREEMENT,
+    PRICE_DATE_COLUMN,
+)
+from openalpha_cn.domain.panel_batch import SUBJECT_COLUMN_NAME
+from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET
+
+DefectKind = Literal[
+    "valuation_without_bar", "valuation_contradicts_corroborated_bar", "limit_placeholder_on_halt"
+]
+"""The named rules. See `close_disagreement_kind` and `limit_placeholder_kind`."""
+
+DEFECT_KINDS: Final[frozenset[str]] = frozenset(get_args(DefectKind))
+
+DEFECT_SOURCE_DATASETS: Final[frozenset[str]] = frozenset(
+    {DAILY_BASIC_DATASET, PRICE_LIMIT_DATASET}
+)
+"""The datasets a rule may drop a row from. `daily` is not one of them: no rule drops a bar."""
+
+SOURCE_DATASET_COLUMN: Final[str] = "source_dataset"
+DEFECT_KIND_COLUMN: Final[str] = "defect_kind"
+BAR_CLOSE_COLUMN: Final[str] = "bar_close"
+VALUATION_CLOSE_COLUMN: Final[str] = "valuation_close"
+PREVIOUS_BAR_CLOSE_COLUMN: Final[str] = "previous_bar_close"
+DEFECT_UP_LIMIT_COLUMN: Final[str] = "up_limit"
+DEFECT_DOWN_LIMIT_COLUMN: Final[str] = "down_limit"
+REPEATS_PREVIOUS_CLOSE_COLUMN: Final[str] = "valuation_repeats_previous_close"
+
+UPSTREAM_DEFECT_DATA_COLUMNS: Final[tuple[str, ...]] = (
+    PRICE_DATE_COLUMN,
+    SOURCE_DATASET_COLUMN,
+    DEFECT_KIND_COLUMN,
+    BAR_CLOSE_COLUMN,
+    VALUATION_CLOSE_COLUMN,
+    PREVIOUS_BAR_CLOSE_COLUMN,
+    DEFECT_UP_LIMIT_COLUMN,
+    DEFECT_DOWN_LIMIT_COLUMN,
+    REPEATS_PREVIOUS_CLOSE_COLUMN,
+)
+"""The stored columns after `subject`, in order.
+
+The first three say *which* row was dropped and *by which rule*; the five numbers are the values
+that disagreed, each `None` where the kind has nothing to say about it, and the last column keeps
+the two shapes of a contradicted valuation apart:
+
+- `valuation_without_bar`: `valuation_close` (there is no bar, so `bar_close` is `None`).
+- `valuation_contradicts_corroborated_bar`: `bar_close`, `valuation_close`, `previous_bar_close`
+  (the security's previous stored bar close, `None` on its first bar of the year), and
+  `valuation_repeats_previous_close` -- `True` for the stale shape (`002357.SZ` on 2013-07-15),
+  `False` for a valuation that equals neither close (2020-10-23), `None` when there is no
+  previous bar to compare with.
+- `limit_placeholder_on_halt`: `up_limit` and `down_limit`, both `0.0`.
+"""
+
+UPSTREAM_DEFECT_NUMBER_COLUMNS: Final[tuple[str, ...]] = UPSTREAM_DEFECT_DATA_COLUMNS[3:8]
+
+UPSTREAM_DEFECT_PANEL_COLUMNS: Final[tuple[str, ...]] = (
+    SUBJECT_COLUMN_NAME,
+    *UPSTREAM_DEFECT_DATA_COLUMNS,
+)
+"""What a reader asks the store for, and the positional contract of the rows back."""
+
+
+class UpstreamDefectError(ValueError):
+    """Raised for a malformed stored defect row."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class UpstreamDefect:
+    """One row the upstream published wrong, which dataset it was in, and the rule that
+    dropped it."""
+
+    ts_code: str
+    trade_date: date
+    source_dataset: str
+    kind: DefectKind
+    bar_close: float | None = None
+    valuation_close: float | None = None
+    previous_bar_close: float | None = None
+    up_limit: float | None = None
+    down_limit: float | None = None
+    valuation_repeats_previous_close: bool | None = None
+
+    def values(self) -> tuple[float | None, ...]:
+        """The five numbers in `UPSTREAM_DEFECT_NUMBER_COLUMNS` order."""
+        return (
+            self.bar_close,
+            self.valuation_close,
+            self.previous_bar_close,
+            self.up_limit,
+            self.down_limit,
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BarWitness:
+    """The three numbers of one `daily` bar the close-disagreement rules read."""
+
+    close: float
+    pre_close: float
+    pct_chg: float
+
+    @property
+    def return_disagreement(self) -> float:
+        """How far `pct_chg / 100` sits from `close / pre_close - 1`, unsigned."""
+        return abs(self.close / self.pre_close - 1 - self.pct_chg / 100.0)
+
+
+def close_disagreement_kind(
+    *,
+    bar: BarWitness | None,
+    next_bar_pre_close: float | None,
+    is_last_session: bool,
+) -> DefectKind | None:
+    """The rule that explains one `daily`/`daily_basic` close disagreement, or `None`.
+
+    Called only after a targeted re-fetch has reproduced the disagreement exactly; a re-fetch
+    that differs is a partial fetch and never reaches this function.
+
+    - **`valuation_without_bar`**: there is no bar and there is a valuation. The re-fetch has
+      already confirmed both halves, so the valuation row is the one to drop -- a bar is never
+      invented to match it.
+    - **`valuation_contradicts_corroborated_bar`**: there is a bar and it is **corroborated** by
+      a witness other than itself, so the valuation's different close is the wrong one.
+      Corroborated means the security's next stored bar's `pre_close` equals this bar's close,
+      or -- when there is no next bar because this is the last session available to the build --
+      the bar's own `pct_chg` agrees with `close / pre_close - 1` within
+      `MAX_PUBLISHED_RETURN_DISAGREEMENT`, one tick of the grid the upstream publishes it on.
+      Whether the valuation repeats the previous close (the stale shape) is recorded by
+      `repeats_previous_close`, not required.
+
+    Anything else returns `None` and the caller refuses: a bar whose next session disagrees with
+    it, and a missing next bar before the last available session, are shapes a fetch fault can
+    produce, so neither is explained here.
+    """
+    if bar is None:
+        return "valuation_without_bar"
+    if next_bar_pre_close is not None:
+        corroborated = next_bar_pre_close == bar.close
+    else:
+        corroborated = (
+            is_last_session and bar.return_disagreement <= MAX_PUBLISHED_RETURN_DISAGREEMENT
+        )
+    return "valuation_contradicts_corroborated_bar" if corroborated else None
+
+
+def repeats_previous_close(
+    *, valuation_close: float, previous_bar_close: float | None
+) -> bool | None:
+    """Whether a contradicted valuation is the stale shape: it equals the previous bar close.
+
+    `None` when there is no previous bar in the year to compare with. Recorded beside the defect
+    so the stale shape (`002357.SZ`, 2013-07-15) and the off-by-a-cent shape (2020-10-23) stay
+    distinguishable in the record; neither is required by the rule.
+    """
+    if previous_bar_close is None:
+        return None
+    return valuation_close == previous_bar_close
+
+
+def limit_placeholder_kind(
+    *, up_limit: float, down_limit: float, halted: bool
+) -> DefectKind | None:
+    """The rule for a `stk_limit` row with a zero upper limit, or `None` to refuse it.
+
+    **`limit_placeholder_on_halt`**: both limits are exactly `0.0` **and** the year's `suspend_d`
+    corpus has the security halted for the whole session (`SuspensionDay.is_halted`: an untimed
+    `S`). That is the upstream's no-band placeholder, and the row is dropped rather than stored,
+    because a band of zero/zero read as a band refuses every order on both sides.
+
+    A zero/zero row on a session the security is not halted, and a row with a zero upper limit
+    beside a non-zero lower one, return `None` and are refused by name. A zero *lower* limit
+    beside a positive upper one is not a candidate at all -- it is the Beijing board's published
+    "no lower bound" and is stored as it always was.
+    """
+    if up_limit == 0.0 and down_limit == 0.0 and halted:
+        return "limit_placeholder_on_halt"
+    return None
+
+
+def upstream_defects_from_panel_rows(
+    rows: Iterable[Sequence[object]],
+) -> tuple[UpstreamDefect, ...]:
+    """Rebuild stored defect rows shaped like `UPSTREAM_DEFECT_PANEL_COLUMNS`, in row order."""
+    defects: list[UpstreamDefect] = []
+    for index, row in enumerate(rows):
+        if len(row) != len(UPSTREAM_DEFECT_PANEL_COLUMNS):
+            raise UpstreamDefectError(
+                f"row {index} has {len(row)} values, expected "
+                f"{len(UPSTREAM_DEFECT_PANEL_COLUMNS)} ({', '.join(UPSTREAM_DEFECT_PANEL_COLUMNS)})"
+            )
+        subject, day_text, source, kind, *numbers, repeats = row
+        if type(subject) is not str or not subject:
+            raise UpstreamDefectError(f"row {index}: subject must be a non-empty string")
+        if type(day_text) is not str:
+            raise UpstreamDefectError(f"row {index}: {PRICE_DATE_COLUMN} must be an ISO date")
+        try:
+            trade_date = date.fromisoformat(day_text)
+        except ValueError as error:
+            raise UpstreamDefectError(
+                f"row {index}: {PRICE_DATE_COLUMN} is not an ISO date: {day_text!r}"
+            ) from error
+        if source not in DEFECT_SOURCE_DATASETS:
+            raise UpstreamDefectError(
+                f"row {index}: {SOURCE_DATASET_COLUMN} {source!r} is not one of "
+                f"{sorted(DEFECT_SOURCE_DATASETS)}"
+            )
+        if kind not in DEFECT_KINDS:
+            raise UpstreamDefectError(
+                f"row {index}: {DEFECT_KIND_COLUMN} {kind!r} is not one of {sorted(DEFECT_KINDS)}"
+            )
+        for name, value in zip(UPSTREAM_DEFECT_NUMBER_COLUMNS, numbers, strict=True):
+            if value is not None and (type(value) is not float or not isfinite(value)):
+                raise UpstreamDefectError(
+                    f"row {index}: {name} must be a finite float or null, got "
+                    f"{type(value).__name__} {value!r}"
+                )
+        if repeats is not None and type(repeats) is not bool:
+            raise UpstreamDefectError(
+                f"row {index}: {REPEATS_PREVIOUS_CLOSE_COLUMN} must be a boolean or null, got "
+                f"{type(repeats).__name__} {repeats!r}"
+            )
+        bar_close, valuation_close, previous_bar_close, up_limit, down_limit = numbers
+        defects.append(
+            UpstreamDefect(
+                ts_code=subject,
+                trade_date=trade_date,
+                source_dataset=str(source),
+                kind=kind,  # type: ignore[arg-type]
+                bar_close=bar_close,  # type: ignore[arg-type]
+                valuation_close=valuation_close,  # type: ignore[arg-type]
+                previous_bar_close=previous_bar_close,  # type: ignore[arg-type]
+                up_limit=up_limit,  # type: ignore[arg-type]
+                down_limit=down_limit,  # type: ignore[arg-type]
+                valuation_repeats_previous_close=repeats,
+            )
+        )
+    return tuple(defects)

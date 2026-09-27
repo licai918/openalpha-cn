@@ -465,8 +465,11 @@ def test_a_write_time_guard_refusal_is_reported_and_leaves_no_partition_behind(
     that contradict each other. The CLI must surface that refusal, and -- because every guard
     in `write_daily_panel` runs before either partition is written -- must leave the store with
     no `daily` partition at all rather than half a price panel."""
+    # The *bar* moves to 11.5 and its next session's `pre_close` stays at 10.0, so nothing
+    # corroborates it and `V2-P6-013`'s reconciliation refuses rather than drops the valuation --
+    # a bar its next session does agree with would now be the upstream's defect, not a refusal.
     transport = ScriptedTushareTransport(
-        closes={DAILY_BASIC_DATASET: {(BUILD_SECURITIES[0], BUILD_SESSIONS[1]): 11.5}}
+        closes={DAILY_DATASET: {(BUILD_SECURITIES[0], BUILD_SESSIONS[1]): 11.5}}
     )
     monkeypatch.setenv("TUSHARE_TOKEN", SECRET_TOKEN)
     monkeypatch.setattr(cli, "_panel_transport", lambda: transport)
@@ -710,8 +713,11 @@ def test_a_refusal_names_the_partitions_it_had_already_stored(
     because a caller deciding whether to re-run or to clear the runtime directory needs the
     difference.
     """
+    # The *bar* moves to 11.5 and its next session's `pre_close` stays at 10.0, so nothing
+    # corroborates it and `V2-P6-013`'s reconciliation refuses rather than drops the valuation --
+    # a bar its next session does agree with would now be the upstream's defect, not a refusal.
     transport = ScriptedTushareTransport(
-        closes={DAILY_BASIC_DATASET: {(BUILD_SECURITIES[0], BUILD_SESSIONS[1]): 11.5}}
+        closes={DAILY_DATASET: {(BUILD_SECURITIES[0], BUILD_SESSIONS[1]): 11.5}}
     )
     monkeypatch.setenv("TUSHARE_TOKEN", SECRET_TOKEN)
     monkeypatch.setattr(cli, "_panel_transport", lambda: transport)

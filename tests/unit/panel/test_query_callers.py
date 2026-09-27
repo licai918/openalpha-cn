@@ -206,8 +206,17 @@ def test_the_allowlist_names_files_that_exist_and_actually_make_the_call() -> No
 
 UNGATED_READERS: dict[str, tuple[str, ...]] = {
     "carry_stored_rows_forward": ("query",),
+    "write_upstream_defects": ("query",),
 }
 """Every function in `panel_ingest` that takes the un-gated door, and which door it takes.
+
+`write_upstream_defects` (`V2-P6-013`) is here on `carry_stored_rows_forward`'s own argument and
+no other: the `upstream_defects` year partition has two writers (the price target records the
+`daily_basic` rows it dropped, the `stk_limit` target the bands), a partition is replaced whole,
+so each writer reads the stored rows back and puts the *other* source's rows in front of its
+own. Nothing it reads is answered with; a point-in-time read there would drop the withheld rows
+from the partition it is about to commit. Reading the record *out* goes through the filtered
+door (`load_upstream_defects`, on `test_visible_read_callers.py`'s allowlist).
 
 **The file-level entry above is too coarse for this one file, and `V2-P4-081` is what it cost.**
 `QUERY_CALLERS` answers *which files may* -- the right granularity for `panel/store.py`, which is

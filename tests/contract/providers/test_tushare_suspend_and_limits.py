@@ -313,14 +313,27 @@ def test_a_negative_lower_limit_is_still_refused_at_the_provider(fake_tushare_tr
         provider.fetch_panel(_request(PRICE_LIMIT_DATASET))
 
 
-def test_a_zero_upper_limit_is_still_refused_at_the_provider(fake_tushare_transport) -> None:
-    """The two sides take different parses and this is the asymmetry: an `up_limit` of zero
-    bounds every price out of existence and no published row has ever carried one."""
+def test_a_zero_upper_limit_is_decoded_and_a_negative_one_is_still_refused(
+    fake_tushare_transport,
+) -> None:
+    """`V2-P6-013`. This test used to say that "no published row has ever carried" a zero
+    `up_limit`, and the 2014 backfill measured one: `000509.SZ` on 2014-01-09 is `0.0/0.0`,
+    halted all session in `suspend_d`, with no bar -- the upstream's no-band placeholder. A cell
+    parser cannot see the row it is in, so the zero is admitted here and decided per row by
+    `panel_ingest.reconcile_limit_placeholders`; a negative upper limit is still no bound at
+    all and is still refused at the provider."""
     provider, _ = _provider(
         fake_tushare_transport,
         _response(LIMIT_FIELDS, [["20240628", "000001.SZ", 0.0, 0.0]], has_more=False),
     )
+    batch = provider.fetch_panel(_request(PRICE_LIMIT_DATASET))
+    assert batch.status == "success"
+    assert [column.values for column in batch.columns if column.name == "up_limit"] == [(0.0,)]
 
+    provider, _ = _provider(
+        fake_tushare_transport,
+        _response(LIMIT_FIELDS, [["20240628", "000001.SZ", -0.01, 0.0]], has_more=False),
+    )
     with pytest.raises(ProviderFailure, match="up_limit must be a finite positive number"):
         provider.fetch_panel(_request(PRICE_LIMIT_DATASET))
 
