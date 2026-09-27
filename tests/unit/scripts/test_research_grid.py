@@ -32,6 +32,7 @@ from openalpha_cn.backtest.multiple_testing import (
     control_false_discovery_rate,
 )
 from openalpha_cn.backtest.outcome_statistics import sign_flip_test
+from openalpha_cn.backtest.strategy_backtest import StrategyBacktestError
 from openalpha_cn.sdk import OpenAlphaSDK
 from openalpha_cn.strategy_view import StrategyRequestError
 
@@ -54,6 +55,9 @@ def _research_module(name: str) -> ModuleType:
 grid = _research_module("grid")
 
 AT: Final[datetime] = datetime(2026, 9, 26, 12, 0, tzinfo=UTC)
+WINDOW: Final[dict[str, object]] = {"start": date(2015, 1, 5), "end": date(2015, 6, 30)}
+"""A measured window inside the discovery segment, for runner tests that are not about windows."""
+NO_LABEL = grid.strategy_label_sessions
 
 
 def _rows(path: Path) -> list[dict[str, Any]]:
@@ -74,11 +78,11 @@ def test_family_size_counts_every_row_of_the_stage_including_failures(tmp_path: 
 def test_family_size_is_per_stage_and_zero_for_a_stage_never_run(tmp_path: Path) -> None:
     ledger = tmp_path / "ledger.jsonl"
     grid.append_ledger(ledger, "discovery", {"i": 0}, {"p_excess": 0.5})
-    grid.append_ledger(ledger, "composite", {"i": 0}, {"p_excess": 0.5})
-    grid.append_ledger(ledger, "composite", {"i": 1}, {"error": "refused"})
+    grid.append_ledger(ledger, "composition", {"i": 0}, {"p_excess": 0.5})
+    grid.append_ledger(ledger, "composition", {"i": 1}, {"error": "refused"})
 
     assert grid.stage_family(ledger, "discovery") == 1
-    assert grid.stage_family(ledger, "composite") == 2
+    assert grid.stage_family(ledger, "composition") == 2
     assert grid.stage_family(ledger, "validation") == 0
     assert grid.stage_family(tmp_path / "absent.jsonl", "discovery") == 0
 
@@ -228,7 +232,7 @@ def test_the_fdr_family_is_every_row_and_a_failed_row_is_withheld(tmp_path: Path
     for index, p_value in enumerate((0.001, 0.02, 0.3)):
         grid.append_ledger(ledger, "discovery", {"i": index}, {"p_excess": p_value})
     grid.append_ledger(ledger, "discovery", {"i": 3}, {"error": "refused"})
-    grid.append_ledger(ledger, "composite", {"i": 0}, {"p_excess": 0.0001})
+    grid.append_ledger(ledger, "composition", {"i": 0}, {"p_excess": 0.0001})
 
     report = grid.fdr_table(ledger, "discovery", 0.10)
 
@@ -271,7 +275,7 @@ def test_the_fdr_table_refuses_a_stage_that_has_no_p_value_to_control(tmp_path: 
     with pytest.raises(grid.ResearchLedgerError, match="1 row"):
         grid.fdr_table(ledger, "discovery", 0.10)
     with pytest.raises(grid.ResearchLedgerError, match="no row"):
-        grid.fdr_table(ledger, "composite", 0.10)
+        grid.fdr_table(ledger, "composition", 0.10)
 
 
 # --- the runner --------------------------------------------------------------------------------
@@ -279,14 +283,16 @@ def test_the_fdr_table_refuses_a_stage_that_has_no_p_value_to_control(tmp_path: 
 
 def test_the_runner_records_a_refused_configuration_as_a_row_of_the_family(tmp_path: Path) -> None:
     ledger = tmp_path / "ledger.jsonl"
-    configs = grid.expand_grid({"holding_count": (30, 50, 100)})
+    configs = tuple({**WINDOW, **c} for c in grid.expand_grid({"holding_count": (30, 50, 100)}))
 
     def measure(config: Mapping[str, object]) -> Mapping[str, object]:
         if config["holding_count"] == 50:
             raise StrategyRequestError("no cross section on the signal day")
         return {"p_excess": 0.5}
 
-    run = grid.run_grid(ledger, "discovery", configs, measure, clock=lambda: AT)
+    run = grid.run_grid(
+        ledger, "discovery", configs, measure, label_sessions=NO_LABEL, clock=lambda: AT
+    )
 
     assert run.ran == 3
     assert run.skipped == 0
@@ -299,15 +305,19 @@ def test_the_runner_records_a_refused_configuration_as_a_row_of_the_family(tmp_p
 
 def test_the_runner_resumes_by_skipping_what_the_ledger_already_holds(tmp_path: Path) -> None:
     ledger = tmp_path / "ledger.jsonl"
-    configs = grid.expand_grid({"holding_count": (30, 50)})
+    configs = tuple({**WINDOW, **c} for c in grid.expand_grid({"holding_count": (30, 50)}))
     calls: list[Mapping[str, object]] = []
 
     def measure(config: Mapping[str, object]) -> Mapping[str, object]:
         calls.append(config)
         return {"p_excess": 0.5}
 
-    grid.run_grid(ledger, "discovery", configs[:1], measure, clock=lambda: AT)
-    run = grid.run_grid(ledger, "discovery", configs, measure, clock=lambda: AT)
+    grid.run_grid(
+        ledger, "discovery", configs[:1], measure, label_sessions=NO_LABEL, clock=lambda: AT
+    )
+    run = grid.run_grid(
+        ledger, "discovery", configs, measure, label_sessions=NO_LABEL, clock=lambda: AT
+    )
 
     assert (run.ran, run.skipped) == (1, 1)
     assert calls == [configs[0], configs[1]]
@@ -323,7 +333,14 @@ def test_an_error_the_runner_does_not_recognise_stops_the_run_and_writes_nothing
         raise KeyError("a bug, not a refusal")
 
     with pytest.raises(KeyError):
-        grid.run_grid(ledger, "discovery", ({"i": 0},), measure, clock=lambda: AT)
+        grid.run_grid(
+            ledger,
+            "discovery",
+            ({"i": 0, **WINDOW},),
+            measure,
+            label_sessions=NO_LABEL,
+            clock=lambda: AT,
+        )
     assert grid.stage_family(ledger, "discovery") == 0
 
 
@@ -331,16 +348,172 @@ def test_the_runner_will_not_run_the_holdout(tmp_path: Path) -> None:
     """The holdout runs once, through `registry.run_holdout`, behind the registration guard."""
     with pytest.raises(grid.ResearchLedgerError, match="registry"):
         grid.run_grid(
-            tmp_path / "l.jsonl", grid.HOLDOUT_STAGE, ({"i": 0},), lambda c: {}, clock=lambda: AT
+            tmp_path / "l.jsonl",
+            grid.HOLDOUT_STAGE,
+            ({"i": 0, "start": date(2024, 1, 2), "end": date(2024, 6, 28)},),
+            lambda c: {},
+            label_sessions=NO_LABEL,
+            clock=lambda: AT,
         )
 
 
-def test_a_second_holdout_row_is_refused_by_the_ledger_itself(tmp_path: Path) -> None:
+def test_append_ledger_will_not_write_the_holdout_stage(tmp_path: Path) -> None:
+    """Only `registry.run_holdout` writes the holdout stage, through `_append_holdout`, which
+    carries the registration it ran under; a public write would be a holdout row with no guard."""
     ledger = tmp_path / "ledger.jsonl"
-    grid.append_ledger(ledger, grid.HOLDOUT_STAGE, {"i": 0}, {"p_excess": 0.5})
+    with pytest.raises(grid.ResearchLedgerError, match="run_holdout"):
+        grid.append_ledger(ledger, grid.HOLDOUT_STAGE, {"i": 0}, {"p_excess": 0.5})
+    assert grid.stage_family(ledger, grid.HOLDOUT_STAGE) == 0
+    assert not ledger.exists()
 
+
+def test_the_holdout_path_takes_one_claim_then_one_measurement_of_the_claimed_configuration(
+    tmp_path: Path,
+) -> None:
+    ledger = tmp_path / "ledger.jsonl"
+    binding = {"registration_sha256": "0" * 64, "registration_commit": "a" * 40}
+
+    with pytest.raises(grid.ResearchLedgerError, match="claim"):
+        grid._append_holdout(ledger, "measurement", {"i": 0}, binding, recorded_at=AT)
+    grid._append_holdout(ledger, "holdout_claim", {"i": 0}, binding, recorded_at=AT)
     with pytest.raises(grid.ResearchLedgerError, match="once"):
-        grid.append_ledger(ledger, grid.HOLDOUT_STAGE, {"i": 1}, {"p_excess": 0.5})
+        grid._append_holdout(ledger, "holdout_claim", {"i": 1}, binding, recorded_at=AT)
+    with pytest.raises(grid.ResearchLedgerError, match="claim"):
+        grid._append_holdout(ledger, "measurement", {"i": 1}, binding, recorded_at=AT)
+    with pytest.raises(grid.ResearchLedgerError, match="registration"):
+        grid._append_holdout(ledger, "measurement", {"i": 0}, {"p_excess": 0.5}, recorded_at=AT)
+    grid._append_holdout(ledger, "measurement", {"i": 0}, {**binding, "p": 1.0}, recorded_at=AT)
+    with pytest.raises(grid.ResearchLedgerError, match="once"):
+        grid._append_holdout(ledger, "measurement", {"i": 0}, binding, recorded_at=AT)
+
+    assert [row["kind"] for row in _rows(ledger)] == ["holdout_claim", "measurement"]
+    assert grid.stage_family(ledger, grid.HOLDOUT_STAGE) == 1
+
+
+# --- the stage windows -------------------------------------------------------------------------
+
+
+def _weekdays(first: date, last: date) -> tuple[date, ...]:
+    days = (first + timedelta(days=offset) for offset in range((last - first).days + 1))
+    return tuple(day for day in days if day.weekday() < 5)
+
+
+CALENDAR: Final[tuple[date, ...]] = _weekdays(date(2021, 11, 1), date(2024, 3, 29))
+
+
+def _run_one(ledger: Path, stage: str, config: Mapping[str, object], **kwargs: Any) -> list[Any]:
+    measured: list[Mapping[str, object]] = []
+
+    def measure(value: Mapping[str, object]) -> Mapping[str, object]:
+        measured.append(value)
+        return {"p_excess": 0.5}
+
+    grid.run_grid(ledger, stage, (config,), measure, clock=lambda: AT, **kwargs)
+    return measured
+
+
+def test_the_protocol_segments_are_code() -> None:
+    assert grid.STAGES == ("discovery", "composition", "validation", "holdout", "forward")
+    windows = grid.PROTOCOL_STAGE_WINDOWS
+    assert windows["discovery"] == grid.StageWindow(date(2015, 1, 5), date(2021, 12, 31))
+    assert windows["composition"] == windows["discovery"]
+    assert windows["validation"] == grid.StageWindow(date(2022, 1, 4), date(2023, 12, 29))
+    assert windows["holdout"] == grid.StageWindow(date(2024, 1, 2), None)
+    assert "forward" not in windows  # it starts after the registration's commit date
+
+
+def test_a_configuration_reaching_into_the_holdout_is_refused_before_it_is_measured(
+    tmp_path: Path,
+) -> None:
+    ledger = tmp_path / "ledger.jsonl"
+    config = {"start": date(2023, 6, 1), "end": date(2024, 1, 5), "holding_count": 50}
+
+    measured = _run_one(ledger, "validation", config, label_sessions=NO_LABEL)
+
+    assert measured == []
+    (row,) = _rows(ledger)
+    assert row["result"]["error"].startswith("StageWindowError: ")
+    assert "2024-01-05" in row["result"]["error"]
+    assert grid.stage_family(ledger, "validation") == 1
+
+
+def test_a_label_that_ends_past_the_stage_is_refused_and_one_inside_it_is_measured(
+    tmp_path: Path,
+) -> None:
+    """Five sessions after Friday 24 December 2021 is Friday 31 December, inside discovery; five
+    after Monday 27 December is Monday 3 January 2022, which is validation's."""
+    ledger = tmp_path / "ledger.jsonl"
+    inside = {"start": date(2021, 6, 1), "end": date(2021, 12, 24)}
+    across = {"start": date(2021, 6, 1), "end": date(2021, 12, 27)}
+    five = {"label_sessions": lambda config: 5, "sessions": CALENDAR}
+
+    assert _run_one(ledger, "discovery", inside, **five) == [inside]
+    assert _run_one(ledger, "discovery", across, **five) == []
+    assert "2022-01-03" in _rows(ledger)[-1]["result"]["error"]
+
+
+def test_a_configuration_starting_before_its_stage_is_refused(tmp_path: Path) -> None:
+    ledger = tmp_path / "ledger.jsonl"
+    config = {"start": date(2014, 12, 31), "end": date(2015, 6, 30)}
+
+    assert _run_one(ledger, "discovery", config, label_sessions=NO_LABEL) == []
+    assert _rows(ledger)[0]["result"]["error"].startswith("StageWindowError: ")
+
+
+def test_the_forward_stage_needs_its_start_and_refuses_a_window_before_it(tmp_path: Path) -> None:
+    ledger = tmp_path / "ledger.jsonl"
+    early = {"start": date(2026, 9, 26), "end": date(2026, 10, 30)}
+    later = {"start": date(2026, 9, 28), "end": date(2026, 10, 30)}
+
+    with pytest.raises(grid.ResearchLedgerError, match="forward_after"):
+        _run_one(ledger, "forward", later, label_sessions=NO_LABEL)
+    after = {"label_sessions": NO_LABEL, "forward_after": date(2026, 9, 27)}
+    assert _run_one(ledger, "forward", early, **after) == []
+    assert _run_one(ledger, "forward", later, **after) == [later]
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"end": date(2015, 6, 30)},
+        {"start": date(2015, 1, 5)},
+        {"start": "2015-01-05", "end": date(2015, 6, 30)},
+        {"start": datetime(2015, 1, 5, tzinfo=UTC), "end": date(2015, 6, 30)},
+        {"start": date(2015, 6, 30), "end": date(2015, 1, 5)},
+    ],
+)
+def test_a_configuration_must_name_its_window_as_two_ordered_dates(
+    tmp_path: Path, config: dict[str, object]
+) -> None:
+    """The window is read from `start` and `end` and nowhere else -- an `as_of` clock in 2026 is
+    not a measured window -- so a configuration without them cannot be placed in a stage."""
+    ledger = tmp_path / "ledger.jsonl"
+    with pytest.raises(grid.ResearchLedgerError, match="start"):
+        _run_one(ledger, "discovery", config, label_sessions=NO_LABEL)
+    assert not ledger.exists()
+
+
+def test_an_as_of_clock_in_the_holdout_years_is_not_a_measured_window(tmp_path: Path) -> None:
+    ledger = tmp_path / "ledger.jsonl"
+    config = {**WINDOW, "as_of": datetime(2026, 8, 29, 4, 0, tzinfo=UTC)}
+
+    assert _run_one(ledger, "discovery", config, label_sessions=NO_LABEL) == [config]
+
+
+def test_a_calendar_that_does_not_reach_the_label_end_is_the_callers_error(tmp_path: Path) -> None:
+    ledger = tmp_path / "ledger.jsonl"
+    config = {"start": date(2021, 6, 1), "end": date(2024, 3, 27)}
+    with pytest.raises(grid.ResearchLedgerError, match="calendar"):
+        _run_one(ledger, "discovery", config, label_sessions=lambda c: 5, sessions=CALENDAR)
+    assert not ledger.exists()
+
+
+def test_a_stage_outside_the_protocol_vocabulary_is_refused(tmp_path: Path) -> None:
+    ledger = tmp_path / "ledger.jsonl"
+    with pytest.raises(grid.ResearchLedgerError, match="stage"):
+        grid.append_ledger(ledger, "smoke", {"i": 0}, {"p_excess": 0.5})
+    with pytest.raises(grid.ResearchLedgerError, match="stage"):
+        _run_one(ledger, "discovery2", WINDOW, label_sessions=NO_LABEL)
 
 
 # --- the strategy measurement, through the SDK ---------------------------------------------------
@@ -368,6 +541,8 @@ def _base_config(panel: GeneratedPanel) -> dict[str, object]:
 def test_the_runner_drives_the_sdk_and_ledgers_net_excess_and_its_sign_flip(
     runtime: tuple[Path, GeneratedPanel], tmp_path: Path
 ) -> None:
+    """The generated panel's sessions are in January 2026, so the grid is run as the forward stage
+    after a registration dated the day before them."""
     root, panel = runtime
     sdk = OpenAlphaSDK(runtime_dir=root)
     configs = tuple(
@@ -377,7 +552,15 @@ def test_the_runner_drives_the_sdk_and_ledgers_net_excess_and_its_sign_flip(
     measure = grid.strategy_measure(sdk.run_strategy_backtest, excess_benchmark="000905.SH")
     ledger = tmp_path / "ledger.jsonl"
 
-    run = grid.run_grid(ledger, "discovery", configs, measure, clock=lambda: AT)
+    run = grid.run_grid(
+        ledger,
+        "forward",
+        configs,
+        measure,
+        label_sessions=NO_LABEL,
+        forward_after=panel.sessions[0],
+        clock=lambda: AT,
+    )
 
     assert run.ran == 2
     rows = _rows(ledger)
@@ -386,27 +569,57 @@ def test_the_runner_drives_the_sdk_and_ledgers_net_excess_and_its_sign_flip(
         excess = tuple(
             period.net_return - period.benchmark_returns["000905.SH"] for period in backtest.periods
         )
+        sessions = [period.sessions for period in backtest.periods]
+        complete = [count == 3 for count in sessions]
+        assert complete == [True, True, False]  # nine sessions, a signal every three
         result = row["result"]
         assert result["excess_benchmark"] == "000905.SH"
         assert result["net_excess"] == [str(value) for value in excess]
-        assert result["period_count"] == len(backtest.periods)
+        assert result["period_sessions"] == sessions
+        assert result["period_complete"] == complete
+        assert result["period_count"] == 3
+        assert result["excluded_incomplete_periods"] == 1
+        values = [float(value) for value, full in zip(excess, complete, strict=True) if full]
         expected = sign_flip_test(
-            tuple(float(value) for value in excess),
+            tuple(values),
             bootstrap_samples=grid.PROTOCOL_BOOTSTRAP_SAMPLES,
             random_seed=grid.PROTOCOL_RANDOM_SEED,
         )
         assert result["p_excess"] == expected.p_value
         assert result["p_excess_exact"] is expected.exact
-        sessions = [period.sessions for period in backtest.periods]
-        assert result["period_sessions"] == sessions
-        values = [float(value) for value in excess]
         mean = statistics.fmean(values)
-        per_year = grid.SESSIONS_PER_YEAR / statistics.fmean(sessions)
+        assert result["p_excess_one_sided"] == grid.one_sided_p_value(expected.p_value, mean)
+        per_year = grid.SESSIONS_PER_YEAR / 3
         assert result["information_ratio"] == pytest.approx(
             mean / statistics.stdev(values) * math.sqrt(per_year), rel=1e-12
         )
         assert result["annualized_mean_net_excess"] == pytest.approx(mean * per_year, rel=1e-12)
-    assert grid.fdr_table(ledger, "discovery", 0.10).family_size == 2
+    assert grid.fdr_table(ledger, "forward", 0.10).family_size == 2
+
+
+def test_a_backtest_with_no_complete_period_is_refused() -> None:
+    """A window shorter than one rebalance interval has nothing the tests may read."""
+
+    class Period:
+        sessions = 2
+        start = date(2026, 1, 5)
+        benchmark_returns: Mapping[str, object] = {"000905.SH": 0}
+
+    class Spec:
+        rebalance_every_sessions = 3
+
+    class Short:
+        periods = (Period(),)
+        spec = Spec()
+
+    with pytest.raises(StrategyBacktestError, match="complete"):
+        grid.strategy_result(Short(), excess_benchmark="000905.SH")
+
+
+def test_the_one_sided_p_value_halves_the_two_sided_one_in_the_observed_direction() -> None:
+    assert grid.one_sided_p_value(0.08, 0.001) == 0.04
+    assert grid.one_sided_p_value(0.08, -0.001) == 0.96
+    assert grid.one_sided_p_value(1.0, 0.0) == 0.5
 
 
 def test_a_score_source_the_runner_does_not_know_is_passed_through_as_data() -> None:
@@ -430,6 +643,16 @@ def test_the_protocol_constants_are_the_protocols() -> None:
     assert grid.PROTOCOL_BOOTSTRAP_SAMPLES == 100_000
     assert grid.PROTOCOL_RANDOM_SEED == 20_260_926
     assert grid.PROTOCOL_FALSE_DISCOVERY_RATE == 0.10
+    assert grid.PRIMARY_EXCESS_BENCHMARK == "equal_weight_all_a"
+    assert grid.SESSIONS_PER_YEAR == 244
+    assert grid.protocol_settings() == {
+        "bootstrap_samples": 100_000,
+        "random_seed": 20_260_926,
+        "excess_benchmark": "equal_weight_all_a",
+        "sessions_per_year": 244,
+    }
+    primary = grid.strategy_measure(lambda **kw: None, excess_benchmark="equal_weight_all_a")
+    assert primary.settings == grid.protocol_settings()
 
 
 def test_the_command_line_prints_the_family_and_the_table(

@@ -1,10 +1,12 @@
 """The holdout pre-registration and the one-shot holdout guard (`V2-P6-008`).
 
-The protocol's holdout runs exactly once, after the chosen configuration and its pass criteria were
-committed to git. `register` writes that registration; `assert_holdout_allowed` is the guard; and
-`run_holdout` is the only path that writes the ledger's holdout row, through the guard.
+The protocol's holdout runs exactly once, after the chosen configuration, its pass criteria and its
+measurement settings were committed to git. `register` writes that registration;
+`assert_holdout_allowed` is the guard; and `run_holdout` is the only path that writes the ledger's
+holdout stage (`grid.append_ledger` and `grid.run_grid` both refuse it).
 
-The guard refuses three ways, in this order, each with its own exception:
+The guard reads the registration's bytes once and refuses four ways, in this order, each with its
+own exception:
 
 1. `RegistrationNotCommittedError` -- the registration is not in the committed history of the
    repository's `HEAD`, or the bytes on disk are not the bytes `HEAD` holds (an edit after the
@@ -13,13 +15,24 @@ The guard refuses three ways, in this order, each with its own exception:
    than a holdout row the ledger already holds: the holdout was looked at before the choice was
    fixed. Git keeps commit times to the second, so a row recorded within the commit's second is
    treated as not after it.
-3. `HoldoutAlreadyRanError` -- the ledger already holds a holdout row. The holdout runs once.
+3. `HoldoutAlreadyRanError` -- the ledger already holds a holdout row: a measurement, or a claim
+   left by a run that crashed. The holdout runs once, and a started run is that once.
+4. `SourceChangedError` -- `src/` at `HEAD`, or in the working tree, is not `src/` at the
+   registration's `code_commit`: the code that would measure is not the code that was registered.
+
+`run_holdout` then refuses, before writing anything, a configuration that is not the registered
+one or whose measured window leaves the holdout window (`HoldoutConfigurationError`), and a measure
+whose settings -- seed, sign-flip samples, excess benchmark, annualisation -- are not the registered
+ones (`HoldoutSettingsError`). It writes a `holdout_claim` row carrying the registration's digest,
+commit and settings **before** measuring, then the measurement row with the same binding. A crash
+between the two leaves the claim, and the guard's third refusal then holds.
 
 What this does not establish. A commit time is what the committer's clock (or
 `GIT_COMMITTER_DATE`) said, and a ledger row's `recorded_at` is what this machine's clock said;
 the guard orders two self-reported times and cannot detect either being set back. Pushing the
 registration commit to a remote someone else holds before the run is what makes its time
-witnessed, and nothing here does that.
+witnessed, and nothing here does that. The ledger file itself is not under git either: deleting
+it deletes the claim.
 """
 
 from __future__ import annotations
@@ -30,19 +43,26 @@ import os
 import re
 import subprocess
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
+from zoneinfo import ZoneInfo
 
 from grid import (
+    DEFAULT_REFUSALS,
+    HOLDOUT_CLAIM,
     HOLDOUT_STAGE,
-    PROTOCOL_BOOTSTRAP_SAMPLES,
+    MEASUREMENT,
     PROTOCOL_DEPENDENCE,
     PROTOCOL_FALSE_DISCOVERY_RATE,
-    PROTOCOL_RANDOM_SEED,
-    Measure,
-    append_ledger,
+    ResearchLedgerError,
+    SettledMeasure,
+    _append_holdout,
+    check_window,
     config_id,
+    measured_window,
+    protocol_settings,
     read_ledger,
     to_json_value,
 )
@@ -50,6 +70,9 @@ from grid import (
 from openalpha_cn.runtime.provenance import resolve_code_commit
 
 REGISTRATION_SCHEMA: Final[str] = "openalpha-research-registration/v1"
+SESSION_TIMEZONE: Final[ZoneInfo] = ZoneInfo("Asia/Shanghai")
+REGISTERED_SOURCE: Final[str] = "src"
+"""The tree whose bytes must be the registration's code commit's when the holdout runs."""
 _FULL_COMMIT: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{40}")
 _GIT_TIMEOUT_SECONDS: Final[int] = 60
 
@@ -59,7 +82,7 @@ class RegistrationError(ValueError):
 
 
 class HoldoutRefusedError(RuntimeError):
-    """The holdout may not run now. Each subclass is one of the guard's refusals."""
+    """The holdout may not run now. Each subclass is one refusal."""
 
 
 class RegistrationNotCommittedError(HoldoutRefusedError):
@@ -71,11 +94,30 @@ class RegistrationAfterHoldoutError(HoldoutRefusedError):
 
 
 class HoldoutAlreadyRanError(HoldoutRefusedError):
-    """The ledger already holds the holdout's row."""
+    """The ledger already holds a holdout row: a measurement, or a crashed run's claim."""
+
+
+class SourceChangedError(HoldoutRefusedError):
+    """`src/` is not what it was at the registration's code commit."""
 
 
 class HoldoutConfigurationError(HoldoutRefusedError):
-    """The configuration handed to the holdout is not the registered one."""
+    """The configuration handed to the holdout is not the registered one, or not a holdout one."""
+
+
+class HoldoutSettingsError(HoldoutRefusedError):
+    """The measure's settings are not the registered settings."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Admitted:
+    """What the guard read and checked: the registration's bytes (read once), its body, and the
+    commit that last touched it."""
+
+    content: bytes
+    registered: Mapping[str, Any]
+    commit: str
+    committed_at: datetime
 
 
 def register(
@@ -84,15 +126,17 @@ def register(
     path: Path,
     *,
     code_commit: str | None = None,
+    settings: Mapping[str, object] | None = None,
 ) -> str:
     """Write the registration to `path` and return the SHA-256 of its bytes.
 
     The file records the configuration (in the ledger's canonical form, with its `config_id`), the
-    pass criteria, the code commit, and the protocol's seed, sign-flip sample count, false
-    discovery rate and dependence assumption. `code_commit` defaults to this checkout's `HEAD` and
-    must be a full commit id: an unknown or `-dirty` commit cannot be checked out to reproduce the
-    run. Writing the same registration again returns the same digest; a different one at an
-    existing path is refused. Committing the file is the caller's step, and the guard's first check.
+    pass criteria, the code commit, the measurement settings (default: `grid.protocol_settings()`)
+    and the protocol's false discovery rate and dependence assumption. `code_commit` defaults to
+    this checkout's `HEAD` and must be a full commit id: an unknown or `-dirty` commit cannot be
+    checked out to reproduce the run. Writing the same registration again returns the same
+    digest; a different one at an existing path is refused. Committing the file is the caller's
+    step, and the guard's first check.
     """
     commit = (
         resolve_code_commit(anchor=Path(__file__).resolve().parent)
@@ -110,8 +154,7 @@ def register(
         "config_id": config_id(config),
         "criteria": to_json_value(criteria),
         "code_commit": commit,
-        "random_seed": PROTOCOL_RANDOM_SEED,
-        "bootstrap_samples": PROTOCOL_BOOTSTRAP_SAMPLES,
+        "settings": to_json_value(protocol_settings() if settings is None else settings),
         "false_discovery_rate": PROTOCOL_FALSE_DISCOVERY_RATE,
         "dependence": PROTOCOL_DEPENDENCE,
     }
@@ -141,13 +184,14 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
     )
 
 
-def _committed_registration(registration: Path, repo: Path) -> tuple[str, datetime]:
-    """The last commit on `HEAD` that touched the registration, and its commit time -- after
-    checking the bytes on disk are the bytes that commit left."""
+def _committed_registration(registration: Path, repo: Path) -> tuple[Path, _Admitted]:
+    """The repository root and the registration as `HEAD` holds it: its bytes, read once and
+    compared with `HEAD`'s, its body, and the last commit on `HEAD` that touched it."""
     if not registration.is_file():
         raise RegistrationNotCommittedError(
             f"{registration} is not a file; there is no registration to hold the holdout to"
         )
+    content = registration.read_bytes()
     top = _git(repo, "rev-parse", "--show-toplevel")
     if top.returncode != 0:
         raise RegistrationNotCommittedError(
@@ -170,29 +214,66 @@ def _committed_registration(registration: Path, repo: Path) -> tuple[str, dateti
         )
     commit, committed_at = stdout.split("\x00")
     held = _git(root, "show", f"HEAD:{relative}")
-    if held.returncode != 0 or held.stdout != registration.read_bytes():
+    if held.returncode != 0 or held.stdout != content:
         raise RegistrationNotCommittedError(
             f"the bytes on disk at {relative} are not the ones HEAD holds; an edit after the "
             "commit is an unregistered change"
         )
-    return commit, datetime.fromisoformat(committed_at).astimezone(UTC)
+    try:
+        registered = json.loads(content)
+    except ValueError as error:
+        raise HoldoutConfigurationError(f"{relative} is not JSON: {error}") from error
+    if not isinstance(registered, dict) or registered.get("schema") != REGISTRATION_SCHEMA:
+        raise HoldoutConfigurationError(f"{relative} is not a {REGISTRATION_SCHEMA} file")
+    return root, _Admitted(
+        content=content,
+        registered=registered,
+        commit=commit,
+        committed_at=datetime.fromisoformat(committed_at).astimezone(UTC),
+    )
 
 
-def _holdout_allowed(registration: Path, ledger: Path, repo: Path) -> tuple[str, datetime]:
-    commit, committed_at = _committed_registration(registration, repo)
+def _refuse_a_changed_source(root: Path, code_commit: object) -> None:
+    if not isinstance(code_commit, str) or not _FULL_COMMIT.fullmatch(code_commit):
+        raise SourceChangedError(f"the registration names no full code commit: {code_commit!r}")
+    committed = _git(root, "diff", "--quiet", code_commit, "HEAD", "--", REGISTERED_SOURCE)
+    if committed.returncode != 0:
+        detail = "differs from" if committed.returncode == 1 else "cannot be compared with"
+        raise SourceChangedError(
+            f"{REGISTERED_SOURCE}/ at HEAD {detail} {REGISTERED_SOURCE}/ at the registered code "
+            f"commit {code_commit}; the holdout measures with the registered code only"
+        )
+    working = _git(root, "status", "--porcelain", "--untracked-files=all", "--", REGISTERED_SOURCE)
+    if working.returncode != 0 or working.stdout.strip():
+        raise SourceChangedError(
+            f"{REGISTERED_SOURCE}/ in the working tree is not {REGISTERED_SOURCE}/ at HEAD: "
+            f"{working.stdout.decode(errors='replace').strip() or 'git status failed'}"
+        )
+
+
+def _holdout_allowed(registration: Path, ledger: Path, repo: Path) -> _Admitted:
+    root, admitted = _committed_registration(registration, repo)
     rows = [row for row in read_ledger(ledger) if row.stage == HOLDOUT_STAGE]
     for row in rows:
-        if committed_at >= row.recorded_at.replace(microsecond=0):
+        if admitted.committed_at >= row.recorded_at.replace(microsecond=0):
             raise RegistrationAfterHoldoutError(
-                f"the registration was committed at {committed_at.isoformat()} ({commit}), after "
-                f"the holdout row recorded at {row.recorded_at.isoformat()} (line {row.line}); a "
-                "registration written after the holdout was seen registers nothing"
+                f"the registration was committed at {admitted.committed_at.isoformat()} "
+                f"({admitted.commit}), after the holdout row recorded at "
+                f"{row.recorded_at.isoformat()} (line {row.line}); a registration written after "
+                "the holdout was seen registers nothing"
             )
+    if any(row.kind == MEASUREMENT for row in rows):
+        raise HoldoutAlreadyRanError(
+            f"{ledger} already holds the holdout's measurement; the holdout runs once"
+        )
     if rows:
         raise HoldoutAlreadyRanError(
-            f"{ledger} already holds the holdout's row (line {rows[0].line}); the holdout runs once"
+            f"a holdout run was claimed at {rows[0].recorded_at.isoformat()} (line {rows[0].line}) "
+            "and recorded no result; a run that started and crashed is still the one run -- the "
+            "holdout runs once"
         )
-    return commit, committed_at
+    _refuse_a_changed_source(root, admitted.registered.get("code_commit"))
+    return admitted
 
 
 def assert_holdout_allowed(registration: Path, ledger: Path, repo: Path) -> None:
@@ -200,42 +281,65 @@ def assert_holdout_allowed(registration: Path, ledger: Path, repo: Path) -> None
     _holdout_allowed(registration, ledger, repo)
 
 
+def forward_after(registration: Path, repo: Path) -> date:
+    """The committed registration's commit date on the exchange's calendar (Asia/Shanghai); the
+    forward stage measures only after it (`grid.run_grid(..., forward_after=...)`)."""
+    _, admitted = _committed_registration(registration, repo)
+    return admitted.committed_at.astimezone(SESSION_TIMEZONE).date()
+
+
 def run_holdout(
     registration: Path,
     ledger: Path,
     repo: Path,
     config: Mapping[str, object],
-    measure: Measure,
+    measure: SettledMeasure,
     *,
     clock: Callable[[], datetime] | None = None,
 ) -> Mapping[str, object]:
-    """Run the registered configuration once and write its row to the ledger's holdout stage.
+    """Run the registered configuration once, under the registered settings, and ledger it.
 
-    Guarded by `assert_holdout_allowed`, and refuses a `config` whose identity is not the
-    registration's `config_id`. The row's result carries the registration's digest and commit and
-    the instant the run started. An error `measure` raises propagates and writes no row: nothing
-    was measured.
+    Guarded by `assert_holdout_allowed`; refuses a configuration that is not the registration's
+    `config_id` or whose `start..end` leaves the holdout window, and a measure whose `settings`
+    are not the registration's. Writes the claim, measures, and writes the measurement; a refusal
+    the measure raises (`grid.DEFAULT_REFUSALS`) is the measurement's recorded error, and any other
+    error propagates and leaves the claim.
     """
     now = _utc_now if clock is None else clock
-    commit, _ = _holdout_allowed(registration, ledger, repo)
-    content = registration.read_bytes()
-    registered = json.loads(content)
-    if registered.get("schema") != REGISTRATION_SCHEMA:
-        raise HoldoutConfigurationError(f"{registration} is not a {REGISTRATION_SCHEMA} file")
+    admitted = _holdout_allowed(registration, ledger, repo)
+    registered = admitted.registered
     if config_id(config) != registered.get("config_id"):
         raise HoldoutConfigurationError(
             f"configuration {config_id(config)} is not the registered one "
             f"({registered.get('config_id')}); the holdout runs the registered configuration"
         )
-    started_at = now()
-    result = {
-        **measure(config),
-        "registration_sha256": hashlib.sha256(content).hexdigest(),
-        "registration_commit": commit,
-        "started_at": started_at,
+    try:
+        first, last = measured_window(config, label_sessions=0)
+        check_window(HOLDOUT_STAGE, first, last)
+    except ResearchLedgerError as error:
+        raise HoldoutConfigurationError(f"the registered configuration: {error}") from error
+    settings = to_json_value(measure.settings)
+    if settings != registered.get("settings"):
+        raise HoldoutSettingsError(
+            f"the measure's settings {settings} are not the registered settings "
+            f"{registered.get('settings')}"
+        )
+    binding = {
+        "registration_sha256": hashlib.sha256(admitted.content).hexdigest(),
+        "registration_commit": admitted.commit,
+        "settings": settings,
     }
-    append_ledger(ledger, HOLDOUT_STAGE, config, result, recorded_at=now())
-    return result
+    started_at = now()
+    _append_holdout(
+        ledger, HOLDOUT_CLAIM, config, {**binding, "claimed_at": started_at}, recorded_at=started_at
+    )
+    try:
+        result = dict(measure(config))
+    except DEFAULT_REFUSALS as error:
+        result = {"error": f"{type(error).__name__}: {error}"}
+    row = {**result, **binding, "started_at": started_at}
+    _append_holdout(ledger, MEASUREMENT, config, row, recorded_at=now())
+    return row
 
 
 def _utc_now() -> datetime:
