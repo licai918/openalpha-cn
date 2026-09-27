@@ -72,12 +72,16 @@ class CappedMarket:
         *,
         cap: int,
         static: dict[str, Any] | None = None,
+        drops_from_lists: bool = False,
     ) -> None:
         self.dataset = dataset
         self.fields = _fields(dataset)
         self.rows = rows
         self.cap = cap
         self.static = static
+        self.drops_from_lists = drops_from_lists
+        """Answer every comma-joined `ts_code` list one row short: the silent short answer the
+        per-security endpoints give a list (zero rows, `code=0`), in its mildest form."""
         self.payloads: list[dict[str, Any]] = []
 
     def post(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -96,6 +100,8 @@ class CappedMarket:
             # codes filters the window to exactly those securities' rows.
             listed = set(str(params["ts_code"]).split(","))
             window = [row for row in window if row[0] in listed]
+            if self.drops_from_lists and window:
+                window = window[1:]
         return {
             "code": 0,
             "msg": "",
@@ -476,3 +482,62 @@ def test_a_capped_single_day_is_refetched_in_chunks_of_the_given_codes(
         ("20240428", "20240428")
     }
     assert {code for entry in chunked for code in entry["ts_code"].split(",")} == set(codes)
+
+
+# --- the capped answer is a witness the chunks must cover (fix round 4) ---------------------------
+
+
+@pytest.mark.parametrize(
+    ("dataset", "window", "period", "announced"),
+    [
+        (FINANCIAL_INDICATOR_DATASET, "20211231", "20211231", "20220420"),
+        (INCOME_DATASET, "202404", "20240331", "20240428"),
+    ],
+)
+@pytest.mark.parametrize("drops", [True, False])
+def test_chunks_that_miss_a_row_the_capped_answer_showed_are_refused(
+    monkeypatch: pytest.MonkeyPatch,
+    dataset: str,
+    window: str,
+    period: str,
+    announced: str,
+    drops: bool,
+) -> None:
+    """The capped first answer is a witness: every row of it whose `ts_code` is among `codes` must
+    be in the chunks' union. A comma-list answer that comes back short -- which is what the
+    per-security endpoints do with a list, silently -- is refused instead of storing a capped day
+    or period short; one that answers correctly is accepted."""
+    _cap(monkeypatch, dataset, 3)
+    codes = ("000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ", "000005.SZ")
+    rows = [_row(dataset, code, period, announced, 1.0) for code in codes]
+    transport = CappedMarket(dataset, rows, cap=3, drops_from_lists=drops)
+
+    if drops:
+        with pytest.raises(ProviderFailure) as raised:
+            _provider(transport).fetch_panel_sweep(_request(dataset, window), codes=codes)
+        message = str(raised.value)
+        assert f"{dataset}_vip" in message
+        assert (period if dataset == FINANCIAL_INDICATOR_DATASET else announced) in message
+        assert "missing 2 of the 3" in message
+    else:
+        batch = _provider(transport).fetch_panel_sweep(_request(dataset, window), codes=codes)
+        assert batch.row_count == 5
+
+
+def test_the_codes_a_capped_answer_showed_are_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A chunked window fetches only `codes`, so the securities outside them that the capped
+    answer showed are the only ones the caller can count; the provider keeps them."""
+    _cap(monkeypatch, FINANCIAL_INDICATOR_DATASET, 3)
+    rows = [
+        _row(FINANCIAL_INDICATOR_DATASET, code, "20211231", "20220420", 1.0)
+        for code in ("000001.SZ", "000002.SZ", "900001.SH", "900002.SH")
+    ]
+    transport = CappedMarket(FINANCIAL_INDICATOR_DATASET, rows, cap=3)
+    provider = _provider(transport)
+
+    batch = provider.fetch_panel_sweep(
+        _request(FINANCIAL_INDICATOR_DATASET, "20211231"), codes=("000001.SZ", "000002.SZ")
+    )
+
+    assert sorted(batch.subjects) == ["000001.SZ", "000002.SZ"]
+    assert provider.witnessed_codes == frozenset({"000001.SZ", "000002.SZ", "900001.SH"})

@@ -252,6 +252,7 @@ import random
 import urllib.error
 import urllib.request
 from calendar import monthrange
+from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -2777,10 +2778,15 @@ little early, and the window is narrowed one step further than it had to be.
 
 
 TUSHARE_TS_CODE_LIST_LIMIT: Final[int] = 1000
-"""The most codes a `*_vip` endpoint takes in one comma-joined `ts_code`, measured 2026-09-27.
+"""The most codes one comma-joined `ts_code` may carry on a `*_vip` endpoint.
 
-Above it the endpoint answers `code=50101` (列表个数超过限制1000个). It bounds a chunk in
-`TushareProvider._narrowest_rows`, the fallback for a window no date can narrow.
+**Measured on `fina_indicator_vip` only**, on 2026-09-26: a list of more than 1,000 codes is
+answered `code=50101` (列表个数超过限制1000个), and 20201231 fetched in chunks of at most 1,000
+codes is multiset-equal to its single 11,917-row answer. For `income_vip`, `balancesheet_vip` and
+`cashflow_vip` the limit is **assumed, not measured**: what was measured there (2026-09-27) is
+only that a three-code list inside one day answers those codes' rows. It bounds a chunk in
+`TushareProvider._narrowest_rows`, whose witness check (`_refuse_a_short_chunk_union`) is what
+turns a wrong assumption about a large list into a refusal rather than a short partition.
 """
 
 
@@ -3516,6 +3522,40 @@ def _page_rows(
     return _zip_rows(descriptor, fields, items), flag
 
 
+def _refuse_a_short_chunk_union(
+    descriptor: TushareDatasetDescriptor,
+    witness: Sequence[dict[str, Any]],
+    chunked: Sequence[dict[str, Any]],
+    codes: frozenset[str],
+    what: str,
+    provider_id: str,
+) -> None:
+    """Refuse a chunked window whose union lacks a row its capped first answer already showed.
+
+    See `TushareProvider._narrowest_rows`. Rows are compared whole, as `_refuse_overlapping_pages`
+    compares them, and as multisets: a revision pair can be two rows equal in every key column.
+    """
+    subject = descriptor.subject_field or "ts_code"
+
+    def key(row: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+        return tuple(sorted((name, repr(value)) for name, value in row.items()))
+
+    shown = Counter(key(row) for row in witness if str(row[subject]) in codes)
+    missing = shown - Counter(key(row) for row in chunked)
+    if missing:
+        raise ProviderFailure(
+            provider_id=provider_id,
+            category="upstream",
+            message=(
+                f"{descriptor.endpoint}'s code chunks for the {what} are missing "
+                f"{sum(missing.values())} of the {sum(shown.values())} rows its capped answer "
+                "showed for those codes; a list answer that comes back short would store the "
+                "window short, so it is refused"
+            ),
+            retryable=False,
+        )
+
+
 def _expand_panel_rows(
     descriptor: TushareDatasetDescriptor, rows: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
@@ -3671,6 +3711,7 @@ class TushareProvider:
         self._stamped_at = stamped_at
         self._attempts = attempts
         self._request_count = 0
+        self._witnessed_codes: set[str] = set()
         self._sleep = sleep
         self._jitter = jitter
         """`sleep` and `jitter` are injected for the same reason `clock` is: a bounded backoff
@@ -3887,6 +3928,7 @@ class TushareProvider:
         """
         descriptor = self._sweep_descriptor(request)
         chunk_codes = tuple(sorted(set(codes)))
+        self._witnessed_codes = set()
         return self._panel_batch(
             descriptor,
             request,
@@ -3902,6 +3944,16 @@ class TushareProvider:
         which only the provider sees.
         """
         return self._request_count
+
+    @property
+    def witnessed_codes(self) -> frozenset[str]:
+        """Every `ts_code` the capped first answer of the last `fetch_panel_sweep` showed.
+
+        Empty unless that call had to chunk a window by codes. A chunked window fetches only the
+        caller's `codes`, so the securities outside them that the capped answer showed are the
+        only ones the caller can still count (`cli._sweep_statement_batches`' `SWEPT` line).
+        """
+        return frozenset(self._witnessed_codes)
 
     def _swept_rows(
         self,
@@ -3992,13 +4044,24 @@ class TushareProvider:
         refused, never stored short. As with every refusal here, the message names the window but
         only the category reaches a terminal: `cli._fetch_panel` withholds every
         `ProviderFailure` message because one can carry the credential.
+
+        ## The capped answer is a witness the chunks must cover (review of `5ca3949`)
+
+        The list behaviour this rests on was measured at three codes per statement endpoint, and
+        the per-security twins answer a list with `code=0` and zero rows. A list answer that came
+        back short -- zero rows, or some -- would pass every per-response witness and store the
+        window short, and the empty-window rule cannot see one short day inside a non-empty month.
+        So the capped first response, which is a real if incomplete sample of the window, is kept:
+        every row it returned whose `ts_code` is among `codes` must appear in the chunks' union
+        (multiset containment over the whole row), or the window is refused with the number
+        missing (`_refuse_a_short_chunk_union`). It is containment and not equality, because the
+        witness is capped by construction; what it rules out is the silent short list answer,
+        not a short answer about rows the witness never showed. The witness's codes are also kept
+        (`witnessed_codes`) so a caller can count the securities outside `codes` it showed.
         """
+        response = self._post(descriptor, request, params=params)
         try:
-            return _response_rows(
-                descriptor,
-                self._post(descriptor, request, params=params),
-                self.metadata.provider_id,
-            )
+            return _response_rows(descriptor, response, self.metadata.provider_id)
         except TushareResponseTruncated:
             if not codes:
                 raise TushareResponseTruncated(
@@ -4012,14 +4075,22 @@ class TushareProvider:
                     ),
                     retryable=False,
                 ) from None
+        _, fields, items = _decode_envelope(response, self.metadata.provider_id)
+        witness = _zip_rows(descriptor, fields, items)
+        subject = descriptor.subject_field or "ts_code"
+        self._witnessed_codes.update(str(row[subject]) for row in witness)
         limit = TUSHARE_TS_CODE_LIST_LIMIT
-        return [
+        chunked = [
             row
             for start in range(0, len(codes), limit)
             for row in self._code_rows(
                 descriptor, request, params, codes[start : start + limit], what=what
             )
         ]
+        _refuse_a_short_chunk_union(
+            descriptor, witness, chunked, frozenset(codes), what, self.metadata.provider_id
+        )
+        return chunked
 
     def _code_rows(
         self,

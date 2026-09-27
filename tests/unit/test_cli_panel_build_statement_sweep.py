@@ -594,3 +594,38 @@ def test_a_capped_report_period_stores_what_an_uncapped_answer_stores(
         if line.startswith("SWEPT")
     )
     assert swept_requests == capped_requests
+
+
+@pytest.mark.parametrize("dataset", ["income", "balancesheet", "cashflow"])
+def test_a_capped_single_day_stores_what_an_uncapped_answer_stores(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dataset: str
+) -> None:
+    """At a cap of four, 28 April 2025 (five rows) cannot be narrowed by date and is re-fetched as
+    chunks of the stored registry's codes -- one chunk is itself capped and halved. The partition
+    must be the one a cap of six, where the day fits in one answer, stores."""
+    wide = _install(monkeypatch, Market(FILINGS))
+    uncapped = _build(tmp_path / "uncapped", *_swept(dataset))
+    assert not any("ts_code" in entry["params"] for entry in wide.payloads)
+
+    sweep = tushare._TUSHARE_SWEEPS_BY_NAME[dataset]
+    monkeypatch.setitem(
+        tushare._TUSHARE_SWEEPS_BY_NAME,
+        dataset,
+        sweep.model_copy(update={"max_rows_per_response": 4}),
+    )
+    narrow = _install(monkeypatch, Market(FILINGS, cap=4))
+    capped = _build(tmp_path / "capped", *_swept(dataset))
+
+    assert uncapped.exit_code == PanelExit.ok, uncapped.output
+    assert capped.exit_code == PanelExit.ok, capped.output
+    assert _stored(tmp_path / "capped", dataset, YEAR) == _stored(
+        tmp_path / "uncapped", dataset, YEAR
+    )
+    chunked = [entry["params"] for entry in narrow.payloads if "ts_code" in entry["params"]]
+    assert {(entry["start_date"], entry["end_date"]) for entry in chunked} == {
+        (f"{YEAR}0428", f"{YEAR}0428")
+    }
+    # 900001.SH files only on 28 April; in the capped build only the day's capped witness shows
+    # it. Both builds count the same two unregistered securities (it and the filler), store none.
+    assert "2 securities outside the stored registry" in uncapped.stderr
+    assert "2 securities outside the stored registry" in capped.stderr

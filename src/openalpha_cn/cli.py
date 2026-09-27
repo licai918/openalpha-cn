@@ -3371,6 +3371,9 @@ def _sweep_statement_batches(
                     "nothing in a closed window is not, so this is a fetch to investigate "
                     "rather than a partition to write without that window",
                 )
+        # A window chunked by the registry's codes fetched no other security; the capped answer
+        # that forced the chunking is the only sight of the ones outside it.
+        served.update(provider.witnessed_codes)
         if batch.status == "success":
             served.update(batch.subjects)
             kept = keep_panel_subjects(batch, registry)
@@ -3383,7 +3386,8 @@ def _sweep_statement_batches(
     typer.echo(
         f"SWEPT {label} {sum(batch.row_count for batch in collected)} rows from "
         f"{len(served & registry)} registered securities; {len(outside)} securities outside "
-        f"the stored registry not stored; {rerequested} empty closed window(s) re-requested; "
+        "the stored registry not stored (a registry-chunked window counts those its capped "
+        f"answer showed); {rerequested} empty closed window(s) re-requested; "
         f"{requests} requests for {len(windows)} windows (the rest are date halvings, registry "
         "chunks and re-requests)",
         err=True,
