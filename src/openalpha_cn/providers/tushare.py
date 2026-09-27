@@ -251,6 +251,7 @@ import os
 import random
 import urllib.error
 import urllib.request
+from calendar import monthrange
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -281,10 +282,12 @@ from openalpha_cn.domain.daily_prices import (
 from openalpha_cn.domain.financial_statements import (
     ANNOUNCEMENT_DATE_COLUMN,
     BALANCE_SHEET_DATASET,
+    CASH_FLOW_DATASET,
     DATASETS_WITH_REVISION_LABEL,
     FINANCIAL_INDICATOR_DATASET,
     FINANCIAL_STATEMENT_DATASETS,
     FIRST_ANNOUNCEMENT_COLUMN,
+    INCOME_DATASET,
     REPORT_PERIOD_COLUMN,
     REVISION_LABEL_COLUMN,
     STATEMENT_DATA_COLUMNS,
@@ -564,6 +567,14 @@ class TushareDatasetDescriptor(BaseModel):
 
     dataset: str = Field(min_length=1, max_length=128)
     """Tushare ``api_name``; also the value ``ProviderRequest.dataset`` must match."""
+    api_name: str | None = Field(default=None, min_length=1, max_length=128)
+    """The endpoint to post to when it is not ``dataset``, or ``None`` when it is.
+
+    Exists for the statement sweeps (``V2-P6-002``): ``income_vip`` serves exactly ``income``'s
+    rows for the whole market, so it is a second *route* to one dataset rather than a dataset of
+    its own, and every name a stored row carries -- the batch's ``dataset``, its ``kind``, its
+    ``source_uri`` -- stays ``income``. See ``TUSHARE_STATEMENT_SWEEPS``.
+    """
     kind: str = Field(min_length=1, max_length=64)
     """Value written to ``ProviderRecord.kind``."""
     subject_field: str | None = Field(default=None)
@@ -670,6 +681,11 @@ class TushareDatasetDescriptor(BaseModel):
     def checked_response_fields(self) -> tuple[str, ...]:
         """The response columns ``_response_rows`` verifies are present."""
         return self.required_response_fields or (self.date_field,)
+
+    @property
+    def endpoint(self) -> str:
+        """The ``api_name`` a request envelope carries: ``api_name`` when set, else ``dataset``."""
+        return self.api_name or self.dataset
 
 
 def _trade_date_params(request: ProviderRequest) -> dict[str, str]:
@@ -1039,6 +1055,99 @@ def _require_one_security_year(request: ProviderRequest) -> int:
             retryable=False,
         )
     return request.as_of.astimezone(_CHINA_TZ).year
+
+
+_REPORT_PERIOD_ENDS: Final[tuple[str, ...]] = ("0331", "0630", "0930", "1231")
+"""The four fiscal quarter ends `fina_indicator_vip`'s `period` takes, as month-days."""
+
+
+def statement_sweep_windows(dataset: str, year: int) -> tuple[str, ...]:
+    """The whole-market request windows one statement year is swept as (`V2-P6-002`).
+
+    `income`, `balancesheet` and `cashflow` are filed by **announcement** year and their `*_vip`
+    endpoints filter `ann_date` with `start_date`/`end_date`, the per-security semantics measured
+    on 2026-09-26, so a year is its twelve calendar months (`YYYYMM`). A month rather than a day
+    or a year: a day window spends most requests on days nobody announced, and a year window
+    starts every sweep above the cap, so it is a month that `TushareProvider._halved_rows`
+    narrows, and only in the months that need it.
+
+    `fina_indicator` is asked by **report-period** year (`_financial_indicator_params`), and its
+    VIP endpoint answers one `period` for the whole market -- 7,558 rows for `20231231`, in one
+    response -- so a period year is its four quarter ends (`YYYYMMDD`).
+    """
+    if dataset == FINANCIAL_INDICATOR_DATASET:
+        return tuple(f"{year}{end}" for end in _REPORT_PERIOD_ENDS)
+    if dataset in FINANCIAL_STATEMENT_DATASETS:
+        return tuple(f"{year}{month:02d}" for month in range(1, 13))
+    raise ValueError(f"{dataset!r} is not a financial-statement dataset; it has no sweep windows")
+
+
+def _one_sweep_window(request: ProviderRequest, *, digits: int, shape: str) -> str:
+    """The single window subject a sweep request carries, or a `configuration` refusal.
+
+    Refused rather than defaulted, `_financial_indicator_params`' rule: a sweep asked without a
+    window, with two, or with a `ts_code` where the window goes would otherwise be some other
+    request than the one the caller meant, answered with rows.
+    """
+    subjects = request.subjects
+    if len(subjects) != 1 or len(subjects[0]) != digits or not subjects[0].isdigit():
+        raise ProviderFailure(
+            provider_id=_PROVIDER_ID,
+            category="configuration",
+            message=(
+                f"a whole-market {request.dataset} sweep takes exactly one subject, {shape}; "
+                f"got {list(subjects)}"
+            ),
+            retryable=False,
+        )
+    return subjects[0]
+
+
+def _statement_sweep_params(request: ProviderRequest) -> dict[str, str]:
+    """One calendar month of the whole market's filings: `{start_date, end_date}` on `ann_date`.
+
+    `_financial_statement_params`' window without its `ts_code`, which is the whole difference
+    and the only one: the `*_vip` endpoints were measured on 2026-09-26 to filter `ann_date`
+    exactly as the per-security endpoints do (window `20240426` returned 1,807 `income` rows, every
+    one announced that day), and 78 security-windows of their rows matched the per-security rows
+    field for field. Never paged: a month that does not fit in one response is halved by
+    `TushareProvider._halved_rows`, which re-asks with narrower `start_date`/`end_date`.
+    """
+    window = _one_sweep_window(request, digits=6, shape="an announcement month YYYYMM")
+    year, month = int(window[:4]), int(window[4:])
+    if not 1 <= month <= 12:
+        raise ProviderFailure(
+            provider_id=_PROVIDER_ID,
+            category="configuration",
+            message=f"{window!r} is not a calendar month",
+            retryable=False,
+        )
+    return {
+        "start_date": f"{window}01",
+        "end_date": f"{window}{monthrange(year, month)[1]:02d}",
+    }
+
+
+def _indicator_sweep_params(request: ProviderRequest) -> dict[str, str]:
+    """One report period of the whole market's indicators: `{period}`.
+
+    A quarter end and nothing else. `_financial_indicator_params` asks a security for a whole
+    period *year*, and the four quarter ends are that year only if nothing is filed against any
+    other `end_date` -- which the live equivalence (`V2-P6-002`'s report: 80 securities, period
+    years 2015 and 2023, every per-security row matched) checked rather than assumed.
+    """
+    window = _one_sweep_window(request, digits=8, shape="a report period YYYYMMDD")
+    if window[4:] not in _REPORT_PERIOD_ENDS:
+        raise ProviderFailure(
+            provider_id=_PROVIDER_ID,
+            category="configuration",
+            message=(
+                f"{window!r} is not a fiscal quarter end; fina_indicator_vip's period is one of "
+                f"{list(_REPORT_PERIOD_ENDS)} in some year"
+            ),
+            retryable=False,
+        )
+    return {"period": window}
 
 
 TUSHARE_FINANCIAL_ROW_CAP: Final[int] = 100
@@ -2648,6 +2757,75 @@ _TUSHARE_DATASETS_BY_NAME: dict[str, TushareDatasetDescriptor] = {
 }
 
 
+STATEMENT_SWEEP_ENDPOINT_SUFFIX: Final[str] = "_vip"
+"""What turns a statement endpoint's name into its whole-market one: `income` -> `income_vip`."""
+
+TUSHARE_STATEMENT_SWEEP_ROW_CAPS: Final[dict[str, int]] = {
+    INCOME_DATASET: 5000,
+    BALANCE_SHEET_DATASET: 7000,
+    CASH_FLOW_DATASET: 6400,
+    FINANCIAL_INDICATOR_DATASET: 12000,
+}
+"""Rows per `*_vip` response, measured on 2026-09-26 (`.superpowers/sdd/p6-vip-probe.md`).
+
+`balancesheet_vip` served 7,000 and `cashflow_vip` 6,400 rows with `has_more=True` to a request
+with no `limit`, and `fina_indicator_vip` 12,000 to a whole-year window. `income_vip`'s is a
+**lower bound**: it was asked with `limit=5000` and served exactly that. Declaring a number under
+the true cap is the fail-closed direction -- `_check_row_cap` then refuses a complete response a
+little early, and the window is narrowed one step further than it had to be.
+"""
+
+
+def _statement_sweep_descriptor(dataset: str) -> TushareDatasetDescriptor:
+    """`dataset`'s own descriptor, re-pointed at its `*_vip` endpoint.
+
+    Everything a stored row carries is inherited unchanged -- `dataset`, `kind`, the projection,
+    the clock, `response_fields`, `source_uri_template` -- because the rows are the same rows. The
+    three fields that change are the ones that describe the *request*: the endpoint, the window
+    and the measured cap.
+
+    **No `page_size`, and that is a measurement.** `offset` paging on these endpoints is unsound
+    in exactly `_namechange_params`' way. Measured on 2026-09-26 against a closed window,
+    `income_vip` for April 2015: one request with `limit=5000` returned 4,654 rows with
+    `has_more=False` and no duplicate; the same window as two `limit=4000` pages returned 4,000 +
+    654 rows of which **239 were served twice and 239 of the 4,654 never at all** -- the endpoint
+    does not list a window in the same order twice. `_refuse_overlapping_pages` refused it, which
+    is how this was found. So a window is always one request judged by the one-shot completeness
+    witnesses, and a window that does not fit is narrowed rather than paged
+    (`TushareProvider._halved_rows`) -- the remedy `_check_response_completeness` has always named.
+    """
+    base = _TUSHARE_DATASETS_BY_NAME[dataset]
+    return TushareDatasetDescriptor.model_validate(
+        {
+            **dict(base),
+            "api_name": f"{dataset}{STATEMENT_SWEEP_ENDPOINT_SUFFIX}",
+            "params_builder": (
+                _indicator_sweep_params
+                if dataset == FINANCIAL_INDICATOR_DATASET
+                else _statement_sweep_params
+            ),
+            "max_rows_per_response": TUSHARE_STATEMENT_SWEEP_ROW_CAPS[dataset],
+        }
+    )
+
+
+TUSHARE_STATEMENT_SWEEPS: Final[tuple[TushareDatasetDescriptor, ...]] = tuple(
+    _statement_sweep_descriptor(dataset) for dataset in FINANCIAL_STATEMENT_DATASETS
+)
+"""The whole-market route to each statement dataset, served by `TushareProvider.fetch_panel_sweep`.
+
+Deliberately **not** in `TUSHARE_DATASETS`. That table is the set of datasets -- what
+`supported_datasets` reports, what `doctor --probe` probes, what every table-wide census counts --
+and a sweep is not a dataset: `income_vip` stores `income`. Keeping the routes apart is also what
+leaves `fetch_panel`'s per-security `income` exactly the request it was, which is what
+`panel build --subject` still sends.
+"""
+
+_TUSHARE_SWEEPS_BY_NAME: dict[str, TushareDatasetDescriptor] = {
+    descriptor.dataset: descriptor for descriptor in TUSHARE_STATEMENT_SWEEPS
+}
+
+
 def _parse_tushare_date(value: object) -> date:
     """Parse one of Tushare's ``YYYYMMDD`` date columns."""
     return datetime.strptime(str(value), "%Y%m%d").date()
@@ -3675,10 +3853,106 @@ class TushareProvider:
                 ),
                 retryable=False,
             )
+        return self._panel_batch(descriptor, request, self._request_rows)
+
+    def fetch_panel_sweep(self, request: ProviderRequest) -> ColumnarPanelBatch:
+        """One whole-market window of a statement dataset, through its `*_vip` endpoint.
+
+        `fetch_panel`'s contract with a different request (`V2-P6-002`): `request.subjects` is one
+        window from `statement_sweep_windows` rather than a `ts_code`, and the rows come back as
+        the same dataset -- decoded, point-in-time filtered and projected by the same code, so a
+        row cannot tell which route fetched it. A window with no filings is `no_data`, which the
+        caller treats as ordinary, exactly as it treats one security's empty year.
+
+        Never paged -- see `_statement_sweep_descriptor` for the measurement -- so every response
+        is judged by `_check_response_completeness` exactly as a one-shot response always has
+        been: `has_more` must be the boolean `False` and the row count under the measured cap. An
+        announcement-date window that fails either is halved (`_halved_rows`); a report period,
+        which has no finer date axis, is refused.
+        """
+        descriptor = self._sweep_descriptor(request)
+        return self._panel_batch(descriptor, request, self._swept_rows)
+
+    def _swept_rows(
+        self, descriptor: TushareDatasetDescriptor, request: ProviderRequest
+    ) -> list[dict[str, Any]]:
+        """Every row of one sweep window: one response, or the halves of a date window."""
+        params = descriptor.params_builder(request)
+        if "start_date" not in params:
+            return _response_rows(
+                descriptor,
+                self._post(descriptor, request, params=params),
+                self.metadata.provider_id,
+            )
+        return self._halved_rows(
+            descriptor,
+            request,
+            _parse_tushare_date(params["start_date"]),
+            _parse_tushare_date(params["end_date"]),
+        )
+
+    def _halved_rows(
+        self,
+        descriptor: TushareDatasetDescriptor,
+        request: ProviderRequest,
+        first: date,
+        last: date,
+    ) -> list[dict[str, Any]]:
+        """The rows announced in `[first, last]`, halving the window until each response fits.
+
+        A window refused as truncated -- `has_more` not `False`, or a row count at the cap -- is
+        split at its midpoint into two disjoint windows that together cover it, and each half is
+        asked again. Disjoint and covering is the whole argument: no row can be served twice or
+        fall between two halves, and every response that is kept passed the one-shot witnesses
+        on its own. A month is one request unless it is a disclosure peak; April, when every
+        issuer publishes its annual and first-quarter reports, costs a handful.
+
+        **A single day that does not fit is refused**, not paged and not stored short. There is
+        no narrower `ann_date` window, and paging is measured unsound here. At the caps measured
+        on 2026-09-26 the busiest day of each swept year fitted (this issue's report records the
+        live sweeps); a market that outgrows that is a refusal naming the day, and `--subject`
+        is still the per-security route for the securities that matter to the caller.
+        """
+        try:
+            return _response_rows(
+                descriptor,
+                self._post(
+                    descriptor,
+                    request,
+                    params={"start_date": f"{first:%Y%m%d}", "end_date": f"{last:%Y%m%d}"},
+                ),
+                self.metadata.provider_id,
+            )
+        except TushareResponseTruncated:
+            if first >= last:
+                raise TushareResponseTruncated(
+                    provider_id=self.metadata.provider_id,
+                    category="upstream",
+                    message=(
+                        f"{descriptor.endpoint} served its cap for the single announcement day "
+                        f"{first:%Y%m%d}; a day cannot be narrowed and this endpoint's offset "
+                        "paging is measured unsound, so the day is refused rather than stored "
+                        "short"
+                    ),
+                    retryable=False,
+                ) from None
+        middle = first + (last - first) // 2
+        return [
+            *self._halved_rows(descriptor, request, first, middle),
+            *self._halved_rows(descriptor, request, middle + timedelta(days=1), last),
+        ]
+
+    def _panel_batch(
+        self,
+        descriptor: TushareDatasetDescriptor,
+        request: ProviderRequest,
+        fetch_rows: Callable[[TushareDatasetDescriptor, ProviderRequest], list[dict[str, Any]]],
+    ) -> ColumnarPanelBatch:
+        """Fetch, decode and assemble one panel batch; the half both panel routes share."""
         try:
             decoded = self._decode_panel_rows(
                 descriptor=descriptor,
-                items=self._request_rows(descriptor, request),
+                items=fetch_rows(descriptor, request),
                 request=request,
             )
         except ProviderFailure:
@@ -3728,8 +4002,8 @@ class TushareProvider:
             source_uri=_panel_source_uri(descriptor, decoded.subjects, decoded.rows),
         )
 
-    def _descriptor(self, request: ProviderRequest) -> TushareDatasetDescriptor:
-        """Resolve the request's descriptor, refusing a missing token or unknown dataset."""
+    def _require_token(self) -> None:
+        """Refuse before any request is built when no credential was resolved."""
         if not self._token:
             raise ProviderFailure(
                 provider_id=self.metadata.provider_id,
@@ -3737,6 +4011,26 @@ class TushareProvider:
                 message="TUSHARE_TOKEN is required.",
                 retryable=False,
             )
+
+    def _sweep_descriptor(self, request: ProviderRequest) -> TushareDatasetDescriptor:
+        """Resolve the request's whole-market sweep, refusing a dataset that has none."""
+        self._require_token()
+        descriptor = _TUSHARE_SWEEPS_BY_NAME.get(request.dataset)
+        if descriptor is None:
+            raise ProviderFailure(
+                provider_id=self.metadata.provider_id,
+                category="configuration",
+                message=(
+                    f"Tushare dataset {request.dataset} has no whole-market sweep; only "
+                    f"{sorted(_TUSHARE_SWEEPS_BY_NAME)} do"
+                ),
+                retryable=False,
+            )
+        return descriptor
+
+    def _descriptor(self, request: ProviderRequest) -> TushareDatasetDescriptor:
+        """Resolve the request's descriptor, refusing a missing token or unknown dataset."""
+        self._require_token()
         descriptor = _TUSHARE_DATASETS_BY_NAME.get(request.dataset)
         if descriptor is None:
             raise ProviderFailure(
@@ -3790,7 +4084,7 @@ class TushareProvider:
         instants as the failures that caused them.
         """
         envelope = {
-            "api_name": descriptor.dataset,
+            "api_name": descriptor.endpoint,
             "token": self._token,
             "params": descriptor.params_builder(request) if params is None else params,
             "fields": descriptor.response_fields,

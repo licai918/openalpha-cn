@@ -3,7 +3,8 @@
 The companion to `tests/integration/test_cli_panel.py`, and it exists as a separate module for
 one reason: that one's scripted transport answers a whole-market cross section per session, and
 these eight targets ask completely different questions -- one announcement year, one index-month,
-one taxonomy vintage, one `(l1_code, is_new)` slice, one `(security, year)` window. Folding both
+one taxonomy vintage, one `(l1_code, is_new)` slice, one whole-market statement month or report
+period, and (under `--subject`) one `(security, year)` window. Folding both
 frames into one transport would make every assertion in either module depend on the other's
 fixture shape.
 
@@ -93,6 +94,11 @@ INDEX_CLASSIFY_FIELDS = [
 ]
 INDEX_MEMBER_FIELDS = ["ts_code", "l1_code", "l2_code", "l3_code", "in_date", "out_date"]
 
+SWEEP = "_vip"
+"""The suffix of a statement dataset's whole-market endpoint (`V2-P6-002`)."""
+
+MONTH_STARTS: tuple[str, ...] = tuple(f"{EXTRA_YEAR}{month:02d}01" for month in range(1, 13))
+
 
 def _statement_fields(dataset: str) -> list[str]:
     """One statement endpoint's response shape, taken from the domain's own column list.
@@ -135,6 +141,8 @@ transport has no calendar for. What matters to the code under test is that the p
 inside the requested month window and is knowable at the month-end `as_of` the CLI derives, and
 the 28th is both in every month of every year.
 """
+
+QUARTER_ENDS: tuple[str, ...] = ("0331", "0630", "0930", "1231")
 
 STATEMENT_PERIODS: tuple[tuple[str, str], ...] = (
     ("0331", "0428"),
@@ -256,6 +264,30 @@ class ExtraTargetTransport:
             rows.append([*keys, *values])
         return rows
 
+    def _sweep_rows(self, dataset: str, params: Mapping[str, str]) -> list[list[Any]]:
+        """The `*_vip` answer: every security's `_statement_rows` inside one window.
+
+        Derived from the per-security answer rather than written separately, so the two routes
+        serve the same rows by construction and a test here can be about the request shape.
+        `income`'s three siblings filter `ann_date` on `start_date`/`end_date`; `fina_indicator`
+        takes a `period` and filters `end_date`, the asymmetry `_financial_indicator_params`
+        records.
+        """
+        window = str(params.get("period") or params["start_date"])
+        year = window[:4]
+        whole_year = {"start_date": f"{year}0101", "end_date": f"{year}1231"}
+        assert "offset" not in params, "the statement sweeps are never paged"
+        return [
+            row
+            for code in SECURITIES
+            for row in self._statement_rows(dataset, {"ts_code": code, **whole_year})
+            if (
+                row[1] == params["period"]
+                if "period" in params
+                else str(params["start_date"]) <= row[2] <= str(params["end_date"])
+            )
+        ]
+
     # -- the transport -------------------------------------------------------------------------
 
     def post(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -324,6 +356,9 @@ class ExtraTargetTransport:
             return _response(INDEX_MEMBER_FIELDS, self._membership_items(params))
         if api_name in STATEMENT_DATA_COLUMNS:
             return _response(_statement_fields(api_name), self._statement_rows(api_name, params))
+        if api_name.removesuffix(SWEEP) in STATEMENT_DATA_COLUMNS:
+            dataset = api_name.removesuffix(SWEEP)
+            return _response(_statement_fields(dataset), self._sweep_rows(dataset, params))
         raise AssertionError(f"the CLI asked for an unscripted dataset: {api_name}")
 
     def _membership_items(self, params: Mapping[str, str]) -> list[list[Any]]:
@@ -533,9 +568,9 @@ def test_a_statement_revised_after_its_announcement_year_ended_is_stored_by_a_la
     assert stored.revised_row_count == len(SECURITIES)
     assert early.row_count == 3 * len(SECURITIES)
     assert early.revised_row_count == 0
-    assert {str(entry["start_date"]) for entry in transport.requests_for(INCOME_DATASET)} == {
-        f"{EXTRA_YEAR}0101"
-    }
+    assert {
+        str(entry["start_date"]) for entry in transport.requests_for(INCOME_DATASET + SWEEP)
+    } == set(MONTH_STARTS)
 
 
 def test_namechange_asks_for_the_year_it_was_given_at_an_instant_that_can_see_it(
@@ -897,22 +932,22 @@ def test_a_membership_sweep_with_no_superseded_row_is_refused(
 # --- the statement targets ----------------------------------------------------------------------
 
 
-def test_a_statement_target_fetches_one_request_per_security_in_the_stored_registry(
+def test_a_statement_target_sweeps_the_whole_market_a_month_at_a_time(
     tmp_path: Path, extra_transport: ExtraTargetTransport
 ) -> None:
-    """`ts_code` is mandatory on all four endpoints and a comma-joined list answers zero rows on
-    three of them, so there is no cross-section fetch and the securities have to come from
-    somewhere. They come from `stock_basic`, which is why it runs first in the same invocation."""
+    """Without `--subject` a statement year is twelve whole-market months through `income_vip`
+    (`V2-P6-002`) rather than one request per registered security. The registry still runs first
+    in the same invocation: the sweep keeps the rows of the securities it names, which is what
+    the per-security route stored."""
     result = build(tmp_path, STOCK_BASIC_DATASET, INCOME_DATASET, extra=["--json"])
 
     assert result.exit_code == PanelExit.ok, result.stderr
-    assert [str(entry["ts_code"]) for entry in extra_transport.requests_for(INCOME_DATASET)] == [
-        *SECURITIES
-    ]
-    assert {
-        (str(entry["start_date"]), str(entry["end_date"]))
-        for entry in extra_transport.requests_for(INCOME_DATASET)
-    } == {(f"{EXTRA_YEAR}0101", f"{EXTRA_YEAR}1231")}
+    assert extra_transport.requests_for(INCOME_DATASET) == []
+    swept = extra_transport.requests_for(INCOME_DATASET + SWEEP)
+    assert [str(entry["start_date"]) for entry in swept] == [*MONTH_STARTS]
+    assert all("ts_code" not in entry for entry in swept)
+    coverage = PanelStore(tmp_path / "panel").read_coverage(INCOME_DATASET, EXTRA_YEAR)
+    assert coverage is not None and set(coverage.subjects) == set(SECURITIES)
 
 
 def test_a_statement_target_is_refused_before_it_starts_when_no_registry_is_stored(
@@ -923,19 +958,22 @@ def test_a_statement_target_is_refused_before_it_starts_when_no_registry_is_stor
     assert result.exit_code == PanelExit.unhealthy
     assert "--dataset stock_basic" in result.output
     assert extra_transport.requests_for(INCOME_DATASET) == []
+    assert extra_transport.requests_for(INCOME_DATASET + SWEEP) == []
 
 
 def test_subject_narrows_the_sweep_to_the_securities_that_were_named(
     tmp_path: Path, extra_transport: ExtraTargetTransport
 ) -> None:
-    """The lever that turns 5,881 requests into one. It also means the registry is not read at
-    all, which is what makes `--subject` usable on a store that has no `stock_basic` in it."""
+    """The per-security route, which `--subject` still selects: one request per name and no
+    sweep. It also means the registry is not read at all, which is what makes `--subject` usable
+    on a store that has no `stock_basic` in it."""
     result = build(tmp_path, INCOME_DATASET, extra=["--subject", SECURITIES[0], "--json"])
 
     assert result.exit_code == PanelExit.ok
     assert [str(entry["ts_code"]) for entry in extra_transport.requests_for(INCOME_DATASET)] == [
         SECURITIES[0]
     ]
+    assert extra_transport.requests_for(INCOME_DATASET + SWEEP) == []
 
 
 def test_subject_is_refused_for_a_target_whose_partition_is_the_whole_market(
@@ -954,17 +992,20 @@ def test_subject_is_refused_for_a_target_whose_partition_is_the_whole_market(
 def test_a_sweep_in_which_no_security_filed_is_refused_rather_than_written(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """One security with nothing to report is ordinary -- `000013.SZ` served no `income` row for
-    the 2024 window -- and every security with nothing to report is a fetch that did not work.
-    Without this the empty list reaches `merge_panel_batches` and is refused as "needs at least
-    one batch", a true sentence about a list several layers from the fetch that produced it."""
+    """One month with nothing announced is ordinary and a whole year of them is a fetch that did
+    not work. Without this the empty list reaches `merge_panel_batches` and is refused as "needs
+    at least one batch", a true sentence about a list several layers from the fetch that produced
+    it. The per-security route refuses the same year with the same exit code."""
     _install(monkeypatch, ExtraTargetTransport(filing_securities=frozenset()))
 
     assert build(tmp_path, STOCK_BASIC_DATASET).exit_code == PanelExit.ok
     result = build(tmp_path, INCOME_DATASET)
+    named = build(tmp_path, INCOME_DATASET, extra=["--subject", SECURITIES[0]])
 
     assert result.exit_code == PanelExit.unhealthy
-    assert "none of the 2 securities served a filing" in result.output
+    assert "none of the 12 month windows served a filing" in result.output
+    assert named.exit_code == PanelExit.unhealthy
+    assert "none of the 1 securities served a filing" in named.output
 
 
 def test_the_statement_sweep_states_its_size_before_it_makes_a_request(
@@ -972,16 +1013,15 @@ def test_the_statement_sweep_states_its_size_before_it_makes_a_request(
 ) -> None:
     """A budget line on stderr, before the first round trip.
 
-    This target turned the command's unit of cost from minutes into hours: one request per
-    security is 5,881 of them for one dataset-year against the live registry, and `--start 2015
-    --end 2026` over the four endpoints is ~282,000. The only honest moment to say so is before
-    the fetch rather than in an `eta` that appears after ten minutes -- and it has to be stderr,
-    because `--json` promises a parseable stdout.
+    The sweep counts windows, and says so: a window is one request per page and its page count
+    is not known until the endpoint answers. It has to be stderr, because `--json` promises a
+    parseable stdout.
     """
     result = build(tmp_path, STOCK_BASIC_DATASET, INCOME_DATASET, extra=["--json"])
 
     assert result.exit_code == PanelExit.ok
-    assert f"BUDGET {INCOME_DATASET} year={EXTRA_YEAR} 2 requests" in result.stderr
+    assert f"BUDGET {INCOME_DATASET} year={EXTRA_YEAR} 12 windows" in result.stderr
+    assert f"SWEPT {INCOME_DATASET} year={EXTRA_YEAR}" in result.stderr
     assert "BUDGET" not in result.stdout
     json.loads(result.stdout)
 
@@ -1035,9 +1075,9 @@ def test_fina_indicator_accumulates_its_period_years_into_one_write(
     # *plus* the three interims of 2025 -- the row that a per-year loop destroys.
     assert landed == {EXTRA_YEAR - 1: 3 * len(SECURITIES), EXTRA_YEAR: 4 * len(SECURITIES)}
     assert [
-        str(entry["start_date"])[:4]
-        for entry in extra_transport.requests_for(FINANCIAL_INDICATOR_DATASET)
-    ] == [str(EXTRA_YEAR - 1)] * len(SECURITIES) + [str(EXTRA_YEAR)] * len(SECURITIES)
+        str(entry["period"])
+        for entry in extra_transport.requests_for(FINANCIAL_INDICATOR_DATASET + SWEEP)
+    ] == [f"{year}{end}" for year in (EXTRA_YEAR - 1, EXTRA_YEAR) for end in QUARTER_ENDS]
 
 
 def test_a_narrower_fina_indicator_span_is_refused_rather_than_shrinking_a_stored_year(
@@ -1116,12 +1156,13 @@ def test_resume_skips_a_registered_statement_year_and_says_which_rule_it_used(
     in a docstring: this one reads a registered partition and nothing else, because a statement
     dataset has no session census to compare against."""
     assert build(tmp_path, STOCK_BASIC_DATASET, INCOME_DATASET).exit_code == PanelExit.ok
-    before = len(extra_transport.requests_for(INCOME_DATASET))
+    before = len(extra_transport.requests_for(INCOME_DATASET + SWEEP))
+    assert before == 12
 
     result = build(tmp_path, INCOME_DATASET, extra=["--resume"])
 
     assert result.exit_code == PanelExit.ok
-    assert len(extra_transport.requests_for(INCOME_DATASET)) == before
+    assert len(extra_transport.requests_for(INCOME_DATASET + SWEEP)) == before
     assert "RESUMED income" in result.output
     assert "does not check which securities it holds" in result.output
 
@@ -1136,9 +1177,10 @@ def test_resume_cannot_tell_a_narrowed_statement_partition_from_a_whole_market_o
     is a finding with a reproduction rather than a caveat nobody checked -- and so that anyone who
     later strengthens the rule has a failing test telling them the disclosure is now stale.
 
-    The remedy is always available and is asserted here too: re-running without `--resume` fetches
-    the whole registry, and `panel_ingest._refuse_to_drop_stored_subjects` does not object because
-    a wider batch drops nothing.
+    The remedy is always available and is asserted here too: re-running without `--resume` sweeps
+    the whole market for the registry's securities, and
+    `panel_ingest._refuse_to_drop_stored_subjects` does not object because a wider batch drops
+    nothing.
     """
     assert build(tmp_path, STOCK_BASIC_DATASET).exit_code == PanelExit.ok
     assert (

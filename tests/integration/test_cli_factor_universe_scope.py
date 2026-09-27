@@ -563,8 +563,9 @@ def test_naming_the_earlier_lifecycle_years_is_not_the_remedy_and_is_no_longer_n
 ) -> None:
     """`--year` is one scope over three datasets, so widening it to reach the registry's
     earlier partitions drags the calendar and the price panel along -- and neither has a 2010
-    partition, nor could be given one without the ~282,000-request backfill `panel build --help`
-    prices at "days rather than hours". The remedy README stated was unreachable; this pins that
+    partition, nor could be given one without a price backfill at the ~2,900 requests a year
+    `panel build --help` prices, over every year in between. The remedy README stated was
+    unreachable; this pins that
     it is unreachable **and** that it is unnecessary, because the single-year form now answers.
     """
     widened = _factor_build(

@@ -1062,9 +1062,9 @@ def load_stock_universe(
     Making the caller name the earlier years instead was measured and does not exist as a
     remedy. `--year` is one scope over three datasets, so `--year 2026 --year 2010` asks the
     calendar for a 2010 partition and the price panel for a 2010 year; on a store built the way
-    `README` builds one, neither is there, and putting them there is the ~282,000-request
-    backfill `panel build --help` prices at "days rather than hours" -- to run a **one-day**
-    reversal.
+    `README` builds one, neither is there, and putting them there is a price backfill at the
+    ~2,900 requests a year `panel build --help` prices, over every year in between -- to run a
+    **one-day** reversal.
 
     ## The snapshot date stops at the first year the store holds and the caller did not read
 
@@ -4585,8 +4585,20 @@ def write_financial_statements(
     replace a year's partition with one holding fewer securities -- which is exactly what a
     naive `for code in universe: write_financial_statements(store, [fetch(code)])` produces.
     Every security whose window touches a year has to arrive in one call.
+
+    ## The rows are stored in one order whatever order they were fetched in (`V2-P6-002`)
+
+    Sorted by security, then announcement, then every stored value, before the split. A
+    partition's `content_hash` is over its rows *in order*, and there are two routes to one
+    year's rows -- one request per security, or a whole-market sweep one month at a time -- that
+    serve the same rows in different orders: grouped by security in the first, by month in the
+    second, and in whatever order each endpoint lists two filings a security announced on one
+    day. Without this the two routes would store the same rows under two hashes and an
+    idempotent rebuild through the other route would read as a change. The last key is the whole
+    row rather than a chosen column because a revision pair can agree on every key column and
+    differ only in a value.
     """
-    merged = merge_panel_batches(batches)
+    merged = _in_statement_order(merge_panel_batches(batches))
     if merged.dataset not in FINANCIAL_STATEMENT_DATASETS:
         raise FinancialStatementError(
             f"expected one of the financial-statement datasets "
@@ -4617,6 +4629,47 @@ def write_financial_statements(
         )
         for year, yearly in by_year
     )
+
+
+def _in_statement_order(batch: ColumnarPanelBatch) -> ColumnarPanelBatch:
+    """`batch` with its rows in `write_financial_statements`' storage order.
+
+    `repr` for everything after the announcement instant, which makes the order total over
+    mixed `None`/number cells without claiming anything about how values compare -- the order
+    has to be deterministic, not meaningful.
+    """
+    timeline = batch.timeline
+
+    def key(index: int) -> tuple[str, datetime, tuple[str, ...]]:
+        return (
+            batch.subjects[index],
+            timeline.event_time[index],
+            (
+                *(repr(column.values[index]) for column in batch.columns),
+                repr(timeline.available_time[index]),
+                repr(timeline.revision_time[index]),
+                repr(timeline.ingested_time[index]),
+            ),
+        )
+
+    return _select_rows(batch, sorted(range(batch.row_count), key=key))
+
+
+def keep_panel_subjects(
+    batch: ColumnarPanelBatch, subjects: frozenset[str]
+) -> ColumnarPanelBatch | None:
+    """`batch`'s rows whose subject is in `subjects`, in order, or `None` if none is.
+
+    `None` rather than an empty batch because a successful `ColumnarPanelBatch` holds at least one
+    row. For a whole-market fetch that has to answer the same question a per-subject loop over a
+    known list answers (`cli._build_statement_panel`'s sweep).
+    """
+    indices = [index for index, subject in enumerate(batch.subjects) if subject in subjects]
+    if not indices:
+        return None
+    if len(indices) == batch.row_count:
+        return batch
+    return _select_rows(batch, indices)
 
 
 def financial_statement_requirement(

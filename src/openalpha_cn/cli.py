@@ -170,6 +170,7 @@ from openalpha_cn.panel_gate import (
 )
 from openalpha_cn.panel_ingest import (
     _sessions_published_through,
+    keep_panel_subjects,
     load_industry_trees,
     load_stock_universe,
     load_suspensions,
@@ -211,11 +212,14 @@ from openalpha_cn.providers.chainlin import ChainLinDataProvider
 from openalpha_cn.providers.file import FileProvider
 from openalpha_cn.providers.tushare import (
     CURRENT_INDUSTRY_MEMBERSHIP,
+    STATEMENT_SWEEP_ENDPOINT_SUFFIX,
     SUPERSEDED_INDUSTRY_MEMBERSHIP,
     TRADING_CALENDAR_DEFAULT_EXCHANGE,
+    TUSHARE_STATEMENT_SWEEP_ROW_CAPS,
     TushareProvider,
     TushareTransport,
     UrllibTushareTransport,
+    statement_sweep_windows,
 )
 from openalpha_cn.research_result_io import (
     parse_research_result,
@@ -1907,14 +1911,15 @@ specified against. The eight are wired here, each with its measured request shap
 - `namechange` -- one announcement year of the whole market per request. One request per `--year`.
 - `index_weight` -- one index for one calendar month. `INDEX_WEIGHT_INDEX_CODES` x 12 months,
   36 requests per `--year`; see `_build_index_weights` for the interior-gap refusal.
-- `income` / `balancesheet` / `cashflow` -- one `(security, announcement year)` window, and
-  `ts_code` is mandatory, so one request per security in the stored registry: **5,881 requests
-  per `--year`, per dataset** (measured 2026-08-11).
+- `income` / `balancesheet` / `cashflow` -- one whole-market announcement month per request
+  through the `*_vip` endpoint, twelve per `--year` per dataset plus a halving for each month at
+  the endpoint's cap (`V2-P6-002`; 2015 and 2024 measured 30 to 42 requests per dataset for both
+  years together). Under `--subject`, one `(security, announcement year)` window per name.
 - `index_classify` -- one taxonomy vintage per request; two requests for the whole invocation.
 - `index_member_all` -- one `(l1_code, is_new)` slice; 31 x 2 = 62 requests for the whole
   invocation.
-- `fina_indicator` -- one `(security, report-period year)` window; 5,881 requests per period year,
-  for the whole invocation.
+- `fina_indicator` -- one whole-market report period per request, four per period year, for the
+  whole invocation. Under `--subject`, one `(security, report-period year)` window per name.
 
 `PANEL_BUILD_SPAN_TARGETS` is why the last three say "for the whole invocation" rather than "per
 `--year`", and it is a fact about their requests rather than a convenience.
@@ -2005,14 +2010,17 @@ Renamed from `_LIFECYCLE_YEAR_TARGETS`, which described the one member it used t
 """
 
 _NEEDS_STORED_UNIVERSE: Final[frozenset[str]] = frozenset(FINANCIAL_STATEMENT_DATASETS)
-"""Targets that cannot name their own subjects and read them out of the stored registry.
+"""Targets that read their securities out of the stored registry.
 
-All four statement endpoints, and the reason is `_financial_statement_params`': `ts_code` is
-**mandatory** on every one of them -- a request without it fails `code=50101`, and a comma-joined
-list answers zero rows with `code=0` on three of the four -- so there is no cross-section fetch
-and the securities have to come from somewhere. They come from `stock_basic`, exactly as the
-session-scoped targets' sessions come from `trade_cal`, which is what `_NEEDS_STORED_CALENDAR`
-says one dependency over. A caller may narrow it with `--subject`; nothing infers it.
+All four statement endpoints. The per-security endpoints make `ts_code` **mandatory** -- a
+request without it fails `code=50101`, and a comma-joined list answers zero rows with `code=0` on
+three of the four -- which is why this set began as the list of securities to ask for, exactly as
+the session-scoped targets' sessions come from `trade_cal` (`_NEEDS_STORED_CALENDAR`). Since
+`V2-P6-002` the whole market is swept through the `*_vip` endpoints instead, and the registry is
+what the sweep keeps: the per-security route never asked for a security it does not hold, so
+keeping the rest is what makes the two routes write the same partition (`_sweep_statement_batches`).
+A caller may narrow it with `--subject`, which also selects the per-security route; nothing
+infers it.
 """
 
 _NEEDS_STORED_INDUSTRY_TREE: Final[frozenset[str]] = frozenset({INDUSTRY_MEMBERSHIP_DATASET})
@@ -2039,8 +2047,9 @@ Deliberately a separate, named set rather than "everything the session rule cann
 because the evidence really is weaker and the difference should be legible at the call site as
 well as in `_resumable_targets`' docstring, which is where the residue is stated and the test
 that measures it is named. Four members: `index_weight` at 36 requests a year and the three
-announcement-year statement targets at 5,881 each, which is the scale that makes a weak resume
-worth more than no resume.
+announcement-year statement targets at twelve month windows each (plus halvings) -- one request per
+security, 5,881 of them, when this set was drawn, which is the scale that made a weak resume worth
+more than no resume and still makes one worth having over a twelve-year span.
 
 `namechange` is not here even though it is the same shape, for `trade_cal`'s reason: it is one
 request a year, so skipping it saves nothing and costs a corpus the resumed build did not verify.
@@ -2499,9 +2508,10 @@ def _build_subjects(requested: Sequence[str], targets: frozenset[str]) -> tuple[
     """Resolve `--subject`, refusing it for every target that does not take one.
 
     `--subject` narrows the securities the four statement targets fetch, which is the one place
-    in this command where the caller can shrink a whole-market fetch: `income` for one year is
-    one request per security in the stored registry, so naming three securities turns 5,881
-    requests into 3. Everything it is good for is that; everything else it could be pointed at
+    in this command where the caller can shrink a whole-market fetch: it selects the per-security
+    route, one request per name and year, instead of the whole-market sweep
+    (`_build_statement_panel`). Everything it is good for is that; everything else it could be
+    pointed at
     is a dataset whose partition **is** the whole market, and narrowing one of those does not
     produce a smaller panel but a wrong one -- `_stock_basic_params` refuses a filtered registry
     for that reason in the provider, and `PanelStore` replaces a partition whole, so a narrowed
@@ -2820,6 +2830,7 @@ def _fetch_panel(
     *,
     as_of: datetime,
     subjects: tuple[str, ...] = (),
+    sweep: bool = False,
 ) -> ColumnarPanelBatch:
     """One panel-plane fetch, reporting a refusal without ever echoing its message.
 
@@ -2827,11 +2838,15 @@ def _fetch_panel(
     same: `ProviderFailure.message` can carry the token or the URL query string it was sent in,
     so only the closed-`Literal` category, the provider id and the dataset name are safe to
     print or log.
+
+    `sweep` sends the request down `TushareProvider.fetch_panel_sweep`, the statement datasets'
+    whole-market route, and through this same boundary rather than a second copy of it.
     """
+    request = ProviderRequest(dataset=dataset, as_of=as_of, subjects=subjects)
     try:
-        return provider.fetch_panel(
-            ProviderRequest(dataset=dataset, as_of=as_of, subjects=subjects)
-        )
+        if sweep:
+            return provider.fetch_panel_sweep(request)
+        return provider.fetch_panel(request)
     except ProviderFailure as failure:
         logger.warning(
             "panel_fetch_failed",
@@ -2859,19 +2874,22 @@ lines are not themselves the output. The measured builds this was chosen against
 this command printed **nothing at all** and a caller could not tell a live fetch from a wedged
 one without `lsof`.
 
-A *floor* rather than the stride itself since the statement targets arrived: those loop over the
+A *floor* rather than the stride itself since the statement targets arrived: they looped over the
 5,881 securities of the stored registry rather than over 145 sessions, and a line every ten would
-be 589 of them for one dataset-year. `_progress_stride` is what keeps both readable, and this
-constant is what keeps every loop that existed before them reporting exactly as it did.
+have been 589 of them for one dataset-year. The whole-market sweep (`V2-P6-002`) is twelve
+windows a year, but `--subject` can still name thousands. `_progress_stride` is what keeps both
+readable, and this constant is what keeps every loop that existed before them reporting exactly as
+it did.
 """
 
 PANEL_PROGRESS_REPORTS: Final[int] = 40
 """At most about this many progress lines from one loop, whatever its length.
 
 Forty, and the number is a compromise between two things that cannot both be had on a loop of
-5,881 requests: few enough lines that they are not themselves the output, and short enough gaps
-that a wedged fetch is visible. At the 1.1--4.6s per request measured on 2026-08-11 a whole-market
-statement year is roughly two to seven hours, so forty reports is one every three to ten minutes;
+5,881 requests -- the per-security statement loop's length for the whole registry, which is what
+it was chosen against: few enough lines that they are not themselves the output, and short enough
+gaps that a wedged fetch is visible. At the 1.1--4.6s per request measured on 2026-08-11 that loop
+was roughly two to seven hours per dataset-year, so forty reports is one every three to ten minutes;
 ten reports would have been one every twenty, and one every two minutes would be nearly six
 hundred lines. The `BUDGET` line is what covers the interval before the first report.
 
@@ -2915,12 +2933,12 @@ def _echo_progress(
 def _echo_budget(label: str, total: int, unit: str, reason: str) -> None:
     """State the size of a fetch **before** it starts, on stderr.
 
-    The statement targets turned this command's unit of cost from minutes into hours: `income`
-    for one year is one request per security in the registry, 5,881 of them, and at the 1.1--4.6s
-    per round trip measured on 2026-08-11 that is between two and seven hours for one
-    dataset-year. A caller who typed `--start 2015 --end 2026` has asked for twelve times that,
-    per dataset, and the only honest moment to say so is before the first request rather than in
-    an `eta` that appears after ten minutes.
+    The statement targets turned this command's unit of cost from minutes into hours while they
+    were one request per registered security -- 5,881 of them per dataset-year, two to seven hours
+    at the 1.1--4.6s per round trip measured on 2026-08-11 -- and the only honest moment to say so
+    is before the first request rather than in an `eta` that appears after ten minutes. The sweep
+    that replaced that loop (`V2-P6-002`) states its size in windows, because a window's request
+    count is known only once the endpoint says whether it fits.
 
     Printed for every fetch loop, not only the expensive ones, so that the number a caller reads
     is always the same kind of number. `_echo_progress` then tracks it.
@@ -2976,11 +2994,12 @@ def _subject_batches(
 ) -> list[ColumnarPanelBatch]:
     """Fetch one dataset once per subject, keeping the batches that carried rows.
 
-    The statement targets' loop. `_session_batches`' shape with the axes swapped: there the
+    The statement targets' per-security loop, which `--subject` selects (the whole-market sweep
+    is `_sweep_statement_batches`). `_session_batches`' shape with the axes swapped: there the
     request is a whole-market cross section and the loop is over days, here the request is one
-    security's window and the loop is over the registry, because `_financial_statement_params`'
-    `ts_code` is mandatory and a comma-joined list answers zero rows rather than an error on
-    three of the four endpoints.
+    security's window and the loop is over the named securities, because
+    `_financial_statement_params`' `ts_code` is mandatory and a comma-joined list answers zero rows
+    rather than an error on three of the four endpoints.
 
     **A `no_data` subject is ordinary here, and that is measured rather than assumed.** It is the
     opposite of `_EMPTY_SESSION_IS_ORDINARY`, which is a closed set of one because every other
@@ -3098,9 +3117,10 @@ def _stored_universe(store: PanelStore, *, now: datetime) -> tuple[str, ...]:
     if not years:
         raise _panel_fail(
             PanelExit.unhealthy,
-            f"the statement targets fetch one request per security and {STOCK_BASIC_DATASET} is "
-            f"not in {store.root}: the endpoints require a ts_code and there is no cross-section "
-            "fetch, so the registry is where the securities come from. Build it first: "
+            f"the statement targets keep the securities of the stored registry and "
+            f"{STOCK_BASIC_DATASET} is not in {store.root}: a whole-market sweep stores the "
+            "securities the registry holds, which is what the per-security route asked for. Build "
+            "it first: "
             "`openalpha panel build --dataset stock_basic --year <year>`, or name the securities "
             "with --subject",
         )
@@ -3120,25 +3140,55 @@ def _build_statement_panel(
     *,
     dataset: str,
     subjects: Sequence[str],
+    sweep: bool,
+    year: int,
     as_of: datetime,
     label: str,
     reason: str,
-    extra: tuple[str, ...] = (),
 ) -> list[ColumnarPanelBatch]:
-    """Fetch one statement dataset for every subject and refuse a sweep that served nothing.
+    """Fetch one statement year by one of two routes and refuse a year that served nothing.
+
+    **Two routes to the same rows (`V2-P6-002`).** With `sweep`, the year is fetched for the whole
+    market through the dataset's `*_vip` endpoint, one window at a time
+    (`_sweep_statement_batches`), and `subjects` -- the stored registry -- is what the rows are
+    kept to. Without it, which is what `--subject` selects, the year is fetched one security at a
+    time (`_subject_batches`), the route this command used to take for the whole registry. Both
+    produce the rows the other does, and `write_financial_statements` stores them in one order,
+    so the partition and its `content_hash` do not depend on the route; see
+    `tests/unit/test_cli_panel_build_statement_sweep.py`.
+
+    `year` is the window: the announcement year of `income`, `balancesheet` and `cashflow`, the
+    report-period year of `fina_indicator`. On the per-security route it is the second request
+    subject (`_financial_statement_params`, `_financial_indicator_params`).
 
     Returns the batches rather than writing them, because the three announcement-year targets
     and `fina_indicator` write at different moments -- per year and once per invocation
     respectively (`PANEL_BUILD_SPAN_TARGETS`) -- and a helper that wrote would have to know which.
 
-    The refusal is the counterweight to `_subject_batches` treating `no_data` as ordinary. One
-    security with nothing to report is the common case; **every** security with nothing to report
-    is a fetch that did not work, and without this it would reach `write_financial_statements` as
-    an empty list and be refused by `merge_panel_batches` with "needs at least one batch" -- a
-    true sentence about a list, several layers from the fetch that produced it.
+    The refusal is the counterweight to both loops treating `no_data` as ordinary. One security,
+    or one month, with nothing to report is the common case; **all** of them with nothing to
+    report is a fetch that did not work, and without this it would reach
+    `write_financial_statements` as an empty list and be refused by `merge_panel_batches` with
+    "needs at least one batch" -- a true sentence about a list, several layers from the fetch that
+    produced it. Both routes refuse with the same exit code.
     """
+    if sweep:
+        return _sweep_statement_batches(
+            provider,
+            dataset,
+            registry=frozenset(subjects),
+            year=year,
+            as_of=as_of,
+            label=label,
+        )
     batches = _subject_batches(
-        provider, dataset, subjects=subjects, as_of=as_of, label=label, reason=reason, extra=extra
+        provider,
+        dataset,
+        subjects=subjects,
+        as_of=as_of,
+        label=label,
+        reason=reason,
+        extra=(str(year),),
     )
     if not batches:
         raise _panel_fail(
@@ -3148,6 +3198,84 @@ def _build_statement_panel(
             "fetch to investigate rather than an empty partition to write",
         )
     return batches
+
+
+def _sweep_window_opens(window: str) -> datetime:
+    """The first instant a sweep window could hold a filing: its month's first day, or its
+    report period's last day (nothing is announced about a quarter before it ends)."""
+    day = int(window[6:]) if len(window) == 8 else 1
+    return datetime(int(window[:4]), int(window[4:6]), day, tzinfo=PANEL_DATE_ZONE)
+
+
+def _sweep_statement_batches(
+    provider: TushareProvider,
+    dataset: str,
+    *,
+    registry: frozenset[str],
+    year: int,
+    as_of: datetime,
+    label: str,
+) -> list[ColumnarPanelBatch]:
+    """Fetch one statement year for the whole market, window by window, kept to `registry`.
+
+    The windows are `statement_sweep_windows`': twelve announcement months, or four report
+    periods for `fina_indicator`. A window that opens after `as_of` is not asked for -- nothing
+    in it could survive `_decode_panel_rows`' point-in-time filter -- which is what lets the
+    current year be built before it has ended. Each window is one request unless it reaches the
+    endpoint's cap, in which case `TushareProvider._halved_rows` splits it -- so the budget counts
+    windows, and the true request count is at least that and is only known once the endpoint has
+    answered.
+
+    **Kept to the stored registry, for the per-security route's reason.** That route asks for
+    every registered security and nothing else, so a security the whole market files for and the
+    registry does not know was never stored by it; storing it here would make the two routes
+    write different partitions and would put a subject in a statement partition that no universe
+    read can name. What is set aside is counted on the `SWEPT` line rather than dropped in
+    silence.
+    """
+    windows = tuple(
+        window
+        for window in statement_sweep_windows(dataset, year)
+        if _sweep_window_opens(window) <= as_of
+    )
+    unit = "report-period" if dataset == FINANCIAL_INDICATOR_DATASET else "month"
+    _echo_budget(
+        label,
+        len(windows),
+        "windows",
+        f"whole-market {dataset}{STATEMENT_SWEEP_ENDPOINT_SUFFIX}, one {unit} per window and one "
+        f"request each; a window at the {TUSHARE_STATEMENT_SWEEP_ROW_CAPS[dataset]}-row cap is "
+        "halved until each half fits",
+    )
+    collected: list[ColumnarPanelBatch] = []
+    served: set[str] = set()
+    started = monotonic()
+    stride = _progress_stride(len(windows))
+    for index, window in enumerate(windows, start=1):
+        batch = _fetch_panel(provider, dataset, as_of=as_of, subjects=(window,), sweep=True)
+        if batch.status == "success":
+            served.update(batch.subjects)
+            kept = keep_panel_subjects(batch, registry)
+            if kept is not None:
+                collected.append(kept)
+        if index % stride == 0 or index == len(windows):
+            _echo_progress((dataset,), index, len(windows), started, unit="windows")
+    outside = served - registry
+    typer.echo(
+        f"SWEPT {label} {sum(batch.row_count for batch in collected)} rows from "
+        f"{len(served & registry)} registered securities; {len(outside)} securities outside "
+        "the stored registry not stored",
+        err=True,
+    )
+    if not collected:
+        raise _panel_fail(
+            PanelExit.unhealthy,
+            f"{label}: none of the {len(windows)} {unit} windows served a filing by a security "
+            f"in the stored registry ({len(outside)} outside it did). A window with nothing "
+            "announced is ordinary and a whole year of them is not, so this is a fetch to "
+            "investigate rather than an empty partition to write",
+        )
+    return collected
 
 
 def _build_index_weights(
@@ -3478,8 +3606,9 @@ def _refuse_shrinking_statement_years(
 
     Scoped to `fina_indicator` because it is the only target whose partitions straddle its
     requests. The three announcement-year statement endpoints write exactly the year they were
-    asked for from one request per security, so the only way to shrink one of those is
-    `--subject`, which `_refuse_to_drop_stored_subjects` already refuses by name.
+    asked for, from its twelve month windows or one window per named security, so the only way to
+    shrink one of those is `--subject`, which `_refuse_to_drop_stored_subjects` already refuses by
+    name.
     """
     merged = merge_panel_batches(batches)
     shrinking: list[str] = []
@@ -3629,18 +3758,18 @@ def _build_panel(
                     provider,
                     dataset=dataset,
                     subjects=universe,
-                    # The build's own clock, with the announcement year as a request subject.
-                    # These three filter `ann_date`, so the window is that year; and a row filed
-                    # in it can be stored as a version re-announced in a later year, which a
-                    # bound at the year's end would drop from this partition at every rebuild.
-                    # See `_financial_statement_params`.
+                    # `--subject` names securities, and only then is the year fetched one of
+                    # them at a time; otherwise it is swept for the whole market.
+                    sweep=not subjects,
+                    year=year,
+                    # The build's own clock, with the announcement year as the window. These
+                    # three filter `ann_date`, so the window is that year; and a row filed in it
+                    # can be stored as a version re-announced in a later year, which a bound at
+                    # the year's end would drop from this partition at every rebuild. See
+                    # `_financial_statement_params`.
                     as_of=_announcement_year_bound(year, now),
                     label=f"{dataset} year={year}",
-                    reason=(
-                        f"one per security; ts_code is mandatory on {dataset} and there is no "
-                        "cross-section fetch"
-                    ),
-                    extra=(str(year),),
+                    reason=f"one per named security; ts_code is mandatory on {dataset}",
                 ),
             )
         )
@@ -3694,16 +3823,17 @@ def _build_span_targets(
                     provider,
                     dataset=FINANCIAL_INDICATOR_DATASET,
                     subjects=universe,
+                    sweep=not subjects,
+                    year=period_year,
                     # `now`, not a year-derived instant. This endpoint's window comes from the
-                    # period year in `extra`, so `as_of` does only its own job -- bounding what
-                    # was knowable -- which is the split `_financial_indicator_params` exists for.
+                    # period year, so `as_of` does only its own job -- bounding what was
+                    # knowable -- which is the split `_financial_indicator_params` exists for.
                     as_of=now,
                     label=f"{FINANCIAL_INDICATOR_DATASET} period-year={period_year}",
                     reason=(
-                        "one per security; the report-period year is a request subject and the "
-                        "partitions are announcement years"
+                        "one per named security; the report-period year is a request subject "
+                        "and the partitions are announcement years"
                     ),
-                    extra=(str(period_year),),
                 )
             )
         _refuse_shrinking_statement_years(
@@ -3935,8 +4065,9 @@ def _resumable_targets(
     to read. Their datasets have no session census: a security that announced nothing in a year
     is absent from the partition and indistinguishable from one that was never fetched, so
     "which securities should be here" has no answer the store can give. What the rule buys is the
-    only thing that matters at this scale -- `income` alone is 5,881 requests per year, so a
-    twelve-year build that dies in the eleventh costs one year rather than eleven.
+    only thing that matters at this scale -- a twelve-year build that dies in the eleventh costs
+    one year rather than eleven, which mattered most while `income` alone was 5,881 requests per
+    year and still saves the sweep's dozen-plus requests per dataset-year.
 
     What it cannot see is a partition an earlier `--subject` run narrowed: that partition is
     registered, so `--resume` skips it, and the year stays narrow. The residue is left visible
@@ -3949,8 +4080,9 @@ def _resumable_targets(
     ## `PANEL_BUILD_SPAN_TARGETS` are never skipped, and `fina_indicator` cannot be
 
     `index_classify` is two requests and `index_member_all` is 62, so for both the answer is
-    `trade_cal`'s. `fina_indicator` is 5,881 requests per period year and is the one target here
-    that would genuinely benefit -- and it is *structurally* unresumable, not merely unimplemented:
+    `trade_cal`'s. `fina_indicator` is four whole-market requests per period year (and one per
+    named security under `--subject`) -- and it is *structurally* unresumable, not merely
+    unimplemented:
     it writes nothing until every requested period year has been fetched, because an announcement
     year is assembled from several of them, so there is no intermediate state for a resume to
     read. The lever a caller has instead is a narrower `--start`/`--end`, at the cost
@@ -4011,10 +4143,12 @@ _BUILD_SUBJECT_HELP = (
     "A ts_code the statement targets fetch, repeatable. Only income, balancesheet, cashflow and "
     "fina_indicator take one -- naming it for any other target is refused rather than ignored, "
     "because their partitions are the whole market and a partition is replaced whole. Without "
-    "it the securities come from the stored stock_basic registry, which is 5,881 requests per "
-    "dataset per year; with it, one per name. Nothing is inferred from --year: a security that "
-    "had not listed yet can still have filings announced in a window (688981.SH answers the "
-    "2015 window) and one delisted in 2002 can still have filings announced in 2024 "
+    "it the whole market is swept through the *_vip endpoints -- twelve announcement months per "
+    "dataset per year, four report periods per fina_indicator period year -- and the securities "
+    "of the stored stock_basic registry are kept; with it, one request per name and year, the "
+    "per-security route, which stores the same rows. Nothing is inferred from --year: a "
+    "security that had not listed yet can still have filings announced in a window (688981.SH "
+    "answers the 2015 window) and one delisted in 2002 can still have filings announced in 2024 "
     "(000003.SZ), both measured, so no lifecycle filter is applied."
 )
 
@@ -4119,13 +4253,20 @@ def panel_build(
     the store, can have been written by the same invocation.
 
     **What a whole-market build now costs.** The five original targets were ~2,900 requests for a
-    year. `income`, `balancesheet` and `cashflow` are one request per security each -- 5,881 on
-    2026-08-11 -- so a single year of the four statement endpoints is ~23,500 round trips, and
-    `--start 2015 --end 2026` is ~282,000. At the 1.1--4.6s per request measured on that date the
-    twelve-year statement backfill is days rather than hours, and the account's own 500-per-minute
-    quota is not the binding constraint at that latency. Every fetch loop therefore states its
-    size before it starts (`_echo_budget`) and reports progress with an `eta` while it runs, and
-    `--subject` is the lever that turns the registry sweep into a named handful.
+    year. The four statement targets were one request per registered security until `V2-P6-002`;
+    without `--subject` they are now swept for the whole market through Tushare's `*_vip`
+    endpoints: twelve announcement-month windows per dataset-year for `income`, `balancesheet`
+    and `cashflow`, four report-period windows per period year for `fina_indicator`, one request
+    each, and a month at the endpoint's cap halved until every half fits -- never paged, because
+    `offset` paging on those endpoints was measured to serve rows twice and skip others (see
+    `providers.tushare._statement_sweep_descriptor`). Measured on 2026-09-26: announcement years
+    2015 and 2024 cost 42 `income`, 30 `balancesheet` and 42 `cashflow` requests (72 month
+    windows, 114 requests, about four minutes), and `fina_indicator`'s period years 2015 and 2023
+    cost 8, where one request per registered security would have been 5,908 x 8 = 47,264. So
+    `--start 2015 --end 2026` is 480 windows (432 months and 48 report periods) plus the halvings,
+    rather than ~282,000 requests. Every fetch loop still states its size before it starts
+    (`_echo_budget`, in windows for a sweep) and reports progress with an `eta` while it runs, and
+    `--subject` still selects the per-security route for a named handful.
     """
     runtime_dir = _resolved_runtime_dir(runtime_dir)
 

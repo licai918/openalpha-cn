@@ -578,7 +578,9 @@ INJECTION_VECTORS = (
             "-- the restatement form the announcement clock cannot order"
         ),
         refused_by=AmbiguousReportError,
-        refusal=r"2 versions disagree about 'total_revenue' \(100\.0, 999\.0\)",
+        # Stored in `write_financial_statements`' canonical order since V2-P6-002, which puts
+        # the injected update_flag="0" version first; the versions have no ordering column.
+        refusal=r"2 versions disagree about 'total_revenue' \(999\.0, 100\.0\)",
         cleared=r"^the one stored version answers 100\.0$",
         inject=_inject_duplicate_versions,
         clear=_clear_duplicate_versions,
