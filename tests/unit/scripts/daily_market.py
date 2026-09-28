@@ -17,6 +17,7 @@ records each request's `api_name` and parameters. What it publishes can be moved
   `pre_close` does not, so the doctor's `return_paths` check reports it;
 - `bands_only`: codes that are published a band on that session and nothing else (the shape of
   the funds Tushare withdrew from a stored session in the live check);
+- `unsteady_bands`: codes served on every second request for a session only;
 - `today` with `reclassified` and `first_assigned`: industry memberships that change on a day --
   published only once `today` has reached it, as an upstream publishes a reclassification;
 - `whole_market_fault`: a whole-market `index_member_all(is_new=Y)` answer that loses or doubles
@@ -246,6 +247,10 @@ class Market:
     open_days: tuple[date, ...]
     disputed: date | None = None
     bands_only: dict[date, tuple[str, ...]] = field(default_factory=dict)
+    unsteady_bands: dict[date, tuple[str, ...]] = field(default_factory=dict)
+    """Codes a session's `stk_limit` serves on every **second** request for it only, so two
+    answers for that session disagree -- what a partial fetch looks like to V2-P6-016's
+    withdrawal rule."""
     today: date | None = None
     reclassified: tuple[tuple[str, date, str], ...] = ()
     """`(code, day, new level-one code)`: from `day` the code sits in the new industry."""
@@ -336,6 +341,15 @@ class Market:
                 for code in rows_for
             ]
             rows += [[code, compact(day), 1.1, 0.9] for code in self.bands_only.get(day, ())]
+            asked = sum(
+                1
+                for name, params in self.requests
+                if name == PRICE_LIMIT_DATASET and params.get("trade_date") == compact(day)
+            )
+            if asked % 2 == 0:
+                rows += [
+                    [code, compact(day), 1.1, 0.9] for code in self.unsteady_bands.get(day, ())
+                ]
             return LIMIT_FIELDS, rows
         if api_name == ADJ_FACTOR_DATASET:
             return FACTOR_FIELDS, [

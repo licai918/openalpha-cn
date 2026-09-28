@@ -63,6 +63,7 @@ from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_ingest import (
     load_industry_cross_section,
     load_trading_calendar,
+    load_upstream_defects,
     session_publication_instant,
 )
 from openalpha_cn.storage.predictions import FilePredictionStore
@@ -580,14 +581,9 @@ def test_scores_registered_before_the_next_call_auction_are_forward(
     assert result["prediction"]["standing"] == "forward"
 
 
-def test_a_refused_panel_update_stops_the_day_counts_its_requests_and_pins_its_clock(
-    world: World, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """The live check's own refusal, reproduced: a band the upstream served for the stored
-    horizon's session (12 January) and no longer serves. The overlap re-fetch of that session
-    drops it and the writer refuses, as it must; the command stops at step 2, says so with
-    the requests it spent, and a retry asks the same question at the same pinned `--as-of`."""
-    store = PanelStore(world.runtime / "panel")
+def _band_withdrawn_after_the_seed(world: World) -> None:
+    """The live check's shape: a band the upstream served for the stored horizon's session (12
+    January) and no longer serves."""
     arguments = ["panel", "build", "--runtime-dir", str(world.runtime), "--year", str(YEAR)]
     arguments += ["--as-of", SEEDED_AS_OF, "--dataset", PRICE_LIMIT_DATASET]
     world.market.bands_only = {date(2026, 1, 12): ("159999.SZ",)}
@@ -596,12 +592,44 @@ def test_a_refused_panel_update_stops_the_day_counts_its_requests_and_pins_its_c
     world.market.bands_only = {}
     world.market.clear()
 
+
+def test_a_band_the_upstream_withdrew_is_recorded_and_the_day_clears(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """What stopped the live check at step 2 is, on V2-P6-016, a recorded withdrawal: the overlap
+    re-fetch of 12 January lacks the stored band, a second whole-session answer lacks it too, and
+    the band is kept whole in `withdrawn_stk_limit` and indexed in `upstream_defects` while the
+    day goes on. The second answer is one request more."""
+    _band_withdrawn_after_the_seed(world)
+
+    code, result, err = _run(world, capsys)
+
+    assert code == 0, err
+    assert result["this_run"]["requests"][PRICE_LIMIT_DATASET] == 6 + 1
+    store = PanelStore(world.runtime / "panel")
+    kept = store.read_coverage("withdrawn_stk_limit", YEAR)
+    assert kept is not None and kept.subjects == ("159999.SZ",)
+    (record,) = load_upstream_defects(store, years=(YEAR,), as_of=DAY_AS_OF)
+    assert (record.ts_code, record.kind) == ("159999.SZ", "withdrawn_after_publication")
+
+
+def test_a_refused_panel_update_stops_the_day_counts_its_requests_and_pins_its_clock(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A refused step 2 on V2-P6-016: the band's absence is not confirmed -- the second answer
+    for 12 January is not the first -- so nothing is recorded or written. The command stops at
+    step 2, says so with the requests it spent (the second answer included), and a retry asks the
+    same question at the same pinned `--as-of`."""
+    store = PanelStore(world.runtime / "panel")
+    _band_withdrawn_after_the_seed(world)
+    world.market.unsteady_bands = {date(2026, 1, 12): ("159998.SZ",)}
+
     code, _text, err = _run(world, capsys)
 
     assert code == 1
     assert "step 2 (panel update) failed" in err
-    assert "would drop ['159999.SZ']" in err
-    assert "tushare requests   32 this run" in err
+    assert "The two answers disagree" in err
+    assert "tushare requests   33 this run" in err
     journal = json.loads(_journal(world, DAY).read_text(encoding="utf-8"))
     assert (journal["as_of"], "panel" in journal) == (DAY_AS_OF.isoformat(), False)
     assert store.registered_years("factor_obs_reversal_1d_v1") == ()
@@ -609,7 +637,7 @@ def test_a_refused_panel_update_stops_the_day_counts_its_requests_and_pins_its_c
     code, _text, err = _run(world, capsys, as_of=DAY_AS_OF + timedelta(hours=3))
 
     assert code == 1
-    assert "would drop ['159999.SZ']" in err
+    assert "The two answers disagree" in err
     assert json.loads(_journal(world, DAY).read_text(encoding="utf-8"))["as_of"] == (
         DAY_AS_OF.isoformat()
     )
