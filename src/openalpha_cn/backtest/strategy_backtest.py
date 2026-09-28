@@ -82,7 +82,7 @@ from __future__ import annotations
 import math
 import statistics
 from bisect import bisect_left, bisect_right
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
@@ -131,6 +131,8 @@ __all__ = [
     "ScoreSource",
     "ScoreSourceKind",
     "SessionQuote",
+    "SignalDayInputs",
+    "SignalDayScores",
     "StrategyBacktest",
     "StrategyBacktestError",
     "StrategyBacktestLimitation",
@@ -145,6 +147,8 @@ __all__ = [
     "component_key",
     "limitation_codes_for",
     "run_strategy_backtest",
+    "score_signal_day",
+    "target_holdings",
     "trailing_ic_weights",
     "usable_fit",
     "walk_forward_fits",
@@ -1131,16 +1135,107 @@ def run_strategy_backtest(inputs: StrategyInputs, spec: StrategySpec) -> Strateg
     )
 
 
+# --- one signal day, scored with no book to run (V2-P6-011) -------------------------------------
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SignalDayInputs:
+    """What scoring one signal day reads, when there is no range and no book around it.
+
+    `calendar` is every session a trailing or training window may reach, ascending and ending at
+    or after the day scored; `signal_instants` is each of those sessions' signal instant. The
+    daily command (`V2-P6-011`) scores today with this: a `StrategyInputs` needs a session after
+    the signal to trade on, and after today's close there is none yet.
+    """
+
+    source: ScoreSource
+    calendar: tuple[date, ...]
+    signal_instants: Mapping[date, datetime]
+
+    def __post_init__(self) -> None:
+        if not self.calendar:
+            raise StrategyBacktestError("a signal day is scored on a calendar holding it")
+        if any(later <= earlier for earlier, later in pairwise(self.calendar)):
+            raise StrategyBacktestError("the calendar a signal day is scored on must ascend")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SignalDayScores:
+    """One signal day's answer exactly as `run_strategy_backtest` computes it for the book.
+
+    `ranked` is the order the book trades on, or `None` when the source held (no trailing weight
+    and no fit in use). `scores` is the composite each ranked security was ordered by -- the
+    number a registered prediction of this day must carry for a backtest reading it to order the
+    market the same way; `incomplete` are the securities carrying some weighted component but
+    not every one; `weights` the weight each component was combined under.
+    """
+
+    day: date
+    ranked: tuple[str, ...] | None
+    scores: Mapping[str, float]
+    incomplete: tuple[str, ...]
+    weights: Mapping[str, float]
+    ic_weights: tuple[TrailingICWeight, ...]
+    model_fit: ModelFit | None
+
+
+def score_signal_day(inputs: SignalDayInputs, feed: ScoreFeed, day: date) -> SignalDayScores:
+    """Score `day` through the book's own scorer: the same guards, weights and ranking.
+
+    `run_strategy_backtest` asks its `_Scorer` for each signal day's ranking; this asks the same
+    scorer for one day, so a caller registering today's scores (`V2-P6-011`) holds the numbers
+    the backtest would have ranked on, by construction rather than by a second implementation.
+    Every refusal the book makes while scoring -- a row not visible at the signal instant, a
+    component with no cross section, a fit not closed by its embargo -- is made here too.
+    """
+    if day not in inputs.calendar:
+        raise StrategyBacktestError(f"{day.isoformat()} is not a session of the calendar given")
+    signal = _Scorer(inputs, feed).signal(day)
+    return SignalDayScores(
+        day=day,
+        ranked=signal.ranked,
+        scores=dict(signal.scores),
+        incomplete=signal.incomplete,
+        weights=dict(signal.weights),
+        ic_weights=signal.ic_weights,
+        model_fit=signal.model_fit,
+    )
+
+
 # --- scores -------------------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _Signal:
-    """One signal day's decision input: the ranking, or `None` for a day the book holds."""
+    """One signal day's decision input: the ranking, or `None` for a day the book holds.
+
+    `scores` is the composite each ranked security was ordered by, `incomplete` the securities
+    that carried some weighted component but not every one (so were not ranked), and `weights`
+    the weight each component was combined under that day -- what `score_signal_day` hands a
+    caller that registers the day's scores (`V2-P6-011`). The book reads `ranked` alone.
+    """
 
     ranked: tuple[str, ...] | None
+    scores: Mapping[str, float] = field(default_factory=dict)
+    incomplete: tuple[str, ...] = ()
+    weights: Mapping[str, float] = field(default_factory=dict)
     ic_weights: tuple[TrailingICWeight, ...] = ()
     model_fit: ModelFit | None = None
+
+
+class _ScoringContext(Protocol):
+    """What scoring one signal day reads: the source, the calendar and each session's instant.
+
+    `StrategyInputs` is one; `SignalDayInputs` is the other, for a caller scoring one day with no
+    book to run (`score_signal_day`).
+    """
+
+    @property
+    def source(self) -> ScoreSource: ...
+    @property
+    def calendar(self) -> tuple[date, ...]: ...
+    @property
+    def signal_instants(self) -> Mapping[date, datetime]: ...
 
 
 class _Scorer:
@@ -1151,7 +1246,7 @@ class _Scorer:
     walk-forward fit in use.
     """
 
-    def __init__(self, inputs: StrategyInputs, feed: ScoreFeed) -> None:
+    def __init__(self, inputs: _ScoringContext, feed: ScoreFeed) -> None:
         self._inputs = inputs
         self._feed = feed
         source = inputs.source
@@ -1176,15 +1271,16 @@ class _Scorer:
             if any(item.observations >= spec.min_ic_observations for item in weights):
                 self._answered = True
             active = {item.component: item.weight for item in weights if item.weight != 0.0}
-            ranked = _rank(day, components, active, source.combine) if active else None
-            return _Signal(ranked=ranked, ic_weights=weights)
+            if not active:
+                return _Signal(ranked=None, ic_weights=weights)
+            return _ranked(day, components, active, source.combine, ic_weights=weights)
         if source.walk_forward is not None:
             fit = self._feed.fit_on(day)
             if fit is not None:
                 self._answered = True
             return _model_signal(inputs, source.walk_forward, day, components, fit)
         fixed = {key: float(weight) for key, weight in source.weights.items()}
-        return _Signal(ranked=_rank(day, components, fixed, source.combine))
+        return _ranked(day, components, fixed, source.combine)
 
     def refuse_a_source_that_never_answered(
         self, signal_count: int, refits: Sequence[WalkForwardFit]
@@ -1220,7 +1316,7 @@ class _Scorer:
         )
 
 
-def _instant(inputs: StrategyInputs, day: date) -> datetime:
+def _instant(inputs: _ScoringContext, day: date) -> datetime:
     instant = inputs.signal_instants.get(day)
     if instant is None:
         raise StrategyBacktestError(f"session {day.isoformat()} has no signal instant")
@@ -1228,7 +1324,7 @@ def _instant(inputs: StrategyInputs, day: date) -> datetime:
 
 
 def _model_signal(
-    inputs: StrategyInputs,
+    inputs: _ScoringContext,
     spec: WalkForwardModel,
     day: date,
     components: Mapping[str, Mapping[str, float]],
@@ -1242,11 +1338,13 @@ def _model_signal(
             f"model scores are supplied for {day.isoformat()} and no fit is named for that "
             "day, so nothing says which training labels produced them"
         )
-    ranked = _rank(day, components, {MODEL_COMPONENT: 1.0}, "zscore_sum") if rows else None
-    return _Signal(ranked=ranked, model_fit=None if fit is None else fit.record)
+    record = None if fit is None else fit.record
+    if not rows:
+        return _Signal(ranked=None, model_fit=record)
+    return _ranked(day, components, {MODEL_COMPONENT: 1.0}, "zscore_sum", model_fit=record)
 
 
-def _embargo_deadline(inputs: StrategyInputs, day: date, embargo_sessions: int) -> datetime:
+def _embargo_deadline(inputs: _ScoringContext, day: date, embargo_sessions: int) -> datetime:
     """The signal instant of the session `embargo_sessions` before `day` on the calendar."""
     calendar = inputs.calendar
     position = calendar.index(day) - embargo_sessions
@@ -1259,7 +1357,7 @@ def _embargo_deadline(inputs: StrategyInputs, day: date, embargo_sessions: int) 
 
 
 def _refuse_a_fit_not_closed_by_the_embargo(
-    inputs: StrategyInputs, spec: WalkForwardModel, fit: WalkForwardFit, day: date
+    inputs: _ScoringContext, spec: WalkForwardModel, fit: WalkForwardFit, day: date
 ) -> None:
     """The walk-forward rule at the point of use: every training label closed strictly before
     the signal instant of the session `embargo_sessions` before `day`.
@@ -1287,7 +1385,7 @@ def _refuse_a_fit_not_closed_by_the_embargo(
 
 
 def _cross_section(
-    inputs: StrategyInputs, day: date, rows: Sequence[ScoreRow]
+    inputs: _ScoringContext, day: date, rows: Sequence[ScoreRow]
 ) -> dict[str, dict[str, float]]:
     """One signal day's cross section per component, after the look-ahead guard.
 
@@ -1327,13 +1425,22 @@ def _cross_section(
     return by_component
 
 
-def _rank(
+def _ranked(
     day: date,
     components: Mapping[str, Mapping[str, float]],
     weights: Mapping[str, float],
     combine: Literal["zscore_sum", "rank_sum"],
-) -> tuple[str, ...]:
-    """The securities carrying every weighted component, best first; ties by code, ascending."""
+    *,
+    ic_weights: tuple[TrailingICWeight, ...] = (),
+    model_fit: ModelFit | None = None,
+) -> _Signal:
+    """The securities carrying every weighted component, best first; ties by code, ascending.
+
+    Each one's composite is the weighted sum of its standardized component values -- z-scores
+    or rank fractions over the securities carrying every component -- and the order is by that
+    composite, descending, then by code. The securities carrying some weighted component but not
+    all of them are `incomplete`: they are not ranked, and are named rather than dropped.
+    """
     absent = sorted(key for key in weights if not components.get(key))
     if absent:
         raise StrategyBacktestError(
@@ -1356,7 +1463,15 @@ def _rank(
         standardized = _zscores(values) if combine == "zscore_sum" else _rank_fractions(values)
         for subject, value in zip(subjects, standardized, strict=True):
             total[subject] += weight * value
-    return tuple(sorted(subjects, key=lambda subject: (-total[subject], subject)))
+    carried: set[str] = set().union(*(set(components[key]) for key in weights))
+    return _Signal(
+        ranked=tuple(sorted(subjects, key=lambda subject: (-total[subject], subject))),
+        scores=total,
+        incomplete=tuple(sorted(carried - set(subjects))),
+        weights=dict(weights),
+        ic_weights=ic_weights,
+        model_fit=model_fit,
+    )
 
 
 def _zscores(values: Sequence[float]) -> tuple[float, ...]:
@@ -1694,10 +1809,35 @@ def _decide(
     ranked: tuple[str, ...],
 ) -> tuple[set[str], list[str]]:
     """Which holdings stay, and the buy list in rank order, both decided at the signal."""
+    keep, buy = target_holdings(
+        ranked,
+        held=book.holdings,
+        spec=spec,
+        industries=inputs.industries.get(signal_day, {}),
+    )
+    return set(keep), list(buy)
+
+
+def target_holdings(
+    ranked: Sequence[str],
+    *,
+    held: Collection[str],
+    spec: StrategySpec,
+    industries: Mapping[str, str],
+) -> tuple[frozenset[str], tuple[str, ...]]:
+    """The book's rebalance rule on one signal day: which held names stay, and what it buys.
+
+    A held name stays while its rank is within `buffer_rank` (or `holding_count` without a band);
+    the free slots are filled in rank order with names not already held, skipping a name whose
+    industry already fills `industry_slots` when industries are capped (an unclassified name
+    counts under one shared industry). The buy list is at most the free slots long; the book then
+    buys from it in order while it has slots and cash. `run_strategy_backtest` decides every
+    rebalance through this function, and the daily command (`V2-P6-011`) decides today's targets
+    through it, so the two cannot come to hold different books from one ranking.
+    """
     band = spec.buffer_rank if spec.buffer_rank is not None else spec.holding_count
     rank = {subject: position for position, subject in enumerate(ranked, start=1)}
-    keep = {subject for subject in book.holdings if rank.get(subject, band + 1) <= band}
-    industries = inputs.industries.get(signal_day, {})
+    keep = {subject for subject in held if rank.get(subject, band + 1) <= band}
     counts: dict[str, int] = {}
     for subject in keep:
         industry = industries.get(subject, _UNCLASSIFIED)
@@ -1707,7 +1847,7 @@ def _decide(
     for subject in ranked:
         if len(buy) >= wanted:
             break
-        if subject in book.holdings:
+        if subject in held:
             continue
         if spec.max_industry_weight is not None:
             industry = industries.get(subject, _UNCLASSIFIED)
@@ -1715,7 +1855,7 @@ def _decide(
                 continue
             counts[industry] = counts.get(industry, 0) + 1
         buy.append(subject)
-    return keep, buy
+    return frozenset(keep), tuple(buy)
 
 
 def _at_the_open(bar: MarketBar) -> MarketBar:

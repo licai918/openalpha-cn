@@ -107,6 +107,8 @@ from openalpha_cn.backtest.strategy_backtest import (
     ScoreRow,
     ScoreSource,
     SessionQuote,
+    SignalDayInputs,
+    SignalDayScores,
     StrategyBacktest,
     StrategyBacktestError,
     StrategyInputs,
@@ -116,6 +118,7 @@ from openalpha_cn.backtest.strategy_backtest import (
     WalkForwardModel,
     component_key,
     run_strategy_backtest,
+    score_signal_day,
     usable_fit,
     walk_forward_fits,
 )
@@ -124,6 +127,7 @@ from openalpha_cn.domain.alpha_model import (
     AlphaModel,
     AlphaModelDeclaration,
     AlphaModelError,
+    PredictionBatch,
     TrainingExample,
 )
 from openalpha_cn.domain.daily_prices import DailyBar, PriceDataError
@@ -202,6 +206,7 @@ __all__ = [
     "ICSeries",
     "ICSeriesPoint",
     "ICSeriesRequest",
+    "SignalDay",
     "StrategyPanelUnreadableError",
     "StrategyRequest",
     "StrategyRequestError",
@@ -213,6 +218,7 @@ __all__ = [
     "ic_series_request",
     "ic_series_view",
     "load_strategy_inputs",
+    "score_day",
     "strategy_request",
 ]
 
@@ -1232,6 +1238,9 @@ class _ModelFeed:
         )
         self._fits: list[WalkForwardFit] = []
         self._window: dict[date, tuple[TrainingExample, ...]] = {}
+        self.last_batch: PredictionBatch | None = None
+        """The batch `rows_on` scored last: the one a caller registering that day's scores files
+        (`score_day`). Only the last is kept, so a long run holds one batch, not the history."""
 
     def rows_on(self, day: date) -> Sequence[ScoreRow]:
         fit = self.fit_on(day)
@@ -1253,6 +1262,7 @@ class _ModelFeed:
                 f"the fit refitted on {fit.refit_day.isoformat()} could not score the cross "
                 f"section visible at {instant.isoformat()}: {error}"
             ) from error
+        self.last_batch = batch
         return [
             ScoreRow(
                 component=MODEL_COMPONENT,
@@ -1661,6 +1671,191 @@ class _IndustryDays(Mapping[date, Mapping[str, str]]):
 
     def __len__(self) -> int:
         return len(self._days)
+
+
+# --- one signal day, today (V2-P6-011) -----------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SignalDay:
+    """One session scored exactly as a backtest of the same source would score it on that day.
+
+    `scores` is `strategy_backtest.score_signal_day`'s answer: the ranking the book would trade
+    on (or `None` when the source held), the composite each ranked security was ordered by, and
+    the weights. `fit` and `model_batch` are a walk-forward source's fit in use and the batch it
+    scored the day's cross section with -- the very batch whose scores became the book's rows.
+    `knowable_through` is the newest instant any score row or counted IC the day read became
+    knowable (at or before the signal instant, or the book would have refused it), and
+    `values_consumed` how many rows and ICs that was. `industries` is each security's level-one
+    industry at the signal instant when the spec caps industries, else empty. `refit_day` is the
+    walk-forward refit the fit in use came from, on the schedule anchored at `anchor`, and
+    `position` how many sessions `day` is after the anchor's first session -- a backtest from the
+    anchor rebalances on every day whose position is a multiple of `rebalance_every_sessions`.
+    """
+
+    day: date
+    instant: datetime
+    anchor: date
+    position: int
+    scores: SignalDayScores
+    fit: WalkForwardFit | None
+    model_batch: PredictionBatch | None
+    knowable_through: datetime | None
+    values_consumed: int
+    industries: Mapping[str, str]
+    refit_day: date | None
+
+
+class _RecordingFeed:
+    """A `ScoreFeed` that remembers what it handed over, so the day's inputs can be dated."""
+
+    def __init__(self, feed: ScoreFeed) -> None:
+        self._feed = feed
+        self.rows: list[ScoreRow] = []
+        self.observations: list[ICObservation] = []
+
+    def rows_on(self, day: date) -> Sequence[ScoreRow]:
+        rows = self._feed.rows_on(day)
+        self.rows.extend(rows)
+        return rows
+
+    def ic_observations_through(self, day: date) -> Sequence[ICObservation]:
+        handed = self._feed.ic_observations_through(day)
+        self.observations.extend(handed)
+        return handed
+
+    def fit_on(self, day: date) -> WalkForwardFit | None:
+        return self._feed.fit_on(day)
+
+    def refits(self) -> tuple[WalkForwardFit, ...]:
+        return self._feed.refits()
+
+
+def score_day(store: PanelStore, request: StrategyRequest, *, day: date, anchor: date) -> SignalDay:
+    """Score one session under `request`'s source, as a backtest over it would (`V2-P6-011`).
+
+    The daily command's reader. After a session's close there is no next session to trade on,
+    so `backtest_strategy` cannot be asked about it; this runs the same feeds and the book's own
+    scorer (`score_signal_day`) for that one day instead. `request.start` and `request.end` are
+    not read -- the day is `day`, read at `request.as_of` -- and everything else is: the source,
+    the spec, the transforms and the exchange.
+
+    `anchor` is the session a backtest of this source would have started on. It decides one
+    thing: which refit a walk-forward source's fit in use on `day` came from. Refits fall on every
+    `refit_every_sessions`-th session from `anchor`, so the fit in use is the newest one on or
+    before `day`, trained on the window ending on that refit session -- the fit a backtest from
+    `anchor` through `day` would have used. A static or trailing-IC source reads the same
+    lookback a backtest starting on `day` reads, which is the one a backtest from `anchor` reads
+    on that day.
+
+    A registered-prediction source is refused: there is nothing to score forward. Refusals are
+    this face's three rows, as `backtest_strategy` raises them.
+    """
+    source = request.source
+    if source.prediction_ids:
+        raise StrategyRequestError(
+            "a source of registered predictions has nothing to score for a new session; name "
+            "the components, trailing-IC weights or walk-forward model that produced them"
+        )
+    if anchor > day:
+        raise StrategyRequestError(
+            f"the schedule anchor {anchor.isoformat()} is after the day scored {day.isoformat()}"
+        )
+    calendar = _read(
+        lambda: load_trading_calendar(
+            store,
+            exchange=request.exchange,
+            years=tuple(range(anchor.year, day.year + 1)),
+            as_of=request.as_of,
+        ),
+        store=store,
+        what=f"the {request.exchange} trading calendar",
+    )
+    schedule = _read(
+        lambda: calendar.trading_days_between(anchor, day),
+        store=store,
+        what="the sessions from the anchor to the day scored",
+    )
+    if not schedule or schedule[-1] != day:
+        raise StrategyRunBlockedError(
+            f"{day.isoformat()} is not an open {request.exchange} session of the stored calendar"
+        )
+    first, refit_day = day, None
+    if source.walk_forward is not None:
+        position = len(schedule) - 1
+        refit_day = schedule[position - position % source.walk_forward.refit_every_sessions]
+        first = refit_day
+    day_request = dataclasses.replace(request, start=first, end=day)
+    sessions = tuple(session for session in schedule if session >= first)
+    lookback: tuple[date, ...] = ()
+    years = day_request.years
+    if source.trailing_ic is not None:
+        lookback, years = _lookback(store, day_request, source.trailing_ic.ic_window_sessions - 1)
+    elif source.walk_forward is not None:
+        lookback, years = _lookback(store, day_request, source.walk_forward.train_sessions - 1)
+    instants = {session: session_publication_instant(session) for session in lookback + sessions}
+    signal_days = frozenset({day})
+    model_feed: _ModelFeed | None = None
+    feed: ScoreFeed
+    if source.walk_forward is not None:
+        model_feed = _ModelFeed(
+            store,
+            day_request,
+            sessions=sessions,
+            calendar=lookback + sessions,
+            signal_days=signal_days,
+            instants=instants,
+            years=years,
+        )
+        feed = model_feed
+    else:
+        feed = _FactorFeed(
+            store,
+            day_request,
+            pairs=(
+                source.trailing_ic.components
+                if source.trailing_ic is not None
+                else tuple((token, tier) for token, tier, _ in source.components)
+            ),
+            signal_days=signal_days,
+            calendar=lookback + sessions,
+            instants=instants,
+            years=years,
+        )
+    recording = _RecordingFeed(feed)
+    context = SignalDayInputs(source=source, calendar=lookback + sessions, signal_instants=instants)
+    try:
+        scores = _read(
+            lambda: score_signal_day(context, recording, day),
+            store=store,
+            what=f"the scores of {day.isoformat()}",
+        )
+    except StrategyBacktestError as error:
+        raise StrategyRunBlockedError(f"the day could not be scored: {error}") from error
+    instant = instants[day]
+    known = [row.available_time for row in recording.rows] + [
+        item.known_at
+        for item in recording.observations
+        if item.ic is not None and item.known_at <= instant
+    ]
+    industries: Mapping[str, str] = (
+        {}
+        if request.spec.max_industry_weight is None
+        else dict(_IndustryDays(store, signal_days, instants)[day])
+    )
+    return SignalDay(
+        day=day,
+        instant=instant,
+        anchor=anchor,
+        position=len(schedule) - 1,
+        scores=scores,
+        fit=None if model_feed is None else model_feed.fit_on(day),
+        model_batch=None if model_feed is None else model_feed.last_batch,
+        knowable_through=max(known) if known else None,
+        values_consumed=len(known),
+        industries=industries,
+        refit_day=refit_day,
+    )
 
 
 # --- the per-instant IC series (V2-P6-014, for V2-P6-008) ---------------------------------------

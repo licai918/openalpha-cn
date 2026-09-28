@@ -58,6 +58,16 @@ GIT_LAUNCHING_TESTS: Final[dict[str, tuple[str, ...]]] = {
     "tests/unit/scripts/test_research_grid.py": (
         "test_the_holdout_drives_the_sdk_and_ledgers_net_excess_and_its_sign_flip",
     ),
+    # V2-P6-011: the daily command admits a registration from a throwaway repository's history
+    # and stamps its factor builds with `resolve_code_commit()`. Every test of that module built
+    # on its `world` fixture starts git; these four cover each path (a refused admission, a full
+    # day, a repeated day, a stop before the factor build) at a quarter of the module's time.
+    "tests/unit/scripts/test_daily_selection.py": (
+        "test_code_that_moved_on_from_the_registered_commit_is_refused_before_any_request",
+        "test_the_day_runs_every_step_and_registers_a_forward_prediction",
+        "test_a_second_run_of_the_same_day_writes_nothing_and_asks_the_network_nothing",
+        "test_a_panel_the_doctor_does_not_clear_stops_the_run_before_any_factor_is_built",
+    ),
 }
 """Every test under `tests/unit/` the D13 census found starting git, by module; `()` is all of it.
 

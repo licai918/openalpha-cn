@@ -61,7 +61,7 @@ import json
 import os
 import re
 import subprocess
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -270,18 +270,24 @@ def _committed_registration(registration: Path, repo: Path) -> tuple[Path, _Admi
     )
 
 
-def _refuse_a_changed_source(root: Path, code_commit: object) -> None:
+def _refuse_a_changed_source(
+    root: Path,
+    code_commit: object,
+    *,
+    paths: Sequence[str] = REGISTERED_PATHS,
+    purpose: str = "the holdout measures with the registered code only",
+) -> None:
     if not isinstance(code_commit, str) or not _FULL_COMMIT.fullmatch(code_commit):
         raise SourceChangedError(f"the registration names no full code commit: {code_commit!r}")
-    bound = ", ".join(REGISTERED_PATHS)
-    committed = _git(root, "diff", "--quiet", code_commit, "HEAD", "--", *REGISTERED_PATHS)
+    bound = ", ".join(paths)
+    committed = _git(root, "diff", "--quiet", code_commit, "HEAD", "--", *paths)
     if committed.returncode != 0:
         detail = "differs from" if committed.returncode == 1 else "cannot be compared with"
         raise SourceChangedError(
             f"the bound code ({bound}) at HEAD {detail} the registered code commit "
-            f"{code_commit}; the holdout measures with the registered code only"
+            f"{code_commit}; {purpose}"
         )
-    working = _git(root, "status", "--porcelain", "--untracked-files=all", "--", *REGISTERED_PATHS)
+    working = _git(root, "status", "--porcelain", "--untracked-files=all", "--", *paths)
     if working.returncode != 0 or working.stdout.strip():
         raise SourceChangedError(
             f"the bound code ({bound}) in the working tree is not what HEAD holds: "
@@ -348,6 +354,33 @@ def _holdout_allowed(registration: Path, ledger: Path, repo: Path) -> _Admitted:
     _refuse_a_foreign_package(root)
     _refuse_foreign_scripts(root)
     return admitted
+
+
+def admit_registered_code(
+    registration: Path, repo: Path, *, also_bound: Sequence[str] = ()
+) -> tuple[Path, _Admitted]:
+    """The committed registration, provided the code running now is the code it registered.
+
+    The holdout guard's admission without its ledger half, for a caller that produces forward
+    results from the registered configuration -- the daily command (`V2-P6-011`) -- rather than
+    measuring the holdout: the registration must be committed and byte-equal to `HEAD`'s
+    (`RegistrationNotCommittedError`); the bound code (`REGISTERED_PATHS` plus `also_bound`, the
+    caller's own files) at `HEAD` and in the working tree must be the registration's
+    `code_commit` (`SourceChangedError`); and `openalpha_cn` and these scripts must have been
+    imported from this repository (`ForeignPackageError`, `ForeignScriptsError`). Returns the
+    repository root and what was admitted: the registration's bytes (read once), its body and the
+    commit that last touched it.
+    """
+    root, admitted = _committed_registration(registration, repo)
+    _refuse_a_changed_source(
+        root,
+        admitted.registered.get("code_commit"),
+        paths=(*REGISTERED_PATHS, *also_bound),
+        purpose="forward results come from the registered code only",
+    )
+    _refuse_a_foreign_package(root)
+    _refuse_foreign_scripts(root)
+    return root, admitted
 
 
 def assert_holdout_allowed(registration: Path, ledger: Path, repo: Path) -> None:
