@@ -755,6 +755,13 @@ def test_a_partition_filed_under_a_year_nobody_asked_for_stops_the_build(
     legitimately be days older than `as_of`, so any finite bound refuses honest corpora. Waiving
     it is what makes "this year's corpus" and "a five-year-old one" the same observation to that
     call. The partition year is the check that survives.
+
+    **Since `V2-P6-016` the build stops one step earlier, and for a sharper reason.** The stored
+    2026 halt on the session fetched again is no longer served, so before anything is written the
+    build judges it as a possible withdrawal -- and an empty halt answer withdraws only a
+    contradicted whole-day halt, which this is not -- and refuses the year naming the session. The
+    misfiled 2025 partition is therefore never written at all, which is the stronger form of
+    what this test exists to show: no partition of a year nobody asked for.
     """
     monkeypatch.setenv("TUSHARE_TOKEN", SECRET_TOKEN)
     monkeypatch.setattr(cli, "_panel_clock", lambda: BUILD_CLOCK)
@@ -765,12 +772,9 @@ def test_a_partition_filed_under_a_year_nobody_asked_for_stops_the_build(
     result = build(tmp_path, "price", extra=["--json"])
 
     assert result.exit_code == PanelExit.unhealthy
-    assert f"--year {BUILD_YEAR} was asked for" in result.stderr
-    assert f"{SUSPENSION_DATASET}:{BUILD_YEAR - 1}" in result.stderr
-    assert PanelStore(tmp_path / "panel").registered_years(SUSPENSION_DATASET) == (
-        BUILD_YEAR - 1,
-        BUILD_YEAR,
-    )
+    assert f"{SUSPENSION_DATASET} answered no rows for {HALT_SESSION.isoformat()}" in result.stderr
+    assert "No partition had been written" in result.stderr
+    assert PanelStore(tmp_path / "panel").registered_years(SUSPENSION_DATASET) == (BUILD_YEAR,)
 
 
 def test_panel_build_asks_the_year_it_was_given_rather_than_the_year_of_its_clock(
