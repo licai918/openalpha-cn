@@ -104,6 +104,8 @@ COMPARED: tuple[str, ...] = (
     UPSTREAM_DEFECTS_DATASET,
 )
 
+PRICE_DATASETS: tuple[str, ...] = (DAILY_DATASET, DAILY_BASIC_DATASET, SUSPENSION_DATASET)
+"""The price target's partitions: what a refusal inside its build must leave as they were."""
 WITHDRAWN_ROWS: tuple[str, ...] = tuple(WITHDRAWN_ROWS_DATASETS.values())
 """The `V2-P6-016` datasets that keep withdrawn rows whole, compared beside `COMPARED`."""
 
@@ -205,6 +207,13 @@ class Corpus:
     restepped: tuple[str, ...] = ()
     """As `stepped`, and a second step to 2.0 on `SESSIONS[6]`, the session after `T1_LAST`, so
     the compressed partition keeps that next session's row too."""
+    misdated: tuple[tuple[str, date, date], ...] = ()
+    """`(api_name, session, dated)`: every whole-market answer for `session` carries its rows
+    dated `dated` instead -- a stale or misfiled answer, the shape `StaleHaltTransport` serves in
+    `tests/integration/test_cli_panel.py`."""
+    misdated_on_refetch: bool = False
+    """`misdated` applies only from the second whole-market request for the session on: the
+    build's own answer is sound and the one confirming a withdrawal is misfiled."""
 
 
 class ScriptedUpstream:
@@ -427,6 +436,13 @@ class ScriptedUpstream:
             rows = [row for row in rows if row[0] == params["ts_code"]]
         else:
             self.asked[(api_name, day)] = self.asked.get((api_name, day), 0) + 1
+        if "ts_code" not in params:
+            asked_before = self.asked.get((api_name, day), 0) > 1
+            for name, session, dated in self.corpus.misdated:
+                if (name, session) == (api_name, day) and (
+                    asked_before or not self.corpus.misdated_on_refetch
+                ):
+                    rows = [[row[0], _compact(dated), *row[2:]] for row in rows]
         again = self.corpus.republished_on_refetch and self.asked.get((api_name, day), 0) > 1
         if not again:
             rows = [row for row in rows if (api_name, row[0], day) not in self.corpus.withdrawn]
@@ -1387,6 +1403,107 @@ def test_an_empty_halt_answer_twice_does_not_withdraw_a_resumption(
     assert _hashes(tmp_path, halts) == before
     assert _withdrawals(tmp_path) == set()
     assert "WITHDRAWN" not in full.output
+
+
+@pytest.mark.parametrize(
+    "dated", [date(YEAR - 1, 12, 31), date(YEAR, 1, 3)], ids=["last-year", "a-closed-day"]
+)
+def test_a_misfiled_halt_answer_is_refused_by_name_and_not_judged_a_withdrawal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dated: date
+) -> None:
+    """`V2-P6-016`'s review: `suspend_d`'s answer for `SESSIONS[0]` carries `RESUMING`'s `R`
+    dated on another day -- last year, or a closed day of this one. Compared by date, the session
+    looked empty and the build was refused as an uncontradicted empty halt answer, with a remedy
+    that rebuilds the year from nothing. The answer is misfiled, not empty: it is refused as that,
+    by name, before any withdrawal is judged, and the price target records and writes nothing.
+    (A row dated *after* its session never arrives: the provider's clock filter drops it as not
+    yet knowable, and `suspend_d`'s empty answer is ordinary.)"""
+    clean = Corpus()
+    stored = run_build(tmp_path, monkeypatch, as_of=T1, incremental=False, corpus=clean)
+    assert stored.exit_code == PanelExit.ok, stored.output
+    watched = (*PRICE_DATASETS, *WITHDRAWN_ROWS)
+    before = _hashes(tmp_path, watched)
+
+    full = run_build(
+        tmp_path,
+        monkeypatch,
+        as_of=T2,
+        incremental=False,
+        corpus=replace(clean, misdated=((SUSPENSION_DATASET, SESSIONS[0], dated),)),
+    )
+
+    assert full.exit_code == PanelExit.unhealthy, full.output
+    assert (
+        f"the {SUSPENSION_DATASET} answer for {SESSIONS[0].isoformat()} carries rows dated "
+        f"{dated.isoformat()}: a misfiled answer, not a withdrawal"
+    ) in full.output
+    assert "keep a copy of this suspend_d partition" not in full.output
+    assert _hashes(tmp_path, watched) == before
+    assert _store(tmp_path).registered_years(SUSPENSION_DATASET) == (YEAR,)
+    assert _withdrawals(tmp_path) == set()
+    assert "WITHDRAWN" not in full.output
+
+
+def test_a_misfiled_answer_beside_a_halted_securitys_bar_records_no_withdrawal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The review's second path: `HALTED`'s stored whole-day `S` on `SESSIONS[2]`, and the build
+    now finds its bar there. With the halt answer misfiled into last year, the session's halt
+    looked absent **and** contradicted by the bar, so a withdrawal was recorded and its row kept
+    in `withdrawn_suspend_d` -- then the answer was filed into 2025 and only the misfiled-year
+    audit stopped the build, after both were written. Refused by name first; nothing written."""
+    clean = Corpus()
+    stored = run_build(tmp_path, monkeypatch, as_of=T1, incremental=False, corpus=clean)
+    assert stored.exit_code == PanelExit.ok, stored.output
+    watched = (*PRICE_DATASETS, *WITHDRAWN_ROWS)
+    before = _hashes(tmp_path, watched)
+    stale = date(YEAR - 1, 12, 31)
+
+    full = run_build(
+        tmp_path,
+        monkeypatch,
+        as_of=T2,
+        incremental=False,
+        corpus=replace(
+            clean,
+            traded=((HALTED, SESSIONS[2]),),
+            misdated=((SUSPENSION_DATASET, SESSIONS[2], stale),),
+        ),
+    )
+
+    assert full.exit_code == PanelExit.unhealthy, full.output
+    assert (
+        f"the {SUSPENSION_DATASET} answer for {SESSIONS[2].isoformat()} carries rows dated "
+        f"{stale.isoformat()}: a misfiled answer, not a withdrawal"
+    ) in full.output
+    assert _hashes(tmp_path, watched) == before
+    store = _store(tmp_path)
+    assert store.registered_years(WITHDRAWN_ROWS_DATASETS[SUSPENSION_DATASET]) == ()
+    assert store.registered_years(SUSPENSION_DATASET) == (YEAR,)
+    assert _withdrawals(tmp_path) == set()
+
+
+def test_a_misfiled_answer_to_the_confirming_request_confirms_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second whole-session request -- the one that confirms a withdrawal -- is held to the
+    same rule: its answer for `T1_LAST` carries rows dated last year, so it is refused as
+    misfiled, by name, and no price withdrawal is recorded."""
+    _stored_at_t1(tmp_path, monkeypatch, "inc")
+    stale = date(YEAR - 1, 12, 31)
+    corpus = replace(
+        WITHDRAWN_NOW, misdated=((DAILY_DATASET, T1_LAST, stale),), misdated_on_refetch=True
+    )
+
+    inc = run_build(tmp_path / "inc", monkeypatch, as_of=T2, incremental=True, corpus=corpus)
+
+    assert inc.exit_code == PanelExit.unhealthy, inc.output
+    assert (
+        f"the {DAILY_DATASET} answer for {T1_LAST.isoformat()} carries rows dated "
+        f"{stale.isoformat()}: a misfiled answer, not a withdrawal"
+    ) in inc.output
+    # `adj_factor`, built before the price target, confirms its own withdrawal as before.
+    assert {dataset for _, dataset, _ in _withdrawals(tmp_path / "inc")} == {ADJ_FACTOR_DATASET}
 
 
 def test_a_withdrawn_factor_step_before_the_slice_refuses_the_incremental_build(

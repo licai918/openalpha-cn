@@ -4306,6 +4306,16 @@ def reconcile_withdrawals(
 
     `fetched` are the build's raw answers, before any reconciliation: a row the upstream serves
     and a `V2-P6-013` rule then drops is served, not withdrawn.
+
+    ## A misfiled answer is refused before anything is judged
+
+    Every answer is one whole-session request, and `sessions` are every session this build asked
+    for. A row dated anywhere else -- another year, or a day of this one nobody asked for -- is a
+    misfiled answer (the session asked for is its `as_of` day), and read by date it would make
+    that session look empty: an `R` halt refused with a remedy that rebuilds the year from
+    nothing, or a contradicted `S` halt recorded as withdrawn and then the answer filed into
+    another year's partition. So such an answer, first or second, is refused by name
+    (`_refuse_a_misfiled_answer`) before any row is compared, and nothing is recorded.
     """
     refetched = frozenset(sessions)
     coverage = store.read_coverage(dataset, year)
@@ -4347,6 +4357,13 @@ def reconcile_withdrawals(
             raise PanelBatchError(
                 f"the fetch compared with the stored {dataset} rows is {batch.dataset}"
             )
+        _refuse_a_misfiled_answer(
+            batch,
+            asked=batch.as_of.astimezone(zone).date(),
+            sessions=refetched,
+            year=year,
+            date_column=date_column,
+        )
         for subject, day in _row_keys(batch, date_column):
             if day in first:
                 first[day].add(subject)
@@ -4375,6 +4392,10 @@ def reconcile_withdrawals(
         if again.dataset != dataset:
             raise PanelBatchError(
                 f"the second fetch of {dataset} for {day.isoformat()} is {again.dataset}"
+            )
+        if again.status == "success":
+            _refuse_a_misfiled_answer(
+                again, asked=day, sessions=frozenset({day}), year=year, date_column=date_column
             )
         second = (
             {subject for subject, served in _row_keys(again, date_column) if served == day}
@@ -4413,6 +4434,33 @@ def reconcile_withdrawals(
             subject for subject, _ in withdrawn if subject not in elsewhere and subject not in kept
         ),
         still_stored=frozenset(still_stored),
+    )
+
+
+def _refuse_a_misfiled_answer(
+    batch: ColumnarPanelBatch,
+    *,
+    asked: date,
+    sessions: Set[date],
+    year: int,
+    date_column: str,
+) -> None:
+    """Refuse a whole-session answer carrying rows dated outside `sessions` or `year`
+    (`V2-P6-016`); see `reconcile_withdrawals`."""
+    dated = sorted(
+        {day for _, day in _row_keys(batch, date_column) if day not in sessions or day.year != year}
+    )
+    if not dated:
+        return
+    shown = ", ".join(day.isoformat() for day in dated[:5])
+    if len(dated) > 5:
+        shown += f" and {len(dated) - 5} more"
+    raise PanelBatchError(
+        f"the {batch.dataset} answer for {asked.isoformat()} carries rows dated {shown}: a "
+        "misfiled answer, not a withdrawal. Only rows dated on a session this build asked for, "
+        f"in {year}, are compared with the store, and a row dated elsewhere would make the "
+        "session it answers look empty. Nothing is recorded or written. Re-run the build; an "
+        "answer that stays misfiled is the upstream answering for the wrong day"
     )
 
 
