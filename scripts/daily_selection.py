@@ -962,6 +962,12 @@ def _budget(built: Invocation) -> list[str]:
 
 
 FINANCIAL_INDICATOR_TARGET: Final[str] = "fina_indicator"
+ANNOUNCEMENT_MONTH_TARGETS: Final[frozenset[str]] = frozenset(
+    {"income", "balancesheet", "cashflow"}
+)
+"""Swept by announcement month under `panel build --incremental` (`V2-P6-018`): the trailing
+months and a weekly rotation, carrying the rest. In January the trailing months reach into last
+year's partition, so the update builds that year too."""
 
 
 def financial_indicator_years(session_year: int, as_of: datetime) -> tuple[int, ...]:
@@ -1025,6 +1031,24 @@ def update_panel(
                 f"exited {swept.exit_code}: {swept.reason()}",
             )
         budget += _budget(swept)
+    previous = [target for target in targets if target in ANNOUNCEMENT_MONTH_TARGETS]
+    if previous and as_of.astimezone(SHANGHAI).month == 1:
+        # `V2-P6-018`: the incremental statement sweep re-sweeps the month before the stored
+        # build's, which in January is last December -- a month of last year's partition.
+        closing = _panel_build(
+            runtime_dir,
+            year=session_year - 1,
+            as_of=as_of,
+            exchange=exchange,
+            targets=tuple(previous),
+        )
+        if closing.exit_code != 0:
+            raise StepFailedError(
+                "panel update",
+                f"`panel build --year {session_year - 1}` for the statements' December re-sweep "
+                f"exited {closing.exit_code}: {closing.reason()}",
+            )
+        budget += _budget(closing)
     if next_year:
         ahead = _panel_build(
             runtime_dir,

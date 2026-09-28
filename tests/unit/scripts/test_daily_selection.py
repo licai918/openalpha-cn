@@ -956,6 +956,53 @@ def test_the_first_session_of_a_year_keeps_last_years_annuals_of_the_year_before
     assert _indicator_partitions(world)[2026] == _indicator_partitions(full)[2026]
 
 
+def test_january_re_sweeps_last_decembers_statements_and_records_the_new_year_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`V2-P6-018` through the daily command. On 4 January 2027 the statement sweep is
+    incremental: 2026's trailing months are its November and December, so January also builds
+    2026 -- re-sweeping December -- while 2027, in which nothing has been announced yet, is swept
+    whole and recorded empty rather than refused. The doctor and the gate clear both years."""
+    world = _new_year(tmp_path / "daily", monkeypatch)
+    seeded = daily.invoke(
+        [
+            "panel",
+            "build",
+            "--runtime-dir",
+            str(world.runtime),
+            "--year",
+            "2026",
+            "--as-of",
+            "2026-12-24T12:00:00+08:00",
+            "--dataset",
+            INCOME_DATASET,
+            "--json",
+        ]
+    )
+    assert seeded.exit_code == 0, seeded.reason()
+    targets = (*TARGETS, INCOME_DATASET)
+    for as_of in ("2026-12-31T18:30:00+08:00", "2027-01-04T18:30:00+08:00"):
+        world.market.clear()
+        code, result, err = _run(
+            world,
+            capsys,
+            as_of=_at(as_of),
+            clock=_at(as_of) + timedelta(minutes=5),
+            targets=targets,
+            monkeypatch=monkeypatch,
+        )
+        assert code == 0, (as_of, err)
+
+    assert result["session"] == "2027-01-04"
+    months = sorted({str(p["start_date"])[:6] for p in world.market.asked(f"{INCOME_DATASET}_vip")})
+    assert months == ["202601", "202606", "202611", "202612", "202701"]
+    store = PanelStore(world.runtime / "panel")
+    empty = store.read_coverage(INCOME_DATASET, 2027)
+    assert empty is not None and empty.row_count == 0
+    kept = store.read_coverage(INCOME_DATASET, 2026)
+    assert kept is not None and kept.row_count
+
+
 # --- across New Year -----------------------------------------------------------------------------
 
 
