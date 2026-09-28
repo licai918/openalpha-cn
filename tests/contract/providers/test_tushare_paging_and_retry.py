@@ -575,12 +575,13 @@ def test_a_halt_announced_for_a_session_that_has_not_published_is_not_a_decode_e
     close for an endpoint that was working.
 
     Two assertions, and the second is the one that keeps the repair honest: the fetch succeeds,
-    **and** the not-yet-knowable row is discarded rather than stored with an overstated clock.
+    **and** the not-yet-knowable rows are discarded rather than stored with an overstated clock.
+    Both rows are the requested session's, as the live answer's were: a `trade_date` answer
+    carries only its own session (`V2-P6-016`), so this is the whole shape the repair meets.
     """
     before_the_close = datetime(2026, 8, 10, 21, 30, tzinfo=UTC)  # 05:30 Asia/Shanghai, 08-11
-    published = ["20260807", "600000.SH", 12.03, 9.85]
-    not_yet = ["20260811", "600001.SH", 12.03, 9.85]
-    transport = StaticTransport(_response([published, not_yet], has_more=False))
+    announced = [["20260811", code, 12.03, 9.85] for code in ("600000.SH", "600001.SH")]
+    transport = StaticTransport(_response(announced, has_more=False))
     provider = TushareProvider(
         token="secret-token", transport=transport, clock=lambda: before_the_close
     )
@@ -589,9 +590,9 @@ def test_a_halt_announced_for_a_session_that_has_not_published_is_not_a_decode_e
         ProviderRequest(dataset=PRICE_LIMIT_DATASET, as_of=before_the_close)
     )
 
-    assert batch.status == "success"
-    assert batch.subjects == ("600000.SH",)
-    assert max(batch.timeline.available_time) <= before_the_close
+    assert batch.status == "no_data"
+    assert batch.subjects == ()
+    assert "none of which was yet knowable" in str(batch.no_data_reason)
 
 
 def test_a_builder_that_already_sets_limit_or_offset_cannot_be_paged() -> None:

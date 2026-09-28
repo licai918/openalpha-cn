@@ -58,6 +58,7 @@ from openalpha_cn.panel_ingest import (
     carry_stored_sessions_forward,
     load_upstream_defects,
 )
+from openalpha_cn.providers import tushare
 
 runner = CliRunner()
 
@@ -211,6 +212,8 @@ class Corpus:
     """`(api_name, session, dated)`: every whole-market answer for `session` carries its rows
     dated `dated` instead -- a stale or misfiled answer, the shape `StaleHaltTransport` serves in
     `tests/integration/test_cli_panel.py`."""
+    resumption: date | None = None
+    """The session `RESUMING`'s `R` is published on; `None`: the first open session."""
     misdated_on_refetch: bool = False
     """`misdated` applies only from the second whole-market request for the session on: the
     build's own answer is sound and the one confirming a withdrawal is misfiled."""
@@ -333,7 +336,7 @@ class ScriptedUpstream:
 
     def _halts(self, day: date) -> list[list[Any]]:
         rows: list[list[Any]] = []
-        if day == self._open()[0]:
+        if day == (self.corpus.resumption or self._open()[0]):
             rows.append([RESUMING, _compact(day), "R", None])
         if self.corpus.defects and day == SESSIONS[2]:
             rows.append([HALTED, _compact(day), "S", None])
@@ -1405,6 +1408,70 @@ def test_an_empty_halt_answer_twice_does_not_withdraw_a_resumption(
     assert "WITHDRAWN" not in full.output
 
 
+def _without_the_providers_session_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Switch off `TushareProvider`'s single-session date check, so a misfiled answer reaches
+    `reconcile_withdrawals`: the tests below pin that function's own check, which stays behind
+    the provider's as defence in depth (`V2-P6-016`)."""
+    monkeypatch.setattr(tushare, "_refuse_rows_off_the_requested_session", lambda *a, **k: None)
+
+
+def test_a_halt_answer_dated_on_the_next_session_is_refused_by_the_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The review's shape (b): `WITHDRAWN_HALT`'s whole-day `S` on `T1_LAST` is stored beside its
+    bar, and the year holds another halt (`HALTED`'s). The answer for `T1_LAST` comes back
+    carrying that row dated on the next session. The provider's point-in-time filter used to drop
+    the row as not yet knowable, the empty `suspend_d` answer was set aside as ordinary, and the
+    build exited 0 having recorded the halt as `withdrawn_after_publication` and removed it from
+    the year. The provider now refuses a single-session answer carrying another day's row,
+    before that filter runs: the build stops as a provider failure and writes nothing."""
+    _stored_at_t1(tmp_path, monkeypatch, "inc")
+    watched = (*PRICE_DATASETS, *WITHDRAWN_ROWS)
+    before = _hashes(tmp_path / "inc", watched)
+    corpus = replace(PUBLISHED, misdated=((SUSPENSION_DATASET, T1_LAST, SESSIONS[6]),))
+
+    inc = run_build(tmp_path / "inc", monkeypatch, as_of=T2, incremental=True, corpus=corpus)
+
+    assert inc.exit_code == PanelExit.provider_failure, inc.output
+    assert f"refused dataset {SUSPENSION_DATASET}: invalid_response" in inc.output
+    assert _hashes(tmp_path / "inc", watched) == before
+    assert _withdrawals(tmp_path / "inc") == set()
+    assert "WITHDRAWN" not in inc.output
+
+
+def test_a_halt_answer_carrying_an_earlier_requested_session_is_misfiled_not_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The review's shape (a), behind the provider (its check switched off): `RESUMING`'s `R` is
+    stored on `SESSIONS[1]`, and the answer for that session carries it dated `SESSIONS[0]` --
+    another session this build asked for. Judged against every requested session, the row passed
+    and `SESSIONS[1]` looked empty, and the old "rebuild the year in full" refusal returned. Each
+    answer is judged against the one session it was asked for."""
+    _without_the_providers_session_check(monkeypatch)
+    moved = Corpus(resumption=SESSIONS[1])
+    stored = run_build(tmp_path, monkeypatch, as_of=T1, incremental=False, corpus=moved)
+    assert stored.exit_code == PanelExit.ok, stored.output
+    watched = (*PRICE_DATASETS, *WITHDRAWN_ROWS)
+    before = _hashes(tmp_path, watched)
+
+    full = run_build(
+        tmp_path,
+        monkeypatch,
+        as_of=T2,
+        incremental=False,
+        corpus=replace(moved, misdated=((SUSPENSION_DATASET, SESSIONS[1], SESSIONS[0]),)),
+    )
+
+    assert full.exit_code == PanelExit.unhealthy, full.output
+    assert (
+        f"the {SUSPENSION_DATASET} answer for {SESSIONS[1].isoformat()} carries rows dated "
+        f"{SESSIONS[0].isoformat()}: a misfiled answer, not a withdrawal"
+    ) in full.output
+    assert "rebuild the year in full" not in full.output
+    assert _hashes(tmp_path, watched) == before
+    assert _withdrawals(tmp_path) == set()
+
+
 @pytest.mark.parametrize(
     "dated", [date(YEAR - 1, 12, 31), date(YEAR, 1, 3)], ids=["last-year", "a-closed-day"]
 )
@@ -1416,8 +1483,8 @@ def test_a_misfiled_halt_answer_is_refused_by_name_and_not_judged_a_withdrawal(
     looked empty and the build was refused as an uncontradicted empty halt answer, with a remedy
     that rebuilds the year from nothing. The answer is misfiled, not empty: it is refused as that,
     by name, before any withdrawal is judged, and the price target records and writes nothing.
-    (A row dated *after* its session never arrives: the provider's clock filter drops it as not
-    yet knowable, and `suspend_d`'s empty answer is ordinary.)"""
+    Behind the provider, whose own single-session check is switched off here."""
+    _without_the_providers_session_check(monkeypatch)
     clean = Corpus()
     stored = run_build(tmp_path, monkeypatch, as_of=T1, incremental=False, corpus=clean)
     assert stored.exit_code == PanelExit.ok, stored.output
@@ -1451,7 +1518,9 @@ def test_a_misfiled_answer_beside_a_halted_securitys_bar_records_no_withdrawal(
     now finds its bar there. With the halt answer misfiled into last year, the session's halt
     looked absent **and** contradicted by the bar, so a withdrawal was recorded and its row kept
     in `withdrawn_suspend_d` -- then the answer was filed into 2025 and only the misfiled-year
-    audit stopped the build, after both were written. Refused by name first; nothing written."""
+    audit stopped the build, after both were written. Refused by name first; nothing written.
+    Behind the provider, whose own single-session check is switched off here."""
+    _without_the_providers_session_check(monkeypatch)
     clean = Corpus()
     stored = run_build(tmp_path, monkeypatch, as_of=T1, incremental=False, corpus=clean)
     assert stored.exit_code == PanelExit.ok, stored.output
@@ -1488,7 +1557,9 @@ def test_a_misfiled_answer_to_the_confirming_request_confirms_nothing(
 ) -> None:
     """The second whole-session request -- the one that confirms a withdrawal -- is held to the
     same rule: its answer for `T1_LAST` carries rows dated last year, so it is refused as
-    misfiled, by name, and no price withdrawal is recorded."""
+    misfiled, by name, and no price withdrawal is recorded. Behind the provider, whose own
+    single-session check is switched off here."""
+    _without_the_providers_session_check(monkeypatch)
     _stored_at_t1(tmp_path, monkeypatch, "inc")
     stale = date(YEAR - 1, 12, 31)
     corpus = replace(

@@ -756,12 +756,13 @@ def test_a_partition_filed_under_a_year_nobody_asked_for_stops_the_build(
     it is what makes "this year's corpus" and "a five-year-old one" the same observation to that
     call. The partition year is the check that survives.
 
-    **Since `V2-P6-016` a store holding the year stops it before anything is written.** The
-    stale answer is the answer for `HALT_SESSION`, a session this build fetched again, and
-    `reconcile_withdrawals` compares it with the stored halts before any write: read by date it
-    would look empty and be judged a withdrawal -- refused with a remedy that rebuilds the year
-    from nothing, or, for a contradicted whole-day halt, recorded as one. It is refused as what it
-    is, a misfiled answer, by name, and no partition of the unasked year is written.
+    **Since `V2-P6-016` it stops before anything is written.** The stale answer is the answer
+    for `HALT_SESSION` alone, so the provider refuses it where it decodes it: a single-session
+    answer carrying another day's row is `invalid_response` (its message, which names the session
+    and the dates, is withheld at this boundary). Read by date it would have looked empty and been
+    judged a withdrawal -- refused with a remedy that rebuilds the year from nothing, or, for a
+    contradicted whole-day halt, recorded as one. `reconcile_withdrawals` refuses the same answer
+    by name if one ever gets past the provider. No partition of the unasked year is written.
     `_audit_written_partitions` still stops a misfiled partition no earlier guard sees:
     `test_a_partition_misfiled_past_every_earlier_guard_is_stopped_by_the_audit`.
     """
@@ -773,11 +774,8 @@ def test_a_partition_filed_under_a_year_nobody_asked_for_stops_the_build(
     monkeypatch.setattr(cli, "_panel_transport", StaleHaltTransport)
     result = build(tmp_path, "price", extra=["--json"])
 
-    assert result.exit_code == PanelExit.unhealthy
-    assert (
-        f"the {SUSPENSION_DATASET} answer for {HALT_SESSION.isoformat()} carries rows dated "
-        f"{date(BUILD_YEAR - 1, 12, 31).isoformat()}: a misfiled answer, not a withdrawal"
-    ) in result.stderr
+    assert result.exit_code == PanelExit.provider_failure
+    assert f"refused dataset {SUSPENSION_DATASET}: invalid_response" in result.stderr
     assert "rebuild the year in full" not in result.stderr
     assert "No partition had been written" in result.stderr
     assert PanelStore(tmp_path / "panel").registered_years(SUSPENSION_DATASET) == (BUILD_YEAR,)

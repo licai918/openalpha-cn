@@ -420,3 +420,83 @@ def test_the_token_never_reaches_a_record_or_a_source_uri(fake_tushare_transport
     assert transport.payload["token"] == "secret-token"
     assert "secret-token" not in batch.source_uri
     assert all("secret-token" not in str(value) for value in batch.columns[0].values)
+
+
+# --- a single-session answer carries only that session (V2-P6-016) ---------------------------
+
+
+SESSION_DATASETS: tuple[str, ...] = (
+    "daily",
+    "daily_basic",
+    SUSPENSION_DATASET,
+    PRICE_LIMIT_DATASET,
+    "adj_factor",
+)
+"""The five endpoints fetched one session at a time, by `trade_date`."""
+
+
+def test_the_five_session_endpoints_are_only_ever_asked_for_one_session() -> None:
+    """The rule below applies to single-session requests only, and on the descriptor table these
+    five have no other shape: their one params builder asks `trade_date`, with or without a
+    `ts_code` filter, and never a date range. (The `ts_code`-over-a-range routes --
+    `fetch_panel_sweep`, `fetch_panel_listed` -- are the statement datasets'.)"""
+    for dataset in SESSION_DATASETS:
+        descriptor = _descriptor(dataset)
+        for subjects in ((), ("000001.SZ",)):
+            params = descriptor.params_builder(
+                ProviderRequest(dataset=dataset, as_of=FETCHED_AT, subjects=subjects)
+            )
+            assert params["trade_date"] == "20240628", dataset
+            assert "start_date" not in params and "end_date" not in params, dataset
+
+
+@pytest.mark.parametrize(("served", "direction"), [("20240627", "earlier"), ("20240701", "later")])
+def test_a_row_dated_off_the_requested_session_is_refused_by_name(
+    fake_tushare_transport, served: str, direction: str
+) -> None:
+    """`suspend_d(trade_date=20240628)` answering a row dated another day is a misfiled answer.
+    Refused before the point-in-time filter runs -- which would otherwise drop a later-dated row
+    as not yet knowable and leave the session looking empty -- as `invalid_response`, naming the
+    session asked for and the dates served."""
+    items = [*SUSPEND_ITEMS[:2], ["000040.SZ", served, None, "S"]]
+    provider, _ = _provider(
+        fake_tushare_transport, _response(SUSPEND_FIELDS, items, has_more=False)
+    )
+
+    with pytest.raises(ProviderFailure) as refused:
+        provider.fetch_panel(_request(SUSPENSION_DATASET))
+
+    assert refused.value.category == "invalid_response", direction
+    message = str(refused.value)
+    assert "2024-06-28" in message
+    assert f"rows dated {served[:4]}-{served[4:6]}-{served[6:]}" in message
+
+
+def test_a_ts_code_range_request_is_not_held_to_one_session(
+    fake_tushare_transport, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rule is keyed on the single-session params builder, not on the dataset: a descriptor
+    that asks one security over a date range decodes rows of many sessions as before."""
+    from openalpha_cn.providers import tushare
+
+    ranged = _descriptor(SUSPENSION_DATASET).model_copy(
+        update={
+            "params_builder": lambda request: {
+                "ts_code": ",".join(request.subjects),
+                "start_date": "20240601",
+                "end_date": "20240628",
+            }
+        }
+    )
+    monkeypatch.setitem(tushare._TUSHARE_DATASETS_BY_NAME, SUSPENSION_DATASET, ranged)
+    items = [["000040.SZ", "20240627", None, "S"], ["000040.SZ", "20240628", None, "S"]]
+    provider, _ = _provider(
+        fake_tushare_transport, _response(SUSPEND_FIELDS, items, has_more=False)
+    )
+
+    batch = provider.fetch_panel(
+        ProviderRequest(dataset=SUSPENSION_DATASET, as_of=FETCHED_AT, subjects=("000040.SZ",))
+    )
+
+    assert batch.status == "success"
+    assert len(batch.subjects) == 2

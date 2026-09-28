@@ -81,12 +81,28 @@ def _response(
     return {"code": 0, "msg": "", "data": data}
 
 
-def _filler(count: int) -> list[list[Any]]:
-    """`count` well-formed rows; only their number matters to the row-count witness."""
-    return [
-        [PING_AN, f"2001{(index % 12) + 1:02d}{(index % 28) + 1:02d}", 24.359]
-        for index in range(count)
-    ]
+def _filler(count: int, session: str = "20011231") -> list[list[Any]]:
+    """`count` well-formed rows of one session; only their number matters to the row-count
+    witness. One session, because a `trade_date` answer carries only its own (`V2-P6-016`)."""
+    return [[f"{index:06d}.SZ", session, 24.359] for index in range(count)]
+
+
+def _windowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`adj_factor` asked the way this file's measurements were taken -- one security over a date
+    window -- rather than the table's one-session request. The single-session rule is keyed on
+    the table's params builder, so a windowed answer decodes rows of many sessions as before."""
+    from openalpha_cn.providers import tushare
+
+    windowed = _descriptor(ADJ_FACTOR_DATASET).model_copy(
+        update={
+            "params_builder": lambda request: {
+                "ts_code": ",".join(request.subjects) or PING_AN,
+                "start_date": "19910101",
+                "end_date": request.as_of.strftime("%Y%m%d"),
+            }
+        }
+    )
+    monkeypatch.setitem(tushare._TUSHARE_DATASETS_BY_NAME, ADJ_FACTOR_DATASET, windowed)
 
 
 def _provider(fake_tushare_transport, response: dict[str, Any], *, clock: datetime = FETCHED_AT):
@@ -463,10 +479,11 @@ def test_subjects_narrow_the_cross_section(fake_tushare_transport) -> None:
 
 
 def test_the_1991_segment_survives_a_windowed_fetch_with_its_factor_of_one(
-    fake_tushare_transport,
+    fake_tushare_transport, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The completeness acceptance: the segment the capped response drops is real data, and
     the narrower window returns it with the listing-day factor of exactly 1.0."""
+    _windowed(monkeypatch)
     as_of = datetime(2001, 11, 13, 12, 0, tzinfo=UTC)
     provider, _ = _provider(fake_tushare_transport, _response(EARLY_ITEMS), clock=as_of)
     batch = provider.fetch_panel(_request(as_of))
@@ -539,7 +556,7 @@ def test_availability_is_the_sessions_close_not_its_midnight(fake_tushare_transp
 
 
 def test_a_fetch_that_runs_before_the_session_closes_drops_the_row_it_cannot_know(
-    fake_tushare_transport,
+    fake_tushare_transport, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A property of `ClockStrategy.daily_close`, pinned here because `adj_factor` is the
     second dataset on it -- **and changed in `V2-P1-018` because live measurement disproved
@@ -563,6 +580,9 @@ def test_a_fetch_that_runs_before_the_session_closes_drops_the_row_it_cannot_kno
     availability runs past the fetch instant reaches the batch -- rather than being inferred
     from an exception.
     """
+    # Two sessions of one security: a window, not the table's one-session request, which could
+    # not serve the 27th at all (`V2-P6-016`).
+    _windowed(monkeypatch)
     morning = datetime(2024, 6, 28, 1, 0, tzinfo=UTC)
     provider, _ = _provider(
         fake_tushare_transport,

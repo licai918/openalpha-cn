@@ -4309,13 +4309,17 @@ def reconcile_withdrawals(
 
     ## A misfiled answer is refused before anything is judged
 
-    Every answer is one whole-session request, and `sessions` are every session this build asked
-    for. A row dated anywhere else -- another year, or a day of this one nobody asked for -- is a
-    misfiled answer (the session asked for is its `as_of` day), and read by date it would make
-    that session look empty: an `R` halt refused with a remedy that rebuilds the year from
-    nothing, or a contradicted `S` halt recorded as withdrawn and then the answer filed into
+    Every answer is one whole-session request, for its `as_of` day. A row dated on any other day
+    -- another year, a day nobody asked for, or another session this build did ask for -- is a
+    misfiled answer, and read by date it would make the session it answers look empty: an `R`
+    halt refused with a remedy that rebuilds the year from nothing, or a contradicted `S` halt
+    recorded as withdrawn and then the answer filed into
     another year's partition. So such an answer, first or second, is refused by name
-    (`_refuse_a_misfiled_answer`) before any row is compared, and nothing is recorded.
+    (`_refuse_a_misfiled_answer`) before any row is compared, and nothing is recorded. The
+    provider refuses such an answer first, where it decodes it
+    (`providers.tushare._refuse_rows_off_the_requested_session`), including a row dated after
+    its session that its point-in-time filter would otherwise drop unseen; this check is the
+    defence behind it.
     """
     refetched = frozenset(sessions)
     coverage = store.read_coverage(dataset, year)
@@ -4357,12 +4361,9 @@ def reconcile_withdrawals(
             raise PanelBatchError(
                 f"the fetch compared with the stored {dataset} rows is {batch.dataset}"
             )
+        asked = batch.as_of.astimezone(zone).date()
         _refuse_a_misfiled_answer(
-            batch,
-            asked=batch.as_of.astimezone(zone).date(),
-            sessions=refetched,
-            year=year,
-            date_column=date_column,
+            batch, asked=asked, sessions=frozenset({asked}), year=year, date_column=date_column
         )
         for subject, day in _row_keys(batch, date_column):
             if day in first:

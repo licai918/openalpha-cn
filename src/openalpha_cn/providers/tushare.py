@@ -714,6 +714,47 @@ def _trade_date_params(request: ProviderRequest) -> dict[str, str]:
     return parameters
 
 
+def _refuse_rows_off_the_requested_session(
+    descriptor: TushareDatasetDescriptor,
+    rows: Sequence[Mapping[str, Any]],
+    request: ProviderRequest,
+    provider_id: str,
+) -> None:
+    """Refuse a single-session answer carrying a row dated on another day (`V2-P6-016`).
+
+    The five endpoints built by `_trade_date_params` -- `daily`, `daily_basic`, `suspend_d`,
+    `stk_limit`, `adj_factor` -- are asked for exactly one session, `trade_date`, with or without
+    a `ts_code` filter, and never over a range; so every row they serve must carry that date.
+    Checked before the point-in-time filter, because that filter would silently drop a row dated
+    *after* the session as not yet knowable and leave the session looking empty -- and for
+    `suspend_d` an empty session is ordinary, so the misfiled answer would reach
+    `panel_ingest.reconcile_withdrawals` as a stored halt the upstream no longer serves. A row
+    dated earlier is refused alike. Keyed on the params builder, not the dataset: a descriptor
+    that asks a range is not held to one day. `reconcile_withdrawals`' own misfiled-answer check
+    stays behind this one.
+    """
+    if descriptor.params_builder is not _trade_date_params:
+        return
+    asked = request.as_of.astimezone(_CHINA_TZ).date()
+    carried = sorted({_parse_tushare_date(row[descriptor.date_field]) for row in rows} - {asked})
+    if not carried:
+        return
+    shown = ", ".join(day.isoformat() for day in carried[:5])
+    if len(carried) > 5:
+        shown += f" and {len(carried) - 5} more"
+    raise ProviderFailure(
+        provider_id=provider_id,
+        category="invalid_response",
+        message=(
+            f"{descriptor.endpoint} was asked for the session {asked.isoformat()} and served "
+            f"rows dated {shown}: a single-session answer carries only its session's rows, so "
+            "this misfiled answer is refused before the point-in-time filter could drop a "
+            "later-dated row as not yet knowable"
+        ),
+        retryable=False,
+    )
+
+
 def _trade_cal_params(request: ProviderRequest) -> dict[str, str]:
     """Request one whole calendar year: ``{exchange, start_date, end_date}``.
 
@@ -4798,6 +4839,9 @@ class TushareProvider:
         """
         expanded = _expand_panel_rows(descriptor, items)
         _check_panel_projection(descriptor, expanded, self.metadata.provider_id)
+        _refuse_rows_off_the_requested_session(
+            descriptor, expanded, request, self.metadata.provider_id
+        )
         ingested_at = self._stamp()
         knowable_by = min(request.as_of, self._clock())
         kept: list[tuple[date, dict[str, Any], Timeline]] = []
