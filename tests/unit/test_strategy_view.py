@@ -11,8 +11,10 @@ independent read of the same store rather than against the module's own output.
 
 from __future__ import annotations
 
+import math
 import statistics
-from datetime import UTC, date, datetime
+from array import array
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Final
 
@@ -39,6 +41,7 @@ from openalpha_cn.backtest.strategy_backtest import (
     STRATEGY_BACKTEST_LIMITATION_CODES,
     component_key,
     limitation_codes_for,
+    run_strategy_backtest,
 )
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_ingest import load_daily_bars, load_trading_calendar
@@ -559,5 +562,250 @@ def test_a_trailing_ic_run_that_never_knows_an_ic_is_blocked_not_reported_flat(
 ) -> None:
     store, panel = corpus
     never = {**TRAILING, "min_ic_observations": 5}
-    with pytest.raises(StrategyRunBlockedError, match="no scores on any"):
+    with pytest.raises(StrategyRunBlockedError, match="could not answer on any of the 4"):
         backtest_strategy(store, _dynamic(panel, trailing_ic=never))
+
+
+# --- V2-P6-014 fix round 1: streaming, determinism and the per-instant IC series -----------------
+
+KINDS: Final[dict[str, dict[str, Any]]] = {
+    "static": {},
+    "trailing_ic": {"components": (), "trailing_ic": TRAILING},
+    "walk_forward": {"components": (), "walk_forward": WALK_FORWARD},
+}
+
+
+@pytest.mark.parametrize("kind", sorted(KINDS))
+def test_a_streamed_run_is_the_materialised_run_period_for_period(
+    corpus: tuple[PanelStore, GeneratedPanel], kind: str
+) -> None:
+    """`backtest_strategy` streams (the book asks for each signal day's scores as it books the
+    period); `load_strategy_inputs` drains the same feed into the four score fields. Same periods,
+    same fills, same ledger, same weights and fits -- the whole answer, byte for byte."""
+    store, panel = corpus
+    request = _request(panel, rebalance_every_sessions=2, **KINDS[kind])
+    streamed = backtest_strategy(store, request)
+    materialised = run_strategy_backtest(load_strategy_inputs(store, request), request.spec)
+
+    assert load_strategy_inputs(store, request, stream=True).feed is not None
+    assert backtest_view(streamed) == backtest_view(materialised)
+
+
+@pytest.mark.parametrize("kind", sorted(KINDS))
+def test_two_runs_of_one_request_answer_identically(
+    corpus: tuple[PanelStore, GeneratedPanel], kind: str
+) -> None:
+    store, panel = corpus
+    request = _request(panel, rebalance_every_sessions=2, **KINDS[kind])
+
+    assert backtest_view(backtest_strategy(store, request)) == backtest_view(
+        backtest_strategy(store, request)
+    )
+
+
+def test_the_walk_forward_feed_holds_one_training_window_and_never_the_history(
+    corpus: tuple[PanelStore, GeneratedPanel],
+) -> None:
+    """After every refit the feed's labelled days all sit inside that refit's window."""
+    store, panel = corpus
+    request = _dynamic(panel, walk_forward={**WALK_FORWARD, "refit_every_sessions": 1})
+    feed = load_strategy_inputs(store, request, stream=True).feed
+    assert feed is not None
+    held: list[tuple[date, ...]] = []
+    for day in panel.sessions[1:8]:
+        feed.fit_on(day)
+        held.append(tuple(sorted(feed._window)))  # type: ignore[attr-defined]
+
+    for day, window in zip(panel.sessions[1:8], held, strict=True):
+        position = panel.sessions.index(day)
+        assert all(position - 5 < panel.sessions.index(kept) <= position for kept in window)
+    assert max(len(window) for window in held) <= 5
+    examples = [
+        example
+        for rows in feed._window.values()  # type: ignore[attr-defined]
+        for example in rows
+    ]
+    assert examples
+    assert all(example.label.window_return.per_session == () for example in examples)
+    assert all(math.isfinite(example.target) for example in examples)
+
+
+def test_a_value_the_tier_does_not_admit_is_counted_by_the_census_and_never_scored() -> None:
+    """A processed `imputed` row carries a number no security produced (`TIER_ADMITTED_CODES`):
+    it is kept for an IC's census and never becomes a score or a correlation term."""
+    from openalpha_cn.strategy_view import _Section
+
+    section = _Section(
+        build=READ_AT,
+        tier="processed",
+        subjects=("000001.SZ", "000002.SZ", "000003.SZ"),
+        values=array("d", (0.5, 0.0, math.nan)),
+        present=bytes((1, 1, 0)),
+        coverage=("processed", "imputed", "input_missing"),
+    )
+
+    assert list(section.admitted()) == [("000001.SZ", 0.5)]
+    assert section.rows() == [
+        ("000001.SZ", 0.5, "processed"),
+        ("000002.SZ", 0.0, "imputed"),
+        ("000003.SZ", None, "input_missing"),
+    ]
+
+
+def test_a_build_that_admits_nothing_is_not_a_days_cross_section(
+    corpus: tuple[PanelStore, GeneratedPanel], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two builds on one day, both visible at its 16:30: the later stores only excluded rows
+    (no value), the earlier admitted ones. The day's section is the earlier build -- the newest
+    build that carries a cross section -- rather than an empty one that happens to be newer."""
+    from openalpha_cn import strategy_view
+
+    store, panel = corpus
+    day = panel.sessions[3]
+    early = datetime(day.year, day.month, day.day, 8, 0, tzinfo=UTC)
+    late = datetime(day.year, day.month, day.day, 8, 20, tzinfo=UTC)
+
+    def stored(*_: object) -> list[Any]:
+        return [
+            strategy_view._Observed(
+                subject="000001.SZ", as_of=early, value=0.1, coverage="computed"
+            ),
+            strategy_view._Observed(
+                subject="000002.SZ", as_of=early, value=0.2, coverage="computed"
+            ),
+            strategy_view._Observed(
+                subject="000001.SZ", as_of=late, value=None, coverage="input_missing"
+            ),
+        ]
+
+    monkeypatch.setattr(strategy_view, "_tier_rows", stored)
+    sections = strategy_view._year_sections(
+        store,
+        _request(panel),
+        REVERSAL,
+        "raw",
+        day.year,
+        days=frozenset({day}),
+        instants={day: late + timedelta(hours=1)},
+        names={},
+    )
+
+    assert sections[day].build == early
+    assert list(sections[day].admitted()) == [("000001.SZ", 0.1), ("000002.SZ", 0.2)]
+
+
+def test_a_factor_feed_drops_each_signal_days_scores_once_handed_over(
+    corpus: tuple[PanelStore, GeneratedPanel],
+) -> None:
+    """The streaming contract: the book asks about a day once, and after it has, the feed holds
+    nothing for that day -- what stays resident is the days not yet booked, never the booked."""
+    store, panel = corpus
+    request = _request(panel, rebalance_every_sessions=2)
+    feed = load_strategy_inputs(store, request, stream=True).feed
+    assert feed is not None
+    signal_days = list(panel.sessions[1:9:2])
+
+    first = feed.rows_on(signal_days[0])
+    assert first
+    held = feed._rows  # type: ignore[attr-defined]
+    assert signal_days[0] not in held
+    assert set(held) == set(signal_days[1:])
+    assert feed.rows_on(signal_days[0]) == []
+
+
+def _ic_series_request(panel: GeneratedPanel, **overrides: Any) -> Any:
+    from openalpha_cn.strategy_view import ic_series_request
+
+    arguments: dict[str, Any] = {
+        "factor": REVERSAL.qualified_key,
+        "tier": "raw",
+        "transform": None,
+        "neutralization": None,
+        "horizon_sessions": 1,
+        "ic_method": "spearman",
+        "min_securities": 3,
+        "start": panel.sessions[1],
+        "end": panel.sessions[7],
+        "as_of": READ_AT,
+        "exchange": EXCHANGE,
+    }
+    return ic_series_request(**{**arguments, **overrides})
+
+
+def test_the_ic_series_is_one_point_per_day_held_against_an_independent_rank_ic(
+    corpus: tuple[PanelStore, GeneratedPanel],
+) -> None:
+    """s1..s7, 1d labels. Every stored row is in the census, by its own code. On the days every
+    name is admitted and labelled the point's IC is the rank IC computed here from
+    `load_daily_bars` closes over all eight names. On s2 and s3 the halted 601318.SH has no
+    label and is counted unlabelled; on s5 it has no previous close and the stored build codes
+    it `insufficient_history`, which the census counts as excluded rather than dropping."""
+    from openalpha_cn.strategy_view import factor_ic_series
+
+    store, panel = corpus
+    series = factor_ic_series(store, _ic_series_request(panel))
+
+    assert [point.prediction_day for point in series.points] == list(panel.sessions[1:8])
+    compared = 0
+    for point in series.points:
+        index = panel.sessions.index(point.prediction_day)
+        census = point.census
+        excluded = dict(census.excluded_by_coverage)
+        assert point.point.coverage == "measured"
+        assert point.n_securities == census.admitted_count == point.point.sample_size
+        assert census.subject_count == 8
+        shape = (point.n_securities, census.unlabelled_count, excluded["insufficient_history"])
+        if index in (2, 3):
+            assert shape == (7, 1, 0)
+        elif index == 5:
+            assert shape == (7, 0, 1)
+        else:
+            assert shape == (8, 0, 0)
+            assert point.ic == pytest.approx(_independent_rank_ic(store, panel, index), abs=1e-12)
+            compared += 1
+    assert compared == 4
+
+
+def test_the_ic_series_and_the_trailing_weights_are_one_computation(
+    corpus: tuple[PanelStore, GeneratedPanel],
+) -> None:
+    """The trailing-IC source's observation for a day is the series' point for that day."""
+    from openalpha_cn.strategy_view import factor_ic_series
+
+    store, panel = corpus
+    series = factor_ic_series(store, _ic_series_request(panel, end=panel.sessions[5]))
+    inputs = load_strategy_inputs(store, _dynamic(panel, trailing_ic=TRAILING))
+
+    assert [(item.prediction_day, item.ic) for item in inputs.ic_observations] == [
+        (point.prediction_day, point.ic) for point in series.points
+    ]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"ic_method": "kendall"}, "ic_method"),
+        ({"tier": "processed"}, "transform"),
+        ({"min_securities": 2}, "min_securities"),
+        ({"horizon_sessions": 0}, "horizon_sessions"),
+        ({"end": date(2026, 1, 5), "start": date(2026, 1, 9)}, "before"),
+        ({"factor": "nonexistent/v1"}, "nonexistent"),
+    ],
+)
+def test_an_ic_series_that_cannot_be_asked_is_a_bad_request(
+    corpus: tuple[PanelStore, GeneratedPanel], overrides: dict[str, Any], message: str
+) -> None:
+    _, panel = corpus
+    with pytest.raises(StrategyRequestError, match=message):
+        _ic_series_request(panel, **overrides)
+
+
+def test_an_ic_series_whose_last_label_has_not_closed_by_the_reading_instant_is_blocked(
+    corpus: tuple[PanelStore, GeneratedPanel],
+) -> None:
+    """s9's 1d label exits two sessions after the panel's last one: not knowable at READ_AT."""
+    from openalpha_cn.strategy_view import factor_ic_series
+
+    store, panel = corpus
+    with pytest.raises(StrategyRunBlockedError, match="has not closed"):
+        factor_ic_series(store, _ic_series_request(panel, end=panel.sessions[-1]))

@@ -1106,11 +1106,36 @@ def test_fewer_known_ics_than_the_floor_abstains_and_the_book_holds_that_period(
     assert second.holdings == (B, D)
 
 
-def test_a_run_on_which_every_signal_day_abstains_is_refused_rather_than_reported_flat() -> None:
-    with pytest.raises(StrategyBacktestError, match="no signal day"):
+def test_a_trailing_source_that_never_knows_enough_ics_is_refused_saying_so() -> None:
+    """One IC ever closes; the floor is two. The source cannot answer on any signal day, and the
+    refusal names the floor and the most any component knew."""
+    ics = [ic(F1, LOOKBACK[-3], 0.5, known_on=LOOKBACK[-1])]
+    with pytest.raises(
+        StrategyBacktestError, match=r"min_ic_observations=2 .*the most any component knew was 1\)"
+    ):
         run_strategy_backtest(
-            dynamic_inputs(trailing(min_obs=3), scores=score_rows(), ics=()), HAND_FIXTURE_SPEC
+            dynamic_inputs(trailing(min_obs=2), scores=score_rows(), ics=ics), HAND_FIXTURE_SPEC
         )
+
+
+def test_a_trailing_source_whose_every_weight_is_clipped_is_a_zero_trade_answer() -> None:
+    """Every known IC is negative and clip_to_zero weighs them all at zero: the source answered
+    ("trade none of these") on both signal days, so the run is reported, held throughout."""
+    ics = [
+        ic(F1, LOOKBACK[-3], -0.3, known_on=LOOKBACK[-1]),
+        ic(F1, D1, -0.1, known_on=D3),
+    ]
+    result = run_strategy_backtest(
+        dynamic_inputs(trailing(negative="clip_to_zero"), scores=score_rows(), ics=ics),
+        HAND_FIXTURE_SPEC,
+    )
+
+    assert [period.held for period in result.periods] == [True, True]
+    assert [period.fills for period in result.periods] == [(), ()]
+    assert [period.end_value for period in result.periods] == [
+        HAND_FIXTURE_SPEC.initial_capital
+    ] * 2
+    assert [_weights(period)[0][1] for period in result.periods] == [1, 2]
 
 
 @pytest.mark.parametrize(
@@ -1351,6 +1376,33 @@ def test_model_scores_on_a_day_no_fit_is_named_for_are_refused() -> None:
     with pytest.raises(StrategyBacktestError, match="no fit"):
         run_strategy_backtest(
             dynamic_inputs(wf_source(), scores=model_rows(), fits=(), fit_for_day={}),
+            HAND_FIXTURE_SPEC,
+        )
+
+
+def test_a_fit_that_abstains_on_every_name_is_a_zero_trade_answer() -> None:
+    """A fit is in use on both signal days and scored nobody: held throughout, and reported."""
+    early, late = fits_at(D1, D4)
+    result = run_strategy_backtest(
+        dynamic_inputs(
+            wf_source(), scores=(), fits=(early, late), fit_for_day={D1: early, D4: late}
+        ),
+        HAND_FIXTURE_SPEC,
+    )
+
+    assert [period.held for period in result.periods] == [True, True]
+    assert [p.model_fit.refit_day if p.model_fit else None for p in result.periods] == [D1, D4]
+
+
+def test_a_walk_forward_source_with_no_admissible_fit_anywhere_is_refused_saying_so() -> None:
+    """Every refit is refused (nothing closed before the embargo deadline), so no signal day has
+    a fit in use; the refusal carries the refits' own reasons."""
+    (refused,) = fits_at(LOOKBACK[3])
+    with pytest.raises(
+        StrategyBacktestError, match=r"no admissible fit .* 0 fitted; refusals: \['no training"
+    ):
+        run_strategy_backtest(
+            dynamic_inputs(wf_source(), scores=(), fits=(refused,), fit_for_day={}),
             HAND_FIXTURE_SPEC,
         )
 

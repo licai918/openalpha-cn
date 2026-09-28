@@ -494,6 +494,7 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "model_view.ModelRunRequest",
             "model_view.ModelViewError",
             "model_view.OutcomeLabels",
+            "model_view.UNFILED_CONFIG_DIGEST",
             "model_view.declared_hyperparameters",
             "model_view.feature_columns",
             "model_view.feature_cross_section",

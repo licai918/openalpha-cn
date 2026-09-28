@@ -318,6 +318,51 @@ def test_the_sdk_refuses_a_dynamic_source_that_cannot_be_put_as_a_request_error(
         OpenAlphaSDK(runtime_dir=root).run_strategy_backtest(**arguments, **source)
 
 
+def test_the_sdk_answers_a_per_instant_ic_series_with_its_census(
+    runtime: tuple[Path, GeneratedPanel],
+) -> None:
+    """`V2-P6-014` for `V2-P6-008`: one point per prediction day, as JSON-shaped data."""
+    root, panel = runtime
+    series = OpenAlphaSDK(runtime_dir=root).factor_ic_series(
+        factor=REVERSAL.qualified_key,
+        tier="raw",
+        horizon_sessions=1,
+        ic_method="spearman",
+        min_securities=3,
+        start=panel.sessions[1],
+        end=panel.sessions[7],
+        as_of=READ_AT,
+        exchange=EXCHANGE,
+    )
+    body = json.loads(json.dumps(strategy_view.ic_series_view(series)))
+
+    assert [point["prediction_day"] for point in body["points"]] == [
+        day.isoformat() for day in panel.sessions[1:8]
+    ]
+    assert {point["coverage"] for point in body["points"]} == {"measured"}
+    assert all(
+        point["n_securities"] == point["census"]["admitted_count"] for point in body["points"]
+    )
+
+
+def test_the_sdk_refuses_an_ic_series_that_cannot_be_asked_as_a_request_error(
+    runtime: tuple[Path, GeneratedPanel],
+) -> None:
+    root, panel = runtime
+    with pytest.raises(StrategyRequestError, match="ic_method"):
+        OpenAlphaSDK(runtime_dir=root).factor_ic_series(
+            factor=REVERSAL.qualified_key,
+            tier="raw",
+            horizon_sessions=1,
+            ic_method="kendall",
+            min_securities=3,
+            start=panel.sessions[1],
+            end=panel.sessions[7],
+            as_of=READ_AT,
+            exchange=EXCHANGE,
+        )
+
+
 def test_every_strategy_view_fault_has_a_row_in_the_exit_table() -> None:
     """Looked up by `reason`, so a fault added with no row raises at the boundary, not here."""
     reasons = {subclass.reason for subclass in StrategyViewError.__subclasses__()}

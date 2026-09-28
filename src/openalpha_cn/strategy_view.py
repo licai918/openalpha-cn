@@ -61,13 +61,17 @@ adjustment factor covering it, has no quote: the book cannot trade it and keeps 
 
 from __future__ import annotations
 
+import dataclasses
+import math
 import statistics
+from array import array
 from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
-from typing import ClassVar, Final, Literal, Protocol, TypeVar
+from functools import partial
+from typing import Any, ClassVar, Final, Literal, Protocol, TypeVar
 from zoneinfo import ZoneInfo
 
 from openalpha_cn.backtest.execution import (
@@ -77,11 +81,16 @@ from openalpha_cn.backtest.execution import (
     suspended_at_the_close,
 )
 from openalpha_cn.backtest.factor_ic import (
+    IC_METHODS,
     MINIMUM_IC_AS_OFS,
+    MINIMUM_IC_SECURITIES,
     TIER_ADMITTED_CODES,
     FactorICError,
     FactorICSpec,
     FactorICStudy,
+    ICCensus,
+    ICMethod,
+    ICPoint,
     ic_cross_section,
 )
 from openalpha_cn.backtest.factor_tradeability import CNY_PER_TURNOVER_UNIT
@@ -90,7 +99,9 @@ from openalpha_cn.backtest.strategy_backtest import (
     KNOWN_STRATEGY_BACKTEST_LIMITATIONS,
     MODEL_COMPONENT,
     PREDICTION_COMPONENT,
+    STRATEGY_TIERS,
     ICObservation,
+    ScoreFeed,
     ScoreRow,
     ScoreSource,
     SessionQuote,
@@ -107,7 +118,12 @@ from openalpha_cn.backtest.strategy_backtest import (
     walk_forward_fits,
 )
 from openalpha_cn.domain.adjustment import AdjustmentHistory, AdjustmentHorizonError
-from openalpha_cn.domain.alpha_model import AlphaModel, AlphaModelDeclaration, AlphaModelError
+from openalpha_cn.domain.alpha_model import (
+    AlphaModel,
+    AlphaModelDeclaration,
+    AlphaModelError,
+    TrainingExample,
+)
 from openalpha_cn.domain.daily_prices import DailyBar, PriceDataError
 from openalpha_cn.domain.factor import FactorDefinition
 from openalpha_cn.domain.factor_neutralization import (
@@ -133,6 +149,7 @@ from openalpha_cn.factor_view import FactorRequestError, resolve_factor
 from openalpha_cn.feature_matrix import FeatureColumn, FeatureMatrixError, feature_spec
 from openalpha_cn.model_view import (
     MODEL_FAMILIES,
+    UNFILED_CONFIG_DIGEST,
     LabelReach,
     ModelRequestError,
     ModelRunRequest,
@@ -174,6 +191,9 @@ __all__ = [
     "PROTOCOL_PARTICIPATION_CAP",
     "PROTOCOL_POSITION_CAPITAL",
     "PROTOCOL_SLIPPAGE_RATE",
+    "ICSeries",
+    "ICSeriesPoint",
+    "ICSeriesRequest",
     "StrategyPanelUnreadableError",
     "StrategyRequest",
     "StrategyRequestError",
@@ -181,6 +201,9 @@ __all__ = [
     "StrategyViewError",
     "backtest_strategy",
     "backtest_view",
+    "factor_ic_series",
+    "ic_series_request",
+    "ic_series_view",
     "load_strategy_inputs",
     "strategy_request",
 ]
@@ -501,9 +524,12 @@ def backtest_strategy(
     inputs are ASSEMBLED as much as for one raised while the book runs: a stored score that
     `ScoreRow`'s own contract refuses (a non-finite value, a naive clock) is the same kind of
     refusal and must not reach a face as an unanticipated error.
+
+    The run is STREAMED (`V2-P6-014`): the book asks for each signal day's scores when it books
+    that period, so memory is bounded by a window rather than by the range.
     """
     try:
-        inputs = load_strategy_inputs(store, request, predictions=predictions)
+        inputs = load_strategy_inputs(store, request, predictions=predictions, stream=True)
         return _read(
             lambda: run_strategy_backtest(inputs, request.spec),
             store=store,
@@ -518,8 +544,16 @@ def load_strategy_inputs(
     request: StrategyRequest,
     *,
     predictions: Callable[[str], PredictionRecord | None] | None = None,
+    stream: bool = False,
 ) -> StrategyInputs:
-    """Everything the book reads, out of the panel, at `request.as_of`."""
+    """Everything the book reads, out of the panel, at `request.as_of`.
+
+    With `stream=True` the scores stay behind a `ScoreFeed` (`_FactorFeed` or `_ModelFeed`) and
+    are read as the book asks for them, which is how `backtest_strategy` runs. With the default
+    the same feed is drained into `StrategyInputs`' four score fields -- the materialised run, the
+    same answer held all at once. A registered-prediction source is always materialised: its
+    batches are already in memory.
+    """
     calendar = _read(
         lambda: load_trading_calendar(
             store, exchange=request.exchange, years=request.years, as_of=request.as_of
@@ -559,50 +593,54 @@ def load_strategy_inputs(
         if request.spec.max_industry_weight is None
         else _IndustryDays(store, signal_days, instants)
     )
-    observations: tuple[ICObservation, ...] = ()
-    fits: tuple[WalkForwardFit, ...] = ()
-    fit_for_day: dict[date, WalkForwardFit] = {}
+    shared = {
+        "source": source,
+        "sessions": sessions,
+        "signal_instants": instants,
+        "quotes": _QuoteDays(days, sessions),
+        "benchmark_returns": benchmarks,
+        "industries": industries,
+        "lookback_sessions": lookback,
+    }
     if source.prediction_ids:
-        scores = _prediction_rows(source.prediction_ids, predictions)
-    elif source.walk_forward is not None:
-        scores, fits, fit_for_day = _from_the_model_plane(
-            lambda: _model_rows(
-                store,
-                request,
-                sessions=sessions,
-                calendar=lookback + sessions,
-                signal_days=signal_days,
-                instants=instants,
-                years=years,
-            )
+        return StrategyInputs(
+            scores=_prediction_rows(source.prediction_ids, predictions),
+            **shared,  # type: ignore[arg-type]
+        )
+    feed: ScoreFeed
+    if source.walk_forward is not None:
+        feed = _ModelFeed(
+            store,
+            request,
+            sessions=sessions,
+            calendar=lookback + sessions,
+            signal_days=signal_days,
+            instants=instants,
+            years=years,
         )
     else:
-        pairs = tuple((token, tier) for token, tier, _ in source.components)
-        if source.trailing_ic is not None:
-            pairs = source.trailing_ic.components
-            observations = _from_the_model_plane(
-                lambda: _ic_observations(
-                    store,
-                    request,
-                    calendar=lookback + sessions,
-                    signal_days=signal_days,
-                    instants=instants,
-                    years=years,
-                )
-            )
-        scores = _factor_rows(store, request, signal_days, instants, pairs=pairs)
+        feed = _FactorFeed(
+            store,
+            request,
+            pairs=(
+                source.trailing_ic.components
+                if source.trailing_ic is not None
+                else tuple((token, tier) for token, tier, _ in source.components)
+            ),
+            signal_days=signal_days,
+            calendar=lookback + sessions,
+            instants=instants,
+            years=years,
+        )
+    if stream:
+        return StrategyInputs(scores=(), feed=feed, **shared)  # type: ignore[arg-type]
+    rows, observations, refits, fits = _drained(feed, signal_days, lookback + sessions)
     return StrategyInputs(
-        source=source,
-        sessions=sessions,
-        signal_instants=instants,
-        scores=scores,
-        quotes=_QuoteDays(days, sessions),
-        benchmark_returns=benchmarks,
-        industries=industries,
-        lookback_sessions=lookback,
+        scores=rows,
         ic_observations=observations,
-        model_fits=fits,
-        fit_for_day=fit_for_day,
+        model_fits=refits,
+        fit_for_day=fits,
+        **shared,  # type: ignore[arg-type]
     )
 
 
@@ -661,7 +699,7 @@ def _lookback(
 class _Observed:
     subject: str
     as_of: datetime
-    value: float
+    value: float | None
     coverage: str
 
 
@@ -678,18 +716,27 @@ class _StoredRow(Protocol):
     def coverage(self) -> str: ...
 
 
-def _admitted(rows: Sequence[_StoredRow], tier: str) -> list[_Observed]:
-    admitted = TIER_ADMITTED_CODES[tier]
+def _observed(rows: Sequence[_StoredRow]) -> list[_Observed]:
     return [
         _Observed(subject=row.subject, as_of=row.as_of, value=row.value, coverage=row.coverage)
         for row in rows
-        if row.coverage in admitted and row.value is not None
     ]
+
+
+class _TierRead(Protocol):
+    """What a tier read needs of a request: the reading instant and the tier's two specs."""
+
+    @property
+    def as_of(self) -> datetime: ...
+    @property
+    def transform(self) -> FactorTransformSpec | None: ...
+    @property
+    def neutralization(self) -> FactorNeutralizationSpec | None: ...
 
 
 def _tier_rows(
     store: PanelStore,
-    request: StrategyRequest,
+    request: _TierRead,
     definition: FactorDefinition,
     tier: str,
     year: int,
@@ -723,47 +770,21 @@ def _tier_rows(
             store=store,
             what=what,
         )
-    return _admitted(rows, tier)
-
-
-def _factor_rows(
-    store: PanelStore,
-    request: StrategyRequest,
-    signal_days: frozenset[date],
-    instants: Mapping[date, datetime],
-    *,
-    pairs: Sequence[tuple[str, str]],
-) -> tuple[ScoreRow, ...]:
-    """Every `(factor, tier)` pair's rows on the signal days, oriented, one build per day."""
-    rows: list[ScoreRow] = []
-    for token, tier in pairs:
-        definition = request.definitions[token]
-        sign = -1.0 if definition.direction == "lower_is_better" else 1.0
-        key = component_key(token, tier)
-        for year in request.years:
-            by_build: dict[date, dict[datetime, list[_Observed]]] = {}
-            for observed in _tier_rows(store, request, definition, tier, year):
-                day = observed.as_of.astimezone(SHANGHAI).date()
-                if day in signal_days:
-                    by_build.setdefault(day, {}).setdefault(observed.as_of, []).append(observed)
-            for day, builds in by_build.items():
-                instant = _chosen_build(builds, instants[day])
-                rows.extend(
-                    ScoreRow(
-                        component=key,
-                        subject=observed.subject,
-                        signal_day=day,
-                        value=sign * observed.value,
-                        available_time=instant,
-                        revision_time=instant,
-                    )
-                    for observed in builds[instant]
-                )
-    return tuple(rows)
+    return _observed(rows)
 
 
 def _chosen_build(builds: Mapping[datetime, object], signal: datetime) -> datetime:
-    """The latest build at or before the signal instant, else the earliest (which is refused)."""
+    """The latest build at or before the signal instant, else the earliest.
+
+    On a signal day the earliest is handed to the book, which refuses it as look-ahead
+    (`ScoreRow`'s clocks carry the build's instant). On an IC day it is used, and that is safe
+    for a precise reason rather than by accident: an IC is used on a signal day only once its
+    `ICObservation.known_at` has passed, and `known_at` is the LATER of this build's instant and
+    its label's exit -- so a build stamped after its own day's 16:30 is an IC nobody could use
+    before that build existed. The label window is dated from the build's own instant
+    (`build_label_window`), so its entry is still the session after the one the values were
+    computed from and no return that preceded them is paired against them.
+    """
     visible = [instant for instant in builds if instant <= signal]
     return max(visible) if visible else min(builds)
 
@@ -804,204 +825,425 @@ def _cached_label_sessions(horizon_sessions: int) -> int:
     return horizon_sessions + 8
 
 
-def _ic_observations(
-    store: PanelStore,
-    request: StrategyRequest,
-    *,
-    calendar: tuple[date, ...],
-    signal_days: frozenset[date],
-    instants: Mapping[date, datetime],
-    years: tuple[int, ...],
-) -> tuple[ICObservation, ...]:
-    """Every component's IC on every prediction day a trailing window could use.
+def _years_around(years: Sequence[int], *, first: int, last: int) -> tuple[int, ...]:
+    """The run's partition years inside `[first, last]`, ascending: one window's reads."""
+    return tuple(year for year in years if first <= year <= last)
 
-    The prediction days are the calendar sessions from the first signal day's window start to the
-    last day whose label can have exited by the last signal day -- a narrowing by calendar
-    arithmetic only, so no window is priced that no signal could ever use; which ICs a signal day
-    DOES use is the book's decision (`_ICIndex.weights`). Each day's cross section is the build
-    `_chosen_build` picks at that day's signal instant, the IC is `ic_cross_section` measured by
-    `FactorICStudy`, and one year of each tier is held at a time.
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Section:
+    """One component's stored cross section on one day -- every row, admitted or not -- held
+    compactly.
+
+    A tuple of (interned) codes and an `array('d')` of the stored values rather than one object
+    per row, so a year of daily cross sections costs a few megabytes rather than hundreds.
+    `present` marks the rows that carry a value (a row without one holds `nan` in `values`).
+    The rows a tier does not admit are kept so an IC's census counts them by their own code;
+    only `admitted` rows ever become scores.
     """
-    spec = request.source.trailing_ic
-    assert spec is not None  # load_strategy_inputs calls this for a trailing-IC source only
-    horizon = parse_horizon(f"{spec.horizon_sessions}d")
+
+    build: datetime
+    tier: str
+    subjects: tuple[str, ...]
+    values: array[float]
+    present: bytes
+    coverage: tuple[str, ...]
+
+    def admitted(self) -> Iterator[tuple[str, float]]:
+        """The `(subject, value)` rows the tier admits: `TIER_ADMITTED_CODES`, with a value."""
+        codes = TIER_ADMITTED_CODES[self.tier]
+        for subject, value, present, coverage in zip(
+            self.subjects, self.values, self.present, self.coverage, strict=True
+        ):
+            if present and coverage in codes:
+                yield subject, value
+
+    def rows(self) -> list[tuple[str, float | None, str]]:
+        """Every row as `ic_cross_section` takes it: `(subject, value or None, coverage)`."""
+        return [
+            (subject, value if present else None, coverage)
+            for subject, value, present, coverage in zip(
+                self.subjects, self.values, self.present, self.coverage, strict=True
+            )
+        ]
+
+
+def _year_sections(
+    store: PanelStore,
+    request: _TierRead,
+    definition: FactorDefinition,
+    tier: str,
+    year: int,
+    *,
+    days: frozenset[date],
+    instants: Mapping[date, datetime],
+    names: dict[str, str],
+) -> dict[date, _Section]:
+    """One tier-year partition, read ONCE, as the compact cross section of each wanted day.
+
+    A day's build is `_chosen_build`'s pick at that day's signal instant, among the builds that
+    carry at least one admitted value -- a build that admits nothing is no cross section. The
+    loader's own rows are dropped when this returns; only the wanted days' sections survive it.
+    """
+    admitted = TIER_ADMITTED_CODES[tier]
+    by_day: dict[date, dict[datetime, list[_Observed]]] = {}
+    for observed in _tier_rows(store, request, definition, tier, year):
+        day = observed.as_of.astimezone(SHANGHAI).date()
+        if day in days:
+            by_day.setdefault(day, {}).setdefault(observed.as_of, []).append(observed)
+    sections: dict[date, _Section] = {}
+    for day, all_builds in by_day.items():
+        builds = {
+            instant: rows
+            for instant, rows in all_builds.items()
+            if any(row.coverage in admitted and row.value is not None for row in rows)
+        }
+        if not builds:
+            continue
+        build = _chosen_build(builds, instants[day])
+        rows = builds[build]
+        sections[day] = _Section(
+            build=build,
+            tier=tier,
+            subjects=tuple(names.setdefault(row.subject, row.subject) for row in rows),
+            values=array("d", (math.nan if row.value is None else row.value for row in rows)),
+            present=bytes(row.value is not None for row in rows),
+            coverage=tuple(names.setdefault(row.coverage, row.coverage) for row in rows),
+        )
+    return sections
+
+
+def _ic_days(
+    spec: TrailingICWeights, calendar: Sequence[date], signal_days: frozenset[date]
+) -> frozenset[date]:
+    """Every prediction day a trailing window could use, by calendar arithmetic alone.
+
+    From the first signal day's window start to the last day whose label can have exited by the
+    last signal day, so no window is priced that no signal could ever use; which ICs a signal
+    day DOES use is the book's decision (`_ICIndex.weights`).
+    """
     position = {day: index for index, day in enumerate(calendar)}
     first = max(position[min(signal_days)] - spec.ic_window_sessions + 1, 0)
     last = position[max(signal_days)] - spec.horizon_sessions - 1
-    wanted = frozenset(calendar[first : last + 1]) if last >= first else frozenset()
-    if not wanted:
-        return ()
+    return frozenset(calendar[first : last + 1]) if last >= first else frozenset()
+
+
+def _ic_study(
+    definition: FactorDefinition, *, method: ICMethod, min_securities: int
+) -> FactorICStudy:
+    return FactorICStudy(
+        FactorICSpec(
+            definition=definition,
+            method=method,
+            min_securities=min_securities,
+            min_as_ofs=MINIMUM_IC_AS_OFS,
+        )
+    )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _MeasuredIC:
+    """One component's IC on one prediction day: the point, its census, and when it was known."""
+
+    prediction_day: date
+    build: datetime
+    point: ICPoint
+    census: ICCensus
+    known_at: datetime
+
+
+def _measure_year(
+    store: PanelStore,
+    request: _TierRead,
+    *,
+    exchange: str,
+    years: Sequence[int],
+    year: int,
+    sections: Mapping[tuple[str, str], Mapping[date, _Section]],
+    studies: Mapping[tuple[str, str], FactorICStudy],
+    horizon: ResearchHorizon,
+    instants: Mapping[date, datetime],
+) -> list[tuple[tuple[str, str], _MeasuredIC]]:
+    """Every component's IC on every day of one year it has a section for, in day order.
+
+    The label reader is this year's: its calendar, registry, halts and adjustment factors span
+    the year before through the year after, which is every session a label window of this year
+    reads and every factor it carries forward -- and nothing older, so the history does not
+    accumulate. Labels are shared across one day's components, whose windows are one window.
+    """
     reader = OutcomeLabels(
         store,
-        LabelReach(as_of=request.as_of, years=years, exchange=request.exchange),
-        cached_sessions=_cached_label_sessions(spec.horizon_sessions),
+        LabelReach(
+            as_of=request.as_of,
+            years=_years_around(years, first=year - 1, last=year + 1),
+            exchange=exchange,
+        ),
+        cached_sessions=_cached_label_sessions(horizon.sessions),
     )
-    studies = {
-        component_key(token, tier): FactorICStudy(
-            FactorICSpec(
-                definition=request.definitions[token],
-                method=spec.ic_method,
-                min_securities=spec.min_ic_securities,
-                min_as_ofs=MINIMUM_IC_AS_OFS,
-            )
-        )
-        for token, tier in spec.components
-    }
-    observations: list[ICObservation] = []
-    for year in sorted({day.year for day in wanted}):
-        by_day: dict[date, dict[tuple[str, str], tuple[datetime, list[_Observed]]]] = {}
-        for token, tier in spec.components:
-            builds: dict[date, dict[datetime, list[_Observed]]] = {}
-            for observed in _tier_rows(store, request, request.definitions[token], tier, year):
-                day = observed.as_of.astimezone(SHANGHAI).date()
-                if day in wanted:
-                    builds.setdefault(day, {}).setdefault(observed.as_of, []).append(observed)
-            for day, per_build in builds.items():
-                chosen = _chosen_build(per_build, instants[day])
-                by_day.setdefault(day, {})[(token, tier)] = (chosen, per_build[chosen])
-        for day in sorted(by_day):
-            labels: dict[tuple[str, date, date], OutcomeLabel | None] = {}
-            for (token, tier_name), (build, rows) in by_day[day].items():
-                observations.append(
-                    _ic_observation(
-                        reader,
-                        studies[component_key(token, tier_name)],
-                        component=component_key(token, tier_name),
-                        tier=tier_name,
-                        build=build,
-                        rows=rows,
-                        horizon=horizon,
-                        labels=labels,
-                        instants=instants,
+    days = sorted({day for by_day in sections.values() for day in by_day})
+    measured: list[tuple[tuple[str, str], _MeasuredIC]] = []
+    for day in days:
+        labels: dict[tuple[str, date, date], OutcomeLabel | None] = {}
+        for pair, by_day in sections.items():
+            section = by_day.get(day)
+            if section is not None:
+                measured.append(
+                    (
+                        pair,
+                        _measure(
+                            reader,
+                            studies[pair],
+                            tier=pair[1],
+                            section=section,
+                            horizon=horizon,
+                            labels=labels,
+                            instants=instants,
+                        ),
                     )
                 )
-    return tuple(observations)
+    return measured
 
 
-def _ic_observation(
+def _measure(
     reader: OutcomeLabels,
     study: FactorICStudy,
     *,
-    component: str,
     tier: str,
-    build: datetime,
-    rows: Sequence[_Observed],
+    section: _Section,
     horizon: ResearchHorizon,
     labels: dict[tuple[str, date, date], OutcomeLabel | None],
     instants: Mapping[date, datetime],
-) -> ICObservation:
-    """One build's IC against its labels, and the instant it became knowable.
-
-    `labels` is shared across one prediction day's components, whose windows are one window.
-    """
-    window = reader.window(build, horizon=horizon)
+) -> _MeasuredIC:
+    """One build's IC against its labels (`ic_cross_section` + `FactorICStudy.measure`)."""
+    window = reader.window(section.build, horizon=horizon)
     paired: dict[str, OutcomeLabel] = {}
-    for row in rows:
-        key = (row.subject, window.entry_day, window.exit_day)
+    for subject, _value in section.admitted():
+        key = (subject, window.entry_day, window.exit_day)
         if key not in labels:
-            labels[key] = reader.label(row.subject, window)
+            labels[key] = reader.label(subject, window)
         label = labels[key]
         if label is not None:
-            paired[row.subject] = label
+            paired[subject] = label
     try:
-        point = study.measure(
-            ic_cross_section(
-                as_of=build,
-                tier=tier,  # type: ignore[arg-type]
-                rows=[(row.subject, row.value, row.coverage) for row in rows],
-                labels=paired,
-            )
+        cross_section = ic_cross_section(
+            as_of=section.build,
+            tier=tier,  # type: ignore[arg-type]
+            rows=section.rows(),
+            labels=paired,
         )
+        point = study.measure(cross_section)
     except FactorICError as error:
         raise StrategyBacktestError(
-            f"the {component} IC at {build.isoformat()} could not be measured: {error}"
+            f"the IC at {section.build.isoformat()} could not be measured: {error}"
         ) from error
-    known_at = max(build, instants[window.exit_day])
-    return ICObservation(
-        component=component, prediction_day=window.prediction_day, known_at=known_at, ic=point.ic
+    return _MeasuredIC(
+        prediction_day=window.prediction_day,
+        build=section.build,
+        point=point,
+        census=cross_section.census,
+        known_at=max(section.build, instants[window.exit_day]),
     )
 
 
-def _model_rows(
-    store: PanelStore,
-    request: StrategyRequest,
-    *,
-    sessions: tuple[date, ...],
-    calendar: tuple[date, ...],
-    signal_days: frozenset[date],
-    instants: Mapping[date, datetime],
-    years: tuple[int, ...],
-) -> tuple[tuple[ScoreRow, ...], tuple[WalkForwardFit, ...], dict[date, WalkForwardFit]]:
-    """A walk-forward source's fits, the fit each signal day scores with, and its scores.
+class _FactorFeed:
+    """A `ScoreFeed` over stored factor tiers, for a static or a trailing-IC source.
 
-    Refits fall on `sessions[0]`, `sessions[F]`, ... up to the last signal day. The training
-    panel is `model_view.training_panel` over the prediction days any refit window can reach,
-    closed by the last refit's embargo deadline; `walk_forward_fits` narrows it per refit. A
-    signal day with a fit in use is scored on `model_view.feature_cross_section` at its signal
-    instant, and every score row carries that instant on both clocks.
+    Reads each tier-year partition once, the first time the book asks about that year, and
+    derives both halves from that one read: the compact sections of the year's signal days, and
+    -- for a trailing-IC source -- every IC of the year's IC days. A signal day's section is
+    handed over as `ScoreRow`s and dropped when the book asks for it, so what is held is at most
+    one year of signal-day sections and the ICs (one small record per component per day).
     """
-    spec = request.source.walk_forward
-    model = request.model
-    assert spec is not None and model is not None  # strategy_request resolved both together
-    position = {day: index for index, day in enumerate(calendar)}
-    refit_days = tuple(
-        day for day in sessions[:: spec.refit_every_sessions] if day <= max(signal_days)
-    )
-    last_refit = position[refit_days[-1]]
-    newest_training = last_refit - spec.embargo_sessions - spec.horizon_sessions - 2
-    run = ModelRunRequest(
-        declaration=model.declaration,
-        columns=request.columns,
-        missing=spec.missing,
-        start=calendar[max(position[sessions[0]] - spec.train_sessions + 1, 0)],
-        end=calendar[max(newest_training, 0)],
-        as_of=request.as_of,
-        years=years,
-        exchange=request.exchange,
-        horizon=parse_horizon(f"{spec.horizon_sessions}d"),
-        minimum_scored_ratio=0.0,
-        shelf_life=None,
-        # Never filed: this request drives reads only, and `config_digest` feeds a daily run's
-        # manifest, which a backtest does not write.
-        config_digest="0" * 64,
-        declared_feature_version=None,
-    )
-    panel = (
-        None
-        if newest_training < 0
-        else training_panel(
-            store,
-            run,
-            deadline=instants[calendar[last_refit - spec.embargo_sessions]],
-            cached_sessions=_cached_label_sessions(spec.horizon_sessions),
+
+    def __init__(
+        self,
+        store: PanelStore,
+        request: StrategyRequest,
+        *,
+        pairs: Sequence[tuple[str, str]],
+        signal_days: frozenset[date],
+        calendar: Sequence[date],
+        instants: Mapping[date, datetime],
+        years: Sequence[int],
+    ) -> None:
+        self._store = store
+        self._request = request
+        self._pairs = tuple(pairs)
+        self._signal_days = signal_days
+        self._instants = instants
+        self._years = tuple(years)
+        self._names: dict[str, str] = {}
+        self._rows: dict[date, list[tuple[str, float, _Section]]] = {}
+        self._ics: list[ICObservation] = []
+        self._loaded: set[int] = set()
+        spec = request.source.trailing_ic
+        self._spec = spec
+        self._ic_days = frozenset() if spec is None else _ic_days(spec, calendar, signal_days)
+
+    def rows_on(self, day: date) -> Sequence[ScoreRow]:
+        self._load(day.year)
+        return [
+            ScoreRow(
+                component=key,
+                subject=subject,
+                signal_day=day,
+                value=sign * value,
+                available_time=section.build,
+                revision_time=section.build,
+            )
+            for key, sign, section in self._rows.pop(day, [])
+            for subject, value in section.admitted()
+        ]
+
+    def ic_observations_through(self, day: date) -> Sequence[ICObservation]:
+        for year in sorted({item.year for item in self._ic_days}):
+            if year <= day.year:
+                self._load(year)
+        handed = sorted(
+            (item for item in self._ics if item.prediction_day <= day),
+            key=lambda item: (item.prediction_day, item.component),
         )
-    )
-    fits = walk_forward_fits(
-        model,
-        () if panel is None else panel.examples,
-        feature_ids=feature_spec(columns=request.columns, missing=spec.missing).feature_ids,
-        spec=spec,
-        calendar=calendar,
-        instants=instants,
-        refit_days=refit_days,
-    )
-    rows: list[ScoreRow] = []
-    fit_for_day: dict[date, WalkForwardFit] = {}
-    for day in sorted(signal_days):
-        fit = usable_fit(fits, signal_day=day)
+        self._ics = [item for item in self._ics if item.prediction_day > day]
+        return handed
+
+    def fit_on(self, day: date) -> WalkForwardFit | None:
+        return None
+
+    def refits(self) -> tuple[WalkForwardFit, ...]:
+        return ()
+
+    def _load(self, year: int) -> None:
+        if year in self._loaded:
+            return
+        self._loaded.add(year)
+        request = self._request
+        signal = frozenset(day for day in self._signal_days if day.year == year)
+        ic_days = frozenset(day for day in self._ic_days if day.year == year)
+        if not signal and not ic_days:
+            return
+        sections = {
+            (token, tier): _year_sections(
+                self._store,
+                request,
+                request.definitions[token],
+                tier,
+                year,
+                days=signal | ic_days,
+                instants=self._instants,
+                names=self._names,
+            )
+            for token, tier in self._pairs
+        }
+        for token, tier in self._pairs:
+            definition = request.definitions[token]
+            sign = -1.0 if definition.direction == "lower_is_better" else 1.0
+            key = component_key(token, tier)
+            for day in sorted(signal):
+                section = sections[(token, tier)].get(day)
+                if section is not None:
+                    self._rows.setdefault(day, []).append((key, sign, section))
+        spec = self._spec
+        if spec is None or not ic_days:
+            return
+        on_ic_days = {
+            pair: {day: section for day, section in by_day.items() if day in ic_days}
+            for pair, by_day in sections.items()
+        }
+        del sections
+        measured = _from_the_model_plane(
+            lambda: _measure_year(
+                self._store,
+                request,
+                exchange=request.exchange,
+                years=self._years,
+                year=year,
+                sections=on_ic_days,
+                studies={
+                    (token, tier): _ic_study(
+                        request.definitions[token],
+                        method=spec.ic_method,
+                        min_securities=spec.min_ic_securities,
+                    )
+                    for token, tier in self._pairs
+                },
+                horizon=parse_horizon(f"{spec.horizon_sessions}d"),
+                instants=self._instants,
+            )
+        )
+        self._ics.extend(
+            ICObservation(
+                component=component_key(*pair),
+                prediction_day=item.prediction_day,
+                known_at=item.known_at,
+                ic=item.point.ic,
+            )
+            for pair, item in measured
+        )
+
+
+class _ModelFeed:
+    """A `ScoreFeed` for a walk-forward source: rolling training windows, fitted as asked.
+
+    Refits fall on `sessions[0]`, `sessions[F]`, ... up to the last signal day and are made in
+    order, when the first signal day on or after one is asked about. Each refit's examples are
+    the labelled cross sections of its own `train_sessions` window, kept by prediction day: the
+    days the window has moved past are dropped and the days it has moved onto are labelled
+    through `model_view.training_panel` over just those days -- so what is held is one window,
+    never the history. A signal day with a fit in use is scored on
+    `model_view.feature_cross_section` at its signal instant, and every score row carries that
+    instant on both clocks.
+    """
+
+    def __init__(
+        self,
+        store: PanelStore,
+        request: StrategyRequest,
+        *,
+        sessions: tuple[date, ...],
+        calendar: tuple[date, ...],
+        signal_days: frozenset[date],
+        instants: Mapping[date, datetime],
+        years: Sequence[int],
+    ) -> None:
+        spec, model = request.source.walk_forward, request.model
+        assert spec is not None and model is not None  # strategy_request resolved both together
+        self._store = store
+        self._request = request
+        self._spec = spec
+        self._model = model
+        self._calendar = calendar
+        self._position = {day: index for index, day in enumerate(calendar)}
+        self._instants = instants
+        self._years = tuple(years)
+        self._horizon = parse_horizon(f"{spec.horizon_sessions}d")
+        self._feature_ids = feature_spec(columns=request.columns, missing=spec.missing).feature_ids
+        self._pending = list(
+            day for day in sessions[:: spec.refit_every_sessions] if day <= max(signal_days)
+        )
+        self._fits: list[WalkForwardFit] = []
+        self._window: dict[date, tuple[TrainingExample, ...]] = {}
+
+    def rows_on(self, day: date) -> Sequence[ScoreRow]:
+        fit = self.fit_on(day)
         if fit is None or fit.fitted is None:
-            continue
-        instant = instants[day]
-        section = feature_cross_section(store, run, as_of=instant)
+            return []
+        fitted = fit.fitted
+        instant = self._instants[day]
+        section = _from_the_model_plane(
+            lambda: feature_cross_section(
+                self._store,
+                self._run(start=day, end=day, first_year=day.year - 1, last_year=day.year),
+                as_of=instant,
+            )
+        )
         try:
-            batch = fit.fitted.predict(section.cross_section, predicted_at=instant, shelf_life=None)
+            batch = fitted.predict(section.cross_section, predicted_at=instant, shelf_life=None)
         except (AlphaModelError, ValueError) as error:
             raise StrategyBacktestError(
                 f"the fit refitted on {fit.refit_day.isoformat()} could not score the cross "
                 f"section visible at {instant.isoformat()}: {error}"
             ) from error
-        fit_for_day[day] = fit
-        rows.extend(
+        return [
             ScoreRow(
                 component=MODEL_COMPONENT,
                 subject=prediction.ts_code,
@@ -1012,8 +1254,117 @@ def _model_rows(
             )
             for prediction in batch.predictions
             if prediction.score is not None
+        ]
+
+    def ic_observations_through(self, day: date) -> Sequence[ICObservation]:
+        return ()
+
+    def fit_on(self, day: date) -> WalkForwardFit | None:
+        while self._pending and self._pending[0] <= day:
+            self._fits.append(self._refit(self._pending.pop(0)))
+        return usable_fit(self._fits, signal_day=day)
+
+    def refits(self) -> tuple[WalkForwardFit, ...]:
+        return tuple(self._fits)
+
+    def _run(self, *, start: date, end: date, first_year: int, last_year: int) -> ModelRunRequest:
+        model = self._model
+        return ModelRunRequest(
+            declaration=model.declaration,
+            columns=self._request.columns,
+            missing=self._spec.missing,
+            start=start,
+            end=end,
+            as_of=self._request.as_of,
+            years=_years_around(self._years, first=first_year, last=last_year),
+            exchange=self._request.exchange,
+            horizon=self._horizon,
+            minimum_scored_ratio=0.0,
+            shelf_life=None,
+            config_digest=UNFILED_CONFIG_DIGEST,
+            declared_feature_version=None,
         )
-    return tuple(rows), fits, fit_for_day
+
+    def _refit(self, refit_day: date) -> WalkForwardFit:
+        spec, calendar = self._spec, self._calendar
+        at = self._position[refit_day]
+        first = max(at - spec.train_sessions + 1, 0)
+        newest = at - spec.embargo_sessions - spec.horizon_sessions - 2
+        for day in [day for day in self._window if self._position[day] < first]:
+            del self._window[day]
+        if newest >= first:
+            missing = [
+                calendar[index]
+                for index in range(first, newest + 1)
+                if calendar[index] not in self._window
+            ]
+            if missing:
+                deadline_day = calendar[at - spec.embargo_sessions]
+                panel = _from_the_model_plane(
+                    lambda: training_panel(
+                        self._store,
+                        self._run(
+                            start=missing[0],
+                            end=missing[-1],
+                            first_year=missing[0].year - 1,
+                            last_year=deadline_day.year,
+                        ),
+                        deadline=self._instants[deadline_day],
+                        cached_sessions=_cached_label_sessions(spec.horizon_sessions),
+                    )
+                )
+                by_day: dict[date, list[TrainingExample]] = {day: [] for day in missing}
+                for example in () if panel is None else panel.examples:
+                    by_day.setdefault(example.label.window.prediction_day, []).append(
+                        _held_example(example)
+                    )
+                self._window.update((day, tuple(rows)) for day, rows in by_day.items())
+        (fit,) = walk_forward_fits(
+            self._model,
+            [example for day in sorted(self._window) for example in self._window[day]],
+            feature_ids=self._feature_ids,
+            spec=spec,
+            calendar=calendar,
+            instants=self._instants,
+            refit_days=(refit_day,),
+        )
+        return fit
+
+
+def _held_example(example: TrainingExample) -> TrainingExample:
+    """`example` as a training window holds it: the same label, less the per-session chain.
+
+    `WindowReturn.per_session` is the audit trail `session_returns` checked, one link at a time,
+    when `label_outcome` built this label -- a check that has already passed or the label would
+    not exist. Nothing a fit reads comes from it: the target is `realized_return` (the adjusted
+    window return), the cutoff is the window's exit, and both are kept exactly. Dropping it is
+    what makes a whole-market two-year window fit in memory; see this module's fix-round notes.
+    """
+    label = example.label
+    if label.window_return is None or not label.window_return.per_session:
+        return example
+    return TrainingExample(
+        label=dataclasses.replace(
+            label, window_return=dataclasses.replace(label.window_return, per_session=())
+        ),
+        features=example.features,
+    )
+
+
+def _drained(feed: ScoreFeed, signal_days: frozenset[date], calendar: Sequence[date]) -> Any:
+    """The feed's whole answer at once -- the materialised twin of a streamed run."""
+    ordered = sorted(signal_days)
+    observations: list[ICObservation] = []
+    rows: list[ScoreRow] = []
+    fits: dict[date, WalkForwardFit] = {}
+    for day in ordered:
+        observations.extend(feed.ic_observations_through(day))
+        rows.extend(feed.rows_on(day))
+        fit = feed.fit_on(day)
+        if fit is not None:
+            fits[day] = fit
+    observations.extend(feed.ic_observations_through(calendar[-1]))
+    return tuple(rows), tuple(observations), feed.refits(), fits
 
 
 # --- sessions -----------------------------------------------------------------------------------
@@ -1039,13 +1390,27 @@ class _PanelDays:
             ),
             years=request.years,
         )
-        self.adjustments: Mapping[str, AdjustmentHistory] = _read(
-            lambda: load_adjustment_histories(
-                store, years=request.years, as_of=request.as_of, max_staleness=None
-            ),
-            store=store,
-            what="the adjustment factors",
-        )
+        self._adjustment_year: int | None = None
+        self._adjustments: Mapping[str, AdjustmentHistory] = {}
+
+    def adjustments(self, year: int) -> Mapping[str, AdjustmentHistory]:
+        """The adjustment histories a quote in `year` reads: that year's and the one before.
+
+        Two years rather than the range, so the factors held do not grow with the history; the
+        year before is what a name with no factor row yet this year carries forward from.
+        """
+        if self._adjustment_year != year:
+            store, request = self._store, self._request
+            years = _years_around(request.years, first=year - 1, last=year)
+            self._adjustments = _read(
+                lambda: load_adjustment_histories(
+                    store, years=years, as_of=request.as_of, max_staleness=None
+                ),
+                store=store,
+                what="the adjustment factors",
+            )
+            self._adjustment_year = year
+        return self._adjustments
 
     def session(self, day: date) -> tuple[dict[str, DailyBar], dict[str, PriceLimit]]:
         held = self._sessions.get(day)
@@ -1075,7 +1440,7 @@ class _PanelDays:
     def quote(self, day: date, subject: str) -> SessionQuote | None:
         bars, limits = self.session(day)
         bar, limit = bars.get(subject), limits.get(subject)
-        history = self.adjustments.get(subject)
+        history = self.adjustments(day.year).get(subject)
         if bar is None or limit is None or history is None:
             return None
         try:
@@ -1240,7 +1605,7 @@ class _IndustryDays(Mapping[date, Mapping[str, str]]):
                 store=store,
                 what=f"the industry cross section for {day.isoformat()}",
             )
-            self._held[day] = {code: answer.l1_code for code, answer in answers.items()}
+            self._held = {day: {code: answer.l1_code for code, answer in answers.items()}}
         return self._held[day]
 
     def __iter__(self) -> Iterator[date]:
@@ -1248,6 +1613,274 @@ class _IndustryDays(Mapping[date, Mapping[str, str]]):
 
     def __len__(self) -> int:
         return len(self._days)
+
+
+# --- the per-instant IC series (V2-P6-014, for V2-P6-008) ---------------------------------------
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ICSeriesRequest:
+    """One factor tier's daily IC series: which tier, which label, which correlation, which days.
+
+    Built by `ic_series_request`, which refuses a question that cannot be put before a store is
+    opened. `min_securities` is `FactorICSpec.min_securities` and has no default for its reason.
+    """
+
+    definition: FactorDefinition
+    tier: str
+    transform: FactorTransformSpec | None
+    neutralization: FactorNeutralizationSpec | None
+    horizon_sessions: int
+    ic_method: ICMethod
+    min_securities: int
+    start: date
+    end: date
+    as_of: datetime
+    exchange: str
+
+    @property
+    def years(self) -> tuple[int, ...]:
+        """Every partition year the prediction days touch, ascending."""
+        return tuple(range(self.start.year, self.end.year + 1))
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ICSeriesPoint:
+    """One prediction day's IC, as `factor_ic` measured it, and what its sample was.
+
+    `point` is `FactorICStudy.measure`'s own `ICPoint` -- coverage code, sample size, raw and
+    oriented IC -- and `census` is the `ICCensus` of the cross section it measured, so a day that
+    has no IC says why and a day that has one says how many names it stood on.
+    """
+
+    prediction_day: date
+    build: datetime
+    """The stored cross section measured: the newest build at or before the day's 16:30."""
+    known_at: datetime
+    """The later of that build's instant and the 16:30 of the session its label exits on."""
+    point: ICPoint
+    census: ICCensus
+
+    @property
+    def ic(self) -> float | None:
+        """The oriented IC (positive means the factor worked), or `None` when not measured."""
+        return self.point.ic
+
+    @property
+    def n_securities(self) -> int:
+        """How many labelled securities the correlation was taken over."""
+        return self.point.sample_size
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ICSeries:
+    """A factor tier's IC on every prediction day in the range it has a stored build for."""
+
+    request: ICSeriesRequest
+    points: tuple[ICSeriesPoint, ...]
+
+
+def ic_series_request(
+    *,
+    factor: str,
+    tier: str,
+    transform: str | None,
+    neutralization: str | None,
+    horizon_sessions: int,
+    ic_method: str,
+    min_securities: int,
+    start: date,
+    end: date,
+    as_of: datetime,
+    exchange: str,
+    transforms: FactorTransformRegistry = FACTOR_TRANSFORMS,
+    neutralizations: FactorNeutralizationRegistry = FACTOR_NEUTRALIZATIONS,
+) -> ICSeriesRequest:
+    """Resolve an IC-series question. Touches no store; every refusal is `bad_request`.
+
+    The transform and neutralization rules are `strategy_request`'s: a transform exactly when the
+    tier is `processed` or `neutralized`, a neutralization exactly when it is `neutralized`.
+    """
+    try:
+        definition = resolve_factor(factor.strip())
+    except FactorRequestError as error:
+        raise StrategyRequestError(str(error)) from error
+    if tier not in STRATEGY_TIERS:
+        raise StrategyRequestError(f"tier {tier!r} is not one of {list(STRATEGY_TIERS)}")
+    if (tier in ("processed", "neutralized")) != (transform is not None):
+        raise StrategyRequestError(
+            "transform is required exactly when the tier is processed or neutralized"
+        )
+    if (tier == "neutralized") != (neutralization is not None):
+        raise StrategyRequestError(
+            "neutralization is required exactly when the tier is neutralized"
+        )
+    if ic_method not in IC_METHODS:
+        raise StrategyRequestError(f"ic_method {ic_method!r} is not one of {sorted(IC_METHODS)}")
+    if min_securities < MINIMUM_IC_SECURITIES:
+        raise StrategyRequestError(
+            f"min_securities {min_securities} is below {MINIMUM_IC_SECURITIES}, the fewest names "
+            "a correlation is not decided by arithmetic alone"
+        )
+    if horizon_sessions < 1:
+        raise StrategyRequestError(f"horizon_sessions {horizon_sessions} must be at least 1")
+    if end < start:
+        raise StrategyRequestError(
+            f"--start {start.isoformat()} must not be after --end {end.isoformat()}; the end is "
+            "before the start"
+        )
+    if as_of.tzinfo is None or as_of.utcoffset() is None:
+        raise StrategyRequestError(f"as_of must be timezone-aware; got {as_of.isoformat()!r}")
+    try:
+        transform_spec = None if transform is None else transforms.get(transform.strip())
+        neutralization_spec = (
+            None if neutralization is None else neutralizations.get(neutralization.strip())
+        )
+    except ValueError as error:
+        raise StrategyRequestError(str(error)) from error
+    return ICSeriesRequest(
+        definition=definition,
+        tier=tier,
+        transform=transform_spec,
+        neutralization=neutralization_spec,
+        horizon_sessions=horizon_sessions,
+        ic_method=ic_method,  # type: ignore[arg-type]
+        min_securities=min_securities,
+        start=start,
+        end=end,
+        as_of=as_of,
+        exchange=exchange,
+    )
+
+
+def factor_ic_series(store: PanelStore, request: ICSeriesRequest) -> ICSeries:
+    """The tier's IC on every session in `[start, end]` it has a stored build for.
+
+    The same computation a trailing-IC source weighs with -- `_year_sections` picks each day's
+    build at its 16:30, `_measure_year` labels it through `model_view.OutcomeLabels` and measures
+    it with `ic_cross_section` and `FactorICStudy` -- so the series and the weights cannot
+    disagree. Each tier-year partition is read once and dropped before the next year's.
+
+    Refuses, as `blocked`, a range whose last label has not closed at `as_of`: those ICs do not
+    exist yet, and a series quietly cut short would read as a complete one.
+    """
+    try:
+        return _ic_series(store, request)
+    except StrategyBacktestError as error:
+        raise StrategyRunBlockedError(f"the IC series could not be measured: {error}") from error
+
+
+def _ic_series(store: PanelStore, request: ICSeriesRequest) -> ICSeries:
+    registered = set(store.registered_years(TRADING_CALENDAR_DATASET))
+    following = request.end.year + 1
+    years = (*request.years, *((following,) if following in registered else ()))
+    calendar = _read(
+        lambda: load_trading_calendar(
+            store, exchange=request.exchange, years=years, as_of=request.as_of
+        ),
+        store=store,
+        what=f"the {request.exchange} trading calendar",
+    )
+    sessions = calendar.trading_days
+    days = tuple(day for day in sessions if request.start <= day <= request.end)
+    if not days:
+        raise StrategyRunBlockedError(
+            f"{request.start.isoformat()}..{request.end.isoformat()} holds no open session"
+        )
+    exit_position = sessions.index(days[-1]) + 1 + request.horizon_sessions
+    if (
+        exit_position >= len(sessions)
+        or session_publication_instant(sessions[exit_position]) > request.as_of
+    ):
+        raise StrategyRunBlockedError(
+            f"the {request.horizon_sessions}-session label of {days[-1].isoformat()} has not "
+            f"closed at {request.as_of.isoformat()}: its exit session is not published yet, so "
+            "that IC does not exist. End the range earlier or read later"
+        )
+    instants = {day: session_publication_instant(day) for day in sessions}
+    pair = (request.definition.qualified_key, request.tier)
+    study = _ic_study(
+        request.definition, method=request.ic_method, min_securities=request.min_securities
+    )
+    names: dict[str, str] = {}
+    points: list[ICSeriesPoint] = []
+    for year in sorted({day.year for day in days}):
+        sections = {
+            pair: _year_sections(
+                store,
+                request,
+                request.definition,
+                request.tier,
+                year,
+                days=frozenset(day for day in days if day.year == year),
+                instants=instants,
+                names=names,
+            )
+        }
+        measured = _from_the_model_plane(
+            partial(
+                _measure_year,
+                store,
+                request,
+                exchange=request.exchange,
+                years=years,
+                year=year,
+                sections=sections,
+                studies={pair: study},
+                horizon=parse_horizon(f"{request.horizon_sessions}d"),
+                instants=instants,
+            )
+        )
+        points.extend(
+            ICSeriesPoint(
+                prediction_day=item.prediction_day,
+                build=item.build,
+                known_at=item.known_at,
+                point=item.point,
+                census=item.census,
+            )
+            for _, item in measured
+        )
+    return ICSeries(request=request, points=tuple(points))
+
+
+def ic_series_view(series: ICSeries) -> dict[str, object]:
+    """One IC series as plain JSON-shaped data: the question, then one row per prediction day."""
+    request = series.request
+    return {
+        "factor": request.definition.qualified_key,
+        "factor_id": request.definition.factor_id,
+        "tier": request.tier,
+        "transform": None if request.transform is None else request.transform.qualified_key,
+        "neutralization": (
+            None if request.neutralization is None else request.neutralization.qualified_key
+        ),
+        "horizon_sessions": request.horizon_sessions,
+        "ic_method": request.ic_method,
+        "min_securities": request.min_securities,
+        "start": request.start.isoformat(),
+        "end": request.end.isoformat(),
+        "as_of": request.as_of.isoformat(),
+        "points": [
+            {
+                "prediction_day": point.prediction_day.isoformat(),
+                "build": point.build.isoformat(),
+                "known_at": point.known_at.isoformat(),
+                "coverage": point.point.coverage,
+                "ic": point.ic,
+                "raw_ic": point.point.raw_ic,
+                "n_securities": point.n_securities,
+                "census": {
+                    "subject_count": point.census.subject_count,
+                    "admitted_count": point.census.admitted_count,
+                    "excluded_by_coverage": dict(point.census.excluded_by_coverage),
+                    "unlabelled_count": point.census.unlabelled_count,
+                    "unmatched_count": point.census.unmatched_count,
+                },
+            }
+            for point in series.points
+        ],
+    }
 
 
 # --- rendering ----------------------------------------------------------------------------------

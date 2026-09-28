@@ -21,7 +21,7 @@ import walk_forward_fixtures
 from import_linter_containment import contained_lint_imports
 from scratch_package import copy_package, lint_copy
 
-from openalpha_cn import cli
+from openalpha_cn import cli, model_view
 from openalpha_cn.api.app import MODEL_HTTP_STATUS
 from openalpha_cn.backtest.alpha_baseline import BASELINE_FAMILY, BaselineScorePoint, FoldEvaluation
 from openalpha_cn.backtest.alpha_tree import TREE_FAMILY
@@ -41,6 +41,8 @@ from openalpha_cn.model_view import (
     MODEL_PANEL_DATASETS,
     MODEL_VIEW_LIMITATION_CODES,
     PREDICTION_STANDING_MEANINGS,
+    UNFILED_CONFIG_DIGEST,
+    DailyRunRequest,
     EvaluationRequest,
     ModelEvaluation,
     ModelNotHeldError,
@@ -613,4 +615,54 @@ def test_the_label_error_arm_of_the_outcome_window_guard_cannot_fire_and_is_kept
             feature_version=f"feat_{'0' * 24}",
             seed=7,
             code_commit="abcdef1234567",
+        )
+
+
+# --- V2-P6-014: the placeholder digest a read-only request carries can never be filed -------------
+
+
+def test_the_unfiled_config_digest_is_refused_as_a_face_argument() -> None:
+    """`UNFILED_CONFIG_DIGEST` marks a `ModelRunRequest` built only to drive reads (the strategy
+    backtest's walk-forward source); a face asking with it would file a run nobody configured."""
+    with pytest.raises(ModelRequestError, match="UNFILED_CONFIG_DIGEST"):
+        model_evaluation_request(
+            columns=(
+                FeatureColumn(definition=FACTOR_DEFINITIONS.get("reversal_1d/v1"), tier="raw"),
+            ),
+            name="aggregation",
+            family=BASELINE_FAMILY,
+            horizon="5d",
+            seed=1,
+            start=date(2026, 1, 6),
+            end=date(2026, 1, 9),
+            as_of=datetime(2026, 1, 20, 4, 0, tzinfo=UTC),
+            years=(2026,),
+            exchange="SZSE",
+            folds=1,
+            test_days_per_fold=1,
+            embargo_sessions=0,
+            minimum_scored_ratio=0.0,
+            code_commit="abcdef1234567",
+            config_digest=UNFILED_CONFIG_DIGEST,
+        )
+
+
+def test_a_request_carrying_the_unfiled_digest_cannot_reach_a_run_manifest() -> None:
+    """Built directly -- as `strategy_view._ModelFeed` builds one -- it still cannot be filed."""
+    run = dataclasses.replace(_evaluation_request().run, config_digest=UNFILED_CONFIG_DIGEST)
+
+    class _NoRuns:
+        def get_run(self, run_id: str) -> None:
+            raise AssertionError("the guard must refuse before the store is asked")
+
+        def append_run(self, manifest: object) -> None:
+            raise AssertionError("the guard must refuse before anything is filed")
+
+    with pytest.raises(ModelRequestError, match="UNFILED_CONFIG_DIGEST"):
+        model_view._file_run(
+            _NoRuns(),  # type: ignore[arg-type]
+            run_id="daily-x",
+            request=DailyRunRequest(run=run, predict_at=datetime(2026, 1, 12, 8, 30, tzinfo=UTC)),
+            artifact_id="mdl_" + "0" * 24,
+            started_at=datetime(2026, 1, 12, 8, 30, tzinfo=UTC),
         )

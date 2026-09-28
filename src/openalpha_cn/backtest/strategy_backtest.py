@@ -87,7 +87,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
 from itertools import pairwise
-from typing import Final, Literal, Self, get_args
+from typing import Final, Literal, Protocol, Self, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -126,6 +126,7 @@ __all__ = [
     "ICObservation",
     "ModelFit",
     "PeriodResult",
+    "ScoreFeed",
     "ScoreRow",
     "ScoreSource",
     "ScoreSourceKind",
@@ -395,8 +396,11 @@ KNOWN_STRATEGY_BACKTEST_LIMITATIONS: Final[tuple[StrategyBacktestLimitation, ...
             "has no scores: the book neither buys nor sells, keeps what it holds, and marks the "
             "period held. That is the only arrangement that does not invent a ranking, and it "
             "makes an early period's return a return on cash and on whatever was already held. "
-            "A run on which EVERY signal day is held is refused rather than reported as a flat "
-            "result, because it answers nothing about the source."
+            "A held run is an answer: every weight clipped to zero, or a fit that abstained on "
+            "every name, is reported as the zero-trade run it is. Only a source that could not "
+            "answer on ANY signal day -- no factor with min_ic_observations known ICs, or no fit "
+            "in use -- is refused, with a diagnosis saying which, because that run measures the "
+            "lookback's length rather than the source."
         ),
         applies_to=DYNAMIC_SOURCE_KINDS,
     ),
@@ -412,7 +416,7 @@ KNOWN_STRATEGY_BACKTEST_LIMITATIONS: Final[tuple[StrategyBacktestLimitation, ...
             "observation. The mean is not shrunk, not scaled by its dispersion and not tested "
             "for significance, so a factor with three noisy ICs weighs as confidently as one "
             "with three hundred; min_ic_observations is the only guard. clip_to_zero turns a "
-            "negative mean into an abstention; keep_sign trades the factor reversed. A weight "
+            "negative mean into a zero weight; keep_sign trades the factor reversed. A weight "
             "of zero, abstained or clipped, takes the factor out of that day's ranking."
         ),
         applies_to=frozenset({"trailing_ic"}),
@@ -422,8 +426,9 @@ KNOWN_STRATEGY_BACKTEST_LIMITATIONS: Final[tuple[StrategyBacktestLimitation, ...
         detail=(
             "A fit on refit session r trains on the prediction days among the train_sessions "
             "sessions ending at r whose label is known strictly before the 16:30 of the session "
-            "embargo_sessions before r, so at least embargo_sessions + horizon_sessions + 1 of "
-            "the most recent sessions never train. Refits fall every refit_every_sessions "
+            "embargo_sessions before r, so the embargo_sessions + horizon_sessions + 2 most "
+            "recent sessions, r itself included, never train. Refits fall every "
+            "refit_every_sessions "
             "sessions from the backtest's first session, and the fit in use on a signal day is "
             "the newest one refitted on or before it; the book refuses any fit whose own "
             "training cutoff is not known strictly before the session embargo_sessions before "
@@ -965,9 +970,30 @@ class WalkForwardFit:
         )
 
 
+class ScoreFeed(Protocol):
+    """Where a streamed backtest's scores come from, one signal day at a time (`V2-P6-014`).
+
+    The book asks in signal-day order and asks about each day once, so a feed may read what a
+    period needs when it is asked and drop it afterwards; memory is then bounded by a window
+    rather than by the history. Each method is the streamed twin of a `StrategyInputs` field.
+    """
+
+    def rows_on(self, day: date) -> Sequence[ScoreRow]:
+        """Every score row dated `day` (a signal day), for every declared component."""
+
+    def ic_observations_through(self, day: date) -> Sequence[ICObservation]:
+        """The ICs whose prediction day is at or before `day`, not handed over before."""
+
+    def fit_on(self, day: date) -> WalkForwardFit | None:
+        """The walk-forward fit `day`'s model rows were scored by, or `None` (no fit yet)."""
+
+    def refits(self) -> tuple[WalkForwardFit, ...]:
+        """Every refit made so far, fitted or refused, in refit order."""
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class StrategyInputs:
-    """Everything a backtest reads, already out of the panel.
+    """Everything a backtest reads, already out of the panel -- or a feed that reads it.
 
     `sessions` are the open sessions of the range, ascending; the first is the first signal
     day. `signal_instants` is each session's signal instant -- the lookback's too, when there is
@@ -979,6 +1005,10 @@ class StrategyInputs:
     sessions before `sessions[0]` a trailing or training window may reach, ascending.
     `ic_observations` are a trailing-IC source's daily ICs. `model_fits` is every refit of a
     walk-forward source and `fit_for_day` the one each signal day's model rows were scored by.
+
+    `feed` replaces the four score fields with a `ScoreFeed`, which the view uses so a run holds
+    one period's scores at a time. A run over a feed and a run over the same scores materialised
+    into the four fields are the same run.
     """
 
     source: ScoreSource
@@ -992,6 +1022,7 @@ class StrategyInputs:
     ic_observations: tuple[ICObservation, ...] = ()
     model_fits: tuple[WalkForwardFit, ...] = ()
     fit_for_day: Mapping[date, WalkForwardFit] = field(default_factory=dict)
+    feed: ScoreFeed | None = None
 
     def __post_init__(self) -> None:
         if len(self.sessions) < 2:
@@ -1003,6 +1034,12 @@ class StrategyInputs:
             raise StrategyBacktestError(
                 "sessions must be strictly ascending, and every lookback session before them"
             )
+        if self.feed is not None and (
+            self.scores or self.ic_observations or self.model_fits or self.fit_for_day
+        ):
+            raise StrategyBacktestError(
+                "scores come from the feed or from the four score fields, not from both"
+            )
 
     @property
     def calendar(self) -> tuple[date, ...]:
@@ -1010,17 +1047,51 @@ class StrategyInputs:
         return self.lookback_sessions + self.sessions
 
 
+class _MaterialisedFeed:
+    """A `ScoreFeed` over scores already held in `StrategyInputs`' four fields."""
+
+    def __init__(self, inputs: StrategyInputs, signal_days: frozenset[date]) -> None:
+        self._rows: dict[date, list[ScoreRow]] = {}
+        for row in inputs.scores:
+            if row.signal_day in signal_days:
+                self._rows.setdefault(row.signal_day, []).append(row)
+        self._observations = sorted(inputs.ic_observations, key=lambda item: item.prediction_day)
+        self._handed = 0
+        self._fits = inputs.fit_for_day
+        self._refits = inputs.model_fits
+
+    def rows_on(self, day: date) -> Sequence[ScoreRow]:
+        return self._rows.pop(day, [])
+
+    def ic_observations_through(self, day: date) -> Sequence[ICObservation]:
+        end = self._handed
+        while end < len(self._observations) and self._observations[end].prediction_day <= day:
+            end += 1
+        handed, self._handed = self._observations[self._handed : end], end
+        return handed
+
+    def fit_on(self, day: date) -> WalkForwardFit | None:
+        return self._fits.get(day)
+
+    def refits(self) -> tuple[WalkForwardFit, ...]:
+        return self._refits
+
+
 def run_strategy_backtest(inputs: StrategyInputs, spec: StrategySpec) -> StrategyBacktest:
     """Run the book over every period `inputs` spans and return the answer.
 
     Signal days are `sessions[0]`, `sessions[R]`, `sessions[2R]`, ... for as long as a session
-    follows to trade on, where `R = spec.rebalance_every_sessions`. Refuses, with
-    `StrategyBacktestError`: a signal day with no signal instant, a score row that was not
-    visible at its signal day's instant, a row naming a component the source does not declare,
-    a signal day on which some weighted component has no cross section or a degenerate one, and
-    a benchmark with no return for some session a period spans. For the two dynamic kinds it
-    also refuses a walk-forward fit not closed by its signal's embargo deadline, model rows on a
-    day no fit is named for, and a run on which every signal day is held.
+    follows to trade on, where `R = spec.rebalance_every_sessions`. Each signal day's scores are
+    asked for when its period is booked and not before, so a streamed feed holds one period at a
+    time. Refuses, with `StrategyBacktestError`: a signal day with no signal instant, a score row
+    that was not visible at its signal day's instant, a row naming a component the source does
+    not declare, a signal day on which some weighted component has no cross section or a
+    degenerate one, and a benchmark with no return for some session a period spans. For the two
+    dynamic kinds it also refuses a walk-forward fit not closed by its signal's embargo deadline,
+    model rows on a day no fit is named for, and a source that could not answer at all
+    (`_Scorer.refuse_a_source_that_never_answered`). A source that answered and chose to trade
+    nothing -- every trailing weight clipped to zero, a fit that abstained on every name -- is an
+    answer, and is reported.
     """
     missing = [name for name in spec.benchmarks if name not in inputs.benchmark_returns]
     if missing:
@@ -1028,7 +1099,8 @@ def run_strategy_backtest(inputs: StrategyInputs, spec: StrategySpec) -> Strateg
     sessions = inputs.sessions
     signal_indices = tuple(range(0, len(sessions) - 1, spec.rebalance_every_sessions))
     signal_days = frozenset(sessions[index] for index in signal_indices)
-    signals = _signals(inputs, signal_days)
+    feed: ScoreFeed = inputs.feed or _MaterialisedFeed(inputs, signal_days)
+    scorer = _Scorer(inputs, feed)
     book = _Book(spec=spec, cash=spec.initial_capital)
     periods: list[PeriodResult] = []
     for index in signal_indices:
@@ -1040,15 +1112,17 @@ def run_strategy_backtest(inputs: StrategyInputs, spec: StrategySpec) -> Strateg
                 book,
                 signal_index=index,
                 end_index=end_index,
-                signal=signals[sessions[index]],
+                signal=scorer.signal(sessions[index]),
             )
         )
+    refits = feed.refits()
+    scorer.refuse_a_source_that_never_answered(len(signal_indices), refits)
     return StrategyBacktest(
         spec=spec,
         source=inputs.source,
         periods=tuple(periods),
         limitations=limitation_codes_for(inputs.source.kind),
-        model_fits=tuple(fit.record for fit in inputs.model_fits),
+        model_fits=tuple(fit.record for fit in refits),
     )
 
 
@@ -1064,36 +1138,78 @@ class _Signal:
     model_fit: ModelFit | None = None
 
 
-def _signals(inputs: StrategyInputs, signal_days: frozenset[date]) -> dict[date, _Signal]:
-    """Each signal day's ranking under the source's kind, after every point-in-time guard."""
-    source = inputs.source
-    by_day = _cross_sections(inputs, signal_days)
-    ordered = sorted(signal_days)
-    if source.trailing_ic is not None:
-        index = _ICIndex(source.trailing_ic, inputs.ic_observations, calendar=inputs.calendar)
-        signals: dict[date, _Signal] = {}
-        for day in ordered:
-            weights = index.weights(day, instant=_instant(inputs, day))
-            active = {item.component: item.weight for item in weights if item.weight != 0.0}
-            ranked = _rank(day, by_day[day], active, source.combine) if active else None
-            signals[day] = _Signal(ranked=ranked, ic_weights=weights)
-    elif source.walk_forward is not None:
-        signals = {
-            day: _model_signal(inputs, source.walk_forward, day, by_day[day]) for day in ordered
-        }
-    else:
-        fixed = {key: float(weight) for key, weight in source.weights.items()}
-        return {
-            day: _Signal(ranked=_rank(day, by_day[day], fixed, source.combine)) for day in ordered
-        }
-    if all(signal.ranked is None for signal in signals.values()):
-        raise StrategyBacktestError(
-            f"the {source.kind} source has no scores on any of the {len(signals)} signal days, "
-            "so there is no signal day it ranked; a backtest that held cash throughout answers "
-            "nothing about the source -- lengthen the lookback, lower the floors or move the "
-            "range later"
+class _Scorer:
+    """Each signal day's ranking under the source's kind, asked for in signal-day order.
+
+    Also keeps the one fact the end of the run needs: whether the source could answer on any
+    signal day at all -- a trailing factor with at least `min_ic_observations` known ICs, or a
+    walk-forward fit in use.
+    """
+
+    def __init__(self, inputs: StrategyInputs, feed: ScoreFeed) -> None:
+        self._inputs = inputs
+        self._feed = feed
+        source = inputs.source
+        self._index = (
+            None
+            if source.trailing_ic is None
+            else _ICIndex(source.trailing_ic, calendar=inputs.calendar)
         )
-    return signals
+        self._answered = False
+        self._most_known = 0
+
+    def signal(self, day: date) -> _Signal:
+        inputs, source = self._inputs, self._inputs.source
+        if self._index is not None:
+            self._index.add(self._feed.ic_observations_through(day))
+        components = _cross_section(inputs, day, self._feed.rows_on(day))
+        if self._index is not None:
+            spec = source.trailing_ic
+            assert spec is not None  # the index exists only for a trailing-IC source
+            weights = self._index.weights(day, instant=_instant(inputs, day))
+            self._most_known = max([self._most_known, *(item.observations for item in weights)])
+            if any(item.observations >= spec.min_ic_observations for item in weights):
+                self._answered = True
+            active = {item.component: item.weight for item in weights if item.weight != 0.0}
+            ranked = _rank(day, components, active, source.combine) if active else None
+            return _Signal(ranked=ranked, ic_weights=weights)
+        if source.walk_forward is not None:
+            fit = self._feed.fit_on(day)
+            if fit is not None:
+                self._answered = True
+            return _model_signal(inputs, source.walk_forward, day, components, fit)
+        fixed = {key: float(weight) for key, weight in source.weights.items()}
+        return _Signal(ranked=_rank(day, components, fixed, source.combine))
+
+    def refuse_a_source_that_never_answered(
+        self, signal_count: int, refits: Sequence[WalkForwardFit]
+    ) -> None:
+        """Refuse a dynamic source that could not answer on any signal day, saying which way.
+
+        Not a source that answered "trade nothing": a trailing factor whose known ICs are all
+        clipped to zero, or a fit that abstained on every security, is a legitimate zero-trade
+        answer and is reported. What is refused is a source with nothing to answer WITH on every
+        one of the run's signal days -- no factor with `min_ic_observations` known ICs, or no fit
+        in use -- because that run measures the lookback's length, not the source.
+        """
+        source = self._inputs.source
+        if self._answered or source.kind not in DYNAMIC_SOURCE_KINDS:
+            return
+        if source.trailing_ic is not None:
+            floor = source.trailing_ic.min_ic_observations
+            raise StrategyBacktestError(
+                f"the trailing-IC source could not answer on any of the {signal_count} signal "
+                f"days: no component had min_ic_observations={floor} ICs known at any signal "
+                f"instant (the most any component knew was {self._most_known}). Lengthen the "
+                "lookback, lower min_ic_observations or start the range later"
+            )
+        reasons = sorted({fit.refusal for fit in refits if fit.refusal is not None})
+        raise StrategyBacktestError(
+            f"the walk-forward source could not answer on any of the {signal_count} signal days: "
+            f"no admissible fit was in use on any of them ({len(refits)} refit(s), "
+            f"{sum(fit.fitted is not None for fit in refits)} fitted; refusals: {reasons}). "
+            "Lengthen the lookback, shorten train_sessions or start the range later"
+        )
 
 
 def _instant(inputs: StrategyInputs, day: date) -> datetime:
@@ -1108,8 +1224,8 @@ def _model_signal(
     spec: WalkForwardModel,
     day: date,
     components: Mapping[str, Mapping[str, float]],
+    fit: WalkForwardFit | None,
 ) -> _Signal:
-    fit = inputs.fit_for_day.get(day)
     rows = components.get(MODEL_COMPONENT)
     if fit is not None:
         _refuse_a_fit_not_closed_by_the_embargo(inputs, spec, fit, day)
@@ -1162,28 +1278,29 @@ def _refuse_a_fit_not_closed_by_the_embargo(
         )
 
 
-def _cross_sections(
-    inputs: StrategyInputs, signal_days: frozenset[date]
-) -> dict[date, dict[str, dict[str, float]]]:
-    """Each signal day's cross section per component, after the look-ahead guard.
+def _cross_section(
+    inputs: StrategyInputs, day: date, rows: Sequence[ScoreRow]
+) -> dict[str, dict[str, float]]:
+    """One signal day's cross section per component, after the look-ahead guard.
 
-    Rows dated on a session that is not a signal day are never read: no rebalance happens there,
+    Only the signal day's own rows are ever asked for: no rebalance happens on another session,
     so nothing could trade on them.
     """
     keys = inputs.source.component_keys
-    by_day: dict[date, dict[str, dict[str, float]]] = {day: {} for day in signal_days}
-    for row in inputs.scores:
-        if row.signal_day not in signal_days:
-            continue
+    instant = inputs.signal_instants.get(day)
+    if instant is None:
+        raise StrategyBacktestError(f"signal day {day.isoformat()} has no signal instant")
+    by_component: dict[str, dict[str, float]] = {}
+    for row in rows:
+        if row.signal_day != day:
+            raise StrategyBacktestError(
+                f"a score row dated {row.signal_day.isoformat()} was handed over for "
+                f"{day.isoformat()}"
+            )
         if row.component not in keys:
             raise StrategyBacktestError(
                 f"a score row names component {row.component!r} and the source declares no "
                 f"component by that key; it declares {sorted(keys)}"
-            )
-        instant = inputs.signal_instants.get(row.signal_day)
-        if instant is None:
-            raise StrategyBacktestError(
-                f"signal day {row.signal_day.isoformat()} has no signal instant"
             )
         if row.available_time > instant or row.revision_time > instant:
             raise StrategyBacktestError(
@@ -1193,13 +1310,13 @@ def _cross_sections(
                 f"{row.revision_time.isoformat()}. Trading on it would be look-ahead; build the "
                 "cross section at or before the signal instant"
             )
-        cross_section = by_day[row.signal_day].setdefault(row.component, {})
+        cross_section = by_component.setdefault(row.component, {})
         if row.subject in cross_section:
             raise StrategyBacktestError(
                 f"{row.subject} has two {row.component} scores on {row.signal_day.isoformat()}"
             )
         cross_section[row.subject] = row.value
-    return by_day
+    return by_component
 
 
 def _rank(
@@ -1253,28 +1370,34 @@ def _rank_fractions(values: Sequence[float]) -> tuple[float, ...]:
 class _ICIndex:
     """One trailing-IC source's observations, indexed by component and calendar position.
 
-    Built once per backtest so each signal day reads only its own window; the rule itself is
-    `weights`, and `trailing_ic_weights` is the same rule for one day.
+    Filled incrementally -- a streamed run adds each year's ICs as it reaches them -- so each
+    signal day reads only its own window; the rule itself is `weights`, and
+    `trailing_ic_weights` is the same rule for one day.
     """
 
     def __init__(
         self,
         spec: TrailingICWeights,
-        observations: Sequence[ICObservation],
+        observations: Sequence[ICObservation] = (),
         *,
         calendar: Sequence[date],
     ) -> None:
         self._spec = spec
         self._position = {day: index for index, day in enumerate(calendar)}
-        entries: dict[str, list[tuple[int, datetime, float | None]]] = {
+        self._entries: dict[str, list[tuple[int, datetime, float | None]]] = {
             key: [] for key in spec.component_keys
         }
-        seen: set[tuple[str, date]] = set()
+        self._positions: dict[str, list[int]] = {key: [] for key in spec.component_keys}
+        self._seen: set[tuple[str, date]] = set()
+        self.add(observations)
+
+    def add(self, observations: Sequence[ICObservation]) -> None:
+        """Index more observations, refusing a foreign component, a stray day or a repeat."""
         for item in observations:
-            if item.component not in entries:
+            if item.component not in self._entries:
                 raise StrategyBacktestError(
                     f"an IC observation names component {item.component!r} and the source "
-                    f"declares no component by that key; it declares {sorted(entries)}"
+                    f"declares no component by that key; it declares {sorted(self._entries)}"
                 )
             position = self._position.get(item.prediction_day)
             if position is None:
@@ -1282,16 +1405,15 @@ class _ICIndex:
                     f"{item.component}'s IC is dated {item.prediction_day.isoformat()}, which is "
                     "not a session of the calendar the trailing window is counted on"
                 )
-            if (item.component, item.prediction_day) in seen:
+            if (item.component, item.prediction_day) in self._seen:
                 raise StrategyBacktestError(
                     f"{item.component} carries two ICs on {item.prediction_day.isoformat()}"
                 )
-            seen.add((item.component, item.prediction_day))
-            entries[item.component].append((position, item.known_at, item.ic))
-        self._entries = {key: sorted(rows, key=lambda row: row[0]) for key, rows in entries.items()}
-        self._positions = {
-            key: [position for position, _known, _ic in rows] for key, rows in self._entries.items()
-        }
+            self._seen.add((item.component, item.prediction_day))
+            positions = self._positions[item.component]
+            at = bisect_right(positions, position)
+            positions.insert(at, position)
+            self._entries[item.component].insert(at, (position, item.known_at, item.ic))
 
     def weights(self, day: date, *, instant: datetime) -> tuple[TrailingICWeight, ...]:
         """Each component's weight on `day`: the mean of the ICs in its window known by `instant`.

@@ -134,7 +134,10 @@ from openalpha_cn.strategy_view import (
     PROTOCOL_PARTICIPATION_CAP,
     PROTOCOL_POSITION_CAPITAL,
     PROTOCOL_SLIPPAGE_RATE,
+    ICSeries,
     backtest_strategy,
+    factor_ic_series,
+    ic_series_request,
     strategy_request,
 )
 
@@ -1311,6 +1314,46 @@ class OpenAlphaSDK:
         return backtest_strategy(
             panel_store(self.runtime_dir), request, predictions=self.prediction_store.get
         )
+
+    def factor_ic_series(
+        self,
+        *,
+        factor: str,
+        tier: str,
+        horizon_sessions: int,
+        ic_method: str,
+        min_securities: int,
+        start: date,
+        end: date,
+        as_of: datetime,
+        exchange: str,
+        transform: str | None = None,
+        neutralization: str | None = None,
+    ) -> ICSeries:
+        """One factor tier's IC on every prediction day in a range (`V2-P6-014`, for `V2-P6-008`).
+
+        One point per session in `start..end` with a stored build: `factor_ic`'s own `ICPoint`
+        (coverage code, sample size, raw and oriented IC) and the `ICCensus` of the cross section
+        it measured -- the per-instant series a research runner needs for a p-value, computed by
+        the same code a trailing-IC score source weighs with. Resolved by
+        `strategy_view.ic_series_request` and measured by `strategy_view.factor_ic_series`;
+        `strategy_view.ic_series_view(result)` is its JSON rendering. Raises a
+        `strategy_view.StrategyViewError` subclass on the strategy face's three rows.
+        """
+        request = ic_series_request(
+            factor=factor,
+            tier=tier,
+            transform=transform,
+            neutralization=neutralization,
+            horizon_sessions=horizon_sessions,
+            ic_method=ic_method,
+            min_securities=min_securities,
+            start=start,
+            end=end,
+            as_of=as_of,
+            exchange=exchange,
+        )
+        return factor_ic_series(panel_store(self.runtime_dir), request)
 
     def replay(
         self,

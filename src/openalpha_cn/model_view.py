@@ -275,6 +275,7 @@ __all__ = [
     "MODEL_VIEW_LIMITATION_CODES",
     "MODEL_VIEW_SCHEMA_VERSION",
     "PREDICTION_STANDING_MEANINGS",
+    "UNFILED_CONFIG_DIGEST",
     "AlphaModelFactory",
     "DailyRunRequest",
     "DailyRunResult",
@@ -317,6 +318,15 @@ __all__ = [
 ]
 
 MODEL_VIEW_SCHEMA_VERSION: Final[str] = "model-view/v1"
+
+UNFILED_CONFIG_DIGEST: Final[str] = "0" * 64
+"""The `ModelRunRequest.config_digest` of a request that drives reads and never files a run.
+
+`V2-P6-014`'s strategy backtest builds `ModelRunRequest`s to reuse this module's training
+assembly and feature reads, and a backtest writes no `RunManifest`. The value is reserved so it
+can never reach one: `_model_request` refuses it from a face, and `_file_run` refuses a request
+carrying it -- a placeholder that could be filed would be a reproducibility claim nothing made.
+"""
 """The version of the envelopes `evaluation_view` and `daily_view` render, carried in the body.
 
 `shortlist_view.SHORTLIST_VIEW_SCHEMA_VERSION`'s reason: the sealed records underneath already
@@ -1313,6 +1323,11 @@ def _model_request(
             f"config_digest {config_digest!r} is not a 64-character hex digest; RunManifest "
             "requires one and a daily run files a manifest under it"
         )
+    if config_digest == UNFILED_CONFIG_DIGEST:
+        raise ModelRequestError(
+            "config_digest is the reserved UNFILED_CONFIG_DIGEST, which marks a request that "
+            "files no run; a daily run's manifest needs the digest of a real configuration"
+        )
     return ModelRunRequest(
         declaration=declaration,
         columns=tuple(columns),
@@ -1820,9 +1835,13 @@ def training_panel(
 
     `V2-P6-014`'s walk-forward model draws each refit's examples from this panel, narrowing it
     further by its own embargo rule. `None` when no cross section's outcome had closed, which is
-    a statement about history (no fit is possible yet) rather than a refusal.
+    a statement about history (no fit is possible yet) rather than a refusal -- and so, for the
+    same reason, is a range holding no stored build at all.
     """
-    matrix = _matrix(store, run, as_ofs=_prediction_instants(store, run))
+    instants = _instants_in_range(store, run)
+    if not instants:
+        return None
+    matrix = _matrix(store, run, as_ofs=instants)
     inputs = _LabelInputs(store, run, cached_sessions=cached_sessions)
     closed = _cross_sections_whose_outcome_had_closed(
         inputs, sections=matrix.sections, horizon=run.horizon, deadline=deadline
@@ -1844,6 +1863,20 @@ def _prediction_instants(store: PanelStore, request: ModelRunRequest) -> tuple[d
 
     Three steps, and each is a rule borrowed rather than invented. See this module's docstring.
     """
+    newest = _instants_in_range(store, request)
+    if not newest:
+        raise ModelRunBlockedError(
+            f"no stored cross section of {list(request.feature_ids)} falls between "
+            f"{request.start.isoformat()} and {request.end.isoformat()} and is visible at "
+            f"{request.as_of.isoformat()}. A walk-forward over no prediction day is an empty "
+            "success -- build the declared columns over that range with `openalpha factor "
+            "build`, or widen it"
+        )
+    return newest
+
+
+def _instants_in_range(store: PanelStore, request: ModelRunRequest) -> tuple[datetime, ...]:
+    """`_prediction_instants` without its refusal: `()` when the range holds no stored build."""
     try:
         stored = stored_cross_section_instants(
             store, columns=request.columns, years=request.years, as_of=request.as_of
@@ -1861,14 +1894,6 @@ def _prediction_instants(store: PanelStore, request: ModelRunRequest) -> tuple[d
         day = instant.astimezone(MODEL_DATE_ZONE).date()
         if request.start <= day <= request.end:
             newest[day] = instant
-    if not newest:
-        raise ModelRunBlockedError(
-            f"no stored cross section of {list(request.feature_ids)} falls between "
-            f"{request.start.isoformat()} and {request.end.isoformat()} and is visible at "
-            f"{request.as_of.isoformat()}. A walk-forward over no prediction day is an empty "
-            "success -- build the declared columns over that range with `openalpha factor "
-            "build`, or widen it"
-        )
     # Not sorted, and a mutation sweep is what settled that. `sorted(newest.items())` here
     # survived every test, because it cannot change the answer: `stored_cross_section_instants`
     # returns ascending instants, `astimezone(...).date()` is monotone in the instant, and a
@@ -2330,6 +2355,11 @@ def _file_run(
     raising `DuplicateRecordError` on the second of two stores that were both meant to be
     idempotent.
     """
+    if request.run.config_digest == UNFILED_CONFIG_DIGEST:
+        raise ModelRequestError(
+            "this request carries UNFILED_CONFIG_DIGEST, the reserved digest of a request that "
+            "drives reads only; it cannot be filed as a run"
+        )
     held = runs.get_run(run_id)
     if held is not None:
         return held, "unchanged"
