@@ -37,6 +37,7 @@ from typing import Any
 
 import pytest
 
+from openalpha_cn.domain.industry_classification import INDUSTRY_MEMBERSHIP_DATASET
 from openalpha_cn.domain.price_limits import KNOWN_SUSPENSION_LIMITATIONS, PRICE_LIMIT_DATASET
 from openalpha_cn.providers.base import ProviderFailure, ProviderRequest
 from openalpha_cn.providers.tushare import (
@@ -147,19 +148,21 @@ def _provider(transport: Any, **kwargs: Any) -> TushareProvider:
 # --- the descriptor invariant ---------------------------------------------------------------
 
 
-def test_exactly_one_descriptor_declares_a_page_size_and_it_is_the_one_running_out_of_room() -> (
-    None
-):
+def test_the_descriptors_that_page_are_pinned_by_name_each_behind_its_own_measurement() -> None:
     """Pinned by equality, not by membership, so a later descriptor cannot acquire paging
     without this test being edited -- the shape `requires_truncation_flag` is already pinned
     with, and for the same reason: `page_size` is a claim that `offset` was *measured* to
     partition this endpoint's answer, and it is measurably false for at least one endpoint on
     this API (`namechange`: two 10,000-row pages return 380 duplicated rows and lose one the
-    per-`ts_code` query finds)."""
-    paged = {entry.dataset for entry in TUSHARE_DATASETS if entry.page_size is not None}
+    per-`ts_code` query finds).
 
-    assert paged == {PRICE_LIMIT_DATASET}
-    assert _descriptor(PRICE_LIMIT_DATASET).page_size == 4000
+    Two since `V2-P6-011`: `stk_limit`, the cross section running out of room (2026-08-10), and
+    `index_member_all`, whose whole-market `is_new` states were paged twice at `limit=3000` and
+    twice at `limit=2999` on 2026-09-28 and came back equal, row for row and in the same order,
+    to the 62 `(l1_code, is_new)` slices taken as the reference."""
+    paged = {entry.dataset: entry.page_size for entry in TUSHARE_DATASETS if entry.page_size}
+
+    assert paged == {PRICE_LIMIT_DATASET: 4000, INDUSTRY_MEMBERSHIP_DATASET: 2999}
 
 
 def test_a_page_size_without_the_truncation_flag_is_refused_at_construction() -> None:

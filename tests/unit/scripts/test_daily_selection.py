@@ -758,6 +758,12 @@ def test_an_industry_cap_refreshed_on_rebalance_days_scores_as_a_daily_full_refr
             assert one[key] == other[key], (day, key)
         due = one["targets"]["decision"] == "rebalanced"
         assert (bool(asked_one & INDUSTRY_APIS)) == due, day
+        if offset:
+            # A stored corpus to check against: the two whole-market states, not the slices.
+            assert daily_refresh.market.asked(INDUSTRY_MEMBERSHIP_DATASET) == [
+                {"is_new": "Y"},
+                {"is_new": "N"},
+            ]
         assert set(daily_refresh.market.payloads) >= INDUSTRY_APIS
         assert (one["candidates"]["industries_read"] > 0) == due
         answers[day] = {
@@ -780,11 +786,58 @@ def test_an_industry_cap_refreshed_on_rebalance_days_scores_as_a_daily_full_refr
     assert answers[fresh]["cadence"][SECURITIES[2]] == L1_CODES[1]
     assert SECURITIES[5] in answers[fresh]["cadence"]
     # Budget: the first day fetches six sessions; after it, two sessions (the overlap and the
-    # new one) of the five price APIs plus the calendar and the registry -- and, on a rebalance
-    # day, the tree (two vintages) and the memberships (two states per level-one industry).
-    industries = 2 + 2 * len(L1_CODES)
-    assert counts["cadence"] == [2 + 5 * 6 + industries, 12 + industries, 12, 12 + industries, 12]
-    assert counts["daily"] == [2 + 5 * 6 + industries] + [12 + industries] * 4
+    # new one) of the five price APIs plus the calendar and the registry -- and, on a day that
+    # reads industries, the tree (two vintages) and the memberships: two states per level-one
+    # industry the first time, with no stored corpus to check a whole-market answer against,
+    # and the two whole-market states after that.
+    first, later = 2 + 2 * len(L1_CODES), 2 + 2
+    assert counts["cadence"] == [2 + 5 * 6 + first, 12 + later, 12, 12 + later, 12]
+    assert counts["daily"] == [2 + 5 * 6 + first] + [12 + later] * 4
+
+
+@pytest.mark.parametrize("fault", ["lost", "doubled"])
+def test_a_whole_market_answer_that_fails_the_self_check_is_fetched_again_as_slices(
+    fault: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The self-check costs budget, never correctness.
+
+    Day one stores the corpus from the slices. On day two the whole-market current answer loses
+    a row (the page gap a close between two pages leaves) or serves one twice (the overlap an
+    arrival leaves); every slice stays right. The day still clears, the membership store answers
+    what day one's did for every security, and the `BUDGET` line says why the slices were asked
+    for and what they cost."""
+    world = _world(tmp_path, monkeypatch, Market(open_days=OPEN_2026, whole_market_fault=fault))
+    every_day = (*TARGETS, *daily.INDUSTRY_TARGETS)
+
+    code, _first, err = _run(world, capsys, targets=every_day)
+    assert code == 0, err
+    assert all("l1_code" in one for one in world.market.asked(INDUSTRY_MEMBERSHIP_DATASET))
+    before = _industries(world, session_publication_instant(DAY))
+    world.market.clear()
+
+    code, second, err = _run(
+        world,
+        capsys,
+        as_of=DAY_AS_OF + timedelta(days=1),
+        clock=RUN_CLOCK + timedelta(days=1),
+        targets=every_day,
+        monkeypatch=monkeypatch,
+    )
+
+    assert code == 0, err
+    asked = world.market.asked(INDUSTRY_MEMBERSHIP_DATASET)
+    assert asked[:2] == [{"is_new": "Y"}, {"is_new": "N"}]
+    assert sorted((one["l1_code"], one["is_new"]) for one in asked[2:]) == sorted(
+        (level_one, state) for level_one in L1_CODES for state in ("Y", "N")
+    )
+    assert second["this_run"]["requests"][INDUSTRY_MEMBERSHIP_DATASET] == 2 + 2 * len(L1_CODES)
+    (fallback,) = [line for line in second["panel"]["budget"] if "self-check" in line]
+    assert fallback.startswith(f"BUDGET {INDUSTRY_MEMBERSHIP_DATASET} {2 * len(L1_CODES)} ")
+    after = _industries(world, session_publication_instant(DAY + timedelta(days=1)))
+    assert before and after == before
 
 
 # --- across New Year -----------------------------------------------------------------------------

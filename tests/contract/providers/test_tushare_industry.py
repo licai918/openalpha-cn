@@ -312,6 +312,135 @@ def test_an_unknown_membership_state_is_refused(fake_tushare_transport) -> None:
         )
 
 
+class _StatePagingTransport:
+    """Serves one membership state's whole answer and honours `limit`/`offset`, as measured.
+
+    Live on 2026-09-28: `index_member_all(is_new=Y)` answers 3,000 rows with `has_more=True`,
+    and `limit=2999` pages at `offset=0` and `offset=2999` answer 2,999 + 2,915 rows ending
+    `has_more=False` -- twice, in the same order, equal row for row to the 62 `(l1_code, is_new)`
+    slices. `mutate` runs once after the first page, to stand for a membership change landing
+    between two requests.
+    """
+
+    def __init__(self, rows: list[list[Any]], *, mutate: Any = None) -> None:
+        self.rows = rows
+        self.mutate = mutate
+        self.payloads: list[dict[str, Any]] = []
+
+    def post(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.payloads.append(payload)
+        params = payload["params"]
+        offset = int(params.get("offset", 0))
+        limit = int(params["limit"]) if "limit" in params else TUSHARE_INDUSTRY_MEMBER_ROW_CAP
+        limit = min(limit, TUSHARE_INDUSTRY_MEMBER_ROW_CAP)
+        window = self.rows[offset : offset + limit]
+        more = offset + len(window) < len(self.rows)
+        if "offset" in params and self.mutate is not None:
+            self.mutate(self.rows)
+            self.mutate = None
+        return _response(MEMBER_FIELDS, tuple(window), has_more=more)
+
+
+def _current_rows(count: int) -> list[list[Any]]:
+    """`count` current assignments, one security each, in the shape `PING_AN_CURRENT` has."""
+    return [
+        [*PING_AN_CURRENT[:6], f"{600000 + index:06d}.SH", "x", "20100104", None, "Y"]
+        for index in range(count)
+    ]
+
+
+def test_a_whole_market_membership_request_names_its_state_and_nothing_else(
+    fake_tushare_transport,
+) -> None:
+    """One subject that is a state asks for that state over the whole market -- the shape
+    measured on 2026-09-28 to answer exactly the union of the 31 `l1_code` slices: 2,006
+    superseded rows in one response (`has_more=False`) and 5,914 current ones in pages. The
+    state is still named; only the `l1_code` slice is dropped."""
+    provider, transport = _provider(
+        fake_tushare_transport, _response(MEMBER_FIELDS, (BAICHUAN_SUPERSEDED,)), clock=AS_OF
+    )
+
+    provider.fetch_panel(
+        ProviderRequest(
+            dataset=INDUSTRY_MEMBERSHIP_DATASET,
+            as_of=AS_OF,
+            subjects=(SUPERSEDED_INDUSTRY_MEMBERSHIP,),
+        )
+    )
+
+    assert transport.payload is not None
+    assert transport.payload["params"] == {"is_new": "N"}
+
+
+def test_the_current_state_past_the_cap_is_paged_at_2999_and_comes_back_whole_in_order() -> None:
+    """The measured shape, end to end: the one-shot request is refused as truncated at the
+    3,000-row cap, and the `page_size` fallback re-asks at `limit=2999` -- under the cap, as the
+    descriptor invariant requires, so a page that came back at 3,000 would still be refused."""
+    rows = _current_rows(5914)
+    transport = _StatePagingTransport(rows)
+    provider = TushareProvider(token="secret-token", transport=transport, clock=lambda: AS_OF)
+
+    batch = provider.fetch_panel(
+        ProviderRequest(
+            dataset=INDUSTRY_MEMBERSHIP_DATASET,
+            as_of=AS_OF,
+            subjects=(CURRENT_INDUSTRY_MEMBERSHIP,),
+        )
+    )
+
+    assert _descriptor(INDUSTRY_MEMBERSHIP_DATASET).page_size == 2999
+    assert [payload["params"] for payload in transport.payloads] == [
+        {"is_new": "Y"},
+        {"is_new": "Y", "limit": "2999", "offset": "0"},
+        {"is_new": "Y", "limit": "2999", "offset": "2999"},
+    ]
+    assert batch.subjects == tuple(row[6] for row in rows)
+
+
+def test_a_current_assignment_closed_between_two_pages_leaves_a_gap_the_pages_cannot_see() -> None:
+    """Why the whole-market sweep carries a self-check one layer up (`panel build
+    --industry-sweep states`), stated as the behaviour it guards against.
+
+    `offset` addresses positions in an answer the endpoint re-evaluates per request. When a
+    current assignment leaves the `is_new=Y` set between page one and page two -- a
+    reclassification or a delisting -- every later row moves one position back, so the row that
+    sat at the boundary is never served, and nothing duplicates: the provider returns a short
+    answer as a whole one. The opposite change, a row arriving before the boundary, serves the
+    boundary row twice and is refused by `_refuse_overlapping_pages`.
+    """
+    rows = _current_rows(5914)
+    boundary = rows[2999][6]
+    transport = _StatePagingTransport(rows, mutate=lambda served: served.pop(10))
+    provider = TushareProvider(token="secret-token", transport=transport, clock=lambda: AS_OF)
+
+    batch = provider.fetch_panel(
+        ProviderRequest(
+            dataset=INDUSTRY_MEMBERSHIP_DATASET,
+            as_of=AS_OF,
+            subjects=(CURRENT_INDUSTRY_MEMBERSHIP,),
+        )
+    )
+
+    # 2,999 + 2,914: the closed row was served on page one while it still held, and the row at
+    # the boundary was served on neither page.
+    assert len(batch.subjects) == 5913
+    assert boundary not in batch.subjects
+
+    newcomer = [*PING_AN_CURRENT[:6], "699999.SH", "x", "20260928", None, "Y"]
+    arriving = _StatePagingTransport(
+        _current_rows(5914), mutate=lambda served: served.insert(10, newcomer)
+    )
+    provider = TushareProvider(token="secret-token", transport=arriving, clock=lambda: AS_OF)
+    with pytest.raises(ProviderFailure, match="served the same row twice"):
+        provider.fetch_panel(
+            ProviderRequest(
+                dataset=INDUSTRY_MEMBERSHIP_DATASET,
+                as_of=AS_OF,
+                subjects=(CURRENT_INDUSTRY_MEMBERSHIP,),
+            )
+        )
+
+
 def test_the_membership_projection_stores_the_codes_and_drops_the_names(
     fake_tushare_transport,
 ) -> None:

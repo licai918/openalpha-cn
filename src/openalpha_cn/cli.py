@@ -8,6 +8,7 @@ import shlex
 import sys
 import textwrap
 from calendar import monthrange
+from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence, Set
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -92,12 +93,16 @@ from openalpha_cn.domain.index_prices import (
     IndexPriceError,
 )
 from openalpha_cn.domain.industry_classification import (
+    INDUSTRY_FROM_COLUMN,
+    INDUSTRY_L1_COLUMN,
     INDUSTRY_MEMBERSHIP_DATASET,
     INDUSTRY_MEMBERSHIP_TAXONOMY,
     INDUSTRY_TAXONOMY_EFFECTIVE_FROM,
+    INDUSTRY_THROUGH_COLUMN,
     INDUSTRY_TREE_DATASET,
     SW2014_MEMBERSHIP_DATASET,
     SW2014_TAXONOMY,
+    IndustryAssignment,
     IndustryClassificationError,
 )
 from openalpha_cn.domain.name_history import NAMECHANGE_DATASET
@@ -205,6 +210,7 @@ from openalpha_cn.panel_ingest import (
     keep_panel_subjects,
     keep_withdrawal_records,
     load_first_daily_bar,
+    load_industry_histories,
     load_industry_trees,
     load_stock_universe,
     load_suspensions,
@@ -1991,7 +1997,9 @@ specified against. The eight are wired here, each with its measured request shap
   years together). Under `--subject`, one `(security, announcement year)` window per name.
 - `index_classify` -- one taxonomy vintage per request; two requests for the whole invocation.
 - `index_member_all` -- one `(l1_code, is_new)` slice; 31 x 2 = 62 requests for the whole
-  invocation.
+  invocation. Under `--industry-sweep states` (`V2-P6-011`), one whole-market state per request
+  instead, paged past the cap: 4 requests, checked against the stored corpus before writing, and
+  the 62 slices whenever the check fails. See `INDUSTRY_SWEEPS`.
 - `fina_indicator` -- one whole-market report period per request, four per period year, for the
   whole invocation. Under `--subject`, one `(security, report-period year)` window per name.
 
@@ -5065,9 +5073,17 @@ def _build_sw2014_memberships(
 
 
 def _build_industry_memberships(
-    store: PanelStore, provider: TushareProvider, *, codes: Sequence[str], now: datetime
+    store: PanelStore,
+    provider: TushareProvider,
+    *,
+    codes: Sequence[str],
+    now: datetime,
+    because: str = "",
 ) -> list[PartitionRef]:
     """Sweep every `(l1_code, is_new)` slice and write the corpus as one partition per event year.
+
+    `because` is why a `--industry-sweep states` build came here instead (`V2-P6-011`), and it is
+    appended to the `BUDGET` line so the 62 requests are counted where the reason is stated.
 
     Two subjects per request and both mandatory. The `l1_code` slice is what keeps a response
     under this table's lowest cap (3,000 rows against a 7,893-row corpus); the `is_new` state is
@@ -5092,7 +5108,8 @@ def _build_industry_memberships(
         total,
         "requests",
         f"{len(codes)} {INDUSTRY_MEMBERSHIP_TAXONOMY} l1_code slices x {len(states)} membership "
-        "states; the partition years are the membership events', not --year",
+        "states; the partition years are the membership events', not --year"
+        + (f"; {because}" if because else ""),
     )
     batches: list[ColumnarPanelBatch] = []
     superseded = 0
@@ -5131,6 +5148,193 @@ def _build_industry_memberships(
             "the current snapshot alone. That is the one shape write_industry_memberships' "
             "subject guard cannot see -- it carries every security and no history, and reads as "
             "a market in which nobody has ever been reclassified",
+        )
+    return list(write_industry_memberships(store, batches))
+
+
+INDUSTRY_SWEEPS: Final[tuple[str, ...]] = ("slices", "states")
+"""`panel build --industry-sweep`: how `index_member_all` is fetched (`V2-P6-011`).
+
+- **`slices`** (the default): 31 `(l1_code, is_new)` slices x 2 states, 62 unpaged requests.
+- **`states`**: the two `is_new` states over the whole market -- 4 requests on the 2026-09-28
+  corpus (the current state's one-shot is refused at the 3,000-row cap and re-asked as two pages
+  of 2,999; the superseded state fits in one) -- each answer checked against the stored corpus
+  before anything is written, and the 62 slices fetched instead whenever the check fails or there
+  is no stored corpus to check against. See `_build_industry_memberships_by_state`.
+
+Measured on 2026-09-28 against the 62 slices taken once as the reference: both states equal to it
+as sets of whole rows, on two runs at `limit=3000` and two at `limit=2999`, the page sequences
+identical in order (`providers/tushare.py::_index_member_all_params`). The daily command asks for
+`states`; a backfill keeps the default, whose every response is complete on its own flag.
+"""
+
+_MembershipRow = tuple[str, str, str | None, str]
+_MembershipKey = tuple[str, str, date]
+
+
+def _membership_rows(batches: Sequence[ColumnarPanelBatch]) -> list[_MembershipRow]:
+    """`(security, industry_from, industry_through, l1_code)` for every split row fetched."""
+    rows: list[_MembershipRow] = []
+    for batch in batches:
+        values = {column.name: column.values for column in batch.columns}
+        for index, security in enumerate(batch.subjects):
+            through = values[INDUSTRY_THROUGH_COLUMN][index]
+            rows.append(
+                (
+                    security,
+                    str(values[INDUSTRY_FROM_COLUMN][index]),
+                    None if through is None else str(through),
+                    str(values[INDUSTRY_L1_COLUMN][index]),
+                )
+            )
+    return rows
+
+
+def _membership_sweep_findings(
+    rows: Sequence[_MembershipRow],
+    *,
+    level_one_codes: Sequence[str],
+    stored: Sequence[IndustryAssignment],
+) -> list[str]:
+    """Why a whole-market membership answer may not be written, or nothing (`V2-P6-011`).
+
+    The self-check `--industry-sweep states` runs before writing, and it is never weaker than the
+    62 unpaged slices it stands in for -- each condition is one those slices satisfy by
+    construction, and the stored corpus is what the last successful build wrote:
+
+    - **No key served twice.** An assignment is `(ts_code, l1_code, in_date)`; its opening row
+      arrives once and its close at most once, and no security holds two current assignments.
+      A page overlap, or a close landing between the two states' requests, breaks this.
+    - **Every level-one industry has a current member** -- every one the stored SW2021 tree
+      lists (31; the smallest held 32 current members on 2026-09-28). A slice the answer lost
+      breaks this.
+    - **At least one superseded assignment**, `_build_industry_memberships`' own refusal: a
+      current-only corpus is the one shape the writer's subject guard cannot see.
+    - **The floor**: no fewer current assignments than the stored corpus holds, less the stored
+      current ones this answer reports closed. A close may shrink the current set; nothing else
+      may.
+    - **Every stored assignment comes back**, current or closed. Stronger than the floor, and
+      the condition that sees a page gap: a current assignment closing between two pages moves
+      the row at the boundary past the next offset with nothing duplicated
+      (`providers/tushare.py::_refuse_overlapping_pages`), and a listing the same day holds the
+      count level. The boundary row is a stored one unless it arrived after the last build.
+
+    The residue, stated: an assignment that arrived after the last build, sitting at a page
+    boundary at the moment another closes between the two page requests, is not seen here. The
+    slices have their own version -- a reclassification between two slices' requests can drop a
+    security from both or show it in both -- and tomorrow's build fetches either one again.
+    """
+    opened: Counter[_MembershipKey] = Counter()
+    closed: Counter[_MembershipKey] = Counter()
+    for security, starts, ends, level_one in rows:
+        key = (security, level_one, date.fromisoformat(starts))
+        (opened if ends is None else closed)[key] += 1
+    findings: list[str] = []
+    doubled = sorted({key for tally in (opened, closed) for key, n in tally.items() if n > 1})
+    if doubled:
+        findings.append(
+            f"{len(doubled)} (ts_code, l1_code, in_date) keys served twice, first {doubled[0]}"
+        )
+    orphans = sorted(set(closed) - set(opened))
+    if orphans:
+        findings.append(f"{len(orphans)} closes with no opening row, first {orphans[0]}")
+    current = [key for key in opened if key not in closed]
+    held = Counter(security for security, _level_one, _starts in current)
+    twice = sorted(security for security, n in held.items() if n > 1)
+    if twice:
+        findings.append(f"{len(twice)} securities hold two current assignments, first {twice[0]}")
+    empty = sorted(set(level_one_codes) - {level_one for _security, level_one, _s in current})
+    if empty:
+        findings.append(f"level-one industries with no current member: {empty}")
+    if not closed:
+        findings.append("no superseded assignment at all -- the current snapshot alone")
+    stored_keys = {(one.ts_code, one.l1_code, one.effective_from) for one in stored}
+    stored_current = {
+        (one.ts_code, one.l1_code, one.effective_from)
+        for one in stored
+        if one.effective_through is None
+    }
+    floor = len(stored_current) - len(stored_current & set(closed))
+    if len(current) < floor:
+        findings.append(
+            f"{len(current)} current assignments, under the floor of {floor}: the "
+            f"{len(stored_current)} stored less the {len(stored_current) - floor} this answer "
+            "reports closed"
+        )
+    lost = sorted(stored_keys - set(opened))
+    if lost:
+        findings.append(f"{len(lost)} stored assignments did not come back, first {lost[0]}")
+    return findings
+
+
+def _stored_membership_assignments(
+    store: PanelStore, *, now: datetime
+) -> tuple[tuple[IndustryAssignment, ...] | None, str]:
+    """Every stored `index_member_all` assignment, or `None` and why there is nothing to check
+    a whole-market answer against."""
+    years = store.registered_years(INDUSTRY_MEMBERSHIP_DATASET)
+    if not years:
+        return None, "no stored membership corpus to check a whole-market answer against"
+    try:
+        histories = load_industry_histories(store, years=years, as_of=now, max_staleness=None)
+    except (PanelStorageError, IndustryClassificationError) as error:
+        return None, (
+            f"the stored membership corpus could not be read at {now.isoformat()} to check a "
+            f"whole-market answer against ({type(error).__name__})"
+        )
+    return tuple(one for history in histories.values() for one in history.assignments), ""
+
+
+def _build_industry_memberships_by_state(
+    store: PanelStore, provider: TushareProvider, *, codes: Sequence[str], now: datetime
+) -> list[PartitionRef]:
+    """`--industry-sweep states`: the two whole-market states, checked, or the 62 slices.
+
+    The answer is held to `_membership_sweep_findings` against the stored corpus before a row is
+    written, and on any finding -- or a refusal from the provider, or no stored corpus to check
+    against -- the build fetches the 62 `(l1_code, is_new)` slices instead and writes those.
+    That costs requests, never correctness: the slices are the reference shape, and their
+    `BUDGET` line carries the reason. A provider refusal's message is withheld (`_fetch_panel`'s
+    rule); its category is what the reason names.
+    """
+    stored, unavailable = _stored_membership_assignments(store, now=now)
+    if stored is None:
+        return _build_industry_memberships(
+            store, provider, codes=codes, now=now, because=unavailable
+        )
+    states = (CURRENT_INDUSTRY_MEMBERSHIP, SUPERSEDED_INDUSTRY_MEMBERSHIP)
+    _echo_budget(
+        INDUSTRY_MEMBERSHIP_DATASET,
+        len(states),
+        "whole-market-states",
+        "is_new Y and N over the whole market; a state past the 3,000-row cap is re-asked in "
+        "pages of 2,999 after its refused one-shot (4 requests on the 2026-09-28 corpus), and "
+        "the answer is checked against the stored corpus before it is written",
+    )
+    batches: list[ColumnarPanelBatch] = []
+    findings: list[str] = []
+    for state in states:
+        request = ProviderRequest(dataset=INDUSTRY_MEMBERSHIP_DATASET, as_of=now, subjects=(state,))
+        try:
+            batch = provider.fetch_panel(request)
+        except ProviderFailure as failure:
+            findings.append(f"the provider refused the is_new={state!r} state: {failure.category}")
+            break
+        if batch.status != "success":
+            findings.append(f"the is_new={state!r} state served no row")
+            break
+        batches.append(batch)
+    if not findings:
+        findings = _membership_sweep_findings(
+            _membership_rows(batches), level_one_codes=codes, stored=stored
+        )
+    if findings:
+        return _build_industry_memberships(
+            store,
+            provider,
+            codes=codes,
+            now=now,
+            because=f"the whole-market states failed the self-check: {'; '.join(findings)}",
         )
     return list(write_industry_memberships(store, batches))
 
@@ -5536,8 +5740,11 @@ def _build_span_targets(
     subjects: Sequence[str],
     years: Sequence[int],
     now: datetime,
+    industry_sweep: str = "slices",
 ) -> None:
     """Run the `PANEL_BUILD_SPAN_TARGETS` once for the whole invocation, in table order.
+
+    `industry_sweep` picks `index_member_all`'s request shape; see `INDUSTRY_SWEEPS`.
 
     `_build_panel`'s counterpart for the three targets a per-year loop cannot serve, and it takes
     `years` rather than a year for the one of them that uses them at all: `fina_indicator`'s
@@ -5563,7 +5770,9 @@ def _build_span_targets(
     if INDUSTRY_MEMBERSHIP_DATASET in targets:
         codes = _stored_level_one_codes(store, now=now)
         written.setdefault(INDUSTRY_MEMBERSHIP_DATASET, []).extend(
-            _build_industry_memberships(store, provider, codes=codes, now=now)
+            _build_industry_memberships_by_state(store, provider, codes=codes, now=now)
+            if industry_sweep == "states"
+            else _build_industry_memberships(store, provider, codes=codes, now=now)
         )
     if SW2014_MEMBERSHIP_DATASET in targets:
         codes = _stored_level_one_codes(
@@ -5956,6 +6165,16 @@ _BUILD_INCREMENTAL_HELP = (
     "holding such a record, so a re-publication is seen as a full build sees it."
 )
 
+_BUILD_INDUSTRY_SWEEP_HELP = (
+    "How index_member_all is fetched (V2-P6-011). 'slices' (the default): 31 l1_code slices x 2 "
+    "membership states, 62 requests. 'states': the two states over the whole market, about 4 "
+    "requests, each answer checked against the stored corpus before it is written -- no key "
+    "twice, every level-one industry with a current member, a superseded half, no fewer current "
+    "assignments than stored less those reported closed, every stored assignment back -- and "
+    "the 62 slices fetched instead, on the BUDGET line with the reason, when the check fails or "
+    "nothing is stored yet."
+)
+
 
 @panel_app.command("build")
 def panel_build(
@@ -5988,6 +6207,9 @@ def panel_build(
     incremental: Annotated[
         bool, typer.Option("--incremental", help=_BUILD_INCREMENTAL_HELP)
     ] = False,
+    industry_sweep: Annotated[
+        str, typer.Option("--industry-sweep", help=_BUILD_INDUSTRY_SWEEP_HELP)
+    ] = "slices",
     json_output: Annotated[
         bool, typer.Option("--json", help="Emit a machine-readable build report.")
     ] = False,
@@ -6090,6 +6312,11 @@ def panel_build(
     runtime_dir = _resolved_runtime_dir(runtime_dir)
 
     with _panel_command("panel build", json_output=json_output):
+        if industry_sweep not in INDUSTRY_SWEEPS:
+            raise _panel_fail(
+                PanelExit.bad_request,
+                f"--industry-sweep must be one of {list(INDUSTRY_SWEEPS)}; got {industry_sweep!r}",
+            )
         targets = _build_targets(dataset)
         subjects = _build_subjects(subject or (), targets)
         years = _build_years(year or (), start, end)
@@ -6237,6 +6464,7 @@ def panel_build(
                     subjects=subjects,
                     years=years,
                     now=now,
+                    industry_sweep=industry_sweep,
                 )
             except _PANEL_WRITE_REFUSALS as error:
                 raise _panel_fail(

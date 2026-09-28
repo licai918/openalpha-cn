@@ -18,7 +18,12 @@ records each request's `api_name` and parameters. What it publishes can be moved
 - `bands_only`: codes that are published a band on that session and nothing else (the shape of
   the funds Tushare withdrew from a stored session in the live check);
 - `today` with `reclassified` and `first_assigned`: industry memberships that change on a day --
-  published only once `today` has reached it, as an upstream publishes a reclassification.
+  published only once `today` has reached it, as an upstream publishes a reclassification;
+- `whole_market_fault`: a whole-market `index_member_all(is_new=Y)` answer that loses or doubles
+  a row while every `(l1_code, is_new)` slice stays right.
+
+`index_member_all` answers both request shapes: one `(l1_code, is_new)` slice, and one state over
+the whole market -- the union of that state's slices, as measured live on 2026-09-28.
 """
 
 from __future__ import annotations
@@ -244,10 +249,14 @@ class Market:
     reclassified: tuple[tuple[str, date, str], ...] = ()
     """`(code, day, new level-one code)`: from `day` the code sits in the new industry."""
     first_assigned: tuple[tuple[str, date], ...] = ()
+    """`(code, day)`: the code has no membership until `day`, then the first level-one code."""
     delisted: tuple[tuple[str, date], ...] = ()
     """`(code, day)`: the code's last bar is the session before `day`, and from `today` on `day`
     the registry reports it delisted on `day`."""
-    """`(code, day)`: the code has no membership until `day`, then the first level-one code."""
+    whole_market_fault: str = ""
+    """What a whole-market `index_member_all(is_new=...)` answer gets wrong, while every
+    `(l1_code, is_new)` slice stays right: `"lost"` drops the first current row (a page gap),
+    `"doubled"` serves it twice (a page overlap)."""
     requests: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -421,6 +430,16 @@ class Market:
         return [*rows, [*keys, *([1.0] * len(STATEMENT_DATA_COLUMNS[dataset]))]]
 
     def _memberships(self, params: Mapping[str, Any]) -> list[list[Any]]:
+        if "l1_code" not in params:
+            # One state over the whole market: the union of its slices, as measured live.
+            rows = [
+                row for code in L1_CODES for row in self._memberships({**params, "l1_code": code})
+            ]
+            if params["is_new"] == "Y" and self.whole_market_fault == "lost":
+                return rows[1:]
+            if params["is_new"] == "Y" and self.whole_market_fault == "doubled":
+                return [rows[0], *rows]
+            return rows
         level_one, state = str(params["l1_code"]), str(params["is_new"])
         today = self.today or self.open_days[-1]
         changes = {code: (day, new) for code, day, new in self.reclassified if day <= today}

@@ -1263,30 +1263,45 @@ def _index_classify_params(request: ProviderRequest) -> dict[str, str]:
 
 
 def _index_member_all_params(request: ProviderRequest) -> dict[str, str]:
-    """Request one L1 slice of one membership state: `{l1_code, is_new}`.
+    """Request one membership state, over one L1 slice or over the whole market.
 
-    Two subjects, in that order, and both are mandatory.
+    Two shapes, and the state is mandatory in both:
 
-    **The `l1_code` slice** is what keeps a request under the 3,000-row cap -- the lowest in this
-    table. The whole corpus is 7,893 rows and the largest slice is `801890.SI` 机械设备 at 625
-    current plus 229 superseded, so 31 codes x 2 states is 62 requests with an order of magnitude
-    of headroom each. `offset` paging is available and sound here (the two default pages are
-    3,000 + 2,889 = 5,889 rows with no overlap, exactly what the 31 slices add up to) and is
-    still not used: `ProviderRequest` carries no offset, and a paging scheme is a request shape
-    whose completeness depends on the caller looping correctly rather than on one response's own
-    flag.
+    - **`(l1_code, is_new)`** -- one L1 slice of one state, `{l1_code, is_new}`. The slice keeps
+      a response under the 3,000-row cap, the lowest in this table: the largest is `801890.SI`
+      机械设备 at 631 rows on 2026-09-28, so 31 codes x 2 states is 62 requests with an order of
+      magnitude of headroom each. `panel build`'s default sweep.
+    - **`(is_new,)`** -- one state over the whole market, `{is_new}` (`V2-P6-011`). Measured on
+      2026-09-28 against those 62 slices taken as the reference (7,920 rows: 5,914 current and
+      2,006 superseded): `is_new=N` answers all 2,006 in one response with `has_more=False`, and
+      `is_new=Y` answers 3,000 with `has_more=True` and is paged by this descriptor's `page_size`
+      -- 2,999 + 2,915 rows. Both states came back equal to the reference as sets of whole
+      11-column rows, with no duplicate row and no duplicate `(ts_code, l1_code, in_date)`, on
+      two runs paged at `limit=3000` and two at `limit=2999`, all four page sequences identical
+      in order. Four requests instead of 62 -- the refused one-shot, two pages, one superseded
+      answer -- which is `panel build --industry-sweep states`' shape. That sweep checks each
+      answer against the stored corpus before writing it, because a page boundary cannot see a
+      row that moved past it (see `_refuse_overlapping_pages`).
+
+    Two more shapes were measured and rejected the same day, so nobody measures them again: an
+    `l1_code` with no `is_new` answers that slice's **current** rows only (464 of `801030.SI`'s
+    777), and a comma-joined `l1_code` list answers **zero** rows with `code=0` -- an empty
+    answer rather than an error, which is why one request never names two codes.
 
     **The `is_new` state** is the refusal this dataset exists for; see
     `CURRENT_INDUSTRY_MEMBERSHIP`. Leaving it out does not widen the answer, it silently narrows
-    it to the current snapshot.
+    it to the current snapshot -- so a single subject that is not a state is refused rather than
+    read as an `l1_code`.
     """
+    if len(request.subjects) == 1 and request.subjects[0] in _INDUSTRY_MEMBERSHIP_STATES:
+        return {"is_new": request.subjects[0]}
     if len(request.subjects) != 2:
         raise ProviderFailure(
             provider_id=_PROVIDER_ID,
             category="configuration",
             message=(
-                f"{INDUSTRY_MEMBERSHIP_DATASET} serves one l1_code slice of one membership state "
-                f"per request and needs both, as (l1_code, is_new); got "
+                f"{INDUSTRY_MEMBERSHIP_DATASET} serves one membership state per request, as "
+                f"(l1_code, is_new) for one slice or (is_new,) for the whole market; got "
                 f"{list(request.subjects)}. Omitting the state does not widen the answer -- the "
                 "endpoint's default hides the 2,004 superseded assignments and returns only the "
                 "5,889 current ones, with no flag and no short count to notice it by"
@@ -1917,9 +1932,8 @@ lower than every other endpoint in this table (`suspend_d` 5,000, `daily`/`adj_f
 `offset` **does** work on this endpoint, unlike the pagination `namechange` was measured to
 break on: `offset=3000` returns the remaining 2,889 rows with `has_more=False` and `offset=5000`
 returns 889, and 3,000 + 2,889 = 5,889 is exactly what the 31 `l1_code` slices add up to, with
-5,889 distinct `ts_code` and no duplicate. It is still not used -- see
-`_index_member_all_params` -- because the descriptor's guarantee is about one response and a
-paging loop's is about the caller.
+5,889 distinct `ts_code` and no duplicate. The `(l1_code, is_new)` slices never reach it; the
+whole-market states do, and are paged at `TUSHARE_INDUSTRY_MEMBER_PAGE_SIZE`.
 
 **The headroom is wide and is not on the market's clock in the same way `stk_limit`'s is.** The
 largest current slice is 801890.SI 机械设备 at 625 rows and the largest superseded one is the
@@ -1927,6 +1941,20 @@ same L1 at 229. What grows is the *superseded* half, and it grows in steps rathe
 continuously: it stood at 439 rows at the end of 2015, 801 at the end of 2020 and 2,004 today,
 with 587 of those added by the 2021 taxonomy revision alone and 265 by the 2022 annual review.
 Split across 31 L1 codes that is a bound to watch rather than a schedule.
+"""
+
+TUSHARE_INDUSTRY_MEMBER_PAGE_SIZE: Final[int] = TUSHARE_INDUSTRY_MEMBER_ROW_CAP - 1
+"""The `limit` `index_member_all`'s whole-market states are paged at (`V2-P6-011`): 2,999.
+
+The largest page the descriptor invariant allows -- a page at the cap cannot be told from one
+the cap truncated -- and the size the equality was measured at, not only a neighbour of it. On
+2026-09-28, `is_new=Y` at `limit=2999` answered 2,999 + 2,915 rows twice, element for element the
+sequence the `limit=3000` pages served, and as a set equal to the 31 current `l1_code` slices.
+The current state is 5,914 rows, so it pages in two until it passes 5,998, and in three after.
+
+Opt-in behind that measurement like every `page_size` (see `_refuse_overlapping_pages`), and it
+changes nothing for the default sweep: no `(l1_code, is_new)` slice comes near the cap, so the
+fallback never fires on one.
 """
 
 
@@ -2840,6 +2868,9 @@ TUSHARE_DATASETS: tuple[TushareDatasetDescriptor, ...] = (
         # where a later assignment survives, by an industry the security was not in yet. That is
         # `adj_factor`'s situation rather than `daily`'s, and this cap is the lowest here.
         requires_truncation_flag=True,
+        # Measured, not assumed (`V2-P6-011`): see `TUSHARE_INDUSTRY_MEMBER_PAGE_SIZE`. Reached
+        # only by the whole-market `(is_new,)` request; no `(l1_code, is_new)` slice nears the cap.
+        page_size=TUSHARE_INDUSTRY_MEMBER_PAGE_SIZE,
         panel_columns=(
             TusharePanelColumn(
                 name=INDUSTRY_FROM_COLUMN,
@@ -3476,21 +3507,32 @@ def _refuse_overlapping_pages(
     so a set that *changes between two pages* moves rows across the boundary, and the two
     directions are not symmetric:
 
-    - A row **removed** between page N and page N+1 shifts the tail back into the window
-      already read, so a row is served twice and this check fires. Witnessed.
-    - A row **inserted** shifts the tail forward past the offset, so exactly one row is never
-      served -- and it produces **no duplicate**. There is no witness here, and none anywhere
-      else either: `has_more=False` is still true of the last page, no page is over its
+    - A row **inserted** before the boundary shifts every later row one position forward, so
+      the next page starts one row early and serves the last row of the page before it again.
+      A duplicate, and this check fires. Witnessed.
+    - A row **removed** before the boundary shifts every later row one position back, so the
+      next page starts one row late and the row that sat at the boundary is never served -- and
+      it produces **no duplicate**. There is no witness here, and none anywhere else in this
+      module either: `has_more=False` is still true of the last page, no page is over its
       `limit`, and the concatenation is a plausible short answer.
 
-    Out of reach for the one descriptor that declares a `page_size`: `stk_limit` is fetched one
-    `trade_date` at a time and only for sessions that have already closed, so the set being
-    paged is fixed before the first page is asked for. It is not out of reach *in general*, and
-    it is the reason `page_size` is opt-in behind a measurement per endpoint rather than a
-    default -- a whole-market endpoint paged during its own publication window would have this
-    hole and this module would report success. An earlier version of this docstring named
-    duplication as "the observable half" of the `namechange` failure, which is true of that
-    failure and was read as a statement about paging in general; it is not one.
+    (An earlier version of this list had the two directions the other way round. `V2-P6-011`
+    corrected it, and `tests/contract/providers/test_tushare_industry.py::
+    test_a_current_assignment_closed_between_two_pages_leaves_a_gap_the_pages_cannot_see` drives
+    both against a transport whose answer changes after the first page.)
+
+    Out of reach for `stk_limit`, which is fetched one `trade_date` at a time and only for
+    sessions that have already closed, so the set being paged is fixed before the first page is
+    asked for. **Within reach for `index_member_all`'s whole-market states**, the second
+    descriptor to declare a `page_size`: a current assignment closing between two pages is a
+    removal. That descriptor's paging is therefore used only by `panel build --industry-sweep
+    states`, which checks the assembled answer against the stored corpus before writing it --
+    every stored assignment must come back, and a row at a page boundary is a stored one unless
+    it arrived after the last build -- and fetches the 62 unpaged slices instead when the check
+    fails. It is the reason `page_size` is opt-in behind a measurement per
+    endpoint rather than a default. An earlier version of this docstring named duplication as
+    "the observable half" of the `namechange` failure, which is true of that failure and was
+    read as a statement about paging in general; it is not one.
     """
     seen: set[tuple[tuple[str, str], ...]] = set()
     for index, page in enumerate(pages):

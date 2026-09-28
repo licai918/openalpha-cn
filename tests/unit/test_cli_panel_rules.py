@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import inspect
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any, Final
 
 import pytest
@@ -53,6 +53,7 @@ from openalpha_cn.domain.industry_classification import (
     INDUSTRY_MEMBERSHIP_DATASET,
     INDUSTRY_TREE_DATASET,
     SW2014_MEMBERSHIP_DATASET,
+    IndustryAssignment,
     IndustryClassificationError,
 )
 from openalpha_cn.domain.name_history import NAMECHANGE_DATASET
@@ -580,3 +581,114 @@ def test_the_json_refusal_payload_names_its_own_exit_code_and_the_sentence() -> 
         "detail": "a sentence",
     }
     assert payload["exit_code"] != int(PanelExit.ok)
+
+
+# --- `panel build --industry-sweep states`: the self-check (`V2-P6-011`) ------------------------
+
+_BANKS, _STEEL = "801780.SI", "801040.SI"
+
+
+def _held(code: str, l1: str, starts: str, ends: str | None = None) -> IndustryAssignment:
+    return IndustryAssignment(
+        ts_code=code,
+        l1_code=l1,
+        effective_from=date.fromisoformat(starts),
+        effective_through=None if ends is None else date.fromisoformat(ends),
+    )
+
+
+# The stored corpus: two current assignments in one industry, and one security that moved.
+_STORED: Final = (
+    _held("000001.SZ", _BANKS, "1991-04-03"),
+    _held("600000.SH", _BANKS, "1999-11-10"),
+    _held("600010.SH", _BANKS, "2001-03-09", "2021-12-10"),
+    _held("600010.SH", _STEEL, "2021-12-13"),
+)
+
+
+def _answer(*held: IndustryAssignment) -> list[tuple[str, str, str | None, str]]:
+    """The rows the two whole-market state answers split into: every assignment's opening, and
+    its close when it has one -- `(security, industry_from, industry_through, l1_code)`."""
+    rows: list[tuple[str, str, str | None, str]] = []
+    for one in held:
+        rows.append((one.ts_code, one.effective_from.isoformat(), None, one.l1_code))
+        if one.effective_through is not None:
+            through = one.effective_through.isoformat()
+            rows.append((one.ts_code, one.effective_from.isoformat(), through, one.l1_code))
+    return rows
+
+
+def _findings(rows: list[tuple[str, str, str | None, str]]) -> tuple[str, ...]:
+    return tuple(
+        cli_module._membership_sweep_findings(
+            rows, level_one_codes=(_BANKS, _STEEL), stored=_STORED
+        )
+    )
+
+
+def test_an_answer_equal_to_the_stored_corpus_passes_the_self_check() -> None:
+    assert _findings(_answer(*_STORED)) == ()
+
+
+def test_a_key_served_twice_fails_the_self_check() -> None:
+    """Paging that served the boundary row twice, or a close that landed between the two states'
+    requests -- current in one answer and superseded in the other."""
+    rows = _answer(*_STORED)
+
+    assert any("twice" in finding for finding in _findings([*rows, rows[0]]))
+
+
+def test_a_security_with_two_current_assignments_fails_the_self_check() -> None:
+    """One security is in one industry at a time; two open assignments are two answers that
+    were never reconciled -- the shape a reclassification between two requests leaves."""
+    rows = _answer(*_STORED, _held("000001.SZ", _STEEL, "2026-09-25"))
+
+    assert any("two current assignments" in finding for finding in _findings(rows))
+
+
+def test_a_close_whose_opening_row_did_not_arrive_fails_the_self_check() -> None:
+    """The provider splits one response row into its opening and its close, so a close alone is
+    half a row -- whatever lost the other half."""
+    rows = [row for row in _answer(*_STORED) if row != ("600010.SH", "2001-03-09", None, _BANKS)]
+
+    assert any("no opening row" in finding for finding in _findings(rows))
+
+
+def test_a_level_one_industry_with_no_current_member_fails_the_self_check() -> None:
+    """Every level-one industry the stored tree lists has current members -- 32 at the least on
+    2026-09-28 -- so one that comes back with none is a slice the answer lost."""
+    rows = _answer(*(one for one in _STORED if one.l1_code != _STEEL))
+
+    findings = _findings(rows)
+    assert any("no current member" in finding and _STEEL in finding for finding in findings)
+
+
+def test_fewer_current_assignments_than_stored_less_those_reported_closed_fails() -> None:
+    """The floor: the stored corpus's current assignments, less the ones this answer reports
+    closed. A close may shrink the current set; nothing else may."""
+    closed = _held("600000.SH", _BANKS, "1999-11-10", "2026-09-25")
+    allowed = _answer(_STORED[0], closed, _STORED[2], _STORED[3])
+    shrunk = _answer(_STORED[0], _STORED[2], _STORED[3])
+
+    assert _findings(allowed) == ()
+    assert any("floor" in finding for finding in _findings(shrunk))
+
+
+def test_a_stored_assignment_that_did_not_come_back_fails_even_when_the_count_holds() -> None:
+    """The page gap: a close between two pages moves the boundary row past the next offset, and a
+    listing the same day keeps the count where it was. The floor cannot see that; the stored
+    assignment that is missing can."""
+    newcomer = _held("688001.SH", _BANKS, "2026-09-25")
+    closed = _held("600000.SH", _BANKS, "1999-11-10", "2026-09-25")
+    rows = _answer(closed, _STORED[2], _STORED[3], newcomer)  # 000001.SZ lost at a boundary
+
+    findings = _findings(rows)
+    assert not any("floor" in finding for finding in findings)
+    assert any("000001.SZ" in finding and "did not come back" in finding for finding in findings)
+
+
+def test_an_answer_with_no_superseded_assignment_fails_the_self_check() -> None:
+    """The current snapshot alone -- the one shape the writer's subject guard cannot see."""
+    rows = _answer(_STORED[0], _STORED[1], _held("600010.SH", _STEEL, "2021-12-13"))
+
+    assert any("superseded" in finding for finding in _findings(rows))

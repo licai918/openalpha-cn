@@ -215,7 +215,8 @@ FULL_UPDATE_TARGETS: Final[tuple[str, ...]] = (
 """`--full-update`: every year-scoped target plus `fina_indicator`, whatever the configuration
 reads -- the whole current year kept fresh for other readers of the same store."""
 
-INDUSTRY_TARGETS: Final[tuple[str, ...]] = ("index_classify", "index_member_all")
+INDUSTRY_MEMBERSHIP_TARGET: Final[str] = "index_member_all"
+INDUSTRY_TARGETS: Final[tuple[str, ...]] = ("index_classify", INDUSTRY_MEMBERSHIP_TARGET)
 UNCHECKED_BY_YEAR: Final[frozenset[str]] = frozenset({"stock_basic", *INDUSTRY_TARGETS})
 """Targets whose partitions are not the session's market (a registry lifecycle year, a taxonomy
 vintage, membership-event years), so the doctor is not asked about them under the session's year.
@@ -825,6 +826,11 @@ def _panel_build(
     for one in (year,) if isinstance(year, int) else year:
         arguments += ["--year", str(one)]
     arguments += ["--as-of", as_of.isoformat(), "--exchange", exchange, "--incremental", "--json"]
+    if INDUSTRY_MEMBERSHIP_TARGET in targets:
+        # The two whole-market states (~4 requests) checked against the stored corpus, and the
+        # 62 slices only when that check fails or there is no corpus yet -- see `panel build
+        # --industry-sweep`.
+        arguments += ["--industry-sweep", "states"]
     for target in targets:
         arguments += ["--dataset", target]
     return invoke(arguments)
