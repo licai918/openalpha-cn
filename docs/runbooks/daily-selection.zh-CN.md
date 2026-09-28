@@ -7,7 +7,9 @@
 ## 前提
 
 1. `docs/research/p6-registration.json` 已由 `scripts/research/registry.py` 的 `register()` 写出并**提交**，磁盘上的字节与 `HEAD` 相同。
-2. 运行命令的检出，其受约束代码（`src/`、`scripts/research/`、`pyproject.toml`、`uv.lock`，以及 `scripts/daily_selection.py` 本身）与登记文件里的 `code_commit` 一致，工作区无未提交改动，`openalpha_cn` 从这个检出的 `src/` 导入；**运行的解释器里装的第三方包与这个检出的 `uv.lock` 完全一致**（装了锁文件没有的包、或版本不同，都算不一致）。任何一条不满足，命令在第 1 步拒绝，退出码 3，并逐个点名不一致的包。2026-09-28 实测：主检出共用的 `.venv` 里是 `numpy 2.4.6`，而本分支的 `uv.lock` 锁的是 `2.5.1`——这正是这条检查要拦下的漂移。
+2. 运行命令的检出，其受约束代码（`src/`、`scripts/research/`、`pyproject.toml`、`uv.lock`，以及 `scripts/daily_selection.py` 本身）与登记文件里的 `code_commit` 一致，工作区无未提交改动，`openalpha_cn` 从这个检出的 `src/` 导入；**运行的解释器与登记提交的 `.python-version` 同一个 `major.minor`**（从 `code_commit` 处读取，改工作区里的文件不算数），且**它装的第三方包与这个检出的 `uv.lock` 对这个解释器锁定的版本完全一致**（装了锁文件没有的包、或版本不同，都算不一致）。任何一条不满足，命令在第 1 步拒绝，退出码 3，并逐个点名不一致的包。
+
+   `uv.lock` 是通用锁：同一个包可以按 fork 出现多次，每条带 `resolution-markers`。本仓库的锁就是这样：`numpy 2.4.6` 用于 Python 3.12 以前，`2.5.1` 用于 3.12 及以后。比对时只取标记对运行解释器成立的那一条。标记用标准库求值（`packaging` 只是测试依赖，这里没有新增运行时依赖）；读不懂的标记直接拒绝，不猜。依赖边上的 `marker` 不参与比对：它决定的是某个包装不装，不是装哪个版本，而锁里有、环境里没装的包本来就不算不一致。2026-09-28 实测：主检出共用的 `.venv` 是 Python 3.11.14、`numpy 2.4.6`，正是锁对 3.11 的答案，0 处差异。第 3 轮报告的"锁的是 `2.5.1`"是误判：当时的比对忽略了 `resolution-markers`，每个包名只取了最后一条。
 3. **所以定时运行不在开发检出里跑，而在一个钉在登记提交上的专用 worktree 里跑**（见「定时」）。主检出里继续开发、提交，都不会再让某一个前向交易日因为代码变了而被拒绝、白白丢掉；手动运行时同样建议从这个 worktree 跑。
 4. 运行目录的面板已回填到当年，因子在训练/滚动窗口内的历史时点已构建（滚动 IC 与 walk-forward 需要窗口内每天的截面；本命令只构建当天）。
 5. `.env` 里有 `TUSHARE_TOKEN`。命令本身从不读取它：`panel build` 在 `TushareProvider` 内部解析凭据，本命令只给传输层套了一个按 `api_name` 计数的外壳。
@@ -34,7 +36,7 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file "<主检出>/.en
 | `--max-staleness-days N` | 因子构建的新鲜度上限，默认 30 |
 | `--top N` | 摘要打印前 N 名候选，默认持仓数 |
 | `--json` | 以 JSON 打印当天结果 |
-| `--pin-worktree DIR` | 在登记提交上创建或移动一个分离 HEAD 的 worktree，再用它自己的 `uv.lock` **离线**建它自己的环境 `DIR/.venv`（`uv sync --frozen --offline`），打印提交号后退出 |
+| `--pin-worktree DIR` | 在登记提交上创建或移动一个分离 HEAD 的 worktree，再用它自己的 `uv.lock` **离线**建它自己的环境 `DIR/.venv`（`uv sync --frozen --offline --no-python-downloads --all-extras --python <.python-version>`），建成后读回它的解释器版本，打印提交号后退出 |
 | `--uv PATH` | 上面两个操作用的 uv，默认 `PATH` 上的 |
 | `--launchd-plist LOG_DIR` | 只打印 launchd 定时配置文本（需 `--worktree`），不安装任何东西 |
 
@@ -42,7 +44,7 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file "<主检出>/.en
 
 | 步 | 做什么 | 失败时 |
 |---|---|---|
-| 1 registration | 读登记文件；用 `registry.admit_registered_code` 校验提交状态与代码绑定；再比对运行解释器已安装的包与检出的 `uv.lock` | 文件缺失或不可读：退出 2；代码不是登记的代码、或环境不是锁文件的环境：退出 3 |
+| 1 registration | 读登记文件；用 `registry.admit_registered_code` 校验提交状态与代码绑定；再核对运行解释器的 `major.minor` 与登记提交的 `.python-version`，并比对它已安装的包与检出的 `uv.lock` 对这个解释器锁定的版本 | 文件缺失或不可读：退出 2；代码不是登记的代码、或环境不是锁文件的环境：退出 3 |
 | 2 panel update | 对最新已收盘交易日所在年份跑 `panel build --incremental`，同一个 `--as-of`，目标按「每天取什么」推导；三张报表按增量规则只重扫还可能变的月份（见「每天取什么」），1 月里另建上一年的三张报表以重扫上一年 12 月；`fina_indicator` 单独一次调用，覆盖报告期年份 Y−1（以及 3 月 31 日之后的 Y），**未扫到的报告期年份在库里的行原样带入**所写的公告年分区（见下）；当年还没有任何公告时记录为空分区；当天的结果窗口或其下一交易日跨入下一年时，再建下一年的 `trade_cal`（1 次请求） | 退出 1，并转述 `panel build` 自己的拒绝理由 |
 | 3 panel doctor | `panel doctor` 与依赖门 `data-check`，数据集为本次更新写的数据集（不含按上市年份分区的 `stock_basic` 和行业目标），带上当天 `--session`，指数数据集带三个指数代码；当天是一年的第一个交易日时，上一年也一并检查（`return_paths` 要跨年比较前一交易日）。`fina_indicator` 单独检查一次，只查已存在的公告年（一年的头几天可能还没有任何公告） | 不 clean 就停，第 4–7 步都不执行 |
 | 4 factor build | 配置读到的每个因子档位，在当天 16:30（上海）信号时点构建；该时点已有构建的档位跳过 | 退出 1，转述构建拒绝 |
@@ -190,7 +192,14 @@ uv run --no-sync python scripts/daily_selection.py --pin-worktree ~/openalpha-da
 
 `--pin-worktree` 读主检出里已提交的登记文件，找到最后一次提交它的那个提交，核对那里的受约束代码与登记的 `code_commit` 完全相同，然后在那个提交上创建（或把已有的、干净的 worktree 移到）一个分离 HEAD 的 worktree。它从不改动有未提交改动的 worktree。登记换了（新的一次研究）就再跑一次它。
 
-接着它给这个 worktree 建**自己的环境**：`UV_PROJECT_ENVIRONMENT=<worktree>/.venv uv sync --frozen --offline --project <worktree>`，按 worktree 自己的 `uv.lock` 原样安装、不重新解析，并且**从不联网**——uv 缓存里缺哪个包，就按名拒绝，并给出需要你在联网时运行一次的命令（`uv sync --frozen`，不带 `--offline`）；这条命令本身从不下载。继承来的 `VIRTUAL_ENV`、`PYTHONPATH` 都去掉，所以它不会装进、也不会导入主检出的环境。2026-09-28 在草稿目录里的一次性检出上实测：离线建成，0.6 秒（全部来自缓存）；用这个环境的解释器对它的 `uv.lock` 做第 1 步的比对，没有差异，`openalpha_cn` 从该检出的 `src/` 导入，没有设 `PYTHONPATH`。
+接着它给这个 worktree 建**自己的环境**：`UV_PROJECT_ENVIRONMENT=<worktree>/.venv uv sync --frozen --offline --no-python-downloads --all-extras --python <worktree 的 .python-version> --project <worktree>`。它按 worktree 自己的 `uv.lock` 原样安装、不重新解析。
+
+- **解释器是 worktree 的 `.python-version` 指定的那个**（目前是 3.11）。建成后读回 `.venv/pyvenv.cfg` 里的版本，`major.minor` 不同就拒绝。
+- **包含全部 extras**，这样它就是研究时用的环境（`uv sync --all-extras --dev`，dev 组是 uv 的默认）。
+- **从不联网**，不下载包，也不下载解释器。uv 缓存里缺哪个包，就按名拒绝，并给出需要你在联网时运行一次的命令（`uv sync --frozen --all-extras --python …`，不带 `--offline`）；这条命令本身从不下载。本机没有对应解释器时，同样拒绝。
+- 继承来的 `VIRTUAL_ENV`、`PYTHONPATH`、`UV_PYTHON` 都去掉，所以它不会装进主检出的环境，不会从那里导入，也不会用那里的解释器。
+
+2026-09-28 在草稿目录里对一次性检出（`ce85333` 的导出）实测：离线建成，0.6 秒，全部来自缓存。`pyvenv.cfg` 记录 `version_info = 3.11.14`，环境里是 `numpy 2.4.6`。用这个环境的解释器做第 1 步的比对：装了 66 个包，锁对 3.11 锁定 70 个，0 处差异。`openalpha_cn` 从该检出的 `src/` 导入，没有设 `PYTHONPATH`。第 3 轮那次实测的环境同样是 3.11.14，但没带 extras，所以根本没装 numpy；那次的"0 处差异"不涉及 numpy。
 
 生成 launchd 配置文本（只打印，不安装）：
 

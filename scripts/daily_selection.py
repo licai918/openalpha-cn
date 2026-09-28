@@ -97,6 +97,7 @@ import importlib.metadata
 import io
 import json
 import os
+import platform
 import plistlib
 import re
 import shlex
@@ -369,7 +370,7 @@ def admit_registration(path: Path, repo: Path) -> Registration:
             f"{type(error).__name__}: {error}",
             exit_code=DailyExit.code_not_registered,
         ) from error
-    admit_environment(root)
+    admit_environment(root, code_commit=str(admitted.registered.get("code_commit")))
     body = admitted.registered
     config = body.get("config")
     if not isinstance(config, dict):
@@ -401,17 +402,244 @@ def _distribution_name(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
-def locked_versions(lock_text: str) -> dict[str, str | None]:
-    """Every package `uv.lock` pins, by normalised name; `None` for one it pins no version of."""
-    document = tomllib.loads(lock_text)
-    packages = document.get("package", [])
-    return {
-        _distribution_name(str(package["name"])): (
-            None if package.get("version") is None else str(package["version"])
-        )
-        for package in packages
-        if isinstance(package, dict) and "name" in package
+PYTHON_VERSION_FILE: Final[str] = ".python-version"
+"""The interpreter the research ran on, by `major.minor`: what `uv` builds the project with."""
+
+_VERSION_MARKERS: Final[frozenset[str]] = frozenset(
+    {"python_version", "python_full_version", "implementation_version"}
+)
+_TEXT_MARKERS: Final[frozenset[str]] = frozenset(
+    {
+        "implementation_name",
+        "os_name",
+        "platform_machine",
+        "platform_python_implementation",
+        "platform_release",
+        "platform_system",
+        "platform_version",
+        "sys_platform",
     }
+)
+_MARKER_TOKEN: Final = re.compile(
+    r"\s*(?:(?P<text>'[^']*'|\"[^\"]*\")|(?P<op>===|==|!=|<=|>=|~=|<|>|\(|\))"
+    r"|(?P<word>[A-Za-z_][A-Za-z0-9_]*))"
+)
+_RELEASE: Final = re.compile(r"\d+(?:\.\d+)*")
+
+
+def marker_environment() -> dict[str, str]:
+    """PEP 508's marker environment for the running interpreter, from the standard library."""
+    implementation = sys.implementation.version
+    implementation_version = f"{implementation.major}.{implementation.minor}.{implementation.micro}"
+    if implementation.releaselevel != "final":
+        implementation_version += f"{implementation.releaselevel[0]}{implementation.serial}"
+    return {
+        "implementation_name": sys.implementation.name,
+        "implementation_version": implementation_version,
+        "os_name": os.name,
+        "platform_machine": platform.machine(),
+        "platform_python_implementation": platform.python_implementation(),
+        "platform_release": platform.release(),
+        "platform_system": platform.system(),
+        "platform_version": platform.version(),
+        "python_full_version": platform.python_version(),
+        "python_version": ".".join(platform.python_version_tuple()[:2]),
+        "sys_platform": sys.platform,
+    }
+
+
+def _marker_tokens(marker: str) -> list[tuple[str, str]]:
+    tokens: list[tuple[str, str]] = []
+    position = 0
+    while position < len(marker.rstrip()):
+        found = _MARKER_TOKEN.match(marker, position)
+        if found is None or found.end() == position:
+            raise ValueError(f"marker {marker!r} cannot be read at {marker[position:]!r}")
+        kind = found.lastgroup
+        assert kind is not None
+        tokens.append((kind, found.group(kind)))
+        position = found.end()
+    return tokens
+
+
+def _release(version: str, marker: str) -> tuple[int, ...]:
+    if _RELEASE.fullmatch(version) is None:
+        raise ValueError(f"marker {marker!r} compares {version!r}, which is not a release number")
+    return tuple(int(part) for part in version.split("."))
+
+
+def _padded(left: tuple[int, ...], right: tuple[int, ...]) -> tuple[tuple[int, ...], ...]:
+    width = max(len(left), len(right))
+    return tuple(side + (0,) * (width - len(side)) for side in (left, right))
+
+
+def _compare_versions(have: str, op: str, want: str, marker: str) -> bool:
+    """`have op want` for release numbers: `==`/`!=` take a `.*` prefix, `~=` is PEP 440's."""
+    if op == "===":
+        return have == want
+    if op in {"==", "!="} and want.endswith(".*"):
+        prefix = _release(want[:-2], marker)
+        release = _release(have, marker)
+        release = release + (0,) * max(0, len(prefix) - len(release))
+        return (release[: len(prefix)] == prefix) is (op == "==")
+    left, right = _padded(_release(have, marker), _release(want, marker))
+    if op == "~=":
+        wanted = _release(want, marker)
+        if len(wanted) < 2:
+            raise ValueError(f"marker {marker!r} uses ~= with a single-part version")
+        return left >= right and left[: len(wanted) - 1] == wanted[:-1]
+    outcomes = {
+        "==": left == right,
+        "!=": left != right,
+        "<": left < right,
+        "<=": left <= right,
+        ">": left > right,
+        ">=": left >= right,
+    }
+    if op not in outcomes:
+        raise ValueError(f"marker {marker!r} uses {op!r} on a version")
+    return outcomes[op]
+
+
+def _marker_comparison(
+    left: tuple[str, str],
+    op: str,
+    right: tuple[str, str],
+    marker: str,
+    environment: Mapping[str, str],
+) -> bool:
+    """One `operand op operand` whose one side is a variable and the other a quoted value."""
+    names = [value for kind, value in (left, right) if kind == "word"]
+    if len(names) != 1:
+        raise ValueError(f"marker {marker!r} compares {left[1]} with {right[1]}")
+    (name,) = names
+    if name not in _VERSION_MARKERS | _TEXT_MARKERS or name not in environment:
+        raise ValueError(f"marker {marker!r} names {name!r}, which this evaluator does not read")
+
+    def value(operand: tuple[str, str]) -> str:
+        kind, token = operand
+        return environment[token] if kind == "word" else token[1:-1]
+
+    have, want = value(left), value(right)
+    if op == "in":
+        return have in want
+    if op == "not in":
+        return have not in want
+    if name in _VERSION_MARKERS and left[0] == "word":
+        return _compare_versions(have, op, want, marker)
+    if op == "==":
+        return have == want
+    if op == "!=":
+        return have != want
+    raise ValueError(f"marker {marker!r} orders text with {op!r}")
+
+
+def marker_holds(marker: str, environment: Mapping[str, str]) -> bool:
+    """Whether a `uv.lock` marker holds in `environment`, or `ValueError` if it cannot be read.
+
+    The PEP 508 subset `uv.lock` writes -- `or` over `and` over parenthesised groups or
+    `variable op 'value'` comparisons -- evaluated with the standard library alone: `packaging`,
+    which implements the full grammar, is only a test dependency here, and the daily command does
+    not add a runtime one. Versions compare as release numbers, everything else as text. A marker
+    outside that subset -- an `extra`, a variable it does not know, a version that is not a
+    release number -- is an error, never a guess: the admission it feeds refuses instead.
+    """
+    tokens = _marker_tokens(marker)
+    position = 0
+
+    def peek() -> tuple[str, str] | None:
+        return tokens[position] if position < len(tokens) else None
+
+    def take() -> tuple[str, str]:
+        nonlocal position
+        token = peek()
+        if token is None:
+            raise ValueError(f"marker {marker!r} ends too early")
+        position += 1
+        return token
+
+    def disjunction() -> bool:
+        holds = conjunction()
+        while peek() == ("word", "or"):
+            take()
+            holds = conjunction() or holds
+        return holds
+
+    def conjunction() -> bool:
+        holds = atom()
+        while peek() == ("word", "and"):
+            take()
+            holds = atom() and holds
+        return holds
+
+    def atom() -> bool:
+        if peek() == ("op", "("):
+            take()
+            holds = disjunction()
+            if take() != ("op", ")"):
+                raise ValueError(f"marker {marker!r} has an unclosed group")
+            return holds
+        left = take()
+        if left[0] == "op" or left[1] in {"and", "or", "in", "not"}:
+            raise ValueError(f"marker {marker!r} has {left[1]!r} where a value belongs")
+        op_kind, op = take()
+        if op_kind == "word" and op == "not" and take() == ("word", "in"):
+            op = "not in"
+        elif not (op_kind == "op" and op not in {"(", ")"}) and op != "in":
+            raise ValueError(f"marker {marker!r} has {op!r} where a comparison belongs")
+        right = take()
+        if right[0] == "op" or right[1] in {"and", "or", "in", "not"}:
+            raise ValueError(f"marker {marker!r} has {right[1]!r} where a value belongs")
+        return _marker_comparison(left, op, right, marker, environment)
+
+    holds = disjunction()
+    if position != len(tokens):
+        raise ValueError(f"marker {marker!r} has {tokens[position][1]!r} after its end")
+    return holds
+
+
+def locked_versions(
+    lock_text: str, *, environment: Mapping[str, str] | None = None
+) -> dict[str, str | None]:
+    """The version `uv.lock` locks of each package **for this interpreter**, by normalised name;
+    `None` for one it locks no version of.
+
+    A universal lock lists a package once per fork -- numpy 2.4.6 for Pythons before 3.12 and
+    2.5.1 from 3.12, in this repository's own lock -- each entry with the `resolution-markers`
+    it applies under. Only an entry whose markers hold for `environment` (the running
+    interpreter's, by default) counts, and one with no markers applies everywhere. A package
+    every entry of which is for other interpreters is absent: installed, it is not locked for
+    this one. Two entries of different versions that both hold are a lock this cannot read, and a
+    `ValueError`, as is a marker `marker_holds` cannot read.
+
+    Dependency `marker`s are not evaluated: they decide whether a package is installed on an
+    interpreter, not at which version, and a locked package that is not installed is not a
+    difference (`environment_differences`).
+    """
+    where = marker_environment() if environment is None else environment
+    document = tomllib.loads(lock_text)
+    versions: dict[str, set[str | None]] = {}
+    for package in document.get("package", []):
+        if not isinstance(package, dict) or "name" not in package:
+            continue
+        markers = package.get("resolution-markers")
+        if markers is not None:
+            if not isinstance(markers, list) or not all(isinstance(m, str) for m in markers):
+                raise ValueError(f"{package['name']}'s resolution-markers are not a marker list")
+            if not any(marker_holds(marker, where) for marker in markers):
+                continue
+        version = package.get("version")
+        versions.setdefault(_distribution_name(str(package["name"])), set()).add(
+            None if version is None else str(version)
+        )
+    locked: dict[str, str | None] = {}
+    for name, found in versions.items():
+        if len(found) > 1:
+            raise ValueError(
+                f"{LOCKFILE} locks {name} at {sorted(map(str, found))} for this interpreter"
+            )
+        (locked[name],) = found
+    return locked
 
 
 def installed_distributions() -> dict[str, str]:
@@ -436,15 +664,62 @@ def environment_differences(
     differences: list[str] = []
     for name, version in sorted(installed.items()):
         if name not in locked:
-            differences.append(f"{name} {version} is installed and {LOCKFILE} does not lock it")
+            differences.append(
+                f"{name} {version} is installed and {LOCKFILE} does not lock it for this "
+                "interpreter"
+            )
         elif locked[name] is not None and locked[name] != version:
             differences.append(f"{name} {version} is installed and {LOCKFILE} pins {locked[name]}")
     return differences
 
 
-def admit_environment(root: Path) -> None:
-    """Step 1's second half (`V2-P6-011`): the running interpreter's third-party packages are
-    exactly the ones `<root>/uv.lock` pins, or the run stops.
+def pinned_python(text: str, *, source: str) -> str:
+    """The `major.minor` a `.python-version` names (`3.11`, `3.11.14`, `cpython@3.11`, ...)."""
+    lines = [line.strip() for line in text.splitlines()]
+    named = [line for line in lines if line and not line.startswith("#")]
+    found = re.fullmatch(r"(?:[A-Za-z]+[@-])?(\d+)\.(\d+)(?:\.\d+)?", named[0]) if named else None
+    if found is None:
+        raise StepFailedError(
+            "registration",
+            f"{source} names no Python version this command can read: {text.strip()!r}",
+            exit_code=DailyExit.code_not_registered,
+        )
+    return f"{found.group(1)}.{found.group(2)}"
+
+
+def admit_interpreter(root: Path, *, code_commit: str) -> None:
+    """The running interpreter is the one the research ran on, by `major.minor`, or the run stops.
+
+    Read from the registered commit's `.python-version` (`git show <code_commit>:...`), so an
+    edit to the checkout's working tree does not move it. Python's own `major.minor` changes the
+    numerical libraries a lock resolves to (this repository's lock pins a different numpy on
+    3.12), so a different interpreter is a different computation even with the lock obeyed.
+    """
+    source = f"{code_commit}:{PYTHON_VERSION_FILE}"
+    run = registry._git(root, "show", source)
+    if run.returncode != 0:
+        raise StepFailedError(
+            "registration",
+            f"the registered commit has no {PYTHON_VERSION_FILE} ({source}), so the interpreter "
+            "the research ran on is not known",
+            exit_code=DailyExit.code_not_registered,
+        )
+    pinned = pinned_python(run.stdout.decode(errors="replace"), source=source)
+    running = f"{sys.version_info.major}.{sys.version_info.minor}"
+    if running != pinned:
+        raise StepFailedError(
+            "registration",
+            f"the running interpreter ({sys.executable}) is Python {running}, and the registered "
+            f"{PYTHON_VERSION_FILE} pins {pinned}. Run from the checkout --pin-worktree made, "
+            "whose environment is built on that interpreter",
+            exit_code=DailyExit.code_not_registered,
+        )
+
+
+def admit_environment(root: Path, *, code_commit: str) -> None:
+    """Step 1's second half (`V2-P6-011`): the running interpreter is the registered one
+    (`admit_interpreter`) and its third-party packages are exactly the ones `<root>/uv.lock`
+    locks **for that interpreter** (`locked_versions`), or the run stops.
 
     The bound code is compared with the registration's commit (`registry.admit_registered_code`,
     whose bound paths include `uv.lock`), and that says nothing about what the interpreter
@@ -453,6 +728,7 @@ def admit_environment(root: Path) -> None:
     its own environment, synced from its own lock offline (`sync_pinned_environment`); this is
     the defence behind that -- it refuses a run whose environment is not that lock, by name.
     """
+    admit_interpreter(root, code_commit=code_commit)
     lock = root / LOCKFILE
     if not lock.is_file():
         raise StepFailedError(
@@ -461,9 +737,15 @@ def admit_environment(root: Path) -> None:
             "compared with a registered one",
             exit_code=DailyExit.code_not_registered,
         )
-    differences = environment_differences(
-        locked_versions(lock.read_text(encoding="utf-8")), installed_distributions()
-    )
+    try:
+        locked = locked_versions(lock.read_text(encoding="utf-8"))
+    except (ValueError, tomllib.TOMLDecodeError) as error:
+        raise StepFailedError(
+            "registration",
+            f"the running environment cannot be compared with {lock}: {error}",
+            exit_code=DailyExit.code_not_registered,
+        ) from error
+    differences = environment_differences(locked, installed_distributions())
     if differences:
         shown = "; ".join(differences[:8])
         more = f" (and {len(differences) - 8} more)" if len(differences) > 8 else ""
@@ -1753,22 +2035,50 @@ PINNED_ENVIRONMENT: Final[str] = ".venv"
 """The pinned checkout's own environment, `<worktree>/.venv` (git-ignored)."""
 
 
-def environment_sync_command(worktree: Path, *, uv: Path) -> tuple[list[str], dict[str, str]]:
+def worktree_python(worktree: Path) -> str:
+    """The `major.minor` the pinned checkout's `.python-version` names, or refuse."""
+    source = worktree / PYTHON_VERSION_FILE
+    if not source.is_file():
+        raise StepFailedError(
+            "registration",
+            f"{source} does not exist, so the interpreter the pinned environment must be built on "
+            "is not known; nothing was synced",
+        )
+    return pinned_python(source.read_text(encoding="utf-8"), source=str(source))
+
+
+def environment_sync_command(
+    worktree: Path, *, uv: Path, python: str
+) -> tuple[list[str], dict[str, str]]:
     """The command that creates the pinned checkout's environment, and its environment variables.
 
     `uv sync --frozen --offline` against `<worktree>/uv.lock`, into `<worktree>/.venv`:
-    `--frozen` installs the lock as it is and never re-resolves it, `--offline` never touches the
-    network -- a package uv's cache does not hold is a refusal, not a download. The inherited
-    `VIRTUAL_ENV` and `PYTHONPATH` are dropped, so the sync cannot target, or import from, the
-    development checkout's environment.
+    `--frozen` installs the lock as it is and never re-resolves it, `--offline` and
+    `--no-python-downloads` never touch the network -- a package uv's cache does not hold, or an
+    interpreter not already on this machine, is a refusal, not a download. `--python` is the
+    checkout's `.python-version` (`worktree_python`), and `--all-extras` (the dev group is uv's
+    default) makes it the environment the research ran in, `uv sync --all-extras --dev`. The
+    inherited `VIRTUAL_ENV`, `PYTHONPATH` and `UV_PYTHON` are dropped, so the sync cannot target,
+    import from, or pick the interpreter of, the development checkout's environment.
     """
     environment = {
         key: value
         for key, value in os.environ.items()
-        if key not in {"VIRTUAL_ENV", "PYTHONPATH", "UV_PROJECT_ENVIRONMENT"}
+        if key not in {"VIRTUAL_ENV", "PYTHONPATH", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON"}
     }
     environment["UV_PROJECT_ENVIRONMENT"] = str(worktree / PINNED_ENVIRONMENT)
-    command = [str(uv), "sync", "--frozen", "--offline", "--project", str(worktree)]
+    command = [
+        str(uv),
+        "sync",
+        "--frozen",
+        "--offline",
+        "--no-python-downloads",
+        "--all-extras",
+        "--python",
+        python,
+        "--project",
+        str(worktree),
+    ]
     return command, environment
 
 
@@ -1782,20 +2092,36 @@ def _run_sync(
 _UNCACHED = re.compile(r"`([A-Za-z0-9_.\-]+)==([^`\s]+)`")
 
 
+def environment_python(environment: Path) -> str | None:
+    """The full Python version a virtual environment was built on, from its `pyvenv.cfg`."""
+    configuration = environment / "pyvenv.cfg"
+    if not configuration.is_file():
+        return None
+    for line in configuration.read_text(encoding="utf-8").splitlines():
+        key, _, value = line.partition("=")
+        if key.strip() in {"version_info", "version"}:
+            return value.strip()
+    return None
+
+
 def sync_pinned_environment(worktree: Path, *, uv: Path) -> Path:
-    """Create or refresh `<worktree>/.venv` from `<worktree>/uv.lock`, offline; return its path.
+    """Create or refresh `<worktree>/.venv` from `<worktree>/uv.lock`, offline, on the
+    interpreter `<worktree>/.python-version` names; return its path.
 
     Refused by name when uv's cache lacks a package: the operator is told which, and the one
-    online command that fills the cache -- which this command never runs.
+    online command that fills the cache -- which this command never runs. After the sync the
+    environment's `pyvenv.cfg` is read back, and one built on another `major.minor` is refused.
     """
-    command, environment = environment_sync_command(worktree, uv=uv)
+    python = worktree_python(worktree)
+    command, environment = environment_sync_command(worktree, uv=uv, python=python)
     finished = _run_sync(command, environment=environment, cwd=worktree)
     if finished.returncode != 0:
         output = finished.stderr.decode(errors="replace")
         missing = sorted({f"{name}=={version}" for name, version in _UNCACHED.findall(output)})
         online = (
             f"UV_PROJECT_ENVIRONMENT={shlex.quote(str(worktree / PINNED_ENVIRONMENT))} "
-            f"{shlex.quote(str(uv))} sync --frozen --project {shlex.quote(str(worktree))}"
+            f"{shlex.quote(str(uv))} sync --frozen --all-extras --python {shlex.quote(python)} "
+            f"--project {shlex.quote(str(worktree))}"
         )
         cause = (
             f"uv's cache holds no copy of {', '.join(missing)}"
@@ -1807,6 +2133,14 @@ def sync_pinned_environment(worktree: Path, *, uv: Path) -> Path:
             f"the pinned environment {worktree / PINNED_ENVIRONMENT} could not be created offline "
             f"from {worktree / LOCKFILE}: {cause}. Nothing was downloaded. To fill the cache, run "
             f"once, online: {online} -- then --pin-worktree again",
+        )
+    built = environment_python(worktree / PINNED_ENVIRONMENT)
+    if built is None or ".".join(built.split(".")[:2]) != python:
+        raise StepFailedError(
+            "registration",
+            f"the pinned environment {worktree / PINNED_ENVIRONMENT} runs Python "
+            f"{built or 'of no recorded version'}, and {worktree / PYTHON_VERSION_FILE} pins "
+            f"{python}; the scheduled run would compute on an interpreter the research did not",
         )
     return worktree / PINNED_ENVIRONMENT
 

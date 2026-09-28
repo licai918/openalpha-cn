@@ -156,6 +156,53 @@ source = { registry = "https://pypi.org/simple" }
 """The throwaway repository's `uv.lock`: the project and one third-party package."""
 LOCKED: Final[dict[str, str]] = {"openalpha-cn": "1.0.0", "numpy": "2.3.1"}
 """The environment `_bind` reports as installed: exactly the lock."""
+RUNNING_PYTHON: Final[str] = f"{sys.version_info.major}.{sys.version_info.minor}"
+"""The throwaway checkout's `.python-version`: the interpreter running the tests, so every test
+that does not ask otherwise is admitted."""
+FORKED_LOCK: Final[str] = """version = 1
+requires-python = ">=3.11"
+resolution-markers = [
+    "python_full_version >= '3.12' and sys_platform == 'win32'",
+    "python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.12' and sys_platform != 'win32'",
+    "python_full_version < '3.12' and sys_platform != 'win32'",
+]
+
+[[package]]
+name = "openalpha-cn"
+version = "1.0.0"
+source = { editable = "." }
+dependencies = [
+    { name = "numpy", version = "2.4.6", marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.5.1", marker = "python_full_version >= '3.12'" },
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+]
+
+[[package]]
+name = "numpy"
+version = "2.4.6"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version < '3.12' and sys_platform != 'win32'",
+]
+
+[[package]]
+name = "numpy"
+version = "2.5.1"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.12' and sys_platform == 'win32'",
+    "python_full_version >= '3.12' and sys_platform != 'win32'",
+]
+
+[[package]]
+name = "colorama"
+version = "0.4.6"
+source = { registry = "https://pypi.org/simple" }
+"""
+"""A lock with two forks, as uv writes one: numpy 2.4.6 for Pythons before 3.12 and 2.5.1 from
+3.12 -- the shape of this repository's own `uv.lock`."""
 COMMITTED: Final[datetime] = datetime(2025, 12, 10, 12, 0, tzinfo=UTC)
 WALL_CLOCK: Final[datetime] = datetime(2027, 6, 1, 4, 0, tzinfo=UTC)
 """The provider's wall clock: after both frames, so it never binds what a fetch may know."""
@@ -172,16 +219,25 @@ class World:
     market: Market
 
 
-def _repository(root: Path, config: Mapping[str, object]) -> tuple[Path, Path]:
-    """A throwaway repository holding one file under each bound path and a committed
-    registration of `config`."""
+def _repository(
+    root: Path,
+    config: Mapping[str, object],
+    *,
+    lock: str = LOCK,
+    python_version: str = RUNNING_PYTHON,
+) -> tuple[Path, Path]:
+    """A throwaway repository holding one file under each bound path, a `.python-version`, the
+    `.venv/` ignore rule the real repository has, and a committed registration of `config`."""
     repo = root / "repo"
     repo.mkdir(parents=True)
     git(repo, "init", "-q", "--template=")
     for name in BOUND:
         (repo / name).parent.mkdir(parents=True, exist_ok=True)
-        (repo / name).write_text(LOCK if name == "uv.lock" else "RULES = 1\n", encoding="utf-8")
+        (repo / name).write_text(lock if name == "uv.lock" else "RULES = 1\n", encoding="utf-8")
         git(repo, "add", name)
+    (repo / ".python-version").write_text(f"{python_version}\n", encoding="utf-8")
+    (repo / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+    git(repo, "add", ".python-version", ".gitignore")
     git(repo, "commit", "-q", "-m", "initial", at=COMMITTED - timedelta(days=1))
     registration = repo / "docs" / "research" / "p6-registration.json"
     registry.register(config, CRITERIA, registration, code_commit=head(repo))
@@ -1285,8 +1341,9 @@ def test_the_scheduled_checkout_is_pinned_at_the_registration_whatever_developme
     dirty worktree.
 
     The worktree gets its own environment: `uv sync --frozen --offline` from its own `uv.lock`
-    into `<worktree>/.venv`, with the development checkout's `VIRTUAL_ENV` dropped. Asserted on the
-    command; uv itself is never run here."""
+    into `<worktree>/.venv`, on the interpreter its `.python-version` names and with every extra
+    (the research environment's `uv sync --all-extras --dev`), with the development checkout's
+    `VIRTUAL_ENV` dropped. Asserted on the command; uv itself is never run here."""
     repo, registration = _repository(tmp_path, CONFIG)
     registered_at = head(repo)
     source = repo / "src" / "openalpha_cn" / "strategy.py"
@@ -1300,6 +1357,7 @@ def test_the_scheduled_checkout_is_pinned_at_the_registration_whatever_developme
         command: Sequence[str], *, environment: Mapping[str, str], cwd: Path
     ) -> subprocess.CompletedProcess[bytes]:
         synced.append((list(command), dict(environment), cwd))
+        _made_environment(Path(environment["UV_PROJECT_ENVIRONMENT"]), f"{RUNNING_PYTHON}.7")
         return subprocess.CompletedProcess(list(command), 0, b"", b"")
 
     monkeypatch.setattr(daily, "_run_sync", sync)
@@ -1324,7 +1382,18 @@ def test_the_scheduled_checkout_is_pinned_at_the_registration_whatever_developme
         f"pinned {where} at {registered_at}; environment {where / '.venv'} synced offline"
     )
     ((command, environment, cwd),) = synced
-    assert command == [str(uv.resolve()), "sync", "--frozen", "--offline", "--project", str(where)]
+    assert command == [
+        str(uv.resolve()),
+        "sync",
+        "--frozen",
+        "--offline",
+        "--no-python-downloads",
+        "--all-extras",
+        "--python",
+        RUNNING_PYTHON,
+        "--project",
+        str(where),
+    ]
     assert environment["UV_PROJECT_ENVIRONMENT"] == str(where / ".venv")
     assert "VIRTUAL_ENV" not in environment and "PYTHONPATH" not in environment
     assert cwd == where
@@ -1434,6 +1503,8 @@ def test_a_pinned_environment_uv_cannot_build_offline_is_refused_by_package_name
         lambda command, *, environment, cwd: subprocess.CompletedProcess(command, 2, b"", uncached),
     )
     worktree = tmp_path / "pinned $HOME"
+    worktree.mkdir()
+    (worktree / ".python-version").write_text("3.11\n", encoding="utf-8")
 
     with pytest.raises(daily.StepFailedError) as refused:
         daily.sync_pinned_environment(worktree, uv=Path("/opt/uv"))
@@ -1441,7 +1512,68 @@ def test_a_pinned_environment_uv_cannot_build_offline_is_refused_by_package_name
     message = str(refused.value)
     assert "uv's cache holds no copy of numpy==2.3.1" in message
     assert "Nothing was downloaded" in message
-    assert f"/opt/uv sync --frozen --project {shlex.quote(str(worktree))}" in message
+    assert (
+        f"/opt/uv sync --frozen --all-extras --python 3.11 --project {shlex.quote(str(worktree))}"
+        in message
+    )
+
+
+def _made_environment(environment: Path, version_info: str) -> None:
+    """What `uv sync` leaves behind that says which interpreter it used: `pyvenv.cfg`."""
+    environment.mkdir(parents=True, exist_ok=True)
+    (environment / "pyvenv.cfg").write_text(
+        f"home = /opt/python/bin\nimplementation = CPython\nversion_info = {version_info}\n",
+        encoding="utf-8",
+    )
+
+
+def test_a_pinned_environment_on_another_interpreter_is_refused_after_the_sync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sync names the interpreter, and what it built is read back: an environment on a
+    Python whose major.minor is not the checkout's `.python-version` is refused by both versions
+    -- the forward run would compute on an interpreter the research did not."""
+    worktree = tmp_path / "pinned $HOME"
+    worktree.mkdir()
+    (worktree / ".python-version").write_text("3.11\n", encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def sync(
+        command: Sequence[str], *, environment: Mapping[str, str], cwd: Path
+    ) -> subprocess.CompletedProcess[bytes]:
+        commands.append(list(command))
+        _made_environment(Path(environment["UV_PROJECT_ENVIRONMENT"]), "3.12.4")
+        return subprocess.CompletedProcess(list(command), 0, b"", b"")
+
+    monkeypatch.setattr(daily, "_run_sync", sync)
+    with pytest.raises(daily.StepFailedError) as refused:
+        daily.sync_pinned_environment(worktree, uv=Path("/opt/uv"))
+
+    assert commands[0][commands[0].index("--python") + 1] == "3.11"
+    assert "runs Python 3.12.4" in str(refused.value)
+    assert ".python-version pins 3.11" in str(refused.value)
+
+    monkeypatch.setattr(
+        daily,
+        "_run_sync",
+        lambda command, *, environment, cwd: (
+            _made_environment(Path(environment["UV_PROJECT_ENVIRONMENT"]), "3.11.14"),
+            subprocess.CompletedProcess(list(command), 0, b"", b""),
+        )[1],
+    )
+    assert daily.sync_pinned_environment(worktree, uv=Path("/opt/uv")) == worktree / ".venv"
+
+
+def test_a_pinned_checkout_without_a_python_version_is_not_synced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No `.python-version`, no interpreter to pin: refused before uv runs."""
+    ran: list[object] = []
+    monkeypatch.setattr(daily, "_run_sync", lambda *a, **k: ran.append(a))
+
+    with pytest.raises(daily.StepFailedError, match=r"\.python-version"):
+        daily.sync_pinned_environment(tmp_path, uv=Path("/opt/uv"))
+    assert ran == []
 
 
 def test_an_interpreter_whose_packages_are_not_the_lock_is_refused_at_admission(
@@ -1475,6 +1607,150 @@ def test_the_environment_comparison_normalises_names_and_ignores_locked_extras()
     assert daily.environment_differences(locked, {**LOCKED, "numpy": "2.3.1.post1"}) == [
         "numpy 2.3.1.post1 is installed and uv.lock pins 2.3.1"
     ]
+
+
+def _marker_environment(python_full_version: str, sys_platform: str = "darwin") -> dict[str, str]:
+    """PEP 508's marker environment for an interpreter, as `marker_environment` reads one."""
+    return {
+        "implementation_name": "cpython",
+        "implementation_version": python_full_version,
+        "os_name": "nt" if sys_platform == "win32" else "posix",
+        "platform_machine": "arm64",
+        "platform_python_implementation": "CPython",
+        "platform_release": "25.5.0",
+        "platform_system": "Windows" if sys_platform == "win32" else "Darwin",
+        "platform_version": "Darwin Kernel Version 25.5.0",
+        "python_full_version": python_full_version,
+        "python_version": ".".join(python_full_version.split(".")[:2]),
+        "sys_platform": sys_platform,
+    }
+
+
+def test_a_forked_lock_locks_the_version_whose_markers_hold_for_the_interpreter() -> None:
+    """`uv.lock` lists a package once per fork, each with the `resolution-markers` it applies
+    under. Only the entry whose markers hold for the running interpreter counts: on 3.11 the lock
+    answers numpy 2.4.6 -- the main checkout's environment is the lock's, not a drift from it --
+    and on 3.12, 2.5.1."""
+    on_311 = daily.locked_versions(FORKED_LOCK, environment=_marker_environment("3.11.14"))
+    on_312 = daily.locked_versions(FORKED_LOCK, environment=_marker_environment("3.12.4"))
+    on_windows = daily.locked_versions(
+        FORKED_LOCK, environment=_marker_environment("3.11.9", "win32")
+    )
+
+    assert on_311["numpy"] == on_windows["numpy"] == "2.4.6"
+    assert on_312["numpy"] == "2.5.1"
+    assert on_311["colorama"] == "0.4.6"
+    installed = {"openalpha-cn": "1.0.0", "numpy": "2.4.6"}
+    assert daily.environment_differences(on_311, installed) == []
+    assert daily.environment_differences(on_312, installed) == [
+        "numpy 2.4.6 is installed and uv.lock pins 2.5.1"
+    ]
+    assert daily.environment_differences(on_311, {**installed, "numpy": "2.5.1"}) == [
+        "numpy 2.5.1 is installed and uv.lock pins 2.4.6"
+    ]
+
+
+def test_admission_takes_the_lock_entry_for_the_running_interpreter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Step 1 end to end on a two-fork lock: a 3.11 interpreter with numpy 2.4.6 is admitted,
+    the same interpreter with 2.5.1 is refused by name (exit 3)."""
+    repo, registration = _repository(tmp_path, CONFIG, lock=FORKED_LOCK)
+    _bind(monkeypatch, repo, Market(open_days=OPEN_2026))
+    monkeypatch.setattr(daily, "marker_environment", lambda: _marker_environment("3.11.14"))
+    installed = {"openalpha-cn": "1.0.0", "numpy": "2.4.6", "colorama": "0.4.6"}
+    monkeypatch.setattr(daily, "installed_distributions", lambda: installed)
+
+    assert daily.admit_registration(registration, repo).code_commit
+
+    monkeypatch.setattr(daily, "installed_distributions", lambda: {**installed, "numpy": "2.5.1"})
+    with pytest.raises(daily.StepFailedError) as refused:
+        daily.admit_registration(registration, repo)
+    assert refused.value.exit_code == 3
+    assert "numpy 2.5.1 is installed and uv.lock pins 2.4.6" in str(refused.value)
+
+
+@pytest.mark.parametrize(
+    ("marker", "holds"),
+    [
+        ("python_full_version < '3.12'", True),
+        ("python_full_version >= '3.12' and python_full_version < '3.14'", False),
+        ("python_full_version == '3.11.*'", True),
+        ("python_full_version != '3.11.*'", False),
+        ("python_full_version == '3.1.*'", False),
+        ("python_version == '3.11'", True),
+        ("python_version ~= '3.10'", True),
+        ("python_version ~= '3.12'", False),
+        ("python_version > '3.9'", True),
+        ("python_version <= '3.10'", False),
+        ("sys_platform == 'win32' or sys_platform == 'darwin'", True),
+        ("sys_platform != 'emscripten' and sys_platform != 'win32'", True),
+        ("(sys_platform == 'win32' or python_version < '3.12') and os_name == 'posix'", True),
+        ("sys_platform == 'darwin' or python_version >= '3.12' and os_name == 'nt'", True),
+        ("'arm' in platform_machine", True),
+        ("'x86' not in platform_machine", True),
+        ("implementation_name == 'cpython' and platform_python_implementation == 'CPython'", True),
+        ('platform_system == "Darwin"', True),
+    ],
+)
+def test_the_lock_marker_grammar(marker: str, holds: bool) -> None:
+    """The subset of PEP 508 markers `uv.lock` writes, evaluated with the standard library alone
+    (`packaging` is only a test dependency): `and` binds tighter than `or`, `==`/`!=` take a
+    `.*` prefix, versions compare as release numbers and everything else as text."""
+    assert daily.marker_holds(marker, _marker_environment("3.11.14")) is holds
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "extra == 'akshare'",
+        "python_full_version < '3.12",
+        "python_full_version <",
+        "sys_platform == 'win32' and",
+        "python_version < 'three'",
+        "sys_platform < 'win32'",
+        "(python_version < '3.12'",
+    ],
+)
+def test_a_marker_the_grammar_cannot_read_is_an_error_not_a_guess(marker: str) -> None:
+    """A marker this evaluator does not understand never counts as holding or not holding."""
+    with pytest.raises(ValueError, match="marker"):
+        daily.marker_holds(marker, _marker_environment("3.11.14"))
+
+
+def test_a_lock_whose_markers_cannot_be_read_refuses_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lock = FORKED_LOCK.replace("python_full_version < '3.12' and sys_platform == 'win32'", "foo ~")
+    repo, registration = _repository(tmp_path, CONFIG, lock=lock)
+    _bind(monkeypatch, repo, Market(open_days=OPEN_2026))
+    monkeypatch.setattr(daily, "marker_environment", lambda: _marker_environment("3.11.14"))
+
+    with pytest.raises(daily.StepFailedError) as refused:
+        daily.admit_registration(registration, repo)
+    assert refused.value.exit_code == 3
+    assert "cannot be compared" in str(refused.value)
+
+
+def test_an_interpreter_other_than_the_registered_python_version_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The registered checkout's `.python-version` (read at the registration's `code_commit`,
+    so an edit to the working tree does not move it) names the interpreter the research ran on;
+    an interpreter of another major.minor is refused (exit 3), whatever its packages."""
+    other = "3.9" if RUNNING_PYTHON != "3.9" else "3.10"
+    repo, registration = _repository(tmp_path, CONFIG, python_version=other)
+    _bind(monkeypatch, repo, Market(open_days=OPEN_2026))
+
+    with pytest.raises(daily.StepFailedError) as refused:
+        daily.admit_registration(registration, repo)
+    assert refused.value.exit_code == 3
+    assert f"Python {RUNNING_PYTHON}" in str(refused.value)
+    assert f".python-version pins {other}" in str(refused.value)
+
+    (repo / ".python-version").write_text(f"{RUNNING_PYTHON}\n", encoding="utf-8")
+    with pytest.raises(daily.StepFailedError, match=rf"\.python-version pins {other}"):
+        daily.admit_registration(registration, repo)
 
 
 # --- the registered score is the backtest's ------------------------------------------------------
