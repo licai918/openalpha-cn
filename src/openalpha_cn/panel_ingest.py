@@ -1536,9 +1536,11 @@ def carry_stored_rows_forward(
       own rather than merged into a batch that has none.
     - **`observed_at` re-observes the carried rows**: their `ingested_time` becomes
       `max(observed_at, available_time)`, which is what a re-fetch stamped at `observed_at`
-      gives the same row, and the smallest value `TimelineColumns` accepts at that stamp. It can
-      make a row visible later, never earlier. `None`, the default, keeps the stored clocks,
-      which is what every derived-plane caller wants.
+      gives the same row, and the smallest value `TimelineColumns` accepts at that stamp -- so the
+      result is hash-equal to that re-fetch. The visibility clocks (`available_time`,
+      `revision_time`) are untouched; `ingested_time` is provenance, and the new value can be
+      earlier or later than the stored one. `None`, the default, keeps the stored clocks, which
+      is what every derived-plane caller wants.
     """
     coverage = store.read_coverage(batch.dataset, year)
     if coverage is None:
@@ -1598,16 +1600,31 @@ def carry_stored_sessions_forward(
 
     `V2-P6-003`, the incremental panel build: a session-scoped year is fetched again only from
     `before` on, and every earlier session comes back out of the partition the last build
-    stored. This is `carry_stored_rows_forward` -- the same un-gated read, for the same reason
-    (nothing read is answered with; a point-in-time read would commit a partition missing the
-    withheld rows) -- with the session cut as its `retain` and two things a fetched dataset
-    needs that a derived one does not:
+    stored. This is `carry_stored_rows_forward`'s un-gated read with the session cut as its
+    `retain`, and two things a fetched dataset needs that a derived one does not (below).
+
+    ## Why the un-gated read is sound here, which is not `carry_stored_rows_forward`'s reason
+
+    That function's argument is that nothing it reads is answered with. **Here the carried rows
+    are answered with**: the incremental build's reconciliations read them as the previous close
+    and resumption witness of a disputed bar, as the halt corpus, as the input the listing rule
+    re-judges, and as an index's published months. What makes an un-gated read of them safe is a
+    fact about the rows instead: every carried row is event-dated before `before`, and the caller
+    only ever passes a `before` at or before its own last requested session -- a session that had
+    published at the build's clock. For the session-scoped datasets, their defect record and
+    `index_weight`, a row's `available_time` and `revision_time` are that session's publication
+    instant (16:30 on its date, `providers.tushare._daily_close_timeline`), so every carried row
+    was knowable at `observed_at`, which is exactly what a point-in-time read at `observed_at`
+    would have required. That is checked rather than assumed: a carried row whose
+    `available_time` or `revision_time` is after `observed_at` refuses the carry, by name.
+
+    ## The two additions
 
     - **The carried rows are re-observed at `observed_at`**, the build's own stamp: their
       `ingested_time` becomes `max(observed_at, available_time)`, the value a full rebuild at the
-      same `--as-of` gives every row it fetches (`providers.tushare._daily_close_timeline`), so
-      the incremental partition is byte-for-byte the full rebuild's. It can only move a row's
-      visibility later, never earlier -- the pin's own direction (`TushareProvider._stamp`).
+      same `--as-of` gives every row it fetches, so the incremental partition is hash-equal to
+      the full rebuild's. The visibility clocks (`available_time`, `revision_time`) are left
+      untouched; `ingested_time` is provenance, and can move either way.
     - **The carried rows come back as a batch of their own**, in front of `batches` and in the
       order they were stored, rather than merged into the first arriving one. The writers merge
       them exactly as they merge a full build's per-session fetches, so the stored row order is
@@ -1641,6 +1658,14 @@ def carry_stored_sessions_forward(
     )
     if carried.status != "success":
         return list(batches)
+    latest = max((*carried.timeline.available_time, *carried.timeline.revision_time))
+    if latest > observed_at:
+        raise PanelBatchError(
+            f"the stored {dataset} year={year} rows before {before.isoformat()} include one "
+            f"knowable only at {latest.isoformat()}, after this build's {observed_at.isoformat()}; "
+            "carrying it would answer with a row the build could not have seen. Rebuild the year "
+            "at this as_of instead"
+        )
     return [carried, *batches]
 
 

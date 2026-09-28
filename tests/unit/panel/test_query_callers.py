@@ -94,6 +94,17 @@ catalog-side guard. The residue -- a `retain` rule that carried a row it should 
 is caught one plane up by `_refuse_two_builds_of_one_factor_at_one_as_of`'s stored-side twin,
 `identity_columns`.
 
+**`V2-P6-003` reuses that function for a caller the argument above does not cover, and says so.**
+`panel_ingest.carry_stored_sessions_forward` (the incremental `panel build`) carries a fetched
+year's stored sessions through it, and those rows **are** answered with: the build reads them as
+a disputed bar's previous close and resumption witness, as the halt corpus, as the listing rule's
+input and as an index's published months. The un-gated read is sound there for a different
+reason -- every carried row is event-dated before the slice's first session, which is at or
+before the build's last requested session and so published at its clock, and for those datasets
+`available_time` and `revision_time` are the session's own 16:30 publication instant. So the rows
+are exactly what a point-in-time read at the build's instant would return, and the function
+checks it: a carried row knowable after that instant refuses the carry by name.
+
 Adding a name here is a deliberate act with a review attached, which is the property this test
 exists to create.
 
@@ -217,6 +228,11 @@ so each writer reads the stored rows back and puts the *other* source's rows in 
 own. Nothing it reads is answered with; a point-in-time read there would drop the withheld rows
 from the partition it is about to commit. Reading the record *out* goes through the filtered
 door (`load_upstream_defects`, on `test_visible_read_callers.py`'s allowlist).
+
+`carry_stored_rows_forward`'s entry also covers `carry_stored_sessions_forward` (`V2-P6-003`),
+which reaches the read through it rather than calling `query` itself, and whose rows *are*
+answered with; `QUERY_CALLERS`' `V2-P6-003` paragraph gives the reason that holds there instead --
+every carried row was published at the build's clock, and the function checks it.
 
 **The file-level entry above is too coarse for this one file, and `V2-P4-081` is what it cost.**
 `QUERY_CALLERS` answers *which files may* -- the right granularity for `panel/store.py`, which is

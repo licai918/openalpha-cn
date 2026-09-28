@@ -3258,7 +3258,9 @@ def _carried_defects(
     incremental build performs none on a carried session -- the dropped rows are not in the
     stored partition to be dropped again -- so without this the record of every defect before
     the slice would be erased while its rows stayed missing. Carried, and re-observed at the
-    build's stamp, they are exactly the rows the full rebuild records for those sessions.
+    build's stamp, they are the rows the full rebuild records for those sessions **only if the
+    upstream has not changed those sessions since they were stored** -- the premise of every
+    carried row, which a full rebuild re-fetches and an incremental one does not.
     """
     if before is None:
         return None
@@ -4134,20 +4136,30 @@ def _build_index_weights(
     """
     batches: list[ColumnarPanelBatch] = []
     months = [month for month in range(1, 13) if _month_end_as_of(year, month, now) is not None]
-    resume = _index_weight_resume_month(store, year=year) if incremental else None
-    if resume is not None:
-        months = [month for month in months if month >= resume]
+    # `V2-P6-003`: per index, because an index can lag the others or be absent from the stored
+    # year altogether -- its own newest stored month is where its slice starts.
+    stored = _index_weight_stored_months(store, year=year, now=now) if incremental else {}
+    plan = {
+        index_code: [
+            month
+            for month in months
+            if not stored.get(index_code) or month >= stored[index_code][-1]
+        ]
+        for index_code in INDEX_WEIGHT_INDEX_CODES
+    }
+    for index_code, carried_months in stored.items():
         typer.echo(
-            f"INCREMENTAL {INDEX_WEIGHT_DATASET} year={year} stored through month {resume}; "
-            f"fetching {len(months)} month(s) from {resume}",
+            f"INCREMENTAL {INDEX_WEIGHT_DATASET} year={year} {index_code} stored through month "
+            f"{carried_months[-1]}; fetching {len(plan[index_code])} month(s) from "
+            f"{carried_months[-1]}",
             err=True,
         )
-    total = len(months) * len(INDEX_WEIGHT_INDEX_CODES)
+    total = sum(len(wanted) for wanted in plan.values())
     _echo_budget(
         f"{INDEX_WEIGHT_DATASET} year={year}",
         total,
         "requests",
-        f"{len(INDEX_WEIGHT_INDEX_CODES)} indices x {len(months)} month-end publications",
+        f"{len(INDEX_WEIGHT_INDEX_CODES)} indices x up to {len(months)} month-end publications",
     )
     started = monotonic()
     stride = _progress_stride(total)
@@ -4155,7 +4167,7 @@ def _build_index_weights(
     for index_code in INDEX_WEIGHT_INDEX_CODES:
         published: list[int] = []
         fetched: list[ColumnarPanelBatch] = []
-        for month in months:
+        for month in plan[index_code]:
             instant = _month_end_as_of(year, month, now)
             assert instant is not None  # `months` is exactly the ones that resolved
             batch = _fetch_panel(
@@ -4167,9 +4179,10 @@ def _build_index_weights(
                 fetched.append(batch)
             if done % stride == 0 or done == total:
                 _echo_progress((INDEX_WEIGHT_DATASET,), done, total, started, unit="index-months")
-        if resume is not None:
-            # `V2-P6-003`: this index's stored months before the slice, in front of its fetched
+        if stored.get(index_code):
+            # `V2-P6-003`: this index's stored months before its slice, in front of its fetched
             # ones -- per index, because a full build appends index by index.
+            resume = stored[index_code][-1]
             carried = carry_stored_sessions_forward(
                 store,
                 (),
@@ -4180,15 +4193,11 @@ def _build_index_weights(
                 keep=_subject_is(index_code),
             )
             published = sorted(
-                {
-                    instant.astimezone(PANEL_DATE_ZONE).month
-                    for batch in carried
-                    for instant in batch.timeline.event_time
-                }
-                | set(published)
+                {month for month in stored[index_code] if month < resume} | set(published)
             )
             fetched = [*carried, *fetched]
         batches.extend(fetched)
+        # Over every resolved month, carried and fetched alike: a hole may lie in either.
         absent = [
             month
             for month in months
@@ -4218,19 +4227,37 @@ def _subject_is(subject: str) -> Callable[[Mapping[str, object]], bool]:
     return lambda row: row[SUBJECT_COLUMN_NAME] == subject
 
 
-def _index_weight_resume_month(store: PanelStore, *, year: int) -> int | None:
-    """The month an incremental `index_weight` build fetches from, or `None` for the year.
+def _index_weight_stored_months(
+    store: PanelStore, *, year: int, now: datetime
+) -> dict[str, list[int]]:
+    """Each index's stored publication months of `year`, ascending; an index with none is absent.
 
-    The month of the stored partition's newest publication: fetched again (one month of
-    overlap, the monthly counterpart of the price targets' one session) with every month after
-    it, and every earlier month carried. `None` when nothing is stored.
+    What an incremental `index_weight` build decides from, per index: the newest of them is
+    fetched again (one month of overlap, the monthly counterpart of the price targets' one
+    session) with every month after it, and the earlier ones are carried. An index that lags the
+    others resumes from its own newest month, not the partition's; an index missing from the
+    stored year is fetched whole. Read through the same carry the build then uses, so the months
+    decided from are the rows carried.
     """
-    if year not in store.registered_years(INDEX_WEIGHT_DATASET):
-        return None
-    coverage = store.read_coverage(INDEX_WEIGHT_DATASET, year)
-    if coverage is None or not coverage.dates:
-        return None
-    return max(entry.event_date for entry in coverage.dates).month
+    months: dict[str, list[int]] = {}
+    for index_code in INDEX_WEIGHT_INDEX_CODES:
+        held = carry_stored_sessions_forward(
+            store,
+            (),
+            dataset=INDEX_WEIGHT_DATASET,
+            year=year,
+            before=date(year + 1, 1, 1),
+            observed_at=now,
+            keep=_subject_is(index_code),
+        )
+        found = {
+            instant.astimezone(PANEL_DATE_ZONE).month
+            for batch in held
+            for instant in batch.timeline.event_time
+        }
+        if found:
+            months[index_code] = sorted(found)
+    return months
 
 
 def _build_index_prices(

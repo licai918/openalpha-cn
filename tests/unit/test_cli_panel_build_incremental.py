@@ -39,11 +39,16 @@ from openalpha_cn.cli import PanelExit, app
 from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
 from openalpha_cn.domain.daily_prices import DAILY_BASIC_DATASET, DAILY_DATASET
 from openalpha_cn.domain.index_membership import INDEX_WEIGHT_DATASET, INDEX_WEIGHT_INDEX_CODES
+from openalpha_cn.domain.panel_batch import PanelBatchError
 from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET, SUSPENSION_DATASET
 from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET
 from openalpha_cn.domain.trading_calendar import TRADING_CALENDAR_DATASET
 from openalpha_cn.panel.store import PanelStore
-from openalpha_cn.panel_ingest import UPSTREAM_DEFECTS_DATASET, load_upstream_defects
+from openalpha_cn.panel_ingest import (
+    UPSTREAM_DEFECTS_DATASET,
+    carry_stored_sessions_forward,
+    load_upstream_defects,
+)
 
 runner = CliRunner()
 
@@ -157,6 +162,8 @@ class Corpus:
     halted_across: bool = False
     """`HALTED_ACROSS` contradicts its bar on `SESSIONS[3]`, is halted all of `SESSIONS[4:6]`,
     and resumes on `SESSIONS[6]` with a `pre_close` that corroborates the disputed bar."""
+    weights_through: tuple[tuple[str, int], ...] = ()
+    """`(index_code, month)`: that index publishes no weighting after `month` (0: none at all)."""
 
 
 class ScriptedUpstream:
@@ -294,6 +301,9 @@ class ScriptedUpstream:
 
     def _index_weights(self, params: Mapping[str, str]) -> list[list[Any]]:
         start = datetime.strptime(str(params["start_date"]), "%Y%m%d").date()
+        last = dict(self.corpus.weights_through).get(str(params["index_code"]), 12)
+        if start.month > last:
+            return []
         day = _compact(start.replace(day=28))
         return [
             [params["index_code"], FILLERS[0], day, 60.0 + start.month],
@@ -599,3 +609,62 @@ def test_incremental_index_weight_fetches_from_the_last_stored_month_and_equals_
     assert months == sorted(
         (code, month) for code in INDEX_WEIGHT_INDEX_CODES for month in (2, 3, 4, 5)
     )
+
+
+@pytest.mark.parametrize(
+    ("lagging", "stored_through"),
+    [
+        pytest.param(INDEX_WEIGHT_INDEX_CODES[0], 2, id="an-index-stored-two-months-short"),
+        pytest.param(INDEX_WEIGHT_INDEX_CODES[2], 0, id="an-index-absent-from-the-stored-year"),
+    ],
+)
+def test_incremental_index_weight_resumes_each_index_from_its_own_stored_months(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lagging: str, stored_through: int
+) -> None:
+    """The stored year holds every index through April except `lagging`, which the first build
+    found only through `stored_through` (an end gap, legitimate then). By July it has published
+    every month, so a full build stores all of them -- and so must the incremental one, rather
+    than resuming `lagging` from the partition's newest month and skipping what lies between."""
+    may, july = "2026-05-15T12:00:00+08:00", "2026-07-15T12:00:00+08:00"
+    targets = (INDEX_WEIGHT_DATASET,)
+    full = run_build(tmp_path / "full", monkeypatch, as_of=july, incremental=False, targets=targets)
+    assert full.exit_code == PanelExit.ok, full.output
+    short = Corpus(weights_through=((lagging, stored_through),))
+    first = run_build(
+        tmp_path / "inc", monkeypatch, as_of=may, incremental=False, targets=targets, corpus=short
+    )
+    assert first.exit_code == PanelExit.ok, first.output
+
+    inc = run_build(tmp_path / "inc", monkeypatch, as_of=july, incremental=True, targets=targets)
+
+    assert inc.exit_code == PanelExit.ok, inc.output
+    assert _hashes(tmp_path / "inc", (INDEX_WEIGHT_DATASET,)) == _hashes(
+        tmp_path / "full", (INDEX_WEIGHT_DATASET,)
+    )
+    asked = {
+        (str(p["params"]["index_code"]), int(str(p["params"]["start_date"])[4:6]))
+        for p in inc.upstream.payloads
+    }
+    assert {month for code, month in asked if code == lagging} == set(
+        range(max(stored_through, 1), 8)
+    )
+
+
+def test_a_carry_refuses_a_stored_row_the_build_could_not_have_seen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The carried rows are answered with, so they must have been knowable at the build's
+    instant: a store built through `T2` carried at `T1` would hand back sessions after `T1`."""
+    stored = run_build(tmp_path, monkeypatch, as_of=T2, incremental=False)
+    assert stored.exit_code == PanelExit.ok, stored.output
+    store = _store(tmp_path)
+
+    at_t1 = datetime.fromisoformat(T1)
+    carried = carry_stored_sessions_forward(
+        store, (), dataset=DAILY_DATASET, year=YEAR, before=T1_LAST, observed_at=at_t1
+    )
+    assert len(carried) == 1
+    with pytest.raises(PanelBatchError, match="knowable only at"):
+        carry_stored_sessions_forward(
+            store, (), dataset=DAILY_DATASET, year=YEAR, before=T2_LAST, observed_at=at_t1
+        )
