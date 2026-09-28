@@ -104,18 +104,42 @@ def test_a_configuration_is_one_row_of_its_stage_and_a_second_is_refused(tmp_pat
 
 def test_a_ledger_row_carries_its_stage_configuration_identity_and_time(tmp_path: Path) -> None:
     ledger = tmp_path / "ledger.jsonl"
-    config = {"holding_count": 50, "start": date(2015, 1, 5), "weight": Decimal("0.5")}
+    config = {**WINDOW, "holding_count": 50, "weight": Decimal("0.5")}
 
     grid.append_ledger(ledger, "discovery", config, {"p_excess": 0.25}, recorded_at=AT)
 
     (row,) = _rows(ledger)
     assert row["schema"] == grid.LEDGER_SCHEMA
     assert row["stage"] == "discovery"
-    assert row["config"] == {"holding_count": 50, "start": "2015-01-05", "weight": "0.5"}
+    assert row["config"] == {
+        "end": "2015-06-30",
+        "holding_count": 50,
+        "start": "2015-01-05",
+        "weight": "0.5",
+    }
     assert row["config_id"] == grid.config_id(config)
     assert len(row["config_id"]) == 64
     assert row["result"] == {"p_excess": 0.25}
     assert row["recorded_at"] == "2026-09-26T12:00:00+00:00"
+
+
+def test_append_ledger_refuses_a_row_whose_declared_window_leaves_its_stage(
+    tmp_path: Path,
+) -> None:
+    """A hand-written row is a hypothesis of its stage's family like any measured one, so a
+    validation row over 2024 -- the holdout's years -- is refused, not counted."""
+    ledger = tmp_path / "ledger.jsonl"
+    in_2024 = {"start": date(2024, 1, 2), "end": date(2025, 6, 30), "holding_count": 50}
+    inside = {"start": date(2022, 1, 4), "end": date(2023, 12, 29), "holding_count": 50}
+
+    with pytest.raises(grid.StageWindowError, match="2025-06-30"):
+        grid.append_ledger(ledger, "validation", in_2024, {"p_excess": 0.001})
+    with pytest.raises(grid.ResearchLedgerError, match="start"):
+        grid.append_ledger(ledger, "validation", {"start": date(2022, 1, 4)}, {"p_excess": 0.1})
+    grid.append_ledger(ledger, "validation", inside, {"p_excess": 0.2})
+
+    assert grid.stage_family(ledger, "validation") == 1
+    assert grid.fdr_table(ledger, "validation", 0.10).family_size == 1
 
 
 def test_a_torn_ledger_line_is_refused_rather_than_skipped(tmp_path: Path) -> None:

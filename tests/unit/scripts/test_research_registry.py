@@ -378,7 +378,8 @@ def test_a_commit_time_in_shanghai_is_ordered_against_utc_ledger_rows(tmp_git_re
 
 def test_a_committed_registration_before_any_holdout_row_is_allowed(tmp_git_repo: Path) -> None:
     ledger = tmp_git_repo / "ledger.jsonl"
-    grid.append_ledger(ledger, "validation", CONFIG, {"p_excess": 0.2}, recorded_at=COMMITTED)
+    validation = {**CONFIG, "start": date(2022, 1, 4), "end": date(2023, 12, 29)}
+    grid.append_ledger(ledger, "validation", validation, {"p_excess": 0.2}, recorded_at=COMMITTED)
     registration = _registered(tmp_git_repo, commit_at=COMMITTED)
 
     registry.assert_holdout_allowed(registration, ledger, tmp_git_repo)

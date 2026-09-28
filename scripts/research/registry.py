@@ -92,9 +92,9 @@ from openalpha_cn.runtime.provenance import resolve_code_commit
 REGISTRATION_SCHEMA: Final[str] = "openalpha-research-registration/v1"
 REGISTERED_PATHS: Final[tuple[str, ...]] = ("src", "scripts/research", "pyproject.toml", "uv.lock")
 """The pathspecs whose bytes must be the registration's code commit's when the holdout runs."""
-PACKAGE_ROOT: Final[str] = "src"
 SCRIPTS_ROOT: Final[str] = "scripts/research"
 """Where, under the repository, the imported `grid` and `registry` modules must live."""
+PACKAGE_ROOT: Final[str] = "src"
 """Where, under the repository, the imported `openalpha_cn` must live."""
 _FULL_COMMIT: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{40}")
 _GIT_TIMEOUT_SECONDS: Final[int] = 60

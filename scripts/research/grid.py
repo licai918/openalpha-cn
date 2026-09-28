@@ -426,8 +426,21 @@ def append_ledger(
     recorded_at: datetime | None = None,
 ) -> None:
     """Append one configuration's row to `stage`. Refuses a stage outside `STAGES`, the holdout
-    stage (only `registry.run_holdout` writes it), a configuration the stage already holds, and a
-    value with no canonical JSON form. `recorded_at` defaults to now."""
+    stage (only `registry.run_holdout` writes it), a configuration the stage already holds, a
+    value with no canonical JSON form, and -- because a hand-written row joins its stage's family
+    and FDR table like a measured one -- a configuration whose declared `start..end` leaves the
+    stage's window (`StageWindowError`), so no row over the holdout's years enters another stage.
+    `recorded_at` defaults to now.
+
+    **It can only refuse a configuration that declares its window.** A configuration naming
+    neither `start` nor `end` has no dates to check and is written; one naming either must name
+    both, as `measured_window` requires. No label past `end` is assumed (`label_sessions=0`).
+    The check lives here rather than in `_append` because `run_grid` writes its refused rows --
+    whose windows are out of the stage by definition -- through `_append`.
+    """
+    if "start" in config or "end" in config:
+        first, last = measured_window(config, label_sessions=0)
+        check_window(_checked_stage(stage), first, last)
     _append(
         path,
         list(read_ledger(path)),
