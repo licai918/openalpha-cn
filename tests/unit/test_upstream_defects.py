@@ -213,6 +213,10 @@ class Frame:
     """More sessions on which `FILLERS[5]` has no bar and no valuation."""
     also_halted_days: tuple[date, ...] = ()
     """More sessions on which `suspend_d` has `FILLERS[5]` halted all day."""
+    next_year_barless: bool = False
+    """`mismatch_code` has no bar and no valuation on any session after 2013."""
+    next_year_halted_days: tuple[date, ...] = ()
+    """Sessions on which `suspend_d` has `mismatch_code` halted all day."""
     delisted_code: str | None = None
     """A security the registry has delisted on 2013-12-31, with no bar after 2013."""
     """`FILLERS[5]` is halted all of `SESSIONS[-1]`, so its last 2013 bar is on `SESSIONS[-2]`."""
@@ -264,6 +268,8 @@ class ScriptedUpstream:
         if code == FILLERS[5] and day in self.frame.also_absent_days:
             return False
         if code == self.frame.delisted_code and day.year > YEAR:
+            return False
+        if self.frame.next_year_barless and code == self.frame.mismatch_code and day.year > YEAR:
             return False
         return not (self.frame.limit_placeholder and code == HALTED and day == HALT_DAY)
 
@@ -329,6 +335,8 @@ class ScriptedUpstream:
             rows.append([FILLERS[5], _compact(day), "S", None])
         if day in self.frame.also_halted_days:
             rows.append([FILLERS[5], _compact(day), "S", None])
+        if day in self.frame.next_year_halted_days:
+            rows.append([self.frame.mismatch_code, _compact(day), "S", None])
         if (
             self.frame.limit_placeholder
             and self.frame.halted_on_placeholder_day
@@ -1181,6 +1189,77 @@ def test_a_re_fetch_that_was_all_pre_listing_comes_back_empty_not_raw(
     assert empty.status == "no_data"
     assert empty.dataset == DAILY_DATASET
     assert empty.subjects == ()
+
+
+# --- round 6: the stored next year, judged session by session within its own horizon ---------
+
+
+def _barless_next_year(**changes: Any) -> Frame:
+    return Frame(
+        mismatch_day=SESSIONS[-1],
+        sessions=(*SESSIONS, *NEXT_YEAR),
+        next_year_barless=True,
+        **changes,
+    )
+
+
+def test_every_barless_session_of_the_stored_next_year_must_be_explained(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reviewer's probe: no 2014 bar at all, halted on 2014-01-02 only. 2014-01-03 is a
+    published, stored session with no bar and nothing to explain it, so the year is refused by
+    that session -- the year+1 build does not refuse a per-security hole, so this has to."""
+    frame = _barless_next_year(next_year_halted_days=(NEXT_YEAR[0],))
+    _next_year_stored(tmp_path, frame, monkeypatch, "price")
+
+    result, _ = _build(tmp_path, frame, monkeypatch, "price")
+
+    assert result.exit_code == PanelExit.unhealthy, result.output
+    assert f"no bar for it on {NEXT_YEAR[1].isoformat()}" in result.output
+
+
+def test_a_security_halted_on_every_stored_next_year_session_is_unconfirmed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frame = _barless_next_year(next_year_halted_days=NEXT_YEAR)
+    _next_year_stored(tmp_path, frame, monkeypatch, "price")
+
+    result, upstream = _build(tmp_path, frame, monkeypatch, "price")
+
+    assert result.exit_code == PanelExit.ok, result.output
+    assert [d.kind for d in _defects(tmp_path)] == ["valuation_contradicts_unconfirmed_bar"]
+    assert not [p for p in upstream.payloads if str(p["params"].get("trade_date", "")) > "2014"]
+
+
+def test_a_stored_next_year_daily_without_its_halt_corpus_is_refused_by_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frame = _barless_next_year(next_year_halted_days=NEXT_YEAR)
+    _next_year_stored(tmp_path, frame, monkeypatch, "price")
+    assert _store(tmp_path).remove_partition(SUSPENSION_DATASET, YEAR + 1)
+
+    result, _ = _build(tmp_path, frame, monkeypatch, "price")
+
+    assert result.exit_code == PanelExit.unhealthy, result.output
+    assert f"no stored {SUSPENSION_DATASET} year={YEAR + 1}" in result.output
+
+
+def test_a_stored_next_year_that_merely_lags_is_judged_within_its_own_horizon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reviewer's second probe: 2014 was built on the evening of 2014-01-02 and holds that
+    session only. Read at 2026 it lags, which is not damage: its 2014-01-02 bar corroborates."""
+    frame = Frame(mismatch_day=SESSIONS[-1], sessions=(*SESSIONS, *NEXT_YEAR))
+    result, _ = _build(
+        tmp_path, frame, monkeypatch, "price", year=YEAR + 1, as_of="2014-01-02T18:00:00+08:00"
+    )
+    assert result.exit_code == PanelExit.ok, result.output
+
+    result, upstream = _build(tmp_path, frame, monkeypatch, "price")
+
+    assert result.exit_code == PanelExit.ok, result.output
+    assert [d.kind for d in _defects(tmp_path)] == ["valuation_contradicts_corroborated_bar"]
+    assert (DAILY_DATASET, FILLERS[2], _compact(NEXT_YEAR[0])) not in upstream.refetches()
 
 
 def test_panel_doctor_answers_for_the_defects_record_rather_than_raising(

@@ -3234,17 +3234,20 @@ def _year_end_witness(
        the answer is `None` -- nothing can corroborate the bar yet, and the row stays
        `valuation_contradicts_unconfirmed_bar`.
     2. A stored `daily` partition for `year + 1` is read once, filtered to the security, through
-       the visibility-filtered door (`load_first_daily_bar`). A security halted into the new
-       year is found on the session it resumes. A partition that cannot be read is refused by
-       name, never silently replaced by a request.
-    3. With no stored partition, one targeted `daily` request on the first session.
+       the visibility-filtered door (`load_first_daily_bar`), **within its own horizon**: as of
+       its newest stored session's publication instant, so a partition that merely lags `now`
+       is judged on what it holds and the sessions after it are "not yet". A security halted
+       into the new year is found on the session it resumes. With no bar up to that horizon,
+       **every** session it is absent on must be explained by the stored `year + 1` `suspend_d`
+       (read once; a stored `daily` without it is refused by name) or a delisting. A partition
+       that cannot be read is refused by name, never silently replaced by a request.
+    3. With no stored partition, one targeted `daily` request on the first session; with no bar
+       there, that session's absence must be explained by a whole-day halt (the stored
+       `suspend_d`, else **one whole-session** request -- the shape the price target already
+       uses, never a `ts_code`-filtered one) or a delisting.
 
-    With no bar found, the first published session's absence has to be explained: a whole-day
-    halt in `year + 1`'s `suspend_d` (the stored partition, else **one whole-session** request --
-    the shape the price target already uses, never a `ts_code`-filtered one) or a delisting in
-    the stored registry. Explained, the answer is `None` and a later build that holds a
-    resumption bar judges the row again; unexplained, it raises, because "not there" for no
-    reason is not "not yet".
+    Explained, the answer is `None` and a later build that holds a resumption bar judges the row
+    again; unexplained, it raises, because "not there" for no reason is not "not yet".
     """
     following = year + 1
     cache: dict[str, object] = {}
@@ -3287,6 +3290,64 @@ def _year_end_witness(
         halts = cast(SuspensionDay | None, cache[key])
         return halts is not None and halts.is_halted(ts_code)
 
+    def stored_witness(
+        ts_code: str, calendar: TradingCalendar, published: Sequence[date]
+    ) -> float | None:
+        """The witness from a stored `year + 1`, judged within that partition's own horizon.
+
+        A stored year that merely lags `now` is read as of its own newest session's publication
+        instant -- the sessions after it are "not yet", not missing. With no bar for the security
+        up to that horizon, **every** session it is absent on must be explained by the stored
+        `year + 1` `suspend_d` (read once) or a delisting; the year+1 build does not refuse a
+        per-security hole, so one unexplained session refuses here, by name.
+        """
+        coverage = store.read_coverage(DAILY_DATASET, following)
+        stored_days = [entry.event_date for entry in coverage.dates] if coverage else []
+        if not stored_days:
+            raise PanelBatchError(
+                f"the stored {DAILY_DATASET} year={following} partition could not be read for "
+                f"{ts_code}'s first bar of {following}, the witness for its disputed {year} "
+                "close: it has no coverage record to bound it. Repair or rebuild that partition"
+            )
+        horizon = max(stored_days)
+        read_at = min(now, session_publication_instant(horizon))
+        try:
+            bar = load_first_daily_bar(
+                store, ts_code=ts_code, year=following, calendar=calendar, as_of=read_at
+            )
+        except (PanelStorageError, PriceDataError) as error:
+            raise PanelBatchError(
+                f"the stored {DAILY_DATASET} year={following} partition could not be read for "
+                f"{ts_code}'s first bar of {following}, the witness for its disputed {year} "
+                f"close: {error}. Repair or rebuild that partition; a stored year that cannot "
+                "be read is not replaced by a request"
+            ) from error
+        if bar is not None:
+            return bar.pre_close
+        if following not in store.registered_years(SUSPENSION_DATASET):
+            raise PanelBatchError(
+                f"{ts_code} has no bar in the stored {DAILY_DATASET} year={following} through "
+                f"{horizon.isoformat()}, and there is no stored {SUSPENSION_DATASET} "
+                f"year={following} to say whether it was halted. Build {following}'s price "
+                "target, which stores both"
+            )
+        if "halts" not in cache:
+            cache["halts"] = load_suspensions(
+                store, years=(following,), as_of=read_at, max_staleness=None
+            )
+        corpus = cast(Mapping[date, SuspensionDay], cache["halts"])
+        for day in (day for day in published if day <= horizon):
+            halted = day in corpus and corpus[day].is_halted(ts_code)
+            delisted = ts_code in delistings and day >= delistings[ts_code]
+            if not (halted or delisted):
+                raise PanelBatchError(
+                    f"{ts_code}'s last {year} bar has no next bar in {year}, and the stored "
+                    f"{DAILY_DATASET} year={following} has no bar for it on {day.isoformat()} "
+                    "with no whole-day halt or delisting to account for that. The disputed "
+                    "close cannot be corroborated"
+                )
+        return None
+
     def witness(ts_code: str) -> float | None:
         calendar = next_calendar()
         if calendar is None:
@@ -3300,38 +3361,25 @@ def _year_end_witness(
             return None
         first = published[0]
         if following in store.registered_years(DAILY_DATASET):
-            try:
-                bar = load_first_daily_bar(
-                    store, ts_code=ts_code, year=following, calendar=calendar, as_of=now
-                )
-            except (PanelStorageError, PriceDataError) as error:
+            return stored_witness(ts_code, calendar, published)
+        typer.echo(f"WITNESS {ts_code} {first.isoformat()} ({DAILY_DATASET})", err=True)
+        batch = _fetch_panel(
+            provider, DAILY_DATASET, as_of=_session_as_of(first), subjects=(ts_code,)
+        )
+        if batch.status == "success":
+            pre_closes = next(column for column in batch.columns if column.name == "pre_close")
+            found = [
+                value
+                for subject, value in zip(batch.subjects, pre_closes.values, strict=True)
+                if subject == ts_code
+            ]
+            if len(found) == 1 and type(found[0]) is float:
+                return found[0]
+            if found:
                 raise PanelBatchError(
-                    f"the stored {DAILY_DATASET} year={following} partition could not be read for "
-                    f"{ts_code}'s first bar of {following}, the witness for its disputed {year} "
-                    f"close: {error}. Repair or rebuild that partition; a stored year that cannot "
-                    "be read is not replaced by a request"
-                ) from error
-            if bar is not None:
-                return bar.pre_close
-        else:
-            typer.echo(f"WITNESS {ts_code} {first.isoformat()} ({DAILY_DATASET})", err=True)
-            batch = _fetch_panel(
-                provider, DAILY_DATASET, as_of=_session_as_of(first), subjects=(ts_code,)
-            )
-            if batch.status == "success":
-                pre_closes = next(column for column in batch.columns if column.name == "pre_close")
-                found = [
-                    value
-                    for subject, value in zip(batch.subjects, pre_closes.values, strict=True)
-                    if subject == ts_code
-                ]
-                if len(found) == 1 and type(found[0]) is float:
-                    return found[0]
-                if found:
-                    raise PanelBatchError(
-                        f"{ts_code}'s first bar of {following} ({first.isoformat()}) has no "
-                        "pre_close, so it cannot witness the disputed close"
-                    )
+                    f"{ts_code}'s first bar of {following} ({first.isoformat()}) has no "
+                    "pre_close, so it cannot witness the disputed close"
+                )
         delisted = ts_code in delistings and first >= delistings[ts_code]
         if delisted or halted_on(ts_code, first):
             return None
@@ -3374,38 +3422,48 @@ def _refetch_price_session(
     )
 
 
-def _registry_delistings(store: PanelStore, *, now: datetime) -> Mapping[str, date]:
-    """Every delisted security's exclusive `delisted_on` in the stored registry, or `{}`.
+RegistryDates = tuple[Mapping[str, date] | None, Mapping[str, date]]
+"""`(listings, delistings)` from the stored registry: every security's `list_date`, and every
+delisted one's exclusive `delisted_on` -- or `(None, {})` when no registry is stored."""
 
-    What `explains_absence` and the year-end witness read to account for a security that has
-    no bar because it is gone (`V2-P6-013`). Absent from the registry is the safe direction: a
-    missing bar with no delisting to explain it is refused.
+
+def _registry_dates(
+    store: PanelStore, *, now: datetime, cache: dict[object, RegistryDates] | None = None
+) -> RegistryDates:
+    """Every `list_date` and every `delisted_on` in the **stored** `stock_basic` registry.
+
+    `bar_before_listing` (`V2-P6-013`) decides from the first map and nothing else: a row is
+    dropped as pre-listing when this says its session precedes the listing, never on the row's
+    own say-so. `explains_absence` and the year-end witness read the second to account for a
+    security that has no bar because it is gone. Absent is the safe direction for both: a
+    security the registry has not caught up with is neither dropped nor excused. No
+    `require_years_through`, unlike `_stored_universe`, for that reason.
+
+    One registry read per build: `cache` is keyed by the stored partitions' content hashes, so a
+    multi-year invocation reads it again only after a `stock_basic` target has rewritten it.
     """
     years = store.registered_years(STOCK_BASIC_DATASET)
     if not years:
-        return {}
+        return None, {}
+    key = tuple(
+        (year, coverage.partition_content_hash if coverage is not None else None)
+        for year in years
+        for coverage in (store.read_coverage(STOCK_BASIC_DATASET, year),)
+    )
+    if cache is not None and key in cache:
+        return cache[key]
     universe = load_stock_universe(store, years=years, as_of=now, max_staleness=None)
-    return {
-        entry.ts_code: entry.delisted_on
-        for entry in universe.securities
-        if entry.delisted_on is not None
-    }
-
-
-def _registry_listings(store: PanelStore, *, now: datetime) -> Mapping[str, date] | None:
-    """Every security's `list_date` in the **stored** `stock_basic` registry, or `None`.
-
-    What `bar_before_listing` (`V2-P6-013`) decides from, and the only thing: a row is dropped as
-    pre-listing when this says its session precedes the listing, never on the row's own say-so.
-    `None` when no registry is stored, which drops nothing. No `require_years_through`, unlike
-    `_stored_universe`: a security the registry has not caught up with is absent here, and absent
-    is the safe direction -- its rows are stored or refused exactly as before.
-    """
-    years = store.registered_years(STOCK_BASIC_DATASET)
-    if not years:
-        return None
-    universe = load_stock_universe(store, years=years, as_of=now, max_staleness=None)
-    return {entry.ts_code: entry.listed_on for entry in universe.securities}
+    dates: RegistryDates = (
+        {entry.ts_code: entry.listed_on for entry in universe.securities},
+        {
+            entry.ts_code: entry.delisted_on
+            for entry in universe.securities
+            if entry.delisted_on is not None
+        },
+    )
+    if cache is not None:
+        cache[key] = dates
+    return dates
 
 
 def _stored_halts(
@@ -4108,6 +4166,7 @@ def _build_panel(
     exchange: str,
     halts: bool,
     now: datetime,
+    registry_cache: dict[object, RegistryDates] | None = None,
 ) -> tuple[tuple[date, ...], str]:
     """Run every requested **year-scoped** target in `PANEL_BUILD_TARGETS`' declared order.
 
@@ -4160,10 +4219,10 @@ def _build_panel(
         universe = tuple(subjects) or _stored_universe(store, now=now)
     # `V2-P6-013`: read once, after the `stock_basic` branch above so a registry this invocation
     # wrote is the one decided from, and only for the targets whose rows it can drop.
-    listings = (
-        _registry_listings(store, now=now)
+    listings, delistings = (
+        _registry_dates(store, now=now, cache=registry_cache)
         if targets & {ADJ_FACTOR_DATASET, "price", PRICE_LIMIT_DATASET}
-        else None
+        else (None, {})
     )
     if targets & _NEEDS_STORED_CALENDAR:
         calendar = _stored_calendar(store, exchange=exchange, years=(year,), as_of=now)
@@ -4206,7 +4265,7 @@ def _build_panel(
             now=now,
             halts=halts,
             listings=listings,
-            delistings=_registry_delistings(store, now=now),
+            delistings=delistings,
             exchange=exchange,
         )
     if PRICE_LIMIT_DATASET in targets:
@@ -4823,6 +4882,8 @@ def panel_build(
         provider = TushareProvider(transport=_panel_transport(), clock=_panel_clock, stamped_at=now)
         stored: list[PartitionRef] = []
         builds: list[dict[str, object]] = []
+        # One registry read per invocation (`V2-P6-013`), re-read only if a year rewrites it.
+        registry_cache: dict[object, RegistryDates] = {}
         for index, one_year in enumerate(years):
             resumed, covered = (
                 _resumable_targets(
@@ -4847,6 +4908,7 @@ def panel_build(
                         exchange=exchange,
                         halts=halts,
                         now=now,
+                        registry_cache=registry_cache,
                     )
                     sessions = sessions or covered
                 defects = _recorded_defects(store, _all_refs(written), now=now)
