@@ -137,7 +137,12 @@ from openalpha_cn.domain.industry_classification import (
     INDUSTRY_MEMBERSHIP_DATASET,
     IndustryClassificationError,
 )
-from openalpha_cn.domain.labels import HaltCorpus, OutcomeLabel, halt_corpus_for_years
+from openalpha_cn.domain.labels import (
+    HaltCorpus,
+    OutcomeLabel,
+    WindowReturn,
+    halt_corpus_for_years,
+)
 from openalpha_cn.domain.prediction_record import PredictionRecord
 from openalpha_cn.domain.price_limits import PriceLimit, TradingState
 from openalpha_cn.domain.trading_calendar import (
@@ -230,6 +235,9 @@ PROTOCOL_BENCHMARKS: Final[tuple[str, ...]] = ("000905.SH", EQUAL_WEIGHT_ALL_A)
 _CACHED_SESSIONS: Final[int] = 8
 """How many sessions' bars and bands stay in memory. The book walks sessions in order and asks
 about the signal session, the next one and each marked session, so a small window suffices."""
+
+_ADJUSTMENT_YEARS_HELD: Final[int] = 2
+"""How many quote years' adjustment histories stay resident: a period spans at most two years."""
 
 _T = TypeVar("_T")
 
@@ -665,9 +673,10 @@ def _lookback(
 ) -> tuple[tuple[date, ...], tuple[int, ...]]:
     """The `needed` open sessions before `--start`, and every partition year a read now spans.
 
-    Read from the contiguous run of registered `trade_cal` years ending the year before
-    `--start`, reaching back no more years than `needed` sessions can span (an A-share year has
-    well over 200 sessions). Fewer are returned when the stored calendar stops earlier -- see
+    Read from the start year's own sessions before `--start` and the contiguous run of
+    registered `trade_cal` years ending the year before it, reaching back no more years than
+    `needed` sessions can span (an A-share year has well over 200 sessions). Fewer are returned
+    when the stored calendar stops earlier -- see
     `a_lookback_reaching_before_the_stored_calendar_is_shorter_rather_than_refused`.
     """
     if needed <= 0:
@@ -678,8 +687,6 @@ def _lookback(
     while year in registered and len(earlier) < needed // 200 + 1:
         earlier.append(year)
         year -= 1
-    if not earlier:
-        return (), request.years
     years = (*sorted(earlier), *request.years)
     calendar = _read(
         lambda: load_trading_calendar(
@@ -1331,21 +1338,40 @@ class _ModelFeed:
         return fit
 
 
-def _held_example(example: TrainingExample) -> TrainingExample:
-    """`example` as a training window holds it: the same label, less the per-session chain.
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _HeldWindowReturn(WindowReturn):
+    """A `WindowReturn` a training window holds: every number, less the per-session chain.
 
-    `WindowReturn.per_session` is the audit trail `session_returns` checked, one link at a time,
-    when `label_outcome` built this label -- a check that has already passed or the label would
-    not exist. Nothing a fit reads comes from it: the target is `realized_return` (the adjusted
-    window return), the cutoff is the window's exit, and both are kept exactly. Dropping it is
-    what makes a whole-market two-year window fit in memory; see this module's fix-round notes.
+    `per_session` is the audit trail `session_returns` checked, one link at a time, when
+    `label_outcome` built the label -- a check that has already passed or the label would not
+    exist. Nothing a fit reads comes from it: the target is `adjusted` (`realized_return`) and
+    the cutoff is the window's exit, both kept exactly. `tolerance` is the one number derived
+    from the chain, so it refuses here rather than answering `0.0` for an emptied chain.
+    """
+
+    @property
+    def tolerance(self) -> float:
+        raise AttributeError(
+            "this window return is held by a walk-forward training window without its "
+            "per-session chain, so its tolerance is not available; read the label that "
+            "label_outcome built"
+        )
+
+
+def _held_example(example: TrainingExample) -> TrainingExample:
+    """`example` as a training window holds it: the same label on a `_HeldWindowReturn`.
+
+    Dropping the chain is what makes a whole-market two-year window fit in memory (measured
+    2,544 -> 1,178 bytes per example); see `_HeldWindowReturn` for what it cannot answer.
     """
     label = example.label
-    if label.window_return is None or not label.window_return.per_session:
+    returned = label.window_return
+    if returned is None or isinstance(returned, _HeldWindowReturn):
         return example
+    fields = {field.name: getattr(returned, field.name) for field in dataclasses.fields(returned)}
     return TrainingExample(
         label=dataclasses.replace(
-            label, window_return=dataclasses.replace(label.window_return, per_session=())
+            label, window_return=_HeldWindowReturn(**{**fields, "per_session": ()})
         ),
         features=example.features,
     )
@@ -1390,27 +1416,37 @@ class _PanelDays:
             ),
             years=request.years,
         )
-        self._adjustment_year: int | None = None
-        self._adjustments: Mapping[str, AdjustmentHistory] = {}
+        self._adjustments: OrderedDict[int, Mapping[str, AdjustmentHistory]] = OrderedDict()
 
     def adjustments(self, year: int) -> Mapping[str, AdjustmentHistory]:
         """The adjustment histories a quote in `year` reads: that year's and the one before.
 
         Two years rather than the range, so the factors held do not grow with the history; the
         year before is what a name with no factor row yet this year carries forward from.
+
+        **Two slots, not one.** A period whose signal day is in December and whose trade day is
+        in January asks, order by order, for the signal session's quote (the participation cap)
+        and the trade session's quote -- two years, alternating. One slot reloaded both on every
+        order; two keep each year's histories resident until a third year is asked for, so a
+        year boundary costs exactly one load per year.
         """
-        if self._adjustment_year != year:
-            store, request = self._store, self._request
-            years = _years_around(request.years, first=year - 1, last=year)
-            self._adjustments = _read(
-                lambda: load_adjustment_histories(
-                    store, years=years, as_of=request.as_of, max_staleness=None
-                ),
-                store=store,
-                what="the adjustment factors",
-            )
-            self._adjustment_year = year
-        return self._adjustments
+        held = self._adjustments.get(year)
+        if held is not None:
+            self._adjustments.move_to_end(year)
+            return held
+        store, request = self._store, self._request
+        years = _years_around(request.years, first=year - 1, last=year)
+        loaded = _read(
+            lambda: load_adjustment_histories(
+                store, years=years, as_of=request.as_of, max_staleness=None
+            ),
+            store=store,
+            what="the adjustment factors",
+        )
+        self._adjustments[year] = loaded
+        while len(self._adjustments) > _ADJUSTMENT_YEARS_HELD:
+            self._adjustments.popitem(last=False)
+        return loaded
 
     def session(self, day: date) -> tuple[dict[str, DailyBar], dict[str, PriceLimit]]:
         held = self._sessions.get(day)

@@ -318,6 +318,12 @@ __all__ = [
 ]
 
 MODEL_VIEW_SCHEMA_VERSION: Final[str] = "model-view/v1"
+"""The version of the envelopes `evaluation_view` and `daily_view` render, carried in the body.
+
+`shortlist_view.SHORTLIST_VIEW_SCHEMA_VERSION`'s reason: the sealed records underneath already
+carry their own `schema_version`, and this says which *shape* the three faces agreed to hand out
+around them.
+"""
 
 UNFILED_CONFIG_DIGEST: Final[str] = "0" * 64
 """The `ModelRunRequest.config_digest` of a request that drives reads and never files a run.
@@ -326,12 +332,6 @@ UNFILED_CONFIG_DIGEST: Final[str] = "0" * 64
 assembly and feature reads, and a backtest writes no `RunManifest`. The value is reserved so it
 can never reach one: `_model_request` refuses it from a face, and `_file_run` refuses a request
 carrying it -- a placeholder that could be filed would be a reproducibility claim nothing made.
-"""
-"""The version of the envelopes `evaluation_view` and `daily_view` render, carried in the body.
-
-`shortlist_view.SHORTLIST_VIEW_SCHEMA_VERSION`'s reason: the sealed records underneath already
-carry their own `schema_version`, and this says which *shape* the three faces agreed to hand out
-around them.
 """
 
 MODEL_DATE_ZONE: Final[ZoneInfo] = ZoneInfo("Asia/Shanghai")

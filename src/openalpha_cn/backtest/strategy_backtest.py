@@ -1208,7 +1208,10 @@ class _Scorer:
             f"the walk-forward source could not answer on any of the {signal_count} signal days: "
             f"no admissible fit was in use on any of them ({len(refits)} refit(s), "
             f"{sum(fit.fitted is not None for fit in refits)} fitted; refusals: {reasons}). "
-            "Lengthen the lookback, shorten train_sessions or start the range later"
+            "No refit window held a label closed before its embargo deadline, or the model "
+            "refused every one it had: store more history before --start (the lookback reads "
+            "the registered trade_cal years and the factor builds in them), or start the "
+            "range later"
         )
 
 

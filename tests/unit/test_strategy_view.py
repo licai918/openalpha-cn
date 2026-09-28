@@ -14,9 +14,11 @@ from __future__ import annotations
 import math
 import statistics
 from array import array
+from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Any, Final
+from typing import Any, Final, Literal
+from zoneinfo import ZoneInfo
 
 import pytest
 from panel_fixtures import EXCHANGE, GeneratedPanel
@@ -33,18 +35,58 @@ from strategy_fixtures import (
     stored_value,
     write_strategy_corpus,
     write_tiered_corpus,
+    write_two_year_corpus,
 )
 
-from openalpha_cn.backtest.factor_ic import average_ranks
+from openalpha_cn.backtest.execution import (
+    MarketBar,
+    published_limit_fields,
+    suspended_at_the_close,
+)
+from openalpha_cn.backtest.factor_ic import (
+    FactorICSpec,
+    FactorICStudy,
+    average_ranks,
+    ic_cross_section,
+)
+from openalpha_cn.backtest.factor_tradeability import CNY_PER_TURNOVER_UNIT
 from openalpha_cn.backtest.strategy_backtest import (
     EQUAL_WEIGHT_ALL_A,
+    MODEL_COMPONENT,
     STRATEGY_BACKTEST_LIMITATION_CODES,
+    ICObservation,
+    ScoreRow,
+    SessionQuote,
+    StrategyInputs,
     component_key,
     limitation_codes_for,
     run_strategy_backtest,
+    usable_fit,
+    walk_forward_fits,
 )
+from openalpha_cn.domain.horizon import parse_horizon
+from openalpha_cn.domain.labels import halt_corpus_for_years
+from openalpha_cn.domain.price_limits import TradingState
+from openalpha_cn.domain.trading_calendar import TradingCalendar
+from openalpha_cn.model_view import (
+    UNFILED_CONFIG_DIGEST,
+    LabelReach,
+    ModelRunRequest,
+    OutcomeLabels,
+    feature_cross_section,
+    training_panel,
+)
+from openalpha_cn.panel.catalog import DEFAULT_DATE_TIMEZONE
 from openalpha_cn.panel.store import PanelStore
-from openalpha_cn.panel_ingest import load_daily_bars, load_trading_calendar
+from openalpha_cn.panel_factors import load_factor_observations
+from openalpha_cn.panel_ingest import (
+    load_adjustment_histories,
+    load_daily_bars,
+    load_price_limits,
+    load_suspensions,
+    load_trading_calendar,
+    session_publication_instant,
+)
 from openalpha_cn.strategy_view import (
     PROTOCOL_BENCHMARKS,
     PROTOCOL_COSTS,
@@ -60,6 +102,7 @@ from openalpha_cn.strategy_view import (
 )
 
 SHANGHAI_1630_UTC_HOUR: Final[int] = 8
+SHANGHAI: Final[ZoneInfo] = ZoneInfo(DEFAULT_DATE_TIMEZONE)
 
 
 @pytest.fixture(scope="module")
@@ -380,9 +423,10 @@ def test_the_industry_cap_reads_the_stored_membership_at_each_signal(
 # --- V2-P6-014: the two dynamic sources over the stored panel ------------------------------------
 #
 # The range is s1..s9 (2026-01-06 .. 01-16), signals every two sessions: s1, s3, s5, s7. The
-# panel holds no calendar year before 2026, so there is no lookback and every window starts at
-# s1. A 1d label for prediction day t enters on t+1 and exits on t+2, so it is known at the
-# 16:30 of s_k only when t <= s_(k-2).
+# panel holds no calendar year before 2026, so the lookback is 2026's own s0 alone -- which
+# carries no factor build, so every IC and every training day is still s1 or later. A 1d label
+# for prediction day t enters on t+1 and exits on t+2, so it is known at the 16:30 of s_k only
+# when t <= s_(k-2).
 
 TRAILING: Final[dict[str, Any]] = {
     "components": ((REVERSAL.qualified_key, "raw"),),
@@ -457,7 +501,7 @@ def test_every_trailing_ic_is_dated_no_earlier_than_its_labels_exit(
     for item in inputs.ic_observations:
         exit_day = panel.sessions[panel.sessions.index(item.prediction_day) + 2]
         assert item.known_at == inputs.signal_instants[exit_day]
-    assert inputs.lookback_sessions == ()
+    assert inputs.lookback_sessions == (panel.sessions[0],)
 
 
 def test_a_walk_forward_model_holds_until_its_first_fit_and_then_ranks_the_column(
@@ -466,7 +510,7 @@ def test_a_walk_forward_model_holds_until_its_first_fit_and_then_ranks_the_colum
     """Refits on s1, s3, s5, s7 with a 5-session window, embargo 1, horizon 1.
 
     A refit at calendar position p may train only on prediction day p-4, so s1 and s3 cannot
-    fit (no calendar before s1; no closed label), s5 trains on s1 and s7 on s3. On s5 and s7 the
+    fit (no prediction day that early has a build), s5 trains on s1 and s7 on s3. On s5 and s7 the
     one-column `cross_sectional_rank` fit orders the market exactly by the stored column, in the
     orientation its learned coefficient says, and every score row carries the signal instant.
     """
@@ -809,3 +853,361 @@ def test_an_ic_series_whose_last_label_has_not_closed_by_the_reading_instant_is_
     store, panel = corpus
     with pytest.raises(StrategyRunBlockedError, match="has not closed"):
         factor_ic_series(store, _ic_series_request(panel, end=panel.sessions[-1]))
+
+
+# --- V2-P6-014 fix round 2: across a calendar year, against whole-range reads --------------------
+#
+# Every narrowing the streamed feeds make is a year window (a tier-year read, the label reader's
+# years, a quote's adjustment years, a scoring cross section's years, a training batch's years),
+# so they can only differ from a whole-range read across a year boundary. The corpus below is
+# priced 2026-01-05 .. 2027-01-22, and each kind is held against a reference assembled here from
+# the public whole-range readers alone. Signals every four sessions from 2026-12-15 fall on
+# 12-15, 12-21, 12-25, 12-31, 01-07, 01-13, 01-19: the 12-31 signal trades on 2027-01-04.
+
+BOUNDARY_START: Final[date] = date(2026, 12, 15)
+BOUNDARY_SIGNAL: Final[date] = date(2026, 12, 31)
+BOUNDARY_TRADE: Final[date] = date(2027, 1, 4)
+TWO_YEARS: Final[tuple[int, ...]] = (2026, 2027)
+TWO_YEAR_TRAILING: Final[dict[str, Any]] = {**TRAILING, "ic_window_sessions": 10}
+TWO_YEAR_WALK_FORWARD: Final[dict[str, Any]] = {
+    **WALK_FORWARD,
+    "train_sessions": 8,
+    "refit_every_sessions": 4,
+}
+TWO_YEAR_KINDS: Final[dict[str, dict[str, Any]]] = {
+    "static": {"components": ((REVERSAL.qualified_key, "raw", Decimal("1")),)},
+    "trailing_ic": {"components": (), "trailing_ic": TWO_YEAR_TRAILING},
+    "walk_forward": {"components": (), "walk_forward": TWO_YEAR_WALK_FORWARD},
+}
+
+
+@pytest.fixture(scope="module")
+def two_years(tmp_path_factory: pytest.TempPathFactory) -> tuple[PanelStore, GeneratedPanel]:
+    root = tmp_path_factory.mktemp("strategy-view-two-years")
+    panel = write_two_year_corpus(root)
+    return PanelStore(root / "panel"), panel
+
+
+def _two_year_request(panel: GeneratedPanel, kind: str) -> Any:
+    return strategy_request(
+        combine="zscore_sum",
+        transform=None,
+        neutralization=None,
+        start=BOUNDARY_START,
+        end=panel.sessions[-1],
+        as_of=panel.as_of,
+        exchange=EXCHANGE,
+        rebalance_every_sessions=4,
+        holding_count=3,
+        buffer_rank=None,
+        max_industry_weight=None,
+        benchmarks=(EQUAL_WEIGHT_ALL_A,),
+        **TWO_YEAR_KINDS[kind],
+    )
+
+
+def _reference_board(code: str) -> Literal["main", "star", "growth", "bse"]:
+    if code.endswith(".BJ"):
+        return "bse"
+    if code.startswith(("688", "689")):
+        return "star"
+    return "growth" if code.startswith(("300", "301")) else "main"
+
+
+def _reference_quotes(
+    store: PanelStore, request: Any, calendar: TradingCalendar, sessions: Sequence[date]
+) -> tuple[dict[date, dict[str, SessionQuote]], dict[date, Decimal]]:
+    """Every session's quotes and equal-weight return, read with WHOLE-RANGE adjustment factors
+    and halts -- the reads the streamed quotes narrow to a year window."""
+    adjustments = load_adjustment_histories(
+        store, years=TWO_YEARS, as_of=request.as_of, max_staleness=None
+    )
+    halts = halt_corpus_for_years(
+        load_suspensions(store, years=TWO_YEARS, as_of=request.as_of, max_staleness=None),
+        years=TWO_YEARS,
+    )
+    quotes: dict[date, dict[str, SessionQuote]] = {}
+    equal: dict[date, Decimal] = {}
+    for day in sessions:
+        bars = load_daily_bars(
+            store, day=day, calendar=calendar, as_of=request.as_of, max_staleness=None
+        )
+        limits = load_price_limits(
+            store, day=day, calendar=calendar, as_of=request.as_of, max_staleness=None
+        )
+        equal[day] = Decimal(
+            repr(statistics.fmean(bar.close / bar.pre_close - 1.0 for bar in bars.values()))
+        )
+        quotes[day] = {}
+        for code, bar in bars.items():
+            limit, history = limits.get(code), adjustments.get(code)
+            if limit is None or history is None:
+                continue
+            state = halts.state_on(day, code)
+            quotes[day][code] = SessionQuote(
+                bar=MarketBar(
+                    subject=code,
+                    trade_date=day,
+                    board=_reference_board(code),
+                    previous_close=Decimal(str(bar.pre_close)),
+                    open=Decimal(str(bar.open)),
+                    high=Decimal(str(bar.high)),
+                    low=Decimal(str(bar.low)),
+                    close=Decimal(str(bar.close)),
+                    suspended=(
+                        suspended_at_the_close(state, halts.timing_on(day, code))
+                        or state is TradingState.interrupted
+                    ),
+                    is_st=False,
+                    **published_limit_fields(limit),
+                ),
+                turnover_yuan=Decimal(str(bar.amount)) * CNY_PER_TURNOVER_UNIT,
+                adj_factor=Decimal(str(history.factor_on(day))),
+            )
+    return quotes, equal
+
+
+def _whole_range_builds(
+    store: PanelStore, request: Any, instants: Mapping[date, datetime]
+) -> dict[date, tuple[datetime, list[Any]]]:
+    """Each day's build (the newest at or before its 16:30, else the earliest), whole range."""
+    by_day: dict[date, dict[datetime, list[Any]]] = {}
+    for row in load_factor_observations(store, REVERSAL, years=TWO_YEARS, as_of=request.as_of):
+        by_day.setdefault(row.as_of.astimezone(SHANGHAI).date(), {}).setdefault(
+            row.as_of, []
+        ).append(row)
+    chosen: dict[date, tuple[datetime, list[Any]]] = {}
+    for day, builds in by_day.items():
+        admitting = {
+            instant: rows
+            for instant, rows in builds.items()
+            if any(row.coverage == "computed" and row.value is not None for row in rows)
+        }
+        if day not in instants or not admitting:
+            continue
+        visible = [instant for instant in admitting if instant <= instants[day]]
+        build = max(visible) if visible else min(admitting)
+        chosen[day] = (build, admitting[build])
+    return chosen
+
+
+def _reference_inputs(store: PanelStore, request: Any, kind: str) -> StrategyInputs:
+    """The kind's whole answer assembled from the public whole-range readers alone."""
+    calendar = load_trading_calendar(store, exchange=EXCHANGE, years=TWO_YEARS, as_of=request.as_of)
+    sessions = calendar.trading_days_between(request.start, request.end)
+    signal_days = sessions[:-1:4]
+    source = request.source
+    needed = (
+        source.trailing_ic.ic_window_sessions - 1
+        if source.trailing_ic is not None
+        else source.walk_forward.train_sessions - 1
+        if source.walk_forward is not None
+        else 0
+    )
+    before = tuple(day for day in calendar.trading_days if day < request.start)
+    lookback = before[-needed:] if needed else ()
+    full = lookback + sessions
+    instants = {day: session_publication_instant(day) for day in full}
+    quotes, equal = _reference_quotes(store, request, calendar, sessions)
+    base: dict[str, Any] = {
+        "source": source,
+        "sessions": sessions,
+        "signal_instants": instants,
+        "quotes": quotes,
+        "benchmark_returns": {EQUAL_WEIGHT_ALL_A: equal},
+        "lookback_sessions": lookback,
+    }
+    if source.walk_forward is None:
+        builds = _whole_range_builds(store, request, instants)
+        key = component_key(REVERSAL.qualified_key, "raw")
+        scores = tuple(
+            ScoreRow(
+                component=key,
+                subject=row.subject,
+                signal_day=day,
+                value=-row.value,
+                available_time=builds[day][0],
+                revision_time=builds[day][0],
+            )
+            for day in signal_days
+            if day in builds
+            for row in builds[day][1]
+            if row.coverage == "computed" and row.value is not None
+        )
+        if source.trailing_ic is None:
+            return StrategyInputs(scores=scores, **base)
+        spec = source.trailing_ic
+        position = {day: index for index, day in enumerate(full)}
+        first = max(position[signal_days[0]] - spec.ic_window_sessions + 1, 0)
+        last = position[signal_days[-1]] - spec.horizon_sessions - 1
+        reader = OutcomeLabels(
+            store, LabelReach(as_of=request.as_of, years=TWO_YEARS, exchange=EXCHANGE)
+        )
+        study = FactorICStudy(
+            FactorICSpec(
+                definition=REVERSAL,
+                method=spec.ic_method,
+                min_securities=spec.min_ic_securities,
+                min_as_ofs=2,
+            )
+        )
+        observations = []
+        for day in full[first : last + 1]:
+            if day not in builds:
+                continue
+            build, rows = builds[day]
+            window = reader.window(build, horizon=parse_horizon(f"{spec.horizon_sessions}d"))
+            labels = {
+                row.subject: label
+                for row in rows
+                if row.coverage == "computed" and row.value is not None
+                if (label := reader.label(row.subject, window)) is not None
+            }
+            point = study.measure(
+                ic_cross_section(
+                    as_of=build,
+                    tier="raw",
+                    rows=[(row.subject, row.value, row.coverage) for row in rows],
+                    labels=labels,
+                )
+            )
+            observations.append(
+                ICObservation(
+                    component=key,
+                    prediction_day=day,
+                    known_at=max(build, instants[window.exit_day]),
+                    ic=point.ic,
+                )
+            )
+        return StrategyInputs(scores=scores, ic_observations=tuple(observations), **base)
+    spec = source.walk_forward
+    model = request.model
+    position = {day: index for index, day in enumerate(full)}
+    refit_days = tuple(
+        day for day in sessions[:: spec.refit_every_sessions] if day <= signal_days[-1]
+    )
+    last_refit = position[refit_days[-1]]
+    newest = last_refit - spec.embargo_sessions - spec.horizon_sessions - 2
+    run = ModelRunRequest(
+        declaration=model.declaration,
+        columns=request.columns,
+        missing=spec.missing,
+        start=full[max(position[sessions[0]] - spec.train_sessions + 1, 0)],
+        end=full[newest],
+        as_of=request.as_of,
+        years=TWO_YEARS,
+        exchange=EXCHANGE,
+        horizon=parse_horizon(f"{spec.horizon_sessions}d"),
+        minimum_scored_ratio=0.0,
+        shelf_life=None,
+        config_digest=UNFILED_CONFIG_DIGEST,
+        declared_feature_version=None,
+    )
+    panel = training_panel(store, run, deadline=instants[full[last_refit - spec.embargo_sessions]])
+    assert panel is not None
+    fits = walk_forward_fits(
+        model,
+        panel.examples,
+        feature_ids=panel.feature_ids,
+        spec=spec,
+        calendar=full,
+        instants=instants,
+        refit_days=refit_days,
+    )
+    rows: list[ScoreRow] = []
+    fit_for_day: dict[date, Any] = {}
+    for day in signal_days:
+        fit = usable_fit(fits, signal_day=day)
+        if fit is None or fit.fitted is None:
+            continue
+        section = feature_cross_section(store, run, as_of=instants[day])
+        batch = fit.fitted.predict(
+            section.cross_section, predicted_at=instants[day], shelf_life=None
+        )
+        fit_for_day[day] = fit
+        rows.extend(
+            ScoreRow(
+                component=MODEL_COMPONENT,
+                subject=prediction.ts_code,
+                signal_day=day,
+                value=prediction.score,
+                available_time=instants[day],
+                revision_time=instants[day],
+            )
+            for prediction in batch.predictions
+            if prediction.score is not None
+        )
+    return StrategyInputs(scores=tuple(rows), model_fits=fits, fit_for_day=fit_for_day, **base)
+
+
+@pytest.mark.parametrize("kind", sorted(TWO_YEAR_KINDS))
+def test_across_a_year_boundary_the_streamed_run_is_the_whole_range_reference(
+    two_years: tuple[PanelStore, GeneratedPanel], kind: str
+) -> None:
+    """Period for period, fill for fill, weight for weight: the streamed run over 2026-12-15 ..
+    2027-01-22 equals the same book fed by whole-range reads. One period signals on 12-31 and
+    trades on 2027-01-04, and every source actually ranks on at least one signal day."""
+    store, panel = two_years
+    request = _two_year_request(panel, kind)
+    streamed = backtest_strategy(store, request)
+    reference = run_strategy_backtest(_reference_inputs(store, request, kind), request.spec)
+
+    assert backtest_view(streamed) == backtest_view(reference)
+    boundary = next(period for period in streamed.periods if period.start == BOUNDARY_SIGNAL)
+    assert boundary.end.year == 2027
+    assert {fill.day for fill in boundary.fills} <= {BOUNDARY_TRADE}
+    assert any(not period.held for period in streamed.periods)
+    assert any(period.fills for period in streamed.periods if period.start.year == 2027)
+    if kind != "walk_forward":
+        assert boundary.fills
+
+
+def test_a_period_across_a_year_boundary_loads_each_years_adjustment_factors_once(
+    two_years: tuple[PanelStore, GeneratedPanel], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 12-31 signal trades on 2027-01-04, and each order reads the signal session's quote
+    (2026, the participation cap) and the trade session's (2027). Two year slots keep both
+    resident: the whole run loads the adjustment factors twice, once per year."""
+    from openalpha_cn import strategy_view
+
+    store, panel = two_years
+    loads: list[tuple[int, ...]] = []
+    real = strategy_view.load_adjustment_histories
+
+    def counted(*args: Any, **kwargs: Any) -> Any:
+        loads.append(tuple(kwargs["years"]))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(strategy_view, "load_adjustment_histories", counted)
+    result = backtest_strategy(store, _two_year_request(panel, "static"))
+
+    boundary = next(period for period in result.periods if period.start == BOUNDARY_SIGNAL)
+    assert boundary.fills
+    assert loads == [(2026,), (2026, 2027)]
+
+
+def test_a_held_training_window_return_refuses_the_tolerance_its_chain_would_give() -> None:
+    """`_held_example` drops `per_session`, the one input of `WindowReturn.tolerance`: the held
+    return refuses the property rather than answering 0.0, and keeps every other number."""
+    from alpha_model_fixtures import training_example
+
+    from openalpha_cn.strategy_view import _held_example
+
+    example = training_example(
+        ts_code="000001.SZ",
+        prediction_day=date(2026, 6, 1),
+        features=(0.5,),
+        target=0.02,
+        horizon="5d",
+    )
+    held = _held_example(example)
+    returned = held.label.window_return
+    assert returned is not None and example.label.window_return is not None
+
+    assert returned.per_session == ()
+    assert held.target == example.target
+    assert returned.adjusted == example.label.window_return.adjusted
+    assert held.label.window.exit_day == example.label.window.exit_day
+    with pytest.raises(AttributeError, match="tolerance"):
+        _ = returned.tolerance
+    assert _held_example(held) is held

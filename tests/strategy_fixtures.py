@@ -20,16 +20,29 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final
 
 from panel_fixtures import (
     DAILY_BASIC_DATASET,
+    EXCHANGE,
     GeneratedPanel,
     generate_panel,
     write_generated_panel,
 )
+from panel_fixtures import _bar_batch as bar_batch
+from panel_fixtures import _calendar_batch as calendar_batch
+from panel_fixtures import _factor_batch as factor_batch
+from panel_fixtures import _index_weight_batch as index_weight_batch
+from panel_fixtures import _limit_batch as limit_batch
+from panel_fixtures import _midnight_shanghai as midnight_shanghai
+from panel_fixtures import _read_instant as read_instant
+from panel_fixtures import _suspension_batch as suspension_batch
+from panel_fixtures import _valuation_batch as valuation_batch
 
 from openalpha_cn.backtest.factor_ic import TIER_ADMITTED_CODES
+from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
+from openalpha_cn.domain.daily_prices import DAILY_DATASET
 from openalpha_cn.domain.factor_neutralization import (
     FactorNeutralizationRegistry,
     FactorNeutralizationSpec,
@@ -40,8 +53,12 @@ from openalpha_cn.domain.factor_transform import (
     MissingValuePolicy,
     WinsorizationPolicy,
 )
+from openalpha_cn.domain.index_membership import INDEX_WEIGHT_DATASET
 from openalpha_cn.domain.index_prices import INDEX_DAILY_DATA_COLUMNS, INDEX_DAILY_DATASET
 from openalpha_cn.domain.panel_batch import ColumnarPanelBatch, PanelColumn, TimelineColumns
+from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET, SUSPENSION_DATASET
+from openalpha_cn.domain.stock_universe import LISTING_EVENT, STOCK_BASIC_DATASET
+from openalpha_cn.domain.trading_calendar import TRADING_CALENDAR_DATASET, CalendarDay
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import (
     FACTOR_DEFINITIONS,
@@ -53,8 +70,16 @@ from openalpha_cn.panel_factors import (
 )
 from openalpha_cn.panel_ingest import (
     daily_requirement,
+    load_suspensions,
     session_publication_instant,
+    split_panel_batch_by_year,
+    write_adjustment_factors,
+    write_daily_panel,
     write_index_prices,
+    write_price_limits,
+    write_stock_universe,
+    write_suspensions,
+    write_trading_calendar,
 )
 from openalpha_cn.panel_neutralization import (
     apply_factor_neutralization,
@@ -191,6 +216,172 @@ def write_strategy_corpus(
             for session in panel.sessions[1:]
         )
     write_factor_panels(store, builds)
+    return panel
+
+
+# --- a corpus that crosses a calendar year (V2-P6-014 fix round 2) --------------------------------
+
+TWO_YEAR_FIRST: Final[date] = date(2026, 1, 5)
+"""The first priced session. A past year's `adj_factor` partition must cover the whole year
+(`panel_ingest._refuse_missing_factor_sessions`), so all of 2026 is priced."""
+TWO_YEAR_BUILDS_FROM: Final[date] = date(2026, 12, 1)
+"""Factor builds start here: every lookback the two-year tests declare fits inside December."""
+TWO_YEAR_LAST: Final[date] = date(2027, 1, 22)
+TWO_YEAR_NEW_YEAR_HOLIDAY: Final[date] = date(2027, 1, 1)
+TWO_YEAR_LATE_LISTING: Final[tuple[str, date]] = ("000011.SZ", date(2027, 1, 11))
+"""A registry-only listing in 2027, so `stock_basic` holds a partition for the second year as a
+real registry does (a year with no lifecycle event has none, and a read naming it refuses)."""
+TWO_YEAR_SHAPES: Final[tuple[str, ...]] = (
+    "daily.close_moves_between_sessions",
+    "suspension.halt_on_the_newest_session",
+)
+"""The newest-session halt gives `suspend_d` a 2027 row, and so a 2027 partition."""
+
+
+def _two_year_panel() -> GeneratedPanel:
+    """`generate_panel`'s whole-2026 window, extended session by session into January 2027.
+
+    Every session-keyed batch is rebuilt over the whole two-year session tuple in one call, so a
+    January session's `pre_close` is December 31's close and every label chained across the
+    boundary is priced from one continuous path -- two single-year batches would restart it.
+    """
+    base = generate_panel(shapes=TWO_YEAR_SHAPES, window=(TWO_YEAR_FIRST, date(2026, 12, 31)))
+    second = tuple(
+        CalendarDay(
+            calendar_date=day,
+            is_trading=day.weekday() < 5 and day != TWO_YEAR_NEW_YEAR_HOLIDAY,
+        )
+        for day in (date(2027, 1, 1) + timedelta(days=offset) for offset in range(59))
+    )
+    days = (*base.calendar_days, *second)
+    sessions = tuple(
+        day.calendar_date
+        for day in days
+        if day.is_trading and TWO_YEAR_FIRST <= day.calendar_date <= TWO_YEAR_LAST
+    )
+    grid = {"sessions": sessions, "securities": base.securities, "shapes": base.shapes}
+    code, listed = TWO_YEAR_LATE_LISTING
+    universe = base.batch(STOCK_BASIC_DATASET)
+    late = midnight_shanghai(listed)
+    registry = dataclasses.replace(
+        universe,
+        as_of=late,
+        fetched_at=late,
+        subjects=(*universe.subjects, code),
+        timeline=TimelineColumns(
+            event_time=(*universe.timeline.event_time, late),
+            available_time=(*universe.timeline.available_time, late),
+            ingested_time=(*universe.timeline.ingested_time, late),
+            revision_time=(*universe.timeline.revision_time, late),
+        ),
+        columns=tuple(
+            PanelColumn(
+                column.name,
+                column.kind,
+                (
+                    *column.values,
+                    {
+                        "lifecycle_event": LISTING_EVENT,
+                        "lifecycle_date": listed.isoformat(),
+                        "exchange": EXCHANGE,
+                    }[column.name],
+                ),
+            )
+            for column in universe.columns
+        ),
+    )
+    batches = {
+        **base.batches,
+        TRADING_CALENDAR_DATASET: calendar_batch(days),
+        STOCK_BASIC_DATASET: registry,
+        ADJ_FACTOR_DATASET: factor_batch(**grid),
+        DAILY_DATASET: bar_batch(**grid),
+        DAILY_BASIC_DATASET: valuation_batch(**grid),
+        SUSPENSION_DATASET: suspension_batch(**grid),
+        PRICE_LIMIT_DATASET: limit_batch(**grid),
+        INDEX_WEIGHT_DATASET: index_weight_batch(**grid),
+    }
+    return dataclasses.replace(
+        base,
+        calendar_days=days,
+        sessions=sessions,
+        batches=MappingProxyType(batches),
+        as_of=read_instant(sessions[-1]),
+    )
+
+
+def _two_year_build(store: PanelStore, panel: GeneratedPanel, session: date) -> FactorPanel:
+    """One raw `reversal_1d/v1` build at `session`'s 16:30, over the years its inputs span."""
+    instant = build_instant(session)
+    index = panel.sessions.index(session)
+    subjects = tuple(panel.securities)
+    years = tuple(year for year in (session.year - 1, session.year) if year >= 2026)
+    return compute_factor(
+        store,
+        REVERSAL,
+        as_of=instant,
+        subjects=subjects,
+        universe=frozenset(panel.securities),
+        requirements={
+            "daily": daily_requirement(
+                panel.calendar(), years=years, as_of=instant, max_staleness=timedelta(days=30)
+            )
+        },
+        code_commit=COMMIT,
+        built_at=instant,
+        evaluators={
+            REVERSAL.qualified_key: lambda context: stored_value(subjects, context.subject, index)
+        },
+    )
+
+
+def _write_by_year(store: PanelStore, panel: GeneratedPanel) -> None:
+    """The datasets a strategy backtest reads, each split by year before its real writer runs.
+
+    `write_generated_panel` hands each writer one batch, which is one partition year; the writers
+    refuse a batch spanning two, so this splits with `split_panel_batch_by_year` and writes one
+    partition year at a time.
+    """
+    calendar = panel.calendar()
+
+    def parts(dataset: str) -> list[ColumnarPanelBatch]:
+        return [part for _, part in split_panel_batch_by_year(panel.batch(dataset))]
+
+    for part in parts(TRADING_CALENDAR_DATASET):
+        write_trading_calendar(store, part)
+    for part in parts(STOCK_BASIC_DATASET):
+        write_stock_universe(store, part)
+    for part in parts(ADJ_FACTOR_DATASET):
+        write_adjustment_factors(store, [part], calendar=calendar)
+    for part in parts(SUSPENSION_DATASET):
+        write_suspensions(store, [part])
+    halts = load_suspensions(store, years=(2026, 2027), as_of=panel.as_of, max_staleness=None)
+    for bars, fundamentals in zip(parts(DAILY_DATASET), parts(DAILY_BASIC_DATASET), strict=True):
+        write_daily_panel(
+            store, bars=[bars], fundamentals=[fundamentals], calendar=calendar, halts=halts
+        )
+    for part in parts(PRICE_LIMIT_DATASET):
+        write_price_limits(store, [part], calendar=calendar)
+
+
+def write_two_year_corpus(root: Path) -> GeneratedPanel:
+    """A panel priced 2026-01-05 .. 2027-01-22, with a raw build on every session from 12-01.
+
+    Two calendar years in every dataset a strategy backtest reads, so a signal day in December
+    trades in January and every year-scoped read the streamed feeds make is exercised across the
+    boundary. No `index_daily`: a test over it benchmarks against `equal_weight_all_a` alone.
+    """
+    store = PanelStore(root / "panel")
+    panel = _two_year_panel()
+    _write_by_year(store, panel)
+    write_factor_panels(
+        store,
+        [
+            _two_year_build(store, panel, session)
+            for session in panel.sessions
+            if session >= TWO_YEAR_BUILDS_FROM
+        ],
+    )
     return panel
 
 
