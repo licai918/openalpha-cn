@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import plistlib
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -699,12 +700,19 @@ def test_the_launchd_job_is_printed_for_weekdays_at_1830_and_nothing_is_installe
         ]
     )
     out, _err = capsys.readouterr()
+    job = plistlib.loads(out.encode("utf-8"))
 
     assert code == 0
-    assert out.count("<key>Hour</key><integer>18</integer>") == 5
-    assert out.count("<key>Minute</key><integer>30</integer>") == 5
-    assert "scripts/daily_selection.py" in out
-    assert "--env-file .env" in out
+    assert job["Label"] == "com.openalpha.daily-selection"
+    assert job["StartCalendarInterval"] == [
+        {"Weekday": weekday, "Hour": 18, "Minute": 30} for weekday in range(1, 6)
+    ]
+    shell, flag, line = job["ProgramArguments"]
+    assert (shell, flag) == ("/bin/zsh", "-lc")
+    assert " && uv run --no-sync --env-file .env python scripts/daily_selection.py " in line
+    assert f'--runtime-dir "{(tmp_path / "runtime").resolve()}"' in line
+    assert "&amp;&amp;" in out  # the shell's `&&`, escaped as XML requires
+    assert job["RunAtLoad"] is False
     assert not (tmp_path / "runtime").exists()
     assert not (tmp_path / "logs").exists()
 

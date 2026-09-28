@@ -77,6 +77,7 @@ import contextlib
 import hashlib
 import io
 import json
+import plistlib
 import sys
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -1267,38 +1268,24 @@ def launchd_plist(*, repo: Path, runtime_dir: Path, log_dir: Path) -> str:
 
     launchd has no exchange calendar, so it fires every weekday and the command decides: on a
     holiday the newest closed session is one whose journal is already complete, which prints
-    the summary again with no request and no write.
+    the summary again with no request and no write. Serialized by `plistlib`, so the `&&` in the
+    shell line and any character a path holds are escaped as XML requires.
     """
     command = (
         f'cd "{repo}" && uv run --no-sync --env-file .env python {THIS_SCRIPT} '
         f'--runtime-dir "{runtime_dir}"'
     )
-    days = "\n".join(
-        f"    <dict><key>Weekday</key><integer>{weekday}</integer>"
-        "<key>Hour</key><integer>18</integer><key>Minute</key><integer>30</integer></dict>"
-        for weekday in range(1, 6)
-    )
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>{LAUNCHD_LABEL}</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/bin/zsh</string>
-    <string>-lc</string>
-    <string>{command}</string>
-  </array>
-  <key>StartCalendarInterval</key>
-  <array>
-{days}
-  </array>
-  <key>StandardOutPath</key><string>{log_dir}/daily-selection.out.log</string>
-  <key>StandardErrorPath</key><string>{log_dir}/daily-selection.err.log</string>
-  <key>RunAtLoad</key><false/>
-</dict>
-</plist>
-"""
+    job = {
+        "Label": LAUNCHD_LABEL,
+        "ProgramArguments": ["/bin/zsh", "-lc", command],
+        "StartCalendarInterval": [
+            {"Weekday": weekday, "Hour": 18, "Minute": 30} for weekday in range(1, 6)
+        ],
+        "StandardOutPath": str(log_dir / "daily-selection.out.log"),
+        "StandardErrorPath": str(log_dir / "daily-selection.err.log"),
+        "RunAtLoad": False,
+    }
+    return plistlib.dumps(job, sort_keys=False).decode("utf-8")
 
 
 def _instant(value: str) -> datetime:

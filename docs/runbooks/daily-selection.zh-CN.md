@@ -98,7 +98,7 @@ launchd 不知道交易日历，所以配置为每个工作日 18:30 触发，�
 uv run --no-sync python scripts/daily_selection.py --runtime-dir ~/openalpha-research --launchd-plist ~/openalpha-research/logs
 ```
 
-把输出保存为 `~/Library/LaunchAgents/com.openalpha.daily-selection.plist` 并用 `launchctl` 加载，是安装常驻配置，只在你明确同意后做。不同意就保留手动命令，产物完全相同。
+输出由 `plistlib` 生成（`plutil -lint` 通过），命令行里的 `&&` 已按 XML 转义。launchd 不会替你创建日志目录，加载前需要先建好它。把输出保存为 `~/Library/LaunchAgents/com.openalpha.daily-selection.plist` 并用 `launchctl` 加载，是安装常驻配置，只在你明确同意后做。不同意就保留手动命令，产物完全相同。
 
 ## 已知局限
 
