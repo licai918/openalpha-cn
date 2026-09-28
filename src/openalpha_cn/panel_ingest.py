@@ -413,9 +413,13 @@ from openalpha_cn.domain.price_limits import (
     SUSPENSION_DATA_COLUMNS,
     SUSPENSION_DATASET,
     SUSPENSION_PANEL_COLUMNS,
+    SUSPENSION_TIMING_COLUMN,
+    SUSPENSION_TYPE_COLUMN,
     UP_LIMIT_COLUMN,
     PriceLimit,
     SuspensionDay,
+    SuspensionRecord,
+    TradingState,
     price_limits_from_panel_rows,
     suspensions_from_panel_rows,
 )
@@ -4160,10 +4164,12 @@ cannot hold a whole row: its columns are fixed, and a new column there would mak
 defects partition and the new build unreadable to each other (hard rule 3). A new dataset per
 source breaks no stored contract, so each withdrawn row is kept here **exactly as it was stored**:
 the source partition's own column projection (an `adj_factor` value, a halt's type and timing, a
-bar's every price), its four clocks, and `WITHDRAWN_CONFIRMED_AT_COLUMN`. One clock moves: when a
-later build carries the row its `ingested_time` becomes `max(build stamp, available_time)`, which
-is `V2-P6-003`'s convention for every carried row and what keeps an incremental build's bytes the
-full build's; the instant it was first confirmed stays in `WITHDRAWN_CONFIRMED_AT_COLUMN`.
+bar's every price), its four clocks, `WITHDRAWN_CONFIRMED_AT_COLUMN` and
+`WITHDRAWN_ORIGINAL_INGESTED_TIME_COLUMN`. One clock moves: when a later build carries the row its
+`ingested_time` becomes `max(build stamp, available_time)`, which is `V2-P6-003`'s convention for
+every carried row and what keeps an incremental build's bytes the full build's; the stored value
+it had when the withdrawal was confirmed stays verbatim in
+`WITHDRAWN_ORIGINAL_INGESTED_TIME_COLUMN`.
 Written by `write_withdrawn_rows` under the same carry, retirement and incremental-equals-full
 rules as the index, and always before the source partition that no longer holds the row.
 
@@ -4172,8 +4178,12 @@ this module, never fetched.
 """
 
 WITHDRAWN_CONFIRMED_AT_COLUMN: Final[str] = "withdrawal_confirmed_at"
-"""The instant a build confirmed the withdrawal: the one column a `withdrawn_*` row adds to its
-source row."""
+"""The instant a build confirmed the withdrawal."""
+
+WITHDRAWN_ORIGINAL_INGESTED_TIME_COLUMN: Final[str] = "original_ingested_time"
+"""The withdrawn row's `ingested_time` as it was stored when the withdrawal was confirmed. The
+clock column itself is restamped by every carry (`V2-P6-003`); this data column is kept verbatim,
+so the row's own provenance survives however many builds carry it."""
 
 WithdrawalRefetch = Callable[[tuple[date, ...]], Mapping[date, ColumnarPanelBatch]]
 """A second whole-session fetch of one dataset for each session named, keyed by session
@@ -4265,13 +4275,13 @@ def reconcile_withdrawals(
        answer**. A second answer that differs, including one that serves the row again, is what a
        partial fetch looks like, and the year is refused naming both answers.
 
-    **`suspend_d`** publishes an empty session whenever nothing is halted, so an empty answer is
-    no evidence either way and rule 2's count cannot be applied to it. `witness` replaces it and
-    is stronger: every withdrawn halt must be contradicted by a positive fact -- the security's
-    bar on that session in the `daily` year this build stores -- or the year is refused naming
-    the security. A count threshold passes a short answer as long as it is not too short; this
-    passes no withdrawn halt at all without its own bar. (A non-empty but thin halt answer is
-    refused by rule 2 as well.)
+    **`suspend_d`** publishes an empty session whenever nothing is halted, so an **empty** answer
+    is no evidence either way and rule 2's count cannot judge it. It confirms a withdrawal only
+    where `witness` shows the answer **contradicts** the stored row: a whole-day halt that now has
+    its security's bar in the `daily` year this build stores. A resumption or an intraday halt
+    has a bar either way, so an empty answer never withdraws one; the year is refused naming it
+    (`_refuse_an_uncontradicted_empty_halt_answer`). A non-empty halt answer is held to rule 2's
+    count floor like every other dataset.
 
     A confirmed withdrawal is recorded as `withdrawn_after_publication` with the stored row's own
     `event_time`, `available_time` and `ingested_time`, what the row said (`_row_numbers`), and
@@ -4342,9 +4352,14 @@ def reconcile_withdrawals(
     if not missing:
         return replace(NO_WITHDRAWALS, still_stored=frozenset(still_stored))
     for day in sorted(missing):
-        _refuse_a_short_first_answer(
-            dataset, day, sorted(missing[day]), served_rows[day], held[day], witness=witness
-        )
+        if witness is not None and served_rows[day] == 0:
+            _refuse_an_uncontradicted_empty_halt_answer(
+                dataset, day, sorted(missing[day]), stored, stored_keys, witness=witness
+            )
+        else:
+            _refuse_a_short_first_answer(
+                dataset, day, sorted(missing[day]), served_rows[day], held[day]
+            )
 
     answers = refetch(tuple(sorted(missing)))
     withdrawn: set[tuple[str, date]] = set()
@@ -4368,17 +4383,6 @@ def reconcile_withdrawals(
             raise PanelBatchError(
                 _withdrawal_refusal(dataset, day, sorted(missing[day]), first[day], second)
             )
-        if witness is not None:
-            unexplained = sorted(subject for subject in verdict if not witness(subject, day))
-            if unexplained:
-                raise PanelBatchError(
-                    f"the stored {dataset} partition holds {_subject_sample(unexplained)} on "
-                    f"{day.isoformat()} and two whole-session answers no longer serve them, but "
-                    f"nothing shows they traded that session: no {DAILY_DATASET} bar for them in "
-                    "the year this build stores. An empty or short halt answer is not evidence "
-                    "that a halt was withdrawn, so the year is refused rather than losing the "
-                    "halt: re-run the build"
-                )
         withdrawn |= {(subject, day) for subject in verdict}
 
     positions = [index for index, key in enumerate(stored_keys) if key in withdrawn]
@@ -4406,13 +4410,7 @@ def reconcile_withdrawals(
 
 
 def _refuse_a_short_first_answer(
-    dataset: str,
-    day: date,
-    missing: Sequence[str],
-    served: int,
-    held: int,
-    *,
-    witness: AbsenceWitness | None,
+    dataset: str, day: date, missing: Sequence[str], served: int, held: int
 ) -> None:
     """Refuse to confirm withdrawals on a session whose first answer is empty or thin (`V2-P6-016`).
 
@@ -4423,11 +4421,9 @@ def _refuse_a_short_first_answer(
     the second request the same way, so no second answer can confirm anything about it. The
     same floor the writers hold a session to (`_refuse_thin_price_sessions`), held against the
     stored session rather than the partition median, because the stored session is what the
-    answer is being asked to replace. `suspend_d` (`witness` given) is exempt only from the empty
-    case, which its witness decides row by row.
+    answer is being asked to replace. `suspend_d`'s non-empty answers are held to it too; its
+    empty answer is `_refuse_an_uncontradicted_empty_halt_answer`'s.
     """
-    if served == 0 and witness is not None:
-        return
     if served >= MIN_SESSION_ROW_SHARE * held:
         return
     answered = "answered no_data" if served == 0 else f"served {served} row(s)"
@@ -4437,6 +4433,63 @@ def _refuse_a_short_first_answer(
         f"({MIN_SESSION_ROW_SHARE}) of them -- without {_subject_sample(missing)}. An empty or "
         "short session is what an outage looks like, and an outage answers a second request the "
         "same way, so it confirms no withdrawal: nothing is recorded or written. Re-run the build"
+    )
+
+
+def _refuse_an_uncontradicted_empty_halt_answer(
+    dataset: str,
+    day: date,
+    missing: Sequence[str],
+    stored: ColumnarPanelBatch,
+    stored_keys: Sequence[tuple[str, date]],
+    *,
+    witness: AbsenceWitness,
+) -> None:
+    """Refuse an empty `suspend_d` answer unless it contradicts every stored row it lacks
+    (`V2-P6-016`).
+
+    `suspend_d` publishes nothing on a session with no halts, so an empty answer -- twice -- says
+    nothing about the rows stored there. A bar is evidence only where it **contradicts** the
+    stored row: a whole-day halt (`S` with no timing, `TradingState.halted`) for which the `daily`
+    year this build stores now holds a bar. A resumption (`R`) and a timed intraday halt have a
+    bar whatever the halt table says, so their bar contradicts nothing, and an empty answer
+    cannot withdraw them. Every missing row of the session must be a contradicted whole-day halt,
+    or the year is refused naming the ones that are not, before any second request.
+
+    **The accepted cost:** a genuine withdrawal of a session's only resumption or intraday rows
+    fails closed here, by name. The remedy is a full rebuild of the year into a store that does
+    not hold the stored `suspend_d` partition, once the withdrawal has been checked by hand.
+    """
+    types = _column_values(stored, SUSPENSION_TYPE_COLUMN)
+    timings = _column_values(stored, SUSPENSION_TIMING_COLUMN)
+    whole_day: dict[tuple[str, date], bool] = {}
+    for index, key in enumerate(stored_keys):
+        halted = (
+            SuspensionRecord(
+                ts_code=key[0],
+                trade_date=key[1],
+                suspend_type=str(types[index]),
+                timing=None if timings[index] is None else str(timings[index]),
+            ).state
+            is TradingState.halted
+        )
+        whole_day[key] = whole_day.get(key, True) and halted
+    uncontradicted = [
+        subject
+        for subject in missing
+        if not (whole_day.get((subject, day), False) and witness(subject, day))
+    ]
+    if not uncontradicted:
+        return
+    raise PanelBatchError(
+        f"{dataset} answered no rows for {day.isoformat()}, a session this build fetched again, "
+        f"where the store holds {_subject_sample(list(missing))}. An empty halt session is "
+        "ordinary, so it withdraws only a whole-day halt ('S' with no timing) that now has a "
+        f"{DAILY_DATASET} bar; {_subject_sample(uncontradicted)} is a resumption, an intraday "
+        "halt, or a whole-day halt with no daily bar, and its bar -- if any -- contradicts "
+        "nothing. The "
+        "year is refused rather than losing those rows. If the upstream has truly withdrawn them, "
+        "rebuild the year in full into a store that does not hold this suspend_d partition"
     )
 
 
@@ -4481,6 +4534,11 @@ def _withdrawn_rows(
             *selected.columns,
             PanelColumn(
                 WITHDRAWN_CONFIRMED_AT_COLUMN, "timestamp", (confirmed_at,) * selected.row_count
+            ),
+            PanelColumn(
+                WITHDRAWN_ORIGINAL_INGESTED_TIME_COLUMN,
+                "timestamp",
+                selected.timeline.ingested_time,
             ),
         ),
     )
@@ -4658,7 +4716,11 @@ def withdrawn_rows_requirement(
         years=tuple(sorted(set(years))),
         required_dates=None,
         required_subjects=None,
-        required_fields=(SUBJECT_COLUMN_NAME, WITHDRAWN_CONFIRMED_AT_COLUMN),
+        required_fields=(
+            SUBJECT_COLUMN_NAME,
+            WITHDRAWN_CONFIRMED_AT_COLUMN,
+            WITHDRAWN_ORIGINAL_INGESTED_TIME_COLUMN,
+        ),
         max_staleness=None,
     )
 

@@ -53,6 +53,7 @@ from openalpha_cn.panel_doctor import panel_health_report
 from openalpha_cn.panel_ingest import (
     UPSTREAM_DEFECTS_DATASET,
     WITHDRAWN_CONFIRMED_AT_COLUMN,
+    WITHDRAWN_ORIGINAL_INGESTED_TIME_COLUMN,
     WITHDRAWN_ROWS_DATASETS,
     carry_stored_sessions_forward,
     load_upstream_defects,
@@ -198,6 +199,9 @@ class Corpus:
     served_only: tuple[tuple[str, date, int], ...] = ()
     """`(api_name, session, n)`: every whole-market answer for it carries only its first `n` rows
     -- an outage (`n == 0`) or a short answer, the same on every request."""
+    stepped: tuple[str, ...] = ()
+    """Securities whose `adj_factor` steps from 1.0 to 1.5 on `T1_LAST`, so the compressed
+    partition keeps that session as a change row."""
 
 
 class ScriptedUpstream:
@@ -349,6 +353,8 @@ class ScriptedUpstream:
 
     def _factors(self, day: date) -> list[list[Any]]:
         def factor(code: str) -> float:
+            if code in self.corpus.stepped:
+                return 1.5 if day >= T1_LAST else 1.0
             if code != ADJUSTED:
                 return 1.0
             return 1.2 if day >= SESSIONS[8] else 1.1 if day >= SESSIONS[3] else 1.0
@@ -1257,18 +1263,37 @@ def test_each_withdrawn_row_is_kept_whole_with_its_clocks_and_confirmation_insta
     inc = run_build(tmp_path / "inc", monkeypatch, as_of=T2, incremental=True, corpus=WITHDRAWN_NOW)
 
     assert inc.exit_code == PanelExit.ok, inc.output
-    for source, (code, columns) in shapes.items():
-        kept = [
+    extra = (WITHDRAWN_CONFIRMED_AT_COLUMN, WITHDRAWN_ORIGINAL_INGESTED_TIME_COLUMN)
+
+    def kept(source: str, code: str, columns: tuple[str, ...]) -> list[tuple[object, ...]]:
+        return [
             row[1:]
             for row in store.query(
                 WITHDRAWN_ROWS_DATASETS[source],
                 year=YEAR,
-                columns=("subject", *columns, *clocks, WITHDRAWN_CONFIRMED_AT_COLUMN),
+                columns=("subject", *columns, *clocks, *extra),
             )
             if row[0] == code
         ]
-        assert [row[:-1] for row in kept] == before[source], source
-        assert [row[-1] for row in kept] == [T2_INSTANT], source
+
+    ingested = clocks.index("ingested_time") - len(clocks) - len(extra)
+    for source, (code, columns) in shapes.items():
+        rows = kept(source, code, columns)
+        assert [row[: -len(extra)] for row in rows] == before[source], source
+        assert [row[-2] for row in rows] == [T2_INSTANT], source
+        assert [row[-1] for row in rows] == [row[ingested] for row in rows], source
+
+    # Carried by a later build: the ingested_time clock is restamped (`V2-P6-003`), and the
+    # original is kept verbatim beside it.
+    later = run_build(
+        tmp_path / "inc", monkeypatch, as_of=T3, incremental=True, corpus=WITHDRAWN_NOW
+    )
+    assert later.exit_code == PanelExit.ok, later.output
+    for source, (code, columns) in shapes.items():
+        (first,) = before[source]
+        (row,) = kept(source, code, columns)
+        assert row[-1] == first[ingested + len(extra)], source
+        assert row[-2] == T2_INSTANT, source
 
 
 def test_a_build_with_no_withdrawal_stores_and_asks_exactly_what_it_did_before(
@@ -1324,3 +1349,73 @@ def test_panel_doctor_answers_for_the_withdrawn_rows_rather_than_raising(
         assert health.is_ready, dataset
     # A year with no partition is a year with no withdrawal, not a missing one.
     assert "partition_missing" not in report.codes()
+
+
+# --- review round 2 (`V2-P6-016`) --------------------------------------------------------------
+
+
+def test_an_empty_halt_answer_twice_does_not_withdraw_a_resumption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`RESUMING`'s `R` is the only `suspend_d` row of `SESSIONS[0]`. A resumption has a bar
+    whether or not its row is still published, so a bar contradicts nothing and two empty
+    answers withdraw nothing: the full build is refused by name and writes nothing of it.
+    (`HALTED`'s whole-day halt on `SESSIONS[2]` keeps the year's halt corpus non-empty.)"""
+    clean = Corpus()
+    stored = run_build(tmp_path, monkeypatch, as_of=T1, incremental=False, corpus=clean)
+    assert stored.exit_code == PanelExit.ok, stored.output
+    halts = (SUSPENSION_DATASET, WITHDRAWN_ROWS_DATASETS[SUSPENSION_DATASET])
+    before = _hashes(tmp_path, halts)
+
+    full = run_build(
+        tmp_path,
+        monkeypatch,
+        as_of=T2,
+        incremental=False,
+        corpus=replace(clean, served_only=((SUSPENSION_DATASET, SESSIONS[0], 0),)),
+    )
+
+    assert full.exit_code == PanelExit.unhealthy, full.output
+    assert RESUMING in full.output
+    assert "whole-day" in full.output
+    assert _hashes(tmp_path, halts) == before
+    assert _withdrawals(tmp_path) == set()
+    assert "WITHDRAWN" not in full.output
+
+
+def test_a_withdrawn_factor_step_before_the_slice_refuses_the_incremental_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`T1_LAST` holds a carried withdrawal, so `T3`'s incremental build asks its `adj_factor`
+    again -- and finds `STEPPED`'s change row there withdrawn too. The full rebuild places the
+    step on the next session that has one, a row the compressed partition never kept, so the
+    incremental build is refused with the full rebuild, which records the withdrawal."""
+    stepped = FILLERS[12]
+    published = replace(PUBLISHED, stepped=(stepped,))
+    base = run_build(tmp_path, monkeypatch, as_of=T1, incremental=False, corpus=published)
+    assert base.exit_code == PanelExit.ok, base.output
+    confirmed = run_build(
+        tmp_path,
+        monkeypatch,
+        as_of=T2,
+        incremental=True,
+        corpus=replace(published, withdrawn=WITHDRAWN),
+    )
+    assert confirmed.exit_code == PanelExit.ok, confirmed.output
+    shutil.copytree(tmp_path, tmp_path.parent / "full")
+    step_withdrawn = replace(
+        published, withdrawn=(*WITHDRAWN, (ADJ_FACTOR_DATASET, stepped, T1_LAST))
+    )
+
+    inc = run_build(tmp_path, monkeypatch, as_of=T3, incremental=True, corpus=step_withdrawn)
+
+    assert inc.exit_code == PanelExit.unhealthy, inc.output
+    assert stepped in inc.output
+    assert "openalpha panel build" in inc.output
+    full = run_build(
+        tmp_path.parent / "full", monkeypatch, as_of=T3, incremental=False, corpus=step_withdrawn
+    )
+    assert full.exit_code == PanelExit.ok, full.output
+    assert (stepped, ADJ_FACTOR_DATASET, T1_LAST) in _withdrawals(
+        tmp_path.parent / "full", datetime.fromisoformat(T3)
+    )

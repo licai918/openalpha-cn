@@ -3353,6 +3353,12 @@ its slice. Withdrawals are rare: the whole 2013..2026 backfill and the live chec
 one pair. Twenty pairs is twenty times that, and still leaves the daily command under half its
 budget; a year that holds more is refused by name rather than skipped, with the full rebuild --
 which re-fetches every session and so needs no re-check -- as the remedy.
+
+**What the bound does not count.** It is a bound on the re-check requests themselves. A
+re-checked price session is then reconciled like any fetched one, so it can add `V2-P6-013`'s
+re-fetches of that session's close disagreements (two requests per disputed session) and this
+issue's confirming request for any row it newly finds withdrawn. Those are data-dependent and are
+stated on their own `REFETCH` and `BUDGET withdrawal-confirmation` lines, not here.
 """
 
 
@@ -3366,7 +3372,7 @@ def _withdrawal_rechecks(
     """The sessions each dataset asks again because they hold a carried withdrawal (`V2-P6-016`).
 
     A `withdrawn_after_publication` record of a target's sources on a session before that
-    target's slice. Decided with the slices, before any request, and refused past
+    target's slice. Decided with the slices, before any session request, and refused past
     `WITHDRAWAL_RECHECK_LIMIT`.
     """
     asked: dict[str, set[date]] = {}
@@ -3685,7 +3691,11 @@ def _stored_defects(
 
 
 def _refuse_a_withdrawn_closing_anchor(
-    found: Withdrawals, fetched: Sequence[ColumnarPanelBatch], *, rebuild: str
+    found: Withdrawals,
+    fetched: Sequence[ColumnarPanelBatch],
+    *,
+    start: date,
+    rebuild: str,
 ) -> None:
     """Refuse an incremental `adj_factor` build that a withdrawn row leaves unable to equal the
     full rebuild (`V2-P6-016`).
@@ -3698,6 +3708,14 @@ def _refuse_a_withdrawn_closing_anchor(
     never kept -- so the incremental build cannot reproduce it and is refused, naming the full
     rebuild. A security every stored row of which was withdrawn (`released`) is gone from both
     builds alike and needs no refusal.
+
+    **The same holds for any withdrawn row before `start`**, on a session asked again for a
+    carried withdrawal. Every stored factor row there is load-bearing -- an anchor or a change --
+    and the full rebuild replaces a withdrawn one with the security's next served session (the
+    new first observation, or the session the change now appears on), which the compressed
+    partition did not keep between its steps. So such a withdrawal, of a security that keeps
+    other rows, is refused too. Inside the slice nothing is missing: every session from `start`
+    on is a fresh answer in both builds.
     """
     if not found.defects:
         return
@@ -3708,16 +3726,17 @@ def _refuse_a_withdrawn_closing_anchor(
         {
             defect.ts_code
             for defect in found.defects
-            if defect.ts_code not in found.released and defect.ts_code not in served
+            if defect.ts_code not in found.released
+            and (defect.ts_code not in served or defect.trade_date < start)
         }
     )
     if anchors:
         raise _refuse_incremental(
             rebuild,
-            f"the upstream withdrew the stored {ADJ_FACTOR_DATASET} closing observation of "
-            f"{anchors} and serves no later row of them in this slice; the full rebuild closes "
-            "their step function on their last served session before it, which the compressed "
-            "partition does not hold",
+            f"the upstream withdrew a stored {ADJ_FACTOR_DATASET} step of {anchors} -- a closing "
+            "observation with no later row in this slice, or a row on a session before the slice"
+            " -- and the full rebuild replaces it with their next served session, a closing "
+            "observation or step the compressed partition does not hold",
         )
 
 
@@ -5273,7 +5292,9 @@ def _build_panel(
         )
         factor_withdrawals = settled_factors.found[ADJ_FACTOR_DATASET]
         if factor_start is not None:
-            _refuse_a_withdrawn_closing_anchor(factor_withdrawals, fetched_factors, rebuild=rebuild)
+            _refuse_a_withdrawn_closing_anchor(
+                factor_withdrawals, fetched_factors, start=factor_start, rebuild=rebuild
+            )
         factors = reconcile_pre_listing_rows(
             fresh_factors
             if factor_start is None
@@ -5360,8 +5381,10 @@ def _build_panel(
         )
     if PRICE_LIMIT_DATASET in targets:
         assert calendar is not None  # guaranteed by `_NEEDS_STORED_CALENDAR` above
-        # `V2-P6-013`: the upstream's zero/zero band on a whole-day halt is dropped and recorded
-        # before the writer sees it; every other zero upper limit is refused by name.
+        # `V2-P6-013`: the upstream's zero/zero band on a whole-day halt is dropped before the
+        # writer sees it, and every other zero upper limit is refused by name. The record is
+        # written from `write_price_limits`' `before_write`, once its guards have all passed and
+        # before the partition is (`V2-P6-016`), so a refused write leaves no record.
         limit_start = starts.get(PRICE_LIMIT_DATASET)
         limit_slice = _incremental_slice(sessions, limit_start)
         fresh_limits = _session_batches(provider, (PRICE_LIMIT_DATASET,), limit_slice)[
