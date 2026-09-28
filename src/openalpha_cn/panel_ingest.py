@@ -308,7 +308,7 @@ straddles a year boundary, is answered with an error instead of a silent choice.
 
 import operator
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence, Set
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from statistics import median
@@ -447,6 +447,7 @@ from openalpha_cn.domain.upstream_defects import (
     repeats_previous_close,
     upstream_defects_from_panel_rows,
     valuation_placeholder_kind,
+    withdrawn_subjects,
 )
 from openalpha_cn.panel.catalog import (
     DEFAULT_DATE_TIMEZONE,
@@ -762,7 +763,12 @@ def _year_sample(years: Sequence[int]) -> str:
 
 
 def _refuse_to_drop_stored_subjects(
-    store: PanelStore, batch: ColumnarPanelBatch, year: int, *, remedy: str
+    store: PanelStore,
+    batch: ColumnarPanelBatch,
+    year: int,
+    *,
+    remedy: str,
+    released: Set[str] = frozenset(),
 ) -> None:
     """Block an overwrite that would remove a subject the partition already holds.
 
@@ -776,11 +782,18 @@ def _refuse_to_drop_stored_subjects(
     A partition with no coverage record is not protected: there is nothing to read the stored
     subjects from. That is an interrupted write, which `assess_readiness()` blocks as
     `coverage_missing`, and refusing to overwrite it would leave the store with no way back.
+
+    `released` (`V2-P6-016`) are the securities `reconcile_withdrawals` found the upstream to have
+    withdrawn **every** stored row of -- each on a session this build fetched again, each absent
+    from two whole-session answers that agree, each recorded as `withdrawn_after_publication`
+    before this write. Nothing else is released: a security with a stored row on any session the
+    build did not fetch again is not in it, so a carried row that went missing is refused here
+    exactly as before.
     """
     existing = store.read_coverage(batch.dataset, year)
     if existing is None:
         return
-    dropped = sorted(set(existing.subjects) - set(batch.subjects))
+    dropped = sorted(set(existing.subjects) - set(batch.subjects) - set(released))
     if dropped:
         raise PanelBatchError(
             f"{batch.dataset} year={year} already holds "
@@ -1952,6 +1965,7 @@ def write_adjustment_factors(
     calendar: TradingCalendar,
     date_timezone: str = DEFAULT_DATE_TIMEZONE,
     census_from: date | None = None,
+    released: Set[str] = frozenset(),
 ) -> PartitionRef:
     """Merge one year of factor cross sections, compress them, and write the partition.
 
@@ -2005,6 +2019,7 @@ def write_adjustment_factors(
             "A year's partition is replaced whole, so every session of the year has to arrive "
             "in one call; a narrower cross section is a partial fetch rather than news"
         ),
+        released=released,
     )
     return write_panel_batch(store, compressed, year=year, date_timezone=date_timezone)
 
@@ -2498,6 +2513,7 @@ def write_daily_panel(
     calendar: TradingCalendar,
     halts: Mapping[date, SuspensionDay] | None,
     date_timezone: str = DEFAULT_DATE_TIMEZONE,
+    released: Mapping[str, Set[str]] | None = None,
 ) -> tuple[PartitionRef, PartitionRef]:
     """Write one year of `daily` and `daily_basic` cross sections as two partitions (`V2-P1-007`).
 
@@ -2535,7 +2551,8 @@ def write_daily_panel(
        It runs on **both** datasets: a `daily_basic` rewrite that dropped a security would
        leave the two partitions disagreeing about which names the year covers, and guard 4
        cannot catch that direction because a bar with no valuation is the measured, tolerated
-       shape of every pre-2024 year.
+       shape of every pre-2024 year. `released`, keyed by dataset, names the securities whose
+       every stored row the upstream withdrew (`V2-P6-016`; see the guard).
     6. `_refuse_unexplained_thin_sessions`, when `halts` is not `None`, refuses a session whose
        missing bars are not accounted for by that day's whole-day halts. This is guard 3 with
        the reason for its low threshold removed -- see below.
@@ -2609,7 +2626,13 @@ def write_daily_panel(
         "one call; a narrower cross section is a partial fetch rather than news"
     )
     for merged in (merged_bars, merged_fundamentals):
-        _refuse_to_drop_stored_subjects(store, merged, year, remedy=remedy)
+        _refuse_to_drop_stored_subjects(
+            store,
+            merged,
+            year,
+            remedy=remedy,
+            released=(released or {}).get(merged.dataset, frozenset()),
+        )
     return (
         write_panel_batch(store, merged_bars, year=year, date_timezone=date_timezone),
         write_panel_batch(store, merged_fundamentals, year=year, date_timezone=date_timezone),
@@ -3192,6 +3215,7 @@ def write_suspensions(
     batches: Sequence[ColumnarPanelBatch],
     *,
     date_timezone: str = DEFAULT_DATE_TIMEZONE,
+    released: Set[str] = frozenset(),
 ) -> PartitionRef:
     """Write one year of `suspend_d` cross sections as a partition (`V2-P1-008`).
 
@@ -3245,6 +3269,7 @@ def write_suspensions(
             "A year's partition is replaced whole, and a security that was halted stays halted; "
             "re-fetch every session of the year and write it in one call"
         ),
+        released=released,
     )
     return write_panel_batch(store, merged, year=year, date_timezone=date_timezone)
 
@@ -3348,6 +3373,7 @@ def write_price_limits(
     *,
     calendar: TradingCalendar,
     date_timezone: str = DEFAULT_DATE_TIMEZONE,
+    released: Set[str] = frozenset(),
 ) -> PartitionRef:
     """Write one year of `stk_limit` cross sections as a partition (`V2-P1-008`).
 
@@ -3391,6 +3417,7 @@ def write_price_limits(
             "A year's partition is replaced whole, so every session of the year has to arrive "
             "in one call; a narrower cross section is a partial fetch rather than news"
         ),
+        released=released,
     )
     return write_panel_batch(store, merged, year=year, date_timezone=date_timezone)
 
@@ -3905,6 +3932,19 @@ def _pre_listing_defect(
     batch: ColumnarPanelBatch, index: int, subject: str, day: date, listed: date
 ) -> UpstreamDefect:
     """The record of one pre-listing row, carrying the value that row had to say."""
+    return UpstreamDefect(
+        ts_code=subject,
+        trade_date=day,
+        source_dataset=batch.dataset,
+        kind="bar_before_listing",
+        list_date=listed,
+        **_row_numbers(batch, index),  # type: ignore[arg-type]
+    )
+
+
+def _row_numbers(batch: ColumnarPanelBatch, index: int) -> dict[str, float | None]:
+    """What a dropped or withdrawn row had to say, in the record's number columns: its close
+    (`daily`, `daily_basic`) or its band (`stk_limit`); nothing for `adj_factor` or `suspend_d`."""
 
     def number(column: str) -> float | None:
         return cast(float | None, _column_values(batch, column)[index])
@@ -3917,14 +3957,7 @@ def _pre_listing_defect(
     elif batch.dataset == PRICE_LIMIT_DATASET:
         values["up_limit"] = number(UP_LIMIT_COLUMN)
         values["down_limit"] = number(DOWN_LIMIT_COLUMN)
-    return UpstreamDefect(
-        ts_code=subject,
-        trade_date=day,
-        source_dataset=batch.dataset,
-        kind="bar_before_listing",
-        list_date=listed,
-        **values,  # type: ignore[arg-type]
-    )
+    return values
 
 
 def combine_defect_records(*records: ColumnarPanelBatch | None) -> ColumnarPanelBatch | None:
@@ -4074,6 +4107,266 @@ def _refuse_zero_upper_limits(batch: ColumnarPanelBatch) -> None:
     )
 
 
+WITHDRAWN_KIND: Final[DefectKind] = "withdrawn_after_publication"
+"""`V2-P6-016`'s kind, named once for the carry below and the CLI's report."""
+
+WithdrawalRefetch = Callable[[tuple[date, ...]], Mapping[date, ColumnarPanelBatch]]
+"""A second whole-session fetch of one dataset for each session named, keyed by session
+(`V2-P6-016`).
+
+Called once, with every session on which the stored partition holds a row the build's own fetch
+lacked, so the caller can state the request count before the first one goes out; every other
+session costs nothing. Each answer must be the same whole-market request the build made for that
+session -- a `no_data` answer is an empty session -- because it is compared with that request's
+answer security for security. Injected for `PriceRefetch`'s reason.
+"""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Withdrawals:
+    """The stored rows of one dataset-year the upstream no longer serves, confirmed twice.
+
+    `record` is the `upstream_defects` batch `write_upstream_defects` stores -- one
+    `withdrawn_after_publication` row per withdrawn stored row -- and `None` exactly when `defects`
+    is empty. `released` are the securities every stored row of which was withdrawn, which the
+    dataset's writer is told so that its subject guard lets them go (`_refuse_to_drop_stored_
+    subjects`); a security with any other stored row is never in it.
+    """
+
+    defects: tuple[UpstreamDefect, ...]
+    record: ColumnarPanelBatch | None
+    released: frozenset[str]
+
+
+NO_WITHDRAWALS: Final[Withdrawals] = Withdrawals(defects=(), record=None, released=frozenset())
+
+
+def reconcile_withdrawals(
+    store: PanelStore,
+    fetched: Sequence[ColumnarPanelBatch],
+    *,
+    dataset: str,
+    year: int,
+    sessions: Sequence[date],
+    refetch: WithdrawalRefetch,
+    confirmed_at: datetime,
+    date_column: str = PRICE_DATE_COLUMN,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> Withdrawals:
+    """Record every stored row of `(dataset, year)` the upstream has withdrawn, or refuse the year
+    (`V2-P6-016`).
+
+    ## Why a row can disappear, and why it used to refuse the year
+
+    A partition is rebuilt from what the upstream serves now: every session a build fetches again
+    replaces what is stored for it. On 2026-09-28 `stk_limit` no longer served three rows it had
+    served for 2026-08-28, each its security's only row in the year, and the build that fetched
+    that session again -- the daily command's incremental build, through its one-session overlap,
+    and equally a full rebuild -- was refused by `_refuse_to_drop_stored_subjects`: the new
+    partition names fewer securities than the stored one. A withdrawn row of a security with
+    other rows would have left the partition with no refusal and no record at all.
+
+    ## The rule
+
+    A stored row counts as withdrawn only when all of these hold (`withdrawn_subjects`):
+
+    1. it sits on one of `sessions`, the sessions this build fetched again -- rows on any other
+       session are carried or were never asked about, and this function never judges them;
+    2. `fetched`, the build's own answer for that session, lacks its key;
+    3. a second whole-session fetch of the same `(dataset, session)` -- one request per affected
+       session, asked through `refetch` -- lacks it too **and otherwise equals the first
+       answer**. A second answer that differs, including one that serves the row again, is what a
+       partial fetch looks like, and the year is refused naming both answers; nothing is
+       recorded and nothing is written.
+
+    A confirmed withdrawal is recorded as `withdrawn_after_publication` with the stored row's own
+    `event_time`, `available_time` and `ingested_time`, what the row said (`_row_numbers`), and
+    `confirmed_at` -- the build's stamp -- as its `revision_time`. Nothing is dropped here: the
+    upstream no longer serves the row, so the partition rebuilt from its answers cannot hold it.
+    What changes is that its absence is on the record and `released` lets the subject guard pass
+    a security whose **every** stored row went this way.
+
+    ## The stored rows are read un-gated, through `carry_stored_rows_forward`
+
+    One pass over the stored partition, for `carry_stored_rows_forward`'s own reason: nothing read
+    is answered with -- the rows are compared with the upstream's answer and the withdrawn ones are
+    copied into the record. The same pass notes every security with a stored row outside
+    `sessions`, which is what keeps such a security out of `released`.
+
+    `fetched` are the build's raw answers, before any reconciliation: a row the upstream serves
+    and a `V2-P6-013` rule then drops is served, not withdrawn.
+    """
+    refetched = frozenset(sessions)
+    coverage = store.read_coverage(dataset, year)
+    if not refetched or coverage is None:
+        return NO_WITHDRAWALS
+    zone = _resolve_timezone(date_timezone)
+    elsewhere: set[str] = set()
+
+    def on_a_refetched_session(row: Mapping[str, object]) -> bool:
+        day = cast(datetime, row[EVENT_TIME_COLUMN]).astimezone(zone).date()
+        if day in refetched:
+            return True
+        elsewhere.add(str(row[SUBJECT_COLUMN_NAME]))
+        return False
+
+    template = ColumnarPanelBatch(
+        provider_id=coverage.provider_id,
+        dataset=dataset,
+        kind=coverage.kind,
+        as_of=coverage.as_of,
+        fetched_at=coverage.fetched_at,
+        status="no_data",
+        no_data_reason=f"the stored {dataset} year={year} rows on the sessions fetched again",
+    )
+    stored = carry_stored_rows_forward(store, template, year=year, retain=on_a_refetched_session)
+    if stored.status != "success":
+        return NO_WITHDRAWALS
+    stored_keys = _row_keys(stored, date_column)
+    first: dict[date, set[str]] = {day: set() for day in refetched}
+    for batch in fetched:
+        if batch.status != "success":
+            continue
+        if batch.dataset != dataset:
+            raise PanelBatchError(
+                f"the fetch compared with the stored {dataset} rows is {batch.dataset}"
+            )
+        for subject, day in _row_keys(batch, date_column):
+            if day in first:
+                first[day].add(subject)
+    missing: dict[date, set[str]] = {}
+    for subject, day in stored_keys:
+        if day in first and subject not in first[day]:
+            missing.setdefault(day, set()).add(subject)
+    if not missing:
+        return NO_WITHDRAWALS
+
+    answers = refetch(tuple(sorted(missing)))
+    withdrawn: set[tuple[str, date]] = set()
+    for day in sorted(missing):
+        again = answers[day]
+        if again.dataset != dataset:
+            raise PanelBatchError(
+                f"the second fetch of {dataset} for {day.isoformat()} is {again.dataset}"
+            )
+        second = (
+            {subject for subject, served in _row_keys(again, date_column) if served == day}
+            if again.status == "success"
+            else set()
+        )
+        verdict = withdrawn_subjects(
+            stored={subject for subject, stored_day in stored_keys if stored_day == day},
+            first=first[day],
+            second=second,
+        )
+        if verdict is None:
+            raise PanelBatchError(
+                _withdrawal_refusal(dataset, day, sorted(missing[day]), first[day], second)
+            )
+        withdrawn |= {(subject, day) for subject in verdict}
+
+    positions = [index for index, key in enumerate(stored_keys) if key in withdrawn]
+    defects = tuple(
+        UpstreamDefect(
+            ts_code=stored_keys[index][0],
+            trade_date=stored_keys[index][1],
+            source_dataset=dataset,
+            kind=WITHDRAWN_KIND,
+            **_row_numbers(stored, index),  # type: ignore[arg-type]
+        )
+        for index in positions
+    )
+    kept = {subject for subject, day in stored_keys if (subject, day) not in withdrawn}
+    return Withdrawals(
+        defects=defects,
+        record=_defect_record(stored, positions, defects, confirmed_at=confirmed_at),
+        released=frozenset(
+            subject for subject, _ in withdrawn if subject not in elsewhere and subject not in kept
+        ),
+    )
+
+
+def _withdrawal_refusal(
+    dataset: str, day: date, missing: Sequence[str], first: set[str], second: set[str]
+) -> str:
+    """Both answers for a `(dataset, session)` whose absence the second fetch did not confirm."""
+    back = sorted(second & set(missing))
+    extra = sorted(second - first - set(missing))
+    short = sorted(first - second)
+    differences = [
+        f"serves {_subject_sample(back)} again" if back else "",
+        f"adds {_subject_sample(extra)}" if extra else "",
+        f"lacks {_subject_sample(short)}" if short else "",
+    ]
+    return (
+        f"the stored {dataset} partition holds {_subject_sample(missing)} on "
+        f"{day.isoformat()}, a session this build fetched again. The first fetch of that session "
+        f"served {len(first)} securities without them; the second fetch served {len(second)} "
+        f"and {', and '.join(part for part in differences if part)}. The two answers disagree, so "
+        "the absence is not confirmed -- a partial fetch looks exactly like this -- and nothing "
+        "is recorded as withdrawn or written: re-run the build"
+    )
+
+
+def carry_withdrawals_forward(
+    store: PanelStore,
+    fetched: Mapping[str, Sequence[ColumnarPanelBatch]],
+    *,
+    sources: frozenset[str],
+    year: int,
+    through: date,
+    observed_at: datetime,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> ColumnarPanelBatch | None:
+    """The stored `withdrawn_after_publication` records of `sources` this build keeps
+    (`V2-P6-016`).
+
+    Every other `upstream_defects` row is rebuilt from the drops a build performs, and a build
+    cannot perform this one again: the withdrawn row left the partition, so there is nothing
+    stored to find missing a second time. So these records are **carried forward by every later
+    build, full or incremental**, through `through` (the build's last session) -- re-observed at
+    `observed_at` like every carried row, `ingested_time` becoming `max(observed_at,
+    available_time)`, and keeping their `revision_time`, the instant the withdrawal was confirmed.
+
+    **A record whose row `fetched` serves again is retired**: the upstream re-published it, the
+    row is stored again from that answer, and the record is not carried. `fetched` are the
+    build's raw answers per source dataset; a record on a session the build did not fetch again
+    cannot be retired, which is the premise of every carried session (`carry_stored_sessions_
+    forward`). Each source's served keys are collected only when a record of it is stored.
+    """
+    served: dict[str, frozenset[tuple[str, date]]] = {}
+
+    def served_again(source: str, key: tuple[str, date]) -> bool:
+        if source not in served:
+            column = ADJUSTMENT_DATE_COLUMN if source == ADJ_FACTOR_DATASET else PRICE_DATE_COLUMN
+            served[source] = frozenset(
+                key
+                for batch in fetched.get(source, ())
+                if batch.status == "success"
+                for key in _row_keys(batch, column)
+            )
+        return key in served[source]
+
+    def keep(row: Mapping[str, object]) -> bool:
+        source = str(row[SOURCE_DATASET_COLUMN])
+        if source not in sources or row[DEFECT_KIND_COLUMN] != WITHDRAWN_KIND:
+            return False
+        day = date.fromisoformat(str(row[PRICE_DATE_COLUMN]))
+        return not served_again(source, (str(row[SUBJECT_COLUMN_NAME]), day))
+
+    carried = carry_stored_sessions_forward(
+        store,
+        (),
+        dataset=UPSTREAM_DEFECTS_DATASET,
+        year=year,
+        before=through + timedelta(days=1),
+        observed_at=observed_at,
+        keep=keep,
+        date_timezone=date_timezone,
+    )
+    return carried[0] if carried else None
+
+
 def write_upstream_defects(
     store: PanelStore,
     record: ColumnarPanelBatch | None,
@@ -4103,6 +4396,12 @@ def write_upstream_defects(
     rewritten without this one's, and with none left it is removed
     (`PanelStore.remove_partition`), because an empty partition cannot be written and a stale
     one would claim a drop the stored data no longer reflects.
+
+    **One kind is carried rather than rebuilt** (`V2-P6-016`): `withdrawn_after_publication`
+    records a row the upstream stopped serving, and no later build can find that row missing
+    again -- it left the partition -- so the callers put the stored records back in `record`
+    through `carry_withdrawals_forward`, which retires one only when the upstream serves its row
+    again. This function stays a replace of the owned rows either way.
 
     Returns the partition written, or `None` when nothing is left to store.
     """
@@ -4315,26 +4614,41 @@ def _without_rows(
 
 
 def _defect_record(
-    source: ColumnarPanelBatch, positions: Sequence[int], defects: Sequence[UpstreamDefect]
+    source: ColumnarPanelBatch,
+    positions: Sequence[int],
+    defects: Sequence[UpstreamDefect],
+    *,
+    confirmed_at: datetime | None = None,
 ) -> ColumnarPanelBatch | None:
-    """The `upstream_defects` batch for `defects`, each carrying its dropped row's clocks."""
+    """The `upstream_defects` batch for `defects`, each carrying its dropped row's clocks.
+
+    `confirmed_at` is `withdrawn_after_publication`'s (`V2-P6-016`): the record's `revision_time`
+    becomes the instant the withdrawal was confirmed rather than the stored row's, so the record
+    is not visible to a read before the build that established it. The other three clocks stay
+    the stored row's.
+    """
     if not defects:
         return None
     timeline = source.timeline
+    clocks = {
+        name: tuple(getattr(timeline, name)[index] for index in positions)
+        for name in CLOCK_COLUMN_NAMES
+    }
+    as_of, fetched_at = source.as_of, source.fetched_at
+    if confirmed_at is not None:
+        clocks["revision_time"] = tuple(
+            max(confirmed_at, revised) for revised in clocks["revision_time"]
+        )
+        as_of, fetched_at = max(as_of, confirmed_at), max(fetched_at, confirmed_at)
     return ColumnarPanelBatch(
         provider_id=source.provider_id,
         dataset=UPSTREAM_DEFECTS_DATASET,
         kind=UPSTREAM_DEFECTS_DATASET,
-        as_of=source.as_of,
-        fetched_at=source.fetched_at,
+        as_of=as_of,
+        fetched_at=fetched_at,
         status="success",
         subjects=tuple(defect.ts_code for defect in defects),
-        timeline=TimelineColumns(
-            **{
-                name: tuple(getattr(timeline, name)[index] for index in positions)
-                for name in CLOCK_COLUMN_NAMES
-            }
-        ),
+        timeline=TimelineColumns(**clocks),
         columns=(
             PanelColumn(
                 PRICE_DATE_COLUMN,

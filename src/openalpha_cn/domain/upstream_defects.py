@@ -50,6 +50,20 @@ row. Nothing here edits a bar or a valuation, fills a gap from another dataset o
 provider, or invents a value. A disagreement no rule names is still refused, by the same guard
 as before.
 
+## A row the upstream withdrew (`V2-P6-016`)
+
+The rules above drop a row the upstream *serves* wrong. The live check of 2026-09-28 found the
+other direction: `stk_limit` stopped serving three rows it had served for 2026-08-28 (funds
+`158008.SZ`, `159096.SZ` and `561730.SH`, each with no other row in the stored year), and the
+incremental build that fetched that session again was refused by the subject guard -- as a full
+rebuild of the stored year was. `withdrawn_after_publication` is that case, and its precondition
+is the three-part one `withdrawn_subjects` states: a stored row on a session the build fetched
+again, absent from the upstream's answer, and absent again from a second whole-session answer that
+is otherwise the first one. Nothing is dropped by the rule -- the upstream no longer serves the
+row, so a rebuilt partition cannot hold it -- the rule only *records* that, with the stored row's
+own `event_time`, `available_time` and `ingested_time` and its confirmation instant as the
+record's `revision_time`, so the record is not knowable before the build that confirmed it.
+
 Every dropped row is recorded in the `upstream_defects` panel dataset
 (`panel_ingest.UPSTREAM_DEFECTS_DATASET`), one partition per year,
 with the values that disagreed and the dropped row's own four clocks, so a reader can see
@@ -59,7 +73,7 @@ Pure rules and a row decoder only: `panel_ingest` owns the batches, the re-fetch
 partition, and this module imports no numerical or storage library (hard rule 2).
 """
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Sequence, Set
 from dataclasses import dataclass
 from datetime import date
 from math import isfinite
@@ -72,7 +86,7 @@ from openalpha_cn.domain.daily_prices import (
     PRICE_DATE_COLUMN,
 )
 from openalpha_cn.domain.panel_batch import SUBJECT_COLUMN_NAME
-from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET
+from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET, SUSPENSION_DATASET
 
 DefectKind = Literal[
     "valuation_without_bar",
@@ -82,17 +96,25 @@ DefectKind = Literal[
     "valuation_contradicts_unconfirmed_bar",
     "limit_placeholder_on_halt",
     "bar_before_listing",
+    "withdrawn_after_publication",
 ]
-"""The named rules. See `close_disagreement_kind`, `valuation_placeholder_kind` and
-`limit_placeholder_kind`."""
+"""The named rules. See `close_disagreement_kind`, `valuation_placeholder_kind`,
+`limit_placeholder_kind` and `withdrawn_subjects`."""
 
 DEFECT_KINDS: Final[frozenset[str]] = frozenset(get_args(DefectKind))
 
 DEFECT_SOURCE_DATASETS: Final[frozenset[str]] = frozenset(
-    {DAILY_DATASET, DAILY_BASIC_DATASET, ADJ_FACTOR_DATASET, PRICE_LIMIT_DATASET}
+    {
+        DAILY_DATASET,
+        DAILY_BASIC_DATASET,
+        ADJ_FACTOR_DATASET,
+        PRICE_LIMIT_DATASET,
+        SUSPENSION_DATASET,
+    }
 )
-"""The datasets a rule may drop a row from. `daily` and `adj_factor` only under
-`bar_before_listing`; no other rule drops a bar."""
+"""The datasets a record may name. `daily` and `adj_factor` only under `bar_before_listing` or
+`withdrawn_after_publication`, and `suspend_d` only under the latter: no rule drops a bar or a
+halt the upstream still serves."""
 
 SOURCE_DATASET_COLUMN: Final[str] = "source_dataset"
 DEFECT_KIND_COLUMN: Final[str] = "defect_kind"
@@ -139,6 +161,8 @@ the two shapes of a contradicted valuation apart:
 - `bar_before_listing`: `list_date` (ISO), from the stored registry, and the dropped row's own
   close (`bar_close` for `daily`, `valuation_close` for `daily_basic`) or band (`stk_limit`);
   an `adj_factor` row records only the date.
+- `withdrawn_after_publication`: the withdrawn stored row's own close or band, in the same
+  columns `bar_before_listing` uses; an `adj_factor` or `suspend_d` row records only the date.
 """
 
 UPSTREAM_DEFECT_NUMBER_COLUMNS: Final[tuple[str, ...]] = UPSTREAM_DEFECT_DATA_COLUMNS[3:8]
@@ -276,6 +300,29 @@ def limit_placeholder_kind(
     if up_limit == 0.0 and down_limit == 0.0 and halted:
         return "limit_placeholder_on_halt"
     return None
+
+
+def withdrawn_subjects(
+    *, stored: Set[str], first: Set[str], second: Set[str]
+) -> frozenset[str] | None:
+    """The stored securities of one `(dataset, session)` the upstream has withdrawn, or `None`.
+
+    **`withdrawn_after_publication`** (`V2-P6-016`). `stored` are the securities the stored
+    partition holds on a session this build fetched again, `first` the securities the build's
+    fetch of that session served, and `second` those a second whole-session fetch served -- asked
+    only because `stored` holds a security `first` lacks, so it is one extra request per affected
+    `(dataset, session)` and none otherwise, `V2-P6-013`'s "a refetch must reproduce it" applied
+    to an absence.
+
+    A security counts as withdrawn only when both answers lack it **and the two answers are the
+    same answer**: `second == first`. A second answer that differs from the first in any security
+    -- serving the missing one again, or anything else -- is what a partial fetch looks like, so
+    this returns `None` and the caller refuses, naming both answers, rather than choosing one.
+    An empty set is "nothing stored is missing"; the caller does not ask for a second fetch then.
+    """
+    if set(second) != set(first):
+        return None
+    return frozenset(set(stored) - set(first))
 
 
 def before_listing(*, trade_date: date, list_date: date | None) -> bool:

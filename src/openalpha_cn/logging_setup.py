@@ -115,6 +115,12 @@ _ALLOWED_EXTRA_FIELDS = frozenset(
         "from_version",
         "migration_version",
         "migration_name",
+        # `panel_rows_withdrawn` (`V2-P6-016`): a year, a row count, and the securities and
+        # sessions as comma-joined codes and ISO dates -- public identifiers, never a credential.
+        "year",
+        "row_count",
+        "subjects",
+        "sessions",
     }
 )
 

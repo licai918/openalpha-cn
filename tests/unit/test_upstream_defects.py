@@ -63,7 +63,9 @@ from openalpha_cn.domain.upstream_defects import (
     close_disagreement_kind,
     limit_placeholder_kind,
     repeats_previous_close,
+    upstream_defects_from_panel_rows,
     valuation_placeholder_kind,
+    withdrawn_subjects,
 )
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_doctor import panel_health_report
@@ -1663,3 +1665,36 @@ def test_a_valuation_placeholder_is_a_defect_only_where_there_is_no_bar() -> Non
     )
     assert valuation_placeholder_kind(has_bar=True, halted=True) is None
     assert valuation_placeholder_kind(has_bar=True, halted=False) is None
+
+
+def test_a_withdrawal_needs_two_answers_that_agree_and_both_lack_the_row() -> None:
+    """`V2-P6-016`'s rule: absent from the first answer, absent from a second that is otherwise
+    the first. Any disagreement between the two answers is `None`, never a guess."""
+    stored, first = {"A", "B", "C"}, {"A", "B"}
+    assert withdrawn_subjects(stored=stored, first=first, second={"A", "B"}) == {"C"}
+    assert withdrawn_subjects(stored=stored, first=first, second={"A", "B", "C"}) is None
+    assert withdrawn_subjects(stored=stored, first=first, second={"A"}) is None
+    assert withdrawn_subjects(stored=stored, first=first, second={"A", "B", "D"}) is None
+    assert withdrawn_subjects(stored={"A"}, first={"A"}, second={"A"}) == frozenset()
+
+
+def test_the_withdrawal_kind_and_a_halt_source_read_back() -> None:
+    (defect,) = upstream_defects_from_panel_rows(
+        [
+            (
+                "561730.SH",
+                "2026-08-28",
+                SUSPENSION_DATASET,
+                "withdrawn_after_publication",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+        ]
+    )
+    assert defect.kind == "withdrawn_after_publication"
+    assert defect.source_dataset == SUSPENSION_DATASET

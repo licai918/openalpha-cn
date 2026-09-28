@@ -68,6 +68,7 @@ from openalpha_cn.domain.daily_prices import (
     DAILY_AVAILABILITY_TIME,
     DAILY_BASIC_DATASET,
     DAILY_DATASET,
+    PRICE_DATE_COLUMN,
     PriceDataError,
 )
 from openalpha_cn.domain.factor import FactorError, FactorNote
@@ -120,7 +121,11 @@ from openalpha_cn.domain.trading_calendar import (
     TradingCalendar,
     TradingCalendarError,
 )
-from openalpha_cn.domain.upstream_defects import SOURCE_DATASET_COLUMN, UpstreamDefect
+from openalpha_cn.domain.upstream_defects import (
+    DEFECT_KIND_COLUMN,
+    SOURCE_DATASET_COLUMN,
+    UpstreamDefect,
+)
 from openalpha_cn.evidence.service import build_provider_evidence, parse_serialized_evidence
 from openalpha_cn.factor_view import (
     ACCEPTANCE_STEP,
@@ -187,8 +192,11 @@ from openalpha_cn.panel_gate import (
 )
 from openalpha_cn.panel_ingest import (
     UPSTREAM_DEFECTS_DATASET,
+    WITHDRAWN_KIND,
+    Withdrawals,
     _sessions_published_through,
     carry_stored_sessions_forward,
+    carry_withdrawals_forward,
     combine_defect_records,
     keep_panel_subjects,
     load_first_daily_bar,
@@ -201,6 +209,7 @@ from openalpha_cn.panel_ingest import (
     reconcile_limit_placeholders,
     reconcile_pre_listing_rows,
     reconcile_price_disagreements,
+    reconcile_withdrawals,
     session_publication_instant,
     split_panel_batch_by_year,
     write_adjustment_factors,
@@ -3078,12 +3087,14 @@ inside the window of its *first* announcement, so no later window can stand in f
 INCREMENTAL_DEFECT_SOURCES: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
     {
         ADJ_FACTOR_DATASET: frozenset({ADJ_FACTOR_DATASET}),
-        "price": frozenset({DAILY_DATASET, DAILY_BASIC_DATASET}),
+        "price": frozenset({DAILY_DATASET, DAILY_BASIC_DATASET, SUSPENSION_DATASET}),
         PRICE_LIMIT_DATASET: frozenset({PRICE_LIMIT_DATASET}),
     }
 )
-"""Which `upstream_defects` rows each incremental target owns: exactly the `source_datasets` its
-`write_upstream_defects` call passes, so the rows it carries are the rows it would rebuild."""
+"""Which `upstream_defects` rows each session-scoped target owns: exactly the `source_datasets`
+its `write_upstream_defects` call passes, so the rows it carries are the rows it would rebuild.
+`suspend_d` is the price target's since `V2-P6-016`, whose `withdrawn_after_publication` is the
+one rule that records a halt."""
 
 _COMPRESSED_CENSUS: Final[frozenset[str]] = frozenset({ADJ_FACTOR_DATASET})
 """Stored partitions whose coverage census holds only load-bearing sessions, so a hole in them
@@ -3293,9 +3304,175 @@ def _carried_defects(
         year=year,
         before=before,
         observed_at=now,
+        # `withdrawn_after_publication` is carried by `_carried_withdrawals`, on every session.
+        keep=lambda row: (
+            row[SOURCE_DATASET_COLUMN] in sources and row[DEFECT_KIND_COLUMN] != WITHDRAWN_KIND
+        ),
+    )
+    return carried[0] if carried else None
+
+
+def _carried_withdrawals(
+    store: PanelStore,
+    *,
+    target: str,
+    fetched: Mapping[str, Sequence[ColumnarPanelBatch]],
+    year: int,
+    sessions: Sequence[date],
+    now: datetime,
+) -> ColumnarPanelBatch | None:
+    """`target`'s stored `withdrawn_after_publication` records, less those `fetched` retires
+    (`V2-P6-016`; `panel_ingest.carry_withdrawals_forward`).
+
+    Full and incremental builds alike: a withdrawn row is not in the stored partition to be found
+    missing again, so no build rebuilds its record from a drop. Computed before the target writes
+    anything, so a record this build adds is never read back as a carried one.
+    """
+    if not sessions:
+        return None
+    return carry_withdrawals_forward(
+        store,
+        fetched,
+        sources=INCREMENTAL_DEFECT_SOURCES[target],
+        year=year,
+        through=sessions[-1],
+        observed_at=now,
+    )
+
+
+def _stored_defects(
+    store: PanelStore, *, target: str, year: int, sessions: Sequence[date], now: datetime
+) -> ColumnarPanelBatch | None:
+    """Every stored `upstream_defects` row `target` owns, re-observed at `now` (`V2-P6-016`).
+
+    Put back beside a withdrawal the price target records before it stores `suspend_d`, so that
+    early write replaces none of the target's other records: they stay until the year's record
+    is rebuilt after the reconciliation, as a build refused in between would leave them.
+    """
+    if not sessions:
+        return None
+    sources = INCREMENTAL_DEFECT_SOURCES[target]
+    carried = carry_stored_sessions_forward(
+        store,
+        (),
+        dataset=UPSTREAM_DEFECTS_DATASET,
+        year=year,
+        before=sessions[-1] + timedelta(days=1),
+        observed_at=now,
         keep=lambda row: row[SOURCE_DATASET_COLUMN] in sources,
     )
     return carried[0] if carried else None
+
+
+def _refuse_a_withdrawn_closing_anchor(
+    found: Withdrawals, fetched: Sequence[ColumnarPanelBatch], *, rebuild: str
+) -> None:
+    """Refuse an incremental `adj_factor` build that a withdrawn row leaves unable to equal the
+    full rebuild (`V2-P6-016`).
+
+    The stored factor partition is compressed: a security's rows are its first observation, its
+    changes and its **last** observation. A withdrawn row on the overlap session is often that
+    last one. When the security still has rows in the slice, the slice supplies its new closing
+    anchor exactly as a full rebuild does. When it has none, the full rebuild's closing anchor is
+    the security's last served session before the withdrawn one -- a row the compressed partition
+    never kept -- so the incremental build cannot reproduce it and is refused, naming the full
+    rebuild. A security every stored row of which was withdrawn (`released`) is gone from both
+    builds alike and needs no refusal.
+    """
+    if not found.defects:
+        return
+    served = {
+        subject for batch in fetched if batch.status == "success" for subject in batch.subjects
+    }
+    anchors = sorted(
+        {
+            defect.ts_code
+            for defect in found.defects
+            if defect.ts_code not in found.released and defect.ts_code not in served
+        }
+    )
+    if anchors:
+        raise _refuse_incremental(
+            rebuild,
+            f"the upstream withdrew the stored {ADJ_FACTOR_DATASET} closing observation of "
+            f"{anchors} and serves no later row of them in this slice; the full rebuild closes "
+            "their step function on their last served session before it, which the compressed "
+            "partition does not hold",
+        )
+
+
+def _withdrawals(
+    store: PanelStore,
+    provider: TushareProvider,
+    *,
+    dataset: str,
+    fetched: Sequence[ColumnarPanelBatch],
+    sessions: Sequence[date],
+    year: int,
+    now: datetime,
+    confirmed: list[UpstreamDefect] | None,
+    date_column: str = PRICE_DATE_COLUMN,
+) -> Withdrawals:
+    """`panel_ingest.reconcile_withdrawals` for one dataset, with its confirming requests
+    budgeted and what it found reported (`V2-P6-016`).
+
+    `sessions` are the sessions this build fetched -- the incremental slice, or the whole year --
+    and `fetched` their raw answers. The confirming requests are the same whole-market request
+    each of those sessions was fetched with, one per session that lost a stored row, and are
+    stated on a `BUDGET` line before the first goes out. A confirmed withdrawal is logged as the
+    structured event `panel_rows_withdrawn`, echoed on stderr, and appended to `confirmed` for
+    the build's JSON report.
+    """
+
+    def refetch(days: tuple[date, ...]) -> dict[date, ColumnarPanelBatch]:
+        _echo_budget(
+            f"withdrawal-confirmation {dataset}",
+            len(days),
+            "requests",
+            f"{len(days)} session(s) on which the store holds a row this build's fetch lacked; "
+            "one whole-session request each confirms the absence or refuses the year",
+        )
+        answers: dict[date, ColumnarPanelBatch] = {}
+        for day in days:
+            typer.echo(
+                f"REFETCH {day.isoformat()} whole session ({dataset}, confirming a withdrawal)",
+                err=True,
+            )
+            answers[day] = _fetch_panel(provider, dataset, as_of=_session_as_of(day))
+        return answers
+
+    found = reconcile_withdrawals(
+        store,
+        fetched,
+        dataset=dataset,
+        year=year,
+        sessions=sessions,
+        refetch=refetch,
+        confirmed_at=now,
+        date_column=date_column,
+    )
+    if found.defects:
+        subjects = sorted({defect.ts_code for defect in found.defects})
+        days = sorted({defect.trade_date.isoformat() for defect in found.defects})
+        logger.info(
+            "panel_rows_withdrawn",
+            extra={
+                "dataset": dataset,
+                "year": year,
+                "row_count": len(found.defects),
+                "subjects": ",".join(subjects),
+                "sessions": ",".join(days),
+            },
+        )
+        typer.echo(
+            f"WITHDRAWN {dataset} year={year}: {len(found.defects)} stored row(s) the upstream no "
+            f"longer serves, confirmed by a second fetch and recorded as {WITHDRAWN_KIND}: "
+            f"{subjects[:10]}{' and more' if len(subjects) > 10 else ''} on {', '.join(days)}",
+            err=True,
+        )
+        if confirmed is not None:
+            confirmed.extend(found.defects)
+    return found
 
 
 def _full_rebuild_command(
@@ -3379,6 +3556,7 @@ def _build_price_panel(
     delistings: Mapping[str, date],
     exchange: str,
     fetch_from: date | None = None,
+    withdrawn: list[UpstreamDefect] | None = None,
 ) -> str:
     """Fetch the three price datasets session by session, then write them in dependency order.
 
@@ -3401,6 +3579,14 @@ def _build_price_panel(
     refused. The drop is recorded in `upstream_defects` before `write_daily_panel` runs, so a
     later refusal still leaves the record of what the upstream got wrong, which is true whatever
     happens to the year. Anything unexplained is refused exactly as before.
+
+    **A stored row the upstream no longer serves is recorded, not refused** (`V2-P6-016`), for all
+    three datasets: `panel_ingest.reconcile_withdrawals` confirms each absence with one more
+    whole-session request and records it as `withdrawn_after_publication`, and the writers' subject
+    guards release a security only when every stored row of it went that way. `suspend_d` is
+    stored before the year's defect record can be rebuilt -- the halt corpus that rebuild needs is
+    read from it -- so a halt withdrawal is written into the record first, beside every record
+    already stored, and the row leaves the partition only after its evidence is on disk.
     """
     if not sessions:
         raise _panel_fail(
@@ -3409,9 +3595,41 @@ def _build_price_panel(
             f"{now.isoformat()}, so there is no price year to build and no last session to judge "
             "a close disagreement against",
         )
-    collected = _session_batches(
-        provider, PANEL_BUILD_TARGETS["price"], _incremental_slice(sessions, fetch_from)
+    price_slice = _incremental_slice(sessions, fetch_from)
+    collected = _session_batches(provider, PANEL_BUILD_TARGETS["price"], price_slice)
+    # `V2-P6-016`: decided on the raw answers, before the carry and before anything is written.
+    carried_withdrawals = _carried_withdrawals(
+        store, target="price", fetched=collected, year=year, sessions=sessions, now=now
     )
+    withdrawals = {
+        name: _withdrawals(
+            store,
+            provider,
+            dataset=name,
+            fetched=collected[name],
+            sessions=price_slice,
+            year=year,
+            now=now,
+            confirmed=withdrawn,
+        )
+        for name in PANEL_BUILD_TARGETS["price"]
+    }
+    carried_defects = _carried_defects(store, target="price", year=year, before=fetch_from, now=now)
+    halt_record = withdrawals[SUSPENSION_DATASET].record
+    if halt_record is not None:
+        # The halt partition is written next and the year's record only after the reconciliation
+        # it feeds, so the withdrawal goes on the record now, beside every stored record.
+        noted = write_upstream_defects(
+            store,
+            combine_defect_records(
+                _stored_defects(store, target="price", year=year, sessions=sessions, now=now),
+                halt_record,
+            ),
+            year=year,
+            source_datasets=INCREMENTAL_DEFECT_SOURCES["price"],
+        )
+        if noted is not None:
+            written.append(noted)
     if fetch_from is not None:
         # `V2-P6-003`: every session before the slice comes back out of the store, in front of
         # the fetched ones, and everything below runs on the whole year exactly as a full build.
@@ -3423,7 +3641,11 @@ def _build_price_panel(
         }
     halt_batches = collected[SUSPENSION_DATASET]
     if halt_batches:
-        written.append(write_suspensions(store, halt_batches))
+        written.append(
+            write_suspensions(
+                store, halt_batches, released=withdrawals[SUSPENSION_DATASET].released
+            )
+        )
     corpus = None
     if halts:
         if not halt_batches:
@@ -3488,13 +3710,15 @@ def _build_price_panel(
     recorded = write_upstream_defects(
         store,
         combine_defect_records(
-            _carried_defects(store, target="price", year=year, before=fetch_from, now=now),
+            carried_defects,
+            carried_withdrawals,
+            *(found.record for found in withdrawals.values()),
             listed_bars.record,
             listed_valuations.record,
             reconciled.record,
         ),
         year=year,
-        source_datasets=frozenset({DAILY_DATASET, DAILY_BASIC_DATASET}),
+        source_datasets=INCREMENTAL_DEFECT_SOURCES["price"],
     )
     if recorded is not None:
         written.append(recorded)
@@ -3505,6 +3729,7 @@ def _build_price_panel(
             fundamentals=reconciled.batches,
             calendar=calendar,
             halts=corpus,
+            released={name: found.released for name, found in withdrawals.items()},
         )
     )
     return "corroborated" if corpus is not None else "waived"
@@ -4645,6 +4870,7 @@ def _build_panel(
     registry_cache: dict[object, RegistryDates] | None = None,
     incremental: bool = False,
     rebuild: str = "",
+    withdrawn: list[UpstreamDefect] | None = None,
 ) -> tuple[tuple[date, ...], str]:
     """Run every requested **year-scoped** target in `PANEL_BUILD_TARGETS`' declared order.
 
@@ -4732,9 +4958,33 @@ def _build_panel(
     if ADJ_FACTOR_DATASET in targets:
         assert calendar is not None  # guaranteed by `_NEEDS_STORED_CALENDAR` above
         factor_start = starts.get(ADJ_FACTOR_DATASET)
-        fetched_factors = _session_batches(
-            provider, (ADJ_FACTOR_DATASET,), _incremental_slice(sessions, factor_start)
-        )[ADJ_FACTOR_DATASET]
+        factor_slice = _incremental_slice(sessions, factor_start)
+        fetched_factors = _session_batches(provider, (ADJ_FACTOR_DATASET,), factor_slice)[
+            ADJ_FACTOR_DATASET
+        ]
+        # `V2-P6-016`: the stored rows the upstream withdrew, confirmed and recorded, and the
+        # records of earlier withdrawals, carried -- both decided before anything is written.
+        carried_factor_withdrawals = _carried_withdrawals(
+            store,
+            target=ADJ_FACTOR_DATASET,
+            fetched={ADJ_FACTOR_DATASET: fetched_factors},
+            year=year,
+            sessions=sessions,
+            now=now,
+        )
+        factor_withdrawals = _withdrawals(
+            store,
+            provider,
+            dataset=ADJ_FACTOR_DATASET,
+            fetched=fetched_factors,
+            sessions=factor_slice,
+            year=year,
+            now=now,
+            confirmed=withdrawn,
+            date_column=ADJUSTMENT_DATE_COLUMN,
+        )
+        if factor_start is not None:
+            _refuse_a_withdrawn_closing_anchor(factor_withdrawals, fetched_factors, rebuild=rebuild)
         factors = reconcile_pre_listing_rows(
             fetched_factors
             if factor_start is None
@@ -4768,6 +5018,8 @@ def _build_panel(
                 _carried_defects(
                     store, target=ADJ_FACTOR_DATASET, year=year, before=factor_start, now=now
                 ),
+                carried_factor_withdrawals,
+                factor_withdrawals.record,
                 factors.record,
             ),
             year=year,
@@ -4777,7 +5029,11 @@ def _build_panel(
             factor_refs.append(recorded)
         factor_refs.append(
             write_adjustment_factors(
-                store, factors.batches, calendar=calendar, census_from=factor_start
+                store,
+                factors.batches,
+                calendar=calendar,
+                census_from=factor_start,
+                released=factor_withdrawals.released,
             )
         )
     if "price" in targets:
@@ -4795,15 +5051,35 @@ def _build_panel(
             delistings=delistings,
             exchange=exchange,
             fetch_from=starts.get("price"),
+            withdrawn=withdrawn,
         )
     if PRICE_LIMIT_DATASET in targets:
         assert calendar is not None  # guaranteed by `_NEEDS_STORED_CALENDAR` above
         # `V2-P6-013`: the upstream's zero/zero band on a whole-day halt is dropped and recorded
         # before the writer sees it; every other zero upper limit is refused by name.
         limit_start = starts.get(PRICE_LIMIT_DATASET)
-        fetched_limits = _session_batches(
-            provider, (PRICE_LIMIT_DATASET,), _incremental_slice(sessions, limit_start)
-        )[PRICE_LIMIT_DATASET]
+        limit_slice = _incremental_slice(sessions, limit_start)
+        fetched_limits = _session_batches(provider, (PRICE_LIMIT_DATASET,), limit_slice)[
+            PRICE_LIMIT_DATASET
+        ]
+        carried_limit_withdrawals = _carried_withdrawals(
+            store,
+            target=PRICE_LIMIT_DATASET,
+            fetched={PRICE_LIMIT_DATASET: fetched_limits},
+            year=year,
+            sessions=sessions,
+            now=now,
+        )
+        limit_withdrawals = _withdrawals(
+            store,
+            provider,
+            dataset=PRICE_LIMIT_DATASET,
+            fetched=fetched_limits,
+            sessions=limit_slice,
+            year=year,
+            now=now,
+            confirmed=withdrawn,
+        )
         listed_limits = reconcile_pre_listing_rows(
             fetched_limits
             if limit_start is None
@@ -4827,6 +5103,8 @@ def _build_panel(
                 _carried_defects(
                     store, target=PRICE_LIMIT_DATASET, year=year, before=limit_start, now=now
                 ),
+                carried_limit_withdrawals,
+                limit_withdrawals.record,
                 listed_limits.record,
                 limits.record,
             ),
@@ -4835,7 +5113,11 @@ def _build_panel(
         )
         if recorded is not None:
             limit_refs.append(recorded)
-        limit_refs.append(write_price_limits(store, limits.batches, calendar=calendar))
+        limit_refs.append(
+            write_price_limits(
+                store, limits.batches, calendar=calendar, released=limit_withdrawals.released
+            )
+        )
     if NAMECHANGE_DATASET in targets:
         written.setdefault(NAMECHANGE_DATASET, []).append(
             write_name_history(
@@ -5302,7 +5584,9 @@ _BUILD_INCREMENTAL_HELP = (
     "year the slice cannot extend into that result -- a gap, a horizon past this build's, a "
     "listing the registry has since moved -- is refused before anything is fetched, with the "
     "full build to run instead. The other targets are one request a year or a whole-year sweep "
-    "and run as they always do. See `_incremental_start`."
+    "and run as they always do. See `_incremental_start`. A stored row the upstream no longer "
+    "serves on a session fetched again -- full build or incremental -- costs one more request "
+    "for that session and, confirmed, is recorded as withdrawn_after_publication (V2-P6-016)."
 )
 
 
@@ -5386,6 +5670,18 @@ def panel_build(
     5,500 securities, all five session-scoped datasets): 27 requests instead of 952 and 117s of
     CPU against the full build's 112s -- the saving is the network, which is where a whole-year
     `price` build spends its ~1,000--2,374s.
+
+    **A stored row the upstream withdrew is recorded, not refused** (`V2-P6-016`). The overlap
+    session is fetched again, and so is every session of a full build; a stored row on one of
+    them that the answer lacks costs one more whole-session request, and when that second answer
+    is the first one again the row is recorded as `withdrawn_after_publication`
+    (`panel_ingest.reconcile_withdrawals`) and the subject guard lets its security go only if
+    every stored row of it went that way. A second answer that differs refuses the year. The
+    records are carried by every later build and retired when the row is served again, so the
+    two builds still agree byte for byte; the confirmed rows are the JSON report's
+    `withdrawals`. One exception, `_refuse_a_withdrawn_closing_anchor`: a compressed
+    `adj_factor` year whose withdrawn row closed a security that the slice no longer serves is
+    refused with the full build.
 
     **Two phases, and the second is not an optimisation.** The year loop runs the ten year-scoped
     targets; `_build_span_targets` then runs the three in `PANEL_BUILD_SPAN_TARGETS` once for the
@@ -5480,6 +5776,7 @@ def panel_build(
             )
             fetched = year_targets - resumed
             written: dict[str, list[PartitionRef]] = {}
+            withdrawn: list[UpstreamDefect] = []
             sessions: tuple[date, ...] = covered
             halt_state = "resumed" if resumed and not fetched else "not-applicable"
             try:
@@ -5496,6 +5793,7 @@ def panel_build(
                         now=now,
                         registry_cache=registry_cache,
                         incremental=incremental,
+                        withdrawn=withdrawn,
                         rebuild=_full_rebuild_command(
                             runtime_dir,
                             year=one_year,
@@ -5547,6 +5845,12 @@ def panel_build(
                     # named rule that dropped it -- the year's whole `upstream_defects` record
                     # whenever this build wrote it, empty otherwise.
                     "defects": defects,
+                    # `V2-P6-016`: the stored rows this build found the upstream to have
+                    # withdrawn and recorded as such; earlier ones are carried in `defects`.
+                    "withdrawals": {
+                        "count": len(withdrawn),
+                        "subjects": sorted({defect.ts_code for defect in withdrawn}),
+                    },
                 }
             )
 
