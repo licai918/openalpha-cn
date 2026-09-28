@@ -629,6 +629,11 @@ NUMBERS_MEANING_SOMETHING_ELSE: Final[tuple[tuple[Path, str, str], ...]] = (
     ),
     (
         SRC / "panel_ingest.py",
+        "roadmap section 11",
+        "a section number",
+    ),
+    (
+        SRC / "panel_ingest.py",
         "price loaders share this one door",
         "the door this sentence is about, not a count",
     ),

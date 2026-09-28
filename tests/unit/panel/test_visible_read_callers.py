@@ -111,6 +111,9 @@ FILTERED_READ_REACHERS: dict[str, frozenset[str]] = {
             # row carries its dropped row's own `daily_close` clocks, so it takes
             # `_read_visible_event_dated_rows` with `load_suspensions`' census bound.
             "load_upstream_defects",
+            # `V2-P6-013` round 5: one security's first stored bar of a year, the year-end
+            # witness for a disputed close -- one subject-filtered read, not a market walk.
+            "load_first_daily_bar",
         }
     ),
 }
@@ -588,7 +591,13 @@ def test_the_closure_follows_the_hop_the_file_scoped_allowlist_missed() -> None:
         fn for fn, node in _defined_functions(tree).items() if FILTERED_READ in _called_names(node)
     }
 
-    assert direct == {"_read_visible_price_session", "_read_visible_event_dated_rows"}
+    # A third direct site since `V2-P6-013`: `load_first_daily_bar`'s one subject-filtered read,
+    # which is a door of its own rather than a session or an event-dated year.
+    assert direct == {
+        "_read_visible_price_session",
+        "_read_visible_event_dated_rows",
+        "load_first_daily_bar",
+    }
     assert direct < _functions_reaching(tree, FILTERED_READ)
     assert {"load_daily_bars", "load_price_limits", "load_statement_histories"} <= (
         _functions_reaching(tree, FILTERED_READ) - direct

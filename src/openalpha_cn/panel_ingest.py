@@ -2942,6 +2942,41 @@ def load_daily_bars(
     return daily_bars_from_panel_rows(rows)
 
 
+def load_first_daily_bar(
+    store: PanelStore,
+    *,
+    ts_code: str,
+    year: int,
+    calendar: TradingCalendar,
+    as_of: datetime,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> DailyBar | None:
+    """One security's first stored `daily` bar of `year` that was knowable at `as_of` (`V2-P6-013`).
+
+    The year-end witness for a disputed close: `cli._year_end_witness` asks for the security's
+    first bar of the following year. One subject-filtered read through the visibility-filtered
+    door rather than a walk of the whole market session by session; a security halted into the
+    new year is found on the session it resumes. `None` when the stored year holds no knowable bar
+    for it. A partition the gate blocks raises, naming it -- never an empty answer.
+    """
+    requirement = daily_requirement(
+        calendar, years=(year,), as_of=as_of, max_staleness=None, date_timezone=date_timezone
+    )
+    outcome = store.read_visible_at(
+        requirement, year=year, columns=DAILY_PANEL_COLUMNS, filters={SUBJECT_COLUMN_NAME: ts_code}
+    )
+    if outcome.is_blocked:
+        raise PanelStorageError(
+            f"{DAILY_DATASET} year={year} cannot be read for {ts_code} at {as_of.isoformat()}: "
+            f"{[issue.code for issue in outcome.blocking_issues]}; "
+            f"{'; '.join(issue.detail for issue in outcome.blocking_issues)}"
+        )
+    rows = sorted(outcome.rows, key=lambda row: str(row[1]))
+    if not rows:
+        return None
+    return daily_bars_from_panel_rows((rows[0],))[ts_code]
+
+
 def load_daily_valuations(
     store: PanelStore,
     *,
@@ -3334,6 +3369,13 @@ reason: `cli._year_end_witness` reads the stored next-year partition and falls b
 targeted request.
 """
 
+AbsenceExplanation = Callable[[str, date], bool]
+"""Whether a security's missing bar on a session is accounted for: halted all day, or delisted.
+
+What lets a disputed bar with no later bar in the year stay `unconfirmed` instead of being
+refused -- only an absence nothing explains looks like a partial fetch.
+"""
+
 HaltCorpusSource = Callable[[], Mapping[date, SuspensionDay] | None]
 """The year's `suspend_d` corpus, read only when a zero upper limit is actually present.
 
@@ -3372,8 +3414,9 @@ def reconcile_price_disagreements(
     fundamentals: Sequence[ColumnarPanelBatch],
     *,
     refetch: PriceRefetch,
-    last_session: date,
+    sessions: Sequence[date],
     year_end_witness: YearEndWitness | None = None,
+    explains_absence: AbsenceExplanation | None = None,
 ) -> ReconciledRows:
     """Resolve every `daily`/`daily_basic` close disagreement of one year, or refuse the year.
 
@@ -3394,18 +3437,22 @@ def reconcile_price_disagreements(
        answer would "confirm" every disputed absence (`_refuse_a_short_session_refetch`).
     2. **Name the rule** (`close_disagreement_kind`): `valuation_without_bar` when there is no
        bar; `valuation_contradicts_corroborated_bar` when the security's next stored bar
-       corroborates it; `valuation_contradicts_unconfirmed_bar` when the mismatch is on
-       `last_session` -- the last session the build **requested**, from the calendar, not the
-       newest one the bars happen to hold -- and there is no next session yet. Anything else is
-       refused, naming the security, the session and both closes.
+       corroborates it; `valuation_contradicts_unconfirmed_bar` when nothing can corroborate it
+       yet (below). Anything else is refused, naming the security, the session and both closes.
 
-       **A bar with no next bar inside the year** -- the year's last session, or a security
-       halted into year-end -- has no witness in this year's batches. When the build requested
-       the year's whole calendar, `year_end_witness` is asked for the security's first bar of the
-       following year: its `pre_close` corroborates or contradicts exactly as an in-year next bar
-       would, and only a following year that has not published yet (`None`) leaves the row
-       `valuation_contradicts_unconfirmed_bar`. Without a witness (a year still in progress) the
-       last requested session is unconfirmed and any earlier one is refused, as before.
+       **A bar with no next bar inside the year** has no witness in this year's batches. Every
+       requested session after it on which the security has no bar must first be explained --
+       `explains_absence` says whether a whole-day halt or a delisting accounts for it -- and
+       one that is not is refused, because a bar missing for no reason is what a partial fetch
+       looks like. Then: when the build requested the year's whole calendar, `year_end_witness`
+       is asked for the security's first bar after it in the following year, whose `pre_close`
+       corroborates or contradicts exactly as an in-year next bar would, and whose `None` (not
+       published yet, or its absence explained there too) leaves the row
+       `valuation_contradicts_unconfirmed_bar`; without a witness (a year still in progress) the
+       row is unconfirmed. A later build that holds a resumption bar judges it again.
+
+       `sessions` are the sessions the build **requested**, from the calendar; the last of them
+       is the build's last session, not the newest one the bars happen to hold.
     3. **Drop the valuation row, and only it.** No bar is edited or invented and nothing is
        filled from anywhere; the dropped row is recorded with its own clocks in `record`, and a
        contradicted valuation also records whether it repeats the previous bar close.
@@ -3481,10 +3528,21 @@ def reconcile_price_disagreements(
             if position + 1 < len(days):
                 next_key = (finding.ts_code, days[position + 1])
                 next_pre_close = cast(float, pre_closes[bar_rows[next_key]])
-        unconfirmed = finding.trade_date == last_session
-        if key in bar_rows and next_pre_close is None and year_end_witness is not None:
-            next_pre_close = year_end_witness(finding.ts_code)
-            unconfirmed = next_pre_close is None
+        unconfirmed = False
+        unexplained: list[date] = []
+        if key in bar_rows and next_pre_close is None:
+            unexplained = [
+                later
+                for later in sessions
+                if later > finding.trade_date
+                and (explains_absence is None or not explains_absence(finding.ts_code, later))
+            ]
+            if not unexplained:
+                if year_end_witness is not None:
+                    next_pre_close = year_end_witness(finding.ts_code)
+                    unconfirmed = next_pre_close is None
+                else:
+                    unconfirmed = True
         kind = close_disagreement_kind(
             bar_close=finding.bar_close,
             next_bar_pre_close=next_pre_close,
@@ -3496,10 +3554,15 @@ def reconcile_price_disagreements(
                 f"{finding.bar_close!r} in {DAILY_DATASET} and {finding.valuation_close!r} in "
                 f"{DAILY_BASIC_DATASET}, and a re-fetch published the same pair. No named rule "
                 "explains it: the bar is not corroborated -- its next stored session's pre_close "
-                f"is {next_pre_close!r}, and a bar with no next session is left unconfirmed only "
-                f"on the last session this build requested ({last_session.isoformat()}). Storing "
-                "either side would leave two partitions that answer differently, so the year is "
-                "refused"
+                f"is {next_pre_close!r}"
+                + (
+                    f", and it has no bar on {unexplained[0].isoformat()} with no whole-day halt "
+                    "or delisting to account for that"
+                    if unexplained
+                    else ""
+                )
+                + ". Storing either side would leave two partitions that answer differently, so "
+                "the year is refused"
             )
         contradicted = kind != "valuation_without_bar"
         defects.append(

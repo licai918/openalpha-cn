@@ -1416,7 +1416,7 @@ class PanelStore:
         its siblings' staleness currently blocks. Neither is a speed-up; both are different
         answers. This is the third option the row asked for, and it moves nothing: `read_if_ready`
         and `read_visible_at` are now one line each on top of it, still one assessment plus one
-        read, so their ten callers see no change at all. The reader that takes a scope directly
+        read, so their eleven callers see no change at all. The reader that takes a scope directly
         rather than through them -- `panel_ingest._read_visible_event_dated_rows` -- is the shape
         this row added, and it is the one place the change is visible at all.
 

@@ -294,6 +294,9 @@ GATED_READERS: dict[str, tuple[str, ...]] = {
     "load_industry_histories": ("assessed",),
     "load_industry_trees": ("assessed",),
     "load_trading_calendar": ("assessed",),
+    # `V2-P6-013`: one security's first stored bar of a year, the year-end witness for a disputed
+    # close, as one subject-filtered read through the filtered door.
+    "load_first_daily_bar": ("read_visible_at",),
 }
 """Every function in `panel_ingest` that reaches rows, and the door it reaches them through.
 

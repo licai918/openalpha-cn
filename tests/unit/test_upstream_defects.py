@@ -24,6 +24,7 @@ guard refuses a session under 85% of its neighbours, and two dropped rows of thr
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -208,6 +209,12 @@ class Frame:
     mismatch_code: str = FILLERS[2]
     """The security `mismatch_day` and `next_pre_close_disagrees` are about."""
     halted_into_year_end: bool = False
+    also_absent_days: tuple[date, ...] = ()
+    """More sessions on which `FILLERS[5]` has no bar and no valuation."""
+    also_halted_days: tuple[date, ...] = ()
+    """More sessions on which `suspend_d` has `FILLERS[5]` halted all day."""
+    delisted_code: str | None = None
+    """A security the registry has delisted on 2013-12-31, with no bar after 2013."""
     """`FILLERS[5]` is halted all of `SESSIONS[-1]`, so its last 2013 bar is on `SESSIONS[-2]`."""
 
 
@@ -253,6 +260,10 @@ class ScriptedUpstream:
 
     def _traded(self, code: str, day: date) -> bool:
         if self.frame.halted_into_year_end and code == FILLERS[5] and day == SESSIONS[-1]:
+            return False
+        if code == FILLERS[5] and day in self.frame.also_absent_days:
+            return False
+        if code == self.frame.delisted_code and day.year > YEAR:
             return False
         return not (self.frame.limit_placeholder and code == HALTED and day == HALT_DAY)
 
@@ -316,6 +327,8 @@ class ScriptedUpstream:
             rows.append([RESUMED, _compact(day), "R", None])
         if self.frame.halted_into_year_end and day == SESSIONS[-1]:
             rows.append([FILLERS[5], _compact(day), "S", None])
+        if day in self.frame.also_halted_days:
+            rows.append([FILLERS[5], _compact(day), "S", None])
         if (
             self.frame.limit_placeholder
             and self.frame.halted_on_placeholder_day
@@ -331,7 +344,12 @@ class ScriptedUpstream:
         return rows
 
     def _registry(self) -> list[list[Any]]:
-        rows = [[code, code, "SSE", "主板", "L", "20100104", None] for code in SECURITIES]
+        rows = [
+            [code, code, "SSE", "主板", "D", "20100104", "20131231"]
+            if code == self.frame.delisted_code
+            else [code, code, "SSE", "主板", "L", "20100104", None]
+            for code in SECURITIES
+        ]
         listed = LIST_DATE_BY_SCENARIO.get(self.frame.pre_listing or "")
         if listed is not None:
             rows.append([PRELISTED, PRELISTED, "BSE", "北交所", "L", listed, None])
@@ -402,13 +420,14 @@ def _build(
     monkeypatch: pytest.MonkeyPatch,
     *targets: str,
     year: int = YEAR,
+    as_of: str = AS_OF,
 ) -> tuple[Any, ScriptedUpstream]:
     upstream = ScriptedUpstream(frame)
     monkeypatch.setenv("TUSHARE_TOKEN", SECRET_TOKEN)
     monkeypatch.setattr(cli, "_panel_transport", lambda: upstream)
     monkeypatch.setattr(cli, "_panel_clock", lambda: CLOCK)
     arguments = ["panel", "build", "--runtime-dir", str(runtime_dir), "--year", str(year)]
-    arguments += ["--as-of", AS_OF, "--json"]
+    arguments += ["--as-of", as_of, "--json"]
     for target in (TRADING_CALENDAR_DATASET, *targets):
         arguments += ["--dataset", target]
     return runner.invoke(app, arguments), upstream
@@ -773,9 +792,9 @@ def test_last_session_treatment_comes_from_the_requested_sessions_not_the_bars(
         return fetch(DAILY_DATASET, day, subjects), fetch(DAILY_BASIC_DATASET, day, subjects)
 
     with pytest.raises(PanelBatchError, match="not corroborated"):
-        reconcile_price_disagreements(bars, valuations, refetch=refetch, last_session=SESSIONS[4])
+        reconcile_price_disagreements(bars, valuations, refetch=refetch, sessions=SESSIONS)
     unconfirmed = reconcile_price_disagreements(
-        bars, valuations, refetch=refetch, last_session=SESSIONS[3]
+        bars, valuations, refetch=refetch, sessions=SESSIONS[:4]
     )
     assert [d.kind for d in unconfirmed.defects] == ["valuation_contradicts_unconfirmed_bar"]
 
@@ -951,8 +970,12 @@ def test_the_witness_answers_not_yet_before_the_next_years_first_session_publish
 
     before = datetime(2014, 1, 2, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
     after = datetime(2014, 1, 2, 17, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
-    early = cli._year_end_witness(_store(tmp_path), provider, year=YEAR, exchange="SSE", now=before)
-    late = cli._year_end_witness(_store(tmp_path), provider, year=YEAR, exchange="SSE", now=after)
+    early = cli._year_end_witness(
+        _store(tmp_path), provider, year=YEAR, exchange="SSE", now=before, delistings={}
+    )
+    late = cli._year_end_witness(
+        _store(tmp_path), provider, year=YEAR, exchange="SSE", now=after, delistings={}
+    )
 
     assert early(FILLERS[2]) is None
     assert upstream.payloads == []
@@ -1004,9 +1027,160 @@ def test_a_price_build_with_no_session_refuses_before_it_fetches_anything(tmp_pa
             now=CLOCK,
             halts=False,
             listings=None,
+            delistings={},
             exchange="SSE",
         )
     assert upstream.payloads == []
+
+
+# --- round 5: an explained absence is unconfirmed, an unexplained one refuses ------------------
+
+HALTED_ACROSS = Frame(
+    halted_into_year_end=True,
+    also_absent_days=(NEXT_YEAR[0],),
+    also_halted_days=(NEXT_YEAR[0],),
+    mismatch_code=FILLERS[5],
+    mismatch_day=SESSIONS[-2],
+    sessions=(*SESSIONS, *NEXT_YEAR),
+)
+"""The reviewer's probe: halted from the 15th of November into 2014-01-02, trading again on the
+3rd. Its disputed close on the 14th has no later bar in 2013 and none on 2014's first session."""
+
+
+def test_a_security_still_halted_on_the_next_years_first_session_is_unconfirmed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _next_year_stored(tmp_path, HALTED_ACROSS, monkeypatch)  # the calendar only
+
+    result, upstream = _build(tmp_path, HALTED_ACROSS, monkeypatch, "price")
+
+    assert result.exit_code == PanelExit.ok, result.output
+    assert [(d.ts_code, d.kind) for d in _defects(tmp_path)] == [
+        (FILLERS[5], "valuation_contradicts_unconfirmed_bar")
+    ]
+    witnessed = [
+        (str(p["api_name"]), dict(p["params"]))
+        for p in upstream.payloads
+        if str(p["params"].get("trade_date")) == _compact(NEXT_YEAR[0])
+    ]
+    # one targeted daily request, and the halts as one WHOLE-SESSION suspend_d request
+    assert (SUSPENSION_DATASET, {"trade_date": _compact(NEXT_YEAR[0])}) in [
+        (api, {k: v for k, v in params.items() if k == "trade_date" or k == "ts_code"})
+        for api, params in witnessed
+    ]
+    assert all("ts_code" not in params for api, params in witnessed if api == SUSPENSION_DATASET)
+
+
+def test_a_security_halted_into_the_new_year_is_found_on_the_session_it_resumes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _next_year_stored(tmp_path, HALTED_ACROSS, monkeypatch, "price")
+
+    result, _ = _build(tmp_path, HALTED_ACROSS, monkeypatch, "price")
+
+    assert result.exit_code == PanelExit.ok, result.output
+    assert [(d.ts_code, d.kind) for d in _defects(tmp_path)] == [
+        (FILLERS[5], "valuation_contradicts_corroborated_bar")
+    ]
+
+
+def test_an_absence_on_the_next_years_first_session_with_no_halt_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frame = dataclasses.replace(HALTED_ACROSS, also_halted_days=())
+    _next_year_stored(tmp_path, frame, monkeypatch)
+
+    result, _ = _build(tmp_path, frame, monkeypatch, "price")
+
+    assert result.exit_code == PanelExit.unhealthy, result.output
+    assert "no whole-day halt or delisting" in result.output
+
+
+def test_a_security_delisted_at_year_end_is_unconfirmed_rather_than_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frame = Frame(
+        delisted_code=FILLERS[5],
+        mismatch_code=FILLERS[5],
+        mismatch_day=SESSIONS[-1],
+        sessions=(*SESSIONS, *NEXT_YEAR),
+    )
+    _next_year_stored(tmp_path, frame, monkeypatch)
+
+    result, _ = _build(tmp_path, frame, monkeypatch, "stock_basic", "price")
+
+    assert result.exit_code == PanelExit.ok, result.output
+    assert [(d.ts_code, d.kind) for d in _defects(tmp_path)] == [
+        (FILLERS[5], "valuation_contradicts_unconfirmed_bar")
+    ]
+
+
+def test_a_year_in_progress_halted_through_its_last_session_is_unconfirmed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The build stops at the 14th (the 15th has not published); the security's disputed close is
+    on the 13th and it is halted all of the 14th, so nothing after it can corroborate it yet."""
+    frame = Frame(
+        also_absent_days=(SESSIONS[3],),
+        also_halted_days=(SESSIONS[3],),
+        mismatch_code=FILLERS[5],
+        mismatch_day=SESSIONS[2],
+    )
+    result, _ = _build(tmp_path, frame, monkeypatch, "price", as_of="2013-11-14T20:00:00+08:00")
+
+    assert result.exit_code == PanelExit.ok, result.output
+    defects = load_upstream_defects(
+        _store(tmp_path), years=(YEAR,), as_of=datetime(2013, 11, 14, 12, 0, tzinfo=UTC)
+    )
+    assert [(d.ts_code, d.kind) for d in defects] == [
+        (FILLERS[5], "valuation_contradicts_unconfirmed_bar")
+    ]
+
+    unhalted = dataclasses.replace(frame, also_halted_days=())
+    refused = tmp_path / "refused"
+    result, _ = _build(refused, unhalted, monkeypatch, "price", as_of="2013-11-14T20:00:00+08:00")
+    assert result.exit_code == PanelExit.unhealthy, result.output
+    assert "no whole-day halt or delisting" in result.output
+
+
+def test_a_stored_next_year_that_cannot_be_read_is_refused_by_name_not_replaced_by_a_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frame = Frame(mismatch_day=SESSIONS[-1], sessions=(*SESSIONS, *NEXT_YEAR))
+    _next_year_stored(tmp_path, frame, monkeypatch, "price")
+    stored = _store(tmp_path).read_coverage(DAILY_DATASET, YEAR + 1)
+    assert stored is not None
+    (tmp_path / "panel" / DAILY_DATASET / str(YEAR + 1) / "data.parquet").unlink()
+
+    result, upstream = _build(tmp_path, frame, monkeypatch, "price")
+
+    assert result.exit_code == PanelExit.unhealthy, result.output
+    assert f"{DAILY_DATASET} year={YEAR + 1} partition could not be read" in result.output
+    assert (DAILY_DATASET, FILLERS[2], _compact(NEXT_YEAR[0])) not in upstream.refetches()
+
+
+def test_a_re_fetch_that_was_all_pre_listing_comes_back_empty_not_raw(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = Frame(pre_listing="before")
+    provider = TushareProvider(
+        token=SECRET_TOKEN, transport=ScriptedUpstream(frame), clock=lambda: CLOCK
+    )
+    day = PRELISTED_DAYS[0]
+    batch = provider.fetch_panel(
+        ProviderRequest(
+            dataset=DAILY_DATASET,
+            as_of=datetime(day.year, day.month, day.day, 12, 0, tzinfo=UTC),
+            subjects=(PRELISTED,),
+        )
+    )
+    assert batch.subjects == (PRELISTED,)
+
+    empty = cli._listed_only(batch, {PRELISTED: date(2022, 10, 14)})
+
+    assert empty.status == "no_data"
+    assert empty.dataset == DAILY_DATASET
+    assert empty.subjects == ()
 
 
 def test_panel_doctor_answers_for_the_defects_record_rather_than_raising(
