@@ -42,6 +42,7 @@ import math
 import shutil
 from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
+from dataclasses import replace
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Final
@@ -522,7 +523,7 @@ def _stored(store: PanelStore) -> dict[str, str]:
     """Every factor-plane partition the store holds, as `dataset@year -> content_hash`."""
     return {
         f"{dataset}@{year}": content_hash
-        for dataset, year, content_hash, _recorded, _hash in store.partition_stamps()
+        for dataset, year, content_hash, _coverage in store.partition_stamps()
         if dataset.startswith(FACTOR_PLANE)
     }
 
@@ -565,14 +566,409 @@ THREE: Final[tuple[str, ...]] = (
 # --- equivalence ---------------------------------------------------------------------------------
 
 
+STORED_BY_SINGLE_FACTOR_BUILDS_AT_8A18532: Final[dict[str, str]] = {
+    "factor_manifest_accruals_ttm_v1@2026": (
+        "b758c03ccc137945be56e50da33e0fd20a282f2335c1f66a769d9619d538cd3b"
+    ),
+    "factor_manifest_amihud_60_v1@2026": (
+        "22eecc0505fdeb3cddeb5cd1b1e978683886b0509f05d6962b90aed24df91df7"
+    ),
+    "factor_manifest_book_to_price_v1@2026": (
+        "472a2aa0021f31e68fd471c1d99722ffaa6bef3508caf141a83fb640229efe95"
+    ),
+    "factor_manifest_deducted_earnings_yield_ttm_v1@2026": (
+        "faa6b2f880ed91fa6c0d2af6467c44476e462c9b46d3299efc4db13be531b9c6"
+    ),
+    "factor_manifest_downside_vol_60_v1@2026": (
+        "417f25bf2d1568fe8a8ef563b2be4f4e495c54b4a4fa05c3d930cbb03d094363"
+    ),
+    "factor_manifest_earnings_yield_ttm_v1@2026": (
+        "ee7c25f5bfce3a1dea7f2d1498a98c8aa537996b81ebe99d2ba81561ece70858"
+    ),
+    "factor_manifest_gross_margin_stability_v1@2026": (
+        "52822d4546820f0581b570c6a853816eda6fef7ae4979ad92f8eb2756dc1851a"
+    ),
+    "factor_manifest_momentum_120_sessions_v1@2026": (
+        "45595c236fed7b5c2ba72ec6d303e943c156f287be1e641dc28b335483a90e70"
+    ),
+    "factor_manifest_momentum_20_sessions_v1@2026": (
+        "a4f3b7cbc3662b42c9c9c6c53a33e523b8f5bb4f7bf158e9cd82142d77d7e249"
+    ),
+    "factor_manifest_momentum_60_sessions_v1@2026": (
+        "0fb8d1708cd2dcb80c1350005c3c639040193e5ecf33b3e1a7fc4085b90a4eb5"
+    ),
+    "factor_manifest_net_profit_yoy_v1@2026": (
+        "6a80a1ca208371afba276e1bcb45814509d194f24afc181e97145170d060aed0"
+    ),
+    "factor_manifest_residual_vol_60_v1@2026": (
+        "de78496523371c947efa2510af25f7a923611fea762ff5d9918e264422fff8fa"
+    ),
+    "factor_manifest_return_on_capital_ttm_v1@2026": (
+        "0699ffafd1f787b28d4f8781aeccb6c8ec27025cd2ff9057f4f0ec242ad5d7e9"
+    ),
+    "factor_manifest_return_on_equity_ttm_v1@2026": (
+        "01cf7a43e56dd40aa6533e842da69a51cd9df195867ad719054e160a0899606a"
+    ),
+    "factor_manifest_return_vol_60_v1@2026": (
+        "b6a718289f80cf44050872855c1196fa3d856f8b387256af75eae9a043e48f6b"
+    ),
+    "factor_manifest_revenue_yoy_acceleration_v1@2026": (
+        "db03dbc8bc2ab2526e4e6a84850a3fc9f1fd2423da40fccbd5374f01eb3c930c"
+    ),
+    "factor_manifest_revenue_yoy_v1@2026": (
+        "8e7666af5312868ebd29ef9f62707441c793545c1eac3609ff93c01687eec320"
+    ),
+    "factor_manifest_reversal_1d_v1@2026": (
+        "3eac72afc27057e9167b8b536ad41d7cb6068684726c5a64eb306e431596cfe3"
+    ),
+    "factor_manifest_reversal_5_sessions_v1@2026": (
+        "0caa24e880ada5b9538e50b4b37bc2ecc09127cc6d3380ae8a514485162cfdf3"
+    ),
+    "factor_manifest_sales_yield_ttm_v1@2026": (
+        "b2a6d7824f7e699a4015a4c0d6d2d607d45923fd49376cc2a5c50f12711a7a14"
+    ),
+    "factor_manifest_turnover_60_v1@2026": (
+        "794494fb60087f07e1fffc769038733a56e4def436794ea8e875146c924f7e8b"
+    ),
+    "factor_neut_accruals_ttm_v1@2026": (
+        "b96ba8104a709c2d7e0a430a340ffe2c93a0734b32769af015d1cb08bb15ea7f"
+    ),
+    "factor_neut_amihud_60_v1@2026": (
+        "21eb305ffe77d8a3f31fd972d842184a845a2e1af6a26bc38f4dfd93a1935176"
+    ),
+    "factor_neut_book_to_price_v1@2026": (
+        "f206c572c5faa72db51c4eda8170c2cacd6915eda650fed349ab64f1078c1e5f"
+    ),
+    "factor_neut_deducted_earnings_yield_ttm_v1@2026": (
+        "0c556ae6efa6c482d4276f8cef0f1fc938cdffcf5edcf058b91d3d2a27d3a39d"
+    ),
+    "factor_neut_downside_vol_60_v1@2026": (
+        "8968e636d05937f78f5d407b35cdac7f3f322014118e9ce4a0e79f7e667b7c11"
+    ),
+    "factor_neut_earnings_yield_ttm_v1@2026": (
+        "c89b0b9858de4f0b8801669b9c589449f2b1d5b24be003555433b81fec5c2f1e"
+    ),
+    "factor_neut_gross_margin_stability_v1@2026": (
+        "58d72f79f03d9c2816d9e7e63540718c940a5d7a8f8158ef8d2b9603f4812ae2"
+    ),
+    "factor_neut_momentum_120_sessions_v1@2026": (
+        "e46eb468ed4a32e62ec679e53c744a8cf0b2a75a82ccfb592287e80aaaf6ea71"
+    ),
+    "factor_neut_momentum_20_sessions_v1@2026": (
+        "98ea5c5815d756e2f661ab7d4066acd90a70d1a4783520347a001d4029ba9305"
+    ),
+    "factor_neut_momentum_60_sessions_v1@2026": (
+        "39cea2ceeea783eb830753ece291f0da0d175e1f110dab2171e1bc0f6165c1ac"
+    ),
+    "factor_neut_net_profit_yoy_v1@2026": (
+        "7f2ea3543fba4a57c87c5f52c537ecc4f0ee5561dc1526a13decf9404dd3f690"
+    ),
+    "factor_neut_residual_vol_60_v1@2026": (
+        "921e835f47ea7901cf3c8a35ea981d93e55af1959229593a84c8bb1d7b29f681"
+    ),
+    "factor_neut_return_on_capital_ttm_v1@2026": (
+        "8296f88dc3901789fc1e828dfc9974eb762e7681274558f83cc3df3de31e7776"
+    ),
+    "factor_neut_return_on_equity_ttm_v1@2026": (
+        "d197f1ea463a079616b5b23ccf0311be52b7fb45694d021accbb91303852a5a6"
+    ),
+    "factor_neut_return_vol_60_v1@2026": (
+        "1134ecd087d8f0a6dff2b841e0df94755ea7e51e4aa1509f685eb5490d47987b"
+    ),
+    "factor_neut_revenue_yoy_acceleration_v1@2026": (
+        "cba8dde57dffb6d0894b19611a0cad23a5ef1939c28196328ec45073099a2e76"
+    ),
+    "factor_neut_revenue_yoy_v1@2026": (
+        "4f69ebe80dc6605af049589f7a0358ec08de94e5d21396ea56edcd173f7885f0"
+    ),
+    "factor_neut_reversal_1d_v1@2026": (
+        "90b67d84bb66d711ceb5beb949b263a2b72e6e118e240e2e9af913ccc2dcc31e"
+    ),
+    "factor_neut_reversal_5_sessions_v1@2026": (
+        "4a560e85b267c98d0080f3cb32e23300659af43351034380cc781a21765d09f4"
+    ),
+    "factor_neut_sales_yield_ttm_v1@2026": (
+        "3b87eedfe08a8960cca08ad0e3cd3d536248819a49aa6fc29d77b95f9319c810"
+    ),
+    "factor_neut_turnover_60_v1@2026": (
+        "a2b1e663e3943019bcb6074ef8479ce5da8d3b310bffbdbfd800e755d202f4db"
+    ),
+    "factor_neutmn_accruals_ttm_v1@2026": (
+        "7a3f826b5f7a9ee3a82cc0b6b7899d85f44e339ce9d636efef1b424f33c50206"
+    ),
+    "factor_neutmn_amihud_60_v1@2026": (
+        "f7dabcabec8355ec0c37860acca102b6607a5b93c7f83870a3078cdfede5fa04"
+    ),
+    "factor_neutmn_book_to_price_v1@2026": (
+        "cec3c7d2ff5428c61e9ef1e570f9b8b958d90e93aa3f1251f2daa320af0b0ccb"
+    ),
+    "factor_neutmn_deducted_earnings_yield_ttm_v1@2026": (
+        "fe876af4f736e5e7066d2647fc3c3926964c0291bc747bcb90dca93898db2e54"
+    ),
+    "factor_neutmn_downside_vol_60_v1@2026": (
+        "d388acf1a34e517b8eadf71b17d7e08f49b93568593d78f2b52df8a5ece5e3ac"
+    ),
+    "factor_neutmn_earnings_yield_ttm_v1@2026": (
+        "985816bb18079a5590e8117ecb05d4790b6a15031b44be5e530ec949ddfd4b18"
+    ),
+    "factor_neutmn_gross_margin_stability_v1@2026": (
+        "126fcfa55ecd8c5a9c47a7660f38bd5e02c2586eead1c60745349e01b4be8c1f"
+    ),
+    "factor_neutmn_momentum_120_sessions_v1@2026": (
+        "410b6b1c33031159778c22bdc3080b41c186a4d11ba5b47f41f107dd773f54ca"
+    ),
+    "factor_neutmn_momentum_20_sessions_v1@2026": (
+        "b27c3e70b6dd900dceef223e5a29611223c26d806d42403105dba43cd576470b"
+    ),
+    "factor_neutmn_momentum_60_sessions_v1@2026": (
+        "e99a0cb5ade6be8773553e5f7a4d8359fe6b087c0fd04af666086c57f9ad64b3"
+    ),
+    "factor_neutmn_net_profit_yoy_v1@2026": (
+        "f92d49578597e1b80e60714553a6a1edc0d39b6bc332bb1e7fcc6e5f515c4f9c"
+    ),
+    "factor_neutmn_residual_vol_60_v1@2026": (
+        "f03a2b79680502713d88651304e7f8f8a6b670f2436d0cd9edf0c598c98802aa"
+    ),
+    "factor_neutmn_return_on_capital_ttm_v1@2026": (
+        "9ee814b0114a98a33933be82369061d1e01bab73b93f2d57309aa0b146fae370"
+    ),
+    "factor_neutmn_return_on_equity_ttm_v1@2026": (
+        "84039ea9dfdefd93554e660a1ec20485082fd5aa5fda9d1dc6b40517aca74882"
+    ),
+    "factor_neutmn_return_vol_60_v1@2026": (
+        "c6e1f2b2a0f725c36bba272d725813442db465fbe4c2a09d430a47cff106969a"
+    ),
+    "factor_neutmn_revenue_yoy_acceleration_v1@2026": (
+        "1d655797ce11218317d23ce241c80e781a478b9042b14d6c6a3ce989f7a6acdc"
+    ),
+    "factor_neutmn_revenue_yoy_v1@2026": (
+        "5754290e8f8193e92fe1ab2635d086e855193f74d4e78f0e86ce39163cb96ac2"
+    ),
+    "factor_neutmn_reversal_1d_v1@2026": (
+        "dffc37f6804167d5bb18dd7e9b94ad65fdbf5b04a3b76824923edf415f3d958c"
+    ),
+    "factor_neutmn_reversal_5_sessions_v1@2026": (
+        "449bbae274f5fd753bf5b15d044bbd0dc8aab61e3089dc56c77df66d622e3906"
+    ),
+    "factor_neutmn_sales_yield_ttm_v1@2026": (
+        "c3e8e6c906ea7e2430954ed494ae1f1d7e705476dde22f5ddc66fba3e75c21ee"
+    ),
+    "factor_neutmn_turnover_60_v1@2026": (
+        "06f73dcda1d4da97fe868a45f05b8fec3c72f76a4b7e68e4619e17be403198de"
+    ),
+    "factor_obs_accruals_ttm_v1@2026": (
+        "508077a2a87905dbdf24ad47fdcf54c1fd03a78099afab652d2f6a1594baa900"
+    ),
+    "factor_obs_amihud_60_v1@2026": (
+        "c9406d3233abde424d5164be03bac6f55d3c40dfa496f088dcecbfa4a93005fb"
+    ),
+    "factor_obs_book_to_price_v1@2026": (
+        "bcf0793e84638a36b1a25032eabc10eeb58228d9782b5e9127c14bcbfc1d940e"
+    ),
+    "factor_obs_deducted_earnings_yield_ttm_v1@2026": (
+        "85041d3c68580cc79bf4820c7027b28b2e09e7f330baa91006ee5d856690c089"
+    ),
+    "factor_obs_downside_vol_60_v1@2026": (
+        "78363d44d99c0bff5970a1297d270a6bda3c9e019bdd4c4928f82b8bc5c17252"
+    ),
+    "factor_obs_earnings_yield_ttm_v1@2026": (
+        "b3bbb97605fef08e87e63c60a4bf86a67bdd8f861bb70cf6e36d9ef1462d0cae"
+    ),
+    "factor_obs_gross_margin_stability_v1@2026": (
+        "d6e43db03a1bc1ea623a22ddd4a22b8e8f46a5da646452aed68d5192d2a70ce4"
+    ),
+    "factor_obs_momentum_120_sessions_v1@2026": (
+        "cbaf472d443b40657abba3b051c3af624bdb1d679dbaeb3b68629adec9933efc"
+    ),
+    "factor_obs_momentum_20_sessions_v1@2026": (
+        "66b12bbdc0a97aef30ca882efcd9e696981c4ff2a68f0c0374d56bdb67be3b8a"
+    ),
+    "factor_obs_momentum_60_sessions_v1@2026": (
+        "883639ead3215082121b8a8b42ef3282c39f0cde715b9e15d13bd2658214d2e8"
+    ),
+    "factor_obs_net_profit_yoy_v1@2026": (
+        "6dc290d4c765407b74e26a9de91eee108f663a1a5b122eb2934730bcf789c8cb"
+    ),
+    "factor_obs_residual_vol_60_v1@2026": (
+        "6c9ed0b439ff7100dff39084b52bc213e5747d82e6a683aa86228ed1cb100baf"
+    ),
+    "factor_obs_return_on_capital_ttm_v1@2026": (
+        "06cedff61c9c5874dfabccbdc444c12cbbe6ff252d84f7cd010df195a04b155d"
+    ),
+    "factor_obs_return_on_equity_ttm_v1@2026": (
+        "353bbf3e9db88dad46d69eb84cb12acbc80e2b0ae3a03172d95497e0e789b206"
+    ),
+    "factor_obs_return_vol_60_v1@2026": (
+        "1d5e29eccf99cef262f9bc87dcb695b8bead952ae16a97b57760d4ca3319802e"
+    ),
+    "factor_obs_revenue_yoy_acceleration_v1@2026": (
+        "6339aa3cb2ef37a6c9d640016e981167f49daff76dbd9ce9f2e6f675156485f8"
+    ),
+    "factor_obs_revenue_yoy_v1@2026": (
+        "0a52418db7ed9d46a1d70a342540b9df7d6f89c20c325ed2d42b41daf19c6911"
+    ),
+    "factor_obs_reversal_1d_v1@2026": (
+        "ecd5dd42c03b80cbddf2699cc4b2debf5db81f3a16b283bfff97e5ed5f6e468e"
+    ),
+    "factor_obs_reversal_5_sessions_v1@2026": (
+        "f4d61ebcf1418adb3b6a77d96791c0db193b70e42c5e1981e9a5cbf210f18070"
+    ),
+    "factor_obs_sales_yield_ttm_v1@2026": (
+        "e3f54b421b4d1d1ebfcaaf24a224a91d3567eb75f5babee16994dd25b30279f4"
+    ),
+    "factor_obs_turnover_60_v1@2026": (
+        "3a57d5314c9534f2fb038d5ca4f378ebc34c4caa674f40163dccf2e14b819708"
+    ),
+    "factor_proc_accruals_ttm_v1@2026": (
+        "d4152bbe515862f5c837e1917e14dd7eca55f7f9022bcb228793855d2b7172a3"
+    ),
+    "factor_proc_amihud_60_v1@2026": (
+        "a019568cd1f1b516f0015e612c6ad13ed0d2bee955180756043dace57384a129"
+    ),
+    "factor_proc_book_to_price_v1@2026": (
+        "e6d8f812e01f98697c0a3867f9513f581582386352df2ab2eb3f7d720ce04204"
+    ),
+    "factor_proc_deducted_earnings_yield_ttm_v1@2026": (
+        "f3e413a85c25add9985b75b5c4eb6b1e764fed1dd69cfcd5bf0422f6d054207b"
+    ),
+    "factor_proc_downside_vol_60_v1@2026": (
+        "3e5db1dfd65020b5ff3c01b5a3a4803f8f269a45cd21a712516fe1983afb8ce7"
+    ),
+    "factor_proc_earnings_yield_ttm_v1@2026": (
+        "618854e1c655fc85624c9c08b0d556ea83648273e0b3b93d4993f12b1d3765e4"
+    ),
+    "factor_proc_gross_margin_stability_v1@2026": (
+        "5fc50383549c18e57b46fe05fe90f2131352f785e45db2132280fa7bc8fb892d"
+    ),
+    "factor_proc_momentum_120_sessions_v1@2026": (
+        "e03d4b611c773af7b02a898767498be0f7ce584b3c0a23d1386aa9ebc5775cf9"
+    ),
+    "factor_proc_momentum_20_sessions_v1@2026": (
+        "03c6706ba51f45636133acae7c6e627d4fd115f17493705c2c11a28a391fb5f5"
+    ),
+    "factor_proc_momentum_60_sessions_v1@2026": (
+        "231490cd59a79e5d9b1a27c47f5eef9f1a0fd1da2178574d0cc6d2bc6c9f6a33"
+    ),
+    "factor_proc_net_profit_yoy_v1@2026": (
+        "eb92bba9314a00964ec88f015e8f42b45c6404677dac0f5c0ebfbe603e3fcb2f"
+    ),
+    "factor_proc_residual_vol_60_v1@2026": (
+        "c98e909d83f1a49c2ae05d52173ec48e5a25a17dc7d3dfbf1328480c0095321c"
+    ),
+    "factor_proc_return_on_capital_ttm_v1@2026": (
+        "02c85a1e5f8a4eaf98b6d7e36e67a604d27452070631f2ceca64ed688669d780"
+    ),
+    "factor_proc_return_on_equity_ttm_v1@2026": (
+        "b7fd9fb60ba04f6b5af28cb718a25c0acdc881d33222914ff15fc97b162d7e0a"
+    ),
+    "factor_proc_return_vol_60_v1@2026": (
+        "a97320567217bb55331452edf99abfbaf67f69555c94c94973f82469ff030f71"
+    ),
+    "factor_proc_revenue_yoy_acceleration_v1@2026": (
+        "bb13a99b88e39bedb1f59f1dc82172f7777a01010f2e01f0866b93caffdbea5a"
+    ),
+    "factor_proc_revenue_yoy_v1@2026": (
+        "3c36e68af074e2b4b87208b6597a2e8937de98e51e46964ab7ed09e470372d01"
+    ),
+    "factor_proc_reversal_1d_v1@2026": (
+        "308e37b509035c5563fe8e0bc3c311b97616f74449c8aa1790285530c99c3689"
+    ),
+    "factor_proc_reversal_5_sessions_v1@2026": (
+        "da6c0164717353672a65d15d6213b1da1231711fe838a5cc0041ca3d20557cc4"
+    ),
+    "factor_proc_sales_yield_ttm_v1@2026": (
+        "d0b5ff8ea8f52f7c1c741f8e209929c3f43d0b31bc8967f5f3463ba8c9f3725d"
+    ),
+    "factor_proc_turnover_60_v1@2026": (
+        "d0fa48188413ec5428f59dc64d14104917b934af1a713f155d1a136a12441be6"
+    ),
+    "factor_procmn_accruals_ttm_v1@2026": (
+        "350b75aa592808a523ecfadae2fb8f2473cb3e7204a45c68d51c60889025f1d5"
+    ),
+    "factor_procmn_amihud_60_v1@2026": (
+        "4d417d9e9333a550e2531f37467aed1d993acf322a67d912d63a5137655f3cbd"
+    ),
+    "factor_procmn_book_to_price_v1@2026": (
+        "3eb18985cc589b5371359113590866c44700cd1c4c2211b8166a642753aa1f05"
+    ),
+    "factor_procmn_deducted_earnings_yield_ttm_v1@2026": (
+        "ac549c54a57c5329cabfb9cc09b4acfb231977ec4fb47afa2aecd083a0dc5b06"
+    ),
+    "factor_procmn_downside_vol_60_v1@2026": (
+        "32a5af921853c4246a3107a44ea69deb9d38206f32045f09aa0f784859ef33fa"
+    ),
+    "factor_procmn_earnings_yield_ttm_v1@2026": (
+        "665967a90f75ef8e5a7a9a9f249e99991d1679045cbd730a6f8a84773e40afde"
+    ),
+    "factor_procmn_gross_margin_stability_v1@2026": (
+        "923cf2ecd2a28c5dd0bc49b3bcfed711ffdfbd34611d725669a40c4026c16d53"
+    ),
+    "factor_procmn_momentum_120_sessions_v1@2026": (
+        "991a4e8949ed6a9823c55a94f61c65597b4411bfc8bfbb474cd49e6abf138602"
+    ),
+    "factor_procmn_momentum_20_sessions_v1@2026": (
+        "492e7d950ac2aa73010be107ca095968b1715ccaf044beda54f1ee1b4564a491"
+    ),
+    "factor_procmn_momentum_60_sessions_v1@2026": (
+        "28be53c78f5e04ecf282286dbbc31006e84cf8046eb6790e91e529a25c2c551a"
+    ),
+    "factor_procmn_net_profit_yoy_v1@2026": (
+        "f3d023bcb4059da60d4fc3fea4e2d41f9e76f5aa886353536a1b58a5ca34df4c"
+    ),
+    "factor_procmn_residual_vol_60_v1@2026": (
+        "f99b32fb9b7e4e2bbcd175d1a1c61e90cf7835233bac30e7086597c29915dff5"
+    ),
+    "factor_procmn_return_on_capital_ttm_v1@2026": (
+        "20ba6442f59297eda34ed8c95418082ac439f11c16e531290e69bfe07cba13e2"
+    ),
+    "factor_procmn_return_on_equity_ttm_v1@2026": (
+        "e63d5dae5dfb640a5d4dba7fcb084ffb21babb97f2596c766032e2f46d3d1aa0"
+    ),
+    "factor_procmn_return_vol_60_v1@2026": (
+        "860d3a4c6e3182fe3b2974fe1213cd426ff5a5abeb504398a6a8b3ba4ab906fc"
+    ),
+    "factor_procmn_revenue_yoy_acceleration_v1@2026": (
+        "653160e5be1cadde8aa259741cd3474d878df68b914df19a1194c03546330d5e"
+    ),
+    "factor_procmn_revenue_yoy_v1@2026": (
+        "a81bcfed9241f2932185744c720eb58eb1fce2086e59f807236b190ea16f6cab"
+    ),
+    "factor_procmn_reversal_1d_v1@2026": (
+        "ebdd7a5d25d7e5e230cd71f860df87d5eecb57f60856a466e78909de450891d2"
+    ),
+    "factor_procmn_reversal_5_sessions_v1@2026": (
+        "f3f1df331591debcc813384c0d59594e8632fc5ee6e84909f0111de042de4e0b"
+    ),
+    "factor_procmn_sales_yield_ttm_v1@2026": (
+        "57bf2b2b1e5c606a4c01edb71129dff06cdb1550ab683ca1f6f225b0a774db07"
+    ),
+    "factor_procmn_turnover_60_v1@2026": (
+        "d6f34fc19454beab055a4d6113f40bb1bb53786fa7d81a46be52ec007e9025b9"
+    ),
+}
+"""Every partition the 21 single-factor builds of this file's corpus stored **before**
+`V2-P6-006`: `build_factor_panels` at `8a18532`, one fresh corpus copy per factor, `_parameters()`
+and `BUILT_AT`, read off the catalog as `dataset@year -> content_hash`.
+
+Pinned rather than recomputed, for `test_factor_read_path_equivalence.py`'s reason: a reference
+computed by the code under test is that code agreeing with itself, and since `V2-P6-006` the
+single-factor build runs through the same `FactorBuildContext` the shared one does. These are what
+the build wrote before the context existed. Reproduced twice, independently (the review's probe and
+the implementer's run of it on an extracted `8a18532` tree), 126 of 126 equal. A change to the
+corpus generator above moves them and must re-pin them from `8a18532` the same way.
+"""
+
+
 def test_every_partition_a_shared_build_writes_is_the_one_its_single_factor_build_writes(
     corpus: Path, tmp_path: Path
 ) -> None:
     """All 21 factors x 3 tiers x 3 instants, by `content_hash`, against 21 separate builds.
 
-    The single-factor builds each run in a fresh copy of the corpus, which is the arrangement the
-    shared build replaces; the shared one runs all 21 in one call over one copy. Every report is
-    equal too, so the universe sizes and coverage censuses the faces print did not move either.
+    Held to the partitions the single-factor build stored before this change
+    (`STORED_BY_SINGLE_FACTOR_BUILDS_AT_8A18532`), and to today's single-factor builds, each in a
+    fresh copy of the corpus -- the arrangement the shared build replaces; the shared one runs all
+    21 in one call over one copy. Every report is equal too, so the universe sizes and coverage
+    censuses the faces print did not move either.
     """
     keys = FACTOR_DEFINITIONS.qualified_keys
     alone: dict[str, str] = {}
@@ -586,8 +982,9 @@ def test_every_partition_a_shared_build_writes_is_the_one_its_single_factor_buil
     together_reports = _shared(together_store, keys)
     together = _stored(together_store)
 
-    assert len(alone) == 6 * len(keys)
-    assert together == alone
+    assert len(STORED_BY_SINGLE_FACTOR_BUILDS_AT_8A18532) == 6 * len(keys)
+    assert together == STORED_BY_SINGLE_FACTOR_BUILDS_AT_8A18532
+    assert alone == STORED_BY_SINGLE_FACTOR_BUILDS_AT_8A18532
     assert list(together_reports) == single_reports
 
 
@@ -718,6 +1115,42 @@ def test_a_registry_year_re_profiled_between_two_factors_is_read_afresh(
     _after_the_first_factor_writes(monkeypatch, re_profile)
     _shared(scratch, THREE[:2])
 
+    assert counts == {name: 2 * len(INSTANTS) for name in SHARED_LOADERS}
+
+
+@pytest.mark.parametrize("change", ["header", "census"])
+def test_a_coverage_re_profiled_under_a_clock_that_does_not_move_is_still_noticed(
+    scratch: PanelStore, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    """A different coverage record under the same `recorded_at` is a different catalog state.
+
+    The review's probe: a store whose injected clock does not advance re-records a registry
+    year's coverage, and the record's `recorded_at` stays exactly what it was. Two changes, one
+    per half of the stamp: another `batch_digest` in the coverage row itself (the provenance a
+    manifest cites), and one more code in its subject census with the row untouched. Stamped by
+    `recorded_at` alone, the second factor was served the first factor's answers; stamped by the
+    whole record and its census, it reloads.
+    """
+    held = scratch.read_coverage(STOCK_BASIC_DATASET, REWRITTEN_YEAR)
+    assert held is not None
+    frozen = PanelStore(scratch.root, clock=lambda: held.recorded_at)
+    changed = (
+        replace(held, batch_digest="sha256:" + "0" * 64)
+        if change == "header"
+        else replace(held, subjects=tuple(sorted((*held.subjects, ADDED_SECURITY))))
+    )
+
+    def re_profile() -> None:
+        frozen.record_coverage(changed)
+
+    counts = _counting(monkeypatch, *SHARED_LOADERS)
+    _after_the_first_factor_writes(monkeypatch, re_profile)
+    _shared(scratch, THREE[:2])
+
+    after = scratch.read_coverage(STOCK_BASIC_DATASET, REWRITTEN_YEAR)
+    assert after is not None
+    assert after.recorded_at == held.recorded_at
+    assert after != held
     assert counts == {name: 2 * len(INSTANTS) for name in SHARED_LOADERS}
 
 

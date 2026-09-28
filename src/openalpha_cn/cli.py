@@ -5962,7 +5962,7 @@ def factor_build_command(
         bool, typer.Option("--json", help="Emit the build report as data.")
     ] = False,
 ) -> None:
-    """Compute one factor's stored tiers at the named instants and write them into the panel.
+    """Compute each named factor's stored tiers at the named instants and write them to the panel.
 
     **The command that makes `factor run` reachable.** A store built by `openalpha panel build`
     holds prices, filings, a registry, a calendar and an industry tree, and no factor partition at
@@ -5982,20 +5982,23 @@ def factor_build_command(
     and then `openalpha factor run --factor reversal_1d/v1 --start 2026-01-08 --end 2026-01-09 ...`
     reads what it stored.
 
-    **`--factor` repeats (`V2-P6-006`).** Every factor named is built with the same options in one
-    invocation, and each prediction instant's calendar, registry and industry cross section is
-    loaded once for all of them instead of once per factor -- on the real 2026 panel those were
-    ~2.4 s of every factor's ~3.3 s per instant. Each factor stores exactly the partitions its own
-    invocation would; they are written one factor at a time, each whole, so a refusal names the
-    factor it stopped at and lists what the factors before it stored. `--json` prints one report
-    per line, in the order named.
-
     **That example said `--waive-max-staleness` until `V2-P4-100` ran it.** It exits `1`:
     `compute_factor` refuses a waived `max_staleness` for every dataset a factor reads, because
     it reads through `read_visible_at` and a waived bound accepts a slice reaching arbitrarily
     far short of `as_of` while every structural check clears. `V2-P4-094` found the model face's
     printed examples failing the same way; a `--help` example that has not been run is a claim
     like any other.
+
+    **`--factor` repeats (`V2-P6-006`).** Every factor named is built with the same options in one
+    invocation, and each prediction instant's calendar, registry and industry cross section is
+    loaded once for all of them instead of once per factor. Measured 2026-09-28 on a copy of the
+    2026-only `runtime/panel` (19 factors, 10 consecutive sessions in June and in August 2026, all
+    three tiers), those three reads were 1.85-2.09 s of the 2.78-3.06 s each factor spent per
+    instant when built alone -- registry 0.81-0.89 s, industry cross section 1.01-1.16 s, calendar
+    0.04 s -- and a 19-factor invocation spent 1.21-1.23 s per factor and instant. Each factor
+    stores exactly the partitions its own invocation would; they are written one factor at a time,
+    each whole, so a refusal names the factor it stopped at and lists what the factors before it
+    stored. `--json` prints one report per line, in the order named.
 
     **The third tier is the one that may refuse, and it refuses by name.** A residual has to carry
     the processed panel's own instant, and both foreign reads are taken for the day that instant
@@ -6004,9 +6007,10 @@ def factor_build_command(
     more: `V2-P4-026` gave `daily_basic` an as-of-sensitive session-level read, and `V2-P4-028`
     put `index_member_all` on a day-scoped one, which is what took "at or after the last stored
     *assignment* of every membership year the read touches" out of this paragraph. The
-    refusal says that, names the remedies, and **writes nothing**: a build that stored two tiers
-    and gave up on the third would leave the exact store shape that makes `factor run` refuse one
-    command later, about a different thing. See
+    refusal says that, names the remedies, and **writes nothing of the refused factor**: a build
+    that stored two tiers and gave up on the third would leave the exact store shape that makes
+    `factor run` refuse one command later, about a different thing. With several `--factor`s the
+    factors before it keep what they stored, each whole, and the refusal lists it. See
     `the_builder_cannot_produce_a_residual_for_a_session_that_has_not_closed`, which
     `openalpha factor list --json` also serves.
 

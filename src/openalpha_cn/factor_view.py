@@ -3243,8 +3243,10 @@ class FactorBuildContext:
     An answer is keyed on everything its call was given -- the kind of read, the instant, and the
     exchange, years, freshness bound, neutralisation spec, subject set and day as each read takes
     them -- and it is held beside the **catalog state it was read under**:
-    `PanelStore.partition_stamps`, every partition's `content_hash` and coverage stamp, which are
-    the only two catalog facts any read of this store is decided by. It is served again only while
+    `PanelStore.partition_stamps`, every partition's `content_hash` and its whole coverage record
+    with its census, the two catalog facts any read of this store is decided by -- the whole
+    record rather than its `recorded_at`, because a store with a clock that does not advance can
+    re-profile without moving it. It is served again only while
     the catalog still says exactly that, compared at every use for one connection's cost. A
     partition rewritten -- or merely re-profiled -- between two factors of one build is therefore
     read afresh by the second, and an answer loaded while the catalog moved underneath it is used

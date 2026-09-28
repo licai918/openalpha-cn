@@ -656,11 +656,11 @@ class PartitionRef:
     content_hash: str
 
 
-PartitionStamp = tuple[str, int, str, int | None, str | None]
+PartitionStamp = tuple[str, int, str, tuple[object, ...]]
 """One partition as `PanelStore.partition_stamps` reports it; see that method.
 
-`(dataset, year, content_hash, coverage recorded_at in epoch microseconds, coverage
-partition_content_hash)`, the last two `None` for a partition with no coverage record.
+`(dataset, year, content_hash, coverage)`, `coverage` being the whole coverage record and its
+census digests, or `()` for a partition with no coverage record.
 """
 
 
@@ -1389,30 +1389,44 @@ class PanelStore:
     def partition_stamps(
         self, *, excluding_prefixes: Sequence[str] = ()
     ) -> tuple[PartitionStamp, ...]:
-        """Every registered partition as the catalog stamps it now, ascending by dataset and year.
+        """Every registered partition as the catalog records it now, ascending by dataset and year.
 
-        One `(dataset, year, content_hash, coverage recorded_at in epoch microseconds, coverage
-        partition_content_hash)` per partition, the last two `None` when the partition has no
-        coverage record. Datasets whose name starts with one of `excluding_prefixes` are left out.
+        One `(dataset, year, content_hash, coverage)` per partition; `coverage` is `()` when the
+        partition has no coverage record and otherwise the **whole** record -- every column of its
+        `panel_partition_coverage` row (instants as epoch microseconds) followed by a
+        `(count, bit_xor of row hashes)` digest of each of its four census tables (subjects,
+        fields, dates, revisions). Datasets whose name starts with one of `excluding_prefixes` are
+        left out.
 
         **What this is for (`V2-P6-006`).** A reader that keeps an answer it computed from stored
         partitions -- `factor_view.FactorBuildContext` keeps one instant's universe, calendar and
         industry cross section for every factor of a build -- may serve it again only while the
-        partitions it came from stand. Every read of this store is decided by exactly two catalog
-        facts per partition: the partition row (its `content_hash`, which every rewrite moves)
-        and its coverage record (which readiness consults, and whose `recorded_at` every
-        re-profile moves). This returns both for every partition in **one** statement, so a
-        keeper can compare the whole catalog state it read under against the state now for the
-        price of one connection -- where asking `read_coverage` per partition would cost the ~37
-        connections a registry read already costs.
+        partitions it came from stand. Every read of this store is decided by two catalog facts
+        per partition: the partition row (its `content_hash`, which every rewrite moves) and its
+        coverage record (which readiness and the census reconciliations consult). This returns both
+        for every partition in **one** connection, so a keeper can compare the whole catalog state
+        it read under against the state now -- where asking `read_coverage` per partition would
+        cost the ~37 connections a registry read already costs.
+
+        **The whole record and not its `recorded_at`, and that was a review finding.** The first
+        version stamped the coverage row by `recorded_at` alone, on the argument that every
+        re-profile moves it. It moves only while the store's clock does: `PanelStore` takes an
+        injected `clock`, and a store whose clock does not advance re-records a *different*
+        coverage -- another `max_available_time`, another census -- under the same `recorded_at`,
+        which a keeper would then read as unchanged. Every column and every census row is compared
+        instead, so a coverage record that differs in anything readiness could consult differs
+        here, whatever the clock says. Held by
+        `tests/integration/panel/test_factor_build_shared_context.py::
+        test_a_coverage_re_profiled_under_a_clock_that_does_not_move_is_still_noticed`.
 
         **Not a read of any row**, which is why it is not a door in
         `tests/unit/panel/test_query_callers.py`'s sense: nothing here reaches a Parquet file, and
-        no answer about the market can be derived from it. It says which bytes the catalog stands
-        behind, never what they contain.
+        no answer about the market can be derived from it. It says which bytes and which census
+        the catalog stands behind, never what the bytes contain.
         """
         if not self.catalog_path.exists():
             return ()
+        prefixes = list(excluding_prefixes)
         with (
             self._catalog_access.shared(),
             duckdb.connect(str(self.catalog_path), read_only=True) as connection,
@@ -1420,38 +1434,20 @@ class PanelStore:
             _check_catalog_schema_version(connection)
             if not _table_exists(connection, "panel_partitions"):
                 return ()
-            excluded = " ".join("AND NOT starts_with(p.dataset, ?)" for _ in excluding_prefixes)
-            if _table_exists(connection, "panel_partition_coverage"):
-                has_partition_hash = _column_exists(
-                    connection, "panel_partition_coverage", "partition_content_hash"
-                )
-                hash_projection = "c.partition_content_hash" if has_partition_hash else "NULL"
-                statement = f"""
-                    SELECT p.dataset, p.year, p.content_hash, epoch_us(c.recorded_at),
-                           {hash_projection}
-                    FROM panel_partitions p
-                    LEFT JOIN panel_partition_coverage c
-                      ON c.dataset = p.dataset AND c.year = p.year
-                    WHERE TRUE {excluded}
-                    ORDER BY p.dataset, p.year
-                """
-            else:
-                statement = f"""
-                    SELECT p.dataset, p.year, p.content_hash, NULL, NULL
-                    FROM panel_partitions p
-                    WHERE TRUE {excluded}
-                    ORDER BY p.dataset, p.year
-                """
-            rows = connection.execute(statement, list(excluding_prefixes)).fetchall()
+            partitions = connection.execute(
+                "SELECT dataset, year, content_hash FROM panel_partitions p WHERE TRUE "
+                f"{_excluded_prefixes('p', prefixes)} ORDER BY dataset, year",
+                prefixes,
+            ).fetchall()
+            coverage = _coverage_stamps(connection, prefixes)
         return tuple(
             (
-                str(row[0]),
-                int(row[1]),
-                str(row[2]),
-                None if row[3] is None else int(row[3]),
-                None if row[4] is None else str(row[4]),
+                str(dataset),
+                int(year),
+                str(content_hash),
+                coverage.get((str(dataset), int(year)), ()),
             )
-            for row in rows
+            for dataset, year, content_hash in partitions
         )
 
     def assess_readiness(self, requirement: ReadinessRequirement) -> DatasetReadiness:
@@ -2784,6 +2780,75 @@ def _write_coverage(
         connection.execute("ROLLBACK")
         raise
     connection.execute("COMMIT")
+
+
+_COVERAGE_STAMP_COLUMNS: tuple[str, ...] = (
+    "provider_id",
+    "kind",
+    "schema_version",
+    "batch_digest",
+    "epoch_us(as_of)",
+    "epoch_us(fetched_at)",
+    "row_count",
+    "date_timezone",
+    "epoch_us(last_event_time)",
+    "epoch_us(max_available_time)",
+    "revised_row_count",
+    "epoch_us(recorded_at)",
+)
+"""Every column of a `panel_partition_coverage` row but the key, as `partition_stamps` projects it.
+
+Instants as epoch microseconds, so no timezone lookup runs per cell and the value does not depend
+on the session's zone. `partition_content_hash` is appended when the catalog has the column."""
+
+_CENSUS_STAMP_ROWS: tuple[tuple[str, str], ...] = (
+    ("panel_partition_subjects", "subject"),
+    ("panel_partition_fields", "ordinal, field_name, field_kind"),
+    ("panel_partition_dates", "event_date, row_count"),
+    ("panel_partition_revisions", "revision_label, row_count"),
+)
+"""The four census tables a coverage record owns, and the columns that make one of their rows.
+
+Each is stamped per partition as `(count(*), bit_xor(hash(<row>)))`: every row is unique under the
+table's primary key, so the xor of distinct row hashes changes when any row is added, removed or
+altered (up to a 64-bit collision), in one aggregate rather than a transfer of the rows."""
+
+
+def _excluded_prefixes(alias: str, prefixes: Sequence[str]) -> str:
+    return " ".join(f"AND NOT starts_with({alias}.dataset, ?)" for _ in prefixes)
+
+
+def _coverage_stamps(
+    connection: duckdb.DuckDBPyConnection, prefixes: Sequence[str]
+) -> dict[tuple[str, int], tuple[object, ...]]:
+    """`partition_stamps`' coverage half: each partition's whole coverage record and census."""
+    if not _table_exists(connection, "panel_partition_coverage"):
+        return {}
+    columns = list(_COVERAGE_STAMP_COLUMNS)
+    if _column_exists(connection, "panel_partition_coverage", "partition_content_hash"):
+        columns.append("partition_content_hash")
+    stamps: dict[tuple[str, int], tuple[object, ...]] = {
+        (str(row[0]), int(row[1])): tuple(row[2:])
+        for row in connection.execute(
+            f"SELECT dataset, year, {', '.join(columns)} FROM panel_partition_coverage c "
+            f"WHERE TRUE {_excluded_prefixes('c', prefixes)}",
+            list(prefixes),
+        ).fetchall()
+    }
+    for table, row in _CENSUS_STAMP_ROWS:
+        census: dict[tuple[str, int], tuple[int, int]] = {}
+        if _table_exists(connection, table):
+            census = {
+                (str(item[0]), int(item[1])): (int(item[2]), int(item[3]))
+                for item in connection.execute(
+                    f"SELECT dataset, year, count(*), bit_xor(hash({row})) FROM {table} t "
+                    f"WHERE TRUE {_excluded_prefixes('t', prefixes)} GROUP BY dataset, year",
+                    list(prefixes),
+                ).fetchall()
+            }
+        for key, stamp in stamps.items():
+            stamps[key] = (*stamp, census.get(key, (0, 0)))
+    return stamps
 
 
 def _read_coverage(

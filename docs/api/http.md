@@ -525,7 +525,12 @@ The twins are `openalpha factor list` / `openalpha factor describe` and
 `openalpha panel build` has no HTTP twin either: building writes panel partitions, a
 partition is replaced whole, and this service ships with no authentication of its own, so
 a `POST` that replaced a stored partition would hand that to whoever could reach the port.
-The builder is `openalpha factor build` and `OpenAlphaSDK.build_factor_panels(...)`.
+The builder is `openalpha factor build` and `OpenAlphaSDK.build_factor_panels(...)`; several
+factors built with one set of options are `openalpha factor build --factor A --factor B ...` and
+`OpenAlphaSDK.build_factor_panel_set(factors=...)` (`V2-P6-006`), which load each prediction
+instant's calendar, registry and industry cross section once for all of them. Each factor stores
+exactly the partitions its own build would; they are written one factor at a time, each whole, and
+a refusal names the factor it stopped at and lists what the factors before it stored.
 
 A store that only `openalpha panel build` ever wrote holds **no factor partition**, so
 `POST /api/v1/factors/run` against it answers `409` with `detail.reason =
