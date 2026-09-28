@@ -21,7 +21,9 @@ after that session. What must be point-in-time relative to each **signal** is de
   book then refuses as look-ahead rather than this module quietly dropping it.
 - **Signal instants** are `panel_ingest.session_publication_instant`, not a restated 16:30.
 - **Industries** (only when `max_industry_weight` is declared) are read per signal day at that
-  day's signal instant through `load_industry_cross_section`, the as-of-sensitive door.
+  day's signal instant through `load_industry_cross_section`, the as-of-sensitive door, in the
+  taxonomy in force that day (`V2-P6-015`): SW2014 level one through 2021-12-10, SW2021 from
+  2021-12-13. A cap is per day, so it never weighs one day's groups against another's.
 - **Turnover** for the participation cap is the signal session's own `daily.amount`, converted
   from thousands of yuan by `factor_tradeability.liquidity_from_amount`'s constant.
 
@@ -134,8 +136,9 @@ from openalpha_cn.domain.factor_transform import FactorTransformRegistry, Factor
 from openalpha_cn.domain.horizon import ResearchHorizon, parse_horizon
 from openalpha_cn.domain.index_prices import IndexPriceError, index_session_returns
 from openalpha_cn.domain.industry_classification import (
-    INDUSTRY_MEMBERSHIP_DATASET,
     IndustryClassificationError,
+    IndustryHorizonError,
+    industry_membership_source_on,
 )
 from openalpha_cn.domain.labels import (
     HaltCorpus,
@@ -1619,18 +1622,27 @@ class _IndustryDays(Mapping[date, Mapping[str, str]]):
         self._store = store
         self._days = signal_days
         self._instants = instants
-        self._years = tuple(sorted(store.registered_years(INDUSTRY_MEMBERSHIP_DATASET)))
         self._held: dict[date, Mapping[str, str]] = {}
 
     def __getitem__(self, day: date) -> Mapping[str, str]:
         if day not in self._days:
             raise KeyError(day)
         if day not in self._held:
-            years = tuple(year for year in self._years if year <= day.year)
+            # The dataset whose taxonomy was in force on the day (`V2-P6-015`): SW2014's
+            # level-one memberships through 2021-12-10, `index_member_all` from 2021-12-13.
+            try:
+                dataset = industry_membership_source_on(day).dataset
+            except IndustryHorizonError as error:
+                raise StrategyRunBlockedError(
+                    f"--max-industry-weight needs an industry cross section on "
+                    f"{day.isoformat()}: {error}"
+                ) from error
+            registered = self._store.registered_years(dataset)
+            years = tuple(sorted(year for year in registered if year <= day.year))
             if not years:
                 raise StrategyRunBlockedError(
                     f"--max-industry-weight needs industry memberships and no "
-                    f"{INDUSTRY_MEMBERSHIP_DATASET} partition at or before {day.year} is "
+                    f"{dataset} partition at or before {day.year} is "
                     "registered in this panel"
                 )
             store, instant = self._store, self._instants[day]

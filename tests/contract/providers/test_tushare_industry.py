@@ -31,6 +31,7 @@ from openalpha_cn.domain.industry_classification import (
     INDUSTRY_MEMBERSHIP_TAXONOMY,
     INDUSTRY_TAXONOMY_EFFECTIVE_FROM,
     INDUSTRY_TREE_DATASET,
+    SW2014_MEMBERSHIP_DATASET,
     SW2014_TAXONOMY,
     SW2021_TAXONOMY,
 )
@@ -647,4 +648,116 @@ def test_a_tree_node_from_an_undated_vintage_is_refused_at_decode(
     with pytest.raises(ProviderFailure, match="has no measured effective date"):
         provider.fetch_panel(
             ProviderRequest(dataset=INDUSTRY_TREE_DATASET, as_of=AS_OF, subjects=(SW2021_TAXONOMY,))
+        )
+
+
+# --------------------------------------------------------------------------------------
+# SW2014 level-one memberships, from the per-index endpoint (`V2-P6-015`)
+# --------------------------------------------------------------------------------------
+
+SW2014_MEMBER_FIELDS = ["index_code", "con_code", "in_date", "out_date", "is_new"]
+# index_member(index_code=801020.SI), SW2014's 采掘, in the shape the 2026-09-27 probe read: one
+# assignment that predates SW2014 and closed on the last SW2014 session, one that began inside
+# the era and is still open.
+SW2014_BEFORE_ITS_BIRTH = ["801020.SI", "600028.SH", "20011008", "20211210", "N"]
+SW2014_INSIDE_ITS_ERA = ["801020.SI", "601857.SH", "20160304", None, "Y"]
+
+
+def _sw2014_batch(fake_tushare_transport: Any, *rows: list[Any], clock: datetime = AS_OF) -> Any:
+    provider, transport = _provider(
+        fake_tushare_transport, _response(SW2014_MEMBER_FIELDS, rows), clock=clock
+    )
+    batch = provider.fetch_panel(
+        ProviderRequest(dataset=SW2014_MEMBERSHIP_DATASET, as_of=clock, subjects=("801020.SI",))
+    )
+    return batch, transport
+
+
+def test_the_sw2014_request_posts_one_index_to_the_per_index_endpoint(
+    fake_tushare_transport,
+) -> None:
+    """28 requests for the whole SW2014 corpus, one per SW2014 L1 index; the probe read 7,558
+    rows that way and no response was paged."""
+    _, transport = _sw2014_batch(fake_tushare_transport, SW2014_INSIDE_ITS_ERA)
+
+    assert transport.payload["api_name"] == "index_member"
+    assert transport.payload["params"] == {"index_code": "801020.SI"}
+
+
+def test_an_sw2014_request_names_exactly_one_index(fake_tushare_transport) -> None:
+    provider, _ = _provider(
+        fake_tushare_transport, _response(SW2014_MEMBER_FIELDS, ()), clock=AS_OF
+    )
+    for subjects in ((), ("801020.SI", "801030.SI")):
+        with pytest.raises(ProviderFailure, match="one SW2014 level-one index"):
+            provider.fetch_panel(
+                ProviderRequest(dataset=SW2014_MEMBERSHIP_DATASET, as_of=AS_OF, subjects=subjects)
+            )
+
+
+def test_the_sw2014_projection_is_the_security_and_its_level_one_index(
+    fake_tushare_transport,
+) -> None:
+    batch, _ = _sw2014_batch(fake_tushare_transport, SW2014_INSIDE_ITS_ERA)
+
+    assert batch.subjects == ("601857.SH",)
+    assert [column.name for column in batch.columns] == [
+        "industry_from",
+        "industry_through",
+        "l1_code",
+    ]
+    values = {column.name: column.values for column in batch.columns}
+    assert values == {
+        "industry_from": ("2016-03-04",),
+        "industry_through": (None,),
+        "l1_code": ("801020.SI",),
+    }
+
+
+def test_an_sw2014_label_is_available_no_earlier_than_sw2014_itself(
+    fake_tushare_transport,
+) -> None:
+    """600028.SH is a constituent of SW2014's 采掘 from 2001-10-08 -- twelve years before SW2014
+    existed. The opening half is dated at its own event and floored at SW2014's birthday; the
+    closing half at 2021-12-10. Dropping the floor dates a 2014 classification at 2001."""
+    batch, _ = _sw2014_batch(fake_tushare_transport, SW2014_BEFORE_ITS_BIRTH)
+
+    sw2014_born = INDUSTRY_TAXONOMY_EFFECTIVE_FROM[SW2014_TAXONOMY]
+    assert batch.subjects == ("600028.SH", "600028.SH")
+    assert batch.timeline.event_time == (
+        datetime(2001, 10, 8, tzinfo=SHANGHAI),
+        datetime(2021, 12, 10, tzinfo=SHANGHAI),
+    )
+    assert batch.timeline.available_time == (
+        datetime(sw2014_born.year, sw2014_born.month, sw2014_born.day, tzinfo=SHANGHAI),
+        datetime(2021, 12, 10, tzinfo=SHANGHAI),
+    )
+
+
+def test_an_sw2014_assignment_inside_its_era_is_available_on_its_own_day(
+    fake_tushare_transport,
+) -> None:
+    """Inside the era the floor is behind the event, so the row is dated at `in_date` -- and
+    not at SW2021's 2021-12-13, which is the floor `index_member_all` gets."""
+    batch, _ = _sw2014_batch(fake_tushare_transport, SW2014_INSIDE_ITS_ERA)
+
+    assert batch.timeline.available_time == (datetime(2016, 3, 4, tzinfo=SHANGHAI),)
+
+
+def test_the_sw2014_descriptor_demands_the_truncation_flag_and_serves_no_evidence(
+    fake_tushare_transport,
+) -> None:
+    """No cap was measurable: the largest SW2014 index (801890.SI, 738 rows) came back with
+    `has_more=False`. So the flag is the only witness, as it is for `index_classify`."""
+    descriptor = _descriptor(SW2014_MEMBERSHIP_DATASET)
+    assert descriptor.max_rows_per_response is None
+    assert descriptor.requires_truncation_flag is True
+    provider, _ = _provider(
+        fake_tushare_transport,
+        _response(SW2014_MEMBER_FIELDS, (SW2014_INSIDE_ITS_ERA,)),
+        clock=AS_OF,
+    )
+    with pytest.raises(ProviderFailure, match="served only on the panel plane"):
+        provider.fetch(
+            ProviderRequest(dataset=SW2014_MEMBERSHIP_DATASET, as_of=AS_OF, subjects=("801020.SI",))
         )

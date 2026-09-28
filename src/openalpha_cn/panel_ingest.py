@@ -310,7 +310,7 @@ import operator
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 from statistics import median
 from types import MappingProxyType
 from typing import Final, cast
@@ -371,16 +371,18 @@ from openalpha_cn.domain.index_prices import (
 from openalpha_cn.domain.industry_classification import (
     INDUSTRY_MEMBERSHIP_DATASET,
     INDUSTRY_MEMBERSHIP_PANEL_COLUMNS,
+    INDUSTRY_MEMBERSHIP_SOURCES,
     INDUSTRY_MEMBERSHIP_TAXONOMY,
-    INDUSTRY_TAXONOMY_EFFECTIVE_FROM,
     INDUSTRY_TREE_DATASET,
     INDUSTRY_TREE_PANEL_COLUMNS,
     IndustryAnswer,
     IndustryClassificationError,
     IndustryHorizonError,
+    IndustryMembershipSource,
     IndustryTree,
     SecurityIndustryHistory,
     industry_histories_from_panel_rows,
+    industry_membership_source_on,
     industry_trees_from_panel_rows,
 )
 from openalpha_cn.domain.name_history import (
@@ -4717,11 +4719,20 @@ def write_industry_memberships(
     market in which nobody has ever been reclassified. What catches it is the request contract
     instead: `providers/tushare.py` refuses a membership request that does not name its state,
     so the current-only fetch has to be written out deliberately rather than fallen into.
+
+    ## The second membership dataset (`V2-P6-015`)
+
+    `index_member_sw2014` -- SW2014's level-one memberships, fetched one SW2014 index per request
+    -- is written here too, and everything above holds for it unchanged: it has no date filter, a
+    closed interval is split at the provider into two rows, and a per-index loop is exactly the
+    loop the subject guard refuses. One call writes one dataset; the batches of the two are never
+    merged, and `merge_panel_batches` refuses a mixture.
     """
     merged = merge_panel_batches(batches)
-    if merged.dataset != INDUSTRY_MEMBERSHIP_DATASET:
+    datasets = [source.dataset for source in INDUSTRY_MEMBERSHIP_SOURCES]
+    if merged.dataset not in datasets:
         raise IndustryClassificationError(
-            f"expected the {INDUSTRY_MEMBERSHIP_DATASET!r} dataset, got {merged.dataset!r}"
+            f"expected one of the {datasets!r} datasets, got {merged.dataset!r}"
         )
     by_year = split_panel_batch_by_year(merged, date_timezone=date_timezone)
     for year, yearly in by_year:
@@ -4766,9 +4777,18 @@ def write_industry_tree(
 
 
 def industry_membership_requirement(
-    *, years: Sequence[int], as_of: datetime, max_staleness: timedelta | None
+    *,
+    years: Sequence[int],
+    as_of: datetime,
+    max_staleness: timedelta | None,
+    source: IndustryMembershipSource | None = None,
 ) -> ReadinessRequirement:
     """What the industry panel must satisfy before assignments may be read from it.
+
+    `source` names which membership dataset (`INDUSTRY_MEMBERSHIP_SOURCES`) and so which row
+    shape; omitted, it is `index_member_all`, the one dataset every caller before `V2-P6-015`
+    meant. The floor below is that source's own taxonomy date -- 2014-02-21 for
+    `index_member_sw2014`.
 
     `required_dates` and `required_subjects` are waived for the reason
     `stock_universe_requirement` waives them: a reclassification has no schedule, so a list of
@@ -4777,21 +4797,25 @@ def industry_membership_requirement(
 
     What is **not** waived, and what does the work this dataset needs, is the availability check
     already inside `evaluate_readiness`: every stored row's `available_time` is at or after the
-    taxonomy's effective date, so a requirement whose `as_of` predates 2021-12-13 blocks with
-    `not_yet_knowable` rather than answering a 2015 question in a 2021 classification. That is
-    not a rule stated here; it is what the honest clock makes the generic rule say.
+    taxonomy's effective date, so a requirement on `index_member_all` whose `as_of` predates
+    2021-12-13 blocks with `not_yet_knowable` rather than answering a 2015 question in a 2021
+    classification -- and one on `index_member_sw2014` whose `as_of` predates 2014-02-21 blocks the
+    same way. That is not a rule stated here; it is what the honest clock makes the generic rule
+    say.
 
     `max_staleness` has no default, for `stock_universe_requirement`'s reason: assignments change
     in bursts around the annual review, so any bound this function chose would be choosing for
     the caller.
     """
     return ReadinessRequirement(
-        dataset=INDUSTRY_MEMBERSHIP_DATASET,
+        dataset=INDUSTRY_MEMBERSHIP_DATASET if source is None else source.dataset,
         as_of=as_of,
         years=tuple(sorted(set(years))),
         required_dates=None,
         required_subjects=None,
-        required_fields=INDUSTRY_MEMBERSHIP_PANEL_COLUMNS,
+        required_fields=(
+            INDUSTRY_MEMBERSHIP_PANEL_COLUMNS if source is None else source.panel_columns
+        ),
         max_staleness=max_staleness,
     )
 
@@ -4958,16 +4982,22 @@ def load_industry_cross_section(
       so `as_of`'s own day in that zone is the last day this read can speak for. Beyond it, an
       open interval and a withheld close are the same rows, which is the one situation this whole
       issue exists to keep out of an answer.
-    - **An `as_of` before the taxonomy's effective date is refused before any read.** Every
-      membership row's availability is floored there (`INDUSTRY_TAXONOMY_EFFECTIVE_FROM`), so the
-      predicate would withhold the entire corpus and hand back an empty mapping -- a market with
-      no industries in it, which is a different fact from a classification that did not exist yet.
-      This is the outer bound `V2-P4-027` explicitly does **not** move, and it is what makes
-      2021-12-13 the earliest `as_of` anything here can serve.
+    - **A `day` no measured taxonomy was in force on is refused before any read** (`V2-P6-015`).
+      The day decides the dataset: `industry_membership_source_on` names SW2014's level-one
+      memberships (`index_member_sw2014`) for 2014-02-21..2021-12-12 and `index_member_all` from
+      2021-12-13, and refuses a day before 2014-02-21. This used to be a refusal of an `as_of`
+      before SW2021's own 2021-12-13 -- the outer bound `V2-P4-027` did not move -- because every
+      day was read off `index_member_all`. It needs no separate `as_of` check any more: `day` is
+      at or after its source's effective date and at or before `as_of`'s own day, so `as_of` is
+      already past the midnight every row of that source is floored at.
     - **A stored membership year at or before `day`'s year that this read did not name is
       refused.** `answerable_through`'s rule, asked about a day instead of about a year: an
       assignment's close is filed in its own year, so an unread year at or before `day` can hold
-      the close that ends an interval this cross section is about to report as current.
+      the close that ends an interval this cross section is about to report as current. The
+      stored years *below* the first one named are read underneath the request
+      (`V2-P6-015`, `load_stock_universe`'s widening): an SW2014 assignment that opened in 1996 is
+      filed in 1996, and a caller asking about a 2016 day names 2016, not the 27 years before it.
+      What is refused is a stored year skipped inside or above the named span.
     - **A partition whose visible rows on an event date do not number what its own census counts
       there is refused.** The equality above, checked rather than assumed, because the clock it
       rests on lives in a provider one package away and nothing in the store enforces it. Both
@@ -4995,11 +5025,15 @@ def load_industry_cross_section(
 
     ## What it does not promise
 
-    Everything `read_visible_at`'s own "what it does not promise" says, plus one thing specific to
-    this dataset: `KNOWN_INDUSTRY_LIMITATIONS.every_pre_2021_answer_is_a_backfill` is untouched
-    here. A cross section for a 2015 day read at a 2022 `as_of` is SW2021's opinion about 2015,
-    which `IndustryAnswer.is_backfilled` says on every row and this function neither hides nor
-    fixes. A security with no assignment covering `day` -- including one of the 49 measured
+    Everything `read_visible_at`'s own "what it does not promise" says, plus what is specific to
+    these datasets. `KNOWN_INDUSTRY_LIMITATIONS.every_pre_2021_answer_is_a_backfill` no longer
+    reaches a cross section: a 2015 day is answered in SW2014, the classification in force then,
+    not in SW2021's opinion about 2015 -- so `IndustryAnswer.is_backfilled` is `False` on every
+    answer this returns. What it costs instead is named there too: SW2014 is level one only
+    (`sw2014_is_stored_at_level_one_only`, so `l2_code`/`l3_code` are `None`), it covers less of
+    the late-era market (`the_sw2014_era_covers_less_of_the_market`), and a series across
+    2021-12-13 changes taxonomy (`the_taxonomy_in_force_switches_on_2021_12_13`). A security
+    with no assignment covering `day` -- including one of the 49 measured
     coverage holes -- is **absent from the mapping** rather than raising, which is
     `SecurityIndustryHistory.is_classified_on`'s distinction and the same fold
     `panel_neutralization._industry_answer` already makes; what is no longer folded in with it is
@@ -5012,11 +5046,18 @@ def load_industry_cross_section(
             "would produce a cross section with no securities in it, which is indistinguishable "
             "from a market nobody has ever classified"
         )
+    try:
+        source = industry_membership_source_on(day)
+    except IndustryHorizonError as error:
+        raise PanelStorageError(
+            f"no industry cross section can be read for {day.isoformat()}: {error}"
+        ) from error
+    dataset = source.dataset
     zone = _resolve_timezone(date_timezone)
     knowable_through = as_of.astimezone(zone).date()
     if day > knowable_through:
         raise PanelStorageError(
-            f"{INDUSTRY_MEMBERSHIP_DATASET} cannot be read for {day.isoformat()} at "
+            f"{dataset} cannot be read for {day.isoformat()} at "
             f"{as_of.isoformat()}: a membership event becomes knowable at midnight "
             f"{date_timezone} on the day it takes effect, so the newest one this read can see is "
             f"{knowable_through.isoformat()}. On a later day an assignment that is open only "
@@ -5024,35 +5065,33 @@ def load_industry_cross_section(
             "genuinely never ended, and answering it would name an industry the security may "
             "already have left"
         )
-    floor = datetime.combine(
-        INDUSTRY_TAXONOMY_EFFECTIVE_FROM[INDUSTRY_MEMBERSHIP_TAXONOMY], time(0, 0), tzinfo=zone
-    )
-    if as_of < floor:
-        raise PanelStorageError(
-            f"{INDUSTRY_MEMBERSHIP_DATASET} cannot be read at {as_of.isoformat()}: every "
-            f"membership row's availability is floored at {floor.isoformat()}, the instant "
-            f"{INDUSTRY_MEMBERSHIP_TAXONOMY} came into force, so no row of any partition was "
-            "knowable then. A visibility-filtered read would withhold the whole corpus and hand "
-            "back an empty cross section, which says the market had no industries rather than "
-            "that this classification did not exist yet"
-        )
-    stored = sorted(set(store.registered_years(INDUSTRY_MEMBERSHIP_DATASET)))
-    skipped = [year for year in stored if year not in set(requested)]
+    # No separate `as_of` floor is checked here any more, and none is needed: `day` is at or after
+    # its source's effective date and at or before `as_of`'s own day, so `as_of` is already past
+    # the midnight every one of that source's rows is floored at. Until `V2-P6-015` the day could
+    # predate the taxonomy (every day was read off SW2021), and this read had to refuse the
+    # `as_of` separately.
+    stored = sorted(set(store.registered_years(dataset)))
+    # The stored years below the first one named are read underneath the request, which is
+    # `load_stock_universe`'s widening and for its reason: an assignment that opened in 1991 is
+    # filed in 1991, and a caller asking about a 2016 day names 2016. What stays refused is a
+    # stored year the request skips *inside or above* its own span at or before `day`.
+    resolved = tuple(year for year in stored if year < requested[0]) + requested
+    skipped = [year for year in stored if year not in set(resolved)]
     if skipped and skipped[0] <= day.year:
         raise PanelStorageError(
-            f"{INDUSTRY_MEMBERSHIP_DATASET} cannot answer {day.isoformat()}: the store holds a "
+            f"{dataset} cannot answer {day.isoformat()}: the store holds a "
             f"{skipped[0]} partition this read did not name, and an assignment's close is stored "
             "as its own row in its own year, so an interval that ended there is indistinguishable "
             "here from one still open. Name every stored year at or before "
             f"{day.year} in `years`, or ask about a day before {skipped[0]}"
         )
     requirement = industry_membership_requirement(
-        years=requested, as_of=as_of, max_staleness=max_staleness
+        years=resolved, as_of=as_of, max_staleness=max_staleness, source=source
     )
     rows = _read_visible_membership_rows(store, requirement, as_of=as_of)
     histories = industry_histories_from_panel_rows(
         rows,
-        taxonomy=INDUSTRY_MEMBERSHIP_TAXONOMY,
+        taxonomy=source.taxonomy,
         answerable_through=(skipped[0] - 1) if skipped else None,
     )
     answers: dict[str, IndustryAnswer] = {}
@@ -5156,10 +5195,13 @@ def _read_visible_membership_rows(
     converted in, not the caller's: the census's dates were resolved in that zone, and comparing
     them against days computed in another would be comparing two different calendars.
     """
+    # The requirement's own row shape, which is the source's: `index_member_sw2014` stores no L2
+    # or L3 column (`V2-P6-015`).
+    columns = requirement.required_fields or INDUSTRY_MEMBERSHIP_PANEL_COLUMNS
     return _read_visible_event_dated_rows(
         store,
         requirement,
-        INDUSTRY_MEMBERSHIP_PANEL_COLUMNS,
+        columns,
         as_of=as_of,
         what="the industry classification",
         availability_rule=(

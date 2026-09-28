@@ -854,7 +854,8 @@ class _RecordingTushareTransport:
 
         name = str(payload["api_name"])
         self.datasets.append(name)
-        (descriptor,) = (entry for entry in TUSHARE_DATASETS if entry.dataset == name)
+        # `endpoint`, not `dataset`: V2-P6-015's index_member_sw2014 posts to `index_member`.
+        (descriptor,) = (entry for entry in TUSHARE_DATASETS if entry.endpoint == name)
         return {
             "code": 0,
             "msg": "",
@@ -898,7 +899,7 @@ def test_doctor_probe_sends_one_request_for_every_declared_tushare_dataset(
 
     assert result.exit_code == 0, result.stdout
     declared = [entry.dataset for entry in TUSHARE_DATASETS]
-    assert transport.datasets == declared
+    assert transport.datasets == [entry.endpoint for entry in TUSHARE_DATASETS]
     payload = json.loads(result.stdout)
     assert payload["providers"]["tushare.pro"]["probe"] == dict.fromkeys(declared, "ok")
     assert payload["probe_failures"] == []
@@ -914,7 +915,7 @@ def test_doctor_probe_exits_non_zero_when_the_credential_is_rejected(
     token answers `code=40101`, which the provider classified `upstream` because the only code
     mapped to `authentication` was one nothing has ever observed.
     """
-    from openalpha_cn.providers.tushare import TushareProvider
+    from openalpha_cn.providers.tushare import TUSHARE_DATASETS, TushareProvider
 
     class _RejectingTransport:
         def post(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -930,7 +931,7 @@ def test_doctor_probe_exits_non_zero_when_the_credential_is_rejected(
     assert result.exit_code == 1
     payload = json.loads(result.stdout)
     assert set(payload["providers"]["tushare.pro"]["probe"].values()) == {"authentication"}
-    assert len(payload["probe_failures"]) == 16
+    assert len(payload["probe_failures"]) == len(TUSHARE_DATASETS) == 17
     assert payload["status"] == "error"
 
 

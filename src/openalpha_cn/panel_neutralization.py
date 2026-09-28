@@ -233,7 +233,9 @@ post-dated the `as_of`, and on the real corpus that was the annual constituent r
 `panel_ingest.load_industry_cross_section`, which takes the day as an argument. What is left is a
 caller's own narrowing -- `KNOWN_NEUTRALIZATION_LIMITATIONS
 .a_stored_membership_year_left_unread_refuses_the_day_rather_than_answering_it` -- plus the
-outer floor that no cross section before 2021-12-13 is assemblable at all.
+outer floor that no cross section before 2014-02-21 is assemblable at all (`V2-P6-015` moved it
+there from SW2021's 2021-12-13 by reading SW2014's level-one memberships for the days SW2014 was in
+force).
 """
 
 import math
@@ -277,9 +279,9 @@ from openalpha_cn.domain.factor_transform import (
     ProcessedFactorObservation,
 )
 from openalpha_cn.domain.industry_classification import (
-    INDUSTRY_MEMBERSHIP_TAXONOMY,
     IndustryAnswer,
     IndustryAssignment,
+    industry_membership_source_on,
 )
 from openalpha_cn.domain.panel_batch import (
     SUBJECT_COLUMN_NAME,
@@ -602,9 +604,10 @@ other residual unmoved.
 INDUSTRY_AND_SIZE_NOTE: Final[FactorNote] = FactorNote(
     subject=INDUSTRY_AND_SIZE.qualified_key,
     summary=(
-        "The conventional cross-sectional neutralisation: remove each SW2021 level-one "
-        "industry's own mean and the part of what is left that the log of total market "
-        "capitalisation explains, and store the residual. L1 because its 31 nodes give a mean "
+        "The conventional cross-sectional neutralisation: remove each level-one industry's own "
+        "mean -- in the taxonomy in force on the day, SW2014's 28 before 2021-12-13 and SW2021's "
+        "31 from it (V2-P6-015) -- and the part of what is left that the log of total market "
+        "capitalisation explains, and store the residual. L1 because SW2021's 31 nodes give a mean "
         "group of about 178 names on a whole-market cross section, where L2's 134 nodes give 41 "
         "and L3's 346 give 16 -- and a group mean estimated from 16 names is mostly the names. "
         "total_mv rather than circ_mv because the whole company is what an industry peer group "
@@ -2241,13 +2244,18 @@ def load_industry_market_cap_cross_section(
       which year to add, rather than the counted absence it used to be here, and it is
       `KNOWN_NEUTRALIZATION_LIMITATIONS
       .a_stored_membership_year_left_unread_refuses_the_day_rather_than_answering_it`.
-    - **No cross section before 2021-12-13 is assemblable at all**, because every membership row's
-      `available_time` is floored at the SW2021 taxonomy's effective date. That is a refusal of
-      the whole build rather than a thinning of it, and it is
-      `KNOWN_NEUTRALIZATION_LIMITATIONS.no_cross_section_is_neutralisable_before_2021_12_13`.
-      **It is the outermost bound and is now the only one a well-formed request meets**: with
-      neither dataset refusing an in-year `as_of`, the earliest instant at which anything here can
-      answer is this floor, and inside the era the granularity is one session.
+    - **No cross section before 2014-02-21 is assemblable at all**, because no measured taxonomy
+      was in force then: `load_industry_cross_section` reads the membership dataset of the
+      taxonomy in force on `day` (`V2-P6-015` -- SW2014 level one through 2021-12-10, SW2021 from
+      2021-12-13) and refuses a day before SW2014's birthday. That is a refusal of the whole build
+      rather than a thinning of it, and it is
+      `KNOWN_NEUTRALIZATION_LIMITATIONS.no_cross_section_is_neutralisable_before_2014_02_21` --
+      `no_cross_section_is_neutralisable_before_2021_12_13` until SW2014 was stored. **It is the
+      outermost bound and the only one a well-formed request meets**: with neither dataset
+      refusing an in-year `as_of`, the earliest instant at which anything here can answer is this
+      floor, and inside either era the granularity is one session. One more refusal is the
+      SW2014 era's own: a spec declared at L2 or L3 on a day before 2021-12-13 is refused by name,
+      because SW2014 is stored at L1 only.
 
     ## What it does with a security it cannot answer for
 
@@ -2281,6 +2289,19 @@ def load_industry_market_cap_cross_section(
         max_staleness=max_staleness,
         date_timezone=date_timezone,
     )
+    # The taxonomy in force on `day` (`V2-P6-015`), which is the one the read above answered in:
+    # `load_industry_cross_section` has already refused a day no measured taxonomy covers, so
+    # this lookup cannot fail here. It decides the cross section's `taxonomy` and whether the
+    # declared level exists at all -- SW2014 is stored at L1 only.
+    source = industry_membership_source_on(day)
+    if spec.industry_level not in source.levels:
+        raise FactorEngineError(
+            f"{spec.qualified_key} groups at {spec.industry_level}, and on {day.isoformat()} the "
+            f"taxonomy in force is {source.taxonomy}, whose stored memberships "
+            f"({source.dataset}) carry {list(source.levels)} only. A level the classification of "
+            "the day does not have is refused rather than borrowed from another taxonomy; see "
+            "KNOWN_INDUSTRY_LIMITATIONS.sw2014_is_stored_at_level_one_only"
+        )
     valuations = load_daily_valuations(
         store,
         day=day,
@@ -2313,7 +2334,7 @@ def load_industry_market_cap_cross_section(
         )
     return build_industry_market_cap_cross_section(
         as_of=as_of,
-        taxonomy=INDUSTRY_MEMBERSHIP_TAXONOMY,
+        taxonomy=source.taxonomy,
         industry_level=spec.industry_level,
         market_cap_measure=spec.market_cap_measure,
         characteristics=complete,

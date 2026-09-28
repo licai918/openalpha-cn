@@ -37,6 +37,7 @@ from openalpha_cn.domain.index_prices import INDEX_DAILY_DATASET
 from openalpha_cn.domain.industry_classification import (
     INDUSTRY_MEMBERSHIP_DATASET,
     INDUSTRY_TREE_DATASET,
+    SW2014_MEMBERSHIP_DATASET,
 )
 from openalpha_cn.domain.panel_batch import MAX_SOURCE_URI_LENGTH, PanelBatchError
 from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET
@@ -265,6 +266,9 @@ def test_every_descriptor_states_whether_its_response_cap_was_measured() -> None
         "index_weight": 7000,
         "index_classify": None,
         "index_member_all": 3000,
+        # V2-P6-015: the largest SW2014 index answered 738 rows with has_more=False, so the
+        # ceiling is above that and unmeasurable from outside -- index_classify's case.
+        "index_member_sw2014": None,
         "income": None,
         "balancesheet": 100,
         "cashflow": None,
@@ -361,6 +365,8 @@ def test_the_flag_is_demanded_exactly_where_it_is_the_only_witness_or_the_stakes
         INDEX_DAILY_DATASET,
         INDUSTRY_TREE_DATASET,
         INDUSTRY_MEMBERSHIP_DATASET,
+        # V2-P6-015: no measurable cap, so the flag is its only witness (index_classify's case).
+        SW2014_MEMBERSHIP_DATASET,
         TRADING_CALENDAR_DATASET,
         *FINANCIAL_STATEMENT_DATASETS,
     }

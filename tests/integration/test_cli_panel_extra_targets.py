@@ -48,6 +48,7 @@ from openalpha_cn.domain.index_prices import INDEX_DAILY_DATASET, INDEX_PRICE_IN
 from openalpha_cn.domain.industry_classification import (
     INDUSTRY_MEMBERSHIP_DATASET,
     INDUSTRY_TREE_DATASET,
+    SW2014_MEMBERSHIP_DATASET,
     SW2014_TAXONOMY,
     SW2021_TAXONOMY,
 )
@@ -93,6 +94,7 @@ INDEX_CLASSIFY_FIELDS = [
     "src",
 ]
 INDEX_MEMBER_FIELDS = ["ts_code", "l1_code", "l2_code", "l3_code", "in_date", "out_date"]
+SW2014_MEMBER_FIELDS = ["index_code", "con_code", "in_date", "out_date", "is_new"]
 
 SWEEP = "_vip"
 """The suffix of a statement dataset's whole-market endpoint (`V2-P6-002`)."""
@@ -373,12 +375,25 @@ class ExtraTargetTransport:
             )
         if api_name == INDUSTRY_MEMBERSHIP_DATASET:
             return _response(INDEX_MEMBER_FIELDS, self._membership_items(params))
+        if api_name == "index_member":
+            return _response(SW2014_MEMBER_FIELDS, self._sw2014_items(params))
         if api_name in STATEMENT_DATA_COLUMNS:
             return _response(_statement_fields(api_name), self._statement_rows(api_name, params))
         if api_name.removesuffix(SWEEP) in STATEMENT_DATA_COLUMNS:
             dataset = api_name.removesuffix(SWEEP)
             return _response(_statement_fields(dataset), self._sweep_rows(dataset, params))
         raise AssertionError(f"the CLI asked for an unscripted dataset: {api_name}")
+
+    def _sw2014_items(self, params: Mapping[str, str]) -> list[list[Any]]:
+        """One SW2014 index's constituents: `SECURITIES[i]` belongs to `L1_CODES[i]`, entering on
+        SW2014's birthday and leaving on its last session -- closed, unless `superseded` is off,
+        which is the current-only shape the sweep refuses."""
+        index_code = str(params["index_code"])
+        if not self._assigns:
+            return []
+        code = SECURITIES[L1_CODES.index(index_code)]
+        out_date = "20211210" if self._superseded else None
+        return [[index_code, code, "20140221", out_date, "N" if out_date else "Y"]]
 
     def _membership_items(self, params: Mapping[str, str]) -> list[list[Any]]:
         level_one = str(params["l1_code"])
@@ -482,6 +497,7 @@ EVERY_EXTRA_TARGET: tuple[str, ...] = (
     CASH_FLOW_DATASET,
     INDUSTRY_TREE_DATASET,
     INDUSTRY_MEMBERSHIP_DATASET,
+    SW2014_MEMBERSHIP_DATASET,
     FINANCIAL_INDICATOR_DATASET,
 )
 
@@ -521,6 +537,9 @@ def test_every_new_target_writes_a_partition_through_the_real_writers(
         # Membership *event* years: the opening half of a closed assignment lands in 2021 and
         # the closing half in 2022, and the open assignments land in 2022.
         INDUSTRY_MEMBERSHIP_DATASET: [2021, 2022],
+        # SW2014's memberships (`V2-P6-015`), filed the same way: each security opens on
+        # 2014-02-21 and closes on 2021-12-10.
+        SW2014_MEMBERSHIP_DATASET: [2014, 2021],
         # Announcement years derived from period year 2025: its three interims were announced
         # in 2025 and its annual on 2026-03-15, which is past this build's clock and dropped.
         FINANCIAL_INDICATOR_DATASET: [EXTRA_YEAR],
@@ -925,6 +944,47 @@ def test_the_membership_sweep_is_refused_before_it_starts_when_no_tree_is_stored
     assert result.exit_code == PanelExit.unhealthy
     assert "--dataset index_classify" in result.output
     assert extra_transport.requests_for(INDUSTRY_MEMBERSHIP_DATASET) == []
+
+
+def test_the_sw2014_sweep_asks_each_stored_sw2014_level_one_index_once(
+    tmp_path: Path, extra_transport: ExtraTargetTransport
+) -> None:
+    """`V2-P6-015`'s target: one `index_member` request per level-one node of the stored
+    **SW2014** tree -- not SW2021's, whose codes would fetch SW2021 constituents under an SW2014
+    name -- and the corpus filed by event year like `index_member_all`'s."""
+    result = build(tmp_path, INDUSTRY_TREE_DATASET, SW2014_MEMBERSHIP_DATASET, extra=["--json"])
+
+    assert result.exit_code == PanelExit.ok, result.output
+    assert extra_transport.requests_for("index_member") == [
+        {"index_code": code} for code in L1_CODES
+    ]
+    assert _partitions(result)[SW2014_MEMBERSHIP_DATASET] == [2014, 2021]
+
+
+def test_the_sw2014_sweep_is_refused_before_it_starts_when_no_tree_is_stored(
+    tmp_path: Path, extra_transport: ExtraTargetTransport
+) -> None:
+    result = build(tmp_path, SW2014_MEMBERSHIP_DATASET)
+
+    assert result.exit_code == PanelExit.unhealthy
+    assert "--dataset index_classify" in result.output
+    assert extra_transport.requests_for("index_member") == []
+
+
+def test_an_sw2014_sweep_with_no_closed_interval_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The per-index endpoint takes no `is_new` and answered both halves of the history on the
+    live probe (534 rows closing on 2021-12-10 alone). A sweep with no closed interval at all is
+    the current-only shape, and it is refused rather than stored as a history."""
+    _install(monkeypatch, ExtraTargetTransport(superseded=False))
+
+    assert build(tmp_path, INDUSTRY_TREE_DATASET).exit_code == PanelExit.ok
+    result = build(tmp_path, SW2014_MEMBERSHIP_DATASET)
+
+    assert result.exit_code == PanelExit.unhealthy
+    assert "found no closed interval" in " ".join(result.output.split())
+    assert PanelStore(tmp_path / "panel").registered_years(SW2014_MEMBERSHIP_DATASET) == ()
 
 
 def test_a_membership_sweep_with_no_superseded_row_is_refused(

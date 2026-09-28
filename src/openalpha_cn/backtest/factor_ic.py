@@ -213,9 +213,13 @@ series actually meets.** The stamping rule is unchanged, so a neutralised series
 point-in-time as the schedule it was built on: a tier built once at year end still reads as one
 December instant, and nothing in a stored artifact says which of the two it was. And one refusal
 still bounds the schedule from outside this module -- no cross section at all is assemblable
-before the SW2021 availability floor of 2021-12-13. `index_member_all` is read one day at a time
-since `V2-P4-027`/`V2-P4-028` and states no bound of its own; it used to be a second refusal
-here, read whole partition.
+before SW2014's birthday, 2014-02-21. That bound was SW2021's 2021-12-13 until `V2-P6-015` stored
+SW2014's level-one memberships and read each day in the taxonomy in force then, so the 2015-2021
+window now has a neutralised tier -- in SW2014's 28 groups before 2021-12-13 and SW2021's 31 from
+it, which a series spanning that date mixes
+(`KNOWN_INDUSTRY_LIMITATIONS.the_taxonomy_in_force_switches_on_2021_12_13`). The membership
+datasets are read one day at a time since `V2-P4-027`/`V2-P4-028` and state no bound of their
+own; `index_member_all` used to be a second refusal here, read whole partition.
 
 `V2-P3-004`'s review judged the original constraint non-blocking for this issue and that
 judgement is unchanged: the residuals' *content* was always clean -- each was computed from the
@@ -506,8 +510,11 @@ KNOWN_IC_LIMITATIONS: Final[tuple[ICLimitation, ...]] = (
             "the build schedule; this module cannot infer it, because the only evidence it sees "
             "is the as_ofs the rows carry and both schedules produce well-formed ones. One "
             "refusal still bounds the schedule from outside this module and is not this entry's "
-            "to fix: no cross section before 2021-12-13 is assemblable at all. index_member_all "
-            "is read one day at a time since V2-P4-027/V2-P4-028 and states no bound of its own. "
+            "to fix: no cross section before 2014-02-21 is assemblable at all (SW2021's "
+            "2021-12-13 until V2-P6-015 read the days before it in SW2014, so a neutralised IC "
+            "over 2015-2021 exists and one spanning 2021-12-13 changes taxonomy there). The "
+            "membership datasets are read one day at a time since V2-P4-027/V2-P4-028 and state "
+            "no bound of their own. "
             "The residuals' CONTENT "
             "was clean before this change and is clean after it -- each is regressed against the "
             "industry, the market capitalisation and the processed value of its own day -- which "

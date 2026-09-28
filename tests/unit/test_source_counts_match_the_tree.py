@@ -528,7 +528,7 @@ CLAIMS: Final[tuple[CountedClaim, ...]] = (
     ),
     CountedClaim(
         LEDGER,
-        "panel_health_report ({panel_datasets} datasets, 12 waiving required_dates",
+        "panel_health_report ({panel_datasets} datasets, 13 waiving required_dates",
         digits=True,
     ),
 )

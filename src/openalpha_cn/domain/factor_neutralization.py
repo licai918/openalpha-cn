@@ -675,9 +675,13 @@ class SecurityCharacteristic:
 
     `is_backfilled` is `IndustryAnswer.is_backfilled` carried rather than recomputed, and it is
     here for `IndexWeights.as_published_on`'s reason: `index_member_all` expresses the entire
-    history in a taxonomy that came into force 2021-12-13, so an answer for an earlier day is a
-    label the classification did not have then. Losing that caveat has to be an act rather than
-    an omission, and the act this contract permits is reading a count off the manifest.
+    history in a taxonomy that came into force 2021-12-13, so an answer for an earlier day off it
+    is a label the classification did not have then. Since `V2-P6-015` the store-side builder
+    reads each day in the taxonomy in force then, so the flag is `False` on every characteristic
+    it builds (`an_industry_answer_is_in_the_taxonomy_in_force_on_its_day`); it stays, hashed and
+    counted, as the check that would show a hand-built one. Losing that caveat has to be an act
+    rather than an omission, and the act this contract permits is reading a count off the
+    manifest.
     """
 
     subject: str
@@ -1374,33 +1378,39 @@ class NeutralizationLimitation:
 
 KNOWN_NEUTRALIZATION_LIMITATIONS: Final[tuple[NeutralizationLimitation, ...]] = (
     NeutralizationLimitation(
-        code="no_cross_section_is_neutralisable_before_2021_12_13",
+        code="no_cross_section_is_neutralisable_before_2014_02_21",
         detail=(
-            "The industry regressor cannot be read at any earlier as_of at all, which is a "
-            "refusal of the whole build rather than a filter that thins it. providers/tushare.py "
-            "floors every index_member_all row's available_time at the SW2021 taxonomy's "
-            "effective date, 2021-12-13, because index_member_all expresses the entire history in "
-            "a vintage that did not exist before then -- all 31 distinct l1_code values it uses "
-            "are SW2021's and its earliest in_date is 1984-05-09. Measured on the stored corpus "
-            "in KNOWN_INDUSTRY_LIMITATIONS.no_cross_section_before_the_taxonomy_is_readable_at_"
-            "all: at as_of 2015-06-30 every partition blocks with not_yet_knowable. So a "
-            "V2-P4-013 walk-forward that wants a neutralised factor for a 2015 session needs a "
-            "source that published a classification in 2015, which this is not; what this plane "
-            "can honestly neutralise is the SW2021 era."
+            "The industry regressor is read in the taxonomy in force on the day being priced "
+            "(V2-P6-015): SW2014 level one for 2014-02-21..2021-12-10, from index_member_sw2014, "
+            "and SW2021 from 2021-12-13, from index_member_all. So the 2015-2021 research window "
+            "is neutralisable, and what is refused outright -- a refusal of the whole build, not "
+            "a filter that thins it -- is a day before 2014-02-21, when no measured taxonomy was "
+            "in force. This entry was no_cross_section_is_neutralisable_before_2021_12_13 until "
+            "then: index_member_all expresses its whole history in SW2021 and is floored at "
+            "2021-12-13, and it was the only membership stored. Three costs come with the SW2014 "
+            "era and are named in KNOWN_INDUSTRY_LIMITATIONS rather than here: a build before "
+            "2021-12-13 can group at L1 only (sw2014_is_stored_at_level_one_only, refused by name "
+            "at L2/L3), the era codes more of the market industry_missing -- 0.56% on 2015-01-05 "
+            "rising to 8.21% on 2021-12-10 (the_sw2014_era_covers_less_of_the_market) -- and a "
+            "series of builds across 2021-12-13 regresses on 28 groups before it and 31 after "
+            "(the_taxonomy_in_force_switches_on_2021_12_13); the cross section's taxonomy is "
+            "hashed into characteristic_digest, so no two builds either side share an identity."
         ),
     ),
     NeutralizationLimitation(
-        code="an_industry_answer_inside_the_era_can_still_be_backfilled",
+        code="an_industry_answer_is_in_the_taxonomy_in_force_on_its_day",
         detail=(
-            "The availability floor is a bound on the as_of, not on the day asked about. A build "
-            "at as_of 2021-12-20 whose panel's own as_of resolves to a session before 2021-12-13 "
-            "gets an SW2021 label for a day SW2021 did not cover, and IndustryAnswer."
-            "is_backfilled reports it. That is not refused, because refusing it would refuse a "
-            "legitimate first week of the era; it is counted. Every participant's flag is hashed "
-            "into characteristic_digest and the total is stored as the manifest's "
-            "backfilled_industry_count column, so a build whose industries were all backfilled is "
-            "distinguishable on the partition from one whose were not -- which is the treatment "
-            "IndexWeights.as_published_on gets for the same hazard."
+            "Since V2-P6-015 no characteristic this plane builds is a backfill: the cross section "
+            "is read from the dataset whose taxonomy was in force on the day being priced, so "
+            "IndustryAnswer.is_backfilled is False by construction and the manifest's "
+            "backfilled_industry_count is 0 on every build the product path can produce. The "
+            "flag and the column are kept, hashed and stored exactly as before, because they are "
+            "the check rather than the claim: a hand-built cross section can still carry a "
+            "backfilled label, and a count that stops being 0 is how one would be seen. This "
+            "entry was an_industry_answer_inside_the_era_can_still_be_backfilled, which described "
+            "the case this issue removed -- a build at as_of 2021-12-20 whose day fell before "
+            "2021-12-13 got an SW2021 label for a day SW2021 did not cover; that day now reads "
+            "SW2014."
         ),
     ),
     NeutralizationLimitation(
@@ -1464,9 +1474,12 @@ KNOWN_NEUTRALIZATION_LIMITATIONS: Final[tuple[NeutralizationLimitation, ...]] = 
             "of the cross section, and it is the direction that has to stay fail-closed: the "
             "alternative is a residual regressed against an industry the security had already "
             "left. The remedy is in the message -- name every stored membership year at or "
-            "before the day, or ask about a day before the earliest unnamed one. A second, outer "
-            "bound is stated separately and is not this entry's: no cross section before "
-            "2021-12-13 is assemblable at all. "
+            "before the day, or ask about a day before the earliest unnamed one. Since V2-P6-015 "
+            "the stored years BELOW the first one named are read underneath the request, "
+            "load_stock_universe's widening, so what refuses is a year skipped inside or above "
+            "the named span. A second, outer bound is stated separately and is not this entry's: "
+            "no cross section before 2014-02-21 is assemblable at all "
+            "(no_cross_section_is_neutralisable_before_2014_02_21). "
             "THE SECOND HOP THIS ENTRY USED TO CARRY IS GONE AND THAT IS THE ACCEPTANCE. "
             "neutralized_observation_batch still stamps every clock of every row with the BUILD's "
             "as_of, which is the right design for a derived row, but that as_of is no longer "
@@ -1569,7 +1582,14 @@ def industry_code_of(assignment: IndustryAssignment, level: IndustryLevel) -> st
         raise FactorNeutralizationError(
             f"{level!r} is not a declared industry level; expected one of {sorted(INDUSTRY_LEVELS)}"
         )
-    code = str(getattr(assignment, INDUSTRY_LEVEL_FIELDS[level]))
+    value = getattr(assignment, INDUSTRY_LEVEL_FIELDS[level])
+    if value is None:
+        raise FactorNeutralizationError(
+            f"{assignment.ts_code}'s assignment carries no {level} code: its taxonomy's stored "
+            "memberships do not have that level (SW2014 is stored at L1 only), so it names no "
+            f"{level} group and none is borrowed from another taxonomy"
+        )
+    code = str(value)
     if not code or code != code.strip():
         raise FactorNeutralizationError(
             f"{assignment.ts_code}'s {level} code is {code!r}; an assignment with a blank code at "

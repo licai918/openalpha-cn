@@ -51,6 +51,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from panel_fixtures import (
     DAILY_BASIC_DATASET,
+    DAILY_BASIC_EXTRA_COLUMNS,
     INDUSTRY_MEMBERSHIP_DATASET,
     SECURITIES,
     YEAR,
@@ -64,6 +65,7 @@ from openalpha_cn.backtest.factor_ic import MINIMUM_IC_AS_OFS
 from openalpha_cn.domain.daily_prices import DAILY_DATASET
 from openalpha_cn.domain.factor_neutralization import (
     FactorNeutralizationError,
+    FactorNeutralizationRegistry,
     FactorNeutralizationSpec,
     IndustryMarketCapCrossSection,
     NeutralizedFactorObservation,
@@ -71,6 +73,7 @@ from openalpha_cn.domain.factor_neutralization import (
     build_industry_market_cap_cross_section,
 )
 from openalpha_cn.domain.factor_transform import (
+    FactorTransformRegistry,
     FactorTransformSpec,
     MissingValuePolicy,
     WinsorizationPolicy,
@@ -78,6 +81,8 @@ from openalpha_cn.domain.factor_transform import (
 from openalpha_cn.domain.industry_classification import (
     INDUSTRY_MEMBERSHIP_TAXONOMY,
     INDUSTRY_TAXONOMY_EFFECTIVE_FROM,
+    SW2014_MEMBERSHIP_DATASET,
+    SW2014_TAXONOMY,
     IndustryAnswer,
     IndustryAssignment,
 )
@@ -87,6 +92,9 @@ from openalpha_cn.domain.panel_batch import (
     PanelColumn,
     TimelineColumns,
 )
+from openalpha_cn.domain.stock_universe import LISTING_EVENT, STOCK_BASIC_DATASET
+from openalpha_cn.domain.trading_calendar import TRADING_CALENDAR_DATASET
+from openalpha_cn.factor_view import build_factor_panels, factor_build_request
 from openalpha_cn.panel.catalog import (
     DEFAULT_DATE_TIMEZONE,
     PanelStorageError,
@@ -111,7 +119,12 @@ from openalpha_cn.panel_ingest import (
     daily_requirement,
     load_daily_valuations,
     load_industry_histories,
+    load_trading_calendar,
+    write_daily_panel,
+    write_industry_memberships,
     write_panel_batch,
+    write_stock_universe,
+    write_trading_calendar,
 )
 from openalpha_cn.panel_neutralization import (
     INDUSTRY_AND_SIZE,
@@ -126,6 +139,8 @@ from openalpha_cn.panel_neutralization import (
     neutralized_factor_dataset,
     write_neutralized_factor_panels,
 )
+from openalpha_cn.providers.base import ProviderRequest
+from openalpha_cn.providers.tushare import TushareProvider
 
 AS_OF: Final[datetime] = datetime(2026, 1, 17, 4, 0, tzinfo=UTC)
 """The fixture panel's own `as_of`: after the last session's `daily_basic` became knowable.
@@ -745,12 +760,12 @@ def test_a_backfilled_label_reaches_the_stored_characteristic_and_is_not_recompu
     it before any characteristic is built.
 
     So the fold is driven directly, with both answers in one mapping, rather than through a store
-    that cannot express the case. `panel_ingest.load_industry_cross_section`'s own end of it is
-    driven against real partitions at
-    `tests/integration/panel/test_industry_ingest.py::
-    test_a_security_with_no_assignment_covering_the_day_is_left_out_rather_than_raised`, which
-    reads a 1995 day and asserts `is_backfilled is True`; what was untested is the two lines
-    between that answer and a stored `SecurityCharacteristic`.
+    that cannot express the case. Since `V2-P6-015` no store can: `load_industry_cross_section`
+    reads each day in the taxonomy in force then, so every answer it returns has
+    `is_backfilled is False` (`tests/integration/panel/test_industry_ingest.py::
+    test_a_2016_day_answers_in_sw2014_with_sw2014s_own_birthday` asserts it), and this hand-built
+    mapping is the one place a backfilled answer still reaches the two lines between an answer
+    and a stored `SecurityCharacteristic`.
     """
     taxonomy_floor = INDUSTRY_TAXONOMY_EFFECTIVE_FROM[INDUSTRY_MEMBERSHIP_TAXONOMY]
     backfilled_day = taxonomy_floor - timedelta(days=1)
@@ -2472,3 +2487,284 @@ def test_both_loaders_refuse_a_partition_the_readiness_rule_blocks(
         )
     with pytest.raises(FactorEngineError, match="cannot be read at"):
         load_factor_neutralization_manifests(store, REVERSAL_1D, years=(YEAR - 1,), as_of=AS_OF)
+
+
+# --- `V2-P6-015`: a neutralised build inside SW2014's era -------------------------------------
+
+ERA_SESSIONS: Final[tuple[date, ...]] = tuple(
+    date(2016, 1, 4) + timedelta(days=offset)
+    for offset in range(12)
+    if (date(2016, 1, 4) + timedelta(days=offset)).weekday() < 5
+)
+"""Ten 2016 sessions, 2016-01-04..2016-01-15. The research window's own year, generated here
+because `panel_fixtures` is a 2026 corpus and every day it prices is SW2021's."""
+
+ERA_BUILD: Final[datetime] = datetime(2016, 1, 15, 9, 0, tzinfo=UTC)
+"""17:00 Asia/Shanghai on 2016-01-15, after that session's 16:30 publication."""
+
+ERA_FETCHED_AT: Final[datetime] = datetime(2026, 9, 27, 4, 0, tzinfo=UTC)
+"""When the calendar, registry and memberships were fetched: ten years after the days they are
+about, like the research store."""
+
+ERA_PRICES_FETCHED_AT: Final[datetime] = datetime(2016, 1, 16, 4, 0, tzinfo=UTC)
+"""12:00 Asia/Shanghai the Saturday after the last session. The price writers' session census runs
+to the batch's own fetch instant, so a fortnight of 2016 is a complete year-to-date only if it was
+fetched then -- `panel_fixtures._read_instant`'s rule."""
+
+ERA_LISTED_ON: Final[date] = date(2010, 1, 4)
+ERA_NEW_LISTING: Final[date] = date(2016, 1, 4)
+"""`SECURITIES[-1]` lists on the first session of 2016 and enters its SW2014 industry two sessions
+later, on 2016-01-06 -- the shape the live probe measured for every 2019-2021 listing it read
+(`KNOWN_INDUSTRY_LIMITATIONS.an_sw2014_assignment_starts_after_the_listing`)."""
+
+ERA_INDUSTRIES: Final[dict[str, str]] = {
+    **dict.fromkeys(SECURITIES[:4], "801780.SI"),
+    **dict.fromkeys(SECURITIES[4:], "801020.SI"),
+}
+"""Two SW2014 level-one industries of four names each -- 银行 and the SW2014-only 采掘, which has
+no SW2021 counterpart at all. The last name enters 采掘 on 2016-01-06, inside the window."""
+
+
+def _era_midnight(day: date) -> datetime:
+    return datetime.combine(day, time(0, 0), tzinfo=ZoneInfo(DEFAULT_DATE_TIMEZONE))
+
+
+def _era_batch(
+    dataset: str,
+    *,
+    subjects: list[str],
+    columns: list[PanelColumn],
+    event_time: list[datetime],
+    available_time: list[datetime],
+    fetched_at: datetime = ERA_FETCHED_AT,
+) -> ColumnarPanelBatch:
+    return ColumnarPanelBatch(
+        provider_id="tushare",
+        dataset=dataset,
+        kind=dataset,
+        as_of=fetched_at,
+        fetched_at=fetched_at,
+        status="success",
+        subjects=tuple(subjects),
+        timeline=TimelineColumns(
+            event_time=tuple(event_time),
+            available_time=tuple(available_time),
+            ingested_time=tuple(available_time),
+            revision_time=tuple(available_time),
+        ),
+        columns=tuple(columns),
+    )
+
+
+class _SW2014Transport:
+    """`index_member` for the two SW2014 indices in `ERA_INDUSTRIES`, one response per index."""
+
+    def post(self, payload: dict[str, Any]) -> dict[str, Any]:
+        index_code = payload["params"]["index_code"]
+        items = [
+            [index_code, code, "20160106" if code == SECURITIES[-1] else "20140221", None, "Y"]
+            for code, industry in ERA_INDUSTRIES.items()
+            if industry == index_code
+        ]
+        return {
+            "code": 0,
+            "msg": "",
+            "data": {
+                "fields": ["index_code", "con_code", "in_date", "out_date", "is_new"],
+                "items": items,
+                "has_more": False,
+            },
+        }
+
+
+def _era_store(root: Path) -> PanelStore:
+    """A 2016 store: calendar, registry, one fortnight of prices, and SW2014 memberships.
+
+    Written through the real writers, so every write-time guard runs. The SW2014 rows come
+    through the real provider with a doubled transport, so the clock they carry is the one
+    `_taxonomy_backfill_timeline` gives them, not one written here.
+    """
+    store = PanelStore(root / "panel")
+    zone = ZoneInfo(DEFAULT_DATE_TIMEZONE)
+    days = [date(2016, 1, 1) + timedelta(days=offset) for offset in range(366)]
+    open_days = {day for day in days if day.weekday() < 5 and day != date(2016, 1, 1)}
+    previous: list[str | None] = []
+    seen: date | None = None
+    for day in days:
+        previous.append(None if seen is None else seen.isoformat())
+        if day in open_days:
+            seen = day
+    write_trading_calendar(
+        store,
+        _era_batch(
+            TRADING_CALENDAR_DATASET,
+            subjects=["SZSE"] * len(days),
+            columns=[
+                PanelColumn("cal_date", "string", tuple(day.isoformat() for day in days)),
+                PanelColumn("is_open", "boolean", tuple(day in open_days for day in days)),
+                PanelColumn("pretrade_date", "string", tuple(previous)),
+            ],
+            event_time=[_era_midnight(day) for day in days],
+            available_time=[_era_midnight(days[0])] * len(days),
+        ),
+    )
+    listed = [ERA_LISTED_ON] * (len(SECURITIES) - 1) + [ERA_NEW_LISTING]
+    write_stock_universe(
+        store,
+        _era_batch(
+            STOCK_BASIC_DATASET,
+            subjects=list(SECURITIES),
+            columns=[
+                PanelColumn("lifecycle_event", "string", (LISTING_EVENT,) * len(SECURITIES)),
+                PanelColumn("lifecycle_date", "string", tuple(day.isoformat() for day in listed)),
+                PanelColumn("exchange", "string", ("SZSE",) * len(SECURITIES)),
+            ],
+            event_time=[_era_midnight(day) for day in listed],
+            available_time=[_era_midnight(day) for day in listed],
+        ),
+    )
+    pairs = [(day, code) for day in ERA_SESSIONS for code in SECURITIES]
+
+    def close(day: date, code: str) -> float:
+        # A different drift per name, so the one-session reversal has a cross section to rank.
+        return 10.0 + (1 + SECURITIES.index(code)) * 0.25 * ERA_SESSIONS.index(day)
+
+    def pre_close(day: date, code: str) -> float:
+        index = ERA_SESSIONS.index(day)
+        return close(ERA_SESSIONS[index - 1], code) if index else close(day, code)
+
+    closes = tuple(close(day, code) for day, code in pairs)
+    befores = tuple(pre_close(day, code) for day, code in pairs)
+    event = [datetime.combine(day, time(15, 0), tzinfo=zone) for day, _ in pairs]
+    published = [datetime.combine(day, time(16, 30), tzinfo=zone) for day, _ in pairs]
+    bars = _era_batch(
+        DAILY_DATASET,
+        subjects=[code for _, code in pairs],
+        columns=[
+            PanelColumn("trade_date", "string", tuple(day.isoformat() for day, _ in pairs)),
+            *(PanelColumn(name, "float", closes) for name in ("open", "high", "low", "close")),
+            PanelColumn("pre_close", "float", befores),
+            PanelColumn(
+                "pct_chg",
+                "float",
+                tuple(
+                    (now / then - 1.0) * 100.0 for now, then in zip(closes, befores, strict=True)
+                ),
+            ),
+            PanelColumn("vol", "float", (1000.0,) * len(pairs)),
+            PanelColumn("amount", "float", (10000.0,) * len(pairs)),
+        ],
+        event_time=event,
+        available_time=published,
+        fetched_at=ERA_PRICES_FETCHED_AT,
+    )
+    caps = tuple(CAP_BASE + CAP_STEP * SECURITIES.index(code) for _, code in pairs)
+    valuations = _era_batch(
+        DAILY_BASIC_DATASET,
+        subjects=[code for _, code in pairs],
+        columns=[
+            PanelColumn("trade_date", "string", tuple(day.isoformat() for day, _ in pairs)),
+            PanelColumn("close", "float", closes),
+            *(
+                PanelColumn(name, "float", caps if name == "total_mv" else (1.0,) * len(pairs))
+                for name in DAILY_BASIC_EXTRA_COLUMNS
+            ),
+        ],
+        event_time=event,
+        available_time=published,
+        fetched_at=ERA_PRICES_FETCHED_AT,
+    )
+    write_daily_panel(
+        store,
+        bars=[bars],
+        fundamentals=[valuations],
+        calendar=load_trading_calendar(store, exchange="SZSE", years=(2016,), as_of=ERA_FETCHED_AT),
+        halts=None,
+    )
+    provider = TushareProvider(
+        token="secret-token", transport=_SW2014Transport(), clock=lambda: ERA_FETCHED_AT
+    )
+    write_industry_memberships(
+        store,
+        [
+            provider.fetch_panel(
+                ProviderRequest(
+                    dataset=SW2014_MEMBERSHIP_DATASET, as_of=ERA_FETCHED_AT, subjects=(code,)
+                )
+            )
+            for code in sorted(set(ERA_INDUSTRIES.values()))
+        ],
+    )
+    return store
+
+
+def test_a_neutralised_build_at_a_2016_instant_succeeds_on_sw2014_memberships(
+    tmp_path: Path,
+) -> None:
+    """`V2-P6-015`'s acceptance: the neutralised tier exists inside the 2015-2021 research window.
+
+    Until this issue every day before 2021-12-13 was refused -- `index_member_all` expresses its
+    history in SW2021 and floors it there -- so no cross section, and no neutralised build, was
+    assemblable anywhere in the window the research protocol studies. Driven through
+    `build_factor_panels`, the entry both faces call, naming only `--year 2016`: the SW2014 years
+    below it (2014) are read underneath the request.
+    """
+    store = _era_store(tmp_path)
+    request = factor_build_request(
+        factor="reversal_1d/v1",
+        tier="neutralized",
+        transform="probe_zscore/v1",
+        neutralization="probe_neutral/v1",
+        as_ofs=[ERA_BUILD],
+        years=[2016],
+        exchange="SZSE",
+        max_staleness_days=30,
+        waive_max_staleness=False,
+        subjects=[],
+        supersedes_raw=[],
+        supersedes_processed=[],
+        supersedes_neutralized=[],
+        code_commit=COMMIT,
+        transforms=FactorTransformRegistry((_transform_spec(),)),
+        neutralizations=FactorNeutralizationRegistry((_spec(),)),
+    )
+
+    report = build_factor_panels(store, request, built_at=ERA_BUILD)
+
+    assert report.manifest_ids["neutralized"]
+    assert report.coverage["neutralized"] == {"neutralized": len(SECURITIES)}
+    section = load_industry_market_cap_cross_section(
+        store,
+        _spec(),
+        subjects=SECURITIES,
+        day=ERA_SESSIONS[-1],
+        as_of=ERA_BUILD,
+        calendar=load_trading_calendar(store, exchange="SZSE", years=(2016,), as_of=ERA_BUILD),
+        membership_years=(2016,),
+        max_staleness=None,
+    )
+    assert section.taxonomy == SW2014_TAXONOMY
+    assert section.backfilled_count == 0
+    assert {item.subject: item.industry_code for item in section.characteristics} == (
+        ERA_INDUSTRIES
+    )
+
+
+def test_an_sw2014_day_refuses_a_level_its_stored_memberships_do_not_have(
+    tmp_path: Path,
+) -> None:
+    """SW2014 is stored at L1 only, so an L2 build on a 2016 day is refused by name rather than
+    grouped by an SW2021 L2 label the day did not have."""
+    store = _era_store(tmp_path)
+
+    with pytest.raises(FactorEngineError, match="carry \\['L1'\\] only"):
+        load_industry_market_cap_cross_section(
+            store,
+            _spec(industry_level="L2"),
+            subjects=SECURITIES,
+            day=ERA_SESSIONS[-1],
+            as_of=ERA_BUILD,
+            calendar=load_trading_calendar(store, exchange="SZSE", years=(2016,), as_of=ERA_BUILD),
+            membership_years=(2016,),
+            max_staleness=None,
+        )

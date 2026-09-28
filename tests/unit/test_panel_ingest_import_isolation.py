@@ -103,7 +103,7 @@ halves are computed from the tree, and `_dataset_naming_constants` resolves
 `PERIOD_INDEXED_DATASETS` through `FINANCIAL_STATEMENT_DATASETS` down to the four scalars the way
 a reader would.
 
-Three blind spots, stated rather than discovered later:
+Four blind spots, stated rather than discovered later:
 
 1. **A dataset name that is computed is invisible.** The factor planes' own dataset names are
    `FACTOR_OBSERVATION_DATASET_PREFIX + key` and friends, which is why this audit is scoped to
@@ -123,6 +123,13 @@ Three blind spots, stated rather than discovered later:
    it means the seam half of the instrument is silent about the four statement endpoints, and a
    caller that took `load_statement_histories` and named its dataset only through a value
    computed at run time would show an empty row.
+4. **A dataset a `domain/` function chooses is invisible too** (`V2-P6-015`). The industry cross
+   section's dataset is picked per day by `industry_membership_source_on` -- `index_member_sw2014`
+   before 2021-12-13, `index_member_all` from it -- and a function is not a constant this scan
+   resolves. So `load_industry_cross_section` still resolves to `index_member_all` alone (through
+   `industry_membership_requirement`'s default), and every row that reaches the cross section
+   under-reports `index_member_sw2014`. Resolving function bodies would fix it and would also
+   count every dataset a `domain/` error message names, which is blind spot 2 made much worse.
 
 ## The drift this instrument could itself become
 
@@ -264,6 +271,7 @@ UPSTREAM_PANEL_DATASETS: frozenset[str] = frozenset(
         "index_classify",
         "index_daily",
         "index_member_all",
+        "index_member_sw2014",
         "index_weight",
         "namechange",
         "stk_limit",
@@ -712,14 +720,17 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
         ),
     ),
     "openalpha_cn.strategy_view": DatasetReach(
-        # V2-P6-007. It names `index_member_all` only to ask the store which membership years
-        # it holds before an industry cap reads them; everything else arrives through the
-        # loaders it takes across the seam. It reaches no `namechange` (a published band
-        # decides the price limit, so no ST flag is read). V2-P6-014 names `trade_cal` for the
-        # same kind of question -- which calendar years a lookback may read -- and reaches
-        # `stock_basic` through the model plane's label reader and feature matrix, whose
-        # labels and universes the two dynamic sources reuse rather than restate.
-        named=frozenset({"index_member_all", "trade_cal"}),
+        # V2-P6-007. It named `index_member_all` only to ask the store which membership years
+        # it holds before an industry cap reads them; since V2-P6-015 it asks
+        # `industry_membership_source_on(day)` which dataset's years to ask about -- SW2014's
+        # `index_member_sw2014` before 2021-12-13 -- and so names no membership dataset at all
+        # (blind spot 4). Everything else arrives through the loaders it takes across the seam.
+        # It reaches no `namechange` (a published band decides the price limit, so no ST flag
+        # is read). V2-P6-014 names `trade_cal` for the same kind of question -- which calendar
+        # years a lookback may read -- and reaches `stock_basic` through the model plane's label
+        # reader and feature matrix, whose labels and universes the two dynamic sources reuse
+        # rather than restate.
+        named=frozenset({"trade_cal"}),
         reached=frozenset(
             {
                 "adj_factor",

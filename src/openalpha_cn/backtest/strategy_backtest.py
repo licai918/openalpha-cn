@@ -458,11 +458,16 @@ KNOWN_STRATEGY_BACKTEST_LIMITATIONS: Final[tuple[StrategyBacktestLimitation, ...
             "resolver the model faces share. The reason that function states -- a residual can "
             "only be built at its year's last stored session -- no longer holds (V2-P4-026 and "
             "V2-P4-028 retracted it; factor_view's "
-            "the_three_tiers_must_have_been_built_at_the_same_instants says so). A reason that "
-            "does hold keeps the refusal: no industry cross section before 2021-12-13 can be "
-            "assembled, so a neutralized column is empty over the whole 2015-2021 walk-forward "
-            "period the research protocol runs this over, and a fit on it would be a fit on "
-            "nothing. The trailing-IC and static sources read the neutralized tier."
+            "the_three_tiers_must_have_been_built_at_the_same_instants says so). The reason this "
+            "entry gave in its place -- no industry cross section before 2021-12-13, so a "
+            "neutralized column was empty over the whole 2015-2021 walk-forward period -- is gone "
+            "too: V2-P6-015 reads each day in the taxonomy in force then, SW2014 level one from "
+            "2014-02-21, and a neutralized build at a 2016 instant succeeds. So the refusal now "
+            "stands on no data limit at all; it stands because no test has driven a walk-forward "
+            "fit on a neutralized column end to end on either face, and lifting it is a separate "
+            "change with that test as its acceptance. A fit that did read one would also meet "
+            "the_taxonomy_in_force_switches_on_2021_12_13 if its window spans that date. The "
+            "trailing-IC and static sources read the neutralized tier."
         ),
         applies_to=frozenset({"walk_forward"}),
     ),

@@ -94,6 +94,8 @@ def test_tushare_metadata_declares_supported_datasets(fake_tushare_transport) ->
         "index_daily",
         "index_classify",
         "index_member_all",
+        # V2-P6-015's SW2014 level-one memberships, the seventeenth.
+        "index_member_sw2014",
         "income",
         "balancesheet",
         "cashflow",

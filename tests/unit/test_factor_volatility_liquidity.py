@@ -548,7 +548,8 @@ def test_exactly_one_dataset_carries_a_level_and_exactly_one_channel_reaches_it(
     declared = {descriptor.dataset for descriptor in TUSHARE_DATASETS}
     levels = {name for name in declared if name.endswith("_daily")}
 
-    assert len(declared) == 16
+    # Seventeen since V2-P6-015's index_member_sw2014, which carries no level either.
+    assert len(declared) == 17
     assert levels == {INDEX_DAILY_DATASET}
     assert INDEX_WEIGHT_DATASET in declared and INDEX_WEIGHT_DATASET not in levels
 

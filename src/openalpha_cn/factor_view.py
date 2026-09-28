@@ -535,7 +535,8 @@ KNOWN_FACTOR_RUN_LIMITATIONS: Final[tuple[FactorRunLimitation, ...]] = (
             "report a three-tier artifact whose neutralised row measured nothing. That row is the "
             "one V2-P3-014's acceptance criterion is decided on. ONE refusal outside this module "
             "still bounds which schedules are reachable at all, and it used to be two: no cross "
-            "section before 2021-12-13 is assemblable. The other -- index_member_all read whole "
+            "section before 2014-02-21 is assemblable (2021-12-13 until V2-P6-015 read the days "
+            "before it in SW2014). The other -- index_member_all read whole "
             "partition -- was V2-P4-027's issue and V2-P4-028 put this plane's read of it on a "
             "day-scoped door, so a membership year no longer states a schedule bound either."
         ),
@@ -2736,7 +2737,8 @@ complement as a literal set and is what turns red if a sixth event-driven datase
   `max_staleness=None` as a literal already -- `FactorRunRequest` carries no freshness bound at
   all, and this module's own docstring says why ("A freshness policy for a *run*") -- so the flag
   never reaches them, and a row here would be a member no call site can use.
-- `index_member_all` is read through `panel_neutralization
+- `index_member_all` -- and since `V2-P6-015` `index_member_sw2014`, the same read before
+  2021-12-13 -- is read through `panel_neutralization
   .load_industry_market_cap_cross_section`, which states **one** `max_staleness` for it and for
   `daily_basic` together -- and `daily_basic` is on the session clock, so waiving there would
   waive a bound that is doing its job. Splitting it is an edit to that module.
@@ -3787,7 +3789,8 @@ def _residual_remedy(calendar: TradingCalendar, *, day: date, years: Sequence[in
     remedy = RESIDUAL_REMEDIES[calendar.day_status(day)]
     return (
         f"{remedy} If instead the industry read is what is short, --year names "
-        f"{list(years)} and every stored membership year at or before that day has to be in it."
+        f"{list(years)} and every stored membership year from the first of those through that day "
+        "has to be in it; the years before the first are read underneath it."
     )
 
 

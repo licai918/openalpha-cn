@@ -44,6 +44,7 @@ from openalpha_cn.panel.catalog import ReadinessRequirement
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.providers.tushare import (
     _CLOCK_BUILDERS,
+    _INDUSTRY_TAXONOMY_FIELD,
     TUSHARE_DATASETS,
     ClockStrategy,
 )
@@ -155,6 +156,9 @@ def _revises(clock: ClockStrategy, date_field: str) -> bool:
         date_field: "20240105",
         "ann_date": "20240105",
         "f_ann_date": "20240705",
+        # The membership clock's floor is the row's own taxonomy since V2-P6-015, synthesised
+        # by the split -- a column this clock reads, so the row names it.
+        _INDUSTRY_TAXONOMY_FIELD: "SW2021",
     }
     timeline = _CLOCK_BUILDERS[clock](row, date_field, datetime(2026, 1, 9, tzinfo=UTC))
     return timeline.revision_time > timeline.available_time

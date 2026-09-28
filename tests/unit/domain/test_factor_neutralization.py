@@ -910,8 +910,10 @@ def test_the_neutralisation_limitations_are_the_five_this_issue_measured() -> No
     here first, which is the whole reason this is an equality.
     """
     assert {
-        "no_cross_section_is_neutralisable_before_2021_12_13",
-        "an_industry_answer_inside_the_era_can_still_be_backfilled",
+        # Both replaced by V2-P6-015: the floor moved to SW2014's birthday and no answer the
+        # product path builds is a backfill any more.
+        "no_cross_section_is_neutralisable_before_2014_02_21",
+        "an_industry_answer_is_in_the_taxonomy_in_force_on_its_day",
         "the_residual_is_orthogonal_to_the_design_and_not_to_size_itself",
         "a_stored_membership_year_left_unread_refuses_the_day_rather_than_answering_it",
         "a_thin_industry_is_coded_rather_than_pooled",

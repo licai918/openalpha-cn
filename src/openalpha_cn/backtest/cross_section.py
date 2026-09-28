@@ -170,7 +170,9 @@ does is make the consequences of each answer unavoidable:
   what the exposures *are*. That is still a boundary on the *caller* that assembles the cross
   section rather than on this leaf, which reads no partition at all: a screen that cannot get an
   industry cross section gets no neutralised values, and this module reports `no_scored_candidate`
-  for the ordinary reason. SW2021's own 2021-12-13 availability floor sits outside both.
+  for the ordinary reason. The taxonomies' own floor sits outside both: no cross section before
+  2014-02-21, SW2014's birthday -- SW2021's 2021-12-13 until `V2-P6-015` read the days before it
+  in SW2014.
 
 ## What the hard filter is worth, measured, because the answer is surprising
 

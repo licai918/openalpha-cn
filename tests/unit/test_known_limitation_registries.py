@@ -701,7 +701,7 @@ REGISTRY_ENTRY_COUNTS: Final[dict[str, int]] = {
     "KNOWN_FINANCIAL_STATEMENT_LIMITATIONS": 12,
     "KNOWN_INDEX_MEMBERSHIP_LIMITATIONS": 9,
     "KNOWN_INDEX_PRICE_LIMITATIONS": 4,
-    "KNOWN_INDUSTRY_LIMITATIONS": 10,
+    "KNOWN_INDUSTRY_LIMITATIONS": 14,
     "KNOWN_LABEL_LIMITATIONS": 8,
     "KNOWN_NEUTRALIZATION_LIMITATIONS": 5,
     "KNOWN_FACTOR_SEAL_LIMITATIONS": 3,
@@ -753,10 +753,10 @@ no longer written in prose at all. `DOCSTRING_TOTALS` below holds them as an equ
 DOCSTRING_TOTALS: Final[Mapping[str, int]] = MappingProxyType(
     {
         "registries": 42,
-        "entries": 389,
-        "derived_entries": 70,
+        "entries": 397,
+        "derived_entries": 74,
         "table_rows": 41,
-        "table_entries": 319,
+        "table_entries": 323,
     }
 )
 """Every number this module would otherwise have stated in prose, as an equality.

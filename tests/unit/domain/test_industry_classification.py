@@ -26,10 +26,14 @@ from datetime import UTC, date, datetime
 import pytest
 
 from openalpha_cn.domain.industry_classification import (
+    INDUSTRY_MEMBERSHIP_DATASET,
     INDUSTRY_MEMBERSHIP_PANEL_COLUMNS,
+    INDUSTRY_MEMBERSHIP_SOURCES,
     INDUSTRY_TAXONOMY_EFFECTIVE_FROM,
     INDUSTRY_TREE_PANEL_COLUMNS,
     KNOWN_INDUSTRY_LIMITATIONS,
+    SW2014_MEMBERSHIP_DATASET,
+    SW2014_MEMBERSHIP_PANEL_COLUMNS,
     SW2014_TAXONOMY,
     SW2021_L1_COUNT,
     SW2021_TAXONOMY,
@@ -44,6 +48,7 @@ from openalpha_cn.domain.industry_classification import (
     build_security_industry_history,
     industry_coverage_report,
     industry_histories_from_panel_rows,
+    industry_membership_source_on,
     industry_trees_from_panel_rows,
 )
 from openalpha_cn.domain.stock_universe import (
@@ -1234,7 +1239,7 @@ def test_two_assignments_that_share_their_boundary_day_are_refused() -> None:
 def test_the_known_limitations_are_named_rather_than_argued_away() -> None:
     """`KNOWN_INDUSTRY_LIMITATIONS` had no assertion of any kind until this one.
 
-    Ten entries, two of which are cited by name elsewhere in the repository:
+    Fourteen entries (four added by `V2-P6-015`), two of which are cited by name elsewhere:
     `no_announcement_and_no_revision_history` is what dates an assignment's availability at
     `in_date`'s midnight and is cited by name in `panel_fixtures.py`'s
     `industry.reclassification_after_the_as_of` measurement, and
@@ -1257,9 +1262,104 @@ def test_the_known_limitations_are_named_rather_than_argued_away() -> None:
         "no_announcement_and_no_revision_history",
         "a_partial_year_read_cannot_see_an_interval_close",
         "no_cross_section_before_the_taxonomy_is_readable_at_all",
+        # V2-P6-015: the taxonomy in force on the day.
+        "the_taxonomy_in_force_switches_on_2021_12_13",
+        "sw2014_is_stored_at_level_one_only",
+        "the_sw2014_era_covers_less_of_the_market",
+        "an_sw2014_assignment_starts_after_the_listing",
         "silent_truncation_at_the_response_cap",
     }
     assert len({entry.code for entry in KNOWN_INDUSTRY_LIMITATIONS}) == len(
         KNOWN_INDUSTRY_LIMITATIONS
     ), "a code is declared twice"
     assert all(len(entry.detail) > 120 for entry in KNOWN_INDUSTRY_LIMITATIONS)
+
+
+# --------------------------------------------------------------------------------------
+# The taxonomy in force on the day (`V2-P6-015`)
+# --------------------------------------------------------------------------------------
+
+# index_member(index_code=801780.SI), SW2014's 银行: 000001.SZ entered on SW2014's own birthday.
+# Stored at L1 only -- the per-index endpoint is fetched once per SW2014 L1 index.
+PING_AN_SW2014_ROWS = (("000001.SZ", "2014-02-21", None, "801780.SI"),)
+
+
+def test_sw2014_answers_every_day_from_its_birthday_through_the_last_day_before_sw2021() -> None:
+    """The day decides the taxonomy, and the boundary is the day SW2021 came into force.
+
+    2021-12-10 is the last SW2014 session (535 constituent rows leave `index_member` that day)
+    and 2021-12-13 the first SW2021 one. An off-by-one-session boundary in either direction
+    answers one of those two sessions in the other vintage.
+    """
+    for day in (date(2014, 2, 21), date(2016, 6, 30), date(2021, 12, 10), date(2021, 12, 12)):
+        source = industry_membership_source_on(day)
+        assert source.taxonomy == SW2014_TAXONOMY, day
+        assert source.dataset == SW2014_MEMBERSHIP_DATASET
+        assert source.levels == ("L1",)
+        assert source.effective_from == date(2014, 2, 21)
+    for day in (date(2021, 12, 13), date(2024, 6, 28)):
+        source = industry_membership_source_on(day)
+        assert source.taxonomy == SW2021_TAXONOMY, day
+        assert source.dataset == INDUSTRY_MEMBERSHIP_DATASET
+        assert source.levels == ("L1", "L2", "L3")
+        assert source.effective_from == date(2021, 12, 13)
+
+
+def test_a_day_before_sw2014_existed_has_no_taxonomy_in_force() -> None:
+    """2014-02-20 is refused rather than answered in SW2014: a label from a classification that
+    did not exist yet is the backfill `V2-P1-010` exists to refuse."""
+    with pytest.raises(IndustryHorizonError, match="2014-02-21"):
+        industry_membership_source_on(date(2014, 2, 20))
+
+
+def test_the_sources_are_the_two_measured_vintages_in_date_order() -> None:
+    assert [source.taxonomy for source in INDUSTRY_MEMBERSHIP_SOURCES] == [
+        SW2014_TAXONOMY,
+        SW2021_TAXONOMY,
+    ]
+    assert SW2014_MEMBERSHIP_PANEL_COLUMNS == (
+        "subject",
+        "industry_from",
+        "industry_through",
+        "l1_code",
+    )
+    assert INDUSTRY_MEMBERSHIP_SOURCES[0].panel_columns == SW2014_MEMBERSHIP_PANEL_COLUMNS
+    assert INDUSTRY_MEMBERSHIP_SOURCES[1].panel_columns == INDUSTRY_MEMBERSHIP_PANEL_COLUMNS
+
+
+def test_an_sw2014_row_rebuilds_a_level_one_history_not_backfilled_inside_its_era() -> None:
+    histories = industry_histories_from_panel_rows(PING_AN_SW2014_ROWS, taxonomy=SW2014_TAXONOMY)
+
+    answer = histories["000001.SZ"].industry_on(date(2016, 6, 30))
+
+    assert answer.l1_code == "801780.SI"
+    assert answer.l2_code is None
+    assert answer.l3_code is None
+    assert answer.taxonomy == SW2014_TAXONOMY
+    assert answer.taxonomy_effective_from == date(2014, 2, 21)
+    assert answer.is_backfilled is False
+
+
+def test_an_sw2014_row_of_the_sw2021_width_is_refused() -> None:
+    """The row shape follows the taxonomy: SW2014 is stored at L1 only, so a six-wide row read
+    as SW2014 is a partition of the other dataset."""
+    with pytest.raises(IndustryClassificationError, match="expected 4"):
+        industry_histories_from_panel_rows(
+            [("000001.SZ", "1991-04-03", None, "801780.SI", "801783.SI", "857831.SI")],
+            taxonomy=SW2014_TAXONOMY,
+        )
+
+
+def test_a_history_carries_exactly_the_levels_its_taxonomy_stores() -> None:
+    """An SW2014 assignment with an L2 code, or an SW2021 one without, is two sources mixed."""
+    level_one_only = IndustryAssignment(
+        ts_code="000001.SZ", l1_code="801780.SI", effective_from=date(2014, 2, 21)
+    )
+    with pytest.raises(IndustryClassificationError, match="L2"):
+        build_security_industry_history("000001.SZ", (PING_AN,), taxonomy=SW2014_TAXONOMY)
+    with pytest.raises(IndustryClassificationError, match="l2_code must be a non-empty string"):
+        build_security_industry_history("000001.SZ", (level_one_only,), taxonomy=SW2021_TAXONOMY)
+    history = build_security_industry_history(
+        "000001.SZ", (level_one_only,), taxonomy=SW2014_TAXONOMY
+    )
+    assert history.industry_on(date(2016, 1, 4)).l1_code == "801780.SI"

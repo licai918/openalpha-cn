@@ -533,8 +533,10 @@ deliberately no flag that every candidate would carry (see
   because a missing exposure cross section is refused outright.
 - **`industry_exposure_is_backfilled`** -- `SecurityCharacteristic.is_backfilled`, carried rather
   than recomputed. `KNOWN_INDUSTRY_LIMITATIONS` records that `index_member_all` expresses its
-  entire history in a taxonomy that came into force 2021-12-13, so an answer for an earlier day is
-  a label the classification did not have then.
+  entire history in a taxonomy that came into force 2021-12-13, so an answer for an earlier day off
+  it is a label the classification did not have then. Since `V2-P6-015` the store-side cross
+  section reads each day in the taxonomy in force then -- SW2014 before 2021-12-13 -- so this flag
+  cannot fire on a stored build; it stays for a hand-built cross section, where it still can.
 - **`evidence_plane_abstained`** -- the run came back `direction="abstain"`. The panel plane
   ranked this name into the top `N` and the evidence plane declined to conclude about it, which is
   the single most important thing a reader of a ranking can be told and is invisible in the score.

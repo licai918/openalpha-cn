@@ -50,6 +50,7 @@ from openalpha_cn.domain.industry_classification import (
     INDUSTRY_MEMBERSHIP_TAXONOMY,
     INDUSTRY_TAXONOMY_EFFECTIVE_FROM,
     INDUSTRY_TREE_DATASET,
+    SW2014_MEMBERSHIP_DATASET,
     SW2014_TAXONOMY,
     SW2021_TAXONOMY,
     IndustryClassificationError,
@@ -238,7 +239,10 @@ class _ScriptedTransport:
     def post(self, payload: dict[str, Any]) -> dict[str, Any]:
         self.calls.append(payload)
         params = payload["params"]
-        key = (payload["api_name"], params.get("l1_code", params.get("src", "")))
+        key = (
+            payload["api_name"],
+            params.get("l1_code", params.get("src", params.get("index_code", ""))),
+        )
         if "is_new" in params:
             key = (key[0], f"{key[1]}/{params['is_new']}")
         return self._script[key]
@@ -547,7 +551,10 @@ def test_a_tree_batch_handed_to_the_membership_writer_is_refused(tmp_path) -> No
         ProviderRequest(dataset=INDUSTRY_TREE_DATASET, as_of=AS_OF, subjects=(SW2021_TAXONOMY,))
     )
 
-    with pytest.raises(IndustryClassificationError, match="expected the 'index_member_all'"):
+    with pytest.raises(
+        IndustryClassificationError,
+        match=r"expected one of the \['index_member_sw2014', 'index_member_all'\] datasets",
+    ):
         write_industry_memberships(store, [tree])
 
 
@@ -642,9 +649,6 @@ compares -- `day` against what `as_of` could see, and `as_of` against the partit
 date is the only shape that can tell a zone-aware comparison from a naive one.
 """
 
-BEFORE_THE_TAXONOMY = datetime(2015, 6, 30, 4, 0, tzinfo=UTC)
-"""12:00 Asia/Shanghai on 2015-06-30 -- six years before SW2021 came into force."""
-
 LATE_AVAILABILITY = datetime(2026, 1, 1, 4, 0, tzinfo=UTC)
 """An availability instant `_taxonomy_backfill_timeline` cannot produce for a 2003 event."""
 
@@ -672,7 +676,6 @@ shapes this dataset cannot tell apart from the returned rows alone, on one store
 AGROCHEMICALS = "801038.SI"
 BASIC_CHEMICAL_MATERIALS = "801033.SI"
 POWER = "801161.SI"
-DECORATION = "801722.SI"
 
 
 def _cross_section_store(root: Any) -> PanelStore:
@@ -849,28 +852,31 @@ def test_a_security_with_no_assignment_covering_the_day_is_left_out_rather_than_
     """ "No industry that day" is data, and "this read cannot speak for that day" is not.
 
     Both used to arrive at `panel_neutralization._industry_answer` as one `IndustryHorizonError`
-    and be folded into one `None`. Here they are separated: 600423.SH has no assignment covering
-    1995 -- its first begins in 2003 -- so it is simply absent from the mapping, while the days
-    this read may not speak for were refused before any of this (the two tests above). A security
-    the corpus never carried is absent the same way, which is the same answer to the same
-    question.
+    and be folded into one `None`. Here they are separated: on 2016-06-30 -- inside SW2014's era,
+    so the SW2014 memberships answer (`V2-P6-015`) -- 600681.SH has no SW2014 assignment at all,
+    so it is simply absent from the mapping. It is **not** answered from `index_member_all`,
+    which classifies it on that day as 建筑装饰 in a taxonomy that did not exist yet: an
+    unclassified name is coded, not guessed. The days this read may not speak for were refused
+    before any of this (the two tests above).
 
-    The 1995 answer for 600681.SH is also a **backfill**: SW2021 did not exist then, and
-    `IndustryAnswer.is_backfilled` says so on the row rather than leaving it to be inferred.
+    This test read a 1995 day off `index_member_all` and asserted `is_backfilled is True` until
+    `V2-P6-015`; a 1995 day is now refused outright (see
+    `test_a_day_before_any_measured_taxonomy_is_refused_before_any_partition_is_read`).
     """
-    store = _cross_section_store(tmp_path)
+    store = _sw2014_store(tmp_path, with_sw2021=True)
 
     cross_section = load_industry_cross_section(
         store,
-        day=date(1995, 6, 30),
-        years=(1993, 2003),
-        as_of=MID_2024,
+        day=date(2016, 6, 30),
+        years=(2016,),
+        as_of=datetime(2016, 6, 30, 8, 0, tzinfo=UTC),
         max_staleness=None,
     )
 
-    assert sorted(cross_section) == ["600681.SH"]
-    assert cross_section["600681.SH"].l2_code == DECORATION
-    assert cross_section["600681.SH"].is_backfilled is True
+    assert sorted(cross_section) == ["000001.SZ", "600028.SH", "600423.SH", "601857.SH"]
+    assert "600681.SH" not in cross_section
+    assert all(answer.taxonomy == SW2014_TAXONOMY for answer in cross_section.values())
+    assert all(answer.is_backfilled is False for answer in cross_section.values())
 
 
 def test_a_withheld_row_and_an_absent_one_are_two_different_row_counts(tmp_path) -> None:
@@ -935,35 +941,39 @@ def test_a_stored_membership_year_at_or_before_the_day_that_the_read_skipped_is_
             max_staleness=None,
         )
 
-    backfilled = load_industry_cross_section(
+    # A 2022 day rather than the 2016 one this used until `V2-P6-015`: 2016 is SW2014's now, and
+    # this store holds `index_member_all` alone. 2024 is after the day and bounds nothing.
+    before_the_skipped_year = load_industry_cross_section(
         store,
-        day=date(2016, 6, 30),
-        years=(1993, 2003),
+        day=date(2022, 6, 30),
+        years=(1993, 2003, 2017),
         as_of=MID_2024,
         max_staleness=None,
     )
-    assert backfilled["600681.SH"].l2_code == DECORATION
-    assert backfilled["600423.SH"].l2_code == AGROCHEMICALS
+    assert before_the_skipped_year["600681.SH"].l2_code == POWER
+    assert before_the_skipped_year["600423.SH"].l2_code == AGROCHEMICALS
 
 
-def test_an_as_of_before_the_taxonomy_is_refused_before_any_partition_is_read(tmp_path) -> None:
-    """The outer floor `V2-P4-027` does not move, stated as a gate rather than left to be
-    inferred.
+def test_a_day_before_any_measured_taxonomy_is_refused_before_any_partition_is_read(
+    tmp_path,
+) -> None:
+    """The outer floor, stated as a gate rather than left to be inferred -- and since `V2-P6-015`
+    it is SW2014's 2014-02-21, not SW2021's 2021-12-13.
 
-    Every membership row's `available_time` is floored at SW2021's own effective date, so at an
-    `as_of` in 2015 the filtered read would find every row withheld and hand back an empty
-    mapping -- a market with no industries in it, which is a different fact from "not knowable
-    yet". Refused before a partition is touched, as the unfiltered door refuses it with
-    `not_yet_knowable`.
+    This test asked about 2015-06-30 at a 2015 `as_of` and expected the SW2021 floor's refusal.
+    That day now has a taxonomy in force, so the refusal moved to the day before SW2014: every
+    SW2014 row's `available_time` is floored at 2014-02-21, and a day before it has no
+    classification that existed then. Refused before a partition is touched -- the store here
+    holds both corpora, so an answer off either of them would be a backfill.
     """
-    store = _cross_section_store(tmp_path)
+    store = _sw2014_store(tmp_path, with_sw2021=True)
 
-    with pytest.raises(PanelStorageError, match="SW2021 came into force"):
+    with pytest.raises(PanelStorageError, match="no measured industry taxonomy was in force"):
         load_industry_cross_section(
             store,
-            day=date(2015, 6, 30),
-            years=(1993, 2003),
-            as_of=BEFORE_THE_TAXONOMY,
+            day=date(2014, 2, 20),
+            years=(2014,),
+            as_of=datetime(2014, 2, 20, 8, 0, tzinfo=UTC),
             max_staleness=None,
         )
 
@@ -1354,3 +1364,161 @@ def test_two_census_errors_below_the_census_day_are_refused_rather_than_cancelli
     assert "2024-01-05" in str(refusal.value)
     assert "its date census counts 1 row(s) dated 2024-01-05" in str(refusal.value)
     assert "the visible slice carries 2" in str(refusal.value)
+
+
+# --- `V2-P6-015`: the taxonomy in force on the day ------------------------------------------------
+
+SW2014_MEMBER_FIELDS = ["index_code", "con_code", "in_date", "out_date", "is_new"]
+SW2014_SCRIPT = {
+    # SW2014's 银行: an assignment that predates SW2014, still open.
+    ("index_member", "801780.SI"): _response(
+        SW2014_MEMBER_FIELDS, [["801780.SI", "000001.SZ", "19910403", None, "Y"]]
+    ),
+    # SW2014's 采掘 (no SW2021 counterpart): one closing on SW2014's last session, one opening in
+    # its era.
+    ("index_member", "801020.SI"): _response(
+        SW2014_MEMBER_FIELDS,
+        [
+            ["801020.SI", "600028.SH", "20011008", "20211210", "N"],
+            ["801020.SI", "601857.SH", "20160304", None, "Y"],
+        ],
+    ),
+    # SW2014's 化工: 600423.SH, whose SW2021 history (`CHEMICALS_*`) is a different grouping.
+    ("index_member", "801030.SI"): _response(
+        SW2014_MEMBER_FIELDS, [["801030.SI", "600423.SH", "20030714", "20211210", "N"]]
+    ),
+}
+"""Three SW2014 L1 indices in the shape the 2026-09-27 probe read. 600681.SH has **no** SW2014
+row while `index_member_all` classifies it from 1993 -- the coded-not-guessed case."""
+
+SW2014_INDICES = ("801780.SI", "801020.SI", "801030.SI")
+
+
+def _sw2014_store(tmp_path: Any, *, with_sw2021: bool = False) -> PanelStore:
+    """A store holding the SW2014 corpus above and, when asked, the SW2021 `CROSS_SECTION` one."""
+    store = PanelStore(tmp_path / "panel")
+    provider = _provider(SW2014_SCRIPT)
+    write_industry_memberships(
+        store,
+        [
+            provider.fetch_panel(
+                ProviderRequest(dataset=SW2014_MEMBERSHIP_DATASET, as_of=AS_OF, subjects=(code,))
+            )
+            for code in SW2014_INDICES
+        ],
+    )
+    if with_sw2021:
+        sw2021 = _provider(CROSS_SECTION_SCRIPT)
+        write_industry_memberships(store, _membership_batches(sw2021, CROSS_SECTION_SLICES))
+    return store
+
+
+def test_a_2016_day_answers_in_sw2014_with_sw2014s_own_birthday(tmp_path) -> None:
+    """The acceptance: a 2016 day has an industry cross section, in the taxonomy in force then.
+
+    Read at an `as_of` on that same day, and naming only 2016 -- the stored years below it
+    (1991, 2001, 2003) are read underneath the request, `load_stock_universe`'s widening.
+    """
+    store = _sw2014_store(tmp_path)
+
+    cross_section = load_industry_cross_section(
+        store,
+        day=date(2016, 6, 30),
+        years=(2016,),
+        as_of=datetime(2016, 6, 30, 8, 0, tzinfo=UTC),
+        max_staleness=None,
+    )
+
+    assert {code: answer.l1_code for code, answer in cross_section.items()} == {
+        "000001.SZ": "801780.SI",
+        "600028.SH": "801020.SI",
+        "600423.SH": "801030.SI",
+        "601857.SH": "801020.SI",
+    }
+    for answer in cross_section.values():
+        assert answer.taxonomy == SW2014_TAXONOMY
+        assert answer.taxonomy_effective_from == date(2014, 2, 21)
+        assert answer.is_backfilled is False
+        assert answer.l2_code is None
+
+
+def test_the_last_sw2014_session_and_the_first_sw2021_one_answer_in_their_own_taxonomies(
+    tmp_path,
+) -> None:
+    """2021-12-10 is SW2014's; 2021-12-13 is SW2021's and answers exactly as it did before
+    `V2-P6-015`. A boundary off by one session in either direction flips one of the two."""
+    store = _sw2014_store(tmp_path, with_sw2021=True)
+
+    friday = load_industry_cross_section(
+        store,
+        day=date(2021, 12, 10),
+        years=(2021,),
+        as_of=datetime(2021, 12, 10, 8, 0, tzinfo=UTC),
+        max_staleness=None,
+    )
+    monday = load_industry_cross_section(
+        store,
+        day=date(2021, 12, 13),
+        # `index_member_all`'s fixture stores 1993, 2003, 2017 and 2024; the first two are read
+        # underneath the request and 2024 is after the day.
+        years=(2017,),
+        as_of=datetime(2021, 12, 13, 8, 0, tzinfo=UTC),
+        max_staleness=None,
+    )
+
+    assert {code: answer.taxonomy for code, answer in friday.items()} == {
+        "000001.SZ": SW2014_TAXONOMY,
+        "600028.SH": SW2014_TAXONOMY,
+        "600423.SH": SW2014_TAXONOMY,
+        "601857.SH": SW2014_TAXONOMY,
+    }
+    assert friday["600423.SH"].l1_code == "801030.SI"
+    assert friday["600423.SH"].assignment.effective_through == date(2021, 12, 10)
+    assert {code: answer.taxonomy for code, answer in monday.items()} == {
+        "600423.SH": SW2021_TAXONOMY,
+        "600681.SH": SW2021_TAXONOMY,
+    }
+    assert monday["600423.SH"].l2_code == AGROCHEMICALS
+    assert monday["600681.SH"].l2_code == POWER
+    assert monday["600423.SH"].is_backfilled is False
+
+
+def test_the_stored_sw2014_availability_is_never_earlier_than_sw2014(tmp_path) -> None:
+    """`test_the_stored_availability_is_never_earlier_than_the_taxonomy`, for the other vintage:
+    a 1991 or 2001 SW2014 label is held to 2014-02-21, so a readiness check before it blocks."""
+    store = _sw2014_store(tmp_path)
+
+    for year in (1991, 2001, 2003):
+        coverage = store.read_coverage(SW2014_MEMBERSHIP_DATASET, year)
+        assert coverage is not None
+        assert coverage.max_available_time.date() >= date(2014, 2, 20)
+    assert store.read_coverage(SW2014_MEMBERSHIP_DATASET, 2016) is not None
+
+
+def test_the_strategy_industry_cap_reads_each_signal_day_in_its_own_taxonomy(tmp_path) -> None:
+    """The strategy backtest's industry cap consumes the same loader, per signal day.
+
+    `strategy_view._IndustryDays` used to name `index_member_all`'s registered years for every
+    day, so a 2016 cap read SW2021's years and could only ever have answered in SW2021. It now
+    asks `industry_membership_source_on` which dataset the day belongs to.
+    """
+    from openalpha_cn.strategy_view import _IndustryDays
+
+    store = _sw2014_store(tmp_path, with_sw2021=True)
+    friday, monday = date(2021, 12, 10), date(2021, 12, 13)
+    days = _IndustryDays(
+        store,
+        frozenset({friday, monday}),
+        {
+            friday: datetime(2021, 12, 10, 8, 30, tzinfo=UTC),
+            monday: datetime(2021, 12, 13, 8, 30, tzinfo=UTC),
+        },
+    )
+
+    assert dict(days[friday]) == {
+        "000001.SZ": "801780.SI",
+        "600028.SH": "801020.SI",
+        "600423.SH": "801030.SI",
+        "601857.SH": "801020.SI",
+    }
+    assert dict(days[monday]) == {"600423.SH": "801030.SI", "600681.SH": "801160.SI"}

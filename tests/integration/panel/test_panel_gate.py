@@ -911,6 +911,11 @@ def test_exactly_one_declared_dataset_is_daily_and_waives_its_date_check(tmp_pat
     from the calendar, `daily_requirement`'s shape -- so the set below stays at one member and
     the count of waivers stays at twelve while the dataset count moves to sixteen. Had it waived
     them, this test would have been the thing that said so.
+
+    `V2-P6-015`'s `index_member_sw2014` is the seventeenth and the other shape: it waives
+    `required_dates` -- a reclassification has no schedule, `index_member_all`'s reason -- and is
+    `event_driven`, not `daily`, so the waiver count moves to thirteen and the daily-and-waiving
+    set below does not move.
     """
     report = panel_health_report(
         seed(tmp_path),
@@ -927,8 +932,8 @@ def test_exactly_one_declared_dataset_is_daily_and_waives_its_date_check(tmp_pat
         if "required_dates" in health.readiness.checks_waived
     }
 
-    assert len(report.datasets) == 16
-    assert len(waiving) == 12
+    assert len(report.datasets) == 17
+    assert len(waiving) == 13
     assert {
         health.dataset
         for health in report.datasets

@@ -94,6 +94,8 @@ from openalpha_cn.domain.industry_classification import (
     INDUSTRY_MEMBERSHIP_TAXONOMY,
     INDUSTRY_TAXONOMY_EFFECTIVE_FROM,
     INDUSTRY_TREE_DATASET,
+    SW2014_MEMBERSHIP_DATASET,
+    SW2014_TAXONOMY,
     IndustryClassificationError,
 )
 from openalpha_cn.domain.name_history import NAMECHANGE_DATASET
@@ -1915,6 +1917,7 @@ PANEL_BUILD_TARGETS: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
         CASH_FLOW_DATASET: (CASH_FLOW_DATASET,),
         INDUSTRY_TREE_DATASET: (INDUSTRY_TREE_DATASET,),
         INDUSTRY_MEMBERSHIP_DATASET: (INDUSTRY_MEMBERSHIP_DATASET,),
+        SW2014_MEMBERSHIP_DATASET: (SW2014_MEMBERSHIP_DATASET,),
         FINANCIAL_INDICATOR_DATASET: (FINANCIAL_INDICATOR_DATASET,),
     }
 )
@@ -1983,6 +1986,11 @@ because a level series is dated by session and a composition is published monthl
 immediately after `index_weight` in this order for a reason that is legibility rather than
 dependency: neither reads the other, and a reader looking for "what does this build know about
 沪深300" should find its composition and its level next to each other.
+
+**Fifteen since `V2-P6-015`**: `index_member_sw2014`, SW2014's level-one memberships, the
+classification in force 2014-02-21..2021-12-10. It sits right after `index_member_all` for the
+same dependency -- its 28 requests are one per level-one node of the stored **SW2014** tree -- and
+is a span target for the same reason: `index_member` takes an index code and no date.
 """
 
 PANEL_BUILD_COUPLED_DATASETS: Final[Mapping[str, str]] = MappingProxyType(
@@ -2002,12 +2010,19 @@ which is a scope decision -- see `PANEL_BUILD_TARGETS`.
 """
 
 PANEL_BUILD_SPAN_TARGETS: Final[frozenset[str]] = frozenset(
-    {INDUSTRY_TREE_DATASET, INDUSTRY_MEMBERSHIP_DATASET, FINANCIAL_INDICATOR_DATASET}
+    {
+        INDUSTRY_TREE_DATASET,
+        INDUSTRY_MEMBERSHIP_DATASET,
+        SW2014_MEMBERSHIP_DATASET,
+        FINANCIAL_INDICATOR_DATASET,
+    }
 )
 """Targets whose unit of work is the **whole invocation** rather than one `--year`, and why.
 
-`panel build` runs its targets year by year, oldest first. Three of the thirteen cannot be run
-that way, and in each case the reason is a property of the endpoint rather than a preference:
+`panel build` runs its targets year by year, oldest first. Four of the fifteen cannot be run
+that way, and in each case the reason is a property of the endpoint rather than a preference
+(`index_member_sw2014`, added by `V2-P6-015`, is `index_member_all`'s case below with one
+`index_code` per request instead of an `(l1_code, is_new)` slice):
 
 - **`index_classify`** takes a `src` and nothing else. One request is one vintage's whole tree,
   dated at that vintage's own effective day, so running it once per year would fetch the same
@@ -2036,12 +2051,13 @@ _UNPINNED_PARTITION_YEAR_TARGETS: Final[frozenset[str]] = frozenset(
         STOCK_BASIC_DATASET,
         INDUSTRY_TREE_DATASET,
         INDUSTRY_MEMBERSHIP_DATASET,
+        SW2014_MEMBERSHIP_DATASET,
         FINANCIAL_INDICATOR_DATASET,
     }
 )
 """Targets whose partitions are not the `--year` that was asked for, and why that is legitimate.
 
-Four, and each is exempt for its own measured reason rather than by family resemblance. Every
+Five, and each is exempt for its own measured reason rather than by family resemblance. Every
 other target writes the year it was asked for, which is what `_audit_written_partitions` checks;
 this set is the exemption, stated once so a future target cannot acquire it by accident.
 
@@ -2054,6 +2070,7 @@ this set is the exemption, stated once so a future target cannot acquire it by a
 - **`index_member_all`** is filed by *membership event* year: an assignment that opened in 1993
   and closed in 2017 puts one row in each of those partitions. A 62-request sweep therefore
   lands in roughly 38 years at once.
+- **`index_member_sw2014`** (`V2-P6-015`) is filed the same way, by membership event year.
 - **`fina_indicator`** is asked for a report-period year and filed by announcement year, and the
   two are not the same year even in the ordinary case (`001278.SZ` announced its 2018 annual on
   2022-01-06). See `PANEL_BUILD_SPAN_TARGETS`.
@@ -2075,7 +2092,9 @@ A caller may narrow it with `--subject`, which also selects the per-security rou
 infers it.
 """
 
-_NEEDS_STORED_INDUSTRY_TREE: Final[frozenset[str]] = frozenset({INDUSTRY_MEMBERSHIP_DATASET})
+_NEEDS_STORED_INDUSTRY_TREE: Final[frozenset[str]] = frozenset(
+    {INDUSTRY_MEMBERSHIP_DATASET, SW2014_MEMBERSHIP_DATASET}
+)
 """`index_member_all`, whose 31 `l1_code` slices are read off the stored `index_classify` tree.
 
 The alternative was a 31-entry literal in this module, which would be a second copy of a table
@@ -2088,6 +2107,8 @@ first costs one dependency and removes a constant that could drift.
 measured: every one of `index_member_all`'s 7,893 rows carries an SW2021 L1 code, and the
 endpoint takes no `src` -- while `index_classify`'s own default is **SW2014**. Slicing SW2021
 memberships by SW2014's 28 L1 codes would silently fetch a corpus missing three whole industries.
+`index_member_sw2014` (`V2-P6-015`) is the mirror image and reads the **SW2014** tree for the same
+reason: its requests name SW2014 level-one indices, `801020.SI` 采掘 among them.
 """
 
 _REGISTERED_PARTITION_RESUME: Final[frozenset[str]] = frozenset(
@@ -4368,33 +4389,99 @@ def _build_industry_tree(
     return written
 
 
-def _stored_level_one_codes(store: PanelStore, *, now: datetime) -> tuple[str, ...]:
+def _stored_level_one_codes(
+    store: PanelStore,
+    *,
+    now: datetime,
+    taxonomy: str = INDUSTRY_MEMBERSHIP_TAXONOMY,
+    dataset: str = INDUSTRY_MEMBERSHIP_DATASET,
+) -> tuple[str, ...]:
     """The `l1_code` slices `index_member_all` is fetched in, read off the stored tree.
 
     `_stored_calendar`'s shape one dataset over: the request needs something the panel already
     holds. See `_NEEDS_STORED_INDUSTRY_TREE` for why it is read rather than written down here,
     and why the vintage is `INDUSTRY_MEMBERSHIP_TAXONOMY` rather than the endpoint's own default.
+
+    `taxonomy` and `dataset` name the other sweep too (`V2-P6-015`): `index_member_sw2014` is
+    fetched one SW2014 level-one index at a time, and those indices are the stored **SW2014**
+    tree's -- 28 of them, `801020.SI` 采掘 among them, which SW2021 does not have.
     """
-    vintage_year = INDUSTRY_TAXONOMY_EFFECTIVE_FROM[INDUSTRY_MEMBERSHIP_TAXONOMY].year
+    vintage_year = INDUSTRY_TAXONOMY_EFFECTIVE_FROM[taxonomy].year
     try:
         trees = load_industry_trees(store, years=(vintage_year,), as_of=now, max_staleness=None)
     except (PanelStorageError, IndustryClassificationError) as error:
         raise _panel_fail(
             PanelExit.unhealthy,
-            f"the {INDUSTRY_MEMBERSHIP_TAXONOMY} industry tree could not be read out of "
-            f"{store.root}: {error}. {INDUSTRY_MEMBERSHIP_DATASET} is fetched one l1_code slice "
+            f"the {taxonomy} industry tree could not be read out of "
+            f"{store.root}: {error}. {dataset} is fetched one level-one index "
             "at a time and the tree is where those codes come from. Build it first: `openalpha "
             "panel build --dataset index_classify --year <year>`",
         ) from error
-    tree = trees.get(INDUSTRY_MEMBERSHIP_TAXONOMY)
+    tree = trees.get(taxonomy)
     if tree is None:
         raise _panel_fail(
             PanelExit.unhealthy,
             f"the {vintage_year} tree partition holds "
-            f"{sorted(trees)} and not {INDUSTRY_MEMBERSHIP_TAXONOMY}, which is the one vintage "
-            f"every {INDUSTRY_MEMBERSHIP_DATASET} row is labelled with",
+            f"{sorted(trees)} and not {taxonomy}, which is the one vintage "
+            f"every {dataset} row is labelled with",
         )
     return tuple(node.index_code for node in tree.nodes_at("L1"))
+
+
+def _build_sw2014_memberships(
+    store: PanelStore, provider: TushareProvider, *, codes: Sequence[str], now: datetime
+) -> list[PartitionRef]:
+    """Sweep every SW2014 level-one index once and write the corpus by event year (`V2-P6-015`).
+
+    One request per index -- 28 on the live tree, measured 2026-09-27 at 7,558 rows with no
+    response paged -- through Tushare's per-index `index_member`, which takes no `is_new` and
+    answered both halves of the history on that probe. So the refusal `_build_industry_memberships`
+    makes about a sweep with no superseded slice is made here about a sweep with **no closed
+    interval at all**: that is the shape a current-only default would have, and stored it would
+    read as SW2014 never having reclassified anyone -- while the probe counted 534 rows closing on
+    2021-12-10 alone.
+
+    `codes` is the stored SW2014 tree's level-one nodes, resolved by the caller before the first
+    request, for `_build_industry_memberships`' reason.
+    """
+    _echo_budget(
+        SW2014_MEMBERSHIP_DATASET,
+        len(codes),
+        "requests",
+        f"one per {SW2014_TAXONOMY} level-one index; the partition years are the membership "
+        "events', not --year",
+    )
+    batches: list[ColumnarPanelBatch] = []
+    closed = 0
+    started = monotonic()
+    stride = _progress_stride(len(codes))
+    for done, code in enumerate(codes, start=1):
+        batch = _fetch_panel(provider, SW2014_MEMBERSHIP_DATASET, as_of=now, subjects=(code,))
+        if batch.status == "success":
+            batches.append(batch)
+            through = next(
+                column.values for column in batch.columns if column.name == "industry_through"
+            )
+            closed += sum(1 for value in through if value is not None)
+        if done % stride == 0 or done == len(codes):
+            _echo_progress(
+                (SW2014_MEMBERSHIP_DATASET,), done, len(codes), started, unit="industry-indices"
+            )
+    if not batches:
+        raise _panel_fail(
+            PanelExit.unhealthy,
+            f"none of the {len(codes)} {SW2014_MEMBERSHIP_DATASET} indices served a row; an empty "
+            "corpus would read as a market SW2014 never classified",
+        )
+    if not closed:
+        raise _panel_fail(
+            PanelExit.unhealthy,
+            f"this sweep fetched {len(codes)} {SW2014_TAXONOMY} level-one indices and found no "
+            "closed interval in any of them, so the corpus is a current snapshot with no history. "
+            "Stored, it would read as SW2014 never having reclassified anyone; the live probe "
+            "counted 534 constituent rows closing on 2021-12-10 alone",
+        )
+    return list(write_industry_memberships(store, batches))
 
 
 def _build_industry_memberships(
@@ -4803,10 +4890,17 @@ def _build_span_targets(
         written.setdefault(INDUSTRY_TREE_DATASET, []).extend(
             _build_industry_tree(store, provider, now=now)
         )
-    if targets & _NEEDS_STORED_INDUSTRY_TREE:
+    if INDUSTRY_MEMBERSHIP_DATASET in targets:
         codes = _stored_level_one_codes(store, now=now)
         written.setdefault(INDUSTRY_MEMBERSHIP_DATASET, []).extend(
             _build_industry_memberships(store, provider, codes=codes, now=now)
+        )
+    if SW2014_MEMBERSHIP_DATASET in targets:
+        codes = _stored_level_one_codes(
+            store, now=now, taxonomy=SW2014_TAXONOMY, dataset=SW2014_MEMBERSHIP_DATASET
+        )
+        written.setdefault(SW2014_MEMBERSHIP_DATASET, []).extend(
+            _build_sw2014_memberships(store, provider, codes=codes, now=now)
         )
     if FINANCIAL_INDICATOR_DATASET in targets:
         batches: list[ColumnarPanelBatch] = []
@@ -5120,17 +5214,20 @@ _BUILD_AS_OF_HELP = (
 )
 
 _BUILD_DATASET_HELP = (
-    "A build target, repeatable. The thirteen this command builds, in the order it runs them: "
-    f"{', '.join(PANEL_BUILD_TARGETS)}. Anything else is refused by name. One target is one "
-    "unit of work a panel_ingest writer accepts, which is not always one dataset: 'price' is "
-    "daily + daily_basic + suspend_d, because write_daily_panel takes the pair together and its "
-    f"halts argument has no default. Four of them do not write the --year they were given, "
+    f"A build target, repeatable. The {len(PANEL_BUILD_TARGETS)} this command builds, in the "
+    f"order it runs them: {', '.join(PANEL_BUILD_TARGETS)}. Anything else is refused by name. "
+    "One target is one unit of work a panel_ingest writer accepts, which is not always one "
+    "dataset: 'price' is daily + daily_basic + suspend_d, because write_daily_panel takes the "
+    f"pair together and its halts argument has no default. "
+    f"{len(_UNPINNED_PARTITION_YEAR_TARGETS)} of them do not write the --year they were given, "
     f"because their partition year comes from the rows rather than from the request "
     f"({', '.join(sorted(_UNPINNED_PARTITION_YEAR_TARGETS))}): the registry is split by "
-    "lifecycle year, the industry tree by taxonomy vintage, the memberships by event year, and "
-    "fina_indicator is asked for a report-period year and filed by announcement year. The last "
-    f"three of those ({', '.join(sorted(PANEL_BUILD_SPAN_TARGETS))}) run once for the whole "
-    "invocation rather than once per year."
+    "lifecycle year, the industry tree by taxonomy vintage, the two membership targets "
+    "(index_member_all in SW2021, index_member_sw2014 in SW2014, the classification in force "
+    "2014-02-21..2021-12-10) by event year, and fina_indicator is asked for a report-period "
+    f"year and filed by announcement year. {len(PANEL_BUILD_SPAN_TARGETS)} of those "
+    f"({', '.join(sorted(PANEL_BUILD_SPAN_TARGETS))}) run once for the whole invocation rather "
+    "than once per year."
 )
 
 _BUILD_SUBJECT_HELP = (

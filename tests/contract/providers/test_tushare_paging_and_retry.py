@@ -488,7 +488,13 @@ def test_the_panel_only_datasets_are_probed_on_the_panel_plane() -> None:
     provider = TushareProvider(token="secret-token", clock=lambda: FETCHED_AT)
     panel_only = {entry.dataset for entry in TUSHARE_DATASETS if not entry.serves_evidence_plane}
 
-    assert panel_only == {"stock_basic", "namechange", "index_classify", "index_member_all"}
+    assert panel_only == {
+        "stock_basic",
+        "namechange",
+        "index_classify",
+        "index_member_all",
+        "index_member_sw2014",
+    }
     for descriptor in TUSHARE_DATASETS:
         expected = "panel" if descriptor.dataset in panel_only else "evidence"
         assert provider.probe_plane(descriptor.dataset) == expected

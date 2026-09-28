@@ -616,6 +616,8 @@ def test_the_waived_reads_are_a_named_subset_of_the_doctors_event_driven_set() -
         "namechange",
         "suspend_d",
         "index_member_all",
+        # V2-P6-015: the same cross-section read's SW2014 era, so the same shared argument.
+        "index_member_sw2014",
         "index_classify",
     }
 

@@ -248,9 +248,10 @@ uv run openalpha serve
 ```
 
 `openalpha doctor --probe` 对已配置的 provider（链邻要配服务地址，AKShare 要装 akshare extra，否则按数据集报 `not_configured` 或 `configuration`）在凭证齐全时对它声明的**每一个**数据集发一次最小请求，并按数据集记录结果
-（Tushare 现为 16/16；面板专供的四个走 `fetch_panel`，需要 `index_code`/`ts_code`/报告期年
-的六个由 provider 自己给出最小主体，另有两个也自带主体但不是为这三类键：`index_classify`
-要一个分类年份、`index_member_all` 要一个 l1 行业码，合计八个）。报 `authentication` 时命令**非零退出**（端点拒绝了凭证会这样；链邻只配服务地址、没配 key 时也这样，而且一个请求都不发），
+（Tushare 现为 17/17；面板专供的五个走 `fetch_panel`，需要 `index_code`/`ts_code`/报告期年
+的六个由 provider 自己给出最小主体，另有三个面板专供的也自带主体：`index_classify` 要一个分类
+年份、`index_member_all` 要一个 l1 行业码、`index_member_sw2014` 要一个申万 2014 一级指数码，
+合计九个）。报 `authentication` 时命令**非零退出**（端点拒绝了凭证会这样；链邻只配服务地址、没配 key 时也这样，而且一个请求都不发），
 `--json` 也一样——它不再在打印完 payload 之后直接返回；而「这个接口这个账号取不到」
 （`upstream`）和「限流」（`rate_limit`）按数据集如实上报且**不**影响退出码，因为那正是这份
 报告要交付的内容本身。
@@ -283,9 +284,9 @@ OpenAlpha CN 不把“多接几个行情 API”当作数据优势。优势落在
 
 ## 面板数据平面的三个命令
 
-面板数据平面（16 个数据集：trade_cal / stock_basic / adj_factor / daily / daily_basic /
+面板数据平面（17 个数据集：trade_cal / stock_basic / adj_factor / daily / daily_basic /
 suspend_d / stk_limit / namechange / index_weight / index_daily / index_classify /
-index_member_all / income / balancesheet / cashflow / fina_indicator）有三个命令：`openalpha panel build`
+index_member_all / index_member_sw2014 / income / balancesheet / cashflow / fina_indicator）有三个命令：`openalpha panel build`
 抓取并写入，`openalpha panel doctor` 体检已存数据，`openalpha data-check` 跑读取前的
 fail-closed 依赖门。
 
@@ -312,11 +313,15 @@ fail-closed 依赖门。
 `|| true` 掉。
 
 ```bash
-# 构建：十四个目标，按依赖序执行，与 --dataset 出现顺序无关
+# 构建：十五个目标，按依赖序执行，与 --dataset 出现顺序无关
 uv run openalpha panel build --dataset trade_cal --dataset price --year 2026
 
 # 行业分类（P3 中性化的前置）：树按 vintage 年落盘，成分按 l1_code 切片全量扫描
 uv run openalpha panel build --dataset index_classify --dataset index_member_all --year 2026
+
+# 申万 2014 一级行业成分（V2-P6-015）：2014-02-21..2021-12-10 当日有效的分类，按已存 SW2014 树的
+# 28 个一级指数逐个请求 index_member；2021-12-13 起的行业截面仍读 index_member_all
+uv run openalpha panel build --dataset index_classify --dataset index_member_sw2014 --year 2026
 
 # 财报：ts_code 必填且没有横截面，所以是「每只证券一次请求」，默认取自已存的 stock_basic
 uv run openalpha panel build --dataset stock_basic --dataset income --year 2024
@@ -343,14 +348,14 @@ uv run openalpha data-check --dataset daily --dataset adj_factor --year 2026 \
   + `suspend_d` 一次会话循环取完，因为 `write_daily_panel` 必须同时收到前两者，且它的
   `halts` 参数没有默认值。所以 `--dataset daily` 会**按名字被拒**并告知原因，而不是被
   click 当作未知选项拒掉（后者读起来像「本仓库没有 daily 面板」，与事实相反）。
-- **十四个目标覆盖 `providers/tushare.py` 声明的全部 16 个数据集。** 早先只有五个，
+- **十五个目标覆盖 `providers/tushare.py` 声明的全部 17 个数据集。** 早先只有五个，
   `namechange`、`index_weight`、两个行业数据集和四个财报接口有 writer、有 loader、有体检
   检查，却没有抓取路径 —— `panel build --dataset income` 按名字被拒，`panel doctor
   --dataset income` 因此永远报 `partition_missing`。表里不存在的名字仍然**按名字被拒**，
   而不是给一个空的成功；`_audit_written_partitions` 会在运行期堵住「表里加了键、没加实现」
   这条缝（两个构建阶段都堵）。
-- **三个目标的工作单元是「整次调用」而不是「一个 `--year`」**（`index_classify`、
-  `index_member_all`、`fina_indicator`）。前两个的请求根本没有日期维度；`fina_indicator`
+- **四个目标的工作单元是「整次调用」而不是「一个 `--year`」**（`index_classify`、
+  `index_member_all`、`index_member_sw2014`、`fina_indicator`）。前三个的请求根本没有日期维度；`fina_indicator`
   的窗口过滤的是**报告期**、行却按**公告日**归档，所以一个公告年至少由两个报告期年拼成
   （上一年的年报 + 本年的三个季报），按年循环写会把前一年写进去的年报**静默替换掉**。
   跨调用的那一半由「不允许缩小已存公告年」的拒绝守住。
@@ -373,9 +378,15 @@ uv run openalpha data-check --dataset daily --dataset adj_factor --year 2026 \
 - `panel doctor` 与顶层 `openalpha doctor` 是两个命令：后者探的是 **provider 凭证与能力**，
   前者读的是**面板本身**。
 - 分区年份由**数据行自身的日期**决定，`--year` 只界定抓取范围；两者不一致时 `panel build`
-  会拒绝并点名。四个目标是例外，每个都有自己的理由：`stock_basic` 按上市生命周期年拆分，
+  会拒绝并点名。五个目标是例外，每个都有自己的理由：`stock_basic` 按上市生命周期年拆分，
   `index_classify` 按 vintage 年（SW2014 → 2014，SW2021 → 2021），`index_member_all`
-  按成分变更**事件年**（一次 62 请求的扫描落进约 38 个分区），`fina_indicator` 按公告年。
+  按成分变更**事件年**（一次 62 请求的扫描落进约 38 个分区），`index_member_sw2014` 同样按
+  事件年，`fina_indicator` 按公告年。
+- **行业截面读当日有效的分类**（`V2-P6-015`）：2014-02-21..2021-12-10 读申万 2014 一级
+  （`index_member_sw2014`，只存一级），2021-12-13 起读申万 2021（`index_member_all`），
+  更早的日期按名拒绝。中性化、策略回测的行业上限都走这一个 loader，所以同一个截面从不混用
+  两套分类；跨 2021-12-13 的序列前后分组不同（28 个 vs 31 个一级行业），这一点记在
+  `KNOWN_INDUSTRY_LIMITATIONS.the_taxonomy_in_force_switches_on_2021_12_13`。
 - 构建是一串「整分区写入」，之间没有事务。中途被拒时命令会**列出已经落盘的分区**，而不是
   声称什么都没写。
 - **一次 `panel build` 只读一次时钟，`--as-of` 把这个时钟钉在多次调用之间。** 会话循环的

@@ -192,7 +192,10 @@ from openalpha_cn.domain.industry_classification import (
     INDUSTRY_MEMBERSHIP_DATASET,
     INDUSTRY_TREE_DATASET,
     KNOWN_INDUSTRY_LIMITATIONS,
+    SW2014_MEMBERSHIP_DATASET,
+    SW2014_TAXONOMY,
     IndustryClassificationError,
+    industry_membership_source,
 )
 from openalpha_cn.domain.name_history import NAMECHANGE_DATASET
 from openalpha_cn.domain.panel_batch import SUBJECT_COLUMN_NAME, PanelBatchError
@@ -507,6 +510,7 @@ DATASET_CADENCE: Final[Mapping[str, Cadence]] = MappingProxyType(
         INDEX_WEIGHT_DATASET: "monthly",
         INDEX_DAILY_DATASET: "daily",
         INDUSTRY_MEMBERSHIP_DATASET: "event_driven",
+        SW2014_MEMBERSHIP_DATASET: "event_driven",
         INDUSTRY_TREE_DATASET: "event_driven",
         "income": "quarterly",
         "balancesheet": "quarterly",
@@ -960,7 +964,7 @@ def _limitations() -> tuple[KnownLimitation, ...]:
         ((INDEX_WEIGHT_DATASET,), KNOWN_INDEX_MEMBERSHIP_LIMITATIONS),
         ((INDEX_DAILY_DATASET,), KNOWN_INDEX_PRICE_LIMITATIONS),
         (
-            (INDUSTRY_MEMBERSHIP_DATASET, INDUSTRY_TREE_DATASET),
+            (INDUSTRY_MEMBERSHIP_DATASET, SW2014_MEMBERSHIP_DATASET, INDUSTRY_TREE_DATASET),
             KNOWN_INDUSTRY_LIMITATIONS,
         ),
         (FINANCIAL_STATEMENT_DATASETS, KNOWN_FINANCIAL_STATEMENT_LIMITATIONS),
@@ -1473,6 +1477,16 @@ def _requirement_for(
     if dataset == INDUSTRY_MEMBERSHIP_DATASET:
         return (
             industry_membership_requirement(years=years, as_of=as_of, max_staleness=max_staleness),
+            None,
+        )
+    if dataset == SW2014_MEMBERSHIP_DATASET:
+        return (
+            industry_membership_requirement(
+                years=years,
+                as_of=as_of,
+                max_staleness=max_staleness,
+                source=industry_membership_source(SW2014_TAXONOMY),
+            ),
             None,
         )
     if dataset == INDUSTRY_TREE_DATASET:

@@ -20,7 +20,8 @@ L1 `801020.SI` 采掘 appears on none of them. The corpus's earliest `in_date` i
 in 2021, and carries no column that says so.
 
 The vintage's birthday is derivable rather than assumed. Tushare's per-index `index_member`
-endpoint -- which this module does **not** store, and which is cited only as the witness --
+endpoint -- which `V2-P1-010` cited only as the witness, and which `V2-P6-015` now stores for
+SW2014 at level one (see "Two taxonomies, one per day" below) --
 reports 535 constituent rows leaving on 2021-12-10 against 393 entering on 2021-12-13, and the
 SW2014-only 采掘 loses 66 of its 97 members on exactly 2021-12-13. The same endpoint shows 912
 rows entering on 2014-02-21, which is SW2014's own effective date. `index_member_all` shows
@@ -55,6 +56,20 @@ a pre-2021 `as_of` blocks with `not_yet_knowable` instead of answering. What tha
 for the row split that separates the two ends, and
 `KNOWN_INDUSTRY_LIMITATIONS.a_partial_year_read_cannot_see_an_interval_close` for what the split
 costs.
+
+## Two taxonomies, one per day (`V2-P6-015`)
+
+Until `V2-P6-015` the only stored membership was `index_member_all`, and flooring it at SW2021's
+birthday meant **no industry cross section was readable before 2021-12-13** -- no neutralised
+tier and no industry cap anywhere in the 2015-2021 research window. The witness above is the
+fix: SW2014 was in force from 2014-02-21 until SW2021 replaced it (its last session 2021-12-10),
+and Tushare's per-index endpoint serves SW2014's own constituent histories. So a second dataset,
+`SW2014_MEMBERSHIP_DATASET`, stores them at level one, with the same clock discipline -- each row
+floored at **its** taxonomy's effective date -- and `industry_membership_source_on(day)` names the
+dataset whose taxonomy was in force on the day asked about: SW2014 for 2014-02-21..2021-12-12,
+SW2021 from 2021-12-13, and nothing before 2014-02-21. Every industry cross section in this build
+is read through that one choice, so a cross section never mixes the two, and a day's answer is in
+the classification that existed that day rather than in one published seven years later.
 
 ## The interval is closed at both ends
 
@@ -224,6 +239,116 @@ row's width against it and then unpacks positionally, so every consumer of the r
 give one reader a column that is a property of *that read* rather than of what the domain decodes.
 """
 
+SW2014_MEMBERSHIP_DATASET: Final[str] = "index_member_sw2014"
+"""SW2014 level-one memberships (`V2-P6-015`): the classification in force 2014-02-21..2021-12-10.
+
+A **new dataset** rather than new columns on `index_member_all`, which hard rule 3 forbids and
+which would be wrong anyway: `index_member_all` speaks SW2021 alone and takes no `src`. These
+rows come from Tushare's per-index `index_member` endpoint -- the witness this module's docstring
+already cites -- asked once per SW2014 L1 index (`801020.SI` 采掘 among them), so each row says
+"this security was a constituent of this SW2014 level-one index over this closed interval".
+Measured 2026-09-27: 28 requests, 7,558 rows, none paged; 912 rows enter on 2014-02-21 and the
+most common `out_date` is 2021-12-10 (534 rows).
+"""
+
+SW2014_MEMBERSHIP_DATA_COLUMNS: Final[tuple[str, ...]] = (
+    INDUSTRY_FROM_COLUMN,
+    INDUSTRY_THROUGH_COLUMN,
+    INDUSTRY_L1_COLUMN,
+)
+SW2014_MEMBERSHIP_PANEL_COLUMNS: Final[tuple[str, ...]] = (
+    SUBJECT_COLUMN_NAME,
+    *SW2014_MEMBERSHIP_DATA_COLUMNS,
+)
+"""`INDUSTRY_MEMBERSHIP_PANEL_COLUMNS` without the two levels this source does not have.
+
+`l1_code` is the SW2014 index the row was fetched from (`801780.SI`), which is the same kind of
+identifier `index_member_all`'s `l1_code` is -- a node's `index_code` -- so a tree join and a
+group label mean the same thing in both eras. L2 and L3 are **absent rather than guessed**: the
+per-index endpoint would answer them only at one request per L2/L3 index (104 + 227 more), and
+nothing in this build groups below L1 before 2021-12-13 (see
+`KNOWN_INDUSTRY_LIMITATIONS.sw2014_is_stored_at_level_one_only`).
+"""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class IndustryMembershipSource:
+    """One stored membership dataset and the taxonomy it speaks, with the levels it carries.
+
+    The answer to "which classification was in force on day D" is a property of the *day*, and
+    this is the table it is read from: `industry_membership_source_on(day)` picks the entry whose
+    taxonomy was the newest one in force. Every reader of an industry cross section goes through
+    it, so no reader states a taxonomy's date of its own.
+    """
+
+    dataset: str
+    taxonomy: str
+    levels: tuple[str, ...]
+    panel_columns: tuple[str, ...]
+
+    @property
+    def effective_from(self) -> date:
+        """The first day this taxonomy was in force, and the floor under its rows' availability."""
+        return INDUSTRY_TAXONOMY_EFFECTIVE_FROM[self.taxonomy]
+
+
+INDUSTRY_MEMBERSHIP_SOURCES: Final[tuple[IndustryMembershipSource, ...]] = (
+    IndustryMembershipSource(
+        dataset=SW2014_MEMBERSHIP_DATASET,
+        taxonomy=SW2014_TAXONOMY,
+        levels=("L1",),
+        panel_columns=SW2014_MEMBERSHIP_PANEL_COLUMNS,
+    ),
+    IndustryMembershipSource(
+        dataset=INDUSTRY_MEMBERSHIP_DATASET,
+        taxonomy=SW2021_TAXONOMY,
+        levels=INDUSTRY_LEVELS,
+        panel_columns=INDUSTRY_MEMBERSHIP_PANEL_COLUMNS,
+    ),
+)
+"""Every stored membership dataset, ascending by the day its taxonomy came into force.
+
+Two, one per measured vintage. SW2014 answers 2014-02-21 through 2021-12-12 -- its last session is
+2021-12-10 -- and SW2021 answers from 2021-12-13 on. **A cross section is read from exactly one of
+them**: the industry dummies of one day are one taxonomy's groups, so a regression never mixes a
+28-group SW2014 label with a 31-group SW2021 one. What does span both is a *series* of cross
+sections across 2021-12-13; see
+`KNOWN_INDUSTRY_LIMITATIONS.the_taxonomy_in_force_switches_on_2021_12_13`.
+"""
+
+
+def industry_membership_source(taxonomy: str) -> IndustryMembershipSource:
+    """The stored membership dataset that speaks `taxonomy`, or `IndustryClassificationError`."""
+    for source in INDUSTRY_MEMBERSHIP_SOURCES:
+        if source.taxonomy == taxonomy:
+            return source
+    raise IndustryClassificationError(
+        f"no stored membership dataset speaks taxonomy {taxonomy!r}; the stored ones are "
+        f"{[source.taxonomy for source in INDUSTRY_MEMBERSHIP_SOURCES]}"
+    )
+
+
+def industry_membership_source_on(day: date) -> IndustryMembershipSource:
+    """The membership dataset whose taxonomy was in force on `day`, or `IndustryHorizonError`.
+
+    The newest source whose effective date is at or before `day`: SW2014 for 2014-02-21 through
+    2021-12-12, SW2021 from 2021-12-13. A day before 2014-02-21 is refused -- no measured taxonomy
+    was in force then, and answering it in SW2014 would be exactly the backfill `index_member_all`
+    commits for every pre-2021 day.
+    """
+    _require_plain_date(day, "day")
+    in_force = [source for source in INDUSTRY_MEMBERSHIP_SOURCES if source.effective_from <= day]
+    if not in_force:
+        earliest = INDUSTRY_MEMBERSHIP_SOURCES[0]
+        raise IndustryHorizonError(
+            f"no measured industry taxonomy was in force on {day.isoformat()}; the earliest is "
+            f"{earliest.taxonomy}, in force from {earliest.effective_from.isoformat()}, and a "
+            "label from a classification that did not exist yet is a backfill rather than an "
+            "answer"
+        )
+    return in_force[-1]
+
+
 INDUSTRY_CODE_COLUMN: Final[str] = "industry_code"
 INDUSTRY_NAME_COLUMN: Final[str] = "industry_name"
 INDUSTRY_LEVEL_COLUMN: Final[str] = "level"
@@ -303,7 +428,11 @@ KNOWN_INDUSTRY_LIMITATIONS: Final[tuple[IndustryLimitation, ...]] = (
             "(earliest 1999-12-30), 石油石化 47 of 54 and 美容护理 28 of 34. The structural "
             "claim needs no witness. IndustryAnswer.is_backfilled reports it per answer and "
             "providers/tushare.py floors availability at the vintage's effective date so a "
-            "pre-2021 readiness check blocks rather than answering."
+            "pre-2021 readiness check blocks rather than answering. Since V2-P6-015 the industry "
+            "cross section no longer reads this dataset for any day before 2021-12-13 -- it reads "
+            "index_member_sw2014, the classification in force then -- so a backfilled SW2021 "
+            "answer is reachable only through load_industry_histories, which hands back whole "
+            "histories rather than a day's cross section."
         ),
     ),
     IndustryLimitation(
@@ -410,16 +539,81 @@ KNOWN_INDUSTRY_LIMITATIONS: Final[tuple[IndustryLimitation, ...]] = (
     IndustryLimitation(
         code="no_cross_section_before_the_taxonomy_is_readable_at_all",
         detail=(
-            "The floor under every row's available_time is 2021-12-13, so the earliest as_of at "
-            "which any of this can be read is 2021-12-13 -- not a filter that thins a 2015 cross "
-            "section, a refusal of the whole read. Measured on the stored corpus: at as_of "
-            "2015-06-30 every partition blocks with not_yet_knowable. That is the correct answer "
-            "and it is also a hard limit on what V2-P3-004 can neutralise against; a backtest "
-            "that wants an industry for a 2015 session needs a source that published one in "
-            "2015, which this is not. What the row split buys is the SW2021 era itself: before "
-            "it, one closed interval held its own opening year past every earlier as_of, and "
-            "fed the real 7,893-row corpus 29 of the 38 requestable years blocked at as_of "
-            "2023-06-30 with the 9 that read holding 118 securities between them."
+            "Each membership dataset's rows are floored at its own taxonomy's effective date: "
+            "index_member_all's at 2021-12-13 and index_member_sw2014's at 2014-02-21. So "
+            "index_member_all alone still cannot be read at any as_of before 2021-12-13 -- at "
+            "as_of 2015-06-30 every one of its partitions blocks with not_yet_knowable -- and "
+            "since V2-P6-015 that no longer bounds the industry cross section, which reads the "
+            "dataset whose taxonomy was in force on the day asked about "
+            "(industry_membership_source_on): SW2014 level one for 2014-02-21..2021-12-10, SW2021 "
+            "from 2021-12-13. The floor that remains is SW2014's own: a day before 2014-02-21 is "
+            "refused outright, and an SW2014 row whose in_date predates it (the probe read in_date "
+            "values back to 1990-12-10) is held to 2014-02-21, because it labels days before "
+            "SW2014 existed -- the same backfill shape as SW2021's, 23 years shorter. What the row "
+            "split buys is the two eras themselves: before it, one closed interval held its own "
+            "opening year past every earlier as_of, and fed the real 7,893-row corpus 29 of the 38 "
+            "requestable years blocked at as_of 2023-06-30 with the 9 that read holding 118 "
+            "securities between them."
+        ),
+    ),
+    IndustryLimitation(
+        code="the_taxonomy_in_force_switches_on_2021_12_13",
+        detail=(
+            "A cross section is one day's, read from one dataset in one taxonomy, so the industry "
+            "dummies of a regression and the groups of an industry cap never mix an SW2014 label "
+            "with an SW2021 one. What does span the switch is a SERIES: SW2014 has 28 level-one "
+            "industries and SW2021 31, the SW2014-only 801020.SI 采掘 loses 66 of its 97 members "
+            "on 2021-12-13 and 环保, 石油石化 and 美容护理 first exist then. So a neutralised IC "
+            "series, a quantile spread or an industry-capped backtest running across 2021-12-13 "
+            "compares residuals against two different groupings, and a change in it at that date "
+            "may be the taxonomy rather than the factor. The cross section's taxonomy is carried "
+            "on IndustryMarketCapCrossSection.taxonomy and hashed into characteristic_digest, so "
+            "two builds either side of the switch have different identities even over the same "
+            "securities."
+        ),
+    ),
+    IndustryLimitation(
+        code="sw2014_is_stored_at_level_one_only",
+        detail=(
+            "index_member_sw2014 is fetched one SW2014 level-one index per request (28 requests, "
+            "7,558 rows on 2026-09-27), so it carries l1_code and nothing below it -- L2 and L3 "
+            "would take one request per node (104 + 227 more) and an interval alignment across "
+            "three levels this dataset has no rows for. An SW2014 IndustryAssignment's l2_code and "
+            "l3_code are None rather than guessed, build_security_industry_history refuses an "
+            "SW2014 assignment that carries one, and load_industry_market_cap_cross_section "
+            "refuses a neutralisation declared at L2 or L3 for a day before 2021-12-13 rather than "
+            "borrowing an SW2021 L2 label the day did not have."
+        ),
+    ),
+    IndustryLimitation(
+        code="the_sw2014_era_covers_less_of_the_market",
+        detail=(
+            "Coverage of the traded A-share market (daily rows, excluding .BJ) by an SW2014 L1 "
+            "membership in force that day, measured live on 2026-09-27: 2015-01-05 99.44% (13 "
+            "unclassified, 10 listed within a year), 2016-06-30 99.73%, 2018-06-29 99.82%, "
+            "2020-06-30 96.74% (125 unclassified, 119 recent listings), 2021-06-30 92.80% (314, "
+            "195 recent), 2021-12-10 91.79% (375, 175 recent). No security was in two SW2014 L1 "
+            "indices on any tested day. An unclassified name is coded industry_missing -- never "
+            "given its SW2021 label, which would re-introduce the backfill this dataset exists to "
+            "avoid -- so a late-era neutralised cross section is up to 8% thinner than a "
+            "2016 one, and industry_coverage_report names the residue for a given day."
+        ),
+    ),
+    IndustryLimitation(
+        code="an_sw2014_assignment_starts_after_the_listing",
+        detail=(
+            "The SW2014 in_date of a new listing is NOT backdated to its stock_basic list_date. "
+            "Measured live on 2026-09-27 (10 requests: 10 of the 28 SW2014 L1 indices, joined to "
+            "the stored registry): of 152 securities listed in 2019, 296 in 2020 and 332 in "
+            "2021 through 12-10 that those indices ever carried, none has its first SW2014 in_date "
+            "on its list_date and all 780 have it after -- at least 7 calendar days, median 14, "
+            "10.5 and 9 days by year -- and 68, 130 and 148 of them first enter an SW2014 index "
+            "only on or after 2021-12-13. So dating an SW2014 row's availability at its in_date "
+            "does not date a classification at the listing it was not yet published for; the "
+            "cost runs the other way, as the first weeks of a listing's life coded "
+            "industry_missing, and for 346 of the 780 as its whole SW2014-era life. What in_date "
+            "still cannot say is how long before it the assignment was announced -- "
+            "no_announcement_and_no_revision_history."
         ),
     ),
     IndustryLimitation(
@@ -442,7 +636,8 @@ KNOWN_INDUSTRY_LIMITATIONS: Final[tuple[IndustryLimitation, ...]] = (
 
 **Not an enumeration of every way the classification could be wrong.** These are the ones a live
 probe of both endpoints could demonstrate on 2026-08-09, over the SW2021 and SW2014 vintages and
-the window 1984-05-09..2026-07-31.
+the window 1984-05-09..2026-07-31 -- plus the four `V2-P6-015` added from a live probe of the
+per-index endpoint and the stored registry on 2026-09-27.
 """
 
 
@@ -602,12 +797,17 @@ class IndustryAssignment:
 
     `effective_through` is **inclusive** -- the last day this assignment held -- and `None` means
     it still holds. See this module's docstring for the measurement.
+
+    `l2_code` and `l3_code` are `None` exactly when the taxonomy's stored memberships do not carry
+    that level -- SW2014's are stored at L1 only (`SW2014_MEMBERSHIP_PANEL_COLUMNS`) -- and
+    `build_security_industry_history` holds each assignment to its taxonomy's
+    `IndustryMembershipSource.levels`, so a missing level is never a blank that reached a group.
     """
 
     ts_code: str
     l1_code: str
-    l2_code: str
-    l3_code: str
+    l2_code: str | None = None
+    l3_code: str | None = None
     effective_from: date
     effective_through: date | None = None
 
@@ -646,11 +846,13 @@ class IndustryAnswer:
         return self.assignment.l1_code
 
     @property
-    def l2_code(self) -> str:
+    def l2_code(self) -> str | None:
+        """`None` for a taxonomy stored at L1 only (SW2014)."""
         return self.assignment.l2_code
 
     @property
-    def l3_code(self) -> str:
+    def l3_code(self) -> str | None:
+        """`None` for a taxonomy stored at L1 only (SW2014)."""
         return self.assignment.l3_code
 
     @property
@@ -658,7 +860,10 @@ class IndustryAnswer:
         """Whether the day asked about predates the taxonomy that labels the answer.
 
         The boundary is inclusive at the taxonomy's own effective date: 2021-12-13 is the first
-        day SW2021 existed, so an answer for it is not a backfill.
+        day SW2021 existed, so an answer for it is not a backfill. An answer read through
+        `industry_membership_source_on` is never backfilled by construction -- the source is
+        chosen *because* its taxonomy was in force that day -- so this flag is `True` only for a
+        history read out of a dataset directly (`load_industry_histories`) about an earlier day.
         """
         return self.asked_for < self.taxonomy_effective_from
 
@@ -925,6 +1130,7 @@ def build_security_industry_history(
     """
     _require_text(ts_code, "ts_code")
     effective_from = _require_dated_taxonomy(taxonomy)
+    levels = industry_membership_source(taxonomy).levels
     by_start: dict[date, IndustryAssignment] = {}
     for entry in assignments:
         if entry.ts_code != ts_code:
@@ -933,8 +1139,7 @@ def build_security_industry_history(
                 "one security, and mixing two would answer the wrong one's industry"
             )
         _require_text(entry.l1_code, "l1_code")
-        _require_text(entry.l2_code, "l2_code")
-        _require_text(entry.l3_code, "l3_code")
+        _require_stored_levels(entry, taxonomy=taxonomy, levels=levels)
         _require_plain_date(entry.effective_from, "effective_from")
         if entry.effective_through is not None:
             _require_plain_date(entry.effective_through, "effective_through")
@@ -984,11 +1189,32 @@ def build_security_industry_history(
     )
 
 
+def _require_stored_levels(
+    entry: IndustryAssignment, *, taxonomy: str, levels: tuple[str, ...]
+) -> None:
+    """Hold an assignment's L2/L3 codes to the levels its taxonomy's stored rows carry.
+
+    A present level must be text and an absent one must be `None`: an SW2014 assignment carrying
+    an L2 code, or an SW2021 one missing it, is a row from the other dataset -- two sources that
+    were never reconciled, arriving under one taxonomy's name.
+    """
+    for level, value in (("L2", entry.l2_code), ("L3", entry.l3_code)):
+        if level in levels:
+            _require_text(value, f"{level.lower()}_code")
+        elif value is not None:
+            raise IndustryClassificationError(
+                f"{entry.ts_code}'s {taxonomy} assignment carries a {level} code {value!r}, and "
+                f"{taxonomy}'s stored memberships carry {list(levels)} only; a level this "
+                "taxonomy's rows do not have is a row from another dataset"
+            )
+
+
 def industry_histories_from_panel_rows(
     rows: Iterable[Sequence[object]], *, taxonomy: str, answerable_through: int | None = None
 ) -> Mapping[str, SecurityIndustryHistory]:
-    """Rebuild one history per security from rows shaped like
-    `INDUSTRY_MEMBERSHIP_PANEL_COLUMNS`.
+    """Rebuild one history per security from rows shaped like the taxonomy's panel columns --
+    `INDUSTRY_MEMBERSHIP_PANEL_COLUMNS` for SW2021 and `SW2014_MEMBERSHIP_PANEL_COLUMNS` (no L2,
+    no L3) for SW2014, as `industry_membership_source(taxonomy)` names them.
 
     The counterpart of the provider's projection. What this function owns is the shape of a
     *stored row* -- its width, the ISO text its two date columns are stored as, and the fact that
@@ -1022,21 +1248,30 @@ def industry_histories_from_panel_rows(
     A read-only mapping rather than a `dict`, because a whole-partition read is shared and a
     caller mutating one entry would be editing what other callers hold.
     """
+    columns = industry_membership_source(taxonomy).panel_columns
     grouped: dict[str, dict[date, IndustryAssignment]] = {}
     for index, row in enumerate(rows):
-        if len(row) != len(INDUSTRY_MEMBERSHIP_PANEL_COLUMNS):
+        if len(row) != len(columns):
             raise IndustryClassificationError(
-                f"row {index} has {len(row)} values, expected "
-                f"{len(INDUSTRY_MEMBERSHIP_PANEL_COLUMNS)} "
-                f"({', '.join(INDUSTRY_MEMBERSHIP_PANEL_COLUMNS)})"
+                f"row {index} has {len(row)} values, expected {len(columns)} "
+                f"({', '.join(columns)}) for {taxonomy}"
             )
-        subject, starts, ends, level_one, level_two, level_three = row
+        subject, starts, ends, level_one, *lower = row
+        level_two, level_three = (*lower, None, None)[:2]
         ts_code = _require_stored_text(subject, index, SUBJECT_COLUMN_NAME)
         assignment = IndustryAssignment(
             ts_code=ts_code,
             l1_code=_require_stored_text(level_one, index, INDUSTRY_L1_COLUMN),
-            l2_code=_require_stored_text(level_two, index, INDUSTRY_L2_COLUMN),
-            l3_code=_require_stored_text(level_three, index, INDUSTRY_L3_COLUMN),
+            l2_code=(
+                None
+                if INDUSTRY_L2_COLUMN not in columns
+                else _require_stored_text(level_two, index, INDUSTRY_L2_COLUMN)
+            ),
+            l3_code=(
+                None
+                if INDUSTRY_L3_COLUMN not in columns
+                else _require_stored_text(level_three, index, INDUSTRY_L3_COLUMN)
+            ),
             effective_from=_parse_iso_date(starts, index, INDUSTRY_FROM_COLUMN),
             effective_through=(
                 None if ends is None else _parse_iso_date(ends, index, INDUSTRY_THROUGH_COLUMN)
@@ -1275,7 +1510,7 @@ def _require_dated_taxonomy(taxonomy: str) -> date:
     return effective_from
 
 
-def _require_text(value: str, role: str) -> None:
+def _require_text(value: object, role: str) -> None:
     if type(value) is not str or not value or value != value.strip():
         raise IndustryClassificationError(
             f"{role} must be a non-empty string without surrounding whitespace; got {value!r}"

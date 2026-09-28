@@ -208,6 +208,8 @@ def test_every_dataset_the_ingest_module_writes_has_a_declared_cadence() -> None
         panel_ingest.INDEX_WEIGHT_DATASET,
         panel_ingest.INDEX_DAILY_DATASET,
         panel_ingest.INDUSTRY_MEMBERSHIP_DATASET,
+        # V2-P6-015: `write_industry_memberships` writes every membership source's dataset.
+        *(source.dataset for source in panel_ingest.INDUSTRY_MEMBERSHIP_SOURCES),
         panel_ingest.INDUSTRY_TREE_DATASET,
         *panel_ingest.FINANCIAL_STATEMENT_DATASETS,
     }

@@ -324,6 +324,8 @@ from openalpha_cn.domain.industry_classification import (
     INDUSTRY_TAXONOMY_EFFECTIVE_FROM,
     INDUSTRY_THROUGH_COLUMN,
     INDUSTRY_TREE_DATASET,
+    SW2014_MEMBERSHIP_DATASET,
+    SW2014_TAXONOMY,
 )
 from openalpha_cn.domain.name_history import (
     NAME_ANNOUNCEMENT_COLUMN,
@@ -520,7 +522,9 @@ class ClockStrategy(StrEnum):
     taxonomy_backfill = "taxonomy_backfill"
     """An interval expressed in a classification published after the interval began.
 
-    ``index_member_all``'s clock: the row's own event, floored at the taxonomy's effective date.
+    ``index_member_all``'s clock, and since ``V2-P6-015`` ``index_member_sw2014``'s: the row's own
+    event, floored at the effective date of the taxonomy the row is labelled in, which the
+    expansion tags each row with (SW2021 and SW2014 respectively).
     The floor is the part no column of the row can supply. See ``_taxonomy_backfill_timeline``
     for the look-ahead it closes and ``_industry_membership_panel_rows`` for why the row is split
     first, exactly as ``calendar_static`` needs ``stock_basic`` split first.
@@ -1294,6 +1298,33 @@ def _index_member_all_params(request: ProviderRequest) -> dict[str, str]:
     return {"l1_code": level_one, "is_new": state}
 
 
+def _index_member_sw2014_params(request: ProviderRequest) -> dict[str, str]:
+    """Request one SW2014 level-one index's whole constituent history: `{index_code}`.
+
+    `V2-P6-015`. One subject, the index, because the per-index endpoint answers one index per
+    request -- 28 requests for the corpus, measured 2026-09-27 at 7,558 rows with no response
+    paged. **No `is_new` is sent and none is needed**, unlike `index_member_all`: the same probe
+    read both open and closed intervals from the bare request (534 rows closing 2021-12-10 alone),
+    and `cli._build_sw2014_memberships` refuses a sweep that comes back with no closed interval,
+    which is the shape a current-only default would have.
+
+    Which vintage the index belongs to is **not** checkable here -- the request carries a bare
+    code -- so the codes come off the stored SW2014 tree (`cli._stored_level_one_codes`), the way
+    `index_member_all`'s `l1_code` slices come off the SW2021 one.
+    """
+    if len(request.subjects) != 1:
+        raise ProviderFailure(
+            provider_id=_PROVIDER_ID,
+            category="configuration",
+            message=(
+                f"{SW2014_MEMBERSHIP_DATASET} serves one SW2014 level-one index per request; got "
+                f"{list(request.subjects)}"
+            ),
+            retryable=False,
+        )
+    return {"index_code": request.subjects[0]}
+
+
 def _industry_tree_panel_rows(row: dict[str, Any]) -> tuple[dict[str, Any], ...]:
     """Give a tree row the one date it has: the day its own taxonomy came into force.
 
@@ -1400,11 +1431,44 @@ def _industry_membership_panel_rows(row: dict[str, Any]) -> tuple[dict[str, Any]
     after the last year a read covered; see
     `KNOWN_INDUSTRY_LIMITATIONS.a_partial_year_read_cannot_see_an_interval_close`.
     """
-    opened = {**row, "out_date": None, _INDUSTRY_EVENT_DATE_FIELD: row["in_date"]}
+    return _split_membership_row(row, taxonomy=INDUSTRY_MEMBERSHIP_TAXONOMY)
+
+
+_INDUSTRY_TAXONOMY_FIELD: Final[str] = "industry_taxonomy"
+"""The taxonomy a split membership row is labelled in; synthesised, never stored.
+
+What `_taxonomy_backfill_timeline` floors the row's availability at. A tag on the row rather than
+a per-descriptor clock, because the two membership datasets differ in exactly this and nothing
+else about their clock: `index_member_all` is SW2021 by construction (the endpoint takes no
+`src`) and `index_member_sw2014` is SW2014 because it is fetched one SW2014 index at a time.
+"""
+
+
+def _split_membership_row(row: dict[str, Any], *, taxonomy: str) -> tuple[dict[str, Any], ...]:
+    """The opening row and, for a closed interval, the closing row -- each tagged with `taxonomy`.
+
+    `_industry_membership_panel_rows`' argument, stated once for both membership datasets.
+    """
+    tagged = {**row, _INDUSTRY_TAXONOMY_FIELD: taxonomy}
+    opened = {**tagged, "out_date": None, _INDUSTRY_EVENT_DATE_FIELD: row["in_date"]}
     closed_on = row["out_date"]
     if closed_on is None or closed_on == "":
         return (opened,)
-    return (opened, {**row, _INDUSTRY_EVENT_DATE_FIELD: closed_on})
+    return (opened, {**tagged, _INDUSTRY_EVENT_DATE_FIELD: closed_on})
+
+
+def _sw2014_membership_panel_rows(row: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    """Split one `index_member` row exactly as `_industry_membership_panel_rows` splits one of
+    `index_member_all`'s, labelled SW2014 (`V2-P6-015`).
+
+    The dilemma is the same one -- a response row states both ends of one closed interval -- and
+    so is the answer. What differs is the taxonomy the floor comes from: SW2014's 2014-02-21
+    rather than SW2021's 2021-12-13, so an assignment that opened inside the SW2014 era is
+    knowable on its own `in_date`, and one whose `in_date` predates SW2014 (the probe read
+    `in_date` values back to 1990-12-10) is held to 2014-02-21 -- an SW2014 label for a day before
+    SW2014 existed is the backfill `index_member_all` commits wholesale.
+    """
+    return _split_membership_row(row, taxonomy=SW2014_TAXONOMY)
 
 
 def _stock_lifecycle_panel_rows(row: dict[str, Any]) -> tuple[dict[str, Any], ...]:
@@ -1867,7 +1931,9 @@ def _taxonomy_backfill_timeline(
     - **The row's own event.** The floor. Within a vintage's own era this is the same bound
       `stock_basic`'s lifecycle rows get and carries the same residue: the annual review is
       published before it takes effect and nothing in this endpoint says how far before.
-    - **The taxonomy's effective date**, 2021-12-13 for SW2021. This is the bound `V2-P1-010`
+    - **The taxonomy's effective date**, 2021-12-13 for SW2021 and, since `V2-P6-015`,
+      2014-02-21 for `index_member_sw2014`'s SW2014 rows -- read off the tag
+      `_split_membership_row` gives each row. This is the bound `V2-P1-010`
       exists for. Every one of the 7,893 rows is labelled with an SW2021 node and the earliest
       `in_date` is 1984-05-09, so dating them at `in_date` alone would present a 2021
       classification as 1984 contemporaneous fact. See
@@ -1898,7 +1964,7 @@ def _taxonomy_backfill_timeline(
     """
     effective_day = _parse_tushare_date(row[date_field])
     event_time = datetime.combine(effective_day, time(0, 0), tzinfo=_CHINA_TZ)
-    available_time = max(event_time, _INDUSTRY_TAXONOMY_AVAILABLE_FROM)
+    available_time = max(event_time, _taxonomy_available_from(row[_INDUSTRY_TAXONOMY_FIELD]))
     return Timeline(
         event_time=event_time,
         available_time=available_time,
@@ -1907,12 +1973,17 @@ def _taxonomy_backfill_timeline(
     )
 
 
-_INDUSTRY_TAXONOMY_AVAILABLE_FROM: Final[datetime] = datetime.combine(
-    INDUSTRY_TAXONOMY_EFFECTIVE_FROM[INDUSTRY_MEMBERSHIP_TAXONOMY], time(0, 0), tzinfo=_CHINA_TZ
-)
-"""The instant SW2021 came into force, which is the floor under every membership row's
-availability. One vintage rather than a per-row lookup because `index_member_all` takes no `src`
--- passing one returns zero rows -- so the whole corpus is SW2021 by construction."""
+def _taxonomy_available_from(taxonomy: str) -> datetime:
+    """The instant `taxonomy` came into force: the floor under its membership rows' availability.
+
+    Per row since `V2-P6-015`, off the tag `_split_membership_row` writes, because two datasets
+    now share this clock and differ in their taxonomy: `index_member_all` is SW2021 by
+    construction (the endpoint takes no `src` -- passing one returns zero rows) and
+    `index_member_sw2014` is SW2014 because each request names an SW2014 index.
+    """
+    return datetime.combine(
+        INDUSTRY_TAXONOMY_EFFECTIVE_FROM[taxonomy], time(0, 0), tzinfo=_CHINA_TZ
+    )
 
 
 def _price_panel_column(name: str) -> TusharePanelColumn:
@@ -2784,6 +2855,55 @@ TUSHARE_DATASETS: tuple[TushareDatasetDescriptor, ...] = (
                 name=INDUSTRY_L3_COLUMN,
                 kind="string",
                 source_field=INDUSTRY_L3_COLUMN,
+                parse=_required_text,
+            ),
+        ),
+    ),
+    TushareDatasetDescriptor(
+        # `V2-P6-015`: SW2014's level-one memberships, the classification in force
+        # 2014-02-21..2021-12-10. Its own dataset rather than columns on `index_member_all`, which
+        # hard rule 3 forbids and which speaks SW2021 alone.
+        dataset=SW2014_MEMBERSHIP_DATASET,
+        api_name="index_member",
+        kind=SW2014_MEMBERSHIP_DATASET,
+        # The security, for `index_member_all`'s reason: a reader asks "what was this one's
+        # industry on day D", and the subject guard must see a dropped index slice.
+        subject_field="con_code",
+        date_field=_INDUSTRY_EVENT_DATE_FIELD,
+        clock=ClockStrategy.taxonomy_backfill,
+        params_builder=_index_member_sw2014_params,
+        panel_rows=_sw2014_membership_panel_rows,
+        # Named rather than the defaults: the endpoint's default set also carries `is_new`,
+        # fetched here as a witness the tests cross-check and never projected.
+        response_fields="index_code,con_code,in_date,out_date,is_new",
+        required_response_fields=("index_code", "con_code", "in_date", "out_date"),
+        source_uri_template="tushare://{dataset}/{subject}/{date}",
+        # Forced, for `index_member_all`'s reason: `date_field` is synthesised by the split.
+        serves_evidence_plane=False,
+        # Not measured: the largest SW2014 index, 801890.SI 机械设备, answered 738 rows with
+        # `has_more=False` on 2026-09-27, so the ceiling is somewhere above that and no probe from
+        # outside can say where -- `index_classify`'s situation. The flag is the only witness.
+        max_rows_per_response=None,
+        requires_truncation_flag=True,
+        panel_columns=(
+            TusharePanelColumn(
+                name=INDUSTRY_FROM_COLUMN,
+                kind="string",
+                source_field="in_date",
+                parse=_calendar_date_text,
+            ),
+            TusharePanelColumn(
+                name=INDUSTRY_THROUGH_COLUMN,
+                kind="string",
+                source_field="out_date",
+                parse=_optional_industry_date_text,
+            ),
+            # The SW2014 index the row came from is the security's level-one node -- the same kind
+            # of identifier (`801780.SI`) `index_member_all`'s `l1_code` holds.
+            TusharePanelColumn(
+                name=INDUSTRY_L1_COLUMN,
+                kind="string",
+                source_field="index_code",
                 parse=_required_text,
             ),
         ),
@@ -3836,6 +3956,10 @@ class TushareProvider:
             return (INDUSTRY_MEMBERSHIP_TAXONOMY,)
         if dataset == INDUSTRY_MEMBERSHIP_DATASET:
             return (PROBE_INDUSTRY_L1_CODE, CURRENT_INDUSTRY_MEMBERSHIP)
+        if dataset == SW2014_MEMBERSHIP_DATASET:
+            # 801890.SI 机械设备 is an SW2014 L1 as well, and the largest one (738 rows, measured
+            # 2026-09-27) -- so the same code is the worst case on both membership endpoints.
+            return (PROBE_INDUSTRY_L1_CODE,)
         if dataset == FINANCIAL_INDICATOR_DATASET:
             return (PROBE_SECURITY, str(self._clock().astimezone(_CHINA_TZ).year - 1))
         if dataset in FINANCIAL_STATEMENT_DATASETS:

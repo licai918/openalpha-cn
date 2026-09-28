@@ -52,6 +52,7 @@ from openalpha_cn.domain.index_prices import INDEX_DAILY_DATASET, IndexPriceErro
 from openalpha_cn.domain.industry_classification import (
     INDUSTRY_MEMBERSHIP_DATASET,
     INDUSTRY_TREE_DATASET,
+    SW2014_MEMBERSHIP_DATASET,
     IndustryClassificationError,
 )
 from openalpha_cn.domain.name_history import NAMECHANGE_DATASET
@@ -125,6 +126,9 @@ def test_the_build_targets_are_a_closed_table_in_dependency_order() -> None:
         "cashflow": (CASH_FLOW_DATASET,),
         "index_classify": (INDUSTRY_TREE_DATASET,),
         "index_member_all": (INDUSTRY_MEMBERSHIP_DATASET,),
+        # V2-P6-015: SW2014's memberships, sliced by the stored SW2014 tree's L1 codes, so it
+        # runs after index_classify too.
+        "index_member_sw2014": (SW2014_MEMBERSHIP_DATASET,),
         "fina_indicator": (FINANCIAL_INDICATOR_DATASET,),
     }
     assert list(PANEL_BUILD_TARGETS) == [
@@ -141,6 +145,7 @@ def test_the_build_targets_are_a_closed_table_in_dependency_order() -> None:
         "cashflow",
         "index_classify",
         "index_member_all",
+        "index_member_sw2014",
         "fina_indicator",
     ]
 
@@ -164,7 +169,8 @@ def test_every_dataset_the_tushare_table_declares_now_has_a_build_target() -> No
     buildable = {name for datasets in PANEL_BUILD_TARGETS.values() for name in datasets}
 
     assert declared == buildable
-    assert len(declared) == 16
+    # Seventeen since V2-P6-015's index_member_sw2014.
+    assert len(declared) == 17
 
 
 def test_the_span_targets_are_the_three_whose_requests_carry_no_usable_year() -> None:
@@ -180,6 +186,8 @@ def test_the_span_targets_are_the_three_whose_requests_carry_no_usable_year() ->
     assert set(PANEL_BUILD_SPAN_TARGETS) == {
         INDUSTRY_TREE_DATASET,
         INDUSTRY_MEMBERSHIP_DATASET,
+        # V2-P6-015: one index_code per request and no date filter, index_member_all's reason.
+        SW2014_MEMBERSHIP_DATASET,
         FINANCIAL_INDICATOR_DATASET,
     }
     assert PANEL_BUILD_SPAN_TARGETS < _UNPINNED_PARTITION_YEAR_TARGETS
@@ -279,6 +287,8 @@ def test_the_partition_year_exemption_names_its_four_targets_one_by_one() -> Non
         STOCK_BASIC_DATASET,
         INDUSTRY_TREE_DATASET,
         INDUSTRY_MEMBERSHIP_DATASET,
+        # V2-P6-015: filed by membership event year, index_member_all's reason.
+        SW2014_MEMBERSHIP_DATASET,
         FINANCIAL_INDICATOR_DATASET,
     }
     assert set(PANEL_BUILD_TARGETS) > _UNPINNED_PARTITION_YEAR_TARGETS
