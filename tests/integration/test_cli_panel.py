@@ -756,12 +756,14 @@ def test_a_partition_filed_under_a_year_nobody_asked_for_stops_the_build(
     it is what makes "this year's corpus" and "a five-year-old one" the same observation to that
     call. The partition year is the check that survives.
 
-    **Since `V2-P6-016` the build stops one step earlier, and for a sharper reason.** The stored
-    2026 halt on the session fetched again is no longer served, so before anything is written the
-    build judges it as a possible withdrawal -- and an empty halt answer withdraws only a
-    contradicted whole-day halt, which this is not -- and refuses the year naming the session. The
-    misfiled 2025 partition is therefore never written at all, which is the stronger form of
-    what this test exists to show: no partition of a year nobody asked for.
+    **Since `V2-P6-016` a store holding the year stops it before anything is written.** The
+    stale answer is the answer for `HALT_SESSION`, a session this build fetched again, and
+    `reconcile_withdrawals` compares it with the stored halts before any write: read by date it
+    would look empty and be judged a withdrawal -- refused with a remedy that rebuilds the year
+    from nothing, or, for a contradicted whole-day halt, recorded as one. It is refused as what it
+    is, a misfiled answer, by name, and no partition of the unasked year is written.
+    `_audit_written_partitions` still stops a misfiled partition no earlier guard sees:
+    `test_a_partition_misfiled_past_every_earlier_guard_is_stopped_by_the_audit`.
     """
     monkeypatch.setenv("TUSHARE_TOKEN", SECRET_TOKEN)
     monkeypatch.setattr(cli, "_panel_clock", lambda: BUILD_CLOCK)
@@ -772,9 +774,49 @@ def test_a_partition_filed_under_a_year_nobody_asked_for_stops_the_build(
     result = build(tmp_path, "price", extra=["--json"])
 
     assert result.exit_code == PanelExit.unhealthy
-    assert f"{SUSPENSION_DATASET} answered no rows for {HALT_SESSION.isoformat()}" in result.stderr
+    assert (
+        f"the {SUSPENSION_DATASET} answer for {HALT_SESSION.isoformat()} carries rows dated "
+        f"{date(BUILD_YEAR - 1, 12, 31).isoformat()}: a misfiled answer, not a withdrawal"
+    ) in result.stderr
+    assert "rebuild the year in full" not in result.stderr
     assert "No partition had been written" in result.stderr
     assert PanelStore(tmp_path / "panel").registered_years(SUSPENSION_DATASET) == (BUILD_YEAR,)
+
+
+class LastYearCalendarTransport(YearAwareCalendarTransport):
+    """A `trade_cal` that answers the year before the one the request named."""
+
+    def post(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if str(payload["api_name"]) != TRADING_CALENDAR_DATASET:
+            return super().post(payload)
+        params = dict(payload["params"])
+        params["start_date"] = f"{int(str(params['start_date'])[:4]) - 1}0101"
+        return super().post({**payload, "params": params})
+
+
+def test_a_partition_misfiled_past_every_earlier_guard_is_stopped_by_the_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_audit_written_partitions`' misfiled-year check, end to end through the command.
+
+    A `trade_cal` answer for the year before the one asked for passes every guard of its own
+    target -- it is a whole, well-formed calendar -- and is filed by its rows' dates into last
+    year's partition. The build is refused after that write, naming the partition, as the
+    audit's docstring says; the partition is on disk, and the message says so.
+    """
+    monkeypatch.setenv("TUSHARE_TOKEN", SECRET_TOKEN)
+    monkeypatch.setattr(cli, "_panel_clock", lambda: BUILD_CLOCK)
+    monkeypatch.setattr(cli, "_panel_transport", LastYearCalendarTransport)
+
+    result = build(tmp_path, "trade_cal", extra=["--json"])
+
+    assert result.exit_code == PanelExit.unhealthy, result.output
+    assert f"--year {BUILD_YEAR} was asked for" in result.stderr
+    assert f"{TRADING_CALENDAR_DATASET}:{BUILD_YEAR - 1}" in result.stderr
+    assert "written before this build stopped and are still stored" in result.stderr
+    assert PanelStore(tmp_path / "panel").registered_years(TRADING_CALENDAR_DATASET) == (
+        BUILD_YEAR - 1,
+    )
 
 
 def test_panel_build_asks_the_year_it_was_given_rather_than_the_year_of_its_clock(
