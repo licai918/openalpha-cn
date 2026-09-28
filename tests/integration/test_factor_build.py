@@ -164,6 +164,10 @@ rather than left to be discovered: `manifest_ids.neutralized` is `[]` on a `--ti
 build and the perturbation loop cannot reach it. That key is held by the equality against
 `_expected_build_view` instead, and by
 `test_the_report_names_what_it_actually_stored`'s explicit `coverage["neutralized"] == {}`.
+`excluded_report_periods` (`V2-P6-019`) is the same case: `reversal_1d` reads no statement, so it
+is `[]` here, and its populated shape is held by
+`tests/integration/panel/test_factor_build_shared_context.py::
+test_a_stub_filing_off_the_quarter_grid_builds_and_every_build_face_lists_it`.
 """
 
 
@@ -1294,6 +1298,14 @@ def _expected_build_view(report: FactorBuildReport) -> dict[str, Any]:
         "manifest_ids": {tier: list(ids) for tier, ids in report.manifest_ids.items()},
         "coverage": {tier: dict(counts) for tier, counts in report.coverage.items()},
         "partitions": list(report.partitions),
+        "excluded_report_periods": [
+            {
+                "dataset": item.dataset,
+                "subject": item.subject,
+                "report_period": item.report_period.isoformat(),
+            }
+            for item in report.excluded_report_periods
+        ],
     }
 
 

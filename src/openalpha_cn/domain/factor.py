@@ -704,7 +704,9 @@ class FactorDefinition(BaseModel):
     calendar year, so the quarters between two period ends are enumerable without consulting a
     row. That is not the "fiscal-quarter arithmetic of this module's own devising" the engine
     declines to perform -- that one would have to rule on which quarter a *non*-quarter-end
-    `end_date` belongs to, and `panel_factors::_report_period` refuses such a period outright.
+    `end_date` belongs to, and the engine never rules on it: its reader excludes such a period
+    from the quarterly corpus and lists it (`V2-P6-019`), and `panel_factors::_quarter_index`
+    refuses to give one an ordinal.
 
     Equality is the strict setting and is the one the year-on-year factors need:
     `max_window_periods == lookback_periods` means **"no missed filing inside the window"**,

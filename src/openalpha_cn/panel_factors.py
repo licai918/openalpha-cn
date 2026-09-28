@@ -2669,8 +2669,8 @@ def _trailing_twelve_months(window: FactorWindow, *, dataset: str, column: str) 
 
     `None` -- hence `undefined_value` -- when `window.periods[:-1]` does not hold exactly one
     fiscal year end. **That is unreachable at this family's declared reaches and is a branch
-    rather than an assumption**, for `_sample_stdev`'s stated reason: `_report_period` refuses a
-    period that is not one of `FISCAL_QUARTER_ENDS`, `_form_window` hands over exactly
+    rather than an assumption**, for `_sample_stdev`'s stated reason: `_read_into` excludes a
+    period that is not one of `FISCAL_QUARTER_ENDS` (`V2-P6-019`), `_form_window` hands over exactly
     `lookback_periods` of them, and `_overruns_its_span` refuses a window whose fiscal-quarter
     span exceeds `max_window_periods` -- so at `5 == 5` the four earlier periods are four
     consecutive quarters and exactly one of them ends a year. Relax the span bound and the branch
@@ -4419,6 +4419,33 @@ _refuse_table_drift(FACTOR_DEFINITIONS, FACTOR_EVALUATORS)
 # --- the computed result ----------------------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True, kw_only=True, order=True)
+class ExcludedReportPeriod:
+    """One stored statement filing a build left out, because its period is not a quarter end.
+
+    `V2-P6-019`. See `_read_into` and `KNOWN_FACTOR_RUN_LIMITATIONS.
+    a_report_period_off_the_quarter_grid_is_excluded_and_listed_rather_than_rounded`. Keyed by
+    `(dataset, subject, report_period)`: several stored versions of one such filing are one
+    exclusion, as they would have been one filing.
+
+    **It refuses a quarter-end period**, and that is the structural half of "the exclusion cannot
+    hide a real defect". The only way leaving a row out could cost an answer is by leaving out a
+    quarterly filing, and a reader that did would have to record it here -- which this refuses.
+    """
+
+    dataset: str
+    subject: str
+    report_period: date
+
+    def __post_init__(self) -> None:
+        if _is_a_fiscal_quarter_end(self.report_period):
+            raise ValueError(
+                f"{self.dataset}.{REPORT_PERIOD_COLUMN} {self.report_period.isoformat()} for "
+                f"{self.subject} is a fiscal quarter end; only a period off the quarter grid is "
+                "excluded, and a quarterly filing left out would be a lost answer"
+            )
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class FactorPanel:
     """One factor at one `as_of`: the manifest, every observation, and the wall clock.
@@ -4443,6 +4470,20 @@ class FactorPanel:
     unchanged inputs got a new `manifest_id` and could then never be written, because a stored
     build may not be dropped. Recorded, stored on the manifest row as `input_batch_digest`, out
     of the content address. See `domain/factor.py::FactorInputProvenance`.
+    """
+    excluded_report_periods: tuple[ExcludedReportPeriod, ...] = ()
+    """Every statement filing this build's read left out for a period off the quarter grid.
+
+    `V2-P6-019`, sorted, one entry per `(dataset, subject, report_period)`, over every row the
+    visible read returned -- not only the evaluated subjects', because the exclusion is a fact
+    about the corpus the build read. Empty for a factor that reads no statement.
+
+    **Reported and not stored**, and neither is a gap. It is not a determinant beside the inputs:
+    the same partitions -- which `manifest.inputs` addresses by content -- always exclude the same
+    rows, so it cannot move `manifest_id` without an input moving it first, and a field on
+    `FactorBuildManifest` would be a breaking contract change (`AGENTS.md` rule 3) to record a
+    function of what the manifest already addresses. A panel constructed by hand carries `()`.
+    The faces carry it on `factor_view.FactorBuildReport`.
     """
 
     @property
@@ -4510,6 +4551,12 @@ class _ReadState:
     announced: dict[tuple[str, date], date] = field(default_factory=dict)
     stated: dict[tuple[str, date, date], tuple[float | None, ...]] = field(default_factory=dict)
     ambiguous: dict[str, set[date]] = field(default_factory=dict)
+    off_grid: set[tuple[str, date]] = field(default_factory=set)
+    """`V2-P6-019`: every `(subject, report_period)` left out for being off the quarter grid.
+
+    Carried like the rest, because a carried read fetches a row once per build: a stub read at an
+    earlier instant is not fetched again at a later one and must still be listed there.
+    """
     session_of: dict[object, date] = field(default_factory=dict)
 
 
@@ -4775,6 +4822,13 @@ def compute_factor(
         observations=observations,
         built_at=built_at,
         input_provenance=tuple(provenance),
+        excluded_report_periods=tuple(
+            sorted(
+                ExcludedReportPeriod(dataset=dataset, subject=subject, report_period=period)
+                for dataset, reading in readings.items()
+                for subject, period in reading.off_grid
+            )
+        ),
     )
 
 
@@ -4831,6 +4885,11 @@ class _DatasetReading:
     columns: tuple[str, ...]
     axis: FactorAxis
     ambiguous_points_by_subject: Mapping[str, frozenset[date]]
+    off_grid: frozenset[tuple[str, date]] = frozenset()
+    """`V2-P6-019`: the `(subject, report_period)` rows this read excluded, which appear nowhere
+    else in the reading. Always empty on the session axis, like the ambiguity carrier above. A
+    copy rather than a view of the carried set, because it is small (18 in the whole research
+    store) and the report outlives the next carried read."""
 
 
 def _panel_axis_points(
@@ -5264,6 +5323,7 @@ def _read_into(
     announced = state.announced
     stated = state.stated
     ambiguous = state.ambiguous
+    off_grid = state.off_grid
     references: list[FactorInputRef] = []
     provenance: list[FactorInputProvenance] = []
     # `V2-P6-005`: the per-row work that does not depend on the row, done once. A year of `daily`
@@ -5337,11 +5397,17 @@ def _read_into(
                     "about whether it had happened and a filing announced after as_of could win "
                     "its period"
                 )
-            point = (
-                _report_period(row[2], dataset=dataset, subject=subject)
-                if period_indexed
-                else announcement
-            )
+            if period_indexed:
+                point = _report_period(row[2], dataset=dataset, subject=subject)
+                if not _is_a_fiscal_quarter_end(point):
+                    # `V2-P6-019`: a stub period is not a periodic report and has no place on the
+                    # quarter grid, so it leaves the quarterly corpus here -- before any cell is
+                    # read, any version compared or any window formed -- and is listed. Never
+                    # rounded: see `FISCAL_QUARTER_ENDS`.
+                    off_grid.add((subject, point))
+                    continue
+            else:
+                point = announcement
             # Every cell a finite float -- nearly every row -- is its own answer, so the row's own
             # slice is the cells; the first cell that is anything else sends the whole row through
             # the per-cell expression, which reaches `_numeric` in column order as it always did.
@@ -5401,6 +5467,7 @@ def _read_into(
             columns,
             axis,
             MappingProxyType({name: frozenset(days) for name, days in ambiguous.items()}),
+            frozenset(off_grid),
         ),
         tuple(references),
         tuple(provenance),
@@ -5563,19 +5630,34 @@ FISCAL_QUARTER_ENDS: Final[tuple[tuple[int, int], ...]] = ((3, 31), (6, 30), (9,
 """The four `(month, day)` pairs an A-share fiscal period can end on.
 
 A statutory fact rather than a convention this module chose: a PRC listed company's accounting
-year is the calendar year, so `end_date` on all four statement endpoints is one of these four
-days -- every value the probes in `domain/financial_statements.py` record is
-(`20260331`, `20251231`, `20060331`, `20051231`, `19891231`, ...), and a period that is not one
-of them is refused by `_report_period` rather than rounded into a quarter.
+year is the calendar year, so the **periodic** reports on all four statement endpoints end on one
+of these four days -- every value the probes in `domain/financial_statements.py` record is
+(`20260331`, `20251231`, `20060331`, `20051231`, `19891231`, ...).
+
+**What the endpoints also serve, and what the reader does with it** (`V2-P6-019`). The multi-year
+research store holds 18 stored rows whose `end_date` is none of the four, measured 2026-09-28:
+12 in `income` (one per security, e.g. `920185.BJ` `2014-05-31`, `688063.SH` `2019-08-31`), 6 in
+`balancesheet` (e.g. `920038.BJ` `2015-02-28`), none in `cashflow` or `fina_indicator`. They are
+stub periods from a company's pre-listing or fiscal-year-change era, not periodic reports.
+`_read_into` excludes them from the quarterly corpus before any period arithmetic and lists each
+one on `FactorPanel.excluded_report_periods`; it never rounds one into a quarter. See
+`KNOWN_FACTOR_RUN_LIMITATIONS.a_report_period_off_the_quarter_grid_is_excluded_and_listed_rather_
+than_rounded`.
 
 This is the grid `_period_span` counts on, and it is the whole of what makes
 `max_window_periods == lookback_periods` mean "no missed filing inside the window"; see that
-field's docstring and `_period_span`.
+field's docstring and `_period_span`. `_quarter_index` refuses a period off it, so the grid
+arithmetic stays exactly as strict as it was when the decoder refused such a row.
 """
 
 
+def _is_a_fiscal_quarter_end(period: date) -> bool:
+    """Whether `period` is on the quarter grid -- the one test the reader excludes a row by."""
+    return (period.month, period.day) in FISCAL_QUARTER_ENDS
+
+
 def _report_period(value: object, *, dataset: str, subject: str) -> date:
-    """A stored `report_period` cell as a fiscal period, or a refusal that names the row.
+    """A stored `report_period` cell as a date, or a refusal that names the row.
 
     A refusal rather than a coverage code, for `_numeric`'s reason: a `report_period` that is not
     an ISO date is a property of the *partition* rather than of this security's fundamentals, and
@@ -5584,12 +5666,13 @@ def _report_period(value: object, *, dataset: str, subject: str) -> date:
     panel plane has no date kind, so this is the same decode `financial_statements
     ._parse_iso_date` performs on the same column -- and the same refusal.
 
-    A well-formed date that is not one of `FISCAL_QUARTER_ENDS` is refused on the same grounds and
-    for a sharper reason: `_period_span` counts the window's reach in fiscal quarters, and a
-    period that is not a quarter end has no place on that grid. Rounding one into the quarter it
-    falls in would be the fiscal-quarter arithmetic of this module's own devising that
-    `_panel_axis_points` refuses to perform, and it would do it silently -- 2024-05-15 and
-    2024-06-30 would become one point.
+    **A well-formed date off `FISCAL_QUARTER_ENDS` is decoded, not refused** (`V2-P6-019`). It used
+    to be refused here, which refused every statement factor at every instant of a store holding
+    one stub filing. The caller now decides: `_read_into` excludes such a row from the quarterly
+    corpus and lists it, and `_quarter_index` still refuses to give one an ordinal. What must
+    never happen to it is unchanged -- rounding it into the quarter it falls in would be the
+    fiscal-quarter arithmetic of this module's own devising that `_panel_axis_points` refuses to
+    perform, and it would do it silently: 2024-05-15 and 2024-06-30 would become one point.
     """
     if not isinstance(value, str):
         raise FactorEngineError(
@@ -5598,20 +5681,12 @@ def _report_period(value: object, *, dataset: str, subject: str) -> date:
             "but the stored ISO date"
         )
     try:
-        period = date.fromisoformat(value)
+        return date.fromisoformat(value)
     except ValueError as error:
         raise FactorEngineError(
             f"{dataset}.{REPORT_PERIOD_COLUMN} holds {value!r} for {subject}, which is not an "
             "ISO date; the report-period axis is ordered by it"
         ) from error
-    if (period.month, period.day) not in FISCAL_QUARTER_ENDS:
-        raise FactorEngineError(
-            f"{dataset}.{REPORT_PERIOD_COLUMN} holds {value!r} for {subject}, which is not an "
-            "A-share fiscal quarter end; this engine measures a period window's reach in "
-            "quarters, and a period off that grid would either be rounded into a neighbour or "
-            "make the reach unmeasurable"
-        )
-    return period
 
 
 def _numeric(
@@ -5965,7 +6040,8 @@ def _period_span(window: tuple[date, ...]) -> int:
     year: the periods between two quarter ends are enumerable without consulting a single row.
     That is not the "fiscal-quarter arithmetic of this module's own devising" `_panel_axis_points`
     declines to perform -- that one would have to rule on which quarter a *non*-quarter-end
-    `end_date` belongs to, and `_report_period` refuses such a period outright instead.
+    `end_date` belongs to; `_read_into` excludes such a period from the quarterly corpus instead,
+    and `_quarter_index` refuses one.
 
     Strictly stronger than the panel count it replaces, never weaker: every panel period is a
     quarter end, so the panel's points between the window's ends are a subset of the grid's.
@@ -5976,9 +6052,18 @@ def _period_span(window: tuple[date, ...]) -> int:
 def _quarter_index(period: date) -> int:
     """A fiscal quarter end as its ordinal on the quarter grid, so two of them can be subtracted.
 
-    `_report_period` has already refused anything that is not one of `FISCAL_QUARTER_ENDS`, so
-    `month // 3` is the quarter of the year rather than a rounding.
+    Anything that is not one of `FISCAL_QUARTER_ENDS` is refused, so `month // 3` is the quarter
+    of the year rather than a rounding. `_read_into` excludes such a period before it can reach a
+    window (`V2-P6-019`), so this refusal is not reached by a stored row; it is here so that a
+    reader that stopped excluding one would refuse the build rather than round it -- the refusal
+    `_report_period` used to make, kept where the arithmetic is.
     """
+    if not _is_a_fiscal_quarter_end(period):
+        raise FactorEngineError(
+            f"report period {period.isoformat()} is not an A-share fiscal quarter end; this "
+            "engine measures a period window's reach in quarters, and a period off that grid "
+            "would either be rounded into a neighbour or make the reach unmeasurable"
+        )
     return period.year * 4 + period.month // 3 - 1
 
 

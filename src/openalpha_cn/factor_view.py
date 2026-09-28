@@ -299,6 +299,7 @@ from openalpha_cn.panel_factors import (
     FACTOR_PROCESSED_DATASET_PREFIX,
     FACTOR_TRANSFORM_MANIFEST_DATASET_PREFIX,
     FACTOR_TRANSFORMS,
+    ExcludedReportPeriod,
     FactorEngineError,
     FactorPanel,
     FactorReadCarry,
@@ -350,6 +351,7 @@ __all__ = [
     "FACTOR_DATE_ZONE",
     "FACTOR_RUN_LIMITATION_CODES",
     "KNOWN_FACTOR_RUN_LIMITATIONS",
+    "OFF_GRID_REPORT_PERIOD_LIMITATION",
     "REQUIREMENT_BUILDERS",
     "VIEW_SCHEMA_VERSION",
     "ExperimentDocumentStore",
@@ -460,6 +462,11 @@ class FactorRunLimitation:
     code: str
     detail: str
 
+
+OFF_GRID_REPORT_PERIOD_LIMITATION: Final[str] = (
+    "a_report_period_off_the_quarter_grid_is_excluded_and_listed_rather_than_rounded"
+)
+"""`V2-P6-019`'s entry below, named once because the terminal face cites it beside the list."""
 
 KNOWN_FACTOR_RUN_LIMITATIONS: Final[tuple[FactorRunLimitation, ...]] = (
     FactorRunLimitation(
@@ -675,6 +682,36 @@ KNOWN_FACTOR_RUN_LIMITATIONS: Final[tuple[FactorRunLimitation, ...]] = (
             "--tier neutralized build is exit 0 at both 5 and 30 days on it -- because its "
             "membership partition's newest assignment sits inside the build window, while a real "
             "corpus's is the last annual constituent review."
+        ),
+    ),
+    FactorRunLimitation(
+        code=OFF_GRID_REPORT_PERIOD_LIMITATION,
+        detail=(
+            "V2-P6-019. A stored statement row whose report_period is a date but not an A-share "
+            "fiscal quarter end (03-31, 06-30, 09-30, 12-31) is LEFT OUT of the quarterly corpus "
+            "the factor engine reads, before any period arithmetic, and never rounded into a "
+            "neighbouring quarter. MEASURED 2026-09-28 in the multi-year research store: 18 such "
+            "rows -- 12 in income, one per security (003040.SZ 2017-01-31, 300959.SZ 2016-04-30, "
+            "301001.SZ 2015-11-30, 301038.SZ 2016-04-30, 301200.SZ 2020-04-30, 301217.SZ "
+            "2019-07-31, 301256.SZ 2017-01-31, 688063.SH 2019-08-31, 688772.SH 2017-05-31, "
+            "688779.SH 2017-10-31, 920185.BJ 2014-05-31, 920305.BJ 2015-04-30), 6 in balancesheet "
+            "(920025.BJ 2022-07-31, 920038.BJ 2015-02-28, 920059.BJ 2015-10-31, 920229.BJ "
+            "2016-02-29, 920269.BJ 2024-05-31, 920289.BJ 2023-10-31), none in cashflow or "
+            "fina_indicator. They are stub periods from a pre-listing or fiscal-year-change era, "
+            "not periodic reports. Before this, the engine refused the whole build on the first "
+            "one it met, so every statement factor was refused at every instant from 2015 on. "
+            "WHY EXCLUDING IS EXACT: those periods are not quarters, so no TTM or year-on-year "
+            "window -- which is counted in fiscal quarters on a grid knowable without reading a "
+            "row -- can contain one, and leaving one out changes no window any factor forms. "
+            "Rounding one into a neighbour would, by contrast, mismeasure: it would restate a "
+            "real quarter with a stub's numbers, or fill a quarter nobody filed. A security whose "
+            "only rows are off the grid has no filing, and is answered exactly as a security "
+            "with no stored row. NEVER SILENT: every factor build lists what it left out, by "
+            "dataset, security and period -- FactorBuildReport.excluded_report_periods, the "
+            "`excluded_report_periods` key of `factor build --json`, and an `excluded` line on "
+            "the terminal. Nothing is deleted: the rows stay in the store as evidence, and no "
+            "ingest path changed. What still refuses: a report_period that is not a date at all, "
+            "which is a damaged partition rather than a stub."
         ),
     ),
 )
@@ -3202,6 +3239,15 @@ class FactorBuildReport:
     """
     partitions: tuple[str, ...]
     """Every partition written, as `dataset@year`, in write order."""
+    excluded_report_periods: tuple[ExcludedReportPeriod, ...]
+    """Every statement filing the raw cross sections left out for a period off the quarter grid.
+
+    `V2-P6-019`: the union of each instant's `FactorPanel.excluded_report_periods`, sorted. Here so
+    the exclusion is never silent -- `KNOWN_FACTOR_RUN_LIMITATIONS.
+    a_report_period_off_the_quarter_grid_is_excluded_and_listed_rather_than_rounded` -- and empty
+    for a factor that reads no statement. Only the raw tier reads the panel; the other two are
+    computed from it, so they exclude nothing of their own.
+    """
 
 
 FACTOR_PLANE_DATASET_PREFIXES: Final[tuple[str, ...]] = (
@@ -3576,6 +3622,9 @@ def _build_one(
             ),
         },
         partitions=tuple(f"{ref.dataset}@{ref.year}" for ref in written),
+        excluded_report_periods=tuple(
+            sorted({item for panel in panels for item in panel.excluded_report_periods})
+        ),
     )
 
 
@@ -3872,7 +3921,9 @@ BUILD_VIEW_SCHEMA_VERSION: Final[str] = "factor-build-view/v1"
 def build_view(report: FactorBuildReport) -> dict[str, object]:
     """One build report as JSON-ready data, for `--json` and for the SDK's own rendering.
 
-    Ten keys, every one a projection of `FactorBuildReport` and none of them recomputed. Unlike
+    Eleven keys, every one a projection of `FactorBuildReport` and none of them recomputed -- the
+    eleventh, `excluded_report_periods`, is `V2-P6-019`'s list of the statement filings a build
+    left out for a period off the quarter grid, one object per filing, `[]` for none. Unlike
     `experiment_view` there is no seal to ship whole -- a build stores partitions rather than a
     document -- so this **is** the rendering, which is why `tests/integration/test_factor_build.py::
     test_every_key_the_build_faces_render_is_separately_falsifiable` perturbs one key at a time and
@@ -3890,6 +3941,14 @@ def build_view(report: FactorBuildReport) -> dict[str, object]:
         "manifest_ids": {tier: list(ids) for tier, ids in report.manifest_ids.items()},
         "coverage": {tier: dict(counts) for tier, counts in report.coverage.items()},
         "partitions": list(report.partitions),
+        "excluded_report_periods": [
+            {
+                "dataset": item.dataset,
+                "subject": item.subject,
+                "report_period": item.report_period.isoformat(),
+            }
+            for item in report.excluded_report_periods
+        ],
     }
 
 

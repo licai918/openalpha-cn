@@ -64,6 +64,7 @@ from openalpha_cn.domain.daily_prices import (
 from openalpha_cn.domain.financial_statements import (
     ANNOUNCEMENT_DATE_COLUMN,
     FIRST_ANNOUNCEMENT_COLUMN,
+    INCOME_DATASET,
     REPORT_PERIOD_COLUMN,
     REVISION_LABEL_COLUMN,
     STATEMENT_DATA_COLUMNS,
@@ -106,7 +107,11 @@ from openalpha_cn.factor_view import (
     factor_build_request,
 )
 from openalpha_cn.panel.store import PanelStore
-from openalpha_cn.panel_factors import FACTOR_DEFINITIONS
+from openalpha_cn.panel_factors import (
+    FACTOR_DEFINITIONS,
+    ExcludedReportPeriod,
+    load_factor_observations,
+)
 from openalpha_cn.panel_ingest import split_panel_batch_by_year, write_panel_batch
 from openalpha_cn.sdk import OpenAlphaSDK
 
@@ -374,10 +379,26 @@ def _announced(index: int, period: date) -> date:
     return deadline + timedelta(days=index % 5)
 
 
-def _statement_batch(dataset: str) -> ColumnarPanelBatch:
-    """Every stored column of one endpoint; positive and growing, so every ratio is defined."""
+def _statement_batch(
+    dataset: str, *, stubs: Sequence[tuple[str, date, date]] = ()
+) -> ColumnarPanelBatch:
+    """Every stored column of one endpoint; positive and growing, so every ratio is defined.
+
+    `stubs` adds `(security, period, announced)` rows beside the quarterly ones, each carrying
+    every column at a value no quarterly row has -- the stub filings `V2-P6-019` excludes.
+    """
     rows: list[tuple[str, datetime, datetime, datetime]] = []
     cells: dict[str, list[object]] = {name: [] for name in statement_panel_columns(dataset)}
+    for code, period, announced in stubs:
+        stamp = _midnight(announced)
+        rows.append((code, stamp, stamp, stamp))
+        cells[REPORT_PERIOD_COLUMN].append(period.isoformat())
+        cells[ANNOUNCEMENT_DATE_COLUMN].append(announced.isoformat())
+        if FIRST_ANNOUNCEMENT_COLUMN in cells:
+            cells[FIRST_ANNOUNCEMENT_COLUMN].append(announced.isoformat())
+            cells[REVISION_LABEL_COLUMN].append("0")
+        for name in STATEMENT_DATA_COLUMNS[dataset]:
+            cells[name].append(98765.0)
     for index, code in enumerate(SECURITIES):
         for position, period in enumerate(PERIODS):
             announced = _announced(index, period)
@@ -1279,3 +1300,102 @@ def test_a_refused_set_exits_with_the_refused_factors_own_code(
     assert result.exit_code == int(FACTOR_EXIT[FactorPanelUnreadableError.reason])
     assert ONE_YEAR_SET[1] in result.stderr
     assert "factor_obs_reversal_1d_v1@2026" in result.stderr
+
+
+# --- V2-P6-019: a stub filing off the quarter grid, at the build's faces ------------------------
+
+STUB_SECURITY: Final[str] = SECURITIES[4]
+STUB_PERIOD: Final[date] = date(2025, 11, 30)
+"""Between 2025-09-30 and 2025-12-31, the shape of `920185.BJ`'s stored `2014-05-31`.
+
+Announced on 2025-12-10, after that security's 2025-09-30 filing and before its 2025 annual
+(which `_announced` puts in March 2026), so at `INSTANTS[0]` a reader that rounded it down would
+restate the September quarter and one that rounded it up would file a December quarter nobody
+had filed yet -- either way the TTM numerator moves.
+"""
+
+STUB_LISTED: Final[str] = (
+    f"excluded   1 statement row(s) off the fiscal quarter grid: "
+    f"income {STUB_SECURITY} {STUB_PERIOD.isoformat()}"
+)
+"""The line the terminal face prints for the stub, with the dataset, the security and the period."""
+
+
+def _with_a_stub(store: PanelStore) -> None:
+    """Rewrite the stub's announcement year of `income` with one stub row beside its quarters."""
+    batch = _statement_batch(
+        INCOME_DATASET, stubs=((STUB_SECURITY, STUB_PERIOD, date(2025, 12, 10)),)
+    )
+    _write(store, batch, only=2025)
+
+
+def _raw_at_january(**overrides: Any) -> dict[str, Any]:
+    return _parameters(
+        tier="raw", transform="", neutralization="", as_ofs=(INSTANTS[0],), **overrides
+    )
+
+
+def _stored_answers(store: PanelStore, factor: str) -> dict[str, tuple[str, float | None]]:
+    observations = load_factor_observations(
+        store, FACTOR_DEFINITIONS.get(factor), years=(2026,), as_of=INSTANTS[0]
+    )
+    return {item.subject: (item.coverage, item.value) for item in observations}
+
+
+def test_a_stub_filing_off_the_quarter_grid_builds_and_every_build_face_lists_it(
+    corpus: Path, tmp_path: Path
+) -> None:
+    """`V2-P6-019` at the faces: the build that refused at `earnings_yield_ttm/v1` now stores, the
+    answers are the ones the store without the stub stores, and the report, the `--json` body and
+    the terminal line all name the excluded row.
+
+    The engine-level measurement -- rounding in either direction moves the answer, a carried read
+    lists what a fresh one lists, a security with only a stub is a security with no filing -- is
+    `tests/integration/panel/test_factor_report_periods.py`'s. This is the part only a build can
+    show: the exclusion reaches the report a caller reads, and it is reported rather than absorbed.
+    A factor that reads no statement lists nothing, which is the zero the terminal line prints.
+    """
+    factor = "earnings_yield_ttm/v1"
+    clean = _copy(corpus, tmp_path / "clean")
+    stubbed = _copy(corpus, tmp_path / "stubbed")
+    _with_a_stub(stubbed)
+
+    _single(clean, factor, **_raw_at_january())
+    reports = _shared(stubbed, (factor, "reversal_1d/v1"), **_raw_at_january())
+
+    listed = (
+        ExcludedReportPeriod(
+            dataset=INCOME_DATASET, subject=STUB_SECURITY, report_period=STUB_PERIOD
+        ),
+    )
+    assert reports[0].excluded_report_periods == listed
+    assert reports[1].excluded_report_periods == ()
+    assert _stored_answers(stubbed, factor) == _stored_answers(clean, factor)
+    assert _stored_answers(stubbed, factor)[STUB_SECURITY][0] == "computed"
+    assert build_view(reports[0])["excluded_report_periods"] == [
+        {
+            "dataset": INCOME_DATASET,
+            "subject": STUB_SECURITY,
+            "report_period": STUB_PERIOD.isoformat(),
+        }
+    ]
+    assert build_view(reports[1])["excluded_report_periods"] == []
+
+    runtime = tmp_path / "cli"
+    _with_a_stub(_copy(corpus, runtime / "panel"))
+    arguments = ["factor", "build", "--runtime-dir", str(runtime), "--factor", factor]
+    arguments.extend(["--factor", "reversal_1d/v1", "--tier", "raw"])
+    arguments.extend(["--as-of", INSTANTS[0].isoformat(), "--year", "2025", "--year", "2026"])
+    arguments.extend(["--exchange", EXCHANGE, "--max-staleness-days", str(STALENESS_DAYS)])
+    arguments.extend(["--code-commit", COMMIT])
+
+    result = CliRunner().invoke(app, arguments)
+
+    assert result.exit_code == 0, result.stderr
+    lines = result.stdout.splitlines()
+    assert [line for line in lines if line.startswith("excluded ")] == [
+        f"{STUB_LISTED} "
+        "(KNOWN_FACTOR_RUN_LIMITATIONS."
+        "a_report_period_off_the_quarter_grid_is_excluded_and_listed_rather_than_rounded)",
+        "excluded   0 statement row(s) off the fiscal quarter grid",
+    ]

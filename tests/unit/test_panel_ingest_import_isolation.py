@@ -423,6 +423,7 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_factors.FACTOR_PROCESSED_DATASET_PREFIX",
             "panel_factors.FACTOR_TRANSFORM_MANIFEST_DATASET_PREFIX",
             "panel_factors.FACTOR_TRANSFORMS",
+            "panel_factors.ExcludedReportPeriod",
             "panel_factors.FactorEngineError",
             "panel_factors.FactorPanel",
             "panel_factors.FactorReadCarry",
@@ -613,7 +614,9 @@ measured, which is the whole reason the table is at name granularity. `V2-P6-005
 reads only the rows that became visible since the one before: a cost moved across the seam, not
 a new reach. `V2-P6-006` added the six factor-plane dataset prefixes, and they are the opposite of
 a reach: `FactorBuildContext` names them to leave the planes a build writes *out* of the catalog
-state its shared per-instant reads are keyed on.
+state its shared per-instant reads are keyed on. `V2-P6-019` added `ExcludedReportPeriod`, the
+record of a statement filing the raw cross section left out for a period off the quarter grid,
+which `FactorBuildReport` carries so the exclusion reaches the faces: a report type, not a reach.
 
 **`shortlist_compare` is the emptiest row on the panel side and that is its whole claim**
 (`V2-P4-007`). It takes four names, all off `openalpha_cn.shortlist_view`, and **not one**

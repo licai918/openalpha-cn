@@ -141,6 +141,7 @@ from openalpha_cn.domain.upstream_defects import (
 from openalpha_cn.evidence.service import build_provider_evidence, parse_serialized_evidence
 from openalpha_cn.factor_view import (
     ACCEPTANCE_STEP,
+    OFF_GRID_REPORT_PERIOD_LIMITATION,
     FactorBuildReport,
     FactorViewError,
     acceptance_rows,
@@ -8283,6 +8284,9 @@ def _echo_build(report: FactorBuildReport) -> None:
     market`).
 
     All three tier rows always, including the ones this build did not ask for; see `build_rows`.
+    The `excluded` line is always printed too, `0` for a build that left nothing out: it lists the
+    statement filings the read excluded for a period off the fiscal quarter grid (`V2-P6-019`), one
+    per `(dataset, security, period)`, and names the limitation that says why.
     """
     typer.echo(f"factor     {report.factor} ({report.factor_id})")
     typer.echo(f"tier       {report.tier}")
@@ -8298,6 +8302,16 @@ def _echo_build(report: FactorBuildReport) -> None:
     for tier, builds, rows, coverage in build_rows(report):
         typer.echo(f"{tier:<15} {builds:>6}  {rows:>4}  {coverage}")
     typer.echo(f"partitions {len(report.partitions)}: {', '.join(report.partitions)}")
+    excluded = report.excluded_report_periods
+    line = f"excluded   {len(excluded)} statement row(s) off the fiscal quarter grid"
+    if excluded:
+        listed = ", ".join(
+            f"{item.dataset} {item.subject} {item.report_period.isoformat()}" for item in excluded
+        )
+        line = (
+            f"{line}: {listed} (KNOWN_FACTOR_RUN_LIMITATIONS.{OFF_GRID_REPORT_PERIOD_LIMITATION})"
+        )
+    typer.echo(line)
     typer.echo("next       `openalpha factor run --factor ... --start ... --end ...`")
 
 

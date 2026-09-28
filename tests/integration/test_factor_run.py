@@ -420,6 +420,7 @@ def test_the_declared_limitations_are_the_ones_this_face_carries() -> None:
         "a_name_never_announced_inside_the_requested_years_is_priced_as_ordinary",
         "a_security_with_no_stored_adjustment_history_is_counted_unmatched_not_refused",
         "the_freshness_bar_is_waived_by_cadence_only_where_the_read_is_outside_the_engine",
+        "a_report_period_off_the_quarter_grid_is_excluded_and_listed_rather_than_rounded",
     } == FACTOR_RUN_LIMITATION_CODES
     assert all(limitation.detail.strip() for limitation in KNOWN_FACTOR_RUN_LIMITATIONS)
 

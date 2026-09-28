@@ -86,9 +86,12 @@ from openalpha_cn.panel.catalog import ReadinessRequirement
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import (
     FISCAL_QUARTER_ENDS,
+    ExcludedReportPeriod,
     FactorEngineError,
     FactorPanel,
+    FactorReadCarry,
     FactorWindow,
+    _quarter_index,
     _report_period,
     compute_factor,
     load_factor_manifests,
@@ -994,9 +997,9 @@ def test_a_report_period_that_is_not_a_stored_iso_date_is_refused(
     )
 
 
-@pytest.mark.parametrize("stored", ["2024-05-15", "2024-03-30", "2024-06-31", "2025-01-01"])
-def test_a_report_period_that_is_not_a_fiscal_quarter_end_is_refused(stored: str) -> None:
-    """A well-formed ISO date off the quarter grid, which is the refusal `_period_span` needs.
+@pytest.mark.parametrize("stored", ["2024-05-15", "2024-03-30", "2025-01-01"])
+def test_a_report_period_off_the_quarter_grid_has_no_ordinal_on_it(stored: str) -> None:
+    """A well-formed ISO date off the quarter grid: decoded, and refused by the grid arithmetic.
 
     A window's reach on this axis is counted in fiscal quarters -- see `FISCAL_QUARTER_ENDS` and
     `test_a_missed_filing_is_a_gap_whether_or_not_another_security_filed_it` -- and a period that
@@ -1004,19 +1007,211 @@ def test_a_report_period_that_is_not_a_fiscal_quarter_end_is_refused(stored: str
     rounding is silent: `2024-05-15` and `2024-06-30` would become one point, which is the
     "fiscal-quarter arithmetic of this module's own devising" the engine declines to perform.
 
-    Four shapes for four ways of being off the grid: a mid-quarter day, a day one short of a
-    quarter end, an impossible day of a quarter month (which `date.fromisoformat` rejects first,
-    so it holds the *order* of the two checks), and a first-of-year that is a quarter *start*.
-    Every one of `FISCAL_QUARTER_ENDS` is asserted to survive in the same breath, because a check
-    that refused everything would pass a test that only asserted refusals.
+    **`V2-P6-019` moved where such a row stops, not whether the arithmetic accepts it.** The
+    decoder used to refuse it, which refused every statement factor at every instant of a store
+    holding one stub filing (18 of them, measured, in the multi-year research store). The reader
+    now leaves such a row out of the quarterly corpus and lists it -- see
+    `test_an_off_grid_stub_row_is_excluded_listed_and_moves_no_answer` -- so the decoder answers
+    the date, and `_quarter_index` is what still refuses to give it an ordinal: if the reader ever
+    stopped excluding one, the build would refuse rather than round.
+
+    Three shapes for three ways of being off the grid: a mid-quarter day, a day one short of a
+    quarter end, and a first-of-year that is a quarter *start*. Every one of `FISCAL_QUARTER_ENDS`
+    is asserted to keep its ordinal in the same breath, because a check that refused everything
+    would pass a test that only asserted refusals.
     """
-    with pytest.raises(FactorEngineError, match=f"holds '{stored}' for 000001.SZ"):
-        _report_period(stored, dataset=INCOME_DATASET, subject="000001.SZ")
+    period = _report_period(stored, dataset=INCOME_DATASET, subject="000001.SZ")
+
+    assert period == date.fromisoformat(stored)
+    with pytest.raises(FactorEngineError, match=f"{stored} is not an A-share fiscal quarter end"):
+        _quarter_index(period)
 
     for month, day in FISCAL_QUARTER_ENDS:
         assert _report_period(
             date(2024, month, day).isoformat(), dataset=INCOME_DATASET, subject="000001.SZ"
         ) == date(2024, month, day)
+        assert _quarter_index(date(2024, month, day)) == 2024 * 4 + month // 3 - 1
+
+
+def test_an_impossible_day_of_a_quarter_month_is_still_refused_as_no_iso_date() -> None:
+    """`2024-06-31` is not a stub period; it is not a date, and the reader refuses it by name.
+
+    Held apart from the off-grid shapes above because exclusion is for a **date** that is not a
+    quarter end. A cell that is not a date at all is a property of the partition, as
+    `test_a_report_period_that_is_not_a_stored_iso_date_is_refused` argues, and excluding it would
+    hide a damaged row behind a limitation written for stub filings.
+    """
+    with pytest.raises(FactorEngineError, match=r"holds '2024-06-31' for 000001\.SZ, which is not"):
+        _report_period("2024-06-31", dataset=INCOME_DATASET, subject="000001.SZ")
+
+
+# --- `V2-P6-019`: a stored report period off the quarter grid -------------------------------------
+
+
+OFF_GRID_STUB: Final[_Filing] = ("000001.SZ", date(2024, 8, 31), date(2025, 4, 25), 777.0)
+"""A stub period between two quarters `000001.SZ` did file, announced after all of them.
+
+The shape the research store holds 18 of (12 in `income`, 6 in `balancesheet`): a pre-listing or
+fiscal-year-change period ending on a month end that is not a quarter end, such as `920185.BJ`'s
+`2014-05-31`. Placed so that rounding it either way lands on a period in this security's window
+and **wins** it -- it is announced on 2025-04-25, after every other filing in `CORPUS` -- so a
+reader that rounded instead of excluding would move the answer: up into 2024-09-30 replaces 120.0,
+down into 2024-06-30 replaces the restated 111.0.
+"""
+
+OFF_GRID_ONLY: Final[_Filing] = ("688001.SH", date(2024, 5, 31), date(2024, 7, 1), 50.0)
+"""A security whose only stored row is a stub period."""
+
+NO_FILING: Final[str] = "688002.SH"
+"""A security with no stored row at all: what `OFF_GRID_ONLY`'s security must be answered as."""
+
+CARRIED_FROM: Final[datetime] = datetime(2025, 5, 1, 4, 0, tzinfo=UTC)
+"""An instant after the stub was announced and before `AS_OF`, for the carried read."""
+
+WINDOW_SUM_OF_000001: Final[float] = 100.0 + RESTATED_REVENUE + 120.0 + 130.0 + 140.0
+"""`000001.SZ`'s five quarters, with the later of the two 2024-06-30 announcements."""
+
+
+def _window_sum(window: FactorWindow) -> float:
+    """Every period in the window counts, so a stub rounded into any of them moves the answer."""
+    return sum(value for value in window.series(INCOME_DATASET, "revenue") if value is not None)
+
+
+def _answers(panel: FactorPanel) -> dict[str, tuple[object, ...]]:
+    """What each security was answered, without the build identity the input hashes move."""
+    return {
+        item.subject: (
+            item.coverage,
+            item.value,
+            item.input_row_count,
+            item.input_period_first,
+            item.input_period_last,
+        )
+        for item in panel.observations
+    }
+
+
+def test_an_off_grid_stub_row_is_excluded_listed_and_moves_no_answer(tmp_path: Path) -> None:
+    """The build computes, every answer is the one the store without the stub gives, and the stub
+    is listed.
+
+    Three things `V2-P6-019` requires at once, on one pair of stores that differ in one row:
+
+    - **It builds.** Before this issue the corpus refused the whole build, for every security,
+      naming `income.report_period` -- which is what stopped the multi-year factor build at its
+      first statement factor.
+    - **Exclusion, not rounding.** The answers equal the clean store's answers, and `000001.SZ`'s
+      is the hand sum of its own five quarters. See `OFF_GRID_STUB` for why a rounding reader
+      would move it in either direction.
+    - **Never silent.** `excluded_report_periods` names the row by dataset, security and period,
+      and the clean store's build names nothing. Every excluded period is checked to be off the
+      grid, because the one way this exclusion could hide a real defect is by leaving out a
+      quarter-end filing.
+    """
+    definition = _definition(key="probe_window_sum")
+    clean = _compute(
+        _written(tmp_path / "clean", dataset=INCOME_DATASET),
+        definition,
+        evaluator=_window_sum,
+    )
+    stubbed = _compute(
+        _written(tmp_path / "stubbed", dataset=INCOME_DATASET, rows=(*CORPUS, OFF_GRID_STUB)),
+        definition,
+        evaluator=_window_sum,
+    )
+
+    assert _answers(stubbed) == _answers(clean)
+    assert stubbed.values()["000001.SZ"] == pytest.approx(WINDOW_SUM_OF_000001)
+    assert stubbed.excluded_report_periods == (
+        ExcludedReportPeriod(
+            dataset=INCOME_DATASET, subject="000001.SZ", report_period=date(2024, 8, 31)
+        ),
+    )
+    assert clean.excluded_report_periods == ()
+    assert all(
+        (item.report_period.month, item.report_period.day) not in FISCAL_QUARTER_ENDS
+        for item in stubbed.excluded_report_periods
+    )
+
+
+def test_an_excluded_report_period_cannot_name_a_quarter_end() -> None:
+    """The record of an exclusion refuses a quarter-end period, so the list cannot carry one.
+
+    The structural half of "the exclusion cannot hide a real defect": a reader that excluded a
+    quarter-end filing would have to record it, and the record refuses to exist.
+    """
+    for month, day in FISCAL_QUARTER_ENDS:
+        with pytest.raises(ValueError, match="is a fiscal quarter end"):
+            ExcludedReportPeriod(
+                dataset=INCOME_DATASET, subject="000001.SZ", report_period=date(2024, month, day)
+            )
+    assert ExcludedReportPeriod(
+        dataset=INCOME_DATASET, subject="000001.SZ", report_period=date(2024, 8, 31)
+    ).report_period == date(2024, 8, 31)
+
+
+def test_a_carried_read_lists_the_exclusion_a_fresh_read_lists(tmp_path: Path) -> None:
+    """A build's later instant reads only the rows new since the earlier one, and must still list
+    a stub it read at the earlier one.
+
+    The stub is visible at `CARRIED_FROM`, and nothing becomes visible between that instant and
+    `AS_OF`, so the carried read at `AS_OF` fetches no row at all. What it lists is therefore what
+    the carry kept, and it has to equal what a fresh read at `AS_OF` lists.
+    """
+    store = _written(tmp_path, dataset=INCOME_DATASET, rows=(*CORPUS, OFF_GRID_STUB))
+    definition = _definition(key="probe_window_sum")
+    listed = (
+        ExcludedReportPeriod(
+            dataset=INCOME_DATASET, subject="000001.SZ", report_period=date(2024, 8, 31)
+        ),
+    )
+    carry = FactorReadCarry()
+
+    earlier = _compute(
+        store,
+        definition,
+        evaluator=_window_sum,
+        as_of=CARRIED_FROM,
+        requirements={INCOME_DATASET: _requirement(as_of=CARRIED_FROM)},
+        carry=carry,
+    )
+    later = _compute(store, definition, evaluator=_window_sum, carry=carry)
+    fresh = _compute(store, definition, evaluator=_window_sum)
+
+    assert earlier.excluded_report_periods == listed
+    assert later.excluded_report_periods == listed
+    assert fresh.excluded_report_periods == listed
+    assert _answers(later) == _answers(fresh)
+
+
+def test_a_security_whose_only_rows_are_off_grid_is_a_security_with_no_filing(
+    tmp_path: Path,
+) -> None:
+    """`688001.SH` stored one stub period and nothing else; it is answered as `688002.SH` is.
+
+    Nothing is refused, the security gets no value, and its coverage and row count are the ones a
+    security with no stored row at all gets. The rest of the cross section is answered exactly as
+    it is without either of them, and the stub is listed.
+    """
+    subjects = (*SUBJECTS, OFF_GRID_ONLY[0], NO_FILING)
+    clean = _compute(_written(tmp_path / "clean", dataset=INCOME_DATASET), _definition())
+    panel = _compute(
+        _written(tmp_path / "stubbed", dataset=INCOME_DATASET, rows=(*CORPUS, OFF_GRID_ONLY)),
+        _definition(),
+        subjects=subjects,
+        universe=frozenset(subjects),
+    )
+    answers = _answers(panel)
+
+    assert answers[OFF_GRID_ONLY[0]] == answers[NO_FILING]
+    assert answers[OFF_GRID_ONLY[0]][1] is None
+    assert OFF_GRID_ONLY[0] not in panel.values()
+    assert {name: answers[name] for name in SUBJECTS} == _answers(clean)
+    assert panel.excluded_report_periods == (
+        ExcludedReportPeriod(
+            dataset=INCOME_DATASET, subject=OFF_GRID_ONLY[0], report_period=date(2024, 5, 31)
+        ),
+    )
 
 
 # --- what the two period fields decide ------------------------------------------------------------
