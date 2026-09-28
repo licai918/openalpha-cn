@@ -3397,10 +3397,10 @@ def _build_price_panel(
     (`V2-P6-013`). `reconcile_price_disagreements` re-fetches each disagreeing
     `(security, session)` on its own -- two requests each, reported on stderr -- and drops a
     `daily_basic` row only under a named rule; a null-close placeholder is one of them
-    (`valuation_placeholder_without_bar`, `V2-P6-017`), and one beside a bar is refused. The
-    drop is recorded in `upstream_defects` before `write_daily_panel` runs, so a later refusal
-    still leaves the record of what the upstream got wrong, which is true whatever happens to the
-    year. Anything unexplained is refused exactly as before.
+    (`valuation_placeholder_on_halt` or `_without_bar`, `V2-P6-017`), and one beside a bar is
+    refused. The drop is recorded in `upstream_defects` before `write_daily_panel` runs, so a
+    later refusal still leaves the record of what the upstream got wrong, which is true whatever
+    happens to the year. Anything unexplained is refused exactly as before.
     """
     if not sessions:
         raise _panel_fail(
@@ -3465,6 +3465,16 @@ def _build_price_panel(
         # which a missing final session would shorten by one.
         sessions=sessions,
         explains_absence=explains_absence,
+        # `V2-P6-017`: which placeholder kind, halted or not. The corpus this build loaded, or
+        # under `--no-halts` the `suspend_d` partition it has just written -- never an older one,
+        # and never a default: with neither, a placeholder is refused by name.
+        halts=lambda: (
+            corpus
+            if corpus is not None
+            else _stored_halts(store, year=year, now=now)
+            if halt_batches
+            else None
+        ),
         # Only a build that requested the year's whole calendar can ask the following year:
         # a year in progress has its own next sessions still to come.
         year_end_witness=(

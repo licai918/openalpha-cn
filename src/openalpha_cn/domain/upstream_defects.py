@@ -29,7 +29,9 @@ them refuses a whole year of every other security's data along with them. Measur
   all week). Measured live on 2026-09-28 (`V2-P6-017`), every one of them has a **null close**
   and every other field null but `volume_ratio` -- a placeholder, not a valuation, which the
   decoder refused whole (`invalid_response`) and stopped the 2020 backfill on. They are
-  `valuation_placeholder_without_bar`, with no halt requirement.
+  dropped with no halt requirement, and the kind says which evidence there is:
+  `valuation_placeholder_on_halt` where `suspend_d` has the security halted all session,
+  `valuation_placeholder_without_bar` where nothing explains the missing bar.
 - `920476.BJ`, `920564.BJ`, `920425.BJ` and `920556.BJ` have `daily` rows on 2014-01-24 with a
   null `pre_close` and `pct_chg`. They are trading on another venue before these securities
   listed -- the stored registry's `list_date`s are 2022-10-14, 2022-06-17, 2023-01-30 and
@@ -74,6 +76,7 @@ from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET
 
 DefectKind = Literal[
     "valuation_without_bar",
+    "valuation_placeholder_on_halt",
     "valuation_placeholder_without_bar",
     "valuation_contradicts_corroborated_bar",
     "valuation_contradicts_unconfirmed_bar",
@@ -120,11 +123,11 @@ that disagreed, each `None` where the kind has nothing to say about it, and the 
 the two shapes of a contradicted valuation apart:
 
 - `valuation_without_bar`: `valuation_close` (there is no bar, so `bar_close` is `None`).
-- `valuation_placeholder_without_bar`: nothing but the key -- there is no bar and the dropped row
-  has no close, so every value column is `None`. Whether `suspend_d` explains the missing bar is
-  not a column here: a new column would make every stored partition of this dataset and the new
-  build unreadable to each other (hard rule 3). The same build stores the year's `suspend_d`,
-  which answers it for the same `(subject, trade_date)`.
+- `valuation_placeholder_on_halt` and `valuation_placeholder_without_bar`: nothing but the key
+  -- there is no bar and the dropped row has no close, so every value column is `None`. Whether
+  `suspend_d` explains the missing bar is carried by the kind rather than by a new column, which
+  would make every stored partition of this dataset and the new build unreadable to each other
+  (hard rule 3).
 - `valuation_contradicts_corroborated_bar`: `bar_close`, `valuation_close`, `previous_bar_close`
   (the security's previous stored bar close, `None` on its first bar of the year), and
   `valuation_repeats_previous_close` -- `True` for the stale shape (`002357.SZ` on 2013-07-15),
@@ -214,23 +217,31 @@ def close_disagreement_kind(
     return "valuation_contradicts_unconfirmed_bar" if is_last_session else None
 
 
-def valuation_placeholder_kind(*, has_bar: bool) -> DefectKind | None:
+def valuation_placeholder_kind(*, has_bar: bool, halted: bool) -> DefectKind | None:
     """The rule for a `daily_basic` row with a null close (`V2-P6-017`), or `None` to refuse it.
 
     Called only after a re-fetch has published the same placeholder again; one that comes back
-    with a real close is a partial fetch and never reaches this function.
+    with a real close is a partial fetch and never reaches this function. `halted` is the year's
+    `suspend_d` answer for the session -- an untimed `S`, `SuspensionDay.is_halted` -- and the
+    caller refuses rather than guess when there is no corpus to ask.
 
-    **`valuation_placeholder_without_bar`**: the security has no `daily` bar on the session. The
-    upstream publishes a row with every value null but `volume_ratio` for a security that did
-    not trade -- 90 of 2020-09-18's 4,160 rows, halted A shares and B shares with no halt row
-    alike -- and the row carries no valuation to store, so it is dropped. No halt is required:
-    measured, the B shares have no `suspend_d` row and no bar all week.
+    The upstream publishes a row with every value null but `volume_ratio` for a security that did
+    not trade -- 90 of 2020-09-18's 4,160 rows -- and the row carries no valuation to store, so
+    with no `daily` bar on the session it is dropped either way. The two kinds keep the evidence
+    apart, as `limit_placeholder_on_halt` does for a band:
 
-    Beside a bar it returns `None` and the caller refuses: the bar says the security traded and
-    the placeholder says nothing about the session it traded in. That shape has not been
-    observed, and no rule is invented for it.
+    - **`valuation_placeholder_on_halt`**: `suspend_d` has the security halted all session, so
+      the missing bar is explained (`000029.SZ`).
+    - **`valuation_placeholder_without_bar`**: nothing in `suspend_d` explains it (`200011.SZ`
+      and the other B shares, with no halt row and no bar all week).
+
+    Beside a bar it returns `None`, halted or not, and the caller refuses: the bar says the
+    security traded and the placeholder says nothing about the session it traded in. That shape
+    has not been observed, and no rule is invented for it.
     """
-    return None if has_bar else "valuation_placeholder_without_bar"
+    if has_bar:
+        return None
+    return "valuation_placeholder_on_halt" if halted else "valuation_placeholder_without_bar"
 
 
 def repeats_previous_close(

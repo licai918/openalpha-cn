@@ -503,8 +503,8 @@ def test_incremental_equals_full_rebuild_with_valuation_placeholders(
         assert inc.hashes[target] == full.hashes[target], target
     assert _defects(tmp_path / "inc") == _defects(tmp_path / "full")
     assert {
-        (code, DAILY_BASIC_DATASET, day, "valuation_placeholder_without_bar")
-        for code, day in PLACEHOLDERS
+        (PLACEHOLDER_CARRIED, DAILY_BASIC_DATASET, SESSIONS[1], "valuation_placeholder_on_halt"),
+        (PLACEHOLDER_OVERLAP, DAILY_BASIC_DATASET, T1_LAST, "valuation_placeholder_without_bar"),
     } <= set(_defects(tmp_path / "inc"))
     assert inc.upstream.sessions_requested(DAILY_BASIC_DATASET) == _between(T1_LAST, T2_LAST)
 

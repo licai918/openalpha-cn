@@ -19,7 +19,7 @@ The frame reproduces the three measured shapes (live, 2026-09-26) on a five-sess
   while the next session's `pre_close` corroborates the bar;
 - (`V2-P6-017`, measured 2026-09-28) `000029.SZ`, halted, and `200011.SZ`, a B share with no halt
   row, have no bar on 2013-11-12 and a `daily_basic` row whose every field but `volume_ratio` is
-  null (`valuation_placeholder_without_bar`).
+  null (`valuation_placeholder_on_halt` and `valuation_placeholder_without_bar`).
 
 The twenty securities are there so a one-row difference is not a thin session: the explained-share
 guard refuses a session under 85% of its neighbours, and two dropped rows of three would be.
@@ -69,7 +69,6 @@ from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_doctor import panel_health_report
 from openalpha_cn.panel_ingest import (
     UPSTREAM_DEFECTS_DATASET,
-    load_suspensions,
     load_upstream_defects,
     reconcile_price_disagreements,
     write_daily_panel,
@@ -117,6 +116,10 @@ PLACEHOLDER_HALTED = "000029.SZ"
 PLACEHOLDER_ABSENT = "200011.SZ"
 PLACEHOLDER_CODES: tuple[str, ...] = (PLACEHOLDER_HALTED, PLACEHOLDER_ABSENT)
 PLACEHOLDER_VOLUME_RATIO = 0.87
+PLACEHOLDER_KINDS: tuple[tuple[str, str], ...] = (
+    (PLACEHOLDER_HALTED, "valuation_placeholder_on_halt"),
+    (PLACEHOLDER_ABSENT, "valuation_placeholder_without_bar"),
+)
 
 REGISTRY_FIELDS = [
     "ts_code",
@@ -240,6 +243,10 @@ class Frame:
     """`PLACEHOLDER_HALTED` has a real bar on `PLACEHOLDER_DAY` beside its placeholder."""
     placeholder_refetch_closes: bool = False
     """The re-fetch answers `PLACEHOLDER_ABSENT`'s placeholder with a real close."""
+    placeholder_codes: tuple[str, ...] = PLACEHOLDER_CODES
+    """Which of `PLACEHOLDER_CODES` publish the placeholder; the others trade that day."""
+    no_halt_rows: bool = False
+    """`suspend_d` serves nothing on any session."""
     delisted_code: str | None = None
     """A security the registry has delisted on 2013-12-31, with no bar after 2013."""
     """`FILLERS[5]` is halted all of `SESSIONS[-1]`, so its last 2013 bar is on `SESSIONS[-2]`."""
@@ -293,7 +300,7 @@ class ScriptedUpstream:
     def _placeholder(self, code: str, day: date) -> bool:
         return (
             self.frame.valuation_placeholders
-            and code in PLACEHOLDER_CODES
+            and code in self.frame.placeholder_codes
             and day == PLACEHOLDER_DAY
         )
 
@@ -372,6 +379,8 @@ class ScriptedUpstream:
 
     def _halts(self, day: date) -> list[list[Any]]:
         rows: list[list[Any]] = []
+        if self.frame.no_halt_rows:
+            return rows
         if day == min(open_day for open_day in self.frame.sessions if open_day.year == day.year):
             rows.append([RESUMED, _compact(day), "R", None])
         if self.frame.halted_into_year_end and day == SESSIONS[-1]:
@@ -380,7 +389,7 @@ class ScriptedUpstream:
             rows.append([FILLERS[5], _compact(day), "S", None])
         if day in self.frame.next_year_halted_days:
             rows.append([self.frame.mismatch_code, _compact(day), "S", None])
-        if self.frame.valuation_placeholders and day == PLACEHOLDER_DAY:
+        if self._placeholder(PLACEHOLDER_HALTED, day):
             rows.append([PLACEHOLDER_HALTED, _compact(day), "S", None])
         if (
             self.frame.limit_placeholder
@@ -476,6 +485,7 @@ def _build(
     *targets: str,
     year: int = YEAR,
     as_of: str = AS_OF,
+    no_halts: bool = False,
 ) -> tuple[Any, ScriptedUpstream]:
     upstream = ScriptedUpstream(frame)
     monkeypatch.setenv("TUSHARE_TOKEN", SECRET_TOKEN)
@@ -483,6 +493,8 @@ def _build(
     monkeypatch.setattr(cli, "_panel_clock", lambda: CLOCK)
     arguments = ["panel", "build", "--runtime-dir", str(runtime_dir), "--year", str(year)]
     arguments += ["--as-of", as_of, "--json"]
+    if no_halts:
+        arguments.append("--no-halts")
     for target in (TRADING_CALENDAR_DATASET, *targets):
         arguments += ["--dataset", target]
     return runner.invoke(app, arguments), upstream
@@ -1345,7 +1357,7 @@ def test_valuation_placeholders_with_no_bar_are_dropped_and_recorded_one_per_row
     """2020-09-18's shape: `daily_basic` rows whose close -- and everything else but
     `volume_ratio` -- is null, for a halted A share and a B share with no halt row, and no bar for
     either. The session builds; each placeholder is dropped and recorded once, after the re-fetch
-    published it again."""
+    published it again -- under the kind that says whether `suspend_d` explains the missing bar."""
     result, upstream = _build(
         tmp_path, Frame(valuation_placeholders=True), monkeypatch, "price", "stk_limit"
     )
@@ -1356,9 +1368,9 @@ def test_valuation_placeholders_with_no_bar_are_dropped_and_recorded_one_per_row
             ts_code=code,
             trade_date=PLACEHOLDER_DAY,
             source_dataset=DAILY_BASIC_DATASET,
-            kind="valuation_placeholder_without_bar",
+            kind=kind,
         )
-        for code in PLACEHOLDER_CODES
+        for code, kind in PLACEHOLDER_KINDS
     )
     stored = _stored_keys(tmp_path, DAILY_BASIC_DATASET, DAILY_BASIC_PANEL_COLUMNS)
     for code in PLACEHOLDER_CODES:
@@ -1372,16 +1384,56 @@ def test_valuation_placeholders_with_no_bar_are_dropped_and_recorded_one_per_row
     ]
     assert asked.count(DAILY_DATASET) == 2
     assert asked.count(DAILY_BASIC_DATASET) == 2
-    # Whether `suspend_d` explains the missing bar is in the same build's stored halt corpus.
-    halts = load_suspensions(
-        _store(tmp_path), years=(YEAR,), as_of=AS_OF_INSTANT, max_staleness=None
-    )
-    assert halts[PLACEHOLDER_DAY].is_halted(PLACEHOLDER_HALTED)
-    assert not halts[PLACEHOLDER_DAY].is_halted(PLACEHOLDER_ABSENT)
+    assert upstream.refetches() == []
     reported = json.loads(result.stdout)["builds"][0]["defects"]
-    assert [(entry["ts_code"], entry["kind"]) for entry in reported] == [
-        (code, "valuation_placeholder_without_bar") for code in PLACEHOLDER_CODES
+    assert [(entry["ts_code"], entry["kind"]) for entry in reported] == list(PLACEHOLDER_KINDS)
+
+
+def test_a_lone_valuation_placeholder_is_re_fetched_on_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One placeholder on a session takes the targeted path: `ts_code`-filtered requests."""
+    frame = Frame(valuation_placeholders=True, placeholder_codes=(PLACEHOLDER_ABSENT,))
+    result, upstream = _build(tmp_path, frame, monkeypatch, "price")
+
+    assert result.exit_code == PanelExit.ok, result.output
+    assert sorted(upstream.refetches()) == [
+        (DAILY_DATASET, PLACEHOLDER_ABSENT, _compact(PLACEHOLDER_DAY)),
+        (DAILY_BASIC_DATASET, PLACEHOLDER_ABSENT, _compact(PLACEHOLDER_DAY)),
     ]
+    assert [(d.ts_code, d.kind) for d in _defects(tmp_path)] == [
+        (PLACEHOLDER_ABSENT, "valuation_placeholder_without_bar")
+    ]
+    assert (PLACEHOLDER_HALTED, PLACEHOLDER_DAY.isoformat()) in _stored_keys(
+        tmp_path, DAILY_BASIC_DATASET, DAILY_BASIC_PANEL_COLUMNS
+    )
+
+
+def test_without_the_halt_guard_the_stored_halt_corpus_still_names_the_kind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--no-halts` waives the explained-share guard, not the halt question: the build reads the
+    `suspend_d` partition it has just stored, and records the same two kinds."""
+    frame = Frame(valuation_placeholders=True)
+    result, _ = _build(tmp_path, frame, monkeypatch, "price", no_halts=True)
+
+    assert result.exit_code == PanelExit.ok, result.output
+    assert [(d.ts_code, d.kind) for d in _defects(tmp_path)] == list(PLACEHOLDER_KINDS)
+
+
+def test_a_placeholder_with_no_halt_corpus_to_ask_is_refused_by_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """'Not halted' cannot be told from 'never checked': with no `suspend_d` stored for the year,
+    a placeholder is not defaulted to either kind."""
+    frame = Frame(valuation_placeholders=True, no_halt_rows=True)
+    result, _ = _build(tmp_path, frame, monkeypatch, "price", no_halts=True)
+
+    assert result.exit_code == PanelExit.unhealthy, result.output
+    for fragment in (PLACEHOLDER_HALTED, PLACEHOLDER_DAY.isoformat(), "suspend_d", "never checked"):
+        assert fragment in result.output
+    assert _store(tmp_path).registered_years(DAILY_BASIC_DATASET) == ()
+    assert _store(tmp_path).registered_years(UPSTREAM_DEFECTS_DATASET) == ()
 
 
 def test_a_valuation_placeholder_beside_a_real_bar_is_refused_by_name(
@@ -1503,8 +1555,8 @@ def _placeholder_row(code: str) -> list[Any]:
 def test_the_decoder_carries_a_null_close_placeholder_and_still_refuses_a_partial_valuation() -> (
     None
 ):
-    """Only the placeholder pattern -- a null close and a null in every column a valuation must
-    have -- is let through, as nulls, for `reconcile_price_disagreements` to judge beside the bar.
+    """Only the measured placeholder -- every column null but `volume_ratio` -- is let through,
+    as nulls, for `reconcile_price_disagreements` to judge beside the bar.
     A null close beside a real market value, or a real close beside a null one, is malformed."""
     batch = _decode_valuations([_valuation_row("000001.SZ", 10.0), _placeholder_row("000029.SZ")])
     assert batch.status == "success"
@@ -1517,6 +1569,15 @@ def test_the_decoder_carries_a_null_close_placeholder_and_still_refuses_a_partia
 
     with pytest.raises(ProviderFailure, match="close"):
         _decode_valuations([_valuation_row("000029.SZ", None)])  # a market value, no close
+    # All six required columns null but a `pe`: not the measured shape, so a human judges it.
+    new_shape = _placeholder_row("000029.SZ")
+    new_shape[3 + VALUATION_EXTRA.index("pe")] = 12.5
+    with pytest.raises(ProviderFailure, match="close"):
+        _decode_valuations([new_shape])
+    # `volume_ratio` null as well is still the placeholder: it is nullable in every row.
+    quiet = _placeholder_row("000029.SZ")
+    quiet[3 + VALUATION_EXTRA.index("volume_ratio")] = None
+    assert _decode_valuations([quiet]).status == "success"
     with pytest.raises(ProviderFailure, match="total_mv"):
         _decode_valuations([_valuation_row("000029.SZ", 10.0, "total_mv")])
 
@@ -1594,5 +1655,11 @@ def test_only_a_zero_zero_band_on_a_halt_is_a_placeholder() -> None:
 
 
 def test_a_valuation_placeholder_is_a_defect_only_where_there_is_no_bar() -> None:
-    assert valuation_placeholder_kind(has_bar=False) == "valuation_placeholder_without_bar"
-    assert valuation_placeholder_kind(has_bar=True) is None
+    assert valuation_placeholder_kind(has_bar=False, halted=True) == (
+        "valuation_placeholder_on_halt"
+    )
+    assert valuation_placeholder_kind(has_bar=False, halted=False) == (
+        "valuation_placeholder_without_bar"
+    )
+    assert valuation_placeholder_kind(has_bar=True, halted=True) is None
+    assert valuation_placeholder_kind(has_bar=True, halted=False) is None

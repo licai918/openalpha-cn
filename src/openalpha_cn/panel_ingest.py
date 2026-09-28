@@ -3519,12 +3519,13 @@ refused -- only an absence nothing explains looks like a partial fetch.
 """
 
 HaltCorpusSource = Callable[[], Mapping[date, SuspensionDay] | None]
-"""The year's `suspend_d` corpus, read only when a zero upper limit is actually present.
+"""The year's `suspend_d` corpus, read only when a zero upper limit or a `daily_basic`
+placeholder (`V2-P6-017`) is actually present.
 
 A callable rather than a mapping so that the ordinary year -- every year but a handful of
-2013..2014 sessions -- never reads the halt partition at all. `None` means there is no corpus
-to consult, and a zero/zero band is then refused, because "not halted" cannot be told from
-"never checked".
+2013..2014 and 2020 sessions -- never reads the halt partition at all. `None` means there is no
+corpus to consult, and a zero/zero band or a placeholder is then refused, because "not halted"
+cannot be told from "never checked".
 """
 
 UPSTREAM_DEFECT_STORAGE_COLUMNS: Final[tuple[str, ...]] = (
@@ -3559,6 +3560,7 @@ def reconcile_price_disagreements(
     sessions: Sequence[date],
     year_end_witness: YearEndWitness | None = None,
     explains_absence: AbsenceExplanation | None = None,
+    halts: HaltCorpusSource | None = None,
 ) -> ReconciledRows:
     """Resolve every `daily`/`daily_basic` close disagreement of one year, or refuse the year.
 
@@ -3603,12 +3605,18 @@ def reconcile_price_disagreements(
     carries only when every one of `DAILY_BASIC_PLACEHOLDER_COLUMNS` is null -- is not a close to
     compare, so it is judged here before the comparison runs (`valuation_placeholder_kind`):
 
-    - **beside a bar** on the same session it is refused at once, by name and before any
-      re-fetch: `daily_basic` contradicts the bar, and that shape has not been observed;
+    - **the year's halt corpus is read first** (`halts`, only when a placeholder is present).
+      The kind records whether a whole-day halt explains the missing bar, and "not halted"
+      cannot be told from "never checked", so with no corpus -- `halts` absent, or answering
+      `None` -- the year is refused by name before any re-fetch. It is deliberately not
+      `explains_absence`, which also accepts a delisting;
+    - **beside a bar** on the same session it is refused, by name and before any re-fetch:
+      `daily_basic` contradicts the bar, and that shape has not been observed;
     - **with no bar** it joins its session's re-fetch (step 1: the same two requests, and a
       second answer with a real close is a partial fetch that refuses the year, exactly as a
-      differing disagreement does), then is dropped and recorded as
-      `valuation_placeholder_without_bar` with only its key.
+      differing disagreement does), then is dropped and recorded with only its key, as
+      `valuation_placeholder_on_halt` when `suspend_d` has it halted all session and
+      `valuation_placeholder_without_bar` when nothing does.
 
     No disagreement and no placeholder means no re-fetch and the batches back unchanged.
     """
@@ -3629,9 +3637,27 @@ def reconcile_price_disagreements(
         return ReconciledRows(batches=kept, defects=(), record=None)
     bar_rows = {key: index for index, key in enumerate(_row_keys(merged_bars))}
     valuation_rows = {key: index for index, key in enumerate(_row_keys(merged_fundamentals))}
-    beside_bars = [
-        key for key in placeholders if valuation_placeholder_kind(has_bar=key in bar_rows) is None
-    ]
+    placeholder_kinds: dict[tuple[str, date], DefectKind | None] = {}
+    if placeholders:
+        corpus = halts() if halts is not None else None
+        if corpus is None:
+            ts_code, day = next(iter(placeholders))
+            raise PanelBatchError(
+                f"{ts_code} on {day.isoformat()}: {DAILY_BASIC_DATASET} published a placeholder "
+                f"with a null close ({len(placeholders)} such row(s) in all), and there is no "
+                f"{SUSPENSION_DATASET} corpus for the year to check it against. The defect's kind "
+                "records whether a whole-day halt explains the missing bar, and 'not halted' "
+                "cannot be told from 'never checked': build the price target, which stores "
+                f"{SUSPENSION_DATASET}, with a session that serves it"
+            )
+        placeholder_kinds = {
+            key: valuation_placeholder_kind(
+                has_bar=key in bar_rows,
+                halted=key[1] in corpus and corpus[key[1]].is_halted(key[0]),
+            )
+            for key in placeholders
+        }
+    beside_bars = [key for key, kind in placeholder_kinds.items() if kind is None]
     if beside_bars:
         # Before any re-fetch: whatever a second answer says, no named rule explains it.
         ts_code, day = beside_bars[0]
@@ -3767,13 +3793,13 @@ def reconcile_price_disagreements(
         )
         positions.append(valuation_rows[key])
     for (ts_code, day), index in placeholders.items():
-        # Re-fetched and reproduced above, and no bar beside it: the rule's one outcome here.
+        # Re-fetched and reproduced above, with no bar beside it: its kind is decided.
         defects.append(
             UpstreamDefect(
                 ts_code=ts_code,
                 trade_date=day,
                 source_dataset=DAILY_BASIC_DATASET,
-                kind=cast(DefectKind, valuation_placeholder_kind(has_bar=False)),
+                kind=cast(DefectKind, placeholder_kinds[(ts_code, day)]),
             )
         )
         positions.append(index)

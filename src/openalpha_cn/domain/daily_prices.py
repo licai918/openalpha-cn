@@ -335,25 +335,27 @@ P3 or P4 reads them today, so the cost of a null is a null cell rather than a dr
 """
 
 DAILY_BASIC_PLACEHOLDER_COLUMNS: Final[tuple[str, ...]] = tuple(
-    name for name in DAILY_BASIC_DATA_COLUMNS[1:] if name not in DAILY_BASIC_NULLABLE_COLUMNS
+    name for name in DAILY_BASIC_DATA_COLUMNS[1:] if name != "volume_ratio"
 )
-"""The six columns a *decoded* `daily_basic` row may carry as `None` only all together, and a
-stored one never may (`V2-P6-017`).
+"""The columns a *decoded* `daily_basic` row may carry as `None` only all together -- the
+measured placeholder -- and a stored one never may carry the required six of (`V2-P6-017`).
 
-`DAILY_BASIC_NULLABLE_COLUMNS`' complement: `close`, `turnover_rate`, `total_share`,
-`float_share`, `total_mv` and `circ_mv`. The upstream publishes a row with every one of them
-null -- and every ratio but `volume_ratio` null too -- for a security with no bar on the
-session: measured live on 2026-09-28, 90 of 2020-09-18's 4,160 rows, halted A shares
-(`000029.SZ`, an untimed `S` in `suspend_d`) and B shares (`200011.SZ`, no `suspend_d` row). A
-row that states no valuation at all is that placeholder; a row missing some of the six and not
-the others is a malformed valuation and is refused by the decoder as before.
+Every value column but `volume_ratio`: the six `DAILY_BASIC_NULLABLE_COLUMNS` leaves out
+(`close`, `turnover_rate`, `total_share`, `float_share`, `total_mv`, `circ_mv`) and every other
+ratio. The upstream publishes exactly that row -- all of them null, `volume_ratio` present or
+not -- for a security with no bar on the session: measured live on 2026-09-28, 90 of
+2020-09-18's 4,160 rows, halted A shares (`000029.SZ`, an untimed `S` in `suspend_d`) and B
+shares (`200011.SZ`, no `suspend_d` row). The pattern is the measured shape and no wider: a row
+with the six null and a `pe` present, or a row missing some of the six and not the others, is
+a shape nobody has seen, and the decoder refuses it as it refused 2020-09-18, so a person judges
+it before a rule is written for it.
 
 The decoder cannot see the `daily` bar the placeholder is judged against, so it hands the row on
 with the six as `None` rather than refusing the session. It has exactly two ways out:
-`panel_ingest.reconcile_price_disagreements` drops it as `valuation_placeholder_without_bar`
-once a re-fetch has published it again and the session has no bar for the security, and refuses
-it by name beside a bar; `write_daily_panel` refuses any that is left, because a null `close`
-cannot cross-check anything.
+`panel_ingest.reconcile_price_disagreements` drops it as `valuation_placeholder_on_halt` or
+`valuation_placeholder_without_bar` once a re-fetch has published it again and the session has
+no bar for the security, and refuses it by name beside a bar; `write_daily_panel` refuses any
+that is left, because a null `close` cannot cross-check anything.
 """
 
 SESSION_CLOSE_TIME: Final[time] = time(15, 0)

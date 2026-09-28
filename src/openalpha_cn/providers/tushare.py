@@ -628,9 +628,9 @@ class TushareDatasetDescriptor(BaseModel):
     in the row; ``()`` for none (``V2-P6-017``).
 
     A cell parser cannot see the row it is in, and the upstream's placeholder is a row-level
-    shape: ``daily_basic`` publishes a row with no close, no share counts and no market value
-    for a security with no bar on the session (``DAILY_BASIC_PLACEHOLDER_COLUMNS``). Such a row
-    is carried with those cells as ``None``; a row with some of them null and not the others is
+    shape: ``daily_basic`` publishes a row with every value null but ``volume_ratio`` for a
+    security with no bar on the session (``DAILY_BASIC_PLACEHOLDER_COLUMNS``). Such a row is
+    carried with those cells as ``None``; a row with some of them null and not the others is
     parsed cell by cell as before and refused.
     """
     serves_evidence_plane: bool = True
@@ -2493,9 +2493,10 @@ TUSHARE_DATASETS: tuple[TushareDatasetDescriptor, ...] = (
         # Not demanded, for the reason `daily`'s comment gives.
         requires_truncation_flag=False,
         panel_columns=tuple(_price_panel_column(name) for name in DAILY_BASIC_DATA_COLUMNS),
-        # `V2-P6-017`: a row with all six null is the upstream's no-valuation placeholder (90
-        # rows on 2020-09-18), carried as nulls for `reconcile_price_disagreements` to judge
-        # beside the session's bars. A row with only some of them null is still refused here.
+        # `V2-P6-017`: a row with every value null but `volume_ratio` is the upstream's
+        # no-valuation placeholder (90 rows on 2020-09-18), carried as nulls for
+        # `reconcile_price_disagreements` to judge beside the session's bars. Any other null
+        # pattern in a required column is still refused here.
         placeholder_fields=DAILY_BASIC_PLACEHOLDER_COLUMNS,
     ),
     TushareDatasetDescriptor(
@@ -4074,6 +4075,15 @@ class TushareProvider:
         returns ``trade_cal`` in descending order, and while neither the batch contract nor
         the store cares, a partition whose row order depends on an upstream response ordering
         is one whose content hash does too.
+
+        **A `daily_basic` batch may carry placeholder rows with nulls in required columns**
+        (``V2-P6-017``, ``placeholder_fields``): a row with every value null but
+        ``volume_ratio`` -- ``close``, the share counts and the market values included -- is
+        carried with those cells as ``None`` rather than refused. Such a batch is not a store of
+        valuations. Its one consumer is the price build's
+        ``panel_ingest.reconcile_price_disagreements``, which drops each placeholder under a
+        named rule or refuses it; ``write_daily_panel`` refuses any null close that reaches it
+        unreconciled. Any other caller must do the same before reading ``close`` as a price.
         """
         descriptor = self._descriptor(request)
         if not descriptor.panel_columns:
