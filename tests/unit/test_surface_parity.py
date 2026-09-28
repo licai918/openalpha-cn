@@ -176,6 +176,8 @@ The count is pinned below so that closing one goes red and says which.
 
 SDK_ONLY: Final[MappingProxyType[str, str]] = MappingProxyType(
     {
+        "build_factor_panel_set": "`openalpha factor build --factor A --factor B`'s in-process "
+        "twin (`V2-P6-006`); no route, for `build_factor_panels`' reason",
         "build_factor_panels": "`openalpha factor build`'s in-process twin; no route (F30 mirror)",
         "compare_shortlists": "`openalpha shortlist compare`'s twin; no route",
         "construct_portfolio_from_ranking": "takes an in-process `ShortlistRunResult`, which no "
@@ -638,6 +640,10 @@ def test_the_measured_surface_counts_are_the_ones_this_file_was_written_against(
 
     `V2-P6-014` moved `sdk_methods` by one and nothing else: `OpenAlphaSDK.factor_ic_series`, the
     per-instant IC series `V2-P6-008`'s research runner asked for, declared in `SDK_ONLY`.
+
+    `V2-P6-006` moved `sdk_methods` by one and nothing else: `OpenAlphaSDK.build_factor_panel_set`,
+    the twin of `openalpha factor build` with `--factor` repeated -- the command gained a repeatable
+    option rather than a second command, so `cli_commands` did not move -- declared in `SDK_ONLY`.
     """
     measured = {
         "routes": len(_routes()),
@@ -649,7 +655,7 @@ def test_the_measured_surface_counts_are_the_ones_this_file_was_written_against(
 
     assert measured == {
         "routes": 48,
-        "sdk_methods": 57,
+        "sdk_methods": 58,
         "cli_commands": 36,
         "without_sdk": 11,
         "rest_only": 9,

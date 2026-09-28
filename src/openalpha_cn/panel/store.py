@@ -518,6 +518,7 @@ __all__ = [
     "PanelStorageError",
     "PanelStore",
     "PartitionRef",
+    "PartitionStamp",
 ]
 
 
@@ -653,6 +654,14 @@ class PartitionRef:
     path: Path
     row_count: int
     content_hash: str
+
+
+PartitionStamp = tuple[str, int, str, int | None, str | None]
+"""One partition as `PanelStore.partition_stamps` reports it; see that method.
+
+`(dataset, year, content_hash, coverage recorded_at in epoch microseconds, coverage
+partition_content_hash)`, the last two `None` for a partition with no coverage record.
+"""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -1376,6 +1385,74 @@ class PanelStore:
                 raise
             existing.path.unlink(missing_ok=True)
         return True
+
+    def partition_stamps(
+        self, *, excluding_prefixes: Sequence[str] = ()
+    ) -> tuple[PartitionStamp, ...]:
+        """Every registered partition as the catalog stamps it now, ascending by dataset and year.
+
+        One `(dataset, year, content_hash, coverage recorded_at in epoch microseconds, coverage
+        partition_content_hash)` per partition, the last two `None` when the partition has no
+        coverage record. Datasets whose name starts with one of `excluding_prefixes` are left out.
+
+        **What this is for (`V2-P6-006`).** A reader that keeps an answer it computed from stored
+        partitions -- `factor_view.FactorBuildContext` keeps one instant's universe, calendar and
+        industry cross section for every factor of a build -- may serve it again only while the
+        partitions it came from stand. Every read of this store is decided by exactly two catalog
+        facts per partition: the partition row (its `content_hash`, which every rewrite moves)
+        and its coverage record (which readiness consults, and whose `recorded_at` every
+        re-profile moves). This returns both for every partition in **one** statement, so a
+        keeper can compare the whole catalog state it read under against the state now for the
+        price of one connection -- where asking `read_coverage` per partition would cost the ~37
+        connections a registry read already costs.
+
+        **Not a read of any row**, which is why it is not a door in
+        `tests/unit/panel/test_query_callers.py`'s sense: nothing here reaches a Parquet file, and
+        no answer about the market can be derived from it. It says which bytes the catalog stands
+        behind, never what they contain.
+        """
+        if not self.catalog_path.exists():
+            return ()
+        with (
+            self._catalog_access.shared(),
+            duckdb.connect(str(self.catalog_path), read_only=True) as connection,
+        ):
+            _check_catalog_schema_version(connection)
+            if not _table_exists(connection, "panel_partitions"):
+                return ()
+            excluded = " ".join("AND NOT starts_with(p.dataset, ?)" for _ in excluding_prefixes)
+            if _table_exists(connection, "panel_partition_coverage"):
+                has_partition_hash = _column_exists(
+                    connection, "panel_partition_coverage", "partition_content_hash"
+                )
+                hash_projection = "c.partition_content_hash" if has_partition_hash else "NULL"
+                statement = f"""
+                    SELECT p.dataset, p.year, p.content_hash, epoch_us(c.recorded_at),
+                           {hash_projection}
+                    FROM panel_partitions p
+                    LEFT JOIN panel_partition_coverage c
+                      ON c.dataset = p.dataset AND c.year = p.year
+                    WHERE TRUE {excluded}
+                    ORDER BY p.dataset, p.year
+                """
+            else:
+                statement = f"""
+                    SELECT p.dataset, p.year, p.content_hash, NULL, NULL
+                    FROM panel_partitions p
+                    WHERE TRUE {excluded}
+                    ORDER BY p.dataset, p.year
+                """
+            rows = connection.execute(statement, list(excluding_prefixes)).fetchall()
+        return tuple(
+            (
+                str(row[0]),
+                int(row[1]),
+                str(row[2]),
+                None if row[3] is None else int(row[3]),
+                None if row[4] is None else str(row[4]),
+            )
+            for row in rows
+        )
 
     def assess_readiness(self, requirement: ReadinessRequirement) -> DatasetReadiness:
         """Judge whether `requirement.dataset` may be read at `requirement.as_of`.

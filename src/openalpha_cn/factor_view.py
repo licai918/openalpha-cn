@@ -174,7 +174,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from types import MappingProxyType
-from typing import ClassVar, Final, Literal, Protocol, TypeVar
+from typing import ClassVar, Final, Literal, Protocol, TypeVar, cast
 from zoneinfo import ZoneInfo
 
 from openalpha_cn.backtest.execution import (
@@ -248,6 +248,7 @@ from openalpha_cn.domain.factor import (
 from openalpha_cn.domain.factor_neutralization import (
     FactorNeutralizationRegistry,
     FactorNeutralizationSpec,
+    IndustryMarketCapCrossSection,
     NeutralizedFactorObservation,
 )
 from openalpha_cn.domain.factor_transform import (
@@ -290,9 +291,13 @@ from openalpha_cn.panel.catalog import (
     PanelStorageError,
     ReadinessRequirement,
 )
-from openalpha_cn.panel.store import PanelStore, PartitionRef
+from openalpha_cn.panel.store import PanelStore, PartitionRef, PartitionStamp
 from openalpha_cn.panel_factors import (
     FACTOR_DEFINITIONS,
+    FACTOR_MANIFEST_DATASET_PREFIX,
+    FACTOR_OBSERVATION_DATASET_PREFIX,
+    FACTOR_PROCESSED_DATASET_PREFIX,
+    FACTOR_TRANSFORM_MANIFEST_DATASET_PREFIX,
     FACTOR_TRANSFORMS,
     FactorEngineError,
     FactorPanel,
@@ -321,7 +326,9 @@ from openalpha_cn.panel_ingest import (
     load_trading_calendar,
 )
 from openalpha_cn.panel_neutralization import (
+    FACTOR_NEUTRALIZATION_MANIFEST_DATASET_PREFIX,
     FACTOR_NEUTRALIZATIONS,
+    FACTOR_NEUTRALIZED_DATASET_PREFIX,
     NeutralizationEngineError,
     NeutralizedFactorPanel,
     apply_factor_neutralization,
@@ -347,6 +354,7 @@ __all__ = [
     "VIEW_SCHEMA_VERSION",
     "ExperimentDocumentStore",
     "ExperimentWrite",
+    "FactorBuildContext",
     "FactorBuildReport",
     "FactorBuildRequest",
     "FactorPanelUnreadableError",
@@ -357,6 +365,7 @@ __all__ = [
     "FactorViewError",
     "acceptance_rows",
     "attribution_rows",
+    "build_factor_panel_set",
     "build_factor_panels",
     "build_rows",
     "build_view",
@@ -364,6 +373,7 @@ __all__ = [
     "everything_is_unmeasured",
     "experiment_view",
     "factor_build_request",
+    "factor_build_requests",
     "factor_catalog",
     "factor_entry",
     "factor_request",
@@ -2944,6 +2954,93 @@ def factor_build_request(
     )
 
 
+def factor_build_requests(
+    *,
+    factors: Sequence[str],
+    tier: str,
+    transform: str,
+    neutralization: str,
+    as_ofs: Sequence[datetime],
+    years: Sequence[int],
+    exchange: str,
+    max_staleness_days: int | None,
+    waive_max_staleness: bool,
+    subjects: Sequence[str],
+    supersedes_raw: Sequence[str],
+    supersedes_processed: Sequence[str],
+    supersedes_neutralized: Sequence[str],
+    code_commit: str,
+    registry: FactorRegistry = FACTOR_DEFINITIONS,
+    transforms: FactorTransformRegistry = FACTOR_TRANSFORMS,
+    neutralizations: FactorNeutralizationRegistry = FACTOR_NEUTRALIZATIONS,
+) -> tuple[FactorBuildRequest, ...]:
+    """One `factor_build_request` per factor, every other option shared (`V2-P6-006`).
+
+    `--factor` repeated on `openalpha factor build`. Every request is resolved before any is
+    built, so a set in which one factor cannot be put -- undeclared, or a tier option it refuses
+    -- is refused whole and reads nothing. Three things are refused here that one request cannot
+    be refused for:
+
+    - **no factor at all**, which would be a build that stored nothing and succeeded;
+    - **one factor named twice**, including once by `key/vN` and once by `fct_...`, which would
+      build it twice and have its second write refused as a second answer to one question;
+    - **a `--supersedes-*` beside more than one factor.** A manifest id names one factor's
+      build, and every writer refuses a supersedes name no partition it touches holds, so the
+      list would be refused by every factor but one. A rebuild that replaces a build is a
+      single-factor build.
+    """
+    names = _distinct("--factor", factors)
+    if not names:
+        raise FactorRequestError(
+            "--factor names no factor; a build of nothing would store nothing and succeed, which "
+            "is the empty success this plane refuses"
+        )
+    if len(names) > 1:
+        for flag, named in (
+            ("--supersedes-raw", supersedes_raw),
+            ("--supersedes-processed", supersedes_processed),
+            ("--supersedes-neutralized", supersedes_neutralized),
+        ):
+            if named:
+                raise FactorRequestError(
+                    f"{flag} names {sorted(named)} beside {len(names)} factors; a manifest id "
+                    "names one factor's build, and every other factor's writer would refuse it as "
+                    "a name its partitions do not hold. Rebuild the factor it belongs to alone"
+                )
+    requests = tuple(
+        factor_build_request(
+            factor=name,
+            tier=tier,
+            transform=transform,
+            neutralization=neutralization,
+            as_ofs=as_ofs,
+            years=years,
+            exchange=exchange,
+            max_staleness_days=max_staleness_days,
+            waive_max_staleness=waive_max_staleness,
+            subjects=subjects,
+            supersedes_raw=supersedes_raw,
+            supersedes_processed=supersedes_processed,
+            supersedes_neutralized=supersedes_neutralized,
+            code_commit=code_commit,
+            factors=registry,
+            transforms=transforms,
+            neutralizations=neutralizations,
+        )
+        for name in names
+    )
+    seen: dict[str, str] = {}
+    for name, request in zip(names, requests, strict=True):
+        earlier = seen.setdefault(request.definition.factor_id, name)
+        if earlier != name:
+            raise FactorRequestError(
+                f"--factor names {request.definition.qualified_key} twice, as {earlier!r} and as "
+                f"{name!r}; the second build would be a second answer to every question the "
+                "first one stored"
+            )
+    return requests
+
+
 def _build_tier(tier: str) -> BuildTier:
     """`--tier` as the declared `Literal`, resolved by search rather than widened by a cast.
 
@@ -3105,6 +3202,160 @@ class FactorBuildReport:
     """Every partition written, as `dataset@year`, in write order."""
 
 
+FACTOR_PLANE_DATASET_PREFIXES: Final[tuple[str, ...]] = (
+    FACTOR_OBSERVATION_DATASET_PREFIX,
+    FACTOR_MANIFEST_DATASET_PREFIX,
+    FACTOR_PROCESSED_DATASET_PREFIX,
+    FACTOR_TRANSFORM_MANIFEST_DATASET_PREFIX,
+    FACTOR_NEUTRALIZED_DATASET_PREFIX,
+    FACTOR_NEUTRALIZATION_MANIFEST_DATASET_PREFIX,
+)
+"""The six name prefixes of the datasets a factor build **writes**, and so the ones it never reads
+an instant's shared answers from. See `FactorBuildContext` for why the distinction is the key."""
+
+_SharedKey = tuple[object, ...]
+
+
+class FactorBuildContext:
+    """The reads every factor of one build shares at an instant (`V2-P6-006`).
+
+    ## What is shared, and why it is the same answer for every factor
+
+    At one prediction instant, three reads of a build do not depend on which factor is being
+    built: the exchange **calendar** (`load_trading_calendar`), the security **registry**
+    (`load_stock_universe`, whose listed cross section and whole membership become every factor's
+    `universe` and `subjects`) and, for the neutralised tier, the **industry and size cross
+    section** (`load_industry_market_cap_cross_section`). `V2-P6-005` measured the second at
+    ~1.0 s (77 DuckDB connections and 1,194 statements over 37 registry partitions) and the third
+    at ~1.1-1.4 s on the real 2026 panel; a 21-factor build paid each 21 times per instant, which
+    was ~38 h of a ~56 h full build. Here each is loaded once per build and instant, and handed
+    to every factor that asks the same question.
+
+    **The result is cached, never the loader's internals.** Each read goes through the loader's
+    own interface with the same arguments the single-factor build passed, so what a factor
+    receives is the value that call returns -- the same object for all of them, which is safe
+    because all three are frozen values. A change to *how* a loader answers (`V2-P6-015` moves
+    where the industry answer for a day before 2021-12-13 comes from) lands in the loader and
+    reaches every factor through here untouched.
+
+    ## The key, and why a stale answer is never served
+
+    An answer is keyed on everything its call was given -- the kind of read, the instant, and the
+    exchange, years, freshness bound, neutralisation spec, subject set and day as each read takes
+    them -- and it is held beside the **catalog state it was read under**:
+    `PanelStore.partition_stamps`, every partition's `content_hash` and coverage stamp, which are
+    the only two catalog facts any read of this store is decided by. It is served again only while
+    the catalog still says exactly that, compared at every use for one connection's cost. A
+    partition rewritten -- or merely re-profiled -- between two factors of one build is therefore
+    read afresh by the second, and an answer loaded while the catalog moved underneath it is used
+    once and not kept.
+
+    **The factor planes are the one part of the catalog left out of that comparison**, because
+    they are what the build itself writes between two factors: comparing them would make every
+    factor after the first reload everything, which is the cost this exists to remove. None of the
+    three shared reads can reach one -- a calendar, a registry, a membership and a valuation panel
+    are fetched datasets, and `FACTOR_PLANE_DATASET_PREFIXES` names exactly the derived ones. A
+    fourth shared read that consulted a factor plane would need that plane put back in its key.
+
+    ## What it holds, and for how long
+
+    One entry per (read, instant) of the build that created it -- only the instants being built,
+    because every key carries its instant -- and nothing after that call returns:
+    `build_factor_panel_set` creates one, hands it to each factor in turn, and drops it.
+    `tests/integration/panel/test_factor_build_shared_context.py` holds the equivalence (every
+    partition of a 21-factor build is its single-factor build's, by `content_hash`), the counts
+    (one load per instant whatever the number of factors) and both staleness paths.
+    """
+
+    __slots__ = ("_entries", "store")
+
+    def __init__(self, store: PanelStore) -> None:
+        self.store = store
+        self._entries: dict[_SharedKey, tuple[tuple[PartitionStamp, ...], object]] = {}
+
+    def _stamps(self) -> tuple[PartitionStamp, ...]:
+        return self.store.partition_stamps(excluding_prefixes=FACTOR_PLANE_DATASET_PREFIXES)
+
+    def _shared(self, key: _SharedKey, load: Callable[[], _T]) -> _T:
+        """`load()`'s answer for `key`, reused while the catalog still reads as it did then."""
+        stamps = self._stamps()
+        held = self._entries.get(key)
+        if held is not None and held[0] == stamps:
+            return cast(_T, held[1])
+        value = load()
+        if self._stamps() == stamps:
+            self._entries[key] = (stamps, value)
+        else:
+            self._entries.pop(key, None)
+        return value
+
+    def calendar(self, request: FactorBuildRequest, *, as_of: datetime) -> TradingCalendar:
+        """The exchange calendar at `as_of`, over the build's years."""
+        return self._shared(
+            ("calendar", as_of, request.exchange, request.years),
+            lambda: _read(
+                lambda: load_trading_calendar(
+                    self.store, exchange=request.exchange, years=request.years, as_of=as_of
+                ),
+                store=self.store,
+                what=f"the {request.exchange} trading calendar",
+            ),
+        )
+
+    def universe(self, request: FactorBuildRequest, *, as_of: datetime) -> StockUniverse:
+        """The security registry at `as_of`, over the build's years."""
+        max_staleness = _event_clock_bound(STOCK_BASIC_DATASET, request.max_staleness)
+        return self._shared(
+            ("universe", as_of, request.years, max_staleness),
+            lambda: _read_registry(
+                lambda: load_stock_universe(
+                    self.store, years=request.years, as_of=as_of, max_staleness=max_staleness
+                ),
+                store=self.store,
+            ),
+        )
+
+    def industry_cross_section(
+        self,
+        request: FactorBuildRequest,
+        spec: FactorNeutralizationSpec,
+        *,
+        subjects: Sequence[str],
+        day: date,
+        as_of: datetime,
+    ) -> IndustryMarketCapCrossSection:
+        """The industry and size cross section for `day` at `as_of`, or the loader's own fault.
+
+        Keyed on the subjects as the loader reads them -- sorted and distinct -- so two factors
+        whose panels list one universe in two orders share one answer. A fault is raised to the
+        caller unwrapped and is not kept, so `_neutralized` turns it into the refusal it always
+        did.
+        """
+        calendar = self.calendar(request, as_of=as_of)
+        return self._shared(
+            (
+                "industry",
+                as_of,
+                spec,
+                tuple(sorted(set(subjects))),
+                day,
+                request.exchange,
+                request.years,
+                request.max_staleness,
+            ),
+            lambda: load_industry_market_cap_cross_section(
+                self.store,
+                spec,
+                subjects=subjects,
+                day=day,
+                as_of=as_of,
+                calendar=calendar,
+                membership_years=request.years,
+                max_staleness=request.max_staleness,
+            ),
+        )
+
+
 def build_factor_panels(
     store: PanelStore, request: FactorBuildRequest, *, built_at: datetime
 ) -> FactorBuildReport:
@@ -3124,14 +3375,122 @@ def build_factor_panels(
 
     So a build that cannot finish stores nothing and says why, by name. See
     `the_builder_cannot_produce_a_residual_for_a_session_that_has_not_closed`.
+
+    One factor is `build_factor_panel_set` with one request, and runs the same code: its
+    `FactorBuildContext` shares each instant's calendar between the raw tier and the residual.
     """
+    return _build_one(store, request, built_at=built_at, context=FactorBuildContext(store))
+
+
+def build_factor_panel_set(
+    store: PanelStore, requests: Sequence[FactorBuildRequest], *, built_at: datetime
+) -> tuple[FactorBuildReport, ...]:
+    """Build several factors in one call, each exactly as `build_factor_panels` builds it alone.
+
+    `V2-P6-006`. One `FactorBuildContext` for the whole call, so every factor reads each
+    instant's calendar, registry and industry cross section from the first factor's load rather
+    than loading its own; everything else -- the carry, the three computations, the three
+    writers and every guard -- is the single-factor build, run once per factor in the order
+    given. Every partition a factor writes here is the one its own build writes from the same
+    inputs and clock, byte for byte.
+
+    ## One factor at a time, each whole
+
+    A factor is computed at every instant and every tier before any of its partitions is
+    written, as `build_factor_panels` does. The factors are **not** held to one another that way:
+    all of them computed before the first write would keep 21 factors x every instant x three
+    tiers of observations in memory at once, where one factor at a time keeps one factor's. So a
+    refusal stops the call at the factor that was refused; every factor before it has written all
+    of its partitions and keeps them, and none after it is built. The refused factor itself is
+    what its own build would have left: nothing, for every refusal made while computing -- which
+    is every refusal about the data -- and, for a write-time refusal, the tiers `_written` says
+    were stored before it. The refusal names the factor and lists what is already stored --
+    `panel build`'s `_stored_so_far` arrangement -- so a re-run can name the factors left. It keeps
+    the refused factor's own fault class, so each face envelopes it as it envelopes that factor's
+    single-factor refusal. A fault that is not a `FactorViewError` is re-raised as it is, with the
+    same listing attached as a note.
+    """
+    if not requests:
+        raise FactorRequestError("a factor build set needs at least one factor")
+    context = FactorBuildContext(store)
+    reports: list[FactorBuildReport] = []
+    for position, request in enumerate(requests):
+        try:
+            reports.append(_build_one(store, request, built_at=built_at, context=context))
+        except FactorViewError as error:
+            if len(requests) == 1:
+                raise
+            raise _refused_in_a_set(
+                error, requests=requests, position=position, reports=reports, store=store
+            ) from error
+        except Exception as error:
+            if len(requests) > 1:
+                error.add_note(_set_progress(requests, position=position, reports=reports))
+            raise
+    return tuple(reports)
+
+
+def _set_progress(
+    requests: Sequence[FactorBuildRequest],
+    *,
+    position: int,
+    reports: Sequence[FactorBuildReport],
+) -> str:
+    """What a set build had stored when the factor at `position` stopped it, and what is left."""
+    stored = [partition for report in reports for partition in report.partitions]
+    left = [request.definition.qualified_key for request in requests[position + 1 :]]
+    if stored:
+        done = (
+            f"The {len(reports)} factor(s) built before it wrote {len(stored)} partition(s), each "
+            f"factor whole, and they are still stored: {', '.join(stored)}."
+        )
+    else:
+        done = "No factor of this build had been written when it stopped."
+    return f"{done} Factors not built: {left}."
+
+
+def _refused_in_a_set(
+    error: FactorViewError,
+    *,
+    requests: Sequence[FactorBuildRequest],
+    position: int,
+    reports: Sequence[FactorBuildReport],
+    store: PanelStore,
+) -> FactorViewError:
+    """`error`, raised by the factor at `position`, restated as the set's refusal.
+
+    The same class, so `FACTOR_EXIT` and every other channel's table envelope it as they
+    envelope the single-factor refusal; the factor named first, because a caller holding 21
+    names needs to know which one to look at; the original words kept whole.
+    """
+    request = requests[position]
+    head = (
+        f"{request.definition.qualified_key} (factor {position + 1} of {len(requests)}) was refused"
+    )
+    progress = _set_progress(requests, position=position, reports=reports)
+    return type(error)(
+        f"{head}: {error} {progress}",
+        disclosable=f"{head}: {_without_store_path(error.disclosable, store)} {progress}",
+    )
+
+
+def _build_one(
+    store: PanelStore,
+    request: FactorBuildRequest,
+    *,
+    built_at: datetime,
+    context: FactorBuildContext,
+) -> FactorBuildReport:
+    """`build_factor_panels`' body, with the instant reads taken from `context`."""
+    if context.store is not store:
+        raise ValueError("a FactorBuildContext is shared only by builds over the store it reads")
     # One carry for the whole build, handed to every instant in `request.as_ofs`' ascending order,
     # so each instant reads only the rows that became visible since the one before it
     # (`V2-P6-005`); see `FactorReadCarry` for why the cross sections are the ones a fresh read of
     # each instant computes.
     carry = FactorReadCarry()
     computed = [
-        _computed(store, request, as_of=as_of, built_at=built_at, carry=carry)
+        _computed(store, request, as_of=as_of, built_at=built_at, carry=carry, context=context)
         for as_of in request.as_ofs
     ]
     panels = [panel for panel, _count in computed]
@@ -3147,7 +3506,8 @@ def build_factor_panels(
         ]
     if request.neutralization is not None:
         neutralized = [
-            _neutralized(store, request, panel=panel, built_at=built_at) for panel in processed
+            _neutralized(store, request, panel=panel, built_at=built_at, context=context)
+            for panel in processed
         ]
     written = list(
         _written(
@@ -3261,6 +3621,7 @@ def _computed(
     as_of: datetime,
     built_at: datetime,
     carry: FactorReadCarry,
+    context: FactorBuildContext,
 ) -> tuple[FactorPanel, int]:
     """One raw cross section, and the size of the universe it was scored against.
 
@@ -3297,24 +3658,13 @@ def _computed(
     staggered availability -- which is the real-world shape `KNOWN_CALENDAR_LOOKAHEAD` records and
     which nothing here generates. A mutation retargeting this one read at `request.as_ofs[0]`
     therefore survives; what is covered is the parameter, which every read in this function shares.
+
+    Both come out of `context`, keyed on this instant: read once per build and instant however
+    many factors the build holds (`V2-P6-006`), and each still the answer at *this* instant.
     """
     day = as_of.astimezone(FACTOR_DATE_ZONE).date()
-    calendar = _read(
-        lambda: load_trading_calendar(
-            store, exchange=request.exchange, years=request.years, as_of=as_of
-        ),
-        store=store,
-        what=f"the {request.exchange} trading calendar",
-    )
-    universe = _read_registry(
-        lambda: load_stock_universe(
-            store,
-            years=request.years,
-            as_of=as_of,
-            max_staleness=_event_clock_bound(STOCK_BASIC_DATASET, request.max_staleness),
-        ),
-        store=store,
-    )
+    calendar = context.calendar(request, as_of=as_of)
+    universe = context.universe(request, as_of=as_of)
     try:
         listed = universe.listed_on(day)
     except StockUniverseError as error:
@@ -3445,6 +3795,7 @@ def _neutralized(
     *,
     panel: ProcessedFactorPanel,
     built_at: datetime,
+    context: FactorBuildContext,
 ) -> NeutralizedFactorPanel:
     """One residual cross section, or the named refusal that says why there cannot be one.
 
@@ -3473,23 +3824,10 @@ def _neutralized(
         raise FactorRequestError("no neutralisation was resolved for this build")
     day = panel.as_of.astimezone(FACTOR_DATE_ZONE).date()
     subjects = tuple(observation.subject for observation in panel.observations)
-    calendar = _read(
-        lambda: load_trading_calendar(
-            store, exchange=request.exchange, years=request.years, as_of=panel.as_of
-        ),
-        store=store,
-        what=f"the {request.exchange} trading calendar",
-    )
+    calendar = context.calendar(request, as_of=panel.as_of)
     try:
-        section = load_industry_market_cap_cross_section(
-            store,
-            neutralization,
-            subjects=subjects,
-            day=day,
-            as_of=panel.as_of,
-            calendar=calendar,
-            membership_years=request.years,
-            max_staleness=request.max_staleness,
+        section = context.industry_cross_section(
+            request, neutralization, subjects=subjects, day=day, as_of=panel.as_of
         )
     except _CROSS_SECTION_FAULTS as error:
         message = (

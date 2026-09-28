@@ -121,13 +121,13 @@ from openalpha_cn.factor_view import (
     FactorViewError,
     acceptance_rows,
     attribution_rows,
-    build_factor_panels,
+    build_factor_panel_set,
     build_rows,
     build_view,
     catalog_rows,
     everything_is_unmeasured,
     experiment_view,
-    factor_build_request,
+    factor_build_requests,
     factor_catalog,
     factor_entry,
     factor_request,
@@ -5838,6 +5838,15 @@ def _echo_declaration(entry: Mapping[str, object]) -> None:
     typer.echo(textwrap.indent(textwrap.fill(str(note), width=NOTE_WRAP_WIDTH), "  "))
 
 
+_BUILD_FACTOR_HELP: Final[str] = (
+    f"{_FACTOR_HELP} Repeatable (V2-P6-006): every factor named is built with the same options, "
+    "and each instant's calendar, registry and industry cross section is loaded once for all of "
+    "them rather than once per factor. Each factor stores exactly the partitions its own build "
+    "stores, and they are written one factor at a time, each whole: a refused factor names itself "
+    "and lists what the factors before it already stored, and the ones after it are not built. "
+    "--json prints one build report per line, in the order named. A --supersedes-* belongs to one "
+    "factor's build and is refused beside more than one."
+)
 _BUILD_TIER_HELP: Final[str] = (
     "The highest tier to store: `raw`, `processed` or `neutralized`. Every tier below it is stored "
     "too, so `--tier neutralized` writes all three. `--transform` is required for the last two and "
@@ -5907,7 +5916,7 @@ _BUILD_SUPERSEDES_HELP: Final[str] = (
 
 @factor_app.command("build")
 def factor_build_command(
-    factor: Annotated[str, typer.Option("--factor", help=_FACTOR_HELP)],
+    factor: Annotated[list[str], typer.Option("--factor", help=_BUILD_FACTOR_HELP)],
     tier: Annotated[str, typer.Option("--tier", help=_BUILD_TIER_HELP)],
     as_of: Annotated[list[str], typer.Option("--as-of", help=_BUILD_FACTOR_AS_OF_HELP)],
     year: Annotated[list[int], typer.Option("--year", help=_BUILD_FACTOR_YEAR_HELP)],
@@ -5973,6 +5982,14 @@ def factor_build_command(
     and then `openalpha factor run --factor reversal_1d/v1 --start 2026-01-08 --end 2026-01-09 ...`
     reads what it stored.
 
+    **`--factor` repeats (`V2-P6-006`).** Every factor named is built with the same options in one
+    invocation, and each prediction instant's calendar, registry and industry cross section is
+    loaded once for all of them instead of once per factor -- on the real 2026 panel those were
+    ~2.4 s of every factor's ~3.3 s per instant. Each factor stores exactly the partitions its own
+    invocation would; they are written one factor at a time, each whole, so a refusal names the
+    factor it stopped at and lists what the factors before it stored. `--json` prints one report
+    per line, in the order named.
+
     **That example said `--waive-max-staleness` until `V2-P4-100` ran it.** It exits `1`:
     `compute_factor` refuses a waived `max_staleness` for every dataset a factor reads, because
     it reads through `read_visible_at` and a waived bound accepts a slice reaching arbitrarily
@@ -6000,8 +6017,8 @@ def factor_build_command(
 
     with _panel_command("factor build", json_output=json_output):
         try:
-            request = factor_build_request(
-                factor=factor,
+            requests = factor_build_requests(
+                factors=factor,
                 tier=tier,
                 transform=transform,
                 neutralization=neutralization,
@@ -6016,16 +6033,17 @@ def factor_build_command(
                 supersedes_neutralized=supersedes_neutralized or [],
                 code_commit=_resolved_code_commit(code_commit),
             )
-            report = build_factor_panels(
-                _panel_store(runtime_dir), request, built_at=_panel_clock()
+            reports = build_factor_panel_set(
+                _panel_store(runtime_dir), requests, built_at=_panel_clock()
             )
         except FactorViewError as error:
             raise _factor_fail(error) from error
 
-        if json_output:
-            typer.echo(json.dumps(build_view(report), ensure_ascii=False, sort_keys=True))
-        else:
-            _echo_build(report)
+        for report in reports:
+            if json_output:
+                typer.echo(json.dumps(build_view(report), ensure_ascii=False, sort_keys=True))
+            else:
+                _echo_build(report)
 
 
 def _factor_instant(value: str) -> datetime:

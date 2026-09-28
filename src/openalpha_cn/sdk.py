@@ -73,10 +73,12 @@ from openalpha_cn.evidence.service import build_provider_evidence
 from openalpha_cn.factor_view import (
     ExperimentWrite,
     FactorBuildReport,
+    build_factor_panel_set,
     build_factor_panels,
     build_view,
     experiment_view,
     factor_build_request,
+    factor_build_requests,
     factor_catalog,
     factor_entry,
     factor_request,
@@ -798,6 +800,56 @@ class OpenAlphaSDK:
             panel_store(self.runtime_dir),
             factor_build_request(
                 factor=factor,
+                tier=tier,
+                transform=transform,
+                neutralization=neutralization,
+                as_ofs=as_ofs,
+                years=years,
+                exchange=exchange,
+                max_staleness_days=max_staleness_days,
+                waive_max_staleness=waive_max_staleness,
+                subjects=subjects,
+                supersedes_raw=supersedes_raw,
+                supersedes_processed=supersedes_processed,
+                supersedes_neutralized=supersedes_neutralized,
+                code_commit=code_commit,
+            ),
+            built_at=self.clock(),
+        )
+
+    def build_factor_panel_set(
+        self,
+        *,
+        factors: Sequence[str],
+        tier: str,
+        as_ofs: Sequence[datetime],
+        years: Sequence[int],
+        exchange: str,
+        max_staleness_days: int | None,
+        waive_max_staleness: bool,
+        transform: str = "",
+        neutralization: str = "",
+        subjects: Sequence[str] = (),
+        supersedes_raw: Sequence[str] = (),
+        supersedes_processed: Sequence[str] = (),
+        supersedes_neutralized: Sequence[str] = (),
+        code_commit: str,
+    ) -> tuple[FactorBuildReport, ...]:
+        """Build several factors with one set of options, sharing each instant's reads.
+
+        The in-process twin of `openalpha factor build --factor A --factor B ...` (`V2-P6-006`),
+        through the same `factor_view.factor_build_requests` and
+        `factor_view.build_factor_panel_set`. Each factor stores exactly the partitions
+        `build_factor_panels` stores for it alone; what is shared is each instant's calendar,
+        registry and industry cross section, loaded once for all of them. One report per factor,
+        in the order named. A refused factor stops the call and names itself and what the factors
+        before it stored -- see `build_factor_panel_set`. No HTTP twin, for
+        `build_factor_panels`' reason.
+        """
+        return build_factor_panel_set(
+            panel_store(self.runtime_dir),
+            factor_build_requests(
+                factors=factors,
                 tier=tier,
                 transform=transform,
                 neutralization=neutralization,
