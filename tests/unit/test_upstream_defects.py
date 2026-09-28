@@ -53,16 +53,17 @@ from openalpha_cn.domain.trading_calendar import (
     build_trading_calendar,
 )
 from openalpha_cn.domain.upstream_defects import (
-    BarWitness,
     UpstreamDefect,
     close_disagreement_kind,
     limit_placeholder_kind,
     repeats_previous_close,
 )
 from openalpha_cn.panel.store import PanelStore
+from openalpha_cn.panel_doctor import panel_health_report
 from openalpha_cn.panel_ingest import (
     UPSTREAM_DEFECTS_DATASET,
     load_upstream_defects,
+    reconcile_price_disagreements,
     write_price_limits,
     write_upstream_defects,
 )
@@ -191,6 +192,17 @@ class Frame:
     uncorroborated_mismatch: bool = False
     pre_listing: str | None = None
     """`None` for no `920476.BJ` at all, else a key of `LIST_DATE_BY_SCENARIO`."""
+    prelisted_nulls: tuple[str, ...] = ("pre_close", "pct_chg")
+    sessions: tuple[date, ...] = SESSIONS
+    """The calendar's open sessions; a later build may add one after `SESSIONS[-1]`."""
+    mismatch_day: date | None = None
+    """`FILLERS[2]` closes at 10.0 in `daily` and 10.07 in `daily_basic` on this session."""
+    next_pre_close_disagrees: bool = False
+    """`FILLERS[2]`'s bar on the session after `mismatch_day` has a `pre_close` of 10.5."""
+    second_no_bar: bool = False
+    """`FILLERS[3]` has no bar on `NO_BAR_DAY` either, so that session re-fetches whole."""
+    session_refetch: str | None = None
+    """How a whole-session `daily` re-fetch answers: `None` (in full), `empty` or `short`."""
 
 
 class ScriptedUpstream:
@@ -211,13 +223,22 @@ class ScriptedUpstream:
 
     def _close(self, code: str, day: date) -> float:
         if code == STALE:
-            return STALE_CLOSES[day]
+            return STALE_CLOSES.get(day, 6.8)
         return 13.75 if code == NO_BAR else 10.0
 
     def _pre_close(self, code: str, day: date) -> float:
         if self.frame.uncorroborated_mismatch and code == FILLERS[0] and day == SESSIONS[3]:
             return 10.5
-        return STALE_PRE_CLOSES[day] if code == STALE else self._close(code, day)
+        mismatch = self.frame.mismatch_day
+        if (
+            self.frame.next_pre_close_disagrees
+            and mismatch is not None
+            and code == FILLERS[2]
+            and day > mismatch
+            and day == min(later for later in self.frame.sessions if later > mismatch)
+        ):
+            return 10.5
+        return STALE_PRE_CLOSES.get(day, 6.8) if code == STALE else self._close(code, day)
 
     def _traded(self, code: str, day: date) -> bool:
         return not (self.frame.limit_placeholder and code == HALTED and day == HALT_DAY)
@@ -229,16 +250,22 @@ class ScriptedUpstream:
         rows: list[list[Any]] = []
         if self._prelisted(day):
             first = day == PRELISTED_DAYS[0]
+            nulls = self.frame.prelisted_nulls if first else ()
+            pre_close = None if "pre_close" in nulls else 18.0
+            pct_chg = None if "pct_chg" in nulls else 0.0
             rows.append(
-                [PRELISTED, _compact(day), 18.0, 18.0, 18.0, 18.0]
-                + ([None, None] if first else [18.0, 0.0])
-                + [300.0, 540.0]
+                [PRELISTED, _compact(day), 18.0, 18.0, 18.0, 18.0, pre_close, pct_chg, 300.0, 540.0]
             )
         for code in SECURITIES:
             if not self._traded(code, day):
                 continue
             absent = self.frame.valuation_without_bar and code == NO_BAR and day == NO_BAR_DAY
+            absent = absent or (
+                self.frame.second_no_bar and code == FILLERS[3] and day == NO_BAR_DAY
+            )
             if absent and not (refetch and self.frame.refetch_differs):
+                continue
+            if refetch and self.frame.session_refetch == "short" and code == FILLERS[4]:
                 continue
             close, pre_close = self._close(code, day), self._pre_close(code, day)
             pct_chg = round((close / pre_close - 1) * 100, 2)
@@ -254,6 +281,8 @@ class ScriptedUpstream:
             return 11.5
         if self.frame.contradicted_valuation and code == FILLERS[1] and day == STALE_DAY:
             return 10.03
+        if code == FILLERS[2] and day == self.frame.mismatch_day:
+            return 10.07
         return self._close(code, day)
 
     def _valuations(self, day: date, *, refetch: bool) -> list[list[Any]]:
@@ -314,7 +343,7 @@ class ScriptedUpstream:
             previous: str | None = None
             day = date(YEAR, 1, 1)
             while day <= date(YEAR, 12, 31):
-                is_open = day in SESSIONS
+                is_open = day in self.frame.sessions
                 items.append([params["exchange"], _compact(day), 1 if is_open else 0, previous])
                 if is_open:
                     previous = _compact(day)
@@ -329,6 +358,8 @@ class ScriptedUpstream:
         self.served.add((api_name, params["trade_date"]))
         if api_name == DAILY_DATASET:
             rows = self._bars(day, refetch=refetch)
+            if refetch and "ts_code" not in params and self.frame.session_refetch == "empty":
+                rows = []
             fields = BAR_FIELDS
         elif api_name == DAILY_BASIC_DATASET:
             rows = self._valuations(day, refetch=refetch)
@@ -622,26 +653,141 @@ def test_the_defects_partition_round_trips_and_its_hash_is_stable_across_identic
     assert hashes[0] == hashes[1]
 
 
-def test_a_recorded_defect_a_rebuild_no_longer_reproduces_is_not_silently_kept(
+def test_a_defect_the_upstream_has_corrected_is_gone_from_the_rebuilt_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The partition is replaced whole and has no delete, so a year whose only defect the source
-    has since corrected cannot be rewritten to an empty record. It is refused rather than left
-    claiming a row was dropped that the rebuilt partition now holds."""
-    result, _ = _build(tmp_path, Frame(valuation_without_bar=True), monkeypatch, "price")
+    """The record is rebuilt from the drops the current build performs, so it always describes
+    exactly the data stored: a corrected defect is simply not in it, its row is stored again, and
+    another target's rows survive the rewrite. With nothing left the partition is removed."""
+    both = Frame(valuation_without_bar=True, limit_placeholder=True)
+    result, _ = _build(tmp_path, both, monkeypatch, "price", "stk_limit")
     assert result.exit_code == PanelExit.ok, result.output
+    assert {d.kind for d in _defects(tmp_path)} == {
+        "valuation_without_bar",
+        "limit_placeholder_on_halt",
+    }
 
-    with pytest.raises(PanelBatchError, match="no longer reproduces"):
-        write_upstream_defects(
-            _store(tmp_path), None, year=YEAR, source_datasets=frozenset({DAILY_BASIC_DATASET})
-        )
-    # A source that recorded nothing is untouched by another source's empty write.
+    corrected = Frame(limit_placeholder=True)  # the upstream now publishes 000022.SZ's bar
+    result, _ = _build(tmp_path, corrected, monkeypatch, "price")
+    assert result.exit_code == PanelExit.ok, result.output
+    assert [d.kind for d in _defects(tmp_path)] == ["limit_placeholder_on_halt"]
+    assert (NO_BAR, NO_BAR_DAY.isoformat()) in _stored_keys(
+        tmp_path, DAILY_BASIC_DATASET, DAILY_BASIC_PANEL_COLUMNS
+    )
+
+    alone = tmp_path / "alone"
+    result, _ = _build(alone, Frame(valuation_without_bar=True), monkeypatch, "price")
+    assert result.exit_code == PanelExit.ok, result.output
+    assert _store(alone).registered_years(UPSTREAM_DEFECTS_DATASET) == (YEAR,)
+    result, _ = _build(alone, Frame(), monkeypatch, "price")
+    assert result.exit_code == PanelExit.ok, result.output
+    assert _store(alone).registered_years(UPSTREAM_DEFECTS_DATASET) == ()
+    assert _store(alone).read_coverage(UPSTREAM_DEFECTS_DATASET, YEAR) is None
+    # A target that recorded nothing and finds nothing of its own is a no-op.
     assert (
         write_upstream_defects(
-            _store(tmp_path), None, year=YEAR, source_datasets=frozenset({PRICE_LIMIT_DATASET})
+            _store(alone), None, year=YEAR, source_datasets=frozenset({DAILY_BASIC_DATASET})
         )
         is None
     )
+
+
+# --- the last session, and the whole-session re-fetch (round 3) ---------------------------------
+
+
+def test_a_mismatch_on_the_builds_last_session_is_recorded_unconfirmed_and_re_judged_later(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On the last session the build requested there is no next session to corroborate the bar,
+    and its own `pct_chg` corroborates nothing. The valuation is dropped and the defect recorded
+    as unconfirmed; the next build that holds the following session judges it again."""
+    last = SESSIONS[-1]
+    result, _ = _build(tmp_path, Frame(mismatch_day=last), monkeypatch, "price")
+    assert result.exit_code == PanelExit.ok, result.output
+    assert _defects(tmp_path) == (
+        UpstreamDefect(
+            ts_code=FILLERS[2],
+            trade_date=last,
+            source_dataset=DAILY_BASIC_DATASET,
+            kind="valuation_contradicts_unconfirmed_bar",
+            bar_close=10.0,
+            valuation_close=10.07,
+            previous_bar_close=10.0,
+            valuation_repeats_previous_close=False,
+        ),
+    )
+
+    later = (*SESSIONS, date(2013, 11, 18))
+    result, _ = _build(tmp_path, Frame(mismatch_day=last, sessions=later), monkeypatch, "price")
+    assert result.exit_code == PanelExit.ok, result.output
+    assert [d.kind for d in _defects(tmp_path)] == ["valuation_contradicts_corroborated_bar"]
+
+    refused = tmp_path / "refused"
+    result, _ = _build(refused, Frame(mismatch_day=last), monkeypatch, "price")
+    assert result.exit_code == PanelExit.ok, result.output
+    frame = Frame(mismatch_day=last, sessions=later, next_pre_close_disagrees=True)
+    result, _ = _build(refused, frame, monkeypatch, "price")
+    assert result.exit_code == PanelExit.unhealthy, result.output
+    assert "not corroborated" in result.output
+
+
+def test_last_session_treatment_comes_from_the_requested_sessions_not_the_bars(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A year whose final session is missing from the bars does not hand its *previous* session
+    the last-session rule: `last_session` is what the build asked for, from the calendar."""
+    frame = Frame(mismatch_day=SESSIONS[3])
+    provider = TushareProvider(
+        token=SECRET_TOKEN, transport=ScriptedUpstream(frame), clock=lambda: CLOCK
+    )
+
+    def fetch(dataset: str, day: date, subjects: tuple[str, ...] = ()) -> Any:
+        instant = datetime(day.year, day.month, day.day, 12, 0, tzinfo=UTC)
+        return provider.fetch_panel(
+            ProviderRequest(dataset=dataset, as_of=instant, subjects=subjects)
+        )
+
+    held = SESSIONS[:4]  # the bars stop at the 14th; the build asked through the 15th
+    bars = [fetch(DAILY_DATASET, day) for day in held]
+    valuations = [fetch(DAILY_BASIC_DATASET, day) for day in held]
+
+    def refetch(day: date, codes: tuple[str, ...]) -> tuple[Any, Any]:
+        subjects = codes if len(codes) == 1 else ()
+        return fetch(DAILY_DATASET, day, subjects), fetch(DAILY_BASIC_DATASET, day, subjects)
+
+    with pytest.raises(PanelBatchError, match="not corroborated"):
+        reconcile_price_disagreements(bars, valuations, refetch=refetch, last_session=SESSIONS[4])
+    unconfirmed = reconcile_price_disagreements(
+        bars, valuations, refetch=refetch, last_session=SESSIONS[3]
+    )
+    assert [d.kind for d in unconfirmed.defects] == ["valuation_contradicts_unconfirmed_bar"]
+
+
+@pytest.mark.parametrize("shape", ["empty", "short"])
+def test_a_whole_session_re_fetch_that_is_empty_or_short_confirms_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shape: str
+) -> None:
+    """Two valuations without a bar on one session re-fetch the whole session. If that answer is
+    empty -- or short -- it carries no row for either disputed security, which is exactly what
+    "no bar" looks like; so the re-fetch must itself be the whole session the year held."""
+    frame = Frame(valuation_without_bar=True, second_no_bar=True, session_refetch=shape)
+    result, _ = _build(tmp_path, frame, monkeypatch, "price")
+
+    assert result.exit_code == PanelExit.unhealthy, result.output
+    assert "whole-session re-fetch" in result.output
+    assert _store(tmp_path).registered_years(UPSTREAM_DEFECTS_DATASET) == ()
+    assert _store(tmp_path).registered_years(DAILY_BASIC_DATASET) == ()
+
+
+def test_a_whole_session_re_fetch_that_is_whole_confirms_every_absence_on_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frame = Frame(valuation_without_bar=True, second_no_bar=True)
+    result, upstream = _build(tmp_path, frame, monkeypatch, "price")
+
+    assert result.exit_code == PanelExit.ok, result.output
+    assert sorted(d.ts_code for d in _defects(tmp_path)) == sorted([NO_BAR, FILLERS[3]])
+    assert upstream.refetches() == []
 
 
 # --- bar_before_listing (round 2) --------------------------------------------------------------
@@ -693,8 +839,36 @@ def test_a_null_field_bar_the_registry_does_not_place_before_listing_is_refused(
     assert result.exit_code == PanelExit.unhealthy, result.output
     assert PRELISTED in result.output
     assert PRELISTED_DAYS[0].isoformat() in result.output
-    assert "pre_close" in result.output
+    assert "with no pct_chg and no pre_close" in result.output
     assert _store(tmp_path).registered_years(DAILY_DATASET) == ()
+
+
+def test_the_refusal_names_the_column_that_is_actually_null(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frame = Frame(pre_listing="after", prelisted_nulls=("pct_chg",))
+    result, _ = _build(tmp_path, frame, monkeypatch, "stock_basic", "price")
+
+    assert result.exit_code == PanelExit.unhealthy, result.output
+    assert "with no pct_chg (" in result.output
+    assert "no pre_close" not in result.output
+
+
+def test_panel_doctor_answers_for_the_defects_record_rather_than_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`upstream_defects` is written by `panel_ingest` and fetched from nowhere, so it has no
+    publication cadence; the report gives it the `derived` one and its own requirement."""
+    result, _ = _build(tmp_path, Frame(valuation_without_bar=True), monkeypatch, "price")
+    assert result.exit_code == PanelExit.ok, result.output
+
+    report = panel_health_report(
+        _store(tmp_path), as_of=AS_OF_INSTANT, datasets=(UPSTREAM_DEFECTS_DATASET,), years=(YEAR,)
+    )
+    health = report.dataset(UPSTREAM_DEFECTS_DATASET)
+    assert health.freshness.cadence == "derived"
+    assert health.is_ready
+    assert report.is_clean
 
 
 # --- the decoder -------------------------------------------------------------------------------
@@ -746,33 +920,32 @@ def test_the_limit_writer_refuses_a_zero_upper_limit_nobody_reconciled(tmp_path:
 # --- the pure rules ----------------------------------------------------------------------------
 
 
-def test_a_bar_on_the_last_session_available_is_corroborated_by_its_own_pct_chg() -> None:
-    bar = BarWitness(close=6.8, pre_close=6.62, pct_chg=2.72)
+def test_a_bar_with_no_next_session_is_unconfirmed_only_on_the_last_requested_session() -> None:
     assert (
-        close_disagreement_kind(bar=bar, next_bar_pre_close=None, is_last_session=True)
-        == "valuation_contradicts_corroborated_bar"
+        close_disagreement_kind(bar_close=6.8, next_bar_pre_close=None, is_last_session=True)
+        == "valuation_contradicts_unconfirmed_bar"
     )
-    for is_last_session, pct_chg in ((False, 2.72), (True, 3.0)):
-        assert (
-            close_disagreement_kind(
-                bar=BarWitness(close=6.8, pre_close=6.62, pct_chg=pct_chg),
-                next_bar_pre_close=None,
-                is_last_session=is_last_session,
-            )
-            is None
-        )
+    assert (
+        close_disagreement_kind(bar_close=6.8, next_bar_pre_close=None, is_last_session=False)
+        is None
+    )
 
 
 def test_a_bar_its_next_session_disagrees_with_is_not_corroborated() -> None:
-    bar = BarWitness(close=6.8, pre_close=6.62, pct_chg=2.72)
-    assert close_disagreement_kind(bar=bar, next_bar_pre_close=6.7, is_last_session=False) is None
     assert (
-        close_disagreement_kind(bar=bar, next_bar_pre_close=6.8, is_last_session=False)
+        close_disagreement_kind(bar_close=6.8, next_bar_pre_close=6.7, is_last_session=False)
+        is None
+    )
+    assert (
+        close_disagreement_kind(bar_close=6.8, next_bar_pre_close=6.8, is_last_session=False)
         == "valuation_contradicts_corroborated_bar"
     )
-    assert close_disagreement_kind(bar=None, next_bar_pre_close=None, is_last_session=False) == (
-        "valuation_without_bar"
+    assert (
+        close_disagreement_kind(bar_close=6.8, next_bar_pre_close=6.7, is_last_session=True) is None
     )
+    assert close_disagreement_kind(
+        bar_close=None, next_bar_pre_close=None, is_last_session=False
+    ) == ("valuation_without_bar")
 
 
 def test_the_stale_shape_is_recorded_rather_than_required() -> None:

@@ -228,6 +228,7 @@ from openalpha_cn.panel.catalog import (
 )
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_ingest import (
+    UPSTREAM_DEFECTS_DATASET,
     adjustment_requirement,
     daily_basic_requirement,
     daily_requirement,
@@ -251,6 +252,7 @@ from openalpha_cn.panel_ingest import (
     stock_universe_requirement,
     suspension_requirement,
     trading_calendar_requirement,
+    upstream_defects_requirement,
 )
 
 
@@ -512,10 +514,10 @@ DATASET_CADENCE: Final[Mapping[str, Cadence]] = MappingProxyType(
         "fina_indicator": "quarterly",
     }
 )
-"""How often each ingested dataset publishes. Every dataset `panel_ingest.py` writes appears
-here, pinned by a test, because a dataset with no declared cadence would otherwise be given
-whatever bound the report's default happened to be -- which for `suspend_d` (a corpus with no
-rows on a session where nothing was halted) would be a permanent false alarm.
+"""How often each ingested dataset publishes. Every **fetched** dataset `panel_ingest.py`
+writes appears here, pinned by a test, because a dataset with no declared cadence would
+otherwise be given whatever bound the report's default happened to be -- which for `suspend_d`
+(a corpus with no rows on a session where nothing was halted) would be a permanent false alarm.
 
 `index_daily` is `daily` and not `monthly` even though it shares its three subjects with
 `index_weight`, and the pairing is exactly why the distinction is worth a sentence: a
@@ -524,6 +526,13 @@ Measured 2026-08-17 -- `000300.SH` served **243** rows for 2025 against `index_w
 publications over the same year. A `monthly` bound copied across from the neighbouring dataset
 would let a level series go three weeks stale without a finding, which is three weeks of a
 60-session regression window estimated against a market that stopped moving.
+
+`panel_ingest.py` also writes one dataset that is not fetched and is deliberately **not** here:
+`upstream_defects` (`V2-P6-013`), the record of rows a build dropped from the upstream under a
+named rule. Nothing publishes into it; it is rebuilt from each build's own drops. It takes the
+`derived` cadence by name in `freshness_policy`, as the factor planes take it by predicate, and
+`_requirement_for` answers it with `upstream_defects_requirement` -- so
+`panel doctor --dataset upstream_defects` reports on it rather than raising.
 """
 
 
@@ -802,6 +811,18 @@ def freshness_policy(dataset: str, *, calendar: TradingCalendar | None = None) -
                 "about a schedule this plane does not own. What *can* go wrong with a derived "
                 "partition is that its rows stop being the ones its build manifest addresses, "
                 "and that is a check (factor_seal_broken) rather than a bound"
+            ),
+        )
+    if dataset == UPSTREAM_DEFECTS_DATASET:
+        return FreshnessPolicy(
+            dataset=dataset,
+            cadence="derived",
+            max_staleness=None,
+            basis=(
+                "this dataset is the record of rows a build dropped from the upstream under a "
+                "named rule (V2-P6-013): it is rebuilt from each build's own drops, nothing "
+                "publishes into it, and a year with no partition is a year whose build dropped "
+                "nothing, so no staleness bound can be right"
             ),
         )
     cadence = DATASET_CADENCE.get(dataset)
@@ -1441,6 +1462,8 @@ def _requirement_for(
             stock_universe_requirement(years=years, as_of=as_of, max_staleness=max_staleness),
             None,
         )
+    if dataset == UPSTREAM_DEFECTS_DATASET:
+        return upstream_defects_requirement(years=years, as_of=as_of), None
     if dataset == NAMECHANGE_DATASET:
         return name_history_requirement(years=years, as_of=as_of, max_staleness=max_staleness), None
     if dataset == ADJ_FACTOR_DATASET:

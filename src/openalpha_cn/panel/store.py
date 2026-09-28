@@ -1334,6 +1334,49 @@ class PanelStore:
             ).fetchall()
         return tuple(int(row[0]) for row in rows)
 
+    def remove_partition(self, dataset: str, year: int) -> bool:
+        """Forget one `(dataset, year)` partition: its catalog row, its coverage, then its file.
+
+        `V2-P6-013`, and the first delete this store has. A record that must always describe
+        exactly what the current build did -- `upstream_defects`, rebuilt from the drops each
+        build performs -- has to be able to become *empty*, and `write_partition` cannot write an
+        empty partition. Every other dataset keeps replace-only semantics; nothing but that
+        writer calls this.
+
+        The catalog rows go in one transaction, before the file, for `write_partition`'s reason
+        in reverse: a crash between the two leaves an orphan file nobody reads rather than a
+        catalog row pointing at nothing. Returns whether a partition was registered.
+        """
+        _validate_dataset(dataset)
+        if not self.catalog_path.exists():
+            return False
+        with (
+            self._catalog_access.exclusive(),
+            duckdb.connect(str(self.catalog_path)) as connection,
+        ):
+            self._ensure_catalog_schema(connection)
+            existing = self._lookup_with_connection(connection, dataset, year)
+            if existing is None:
+                return False
+            key: list[object] = [dataset, year]
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                for table in (*_COVERAGE_CHILD_TABLES, "panel_partition_coverage"):
+                    connection.execute(
+                        f"DELETE FROM {_quote_identifier(table, role='table')} "
+                        "WHERE dataset = ? AND year = ?",
+                        key,
+                    )
+                connection.execute(
+                    "DELETE FROM panel_partitions WHERE dataset = ? AND year = ?", key
+                )
+                connection.execute("COMMIT")
+            except BaseException:
+                connection.execute("ROLLBACK")
+                raise
+            existing.path.unlink(missing_ok=True)
+        return True
+
     def assess_readiness(self, requirement: ReadinessRequirement) -> DatasetReadiness:
         """Judge whether `requirement.dataset` may be read at `requirement.as_of`.
 

@@ -64,7 +64,6 @@ from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
 from openalpha_cn.domain.daily_prices import (
     DAILY_BASIC_DATASET,
     DAILY_DATASET,
-    MAX_PUBLISHED_RETURN_DISAGREEMENT,
     PRICE_DATE_COLUMN,
 )
 from openalpha_cn.domain.panel_batch import SUBJECT_COLUMN_NAME
@@ -73,6 +72,7 @@ from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET
 DefectKind = Literal[
     "valuation_without_bar",
     "valuation_contradicts_corroborated_bar",
+    "valuation_contradicts_unconfirmed_bar",
     "limit_placeholder_on_halt",
     "bar_before_listing",
 ]
@@ -120,6 +120,8 @@ the two shapes of a contradicted valuation apart:
   `valuation_repeats_previous_close` -- `True` for the stale shape (`002357.SZ` on 2013-07-15),
   `False` for a valuation that equals neither close (2020-10-23), `None` when there is no
   previous bar to compare with.
+- `valuation_contradicts_unconfirmed_bar`: the same four, for a mismatch on the build's last
+  session, where no next stored session exists to corroborate the bar.
 - `limit_placeholder_on_halt`: `up_limit` and `down_limit`, both `0.0`.
 - `bar_before_listing`: `list_date` (ISO), from the stored registry, and the dropped row's own
   close (`bar_close` for `daily`, `valuation_close` for `daily_basic`) or band (`stk_limit`);
@@ -167,56 +169,39 @@ class UpstreamDefect:
         )
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class BarWitness:
-    """The three numbers of one `daily` bar the close-disagreement rules read."""
-
-    close: float
-    pre_close: float
-    pct_chg: float
-
-    @property
-    def return_disagreement(self) -> float:
-        """How far `pct_chg / 100` sits from `close / pre_close - 1`, unsigned."""
-        return abs(self.close / self.pre_close - 1 - self.pct_chg / 100.0)
-
-
 def close_disagreement_kind(
     *,
-    bar: BarWitness | None,
+    bar_close: float | None,
     next_bar_pre_close: float | None,
     is_last_session: bool,
 ) -> DefectKind | None:
     """The rule that explains one `daily`/`daily_basic` close disagreement, or `None`.
 
-    Called only after a targeted re-fetch has reproduced the disagreement exactly; a re-fetch
-    that differs is a partial fetch and never reaches this function.
+    Called only after a re-fetch has reproduced the disagreement exactly; a re-fetch that differs
+    is a partial fetch and never reaches this function.
 
     - **`valuation_without_bar`**: there is no bar and there is a valuation. The re-fetch has
       already confirmed both halves, so the valuation row is the one to drop -- a bar is never
       invented to match it.
-    - **`valuation_contradicts_corroborated_bar`**: there is a bar and it is **corroborated** by
-      a witness other than itself, so the valuation's different close is the wrong one.
-      Corroborated means the security's next stored bar's `pre_close` equals this bar's close,
-      or -- when there is no next bar because this is the last session available to the build --
-      the bar's own `pct_chg` agrees with `close / pre_close - 1` within
-      `MAX_PUBLISHED_RETURN_DISAGREEMENT`, one tick of the grid the upstream publishes it on.
-      Whether the valuation repeats the previous close (the stale shape) is recorded by
-      `repeats_previous_close`, not required.
+    - **`valuation_contradicts_corroborated_bar`**: there is a bar and the security's next stored
+      bar's `pre_close` equals its close -- a witness other than the bar itself -- so the
+      valuation's different close is the wrong one.
+    - **`valuation_contradicts_unconfirmed_bar`**: there is a bar, it has no next stored bar, and
+      this is the **last session the build requested**. Nothing can corroborate it yet, and it
+      is not claimed corroborated: the valuation is dropped because the bar is what the price
+      path trusts, the defect is recorded as unconfirmed, and the next build that holds the
+      following session judges it again under the rule above. The bar's own `pct_chg` is **not**
+      a witness -- every storable bar agrees with itself.
 
     Anything else returns `None` and the caller refuses: a bar whose next session disagrees with
-    it, and a missing next bar before the last available session, are shapes a fetch fault can
-    produce, so neither is explained here.
+    it, and a bar with no next stored bar before the build's last session, are shapes a fetch
+    fault can produce.
     """
-    if bar is None:
+    if bar_close is None:
         return "valuation_without_bar"
     if next_bar_pre_close is not None:
-        corroborated = next_bar_pre_close == bar.close
-    else:
-        corroborated = (
-            is_last_session and bar.return_disagreement <= MAX_PUBLISHED_RETURN_DISAGREEMENT
-        )
-    return "valuation_contradicts_corroborated_bar" if corroborated else None
+        return "valuation_contradicts_corroborated_bar" if next_bar_pre_close == bar_close else None
+    return "valuation_contradicts_unconfirmed_bar" if is_last_session else None
 
 
 def repeats_previous_close(

@@ -335,6 +335,11 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_ingest.stock_universe_requirement",
             "panel_ingest.suspension_requirement",
             "panel_ingest.trading_calendar_requirement",
+            # `V2-P6-013`: the defects record's name and its requirement, so `panel doctor
+            # --dataset upstream_defects` answers with the `derived` cadence rather than raising.
+            # A derived record rather than an upstream dataset, so it reaches no fetched data.
+            "panel_ingest.UPSTREAM_DEFECTS_DATASET",
+            "panel_ingest.upstream_defects_requirement",
         }
     ),
     "openalpha_cn.panel_gate": frozenset(

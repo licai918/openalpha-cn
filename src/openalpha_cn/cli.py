@@ -3129,6 +3129,9 @@ def _build_price_panel(
         listed_bars.batches,
         listed_valuations.batches,
         refetch=lambda day, codes: _refetch_price_session(provider, day, codes),
+        # The last session this build *requested*, from the calendar -- not the newest one the
+        # bars hold, which a missing final session would move back by one.
+        last_session=sessions[-1],
     )
     recorded = write_upstream_defects(
         store,

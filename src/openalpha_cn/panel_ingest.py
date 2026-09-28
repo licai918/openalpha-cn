@@ -437,7 +437,6 @@ from openalpha_cn.domain.upstream_defects import (
     UPSTREAM_DEFECT_DATA_COLUMNS,
     UPSTREAM_DEFECT_NUMBER_COLUMNS,
     UPSTREAM_DEFECT_PANEL_COLUMNS,
-    BarWitness,
     UpstreamDefect,
     before_listing,
     close_disagreement_kind,
@@ -3362,6 +3361,7 @@ def reconcile_price_disagreements(
     fundamentals: Sequence[ColumnarPanelBatch],
     *,
     refetch: PriceRefetch,
+    last_session: date,
 ) -> ReconciledRows:
     """Resolve every `daily`/`daily_basic` close disagreement of one year, or refuse the year.
 
@@ -3376,11 +3376,16 @@ def reconcile_price_disagreements(
        (`refetch`) -- two requests for a session whether it has one disputed security or ninety,
        as 2020-09-18 has. A re-fetched row that differs from the year's fetch -- a value, or
        present where it was absent, or the reverse -- is a partial fetch and the year is refused,
-       as before. Only a disagreement the upstream publishes twice goes on.
+       as before. Only a disagreement the upstream publishes twice goes on. A **whole-session**
+       re-fetch (several disputed securities) must itself be whole: `success` in both datasets,
+       and exactly the first fetch's securities for that session -- otherwise an empty or short
+       answer would "confirm" every disputed absence (`_refuse_a_short_session_refetch`).
     2. **Name the rule** (`close_disagreement_kind`): `valuation_without_bar` when there is no
-       bar; `valuation_contradicts_corroborated_bar` when the bar is corroborated by the
-       security's next stored bar (or, on the last session available, by its own `pct_chg`).
-       A bar nothing corroborates is refused, naming the security, the session and both closes.
+       bar; `valuation_contradicts_corroborated_bar` when the security's next stored bar
+       corroborates it; `valuation_contradicts_unconfirmed_bar` when the mismatch is on
+       `last_session` -- the last session the build **requested**, from the calendar, not the
+       newest one the bars happen to hold -- and there is no next session yet. Anything else is
+       refused, naming the security, the session and both closes.
     3. **Drop the valuation row, and only it.** No bar is edited or invented and nothing is
        filled from anywhere; the dropped row is recorded with its own clocks in `record`, and a
        contradicted valuation also records whether it repeats the previous bar close.
@@ -3402,7 +3407,6 @@ def reconcile_price_disagreements(
             bar_days.setdefault(subject, []).append(day)
     for days in bar_days.values():
         days.sort()
-    last_session = max(day for _, day in bar_rows)
     closes = _column_values(merged_bars, CLOSE_COLUMN)
     pre_closes = _column_values(merged_bars, PRE_CLOSE_COLUMN)
     pct_chgs = _column_values(merged_bars, _PCT_CHG_COLUMN)
@@ -3412,6 +3416,17 @@ def reconcile_price_disagreements(
         by_session.setdefault(finding.trade_date, []).append(finding.ts_code)
     for session, codes in sorted(by_session.items()):
         refetched_bars, refetched_valuations = refetch(session, tuple(codes))
+        if len(codes) > 1:
+            for dataset, first, again in (
+                (DAILY_DATASET, bar_rows, refetched_bars),
+                (DAILY_BASIC_DATASET, valuation_rows, refetched_valuations),
+            ):
+                _refuse_a_short_session_refetch(
+                    session,
+                    dataset,
+                    {subject for subject, day in first if day == session},
+                    again,
+                )
         for code in codes:
             key = (code, session)
             _refuse_a_refetch_that_differs(
@@ -3431,19 +3446,12 @@ def reconcile_price_disagreements(
     positions: list[int] = []
     for finding in findings:
         key = (finding.ts_code, finding.trade_date)
-        witness: BarWitness | None = None
         previous_close: float | None = None
         next_pre_close: float | None = None
         if key in bar_rows and None in (pre_closes[bar_rows[key]], pct_chgs[bar_rows[key]]):
             # An incomplete bar corroborates nothing; `write_daily_panel` refuses it by name.
             _refuse_incomplete_bars(_select_rows(merged_bars, [bar_rows[key]]))
         if key in bar_rows:
-            index = bar_rows[key]
-            witness = BarWitness(
-                close=cast(float, closes[index]),
-                pre_close=cast(float, pre_closes[index]),
-                pct_chg=cast(float, pct_chgs[index]),
-            )
             days = bar_days[finding.ts_code]
             position = days.index(finding.trade_date)
             if position > 0:
@@ -3454,7 +3462,7 @@ def reconcile_price_disagreements(
                 next_key = (finding.ts_code, days[position + 1])
                 next_pre_close = cast(float, pre_closes[bar_rows[next_key]])
         kind = close_disagreement_kind(
-            bar=witness,
+            bar_close=finding.bar_close,
             next_bar_pre_close=next_pre_close,
             is_last_session=finding.trade_date == last_session,
         )
@@ -3464,11 +3472,12 @@ def reconcile_price_disagreements(
                 f"{finding.bar_close!r} in {DAILY_DATASET} and {finding.valuation_close!r} in "
                 f"{DAILY_BASIC_DATASET}, and a re-fetch published the same pair. No named rule "
                 "explains it: the bar is not corroborated -- its next stored session's pre_close "
-                f"is {next_pre_close!r}, and without a next session only the year's last one may "
-                "lean on its own pct_chg. Storing either side would leave two partitions that "
-                "answer differently, so the year is refused"
+                f"is {next_pre_close!r}, and a bar with no next session is left unconfirmed only "
+                f"on the last session this build requested ({last_session.isoformat()}). Storing "
+                "either side would leave two partitions that answer differently, so the year is "
+                "refused"
             )
-        contradicted = kind == "valuation_contradicts_corroborated_bar"
+        contradicted = kind != "valuation_without_bar"
         defects.append(
             UpstreamDefect(
                 ts_code=finding.ts_code,
@@ -3516,6 +3525,15 @@ def reconcile_pre_listing_rows(
     after its list date: both go on to their writer exactly as before, where an incomplete bar
     (`DAILY_INCOMPLETE_BAR_COLUMNS`) is refused by `write_daily_panel`. `listings=None` -- no
     registry stored -- drops nothing.
+
+    **Limitation: a year stored before this rule existed cannot be rebuilt over in place.** If
+    such a year holds a security whose every row in the year is pre-listing (2013's `daily`
+    holds 40 such bars across `920017.BJ`, `920047.BJ`, `920090.BJ` and `920139.BJ`, measured
+    on a scratch build), the rebuild drops that security entirely and `write_daily_panel`'s
+    `_refuse_to_drop_stored_subjects` refuses the rewrite -- the stored partition names a
+    security the new one does not. That is the guard doing its job, not a defect here; the
+    remedy is to rebuild the year into a store that does not hold the old partition. No stored
+    research year is affected (checked by the controller for `V2-P6-013`).
 
     Per batch, and only the batches holding a security whose listing is later than the batch's
     earliest session are read row by row, so a year with no pre-listing row costs one set
@@ -3603,19 +3621,27 @@ def _refuse_incomplete_bars(batch: ColumnarPanelBatch) -> None:
     or for a security the registry does not know -- and is refused here, so a bar with no
     `pre_close` is never stored.
     """
-    for column in sorted(DAILY_INCOMPLETE_BAR_COLUMNS):
-        values = _column_values(batch, column)
-        if None not in values:
-            continue
-        index = values.index(None)
-        ts_code, day = _row_keys(batch)[index]
-        raise PanelBatchError(
-            f"{DAILY_DATASET} carries {ts_code} on {day.isoformat()} with no {column} (and "
-            f"{values.count(None)} such row(s) in all). A bar with no pre_close is dropped only "
-            "under bar_before_listing -- dated before the security's list_date in the stored "
-            "stock_basic registry -- and this one is not: it is on or after its listing, or the "
-            "registry does not know the security. Storing it would divide a return by nothing"
-        )
+    columns = {column: _column_values(batch, column) for column in DAILY_INCOMPLETE_BAR_COLUMNS}
+    if not any(None in values for values in columns.values()):
+        return  # one C-level scan per column on the ordinary year
+    incomplete = [
+        index
+        for index in range(batch.row_count)
+        if any(values[index] is None for values in columns.values())
+    ]
+    if not incomplete:
+        return
+    first = incomplete[0]
+    missing = sorted(column for column, values in columns.items() if values[first] is None)
+    ts_code, day = _row_keys(batch)[first]
+    raise PanelBatchError(
+        f"{DAILY_DATASET} carries {ts_code} on {day.isoformat()} with no "
+        f"{' and no '.join(missing)} "
+        f"({len(incomplete)} incomplete bar(s) in all). An incomplete bar is dropped only under "
+        "bar_before_listing -- dated before the security's list_date in the stored stock_basic "
+        "registry -- and this one is not: it is on or after its listing, or the registry does "
+        "not know the security. Storing it would divide a return by nothing"
+    )
 
 
 def reconcile_limit_placeholders(
@@ -3747,16 +3773,17 @@ def write_upstream_defects(
     here is answered with. Rows are sorted by `(trade_date, subject, source_dataset)`, so the
     partition's content hash does not depend on which target ran first.
 
-    ## A source whose defects went away
+    ## Rebuilt from this build's drops, so it always describes the data stored
 
-    `record=None` means this source dropped nothing this time. If the stored partition still
-    holds rows of this source, the rebuild no longer reproduces them -- the upstream corrected
-    them, or they were never what they looked like -- and the record would otherwise go on
-    claiming a row was dropped that the rebuilt partition now holds. With another source's rows
-    left the partition is rewritten without this one's; with none left it is refused, because
-    `PanelStore` has no way to delete a partition and an empty one cannot be written.
+    The owned rows are replaced, never merged: the record is exactly the rows *this* build
+    dropped from the sources it owns. A defect the upstream has since corrected is simply not in
+    the new partition, and its row is stored again by the same build. `record=None` means this
+    build dropped nothing from its sources; with another target's rows left the partition is
+    rewritten without this one's, and with none left it is removed
+    (`PanelStore.remove_partition`), because an empty partition cannot be written and a stale
+    one would claim a drop the stored data no longer reflects.
 
-    Returns the partition written, or `None` when there was nothing to write or to change.
+    Returns the partition written, or `None` when nothing is left to store.
     """
     if not source_datasets or not source_datasets <= DEFECT_SOURCE_DATASETS:
         raise PanelBatchError(
@@ -3793,16 +3820,8 @@ def write_upstream_defects(
         if not owned:
             return None
         if not others:
-            dropped = sorted(f"{row[0]}@{row[len(CLOCK_COLUMN_NAMES) + 1]}" for row in owned)
-            raise PanelBatchError(
-                f"{UPSTREAM_DEFECTS_DATASET} year={year} records {len(owned)} "
-                f"{sorted(source_datasets)} "
-                f"row(s) as dropped ({dropped}) and this build no longer reproduces any of them. "
-                "The record cannot be emptied -- the panel store has no partition delete and an "
-                "empty partition cannot be written -- and leaving it would claim a row was "
-                "dropped that the rebuilt partition now holds. Investigate the upstream "
-                "correction before removing the partition by hand"
-            )
+            store.remove_partition(UPSTREAM_DEFECTS_DATASET, year)
+            return None
     carried = (
         _stored_defect_batch(others, coverage=coverage) if others and coverage is not None else None
     )
@@ -3895,6 +3914,44 @@ def _refetched_row(
             f"{len(matches)} times; a session has one row per security"
         )
     return _row_values(batch, matches[0]) if matches else None
+
+
+def _refuse_a_short_session_refetch(
+    session: date, dataset: str, first: set[str], again: ColumnarPanelBatch
+) -> None:
+    """Refuse a whole-session re-fetch that is not the whole session the year's fetch held.
+
+    The per-row comparison alone cannot see this: a whole-session answer that came back empty or
+    short carries no row for a disputed security, and "no row" is exactly what a disputed
+    valuation without a bar expects -- so an empty re-fetch would confirm every one of them. Costs
+    no request: the first fetch's securities for the session are already in hand.
+    """
+    if again.dataset != dataset:
+        raise PanelBatchError(
+            f"the whole-session re-fetch of {session.isoformat()} was expected to be {dataset} "
+            f"and is {again.dataset}"
+        )
+    if again.status != "success":
+        raise PanelBatchError(
+            f"the whole-session re-fetch of {dataset} for {session.isoformat()} answered "
+            f"{again.status!r} where the year's fetch held {len(first)} row(s). An empty "
+            "re-fetch confirms nothing about the securities it does not carry, so the "
+            "disagreements on that session are a partial or mismatched fetch rather than an "
+            "upstream defect, and the year is refused as before: re-run the build"
+        )
+    keys = _row_keys(again)
+    subjects = {subject for subject, day in keys if day == session}
+    if len(keys) != len(set(keys)) or len(keys) != len(subjects) or subjects != first:
+        missing = sorted(first - subjects)
+        extra = sorted(subjects - first)
+        raise PanelBatchError(
+            f"the whole-session re-fetch of {dataset} for {session.isoformat()} carried "
+            f"{len(keys)} row(s) where the year's fetch held {len(first)}; missing "
+            f"{missing[:5]}{'...' if len(missing) > 5 else ''}, extra "
+            f"{extra[:5]}{'...' if len(extra) > 5 else ''}. A short or different session "
+            "confirms nothing about the rows it lacks, so this is a partial fetch rather than "
+            "an upstream defect, and the year is refused as before: re-run the build"
+        )
 
 
 def _refuse_a_refetch_that_differs(

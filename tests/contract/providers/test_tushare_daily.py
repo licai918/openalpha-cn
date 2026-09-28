@@ -441,6 +441,45 @@ def test_a_negative_pct_chg_is_kept_because_a_return_has_a_sign(fake_tushare_tra
     assert pct.values == (-0.1767,)
 
 
+def test_an_incomplete_bar_decodes_its_null_pre_close_and_pct_chg_and_nothing_else(
+    fake_tushare_transport,
+) -> None:
+    """`V2-P6-013`. The upstream publishes a bar that predates its security's listing with a
+    null `pre_close`, `change` and `pct_chg` (`920476.BJ` on 2014-01-24). A cell parser cannot
+    see the listing date, so exactly those two stored columns decode a null as `None` and the
+    ingest side decides (`panel_ingest.reconcile_pre_listing_rows` drops it, or
+    `write_daily_panel` refuses it). A null in any other price column is still refused here,
+    and so is a `pre_close` that is present and not a price."""
+    incomplete = list(BAR_06_12)
+    for field in ("pre_close", "change", "pct_chg"):
+        incomplete[DAILY_FIELDS.index(field)] = None
+    provider, _ = _provider(
+        fake_tushare_transport, _response(DAILY_FIELDS, [incomplete]), clock=AFTER_CLOSE_06_12
+    )
+    batch = provider.fetch_panel(ProviderRequest(dataset=DAILY_DATASET, as_of=AFTER_CLOSE_06_12))
+    columns = {column.name: column.values for column in batch.columns}
+    assert columns["pre_close"] == (None,)
+    assert columns["pct_chg"] == (None,)
+    assert columns["close"] == (11.24,)
+
+    for field in ("open", "close"):
+        row = list(BAR_06_12)
+        row[DAILY_FIELDS.index(field)] = None
+        provider, _ = _provider(
+            fake_tushare_transport, _response(DAILY_FIELDS, [row]), clock=AFTER_CLOSE_06_12
+        )
+        with pytest.raises(ProviderFailure, match=f"{field} must be a finite positive number"):
+            provider.fetch_panel(ProviderRequest(dataset=DAILY_DATASET, as_of=AFTER_CLOSE_06_12))
+
+    zero = list(BAR_06_12)
+    zero[DAILY_FIELDS.index("pre_close")] = 0.0
+    provider, _ = _provider(
+        fake_tushare_transport, _response(DAILY_FIELDS, [zero]), clock=AFTER_CLOSE_06_12
+    )
+    with pytest.raises(ProviderFailure, match="pre_close must be a finite positive number"):
+        provider.fetch_panel(ProviderRequest(dataset=DAILY_DATASET, as_of=AFTER_CLOSE_06_12))
+
+
 def test_a_response_missing_a_projected_column_is_refused_by_name(fake_tushare_transport) -> None:
     """Without this the missing column surfaced as `Tushare response could not be decoded:
     'pre_close'` -- a bare `KeyError` reason for what is a schema drift in a named column.
