@@ -231,6 +231,7 @@ from openalpha_cn.panel.catalog import (
 )
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_ingest import (
+    SUPERSEDED_ROWS_DATASETS,
     UPSTREAM_DEFECTS_DATASET,
     WITHDRAWN_ROWS_DATASETS,
     adjustment_requirement,
@@ -254,6 +255,7 @@ from openalpha_cn.panel_ingest import (
     name_history_requirement,
     price_limit_requirement,
     stock_universe_requirement,
+    superseded_rows_requirement,
     suspension_requirement,
     trading_calendar_requirement,
     upstream_defects_requirement,
@@ -542,6 +544,10 @@ named rule. Nothing publishes into it; it is rebuilt from each build's own drops
 `withdrawn_*` datasets (`V2-P6-016`, `panel_ingest.WITHDRAWN_ROWS_DATASETS`) keep the rows that
 record calls withdrawn whole, and are treated the same way: `derived`, answered by
 `withdrawn_rows_requirement`, and an absent year is a year with no withdrawal.
+`superseded_fina_indicator` (`V2-P6-018`, `panel_ingest.SUPERSEDED_ROWS_DATASETS`) keeps the
+`fina_indicator` versions that record calls `superseded_after_publication` whole, and is treated
+the same way: `derived`, answered by `superseded_rows_requirement`, and an absent year is a year
+with no supersession.
 """
 
 
@@ -820,6 +826,18 @@ def freshness_policy(dataset: str, *, calendar: TradingCalendar | None = None) -
                 "about a schedule this plane does not own. What *can* go wrong with a derived "
                 "partition is that its rows stop being the ones its build manifest addresses, "
                 "and that is a check (factor_seal_broken) rather than a bound"
+            ),
+        )
+    if dataset in SUPERSEDED_ROWS_DATASETS.values():
+        return FreshnessPolicy(
+            dataset=dataset,
+            cadence="derived",
+            max_staleness=None,
+            basis=(
+                "this dataset keeps whole the stored fina_indicator versions the upstream "
+                "superseded by re-publishing the report under a later date (V2-P6-018), indexed "
+                "by upstream_defects: nothing publishes into it, and a year with no partition is a "
+                "year with no supersession, so no staleness bound can be right"
             ),
         )
     if dataset in WITHDRAWN_ROWS_DATASETS.values():
@@ -1487,6 +1505,8 @@ def _requirement_for(
         return upstream_defects_requirement(years=years, as_of=as_of), None
     if dataset in WITHDRAWN_ROWS_DATASETS.values():
         return withdrawn_rows_requirement(dataset, years=years, as_of=as_of), None
+    if dataset in SUPERSEDED_ROWS_DATASETS.values():
+        return superseded_rows_requirement(years=years, as_of=as_of), None
     if dataset == NAMECHANGE_DATASET:
         return name_history_requirement(years=years, as_of=as_of, max_staleness=max_staleness), None
     if dataset == ADJ_FACTOR_DATASET:
@@ -1692,7 +1712,11 @@ def dataset_health(
         date_timezone=date_timezone,
     )
     readiness = store.assess_readiness(requirement)
-    if dataset == UPSTREAM_DEFECTS_DATASET or dataset in WITHDRAWN_ROWS_DATASETS.values():
+    if (
+        dataset == UPSTREAM_DEFECTS_DATASET
+        or dataset in WITHDRAWN_ROWS_DATASETS.values()
+        or dataset in SUPERSEDED_ROWS_DATASETS.values()
+    ):
         readiness = _a_year_without_defects_is_not_missing(readiness)
     findings = list(findings_from_readiness(readiness))
     if note is not None:

@@ -351,6 +351,9 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             # `V2-P6-016`: the datasets keeping withdrawn rows whole, answered the same way.
             "panel_ingest.WITHDRAWN_ROWS_DATASETS",
             "panel_ingest.withdrawn_rows_requirement",
+            # `V2-P6-018`: the dataset keeping superseded fina_indicator versions whole, the same.
+            "panel_ingest.SUPERSEDED_ROWS_DATASETS",
+            "panel_ingest.superseded_rows_requirement",
         }
     ),
     "openalpha_cn.panel_gate": frozenset(

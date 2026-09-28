@@ -38,7 +38,7 @@ from openalpha_cn.domain.financial_statements import (
 from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET
 from openalpha_cn.panel.catalog import PanelStorageError
 from openalpha_cn.panel.store import PanelStore
-from openalpha_cn.panel_ingest import load_statement_histories
+from openalpha_cn.panel_ingest import load_statement_histories, load_upstream_defects
 from openalpha_cn.providers import tushare
 
 runner = CliRunner()
@@ -1037,12 +1037,24 @@ def test_a_fina_indicator_report_re_published_in_another_year_moves_with_its_evi
     after_2026 = _stored(tmp_path, FINANCIAL_INDICATOR_DATASET, YEAR + 1)[1]
     assert len(after_2025) == len(stored_2025) - 1
     assert any(row[0] == "000002.SZ" and row[5] == "2025-03-31" for row in after_2026)
-    evidence = PanelStore(tmp_path / "panel").read_coverage(SUPERSEDED_INDICATOR_DATASET, YEAR)
+    store = PanelStore(tmp_path / "panel")
+    evidence = store.read_coverage(SUPERSEDED_INDICATOR_DATASET, YEAR)
     assert evidence is not None and evidence.subjects == ("000002.SZ",)
+    names = [f.name for f in evidence.fields]
     (kept,) = _stored(tmp_path, SUPERSEDED_INDICATOR_DATASET, YEAR)[1]
     old = next(row for row in stored_2025 if row[0] == "000002.SZ" and row[5] == "2025-03-31")
-    assert kept[: len(old)][:1] == old[:1] and kept[5:7] == old[5:7]
-    assert SUPERSEDED_CONFIRMED_AT_COLUMN in [f.name for f in evidence.fields]
+    # Kept exactly as stored: every data column, and the stored stamp in original_ingested_time.
+    assert kept[5 : len(old)] == old[5:]
+    assert kept[names.index("original_ingested_time")] == old[names.index("ingested_time")]
+    assert SUPERSEDED_CONFIRMED_AT_COLUMN in names
+    # Indexed in upstream_defects under its own announcement day.
+    (record,) = load_upstream_defects(store, years=(YEAR,), as_of=CLOCK + timedelta(days=2))
+    assert (record.ts_code, record.trade_date, record.source_dataset, record.kind) == (
+        "000002.SZ",
+        date(2025, 4, 29),
+        FINANCIAL_INDICATOR_DATASET,
+        "superseded_after_publication",
+    )
 
 
 def test_a_fina_indicator_report_that_goes_nowhere_still_refuses_the_shrink(
@@ -1090,3 +1102,129 @@ def test_an_empty_year_is_unreadable_after_its_first_deadline_even_without_a_sta
     else:
         with pytest.raises(PanelStorageError, match="stale by rule"):
             read()
+
+
+# --- V2-P6-018 on V2-P6-016: supersession at the version, carried and retired -----------------
+
+SECOND_VERSION: Final = ("000002.SZ", "20250331", "20250601", "20250601", "1", 33.0)
+"""A later version of 000002.SZ's 2025 first-quarter report, announced in 2025 as well."""
+
+
+def _without(filings: Sequence[tuple[str, str, str, str, str, float]], announced: str) -> list:
+    """`filings` with 000002.SZ's 2025 first-quarter version announced on `announced` no longer
+    served."""
+    return [
+        f for f in filings if not (f[0] == "000002.SZ" and f[1] == "20250331" and f[2] == announced)
+    ]
+
+
+def _republished(announced: str) -> tuple[str, str, str, str, str, float]:
+    return ("000002.SZ", "20250331", announced, announced, "1", 34.0)
+
+
+def _two_versions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Market, list[str]]:
+    market = _install(monkeypatch, Market((*FILINGS, SECOND_VERSION)), clock=CLOCK)
+    arguments = _swept(FINANCIAL_INDICATOR_DATASET)
+    assert _build(tmp_path, *arguments, "--incremental").exit_code == 0
+    monkeypatch.setattr(cli, "_panel_clock", lambda: CLOCK + timedelta(days=1))
+    return market, arguments
+
+
+def test_a_version_superseded_while_another_version_is_still_held_is_a_move(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Announcement year 2025 holds two versions of 000002.SZ's report (29 April and 1 June).
+    The upstream stops serving the 29 April one and re-publishes the report in 2026. The key is
+    still held in 2025 -- by the June version -- so a key-level rule saw nothing leave and the
+    count guard refused the year; at the version, 29 April is superseded, kept, and indexed."""
+    from openalpha_cn.panel_ingest import SUPERSEDED_INDICATOR_DATASET
+
+    market, arguments = _two_versions(tmp_path, monkeypatch)
+    market.filings = (*_without(market.filings, "20250429"), _republished("20260318"))
+
+    result = _build(tmp_path, *arguments, "--incremental")
+
+    assert result.exit_code == PanelExit.ok, result.output
+    kept = _stored(tmp_path, SUPERSEDED_INDICATOR_DATASET, YEAR)[1]
+    assert [(row[0], row[5], row[6]) for row in kept] == [("000002.SZ", "2025-03-31", "2025-04-29")]
+    held = _stored(tmp_path, FINANCIAL_INDICATOR_DATASET, YEAR)[1]
+    assert ("000002.SZ", "2025-03-31", "2025-06-01") in {(r[0], r[5], r[6]) for r in held}
+
+
+def test_a_lost_version_with_no_later_one_served_is_refused_by_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The June version stops being served and nothing later replaces it -- the April one is
+    earlier. That is not a correction, and the build is refused naming the version."""
+    market, arguments = _two_versions(tmp_path, monkeypatch)
+    before = _stored(tmp_path, FINANCIAL_INDICATOR_DATASET, YEAR)
+    market.filings = tuple(_without(market.filings, "20250601"))
+
+    result = _build(tmp_path, *arguments, "--incremental")
+
+    assert result.exit_code == PanelExit.unhealthy
+    assert "000002.SZ 2025-03-31 2025-06-01" in result.output
+    assert _stored(tmp_path, FINANCIAL_INDICATOR_DATASET, YEAR) == before
+
+
+def test_a_superseded_version_served_again_in_its_year_is_retired_with_its_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """V2-P6-016's retirement rule for a withdrawn row, for a superseded version: the next day the
+    upstream serves the 29 April version again (beside the 2026 one). 2025 stores it again, and
+    both the kept copy and its `upstream_defects` record are gone -- neither can truthfully
+    describe the store any more. A day in between that changes nothing carries both, re-stamped."""
+    from openalpha_cn.panel_ingest import SUPERSEDED_INDICATOR_DATASET
+
+    market = _install(monkeypatch, Market(FILINGS), clock=CLOCK)
+    arguments = _swept(FINANCIAL_INDICATOR_DATASET)
+    assert _build(tmp_path, *arguments, "--incremental").exit_code == 0
+    original = market.filings
+    market.filings = tuple(_moved(original, "20260318"))
+    monkeypatch.setattr(cli, "_panel_clock", lambda: CLOCK + timedelta(days=1))
+    assert _build(tmp_path, *arguments, "--incremental").exit_code == 0
+    store = PanelStore(tmp_path / "panel")
+    first = store.read_coverage(SUPERSEDED_INDICATOR_DATASET, YEAR)
+    assert first is not None
+    names = [field.name for field in first.fields]
+    (first_row,) = _stored(tmp_path, SUPERSEDED_INDICATOR_DATASET, YEAR)[1]
+    for command in (["panel", "doctor"], ["data-check"]):
+        checked = runner.invoke(
+            app,
+            [
+                *command,
+                "--runtime-dir",
+                str(tmp_path),
+                "--year",
+                str(YEAR),
+                "--year",
+                str(YEAR - 1),
+                "--dataset",
+                SUPERSEDED_INDICATOR_DATASET,
+                "--as-of",
+                (CLOCK + timedelta(days=1)).isoformat(),
+                "--no-calendar",
+            ],
+        )
+        assert checked.exit_code == 0, (command, checked.output)
+
+    monkeypatch.setattr(cli, "_panel_clock", lambda: CLOCK + timedelta(days=2))
+    assert _build(tmp_path, *arguments, "--incremental").exit_code == 0
+    carried = store.read_coverage(SUPERSEDED_INDICATOR_DATASET, YEAR)
+    assert carried is not None and carried.row_count == 1
+    # Carried per V2-P6-003: ingested_time re-stamped, the stored stamp kept in its own column.
+    (carried_row,) = _stored(tmp_path, SUPERSEDED_INDICATOR_DATASET, YEAR)[1]
+    ingested, kept_stamp = names.index("ingested_time"), names.index("original_ingested_time")
+    assert carried_row[ingested] > first_row[ingested]
+    assert carried_row[kept_stamp] == first_row[kept_stamp]
+    assert len(load_upstream_defects(store, years=(YEAR,), as_of=CLOCK + timedelta(days=3))) == 1
+
+    market.filings = (*original, _republished("20260318"))
+    monkeypatch.setattr(cli, "_panel_clock", lambda: CLOCK + timedelta(days=3))
+    result = _build(tmp_path, *arguments, "--incremental")
+
+    assert result.exit_code == PanelExit.ok, result.output
+    assert YEAR not in store.registered_years(SUPERSEDED_INDICATOR_DATASET)
+    assert YEAR not in store.registered_years("upstream_defects")
+    held = _stored(tmp_path, FINANCIAL_INDICATOR_DATASET, YEAR)[1]
+    assert ("000002.SZ", "2025-03-31", "2025-04-29") in {(r[0], r[5], r[6]) for r in held}

@@ -64,6 +64,16 @@ row, so a rebuilt partition cannot hold it -- the rule only *records* that, with
 own `event_time`, `available_time` and `ingested_time` and its confirmation instant as the
 record's `revision_time`, so the record is not knowable before the build that confirmed it.
 
+## A `fina_indicator` version the upstream superseded (`V2-P6-018`)
+
+`fina_indicator` carries no revision label: a correction re-publishes the same
+`(ts_code, report_period)` under a later `ann_date` and stops serving the old version (measured
+2026-09-28, `000909.SZ`'s 2026-03-31 report from 2026-04-25 to 2026-09-28).
+`superseded_after_publication` records the stored old version, per `superseded_versions`, dated as
+a withdrawal is: its own clocks, the confirmation instant as `revision_time`. One record per
+`(ts_code, ann_date)` -- the key this record has -- with every superseded report kept whole in
+`superseded_fina_indicator`.
+
 Every dropped row is recorded in the `upstream_defects` panel dataset
 (`panel_ingest.UPSTREAM_DEFECTS_DATASET`), one partition per year,
 with the values that disagreed and the dropped row's own four clocks, so a reader can see
@@ -85,6 +95,7 @@ from openalpha_cn.domain.daily_prices import (
     DAILY_DATASET,
     PRICE_DATE_COLUMN,
 )
+from openalpha_cn.domain.financial_statements import FINANCIAL_INDICATOR_DATASET
 from openalpha_cn.domain.panel_batch import SUBJECT_COLUMN_NAME
 from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET, SUSPENSION_DATASET
 
@@ -97,9 +108,10 @@ DefectKind = Literal[
     "limit_placeholder_on_halt",
     "bar_before_listing",
     "withdrawn_after_publication",
+    "superseded_after_publication",
 ]
 """The named rules. See `close_disagreement_kind`, `valuation_placeholder_kind`,
-`limit_placeholder_kind` and `withdrawn_subjects`."""
+`limit_placeholder_kind`, `withdrawn_subjects` and `superseded_versions`."""
 
 DEFECT_KINDS: Final[frozenset[str]] = frozenset(get_args(DefectKind))
 
@@ -110,11 +122,13 @@ DEFECT_SOURCE_DATASETS: Final[frozenset[str]] = frozenset(
         ADJ_FACTOR_DATASET,
         PRICE_LIMIT_DATASET,
         SUSPENSION_DATASET,
+        FINANCIAL_INDICATOR_DATASET,
     }
 )
 """The datasets a record may name. `daily` and `adj_factor` only under `bar_before_listing` or
-`withdrawn_after_publication`, and `suspend_d` only under the latter: no rule drops a bar or a
-halt the upstream still serves."""
+`withdrawn_after_publication`, `suspend_d` only under the latter, and `fina_indicator` only under
+`superseded_after_publication` (`V2-P6-018`): no rule drops a bar or a halt the upstream still
+serves, and none drops a report whose current version is not stored in its place."""
 
 SOURCE_DATASET_COLUMN: Final[str] = "source_dataset"
 DEFECT_KIND_COLUMN: Final[str] = "defect_kind"
@@ -323,6 +337,38 @@ def withdrawn_subjects(
     if set(second) != set(first):
         return None
     return frozenset(set(stored) - set(first))
+
+
+def superseded_versions(
+    *,
+    lost: Set[tuple[str, str, date]],
+    served: Set[tuple[str, str, date]],
+) -> tuple[frozenset[tuple[str, str, date]], frozenset[tuple[str, str, date]]]:
+    """Split the stored `fina_indicator` versions a build no longer holds into superseded and
+    unexplained: `(superseded, nowhere)` (`V2-P6-018`).
+
+    **`superseded_after_publication`.** `fina_indicator` carries no revision label, so the
+    upstream corrects a report by re-publishing the same `(ts_code, report_period)` under a later
+    `ann_date` and no longer serving the old version -- measured on 2026-09-28, `000909.SZ`'s
+    2026-03-31 report moved from 2026-04-25 to 2026-09-28. So a stored version
+    `(ts_code, report_period, ann_date)` that is in `lost` -- not served where it is stored -- is
+    superseded exactly when `served` -- every version this build writes, in any announcement year
+    -- holds the same `(ts_code, report_period)` under a **later** `ann_date`. That holds at the
+    version, not the key: another version of the same report still stored beside it does not stop
+    the lost one being superseded. A lost version with no later version served is `nowhere`, and
+    the caller refuses it, as a shrink always was.
+    """
+    latest: dict[tuple[str, str], date] = {}
+    for subject, period, announced in served:
+        key = (subject, period)
+        if key not in latest or announced > latest[key]:
+            latest[key] = announced
+    superseded = frozenset(
+        version
+        for version in lost
+        if (version[0], version[1]) in latest and latest[(version[0], version[1])] > version[2]
+    )
+    return superseded, frozenset(lost) - superseded
 
 
 def before_listing(*, trade_date: date, list_date: date | None) -> bool:

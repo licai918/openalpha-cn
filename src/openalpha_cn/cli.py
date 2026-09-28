@@ -136,6 +136,7 @@ from openalpha_cn.domain.upstream_defects import (
     DEFECT_KIND_COLUMN,
     SOURCE_DATASET_COLUMN,
     UpstreamDefect,
+    superseded_versions,
 )
 from openalpha_cn.evidence.service import build_provider_evidence, parse_serialized_evidence
 from openalpha_cn.factor_view import (
@@ -219,6 +220,7 @@ from openalpha_cn.panel_ingest import (
     combine_defect_records,
     interleave_sessions,
     keep_panel_subjects,
+    keep_supersession_records,
     keep_withdrawal_records,
     load_first_daily_bar,
     load_industry_histories,
@@ -236,7 +238,9 @@ from openalpha_cn.panel_ingest import (
     served_keys,
     session_publication_instant,
     split_panel_batch_by_year,
+    stored_supersession_records,
     stored_withdrawal_records,
+    superseded_indicator_record,
     superseded_indicator_rows,
     withdrawal_date_column,
     withdrawal_keys,
@@ -6180,25 +6184,37 @@ def _build_span_targets(
                     ),
                 )
             )
-        superseded: Mapping[int, ColumnarPanelBatch] = {}
+        supersessions: Mapping[int, _Supersession] = {}
         if incremental:
             batches = _carry_unswept_report_periods(store, batches, swept=years, now=now)
-            superseded = _superseded_indicator_rows(store, batches, swept=years, now=now)
+            supersessions = _supersessions(store, batches, swept=years, now=now)
         _refuse_shrinking_statement_years(
             store,
             dataset=FINANCIAL_INDICATOR_DATASET,
             batches=batches,
-            superseded={year: rows.row_count for year, rows in superseded.items()},
+            superseded={year: found.lost_rows for year, found in supersessions.items()},
         )
-        written.setdefault(SUPERSEDED_INDICATOR_DATASET, []).extend(
-            write_superseded_indicator_rows(store, rows, year=year)
-            for year, rows in sorted(superseded.items())
-        )
+        # V2-P6-016's order: the kept versions, then their index, then the source partition that
+        # no longer holds them.
+        for year, found in sorted(supersessions.items()):
+            for ref in (
+                write_superseded_indicator_rows(
+                    store, found.rows, year=year, observed_at=now, retired=found.retired
+                ),
+                write_upstream_defects(
+                    store,
+                    found.record,
+                    year=year,
+                    source_datasets=frozenset({FINANCIAL_INDICATOR_DATASET}),
+                ),
+            ):
+                if ref is not None:
+                    written.setdefault(ref.dataset, []).append(ref)
         refs = list(
             write_financial_statements(
                 store,
                 batches,
-                superseded={year: frozenset(rows.subjects) for year, rows in superseded.items()},
+                superseded={year: found.released for year, found in supersessions.items()},
             )
         )
         written.setdefault(FINANCIAL_INDICATOR_DATASET, []).extend(
@@ -6206,91 +6222,187 @@ def _build_span_targets(
         )
 
 
-def _superseded_indicator_rows(
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Supersession:
+    """What one announcement year of a `fina_indicator` build supersedes, retires and releases."""
+
+    rows: ColumnarPanelBatch | None
+    """The versions this build found superseded, whole, for `SUPERSEDED_INDICATOR_DATASET`."""
+    record: ColumnarPanelBatch | None
+    """The year's `superseded_after_publication` index: the carried records it keeps, and new."""
+    retired: frozenset[tuple[str, str, str]]
+    """Kept versions the upstream serves again where they were stored."""
+    lost_rows: int
+    """Stored rows of the year this build does not write back -- each one superseded."""
+    released: frozenset[str]
+    """Securities the year no longer holds at all, every one of whose rows was superseded."""
+
+
+def _supersessions(
     store: PanelStore,
     batches: Sequence[ColumnarPanelBatch],
     *,
     swept: Sequence[int],
     now: datetime,
-) -> dict[int, ColumnarPanelBatch]:
-    """The stored `fina_indicator` rows a correction moved to another announcement year, per year
-    they leave, kept whole -- or a refusal naming the ones that went nowhere (`V2-P6-018`).
+) -> dict[int, _Supersession]:
+    """Per announcement year this `fina_indicator` build writes: the stored versions a correction
+    superseded, kept whole and indexed -- or a refusal naming the ones nothing explains
+    (`V2-P6-018`).
 
     `fina_indicator` carries no revision label, so the upstream corrects a report by re-publishing
-    it under a new `ann_date` and no longer serving the old one (`000909.SZ`'s 2026-03-31 report
-    moved from 2026-04-25 to 2026-09-28, measured on 2026-09-28). When the new date is in another
-    year, the old announcement year loses a row and `_refuse_shrinking_statement_years` would stop
-    every daily build from then on.
+    it under a later `ann_date` and no longer serving the old version (`000909.SZ`'s 2026-03-31
+    report moved from 2026-04-25 to 2026-09-28, measured on 2026-09-28). Judged at the **version**
+    -- `(ts_code, report_period, ann_date)` -- by `superseded_versions`: a stored version of a
+    swept period that its year no longer holds is superseded when this build serves the same report
+    under a later `ann_date`, in any year it writes, even while another version of that report is
+    still held beside it; any other lost version is refused by name, as a shrink always was.
 
-    So, for every announcement year this build writes, a stored `(ts_code, report_period)` of a
-    swept period that the year no longer holds is **moved** when the same build writes that key
-    into another announcement year, and its stored rows are kept whole in
-    `SUPERSEDED_INDICATOR_DATASET` -- the evidence V2-P6-016 keeps for a withdrawn row. A key that
-    left and went nowhere is a shrink of the ordinary kind and is refused by name, as it always
-    was.
+    What is superseded is kept exactly as `withdrawn_after_publication` keeps a withdrawn row
+    (`V2-P6-016`): whole in `SUPERSEDED_INDICATOR_DATASET`, indexed in `upstream_defects` as
+    `superseded_after_publication`, every stored record carried by every later incremental build
+    and **retired** when the upstream serves the version again in its original announcement year
+    (the build then stores it again). Years with nothing kept and nothing superseded come back
+    empty-handed and are left untouched.
     """
     periods = {str(year) for year in swept}
-    keys: dict[int, set[tuple[str, str]]] = {}
+    served: dict[int, set[tuple[str, str, str]]] = {}
+    subjects: dict[int, set[str]] = {}
     for batch in batches:
         if batch.status != "success":
             continue
-        values = next(
-            column.values for column in batch.columns if column.name == REPORT_PERIOD_COLUMN
-        )
+        values = {column.name: column.values for column in batch.columns}
         year = panel_partition_year(batch)
-        keys.setdefault(year, set()).update(
-            (subject, str(values[index])) for index, subject in enumerate(batch.subjects)
+        served.setdefault(year, set()).update(
+            (
+                subject,
+                str(values[REPORT_PERIOD_COLUMN][index]),
+                str(values[ANNOUNCEMENT_DATE_COLUMN][index]),
+            )
+            for index, subject in enumerate(batch.subjects)
         )
-    moved: dict[int, ColumnarPanelBatch] = {}
+        subjects.setdefault(year, set()).update(batch.subjects)
+    everywhere = {
+        (subject, period, date.fromisoformat(announced))
+        for versions in served.values()
+        for subject, period, announced in versions
+    }
+    found: dict[int, _Supersession] = {}
     nowhere: list[str] = []
-    for year, held in keys.items():
+    for year, held in served.items():
         coverage = store.read_coverage(FINANCIAL_INDICATOR_DATASET, year)
         if coverage is None or not coverage.row_count:
             continue
-        elsewhere = set().union(
-            *(other for other_year, other in keys.items() if other_year != year)
-        )
-        template = ColumnarPanelBatch(
-            provider_id=coverage.provider_id,
-            dataset=FINANCIAL_INDICATOR_DATASET,
-            kind=coverage.kind,
-            as_of=now,
-            fetched_at=now,
-            status="no_data",
-            no_data_reason=f"the stored {FINANCIAL_INDICATOR_DATASET} year={year} rows",
-        )
         stored = carry_stored_rows_forward(
             store,
-            template,
+            ColumnarPanelBatch(
+                provider_id=coverage.provider_id,
+                dataset=FINANCIAL_INDICATOR_DATASET,
+                kind=coverage.kind,
+                as_of=now,
+                fetched_at=now,
+                status="no_data",
+                no_data_reason=f"the stored {FINANCIAL_INDICATOR_DATASET} year={year} rows",
+            ),
             year=year,
             retain=lambda row: str(row[REPORT_PERIOD_COLUMN])[:4] in periods,
         )
-        if stored.status != "success":
-            continue
-        period_of = next(
-            column.values for column in stored.columns if column.name == REPORT_PERIOD_COLUMN
+        lost_at: dict[tuple[str, str, date], list[int]] = {}
+        if stored.status == "success":
+            values = {column.name: column.values for column in stored.columns}
+            for index, subject in enumerate(stored.subjects):
+                version = (
+                    subject,
+                    str(values[REPORT_PERIOD_COLUMN][index]),
+                    str(values[ANNOUNCEMENT_DATE_COLUMN][index]),
+                )
+                if version not in held:
+                    lost_at.setdefault(
+                        (version[0], version[1], date.fromisoformat(version[2])), []
+                    ).append(index)
+        superseded, unexplained = superseded_versions(lost=set(lost_at), served=everywhere)
+        nowhere.extend(
+            f"{subject} {period} {announced.isoformat()} (announcement year {year})"
+            for subject, period, announced in sorted(unexplained)
         )
-        positions: list[int] = []
-        for index, subject in enumerate(stored.subjects):
-            key = (subject, str(period_of[index]))
-            if key in held:
-                continue
-            if key in elsewhere:
-                positions.append(index)
-            else:
-                nowhere.append(f"{subject} {key[1]} (announcement year {year})")
-        if positions:
-            moved[year] = superseded_indicator_rows(stored, positions, confirmed_at=now)
+        positions = sorted(index for version in superseded for index in lost_at[version])
+        kept = _kept_supersessions(store, year=year)
+        retired = frozenset(kept & held)
+        if not positions and not kept:
+            continue
+        new_rows = (
+            superseded_indicator_rows(stored, positions, confirmed_at=now) if positions else None
+        )
+        new_record = (
+            superseded_indicator_record(stored, positions, confirmed_at=now) if positions else None
+        )
+        remaining = {
+            (subject, date.fromisoformat(announced))
+            for subject, _period, announced in kept - retired
+        }
+        renewed = withdrawal_keys(new_record).get(FINANCIAL_INDICATOR_DATASET, frozenset())
+        stored_records = stored_supersession_records(store, year=year, observed_at=now)
+        carried = keep_supersession_records(
+            stored_records,
+            retired={
+                key
+                for key in withdrawal_keys(stored_records).get(
+                    FINANCIAL_INDICATOR_DATASET, frozenset()
+                )
+                if key not in remaining or key in renewed
+            },
+        )
+        record = combine_defect_records(carried, new_record)
+        lost_subjects = {stored.subjects[index] for index in positions}
+        found[year] = _Supersession(
+            rows=new_rows,
+            record=record,
+            retired=retired,
+            lost_rows=len(positions),
+            released=frozenset(lost_subjects - subjects.get(year, set())),
+        )
     if nowhere:
         raise _panel_fail(
             PanelExit.unhealthy,
-            f"this {FINANCIAL_INDICATOR_DATASET} build would drop stored reports that it writes "
-            f"into no other announcement year: {sorted(nowhere)[:10]}"
+            f"this {FINANCIAL_INDICATOR_DATASET} build would drop stored reports it serves under "
+            f"no later announcement date: {sorted(nowhere)[:10]}"
             + (f" and {len(nowhere) - 10} more" if len(nowhere) > 10 else "")
-            + ". A report re-published under a later date moves with its evidence kept; one that "
+            + ". A report re-published under a later date is kept whole as superseded; one that "
             "simply stopped being served is a withdrawal or a failed fetch, and is not written",
         )
-    return moved
+    return found
+
+
+def _kept_supersessions(store: PanelStore, *, year: int) -> set[tuple[str, str, str]]:
+    """The `(ts_code, report_period, ann_date)` of every version `SUPERSEDED_INDICATOR_DATASET`
+    keeps for `year`, read through the carry door (nothing here is answered with)."""
+    coverage = store.read_coverage(SUPERSEDED_INDICATOR_DATASET, year)
+    if coverage is None:
+        return set()
+    kept = carry_stored_rows_forward(
+        store,
+        ColumnarPanelBatch(
+            provider_id=coverage.provider_id,
+            dataset=SUPERSEDED_INDICATOR_DATASET,
+            kind=coverage.kind,
+            as_of=coverage.as_of,
+            fetched_at=coverage.fetched_at,
+            status="no_data",
+            no_data_reason=f"the stored {SUPERSEDED_INDICATOR_DATASET} year={year} rows",
+        ),
+        year=year,
+        retain=lambda _row: True,
+    )
+    if kept.status != "success":
+        return set()
+    values = {column.name: column.values for column in kept.columns}
+    return {
+        (
+            subject,
+            str(values[REPORT_PERIOD_COLUMN][index]),
+            str(values[ANNOUNCEMENT_DATE_COLUMN][index]),
+        )
+        for index, subject in enumerate(kept.subjects)
+    }
 
 
 def _empty_indicator_year(

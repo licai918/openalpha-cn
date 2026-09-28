@@ -6681,36 +6681,56 @@ def write_empty_announcement_year(
 
 
 SUPERSEDED_INDICATOR_DATASET: Final[str] = "superseded_fina_indicator"
-"""Where a `fina_indicator` row the upstream re-published under a later `ann_date` is kept whole
-once it leaves its announcement year (`V2-P6-018`).
+"""Where a `fina_indicator` version the upstream re-published under a later `ann_date` is kept
+whole once it leaves the store (`V2-P6-018`).
 
 `fina_indicator` carries no revision label: a correction is re-published as the same
 `(ts_code, report_period)` under a new `ann_date`, and the old version is no longer served --
-measured on 2026-09-28, `000909.SZ`'s 2026-03-31 report moved from 2026-04-25 to 2026-09-28. When
-the new date is in another year the old row leaves its partition, which the store would otherwise
-lose without trace. It is kept here **exactly as it was stored** -- the source partition's columns
-and its four clocks -- plus `SUPERSEDED_CONFIRMED_AT_COLUMN` and
-`SUPERSEDED_ORIGINAL_INGESTED_TIME_COLUMN`, in the partition of its own announcement year. The
-shape is V2-P6-016's `withdrawn_<dataset>` records' (not merged at the time of writing), named
-in its pattern; a new dataset breaks no stored contract, where a column on `fina_indicator` would
-(hard rule 3). Written by `write_superseded_indicator_rows`, before the source partition that no
-longer holds the row."""
+measured on 2026-09-28, `000909.SZ`'s 2026-03-31 report moved from 2026-04-25 to 2026-09-28. The
+old version then leaves its announcement-year partition, and it is kept here **exactly as it was
+stored** -- the source partition's columns and its four clocks -- plus
+`SUPERSEDED_CONFIRMED_AT_COLUMN` and `WITHDRAWN_ORIGINAL_INGESTED_TIME_COLUMN`, in the partition
+of its own announcement year, indexed in `upstream_defects` as `superseded_after_publication`.
+
+**V2-P6-016's `withdrawn_*` convention, kept.** The same column shape (`<event>_confirmed_at`,
+`original_ingested_time`), the same carry -- every later build re-stamps a carried row's
+`ingested_time` to `max(stamp, available_time)` per `V2-P6-003` and keeps the value it had when
+confirmed in `original_ingested_time` -- the same retirement (a version the upstream serves again
+where it was stored) and the same order (written before the source partition that no longer holds
+the row). `panel_doctor` declares it `derived` and answers it with `superseded_rows_requirement`.
+"""
+
+SUPERSEDED_ROWS_DATASETS: Final[Mapping[str, str]] = MappingProxyType(
+    {FINANCIAL_INDICATOR_DATASET: SUPERSEDED_INDICATOR_DATASET}
+)
+"""Each source dataset's superseded-version dataset -- one today (`V2-P6-018`).
+
+**Kept apart from `WITHDRAWN_ROWS_DATASETS`, on purpose.** That map's sources are session-dated,
+and the code that iterates it re-asks a *session* (`reconcile_withdrawals`,
+`withdrawal_date_column`, the incremental re-check of withdrawn sessions), which has no meaning for
+a report period and would misfire on one. And the event is not the same: a withdrawn row is no
+longer served at all; a superseded version is served again, under a later date, and what left is
+only the old version. The two maps share every convention and none of the session machinery."""
+
+SUPERSEDED_KIND: Final[DefectKind] = "superseded_after_publication"
 
 SUPERSEDED_CONFIRMED_AT_COLUMN: Final[str] = "supersession_confirmed_at"
-"""The instant a build found the row re-published in another announcement year."""
+"""The instant a build found the version re-published under a later `ann_date`; the
+`withdrawal_confirmed_at` of `WITHDRAWN_ROWS_DATASETS`."""
 
-SUPERSEDED_ORIGINAL_INGESTED_TIME_COLUMN: Final[str] = "original_ingested_time"
-"""The row's stored `ingested_time` when it was superseded, verbatim."""
+SUPERSEDED_ORIGINAL_INGESTED_TIME_COLUMN: Final[str] = WITHDRAWN_ORIGINAL_INGESTED_TIME_COLUMN
+"""The version's stored `ingested_time` when it was superseded -- `original_ingested_time`, the
+`withdrawn_*` column's own name, so a reader of either treats it alike."""
 
 
 def superseded_indicator_rows(
     stored: ColumnarPanelBatch, positions: Sequence[int], *, confirmed_at: datetime
 ) -> ColumnarPanelBatch:
-    """The superseded stored `fina_indicator` rows whole, as their `SUPERSEDED_INDICATOR_DATASET`
-    batch."""
+    """The superseded stored `fina_indicator` versions whole, as their
+    `SUPERSEDED_INDICATOR_DATASET` batch."""
     if stored.dataset != FINANCIAL_INDICATOR_DATASET:
         raise FinancialStatementError(
-            f"only {FINANCIAL_INDICATOR_DATASET} rows are superseded this way, got "
+            f"only {FINANCIAL_INDICATOR_DATASET} versions are superseded this way, got "
             f"{stored.dataset!r}"
         )
     selected = _select_rows(stored, positions)
@@ -6737,43 +6757,149 @@ def superseded_indicator_rows(
     )
 
 
+def superseded_indicator_record(
+    stored: ColumnarPanelBatch, positions: Sequence[int], *, confirmed_at: datetime
+) -> ColumnarPanelBatch | None:
+    """The `upstream_defects` index of superseded versions: one `superseded_after_publication`
+    row per `(ts_code, ann_date)` of the stored versions at `positions` (`V2-P6-018`).
+
+    Per security and announcement **day**, not per report: the index's key is `(subject,
+    trade_date)` and it has no report-period column, and a security announcing its annual and
+    first quarter on one day would otherwise index twice under one key. The reports themselves are
+    in `SUPERSEDED_INDICATOR_DATASET`, one row each. `trade_date` is the superseded version's own
+    `ann_date`; the clocks are its own, with the confirmation instant as `revision_time`, exactly
+    as a `withdrawn_after_publication` record is dated.
+    """
+    announced = _column_values(stored, ANNOUNCEMENT_DATE_COLUMN)
+    first: dict[tuple[str, str], int] = {}
+    for index in positions:
+        first.setdefault((stored.subjects[index], str(announced[index])), index)
+    chosen = sorted(first.values())
+    defects = tuple(
+        UpstreamDefect(
+            ts_code=stored.subjects[index],
+            trade_date=date.fromisoformat(str(announced[index])),
+            source_dataset=FINANCIAL_INDICATOR_DATASET,
+            kind=SUPERSEDED_KIND,
+        )
+        for index in chosen
+    )
+    return _defect_record(stored, chosen, defects, confirmed_at=confirmed_at)
+
+
+def stored_supersession_records(
+    store: PanelStore, *, year: int, observed_at: datetime
+) -> ColumnarPanelBatch | None:
+    """The stored `superseded_after_publication` records of `year`, re-observed at `observed_at`
+    for the carry -- `stored_withdrawal_records`' rule: no later build can find the version
+    missing again, so every later build carries them, less what it retires."""
+    carried = carry_stored_sessions_forward(
+        store,
+        (),
+        dataset=UPSTREAM_DEFECTS_DATASET,
+        year=year,
+        before=date(year + 1, 1, 1),
+        observed_at=observed_at,
+        keep=lambda row: (
+            row[SOURCE_DATASET_COLUMN] == FINANCIAL_INDICATOR_DATASET
+            and row[DEFECT_KIND_COLUMN] == SUPERSEDED_KIND
+        ),
+    )
+    return carried[0] if carried else None
+
+
+def keep_supersession_records(
+    records: ColumnarPanelBatch | None, *, retired: Set[tuple[str, date]]
+) -> ColumnarPanelBatch | None:
+    """`records` without the `(subject, ann_date)` keys this build retires or re-confirms."""
+    if records is None:
+        return None
+    kept = [index for index, key in enumerate(_row_keys(records)) if key not in retired]
+    if not kept:
+        return None
+    return records if len(kept) == records.row_count else _select_rows(records, kept)
+
+
+def superseded_rows_requirement(*, years: Sequence[int], as_of: datetime) -> ReadinessRequirement:
+    """What a `SUPERSEDED_ROWS_DATASETS` partition must satisfy before it is read back --
+    `withdrawn_rows_requirement`'s waivers, for its reasons."""
+    return ReadinessRequirement(
+        dataset=SUPERSEDED_INDICATOR_DATASET,
+        as_of=as_of,
+        years=tuple(sorted(set(years))),
+        required_dates=None,
+        required_subjects=None,
+        required_fields=(
+            SUBJECT_COLUMN_NAME,
+            SUPERSEDED_CONFIRMED_AT_COLUMN,
+            SUPERSEDED_ORIGINAL_INGESTED_TIME_COLUMN,
+        ),
+        max_staleness=None,
+    )
+
+
 def write_superseded_indicator_rows(
     store: PanelStore,
-    rows: ColumnarPanelBatch,
+    rows: ColumnarPanelBatch | None,
     *,
     year: int,
+    observed_at: datetime,
+    retired: Set[tuple[str, str, str]] = frozenset(),
     date_timezone: str = DEFAULT_DATE_TIMEZONE,
-) -> PartitionRef:
-    """Add `rows` to the stored superseded `fina_indicator` rows of `year` (`V2-P6-018`).
+) -> PartitionRef | None:
+    """Store `year`'s superseded `fina_indicator` versions: the stored ones re-observed and less
+    those this build retires, then `rows` (`V2-P6-018`).
 
-    The partition is the stored rows followed by the new ones, a row already recorded -- the same
-    `(ts_code, report_period, ann_date)` -- kept once, and sorted by `(event_time, subject)` so the
-    content hash does not depend on the order they arrived in. The stored rows go back through
-    `carry_stored_rows_forward` with their clocks untouched: this is evidence, and a record of when
-    something was superseded does not move when a later build carries it.
+    `write_withdrawn_rows`' shape. The stored rows come back through `carry_stored_rows_forward`
+    re-stamped at `observed_at` (`V2-P6-003`); the stamp each had when it was superseded stays in
+    `original_ingested_time`. A version in `retired` -- `(ts_code, report_period, ann_date)` --
+    is dropped: the upstream serves it again where it was stored, so the store holds it again. A
+    version recorded twice is kept once, the earlier record first. Sorted by
+    `(event_time, subject)`, so the content hash does not depend on arrival order. With nothing
+    left, a stored partition is removed (`PanelStore.remove_partition`) and `None` returned.
     """
-    if rows.dataset != SUPERSEDED_INDICATOR_DATASET:
-        raise PanelBatchError(
-            f"expected the {SUPERSEDED_INDICATOR_DATASET!r} dataset, got {rows.dataset!r}"
-        )
-    written_year = panel_partition_year(rows, date_timezone=date_timezone)
-    if written_year != year:
-        raise PanelBatchError(
-            f"the superseded rows are dated {written_year} and the write is for {year}"
-        )
-    merged = carry_stored_rows_forward(store, rows, year=year, retain=lambda _row: True)
+    if rows is not None:
+        if rows.dataset != SUPERSEDED_INDICATOR_DATASET:
+            raise PanelBatchError(
+                f"expected the {SUPERSEDED_INDICATOR_DATASET!r} dataset, got {rows.dataset!r}"
+            )
+        written_year = panel_partition_year(rows, date_timezone=date_timezone)
+        if written_year != year:
+            raise PanelBatchError(
+                f"the superseded rows are dated {written_year} and the write is for {year}"
+            )
+    coverage = store.read_coverage(SUPERSEDED_INDICATOR_DATASET, year)
+    if rows is None and coverage is None:
+        return None
+    base = rows or ColumnarPanelBatch(
+        provider_id=coverage.provider_id if coverage is not None else "",
+        dataset=SUPERSEDED_INDICATOR_DATASET,
+        kind=SUPERSEDED_INDICATOR_DATASET,
+        as_of=observed_at,
+        fetched_at=observed_at,
+        status="no_data",
+        no_data_reason=f"the stored {SUPERSEDED_INDICATOR_DATASET} year={year} rows",
+    )
+    merged = carry_stored_rows_forward(
+        store, base, year=year, retain=lambda _row: True, observed_at=observed_at
+    )
+    if merged.status != "success":
+        return None
     values = {column.name: column.values for column in merged.columns}
-    seen: set[tuple[object, ...]] = set()
+    seen: set[tuple[str, str, str]] = set()
     kept: list[int] = []
     for index, subject in enumerate(merged.subjects):
-        key = (
+        version = (
             subject,
-            values[REPORT_PERIOD_COLUMN][index],
-            values[ANNOUNCEMENT_DATE_COLUMN][index],
+            str(values[REPORT_PERIOD_COLUMN][index]),
+            str(values[ANNOUNCEMENT_DATE_COLUMN][index]),
         )
-        if key not in seen:
-            seen.add(key)
+        if version not in seen and version not in retired:
+            seen.add(version)
             kept.append(index)
+    if not kept:
+        store.remove_partition(SUPERSEDED_INDICATOR_DATASET, year)
+        return None
     events = merged.timeline.event_time
     kept.sort(key=lambda index: (events[index], merged.subjects[index]))
     return write_panel_batch(

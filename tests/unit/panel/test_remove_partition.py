@@ -25,6 +25,7 @@ REMOVE_PARTITION_CALLERS: frozenset[tuple[str, str]] = frozenset(
     {
         ("panel_ingest.py", "write_upstream_defects"),
         ("panel_ingest.py", "write_withdrawn_rows"),
+        ("panel_ingest.py", "write_superseded_indicator_rows"),
     }
 )
 """Every `src/` function allowed to call `remove_partition`, as `(file, function)`.
@@ -35,7 +36,9 @@ and a year whose build dropped nothing has to be able to become empty. `write_wi
 withdrawal of a year is retired -- its row served again -- the partition must become empty with
 its index, or it would claim a withdrawal the stored data no longer reflects. No other writer
 removes anything: a price, factor or registry partition is replaced whole or refused, never
-deleted.
+deleted. `write_superseded_indicator_rows` (`V2-P6-018`) keeps the superseded `fina_indicator`
+versions the same record indexes, under that rule exactly: when its last kept version is served
+again where it was stored, the partition becomes empty with its index.
 """
 
 
@@ -60,7 +63,8 @@ def _callers() -> set[tuple[str, str]]:
 def test_only_the_defects_writer_removes_a_partition() -> None:
     assert _callers() == set(REMOVE_PARTITION_CALLERS), (
         "PanelStore.remove_partition is the store's only delete and is granted to the defects "
-        "record and the withdrawn rows it indexes alone; a new caller has to be argued for here"
+        "record and the withdrawn and superseded rows it indexes alone; a new caller has to be "
+        "argued for here"
     )
 
 
