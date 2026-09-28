@@ -1474,8 +1474,9 @@ def test_a_neutralized_feature_is_refused_by_name_with_the_issue_that_owns_the_b
 
     The reason is an untested path, not missing data: this docstring and the message used to
     cite `V2-P4-026` (a residual only at its year's last stored session), which was retracted, and
-    since `V2-P6-015` a neutralized build succeeds at any instant from 2014-02-21. No walk-forward
-    evaluation on a neutralized column has been built and tested end to end yet, so the tier stays
+    since `V2-P6-015` a neutralized build succeeds at a closed session from 2014-02-21 on. No
+    walk-forward evaluation on a neutralized column has been built and tested end to end yet, so
+    the tier stays
     refused by name until a follow-up adds that test.
     """
     neutralized = {

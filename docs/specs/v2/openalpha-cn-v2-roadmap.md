@@ -1142,6 +1142,7 @@ subjects 取并集），于是同一个 requirement 在两条路径上得到了�
 **已立 `V2-P4-027`。** SW2021 的 2021-12-13 可得性地板仍在，它现在是最外层的界
 （`KNOWN_NEUTRALIZATION_LIMITATIONS.no_cross_section_is_neutralisable_before_2021_12_13`），
 但**在该地板之内真正卡住月度/日度粒度的是上面那条分区级判定**，所以 `027` 覆盖两者。
+（2026-09-28 更正，`V2-P6-015`：该地板已不在。2014-02-21 至 2021-12-10 改用当时在用的申万 2014，限制码改名为 `no_cross_section_is_neutralisable_before_2014_02_21`。）
 
 **受影响的声明已逐条处理**：四个注册表里的
 `neutralised_residuals_are_read_at_a_year_end_snapshot` 改名为

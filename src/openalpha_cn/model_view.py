@@ -777,7 +777,7 @@ KNOWN_MODEL_VIEW_LIMITATIONS: Final[tuple[ModelViewLimitation, ...]] = (
             "partition could only be built at or after its year's last stored session "
             "(`V2-P4-026`), so a column on it was empty at every instant a walk-forward asks "
             "about; `V2-P4-026` and `V2-P4-028` retracted that, and since `V2-P6-015` a "
-            "neutralized build succeeds at any instant from 2014-02-21 (a live 2016 build "
+            "neutralized build succeeds at a closed session from 2014-02-21 on (a live 2016 build "
             "stored 2,566 residuals). What remains is that no walk-forward evaluation on a "
             "neutralized column has been built and tested end to end on either face -- the "
             "feature matrix can read the tier, but nothing drives a fit through it -- so lifting "

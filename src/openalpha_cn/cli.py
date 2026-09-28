@@ -4642,10 +4642,10 @@ def _build_panel(
     with no transaction around them, so when a later target is refused the earlier ones are
     already on disk and the command has to be able to *name* them (`_stored_so_far`). And a
     target that this function accepted but wrote nothing for is only visible as an absent key
-    (`_audit_written_partitions`) -- the failure a fourteenth entry in `PANEL_BUILD_TARGETS` with
+    (`_audit_written_partitions`) -- the failure a new entry in `PANEL_BUILD_TARGETS` with
     no branch below produces, which would otherwise be an exit 0 with an empty `partitions` list.
 
-    The three `PANEL_BUILD_SPAN_TARGETS` are not run here: their unit of work is the whole
+    The `PANEL_BUILD_SPAN_TARGETS` are not run here: their unit of work is the whole
     invocation rather than one year, which `_build_span_targets` does once after this loop has
     finished. That set's docstring says why for each of them, and the reason is never
     convenience -- for `fina_indicator` a per-year loop is silently destructive.
@@ -4988,11 +4988,11 @@ def _audit_written_partitions(
 
     `year` is `None` for the span phase, where there is no `--year` a partition could be checked
     against: `_build_span_targets` runs once per invocation and every one of its targets is in
-    `_UNPINNED_PARTITION_YEAR_TARGETS` anyway. Check 1 still runs, and has to -- a fourteenth
+    `_UNPINNED_PARTITION_YEAR_TARGETS` anyway. Check 1 still runs, and has to -- a new
     entry in `PANEL_BUILD_TARGETS` with no branch is exactly as invisible in that phase as in the
     other, and adding a phase without extending this audit is the same defect wearing a new coat.
 
-    1. **A requested target wrote no partition at all.** This is what a fourteenth entry in
+    1. **A requested target wrote no partition at all.** This is what a new entry in
        `PANEL_BUILD_TARGETS` with no matching branch produces: `_build_targets`
        accepts the name because the table has it, every `if` misses, and the command reports
        `exit 0` with `"partitions": []` -- the empty success this whole issue exists to make
