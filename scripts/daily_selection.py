@@ -25,10 +25,12 @@ exit; nothing after it runs.
 6. **target weights** -- the book's rebalance rule (`strategy_backtest.target_holdings`) over that
    ranking, the previous session's targets as the book held, on the configuration's rebalance
    schedule; equal weights of `1 / holding_count`, the rest cash.
-7. **prediction** -- the day's scores registered in the prediction store before their outcome is
-   knowable: the fitted model's own batch for a walk-forward source, and for a static or
-   trailing-IC source a batch carrying the composite each security was ranked by.
-8. **summary** -- printed, and written to the day's journal.
+7. **prediction** -- the day's scores registered in the prediction store before the next
+   session opens, which is before any of their outcome has printed: the fitted model's own batch
+   for a walk-forward source, and for a static or trailing-IC source a batch carrying the
+   composite each security was ranked by.
+8. **summary** -- printed, and written to the day's journal. A refused run prints the step, the
+   reason and the Tushare requests it had spent.
 
 ## Why steps 5 and 6 are not `shortlist run` and `portfolio construct`
 
@@ -51,12 +53,13 @@ asserted (`tests/unit/scripts/test_daily_selection.py`).
 
 ## Idempotent per trading day
 
-The journal is `RT/daily_selection/<config_id[:16]>/<session>.json`. A day whose journal is
-complete is printed again and nothing runs: no request, no write. A day whose panel update is
-journalled resumes after it, at the journalled `--as-of`. Every other step is idempotent on its
-own: a partition written again with the same content is not rewritten (`PanelStore`), a factor
-tier already built at the instant is skipped, and a prediction already registered for the day
-under the same declaration is reused rather than filed twice (and a different one is refused).
+The journal is `RT/daily_selection/<config_id[:16]>/<session>.json`. The day's `--as-of` is
+written to it before anything is fetched, and every later run of that session uses it. A day
+whose journal is complete is printed again and nothing runs: no request, no write. A day whose
+panel update is journalled resumes after it. Every other step is idempotent on its own: a
+partition written again with the same content is not rewritten (`PanelStore`), a factor tier
+already built at the instant is skipped, and a prediction already registered for the day under
+the same declaration is reused rather than filed twice (and a different one is refused).
 
 ## What the numbers are
 
@@ -78,7 +81,7 @@ import sys
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from enum import IntEnum
 from pathlib import Path
@@ -199,6 +202,8 @@ DEFAULT_MAX_STALENESS_DAYS: Final[int] = 30
 
 SHANGHAI: Final[ZoneInfo] = ZoneInfo(DEFAULT_DATE_TIMEZONE)
 _WEIGHT_QUANTUM: Final[Decimal] = Decimal("0.0000000001")
+NEXT_SESSION_OPEN: Final[time] = time(9, 30)
+"""When the next session opens (Shanghai): the latest a day's scores may be registered."""
 _STRATEGY_KEYS: Final[frozenset[str]] = frozenset(
     {
         "as_of",
@@ -254,6 +259,9 @@ class StepFailedError(RuntimeError):
         super().__init__(f"step {STEPS.index(step) + 1} ({step}) failed: {message}")
         self.step = step
         self.exit_code = exit_code
+        self.requests: dict[str, int] = {}
+        """The Tushare requests the run had made when it stopped, by `api_name`: a refused run
+        spends requests too, and the budget is counted either way."""
 
 
 # --- the configuration ---------------------------------------------------------------------------
@@ -514,17 +522,31 @@ class Invocation:
         return found
 
     def reason(self) -> str:
-        """The command's own account of a refusal: its stderr and every stdout line that is a
-        finding rather than a status (`READY`, `CHECK`, `INFO` and a clean gate's `UNVERIFIED`
-        lines are left out), else its last lines."""
-        routine = ("READY ", "CHECK ", "INFO ", "UNVERIFIED ", "CLEARED ")
+        """The command's own account of a refusal: the last twelve lines of its stderr and stdout
+        that are findings rather than status or progress (`READY`, `CHECK`, `INFO`, a clean
+        gate's `UNVERIFIED`, and `panel build`'s `INCREMENTAL`/`BUDGET`/`FETCHING`/`WROTE` lines
+        are left out, so the refusal, which comes last, is never cut), else its last lines."""
+        routine = (
+            "READY ",
+            "CHECK ",
+            "INFO ",
+            "UNVERIFIED ",
+            "CLEARED ",
+            "INCREMENTAL ",
+            "BUDGET ",
+            "FETCHING ",
+            "WROTE ",
+            "SESSIONS ",
+            "AS-OF ",
+            "HALTS ",
+        )
         findings = [
             line
             for line in (*self.stderr.splitlines(), *self.stdout.splitlines())
             if line.strip() and not line.startswith(routine)
         ]
         if findings:
-            return " | ".join(findings[:12])
+            return " | ".join(findings[-12:])
         text = (self.stderr.strip() or self.stdout.strip()).splitlines()
         return " | ".join(text[-6:]) if text else f"exit {self.exit_code} with no output"
 
@@ -988,9 +1010,12 @@ def register_prediction(
     stands and this run is refused -- a second answer to one day would be a revision, which the
     prediction store exists to make impossible.
 
-    **Only before the outcome.** A day whose outcome is already knowable -- the command run late,
-    or catching up a missed session -- is refused before anything is filed: registered now, it
-    would be a `backfill`, and a forward record is the only kind this command exists to make.
+    **Only before the outcome starts.** The store calls a record `forward` when it held it before
+    the outcome window's last close. That is the store's question; this command's is stricter,
+    because the book trades the day's scores at the next session's open and every session after
+    it prints part of the outcome. So a registration at or after the next session's open (09:30
+    Shanghai) -- the command run late, or catching up a missed day -- is refused before anything
+    is filed.
     """
     store = FilePredictionStore(runtime_dir / "predictions", clock=clock)
     for record_id in store.list_ids():
@@ -1007,14 +1032,17 @@ def register_prediction(
                 "filed. The panel or a factor build changed after it was registered",
             )
         return held, "unchanged"
+    day = batch.as_of.astimezone(SHANGHAI).date()
+    opens = datetime.combine(calendar.next_trading_day(day), NEXT_SESSION_OPEN, tzinfo=SHANGHAI)
     deadline = outcome_known_at_for(batch, calendar=calendar, zone=SHANGHAI)
     now = clock()
-    if now >= deadline:
+    if now >= opens:
         raise StepFailedError(
             "prediction",
-            f"the scores of {batch.as_of.isoformat()} have an outcome knowable at "
-            f"{deadline.isoformat()}, and it is {now.isoformat()}: registered now they would be a "
-            "backfill, not a prediction made before its outcome. Nothing was filed",
+            f"the scores of {day.isoformat()} are traded from the next session's open, "
+            f"{opens.isoformat()}, and it is {now.isoformat()}: part of their outcome has "
+            f"printed already (all of it by {deadline.isoformat()}), so registered now they "
+            "would not be a prediction made before its outcome. Nothing was filed",
         )
     written = store.put(batch=batch, calendar=calendar, zone=SHANGHAI)
     return written.record, written.outcome
@@ -1030,11 +1058,22 @@ def _utc_now() -> datetime:
 def run_daily_selection(
     options: DailyOptions, *, clock: Callable[[], datetime] = _utc_now
 ) -> dict[str, Any]:
-    """Run the eight steps and return the day's journal; raise `StepFailedError` on a refusal."""
+    """Run the eight steps and return the day's journal; raise `StepFailedError` on a refusal,
+    carrying the requests made before it."""
+    counts: Counter[str] = Counter()
+    try:
+        return _run_daily_selection(options, clock=clock, counts=counts)
+    except StepFailedError as error:
+        error.requests = dict(sorted(counts.items()))
+        raise
+
+
+def _run_daily_selection(
+    options: DailyOptions, *, clock: Callable[[], datetime], counts: Counter[str]
+) -> dict[str, Any]:
     runtime_dir = options.runtime_dir
     registration = admit_registration(options.registration, options.repo)
     store = PanelStore(runtime_dir / "panel")
-    counts: Counter[str] = Counter()
     directory = journal_directory(runtime_dir, registration)
     first_as_of = options.as_of or clock()
     anchor = _registered_anchor(registration)
@@ -1081,11 +1120,24 @@ def run_daily_selection(
             result = dict(journal["result"])
             result["this_run"] = {"requests": {}, "request_count": 0, "wrote": False}
             return result
-        if journal is not None and "panel" in journal:
-            as_of = datetime.fromisoformat(journal["as_of"])
-            panel = journal["panel"]
-        else:
-            as_of = first_as_of
+        if journal is None:
+            # The day's clock is pinned before anything is fetched, so a retry of a step 2 that
+            # stopped partway asks the same question: the partitions it already wrote are then
+            # rewritten byte for byte, which `PanelStore` does not rewrite at all.
+            journal = {
+                "schema": DAILY_SELECTION_SCHEMA,
+                "session": session.isoformat(),
+                "as_of": first_as_of.isoformat(),
+                "registration": {
+                    "path": registration.path.name,
+                    "sha256": registration.sha256,
+                    "commit": registration.commit,
+                    "config_id": registration.config_id,
+                },
+            }
+            write_journal(path, journal)
+        as_of = datetime.fromisoformat(journal["as_of"])
+        if "panel" not in journal:
             panel = update_panel(
                 runtime_dir,
                 session_year=session.year,
@@ -1093,18 +1145,7 @@ def run_daily_selection(
                 exchange=exchange,
                 targets=targets,
             )
-            journal = {
-                "schema": DAILY_SELECTION_SCHEMA,
-                "session": session.isoformat(),
-                "as_of": as_of.isoformat(),
-                "registration": {
-                    "path": registration.path.name,
-                    "sha256": registration.sha256,
-                    "commit": registration.commit,
-                    "config_id": registration.config_id,
-                },
-                "panel": {**panel, "requests": dict(sorted(counts.items()))},
-            }
+            journal = {**journal, "panel": {**panel, "requests": dict(sorted(counts.items()))}}
             write_journal(path, journal)
 
     check_panel(
@@ -1319,6 +1360,11 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
         result = run_daily_selection(options, clock=clock)
     except StepFailedError as error:
         print(str(error), file=sys.stderr)
+        print(
+            f"tushare requests   {sum(error.requests.values())} this run "
+            f"{json.dumps(error.requests, sort_keys=True)}",
+            file=sys.stderr,
+        )
         return int(error.exit_code)
     if arguments.json:
         print(json.dumps(result, sort_keys=True, ensure_ascii=False))

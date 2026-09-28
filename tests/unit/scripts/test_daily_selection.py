@@ -189,6 +189,9 @@ class Market:
 
     def __init__(self, *, disputed: date | None = None) -> None:
         self.disputed = disputed
+        self.bands_only: dict[date, tuple[str, ...]] = {}
+        """Codes the upstream publishes a band for, on that session, and nothing else: the shape
+        of the funds whose bands Tushare served for 2026-08-28 and later withdrew."""
         self.payloads: list[str] = []
         closes: dict[str, list[float]] = {}
         for index, code in enumerate(SECURITIES):
@@ -258,6 +261,7 @@ class Market:
                     ]
                     for code in SECURITIES
                 ]
+                rows += [[code, _compact(day), 1.1, 0.9] for code in self.bands_only.get(day, ())]
                 fields = LIMIT_FIELDS
             elif api_name == ADJ_FACTOR_DATASET:
                 rows = [[code, _compact(day), self._factor(code, day)] for code in SECURITIES]
@@ -587,16 +591,74 @@ def test_a_panel_the_doctor_does_not_clear_stops_the_run_before_any_factor_is_bu
     assert "result" not in json.loads(_journal(world, DAY).read_text(encoding="utf-8"))
 
 
-def test_a_day_whose_outcome_is_already_knowable_is_not_registered(
-    world: World, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize(
+    "late",
+    [
+        pytest.param(timedelta(days=30), id="a month late: the whole outcome has printed"),
+        pytest.param(
+            datetime.fromisoformat("2026-01-20T09:30:00+08:00") - RUN_CLOCK,
+            id="at the next session's open",
+        ),
+    ],
+)
+def test_scores_registered_once_the_next_session_has_opened_are_refused(
+    world: World, capsys: pytest.CaptureFixture[str], late: timedelta
 ) -> None:
-    """Run a month late, the day's scores would be a backfill: nothing is filed."""
-    code, _text, err = _run(world, capsys, clock=RUN_CLOCK + timedelta(days=30))
+    """The book trades the day's scores at the next open, so from then on part of their outcome
+    has printed: nothing is filed, even while the store would still call the record forward."""
+    code, _text, err = _run(world, capsys, clock=RUN_CLOCK + late)
 
     assert code == 1
     assert "step 7 (prediction) failed" in err
-    assert "backfill" in err
+    assert "2026-01-20T09:30:00+08:00" in err
+    assert "Nothing was filed" in err
     assert _records(world.runtime) == ()
+
+
+def test_scores_registered_before_the_next_open_are_forward(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, result, err = _run(
+        world, capsys, clock=datetime.fromisoformat("2026-01-20T09:29:00+08:00")
+    )
+
+    assert code == 0, err
+    assert result["prediction"]["standing"] == "forward"
+
+
+def test_a_refused_panel_update_stops_the_day_counts_its_requests_and_pins_its_clock(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The live check's own refusal, reproduced: a band the upstream served for the stored
+    horizon's session (12 January) and no longer serves. The overlap re-fetch of that session
+    drops it and the writer refuses, as it must; the command stops at step 2, says so with
+    the requests it spent, and a retry asks the same question at the same pinned `--as-of`."""
+    store = PanelStore(world.runtime / "panel")
+    arguments = ["panel", "build", "--runtime-dir", str(world.runtime), "--year", str(YEAR)]
+    arguments += ["--as-of", SEEDED_AS_OF, "--dataset", PRICE_LIMIT_DATASET]
+    world.market.bands_only = {date(2026, 1, 12): ("159999.SZ",)}
+    reseeded = daily.invoke(arguments)
+    assert reseeded.exit_code == 0, reseeded.reason()
+    world.market.bands_only = {}
+    world.market.payloads.clear()
+
+    code, _text, err = _run(world, capsys)
+
+    assert code == 1
+    assert "step 2 (panel update) failed" in err
+    assert "would drop ['159999.SZ']" in err
+    assert "tushare requests   32 this run" in err
+    journal = json.loads(_journal(world, DAY).read_text(encoding="utf-8"))
+    assert (journal["as_of"], "panel" in journal) == (DAY_AS_OF.isoformat(), False)
+    assert store.registered_years("factor_obs_reversal_1d_v1") == ()
+
+    code, _text, err = _run(world, capsys, as_of=DAY_AS_OF + timedelta(hours=3))
+
+    assert code == 1
+    assert "would drop ['159999.SZ']" in err
+    assert json.loads(_journal(world, DAY).read_text(encoding="utf-8"))["as_of"] == (
+        DAY_AS_OF.isoformat()
+    )
 
 
 def test_the_doctor_is_asked_about_the_days_market_and_the_index_codes_the_panel_builds(
