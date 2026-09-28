@@ -4170,6 +4170,64 @@ class TushareProvider:
             lambda chosen, asked: self._swept_rows(chosen, asked, chunk_codes),
         )
 
+    def fetch_panel_listed(
+        self, request: ProviderRequest, *, codes: Sequence[str]
+    ) -> ColumnarPanelBatch:
+        """One announcement year of `codes` alone, through the dataset's `*_vip` endpoint
+        (`V2-P6-018`): `request.subjects` is the year, `YYYY`.
+
+        The route an incremental statement build takes for securities the registry gained since
+        the partition was stored. A newly listed security's earlier filings -- the pre-listing
+        reports a company files when it registers -- are dated in months the build carries rather
+        than re-sweeps, so they reach the store only by asking for the security itself. One
+        request per 1,000 codes, `start_date`/`end_date` spanning the year and a comma-joined
+        `ts_code`, halved by codes at the cap (`_code_rows`).
+
+        Measured on 2026-09-28: for the 18 securities new to the registry between two stored
+        builds (2026-09-01 and 2026-09-27), `income_vip`, `balancesheet_vip` and `cashflow_vip`
+        answered 126, 98 and 115 rows for 2026 in one request each, equal as whole rows to the
+        month-by-month sweep the 2026-09-27 build stored for those securities. `fina_indicator`
+        has no announcement-year window and is refused.
+        """
+        if request.dataset == FINANCIAL_INDICATOR_DATASET:
+            raise ProviderFailure(
+                provider_id=self.metadata.provider_id,
+                category="configuration",
+                message=(
+                    "fina_indicator is swept by report period and has no announcement-year "
+                    "window to ask a list of codes for"
+                ),
+                retryable=False,
+            )
+        descriptor = self._sweep_descriptor(request)
+        year = _one_sweep_window(request, digits=4, shape="an announcement year YYYY")
+        chosen = tuple(sorted(set(codes)))
+        if not chosen:
+            raise ProviderFailure(
+                provider_id=self.metadata.provider_id,
+                category="configuration",
+                message="a listed-securities fetch names at least one code",
+                retryable=False,
+            )
+        params = {"start_date": f"{year}0101", "end_date": f"{year}1231"}
+        limit = TUSHARE_TS_CODE_LIST_LIMIT
+        self._witnessed_codes = set()
+        return self._panel_batch(
+            descriptor,
+            request,
+            lambda chosen_descriptor, asked: [
+                row
+                for start in range(0, len(chosen), limit)
+                for row in self._code_rows(
+                    chosen_descriptor,
+                    asked,
+                    params,
+                    chosen[start : start + limit],
+                    what=f"announcement year {year} of {len(chosen)} listed code(s)",
+                )
+            ],
+        )
+
     @property
     def request_count(self) -> int:
         """How many round trips this provider has sent, retries included.

@@ -283,6 +283,31 @@ def test_coverage_whose_row_count_disagrees_with_the_partition_is_refused(
         store.record_coverage(inconsistent)
 
 
+def test_an_empty_partition_is_written_only_on_request_and_its_record_names_nothing(
+    tmp_path: Path,
+) -> None:
+    """`V2-P6-018`: a zero-row partition exists only through `allow_empty`, and its coverage
+    record is coherent or refused -- a zero count naming a subject or a date describes a
+    partition that could not exist."""
+    store = _store(tmp_path / "panel")
+    with pytest.raises(PanelStorageError, match="empty partition"):
+        store.write_partition(DATASET, 2024, _COLUMNS, ())
+    store.write_partition(DATASET, 2024, _COLUMNS, (), allow_empty=True)
+    empty = _coverage(row_count=0, subjects=(), dates=(), revisions=())
+
+    for incoherent in (
+        _coverage(row_count=0, dates=(), revisions=()),
+        _coverage(row_count=0, subjects=(), revisions=()),
+    ):
+        with pytest.raises(PanelStorageError, match="names no subject, date or revision"):
+            store.record_coverage(incoherent)
+    store.record_coverage(empty)
+
+    stored = store.read_coverage(DATASET, 2024)
+    assert stored is not None and stored.row_count == 0
+    assert stored.subjects == () and stored.dates == ()
+
+
 def test_the_store_revalidates_coverage_instead_of_trusting_the_dataclass(
     tmp_path: Path,
 ) -> None:

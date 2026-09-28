@@ -543,8 +543,9 @@ def test_every_new_target_writes_a_partition_through_the_real_writers(
         # 2014-02-21 and closes on 2021-12-10.
         SW2014_MEMBERSHIP_DATASET: [2014, 2021],
         # Announcement years derived from period year 2025: its three interims were announced
-        # in 2025 and its annual on 2026-03-15, which is past this build's clock and dropped.
-        FINANCIAL_INDICATOR_DATASET: [EXTRA_YEAR],
+        # in 2025 and its annual on 2026-03-15, which is past this build's clock and dropped --
+        # so 2026 is recorded empty, as nothing announced in it yet (`V2-P6-018`).
+        FINANCIAL_INDICATOR_DATASET: [EXTRA_YEAR, EXTRA_YEAR + 1],
     }
     assert SECRET_TOKEN not in result.output
 
@@ -1170,8 +1171,14 @@ def test_fina_indicator_accumulates_its_period_years_into_one_write(
         if entry["dataset"] == FINANCIAL_INDICATOR_DATASET
     }
     # 2024: three interims of period year 2024. 2025: the annual of 2024 announced 2025-03-15
-    # *plus* the three interims of 2025 -- the row that a per-year loop destroys.
-    assert landed == {EXTRA_YEAR - 1: 3 * len(SECURITIES), EXTRA_YEAR: 4 * len(SECURITIES)}
+    # *plus* the three interims of 2025 -- the row that a per-year loop destroys. 2026: the
+    # announcement year 2025's annual files into, recorded empty on 8 January -- nothing is
+    # announced in it yet and no statutory deadline in it has passed (`V2-P6-018`).
+    assert landed == {
+        EXTRA_YEAR - 1: 3 * len(SECURITIES),
+        EXTRA_YEAR: 4 * len(SECURITIES),
+        EXTRA_YEAR + 1: 0,
+    }
     assert [
         str(entry["period"])
         for entry in extra_transport.requests_for(FINANCIAL_INDICATOR_DATASET + SWEEP)

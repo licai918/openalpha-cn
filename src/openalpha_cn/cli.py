@@ -75,13 +75,17 @@ from openalpha_cn.domain.daily_prices import (
 )
 from openalpha_cn.domain.factor import FactorError, FactorNote
 from openalpha_cn.domain.financial_statements import (
+    ANNOUNCEMENT_DATE_COLUMN,
     BALANCE_SHEET_DATASET,
     CASH_FLOW_DATASET,
     FINANCIAL_INDICATOR_DATASET,
     FINANCIAL_STATEMENT_DATASETS,
     INCOME_DATASET,
     REPORT_PERIOD_COLUMN,
+    STATUTORY_DISCLOSURE_DEADLINES,
     FinancialStatementError,
+    announcement_year_may_be_empty,
+    first_disclosure_deadline,
 )
 from openalpha_cn.domain.index_membership import (
     INDEX_WEIGHT_DATASET,
@@ -231,6 +235,7 @@ from openalpha_cn.panel_ingest import (
     withdrawal_keys,
     write_adjustment_factors,
     write_daily_panel,
+    write_empty_announcement_year,
     write_financial_statements,
     write_index_prices,
     write_index_weights,
@@ -4507,6 +4512,8 @@ def _build_statement_panel(
         reason=reason,
         extra=(str(year),),
     )
+    if not batches and _statement_year_may_be_empty(dataset, year, as_of):
+        return []
     if not batches:
         raise _panel_fail(
             PanelExit.unhealthy,
@@ -4522,29 +4529,6 @@ def _sweep_window_opens(window: str) -> datetime:
     report period's last day (nothing is announced about a quarter before it ends)."""
     day = int(window[6:]) if len(window) == 8 else 1
     return datetime(int(window[:4]), int(window[4:6]), day, tzinfo=PANEL_DATE_ZONE)
-
-
-STATUTORY_DISCLOSURE_DEADLINES: Final[Mapping[str, tuple[int, str]]] = MappingProxyType(
-    {
-        "0331": (0, "0430"),
-        "0630": (0, "0831"),
-        "0930": (0, "1031"),
-        "1231": (1, "0430"),
-    }
-)
-"""The last day a report period may be disclosed on, as `(years after the period, MMDD)`.
-
-The rule is 《上市公司信息披露管理办法》's: the annual report within four months of the fiscal
-year's end, the half-year report within two months of the first half's end, and the first- and
-third-quarter reports within one month of their quarters' ends -- so Q1 by 30 April, H1 by 31
-August, Q3 by 31 October, and the annual by 30 April of the following year.
-
-What it decides is when a whole-market `fina_indicator_vip` answer of **nothing** for a period
-stops being "not filed yet" and becomes a failed fetch (`_sweep_window_refuses_empty_from`). The
-period's own end is the wrong trigger: every period is empty for days after it ends, so a refusal
-there would fail every daily update for about two weeks after each quarter end. After the
-deadline, a whole market with not one filing for the period is not a timetable.
-"""
 
 
 def _sweep_window_closes(window: str) -> datetime:
@@ -4577,8 +4561,15 @@ def _sweep_statement_batches(
     year: int,
     as_of: datetime,
     label: str,
+    windows: Sequence[str] | None = None,
+    allow_empty: bool = False,
 ) -> list[ColumnarPanelBatch]:
     """Fetch one statement year for the whole market, window by window, kept to `registry`.
+
+    `windows` narrows the sweep to the ones an incremental build re-sweeps
+    (`_incremental_statement_batches`), and `allow_empty` is that build's: a handful of windows
+    that served nothing registered is ordinary when the year's other months are carried. Without
+    them, a year with nothing registered in it is refused unless `_statement_year_may_be_empty`.
 
     The windows are `statement_sweep_windows`': twelve announcement months, or four report
     periods for `fina_indicator`. A window that opens after `as_of` is not asked for -- nothing
@@ -4614,7 +4605,7 @@ def _sweep_statement_batches(
     """
     windows = tuple(
         window
-        for window in statement_sweep_windows(dataset, year)
+        for window in (statement_sweep_windows(dataset, year) if windows is None else windows)
         if _sweep_window_opens(window) <= as_of
     )
     unit = "report-period" if dataset == FINANCIAL_INDICATOR_DATASET else "month"
@@ -4677,6 +4668,8 @@ def _sweep_statement_batches(
         "chunks and re-requests)",
         err=True,
     )
+    if not collected and (allow_empty or _statement_year_may_be_empty(dataset, year, as_of)):
+        return []
     if not collected:
         raise _panel_fail(
             PanelExit.unhealthy,
@@ -4686,6 +4679,255 @@ def _sweep_statement_batches(
             "security is a fetch to investigate rather than an empty partition to write",
         )
     return collected
+
+
+def _statement_year_may_be_empty(dataset: str, year: int, as_of: datetime) -> bool:
+    """Whether `dataset`'s announcement year `year` may be written with nothing in it at `as_of`
+    (`V2-P6-018`): an announcement-year statement dataset, the year of `as_of` itself, and no
+    statutory deadline in it passed yet (`announcement_year_may_be_empty`).
+
+    What that admits is a year's first days before its first announcement -- three of the stored
+    years 2014-2026 had a first session with none. The year is then written empty
+    (`panel_ingest.write_empty_announcement_year`), so the readers answer "no filing yet" rather
+    than `partition_missing`. `fina_indicator` is not one: its windows are report periods, each
+    already held to its own deadline (`_sweep_window_refuses_empty_from`), and its empty
+    announcement year is written by the span phase.
+    """
+    day = as_of.astimezone(PANEL_DATE_ZONE).date()
+    return (
+        dataset in (INCOME_DATASET, BALANCE_SHEET_DATASET, CASH_FLOW_DATASET)
+        and day.year == year
+        and announcement_year_may_be_empty(year, day)
+    )
+
+
+STATEMENT_ROTATION_DAYS: Final[int] = 5
+"""The carried months of an incremental statement build are re-swept once a week, a fifth of them
+each weekday (`statement_resweep_windows`)."""
+
+STATEMENT_LISTING_LOOKBACK: Final[timedelta] = timedelta(days=30)
+"""How far before the stored partition's `as_of` a listing still counts as new to an incremental
+statement build. Measured on 2026-09-28: every one of the 18 securities that entered the registry
+between two stored builds (2026-09-01, 2026-09-27) has a `list_date` on or after the first of
+them, so the registry learns a listing on its day; the margin costs nothing, since all the new
+codes go in one request (`TushareProvider.fetch_panel_listed`)."""
+
+
+def statement_resweep_windows(
+    windows: Sequence[str], *, last_build: datetime, now: datetime
+) -> tuple[str, ...]:
+    """The month windows an incremental `income`/`balancesheet`/`cashflow` build re-sweeps.
+
+    ## The rule
+
+    - **Every month from the one before the stored partition's own `as_of` month onwards.** A
+      month that had not ended when the partition was stored, or had only just, is swept again,
+      so a daily build re-sweeps the current and the previous month -- and the month before that
+      on the first run of a month -- and a build after a gap re-sweeps everything since.
+    - **One fifth of the older, carried months each weekday**, by `(month - 1) % 5 == weekday`:
+      January, June and November on Monday, February, July and December on Tuesday, March and
+      August on Wednesday, April and September on Thursday, May and October on Friday. The three
+      disclosure peaks -- April, August, October -- fall on three different days. Every carried
+      month is re-swept once a week, or twice a week apart across a weekday holiday.
+
+    ## The evidence the window is sized from (2026-09-28, 18 live requests)
+
+    Two stored builds of 2026 (2026-09-01 and 2026-09-27 Shanghai) and a live re-sweep of
+    closed months 2, 3, 6 and 12 months old, compared row by row: across the three endpoints and
+    months January-July 2026, every row that appeared after a month had closed belonged to a
+    security new to the registry (all 18 listed on or after 2026-09-01), and none changed or
+    vanished; August -- the previous month at the first build -- gained 614 rows (84 of them new
+    listings') and 332 rows changed value. One row did land late in an old month:
+    `balancesheet` `000909.SZ`, period 2025-12-31, `ann_date` 2026-03-31, `update_flag` 1 and
+    `f_ann_date` 2026-09-28 -- a
+    correction filed six months after the date it is stored under. The trailing window cannot
+    reach that far at any affordable cost; the weekly rotation reaches it within a week. A full
+    re-sweep on one named day could not: on 31 December it is the whole year, up to 86 requests
+    for the three endpoints alone (2023's stored counts).
+
+    ## What incremental == full rests on
+
+    The partition this writes is the one a full build at the same `as_of` writes whenever the
+    upstream has not changed a carried month since it was last swept -- `V2-P6-003`'s premise for
+    the session-scoped targets, stated for the announcement months. A change to a carried month
+    reaches the store at the next build whose rotation covers it.
+    """
+    last = last_build.astimezone(PANEL_DATE_ZONE).date()
+    first = (last.year, last.month - 1) if last.month > 1 else (last.year - 1, 12)
+    weekday = now.astimezone(PANEL_DATE_ZONE).weekday()
+    chosen: list[str] = []
+    for window in windows:
+        month = (int(window[:4]), int(window[4:6]))
+        rotation = weekday < STATEMENT_ROTATION_DAYS and (month[1] - 1) % 5 == weekday
+        if month >= first or rotation:
+            chosen.append(window)
+    return tuple(chosen)
+
+
+def _recent_listings(store: PanelStore, *, now: datetime, since: datetime) -> frozenset[str]:
+    """The stored registry's securities listed on or after `since`'s day."""
+    universe = load_stock_universe(
+        store,
+        years=store.registered_years(STOCK_BASIC_DATASET),
+        as_of=now,
+        max_staleness=None,
+        require_years_through=now.astimezone(PANEL_DATE_ZONE).year,
+    )
+    day = since.astimezone(PANEL_DATE_ZONE).date()
+    return frozenset(entry.ts_code for entry in universe.securities if entry.listed_on >= day)
+
+
+def _incremental_statement_batches(
+    store: PanelStore,
+    provider: TushareProvider,
+    *,
+    dataset: str,
+    registry: Sequence[str],
+    year: int,
+    now: datetime,
+    label: str,
+) -> list[ColumnarPanelBatch]:
+    """`income`/`balancesheet`/`cashflow` under `--incremental` (`V2-P6-018`): re-sweep the
+    months that can still change, carry the rest, and fetch new listings whole.
+
+    - The months are `statement_resweep_windows`'. A year with no stored partition, or an empty
+      one, is swept whole: there is nothing to carry.
+    - The securities the registry gained since the partition was stored
+      (`STATEMENT_LISTING_LOOKBACK`) are fetched for the whole year in one request
+      (`TushareProvider.fetch_panel_listed`) and left out of the month sweep; their stored rows,
+      if any, are replaced by that answer.
+    - Every other stored row whose `ann_date` month is not re-swept is carried
+      (`carry_stored_rows_forward`), re-observed at `now` -- the stamp a full build at the same
+      `as_of` gives every row it fetches -- so the partition is hash-equal to that full build
+      under the premise `statement_resweep_windows` states.
+
+    Before `V2-P6-018` a daily build re-swept every month of the year every day: 90-115 requests
+    for the three endpoints by 31 December on the stored record, past R2 on its own.
+    """
+    coverage = store.read_coverage(dataset, year)
+    if coverage is None or not coverage.row_count:
+        return _build_statement_panel(
+            store,
+            provider,
+            dataset=dataset,
+            subjects=registry,
+            sweep=True,
+            year=year,
+            as_of=now,
+            label=label,
+            reason="",
+        )
+    opened = tuple(
+        window
+        for window in statement_sweep_windows(dataset, year)
+        if _sweep_window_opens(window) <= now
+    )
+    swept = statement_resweep_windows(opened, last_build=coverage.as_of, now=now)
+    listed = _recent_listings(
+        store, now=now, since=coverage.as_of - STATEMENT_LISTING_LOOKBACK
+    ) & frozenset(registry)
+    typer.echo(
+        f"INCREMENTAL {label} re-sweeps {len(swept)} of {len(opened)} opened month(s) "
+        f"{list(swept)} and carries the rest from the partition stored at "
+        f"{coverage.as_of.isoformat()}; {len(listed)} security(ies) listed since "
+        f"{(coverage.as_of - STATEMENT_LISTING_LOOKBACK).date().isoformat()} fetched for the "
+        "whole year",
+        err=True,
+    )
+    fetched: list[ColumnarPanelBatch] = []
+    if swept:
+        fetched.extend(
+            _sweep_statement_batches(
+                provider,
+                dataset,
+                registry=frozenset(registry) - listed,
+                year=year,
+                as_of=now,
+                label=label,
+                windows=swept,
+                allow_empty=True,
+            )
+        )
+    if listed:
+        _echo_budget(
+            f"{dataset} year={year} listed",
+            -(-len(listed) // TUSHARE_TS_CODE_LIST_LIMIT),
+            "requests",
+            f"{len(listed)} newly listed security(ies), their whole year in one list per "
+            f"{TUSHARE_TS_CODE_LIST_LIMIT} codes",
+        )
+        fetched.append(
+            _fetch_listed(provider, dataset, year=year, codes=tuple(sorted(listed)), as_of=now)
+        )
+    arrived = [batch for batch in fetched if batch.status == "success"]
+    months = frozenset(swept)
+
+    def carried(row: Mapping[str, object]) -> bool:
+        announced = str(row[ANNOUNCEMENT_DATE_COLUMN])
+        return (
+            f"{announced[:4]}{announced[5:7]}" not in months
+            and str(row[SUBJECT_COLUMN_NAME]) not in listed
+        )
+
+    base = (
+        merge_panel_batches(arrived)
+        if arrived
+        else ColumnarPanelBatch(
+            provider_id=coverage.provider_id,
+            dataset=dataset,
+            kind=coverage.kind,
+            as_of=now,
+            fetched_at=now,
+            status="no_data",
+            no_data_reason=f"no filing in the re-swept months {list(swept)} of {year}",
+        )
+    )
+    result = carry_stored_rows_forward(store, base, year=year, retain=carried, observed_at=now)
+    return [result] if result.status == "success" else []
+
+
+def _fetch_listed(
+    provider: TushareProvider,
+    dataset: str,
+    *,
+    year: int,
+    codes: tuple[str, ...],
+    as_of: datetime,
+) -> ColumnarPanelBatch:
+    """`TushareProvider.fetch_panel_listed` through `_fetch_panel`'s credential boundary."""
+    request = ProviderRequest(dataset=dataset, as_of=as_of, subjects=(str(year),))
+    try:
+        batch = provider.fetch_panel_listed(request, codes=codes)
+    except ProviderFailure as failure:
+        raise _panel_fail(
+            PanelExit.provider_failure,
+            f"provider {failure.provider_id} refused dataset {dataset} for the newly listed "
+            f"securities: {failure.category}. The failure's own message is withheld because it "
+            "can carry the credential it was sent with",
+        ) from failure
+    kept = keep_panel_subjects(batch, frozenset(codes)) if batch.status == "success" else None
+    return batch if kept is None else kept
+
+
+def _write_statement_year(
+    store: PanelStore,
+    *,
+    dataset: str,
+    year: int,
+    batches: Sequence[ColumnarPanelBatch],
+    now: datetime,
+) -> list[PartitionRef]:
+    """Write an announcement year's statement batches -- or, when there are none and the year may
+    be empty, record it empty (`panel_ingest.write_empty_announcement_year`)."""
+    if any(batch.status == "success" for batch in batches):
+        return list(write_financial_statements(store, batches))
+    typer.echo(
+        f"EMPTY {dataset} year={year}: no filing by a registered security announced yet at "
+        f"{now.isoformat()}, before the year's first statutory deadline "
+        f"({first_disclosure_deadline(year).isoformat()}); recorded as an empty partition",
+        err=True,
+    )
+    return [write_empty_announcement_year(store, dataset=dataset, year=year, observed_at=now)]
 
 
 def _build_index_weights(
@@ -5707,28 +5949,38 @@ def _build_panel(
     for dataset in (INCOME_DATASET, BALANCE_SHEET_DATASET, CASH_FLOW_DATASET):
         if dataset not in targets:
             continue
-        written.setdefault(dataset, []).extend(
-            write_financial_statements(
+        # The build's own clock, with the announcement year as the window. These three filter
+        # `ann_date`, so the window is that year; and a row filed in it can be stored as a
+        # version re-announced in a later year, which a bound at the year's end would drop from
+        # this partition at every rebuild. See `_financial_statement_params`.
+        bound = _announcement_year_bound(year, now)
+        label = f"{dataset} year={year}"
+        if incremental and not subjects:
+            batches = _incremental_statement_batches(
                 store,
-                _build_statement_panel(
-                    store,
-                    provider,
-                    dataset=dataset,
-                    subjects=universe,
-                    # `--subject` names securities, and only then is the year fetched one of
-                    # them at a time; otherwise it is swept for the whole market.
-                    sweep=not subjects,
-                    year=year,
-                    # The build's own clock, with the announcement year as the window. These
-                    # three filter `ann_date`, so the window is that year; and a row filed in it
-                    # can be stored as a version re-announced in a later year, which a bound at
-                    # the year's end would drop from this partition at every rebuild. See
-                    # `_financial_statement_params`.
-                    as_of=_announcement_year_bound(year, now),
-                    label=f"{dataset} year={year}",
-                    reason=f"one per named security; ts_code is mandatory on {dataset}",
-                ),
+                provider,
+                dataset=dataset,
+                registry=universe,
+                year=year,
+                now=bound,
+                label=label,
             )
+        else:
+            batches = _build_statement_panel(
+                store,
+                provider,
+                dataset=dataset,
+                subjects=universe,
+                # `--subject` names securities, and only then is the year fetched one of them at
+                # a time; otherwise it is swept for the whole market.
+                sweep=not subjects,
+                year=year,
+                as_of=bound,
+                label=label,
+                reason=f"one per named security; ts_code is mandatory on {dataset}",
+            )
+        written.setdefault(dataset, []).extend(
+            _write_statement_year(store, dataset=dataset, year=year, batches=batches, now=bound)
         )
     return sessions, halt_state
 
@@ -5813,9 +6065,43 @@ def _build_span_targets(
         _refuse_shrinking_statement_years(
             store, dataset=FINANCIAL_INDICATOR_DATASET, batches=batches
         )
+        refs = list(write_financial_statements(store, batches))
         written.setdefault(FINANCIAL_INDICATOR_DATASET, []).extend(
-            write_financial_statements(store, batches)
+            [*refs, *_empty_indicator_year(store, periods=years, refs=refs, now=now)]
         )
+
+
+def _empty_indicator_year(
+    store: PanelStore, *, periods: Sequence[int], refs: Sequence[PartitionRef], now: datetime
+) -> list[PartitionRef]:
+    """`fina_indicator`'s announcement year of `now`, recorded empty when the sweep could have
+    filed into it and nothing was (`V2-P6-018`).
+
+    A sweep of report-period year Y-1 or Y can file into announcement year Y (Y-1's annual and
+    Y's interims are announced in it). Before anything is announced in Y -- a year's first days,
+    `announcement_year_may_be_empty` -- the sweep writes the years it has rows for and not Y, and
+    every reader of Y would find `partition_missing`. Recorded empty instead, by the writer the
+    three announcement-year targets use, so the readers answer "no filing yet". Nothing is
+    written once a deadline in Y has passed, or when Y already holds rows.
+    """
+    day = now.astimezone(PANEL_DATE_ZONE).date()
+    year = day.year
+    if year in {ref.year for ref in refs} or not {year - 1, year} & set(periods):
+        return []
+    stored = store.read_coverage(FINANCIAL_INDICATOR_DATASET, year)
+    if (stored is not None and stored.row_count) or not announcement_year_may_be_empty(year, day):
+        return []
+    typer.echo(
+        f"EMPTY {FINANCIAL_INDICATOR_DATASET} year={year}: no report announced yet at "
+        f"{now.isoformat()}, before the year's first statutory deadline "
+        f"({first_disclosure_deadline(year).isoformat()}); recorded as an empty partition",
+        err=True,
+    )
+    return [
+        write_empty_announcement_year(
+            store, dataset=FINANCIAL_INDICATOR_DATASET, year=year, observed_at=now
+        )
+    ]
 
 
 def _carry_unswept_report_periods(
@@ -6220,14 +6506,17 @@ _BUILD_INCREMENTAL_HELP = (
     "writes, upstream_defects included. A year with nothing stored is fetched whole. A stored "
     "year the slice cannot extend into that result -- a gap, a horizon past this build's, a "
     "listing the registry has since moved -- is refused before anything is fetched, with the "
-    "full build to run instead. fina_indicator keeps, in every announcement year it writes, the "
-    "stored rows of the report-period years it did not sweep (V2-P6-011). The other targets are "
-    "one request a year or a whole-year sweep and run as they always do. See "
-    "`_incremental_start` and `_carry_unswept_report_periods`. A stored row the upstream no "
-    "longer serves on a session fetched again -- full build or incremental -- costs one more "
-    "request for that session and, confirmed, is recorded as withdrawn_after_publication and kept "
-    "whole in its withdrawn_* dataset (V2-P6-016); an incremental build also asks again each "
-    "session holding such a record, so a re-publication is seen as a full build sees it."
+    "full build to run instead. income, balancesheet and cashflow re-sweep the months from the one "
+    "before the stored partition's as_of onwards plus a fifth of the older months each weekday, "
+    "fetch securities listed since then for the whole year, and carry every other stored row "
+    "(V2-P6-018). fina_indicator keeps, in every announcement year it writes, the stored rows of "
+    "the report-period years it did not sweep (V2-P6-011). The other targets are one request a "
+    "year and run as they always do. See `_incremental_start`, `statement_resweep_windows` and "
+    "`_carry_unswept_report_periods`. A stored row the upstream no longer serves on a session "
+    "fetched again -- full build or incremental -- costs one more request for that session and, "
+    "confirmed, is recorded as withdrawn_after_publication and kept whole in its withdrawn_* "
+    "dataset (V2-P6-016); an incremental build also asks again each session holding such a "
+    "record, so a re-publication is seen as a full build sees it."
 )
 
 _BUILD_INDUSTRY_SWEEP_HELP = (

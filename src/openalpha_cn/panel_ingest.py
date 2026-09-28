@@ -311,7 +311,7 @@ from bisect import bisect_right
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence, Set
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from itertools import pairwise
 from statistics import median
 from types import MappingProxyType
@@ -352,6 +352,8 @@ from openalpha_cn.domain.financial_statements import (
     REVISION_LABEL_COLUMN,
     FinancialStatementError,
     StatementHistory,
+    announcement_year_may_be_empty,
+    first_disclosure_deadline,
     statement_histories_from_panel_rows,
     statement_panel_columns,
 )
@@ -568,7 +570,9 @@ def write_panel_batch(
     writing it would either raise deep inside the store ("cannot write an empty partition
     batch") or, worse, be mistaken for a successful empty partition. Explicit no-data is a
     result to record somewhere, not a partition to create -- the same distinction
-    `ProviderBatch` draws between `status="no_data"` and an empty success.
+    `ProviderBatch` draws between `status="no_data"` and an empty success. The one empty
+    partition this module writes is a statement announcement year with nothing filed in it yet,
+    through its own door (`write_empty_announcement_year`, `V2-P6-018`).
     """
     if batch.status != "success":
         raise PanelBatchError(
@@ -6544,6 +6548,129 @@ def write_financial_statements(
         )
         for year, yearly in by_year
     )
+
+
+def write_empty_announcement_year(
+    store: PanelStore,
+    *,
+    dataset: str,
+    year: int,
+    observed_at: datetime,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> PartitionRef:
+    """Record that nothing has been filed in announcement year `year` yet (`V2-P6-018`).
+
+    ## Why an empty partition, when `write_panel_batch` refuses one
+
+    A year's first sessions can come before its first announcement -- the stored record has three
+    such years in 2014-2026 (`announcement_year_may_be_empty`) -- and a statement year that has no
+    partition is `partition_missing` to every reader, so a factor that reads statements could not
+    be built on those days at all. "No filing yet" is a true answer on those days, and the only
+    honest way to give it is a partition that says so: zero rows, and a coverage record that
+    states when the observation was made. Leaving the year unstored would make the readers either
+    refuse or -- if taught to skip a missing year -- answer from the previous year with nothing
+    to say the current one was ever looked at.
+
+    ## What the coverage record says, and why it cannot answer stale data
+
+    `row_count` 0 and no subjects, dates or revisions: empty. `as_of`, `fetched_at` and
+    `last_event_time` are the observation instant, so the partition is as fresh as the
+    observation and no fresher -- a reader with a staleness bound is refused once the observation
+    is older than it, exactly as it would be for a partition whose newest row is that old; and
+    the first write of a real row replaces the partition whole. `max_available_time` is the first
+    instant of the year: nothing in the partition becomes knowable later, so no reader at or after
+    the year's start is held back by it. The fields are the dataset's own shape, read from its
+    newest stored year, so the empty partition reads back with the same columns as a full one.
+    `batch_digest` is the digest of the `no_data` batch naming the reason.
+
+    ## Refused when it could hide something
+
+    Only while no statutory deadline in `year` has passed at `observed_at`
+    (`announcement_year_may_be_empty`), only for the year of `observed_at` itself, and never over
+    a stored partition that holds rows -- a whole market that has announced nothing after a
+    deadline is a failed fetch, and an empty write over filed rows is a loss.
+    """
+    if dataset not in FINANCIAL_STATEMENT_DATASETS:
+        raise FinancialStatementError(
+            f"expected one of the financial-statement datasets "
+            f"{list(FINANCIAL_STATEMENT_DATASETS)}, got {dataset!r}"
+        )
+    zone = _resolve_timezone(date_timezone)
+    day = observed_at.astimezone(zone).date()
+    deadline = first_disclosure_deadline(year)
+    if day.year != year or not announcement_year_may_be_empty(year, day):
+        raise FinancialStatementError(
+            f"{dataset} announcement year {year} served no filing by a registered security as of "
+            f"{observed_at.isoformat()}, and an empty year is admissible only within that year "
+            f"and only until its first statutory disclosure deadline ({deadline.isoformat()}) has "
+            "passed. After it, a whole market that has announced nothing is a failed fetch"
+        )
+    stored = store.read_coverage(dataset, year)
+    if stored is not None and stored.row_count:
+        raise FinancialStatementError(
+            f"{dataset} year={year} already holds {stored.row_count} filed row(s); an empty "
+            "answer now would replace them with nothing, which is a lost fetch and not a fact "
+            "about the year"
+        )
+    shaped = [
+        coverage
+        for coverage in (
+            store.read_coverage(dataset, other) for other in store.registered_years(dataset)
+        )
+        if coverage is not None and coverage.row_count
+    ]
+    if not shaped:
+        raise FinancialStatementError(
+            f"{dataset} has no stored year with rows to take the partition's columns from; build "
+            f"the year before {year} first"
+        )
+    template = max(shaped, key=lambda coverage: coverage.year)
+    reason = (
+        f"no {dataset} filing by a registered security announced in {year} as of "
+        f"{observed_at.isoformat()}; the year's first statutory disclosure deadline, "
+        f"{deadline.isoformat()}, had not passed"
+    )
+    marker = ColumnarPanelBatch(
+        provider_id=template.provider_id,
+        dataset=dataset,
+        kind=template.kind,
+        as_of=observed_at,
+        fetched_at=observed_at,
+        status="no_data",
+        no_data_reason=reason,
+    )
+    reference = store.write_partition(
+        dataset,
+        year,
+        tuple(
+            ColumnSpec(field.name, PANEL_DUCKDB_TYPES[cast(PanelColumnKind, field.kind)])
+            for field in template.fields
+        ),
+        (),
+        allow_empty=True,
+    )
+    store.record_coverage(
+        PartitionCoverage(
+            dataset=dataset,
+            year=year,
+            provider_id=template.provider_id,
+            kind=template.kind,
+            schema_version=template.schema_version,
+            batch_digest=marker.content_digest,
+            as_of=observed_at,
+            fetched_at=observed_at,
+            row_count=0,
+            date_timezone=date_timezone,
+            last_event_time=observed_at,
+            max_available_time=datetime.combine(date(year, 1, 1), time(0, 0), tzinfo=zone),
+            revised_row_count=0,
+            subjects=(),
+            fields=template.fields,
+            dates=(),
+            revisions=(),
+        )
+    )
+    return reference
 
 
 def _in_statement_order(batch: ColumnarPanelBatch) -> ColumnarPanelBatch:

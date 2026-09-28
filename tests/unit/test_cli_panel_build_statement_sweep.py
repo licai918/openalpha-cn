@@ -19,7 +19,7 @@ the registry at all.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final
 
@@ -35,7 +35,9 @@ from openalpha_cn.domain.financial_statements import (
     STATEMENT_DATA_COLUMNS,
 )
 from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET
+from openalpha_cn.panel.catalog import PanelStorageError
 from openalpha_cn.panel.store import PanelStore
+from openalpha_cn.panel_ingest import load_statement_histories
 from openalpha_cn.providers import tushare
 
 runner = CliRunner()
@@ -629,3 +631,298 @@ def test_a_capped_single_day_stores_what_an_uncapped_answer_stores(
     # it. Both builds count the same two unregistered securities (it and the filler), store none.
     assert "2 securities outside the stored registry" in uncapped.stderr
     assert "2 securities outside the stored registry" in capped.stderr
+
+
+# --- V2-P6-018: an announcement year with no filing yet ----------------------------------------
+
+JANUARY_2: Final[datetime] = datetime(2026, 1, 2, 4, 0, tzinfo=UTC)
+JANUARY_FILINGS: Final = (*FILINGS, (FILLER, "20250930", "20251020", "20251020", "1", 81.0))
+"""`FILINGS` with October 2025 filled: its only filing there is stored as a version re-announced on
+5 January 2026, not yet knowable on 2 January, and a closed empty month is refused."""
+"""12:00 Asia/Shanghai on 2 January 2026: nothing in `FILINGS` is announced in 2026 yet -- the
+first is `FILLER` on 15 January. The stored record has three such first sessions in 2014-2026."""
+
+
+def _no_filing_yet(root: Path, dataset: str, year: int) -> None:
+    """The year is stored, empty, and says so: zero rows, a coverage record of zero rows observed
+    at 2 January, and readers, the doctor and the gate that answer from it without refusing."""
+    store = PanelStore(root / "panel")
+    coverage = store.read_coverage(dataset, year)
+    assert coverage is not None and coverage.row_count == 0
+    assert coverage.subjects == () and coverage.dates == ()
+    assert coverage.as_of == JANUARY_2 and coverage.last_event_time == JANUARY_2
+    assert _stored(root, dataset, year)[1] == []
+    for command in (["panel", "doctor"], ["data-check"]):
+        checked = runner.invoke(
+            app,
+            [
+                *command,
+                "--runtime-dir",
+                str(root),
+                "--year",
+                str(year),
+                "--dataset",
+                dataset,
+                "--as-of",
+                JANUARY_2.isoformat(),
+                "--no-calendar",
+            ],
+        )
+        assert checked.exit_code == 0, (command, checked.output)
+
+
+@pytest.mark.parametrize("dataset", ["income", "balancesheet", "cashflow"])
+def test_on_2_january_an_announcement_year_with_no_filing_yet_is_recorded_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dataset: str
+) -> None:
+    """Before `V2-P6-018` the sweep refused the year -- "none of the 1 month windows served a
+    filing by a security in the stored registry" -- and a statement-reading configuration could
+    not be run on a year's first session. The year is now admissible while no statutory deadline
+    in it has passed (30 April), recorded empty, and read as "no filing yet": the histories answer
+    from 2025, and the doctor and the gate clear the empty year."""
+    _install(monkeypatch, Market(JANUARY_FILINGS), clock=JANUARY_2)
+    seeded = _build(tmp_path, *_swept(dataset, years=("--year", "2025")))
+    assert seeded.exit_code == PanelExit.ok, seeded.output
+
+    result = _build(tmp_path, *_swept(dataset, years=("--year", "2026")))
+
+    assert result.exit_code == PanelExit.ok, result.output
+    assert f"EMPTY {dataset} year=2026" in result.stderr
+    _no_filing_yet(tmp_path, dataset, 2026)
+    histories = load_statement_histories(
+        PanelStore(tmp_path / "panel"),
+        dataset=dataset,
+        years=(2025, 2026),
+        as_of=JANUARY_2,
+        max_staleness=None,
+    )
+    assert set(histories) == {"000001.SZ", "000002.SZ", "600000.SH"}
+
+
+def test_on_2_january_fina_indicators_announcement_year_with_no_report_yet_is_recorded_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`fina_indicator` is swept by report period, so its build does not refuse: period year 2025
+    files into announcement year 2025, and 2026 -- which the 2025 annuals will file into -- was
+    simply not written, `partition_missing` to every reader. It is now recorded empty."""
+    _install(monkeypatch, Market(JANUARY_FILINGS), clock=JANUARY_2)
+
+    result = _build(tmp_path, *_swept(FINANCIAL_INDICATOR_DATASET, years=("--year", "2025")))
+
+    assert result.exit_code == PanelExit.ok, result.output
+    assert f"EMPTY {FINANCIAL_INDICATOR_DATASET} year=2026" in result.stderr
+    _no_filing_yet(tmp_path, FINANCIAL_INDICATOR_DATASET, 2026)
+
+
+def test_an_empty_year_is_as_fresh_as_its_observation_and_no_fresher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Observed empty on 20 January (nothing registered filed in 2026 yet). A reader on 25
+    January with a twenty-day bound reads it -- the observation is five days old, though the year
+    began twenty-four days before. A reader in March with a thirty-day bound is refused, rather
+    than told that nothing has been filed since January."""
+    filings = [f for f in JANUARY_FILINGS if f[2] < "20260101" or f[0] not in REGISTERED]
+    _install(monkeypatch, Market(filings), clock=_noon("20260120"))
+    assert _build(tmp_path, *_swept(INCOME_DATASET, years=("--year", "2025"))).exit_code == 0
+    assert _build(tmp_path, *_swept(INCOME_DATASET, years=("--year", "2026"))).exit_code == 0
+    store = PanelStore(tmp_path / "panel")
+
+    fresh = load_statement_histories(
+        store,
+        dataset=INCOME_DATASET,
+        years=(2025, 2026),
+        as_of=_noon("20260125"),
+        max_staleness=timedelta(days=20),
+    )
+    assert fresh
+    with pytest.raises(PanelStorageError, match="stale"):
+        load_statement_histories(
+            store,
+            dataset=INCOME_DATASET,
+            years=(2025, 2026),
+            as_of=_noon("20260302"),
+            max_staleness=timedelta(days=30),
+        )
+
+
+@pytest.mark.parametrize(("clock", "admitted"), [("20260430", True), ("20260501", False)])
+def test_an_announcement_year_may_be_empty_only_until_its_first_statutory_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clock: str, admitted: bool
+) -> None:
+    """Every month of 2026 answered -- by an unregistered filer -- and none by a registered one.
+    On 30 April, the day the 2025 annual reports and the 2026 first quarters are due, that is
+    still "not filed yet"; on 1 May it is a failed fetch and the build is refused."""
+    filings = [f for f in FILINGS if f[2] < "20260101" or f[0] not in REGISTERED]
+    filings.append((FILLER, "20251231", "20260420", "20260420", "1", 81.0))
+    _install(monkeypatch, Market(filings), clock=_noon(clock))
+    assert _build(tmp_path, *_swept(INCOME_DATASET, years=("--year", "2025"))).exit_code == 0
+
+    result = _build(tmp_path, *_swept(INCOME_DATASET, years=("--year", "2026")))
+
+    store = PanelStore(tmp_path / "panel")
+    if admitted:
+        assert result.exit_code == PanelExit.ok, result.output
+        coverage = store.read_coverage(INCOME_DATASET, 2026)
+        assert coverage is not None and coverage.row_count == 0
+    else:
+        assert result.exit_code == PanelExit.unhealthy
+        assert "none of the 5 month windows served a filing" in result.output
+        assert 2026 not in store.registered_years(INCOME_DATASET)
+
+
+def test_an_empty_year_is_never_written_over_filed_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty answer where rows are stored is a lost fetch, not a fact about the year."""
+    from openalpha_cn.domain.financial_statements import FinancialStatementError
+    from openalpha_cn.panel_ingest import write_empty_announcement_year
+
+    _install(monkeypatch, Market(FILINGS), clock=_noon("20260320"))
+    assert _build(tmp_path, *_swept(INCOME_DATASET, years=("--year", "2026"))).exit_code == 0
+    store = PanelStore(tmp_path / "panel")
+
+    with pytest.raises(FinancialStatementError, match="already holds"):
+        write_empty_announcement_year(
+            store, dataset=INCOME_DATASET, year=2026, observed_at=_noon("20260320")
+        )
+
+
+# --- V2-P6-018: an incremental build re-sweeps the months that can still change ----------------
+
+
+@pytest.mark.parametrize(
+    ("last_build", "now", "expected"),
+    [
+        # Daily: the previous and the current month, plus Thursday's April and September.
+        ("20251210", "20251211", ["202504", "202509", "202511", "202512"]),
+        # The first run of a month reaches back to the month before the previous one.
+        ("20251128", "20251201", ["202501", "202506", "202510", "202511", "202512"]),
+        # A gap: everything since the month before the stored build, plus Tuesday's February.
+        (
+            "20250610",
+            "20251209",
+            [
+                "202502",
+                "202505",
+                "202506",
+                "202507",
+                "202508",
+                "202509",
+                "202510",
+                "202511",
+                "202512",
+            ],
+        ),
+        # A weekend run re-sweeps the trailing months only.
+        ("20251212", "20251213", ["202511", "202512"]),
+    ],
+)
+def test_the_months_an_incremental_build_re_sweeps(
+    last_build: str, now: str, expected: list[str]
+) -> None:
+    windows = tuple(f"2025{month:02d}" for month in range(1, 13))
+    assert (
+        list(cli.statement_resweep_windows(windows, last_build=_noon(last_build), now=_noon(now)))
+        == expected
+    )
+
+
+LISTED_LATE: Final[str] = "300999.SZ"
+"""Listed on 5 December 2025, after the seed build: its pre-listing filing is dated in May."""
+
+
+class GrowingMarket(Market):
+    """`Market` whose registry gains `LISTED_LATE` once `grown` is set."""
+
+    grown = False
+
+    def post(self, payload: dict[str, Any]) -> dict[str, Any]:
+        answer = super().post(payload)
+        if payload["api_name"] == STOCK_BASIC_DATASET and self.grown:
+            answer["data"]["items"].append(
+                [LISTED_LATE, LISTED_LATE, "SZSE", "创业板", "L", "20251205", None]
+            )
+        return answer
+
+
+def _monthly_filings() -> list[tuple[str, str, str, str, str, float]]:
+    """A registered filing in every month of 2025 (so a changed one can be placed anywhere),
+    April's cap-reaching day kept from `FILINGS`."""
+    rows = [f for f in FILINGS if f[2].startswith("2025")]
+    rows.extend(
+        ("000002.SZ", "20241231", f"2025{month:02d}20", f"2025{month:02d}20", "1", 40.0 + month)
+        for month in range(1, 13)
+    )
+    rows.append((LISTED_LATE, "20241231", "20250520", "20250520", "1", 77.0))
+    return rows
+
+
+def _changed(
+    filings: Sequence[tuple[str, str, str, str, str, float]], month: int
+) -> list[tuple[str, str, str, str, str, float]]:
+    """`filings` with 000002.SZ's filing announced in `month` restated in place (same key)."""
+    marker = f"2025{month:02d}20"
+    return [
+        (*f[:5], f[5] + 1000.0) if f[0] == "000002.SZ" and f[2] == marker else f for f in filings
+    ]
+
+
+@pytest.mark.parametrize(("month", "caught"), [(11, True), (9, True), (6, False)])
+def test_an_incremental_build_matches_a_full_one_unless_a_carried_month_changed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, month: int, caught: bool
+) -> None:
+    """Seeded on Wednesday 10 December 2025; on Thursday 11 December the upstream has restated a
+    filing announced in `month` and the registry has gained a security whose filing is dated May.
+
+    November is inside the trailing window and September is Thursday's rotation, so the change is
+    re-swept and the incremental partition is hash-equal to a full build at the same `as_of`. June
+    is carried that day -- the premise, stated rather than hidden: the incremental partition then
+    still holds the old value until June's rotation day, and differs from the full build by it.
+    The new listing's May filing is fetched either way, by the one listed-securities request."""
+    market = _install(
+        monkeypatch,
+        GrowingMarket(_monthly_filings(), listed=f"{YEAR}0102"),
+        clock=_noon("20251210"),
+    )
+    seeded = _build(tmp_path / "daily", *_swept(INCOME_DATASET), "--incremental")
+    assert seeded.exit_code == PanelExit.ok, seeded.output
+
+    market.filings = tuple(_changed(market.filings, month))
+    market.grown = True
+    market.payloads.clear()
+    monkeypatch.setattr(cli, "_panel_clock", lambda: _noon("20251211"))
+    daily = _build(tmp_path / "daily", *_swept(INCOME_DATASET), "--incremental")
+    assert daily.exit_code == PanelExit.ok, daily.output
+    full = _build(tmp_path / "full", *_swept(INCOME_DATASET))
+    assert full.exit_code == PanelExit.ok, full.output
+
+    daily_hash, daily_rows = _stored(tmp_path / "daily", INCOME_DATASET, YEAR)
+    full_hash, _full_rows = _stored(tmp_path / "full", INCOME_DATASET, YEAR)
+    assert any(row[0] == LISTED_LATE for row in daily_rows)
+    assert (daily_hash == full_hash) is caught
+    restated = [row for row in daily_rows if row[0] == "000002.SZ" and row[-1] > 1000.0]
+    assert bool(restated) is caught
+
+
+def test_an_incremental_build_asks_only_for_the_re_swept_months_and_the_new_listing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    market = _install(
+        monkeypatch,
+        GrowingMarket(_monthly_filings(), listed=f"{YEAR}0102"),
+        clock=_noon("20251210"),
+    )
+    assert _build(tmp_path, *_swept(INCOME_DATASET), "--incremental").exit_code == 0
+    market.grown = True
+    market.payloads.clear()
+    monkeypatch.setattr(cli, "_panel_clock", lambda: _noon("20251211"))
+
+    result = _build(tmp_path, *_swept(INCOME_DATASET), "--incremental")
+
+    assert result.exit_code == PanelExit.ok, result.output
+    asked = [e["params"] for e in market.payloads if e["api_name"] == "income_vip"]
+    months = sorted({str(p["start_date"])[:6] for p in asked if "ts_code" not in p})
+    assert months == ["202504", "202509", "202511", "202512"]
+    (listed,) = [p for p in asked if "ts_code" in p]
+    assert listed == {"start_date": "20250101", "end_date": "20251231", "ts_code": LISTED_LATE}
+    assert "INCREMENTAL income year=2025 re-sweeps 4 of 12" in result.stderr

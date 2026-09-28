@@ -1014,10 +1014,18 @@ class PanelStore:
         year: int,
         columns: Sequence[ColumnSpec],
         rows: Sequence[tuple[object, ...]],
+        *,
+        allow_empty: bool = False,
     ) -> PartitionRef:
         """Write (or idempotently no-op, or overwrite) one `(dataset, year)` partition.
 
         See the module docstring's "Write and idempotency semantics" section.
+
+        `allow_empty` (`V2-P6-018`) is how a zero-row partition gets written, and it is opt-in at
+        the call so an empty batch can never reach it by accident: its only caller is
+        `panel_ingest.write_empty_announcement_year`, which writes a statement announcement year
+        in which nothing has been filed yet, and only while no statutory deadline in it has
+        passed. Every other caller still gets "cannot write an empty partition batch".
 
         Raises `PanelStorageError` if `dataset` is not a single, plain path segment --
         see `_validate_dataset` and the module docstring's "Dataset name validation"
@@ -1034,7 +1042,7 @@ class PanelStore:
         _validate_dataset(dataset)
         if not columns:
             raise PanelStorageError("cannot write a partition with zero columns")
-        if not rows:
+        if not rows and not allow_empty:
             raise PanelStorageError("cannot write an empty partition batch")
         # Read (and check) the clock before anything is written, so a caller whose clock is
         # unusable fails without leaving a half-registered partition on disk.
@@ -1061,7 +1069,8 @@ class PanelStore:
         )
         with duckdb.connect(":memory:") as staging:
             staging.execute(f"CREATE TABLE staging ({column_ddl})")
-            _insert_columnar(staging, columns, rows)
+            if rows:
+                _insert_columnar(staging, columns, rows)
             staging.execute(
                 "COPY staging TO ? (FORMAT PARQUET, COMPRESSION ZSTD)", [str(temporary)]
             )
@@ -2756,20 +2765,24 @@ def _write_coverage(
                 coverage.partition_content_hash,
             ],
         )
-        connection.executemany(
-            "INSERT INTO panel_partition_subjects (dataset, year, subject) VALUES (?, ?, ?)",
-            [(*key, subject) for subject in coverage.subjects],
-        )
+        # An empty partition's record (`V2-P6-018`) names no subject and no date; DuckDB's
+        # `executemany` refuses an empty parameter list, so those censuses are skipped, not sent.
+        if coverage.subjects:
+            connection.executemany(
+                "INSERT INTO panel_partition_subjects (dataset, year, subject) VALUES (?, ?, ?)",
+                [(*key, subject) for subject in coverage.subjects],
+            )
         connection.executemany(
             "INSERT INTO panel_partition_fields (dataset, year, ordinal, field_name, field_kind) "
             "VALUES (?, ?, ?, ?, ?)",
             [(*key, ordinal, item.name, item.kind) for ordinal, item in enumerate(coverage.fields)],
         )
-        connection.executemany(
-            "INSERT INTO panel_partition_dates (dataset, year, event_date, row_count) "
-            "VALUES (?, ?, ?, ?)",
-            [(*key, day.event_date, day.row_count) for day in coverage.dates],
-        )
+        if coverage.dates:
+            connection.executemany(
+                "INSERT INTO panel_partition_dates (dataset, year, event_date, row_count) "
+                "VALUES (?, ?, ?, ?)",
+                [(*key, day.event_date, day.row_count) for day in coverage.dates],
+            )
         if coverage.revisions:
             connection.executemany(
                 "INSERT INTO panel_partition_revisions (dataset, year, revision_label, row_count) "
@@ -2964,8 +2977,20 @@ def _validated_coverage(coverage: PartitionCoverage) -> PartitionCoverage:
         _require_aware(getattr(coverage, name), f"coverage {name}")
 
     row_count = coverage.row_count
-    if type(row_count) is not int or row_count < 1:
+    if type(row_count) is not int or row_count < 0:
         raise PanelStorageError(f"coverage row_count must be a positive int; got {row_count!r}")
+    if row_count == 0:
+        # `V2-P6-018`: the record of a partition written with `allow_empty` -- nothing in it,
+        # and nothing it names. Coherent or refused: a zero count beside a subject, a date, a
+        # revision or a revised row describes a partition that could not exist.
+        if coverage.subjects or coverage.dates or coverage.revisions or coverage.revised_row_count:
+            raise PanelStorageError(
+                "coverage row_count must be a positive int, or 0 for an empty partition that "
+                f"names no subject, date or revision; got {row_count!r}"
+            )
+        if not coverage.fields:
+            raise PanelStorageError("coverage must name at least one field")
+        return coverage
     revised = coverage.revised_row_count
     if type(revised) is not int or not 0 <= revised <= row_count:
         raise PanelStorageError(

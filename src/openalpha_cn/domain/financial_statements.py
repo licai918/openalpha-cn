@@ -394,6 +394,61 @@ STATEMENT_DATA_COLUMNS: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
 STATEMENT_KEY_COLUMNS: Final[tuple[str, ...]] = (REPORT_PERIOD_COLUMN, ANNOUNCEMENT_DATE_COLUMN)
 """The two date columns every one of the four endpoints carries."""
 
+STATUTORY_DISCLOSURE_DEADLINES: Final[Mapping[str, tuple[int, str]]] = MappingProxyType(
+    {
+        "0331": (0, "0430"),
+        "0630": (0, "0831"),
+        "0930": (0, "1031"),
+        "1231": (1, "0430"),
+    }
+)
+"""The last day a report period may be disclosed on, as `(years after the period, MMDD)`.
+
+The rule is 《上市公司信息披露管理办法》's: the annual report within four months of the fiscal
+year's end, the half-year report within two months of the first half's end, and the first- and
+third-quarter reports within one month of their quarters' ends -- so Q1 by 30 April, H1 by 31
+August, Q3 by 31 October, and the annual by 30 April of the following year.
+
+What it decides is when a whole-market `fina_indicator_vip` answer of **nothing** for a period
+stops being "not filed yet" and becomes a failed fetch (`cli._sweep_window_refuses_empty_from`),
+and -- since `V2-P6-018` -- until when a whole announcement year with no filing in it is
+admissible (`announcement_year_may_be_empty`). Moved here from `cli.py` by that issue, so the
+build that writes such a year and the readers of it apply one table. The
+period's own end is the wrong trigger: every period is empty for days after it ends, so a refusal
+there would fail every daily update for about two weeks after each quarter end. After the
+deadline, a whole market with not one filing for the period is not a timetable.
+"""
+
+
+def first_disclosure_deadline(announcement_year: int) -> date:
+    """The earliest statutory deadline that falls inside `announcement_year` (`V2-P6-018`).
+
+    Read off `STATUTORY_DISCLOSURE_DEADLINES`: the deadlines inside a year are the previous
+    year's annual report and this year's three interim reports, and the earliest of them is 30
+    April -- the annual of the year before and the first quarter of this one, both due that day.
+    """
+    deadlines = [
+        date(period_year + years_after, int(month_day[:2]), int(month_day[2:]))
+        for period_year in (announcement_year - 1, announcement_year)
+        for years_after, month_day in STATUTORY_DISCLOSURE_DEADLINES.values()
+    ]
+    return min(deadline for deadline in deadlines if deadline.year == announcement_year)
+
+
+def announcement_year_may_be_empty(announcement_year: int, day: date) -> bool:
+    """Whether an announcement year with no filing in it is admissible on calendar `day`.
+
+    True through `first_disclosure_deadline` itself -- the deadline day still counts as "may not
+    have filed yet", the rule `cli._sweep_window_refuses_empty_from` applies to a report period --
+    and False from the day after, when a whole market that has announced nothing in the year is a
+    failed fetch rather than a timetable. `day` is an Asia/Shanghai calendar date, which is the
+    zone every `ann_date` is. Measured on the stored record 2014-2026: the first announcement of
+    the year came after the year's first session in 2020 (3 January against 2 January), 2023
+    (4 January against 3 January) and 2024 (3 January against 2 January).
+    """
+    return day <= first_disclosure_deadline(announcement_year)
+
+
 DATASETS_WITH_REVISION_LABEL: Final[tuple[str, ...]] = (
     INCOME_DATASET,
     BALANCE_SHEET_DATASET,
