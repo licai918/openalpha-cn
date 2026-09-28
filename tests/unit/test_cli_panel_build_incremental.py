@@ -202,6 +202,9 @@ class Corpus:
     stepped: tuple[str, ...] = ()
     """Securities whose `adj_factor` steps from 1.0 to 1.5 on `T1_LAST`, so the compressed
     partition keeps that session as a change row."""
+    restepped: tuple[str, ...] = ()
+    """As `stepped`, and a second step to 2.0 on `SESSIONS[6]`, the session after `T1_LAST`, so
+    the compressed partition keeps that next session's row too."""
 
 
 class ScriptedUpstream:
@@ -355,6 +358,8 @@ class ScriptedUpstream:
         def factor(code: str) -> float:
             if code in self.corpus.stepped:
                 return 1.5 if day >= T1_LAST else 1.0
+            if code in self.corpus.restepped:
+                return 2.0 if day >= SESSIONS[6] else 1.5 if day >= T1_LAST else 1.0
             if code != ADJUSTED:
                 return 1.0
             return 1.2 if day >= SESSIONS[8] else 1.1 if day >= SESSIONS[3] else 1.0
@@ -1378,6 +1383,7 @@ def test_an_empty_halt_answer_twice_does_not_withdraw_a_resumption(
     assert full.exit_code == PanelExit.unhealthy, full.output
     assert RESUMING in full.output
     assert "whole-day" in full.output
+    assert "keep a copy of this suspend_d partition" in full.output
     assert _hashes(tmp_path, halts) == before
     assert _withdrawals(tmp_path) == set()
     assert "WITHDRAWN" not in full.output
@@ -1419,3 +1425,120 @@ def test_a_withdrawn_factor_step_before_the_slice_refuses_the_incremental_build(
     assert (stepped, ADJ_FACTOR_DATASET, T1_LAST) in _withdrawals(
         tmp_path.parent / "full", datetime.fromisoformat(T3)
     )
+
+
+# --- rebased onto `V2-P6-017` (placeholders) and the approving review's minors ----------------
+
+
+def test_a_withdrawn_factor_step_whose_next_session_is_held_equals_the_full_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exact form of the pre-slice rule. `RESTEPPED` steps on `T1_LAST` and again on the
+    next session, so the compressed partition holds that next session's row; with the step on
+    `T1_LAST` withdrawn, both builds decide from the same rows and store the same bytes."""
+    restepped = FILLERS[13]
+    published = replace(PUBLISHED, restepped=(restepped,))
+    base = run_build(tmp_path / "inc", monkeypatch, as_of=T1, incremental=False, corpus=published)
+    assert base.exit_code == PanelExit.ok, base.output
+    confirmed = run_build(
+        tmp_path / "inc",
+        monkeypatch,
+        as_of=T2,
+        incremental=True,
+        corpus=replace(published, withdrawn=WITHDRAWN),
+    )
+    assert confirmed.exit_code == PanelExit.ok, confirmed.output
+    shutil.copytree(tmp_path / "inc", tmp_path / "full")
+    step_withdrawn = replace(
+        published, withdrawn=(*WITHDRAWN, (ADJ_FACTOR_DATASET, restepped, T1_LAST))
+    )
+
+    inc = run_build(
+        tmp_path / "inc", monkeypatch, as_of=T3, incremental=True, corpus=step_withdrawn
+    )
+    full = run_build(
+        tmp_path / "full", monkeypatch, as_of=T3, incremental=False, corpus=step_withdrawn
+    )
+
+    assert inc.exit_code == PanelExit.ok, inc.output
+    assert full.exit_code == PanelExit.ok, full.output
+    for name in (*COMPARED, *WITHDRAWN_ROWS):
+        assert inc.hashes[name] == full.hashes[name], name
+    assert (restepped, ADJ_FACTOR_DATASET, T1_LAST) in _withdrawals(
+        tmp_path / "inc", datetime.fromisoformat(T3)
+    )
+
+
+def test_a_placeholder_and_a_withdrawal_in_one_year_equal_the_full_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`V2-P6-017`'s placeholders and this issue's withdrawals together: `PLACEHOLDER_OVERLAP`
+    sits on `T1_LAST`, the session that also loses five stored rows. Incremental equals full at
+    `T2`, and again at `T3` when those rows are re-published on what is then a carried session
+    -- asked again, so the placeholder there is re-derived rather than carried twice."""
+    published = replace(PUBLISHED, placeholders=True)
+    withdrawn = replace(published, withdrawn=WITHDRAWN)
+    base = run_build(tmp_path / "base", monkeypatch, as_of=T1, incremental=False, corpus=published)
+    assert base.exit_code == PanelExit.ok, base.output
+    for name in ("inc", "full"):
+        shutil.copytree(tmp_path / "base", tmp_path / name)
+
+    inc = run_build(tmp_path / "inc", monkeypatch, as_of=T2, incremental=True, corpus=withdrawn)
+    full = run_build(tmp_path / "full", monkeypatch, as_of=T2, incremental=False, corpus=withdrawn)
+
+    assert inc.exit_code == PanelExit.ok, inc.output
+    assert full.exit_code == PanelExit.ok, full.output
+    for name in (*COMPARED, *WITHDRAWN_ROWS):
+        assert inc.hashes[name] is not None, name
+        assert inc.hashes[name] == full.hashes[name], name
+    kinds = {kind for _, _, _, kind in _defects(tmp_path / "inc")}
+    assert {
+        "valuation_placeholder_on_halt",
+        "valuation_placeholder_without_bar",
+        "withdrawn_after_publication",
+    } <= kinds
+    assert _defects(tmp_path / "inc") == _defects(tmp_path / "full")
+
+    shutil.rmtree(tmp_path / "full")
+    shutil.copytree(tmp_path / "inc", tmp_path / "full")
+    t3 = datetime.fromisoformat(T3)
+    again = run_build(tmp_path / "inc", monkeypatch, as_of=T3, incremental=True, corpus=published)
+    whole = run_build(tmp_path / "full", monkeypatch, as_of=T3, incremental=False, corpus=published)
+    assert again.exit_code == PanelExit.ok, again.output
+    assert whole.exit_code == PanelExit.ok, whole.output
+    for name in (*COMPARED, *WITHDRAWN_ROWS):
+        assert again.hashes[name] == whole.hashes[name], name
+    assert _withdrawals(tmp_path / "inc", t3) == set()
+    placeholders = [
+        entry
+        for entry in load_upstream_defects(_store(tmp_path / "inc"), years=(YEAR,), as_of=t3)
+        if entry.kind.startswith("valuation_placeholder")
+    ]
+    assert sorted((entry.ts_code, entry.trade_date) for entry in placeholders) == sorted(
+        PLACEHOLDERS
+    )
+
+
+def test_a_placeholder_is_not_recorded_by_a_price_write_that_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`V2-P6-017`'s records go through `write_daily_panel`'s `before_write` like every other:
+    a price write refused by its own guards leaves no placeholder on the record."""
+    clean = Corpus(defects=False)
+    stored = run_build(tmp_path, monkeypatch, as_of=T1, incremental=False, corpus=clean)
+    assert stored.exit_code == PanelExit.ok, stored.output
+
+    def refused(*args: Any, **kwargs: Any) -> Any:
+        raise PanelBatchError("write_daily_panel refused by its own guards")
+
+    monkeypatch.setattr(cli, "write_daily_panel", refused)
+    build = run_build(
+        tmp_path,
+        monkeypatch,
+        as_of=T2,
+        incremental=False,
+        corpus=replace(clean, placeholders=True),
+    )
+
+    assert build.exit_code == PanelExit.unhealthy, build.output
+    assert _store(tmp_path).registered_years(UPSTREAM_DEFECTS_DATASET) == ()

@@ -3695,6 +3695,8 @@ def _refuse_a_withdrawn_closing_anchor(
     fetched: Sequence[ColumnarPanelBatch],
     *,
     start: date,
+    sessions: Sequence[date],
+    held: Set[tuple[str, date]],
     rebuild: str,
 ) -> None:
     """Refuse an incremental `adj_factor` build that a withdrawn row leaves unable to equal the
@@ -3709,34 +3711,51 @@ def _refuse_a_withdrawn_closing_anchor(
     rebuild. A security every stored row of which was withdrawn (`released`) is gone from both
     builds alike and needs no refusal.
 
-    **The same holds for any withdrawn row before `start`**, on a session asked again for a
-    carried withdrawal. Every stored factor row there is load-bearing -- an anchor or a change --
-    and the full rebuild replaces a withdrawn one with the security's next served session (the
-    new first observation, or the session the change now appears on), which the compressed
-    partition did not keep between its steps. So such a withdrawal, of a security that keeps
-    other rows, is refused too. Inside the slice nothing is missing: every session from `start`
-    on is a fresh answer in both builds.
+    **A withdrawn row before `start`**, on a session asked again for a carried withdrawal, is
+    load-bearing too -- an anchor or a change -- and the full rebuild decides what replaces it from
+    the security's row on the **next open session**: the new first observation, or the session a
+    change now appears on. The incremental build holds that row exactly when it is in `held` --
+    the rows this build will compress (the carried steps, the answers asked again, the slice) --
+    and then it is the full build's own row: a stored step is a row both builds hold (the premise
+    of every carried session), and an answer is the same request the full build makes. With it,
+    compression decides identically in both builds, because the only input that differs is the
+    run of unchanged rows between the steps before it, which compression drops in both (its
+    predecessor's factor is the last step's). Without it -- the next session's row was never a
+    step, or the security has none there -- the full build's replacement is a row the compressed
+    partition did not keep, and the build is refused. Inside the slice nothing is missing: every
+    session from `start` on is a fresh answer in both builds.
     """
     if not found.defects:
         return
     served = {
         subject for batch in fetched if batch.status == "success" for subject in batch.subjects
     }
+
+    def replaced_from_what_is_held(ts_code: str, day: date) -> bool:
+        later = [session for session in sessions if session > day]
+        return bool(later) and (ts_code, later[0]) in held
+
     anchors = sorted(
         {
             defect.ts_code
             for defect in found.defects
             if defect.ts_code not in found.released
-            and (defect.ts_code not in served or defect.trade_date < start)
+            and (
+                defect.ts_code not in served
+                or (
+                    defect.trade_date < start
+                    and not replaced_from_what_is_held(defect.ts_code, defect.trade_date)
+                )
+            )
         }
     )
     if anchors:
         raise _refuse_incremental(
             rebuild,
             f"the upstream withdrew a stored {ADJ_FACTOR_DATASET} step of {anchors} -- a closing "
-            "observation with no later row in this slice, or a row on a session before the slice"
-            " -- and the full rebuild replaces it with their next served session, a closing "
-            "observation or step the compressed partition does not hold",
+            "observation with no later row in this slice, or a row before the slice whose next "
+            "session's row this build does not hold -- and the full rebuild replaces it with a "
+            "closing observation or step the compressed partition did not keep",
         )
 
 
@@ -5291,11 +5310,7 @@ def _build_panel(
             now=now,
         )
         factor_withdrawals = settled_factors.found[ADJ_FACTOR_DATASET]
-        if factor_start is not None:
-            _refuse_a_withdrawn_closing_anchor(
-                factor_withdrawals, fetched_factors, start=factor_start, rebuild=rebuild
-            )
-        factors = reconcile_pre_listing_rows(
+        factor_batches = (
             fresh_factors
             if factor_start is None
             else _carried_with_rechecks(
@@ -5307,7 +5322,23 @@ def _build_panel(
                 year=year,
                 before=factor_start,
                 now=now,
-            ),
+            )
+        )
+        if factor_start is not None:
+            _refuse_a_withdrawn_closing_anchor(
+                factor_withdrawals,
+                fetched_factors,
+                start=factor_start,
+                sessions=sessions,
+                held=(
+                    served_keys(factor_batches, ADJ_FACTOR_DATASET)
+                    if factor_withdrawals.defects
+                    else frozenset()
+                ),
+                rebuild=rebuild,
+            )
+        factors = reconcile_pre_listing_rows(
+            factor_batches,
             listings=listings,
             date_column=ADJUSTMENT_DATE_COLUMN,
         )

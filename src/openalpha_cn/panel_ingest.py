@@ -4458,7 +4458,10 @@ def _refuse_an_uncontradicted_empty_halt_answer(
 
     **The accepted cost:** a genuine withdrawal of a session's only resumption or intraday rows
     fails closed here, by name. The remedy is a full rebuild of the year into a store that does
-    not hold the stored `suspend_d` partition, once the withdrawal has been checked by hand.
+    not hold the stored `suspend_d` partition, once the withdrawal has been checked by hand -- and
+    **a copy of that partition kept first**: the rebuild starts from nothing stored, so it finds
+    nothing withdrawn and records no `withdrawn_suspend_d` row, and the copy is then the only
+    evidence of the rows it no longer holds.
     """
     types = _column_values(stored, SUSPENSION_TYPE_COLUMN)
     timings = _column_values(stored, SUSPENSION_TIMING_COLUMN)
@@ -4489,7 +4492,9 @@ def _refuse_an_uncontradicted_empty_halt_answer(
         "halt, or a whole-day halt with no daily bar, and its bar -- if any -- contradicts "
         "nothing. The "
         "year is refused rather than losing those rows. If the upstream has truly withdrawn them, "
-        "rebuild the year in full into a store that does not hold this suspend_d partition"
+        "first keep a copy of this suspend_d partition -- the rebuild starts from nothing stored, "
+        "so it records no withdrawn_suspend_d row for them and the copy is their only evidence -- "
+        "then rebuild the year in full into a store that does not hold it"
     )
 
 
