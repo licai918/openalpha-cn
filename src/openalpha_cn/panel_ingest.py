@@ -6513,8 +6513,14 @@ def write_financial_statements(
     *,
     date_timezone: str = DEFAULT_DATE_TIMEZONE,
     superseded: Mapping[int, frozenset[str]] | None = None,
+    before_write: Callable[[], None] | None = None,
 ) -> tuple[PartitionRef, ...]:
     """Write one financial-statement dataset into one partition per **announcement** year.
+
+    `before_write` (`V2-P6-018`, after `V2-P6-016`'s writers) runs after every guard here has
+    passed and immediately before the first partition is written: where the caller stores the
+    `fina_indicator` versions `superseded` releases, so a refused write leaves no evidence of a
+    move the store never made.
 
     The announcement, not the period. `providers/tushare.py` dates every row of these four
     endpoints at its own `ann_date`, so `001278.SZ`'s 2018 annual report -- announced
@@ -6593,6 +6599,8 @@ def write_financial_statements(
             # announcement year, kept whole in `SUPERSEDED_INDICATOR_DATASET` first.
             released=(superseded or {}).get(year, frozenset()),
         )
+    if before_write is not None:
+        before_write()
     return tuple(
         write_panel_batch(
             store,

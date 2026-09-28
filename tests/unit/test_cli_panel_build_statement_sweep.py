@@ -18,6 +18,7 @@ the registry at all.
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from itertools import pairwise
@@ -28,13 +29,14 @@ import duckdb
 import pytest
 from typer.testing import CliRunner
 
-from openalpha_cn import cli
+from openalpha_cn import cli, panel_ingest
 from openalpha_cn.cli import PanelExit, app
 from openalpha_cn.domain.financial_statements import (
     FINANCIAL_INDICATOR_DATASET,
     INCOME_DATASET,
     STATEMENT_DATA_COLUMNS,
 )
+from openalpha_cn.domain.panel_batch import PanelBatchError
 from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET
 from openalpha_cn.panel.catalog import PanelStorageError
 from openalpha_cn.panel.store import PanelStore
@@ -1227,4 +1229,105 @@ def test_a_superseded_version_served_again_in_its_year_is_retired_with_its_index
     assert YEAR not in store.registered_years(SUPERSEDED_INDICATOR_DATASET)
     assert YEAR not in store.registered_years("upstream_defects")
     held = _stored(tmp_path, FINANCIAL_INDICATOR_DATASET, YEAR)[1]
+    assert ("000002.SZ", "2025-03-31", "2025-04-29") in {(r[0], r[5], r[6]) for r in held}
+
+
+# --- V2-P6-018 review round 7: one rule for both modes, and evidence only beside a write -------
+
+
+def _moved_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *roots: str) -> Market:
+    """One store built from `FILINGS`, copied to each of `roots`, and a market that has since
+    re-published 000002.SZ's 2025 first-quarter report on 2026-03-18."""
+    market = _install(monkeypatch, Market(FILINGS), clock=CLOCK)
+    assert _build(tmp_path / "base", *_swept(FINANCIAL_INDICATOR_DATASET)).exit_code == 0
+    for root in roots:
+        shutil.copytree(tmp_path / "base", tmp_path / root)
+    market.filings = tuple(_moved(market.filings, "20260318"))
+    monkeypatch.setattr(cli, "_panel_clock", lambda: CLOCK + timedelta(days=1))
+    return market
+
+
+def test_a_full_build_after_a_move_stores_what_an_incremental_one_stores(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Supersession was judged only under `--incremental`, so after a move a full rebuild found
+    2025 one row short and was refused for good ("holds 6 and would get 5"). One rule for both
+    modes: from the same store at the same clock the two builds succeed and store the same bytes
+    -- the source years, the kept version and its index."""
+    from openalpha_cn.panel_ingest import SUPERSEDED_INDICATOR_DATASET, UPSTREAM_DEFECTS_DATASET
+
+    _moved_once(tmp_path, monkeypatch, "inc", "full")
+    arguments = _swept(FINANCIAL_INDICATOR_DATASET)
+
+    incremental = _build(tmp_path / "inc", *arguments, "--incremental")
+    full = _build(tmp_path / "full", *arguments)
+
+    assert incremental.exit_code == PanelExit.ok, incremental.output
+    assert full.exit_code == PanelExit.ok, full.output
+    for dataset, year in (
+        (FINANCIAL_INDICATOR_DATASET, YEAR),
+        (FINANCIAL_INDICATOR_DATASET, YEAR + 1),
+        (SUPERSEDED_INDICATOR_DATASET, YEAR),
+        (UPSTREAM_DEFECTS_DATASET, YEAR),
+    ):
+        assert _stored(tmp_path / "full", dataset, year) == _stored(
+            tmp_path / "inc", dataset, year
+        ), (dataset, year)
+    (kept,) = _stored(tmp_path / "full", SUPERSEDED_INDICATOR_DATASET, YEAR)[1]
+    assert (kept[0], kept[5], kept[6]) == ("000002.SZ", "2025-03-31", "2025-04-29")
+
+
+def test_a_refused_indicator_write_leaves_no_supersession_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The kept version and its index were written before `write_financial_statements` ran its
+    own guards, so a write that guard refused left evidence of a move the store never made. They
+    are now written in its `before_write`, after every guard has passed: refused, nothing is."""
+    from openalpha_cn.panel_ingest import SUPERSEDED_INDICATOR_DATASET, UPSTREAM_DEFECTS_DATASET
+
+    _moved_once(tmp_path, monkeypatch, "inc")
+    before = _stored(tmp_path / "inc", FINANCIAL_INDICATOR_DATASET, YEAR)
+
+    guard = panel_ingest._refuse_to_drop_stored_subjects
+
+    def refuse(store: PanelStore, batch: Any, *arguments: Any, **keywords: Any) -> None:
+        if batch.dataset == FINANCIAL_INDICATOR_DATASET:
+            raise PanelBatchError("the writer's own subject guard refused this year")
+        guard(store, batch, *arguments, **keywords)
+
+    monkeypatch.setattr(panel_ingest, "_refuse_to_drop_stored_subjects", refuse)
+    result = _build(tmp_path / "inc", *_swept(FINANCIAL_INDICATOR_DATASET), "--incremental")
+
+    assert result.exit_code == PanelExit.unhealthy, result.output
+    assert "the writer's own subject guard refused this year" in result.output
+    store = PanelStore(tmp_path / "inc" / "panel")
+    assert store.registered_years(SUPERSEDED_INDICATOR_DATASET) == ()
+    assert YEAR not in store.registered_years(UPSTREAM_DEFECTS_DATASET)
+    assert _stored(tmp_path / "inc", FINANCIAL_INDICATOR_DATASET, YEAR) == before
+
+
+def test_a_kept_version_is_retired_in_a_year_whose_stored_partition_is_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A year with kept versions and no stored `fina_indicator` rows was skipped before its
+    kept versions were read, so a version the upstream serves there again stayed "superseded"
+    beside its own stored row. Such a year is judged like any other: served again, the kept copy
+    and its index are retired."""
+    from openalpha_cn.panel_ingest import SUPERSEDED_INDICATOR_DATASET, UPSTREAM_DEFECTS_DATASET
+
+    market = _moved_once(tmp_path, monkeypatch, "inc")
+    arguments = _swept(FINANCIAL_INDICATOR_DATASET)
+    assert _build(tmp_path / "inc", *arguments, "--incremental").exit_code == 0
+    store = PanelStore(tmp_path / "inc" / "panel")
+    assert store.registered_years(SUPERSEDED_INDICATOR_DATASET) == (YEAR,)
+    assert store.remove_partition(FINANCIAL_INDICATOR_DATASET, YEAR)
+    market.filings = (*FILINGS, _republished("20260318"))
+    monkeypatch.setattr(cli, "_panel_clock", lambda: CLOCK + timedelta(days=2))
+
+    result = _build(tmp_path / "inc", *arguments, "--incremental")
+
+    assert result.exit_code == PanelExit.ok, result.output
+    assert store.registered_years(SUPERSEDED_INDICATOR_DATASET) == ()
+    assert YEAR not in store.registered_years(UPSTREAM_DEFECTS_DATASET)
+    held = _stored(tmp_path / "inc", FINANCIAL_INDICATOR_DATASET, YEAR)[1]
     assert ("000002.SZ", "2025-03-31", "2025-04-29") in {(r[0], r[5], r[6]) for r in held}
