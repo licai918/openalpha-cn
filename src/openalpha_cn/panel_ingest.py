@@ -439,12 +439,14 @@ from openalpha_cn.domain.upstream_defects import (
     UPSTREAM_DEFECT_DATA_COLUMNS,
     UPSTREAM_DEFECT_NUMBER_COLUMNS,
     UPSTREAM_DEFECT_PANEL_COLUMNS,
+    DefectKind,
     UpstreamDefect,
     before_listing,
     close_disagreement_kind,
     limit_placeholder_kind,
     repeats_previous_close,
     upstream_defects_from_panel_rows,
+    valuation_placeholder_kind,
 )
 from openalpha_cn.panel.catalog import (
     DEFAULT_DATE_TIMEZONE,
@@ -3597,16 +3599,52 @@ def reconcile_price_disagreements(
        filled from anywhere; the dropped row is recorded with its own clocks in `record`, and a
        contradicted valuation also records whether it repeats the previous bar close.
 
-    No disagreement means no re-fetch and the batches back unchanged.
+    **A valuation placeholder** (`V2-P6-017`) -- a row with a null close, which the decoder
+    carries only when every one of `DAILY_BASIC_PLACEHOLDER_COLUMNS` is null -- is not a close to
+    compare, so it is judged here before the comparison runs (`valuation_placeholder_kind`):
+
+    - **beside a bar** on the same session it is refused at once, by name and before any
+      re-fetch: `daily_basic` contradicts the bar, and that shape has not been observed;
+    - **with no bar** it joins its session's re-fetch (step 1: the same two requests, and a
+      second answer with a real close is a partial fetch that refuses the year, exactly as a
+      differing disagreement does), then is dropped and recorded as
+      `valuation_placeholder_without_bar` with only its key.
+
+    No disagreement and no placeholder means no re-fetch and the batches back unchanged.
     """
     kept = tuple(fundamentals)
     merged_bars = merge_panel_batches(bars)
     merged_fundamentals = merge_panel_batches(fundamentals)
-    findings = close_disagreements(_close_index(merged_bars), _close_index(merged_fundamentals))
-    if not findings:
+    placeholders = _valuation_placeholders(merged_fundamentals)
+    valued = (
+        _select_rows(
+            merged_fundamentals,
+            sorted(set(range(merged_fundamentals.row_count)) - set(placeholders.values())),
+        )
+        if placeholders
+        else merged_fundamentals
+    )
+    findings = close_disagreements(_close_index(merged_bars), _close_index(valued))
+    if not findings and not placeholders:
         return ReconciledRows(batches=kept, defects=(), record=None)
     bar_rows = {key: index for index, key in enumerate(_row_keys(merged_bars))}
     valuation_rows = {key: index for index, key in enumerate(_row_keys(merged_fundamentals))}
+    beside_bars = [
+        key for key in placeholders if valuation_placeholder_kind(has_bar=key in bar_rows) is None
+    ]
+    if beside_bars:
+        # Before any re-fetch: whatever a second answer says, no named rule explains it.
+        ts_code, day = beside_bars[0]
+        bar_close = _column_values(merged_bars, CLOSE_COLUMN)[bar_rows[beside_bars[0]]]
+        raise PanelBatchError(
+            f"{ts_code} on {day.isoformat()}: {DAILY_BASIC_DATASET} published a placeholder with "
+            f"a null close beside a {DAILY_DATASET} bar that closed at {bar_close!r} "
+            f"({len(beside_bars)} such row(s) in all). {DAILY_BASIC_DATASET} contradicts the bar: "
+            "the upstream publishes that placeholder for a security with no bar on the session, "
+            "and beside one it is a shape no named rule explains -- it has not been observed. "
+            "Storing either side would leave two partitions that answer differently, so the year "
+            "is refused"
+        )
     disputed = {finding.ts_code for finding in findings}
     bar_days: dict[str, list[date]] = {}
     for subject, day in bar_rows:
@@ -3621,6 +3659,9 @@ def reconcile_price_disagreements(
     by_session: dict[date, list[str]] = {}
     for finding in findings:
         by_session.setdefault(finding.trade_date, []).append(finding.ts_code)
+    for ts_code, day in placeholders:
+        # A placeholder is re-fetched with the session's disagreements, in the same two requests.
+        by_session.setdefault(day, []).append(ts_code)
     for session, codes in sorted(by_session.items()):
         refetched_bars, refetched_valuations = refetch(session, tuple(codes))
         if len(codes) > 1:
@@ -3725,11 +3766,38 @@ def reconcile_price_disagreements(
             )
         )
         positions.append(valuation_rows[key])
+    for (ts_code, day), index in placeholders.items():
+        # Re-fetched and reproduced above, and no bar beside it: the rule's one outcome here.
+        defects.append(
+            UpstreamDefect(
+                ts_code=ts_code,
+                trade_date=day,
+                source_dataset=DAILY_BASIC_DATASET,
+                kind=cast(DefectKind, valuation_placeholder_kind(has_bar=False)),
+            )
+        )
+        positions.append(index)
     return ReconciledRows(
         batches=_without_rows(kept, {(defect.ts_code, defect.trade_date) for defect in defects}),
         defects=tuple(defects),
         record=_defect_record(merged_fundamentals, positions, defects),
     )
+
+
+def _valuation_placeholders(batch: ColumnarPanelBatch) -> dict[tuple[str, date], int]:
+    """Every `daily_basic` row with a null close, by `(subject, session)`, to its row index.
+
+    The decoder hands a row on with a null close only when all of
+    `DAILY_BASIC_PLACEHOLDER_COLUMNS` are null (`V2-P6-017`), so a null close here is the
+    upstream's placeholder. One C-level scan on the ordinary year, which has none.
+    """
+    if batch.status != "success":
+        return {}
+    closes = _column_values(batch, CLOSE_COLUMN)
+    if None not in closes:
+        return {}
+    keys = _row_keys(batch)
+    return {keys[index]: index for index, close in enumerate(closes) if close is None}
 
 
 def reconcile_pre_listing_rows(

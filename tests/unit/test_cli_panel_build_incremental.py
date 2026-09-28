@@ -20,6 +20,9 @@ get them wrong:
   its bar -- `valuation_contradicts_unconfirmed_bar` at `T1`, where it is the last session, and
   corroborated by the next session's `pre_close` at `T2`;
 - **on `T2`'s last session**: another contradiction, unconfirmed in both builds.
+
+`Corpus(placeholders=True)` adds `V2-P6-017`'s null-close `daily_basic` placeholders with no bar:
+one halted all day on a carried session, one with no halt row on the overlap session.
 """
 
 from __future__ import annotations
@@ -107,6 +110,14 @@ MISMATCH_LAST = FILLERS[3]
 ADJUSTED = FILLERS[4]
 RESUMING = FILLERS[6]
 HALTED_ACROSS = FILLERS[7]
+# `V2-P6-017`: `daily_basic` placeholders with a null close and no bar -- one halted all day on a
+# carried session, one with no halt row on the overlap session.
+PLACEHOLDER_CARRIED = "000029.SZ"
+PLACEHOLDER_OVERLAP = "200011.SZ"
+PLACEHOLDERS: tuple[tuple[str, date], ...] = (
+    (PLACEHOLDER_CARRIED, SESSIONS[1]),
+    (PLACEHOLDER_OVERLAP, T1_LAST),
+)
 
 CALENDAR_FIELDS = ["exchange", "cal_date", "is_open", "pretrade_date"]
 REGISTRY_FIELDS = ["ts_code", "name", "exchange", "market", "list_status", "list_date"]
@@ -164,6 +175,8 @@ class Corpus:
     and resumes on `SESSIONS[6]` with a `pre_close` that corroborates the disputed bar."""
     weights_through: tuple[tuple[str, int], ...] = ()
     """`(index_code, month)`: that index publishes no weighting after `month` (0: none at all)."""
+    placeholders: bool = False
+    """`PLACEHOLDERS`: a null-close `daily_basic` row and no bar on that session (`V2-P6-017`)."""
 
 
 class ScriptedUpstream:
@@ -196,13 +209,23 @@ class ScriptedUpstream:
     def _open(self) -> tuple[date, ...]:
         return tuple(day for day in SESSIONS if day not in self.corpus.closed)
 
+    def _codes(self) -> tuple[str, ...]:
+        if self.corpus.placeholders:
+            return (*SECURITIES, *(code for code, _ in PLACEHOLDERS))
+        return SECURITIES
+
+    def _placeholder(self, code: str, day: date) -> bool:
+        return self.corpus.placeholders and (code, day) in PLACEHOLDERS
+
     def _traded(self, code: str, day: date) -> bool:
+        if self._placeholder(code, day):
+            return False
         if self.corpus.defects and code == HALTED and day == SESSIONS[2]:
             return False
         return not (self.corpus.halted_across and code == HALTED_ACROSS and day in SESSIONS[4:6])
 
     def _close(self, code: str, day: date) -> float:
-        base = 10.0 + SECURITIES.index(code) / 10
+        base = 10.0 + self._codes().index(code) / 10
         return round(base + 0.1 * self._open().index(day), 2) if code == RESUMING else base
 
     def _pre_close(self, code: str, day: date) -> float:
@@ -221,7 +244,7 @@ class ScriptedUpstream:
             )
         if self.corpus.defects and day >= PRELISTED_LISTING:
             rows.append([PRELISTED, _compact(day), 20.0, 20.0, 20.0, 20.0, 20.0, 0.0, 30.0, 60.0])
-        for code in SECURITIES:
+        for code in self._codes():
             if not self._traded(code, day):
                 continue
             if self.corpus.defects and (code, day) in (
@@ -249,9 +272,13 @@ class ScriptedUpstream:
     def _valuations(self, day: date) -> list[list[Any]]:
         rows = [
             [code, _compact(day), self._valuation_close(code, day), *([1.0] * len(VALUATION_EXTRA))]
-            for code in SECURITIES
+            for code in self._codes()
             if self._traded(code, day)
         ]
+        for code in self._codes():
+            if self._placeholder(code, day):
+                extra = [0.87 if name == "volume_ratio" else None for name in VALUATION_EXTRA]
+                rows.append([code, _compact(day), None, *extra])
         if self.corpus.defects and day >= PRELISTED_LISTING:
             rows.append([PRELISTED, _compact(day), 20.0, *([1.0] * len(VALUATION_EXTRA))])
         return rows
@@ -264,6 +291,8 @@ class ScriptedUpstream:
             rows.append([HALTED, _compact(day), "S", None])
         if self.corpus.halted_across and day in SESSIONS[4:6]:
             rows.append([HALTED_ACROSS, _compact(day), "S", None])
+        if self._placeholder(PLACEHOLDER_CARRIED, day):
+            rows.append([PLACEHOLDER_CARRIED, _compact(day), "S", None])
         return rows
 
     def _limits(self, day: date) -> list[list[Any]]:
@@ -272,7 +301,9 @@ class ScriptedUpstream:
             rows.append([PRELISTED, _compact(day), 19.8, 16.2])
         if self.corpus.defects and day >= PRELISTED_LISTING:
             rows.append([PRELISTED, _compact(day), 22.0, 18.0])
-        for code in SECURITIES:
+        for code in self._codes():
+            if self._placeholder(code, day) and code == PLACEHOLDER_OVERLAP:
+                continue
             close = self._pre_close(code, day)
             band = [round(close * 1.1, 2), round(close * 0.9, 2)]
             if self.corpus.defects and code == HALTED and day == SESSIONS[2]:
@@ -286,13 +317,13 @@ class ScriptedUpstream:
                 return 1.0
             return 1.2 if day >= SESSIONS[8] else 1.1 if day >= SESSIONS[3] else 1.0
 
-        rows = [[code, _compact(day), factor(code)] for code in SECURITIES]
+        rows = [[code, _compact(day), factor(code)] for code in self._codes()]
         if self.corpus.defects and (day in SESSIONS[:2] or day >= PRELISTED_LISTING):
             rows.append([PRELISTED, _compact(day), 1.0])
         return rows
 
     def _registry(self) -> list[list[Any]]:
-        rows = [[code, code, "SSE", "主板", "L", "20100104", None] for code in SECURITIES]
+        rows = [[code, code, "SSE", "主板", "L", "20100104", None] for code in self._codes()]
         if self.corpus.defects:
             rows.append(
                 [PRELISTED, PRELISTED, "BSE", "北交所", "L", _compact(self.corpus.list_date), None]
@@ -450,6 +481,32 @@ def test_incremental_equals_full_rebuild_at_the_same_as_of(
         (NO_BAR_OVERLAP, DAILY_BASIC_DATASET, T1_LAST, "valuation_without_bar"),
         (MISMATCH_LAST, DAILY_BASIC_DATASET, T2_LAST, "valuation_contradicts_unconfirmed_bar"),
     } <= set(_defects(tmp_path / "inc"))
+
+
+def test_incremental_equals_full_rebuild_with_valuation_placeholders(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`V2-P6-017`: a placeholder on a carried session is carried with its record, and one on
+    the overlap session is fetched, re-fetched and recorded again -- the same bytes as a full
+    rebuild at the same `--as-of`."""
+    corpus = Corpus(placeholders=True)
+    full = run_build(tmp_path / "full", monkeypatch, as_of=T2, incremental=False, corpus=corpus)
+    assert full.exit_code == PanelExit.ok, full.output
+    first = run_build(tmp_path / "inc", monkeypatch, as_of=T1, incremental=False, corpus=corpus)
+    assert first.exit_code == PanelExit.ok, first.output
+
+    inc = run_build(tmp_path / "inc", monkeypatch, as_of=T2, incremental=True, corpus=corpus)
+
+    assert inc.exit_code == PanelExit.ok, inc.output
+    assert all(full.hashes[name] is not None for name in COMPARED)
+    for target in COMPARED:
+        assert inc.hashes[target] == full.hashes[target], target
+    assert _defects(tmp_path / "inc") == _defects(tmp_path / "full")
+    assert {
+        (code, DAILY_BASIC_DATASET, day, "valuation_placeholder_without_bar")
+        for code, day in PLACEHOLDERS
+    } <= set(_defects(tmp_path / "inc"))
+    assert inc.upstream.sessions_requested(DAILY_BASIC_DATASET) == _between(T1_LAST, T2_LAST)
 
 
 def test_incremental_fetches_only_sessions_after_the_stored_horizon(

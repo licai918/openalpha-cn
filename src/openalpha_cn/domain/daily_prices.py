@@ -334,6 +334,28 @@ what those caps are computed from. `free_share` and `turnover_rate_f` are neithe
 P3 or P4 reads them today, so the cost of a null is a null cell rather than a dropped name.
 """
 
+DAILY_BASIC_PLACEHOLDER_COLUMNS: Final[tuple[str, ...]] = tuple(
+    name for name in DAILY_BASIC_DATA_COLUMNS[1:] if name not in DAILY_BASIC_NULLABLE_COLUMNS
+)
+"""The six columns a *decoded* `daily_basic` row may carry as `None` only all together, and a
+stored one never may (`V2-P6-017`).
+
+`DAILY_BASIC_NULLABLE_COLUMNS`' complement: `close`, `turnover_rate`, `total_share`,
+`float_share`, `total_mv` and `circ_mv`. The upstream publishes a row with every one of them
+null -- and every ratio but `volume_ratio` null too -- for a security with no bar on the
+session: measured live on 2026-09-28, 90 of 2020-09-18's 4,160 rows, halted A shares
+(`000029.SZ`, an untimed `S` in `suspend_d`) and B shares (`200011.SZ`, no `suspend_d` row). A
+row that states no valuation at all is that placeholder; a row missing some of the six and not
+the others is a malformed valuation and is refused by the decoder as before.
+
+The decoder cannot see the `daily` bar the placeholder is judged against, so it hands the row on
+with the six as `None` rather than refusing the session. It has exactly two ways out:
+`panel_ingest.reconcile_price_disagreements` drops it as `valuation_placeholder_without_bar`
+once a re-fetch has published it again and the session has no bar for the security, and refuses
+it by name beside a bar; `write_daily_panel` refuses any that is left, because a null `close`
+cannot cross-check anything.
+"""
+
 SESSION_CLOSE_TIME: Final[time] = time(15, 0)
 """When an A-share session's continuous auction ends, Asia/Shanghai. `event_time`."""
 
@@ -456,8 +478,9 @@ KNOWN_PRICE_LIMITATIONS: Final[tuple[PriceLimitation, ...]] = (
             "prices without market caps for Beijing-board names, and close_disagreements "
             "tolerates that direction while reporting the other. The other direction is real but "
             "rare: a 2013..2026 census found 91 valuations with no bar on two sessions "
-            "(000022.SZ on 2013-11-14; ninety halted A and B shares on 2020-09-18), reproduced by "
-            "a re-fetch and recorded as upstream_defects rows."
+            "(000022.SZ on 2013-11-14; ninety halted A and B shares on 2020-09-18, placeholder "
+            "rows with a null close), reproduced by a re-fetch and recorded as upstream_defects "
+            "rows."
         ),
     ),
     PriceLimitation(
@@ -740,8 +763,9 @@ class CloseDisagreement:
     contradiction rather than sparse data: it was never observed on the sessions first probed,
     and the 2013..2026 census found it on two sessions, in the upstream's own data (`000022.SZ`
     on 2013-11-14, ninety halted A and B shares on 2020-09-18; see `close_disagreements`). The
-    other direction -- a bar with no valuation -- is real (see
-    `daily_basic_omits_the_beijing_board_before_2024`) and is not reported here.
+    ninety have a null close: they are placeholders (`V2-P6-017`), taken out before the closes
+    are compared, and never reach this type. The other direction -- a bar with no valuation --
+    is real (see `daily_basic_omits_the_beijing_board_before_2024`) and is not reported here.
     """
 
     ts_code: str
@@ -1015,11 +1039,13 @@ def close_disagreements(
     history. A census of every session from 2013-01-04 through 2026-09-24 (3,335 sessions,
     comparing both datasets on `(ts_code, close)`, live, completed 2026-09-26) found
     disagreements on 11 sessions: 91 valuations with no bar (one on 2013-11-14, `000022.SZ`;
-    ninety on 2020-09-18, halted A shares and B shares) and 237 closes that differ (one each on
-    2013-07-15, 2019-04-19, 2020-03-18, 2020-10-19 and 2023-11-07; ten on 2020-10-23; 56, 58 and
-    108 on 2021-11-16, 2021-11-22 and 2022-10-31, every one a `.BJ` code, most a cent or two
-    apart). All 237 were re-fetched on 2026-09-26 and every one reproduced, with the next
-    session's `pre_close` equal to the `daily` close -- the valuation is the side that is wrong;
+    ninety on 2020-09-18, halted A shares and B shares -- measured again on 2026-09-28, those
+    ninety have a null close and are placeholders rather than valuations, `V2-P6-017`) and 237
+    closes that differ (one each on 2013-07-15, 2019-04-19, 2020-03-18, 2020-10-19 and
+    2023-11-07; ten on 2020-10-23; 56, 58 and 108 on 2021-11-16, 2021-11-22 and 2022-10-31,
+    every one a `.BJ` code, most a cent or two apart). All 237 were re-fetched on 2026-09-26 and
+    every one reproduced, with the next session's `pre_close` equal to the `daily` close -- the
+    valuation is the side that is wrong;
     `002357.SZ` on 2013-07-15 closed at 6.8 in `daily` and at 6.62, the previous close, in
     `daily_basic`. This function still reports every disagreement; what happens next is
     `panel_ingest.reconcile_price_disagreements`' decision (`V2-P6-013`), not this function's.

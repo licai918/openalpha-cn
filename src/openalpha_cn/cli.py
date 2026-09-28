@@ -3396,10 +3396,11 @@ def _build_price_panel(
     **A disagreement the upstream itself publishes is resolved before the writer sees it**
     (`V2-P6-013`). `reconcile_price_disagreements` re-fetches each disagreeing
     `(security, session)` on its own -- two requests each, reported on stderr -- and drops a
-    `daily_basic` row only under a named rule. The drop is recorded in `upstream_defects` before
-    `write_daily_panel` runs, so a later refusal still leaves the record of what the upstream got
-    wrong, which is true whatever happens to the year. Anything unexplained is refused exactly
-    as before.
+    `daily_basic` row only under a named rule; a null-close placeholder is one of them
+    (`valuation_placeholder_without_bar`, `V2-P6-017`), and one beside a bar is refused. The
+    drop is recorded in `upstream_defects` before `write_daily_panel` runs, so a later refusal
+    still leaves the record of what the upstream got wrong, which is true whatever happens to the
+    year. Anything unexplained is refused exactly as before.
     """
     if not sessions:
         raise _panel_fail(
@@ -3709,8 +3710,8 @@ def _refetch_price_session(
     - one disputed security is asked for on its own (`ts_code` filter), which is a differently
       shaped request than the one that produced the disagreement and so the stronger witness;
     - several are answered by the whole session again, because asking each on its own costs two
-      requests per security -- 180 for 2020-09-18's ninety valuations with no bar -- to learn what
-      the two whole-session responses already carry, row for row.
+      requests per security -- 180 for 2020-09-18's ninety valuation placeholders with no bar
+      (`V2-P6-017`) -- to learn what the two whole-session responses already carry, row for row.
 
     Same session instant, same provider, same credential boundary (`_fetch_panel`). A row that
     differs between the two fetches is a fetch fault, and a row that does not is what the

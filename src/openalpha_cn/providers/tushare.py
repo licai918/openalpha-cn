@@ -274,6 +274,7 @@ from openalpha_cn.domain.daily_prices import (
     DAILY_BASIC_DATA_COLUMNS,
     DAILY_BASIC_DATASET,
     DAILY_BASIC_NULLABLE_COLUMNS,
+    DAILY_BASIC_PLACEHOLDER_COLUMNS,
     DAILY_DATA_COLUMNS,
     DAILY_DATASET,
     DAILY_INCOMPLETE_BAR_COLUMNS,
@@ -621,6 +622,16 @@ class TushareDatasetDescriptor(BaseModel):
     Exists because a response row is not always a unit of knowability. A ``stock_basic`` row
     carries a listing and, sometimes, a delisting, and no single ``available_time`` is right
     for both -- see ``_stock_lifecycle_panel_rows``.
+    """
+    placeholder_fields: tuple[str, ...] = ()
+    """Response fields that decode as ``None`` when, and only when, **every one** of them is null
+    in the row; ``()`` for none (``V2-P6-017``).
+
+    A cell parser cannot see the row it is in, and the upstream's placeholder is a row-level
+    shape: ``daily_basic`` publishes a row with no close, no share counts and no market value
+    for a security with no bar on the session (``DAILY_BASIC_PLACEHOLDER_COLUMNS``). Such a row
+    is carried with those cells as ``None``; a row with some of them null and not the others is
+    parsed cell by cell as before and refused.
     """
     serves_evidence_plane: bool = True
     """Whether ``fetch()`` serves this dataset; see this module's docstring for the two that
@@ -2482,6 +2493,10 @@ TUSHARE_DATASETS: tuple[TushareDatasetDescriptor, ...] = (
         # Not demanded, for the reason `daily`'s comment gives.
         requires_truncation_flag=False,
         panel_columns=tuple(_price_panel_column(name) for name in DAILY_BASIC_DATA_COLUMNS),
+        # `V2-P6-017`: a row with all six null is the upstream's no-valuation placeholder (90
+        # rows on 2020-09-18), carried as nulls for `reconcile_price_disagreements` to judge
+        # beside the session's bars. A row with only some of them null is still refused here.
+        placeholder_fields=DAILY_BASIC_PLACEHOLDER_COLUMNS,
     ),
     TushareDatasetDescriptor(
         dataset=SUSPENSION_DATASET,
@@ -4655,12 +4670,29 @@ class TushareProvider:
             kept.append((_parse_tushare_date(row[descriptor.date_field]), row, timeline))
         kept.sort(key=lambda entry: entry[0])
         rows = [row for _, row, _ in kept]
+        placeholders = descriptor.placeholder_fields
+        # `V2-P6-017`: the placeholder's own fields decode as `None`, and only in a row where all
+        # of them are null. Every other cell -- and every cell of a partly-null row -- is parsed.
+        placeholder_rows = (
+            {
+                index
+                for index, row in enumerate(rows)
+                if all(row[field] is None for field in placeholders)
+            }
+            if placeholders
+            else set()
+        )
         return _DecodedPanelRows(
             rows=rows,
             subjects=tuple(_resolve_subject(descriptor, row) for row in rows),
             timelines=[line for _, _, line in kept],
             values=tuple(
-                tuple(spec.parse(row[spec.source_field]) for row in rows)
+                tuple(
+                    None
+                    if index in placeholder_rows and spec.source_field in placeholders
+                    else spec.parse(row[spec.source_field])
+                    for index, row in enumerate(rows)
+                )
                 for spec in descriptor.panel_columns
             ),
             served=len(expanded),
