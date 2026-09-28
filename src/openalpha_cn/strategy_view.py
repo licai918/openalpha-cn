@@ -1731,7 +1731,14 @@ class _RecordingFeed:
         return self._feed.refits()
 
 
-def score_day(store: PanelStore, request: StrategyRequest, *, day: date, anchor: date) -> SignalDay:
+def score_day(
+    store: PanelStore,
+    request: StrategyRequest,
+    *,
+    day: date,
+    anchor: date,
+    read_industries: bool | None = None,
+) -> SignalDay:
     """Score one session under `request`'s source, as a backtest over it would (`V2-P6-011`).
 
     The daily command's reader. After a session's close there is no next session to trade on,
@@ -1747,6 +1754,10 @@ def score_day(store: PanelStore, request: StrategyRequest, *, day: date, anchor:
     `anchor` through `day` would have used. A static or trailing-IC source reads the same
     lookback a backtest starting on `day` reads, which is the one a backtest from `anchor` reads
     on that day.
+
+    `read_industries` decides whether the day's industry cross section is read: by default
+    exactly when the spec caps industries. A caller that knows the day's decision will not read
+    it -- no rebalance today -- passes `False`, and then the day reads no membership at all.
 
     A registered-prediction source is refused: there is nothing to score forward. Refusals are
     this face's three rows, as `backtest_strategy` raises them.
@@ -1838,10 +1849,10 @@ def score_day(store: PanelStore, request: StrategyRequest, *, day: date, anchor:
         for item in recording.observations
         if item.ic is not None and item.known_at <= instant
     ]
+    if read_industries is None:
+        read_industries = request.spec.max_industry_weight is not None
     industries: Mapping[str, str] = (
-        {}
-        if request.spec.max_industry_weight is None
-        else dict(_IndustryDays(store, signal_days, instants)[day])
+        dict(_IndustryDays(store, signal_days, instants)[day]) if read_industries else {}
     )
     return SignalDay(
         day=day,

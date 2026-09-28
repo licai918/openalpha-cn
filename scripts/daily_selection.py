@@ -4,16 +4,21 @@ weights and a registered prediction, under the registered configuration.
     uv run --no-sync --env-file .env python scripts/daily_selection.py --runtime-dir RT
 
 Eight steps, in this order. The first that fails stops the run, is named, and sets a non-zero
-exit; nothing after it runs.
+exit; nothing after it runs. Every unexpected fault inside a step is reported as that step's
+refusal, with the Tushare requests spent so far.
 
 1. **registration** -- read `docs/research/p6-registration.json` (`--registration`), the file the
    holdout ran on. It must be committed and byte-equal to `HEAD`'s, and the code running now must
    be its `code_commit`: `registry.admit_registered_code`, the holdout guard's own checks, over
    `REGISTERED_PATHS` plus this file. Forward results come from the registered code or not at all.
-   A missing file exits `2`; a refused binding exits `3`.
+   A missing file exits `2`; a refused binding exits `3`. A scheduled run should stand in a
+   checkout pinned at the registration (`--pin-worktree`), so development elsewhere cannot make
+   it refuse.
 2. **panel update** -- `openalpha panel build --incremental` for the year of the newest closed
-   session, every target in `--dataset` (`DAILY_TARGETS` by default, plus the industry targets
-   when the configuration reads industries), pinned to one `--as-of` for the day.
+   session, pinned to one `--as-of` for the day, over the targets the day's scoring reads
+   (`targets_for`): the price base, every statement dataset a registered factor reads, and the
+   industry targets on a day that reads industries (`industry_day`). When the session's outcome
+   window or its next session reaches into the next calendar year, that year's `trade_cal` too.
 3. **panel doctor** -- `openalpha panel doctor` and the dependency gate `openalpha data-check`
    over those datasets, the year and the session. Not clean stops the run before any factor is
    built.
@@ -23,14 +28,13 @@ exit; nothing after it runs.
 5. **candidates** -- the session scored by `strategy_view.score_day`: the backtest's own feeds and
    scorer, so the ranking is the one a backtest of the registered configuration would trade on.
 6. **target weights** -- the book's rebalance rule (`strategy_backtest.target_holdings`) over that
-   ranking, the previous session's targets as the book held, on the configuration's rebalance
-   schedule; equal weights of `1 / holding_count`, the rest cash.
-7. **prediction** -- the day's scores registered in the prediction store before the next
-   session opens, which is before any of their outcome has printed: the fitted model's own batch
-   for a walk-forward source, and for a static or trailing-IC source a batch carrying the
-   composite each security was ranked by.
-8. **summary** -- printed, and written to the day's journal. A refused run prints the step, the
-   reason and the Tushare requests it had spent.
+   ranking, the previous journalled targets as the book held, on the configuration's rebalance
+   schedule counted from its `start`; equal weights of `1 / holding_count`, the rest cash.
+7. **prediction** -- the day's scores registered in the prediction store before 09:15 on the next
+   session, when the call auction that fixes the book's execution price begins:
+   `strategy_registration.signal_day_batch` (the fit's own batch for a walk-forward source, the
+   composite each security was ranked by otherwise).
+8. **summary** -- printed, and written to the day's journal.
 
 ## Why steps 5 and 6 are not `shortlist run` and `portfolio construct`
 
@@ -50,6 +54,20 @@ would publish a list and a book the research never measured:
 So the candidates are the strategy's own ranking and the targets its own rebalance rule, both
 through the functions `run_strategy_backtest` uses, and the equality is tested rather than
 asserted (`tests/unit/scripts/test_daily_selection.py`).
+
+## What a day fetches (R2)
+
+`targets_for` reads the configuration: `BASE_TARGETS` always (the calendar, the registry, the
+three session-scoped price targets the scoring, the labels and the book read, and `index_daily`
+for the protocol's 000905.SH benchmark), plus the target of every dataset a registered factor
+reads -- the statement sweeps only for a configuration that reads statements. Industries are
+refreshed only on a day whose scoring reads them (`industry_day`): every day for a neutralized
+tier, whose build reads the whole cross section's industries; on a rebalance day for an industry
+cap, whose only reader is the rebalance decision. On any other day nothing reads a membership,
+so every security the day's scoring reads has exactly the membership a daily full refresh would
+have given it -- none is read. `--full-update` fetches `FULL_UPDATE_TARGETS` instead, the whole
+current year. The runbook carries the per-kind counts, measured from the code's own `BUDGET`
+lines.
 
 ## Idempotent per trading day
 
@@ -78,11 +96,12 @@ import hashlib
 import io
 import json
 import plistlib
+import shutil
 import sys
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from enum import IntEnum
 from pathlib import Path
@@ -99,16 +118,8 @@ from click import ClickException  # noqa: E402
 from typer.main import get_command  # noqa: E402
 
 from openalpha_cn import cli  # noqa: E402
-from openalpha_cn.backtest.strategy_backtest import (  # noqa: E402
-    target_holdings,
-)
-from openalpha_cn.domain.alpha_model import (  # noqa: E402
-    ABSTAIN_INCOMPLETE_FEATURES,
-    AlphaModelArtifact,
-    AlphaModelDeclaration,
-    Prediction,
-    PredictionBatch,
-)
+from openalpha_cn.backtest.strategy_backtest import target_holdings  # noqa: E402
+from openalpha_cn.domain.alpha_model import PredictionBatch  # noqa: E402
 from openalpha_cn.domain.index_membership import (  # noqa: E402
     INDEX_WEIGHT_DATASET,
     INDEX_WEIGHT_INDEX_CODES,
@@ -121,6 +132,7 @@ from openalpha_cn.domain.prediction_record import (  # noqa: E402
 from openalpha_cn.domain.trading_calendar import (  # noqa: E402
     TRADING_CALENDAR_DATASET,
     TradingCalendar,
+    TradingCalendarError,
 )
 from openalpha_cn.factor_view import (  # noqa: E402
     FactorViewError,
@@ -128,7 +140,7 @@ from openalpha_cn.factor_view import (  # noqa: E402
     factor_build_requests,
     resolve_factor,
 )
-from openalpha_cn.panel.catalog import DEFAULT_DATE_TIMEZONE  # noqa: E402
+from openalpha_cn.panel.catalog import DEFAULT_DATE_TIMEZONE, PanelStorageError  # noqa: E402
 from openalpha_cn.panel.store import PanelStore  # noqa: E402
 from openalpha_cn.panel_factors import (  # noqa: E402
     FACTOR_TRANSFORMS,
@@ -146,12 +158,21 @@ from openalpha_cn.panel_neutralization import (  # noqa: E402
     FACTOR_NEUTRALIZATIONS,
     load_factor_neutralization_manifests,
 )
+from openalpha_cn.panel_view import panel_store  # noqa: E402
+from openalpha_cn.providers.base import ProviderFailure  # noqa: E402
 from openalpha_cn.providers.tushare import (  # noqa: E402
     TRADING_CALENDAR_DEFAULT_EXCHANGE,
     TushareTransport,
 )
+from openalpha_cn.runtime.composition import build_storage  # noqa: E402
 from openalpha_cn.runtime.provenance import resolve_code_commit  # noqa: E402
-from openalpha_cn.storage.predictions import FilePredictionStore  # noqa: E402
+from openalpha_cn.strategy_registration import (  # noqa: E402
+    RegisteredConfiguration,
+    StrategyRegistrationError,
+    registration_cutoff,
+    session_record,
+    signal_day_batch,
+)
 from openalpha_cn.strategy_view import (  # noqa: E402
     SignalDay,
     StrategyRequest,
@@ -162,10 +183,22 @@ from openalpha_cn.strategy_view import (  # noqa: E402
 
 DAILY_SELECTION_SCHEMA: Final[str] = "openalpha-daily-selection/v1"
 DEFAULT_REGISTRATION: Final[Path] = REPOSITORY / "docs" / "research" / "p6-registration.json"
+REGISTRATION_IN_REPOSITORY: Final[str] = "docs/research/p6-registration.json"
 JOURNAL_DIRECTORY: Final[str] = "daily_selection"
 THIS_SCRIPT: Final[str] = "scripts/daily_selection.py"
 
-DAILY_TARGETS: Final[tuple[str, ...]] = (
+BASE_TARGETS: Final[tuple[str, ...]] = (
+    "trade_cal",
+    "stock_basic",
+    "adj_factor",
+    "price",
+    "stk_limit",
+    "index_daily",
+)
+"""What every day fetches: the calendar, the registry, the price targets the scoring, the labels
+and the book read, and `index_daily` for the protocol's benchmark (the forward report's)."""
+
+FULL_UPDATE_TARGETS: Final[tuple[str, ...]] = (
     "trade_cal",
     "stock_basic",
     "namechange",
@@ -179,10 +212,8 @@ DAILY_TARGETS: Final[tuple[str, ...]] = (
     "cashflow",
     "fina_indicator",
 )
-"""What one day's update fetches by default: every year-scoped target plus `fina_indicator`,
-about 93 requests on an ordinary day (`V2-P6-003`'s measurement; the statement sweeps are 71 of
-them). The two industry targets are added only when the configuration reads industries
-(`INDUSTRY_TARGETS`): `index_member_all` alone is 62 requests."""
+"""`--full-update`: every year-scoped target plus `fina_indicator`, whatever the configuration
+reads -- the whole current year kept fresh for other readers of the same store."""
 
 INDUSTRY_TARGETS: Final[tuple[str, ...]] = ("index_classify", "index_member_all")
 UNCHECKED_BY_YEAR: Final[frozenset[str]] = frozenset({"stock_basic", *INDUSTRY_TARGETS})
@@ -203,8 +234,6 @@ DEFAULT_MAX_STALENESS_DAYS: Final[int] = 30
 
 SHANGHAI: Final[ZoneInfo] = ZoneInfo(DEFAULT_DATE_TIMEZONE)
 _WEIGHT_QUANTUM: Final[Decimal] = Decimal("0.0000000001")
-NEXT_SESSION_OPEN: Final[time] = time(9, 30)
-"""When the next session opens (Shanghai): the latest a day's scores may be registered."""
 _STRATEGY_KEYS: Final[frozenset[str]] = frozenset(
     {
         "as_of",
@@ -265,6 +294,27 @@ class StepFailedError(RuntimeError):
         spends requests too, and the budget is counted either way."""
 
 
+@contextlib.contextmanager
+def _step(name: str) -> Iterator[None]:
+    """Report any fault the step did not anticipate as that step's refusal, by name.
+
+    A `StepFailedError` passes through; anything else becomes one naming the step and the
+    fault's type -- and its message, except for a provider failure, whose message can carry the
+    request envelope and is never printed (the `panel build` rule, applied here too).
+    """
+    try:
+        yield
+    except StepFailedError:
+        raise
+    except Exception as error:
+        detail = (
+            type(error).__name__
+            if isinstance(error, ProviderFailure)
+            else f"{type(error).__name__}: {error}"
+        )
+        raise StepFailedError(name, f"an unexpected fault: {detail}") from error
+
+
 # --- the configuration ---------------------------------------------------------------------------
 
 
@@ -279,6 +329,16 @@ class Registration:
     config: Mapping[str, Any]
     config_id: str
     seed: int
+
+    @property
+    def declared(self) -> RegisteredConfiguration:
+        """What a composite record declares about this registration."""
+        return RegisteredConfiguration(
+            config_id=self.config_id,
+            registration_sha256=self.sha256,
+            code_commit=self.code_commit,
+            seed=self.seed,
+        )
 
 
 def admit_registration(path: Path, repo: Path) -> Registration:
@@ -459,11 +519,31 @@ def tiers_read(request: StrategyRequest) -> tuple[TierBuild, ...]:
     )
 
 
-def reads_industries(request: StrategyRequest, builds: Sequence[TierBuild]) -> bool:
-    """Whether the configuration reads industry memberships: a cap, or a neutralized tier."""
-    return request.spec.max_industry_weight is not None or any(
-        build.tier == "neutralized" for build in builds
-    )
+def reads_neutralized(builds: Sequence[TierBuild]) -> bool:
+    """Whether a factor build reads industries: a neutralized tier, every day it is built."""
+    return any(build.tier == "neutralized" for build in builds)
+
+
+def targets_for(builds: Sequence[TierBuild]) -> tuple[str, ...]:
+    """The panel targets the day's scoring reads, industries aside: `BASE_TARGETS` plus the
+    target writing each dataset a registered factor reads, in `PANEL_BUILD_TARGETS`' order."""
+    writes = {
+        dataset: target
+        for target, datasets in cli.PANEL_BUILD_TARGETS.items()
+        for dataset in datasets
+    }
+    read = {
+        writes[dataset] for build in builds for dataset in resolve_factor(build.factor).datasets
+    }
+    wanted = set(BASE_TARGETS) | (read - set(INDUSTRY_TARGETS))
+    return tuple(target for target in cli.PANEL_BUILD_TARGETS if target in wanted)
+
+
+def outcome_horizon(request: StrategyRequest) -> int:
+    """How many sessions a day's registered scores are about: the model's horizon for a
+    walk-forward source, the rebalance interval otherwise (`strategy_registration`)."""
+    model = request.source.walk_forward
+    return model.horizon_sessions if model is not None else request.spec.rebalance_every_sessions
 
 
 # --- running the CLI in-process, and counting what it asked the network ------------------------
@@ -621,6 +701,74 @@ def previous_targets(directory: Path, session: date) -> tuple[date | None, dict[
     return None, {}
 
 
+# --- the day's schedule --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Schedule:
+    """Where the session sits on the configuration's rebalance schedule, and what the book held.
+
+    `position` counts sessions from the configuration's first; `scheduled` is the newest
+    scheduled rebalance on or before the session; `previous` the session of the newest journalled
+    book. A rebalance is due when there is no book yet (the first day), or when a scheduled
+    rebalance has come since the book was set -- today's, or one a missed or refused day never
+    made, which is then made today rather than left for the next one.
+    """
+
+    session: date
+    position: int
+    scheduled: date
+    previous: date | None
+
+    @property
+    def due(self) -> bool:
+        return self.previous is None or self.scheduled > self.previous
+
+    @property
+    def reason(self) -> str:
+        if self.previous is None:
+            return "the first day: no book yet"
+        if not self.due:
+            return f"the book set on {self.previous.isoformat()} holds until the next rebalance"
+        if self.scheduled == self.session:
+            return "scheduled"
+        return f"catching up the rebalance scheduled on {self.scheduled.isoformat()}"
+
+
+def schedule_of(
+    calendar: TradingCalendar,
+    *,
+    anchor: date,
+    session: date,
+    every: int,
+    previous: date | None,
+) -> Schedule:
+    """The session's place on the rebalance schedule counted from `anchor`."""
+    days = calendar.trading_days_between(anchor, session)
+    if not days or days[-1] != session:
+        raise StepFailedError(
+            "panel update", f"{session.isoformat()} is not a session on or after {anchor}"
+        )
+    position = len(days) - 1
+    return Schedule(
+        session=session,
+        position=position,
+        scheduled=days[position - position % every],
+        previous=previous,
+    )
+
+
+def industry_day(request: StrategyRequest, builds: Sequence[TierBuild], schedule: Schedule) -> bool:
+    """Whether the day's scoring reads industry memberships.
+
+    A neutralized tier reads the whole cross section's industries every day it is built. An
+    industry cap reads them only in the rebalance decision, so only on a day a rebalance is due.
+    On any other day nothing the day computes reads a membership.
+    """
+    capped = request.spec.max_industry_weight is not None
+    return reads_neutralized(builds) or (capped and schedule.due)
+
+
 # --- the steps ---------------------------------------------------------------------------------
 
 
@@ -631,29 +779,89 @@ class DailyOptions:
     repo: Path = REPOSITORY
     as_of: datetime | None = None
     targets: tuple[str, ...] | None = None
+    full_update: bool = False
     max_staleness_days: int = DEFAULT_MAX_STALENESS_DAYS
     json_output: bool = False
 
 
-def _stored_session(store: PanelStore, exchange: str, as_of: datetime) -> date | None:
-    """The newest session published at `as_of`, by the stored calendar; `None` when the year's
-    calendar is not stored yet."""
-    year = as_of.astimezone(SHANGHAI).year
+def _stored_calendar(
+    store: PanelStore, exchange: str, years: Sequence[int], as_of: datetime
+) -> TradingCalendar | None:
+    """The stored calendar of those of `years` the store holds, or `None` when it holds none or
+    they cannot be read at `as_of` (a refusal step 2's calendar build is the remedy for)."""
+    held = set(store.registered_years(TRADING_CALENDAR_DATASET))
+    stored = tuple(year for year in years if year in held)
+    if not stored:
+        return None
     try:
-        calendar = load_trading_calendar(store, exchange=exchange, years=(year,), as_of=as_of)
+        return load_trading_calendar(store, exchange=exchange, years=stored, as_of=as_of)
+    except (TradingCalendarError, PanelStorageError):
+        return None
+
+
+def _stored_session(store: PanelStore, exchange: str, as_of: datetime) -> date | None:
+    """The newest session published at `as_of`, by the stored calendar of `as_of`'s year and the
+    year before it -- so 1 January, and every day of a new year before its first session closes,
+    find the previous year's last session. `None` when neither year's calendar is stored."""
+    year = as_of.astimezone(SHANGHAI).year
+    calendar = _stored_calendar(store, exchange, (year - 1, year), as_of)
+    if calendar is None:
+        return None
+    try:
         return newest_published_session(calendar, as_of=as_of)
-    except Exception:  # any refusal means the year's calendar is not stored yet: step 2 builds it
+    except TradingCalendarError:
         return None
 
 
 def _panel_build(
-    runtime_dir: Path, *, year: int, as_of: datetime, exchange: str, targets: Sequence[str]
+    runtime_dir: Path,
+    *,
+    year: int | Sequence[int],
+    as_of: datetime,
+    exchange: str,
+    targets: Sequence[str],
 ) -> Invocation:
-    arguments = ["panel", "build", "--runtime-dir", str(runtime_dir), "--year", str(year)]
+    arguments = ["panel", "build", "--runtime-dir", str(runtime_dir)]
+    for one in (year,) if isinstance(year, int) else year:
+        arguments += ["--year", str(one)]
     arguments += ["--as-of", as_of.isoformat(), "--exchange", exchange, "--incremental", "--json"]
     for target in targets:
         arguments += ["--dataset", target]
     return invoke(arguments)
+
+
+def _budget(built: Invocation) -> list[str]:
+    """The `BUDGET` lines `panel build` states before each fetch loop: the code's own count."""
+    return [
+        line
+        for line in (*built.stderr.splitlines(), *built.stdout.splitlines())
+        if line.startswith("BUDGET ")
+    ]
+
+
+FINANCIAL_INDICATOR_TARGET: Final[str] = "fina_indicator"
+
+
+def financial_indicator_years(session_year: int, as_of: datetime) -> tuple[int, ...]:
+    """The report-period years a day's `fina_indicator` sweep covers.
+
+    `fina_indicator` is swept by report-period year, not by announcement year: a period year is
+    its four quarter ends, each window opening on its period's last day. The year before the
+    session's is always among them -- its annual report is announced in the session's year (by
+    30 April) and every revision of it is served in that period's window -- and the session's
+    own year once its first period (31 March) has ended. Before that it has no open window, and
+    `panel build` refuses a period year none of whose windows served a registered filing: asked
+    for the session's year alone, every day from 1 January to 30 March would be refused.
+    """
+    opens = datetime(session_year, 3, 31, tzinfo=SHANGHAI)
+    return (session_year - 1, session_year) if as_of >= opens else (session_year - 1,)
+
+
+def next_year_calendar_needed(calendar: TradingCalendar, *, session: date, horizon: int) -> bool:
+    """Whether the session's outcome window -- the next session and `horizon` more -- or its
+    registration cutoff reaches past the last session the session's year's calendar holds."""
+    later = [day for day in calendar.trading_days if session < day <= date(session.year, 12, 31)]
+    return len(later) < horizon + 1
 
 
 def update_panel(
@@ -663,10 +871,14 @@ def update_panel(
     as_of: datetime,
     exchange: str,
     targets: Sequence[str],
+    next_year: bool,
 ) -> dict[str, Any]:
-    """Step 2: the incremental build of every target, and what it wrote."""
+    """Step 2: the incremental build of every target, and what it wrote; `fina_indicator` in an
+    invocation of its own over `financial_indicator_years`; then next year's calendar when the
+    session's outcome window reaches into it."""
+    yearly = tuple(target for target in targets if target != FINANCIAL_INDICATOR_TARGET)
     built = _panel_build(
-        runtime_dir, year=session_year, as_of=as_of, exchange=exchange, targets=targets
+        runtime_dir, year=session_year, as_of=as_of, exchange=exchange, targets=yearly
     )
     if built.exit_code != 0:
         raise StepFailedError(
@@ -674,9 +886,42 @@ def update_panel(
         )
     payloads = [body for body in built.payloads() if isinstance(body, dict)]
     report = payloads[-1] if payloads else {}
+    budget = _budget(built)
+    if FINANCIAL_INDICATOR_TARGET in targets:
+        periods = financial_indicator_years(session_year, as_of)
+        swept = _panel_build(
+            runtime_dir,
+            year=periods,
+            as_of=as_of,
+            exchange=exchange,
+            targets=(FINANCIAL_INDICATOR_TARGET,),
+        )
+        if swept.exit_code != 0:
+            raise StepFailedError(
+                "panel update",
+                f"`panel build --dataset fina_indicator` for report-period years {list(periods)} "
+                f"exited {swept.exit_code}: {swept.reason()}",
+            )
+        budget += _budget(swept)
+    if next_year:
+        ahead = _panel_build(
+            runtime_dir,
+            year=session_year + 1,
+            as_of=as_of,
+            exchange=exchange,
+            targets=(TRADING_CALENDAR_DATASET,),
+        )
+        if ahead.exit_code != 0:
+            raise StepFailedError(
+                "panel update",
+                f"the session's outcome window reaches into {session_year + 1} and that year's "
+                f"calendar could not be built (exit {ahead.exit_code}): {ahead.reason()}",
+            )
     return {
         "targets": list(targets),
         "year": session_year,
+        "next_year_calendar": next_year,
+        "budget": budget,
         "sessions": report.get("sessions"),
         "partitions": report.get("partitions", []),
     }
@@ -703,9 +948,19 @@ def check_panel(
     session: date,
     as_of: datetime,
     exchange: str,
+    first_of_year: bool = False,
 ) -> None:
-    """Step 3: `panel doctor` and the dependency gate, both clean, or the run stops."""
-    arguments = ["--runtime-dir", str(runtime_dir), "--year", str(session.year)]
+    """Step 3: `panel doctor` and the dependency gate, both clean, or the run stops.
+
+    On the first session of a year the year before is asked about too: the day-level checks
+    compare the session with the one before it (`return_paths` reads the previous close and the
+    adjustment factors across it), and a calendar of the session's year alone cannot place that
+    session -- measured: `check_unavailable`, which blocks.
+    """
+    arguments = ["--runtime-dir", str(runtime_dir)]
+    if first_of_year:
+        arguments += ["--year", str(session.year - 1)]
+    arguments += ["--year", str(session.year)]
     arguments += ["--session", session.isoformat(), "--as-of", as_of.isoformat()]
     arguments += ["--exchange", exchange]
     for dataset in datasets:
@@ -835,26 +1090,24 @@ def build_factors(
     }
 
 
-def rebalance_due(signal: SignalDay, request: StrategyRequest, *, has_book: bool) -> bool:
-    """Whether today is a rebalance on the configuration's schedule (every
-    `rebalance_every_sessions`-th session from its start), or the first day with no book."""
-    return not has_book or signal.position % request.spec.rebalance_every_sessions == 0
-
-
 def target_weights(
-    signal: SignalDay, request: StrategyRequest, previous: Mapping[str, str]
+    signal: SignalDay,
+    request: StrategyRequest,
+    previous: Mapping[str, str],
+    *,
+    schedule: Schedule,
 ) -> dict[str, Any]:
     """Step 6: today's book under the book's rule, and the move from yesterday's.
 
-    On a rebalance day the held names that still rank within the band stay and the free slots
-    are filled in rank order (`target_holdings`, the backtest's own rule). Between rebalances,
-    and on a day the source held, yesterday's book is today's. Each name is `1 / holding_count`
-    of the book, the book's equal position capital; what no name fills is cash.
+    On a day a rebalance is due (`Schedule.due`) the held names that still rank within the band
+    stay and the free slots are filled in rank order (`target_holdings`, the backtest's own rule).
+    Otherwise, and on a day the source held, yesterday's book is today's. Each name is
+    `1 / holding_count` of the book, the book's equal position capital; what no name fills is
+    cash.
     """
     spec = request.spec
-    due = rebalance_due(signal, request, has_book=bool(previous))
     ranked = signal.scores.ranked
-    if ranked is None or not due:
+    if ranked is None or not schedule.due:
         names = tuple(sorted(previous))
         decided = "held" if ranked is None else "not a rebalance day"
     else:
@@ -874,9 +1127,11 @@ def target_weights(
     )
     return {
         "decision": decided,
+        "reason": schedule.reason,
         "holding_count": spec.holding_count,
         "rebalance_every_sessions": spec.rebalance_every_sessions,
-        "sessions_since_start": signal.position,
+        "sessions_since_start": schedule.position,
+        "scheduled_rebalance": schedule.scheduled.isoformat(),
         "weights": weights,
         "cash": f"{(Decimal(1) - weight * len(names)).quantize(_WEIGHT_QUANTUM):f}",
         "turnover": f"{(moved / 2).quantize(_WEIGHT_QUANTUM):f}",
@@ -908,81 +1163,8 @@ def candidates(signal: SignalDay, request: StrategyRequest, config_id: str) -> d
         "candidates": rows,
         "weights": {key: value for key, value in sorted(signal.scores.weights.items())},
         "refit_day": None if signal.refit_day is None else signal.refit_day.isoformat(),
+        "industries_read": len(signal.industries),
     }
-
-
-COMPOSITE_MODEL_NAME: Final[str] = "daily_selection"
-"""The declared name of every composite batch this command registers."""
-
-
-def prediction_batch(
-    signal: SignalDay,
-    request: StrategyRequest,
-    registration: Registration,
-    *,
-    predicted_at: datetime,
-) -> PredictionBatch | None:
-    """The day's scores as a `PredictionBatch`, or `None` when the source held.
-
-    **Walk-forward:** the fit in use's own batch -- the one whose scores became the book's rows
-    -- restamped with the instant it is registered at.
-
-    **Static and trailing IC:** there is no fitted model, so the batch declares the composite
-    itself. `family` is `strategy_<kind>`; `feature_version` is the registered `config_id`;
-    `seed` and `code_commit` are the registration's; the hyperparameters name the combine rule
-    and the registration's digest. The artifact's measured fields are measured, off the day's
-    inputs rather than typed: `feature_ids` are the component keys, `parameters` the weights the
-    composite was taken under, `training_cutoff` the newest instant any score row or counted IC
-    it read became knowable, and `training_example_count` how many rows and ICs that was. Every
-    ranked security carries its composite; a security carrying some component but not all
-    abstains with `ABSTAIN_INCOMPLETE_FEATURES`.
-    """
-    scores = signal.scores
-    if scores.ranked is None:
-        return None
-    source = request.source
-    if source.walk_forward is not None:
-        batch = signal.model_batch
-        if batch is None:  # pragma: no cover - a ranked walk-forward day scored a batch
-            raise StepFailedError("prediction", "the fit in use scored no batch")
-        return PredictionBatch(
-            as_of=batch.as_of,
-            predicted_at=predicted_at,
-            artifact=batch.artifact,
-            predictions=batch.predictions,
-        )
-    if signal.knowable_through is None:  # pragma: no cover - a ranked day read some row
-        raise StepFailedError("prediction", "the day's composite read no dated input")
-    declaration = AlphaModelDeclaration(
-        name=COMPOSITE_MODEL_NAME,
-        family=f"strategy_{source.kind}",
-        horizon=f"{request.spec.rebalance_every_sessions}d",
-        feature_version=registration.config_id,
-        seed=registration.seed,
-        code_commit=registration.code_commit,
-        hyperparameters=(
-            ("combine", source.combine),
-            ("registration_sha256", registration.sha256),
-        ),
-    )
-    artifact = AlphaModelArtifact(
-        declaration=declaration,
-        feature_ids=tuple(sorted(source.component_keys)),
-        training_cutoff=signal.knowable_through,
-        training_example_count=signal.values_consumed,
-        parameters=tuple(sorted((key, float(value)) for key, value in scores.weights.items())),
-    )
-    rows = [Prediction(ts_code=name, score=scores.scores[name]) for name in scores.ranked]
-    rows += [
-        Prediction(ts_code=name, abstention=ABSTAIN_INCOMPLETE_FEATURES)
-        for name in scores.incomplete
-    ]
-    return PredictionBatch(
-        as_of=signal.instant,
-        predicted_at=predicted_at,
-        artifact=artifact,
-        predictions=tuple(sorted(rows, key=lambda row: row.ts_code)),
-    )
 
 
 def _outcome_calendar(
@@ -1002,48 +1184,38 @@ def register_prediction(
     calendar: TradingCalendar,
     clock: Callable[[], datetime],
 ) -> tuple[PredictionRecord, str]:
-    """Step 7: file `batch` unless this day is already registered under its declaration.
+    """Step 7: file `batch` unless the session already has its record.
 
     `model daily-run` files a new record on every invocation, because `predicted_at` reaches the
-    address; a daily command re-run the same evening must not. So the store is searched first
-    for a record about the same instant under the same declaration: holding the same numbers it
-    is the day's record and nothing is written; holding different ones, the registered record
-    stands and this run is refused -- a second answer to one day would be a revision, which the
-    prediction store exists to make impossible.
+    address; a daily command re-run the same evening must not. `session_record` finds the
+    session's record under the same declaration: holding the same numbers it is reused and
+    nothing is written; holding different ones, the registered record stands and this run is
+    refused.
 
-    **Only before the outcome starts.** The store calls a record `forward` when it held it before
-    the outcome window's last close. That is the store's question; this command's is stricter,
-    because the book trades the day's scores at the next session's open and every session after
-    it prints part of the outcome. So a registration at or after the next session's open (09:30
-    Shanghai) -- the command run late, or catching up a missed day -- is refused before anything
-    is filed.
+    **Only before the next session's call auction.** The store calls a record `forward` when it
+    held it before the outcome window's last close. This command's rule is stricter, because the
+    book trades the day's scores at the next open, whose price the call auction starting at 09:15
+    fixes: a registration at or after `registration_cutoff` -- the command run late, or catching
+    up a missed day -- is refused before anything is filed.
     """
-    store = FilePredictionStore(runtime_dir / "predictions", clock=clock)
-    for record_id in store.list_ids():
-        held = store.get(record_id)
-        if held is None or held.batch.as_of != batch.as_of:
-            continue
-        if held.batch.artifact.declaration != batch.artifact.declaration:
-            continue
-        if (held.batch.artifact, held.batch.predictions) != (batch.artifact, batch.predictions):
-            raise StepFailedError(
-                "prediction",
-                f"{record_id} already registers {batch.as_of.isoformat()} under this "
-                "declaration with other scores; the registered record stands and nothing was "
-                "filed. The panel or a factor build changed after it was registered",
-            )
+    store = build_storage(runtime_dir=runtime_dir, clock=clock).prediction_store
+    try:
+        held = session_record(store, batch)
+    except StrategyRegistrationError as error:
+        raise StepFailedError("prediction", str(error)) from error
+    if held is not None:
         return held, "unchanged"
     day = batch.as_of.astimezone(SHANGHAI).date()
-    opens = datetime.combine(calendar.next_trading_day(day), NEXT_SESSION_OPEN, tzinfo=SHANGHAI)
+    cutoff = registration_cutoff(calendar, day)
     deadline = outcome_known_at_for(batch, calendar=calendar, zone=SHANGHAI)
     now = clock()
-    if now >= opens:
+    if now >= cutoff:
         raise StepFailedError(
             "prediction",
-            f"the scores of {day.isoformat()} are traded from the next session's open, "
-            f"{opens.isoformat()}, and it is {now.isoformat()}: part of their outcome has "
-            f"printed already (all of it by {deadline.isoformat()}), so registered now they "
-            "would not be a prediction made before its outcome. Nothing was filed",
+            f"the scores of {day.isoformat()} are traded at the next session's open, whose call "
+            f"auction starts {cutoff.isoformat()}, and it is {now.isoformat()}: part of their "
+            f"outcome is published already (all of it by {deadline.isoformat()}), so registered "
+            "now they would not be a prediction made before its outcome. Nothing was filed",
         )
     written = store.put(batch=batch, calendar=calendar, zone=SHANGHAI)
     return written.record, written.outcome
@@ -1073,22 +1245,29 @@ def _run_daily_selection(
     options: DailyOptions, *, clock: Callable[[], datetime], counts: Counter[str]
 ) -> dict[str, Any]:
     runtime_dir = options.runtime_dir
-    registration = admit_registration(options.registration, options.repo)
-    store = PanelStore(runtime_dir / "panel")
-    directory = journal_directory(runtime_dir, registration)
-    first_as_of = options.as_of or clock()
-    anchor = _registered_anchor(registration)
-    # The configuration resolved once, about its own first day, before anything is fetched: a
-    # configuration that cannot be put is a step-1 refusal, and which tiers and whether
-    # industries are read decide steps 2 and 4.
-    probe = day_request(registration.config, day=anchor, as_of=session_publication_instant(anchor))
-    exchange = probe.exchange
-    builds = tiers_read(probe)
-    targets = options.targets or (
-        DAILY_TARGETS + (INDUSTRY_TARGETS if reads_industries(probe, builds) else ())
-    )
+    with _step("registration"):
+        registration = admit_registration(options.registration, options.repo)
+        store = panel_store(runtime_dir)
+        directory = journal_directory(runtime_dir, registration)
+        first_as_of = options.as_of or clock()
+        anchor = _registered_anchor(registration)
+        # The configuration resolved once, about its own first day, before anything is fetched:
+        # a configuration that cannot be put is a step-1 refusal, and which tiers and industries
+        # it reads decide steps 2 and 4.
+        probe = day_request(
+            registration.config, day=anchor, as_of=session_publication_instant(anchor)
+        )
+        exchange = probe.exchange
+        builds = tiers_read(probe)
+        base = (
+            FULL_UPDATE_TARGETS
+            if options.full_update
+            else options.targets
+            if options.targets is not None
+            else targets_for(builds)
+        )
 
-    with counted_transport(counts):
+    with _step("panel update"), counted_transport(counts):
         session = _stored_session(store, exchange, first_as_of)
         if session is None:
             year = first_as_of.astimezone(SHANGHAI).year
@@ -1108,6 +1287,13 @@ def _run_daily_selection(
                 raise StepFailedError(
                     "panel update", f"no session had published at {first_as_of.isoformat()}"
                 )
+        if session < anchor:
+            raise StepFailedError(
+                "registration",
+                f"the registered configuration starts on {anchor.isoformat()}, after the newest "
+                f"closed session {session.isoformat()}",
+                exit_code=DailyExit.no_registration,
+            )
         path = directory / f"{session.isoformat()}.json"
         journal = read_journal(path)
         if journal is not None and journal.get("registration", {}).get("sha256") not in (
@@ -1138,79 +1324,117 @@ def _run_daily_selection(
             }
             write_journal(path, journal)
         as_of = datetime.fromisoformat(journal["as_of"])
+        calendar = _stored_calendar(
+            store, exchange, tuple(range(anchor.year, session.year + 1)), as_of
+        )
+        if calendar is None:
+            raise StepFailedError(
+                "panel update",
+                f"the {exchange} calendar from {anchor.year} to {session.year} is not stored; "
+                "the rebalance schedule is counted on it",
+            )
+        prior_day, prior = previous_targets(directory, session)
+        schedule = schedule_of(
+            calendar,
+            anchor=anchor,
+            session=session,
+            every=probe.spec.rebalance_every_sessions,
+            previous=prior_day,
+        )
+        reads_industries = industry_day(probe, builds, schedule)
         if "panel" not in journal:
+            targets = tuple(base) + tuple(
+                target for target in INDUSTRY_TARGETS if reads_industries and target not in base
+            )
             panel = update_panel(
                 runtime_dir,
                 session_year=session.year,
                 as_of=as_of,
                 exchange=exchange,
                 targets=targets,
+                next_year=next_year_calendar_needed(
+                    calendar, session=session, horizon=outcome_horizon(probe)
+                ),
             )
             journal = {**journal, "panel": {**panel, "requests": dict(sorted(counts.items()))}}
             write_journal(path, journal)
 
-    check_panel(
-        runtime_dir,
-        datasets=doctor_datasets(targets),
-        session=session,
-        as_of=as_of,
-        exchange=exchange,
-    )
-    request = day_request(registration.config, day=session, as_of=as_of)
-    factors = build_factors(
-        store,
-        builds,
-        session=session,
-        as_of=as_of,
-        exchange=request.exchange,
-        max_staleness_days=options.max_staleness_days,
-    )
-    try:
-        signal = score_day(store, request, day=session, anchor=anchor)
-    except StrategyViewError as error:
-        raise StepFailedError("candidates", error.disclosable) from error
-    listed = candidates(signal, request, registration.config_id)
-    prior_day, prior = previous_targets(directory, session)
-    targets_today = {
-        **target_weights(signal, request, prior),
-        "previous_session": None if prior_day is None else prior_day.isoformat(),
-    }
-    batch = prediction_batch(signal, request, registration, predicted_at=clock())
-    prediction: dict[str, Any] = {"registered": False, "reason": "the source held today"}
-    if batch is not None:
+    with _step("panel doctor"):
+        check_panel(
+            runtime_dir,
+            datasets=doctor_datasets(journal["panel"]["targets"]),
+            session=session,
+            as_of=as_of,
+            exchange=exchange,
+            first_of_year=session
+            == min(day for day in calendar.trading_days if day.year == session.year),
+        )
+    with _step("factor build"):
+        request = day_request(registration.config, day=session, as_of=as_of)
+        factors = build_factors(
+            store,
+            builds,
+            session=session,
+            as_of=as_of,
+            exchange=request.exchange,
+            max_staleness_days=options.max_staleness_days,
+        )
+    with _step("candidates"):
+        capped = request.spec.max_industry_weight is not None
         try:
-            calendar = _outcome_calendar(store, request.exchange, session, as_of)
-            record, outcome = register_prediction(
-                runtime_dir, batch, calendar=calendar, clock=clock
+            signal = score_day(
+                store,
+                request,
+                day=session,
+                anchor=anchor,
+                read_industries=capped and schedule.due,
             )
-        except StepFailedError:
-            raise
-        except Exception as error:  # named and re-raised as the step's refusal, never swallowed
-            raise StepFailedError("prediction", f"{type(error).__name__}: {error}") from error
-        prediction = {
-            "registered": True,
-            "record_id": record.record_id,
-            "outcome": outcome,
-            "standing": record.standing,
-            "as_of": record.batch.as_of.isoformat(),
-            "outcome_known_at": record.outcome_known_at.isoformat(),
-            "recorded_at": record.recorded_at.isoformat(),
-            "scored": len(record.batch.scored),
-            "abstained": len(record.batch.abstained),
+        except StrategyViewError as error:
+            raise StepFailedError("candidates", error.disclosable) from error
+        listed = candidates(signal, request, registration.config_id)
+    with _step("target weights"):
+        targets_today = {
+            **target_weights(signal, request, prior, schedule=schedule),
+            "previous_session": None if prior_day is None else prior_day.isoformat(),
         }
-    result = {
-        "session": session.isoformat(),
-        "as_of": as_of.isoformat(),
-        "registration": journal["registration"],
-        "panel": journal["panel"],
-        "factors": factors,
-        "candidates": listed,
-        "targets": targets_today,
-        "prediction": prediction,
-        "wording": "candidates of a registered research configuration; not an order, not a "
-        "forecast of return",
-    }
-    write_journal(path, {**journal, "result": result})
+    with _step("prediction"):
+        try:
+            batch = signal_day_batch(signal, request, registration.declared, predicted_at=clock())
+        except StrategyRegistrationError as error:
+            raise StepFailedError("prediction", str(error)) from error
+        prediction: dict[str, Any] = {"registered": False, "reason": "the source held today"}
+        if batch is not None:
+            record, outcome = register_prediction(
+                runtime_dir,
+                batch,
+                calendar=_outcome_calendar(store, request.exchange, session, as_of),
+                clock=clock,
+            )
+            prediction = {
+                "registered": True,
+                "record_id": record.record_id,
+                "outcome": outcome,
+                "standing": record.standing,
+                "as_of": record.batch.as_of.isoformat(),
+                "outcome_known_at": record.outcome_known_at.isoformat(),
+                "recorded_at": record.recorded_at.isoformat(),
+                "scored": len(record.batch.scored),
+                "abstained": len(record.batch.abstained),
+            }
+    with _step("summary"):
+        result = {
+            "session": session.isoformat(),
+            "as_of": as_of.isoformat(),
+            "registration": journal["registration"],
+            "panel": journal["panel"],
+            "factors": factors,
+            "candidates": listed,
+            "targets": targets_today,
+            "prediction": prediction,
+            "wording": "candidates of a registered research configuration; not an order, not a "
+            "forecast of return",
+        }
+        write_journal(path, {**journal, "result": result})
     return {
         **result,
         "this_run": {
@@ -1238,9 +1462,9 @@ def summary_lines(result: Mapping[str, Any], *, top: int) -> list[str]:
     for row in listed["candidates"][:top]:
         lines.append(f"  {row['rank']:>4}  {row['ts_code']:<10} {row['score']:+.6f}")
     lines.append(
-        f"target weights     {targets['decision']}, {len(targets['weights'])} name(s), "
-        f"cash {targets['cash']}, turnover {targets['turnover']} "
-        f"(previous: {targets['previous_session'] or 'none'})"
+        f"target weights     {targets['decision']} ({targets['reason']}), "
+        f"{len(targets['weights'])} name(s), cash {targets['cash']}, "
+        f"turnover {targets['turnover']} (previous: {targets['previous_session'] or 'none'})"
     )
     for name, weight in targets["weights"].items():
         lines.append(f"  {name:<10} {weight}")
@@ -1260,24 +1484,116 @@ def summary_lines(result: Mapping[str, Any], *, top: int) -> list[str]:
     return lines
 
 
+# --- the scheduled run: a checkout pinned at the registration, and its launchd job ------------
+
+
+def _git_output(repo: Path, *args: str, what: str) -> str:
+    """Run git in `repo` through the registry's runner (no inherited `GIT_*`) and return stdout,
+    or refuse naming what was being done."""
+    run = registry._git(repo, *args)
+    if run.returncode != 0:
+        raise StepFailedError(
+            "registration",
+            f"could not {what}: {run.stderr.decode(errors='replace').strip()}",
+        )
+    return run.stdout.decode().strip()
+
+
+def pin_worktree(registration: Path, repo: Path, directory: Path) -> str:
+    """Create, or move, a detached worktree at the registration's commit; return that commit.
+
+    The scheduled run stands there rather than in the development checkout. The commit is the one
+    that last touched the registration on `repo`'s `HEAD`, refused unless the bound code there is
+    exactly the registered `code_commit` (`registry.registered_checkout`) -- so the worktree
+    passes the daily command's own admission however far development has moved on, and a commit
+    in the development checkout can no longer cost a forward day. An existing `directory` must
+    be a clean worktree of the same repository; it is moved to the commit, never overwritten.
+    """
+    try:
+        root, commit, _code = registry.registered_checkout(
+            registration, repo, also_bound=(THIS_SCRIPT,)
+        )
+    except registry.HoldoutRefusedError as error:
+        raise StepFailedError(
+            "registration",
+            f"{type(error).__name__}: {error}",
+            exit_code=DailyExit.code_not_registered,
+        ) from error
+    common = Path(_git_output(root, "rev-parse", "--git-common-dir", what="read the repository"))
+    common = (root / common).resolve() if not common.is_absolute() else common.resolve()
+    if not directory.exists():
+        directory.parent.mkdir(parents=True, exist_ok=True)
+        _git_output(
+            root, "worktree", "add", "--detach", str(directory), commit, what="add the worktree"
+        )
+    else:
+        theirs = Path(
+            _git_output(directory, "rev-parse", "--git-common-dir", what="read the worktree")
+        )
+        theirs = (directory / theirs).resolve() if not theirs.is_absolute() else theirs.resolve()
+        if theirs != common:
+            raise StepFailedError(
+                "registration", f"{directory} is not a worktree of {root}; nothing was changed"
+            )
+        dirty = _git_output(
+            directory, "status", "--porcelain", "--untracked-files=all", what="read its status"
+        )
+        if dirty:
+            raise StepFailedError(
+                "registration",
+                f"{directory} has uncommitted changes; a pinned checkout is never edited, and "
+                "nothing was changed",
+            )
+        _git_output(directory, "checkout", "-q", "--detach", commit, what="move the worktree")
+    return _git_output(directory, "rev-parse", "HEAD", what="read the worktree's commit")
+
+
 LAUNCHD_LABEL: Final[str] = "com.openalpha.daily-selection"
 
 
-def launchd_plist(*, repo: Path, runtime_dir: Path, log_dir: Path) -> str:
-    """The launchd job that would run this command at 18:30 on weekdays. Printed, never installed.
+def launchd_plist(
+    *,
+    worktree: Path,
+    runtime_dir: Path,
+    log_dir: Path,
+    env_file: Path,
+    venv: Path,
+    uv: Path,
+) -> str:
+    """The launchd job that runs this command from the pinned worktree at 18:30 on weekdays.
 
-    launchd has no exchange calendar, so it fires every weekday and the command decides: on a
-    holiday the newest closed session is one whose journal is already complete, which prints
-    the summary again with no request and no write. Serialized by `plistlib`, so the `&&` in the
-    shell line and any character a path holds are escaped as XML requires.
+    Printed, never installed. No shell runs it: `ProgramArguments` is the argument vector itself
+    and `WorkingDirectory`/`EnvironmentVariables` set the rest, so no path is ever parsed by a
+    shell and a `"`, `$` or space in one cannot break it or expand. `PYTHONPATH` is the worktree's
+    `src`, so the shared virtual environment imports the pinned `openalpha_cn` and the
+    registration's foreign-package check passes. launchd has no exchange calendar, so it fires
+    every weekday and the command decides: on a holiday the newest closed session is one whose
+    journal is already complete, which prints the summary again with no request and no write.
     """
-    command = (
-        f'cd "{repo}" && uv run --no-sync --env-file .env python {THIS_SCRIPT} '
-        f'--runtime-dir "{runtime_dir}"'
-    )
     job = {
         "Label": LAUNCHD_LABEL,
-        "ProgramArguments": ["/bin/zsh", "-lc", command],
+        "ProgramArguments": [
+            str(uv),
+            "run",
+            "--no-sync",
+            "--active",
+            "--env-file",
+            str(env_file),
+            "python",
+            str(worktree / THIS_SCRIPT),
+            "--runtime-dir",
+            str(runtime_dir),
+            "--repo",
+            str(worktree),
+            "--registration",
+            str(worktree / REGISTRATION_IN_REPOSITORY),
+        ],
+        "WorkingDirectory": str(worktree),
+        "EnvironmentVariables": {
+            "PYTHONPATH": str(worktree / "src"),
+            "VIRTUAL_ENV": str(venv),
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        },
         "StartCalendarInterval": [
             {"Weekday": weekday, "Hour": 18, "Minute": 30} for weekday in range(1, 6)
         ],
@@ -1297,7 +1613,7 @@ def _instant(value: str) -> datetime:
 
 def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _utc_now) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
-    parser.add_argument("--runtime-dir", type=Path, required=True)
+    parser.add_argument("--runtime-dir", type=Path, default=None)
     parser.add_argument("--registration", type=Path, default=DEFAULT_REGISTRATION)
     parser.add_argument("--repo", type=Path, default=REPOSITORY)
     parser.add_argument(
@@ -1310,26 +1626,66 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
         "--dataset",
         action="append",
         default=None,
-        help="A panel target to update, repeatable (default: DAILY_TARGETS).",
+        help="A panel target to update, repeatable, in place of the targets the configuration "
+        "reads (industries are still added on a day that reads them).",
+    )
+    parser.add_argument(
+        "--full-update",
+        action="store_true",
+        help="Update every year-scoped target (FULL_UPDATE_TARGETS), whatever the configuration "
+        "reads.",
     )
     parser.add_argument("--max-staleness-days", type=int, default=DEFAULT_MAX_STALENESS_DAYS)
     parser.add_argument("--top", type=int, default=None, help="How many candidates to print.")
     parser.add_argument("--json", action="store_true", help="Print the day's result as JSON.")
     parser.add_argument(
+        "--pin-worktree",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="Create or move a detached worktree at the registration's commit, print the commit "
+        "and exit. The scheduled run stands there.",
+    )
+    parser.add_argument(
         "--launchd-plist",
         type=Path,
         default=None,
         metavar="LOG_DIR",
-        help="Print the launchd job for this command, logging to LOG_DIR, and exit. Installs "
-        "nothing.",
+        help="Print the launchd job (run from --worktree), logging to LOG_DIR, and exit. "
+        "Installs nothing.",
     )
+    parser.add_argument("--worktree", type=Path, default=None, help="The pinned worktree.")
+    parser.add_argument("--env-file", type=Path, default=None, help="Default: <repo>/.env.")
+    parser.add_argument("--venv", type=Path, default=None, help="Default: <repo>/.venv.")
+    parser.add_argument("--uv", type=Path, default=None, help="Default: the uv on PATH.")
     arguments = parser.parse_args(argv)
+    try:
+        if arguments.pin_worktree is not None:
+            commit = pin_worktree(
+                arguments.registration.resolve(),
+                arguments.repo.resolve(),
+                arguments.pin_worktree.resolve(),
+            )
+            print(f"pinned {arguments.pin_worktree.resolve()} at {commit}")
+            return int(DailyExit.done)
+    except StepFailedError as error:
+        print(str(error), file=sys.stderr)
+        return int(error.exit_code)
+    if arguments.runtime_dir is None:
+        parser.error("--runtime-dir is required")
     if arguments.launchd_plist is not None:
+        if arguments.worktree is None:
+            parser.error("--launchd-plist needs --worktree, the checkout pinned by --pin-worktree")
+        uv = arguments.uv or Path(shutil.which("uv") or "uv")
+        repo = arguments.repo.resolve()
         print(
             launchd_plist(
-                repo=arguments.repo.resolve(),
+                worktree=arguments.worktree.resolve(),
                 runtime_dir=arguments.runtime_dir.resolve(),
                 log_dir=arguments.launchd_plist.resolve(),
+                env_file=(arguments.env_file or repo / ".env").resolve(),
+                venv=(arguments.venv or repo / ".venv").resolve(),
+                uv=uv.resolve(),
             ),
             end="",
         )
@@ -1340,6 +1696,7 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
         repo=arguments.repo,
         as_of=arguments.as_of,
         targets=None if arguments.dataset is None else tuple(arguments.dataset),
+        full_update=arguments.full_update,
         max_staleness_days=arguments.max_staleness_days,
         json_output=arguments.json,
     )

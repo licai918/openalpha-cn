@@ -541,6 +541,14 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_view.without_store_path",
         }
     ),
+    "openalpha_cn.strategy_registration": frozenset(
+        {
+            # V2-P6-011. A registered strategy's day as a prediction record: it takes the day's
+            # answer and the request that produced it, and reads no panel data of its own.
+            "strategy_view.SignalDay",
+            "strategy_view.StrategyRequest",
+        }
+    ),
     "openalpha_cn.shortlist_compare": frozenset(
         {
             "shortlist_view.SHORTLIST_VIEW_SCHEMA_VERSION",
@@ -751,6 +759,13 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
                 "trade_cal",
             }
         ),
+    ),
+    "openalpha_cn.strategy_registration": DatasetReach(
+        # V2-P6-011. Empty in both directions, `shortlist_compare`'s shape: it turns an answer
+        # `strategy_view.score_day` already produced into a `PredictionBatch` and searches a
+        # prediction store it is handed -- no loader, no dataset name.
+        named=frozenset(),
+        reached=frozenset(),
     ),
     "openalpha_cn.shortlist_compare": DatasetReach(
         # V2-P4-007. The only row in this table that is empty in both directions, and the

@@ -383,6 +383,35 @@ def admit_registered_code(
     return root, admitted
 
 
+def registered_checkout(
+    registration: Path, repo: Path, *, also_bound: Sequence[str] = ()
+) -> tuple[Path, str, str]:
+    """The commit a checkout must stand at to run the registered code: the registration's own.
+
+    Returns the repository root, the commit that last touched the registration on `HEAD`, and the
+    registration's `code_commit`. The registration's commit is the one to stand at rather than
+    `code_commit`: the registration file exists only from that commit on, and a checkout without
+    it has no registration to admit. It is refused (`SourceChangedError`) unless the bound code
+    (`REGISTERED_PATHS` plus `also_bound`) at that commit is exactly `code_commit`'s -- which is
+    what a checkout standing there then passes `admit_registered_code` with, whatever the
+    development checkout has moved on to since. Nothing about the running process is checked
+    here: this answers where a checkout should stand, not whether this one does.
+    """
+    root, admitted = _committed_registration(registration, repo)
+    code_commit = admitted.registered.get("code_commit")
+    if not isinstance(code_commit, str) or not _FULL_COMMIT.fullmatch(code_commit):
+        raise SourceChangedError(f"the registration names no full code commit: {code_commit!r}")
+    paths = (*REGISTERED_PATHS, *also_bound)
+    compared = _git(root, "diff", "--quiet", code_commit, admitted.commit, "--", *paths)
+    if compared.returncode != 0:
+        raise SourceChangedError(
+            f"the bound code ({', '.join(paths)}) at the registration's commit "
+            f"{admitted.commit} is not the registered code commit {code_commit}; no checkout "
+            "of this history runs the registered code"
+        )
+    return root, admitted.commit, code_commit
+
+
 def assert_holdout_allowed(registration: Path, ledger: Path, repo: Path) -> None:
     """Raise a `HoldoutRefusedError` unless the holdout may run now; see the module docstring."""
     _holdout_allowed(registration, ledger, repo)

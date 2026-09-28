@@ -7,16 +7,17 @@
 ## 前提
 
 1. `docs/research/p6-registration.json` 已由 `scripts/research/registry.py` 的 `register()` 写出并**提交**，磁盘上的字节与 `HEAD` 相同。
-2. 当前检出的受约束代码（`src/`、`scripts/research/`、`pyproject.toml`、`uv.lock`，以及 `scripts/daily_selection.py` 本身）与登记文件里的 `code_commit` 一致，且工作区无未提交改动。`openalpha_cn` 必须从本仓库的 `src/` 导入。任何一条不满足，命令在第 1 步拒绝，退出码 3。
-3. 运行目录的面板已回填到当年，因子在训练/滚动窗口内的历史时点已构建（滚动 IC 与 walk-forward 需要窗口内每天的截面；本命令只构建当天）。
-4. `.env` 里有 `TUSHARE_TOKEN`。命令本身从不读取它：`panel build` 在 `TushareProvider` 内部解析凭据，本命令只给传输层套了一个按 `api_name` 计数的外壳。
+2. 运行命令的检出，其受约束代码（`src/`、`scripts/research/`、`pyproject.toml`、`uv.lock`，以及 `scripts/daily_selection.py` 本身）与登记文件里的 `code_commit` 一致，工作区无未提交改动，`openalpha_cn` 从这个检出的 `src/` 导入。任何一条不满足，命令在第 1 步拒绝，退出码 3。
+3. **所以定时运行不在开发检出里跑，而在一个钉在登记提交上的专用 worktree 里跑**（见「定时」）。主检出里继续开发、提交，都不会再让某一个前向交易日因为代码变了而被拒绝、白白丢掉；手动运行时同样建议从这个 worktree 跑。
+4. 运行目录的面板已回填到当年，因子在训练/滚动窗口内的历史时点已构建（滚动 IC 与 walk-forward 需要窗口内每天的截面；本命令只构建当天）。
+5. `.env` 里有 `TUSHARE_TOKEN`。命令本身从不读取它：`panel build` 在 `TushareProvider` 内部解析凭据，本命令只给传输层套了一个按 `api_name` 计数的外壳。
 
 ## 手动运行
 
-在仓库根目录：
+在钉住的 worktree 里（路径以你的为准）：
 
 ```bash
-uv run --no-sync --env-file .env python scripts/daily_selection.py --runtime-dir ~/openalpha-research
+PYTHONPATH="$PWD/src" VIRTUAL_ENV="<主检出>/.venv" uv run --no-sync --active --env-file "<主检出>/.env" python scripts/daily_selection.py --runtime-dir ~/openalpha-research
 ```
 
 常用选项：
@@ -24,27 +25,30 @@ uv run --no-sync --env-file .env python scripts/daily_selection.py --runtime-dir
 | 选项 | 作用 |
 |---|---|
 | `--registration PATH` | 登记文件，默认 `docs/research/p6-registration.json` |
+| `--repo DIR` | 校验登记与代码绑定所用的 git 检出，默认脚本所在的检出 |
 | `--as-of ISO` | 固定当天的时钟（默认现在）；该时刻已发布的最新交易日就是「当天」 |
-| `--dataset T`（可重复） | 只更新这些面板目标；默认 `DAILY_TARGETS`，配置读行业时再加 `index_classify`、`index_member_all` |
+| `--dataset T`（可重复） | 用这些面板目标代替按配置推导的目标（读行业的当天仍会加上行业目标） |
+| `--full-update` | 更新当年全部目标（`FULL_UPDATE_TARGETS`），不管配置读什么 |
 | `--max-staleness-days N` | 因子构建的新鲜度上限，默认 30 |
 | `--top N` | 摘要打印前 N 名候选，默认持仓数 |
 | `--json` | 以 JSON 打印当天结果 |
-| `--launchd-plist LOG_DIR` | 只打印 launchd 定时配置文本，不安装任何东西 |
+| `--pin-worktree DIR` | 在登记提交上创建或移动一个分离 HEAD 的 worktree，打印提交号后退出 |
+| `--launchd-plist LOG_DIR` | 只打印 launchd 定时配置文本（需 `--worktree`），不安装任何东西 |
 
 ## 八步与失败时的行为
 
 | 步 | 做什么 | 失败时 |
 |---|---|---|
 | 1 registration | 读登记文件；用 `registry.admit_registered_code` 校验提交状态与代码绑定 | 文件缺失或不可读：退出 2；代码不是登记的代码：退出 3 |
-| 2 panel update | 对最新已收盘交易日所在年份跑 `panel build --incremental`，全部目标一次调用、同一个 `--as-of` | 退出 1，并转述 `panel build` 自己的拒绝理由 |
-| 3 panel doctor | `panel doctor` 与依赖门 `data-check`，数据集为本次更新写的数据集（不含按上市年份分区的 `stock_basic` 和行业目标），带上当天 `--session`，指数数据集带三个指数代码 | 不 clean 就停，第 4–7 步都不执行 |
+| 2 panel update | 对最新已收盘交易日所在年份跑 `panel build --incremental`，同一个 `--as-of`，目标按「每天取什么」推导；`fina_indicator` 单独一次调用，覆盖报告期年份 Y−1（以及 3 月 31 日之后的 Y）；当天的结果窗口或其下一交易日跨入下一年时，再建下一年的 `trade_cal`（1 次请求） | 退出 1，并转述 `panel build` 自己的拒绝理由 |
+| 3 panel doctor | `panel doctor` 与依赖门 `data-check`，数据集为本次更新写的数据集（不含按上市年份分区的 `stock_basic` 和行业目标），带上当天 `--session`，指数数据集带三个指数代码；当天是一年的第一个交易日时，上一年也一并检查（`return_paths` 要跨年比较前一交易日） | 不 clean 就停，第 4–7 步都不执行 |
 | 4 factor build | 配置读到的每个因子档位，在当天 16:30（上海）信号时点构建；该时点已有构建的档位跳过 | 退出 1，转述构建拒绝 |
 | 5 candidates | `strategy_view.score_day`：回测自己的读路径与打分器给当天打分排序 | 退出 1 |
-| 6 target weights | 回测自己的调仓规则 `strategy_backtest.target_holdings`，上一交易日的目标持仓视为账面 | —— |
-| 7 prediction | 当天打分登记进预测库，必须早于下一交易日 09:30 开盘 | 已过下一交易日开盘（晚跑、补跑过去的日子）则拒绝登记，什么也不写：回测在下一开盘成交，从那时起结果已部分揭晓 |
+| 6 target weights | 回测自己的调仓规则 `strategy_backtest.target_holdings`，上一次日志里的目标持仓视为账面 | —— |
+| 7 prediction | 当天打分登记进预测库，必须早于下一交易日 09:15（集合竞价开始，开盘价由它决定） | 已到或已过下一交易日 09:15（晚跑、补跑过去的日子）则拒绝登记，什么也不写 |
 | 8 summary | 打印摘要并写当日日志 | —— |
 
-任何一步失败，标准错误输出里写明「step N (名称) failed」和原因，并给出本次运行到停下时已发出的 Tushare 请求数（失败也花请求），之后的步骤不执行。
+任何一步失败——包括步骤里没有预料到的异常——标准错误输出里都写明「step N (名称) failed」和原因，并给出本次运行到停下时已发出的 Tushare 请求数（失败也花请求），之后的步骤不执行。
 
 当天的 `as_of` 在第 2 步开始前就写进日志：第 2 步中途失败后重跑，问的是同一个问题，已写成的分区按字节相同，`PanelStore` 不会重写。
 
@@ -54,11 +58,11 @@ uv run --no-sync --env-file .env python scripts/daily_selection.py --runtime-dir
 
 - **session**：当天交易日与固定的 `as_of`。
 - **candidate list**：候选榜 ID（`dsl_` 加 24 位十六进制，是当天榜单内容的摘要），以及前 N 名与各自的组合分。榜单截到缓冲带（`buffer_rank`，无缓冲带时为持仓数）。
-- **target weights**：`rebalanced`（调仓日）、`not a rebalance day`（非调仓日，沿用上一日目标）或 `held`（打分源当天没有答案，沿用上一日目标）；每只 `1 / holding_count`，其余为现金；`turnover` 是与上一日目标权重的单边换手。
+- **target weights**：`rebalanced`、`not a rebalance day`（沿用上一次目标）或 `held`（打分源当天没有答案，沿用上一次目标），括号里写明原因（`scheduled`、`the first day: no book yet`、`catching up the rebalance scheduled on …`）；每只 `1 / holding_count`，其余为现金；`turnover` 是与上一次目标权重的单边换手。
 - **prediction**：预测记录 ID（`prd_…`）、`standing`（应为 `forward`）与结果可知时刻。
 - **tushare requests**：本次运行实际发出的请求数，按接口分列。
 
-调仓日按登记配置的 `start` 起算，每 `rebalance_every_sessions` 个交易日一次，与回测一致；第一次运行（还没有上一日目标）总是建仓。walk-forward 模型的重训日也从 `start` 起算，当天使用的是最近一个重训日训练的模型，与从 `start` 回测到当天时回测使用的模型相同。
+调仓按登记配置的 `start` 起算，每 `rebalance_every_sessions` 个交易日一次，与回测一致。walk-forward 模型的重训日也从 `start` 起算，当天使用的是最近一个重训日训练的模型，与从 `start` 回测到当天时回测使用的模型相同。
 
 ## 为什么不是 `shortlist run` 和 `portfolio construct`
 
@@ -70,6 +74,8 @@ uv run --no-sync --env-file .env python scripts/daily_selection.py --runtime-dir
 所以候选榜就是策略自己的排序，目标权重就是策略自己的调仓规则，两者都通过 `run_strategy_backtest` 使用的同一组函数得到。测试 `tests/unit/scripts/test_daily_selection.py` 对静态、滚动 IC、walk-forward 三种打分源分别证明：读取登记记录的回测与登记配置本身的回测逐期成交、持仓、收益完全相同。
 
 ## 登记的预测是什么
+
+批次由 `src/openalpha_cn/strategy_registration.py` 的 `signal_day_batch` 生成，「当天已登记的记录」由同一模块的 `session_record` 查找，前向报告（`V2-P6-012`）引用同一份定义。
 
 - **walk-forward 模型**：就是当天在用模型给当天截面打的那一批分（回测把它们作为打分行），重新盖上登记时刻。
 - **静态权重、滚动 IC**：没有拟合的模型，登记的批次声明的是组合分本身：`family` 为 `strategy_static` 或 `strategy_trailing_ic`，`feature_version` 为登记配置的 `config_id`，`seed`、`code_commit` 取自登记文件，超参数写明组合方式与登记文件摘要。制品里的「测量字段」来自当天的输入而不是手填：`feature_ids` 是成分键，`parameters` 是当天使用的权重，`training_cutoff` 是当天读到的任一打分行或计入的 IC 最晚变为可知的时刻，`training_example_count` 是这些行和 IC 的个数。每只被排序的证券带组合分；只有部分成分有值的证券以 `ABSTAIN_INCOMPLETE_FEATURES` 弃权。
@@ -84,26 +90,68 @@ uv run --no-sync --env-file .env python scripts/daily_selection.py --runtime-dir
 - 只记录了第 2 步：从第 3 步继续，沿用日志里的 `as_of`。
 - 其余各步自身幂等：内容相同的分区不会重写（`PanelStore`），当时点已构建的因子档位跳过，当天已登记的预测复用。
 
-## 请求预算
+## 每天取什么，以及请求预算（R2）
 
-默认目标一天约 93 次请求（`V2-P6-003` 实测：逐日目标约 22 次，财报横扫每天约 71 次）。配置读行业（行业上限或中性化档）时，`index_member_all` 每次再加 62 次。重跑同一天：0 次。
+每天取的目标由配置推导（`targets_for`）：
+
+- **基础**（每天）：`trade_cal`、`stock_basic`、`adj_factor`、`price`（`daily`、`daily_basic`、`suspend_d`）、`stk_limit`、`index_daily`（协议基准 000905.SH，前向报告要用）。
+- **财报**：只有登记的因子读到的财报数据集才取。
+- **行业**（`index_classify`、`index_member_all`）：只在当天的打分会读行业的日子取——中性化档每天（因子构建要读全截面的行业）；行业上限只在调仓日（行业只在调仓决策里被读）。其余日子当天的计算不读任何行业归属，所以「当天打分读到的每只证券」的行业与每天全量刷新完全相同——因为一只也不读。测试 `test_an_industry_cap_refreshed_on_rebalance_days_scores_as_a_daily_full_refresh_does` 把这条规则与每天全量刷新并排跑 5 天（其中非调仓日上游发生一次改类和一次首次归类）：每天的候选榜、目标权重、登记记录完全相同；调仓日两个库对每只证券的行业回答相同。
+
+稳态请求数（上一交易日已更新；由代码的 `BUDGET` 行与各目标每次一请求的规则推导，财报取数按 `V2-P6-003` 2026-09-28 在真实市场上的实测：`income` 25、`balancesheet` 21、`cashflow` 23；行业按 SW2021 的 31 个一级行业）：
+
+| 目标 | 请求数 |
+|---|---:|
+| 基础：`trade_cal` 1 + `stock_basic` 1 + 5 个会话接口 × 2 个会话（重叠 + 新的一天）+ `index_daily` 3 | 15 |
+| 三张报表横扫（只算配置读到的那几张） | 至多 69 |
+| `fina_indicator`（报告期年份 Y−1 的 4 个期 + Y 已结束的期；9 月为 4 + 3） | 约 7 |
+| 行业：`index_classify` 2 + `index_member_all` 2 × 31 | 64 |
+
+| 配置类型 | 普通日 | 读行业的日子 |
+|---|---:|---:|
+| 只读价量，无行业 | 15 | —— |
+| 只读价量 + 行业上限 | 15 | 79（仅调仓日） |
+| 只读价量 + 中性化档 | —— | 79（每天） |
+| 读全部财报，无行业 | 约 91 | —— |
+| 读一张报表（如 `book_to_price` 读 `balancesheet`）+ 行业上限 | 36 | 100（仅调仓日） |
+| **读全部财报 + 行业**（上限或中性化档） | 约 91 | **约 155** |
+| `--full-update`（当年全部 12 个目标） | 约 98 | —— |
+
+离线端到端测试 `test_a_full_update_with_statements_runs_every_step_and_states_its_budget` 在 2 月 20 日（1、2 月两个公告月窗口已开始）用 `--full-update` 跑完全部八步，逐接口核对请求数：会话接口各 2、`trade_cal`/`stock_basic`/`namechange` 各 1、`index_daily` 3、`index_weight` 6、三张报表各 2、`fina_indicator` 4。重跑同一天：0 次。
+
+**超出 R2 的只有「读全部财报 + 读行业」这一类，而且只在读行业的日子。** `index_member_all` 单次上限 3,000 行，全量 7,893 行只能按 31 个一级行业 × 2 个状态切片取；把它降到 3 次请求需要 `offset` 翻页，而翻页在这个接口上只在 2026-08-09 实测过一次（两页不重不漏），VIP 财报接口上已测出翻页会重复和漏行。所以在没有新的实测之前，这一类配置在读行业的日子约 155 次请求；要么接受，要么安排一次在线实测（约 66 次请求：切片取一次、翻页取一次、逐行比较）后再改用翻页。
 
 ## 定时（需要你同意后才安装）
 
-launchd 不知道交易日历，所以配置为每个工作日 18:30 触发，由命令自己判断：节假日里「最新已收盘交易日」的日志已经完整，于是只打印摘要，零请求、零写入。
-
-生成配置文本（只打印，不安装）：
+定时运行从一个**钉在登记提交上的专用 worktree** 里跑，不从开发检出跑：
 
 ```bash
-uv run --no-sync python scripts/daily_selection.py --runtime-dir ~/openalpha-research --launchd-plist ~/openalpha-research/logs
+uv run --no-sync python scripts/daily_selection.py --pin-worktree ~/openalpha-daily
 ```
 
-输出由 `plistlib` 生成（`plutil -lint` 通过），命令行里的 `&&` 已按 XML 转义。launchd 不会替你创建日志目录，加载前需要先建好它。把输出保存为 `~/Library/LaunchAgents/com.openalpha.daily-selection.plist` 并用 `launchctl` 加载，是安装常驻配置，只在你明确同意后做。不同意就保留手动命令，产物完全相同。
+`--pin-worktree` 读主检出里已提交的登记文件，找到最后一次提交它的那个提交，核对那里的受约束代码与登记的 `code_commit` 完全相同，然后在那个提交上创建（或把已有的、干净的 worktree 移到）一个分离 HEAD 的 worktree。它从不改动有未提交改动的 worktree。登记换了（新的一次研究）就再跑一次它。
+
+生成 launchd 配置文本（只打印，不安装）：
+
+```bash
+uv run --no-sync python scripts/daily_selection.py --runtime-dir ~/openalpha-research --worktree ~/openalpha-daily --launchd-plist ~/openalpha-research/logs
+```
+
+配置里没有 shell：`ProgramArguments` 就是 launchd 交给 exec 的参数向量，`WorkingDirectory` 是钉住的 worktree，`EnvironmentVariables` 设 `PYTHONPATH=<worktree>/src`（共用的虚拟环境因此导入钉住的 `openalpha_cn`，外来包检查通过）和 `VIRTUAL_ENV=<主检出>/.venv`，`--env-file` 指向主检出的 `.env`。路径里有空格、`"` 或 `$` 都原样传递，不会被解析。配置由 `plistlib` 生成（`plutil -lint` 通过）。
+
+launchd 不知道交易日历，所以配置为每个工作日 18:30 触发，由命令自己判断：节假日里「最新已收盘交易日」的日志已经完整，于是只打印摘要，零请求、零写入。1 月 1 日这类假日找到的是上一年的最后一个交易日（日历按当年和上一年两年读）。
+
+launchd 不会替你创建日志目录，加载前需要先建好它。把输出保存为 `~/Library/LaunchAgents/com.openalpha.daily-selection.plist` 并用 `launchctl` 加载，是安装常驻配置，只在你明确同意后做。不同意就保留手动命令，产物完全相同。
 
 ## 已知局限
 
-1. 错过的交易日不能补登记预测：下一交易日一开盘，那天打分的结果就开始揭晓，命令拒绝登记。当天的目标权重仍可通过 `--as-of` 补算，但第 7 步会失败并说明原因。
+1. 错过的交易日不能补登记预测：下一交易日 09:15 一到，那天打分的结果就开始揭晓，命令拒绝登记。当天的目标权重仍可通过 `--as-of` 补算，但第 7 步会失败并说明原因。
 2. 预测在收盘后（约 18:30）登记，晚于回测使用的 16:30 信号时点。回测的前视守卫以 16:30 为界，所以前向报告（`V2-P6-012`）读取这些记录时需要按「T 日收盘后登记、T+1 开盘成交」的口径处理，而不是直接把记录当作 T 日 16:30 的打分行。
-3. 目标权重是等权 `1 / holding_count` 的决策，不是成交后的持仓：回测里受参与率上限、涨跌停、停牌影响而没成交的单，这里不模拟；上一交易日的「账面」取的是上一日目标，而不是实际成交结果。
-4. 中性化档的因子构建依赖行业分类的年份覆盖（`V2-P6-015`）；在它合入之前，读中性化档的配置可能在第 4 步被按名拒绝。
-5. **上游撤回已存会话的行时，第 2 步会停。** `--incremental` 会重新拉取已存的最后一个会话（一个会话的重叠）。2026-09-28 实测：Tushare 对 2026-08-28 的 `stk_limit` 已不再返回三只基金（`158008.SZ`、`159096.SZ`、`561730.SH`，此前存下时各只有这一天一行），写入端的丢弃守卫按设计拒绝（更窄的截面被当作不完整的拉取），命令停在第 2 步并说明。这需要面板层的处理（`V2-P6-003` 的后续），不是这条命令能替面板决定的。
+3. 目标权重是等权 `1 / holding_count` 的决策，不是成交后的持仓：回测里受参与率上限、涨跌停、停牌影响而没成交的单，这里不模拟；上一次的「账面」取的是上一次日志里的目标，而不是实际成交结果。
+4. **账面与回测的两种偏离。**
+   - 错过或被拒的调仓日：命令在它之后的第一次运行里补做这次调仓（原因写作 `catching up the rebalance scheduled on …`），而不是让旧账面一直留到下一个预定调仓日。补做用的是补做那天的排序，所以那一期与回测不同（回测在预定日调仓）。
+   - 第一次运行（还没有账面）：当天就建仓，不管当天是不是预定调仓日——回测在那一天已经持有预定调仓日买入的组合，没有账面就无法对齐，等到下一个预定日只会多持有几天现金。
+5. walk-forward 模型每天都重训一次：非重训日重训的是最近一个重训日的同一个窗口，结果与回测使用的模型完全相同，但成本每天都付。在策略测试语料（8 只证券）上实测：重训日 `score_day` 0.50 秒，非重训日 0.48 秒，其中 `walk_forward_fits` 0.1–0.2 毫秒，其余是读训练面板；全市场上树模型单次拟合在 `V2-P6-014` 实测为 26–125 秒（47.7 万个样本），即每天付一次这个时间。把拟合好的模型存下来跨天复用需要一个新的持久化契约（树模型没有从制品重建的函数），这一轮没有做。
+6. 中性化档的因子构建依赖行业分类的年份覆盖（`V2-P6-015` 已合入）；一年的第一个交易日，因子构建读的证券池要求登记表在当年已有至少一个上市/退市事件的分区，否则第 4 步按名拒绝（真实登记表几乎每周都有事件，但 1 月初并非必然）。
+7. **上游撤回已存会话的行时，第 2 步会停。** `--incremental` 会重新拉取已存的最后一个会话（一个会话的重叠）。2026-09-28 实测：Tushare 对 2026-08-28 的 `stk_limit` 已不再返回三只基金（`158008.SZ`、`159096.SZ`、`561730.SH`，此前存下时各只有这一天一行），写入端的丢弃守卫按设计拒绝（更窄的截面被当作不完整的拉取），命令停在第 2 步并说明。这由面板层的 `V2-P6-016` 处理，不是这条命令能替面板决定的。
+8. 读全部财报又读行业的配置，在读行业的日子超出 R2（见上）。
