@@ -2236,10 +2236,12 @@ def load_industry_market_cap_cross_section(
 
     Two bounds survive and are costs rather than benefits:
 
-    - **A stored membership year at or before `day` that `membership_years` did not name refuses
-      the read.** An assignment's close is filed as its own row in its own year, so an unread year
-      can hold the close of an interval this cross section would otherwise report as current --
-      the fail-open direction `KNOWN_INDUSTRY_LIMITATIONS
+    - **A stored membership year that `membership_years` skips -- from its first year through
+      `day`'s -- refuses the read.** The stored years before the first one named are read
+      underneath it (`V2-P6-015`, `load_stock_universe`'s widening), so what refuses is a gap
+      inside or after the named span. An assignment's close is filed as its own row in its own
+      year, so an unread year can hold the close of an interval this cross section would
+      otherwise report as current -- the fail-open direction `KNOWN_INDUSTRY_LIMITATIONS
       .a_partial_year_read_cannot_see_an_interval_close` closed. It is a named refusal that says
       which year to add, rather than the counted absence it used to be here, and it is
       `KNOWN_NEUTRALIZATION_LIMITATIONS
@@ -2360,7 +2362,8 @@ def _industry_answer(
     `industry_missing` says, and neither is a fault in this module.
 
     **The third used to be "this read cannot speak for that day", and it is now a named refusal.**
-    A stored membership year at or before the day that the read did not name can hold the closing
+    A stored membership year the read skipped -- from the first year named through the day's
+    (`V2-P6-015` reads the years before the first underneath it) -- can hold the closing
     row of an interval this cross section would otherwise report as current, and
     `load_industry_cross_section` refuses the read outright rather than handing back a mapping
     that is short by exactly the securities it could not speak for. So a caller who narrows

@@ -409,7 +409,8 @@ argued:
   test_an_industry_code_is_declarable_as_a_factor_input_and_refused_at_the_read` drives exactly
   that, so the claim is a measurement.
 - **The composition already produces the quantity.** `V2-P3-004`'s `INDUSTRY_AND_SIZE` regresses a
-  processed cross section on a complete set of SW2021 L1 dummies plus `log(total_mv)` and stores
+  processed cross section on a complete set of L1 dummies -- in the taxonomy in force on the day,
+  SW2014's before 2021-12-13 and SW2021's from it (`V2-P6-015`) -- plus `log(total_mv)` and stores
   the residual, which by Frisch-Waugh-Lovell is `(y - mean_y_g) - beta * (x - mean_x_g)`. The first
   term **is** industry-relative momentum. So `V2-P3-012` delivers
   `compute_factor(MOMENTUM_60_SESSIONS) -> apply_factor_transform(CROSS_SECTION_STANDARD) ->

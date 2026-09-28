@@ -216,7 +216,9 @@ class ExtraTargetTransport:
         assigned_securities: tuple[str, ...] = SECURITIES,
         vintage_override: str | None = None,
         late_revision: str | None = None,
+        silent_sw2014_index: str | None = None,
     ) -> None:
+        self._silent_sw2014_index = silent_sw2014_index
         self._assigned_securities = assigned_securities
         self._late_revision = late_revision
         self.payloads: list[dict[str, Any]] = []
@@ -389,7 +391,7 @@ class ExtraTargetTransport:
         SW2014's birthday and leaving on its last session -- closed, unless `superseded` is off,
         which is the current-only shape the sweep refuses."""
         index_code = str(params["index_code"])
-        if not self._assigns:
+        if not self._assigns or index_code == self._silent_sw2014_index:
             return []
         code = SECURITIES[L1_CODES.index(index_code)]
         out_date = "20211210" if self._superseded else None
@@ -984,6 +986,22 @@ def test_an_sw2014_sweep_with_no_closed_interval_is_refused(
 
     assert result.exit_code == PanelExit.unhealthy
     assert "found no closed interval" in " ".join(result.output.split())
+    assert PanelStore(tmp_path / "panel").registered_years(SW2014_MEMBERSHIP_DATASET) == ()
+
+
+def test_an_sw2014_index_that_answers_nothing_refuses_the_sweep_by_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A whole level-one industry answering no constituent is a failed fetch, not an empty
+    industry: stored, every one of its securities would read as unclassified for the whole SW2014
+    era. Refused by name with nothing written, the V2-P6-002 rule for an empty window."""
+    _install(monkeypatch, ExtraTargetTransport(silent_sw2014_index=L1_CODES[1]))
+
+    assert build(tmp_path, INDUSTRY_TREE_DATASET).exit_code == PanelExit.ok
+    result = build(tmp_path, SW2014_MEMBERSHIP_DATASET)
+
+    assert result.exit_code == PanelExit.unhealthy
+    assert f"index {L1_CODES[1]} served no constituent row" in " ".join(result.output.split())
     assert PanelStore(tmp_path / "panel").registered_years(SW2014_MEMBERSHIP_DATASET) == ()
 
 

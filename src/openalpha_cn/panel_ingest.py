@@ -5082,8 +5082,9 @@ def load_industry_cross_section(
             f"{dataset} cannot answer {day.isoformat()}: the store holds a "
             f"{skipped[0]} partition this read did not name, and an assignment's close is stored "
             "as its own row in its own year, so an interval that ended there is indistinguishable "
-            "here from one still open. Name every stored year at or before "
-            f"{day.year} in `years`, or ask about a day before {skipped[0]}"
+            f"here from one still open. Name {skipped[0]} in `years` -- every stored year from "
+            f"{requested[0]} through {day.year}; the years before {requested[0]} are read "
+            f"underneath it -- or ask about a day before {skipped[0]}"
         )
     requirement = industry_membership_requirement(
         years=resolved, as_of=as_of, max_staleness=max_staleness, source=source

@@ -327,9 +327,11 @@ surfaced a third unreviewed reacher the row does not mention: `load_statement_hi
   `compress_adjustment_batch` stores a step function, so a withheld row shortens a horizon the
   census cannot rebuild per security (`V2-P4-079`).
 
-- **`index_member_all`** (`load_industry_cross_section`, `V2-P4-027`/`034`).
+- **`index_member_all`** (`load_industry_cross_section`, `V2-P4-027`/`034`), and since
+  `V2-P6-015` `index_member_sw2014` through the same door for days before 2021-12-13.
   `providers/tushare.py::_taxonomy_backfill_timeline` dates a row's availability at its own
-  event floored at 2021-12-13, so once that floor is behind `as_of` the rows the predicate keeps
+  event floored at its taxonomy's birthday (2021-12-13 / 2014-02-21), so once that floor is behind
+  `as_of` the rows the predicate keeps
   are *exactly* the rows the census places at or before `as_of`'s day. Measured on the
   four-partition fixture at `as_of` 2024-06-30T04:00Z: 1993, 2003 and 2017 each answer
   census-count rows with 0 withheld, and 2024 answers 0 rows with 2 withheld against a census
@@ -338,7 +340,8 @@ surfaced a third unreviewed reacher the row does not mention: `load_statement_hi
   not a short row set at all -- it is an **interval with no end in it**. So the second half of
   the answer is that the caller returns no history: it takes the `day` as an argument, resolves
   it inside, and refuses a `day` later than the newest event `as_of` could see, a `day` whose
-  year has a stored partition the read did not name, and an `as_of` before the taxonomy existed.
+  year has a stored partition the read skipped inside or after its named span, and a `day` before
+  any measured taxonomy existed (2014-02-21).
   `tests/integration/panel/test_industry_ingest.py` drives all of them, and holds the refused day
   against the answer the same day gives once the revision has taken effect, so that the refusal
   is shown to be protecting a real difference rather than being cautious about nothing.

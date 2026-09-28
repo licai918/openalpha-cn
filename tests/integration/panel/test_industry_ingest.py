@@ -1488,10 +1488,11 @@ def test_the_stored_sw2014_availability_is_never_earlier_than_sw2014(tmp_path) -
     a 1991 or 2001 SW2014 label is held to 2014-02-21, so a readiness check before it blocks."""
     store = _sw2014_store(tmp_path)
 
+    sw2014_born = datetime(2014, 2, 21, tzinfo=ZoneInfo("Asia/Shanghai"))
     for year in (1991, 2001, 2003):
         coverage = store.read_coverage(SW2014_MEMBERSHIP_DATASET, year)
         assert coverage is not None
-        assert coverage.max_available_time.date() >= date(2014, 2, 20)
+        assert coverage.max_available_time >= sw2014_born
     assert store.read_coverage(SW2014_MEMBERSHIP_DATASET, 2016) is not None
 
 

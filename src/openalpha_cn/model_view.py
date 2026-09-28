@@ -772,15 +772,17 @@ KNOWN_MODEL_VIEW_LIMITATIONS: Final[tuple[ModelViewLimitation, ...]] = (
     ModelViewLimitation(
         code="a_neutralized_feature_column_is_refused_by_this_face",
         detail=(
-            "A `--feature` on the neutralized tier resolves and then fails to read on any panel "
-            "this build can produce inside a covered year: `load_neutralized_factor_observations` "
-            "answers only where the residual partition holds a build, and "
-            "`openalpha factor build --tier neutralized` refuses every instant before its year's "
-            "last stored session (`V2-P4-026`). Rather than let that arrive as an empty column "
-            "and a fit on nothing, the tier is refused at request time with the issue that owns "
-            "the boundary named. `shortlist_view` refuses the same tier for a different reason "
-            "-- it would need an exposure cross section -- and neither refusal is this face's to "
-            "lift."
+            "A `--feature` on the neutralized tier is refused at request time, and the reason is "
+            "an untested path rather than missing data. This entry used to say the residual "
+            "partition could only be built at or after its year's last stored session "
+            "(`V2-P4-026`), so a column on it was empty at every instant a walk-forward asks "
+            "about; `V2-P4-026` and `V2-P4-028` retracted that, and since `V2-P6-015` a "
+            "neutralized build succeeds at any instant from 2014-02-21 (a live 2016 build "
+            "stored 2,566 residuals). What remains is that no walk-forward evaluation on a "
+            "neutralized column has been built and tested end to end on either face -- the "
+            "feature matrix can read the tier, but nothing drives a fit through it -- so lifting "
+            "the refusal is a follow-up whose acceptance is that test. `shortlist_view` refuses "
+            "the same tier for a different reason -- it would need an exposure cross section."
         ),
     ),
 )
@@ -1107,11 +1109,12 @@ def feature_columns(
         tier = _resolve_tier(entry.get("tier"))
         if tier == "neutralized":
             raise ModelRequestError(
-                "a neutralized-tier feature is refused by this face: the residual partition can "
-                "only be built at or after its year's last stored session (V2-P4-026), so a "
-                "column declared on it is empty at every instant a walk-forward asks about and "
-                "the fit would be on nothing. Declare the raw or the processed tier; see "
-                "KNOWN_MODEL_VIEW_LIMITATIONS"
+                "a neutralized-tier feature is refused by this face: no walk-forward "
+                "evaluation on a neutralized column has been built and tested end to end on "
+                "either face yet, and lifting the refusal is a follow-up with that test as its "
+                "acceptance. It is not a data limit -- a neutralized build succeeds at any "
+                "instant from 2014-02-21 on (V2-P6-015). Declare the raw or the processed tier; "
+                "see KNOWN_MODEL_VIEW_LIMITATIONS"
             )
         try:
             resolved.append(

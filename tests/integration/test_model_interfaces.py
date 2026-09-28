@@ -1472,10 +1472,11 @@ def test_a_neutralized_feature_is_refused_by_name_with_the_issue_that_owns_the_b
 ) -> None:
     """The tier this face cannot read, refused at request time rather than as a fit on nothing.
 
-    `openalpha factor build --tier neutralized` refuses every instant before its year's last
-    stored session (`V2-P4-026`), so a neutralized column is empty at every instant a walk-forward
-    asks about. Letting that arrive as a blocked panel would send a caller to rebuild a partition
-    that cannot be built at those instants at all.
+    The reason is an untested path, not missing data: this docstring and the message used to
+    cite `V2-P4-026` (a residual only at its year's last stored session), which was retracted, and
+    since `V2-P6-015` a neutralized build succeeds at any instant from 2014-02-21. No walk-forward
+    evaluation on a neutralized column has been built and tested end to end yet, so the tier stays
+    refused by name until a follow-up adds that test.
     """
     neutralized = {
         **BASELINE,
@@ -1490,11 +1491,14 @@ def test_a_neutralized_feature_is_refused_by_name_with_the_issue_that_owns_the_b
     }
     code, out = _cli(runtime_dir, "evaluate", neutralized)
     assert code == 3
-    assert "V2-P4-026" in out
+    assert "no walk-forward evaluation on a neutralized column" in " ".join(out.split())
+    assert "V2-P4-026" not in out
 
     response = rest.post("/api/v1/models/evaluate", json=_rest_body(neutralized))
     assert response.status_code == 422
-    assert "V2-P4-026" in response.json()["detail"]["message"]
+    message = response.json()["detail"]["message"]
+    assert "no walk-forward evaluation on a neutralized column" in message
+    assert "V2-P4-026" not in message
 
 
 def test_a_reading_as_of_before_the_range_it_reads_is_refused_rather_than_answered_short(

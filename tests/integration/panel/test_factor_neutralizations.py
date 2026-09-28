@@ -2557,14 +2557,20 @@ def _era_batch(
 
 
 class _SW2014Transport:
-    """`index_member` for the two SW2014 indices in `ERA_INDUSTRIES`, one response per index."""
+    """`index_member` for the two SW2014 indices in `ERA_INDUSTRIES`, one response per index.
+
+    `unclassified` names securities no SW2014 index carries at all -- the era's coverage gap.
+    """
+
+    def __init__(self, unclassified: frozenset[str] = frozenset()) -> None:
+        self._unclassified = unclassified
 
     def post(self, payload: dict[str, Any]) -> dict[str, Any]:
         index_code = payload["params"]["index_code"]
         items = [
             [index_code, code, "20160106" if code == SECURITIES[-1] else "20140221", None, "Y"]
             for code, industry in ERA_INDUSTRIES.items()
-            if industry == index_code
+            if industry == index_code and code not in self._unclassified
         ]
         return {
             "code": 0,
@@ -2577,7 +2583,7 @@ class _SW2014Transport:
         }
 
 
-def _era_store(root: Path) -> PanelStore:
+def _era_store(root: Path, *, unclassified: frozenset[str] = frozenset()) -> PanelStore:
     """A 2016 store: calendar, registry, one fortnight of prices, and SW2014 memberships.
 
     Written through the real writers, so every write-time guard runs. The SW2014 rows come
@@ -2682,7 +2688,9 @@ def _era_store(root: Path) -> PanelStore:
         halts=None,
     )
     provider = TushareProvider(
-        token="secret-token", transport=_SW2014Transport(), clock=lambda: ERA_FETCHED_AT
+        token="secret-token",
+        transport=_SW2014Transport(unclassified),
+        clock=lambda: ERA_FETCHED_AT,
     )
     write_industry_memberships(
         store,
@@ -2748,6 +2756,46 @@ def test_a_neutralised_build_at_a_2016_instant_succeeds_on_sw2014_memberships(
     assert {item.subject: item.industry_code for item in section.characteristics} == (
         ERA_INDUSTRIES
     )
+
+
+def test_a_name_sw2014_does_not_classify_is_coded_industry_missing_by_the_build(
+    tmp_path: Path,
+) -> None:
+    """The SW2014 era's coverage gap at the build level: a name no SW2014 index carries on the
+    instant gets no residual and is coded `industry_missing` -- it is not given its SW2021 label,
+    which would be the backfill this dataset exists to avoid."""
+    store = _era_store(tmp_path, unclassified=frozenset({SECURITIES[0]}))
+    request = factor_build_request(
+        factor="reversal_1d/v1",
+        tier="neutralized",
+        transform="probe_zscore/v1",
+        neutralization="probe_neutral/v1",
+        as_ofs=[ERA_BUILD],
+        years=[2016],
+        exchange="SZSE",
+        max_staleness_days=30,
+        waive_max_staleness=False,
+        subjects=[],
+        supersedes_raw=[],
+        supersedes_processed=[],
+        supersedes_neutralized=[],
+        code_commit=COMMIT,
+        transforms=FactorTransformRegistry((_transform_spec(),)),
+        neutralizations=FactorNeutralizationRegistry((_spec(),)),
+    )
+
+    report = build_factor_panels(store, request, built_at=ERA_BUILD)
+
+    assert report.coverage["neutralized"] == {
+        "industry_missing": 1,
+        "neutralized": len(SECURITIES) - 1,
+    }
+    residuals = load_neutralized_factor_observations(
+        store, REVERSAL_1D, _spec(), years=(2016,), as_of=ERA_BUILD
+    )
+    (lone,) = (row for row in residuals if row.subject == SECURITIES[0])
+    assert lone.coverage == "industry_missing"
+    assert lone.value is None
 
 
 def test_an_sw2014_day_refuses_a_level_its_stored_memberships_do_not_have(

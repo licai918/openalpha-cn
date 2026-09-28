@@ -4457,12 +4457,24 @@ def _build_sw2014_memberships(
     stride = _progress_stride(len(codes))
     for done, code in enumerate(codes, start=1):
         batch = _fetch_panel(provider, SW2014_MEMBERSHIP_DATASET, as_of=now, subjects=(code,))
-        if batch.status == "success":
-            batches.append(batch)
-            through = next(
-                column.values for column in batch.columns if column.name == "industry_through"
+        if batch.status != "success" or not batch.row_count:
+            # A whole level-one industry answering nothing is a failed fetch, not an empty
+            # industry -- every SW2014 L1 index carried constituents on the live probe (the
+            # smallest well over a dozen) -- and stored, its securities would read as unclassified
+            # for the whole era. Refused by name before anything is written, the V2-P6-002 rule
+            # for an empty whole-market window.
+            raise _panel_fail(
+                PanelExit.unhealthy,
+                f"{SW2014_MEMBERSHIP_DATASET} index {code} served no constituent row; a whole "
+                f"{SW2014_TAXONOMY} level-one industry answering nothing is a failed fetch, and "
+                "storing the sweep without it would code every one of its securities "
+                "industry_missing for the whole SW2014 era. Nothing was written",
             )
-            closed += sum(1 for value in through if value is not None)
+        batches.append(batch)
+        through = next(
+            column.values for column in batch.columns if column.name == "industry_through"
+        )
+        closed += sum(1 for value in through if value is not None)
         if done % stride == 0 or done == len(codes):
             _echo_progress(
                 (SW2014_MEMBERSHIP_DATASET,), done, len(codes), started, unit="industry-indices"
