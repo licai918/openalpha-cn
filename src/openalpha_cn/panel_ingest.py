@@ -3323,6 +3323,17 @@ is disputed and for the whole session when several are, and a test passes one bu
 transport.
 """
 
+YearEndWitness = Callable[[str], float | None]
+"""A security's first `daily` bar of the following year, as its `pre_close`, or `None`.
+
+The witness for a disputed bar that has no next bar inside its own year. `None` means the
+following year's first session has not published, so nothing can corroborate the bar yet; a
+witness that finds the session published and no bar to read raises rather than answering
+`None`, because "not yet" and "not there" are different answers. Injected for `PriceRefetch`'s
+reason: `cli._year_end_witness` reads the stored next-year partition and falls back to one
+targeted request.
+"""
+
 HaltCorpusSource = Callable[[], Mapping[date, SuspensionDay] | None]
 """The year's `suspend_d` corpus, read only when a zero upper limit is actually present.
 
@@ -3362,6 +3373,7 @@ def reconcile_price_disagreements(
     *,
     refetch: PriceRefetch,
     last_session: date,
+    year_end_witness: YearEndWitness | None = None,
 ) -> ReconciledRows:
     """Resolve every `daily`/`daily_basic` close disagreement of one year, or refuse the year.
 
@@ -3386,6 +3398,14 @@ def reconcile_price_disagreements(
        `last_session` -- the last session the build **requested**, from the calendar, not the
        newest one the bars happen to hold -- and there is no next session yet. Anything else is
        refused, naming the security, the session and both closes.
+
+       **A bar with no next bar inside the year** -- the year's last session, or a security
+       halted into year-end -- has no witness in this year's batches. When the build requested
+       the year's whole calendar, `year_end_witness` is asked for the security's first bar of the
+       following year: its `pre_close` corroborates or contradicts exactly as an in-year next bar
+       would, and only a following year that has not published yet (`None`) leaves the row
+       `valuation_contradicts_unconfirmed_bar`. Without a witness (a year still in progress) the
+       last requested session is unconfirmed and any earlier one is refused, as before.
     3. **Drop the valuation row, and only it.** No bar is edited or invented and nothing is
        filled from anywhere; the dropped row is recorded with its own clocks in `record`, and a
        contradicted valuation also records whether it repeats the previous bar close.
@@ -3461,10 +3481,14 @@ def reconcile_price_disagreements(
             if position + 1 < len(days):
                 next_key = (finding.ts_code, days[position + 1])
                 next_pre_close = cast(float, pre_closes[bar_rows[next_key]])
+        unconfirmed = finding.trade_date == last_session
+        if key in bar_rows and next_pre_close is None and year_end_witness is not None:
+            next_pre_close = year_end_witness(finding.ts_code)
+            unconfirmed = next_pre_close is None
         kind = close_disagreement_kind(
             bar_close=finding.bar_close,
             next_bar_pre_close=next_pre_close,
-            is_last_session=finding.trade_date == last_session,
+            is_last_session=unconfirmed,
         )
         if kind is None:
             raise PanelBatchError(

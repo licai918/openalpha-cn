@@ -7,7 +7,7 @@ import platform
 import sys
 import textwrap
 from calendar import monthrange
-from collections.abc import Iterator, Mapping, Sequence, Set
+from collections.abc import Callable, Iterator, Mapping, Sequence, Set
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import MAXYEAR, MINYEAR, UTC, date, datetime, time, timedelta
@@ -181,6 +181,7 @@ from openalpha_cn.panel_ingest import (
     _sessions_published_through,
     combine_defect_records,
     keep_panel_subjects,
+    load_daily_bars,
     load_industry_trees,
     load_stock_universe,
     load_suspensions,
@@ -3084,6 +3085,7 @@ def _build_price_panel(
     now: datetime,
     halts: bool,
     listings: Mapping[str, date] | None,
+    exchange: str,
 ) -> str:
     """Fetch the three price datasets session by session, then write them in dependency order.
 
@@ -3106,6 +3108,13 @@ def _build_price_panel(
     wrong, which is true whatever happens to the year. Anything unexplained is refused exactly
     as before.
     """
+    if not sessions:
+        raise _panel_fail(
+            PanelExit.unhealthy,
+            f"the {calendar.exchange} calendar reports no open session of {year} up to "
+            f"{now.isoformat()}, so there is no price year to build and no last session to judge "
+            "a close disagreement against",
+        )
     collected = _session_batches(provider, PANEL_BUILD_TARGETS["price"], sessions)
     halt_batches = collected[SUSPENSION_DATASET]
     if halt_batches:
@@ -3125,13 +3134,31 @@ def _build_price_panel(
     listed_valuations = reconcile_pre_listing_rows(
         collected[DAILY_BASIC_DATASET], listings=listings
     )
+
+    def refetch(day: date, codes: tuple[str, ...]) -> tuple[ColumnarPanelBatch, ColumnarPanelBatch]:
+        # The re-fetch is compared with batches `bar_before_listing` has already filtered, so it
+        # is filtered by the same rule first: a back-mapped pre-listing bar in a whole-session
+        # re-fetch is not a row the year's fetch was short of.
+        bars, valuations = _refetch_price_session(provider, day, codes)
+        return _listed_only(bars, listings), _listed_only(valuations, listings)
+
+    year_complete = sessions[-1] == date(year, 12, 31) or not calendar.trading_days_between(
+        sessions[-1] + timedelta(days=1), date(year, 12, 31)
+    )
     reconciled = reconcile_price_disagreements(
         listed_bars.batches,
         listed_valuations.batches,
-        refetch=lambda day, codes: _refetch_price_session(provider, day, codes),
+        refetch=refetch,
         # The last session this build *requested*, from the calendar -- not the newest one the
         # bars hold, which a missing final session would move back by one.
         last_session=sessions[-1],
+        # Only a build that requested the year's whole calendar can ask the following year:
+        # a year in progress has its own next sessions still to come.
+        year_end_witness=(
+            _year_end_witness(store, provider, year=year, exchange=exchange, now=now)
+            if year_complete
+            else None
+        ),
     )
     recorded = write_upstream_defects(
         store,
@@ -3151,6 +3178,96 @@ def _build_price_panel(
         )
     )
     return "corroborated" if corpus is not None else "waived"
+
+
+def _listed_only(
+    batch: ColumnarPanelBatch, listings: Mapping[str, date] | None
+) -> ColumnarPanelBatch:
+    """`batch` without the rows `bar_before_listing` drops, for comparison with the year's fetch.
+
+    A batch that held nothing but pre-listing rows is returned as it came: no disputed security
+    can be in it, because disputed rows are drawn from the batches the rule already filtered.
+    """
+    kept = reconcile_pre_listing_rows((batch,), listings=listings).batches
+    return kept[0] if kept else batch
+
+
+def _year_end_witness(
+    store: PanelStore, provider: TushareProvider, *, year: int, exchange: str, now: datetime
+) -> Callable[[str], float | None]:
+    """The first `daily` bar of `year + 1` for a security, as its `pre_close` (`V2-P6-013`).
+
+    The witness a disputed bar with no next bar inside its year is judged by. In order:
+
+    1. `year + 1`'s calendar must be stored and its first session published at `now`;
+       otherwise the answer is `None` -- nothing can corroborate the bar yet, and the row stays
+       `valuation_contradicts_unconfirmed_bar`.
+    2. A stored `daily` partition for `year + 1` is read session by session, from its first
+       published session, for the security's first bar -- no request. A security halted into
+       the new year is found on the session it resumes.
+    3. Failing that, one targeted `daily` request for the security on the first session.
+
+    A published first session that yields no bar for the security raises: "not there" is not
+    "not yet", and the bar is then uncorroborated. Build `year + 1` first to widen step 2.
+    """
+    following = year + 1
+    cache: dict[str, TradingCalendar | None] = {}
+
+    def next_calendar() -> TradingCalendar | None:
+        if "calendar" not in cache:
+            cache["calendar"] = None
+            if following in store.registered_years(TRADING_CALENDAR_DATASET):
+                try:
+                    cache["calendar"] = load_trading_calendar(
+                        store, exchange=exchange, years=(following,), as_of=now
+                    )
+                except (TradingCalendarError, PanelStorageError):
+                    cache["calendar"] = None
+        return cache["calendar"]
+
+    def witness(ts_code: str) -> float | None:
+        calendar = next_calendar()
+        if calendar is None:
+            return None
+        published = [
+            day
+            for day in calendar.trading_days_between(date(following, 1, 1), date(following, 12, 31))
+            if session_publication_instant(day) <= now
+        ]
+        if not published:
+            return None
+        if following in store.registered_years(DAILY_DATASET):
+            for day in published:
+                try:
+                    bars = load_daily_bars(
+                        store, day=day, calendar=calendar, as_of=now, max_staleness=None
+                    )
+                except (PanelStorageError, PriceDataError):
+                    break
+                if ts_code in bars:
+                    return bars[ts_code].pre_close
+        first = published[0]
+        typer.echo(f"WITNESS {ts_code} {first.isoformat()} ({DAILY_DATASET})", err=True)
+        batch = _fetch_panel(
+            provider, DAILY_DATASET, as_of=_session_as_of(first), subjects=(ts_code,)
+        )
+        if batch.status == "success":
+            pre_closes = next(column for column in batch.columns if column.name == "pre_close")
+            found = [
+                value
+                for subject, value in zip(batch.subjects, pre_closes.values, strict=True)
+                if subject == ts_code
+            ]
+            if len(found) == 1 and type(found[0]) is float:
+                return found[0]
+        raise PanelBatchError(
+            f"{ts_code}'s last {year} bar has no next bar in {year}, and {following}'s first "
+            f"session ({first.isoformat()}) has published with no complete bar for it to read "
+            f"its pre_close from. The disputed close cannot be corroborated; build {following}'s "
+            "price panel first so its first bar of the year can be read from the store"
+        )
+
+    return witness
 
 
 def _refetch_price_session(
@@ -3997,6 +4114,7 @@ def _build_panel(
             now=now,
             halts=halts,
             listings=listings,
+            exchange=exchange,
         )
     if PRICE_LIMIT_DATASET in targets:
         assert calendar is not None  # guaranteed by `_NEEDS_STORED_CALENDAR` above

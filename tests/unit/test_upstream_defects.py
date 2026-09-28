@@ -30,8 +30,10 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from openalpha_cn import cli
@@ -203,6 +205,10 @@ class Frame:
     """`FILLERS[3]` has no bar on `NO_BAR_DAY` either, so that session re-fetches whole."""
     session_refetch: str | None = None
     """How a whole-session `daily` re-fetch answers: `None` (in full), `empty` or `short`."""
+    mismatch_code: str = FILLERS[2]
+    """The security `mismatch_day` and `next_pre_close_disagrees` are about."""
+    halted_into_year_end: bool = False
+    """`FILLERS[5]` is halted all of `SESSIONS[-1]`, so its last 2013 bar is on `SESSIONS[-2]`."""
 
 
 class ScriptedUpstream:
@@ -233,14 +239,21 @@ class ScriptedUpstream:
         if (
             self.frame.next_pre_close_disagrees
             and mismatch is not None
-            and code == FILLERS[2]
+            and code == self.frame.mismatch_code
             and day > mismatch
-            and day == min(later for later in self.frame.sessions if later > mismatch)
+            and day
+            == min(
+                later
+                for later in self.frame.sessions
+                if later > mismatch and self._traded(code, later)
+            )
         ):
             return 10.5
         return STALE_PRE_CLOSES.get(day, 6.8) if code == STALE else self._close(code, day)
 
     def _traded(self, code: str, day: date) -> bool:
+        if self.frame.halted_into_year_end and code == FILLERS[5] and day == SESSIONS[-1]:
+            return False
         return not (self.frame.limit_placeholder and code == HALTED and day == HALT_DAY)
 
     def _prelisted(self, day: date) -> bool:
@@ -281,7 +294,7 @@ class ScriptedUpstream:
             return 11.5
         if self.frame.contradicted_valuation and code == FILLERS[1] and day == STALE_DAY:
             return 10.03
-        if code == FILLERS[2] and day == self.frame.mismatch_day:
+        if code == self.frame.mismatch_code and day == self.frame.mismatch_day:
             return 10.07
         return self._close(code, day)
 
@@ -299,8 +312,10 @@ class ScriptedUpstream:
 
     def _halts(self, day: date) -> list[list[Any]]:
         rows: list[list[Any]] = []
-        if day == SESSIONS[0]:
+        if day == min(open_day for open_day in self.frame.sessions if open_day.year == day.year):
             rows.append([RESUMED, _compact(day), "R", None])
+        if self.frame.halted_into_year_end and day == SESSIONS[-1]:
+            rows.append([FILLERS[5], _compact(day), "S", None])
         if (
             self.frame.limit_placeholder
             and self.frame.halted_on_placeholder_day
@@ -341,8 +356,9 @@ class ScriptedUpstream:
         if api_name == TRADING_CALENDAR_DATASET:
             items: list[list[Any]] = []
             previous: str | None = None
-            day = date(YEAR, 1, 1)
-            while day <= date(YEAR, 12, 31):
+            year = int(str(params["start_date"])[:4])
+            day = date(year, 1, 1)
+            while day <= date(year, 12, 31):
                 is_open = day in self.frame.sessions
                 items.append([params["exchange"], _compact(day), 1 if is_open else 0, previous])
                 if is_open:
@@ -385,12 +401,13 @@ def _build(
     frame: Frame,
     monkeypatch: pytest.MonkeyPatch,
     *targets: str,
+    year: int = YEAR,
 ) -> tuple[Any, ScriptedUpstream]:
     upstream = ScriptedUpstream(frame)
     monkeypatch.setenv("TUSHARE_TOKEN", SECRET_TOKEN)
     monkeypatch.setattr(cli, "_panel_transport", lambda: upstream)
     monkeypatch.setattr(cli, "_panel_clock", lambda: CLOCK)
-    arguments = ["panel", "build", "--runtime-dir", str(runtime_dir), "--year", str(YEAR)]
+    arguments = ["panel", "build", "--runtime-dir", str(runtime_dir), "--year", str(year)]
     arguments += ["--as-of", AS_OF, "--json"]
     for target in (TRADING_CALENDAR_DATASET, *targets):
         arguments += ["--dataset", target]
@@ -854,6 +871,144 @@ def test_the_refusal_names_the_column_that_is_actually_null(
     assert "no pre_close" not in result.output
 
 
+# --- round 4: the pre-listing re-fetch, and the year-end witness ---------------------------------
+
+NEXT_YEAR: tuple[date, ...] = (date(2014, 1, 2), date(2014, 1, 3))
+
+
+def test_a_whole_session_re_fetch_is_filtered_by_the_listing_rule_before_it_is_compared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reviewer's reproduction: two disputed securities on a session that also carries a
+    back-mapped pre-listing bar. The year's batches no longer hold `920476.BJ`; the raw
+    whole-session re-fetch does, and must be filtered the same way before it is compared."""
+    frame = Frame(pre_listing="before", valuation_without_bar=True, second_no_bar=True)
+    result, _ = _build(tmp_path, frame, monkeypatch, "stock_basic", "price")
+
+    assert result.exit_code == PanelExit.ok, result.output
+    assert sorted(
+        d.ts_code for d in _defects(tmp_path) if d.kind == "valuation_without_bar"
+    ) == sorted([NO_BAR, FILLERS[3]])
+
+
+def _next_year_stored(runtime: Path, frame: Frame, monkeypatch: pytest.MonkeyPatch, *targets: str):
+    result, _ = _build(runtime, frame, monkeypatch, *targets, year=YEAR + 1)
+    assert result.exit_code == PanelExit.ok, result.output
+
+
+def test_a_year_end_mismatch_is_corroborated_by_the_stored_next_years_first_bar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frame = Frame(mismatch_day=SESSIONS[-1], sessions=(*SESSIONS, *NEXT_YEAR))
+    _next_year_stored(tmp_path, frame, monkeypatch, "price")
+
+    result, upstream = _build(tmp_path, frame, monkeypatch, "price")
+
+    assert result.exit_code == PanelExit.ok, result.output
+    assert [d.kind for d in _defects(tmp_path)] == ["valuation_contradicts_corroborated_bar"]
+    assert upstream.refetches() == [
+        (DAILY_DATASET, FILLERS[2], _compact(SESSIONS[-1])),
+        (DAILY_BASIC_DATASET, FILLERS[2], _compact(SESSIONS[-1])),
+    ]  # the re-fetch only: the witness came out of the store
+
+
+def test_a_year_end_mismatch_is_corroborated_by_one_targeted_fetch_of_the_next_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frame = Frame(mismatch_day=SESSIONS[-1], sessions=(*SESSIONS, *NEXT_YEAR))
+    _next_year_stored(tmp_path, frame, monkeypatch)  # the calendar only
+
+    result, upstream = _build(tmp_path, frame, monkeypatch, "price")
+
+    assert result.exit_code == PanelExit.ok, result.output
+    assert [d.kind for d in _defects(tmp_path)] == ["valuation_contradicts_corroborated_bar"]
+    assert (DAILY_DATASET, FILLERS[2], _compact(NEXT_YEAR[0])) in upstream.refetches()
+
+
+def test_a_year_end_mismatch_the_next_years_first_bar_contradicts_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frame = Frame(
+        mismatch_day=SESSIONS[-1], sessions=(*SESSIONS, *NEXT_YEAR), next_pre_close_disagrees=True
+    )
+    _next_year_stored(tmp_path, frame, monkeypatch)
+
+    result, _ = _build(tmp_path, frame, monkeypatch, "price")
+
+    assert result.exit_code == PanelExit.unhealthy, result.output
+    assert "not corroborated" in result.output
+    assert _store(tmp_path).registered_years(DAILY_BASIC_DATASET) == ()
+
+
+def test_the_witness_answers_not_yet_before_the_next_years_first_session_publishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a following year that has not published leaves the row unconfirmed."""
+    frame = Frame(sessions=(*SESSIONS, *NEXT_YEAR))
+    _next_year_stored(tmp_path, frame, monkeypatch)
+    upstream = ScriptedUpstream(frame)
+    provider = TushareProvider(token=SECRET_TOKEN, transport=upstream, clock=lambda: CLOCK)
+
+    before = datetime(2014, 1, 2, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    after = datetime(2014, 1, 2, 17, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    early = cli._year_end_witness(_store(tmp_path), provider, year=YEAR, exchange="SSE", now=before)
+    late = cli._year_end_witness(_store(tmp_path), provider, year=YEAR, exchange="SSE", now=after)
+
+    assert early(FILLERS[2]) is None
+    assert upstream.payloads == []
+    assert late(FILLERS[2]) == 10.0
+
+
+def test_a_security_halted_into_year_end_is_corroborated_by_its_first_next_year_bar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its last 2013 bar is on the 14th and it is halted on the 15th, so no 2013 bar follows it
+    -- before round 4 that was a refusal. Its first 2014 bar's pre_close is the witness."""
+    frame = Frame(
+        halted_into_year_end=True,
+        mismatch_code=FILLERS[5],
+        mismatch_day=SESSIONS[-2],
+        sessions=(*SESSIONS, *NEXT_YEAR),
+    )
+    _next_year_stored(tmp_path, frame, monkeypatch, "price")
+
+    result, _ = _build(tmp_path, frame, monkeypatch, "price")
+
+    assert result.exit_code == PanelExit.ok, result.output
+    assert [(d.ts_code, d.kind) for d in _defects(tmp_path)] == [
+        (FILLERS[5], "valuation_contradicts_corroborated_bar")
+    ]
+
+
+def test_a_price_build_with_no_session_refuses_before_it_fetches_anything(tmp_path: Path) -> None:
+    """`last_session` is `sessions[-1]`; an empty session list is refused by name first."""
+    upstream = ScriptedUpstream(Frame())
+    provider = TushareProvider(token=SECRET_TOKEN, transport=upstream, clock=lambda: CLOCK)
+    calendar = build_trading_calendar(
+        "SSE",
+        [
+            CalendarDay(
+                calendar_date=date(YEAR, 1, 1) + timedelta(days=offset), is_trading=offset == 1
+            )
+            for offset in range(365)
+        ],
+    )
+    with pytest.raises(typer.Exit):
+        cli._build_price_panel(
+            _store(tmp_path),
+            provider,
+            written=[],
+            sessions=(),
+            calendar=calendar,
+            year=YEAR,
+            now=CLOCK,
+            halts=False,
+            listings=None,
+            exchange="SSE",
+        )
+    assert upstream.payloads == []
+
+
 def test_panel_doctor_answers_for_the_defects_record_rather_than_raising(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -869,6 +1024,16 @@ def test_panel_doctor_answers_for_the_defects_record_rather_than_raising(
     assert health.freshness.cadence == "derived"
     assert health.is_ready
     assert report.is_clean
+
+    # A year with no partition is a year whose build dropped nothing, not a missing one.
+    quiet = panel_health_report(
+        _store(tmp_path),
+        as_of=AS_OF_INSTANT,
+        datasets=(UPSTREAM_DEFECTS_DATASET,),
+        years=(YEAR, YEAR - 1),
+    )
+    assert quiet.dataset(UPSTREAM_DEFECTS_DATASET).is_ready
+    assert "partition_missing" not in quiet.codes()
 
 
 # --- the decoder -------------------------------------------------------------------------------

@@ -1593,6 +1593,20 @@ def _coverage_records(
     )
 
 
+def _a_year_without_defects_is_not_missing(readiness: DatasetReadiness) -> DatasetReadiness:
+    """`upstream_defects` with its `partition_missing` issues removed (`V2-P6-013`).
+
+    That record is rebuilt from each build's own drops and its partition is *removed* when a
+    build drops nothing, so an absent year is a year whose build dropped nothing -- the answer,
+    not a gap. Every other issue (a damaged file, stale coverage, a partition not yet knowable)
+    still blocks exactly as it does for any dataset.
+    """
+    kept = tuple(issue for issue in readiness.issues if issue.code != "partition_missing")
+    if len(kept) == len(readiness.issues):
+        return readiness
+    return replace(readiness, issues=kept, state="blocked" if kept else "ready")
+
+
 def dataset_health(
     store: PanelStore,
     *,
@@ -1644,6 +1658,8 @@ def dataset_health(
         date_timezone=date_timezone,
     )
     readiness = store.assess_readiness(requirement)
+    if dataset == UPSTREAM_DEFECTS_DATASET:
+        readiness = _a_year_without_defects_is_not_missing(readiness)
     findings = list(findings_from_readiness(readiness))
     if note is not None:
         findings.append(
