@@ -253,7 +253,7 @@ import urllib.error
 import urllib.request
 from calendar import monthrange
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from enum import StrEnum
@@ -4141,7 +4141,11 @@ class TushareProvider:
         return self._panel_batch(descriptor, request, self._request_rows)
 
     def fetch_panel_sweep(
-        self, request: ProviderRequest, *, codes: Sequence[str] = ()
+        self,
+        request: ProviderRequest,
+        *,
+        codes: Sequence[str] = (),
+        floor: Mapping[date, int] | None = None,
     ) -> ColumnarPanelBatch:
         """One whole-market window of a statement dataset, through its `*_vip` endpoint.
 
@@ -4160,6 +4164,12 @@ class TushareProvider:
         (`_narrowest_rows`), and refused if `codes` is empty. `codes` is the caller's list of the
         securities it keeps; rows of any other security are not fetched on that path, which is
         the same row set a caller that keeps only `codes` stores.
+
+        `floor` (`V2-P6-018`) is a lower bound on the rows each announcement day holds -- the
+        stored partition's own date census, for a caller re-sweeping a month it has stored. A
+        date window whose floor already reaches the cap is split without being asked: its answer
+        would be refused as truncated, so the request could only cost. Nothing else changes; a
+        window whose floor is under the cap is asked, and halved if refused, exactly as before.
         """
         descriptor = self._sweep_descriptor(request)
         chunk_codes = tuple(sorted(set(codes)))
@@ -4167,7 +4177,7 @@ class TushareProvider:
         return self._panel_batch(
             descriptor,
             request,
-            lambda chosen, asked: self._swept_rows(chosen, asked, chunk_codes),
+            lambda chosen, asked: self._swept_rows(chosen, asked, chunk_codes, floor),
         )
 
     def fetch_panel_listed(
@@ -4253,6 +4263,7 @@ class TushareProvider:
         descriptor: TushareDatasetDescriptor,
         request: ProviderRequest,
         codes: tuple[str, ...],
+        floor: Mapping[date, int] | None = None,
     ) -> list[dict[str, Any]]:
         """Every row of one sweep window: one response, the halves of a date window, or chunks."""
         params = descriptor.params_builder(request)
@@ -4266,6 +4277,7 @@ class TushareProvider:
             _parse_tushare_date(params["start_date"]),
             _parse_tushare_date(params["end_date"]),
             codes,
+            floor,
         )
 
     def _halved_rows(
@@ -4275,6 +4287,7 @@ class TushareProvider:
         first: date,
         last: date,
         codes: tuple[str, ...],
+        floor: Mapping[date, int] | None = None,
     ) -> list[dict[str, Any]]:
         """The rows announced in `[first, last]`, halving the window until each response fits.
 
@@ -4290,6 +4303,21 @@ class TushareProvider:
         refusal when there are no codes.
         """
         window = {"start_date": f"{first:%Y%m%d}", "end_date": f"{last:%Y%m%d}"}
+        cap = descriptor.max_rows_per_response
+        if (
+            floor is not None
+            and cap is not None
+            and first < last
+            and sum(count for day, count in floor.items() if first <= day <= last) >= cap
+        ):
+            # Known to be truncated before it is asked: split without spending the request.
+            middle = first + (last - first) // 2
+            return [
+                *self._halved_rows(descriptor, request, first, middle, codes, floor),
+                *self._halved_rows(
+                    descriptor, request, middle + timedelta(days=1), last, codes, floor
+                ),
+            ]
         if first >= last:
             return self._narrowest_rows(
                 descriptor, request, window, codes, what=f"single announcement day {first:%Y%m%d}"
@@ -4304,8 +4332,8 @@ class TushareProvider:
             pass
         middle = first + (last - first) // 2
         return [
-            *self._halved_rows(descriptor, request, first, middle, codes),
-            *self._halved_rows(descriptor, request, middle + timedelta(days=1), last, codes),
+            *self._halved_rows(descriptor, request, first, middle, codes, floor),
+            *self._halved_rows(descriptor, request, middle + timedelta(days=1), last, codes, floor),
         ]
 
     def _narrowest_rows(

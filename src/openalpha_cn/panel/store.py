@@ -3100,6 +3100,13 @@ def _validated_requirement(requirement: ReadinessRequirement) -> ReadinessRequir
         raise PanelStorageError(
             f"max_staleness must be a timedelta or None; got {requirement.max_staleness!r}"
         )
+    admissible = requirement.empty_admissible_through
+    if admissible is not None and not all(
+        type(year) is int and type(day) is date for year, day in admissible.items()
+    ):
+        raise PanelStorageError(
+            f"empty_admissible_through must map int years to dates; got {admissible!r}"
+        )
     return requirement
 
 

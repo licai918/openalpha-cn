@@ -288,12 +288,13 @@ disagreeing by one day (a session at 08:00 Asia/Shanghai is the previous date in
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Final, Literal
+from zoneinfo import ZoneInfo
 
 
 class PanelStorageError(RuntimeError):
@@ -939,6 +940,19 @@ class ReadinessRequirement:
     required_subjects: tuple[str, ...] | None
     required_fields: tuple[str, ...] | None
     max_staleness: timedelta | None
+    empty_admissible_through: Mapping[int, date] | None = None
+    """The last calendar day, per year, on which a **zero-row** partition may be read
+    (`V2-P6-018`), or `None`: no empty partition is admissible.
+
+    A zero-row partition says "nothing here yet as of its observation"
+    (`panel_ingest.write_empty_announcement_year`), and that claim has an expiry the writer
+    knows and a reader must apply too: a statement announcement year may be empty only until its
+    first statutory disclosure deadline. Read after it, the empty partition is refused as `stale`
+    whatever `max_staleness` says -- `None` included -- because no observation made before the
+    deadline can say nothing was filed by it. The default is the strict one, for the four checks'
+    reason: a requirement that did not say an empty partition is admissible gets `stale` for it.
+    Days are calendar days in each partition's own `date_timezone`.
+    """
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -1657,6 +1671,31 @@ def evaluate_readiness(
             continue
         usable.append(state.coverage)
         years_present.append(year)
+
+    for coverage in usable:
+        if coverage.row_count:
+            continue
+        admissible = (requirement.empty_admissible_through or {}).get(coverage.year)
+        day = requirement.as_of.astimezone(ZoneInfo(coverage.date_timezone)).date()
+        if admissible is None or day > admissible:
+            issues.append(
+                ReadinessIssue(
+                    code="stale",
+                    dataset=dataset,
+                    year=coverage.year,
+                    detail=(
+                        f"{dataset} year={coverage.year} is an empty partition observed at "
+                        f"{coverage.as_of.isoformat()}, and an empty year is readable "
+                        + (
+                            "under no rule this read states"
+                            if admissible is None
+                            else f"only through {admissible.isoformat()}"
+                        )
+                        + f'; at {requirement.as_of.isoformat()} its "nothing filed yet" '
+                        "is stale by rule, whatever the staleness bound"
+                    ),
+                )
+            )
 
     observed_dates = {day.event_date for coverage in usable for day in coverage.dates}
     missing_dates = tuple(sorted(set(requirement.required_dates or ()) - observed_dates))

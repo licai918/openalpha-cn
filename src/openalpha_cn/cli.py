@@ -188,7 +188,11 @@ from openalpha_cn.model_view import (
     prediction_standing_legend,
     run_daily,
 )
-from openalpha_cn.panel.catalog import DEFAULT_DATE_TIMEZONE, PanelStorageError
+from openalpha_cn.panel.catalog import (
+    DEFAULT_DATE_TIMEZONE,
+    PanelStorageError,
+    PartitionCoverage,
+)
 from openalpha_cn.panel.store import PanelStore, PartitionRef
 from openalpha_cn.panel_doctor import (
     PanelDoctorError,
@@ -202,6 +206,7 @@ from openalpha_cn.panel_gate import (
     require_datasets,
 )
 from openalpha_cn.panel_ingest import (
+    SUPERSEDED_INDICATOR_DATASET,
     UPSTREAM_DEFECTS_DATASET,
     WITHDRAWN_KIND,
     WITHDRAWN_ROWS_DATASETS,
@@ -223,6 +228,7 @@ from openalpha_cn.panel_ingest import (
     load_trading_calendar,
     load_upstream_defects,
     merge_panel_batches,
+    panel_partition_year,
     reconcile_limit_placeholders,
     reconcile_pre_listing_rows,
     reconcile_price_disagreements,
@@ -231,6 +237,7 @@ from openalpha_cn.panel_ingest import (
     session_publication_instant,
     split_panel_batch_by_year,
     stored_withdrawal_records,
+    superseded_indicator_rows,
     withdrawal_date_column,
     withdrawal_keys,
     write_adjustment_factors,
@@ -244,6 +251,7 @@ from openalpha_cn.panel_ingest import (
     write_name_history,
     write_price_limits,
     write_stock_universe,
+    write_superseded_indicator_rows,
     write_suspensions,
     write_trading_calendar,
     write_upstream_defects,
@@ -2939,6 +2947,7 @@ def _fetch_panel(
     subjects: tuple[str, ...] = (),
     sweep: bool = False,
     codes: tuple[str, ...] = (),
+    floor: Mapping[date, int] | None = None,
 ) -> ColumnarPanelBatch:
     """One panel-plane fetch, reporting a refusal without ever echoing its message.
 
@@ -2954,7 +2963,7 @@ def _fetch_panel(
     request = ProviderRequest(dataset=dataset, as_of=as_of, subjects=subjects)
     try:
         if sweep:
-            return provider.fetch_panel_sweep(request, codes=codes)
+            return provider.fetch_panel_sweep(request, codes=codes, floor=floor)
         return provider.fetch_panel(request)
     except ProviderFailure as failure:
         logger.warning(
@@ -4563,6 +4572,7 @@ def _sweep_statement_batches(
     label: str,
     windows: Sequence[str] | None = None,
     allow_empty: bool = False,
+    floor: Mapping[date, int] | None = None,
 ) -> list[ColumnarPanelBatch]:
     """Fetch one statement year for the whole market, window by window, kept to `registry`.
 
@@ -4630,7 +4640,7 @@ def _sweep_statement_batches(
     stride = _progress_stride(len(windows))
     for index, window in enumerate(windows, start=1):
         batch = _fetch_panel(
-            provider, dataset, as_of=as_of, subjects=(window,), sweep=True, codes=codes
+            provider, dataset, as_of=as_of, subjects=(window,), sweep=True, codes=codes, floor=floor
         )
         if batch.status == "no_data" and _sweep_window_refuses_empty_from(window) <= as_of:
             rerequested += 1
@@ -4702,8 +4712,9 @@ def _statement_year_may_be_empty(dataset: str, year: int, as_of: datetime) -> bo
 
 
 STATEMENT_ROTATION_DAYS: Final[int] = 5
-"""The carried months of an incremental statement build are re-swept once a week, a fifth of them
-each weekday (`statement_resweep_windows`)."""
+"""The carried months of an incremental statement build fall in five weekday groups, and every
+build re-sweeps the groups of the weekdays since the partition's previous build
+(`statement_resweep_windows`)."""
 
 STATEMENT_LISTING_LOOKBACK: Final[timedelta] = timedelta(days=30)
 """How far before the stored partition's `as_of` a listing still counts as new to an incremental
@@ -4724,11 +4735,36 @@ def statement_resweep_windows(
       month that had not ended when the partition was stored, or had only just, is swept again,
       so a daily build re-sweeps the current and the previous month -- and the month before that
       on the first run of a month -- and a build after a gap re-sweeps everything since.
-    - **One fifth of the older, carried months each weekday**, by `(month - 1) % 5 == weekday`:
-      January, June and November on Monday, February, July and December on Tuesday, March and
-      August on Wednesday, April and September on Thursday, May and October on Friday. The three
-      disclosure peaks -- April, August, October -- fall on three different days. Every carried
-      month is re-swept once a week, or twice a week apart across a weekday holiday.
+    - **The rotation of every weekday since the partition's previous build.** The older, carried
+      months are split into five groups by `(month - 1) % 5`: January, June and November on
+      Monday, February, July and December on Tuesday, March and August on Wednesday, April and
+      September on Thursday, May and October on Friday -- the three disclosure peaks (April,
+      August, October) on three different days. A build re-sweeps the group of **each** weekday
+      between the stored partition's `as_of` day (exclusive) and its own day (inclusive): on a
+      daily run that is today's group, after a weekend the Monday one, after a holiday or a missed
+      run every group whose day passed, and after a gap of more than a week all five -- the whole
+      year.
+
+    ## The bound this guarantees
+
+    **When a build finishes, every month of the year it wrote has been re-swept within the
+    preceding seven calendar days.** The stored partition's `as_of` is the previous build's
+    instant, so the state this needs is already stored, per partition, in its coverage record --
+    no new dataset and no new column. The argument: a month whose last re-sweep is more than
+    seven days before this build has a group day in between, because any seven consecutive days
+    contain every weekday; that day fell in the interval of exactly one build, which re-swept
+    the month -- this one, since an earlier one would contradict the month's last re-sweep.
+    Holidays cannot stretch it: two same-weekday holidays in a row (2023-09-29 and 2023-10-06)
+    only move that group's re-sweep to the first session after them, and a missed run moves it to
+    the next run. What is not bounded is the time between runs; a partition that is not rebuilt
+    is not re-swept.
+
+    The earlier form of this rule (`V2-P6-018`, first commit) re-swept only the group of the
+    build's own weekday and claimed "at most two weeks"; the two consecutive Friday holidays
+    above left the Friday months unswept for three weeks. The catch-up costs requests only
+    after a gap, and the stored-count pre-split (`_statement_sweep_floor`) is what keeps the
+    worst such day -- the first session after the Spring Festival, re-sweeping all of last year
+    in January -- inside R2.
 
     ## The evidence the window is sized from (2026-09-28, 18 live requests)
 
@@ -4739,9 +4775,9 @@ def statement_resweep_windows(
     vanished; August -- the previous month at the first build -- gained 614 rows (84 of them new
     listings') and 332 rows changed value. One row did land late in an old month:
     `balancesheet` `000909.SZ`, period 2025-12-31, `ann_date` 2026-03-31, `update_flag` 1 and
-    `f_ann_date` 2026-09-28 -- a
-    correction filed six months after the date it is stored under. The trailing window cannot
-    reach that far at any affordable cost; the weekly rotation reaches it within a week. A full
+    `f_ann_date` 2026-09-28 -- a correction filed six months after the date it is stored under.
+    The trailing window cannot reach that far at any affordable cost; the rotation re-sweeps it
+    within seven calendar days of the last re-sweep. A full
     re-sweep on one named day could not: on 31 December it is the whole year, up to 86 requests
     for the three endpoints alone (2023's stored counts).
 
@@ -4750,16 +4786,21 @@ def statement_resweep_windows(
     The partition this writes is the one a full build at the same `as_of` writes whenever the
     upstream has not changed a carried month since it was last swept -- `V2-P6-003`'s premise for
     the session-scoped targets, stated for the announcement months. A change to a carried month
-    reaches the store at the next build whose rotation covers it.
+    reaches the store at the first build seven or fewer days after its last re-sweep that covers
+    its group -- by the bound above, no later than the first build more than seven days after it.
     """
     last = last_build.astimezone(PANEL_DATE_ZONE).date()
+    today = now.astimezone(PANEL_DATE_ZONE).date()
     first = (last.year, last.month - 1) if last.month > 1 else (last.year - 1, 12)
-    weekday = now.astimezone(PANEL_DATE_ZONE).weekday()
+    groups = {
+        day.weekday()
+        for day in (last + timedelta(days=offset) for offset in range(1, (today - last).days + 1))
+        if day.weekday() < STATEMENT_ROTATION_DAYS
+    }
     chosen: list[str] = []
     for window in windows:
         month = (int(window[:4]), int(window[4:6]))
-        rotation = weekday < STATEMENT_ROTATION_DAYS and (month[1] - 1) % 5 == weekday
-        if month >= first or rotation:
+        if month >= first or (month[1] - 1) % STATEMENT_ROTATION_DAYS in groups:
             chosen.append(window)
     return tuple(chosen)
 
@@ -4846,6 +4887,7 @@ def _incremental_statement_batches(
                 label=label,
                 windows=swept,
                 allow_empty=True,
+                floor=_statement_sweep_floor(coverage),
             )
         )
     if listed:
@@ -4857,7 +4899,15 @@ def _incremental_statement_batches(
             f"{TUSHARE_TS_CODE_LIST_LIMIT} codes",
         )
         fetched.append(
-            _fetch_listed(provider, dataset, year=year, codes=tuple(sorted(listed)), as_of=now)
+            _fetch_listed_held(
+                provider,
+                dataset,
+                year=year,
+                codes=tuple(sorted(listed)),
+                held=frozenset(coverage.subjects),
+                as_of=now,
+                label=label,
+            )
         )
     arrived = [batch for batch in fetched if batch.status == "success"]
     months = frozenset(swept)
@@ -4884,6 +4934,67 @@ def _incremental_statement_batches(
     )
     result = carry_stored_rows_forward(store, base, year=year, retain=carried, observed_at=now)
     return [result] if result.status == "success" else []
+
+
+def _statement_sweep_floor(coverage: PartitionCoverage) -> Mapping[date, int]:
+    """A lower bound on the rows each announcement day of a stored statement year answers with:
+    the partition's own date census (`V2-P6-018`).
+
+    Every stored row was served by the endpoint -- the sweep keeps registered securities only,
+    and the endpoint also serves the rest -- so a date window whose census reaches the cap is
+    truncated before it is asked, and `TushareProvider._halved_rows` splits it without spending
+    the request. On the stored record that is what keeps a catch-up day in R2: April's
+    re-sweep falls from 7-13 requests a dataset to the halves that fit. A row the upstream
+    withdrew since only over-counts, which costs a split and never a row.
+    """
+    return {day.event_date: day.row_count for day in coverage.dates}
+
+
+def _fetch_listed_held(
+    provider: TushareProvider,
+    dataset: str,
+    *,
+    year: int,
+    codes: tuple[str, ...],
+    held: frozenset[str],
+    as_of: datetime,
+    label: str,
+) -> ColumnarPanelBatch:
+    """The newly listed securities' year, refused when it leaves out one the partition holds.
+
+    The answer replaces the stored rows of `codes` (`_incremental_statement_batches` carries none
+    of them), so an answer that silently leaves a held security out -- `no_data`, or rows for the
+    others only -- would drop that security's filings from the partition. The rule
+    `_sweep_statement_batches` applies to an empty closed window applies here: asked once more,
+    which rules out a transient empty answer, and refused by name if the security is still
+    missing (`V2-P6-018`). A security with
+    nothing stored may answer nothing: a new listing whose first filing has not arrived is
+    ordinary.
+    """
+    batch = _fetch_listed(provider, dataset, year=year, codes=codes, as_of=as_of)
+    missing = (held & frozenset(codes)) - _answered(batch)
+    if not missing:
+        return batch
+    typer.echo(
+        f"{label}: the newly listed securities' answer left out {sorted(missing)}, whose rows the "
+        "stored partition holds; asking once more",
+        err=True,
+    )
+    batch = _fetch_listed(provider, dataset, year=year, codes=codes, as_of=as_of)
+    missing = (held & frozenset(codes)) - _answered(batch)
+    if missing:
+        raise _panel_fail(
+            PanelExit.unhealthy,
+            f"{label}: the whole-year {dataset} answer for the newly listed securities served "
+            f"nothing for {sorted(missing)}, asked twice, and the stored partition holds their "
+            "filings. The answer replaces those rows, so writing it would drop them; this is a "
+            "fetch to investigate, not a withdrawal to record. Nothing was written",
+        )
+    return batch
+
+
+def _answered(batch: ColumnarPanelBatch) -> frozenset[str]:
+    return frozenset(batch.subjects) if batch.status == "success" else frozenset()
 
 
 def _fetch_listed(
@@ -5584,9 +5695,17 @@ def _build_industry_memberships_by_state(
 
 
 def _refuse_shrinking_statement_years(
-    store: PanelStore, *, dataset: str, batches: Sequence[ColumnarPanelBatch]
+    store: PanelStore,
+    *,
+    dataset: str,
+    batches: Sequence[ColumnarPanelBatch],
+    superseded: Mapping[int, int] | None = None,
 ) -> None:
     """Refuse a `fina_indicator` write that would replace a stored year with fewer rows.
+
+    `superseded` (`V2-P6-018`) is, per year, how many stored rows this build found re-published
+    under a later announcement year and kept whole (`_superseded_indicator_rows`); a year may shrink
+    by that many and no more.
 
     ## The partition this stops from being destroyed
 
@@ -5621,7 +5740,8 @@ def _refuse_shrinking_statement_years(
     shrinking: list[str] = []
     for year, yearly in split_panel_batch_by_year(merged):
         existing = store.read_coverage(dataset, year)
-        if existing is not None and yearly.row_count < existing.row_count:
+        allowed = (superseded or {}).get(year, 0)
+        if existing is not None and yearly.row_count + allowed < existing.row_count:
             shrinking.append(f"{year} holds {existing.row_count} and would get {yearly.row_count}")
     if shrinking:
         raise _panel_fail(
@@ -6060,15 +6180,117 @@ def _build_span_targets(
                     ),
                 )
             )
+        superseded: Mapping[int, ColumnarPanelBatch] = {}
         if incremental:
             batches = _carry_unswept_report_periods(store, batches, swept=years, now=now)
+            superseded = _superseded_indicator_rows(store, batches, swept=years, now=now)
         _refuse_shrinking_statement_years(
-            store, dataset=FINANCIAL_INDICATOR_DATASET, batches=batches
+            store,
+            dataset=FINANCIAL_INDICATOR_DATASET,
+            batches=batches,
+            superseded={year: rows.row_count for year, rows in superseded.items()},
         )
-        refs = list(write_financial_statements(store, batches))
+        written.setdefault(SUPERSEDED_INDICATOR_DATASET, []).extend(
+            write_superseded_indicator_rows(store, rows, year=year)
+            for year, rows in sorted(superseded.items())
+        )
+        refs = list(
+            write_financial_statements(
+                store,
+                batches,
+                superseded={year: frozenset(rows.subjects) for year, rows in superseded.items()},
+            )
+        )
         written.setdefault(FINANCIAL_INDICATOR_DATASET, []).extend(
             [*refs, *_empty_indicator_year(store, periods=years, refs=refs, now=now)]
         )
+
+
+def _superseded_indicator_rows(
+    store: PanelStore,
+    batches: Sequence[ColumnarPanelBatch],
+    *,
+    swept: Sequence[int],
+    now: datetime,
+) -> dict[int, ColumnarPanelBatch]:
+    """The stored `fina_indicator` rows a correction moved to another announcement year, per year
+    they leave, kept whole -- or a refusal naming the ones that went nowhere (`V2-P6-018`).
+
+    `fina_indicator` carries no revision label, so the upstream corrects a report by re-publishing
+    it under a new `ann_date` and no longer serving the old one (`000909.SZ`'s 2026-03-31 report
+    moved from 2026-04-25 to 2026-09-28, measured on 2026-09-28). When the new date is in another
+    year, the old announcement year loses a row and `_refuse_shrinking_statement_years` would stop
+    every daily build from then on.
+
+    So, for every announcement year this build writes, a stored `(ts_code, report_period)` of a
+    swept period that the year no longer holds is **moved** when the same build writes that key
+    into another announcement year, and its stored rows are kept whole in
+    `SUPERSEDED_INDICATOR_DATASET` -- the evidence V2-P6-016 keeps for a withdrawn row. A key that
+    left and went nowhere is a shrink of the ordinary kind and is refused by name, as it always
+    was.
+    """
+    periods = {str(year) for year in swept}
+    keys: dict[int, set[tuple[str, str]]] = {}
+    for batch in batches:
+        if batch.status != "success":
+            continue
+        values = next(
+            column.values for column in batch.columns if column.name == REPORT_PERIOD_COLUMN
+        )
+        year = panel_partition_year(batch)
+        keys.setdefault(year, set()).update(
+            (subject, str(values[index])) for index, subject in enumerate(batch.subjects)
+        )
+    moved: dict[int, ColumnarPanelBatch] = {}
+    nowhere: list[str] = []
+    for year, held in keys.items():
+        coverage = store.read_coverage(FINANCIAL_INDICATOR_DATASET, year)
+        if coverage is None or not coverage.row_count:
+            continue
+        elsewhere = set().union(
+            *(other for other_year, other in keys.items() if other_year != year)
+        )
+        template = ColumnarPanelBatch(
+            provider_id=coverage.provider_id,
+            dataset=FINANCIAL_INDICATOR_DATASET,
+            kind=coverage.kind,
+            as_of=now,
+            fetched_at=now,
+            status="no_data",
+            no_data_reason=f"the stored {FINANCIAL_INDICATOR_DATASET} year={year} rows",
+        )
+        stored = carry_stored_rows_forward(
+            store,
+            template,
+            year=year,
+            retain=lambda row: str(row[REPORT_PERIOD_COLUMN])[:4] in periods,
+        )
+        if stored.status != "success":
+            continue
+        period_of = next(
+            column.values for column in stored.columns if column.name == REPORT_PERIOD_COLUMN
+        )
+        positions: list[int] = []
+        for index, subject in enumerate(stored.subjects):
+            key = (subject, str(period_of[index]))
+            if key in held:
+                continue
+            if key in elsewhere:
+                positions.append(index)
+            else:
+                nowhere.append(f"{subject} {key[1]} (announcement year {year})")
+        if positions:
+            moved[year] = superseded_indicator_rows(stored, positions, confirmed_at=now)
+    if nowhere:
+        raise _panel_fail(
+            PanelExit.unhealthy,
+            f"this {FINANCIAL_INDICATOR_DATASET} build would drop stored reports that it writes "
+            f"into no other announcement year: {sorted(nowhere)[:10]}"
+            + (f" and {len(nowhere) - 10} more" if len(nowhere) > 10 else "")
+            + ". A report re-published under a later date moves with its evidence kept; one that "
+            "simply stopped being served is a withdrawal or a failed fetch, and is not written",
+        )
+    return moved
 
 
 def _empty_indicator_year(

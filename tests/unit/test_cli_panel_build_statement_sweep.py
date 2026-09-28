@@ -19,7 +19,8 @@ the registry at all.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, Final
 
@@ -797,22 +798,10 @@ def test_an_empty_year_is_never_written_over_filed_rows(
         ("20251210", "20251211", ["202504", "202509", "202511", "202512"]),
         # The first run of a month reaches back to the month before the previous one.
         ("20251128", "20251201", ["202501", "202506", "202510", "202511", "202512"]),
-        # A gap: everything since the month before the stored build, plus Tuesday's February.
-        (
-            "20250610",
-            "20251209",
-            [
-                "202502",
-                "202505",
-                "202506",
-                "202507",
-                "202508",
-                "202509",
-                "202510",
-                "202511",
-                "202512",
-            ],
-        ),
+        # A gap of more than a week: every weekday's group has passed, so the whole year.
+        ("20250610", "20251209", [f"2025{month:02d}" for month in range(1, 13)]),
+        # A holiday Monday: Tuesday's run catches up Monday's group as well as its own.
+        ("20251205", "20251209", ["202501", "202502", "202506", "202507", "202511", "202512"]),
         # A weekend run re-sweeps the trailing months only.
         ("20251212", "20251213", ["202511", "202512"]),
     ],
@@ -832,11 +821,20 @@ LISTED_LATE: Final[str] = "300999.SZ"
 
 
 class GrowingMarket(Market):
-    """`Market` whose registry gains `LISTED_LATE` once `grown` is set."""
+    """`Market` whose registry gains `LISTED_LATE` once `grown` is set, and whose answers to a
+    comma-joined `ts_code` list come back empty while `hide_listed` is."""
 
     grown = False
+    hide_listed = False
 
     def post(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if (
+            self.hide_listed
+            and "ts_code" in payload["params"]
+            and payload["api_name"].endswith("_vip")
+        ):
+            self.payloads.append(payload)
+            return _envelope(str(payload["api_name"]).removesuffix("_vip"), [])
         answer = super().post(payload)
         if payload["api_name"] == STOCK_BASIC_DATASET and self.grown:
             answer["data"]["items"].append(
@@ -923,6 +921,172 @@ def test_an_incremental_build_asks_only_for_the_re_swept_months_and_the_new_list
     asked = [e["params"] for e in market.payloads if e["api_name"] == "income_vip"]
     months = sorted({str(p["start_date"])[:6] for p in asked if "ts_code" not in p})
     assert months == ["202504", "202509", "202511", "202512"]
+    # April's stored census already reaches the cap, so the month is split without being asked.
+    assert {"start_date": "20250401", "end_date": "20250430"} not in asked
     (listed,) = [p for p in asked if "ts_code" in p]
     assert listed == {"start_date": "20250101", "end_date": "20251231", "ts_code": LISTED_LATE}
     assert "INCREMENTAL income year=2025 re-sweeps 4 of 12" in result.stderr
+
+
+# --- V2-P6-018, review round 5 ----------------------------------------------------------------
+
+
+def _sessions(first: date, last: date, closed: set[date]) -> list[date]:
+    days = (first + timedelta(days=offset) for offset in range((last - first).days + 1))
+    return [day for day in days if day.weekday() < 5 and day not in closed]
+
+
+def _holidays(first: str, last: str) -> set[date]:
+    start, end = date.fromisoformat(first), date.fromisoformat(last)
+    return {start + timedelta(days=offset) for offset in range((end - start).days + 1)}
+
+
+@pytest.mark.parametrize(
+    ("closed", "missed"),
+    [
+        # 2023: Friday 29 September and Friday 6 October were both holidays.
+        (_holidays("2023-09-29", "2023-10-06"), set()),
+        # 2025: Wednesday 1 October to Wednesday 8 October, and a run missed on 20 October.
+        (_holidays("2025-10-01", "2025-10-08"), {date(2025, 10, 20)}),
+    ],
+)
+def test_every_month_is_re_swept_within_seven_days_of_every_build(
+    closed: set[date], missed: set[date]
+) -> None:
+    """The bound the rotation guarantees, driven over the real holidays that broke the earlier
+    one: when a build finishes, no month of the year has gone more than seven calendar days
+    without a re-sweep -- whatever holidays or missed runs came before it."""
+    year = min(closed).year
+    runs = [
+        day for day in _sessions(date(year, 9, 1), date(year, 11, 28), closed) if day not in missed
+    ]
+    last_swept = {month: runs[0] for month in range(1, 13)}  # the full build the daily began with
+    for previous, day in pairwise(runs):
+        opened = tuple(f"{year}{month:02d}" for month in range(1, day.month + 1))
+        for window in cli.statement_resweep_windows(
+            opened, last_build=_noon(previous.strftime("%Y%m%d")), now=_noon(day.strftime("%Y%m%d"))
+        ):
+            last_swept[int(window[4:])] = day
+        stale = {
+            month: (day - last_swept[month]).days
+            for month in range(1, day.month + 1)
+            if (day - last_swept[month]).days > 7
+        }
+        assert stale == {}, (day, stale)
+
+
+def test_a_listed_answer_that_leaves_out_a_held_security_is_refused_by_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The newly listed securities' answer replaces their stored rows. Empty for a security the
+    partition holds -- asked twice -- it is a failed fetch, and writing it would drop that
+    security's filings; refused by name, nothing written."""
+    market = _install(
+        monkeypatch,
+        GrowingMarket(_monthly_filings(), listed=f"{YEAR}0102"),
+        clock=_noon("20251210"),
+    )
+    market.grown = True
+    assert _build(tmp_path, *_swept(INCOME_DATASET), "--incremental").exit_code == 0
+    before = _stored(tmp_path, INCOME_DATASET, YEAR)
+    assert any(row[0] == LISTED_LATE for row in before[1])
+    market.hide_listed = True
+    market.payloads.clear()
+    monkeypatch.setattr(cli, "_panel_clock", lambda: _noon("20251211"))
+
+    result = _build(tmp_path, *_swept(INCOME_DATASET), "--incremental")
+
+    assert result.exit_code == PanelExit.unhealthy
+    assert LISTED_LATE in result.output and "asked twice" in result.output
+    assert sum(1 for e in market.payloads if "ts_code" in e["params"]) == 2
+    assert _stored(tmp_path, INCOME_DATASET, YEAR) == before
+
+
+def _moved(filings: Sequence[tuple[str, str, str, str, str, float]], announced: str) -> list:
+    """`filings` with 000002.SZ's 2025 first-quarter report re-published on `announced` and the
+    old version no longer served -- how `fina_indicator` publishes a correction."""
+    return [
+        (*f[:2], announced, announced, *f[4:]) if f[0] == "000002.SZ" and f[1] == "20250331" else f
+        for f in filings
+    ]
+
+
+def test_a_fina_indicator_report_re_published_in_another_year_moves_with_its_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Announcement year 2025 loses the report and 2026 gains it, in one incremental build. The
+    shrink is admitted because the same build writes the key into 2026, and the superseded row
+    is kept whole in `superseded_fina_indicator`'s 2025 partition. Before, every daily build
+    from then on was refused."""
+    from openalpha_cn.panel_ingest import (
+        SUPERSEDED_CONFIRMED_AT_COLUMN,
+        SUPERSEDED_INDICATOR_DATASET,
+    )
+
+    market = _install(monkeypatch, Market(FILINGS), clock=CLOCK)
+    arguments = _swept(FINANCIAL_INDICATOR_DATASET)
+    assert _build(tmp_path, *arguments, "--incremental").exit_code == 0
+    stored_2025 = _stored(tmp_path, FINANCIAL_INDICATOR_DATASET, YEAR)[1]
+    market.filings = tuple(_moved(market.filings, "20260318"))
+    monkeypatch.setattr(cli, "_panel_clock", lambda: CLOCK + timedelta(days=1))
+
+    result = _build(tmp_path, *arguments, "--incremental")
+
+    assert result.exit_code == PanelExit.ok, result.output
+    after_2025 = _stored(tmp_path, FINANCIAL_INDICATOR_DATASET, YEAR)[1]
+    after_2026 = _stored(tmp_path, FINANCIAL_INDICATOR_DATASET, YEAR + 1)[1]
+    assert len(after_2025) == len(stored_2025) - 1
+    assert any(row[0] == "000002.SZ" and row[5] == "2025-03-31" for row in after_2026)
+    evidence = PanelStore(tmp_path / "panel").read_coverage(SUPERSEDED_INDICATOR_DATASET, YEAR)
+    assert evidence is not None and evidence.subjects == ("000002.SZ",)
+    (kept,) = _stored(tmp_path, SUPERSEDED_INDICATOR_DATASET, YEAR)[1]
+    old = next(row for row in stored_2025 if row[0] == "000002.SZ" and row[5] == "2025-03-31")
+    assert kept[: len(old)][:1] == old[:1] and kept[5:7] == old[5:7]
+    assert SUPERSEDED_CONFIRMED_AT_COLUMN in [f.name for f in evidence.fields]
+
+
+def test_a_fina_indicator_report_that_goes_nowhere_still_refuses_the_shrink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A report no longer served and re-published nowhere is not a correction: the shrink is
+    refused by name, as before, and nothing is written."""
+    market = _install(monkeypatch, Market(FILINGS), clock=CLOCK)
+    arguments = _swept(FINANCIAL_INDICATOR_DATASET)
+    assert _build(tmp_path, *arguments, "--incremental").exit_code == 0
+    before = _stored(tmp_path, FINANCIAL_INDICATOR_DATASET, YEAR)
+    market.filings = tuple(
+        f for f in market.filings if not (f[0] == "000002.SZ" and f[1] == "20250331")
+    )
+    monkeypatch.setattr(cli, "_panel_clock", lambda: CLOCK + timedelta(days=1))
+
+    result = _build(tmp_path, *arguments, "--incremental")
+
+    assert result.exit_code == PanelExit.unhealthy
+    assert "000002.SZ 2025-03-31" in result.output
+    assert _stored(tmp_path, FINANCIAL_INDICATOR_DATASET, YEAR) == before
+
+
+@pytest.mark.parametrize(("clock", "readable"), [("20260430", True), ("20260501", False)])
+def test_an_empty_year_is_unreadable_after_its_first_deadline_even_without_a_staleness_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clock: str, readable: bool
+) -> None:
+    """The writer's rule, applied at read time: recorded empty on 2 January, the year may be read
+    as "no filing yet" through 30 April and not after, with `max_staleness=None`."""
+    _install(monkeypatch, Market(JANUARY_FILINGS), clock=JANUARY_2)
+    assert _build(tmp_path, *_swept(INCOME_DATASET, years=("--year", "2025"))).exit_code == 0
+    assert _build(tmp_path, *_swept(INCOME_DATASET, years=("--year", "2026"))).exit_code == 0
+
+    def read() -> object:
+        return load_statement_histories(
+            PanelStore(tmp_path / "panel"),
+            dataset=INCOME_DATASET,
+            years=(2025, 2026),
+            as_of=_noon(clock),
+            max_staleness=None,
+        )
+
+    if readable:
+        assert read()
+    else:
+        with pytest.raises(PanelStorageError, match="stale by rule"):
+            read()

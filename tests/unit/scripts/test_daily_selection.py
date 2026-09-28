@@ -995,7 +995,10 @@ def test_january_re_sweeps_last_decembers_statements_and_records_the_new_year_em
 
     assert result["session"] == "2027-01-04"
     months = sorted({str(p["start_date"])[:6] for p in world.market.asked(f"{INCOME_DATASET}_vip")})
-    assert months == ["202601", "202606", "202611", "202612", "202701"]
+    # 2026: its trailing November and December, and the rotation groups of Friday 1 January
+    # (May, October) and Monday 4 January (January, June, November) -- every weekday since the
+    # partition's last build on 31 December. 2027: swept whole, its January.
+    assert months == ["202601", "202605", "202606", "202610", "202611", "202612", "202701"]
     store = PanelStore(world.runtime / "panel")
     empty = store.read_coverage(INCOME_DATASET, 2027)
     assert empty is not None and empty.row_count == 0

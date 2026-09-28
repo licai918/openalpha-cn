@@ -347,8 +347,11 @@ from openalpha_cn.domain.daily_prices import (
     daily_valuations_from_panel_rows,
 )
 from openalpha_cn.domain.financial_statements import (
+    ANNOUNCEMENT_DATE_COLUMN,
     DATASETS_WITH_REVISION_LABEL,
+    FINANCIAL_INDICATOR_DATASET,
     FINANCIAL_STATEMENT_DATASETS,
+    REPORT_PERIOD_COLUMN,
     REVISION_LABEL_COLUMN,
     FinancialStatementError,
     StatementHistory,
@@ -6461,6 +6464,7 @@ def write_financial_statements(
     batches: Sequence[ColumnarPanelBatch],
     *,
     date_timezone: str = DEFAULT_DATE_TIMEZONE,
+    superseded: Mapping[int, frozenset[str]] | None = None,
 ) -> tuple[PartitionRef, ...]:
     """Write one financial-statement dataset into one partition per **announcement** year.
 
@@ -6537,6 +6541,9 @@ def write_financial_statements(
                 "ts_code dimension, so every security whose filings fall in that year has to "
                 "arrive in one call or not at all"
             ),
+            # `V2-P6-018`: a security whose rows the upstream re-published into another
+            # announcement year, kept whole in `SUPERSEDED_INDICATOR_DATASET` first.
+            released=(superseded or {}).get(year, frozenset()),
         )
     return tuple(
         write_panel_batch(
@@ -6673,6 +6680,107 @@ def write_empty_announcement_year(
     return reference
 
 
+SUPERSEDED_INDICATOR_DATASET: Final[str] = "superseded_fina_indicator"
+"""Where a `fina_indicator` row the upstream re-published under a later `ann_date` is kept whole
+once it leaves its announcement year (`V2-P6-018`).
+
+`fina_indicator` carries no revision label: a correction is re-published as the same
+`(ts_code, report_period)` under a new `ann_date`, and the old version is no longer served --
+measured on 2026-09-28, `000909.SZ`'s 2026-03-31 report moved from 2026-04-25 to 2026-09-28. When
+the new date is in another year the old row leaves its partition, which the store would otherwise
+lose without trace. It is kept here **exactly as it was stored** -- the source partition's columns
+and its four clocks -- plus `SUPERSEDED_CONFIRMED_AT_COLUMN` and
+`SUPERSEDED_ORIGINAL_INGESTED_TIME_COLUMN`, in the partition of its own announcement year. The
+shape is V2-P6-016's `withdrawn_<dataset>` records' (not merged at the time of writing), named
+in its pattern; a new dataset breaks no stored contract, where a column on `fina_indicator` would
+(hard rule 3). Written by `write_superseded_indicator_rows`, before the source partition that no
+longer holds the row."""
+
+SUPERSEDED_CONFIRMED_AT_COLUMN: Final[str] = "supersession_confirmed_at"
+"""The instant a build found the row re-published in another announcement year."""
+
+SUPERSEDED_ORIGINAL_INGESTED_TIME_COLUMN: Final[str] = "original_ingested_time"
+"""The row's stored `ingested_time` when it was superseded, verbatim."""
+
+
+def superseded_indicator_rows(
+    stored: ColumnarPanelBatch, positions: Sequence[int], *, confirmed_at: datetime
+) -> ColumnarPanelBatch:
+    """The superseded stored `fina_indicator` rows whole, as their `SUPERSEDED_INDICATOR_DATASET`
+    batch."""
+    if stored.dataset != FINANCIAL_INDICATOR_DATASET:
+        raise FinancialStatementError(
+            f"only {FINANCIAL_INDICATOR_DATASET} rows are superseded this way, got "
+            f"{stored.dataset!r}"
+        )
+    selected = _select_rows(stored, positions)
+    return ColumnarPanelBatch(
+        provider_id=selected.provider_id,
+        dataset=SUPERSEDED_INDICATOR_DATASET,
+        kind=SUPERSEDED_INDICATOR_DATASET,
+        as_of=max(selected.as_of, confirmed_at),
+        fetched_at=max(selected.fetched_at, confirmed_at),
+        status="success",
+        subjects=selected.subjects,
+        timeline=selected.timeline,
+        columns=(
+            *selected.columns,
+            PanelColumn(
+                SUPERSEDED_CONFIRMED_AT_COLUMN, "timestamp", (confirmed_at,) * selected.row_count
+            ),
+            PanelColumn(
+                SUPERSEDED_ORIGINAL_INGESTED_TIME_COLUMN,
+                "timestamp",
+                selected.timeline.ingested_time,
+            ),
+        ),
+    )
+
+
+def write_superseded_indicator_rows(
+    store: PanelStore,
+    rows: ColumnarPanelBatch,
+    *,
+    year: int,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> PartitionRef:
+    """Add `rows` to the stored superseded `fina_indicator` rows of `year` (`V2-P6-018`).
+
+    The partition is the stored rows followed by the new ones, a row already recorded -- the same
+    `(ts_code, report_period, ann_date)` -- kept once, and sorted by `(event_time, subject)` so the
+    content hash does not depend on the order they arrived in. The stored rows go back through
+    `carry_stored_rows_forward` with their clocks untouched: this is evidence, and a record of when
+    something was superseded does not move when a later build carries it.
+    """
+    if rows.dataset != SUPERSEDED_INDICATOR_DATASET:
+        raise PanelBatchError(
+            f"expected the {SUPERSEDED_INDICATOR_DATASET!r} dataset, got {rows.dataset!r}"
+        )
+    written_year = panel_partition_year(rows, date_timezone=date_timezone)
+    if written_year != year:
+        raise PanelBatchError(
+            f"the superseded rows are dated {written_year} and the write is for {year}"
+        )
+    merged = carry_stored_rows_forward(store, rows, year=year, retain=lambda _row: True)
+    values = {column.name: column.values for column in merged.columns}
+    seen: set[tuple[object, ...]] = set()
+    kept: list[int] = []
+    for index, subject in enumerate(merged.subjects):
+        key = (
+            subject,
+            values[REPORT_PERIOD_COLUMN][index],
+            values[ANNOUNCEMENT_DATE_COLUMN][index],
+        )
+        if key not in seen:
+            seen.add(key)
+            kept.append(index)
+    events = merged.timeline.event_time
+    kept.sort(key=lambda index: (events[index], merged.subjects[index]))
+    return write_panel_batch(
+        store, _select_rows(merged, kept), year=year, date_timezone=date_timezone
+    )
+
+
 def _in_statement_order(batch: ColumnarPanelBatch) -> ColumnarPanelBatch:
     """`batch` with its rows in `write_financial_statements`' storage order.
 
@@ -6741,6 +6849,11 @@ def financial_statement_requirement(
         required_subjects=None,
         required_fields=statement_panel_columns(dataset),
         max_staleness=max_staleness,
+        # `V2-P6-018`: an announcement year recorded empty is readable only through its first
+        # statutory deadline -- the writer's own rule (`write_empty_announcement_year`).
+        empty_admissible_through={
+            year: first_disclosure_deadline(year) for year in sorted(set(years))
+        },
     )
 
 
