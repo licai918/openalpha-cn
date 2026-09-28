@@ -23,11 +23,14 @@ import hashlib
 import importlib
 import json
 import plistlib
+import shlex
+import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Final
@@ -46,6 +49,7 @@ from openalpha_cn.domain.daily_prices import DAILY_BASIC_DATASET, DAILY_DATASET
 from openalpha_cn.domain.financial_statements import (
     BALANCE_SHEET_DATASET,
     CASH_FLOW_DATASET,
+    FINANCIAL_INDICATOR_DATASET,
     INCOME_DATASET,
 )
 from openalpha_cn.domain.industry_classification import (
@@ -135,6 +139,22 @@ BOUND: Final[tuple[str, ...]] = (
     "uv.lock",
     "scripts/daily_selection.py",
 )
+LOCK: Final[str] = """version = 1
+requires-python = ">=3.11"
+
+[[package]]
+name = "openalpha-cn"
+version = "1.0.0"
+source = { editable = "." }
+
+[[package]]
+name = "numpy"
+version = "2.3.1"
+source = { registry = "https://pypi.org/simple" }
+"""
+"""The throwaway repository's `uv.lock`: the project and one third-party package."""
+LOCKED: Final[dict[str, str]] = {"openalpha-cn": "1.0.0", "numpy": "2.3.1"}
+"""The environment `_bind` reports as installed: exactly the lock."""
 COMMITTED: Final[datetime] = datetime(2025, 12, 10, 12, 0, tzinfo=UTC)
 WALL_CLOCK: Final[datetime] = datetime(2027, 6, 1, 4, 0, tzinfo=UTC)
 """The provider's wall clock: after both frames, so it never binds what a fetch may know."""
@@ -159,7 +179,7 @@ def _repository(root: Path, config: Mapping[str, object]) -> tuple[Path, Path]:
     git(repo, "init", "-q", "--template=")
     for name in BOUND:
         (repo / name).parent.mkdir(parents=True, exist_ok=True)
-        (repo / name).write_text("RULES = 1\n", encoding="utf-8")
+        (repo / name).write_text(LOCK if name == "uv.lock" else "RULES = 1\n", encoding="utf-8")
         git(repo, "add", name)
     git(repo, "commit", "-q", "-m", "initial", at=COMMITTED - timedelta(days=1))
     registration = repo / "docs" / "research" / "p6-registration.json"
@@ -179,6 +199,7 @@ def _bind(monkeypatch: pytest.MonkeyPatch, repo: Path, market: Market) -> None:
     monkeypatch.setenv("TUSHARE_TOKEN", SECRET_TOKEN)
     monkeypatch.setattr(cli, "_panel_transport", lambda: market)
     monkeypatch.setattr(cli, "_panel_clock", lambda: WALL_CLOCK)
+    monkeypatch.setattr(daily, "installed_distributions", lambda: dict(LOCKED))
 
 
 def _world(
@@ -764,6 +785,10 @@ def test_an_industry_cap_refreshed_on_rebalance_days_scores_as_a_daily_full_refr
                 {"is_new": "Y"},
                 {"is_new": "N"},
             ]
+            assert other["panel"]["industry_sweep"] == "whole-market states"
+        else:
+            assert other["panel"]["industry_sweep"].startswith("the l1_code slices (4 requests)")
+            assert "no stored membership corpus" in other["panel"]["industry_sweep"]
         assert set(daily_refresh.market.payloads) >= INDUSTRY_APIS
         assert (one["candidates"]["industries_read"] > 0) == due
         answers[day] = {
@@ -795,7 +820,13 @@ def test_an_industry_cap_refreshed_on_rebalance_days_scores_as_a_daily_full_refr
     assert counts["daily"] == [2 + 5 * 6 + first] + [12 + later] * 4
 
 
-@pytest.mark.parametrize("fault", ["lost", "doubled"])
+# Every request the whole-market attempt makes before the slices, per fault: both states (a
+# lost or doubled row fails the check afterwards); the refused one-shot, page one and the
+# overlapping page two; the one-shot, page one and four attempts at a page two that raises.
+WHOLE_MARKET_ATTEMPTS: Final[dict[str, int]] = {"lost": 2, "doubled": 2, "overlap": 3, "raises": 6}
+
+
+@pytest.mark.parametrize("fault", sorted(WHOLE_MARKET_ATTEMPTS))
 def test_a_whole_market_answer_that_fails_the_self_check_is_fetched_again_as_slices(
     fault: str,
     tmp_path: Path,
@@ -805,11 +836,14 @@ def test_a_whole_market_answer_that_fails_the_self_check_is_fetched_again_as_sli
     """The self-check costs budget, never correctness.
 
     Day one stores the corpus from the slices. On day two the whole-market current answer loses
-    a row (the page gap a close between two pages leaves) or serves one twice (the overlap an
-    arrival leaves); every slice stays right. The day still clears, the membership store answers
-    what day one's did for every security, and the `BUDGET` line says why the slices were asked
-    for and what they cost."""
+    a row (the page gap a close between two pages leaves), serves one twice (the overlap an
+    arrival leaves), or -- paged past the cap -- has a second page that overlaps the first or
+    whose transport raises on every attempt; every slice stays right. The day still clears, the
+    membership store answers what day one's did for every security, the `BUDGET` line says why
+    the slices were asked for, and the printed summary says the sweep fell back."""
     world = _world(tmp_path, monkeypatch, Market(open_days=OPEN_2026, whole_market_fault=fault))
+    # The provider's retry backoff, not waited out: four attempts at the raising page.
+    monkeypatch.setattr(cli, "TushareProvider", partial(cli.TushareProvider, sleep=lambda _s: None))
     every_day = (*TARGETS, *daily.INDUSTRY_TARGETS)
 
     code, _first, err = _run(world, capsys, targets=every_day)
@@ -829,15 +863,97 @@ def test_a_whole_market_answer_that_fails_the_self_check_is_fetched_again_as_sli
 
     assert code == 0, err
     asked = world.market.asked(INDUSTRY_MEMBERSHIP_DATASET)
-    assert asked[:2] == [{"is_new": "Y"}, {"is_new": "N"}]
-    assert sorted((one["l1_code"], one["is_new"]) for one in asked[2:]) == sorted(
+    attempts = WHOLE_MARKET_ATTEMPTS[fault]
+    assert all("l1_code" not in one for one in asked[:attempts])
+    assert sorted((one["l1_code"], one["is_new"]) for one in asked[attempts:]) == sorted(
         (level_one, state) for level_one in L1_CODES for state in ("Y", "N")
     )
-    assert second["this_run"]["requests"][INDUSTRY_MEMBERSHIP_DATASET] == 2 + 2 * len(L1_CODES)
     (fallback,) = [line for line in second["panel"]["budget"] if "self-check" in line]
     assert fallback.startswith(f"BUDGET {INDUSTRY_MEMBERSHIP_DATASET} {2 * len(L1_CODES)} ")
+    assert second["panel"]["industry_sweep"].startswith("FELL BACK to the l1_code slices")
+    printed = daily.summary_lines(second, top=3)
+    assert any(line.startswith("industry sweep     FELL BACK") for line in printed)
     after = _industries(world, session_publication_instant(DAY + timedelta(days=1)))
     assert before and after == before
+
+
+# --- fina_indicator: announcement years assembled from report-period years it did not sweep ------
+
+
+def _build_financial_indicator(
+    world: World, periods: Sequence[int], as_of: str, *, registry: bool = False
+) -> None:
+    """`panel build --dataset fina_indicator` over `periods`, non-incremental: the backfill a real
+    store was filled by -- with the registry at the same `as_of` when `registry`."""
+    arguments = ["panel", "build", "--runtime-dir", str(world.runtime), "--as-of", as_of]
+    for period in periods:
+        arguments += ["--year", str(period)]
+    if registry:
+        arguments += ["--dataset", STOCK_BASIC_DATASET]
+    built = daily.invoke([*arguments, "--dataset", FINANCIAL_INDICATOR_DATASET, "--json"])
+    assert built.exit_code == 0, built.reason()
+
+
+def _indicator_partitions(world: World) -> dict[int, Any]:
+    return {
+        year: content_hash
+        for dataset, year, content_hash, _written in _catalog(world.runtime)
+        if dataset == FINANCIAL_INDICATOR_DATASET
+    }
+
+
+def test_the_days_indicator_sweep_keeps_what_the_periods_it_did_not_sweep_filed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A backfilled store's announcement year 2025 holds 2025's interim reports **and** 2024's
+    annual reports, announced in April 2025. On 19 January 2026 the day sweeps report-period year
+    2025 alone (2026's first period has not ended), whose rows are announced in 2025 and 2026.
+    Written whole, announcement year 2025 would lose 2024's annuals and the panel refuses the
+    shrink, so the day would stop at step 2 every day of the year.
+
+    The stored rows of the period years not swept are carried into the partition, and the
+    result is the partition a full build over both period years writes at the same `as_of`,
+    hash for hash."""
+    world = _world(tmp_path / "daily", monkeypatch, Market(open_days=OPEN_2026))
+    _build_financial_indicator(world, (2024, 2025), SEEDED_AS_OF)
+    assert set(_indicator_partitions(world)) >= {2025}
+
+    code, result, err = _run(world, capsys, targets=(*TARGETS, FINANCIAL_INDICATOR_DATASET))
+
+    assert code == 0, err
+    assert result["this_run"]["requests"]["fina_indicator_vip"] == 4  # period year 2025 only
+    daily_hashes = _indicator_partitions(world)
+    full = _world(tmp_path / "full", monkeypatch, Market(open_days=OPEN_2026))
+    full.market.today = DAY
+    _build_financial_indicator(full, (2024, 2025), DAY_AS_OF.isoformat())
+    assert daily_hashes == _indicator_partitions(full)
+
+
+def test_the_first_session_of_a_year_keeps_last_years_annuals_of_the_year_before(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """4 January 2027 sweeps report-period year 2026 alone. Announcement year 2026 holds 2026's
+    interims and 2025's annuals (announced April 2026, report-period year 2025): the carry keeps
+    the latter, and the partition is a full build's over 2025 and 2026 at the same `as_of`."""
+    world = _new_year(tmp_path / "daily", monkeypatch)
+    _build_financial_indicator(world, (2025, 2026), "2026-12-24T12:00:00+08:00")
+    targets = (*TARGETS, FINANCIAL_INDICATOR_DATASET)
+    for as_of in ("2026-12-31T18:30:00+08:00", "2027-01-04T18:30:00+08:00"):
+        code, result, err = _run(
+            world,
+            capsys,
+            as_of=_at(as_of),
+            clock=_at(as_of) + timedelta(minutes=5),
+            targets=targets,
+            monkeypatch=monkeypatch,
+        )
+        assert code == 0, (as_of, err)
+    assert result["session"] == "2027-01-04"
+
+    full = _new_year(tmp_path / "full", monkeypatch)
+    full.market.today = date(2027, 1, 4)
+    _build_financial_indicator(full, (2025, 2026), "2027-01-04T18:30:00+08:00", registry=True)
+    assert _indicator_partitions(world)[2026] == _indicator_partitions(full)[2026]
 
 
 # --- across New Year -----------------------------------------------------------------------------
@@ -1037,21 +1153,52 @@ def test_the_scheduled_checkout_is_pinned_at_the_registration_whatever_developme
     """After the registration, development commits a change to the bound code. The development
     checkout is refused (exit 3) -- that forward day would be lost -- while the worktree the helper
     pins at the registration's commit is admitted; the helper is idempotent and never touches a
-    dirty worktree."""
+    dirty worktree.
+
+    The worktree gets its own environment: `uv sync --frozen --offline` from its own `uv.lock`
+    into `<worktree>/.venv`, with the development checkout's `VIRTUAL_ENV` dropped. Asserted on the
+    command; uv itself is never run here."""
     repo, registration = _repository(tmp_path, CONFIG)
     registered_at = head(repo)
     source = repo / "src" / "openalpha_cn" / "strategy.py"
     source.write_text("RULES = 2\n", encoding="utf-8")
     commit_file(repo, source, "development moves on", at=COMMITTED + timedelta(days=3))
     pinned = tmp_path / 'pinned daily $HOME "x"'
+    uv = tmp_path / "bin" / "uv"
+    synced: list[tuple[list[str], dict[str, str], Path]] = []
 
+    def sync(
+        command: Sequence[str], *, environment: Mapping[str, str], cwd: Path
+    ) -> subprocess.CompletedProcess[bytes]:
+        synced.append((list(command), dict(environment), cwd))
+        return subprocess.CompletedProcess(list(command), 0, b"", b"")
+
+    monkeypatch.setattr(daily, "_run_sync", sync)
+    monkeypatch.setenv("VIRTUAL_ENV", str(repo / ".venv"))
     code = daily.main(
-        ["--pin-worktree", str(pinned), "--registration", str(registration), "--repo", str(repo)]
+        [
+            "--pin-worktree",
+            str(pinned),
+            "--registration",
+            str(registration),
+            "--repo",
+            str(repo),
+            "--uv",
+            str(uv),
+        ]
     )
     out, err = capsys.readouterr()
 
     assert code == 0, err
-    assert out.strip().endswith(registered_at)
+    where = pinned.resolve()
+    assert out.strip() == (
+        f"pinned {where} at {registered_at}; environment {where / '.venv'} synced offline"
+    )
+    ((command, environment, cwd),) = synced
+    assert command == [str(uv.resolve()), "sync", "--frozen", "--offline", "--project", str(where)]
+    assert environment["UV_PROJECT_ENVIRONMENT"] == str(where / ".venv")
+    assert "VIRTUAL_ENV" not in environment and "PYTHONPATH" not in environment
+    assert cwd == where
     assert git(pinned, "rev-parse", "HEAD").strip() == registered_at
     assert (pinned / "src" / "openalpha_cn" / "strategy.py").read_text() == "RULES = 1\n"
     assert daily.pin_worktree(registration, repo, pinned) == registered_at
@@ -1092,7 +1239,7 @@ def test_the_launchd_job_runs_the_pinned_checkout_with_no_shell_and_is_not_insta
     in any of them arrives verbatim; nothing is installed and no directory is created."""
     odd = tmp_path / 'my "daily" $HOME dir'
     worktree, runtime, logs = odd / "pinned", odd / "runtime", odd / "logs"
-    env_file, venv, uv = odd / ".env", odd / ".venv", odd / "bin" / "uv"
+    env_file, uv = odd / ".env", odd / "bin" / "uv"
 
     code = daily.main(
         [
@@ -1104,8 +1251,6 @@ def test_the_launchd_job_runs_the_pinned_checkout_with_no_shell_and_is_not_insta
             str(worktree),
             "--env-file",
             str(env_file),
-            "--venv",
-            str(venv),
             "--uv",
             str(uv),
         ]
@@ -1119,10 +1264,9 @@ def test_the_launchd_job_runs_the_pinned_checkout_with_no_shell_and_is_not_insta
         str(uv),
         "run",
         "--no-sync",
-        "--active",
         "--env-file",
         str(env_file),
-        "python",
+        str(worktree / ".venv" / "bin" / "python"),
         str(worktree / "scripts" / "daily_selection.py"),
         "--runtime-dir",
         str(runtime),
@@ -1132,13 +1276,76 @@ def test_the_launchd_job_runs_the_pinned_checkout_with_no_shell_and_is_not_insta
         str(worktree / "docs" / "research" / "p6-registration.json"),
     ]
     assert job["WorkingDirectory"] == str(worktree)
-    assert job["EnvironmentVariables"]["PYTHONPATH"] == str(worktree / "src")
-    assert job["EnvironmentVariables"]["VIRTUAL_ENV"] == str(venv)
+    # The pinned checkout's own environment, and nothing that points anywhere else.
+    assert job["EnvironmentVariables"] == {
+        "UV_PROJECT_ENVIRONMENT": str(worktree / ".venv"),
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+    }
     assert job["StartCalendarInterval"] == [
         {"Weekday": weekday, "Hour": 18, "Minute": 30} for weekday in range(1, 6)
     ]
     assert job["RunAtLoad"] is False
     assert not odd.exists()
+
+
+def test_a_pinned_environment_uv_cannot_build_offline_is_refused_by_package_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--offline` never downloads: a package uv's cache lacks is named, with the one online
+    command that fills the cache -- which the daily command never runs itself."""
+    uncached = (
+        b"error: Failed to prepare distributions\n"
+        b"  Caused by: Failed to download `numpy==2.3.1`\n"
+        b"  Caused by: Network connectivity is disabled, but the requested data wasn't found in "
+        b"the cache for: `https://files.pythonhosted.org/packages/numpy-2.3.1.whl`\n"
+    )
+    monkeypatch.setattr(
+        daily,
+        "_run_sync",
+        lambda command, *, environment, cwd: subprocess.CompletedProcess(command, 2, b"", uncached),
+    )
+    worktree = tmp_path / "pinned $HOME"
+
+    with pytest.raises(daily.StepFailedError) as refused:
+        daily.sync_pinned_environment(worktree, uv=Path("/opt/uv"))
+
+    message = str(refused.value)
+    assert "uv's cache holds no copy of numpy==2.3.1" in message
+    assert "Nothing was downloaded" in message
+    assert f"/opt/uv sync --frozen --project {shlex.quote(str(worktree))}" in message
+
+
+def test_an_interpreter_whose_packages_are_not_the_lock_is_refused_at_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Step 1 compares the running interpreter's distributions with the checkout's `uv.lock`,
+    which the bound-code check holds to the registration's commit: a different version, or a
+    package the lock does not name, refuses the run (exit 3) by name."""
+    repo, registration = _repository(tmp_path, CONFIG)
+    _bind(monkeypatch, repo, Market(open_days=OPEN_2026))
+    assert daily.admit_registration(registration, repo).code_commit
+
+    monkeypatch.setattr(
+        daily, "installed_distributions", lambda: {**LOCKED, "numpy": "2.3.2", "left-pad": "1.0"}
+    )
+    with pytest.raises(daily.StepFailedError) as refused:
+        daily.admit_registration(registration, repo)
+
+    assert refused.value.exit_code == 3
+    assert "numpy 2.3.2 is installed and uv.lock pins 2.3.1" in str(refused.value)
+    assert "left-pad 1.0 is installed and uv.lock does not lock it" in str(refused.value)
+
+
+def test_the_environment_comparison_normalises_names_and_ignores_locked_extras() -> None:
+    """`uv.lock` spells names in PEP 503's normal form; a locked package that is not installed --
+    an extra, another platform's wheel -- is not a difference."""
+    locked = daily.locked_versions(f'{LOCK}\n[[package]]\nname = "akshare"\nversion = "1.18.38"\n')
+
+    assert daily._distribution_name("Typing_Extensions.Backport") == "typing-extensions-backport"
+    assert daily.environment_differences(locked, LOCKED) == []
+    assert daily.environment_differences(locked, {**LOCKED, "numpy": "2.3.1.post1"}) == [
+        "numpy 2.3.1.post1 is installed and uv.lock pins 2.3.1"
+    ]
 
 
 # --- the registered score is the backtest's ------------------------------------------------------

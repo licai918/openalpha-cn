@@ -167,6 +167,7 @@ INDEX_CLASSIFY_FIELDS: Final = [
     "src",
 ]
 INDEX_MEMBER_FIELDS: Final = ["ts_code", "l1_code", "l2_code", "l3_code", "in_date", "out_date"]
+PAGED_FAULTS: Final = frozenset({"raises", "overlap"})
 SWEEP: Final[str] = "_vip"
 
 
@@ -256,7 +257,8 @@ class Market:
     whole_market_fault: str = ""
     """What a whole-market `index_member_all(is_new=...)` answer gets wrong, while every
     `(l1_code, is_new)` slice stays right: `"lost"` drops the first current row (a page gap),
-    `"doubled"` serves it twice (a page overlap)."""
+    `"doubled"` serves it twice; `"raises"` and `"overlap"` (`PAGED_FAULTS`) make the current
+    answer page past the cap and fail on its second page -- see `_paged_fault`."""
     requests: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -388,15 +390,17 @@ class Market:
         return [[code, code, compact(start), None, compact(start), "改名"] for code in SECURITIES]
 
     def _filings(self, dataset: str) -> list[tuple[str, str, str, list[float]]]:
-        """Each registered security's filings: the previous year's three interim reports,
-        announced that year, its annual report, announced on 15 January, and the frame year's
-        first quarter, announced at the end of April. `(code, period end, announcement,
-        values)`."""
+        """Each registered security's filings: the annual report of two years back, announced
+        in April of the year before (so that year's announcement partition holds two report-
+        period years, as a real one does); the previous year's three interim reports, announced
+        that year; its annual report, announced from 15 January; and the frame year's first
+        quarter, announced at the end of April. `(code, period end, announcement, values)`."""
         year = self.open_days[-1].year
         width = len(STATEMENT_DATA_COLUMNS[dataset])
         filings = []
         for index, code in enumerate(SECURITIES):
             values = [1.0e8 * (index + 1) + column for column in range(width)]
+            filings.append((code, f"{year - 2}1231", f"{year - 1}0420", values))
             for period, announced in (("0331", "0428"), ("0630", "0828"), ("0930", "1028")):
                 filings.append((code, f"{year - 1}{period}", f"{year - 1}{announced}", values))
             # Announced every other day from 15 January, so the partition's newest row is
@@ -428,6 +432,22 @@ class Market:
         if dataset != FINANCIAL_INDICATOR_DATASET:
             keys.extend([filed, "1"])
         return [*rows, [*keys, *([1.0] * len(STATEMENT_DATA_COLUMNS[dataset]))]]
+
+    def _paged_fault(self, params: Mapping[str, Any]) -> dict[str, Any]:
+        """A whole-market current answer past the 3,000-row cap, as the live one is, whose second
+        page goes wrong: `"raises"` -- the transport fails on it, every attempt -- or `"overlap"`
+        -- it serves page one's last row again. The rows are the real ones repeated to size; the
+        answer never reaches a partition, which is the point."""
+        real = self._memberships({**params, "l1_code": L1_CODES[0]})[0]
+        filler = [[f"{800000 + index:06d}.SZ", *real[1:]] for index in range(3000)]
+        if "offset" not in params:
+            return response(INDEX_MEMBER_FIELDS, filler, has_more=True)
+        offset, limit = int(params["offset"]), int(params["limit"])
+        if offset == 0:
+            return response(INDEX_MEMBER_FIELDS, filler[:limit], has_more=True)
+        if self.whole_market_fault == "raises":
+            raise ConnectionError("the second page's connection was reset")
+        return response(INDEX_MEMBER_FIELDS, [filler[limit - 1]], has_more=False)
 
     def _memberships(self, params: Mapping[str, Any]) -> list[list[Any]]:
         if "l1_code" not in params:
@@ -500,6 +520,9 @@ class Market:
         if api_name == INDUSTRY_TREE_DATASET:
             return response(INDEX_CLASSIFY_FIELDS, _tree_items(str(params["src"])))
         if api_name == INDUSTRY_MEMBERSHIP_DATASET:
+            whole_market = "l1_code" not in params and params.get("is_new") == "Y"
+            if whole_market and self.whole_market_fault in PAGED_FAULTS:
+                return self._paged_fault(params)
             return response(INDEX_MEMBER_FIELDS, self._memberships(params))
         if api_name.removesuffix(SWEEP) in STATEMENT_DATA_COLUMNS and api_name.endswith(SWEEP):
             dataset = api_name.removesuffix(SWEEP)

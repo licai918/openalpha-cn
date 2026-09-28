@@ -7,18 +7,20 @@
 ## 前提
 
 1. `docs/research/p6-registration.json` 已由 `scripts/research/registry.py` 的 `register()` 写出并**提交**，磁盘上的字节与 `HEAD` 相同。
-2. 运行命令的检出，其受约束代码（`src/`、`scripts/research/`、`pyproject.toml`、`uv.lock`，以及 `scripts/daily_selection.py` 本身）与登记文件里的 `code_commit` 一致，工作区无未提交改动，`openalpha_cn` 从这个检出的 `src/` 导入。任何一条不满足，命令在第 1 步拒绝，退出码 3。
+2. 运行命令的检出，其受约束代码（`src/`、`scripts/research/`、`pyproject.toml`、`uv.lock`，以及 `scripts/daily_selection.py` 本身）与登记文件里的 `code_commit` 一致，工作区无未提交改动，`openalpha_cn` 从这个检出的 `src/` 导入；**运行的解释器里装的第三方包与这个检出的 `uv.lock` 完全一致**（装了锁文件没有的包、或版本不同，都算不一致）。任何一条不满足，命令在第 1 步拒绝，退出码 3，并逐个点名不一致的包。2026-09-28 实测：主检出共用的 `.venv` 里是 `numpy 2.4.6`，而本分支的 `uv.lock` 锁的是 `2.5.1`——这正是这条检查要拦下的漂移。
 3. **所以定时运行不在开发检出里跑，而在一个钉在登记提交上的专用 worktree 里跑**（见「定时」）。主检出里继续开发、提交，都不会再让某一个前向交易日因为代码变了而被拒绝、白白丢掉；手动运行时同样建议从这个 worktree 跑。
 4. 运行目录的面板已回填到当年，因子在训练/滚动窗口内的历史时点已构建（滚动 IC 与 walk-forward 需要窗口内每天的截面；本命令只构建当天）。
 5. `.env` 里有 `TUSHARE_TOKEN`。命令本身从不读取它：`panel build` 在 `TushareProvider` 内部解析凭据，本命令只给传输层套了一个按 `api_name` 计数的外壳。
 
 ## 手动运行
 
-在钉住的 worktree 里（路径以你的为准）：
+在钉住的 worktree 里（路径以你的为准），用它自己的环境 `.venv`（`--pin-worktree` 建的）：
 
 ```bash
-PYTHONPATH="$PWD/src" VIRTUAL_ENV="<主检出>/.venv" uv run --no-sync --active --env-file "<主检出>/.env" python scripts/daily_selection.py --runtime-dir ~/openalpha-research
+UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file "<主检出>/.env" "$PWD/.venv/bin/python" scripts/daily_selection.py --runtime-dir ~/openalpha-research
 ```
+
+不需要 `PYTHONPATH`：这个环境里的项目是指向本 worktree `src/` 的可编辑安装。`uv run` 只用来读 `--env-file`。
 
 常用选项：
 
@@ -32,16 +34,17 @@ PYTHONPATH="$PWD/src" VIRTUAL_ENV="<主检出>/.venv" uv run --no-sync --active 
 | `--max-staleness-days N` | 因子构建的新鲜度上限，默认 30 |
 | `--top N` | 摘要打印前 N 名候选，默认持仓数 |
 | `--json` | 以 JSON 打印当天结果 |
-| `--pin-worktree DIR` | 在登记提交上创建或移动一个分离 HEAD 的 worktree，打印提交号后退出 |
+| `--pin-worktree DIR` | 在登记提交上创建或移动一个分离 HEAD 的 worktree，再用它自己的 `uv.lock` **离线**建它自己的环境 `DIR/.venv`（`uv sync --frozen --offline`），打印提交号后退出 |
+| `--uv PATH` | 上面两个操作用的 uv，默认 `PATH` 上的 |
 | `--launchd-plist LOG_DIR` | 只打印 launchd 定时配置文本（需 `--worktree`），不安装任何东西 |
 
 ## 八步与失败时的行为
 
 | 步 | 做什么 | 失败时 |
 |---|---|---|
-| 1 registration | 读登记文件；用 `registry.admit_registered_code` 校验提交状态与代码绑定 | 文件缺失或不可读：退出 2；代码不是登记的代码：退出 3 |
-| 2 panel update | 对最新已收盘交易日所在年份跑 `panel build --incremental`，同一个 `--as-of`，目标按「每天取什么」推导；`fina_indicator` 单独一次调用，覆盖报告期年份 Y−1（以及 3 月 31 日之后的 Y）；当天的结果窗口或其下一交易日跨入下一年时，再建下一年的 `trade_cal`（1 次请求） | 退出 1，并转述 `panel build` 自己的拒绝理由 |
-| 3 panel doctor | `panel doctor` 与依赖门 `data-check`，数据集为本次更新写的数据集（不含按上市年份分区的 `stock_basic` 和行业目标），带上当天 `--session`，指数数据集带三个指数代码；当天是一年的第一个交易日时，上一年也一并检查（`return_paths` 要跨年比较前一交易日） | 不 clean 就停，第 4–7 步都不执行 |
+| 1 registration | 读登记文件；用 `registry.admit_registered_code` 校验提交状态与代码绑定；再比对运行解释器已安装的包与检出的 `uv.lock` | 文件缺失或不可读：退出 2；代码不是登记的代码、或环境不是锁文件的环境：退出 3 |
+| 2 panel update | 对最新已收盘交易日所在年份跑 `panel build --incremental`，同一个 `--as-of`，目标按「每天取什么」推导；`fina_indicator` 单独一次调用，覆盖报告期年份 Y−1（以及 3 月 31 日之后的 Y），**未扫到的报告期年份在库里的行原样带入**所写的公告年分区（见下）；当天的结果窗口或其下一交易日跨入下一年时，再建下一年的 `trade_cal`（1 次请求） | 退出 1，并转述 `panel build` 自己的拒绝理由 |
+| 3 panel doctor | `panel doctor` 与依赖门 `data-check`，数据集为本次更新写的数据集（不含按上市年份分区的 `stock_basic` 和行业目标），带上当天 `--session`，指数数据集带三个指数代码；当天是一年的第一个交易日时，上一年也一并检查（`return_paths` 要跨年比较前一交易日）。`fina_indicator` 单独检查一次，只查已存在的公告年（一年的头几天可能还没有任何公告） | 不 clean 就停，第 4–7 步都不执行 |
 | 4 factor build | 配置读到的每个因子档位，在当天 16:30（上海）信号时点构建；该时点已有构建的档位跳过 | 退出 1，转述构建拒绝 |
 | 5 candidates | `strategy_view.score_day`：回测自己的读路径与打分器给当天打分排序 | 退出 1 |
 | 6 target weights | 回测自己的调仓规则 `strategy_backtest.target_holdings`，上一次日志里的目标持仓视为账面 | —— |
@@ -61,6 +64,13 @@ PYTHONPATH="$PWD/src" VIRTUAL_ENV="<主检出>/.venv" uv run --no-sync --active 
 - **target weights**：`rebalanced`、`not a rebalance day`（沿用上一次目标）或 `held`（打分源当天没有答案，沿用上一次目标），括号里写明原因（`scheduled`、`the first day: no book yet`、`catching up the rebalance scheduled on …`）；每只 `1 / holding_count`，其余为现金；`turnover` 是与上一次目标权重的单边换手。
 - **prediction**：预测记录 ID（`prd_…`）、`standing`（应为 `forward`）与结果可知时刻。
 - **tushare requests**：本次运行实际发出的请求数，按接口分列。
+- **industry sweep**（当天取了行业归属时）：`whole-market states`（4 次请求）；库里还没有行业归属时为 `the l1_code slices (62 requests): …`；全市场答案自检不通过时为 `FELL BACK to the l1_code slices (62 more requests): <原因>`。如果每个读行业的日子都出现 `FELL BACK`，说明每天多花约 62 次请求，需要查原因。
+
+## `fina_indicator` 的公告年分区为什么要带入旧行
+
+`fina_indicator` 按报告期取、按公告日期分区，一个公告年由至少两个报告期年份拼成：比如公告年 2025 里有 2025 年的三份中报/季报，也有 2024 年报（2025 年 4 月公告）。每天只扫报告期年份 Y−1（3 月 31 日之后再加 Y），如果把扫到的行整份写进公告年分区，2024 年报就会从 2025 分区里消失，面板的「分区行数不许变少」守卫会拒绝，第 2 步在一个回填过的真实库上就会每天失败；一年的第一个交易日，公告年 Y−1 也是同样的情况。
+
+所以在 `--incremental` 下，每个被写的公告年分区里，报告期年份**不在**本次扫描范围内的已存行原样带入，重新按本次的 `as_of` 盖入库时刻；在扫描范围内的行用本次取到的替换。结果与同一 `as_of` 下对全部相关报告期年份做一次全量构建逐字节相同（测试比对了两者的分区内容哈希），且不多花任何请求。带入的是已存的行：本次未扫到的报告期年份如果在上游被更正，要等下一次扫到它的构建才会进库——不带入也一样。另一种办法「只写所有来源报告期都扫到了的公告年」行不通：迟到的年报会落在很多年之后（`001278.SZ` 的 2018 年报 2022-01-06 才公告），当年的公告年分区几乎总含有每天扫不到的报告期，于是永远写不进去。
 
 调仓按登记配置的 `start` 起算，每 `rebalance_every_sessions` 个交易日一次，与回测一致。walk-forward 模型的重训日也从 `start` 起算，当天使用的是最近一个重训日训练的模型，与从 `start` 回测到当天时回测使用的模型相同。
 
@@ -98,29 +108,46 @@ PYTHONPATH="$PWD/src" VIRTUAL_ENV="<主检出>/.venv" uv run --no-sync --active 
 - **财报**：只有登记的因子读到的财报数据集才取。
 - **行业**（`index_classify`、`index_member_all`）：只在当天的打分会读行业的日子取——中性化档每天（因子构建要读全截面的行业）；行业上限只在调仓日（行业只在调仓决策里被读）。其余日子当天的计算不读任何行业归属，所以「当天打分读到的每只证券」的行业与每天全量刷新完全相同——因为一只也不读。测试 `test_an_industry_cap_refreshed_on_rebalance_days_scores_as_a_daily_full_refresh_does` 把这条规则与每天全量刷新并排跑 5 天（其中非调仓日上游发生一次改类和一次首次归类）：每天的候选榜、目标权重、登记记录完全相同；调仓日两个库对每只证券的行业回答相同。
 
-稳态请求数（上一交易日已更新；由代码的 `BUDGET` 行与各目标每次一请求的规则推导，财报取数按 `V2-P6-003` 2026-09-28 在真实市场上的实测：`income` 25、`balancesheet` 21、`cashflow` 23；行业按 SW2021 的 31 个一级行业）：
+请求数（上一交易日已更新；由代码的 `BUDGET` 行与各目标的取数规则推导；行业按 SW2021 的 31 个一级行业）：
 
 | 目标 | 请求数 |
 |---|---:|
 | 基础：`trade_cal` 1 + `stock_basic` 1 + 5 个会话接口 × 2 个会话（重叠 + 新的一天）+ `index_daily` 3 | 15 |
-| 三张报表横扫（只算配置读到的那几张） | 至多 69 |
-| `fina_indicator`（报告期年份 Y−1 的 4 个期 + Y 已结束的期；9 月为 4 + 3） | 约 7 |
+| 三张报表横扫（只算配置读到的那几张）：**当年每个已开始的公告月都重扫一遍**，每月 1 次，到上限的月按日期对半再取 | 随月份累积，见下表 |
+| `fina_indicator`：报告期年份 Y−1 的 4 个期，3 月 31 日起加上 Y 已结束的期（9 月 28 日为 4 + 2 = 6，12 月 31 日为 8）；带入旧行不花请求 | 4–8 |
 | 行业：`index_classify` 2 + `index_member_all` 按全市场两个状态取 4（见下） | 6 |
 | 行业自检不通过、或库里还没有行业归属时：改按 31 个一级行业 × 2 个状态切片取 | 另加 62 |
 
-| 配置类型 | 普通日 | 读行业的日子 |
+三张报表横扫的请求数由库里已存的公告行数、按代码自己的规则逐日算出（`income`、`balancesheet`、`cashflow` 上限分别为 5,000、7,000、6,400 行；月窗口到上限就在中点对半，单日到上限再按登记表代码每 1,000 个一块取 6 块；`fina_indicator` 单期上限 12,000）。已存行只含登记表内的证券，是接口实际返回行数的下界，所以算出的是下界。校验：按这个规则算 2026-09-28，三张报表为 25、21、23，与 `V2-P6-003` 当天的在线实测完全相同。
+
+每月的横扫成本集中在公告高峰：4 月（年报 + 一季报）7–13 次，8 月（中报）1–9 次，10 月（三季报）1–7 次，其余月份各 1 次。因为每天重扫全年已开始的月份，一年里请求数单调增加，最多的是 12 月 31 日：
+
+| 年份 | 最多的一天 | 三张报表 | `fina_indicator` | 读全部财报 + 行业 | 超过 100 的第一天（+ 行业 / 无行业） |
+|---|---|---|---:|---:|---|
+| 2019 | 12-31 | 26 + 18 + 20 | 8 | 93 | —— |
+| 2020 | 12-31 | 34 + 22 + 22 | 8 | 107 | 11-01 / 12-31 |
+| 2021 | 12-31 | 26 + 26 + 18 | 8 | 99 | —— |
+| 2022 | 12-31 | 30 + 18 + 26 | 8 | 103 | 12-01 / —— |
+| 2023 | 12-31 | 30 + 24 + 32 | 8 | **115** | 10-30 / 10-31 |
+| 2024 | 12-31 | 30 + 18 + 30 | 8 | 107 | 11-01 / 12-31 |
+| 2025 | 12-31 | 32 + 18 + 32 | 8 | 111 | 10-31 / 11-01 |
+| 2026（到 9-28） | 9-01 起 | 25 + 21 + 23 | 6 | 96 | —— |
+
+| 配置类型 | 读行业的日子以外 | 读行业的日子 |
 |---|---:|---:|
 | 只读价量，无行业 | 15 | —— |
 | 只读价量 + 行业上限 | 15 | 21（仅调仓日） |
 | 只读价量 + 中性化档 | —— | 21（每天） |
-| 读全部财报，无行业 | 约 91 | —— |
-| 读一张报表（如 `book_to_price` 读 `balancesheet`）+ 行业上限 | 36 | 42（仅调仓日） |
-| **读全部财报 + 行业**（上限或中性化档） | 约 91 | **约 97** |
-| `--full-update`（当年全部 12 个目标） | 约 98 | —— |
+| 读一张报表（如 `book_to_price` 读 `balancesheet`）+ 行业上限 | 至多 15 + 26 = 41（2021 年末的 `balancesheet`） | 至多 47（仅调仓日） |
+| 读全部财报，无行业 | 9 月底约 90；年末至多 109（2023） | —— |
+| **读全部财报 + 行业**（上限或中性化档） | 同上 | 9 月底约 96；**年末至多 115（2023）** |
+| `--full-update`（当年全部 12 个目标） | 读全部财报的数再加 `namechange` 1、`index_weight` 3–6（从已存的最新月份起，3 个指数） | —— |
+
+**读全部财报的配置在 10 月底到 12 月 31 日超出 R2**：2023–2025 年每年都超，最多 115 次（2023-12-31，读行业的日子），不读行业也有 109 次。原因是报表横扫每天都把当年已开始的每个月重扫一遍，而不是只扫还在变化的月份。把已结束的月份像 `fina_indicator` 那样从库里带入、只重扫当月（月初加扫上一个月），每天就只剩当月的成本（最多是 4 月的 7–13 次），这类配置每天约 60 次以内；这是面板层对三张报表的 `--incremental` 改动，这一轮没有做。
 
 离线端到端测试 `test_a_full_update_with_statements_runs_every_step_and_states_its_budget` 在 2 月 20 日（1、2 月两个公告月窗口已开始）用 `--full-update` 跑完全部八步，逐接口核对请求数：会话接口各 2、`trade_cal`/`stock_basic`/`namechange` 各 1、`index_daily` 3、`index_weight` 6、三张报表各 2、`fina_indicator` 4。重跑同一天：0 次。
 
-**行业归属按全市场两个状态取（`panel build --industry-sweep states`），每类配置都在 R2 之内。** `index_member_all` 单次上限 3,000 行。2026-09-28 在线实测（80 次请求）：以 31 个一级行业 × 2 个状态的切片取一次作为基准（62 次，7,920 行：当前 5,914、已失效 2,006），全市场 `is_new=N` 一次返回全部 2,006 行（`has_more=False`），全市场 `is_new=Y` 用 `offset` 翻页——`limit=3000` 翻两遍、`limit=2999` 翻两遍——四遍都与基准按全部 11 列逐行相同，无重复行、无重复 `(ts_code, l1_code, in_date)`，四遍的行序也完全相同。于是每次取 4 次请求：当前状态的单次请求在 3,000 行上限处被判为截断，按 2,999 一页再取两页，已失效状态一次。当前状态超过 5,998 行后多一页。
+**行业归属按全市场两个状态取（`panel build --industry-sweep states`）。** `index_member_all` 单次上限 3,000 行。2026-09-28 在线实测（80 次请求）：以 31 个一级行业 × 2 个状态的切片取一次作为基准（62 次，7,920 行：当前 5,914、已失效 2,006），全市场 `is_new=N` 一次返回全部 2,006 行（`has_more=False`），全市场 `is_new=Y` 用 `offset` 翻页——`limit=3000` 翻两遍、`limit=2999` 翻两遍——四遍都与基准按全部 11 列逐行相同，无重复行、无重复 `(ts_code, l1_code, in_date)`，四遍的行序也完全相同。于是每次取 4 次请求：当前状态的单次请求在 3,000 行上限处被判为截断，按 2,999 一页再取两页，已失效状态一次。当前状态超过 5,998 行后多一页。
 
 同一天也测了另外两种形状，都不相等，所以没有采用：只给 `l1_code` 不给 `is_new`，只返回该行业的当前归属（`801030.SI` 777 行里只回 464 行）；逗号连接多个 `l1_code`，返回 0 行且 `code=0`。
 
@@ -144,13 +171,15 @@ uv run --no-sync python scripts/daily_selection.py --pin-worktree ~/openalpha-da
 
 `--pin-worktree` 读主检出里已提交的登记文件，找到最后一次提交它的那个提交，核对那里的受约束代码与登记的 `code_commit` 完全相同，然后在那个提交上创建（或把已有的、干净的 worktree 移到）一个分离 HEAD 的 worktree。它从不改动有未提交改动的 worktree。登记换了（新的一次研究）就再跑一次它。
 
+接着它给这个 worktree 建**自己的环境**：`UV_PROJECT_ENVIRONMENT=<worktree>/.venv uv sync --frozen --offline --project <worktree>`，按 worktree 自己的 `uv.lock` 原样安装、不重新解析，并且**从不联网**——uv 缓存里缺哪个包，就按名拒绝，并给出需要你在联网时运行一次的命令（`uv sync --frozen`，不带 `--offline`）；这条命令本身从不下载。继承来的 `VIRTUAL_ENV`、`PYTHONPATH` 都去掉，所以它不会装进、也不会导入主检出的环境。2026-09-28 在草稿目录里的一次性检出上实测：离线建成，0.6 秒（全部来自缓存）；用这个环境的解释器对它的 `uv.lock` 做第 1 步的比对，没有差异，`openalpha_cn` 从该检出的 `src/` 导入，没有设 `PYTHONPATH`。
+
 生成 launchd 配置文本（只打印，不安装）：
 
 ```bash
 uv run --no-sync python scripts/daily_selection.py --runtime-dir ~/openalpha-research --worktree ~/openalpha-daily --launchd-plist ~/openalpha-research/logs
 ```
 
-配置里没有 shell：`ProgramArguments` 就是 launchd 交给 exec 的参数向量，`WorkingDirectory` 是钉住的 worktree，`EnvironmentVariables` 设 `PYTHONPATH=<worktree>/src`（共用的虚拟环境因此导入钉住的 `openalpha_cn`，外来包检查通过）和 `VIRTUAL_ENV=<主检出>/.venv`，`--env-file` 指向主检出的 `.env`。路径里有空格、`"` 或 `$` 都原样传递，不会被解析。配置由 `plistlib` 生成（`plutil -lint` 通过）。
+配置里没有 shell：`ProgramArguments` 就是 launchd 交给 exec 的参数向量，解释器是钉住的 worktree 自己的 `<worktree>/.venv/bin/python`（`uv run --no-sync` 只用来读 `--env-file`），`WorkingDirectory` 是钉住的 worktree，`EnvironmentVariables` 只设 `UV_PROJECT_ENVIRONMENT=<worktree>/.venv` 和 `PATH`——不设 `PYTHONPATH`，也不指向任何共用环境；`--env-file` 指向主检出的 `.env`。路径里有空格、`"` 或 `$` 都原样传递，不会被解析。配置由 `plistlib` 生成（`plutil -lint` 通过）。
 
 launchd 不知道交易日历，所以配置为每个工作日 18:30 触发，由命令自己判断：节假日里「最新已收盘交易日」的日志已经完整，于是只打印摘要，零请求、零写入。1 月 1 日这类假日找到的是上一年的最后一个交易日（日历按当年和上一年两年读）。
 
@@ -167,4 +196,5 @@ launchd 不会替你创建日志目录，加载前需要先建好它。把输出
 5. walk-forward 模型每天都重训一次：非重训日重训的是最近一个重训日的同一个窗口，结果与回测使用的模型完全相同，但成本每天都付。在策略测试语料（8 只证券）上实测：重训日 `score_day` 0.50 秒，非重训日 0.48 秒，其中 `walk_forward_fits` 0.1–0.2 毫秒，其余是读训练面板；全市场上树模型单次拟合在 `V2-P6-014` 实测为 26–125 秒（47.7 万个样本），即每天付一次这个时间。把拟合好的模型存下来跨天复用需要一个新的持久化契约（树模型没有从制品重建的函数），这一轮没有做。
 6. 中性化档的因子构建依赖行业分类的年份覆盖（`V2-P6-015` 已合入）；一年的第一个交易日，因子构建读的证券池要求登记表在当年已有至少一个上市/退市事件的分区，否则第 4 步按名拒绝（真实登记表几乎每周都有事件，但 1 月初并非必然）。
 7. **上游撤回已存会话的行时，第 2 步会停。** `--incremental` 会重新拉取已存的最后一个会话（一个会话的重叠）。2026-09-28 实测：Tushare 对 2026-08-28 的 `stk_limit` 已不再返回三只基金（`158008.SZ`、`159096.SZ`、`561730.SH`，此前存下时各只有这一天一行），写入端的丢弃守卫按设计拒绝（更窄的截面被当作不完整的拉取），命令停在第 2 步并说明。这由面板层的 `V2-P6-016` 处理，不是这条命令能替面板决定的。
-8. 读全部财报又读行业的配置，在读行业的日子约 97 次请求，离 R2 的 100 只有 3 次的余量；行业自检不通过的那天、以及库里还没有行业归属的第一次，多花 62 次（见上）。
+8. **读全部财报的配置在每年 10 月底到年末超出 R2**（2023 年最多 115 次，见上表）：三张报表每天重扫当年全部已开始的月份。行业自检不通过的那天、以及库里还没有行业归属的第一次，另多花 62 次。
+9. **一年的头一两个交易日，读 `income`/`balancesheet`/`cashflow` 的配置可能在第 2 步停下**：当年还没有任何公告时，当年的横扫一行登记表内的公告也拿不到，`panel build` 按设计拒绝（「一年里没有任何登记证券的公告，是要查的取数问题」）。库里的实测（2014–2026）：三张报表当年第一条公告晚于当年第一个交易日的有三年——2020 年（1 月 3 日对 1 月 2 日）、2023 年（1 月 4 日对 1 月 3 日）、2024 年（1 月 3 日对 1 月 2 日）；其余年份第一条公告不晚于第一个交易日。这一轮没有改：要改的是面板层对「当年还没有公告」与「取数失败」的区分。`fina_indicator` 不受影响（它按上一年的报告期取），它的体检只查已存在的公告年。

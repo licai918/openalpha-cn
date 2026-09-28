@@ -80,6 +80,7 @@ from openalpha_cn.domain.financial_statements import (
     FINANCIAL_INDICATOR_DATASET,
     FINANCIAL_STATEMENT_DATASETS,
     INCOME_DATASET,
+    REPORT_PERIOD_COLUMN,
     FinancialStatementError,
 )
 from openalpha_cn.domain.index_membership import (
@@ -203,6 +204,7 @@ from openalpha_cn.panel_ingest import (
     AbsenceWitness,
     Withdrawals,
     _sessions_published_through,
+    carry_stored_rows_forward,
     carry_stored_sessions_forward,
     carry_withdrawn_rows,
     combine_defect_records,
@@ -5741,10 +5743,13 @@ def _build_span_targets(
     years: Sequence[int],
     now: datetime,
     industry_sweep: str = "slices",
+    incremental: bool = False,
 ) -> None:
     """Run the `PANEL_BUILD_SPAN_TARGETS` once for the whole invocation, in table order.
 
-    `industry_sweep` picks `index_member_all`'s request shape; see `INDUSTRY_SWEEPS`.
+    `industry_sweep` picks `index_member_all`'s request shape; see `INDUSTRY_SWEEPS`. Under
+    `incremental`, `fina_indicator` keeps the stored rows of the report-period years it did not
+    sweep (`_carry_unswept_report_periods`).
 
     `_build_panel`'s counterpart for the three targets a per-year loop cannot serve, and it takes
     `years` rather than a year for the one of them that uses them at all: `fina_indicator`'s
@@ -5803,12 +5808,70 @@ def _build_span_targets(
                     ),
                 )
             )
+        if incremental:
+            batches = _carry_unswept_report_periods(store, batches, swept=years, now=now)
         _refuse_shrinking_statement_years(
             store, dataset=FINANCIAL_INDICATOR_DATASET, batches=batches
         )
         written.setdefault(FINANCIAL_INDICATOR_DATASET, []).extend(
             write_financial_statements(store, batches)
         )
+
+
+def _carry_unswept_report_periods(
+    store: PanelStore,
+    batches: Sequence[ColumnarPanelBatch],
+    *,
+    swept: Sequence[int],
+    now: datetime,
+) -> list[ColumnarPanelBatch]:
+    """`fina_indicator` under `--incremental`: each announcement year the sweep touches, with the
+    stored rows of the report-period years it did **not** sweep put back in front (`V2-P6-011`).
+
+    ## Why a daily sweep needs it
+
+    The request window is a report period and the partition is an announcement year, so a year
+    is assembled from at least two period years -- `_refuse_shrinking_statement_years` has the
+    argument. The daily update sweeps period years Y-1 and Y (Y-1 alone before 31 March). Written
+    whole, announcement year Y-1 would hold only Y-1's interims: the Y-2 annual reports announced
+    in Y-1 would be lost, the shrink guard refuses, and on a backfilled store step 2 would stop
+    every day; on a year's first session announcement year Y-1 is the one assembled from Y-1's
+    interims and Y-2's annuals, and the same refusal follows.
+
+    ## Why carry, and not "write only the years whose every period was swept"
+
+    Both keep an incremental build equal to a full one; carrying costs no request and the other
+    cannot work. An announcement year's contributing period years are open-ended -- a late annual
+    lands years after its period (`001278.SZ` announced its 2018 annual on 2022-01-06) -- so the
+    current announcement year routinely holds a period no daily sweep covers, and "write only
+    fully swept years" would never write the current year at all, or would have to sweep every
+    period year that ever filed into it.
+
+    So a stored row is carried when its `report_period`'s year is not in `swept`, and replaced
+    by what the sweep fetched when it is. The carried rows are re-observed at `now`
+    (`carry_stored_rows_forward`'s `observed_at`), which is the stamp a full build at the same
+    `--as-of` gives every row it fetches: the partition is **hash-equal to a full build** over
+    the swept period years plus those that filed the carried rows, as long as upstream has not
+    changed a carried row since it was stored -- a correction to a period this sweep does not
+    cover reaches the store at the next build that sweeps it, as it would without the carry.
+    The shrink guard still runs on the result, so a carry with a hole in it is refused as the
+    uncarried write was.
+
+    Announcement years the sweep did not touch are not written at all, and their stored bytes
+    are unchanged.
+    """
+    arrived = [batch for batch in batches if batch.status == "success"]
+    if not arrived:
+        return list(batches)
+    periods = {str(year) for year in swept}
+
+    def unswept(row: Mapping[str, object]) -> bool:
+        return str(row[REPORT_PERIOD_COLUMN])[:4] not in periods
+
+    return [
+        carry_stored_rows_forward(store, yearly, year=year, retain=unswept, observed_at=now)
+        for year, yearly in split_panel_batch_by_year(merge_panel_batches(arrived))
+    ]
 
 
 def _all_refs(written: Mapping[str, Sequence[PartitionRef]]) -> list[PartitionRef]:
@@ -6157,12 +6220,14 @@ _BUILD_INCREMENTAL_HELP = (
     "writes, upstream_defects included. A year with nothing stored is fetched whole. A stored "
     "year the slice cannot extend into that result -- a gap, a horizon past this build's, a "
     "listing the registry has since moved -- is refused before anything is fetched, with the "
-    "full build to run instead. The other targets are one request a year or a whole-year sweep "
-    "and run as they always do. See `_incremental_start`. A stored row the upstream no longer "
-    "serves on a session fetched again -- full build or incremental -- costs one more request "
-    "for that session and, confirmed, is recorded as withdrawn_after_publication and kept whole "
-    "in its withdrawn_* dataset (V2-P6-016); an incremental build also asks again each session "
-    "holding such a record, so a re-publication is seen as a full build sees it."
+    "full build to run instead. fina_indicator keeps, in every announcement year it writes, the "
+    "stored rows of the report-period years it did not sweep (V2-P6-011). The other targets are "
+    "one request a year or a whole-year sweep and run as they always do. See "
+    "`_incremental_start` and `_carry_unswept_report_periods`. A stored row the upstream no "
+    "longer serves on a session fetched again -- full build or incremental -- costs one more "
+    "request for that session and, confirmed, is recorded as withdrawn_after_publication and kept "
+    "whole in its withdrawn_* dataset (V2-P6-016); an incremental build also asks again each "
+    "session holding such a record, so a re-publication is seen as a full build sees it."
 )
 
 _BUILD_INDUSTRY_SWEEP_HELP = (
@@ -6465,6 +6530,7 @@ def panel_build(
                     years=years,
                     now=now,
                     industry_sweep=industry_sweep,
+                    incremental=incremental,
                 )
             except _PANEL_WRITE_REFUSALS as error:
                 raise _panel_fail(

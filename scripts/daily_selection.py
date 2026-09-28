@@ -93,11 +93,17 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+import importlib.metadata
 import io
 import json
+import os
 import plistlib
+import re
+import shlex
 import shutil
+import subprocess
 import sys
+import tomllib
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -352,7 +358,7 @@ def admit_registration(path: Path, repo: Path) -> Registration:
             exit_code=DailyExit.no_registration,
         )
     try:
-        _root, admitted = registry.admit_registered_code(path, repo, also_bound=(THIS_SCRIPT,))
+        root, admitted = registry.admit_registered_code(path, repo, also_bound=(THIS_SCRIPT,))
     except registry.HoldoutConfigurationError as error:
         raise StepFailedError(
             "registration", str(error), exit_code=DailyExit.no_registration
@@ -363,6 +369,7 @@ def admit_registration(path: Path, repo: Path) -> Registration:
             f"{type(error).__name__}: {error}",
             exit_code=DailyExit.code_not_registered,
         ) from error
+    admit_environment(root)
     body = admitted.registered
     config = body.get("config")
     if not isinstance(config, dict):
@@ -382,6 +389,91 @@ def admit_registration(path: Path, repo: Path) -> Registration:
         config_id=str(body.get("config_id")),
         seed=int(seed) if isinstance(seed, int) else 0,
     )
+
+
+LOCKFILE: Final[str] = "uv.lock"
+"""The registered third-party environment: bound with the code (`registry.REGISTERED_PATHS`), so
+the checkout's copy is the one committed at the registration's `code_commit`."""
+
+
+def _distribution_name(name: str) -> str:
+    """PEP 503's normalised form, which is how `uv.lock` spells every name."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def locked_versions(lock_text: str) -> dict[str, str | None]:
+    """Every package `uv.lock` pins, by normalised name; `None` for one it pins no version of."""
+    document = tomllib.loads(lock_text)
+    packages = document.get("package", [])
+    return {
+        _distribution_name(str(package["name"])): (
+            None if package.get("version") is None else str(package["version"])
+        )
+        for package in packages
+        if isinstance(package, dict) and "name" in package
+    }
+
+
+def installed_distributions() -> dict[str, str]:
+    """Every distribution the running interpreter can import, by normalised name."""
+    return {
+        _distribution_name(distribution.metadata["Name"]): distribution.version
+        for distribution in importlib.metadata.distributions()
+        if distribution.metadata["Name"]
+    }
+
+
+def environment_differences(
+    locked: Mapping[str, str | None], installed: Mapping[str, str]
+) -> list[str]:
+    """Where the running environment is not the locked one, one sentence per distribution.
+
+    Every **installed** distribution has to be in the lock at the locked version. A locked
+    package that is not installed is not a difference: the lock covers every platform, Python
+    version and extra (`akshare` is an extra, and one wheel per interpreter is listed), and a
+    package the code needs and lacks fails at import rather than computing anything.
+    """
+    differences: list[str] = []
+    for name, version in sorted(installed.items()):
+        if name not in locked:
+            differences.append(f"{name} {version} is installed and {LOCKFILE} does not lock it")
+        elif locked[name] is not None and locked[name] != version:
+            differences.append(f"{name} {version} is installed and {LOCKFILE} pins {locked[name]}")
+    return differences
+
+
+def admit_environment(root: Path) -> None:
+    """Step 1's second half (`V2-P6-011`): the running interpreter's third-party packages are
+    exactly the ones `<root>/uv.lock` pins, or the run stops.
+
+    The bound code is compared with the registration's commit (`registry.admit_registered_code`,
+    whose bound paths include `uv.lock`), and that says nothing about what the interpreter
+    actually imports: a scheduled run started from a shared virtual environment would compute
+    with whatever that environment was last synced to. `--pin-worktree` gives the pinned checkout
+    its own environment, synced from its own lock offline (`sync_pinned_environment`); this is
+    the defence behind that -- it refuses a run whose environment is not that lock, by name.
+    """
+    lock = root / LOCKFILE
+    if not lock.is_file():
+        raise StepFailedError(
+            "registration",
+            f"{lock} does not exist, so the environment this run computes with cannot be "
+            "compared with a registered one",
+            exit_code=DailyExit.code_not_registered,
+        )
+    differences = environment_differences(
+        locked_versions(lock.read_text(encoding="utf-8")), installed_distributions()
+    )
+    if differences:
+        shown = "; ".join(differences[:8])
+        more = f" (and {len(differences) - 8} more)" if len(differences) > 8 else ""
+        raise StepFailedError(
+            "registration",
+            f"the running interpreter ({sys.executable}) is not the environment {lock} pins: "
+            f"{shown}{more}. Run from the checkout --pin-worktree made, whose environment is "
+            "synced from its own lock",
+            exit_code=DailyExit.code_not_registered,
+        )
 
 
 def _decimal(value: object, key: str) -> Decimal:
@@ -836,6 +928,30 @@ def _panel_build(
     return invoke(arguments)
 
 
+def industry_sweep(budget: Sequence[str]) -> str | None:
+    """How the day's `index_member_all` was fetched, read off `panel build`'s `BUDGET` lines, or
+    `None` when it was not.
+
+    The whole-market states on an ordinary day. The l1_code slices when there was no stored corpus
+    to check against, and "FELL BACK" when the states were fetched and failed the self-check --
+    62 more requests, which a persistent fallback would spend every industry day without anything
+    else saying so; the printed summary carries this line for that reason.
+    """
+    prefix = f"BUDGET {INDUSTRY_MEMBERSHIP_TARGET} "
+    lines = [line for line in budget if line.startswith(prefix)]
+    if not lines:
+        return None
+    slices = next((line for line in lines if "l1_code slices" in line), None)
+    if slices is None:
+        return "whole-market states"
+    count = slices[len(prefix) :].split(" ", 1)[0]
+    _head, _marker, reason = slices.partition("not --year; ")
+    reason = reason.removesuffix(")")
+    if len(lines) > 1:
+        return f"FELL BACK to the l1_code slices ({count} more requests): {reason}"
+    return f"the l1_code slices ({count} requests): {reason or 'the default sweep'}"
+
+
 def _budget(built: Invocation) -> list[str]:
     """The `BUDGET` lines `panel build` states before each fetch loop: the code's own count."""
     return [
@@ -928,6 +1044,7 @@ def update_panel(
         "year": session_year,
         "next_year_calendar": next_year,
         "budget": budget,
+        "industry_sweep": industry_sweep(budget),
         "sessions": report.get("sessions"),
         "partitions": report.get("partitions", []),
     }
@@ -962,11 +1079,60 @@ def check_panel(
     compare the session with the one before it (`return_paths` reads the previous close and the
     adjustment factors across it), and a calendar of the session's year alone cannot place that
     session -- measured: `check_unavailable`, which blocks.
+
+    `fina_indicator` is asked about in an invocation of its own, over the years among those that
+    are stored: its partitions are announcement years written only when something was announced,
+    and a year's first sessions can precede its first announcement (`income`'s first 2023 row
+    was announced on 4 January, the day after 2023's first session). A year the sweep wrote is
+    stored, so the filter only drops a year nothing has been announced in yet.
     """
+    years = [session.year - 1, session.year] if first_of_year else [session.year]
+    announced = [dataset for dataset in datasets if dataset in ANNOUNCEMENT_YEAR_DATASETS]
+    _doctor(
+        runtime_dir,
+        datasets=[dataset for dataset in datasets if dataset not in ANNOUNCEMENT_YEAR_DATASETS],
+        years=years,
+        session=session,
+        as_of=as_of,
+        exchange=exchange,
+    )
+    if announced:
+        store = PanelStore(runtime_dir / "panel")
+        stored = [
+            year
+            for year in years
+            if all(year in store.registered_years(dataset) for dataset in announced)
+        ]
+        if stored:
+            _doctor(
+                runtime_dir,
+                datasets=announced,
+                years=stored,
+                session=session,
+                as_of=as_of,
+                exchange=exchange,
+            )
+
+
+ANNOUNCEMENT_YEAR_DATASETS: Final[frozenset[str]] = frozenset({FINANCIAL_INDICATOR_TARGET})
+"""Swept by report period, filed by announcement year: see `check_panel`."""
+
+
+def _doctor(
+    runtime_dir: Path,
+    *,
+    datasets: Sequence[str],
+    years: Sequence[int],
+    session: date,
+    as_of: datetime,
+    exchange: str,
+) -> None:
+    """One `panel doctor` and one `data-check` over `datasets` x `years`, both clean."""
+    if not datasets:
+        return
     arguments = ["--runtime-dir", str(runtime_dir)]
-    if first_of_year:
-        arguments += ["--year", str(session.year - 1)]
-    arguments += ["--year", str(session.year)]
+    for year in years:
+        arguments += ["--year", str(year)]
     arguments += ["--session", session.isoformat(), "--as-of", as_of.isoformat()]
     arguments += ["--exchange", exchange]
     for dataset in datasets:
@@ -1486,6 +1652,9 @@ def summary_lines(result: Mapping[str, Any], *, top: int) -> list[str]:
         f"{json.dumps(run['requests'], sort_keys=True)}"
         + ("" if run["wrote"] else " -- the day was already complete; nothing was run")
     )
+    sweep = result.get("panel", {}).get("industry_sweep")
+    if sweep:
+        lines.append(f"industry sweep     {sweep}")
     lines.append(f"wording            {result['wording']}")
     return lines
 
@@ -1554,6 +1723,68 @@ def pin_worktree(registration: Path, repo: Path, directory: Path) -> str:
     return _git_output(directory, "rev-parse", "HEAD", what="read the worktree's commit")
 
 
+PINNED_ENVIRONMENT: Final[str] = ".venv"
+"""The pinned checkout's own environment, `<worktree>/.venv` (git-ignored)."""
+
+
+def environment_sync_command(worktree: Path, *, uv: Path) -> tuple[list[str], dict[str, str]]:
+    """The command that creates the pinned checkout's environment, and its environment variables.
+
+    `uv sync --frozen --offline` against `<worktree>/uv.lock`, into `<worktree>/.venv`:
+    `--frozen` installs the lock as it is and never re-resolves it, `--offline` never touches the
+    network -- a package uv's cache does not hold is a refusal, not a download. The inherited
+    `VIRTUAL_ENV` and `PYTHONPATH` are dropped, so the sync cannot target, or import from, the
+    development checkout's environment.
+    """
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"VIRTUAL_ENV", "PYTHONPATH", "UV_PROJECT_ENVIRONMENT"}
+    }
+    environment["UV_PROJECT_ENVIRONMENT"] = str(worktree / PINNED_ENVIRONMENT)
+    command = [str(uv), "sync", "--frozen", "--offline", "--project", str(worktree)]
+    return command, environment
+
+
+def _run_sync(
+    command: Sequence[str], *, environment: Mapping[str, str], cwd: Path
+) -> subprocess.CompletedProcess[bytes]:
+    """Run the sync. A seam, so the tests assert the command without ever running uv."""
+    return subprocess.run(list(command), env=dict(environment), cwd=cwd, capture_output=True)
+
+
+_UNCACHED = re.compile(r"`([A-Za-z0-9_.\-]+)==([^`\s]+)`")
+
+
+def sync_pinned_environment(worktree: Path, *, uv: Path) -> Path:
+    """Create or refresh `<worktree>/.venv` from `<worktree>/uv.lock`, offline; return its path.
+
+    Refused by name when uv's cache lacks a package: the operator is told which, and the one
+    online command that fills the cache -- which this command never runs.
+    """
+    command, environment = environment_sync_command(worktree, uv=uv)
+    finished = _run_sync(command, environment=environment, cwd=worktree)
+    if finished.returncode != 0:
+        output = finished.stderr.decode(errors="replace")
+        missing = sorted({f"{name}=={version}" for name, version in _UNCACHED.findall(output)})
+        online = (
+            f"UV_PROJECT_ENVIRONMENT={shlex.quote(str(worktree / PINNED_ENVIRONMENT))} "
+            f"{shlex.quote(str(uv))} sync --frozen --project {shlex.quote(str(worktree))}"
+        )
+        cause = (
+            f"uv's cache holds no copy of {', '.join(missing)}"
+            if missing
+            else "uv refused: " + " | ".join(output.strip().splitlines()[-4:])
+        )
+        raise StepFailedError(
+            "registration",
+            f"the pinned environment {worktree / PINNED_ENVIRONMENT} could not be created offline "
+            f"from {worktree / LOCKFILE}: {cause}. Nothing was downloaded. To fill the cache, run "
+            f"once, online: {online} -- then --pin-worktree again",
+        )
+    return worktree / PINNED_ENVIRONMENT
+
+
 LAUNCHD_LABEL: Final[str] = "com.openalpha.daily-selection"
 
 
@@ -1563,18 +1794,23 @@ def launchd_plist(
     runtime_dir: Path,
     log_dir: Path,
     env_file: Path,
-    venv: Path,
     uv: Path,
 ) -> str:
     """The launchd job that runs this command from the pinned worktree at 18:30 on weekdays.
 
     Printed, never installed. No shell runs it: `ProgramArguments` is the argument vector itself
     and `WorkingDirectory`/`EnvironmentVariables` set the rest, so no path is ever parsed by a
-    shell and a `"`, `$` or space in one cannot break it or expand. `PYTHONPATH` is the worktree's
-    `src`, so the shared virtual environment imports the pinned `openalpha_cn` and the
-    registration's foreign-package check passes. launchd has no exchange calendar, so it fires
-    every weekday and the command decides: on a holiday the newest closed session is one whose
-    journal is already complete, which prints the summary again with no request and no write.
+    shell and a `"`, `$` or space in one cannot break it or expand.
+
+    **The interpreter is the pinned checkout's own**, `<worktree>/.venv/bin/python`, which
+    `--pin-worktree` synced offline from the worktree's `uv.lock` (`sync_pinned_environment`).
+    Its editable install of the project points at `<worktree>/src`, so no `PYTHONPATH` is set and
+    no shared environment is named; `uv run --no-sync` is there only to load `--env-file`, and
+    `UV_PROJECT_ENVIRONMENT` keeps it on the same environment. Step 1 then compares that
+    interpreter's packages with the lock (`admit_environment`). launchd has no exchange calendar,
+    so it fires every weekday and the command decides: on a holiday the newest closed session is
+    one whose journal is already complete, which prints the summary again with no request and no
+    write.
     """
     job = {
         "Label": LAUNCHD_LABEL,
@@ -1582,10 +1818,9 @@ def launchd_plist(
             str(uv),
             "run",
             "--no-sync",
-            "--active",
             "--env-file",
             str(env_file),
-            "python",
+            str(worktree / PINNED_ENVIRONMENT / "bin" / "python"),
             str(worktree / THIS_SCRIPT),
             "--runtime-dir",
             str(runtime_dir),
@@ -1596,8 +1831,7 @@ def launchd_plist(
         ],
         "WorkingDirectory": str(worktree),
         "EnvironmentVariables": {
-            "PYTHONPATH": str(worktree / "src"),
-            "VIRTUAL_ENV": str(venv),
+            "UV_PROJECT_ENVIRONMENT": str(worktree / PINNED_ENVIRONMENT),
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
         },
         "StartCalendarInterval": [
@@ -1649,8 +1883,9 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
         type=Path,
         default=None,
         metavar="DIR",
-        help="Create or move a detached worktree at the registration's commit, print the commit "
-        "and exit. The scheduled run stands there.",
+        help="Create or move a detached worktree at the registration's commit, sync its own "
+        "environment (<DIR>/.venv) offline from its uv.lock, print the commit and exit. The "
+        "scheduled run stands there.",
     )
     parser.add_argument(
         "--launchd-plist",
@@ -1662,17 +1897,17 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
     )
     parser.add_argument("--worktree", type=Path, default=None, help="The pinned worktree.")
     parser.add_argument("--env-file", type=Path, default=None, help="Default: <repo>/.env.")
-    parser.add_argument("--venv", type=Path, default=None, help="Default: <repo>/.venv.")
     parser.add_argument("--uv", type=Path, default=None, help="Default: the uv on PATH.")
     arguments = parser.parse_args(argv)
+    uv = (arguments.uv or Path(shutil.which("uv") or "uv")).resolve()
     try:
         if arguments.pin_worktree is not None:
+            directory = arguments.pin_worktree.resolve()
             commit = pin_worktree(
-                arguments.registration.resolve(),
-                arguments.repo.resolve(),
-                arguments.pin_worktree.resolve(),
+                arguments.registration.resolve(), arguments.repo.resolve(), directory
             )
-            print(f"pinned {arguments.pin_worktree.resolve()} at {commit}")
+            environment = sync_pinned_environment(directory, uv=uv)
+            print(f"pinned {directory} at {commit}; environment {environment} synced offline")
             return int(DailyExit.done)
     except StepFailedError as error:
         print(str(error), file=sys.stderr)
@@ -1682,7 +1917,6 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
     if arguments.launchd_plist is not None:
         if arguments.worktree is None:
             parser.error("--launchd-plist needs --worktree, the checkout pinned by --pin-worktree")
-        uv = arguments.uv or Path(shutil.which("uv") or "uv")
         repo = arguments.repo.resolve()
         print(
             launchd_plist(
@@ -1690,8 +1924,7 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
                 runtime_dir=arguments.runtime_dir.resolve(),
                 log_dir=arguments.launchd_plist.resolve(),
                 env_file=(arguments.env_file or repo / ".env").resolve(),
-                venv=(arguments.venv or repo / ".venv").resolve(),
-                uv=uv.resolve(),
+                uv=uv,
             ),
             end="",
         )
