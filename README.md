@@ -325,6 +325,10 @@ uv run openalpha panel build --dataset income --year 2024 --subject 000001.SZ
 # 多年：--year 可重复，或用闭区间 --start/--end；年份由老到新依次构建
 uv run openalpha panel build --dataset trade_cal --dataset price --start 2015 --end 2026 --resume
 
+# 年内日更：会话级目标只取已存最后一个会话（重叠一日）起的会话，其余从库里带出
+uv run openalpha panel build --dataset trade_cal --dataset stock_basic --dataset adj_factor \
+  --dataset price --dataset stk_limit --year 2026 --incremental
+
 # 体检：--json 输出与 REST/SDK 面序列化同一个 PanelHealthReport
 uv run openalpha panel doctor --dataset daily --year 2026 --session 2026-01-16 --json
 
@@ -408,6 +412,13 @@ uv run openalpha data-check --dataset daily --dataset adj_factor --year 2026 \
   `--subject` 缩窄过的年份会一直是窄的。`trade_cal`、`stock_basic`、`namechange` 与三个跨年目标
   永不跳过（前三个各一次请求）。**年内没有断点续传**：分区是整体写入、没有追加，
   半年份只能落成第二套磁盘格式，而它最坏的失败形态正是「看起来完整的半截」。
+- **`--incremental` 是年内日更，结果与同一 `--as-of` 的全量重建逐字节相同（`V2-P6-003`）。**
+  `adj_factor`、`price`、`stk_limit` 只取已存分区最后一个会话起的会话（那个会话重取一次，
+  让记录为 `valuation_contradicts_unconfirmed_bar` 的行按下一会话的 `pre_close` 重判），更早的
+  会话连同本目标拥有的 `upstream_defects` 行从库里带出、按本次构建的时刻重新盖戳，再整分区
+  写回；`index_weight` 从最新已存月份起取。已存分区有洞、已越过本次地平线、或登记簿改了某条
+  `bar_before_listing` 所依据的上市日时，在取数之前按名拒绝，并给出可直接执行的全量命令。
+  离线全尺寸实测（190 会话 × 5,500 证券）：27 次请求对 952 次。财报目标仍整年扫描。
 - 凭证不经过 CLI：`TushareProvider` 在自己的构造函数里解析 `TUSHARE_TOKEN`，
   `ProviderFailure` 的原始消息（可能带着 token 或整条 query string）永不打印、永不入日志。
 

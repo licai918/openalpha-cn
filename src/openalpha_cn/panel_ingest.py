@@ -1452,6 +1452,7 @@ def carry_stored_rows_forward(
     *,
     year: int,
     retain: Callable[[Mapping[str, object]], bool],
+    observed_at: datetime | None = None,
 ) -> ColumnarPanelBatch:
     """`batch` with the stored partition's own rows in front of it, wherever `retain` says so.
 
@@ -1522,36 +1523,125 @@ def carry_stored_rows_forward(
     round -- `_manifest_cells`' "refusing the wrong width" one plane over, for the same reason.
     Two column lists in one partition have no aligned row block, and the remedy is the one the
     drop guard already names: supersede the builds written under the old shape.
+
+    ## Two additions for a fetched dataset (`V2-P6-003`)
+
+    `carry_stored_sessions_forward` uses this function for the incremental panel build, and a
+    fetched year needs two things a derived one did not:
+
+    - **`batch` may be a `no_data` batch.** A slice of sessions can fetch nothing at all --
+      `suspend_d` publishes no row on a session without halts -- and the stored rows still have
+      to come back. The column shape is then the stored partition's own (`coverage.fields`),
+      the provider and kind its coverage record's, and the carried rows are returned on their
+      own rather than merged into a batch that has none.
+    - **`observed_at` re-observes the carried rows**: their `ingested_time` becomes
+      `max(observed_at, available_time)`, which is what a re-fetch stamped at `observed_at`
+      gives the same row, and the smallest value `TimelineColumns` accepts at that stamp. It can
+      make a row visible later, never earlier. `None`, the default, keeps the stored clocks,
+      which is what every derived-plane caller wants.
     """
     coverage = store.read_coverage(batch.dataset, year)
     if coverage is None:
         return batch
-    names = tuple(column.name for column in batch.storage_columns())
+    arriving = batch.status == "success"
+    shape: tuple[tuple[str, PanelColumnKind], ...] = (
+        tuple((column.name, column.kind) for column in batch.columns)
+        if arriving
+        else tuple(
+            (entry.name, cast(PanelColumnKind, entry.kind))
+            for entry in coverage.fields
+            if entry.name not in RESERVED_COLUMN_NAMES
+        )
+    )
+    names = (SUBJECT_COLUMN_NAME, *CLOCK_COLUMN_NAMES, *(name for name, _ in shape))
     stored = store.query(batch.dataset, year=year, columns=names)
     kept = [row for row in stored if retain(dict(zip(names, row, strict=True)))]
     if not kept:
         return batch
     held = {name: tuple(row[index] for row in kept) for index, name in enumerate(names)}
+    clocks = {
+        name: tuple(cast(datetime, value) for value in held[name]) for name in CLOCK_COLUMN_NAMES
+    }
+    if observed_at is not None:
+        clocks["ingested_time"] = tuple(
+            max(observed_at, available) for available in clocks["available_time"]
+        )
     carried = ColumnarPanelBatch(
-        provider_id=batch.provider_id,
+        provider_id=batch.provider_id if arriving else coverage.provider_id,
         dataset=batch.dataset,
-        kind=batch.kind,
-        as_of=coverage.as_of,
-        fetched_at=coverage.fetched_at,
+        kind=batch.kind if arriving else coverage.kind,
+        as_of=coverage.as_of if observed_at is None else max(coverage.as_of, observed_at),
+        fetched_at=(
+            coverage.fetched_at if observed_at is None else max(coverage.fetched_at, observed_at)
+        ),
         status="success",
         subjects=tuple(str(value) for value in held[SUBJECT_COLUMN_NAME]),
-        timeline=TimelineColumns(
-            **{
-                name: tuple(cast(datetime, value) for value in held[name])
-                for name in CLOCK_COLUMN_NAMES
-            }
-        ),
-        columns=tuple(
-            PanelColumn(column.name, column.kind, held[column.name]) for column in batch.columns
-        ),
+        timeline=TimelineColumns(**clocks),
+        columns=tuple(PanelColumn(name, kind, held[name]) for name, kind in shape),
         source_uri=None,
     )
-    return merge_panel_batches((carried, batch))
+    return merge_panel_batches((carried, batch)) if arriving else carried
+
+
+def carry_stored_sessions_forward(
+    store: PanelStore,
+    batches: Sequence[ColumnarPanelBatch],
+    *,
+    dataset: str,
+    year: int,
+    before: date,
+    observed_at: datetime,
+    keep: Callable[[Mapping[str, object]], bool] | None = None,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> list[ColumnarPanelBatch]:
+    """`batches` with the stored `(dataset, year)` rows dated before `before` in front of them.
+
+    `V2-P6-003`, the incremental panel build: a session-scoped year is fetched again only from
+    `before` on, and every earlier session comes back out of the partition the last build
+    stored. This is `carry_stored_rows_forward` -- the same un-gated read, for the same reason
+    (nothing read is answered with; a point-in-time read would commit a partition missing the
+    withheld rows) -- with the session cut as its `retain` and two things a fetched dataset
+    needs that a derived one does not:
+
+    - **The carried rows are re-observed at `observed_at`**, the build's own stamp: their
+      `ingested_time` becomes `max(observed_at, available_time)`, the value a full rebuild at the
+      same `--as-of` gives every row it fetches (`providers.tushare._daily_close_timeline`), so
+      the incremental partition is byte-for-byte the full rebuild's. It can only move a row's
+      visibility later, never earlier -- the pin's own direction (`TushareProvider._stamp`).
+    - **The carried rows come back as a batch of their own**, in front of `batches` and in the
+      order they were stored, rather than merged into the first arriving one. The writers merge
+      them exactly as they merge a full build's per-session fetches, so the stored row order is
+      the full build's: every carried session, then every fetched one.
+
+    `keep` narrows the carry further (the defects record carries only its own sources). A
+    partition that is not stored, or that has no row before `before`, carries nothing and
+    `batches` come back unchanged. Session dates are the rows' own `event_time` in
+    `date_timezone`, which is the census every writer here keeps.
+    """
+    zone = _resolve_timezone(date_timezone)
+    coverage = store.read_coverage(dataset, year)
+    if coverage is None:
+        return list(batches)
+
+    def retain(row: Mapping[str, object]) -> bool:
+        event = cast(datetime, row[EVENT_TIME_COLUMN])
+        return event.astimezone(zone).date() < before and (keep is None or keep(row))
+
+    template = ColumnarPanelBatch(
+        provider_id=coverage.provider_id,
+        dataset=dataset,
+        kind=coverage.kind,
+        as_of=observed_at,
+        fetched_at=observed_at,
+        status="no_data",
+        no_data_reason=f"the stored {dataset} year={year} sessions before {before.isoformat()}",
+    )
+    carried = carry_stored_rows_forward(
+        store, template, year=year, retain=retain, observed_at=observed_at
+    )
+    if carried.status != "success":
+        return list(batches)
+    return [carried, *batches]
 
 
 def compress_adjustment_batch(batch: ColumnarPanelBatch) -> ColumnarPanelBatch:
@@ -1680,6 +1770,7 @@ def _refuse_missing_factor_sessions(
     year: int,
     *,
     date_timezone: str,
+    census_from: date | None = None,
 ) -> None:
     """Refuse a pre-compression batch that is missing a session the calendar reports open.
 
@@ -1728,7 +1819,12 @@ def _refuse_missing_factor_sessions(
     """
     _require_adjustment_batch(batch)
     census = _session_census(
-        batch, calendar, year, date_column=ADJUSTMENT_DATE_COLUMN, date_timezone=date_timezone
+        batch,
+        calendar,
+        year,
+        date_column=ADJUSTMENT_DATE_COLUMN,
+        date_timezone=date_timezone,
+        census_from=census_from,
     )
     if census is None:
         # The batch was fetched on 1 January of its own year, so no session in it had closed
@@ -1754,6 +1850,7 @@ def _session_census(
     *,
     date_column: str,
     date_timezone: str,
+    census_from: date | None = None,
 ) -> tuple[list[date], date, date] | None:
     """Which sessions the calendar reports open in `year` that `batch` does not carry.
 
@@ -1768,7 +1865,9 @@ def _session_census(
 
     The **lower** bound is the year's own start, not the batch's first row -- a partition that
     begins in March is exactly the failure this exists for, and clamping at its own first row
-    would define the hole out of existence.
+    would define the hole out of existence. `census_from` raises it for one caller only:
+    `write_adjustment_factors` in an incremental build, whose earlier sessions are carried out of
+    a compressed partition that was censused when it was written (see that writer).
 
     The **upper** bound is `_sessions_published_through(batch.fetched_at)`, and it is that
     function rather than arithmetic of its own (`V2-P4-114`). A session publishes at 16:30
@@ -1798,7 +1897,7 @@ def _session_census(
     that stops in June cannot testify about December.
     """
     zone = _resolve_timezone(date_timezone)
-    opens_on = date(year, 1, 1)
+    opens_on = date(year, 1, 1) if census_from is None else max(date(year, 1, 1), census_from)
     closes_on = min(date(year, 12, 31), _sessions_published_through(batch.fetched_at, zone))
     if closes_on < opens_on:
         return None
@@ -1823,6 +1922,7 @@ def write_adjustment_factors(
     *,
     calendar: TradingCalendar,
     date_timezone: str = DEFAULT_DATE_TIMEZONE,
+    census_from: date | None = None,
 ) -> PartitionRef:
     """Merge one year of factor cross sections, compress them, and write the partition.
 
@@ -1846,6 +1946,17 @@ def write_adjustment_factors(
 
     Guards 2 and 3 are the two halves of the same failure and neither substitutes for the
     other: a missing *security* makes the answer shorter, a missing *session* makes it wrong.
+
+    **`census_from` is the incremental build's (`V2-P6-003`), and it narrows guard 2 by exactly
+    the sessions that did not arrive as fetches.** An incremental build carries the sessions
+    before its slice out of this same stored partition, which is compressed -- its rows are the
+    step function's load-bearing ones, not a census -- so the merged batch cannot show every
+    session before the slice however complete the year is. Those sessions were censused when
+    the stored partition was written; `census_from` is the slice's first session, and the
+    census still requires every session from it on. Compressing the carried steps with the new
+    sessions again is exact, because a kept row is either an endpoint or a change
+    (`compress_adjustment_batch` is idempotent) and the slice starts at or before the stored
+    closing anchor. `None`, the default, is the whole-year census every full build runs.
     """
     # The dataset check belongs to `_require_adjustment_batch` and is called by both the
     # session census and `compress_adjustment_batch`; `merge_panel_batches` has already made
@@ -1853,7 +1964,9 @@ def write_adjustment_factors(
     merged = merge_panel_batches(batches)
     _require_adjustment_batch(merged)
     year = panel_partition_year(merged, date_timezone=date_timezone)
-    _refuse_missing_factor_sessions(merged, calendar, year, date_timezone=date_timezone)
+    _refuse_missing_factor_sessions(
+        merged, calendar, year, date_timezone=date_timezone, census_from=census_from
+    )
     compressed = compress_adjustment_batch(merged)
     _refuse_to_drop_stored_subjects(
         store,
