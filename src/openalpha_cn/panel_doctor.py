@@ -232,6 +232,7 @@ from openalpha_cn.panel.catalog import (
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_ingest import (
     UPSTREAM_DEFECTS_DATASET,
+    WITHDRAWN_ROWS_DATASETS,
     adjustment_requirement,
     daily_basic_requirement,
     daily_requirement,
@@ -256,6 +257,7 @@ from openalpha_cn.panel_ingest import (
     suspension_requirement,
     trading_calendar_requirement,
     upstream_defects_requirement,
+    withdrawn_rows_requirement,
 )
 
 
@@ -536,7 +538,10 @@ would let a level series go three weeks stale without a finding, which is three 
 named rule. Nothing publishes into it; it is rebuilt from each build's own drops. It takes the
 `derived` cadence by name in `freshness_policy`, as the factor planes take it by predicate, and
 `_requirement_for` answers it with `upstream_defects_requirement` -- so
-`panel doctor --dataset upstream_defects` reports on it rather than raising.
+`panel doctor --dataset upstream_defects` reports on it rather than raising. The five
+`withdrawn_*` datasets (`V2-P6-016`, `panel_ingest.WITHDRAWN_ROWS_DATASETS`) keep the rows that
+record calls withdrawn whole, and are treated the same way: `derived`, answered by
+`withdrawn_rows_requirement`, and an absent year is a year with no withdrawal.
 """
 
 
@@ -815,6 +820,18 @@ def freshness_policy(dataset: str, *, calendar: TradingCalendar | None = None) -
                 "about a schedule this plane does not own. What *can* go wrong with a derived "
                 "partition is that its rows stop being the ones its build manifest addresses, "
                 "and that is a check (factor_seal_broken) rather than a bound"
+            ),
+        )
+    if dataset in WITHDRAWN_ROWS_DATASETS.values():
+        return FreshnessPolicy(
+            dataset=dataset,
+            cadence="derived",
+            max_staleness=None,
+            basis=(
+                "this dataset keeps whole the stored rows the upstream withdrew after publishing "
+                "them (V2-P6-016), indexed by upstream_defects: nothing publishes into it, and a "
+                "year with no partition is a year with no withdrawal, so no staleness bound can be "
+                "right"
             ),
         )
     if dataset == UPSTREAM_DEFECTS_DATASET:
@@ -1468,6 +1485,8 @@ def _requirement_for(
         )
     if dataset == UPSTREAM_DEFECTS_DATASET:
         return upstream_defects_requirement(years=years, as_of=as_of), None
+    if dataset in WITHDRAWN_ROWS_DATASETS.values():
+        return withdrawn_rows_requirement(dataset, years=years, as_of=as_of), None
     if dataset == NAMECHANGE_DATASET:
         return name_history_requirement(years=years, as_of=as_of, max_staleness=max_staleness), None
     if dataset == ADJ_FACTOR_DATASET:
@@ -1608,7 +1627,8 @@ def _coverage_records(
 
 
 def _a_year_without_defects_is_not_missing(readiness: DatasetReadiness) -> DatasetReadiness:
-    """`upstream_defects` with its `partition_missing` issues removed (`V2-P6-013`).
+    """`upstream_defects` -- and a `withdrawn_*` dataset (`V2-P6-016`) -- with its
+    `partition_missing` issues removed (`V2-P6-013`).
 
     That record is rebuilt from each build's own drops and its partition is *removed* when a
     build drops nothing, so an absent year is a year whose build dropped nothing -- the answer,
@@ -1672,7 +1692,7 @@ def dataset_health(
         date_timezone=date_timezone,
     )
     readiness = store.assess_readiness(requirement)
-    if dataset == UPSTREAM_DEFECTS_DATASET:
+    if dataset == UPSTREAM_DEFECTS_DATASET or dataset in WITHDRAWN_ROWS_DATASETS.values():
         readiness = _a_year_without_defects_is_not_missing(readiness)
     findings = list(findings_from_readiness(readiness))
     if note is not None:

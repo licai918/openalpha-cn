@@ -49,8 +49,11 @@ from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET, SUSPENSION_DAT
 from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET
 from openalpha_cn.domain.trading_calendar import TRADING_CALENDAR_DATASET
 from openalpha_cn.panel.store import PanelStore
+from openalpha_cn.panel_doctor import panel_health_report
 from openalpha_cn.panel_ingest import (
     UPSTREAM_DEFECTS_DATASET,
+    WITHDRAWN_CONFIRMED_AT_COLUMN,
+    WITHDRAWN_ROWS_DATASETS,
     carry_stored_sessions_forward,
     load_upstream_defects,
 )
@@ -99,6 +102,9 @@ COMPARED: tuple[str, ...] = (
     PRICE_LIMIT_DATASET,
     UPSTREAM_DEFECTS_DATASET,
 )
+
+WITHDRAWN_ROWS: tuple[str, ...] = tuple(WITHDRAWN_ROWS_DATASETS.values())
+"""The `V2-P6-016` datasets that keep withdrawn rows whole, compared beside `COMPARED`."""
 
 FILLERS: tuple[str, ...] = tuple(f"{600000 + index}.SH" for index in range(20))
 NO_BAR_EARLY = "000022.SZ"
@@ -186,6 +192,12 @@ class Corpus:
     """`(api_name, code, session)`: rows the upstream served once and no longer serves."""
     republished_on_refetch: bool = False
     """The second whole-market request for a withdrawn row's session serves it again."""
+    traded: tuple[tuple[str, date], ...] = ()
+    """`(code, session)`: an extra `daily` bar and nothing else -- a security halted part of the
+    session, whose `suspend_d` row sits beside a bar."""
+    served_only: tuple[tuple[str, date, int], ...] = ()
+    """`(api_name, session, n)`: every whole-market answer for it carries only its first `n` rows
+    -- an outage (`n == 0`) or a short answer, the same on every request."""
 
 
 class ScriptedUpstream:
@@ -269,6 +281,9 @@ class ScriptedUpstream:
             )
         for code in self._once(DAILY_DATASET, day):
             rows.append([code, _compact(day), 5.0, 5.0, 5.0, 5.0, 5.0, 0.0, 1.0, 5.0])
+        for code, traded_on in self.corpus.traded:
+            if traded_on == day:
+                rows.append([code, _compact(day), 7.0, 7.0, 7.0, 7.0, 7.0, 0.0, 1.0, 7.0])
         return rows
 
     def _once(self, api_name: str, day: date) -> list[str]:
@@ -404,6 +419,10 @@ class ScriptedUpstream:
         again = self.corpus.republished_on_refetch and self.asked.get((api_name, day), 0) > 1
         if not again:
             rows = [row for row in rows if (api_name, row[0], day) not in self.corpus.withdrawn]
+        if "ts_code" not in params:
+            for name, short_on, keep in self.corpus.served_only:
+                if (name, short_on) == (api_name, day):
+                    rows = rows[:keep]
         return _response(fields, rows)
 
 
@@ -455,7 +474,7 @@ def run_build(
         output=result.output,
         stdout=result.stdout,
         upstream=upstream,
-        hashes=_hashes(runtime_dir),
+        hashes=_hashes(runtime_dir, (*COMPARED, *WITHDRAWN_ROWS)),
     )
 
 
@@ -777,14 +796,18 @@ WITHDRAWN: tuple[tuple[str, str, date], ...] = (
     *((api_name, code, T1_LAST) for api_name, code in ONCE),
     (PRICE_LIMIT_DATASET, PARTLY_WITHDRAWN, T1_LAST),
 )
-PUBLISHED = Corpus(once=ONCE)
+TRADED: tuple[tuple[str, date], ...] = ((WITHDRAWN_HALT, T1_LAST),)
+"""`WITHDRAWN_HALT` has a bar beside its halt row: a halt is withdrawn only against a bar."""
+PUBLISHED = Corpus(once=ONCE, traded=TRADED)
 """What the upstream served at `T1`."""
-WITHDRAWN_NOW = Corpus(once=ONCE, withdrawn=WITHDRAWN)
+WITHDRAWN_NOW = replace(PUBLISHED, withdrawn=WITHDRAWN)
 """What it serves from then on: the same corpus without the five rows on `T1_LAST`."""
 T3 = _as_of(SESSIONS[11])
 
 
 def _withdrawals(runtime_dir: Path, as_of: datetime = T2_INSTANT) -> set[tuple[str, str, date]]:
+    if YEAR not in _store(runtime_dir).registered_years(UPSTREAM_DEFECTS_DATASET):
+        return set()
     return {
         (d.ts_code, d.source_dataset, d.trade_date)
         for d in load_upstream_defects(_store(runtime_dir), years=(YEAR,), as_of=as_of)
@@ -823,7 +846,7 @@ def test_a_withdrawal_on_the_overlap_session_is_recorded_and_equals_a_full_rebui
         for d in load_upstream_defects(_store(tmp_path / "inc"), years=(YEAR,), as_of=T2_INSTANT)
     ]
     assert kinds.count("withdrawn_after_publication") == len(WITHDRAWN)
-    for name in COMPARED:
+    for name in (*COMPARED, *WITHDRAWN_ROWS):
         assert inc.hashes[name] is not None, name
         assert inc.hashes[name] == full.hashes[name], name
     for build in (inc, full):
@@ -872,7 +895,7 @@ def test_the_confirming_refetch_is_one_request_per_session_and_is_budgeted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """No `V2-P6-013` defect here, whose own whole-session re-fetch would ask again too."""
-    clean = Corpus(defects=False, once=ONCE)
+    clean = Corpus(defects=False, once=ONCE, traded=TRADED)
     stored = run_build(tmp_path, monkeypatch, as_of=T1, incremental=False, corpus=clean)
     assert stored.exit_code == PanelExit.ok, stored.output
 
@@ -926,7 +949,7 @@ def test_a_row_missing_from_a_carried_session_is_still_refused(
 
     def lossy(*args: Any, **kwargs: Any) -> list[Any]:
         carried = real(*args, **kwargs)
-        if kwargs.get("dataset") != PRICE_LIMIT_DATASET or len(carried) < 2:
+        if kwargs.get("dataset") != PRICE_LIMIT_DATASET or not carried:
             return carried
         first = carried[0]
         kept = [index for index, subject in enumerate(first.subjects) if subject != lost]
@@ -946,6 +969,10 @@ def test_a_row_missing_from_a_carried_session_is_still_refused(
     assert inc.exit_code == PanelExit.unhealthy, inc.output
     assert "would drop" in inc.output
     assert lost in inc.output
+    # The withdrawals it confirmed are not on the record: the write they belonged to was refused.
+    assert _withdrawals(tmp_path) == set()
+    assert _store(tmp_path).registered_years(WITHDRAWN_ROWS_DATASETS[PRICE_LIMIT_DATASET]) == ()
+    assert "WITHDRAWN" not in inc.output
 
 
 def test_a_withdrawal_is_carried_forward_and_retired_when_the_row_is_served_again(
@@ -971,7 +998,8 @@ def test_a_withdrawal_is_carried_forward_and_retired_when_the_row_is_served_agai
     for build in (inc, full):
         assert build.exit_code == PanelExit.ok, build.output
         assert json.loads(build.stdout)["builds"][0]["withdrawals"]["count"] == 0
-    for name in COMPARED:
+    for name in (*COMPARED, *WITHDRAWN_ROWS):
+        assert inc.hashes[name] is not None, name
         assert inc.hashes[name] == full.hashes[name], name
     for name in ("store", "full"):
         assert _withdrawals(tmp_path / name, t3) == expected
@@ -990,6 +1018,8 @@ def test_a_withdrawal_is_carried_forward_and_retired_when_the_row_is_served_agai
     )
     assert again.exit_code == PanelExit.ok, again.output
     assert _withdrawals(tmp_path / "republished", t3) == set()
+    for dataset in WITHDRAWN_ROWS:
+        assert _store(tmp_path / "republished").registered_years(dataset) == (), dataset
     subjects = {
         row[0]
         for row in _store(tmp_path / "republished").query(
@@ -1018,6 +1048,279 @@ def test_an_incremental_build_refuses_a_withdrawn_closing_factor_the_slice_canno
     assert inc.exit_code == PanelExit.unhealthy, inc.output
     assert gone in inc.output
     assert "closing observation" in inc.output
+    assert "WITHDRAWN" not in inc.output
+    assert _withdrawals(tmp_path / "inc") == set()
     rebuilt = run_build(tmp_path / "inc", monkeypatch, as_of=T2, incremental=False, corpus=stopped)
     assert rebuilt.exit_code == PanelExit.ok, rebuilt.output
     assert (gone, ADJ_FACTOR_DATASET, T1_LAST) in _withdrawals(tmp_path / "inc")
+
+
+# --- review round 1 (`V2-P6-016`) --------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("served", "shape"),
+    [
+        pytest.param(0, "answered no_data", id="an-empty-answer-twice"),
+        pytest.param(2, "served 2 row(s)", id="a-thin-answer-twice"),
+    ],
+)
+def test_an_empty_or_thin_session_confirms_no_withdrawal_however_often_it_repeats(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, served: int, shape: str
+) -> None:
+    """An outage answers the second request as it answered the first. Twenty-five stored bands
+    are not withdrawn because `stk_limit` served none (or two) of them twice: refused by name,
+    before any confirming request, with nothing recorded."""
+    clean = Corpus(defects=False)
+    stored = run_build(tmp_path, monkeypatch, as_of=T1, incremental=False, corpus=clean)
+    assert stored.exit_code == PanelExit.ok, stored.output
+    before = _hashes(tmp_path, (*COMPARED, *WITHDRAWN_ROWS))
+
+    inc = run_build(
+        tmp_path,
+        monkeypatch,
+        as_of=T2,
+        incremental=True,
+        corpus=replace(clean, served_only=((PRICE_LIMIT_DATASET, T1_LAST, served),)),
+    )
+
+    assert inc.exit_code == PanelExit.unhealthy, inc.output
+    assert shape in inc.output
+    assert "MIN_SESSION_ROW_SHARE" in inc.output
+    assert inc.upstream.asked[(PRICE_LIMIT_DATASET, T1_LAST)] == 1
+    assert "withdrawal-confirmation" not in inc.output
+    # `stk_limit` is the last target, so only its partitions are sure to be untouched.
+    untouched = (PRICE_LIMIT_DATASET, UPSTREAM_DEFECTS_DATASET, *WITHDRAWN_ROWS)
+    assert _hashes(tmp_path, untouched) == {name: before[name] for name in untouched}
+    assert _withdrawals(tmp_path) == set()
+
+
+HALTED_WITHOUT_A_BAR = replace(PUBLISHED, traded=())
+"""`WITHDRAWN_HALT` halted all of `T1_LAST`, with no bar."""
+
+
+@pytest.mark.parametrize(
+    "corpus",
+    [
+        pytest.param(
+            replace(HALTED_WITHOUT_A_BAR, served_only=((SUSPENSION_DATASET, T1_LAST, 0),)),
+            id="an-empty-halt-answer-twice",
+        ),
+        pytest.param(
+            replace(HALTED_WITHOUT_A_BAR, withdrawn=WITHDRAWN), id="a-halt-withdrawn-with-no-bar"
+        ),
+    ],
+)
+def test_a_halt_is_withdrawn_only_against_the_securitys_own_bar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, corpus: Corpus
+) -> None:
+    """`suspend_d` publishes an empty session whenever nothing is halted, so an empty answer --
+    twice -- says nothing about the halts stored there. A withdrawn halt needs the security's bar
+    on that session; without it the year is refused, naming the security."""
+    stored = run_build(
+        tmp_path, monkeypatch, as_of=T1, incremental=False, corpus=HALTED_WITHOUT_A_BAR
+    )
+    assert stored.exit_code == PanelExit.ok, stored.output
+    halts = (SUSPENSION_DATASET, WITHDRAWN_ROWS_DATASETS[SUSPENSION_DATASET])
+    before = _hashes(tmp_path, halts)
+
+    inc = run_build(tmp_path, monkeypatch, as_of=T2, incremental=True, corpus=corpus)
+
+    assert inc.exit_code == PanelExit.unhealthy, inc.output
+    assert WITHDRAWN_HALT in inc.output
+    assert "no daily bar" in inc.output
+    assert _hashes(tmp_path, halts) == before
+    assert not any(code == WITHDRAWN_HALT for code, _, _ in _withdrawals(tmp_path))
+
+
+def test_a_record_a_refused_build_left_behind_is_not_duplicated_or_carried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The state the first cut of this issue could leave: the record written, then the writer
+    refused, so the row is still stored beside a record of its withdrawal. The next build that
+    confirms the withdrawal keeps exactly one record, and the stale one is not carried."""
+    once = ((PRICE_LIMIT_DATASET, WITHDRAWN_LIMIT),)
+    clean = Corpus(defects=False, once=once)
+    stored = run_build(tmp_path, monkeypatch, as_of=T1, incremental=False, corpus=clean)
+    assert stored.exit_code == PanelExit.ok, stored.output
+    gone = replace(clean, withdrawn=((PRICE_LIMIT_DATASET, WITHDRAWN_LIMIT, T1_LAST),))
+    real = cli.write_price_limits
+
+    def refused_after_its_record(*args: Any, **kwargs: Any) -> Any:
+        kwargs["before_write"]()
+        raise PanelBatchError("refused after the record was written")
+
+    monkeypatch.setattr(cli, "write_price_limits", refused_after_its_record)
+    broken = run_build(tmp_path, monkeypatch, as_of=T2, incremental=True, corpus=gone)
+    assert broken.exit_code == PanelExit.unhealthy, broken.output
+    assert _withdrawals(tmp_path) == {(WITHDRAWN_LIMIT, PRICE_LIMIT_DATASET, T1_LAST)}
+    limits = _store(tmp_path).query(PRICE_LIMIT_DATASET, year=YEAR, columns=("subject",))
+    assert (WITHDRAWN_LIMIT,) in limits  # the row the record calls withdrawn is still stored
+    monkeypatch.setattr(cli, "write_price_limits", real)
+
+    again = run_build(tmp_path, monkeypatch, as_of=T2, incremental=True, corpus=gone)
+
+    assert again.exit_code == PanelExit.ok, again.output
+    records = [
+        row
+        for row in _store(tmp_path).query(
+            UPSTREAM_DEFECTS_DATASET, year=YEAR, columns=("subject", "defect_kind")
+        )
+        if row == (WITHDRAWN_LIMIT, "withdrawn_after_publication")
+    ]
+    assert len(records) == 1
+    kept = _store(tmp_path).query(
+        WITHDRAWN_ROWS_DATASETS[PRICE_LIMIT_DATASET], year=YEAR, columns=("subject",)
+    )
+    assert kept == [(WITHDRAWN_LIMIT,)]
+
+
+def test_a_republication_on_a_carried_session_is_seen_by_an_incremental_build_as_by_a_full_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The withdrawals sit on `T1_LAST`, before `T3`'s slice. The incremental build asks those
+    `(dataset, session)` pairs again -- one request each, budgeted -- so it retires the records
+    and stores the rows again exactly as the full build from the same store does."""
+    _stored_at_t1(tmp_path, monkeypatch, "store")
+    confirmed = run_build(
+        tmp_path / "store", monkeypatch, as_of=T2, incremental=True, corpus=WITHDRAWN_NOW
+    )
+    assert confirmed.exit_code == PanelExit.ok, confirmed.output
+    shutil.copytree(tmp_path / "store", tmp_path / "full")
+    t3 = datetime.fromisoformat(T3)
+
+    inc = run_build(tmp_path / "store", monkeypatch, as_of=T3, incremental=True, corpus=PUBLISHED)
+    full = run_build(tmp_path / "full", monkeypatch, as_of=T3, incremental=False, corpus=PUBLISHED)
+
+    assert inc.exit_code == PanelExit.ok, inc.output
+    assert full.exit_code == PanelExit.ok, full.output
+    for name in (*COMPARED, *WITHDRAWN_ROWS):
+        assert inc.hashes[name] == full.hashes[name], name
+    assert _withdrawals(tmp_path / "store", t3) == set()
+    for api_name in SESSION_APIS:
+        # Asked again once, and then exactly as the full build asks it: `daily` and `daily_basic`
+        # are asked a second time by the `V2-P6-013` re-fetch of that session's disputes.
+        assert f"BUDGET withdrawal-recheck {api_name} 1 requests" in inc.output, api_name
+        assert inc.upstream.asked[(api_name, T1_LAST)] == full.upstream.asked[(api_name, T1_LAST)]
+    assert inc.upstream.asked[(PRICE_LIMIT_DATASET, T1_LAST)] == 1
+    subjects = {
+        row[0]
+        for row in _store(tmp_path / "store").query(
+            PRICE_LIMIT_DATASET, year=YEAR, columns=("subject",)
+        )
+    }
+    assert {WITHDRAWN_LIMIT, PARTLY_WITHDRAWN} <= subjects
+
+
+def test_more_carried_withdrawals_than_the_daily_budget_allows_are_refused_with_the_full_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stored_at_t1(tmp_path, monkeypatch, "store")
+    confirmed = run_build(
+        tmp_path / "store", monkeypatch, as_of=T2, incremental=True, corpus=WITHDRAWN_NOW
+    )
+    assert confirmed.exit_code == PanelExit.ok, confirmed.output
+    monkeypatch.setattr(cli, "WITHDRAWAL_RECHECK_LIMIT", 4)
+
+    inc = run_build(
+        tmp_path / "store", monkeypatch, as_of=T3, incremental=True, corpus=WITHDRAWN_NOW
+    )
+
+    assert inc.exit_code == PanelExit.unhealthy, inc.output
+    assert "WITHDRAWAL_RECHECK_LIMIT" in inc.output
+    assert "openalpha panel build" in inc.output
+    assert inc.upstream.session_requests() == []
+
+
+def test_each_withdrawn_row_is_kept_whole_with_its_clocks_and_confirmation_instant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stored_at_t1(tmp_path, monkeypatch, "inc")
+    store = _store(tmp_path / "inc")
+    clocks = ("event_time", "available_time", "ingested_time", "revision_time")
+    shapes = {
+        PRICE_LIMIT_DATASET: (WITHDRAWN_LIMIT, ("trade_date", "up_limit", "down_limit")),
+        ADJ_FACTOR_DATASET: (WITHDRAWN_PRICE, ("factor_date", "adj_factor")),
+        SUSPENSION_DATASET: (WITHDRAWN_HALT, ("trade_date", "suspend_type", "suspend_timing")),
+        DAILY_DATASET: (WITHDRAWN_PRICE, ("trade_date", "open", "close", "pre_close", "amount")),
+        DAILY_BASIC_DATASET: (WITHDRAWN_PRICE, ("trade_date", "close", "total_mv")),
+    }
+    before = {
+        source: [
+            row[1:]
+            for row in store.query(source, year=YEAR, columns=("subject", *columns, *clocks))
+            if row[0] == code
+        ]
+        for source, (code, columns) in shapes.items()
+    }
+
+    inc = run_build(tmp_path / "inc", monkeypatch, as_of=T2, incremental=True, corpus=WITHDRAWN_NOW)
+
+    assert inc.exit_code == PanelExit.ok, inc.output
+    for source, (code, columns) in shapes.items():
+        kept = [
+            row[1:]
+            for row in store.query(
+                WITHDRAWN_ROWS_DATASETS[source],
+                year=YEAR,
+                columns=("subject", *columns, *clocks, WITHDRAWN_CONFIRMED_AT_COLUMN),
+            )
+            if row[0] == code
+        ]
+        assert [row[:-1] for row in kept] == before[source], source
+        assert [row[-1] for row in kept] == [T2_INSTANT], source
+
+
+def test_a_build_with_no_withdrawal_stores_and_asks_exactly_what_it_did_before(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pinned against the build before `V2-P6-016` (`d5176c5`), run on this corpus: the same
+    partition bytes and the same request count, at `T1` and incrementally at `T2`."""
+    first = run_build(tmp_path, monkeypatch, as_of=T1, incremental=False)
+    assert first.exit_code == PanelExit.ok, first.output
+    assert len(first.upstream.payloads) == 36
+    assert {name: first.hashes[name] for name in COMPARED} == BEFORE_V2_P6_016_AT_T1
+    inc = run_build(tmp_path, monkeypatch, as_of=T2, incremental=True)
+    assert inc.exit_code == PanelExit.ok, inc.output
+    assert len(inc.upstream.payloads) == 36
+    assert {name: inc.hashes[name] for name in COMPARED} == BEFORE_V2_P6_016_AT_T2
+    assert all(inc.hashes[name] is None for name in WITHDRAWN_ROWS)
+    assert "withdrawal-" not in inc.output
+
+
+BEFORE_V2_P6_016_AT_T1: dict[str, str | None] = {
+    DAILY_DATASET: "f6c5c73c2512c5a2bb0ab38b06ff1178da0b993a272e10f843bc180cc7c14543",
+    DAILY_BASIC_DATASET: "b5a2be96311ed5c2f31354eb69391f7c9968acb261599f7b8297823cb0b3faa9",
+    SUSPENSION_DATASET: "8d5fa9199cc14fb0ecddbf9def87a7d5856383f2b1d04d0e07bd6fefbaf0c285",
+    ADJ_FACTOR_DATASET: "2a6465b7be21478e733f61e1a2d91aebcd6f0914a198d31ce1f848139b38183c",
+    PRICE_LIMIT_DATASET: "65542ca3da0f6226dfc0ea355cb7a43819fecd17697e54776279ccbacee77b62",
+    UPSTREAM_DEFECTS_DATASET: "30240f6ba29b758756ec1d2bf67a12c2784ee2dd0a09e14ea7c7027c2345bdfc",
+}
+"""Measured by running this module's `run_build` on the base commit `d5176c5`."""
+BEFORE_V2_P6_016_AT_T2: dict[str, str | None] = {
+    DAILY_DATASET: "feae26489df535ee1d5c2fd8bf64166b0761ee4e0e00a10169261b67d5c343be",
+    DAILY_BASIC_DATASET: "094f7ea0b479e48e8b8276c6abc5cb8a0fd8e80e46dd8e402f9a34e8c1852fd2",
+    SUSPENSION_DATASET: "4b956b47a2d6c8fa2250f99b5d51e3ba916ac0c1f1e05dddc8955acfd18f81e0",
+    ADJ_FACTOR_DATASET: "0117628270cf9e6d49209028e45c53fe002a56a3579f39a0fff25145912e0bc8",
+    PRICE_LIMIT_DATASET: "40d0618aafcebcbf633e98bed5fdb7e07b3174c1028643d1acf43041dbc19ffd",
+    UPSTREAM_DEFECTS_DATASET: "baae6017b11eae62b693fc490113fa55acfc83a866b519f8e8112837bb89cc10",
+}
+
+
+def test_panel_doctor_answers_for_the_withdrawn_rows_rather_than_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stored_at_t1(tmp_path, monkeypatch, "inc")
+    inc = run_build(tmp_path / "inc", monkeypatch, as_of=T2, incremental=True, corpus=WITHDRAWN_NOW)
+    assert inc.exit_code == PanelExit.ok, inc.output
+
+    report = panel_health_report(
+        _store(tmp_path / "inc"), as_of=T2_INSTANT, datasets=WITHDRAWN_ROWS, years=(YEAR, YEAR - 1)
+    )
+
+    for dataset in WITHDRAWN_ROWS:
+        health = report.dataset(dataset)
+        assert health.freshness.cadence == "derived", dataset
+        assert health.is_ready, dataset
+    # A year with no partition is a year with no withdrawal, not a missing one.
+    assert "partition_missing" not in report.codes()

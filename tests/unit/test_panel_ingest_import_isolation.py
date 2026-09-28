@@ -348,6 +348,9 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             # A derived record rather than an upstream dataset, so it reaches no fetched data.
             "panel_ingest.UPSTREAM_DEFECTS_DATASET",
             "panel_ingest.upstream_defects_requirement",
+            # `V2-P6-016`: the datasets keeping withdrawn rows whole, answered the same way.
+            "panel_ingest.WITHDRAWN_ROWS_DATASETS",
+            "panel_ingest.withdrawn_rows_requirement",
         }
     ),
     "openalpha_cn.panel_gate": frozenset(

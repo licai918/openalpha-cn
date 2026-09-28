@@ -22,13 +22,20 @@ ROOT = Path(__file__).resolve().parents[3]
 SOURCE = ROOT / "src" / "openalpha_cn"
 
 REMOVE_PARTITION_CALLERS: frozenset[tuple[str, str]] = frozenset(
-    {("panel_ingest.py", "write_upstream_defects")}
+    {
+        ("panel_ingest.py", "write_upstream_defects"),
+        ("panel_ingest.py", "write_withdrawn_rows"),
+    }
 )
 """Every `src/` function allowed to call `remove_partition`, as `(file, function)`.
 
 `write_upstream_defects` rebuilds the defects record from the drops the current build performs,
-and a year whose build dropped nothing has to be able to become empty. No other writer removes
-anything: a price, factor or registry partition is replaced whole or refused, never deleted.
+and a year whose build dropped nothing has to be able to become empty. `write_withdrawn_rows`
+(`V2-P6-016`) keeps the withdrawn rows that record indexes, under the same rule: when the last
+withdrawal of a year is retired -- its row served again -- the partition must become empty with
+its index, or it would claim a withdrawal the stored data no longer reflects. No other writer
+removes anything: a price, factor or registry partition is replaced whole or refused, never
+deleted.
 """
 
 
@@ -53,7 +60,7 @@ def _callers() -> set[tuple[str, str]]:
 def test_only_the_defects_writer_removes_a_partition() -> None:
     assert _callers() == set(REMOVE_PARTITION_CALLERS), (
         "PanelStore.remove_partition is the store's only delete and is granted to the defects "
-        "record alone; a new caller has to be argued for here"
+        "record and the withdrawn rows it indexes alone; a new caller has to be argued for here"
     )
 
 

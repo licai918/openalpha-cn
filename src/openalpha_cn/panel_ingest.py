@@ -307,10 +307,12 @@ straddles a year boundary, is answered with an error instead of a silent choice.
 """
 
 import operator
+from bisect import bisect_right
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence, Set
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
+from itertools import pairwise
 from statistics import median
 from types import MappingProxyType
 from typing import Final, cast
@@ -1612,6 +1614,7 @@ def carry_stored_sessions_forward(
     observed_at: datetime,
     keep: Callable[[Mapping[str, object]], bool] | None = None,
     date_timezone: str = DEFAULT_DATE_TIMEZONE,
+    skip: Set[date] = frozenset(),
 ) -> list[ColumnarPanelBatch]:
     """`batches` with the stored `(dataset, year)` rows dated before `before` in front of them.
 
@@ -1647,7 +1650,10 @@ def carry_stored_sessions_forward(
       them exactly as they merge a full build's per-session fetches, so the stored row order is
       the full build's: every carried session, then every fetched one.
 
-    `keep` narrows the carry further (the defects record carries only its own sources). A
+    `keep` narrows the carry further (the defects record carries only its own sources), and
+    `skip` names sessions before `before` that are not carried because the build asks for them
+    again (`V2-P6-016`: the sessions holding a carried withdrawal; `interleave_sessions` puts the
+    new answers back in session order). A
     partition that is not stored, or that has no row before `before`, carries nothing and
     `batches` come back unchanged. Session dates are the rows' own `event_time` in
     `date_timezone`, which is the census every writer here keeps.
@@ -1658,8 +1664,8 @@ def carry_stored_sessions_forward(
         return list(batches)
 
     def retain(row: Mapping[str, object]) -> bool:
-        event = cast(datetime, row[EVENT_TIME_COLUMN])
-        return event.astimezone(zone).date() < before and (keep is None or keep(row))
+        day = cast(datetime, row[EVENT_TIME_COLUMN]).astimezone(zone).date()
+        return day < before and day not in skip and (keep is None or keep(row))
 
     template = ColumnarPanelBatch(
         provider_id=coverage.provider_id,
@@ -1966,8 +1972,14 @@ def write_adjustment_factors(
     date_timezone: str = DEFAULT_DATE_TIMEZONE,
     census_from: date | None = None,
     released: Set[str] = frozenset(),
+    before_write: Callable[[], None] | None = None,
 ) -> PartitionRef:
     """Merge one year of factor cross sections, compress them, and write the partition.
+
+    `before_write` (`V2-P6-016`) runs after every guard here has passed and immediately before
+    the partition is written: the caller stores there the record of the rows this write no
+    longer holds, so that record is on disk before the rows leave and is never written for a
+    write these guards refuse.
 
     Takes a *sequence* of batches where every other writer here takes one, and the reason is
     the arithmetic rather than a preference: an `adj_factor` request is one trading day of the
@@ -2021,6 +2033,8 @@ def write_adjustment_factors(
         ),
         released=released,
     )
+    if before_write is not None:
+        before_write()
     return write_panel_batch(store, compressed, year=year, date_timezone=date_timezone)
 
 
@@ -2514,6 +2528,7 @@ def write_daily_panel(
     halts: Mapping[date, SuspensionDay] | None,
     date_timezone: str = DEFAULT_DATE_TIMEZONE,
     released: Mapping[str, Set[str]] | None = None,
+    before_write: Callable[[], None] | None = None,
 ) -> tuple[PartitionRef, PartitionRef]:
     """Write one year of `daily` and `daily_basic` cross sections as two partitions (`V2-P1-007`).
 
@@ -2552,7 +2567,8 @@ def write_daily_panel(
        leave the two partitions disagreeing about which names the year covers, and guard 4
        cannot catch that direction because a bar with no valuation is the measured, tolerated
        shape of every pre-2024 year. `released`, keyed by dataset, names the securities whose
-       every stored row the upstream withdrew (`V2-P6-016`; see the guard).
+       every stored row the upstream withdrew (`V2-P6-016`; see the guard), and
+       `before_write` runs once all six have passed, before either partition is written.
     6. `_refuse_unexplained_thin_sessions`, when `halts` is not `None`, refuses a session whose
        missing bars are not accounted for by that day's whole-day halts. This is guard 3 with
        the reason for its low threshold removed -- see below.
@@ -2633,6 +2649,8 @@ def write_daily_panel(
             remedy=remedy,
             released=(released or {}).get(merged.dataset, frozenset()),
         )
+    if before_write is not None:
+        before_write()
     return (
         write_panel_batch(store, merged_bars, year=year, date_timezone=date_timezone),
         write_panel_batch(store, merged_fundamentals, year=year, date_timezone=date_timezone),
@@ -3216,8 +3234,14 @@ def write_suspensions(
     *,
     date_timezone: str = DEFAULT_DATE_TIMEZONE,
     released: Set[str] = frozenset(),
+    before_write: Callable[[], None] | None = None,
 ) -> PartitionRef:
     """Write one year of `suspend_d` cross sections as a partition (`V2-P1-008`).
+
+    `before_write` (`V2-P6-016`) runs after every guard here has passed and immediately before
+    the partition is written: the caller stores there the record of the rows this write no
+    longer holds, so that record is on disk before the rows leave and is never written for a
+    write these guards refuse.
 
     A sequence for `write_adjustment_factors`' reason -- one request is one session and one
     partition is a year -- and it is the *cheap* one of this issue's two datasets: 28 rows on
@@ -3271,6 +3295,8 @@ def write_suspensions(
         ),
         released=released,
     )
+    if before_write is not None:
+        before_write()
     return write_panel_batch(store, merged, year=year, date_timezone=date_timezone)
 
 
@@ -3374,8 +3400,14 @@ def write_price_limits(
     calendar: TradingCalendar,
     date_timezone: str = DEFAULT_DATE_TIMEZONE,
     released: Set[str] = frozenset(),
+    before_write: Callable[[], None] | None = None,
 ) -> PartitionRef:
     """Write one year of `stk_limit` cross sections as a partition (`V2-P1-008`).
+
+    `before_write` (`V2-P6-016`) runs after every guard here has passed and immediately before
+    the partition is written: the caller stores there the record of the rows this write no
+    longer holds, so that record is on disk before the rows leave and is never written for a
+    write these guards refuse.
 
     The price panel's guards apply here almost unchanged, because this dataset has the price
     panel's shape: every open session publishes a band, the counts are stable within a year, and
@@ -3419,6 +3451,8 @@ def write_price_limits(
         ),
         released=released,
     )
+    if before_write is not None:
+        before_write()
     return write_panel_batch(store, merged, year=year, date_timezone=date_timezone)
 
 
@@ -4110,6 +4144,37 @@ def _refuse_zero_upper_limits(batch: ColumnarPanelBatch) -> None:
 WITHDRAWN_KIND: Final[DefectKind] = "withdrawn_after_publication"
 """`V2-P6-016`'s kind, named once for the carry below and the CLI's report."""
 
+WITHDRAWN_ROWS_DATASETS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        DAILY_DATASET: "withdrawn_daily",
+        DAILY_BASIC_DATASET: "withdrawn_daily_basic",
+        SUSPENSION_DATASET: "withdrawn_suspend_d",
+        PRICE_LIMIT_DATASET: "withdrawn_stk_limit",
+        ADJ_FACTOR_DATASET: "withdrawn_adj_factor",
+    }
+)
+"""Where each source dataset's withdrawn rows are kept whole (`V2-P6-016`).
+
+The `upstream_defects` record is the index -- which row, which rule, when confirmed -- and it
+cannot hold a whole row: its columns are fixed, and a new column there would make every stored
+defects partition and the new build unreadable to each other (hard rule 3). A new dataset per
+source breaks no stored contract, so each withdrawn row is kept here **exactly as it was stored**:
+the source partition's own column projection (an `adj_factor` value, a halt's type and timing, a
+bar's every price), its four clocks, and `WITHDRAWN_CONFIRMED_AT_COLUMN`. One clock moves: when a
+later build carries the row its `ingested_time` becomes `max(build stamp, available_time)`, which
+is `V2-P6-003`'s convention for every carried row and what keeps an incremental build's bytes the
+full build's; the instant it was first confirmed stays in `WITHDRAWN_CONFIRMED_AT_COLUMN`.
+Written by `write_withdrawn_rows` under the same carry, retirement and incremental-equals-full
+rules as the index, and always before the source partition that no longer holds the row.
+
+Declared here beside `UPSTREAM_DEFECTS_DATASET`, for that constant's reason: these are written by
+this module, never fetched.
+"""
+
+WITHDRAWN_CONFIRMED_AT_COLUMN: Final[str] = "withdrawal_confirmed_at"
+"""The instant a build confirmed the withdrawal: the one column a `withdrawn_*` row adds to its
+source row."""
+
 WithdrawalRefetch = Callable[[tuple[date, ...]], Mapping[date, ColumnarPanelBatch]]
 """A second whole-session fetch of one dataset for each session named, keyed by session
 (`V2-P6-016`).
@@ -4121,24 +4186,40 @@ session -- a `no_data` answer is an empty session -- because it is compared with
 answer security for security. Injected for `PriceRefetch`'s reason.
 """
 
+AbsenceWitness = Callable[[str, date], bool]
+"""Whether something other than the halt corpus shows a security traded on a session: its bar in
+the `daily` year this build stores (`V2-P6-016`, `suspend_d` only)."""
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Withdrawals:
     """The stored rows of one dataset-year the upstream no longer serves, confirmed twice.
 
-    `record` is the `upstream_defects` batch `write_upstream_defects` stores -- one
-    `withdrawn_after_publication` row per withdrawn stored row -- and `None` exactly when `defects`
-    is empty. `released` are the securities every stored row of which was withdrawn, which the
-    dataset's writer is told so that its subject guard lets them go (`_refuse_to_drop_stored_
-    subjects`); a security with any other stored row is never in it.
+    `record` is the `upstream_defects` batch -- one `withdrawn_after_publication` row per
+    withdrawn stored row -- and `rows` the same rows whole, for `WITHDRAWN_ROWS_DATASETS`; both are
+    `None` exactly when `defects` is empty. `keys` are their `(subject, session)`s. `released` are
+    the securities every stored row of which was withdrawn, which the dataset's writer is told so
+    that its subject guard lets them go (`_refuse_to_drop_stored_subjects`); a security with any
+    other stored row is never in it. `still_stored` are the watched keys -- a stored withdrawal
+    record's -- whose row the stored partition still holds, a record that cannot be true.
     """
 
     defects: tuple[UpstreamDefect, ...]
     record: ColumnarPanelBatch | None
+    rows: ColumnarPanelBatch | None
+    keys: frozenset[tuple[str, date]]
     released: frozenset[str]
+    still_stored: frozenset[tuple[str, date]]
 
 
-NO_WITHDRAWALS: Final[Withdrawals] = Withdrawals(defects=(), record=None, released=frozenset())
+NO_WITHDRAWALS: Final[Withdrawals] = Withdrawals(
+    defects=(),
+    record=None,
+    rows=None,
+    keys=frozenset(),
+    released=frozenset(),
+    still_stored=frozenset(),
+)
 
 
 def reconcile_withdrawals(
@@ -4152,9 +4233,12 @@ def reconcile_withdrawals(
     confirmed_at: datetime,
     date_column: str = PRICE_DATE_COLUMN,
     date_timezone: str = DEFAULT_DATE_TIMEZONE,
+    watch: Set[tuple[str, date]] = frozenset(),
+    witness: AbsenceWitness | None = None,
 ) -> Withdrawals:
-    """Record every stored row of `(dataset, year)` the upstream has withdrawn, or refuse the year
-    (`V2-P6-016`).
+    """Find every stored row of `(dataset, year)` the upstream has withdrawn, or refuse the year
+    (`V2-P6-016`). Nothing is written here; the caller writes what this returns only once the
+    dataset's own partition is about to be written (see the writers' `before_write`).
 
     ## Why a row can disappear, and why it used to refuse the year
 
@@ -4172,26 +4256,36 @@ def reconcile_withdrawals(
 
     1. it sits on one of `sessions`, the sessions this build fetched again -- rows on any other
        session are carried or were never asked about, and this function never judges them;
-    2. `fetched`, the build's own answer for that session, lacks its key;
+    2. `fetched`, the build's own answer for that session, lacks its key, **and that answer is a
+       whole session**: an empty (`no_data`) answer, or one under `MIN_SESSION_ROW_SHARE` of the
+       rows the store holds on that session, is refused by name before any second request -- two
+       identical empty answers are an outage twice, not a mass withdrawal;
     3. a second whole-session fetch of the same `(dataset, session)` -- one request per affected
        session, asked through `refetch` -- lacks it too **and otherwise equals the first
        answer**. A second answer that differs, including one that serves the row again, is what a
-       partial fetch looks like, and the year is refused naming both answers; nothing is
-       recorded and nothing is written.
+       partial fetch looks like, and the year is refused naming both answers.
+
+    **`suspend_d`** publishes an empty session whenever nothing is halted, so an empty answer is
+    no evidence either way and rule 2's count cannot be applied to it. `witness` replaces it and
+    is stronger: every withdrawn halt must be contradicted by a positive fact -- the security's
+    bar on that session in the `daily` year this build stores -- or the year is refused naming
+    the security. A count threshold passes a short answer as long as it is not too short; this
+    passes no withdrawn halt at all without its own bar. (A non-empty but thin halt answer is
+    refused by rule 2 as well.)
 
     A confirmed withdrawal is recorded as `withdrawn_after_publication` with the stored row's own
     `event_time`, `available_time` and `ingested_time`, what the row said (`_row_numbers`), and
-    `confirmed_at` -- the build's stamp -- as its `revision_time`. Nothing is dropped here: the
-    upstream no longer serves the row, so the partition rebuilt from its answers cannot hold it.
-    What changes is that its absence is on the record and `released` lets the subject guard pass
-    a security whose **every** stored row went this way.
+    `confirmed_at` -- the build's stamp -- as its `revision_time`; `rows` holds the whole stored
+    row for `WITHDRAWN_ROWS_DATASETS`. Nothing is dropped here: the upstream no longer serves the
+    row, so the partition rebuilt from its answers cannot hold it. `released` lets the subject
+    guard pass a security whose **every** stored row went this way.
 
     ## The stored rows are read un-gated, through `carry_stored_rows_forward`
 
     One pass over the stored partition, for `carry_stored_rows_forward`'s own reason: nothing read
     is answered with -- the rows are compared with the upstream's answer and the withdrawn ones are
     copied into the record. The same pass notes every security with a stored row outside
-    `sessions`, which is what keeps such a security out of `released`.
+    `sessions`, which keeps it out of `released`, and every `watch` key still stored.
 
     `fetched` are the build's raw answers, before any reconciliation: a row the upstream serves
     and a `V2-P6-013` rule then drops is served, not withdrawn.
@@ -4202,12 +4296,16 @@ def reconcile_withdrawals(
         return NO_WITHDRAWALS
     zone = _resolve_timezone(date_timezone)
     elsewhere: set[str] = set()
+    still_stored: set[tuple[str, date]] = set()
 
     def on_a_refetched_session(row: Mapping[str, object]) -> bool:
         day = cast(datetime, row[EVENT_TIME_COLUMN]).astimezone(zone).date()
+        subject = str(row[SUBJECT_COLUMN_NAME])
+        if (subject, day) in watch:
+            still_stored.add((subject, day))
         if day in refetched:
             return True
-        elsewhere.add(str(row[SUBJECT_COLUMN_NAME]))
+        elsewhere.add(subject)
         return False
 
     template = ColumnarPanelBatch(
@@ -4221,9 +4319,10 @@ def reconcile_withdrawals(
     )
     stored = carry_stored_rows_forward(store, template, year=year, retain=on_a_refetched_session)
     if stored.status != "success":
-        return NO_WITHDRAWALS
+        return replace(NO_WITHDRAWALS, still_stored=frozenset(still_stored))
     stored_keys = _row_keys(stored, date_column)
     first: dict[date, set[str]] = {day: set() for day in refetched}
+    served_rows: Counter[date] = Counter()
     for batch in fetched:
         if batch.status != "success":
             continue
@@ -4234,12 +4333,18 @@ def reconcile_withdrawals(
         for subject, day in _row_keys(batch, date_column):
             if day in first:
                 first[day].add(subject)
+                served_rows[day] += 1
+    held: Counter[date] = Counter(day for _, day in stored_keys)
     missing: dict[date, set[str]] = {}
     for subject, day in stored_keys:
         if day in first and subject not in first[day]:
             missing.setdefault(day, set()).add(subject)
     if not missing:
-        return NO_WITHDRAWALS
+        return replace(NO_WITHDRAWALS, still_stored=frozenset(still_stored))
+    for day in sorted(missing):
+        _refuse_a_short_first_answer(
+            dataset, day, sorted(missing[day]), served_rows[day], held[day], witness=witness
+        )
 
     answers = refetch(tuple(sorted(missing)))
     withdrawn: set[tuple[str, date]] = set()
@@ -4263,6 +4368,17 @@ def reconcile_withdrawals(
             raise PanelBatchError(
                 _withdrawal_refusal(dataset, day, sorted(missing[day]), first[day], second)
             )
+        if witness is not None:
+            unexplained = sorted(subject for subject in verdict if not witness(subject, day))
+            if unexplained:
+                raise PanelBatchError(
+                    f"the stored {dataset} partition holds {_subject_sample(unexplained)} on "
+                    f"{day.isoformat()} and two whole-session answers no longer serve them, but "
+                    f"nothing shows they traded that session: no {DAILY_DATASET} bar for them in "
+                    "the year this build stores. An empty or short halt answer is not evidence "
+                    "that a halt was withdrawn, so the year is refused rather than losing the "
+                    "halt: re-run the build"
+                )
         withdrawn |= {(subject, day) for subject in verdict}
 
     positions = [index for index, key in enumerate(stored_keys) if key in withdrawn]
@@ -4280,9 +4396,47 @@ def reconcile_withdrawals(
     return Withdrawals(
         defects=defects,
         record=_defect_record(stored, positions, defects, confirmed_at=confirmed_at),
+        rows=_withdrawn_rows(stored, positions, confirmed_at=confirmed_at) if positions else None,
+        keys=frozenset(withdrawn),
         released=frozenset(
             subject for subject, _ in withdrawn if subject not in elsewhere and subject not in kept
         ),
+        still_stored=frozenset(still_stored),
+    )
+
+
+def _refuse_a_short_first_answer(
+    dataset: str,
+    day: date,
+    missing: Sequence[str],
+    served: int,
+    held: int,
+    *,
+    witness: AbsenceWitness | None,
+) -> None:
+    """Refuse to confirm withdrawals on a session whose first answer is empty or thin (`V2-P6-016`).
+
+    `held` is how many rows the store holds on the session, `served` how many the build's answer
+    carries. A dataset every open session of which publishes a cross section (`daily`,
+    `daily_basic`, `stk_limit`, `adj_factor`) answering `no_data`, or under
+    `MIN_SESSION_ROW_SHARE` of what is stored, is the shape of an outage -- and an outage answers
+    the second request the same way, so no second answer can confirm anything about it. The
+    same floor the writers hold a session to (`_refuse_thin_price_sessions`), held against the
+    stored session rather than the partition median, because the stored session is what the
+    answer is being asked to replace. `suspend_d` (`witness` given) is exempt only from the empty
+    case, which its witness decides row by row.
+    """
+    if served == 0 and witness is not None:
+        return
+    if served >= MIN_SESSION_ROW_SHARE * held:
+        return
+    answered = "answered no_data" if served == 0 else f"served {served} row(s)"
+    raise PanelBatchError(
+        f"the stored {dataset} partition holds {held} row(s) on {day.isoformat()}, a session this "
+        f"build fetched again, and the fetch {answered} -- under MIN_SESSION_ROW_SHARE "
+        f"({MIN_SESSION_ROW_SHARE}) of them -- without {_subject_sample(missing)}. An empty or "
+        "short session is what an outage looks like, and an outage answers a second request the "
+        "same way, so it confirms no withdrawal: nothing is recorded or written. Re-run the build"
     )
 
 
@@ -4308,9 +4462,45 @@ def _withdrawal_refusal(
     )
 
 
-def carry_withdrawals_forward(
+def _withdrawn_rows(
+    stored: ColumnarPanelBatch, positions: Sequence[int], *, confirmed_at: datetime
+) -> ColumnarPanelBatch:
+    """The withdrawn stored rows whole, as their `WITHDRAWN_ROWS_DATASETS` batch."""
+    selected = _select_rows(stored, positions)
+    dataset = WITHDRAWN_ROWS_DATASETS[stored.dataset]
+    return ColumnarPanelBatch(
+        provider_id=selected.provider_id,
+        dataset=dataset,
+        kind=dataset,
+        as_of=max(selected.as_of, confirmed_at),
+        fetched_at=max(selected.fetched_at, confirmed_at),
+        status="success",
+        subjects=selected.subjects,
+        timeline=selected.timeline,
+        columns=(
+            *selected.columns,
+            PanelColumn(
+                WITHDRAWN_CONFIRMED_AT_COLUMN, "timestamp", (confirmed_at,) * selected.row_count
+            ),
+        ),
+    )
+
+
+def withdrawal_date_column(source: str) -> str:
+    """The session column of a source dataset: `adj_factor` renames `trade_date`."""
+    return ADJUSTMENT_DATE_COLUMN if source == ADJ_FACTOR_DATASET else PRICE_DATE_COLUMN
+
+
+def served_keys(batches: Sequence[ColumnarPanelBatch], source: str) -> frozenset[tuple[str, date]]:
+    """Every `(subject, session)` the successful `batches` of `source` carry."""
+    column = withdrawal_date_column(source)
+    return frozenset(
+        key for batch in batches if batch.status == "success" for key in _row_keys(batch, column)
+    )
+
+
+def stored_withdrawal_records(
     store: PanelStore,
-    fetched: Mapping[str, Sequence[ColumnarPanelBatch]],
     *,
     sources: frozenset[str],
     year: int,
@@ -4318,42 +4508,17 @@ def carry_withdrawals_forward(
     observed_at: datetime,
     date_timezone: str = DEFAULT_DATE_TIMEZONE,
 ) -> ColumnarPanelBatch | None:
-    """The stored `withdrawn_after_publication` records of `sources` this build keeps
-    (`V2-P6-016`).
+    """The stored `withdrawn_after_publication` records of `sources` through `through`
+    (`V2-P6-016`), re-observed at `observed_at` for the carry.
 
     Every other `upstream_defects` row is rebuilt from the drops a build performs, and a build
     cannot perform this one again: the withdrawn row left the partition, so there is nothing
-    stored to find missing a second time. So these records are **carried forward by every later
-    build, full or incremental**, through `through` (the build's last session) -- re-observed at
-    `observed_at` like every carried row, `ingested_time` becoming `max(observed_at,
-    available_time)`, and keeping their `revision_time`, the instant the withdrawal was confirmed.
-
-    **A record whose row `fetched` serves again is retired**: the upstream re-published it, the
-    row is stored again from that answer, and the record is not carried. `fetched` are the
-    build's raw answers per source dataset; a record on a session the build did not fetch again
-    cannot be retired, which is the premise of every carried session (`carry_stored_sessions_
-    forward`). Each source's served keys are collected only when a record of it is stored.
+    stored to find missing a second time. These records are therefore **carried by every later
+    build, full or incremental** -- `ingested_time` restamped to `max(observed_at,
+    available_time)`, `V2-P6-003`'s convention for every carried row, and `revision_time`, the
+    confirmation instant, kept. `keep_withdrawal_records` then removes the ones this build
+    retires. Read once per target, before anything is written.
     """
-    served: dict[str, frozenset[tuple[str, date]]] = {}
-
-    def served_again(source: str, key: tuple[str, date]) -> bool:
-        if source not in served:
-            column = ADJUSTMENT_DATE_COLUMN if source == ADJ_FACTOR_DATASET else PRICE_DATE_COLUMN
-            served[source] = frozenset(
-                key
-                for batch in fetched.get(source, ())
-                if batch.status == "success"
-                for key in _row_keys(batch, column)
-            )
-        return key in served[source]
-
-    def keep(row: Mapping[str, object]) -> bool:
-        source = str(row[SOURCE_DATASET_COLUMN])
-        if source not in sources or row[DEFECT_KIND_COLUMN] != WITHDRAWN_KIND:
-            return False
-        day = date.fromisoformat(str(row[PRICE_DATE_COLUMN]))
-        return not served_again(source, (str(row[SUBJECT_COLUMN_NAME]), day))
-
     carried = carry_stored_sessions_forward(
         store,
         (),
@@ -4361,10 +4526,181 @@ def carry_withdrawals_forward(
         year=year,
         before=through + timedelta(days=1),
         observed_at=observed_at,
+        keep=lambda row: (
+            row[SOURCE_DATASET_COLUMN] in sources and row[DEFECT_KIND_COLUMN] == WITHDRAWN_KIND
+        ),
+        date_timezone=date_timezone,
+    )
+    return carried[0] if carried else None
+
+
+def withdrawal_keys(records: ColumnarPanelBatch | None) -> dict[str, frozenset[tuple[str, date]]]:
+    """The `(subject, session)` of every record in `records`, by source dataset."""
+    if records is None:
+        return {}
+    sources = _column_values(records, SOURCE_DATASET_COLUMN)
+    found: dict[str, set[tuple[str, date]]] = {}
+    for source, key in zip(sources, _row_keys(records), strict=True):
+        found.setdefault(str(source), set()).add(key)
+    return {source: frozenset(keys) for source, keys in found.items()}
+
+
+def keep_withdrawal_records(
+    records: ColumnarPanelBatch | None, *, retired: Mapping[str, Set[tuple[str, date]]]
+) -> ColumnarPanelBatch | None:
+    """`records` without the ones this build retires (`V2-P6-016`).
+
+    A record is retired when its key is in `retired[source]`, which the caller fills with three
+    kinds of key: the upstream **serves the row again** (it is stored again from that answer);
+    this build **confirms the same withdrawal again** (the new record replaces it, so the record
+    is never duplicated); or the **stored partition still holds the row**, which a record of its
+    withdrawal can never truthfully describe -- the state a build refused after its record was
+    written used to leave behind.
+    """
+    if records is None:
+        return None
+    sources = _column_values(records, SOURCE_DATASET_COLUMN)
+    kept = [
+        index
+        for index, (source, key) in enumerate(zip(sources, _row_keys(records), strict=True))
+        if key not in retired.get(str(source), frozenset())
+    ]
+    if not kept:
+        return None
+    return records if len(kept) == records.row_count else _select_rows(records, kept)
+
+
+def carry_withdrawn_rows(
+    store: PanelStore,
+    *,
+    source: str,
+    year: int,
+    through: date,
+    observed_at: datetime,
+    keys: Set[tuple[str, date]],
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> ColumnarPanelBatch | None:
+    """The stored `WITHDRAWN_ROWS_DATASETS[source]` rows whose keys the index still carries.
+
+    The same carry as the index (`stored_withdrawal_records`): re-observed at `observed_at`,
+    `ingested_time` restamped under `V2-P6-003`'s convention, every other stored value kept.
+    """
+    if not keys:
+        return None
+    column = withdrawal_date_column(source)
+
+    def keep(row: Mapping[str, object]) -> bool:
+        day = _stored_dates((row[column],), column)[0]
+        return (str(row[SUBJECT_COLUMN_NAME]), day) in keys
+
+    carried = carry_stored_sessions_forward(
+        store,
+        (),
+        dataset=WITHDRAWN_ROWS_DATASETS[source],
+        year=year,
+        before=through + timedelta(days=1),
+        observed_at=observed_at,
         keep=keep,
         date_timezone=date_timezone,
     )
     return carried[0] if carried else None
+
+
+def write_withdrawn_rows(
+    store: PanelStore,
+    rows: ColumnarPanelBatch | None,
+    *,
+    source: str,
+    year: int,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> PartitionRef | None:
+    """Store `source`'s withdrawn rows for `year` whole, replacing the partition (`V2-P6-016`).
+
+    `rows` are the carried rows and this build's new ones together; like the index they are
+    replaced rather than merged, sorted by `(event_time, subject)` so the content hash does not
+    depend on which were carried. `None` with a stored partition removes it
+    (`PanelStore.remove_partition`): every row it held was retired, and a stale one would claim a
+    withdrawal the stored data no longer reflects.
+    """
+    dataset = WITHDRAWN_ROWS_DATASETS[source]
+    if rows is None:
+        if store.read_coverage(dataset, year) is not None:
+            store.remove_partition(dataset, year)
+        return None
+    if rows.dataset != dataset:
+        raise PanelBatchError(f"expected the {dataset!r} dataset, got {rows.dataset!r}")
+    written_year = panel_partition_year(rows, date_timezone=date_timezone)
+    if written_year != year:
+        raise PanelBatchError(
+            f"the withdrawn {source} rows are dated {written_year} and the write is for {year}"
+        )
+    events = rows.timeline.event_time
+    order = sorted(range(rows.row_count), key=lambda index: (events[index], rows.subjects[index]))
+    return write_panel_batch(
+        store, _select_rows(rows, order), year=year, date_timezone=date_timezone
+    )
+
+
+def withdrawn_rows_requirement(
+    dataset: str, *, years: Sequence[int], as_of: datetime
+) -> ReadinessRequirement:
+    """What a `WITHDRAWN_ROWS_DATASETS` partition must satisfy before it is read back.
+
+    `upstream_defects_requirement`'s waivers, for its reasons: a withdrawal has no schedule, names
+    whichever security the upstream withdrew, and can be months old on a complete record.
+    """
+    if dataset not in WITHDRAWN_ROWS_DATASETS.values():
+        known = sorted(WITHDRAWN_ROWS_DATASETS.values())
+        raise PanelBatchError(f"{dataset!r} is not one of {known}")
+    return ReadinessRequirement(
+        dataset=dataset,
+        as_of=as_of,
+        years=tuple(sorted(set(years))),
+        required_dates=None,
+        required_subjects=None,
+        required_fields=(SUBJECT_COLUMN_NAME, WITHDRAWN_CONFIRMED_AT_COLUMN),
+        max_staleness=None,
+    )
+
+
+def interleave_sessions(
+    carried: ColumnarPanelBatch | None,
+    inserted: Mapping[date, ColumnarPanelBatch],
+    *,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> list[ColumnarPanelBatch]:
+    """`carried` with each of `inserted`'s one-session batches placed at its session's position
+    (`V2-P6-016`).
+
+    An incremental build asks again for the sessions that hold carried withdrawals, and a
+    partition's row order is its content hash's: a full build stores every session's answer in
+    session order. `carried` -- the stored rows of every other session before the slice, in
+    stored (session) order, none of them on an `inserted` session -- is cut at each inserted
+    session, so the result is the full build's order. Refuses a `carried` batch whose sessions
+    are not ascending, which no build writes.
+    """
+    if not inserted:
+        return [] if carried is None else [carried]
+    if carried is None:
+        return [inserted[day] for day in sorted(inserted)]
+    zone = _resolve_timezone(date_timezone)
+    days = [instant.astimezone(zone).date() for instant in carried.timeline.event_time]
+    if any(later < earlier for earlier, later in pairwise(days)):
+        raise PanelBatchError(
+            f"the carried {carried.dataset} rows are not in session order, so a session asked "
+            "again cannot be put back where a full build stores it"
+        )
+    pieces: list[ColumnarPanelBatch] = []
+    start = 0
+    for day in sorted(inserted):
+        cut = bisect_right(days, day)
+        if cut > start:
+            pieces.append(_select_rows(carried, range(start, cut)))
+        pieces.append(inserted[day])
+        start = cut
+    if start < len(days):
+        pieces.append(_select_rows(carried, range(start, len(days))))
+    return pieces
 
 
 def write_upstream_defects(
@@ -4400,8 +4736,10 @@ def write_upstream_defects(
     **One kind is carried rather than rebuilt** (`V2-P6-016`): `withdrawn_after_publication`
     records a row the upstream stopped serving, and no later build can find that row missing
     again -- it left the partition -- so the callers put the stored records back in `record`
-    through `carry_withdrawals_forward`, which retires one only when the upstream serves its row
-    again. This function stays a replace of the owned rows either way.
+    (`stored_withdrawal_records`, less what `keep_withdrawal_records` retires: a row served again,
+    a withdrawal confirmed again, a row still stored). An incremental build asks again for every
+    session holding such a record, so it retires exactly what a full build retires. This
+    function stays a replace of the owned rows either way.
 
     Returns the partition written, or `None` when nothing is left to store.
     """

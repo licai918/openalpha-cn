@@ -11,6 +11,7 @@ from calendar import monthrange
 from collections.abc import Callable, Iterator, Mapping, Sequence, Set
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import MAXYEAR, MINYEAR, UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from enum import IntEnum, StrEnum
@@ -193,12 +194,16 @@ from openalpha_cn.panel_gate import (
 from openalpha_cn.panel_ingest import (
     UPSTREAM_DEFECTS_DATASET,
     WITHDRAWN_KIND,
+    WITHDRAWN_ROWS_DATASETS,
+    AbsenceWitness,
     Withdrawals,
     _sessions_published_through,
     carry_stored_sessions_forward,
-    carry_withdrawals_forward,
+    carry_withdrawn_rows,
     combine_defect_records,
+    interleave_sessions,
     keep_panel_subjects,
+    keep_withdrawal_records,
     load_first_daily_bar,
     load_industry_trees,
     load_stock_universe,
@@ -210,8 +215,12 @@ from openalpha_cn.panel_ingest import (
     reconcile_pre_listing_rows,
     reconcile_price_disagreements,
     reconcile_withdrawals,
+    served_keys,
     session_publication_instant,
     split_panel_batch_by_year,
+    stored_withdrawal_records,
+    withdrawal_date_column,
+    withdrawal_keys,
     write_adjustment_factors,
     write_daily_panel,
     write_financial_statements,
@@ -225,6 +234,7 @@ from openalpha_cn.panel_ingest import (
     write_suspensions,
     write_trading_calendar,
     write_upstream_defects,
+    write_withdrawn_rows,
 )
 from openalpha_cn.panel_view import (
     PanelRequestError,
@@ -3110,8 +3120,10 @@ def _incremental_starts(
     now: datetime,
     listings: Mapping[str, date] | None,
     rebuild: str,
-) -> dict[str, date | None]:
-    """The first session each incremental target fetches, or `None` for the whole year.
+) -> tuple[dict[str, date | None], dict[str, tuple[date, ...]]]:
+    """The first session each incremental target fetches, or `None` for the whole year, and
+    the sessions before it each dataset asks again for a carried withdrawal
+    (`_withdrawal_rechecks`, `V2-P6-016`).
 
     Decided for every target **before any session is fetched**, so a store an incremental build
     cannot extend costs one refusal rather than a target's worth of requests first. See
@@ -3123,7 +3135,7 @@ def _incremental_starts(
         if target in targets and target in INCREMENTAL_CENSUS
     ]
     if not chosen or not sessions:
-        return {}
+        return {}, {}
     recorded = (
         load_upstream_defects(store, years=(year,), as_of=now)
         if year in store.registered_years(UPSTREAM_DEFECTS_DATASET)
@@ -3153,7 +3165,7 @@ def _incremental_starts(
             err=True,
         )
         starts[target] = start
-    return starts
+    return starts, _withdrawal_rechecks(recorded, starts=starts, year=year, rebuild=rebuild)
 
 
 def _incremental_start(
@@ -3282,7 +3294,13 @@ def _incremental_slice(sessions: Sequence[date], start: date | None) -> tuple[da
 
 
 def _carried_defects(
-    store: PanelStore, *, target: str, year: int, before: date | None, now: datetime
+    store: PanelStore,
+    *,
+    target: str,
+    year: int,
+    before: date | None,
+    now: datetime,
+    rechecked: Set[tuple[str, date]] = frozenset(),
 ) -> ColumnarPanelBatch | None:
     """The `upstream_defects` rows `target` owns on the sessions its slice does not fetch.
 
@@ -3293,10 +3311,22 @@ def _carried_defects(
     build's stamp, they are the rows the full rebuild records for those sessions **only if the
     upstream has not changed those sessions since they were stored** -- the premise of every
     carried row, which a full rebuild re-fetches and an incremental one does not.
+
+    Two exclusions (`V2-P6-016`): `withdrawn_after_publication` rows, which
+    `_settle_withdrawals` carries on every session; and a row whose `(source, session)` is in
+    `rechecked` -- a session this build asks for again, so the drop is performed again from the
+    new answer exactly as in a full build.
     """
     if before is None:
         return None
     sources = INCREMENTAL_DEFECT_SOURCES[target]
+
+    def keep(row: Mapping[str, object]) -> bool:
+        source = row[SOURCE_DATASET_COLUMN]
+        if source not in sources or row[DEFECT_KIND_COLUMN] == WITHDRAWN_KIND:
+            return False
+        return (str(source), date.fromisoformat(str(row[PRICE_DATE_COLUMN]))) not in rechecked
+
     carried = carry_stored_sessions_forward(
         store,
         (),
@@ -3304,54 +3334,344 @@ def _carried_defects(
         year=year,
         before=before,
         observed_at=now,
-        # `withdrawn_after_publication` is carried by `_carried_withdrawals`, on every session.
-        keep=lambda row: (
-            row[SOURCE_DATASET_COLUMN] in sources and row[DEFECT_KIND_COLUMN] != WITHDRAWN_KIND
-        ),
+        keep=keep,
     )
     return carried[0] if carried else None
 
 
-def _carried_withdrawals(
+WITHDRAWAL_RECHECK_LIMIT: Final[int] = 20
+"""The most `(dataset, session)` pairs one incremental year build asks again because they hold a
+carried withdrawal (`V2-P6-016`); more is refused with the full rebuild.
+
+An incremental build fetches from its stored horizon on, so a withdrawal recorded on an earlier
+session could only be seen re-published by a full build -- and the two would then store
+different partitions. So each such pair is asked again, one whole-session request each, on
+every incremental build of the year. That cost grows with the withdrawals a year accumulates,
+while the daily command has a budget of about a hundred requests a day (R2) and spends ~10 on
+its slice. Withdrawals are rare: the whole 2013..2026 backfill and the live checks through
+2026-09-28 found one session with withdrawn rows (three `stk_limit` rows on 2026-08-28), i.e.
+one pair. Twenty pairs is twenty times that, and still leaves the daily command under half its
+budget; a year that holds more is refused by name rather than skipped, with the full rebuild --
+which re-fetches every session and so needs no re-check -- as the remedy.
+"""
+
+
+def _withdrawal_rechecks(
+    recorded: Sequence[UpstreamDefect],
+    *,
+    starts: Mapping[str, date | None],
+    year: int,
+    rebuild: str,
+) -> dict[str, tuple[date, ...]]:
+    """The sessions each dataset asks again because they hold a carried withdrawal (`V2-P6-016`).
+
+    A `withdrawn_after_publication` record of a target's sources on a session before that
+    target's slice. Decided with the slices, before any request, and refused past
+    `WITHDRAWAL_RECHECK_LIMIT`.
+    """
+    asked: dict[str, set[date]] = {}
+    for target, start in starts.items():
+        if start is None:
+            continue
+        for entry in recorded:
+            if (
+                entry.kind == WITHDRAWN_KIND
+                and entry.source_dataset in INCREMENTAL_DEFECT_SOURCES[target]
+                and entry.trade_date < start
+            ):
+                asked.setdefault(entry.source_dataset, set()).add(entry.trade_date)
+    pairs = sum(len(days) for days in asked.values())
+    if pairs > WITHDRAWAL_RECHECK_LIMIT:
+        raise _refuse_incremental(
+            rebuild,
+            f"{year} holds withdrawn_after_publication records on {pairs} (dataset, session) "
+            f"pairs before the slice, over WITHDRAWAL_RECHECK_LIMIT ({WITHDRAWAL_RECHECK_LIMIT}); "
+            "an incremental build asks each of them again so that a re-publication is seen as a "
+            "full build sees it, and that many requests would spend the daily budget",
+        )
+    return {dataset: tuple(sorted(days)) for dataset, days in asked.items()}
+
+
+def _recheck_batches(
+    provider: TushareProvider, dataset: str, days: Sequence[date]
+) -> dict[date, ColumnarPanelBatch]:
+    """One whole-session request per session holding a carried withdrawal of `dataset`
+    (`V2-P6-016`), stated on a `BUDGET` line first. Keyed by session; a `suspend_d` session with
+    no halts answers `no_data` and is left out, as `_session_batches` leaves it out."""
+    if not days:
+        return {}
+    _echo_budget(
+        f"withdrawal-recheck {dataset}",
+        len(days),
+        "requests",
+        f"{len(days)} session(s) before the slice holding a withdrawal this build carries; asked "
+        "again so a re-published row is seen exactly as a full build sees it",
+    )
+    answers: dict[date, ColumnarPanelBatch] = {}
+    for day in days:
+        batch = _fetch_panel(provider, dataset, as_of=_session_as_of(day))
+        if batch.status == "no_data" and dataset in _EMPTY_SESSION_IS_ORDINARY:
+            continue
+        answers[day] = batch
+    return answers
+
+
+def _carried_with_rechecks(
     store: PanelStore,
+    *,
+    dataset: str,
+    fresh: Sequence[ColumnarPanelBatch],
+    asked: Sequence[date],
+    answers: Mapping[date, ColumnarPanelBatch],
+    year: int,
+    before: date,
+    now: datetime,
+) -> list[ColumnarPanelBatch]:
+    """`V2-P6-003`'s carry of every session before the slice, less the sessions asked again,
+    whose new answers take their place in session order (`V2-P6-016`); then the slice.
+
+    `adj_factor` is stored compressed and in `(subject, factor_date)` order, which
+    `compress_adjustment_batch` restores whatever order it is handed, so its answers are simply
+    put after the carried steps."""
+    carried = carry_stored_sessions_forward(
+        store, (), dataset=dataset, year=year, before=before, observed_at=now, skip=frozenset(asked)
+    )
+    if dataset == ADJ_FACTOR_DATASET:
+        return [*carried, *answers.values(), *fresh]
+    return [*interleave_sessions(carried[0] if carried else None, answers), *fresh]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _SettledWithdrawals:
+    """One target's withdrawals, decided before anything of it is written (`V2-P6-016`).
+
+    `found` is this build's new ones per dataset. `records` are the stored index records it
+    keeps, and `rows` per dataset the whole withdrawn rows it stores (kept and new). `changed`
+    names the datasets whose withdrawals this build adds to or retires.
+    """
+
+    found: Mapping[str, Withdrawals]
+    records: ColumnarPanelBatch | None
+    rows: Mapping[str, ColumnarPanelBatch | None]
+    changed: frozenset[str]
+
+    def records_of(self, sources: frozenset[str]) -> ColumnarPanelBatch | None:
+        """The kept index records of `sources` and the new ones, together."""
+        others = {
+            str(source): keys
+            for source, keys in withdrawal_keys(self.records).items()
+            if source not in sources
+        }
+        return combine_defect_records(
+            keep_withdrawal_records(self.records, retired=others),
+            *(self.found[source].record for source in sorted(sources)),
+        )
+
+
+def _settle_withdrawals(
+    store: PanelStore,
+    provider: TushareProvider,
     *,
     target: str,
     fetched: Mapping[str, Sequence[ColumnarPanelBatch]],
+    refetched: Mapping[str, Sequence[date]],
+    year: int,
+    sessions: Sequence[date],
+    now: datetime,
+    witness: Mapping[str, AbsenceWitness] | None = None,
+) -> _SettledWithdrawals:
+    """Confirm this build's withdrawals and decide which stored ones it keeps (`V2-P6-016`).
+
+    `fetched` are the raw answers per dataset -- the slice and any session asked again -- and
+    `refetched` those sessions. A stored record is retired when its row is served again, when this
+    build confirms the same withdrawal again, or when the stored partition still holds its row
+    (`panel_ingest.keep_withdrawal_records`); every other one is carried, with its whole row.
+    Nothing is written here.
+    """
+    through = sessions[-1]
+    datasets = PANEL_BUILD_TARGETS[target]
+    records = stored_withdrawal_records(
+        store,
+        sources=INCREMENTAL_DEFECT_SOURCES[target],
+        year=year,
+        through=through,
+        observed_at=now,
+    )
+    watch = withdrawal_keys(records)
+    found = {
+        dataset: _confirm_withdrawals(
+            store,
+            provider,
+            dataset=dataset,
+            fetched=fetched[dataset],
+            sessions=refetched[dataset],
+            year=year,
+            now=now,
+            watch=watch.get(dataset, frozenset()),
+            witness=(witness or {}).get(dataset),
+        )
+        for dataset in datasets
+    }
+    retired = {
+        dataset: (
+            (served_keys(fetched[dataset], dataset) & watch.get(dataset, frozenset()))
+            | found[dataset].keys
+            | found[dataset].still_stored
+        )
+        for dataset in datasets
+    }
+    rows = {
+        dataset: combine_defect_records(
+            carry_withdrawn_rows(
+                store,
+                source=dataset,
+                year=year,
+                through=through,
+                observed_at=now,
+                keys=watch.get(dataset, frozenset()) - retired[dataset],
+            ),
+            found[dataset].rows,
+        )
+        for dataset in datasets
+    }
+    return _SettledWithdrawals(
+        found=found,
+        records=keep_withdrawal_records(records, retired=retired),
+        rows=rows,
+        changed=frozenset(
+            dataset
+            for dataset in datasets
+            if found[dataset].keys or (retired[dataset] & watch.get(dataset, frozenset()))
+        ),
+    )
+
+
+def _confirm_withdrawals(
+    store: PanelStore,
+    provider: TushareProvider,
+    *,
+    dataset: str,
+    fetched: Sequence[ColumnarPanelBatch],
+    sessions: Sequence[date],
+    year: int,
+    now: datetime,
+    watch: Set[tuple[str, date]],
+    witness: AbsenceWitness | None,
+) -> Withdrawals:
+    """`panel_ingest.reconcile_withdrawals` for one dataset, with its confirming requests stated
+    on a `BUDGET` line before the first goes out (`V2-P6-016`).
+
+    The confirming requests are the same whole-market request each session was fetched with, one
+    per session that lost a stored row.
+    """
+
+    def refetch(days: tuple[date, ...]) -> dict[date, ColumnarPanelBatch]:
+        _echo_budget(
+            f"withdrawal-confirmation {dataset}",
+            len(days),
+            "requests",
+            f"{len(days)} session(s) on which the store holds a row this build's fetch lacked; "
+            "one whole-session request each confirms the absence or refuses the year",
+        )
+        answers: dict[date, ColumnarPanelBatch] = {}
+        for day in days:
+            typer.echo(
+                f"REFETCH {day.isoformat()} whole session ({dataset}, confirming a withdrawal)",
+                err=True,
+            )
+            answers[day] = _fetch_panel(provider, dataset, as_of=_session_as_of(day))
+        return answers
+
+    return reconcile_withdrawals(
+        store,
+        fetched,
+        dataset=dataset,
+        year=year,
+        sessions=sessions,
+        refetch=refetch,
+        confirmed_at=now,
+        date_column=withdrawal_date_column(dataset),
+        watch=watch,
+        witness=witness,
+    )
+
+
+def _write_withdrawals(
+    store: PanelStore,
+    settled: _SettledWithdrawals,
+    *,
+    datasets: Sequence[str],
+    index: ColumnarPanelBatch | None,
+    index_sources: frozenset[str] | None,
+    year: int,
+    written: list[PartitionRef],
+    confirmed: list[UpstreamDefect] | None,
+) -> None:
+    """Store `datasets`' withdrawn rows and the index, then report them (`V2-P6-016`).
+
+    Called from a writer's `before_write`: after every guard of the partition that no longer
+    holds the rows has passed, and before that partition is written. `index_sources=None`
+    leaves `upstream_defects` to a later write. Reported only once stored: the
+    `panel_rows_withdrawn` log event, a `WITHDRAWN` line on stderr, and `confirmed` for the
+    build's JSON report.
+    """
+    for dataset in datasets:
+        ref = write_withdrawn_rows(store, settled.rows[dataset], source=dataset, year=year)
+        if ref is not None:
+            written.append(ref)
+    if index_sources is not None:
+        ref = write_upstream_defects(store, index, year=year, source_datasets=index_sources)
+        if ref is not None:
+            written.append(ref)
+    for dataset in datasets:
+        _report_withdrawals(settled.found[dataset], dataset=dataset, year=year, confirmed=confirmed)
+
+
+def _report_withdrawals(
+    found: Withdrawals, *, dataset: str, year: int, confirmed: list[UpstreamDefect] | None
+) -> None:
+    if not found.defects:
+        return
+    subjects = sorted({defect.ts_code for defect in found.defects})
+    days = sorted({defect.trade_date.isoformat() for defect in found.defects})
+    logger.info(
+        "panel_rows_withdrawn",
+        extra={
+            "dataset": dataset,
+            "year": year,
+            "row_count": len(found.defects),
+            "subjects": ",".join(subjects),
+            "sessions": ",".join(days),
+        },
+    )
+    typer.echo(
+        f"WITHDRAWN {dataset} year={year}: {len(found.defects)} stored row(s) the upstream no "
+        f"longer serves, confirmed by a second fetch and recorded as {WITHDRAWN_KIND} (the rows "
+        f"whole in {WITHDRAWN_ROWS_DATASETS[dataset]}): "
+        f"{subjects[:10]}{' and more' if len(subjects) > 10 else ''} on {', '.join(days)}",
+        err=True,
+    )
+    if confirmed is not None:
+        confirmed.extend(found.defects)
+
+
+def _stored_defects(
+    store: PanelStore,
+    *,
+    sources: frozenset[str],
     year: int,
     sessions: Sequence[date],
     now: datetime,
 ) -> ColumnarPanelBatch | None:
-    """`target`'s stored `withdrawn_after_publication` records, less those `fetched` retires
-    (`V2-P6-016`; `panel_ingest.carry_withdrawals_forward`).
+    """Every stored `upstream_defects` row of `sources`, re-observed at `now` (`V2-P6-016`).
 
-    Full and incremental builds alike: a withdrawn row is not in the stored partition to be found
-    missing again, so no build rebuilds its record from a drop. Computed before the target writes
-    anything, so a record this build adds is never read back as a carried one.
+    Put back beside the halt withdrawals the price target records before it stores `suspend_d`,
+    so that early write replaces none of the target's `daily`/`daily_basic` records: they stay
+    until the year's record is rebuilt after the reconciliation, as a build refused in between
+    leaves them.
     """
     if not sessions:
         return None
-    return carry_withdrawals_forward(
-        store,
-        fetched,
-        sources=INCREMENTAL_DEFECT_SOURCES[target],
-        year=year,
-        through=sessions[-1],
-        observed_at=now,
-    )
-
-
-def _stored_defects(
-    store: PanelStore, *, target: str, year: int, sessions: Sequence[date], now: datetime
-) -> ColumnarPanelBatch | None:
-    """Every stored `upstream_defects` row `target` owns, re-observed at `now` (`V2-P6-016`).
-
-    Put back beside a withdrawal the price target records before it stores `suspend_d`, so that
-    early write replaces none of the target's other records: they stay until the year's record
-    is rebuilt after the reconciliation, as a build refused in between would leave them.
-    """
-    if not sessions:
-        return None
-    sources = INCREMENTAL_DEFECT_SOURCES[target]
     carried = carry_stored_sessions_forward(
         store,
         (),
@@ -3399,80 +3719,6 @@ def _refuse_a_withdrawn_closing_anchor(
             "their step function on their last served session before it, which the compressed "
             "partition does not hold",
         )
-
-
-def _withdrawals(
-    store: PanelStore,
-    provider: TushareProvider,
-    *,
-    dataset: str,
-    fetched: Sequence[ColumnarPanelBatch],
-    sessions: Sequence[date],
-    year: int,
-    now: datetime,
-    confirmed: list[UpstreamDefect] | None,
-    date_column: str = PRICE_DATE_COLUMN,
-) -> Withdrawals:
-    """`panel_ingest.reconcile_withdrawals` for one dataset, with its confirming requests
-    budgeted and what it found reported (`V2-P6-016`).
-
-    `sessions` are the sessions this build fetched -- the incremental slice, or the whole year --
-    and `fetched` their raw answers. The confirming requests are the same whole-market request
-    each of those sessions was fetched with, one per session that lost a stored row, and are
-    stated on a `BUDGET` line before the first goes out. A confirmed withdrawal is logged as the
-    structured event `panel_rows_withdrawn`, echoed on stderr, and appended to `confirmed` for
-    the build's JSON report.
-    """
-
-    def refetch(days: tuple[date, ...]) -> dict[date, ColumnarPanelBatch]:
-        _echo_budget(
-            f"withdrawal-confirmation {dataset}",
-            len(days),
-            "requests",
-            f"{len(days)} session(s) on which the store holds a row this build's fetch lacked; "
-            "one whole-session request each confirms the absence or refuses the year",
-        )
-        answers: dict[date, ColumnarPanelBatch] = {}
-        for day in days:
-            typer.echo(
-                f"REFETCH {day.isoformat()} whole session ({dataset}, confirming a withdrawal)",
-                err=True,
-            )
-            answers[day] = _fetch_panel(provider, dataset, as_of=_session_as_of(day))
-        return answers
-
-    found = reconcile_withdrawals(
-        store,
-        fetched,
-        dataset=dataset,
-        year=year,
-        sessions=sessions,
-        refetch=refetch,
-        confirmed_at=now,
-        date_column=date_column,
-    )
-    if found.defects:
-        subjects = sorted({defect.ts_code for defect in found.defects})
-        days = sorted({defect.trade_date.isoformat() for defect in found.defects})
-        logger.info(
-            "panel_rows_withdrawn",
-            extra={
-                "dataset": dataset,
-                "year": year,
-                "row_count": len(found.defects),
-                "subjects": ",".join(subjects),
-                "sessions": ",".join(days),
-            },
-        )
-        typer.echo(
-            f"WITHDRAWN {dataset} year={year}: {len(found.defects)} stored row(s) the upstream no "
-            f"longer serves, confirmed by a second fetch and recorded as {WITHDRAWN_KIND}: "
-            f"{subjects[:10]}{' and more' if len(subjects) > 10 else ''} on {', '.join(days)}",
-            err=True,
-        )
-        if confirmed is not None:
-            confirmed.extend(found.defects)
-    return found
 
 
 def _full_rebuild_command(
@@ -3557,6 +3803,7 @@ def _build_price_panel(
     exchange: str,
     fetch_from: date | None = None,
     withdrawn: list[UpstreamDefect] | None = None,
+    rechecks: Mapping[str, tuple[date, ...]] | None = None,
 ) -> str:
     """Fetch the three price datasets session by session, then write them in dependency order.
 
@@ -3576,17 +3823,20 @@ def _build_price_panel(
     `(security, session)` on its own -- two requests each, reported on stderr -- and drops a
     `daily_basic` row only under a named rule; a null-close placeholder is one of them
     (`valuation_placeholder_on_halt` or `_without_bar`, `V2-P6-017`), and one beside a bar is
-    refused. The drop is recorded in `upstream_defects` before `write_daily_panel` runs, so a
-    later refusal still leaves the record of what the upstream got wrong, which is true whatever
-    happens to the year. Anything unexplained is refused exactly as before.
+    refused. The drop is recorded in `upstream_defects` once `write_daily_panel`'s guards have all
+    passed and before either partition is written (its `before_write`, `V2-P6-016`), so the record
+    never claims a drop a refused write did not make. Anything unexplained is refused exactly as
+    before.
 
     **A stored row the upstream no longer serves is recorded, not refused** (`V2-P6-016`), for all
-    three datasets: `panel_ingest.reconcile_withdrawals` confirms each absence with one more
-    whole-session request and records it as `withdrawn_after_publication`, and the writers' subject
-    guards release a security only when every stored row of it went that way. `suspend_d` is
-    stored before the year's defect record can be rebuilt -- the halt corpus that rebuild needs is
-    read from it -- so a halt withdrawal is written into the record first, beside every record
-    already stored, and the row leaves the partition only after its evidence is on disk.
+    three datasets: `_settle_withdrawals` confirms each absence with one more whole-session request
+    and records it as `withdrawn_after_publication` -- the row whole in its `withdrawn_*` dataset
+    -- and the writers' subject guards release a security only when every stored row of it went
+    that way. `suspend_d` is written before the year's defect record can be rebuilt -- the halt
+    corpus that rebuild needs is read from it -- so a change to the halt withdrawals goes on the
+    record in `write_suspensions`' own `before_write`, beside every other record already stored,
+    and the final record is written in `write_daily_panel`'s. A withdrawn halt needs its
+    security's bar on that session in the `daily` year stored here, or the year is refused.
     """
     if not sessions:
         raise _panel_fail(
@@ -3596,54 +3846,96 @@ def _build_price_panel(
             "a close disagreement against",
         )
     price_slice = _incremental_slice(sessions, fetch_from)
-    collected = _session_batches(provider, PANEL_BUILD_TARGETS["price"], price_slice)
-    # `V2-P6-016`: decided on the raw answers, before the carry and before anything is written.
-    carried_withdrawals = _carried_withdrawals(
-        store, target="price", fetched=collected, year=year, sessions=sessions, now=now
-    )
-    withdrawals = {
-        name: _withdrawals(
-            store,
-            provider,
-            dataset=name,
-            fetched=collected[name],
-            sessions=price_slice,
-            year=year,
-            now=now,
-            confirmed=withdrawn,
+    datasets = PANEL_BUILD_TARGETS["price"]
+    fresh = _session_batches(provider, datasets, price_slice)
+    # `V2-P6-016`: the sessions holding a carried withdrawal are asked again, per dataset.
+    asked = {name: (rechecks or {}).get(name, ()) for name in datasets}
+    answers = {name: _recheck_batches(provider, name, asked[name]) for name in datasets}
+    collected: dict[str, list[ColumnarPanelBatch]] = {
+        name: (
+            list(fresh[name])
+            if fetch_from is None
+            # `V2-P6-003`: every session before the slice comes back out of the store, in front
+            # of the fetched ones, and everything below runs on the whole year as a full build.
+            else _carried_with_rechecks(
+                store,
+                dataset=name,
+                fresh=fresh[name],
+                asked=asked[name],
+                answers=answers[name],
+                year=year,
+                before=fetch_from,
+                now=now,
+            )
         )
-        for name in PANEL_BUILD_TARGETS["price"]
+        for name in datasets
     }
-    carried_defects = _carried_defects(store, target="price", year=year, before=fetch_from, now=now)
-    halt_record = withdrawals[SUSPENSION_DATASET].record
-    if halt_record is not None:
-        # The halt partition is written next and the year's record only after the reconciliation
-        # it feeds, so the withdrawal goes on the record now, beside every stored record.
-        noted = write_upstream_defects(
+    bars: set[tuple[str, date]] | None = None
+
+    def traded(ts_code: str, day: date) -> bool:
+        nonlocal bars
+        if bars is None:
+            bars = set(served_keys(collected[DAILY_DATASET], DAILY_DATASET))
+        return (ts_code, day) in bars
+
+    settled = _settle_withdrawals(
+        store,
+        provider,
+        target="price",
+        fetched={name: [*fresh[name], *answers[name].values()] for name in datasets},
+        refetched={name: (*price_slice, *asked[name]) for name in datasets},
+        year=year,
+        sessions=sessions,
+        now=now,
+        witness={SUSPENSION_DATASET: traded},
+    )
+    carried_defects = _carried_defects(
+        store,
+        target="price",
+        year=year,
+        before=fetch_from,
+        now=now,
+        rechecked={(name, day) for name in datasets for day in asked[name]},
+    )
+    halt_batches = collected[SUSPENSION_DATASET]
+    halt_withdrawals = settled.found[SUSPENSION_DATASET]
+    if halt_withdrawals.defects and not halt_batches:
+        raise _panel_fail(
+            PanelExit.unhealthy,
+            f"every {SUSPENSION_DATASET} row of {year} the store held is withdrawn and nothing is "
+            "served in its place, so there is no halt partition to write the year's halts to; "
+            "rebuild the year in full",
+        )
+    bar_sources = frozenset({DAILY_DATASET, DAILY_BASIC_DATASET})
+
+    def record_halts() -> None:
+        _write_withdrawals(
             store,
-            combine_defect_records(
-                _stored_defects(store, target="price", year=year, sessions=sessions, now=now),
-                halt_record,
+            settled,
+            datasets=(SUSPENSION_DATASET,),
+            index=combine_defect_records(
+                _stored_defects(store, sources=bar_sources, year=year, sessions=sessions, now=now),
+                settled.records_of(frozenset({SUSPENSION_DATASET})),
+            ),
+            # Only when the halt withdrawals change: the year's record is otherwise rewritten
+            # once, after the reconciliation below, exactly as before `V2-P6-016`.
+            index_sources=(
+                INCREMENTAL_DEFECT_SOURCES["price"]
+                if SUSPENSION_DATASET in settled.changed
+                else None
             ),
             year=year,
-            source_datasets=INCREMENTAL_DEFECT_SOURCES["price"],
+            written=written,
+            confirmed=withdrawn,
         )
-        if noted is not None:
-            written.append(noted)
-    if fetch_from is not None:
-        # `V2-P6-003`: every session before the slice comes back out of the store, in front of
-        # the fetched ones, and everything below runs on the whole year exactly as a full build.
-        collected = {
-            name: carry_stored_sessions_forward(
-                store, batches, dataset=name, year=year, before=fetch_from, observed_at=now
-            )
-            for name, batches in collected.items()
-        }
-    halt_batches = collected[SUSPENSION_DATASET]
+
     if halt_batches:
         written.append(
             write_suspensions(
-                store, halt_batches, released=withdrawals[SUSPENSION_DATASET].released
+                store,
+                halt_batches,
+                released=halt_withdrawals.released,
+                before_write=record_halts,
             )
         )
     corpus = None
@@ -3707,21 +3999,6 @@ def _build_price_panel(
             else None
         ),
     )
-    recorded = write_upstream_defects(
-        store,
-        combine_defect_records(
-            carried_defects,
-            carried_withdrawals,
-            *(found.record for found in withdrawals.values()),
-            listed_bars.record,
-            listed_valuations.record,
-            reconciled.record,
-        ),
-        year=year,
-        source_datasets=INCREMENTAL_DEFECT_SOURCES["price"],
-    )
-    if recorded is not None:
-        written.append(recorded)
     written.extend(
         write_daily_panel(
             store,
@@ -3729,7 +4006,24 @@ def _build_price_panel(
             fundamentals=reconciled.batches,
             calendar=calendar,
             halts=corpus,
-            released={name: found.released for name, found in withdrawals.items()},
+            released={name: found.released for name, found in settled.found.items()},
+            before_write=lambda: _write_withdrawals(
+                store,
+                settled,
+                datasets=(DAILY_DATASET, DAILY_BASIC_DATASET)
+                + (() if halt_batches else (SUSPENSION_DATASET,)),
+                index=combine_defect_records(
+                    carried_defects,
+                    settled.records_of(INCREMENTAL_DEFECT_SOURCES["price"]),
+                    listed_bars.record,
+                    listed_valuations.record,
+                    reconciled.record,
+                ),
+                index_sources=INCREMENTAL_DEFECT_SOURCES["price"],
+                year=year,
+                written=written,
+                confirmed=withdrawn,
+            ),
         )
     )
     return "corroborated" if corpus is not None else "waived"
@@ -4942,7 +5236,7 @@ def _build_panel(
         )
     # `V2-P6-003`: where each session-scoped target's slice starts, decided for all of them
     # before the first session is fetched. Empty without `--incremental`: every slice is the year.
-    starts = (
+    starts, rechecks = (
         _incremental_starts(
             store,
             targets=targets,
@@ -4953,80 +5247,80 @@ def _build_panel(
             rebuild=rebuild,
         )
         if incremental
-        else {}
+        else ({}, {})
     )
     if ADJ_FACTOR_DATASET in targets:
         assert calendar is not None  # guaranteed by `_NEEDS_STORED_CALENDAR` above
         factor_start = starts.get(ADJ_FACTOR_DATASET)
         factor_slice = _incremental_slice(sessions, factor_start)
-        fetched_factors = _session_batches(provider, (ADJ_FACTOR_DATASET,), factor_slice)[
+        fresh_factors = _session_batches(provider, (ADJ_FACTOR_DATASET,), factor_slice)[
             ADJ_FACTOR_DATASET
         ]
-        # `V2-P6-016`: the stored rows the upstream withdrew, confirmed and recorded, and the
-        # records of earlier withdrawals, carried -- both decided before anything is written.
-        carried_factor_withdrawals = _carried_withdrawals(
+        # `V2-P6-016`: the sessions holding a carried withdrawal are asked again, and every
+        # withdrawal is confirmed and settled before anything of this target is written.
+        asked_factors = rechecks.get(ADJ_FACTOR_DATASET, ())
+        factor_answers = _recheck_batches(provider, ADJ_FACTOR_DATASET, asked_factors)
+        fetched_factors = [*fresh_factors, *factor_answers.values()]
+        settled_factors = _settle_withdrawals(
             store,
+            provider,
             target=ADJ_FACTOR_DATASET,
             fetched={ADJ_FACTOR_DATASET: fetched_factors},
+            refetched={ADJ_FACTOR_DATASET: (*factor_slice, *asked_factors)},
             year=year,
             sessions=sessions,
             now=now,
         )
-        factor_withdrawals = _withdrawals(
-            store,
-            provider,
-            dataset=ADJ_FACTOR_DATASET,
-            fetched=fetched_factors,
-            sessions=factor_slice,
-            year=year,
-            now=now,
-            confirmed=withdrawn,
-            date_column=ADJUSTMENT_DATE_COLUMN,
-        )
+        factor_withdrawals = settled_factors.found[ADJ_FACTOR_DATASET]
         if factor_start is not None:
             _refuse_a_withdrawn_closing_anchor(factor_withdrawals, fetched_factors, rebuild=rebuild)
         factors = reconcile_pre_listing_rows(
-            fetched_factors
+            fresh_factors
             if factor_start is None
-            else carry_stored_sessions_forward(
+            else _carried_with_rechecks(
                 store,
-                fetched_factors,
                 dataset=ADJ_FACTOR_DATASET,
+                fresh=fresh_factors,
+                asked=asked_factors,
+                answers=factor_answers,
                 year=year,
                 before=factor_start,
-                observed_at=now,
+                now=now,
             ),
             listings=listings,
             date_column=ADJUSTMENT_DATE_COLUMN,
         )
-        if factor_start is not None and any(
-            defect.trade_date < factor_start for defect in factors.defects
-        ):
+        carried_before = sorted(
+            {
+                defect.ts_code
+                for defect in factors.defects
+                if factor_start is not None
+                and defect.trade_date < factor_start
+                and defect.trade_date not in asked_factors
+            }
+        )
+        if carried_before:
             # The carried factor rows are compressed: a full rebuild would drop and record every
             # pre-listing session of the security, the slice only the steps it kept.
             raise _refuse_incremental(
                 rebuild,
                 f"the stored registry now places carried {ADJ_FACTOR_DATASET} rows of "
-                f"{sorted({d.ts_code for d in factors.defects if d.trade_date < factor_start})} "
-                "before their listing, and a compressed partition cannot be re-judged session by "
-                "session",
+                f"{carried_before} before their listing, and a compressed partition cannot be "
+                "re-judged session by session",
             )
         factor_refs = written.setdefault(ADJ_FACTOR_DATASET, [])
-        recorded = write_upstream_defects(
-            store,
-            combine_defect_records(
-                _carried_defects(
-                    store, target=ADJ_FACTOR_DATASET, year=year, before=factor_start, now=now
-                ),
-                carried_factor_withdrawals,
-                factor_withdrawals.record,
-                factors.record,
+        factor_index = combine_defect_records(
+            _carried_defects(
+                store,
+                target=ADJ_FACTOR_DATASET,
+                year=year,
+                before=factor_start,
+                now=now,
+                rechecked={(ADJ_FACTOR_DATASET, day) for day in asked_factors},
             ),
-            year=year,
-            source_datasets=frozenset({ADJ_FACTOR_DATASET}),
+            settled_factors.records_of(frozenset({ADJ_FACTOR_DATASET})),
+            factors.record,
         )
-        if recorded is not None:
-            factor_refs.append(recorded)
         factor_refs.append(
             write_adjustment_factors(
                 store,
@@ -5034,6 +5328,16 @@ def _build_panel(
                 calendar=calendar,
                 census_from=factor_start,
                 released=factor_withdrawals.released,
+                before_write=lambda: _write_withdrawals(
+                    store,
+                    settled_factors,
+                    datasets=(ADJ_FACTOR_DATASET,),
+                    index=factor_index,
+                    index_sources=frozenset({ADJ_FACTOR_DATASET}),
+                    year=year,
+                    written=factor_refs,
+                    confirmed=withdrawn,
+                ),
             )
         )
     if "price" in targets:
@@ -5052,6 +5356,7 @@ def _build_panel(
             exchange=exchange,
             fetch_from=starts.get("price"),
             withdrawn=withdrawn,
+            rechecks=rechecks,
         )
     if PRICE_LIMIT_DATASET in targets:
         assert calendar is not None  # guaranteed by `_NEEDS_STORED_CALENDAR` above
@@ -5059,37 +5364,33 @@ def _build_panel(
         # before the writer sees it; every other zero upper limit is refused by name.
         limit_start = starts.get(PRICE_LIMIT_DATASET)
         limit_slice = _incremental_slice(sessions, limit_start)
-        fetched_limits = _session_batches(provider, (PRICE_LIMIT_DATASET,), limit_slice)[
+        fresh_limits = _session_batches(provider, (PRICE_LIMIT_DATASET,), limit_slice)[
             PRICE_LIMIT_DATASET
         ]
-        carried_limit_withdrawals = _carried_withdrawals(
+        asked_limits = rechecks.get(PRICE_LIMIT_DATASET, ())
+        limit_answers = _recheck_batches(provider, PRICE_LIMIT_DATASET, asked_limits)
+        settled_limits = _settle_withdrawals(
             store,
+            provider,
             target=PRICE_LIMIT_DATASET,
-            fetched={PRICE_LIMIT_DATASET: fetched_limits},
+            fetched={PRICE_LIMIT_DATASET: [*fresh_limits, *limit_answers.values()]},
+            refetched={PRICE_LIMIT_DATASET: (*limit_slice, *asked_limits)},
             year=year,
             sessions=sessions,
             now=now,
         )
-        limit_withdrawals = _withdrawals(
-            store,
-            provider,
-            dataset=PRICE_LIMIT_DATASET,
-            fetched=fetched_limits,
-            sessions=limit_slice,
-            year=year,
-            now=now,
-            confirmed=withdrawn,
-        )
         listed_limits = reconcile_pre_listing_rows(
-            fetched_limits
+            fresh_limits
             if limit_start is None
-            else carry_stored_sessions_forward(
+            else _carried_with_rechecks(
                 store,
-                fetched_limits,
                 dataset=PRICE_LIMIT_DATASET,
+                fresh=fresh_limits,
+                asked=asked_limits,
+                answers=limit_answers,
                 year=year,
                 before=limit_start,
-                observed_at=now,
+                now=now,
             ),
             listings=listings,
         )
@@ -5097,25 +5398,35 @@ def _build_panel(
             listed_limits.batches, halts=lambda: _stored_halts(store, year=year, now=now)
         )
         limit_refs = written.setdefault(PRICE_LIMIT_DATASET, [])
-        recorded = write_upstream_defects(
-            store,
-            combine_defect_records(
-                _carried_defects(
-                    store, target=PRICE_LIMIT_DATASET, year=year, before=limit_start, now=now
-                ),
-                carried_limit_withdrawals,
-                limit_withdrawals.record,
-                listed_limits.record,
-                limits.record,
+        limit_index = combine_defect_records(
+            _carried_defects(
+                store,
+                target=PRICE_LIMIT_DATASET,
+                year=year,
+                before=limit_start,
+                now=now,
+                rechecked={(PRICE_LIMIT_DATASET, day) for day in asked_limits},
             ),
-            year=year,
-            source_datasets=frozenset({PRICE_LIMIT_DATASET}),
+            settled_limits.records_of(frozenset({PRICE_LIMIT_DATASET})),
+            listed_limits.record,
+            limits.record,
         )
-        if recorded is not None:
-            limit_refs.append(recorded)
         limit_refs.append(
             write_price_limits(
-                store, limits.batches, calendar=calendar, released=limit_withdrawals.released
+                store,
+                limits.batches,
+                calendar=calendar,
+                released=settled_limits.found[PRICE_LIMIT_DATASET].released,
+                before_write=lambda: _write_withdrawals(
+                    store,
+                    settled_limits,
+                    datasets=(PRICE_LIMIT_DATASET,),
+                    index=limit_index,
+                    index_sources=frozenset({PRICE_LIMIT_DATASET}),
+                    year=year,
+                    written=limit_refs,
+                    confirmed=withdrawn,
+                ),
             )
         )
     if NAMECHANGE_DATASET in targets:
@@ -5586,7 +5897,9 @@ _BUILD_INCREMENTAL_HELP = (
     "full build to run instead. The other targets are one request a year or a whole-year sweep "
     "and run as they always do. See `_incremental_start`. A stored row the upstream no longer "
     "serves on a session fetched again -- full build or incremental -- costs one more request "
-    "for that session and, confirmed, is recorded as withdrawn_after_publication (V2-P6-016)."
+    "for that session and, confirmed, is recorded as withdrawn_after_publication and kept whole "
+    "in its withdrawn_* dataset (V2-P6-016); an incremental build also asks again each session "
+    "holding such a record, so a re-publication is seen as a full build sees it."
 )
 
 
@@ -5674,14 +5987,19 @@ def panel_build(
     **A stored row the upstream withdrew is recorded, not refused** (`V2-P6-016`). The overlap
     session is fetched again, and so is every session of a full build; a stored row on one of
     them that the answer lacks costs one more whole-session request, and when that second answer
-    is the first one again the row is recorded as `withdrawn_after_publication`
-    (`panel_ingest.reconcile_withdrawals`) and the subject guard lets its security go only if
-    every stored row of it went that way. A second answer that differs refuses the year. The
-    records are carried by every later build and retired when the row is served again, so the
-    two builds still agree byte for byte; the confirmed rows are the JSON report's
-    `withdrawals`. One exception, `_refuse_a_withdrawn_closing_anchor`: a compressed
-    `adj_factor` year whose withdrawn row closed a security that the slice no longer serves is
-    refused with the full build.
+    is the first one again -- and the first was a whole session, not an empty or thin one -- the
+    row is recorded as `withdrawn_after_publication` in `upstream_defects`, kept whole in its
+    `withdrawn_*` dataset, and the subject guard lets its security go only if every stored row of
+    it went that way (`panel_ingest.reconcile_withdrawals`). A withdrawn halt also needs its
+    security's bar. A second answer that differs refuses the year. Both records are written only
+    once the partition losing the row has passed every guard (the writers' `before_write`), are
+    carried by every later build, and are retired when the row is served again. An incremental
+    build asks again for every `(dataset, session)` holding a carried withdrawal before its slice
+    -- stated on a `BUDGET withdrawal-recheck` line, and refused past `WITHDRAWAL_RECHECK_LIMIT` --
+    so it sees a re-publication exactly as the full build does and the two still agree byte for
+    byte; the confirmed rows are the JSON report's `withdrawals`. One exception,
+    `_refuse_a_withdrawn_closing_anchor`: a compressed `adj_factor` year whose withdrawn row
+    closed a security that the slice no longer serves is refused with the full build.
 
     **Two phases, and the second is not an optimisation.** The year loop runs the ten year-scoped
     targets; `_build_span_targets` then runs the three in `PANEL_BUILD_SPAN_TARGETS` once for the
