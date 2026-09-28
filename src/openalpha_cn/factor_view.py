@@ -296,6 +296,7 @@ from openalpha_cn.panel_factors import (
     FACTOR_TRANSFORMS,
     FactorEngineError,
     FactorPanel,
+    FactorReadCarry,
     ProcessedFactorPanel,
     apply_factor_transform,
     compute_factor,
@@ -3124,8 +3125,14 @@ def build_factor_panels(
     So a build that cannot finish stores nothing and says why, by name. See
     `the_builder_cannot_produce_a_residual_for_a_session_that_has_not_closed`.
     """
+    # One carry for the whole build, handed to every instant in `request.as_ofs`' ascending order,
+    # so each instant reads only the rows that became visible since the one before it
+    # (`V2-P6-005`); see `FactorReadCarry` for why the cross sections are the ones a fresh read of
+    # each instant computes.
+    carry = FactorReadCarry()
     computed = [
-        _computed(store, request, as_of=as_of, built_at=built_at) for as_of in request.as_ofs
+        _computed(store, request, as_of=as_of, built_at=built_at, carry=carry)
+        for as_of in request.as_ofs
     ]
     panels = [panel for panel, _count in computed]
     processed: list[ProcessedFactorPanel] = []
@@ -3248,7 +3255,12 @@ def _census(codes: Sequence[str]) -> dict[str, int]:
 
 
 def _computed(
-    store: PanelStore, request: FactorBuildRequest, *, as_of: datetime, built_at: datetime
+    store: PanelStore,
+    request: FactorBuildRequest,
+    *,
+    as_of: datetime,
+    built_at: datetime,
+    carry: FactorReadCarry,
 ) -> tuple[FactorPanel, int]:
     """One raw cross section, and the size of the universe it was scored against.
 
@@ -3321,6 +3333,7 @@ def _computed(
             requirements=requirements,
             code_commit=request.code_commit,
             built_at=built_at,
+            carry=carry,
         ),
         store=store,
         what=f"the {request.definition.qualified_key} cross section at {as_of.isoformat()}",

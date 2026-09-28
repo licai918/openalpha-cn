@@ -80,6 +80,7 @@ FILTERED_READ_REACHERS: dict[str, frozenset[str]] = {
     "panel_factors.py": frozenset(
         {
             "_read_dataset",
+            "_read_into",
             "compute_factor",
             "load_factor_manifests",
             "load_factor_observations",
@@ -130,6 +131,15 @@ closure below therefore follows intra-module calls, and a loader that newly rout
 What the entry does not promise is inter-module reachability: the closure stops at the file, for
 the same reason the allowlist above it does -- a caller in another module cannot reach the method
 without importing a name from a file that is already on this list, and that import is the review.
+
+**`_read_into` (`V2-P6-005`) is `_read_dataset`'s row loop split out, and its answer about
+shortness is `_read_dataset`'s.** Handed a `FactorReadCarry` from an earlier instant of the same
+build, it asks for the rows that became visible since that instant (`newly_visible_since`) and adds
+them to the rows it holds from then, so what the engine indexes at `as_of` is the whole visible
+read and not the slice: visibility only grows, and the carry is refused whenever the partition's
+content hash has moved. Every withheld count, reach and readiness verdict it records is the
+store's, taken at `as_of` over the whole selection exactly as for a fresh read, so a withheld row
+and an absent one are told apart where they always were -- by the store, not by this caller.
 """
 
 FILTERED_READ_CALLERS: frozenset[str] = frozenset(FILTERED_READ_REACHERS)

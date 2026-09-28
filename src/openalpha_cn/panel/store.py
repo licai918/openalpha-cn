@@ -1437,6 +1437,7 @@ class PanelStore:
         columns: Sequence[str],
         filters: Mapping[str, object] | None = None,
         event_time_as_naive_utc: bool = False,
+        newly_visible_since: datetime | None = None,
     ) -> PanelVisibleReadOutcome:
         """Read the rows of a partition that were knowable at `requirement.as_of`, and say how
         many were not (`V2-P3-002`).
@@ -1579,12 +1580,34 @@ class PanelStore:
         for microsecond -- and the caller attaches `UTC` itself, once per distinct instant rather
         than once per row. The predicate, the census, the readiness verdict and the slice
         re-checks do not read the projection and are untouched.
+
+        **`newly_visible_since` narrows the rows handed back and nothing else** (`V2-P6-005`).
+        With an earlier instant `t`, the projection returns the rows visible at `as_of` that were
+        *not* visible at `t` -- the same predicate at `as_of`, and its own negation at `t`, both in
+        the statement:
+
+            available_time <= as_of AND revision_time <= as_of
+            AND NOT (available_time <= t AND revision_time <= t)
+
+        Visibility only ever grows with the instant it is asked at -- a row visible at `t` has
+        both clocks at or before `t`, so at or before any later `as_of` -- so the rows visible at
+        `as_of` are exactly the rows visible at `t` plus these, each once. A caller that holds the
+        read it took at `t` of the same partition therefore holds the read at `as_of` after this
+        one, without the partition's whole visible slice being fetched and converted again. That
+        is the factor engine's use (`panel_factors.FactorReadCarry`), and holding "the same
+        partition" is its obligation: it compares `partition_content_hash` before trusting what
+        it carried. Everything this method decides is still decided at `as_of`, over the whole
+        selection -- the verdict, the pooled slice re-checks, the withheld count, the reach and
+        the revision-withheld list -- so a read that would be refused whole is refused whole.
+        The outcome says which kind of read it is (`newly_visible_since_or_none`) and refuses
+        `visible_row_count` on the slice.
         """
         return self.assessed(requirement).read_visible_at(
             year=year,
             columns=columns,
             filters=filters,
             event_time_as_naive_utc=event_time_as_naive_utc,
+            newly_visible_since=newly_visible_since,
         )
 
     def _scan_visible(
@@ -1598,6 +1621,7 @@ class PanelStore:
         filters: Mapping[str, object] | None,
         probe_subjects: Sequence[str] | None,
         event_time_as_naive_utc: bool = False,
+        newly_visible_since: datetime | None = None,
     ) -> _VisibleScan:
         """The visible rows of `year`, and everything the second gate needs to judge them.
 
@@ -1652,6 +1676,7 @@ class PanelStore:
                 filters,
                 as_of=as_of,
                 event_time_as_naive_utc=event_time_as_naive_utc,
+                newly_visible_since=newly_visible_since,
             )
             with _scan_failures_as_storage_errors(dataset, year):
                 scanned = connection.execute(visible_sql, visible_parameters).fetchall()
@@ -2000,6 +2025,7 @@ class AssessedPanelRead:
         columns: Sequence[str],
         filters: Mapping[str, object] | None = None,
         event_time_as_naive_utc: bool = False,
+        newly_visible_since: datetime | None = None,
     ) -> PanelVisibleReadOutcome:
         """`PanelStore.read_visible_at`'s body, against a verdict already taken.
 
@@ -2010,6 +2036,14 @@ class AssessedPanelRead:
         let a pair of cancelling errors through.
         """
         requirement = self._year_in_scope(year)
+        if newly_visible_since is not None:
+            _require_aware(newly_visible_since, "newly_visible_since")
+            if newly_visible_since > requirement.as_of:
+                raise PanelStorageError(
+                    f"newly_visible_since {newly_visible_since.isoformat()} is after the as_of "
+                    f"{requirement.as_of.isoformat()} it narrows; the rows that became visible "
+                    "since a later instant are not a slice of the rows visible now"
+                )
         readiness = self.readiness
         found = {issue.code for issue in readiness.issues}
         if found - ROW_FILTERABLE_ISSUE_CODES:
@@ -2034,6 +2068,7 @@ class AssessedPanelRead:
                 filters=filters,
                 probe_subjects=requirement.required_subjects,
                 event_time_as_naive_utc=event_time_as_naive_utc,
+                newly_visible_since=newly_visible_since,
             )
         except PanelStorageError:
             raise
@@ -2062,6 +2097,7 @@ class AssessedPanelRead:
             withheld_row_count_or_none=scan.partition.withheld_row_count,
             visible_last_event_time_or_none=scan.partition.last_event_time,
             revision_withheld_or_none=scan.partition.revision_withheld,
+            newly_visible_since_or_none=newly_visible_since,
         )
 
 
@@ -2178,6 +2214,7 @@ def _build_visible_scan_sql(
     *,
     as_of: datetime,
     event_time_as_naive_utc: bool = False,
+    newly_visible_since: datetime | None = None,
 ) -> tuple[str, list[object]]:
     """`read_visible_at`'s projection, with the visibility predicate **in the statement**.
 
@@ -2198,6 +2235,10 @@ def _build_visible_scan_sql(
     `event_time_as_naive_utc` rewrites one projected column and nothing else; see
     `PanelStore.read_visible_at`. The rewrite keeps the column's own quoted name as its alias, so
     a hostile name still reaches the binder as one quoted identifier.
+
+    `newly_visible_since` appends the predicate's own negation at that instant, from the same
+    `_visible_clauses()`, so the two halves cannot come to spell visibility differently. It is
+    appended after the predicate and binds its own `?`s; the predicate at `as_of` is unchanged.
     """
     if not columns:
         raise PanelStorageError("must request at least one column")
@@ -2207,9 +2248,13 @@ def _build_visible_scan_sql(
     clauses, values = _equality_clauses(filters)
     visible = _visible_clauses()
     clauses.extend(visible)
+    parameters: list[object] = [str(partition_path), *values, *(as_of for _ in visible)]
+    if newly_visible_since is not None:
+        clauses.append(f"NOT ({' AND '.join(visible)})")
+        parameters.extend(newly_visible_since for _ in visible)
     return (
         f"SELECT {column_list} FROM read_parquet(?) WHERE {' AND '.join(clauses)}",
-        [str(partition_path), *values, *(as_of for _ in visible)],
+        parameters,
     )
 
 

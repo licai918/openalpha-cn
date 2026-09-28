@@ -402,6 +402,7 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_factors.FACTOR_TRANSFORMS",
             "panel_factors.FactorEngineError",
             "panel_factors.FactorPanel",
+            "panel_factors.FactorReadCarry",
             "panel_factors.ProcessedFactorPanel",
             "panel_factors.apply_factor_transform",
             "panel_factors.compute_factor",
@@ -574,7 +575,10 @@ row -- which is what this table is for.
 two panel types, `load_industry_market_cap_cross_section` and the two requirement builders --
 are ones a *renderer* would not have. That is a face that now writes the tiers it used to only
 read, and it arrived here as thirteen lines on this row rather than as a package edge nothing
-measured, which is the whole reason the table is at name granularity.
+measured, which is the whole reason the table is at name granularity. `V2-P6-005` added
+`FactorReadCarry`, which `build_factor_panels` hands to every instant of one build so that each
+reads only the rows that became visible since the one before: a cost moved across the seam, not
+a new reach.
 
 **`shortlist_compare` is the emptiest row on the panel side and that is its whole claim**
 (`V2-P4-007`). It takes four names, all off `openalpha_cn.shortlist_view`, and **not one**

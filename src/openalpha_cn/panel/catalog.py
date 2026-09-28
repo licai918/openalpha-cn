@@ -1128,6 +1128,16 @@ class PanelVisibleReadOutcome:
     date by date and still refuses everything else; see its docstring. `None` on a blocked
     outcome; read it through `revision_withheld`, which raises there.
     """
+    newly_visible_since_or_none: datetime | None = None
+    """Set when `rows` are only the rows that became visible after this instant (`V2-P6-005`).
+
+    `PanelStore.read_visible_at(..., newly_visible_since=...)` hands back the rows visible at
+    `as_of` that were **not** visible at the earlier instant -- a slice of the visible read, not
+    the visible read. Everything else on the outcome still describes the whole selection at
+    `as_of`: the verdict, the slice re-checks, `withheld_row_count`, `visible_last_event_time`
+    and `revision_withheld` are taken exactly as for a full read. `visible_row_count` is the one
+    number that would silently change meaning, so it refuses on such an outcome.
+    """
 
     @property
     def is_blocked(self) -> bool:
@@ -1209,6 +1219,12 @@ class PanelVisibleReadOutcome:
 
     @property
     def visible_row_count(self) -> int:
+        if self.newly_visible_since_or_none is not None:
+            raise PanelStorageError(
+                f"{self.readiness.dataset} was read for the rows that became visible after "
+                f"{self.newly_visible_since_or_none.isoformat()}, so len(rows) is how many became "
+                f"visible since then and not how many are visible at {self.as_of.isoformat()}"
+            )
         return len(self.rows)
 
     @property

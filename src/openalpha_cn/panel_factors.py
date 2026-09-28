@@ -836,7 +836,7 @@ from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from types import MappingProxyType
-from typing import Final, Literal, Protocol, TypeVar, cast
+from typing import Any, Final, Literal, Protocol, TypeVar, cast
 from zoneinfo import ZoneInfo
 
 from openalpha_cn.domain.daily_prices import (
@@ -4481,6 +4481,126 @@ class FactorPanel:
 # --- computing ---------------------------------------------------------------------------------
 
 
+class _CarriedPartitionChanged(Exception):
+    """A carried read met a partition whose content is not the one it carried rows from."""
+
+
+@dataclass(eq=False, slots=True, kw_only=True)
+class _ReadState:
+    """Everything `_read_dataset` builds from one dataset's rows, kept so it can be added to.
+
+    The accumulators are exactly the ones `_read_dataset` has always filled -- `points`,
+    `values`, `announced`, `stated`, `ambiguous` -- plus what a later instant needs in order to
+    trust them: the instant they were read at, and, per year, the partition's content hash and
+    how many rows were visible. `session_of` is `V2-P6-005`'s per-instant date memo, which is a
+    fact about instants rather than about any one read and so carries too.
+    """
+
+    store: PanelStore
+    columns: tuple[str, ...]
+    zone: ZoneInfo
+    years: tuple[int, ...]
+    as_of: datetime | None = None
+    partitions: dict[int, tuple[str, int]] = field(default_factory=dict)
+    points: defaultdict[str, list[date]] = field(default_factory=lambda: defaultdict(list))
+    values: dict[tuple[str, date], tuple[float | None, ...]] = field(default_factory=dict)
+    announced: dict[tuple[str, date], date] = field(default_factory=dict)
+    stated: dict[tuple[str, date, date], tuple[float | None, ...]] = field(default_factory=dict)
+    ambiguous: dict[str, set[date]] = field(default_factory=dict)
+    session_of: dict[object, date] = field(default_factory=dict)
+
+
+class FactorReadCarry:
+    """What one build has read, carried from one of its instants to the next (`V2-P6-005`).
+
+    ## Why a build re-read a year per instant, and what this changes
+
+    `compute_factor` reads every visible row of every requested year at its `as_of`, so a build of
+    one factor at the ~245 sessions of a year fetched and decoded that year's partition ~245
+    times -- 675,148 rows for one whole-market `daily` year, each instant a little longer than
+    the last. Handed to `compute_factor` at each of a build's instants in ascending order, one of
+    these keeps what the previous instant read, and the next instant asks the store only for the
+    rows that became visible since (`PanelStore.read_visible_at(..., newly_visible_since=...)`).
+    Each row is fetched and decoded once per build rather than once per instant.
+
+    ## Why the answer is the one a fresh read gives
+
+    Three facts. The first is a property of the predicate, the second of `_read_into`, and the
+    one precondition that can change between two instants -- that it is the same partition -- is
+    checked at every carried read rather than assumed:
+
+    - **Visibility only grows.** A row is visible at an instant when both of its clocks are at
+      or before it (`domain/time.py::is_visible_at`), so a row visible at `t` is visible at every
+      later instant. The rows visible at `as_of` are therefore the rows visible at `t` plus the
+      rows the store returns for `newly_visible_since=t` -- each exactly once, because that read
+      is the predicate at `as_of` and its negation at `t` in one statement. That holds only for
+      the same partition, so every carried year's `partition_content_hash` is compared before a
+      carried row is trusted; a partition rewritten between two instants discards the carry and
+      reads the dataset afresh.
+    - **`_read_dataset` is indifferent to the order rows arrive in.** The session axis keeps one
+      row per `(subject, session)` and refuses a second whenever it arrives; the period axis keeps
+      the latest announcement and decides "one fact stated twice" by comparing each version with
+      the first one seen, which `V2-P3-018` already made order-independent because DuckDB does not
+      order a scan. A carried read is the fresh read's rows in a different order.
+    - **Every refusal is still taken at this instant.** The readiness verdict, the pooled slice
+      re-checks, the withheld count and the reach are decided by the store over the whole
+      selection at `as_of`, carried or not, and `_refuse_a_read_that_cannot_see_what_as_of_holds`
+      runs before the read. A row carried from `t` passed the `event_time <= as_of` check at `t`,
+      and `as_of` is later.
+
+    So `visible_row_count` is the one number the carry adds up rather than reads: the count at `t`
+    plus the rows new since -- the same count, because the two sets partition the visible rows.
+
+    ## What it does not carry
+
+    Anything but one factor's own reads, in ascending instant order. A carry is resumed only by
+    the same store object, the same dataset, the same projected columns, the same zone and the
+    same year set, at an instant no earlier than the one it was taken at; anything else reads
+    afresh and replaces it. A read that raises forgets the dataset, so a half-applied delta is
+    never resumed. The `_DatasetReading` a carried read returns is a view over the carried
+    dictionaries, and the next carried read of the same dataset extends them, so it is valid
+    until then -- which is the whole of `compute_factor`'s use of it.
+
+    Not a determinant of the answers, which is what the determinant audit in
+    `tests/integration/panel/test_factor_engine.py` records it as; and
+    `tests/unit/panel/test_factor_read_path_equivalence.py` holds a carried build of every
+    declared factor to the partitions a fresh one stores.
+    """
+
+    __slots__ = ("_states",)
+
+    def __init__(self) -> None:
+        self._states: dict[str, _ReadState] = {}
+
+    def _resume(
+        self,
+        store: PanelStore,
+        *,
+        dataset: str,
+        columns: tuple[str, ...],
+        zone: ZoneInfo,
+        years: tuple[int, ...],
+    ) -> _ReadState | None:
+        state = self._states.get(dataset)
+        if state is None:
+            return None
+        if (
+            state.store is not store
+            or state.columns != columns
+            or state.zone.key != zone.key
+            or state.years != years
+        ):
+            del self._states[dataset]
+            return None
+        return state
+
+    def _keep(self, dataset: str, state: _ReadState) -> None:
+        self._states[dataset] = state
+
+    def _forget(self, dataset: str) -> None:
+        self._states.pop(dataset, None)
+
+
 def compute_factor(
     store: PanelStore,
     definition: FactorDefinition,
@@ -4493,6 +4613,7 @@ def compute_factor(
     built_at: datetime,
     date_timezone: str = DEFAULT_DATE_TIMEZONE,
     evaluators: Mapping[str, FactorEvaluator] | None = None,
+    carry: FactorReadCarry | None = None,
 ) -> FactorPanel:
     """Evaluate `definition` for `subjects` at `as_of`, reading only rows visible at `as_of`.
 
@@ -4557,6 +4678,14 @@ def compute_factor(
     which ever held of its **output**. `manifest.observation_digest` addresses the answers, so an
     evaluator that computes different numbers from the same rows moves `manifest_id`. That was the
     last place in this contract where "decides the answers" and "reaches the identity" came apart.
+
+    **`carry` is an exemption, and the reason is a proof rather than a convenience** (`V2-P6-005`).
+    A `FactorReadCarry` handed to one build's instants in ascending order lets each read ask the
+    store for the rows new since the last one instead of the whole year again; `FactorReadCarry`
+    argues why the rows it assembles are exactly the rows a fresh read returns, and every
+    readiness decision is still taken at this `as_of`. What it changes is the cost, so it is in
+    the exempt list with that reason, and a carried build of every declared factor is held to the
+    partitions a fresh one stores.
     """
     table = FACTOR_EVALUATORS if evaluators is None else evaluators
     evaluator = _resolve_evaluator(definition, table)
@@ -4574,6 +4703,7 @@ def compute_factor(
             columns=definition.columns_of(dataset),
             requirement=requirements[dataset],
             zone=zone,
+            carry=carry,
         )
         readings[dataset] = reading
         inputs.extend(refs)
@@ -4882,6 +5012,7 @@ def _read_dataset(
     columns: tuple[str, ...],
     requirement: ReadinessRequirement,
     zone: ZoneInfo,
+    carry: FactorReadCarry | None = None,
 ) -> tuple[_DatasetReading, tuple[FactorInputRef, ...], tuple[FactorInputProvenance, ...]]:
     """Every visible row of every requested year of one dataset, plus its input references.
 
@@ -4890,6 +5021,12 @@ def _read_dataset(
     `(subject, event_time, *columns)` -- `available_time` is deliberately not projected, because
     the predicate is applied in SQL and a caller-side re-filter would be a second copy of the
     rule that can disagree with the first.
+
+    **With a `carry` from an earlier instant of the same build, only the rows that became visible
+    since are fetched** (`V2-P6-005`), and they are added to what the carry holds; the predicate
+    for that is the store's too (`newly_visible_since`), so this function still re-filters
+    nothing. `FactorReadCarry` argues why the reading is the one a fresh read builds. Without one,
+    every visible row is read, as before.
 
     **The refusal is reported from `blocking_issues`, not from `readiness.issues`**, and the
     difference is not cosmetic. A filtered read now has two verdicts -- one about the partition
@@ -5047,6 +5184,70 @@ def _read_dataset(
     set the two sides read; see `_refuse_a_read_that_cannot_see_what_as_of_holds` for the
     divergence that audit did not have the language to see until it did.
     """
+    as_of_day = requirement.as_of.astimezone(zone).date()
+    _refuse_a_read_that_cannot_see_what_as_of_holds(
+        store, dataset=dataset, requirement=requirement, as_of_day=as_of_day
+    )
+    years = tuple(sorted(set(requirement.years)))
+    state = (
+        None
+        if carry is None
+        else carry._resume(store, dataset=dataset, columns=columns, zone=zone, years=years)
+    )
+    if state is not None and state.as_of is not None and state.as_of <= requirement.as_of:
+        try:
+            return _read_into(
+                state,
+                store,
+                dataset=dataset,
+                requirement=requirement,
+                years=years,
+                since=state.as_of,
+                as_of_day=as_of_day,
+            )
+        except _CarriedPartitionChanged:
+            pass
+        except BaseException:
+            if carry is not None:
+                carry._forget(dataset)
+            raise
+    state = _ReadState(store=store, columns=columns, zone=zone, years=years)
+    try:
+        answer = _read_into(
+            state,
+            store,
+            dataset=dataset,
+            requirement=requirement,
+            years=years,
+            since=None,
+            as_of_day=as_of_day,
+        )
+    except BaseException:
+        if carry is not None:
+            carry._forget(dataset)
+        raise
+    if carry is not None:
+        carry._keep(dataset, state)
+    return answer
+
+
+def _read_into(
+    state: _ReadState,
+    store: PanelStore,
+    *,
+    dataset: str,
+    requirement: ReadinessRequirement,
+    years: tuple[int, ...],
+    since: datetime | None,
+    as_of_day: date,
+) -> tuple[_DatasetReading, tuple[FactorInputRef, ...], tuple[FactorInputProvenance, ...]]:
+    """`_read_dataset`'s row loop, adding to `state`: every visible row, or those new `since`.
+
+    See `FactorReadCarry` for why the second is the first. `since is None` is the fresh read and
+    is the loop this function has always been.
+    """
+    columns = state.columns
+    zone = state.zone
     period_indexed = dataset in PERIOD_INDEXED_DATASETS
     axis: FactorAxis = "period" if period_indexed else "session"
     projection = (
@@ -5055,15 +5256,11 @@ def _read_dataset(
         else (SUBJECT_COLUMN_NAME, EVENT_TIME_COLUMN, *columns)
     )
     offset = 3 if period_indexed else 2
-    as_of_day = requirement.as_of.astimezone(zone).date()
-    _refuse_a_read_that_cannot_see_what_as_of_holds(
-        store, dataset=dataset, requirement=requirement, as_of_day=as_of_day
-    )
-    points: defaultdict[str, list[date]] = defaultdict(list)
-    values: dict[tuple[str, date], tuple[float | None, ...]] = {}
-    announced: dict[tuple[str, date], date] = {}
-    stated: dict[tuple[str, date, date], tuple[float | None, ...]] = {}
-    ambiguous: dict[str, set[date]] = {}
+    points = state.points
+    values = state.values
+    announced = state.announced
+    stated = state.stated
+    ambiguous = state.ambiguous
     references: list[FactorInputRef] = []
     provenance: list[FactorInputProvenance] = []
     # `V2-P6-005`: the per-row work that does not depend on the row, done once. A year of `daily`
@@ -5077,11 +5274,15 @@ def _read_dataset(
     # exactly one instant. `isfinite` is `_numeric`'s own acceptance test for the one case that
     # is nearly every cell -- a stored finite float, which `_numeric` returns as `float(value)`,
     # i.e. unchanged -- and every other cell still goes through `_numeric` and its refusals.
-    session_of: dict[object, date] = {}
+    session_of = state.session_of
     isfinite = math.isfinite
-    for year in sorted(set(requirement.years)):
+    for year in years:
         outcome = store.read_visible_at(
-            requirement, year=year, columns=projection, event_time_as_naive_utc=True
+            requirement,
+            year=year,
+            columns=projection,
+            event_time_as_naive_utc=True,
+            newly_visible_since=since,
         )
         if outcome.is_blocked:
             raise FactorEngineError(
@@ -5095,19 +5296,29 @@ def _read_dataset(
                 f"{dataset} year={year} cleared readiness but has no coverage record to cite as "
                 "an input reference; the catalog changed underneath this read"
             )
+        if since is None:
+            visible = outcome.visible_row_count
+        else:
+            carried_hash, carried_count = state.partitions[year]
+            if carried_hash != coverage.partition_content_hash:
+                raise _CarriedPartitionChanged(dataset, year)
+            visible = carried_count + len(outcome.rows)
+        state.partitions[year] = (coverage.partition_content_hash, visible)
         references.append(
             FactorInputRef(
                 dataset=dataset,
                 year=year,
                 partition_content_hash=coverage.partition_content_hash,
-                visible_row_count=outcome.visible_row_count,
+                visible_row_count=visible,
                 withheld_row_count=outcome.withheld_row_count,
             )
         )
         provenance.append(
             FactorInputProvenance(dataset=dataset, year=year, batch_digest=coverage.batch_digest)
         )
-        for row in outcome.rows:
+        # Typed once per year rather than cast once per row: `typing.cast` is a call.
+        rows = cast(tuple[tuple[Any, ...], ...], outcome.rows)
+        for row in rows:
             subject = str(row[0])
             stamp = row[1]
             announcement = session_of.get(stamp)
@@ -5128,14 +5339,23 @@ def _read_dataset(
                 if period_indexed
                 else announcement
             )
-            cells = tuple(
-                [
-                    value
-                    if type(value) is float and isfinite(value)
-                    else _numeric(value, dataset=dataset, column=name, subject=subject, point=point)
-                    for name, value in zip(columns, row[offset:], strict=True)
-                ]
-            )
+            # Every cell a finite float -- nearly every row -- is its own answer, so the row's own
+            # slice is the cells; the first cell that is anything else sends the whole row through
+            # the per-cell expression, which reaches `_numeric` in column order as it always did.
+            cells: tuple[float | None, ...] = row[offset:]
+            for value in cells:
+                if type(value) is not float or not isfinite(value):
+                    cells = tuple(
+                        [
+                            value
+                            if type(value) is float and isfinite(value)
+                            else _numeric(
+                                value, dataset=dataset, column=name, subject=subject, point=point
+                            )
+                            for name, value in zip(columns, row[offset:], strict=True)
+                        ]
+                    )
+                    break
             key = (subject, point)
             if not period_indexed:
                 # The session axis has no versions, so a second row is a fault and there is
@@ -5170,6 +5390,7 @@ def _read_dataset(
                 points[subject].append(point)
             announced[key] = announcement
             values[key] = cells
+    state.as_of = requirement.as_of
     return (
         _DatasetReading(
             MappingProxyType({name: tuple(sorted(days)) for name, days in points.items()}),
@@ -5517,7 +5738,11 @@ def _classify(
             factor_id=definition.factor_id,
             manifest_id=manifest_id,
             input_row_count=_stored_rows(
-                subject, sessions=sessions_held, periods=periods_held, readings=readings
+                subject,
+                sessions=sessions_held,
+                periods=periods_held,
+                readings=readings,
+                windows_are_held=True,
             ),
             input_session_first=session_first,
             input_session_last=session_last,
@@ -5601,11 +5826,28 @@ def _classify(
 def _points_held(
     subject: str, *, readings: Mapping[str, _DatasetReading], axis: FactorAxis
 ) -> tuple[date, ...]:
-    """Every point on one axis this security has a row on, ascending and de-duplicated."""
-    held: set[date] = set()
+    """Every point on one axis this security has a row on, ascending and de-duplicated.
+
+    A security held by one reading on the axis -- every session-axis factor but the one that
+    also reads the shared index, and every single-statement one -- is answered with that
+    reading's own tuple, which `_read_into` already built ascending and without a repeat
+    (`V2-P6-005`). The union is only formed when two readings both hold the security, and it is
+    the same set either way; what the shortcut saves is re-sorting a security's whole history at
+    every instant of a carried build.
+    """
+    found: list[tuple[date, ...]] = []
     for reading in readings.values():
         if reading.axis == axis:
-            held.update(reading.points_by_subject.get(subject, ()))
+            own = reading.points_by_subject.get(subject, ())
+            if own:
+                found.append(own)
+    if not found:
+        return ()
+    if len(found) == 1:
+        return found[0]
+    held: set[date] = set()
+    for own in found:
+        held.update(own)
     return tuple(sorted(held))
 
 
@@ -5743,6 +5985,7 @@ def _stored_rows(
     sessions: tuple[date, ...],
     periods: tuple[date, ...],
     readings: Mapping[str, _DatasetReading],
+    windows_are_held: bool = False,
 ) -> int:
     """How many input rows this security actually has over both windows, across every dataset.
 
@@ -5755,14 +5998,24 @@ def _stored_rows(
 
     Each reading is counted over its **own** axis's window, so a factor that reads a price and a
     filing gets one number covering both rather than a session count with the filings missing.
+
+    `windows_are_held` says the two windows are the security's **whole** held point sets
+    (`_points_held`), which is what an `insufficient_history` observation counts over -- every
+    row it has, not a window's worth. Then a reading read under the security's own name holds a
+    row at exactly its own points, all of them inside that union, so its count is how many points
+    it holds: the lookup per held point this function would otherwise make, at every instant of a
+    carried build and over the security's whole history, is a length (`V2-P6-005`). A reading
+    under a shared subject still counts point by point, because its rows are not the security's.
     """
     windows: Mapping[FactorAxis, tuple[date, ...]] = {"session": sessions, "period": periods}
-    return sum(
-        1
-        for dataset, reading in readings.items()
-        for point in windows[reading.axis]
-        if (_reading_subject(dataset, subject), point) in reading.values
-    )
+    total = 0
+    for dataset, reading in readings.items():
+        held = _reading_subject(dataset, subject)
+        if windows_are_held and held == subject:
+            total += len(reading.points_by_subject.get(subject, ()))
+            continue
+        total += sum(1 for point in windows[reading.axis] if (held, point) in reading.values)
+    return total
 
 
 def _reading_subject(dataset: str, subject: str) -> str:

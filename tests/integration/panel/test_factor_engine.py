@@ -730,6 +730,13 @@ _IDENTITY_EXEMPT_ARGUMENTS: Final[dict[str, str]] = {
         "arrives in the identity as manifest.inputs; "
         "test_the_years_a_requirement_names_reach_the_identity covers it"
     ),
+    "carry": (
+        "what an earlier instant of the same build already read (V2-P6-005). It changes how many "
+        "rows this read fetches, not which rows the cross section is computed from. "
+        "FactorReadCarry argues the equality, and "
+        "tests/unit/panel/test_factor_read_path_equivalence.py holds every declared factor's "
+        "carried build to the fresh one"
+    ),
 }
 """Every `compute_factor` argument that does **not** have to move `manifest_id`, with why.
 
