@@ -995,7 +995,7 @@ def next_year_calendar_needed(calendar: TradingCalendar, *, session: date, horiz
 def update_panel(
     runtime_dir: Path,
     *,
-    session_year: int,
+    session: date,
     as_of: datetime,
     exchange: str,
     targets: Sequence[str],
@@ -1006,7 +1006,7 @@ def update_panel(
     session's outcome window reaches into it."""
     yearly = tuple(target for target in targets if target != FINANCIAL_INDICATOR_TARGET)
     built = _panel_build(
-        runtime_dir, year=session_year, as_of=as_of, exchange=exchange, targets=yearly
+        runtime_dir, year=session.year, as_of=as_of, exchange=exchange, targets=yearly
     )
     if built.exit_code != 0:
         raise StepFailedError(
@@ -1016,7 +1016,7 @@ def update_panel(
     report = payloads[-1] if payloads else {}
     budget = _budget(built)
     if FINANCIAL_INDICATOR_TARGET in targets:
-        periods = financial_indicator_years(session_year, as_of)
+        periods = financial_indicator_years(session.year, as_of)
         swept = _panel_build(
             runtime_dir,
             year=periods,
@@ -1032,12 +1032,14 @@ def update_panel(
             )
         budget += _budget(swept)
     previous = [target for target in targets if target in ANNOUNCEMENT_MONTH_TARGETS]
-    if previous and as_of.astimezone(SHANGHAI).month == 1:
+    if previous and session.month == 1:
         # `V2-P6-018`: the incremental statement sweep re-sweeps the month before the stored
-        # build's, which in January is last December -- a month of last year's partition.
+        # build's, which in January is last December -- a month of last year's partition. Keyed
+        # on the **session**, not the clock: on New Year's Day the day is still 31 December,
+        # whose year is the session's and whose previous year is not to be built.
         closing = _panel_build(
             runtime_dir,
-            year=session_year - 1,
+            year=session.year - 1,
             as_of=as_of,
             exchange=exchange,
             targets=tuple(previous),
@@ -1045,14 +1047,14 @@ def update_panel(
         if closing.exit_code != 0:
             raise StepFailedError(
                 "panel update",
-                f"`panel build --year {session_year - 1}` for the statements' December re-sweep "
+                f"`panel build --year {session.year - 1}` for the statements' December re-sweep "
                 f"exited {closing.exit_code}: {closing.reason()}",
             )
         budget += _budget(closing)
     if next_year:
         ahead = _panel_build(
             runtime_dir,
-            year=session_year + 1,
+            year=session.year + 1,
             as_of=as_of,
             exchange=exchange,
             targets=(TRADING_CALENDAR_DATASET,),
@@ -1060,12 +1062,12 @@ def update_panel(
         if ahead.exit_code != 0:
             raise StepFailedError(
                 "panel update",
-                f"the session's outcome window reaches into {session_year + 1} and that year's "
+                f"the session's outcome window reaches into {session.year + 1} and that year's "
                 f"calendar could not be built (exit {ahead.exit_code}): {ahead.reason()}",
             )
     return {
         "targets": list(targets),
-        "year": session_year,
+        "year": session.year,
         "next_year_calendar": next_year,
         "budget": budget,
         "industry_sweep": industry_sweep(budget),
@@ -1544,7 +1546,7 @@ def _run_daily_selection(
             )
             panel = update_panel(
                 runtime_dir,
-                session_year=session.year,
+                session=session,
                 as_of=as_of,
                 exchange=exchange,
                 targets=targets,

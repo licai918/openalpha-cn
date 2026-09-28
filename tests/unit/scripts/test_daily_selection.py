@@ -1006,6 +1006,57 @@ def test_january_re_sweeps_last_decembers_statements_and_records_the_new_year_em
     assert kept is not None and kept.row_count
 
 
+def test_new_years_day_updates_the_31_december_session_and_builds_no_year_before_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """1 January 2027 is a holiday: the day is 31 December 2026. The January re-sweep of last
+    December is keyed on the **session's** month, so this run builds 2026's statements and not
+    2025's -- keyed on the clock, it asked for a year two before the one it was updating.
+
+    The registry here records an event on 1 January: a statement build reads the registry through
+    the year of its clock, and a registry with no event in the new year yet is refused (the
+    runbook's known limitation 6). That limitation only matters when 31 December's own run was
+    missed -- run on the day, its journal is complete and New Year's Day asks for nothing."""
+    world = _world(
+        tmp_path / "daily",
+        monkeypatch,
+        Market(open_days=NEW_YEAR, delisted=((SECURITIES[-2], date(2027, 1, 1)),)),
+        config=NEW_YEAR_CONFIG,
+        seeded_as_of="2026-12-24T12:00:00+08:00",
+    )
+    seeded = daily.invoke(
+        [
+            "panel",
+            "build",
+            "--runtime-dir",
+            str(world.runtime),
+            "--year",
+            "2026",
+            "--as-of",
+            "2026-12-24T12:00:00+08:00",
+            "--dataset",
+            INCOME_DATASET,
+            "--json",
+        ]
+    )
+    assert seeded.exit_code == 0, seeded.reason()
+    world.market.clear()
+
+    code, result, err = _run(
+        world,
+        capsys,
+        as_of=_at("2027-01-01T18:30:00+08:00"),
+        clock=_at("2027-01-01T18:35:00+08:00"),
+        targets=(*TARGETS, INCOME_DATASET),
+        monkeypatch=monkeypatch,
+    )
+
+    assert code == 0, err
+    assert result["session"] == "2026-12-31"
+    years = {str(p["start_date"])[:4] for p in world.market.asked(f"{INCOME_DATASET}_vip")}
+    assert years == {"2026"}
+
+
 # --- across New Year -----------------------------------------------------------------------------
 
 
