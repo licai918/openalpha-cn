@@ -54,11 +54,46 @@ because a family with a hand-added or a dropped row is not the protocol's family
 artifacts written next to the ledger are reports of those computations; they are written once
 and a recomputation that disagrees with one is refused (`ArtifactConflictError`).
 
-**One commit per stage where a configuration names one.** A walk-forward source carries its
-`code_commit` (rule 8), so the same source at another commit is another configuration: resuming
-the composition or validation stage at a commit other than the one its rows were measured at
-would count one hypothesis twice. Those stages refuse (`StageCommitError`), as does every stage
-asked to run from a checkout with uncommitted changes.
+**One commit from composition through validation, and the registration bound to it.** A
+walk-forward source carries its `code_commit` (rule 8), so the same source at another commit is
+another configuration. So:
+
+* every row a stage writes -- a refused one included -- names the commit it ran at, and
+  `stage_commit` reads the stage's one commit;
+* the composition stage resumes only at its own commit, and the validation stage runs only at
+  the composition commit (`run_validation`, `validation_selection`): the finalists are validated
+  as they were measured, never re-run under other code with their names;
+* a configuration carried to a later window keeps the commit it names; `_rewindowed` refuses to
+  rewrite it;
+* the registration may be written from a later clean checkout R only when the bound code
+  (`BOUND_PATHS`: `registry.REGISTERED_PATHS` and this driver) is byte-identical to the
+  validation commit V, at `HEAD` and in the working tree (`_require_validated_code`, reusing
+  `registry`'s own check); the registered configuration keeps V. This was chosen over requiring
+  R == V because a report or a protocol record is committed between validation and
+  registration, and a byte-identical diff over the bound code is the same guarantee git gives
+  the holdout guard; `run_holdout_stage` repeats the check before the one run;
+* every stage refuses a checkout with uncommitted changes (`_clean_commit`). The discovery stage
+  may be resumed at another commit (a crash fixed); the survivors report lists every commit its
+  rows name (`code_commits`).
+
+**The holdout's checks come first, and its verdict is recoverable.** `run_holdout_stage` checks
+the registration against the ledger (`_registered_holdout`: the configuration, the validation
+row, its drawdown, every bound, the settings) and the bound code before `registry.run_holdout`
+claims the one run. The verdict is then computed by `holdout_verdict`, which reads only the
+ledger's holdout rows and is also the `holdout-verdict` command: a run that crashed after its
+measurement row is judged there, and a claim with no measurement is "不通过" and says why.
+
+**Where the driver fails closed rather than choosing.** A stage missing a configuration, holding
+one the protocol does not build, or holding one twice (`StageIncompleteError`,
+`DuplicateRowError`). A discovery stage in which all 189 configurations were refused: no row
+carries `p_excess`, so `grid.fdr_table` refuses and there are no survivors to compute -- not the
+no-survivor fallback, which is for a stage that was measured and found nothing. A candidate
+whose information ratio is `None` (one complete period, or no variance): `UnrankableRowError`,
+since no rule places it. A selection with no measured row at all (`NothingMeasuredError`).
+
+**Reported, never selected on.** The secondary family's false-discovery table (`p_ic`, section 3)
+is in the survivors report (`ic_fdr_table`); `grid.strategy_result` stores 000905.SH's series
+and statistics under `reported_*` (section 3's parallel benchmark). No rule reads either.
 """
 
 from __future__ import annotations
@@ -69,6 +104,7 @@ import json
 import re
 import subprocess
 import sys
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -183,6 +219,7 @@ COMMANDS: Final[tuple[str, ...]] = (
     "validation",
     "register",
     "holdout",
+    "holdout-verdict",
 )
 _FULL_COMMIT: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{40}")
 CLEAN_RETURN_PATHS: Final[str] = "stale return-path builds: none"
@@ -217,6 +254,10 @@ class ProtocolMismatchError(P6Error):
 
 class StageIncompleteError(P6Error):
     """A stage does not hold exactly the configurations the protocol builds for it."""
+
+
+class DuplicateRowError(P6Error):
+    """A stage holds one configuration twice; its family would count one hypothesis twice."""
 
 
 class UnrankableRowError(P6Error):
@@ -285,12 +326,12 @@ def require_clean_return_paths(
     stdout is exactly the one line `CLEAN_RETURN_PATHS`, and its stderr states the
     `BUDGET stale-return-path-recompute N` line -- the proof it reached the recomputation rather
     than answering before it. Any other answer -- a stale build listed, a panel it could not
-    read, a build of the CLI that lacks the command, a bare `none` -- is not clean."""
+    read, a build of the CLI that lacks the command, a bare `none`, a blank line around the
+    answer -- is not clean."""
     argv = precondition_argv(runtime_dir)
     outcome = runner(argv)
-    lines = [line for line in outcome.stdout.splitlines() if line.strip()]
     budgeted = any(_RETURN_PATH_BUDGET.match(line) for line in outcome.stderr.splitlines())
-    if outcome.exit_code == 0 and lines == [CLEAN_RETURN_PATHS] and budgeted:
+    if outcome.exit_code == 0 and outcome.stdout.splitlines() == [CLEAN_RETURN_PATHS] and budgeted:
         return
     said = (outcome.stdout.strip() or outcome.stderr.strip() or "nothing")[:2000]
     raise StaleReturnPathsError(
@@ -519,8 +560,17 @@ def _rows_for(
 ) -> dict[str, LedgerRow]:
     """The stage's row of each expected configuration, by `config_id`. Refuses a missing one,
     and with `exact` a row the protocol does not build: it would be a hypothesis of the family
-    that no grid tried, or a grid other than the protocol's."""
-    rows = {row.config_id: row for row in _stage_rows(ledger, stage)}
+    that no grid tried, or a grid other than the protocol's. Refuses a configuration the stage
+    holds twice (`DuplicateRowError`): `grid.stage_family` would count it twice."""
+    stage_rows = _stage_rows(ledger, stage)
+    rows = {row.config_id: row for row in stage_rows}
+    if len(rows) != len(stage_rows):
+        counts = Counter(row.config_id for row in stage_rows)
+        lines = sorted(row.line for row in stage_rows if counts[row.config_id] > 1)
+        raise DuplicateRowError(
+            f"the {stage} stage in {ledger} holds a configuration twice (lines {lines}); the "
+            "family would count one hypothesis twice -- the ledger was edited by hand"
+        )
     wanted = [grid.config_id(config) for config in expected]
     missing = [identity for identity in wanted if identity not in rows]
     extra = sorted(set(rows) - set(wanted)) if exact else []
@@ -543,13 +593,23 @@ def _clean_commit(code_commit: str) -> str:
 
 
 def stage_commit(ledger: Path, stage: str) -> str | None:
-    """The one commit the stage's rows were measured at, or `None` for a stage with no row."""
-    commits = {row.result.get("code_commit") for row in _stage_rows(ledger, stage)}
-    if not commits:
+    """The one commit the stage's rows were measured at, or `None` for a stage with no row.
+
+    A row that names no commit (a row written before this driver recorded one) is passed over;
+    a stage whose rows name none at all, or more than one, is refused."""
+    rows = _stage_rows(ledger, stage)
+    if not rows:
         return None
-    if len(commits) != 1 or not isinstance(next(iter(commits)), str):
+    commits = {
+        row.result["code_commit"] for row in rows if isinstance(row.result.get("code_commit"), str)
+    }
+    if not commits:
         raise StageCommitError(
-            f"the {stage} stage's rows name {sorted(map(str, commits))} as their commit; its "
+            f"the {stage} stage has {len(rows)} row(s) and no row names the commit it ran at"
+        )
+    if len(commits) != 1:
+        raise StageCommitError(
+            f"the {stage} stage's rows name {sorted(commits)} as their commit; its "
             "configurations cannot be rebuilt from one"
         )
     return str(next(iter(commits)))
@@ -565,6 +625,24 @@ def _require_stage_commit(ledger: Path, stage: str, code_commit: str) -> str:
             "same hypothesis twice. Resume at the stage's commit"
         )
     return head
+
+
+def _composition_commit(ledger: Path) -> str:
+    commit = stage_commit(ledger, COMPOSITION)
+    if commit is None:
+        raise StageIncompleteError(f"the composition stage has no row in {ledger}")
+    return commit
+
+
+def _require_composition_commit(ledger: Path, commit: str, what: str) -> None:
+    """Validation runs the finalists as they were measured: at the composition commit."""
+    composition = _composition_commit(ledger)
+    if commit != composition:
+        raise StageCommitError(
+            f"{what} is {commit} and the composition stage was measured at {composition}; the "
+            "finalists are validated at the commit they were measured at, or they are other "
+            "configurations under the finalists' names"
+        )
 
 
 def _measured(rows: Sequence[LedgerRow]) -> list[LedgerRow]:
@@ -612,6 +690,11 @@ def _summary(row: LedgerRow) -> dict[str, object]:
         "information_ratio",
         "mean_turnover",
         "max_relative_drawdown",
+        "compounded_annual_relative_return",
+        "reported_benchmark",
+        "reported_mean_net_excess",
+        "reported_information_ratio",
+        "reported_compounded_annual_relative_return",
         "code_commit",
     )
     return {"config_id": row.config_id} | {
@@ -662,11 +745,27 @@ def survivors(ledger: Path, sessions: Sequence[date]) -> dict[str, Any]:
         else [[factor, tier_of[row.config_id]] for factor, row in chosen]
     )
     surviving = [row for factor in by_factor for row in by_factor[factor]]
+    measured_ic = any("p_ic" in row.result for row in rows.values())
     return {
         "schema": "openalpha-p6-survivors/v1",
         "stage": DISCOVERY,
         "family_size": grid.stage_family(ledger, DISCOVERY),
         "fdr_table": report.model_dump(mode="json"),
+        # The secondary family (section 3): BY over `p_ic` on the same stage family, a row with
+        # `ic_error` or `error` withheld. Reported only; no selection reads it.
+        "ic_fdr_table": (
+            grid.fdr_table(ledger, DISCOVERY, Q, p_value_key="p_ic").model_dump(mode="json")
+            if measured_ic
+            else None
+        ),
+        "ic_fdr_note": None if measured_ic else "no discovery row carries p_ic",
+        "code_commits": sorted(
+            {
+                row.result["code_commit"]
+                for row in rows.values()
+                if isinstance(row.result.get("code_commit"), str)
+            }
+        ),
         "survivors": [_summary(row) for row in surviving],
         "chosen": [{"factor": factor, **_summary(row)} for factor, row in chosen],
         "components": components,
@@ -840,16 +939,22 @@ def finalists(
 
 
 def _rewindowed(config: Config, start: date, end: date, code_commit: str) -> dict[str, Any]:
-    moved = {**config, "start": start, "end": end}
-    if "walk_forward" in moved:
-        moved["walk_forward"] = {**moved["walk_forward"], "code_commit": code_commit}
-    return moved
+    """`config` over another window. A walk-forward source keeps the commit it names, which must
+    be `code_commit`: a later stage runs the configuration an earlier one measured, and a
+    rewritten commit would make it another configuration under the same name."""
+    model = config.get("walk_forward")
+    if model is not None and model["code_commit"] != code_commit:
+        raise StageCommitError(
+            f"the walk-forward source was measured at {model['code_commit']} and this stage "
+            f"would run it at {code_commit}; a source is carried to a later window unchanged"
+        )
+    return {**config, "start": start, "end": end}
 
 
 def validation_configs(
     finalist_configs: Sequence[Config], sessions: Sequence[date], code_commit: str
 ) -> tuple[dict[str, Any], ...]:
-    """Each finalist over section 6's window, a walk-forward one at the stage's commit."""
+    """Each finalist over section 6's window, unchanged otherwise (`_rewindowed`)."""
     start = stage_start(sessions, VALIDATION)
     end = stage_end(sessions, VALIDATION, label_sessions=grid.strategy_label_sessions({}))
     return tuple(_rewindowed(config, start, end, code_commit) for config in finalist_configs)
@@ -861,10 +966,12 @@ def validation_selection(
     """Section 6: of the finalists' validation rows, the first under the protocol's tie rule
     (`rank_by_information_ratio`: the annualized information ratio of the net excess, then the
     lower mean turnover, then the lower `config_id`). Returns the report of every finalist's
-    result, the chosen configuration and its row."""
+    result, the chosen configuration and its row. The validation rows must have been measured at
+    the composition commit (`StageCommitError`)."""
     commit = stage_commit(ledger, VALIDATION)
     if commit is None:
         raise StageIncompleteError(f"the validation stage has no row in {ledger}")
+    _require_composition_commit(ledger, commit, "the validation stage's commit")
     _, finalist_configs = finalists(ledger, sessions)
     configs = validation_configs(finalist_configs, sessions, commit)
     rows = _rows_for(ledger, VALIDATION, configs, exact=True)
@@ -884,11 +991,18 @@ def validation_selection(
     return body, chosen, best
 
 
-# --- section 7: registration and the holdout ------------------------------------------------------
+# --- section 7: registration and the holdout ----------------------------------------------------
+
+BOUND_PATHS: Final[tuple[str, ...]] = tuple(
+    dict.fromkeys((*registry.REGISTERED_PATHS, "scripts/research/p6.py"))
+)
+"""The code a registration binds to the validation commit: `registry.REGISTERED_PATHS` (which
+already holds `scripts/research/`) and this driver, named so the binding says so."""
 
 
 def holdout_config(config: Config, sessions: Sequence[date], code_commit: str) -> dict[str, Any]:
-    """The chosen configuration over section 7's window, a walk-forward one at `code_commit`."""
+    """The chosen configuration over section 7's window, unchanged otherwise: a walk-forward one
+    keeps `code_commit`, the commit it was validated at (`_rewindowed`)."""
     start = stage_start(sessions, HOLDOUT)
     end = stage_end(sessions, HOLDOUT, label_sessions=grid.strategy_label_sessions({}))
     return _rewindowed(config, start, end, code_commit)
@@ -905,19 +1019,48 @@ def holdout_criteria(validation_row: LedgerRow) -> dict[str, object]:
     }
 
 
+def _require_validated_code(repo: Path, validated: str, head: str) -> Path:
+    """The repository root, provided `head` is its checked-out commit and `BOUND_PATHS` -- at
+    `HEAD` and in the working tree -- are what they were at `validated` (`registry`'s own check,
+    `SourceChangedError`). A commit that touched only documentation passes."""
+    top = registry._git(repo, "rev-parse", "--show-toplevel")
+    at = registry._git(repo, "rev-parse", "HEAD")
+    if top.returncode != 0 or at.returncode != 0:
+        raise StageCommitError(f"{repo} is not a git checkout with a commit")
+    root = Path(top.stdout.decode().strip()).resolve()
+    if at.stdout.decode().strip() != head:
+        raise StageCommitError(f"{head} is not the checked-out commit of {root}")
+    registry._refuse_a_changed_source(
+        root,
+        validated,
+        paths=BOUND_PATHS,
+        purpose="the registration binds the code the finalists were validated with",
+    )
+    return root
+
+
 def register_holdout(
-    ledger: Path, sessions: Sequence[date], registration: Path, code_commit: str
+    ledger: Path, sessions: Sequence[date], registration: Path, code_commit: str, repo: Path
 ) -> str:
-    """Write section 7's registration through `registry.register` and return its digest: the
-    configuration section 6 chose over the holdout window, the criteria, the protocol settings
-    and the commit. It does not run the holdout; committing the file is the next step."""
-    commit = _clean_commit(code_commit)
+    """Write section 7's registration through `registry.register` and return its digest. It does
+    not run the holdout; committing the file is the next step.
+
+    **The binding to the validation commit V.** The registration may be written from a later
+    clean checkout R (a report or a protocol record committed since), and only when the bound
+    code (`BOUND_PATHS`) is byte-identical between V and R, at `HEAD` and in the working tree:
+    `registry.register` records R as the code commit, `registry.run_holdout` later holds `HEAD`
+    to R, and this check holds R to V, so the holdout measures with the code that chose the
+    configuration. The configuration keeps V, the commit it was validated at (rule 8).
+    """
+    head = _clean_commit(code_commit)
     _, chosen, row = validation_selection(ledger, sessions)
+    validated = str(stage_commit(ledger, VALIDATION))
+    _require_validated_code(repo, validated, head)
     return registry.register(
-        holdout_config(chosen, sessions, commit),
+        holdout_config(chosen, sessions, validated),
         holdout_criteria(row),
         registration,
-        code_commit=commit,
+        code_commit=head,
         settings=grid.protocol_settings(),
     )
 
@@ -925,7 +1068,30 @@ def register_holdout(
 def _number(value: object, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, int | float | str):
         raise HoldoutEvaluationError(f"{name} is {value!r}, not a number")
-    return float(value)
+    try:
+        return float(value)
+    except ValueError as error:
+        raise HoldoutEvaluationError(f"{name} is {value!r}, not a number") from error
+
+
+def _holdout_bounds(
+    criteria: Mapping[str, Any], validation_result: Mapping[str, Any]
+) -> dict[str, float]:
+    """Each criterion's bound, once the registered validation drawdown is the ledger's."""
+    validation = grid.result_max_relative_drawdown(validation_result)
+    if validation != criteria["validation_max_relative_drawdown"]:
+        raise HoldoutEvaluationError(
+            f"the validation row's maximum relative drawdown is {validation}, and the "
+            f"registration recorded {criteria['validation_max_relative_drawdown']}"
+        )
+    multiple = _number(criteria["max_relative_drawdown_multiple_of_validation"], "the multiple")
+    return {
+        "compounded_annualized_relative_return": _number(
+            criteria["compounded_annualized_relative_return_above"], "the return bound"
+        ),
+        "one_sided_p_excess": _number(criteria["one_sided_p_excess_below"], "the p bound"),
+        "max_relative_drawdown": multiple * validation,
+    }
 
 
 def evaluate_holdout(
@@ -946,20 +1112,7 @@ def evaluate_holdout(
     mean excess is significantly positive (a loss in a period the benchmark fell is divided by
     that period's small `1 + benchmark`).
     """
-    validation = grid.result_max_relative_drawdown(validation_result)
-    if validation != criteria["validation_max_relative_drawdown"]:
-        raise HoldoutEvaluationError(
-            f"the validation row's maximum relative drawdown is {validation}, and the "
-            f"registration recorded {criteria['validation_max_relative_drawdown']}"
-        )
-    multiple = _number(criteria["max_relative_drawdown_multiple_of_validation"], "the multiple")
-    bounds = {
-        "compounded_annualized_relative_return": _number(
-            criteria["compounded_annualized_relative_return_above"], "the return bound"
-        ),
-        "one_sided_p_excess": _number(criteria["one_sided_p_excess_below"], "the p bound"),
-        "max_relative_drawdown": multiple * validation,
-    }
+    bounds = _holdout_bounds(criteria, validation_result)
     if "error" in result:
         items = {
             name: {"value": None, "threshold": bound, "passed": False}
@@ -989,6 +1142,61 @@ def evaluate_holdout(
     return {"verdict": PASS if all(passed.values()) else FAIL, "criteria": items}
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Registered:
+    """The registration as read once, and everything the ledger says it must agree with."""
+
+    content: bytes
+    body: Mapping[str, Any]
+    config: dict[str, Any]
+    validation_row: LedgerRow
+    bounds: Mapping[str, float]
+
+
+def _registered_holdout(ledger: Path, sessions: Sequence[date], registration: Path) -> _Registered:
+    """Every check of the registration that the ledger can answer, made before anything runs:
+    the configuration rebuilt from the ledger (at the validation commit) is the registered one;
+    the registered validation row is section 6's choice; its registered drawdown is the ledger's;
+    every criterion is a number; the settings are the protocol's."""
+    content = registration.read_bytes()
+    try:
+        body = json.loads(content)
+    except ValueError as error:
+        raise HoldoutEvaluationError(f"{registration} is not JSON: {error}") from error
+    if not isinstance(body, dict) or body.get("schema") != registry.REGISTRATION_SCHEMA:
+        raise HoldoutEvaluationError(f"{registration} is not a {registry.REGISTRATION_SCHEMA}")
+    _, chosen, validation_row = validation_selection(ledger, sessions)
+    config = holdout_config(chosen, sessions, str(stage_commit(ledger, VALIDATION)))
+    if grid.config_id(config) != body.get("config_id"):
+        raise HoldoutEvaluationError(
+            f"the ledger's choice over the holdout window is {grid.config_id(config)} and the "
+            f"registration names {body.get('config_id')}"
+        )
+    criteria = body.get("criteria")
+    if not isinstance(criteria, dict):
+        raise HoldoutEvaluationError(f"{registration} carries no criteria")
+    if criteria.get("validation_config_id") != validation_row.config_id:
+        raise HoldoutEvaluationError(
+            f"the registration compares with validation row {criteria.get('validation_config_id')}"
+            f" and section 6 chose {validation_row.config_id}"
+        )
+    if body.get("settings") != grid.to_json_value(grid.protocol_settings()):
+        raise HoldoutEvaluationError(
+            f"the registered settings {body.get('settings')} are not the protocol's"
+        )
+    try:
+        bounds = _holdout_bounds(criteria, validation_row.result)
+    except KeyError as error:
+        raise HoldoutEvaluationError(f"the registration's criteria lack {error}") from error
+    return _Registered(
+        content=content,
+        body=body,
+        config=config,
+        validation_row=validation_row,
+        bounds=bounds,
+    )
+
+
 def run_holdout_stage(
     ledger: Path,
     sessions: Sequence[date],
@@ -999,31 +1207,66 @@ def run_holdout_stage(
     clock: Clock = None,
 ) -> dict[str, Any]:
     """Run the registered configuration once through `registry.run_holdout`, then compute the
-    verdict. The configuration is rebuilt from the ledger and the registration's commit, and
-    `run_holdout` refuses it unless it is the registered one."""
-    content = registration.read_bytes()
-    registered = json.loads(content)
-    _, chosen, validation_row = validation_selection(ledger, sessions)
-    config = holdout_config(chosen, sessions, str(registered["code_commit"]))
+    verdict through `holdout_verdict`, the read-only path a crashed run recovers by.
+
+    Everything that can be checked before the one run is checked first: the registration against
+    the ledger (`_registered_holdout`) and the bound code against the validation commit
+    (`_require_validated_code`); `run_holdout` then applies its own guard before its claim."""
+    registered = _registered_holdout(ledger, sessions, registration)
+    head = registry._git(repo, "rev-parse", "HEAD").stdout.decode().strip()
+    _require_validated_code(repo, str(stage_commit(ledger, VALIDATION)), head)
     measure = grid.strategy_measure(backtest, excess_benchmark=grid.PRIMARY_EXCESS_BENCHMARK)
-    row = registry.run_holdout(registration, ledger, repo, config, measure, clock=clock)
-    if row["registration_sha256"] != hashlib.sha256(content).hexdigest():
-        raise HoldoutEvaluationError("the registration changed while the holdout ran")
-    criteria = registered["criteria"]
-    if criteria["validation_config_id"] != validation_row.config_id:
-        raise HoldoutEvaluationError(
-            f"the registration compares with validation row {criteria['validation_config_id']} "
-            f"and section 6 chose {validation_row.config_id}"
+    registry.run_holdout(registration, ledger, repo, registered.config, measure, clock=clock)
+    return holdout_verdict(ledger, sessions, registration)
+
+
+def holdout_verdict(ledger: Path, sessions: Sequence[date], registration: Path) -> dict[str, Any]:
+    """Section 7's verdict from the ledger's holdout rows, reading and running nothing else.
+
+    The rows must carry this registration's digest and configuration. A measurement row is
+    judged by `evaluate_holdout`. A claim with no measurement is a run that started and did not
+    finish: it is the one run, nothing it could have measured passes, and the verdict is "不通过"
+    with a statement saying so. No holdout row at all is refused: the holdout has not run.
+    """
+    registered = _registered_holdout(ledger, sessions, registration)
+    digest = hashlib.sha256(registered.content).hexdigest()
+    rows = [row for row in grid.read_ledger(ledger) if row.stage == HOLDOUT]
+    if not rows:
+        raise HoldoutEvaluationError(f"the holdout has not run: {ledger} holds no holdout row")
+    for row in rows:
+        if row.result.get("registration_sha256") != digest:
+            raise HoldoutEvaluationError(
+                f"holdout row {row.line} was written under another registration"
+            )
+        if row.config_id != registered.body["config_id"]:
+            raise HoldoutEvaluationError(f"holdout row {row.line} is not the registered config")
+    claim = next(row for row in rows if row.kind == grid.HOLDOUT_CLAIM)
+    measured = [row for row in rows if row.kind == grid.MEASUREMENT]
+    criteria = registered.body["criteria"]
+    if measured:
+        verdict = evaluate_holdout(measured[0].result, criteria, registered.validation_row.result)
+        statement = f"measured once, claimed at {claim.recorded_at.isoformat()}"
+    else:
+        verdict = {
+            "verdict": FAIL,
+            "criteria": {
+                name: {"value": None, "threshold": bound, "passed": False}
+                for name, bound in registered.bounds.items()
+            },
+        }
+        statement = (
+            f"the holdout claim of {claim.recorded_at.isoformat()} has no measurement row: the "
+            "one run started and did not finish, so nothing passes (不通过)"
         )
-    verdict = evaluate_holdout(row, criteria, validation_row.result)
     return {
         "schema": "openalpha-p6-holdout-verdict/v1",
         **verdict,
+        "statement": statement,
         "wording": "候选",
-        "holdout_config_id": grid.config_id(config),
-        "validation_config_id": validation_row.config_id,
-        "registration_sha256": row["registration_sha256"],
-        "registration_commit": row["registration_commit"],
+        "holdout_config_id": registered.body["config_id"],
+        "validation_config_id": registered.validation_row.config_id,
+        "registration_sha256": digest,
+        "registration_commit": claim.result.get("registration_commit"),
     }
 
 
@@ -1055,9 +1298,11 @@ def _run(
     sessions: Sequence[date],
     echo: Echo,
     clock: Clock,
+    code_commit: str,
 ) -> GridRun:
     """`grid.run_grid` one configuration at a time, so each is reported as it lands; resumable
-    exactly as `run_grid` is."""
+    exactly as `run_grid` is. A row the runner refuses itself (a window outside the stage)
+    carries `code_commit` like every row the measures write."""
     ran = skipped = 0
     for index, config in enumerate(configs, start=1):
         run = grid.run_grid(
@@ -1068,6 +1313,7 @@ def _run(
             label_sessions=label_sessions,
             sessions=sessions,
             clock=clock,
+            result_extra={"code_commit": code_commit},
         )
         ran, skipped = ran + run.ran, skipped + run.skipped
         echo(
@@ -1089,11 +1335,9 @@ def run_discovery(
     clock: Clock = None,
 ) -> GridRun:
     """Section 4's stage: every discovery configuration the ledger does not hold yet."""
+    head = _clean_commit(code_commit)
     measure = DiscoveryMeasure(
-        backtest=backtest,
-        ic_series=ic_series,
-        sessions=tuple(sessions),
-        code_commit=_clean_commit(code_commit),
+        backtest=backtest, ic_series=ic_series, sessions=tuple(sessions), code_commit=head
     )
     return _run(
         ledger,
@@ -1104,6 +1348,7 @@ def run_discovery(
         sessions=sessions,
         echo=echo,
         clock=clock,
+        code_commit=head,
     )
 
 
@@ -1128,6 +1373,7 @@ def run_composition_sources(
         sessions=sessions,
         echo=echo,
         clock=clock,
+        code_commit=head,
     )
 
 
@@ -1154,6 +1400,7 @@ def run_composition_strategies(
         sessions=sessions,
         echo=echo,
         clock=clock,
+        code_commit=head,
     )
 
 
@@ -1166,8 +1413,10 @@ def run_validation(
     echo: Echo,
     clock: Clock = None,
 ) -> GridRun:
-    """Section 6's stage: each finalist once over the validation window."""
+    """Section 6's stage: each finalist once over the validation window, at the commit the
+    composition stage measured it at (`StageCommitError` otherwise)."""
     head = _require_stage_commit(ledger, VALIDATION, code_commit)
+    _require_composition_commit(ledger, head, "this checkout")
     _, finalist_configs = finalists(ledger, sessions)
     return _run(
         ledger,
@@ -1178,6 +1427,7 @@ def run_validation(
         sessions=sessions,
         echo=echo,
         clock=clock,
+        code_commit=head,
     )
 
 
@@ -1239,11 +1489,20 @@ def _parser() -> argparse.ArgumentParser:
         command = commands.add_parser(name)
         command.add_argument("--runtime-dir", type=Path, required=True)
         command.add_argument("--ledger", type=Path, required=True)
-        if name in ("register", "holdout"):
+        if name in ("register", "holdout", "holdout-verdict"):
             command.add_argument("--registration", type=Path, default=DEFAULT_REGISTRATION)
         if name == "holdout":
             command.add_argument("--repo", type=Path, default=None)
     return parser
+
+
+def _report_verdict(verdict: Mapping[str, Any], artifacts: Path, echo: Echo) -> None:
+    """Write the verdict next to the ledger and print it."""
+    write_artifact(artifacts / "p6-holdout-verdict.json", verdict)
+    echo(f"保留期结论：{verdict['verdict']}（措辞：{verdict['wording']}）")
+    echo(f"  {verdict['statement']}")
+    for name, item in verdict["criteria"].items():
+        echo(f"  {name}: {item['value']} vs {item['threshold']} -> {item['passed']}")
 
 
 def _dispatch(arguments: argparse.Namespace, environment: Environment, echo: Echo) -> None:
@@ -1264,16 +1523,16 @@ def _dispatch(arguments: argparse.Namespace, environment: Environment, echo: Ech
             echo(body["note"])
         echo(f"finalists: {body['finalists']}")
         return
+    if command == "holdout-verdict":
+        _report_verdict(holdout_verdict(ledger, sessions, arguments.registration), artifacts, echo)
+        return
     sdk = environment.sdk(runtime_dir)
     if command == "holdout":
         repo = arguments.repo if arguments.repo is not None else environment.repo
         verdict = run_holdout_stage(
             ledger, sessions, arguments.registration, repo, sdk.run_strategy_backtest, clock=clock
         )
-        write_artifact(artifacts / "p6-holdout-verdict.json", verdict)
-        echo(f"保留期结论：{verdict['verdict']}（措辞：{verdict['wording']}）")
-        for name, item in verdict["criteria"].items():
-            echo(f"  {name}: {item['value']} vs {item['threshold']} -> {item['passed']}")
+        _report_verdict(verdict, artifacts, echo)
         return
     commit = environment.code_commit()
     if command == "discovery":
@@ -1300,7 +1559,9 @@ def _dispatch(arguments: argparse.Namespace, environment: Environment, echo: Ech
         write_artifact(artifacts / "p6-validation.json", body)
         echo(f"validation chose {body['chosen']}")
     elif command == "register":
-        digest = register_holdout(ledger, sessions, arguments.registration, commit)
+        digest = register_holdout(
+            ledger, sessions, arguments.registration, commit, environment.repo
+        )
         echo(
             f"registered {arguments.registration} sha256={digest}; commit it before "
             "`holdout` runs -- the holdout has not run"

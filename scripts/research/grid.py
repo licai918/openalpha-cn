@@ -134,6 +134,9 @@ PROTOCOL_RANDOM_SEED: Final[int] = 20_260_926
 PROTOCOL_FALSE_DISCOVERY_RATE: Final[float] = 0.10
 PROTOCOL_DEPENDENCE: Final[DependenceAssumption] = "arbitrary"
 PRIMARY_EXCESS_BENCHMARK: Final[str] = EQUAL_WEIGHT_ALL_A
+REPORTED_BENCHMARK: Final[str] = "000905.SH"
+"""The benchmark section 3 reports beside the primary one. Its series and statistics are stored
+under `reported_*` keys and no selection or test reads them."""
 """The benchmark the primary family's excess return is measured against (the protocol's
 decision); `000905.SH` is reported beside it and tests nothing."""
 DEFAULT_P_VALUE_KEY: Final[str] = "p_excess"
@@ -789,6 +792,35 @@ def strategy_result(
             [p.benchmark_returns[excess_benchmark] for _, p in tested],
             [p.sessions for _, p in tested],
         ),
+        **_reported_result(periods, complete, per_year),
+    }
+
+
+def _reported_result(
+    periods: Sequence[Any], complete: Sequence[bool], per_year: float
+) -> dict[str, object]:
+    """`REPORTED_BENCHMARK`'s series and statistics over the same complete periods, for the
+    report only; nothing when a period lacks its return (a book that did not price it)."""
+    if any(REPORTED_BENCHMARK not in p.benchmark_returns for p in periods):
+        return {}
+    excess = [p.net_return - p.benchmark_returns[REPORTED_BENCHMARK] for p in periods]
+    full = [p for p, whole in zip(periods, complete, strict=True) if whole]
+    values = [float(v) for v, whole in zip(excess, complete, strict=True) if whole]
+    mean = statistics.fmean(values)
+    stdev = statistics.stdev(values) if len(values) > 1 else None
+    return {
+        "reported_benchmark": REPORTED_BENCHMARK,
+        "reported_benchmark_return": [
+            str(p.benchmark_returns[REPORTED_BENCHMARK]) for p in periods
+        ],
+        "reported_net_excess": [str(value) for value in excess],
+        "reported_mean_net_excess": mean,
+        "reported_information_ratio": None if not stdev else mean / stdev * math.sqrt(per_year),
+        "reported_compounded_annual_relative_return": compounded_annual_relative_return(
+            [p.net_return for p in full],
+            [p.benchmark_returns[REPORTED_BENCHMARK] for p in full],
+            [p.sessions for p in full],
+        ),
     }
 
 
@@ -873,6 +905,7 @@ def run_grid(
     sessions: Sequence[date] = (),
     refusals: tuple[type[Exception], ...] = DEFAULT_REFUSALS,
     clock: Callable[[], datetime] | None = None,
+    result_extra: Mapping[str, object] | None = None,
 ) -> GridRun:
     """Measure every configuration the ledger does not already hold for `stage`, one row each.
 
@@ -884,6 +917,9 @@ def run_grid(
     error. Both count in the family. `label_sessions` has no default because a label's length is
     the one thing about a window a configuration's dates do not say; `strategy_label_sessions` is
     the strategy backtest's. The holdout stage is refused: it runs through `registry.run_holdout`.
+
+    `result_extra` is added to every refused row the runner writes itself -- the commit a stage
+    ran at, say (`V2-P6-010`) -- so a refused row states what a measured one does.
     """
     stage = _checked_stage(stage)
     if stage == HOLDOUT_STAGE:
@@ -910,7 +946,7 @@ def run_grid(
             check_window(stage, first, last)
             result = dict(measure(config))
         except recorded as error:
-            result = {"error": f"{type(error).__name__}: {error}"}
+            result = {"error": f"{type(error).__name__}: {error}", **(result_extra or {})}
         _append(ledger, existing, stage, config, result, recorded_at=now())
         ran += 1
     return GridRun(stage=stage, ran=ran, skipped=skipped)

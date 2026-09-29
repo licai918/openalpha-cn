@@ -1061,6 +1061,8 @@ BUDGET: Final[str] = (
         (1, CLEAN, BUDGET),
         (0, "none\n", BUDGET),
         (0, CLEAN + "stale return-path builds: none\n", BUDGET),
+        (0, "\n" + CLEAN, BUDGET),
+        (0, CLEAN + "\n", BUDGET),
         (0, CLEAN, ""),
         (0, CLEAN, "BUDGET stale-return-path-recompute many\n"),
         (2, "", "Usage: ... No such command 'stale-return-paths'."),
@@ -1248,7 +1250,23 @@ def test_every_stage_runs_from_the_command_line_and_nothing_is_typed_by_hand(
     assert grid.stage_family(ledger, "holdout") == 0  # registering never runs the holdout
     commit_file(repo, registration, "register", at=datetime(2026, 9, 27, 0, 0, tzinfo=UTC))
 
-    out = run("holdout", "--registration", str(registration), "--repo", str(repo))
+    real_run_holdout = registry.run_holdout
+
+    def crash_after_the_measurement(*args: Any, **kwargs: Any) -> Any:
+        real_run_holdout(*args, **kwargs)
+        raise RuntimeError("the process died after the measurement row was written")
+
+    monkeypatch.setattr(registry, "run_holdout", crash_after_the_measurement)
+    holdout = ["--runtime-dir", str(runtime), "--ledger", str(ledger)]
+    holdout += ["--registration", str(registration), "--repo", str(repo)]
+    with pytest.raises(RuntimeError, match="died"):
+        p6.main(["holdout", *holdout], environment=environment)
+    monkeypatch.setattr(registry, "run_holdout", real_run_holdout)
+    assert not (ledger.parent / "p6-holdout-verdict.json").exists()
+    assert p6.main(["holdout", *holdout], environment=environment) == 1
+    assert "HoldoutAlreadyRanError" in capsys.readouterr().err  # it ran once
+
+    out = run("holdout-verdict", "--registration", str(registration))
     verdict = json.loads((ledger.parent / "p6-holdout-verdict.json").read_text(encoding="utf-8"))
     assert verdict["verdict"] in ("通过", "不通过")
     assert verdict["verdict"] in out
@@ -1262,4 +1280,356 @@ def test_every_stage_runs_from_the_command_line_and_nothing_is_typed_by_hand(
         computed["verdict"],
         grid.to_json_value(computed["criteria"]),
     )
-    assert len(checks) == 9
+    assert len(checks) == 11
+
+
+# --- review round 1: one commit through composition and validation ------------------------------
+
+
+def _static_finalists(configs: list[Mapping[str, object]]) -> Mapping[str, Any]:
+    """Five step-2b strategies of the static source ahead of every other row: finalists that name
+    no commit, so only the stage-commit rule -- not `_rewindowed` -- can stop them moving."""
+    return {_id(configs[k]): _result(ir=9.0 + k) for k in range(5)}
+
+
+def test_validation_refuses_to_run_at_a_commit_other_than_the_compositions(tmp_path: Path) -> None:
+    """The finalists were measured at the composition commit; a validation run at another commit
+    would validate other code under the finalists' names -- even a static source, which names no
+    commit of its own."""
+    ledger, _ = _full_composition(tmp_path, _static_finalists)
+    _, finalists = p6.finalists(ledger, SESSIONS)
+    assert not any("walk_forward" in config for config in finalists)
+
+    with pytest.raises(p6.StageCommitError, match=COMMIT):
+        p6.run_validation(
+            ledger, SESSIONS, _FakeSDK().run_strategy_backtest, OTHER_COMMIT, echo=print
+        )
+    assert grid.stage_family(ledger, "validation") == 0
+
+
+def test_the_validation_choice_refuses_rows_measured_at_another_commit(tmp_path: Path) -> None:
+    ledger, _ = _full_composition(tmp_path, _static_finalists)
+    _, finalists = p6.finalists(ledger, SESSIONS)
+    assert not any("walk_forward" in config for config in finalists)
+    configs = p6.validation_configs(finalists, SESSIONS, COMMIT)
+    elsewhere = {**_result(), "code_commit": OTHER_COMMIT}
+    _fill(ledger, "validation", configs, {_id(c): elsewhere for c in configs})
+
+    with pytest.raises(p6.StageCommitError, match=OTHER_COMMIT):
+        p6.validation_selection(ledger, SESSIONS)
+
+
+def test_a_walk_forward_commit_is_carried_into_a_later_window_and_never_rewritten() -> None:
+    forest = p6.composition_source_configs(COMPONENTS, SESSIONS, COMMIT)[-1]
+
+    (moved,) = p6.validation_configs([forest], SESSIONS, COMMIT)
+    assert moved["walk_forward"] == forest["walk_forward"]
+    assert p6.holdout_config(forest, SESSIONS, COMMIT)["walk_forward"] == forest["walk_forward"]
+    with pytest.raises(p6.StageCommitError, match=OTHER_COMMIT):
+        p6.validation_configs([forest], SESSIONS, OTHER_COMMIT)
+
+
+# --- review round 1: the registration is bound to the validation commit -------------------------
+
+
+@pytest.fixture
+def validated_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path, str]:
+    """A repository holding a file under each bound path, committed at V; a ledger whose every
+    stage was measured at V; and V itself."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q", "--template=")
+    for name in (
+        "src/openalpha_cn/strategy.py",
+        "scripts/research/p6.py",
+        "pyproject.toml",
+        "uv.lock",
+    ):
+        (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / name).write_text("RULES = 1\n", encoding="utf-8")
+        git(repo, "add", name)
+    git(repo, "commit", "-q", "-m", "validated", at=datetime(2026, 9, 26, 0, 0, tzinfo=UTC))
+    validated = head(repo)
+    monkeypatch.setattr(sys.modules[__name__], "COMMIT", validated)
+    research = repo / "scripts" / "research"
+    monkeypatch.setattr(
+        registry, "_imported_package", lambda: repo / "src" / "openalpha_cn" / "__init__.py"
+    )
+    monkeypatch.setattr(
+        registry, "_imported_scripts", lambda: (research / "grid.py", research / "registry.py")
+    )
+
+    def results(configs: list[Mapping[str, object]]) -> Mapping[str, Any]:
+        return {_id(configs[1]): _result(ir=0.9, turnover=0.4)}
+
+    ledger, _ = _validation_ledger(tmp_path / "research", results)
+    return repo, ledger, validated
+
+
+def _commit(repo: Path, name: str, text: str, *, at: datetime) -> str:
+    (repo / name).parent.mkdir(parents=True, exist_ok=True)
+    (repo / name).write_text(text, encoding="utf-8")
+    commit_file(repo, repo / name, f"change {name}", at=at)
+    return head(repo)
+
+
+def test_a_registration_after_a_documentation_commit_keeps_the_validated_code(
+    validated_repo: tuple[Path, Path, str],
+) -> None:
+    """The bound code (`registry.REGISTERED_PATHS`, which holds `scripts/research/p6.py`) is
+    unchanged from the validation commit V to this checkout R, so R may register; the configuration
+    keeps V, the commit it was validated at."""
+    repo, ledger, validated = validated_repo
+    later = _commit(repo, "docs/notes.md", "results\n", at=datetime(2026, 9, 27, tzinfo=UTC))
+    registration = repo / "docs" / "research" / "p6-registration.json"
+
+    p6.register_holdout(ledger, SESSIONS, registration, later, repo)
+
+    body = json.loads(registration.read_text(encoding="utf-8"))
+    assert body["code_commit"] == later
+    _, chosen, row = p6.validation_selection(ledger, SESSIONS)
+    assert body["config_id"] == _id(p6.holdout_config(chosen, SESSIONS, validated))
+    assert body["criteria"]["validation_config_id"] == row.config_id
+
+
+def test_a_registration_names_the_commit_that_is_checked_out(
+    validated_repo: tuple[Path, Path, str],
+) -> None:
+    """The registration records the commit it was written from; naming V while R is checked out
+    would record a commit whose files were not the ones checked."""
+    repo, ledger, validated = validated_repo
+    _commit(repo, "docs/notes.md", "results\n", at=datetime(2026, 9, 27, tzinfo=UTC))
+    registration = repo / "docs" / "research" / "p6-registration.json"
+
+    with pytest.raises(p6.StageCommitError, match="checked-out"):
+        p6.register_holdout(ledger, SESSIONS, registration, validated, repo)
+    assert not registration.exists()
+
+
+@pytest.mark.parametrize("where", ["committed", "working tree"])
+def test_a_registration_after_the_bound_code_changed_is_refused(
+    validated_repo: tuple[Path, Path, str], where: str
+) -> None:
+    repo, ledger, _ = validated_repo
+    at = datetime(2026, 9, 27, tzinfo=UTC)
+    if where == "committed":
+        later = _commit(repo, "scripts/research/p6.py", "RULES = 2\n", at=at)
+    else:
+        later = head(repo)
+        (repo / "src" / "openalpha_cn" / "strategy.py").write_text("RULES = 2\n", encoding="utf-8")
+    registration = repo / "docs" / "research" / "p6-registration.json"
+
+    with pytest.raises(registry.SourceChangedError):
+        p6.register_holdout(ledger, SESSIONS, registration, later, repo)
+    assert not registration.exists()
+
+
+# --- review round 1: the holdout's checks come first, and its verdict is recoverable ------------
+
+
+def _registered(repo: Path, ledger: Path) -> Path:
+    registration = repo / "docs" / "research" / "p6-registration.json"
+    p6.register_holdout(ledger, SESSIONS, registration, head(repo), repo)
+    commit_file(repo, registration, "register", at=datetime(2026, 9, 27, tzinfo=UTC))
+    return registration
+
+
+@pytest.mark.parametrize(
+    "tampered",
+    [
+        {"validation_config_id": "0" * 64},
+        {"validation_max_relative_drawdown": 0.5},
+        {"compounded_annualized_relative_return_above": "zero"},
+    ],
+)
+def test_a_binding_the_ledger_contradicts_is_refused_before_the_holdout_is_claimed(
+    validated_repo: tuple[Path, Path, str], tampered: dict[str, object]
+) -> None:
+    repo, ledger, _ = validated_repo
+    registration = _registered(repo, ledger)
+    body = json.loads(registration.read_text(encoding="utf-8"))
+    body["criteria"].update(tampered)
+    registration.write_text(json.dumps(body, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    commit_file(repo, registration, "tamper", at=datetime(2026, 9, 28, tzinfo=UTC))
+
+    with pytest.raises(p6.HoldoutEvaluationError):
+        p6.run_holdout_stage(ledger, SESSIONS, registration, repo, _FakeSDK().run_strategy_backtest)
+    assert grid.stage_family(ledger, "holdout") == 0
+    assert not [row for row in grid.read_ledger(ledger) if row.stage == "holdout"]
+
+
+def test_a_claim_with_no_measurement_is_a_fail_and_says_so(
+    validated_repo: tuple[Path, Path, str],
+) -> None:
+    """A run that claimed the holdout and died is still the one run (section 7), and nothing it
+    could have measured passes."""
+    repo, ledger, _ = validated_repo
+    registration = _registered(repo, ledger)
+    body = json.loads(registration.read_text(encoding="utf-8"))
+    binding = {
+        "registration_sha256": hashlib.sha256(registration.read_bytes()).hexdigest(),
+        "registration_commit": head(repo),
+    }
+    grid._append_holdout(ledger, "holdout_claim", body["config"], binding, recorded_at=AT)
+
+    verdict = p6.holdout_verdict(ledger, SESSIONS, registration)
+
+    assert verdict["verdict"] == "不通过"
+    assert "claim" in verdict["statement"]
+    assert not any(item["passed"] for item in verdict["criteria"].values())
+
+
+@pytest.mark.parametrize("foreign", ["registration", "configuration"])
+def test_the_verdict_path_refuses_holdout_rows_that_are_not_this_registrations(
+    validated_repo: tuple[Path, Path, str], foreign: str
+) -> None:
+    repo, ledger, _ = validated_repo
+    registration = _registered(repo, ledger)
+    body = json.loads(registration.read_text(encoding="utf-8"))
+    digest = hashlib.sha256(registration.read_bytes()).hexdigest()
+    config = body["config"]
+    if foreign == "registration":
+        digest = "f" * 64
+    else:
+        config = {**config, "holding_count": config["holding_count"] + 1}
+    binding = {"registration_sha256": digest, "registration_commit": head(repo)}
+    grid._append_holdout(ledger, "holdout_claim", config, binding, recorded_at=AT)
+
+    with pytest.raises(p6.HoldoutEvaluationError, match=r"another|not the registered"):
+        p6.holdout_verdict(ledger, SESSIONS, registration)
+
+
+def test_the_holdout_runs_once_after_its_checks_and_is_judged_by_the_verdict_path(
+    validated_repo: tuple[Path, Path, str],
+) -> None:
+    repo, ledger, _ = validated_repo
+    registration = _registered(repo, ledger)
+
+    verdict = p6.run_holdout_stage(
+        ledger, SESSIONS, registration, repo, _FakeSDK().run_strategy_backtest
+    )
+
+    assert verdict == p6.holdout_verdict(ledger, SESSIONS, registration)
+    assert verdict["statement"].startswith("measured once")
+    kinds = [row.kind for row in grid.read_ledger(ledger) if row.stage == "holdout"]
+    assert kinds == ["holdout_claim", "measurement"]
+
+
+def test_the_verdict_path_refuses_a_holdout_that_has_not_run(
+    validated_repo: tuple[Path, Path, str],
+) -> None:
+    repo, ledger, _ = validated_repo
+    registration = _registered(repo, ledger)
+
+    with pytest.raises(p6.HoldoutEvaluationError, match="has not run"):
+        p6.holdout_verdict(ledger, SESSIONS, registration)
+
+
+# --- review round 1: the secondary family, duplicates, commits -----------------------------------
+
+
+def test_the_secondary_family_is_controlled_over_the_whole_stage_and_reported_only(
+    tmp_path: Path,
+) -> None:
+    configs = p6.discovery_configs(SESSIONS)
+    rows: dict[str, Mapping[str, object]] = {}
+    for index, config in enumerate(configs):
+        if index % 3 == 0:
+            rows[_id(config)] = {**_result(), "ic_error": "StrategyRunBlockedError: no build"}
+        else:
+            rows[_id(config)] = {**_result(), "p_ic": 1e-9 if index == 1 else 0.5}
+    ledger = tmp_path / "ledger.jsonl"
+    _fill(ledger, "discovery", configs, rows)
+
+    answer = p6.survivors(ledger, SESSIONS)
+
+    table = answer["ic_fdr_table"]
+    assert table == grid.fdr_table(ledger, "discovery", 0.10, p_value_key="p_ic").model_dump(
+        mode="json"
+    )
+    assert table["family_size"] == 189
+    assert table["withheld_hypotheses"] == 63
+    assert table["discoveries"] == 1
+    assert answer["fallback"] is True  # a p_ic discovery selects nothing
+
+
+def test_a_stage_with_no_ic_p_value_reports_the_secondary_family_as_absent(tmp_path: Path) -> None:
+    answer = p6.survivors(_survivor_ledger(tmp_path, {}), SESSIONS)
+    assert answer["ic_fdr_table"] is None
+    assert "p_ic" in answer["ic_fdr_note"]
+
+
+def test_a_discovery_stage_that_measured_nothing_is_refused_not_taken_as_no_survivor(
+    tmp_path: Path,
+) -> None:
+    """The fallback is for a stage that was measured and found nothing; 189 refusals measured
+    nothing, and there is no p-value to control."""
+    configs = p6.discovery_configs(SESSIONS)
+    ledger = tmp_path / "ledger.jsonl"
+    refused = {"error": "StrategyRunBlockedError: no build", "code_commit": COMMIT}
+    _fill(ledger, "discovery", configs, {_id(c): refused for c in configs})
+
+    with pytest.raises(grid.ResearchLedgerError, match="p_excess"):
+        p6.survivors(ledger, SESSIONS)
+
+
+def test_a_candidate_without_an_information_ratio_is_refused_rather_than_placed(
+    tmp_path: Path,
+) -> None:
+    config = _discovery("amihud_60/v1", "raw", 5)
+    ledger = _survivor_ledger(tmp_path, {_id(config): _result(p=1e-9, mean=0.01, ir=None)})
+
+    with pytest.raises(p6.UnrankableRowError, match="information ratio None"):
+        p6.survivors(ledger, SESSIONS)
+
+
+def test_a_duplicated_ledger_row_is_refused_by_name(tmp_path: Path) -> None:
+    ledger = _survivor_ledger(tmp_path, {})
+    first = ledger.read_text(encoding="utf-8").splitlines()[0]
+    with ledger.open("a", encoding="utf-8") as handle:
+        handle.write(first + "\n")
+
+    with pytest.raises(p6.DuplicateRowError, match="twice"):
+        p6.survivors(ledger, SESSIONS)
+
+
+def test_the_survivors_report_names_every_commit_the_discovery_rows_ran_at(tmp_path: Path) -> None:
+    config = _discovery("reversal_1d/v1", "raw", 1)
+    ledger = _survivor_ledger(tmp_path, {_id(config): {**_result(), "code_commit": OTHER_COMMIT}})
+
+    assert p6.survivors(ledger, SESSIONS)["code_commits"] == sorted((COMMIT, OTHER_COMMIT))
+
+
+def test_a_stage_commit_ignores_a_row_that_names_none_but_not_a_stage_of_only_those(
+    tmp_path: Path,
+) -> None:
+    ledger = tmp_path / "ledger.jsonl"
+    window = {"start": date(2017, 1, 3), "end": date(2021, 12, 31)}
+    grid.append_ledger(ledger, "composition", {"i": 0, **window}, _result(), recorded_at=AT)
+    grid.append_ledger(ledger, "composition", {"i": 1, **window}, {"error": "x"}, recorded_at=AT)
+    grid.append_ledger(ledger, "validation", {"i": 0}, {"error": "x"}, recorded_at=AT)
+
+    assert p6.stage_commit(ledger, "composition") == COMMIT
+    with pytest.raises(p6.StageCommitError, match="no row"):
+        p6.stage_commit(ledger, "validation")
+
+
+def test_a_row_the_window_refuses_carries_the_stages_commit(tmp_path: Path) -> None:
+    ledger = tmp_path / "ledger.jsonl"
+    reaching_2022 = {**_discovery("reversal_1d/v1", "raw", 1), "end": date(2021, 12, 31)}
+
+    p6._run(
+        ledger,
+        "discovery",
+        (reaching_2022,),
+        lambda config: {"p_excess": 0.5},
+        label_sessions=p6.discovery_label_sessions,
+        sessions=SESSIONS,
+        echo=lambda line: None,
+        clock=lambda: AT,
+        code_commit=COMMIT,
+    )
+
+    (row,) = grid.read_ledger(ledger)
+    assert row.result["error"].startswith("StageWindowError: ")
+    assert row.result["code_commit"] == COMMIT

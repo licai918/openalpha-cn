@@ -778,6 +778,88 @@ def test_the_ledgered_compounded_return_reads_only_complete_periods() -> None:
     )
 
 
+class _Period:
+    def __init__(self, day: int, net: str, primary: str, reported: str | None) -> None:
+        self.start = date(2026, 1, day)
+        self.end = date(2026, 1, day + 1)
+        self.sessions = 20
+        self.net_return = Decimal(net)
+        self.benchmark_returns = {"equal_weight_all_a": Decimal(primary)}
+        if reported is not None:
+            self.benchmark_returns["000905.SH"] = Decimal(reported)
+        self.turnover = Decimal("0.5")
+
+
+class _Spec:
+    rebalance_every_sessions = 20
+
+
+class _Book:
+    def __init__(self, periods: list[_Period]) -> None:
+        self.periods = tuple(periods)
+        self.spec = _Spec()
+        self.unknowable_crossings = ()
+
+
+def test_the_reported_benchmark_is_ledgered_beside_the_primary_and_decides_nothing() -> None:
+    """Section 3: 000905.SH is reported in parallel. Net (0.02, 0.01, 0.04) against it
+    (0.01, -0.01, 0.00) is an excess of (0.01, 0.02, 0.04); every primary key is unchanged."""
+    book = _Book(
+        [
+            _Period(5, "0.02", "0.00", "0.01"),
+            _Period(6, "0.01", "0.00", "-0.01"),
+            _Period(7, "0.04", "0.00", "0.00"),
+        ]
+    )
+
+    result = grid.strategy_result(book, excess_benchmark="equal_weight_all_a", bootstrap_samples=10)
+
+    excess = [0.01, 0.02, 0.04]
+    per_year = 244 / 20
+    assert result["reported_benchmark"] == "000905.SH"
+    assert result["reported_benchmark_return"] == ["0.01", "-0.01", "0.00"]
+    assert result["reported_net_excess"] == ["0.01", "0.02", "0.04"]
+    assert result["reported_mean_net_excess"] == pytest.approx(statistics.fmean(excess))
+    assert result["reported_information_ratio"] == pytest.approx(
+        statistics.fmean(excess) / statistics.stdev(excess) * math.sqrt(per_year)
+    )
+    level = (1.02 * 1.01 * 1.04) / (1.01 * 0.99 * 1.00)
+    assert result["reported_compounded_annual_relative_return"] == pytest.approx(
+        level ** (244 / 60) - 1
+    )
+    primary = grid.strategy_result(
+        _Book([_Period(5 + i, n, "0.00", None) for i, n in enumerate(("0.02", "0.01", "0.04"))]),
+        excess_benchmark="equal_weight_all_a",
+        bootstrap_samples=10,
+    )
+    assert "reported_benchmark" not in primary  # a book without it still measures
+    assert {k: v for k, v in result.items() if not k.startswith("reported_")} == primary
+
+
+def test_a_refused_row_carries_the_extra_keys_the_runner_is_handed(tmp_path: Path) -> None:
+    ledger = tmp_path / "ledger.jsonl"
+    outside = {"start": date(2023, 6, 1), "end": date(2024, 1, 5)}
+
+    def refuse(config: Mapping[str, object]) -> Mapping[str, object]:
+        raise StrategyRequestError("no cross section")
+
+    for config, measure in ((outside, lambda c: {"p_excess": 0.5}), ({**WINDOW}, refuse)):
+        stage = "validation" if config is outside else "discovery"
+        grid.run_grid(
+            ledger,
+            stage,
+            (config,),
+            measure,
+            label_sessions=NO_LABEL,
+            clock=lambda: AT,
+            result_extra={"code_commit": "a" * 40},
+        )
+
+    assert [row["result"]["code_commit"] for row in _rows(ledger)] == ["a" * 40] * 2
+    assert _rows(ledger)[0]["result"]["error"].startswith("StageWindowError: ")
+    assert _rows(ledger)[1]["result"]["error"].startswith("StrategyRequestError: ")
+
+
 def test_the_one_sided_p_value_halves_the_two_sided_one_in_the_observed_direction() -> None:
     assert grid.one_sided_p_value(0.08, 0.001) == 0.04
     assert grid.one_sided_p_value(0.08, -0.001) == 0.96
