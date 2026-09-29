@@ -45,6 +45,7 @@ from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
 from datetime import UTC, date, datetime, time, timedelta
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, Final
 from zoneinfo import ZoneInfo
@@ -62,6 +63,7 @@ from openalpha_cn.domain.daily_prices import (
     DAILY_DATASET,
     SESSION_CLOSE_TIME,
 )
+from openalpha_cn.domain.factor_transform import FactorTransformRegistry, FactorTransformSpec
 from openalpha_cn.domain.financial_statements import (
     ANNOUNCEMENT_DATE_COLUMN,
     FIRST_ANNOUNCEMENT_COLUMN,
@@ -110,6 +112,7 @@ from openalpha_cn.factor_view import (
 )
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import (
+    CROSS_SECTION_STANDARD,
     FACTOR_DEFINITIONS,
     ExcludedReportPeriod,
     UnknowableReturnSession,
@@ -1425,24 +1428,45 @@ UNKNOWABLE_SECURITY: Final[str] = SECURITIES[UNKNOWABLE_INDEX]
 def _with_an_unknowable_session(store: PanelStore) -> date:
     """Record `UNKNOWABLE_SECURITY`'s newest session at `INSTANTS[0]` as one whose return no
     witness decides, judged on the two stored closes, as the `stk_limit` target writes one."""
-    path = _path(UNKNOWABLE_INDEX, UNKNOWABLE_SECURITY)
-    held = [day for day in path if day <= INSTANTS[0].astimezone(SHANGHAI).date()]
-    session, previous = held[-1], held[-2]
-    close, pre_close = path[session]
-    values: dict[str, object] = {
-        "trade_date": session.isoformat(),
-        "source_dataset": "stk_limit",
-        "defect_kind": "pre_close_contradicts_adj_factor",
-        "bar_close": close,
-        "valuation_close": pre_close * 0.5,
-        "previous_bar_close": path[previous][0],
-        "up_limit": None,
-        "down_limit": None,
-        "valuation_repeats_previous_close": None,
-        "list_date": None,
-    }
+    (session,) = _with_decisions(store, (UNKNOWABLE_INDEX, "pre_close_contradicts_adj_factor"))
+    return session
+
+
+def _with_decisions(
+    store: PanelStore, *decisions: tuple[int, str] | tuple[int, str, datetime]
+) -> tuple[date, ...]:
+    """Record each `(security index, kind[, instant])` about that security's newest session at
+    the instant (`INSTANTS[0]` by default), judged on the two stored closes with an implied
+    `pre_close` half the published one, replacing every `stk_limit` record of the year -- as a
+    re-judgement does."""
+    rows: list[tuple[str, date, dict[str, object]]] = []
+    for index, kind, *at in decisions:
+        security = SECURITIES[index]
+        path = _path(index, security)
+        instant = at[0] if at else INSTANTS[0]
+        held = [day for day in path if day <= instant.astimezone(SHANGHAI).date()]
+        session, previous = held[-1], held[-2]
+        close, pre_close = path[session]
+        rows.append(
+            (
+                security,
+                session,
+                {
+                    "trade_date": session.isoformat(),
+                    "source_dataset": "stk_limit",
+                    "defect_kind": kind,
+                    "bar_close": close,
+                    "valuation_close": pre_close * 0.5,
+                    "previous_bar_close": path[previous][0],
+                    "up_limit": None,
+                    "down_limit": None,
+                    "valuation_repeats_previous_close": None,
+                    "list_date": None,
+                },
+            )
+        )
     kinds = {"valuation_repeats_previous_close": "boolean"}
-    published = _at(session, DAILY_AVAILABILITY_TIME)
+    (year,) = {session.year for _security, session, _values in rows}
     write_upstream_defects(
         store,
         ColumnarPanelBatch(
@@ -1452,26 +1476,32 @@ def _with_an_unknowable_session(store: PanelStore) -> date:
             as_of=FETCHED_AT,
             fetched_at=FETCHED_AT,
             status="success",
-            subjects=(UNKNOWABLE_SECURITY,),
+            subjects=tuple(security for security, _session, _values in rows),
             timeline=TimelineColumns(
-                event_time=(_at(session, SESSION_CLOSE_TIME),),
-                available_time=(published,),
-                ingested_time=(published,),
-                revision_time=(published,),
+                event_time=tuple(_at(session, SESSION_CLOSE_TIME) for _s, session, _v in rows),
+                available_time=tuple(
+                    _at(session, DAILY_AVAILABILITY_TIME) for _s, session, _v in rows
+                ),
+                ingested_time=tuple(
+                    _at(session, DAILY_AVAILABILITY_TIME) for _s, session, _v in rows
+                ),
+                revision_time=tuple(
+                    _at(session, DAILY_AVAILABILITY_TIME) for _s, session, _v in rows
+                ),
             ),
             columns=tuple(
                 PanelColumn(
                     name,
-                    kinds.get(name, "string" if isinstance(values[name], str) else "float"),
-                    (values[name],),
+                    kinds.get(name, "string" if isinstance(rows[0][2][name], str) else "float"),
+                    tuple(values[name] for _security, _session, values in rows),
                 )
                 for name in UPSTREAM_DEFECT_DATA_COLUMNS
             ),
         ),
-        year=session.year,
+        year=year,
         source_datasets=frozenset({"stk_limit"}),
     )
-    return session
+    return tuple(session for _security, session, _values in rows)
 
 
 def test_an_unknowable_session_a_return_factor_crosses_is_counted_on_every_build_face(
@@ -1518,27 +1548,71 @@ def test_an_unknowable_session_a_return_factor_crosses_is_counted_on_every_build
 # --- review round 2, N1: the stored builds a decision made stale, found and repaired --------------
 
 
+def _detect(store: PanelStore) -> tuple[tuple[factor_view.StaleReturnPathBuild, ...], list[int]]:
+    calls: list[int] = []
+    found = factor_view.stale_return_path_builds(
+        store,
+        exchange=EXCHANGE,
+        max_staleness_days=STALENESS_DAYS,
+        as_of=FETCHED_AT,
+        code_commit=COMMIT,
+        budget=calls.append,
+    )
+    return found, calls
+
+
+def _detector_arguments(runtime: Path) -> list[str]:
+    arguments = ["factor", "stale-return-paths", "--runtime-dir", str(runtime)]
+    arguments += ["--exchange", EXCHANGE, "--max-staleness-days", str(STALENESS_DAYS)]
+    return [*arguments, "--code-commit", COMMIT, "--as-of", FETCHED_AT.isoformat()]
+
+
+def _raw_only(store: PanelStore, factor: str, **overrides: Any) -> FactorBuildReport:
+    return _single(store, factor, tier="raw", transform="", neutralization="", **overrides)
+
+
 def test_the_detector_lists_every_build_made_before_a_decision_and_nothing_after_its_repair(
     corpus: Path, tmp_path: Path
 ) -> None:
     """A store whose factor builds were made before any return-path decision existed holds
     values on the published path. A decision is not a manifest input, so nothing else notices.
-    `factor stale-return-paths` recomputes, with the engine itself, every stored raw observation
-    whose window can reach a decided session, lists each build whose stored answer the engine no
+    `factor stale-return-paths` asks the engine again about every stored observation whose own
+    window reads a decision that can move it, lists each build whose stored answer the engine no
     longer gives -- raw, and the processed and neutralized builds made from it at that instant --
-    with the `factor build ... --supersedes-*` command that repairs it, and exits 1. Running the
-    printed command leaves nothing to list, and the command exits 0.
+    with the `factor build ... --supersedes-*` commands that repair them, and exits 1. Running
+    the printed commands leaves nothing to list, and the command exits 0.
 
-    The build the next session later is a candidate too -- its window holds the decided session
-    -- but the one-session reversal reads only the return into its own newest session, so the
-    engine gives the stored answer and it is not listed: the judgement is the engine's, not the
-    window's."""
+    Three decisions, about three securities' newest session at `INSTANTS[0]`: unknowable,
+    published, and the factor path; and a published one about a fourth security's session the
+    next day. Review round 3 narrowed what is asked (I-A), and the stated budget is the count:
+
+    - `reversal_1d` at `INSTANTS[0]`: asked, for the unknowable session -- it moves. The published
+      decision moves nothing and the factor path moves no close-to-close return: not asked.
+    - `reversal_5_sessions` at `INSTANTS[0]`: asked, for the unknowable session and the factor
+      path of a return it reads on its own row -- both move.
+    - `reversal_1d` the next day: the unknowable session is the first of its window, whose return
+      into it is not read, and the only session it does read carries a published decision, which
+      moves nothing. Not asked.
+    - `momentum_20_sessions` at `INSTANTS[0]`: every decided session is the newest, inside the
+      five sessions momentum skips. Not asked.
+    - `earnings_yield_ttm` reads no session return. Not asked.
+
+    After the repair the two builds are asked again -- each now holds an abstention with a
+    decision in its window -- and the engine gives the stored answers, so nothing is listed."""
     runtime = tmp_path / "research"
     store = _copy(corpus, runtime / "panel")
     next_day = INSTANTS[0] + timedelta(days=1)
     _single(store, "reversal_1d/v1", as_ofs=(INSTANTS[0], next_day))
+    _raw_only(store, "reversal_5_sessions/v1", as_ofs=(INSTANTS[0],))
+    _raw_only(store, "momentum_20_sessions/v1", as_ofs=(INSTANTS[0],))
     _single(store, "earnings_yield_ttm/v1", as_ofs=(INSTANTS[0],))
-    session = _with_an_unknowable_session(store)
+    session, _published, _adjusted, _next = _with_decisions(
+        store,
+        (UNKNOWABLE_INDEX, "pre_close_contradicts_adj_factor"),
+        (UNKNOWABLE_INDEX + 2, "pre_close_corroborated_over_adj_factor"),
+        (UNKNOWABLE_INDEX + 4, "adj_factor_corroborated_over_pre_close"),
+        (UNKNOWABLE_INDEX + 6, "pre_close_corroborated_over_adj_factor", next_day),
+    )
     definition = FACTOR_DEFINITIONS.get("reversal_1d/v1")
     raw = [
         item
@@ -1561,30 +1635,45 @@ def test_the_detector_lists_every_build_made_before_a_decision_and_nothing_after
     ]
     kept = _stored_answers(store, "reversal_1d/v1", as_of=next_day)[UNKNOWABLE_SECURITY]
     assert kept[0] == "computed"
+    momentum = _stored_answers(store, "momentum_20_sessions/v1")
 
-    (stale,) = factor_view.stale_return_path_builds(
-        store,
-        exchange=EXCHANGE,
-        max_staleness_days=STALENESS_DAYS,
-        as_of=FETCHED_AT,
-        code_commit=COMMIT,
-    )
+    stale, calls = _detect(store)
 
-    assert (stale.factor, stale.as_of, stale.subject, stale.session) == (
-        "reversal_1d/v1",
-        INSTANTS[0],
-        UNKNOWABLE_SECURITY,
-        session,
-    )
-    assert stale.kind == "pre_close_contradicts_adj_factor"
-    assert stale.stored_coverage == "computed"
-    assert stale.engine_coverage == "undefined_value"
-    assert [(build.tier, build.year, build.manifest_id) for build in stale.builds] == [
+    assert calls == [2]
+    assert sorted(
+        (item.factor, item.subject, item.kind, item.stored_coverage, item.engine_coverage)
+        for item in stale
+    ) == [
+        (
+            "reversal_1d/v1",
+            UNKNOWABLE_SECURITY,
+            "pre_close_contradicts_adj_factor",
+            "computed",
+            "undefined_value",
+        ),
+        (
+            "reversal_5_sessions/v1",
+            UNKNOWABLE_SECURITY,
+            "pre_close_contradicts_adj_factor",
+            "computed",
+            "undefined_value",
+        ),
+        (
+            "reversal_5_sessions/v1",
+            SECURITIES[UNKNOWABLE_INDEX + 4],
+            "adj_factor_corroborated_over_pre_close",
+            "computed",
+            "computed",
+        ),
+    ]
+    (reversal,) = [item for item in stale if item.factor == "reversal_1d/v1"]
+    assert (reversal.as_of, reversal.session) == (INSTANTS[0], session)
+    assert [(build.tier, build.year, build.manifest_id) for build in reversal.builds] == [
         ("raw", 2026, raw[0].manifest_id),
         ("processed", 2026, processed[0].transform_manifest_id),
         ("neutralized", 2026, neutralized[0].neutralization_manifest_id),
     ]
-    (command,) = stale.commands
+    (command,) = reversal.commands
     assert command[:6] == ("factor", "build", "--factor", "reversal_1d/v1", "--tier", "neutralized")
     for flag, value in (
         ("--supersedes-raw", raw[0].manifest_id),
@@ -1593,32 +1682,33 @@ def test_the_detector_lists_every_build_made_before_a_decision_and_nothing_after
         ("--as-of", INSTANTS[0].isoformat()),
     ):
         assert command[command.index(flag) + 1] == value
-
-    arguments = ["factor", "stale-return-paths", "--runtime-dir", str(runtime)]
-    arguments += ["--exchange", EXCHANGE, "--max-staleness-days", str(STALENESS_DAYS)]
-    arguments += ["--code-commit", COMMIT, "--as-of", FETCHED_AT.isoformat()]
-    found = CliRunner().invoke(app, arguments)
-
-    assert found.exit_code == 1, found.output
-    printed = [line for line in found.stdout.splitlines() if line.startswith("  openalpha ")]
-    assert printed == [
-        f"  openalpha {shlex.join(command)} --runtime-dir {shlex.quote(str(runtime))}"
+    (short,) = {item.commands for item in stale if item.factor == "reversal_5_sessions/v1"}
+    assert [line[:6] for line in short] == [
+        ("factor", "build", "--factor", "reversal_5_sessions/v1", "--tier", "raw")
     ]
 
-    repaired = CliRunner().invoke(app, [*command, "--runtime-dir", str(runtime)])
-    assert repaired.exit_code == 0, repaired.stderr
+    found = CliRunner().invoke(app, _detector_arguments(runtime))
 
+    assert found.exit_code == 1, found.output
+    assert "BUDGET stale-return-path-recompute 2 compute_factor calls" in found.stderr
     assert (
-        factor_view.stale_return_path_builds(
-            store,
-            exchange=EXCHANGE,
-            max_staleness_days=STALENESS_DAYS,
-            as_of=FETCHED_AT,
-            code_commit=COMMIT,
-        )
-        == ()
-    )
-    clean = CliRunner().invoke(app, arguments)
+        f"  {UNKNOWABLE_SECURITY}: stored computed {reversal.stored_value} differs from the "
+        "engine's current result undefined_value None; decision "
+        f"pre_close_contradicts_adj_factor on {session.isoformat()} is inside its window"
+    ) in found.stdout.splitlines()
+    printed = [line for line in found.stdout.splitlines() if line.startswith("  openalpha ")]
+    suffix = f"--runtime-dir {shlex.quote(str(runtime))}"
+    assert printed == [
+        f"  openalpha {shlex.join(command)} {suffix}",
+        f"  openalpha {shlex.join(short[0])} {suffix}",
+    ]
+
+    for line in (command, short[0]):
+        repaired = CliRunner().invoke(app, [*line, "--runtime-dir", str(runtime)])
+        assert repaired.exit_code == 0, repaired.stderr
+
+    assert _detect(store) == ((), [2])
+    clean = CliRunner().invoke(app, _detector_arguments(runtime))
     assert clean.exit_code == 0, clean.output
     assert "stale return-path builds: none" in clean.stdout
     assert _stored_answers(store, "reversal_1d/v1")[UNKNOWABLE_SECURITY] == (
@@ -1626,3 +1716,142 @@ def test_the_detector_lists_every_build_made_before_a_decision_and_nothing_after
         None,
     )
     assert _stored_answers(store, "reversal_1d/v1", as_of=next_day)[UNKNOWABLE_SECURITY] == kept
+    assert _stored_answers(store, "momentum_20_sessions/v1") == momentum
+
+
+def test_an_abstention_whose_decision_was_judged_again_is_listed_and_repaired(
+    corpus: Path, tmp_path: Path
+) -> None:
+    """Review round 3, Minors 1 and 2. A build made while a session was unknowable stores
+    `undefined_value` for it. Re-judged later -- a rebuilt band now corroborates the published
+    `pre_close` -- the record says `published`, and the engine now computes a number. The stored
+    abstention is a candidate because its window holds a decision of any path, so the detector
+    lists it; after the printed rebuild it is `computed` under a published decision, which moves
+    nothing, and nobody is asked again."""
+    runtime = tmp_path / "research"
+    store = _copy(corpus, runtime / "panel")
+    _with_an_unknowable_session(store)
+    _raw_only(store, "reversal_1d/v1", as_ofs=(INSTANTS[0],))
+    assert _stored_answers(store, "reversal_1d/v1")[UNKNOWABLE_SECURITY] == (
+        "undefined_value",
+        None,
+    )
+    assert _detect(store) == ((), [1])
+
+    (session,) = _with_decisions(
+        store, (UNKNOWABLE_INDEX, "pre_close_corroborated_over_adj_factor")
+    )
+    (stale,), calls = _detect(store)
+
+    assert calls == [1]
+    assert (stale.subject, stale.session, stale.kind) == (
+        UNKNOWABLE_SECURITY,
+        session,
+        "pre_close_corroborated_over_adj_factor",
+    )
+    assert (stale.stored_coverage, stale.engine_coverage) == ("undefined_value", "computed")
+    (command,) = stale.commands
+    repaired = CliRunner().invoke(app, [*command, "--runtime-dir", str(runtime)])
+    assert repaired.exit_code == 0, repaired.stderr
+    assert _detect(store) == ((), [0])
+    assert _stored_answers(store, "reversal_1d/v1")[UNKNOWABLE_SECURITY] == (
+        "computed",
+        stale.engine_value,
+    )
+
+
+ALTERNATIVE_TRANSFORM: Final[FactorTransformSpec] = FactorTransformSpec.model_validate(
+    {
+        **CROSS_SECTION_STANDARD.model_dump(include=set(FactorTransformSpec.model_fields)),
+        "key": "cross_section_alternative",
+    }
+)
+
+
+def test_a_raw_build_under_two_transforms_is_repaired_by_one_command_per_transform(
+    corpus: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 3, Minor 3. One raw build under two transforms, the first also neutralized --
+    a neutralization answers one question per instant, so a second neutralized build of the same
+    policy at the same instant cannot be stored beside it: four builds to supersede and one
+    command per transform. The raw build is superseded once, by the first command; each command
+    supersedes its own processed build, and the neutralized one rides with the transform it was
+    made from. Run in the printed order they repair the store, and nothing is listed
+    afterwards.
+
+    Only one transform is registered, so the second is a test registry's, handed to the command
+    line's own default -- the commands run are the printed ones, byte for byte."""
+    registry = FactorTransformRegistry((CROSS_SECTION_STANDARD, ALTERNATIVE_TRANSFORM))
+    monkeypatch.setitem(factor_view.factor_build_requests.__kwdefaults__, "transforms", registry)
+    monkeypatch.setitem(factor_view.factor_build_request.__kwdefaults__, "transforms", registry)
+    runtime = tmp_path / "research"
+    store = _copy(corpus, runtime / "panel")
+    alternative = ALTERNATIVE_TRANSFORM.qualified_key
+    _single(store, "reversal_1d/v1", as_ofs=(INSTANTS[0],))
+    _single(
+        store,
+        "reversal_1d/v1",
+        as_ofs=(INSTANTS[0],),
+        tier="processed",
+        transform=alternative,
+        neutralization="",
+    )
+    _with_an_unknowable_session(store)
+    definition = FACTOR_DEFINITIONS.get("reversal_1d/v1")
+    (raw,) = load_factor_manifests(store, definition, years=(2026,), as_of=FETCHED_AT)
+    processed = {
+        f"{item.transform_key}/v{item.transform_version}": item.transform_manifest_id
+        for item in load_factor_transform_manifests(
+            store, definition, years=(2026,), as_of=FETCHED_AT
+        )
+    }
+    neutralized = {
+        item.source_transform_manifest_id: item.neutralization_manifest_id
+        for item in load_factor_neutralization_manifests(
+            store, definition, years=(2026,), as_of=FETCHED_AT
+        )
+    }
+
+    (stale,), calls = _detect(store)
+
+    assert calls == [1]
+    assert sorted((build.tier, build.manifest_id) for build in stale.builds) == sorted(
+        [
+            ("raw", raw.manifest_id),
+            *(("processed", identifier) for identifier in processed.values()),
+            ("neutralized", neutralized[processed[TRANSFORM]]),
+        ]
+    )
+
+    def supersedes(command: tuple[str, ...]) -> dict[str, list[str]]:
+        named: dict[str, list[str]] = {}
+        for flag, value in pairwise(command):
+            if flag.startswith("--supersedes-"):
+                named.setdefault(flag, []).append(value)
+        return named
+
+    first, second = stale.commands
+    by_transform = {
+        command[command.index("--transform") + 1]: supersedes(command)
+        for command in (first, second)
+    }
+    assert set(by_transform) == {TRANSFORM, alternative}
+    for transform, named in by_transform.items():
+        assert named["--supersedes-processed"] == [processed[transform]]
+    assert by_transform[TRANSFORM]["--supersedes-neutralized"] == [
+        neutralized[processed[TRANSFORM]]
+    ]
+    assert "--supersedes-neutralized" not in by_transform[alternative]
+    assert supersedes(first)["--supersedes-raw"] == [raw.manifest_id]
+    assert "--supersedes-raw" not in supersedes(second)
+    tiers = {command[command.index("--transform") + 1]: command[5] for command in (first, second)}
+    assert tiers == {TRANSFORM: "neutralized", alternative: "processed"}
+
+    for command in (first, second):
+        repaired = CliRunner().invoke(app, [*command, "--runtime-dir", str(runtime)])
+        assert repaired.exit_code == 0, repaired.stderr
+    assert _detect(store) == ((), [1])
+    assert _stored_answers(store, "reversal_1d/v1")[UNKNOWABLE_SECURITY] == (
+        "undefined_value",
+        None,
+    )

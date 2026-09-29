@@ -2220,3 +2220,36 @@ def test_a_first_pair_is_judged_again_when_the_year_before_under_it_changed() ->
     (decision,) = reconciled.defects
     assert decision.previous_bar_close == 10.0
     assert decision.valuation_close == pytest.approx(10.0 / 1.1)
+
+
+def test_a_decision_the_stored_rows_no_longer_support_is_named_as_retired(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 3, Minor 2. A session judged unknowable, then its `adj_factor` and `daily`
+    rebuilt so the two statements agree: re-judging records nothing for it, and the stored
+    decision is replaced by none. A factor build that abstained on it is stale and
+    `factor stale-return-paths` cannot see it -- neither the store nor the manifest keeps the
+    decision -- so the re-judgement names it on a `RETIRED-RETURN-PATH` line, the one moment it
+    is known."""
+    unknowable = Frame(return_path="unknowable")
+    built, _ = _build(tmp_path, unknowable, monkeypatch, "adj_factor", "price", "stk_limit")
+    assert built.exit_code == PanelExit.ok, built.output
+    assert [d.kind for d in _return_path_defects(tmp_path)] == ["pre_close_contradicts_adj_factor"]
+    # Judged again on the same rows, the decision is the same one: nothing is retired.
+    again, _ = _judge_from_store(tmp_path, unknowable, monkeypatch)
+    assert again.exit_code == PanelExit.ok, again.output
+    assert "RETIRED-RETURN-PATH" not in again.output
+    agreeing = Frame()
+    rebuilt, _ = _build(tmp_path, agreeing, monkeypatch, "adj_factor", "price")
+    assert rebuilt.exit_code == PanelExit.ok, rebuilt.output
+
+    result, upstream = _judge_from_store(tmp_path, agreeing, monkeypatch)
+
+    assert result.exit_code == PanelExit.ok, result.output
+    # The year's only record was the retired decision, so nothing is left to store.
+    assert _store(tmp_path).registered_years(UPSTREAM_DEFECTS_DATASET) == ()
+    assert upstream.payloads == []
+    assert (
+        f"RETIRED-RETURN-PATH {RETURN_PATH_CODE} {SESSIONS[2].isoformat()} was "
+        "pre_close_contradicts_adj_factor"
+    ) in result.output

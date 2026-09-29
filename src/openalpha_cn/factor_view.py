@@ -310,17 +310,20 @@ from openalpha_cn.panel_factors import (
     FactorPanel,
     FactorReadCarry,
     ProcessedFactorPanel,
+    ReturnLinks,
     UnknowableReturnSession,
     apply_factor_transform,
     compute_factor,
     factor_manifest_dataset,
     factor_observation_dataset,
+    factor_transform_manifest_dataset,
     load_factor_manifests,
     load_factor_observations,
     load_factor_transform_manifests,
     load_processed_factor_observations,
     processed_factor_dataset,
     session_return_links,
+    unread_newest_sessions,
     write_factor_panels,
     write_processed_factor_panels,
 )
@@ -345,6 +348,7 @@ from openalpha_cn.panel_neutralization import (
     NeutralizationEngineError,
     NeutralizedFactorPanel,
     apply_factor_neutralization,
+    factor_neutralization_manifest_dataset,
     load_factor_neutralization_manifests,
     load_industry_market_cap_cross_section,
     load_neutralized_factor_observations,
@@ -4032,12 +4036,12 @@ class StaleReturnPathBuild:
     """A stored raw observation the factor engine would no longer give, and what repairs it.
 
     `stored_*` is what the build wrote and `engine_*` what `compute_factor` answers now for the
-    same security at the same instant over the same partition years -- different because a
-    return-path decision about `session` (`kind`) was recorded after the build was made, and a
-    decision is not a manifest input, so no readiness or staleness check can see it. `builds` is
-    the raw build and every processed and neutralized build made from it at that instant; each
-    of `commands` is a `factor build` argument list that re-answers them and names what it
-    supersedes, without `--runtime-dir`.
+    same security at the same instant over the same partition years. `session` and `kind` name
+    the earliest recorded decision inside the observation's own window -- the reason it was asked
+    again, not a proof of why it moved: a rebuilt input partition under the same window would
+    show here too, and the repair is the same. `builds` is the raw build and every processed and
+    neutralized build made from it at that instant; each of `commands` is a `factor build`
+    argument list that re-answers them and names what it supersedes, without `--runtime-dir`.
     """
 
     factor: str
@@ -4053,6 +4057,16 @@ class StaleReturnPathBuild:
     commands: tuple[tuple[str, ...], ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _Recompute:
+    """One stored raw build to ask the engine about again, and why."""
+
+    definition: FactorDefinition
+    year: int
+    manifest: FactorBuildManifest
+    held: tuple[tuple[FactorObservation, date, RecordedReturnPath], ...]
+
+
 def stale_return_path_builds(
     store: PanelStore,
     *,
@@ -4060,44 +4074,129 @@ def stale_return_path_builds(
     max_staleness_days: int,
     as_of: datetime,
     code_commit: str | None = None,
+    budget: Callable[[int], None] | None = None,
 ) -> tuple[StaleReturnPathBuild, ...]:
     """Every stored price-return factor build a recorded return-path decision made stale.
 
-    `V2-P6-020`, review round 2 (N1). A build stored before a decision existed holds the value the
-    published path gives; the engine now abstains on an unknowable session and reads a session
-    decided for the factor path on that path. Nothing in the store says so -- a decision is not a
-    manifest input -- so this asks the engine itself:
+    `V2-P6-020`, review rounds 2 and 3. A build stored before a decision existed holds the value
+    the published path gives; the engine now abstains on an unknowable session and reads a
+    session decided for the factor path on that path. Nothing in the store says so -- a decision
+    is not a manifest input -- so this asks the engine itself, about as few observations as can
+    have moved:
 
-    1. **Which decisions.** Every recorded decision visible at `as_of`, whichever path it names:
-       whether it moves a stored value is step 3's question, not this one's.
-    2. **Which stored raw observations can have read one.** For every factor that reads a session
-       return (`panel_factors.session_return_links`), every stored build whose instant falls on
-       the decided session or after it, with at most `max_window_sessions` + 1 stored sessions
-       from the one to the other (the + 1 is an instant before its own day's close, whose window
-       ends the session before). No window the engine can assemble holds a session further back,
-       so this bound only narrows what step 3 is asked; it decides nothing. Only a `computed`
-       observation of the decided security can move.
-    3. **Whether it moved.** `compute_factor` for the decided securities at the build's own
-       instant, over the build's own partition years and code commit -- the engine's window rule,
-       skip and decision matching, not a copy of them. A different coverage or value is stale.
+    1. **The window is the observation's own.** Every stored `computed` or `undefined_value`
+       observation of a factor that reads session returns (`panel_factors.session_return_links`)
+       carries the first and last session its value was computed over. A decision is a reason to
+       ask again only when its session is one the engine reads in that window: not the first
+       session of a close-to-close window, whose return into it is not read, and not a session
+       among the newest `panel_factors.unread_newest_sessions` on the stored calendar -- a
+       security's held sessions are a subset of the calendar's, so a session with fewer calendar
+       sessions after it than the skip is certainly unread.
+    2. **Only a decision that can move the stored answer.** A `computed` observation moves only
+       under an unknowable decision, or a factor-path decision for a factor that reads its own
+       row's `pre_close` -- a `published` decision is what the stored value already reads, and a
+       close-to-close return reads no `pre_close` at all. An `undefined_value` observation moves
+       under any decision: a factor-path read can turn a degenerate window into a number, and an
+       abstention whose unknowable decision was later judged again to another path is exactly a
+       stored `undefined_value` with a present decision in its window.
+    3. **Whether it moved.** `compute_factor` for those securities at the build's own instant,
+       over the build's own partition years and code commit -- the engine's window rule, skip and
+       decision matching, not a copy of them -- with one `FactorReadCarry` per `(factor, year)`,
+       the builds in ascending instant order, as a build carries its own reads. A different
+       coverage or value is stale. `budget` is told the number of those calls once, before the
+       first.
+
+    **What this cannot see.** A decision that is gone -- the stored `daily` or `adj_factor` was
+    rebuilt and the two statements now agree, so re-judging records nothing for the session --
+    leaves an abstention with no decision in its window, and neither the store (decisions are
+    replaced, not kept) nor the manifest (a decision is not an input) remembers it was there.
+    Re-judging names each decision it retires (`RETIRED-RETURN-PATH`); the runbook says what to
+    rebuild for one.
 
     Each stale raw build is listed with every processed and neutralized build made from it at
-    that instant, and with the `factor build` command that re-answers them all and names each
+    that instant, and with the `factor build` commands that re-answer them all and name each
     `--supersedes-*` (`_refuse_to_drop_a_stored_build` refuses a second answer that does not).
     `code_commit` goes into the commands when given; otherwise the rebuild resolves its own.
     """
     daily_years = tuple(store.registered_years(DAILY_DATASET))
-    if not daily_years:
-        return ()
-    decisions = _read(
-        lambda: load_return_path_records(store, years=daily_years, as_of=as_of),
-        store=store,
-        what="the recorded return-path decisions",
-        faults=(*_PANEL_FAULTS, UpstreamDefectError),
+    decisions: Mapping[tuple[str, date], RecordedReturnPath] = (
+        _read(
+            lambda: load_return_path_records(store, years=daily_years, as_of=as_of),
+            store=store,
+            what="the recorded return-path decisions",
+            faults=(*_PANEL_FAULTS, UpstreamDefectError),
+        )
+        if daily_years
+        else {}
     )
+    plans = _recomputes(store, decisions=decisions, exchange=exchange, as_of=as_of)
+    if budget is not None:
+        budget(len(plans))
     kinds = {path: kind for kind, path in RETURN_PATH_KINDS.items()}
+    found: list[StaleReturnPathBuild] = []
+    carries: dict[tuple[str, int], FactorReadCarry] = {}
+    for plan in plans:
+        carry = carries.setdefault((plan.definition.qualified_key, plan.year), FactorReadCarry())
+        engine = _recomputed(
+            store,
+            plan.definition,
+            manifest=plan.manifest,
+            subjects=tuple(sorted({held.subject for held, _session, _record in plan.held})),
+            exchange=exchange,
+            max_staleness_days=max_staleness_days,
+            carry=carry,
+        )
+        moved = [
+            (held, session, record)
+            for held, session, record in plan.held
+            if (engine[held.subject].coverage, engine[held.subject].value)
+            != (held.coverage, held.value)
+        ]
+        if not moved:
+            continue
+        builds, commands = _supersession(
+            store,
+            plan.definition,
+            manifest=plan.manifest,
+            year=plan.year,
+            as_of=as_of,
+            exchange=exchange,
+            max_staleness_days=max_staleness_days,
+            code_commit=code_commit,
+        )
+        found.extend(
+            StaleReturnPathBuild(
+                factor=plan.definition.qualified_key,
+                as_of=plan.manifest.as_of,
+                subject=held.subject,
+                session=session,
+                kind=kinds[record.path],
+                stored_coverage=held.coverage,
+                stored_value=held.value,
+                engine_coverage=engine[held.subject].coverage,
+                engine_value=engine[held.subject].value,
+                builds=builds,
+                commands=commands,
+            )
+            for held, session, record in moved
+        )
+    return tuple(found)
+
+
+def _recomputes(
+    store: PanelStore,
+    *,
+    decisions: Mapping[tuple[str, date], RecordedReturnPath],
+    exchange: str,
+    as_of: datetime,
+) -> tuple[_Recompute, ...]:
+    """Steps 1 and 2 of `stale_return_path_builds`: the stored raw builds to ask again, in
+    `(factor, year, instant)` order, each with the observations and decisions that are why."""
     if not decisions:
         return ()
+    by_subject: dict[str, list[tuple[date, RecordedReturnPath]]] = {}
+    for (subject, session), record in sorted(decisions.items()):
+        by_subject.setdefault(subject, []).append((session, record))
     calendar_years = tuple(store.registered_years(TRADING_CALENDAR_DATASET))
     calendar = _read(
         lambda: load_trading_calendar(store, exchange=exchange, years=calendar_years, as_of=as_of),
@@ -4105,89 +4204,82 @@ def stale_return_path_builds(
         what=f"the {exchange} trading calendar",
     )
     sessions = calendar.trading_days
-    found: list[StaleReturnPathBuild] = []
+    decided = sorted(session for _subject, session in decisions)
+    plans: list[_Recompute] = []
     for definition in FACTOR_DEFINITIONS.definitions:
-        if session_return_links(definition) is None:
+        links = session_return_links(definition)
+        if links is None:
             continue
+        skip = unread_newest_sessions(definition)
         reach = definition.max_window_sessions or definition.lookback_sessions or 0
         for year in store.registered_years(factor_manifest_dataset(definition)):
-            manifests = _read(
-                partial(load_factor_manifests, store, definition, years=(year,), as_of=as_of),
-                store=store,
-                what=f"the stored {definition.qualified_key} builds of {year}",
-            )
-            candidates = [
-                (manifest, subject, session, record)
-                for manifest in manifests
-                for (subject, session), record in sorted(decisions.items())
-                if session <= manifest.as_of.astimezone(FACTOR_DATE_ZONE).date()
-                and bisect_right(sessions, manifest.as_of.astimezone(FACTOR_DATE_ZONE).date())
-                - bisect_left(sessions, session)
-                <= reach + 1
-            ]
-            if not candidates:
+            opening = bisect_left(sessions, date(year, 1, 1))
+            earliest = sessions[max(opening - reach, 0)] if sessions else date(year, 1, 1)
+            if not any(earliest <= session <= date(year, 12, 31) for session in decided):
                 continue
-            stored = {
-                (item.manifest_id, item.subject): item
-                for item in _read(
-                    partial(
-                        load_factor_observations, store, definition, years=(year,), as_of=as_of
-                    ),
+            manifests = {
+                manifest.manifest_id: manifest
+                for manifest in _read(
+                    partial(load_factor_manifests, store, definition, years=(year,), as_of=as_of),
                     store=store,
-                    what=f"the stored {definition.qualified_key} observations of {year}",
+                    what=f"the stored {definition.qualified_key} builds of {year}",
                 )
             }
-            movable: dict[str, list[tuple[FactorObservation, date, RecordedReturnPath]]] = {}
-            by_id = {manifest.manifest_id: manifest for manifest in manifests}
-            for manifest, subject, session, record in candidates:
-                held = stored.get((manifest.manifest_id, subject))
-                if held is not None and held.coverage == "computed":
-                    movable.setdefault(manifest.manifest_id, []).append((held, session, record))
-            for manifest_id, items in movable.items():
-                manifest = by_id[manifest_id]
-                engine = _recomputed(
-                    store,
-                    definition,
-                    manifest=manifest,
-                    subjects=tuple(sorted({held.subject for held, _session, _record in items})),
-                    exchange=exchange,
-                    max_staleness_days=max_staleness_days,
+            held: dict[str, list[tuple[FactorObservation, date, RecordedReturnPath]]] = {}
+            for observation in _read(
+                partial(load_factor_observations, store, definition, years=(year,), as_of=as_of),
+                store=store,
+                what=f"the stored {definition.qualified_key} observations of {year}",
+            ):
+                reason = _reason_to_ask(
+                    observation,
+                    decided=by_subject.get(observation.subject, ()),
+                    links=links,
+                    skip=skip,
+                    sessions=sessions,
                 )
-                moved = [
-                    (held, session, record)
-                    for held, session, record in items
-                    if (engine[held.subject].coverage, engine[held.subject].value)
-                    != (held.coverage, held.value)
-                ]
-                if not moved:
-                    continue
-                builds, commands = _supersession(
-                    store,
-                    definition,
-                    manifest=manifest,
-                    year=year,
-                    as_of=as_of,
-                    exchange=exchange,
-                    max_staleness_days=max_staleness_days,
-                    code_commit=code_commit,
-                )
-                found.extend(
-                    StaleReturnPathBuild(
-                        factor=definition.qualified_key,
-                        as_of=manifest.as_of,
-                        subject=held.subject,
-                        session=session,
-                        kind=kinds[record.path],
-                        stored_coverage=held.coverage,
-                        stored_value=held.value,
-                        engine_coverage=engine[held.subject].coverage,
-                        engine_value=engine[held.subject].value,
-                        builds=builds,
-                        commands=commands,
-                    )
-                    for held, session, record in moved
-                )
-    return tuple(found)
+                if reason is not None:
+                    held.setdefault(observation.manifest_id, []).append((observation, *reason))
+            plans.extend(
+                _Recompute(definition, year, manifest, tuple(held[manifest.manifest_id]))
+                for manifest in sorted(manifests.values(), key=lambda item: item.as_of)
+                if manifest.manifest_id in held
+            )
+    return tuple(plans)
+
+
+def _reason_to_ask(
+    observation: FactorObservation,
+    *,
+    decided: Sequence[tuple[date, RecordedReturnPath]],
+    links: ReturnLinks,
+    skip: int,
+    sessions: Sequence[date],
+) -> tuple[date, RecordedReturnPath] | None:
+    """The earliest decision that can move one stored observation (`stale_return_path_builds`'
+    steps 1 and 2), or `None`."""
+    first, last = observation.input_session_first, observation.input_session_last
+    if first is None or last is None or observation.coverage not in _MOVABLE_COVERAGE:
+        return None
+    for session, record in decided:
+        if not first <= session <= last:
+            continue
+        if links == "close_to_close" and session == first:
+            continue
+        if skip and bisect_right(sessions, last) - bisect_right(sessions, session) < skip:
+            continue
+        if (
+            observation.coverage == "undefined_value"
+            or record.path is None
+            or (record.path == "adjusted" and links == "own_row")
+        ):
+            return session, record
+    return None
+
+
+_MOVABLE_COVERAGE: Final[frozenset[str]] = frozenset({"computed", "undefined_value"})
+"""The stored answers a return-path decision can change: every other coverage code is decided
+before `panel_factors._classify` reads a single return."""
 
 
 def _recomputed(
@@ -4198,10 +4290,12 @@ def _recomputed(
     subjects: tuple[str, ...],
     exchange: str,
     max_staleness_days: int,
+    carry: FactorReadCarry | None = None,
 ) -> Mapping[str, FactorObservation]:
     """What `compute_factor` answers now for `subjects` at a stored build's own instant, over
     its partition years and code commit. `subjects` is also the universe: every one of them was
-    stored `computed`, so it was in the build's universe, and nothing else is asked."""
+    stored `computed` or `undefined_value`, so it was in the build's universe, and nothing else
+    is asked."""
     years = tuple(sorted({item.year for item in manifest.inputs}))
     request = factor_build_request(
         factor=definition.qualified_key,
@@ -4237,6 +4331,7 @@ def _recomputed(
             requirements=requirements,
             code_commit=manifest.code_commit,
             built_at=manifest.as_of,
+            carry=carry,
         ),
         store=store,
         what=f"{definition.qualified_key} at {manifest.as_of.isoformat()} for {len(subjects)} "
@@ -4258,24 +4353,36 @@ def _supersession(
 ) -> tuple[tuple[StaleFactorBuild, ...], tuple[tuple[str, ...], ...]]:
     """The builds made from one stale raw build at its instant, and the commands that re-answer
     them: one per processed build (the neutralized builds made from it riding with it), the
-    first of them also naming the raw build."""
+    first of them also naming the raw build. A factor built only to a lower tier has no
+    partition of the tier above it that year, and nothing of that tier to supersede."""
     transforms = [
         item
-        for item in _read(
-            lambda: load_factor_transform_manifests(store, definition, years=(year,), as_of=as_of),
-            store=store,
-            what=f"the stored {definition.qualified_key} transform builds of {year}",
+        for item in (
+            _read(
+                lambda: load_factor_transform_manifests(
+                    store, definition, years=(year,), as_of=as_of
+                ),
+                store=store,
+                what=f"the stored {definition.qualified_key} transform builds of {year}",
+            )
+            if year in store.registered_years(factor_transform_manifest_dataset(definition))
+            else ()
         )
         if item.source_manifest_id == manifest.manifest_id
     ]
     neutralizations = [
         item
-        for item in _read(
-            lambda: load_factor_neutralization_manifests(
-                store, definition, years=(year,), as_of=as_of
-            ),
-            store=store,
-            what=f"the stored {definition.qualified_key} neutralization builds of {year}",
+        for item in (
+            _read(
+                lambda: load_factor_neutralization_manifests(
+                    store, definition, years=(year,), as_of=as_of
+                ),
+                store=store,
+                what=f"the stored {definition.qualified_key} neutralization builds of {year}",
+            )
+            if transforms
+            and year in store.registered_years(factor_neutralization_manifest_dataset(definition))
+            else ()
         )
         if item.source_transform_manifest_id
         in {transform.transform_manifest_id for transform in transforms}

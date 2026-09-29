@@ -5995,6 +5995,15 @@ def session_return_links(definition: FactorDefinition) -> ReturnLinks | None:
     return "close_to_close" if (definition.lookback_sessions or 0) >= 2 else None
 
 
+def unread_newest_sessions(definition: FactorDefinition) -> int:
+    """How many of `definition`'s window's newest sessions the evaluator `compute_factor` resolves
+    for it by default does not read -- `RETURN_SKIP_BY_EVALUATOR`, looked up the way
+    `compute_factor` looks it up, so a reader outside the engine (`factor_view`'s stale-build
+    detector, `V2-P6-020` review round 3) cannot hold a second copy of the skip."""
+    evaluator = FACTOR_EVALUATORS.get(definition.qualified_key)
+    return 0 if evaluator is None else RETURN_SKIP_BY_EVALUATOR.get(evaluator, 0)
+
+
 def _return_decisions(
     store: PanelStore,
     *,

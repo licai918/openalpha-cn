@@ -4461,7 +4461,7 @@ def _judge_return_paths(
             )
         )
     }
-    return reconcile_return_paths(
+    reconciled = reconcile_return_paths(
         limits,
         bars=stored(DAILY_DATASET, year, after),
         factors=stored(ADJ_FACTOR_DATASET, year, after),
@@ -4481,6 +4481,29 @@ def _judge_return_paths(
             "asked again",
         ),
     )
+    _echo_retired_decisions(stored_decisions, reconciled.defects)
+    return reconciled
+
+
+def _echo_retired_decisions(
+    stored: Mapping[tuple[str, date], UpstreamDefect], judged: Sequence[UpstreamDefect]
+) -> None:
+    """Name every stored unknowable or factor-path decision this judgement records nothing for
+    (`V2-P6-020`, review round 3): the two statements now agree, so the record is replaced by
+    none. A factor build that abstained on it -- or read it on the factor path -- is stale, and
+    `factor stale-return-paths` cannot see it afterwards, because nothing stored remembers the
+    decision was there. This line, on stderr, is the one moment it is known."""
+    now = {(defect.ts_code, defect.trade_date) for defect in judged}
+    for (ts_code, day), defect in sorted(stored.items()):
+        if (ts_code, day) in now or RETURN_PATH_KINDS[defect.kind] == "published":
+            continue
+        typer.echo(
+            f"RETIRED-RETURN-PATH {ts_code} {day.isoformat()} was {defect.kind}; the stored "
+            f"{DAILY_DATASET} and {ADJ_FACTOR_DATASET} now agree, so no decision is recorded -- "
+            "rebuild the price-return factor builds whose windows hold this session "
+            "(`factor stale-return-paths` cannot see them)",
+            err=True,
+        )
 
 
 def _refetch_return_path(
@@ -8604,6 +8627,20 @@ def factor_stale_return_paths_command(
     that no longer matches with the rebuild naming every `--supersedes-*`. Run the printed
     commands as given and run this again: it answers `none`.
 
+    It asks only about the observations a decision can move -- a `computed` value whose own
+    window reads an unknowable session, or a factor-path session of a factor that reads its own
+    row's `pre_close`, and an `undefined_value` whose window holds any decision -- and states how
+    many `compute_factor` calls that is on a `BUDGET stale-return-path-recompute` line before the
+    first. Each reads the build's partition years at the build's instant, one carried read per
+    factor and year.
+
+    **One stale build it cannot see (review round 3).** When a rebuilt `daily` or `adj_factor`
+    makes the two statements agree, re-judging records nothing for that session, and an
+    abstention stored while it was unknowable is left with no decision in its window: the store
+    does not keep a replaced decision and a decision is not a manifest input, so nothing here
+    remembers it. Re-judging prints each such decision as `RETIRED-RETURN-PATH`; rebuild the
+    price-return factor years whose windows hold its session (the runbook, item 10).
+
     `--max-staleness-days` is the bound the builds were made with; the printed commands repeat it.
 
     Exits 0 when nothing is stale; 1 when something is, or the panel could not answer.
@@ -8617,6 +8654,14 @@ def factor_stale_return_paths_command(
                 max_staleness_days=max_staleness_days,
                 as_of=_panel_as_of(as_of),
                 code_commit=code_commit,
+                budget=lambda calls: _echo_budget(
+                    "stale-return-path-recompute",
+                    calls,
+                    "compute_factor calls",
+                    "one per stored raw build whose own window a recorded decision can move, "
+                    "each reading that build's partition years at its instant; reads carried "
+                    "within a factor and year",
+                ),
             )
         except FactorViewError as error:
             raise _factor_fail(error) from error
@@ -8663,9 +8708,10 @@ def factor_stale_return_paths_command(
                         f"{item.as_of.isoformat()} {build.manifest_id}"
                     )
                 typer.echo(
-                    f"  because {item.subject} {item.session.isoformat()} ({item.kind}): stored "
-                    f"{item.stored_coverage} {item.stored_value}, the engine now answers "
-                    f"{item.engine_coverage} {item.engine_value}"
+                    f"  {item.subject}: stored {item.stored_coverage} {item.stored_value} differs "
+                    f"from the engine's current result {item.engine_coverage} "
+                    f"{item.engine_value}; decision {item.kind} on {item.session.isoformat()} is "
+                    "inside its window"
                 )
             typer.echo("repair, in this order:")
             for command in commands:
