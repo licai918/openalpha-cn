@@ -24,12 +24,13 @@ it read became knowable (at or before the signal instant), and `training_example
 rows and ICs that was. A reader of such a record must take those two fields in that sense. Every
 ranked security carries its composite -- the number the book ordered the market by -- and a
 security carrying some component but not all abstains with `ABSTAIN_INCOMPLETE_FEATURES`.
+
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime
 from typing import Final, Protocol
 from zoneinfo import ZoneInfo
 
@@ -43,7 +44,12 @@ from openalpha_cn.domain.alpha_model import (
 from openalpha_cn.domain.prediction_record import PredictionRecord
 from openalpha_cn.domain.trading_calendar import TradingCalendar
 from openalpha_cn.panel.catalog import DEFAULT_DATE_TIMEZONE
-from openalpha_cn.strategy_view import SignalDay, StrategyRequest
+from openalpha_cn.strategy_view import (
+    REGISTRATION_CUTOFF,
+    SignalDay,
+    StrategyRequest,
+    registration_deadline,
+)
 
 __all__ = [
     "COMPOSITE_MODEL_NAME",
@@ -60,14 +66,6 @@ SHANGHAI: Final[ZoneInfo] = ZoneInfo(DEFAULT_DATE_TIMEZONE)
 
 COMPOSITE_MODEL_NAME: Final[str] = "daily_selection"
 """The declared name of every composite batch the daily command registers."""
-
-REGISTRATION_CUTOFF: Final[time] = time(9, 15)
-"""The latest instant (Shanghai) on the next session a session's scores may be registered.
-
-The book trades them at the next session's open, and the opening price is fixed by the call
-auction that starts at 09:15: from then on an order placed on them is no longer the order the
-book assumes, and the auction's indicative price is already a published piece of the outcome.
-"""
 
 
 class StrategyRegistrationError(RuntimeError):
@@ -182,5 +180,7 @@ def session_record(store: HeldRecordLookup, batch: PredictionBatch) -> Predictio
 
 def registration_cutoff(calendar: TradingCalendar, session: date) -> datetime:
     """The instant after which `session`'s scores may no longer be registered: 09:15 Shanghai on
-    the next open session, when the call auction that fixes the book's execution price begins."""
-    return datetime.combine(calendar.next_trading_day(session), REGISTRATION_CUTOFF, SHANGHAI)
+    the next open session, when the call auction that fixes the book's execution price begins
+    (`strategy_view.REGISTRATION_CUTOFF`; a backtest reading the record holds it to the same
+    instant)."""
+    return registration_deadline(calendar.next_trading_day(session))

@@ -551,6 +551,11 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             # answer and the request that produced it, and reads no panel data of its own.
             "strategy_view.SignalDay",
             "strategy_view.StrategyRequest",
+            # V2-P6-011 round 9: the 09:15 registration deadline is the view's, because a
+            # backtest reading a record holds it to the same instant the command files before;
+            # one definition, re-exported here for the daily command.
+            "strategy_view.REGISTRATION_CUTOFF",
+            "strategy_view.registration_deadline",
         }
     ),
     "openalpha_cn.shortlist_compare": frozenset(

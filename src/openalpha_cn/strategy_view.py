@@ -59,6 +59,29 @@ bars and bands when first asked and builds a `SessionQuote` only for the securit
 asks about, keeping a small window of recent sessions cached. The equal-weight benchmark reads
 the same cached sessions. A session without a published band, or a security without an
 adjustment factor covering it, has no quote: the book cannot trade it and keeps its last mark.
+
+## A registered prediction is read on two clocks, not on its custody stamp (`V2-P6-011`)
+
+A source of `prediction_ids` reads records the daily command filed at about 18:30, after the
+16:30 signal instant. The book's own rule -- every score row visible at the signal instant -- was
+applied to the custody stamp and so refused every production record, although nothing in one
+could have been read later than 16:30. The point-in-time argument is about two different events,
+and `_prediction_rows` checks exactly those:
+
+- **what the numbers were computed from** -- the batch's `as_of`, the instant its inputs were
+  read (the signal instant of the factor build or the fit's cross section). It is the row's
+  `available_time`, so the book refuses it after the signal instant as it refuses any row. A
+  record's numbers are a deterministic function of what was readable at `as_of`: the panel and
+  the factor builds are point-in-time gated at that instant, so computing them at 18:30 cannot
+  put anything later into them;
+- **when they were fixed** -- `max(predicted_at, recorded_at)`. The book trades a signal day's
+  scores at the next session's open, priced by the call auction that starts at 09:15
+  (`REGISTRATION_CUTOFF`), whose indicative price is already a piece of the outcome. A record
+  registered at or after that instant on the trading session is refused by name. That is the
+  same rule the daily command enforces before filing (`strategy_registration.registration_cutoff`).
+
+A record is never revised -- the store is append-only and a second answer for a session is
+refused -- so its `revision_time` is its `as_of` too.
 """
 
 from __future__ import annotations
@@ -70,9 +93,10 @@ from array import array
 from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal
 from functools import partial
+from itertools import pairwise
 from typing import Any, ClassVar, Final, Literal, Protocol, TypeVar
 from zoneinfo import ZoneInfo
 
@@ -117,6 +141,7 @@ from openalpha_cn.backtest.strategy_backtest import (
     WalkForwardFit,
     WalkForwardModel,
     component_key,
+    rebalance_indices,
     run_strategy_backtest,
     score_signal_day,
     usable_fit,
@@ -203,6 +228,7 @@ __all__ = [
     "PROTOCOL_PARTICIPATION_CAP",
     "PROTOCOL_POSITION_CAPITAL",
     "PROTOCOL_SLIPPAGE_RATE",
+    "REGISTRATION_CUTOFF",
     "ICSeries",
     "ICSeriesPoint",
     "ICSeriesRequest",
@@ -218,11 +244,29 @@ __all__ = [
     "ic_series_request",
     "ic_series_view",
     "load_strategy_inputs",
+    "registration_deadline",
     "score_day",
     "strategy_request",
 ]
 
 SHANGHAI: Final[ZoneInfo] = ZoneInfo(DEFAULT_DATE_TIMEZONE)
+
+REGISTRATION_CUTOFF: Final[time] = time(9, 15)
+"""The latest instant (Shanghai) on the session that trades a signal day's scores at which they
+may have been registered.
+
+The book trades them at that session's open, and the opening price is fixed by the call auction
+that starts at 09:15: from then on an order placed on them is no longer the order the book
+assumes, and the auction's indicative price is already a published piece of the outcome.
+`strategy_registration` re-exports it for the daily command, which refuses to file after it.
+"""
+
+
+def registration_deadline(trading_session: date) -> datetime:
+    """09:15 Shanghai on `trading_session`: a record of the signal day before it registered at or
+    after this instant is not a prediction made before the trade it drives."""
+    return datetime.combine(trading_session, REGISTRATION_CUTOFF, SHANGHAI)
+
 
 PROTOCOL_POSITION_CAPITAL: Final[Decimal] = Decimal("100000")
 """The research protocol's per-position capital (section 2, a measurement setting)."""
@@ -309,6 +353,9 @@ class StrategyRequest:
     """A walk-forward source's declared features, resolved by `model_view.feature_columns`."""
     model: AlphaModel | None = None
     """A walk-forward source's unfitted model, built from `MODEL_FAMILIES` at request time."""
+    rebalance_days: tuple[date, ...] | None = None
+    """The sessions the book rebalances on, replacing the fixed grid; `None` is the grid
+    (`strategy_backtest.rebalance_indices`, `V2-P6-011`)."""
 
     @property
     def years(self) -> tuple[int, ...]:
@@ -340,6 +387,7 @@ def strategy_request(
     neutralizations: FactorNeutralizationRegistry = FACTOR_NEUTRALIZATIONS,
     trailing_ic: TrailingICWeights | Mapping[str, object] | None = None,
     walk_forward: WalkForwardModel | Mapping[str, object] | None = None,
+    rebalance_days: Sequence[date] | None = None,
 ) -> StrategyRequest:
     """Resolve one face's parameters into the request both faces ask. Touches no store.
 
@@ -360,6 +408,11 @@ def strategy_request(
     two request-level ones are refused beside it, and its features, family and hyperparameters
     are resolved here -- a neutralized feature, an unknown family or a hyperparameter the family
     refuses is `bad_request` before any store is opened.
+
+    `rebalance_days` (`V2-P6-011`) replaces the fixed grid with named sessions -- the days a daily
+    command actually rebalanced on (`scripts/daily_selection.journalled_rebalances`). Omitted,
+    the grid runs and every existing answer is unchanged. They are checked against the range's
+    sessions when the store is read (`strategy_backtest.rebalance_indices`).
     """
     try:
         source = ScoreSource.model_validate(
@@ -453,6 +506,7 @@ def strategy_request(
         exchange=exchange,
         columns=columns,
         model=model,
+        rebalance_days=None if rebalance_days is None else tuple(rebalance_days),
     )
 
 
@@ -588,8 +642,12 @@ def load_strategy_inputs(
             f"{request.start.isoformat()}..{request.end.isoformat()} holds "
             f"{len(sessions)} open session(s); a backtest needs a signal and a session to trade on"
         )
-    step = request.spec.rebalance_every_sessions
-    signal_days = frozenset(sessions[index] for index in range(0, len(sessions) - 1, step))
+    signal_days = frozenset(
+        sessions[index]
+        for index in rebalance_indices(
+            sessions, every=request.spec.rebalance_every_sessions, days=request.rebalance_days
+        )
+    )
     source = request.source
     lookback: tuple[date, ...] = ()
     years = request.years
@@ -618,10 +676,11 @@ def load_strategy_inputs(
         "benchmark_returns": benchmarks,
         "industries": industries,
         "lookback_sessions": lookback,
+        "rebalance_days": request.rebalance_days,
     }
     if source.prediction_ids:
         return StrategyInputs(
-            scores=_prediction_rows(source.prediction_ids, predictions),
+            scores=_prediction_rows(source.prediction_ids, predictions, sessions=sessions),
             **shared,  # type: ignore[arg-type]
         )
     feed: ScoreFeed
@@ -808,11 +867,22 @@ def _chosen_build(builds: Mapping[datetime, object], signal: datetime) -> dateti
 def _prediction_rows(
     identifiers: Sequence[str],
     predictions: Callable[[str], PredictionRecord | None] | None,
+    *,
+    sessions: Sequence[date],
 ) -> tuple[ScoreRow, ...]:
+    """Each record's scored rows, on the two clocks the module docstring argues for.
+
+    The information instant (`batch.as_of`) becomes the rows' `available_time` and
+    `revision_time`, which the book holds to the signal instant. The registration instant
+    (`max(predicted_at, recorded_at)`) is held here to `registration_deadline` of the session
+    after the record's day in `sessions` -- the session that trades it. A record of the range's
+    last session, or of a day outside the range, trades nothing in this run.
+    """
     if predictions is None:
         raise StrategyRequestError(
             "the source names prediction_ids and no prediction store was supplied to read them"
         )
+    trading = dict(pairwise(sessions))
     rows: list[ScoreRow] = []
     for identifier in identifiers:
         record = predictions(identifier)
@@ -820,15 +890,24 @@ def _prediction_rows(
             raise StrategyRunBlockedError(f"no prediction is held under {identifier}")
         batch = record.batch
         day = batch.as_of.astimezone(SHANGHAI).date()
-        available = max(batch.predicted_at, record.recorded_at)
+        registered = max(batch.predicted_at, record.recorded_at)
+        session = trading.get(day)
+        if session is not None and registered >= registration_deadline(session):
+            raise StrategyBacktestError(
+                f"{identifier} holds the scores of {day.isoformat()}, which the book trades at "
+                f"{session.isoformat()}'s open, and it was registered at "
+                f"{registered.astimezone(SHANGHAI).isoformat()}, at or after that session's call "
+                f"auction started ({registration_deadline(session).isoformat()}). Its scores "
+                "may have seen part of the outcome of the trade they drive"
+            )
         rows.extend(
             ScoreRow(
                 component=PREDICTION_COMPONENT,
                 subject=prediction.ts_code,
                 signal_day=day,
                 value=prediction.score,
-                available_time=available,
-                revision_time=record.recorded_at,
+                available_time=batch.as_of,
+                revision_time=batch.as_of,
             )
             for prediction in batch.predictions
             if prediction.score is not None

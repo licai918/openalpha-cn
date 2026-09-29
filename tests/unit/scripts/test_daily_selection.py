@@ -28,7 +28,7 @@ import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from functools import partial
 from pathlib import Path
@@ -44,6 +44,7 @@ from research_repo import commit_file, git, head
 from strategy_fixtures import READ_AT, REVERSAL, write_strategy_corpus
 
 from openalpha_cn import cli
+from openalpha_cn.backtest.strategy_backtest import EQUAL_WEIGHT_ALL_A
 from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
 from openalpha_cn.domain.daily_prices import DAILY_BASIC_DATASET, DAILY_DATASET
 from openalpha_cn.domain.financial_statements import (
@@ -69,6 +70,7 @@ from openalpha_cn.panel_ingest import (
 from openalpha_cn.storage.predictions import FilePredictionStore
 from openalpha_cn.strategy_registration import RegisteredConfiguration, signal_day_batch
 from openalpha_cn.strategy_view import (
+    StrategyRunBlockedError,
     backtest_strategy,
     load_strategy_inputs,
     score_day,
@@ -1766,29 +1768,47 @@ def _read_at(day: date) -> datetime:
 
     `write_strategy_corpus` stamps its calendar and registry as ingested on 17 January, so they
     are not readable at an earlier evening. Reading later changes nothing a day's score depends
-    on -- each build is chosen by the day's own signal instant and each bar by its session -- and
-    the records are still registered at each day's signal instant, which is what a backtest
-    reading them checks.
+    on: each build is chosen by the day's own signal instant and each bar by its session.
     """
     return max(READ_AT, _evening(day))
 
 
+def _after_the_close(day: date, following: date) -> datetime:
+    """18:30 on the day: when the scheduled daily command files it."""
+    return _evening(day)
+
+
+def _before_the_auction(day: date, following: date) -> datetime:
+    """09:14 on the next session, the last minute before its call auction."""
+    return datetime.combine(following, time(9, 14), daily.SHANGHAI)
+
+
+def _at_the_auction(day: date, following: date) -> datetime:
+    """09:15 on the next session, as its call auction starts."""
+    return datetime.combine(following, time(9, 15), daily.SHANGHAI)
+
+
 def _register_days(
-    root: Path, request_for: Callable[[date], Any], days: Sequence[date], anchor: date
+    root: Path,
+    request_for: Callable[[date], Any],
+    days: Sequence[date],
+    anchor: date,
+    *,
+    filed_at: Callable[[date, date], datetime] = _after_the_close,
 ) -> list[str]:
-    """Each day's scores registered through the command's path at that day's signal instant --
-    the clock at which a backtest reading them may use them."""
+    """Each day's scores registered through the command's path at `filed_at(day, next session)`
+    -- 18:30 by default, the scheduled command's evening."""
     store = PanelStore(root / "panel")
     identifiers: list[str] = []
     for day in days:
         request = request_for(day)
         signal = score_day(store, request, day=day, anchor=anchor)
-        instant = session_publication_instant(day)
-        batch = signal_day_batch(signal, request, REGISTERED, predicted_at=instant)
-        assert batch is not None
         calendar = daily._outcome_calendar(store, request.exchange, day, request.as_of)
+        filed = filed_at(day, calendar.next_trading_day(day))
+        batch = signal_day_batch(signal, request, REGISTERED, predicted_at=filed)
+        assert batch is not None
         record, outcome = daily.register_prediction(
-            root, batch, calendar=calendar, clock=lambda instant=instant: instant
+            root, batch, calendar=calendar, clock=lambda filed=filed: filed
         )
         assert (outcome, record.standing) == ("created", "forward")
         identifiers.append(record.record_id)
@@ -1866,7 +1886,8 @@ def test_a_backtest_reading_the_registered_records_trades_as_the_configuration_w
     tmp_path: Path, source: dict[str, Any], first: int
 ) -> None:
     """Every signal day of a backtest from `first`, scored and registered through the daily
-    command's path; a backtest of the records, then, holds, fills and returns exactly what the
+    command's path at 18:30 -- when the scheduled command files it, two hours after the 16:30
+    signal instant; a backtest of the records, then, holds, fills and returns exactly what the
     configuration's own backtest does, period by period.
 
     From `first`: the trailing source answers from s3 (s1 knows no IC) and the walk-forward one
@@ -1905,6 +1926,131 @@ def test_a_backtest_reading_the_registered_records_trades_as_the_configuration_w
     assert not any(period.held for period in by_configuration.periods)
     assert any(period.fills for period in by_configuration.periods)
     assert _traded(by_records) == _traded(by_configuration)
+
+
+def _static_records(
+    tmp_path: Path, filed_at: Callable[[date, date], datetime]
+) -> tuple[Any, list[date], list[str], dict[str, Any]]:
+    panel = write_strategy_corpus(tmp_path)
+    sessions = panel.sessions
+    configured = _base(**STATIC)
+    days = [sessions[index] for index in range(1, len(sessions) - 1, 3)]
+
+    def request_for(day: date) -> Any:
+        return strategy_request(
+            **configured, start=day - timedelta(days=1), end=day, as_of=_read_at(day)
+        )
+
+    identifiers = _register_days(tmp_path, request_for, days, sessions[1], filed_at=filed_at)
+    return panel, days, identifiers, configured
+
+
+def _by_records(tmp_path: Path, panel: Any, identifiers: Sequence[str]) -> Any:
+    return backtest_strategy(
+        PanelStore(tmp_path / "panel"),
+        strategy_request(
+            **_base(rebalance_every_sessions=3),
+            prediction_ids=identifiers,
+            start=panel.sessions[1],
+            end=panel.sessions[-1],
+            as_of=READ_AT,
+        ),
+        predictions=FilePredictionStore(tmp_path / "predictions", clock=lambda: READ_AT).get,
+    )
+
+
+def test_records_filed_before_the_next_call_auction_trade_as_the_configuration_would(
+    tmp_path: Path,
+) -> None:
+    """The two clocks a record is read on (`V2-P6-011`): its information instant -- the batch's
+    `as_of`, the 16:30 signal instant its inputs were read at -- at or before the signal
+    instant, and its registration before the call auction of the session that trades it. Filed
+    at 09:14 the next morning, every record is read and the book is the configuration's own."""
+    panel, _days, identifiers, configured = _static_records(tmp_path, _before_the_auction)
+
+    by_records = _by_records(tmp_path, panel, identifiers)
+    by_configuration = backtest_strategy(
+        PanelStore(tmp_path / "panel"),
+        strategy_request(
+            **configured, start=panel.sessions[1], end=panel.sessions[-1], as_of=READ_AT
+        ),
+    )
+
+    assert _traded(by_records) == _traded(by_configuration)
+
+
+def test_a_configuration_and_its_records_rebalance_alike_on_days_off_the_grid(
+    tmp_path: Path,
+) -> None:
+    """`rebalance_days` replaces the grid for every source: the configuration's own factor source
+    scored on the days named -- here s1, s2 and s5, a grid of 3 caught up and held off -- and the
+    records filed on those days at 18:30 trade the same book."""
+    panel = write_strategy_corpus(tmp_path)
+    sessions = panel.sessions
+    configured = _base(**STATIC)
+    days = [sessions[1], sessions[2], sessions[5]]
+
+    def request_for(day: date) -> Any:
+        return strategy_request(
+            **configured, start=day - timedelta(days=1), end=day, as_of=_read_at(day)
+        )
+
+    identifiers = _register_days(tmp_path, request_for, days, sessions[1])
+    store = PanelStore(tmp_path / "panel")
+    by_records = backtest_strategy(
+        store,
+        strategy_request(
+            **_base(rebalance_every_sessions=3),
+            prediction_ids=identifiers,
+            rebalance_days=days,
+            start=sessions[1],
+            end=sessions[-1],
+            as_of=READ_AT,
+        ),
+        predictions=FilePredictionStore(tmp_path / "predictions", clock=lambda: READ_AT).get,
+    )
+    by_configuration = backtest_strategy(
+        store,
+        strategy_request(
+            **configured,
+            rebalance_days=days,
+            start=sessions[1],
+            end=sessions[-1],
+            as_of=READ_AT,
+        ),
+    )
+
+    assert [period.start for period in by_configuration.periods] == days
+    assert _traded(by_records) == _traded(by_configuration)
+
+
+def test_a_record_filed_as_the_next_call_auction_starts_refuses_the_book(tmp_path: Path) -> None:
+    """Filed at 09:15 -- which `register_prediction` refuses, so it is put in the store directly
+    -- a record could have seen the auction that prices the book's first trade on it. The book
+    reading it is refused, naming the cutoff; the other records alone are not enough."""
+    panel = write_strategy_corpus(tmp_path)
+    sessions = panel.sessions
+    configured = _base(**STATIC)
+    day = sessions[1]
+    request = strategy_request(
+        **configured, start=day - timedelta(days=1), end=day, as_of=_read_at(day)
+    )
+    store = PanelStore(tmp_path / "panel")
+    signal = score_day(store, request, day=day, anchor=day)
+    calendar = daily._outcome_calendar(store, request.exchange, day, request.as_of)
+    late = _at_the_auction(day, calendar.next_trading_day(day))
+    batch = signal_day_batch(signal, request, REGISTERED, predicted_at=late)
+    assert batch is not None
+    written = FilePredictionStore(tmp_path / "predictions", clock=lambda: late).put(
+        batch=batch, calendar=calendar, zone=daily.SHANGHAI
+    )
+    assert written.record.standing == "forward"
+
+    with pytest.raises(StrategyRunBlockedError) as refused:
+        _by_records(tmp_path, panel, [written.record.record_id])
+
+    assert late.isoformat() in str(refused.value)
+    assert "call auction" in str(refused.value)
 
 
 def test_the_days_targets_are_the_book_the_backtest_holds_after_that_rebalance(
@@ -1986,3 +2132,114 @@ def test_a_walk_forward_day_between_refits_uses_the_fit_the_schedule_from_the_an
     assert {
         row.ts_code: row.score for row in signal.model_batch.predictions if row.score is not None
     } == {row.subject: row.value for row in backtest.scores if row.signal_day == sessions[6]}
+
+
+# --- the book the command actually recommended (V2-P6-011, for V2-P6-012) ----------------------
+
+
+FILLED: Final[dict[str, object]] = {
+    **CONFIG,
+    "position_capital": Decimal("1000000"),
+    "participation_cap": Decimal("1"),
+}
+"""`CONFIG` with a book sized so every order fills whole: the command's targets are the book's
+decision, and a backtest's holdings are that decision less what the market refused."""
+
+
+def test_a_book_on_the_journals_rebalance_days_holds_what_the_command_recommended(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The command ran on 19, 21, 22 and 23 January and missed the 20th, a scheduled rebalance:
+    it rebalanced on the 19th (its first day), caught the 20th up on the 21st, rebalanced on the
+    22nd on schedule and held on the 23rd. `journalled_rebalances` gives those three sessions and
+    the record each used; a backtest of those records on those days -- not the fixed grid, which
+    would rebalance on the 20th, a day with no recommendation -- holds exactly the targets the
+    command printed, every rebalance. Every record was filed at 18:35."""
+    world = _world(tmp_path, monkeypatch, Market(open_days=OPEN_2026), config=FILLED)
+    results = {days: _next(world, capsys, days) for days in (0, 2, 3, 4)}
+    directory = _journal(world, DAY).parent
+
+    journalled = daily.journalled_days(directory)
+    rebalances = daily.journalled_rebalances(directory)
+
+    assert [(day.session.day, day.decision) for day in journalled] == [
+        (19, "rebalanced"),
+        (21, "rebalanced"),
+        (22, "rebalanced"),
+        (23, "not a rebalance day"),
+    ]
+    assert [(session.day, record_id) for session, record_id in rebalances] == [
+        (19 + days, results[days]["prediction"]["record_id"]) for days in (0, 2, 3)
+    ]
+    last = DAY + timedelta(days=4)
+    book = backtest_strategy(
+        PanelStore(world.runtime / "panel"),
+        strategy_request(
+            **{
+                **daily.strategy_arguments(FILLED),
+                "components": (),
+                "prediction_ids": [record_id for _, record_id in rebalances],
+                "rebalance_days": [session for session, _ in rebalances],
+                "benchmarks": (EQUAL_WEIGHT_ALL_A,),
+            },
+            start=DAY,
+            end=last,
+            as_of=_evening(last),
+        ),
+        predictions=FilePredictionStore(world.runtime / "predictions", clock=lambda: RUN_CLOCK).get,
+    )
+
+    assert [period.start for period in book.periods] == [session for session, _ in rebalances]
+    assert all(not period.rejections for period in book.periods)
+    assert [period.holdings for period in book.periods] == [
+        tuple(results[days]["targets"]["weights"]) for days in (0, 2, 3)
+    ]
+    assert tuple(results[4]["targets"]["weights"]) == book.periods[-1].holdings
+
+
+def _journalled(
+    directory: Path, day: date, decision: str, record_id: str | None, *, complete: bool = True
+) -> None:
+    body: dict[str, Any] = {
+        "schema": daily.DAILY_SELECTION_SCHEMA,
+        "session": day.isoformat(),
+        "registration": {"sha256": "0" * 64},
+    }
+    if complete:
+        body["result"] = {
+            "session": day.isoformat(),
+            "candidates": {"held": decision == "held"},
+            "targets": {"decision": decision, "reason": "why", "weights": {}},
+            "prediction": (
+                {"registered": False, "reason": "the source held today"}
+                if record_id is None
+                else {"registered": True, "record_id": record_id}
+            ),
+        }
+    daily.write_journal(directory / f"{day.isoformat()}.json", body)
+
+
+def test_the_journal_says_which_days_held_and_which_rebalanced_on_which_record(
+    tmp_path: Path,
+) -> None:
+    """A day the source held is journalled as held, with no record: it is evidence the book did
+    not rebalance there, not a gap. A day whose run stopped before its summary has no result and
+    is not a day the command recommended anything on. A rebalance without a record is refused."""
+    first, held, stopped, caught_up = (date(2026, 1, day) for day in (19, 20, 21, 22))
+    _journalled(tmp_path, first, "rebalanced", "prd_a")
+    _journalled(tmp_path, held, "held", None)
+    _journalled(tmp_path, stopped, "rebalanced", "prd_x", complete=False)
+    _journalled(tmp_path, caught_up, "rebalanced", "prd_b")
+
+    days = daily.journalled_days(tmp_path)
+
+    assert [(day.session, day.decision, day.source_held, day.record_id) for day in days] == [
+        (first, "rebalanced", False, "prd_a"),
+        (held, "held", True, None),
+        (caught_up, "rebalanced", False, "prd_b"),
+    ]
+    assert daily.journalled_rebalances(tmp_path) == ((first, "prd_a"), (caught_up, "prd_b"))
+
+    _journalled(tmp_path, date(2026, 1, 23), "rebalanced", None)
+    with pytest.raises(daily.StepFailedError, match="no record"):
+        daily.journalled_rebalances(tmp_path)

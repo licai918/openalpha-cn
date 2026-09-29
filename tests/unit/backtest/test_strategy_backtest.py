@@ -1486,3 +1486,49 @@ def test_a_dynamic_answer_names_the_reconstruction_and_a_static_one_does_not() -
     assert set(static.limitations) == set(limitation_codes_for("static"))
     assert set(dynamic.limitations) == set(limitation_codes_for("trailing_ic"))
     assert set(model.limitations) == set(limitation_codes_for("walk_forward"))
+
+
+# --- explicit rebalance days (V2-P6-011) ---------------------------------------------------------
+
+
+def test_explicit_rebalance_days_equal_to_the_grid_are_the_grid() -> None:
+    """`rebalance_days` replaces the fixed grid; given the grid's own days it is the same run,
+    and without it the grid is what runs -- every existing result is unchanged."""
+    grid = run_strategy_backtest(HAND_FIXTURE_INPUTS, HAND_FIXTURE_SPEC)
+    explicit = run_strategy_backtest(
+        replace(HAND_FIXTURE_INPUTS, rebalance_days=(D1, D4)), HAND_FIXTURE_SPEC
+    )
+
+    assert explicit == grid
+    assert [(period.start, period.end) for period in grid.periods] == [(D1, D4), (D4, D6)]
+
+
+def test_explicit_rebalance_days_off_the_grid_set_the_periods() -> None:
+    """The days a daily command actually rebalanced on -- here D1 and D5, a rebalance caught up
+    one session after the grid's D4 -- are the signal days, and each period runs to the next."""
+    rows = score_rows({D1: SCORES[D1], D5: SCORES[D4]})
+    result = run_strategy_backtest(
+        replace(build_inputs(scores=rows), rebalance_days=(D1, D5)), HAND_FIXTURE_SPEC
+    )
+
+    assert [(period.start, period.end) for period in result.periods] == [(D1, D5), (D5, D6)]
+    assert result.periods[1].fills
+    assert all(fill.day == D6 for fill in result.periods[1].fills)
+
+
+@pytest.mark.parametrize(
+    ("days", "reason"),
+    [
+        pytest.param((D1, date(2026, 3, 7)), "not a session", id="a closed day"),
+        pytest.param((D4, D1), "ascending", id="out of order"),
+        pytest.param((D1, D4, D4), "ascending", id="twice"),
+        pytest.param((D1, D6), "no session after it", id="the last session"),
+        pytest.param((D2, D4), "first session", id="not the first session"),
+        pytest.param((), "at least one", id="none"),
+    ],
+)
+def test_rebalance_days_the_range_cannot_trade_are_refused(
+    days: tuple[date, ...], reason: str
+) -> None:
+    with pytest.raises(StrategyBacktestError, match=reason):
+        run_strategy_backtest(replace(HAND_FIXTURE_INPUTS, rebalance_days=days), HAND_FIXTURE_SPEC)

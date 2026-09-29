@@ -146,6 +146,7 @@ __all__ = [
     "WalkForwardModel",
     "component_key",
     "limitation_codes_for",
+    "rebalance_indices",
     "run_strategy_backtest",
     "score_signal_day",
     "target_holdings",
@@ -1018,6 +1019,11 @@ class StrategyInputs:
     `feed` replaces the four score fields with a `ScoreFeed`, which the view uses so a run holds
     one period's scores at a time. A run over a feed and a run over the same scores materialised
     into the four fields are the same run.
+
+    `rebalance_days` (`V2-P6-011`) replaces the fixed grid with the sessions the book actually
+    rebalanced on -- a forward book priced on the days its daily command recommended, which
+    catches a missed rebalance up at its next run and does not rebalance on a day its source
+    held. `None`, the default, is the grid; see `rebalance_indices`.
     """
 
     source: ScoreSource
@@ -1032,6 +1038,7 @@ class StrategyInputs:
     model_fits: tuple[WalkForwardFit, ...] = ()
     fit_for_day: Mapping[date, WalkForwardFit] = field(default_factory=dict)
     feed: ScoreFeed | None = None
+    rebalance_days: tuple[date, ...] | None = None
 
     def __post_init__(self) -> None:
         if len(self.sessions) < 2:
@@ -1086,11 +1093,54 @@ class _MaterialisedFeed:
         return self._refits
 
 
+def rebalance_indices(
+    sessions: Sequence[date], *, every: int, days: Sequence[date] | None = None
+) -> tuple[int, ...]:
+    """The positions in `sessions` the book rebalances at, or `StrategyBacktestError`.
+
+    `days is None` is the fixed grid: `0, R, 2R, ...` for as long as a session follows to trade
+    on, `R = every`. Otherwise `days` are the sessions themselves (`V2-P6-011`): ascending, each a
+    session of the range with one after it to trade on, and the first the range's first session
+    -- the book starts in cash, so a range that opened before its first rebalance would report a
+    period no decision made.
+    """
+    if days is None:
+        return tuple(range(0, len(sessions) - 1, every))
+    if not days:
+        raise StrategyBacktestError("rebalance_days names no day; a book needs at least one")
+    position = {day: index for index, day in enumerate(sessions)}
+    absent = [day.isoformat() for day in days if day not in position]
+    if absent:
+        raise StrategyBacktestError(
+            f"rebalance day(s) {absent} are not a session of the range "
+            f"{sessions[0].isoformat()}..{sessions[-1].isoformat()}"
+        )
+    indices = tuple(position[day] for day in days)
+    if any(later <= earlier for earlier, later in pairwise(indices)):
+        raise StrategyBacktestError(
+            f"rebalance_days must be strictly ascending sessions; got "
+            f"{[day.isoformat() for day in days]}"
+        )
+    if indices[-1] == len(sessions) - 1:
+        raise StrategyBacktestError(
+            f"rebalance day {days[-1].isoformat()} is the range's last session, with no session "
+            "after it to trade on"
+        )
+    if indices[0] != 0:
+        raise StrategyBacktestError(
+            f"the first rebalance day {days[0].isoformat()} is not the range's first session "
+            f"{sessions[0].isoformat()}; start the range on it"
+        )
+    return indices
+
+
 def run_strategy_backtest(inputs: StrategyInputs, spec: StrategySpec) -> StrategyBacktest:
     """Run the book over every period `inputs` spans and return the answer.
 
     Signal days are `sessions[0]`, `sessions[R]`, `sessions[2R]`, ... for as long as a session
-    follows to trade on, where `R = spec.rebalance_every_sessions`. Each signal day's scores are
+    follows to trade on, where `R = spec.rebalance_every_sessions` -- or, when
+    `inputs.rebalance_days` names them, those sessions (`rebalance_indices`); each period runs to
+    the next signal day or the range's last session. Each signal day's scores are
     asked for when its period is booked and not before, so a streamed feed holds one period at a
     time. Refuses, with `StrategyBacktestError`: a signal day with no signal instant, a score row
     that was not visible at its signal day's instant, a row naming a component the source does
@@ -1106,14 +1156,20 @@ def run_strategy_backtest(inputs: StrategyInputs, spec: StrategySpec) -> Strateg
     if missing:
         raise StrategyBacktestError(f"no return series was supplied for benchmark(s) {missing}")
     sessions = inputs.sessions
-    signal_indices = tuple(range(0, len(sessions) - 1, spec.rebalance_every_sessions))
+    signal_indices = rebalance_indices(
+        sessions, every=spec.rebalance_every_sessions, days=inputs.rebalance_days
+    )
     signal_days = frozenset(sessions[index] for index in signal_indices)
     feed: ScoreFeed = inputs.feed or _MaterialisedFeed(inputs, signal_days)
     scorer = _Scorer(inputs, feed)
     book = _Book(spec=spec, cash=spec.initial_capital)
     periods: list[PeriodResult] = []
-    for index in signal_indices:
-        end_index = min(index + spec.rebalance_every_sessions, len(sessions) - 1)
+    for position, index in enumerate(signal_indices):
+        end_index = (
+            signal_indices[position + 1]
+            if position + 1 < len(signal_indices)
+            else len(sessions) - 1
+        )
         periods.append(
             _run_period(
                 inputs,

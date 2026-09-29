@@ -1076,6 +1076,76 @@ def previous_targets(directory: Path, session: date) -> tuple[date | None, dict[
     return None, {}
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class JournalledDay:
+    """One session the command completed, as its journal says (`V2-P6-011`, for `V2-P6-012`).
+
+    `decision` is step 6's: `rebalanced`, `held` (the source ranked nothing, so the book kept
+    yesterday's) or `not a rebalance day`. `record_id` is the record step 7 registered or found,
+    `None` on a day the source held -- which is evidence the book did not rebalance there, not a
+    gap (`source_held`). `weights` are the targets the command printed.
+    """
+
+    session: date
+    decision: str
+    reason: str
+    source_held: bool
+    record_id: str | None
+    weights: Mapping[str, str]
+
+
+def journalled_days(directory: Path) -> tuple[JournalledDay, ...]:
+    """Every session the command completed under `directory` (`journal_directory`), ascending.
+
+    A journal without a `result` -- a run refused or stopped before its summary -- is not a day
+    the command recommended anything on, and is left out: the next run catches its rebalance up
+    (`Schedule.due`), and that run's journal says so.
+    """
+    if not directory.is_dir():
+        return ()
+    days: list[JournalledDay] = []
+    for path in sorted(directory.glob("????-??-??.json")):
+        body = read_journal(path)
+        if body is None or "result" not in body:
+            continue
+        result = body["result"]
+        targets, prediction = result["targets"], result["prediction"]
+        days.append(
+            JournalledDay(
+                session=date.fromisoformat(result["session"]),
+                decision=str(targets["decision"]),
+                reason=str(targets["reason"]),
+                source_held=bool(result["candidates"]["held"]),
+                record_id=str(prediction["record_id"]) if prediction.get("registered") else None,
+                weights=dict(targets["weights"]),
+            )
+        )
+    return tuple(days)
+
+
+def journalled_rebalances(directory: Path) -> tuple[tuple[date, str], ...]:
+    """The sessions the command actually rebalanced on, ascending, each with the record it used.
+
+    What the forward report prices (`V2-P6-012`): a backtest of these records with these days as
+    its `rebalance_days` holds, after every rebalance, the targets the command printed (every
+    order filled). It differs from the fixed grid exactly where the command did: a day the
+    source held is not a rebalance, and a missed or refused run's rebalance is made at the next
+    run. A rebalance journalled without a record is refused -- the book could not be priced.
+    """
+    rebalances: list[tuple[date, str]] = []
+    for day in journalled_days(directory):
+        if day.decision != "rebalanced":
+            continue
+        if day.record_id is None:
+            raise StepFailedError(
+                "summary",
+                f"the journal of {day.session.isoformat()} rebalanced with no record registered; "
+                "the book it recommended cannot be priced from the prediction store",
+            )
+        rebalances.append((day.session, day.record_id))
+    return tuple(rebalances)
+
+
 # --- the day's schedule --------------------------------------------------------------------------
 
 
