@@ -233,6 +233,7 @@ def write_strategy_corpus_published_daily(
     label_inputs_through: date | None = None,
     through: date | None = None,
     late: bool = False,
+    builds_through: date | None = None,
 ) -> GeneratedPanel:
     """`write_strategy_corpus`'s ten-session panel, but with `adj_factor` and `suspend_d`
     published session by session, each session's own row available at its own 16:30 close, the
@@ -280,6 +281,8 @@ def write_strategy_corpus_published_daily(
     answers "none" rather than refusing.
 
     `late=True` carries the same meaning `write_strategy_corpus`'s does, for the factor builds.
+    `builds_through` stops the factor builds at that session (default: `through`), so every
+    label input can reach later than any factor partition (`V2-P6-011` fix round 15).
     """
     store = PanelStore(root / "panel")
     full = generate_panel(shapes=("daily.close_moves_between_sessions",))
@@ -354,7 +357,8 @@ def write_strategy_corpus_published_daily(
     )
     write_price_limits(store, [_fetched_at_through(PRICE_LIMIT_DATASET)], calendar=calendar)
     write_index_prices(store, [_index_batch(sessions)])
-    builds = [_build(store, full, session, late=late) for session in sessions[1:]]
+    built = sessions if builds_through is None else sessions[: sessions.index(builds_through) + 1]
+    builds = [_build(store, full, session, late=late) for session in built[1:]]
     write_factor_panels(store, builds)
     return dataclasses.replace(full, sessions=sessions, as_of=read_instant(sessions[-1]))
 

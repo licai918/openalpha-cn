@@ -288,7 +288,7 @@ disagreeing by one day (a session at 08:00 Asia/Shanghai is the previous date in
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -307,6 +307,18 @@ class PanelStorageError(RuntimeError):
     Defined here rather than in `panel/store.py` (which re-exports it, so every existing
     import keeps working) because `PanelReadOutcome.rows` has to raise it and this module
     must not import the store -- the dependency runs store -> catalog, never back.
+    """
+
+
+class PartitionNotYetKnowableError(PanelStorageError):
+    """A read refused for `not_yet_knowable` and nothing else: a partition read whole holds a row
+    that became knowable after the `as_of` (`V2-P6-011` fix round 15).
+
+    Its own type because it alone is a fact about *when* the store is read rather than about what
+    it holds -- the same partition reads at its `max_available_time` -- so a caller re-reading a
+    day at a later instant (`strategy_registration._score_when_readable`) can tell it from every
+    other refusal without parsing a message. Still a `PanelStorageError`: every existing handler
+    catches it unchanged.
     """
 
 
@@ -965,6 +977,13 @@ class ReadinessIssue:
     year: int | None = None
     missing_dates: tuple[date, ...] = ()
     missing_items: tuple[str, ...] = ()
+
+
+def refusal_type(codes: Iterable[str]) -> type[PanelStorageError]:
+    """The error a read blocked for `codes` raises: `PartitionNotYetKnowableError` when every
+    code is `not_yet_knowable`, `PanelStorageError` otherwise."""
+    found = set(codes)
+    return PartitionNotYetKnowableError if found == {"not_yet_knowable"} else PanelStorageError
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

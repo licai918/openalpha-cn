@@ -113,7 +113,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from enum import IntEnum
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, cast
 from zoneinfo import ZoneInfo
 
 REPOSITORY: Final[Path] = Path(__file__).resolve().parents[1]
@@ -121,14 +121,19 @@ RESEARCH_SCRIPTS: Final[Path] = REPOSITORY / "scripts" / "research"
 if str(RESEARCH_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(RESEARCH_SCRIPTS))
 
+import grid  # noqa: E402  (scripts/research/grid.py: the holdout's own significance test)
 import registry  # noqa: E402
 from click import ClickException  # noqa: E402
 from typer.main import get_command  # noqa: E402
 
 from openalpha_cn import cli  # noqa: E402
-from openalpha_cn.backtest.strategy_backtest import target_holdings  # noqa: E402
+from openalpha_cn.backtest.strategy_backtest import (  # noqa: E402
+    StrategyBacktestError,
+    target_holdings,
+)
 from openalpha_cn.domain.alpha_model import PredictionBatch  # noqa: E402
 from openalpha_cn.domain.index_membership import (  # noqa: E402
+    CSI500_INDEX_CODE,
     INDEX_WEIGHT_DATASET,
     INDEX_WEIGHT_INDEX_CODES,
 )
@@ -349,6 +354,9 @@ class Registration:
     config: Mapping[str, Any]
     config_id: str
     seed: int
+    settings: Mapping[str, Any]
+    """The registration's measurement settings (`grid.protocol_settings`' keys): what the forward
+    report's significance test runs under (`forward_summary`)."""
 
     @property
     def declared(self) -> RegisteredConfiguration:
@@ -361,8 +369,14 @@ class Registration:
         )
 
 
-def admit_registration(path: Path, repo: Path) -> Registration:
-    """Step 1: the committed registration, provided the running code is the registered code."""
+def admit_registration(path: Path, repo: Path, *, also_bound: Sequence[str] = ()) -> Registration:
+    """Step 1: the committed registration, provided the running code is the registered code.
+
+    `also_bound` adds paths the registration binds beside this file -- the forward report adds its
+    own (`scripts/forward_report.py`), since a forward report is as much its claim. The
+    registration's `config_id` is re-derived from its `config` here, the one place either command
+    admits a registration (`run_holdout`'s defence against two halves that disagree).
+    """
     if not path.is_file():
         raise StepFailedError(
             "registration",
@@ -371,7 +385,9 @@ def admit_registration(path: Path, repo: Path) -> Registration:
             exit_code=DailyExit.no_registration,
         )
     try:
-        root, admitted = registry.admit_registered_code(path, repo, also_bound=(THIS_SCRIPT,))
+        root, admitted = registry.admit_registered_code(
+            path, repo, also_bound=(THIS_SCRIPT, *also_bound)
+        )
     except registry.HoldoutConfigurationError as error:
         raise StepFailedError(
             "registration", str(error), exit_code=DailyExit.no_registration
@@ -391,16 +407,28 @@ def admit_registration(path: Path, repo: Path) -> Registration:
             f"{path} registers no configuration object",
             exit_code=DailyExit.no_registration,
         )
+    config_id = grid.config_id(config)
+    if config_id != body.get("config_id"):
+        raise StepFailedError(
+            "registration",
+            f"{path}'s config_id {body.get('config_id')!r} does not match its own config "
+            f"(re-derived: {config_id!r}); the registration file may have been edited after it "
+            "was written",
+            exit_code=DailyExit.no_registration,
+        )
     settings = body.get("settings")
-    seed = settings.get("random_seed", 0) if isinstance(settings, dict) else 0
+    settings = dict(settings) if isinstance(settings, dict) else {}
+    seed = settings.get("random_seed", 0)
     return Registration(
         path=path,
         sha256=hashlib.sha256(admitted.content).hexdigest(),
         commit=admitted.commit,
         code_commit=str(body.get("code_commit")),
         config=config,
-        config_id=str(body.get("config_id")),
-        seed=int(seed) if isinstance(seed, int) else 0,
+        config_id=config_id,
+        # A bool is an int to Python and not a seed: it is read as no seed.
+        seed=seed if isinstance(seed, int) and not isinstance(seed, bool) else 0,
+        settings=settings,
     )
 
 
@@ -1378,10 +1406,12 @@ def forward_rebalances(
     store = panel_store(runtime_dir)
     anchor = _registered_anchor(registration)
     request_for = _request_at(registration)
+    # The next year too, when stored: a record on the year's last session is cut off at 09:15 on
+    # the next year's first (`registration_cutoff`), as `_outcome_calendar` places its outcome.
     calendar = _stored_calendar(
         store,
         request_for(anchor, as_of).exchange,
-        tuple(range(anchor.year, through.year + 1)),
+        tuple(range(anchor.year, through.year + 2)),
         as_of,
     )
     if calendar is None:
@@ -1484,7 +1514,61 @@ def _book_statistics(periods: Sequence[Any]) -> dict[str, Any]:
     }
 
 
-def forward_summary(book: Any, check: RecordCheck, schedule: ForwardSchedule) -> dict[str, Any]:
+REPORTED_EXCESS_BENCHMARK: Final[str] = CSI500_INDEX_CODE
+"""The benchmark the forward report tests excess against beside the registration's own
+`excess_benchmark` (all-A equal weight): the protocol reports 000905.SH beside it."""
+
+SIGNIFICANCE_TESTED: Final[str] = (
+    "grid.strategy_result, the holdout's own: a sign-flip test of the non-overlapping periods' "
+    "net excess (one-sided p), over complete periods only -- a period of at least the "
+    "registered rebalance interval in sessions. A shorter period (the book's open last period, "
+    "a catch-up's) is shown in the statistics and not tested"
+)
+"""What the significance rows are, stated on every forward report."""
+
+_SIGNIFICANCE_KEYS: Final[tuple[str, ...]] = (
+    "excess_benchmark",
+    "period_count",
+    "excluded_incomplete_periods",
+    "net_excess",
+    "mean_net_excess",
+    "p_excess",
+    "p_excess_one_sided",
+    "p_excess_exact",
+    "p_excess_sign_patterns",
+)
+
+
+def _significance(
+    book: Any, *, benchmarks: Sequence[str], samples: int, seed: int
+) -> dict[str, Any]:
+    """`grid.strategy_result` of `book` against each benchmark, the keys a report shows; a book
+    the test refuses (no complete period, a benchmark it has no return for) says why."""
+    tested: dict[str, Any] = {}
+    for benchmark in benchmarks:
+        try:
+            result = grid.strategy_result(
+                book, excess_benchmark=benchmark, bootstrap_samples=samples, random_seed=seed
+            )
+        except StrategyBacktestError as error:
+            tested[benchmark] = {"refused": str(error)}
+            continue
+        shown: dict[str, Any] = {key: result[key] for key in _SIGNIFICANCE_KEYS}
+        complete = cast(list[bool], result["period_complete"])
+        shown["tested_periods"] = sum(complete)
+        shown["bootstrap_samples"] = samples
+        shown["random_seed"] = seed
+        tested[benchmark] = shown
+    return tested
+
+
+def forward_summary(
+    book: Any,
+    check: RecordCheck,
+    schedule: ForwardSchedule,
+    *,
+    settings: Mapping[str, Any],
+) -> dict[str, Any]:
     """What a forward report shows about the evidence behind its book (`V2-P6-012`).
 
     The book is priced as recommended -- every on-time bound record, `UNVERIFIABLE` ones
@@ -1492,10 +1576,28 @@ def forward_summary(book: Any, check: RecordCheck, schedule: ForwardSchedule) ->
     whose record verified, excluding those an `UNVERIFIABLE` record opened. Both are shown, with
     the count and each corrected partition, so a reader sees whether the corrections matter;
     `unprovable_holds` and `INTEGRITY` are stated beside them.
+
+    Each set is also tested as the holdout tested it (`grid.strategy_result`, `SIGNIFICANCE_
+    TESTED`): net excess against the registration's `excess_benchmark` and 000905.SH, under the
+    registration's own `bootstrap_samples` and `random_seed` -- `settings`, which has no
+    default: a forward p-value under other settings than the registered ones is not the
+    registered test.
     """
+    missing = [key for key in ("bootstrap_samples", "random_seed") if key not in settings]
+    if missing:
+        raise StepFailedError(
+            "summary",
+            f"the registration's settings name no {missing}; the forward book is tested under "
+            "the registered measurement settings, and there are none to test it under",
+        )
+    samples, seed = int(settings["bootstrap_samples"]), int(settings["random_seed"])
+    primary = str(settings.get("excess_benchmark", grid.PRIMARY_EXCESS_BENCHMARK))
+    benchmarks = tuple(dict.fromkeys((primary, REPORTED_EXCESS_BENCHMARK)))
     flagged = dict(check.unverifiable)
     opened = {session: record for session, record in schedule.rebalances}
     excluded = {session for session, record in opened.items() if record in flagged}
+    kept = [period for period in book.periods if period.start not in excluded]
+    subset = book.model_copy(update={"periods": tuple(kept)}) if book.periods else book
     return {
         UNVERIFIABLE: {
             "count": len(flagged),
@@ -1506,8 +1608,13 @@ def forward_summary(book: Any, check: RecordCheck, schedule: ForwardSchedule) ->
         },
         "statistics": {
             "all_periods": _book_statistics(book.periods),
-            "excluding_unverifiable": _book_statistics(
-                [period for period in book.periods if period.start not in excluded]
+            "excluding_unverifiable": _book_statistics(kept),
+        },
+        "significance": {
+            "tested": SIGNIFICANCE_TESTED,
+            "all_periods": _significance(book, benchmarks=benchmarks, samples=samples, seed=seed),
+            "excluding_unverifiable": _significance(
+                subset, benchmarks=benchmarks, samples=samples, seed=seed
             ),
         },
         "unprovable_holds": [day.isoformat() for day in schedule.unprovable_holds],
@@ -1521,7 +1628,7 @@ def forward_summary_lines(summary: Mapping[str, Any]) -> list[str]:
     lines = [f"{UNVERIFIABLE}: {flagged['count']} record(s)"]
     for entry in flagged["records"]:
         lines.append(f"  {entry['record_id']} corrected: {', '.join(entry['corrected'])}")
-    for name, label in (
+    labels = (
         ("all_periods", "headline: the book as recommended"),
         (
             "excluding_unverifiable",
@@ -1529,13 +1636,33 @@ def forward_summary_lines(summary: Mapping[str, Any]) -> list[str]:
             "records (a subset of one path, not a re-run; later periods keep the positions and "
             "costs those periods left)",
         ),
-    ):
+    )
+    for name, label in labels:
         stats = summary["statistics"][name]
         lines.append(
             f"{label}: {stats['periods']} period(s), compounded net "
             f"{stats['compounded_net_return']}, mean period net {stats['mean_period_net_return']}, "
             f"benchmarks {json.dumps(stats['compounded_benchmark_returns'], sort_keys=True)}"
         )
+    significance = summary["significance"]
+    lines.append(f"significance: {significance['tested']}")
+    for name, label in labels:
+        for benchmark, shown in significance[name].items():
+            head = f"  {label.split(':')[0]} vs {benchmark}: "
+            if "refused" in shown:
+                lines.append(head + f"not tested -- {shown['refused']}")
+                continue
+            draws = (
+                "exact"
+                if shown["p_excess_exact"]
+                else f"{shown['p_excess_sign_patterns']} sign patterns, seed {shown['random_seed']}"
+            )
+            lines.append(
+                head + f"{shown['tested_periods']} complete period(s) tested, "
+                f"{shown['excluded_incomplete_periods']} incomplete shown and not tested; "
+                f"mean net excess {shown['mean_net_excess']}, one-sided p "
+                f"{shown['p_excess_one_sided']} (two-sided {shown['p_excess']}, {draws})"
+            )
     if summary["unprovable_holds"]:
         lines.append(
             "holds before the first record (unprovable, not counted): "

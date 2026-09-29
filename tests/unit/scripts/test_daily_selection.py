@@ -100,6 +100,7 @@ def _script(name: str, directory: Path) -> ModuleType:
 
 
 registry = _script("registry", ROOT / "scripts" / "research")
+grid = _script("grid", ROOT / "scripts" / "research")
 daily = _script("daily_selection", ROOT / "scripts")
 
 SECRET_TOKEN: Final[str] = "sk-daily-selection-token-must-not-leak-60011"
@@ -2836,6 +2837,7 @@ def test_a_label_restated_after_filing_makes_a_record_unverifiable_and_still_pri
         daily.ForwardSchedule(
             rebalances=((day, record.record_id),), days=(), first_record=day, unprovable_holds=()
         ),
+        settings=grid.protocol_settings(),
     )
     flagged = summary["unverifiable_inputs_corrected_after_filing"]
     assert flagged["count"] == 1
@@ -2898,9 +2900,9 @@ def test_a_verified_verdict_is_kept_and_a_correction_asks_again(
     _supersede(tmp_path, panel, day)
     asked = check()
     assert asked(record) is None
-    # Recomputed -- and, `counted` refusing every read, tried once more at the instant its
-    # inputs became readable (`_score_when_readable`, fix round 14): still only this day.
-    assert calls and set(calls) == {day}
+    # Recomputed once: `counted`'s refusal is not a partition that is not yet knowable, so it is
+    # not tried again at a later instant (`_score_when_readable`, fix round 15).
+    assert calls == [day]
     assert [flagged for flagged, _ in asked.unverifiable] == [record.record_id]
 
 

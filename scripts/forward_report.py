@@ -33,23 +33,21 @@ filing is shown. None of that is re-derived here anymore.
   portfolio's own rules -- holding count, rebalance interval, buffer, industry cap, costs, sell
   side -- with the registered configuration read through `daily_selection.strategy_arguments`.
 - **Where the last period ends**: `strategy_registration.book_period_end` on the schedule's newest
-  record, at the registered grid interval (there being no *next* rebalance for it yet), capped by
-  what the panel has actually published.
+  record, ending on the registered grid's next rebalance after it -- the interval after it on a
+  scheduled day, sooner after a catch-up -- capped by what the panel has actually published. The
+  calendar is read through the next year when stored (`daily_selection._outcome_calendar`'s
+  rule), so a period that ends in January can be placed on 31 December.
 - **What the evidence means**: `daily_selection.forward_summary` /
   `daily_selection.forward_summary_lines` -- the book as recommended, the same book's statistics
-  excluding the periods an unverifiable record opened, the unprovable holds before the first
-  record, and `daily_selection.INTEGRITY`, the threat model stated on every forward report. This
-  module renders exactly that; it computes no statistic of its own.
-- **The registry's code-binding check**: `registry.admit_registered_code` (`V2-P6-008`), with
-  *both* `scripts/forward_report.py` (this file) and `scripts/daily_selection.py` added to
-  `also_bound` -- a forward report is as much this file's claim as it is the daily command's, and
-  `daily_selection.admit_environment` (the running interpreter and its packages against the
-  registration's `.python-version` and `uv.lock`) is reused unchanged rather than only checking
-  the code.
-- **The stored configuration's own identity**: `grid.config_id`, re-derived from the registration's
-  `config` and checked against its own `config_id` -- `run_holdout`'s own defence against a
-  registration whose two halves disagree, applied here because this module has no external
-  caller-supplied configuration to check `config_id` against the way `run_holdout` does.
+  excluding the periods an unverifiable record opened, each tested as the holdout tested it
+  (`grid.strategy_result` under the registration's own settings), the unprovable holds before the
+  first record, and `daily_selection.INTEGRITY`, the threat model stated on every forward report.
+  This module renders exactly that; it computes no statistic of its own.
+- **Admission**: `daily_selection.admit_registration` itself, with this file added to what the
+  registration binds (`also_bound`) -- the registry's code-binding check (`V2-P6-008`), the
+  running environment against the registration's `.python-version` and `uv.lock`, and the
+  registration's `config_id` re-derived from its `config` (`run_holdout`'s defence against two
+  halves that disagree) all in that one place.
 - **The panel and the prediction store**: `panel_view.panel_store` and
   `runtime.composition.build_storage`, the same composition helpers the daily command uses
   (`main`, below).
@@ -61,7 +59,6 @@ Research wording stays "candidate"; this report states results, never expectatio
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import sys
 from collections.abc import Callable, Mapping, Sequence
@@ -78,7 +75,11 @@ from openalpha_cn.panel_view import panel_store
 from openalpha_cn.providers.tushare import TRADING_CALENDAR_DEFAULT_EXCHANGE
 from openalpha_cn.runtime.composition import build_storage
 from openalpha_cn.storage.predictions import FilePredictionStore
-from openalpha_cn.strategy_registration import book_period_end
+from openalpha_cn.strategy_registration import (
+    StrategyRegistrationError,
+    book_period_end,
+    schedule_of,
+)
 from openalpha_cn.strategy_view import SHANGHAI, StrategyViewError, backtest_strategy
 from openalpha_cn.strategy_view import strategy_request as _strategy_request
 
@@ -94,7 +95,6 @@ for _root in (_SCRIPTS, _RESEARCH_ROOT):
         sys.path.insert(0, str(_root))
 
 import daily_selection  # noqa: E402  (scripts/daily_selection.py: the forward-evidence machinery)
-import grid  # noqa: E402  (scripts/research/grid.py; registry.py's own sibling-import arrangement)
 import registry  # noqa: E402  (scripts/research/registry.py)
 
 _PORTFOLIO_ARGUMENT_KEYS: Final[tuple[str, ...]] = (
@@ -141,53 +141,17 @@ class ForwardReport:
 
 
 def _admit(registration: Path, repo: Path) -> daily_selection.Registration:
-    """Admit the registration the way `daily_selection.admit_registration` does, with this file
-    added to what is bound beside `scripts/daily_selection.py` -- `registry.admit_registered_code`
-    and `daily_selection.admit_environment`, both reused rather than restated -- and the
-    registration's own `config_id` re-derived and checked against its `config`
-    (`run_holdout`'s own defence against a doctored registration, applied here because this module
-    builds no separate caller-supplied configuration to check `config_id` against the way
-    `run_holdout` does).
-    """
+    """`daily_selection.admit_registration`, with this file added to what the registration binds;
+    its refusal is this report's."""
     if not registration.is_file():
         raise ForwardReportError(
             f"{registration} does not exist; the forward report reads the registered "
             "configuration's own records and there is no registration to read"
         )
     try:
-        root, admitted = registry.admit_registered_code(
-            registration, repo, also_bound=(_THIS_SCRIPT, daily_selection.THIS_SCRIPT)
-        )
-    except registry.HoldoutRefusedError as error:
-        raise ForwardReportError(f"{type(error).__name__}: {error}") from error
-    try:
-        daily_selection.admit_environment(
-            root, code_commit=str(admitted.registered.get("code_commit"))
-        )
+        return daily_selection.admit_registration(registration, repo, also_bound=(_THIS_SCRIPT,))
     except daily_selection.StepFailedError as error:
         raise ForwardReportError(str(error)) from error
-    body = admitted.registered
-    config = body.get("config")
-    if not isinstance(config, dict):
-        raise ForwardReportError(f"{registration} registers no configuration object")
-    config_id = grid.config_id(config)
-    if config_id != body.get("config_id"):
-        raise ForwardReportError(
-            f"{registration}'s config_id {body.get('config_id')!r} does not match its own "
-            f"config (re-derived: {config_id!r}); the registration file may have been edited "
-            "after it was written"
-        )
-    settings = body.get("settings")
-    seed = settings.get("random_seed", 0) if isinstance(settings, dict) else 0
-    return daily_selection.Registration(
-        path=registration,
-        sha256=hashlib.sha256(admitted.content).hexdigest(),
-        commit=admitted.commit,
-        code_commit=str(body.get("code_commit")),
-        config=config,
-        config_id=config_id,
-        seed=int(seed) if isinstance(seed, int) and not isinstance(seed, bool) else 0,
-    )
 
 
 def _forward_request_arguments(
@@ -261,27 +225,40 @@ def forward_report(
     )
     rebalance_every_sessions = int(arguments["rebalance_every_sessions"])
 
-    years = tuple(range(admitted_anchor_year(admitted), as_of.astimezone(SHANGHAI).year + 1))
+    # Through the next year when it is stored: the newest period may end in January.
+    years = tuple(range(admitted_anchor_year(admitted), as_of.astimezone(SHANGHAI).year + 2))
     held = set(store.registered_years(TRADING_CALENDAR_DATASET))
     calendar_years = tuple(year for year in years if year in held)
     if not calendar_years:
         raise ForwardReportError(f"the panel holds no {exchange} trading calendar for {years}")
     calendar = load_trading_calendar(store, exchange=exchange, years=calendar_years, as_of=as_of)
 
-    newest_record_id = schedule.rebalances[-1][1]
+    newest_day, newest_record_id = schedule.rebalances[-1]
     newest_record = prediction_store.get(newest_record_id)
     if newest_record is None:
         raise ForwardReportError(
             f"the schedule names {newest_record_id}, which the prediction store no longer holds"
         )
-    grid_end = book_period_end(
-        newest_record, calendar=calendar, rebalance_every_sessions=rebalance_every_sessions
-    ).date()
     try:
+        # The grid's next rebalance after the newest one: the interval after a scheduled day,
+        # sooner after a catch-up, which the daily command rebalances on as scheduled.
+        position = schedule_of(
+            calendar,
+            anchor=daily_selection.anchor_of(config),
+            session=newest_day,
+            every=rebalance_every_sessions,
+            previous=None,
+        ).position
+        next_rebalance = calendar.shift(
+            newest_day, rebalance_every_sessions - position % rebalance_every_sessions
+        )
+        grid_end = book_period_end(
+            newest_record, calendar=calendar, next_rebalance=next_rebalance
+        ).date()
         published = newest_published_session(calendar, as_of=as_of)
-    except TradingCalendarError as error:
+    except (TradingCalendarError, StrategyRegistrationError) as error:
         raise ForwardReportError(
-            f"the newest published session cannot be found: {error}"
+            f"the newest period's end cannot be placed on the stored calendar: {error}"
         ) from error
     end = min(grid_end, published)
     if end <= schedule.first_record:
@@ -298,7 +275,12 @@ def forward_report(
     except StrategyViewError as error:
         raise ForwardReportError(f"the continuous book could not be run: {error}") from error
 
-    summary = daily_selection.forward_summary(backtest, check, schedule)
+    try:
+        summary = daily_selection.forward_summary(
+            backtest, check, schedule, settings=admitted.settings
+        )
+    except daily_selection.StepFailedError as error:
+        raise ForwardReportError(str(error)) from error
     return ForwardReport(
         as_of=as_of,
         config_id=admitted.config_id,

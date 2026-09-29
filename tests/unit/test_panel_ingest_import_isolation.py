@@ -610,6 +610,9 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_ingest.RowDigestCache",
             "panel_ingest.session_publication_instant",
             "panel_ingest.stored_rows_digest",
+            # Round 15: rows of a label input that became visible between a record's filing and
+            # a later recompute are a correction -- the labels are read at the request's as_of.
+            "strategy_view.LABEL_INPUTS",
         }
     ),
     "openalpha_cn.shortlist_compare": frozenset(

@@ -49,21 +49,26 @@ import json
 import os
 import subprocess
 import sys
-from collections.abc import Callable, Mapping
-from datetime import UTC, date, datetime, timedelta
+from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any, Final
 
+import panel_fixtures
 import pytest
 import strategy_fixtures
 from panel_fixtures import generate_panel
 from strategy_fixtures import READ_AT, write_strategy_corpus, write_strategy_corpus_published_daily
 
 from openalpha_cn import strategy_registration
+from openalpha_cn.domain.panel_batch import PanelColumn
+from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET
+from openalpha_cn.domain.upstream_defects import UPSTREAM_DEFECT_DATA_COLUMNS
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import write_factor_panels
+from openalpha_cn.panel_ingest import UPSTREAM_DEFECTS_DATASET, write_upstream_defects
 from openalpha_cn.storage.predictions import FilePredictionStore
 from openalpha_cn.strategy_registration import (
     RegisteredConfiguration,
@@ -173,11 +178,19 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return root
 
 
-def register_config(repo_path: Path, config: dict[str, Any]) -> Path:
+def register_config(
+    repo_path: Path, config: dict[str, Any], *, settings: Mapping[str, object] | None = None
+) -> Path:
     commit = _head(repo_path)
     path = repo_path / "docs" / "research" / "p6-registration.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    registry.register(config, CRITERIA, path, code_commit=commit, settings=grid.protocol_settings())
+    registry.register(
+        config,
+        CRITERIA,
+        path,
+        code_commit=commit,
+        settings=grid.protocol_settings() if settings is None else settings,
+    )
     _commit_file(repo_path, path, "register", at=CLOCK0 + timedelta(seconds=1))
     return path
 
@@ -194,6 +207,7 @@ def register_days(
     *,
     registered: RegisteredConfiguration,
     store: PanelStore | None = None,
+    provenance_store: PanelStore | None = None,
 ) -> list[str]:
     """`test_daily_selection._register_days`'s own body, parameterized on `registered`: that
     helper hardcodes its own module's placeholder `REGISTERED` constant (a fixed, unrelated
@@ -203,8 +217,10 @@ def register_days(
     `daily.write_provenance`, `daily.register_prediction`) is reused unchanged; only the constant
     `_register_days` closes over is made a parameter. `store` is the panel the days are scored
     on (default: `root`'s own) -- a store as it stood when they were filed, before the runtime's
-    panel advanced past them."""
+    panel advanced past them. `provenance_store` is the one the input provenance is written from
+    (default: `store`)."""
     store = PanelStore(root / "panel") if store is None else store
+    provenance_store = store if provenance_store is None else provenance_store
     identifiers: list[str] = []
     for day in days:
         request = request_for(day)
@@ -215,7 +231,9 @@ def register_days(
         assert batch is not None
         daily.write_provenance(
             root,
-            input_provenance(store, request, registered, day=day, batch=batch, recorded_at=filed),
+            input_provenance(
+                provenance_store, request, registered, day=day, batch=batch, recorded_at=filed
+            ),
         )
         record, outcome = daily.register_prediction(
             root, batch, calendar=calendar, clock=lambda filed=filed: filed
@@ -263,7 +281,7 @@ def write_journal_day(
 
 
 def build_static_fixture(
-    tmp_path: Path, repo_path: Path
+    tmp_path: Path, repo_path: Path, *, settings: Mapping[str, object] | None = None
 ) -> tuple[Path, Any, tuple[date, ...], tuple[date, ...]]:
     """`STATIC` (`rebalance_every_sessions=3`) on `write_strategy_corpus`'s panel, registered
     through `test_daily_selection._register_days` -- real `score_day` scoring, filed at 18:30
@@ -277,7 +295,7 @@ def build_static_fixture(
     configured = tds._base(**tds.STATIC)
     anchor = sessions[1]
     config = dict(configured, start=anchor)
-    registration_path = register_config(repo_path, config)
+    registration_path = register_config(repo_path, config, settings=settings)
     admitted = daily.admit_registration(registration_path, repo_path)
 
     step = configured["rebalance_every_sessions"]
@@ -420,6 +438,169 @@ def test_forward_report_view_and_summary_lines_render_the_landed_summary_unmodif
     assert lines[-1] == daily.INTEGRITY
 
 
+# --- Important 1 (review round 3): the holdout's own significance test ----------------------------
+
+SETTINGS: Final[dict[str, object]] = {
+    **grid.protocol_settings(),
+    "bootstrap_samples": 4_321,
+    "random_seed": 97,
+}
+"""Measurement settings no default carries, so a result read under them came from the
+registration."""
+
+
+def test_the_forward_summary_tests_both_statistic_sets_with_the_holdouts_own_function(
+    tmp_path: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`grid.strategy_result` -- the holdout's sign-flip test of non-overlapping periods' net
+    excess, one-sided p -- over the headline book and the sensitivity subset, against all-A
+    equal weight (the registration's `excess_benchmark`) and 000905.SH, under the registration's
+    own `bootstrap_samples`/`random_seed`. Only complete periods are tested; the short last one is
+    shown and said to be left out."""
+    panel_root, admitted, _sessions, _signal_days = build_static_fixture(
+        tmp_path, repo, settings=SETTINGS
+    )
+    real = grid.strategy_result
+    asked: list[tuple[str, int, int, int]] = []
+
+    def recorded(backtest: Any, **keywords: Any) -> Any:
+        asked.append(
+            (
+                keywords["excess_benchmark"],
+                keywords["bootstrap_samples"],
+                keywords["random_seed"],
+                len(backtest.periods),
+            )
+        )
+        return real(backtest, **keywords)
+
+    monkeypatch.setattr(grid, "strategy_result", recorded)
+    report = forward_report.forward_report(
+        PanelStore(panel_root / "panel"),
+        prediction_store(panel_root, clock_at=READ_AT),
+        panel_root,
+        registration=admitted.path,
+        repo=repo,
+        as_of=READ_AT,
+    )
+    monkeypatch.undo()
+
+    periods = len(report.backtest.periods)
+    assert periods == 3
+    # Headline and sensitivity (nothing unverifiable, so the subset is every period), each
+    # against both benchmarks.
+    assert sorted(asked) == sorted(
+        [(benchmark, 4_321, 97, periods) for benchmark in ("000905.SH", "equal_weight_all_a")] * 2
+    )
+    significance = report.summary["significance"]
+    assert "complete" in significance["tested"]
+    for name in ("all_periods", "excluding_unverifiable"):
+        for benchmark in ("equal_weight_all_a", "000905.SH"):
+            shown = significance[name][benchmark]
+            expected = real(
+                report.backtest,
+                excess_benchmark=benchmark,
+                bootstrap_samples=4_321,
+                random_seed=97,
+            )
+            for key in (
+                "p_excess",
+                "p_excess_one_sided",
+                "mean_net_excess",
+                "net_excess",
+                "excluded_incomplete_periods",
+            ):
+                assert shown[key] == expected[key], (name, benchmark, key)
+            assert shown["excluded_incomplete_periods"] == 1
+            assert shown["tested_periods"] == periods - 1
+            assert (shown["bootstrap_samples"], shown["random_seed"]) == (4_321, 97)
+    json.dumps(forward_report.forward_report_view(report))
+    # The sensitivity set is tested on its own periods: with the first record unverifiable, the
+    # two periods after it, one of them complete.
+    first = report.schedule.rebalances[0][1]
+    sensitivity = daily.forward_summary(
+        report.backtest,
+        SimpleNamespace(unverifiable=[(first, ("factor_obs_reversal_1d_v1:2026",))]),
+        report.schedule,
+        settings=SETTINGS,
+    )["significance"]["excluding_unverifiable"]["equal_weight_all_a"]
+    assert (sensitivity["period_count"], sensitivity["tested_periods"]) == (2, 1)
+    lines = daily.forward_summary_lines(report.summary)
+    assert any("one-sided p" in line and "000905.SH" in line for line in lines)
+    assert any("complete" in line and "not tested" in line for line in lines)
+    assert lines[-1] == daily.INTEGRITY
+
+
+def test_forward_summary_refuses_a_registration_without_its_measurement_settings() -> None:
+    """No default stands in for the registration's `bootstrap_samples`/`random_seed`."""
+    with pytest.raises(daily.StepFailedError, match="bootstrap_samples"):
+        daily.forward_summary(
+            SimpleNamespace(periods=()),
+            SimpleNamespace(unverifiable=[]),
+            daily.ForwardSchedule(
+                rebalances=(), days=(), first_record=date(2026, 1, 5), unprovable_holds=()
+            ),
+            settings={"random_seed": 1},
+        )
+
+
+# --- Important 2 (review round 3): a book whose newest period crosses New Year --------------------
+
+
+@pytest.mark.parametrize("newest", [date(2026, 12, 30), date(2026, 12, 31)], ids=str)
+def test_a_forward_report_at_year_end_reads_the_next_years_calendar(
+    tmp_path: Path, repo: Path, newest: date
+) -> None:
+    """On 2026-12-31, a record whose grid period ends in January needs 2027's calendar to place
+    that end (`book_period_end`), and a record filed on the 31st needs it for its registration
+    cutoff (09:15 on the next session). Both are loaded when stored, as `_outcome_calendar` does;
+    a record on the 30th prices one period through the 31st, and one on the 31st -- the newest
+    published session -- is refused as a book with no session to trade, never a raw calendar
+    error."""
+    strategy_fixtures.write_two_year_corpus(tmp_path)
+    configured = tds._base(**tds.STATIC, benchmarks=("equal_weight_all_a",))
+    admitted = daily.admit_registration(register_config(repo, dict(configured, start=newest)), repo)
+
+    def request_for(day: date) -> Any:
+        return strategy_request(
+            **configured, start=day - timedelta(days=1), end=day, as_of=tds._evening(day)
+        )
+
+    identifiers = register_days(
+        tmp_path, request_for, [newest], newest, registered=admitted.declared
+    )
+    write_journal_day(
+        tmp_path,
+        admitted,
+        session=newest,
+        as_of=tds._evening(newest),
+        decision="rebalanced",
+        reason="the first day: no book yet",
+        held=False,
+        record_id=identifiers[0],
+    )
+    as_of = tds._evening(date(2026, 12, 31), hours=4)
+
+    def run() -> Any:
+        return forward_report.forward_report(
+            PanelStore(tmp_path / "panel"),
+            prediction_store(tmp_path, clock_at=as_of),
+            tmp_path,
+            registration=admitted.path,
+            repo=repo,
+            as_of=as_of,
+        )
+
+    if newest == date(2026, 12, 31):
+        with pytest.raises(forward_report.ForwardReportError, match="no session to trade"):
+            run()
+        return
+    report = run()
+    ((period,),) = [report.backtest.periods]
+    assert (period.start, period.end) == (newest, date(2026, 12, 31))
+    assert report.check.verified == identifiers
+
+
 # --- production-shaped: a missed day, caught up ---------------------------------------------------
 
 
@@ -469,6 +650,9 @@ def test_a_missed_rebalance_is_caught_up_on_the_next_record_the_store_witnesses(
     assert report.schedule.first_record == sessions[1]
     assert len(report.backtest.periods) == 2
     assert [period.start for period in report.backtest.periods] == list(filed_days)
+    # Day 5 caught up the rebalance scheduled on day 4; the grid's next is day 7, not day 5 plus
+    # the interval (day 8), so the last period ends there (`V2-P6-012` review, minor 3).
+    assert report.backtest.periods[-1].end == sessions[7]
 
 
 # --- production-shaped: a held day ---------------------------------------------------------------
@@ -666,6 +850,10 @@ def test_a_registration_whose_config_id_does_not_match_its_own_config_is_refused
             repo=repo,
             as_of=READ_AT,
         )
+    # One place: the daily command's own admission refuses it the same way (review minor 1).
+    with pytest.raises(daily.StepFailedError, match="config_id") as refused:
+        daily.admit_registration(registration_path, repo)
+    assert refused.value.exit_code == daily.DailyExit.no_registration
 
 
 def test_a_change_to_only_daily_selections_own_file_after_registration_refuses(
@@ -785,8 +973,9 @@ def _label_consuming_scenario(
     )
 
     def request_for(day: date) -> Any:
+        # The daily command's own instant: the signal day's evening, when it files.
         return strategy_request(
-            **configured, start=day - timedelta(days=1), end=day, as_of=panel.as_of
+            **configured, start=day - timedelta(days=1), end=day, as_of=tds._evening(day)
         )
 
     return tmp_path, admitted, panel, signal_day, request_for
@@ -964,6 +1153,9 @@ def test_a_label_restated_after_a_late_record_files_marks_it_unverifiable_and_st
     assert summary["count"] == 1
     assert len(report.backtest.periods) == 1
     assert report.summary["statistics"]["excluding_unverifiable"]["periods"] == 0
+    # Not tested, and said so: the sensitivity set has no period at all.
+    significance = report.summary["significance"]
+    assert "no complete" in significance["excluding_unverifiable"]["equal_weight_all_a"]["refused"]
 
 
 # --- Fix round 14: an older label-consuming record, checked after the panel has advanced ---------
@@ -989,9 +1181,17 @@ def _filed_on_its_own_evening(
     anchor: date,
     *,
     registered: RegisteredConfiguration,
+    provenance_from: Path | None = None,
 ) -> list[str]:
     """Each of `days` scored on a corpus built through it alone, at its own filing time, and
-    filed -- record and provenance -- into `runtime_dir`, as the daily command filed it then."""
+    filed -- record and provenance -- into `runtime_dir`, as the daily command filed it then.
+
+    `provenance_from` is a corpus to write the input provenance from instead: the advanced one,
+    written before any correction a test then makes. The two fixture corpora are not one store's
+    history -- a step function's newest stored row, and every build's own input manifest, depend
+    on how far the corpus reaches -- so a provenance from the shorter one would name those
+    fixture differences as corrections, and a test of *one* correction must compare against
+    the store it corrects."""
     identifiers: list[str] = []
     for day in days:
         own = tmp_path / f"own-{day.isoformat()}"
@@ -1012,6 +1212,9 @@ def _filed_on_its_own_evening(
             anchor,
             registered=registered,
             store=PanelStore(own / "panel"),
+            provenance_store=(
+                None if provenance_from is None else PanelStore(provenance_from / "panel")
+            ),
         )
     return identifiers
 
@@ -1034,9 +1237,12 @@ def _supersede_the_build_of(root: Path, day: date, *, through: date) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "builds_stop", [False, True], ids=["builds_advanced", "builds_stop_at_the_day"]
+)
 @pytest.mark.parametrize("source", LABEL_CONSUMING)
 def test_an_older_label_consuming_record_is_verified_once_the_panel_has_since_advanced(
-    tmp_path: Path, repo: Path, source: Mapping[str, Any]
+    tmp_path: Path, repo: Path, source: Mapping[str, Any], builds_stop: bool
 ) -> None:
     """Once the panel has ingested sessions past a trailing-IC or walk-forward record's own
     signal day, `adj_factor`/`suspend_d` can no longer be read at the record's filing time:
@@ -1045,8 +1251,13 @@ def test_an_older_label_consuming_record_is_verified_once_the_panel_has_since_ad
     `as_of`. `RecordCheck` recomputed there and refused every honest older record of the two
     label-consuming sources (`V2-P6-011` fix round 14). It now recomputes, when the filing time
     cannot be read, at the earliest instant every partition the day's source reads can be
-    (`strategy_registration.readable_instant`) -- which changes nothing the day's scoring sees
-    (`test_a_label_consuming_days_filing_time_scores_equal_the_advanced_stores`): verified."""
+    (`strategy_registration.readable_instant`). Sessions ingested since change nothing the day's
+    scoring sees (`test_a_label_consuming_days_filing_time_scores_equal_the_advanced_stores`), so
+    the honest record is verified.
+
+    `builds_stop`: the factor builds stop at the signal day while every label input reaches two
+    sessions further, so only the label inputs make the filing time unreadable -- the readable
+    instant must be theirs (fix round 15)."""
     probe_sessions = generate_panel(shapes=("daily.close_moves_between_sessions",)).sessions
     anchor, signal_day, advanced = probe_sessions[1], probe_sessions[6], probe_sessions[8]
     configured = tds._base(**source)
@@ -1065,7 +1276,10 @@ def test_an_older_label_consuming_record_is_verified_once_the_panel_has_since_ad
         record_id=identifiers[0],
     )
     panel = write_strategy_corpus_published_daily(
-        tmp_path, label_inputs_through=advanced, through=advanced
+        tmp_path,
+        label_inputs_through=advanced,
+        through=advanced,
+        builds_through=signal_day if builds_stop else None,
     )
 
     store = PanelStore(tmp_path / "panel")
@@ -1160,8 +1374,17 @@ def test_a_build_superseded_after_an_older_record_files_marks_it_unverifiable(
     anchor, signal_day, advanced = probe_sessions[1], probe_sessions[6], probe_sessions[8]
     configured = tds._base(**source)
     admitted = daily.admit_registration(register_config(repo, dict(configured, start=anchor)), repo)
+    panel = write_strategy_corpus_published_daily(
+        tmp_path, label_inputs_through=advanced, through=advanced
+    )
     identifiers = _filed_on_its_own_evening(
-        tmp_path, tmp_path, configured, [signal_day], anchor, registered=admitted.declared
+        tmp_path,
+        tmp_path,
+        configured,
+        [signal_day],
+        anchor,
+        registered=admitted.declared,
+        provenance_from=tmp_path,
     )
     write_journal_day(
         tmp_path,
@@ -1172,9 +1395,6 @@ def test_a_build_superseded_after_an_older_record_files_marks_it_unverifiable(
         reason="scheduled",
         held=False,
         record_id=identifiers[0],
-    )
-    panel = write_strategy_corpus_published_daily(
-        tmp_path, label_inputs_through=advanced, through=advanced
     )
     _supersede_the_build_of(tmp_path, signal_day, through=advanced)
 
@@ -1190,7 +1410,179 @@ def test_a_build_superseded_after_an_older_record_files_marks_it_unverifiable(
     assert report.check.verified == []
     ((flagged, changes),) = report.check.unverifiable
     assert flagged == identifiers[0]
-    assert any(change.startswith("factor_") for change in changes), changes
+    # The supersession and nothing else: the provenance is the advanced store's own.
+    assert changes == (
+        "factor_manifest_reversal_1d_v1:2026",
+        "factor_obs_reversal_1d_v1:2026",
+    )
+
+
+def _record_return_path_decisions(root: Path, decisions: Sequence[tuple[date, datetime]]) -> None:
+    """`pre_close_contradicts_adj_factor` decisions (`V2-P6-020`), each about a session of the
+    corpus's first security and stored under its confirming build's clock -- the `stk_limit`
+    target's whole record for the year, as that target writes it (one call owns its rows)."""
+    full = generate_panel(shapes=("daily.close_moves_between_sessions",))
+    subject = full.securities[0]
+    closes = {
+        (str(code), str(day)): float(close)  # type: ignore[arg-type]
+        for code, day, close in zip(
+            full.batch("daily").subjects,
+            full.column("daily", "trade_date"),
+            full.column("daily", "close"),
+            strict=True,
+        )
+    }
+    kinds = {
+        "trade_date": "string",
+        "source_dataset": "string",
+        "defect_kind": "string",
+        "valuation_repeats_previous_close": "boolean",
+        "list_date": "string",
+    }
+    rows: list[dict[str, object]] = []
+    for session, _recorded in decisions:
+        previous = full.sessions[full.sessions.index(session) - 1]
+        rows.append(
+            {
+                "trade_date": session.isoformat(),
+                "source_dataset": PRICE_LIMIT_DATASET,
+                "defect_kind": "pre_close_contradicts_adj_factor",
+                "bar_close": closes[(subject, session.isoformat())],
+                "valuation_close": closes[(subject, previous.isoformat())],
+                "previous_bar_close": closes[(subject, previous.isoformat())],
+                "up_limit": None,
+                "down_limit": None,
+                "valuation_repeats_previous_close": None,
+                "list_date": None,
+            }
+        )
+    newest = max(recorded for _session, recorded in decisions)
+    write_upstream_defects(
+        PanelStore(root / "panel"),
+        panel_fixtures._batch(
+            UPSTREAM_DEFECTS_DATASET,
+            subjects=tuple(subject for _ in decisions),
+            columns=[
+                PanelColumn(
+                    name,
+                    kinds.get(name, "float"),  # type: ignore[arg-type]
+                    tuple(row[name] for row in rows),
+                )
+                for name in UPSTREAM_DEFECT_DATA_COLUMNS
+            ],
+            event_time=tuple(
+                datetime.combine(session, time(15, 0), tzinfo=daily.SHANGHAI)
+                for session, _recorded in decisions
+            ),
+            available_time=tuple(recorded for _session, recorded in decisions),
+            fetched_at=newest,
+        ),
+        year=decisions[0][0].year,
+        source_datasets=frozenset({PRICE_LIMIT_DATASET}),
+    )
+
+
+@pytest.mark.parametrize("decided", [False, True], ids=["nothing_recorded", "decision_recorded"])
+@pytest.mark.parametrize("source", LABEL_CONSUMING)
+def test_a_return_path_decision_recorded_after_filing_is_a_correction_not_a_refusal(
+    tmp_path: Path, repo: Path, source: Mapping[str, Any], decided: bool
+) -> None:
+    """A `V2-P6-020` return-path decision carries the confirming build's clock, so one recorded
+    after a record was filed is invisible to its provenance digest (rows visible at the signal
+    instant) -- yet the recompute, reading the labels at the later readable instant, follows it.
+    A record whose recompute then differs is `UNVERIFIABLE`, naming `upstream_defects`, not
+    refused (fix round 15). Here the stored scores are negated so the recompute differs whatever
+    the decision does; with nothing recorded since, the same record is refused.
+
+    The year's `upstream_defects` partition already holds a decision recorded before the signal
+    instant, so the later one moves the partition without moving what the day saw at its signal
+    instant -- the case the provenance digest alone cannot see (a partition that did not exist
+    at filing is already "stored since")."""
+    probe_sessions = generate_panel(shapes=("daily.close_moves_between_sessions",)).sessions
+    anchor, signal_day, advanced = probe_sessions[1], probe_sessions[6], probe_sessions[8]
+    configured = tds._base(**source)
+    admitted = daily.admit_registration(register_config(repo, dict(configured, start=anchor)), repo)
+    own = tmp_path / "own"
+    write_strategy_corpus_published_daily(own, label_inputs_through=signal_day, through=signal_day)
+    own_store = PanelStore(own / "panel")
+    request = strategy_request(
+        **configured,
+        start=signal_day - timedelta(days=1),
+        end=signal_day,
+        as_of=tds._evening(signal_day),
+    )
+    filed = tds._evening(signal_day)
+    honest = signal_day_batch(
+        score_day(own_store, request, day=signal_day, anchor=anchor),
+        request,
+        admitted.declared,
+        predicted_at=filed,
+    )
+    assert honest is not None
+    batch = honest.model_copy(
+        update={
+            "predictions": tuple(
+                row.model_copy(update={"score": -row.score}) for row in honest.predictions
+            )
+        }
+    )
+    # The advanced corpus first: the provenance is its own, as `_filed_on_its_own_evening`'s
+    # `provenance_from` explains.
+    panel = write_strategy_corpus_published_daily(
+        tmp_path, label_inputs_through=advanced, through=advanced
+    )
+    before = (probe_sessions[3], tds._evening(probe_sessions[5]))
+    _record_return_path_decisions(tmp_path, [before])
+    daily.write_provenance(
+        tmp_path,
+        input_provenance(
+            PanelStore(tmp_path / "panel"),
+            request,
+            admitted.declared,
+            day=signal_day,
+            batch=batch,
+            recorded_at=filed,
+        ),
+    )
+    calendar = daily._outcome_calendar(own_store, request.exchange, signal_day, request.as_of)
+    record, _outcome = daily.register_prediction(
+        tmp_path, batch, calendar=calendar, clock=lambda: filed
+    )
+    write_journal_day(
+        tmp_path,
+        admitted,
+        session=signal_day,
+        as_of=filed,
+        decision="rebalanced",
+        reason="scheduled",
+        held=False,
+        record_id=record.record_id,
+    )
+    if decided:
+        _record_return_path_decisions(
+            tmp_path, [before, (probe_sessions[4], tds._evening(advanced, hours=-1))]
+        )
+
+    def run() -> Any:
+        return forward_report.forward_report(
+            PanelStore(tmp_path / "panel"),
+            prediction_store(tmp_path, clock_at=panel.as_of),
+            tmp_path,
+            registration=admitted.path,
+            repo=repo,
+            as_of=tds._evening(advanced),
+        )
+
+    if not decided:
+        with pytest.raises(
+            forward_report.ForwardReportError, match="no input it read has been corrected since"
+        ):
+            run()
+        return
+    report = run()
+    ((flagged, changes),) = report.check.unverifiable
+    assert flagged == record.record_id
+    assert changes == ("upstream_defects:2026 (rows of the window recorded after filing)",)
 
 
 @pytest.mark.parametrize("source", LABEL_CONSUMING)

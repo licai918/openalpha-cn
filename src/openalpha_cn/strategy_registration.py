@@ -87,7 +87,7 @@ from openalpha_cn.domain.alpha_model import (
 from openalpha_cn.domain.daily_prices import SESSION_CLOSE_TIME
 from openalpha_cn.domain.prediction_record import PredictionRecord
 from openalpha_cn.domain.trading_calendar import TradingCalendar
-from openalpha_cn.panel.catalog import DEFAULT_DATE_TIMEZONE
+from openalpha_cn.panel.catalog import DEFAULT_DATE_TIMEZONE, PartitionNotYetKnowableError
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_ingest import (
     RowDigestCache,
@@ -95,6 +95,7 @@ from openalpha_cn.panel_ingest import (
     stored_rows_digest,
 )
 from openalpha_cn.strategy_view import (
+    LABEL_INPUTS,
     REGISTRATION_CUTOFF,
     SignalDay,
     StrategyRequest,
@@ -335,9 +336,9 @@ def batch_digest(batch: PredictionBatch) -> str:
     return hashlib.sha256(batch.model_dump_json().encode("utf-8")).hexdigest()
 
 
-def _input_years(request: StrategyRequest, day: date) -> tuple[int, ...]:
-    """The years a day's scoring can read: its own, and as far back as its lookback reaches
-    (a session is at most ~1.5 calendar days across a year; a month is added for holidays)."""
+def _window_start(request: StrategyRequest, day: date) -> date:
+    """The first date a day's scoring can read: as far back as its lookback reaches (a session
+    is at most ~1.5 calendar days across a year; a month is added for holidays)."""
     source = request.source
     sessions = 1
     if source.trailing_ic is not None:
@@ -345,8 +346,12 @@ def _input_years(request: StrategyRequest, day: date) -> tuple[int, ...]:
     elif source.walk_forward is not None:
         spec = source.walk_forward
         sessions = spec.train_sessions + spec.embargo_sessions + spec.horizon_sessions
-    first = day - timedelta(days=int(sessions * 1.5) + 31)
-    return tuple(range(first.year, day.year + 1))
+    return day - timedelta(days=int(sessions * 1.5) + 31)
+
+
+def _input_years(request: StrategyRequest, day: date) -> tuple[int, ...]:
+    """The years a day's scoring can read: its own, and every one back to `_window_start`."""
+    return tuple(range(_window_start(request, day).year, day.year + 1))
 
 
 def _partition_state(
@@ -407,6 +412,17 @@ def readable_instant(store: PanelStore, request: StrategyRequest, *, day: date) 
 _READ_REFUSALS: Final = (StrategyViewError, StrategyBacktestError, StrategyRegistrationError)
 
 
+def _not_yet_knowable(error: BaseException) -> bool:
+    """Whether `error` is, at its root, a partition read whole that holds a row knowable only
+    after the instant asked (`PartitionNotYetKnowableError`) -- and nothing else."""
+    seen: BaseException | None = error
+    while seen is not None:
+        if isinstance(seen, PartitionNotYetKnowableError):
+            return True
+        seen = seen.__cause__
+    return False
+
+
 def _score_when_readable(
     store: PanelStore,
     request_for: Callable[[date, datetime], StrategyRequest],
@@ -416,32 +432,44 @@ def _score_when_readable(
     anchor: date,
     fit_cache: dict[tuple[date, datetime, object], WalkForwardFit],
 ) -> tuple[SignalDay, StrategyRequest, datetime]:
-    """`day` scored again at `at`; when the store cannot be read there, at `readable_instant`.
+    """`day` scored again at `at`; when a partition cannot be read there only because it is not
+    yet knowable, at `readable_instant`.
 
-    Only a refusal to read at `at` sends the day here; a day `at` can read is judged at `at`.
+    Only that refusal (`PartitionNotYetKnowableError`, `V2-P6-011` fix round 15) sends the day to
+    the later instant; any other refusal at `at` is the answer, and a day `at` can read is judged
+    at `at`.
 
-    **Why the later instant verifies nothing `at` would not.** A record's numbers were fixed at
-    `at`, so they carry no row that arrived after it. What arrived between the two instants
-    either leaves the day's scoring as it was -- rows of later sessions (every counted IC's label
-    exited by the signal instant; a walk-forward fit trains on labels exited by its embargo
-    deadline and scores the cross section visible at the instant), and builds: each day's is the
-    latest at or before its own signal instant (`strategy_view._chosen_build`), so a re-run
-    filed after `at` is never taken in place of the build the day had -- or it changes the
-    scoring, and then the recompute differs and the record is not verified: `UNVERIFIABLE` when
-    `provenance_changes` names a correction of what it read (a build superseded in place, a
-    restated row), refused otherwise. The one-sided error is a refusal, never an admission.
-    The forward report's tests pin both halves:
-    `test_a_label_consuming_days_filing_time_scores_equal_the_advanced_stores` and
-    `test_a_build_superseded_after_an_older_record_files_marks_it_unverifiable`.
+    **What the later instant can and cannot do.** A record's numbers were fixed at `at`, so they
+    carry no row that arrived after it. What arrived between the two instants either leaves the
+    day's scoring as it was, or changes it:
+
+    - **Unchanged.** Rows of later sessions: every counted IC's label exited by the signal
+      instant, and a walk-forward fit trains on labels exited by its embargo deadline and scores
+      the cross section visible at the instant. And builds filed after `at` beside the one the
+      day had: each day takes the latest build at or before its own signal instant
+      (`strategy_view._chosen_build`), so a later re-run is never taken in its place.
+    - **Changed.** A build superseded in place -- the replacement carries the same instant, so it
+      *is* taken -- a restated row, a row of an earlier date that arrived late, a return-path
+      decision recorded since (`V2-P6-020`). The recompute then differs, and the record is
+      `UNVERIFIABLE` when `provenance_changes` names what changed, refused otherwise.
+
+    So the later instant ends in a verified record only where `at` would have; otherwise in a
+    refusal or a flagged `UNVERIFIABLE` admission, never a verified one. The forward report's
+    round-14 tests pin the unchanged half,
+    `test_a_label_consuming_days_filing_time_scores_equal_the_advanced_stores`, and the
+    superseded build, `test_a_build_superseded_after_an_older_record_files_marks_it_unverifiable`.
 
     Returns the day, the request it was scored under and that request's `as_of`. Raises what the
-    read at the later instant raises, or -- when there is no later instant -- what the first did.
+    read at the later instant raises, or -- when there is no later instant, or the refusal is of
+    another kind -- what the first did.
     """
     request = request_for(day, at)
     try:
         signal = score_day(store, request, day=day, anchor=anchor, fit_cache=fit_cache)
         return signal, request, at
-    except _READ_REFUSALS:
+    except _READ_REFUSALS as error:
+        if not _not_yet_knowable(error):
+            raise
         readable = readable_instant(store, request, day=day)
         if readable is None or readable <= at:
             raise
@@ -495,6 +523,7 @@ def provenance_changes(
     *,
     request: StrategyRequest,
     cache: RowDigestCache | None = None,
+    read_at: datetime | None = None,
 ) -> tuple[str, ...]:
     """The inputs a record read that the store no longer holds as they were: a partition whose
     rows through the record's day, visible at its signal instant, hash otherwise, or one gone,
@@ -503,10 +532,42 @@ def provenance_changes(
     A partition whose content hash has not moved is not re-read. One that moved only by rows
     dated after the day, or by rows that became visible after its signal instant -- a daily
     append, a late-arriving row with an old date -- is not a change.
+
+    **When the recompute read later than the filing** (`read_at`, fix round 15): a label input
+    (`strategy_view.LABEL_INPUTS`) holding rows dated inside the day's window that became visible
+    between the filing and `read_at` is a change too. The labels are read at the request's
+    `as_of`, not at the signal instant, so those rows -- a return-path decision `upstream_defects`
+    recorded under the confirming build's clock (`V2-P6-020`), a late `adj_factor` row with an
+    old date -- are read by the recompute and could not have been by the record; the digest at
+    the signal instant cannot see them. Factor builds are not asked: a build filed after the
+    record is never the one a day takes (`_score_when_readable`).
     """
     recorded = {(item.dataset, item.year): item for item in provenance.inputs}
-    now = _partition_state(store, request, day=provenance.session, cache=cache, known=recorded)
-    return _changes(recorded, now)
+    day = provenance.session
+    now = _partition_state(store, request, day=day, cache=cache, known=recorded)
+    changed = list(_changes(recorded, now))
+    filed = provenance.recorded_at
+    if read_at is not None and read_at > filed:
+        since = _window_start(request, day)
+        for dataset in input_datasets(request):
+            if dataset not in LABEL_INPUTS:
+                continue
+            for year in _input_years(request, day):
+                digests = {
+                    stored_rows_digest(
+                        store,
+                        dataset,
+                        year=year,
+                        through=day,
+                        since=since,
+                        visible_at=instant,
+                        cache=cache,
+                    )
+                    for instant in (filed, read_at)
+                }
+                if len(digests) > 1:
+                    changed.append(f"{dataset}:{year} (rows of the window recorded after filing)")
+    return tuple(changed)
 
 
 def record_is_bound(
@@ -560,8 +621,9 @@ class RecordCheck:
        record's writer could keep what was stored after it out of the question. When the store
        can no longer be read there -- a label-consuming source's `adj_factor`/`suspend_d` year
        has since gained later rows, and those loaders gate the whole partition -- it is scored at
-       the earliest instant it can be (`readable_instant`), which changes nothing the day's
-       scoring sees (`_score_when_readable`, fix round 14).
+       the earliest instant it can be (`readable_instant`, fix round 14). That instant verifies
+       only what the filing time would have; anything read there that moves the scores ends in a
+       refusal or a flagged `UNVERIFIABLE`, never a verified record (`_score_when_readable`).
     3. Otherwise, if its provenance shows an input corrected after it was filed, it is
        `UNVERIFIABLE`: admitted -- it is an on-time record in the append-only store -- and listed
        in `unverifiable`, never silently. With no correction to point to, it is refused.
@@ -620,6 +682,7 @@ class RecordCheck:
                     self.verified.append(record.record_id)
                     return None
         filed = registered_at(record)
+        at = filed
         try:
             signal, scored, at = _score_when_readable(
                 self._store,
@@ -661,7 +724,9 @@ class RecordCheck:
         changes = (
             ()
             if provenance is None
-            else provenance_changes(self._store, provenance, request=request, cache=self._digests)
+            else provenance_changes(
+                self._store, provenance, request=request, cache=self._digests, read_at=at
+            )
         )
         if changes:
             self.unverifiable.append((record.record_id, changes))

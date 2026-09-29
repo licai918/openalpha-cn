@@ -475,6 +475,7 @@ from openalpha_cn.panel.catalog import (
     PartitionCoverage,
     ReadinessRequirement,
     RevisionCoverage,
+    refusal_type,
 )
 from openalpha_cn.panel.store import EVENT_TIME_COLUMN, ColumnSpec, PanelStore, PartitionRef
 
@@ -2275,7 +2276,7 @@ def load_adjustment_histories(
     for year in requested:
         outcome = assessed.read(year=year, columns=ADJUSTMENT_PANEL_COLUMNS)
         if outcome.is_blocked:
-            raise PanelStorageError(
+            raise refusal_type(issue.code for issue in outcome.readiness.issues)(
                 f"the adjustment factor series cannot be read at {as_of.isoformat()}: "
                 f"{[issue.code for issue in outcome.readiness.issues]}; "
                 f"{'; '.join(issue.detail for issue in outcome.readiness.issues)}"
@@ -3030,7 +3031,7 @@ def _read_visible_price_session(
         )
     gate = store.assess_readiness(requirement)
     if {issue.code for issue in gate.issues} - ROW_FILTERABLE_ISSUE_CODES:
-        raise PanelStorageError(
+        raise refusal_type(issue.code for issue in gate.issues)(
             f"{requirement.dataset} cannot be read at {as_of.isoformat()}: "
             f"{[issue.code for issue in gate.issues]}; "
             f"{'; '.join(issue.detail for issue in gate.issues)}"
@@ -3042,7 +3043,7 @@ def _read_visible_price_session(
         filters={PRICE_DATE_COLUMN: day.isoformat()},
     )
     if outcome.is_blocked:
-        raise PanelStorageError(
+        raise refusal_type(issue.code for issue in outcome.blocking_issues)(
             f"{requirement.dataset} cannot be read at {as_of.isoformat()}: "
             f"{[issue.code for issue in outcome.blocking_issues]}; "
             f"{'; '.join(issue.detail for issue in outcome.blocking_issues)}"
@@ -3166,7 +3167,7 @@ def load_first_daily_bar(
         requirement, year=year, columns=DAILY_PANEL_COLUMNS, filters={SUBJECT_COLUMN_NAME: ts_code}
     )
     if outcome.is_blocked:
-        raise PanelStorageError(
+        raise refusal_type(issue.code for issue in outcome.blocking_issues)(
             f"{DAILY_DATASET} year={year} cannot be read for {ts_code} at {as_of.isoformat()}: "
             f"{[issue.code for issue in outcome.blocking_issues]}; "
             f"{'; '.join(issue.detail for issue in outcome.blocking_issues)}"
@@ -5682,7 +5683,7 @@ def load_index_membership(
             filters={SUBJECT_COLUMN_NAME: index_code},
         )
         if outcome.is_blocked:
-            raise PanelStorageError(
+            raise refusal_type(issue.code for issue in outcome.readiness.issues)(
                 f"{index_code}'s composition cannot be read at {as_of.isoformat()}: "
                 f"{[issue.code for issue in outcome.readiness.issues]}; "
                 f"{'; '.join(issue.detail for issue in outcome.readiness.issues)}"
@@ -5858,7 +5859,7 @@ def load_index_prices(
     for year in requested:
         outcome = assessed.read(year=year, columns=INDEX_DAILY_PANEL_COLUMNS)
         if outcome.is_blocked:
-            raise PanelStorageError(
+            raise refusal_type(issue.code for issue in outcome.readiness.issues)(
                 f"the {INDEX_DAILY_DATASET} panel cannot be read at {as_of.isoformat()}: "
                 f"{[issue.code for issue in outcome.readiness.issues]}; "
                 f"{'; '.join(issue.detail for issue in outcome.readiness.issues)}"
@@ -6088,7 +6089,7 @@ def load_industry_histories(
     for year in requested:
         outcome = assessed.read(year=year, columns=INDUSTRY_MEMBERSHIP_PANEL_COLUMNS)
         if outcome.is_blocked:
-            raise PanelStorageError(
+            raise refusal_type(issue.code for issue in outcome.readiness.issues)(
                 f"the industry classification cannot be read at {as_of.isoformat()}: "
                 f"{[issue.code for issue in outcome.readiness.issues]}; "
                 f"{'; '.join(issue.detail for issue in outcome.readiness.issues)}"
@@ -6518,7 +6519,7 @@ def _read_visible_event_dated_rows(
     """
     gate = store.assess_readiness(requirement)
     if {issue.code for issue in gate.issues} - ROW_FILTERABLE_ISSUE_CODES:
-        raise PanelStorageError(
+        raise refusal_type(issue.code for issue in gate.issues)(
             f"{what} cannot be read at {as_of.isoformat()}: "
             f"{[issue.code for issue in gate.issues]}; "
             f"{'; '.join(issue.detail for issue in gate.issues)}"
@@ -6529,7 +6530,7 @@ def _read_visible_event_dated_rows(
     for year in requirement.years:
         outcome = assessed.read_visible_at(year=year, columns=(EVENT_TIME_COLUMN, *columns))
         if outcome.is_blocked:
-            raise PanelStorageError(
+            raise refusal_type(issue.code for issue in outcome.blocking_issues)(
                 f"{what} cannot be read at {as_of.isoformat()}: "
                 f"{[issue.code for issue in outcome.blocking_issues]}; "
                 f"{'; '.join(issue.detail for issue in outcome.blocking_issues)}"
@@ -6713,7 +6714,7 @@ def load_industry_trees(
     for year in requested:
         outcome = assessed.read(year=year, columns=INDUSTRY_TREE_PANEL_COLUMNS)
         if outcome.is_blocked:
-            raise PanelStorageError(
+            raise refusal_type(issue.code for issue in outcome.readiness.issues)(
                 f"the industry tree cannot be read at {as_of.isoformat()}: "
                 f"{[issue.code for issue in outcome.readiness.issues]}; "
                 f"{'; '.join(issue.detail for issue in outcome.readiness.issues)}"
@@ -6786,11 +6787,13 @@ def stored_rows_digest(
     year: int,
     through: date,
     visible_at: datetime,
+    since: date | None = None,
     date_timezone: str = DEFAULT_DATE_TIMEZONE,
     cache: RowDigestCache | None = None,
 ) -> str | None:
-    """A digest of the stored rows of `(dataset, year)` dated on or before `through` and visible
-    at `visible_at`; `None` when the partition is not stored (`V2-P6-011`'s input provenance).
+    """A digest of the stored rows of `(dataset, year)` dated on or before `through` (and on or
+    after `since`, when given) and visible at `visible_at`; `None` when the partition is not
+    stored (`V2-P6-011`'s input provenance).
 
     What a prediction filed for `through` could have read of this partition at its signal
     instant, fingerprinted so a later verification can tell "the store corrected what the record
@@ -6839,7 +6842,9 @@ def stored_rows_digest(
         if cache is not None:
             cache[key] = rows
     body = "\n".join(
-        digest for day, visible, digest in rows if day <= through and visible <= visible_at
+        digest
+        for day, visible, digest in rows
+        if day <= through and visible <= visible_at and (since is None or day >= since)
     )
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
