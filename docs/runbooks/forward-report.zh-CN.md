@@ -1,14 +1,17 @@
 # 前向跟踪周报（V2-P6-012）运行手册
 
-每周运行一次。它把每日选股命令（`scripts/daily_selection.py`，`V2-P6-011`）已登记的预测记录接到**一本连续的账**上，按登记配置自己的持仓数、调仓间隔、缓冲带、行业上限与成本（含卖出）跑一次 `strategy_view.backtest_strategy`，然后用研究网格给保留期用的同一套统计（`scripts/research/grid.strategy_result`）算逐期净超额与符号翻转检验。
+每周运行一次。它把每日选股命令（`scripts/daily_selection.py`，`V2-P6-011`）实际调仓过的那些交易日接到**一本连续的账**上——调仓日与每天用的记录由追加写入的预测库自己见证（`daily_selection.forward_rebalances`），日志只用来交叉核对，不是权威来源——按登记配置自己的持仓数、调仓间隔、缓冲带、行业上限与成本（含卖出）跑一次 `strategy_view.backtest_strategy`，然后渲染 `daily_selection.forward_summary` 对这份证据的唯一解读。
+
+本报告是 `V2-P6-011` round 9-12 落地的前向证据机制上的一层薄封装：它自己不再判定「哪些日子该进账」「一条晚登记的记录能不能信」「登记后被订正意味着什么」——这些全部来自被复用的函数，本文件不保留第二套判定逻辑。
 
 措辞保持「结果」而非「预期」：这是已经发生、已经可知的收益，不是对未来的承诺。
 
 ## 前提
 
-1. `docs/research/p6-registration.json`（或 `--registration` 指定的文件）已提交，磁盘字节与 `HEAD` 相同；运行的代码（`src/`、`scripts/research/`、`pyproject.toml`、`uv.lock`，以及 `scripts/forward_report.py` 本身）与登记文件的 `code_commit` 一致——校验用的是 `registry.admit_registered_code`，与每日命令绑定 `scripts/daily_selection.py` 的同一个函数，只是把 `scripts/forward_report.py` 换成了 `also_bound` 里的那一个文件。任何一条不满足，退出 1，原因写在标准错误里。
-2. 登记文件自身的 `config_id` 与它的 `config` 字段重新算出来的一致（防止登记文件被人手改过一半）；`settings` 里有整数的 `bootstrap_samples` 与 `random_seed`——这两个数从登记文件读，本报告不另外选。
-3. 每日选股命令已经跑过至少一天：预测库（`<runtime-dir>/predictions`）里有登记的记录。
+1. `docs/research/p6-registration.json`（或 `--registration` 指定的文件）已提交，磁盘字节与 `HEAD` 相同；运行的代码（`src/`、`scripts/research/`、`pyproject.toml`、`uv.lock`）与登记文件的 `code_commit` 一致，`scripts/daily_selection.py` 和 `scripts/forward_report.py` 这两个文件也一并绑定——校验用的是 `registry.admit_registered_code`，与每日命令同一个函数，只是 `also_bound` 里换成了这两个脚本文件（前向报告的正确性和每日命令的正确性一样，都是这次登记的一部分）。任何一条不满足，退出 1，原因写在标准错误里。
+2. 登记文件自身的 `config_id` 与它的 `config` 字段重新算出来的一致（防止登记文件被人手改过一半）；`settings.random_seed`（若存在）从登记文件读,本报告不另外选。
+3. 运行的解释器与已安装的包，和登记文件的 `.python-version`/`uv.lock` 一致（`daily_selection.admit_environment`，每日命令用的同一个检查）。
+4. 每日选股命令已经跑过至少一天，且至少完成过一次调仓：预测库（`<runtime-dir>/predictions`）里有这份登记绑定的记录，日志（`<runtime-dir>` 下每日命令自己的日志目录）里有对应的调仓日。
 
 ## 手动运行
 
@@ -26,18 +29,20 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file "<主检出>/.en
 | `--as-of ISO` | 固定报告的时钟（默认现在） |
 | `--json` | 以 JSON 打印本次报告 |
 
-## 一条记录何时不进这本账，以及为什么从不悄悄丢弃
+## 账本怎么定出来的：起点、每一天、终点
 
-每条登记记录先被判定一次，不能进账的都在报告的 `excluded` 里列出并写明原因：
-
-1. **登记晚于登记截止时刻**（`declares_a_different_horizon_or_model_than_the_registration` 之外的另一条独立规则）：账把一天的分数在下一交易日开盘成交，开盘价由 09:15 起的集合竞价定；一条在那一刻或之后才登记的记录（晚跑、补跑过去的日子）是事后诸葛亮，不论 `PredictionRecord.standing` 对更晚的「结果可知」时刻怎么说。判定函数与每日命令登记时用的是同一个（`strategy_registration.registration_cutoff`）。
-2. **结果还不可知**（`outcome_not_yet_knowable`）：这条记录自己的观测窗口在报告的 `--as-of` 时还没关闭。一条记录可能登记得很及时、但结果还没到——两把尺子量的是两件事。
-3. **不是这份登记的记录**（`declares_a_different_horizon_or_model_than_the_registration`）：预测库若被另一份登记共用，声明着别的 `feature_version`/家族/周期的记录不算这份登记的证据。
+- **哪些日子调仓、每天用哪条记录**：`daily_selection.forward_rebalances` 从预测库的第一条被这份登记绑定的、准时的记录开始往后数——不是日志说了算,也不是这份登记第一次被信号覆盖的那天。日志只用来交叉核对；日志与库不一致时,报告直接拒绝（`ForwardReportError`）,不会悄悄选一边。
+- **一条晚于信号时刻才登记的记录能不能读**：`daily_selection.forward_record_check`（`strategy_registration.RecordCheck`),作为 `backtest_strategy(verify_late=...)` 传入——先看它是否绑定这份登记（`record_is_bound`：组合模型比对声明本身；走前向模型比对它自己写的输入溯源),再在它自己登记的那一刻从已存的构建重新算一遍分数。算出来一样就正常计入;算出来不一样、但它读过的某个输入后来被订正过,记作 `unverifiable_inputs_corrected_after_filing`——照样计入账本（推荐了就是推荐了）,只是在汇总里单独标出、单独统计;算出来不一样又没有输入被订正的解释,直接拒绝整份报告。
+- **账本的终点**：最新一次调仓那条记录的 `book_period_end`（登记的调仓间隔,下一交易日起才算收益、再往后数一个调仓周期),再取面板已发布的最新交易日与它的较小值——面板还没发布到的日子不会出现在账本里。
 
 ## 输出怎么读
 
-- **periods**：连续账本自己的逐期结果——起止交易日、净收益、成本、毛收益、换手、当期是否成交、持仓。这些数字全部来自 `run_strategy_backtest`（`V2-P6-007`），本报告不重算，也不拆成互相独立的单笔交易。
-- **excluded**：被排除的记录，逐条给出原因与判定时用的具体时刻。
-- **statistics**：按 `000905.SH` 与全 A 等权两个基准分别给出：累计净超额（逐期净超额的直接相加——账本连续复利，逐期收益已经把复利算过一次，相加不会重复计息）、符号翻转检验的双边 p 值与单边换算（均值为正取 `p/2`，为负取 `1-p/2`）、样本是穷举还是抽样、以及穷举的模式数或抽样的随机种子。
+`forward_report_view`/`summary_lines` 渲染的就是 `daily_selection.forward_summary` 自己的字段,本文件不重新计算、也不改名:
+
+- **`unverifiable_inputs_corrected_after_filing`**：`count` 与逐条 `record_id`/`corrected`（它读过的、后来被订正的分区名)。这些记录仍然算在账本里,这里只是标出来。
+- **`statistics.all_periods`**：账本每一期都算在内的统计——期数、复利算出的 `compounded_net_return`（`∏(1+net_return_i) - 1`,不是逐期相加)、`mean_period_net_return`、按基准复利的 `compounded_benchmark_returns`。这是报告的头条数字。
+- **`statistics.excluding_unverifiable`**：同一本账,去掉被标记记录开的那些期——同一条路径的子集,不是重新跑一遍（后面几期仍然沿用它们实际发生时的持仓与成本）,用来看订正是否真的影响了结论。
+- **`unprovable_holds`**：第一条记录之前、日志说「空仓」的那些日子——没有记录,无法从库里证明,只是列出来,不计入统计。
+- **`integrity`**：固定的威胁模型说明（`daily_selection.INTEGRITY`）——这些检查防的是正常运行下的误差、程序缺陷、意外损坏与上游数据订正,不防有权限直接改本地磁盘的人蓄意篡改;那需要外部的、仅可追加的见证,这份报告没有。
 
 报告同时写入 `<runtime-dir>/reports/forward-<报告日期>.json`。

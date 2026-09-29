@@ -1,96 +1,54 @@
-"""`scripts/forward_report.py`: the weekly forward-tracking report (`V2-P6-012`), fix round 1.
+"""`scripts/forward_report.py`: the weekly forward-tracking report (`V2-P6-012`), fix round 2.
 
-Fix round 1 replaces the first design, which priced each registered prediction as an isolated,
-fresh-capital, buy-only trade and summed overlapping per-prediction returns. This module now
-chains every admitted record into **one continuous book** -- the registered configuration's own
-portfolio rules, sell side included -- and reduces its own non-overlapping periods with
-`scripts.research.grid.strategy_result`, the same reduction the research grid gives the holdout.
+Fix round 2 rebuilds the report on the forward-evidence machinery `V2-P6-011` rounds 9-12 landed
+after round 1 was written: which sessions the command actually rebalanced on is witnessed by the
+append-only prediction store (`daily_selection.forward_rebalances`), a record filed after its
+signal instant is admitted only when it recomputes from the stored builds at its own filing time
+or an input it read was corrected since (`daily_selection.forward_record_check`), and what the
+evidence means is `daily_selection.forward_summary`'s own reduction -- the headline book, the
+same book's statistics excluding unverifiable periods, the unprovable holds, and the threat model.
+This module is now a thin layer over that: it admits the registration (binding this file and
+`scripts/daily_selection.py`), asks for the schedule and the check, prices the continuous book on
+exactly the witnessed days, and renders `forward_summary` unmodified.
 
-## The hand-computed ledger
+## Why the fixture changed from round 1
 
-Three composite records are registered on `write_strategy_corpus`'s real panel (2026-01-05 through
-2026-01-16, `600000.SH` base close 12.0 rising 0.5/session -- `close(i, j) = 10 + i + 0.5j` for
-security index `i` and session index `j`; see `tests/panel_fixtures.py`). The registered
-configuration: `holding_count=2`, `rebalance_every_sessions=3`, `position_capital=50000`
-(comfortably under the 1% participation cap of 100,000 on a flat 10,000,000-yuan turnover, so no
-sale is ever capped), anchored at session 0 (2026-01-05). Signal days 0, 3 and 6 give three
-complete 3-session periods spanning the whole panel (2026-01-05 .. 2026-01-16); day 0 ranks
-`600000.SH` and `600519.SH` top two, day 3 ranks `600000.SH` and `300750.SZ` top two (a sell), day
-6 repeats day 3's ranking (no trade, a pure mark-to-market period).
+Round 1's fixture hand-built each day's `SignalDay` with chosen scores, bypassing the real
+`reversal_1d/v1` factor panel entirely -- correct for round 1's own `run_strategy_backtest` call,
+but incompatible with this round's `RecordCheck`, which **recomputes** a late-filed record's
+scores from the stored factor builds (`strategy_view.score_day`) and refuses it if they no longer
+match. A hand-built `SignalDay` has no factor panel behind it, so recomputation always finds "no
+cross section" and every record is refused. This round's fixture therefore scores every day for
+real, through `score_day` over `write_strategy_corpus`'s own `reversal_1d/v1` build -- exactly
+`test_a_backtest_reading_the_registered_records_trades_as_the_configuration_would`'s own path
+(`tests/unit/scripts/test_daily_selection.py`), reused via `test_daily_selection._register_days`
+rather than re-derived, with the input provenance it already writes.
 
-**Period 1** (signal 01-05, entry 01-06, exit 01-08). Both buys at the entry session's open:
+## What is hand-verified, and what is reused
 
-- `600000.SH` @ 12.5 (`close(2, 1)`): target `min(position_capital, cash, cap) = 50000`;
-  `floor(50000 / (12.5*100)) = 40` lots (4000 shares) costs `50000.00` before fees, over budget,
-  so the sizer steps down one lot to **3900 shares**: notional `48750.00`, commission
-  `max(48750*0.00025, 5) = 12.1875` -> `12.19`, slippage `48750*0.001 = 48.75`, fees `60.94`,
-  `48750.00 + 60.94 = 48810.94 <= 50000` accepted.
-- `600519.SH` @ 13.5 (`close(3, 1)`): 37 lots (3700 shares, notional `49950.00`) plus fees
-  (`12.49 + 49.95 = 62.44`) totals `50012.44 > 50000`, so the sizer steps down to **3600 shares**:
-  notional `48600.00`, commission `12.15` (exact), slippage `48.60`, fees `60.75`,
-  `48600.00 + 60.75 = 48660.75 <= 50000` accepted.
-- `start_value = 100000.00` (an empty two-slot book, `position_capital * holding_count`);
-  `cash_after_buys = 100000.00 - 48810.94 - 48660.75 = 2528.31`.
-- Marked at the exit session's close: `600000.SH` @ 13.5 (`close(2, 3)`), `600519.SH` @ 14.5
-  (`close(3, 3)`). `end_value = 2528.31 + 3900*13.5 + 3600*14.5 = 2528.31 + 52650.00 + 52200.00 =
-  107378.31`.
-- `net_return = (107378.31 - 100000.00) / 100000.00 = 0.0737831000`;
-  `cost = (60.94 + 60.75) / 100000.00 = 0.0012169000`; `gross_return = 0.0750000000` (matches the
-  raw price gain: `3900*(13.5-12.5) + 3600*(14.5-13.5) = 7500.00`, `7500.00/100000.00 = 0.075`).
+The book's own pricing (fills, fees, marks) is `V2-P6-007`'s, already proven correct by its own
+suite; re-deriving it a second time here would not test this module. What this module adds is:
+turning the store's witnessed schedule into a `prediction_ids` request on `rebalance_days`, and
+`daily_selection.forward_summary`'s **compounding** of the resulting periods. So the test:
 
-**Period 2** (signal 01-08, entry 01-09, exit 01-13): sell all of `600519.SH`, keep `600000.SH`,
-buy `300750.SZ`.
-
-- Sell `600519.SH`, 3600 shares @ 15.0 (`close(3, 4)`; `3600*15.0 = 54000.00 <=` the 100,000
-  participation cap, so the whole position is a legal sale): notional `54000.00`, commission
-  `13.95`, stamp duty `54000*0.0005 = 27.00`, slippage `54.00`, fees `94.50`; proceeds `54000.00`
-  (adjustment factors are all 1). `cash = 2528.31 + 54000.00 - 94.50 = 56433.81`.
-- Buy `300750.SZ` @ 16.0 (`close(4, 4)`): budget `min(50000, 56433.81) = 50000`; 31 lots (3100
-  shares, notional `49600.00`), commission `12.40`, slippage `49.60`, fees `62.00`,
-  `49600.00 + 62.00 = 49662.00 <= 50000` accepted. `cash = 56433.81 - 49662.00 = 6771.81`.
-- Marked at exit: `600000.SH` @ 15.0 (`close(2, 6)`), `300750.SZ` @ 17.0 (`close(4, 6)`).
-  `end_value = 6771.81 + 3900*15.0 + 3100*17.0 = 6771.81 + 58500.00 + 52700.00 = 117971.81`.
-- `start_value = 107378.31` (the continuous book: period 2 starts where period 1 ended).
-  `net_return = (117971.81-107378.31)/107378.31 = 0.0986558645`;
-  `cost = (94.50+62.00)/107378.31 = 0.0014574638`; `gross_return = 0.1001133283`.
-
-**Period 3** (signal 01-13, entry 01-14, exit 01-16): the same two names, ranked the same way --
-no trade, pure mark-to-market.
-
-- Marked at exit: `600000.SH` @ 16.5 (`close(2, 9)`), `300750.SZ` @ 18.5 (`close(4, 9)`).
-  `end_value = 6771.81 + 3900*16.5 + 3100*18.5 = 6771.81 + 64350.00 + 57350.00 = 128471.81`.
-  `start_value = 117971.81`. `net_return = 10500.00/117971.81 = 0.0890043138`; `cost = 0` (no
-  fills); `gross_return = net_return`.
-
-**The statistics** (`grid.strategy_result`, unchanged, called once per benchmark). Net excess is
-`net_return` less the period's own benchmark return (`period.benchmark_returns`, real
-`000905.SH`/`equal_weight_all_a` series this panel's real index levels and bars give -- not
-restated here, only read back and checked against the per-period arithmetic above):
-
-- vs `000905.SH` (benchmark returns `0.0100000000, 0.0198019802, 0.0097087379`): excess
-  `0.0637831000, 0.0788538843, 0.0792955759`, all positive. Cumulative (the plain sum):
-  `0.2219325602`. `sign_flip_test` at n=3 (8 patterns): only the observed all-positive pattern and
-  its exact negation reach the observed magnitude, so `p = 2/8 = 0.25`; the mean is positive, so
-  the one-sided conversion gives `p/2 = 0.125`.
-- vs `equal_weight_all_a` (benchmark returns `0.1143643240, 0.1034401052, 0.0926714448`): excess
-  `-0.0405812240, -0.0047842407, -0.0036671310`, all negative. Cumulative `-0.0490325957`. The
-  same two-pattern argument gives `p = 0.25`; the mean is negative, so the one-sided conversion
-  gives `1 - p/2 = 0.875`.
-
-This arithmetic was cross-checked with `Decimal` in a scratch script
-(`scratchpad/task14forward/verify_continuous.py`) and against an independent driver that ran the
-real `strategy_view.backtest_strategy` before this test was written.
+1. Prices the registered records both ways -- through `forward_report()` and directly through
+   `backtest_strategy` of the *configuration itself* (no predictions) -- and asserts every period's
+   fills, holdings and returns are identical, the same equivalence
+   `test_a_backtest_reading_the_registered_records_trades_as_the_configuration_would` proves.
+2. Reads the resulting `net_return` off the real (already-equal) periods and independently
+   recomputes `forward_summary`'s `compounded_net_return = prod(1 + net_return_i) - 1` in `Decimal`
+   in this file's own assertion -- the one piece of arithmetic this module's reuse map adds beyond
+   what `V2-P6-007`/`V2-P6-011` already prove.
 """
 
 from __future__ import annotations
 
-import hashlib
+import dataclasses
 import importlib
-import itertools
+import json
 import os
 import subprocess
 import sys
-from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -100,16 +58,15 @@ from typing import Any, Final
 import pytest
 from strategy_fixtures import READ_AT, write_strategy_corpus
 
-from openalpha_cn.backtest.strategy_backtest import EQUAL_WEIGHT_ALL_A, SignalDayScores
+from openalpha_cn import strategy_registration
 from openalpha_cn.panel.store import PanelStore
-from openalpha_cn.panel_ingest import session_publication_instant
 from openalpha_cn.storage.predictions import FilePredictionStore
 from openalpha_cn.strategy_registration import (
     RegisteredConfiguration,
-    registration_cutoff,
+    input_provenance,
     signal_day_batch,
 )
-from openalpha_cn.strategy_view import SHANGHAI, SignalDay, strategy_request
+from openalpha_cn.strategy_view import backtest_strategy, score_day, strategy_request
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[3]
 SCRIPTS: Final[Path] = ROOT / "scripts"
@@ -127,37 +84,24 @@ daily = _module(SCRIPTS, "daily_selection")
 grid = _module(RESEARCH, "grid")
 registry = _module(RESEARCH, "registry")
 
-BENCHMARK_905: Final[str] = "000905.SH"
-EXCHANGE: Final[str] = "SZSE"
-WINNER: Final[str] = "600000.SH"
-SECOND: Final[str] = "600519.SH"
-THIRD: Final[str] = "300750.SZ"
-UNIVERSE: Final[tuple[str, ...]] = (
-    "000001.SZ",
-    "000002.SZ",
-    "600000.SH",
-    "600519.SH",
-    "300750.SZ",
-    "688981.SH",
-    "002415.SZ",
-    "601318.SH",
+# `test_daily_selection.py`'s own fixtures, reused rather than re-derived: sibling test modules
+# import each other's helpers in this tree (`research_repo.py`'s own precedent).
+import test_daily_selection as tds  # noqa: E402
+
+RUNNING_PYTHON: Final[str] = f"{sys.version_info.major}.{sys.version_info.minor}"
+BOUND: Final[tuple[str, ...]] = (
+    "src/openalpha_cn/strategy.py",
+    "scripts/research/grid.py",
+    "pyproject.toml",
+    "uv.lock",
+    "scripts/daily_selection.py",
+    "scripts/forward_report.py",
 )
-
-CONFIG_BASE: Final[dict[str, Any]] = {
-    "components": (("reversal_1d/v1", "raw", Decimal("1")),),
-    "combine": "zscore_sum",
-    "transform": None,
-    "neutralization": None,
-    "exchange": EXCHANGE,
-    "rebalance_every_sessions": 3,
-    "holding_count": 2,
-    "buffer_rank": None,
-    "max_industry_weight": None,
-    "position_capital": Decimal("50000"),
-}
-
-
-# --- a throwaway git repository, the registry's own hermetic pattern -----------------------------
+"""Every path this report's admission binds: `registry.REGISTERED_PATHS`' directories (one file
+each), `scripts/daily_selection.py` and `scripts/forward_report.py` -- the fix-round point that
+this report's own file must be bound exactly as the daily command's is."""
+CLOCK0: Final[datetime] = datetime(2026, 9, 26, 8, 0, tzinfo=UTC)
+CRITERIA: Final[dict[str, object]] = {"annualized_net_excess_above": "0"}
 
 
 def _git(repo: Path, *args: str, at: datetime | None = None) -> str:
@@ -186,38 +130,30 @@ def _commit_file(repo: Path, path: Path, message: str, *, at: datetime) -> None:
     _git(repo, "commit", "-q", "-m", message, at=at)
 
 
-BOUND_FILE: Final[str] = "src/openalpha_cn/strategy.py"
-CLOCK0: Final[datetime] = datetime(2026, 9, 26, 8, 0, tzinfo=UTC)
+def _head(repo_path: Path) -> str:
+    return _git(repo_path, "rev-parse", "HEAD").strip()
 
 
 @pytest.fixture
 def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A throwaway repository with one file under each bound pathspec, `scripts/forward_report.py`
-    included -- the fix round's own point: this file must be as bound as `scripts/daily_selection
-    .py` is. `registry._imported_package`/`_imported_scripts` are patched at this fixture's own
-    `src`/`scripts/research`, the real import stays this checkout's."""
+    """A throwaway repository with one file under each bound pathspec -- `scripts
+    /forward_report.py` and `scripts/daily_selection.py` both included -- a real
+    `.python-version` and `uv.lock` (`daily_selection.admit_environment`, reused rather than
+    skipped), and the environment `installed_distributions` reports patched to match it exactly.
+    """
     root = (tmp_path / "repo").resolve()
     root.mkdir()
     _git(root, "init", "-q", "--template=")
-    for relative in (
-        BOUND_FILE,
-        "scripts/research/grid.py",
-        "scripts/forward_report.py",
-        "pyproject.toml",
-        "uv.lock",
-    ):
+    for relative in BOUND:
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("# fixture\n", encoding="utf-8")
-    _commit_file(root, root / BOUND_FILE, "seed", at=CLOCK0)
-    for relative in (
-        "scripts/research/grid.py",
-        "scripts/forward_report.py",
-        "pyproject.toml",
-        "uv.lock",
-    ):
+        path.write_text(tds.LOCK if relative == "uv.lock" else "# fixture\n", encoding="utf-8")
+    (root / ".python-version").write_text(f"{RUNNING_PYTHON}\n", encoding="utf-8")
+    (root / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+    _git(root, "add", ".python-version", ".gitignore")
+    for relative in BOUND:
         _git(root, "add", relative)
-    _git(root, "commit", "-q", "-m", "seed the rest", at=CLOCK0 + timedelta(seconds=1))
+    _git(root, "commit", "-q", "-m", "seed", at=CLOCK0)
     monkeypatch.setattr(
         registry, "_imported_package", lambda: root / "src" / "openalpha_cn" / "__init__.py"
     )
@@ -229,358 +165,465 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             root / "scripts" / "research" / "registry.py",
         ),
     )
+    monkeypatch.setattr(daily, "installed_distributions", lambda: dict(tds.LOCKED))
     return root
 
 
-def _head(repo_path: Path) -> str:
-    return _git(repo_path, "rev-parse", "HEAD").strip()
-
-
-def register_config(
-    repo_path: Path, config: dict[str, Any], *, settings: dict[str, Any] | None = None
-) -> Path:
-    """Write and commit a standing-forward registration in `repo_path`, the same shape the
-    holdout's own registration carries (`registry.register`, unchanged)."""
+def register_config(repo_path: Path, config: dict[str, Any]) -> Path:
     commit = _head(repo_path)
     path = repo_path / "docs" / "research" / "p6-registration.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    registry.register(
-        config,
-        forward_report.STANDING_FORWARD_CRITERIA,
-        path,
-        code_commit=commit,
-        settings=grid.protocol_settings() if settings is None else settings,
-    )
-    _commit_file(repo_path, path, "register", at=CLOCK0 + timedelta(seconds=2))
+    registry.register(config, CRITERIA, path, code_commit=commit, settings=grid.protocol_settings())
+    _commit_file(repo_path, path, "register", at=CLOCK0 + timedelta(seconds=1))
     return path
-
-
-# --- registered records, built through strategy_registration.signal_day_batch --------------------
-
-
-def _request_for(config: dict[str, Any], *, probe_day: date) -> Any:
-    """A `StrategyRequest` carrying `config`'s source and spec, for `signal_day_batch` alone --
-    it reads only `.source` and `.spec.rebalance_every_sessions`, never `.start`/`.end`, so these
-    two dates need only satisfy `strategy_request`'s own ordering, not name real sessions."""
-    arguments = {
-        key: value
-        for key, value in config.items()
-        if key not in {"start", "end", "as_of", "position_capital"}
-    }
-    end = probe_day + timedelta(days=1)
-    return strategy_request(
-        **arguments,
-        position_capital=config.get("position_capital", Decimal("100000")),
-        start=probe_day,
-        end=end,
-        as_of=session_publication_instant(end) + timedelta(hours=1),
-    )
-
-
-def _signal_day(day: date, ranked: Sequence[str]) -> SignalDay:
-    """A hand-built `SignalDay` ranking `ranked` top to bottom -- no real factor panel needed,
-    `strategy_registration.signal_day_batch` only reads `signal.scores` and the two knowability
-    fields."""
-    scores = {name: float(len(ranked) - index) for index, name in enumerate(ranked)}
-    instant = session_publication_instant(day)
-    return SignalDay(
-        day=day,
-        instant=instant,
-        anchor=day,
-        position=0,
-        scores=SignalDayScores(
-            day=day,
-            ranked=tuple(ranked),
-            scores=scores,
-            incomplete=(),
-            weights={"reversal_1d/v1@raw": 1.0},
-            ic_weights=(),
-            model_fit=None,
-        ),
-        fit=None,
-        model_batch=None,
-        knowable_through=instant,
-        values_consumed=len(ranked),
-        industries={},
-        refit_day=None,
-    )
-
-
-def registered_batch(
-    config: dict[str, Any], registered: RegisteredConfiguration, *, day: date, ranked: Sequence[str]
-) -> Any:
-    """One day's composite `PredictionBatch`, exactly as the daily command would register it: the
-    book trades a session's scores at its own signal instant, so `predicted_at` is exactly that
-    instant (`test_a_backtest_reading_the_registered_records_trades_as_the_configuration_would`'s
-    own arrangement -- any later instant is look-ahead the book itself refuses)."""
-    request = _request_for(config, probe_day=day)
-    signal = _signal_day(day, ranked)
-    return signal_day_batch(signal, request, registered, predicted_at=signal.instant)
-
-
-def register_prediction(root: Path, batch: Any, *, calendar: Any, recorded_at: datetime) -> Any:
-    store = FilePredictionStore(root / "predictions", clock=lambda: recorded_at)
-    return store.put(batch=batch, calendar=calendar, zone=SHANGHAI).record
 
 
 def prediction_store(root: Path, *, clock_at: datetime) -> FilePredictionStore:
     return FilePredictionStore(root / "predictions", clock=lambda: clock_at)
 
 
-# --- the main fixture: three signal days, two rebalances, a sell ---------------------------------
+def register_days(
+    root: Path,
+    request_for: Any,
+    days: Any,
+    anchor: date,
+    *,
+    registered: RegisteredConfiguration,
+) -> list[str]:
+    """`test_daily_selection._register_days`'s own body, parameterized on `registered`: that
+    helper hardcodes its own module's placeholder `REGISTERED` constant (a fixed, unrelated
+    `RegisteredConfiguration`), which cannot be reused here -- this report's records must be
+    bound to the *real* admitted registration `forward_rebalances`/`forward_record_check` check
+    them against. Every underlying primitive (`score_day`, `signal_day_batch`, `input_provenance`,
+    `daily.write_provenance`, `daily.register_prediction`) is reused unchanged; only the constant
+    `_register_days` closes over is made a parameter."""
+    store = PanelStore(root / "panel")
+    identifiers: list[str] = []
+    for day in days:
+        request = request_for(day)
+        signal = score_day(store, request, day=day, anchor=anchor)
+        calendar = daily._outcome_calendar(store, request.exchange, day, request.as_of)
+        filed = tds._after_the_close(day, calendar.next_trading_day(day))
+        batch = signal_day_batch(signal, request, registered, predicted_at=filed)
+        assert batch is not None
+        daily.write_provenance(
+            root,
+            input_provenance(store, request, registered, day=day, batch=batch, recorded_at=filed),
+        )
+        record, outcome = daily.register_prediction(
+            root, batch, calendar=calendar, clock=lambda filed=filed: filed
+        )
+        assert (outcome, record.standing) == ("created", "forward")
+        identifiers.append(record.record_id)
+    return identifiers
 
-AS_OF: Final[datetime] = datetime(2026, 1, 19, 8, 0, tzinfo=UTC)
-"""After every one of the three records' own (conservative) outcome deadlines -- the third
-record's, 2026-01-19T07:00Z, is the latest -- while the book itself only ever reads through
-2026-01-16, the panel's real last session."""
+
+def write_journal_day(
+    tmp_path: Path,
+    admitted: Any,
+    *,
+    session: date,
+    as_of: datetime,
+    decision: str,
+    reason: str,
+    held: bool,
+    record_id: str | None,
+    weights: dict[str, str] | None = None,
+) -> None:
+    """One session's journal, the shape `journalled_days` reads (`daily_selection
+    .DAILY_SELECTION_SCHEMA`), hand-built rather than run through the full command: the fields
+    `journalled_days`/`Schedule` read are the session, `as_of`, the decision and its reason, the
+    held flag and the record."""
+    path = daily.journal_directory(tmp_path, admitted) / f"{session.isoformat()}.json"
+    daily.write_journal(
+        path,
+        {
+            "schema": daily.DAILY_SELECTION_SCHEMA,
+            "result": {
+                "session": session.isoformat(),
+                "as_of": as_of.isoformat(),
+                "targets": {
+                    "decision": decision,
+                    "reason": reason,
+                    "weights": weights or {},
+                    "previous_session": None,
+                },
+                "candidates": {"held": held, "ranked_count": 0, "candidates": []},
+                "prediction": {"registered": record_id is not None, "record_id": record_id},
+            },
+        },
+    )
 
 
-def build_main_fixture(
+def build_static_fixture(
     tmp_path: Path, repo_path: Path
-) -> tuple[Path, Path, RegisteredConfiguration, tuple[date, ...]]:
-    """The panel, the registration and the three registered records for the hand-computed ledger.
+) -> tuple[Path, Any, tuple[date, ...], tuple[date, ...]]:
+    """`STATIC` (`rebalance_every_sessions=3`) on `write_strategy_corpus`'s panel, registered
+    through `test_daily_selection._register_days` -- real `score_day` scoring, filed at 18:30
+    (`test_daily_selection._after_the_close`), with the input provenance the daily command writes
+    -- at signal days 1, 4 and 7, each journalled as a rebalance.
 
-    Returns `(panel_root, registration_path, registered, sessions)`.
+    Returns `(panel_root, admitted_registration, sessions, signal_days)`.
     """
     panel = write_strategy_corpus(tmp_path)
     sessions = panel.sessions
-    config = dict(CONFIG_BASE, start=sessions[0])
+    configured = tds._base(**tds.STATIC)
+    anchor = sessions[1]
+    config = dict(configured, start=anchor)
     registration_path = register_config(repo_path, config)
-    registered = RegisteredConfiguration(
-        config_id=grid.config_id(config),
-        registration_sha256=hashlib.sha256(registration_path.read_bytes()).hexdigest(),
-        code_commit=_head(repo_path),
-        seed=int(grid.protocol_settings()["random_seed"]),
+    admitted = daily.admit_registration(registration_path, repo_path)
+
+    step = configured["rebalance_every_sessions"]
+    signal_days = tuple(sessions[index] for index in range(1, len(sessions) - 1, step))
+
+    def request_for(day: date) -> Any:
+        return strategy_request(
+            **configured, start=day - timedelta(days=1), end=day, as_of=tds._read_at(day)
+        )
+
+    identifiers = register_days(
+        tmp_path, request_for, list(signal_days), anchor, registered=admitted.declared
     )
-
-    plan = (
-        (
-            sessions[0],
-            (WINNER, SECOND, *[name for name in UNIVERSE if name not in (WINNER, SECOND)]),
-        ),
-        (sessions[3], (WINNER, THIRD, *[name for name in UNIVERSE if name not in (WINNER, THIRD)])),
-        (sessions[6], (WINNER, THIRD, *[name for name in UNIVERSE if name not in (WINNER, THIRD)])),
-    )
-    store = PanelStore(tmp_path / "panel")
-    for day, ranked in plan:
-        batch = registered_batch(config, registered, day=day, ranked=ranked)
-        calendar = daily._outcome_calendar(store, EXCHANGE, day, AS_OF)
-        register_prediction(tmp_path, batch, calendar=calendar, recorded_at=batch.as_of)
-    return tmp_path, registration_path, registered, sessions
+    for day, record_id in zip(signal_days, identifiers, strict=True):
+        write_journal_day(
+            tmp_path,
+            admitted,
+            session=day,
+            as_of=tds._evening(day),
+            decision="rebalanced",
+            reason="scheduled",
+            held=False,
+            record_id=record_id,
+        )
+    return tmp_path, admitted, sessions, signal_days
 
 
-# --- Step 1: the hand-computed continuous book ----------------------------------------------------
+# --- the book's end, at the exact boundary against its start ------------------------------------
 
 
-def test_the_continuous_books_periods_and_statistics_match_hand_computation(
+def test_a_brand_new_registrations_first_record_with_nothing_yet_published_beyond_it_is_refused(
     tmp_path: Path, repo: Path
 ) -> None:
-    panel_root, registration_path, registered, sessions = build_main_fixture(tmp_path, repo)
-    store = PanelStore(panel_root / "panel")
-    store_predictions = prediction_store(panel_root, clock_at=AS_OF)
-
-    result = forward_report.forward_report(
-        store, store_predictions, registration=registration_path, repo=repo, as_of=AS_OF
-    )
-
-    assert result.excluded == ()
-    periods = result.backtest.periods
-    assert [period.start for period in periods] == [sessions[0], sessions[3], sessions[6]]
-    assert [period.end for period in periods] == [sessions[3], sessions[6], sessions[9]]
-
-    expected = [
-        (Decimal("0.0737831000"), Decimal("0.0012169000"), ("600000.SH", "600519.SH")),
-        (Decimal("0.0986558645"), Decimal("0.0014574638"), ("300750.SZ", "600000.SH")),
-        (Decimal("0.0890043138"), Decimal("0"), ("300750.SZ", "600000.SH")),
-    ]
-    for period, (net, cost, holdings) in zip(periods, expected, strict=True):
-        assert period.net_return == net
-        assert period.cost == cost
-        assert period.gross_return == net + cost
-        assert period.holdings == holdings
-
-    assert [len(period.fills) for period in periods] == [2, 2, 0]
-    assert periods[1].fills[0].side == "sell" and periods[1].fills[0].subject == SECOND
-    assert periods[1].fills[1].side == "buy" and periods[1].fills[1].subject == THIRD
-
-    stat_905 = result.statistics[BENCHMARK_905]
-    stat_ew = result.statistics[EQUAL_WEIGHT_ALL_A]
-    assert stat_905.cumulative_net_excess == Decimal("0.2219325602")
-    assert stat_905.p_value == pytest.approx(0.25)
-    assert stat_905.p_value_one_sided == pytest.approx(0.125)
-    assert stat_905.exact is True
-    assert stat_905.sign_patterns == 8
-    assert stat_ew.cumulative_net_excess == Decimal("-0.0490325957")
-    assert stat_ew.p_value == pytest.approx(0.25)
-    assert stat_ew.p_value_one_sided == pytest.approx(0.875)
-
-    assert result.config_id == registered.config_id
-
-
-# --- Step 2: overlapping periods -- consecutive daily registrations ------------------------------
-
-
-def test_consecutive_daily_registrations_give_the_continuous_books_own_non_overlapping_periods(
-    tmp_path: Path, repo: Path
-) -> None:
-    """Four consecutive signal days, `rebalance_every_sessions=1`: the same two names held
-    throughout (no trade past day 0), so this isolates the *period* mechanics fix-round point 2
-    asks for, rather than re-deriving a second fee ledger. Every period's end is the next one's
-    start -- share no session -- and the statistics see all of them, not a re-summed subset of
-    independently priced predictions the way the first design did."""
+    """The book's end is `min(book_period_end(newest_record), newest_published_session)`. When
+    the only witnessed rebalance is also the newest session the panel has published -- a report
+    run the same evening a brand-new registration files its very first record, before any later
+    session exists to hold a period open to -- that end equals `schedule.first_record` itself:
+    there is no session after the first rebalance to trade a period on, and the report must
+    refuse rather than ask `backtest_strategy` for a zero-width window. This is the exact
+    boundary of `end <= schedule.first_record`, not only the case where `end` falls short of it."""
     panel = write_strategy_corpus(tmp_path)
     sessions = panel.sessions
-    config = dict(CONFIG_BASE, rebalance_every_sessions=1, start=sessions[0])
+    configured = tds._base(**tds.STATIC)
+    anchor = sessions[-1]
+    config = dict(configured, start=anchor)
     registration_path = register_config(repo, config)
-    registered = RegisteredConfiguration(
-        config_id=grid.config_id(config),
-        registration_sha256="0" * 64,
-        code_commit=_head(repo),
-        seed=int(grid.protocol_settings()["random_seed"]),
+    admitted = daily.admit_registration(registration_path, repo)
+
+    def request_for(day: date) -> Any:
+        return strategy_request(
+            **configured, start=day - timedelta(days=1), end=day, as_of=tds._read_at(day)
+        )
+
+    identifiers = register_days(
+        tmp_path, request_for, [anchor], anchor, registered=admitted.declared
     )
+    write_journal_day(
+        tmp_path,
+        admitted,
+        session=anchor,
+        as_of=tds._evening(anchor),
+        decision="rebalanced",
+        reason="scheduled",
+        held=False,
+        record_id=identifiers[0],
+    )
+
     store = PanelStore(tmp_path / "panel")
-    ranked = (WINNER, SECOND, *[name for name in UNIVERSE if name not in (WINNER, SECOND)])
-    as_of = READ_AT
-    for day in sessions[:4]:
-        batch = registered_batch(config, registered, day=day, ranked=ranked)
-        calendar = daily._outcome_calendar(store, EXCHANGE, day, as_of)
-        register_prediction(tmp_path, batch, calendar=calendar, recorded_at=batch.as_of)
-
-    store_predictions = prediction_store(tmp_path, clock_at=as_of)
-    result = forward_report.forward_report(
-        store, store_predictions, registration=registration_path, repo=repo, as_of=as_of
-    )
-
-    periods = result.backtest.periods
-    assert len(periods) == 4
-    for earlier, later in itertools.pairwise(periods):
-        assert earlier.end == later.start
-    assert len({period.start for period in periods} | {period.end for period in periods}) == 5
-    for _name, stat in result.statistics.items():
-        assert stat.result["period_count"] == 4
-        assert stat.result["excluded_incomplete_periods"] == 0
-
-
-# --- exclusions: never silent --------------------------------------------------------------------
-
-
-def test_a_record_registered_at_or_after_its_cutoff_is_excluded_and_listed(
-    tmp_path: Path, repo: Path
-) -> None:
-    panel = write_strategy_corpus(tmp_path)
-    sessions = panel.sessions
-    config = dict(CONFIG_BASE, start=sessions[0])
-    registration_path = register_config(repo, config)
-    registered = RegisteredConfiguration(
-        config_id=grid.config_id(config),
-        registration_sha256="0" * 64,
-        code_commit=_head(repo),
-        seed=int(grid.protocol_settings()["random_seed"]),
-    )
-    store = PanelStore(tmp_path / "panel")
-    day = sessions[0]
-    ranked = (WINNER, SECOND, *[n for n in UNIVERSE if n not in (WINNER, SECOND)])
-    batch = registered_batch(config, registered, day=day, ranked=ranked)
-    calendar = daily._outcome_calendar(store, EXCHANGE, day, READ_AT)
-    late = registration_cutoff(calendar, day) + timedelta(minutes=1)
-    register_prediction(tmp_path, batch, calendar=calendar, recorded_at=late)
-
     store_predictions = prediction_store(tmp_path, clock_at=READ_AT)
-    with pytest.raises(forward_report.ForwardReportError, match="excluded"):
+    with pytest.raises(forward_report.ForwardReportError, match="there is no session to trade"):
         forward_report.forward_report(
-            store, store_predictions, registration=registration_path, repo=repo, as_of=READ_AT
+            store, store_predictions, tmp_path, registration=admitted.path, repo=repo, as_of=READ_AT
         )
 
 
-def test_a_record_whose_outcome_is_not_yet_knowable_is_excluded_though_its_signal_is_before_as_of(
+# --- Step 1: the registered records price exactly as the configuration itself does ---------------
+
+
+def test_the_continuous_book_prices_exactly_as_the_configuration_itself_does(
     tmp_path: Path, repo: Path
 ) -> None:
-    """`day6`'s signal (2026-01-13) is well before `as_of` (2026-01-17); its own outcome deadline
-    (`~2026-01-19`, `signal_day_batch`'s horizon convention) is not. The minor fix-round point:
-    a record can be registered in time and still excluded, because "in time" and "knowable" are
-    two different clocks."""
-    panel = write_strategy_corpus(tmp_path)
-    sessions = panel.sessions
-    config = dict(CONFIG_BASE, start=sessions[0])
-    registration_path = register_config(repo, config)
-    registered = RegisteredConfiguration(
-        config_id=grid.config_id(config),
-        registration_sha256="0" * 64,
-        code_commit=_head(repo),
-        seed=int(grid.protocol_settings()["random_seed"]),
-    )
-    store = PanelStore(tmp_path / "panel")
-    as_of = READ_AT
-    winners = (WINNER, SECOND, *[n for n in UNIVERSE if n not in (WINNER, SECOND)])
-    for day in (sessions[0], sessions[3], sessions[6]):
-        batch = registered_batch(config, registered, day=day, ranked=winners)
-        calendar = daily._outcome_calendar(store, EXCHANGE, day, as_of)
-        register_prediction(tmp_path, batch, calendar=calendar, recorded_at=batch.as_of)
+    panel_root, admitted, sessions, signal_days = build_static_fixture(tmp_path, repo)
+    store = PanelStore(panel_root / "panel")
+    store_predictions = prediction_store(panel_root, clock_at=READ_AT)
 
-    store_predictions = prediction_store(tmp_path, clock_at=as_of)
-    result = forward_report.forward_report(
-        store, store_predictions, registration=registration_path, repo=repo, as_of=as_of
+    report = forward_report.forward_report(
+        store, store_predictions, panel_root, registration=admitted.path, repo=repo, as_of=READ_AT
     )
 
-    assert len(result.excluded) == 1
-    excluded = result.excluded[0]
-    assert excluded.signal_day == sessions[6]
-    assert excluded.signal_day < as_of.astimezone(SHANGHAI).date()
-    assert excluded.reason == forward_report.OUTCOME_NOT_YET_KNOWABLE
-    # day3's own outcome (its exit at session 7, well before as_of) is knowable, so it is admitted
-    # too and the book continues one more period on it -- day6 is excluded, not the whole tail.
-    periods = result.backtest.periods
-    assert [period.start for period in periods] == [sessions[0], sessions[3]]
-    assert [period.end for period in periods] == [sessions[3], sessions[6]]
-    assert periods[0].net_return == Decimal("0.0737831000")
+    assert [session for session, _record in report.schedule.rebalances] == list(signal_days)
+    assert report.schedule.first_record == signal_days[0]
+    assert report.check.unverifiable == []
+    assert report.check.verified == [record for _session, record in report.schedule.rebalances]
+
+    configured = tds._base(**tds.STATIC)
+    by_configuration = backtest_strategy(
+        store,
+        strategy_request(**configured, start=signal_days[0], end=sessions[-1], as_of=READ_AT),
+    )
+    assert not any(period.held for period in by_configuration.periods)
+    assert any(period.fills for period in by_configuration.periods)
+    assert tds._traded(report.backtest) == tds._traded(by_configuration)
+
+    # The one piece of arithmetic this module adds beyond the already-proven book: compounding.
+    net_returns = [period.net_return for period in report.backtest.periods]
+    expected_compound = Decimal(1)
+    for value in net_returns:
+        expected_compound *= Decimal(1) + value
+    expected_compound = (expected_compound - 1).quantize(Decimal("0.0000000001"))
+    all_periods = report.summary["statistics"]["all_periods"]
+    assert all_periods["periods"] == len(net_returns)
+    assert Decimal(all_periods["compounded_net_return"]) == expected_compound
+
+    assert report.summary[daily.UNVERIFIABLE]["count"] == 0
+    assert report.summary["unprovable_holds"] == []
+    assert report.summary["integrity"] == daily.INTEGRITY
+    assert report.config_id == admitted.config_id
 
 
-def test_a_record_declaring_a_different_configuration_is_excluded_and_listed(
+def test_forward_report_view_and_summary_lines_render_the_landed_summary_unmodified(
     tmp_path: Path, repo: Path
 ) -> None:
-    """A record whose declaration names a `config_id` this registration did not write -- a stale
-    registration's record left in a shared store -- is not this registration's evidence."""
+    panel_root, admitted, _sessions, _signal_days = build_static_fixture(tmp_path, repo)
+    store = PanelStore(panel_root / "panel")
+    store_predictions = prediction_store(panel_root, clock_at=READ_AT)
+    report = forward_report.forward_report(
+        store, store_predictions, panel_root, registration=admitted.path, repo=repo, as_of=READ_AT
+    )
+
+    payload = forward_report.forward_report_view(report)
+    assert payload["config_id"] == admitted.config_id
+    assert payload["as_of"] == READ_AT.isoformat()
+    for key in (daily.UNVERIFIABLE, "statistics", "unprovable_holds", "integrity"):
+        assert payload[key] == report.summary[key]
+
+    lines = forward_report.summary_lines(report)
+    assert lines[0] == f"as_of              {READ_AT.isoformat()}"
+    assert lines[1] == f"config_id          {admitted.config_id}"
+    assert lines[2:] == daily.forward_summary_lines(report.summary)
+    assert lines[-1] == daily.INTEGRITY
+
+
+# --- production-shaped: a missed day, caught up ---------------------------------------------------
+
+
+def test_a_missed_rebalance_is_caught_up_on_the_next_record_the_store_witnesses(
+    tmp_path: Path, repo: Path
+) -> None:
+    """Signal day 1 rebalances (the book's first day); the scheduled rebalance at day 4 (three
+    sessions later) is never registered -- the command missed it -- and day 5's record catches it
+    up. Days 2, 3 and 4 carry no record and no journal at all: not a hold, simply not completed,
+    exactly `witnessed_days`' "missed or refused" case."""
     panel = write_strategy_corpus(tmp_path)
     sessions = panel.sessions
-    config = dict(CONFIG_BASE, start=sessions[0])
+    configured = tds._base(**tds.STATIC)
+    anchor = sessions[1]
+    config = dict(configured, start=anchor)
     registration_path = register_config(repo, config)
-    registered = RegisteredConfiguration(
-        config_id=grid.config_id(config),
-        registration_sha256="0" * 64,
-        code_commit=_head(repo),
-        seed=int(grid.protocol_settings()["random_seed"]),
-    )
-    foreign = RegisteredConfiguration(
-        config_id="f" * 64, registration_sha256="0" * 64, code_commit=_head(repo), seed=1
-    )
-    store = PanelStore(tmp_path / "panel")
-    as_of = READ_AT
-    winners = (WINNER, SECOND, *[n for n in UNIVERSE if n not in (WINNER, SECOND)])
-    day = sessions[0]
-    foreign_batch = registered_batch(config, foreign, day=day, ranked=winners)
-    calendar = daily._outcome_calendar(store, EXCHANGE, day, as_of)
-    register_prediction(tmp_path, foreign_batch, calendar=calendar, recorded_at=foreign_batch.as_of)
+    admitted = daily.admit_registration(registration_path, repo)
 
-    store_predictions = prediction_store(tmp_path, clock_at=as_of)
-    with pytest.raises(forward_report.ForwardReportError, match="excluded"):
-        forward_report.forward_report(
-            store, store_predictions, registration=registration_path, repo=repo, as_of=as_of
+    def request_for(day: date) -> Any:
+        return strategy_request(
+            **configured, start=day - timedelta(days=1), end=day, as_of=tds._read_at(day)
         )
 
-    # A second copy of the store also carrying the registration's own record: the foreign one is
-    # excluded and listed, the registration's own is chained.
-    own_batch = registered_batch(config, registered, day=day, ranked=winners)
-    register_prediction(tmp_path, own_batch, calendar=calendar, recorded_at=own_batch.as_of)
-    result = forward_report.forward_report(
-        store, store_predictions, registration=registration_path, repo=repo, as_of=as_of
+    filed_days = (sessions[1], sessions[5])
+    identifiers = register_days(
+        tmp_path, request_for, list(filed_days), anchor, registered=admitted.declared
     )
-    assert {excluded.reason for excluded in result.excluded} == {
-        forward_report.FOREIGN_TO_THE_REGISTRATION
-    }
-    assert len(result.backtest.periods) == 1
+    for day, record_id in zip(filed_days, identifiers, strict=True):
+        write_journal_day(
+            tmp_path,
+            admitted,
+            session=day,
+            as_of=tds._evening(day),
+            decision="rebalanced",
+            reason="scheduled" if day == anchor else "catching up the rebalance scheduled",
+            held=False,
+            record_id=record_id,
+        )
+
+    store = PanelStore(tmp_path / "panel")
+    store_predictions = prediction_store(tmp_path, clock_at=READ_AT)
+    report = forward_report.forward_report(
+        store, store_predictions, tmp_path, registration=admitted.path, repo=repo, as_of=READ_AT
+    )
+
+    assert [session for session, _record in report.schedule.rebalances] == list(filed_days)
+    assert report.schedule.first_record == sessions[1]
+    assert len(report.backtest.periods) == 2
+    assert [period.start for period in report.backtest.periods] == list(filed_days)
 
 
-# --- binding: mandatory, config_id and settings checked, this file bound too ---------------------
+# --- production-shaped: a held day ---------------------------------------------------------------
+
+
+def test_a_held_day_carries_no_record_and_is_not_a_rebalance(tmp_path: Path, repo: Path) -> None:
+    """Session 4 is forced to hold (the registered configuration, scored again, ranks nothing) --
+    `strategy_registration.score_day` monkeypatched for that one day, `test_a_day_without_a_record_
+    is_held_only_when_the_journal_and_the_configuration_agree`'s own technique. Held to a journal
+    that agrees it held, `witnessed_days` -- and this report -- treats it as a completed, unranked
+    day: no record, not a rebalance, and the next scheduled rebalance (session 7) still runs."""
+    panel = write_strategy_corpus(tmp_path)
+    sessions = panel.sessions
+    configured = tds._base(**tds.STATIC)
+    anchor = sessions[1]
+    config = dict(configured, start=anchor)
+    registration_path = register_config(repo, config)
+    admitted = daily.admit_registration(registration_path, repo)
+
+    def request_for(day: date) -> Any:
+        return strategy_request(
+            **configured, start=day - timedelta(days=1), end=day, as_of=tds._read_at(day)
+        )
+
+    filed_days = (sessions[1], sessions[7])
+    identifiers = register_days(
+        tmp_path, request_for, list(filed_days), anchor, registered=admitted.declared
+    )
+    for day, record_id in zip(filed_days, identifiers, strict=True):
+        write_journal_day(
+            tmp_path,
+            admitted,
+            session=day,
+            as_of=tds._evening(day),
+            decision="rebalanced",
+            reason="scheduled",
+            held=False,
+            record_id=record_id,
+        )
+
+    held_day = sessions[4]
+    held_at = tds._evening(held_day)
+    write_journal_day(
+        tmp_path,
+        admitted,
+        session=held_day,
+        as_of=held_at,
+        decision="held",
+        reason="the source held",
+        held=True,
+        record_id=None,
+    )
+
+    real_score_day = strategy_registration.score_day
+
+    def holding(store: Any, request: Any, *, day: date, **keywords: Any) -> Any:
+        signal = real_score_day(store, request, day=day, **keywords)
+        if day == held_day:
+            return dataclasses.replace(
+                signal, scores=dataclasses.replace(signal.scores, ranked=None)
+            )
+        return signal
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(strategy_registration, "score_day", holding)
+    try:
+        store = PanelStore(tmp_path / "panel")
+        store_predictions = prediction_store(tmp_path, clock_at=READ_AT)
+        report = forward_report.forward_report(
+            store,
+            store_predictions,
+            tmp_path,
+            registration=admitted.path,
+            repo=repo,
+            as_of=READ_AT,
+        )
+    finally:
+        monkeypatch.undo()
+
+    decisions = {day.session: day.decision for day in report.schedule.days}
+    assert decisions[held_day] == "held"
+    assert [session for session, _record in report.schedule.rebalances] == list(filed_days)
+    assert len(report.backtest.periods) == 2
+
+
+# --- Important 3: a walk-forward source, bound through its provenance, not a hand-rolled check ---
+
+
+def test_a_walk_forward_records_binding_is_checked_through_its_provenance_not_a_declaration_diff(
+    tmp_path: Path, repo: Path
+) -> None:
+    """A walk-forward record's declaration is the fitted model's own and names no registration
+    (`strategy_registration`'s module docstring); it is bound only through the input provenance
+    the daily command wrote for its batch (`record_is_bound`). This report does not compare
+    declarations itself -- it reuses `daily_selection.forward_rebalances`, which calls
+    `record_is_bound` internally -- so a walk-forward registration is witnessed exactly like a
+    static one, with no separate code path here to fall out of step with `V2-P6-011`.
+
+    This is checked at `forward_rebalances` rather than through the full `forward_report()`
+    (schedule, check and priced book together), because `write_strategy_corpus` stamps its whole
+    `adj_factor` partition knowable only from `READ_AT` (after every session, per `_read_at`'s own
+    docstring in `test_daily_selection.py`) -- a walk-forward source's `score_day` reads it *for
+    the fit itself*, so recomputing at a record's own same-day 18:30 filing time
+    (`RecordCheck.__call__`, which `forward_record_check` always uses -- it has no `_at_read`-style
+    escape hatch, correctly, since production must recompute at the real filing time) refuses with
+    `not_yet_knowable` regardless of which signal day is chosen: every session in the fixture's
+    window is earlier than `READ_AT`. `test_daily_selection.py`'s own equality test hits the same
+    wall and sidesteps it with `_at_read` for a plain equivalence check; it never runs
+    `forward_record_check` itself against `TRAILING`/`WALK_FORWARD` either. So `record_is_bound`'s
+    use for a walk-forward record is verified here where it is reachable -- schedule witnessing --
+    rather than forced through a check this fixture cannot support for a label-fitting source."""
+    panel = write_strategy_corpus(tmp_path)
+    sessions = panel.sessions
+    configured = tds._base(**tds.WALK_FORWARD)
+    anchor = sessions[1]
+    config = dict(configured, start=anchor)
+    registration_path = register_config(repo, config)
+    admitted = daily.admit_registration(registration_path, repo)
+
+    step = configured["rebalance_every_sessions"]
+    first = (
+        5  # the walk-forward source's first admissible fit, per test_daily_selection's own table
+    )
+    signal_days = tuple(sessions[index] for index in range(first, len(sessions) - 1, step))
+
+    def request_for(day: date) -> Any:
+        return strategy_request(
+            **configured, start=day - timedelta(days=1), end=day, as_of=tds._read_at(day)
+        )
+
+    identifiers = register_days(
+        tmp_path, request_for, list(signal_days), anchor, registered=admitted.declared
+    )
+    for day, record_id in zip(signal_days, identifiers, strict=True):
+        write_journal_day(
+            tmp_path,
+            admitted,
+            session=day,
+            as_of=tds._evening(day),
+            decision="rebalanced",
+            reason="scheduled",
+            held=False,
+            record_id=record_id,
+        )
+
+    schedule = daily.forward_rebalances(tmp_path, admitted, through=sessions[-1], as_of=READ_AT)
+    assert [session for session, _record in schedule.rebalances] == list(signal_days)
+    assert schedule.first_record == signal_days[0]
+    assert schedule.unprovable_holds == ()
+    assert [record_id for _session, record_id in schedule.rebalances] == identifiers
+
+    # The declaration each record carries is the fitted model's own, naming no registration --
+    # exactly what makes a hand-rolled declaration comparison unable to bind it, and what makes
+    # `record_is_bound`'s provenance check (which `forward_rebalances` used above) necessary.
+    store_predictions = prediction_store(tmp_path, clock_at=READ_AT)
+    for _session, record_id in schedule.rebalances:
+        record = store_predictions.get(record_id)
+        assert record is not None
+        assert record.batch.artifact.declaration.name != strategy_registration.COMPOSITE_MODEL_NAME
+
+
+# --- binding: mandatory, config_id checked, and this file bound too -------------------------------
 
 
 def test_registration_and_repo_are_mandatory(tmp_path: Path, repo: Path) -> None:
@@ -588,7 +631,7 @@ def test_registration_and_repo_are_mandatory(tmp_path: Path, repo: Path) -> None
     store = PanelStore(tmp_path / "panel")
     store_predictions = prediction_store(tmp_path, clock_at=READ_AT)
     with pytest.raises(TypeError):
-        forward_report.forward_report(store, store_predictions, as_of=READ_AT)  # type: ignore[call-arg]
+        forward_report.forward_report(store, store_predictions, tmp_path, as_of=READ_AT)  # type: ignore[call-arg]
 
 
 def test_a_registration_whose_config_id_does_not_match_its_own_config_is_refused(
@@ -596,132 +639,91 @@ def test_a_registration_whose_config_id_does_not_match_its_own_config_is_refused
 ) -> None:
     panel = write_strategy_corpus(tmp_path)
     sessions = panel.sessions
-    config = dict(CONFIG_BASE, start=sessions[0])
+    configured = tds._base(**tds.STATIC)
+    config = dict(configured, start=sessions[1])
     registration_path = register_config(repo, config)
     payload = registration_path.read_text(encoding="utf-8")
     doctored = payload.replace(grid.config_id(config), "0" * 64)
     assert doctored != payload
     registration_path.write_text(doctored, encoding="utf-8")
-    _commit_file(repo, registration_path, "doctor the config_id", at=CLOCK0 + timedelta(seconds=3))
+    _commit_file(repo, registration_path, "doctor the config_id", at=CLOCK0 + timedelta(seconds=2))
 
     store = PanelStore(tmp_path / "panel")
     store_predictions = prediction_store(tmp_path, clock_at=READ_AT)
     with pytest.raises(forward_report.ForwardReportError, match="config_id"):
         forward_report.forward_report(
-            store, store_predictions, registration=registration_path, repo=repo, as_of=READ_AT
+            store,
+            store_predictions,
+            tmp_path,
+            registration=registration_path,
+            repo=repo,
+            as_of=READ_AT,
         )
 
 
-def test_a_registration_with_no_usable_measurement_settings_is_refused(
+def test_a_change_to_only_daily_selections_own_file_after_registration_refuses(
     tmp_path: Path, repo: Path
 ) -> None:
-    panel = write_strategy_corpus(tmp_path)
-    sessions = panel.sessions
-    config = dict(CONFIG_BASE, start=sessions[0])
-    registration_path = register_config(
-        repo, config, settings={"excess_benchmark": EQUAL_WEIGHT_ALL_A}
+    panel_root, admitted, _sessions, _signal_days = build_static_fixture(tmp_path, repo)
+    (repo / "scripts" / "daily_selection.py").write_text("# moved\n", encoding="utf-8")
+    _commit_file(
+        repo, repo / "scripts" / "daily_selection.py", "move", at=CLOCK0 + timedelta(seconds=2)
     )
 
-    store = PanelStore(tmp_path / "panel")
-    store_predictions = prediction_store(tmp_path, clock_at=READ_AT)
-    with pytest.raises(forward_report.ForwardReportError, match="settings"):
-        forward_report.forward_report(
-            store, store_predictions, registration=registration_path, repo=repo, as_of=READ_AT
-        )
-
-
-def test_a_registration_whose_bound_code_has_not_moved_is_not_refused(
-    tmp_path: Path, repo: Path
-) -> None:
-    panel_root, registration_path, _registered, _sessions = build_main_fixture(tmp_path, repo)
     store = PanelStore(panel_root / "panel")
-    store_predictions = prediction_store(panel_root, clock_at=AS_OF)
-
-    forward_report.forward_report(
-        store, store_predictions, registration=registration_path, repo=repo, as_of=AS_OF
-    )  # must not raise
+    store_predictions = prediction_store(panel_root, clock_at=READ_AT)
+    with pytest.raises(forward_report.ForwardReportError, match="SourceChangedError"):
+        forward_report.forward_report(
+            store,
+            store_predictions,
+            panel_root,
+            registration=admitted.path,
+            repo=repo,
+            as_of=READ_AT,
+        )
 
 
 def test_forward_reports_own_file_is_bound_the_way_daily_selections_own_file_is(
     tmp_path: Path, repo: Path
 ) -> None:
     """`scripts/forward_report.py` must be as bound as `scripts/daily_selection.py` -- a change to
-    *only* this file after registration refuses the report, the same way a change to `src/` does."""
-    panel_root, registration_path, _registered, _sessions = build_main_fixture(tmp_path, repo)
+    *only* this file after registration refuses the report, the same way a change to `src/` or to
+    `scripts/daily_selection.py` does."""
+    panel_root, admitted, _sessions, _signal_days = build_static_fixture(tmp_path, repo)
     (repo / "scripts" / "forward_report.py").write_text("# moved\n", encoding="utf-8")
     _commit_file(
-        repo,
-        repo / "scripts" / "forward_report.py",
-        "move this file",
-        at=CLOCK0 + timedelta(seconds=3),
+        repo, repo / "scripts" / "forward_report.py", "move", at=CLOCK0 + timedelta(seconds=2)
     )
 
     store = PanelStore(panel_root / "panel")
-    store_predictions = prediction_store(panel_root, clock_at=AS_OF)
-    with pytest.raises(registry.SourceChangedError):
+    store_predictions = prediction_store(panel_root, clock_at=READ_AT)
+    with pytest.raises(forward_report.ForwardReportError, match="SourceChangedError"):
         forward_report.forward_report(
-            store, store_predictions, registration=registration_path, repo=repo, as_of=AS_OF
+            store,
+            store_predictions,
+            panel_root,
+            registration=admitted.path,
+            repo=repo,
+            as_of=READ_AT,
         )
-
-
-# --- read_registered_predictions: the race with a concurrent write -------------------------------
-
-
-class _RacingStore:
-    """A store that names a record `list_ids` promises but `get` no longer holds -- a write that
-    raced a concurrent removal between the two calls."""
-
-    def __init__(self, held: dict[str, Any]) -> None:
-        self._held = held
-
-    def list_ids(self) -> tuple[str, ...]:
-        return (*sorted(self._held), "prd_" + "a" * 24)
-
-    def get(self, record_id: str) -> Any:
-        return self._held.get(record_id)
-
-
-def test_a_record_removed_between_list_ids_and_get_is_skipped_not_raised(
-    tmp_path: Path, repo: Path
-) -> None:
-    panel = write_strategy_corpus(tmp_path)
-    sessions = panel.sessions
-    config = dict(CONFIG_BASE, start=sessions[0])
-    registered = RegisteredConfiguration(
-        config_id=grid.config_id(config),
-        registration_sha256="0" * 64,
-        code_commit=_head(repo),
-        seed=1,
-    )
-    day = sessions[0]
-    winners = (WINNER, SECOND, *[n for n in UNIVERSE if n not in (WINNER, SECOND)])
-    batch = registered_batch(config, registered, day=day, ranked=winners)
-    store = PanelStore(tmp_path / "panel")
-    calendar = daily._outcome_calendar(store, EXCHANGE, day, READ_AT)
-    held = register_prediction(tmp_path, batch, calendar=calendar, recorded_at=batch.as_of)
-
-    racing = _RacingStore({held.record_id: held})
-    records = forward_report.read_registered_predictions(racing)
-
-    assert records == (held,)
 
 
 # --- a runnable entry: main() -----------------------------------------------------------------
 
 
 def test_main_writes_a_json_report_under_the_runtime_directory(tmp_path: Path, repo: Path) -> None:
-    panel_root, registration_path, registered, _sessions = build_main_fixture(tmp_path, repo)
+    panel_root, admitted, _sessions, signal_days = build_static_fixture(tmp_path, repo)
 
     exit_code = forward_report.main(
         [
             "--runtime-dir",
             str(panel_root),
             "--registration",
-            str(registration_path),
+            str(admitted.path),
             "--repo",
             str(repo),
             "--as-of",
-            AS_OF.isoformat(),
+            READ_AT.isoformat(),
             "--json",
         ]
     )
@@ -729,10 +731,7 @@ def test_main_writes_a_json_report_under_the_runtime_directory(tmp_path: Path, r
     assert exit_code == 0
     reports = sorted((panel_root / "reports").glob("forward-*.json"))
     assert len(reports) == 1
-    import json
-
     payload = json.loads(reports[0].read_text(encoding="utf-8"))
-    assert payload["config_id"] == registered.config_id
-    assert len(payload["periods"]) == 3
-    assert payload["excluded"] == []
-    assert payload["statistics"][BENCHMARK_905]["cumulative_net_excess"] == "0.2219325602"
+    assert payload["config_id"] == admitted.config_id
+    assert payload["statistics"]["all_periods"]["periods"] == len(signal_days)
+    assert payload["integrity"] == daily.INTEGRITY
