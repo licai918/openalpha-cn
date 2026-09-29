@@ -4123,16 +4123,26 @@ Injected for `PriceRefetch`'s reason: this module is pinned to importing `domain
 only. `cli._refetch_return_path` asks for exactly that security on exactly those two sessions --
 four requests -- and a test passes one built on a fake transport."""
 
+EarlierYear = Callable[
+    [frozenset[str]], tuple[Sequence[ColumnarPanelBatch], Sequence[ColumnarPanelBatch]]
+]
+"""The stored `daily` and `adj_factor` rows of the year before, for the named securities only.
+
+Asked only for the securities whose first bar of the year falls on a judged session -- none on
+an ordinary incremental build, whose slice starts after the year's first session -- so the year
+before is read only when a pair actually reaches back into it (review round 1, Minor 4)."""
+
 
 def reconcile_return_paths(
     limits: Sequence[ColumnarPanelBatch],
     *,
     bars: Sequence[ColumnarPanelBatch],
-    earlier_bars: Sequence[ColumnarPanelBatch],
     factors: Sequence[ColumnarPanelBatch],
+    earlier: EarlierYear | None,
     answerable_through: date,
     refetch: ReturnPathRefetch,
-    judged: Callable[[date], bool] | None = None,
+    fresh: Callable[[date], bool] | None = None,
+    stored_decisions: Mapping[tuple[str, date], UpstreamDefect] | None = None,
 ) -> ReconciledRows:
     """Record, per session, which of `daily.pre_close` and `adj_factor` the day's own price
     corroborates where the two disagree, or refuse the year (`V2-P6-020`).
@@ -4144,18 +4154,20 @@ def reconcile_return_paths(
     are in the upstream's own data, so -- as for every `V2-P6-013` rule -- they are decided once,
     here, and every reader follows the record instead of deciding again.
 
-    `limits` is the `stk_limit` year this target is about to write, `bars` the stored `daily`
-    year, `earlier_bars` the stored `daily` year before it (each security's last bar there is the
-    previous close of its first bar of the year), and `factors` the stored `adj_factor` years the
-    pairs reach. Nothing is dropped: `batches` come back as `limits`, and `record` is the
-    `upstream_defects` batch of the decisions, source `stk_limit`, each carrying the disputed
-    bar's own four clocks.
+    `limits` is the `stk_limit` year the decisions are judged against -- the one this target is
+    about to write, or the stored one (`--return-paths-from-store`) -- `bars` the stored `daily`
+    year, `factors` its stored `adj_factor` year, and `earlier` the reader of the year before
+    (`None`: that year is not stored). Nothing is dropped: `batches` come back as `limits`, and
+    `record` is the `upstream_defects` batch of the decisions, source `stk_limit`, each carrying
+    the disputed bar's own four clocks.
 
-    1. **Find every consecutive-bar pair** of a security whose two statements disagree past
-       `pre_close_tolerance`, on the sessions `judged` admits (all of them for a full build).
-       A pair the stored factor series does not cover is left alone: a reader cannot price it
-       either, and refuses it by its own error.
-    2. **Re-fetch each disputed pair** (`refetch`): both bars and both factors, one security at a
+    1. **Judge every consecutive-bar pair of the year** from the stored rows: a pair whose two
+       statements disagree past `pre_close_tolerance` is disputed. Every build does this for the
+       whole year, incremental or not, so a decision can never outlive the rows it was made on
+       -- a factor row withdrawn before the slice moves a step, and with it the decisions on
+       both sides of it. A pair the stored factor series does not cover is left alone: a reader
+       cannot price it either, and refuses it by its own error.
+    2. **Re-fetch a disputed pair** (`refetch`): both bars and both factors, one security at a
        time. A re-fetched close, `pre_close` or factor that differs from the stored one is a
        stale or partial store, and the year is refused by name -- only a disagreement the
        upstream publishes twice is recorded.
@@ -4163,18 +4175,40 @@ def reconcile_return_paths(
        with the close inside the band, corroborates that statement; otherwise neither is, and the
        session's return is unknowable. Every reproduced disagreement is recorded one way or the
        other; a reader refuses only a disagreement nobody recorded.
+
+    **What an incremental build saves, and how it stays the full build** (`fresh`, review round
+    1 Minor 4). `fresh` names the sessions this build fetched again; `None` is a full build,
+    which fetches every one. On a session it did not fetch, a disputed pair whose stored decision
+    (`stored_decisions`) is exactly the decision the stored rows give now is written again
+    without a re-fetch -- the rows under it are the rows it was reproduced on -- and one that
+    differs is re-fetched and decided afresh. And a security's first pair of the year, whose
+    previous close is in the year before, is judged only when its first session is fresh, so
+    the year before is read only for those securities; otherwise its stored decision is written
+    again as stored, its closes matched against the bar in hand. A full build at the same clock
+    writes the same rows.
     """
     kept = tuple(limits)
     judged_bars = [batch for batch in bars if batch.status == "success"]
     if not judged_bars:
         return ReconciledRows(batches=kept, defects=(), record=None)
+    decided_before = stored_decisions or {}
     merged = merge_panel_batches(judged_bars)
     keys = _row_keys(merged)
     closes = _column_values(merged, CLOSE_COLUMN)
     pre_closes = _column_values(merged, PRE_CLOSE_COLUMN)
+    first_bars: dict[str, date] = {}
+    for subject, day in keys:
+        if subject not in first_bars or day < first_bars[subject]:
+            first_bars[subject] = day
+    reaching_back = frozenset(
+        subject for subject, day in first_bars.items() if fresh is None or fresh(day)
+    )
+    earlier_bars, earlier_factors = (
+        earlier(reaching_back) if earlier is not None and reaching_back else ((), ())
+    )
     factor_table = [
         row
-        for batch in factors
+        for batch in (*earlier_factors, *factors)
         if batch.status == "success"
         for row in zip(
             batch.subjects,
@@ -4208,14 +4242,21 @@ def reconcile_return_paths(
         ):
             bands[key] = (cast(float, up), cast(float, down))
 
-    disputed: list[tuple[int, date, float, float, float]] = []
+    defects: list[UpstreamDefect] = []
+    positions: list[int] = []
     for index in sorted(range(len(keys)), key=lambda at: keys[at]):
         subject, day = keys[index]
         close, pre_close = cast(float, closes[index]), cast(float, pre_closes[index])
         before = previous.get(subject)
         previous[subject] = (day, close)
+        if day == first_bars[subject] and subject not in reaching_back:
+            carried = decided_before.get((subject, day))
+            if carried is not None and carried.bar_close == close:
+                defects.append(carried)
+                positions.append(index)
+            continue
         history = histories.get(subject)
-        if before is None or history is None or (judged is not None and not judged(day)):
+        if before is None or history is None:
             continue
         previous_day, previous_close = before
         try:
@@ -4225,85 +4266,95 @@ def reconcile_return_paths(
             continue
         implied = previous_close * previous_factor / factor
         allowed = pre_close_tolerance(implied, factor=factor, previous_factor=previous_factor)
-        if abs(implied - pre_close) > allowed:
-            disputed.append((index, previous_day, previous_close, previous_factor, factor))
-    if not disputed:
-        return ReconciledRows(batches=kept, defects=(), record=None)
-
-    defects: list[UpstreamDefect] = []
-    positions: list[int] = []
-    for index, previous_day, previous_close, previous_factor, factor in disputed:
-        subject, day = keys[index]
-        close, pre_close = cast(float, closes[index]), cast(float, pre_closes[index])
-        again_bars, again_factors = refetch(subject, previous_day, day)
-        stored = {
-            (DAILY_DATASET, previous_day): (previous_close,),
-            (DAILY_DATASET, day): (close, pre_close),
-            (ADJ_FACTOR_DATASET, previous_day): (previous_factor,),
-            (ADJ_FACTOR_DATASET, day): (factor,),
-        }
-        served = {
-            **{
-                (DAILY_DATASET, when): values
-                for when, values in _refetched_return_path_rows(
-                    again_bars, subject, PRICE_DATE_COLUMN, (CLOSE_COLUMN, PRE_CLOSE_COLUMN)
-                ).items()
-            },
-            **{
-                (ADJ_FACTOR_DATASET, when): values
-                for when, values in _refetched_return_path_rows(
-                    again_factors, subject, ADJUSTMENT_DATE_COLUMN, (ADJUSTMENT_FACTOR_COLUMN,)
-                ).items()
-            },
-        }
-        for (dataset, when), values in stored.items():
-            answer = served.get((dataset, when))
-            if (
-                answer is None
-                and dataset == ADJ_FACTOR_DATASET
-                and (subject, when) not in factor_rows
-            ):
-                # The stored factor there is an earlier step carried forward -- the partition is
-                # compressed to its change rows -- and an absent row is what the upstream serves
-                # on such a session when it withdrew the step (`V2-P6-016`). Only a served value
-                # can contradict a carried one.
-                continue
-            if answer is None or answer[: len(values)] != values:
-                raise PanelBatchError(
-                    f"{subject} on {day.isoformat()}: the stored {DAILY_DATASET} pre_close "
-                    f"{pre_close!r} and the one {ADJ_FACTOR_DATASET} implies from "
-                    f"{previous_day.isoformat()}'s close disagree, and a re-fetch of {dataset} "
-                    f"on {when.isoformat()} answered {answer!r} where the store holds "
-                    f"{values!r}. A disagreement is recorded only once the upstream publishes it "
-                    f"twice; rebuild {dataset} for the year, whose stored rows are not what the "
-                    "upstream now serves"
-                )
+        if abs(implied - pre_close) <= allowed:
+            continue
         band = bands.get((subject, day))
         up, down = band if band is not None else (None, None)
-        defects.append(
-            UpstreamDefect(
-                ts_code=subject,
-                trade_date=day,
-                source_dataset=PRICE_LIMIT_DATASET,
-                kind=return_path_kind(
-                    published_pre_close=pre_close,
-                    implied_pre_close=previous_close * previous_factor / factor,
-                    close=close,
-                    up_limit=up,
-                    down_limit=down,
-                ),
-                bar_close=close,
-                previous_bar_close=previous_close,
+        decision = UpstreamDefect(
+            ts_code=subject,
+            trade_date=day,
+            source_dataset=PRICE_LIMIT_DATASET,
+            kind=return_path_kind(
+                published_pre_close=pre_close,
+                implied_pre_close=implied,
+                close=close,
                 up_limit=up,
                 down_limit=down,
-            )
+            ),
+            bar_close=close,
+            valuation_close=implied,
+            previous_bar_close=previous_close,
+            up_limit=up,
+            down_limit=down,
         )
+        unchanged = fresh is not None and not fresh(day) and decided_before.get((subject, day))
+        if unchanged != decision:
+            _reproduce_return_path(
+                subject,
+                day=day,
+                refetch=refetch,
+                factor_rows=factor_rows,
+                stored={
+                    (DAILY_DATASET, previous_day): (previous_close,),
+                    (DAILY_DATASET, day): (close, pre_close),
+                    (ADJ_FACTOR_DATASET, previous_day): (previous_factor,),
+                    (ADJ_FACTOR_DATASET, day): (factor,),
+                },
+                previous_day=previous_day,
+                pre_close=pre_close,
+            )
+        defects.append(decision)
         positions.append(index)
     return ReconciledRows(
         batches=kept,
         defects=tuple(defects),
         record=_defect_record(merged, positions, defects),
     )
+
+
+def _reproduce_return_path(
+    subject: str,
+    *,
+    day: date,
+    refetch: ReturnPathRefetch,
+    factor_rows: Set[tuple[str, date]],
+    stored: Mapping[tuple[str, date], tuple[float, ...]],
+    previous_day: date,
+    pre_close: float,
+) -> None:
+    """Refuse the year unless a per-security re-fetch serves the disputed pair's stored rows."""
+    again_bars, again_factors = refetch(subject, previous_day, day)
+    served = {
+        **{
+            (DAILY_DATASET, when): values
+            for when, values in _refetched_return_path_rows(
+                again_bars, subject, PRICE_DATE_COLUMN, (CLOSE_COLUMN, PRE_CLOSE_COLUMN)
+            ).items()
+        },
+        **{
+            (ADJ_FACTOR_DATASET, when): values
+            for when, values in _refetched_return_path_rows(
+                again_factors, subject, ADJUSTMENT_DATE_COLUMN, (ADJUSTMENT_FACTOR_COLUMN,)
+            ).items()
+        },
+    }
+    for (dataset, when), values in stored.items():
+        answer = served.get((dataset, when))
+        if answer is None and dataset == ADJ_FACTOR_DATASET and (subject, when) not in factor_rows:
+            # The stored factor there is an earlier step carried forward -- the partition is
+            # compressed to its change rows -- and an absent row is what the upstream serves on
+            # such a session when it withdrew the step (`V2-P6-016`). Only a served value can
+            # contradict a carried one.
+            continue
+        if answer is None or answer[: len(values)] != values:
+            raise PanelBatchError(
+                f"{subject} on {day.isoformat()}: the stored {DAILY_DATASET} pre_close "
+                f"{pre_close!r} and the one {ADJ_FACTOR_DATASET} implies from "
+                f"{previous_day.isoformat()}'s close disagree, and a re-fetch of {dataset} on "
+                f"{when.isoformat()} answered {answer!r} where the store holds {values!r}. A "
+                "disagreement is recorded only once the upstream publishes it twice; rebuild "
+                f"{dataset} for the year, whose stored rows are not what the upstream now serves"
+            )
 
 
 def _refetched_return_path_rows(
@@ -5069,9 +5120,16 @@ def write_upstream_defects(
     *,
     year: int,
     source_datasets: frozenset[str],
+    kinds: frozenset[str] | None = None,
     date_timezone: str = DEFAULT_DATE_TIMEZONE,
 ) -> PartitionRef | None:
     """Store one build target's defects for `year`, keeping every other target's rows.
+
+    `kinds` narrows what the write owns to those kinds of its sources (`V2-P6-020`,
+    `--return-paths-from-store`): the `stk_limit` target's return-path decisions can then be
+    rebuilt from the stored bands while its other records -- a zero/zero band on a halt, a
+    withdrawal -- stay exactly as stored. `None`, every kind: what every target's own build
+    passes.
 
     ## One dataset, one partition per year, and three writers of it
 
@@ -5119,6 +5177,14 @@ def write_upstream_defects(
                 f"this write owns {sorted(source_datasets)}'s defects and the record carries "
                 f"{sorted(map(str, foreign))}'s too; each source is written by its own target"
             )
+        unowned = (
+            set(_column_values(record, DEFECT_KIND_COLUMN)) - kinds if kinds is not None else set()
+        )
+        if unowned:
+            raise PanelBatchError(
+                f"this write owns only {sorted(cast(frozenset[str], kinds))} of its sources and "
+                f"the record carries {sorted(map(str, unowned))} too"
+            )
         record_year = panel_partition_year(record, date_timezone=date_timezone)
         if record_year != year:
             raise PanelBatchError(
@@ -5132,8 +5198,13 @@ def write_upstream_defects(
         else []
     )
     source_at = UPSTREAM_DEFECT_STORAGE_COLUMNS.index(SOURCE_DATASET_COLUMN)
-    others = [row for row in stored if row[source_at] not in source_datasets]
-    owned = [row for row in stored if row[source_at] in source_datasets]
+    kind_at = UPSTREAM_DEFECT_STORAGE_COLUMNS.index(DEFECT_KIND_COLUMN)
+
+    def owns(row: Sequence[object]) -> bool:
+        return row[source_at] in source_datasets and (kinds is None or row[kind_at] in kinds)
+
+    others = [row for row in stored if not owns(row)]
+    owned = [row for row in stored if owns(row)]
     if record is None:
         if not owned:
             return None

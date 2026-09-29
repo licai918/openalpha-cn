@@ -21,9 +21,9 @@ from panel_fixtures import EXCHANGE, GeneratedPanel
 from strategy_fixtures import READ_AT, REVERSAL, write_strategy_corpus
 from typer.testing import CliRunner
 
-from openalpha_cn import strategy_view
+from openalpha_cn import cli, strategy_view
 from openalpha_cn.backtest.execution import CostSchedule
-from openalpha_cn.backtest.strategy_backtest import limitation_codes_for
+from openalpha_cn.backtest.strategy_backtest import UnknowableCrossing, limitation_codes_for
 from openalpha_cn.cli import STRATEGY_EXIT, PanelExit, app
 from openalpha_cn.panel_ingest import session_publication_instant
 from openalpha_cn.sdk import OpenAlphaSDK
@@ -106,6 +106,8 @@ def test_the_command_line_and_the_sdk_answer_one_request_with_the_same_bytes(
     assert len(body["periods"]) == 3
     assert set(body["limitations"]) == set(limitation_codes_for("static"))
     assert body["spec"]["costs"]["commission_rate"] == "0.00025"
+    # `V2-P6-020`: the run says whether an unknowable session touched it, not only the registry.
+    assert body["unknowable_crossings"] == []
 
 
 def test_the_text_answer_prints_one_line_per_period(runtime: tuple[Path, GeneratedPanel]) -> None:
@@ -115,6 +117,28 @@ def test_the_text_answer_prints_one_line_per_period(runtime: tuple[Path, Generat
     assert outcome.exit_code == 0, outcome.output
     assert outcome.stdout.count(" net ") == 3
     assert "limitations:" in outcome.stdout
+    assert "unknowable sessions: none" in outcome.stdout
+
+
+def test_each_unknowable_crossing_is_one_line_with_its_price_against_the_other_path() -> None:
+    crossing = UnknowableCrossing(
+        subject="600733.SH",
+        day=date(2018, 9, 27),
+        period_start=date(2018, 9, 21),
+        held_value=Decimal("91234.00"),
+        valuation_difference=Decimal("-11376.35"),
+        share_of_book=Decimal("-0.0568817500"),
+    )
+
+    assert cli._unknowable_crossing_lines(()) == ["unknowable sessions: none"]
+    assert cli._unknowable_crossing_lines((crossing, crossing)) == [
+        "unknowable sessions: 2, valued by the adjustment factor; the published path would have "
+        "booked -22752.70 yuan more in all",
+        "  600733.SH 2018-09-27 (period from 2018-09-21): held 91234.00, published path "
+        "-11376.35 (-0.0568817500 of the book)",
+        "  600733.SH 2018-09-27 (period from 2018-09-21): held 91234.00, published path "
+        "-11376.35 (-0.0568817500 of the book)",
+    ]
 
 
 def test_a_look_ahead_build_exits_unhealthy_with_a_json_refusal(

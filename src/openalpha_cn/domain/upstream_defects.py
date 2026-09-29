@@ -193,10 +193,12 @@ the two shapes of a contradicted valuation apart:
 - `pre_close_corroborated_over_adj_factor`, `adj_factor_corroborated_over_pre_close` and
   `pre_close_contradicts_adj_factor` (`V2-P6-020`): `bar_close` is the session's close and
   `previous_bar_close` the previous stored bar's close -- the two rows the disagreement was
-  judged on, which a reader matches before following the record -- and `up_limit`/`down_limit`
-  the band that decided it (`None` when none was published). The disputed `pre_close` and the
-  two factors are the stored `daily` and `adj_factor` rows the record keys; the kind carries the
-  decision rather than a new column, for `valuation_placeholder_*`'s reason (hard rule 3).
+  judged on, which a reader matches before following the record -- `valuation_close` the
+  **implied** `pre_close` (`previous_bar_close * f_prev / f`, the adjustment factor's statement,
+  which is the column's only use under these kinds: no `daily_basic` row is involved), and
+  `up_limit`/`down_limit` the band that decided it (`None` when none was published). The
+  published `pre_close` is the stored `daily` row the record keys; the kind carries the decision
+  rather than a new column, for `valuation_placeholder_*`'s reason (hard rule 3).
 """
 
 UPSTREAM_DEFECT_NUMBER_COLUMNS: Final[tuple[str, ...]] = UPSTREAM_DEFECT_DATA_COLUMNS[3:8]
@@ -471,6 +473,12 @@ def recorded_return_paths(
                 "judged on, and this one lacks one; a reader could not tell whether it is a "
                 "decision about the rows it holds"
             )
+        if defect.valuation_close is None:
+            raise UpstreamDefectError(
+                f"{defect.ts_code} on {defect.trade_date.isoformat()}: a {defect.kind} record "
+                f"needs the implied pre_close it was judged on, in {VALUATION_CLOSE_COLUMN}, and "
+                "this one has none; a reader could not price the factor path through the session"
+            )
         if key in decided:
             raise UpstreamDefectError(
                 f"{defect.ts_code} on {defect.trade_date.isoformat()} carries two return-path "
@@ -481,6 +489,7 @@ def recorded_return_paths(
             day=defect.trade_date,
             close=defect.bar_close,
             previous_close=defect.previous_bar_close,
+            implied_pre_close=defect.valuation_close,
             path=RETURN_PATH_KINDS[defect.kind],
         )
     return decided

@@ -697,6 +697,18 @@ def strategy_result(
         "information_ratio": information_ratio,
         "annualized_mean_net_excess": mean * per_year,
         "mean_turnover": statistics.fmean(float(p.turnover) for _, p in tested),
+        # V2-P6-020: the sessions a held position crossed whose return no witness decides, and
+        # what the published path would have booked instead in all -- so a ledger row says
+        # whether the run carries a number the data does not decide.
+        "unknowable_crossings": [
+            f"{item.subject}@{item.day.isoformat()}" for item in backtest.unknowable_crossings
+        ],
+        "unknowable_valuation_difference": str(
+            sum(
+                (item.valuation_difference for item in backtest.unknowable_crossings),
+                Decimal("0.00"),
+            )
+        ),
     }
 
 

@@ -1395,6 +1395,7 @@ def _record(
         day=bar.trade_date,
         close=bar.close if close is None else close,
         previous_close=TICK_PAIRS[ts_code][1] if previous_close is None else previous_close,
+        implied_pre_close=_implied(ts_code),
         path=path,  # type: ignore[arg-type]
     )
 

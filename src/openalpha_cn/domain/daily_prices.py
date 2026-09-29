@@ -41,14 +41,19 @@ them:
 
 - `pre_close` is published to two decimals, so its own half-tick is 0.005 and a full tick 0.01.
   That term does not scale with anything.
-- `adj_factor` is published to **four** decimals, and it enters through
-  `implied = prev_close * f_prev / f`. A tick there is worth `implied * 1e-4 / f` of price, so
-  **it scales with the price**. On a 450-yuan stock with `f ~ 1` a single tick in the last
-  published digit of either factor moves the implied previous close by about 0.045 -- four and a
-  half times a flat 0.01 tolerance, with nothing wrong anywhere.
+- `adj_factor` is published to four decimals on recent sessions and to three on most of the
+  history (`V2-P6-020`, below), and it enters through `implied = prev_close * f_prev / f`. A tick
+  there is worth `implied * tick / f` of price, so **it scales with the price**. On a 450-yuan
+  stock with `f ~ 1` a single four-decimal tick in the last published digit of either factor
+  moves the implied previous close by about 0.045 -- four and a half times a flat 0.01
+  tolerance, with nothing wrong anywhere.
 
-So the tolerance is `MAX_PRE_CLOSE_DISAGREEMENT + implied * ADJ_FACTOR_PUBLICATION_TICK *
-(1/f_prev + 1/f)`; see `pre_close_tolerance`.
+So the tolerance is `MAX_PRE_CLOSE_DISAGREEMENT + implied * (tick(f_prev)/f_prev + tick(f)/f)`,
+each factor at its own published tick (`adj_factor_publication_tick`: 1e-3 for a value
+representable at three decimals, `ADJ_FACTOR_PUBLICATION_TICK` otherwise); see
+`pre_close_tolerance`. The measurements in the next two sections were made when every factor was
+read at 1e-4, on seven recent pairs whose factors are four-decimal; the whole-store census under
+the per-value tick is the `V2-P6-020` section.
 
 The flat 0.01 was calibrated on three session pairs (2024-06-27/28, 2025-06-30/07-01,
 2026-06-11/12) whose worst residue was 0.0081, and the adjacent pairs it did not sample break
@@ -87,9 +92,12 @@ is wrong by up to **118.30** (`300394.SZ`), three orders of magnitude away from 
 population, which is what makes the separation robust to the exact constant.
 
 The `1/f` terms are bounded in practice because Tushare's `adj_factor` is a cumulative series
-normalised so its earliest session is 1.0: across the 75,204 factor cells of those seven pairs
-the minimum is exactly 1.0 and the maximum 10,055.6401, so the tolerance never exceeds
-`0.01 + 2e-4 * implied`. It is not bounded by contract, and a factor below 1.0 would widen it.
+normalised so its earliest session is 1.0 -- nearly: across the 75,204 factor cells of those
+seven pairs the minimum is exactly 1.0 and the maximum 10,055.6401, but the whole research store
+holds 66 factor rows below 1.0, the smallest 0.645. So with the per-value tick the factor term
+is at most `2e-3 * implied` (0.2% of the price) for factors of 1 or more, and 0.2064% of the
+price anywhere in the store; with the old 1e-4 tick it was a tenth of that. It is not bounded by
+contract, and a factor below 1.0 widens it.
 
 ### The factor's own tick, and what the whole store says about it (`V2-P6-020`)
 
@@ -536,13 +544,25 @@ class RecordedReturnPath:
     `path` is the corroborated statement's path, or `None` when neither was corroborated: the
     session's return is then unknowable, and `session_returns` raises
     `UnknowableSessionReturnError` rather than choosing one.
+
+    `implied_pre_close` is the adjustment factor's statement of the session's reference price,
+    `previous_close * f_prev / f`, as the record was judged. It travels with the decision so a
+    reader that holds only this session's bar -- the strategy book, the factor engine -- can
+    price both paths: the published path's gross return over the factor path's is
+    `implied_pre_close / pre_close` (`path_ratio`).
     """
 
     ts_code: str
     day: date
     close: float
     previous_close: float
+    implied_pre_close: float
     path: ReturnPath | None
+
+    def path_ratio(self, published_pre_close: float) -> float:
+        """`(close / pre_close) / (close / implied_pre_close)`: the published path's gross
+        return over the factor path's on this session, from the bar's own `pre_close`."""
+        return self.implied_pre_close / published_pre_close
 
 
 def corroborated_return_path(

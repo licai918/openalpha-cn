@@ -848,6 +848,7 @@ from openalpha_cn.domain.daily_prices import (
     DAILY_BASIC_DATASET,
     DAILY_DATASET,
     PRE_CLOSE_COLUMN,
+    RecordedReturnPath,
 )
 from openalpha_cn.domain.factor import (
     FACTOR_DIRECTIONS,
@@ -907,6 +908,7 @@ from openalpha_cn.domain.panel_batch import (
     PanelColumnKind,
     TimelineColumns,
 )
+from openalpha_cn.domain.upstream_defects import UpstreamDefectError
 from openalpha_cn.panel.catalog import (
     DEFAULT_DATE_TIMEZONE,
     PanelStorageError,
@@ -915,6 +917,7 @@ from openalpha_cn.panel.catalog import (
 from openalpha_cn.panel.store import PanelStore, PartitionRef
 from openalpha_cn.panel_ingest import (
     carry_stored_rows_forward,
+    load_return_path_records,
     merge_panel_batches,
     split_panel_batch_by_year,
     write_panel_batch,
@@ -929,6 +932,16 @@ endpoints. A `Literal` rather than a bool for `FactorCoverage`'s reason: "not a 
 one fact, and a third axis (an intraday one, say) would have to be declared here rather than
 arrive as the false branch of an `if`.
 """
+
+ReturnLinks = Literal["own_row", "close_to_close"]
+"""How a price-return factor's window holds its session returns (`V2-P6-020`).
+
+`own_row`: it reads `daily.pre_close`, so every session's return is `close / pre_close` inside
+that session's own row, and a session of the window is a return of the window. `close_to_close`:
+it reads `daily.close` over two or more sessions and no `pre_close` (`reversal_1d`), so the
+return a session carries is the link from the one before it, and the window's first session
+carries none."""
+
 
 EVENT_TIME_COLUMN: Final[str] = "event_time"
 """The clock column the engine resolves to a session date.
@@ -4447,6 +4460,22 @@ class ExcludedReportPeriod:
             )
 
 
+@dataclass(frozen=True, slots=True, kw_only=True, order=True)
+class UnknowableReturnSession:
+    """One security a price-return factor abstained on, and the session that made it abstain.
+
+    `V2-P6-020`. `upstream_defects` recorded that the session's published `pre_close` and the one
+    its adjustment factors imply disagree and that neither is corroborated by the day's own
+    price, so its return is unknowable; a window that would compound or summarise that return
+    has no value, and the observation is `undefined_value`. Counted here -- and on
+    `factor_view.FactorBuildReport.unknowable_return_sessions` -- rather than left to read as an
+    ordinary undefined value, `ExcludedReportPeriod`'s arrangement.
+    """
+
+    subject: str
+    session: date
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class FactorPanel:
     """One factor at one `as_of`: the manifest, every observation, and the wall clock.
@@ -4472,6 +4501,10 @@ class FactorPanel:
     build may not be dropped. Recorded, stored on the manifest row as `input_batch_digest`, out
     of the content address. See `domain/factor.py::FactorInputProvenance`.
     """
+    unknowable_return_sessions: tuple[UnknowableReturnSession, ...] = ()
+    """Every security this build abstained on because its window crosses a session whose return
+    `upstream_defects` records as unknowable (`V2-P6-020`), sorted, with that session. Empty for
+    a factor that reads no session return."""
     excluded_report_periods: tuple[ExcludedReportPeriod, ...] = ()
     """Every statement filing this build's read left out for a period off the quarter grid.
 
@@ -4769,6 +4802,9 @@ def compute_factor(
         requirements=requirements,
     )
     listed = set(universe)
+    links = _return_links(definition)
+    decisions = _return_decisions(store, links=links, requirements=requirements, as_of=as_of)
+    abstained: list[UnknowableReturnSession] = []
     # The answers are computed *before* the manifest, and the ordering is forced rather than
     # stylistic: `observation_digest` is a field of `FactorBuildManifest`, so the manifest cannot
     # exist until the cross section does -- while every observation carries the `manifest_id` the
@@ -4787,6 +4823,9 @@ def compute_factor(
             panel_sessions=panel_sessions,
             evaluator=evaluator,
             manifest_id=_UNSEALED_MANIFEST_ID,
+            links=links,
+            decisions=decisions,
+            abstained=abstained,
         )
         for subject in ordered_subjects
     )
@@ -4823,6 +4862,7 @@ def compute_factor(
         observations=observations,
         built_at=built_at,
         input_provenance=tuple(provenance),
+        unknowable_return_sessions=tuple(sorted(abstained)),
         excluded_report_periods=tuple(
             sorted(
                 ExcludedReportPeriod(dataset=dataset, subject=subject, report_period=period)
@@ -5756,6 +5796,9 @@ def _classify(
     panel_sessions: tuple[date, ...],
     evaluator: FactorEvaluator,
     manifest_id: str,
+    links: ReturnLinks | None = None,
+    decisions: Mapping[tuple[str, date], RecordedReturnPath] | None = None,
+    abstained: list[UnknowableReturnSession] | None = None,
 ) -> FactorObservation:
     """One security's coverage code and, if there is one, its value.
 
@@ -5871,22 +5914,40 @@ def _classify(
             input_row_count=row_count,
             **ends,
         )
-    computed = evaluator(
-        FactorWindow(
-            subject=subject,
-            as_of=as_of,
-            sessions=sessions,
-            periods=periods,
-            values=MappingProxyType(
-                {
-                    key: cells
-                    for key, cells in series.items()
-                    if key[0] not in SHARED_SUBJECT_DATASETS
-                }
-            ),
-            shared=MappingProxyType(
-                {key: cells for key, cells in series.items() if key[0] in SHARED_SUBJECT_DATASETS}
-            ),
+    unknowable: date | None = None
+    if links is not None and decisions:
+        # `V2-P6-020`: a session whose return the record calls unknowable leaves the window with
+        # no answer -- `undefined_value`, decided by the same last branch as any other -- and is
+        # counted; the evaluator is not asked.
+        series, unknowable = _decided_series(
+            subject, sessions=sessions, series=series, links=links, decisions=decisions
+        )
+        if unknowable is not None and abstained is not None:
+            abstained.append(UnknowableReturnSession(subject=subject, session=unknowable))
+    computed = (
+        None
+        if unknowable is not None
+        else evaluator(
+            FactorWindow(
+                subject=subject,
+                as_of=as_of,
+                sessions=sessions,
+                periods=periods,
+                values=MappingProxyType(
+                    {
+                        key: cells
+                        for key, cells in series.items()
+                        if key[0] not in SHARED_SUBJECT_DATASETS
+                    }
+                ),
+                shared=MappingProxyType(
+                    {
+                        key: cells
+                        for key, cells in series.items()
+                        if key[0] in SHARED_SUBJECT_DATASETS
+                    }
+                ),
+            )
         )
     )
     usable = computed is not None and math.isfinite(computed)
@@ -5900,6 +5961,91 @@ def _classify(
         input_row_count=row_count,
         **ends,
     )
+
+
+def _return_links(definition: FactorDefinition) -> ReturnLinks | None:
+    """Whether `definition` reads session returns, and how -- decided by its declared fields.
+
+    Structural rather than a list of factor keys, so a factor added later that reads `pre_close`
+    follows the recorded decisions without anyone remembering to add it. A factor that reads a
+    close as a price level over one session (a valuation ratio) has no return to decide."""
+    if DAILY_DATASET not in definition.datasets:
+        return None
+    columns = set(definition.columns_of(DAILY_DATASET))
+    if CLOSE_COLUMN not in columns:
+        return None
+    if PRE_CLOSE_COLUMN in columns:
+        return "own_row"
+    return "close_to_close" if (definition.lookback_sessions or 0) >= 2 else None
+
+
+def _return_decisions(
+    store: PanelStore,
+    *,
+    links: ReturnLinks | None,
+    requirements: Mapping[str, ReadinessRequirement],
+    as_of: datetime,
+) -> Mapping[tuple[str, date], RecordedReturnPath]:
+    """The `V2-P6-020` decisions a price-return factor follows, read at `as_of` over the `daily`
+    requirement's own years -- or none, for a factor that reads no session return.
+
+    Point in time: a record carries its session's own daily-close clocks, so it is visible at
+    `as_of` exactly when the bar it is about is, and only a session inside the window -- every
+    one of them published by `as_of` -- is ever looked up. Not an input of the manifest: the
+    answers it moves reach `manifest_id` through `observation_digest`, `evaluators`' argument.
+    """
+    if links is None:
+        return MappingProxyType({})
+    try:
+        return load_return_path_records(store, years=requirements[DAILY_DATASET].years, as_of=as_of)
+    except (PanelStorageError, UpstreamDefectError) as error:
+        raise FactorEngineError(
+            f"the recorded return-path decisions could not be read at {as_of.isoformat()}: {error}"
+        ) from error
+
+
+def _decided_series(
+    subject: str,
+    *,
+    sessions: tuple[date, ...],
+    series: Mapping[tuple[str, str], tuple[float, ...]],
+    links: ReturnLinks,
+    decisions: Mapping[tuple[str, date], RecordedReturnPath],
+) -> tuple[Mapping[tuple[str, str], tuple[float, ...]], date | None]:
+    """`series` with every recorded session read on its decided path, or the first session whose
+    return is unknowable (`V2-P6-020`).
+
+    Every reader follows the same record: `domain/labels.py` chains the decided path and drops an
+    unknowable window, the strategy book rescales through a decided session, and this does the
+    same for a factor. A record decides a session only when it was judged on the rows in hand --
+    the session's close, and the previous one where the window holds it -- `session_returns`'
+    matching rule; one judged on other closes is not about these rows and is ignored, as the
+    engine never adjudicated an unrecorded disagreement either.
+
+    - **published** is what `close / pre_close` already reads: nothing moves.
+    - **adjusted** reads the session on the factor path, `close / implied_pre_close`; on a
+      `close_to_close` factor, which reads neither statement, nothing moves.
+    - **unknowable** is returned, and the caller abstains.
+    """
+    closes = series[(DAILY_DATASET, CLOSE_COLUMN)]
+    pre_closes = list(series.get((DAILY_DATASET, PRE_CLOSE_COLUMN), ()))
+    moved = False
+    for index, day in enumerate(sessions):
+        if links == "close_to_close" and index == 0:
+            continue
+        record = decisions.get((subject, day))
+        if record is None or record.close != closes[index]:
+            continue
+        if index > 0 and record.previous_close != closes[index - 1]:
+            continue
+        if record.path is None:
+            return series, day
+        if record.path == "adjusted" and links == "own_row":
+            pre_closes[index] = record.implied_pre_close
+            moved = True
+    if not moved:
+        return series, None
+    return {**series, (DAILY_DATASET, PRE_CLOSE_COLUMN): tuple(pre_closes)}, None
 
 
 def _points_held(

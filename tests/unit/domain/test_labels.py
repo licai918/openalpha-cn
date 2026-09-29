@@ -1290,6 +1290,7 @@ def _recorded(path: str | None, *, close: float = EXIT_CLOSE) -> dict[tuple[str,
             day=EXIT,
             close=close,
             previous_close=ENTRY_CLOSE,
+            implied_pre_close=ENTRY_CLOSE * ENTRY_FACTOR / WRONG_EXIT_FACTOR,
             path=path,  # type: ignore[arg-type]
         )
     }

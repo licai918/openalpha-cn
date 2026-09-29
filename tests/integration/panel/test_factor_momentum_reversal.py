@@ -73,7 +73,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from itertools import pairwise
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, cast
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -99,6 +99,7 @@ from openalpha_cn.domain.industry_classification import (
     INDUSTRY_MEMBERSHIP_TAXONOMY,
 )
 from openalpha_cn.domain.panel_batch import ColumnarPanelBatch, PanelColumn, TimelineColumns
+from openalpha_cn.domain.upstream_defects import UPSTREAM_DEFECT_DATA_COLUMNS
 from openalpha_cn.panel.catalog import ReadinessRequirement
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import (
@@ -110,10 +111,15 @@ from openalpha_cn.panel_factors import (
     SHORT_REVERSAL_SESSIONS,
     FactorEngineError,
     FactorPanel,
+    UnknowableReturnSession,
     apply_factor_transform,
     compute_factor,
 )
-from openalpha_cn.panel_ingest import write_panel_batch
+from openalpha_cn.panel_ingest import (
+    UPSTREAM_DEFECTS_DATASET,
+    write_panel_batch,
+    write_upstream_defects,
+)
 from openalpha_cn.panel_neutralization import INDUSTRY_AND_SIZE, apply_factor_neutralization
 
 SHANGHAI: Final[ZoneInfo] = ZoneInfo("Asia/Shanghai")
@@ -986,3 +992,129 @@ def test_the_two_industry_groups_are_different_sizes_so_demeaning_is_not_a_globa
     by_group = _industry_relative(measured, neutralized.industries())
     globally = _industry_relative(measured, dict.fromkeys(measured, "_ONE_"))
     assert max(abs(by_group[code] - globally[code]) for code in measured) > 1e-6
+
+
+# --- V2-P6-020: a session whose pre_close and adj_factor disagree, as upstream_defects decided
+#
+# The price-return factors read `close / pre_close` inside each session's own row. Where the
+# record says neither statement is corroborated, that session's return is unknowable, and a
+# window that uses it abstains -- `undefined_value`, counted on the panel -- rather than
+# compounding a number the store's own record says nobody can know. Where the record names the
+# factor path, the session is read on it. The session sits ten own sessions back: inside
+# MOMENTUM_20_SESSIONS' compounded twenty, outside REVERSAL_5_SESSIONS' five.
+
+DISPUTED_CODE: Final[str] = PLAIN[0]
+DISPUTED_SESSION: Final[date] = SESSIONS[-10]
+
+
+def _decision_batch(kind: str, *, close_offset: float = 0.0, implied: float) -> ColumnarPanelBatch:
+    close, _pre_close = _path(DISPUTED_CODE)[DISPUTED_SESSION]
+    earlier = SESSIONS[SESSIONS.index(DISPUTED_SESSION) - 1]
+    previous_close = _path(DISPUTED_CODE)[earlier][0]
+    values: dict[str, object] = {
+        "trade_date": DISPUTED_SESSION.isoformat(),
+        "source_dataset": "stk_limit",
+        "defect_kind": kind,
+        "bar_close": float(cast(float, close)) + close_offset,
+        "valuation_close": implied,
+        "previous_bar_close": previous_close,
+        "up_limit": None,
+        "down_limit": None,
+        "valuation_repeats_previous_close": None,
+        "list_date": None,
+    }
+    kinds = {
+        "trade_date": "string",
+        "source_dataset": "string",
+        "defect_kind": "string",
+        "valuation_repeats_previous_close": "boolean",
+        "list_date": "string",
+    }
+    return ColumnarPanelBatch(
+        provider_id="openalpha-cn/tests",
+        dataset=UPSTREAM_DEFECTS_DATASET,
+        kind=UPSTREAM_DEFECTS_DATASET,
+        as_of=AS_OF,
+        fetched_at=BUILT_AT,
+        status="success",
+        subjects=(DISPUTED_CODE,),
+        timeline=TimelineColumns(
+            event_time=(_at(DISPUTED_SESSION, SESSION_CLOSE_TIME),),
+            available_time=(_at(DISPUTED_SESSION, DAILY_AVAILABILITY_TIME),),
+            ingested_time=(_at(DISPUTED_SESSION, DAILY_AVAILABILITY_TIME),),
+            revision_time=(_at(DISPUTED_SESSION, DAILY_AVAILABILITY_TIME),),
+        ),
+        columns=tuple(
+            PanelColumn(name, kinds.get(name, "float"), (values[name],))  # type: ignore[arg-type]
+            for name in UPSTREAM_DEFECT_DATA_COLUMNS
+        ),
+    )
+
+
+def _decided_store(tmp_path: Path, kind: str, **decision: Any) -> PanelStore:
+    store = _written(tmp_path)
+    _close, pre_close = _path(DISPUTED_CODE)[DISPUTED_SESSION]
+    write_upstream_defects(
+        store,
+        _decision_batch(kind, implied=decision.pop("implied", pre_close * 0.8), **decision),
+        year=DISPUTED_SESSION.year,
+        source_datasets=frozenset({"stk_limit"}),
+    )
+    return store
+
+
+def test_a_momentum_window_crossing_an_unknowable_session_abstains_and_is_counted(
+    tmp_path: Path, store: PanelStore
+) -> None:
+    decided = _decided_store(tmp_path, "pre_close_contradicts_adj_factor")
+
+    momentum = _compute(decided, MOMENTUM_20_SESSIONS)
+    reversal = _compute(decided, REVERSAL_5_SESSIONS)
+
+    assert _coverage(momentum)[DISPUTED_CODE] == "undefined_value"
+    assert _by_subject(momentum)[DISPUTED_CODE].value is None
+    assert momentum.unknowable_return_sessions == (
+        UnknowableReturnSession(subject=DISPUTED_CODE, session=DISPUTED_SESSION),
+    )
+    # The window that does not reach the session is not touched, and neither is anyone else.
+    assert reversal.unknowable_return_sessions == ()
+    assert _by_subject(reversal) == _by_subject(_compute(store, REVERSAL_5_SESSIONS))
+    undecided = _by_subject(_compute(store, MOMENTUM_20_SESSIONS))
+    for code, observation in _by_subject(momentum).items():
+        if code != DISPUTED_CODE:
+            assert observation.value == undecided[code].value, code
+
+
+def test_a_momentum_window_crossing_a_session_decided_for_the_factor_path_reads_that_path(
+    tmp_path: Path, store: PanelStore
+) -> None:
+    """`close / implied_pre_close` on the decided session instead of `close / pre_close`: the
+    compounded value moves by exactly `pre_close / implied_pre_close`."""
+    _close, pre_close = _path(DISPUTED_CODE)[DISPUTED_SESSION]
+    implied = pre_close * 0.8
+    decided = _decided_store(tmp_path, "adj_factor_corroborated_over_pre_close", implied=implied)
+
+    observation = _by_subject(_compute(decided, MOMENTUM_20_SESSIONS))[DISPUTED_CODE]
+    published = _expected(DISPUTED_CODE, compounded=20, skip=SHORT_REVERSAL_SESSIONS)
+
+    assert observation.coverage == "computed"
+    assert observation.value == pytest.approx((1.0 + published) * pre_close / implied - 1.0)
+
+
+@pytest.mark.parametrize(
+    ("kind", "offset"),
+    [
+        ("pre_close_corroborated_over_adj_factor", 0.0),
+        ("pre_close_contradicts_adj_factor", 0.01),
+    ],
+    ids=["decided for the published path", "judged on another close"],
+)
+def test_a_window_the_record_does_not_move_is_read_as_before(
+    tmp_path: Path, store: PanelStore, kind: str, offset: float
+) -> None:
+    decided = _decided_store(tmp_path, kind, close_offset=offset)
+
+    momentum = _compute(decided, MOMENTUM_20_SESSIONS)
+
+    assert momentum.unknowable_return_sessions == ()
+    assert _by_subject(momentum) == _by_subject(_compute(store, MOMENTUM_20_SESSIONS))

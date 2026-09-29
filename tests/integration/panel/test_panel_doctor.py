@@ -1094,7 +1094,8 @@ def _record_return_path(store: PanelStore, kind: str, *, close_offset: float = 0
         "source_dataset": PRICE_LIMIT_DATASET,
         "defect_kind": kind,
         "bar_close": _bar_price(SECURITIES[0], LAST_SESSION) + close_offset,
-        "valuation_close": None,
+        # The implied pre_close: the fixture steps the factor 1.0 -> 2.0 on the last session.
+        "valuation_close": _bar_price(SECURITIES[0], PREVIOUS_SESSION) / 2.0,
         "previous_bar_close": _bar_price(SECURITIES[0], PREVIOUS_SESSION),
         "up_limit": None,
         "down_limit": None,

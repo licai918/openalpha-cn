@@ -168,6 +168,9 @@ build and the perturbation loop cannot reach it. That key is held by the equalit
 is `[]` here, and its populated shape is held by
 `tests/integration/panel/test_factor_build_shared_context.py::
 test_a_stub_filing_off_the_quarter_grid_builds_and_every_build_face_lists_it`.
+`unknowable_return_sessions` (`V2-P6-020`) likewise: this store records no decision, so it is
+`[]`, and its populated shape is held by the same file's
+`test_an_unknowable_session_a_return_factor_crosses_is_counted_on_every_build_face`.
 """
 
 
@@ -1305,6 +1308,10 @@ def _expected_build_view(report: FactorBuildReport) -> dict[str, Any]:
                 "report_period": item.report_period.isoformat(),
             }
             for item in report.excluded_report_periods
+        ],
+        "unknowable_return_sessions": [
+            {"subject": item.subject, "session": item.session.isoformat()}
+            for item in report.unknowable_return_sessions
         ],
     }
 

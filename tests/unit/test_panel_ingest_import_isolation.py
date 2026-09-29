@@ -396,6 +396,10 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
     "openalpha_cn.panel_factors": frozenset(
         {
             "panel_ingest.carry_stored_rows_forward",
+            # `V2-P6-020` review round 1: the price-return factors follow the recorded
+            # return-path decisions every other reader follows. A derived record, so it reaches
+            # no fetched dataset the engine does not already read.
+            "panel_ingest.load_return_path_records",
             "panel_ingest.merge_panel_batches",
             "panel_ingest.split_panel_batch_by_year",
             "panel_ingest.write_panel_batch",
@@ -432,6 +436,8 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_factors.FactorPanel",
             "panel_factors.FactorReadCarry",
             "panel_factors.ProcessedFactorPanel",
+            # `V2-P6-020`: the abstentions a price-return factor counts, carried to the report.
+            "panel_factors.UnknowableReturnSession",
             "panel_factors.apply_factor_transform",
             "panel_factors.compute_factor",
             "panel_factors.factor_observation_dataset",

@@ -87,7 +87,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
 from itertools import pairwise
-from typing import Final, Literal, Protocol, Self, get_args
+from typing import Final, Literal, Protocol, Self, cast, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -142,6 +142,7 @@ __all__ = [
     "StrategySpec",
     "TrailingICWeight",
     "TrailingICWeights",
+    "UnknowableCrossing",
     "WalkForwardFit",
     "WalkForwardModel",
     "component_key",
@@ -284,16 +285,26 @@ KNOWN_STRATEGY_BACKTEST_LIMITATIONS: Final[tuple[StrategyBacktestLimitation, ...
             "V2-P6-020. Where daily's pre_close and adj_factor disagree about a session, "
             "upstream_defects records which one the day's own stk_limit band corroborates, and "
             "a held position follows that path: through a corroborated pre_close the session "
-            "return is close / pre_close and every later mark and sale is rescaled to match. "
-            "Where neither is corroborated the return is unknowable, and the book values the "
-            "position exactly as it values every other session and every resumption after a "
-            "halt -- close x adj_factor / entry adj_factor -- and names the (security, session) "
-            "on that period's unknowable_sessions. It does not exclude the security before the "
-            "session (no signal could have known of it) and it does not refuse the period: a "
-            "refused period leaves the book's value unknown until the position is sold, which "
-            "is every later period rather than one. The 2013..2026 research store holds seven "
-            "such sessions, every one a resumption after a halt that spanned a corporate action; "
-            "a period that names one carries a number the data does not decide."
+            "return is close / pre_close and every later mark and sale is rescaled by that "
+            "session's own implied / pre_close ratio. Where neither is corroborated the return is "
+            "unknowable, and the book values the position exactly as it values every other "
+            "session and every resumption after a halt -- close x adj_factor / entry adj_factor. "
+            "The research store holds seven such sessions, every one a resumption after a halt "
+            "that spanned a corporate action, and the evidence is why the factor path is the one "
+            "taken: on five of them pre_close is still the pre-halt close while the factor rose "
+            "1.5 to 4 times, so the published path books a spurious -43% to -72%. Published and "
+            "factor-path returns, in percent: 000010.SZ 2013-07-19 -70.7 / +17.3, 000509.SZ "
+            "2014-01-14 -72.4 / -3.6, 000670.SZ 2014-07-15 -52.5 / +42.6, 600610.SH 2014-11-25 "
+            "+12.7 / +57.8, 600688.SH 2013-08-20 -43.2 / -14.9, 600871.SH 2013-08-20 -42.7 / "
+            "-14.1, 600733.SH 2018-09-27 -36.9 / -27.9. Neither is corroborated: every one of "
+            "those closes lies outside the band centred on its published pre_close. The book does "
+            "not exclude the security before the session (no signal could have known of it) and "
+            "does not refuse the period -- a refused period leaves the book's value unknown until "
+            "the position is sold, which is every later period rather than one. What the choice "
+            "is worth is on the answer: every crossing is on the run's unknowable_crossings with "
+            "the position's booked value and the published path's difference from it, in yuan "
+            "and as a share of the period's starting book, and on its period's "
+            "unknowable_sessions; a run with none is a run this entry did not touch."
         ),
     ),
     StrategyBacktestLimitation(
@@ -875,6 +886,29 @@ class PeriodResult(BaseModel):
         return self
 
 
+class UnknowableCrossing(BaseModel):
+    """One session a held position crossed whose return no witness decides (`V2-P6-020`).
+
+    The book values it by the adjustment factor
+    (`a_session_whose_return_is_unknowable_is_valued_by_the_adjustment_factor`); these fields say
+    what that choice is worth. `held_value` is what the book booked for the position at that
+    session's price -- its close, or its open when it was sold there -- and
+    `valuation_difference` is what the published path would have booked instead, less that:
+    `held_value x (path_ratio - 1)`, in yuan, from the session's own two statements and with no
+    second run. `share_of_book` is that difference over the book's value at the start of the
+    period it fell in (`period_start`).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    subject: str
+    day: date
+    period_start: date
+    held_value: Decimal
+    valuation_difference: Decimal
+    share_of_book: Decimal
+
+
 class StrategyBacktest(BaseModel):
     """The whole answer: the rules, the score source, every period, and what it cannot say.
 
@@ -882,6 +916,9 @@ class StrategyBacktest(BaseModel):
     `rebalance_days` are the sessions the run was told to rebalance on (`V2-P6-011`), `None` on
     the fixed grid -- part of the answer, so a run on named days never reads as a grid run of
     the same spec and source. An answer model, not a stored row: nothing persists it.
+    `unknowable_crossings` (`V2-P6-020`) is every session a held position crossed whose return is
+    unknowable, in the order the book met them -- empty for a run the limitation of that name did
+    not touch, which is how a reader tells the two apart.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -892,6 +929,7 @@ class StrategyBacktest(BaseModel):
     limitations: tuple[str, ...]
     model_fits: tuple[ModelFit, ...] = ()
     rebalance_days: tuple[date, ...] | None = None
+    unknowable_crossings: tuple[UnknowableCrossing, ...] = ()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -934,18 +972,32 @@ class SessionQuote:
     `close / bar.previous_close` through the session), `adjusted` (the factor path, which the
     book follows anyway) or `unknowable` (neither is corroborated). See
     `a_session_whose_return_is_unknowable_is_valued_by_the_adjustment_factor`.
+
+    `path_ratio` is that session's own `implied_pre_close / pre_close` -- the published path's
+    gross return over the factor path's -- and is required exactly when `recorded_path` is set.
+    The book rescales by it, so the correction does not depend on when it last valued the
+    position (review round 1, Minor 2), and prices an unknowable crossing against the other path
+    with it.
     """
 
     bar: MarketBar
     turnover_yuan: Decimal
     adj_factor: Decimal
     recorded_path: Literal["published", "adjusted", "unknowable"] | None = None
+    path_ratio: Decimal | None = None
 
     def __post_init__(self) -> None:
         if self.turnover_yuan < 0:
             raise StrategyBacktestError(f"{self.bar.subject} reports negative turnover")
         if self.adj_factor <= 0:
             raise StrategyBacktestError(f"{self.bar.subject} reports a non-positive adj_factor")
+        if (self.recorded_path is None) != (self.path_ratio is None):
+            raise StrategyBacktestError(
+                f"{self.bar.subject} on {self.bar.trade_date.isoformat()}: path_ratio is carried "
+                "exactly when a recorded path is, and this quote has one without the other"
+            )
+        if self.path_ratio is not None and self.path_ratio <= 0:
+            raise StrategyBacktestError(f"{self.bar.subject} reports a non-positive path_ratio")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -1222,6 +1274,7 @@ def run_strategy_backtest(inputs: StrategyInputs, spec: StrategySpec) -> Strateg
         limitations=limitation_codes_for(inputs.source.kind),
         model_fits=tuple(fit.record for fit in refits),
         rebalance_days=inputs.rebalance_days,
+        unknowable_crossings=tuple(book.unknowable),
     )
 
 
@@ -1799,7 +1852,8 @@ class _Holding:
     """The last close times its adjustment factor, times `correction`."""
     correction: Decimal = Decimal(1)
     """What the adjustment factor is rescaled by after a session whose recorded path is the
-    published one (`V2-P6-020`); exactly `1` until one is crossed."""
+    published one (`V2-P6-020`): the product of those sessions' `path_ratio`s; exactly `1` until
+    one is crossed."""
     observed: date | None = None
     """The newest session whose recorded path this holding has taken into account."""
 
@@ -1816,37 +1870,60 @@ class _Book:
     spec: StrategySpec
     cash: Decimal
     holdings: dict[str, _Holding] = field(default_factory=dict)
-    unknowable: list[str] = field(default_factory=list)
-    """Every `<security>@<session>` a held position crossed with no decided return."""
+    unknowable: list[UnknowableCrossing] = field(default_factory=list)
+    """Every session a held position crossed with no decided return, in the order met."""
+    period_start: date | None = None
+    start_value: Decimal = _ZERO_MONEY
+    """The current period's signal day and starting value, which a crossing's share is over."""
 
     def value(self) -> Decimal:
         return self.cash + sum((holding.value() for holding in self.holdings.values()), _ZERO_MONEY)
 
-    def observe(self, subject: str, holding: _Holding, quote: SessionQuote) -> None:
+    def observe(self, holding: _Holding, quote: SessionQuote) -> Decimal | None:
         """Take a session's recorded path into account, once, before its first price is used.
 
         Only for a position held into the session -- opened on an earlier one -- because the
         disagreement is about the overnight link from the previous close, which a position
-        bought at this session's open never held. On `published` the correction becomes
-        `last mark / (adj_factor x pre_close)`, which makes this session's mark `last mark x
-        close / pre_close` and rescales every later one by the same factor. On `unknowable`
-        nothing is rescaled and the crossing is named.
+        bought at this session's open never held. On `published` the correction is multiplied
+        by the session's own `path_ratio`, which makes this session's gross return
+        `close / pre_close` and rescales every later mark by the same factor. On `unknowable`
+        nothing is rescaled, and the ratio is returned so the caller can price the crossing once
+        it knows what it booked.
         """
         day = quote.bar.trade_date
         if holding.opened >= day or holding.observed == day:
-            return
+            return None
         holding.observed = day
-        if quote.recorded_path == "published":
-            holding.correction = holding.mark / (quote.adj_factor * quote.bar.previous_close)
+        if quote.recorded_path == "published" and quote.path_ratio is not None:
+            holding.correction *= quote.path_ratio
         elif quote.recorded_path == "unknowable":
-            self.unknowable.append(f"{subject}@{day.isoformat()}")
+            return quote.path_ratio
+        return None
+
+    def cross(self, subject: str, day: date, *, held_value: Decimal, ratio: Decimal) -> None:
+        """Name one unknowable crossing on the run, priced against the published path."""
+        difference = (held_value * (ratio - 1)).quantize(_CENT, rounding=ROUND_HALF_UP)
+        self.unknowable.append(
+            UnknowableCrossing(
+                subject=subject,
+                day=day,
+                period_start=cast(date, self.period_start),
+                held_value=held_value,
+                valuation_difference=difference,
+                share_of_book=_quantized(difference / self.start_value),
+            )
+        )
 
     def mark(self, day_quotes: Mapping[str, SessionQuote]) -> None:
         for subject, holding in self.holdings.items():
             quote = day_quotes.get(subject)
             if quote is not None:
-                self.observe(subject, holding, quote)
+                ratio = self.observe(holding, quote)
                 holding.mark = quote.bar.close * holding.adjusted(quote)
+                if ratio is not None:
+                    self.cross(
+                        subject, quote.bar.trade_date, held_value=holding.value(), ratio=ratio
+                    )
 
 
 @dataclass(slots=True)
@@ -1881,6 +1958,7 @@ def _run_period(
     start_value = book.value()
     if start_value <= 0:
         raise StrategyBacktestError(f"the book is worth {start_value} on {signal_day.isoformat()}")
+    book.period_start, book.start_value = signal_day, start_value
     ledger = _Ledger()
     if signal.ranked is not None:
         keep, buy = _decide(inputs, spec, book, signal_day=signal_day, ranked=signal.ranked)
@@ -1919,7 +1997,9 @@ def _run_period(
         held=signal.ranked is None,
         ic_weights=signal.ic_weights,
         model_fit=signal.model_fit,
-        unknowable_sessions=tuple(book.unknowable[crossed:]),
+        unknowable_sessions=tuple(
+            f"{item.subject}@{item.day.isoformat()}" for item in book.unknowable[crossed:]
+        ),
     )
 
 
@@ -2085,10 +2165,12 @@ def _sell(
     if quantity < holding.shares:
         ledger.capped += 1
     fees = _record_fill(ledger, spec, result, subject=subject, day=day, price=bar.open)
-    book.observe(subject, holding, quote)
+    ratio = book.observe(holding, quote)
     proceeds = (quantity * bar.open * holding.adjusted(quote) / holding.entry_adj).quantize(
         _CENT, rounding=ROUND_HALF_UP
     )
+    if ratio is not None:
+        book.cross(subject, day, held_value=proceeds, ratio=ratio)
     book.cash += proceeds - fees
     ledger.sold += result.notional
     holding.shares -= quantity

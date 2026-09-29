@@ -306,6 +306,7 @@ from openalpha_cn.panel_factors import (
     FactorPanel,
     FactorReadCarry,
     ProcessedFactorPanel,
+    UnknowableReturnSession,
     apply_factor_transform,
     compute_factor,
     factor_observation_dataset,
@@ -3260,6 +3261,15 @@ class FactorBuildReport:
     for a factor that reads no statement. Only the raw tier reads the panel; the other two are
     computed from it, so they exclude nothing of their own.
     """
+    unknowable_return_sessions: tuple[UnknowableReturnSession, ...] = ()
+    """Every security a price-return factor abstained on, with the session that made it abstain.
+
+    `V2-P6-020`: the union of each instant's `FactorPanel.unknowable_return_sessions`, sorted. A
+    session whose return `upstream_defects` records as unknowable makes every window that uses it
+    `undefined_value`; this is where that is counted rather than read as an ordinary undefined
+    value. Empty for a factor that reads no session return. The raw tier's only; the other two
+    carry the abstention as the raw value they are computed from.
+    """
 
 
 FACTOR_PLANE_DATASET_PREFIXES: Final[tuple[str, ...]] = (
@@ -3634,6 +3644,9 @@ def _build_one(
             ),
         },
         partitions=tuple(f"{ref.dataset}@{ref.year}" for ref in written),
+        unknowable_return_sessions=tuple(
+            sorted({item for panel in panels for item in panel.unknowable_return_sessions})
+        ),
         excluded_report_periods=tuple(
             sorted({item for panel in panels for item in panel.excluded_report_periods})
         ),
@@ -3933,9 +3946,11 @@ BUILD_VIEW_SCHEMA_VERSION: Final[str] = "factor-build-view/v1"
 def build_view(report: FactorBuildReport) -> dict[str, object]:
     """One build report as JSON-ready data, for `--json` and for the SDK's own rendering.
 
-    Eleven keys, every one a projection of `FactorBuildReport` and none of them recomputed -- the
+    Twelve keys, every one a projection of `FactorBuildReport` and none of them recomputed -- the
     eleventh, `excluded_report_periods`, is `V2-P6-019`'s list of the statement filings a build
-    left out for a period off the quarter grid, one object per filing, `[]` for none. Unlike
+    left out for a period off the quarter grid, one object per filing, `[]` for none; the twelfth,
+    `unknowable_return_sessions`, is `V2-P6-020`'s list of the securities a price-return factor
+    abstained on and the session that made it, `[]` for none. Unlike
     `experiment_view` there is no seal to ship whole -- a build stores partitions rather than a
     document -- so this **is** the rendering, which is why `tests/integration/test_factor_build.py::
     test_every_key_the_build_faces_render_is_separately_falsifiable` perturbs one key at a time and
@@ -3960,6 +3975,10 @@ def build_view(report: FactorBuildReport) -> dict[str, object]:
                 "report_period": item.report_period.isoformat(),
             }
             for item in report.excluded_report_periods
+        ],
+        "unknowable_return_sessions": [
+            {"subject": item.subject, "session": item.session.isoformat()}
+            for item in report.unknowable_return_sessions
         ],
     }
 

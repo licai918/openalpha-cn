@@ -98,6 +98,7 @@ from openalpha_cn.domain.trading_calendar import (
     CALENDAR_PRETRADE_COLUMN,
     TRADING_CALENDAR_DATASET,
 )
+from openalpha_cn.domain.upstream_defects import UPSTREAM_DEFECT_DATA_COLUMNS
 from openalpha_cn.factor_view import (
     FactorBuildReport,
     FactorPanelUnreadableError,
@@ -110,9 +111,15 @@ from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import (
     FACTOR_DEFINITIONS,
     ExcludedReportPeriod,
+    UnknowableReturnSession,
     load_factor_observations,
 )
-from openalpha_cn.panel_ingest import split_panel_batch_by_year, write_panel_batch
+from openalpha_cn.panel_ingest import (
+    UPSTREAM_DEFECTS_DATASET,
+    split_panel_batch_by_year,
+    write_panel_batch,
+    write_upstream_defects,
+)
 from openalpha_cn.sdk import OpenAlphaSDK
 
 SHANGHAI: Final[ZoneInfo] = ZoneInfo("Asia/Shanghai")
@@ -1398,4 +1405,103 @@ def test_a_stub_filing_off_the_quarter_grid_builds_and_every_build_face_lists_it
         "(KNOWN_FACTOR_RUN_LIMITATIONS."
         "a_report_period_off_the_quarter_grid_is_excluded_and_listed_rather_than_rounded)",
         "excluded   0 statement row(s) off the fiscal quarter grid",
+    ]
+
+
+# --- V2-P6-020: a return factor abstains on an unknowable session, and every face counts it ----
+
+UNKNOWABLE_INDEX: Final[int] = 6
+UNKNOWABLE_SECURITY: Final[str] = SECURITIES[UNKNOWABLE_INDEX]
+
+
+def _with_an_unknowable_session(store: PanelStore) -> date:
+    """Record `UNKNOWABLE_SECURITY`'s newest session at `INSTANTS[0]` as one whose return no
+    witness decides, judged on the two stored closes, as the `stk_limit` target writes one."""
+    path = _path(UNKNOWABLE_INDEX, UNKNOWABLE_SECURITY)
+    held = [day for day in path if day <= INSTANTS[0].astimezone(SHANGHAI).date()]
+    session, previous = held[-1], held[-2]
+    close, pre_close = path[session]
+    values: dict[str, object] = {
+        "trade_date": session.isoformat(),
+        "source_dataset": "stk_limit",
+        "defect_kind": "pre_close_contradicts_adj_factor",
+        "bar_close": close,
+        "valuation_close": pre_close * 0.5,
+        "previous_bar_close": path[previous][0],
+        "up_limit": None,
+        "down_limit": None,
+        "valuation_repeats_previous_close": None,
+        "list_date": None,
+    }
+    kinds = {"valuation_repeats_previous_close": "boolean"}
+    published = _at(session, DAILY_AVAILABILITY_TIME)
+    write_upstream_defects(
+        store,
+        ColumnarPanelBatch(
+            provider_id="openalpha-cn/tests",
+            dataset=UPSTREAM_DEFECTS_DATASET,
+            kind=UPSTREAM_DEFECTS_DATASET,
+            as_of=FETCHED_AT,
+            fetched_at=FETCHED_AT,
+            status="success",
+            subjects=(UNKNOWABLE_SECURITY,),
+            timeline=TimelineColumns(
+                event_time=(_at(session, SESSION_CLOSE_TIME),),
+                available_time=(published,),
+                ingested_time=(published,),
+                revision_time=(published,),
+            ),
+            columns=tuple(
+                PanelColumn(
+                    name,
+                    kinds.get(name, "string" if isinstance(values[name], str) else "float"),
+                    (values[name],),
+                )
+                for name in UPSTREAM_DEFECT_DATA_COLUMNS
+            ),
+        ),
+        year=session.year,
+        source_datasets=frozenset({"stk_limit"}),
+    )
+    return session
+
+
+def test_an_unknowable_session_a_return_factor_crosses_is_counted_on_every_build_face(
+    corpus: Path, tmp_path: Path
+) -> None:
+    """Review round 1 of `V2-P6-020`: the factor engine follows the record the labels and the book
+    follow. `reversal_1d` abstains on the one security whose newest link is unknowable -- an
+    `undefined_value` rather than the naive return across it -- and the report, the `--json` body
+    and the terminal line say so; a factor that reads no session return lists nothing."""
+    factor = "earnings_yield_ttm/v1"
+    decided = _copy(corpus, tmp_path / "decided")
+    session = _with_an_unknowable_session(decided)
+
+    reports = _shared(decided, (factor, "reversal_1d/v1"), **_raw_at_january())
+
+    crossed = (UnknowableReturnSession(subject=UNKNOWABLE_SECURITY, session=session),)
+    assert reports[0].unknowable_return_sessions == ()
+    assert reports[1].unknowable_return_sessions == crossed
+    assert _stored_answers(decided, "reversal_1d/v1")[UNKNOWABLE_SECURITY] == (
+        "undefined_value",
+        None,
+    )
+    assert build_view(reports[1])["unknowable_return_sessions"] == [
+        {"subject": UNKNOWABLE_SECURITY, "session": session.isoformat()}
+    ]
+    assert build_view(reports[0])["unknowable_return_sessions"] == []
+
+    runtime = tmp_path / "cli"
+    _with_an_unknowable_session(_copy(corpus, runtime / "panel"))
+    arguments = ["factor", "build", "--runtime-dir", str(runtime), "--factor", "reversal_1d/v1"]
+    arguments.extend(["--tier", "raw", "--as-of", INSTANTS[0].isoformat()])
+    arguments.extend(["--year", "2025", "--year", "2026", "--exchange", EXCHANGE])
+    arguments.extend(["--max-staleness-days", str(STALENESS_DAYS), "--code-commit", COMMIT])
+
+    result = CliRunner().invoke(app, arguments)
+
+    assert result.exit_code == 0, result.stderr
+    assert [line for line in result.stdout.splitlines() if line.startswith("unknowable ")] == [
+        f"unknowable 1 security-session(s) abstained on, whose return upstream_defects records as "
+        f"unknowable: {UNKNOWABLE_SECURITY} {session.isoformat()}"
     ]

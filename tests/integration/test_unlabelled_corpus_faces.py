@@ -76,6 +76,7 @@ direction -- and both reasons it cannot fire are pinned in the last test here.
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, time, timedelta
+from decimal import Decimal
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
@@ -123,6 +124,7 @@ from openalpha_cn.factor_view import FACTOR_DATE_ZONE, FactorPanelUnreadableErro
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_ingest import (
     UPSTREAM_DEFECTS_DATASET,
+    load_daily_bars,
     load_stock_universe,
     load_trading_calendar,
     session_publication_instant,
@@ -775,7 +777,9 @@ def _decided(
         "source_dataset": PRICE_LIMIT_DATASET,
         "defect_kind": kind,
         "bar_close": closes[(DISAGREEING, last.isoformat())] + close_offset,
-        "valuation_close": None,
+        # The implied pre_close; any value will do for these faces, which never price the
+        # factor path through a record -- the book test reads it off the quote.
+        "valuation_close": closes[(DISAGREEING, previous.isoformat())],
         "previous_bar_close": closes[(DISAGREEING, previous.isoformat())],
         "up_limit": None,
         "down_limit": None,
@@ -910,5 +914,20 @@ def test_the_book_is_told_which_path_a_held_position_takes_through_the_session(
         quote = days.quote(last, DISAGREEING)
         assert quote is not None
         assert quote.recorded_path == path, runtime
+        if path is not None:
+            # The record's implied pre_close is the previous close here (see `_decided`), so the
+            # session's own ratio is that over the bar's published pre_close.
+            bars = load_daily_bars(
+                store, day=last, calendar=calendar, as_of=RUN_AS_OF, max_staleness=None
+            )
+            previous = generate_panel(shapes=(MOVING,)).sessions[-2]
+            earlier = load_daily_bars(
+                store, day=previous, calendar=calendar, as_of=RUN_AS_OF, max_staleness=None
+            )
+            assert quote.path_ratio == Decimal(str(earlier[DISAGREEING].close)) / Decimal(
+                str(bars[DISAGREEING].pre_close)
+            )
+        else:
+            assert quote.path_ratio is None
         other = days.quote(last, SECURITIES[0])
         assert other is not None and other.recorded_path is None

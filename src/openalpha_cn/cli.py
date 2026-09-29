@@ -53,6 +53,7 @@ from openalpha_cn.backtest.segmented_reporting import (
     SegmentedReportingError,
     segmented_report_view,
 )
+from openalpha_cn.backtest.strategy_backtest import UnknowableCrossing
 from openalpha_cn.backtest.turnover_variants import (
     TurnoverCostModel,
     TurnoverVariantError,
@@ -134,9 +135,12 @@ from openalpha_cn.domain.trading_calendar import (
 )
 from openalpha_cn.domain.upstream_defects import (
     DEFECT_KIND_COLUMN,
+    RETURN_PATH_KINDS,
     SOURCE_DATASET_COLUMN,
+    UPSTREAM_DEFECT_DATA_COLUMNS,
     UpstreamDefect,
     superseded_versions,
+    upstream_defects_from_panel_rows,
 )
 from openalpha_cn.evidence.service import build_provider_evidence, parse_serialized_evidence
 from openalpha_cn.factor_view import (
@@ -3355,6 +3359,10 @@ def _carried_defects(
         source = row[SOURCE_DATASET_COLUMN]
         if source not in sources or row[DEFECT_KIND_COLUMN] == WITHDRAWN_KIND:
             return False
+        if row[DEFECT_KIND_COLUMN] in RETURN_PATH_KINDS:
+            # `V2-P6-020`: every build judges the whole year's return paths from the stored rows
+            # and writes each decision again, so none is carried past it.
+            return False
         return (str(source), date.fromisoformat(str(row[PRICE_DATE_COLUMN]))) not in rechecked
 
     carried = carry_stored_sessions_forward(
@@ -4296,10 +4304,75 @@ def _year_end_witness(
     return witness
 
 
-def _judged_from(start: date, *, again: frozenset[date]) -> Callable[[date], bool]:
-    """The sessions an incremental `stk_limit` slice judges return paths on (`V2-P6-020`): the
-    slice, and every earlier session it asks again for a carried withdrawal -- whose carried
-    records `_carried_defects` does not carry, so they must be judged again or be lost."""
+def _judge_stored_return_paths(
+    store: PanelStore,
+    provider: TushareProvider,
+    *,
+    written: list[PartitionRef],
+    year: int,
+    sessions: Sequence[date],
+    now: datetime,
+) -> None:
+    """`--return-paths-from-store` (`V2-P6-020`, review round 1): the year's return-path decisions
+    from the **stored** `daily`, `adj_factor` and `stk_limit`, with no band fetched again.
+
+    The research store's years were built before the decisions existed, and every band they need
+    is already stored; re-running the `stk_limit` target would re-fetch about 2,900 whole-market
+    sessions to learn nothing new. This judges exactly what that target's build judges -- the
+    same `reconcile_return_paths`, over the same stored `daily` and `adj_factor`, against the
+    stored bands the target itself wrote -- spending only the four-request reproduction per
+    disputed pair, and replaces only the return-path rows of `upstream_defects`
+    (`write_upstream_defects(kinds=...)`): the target's other records stay as stored.
+
+    Nothing else is written, so there is no `before_write` to order it behind: the only guard is
+    the reproduction, and a disagreement it does not reproduce refuses the year before anything
+    is written, exactly as in the target's own build. A year with no stored `stk_limit` is
+    refused by name -- there is no band to judge against, and building that year of `stk_limit`
+    judges it anyway.
+    """
+    if year not in store.registered_years(PRICE_LIMIT_DATASET):
+        raise _panel_fail(
+            PanelExit.unhealthy,
+            f"--return-paths-from-store has no stored {PRICE_LIMIT_DATASET} year={year} to judge "
+            f"against; build it (`panel build --dataset {PRICE_LIMIT_DATASET} --year {year}`), "
+            "which judges the year's return paths as it writes the bands",
+        )
+    if not sessions:
+        return
+    bands = carry_stored_sessions_forward(
+        store,
+        (),
+        dataset=PRICE_LIMIT_DATASET,
+        year=year,
+        before=sessions[-1] + timedelta(days=1),
+        observed_at=now,
+    )
+    paths = _judge_return_paths(
+        store, provider, limits=bands, year=year, sessions=sessions, now=now, fresh=None
+    )
+    ref = write_upstream_defects(
+        store,
+        paths.record,
+        year=year,
+        source_datasets=frozenset({PRICE_LIMIT_DATASET}),
+        kinds=frozenset(RETURN_PATH_KINDS),
+    )
+    if ref is not None:
+        written.append(ref)
+    counts = Counter(RETURN_PATH_KINDS[defect.kind] for defect in paths.defects)
+    typer.echo(
+        f"RETURN-PATHS year={year}: {len(paths.defects)} recorded from the stored "
+        f"{PRICE_LIMIT_DATASET} ({counts['published']} published, {counts['adjusted']} factor "
+        f"path, {counts[None]} unknowable)",
+        err=True,
+    )
+
+
+def _fetched_from(start: date, *, again: frozenset[date]) -> Callable[[date], bool]:
+    """The sessions an incremental `stk_limit` build fetched again (`V2-P6-020`): the slice, and
+    every earlier session it asks again for a carried withdrawal. `reconcile_return_paths`
+    re-fetches a disputed pair on any other session only when its stored decision no longer
+    matches, and reaches into the year before only for a first pair on one of these."""
     return lambda day: day >= start or day in again
 
 
@@ -4311,7 +4384,7 @@ def _judge_return_paths(
     year: int,
     sessions: Sequence[date],
     now: datetime,
-    judged: Callable[[date], bool] | None,
+    fresh: Callable[[date], bool] | None,
 ) -> ReconciledRows:
     """`panel_ingest.reconcile_return_paths` over the **stored** `daily` and `adj_factor` years
     (`V2-P6-020`), from the `stk_limit` target, which is built after both.
@@ -4321,8 +4394,10 @@ def _judge_return_paths(
     A year whose `daily` or `adj_factor` partition is not stored has nothing to judge, and none is
     recorded: a reader that later meets a disagreement there refuses it as unrecorded, and a
     rebuild of this target once both are stored records it. The previous year's `daily` and
-    `adj_factor` are read when stored, for each security's first pair of the year; without them
-    that pair is not judged, with the same consequence.
+    `adj_factor` are read when stored, and only for the securities whose first pair of the year
+    is judged; without them that pair is not judged, with the same consequence. The stored
+    decisions are read too, so an incremental build writes an unchanged one again without
+    re-fetching it (`reconcile_return_paths`' `fresh`).
 
     Read through `carry_stored_sessions_forward`, the door every build-time read of stored rows
     takes -- its docstring states why an un-gated read is sound for rows event-dated before the
@@ -4336,25 +4411,64 @@ def _judge_return_paths(
     after = sessions[-1] + timedelta(days=1)
     opening = date(year, 1, 1)
 
-    def stored(dataset: str, of: int, before: date) -> list[ColumnarPanelBatch]:
+    def stored(
+        dataset: str, of: int, before: date, subjects: frozenset[str] | None = None
+    ) -> list[ColumnarPanelBatch]:
         return carry_stored_sessions_forward(
-            store, (), dataset=dataset, year=of, before=before, observed_at=now
+            store,
+            (),
+            dataset=dataset,
+            year=of,
+            before=before,
+            observed_at=now,
+            keep=None if subjects is None else (lambda row: row[SUBJECT_COLUMN_NAME] in subjects),
         )
 
-    earlier_bars = stored(DAILY_DATASET, year - 1, opening) if year - 1 in daily_years else []
-    earlier_factors = (
-        stored(ADJ_FACTOR_DATASET, year - 1, opening) if year - 1 in factor_years else []
+    def earlier(
+        subjects: frozenset[str],
+    ) -> tuple[list[ColumnarPanelBatch], list[ColumnarPanelBatch]]:
+        return (
+            stored(DAILY_DATASET, year - 1, opening, subjects),
+            stored(ADJ_FACTOR_DATASET, year - 1, opening, subjects),
+        )
+
+    decided = carry_stored_sessions_forward(
+        store,
+        (),
+        dataset=UPSTREAM_DEFECTS_DATASET,
+        year=year,
+        before=after,
+        observed_at=now,
+        keep=lambda row: (
+            row[SOURCE_DATASET_COLUMN] == PRICE_LIMIT_DATASET
+            and row[DEFECT_KIND_COLUMN] in RETURN_PATH_KINDS
+        ),
     )
+    stored_decisions = {
+        (defect.ts_code, defect.trade_date): defect
+        for batch in decided
+        for defect in upstream_defects_from_panel_rows(
+            zip(
+                batch.subjects,
+                *(
+                    next(column for column in batch.columns if column.name == name).values
+                    for name in UPSTREAM_DEFECT_DATA_COLUMNS
+                ),
+                strict=True,
+            )
+        )
+    }
     return reconcile_return_paths(
         limits,
         bars=stored(DAILY_DATASET, year, after),
-        earlier_bars=earlier_bars,
-        factors=[*earlier_factors, *stored(ADJ_FACTOR_DATASET, year, after)],
+        factors=stored(ADJ_FACTOR_DATASET, year, after),
+        earlier=earlier if {year - 1} <= daily_years & factor_years else None,
         answerable_through=sessions[-1],
         refetch=lambda code, previous_day, day: _refetch_return_path(
             provider, code, previous_day, day
         ),
-        judged=judged,
+        fresh=fresh,
+        stored_decisions=stored_decisions,
     )
 
 
@@ -5869,6 +5983,7 @@ def _build_panel(
     incremental: bool = False,
     rebuild: str = "",
     withdrawn: list[UpstreamDefect] | None = None,
+    return_paths_from_store: bool = False,
 ) -> tuple[tuple[date, ...], str]:
     """Run every requested **year-scoped** target in `PANEL_BUILD_TARGETS`' declared order.
 
@@ -6076,7 +6191,16 @@ def _build_panel(
             withdrawn=withdrawn,
             rechecks=rechecks,
         )
-    if PRICE_LIMIT_DATASET in targets:
+    if PRICE_LIMIT_DATASET in targets and return_paths_from_store:
+        _judge_stored_return_paths(
+            store,
+            provider,
+            written=written.setdefault(PRICE_LIMIT_DATASET, []),
+            year=year,
+            sessions=sessions,
+            now=now,
+        )
+    elif PRICE_LIMIT_DATASET in targets:
         assert calendar is not None  # guaranteed by `_NEEDS_STORED_CALENDAR` above
         # `V2-P6-013`: the upstream's zero/zero band on a whole-day halt is dropped before the
         # writer sees it, and every other zero upper limit is refused by name. The record is
@@ -6126,10 +6250,10 @@ def _build_panel(
             year=year,
             sessions=sessions,
             now=now,
-            judged=(
+            fresh=(
                 None
                 if limit_start is None
-                else _judged_from(limit_start, again=frozenset(asked_limits))
+                else _fetched_from(limit_start, again=frozenset(asked_limits))
             ),
         )
         limit_refs = written.setdefault(PRICE_LIMIT_DATASET, [])
@@ -6991,6 +7115,15 @@ _BUILD_INDUSTRY_SWEEP_HELP = (
 )
 
 
+_BUILD_RETURN_PATHS_FROM_STORE_HELP = (
+    "With --dataset stk_limit only: judge the year's pre_close/adj_factor return-path decisions "
+    "(V2-P6-020) from the stored daily, adj_factor and stk_limit, fetching no band -- only the "
+    "four-request reproduction of each disputed pair -- and replace only those rows of "
+    "upstream_defects. For a store whose years were built before the decisions existed; an "
+    "ordinary stk_limit build judges them as it writes the bands."
+)
+
+
 @panel_app.command("build")
 def panel_build(
     dataset: Annotated[list[str], typer.Option("--dataset", help=_BUILD_DATASET_HELP)],
@@ -7025,6 +7158,10 @@ def panel_build(
     industry_sweep: Annotated[
         str, typer.Option("--industry-sweep", help=_BUILD_INDUSTRY_SWEEP_HELP)
     ] = "slices",
+    return_paths_from_store: Annotated[
+        bool,
+        typer.Option("--return-paths-from-store", help=_BUILD_RETURN_PATHS_FROM_STORE_HELP),
+    ] = False,
     json_output: Annotated[
         bool, typer.Option("--json", help="Emit a machine-readable build report.")
     ] = False,
@@ -7133,6 +7270,15 @@ def panel_build(
                 f"--industry-sweep must be one of {list(INDUSTRY_SWEEPS)}; got {industry_sweep!r}",
             )
         targets = _build_targets(dataset)
+        if return_paths_from_store and (
+            targets != {PRICE_LIMIT_DATASET} or incremental or resume or subject
+        ):
+            raise _panel_fail(
+                PanelExit.bad_request,
+                "--return-paths-from-store judges the stk_limit target's return-path decisions "
+                f"from the stored years alone: pass --dataset {PRICE_LIMIT_DATASET} and nothing "
+                "else, without --incremental, --resume or --subject",
+            )
         subjects = _build_subjects(subject or (), targets)
         years = _build_years(year or (), start, end)
         year_targets = targets - PANEL_BUILD_SPAN_TARGETS
@@ -7208,6 +7354,7 @@ def panel_build(
                         registry_cache=registry_cache,
                         incremental=incremental,
                         withdrawn=withdrawn,
+                        return_paths_from_store=return_paths_from_store,
                         rebuild=_full_rebuild_command(
                             runtime_dir,
                             year=one_year,
@@ -7238,7 +7385,13 @@ def panel_build(
                     err=True,
                 )
                 raise
-            _audit_written_partitions(written, targets=fetched, year=one_year)
+            _audit_written_partitions(
+                written,
+                # A store-only judgement that recorded nothing and replaced nothing writes no
+                # partition, and that is its answer rather than a silent target.
+                targets=fetched - ({PRICE_LIMIT_DATASET} if return_paths_from_store else set()),
+                year=one_year,
+            )
             landed = _all_refs(written)
             stored.extend(landed)
             builds.append(
@@ -8422,6 +8575,16 @@ def _echo_build(report: FactorBuildReport) -> None:
             f"{line}: {listed} (KNOWN_FACTOR_RUN_LIMITATIONS.{OFF_GRID_REPORT_PERIOD_LIMITATION})"
         )
     typer.echo(line)
+    crossed = report.unknowable_return_sessions
+    typer.echo(
+        f"unknowable {len(crossed)} security-session(s) abstained on, whose return "
+        "upstream_defects records as unknowable"
+        + (
+            ": " + ", ".join(f"{item.subject} {item.session.isoformat()}" for item in crossed)
+            if crossed
+            else ""
+        )
+    )
     typer.echo("next       `openalpha factor run --factor ... --start ... --end ...`")
 
 
@@ -11175,6 +11338,29 @@ def _strategy_decimal(value: str, *, flag: str) -> Decimal:
     return parsed
 
 
+def _unknowable_crossing_lines(crossings: Sequence[UnknowableCrossing]) -> list[str]:
+    """The text answer's account of the sessions a held position crossed whose return no witness
+    decides (`V2-P6-020`): one summary line, then one per crossing with what it was worth.
+
+    Always printed, `none` included, so a reader of a text answer can tell a run the
+    `a_session_whose_return_is_unknowable_is_valued_by_the_adjustment_factor` limitation did not
+    touch from one it did -- the limitation code itself is on every answer.
+    """
+    if not crossings:
+        return ["unknowable sessions: none"]
+    total = sum((item.valuation_difference for item in crossings), Decimal("0.00"))
+    return [
+        f"unknowable sessions: {len(crossings)}, valued by the adjustment factor; the published "
+        f"path would have booked {total} yuan more in all",
+        *(
+            f"  {item.subject} {item.day.isoformat()} (period from "
+            f"{item.period_start.isoformat()}): held {item.held_value}, published path "
+            f"{item.valuation_difference} ({item.share_of_book} of the book)"
+            for item in crossings
+        ),
+    ]
+
+
 @strategy_app.command("backtest")
 def strategy_backtest_command(
     combine: Annotated[str, typer.Option("--combine", help=_STRATEGY_COMBINE_HELP)],
@@ -11320,4 +11506,6 @@ def strategy_backtest_command(
                 f"cost {period.cost}  turnover {period.turnover}  "
                 f"rejected {period.rejected_orders}  {benchmarks}"
             )
+        for line in _unknowable_crossing_lines(result.unknowable_crossings):
+            typer.echo(line)
         typer.echo(f"limitations: {', '.join(result.limitations)}")

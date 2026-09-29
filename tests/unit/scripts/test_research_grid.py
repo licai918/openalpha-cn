@@ -33,7 +33,7 @@ from openalpha_cn.backtest.multiple_testing import (
     control_false_discovery_rate,
 )
 from openalpha_cn.backtest.outcome_statistics import sign_flip_test
-from openalpha_cn.backtest.strategy_backtest import StrategyBacktestError
+from openalpha_cn.backtest.strategy_backtest import StrategyBacktestError, UnknowableCrossing
 from openalpha_cn.sdk import OpenAlphaSDK
 from openalpha_cn.strategy_view import StrategyRequestError
 
@@ -657,6 +657,31 @@ def test_the_holdout_drives_the_sdk_and_ledgers_net_excess_and_its_sign_flip(
         assert result["period_complete"] == complete
         assert result["period_count"] == 3
         assert result["excluded_incomplete_periods"] == 1
+        assert result["unknowable_crossings"] == []
+        assert result["unknowable_valuation_difference"] == "0.00"
+        crossed = backtest.model_copy(
+            update={
+                "unknowable_crossings": (
+                    UnknowableCrossing(
+                        subject="600733.SH",
+                        day=backtest.periods[0].end,
+                        period_start=backtest.periods[0].start,
+                        held_value=Decimal("1000.00"),
+                        valuation_difference=Decimal("-120.50"),
+                        share_of_book=Decimal("-0.0006025000"),
+                    ),
+                )
+            }
+        )
+        assert grid.strategy_result(crossed, excess_benchmark="000905.SH")[
+            "unknowable_crossings"
+        ] == [f"600733.SH@{backtest.periods[0].end.isoformat()}"]
+        assert (
+            grid.strategy_result(crossed, excess_benchmark="000905.SH")[
+                "unknowable_valuation_difference"
+            ]
+            == "-120.50"
+        )
         values = [float(value) for value, full in zip(excess, complete, strict=True) if full]
         expected = sign_flip_test(
             tuple(values),

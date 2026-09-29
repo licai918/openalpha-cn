@@ -31,7 +31,7 @@ import dataclasses
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -48,7 +48,12 @@ from openalpha_cn.domain.daily_prices import (
     DAILY_DATASET,
     RecordedReturnPath,
 )
-from openalpha_cn.domain.panel_batch import PanelBatchError
+from openalpha_cn.domain.panel_batch import (
+    ColumnarPanelBatch,
+    PanelBatchError,
+    PanelColumn,
+    TimelineColumns,
+)
 from openalpha_cn.domain.price_limits import (
     PRICE_LIMIT_DATASET,
     PRICE_LIMIT_PANEL_COLUMNS,
@@ -78,6 +83,7 @@ from openalpha_cn.panel_ingest import (
     UPSTREAM_DEFECTS_DATASET,
     load_upstream_defects,
     reconcile_price_disagreements,
+    reconcile_return_paths,
     write_daily_panel,
     write_price_limits,
     write_upstream_defects,
@@ -522,6 +528,7 @@ def _build(
     year: int = YEAR,
     as_of: str = AS_OF,
     no_halts: bool = False,
+    extra: tuple[str, ...] = (),
 ) -> tuple[Any, ScriptedUpstream]:
     upstream = ScriptedUpstream(frame)
     monkeypatch.setenv("TUSHARE_TOKEN", SECRET_TOKEN)
@@ -531,6 +538,7 @@ def _build(
     arguments += ["--as-of", as_of, "--json"]
     if no_halts:
         arguments.append("--no-halts")
+    arguments += list(extra)
     for target in (TRADING_CALENDAR_DATASET, *targets):
         arguments += ["--dataset", target]
     return runner.invoke(app, arguments), upstream
@@ -1781,7 +1789,7 @@ def _return_path_row(kind: str, **values: Any) -> tuple[object, ...]:
         values.get("source", PRICE_LIMIT_DATASET),
         kind,
         values.get("bar_close", 16.18),
-        None,
+        values.get("implied_pre_close", 15.1083),
         values.get("previous_bar_close", 14.71),
         values.get("up_limit", 16.18),
         values.get("down_limit", 13.24),
@@ -1802,6 +1810,7 @@ def test_the_three_return_path_kinds_read_back_as_the_decisions_a_reader_follows
                 ts_code="000010.SZ",
                 day="2013-07-19",
                 bar_close=7.0,
+                implied_pre_close=5.9681,
                 previous_bar_close=23.87,
                 up_limit=None,
                 down_limit=None,
@@ -1819,6 +1828,7 @@ def test_the_three_return_path_kinds_read_back_as_the_decisions_a_reader_follows
             day=date(2020, 1, 2),
             close=16.18,
             previous_close=14.71,
+            implied_pre_close=15.1083,
             path="published",
         ),
         ("600000.SH", date(2020, 1, 2)): RecordedReturnPath(
@@ -1826,6 +1836,7 @@ def test_the_three_return_path_kinds_read_back_as_the_decisions_a_reader_follows
             day=date(2020, 1, 2),
             close=10.2,
             previous_close=14.71,
+            implied_pre_close=15.1083,
             path="adjusted",
         ),
         ("000010.SZ", date(2013, 7, 19)): RecordedReturnPath(
@@ -1833,6 +1844,7 @@ def test_the_three_return_path_kinds_read_back_as_the_decisions_a_reader_follows
             day=date(2013, 7, 19),
             close=7.0,
             previous_close=23.87,
+            implied_pre_close=5.9681,
             path=None,
         ),
     }
@@ -1850,6 +1862,14 @@ def test_a_return_path_record_without_the_two_closes_it_was_judged_on_is_refused
     )
     with pytest.raises(UpstreamDefectError, match="previous_bar_close"):
         recorded_return_paths([defect])
+    # The adjustment factor's own statement of the session's reference price travels with the
+    # decision (`valuation_close` for these kinds), so a reader can price both paths without a
+    # second session's bar; a record without it is refused the same way.
+    (unpriced,) = upstream_defects_from_panel_rows(
+        [_return_path_row("pre_close_contradicts_adj_factor", implied_pre_close=None)]
+    )
+    with pytest.raises(UpstreamDefectError, match="implied pre_close"):
+        recorded_return_paths([unpriced])
     twice = upstream_defects_from_panel_rows(
         [
             _return_path_row("pre_close_contradicts_adj_factor"),
@@ -1890,11 +1910,12 @@ def test_a_disagreement_the_band_decides_is_recorded_by_the_limit_target_with_it
             source_dataset=PRICE_LIMIT_DATASET,
             kind="pre_close_corroborated_over_adj_factor",
             bar_close=10.0,
+            valuation_close=implied,
             previous_bar_close=10.0,
             up_limit=11.0,
             down_limit=9.0,
         )
-        for day in (SESSIONS[2], SESSIONS[3])
+        for day, implied in ((SESSIONS[2], 10.0 * 1.0 / 1.1), (SESSIONS[3], 10.0 * 1.1 / 1.0))
     ]
     # Reproduced before it was recorded: both bars and both factors, one security at a time.
     assert upstream.refetches() == [
@@ -1923,6 +1944,7 @@ def test_a_disagreement_no_band_decides_is_recorded_as_unknowable(
             source_dataset=PRICE_LIMIT_DATASET,
             kind="pre_close_contradicts_adj_factor",
             bar_close=12.0,
+            valuation_close=10.0 * 1.0 / 1.1,
             previous_bar_close=10.0,
             up_limit=11.0,
             down_limit=9.0,
@@ -1959,3 +1981,167 @@ def test_a_limit_year_with_no_stored_price_year_judges_nothing(
     assert result.exit_code == PanelExit.ok, result.output
     assert upstream.refetches() == []
     assert _store(tmp_path).registered_years(UPSTREAM_DEFECTS_DATASET) == ()
+
+
+# --- review round 1: the decisions from the stored bands, with no band fetched again ----------
+
+STORE_ONLY: tuple[str, ...] = ("--return-paths-from-store",)
+
+
+def _judge_from_store(runtime: Path, frame: Frame, monkeypatch: pytest.MonkeyPatch) -> Any:
+    upstream = ScriptedUpstream(frame)
+    monkeypatch.setenv("TUSHARE_TOKEN", SECRET_TOKEN)
+    monkeypatch.setattr(cli, "_panel_transport", lambda: upstream)
+    monkeypatch.setattr(cli, "_panel_clock", lambda: CLOCK)
+    arguments = ["panel", "build", "--runtime-dir", str(runtime), "--year", str(YEAR)]
+    arguments += ["--as-of", AS_OF, "--json", *STORE_ONLY, "--dataset", PRICE_LIMIT_DATASET]
+    return runner.invoke(app, arguments), upstream
+
+
+def test_the_decisions_are_judged_from_the_stored_bands_without_fetching_a_band(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 1, Minor 5: a store whose years were built before `V2-P6-020` holds every
+    band the decision needs. `--return-paths-from-store` judges from the stored `daily`,
+    `adj_factor` and `stk_limit`, spends only the four-request reproduction per disputed pair --
+    no whole-market request of any dataset -- and replaces only the return-path rows: the
+    `stk_limit` target's other records (the zero/zero band on a halt here) stay as stored."""
+    frame = Frame(return_path="published", limit_placeholder=True)
+    built, _ = _build(tmp_path, frame, monkeypatch, "adj_factor", "price", "stk_limit")
+    assert built.exit_code == PanelExit.ok, built.output
+    full = _defects(tmp_path)
+    store = _store(tmp_path)
+    kept = [d for d in full if d.kind not in RETURN_PATH_KINDS]
+    assert kept and len(kept) < len(full)
+    # The store as a build before `V2-P6-020` left it: the same partitions, no decision.
+    write_upstream_defects(
+        store,
+        None,
+        year=YEAR,
+        source_datasets=frozenset({PRICE_LIMIT_DATASET}),
+        kinds=frozenset(RETURN_PATH_KINDS),
+    )
+    assert list(_defects(tmp_path)) == kept
+
+    result, upstream = _judge_from_store(tmp_path, frame, monkeypatch)
+
+    assert result.exit_code == PanelExit.ok, result.output
+    assert _defects(tmp_path) == full
+    assert all("ts_code" in payload["params"] for payload in upstream.payloads)
+    assert len(upstream.payloads) == 8  # two disputed pairs, four requests each
+    assert "RETURN-PATHS year=2013: 2 recorded from the stored stk_limit" in result.output
+
+
+def test_judging_from_the_store_is_the_limit_target_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    upstream = ScriptedUpstream(Frame())
+    monkeypatch.setenv("TUSHARE_TOKEN", SECRET_TOKEN)
+    monkeypatch.setattr(cli, "_panel_transport", lambda: upstream)
+    arguments = ["panel", "build", "--runtime-dir", str(tmp_path), "--year", str(YEAR)]
+    arguments += [*STORE_ONLY, "--dataset", PRICE_LIMIT_DATASET, "--dataset", "price"]
+
+    result = runner.invoke(app, arguments)
+
+    assert result.exit_code == PanelExit.bad_request, result.output
+    assert "--return-paths-from-store" in result.output
+    assert upstream.payloads == []
+
+
+def test_judging_from_a_store_with_no_band_year_is_refused_by_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frame = Frame(return_path="published")
+    built, _ = _build(tmp_path, frame, monkeypatch, "adj_factor", "price")
+    assert built.exit_code == PanelExit.ok, built.output
+
+    result, upstream = _judge_from_store(tmp_path, frame, monkeypatch)
+
+    assert result.exit_code == PanelExit.unhealthy, result.output
+    assert "no stored stk_limit year=2013" in result.output
+    assert upstream.payloads == []
+
+
+# --- review round 1, Minor 4: the year before is read only where a pair reaches into it -----------
+
+
+def _session_batch(dataset: str, rows: Sequence[tuple[str, date, tuple[object, ...]]]) -> Any:
+    names = {
+        DAILY_DATASET: (("trade_date", "string"), ("close", "float"), ("pre_close", "float")),
+        "adj_factor": (("factor_date", "string"), ("adj_factor", "float")),
+        PRICE_LIMIT_DATASET: (
+            ("trade_date", "string"),
+            ("up_limit", "float"),
+            ("down_limit", "float"),
+        ),
+    }[dataset]
+    instants = tuple(datetime.combine(day, time(8, 30), tzinfo=UTC) for _, day, _ in rows)
+    return ColumnarPanelBatch(
+        provider_id="openalpha-cn/tests",
+        dataset=dataset,
+        kind=dataset,
+        as_of=CLOCK,
+        fetched_at=CLOCK,
+        status="success",
+        subjects=tuple(code for code, _, _ in rows),
+        timeline=TimelineColumns(
+            event_time=instants,
+            available_time=instants,
+            ingested_time=instants,
+            revision_time=instants,
+        ),
+        columns=tuple(
+            PanelColumn(
+                name,
+                kind,  # type: ignore[arg-type]
+                tuple(
+                    day.isoformat() if position == 0 else values[position - 1]
+                    for _, day, values in rows
+                ),
+            )
+            for position, (name, kind) in enumerate(names)
+        ),
+    )
+
+
+def test_the_year_before_is_read_only_for_a_first_pair_on_a_fresh_session() -> None:
+    """`600000.SH` trades all three sessions; `600001.SH` first trades on the last. A full build
+    reaches back for both; an incremental one whose slice is the last session reaches back only
+    for the security whose first pair of the year lands on it; a slice that holds no one's first
+    session does not read the year before at all."""
+    first, second, third = SESSIONS[:3]
+    bars = _session_batch(
+        DAILY_DATASET,
+        [
+            ("600000.SH", first, (10.0, 10.0)),
+            ("600000.SH", second, (10.0, 10.0)),
+            ("600000.SH", third, (10.0, 10.0)),
+            ("600001.SH", third, (10.0, 10.0)),
+        ],
+    )
+    factors = _session_batch(
+        "adj_factor",
+        [(code, day, (1.0,)) for code in ("600000.SH", "600001.SH") for day in (first, third)],
+    )
+    asked: list[frozenset[str]] = []
+
+    def earlier(subjects: frozenset[str]) -> tuple[Sequence[Any], Sequence[Any]]:
+        asked.append(subjects)
+        return (), ()
+
+    def judge(fresh: Any) -> None:
+        reconcile_return_paths(
+            [_session_batch(PRICE_LIMIT_DATASET, [("600000.SH", third, (11.0, 9.0))])],
+            bars=[bars],
+            factors=[factors],
+            earlier=earlier,
+            answerable_through=third,
+            refetch=lambda *args: pytest.fail("nothing disagrees here"),
+            fresh=fresh,
+        )
+
+    judge(None)
+    judge(lambda day: day >= third)
+    judge(lambda day: day == second)
+
+    assert asked == [frozenset({"600000.SH", "600001.SH"}), frozenset({"600001.SH"})]

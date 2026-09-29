@@ -1424,7 +1424,7 @@ BEFORE_V2_P6_016_AT_T1: dict[str, str | None] = {
     SUSPENSION_DATASET: "8d5fa9199cc14fb0ecddbf9def87a7d5856383f2b1d04d0e07bd6fefbaf0c285",
     ADJ_FACTOR_DATASET: "2a6465b7be21478e733f61e1a2d91aebcd6f0914a198d31ce1f848139b38183c",
     PRICE_LIMIT_DATASET: "65542ca3da0f6226dfc0ea355cb7a43819fecd17697e54776279ccbacee77b62",
-    UPSTREAM_DEFECTS_DATASET: "d8ee79c955ead8b7383be6184f871a3fedcdb69cffac5845382fb49a6d8ae9ee",
+    UPSTREAM_DEFECTS_DATASET: "f8496325222f8926aa09592529cbb39d63c04bfdd41f4b1cf30614fca2b21bc8",
 }
 """Measured by running this module's `run_build` on the base commit `d5176c5`; the
 `upstream_defects` hash since `V2-P6-020` (its return-path rows, see the test above)."""
@@ -1434,7 +1434,7 @@ BEFORE_V2_P6_016_AT_T2: dict[str, str | None] = {
     SUSPENSION_DATASET: "4b956b47a2d6c8fa2250f99b5d51e3ba916ac0c1f1e05dddc8955acfd18f81e0",
     ADJ_FACTOR_DATASET: "0117628270cf9e6d49209028e45c53fe002a56a3579f39a0fff25145912e0bc8",
     PRICE_LIMIT_DATASET: "40d0618aafcebcbf633e98bed5fdb7e07b3174c1028643d1acf43041dbc19ffd",
-    UPSTREAM_DEFECTS_DATASET: "45f1b9bd0717851c7d1b3d9083b9d20322b3bdab6d4ac8325b199f7b2ef36759",
+    UPSTREAM_DEFECTS_DATASET: "150917a515ae6f08eacb04a1a3152b168b026944921de1dbfea38988ec475dd1",
 }
 
 

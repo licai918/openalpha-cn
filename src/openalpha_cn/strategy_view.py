@@ -1697,8 +1697,10 @@ class _PanelDays:
         except AdjustmentHorizonError:
             return None
         state = self.halts.state_on(day, subject)
+        path, ratio = _recorded_path(self.return_paths.get((subject, day)), bar)
         return SessionQuote(
-            recorded_path=_recorded_path(self.return_paths.get((subject, day)), bar),
+            recorded_path=path,
+            path_ratio=ratio,
             bar=MarketBar(
                 subject=subject,
                 trade_date=day,
@@ -1723,16 +1725,18 @@ class _PanelDays:
 
 def _recorded_path(
     recorded: RecordedReturnPath | None, bar: DailyBar
-) -> Literal["published", "adjusted", "unknowable"] | None:
-    """The book's reading of a `V2-P6-020` decision about this bar's session, or `None`.
+) -> tuple[Literal["published", "adjusted", "unknowable"] | None, Decimal | None]:
+    """The book's reading of a `V2-P6-020` decision about this bar's session, with the
+    session's own `implied / pre_close` ratio -- or `(None, None)`.
 
     Followed only when it was judged on this bar's own close, `session_returns`' matching rule
     for the half the book can check without a second session's bar; a record about another
     close decides nothing here, and the book values the session as it values every other.
     """
     if recorded is None or recorded.close != bar.close:
-        return None
-    return "unknowable" if recorded.path is None else recorded.path
+        return None, None
+    ratio = Decimal(str(recorded.implied_pre_close)) / Decimal(str(bar.pre_close))
+    return ("unknowable" if recorded.path is None else recorded.path), ratio
 
 
 def _board(ts_code: str) -> Literal["main", "star", "growth", "bse"]:

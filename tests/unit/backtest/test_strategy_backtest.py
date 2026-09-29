@@ -1557,12 +1557,20 @@ def _jumped_quotes(
         if day < on:
             continue
         quote = quotes[day][A]
+        # The session's own two statements: the published pre_close is the previous close and
+        # the factor says 1.0 -> 1.1, so the implied pre_close is pre_close / 1.1.
         quotes[day][A] = replace(
             quote,
             adj_factor=Decimal("1.1"),
             recorded_path=recorded if day == on else None,  # type: ignore[arg-type]
+            path_ratio=JUMP_RATIO if day == on and recorded is not None else None,
         )
     return quotes
+
+
+JUMP_RATIO: Final[Decimal] = Decimal(1) / Decimal("1.1")
+"""`implied_pre_close / pre_close` on the jump session: the published path's gross return over
+the factor path's."""
 
 
 def _run(quotes: Mapping[date, Mapping[str, SessionQuote]]) -> tuple[PeriodResult, ...]:
@@ -1624,9 +1632,57 @@ def test_an_unknowable_session_is_valued_by_the_factor_and_named_on_its_period()
     )
 
 
+def test_the_correction_is_the_sessions_own_ratio_and_not_the_last_mark() -> None:
+    """Minor 2 of review round 1. A traded on D3 but the book has no quote for it there -- the
+    view could not price it that session -- so on D4, where the factor jumps and the record names
+    the published path, its last valuation is D2's close (10.20), not the previous bar (D3,
+    10.50). A correction derived from the last mark would book D4 at 10.80 x 10.20 / 10.50; the
+    session's own `implied / pre_close` ratio does not depend on when the book last looked, and
+    the book lands exactly where the unjumped book does."""
+    unpriced = frozenset({(A, D3)})
+
+    def without_d3(
+        quotes: dict[date, dict[str, SessionQuote]],
+    ) -> dict[date, dict[str, SessionQuote]]:
+        for subject, day in unpriced:
+            del quotes[day][subject]
+        return quotes
+
+    baseline = _run(without_d3(build_quotes()))
+    recorded = _run(without_d3(_jumped_quotes(on=D4, recorded="published")))
+
+    assert _values(recorded) == _values(baseline)
+
+
+def test_every_unknowable_crossing_is_on_the_run_with_its_price_against_the_other_path() -> None:
+    """I1 of review round 1: a reader must see from the run itself whether it was affected, and by
+    how much. A holds 9,900 shares through D3, valued by the factor path at 10.50 x 1.1 =
+    114,345.00; the published path would have booked 114,345.00 x (1/1.1 - 1) = -10,395.00 less,
+    which is -5.1975% of the period's 200,000.00 starting book. Computed from the session's own
+    ratio, with no second run."""
+    result = run_strategy_backtest(
+        build_inputs(quotes=_jumped_quotes(recorded="unknowable")), HAND_FIXTURE_SPEC
+    )
+
+    (crossing,) = result.unknowable_crossings
+    assert (crossing.subject, crossing.day, crossing.period_start) == (A, D3, D1)
+    assert crossing.held_value == Decimal("114345.00")
+    assert crossing.valuation_difference == Decimal("-10395.00")
+    assert crossing.share_of_book == Decimal("-0.0519750000")
+    assert result.periods[0].unknowable_sessions == (f"{A}@{D3.isoformat()}",)
+    clean = run_strategy_backtest(build_inputs(), HAND_FIXTURE_SPEC)
+    assert clean.unknowable_crossings == ()
+
+
+def test_a_recorded_session_must_carry_its_ratio() -> None:
+    quote = build_quotes()[D3][A]
+    with pytest.raises(StrategyBacktestError, match="path_ratio"):
+        replace(quote, recorded_path="unknowable")
+
+
 def test_an_unknowable_session_a_position_did_not_hold_through_is_not_named() -> None:
     """C is never bought. A record on its session is not the book's exposure."""
     quotes = build_quotes()
-    quotes[D3][C] = replace(quotes[D3][C], recorded_path="unknowable")
+    quotes[D3][C] = replace(quotes[D3][C], recorded_path="unknowable", path_ratio=JUMP_RATIO)
 
     assert all(p.unknowable_sessions == () for p in _run(quotes))
