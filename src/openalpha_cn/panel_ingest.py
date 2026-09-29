@@ -473,6 +473,7 @@ from openalpha_cn.panel.catalog import (
     FieldCoverage,
     PanelStorageError,
     PartitionCoverage,
+    PartitionNotYetKnowableError,
     ReadinessRequirement,
     RevisionCoverage,
     refusal_type,
@@ -6674,7 +6675,12 @@ def _refuse_a_slice_the_census_disagrees_with(
     credited = (
         f", and {held[day]} more held back until a revision published after it" if held[day] else ""
     )
-    raise PanelStorageError(
+    # Every date short, none over: the rows are stored and the predicate held them back, which it
+    # does only for a clock after `as_of` -- a later read sees them (a `V2-P6-020` decision
+    # stored under its confirming build's clock, say). An excess is a census that does not
+    # describe its partition, and no instant reads it (`V2-P6-011` fix round 16).
+    short = all(visible[date_] + held[date_] < happened[date_] for date_ in disagreed)
+    raise (PartitionNotYetKnowableError if short else PanelStorageError)(
         f"{dataset} year={year} cannot be read at {as_of.isoformat()}: its date census counts "
         f"{happened[day]} row(s) dated {day.isoformat()}, whose event had already happened, and "
         f"the visible slice carries {visible[day]} of them{credited} ({withheld_row_count} "
@@ -6774,9 +6780,9 @@ def panel_readiness_requirement(
     )
 
 
-RowDigestCache = MutableMapping[tuple[str, int, str], tuple[tuple[date, datetime, str], ...]]
-"""One partition's rows as `(event date, visible from, row hash)`, sorted by row hash, by
-`(dataset, year, content_hash)`: a partition is read once per state however many days and
+RowDigestCache = MutableMapping[tuple[str, int, str], tuple[tuple[date, datetime, str, str], ...]]
+"""One partition's rows as `(event date, visible from, row hash, subject)`, sorted by row hash,
+by `(dataset, year, content_hash)`: a partition is read once per state however many days and
 instants are asked about it."""
 
 
@@ -6788,12 +6794,18 @@ def stored_rows_digest(
     through: date,
     visible_at: datetime,
     since: date | None = None,
+    in_force: bool = False,
     date_timezone: str = DEFAULT_DATE_TIMEZONE,
     cache: RowDigestCache | None = None,
 ) -> str | None:
     """A digest of the stored rows of `(dataset, year)` dated on or before `through` (and on or
     after `since`, when given) and visible at `visible_at`; `None` when the partition is not
     stored (`V2-P6-011`'s input provenance).
+
+    `in_force` (with `since`) also takes each subject's newest visible row dated before `since`:
+    the row still in force on `since` in a step series -- a compressed `adj_factor`'s last change
+    before it, the `suspend_d` row a halt that encloses it carries -- which a reader of the
+    window reads though it is not dated inside it (`V2-P6-011` fix round 16).
 
     What a prediction filed for `through` could have read of this partition at its signal
     instant, fingerprinted so a later verification can tell "the store corrected what the record
@@ -6833,6 +6845,7 @@ def stored_rows_digest(
                         cast(datetime, row[event]).astimezone(zone).date(),
                         max(cast(datetime, row[available]), cast(datetime, row[revised])),
                         hashlib.sha256(repr(row).encode("utf-8")).hexdigest(),
+                        str(row[0]),
                     )
                     for row in store.query(dataset, year=year, columns=names)
                 ),
@@ -6841,11 +6854,19 @@ def stored_rows_digest(
         )
         if cache is not None:
             cache[key] = rows
-    body = "\n".join(
-        digest
-        for day, visible, digest in rows
-        if day <= through and visible <= visible_at and (since is None or day >= since)
-    )
+    visible = [row for row in rows if row[0] <= through and row[1] <= visible_at]
+    kept = {row[2] for row in visible if since is None or row[0] >= since}
+    if since is not None and in_force:
+        newest: dict[str, date] = {}
+        for day, _visible, _digest, subject in visible:
+            if day < since and day > newest.get(subject, date.min):
+                newest[subject] = day
+        kept.update(
+            digest
+            for day, _visible, digest, subject in visible
+            if day < since and newest.get(subject) == day
+        )
+    body = "\n".join(digest for _day, _visible, digest, _subject in rows if digest in kept)
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 

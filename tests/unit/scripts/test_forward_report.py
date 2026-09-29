@@ -63,12 +63,18 @@ from panel_fixtures import generate_panel
 from strategy_fixtures import READ_AT, write_strategy_corpus, write_strategy_corpus_published_daily
 
 from openalpha_cn import strategy_registration
-from openalpha_cn.domain.panel_batch import PanelColumn
+from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
+from openalpha_cn.domain.panel_batch import PanelColumn, TimelineColumns
 from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET
 from openalpha_cn.domain.upstream_defects import UPSTREAM_DEFECT_DATA_COLUMNS
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import write_factor_panels
-from openalpha_cn.panel_ingest import UPSTREAM_DEFECTS_DATASET, write_upstream_defects
+from openalpha_cn.panel_ingest import (
+    UPSTREAM_DEFECTS_DATASET,
+    split_panel_batch_by_year,
+    write_adjustment_factors,
+    write_upstream_defects,
+)
 from openalpha_cn.storage.predictions import FilePredictionStore
 from openalpha_cn.strategy_registration import (
     RegisteredConfiguration,
@@ -454,8 +460,10 @@ def test_the_forward_summary_tests_both_statistic_sets_with_the_holdouts_own_fun
 ) -> None:
     """`grid.strategy_result` -- the holdout's sign-flip test of non-overlapping periods' net
     excess, one-sided p -- over the headline book and the sensitivity subset, against all-A
-    equal weight (the registration's `excess_benchmark`) and 000905.SH, under the registration's
-    own `bootstrap_samples`/`random_seed`. Only complete periods are tested; the short last one is
+    equal weight (the registration's `excess_benchmark`), under the registration's own
+    `bootstrap_samples`/`random_seed`, with 000905.SH reported beside it from the same result's
+    `reported_*` keys (one call per set, one source; it tests nothing, as the protocol says).
+    Only complete periods are tested, each one's session count shown; the short last one is
     shown and said to be left out."""
     panel_root, admitted, _sessions, _signal_days = build_static_fixture(
         tmp_path, repo, settings=SETTINGS
@@ -487,33 +495,43 @@ def test_the_forward_summary_tests_both_statistic_sets_with_the_holdouts_own_fun
 
     periods = len(report.backtest.periods)
     assert periods == 3
-    # Headline and sensitivity (nothing unverifiable, so the subset is every period), each
-    # against both benchmarks.
-    assert sorted(asked) == sorted(
-        [(benchmark, 4_321, 97, periods) for benchmark in ("000905.SH", "equal_weight_all_a")] * 2
-    )
+    # Headline and sensitivity (nothing unverifiable, so the subset is every period): one call
+    # each, against the registration's excess_benchmark.
+    assert asked == [("equal_weight_all_a", 4_321, 97, periods)] * 2
     significance = report.summary["significance"]
-    assert "complete" in significance["tested"]
+    assert "complete" in significance["tested"] and "session count" in significance["tested"]
     for name in ("all_periods", "excluding_unverifiable"):
-        for benchmark in ("equal_weight_all_a", "000905.SH"):
-            shown = significance[name][benchmark]
-            expected = real(
-                report.backtest,
-                excess_benchmark=benchmark,
-                bootstrap_samples=4_321,
-                random_seed=97,
-            )
-            for key in (
-                "p_excess",
-                "p_excess_one_sided",
-                "mean_net_excess",
-                "net_excess",
-                "excluded_incomplete_periods",
-            ):
-                assert shown[key] == expected[key], (name, benchmark, key)
-            assert shown["excluded_incomplete_periods"] == 1
-            assert shown["tested_periods"] == periods - 1
-            assert (shown["bootstrap_samples"], shown["random_seed"]) == (4_321, 97)
+        shown = significance[name]["equal_weight_all_a"]
+        expected = real(
+            report.backtest,
+            excess_benchmark="equal_weight_all_a",
+            bootstrap_samples=4_321,
+            random_seed=97,
+        )
+        for key in (
+            "p_excess",
+            "p_excess_one_sided",
+            "mean_net_excess",
+            "net_excess",
+            "excluded_incomplete_periods",
+        ):
+            assert shown[key] == expected[key], (name, key)
+        assert shown["excluded_incomplete_periods"] == 1
+        assert shown["tested_periods"] == periods - 1
+        assert shown["tested_period_sessions"] == [
+            period.sessions for period in report.backtest.periods[:-1]
+        ]
+        assert (shown["bootstrap_samples"], shown["random_seed"]) == (4_321, 97)
+        # 000905.SH from the same result's reported_* keys: the numbers a separate call against
+        # it gives, so reading them is one source, not a second computation.
+        reported = significance[name]["000905.SH"]
+        separately = real(
+            report.backtest, excess_benchmark="000905.SH", bootstrap_samples=4_321, random_seed=97
+        )
+        assert reported["reported"] is True
+        assert reported["net_excess"] == separately["net_excess"]
+        assert reported["mean_net_excess"] == separately["mean_net_excess"]
+        assert "p_excess" not in reported
     json.dumps(forward_report.forward_report_view(report))
     # The sensitivity set is tested on its own periods: with the first record unverifiable, the
     # two periods after it, one of them complete.
@@ -526,21 +544,38 @@ def test_the_forward_summary_tests_both_statistic_sets_with_the_holdouts_own_fun
     )["significance"]["excluding_unverifiable"]["equal_weight_all_a"]
     assert (sensitivity["period_count"], sensitivity["tested_periods"]) == (2, 1)
     lines = daily.forward_summary_lines(report.summary)
-    assert any("one-sided p" in line and "000905.SH" in line for line in lines)
+    assert any("one-sided p" in line and "equal_weight_all_a" in line for line in lines)
+    assert any("sessions [" in line for line in lines)
+    assert any("000905.SH" in line and "tests nothing" in line for line in lines)
     assert any("complete" in line and "not tested" in line for line in lines)
     assert lines[-1] == daily.INTEGRITY
 
 
-def test_forward_summary_refuses_a_registration_without_its_measurement_settings() -> None:
-    """No default stands in for the registration's `bootstrap_samples`/`random_seed`."""
-    with pytest.raises(daily.StepFailedError, match="bootstrap_samples"):
+@pytest.mark.parametrize(
+    ("settings", "named"),
+    [
+        pytest.param({"random_seed": 1}, "bootstrap_samples", id="samples_missing"),
+        pytest.param(
+            {"bootstrap_samples": 100, "random_seed": True}, "random_seed", id="bool_seed"
+        ),
+        pytest.param(
+            {"bootstrap_samples": False, "random_seed": 1}, "bootstrap_samples", id="bool"
+        ),
+    ],
+)
+def test_forward_summary_refuses_a_registration_without_its_measurement_settings(
+    settings: dict[str, object], named: str
+) -> None:
+    """No default stands in for the registration's `bootstrap_samples`/`random_seed`, and a bool
+    -- an int to Python -- is not one (`Registration.seed`'s rule, round 16)."""
+    with pytest.raises(daily.StepFailedError, match=named):
         daily.forward_summary(
             SimpleNamespace(periods=()),
             SimpleNamespace(unverifiable=[]),
             daily.ForwardSchedule(
                 rebalances=(), days=(), first_record=date(2026, 1, 5), unprovable_holds=()
             ),
-            settings={"random_seed": 1},
+            settings=settings,
         )
 
 
@@ -653,6 +688,11 @@ def test_a_missed_rebalance_is_caught_up_on_the_next_record_the_store_witnesses(
     # Day 5 caught up the rebalance scheduled on day 4; the grid's next is day 7, not day 5 plus
     # the interval (day 8), so the last period ends there (`V2-P6-012` review, minor 3).
     assert report.backtest.periods[-1].end == sessions[7]
+    # A journalled book's periods are the days it rebalanced on: the tested one's length is
+    # stated, not assumed to be the interval (round 16).
+    shown = report.summary["significance"]["all_periods"]["equal_weight_all_a"]
+    assert shown["tested_period_sessions"] == [4]
+    assert shown["excluded_incomplete_periods"] == 1
 
 
 # --- production-shaped: a held day ---------------------------------------------------------------
@@ -853,7 +893,7 @@ def test_a_registration_whose_config_id_does_not_match_its_own_config_is_refused
     # One place: the daily command's own admission refuses it the same way (review minor 1).
     with pytest.raises(daily.StepFailedError, match="config_id") as refused:
         daily.admit_registration(registration_path, repo)
-    assert refused.value.exit_code == daily.DailyExit.no_registration
+    assert refused.value.exit_code == daily.DailyExit.code_not_registered == 3
 
 
 def test_a_change_to_only_daily_selections_own_file_after_registration_refuses(
@@ -1417,11 +1457,15 @@ def test_a_build_superseded_after_an_older_record_files_marks_it_unverifiable(
     )
 
 
-def _record_return_path_decisions(root: Path, decisions: Sequence[tuple[date, datetime]]) -> None:
+def _record_return_path_decisions(
+    root: Path, decisions: Sequence[tuple[date, datetime]], *, full: Any = None
+) -> None:
     """`pre_close_contradicts_adj_factor` decisions (`V2-P6-020`), each about a session of the
     corpus's first security and stored under its confirming build's clock -- the `stk_limit`
-    target's whole record for the year, as that target writes it (one call owns its rows)."""
-    full = generate_panel(shapes=("daily.close_moves_between_sessions",))
+    target's whole record for the year, as that target writes it (one call owns its rows).
+    `full` is the corpus's generated panel (default: the ten-session one)."""
+    if full is None:
+        full = generate_panel(shapes=("daily.close_moves_between_sessions",))
     subject = full.securities[0]
     closes = {
         (str(code), str(day)): float(close)  # type: ignore[arg-type]
@@ -1668,3 +1712,192 @@ def test_a_journalled_hold_before_the_panel_advanced_is_still_witnessed(
     }
     assert [session for session, _record in report.schedule.rebalances] == [first]
     assert report.check.verified == identifiers[:1]
+
+
+# --- Fix round 16: the correction check measures what the day actually reads ---------------------
+
+TWO_YEAR_WALK_FORWARD: Final[dict[str, Any]] = {
+    "walk_forward": {
+        **tds.WALK_FORWARD["walk_forward"],
+        "train_sessions": 5,
+        "refit_every_sessions": 25,
+    }
+}
+"""A refit every 25 sessions: a day 23 sessions after its anchor is scored by the fit refitted on
+the anchor, trained on the window before it."""
+LATE: Final[datetime] = datetime(2027, 1, 15, 21, 0, tzinfo=daily.SHANGHAI)
+"""After every filing below, before the two-year corpus's newest row."""
+
+
+def _corrupted_late_record(
+    root: Path, source: Mapping[str, Any], *, day: date, anchor: date
+) -> tuple[Any, Any]:
+    """`day`'s record under `source` on the two-year corpus, filed at its evening with every score
+    negated -- so its recompute differs whatever else does -- and the provenance written then;
+    and the registration's check of it. The recompute reads the corpus at its readable instant:
+    the 2027 partitions reach past the filing, so the filing time cannot read them."""
+    store = PanelStore(root / "panel")
+    configured = tds._base(**source)
+    filed = tds._evening(day)
+
+    def request_for(session: date, at: datetime) -> Any:
+        return strategy_request(
+            **configured, start=session - timedelta(days=1), end=session, as_of=at
+        )
+
+    readable = strategy_registration.readable_instant(store, request_for(day, filed), day=day)
+    assert readable is not None and readable > filed
+    request = request_for(day, readable)
+    honest = signal_day_batch(
+        score_day(store, request, day=day, anchor=anchor),
+        request,
+        tds.REGISTERED,
+        predicted_at=filed,
+    )
+    assert honest is not None
+    assert any(row.score for row in honest.predictions)
+    batch = honest.model_copy(
+        update={
+            "predictions": tuple(
+                row.model_copy(update={"score": None if row.score is None else -row.score})
+                for row in honest.predictions
+            )
+        }
+    )
+    held = input_provenance(store, request, tds.REGISTERED, day=day, batch=batch, recorded_at=filed)
+    calendar = daily._outcome_calendar(store, request.exchange, day, readable)
+    record, _outcome = daily.register_prediction(
+        root, batch, calendar=calendar, clock=lambda: filed
+    )
+    check = strategy_registration.RecordCheck(
+        store,
+        tds.REGISTERED,
+        request_for=request_for,
+        anchor=anchor,
+        provenance_for=lambda _record: held,
+    )
+    return record, check
+
+
+def _a_late_factor_step(root: Path, subject: str, *, on: date, back_on: date) -> None:
+    """`subject`'s `adj_factor` for `on` restated upward and back on `back_on` -- a corporate
+    action the upstream published late, both rows stamped `LATE`. The year is rewritten whole
+    through the real writer, which stores the steps: the two new change points are the only
+    rows that move."""
+    panel = strategy_fixtures._two_year_panel()
+    part = dict(split_panel_batch_by_year(panel.batch(ADJ_FACTOR_DATASET)))[on.year]
+    dates = next(column for column in part.columns if column.name == "factor_date").values
+    marks = [
+        code == subject and day in {on.isoformat(), back_on.isoformat()}
+        for code, day in zip(part.subjects, dates, strict=True)
+    ]
+
+    def stamped(values: Sequence[datetime]) -> tuple[datetime, ...]:
+        return tuple(LATE if mark else value for value, mark in zip(values, marks, strict=True))
+
+    timeline = part.timeline
+    write_adjustment_factors(
+        PanelStore(root / "panel"),
+        [
+            dataclasses.replace(
+                part,
+                as_of=LATE,
+                fetched_at=LATE,
+                columns=tuple(
+                    PanelColumn(
+                        column.name,
+                        column.kind,
+                        tuple(
+                            value * 1.1
+                            if column.name == "adj_factor" and mark and day == on.isoformat()
+                            else value
+                            for value, mark, day in zip(column.values, marks, dates, strict=True)
+                        ),
+                    )
+                    for column in part.columns
+                ),
+                timeline=TimelineColumns(
+                    event_time=timeline.event_time,
+                    available_time=stamped(timeline.available_time),
+                    ingested_time=stamped(timeline.ingested_time),
+                    revision_time=stamped(timeline.revision_time),
+                ),
+            )
+        ],
+        calendar=panel.calendar(),
+    )
+
+
+@pytest.mark.parametrize("stepped", [False, True], ids=["nothing_restated", "factor_restated"])
+def test_a_late_factor_step_in_force_before_the_window_is_a_correction_not_a_refusal(
+    tmp_path: Path, stepped: bool
+) -> None:
+    """A trailing-IC day of 2027-01-12 reads its window from early December, and a compressed
+    `adj_factor` answers every day of it from the row in force when it opens -- the last change
+    before it. A change dated 2026-11-30, published after the record was filed, moves that row
+    though no row inside the window moved: the record, whose recompute differs, is `UNVERIFIABLE`
+    naming `adj_factor:2026` (fix round 16). With nothing restated it is refused."""
+    strategy_fixtures.write_two_year_corpus(tmp_path)
+    day = date(2027, 1, 12)
+    record, check = _corrupted_late_record(tmp_path, tds.TRAILING, day=day, anchor=day)
+    if stepped:
+        subject = strategy_fixtures._two_year_panel().securities[1]
+        _a_late_factor_step(tmp_path, subject, on=date(2026, 11, 30), back_on=date(2026, 12, 1))
+
+    refusal = check(record)
+
+    if not stepped:
+        assert refusal is not None and "no input it read has been corrected since" in refusal
+        return
+    assert refusal is None
+    ((flagged, changes),) = check.unverifiable
+    assert flagged == record.record_id
+    assert changes == ("adj_factor:2026 (rows of the window recorded after filing)",)
+
+
+@pytest.mark.parametrize("decided", [False, True], ids=["nothing_recorded", "decision_recorded"])
+def test_a_walk_forward_records_window_is_counted_from_its_refit_day(
+    tmp_path: Path, decided: bool
+) -> None:
+    """A walk-forward day scored 23 sessions after its fit's refit day (every 25) reads the
+    training window before that refit day. A return-path decision about 2026-12-04 -- before the
+    window counted from the day itself, inside the one counted from the refit day -- recorded
+    after filing makes the record, whose recompute differs, `UNVERIFIABLE` naming
+    `upstream_defects:2026` (fix round 16); with nothing recorded it is refused."""
+    strategy_fixtures.write_two_year_corpus(tmp_path)
+    full = strategy_fixtures._two_year_panel()
+    anchor, day = date(2026, 12, 14), date(2027, 1, 15)
+    assert len(full.calendar().trading_days_between(anchor, day)) - 1 == 23
+    early = (date(2026, 11, 2), tds._evening(date(2026, 11, 2)))
+    _record_return_path_decisions(tmp_path, [early], full=full)
+    record, check = _corrupted_late_record(tmp_path, TWO_YEAR_WALK_FORWARD, day=day, anchor=anchor)
+    if decided:
+        _record_return_path_decisions(tmp_path, [early, (date(2026, 12, 4), LATE)], full=full)
+
+    refusal = check(record)
+
+    if not decided:
+        assert refusal is not None and "no input it read has been corrected since" in refusal
+        return
+    assert refusal is None
+    ((flagged, changes),) = check.unverifiable
+    assert flagged == record.record_id
+    assert changes == ("upstream_defects:2026 (rows of the window recorded after filing)",)
+
+
+def test_a_step_series_is_read_from_the_year_before_its_window_opens() -> None:
+    """A step series answers the first day of a window from the row in force then, which --
+    when the window opens before a year's first session -- sits in the year before; its readers
+    take that year too (`strategy_view._PanelDays.adjustments`). So the partitions a day is
+    fingerprinted over reach one year further back for `adj_factor`/`suspend_d` than for a
+    dataset read by the date (`V2-P6-011` fix round 16)."""
+    day = date(2027, 1, 12)
+    request = strategy_request(
+        **tds._base(**tds.TRAILING),
+        start=day - timedelta(days=1),
+        end=day,
+        as_of=tds._evening(day),
+    )
+    assert strategy_registration._dataset_years(request, day, "daily") == (2026, 2027)
+    for step in ("adj_factor", "suspend_d"):
+        assert strategy_registration._dataset_years(request, day, step) == (2025, 2026, 2027)

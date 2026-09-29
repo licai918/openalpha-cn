@@ -133,7 +133,6 @@ from openalpha_cn.backtest.strategy_backtest import (  # noqa: E402
 )
 from openalpha_cn.domain.alpha_model import PredictionBatch  # noqa: E402
 from openalpha_cn.domain.index_membership import (  # noqa: E402
-    CSI500_INDEX_CODE,
     INDEX_WEIGHT_DATASET,
     INDEX_WEIGHT_INDEX_CODES,
 )
@@ -414,7 +413,9 @@ def admit_registration(path: Path, repo: Path, *, also_bound: Sequence[str] = ()
             f"{path}'s config_id {body.get('config_id')!r} does not match its own config "
             f"(re-derived: {config_id!r}); the registration file may have been edited after it "
             "was written",
-            exit_code=DailyExit.no_registration,
+            # Not "no registration": there is one, and it contradicts itself -- the same class as
+            # code that is not the registered code (round 16).
+            exit_code=DailyExit.code_not_registered,
         )
     settings = body.get("settings")
     settings = dict(settings) if isinstance(settings, dict) else {}
@@ -1514,15 +1515,14 @@ def _book_statistics(periods: Sequence[Any]) -> dict[str, Any]:
     }
 
 
-REPORTED_EXCESS_BENCHMARK: Final[str] = CSI500_INDEX_CODE
-"""The benchmark the forward report tests excess against beside the registration's own
-`excess_benchmark` (all-A equal weight): the protocol reports 000905.SH beside it."""
-
 SIGNIFICANCE_TESTED: Final[str] = (
     "grid.strategy_result, the holdout's own: a sign-flip test of the non-overlapping periods' "
-    "net excess (one-sided p), over complete periods only -- a period of at least the "
-    "registered rebalance interval in sessions. A shorter period (the book's open last period, "
-    "a catch-up's) is shown in the statistics and not tested"
+    "net excess over the registration's excess_benchmark (one-sided p), over complete periods "
+    "only -- a period of at least the registered rebalance interval in sessions. A shorter "
+    "period (the book's open last period, a catch-up's) is shown in the statistics and not "
+    "tested. The periods are the sessions the command rebalanced on, so the tested ones need "
+    "not be of equal length: each one's session count is shown. 000905.SH is reported beside "
+    "the test from the same result's reported_* keys and tests nothing (the protocol's rule)"
 )
 """What the significance rows are, stated on every forward report."""
 
@@ -1539,27 +1539,53 @@ _SIGNIFICANCE_KEYS: Final[tuple[str, ...]] = (
 )
 
 
-def _significance(
-    book: Any, *, benchmarks: Sequence[str], samples: int, seed: int
-) -> dict[str, Any]:
-    """`grid.strategy_result` of `book` against each benchmark, the keys a report shows; a book
-    the test refuses (no complete period, a benchmark it has no return for) says why."""
-    tested: dict[str, Any] = {}
-    for benchmark in benchmarks:
-        try:
-            result = grid.strategy_result(
-                book, excess_benchmark=benchmark, bootstrap_samples=samples, random_seed=seed
-            )
-        except StrategyBacktestError as error:
-            tested[benchmark] = {"refused": str(error)}
-            continue
-        shown: dict[str, Any] = {key: result[key] for key in _SIGNIFICANCE_KEYS}
-        complete = cast(list[bool], result["period_complete"])
-        shown["tested_periods"] = sum(complete)
-        shown["bootstrap_samples"] = samples
-        shown["random_seed"] = seed
-        tested[benchmark] = shown
-    return tested
+def _registered_count(settings: Mapping[str, Any], key: str) -> int:
+    """`settings[key]` as an integer, refusing a missing one and a bool -- which Python counts
+    as an int and no registration means as one (`Registration.seed`'s rule)."""
+    value = settings.get(key)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise StepFailedError(
+            "summary",
+            f"the registration's settings give {key} as {value!r}; the forward book is tested "
+            "under the registered measurement settings, and without an integer there is none to "
+            "test it under",
+        )
+    return value
+
+
+def _significance(book: Any, *, benchmark: str, samples: int, seed: int) -> dict[str, Any]:
+    """`grid.strategy_result` of `book` -- one call, one source: the test against `benchmark`
+    and, from the same result's `reported_*` keys, 000905.SH beside it (`grid.REPORTED_BENCHMARK`,
+    which tests nothing). A book the test refuses (no complete period, a benchmark it has no
+    return for) says why."""
+    try:
+        result = grid.strategy_result(
+            book, excess_benchmark=benchmark, bootstrap_samples=samples, random_seed=seed
+        )
+    except StrategyBacktestError as error:
+        return {benchmark: {"refused": str(error)}}
+    complete = cast(list[bool], result["period_complete"])
+    sessions = cast(list[int], result["period_sessions"])
+    tested: dict[str, Any] = {key: result[key] for key in _SIGNIFICANCE_KEYS}
+    tested["tested_periods"] = sum(complete)
+    tested["tested_period_sessions"] = [
+        count for count, whole in zip(sessions, complete, strict=True) if whole
+    ]
+    tested["bootstrap_samples"] = samples
+    tested["random_seed"] = seed
+    reported: dict[str, Any]
+    if "reported_net_excess" in result:
+        reported = {
+            "reported": True,
+            "net_excess": result["reported_net_excess"],
+            "mean_net_excess": result["reported_mean_net_excess"],
+            "tested_periods": tested["tested_periods"],
+        }
+    else:
+        reported = {
+            "refused": f"the book priced no {grid.REPORTED_BENCHMARK} return for every period"
+        }
+    return {benchmark: tested, grid.REPORTED_BENCHMARK: reported}
 
 
 def forward_summary(
@@ -1578,21 +1604,14 @@ def forward_summary(
     `unprovable_holds` and `INTEGRITY` are stated beside them.
 
     Each set is also tested as the holdout tested it (`grid.strategy_result`, `SIGNIFICANCE_
-    TESTED`): net excess against the registration's `excess_benchmark` and 000905.SH, under the
-    registration's own `bootstrap_samples` and `random_seed` -- `settings`, which has no
-    default: a forward p-value under other settings than the registered ones is not the
-    registered test.
+    TESTED`): net excess against the registration's `excess_benchmark`, with 000905.SH reported
+    beside it from the same result, under the registration's own `bootstrap_samples` and
+    `random_seed` -- `settings`, which has no default: a forward p-value under other settings
+    than the registered ones is not the registered test.
     """
-    missing = [key for key in ("bootstrap_samples", "random_seed") if key not in settings]
-    if missing:
-        raise StepFailedError(
-            "summary",
-            f"the registration's settings name no {missing}; the forward book is tested under "
-            "the registered measurement settings, and there are none to test it under",
-        )
-    samples, seed = int(settings["bootstrap_samples"]), int(settings["random_seed"])
+    samples = _registered_count(settings, "bootstrap_samples")
+    seed = _registered_count(settings, "random_seed")
     primary = str(settings.get("excess_benchmark", grid.PRIMARY_EXCESS_BENCHMARK))
-    benchmarks = tuple(dict.fromkeys((primary, REPORTED_EXCESS_BENCHMARK)))
     flagged = dict(check.unverifiable)
     opened = {session: record for session, record in schedule.rebalances}
     excluded = {session for session, record in opened.items() if record in flagged}
@@ -1612,9 +1631,9 @@ def forward_summary(
         },
         "significance": {
             "tested": SIGNIFICANCE_TESTED,
-            "all_periods": _significance(book, benchmarks=benchmarks, samples=samples, seed=seed),
+            "all_periods": _significance(book, benchmark=primary, samples=samples, seed=seed),
             "excluding_unverifiable": _significance(
-                subset, benchmarks=benchmarks, samples=samples, seed=seed
+                subset, benchmark=primary, samples=samples, seed=seed
             ),
         },
         "unprovable_holds": [day.isoformat() for day in schedule.unprovable_holds],
@@ -1652,13 +1671,21 @@ def forward_summary_lines(summary: Mapping[str, Any]) -> list[str]:
             if "refused" in shown:
                 lines.append(head + f"not tested -- {shown['refused']}")
                 continue
+            if shown.get("reported"):
+                lines.append(
+                    head + f"reported beside the test, tests nothing; mean net excess "
+                    f"{shown['mean_net_excess']} over the same {shown['tested_periods']} complete "
+                    "period(s)"
+                )
+                continue
             draws = (
                 "exact"
                 if shown["p_excess_exact"]
                 else f"{shown['p_excess_sign_patterns']} sign patterns, seed {shown['random_seed']}"
             )
             lines.append(
-                head + f"{shown['tested_periods']} complete period(s) tested, "
+                head + f"{shown['tested_periods']} complete period(s) tested (sessions "
+                f"{shown['tested_period_sessions']}), "
                 f"{shown['excluded_incomplete_periods']} incomplete shown and not tested; "
                 f"mean net excess {shown['mean_net_excess']}, one-sided p "
                 f"{shown['p_excess_one_sided']} (two-sided {shown['p_excess']}, {draws})"

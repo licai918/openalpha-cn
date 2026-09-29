@@ -77,6 +77,7 @@ from typing import Final, Protocol, cast
 from zoneinfo import ZoneInfo
 
 from openalpha_cn.backtest.strategy_backtest import StrategyBacktestError, WalkForwardFit
+from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
 from openalpha_cn.domain.alpha_model import (
     ABSTAIN_INCOMPLETE_FEATURES,
     AlphaModelArtifact,
@@ -86,6 +87,7 @@ from openalpha_cn.domain.alpha_model import (
 )
 from openalpha_cn.domain.daily_prices import SESSION_CLOSE_TIME
 from openalpha_cn.domain.prediction_record import PredictionRecord
+from openalpha_cn.domain.price_limits import SUSPENSION_DATASET
 from openalpha_cn.domain.trading_calendar import TradingCalendar
 from openalpha_cn.panel.catalog import DEFAULT_DATE_TIMEZONE, PartitionNotYetKnowableError
 from openalpha_cn.panel.store import PanelStore
@@ -338,20 +340,39 @@ def batch_digest(batch: PredictionBatch) -> str:
 
 def _window_start(request: StrategyRequest, day: date) -> date:
     """The first date a day's scoring can read: as far back as its lookback reaches (a session
-    is at most ~1.5 calendar days across a year; a month is added for holidays)."""
+    is at most ~1.5 calendar days across a year; a month is added for holidays).
+
+    A walk-forward day is scored by the fit refitted on the newest refit session on or before
+    it -- up to `refit_every_sessions - 1` sessions back -- trained on the window ending there
+    (`strategy_view.score_day`), so its reach is counted from that refit day, not from the day
+    (`V2-P6-011` fix round 16)."""
     source = request.source
     sessions = 1
     if source.trailing_ic is not None:
         sessions = source.trailing_ic.ic_window_sessions + source.trailing_ic.horizon_sessions
     elif source.walk_forward is not None:
         spec = source.walk_forward
-        sessions = spec.train_sessions + spec.embargo_sessions + spec.horizon_sessions
+        sessions = (
+            spec.refit_every_sessions
+            + spec.train_sessions
+            + spec.embargo_sessions
+            + spec.horizon_sessions
+        )
     return day - timedelta(days=int(sessions * 1.5) + 31)
 
 
-def _input_years(request: StrategyRequest, day: date) -> tuple[int, ...]:
-    """The years a day's scoring can read: its own, and every one back to `_window_start`."""
-    return tuple(range(_window_start(request, day).year, day.year + 1))
+_IN_FORCE_DATASETS: Final = frozenset({ADJ_FACTOR_DATASET, SUSPENSION_DATASET})
+"""The step series a label reads through the row in force at a date, not only rows dated on it:
+a compressed `adj_factor`'s last change, the `suspend_d` row of a halt that encloses the date.
+Their readers take the year before as well (`strategy_view._PanelDays.adjustments`)."""
+
+
+def _dataset_years(request: StrategyRequest, day: date, dataset: str) -> tuple[int, ...]:
+    """The years of `dataset` a day's scoring can read: every one from `_window_start`'s through
+    the day's -- and, for a step series (`_IN_FORCE_DATASETS`), the year before, which holds
+    the row in force when the window opens."""
+    first = _window_start(request, day).year - (1 if dataset in _IN_FORCE_DATASETS else 0)
+    return tuple(range(first, day.year + 1))
 
 
 def _partition_state(
@@ -368,7 +389,7 @@ def _partition_state(
     instant = session_publication_instant(day)
     state: dict[tuple[str, int], InputPartition] = {}
     for dataset in input_datasets(request):
-        for year in _input_years(request, day):
+        for year in _dataset_years(request, day, dataset):
             coverage = store.read_coverage(dataset, year)
             if coverage is None:
                 continue
@@ -400,7 +421,7 @@ def readable_instant(store: PanelStore, request: StrategyRequest, *, day: date) 
     """
     newest: datetime | None = None
     for dataset in input_datasets(request):
-        for year in _input_years(request, day):
+        for year in _dataset_years(request, day, dataset):
             coverage = store.read_coverage(dataset, year)
             if coverage is None:
                 continue
@@ -541,6 +562,11 @@ def provenance_changes(
     old date -- are read by the recompute and could not have been by the record; the digest at
     the signal instant cannot see them. Factor builds are not asked: a build filed after the
     record is never the one a day takes (`_score_when_readable`).
+
+    The window is what the day reads (fix round 16): from `_window_start` -- counted from a
+    walk-forward fit's refit day -- and, for a step series (`_IN_FORCE_DATASETS`), each
+    security's row still in force when it opens, so a late change dated before the window that
+    moves the factor every day of it counts.
     """
     recorded = {(item.dataset, item.year): item for item in provenance.inputs}
     day = provenance.session
@@ -552,7 +578,7 @@ def provenance_changes(
         for dataset in input_datasets(request):
             if dataset not in LABEL_INPUTS:
                 continue
-            for year in _input_years(request, day):
+            for year in _dataset_years(request, day, dataset):
                 digests = {
                     stored_rows_digest(
                         store,
@@ -560,6 +586,7 @@ def provenance_changes(
                         year=year,
                         through=day,
                         since=since,
+                        in_force=dataset in _IN_FORCE_DATASETS,
                         visible_at=instant,
                         cache=cache,
                     )

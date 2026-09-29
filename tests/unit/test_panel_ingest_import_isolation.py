@@ -839,8 +839,10 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
         # across the seam -- a late record is read only when its day, scored again, gives its
         # scores, and a hold is witnessed the same way -- and so reaches what that reader
         # reaches through the loaders it names itself: the price base, the registry, the
-        # calendar and the industry memberships an industry cap reads.
-        named=frozenset(),
+        # calendar and the industry memberships an industry cap reads. Round 16: it names the two
+        # step series whose row in force when a window opens is read though it is dated before
+        # it (`_IN_FORCE_DATASETS`) -- a fingerprint of rows, never a read answered with.
+        named=frozenset({"adj_factor", "suspend_d"}),
         reached=frozenset(
             {
                 "adj_factor",
