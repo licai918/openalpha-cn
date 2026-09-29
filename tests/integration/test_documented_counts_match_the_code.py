@@ -491,9 +491,9 @@ UNDERIVED_COUNTS: Final[tuple[UnderivedCount, ...]] = (
         pattern=re.compile(r"[0-9]+\s*个\s*issues?", re.IGNORECASE),
         reason=(
             "README.md said 110. The roadmap gives no one figure to derive it from: it records its "
-            "own total moving from 110 to 113, and its overview table, which totals 212 (193 "
-            "until P6's fifteen were added on 2026-09-26/27, four more on 2026-09-28), and its "
-            "issue tables count the same issues and disagree."
+            "own total moving from 110 to 113, and its overview table, which totals 213 (193 "
+            "until P6's fifteen were added on 2026-09-26/27, four more on 2026-09-28, one on "
+            "2026-09-29), and its issue tables count the same issues and disagree."
         ),
         example="七个阶段 110 个 issue。",
         source=ROADMAP,
