@@ -86,7 +86,7 @@ import math
 import statistics
 from array import array
 from collections import OrderedDict
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from decimal import Decimal
@@ -142,7 +142,11 @@ from openalpha_cn.backtest.strategy_backtest import (
     usable_fit,
     walk_forward_fits,
 )
-from openalpha_cn.domain.adjustment import AdjustmentHistory, AdjustmentHorizonError
+from openalpha_cn.domain.adjustment import (
+    ADJ_FACTOR_DATASET,
+    AdjustmentHistory,
+    AdjustmentHorizonError,
+)
 from openalpha_cn.domain.alpha_model import (
     AlphaModel,
     AlphaModelDeclaration,
@@ -150,7 +154,7 @@ from openalpha_cn.domain.alpha_model import (
     PredictionBatch,
     TrainingExample,
 )
-from openalpha_cn.domain.daily_prices import DailyBar, PriceDataError
+from openalpha_cn.domain.daily_prices import DAILY_DATASET, DailyBar, PriceDataError
 from openalpha_cn.domain.factor import FactorDefinition
 from openalpha_cn.domain.factor_neutralization import (
     FactorNeutralizationRegistry,
@@ -160,6 +164,8 @@ from openalpha_cn.domain.factor_transform import FactorTransformRegistry, Factor
 from openalpha_cn.domain.horizon import ResearchHorizon, parse_horizon
 from openalpha_cn.domain.index_prices import IndexPriceError, index_session_returns
 from openalpha_cn.domain.industry_classification import (
+    INDUSTRY_MEMBERSHIP_DATASET,
+    SW2014_MEMBERSHIP_DATASET,
     IndustryClassificationError,
     IndustryHorizonError,
     industry_membership_source_on,
@@ -171,7 +177,13 @@ from openalpha_cn.domain.labels import (
     halt_corpus_for_years,
 )
 from openalpha_cn.domain.prediction_record import PredictionRecord
-from openalpha_cn.domain.price_limits import PriceLimit, TradingState
+from openalpha_cn.domain.price_limits import (
+    PRICE_LIMIT_DATASET,
+    SUSPENSION_DATASET,
+    PriceLimit,
+    TradingState,
+)
+from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET
 from openalpha_cn.domain.trading_calendar import (
     TRADING_CALENDAR_DATASET,
     TradingCalendar,
@@ -197,8 +209,12 @@ from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import (
     FACTOR_TRANSFORMS,
     FactorEngineError,
+    factor_manifest_dataset,
+    factor_observation_dataset,
+    factor_transform_manifest_dataset,
     load_factor_observations,
     load_processed_factor_observations,
+    processed_factor_dataset,
 )
 from openalpha_cn.panel_ingest import (
     load_adjustment_histories,
@@ -213,7 +229,9 @@ from openalpha_cn.panel_ingest import (
 from openalpha_cn.panel_neutralization import (
     FACTOR_NEUTRALIZATIONS,
     NeutralizationEngineError,
+    factor_neutralization_manifest_dataset,
     load_neutralized_factor_observations,
+    neutralized_factor_dataset,
 )
 from openalpha_cn.panel_view import PANEL_STORE_PLACEHOLDER, without_store_path
 
@@ -238,6 +256,7 @@ __all__ = [
     "factor_ic_series",
     "ic_series_request",
     "ic_series_view",
+    "input_datasets",
     "load_strategy_inputs",
     "registration_deadline",
     "score_day",
@@ -255,6 +274,49 @@ that starts at 09:15: from then on an order placed on them is no longer the orde
 assumes, and the auction's indicative price is already a published piece of the outcome.
 `strategy_registration` re-exports it for the daily command, which refuses to file after it.
 """
+
+
+PRICE_BASE_INPUTS: Final[tuple[str, ...]] = (
+    TRADING_CALENDAR_DATASET,
+    STOCK_BASIC_DATASET,
+    DAILY_DATASET,
+    ADJ_FACTOR_DATASET,
+    PRICE_LIMIT_DATASET,
+    SUSPENSION_DATASET,
+    INDUSTRY_MEMBERSHIP_DATASET,
+    SW2014_MEMBERSHIP_DATASET,
+)
+"""The panel datasets any strategy source's scoring can read beside its factor builds: the
+calendar and registry, the price base the labels are priced from, and the memberships an
+industry cap or a neutralized tier reads."""
+
+
+def input_datasets(request: StrategyRequest) -> tuple[str, ...]:
+    """Every stored dataset scoring one day of `request`'s source can read (`V2-P6-011`).
+
+    The price base and every dataset of every factor the source names -- the raw, processed and
+    neutralized observations and their manifests -- whether or not the tier is the one declared:
+    the list is for an input provenance, where naming a dataset that is never read costs a
+    fingerprint and leaving one out would let a correction to it pass unseen.
+    """
+    definitions = {
+        definition.qualified_key: definition for definition in request.definitions.values()
+    }
+    for column in request.columns:
+        definitions.setdefault(column.definition.qualified_key, column.definition)
+    factors = tuple(
+        dataset
+        for _key, definition in sorted(definitions.items())
+        for dataset in (
+            factor_observation_dataset(definition),
+            factor_manifest_dataset(definition),
+            processed_factor_dataset(definition),
+            factor_transform_manifest_dataset(definition),
+            neutralized_factor_dataset(definition),
+            factor_neutralization_manifest_dataset(definition),
+        )
+    )
+    return (*PRICE_BASE_INPUTS, *factors)
 
 
 def registration_deadline(trading_session: date) -> datetime:
@@ -1317,6 +1379,7 @@ class _ModelFeed:
         signal_days: frozenset[date],
         instants: Mapping[date, datetime],
         years: Sequence[int],
+        fit_cache: MutableMapping[tuple[date, datetime, object], WalkForwardFit] | None = None,
     ) -> None:
         spec, model = request.source.walk_forward, request.model
         assert spec is not None and model is not None  # strategy_request resolved both together
@@ -1334,6 +1397,7 @@ class _ModelFeed:
             day for day in sessions[:: spec.refit_every_sessions] if day <= max(signal_days)
         )
         self._fits: list[WalkForwardFit] = []
+        self._fit_cache = fit_cache
         self._window: dict[date, tuple[TrainingExample, ...]] = {}
         self.last_batch: PredictionBatch | None = None
         """The batch `rows_on` scored last: the one a caller registering that day's scores files
@@ -1378,8 +1442,20 @@ class _ModelFeed:
 
     def fit_on(self, day: date) -> WalkForwardFit | None:
         while self._pending and self._pending[0] <= day:
-            self._fits.append(self._refit(self._pending.pop(0)))
+            self._fits.append(self._cached_refit(self._pending.pop(0)))
         return usable_fit(self._fits, signal_day=day)
+
+    def _cached_refit(self, refit_day: date) -> WalkForwardFit:
+        """`_refit`, served from `fit_cache` when one was handed in: a fit is a function of the
+        refit day, the instant the store is read at and the model declared, so one computed
+        for another day of the same report is that day's too (`V2-P6-011` round 11)."""
+        if self._fit_cache is None:
+            return self._refit(refit_day)
+        key = (refit_day, self._request.as_of, self._model.declaration)
+        held = self._fit_cache.get(key)
+        if held is None:
+            held = self._fit_cache[key] = self._refit(refit_day)
+        return held
 
     def refits(self) -> tuple[WalkForwardFit, ...]:
         return tuple(self._fits)
@@ -1835,6 +1911,7 @@ def score_day(
     day: date,
     anchor: date,
     read_industries: bool | None = None,
+    fit_cache: MutableMapping[tuple[date, datetime, object], WalkForwardFit] | None = None,
 ) -> SignalDay:
     """Score one session under `request`'s source, as a backtest over it would (`V2-P6-011`).
 
@@ -1914,6 +1991,7 @@ def score_day(
             signal_days=signal_days,
             instants=instants,
             years=years,
+            fit_cache=fit_cache,
         )
         feed = model_feed
     else:

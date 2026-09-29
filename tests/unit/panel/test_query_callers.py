@@ -217,6 +217,7 @@ def test_the_allowlist_names_files_that_exist_and_actually_make_the_call() -> No
 
 UNGATED_READERS: dict[str, tuple[str, ...]] = {
     "carry_stored_rows_forward": ("query",),
+    "stored_rows_digest": ("query",),
     "write_upstream_defects": ("query",),
 }
 """Every function in `panel_ingest` that takes the un-gated door, and which door it takes.
@@ -228,6 +229,11 @@ so each writer reads the stored rows back and puts the *other* source's rows in 
 own. Nothing it reads is answered with; a point-in-time read there would drop the withheld rows
 from the partition it is about to commit. Reading the record *out* goes through the filtered
 door (`load_upstream_defects`, on `test_visible_read_callers.py`'s allowlist).
+
+`stored_rows_digest` (`V2-P6-011` round 11) is here on the same argument, more strongly: it
+answers with a sha256 and nothing else. It fingerprints a partition's rows through one day for a
+prediction's input provenance, and a point-in-time read would defeat it -- a correction stamped
+after the filing is exactly what the fingerprint exists to see.
 
 `carry_stored_rows_forward`'s entry also covers `carry_stored_sessions_forward` (`V2-P6-003`),
 which reaches the read through it rather than calling `query` itself, and whose rows *are*

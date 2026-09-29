@@ -68,13 +68,15 @@ the completed days gives the decisions, exactly as the command takes them.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import hashlib
+import json
+from collections.abc import Callable, Mapping, Sequence, Set
 from dataclasses import dataclass
-from datetime import date, datetime
-from typing import Final, Protocol
+from datetime import date, datetime, timedelta
+from typing import Final, Protocol, cast
 from zoneinfo import ZoneInfo
 
-from openalpha_cn.backtest.strategy_backtest import StrategyBacktestError
+from openalpha_cn.backtest.strategy_backtest import StrategyBacktestError, WalkForwardFit
 from openalpha_cn.domain.alpha_model import (
     ABSTAIN_INCOMPLETE_FEATURES,
     AlphaModelArtifact,
@@ -87,11 +89,13 @@ from openalpha_cn.domain.prediction_record import PredictionRecord
 from openalpha_cn.domain.trading_calendar import TradingCalendar
 from openalpha_cn.panel.catalog import DEFAULT_DATE_TIMEZONE
 from openalpha_cn.panel.store import PanelStore
+from openalpha_cn.panel_ingest import RowDigestCache, stored_rows_digest
 from openalpha_cn.strategy_view import (
     REGISTRATION_CUTOFF,
     SignalDay,
     StrategyRequest,
     StrategyViewError,
+    input_datasets,
     registration_deadline,
     score_day,
 )
@@ -99,13 +103,22 @@ from openalpha_cn.strategy_view import (
 __all__ = [
     "COMPOSITE_MODEL_NAME",
     "REGISTRATION_CUTOFF",
+    "UNVERIFIABLE",
     "HeldRecordLookup",
+    "InputPartition",
+    "InputProvenance",
+    "RecordCheck",
     "RegisteredConfiguration",
     "Schedule",
     "StrategyRegistrationError",
+    "VerdictCache",
     "WitnessedDay",
+    "batch_digest",
     "book_period_end",
+    "input_provenance",
     "late_record_check",
+    "provenance_changes",
+    "record_is_bound",
     "registered_at",
     "registered_declaration",
     "registration_cutoff",
@@ -228,64 +241,338 @@ def registered_at(record: PredictionRecord) -> datetime:
     return max(record.batch.predicted_at, record.recorded_at)
 
 
+UNVERIFIABLE: Final[str] = "unverifiable_inputs_corrected_after_filing"
+"""A late, bound record whose scores no longer recompute because an input it read was corrected
+after it was filed. Priced -- it is an on-time record in the append-only store, and the book
+must stay what was recommended -- and flagged and counted, never silently."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class InputPartition:
+    """One stored partition a day's scoring could read, as it stood when the record was filed."""
+
+    dataset: str
+    year: int
+    content_hash: str
+    rows_digest: str
+    """`panel_ingest.stored_rows_digest` through the record's day."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class InputProvenance:
+    """What a daily run read before filing a day's record (`V2-P6-011` round 11).
+
+    Written by the daily command before step 7 registers, content-addressed and never
+    rewritten. `batch_digest` names the batch it was written for -- the whole batch, its
+    `predicted_at` included, so another writer's record of the same model and day is not this
+    run's. `inputs` fingerprints every partition `strategy_view.input_datasets` names in the
+    years the day's lookback reaches.
+    """
+
+    registration_sha256: str
+    config_id: str
+    session: date
+    batch_digest: str
+    recorded_at: datetime
+    inputs: tuple[InputPartition, ...]
+
+    def document(self) -> dict[str, object]:
+        return {
+            "schema": INPUT_PROVENANCE_SCHEMA,
+            "registration_sha256": self.registration_sha256,
+            "config_id": self.config_id,
+            "session": self.session.isoformat(),
+            "batch_digest": self.batch_digest,
+            "recorded_at": self.recorded_at.isoformat(),
+            "inputs": [
+                [item.dataset, item.year, item.content_hash, item.rows_digest]
+                for item in self.inputs
+            ],
+        }
+
+    @property
+    def digest(self) -> str:
+        return hashlib.sha256(
+            json.dumps(self.document(), sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+    @classmethod
+    def from_document(cls, body: Mapping[str, object]) -> InputProvenance:
+        if body.get("schema") != INPUT_PROVENANCE_SCHEMA:
+            raise StrategyRegistrationError(f"not a {INPUT_PROVENANCE_SCHEMA} document")
+        inputs = cast(Sequence[Sequence[object]], body["inputs"])
+        return cls(
+            registration_sha256=str(body["registration_sha256"]),
+            config_id=str(body["config_id"]),
+            session=date.fromisoformat(str(body["session"])),
+            batch_digest=str(body["batch_digest"]),
+            recorded_at=datetime.fromisoformat(str(body["recorded_at"])),
+            inputs=tuple(
+                InputPartition(
+                    dataset=str(item[0]),
+                    year=int(cast(int, item[1])),
+                    content_hash=str(item[2]),
+                    rows_digest=str(item[3]),
+                )
+                for item in inputs
+            ),
+        )
+
+
+INPUT_PROVENANCE_SCHEMA: Final[str] = "daily-selection-input-provenance/v1"
+
+ProvenanceLookup = Callable[[PredictionRecord], "InputProvenance | None"]
+"""The provenance a daily run wrote for a record's batch, or `None`."""
+
+
+def batch_digest(batch: PredictionBatch) -> str:
+    """The whole batch, `predicted_at` included: which filing a provenance was written for."""
+    return hashlib.sha256(batch.model_dump_json().encode("utf-8")).hexdigest()
+
+
+def _input_years(request: StrategyRequest, day: date) -> tuple[int, ...]:
+    """The years a day's scoring can read: its own, and as far back as its lookback reaches
+    (a session is at most ~1.5 calendar days across a year; a month is added for holidays)."""
+    source = request.source
+    sessions = 1
+    if source.trailing_ic is not None:
+        sessions = source.trailing_ic.ic_window_sessions + source.trailing_ic.horizon_sessions
+    elif source.walk_forward is not None:
+        spec = source.walk_forward
+        sessions = spec.train_sessions + spec.embargo_sessions + spec.horizon_sessions
+    first = day - timedelta(days=int(sessions * 1.5) + 31)
+    return tuple(range(first.year, day.year + 1))
+
+
+def input_provenance(
+    store: PanelStore,
+    request: StrategyRequest,
+    registered: RegisteredConfiguration,
+    *,
+    day: date,
+    batch: PredictionBatch,
+    recorded_at: datetime,
+) -> InputProvenance:
+    """Fingerprint what scoring `day` under `request` could read, for the record of `batch`."""
+    inputs = []
+    for dataset in input_datasets(request):
+        for year in _input_years(request, day):
+            coverage = store.read_coverage(dataset, year)
+            digest = stored_rows_digest(store, dataset, year=year, through=day)
+            if coverage is None or digest is None:
+                continue
+            inputs.append(
+                InputPartition(
+                    dataset=dataset,
+                    year=year,
+                    content_hash=coverage.partition_content_hash or "",
+                    rows_digest=digest,
+                )
+            )
+    return InputProvenance(
+        registration_sha256=registered.registration_sha256,
+        config_id=registered.config_id,
+        session=day,
+        batch_digest=batch_digest(batch),
+        recorded_at=recorded_at,
+        inputs=tuple(inputs),
+    )
+
+
+def provenance_changes(
+    store: PanelStore,
+    provenance: InputProvenance,
+    *,
+    request: StrategyRequest,
+    cache: RowDigestCache | None = None,
+) -> tuple[str, ...]:
+    """The inputs a record read that the store no longer holds as they were: a partition whose
+    rows through the record's day hash otherwise, or one gone, or one now there that was not.
+
+    A partition whose content hash has not moved is not re-read. One that moved only by rows
+    after the day -- a daily update's append -- is not a change.
+    """
+    day = provenance.session
+    recorded = {(item.dataset, item.year): item for item in provenance.inputs}
+    changed: list[str] = []
+    for dataset in input_datasets(request):
+        for year in _input_years(request, day):
+            item = recorded.get((dataset, year))
+            coverage = store.read_coverage(dataset, year)
+            if item is not None and coverage is not None:
+                if coverage.partition_content_hash == item.content_hash:
+                    continue
+                now = stored_rows_digest(store, dataset, year=year, through=day, cache=cache)
+                if now == item.rows_digest:
+                    continue
+                changed.append(f"{dataset}:{year}")
+            elif item is not None:
+                changed.append(f"{dataset}:{year} (no longer stored)")
+            elif coverage is not None and stored_rows_digest(
+                store, dataset, year=year, through=day, cache=cache
+            ):
+                changed.append(f"{dataset}:{year} (stored since)")
+    return tuple(changed)
+
+
+def record_is_bound(
+    record: PredictionRecord,
+    *,
+    request: StrategyRequest,
+    registered: RegisteredConfiguration,
+    provenance: InputProvenance | None,
+) -> bool:
+    """Whether `record` is this registration's: its declaration is the registered one, and --
+    for a walk-forward source, whose declaration is the model's and names no registration -- a
+    provenance this registration's daily run wrote names its batch. Another writer's record of
+    the same model (`model daily-run`) is therefore not bound (`V2-P6-011` round 11)."""
+    if record.batch.artifact.declaration != registered_declaration(request, registered):
+        return False
+    if request.source.walk_forward is None:
+        return True
+    return (
+        provenance is not None
+        and provenance.registration_sha256 == registered.registration_sha256
+        and provenance.batch_digest == batch_digest(record.batch)
+    )
+
+
+class VerdictCache(Protocol):
+    """Where a record's `verified` verdict is kept, keyed by record id and provenance digest."""
+
+    def verified(self, record_id: str, provenance_digest: str) -> bool: ...
+    def keep(self, record_id: str, provenance_digest: str) -> None: ...
+
+
+class RecordCheck:
+    """The check a backtest holds a record registered after its signal instant to
+    (`backtest_strategy(verify_late=...)`); calling it returns `None` to admit, or the refusal.
+
+    1. **Bound** (`record_is_bound`), or refused.
+    2. **Recomputed at its own filing time**: `request_for(day, registered_at(record))` scored
+       through `score_day` from the stored builds (no request) and put by `signal_day_batch`;
+       equal in instant, artifact and every score, it is `verified`. Reading the store as the
+       record's writer could keep what was stored after it out of the question.
+    3. Otherwise, if its provenance shows an input corrected after it was filed, it is
+       `UNVERIFIABLE`: admitted -- it is an on-time record in the append-only store -- and listed
+       in `unverifiable`, never silently. With no correction to point to, it is refused.
+
+    A `verified` verdict is kept in `verdicts` under the record id and its provenance digest,
+    and served from there while no input has changed since; `fit_cache` shares walk-forward
+    fits between the days a report re-scores.
+    """
+
+    def __init__(
+        self,
+        store: PanelStore,
+        registered: RegisteredConfiguration,
+        *,
+        request_for: Callable[[date, datetime], StrategyRequest],
+        anchor: date,
+        provenance_for: ProvenanceLookup | None = None,
+        verdicts: VerdictCache | None = None,
+        fit_cache: dict[tuple[date, datetime, object], WalkForwardFit] | None = None,
+    ) -> None:
+        self._store = store
+        self._registered = registered
+        self._request_for = request_for
+        self._anchor = anchor
+        self._provenance_for = provenance_for or (lambda _record: None)
+        self._verdicts = verdicts
+        self._fit_cache = {} if fit_cache is None else fit_cache
+        self._digests: RowDigestCache = {}
+        self.verified: list[str] = []
+        self.unverifiable: list[tuple[str, tuple[str, ...]]] = []
+
+    def __call__(self, record: PredictionRecord) -> str | None:
+        batch = record.batch
+        day = batch.as_of.astimezone(SHANGHAI).date()
+        request = self._request_for(day, registered_at(record))
+        provenance = self._provenance_for(record)
+        if not record_is_bound(
+            record, request=request, registered=self._registered, provenance=provenance
+        ):
+            return (
+                f"{record.record_id} is not declared under the registered configuration "
+                f"({batch.artifact.declaration.name}, feature_version "
+                f"{batch.artifact.declaration.feature_version}) or no provenance of this "
+                "registration names its batch; a record registered after its signal instant is "
+                "read only when it is bound to the registration"
+            )
+        if (
+            provenance is not None
+            and self._verdicts is not None
+            and self._verdicts.verified(record.record_id, provenance.digest)
+            and not provenance_changes(
+                self._store, provenance, request=request, cache=self._digests
+            )
+        ):
+            self.verified.append(record.record_id)
+            return None
+        try:
+            again = signal_day_batch(
+                score_day(
+                    self._store,
+                    request,
+                    day=day,
+                    anchor=self._anchor,
+                    fit_cache=self._fit_cache,
+                ),
+                request,
+                self._registered,
+                predicted_at=batch.predicted_at,
+            )
+            differs = again is None or (again.as_of, again.artifact, again.predictions) != (
+                batch.as_of,
+                batch.artifact,
+                batch.predictions,
+            )
+            failure = (
+                f"the registered configuration holds on {day.isoformat()}"
+                if again is None
+                else "they are not the registered configuration's scored again from the stored "
+                "builds at its filing time"
+            )
+        except (StrategyViewError, StrategyBacktestError, StrategyRegistrationError) as error:
+            differs, failure = True, f"they cannot be recomputed from the stored builds: {error}"
+        if not differs:
+            self.verified.append(record.record_id)
+            if provenance is not None and self._verdicts is not None:
+                self._verdicts.keep(record.record_id, provenance.digest)
+            return None
+        changes = (
+            ()
+            if provenance is None
+            else provenance_changes(self._store, provenance, request=request, cache=self._digests)
+        )
+        if changes:
+            self.unverifiable.append((record.record_id, changes))
+            return None
+        return (
+            f"{record.record_id}'s scores for {day.isoformat()} were registered after the signal "
+            f"instant and {failure}; no input it read has been corrected since, so it could "
+            "carry what arrived after the signal instant, and it is refused"
+        )
+
+
 def late_record_check(
     store: PanelStore,
     registered: RegisteredConfiguration,
     *,
-    request_for: Callable[[date], StrategyRequest],
+    request_for: Callable[[date, datetime], StrategyRequest],
     anchor: date,
-) -> Callable[[PredictionRecord], str | None]:
-    """The check a backtest holds a record registered after its signal instant to; `None` admits.
-
-    `request_for(day)` is the registered configuration's request for one day (the daily command's
-    `day_request`) and `anchor` its first day. The record must be bound to the registration
-    (`registered_declaration`) and its batch -- instant, artifact and every score -- must equal
-    the registered configuration's, scored again for its day from the stored builds (no
-    request). See the module docstring.
-    """
-
-    def check(record: PredictionRecord) -> str | None:
-        batch = record.batch
-        day = batch.as_of.astimezone(SHANGHAI).date()
-        request = request_for(day)
-        if batch.artifact.declaration != registered_declaration(request, registered):
-            return (
-                f"{record.record_id} is not declared under the registered configuration "
-                f"({batch.artifact.declaration.name}, feature_version "
-                f"{batch.artifact.declaration.feature_version}); a record registered after its "
-                "signal instant is read only when it is bound to the registration"
-            )
-        try:
-            again = signal_day_batch(
-                score_day(store, request, day=day, anchor=anchor),
-                request,
-                registered,
-                predicted_at=batch.predicted_at,
-            )
-        except (StrategyViewError, StrategyBacktestError, StrategyRegistrationError) as error:
-            return (
-                f"{record.record_id}'s scores for {day.isoformat()} cannot be recomputed from the "
-                f"stored builds, so a record registered after its signal instant is refused: "
-                f"{error}"
-            )
-        if again is None:
-            return (
-                f"the registered configuration holds on {day.isoformat()}, so {record.record_id} "
-                "cannot be its scores"
-            )
-        if (again.as_of, again.artifact, again.predictions) != (
-            batch.as_of,
-            batch.artifact,
-            batch.predictions,
-        ):
-            return (
-                f"{record.record_id}'s scores for {day.isoformat()} are not the registered "
-                "configuration's scored again from the stored builds; registered after the "
-                "signal instant, it could carry what arrived after it, and it is refused"
-            )
-        return None
-
-    return check
+    provenance_for: ProvenanceLookup | None = None,
+    verdicts: VerdictCache | None = None,
+) -> RecordCheck:
+    """A `RecordCheck` for `registered`; see it."""
+    return RecordCheck(
+        store,
+        registered,
+        request_for=request_for,
+        anchor=anchor,
+        provenance_for=provenance_for,
+        verdicts=verdicts,
+    )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -357,44 +644,52 @@ def witnessed_days(
     records: HeldRecordLookup,
     registered: RegisteredConfiguration,
     *,
-    request_for: Callable[[date], StrategyRequest],
+    request_for: Callable[[date, datetime], StrategyRequest],
+    as_of: datetime,
     anchor: date,
     calendar: TradingCalendar,
-    start: date,
     through: date,
+    journalled_holds: Set[date] = frozenset(),
+    provenance_for: ProvenanceLookup | None = None,
+    fit_cache: dict[tuple[date, datetime, object], WalkForwardFit] | None = None,
 ) -> tuple[WitnessedDay, ...]:
-    """The command's decisions from `start` -- the first day it ran -- through `through`,
-    re-derived from the store; the schedule is counted from the configuration's `anchor`.
+    """The command's decisions from its first record through `through`, re-derived from the
+    store; the schedule is counted from the configuration's `anchor`.
 
-    A session with one on-time record bound to the registration is a ranked day; one without is
-    re-scored (`score_day`, no request), and is a held day when the configuration ranks nothing
-    there, and not a completed day otherwise -- ranked with no record is a missed or refused run,
-    and a session the stored builds cannot score was not run. `Schedule` over the completed days
-    decides `rebalanced`, `not a rebalance day` or `held`, as the command does. Two bound records
-    for one session are refused; a record filed at or after its registration cutoff is not a
-    registration.
+    **Where it starts is the store's**: the earliest session carrying an on-time record bound to
+    the registration (`record_is_bound`). A hold before it leaves no record and cannot be told
+    from a day the command never ran, so none is counted. From there, a session with one
+    on-time bound record is a ranked day. One without is a held day only when the journal says
+    the command completed it holding **and** the registered configuration, scored again at
+    `as_of` (no request), ranks nothing there; any other session is not a completed day -- a
+    missed or refused run, whose rebalance the next run caught up. `Schedule` over the completed
+    days decides as the command does. Two bound records for one session are refused; a record
+    filed at or after its registration cutoff is not a registration.
     """
-    if start < anchor:
-        raise StrategyRegistrationError(
-            f"the command cannot have run on {start.isoformat()}, before the configuration's "
-            f"first day {anchor.isoformat()}"
-        )
-    sessions = calendar.trading_days_between(start, through)
-    declaration = registered_declaration(request_for(anchor), registered)
-    every = request_for(anchor).spec.rebalance_every_sessions
+    lookup = provenance_for or (lambda _record: None)
+    request = request_for(anchor, as_of)
+    every = request.spec.rebalance_every_sessions
     on_time: dict[date, list[str]] = {}
-    admitted = frozenset(sessions)
     for record_id in records.list_ids():
         record = records.get(record_id)
-        if record is None or record.batch.artifact.declaration != declaration:
+        if record is None:
+            continue
+        if not record_is_bound(
+            record, request=request, registered=registered, provenance=lookup(record)
+        ):
             continue
         day = record.batch.as_of.astimezone(SHANGHAI).date()
-        if day not in admitted or registered_at(record) >= registration_cutoff(calendar, day):
+        if not anchor <= day <= through:
+            continue
+        if registered_at(record) >= registration_cutoff(calendar, day):
             continue
         on_time.setdefault(day, []).append(record_id)
+    if not on_time:
+        return ()
+    cache = {} if fit_cache is None else fit_cache
     days: list[WitnessedDay] = []
     previous: date | None = None
-    for session in sessions:
+    for session in calendar.trading_days_between(min(on_time), through):
         held = on_time.get(session, [])
         if len(held) > 1:
             raise StrategyRegistrationError(
@@ -403,14 +698,18 @@ def witnessed_days(
             )
         if held:
             ranked = True
-        else:
+        elif session in journalled_holds:
             try:
-                signal = score_day(store, request_for(session), day=session, anchor=anchor)
+                signal = score_day(
+                    store, request_for(session, as_of), day=session, anchor=anchor, fit_cache=cache
+                )
             except (StrategyViewError, StrategyBacktestError):
                 continue
             if signal.scores.ranked is not None:
                 continue
             ranked = False
+        else:
+            continue
         schedule = schedule_of(
             calendar, anchor=anchor, session=session, every=every, previous=previous
         )

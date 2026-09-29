@@ -306,10 +306,11 @@ every early-January morning -- is avoided by resolving in `date_timezone`, the s
 straddles a year boundary, is answered with an error instead of a silent choice.
 """
 
+import hashlib
 import operator
 from bisect import bisect_right
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence, Set
+from collections.abc import Callable, Mapping, MutableMapping, Sequence, Set
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from itertools import pairwise
@@ -1528,7 +1529,7 @@ def carry_stored_rows_forward(
     ## The read is un-gated, and it has to be
 
     `PanelStore.query` takes no `as_of` and filters no row by availability, and this is one of the
-    three callers in `src/` allowed to take it (`tests/unit/panel/test_query_callers.py` is the
+    four callers in `src/` allowed to take it (`tests/unit/panel/test_query_callers.py` is the
     allowlist). A point-in-time read here would be the fail-open, not the safe choice: a carry-
     forward that filtered by the visibility clocks would carry only the rows knowable at some
     instant and would then hand the store a partition **missing** the withheld ones -- which
@@ -6446,6 +6447,64 @@ def panel_readiness_requirement(
         required_fields=required_fields,
         max_staleness=max_staleness,
     )
+
+
+RowDigestCache = MutableMapping[tuple[str, int, str], Mapping[date, str]]
+"""Per-date row digests of one partition, by `(dataset, year, content_hash)`: a partition is
+hashed once per state however many days are asked about it."""
+
+
+def stored_rows_digest(
+    store: PanelStore,
+    dataset: str,
+    *,
+    year: int,
+    through: date,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+    cache: RowDigestCache | None = None,
+) -> str | None:
+    """A digest of the stored rows of `(dataset, year)` dated on or before `through`; `None`
+    when the partition is not stored (`V2-P6-011` round 11's input provenance).
+
+    What a prediction filed on `through` could have read of this partition, fingerprinted so a
+    later verification can tell "the store corrected what the record read" from "the record is
+    not what its inputs give". Rows dated after `through` are left out -- a daily update appends
+    them without touching anything read -- and so is `ingested_time`, which every incremental
+    carry re-stamps (`V2-P6-003`); the subject, `event_time`, `available_time`,
+    `revision_time` and every data column are in, in a canonical order. The partition is hashed
+    once per event date and the dates through `through` combined, so `cache` serves every day
+    asked about one partition state from one read.
+
+    It takes the un-gated `query` door, on `carry_stored_rows_forward`'s argument: nothing it
+    reads is answered with. It returns a hash and nothing a caller could compute a number from.
+    """
+    coverage = store.read_coverage(dataset, year)
+    if coverage is None:
+        return None
+    key = (dataset, year, coverage.partition_content_hash or "")
+    by_date = None if cache is None else cache.get(key)
+    if by_date is None:
+        clocks = tuple(name for name in CLOCK_COLUMN_NAMES if name != "ingested_time")
+        fields = tuple(
+            entry.name for entry in coverage.fields if entry.name not in RESERVED_COLUMN_NAMES
+        )
+        names = (SUBJECT_COLUMN_NAME, *clocks, *fields)
+        zone = _resolve_timezone(date_timezone)
+        event = names.index(EVENT_TIME_COLUMN)
+        grouped: dict[date, list[str]] = {}
+        for row in store.query(dataset, year=year, columns=names):
+            day = cast(datetime, row[event]).astimezone(zone).date()
+            grouped.setdefault(day, []).append(repr(row))
+        by_date = {
+            day: hashlib.sha256("\n".join((repr(names), *sorted(rows))).encode("utf-8")).hexdigest()
+            for day, rows in grouped.items()
+        }
+        if cache is not None:
+            cache[key] = by_date
+    body = "\n".join(
+        f"{day.isoformat()} {digest}" for day, digest in sorted(by_date.items()) if day <= through
+    )
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
 def _resolve_timezone(name: str) -> ZoneInfo:

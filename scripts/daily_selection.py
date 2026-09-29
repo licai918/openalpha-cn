@@ -173,11 +173,16 @@ from openalpha_cn.providers.tushare import (  # noqa: E402
 )
 from openalpha_cn.runtime.composition import build_storage  # noqa: E402
 from openalpha_cn.runtime.provenance import resolve_code_commit  # noqa: E402
-from openalpha_cn.strategy_registration import (  # noqa: E402
+from openalpha_cn.strategy_registration import (  # noqa: E402  # noqa: E402
+    InputProvenance,
+    ProvenanceLookup,
+    RecordCheck,
     RegisteredConfiguration,
     Schedule,
     StrategyRegistrationError,
-    late_record_check,
+    WitnessedDay,
+    batch_digest,
+    input_provenance,
     registration_cutoff,
     session_record,
     signal_day_batch,
@@ -1159,51 +1164,157 @@ def journalled_rebalances(directory: Path) -> tuple[tuple[date, str], ...]:
     return tuple(rebalances)
 
 
-def _request_for(registration: Registration, as_of: datetime) -> Callable[[date], StrategyRequest]:
-    def request_for(day: date) -> StrategyRequest:
+PROVENANCE_DIRECTORY: Final[str] = "daily_selection_provenance"
+"""Under the runtime directory: each record's input provenance, `<digest>.json`, write-once."""
+
+VERDICT_DIRECTORY: Final[str] = "reports/record_verdicts"
+"""Under the runtime directory: each record's `verified` verdict, `<record>.<provenance>.json`,
+write-once -- a record is recomputed once, and again only when its inputs have changed."""
+
+
+def _request_at(registration: Registration) -> Callable[[date, datetime], StrategyRequest]:
+    def request_for(day: date, as_of: datetime) -> StrategyRequest:
         return day_request(registration.config, day=day, as_of=as_of)
 
     return request_for
 
 
+def _write_once(path: Path, body: Mapping[str, Any]) -> None:
+    """Write a content-addressed document, or check the one already there says the same."""
+    text = json.dumps(body, sort_keys=True, indent=2, ensure_ascii=False) + "\n"
+    if path.is_file():
+        if path.read_text(encoding="utf-8") != text:
+            raise StepFailedError("prediction", f"{path} is held and says something else")
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.partial")
+    temporary.write_text(text, encoding="utf-8")
+    temporary.replace(path)
+
+
+def write_provenance(runtime_dir: Path, provenance: InputProvenance) -> Path:
+    """File a record's input provenance before the record (`V2-P6-011` round 11).
+
+    Its own small content-addressed file rather than a field of the record: a
+    `PredictionRecord` is `extra="forbid"` under `alpha-prediction-record/v1`, and a field would
+    be a contract change (hard rule 3); `supersedes` and the batch are taken. The file is named by
+    the digest of what it says, written once and never rewritten -- the prediction store's own
+    discipline -- and names the batch it was written for, so it binds to exactly one record.
+    """
+    path = runtime_dir / PROVENANCE_DIRECTORY / f"{provenance.digest}.json"
+    _write_once(path, provenance.document())
+    return path
+
+
+def provenance_lookup(runtime_dir: Path, registration_sha256: str) -> ProvenanceLookup:
+    """The provenance this registration's daily runs wrote for a record's batch, or `None`."""
+    directory = runtime_dir / PROVENANCE_DIRECTORY
+    held: dict[tuple[date, str], InputProvenance] = {}
+    for path in sorted(directory.glob("*.json")) if directory.is_dir() else ():
+        provenance = InputProvenance.from_document(json.loads(path.read_text(encoding="utf-8")))
+        if provenance.digest != path.stem:
+            raise StepFailedError("summary", f"{path} is not what its name says it is")
+        if provenance.registration_sha256 == registration_sha256:
+            held[(provenance.session, provenance.batch_digest)] = provenance
+
+    def lookup(record: PredictionRecord) -> InputProvenance | None:
+        day = record.batch.as_of.astimezone(SHANGHAI).date()
+        return held.get((day, batch_digest(record.batch)))
+
+    return lookup
+
+
+class FileVerdicts:
+    """`strategy_registration.VerdictCache` over `VERDICT_DIRECTORY`: one write-once file per
+    verified record and provenance."""
+
+    def __init__(self, runtime_dir: Path, *, clock: Callable[[], datetime]) -> None:
+        self._directory = runtime_dir / VERDICT_DIRECTORY
+        self._clock = clock
+
+    def _path(self, record_id: str, provenance_digest: str) -> Path:
+        return self._directory / f"{record_id}.{provenance_digest}.json"
+
+    def verified(self, record_id: str, provenance_digest: str) -> bool:
+        return self._path(record_id, provenance_digest).is_file()
+
+    def keep(self, record_id: str, provenance_digest: str) -> None:
+        path = self._path(record_id, provenance_digest)
+        if path.is_file():
+            return
+        _write_once(
+            path,
+            {
+                "record_id": record_id,
+                "provenance": provenance_digest,
+                "verdict": "verified",
+                "verified_at": self._clock().isoformat(),
+            },
+        )
+
+
 def forward_record_check(
     runtime_dir: Path, registration: Registration, *, as_of: datetime
-) -> Callable[[PredictionRecord], str | None]:
+) -> RecordCheck:
     """The check a forward book holds a record registered after its signal instant to
-    (`strategy_view.backtest_strategy(verify_late=...)`): bound to this registration, and its
-    scores recomputed equal from the panel store under `runtime_dir`, read at `as_of`."""
-    return late_record_check(
+    (`strategy_view.backtest_strategy(verify_late=...)`): bound to this registration (a
+    walk-forward record through its provenance), recomputed at its own filing time from the
+    panel store under `runtime_dir`, and -- where an input it read was corrected since --
+    admitted as `UNVERIFIABLE` and listed on the check's `unverifiable`. Verified verdicts are
+    kept under `VERDICT_DIRECTORY`."""
+    return RecordCheck(
         panel_store(runtime_dir),
         registration.declared,
-        request_for=_request_for(registration, as_of),
+        request_for=_request_at(registration),
         anchor=_registered_anchor(registration),
+        provenance_for=provenance_lookup(runtime_dir, registration.sha256),
+        verdicts=FileVerdicts(runtime_dir, clock=lambda: as_of),
     )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ForwardSchedule:
+    """The forward book's days as the store witnesses them (`forward_rebalances`).
+
+    `first_record` is where the witnessed period starts: the earliest session carrying an on-time
+    record bound to the registration. `unprovable_holds` are the journal's held days before it --
+    a hold leaves no record, so the store cannot tell one from a day the command never ran, and
+    they are stated rather than counted.
+    """
+
+    rebalances: tuple[tuple[date, str], ...]
+    days: tuple[WitnessedDay, ...]
+    first_record: date
+    unprovable_holds: tuple[date, ...]
 
 
 def forward_rebalances(
     runtime_dir: Path, registration: Registration, *, through: date, as_of: datetime
-) -> tuple[tuple[date, str], ...]:
+) -> ForwardSchedule:
     """The sessions the command rebalanced on through `through`, each with its record, as the
-    append-only prediction store witnesses them (`V2-P6-011` round 10, for `V2-P6-012`).
+    append-only prediction store witnesses them (`V2-P6-011`, for `V2-P6-012`).
 
     `strategy_registration.witnessed_days` re-derives every decision from the store, from the
-    journal's first day -- the first day the command ran. The journal is only the cross-check:
-    a completed day whose decision or record differs between the two, or that one has and the
-    other has not, refuses the book naming the day, because the journal is a local file an edit
-    could move a rebalance in and the store is the witness.
+    **store's** first record: the journal cannot choose where the forward book starts. A journal
+    starting later is refused (a first day deleted); a journal day before the first record may
+    only be a hold, and those are returned as `unprovable_holds`. From the first record on, a
+    held day counts only when the journal completed it holding and the configuration, scored
+    again, holds. Every completed day is then held to the journal -- decision and record -- and a
+    difference refuses the book naming the day.
     """
     journalled = [
         day
         for day in journalled_days(journal_directory(runtime_dir, registration))
         if day.session <= through
     ]
-    if not journalled:
-        raise StepFailedError("summary", f"no day of this configuration is journalled by {through}")
     store = panel_store(runtime_dir)
     anchor = _registered_anchor(registration)
-    request_for = _request_for(registration, as_of)
+    request_for = _request_at(registration)
     calendar = _stored_calendar(
-        store, request_for(anchor).exchange, tuple(range(anchor.year, through.year + 1)), as_of
+        store,
+        request_for(anchor, as_of).exchange,
+        tuple(range(anchor.year, through.year + 1)),
+        as_of,
     )
     if calendar is None:
         raise StepFailedError(
@@ -1216,15 +1327,40 @@ def forward_rebalances(
             records,
             registration.declared,
             request_for=request_for,
+            as_of=as_of,
             anchor=anchor,
             calendar=calendar,
-            start=journalled[0].session,
             through=through,
+            journalled_holds=frozenset(day.session for day in journalled if day.decision == "held"),
+            provenance_for=provenance_lookup(runtime_dir, registration.sha256),
         )
     except StrategyRegistrationError as error:
         raise StepFailedError("summary", str(error)) from error
+    if not witnessed:
+        raise StepFailedError(
+            "summary",
+            f"the prediction store holds no on-time record of this registration by {through}",
+        )
+    first = witnessed[0].session
+    if not journalled or journalled[0].session > first:
+        raise StepFailedError(
+            "summary",
+            f"the store's first record of this registration is of {first.isoformat()} and the "
+            f"journal starts {journalled[0].session.isoformat() if journalled else 'nowhere'}; "
+            "a journal missing its first days would move where the forward book starts",
+        )
+    before = [day for day in journalled if day.session < first]
+    unheld = [day.session.isoformat() for day in before if day.decision != "held"]
+    if unheld:
+        raise StepFailedError(
+            "summary",
+            f"the journal says the command {unheld} ranked before the store's first record "
+            f"({first.isoformat()}); the store is the witness",
+        )
     derived = {day.session: (day.decision, day.record_id) for day in witnessed}
-    written = {day.session: (day.decision, day.record_id) for day in journalled}
+    written = {
+        day.session: (day.decision, day.record_id) for day in journalled if day.session >= first
+    }
     for session in sorted(set(derived) | set(written)):
         if derived.get(session) != written.get(session):
             raise StepFailedError(
@@ -1233,10 +1369,15 @@ def forward_rebalances(
                 f"witnesses {derived.get(session)} (decision, record); the store is the witness, "
                 "and a journal that disagrees with it is not a book to price",
             )
-    return tuple(
-        (day.session, day.record_id)
-        for day in witnessed
-        if day.decision == "rebalanced" and day.record_id is not None
+    return ForwardSchedule(
+        rebalances=tuple(
+            (day.session, day.record_id)
+            for day in witnessed
+            if day.decision == "rebalanced" and day.record_id is not None
+        ),
+        days=witnessed,
+        first_record=first,
+        unprovable_holds=tuple(day.session for day in before),
     )
 
 
@@ -2012,6 +2153,15 @@ def _run_daily_selection(
             raise StepFailedError("prediction", str(error)) from error
         prediction: dict[str, Any] = {"registered": False, "reason": "the source held today"}
         if batch is not None:
+            provenance = input_provenance(
+                store,
+                request,
+                registration.declared,
+                day=session,
+                batch=batch,
+                recorded_at=clock(),
+            )
+            write_provenance(runtime_dir, provenance)
             record, outcome = register_prediction(
                 runtime_dir,
                 batch,
@@ -2028,6 +2178,7 @@ def _run_daily_selection(
                 "recorded_at": record.recorded_at.isoformat(),
                 "scored": len(record.batch.scored),
                 "abstained": len(record.batch.abstained),
+                "provenance": provenance.digest,
             }
     with _step("summary"):
         result = {

@@ -820,6 +820,18 @@ DECLARED_PLAIN_DIGESTS: Final[dict[str, str]] = {
     "runtime/provenance.py::compute_config_digest": (
         "the whole 64 hex of a run's configuration, quoted into a manifest as evidence"
     ),
+    "panel_ingest.py::stored_rows_digest": (
+        "two of them, both whole 64 hex: one per event date of a stored partition's rows, and "
+        "their combination through a day -- a prediction's input fingerprint, compared for "
+        "equality and never an address (V2-P6-011 round 11)"
+    ),
+    "strategy_registration.py::InputProvenance.digest": (
+        "the whole 64 hex of one input provenance document, the name of its write-once file"
+    ),
+    "strategy_registration.py::batch_digest": (
+        "the whole 64 hex of one prediction batch, naming which filing a provenance belongs to; "
+        "compared for equality, never an id"
+    ),
 }
 """Every function under `src/` that hashes and does **not** narrow the result.
 
@@ -835,6 +847,7 @@ Six entries for seven calls, and the arithmetic is `DIGESTS_PER_SITE`'s.
 
 DIGESTS_PER_SITE: Final[dict[str, int]] = {
     "runtime/engine.py::ResearchEngine._load_or_start_recovery": 2,
+    "panel_ingest.py::stored_rows_digest": 2,
 }
 """Sites that hash more than once. Everything not named here hashes exactly once.
 

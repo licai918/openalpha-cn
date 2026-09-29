@@ -508,6 +508,14 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
         {
             "factor_view.FactorRequestError",
             "factor_view.resolve_factor",
+            # V2-P6-011 round 11: `input_datasets` names every dataset of every factor a source
+            # reads, for the input provenance a daily run files before its record.
+            "panel_factors.factor_manifest_dataset",
+            "panel_factors.factor_observation_dataset",
+            "panel_factors.factor_transform_manifest_dataset",
+            "panel_factors.processed_factor_dataset",
+            "panel_neutralization.factor_neutralization_manifest_dataset",
+            "panel_neutralization.neutralized_factor_dataset",
             # V2-P6-014. The walk-forward source resolves its features and family through the
             # model faces' own tables and prices its training labels, and the trailing-IC
             # source its ICs, through the model plane's label reader -- so no outcome is
@@ -560,6 +568,11 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             # view's own reader, gives its scores; a hold is witnessed the same way.
             "strategy_view.StrategyViewError",
             "strategy_view.score_day",
+            # Round 11: the input provenance -- which datasets a day's scoring can read, and a
+            # digest of their rows through the day (nothing read is answered with).
+            "strategy_view.input_datasets",
+            "panel_ingest.RowDigestCache",
+            "panel_ingest.stored_rows_digest",
         }
     ),
     "openalpha_cn.shortlist_compare": frozenset(
@@ -755,8 +768,22 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
         # is read). V2-P6-014 names `trade_cal` for the same kind of question -- which calendar
         # years a lookback may read -- and reaches `stock_basic` through the model plane's label
         # reader and feature matrix, whose labels and universes the two dynamic sources reuse
-        # rather than restate.
-        named=frozenset({"trade_cal"}),
+        # rather than restate. V2-P6-011 round 11 names the price base, the registry and both
+        # membership datasets in `PRICE_BASE_INPUTS`: the datasets a day's input provenance
+        # fingerprints, which is a naming and not a read -- and it reaches SW2014's membership
+        # through `stored_rows_digest`.
+        named=frozenset(
+            {
+                "adj_factor",
+                "daily",
+                "index_member_all",
+                "index_member_sw2014",
+                "stk_limit",
+                "stock_basic",
+                "suspend_d",
+                "trade_cal",
+            }
+        ),
         reached=frozenset(
             {
                 "adj_factor",
@@ -768,6 +795,7 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
                 "income",
                 "index_daily",
                 "index_member_all",
+                "index_member_sw2014",
                 "stk_limit",
                 "stock_basic",
                 "suspend_d",
@@ -787,6 +815,7 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
                 "adj_factor",
                 "daily",
                 "index_member_all",
+                "index_member_sw2014",
                 "stk_limit",
                 "stock_basic",
                 "suspend_d",

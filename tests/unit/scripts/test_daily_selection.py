@@ -43,7 +43,7 @@ from panel_fixtures import EXCHANGE
 from research_repo import commit_file, git, head
 from strategy_fixtures import READ_AT, REVERSAL, write_strategy_corpus
 
-from openalpha_cn import cli
+from openalpha_cn import cli, strategy_registration, strategy_view
 from openalpha_cn.backtest.strategy_backtest import EQUAL_WEIGHT_ALL_A
 from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
 from openalpha_cn.domain.daily_prices import (
@@ -74,8 +74,11 @@ from openalpha_cn.panel_ingest import (
 from openalpha_cn.storage.predictions import FilePredictionStore
 from openalpha_cn.strategy_registration import (
     RegisteredConfiguration,
+    batch_digest,
     book_period_end,
+    input_provenance,
     late_record_check,
+    registered_at,
     signal_day_batch,
     witnessed_days,
 )
@@ -823,6 +826,10 @@ def _industries(world: World, instant: datetime) -> dict[str, str]:
     }
 
 
+def _without_provenance(section: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in section.items() if key != "provenance"}
+
+
 def test_an_industry_cap_refreshed_on_rebalance_days_scores_as_a_daily_full_refresh_does(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -872,7 +879,9 @@ def test_an_industry_cap_refreshed_on_rebalance_days_scores_as_a_daily_full_refr
         )
         assert code == 0, err
         for key in ("candidates", "targets", "prediction"):
-            assert one[key] == other[key], (day, key)
+            # The input provenance fingerprints the stored bytes, which the two routes write
+            # differently (their own ingestion stamps); everything the day decided is equal.
+            assert _without_provenance(one[key]) == _without_provenance(other[key]), (day, key)
         due = one["targets"]["decision"] == "rebalanced"
         assert (bool(asked_one & INDUSTRY_APIS)) == due, day
         if offset:
@@ -1817,6 +1826,10 @@ def _register_days(
         filed = filed_at(day, calendar.next_trading_day(day))
         batch = signal_day_batch(signal, request, REGISTERED, predicted_at=filed)
         assert batch is not None
+        daily.write_provenance(
+            root,
+            input_provenance(store, request, REGISTERED, day=day, batch=batch, recorded_at=filed),
+        )
         record, outcome = daily.register_prediction(
             root, batch, calendar=calendar, clock=lambda filed=filed: filed
         )
@@ -1930,7 +1943,13 @@ def test_a_backtest_reading_the_registered_records_trades_as_the_configuration_w
             as_of=READ_AT,
         ),
         predictions=FilePredictionStore(tmp_path / "predictions", clock=lambda: READ_AT).get,
-        verify_late=late_record_check(store, REGISTERED, request_for=request_for, anchor=start),
+        verify_late=late_record_check(
+            store,
+            REGISTERED,
+            request_for=_at_read(request_for),
+            anchor=start,
+            provenance_for=daily.provenance_lookup(tmp_path, REGISTERED.registration_sha256),
+        ),
     )
     by_configuration = backtest_strategy(
         store, strategy_request(**configured, start=start, end=end, as_of=READ_AT)
@@ -1939,6 +1958,19 @@ def test_a_backtest_reading_the_registered_records_trades_as_the_configuration_w
     assert not any(period.held for period in by_configuration.periods)
     assert any(period.fills for period in by_configuration.periods)
     assert _traded(by_records) == _traded(by_configuration)
+
+
+def _at_read(request_for: Callable[[date], Any]) -> Callable[[date, datetime], Any]:
+    """`request_for` as a record check asks for it -- at the record's filing time -- read instead
+    at `_read_at(day)`: `write_strategy_corpus` stamps its calendar and registry as ingested on 17
+    January, so nothing in it is readable at an evening of the frame. The daily command's own
+    check (`forward_record_check`) reads at the filing time; `test_a_record_is_recomputed_at_its_
+    own_filing_time` holds it to that."""
+
+    def at(day: date, _filed: datetime) -> Any:
+        return request_for(day)
+
+    return at
 
 
 def _static_request_for(configured: Mapping[str, Any]) -> Callable[[date], Any]:
@@ -1955,7 +1987,7 @@ def _static_check(tmp_path: Path, panel: Any) -> Any:
     return late_record_check(
         PanelStore(tmp_path / "panel"),
         REGISTERED,
-        request_for=_static_request_for(_base(**STATIC)),
+        request_for=_at_read(_static_request_for(_base(**STATIC))),
         anchor=panel.sessions[1],
     )
 
@@ -2231,9 +2263,11 @@ def test_a_book_on_the_journals_rebalance_days_holds_what_the_command_recommende
     last = DAY + timedelta(days=4)
 
     journalled = daily.journalled_days(directory)
-    rebalances = daily.forward_rebalances(
+    forward = daily.forward_rebalances(
         world.runtime, registration, through=last, as_of=_evening(last)
     )
+    rebalances = forward.rebalances
+    assert (forward.first_record, forward.unprovable_holds) == (DAY, ())
 
     assert [(day.session.day, day.decision) for day in journalled] == [
         (19, "rebalanced"),
@@ -2268,6 +2302,15 @@ def test_a_book_on_the_journals_rebalance_days_holds_what_the_command_recommende
         tuple(results[days]["targets"]["weights"]) for days in (0, 2, 3)
     ]
     assert tuple(results[4]["targets"]["weights"]) == book.periods[-1].holdings
+    # Every record was filed after the provenance of what its run read, which names its batch.
+    lookup = daily.provenance_lookup(world.runtime, registration.sha256)
+    store = FilePredictionStore(world.runtime / "predictions", clock=lambda: RUN_CLOCK)
+    for days in (0, 2, 3, 4):
+        record = store.get(results[days]["prediction"]["record_id"])
+        assert record is not None
+        held = lookup(record)
+        assert held is not None and held.digest == results[days]["prediction"]["provenance"]
+        assert held.recorded_at <= registered_at(record)
 
 
 def _four_days(
@@ -2310,7 +2353,7 @@ def test_a_journal_edited_to_move_a_rebalance_is_refused_by_the_store(
         len(
             daily.forward_rebalances(
                 world.runtime, registration, through=last, as_of=_evening(last)
-            )
+            ).rebalances
         )
         == 3
     )
@@ -2346,7 +2389,7 @@ def test_a_record_of_another_configuration_on_the_same_day_is_not_the_days_recor
 
     rebalances = daily.forward_rebalances(
         world.runtime, registration, through=last, as_of=_evening(last)
-    )
+    ).rebalances
     assert dict(rebalances)[day] == results[2]["prediction"]["record_id"]
 
     path = _journal(world, day)
@@ -2507,8 +2550,8 @@ def test_the_store_witnesses_the_commands_holds_rebalances_and_catch_ups(tmp_pat
     """The command's decisions for a trailing-IC configuration from s1, rebalancing every second
     session, run day by day through its own functions with s5 -- a scheduled rebalance -- missed:
     it holds while no IC is known, rebalances, catches s5 up on s6. `witnessed_days`, from the
-    prediction store and the stored builds alone, re-derives every decision and record; the held
-    days, which leave no record, are proven by the configuration's own hold rule."""
+    prediction store and the stored builds alone, re-derives every decision and record from the
+    first record on; the holds before it leave nothing in the store and are not counted."""
     panel = write_strategy_corpus(tmp_path)
     sessions = panel.sessions
     configured = _base(**TRAILING)
@@ -2545,14 +2588,431 @@ def test_the_store_witnesses_the_commands_holds_rebalances_and_catch_ups(tmp_pat
         store,
         FilePredictionStore(tmp_path / "predictions", clock=lambda: READ_AT),
         REGISTERED,
-        request_for=request_for,
+        request_for=_at_read(request_for),
+        as_of=READ_AT,
         anchor=anchor,
         calendar=calendar,
-        start=anchor,
         through=sessions[-2],
+        journalled_holds=frozenset(day for day, decision, _ in expected if decision == "held"),
     )
 
-    assert [(day.session, day.decision, day.record_id) for day in witnessed] == expected
-    decisions = [decision for _, decision, _ in expected]
-    assert "held" in decisions
+    first = next(day for day, _, record_id in expected if record_id is not None)
+    held_before = [day for day, decision, _ in expected if day < first]
+    assert held_before and all(decision == "held" for day, decision, _ in expected if day < first)
+    # The holds before the first record leave nothing in the store: they are not counted.
+    assert [(day.session, day.decision, day.record_id) for day in witnessed] == [
+        entry for entry in expected if entry[0] >= first
+    ]
     assert (sessions[6], "rebalanced") in [(day, decision) for day, decision, _ in expected]
+
+
+# --- round 11: recomputed at filing, provenance, the store's start, holds, other writers -------
+
+
+def _file(
+    tmp_path: Path,
+    request_for: Callable[[date], Any],
+    day: date,
+    anchor: date,
+    *,
+    at: datetime,
+    registered: RegisteredConfiguration = REGISTERED,
+    provenance: bool = True,
+    another_writer: bool = False,
+) -> tuple[Any, Any]:
+    """`day`'s scores filed at `at` through the command's path, with the provenance the command
+    writes before step 7 (or none)."""
+    store = PanelStore(tmp_path / "panel")
+    request = request_for(day)
+    batch = signal_day_batch(
+        score_day(store, request, day=day, anchor=anchor), request, registered, predicted_at=at
+    )
+    assert batch is not None
+    held = (
+        input_provenance(store, request, registered, day=day, batch=batch, recorded_at=at)
+        if provenance
+        else None
+    )
+    calendar = daily._outcome_calendar(store, request.exchange, day, request.as_of)
+    if another_writer:
+        # Straight into the store, as `model daily-run` files: no session lookup first.
+        written = FilePredictionStore(tmp_path / "predictions", clock=lambda: at).put(
+            batch=batch, calendar=calendar, zone=daily.SHANGHAI
+        )
+        return written.record, held
+    record, _ = daily.register_prediction(tmp_path, batch, calendar=calendar, clock=lambda: at)
+    return record, held
+
+
+def _lookup(*held: Any) -> Callable[[Any], Any]:
+    by_batch = {provenance.batch_digest: provenance for provenance in held if provenance}
+    return lambda record: by_batch.get(batch_digest(record.batch))
+
+
+def test_a_record_is_recomputed_at_its_own_filing_time(tmp_path: Path) -> None:
+    """The registered configuration is asked for the record's day read at `registered_at(record)`
+    -- the store as its writer could have seen it -- and not at the report's clock, so what was
+    stored after the filing (a superseding build, a later row) is kept out of the question."""
+    panel = write_strategy_corpus(tmp_path)
+    request_for = _static_request_for(_base(**STATIC))
+    day = panel.sessions[1]
+    record, held = _file(tmp_path, request_for, day, day, at=_evening(day))
+    asked: list[datetime] = []
+
+    def spy(asked_day: date, at: datetime) -> Any:
+        asked.append(at)
+        return request_for(asked_day)
+
+    check = late_record_check(
+        PanelStore(tmp_path / "panel"),
+        REGISTERED,
+        request_for=spy,
+        anchor=day,
+        provenance_for=_lookup(held),
+    )
+
+    assert check(record) is None
+    assert asked and set(asked) == {registered_at(record)}
+    assert check.verified == [record.record_id]
+
+
+def _supersede(tmp_path: Path, panel: Any, day: date) -> None:
+    """`day`'s raw build superseded, after the filing, by one carrying other values."""
+    from strategy_fixtures import _build
+
+    from openalpha_cn.panel_factors import load_factor_manifests, write_factor_panels
+
+    store = PanelStore(tmp_path / "panel")
+    old = [
+        manifest.manifest_id
+        for manifest in load_factor_manifests(store, REVERSAL, years=(day.year,), as_of=READ_AT)
+        if manifest.as_of == session_publication_instant(day)
+    ]
+    assert len(old) == 1
+    write_factor_panels(
+        store, [_build(store, panel, day, late=False, reversed_=True)], supersedes=old
+    )
+
+
+def test_a_build_superseded_after_filing_leaves_the_honest_record_admitted(
+    tmp_path: Path,
+) -> None:
+    """s1's build is superseded after its record was filed. The record's scores are no longer
+    what the store gives, and its provenance shows why: the factor build it read was replaced.
+    It is admitted -- listed as unverifiable, not refused -- and the book is priced."""
+    panel, day = write_strategy_corpus(tmp_path), None
+    day = panel.sessions[1]
+    request_for = _static_request_for(_base(**STATIC))
+    record, held = _file(tmp_path, request_for, day, day, at=_evening(day))
+    _supersede(tmp_path, panel, day)
+    check = late_record_check(
+        PanelStore(tmp_path / "panel"),
+        REGISTERED,
+        request_for=_at_read(request_for),
+        anchor=day,
+        provenance_for=_lookup(held),
+    )
+
+    assert check(record) is None
+    ((flagged, changes),) = check.unverifiable
+    assert flagged == record.record_id
+    assert any(change.startswith("factor_obs_reversal_1d_v1") for change in changes)
+
+
+def _restated(
+    batch: Any, dates: Sequence[object], rows: Mapping[tuple[str, str], Mapping[str, float]]
+) -> Any:
+    """`batch` with the named cells of the named `(code, trade_date)` rows replaced."""
+    import dataclasses
+
+    from openalpha_cn.domain.panel_batch import PanelColumn
+
+    keys = list(zip(batch.subjects, (str(day) for day in dates), strict=True))
+    columns = []
+    for column in batch.columns:
+        values = list(column.values)
+        for index, key in enumerate(keys):
+            if key in rows and column.name in rows[key]:
+                values[index] = rows[key][column.name]
+        columns.append(PanelColumn(column.name, column.kind, tuple(values)))
+    return dataclasses.replace(batch, columns=tuple(columns))
+
+
+def _restate_a_close(tmp_path: Path, panel: Any, day: date) -> None:
+    """The upstream restates one security's close on `day` (and the next session's `pre_close`
+    and change with it), after the records were filed: a label input corrected."""
+    from openalpha_cn.panel_ingest import load_suspensions, write_daily_panel
+
+    store = PanelStore(tmp_path / "panel")
+    code = panel.securities[0]
+    following = panel.sessions[panel.sessions.index(day) + 1]
+    closes = {
+        (subject, str(on)): float(value)
+        for subject, on, value in panel.rows_of(DAILY_DATASET, "trade_date", "close")
+    }
+    highs = {
+        (subject, str(on)): float(value)
+        for subject, on, value in panel.rows_of(DAILY_DATASET, "trade_date", "high")
+    }
+    close = closes[(code, day.isoformat())] * 1.05
+    after = closes[(code, following.isoformat())]
+    write_daily_panel(
+        store,
+        bars=[
+            _restated(
+                panel.batch(DAILY_DATASET),
+                panel.column(DAILY_DATASET, "trade_date"),
+                {
+                    (code, day.isoformat()): {
+                        "close": close,
+                        "high": max(close, highs[(code, day.isoformat())]),
+                    },
+                    (code, following.isoformat()): {
+                        "pre_close": close,
+                        "pct_chg": (after / close - 1.0) * 100.0,
+                    },
+                },
+            )
+        ],
+        fundamentals=[
+            _restated(
+                panel.batch(DAILY_BASIC_DATASET),
+                panel.column(DAILY_BASIC_DATASET, "trade_date"),
+                {(code, day.isoformat()): {"close": close}},
+            )
+        ],
+        calendar=panel.calendar(),
+        halts=load_suspensions(store, years=(panel.year,), as_of=panel.as_of, max_staleness=None),
+    )
+
+
+def test_a_label_restated_after_filing_makes_a_record_unverifiable_and_still_priced(
+    tmp_path: Path,
+) -> None:
+    """A trailing-IC record of s6, filed at 18:30; then the upstream restates s3's close for one
+    security -- a label its IC window read. The record no longer recomputes, and its provenance
+    names the `daily` year it read as corrected since: it is admitted and priced, and listed as
+    `unverifiable_inputs_corrected_after_filing`, never silently."""
+    panel = write_strategy_corpus(tmp_path)
+    sessions = panel.sessions
+    configured = _base(**TRAILING)
+    request_for = _static_request_for(configured)
+    day, anchor = sessions[6], sessions[1]
+    record, held = _file(tmp_path, request_for, day, anchor, at=_evening(day))
+    _restate_a_close(tmp_path, panel, sessions[3])
+    check = late_record_check(
+        PanelStore(tmp_path / "panel"),
+        REGISTERED,
+        request_for=_at_read(request_for),
+        anchor=anchor,
+        provenance_for=_lookup(held),
+    )
+
+    book = backtest_strategy(
+        PanelStore(tmp_path / "panel"),
+        strategy_request(
+            **{**configured, "trailing_ic": None, "components": ()},
+            prediction_ids=[record.record_id],
+            rebalance_days=[day],
+            start=day,
+            end=sessions[-1],
+            as_of=READ_AT,
+        ),
+        predictions=FilePredictionStore(tmp_path / "predictions", clock=lambda: READ_AT).get,
+        verify_late=check,
+    )
+
+    assert book.periods
+    ((flagged, changes),) = check.unverifiable
+    assert flagged == record.record_id
+    assert "daily:2026" in changes
+    assert strategy_registration.UNVERIFIABLE == "unverifiable_inputs_corrected_after_filing"
+
+
+def test_a_verified_verdict_is_kept_and_a_correction_asks_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verified once, a record is served from its kept verdict while no input it read has moved
+    -- not recomputed. Once one has, it is asked again."""
+    panel = write_strategy_corpus(tmp_path)
+    day = panel.sessions[1]
+    request_for = _static_request_for(_base(**STATIC))
+    record, held = _file(tmp_path, request_for, day, day, at=_evening(day))
+    verdicts = daily.FileVerdicts(tmp_path, clock=lambda: READ_AT)
+
+    def check() -> Any:
+        return late_record_check(
+            PanelStore(tmp_path / "panel"),
+            REGISTERED,
+            request_for=_at_read(request_for),
+            anchor=day,
+            provenance_for=_lookup(held),
+            verdicts=verdicts,
+        )
+
+    assert check()(record) is None
+    assert verdicts.verified(record.record_id, held.digest)
+    calls: list[date] = []
+
+    def counted(*arguments: Any, **keywords: Any) -> Any:
+        calls.append(keywords["day"])
+        raise strategy_view.StrategyRunBlockedError("recomputed")
+
+    monkeypatch.setattr(strategy_registration, "score_day", counted)
+    again = check()
+    assert again(record) is None and again.verified == [record.record_id]
+    assert calls == []
+
+    _supersede(tmp_path, panel, day)
+    asked = check()
+    assert asked(record) is None
+    assert calls == [day]
+    assert [flagged for flagged, _ in asked.unverifiable] == [record.record_id]
+
+
+def test_deleting_the_journals_first_day_is_refused_by_the_stores_first_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The store's first record decides where the forward book starts. A journal whose first day
+    was deleted would start it later; it is refused naming both days."""
+    world, _results = _four_days(tmp_path, monkeypatch, capsys)
+    registration = daily.admit_registration(world.registration, world.repo)
+    last = DAY + timedelta(days=4)
+    _journal(world, DAY).unlink()
+
+    with pytest.raises(daily.StepFailedError) as refused:
+        daily.forward_rebalances(world.runtime, registration, through=last, as_of=_evening(last))
+
+    assert DAY.isoformat() in str(refused.value)
+    assert "journal starts 2026-01-21" in str(refused.value)
+
+
+def test_a_day_without_a_record_is_held_only_when_the_journal_and_the_configuration_agree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Records on s1, s2, s4 and s6 (every second session from s1 is scheduled); none on s3 or
+    s5, on which the configuration, scored again, holds. s3 is journalled held: a held day, so s4
+    is not a rebalance day. s5 -- a scheduled day -- is not journalled held: a day the command did
+    not complete, whatever the configuration would have done, so s6 catches its rebalance up."""
+    panel = write_strategy_corpus(tmp_path)
+    sessions = panel.sessions
+    request_for = _static_request_for(_base(**{**STATIC, "rebalance_every_sessions": 2}))
+    anchor = sessions[1]
+    filed = {
+        day: _file(tmp_path, request_for, day, anchor, at=_evening(day))[0]
+        for day in (sessions[1], sessions[2], sessions[4], sessions[6])
+    }
+    held_days = {sessions[3], sessions[5]}
+    real = strategy_registration.score_day
+
+    def holding(store: Any, request: Any, *, day: date, **keywords: Any) -> Any:
+        signal = real(store, request, day=day, **keywords)
+        if day in held_days:
+            return dataclasses_replace(
+                signal, scores=dataclasses_replace(signal.scores, ranked=None)
+            )
+        return signal
+
+    monkeypatch.setattr(strategy_registration, "score_day", holding)
+    store = PanelStore(tmp_path / "panel")
+    calendar = load_trading_calendar(store, exchange=EXCHANGE, years=(2026,), as_of=READ_AT)
+
+    witnessed = witnessed_days(
+        store,
+        FilePredictionStore(tmp_path / "predictions", clock=lambda: READ_AT),
+        REGISTERED,
+        request_for=_at_read(request_for),
+        as_of=READ_AT,
+        anchor=anchor,
+        calendar=calendar,
+        through=sessions[6],
+        journalled_holds=frozenset({sessions[3]}),
+    )
+
+    assert [(day.session, day.decision, day.record_id) for day in witnessed] == [
+        (sessions[1], "rebalanced", filed[sessions[1]].record_id),
+        (sessions[2], "not a rebalance day", filed[sessions[2]].record_id),
+        (sessions[3], "held", None),
+        (sessions[4], "not a rebalance day", filed[sessions[4]].record_id),
+        (sessions[6], "rebalanced", filed[sessions[6]].record_id),
+    ]
+
+
+def dataclasses_replace(value: Any, **changes: Any) -> Any:
+    import dataclasses
+
+    return dataclasses.replace(value, **changes)
+
+
+def test_another_writers_record_of_the_same_model_is_not_this_registrations(
+    tmp_path: Path,
+) -> None:
+    """A walk-forward record carries its model's declaration, which names no registration. The
+    command's record of s6 is bound through the provenance it wrote; a second record of the same
+    model and day -- `model daily-run`'s, filed a minute later -- names no provenance of this
+    registration: the store derivation ignores it rather than refusing two records, and the
+    check refuses it as unbound."""
+    panel = write_strategy_corpus(tmp_path)
+    sessions = panel.sessions
+    request_for = _static_request_for(_base(**WALK_FORWARD))
+    day, anchor = sessions[6], sessions[5]
+    ours, held = _file(tmp_path, request_for, day, anchor, at=_evening(day))
+    theirs, _ = _file(
+        tmp_path,
+        request_for,
+        day,
+        anchor,
+        at=_evening(day) + timedelta(minutes=1),
+        provenance=False,
+        another_writer=True,
+    )
+    assert ours.batch.artifact.declaration == theirs.batch.artifact.declaration
+    store = PanelStore(tmp_path / "panel")
+    calendar = load_trading_calendar(store, exchange=EXCHANGE, years=(2026,), as_of=READ_AT)
+
+    witnessed = witnessed_days(
+        store,
+        FilePredictionStore(tmp_path / "predictions", clock=lambda: READ_AT),
+        REGISTERED,
+        request_for=_at_read(request_for),
+        as_of=READ_AT,
+        anchor=anchor,
+        calendar=calendar,
+        through=day,
+        provenance_for=_lookup(held),
+    )
+    check = late_record_check(
+        store,
+        REGISTERED,
+        request_for=_at_read(request_for),
+        anchor=anchor,
+        provenance_for=_lookup(held),
+    )
+
+    assert [(item.session, item.record_id) for item in witnessed] == [(day, ours.record_id)]
+    assert check(ours) is None
+    assert "not declared under the registered configuration" in str(check(theirs))
+
+
+def test_a_reports_walk_forward_fits_are_made_once_per_refit_and_instant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """s5 and s6 share s5's refit (every second session from s5). Scored twice with one cache,
+    the refit is fitted once."""
+    panel = write_strategy_corpus(tmp_path)
+    sessions = panel.sessions
+    request = _static_request_for(_base(**WALK_FORWARD))(sessions[6])
+    store = PanelStore(tmp_path / "panel")
+    fitted: list[date] = []
+    real = strategy_view._ModelFeed._refit
+
+    def counted(self: Any, refit_day: date) -> Any:
+        fitted.append(refit_day)
+        return real(self, refit_day)
+
+    monkeypatch.setattr(strategy_view._ModelFeed, "_refit", counted)
+    cache: dict[Any, Any] = {}
+    for day in (sessions[5], sessions[6]):
+        score_day(store, request, day=day, anchor=sessions[5], fit_cache=cache)
+
+    assert fitted == [sessions[5]]
