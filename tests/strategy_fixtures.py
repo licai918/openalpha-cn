@@ -21,11 +21,12 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import MappingProxyType
-from typing import Final
+from typing import Any, Final
 
 from panel_fixtures import (
     DAILY_BASIC_DATASET,
     EXCHANGE,
+    WINDOW_FIRST,
     GeneratedPanel,
     generate_panel,
     write_generated_panel,
@@ -118,7 +119,7 @@ def _index_batch(sessions: Sequence[date]) -> ColumnarPanelBatch:
     previous_levels: list[float] = []
     for code, path in INDEX_LEVELS.items():
         previous = path[0] / 1.001
-        for day, level in zip(sessions, path, strict=True):
+        for day, level in zip(sessions, path[: len(sessions)], strict=True):
             subjects.append(code)
             days.append(day)
             levels.append(level)
@@ -217,6 +218,138 @@ def write_strategy_corpus(
         )
     write_factor_panels(store, builds)
     return panel
+
+
+def write_strategy_corpus_published_daily(
+    root: Path,
+    *,
+    label_inputs_through: date | None = None,
+    through: date | None = None,
+    late: bool = False,
+) -> GeneratedPanel:
+    """`write_strategy_corpus`'s ten-session panel, but with `adj_factor` and `suspend_d`
+    published session by session, each session's own row available at its own 16:30 close, the
+    way the real store accumulates a year (`V2-P6-012` fix round 3).
+
+    `write_strategy_corpus` writes each of those as one partition covering all ten sessions in a
+    single call, so the partition's own stored `max_available_time` -- what `read_if_ready()`'s
+    per-partition `not_yet_knowable` gate compares an `as_of` against
+    (`panel_ingest.load_adjustment_histories`/`load_suspensions`; that module's own docstring,
+    `V2-P4-079`/`086`/`094`) -- is the *tenth* session's, regardless of which session a caller
+    actually asks about. A record recomputed at its own filing time, days before the panel had
+    grown that far (`strategy_registration.RecordCheck`), then refuses to even read the
+    partition -- not because anything it read changed, but because the fixture's own one-shot
+    write makes every earlier `as_of` look premature, a fact about how this fixture was built
+    rather than about the record.
+
+    This fixture builds `adj_factor`/`suspend_d` through growing-window writes instead --
+    `generate_panel(window=(WINDOW_FIRST, sessions[i]))` for each `i` up to
+    `label_inputs_through`, which reproduces exactly session `i`'s own values (`_close_of`/
+    `_factor_of` index into `sessions` by position, and a prefix of the full ten shares every
+    earlier position with it) -- so a read at session N's own evening sees a partition whose
+    current coverage stops at session N, exactly as the real store would after N days of
+    ingestion. `write_adjustment_factors`/`write_suspensions` are the real writers, every guard
+    included; only the *shape of the calls* -- growing writes instead of one whole-year write --
+    differs from `write_strategy_corpus`.
+
+    `daily`/`daily_basic` are **not** built incrementally: `daily` is a step function's opposite
+    -- a new row every session regardless -- and its read door is already per-session
+    (`panel_ingest.load_daily_bars`, unlike `load_adjustment_histories`/`load_suspensions`'s
+    whole-year one; `_restate_a_close`'s own precedent in `test_daily_selection.py` already reads
+    a one-shot `daily` partition at an early `as_of` without incident). They, the trading
+    calendar, the security registry, the index levels and the factor builds are written once,
+    whole-range, through `through` (which may run *later* than `label_inputs_through` -- a book
+    needs a session after its newest record to hold a period open to, and `adj_factor`/
+    `suspend_d` do not need a fresh row for a session nothing changed on; a step function answers
+    a later date from its last change point). `through=None` (the default) matches `label_inputs_
+    through`'s own resolution, or the whole ten sessions if that is `None` too.
+
+    `label_inputs_through=None` (the default) builds `adj_factor`/`suspend_d` incrementally
+    through the same session `through` resolves to -- growing writes all the way, not a one-shot
+    build, so `through`-without-`label_inputs_through` is `write_strategy_corpus_published_daily`
+    at its plainest: every `LABEL_INPUTS` dataset published session by session through the given
+    end. `upstream_defects` is not written here either, matching `write_strategy_corpus`: nothing
+    in this corpus ever names a return-path defect, and an unwritten partition of that dataset
+    answers "none" rather than refusing.
+
+    `late=True` carries the same meaning `write_strategy_corpus`'s does, for the factor builds.
+    """
+    store = PanelStore(root / "panel")
+    full = generate_panel(shapes=("daily.close_moves_between_sessions",))
+    all_sessions = full.sessions
+    through_stop = len(all_sessions) if through is None else all_sessions.index(through) + 1
+    sessions = all_sessions[:through_stop]
+    label_stop = (
+        through_stop
+        if label_inputs_through is None
+        else all_sessions.index(label_inputs_through) + 1
+    )
+    write_trading_calendar(store, full.batch(TRADING_CALENDAR_DATASET))
+    write_stock_universe(store, full.batch(STOCK_BASIC_DATASET))
+    calendar = full.calendar()
+    # The shapeless panel's one untimed halt sits at the fifth session regardless of window
+    # (`_halted_key`), so no window shorter than five sessions can be generated at all; the
+    # smallest publishable state is therefore "through the fifth session", not "through the
+    # first" -- sessions 0-3 are never published alone, exactly as a five-name halt convention
+    # would make them unreachable in a real, incrementally-published corpus too.
+    for index in range(min(4, label_stop - 1), label_stop):
+        window = generate_panel(
+            shapes=("daily.close_moves_between_sessions",), window=(WINDOW_FIRST, sessions[index])
+        )
+
+        def _fetched_at_this_window(dataset: str, *, window: GeneratedPanel = window) -> Any:
+            # `_factor_batch`/`_suspension_batch` stamp
+            # `fetched_at=max([panel_fixtures.AS_OF, *available])` -- `AS_OF` is that module's
+            # own constant, the *full* corpus's read instant, not this window's -- so every
+            # batch `generate_panel` builds, however short its own window, claims to have been
+            # fetched on the full corpus's last day. `_refuse_missing_factor_sessions`'s upper
+            # bound is "the day before the fetch", so an unmodified window batch is checked
+            # against the *full* ten-session range regardless of `index`. Restamping
+            # `as_of`/`fetched_at` to `window.as_of` -- already `_read_instant(sessions[index])`,
+            # the morning after this window's own last session -- makes the guard's upper bound
+            # this window's, not the full corpus's.
+            return dataclasses.replace(
+                window.batch(dataset), as_of=window.as_of, fetched_at=window.as_of
+            )
+
+        write_adjustment_factors(
+            store, [_fetched_at_this_window(ADJ_FACTOR_DATASET)], calendar=calendar
+        )
+        write_suspensions(store, [_fetched_at_this_window(SUSPENSION_DATASET)])
+    # Everything else this corpus carries -- `suspend_d` extended past `label_inputs_through`
+    # (a step of "nothing suspended" needs no new row, but `write_daily_panel`'s halt
+    # cross-check still wants every session through `through` explained), `daily`/`daily_basic`
+    # and `stk_limit` (the model plane's label window reads published limit bands too) -- is
+    # written once, whole-range, through `through`: none of their read doors is the one this
+    # fixture exists to work around.
+    through_window = generate_panel(
+        shapes=("daily.close_moves_between_sessions",), window=(WINDOW_FIRST, sessions[-1])
+    )
+
+    def _fetched_at_through(dataset: str) -> Any:
+        return dataclasses.replace(
+            through_window.batch(dataset),
+            as_of=through_window.as_of,
+            fetched_at=through_window.as_of,
+        )
+
+    if through_stop > label_stop:
+        write_suspensions(store, [_fetched_at_through(SUSPENSION_DATASET)])
+    halts = load_suspensions(
+        store, years=(through_window.year,), as_of=through_window.as_of, max_staleness=None
+    )
+    write_daily_panel(
+        store,
+        bars=[_fetched_at_through(DAILY_DATASET)],
+        fundamentals=[_fetched_at_through(DAILY_BASIC_DATASET)],
+        calendar=calendar,
+        halts=halts,
+    )
+    write_price_limits(store, [_fetched_at_through(PRICE_LIMIT_DATASET)], calendar=calendar)
+    write_index_prices(store, [_index_batch(sessions)])
+    builds = [_build(store, full, session, late=late) for session in sessions[1:]]
+    write_factor_panels(store, builds)
+    return dataclasses.replace(full, sessions=sessions, as_of=read_instant(sessions[-1]))
 
 
 # --- a corpus that crosses a calendar year (V2-P6-014 fix round 2) --------------------------------

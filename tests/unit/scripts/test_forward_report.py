@@ -49,6 +49,7 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Callable, Mapping
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -56,7 +57,8 @@ from types import ModuleType
 from typing import Any, Final
 
 import pytest
-from strategy_fixtures import READ_AT, write_strategy_corpus
+from panel_fixtures import generate_panel
+from strategy_fixtures import READ_AT, write_strategy_corpus, write_strategy_corpus_published_daily
 
 from openalpha_cn import strategy_registration
 from openalpha_cn.panel.store import PanelStore
@@ -735,3 +737,290 @@ def test_main_writes_a_json_report_under_the_runtime_directory(tmp_path: Path, r
     assert payload["config_id"] == admitted.config_id
     assert payload["statistics"]["all_periods"]["periods"] == len(signal_days)
     assert payload["integrity"] == daily.INTEGRITY
+
+
+# --- Fix round 3: trailing-IC / walk-forward, filed the real daily-command way -------------------
+#
+# Round 2's walk-forward test stopped at `forward_rebalances` (schedule witnessing) because
+# `RecordCheck`'s real recompute -- at the record's own filing time -- could not be exercised
+# end to end for a label-consuming source (`strategy_view.LABEL_INPUTS`: `adj_factor`, `daily`,
+# `suspend_d`, `upstream_defects`) against `write_strategy_corpus`: that fixture writes each of
+# those as one whole-year partition, so the partition's own `max_available_time` is the *tenth*
+# session's regardless of which session is asked about, and every `as_of` before it refuses with
+# `not_yet_knowable` (`panel_ingest.load_adjustment_histories`'s own docstring names this,
+# `V2-P4-079`/`086`/`094`). `strategy_fixtures.write_strategy_corpus_published_daily` builds the
+# same panel through growing-window writes instead, so a record checked the evening it was filed
+# -- before the panel had grown past it -- is reachable. These tests drive that record through
+# the real filing path (`score_day` + `signal_day_batch` + `daily.register_prediction`, at
+# ~18:30, exactly `scripts/daily_selection.py`'s own step order) and `forward_report()`
+# end to end, for both label-consuming sources.
+
+
+def _label_consuming_scenario(
+    tmp_path: Path, repo: Path, *, source: Mapping[str, Any]
+) -> tuple[Path, Any, Any, date, Callable[[date], Any]]:
+    """A `source` (`test_daily_selection.TRAILING` or `.WALK_FORWARD`) registration, admitted,
+    on an incrementally-published corpus built exactly through the signal day for
+    `adj_factor`/`suspend_d` and two sessions further for `daily`/`daily_basic`/`stk_limit` --
+    enough for the book to hold one period past it (`forward_report`'s own boundary: the book's
+    end must be after its first rebalance day).
+
+    Returns `(runtime_dir, admitted, panel, signal_day, request_for)`; nothing is filed yet.
+    """
+    probe_sessions = generate_panel(shapes=("daily.close_moves_between_sessions",)).sessions
+    anchor = probe_sessions[1]
+    signal_day = probe_sessions[6]
+    book_through = probe_sessions[8]
+    configured = tds._base(**source)
+    config = dict(configured, start=anchor)
+    registration_path = register_config(repo, config)
+    admitted = daily.admit_registration(registration_path, repo)
+    panel = write_strategy_corpus_published_daily(
+        tmp_path, label_inputs_through=signal_day, through=book_through
+    )
+
+    def request_for(day: date) -> Any:
+        return strategy_request(
+            **configured, start=day - timedelta(days=1), end=day, as_of=panel.as_of
+        )
+
+    return tmp_path, admitted, panel, signal_day, request_for
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(tds.TRAILING, id="trailing_ic"),
+        pytest.param(tds.WALK_FORWARD, id="walk_forward"),
+    ],
+)
+def test_an_honest_late_record_of_a_label_consuming_source_is_verified(
+    tmp_path: Path, repo: Path, source: Mapping[str, Any]
+) -> None:
+    """Filed at 18:30 through the real path, scored from the stored builds exactly as the
+    registered configuration would score it: `RecordCheck` recomputes the same scores at the
+    record's own filing time and admits it verified, not merely unrefused."""
+    runtime_dir, admitted, panel, signal_day, request_for = _label_consuming_scenario(
+        tmp_path, repo, source=source
+    )
+    identifiers = register_days(
+        runtime_dir, request_for, [signal_day], panel.sessions[1], registered=admitted.declared
+    )
+    write_journal_day(
+        runtime_dir,
+        admitted,
+        session=signal_day,
+        as_of=tds._evening(signal_day),
+        decision="rebalanced",
+        reason="scheduled",
+        held=False,
+        record_id=identifiers[0],
+    )
+
+    store = PanelStore(runtime_dir / "panel")
+    store_predictions = prediction_store(runtime_dir, clock_at=panel.as_of)
+    report = forward_report.forward_report(
+        store,
+        store_predictions,
+        runtime_dir,
+        registration=admitted.path,
+        repo=repo,
+        as_of=panel.as_of,
+    )
+
+    assert report.check.verified == identifiers
+    assert report.check.unverifiable == []
+    assert len(report.backtest.periods) == 1
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(tds.TRAILING, id="trailing_ic"),
+        pytest.param(tds.WALK_FORWARD, id="walk_forward"),
+    ],
+)
+def test_a_record_whose_stored_scores_do_not_match_a_recompute_is_refused(
+    tmp_path: Path, repo: Path, source: Mapping[str, Any]
+) -> None:
+    """The same honest scoring, but the *stored* record carries scores no build in the panel
+    produced -- a corrupted write, not a stale one. Nothing in the panel changed since filing,
+    so `RecordCheck` finds no correction to explain the mismatch and refuses the whole report,
+    rather than pricing a number nobody can reproduce."""
+    runtime_dir, admitted, panel, signal_day, request_for = _label_consuming_scenario(
+        tmp_path, repo, source=source
+    )
+    store = PanelStore(runtime_dir / "panel")
+    anchor = panel.sessions[1]
+    request = request_for(signal_day)
+    signal = score_day(store, request, day=signal_day, anchor=anchor)
+    filed_at = tds._after_the_close(
+        signal_day, panel.sessions[panel.sessions.index(signal_day) + 1]
+    )
+    honest = signal_day_batch(signal, request, admitted.declared, predicted_at=filed_at)
+    assert honest is not None
+    # Corrupted at the stored batch itself, not at `SignalDay`: a walk-forward source's
+    # `predictions` come from the fitted model's own output, not from `SignalDayScores.scores`/
+    # `.ranked` (perturbing those left `signal_day_batch`'s own output byte-identical, measured
+    # directly). Negating every stored score is source-agnostic and, since a security's score is
+    # never exactly its own negation here, guaranteed to disagree with any correct recompute.
+    assert honest.predictions and all(row.score is not None for row in honest.predictions)
+    batch = honest.model_copy(
+        update={
+            "predictions": tuple(
+                row.model_copy(update={"score": -row.score}) for row in honest.predictions
+            )
+        }
+    )
+    daily.write_provenance(
+        runtime_dir,
+        input_provenance(
+            store, request, admitted.declared, day=signal_day, batch=batch, recorded_at=filed_at
+        ),
+    )
+    calendar = daily._outcome_calendar(store, request.exchange, signal_day, request.as_of)
+    record, outcome = daily.register_prediction(
+        runtime_dir, batch, calendar=calendar, clock=lambda: filed_at
+    )
+    assert (outcome, record.standing) == ("created", "forward")
+    write_journal_day(
+        runtime_dir,
+        admitted,
+        session=signal_day,
+        as_of=tds._evening(signal_day),
+        decision="rebalanced",
+        reason="scheduled",
+        held=False,
+        record_id=record.record_id,
+    )
+
+    store_predictions = prediction_store(runtime_dir, clock_at=panel.as_of)
+    with pytest.raises(
+        forward_report.ForwardReportError, match="no input it read has been corrected since"
+    ):
+        forward_report.forward_report(
+            store,
+            store_predictions,
+            runtime_dir,
+            registration=admitted.path,
+            repo=repo,
+            as_of=panel.as_of,
+        )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(tds.TRAILING, id="trailing_ic"),
+        pytest.param(tds.WALK_FORWARD, id="walk_forward"),
+    ],
+)
+def test_a_label_restated_after_a_late_record_files_marks_it_unverifiable_and_still_prices_it(
+    tmp_path: Path, repo: Path, source: Mapping[str, Any]
+) -> None:
+    """Honest at filing; then the upstream restates an earlier close inside the source's own
+    lookback (`test_daily_selection._restate_a_close`, reused unchanged). The record no longer
+    recomputes, its provenance names `daily` as corrected since, and it is admitted -- priced,
+    not refused -- and listed under `unverifiable_inputs_corrected_after_filing`."""
+    runtime_dir, admitted, panel, signal_day, request_for = _label_consuming_scenario(
+        tmp_path, repo, source=source
+    )
+    identifiers = register_days(
+        runtime_dir, request_for, [signal_day], panel.sessions[1], registered=admitted.declared
+    )
+    write_journal_day(
+        runtime_dir,
+        admitted,
+        session=signal_day,
+        as_of=tds._evening(signal_day),
+        decision="rebalanced",
+        reason="scheduled",
+        held=False,
+        record_id=identifiers[0],
+    )
+    tds._restate_a_close(runtime_dir, panel, panel.sessions[3])
+
+    store = PanelStore(runtime_dir / "panel")
+    store_predictions = prediction_store(runtime_dir, clock_at=panel.as_of)
+    report = forward_report.forward_report(
+        store,
+        store_predictions,
+        runtime_dir,
+        registration=admitted.path,
+        repo=repo,
+        as_of=panel.as_of,
+    )
+
+    assert report.check.verified == []
+    ((flagged, changes),) = report.check.unverifiable
+    assert flagged == identifiers[0]
+    assert "daily:2026" in changes
+    summary = report.summary["unverifiable_inputs_corrected_after_filing"]
+    assert summary["count"] == 1
+    assert len(report.backtest.periods) == 1
+    assert report.summary["statistics"]["excluding_unverifiable"]["periods"] == 0
+
+
+def test_an_older_label_consuming_record_is_refused_once_the_panel_has_since_advanced(
+    tmp_path: Path, repo: Path
+) -> None:
+    """A known, standing limitation, held here as evidence rather than left implicit
+    (`panel_ingest.load_adjustment_histories`'s own docstring, `V2-P4-079`/`086`/`094`): once the
+    panel has ingested sessions past a trailing-IC or walk-forward record's own signal day,
+    `RecordCheck`'s recompute -- at the record's own filing time -- can no longer even read
+    `adj_factor`/`suspend_d`, because `load_adjustment_histories`/`load_suspensions` judge
+    `not_yet_knowable` on the *partition's* newest row, not the row the record's own day needs;
+    the store has since advanced, and one late row refuses the whole year for every earlier
+    `as_of`. `provenance_changes` correctly finds nothing the record read was corrected (its own
+    row through its own day is unchanged), so the record is refused, not marked unverifiable --
+    the whole report fails rather than silently dropping or mispricing it, but a review of more
+    than the single newest day's record of either source cannot currently complete at all. The
+    fix is not this module's: it is the two-part repair `load_adjustment_histories`'s own
+    docstring names (`answerable_through` plus a per-subject `last_event_date` census) and that
+    module's own history has measured and deliberately deferred three times over; nothing here
+    should quietly route around it."""
+    probe_sessions = generate_panel(shapes=("daily.close_moves_between_sessions",)).sessions
+    anchor = probe_sessions[1]
+    signal_day = probe_sessions[6]
+    advanced_through = probe_sessions[8]
+    configured = tds._base(**tds.TRAILING)
+    config = dict(configured, start=anchor)
+    registration_path = register_config(repo, config)
+    admitted = daily.admit_registration(registration_path, repo)
+    # Built once, through `advanced_through`: a store is one physical state at read time, so
+    # whether the later sessions arrived before or after the record was filed makes no
+    # difference to what a check run now can see -- only how far the store currently reaches
+    # does. Filing still reads at `signal_day`'s own instant (`request_for`, below), exactly as
+    # the daily command would have on `signal_day` itself, before any of this had happened.
+    panel = write_strategy_corpus_published_daily(
+        tmp_path, label_inputs_through=advanced_through, through=advanced_through
+    )
+
+    def request_for(day: date) -> Any:
+        return strategy_request(
+            **configured, start=day - timedelta(days=1), end=day, as_of=panel.as_of
+        )
+
+    identifiers = register_days(
+        tmp_path, request_for, [signal_day], anchor, registered=admitted.declared
+    )
+    write_journal_day(
+        tmp_path,
+        admitted,
+        session=signal_day,
+        as_of=tds._evening(signal_day),
+        decision="rebalanced",
+        reason="scheduled",
+        held=False,
+        record_id=identifiers[0],
+    )
+
+    store = PanelStore(tmp_path / "panel")
+    store_predictions = prediction_store(tmp_path, clock_at=panel.as_of)
+    later = tds._evening(advanced_through)
+    with pytest.raises(
+        forward_report.ForwardReportError, match="no input it read has been corrected since"
+    ):
+        forward_report.forward_report(
+            store, store_predictions, tmp_path, registration=admitted.path, repo=repo, as_of=later
+        )
