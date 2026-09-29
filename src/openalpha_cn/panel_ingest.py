@@ -6449,9 +6449,10 @@ def panel_readiness_requirement(
     )
 
 
-RowDigestCache = MutableMapping[tuple[str, int, str], Mapping[date, str]]
-"""Per-date row digests of one partition, by `(dataset, year, content_hash)`: a partition is
-hashed once per state however many days are asked about it."""
+RowDigestCache = MutableMapping[tuple[str, int, str], tuple[tuple[date, datetime, str], ...]]
+"""One partition's rows as `(event date, visible from, row hash)`, sorted by row hash, by
+`(dataset, year, content_hash)`: a partition is read once per state however many days and
+instants are asked about it."""
 
 
 def stored_rows_digest(
@@ -6460,20 +6461,25 @@ def stored_rows_digest(
     *,
     year: int,
     through: date,
+    visible_at: datetime,
     date_timezone: str = DEFAULT_DATE_TIMEZONE,
     cache: RowDigestCache | None = None,
 ) -> str | None:
-    """A digest of the stored rows of `(dataset, year)` dated on or before `through`; `None`
-    when the partition is not stored (`V2-P6-011` round 11's input provenance).
+    """A digest of the stored rows of `(dataset, year)` dated on or before `through` and visible
+    at `visible_at`; `None` when the partition is not stored (`V2-P6-011`'s input provenance).
 
-    What a prediction filed on `through` could have read of this partition, fingerprinted so a
-    later verification can tell "the store corrected what the record read" from "the record is
-    not what its inputs give". Rows dated after `through` are left out -- a daily update appends
-    them without touching anything read -- and so is `ingested_time`, which every incremental
-    carry re-stamps (`V2-P6-003`); the subject, `event_time`, `available_time`,
-    `revision_time` and every data column are in, in a canonical order. The partition is hashed
-    once per event date and the dates through `through` combined, so `cache` serves every day
-    asked about one partition state from one read.
+    What a prediction filed for `through` could have read of this partition at its signal
+    instant, fingerprinted so a later verification can tell "the store corrected what the record
+    read" from "the record is not what its inputs give". Left out:
+
+    - rows dated after `through` -- a daily update appends them without touching anything read;
+    - rows whose `available_time` or `revision_time` is after `visible_at` -- a late-arriving row
+      with an old date was not readable then, and is not a correction of what was (round 12);
+    - `ingested_time`, which every incremental carry re-stamps (`V2-P6-003`).
+
+    The subject, `event_time`, `available_time`, `revision_time` and every data column are in.
+    Each row is hashed once per partition state (`cache`), and a digest is the hash of the
+    selected rows' hashes in one canonical order.
 
     It takes the un-gated `query` door, on `carry_stored_rows_forward`'s argument: nothing it
     reads is answered with. It returns a hash and nothing a caller could compute a number from.
@@ -6482,8 +6488,8 @@ def stored_rows_digest(
     if coverage is None:
         return None
     key = (dataset, year, coverage.partition_content_hash or "")
-    by_date = None if cache is None else cache.get(key)
-    if by_date is None:
+    rows = None if cache is None else cache.get(key)
+    if rows is None:
         clocks = tuple(name for name in CLOCK_COLUMN_NAMES if name != "ingested_time")
         fields = tuple(
             entry.name for entry in coverage.fields if entry.name not in RESERVED_COLUMN_NAMES
@@ -6491,18 +6497,25 @@ def stored_rows_digest(
         names = (SUBJECT_COLUMN_NAME, *clocks, *fields)
         zone = _resolve_timezone(date_timezone)
         event = names.index(EVENT_TIME_COLUMN)
-        grouped: dict[date, list[str]] = {}
-        for row in store.query(dataset, year=year, columns=names):
-            day = cast(datetime, row[event]).astimezone(zone).date()
-            grouped.setdefault(day, []).append(repr(row))
-        by_date = {
-            day: hashlib.sha256("\n".join((repr(names), *sorted(rows))).encode("utf-8")).hexdigest()
-            for day, rows in grouped.items()
-        }
+        available = names.index("available_time")
+        revised = names.index("revision_time")
+        rows = tuple(
+            sorted(
+                (
+                    (
+                        cast(datetime, row[event]).astimezone(zone).date(),
+                        max(cast(datetime, row[available]), cast(datetime, row[revised])),
+                        hashlib.sha256(repr(row).encode("utf-8")).hexdigest(),
+                    )
+                    for row in store.query(dataset, year=year, columns=names)
+                ),
+                key=lambda entry: entry[2],
+            )
+        )
         if cache is not None:
-            cache[key] = by_date
+            cache[key] = rows
     body = "\n".join(
-        f"{day.isoformat()} {digest}" for day, digest in sorted(by_date.items()) if day <= through
+        digest for day, visible, digest in rows if day <= through and visible <= visible_at
     )
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 

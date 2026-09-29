@@ -164,8 +164,6 @@ from openalpha_cn.domain.factor_transform import FactorTransformRegistry, Factor
 from openalpha_cn.domain.horizon import ResearchHorizon, parse_horizon
 from openalpha_cn.domain.index_prices import IndexPriceError, index_session_returns
 from openalpha_cn.domain.industry_classification import (
-    INDUSTRY_MEMBERSHIP_DATASET,
-    SW2014_MEMBERSHIP_DATASET,
     IndustryClassificationError,
     IndustryHorizonError,
     industry_membership_source_on,
@@ -178,12 +176,10 @@ from openalpha_cn.domain.labels import (
 )
 from openalpha_cn.domain.prediction_record import PredictionRecord
 from openalpha_cn.domain.price_limits import (
-    PRICE_LIMIT_DATASET,
     SUSPENSION_DATASET,
     PriceLimit,
     TradingState,
 )
-from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET
 from openalpha_cn.domain.trading_calendar import (
     TRADING_CALENDAR_DATASET,
     TradingCalendar,
@@ -217,6 +213,7 @@ from openalpha_cn.panel_factors import (
     processed_factor_dataset,
 )
 from openalpha_cn.panel_ingest import (
+    UPSTREAM_DEFECTS_DATASET,
     load_adjustment_histories,
     load_daily_bars,
     load_index_prices,
@@ -276,47 +273,61 @@ assumes, and the auction's indicative price is already a published piece of the 
 """
 
 
-PRICE_BASE_INPUTS: Final[tuple[str, ...]] = (
-    TRADING_CALENDAR_DATASET,
-    STOCK_BASIC_DATASET,
+LABEL_INPUTS: Final[tuple[str, ...]] = (
     DAILY_DATASET,
     ADJ_FACTOR_DATASET,
-    PRICE_LIMIT_DATASET,
     SUSPENSION_DATASET,
-    INDUSTRY_MEMBERSHIP_DATASET,
-    SW2014_MEMBERSHIP_DATASET,
+    UPSTREAM_DEFECTS_DATASET,
 )
-"""The panel datasets any strategy source's scoring can read beside its factor builds: the
-calendar and registry, the price base the labels are priced from, and the memberships an
-industry cap or a neutralized tier reads."""
+"""What a label is priced from, beside the factor builds, for the two sources that read labels
+(trailing IC, walk-forward): the price base, the adjustment factors, the halts, and the recorded
+decisions a return path follows (`upstream_defects`: `V2-P6-013`'s drops today, `V2-P6-020`'s
+return-path decisions where that is merged)."""
 
 
-def input_datasets(request: StrategyRequest) -> tuple[str, ...]:
-    """Every stored dataset scoring one day of `request`'s source can read (`V2-P6-011`).
-
-    The price base and every dataset of every factor the source names -- the raw, processed and
-    neutralized observations and their manifests -- whether or not the tier is the one declared:
-    the list is for an input provenance, where naming a dataset that is never read costs a
-    fingerprint and leaving one out would let a correction to it pass unseen.
-    """
-    definitions = {
-        definition.qualified_key: definition for definition in request.definitions.values()
-    }
-    for column in request.columns:
-        definitions.setdefault(column.definition.qualified_key, column.definition)
-    factors = tuple(
-        dataset
-        for _key, definition in sorted(definitions.items())
-        for dataset in (
-            factor_observation_dataset(definition),
-            factor_manifest_dataset(definition),
-            processed_factor_dataset(definition),
-            factor_transform_manifest_dataset(definition),
+def _tier_datasets(definition: FactorDefinition, tier: str) -> tuple[str, str]:
+    """The observation and manifest datasets one factor tier is read from."""
+    if tier == "processed":
+        return processed_factor_dataset(definition), factor_transform_manifest_dataset(definition)
+    if tier == "neutralized":
+        return (
             neutralized_factor_dataset(definition),
             factor_neutralization_manifest_dataset(definition),
         )
+    return factor_observation_dataset(definition), factor_manifest_dataset(definition)
+
+
+def input_datasets(request: StrategyRequest) -> tuple[str, ...]:
+    """The stored datasets scoring one day of `request`'s source reads (`V2-P6-011` round 12).
+
+    Derived from the source, for an input provenance: a correction to anything else is not a
+    correction of what the day read, and must not make a record's mismatch look explained.
+
+    - **static**: each component's factor tier and its build manifests -- the day's score rows;
+    - **trailing IC**: the same for its components, and `LABEL_INPUTS`, which its ICs are priced
+      from;
+    - **walk-forward**: each declared feature's tier and manifests, and `LABEL_INPUTS`, which its
+      training labels are priced from.
+    """
+    source = request.source
+    pairs: list[tuple[FactorDefinition, str]]
+    if source.walk_forward is not None:
+        pairs = [(column.definition, column.tier) for column in request.columns]
+    elif source.trailing_ic is not None:
+        pairs = [
+            (request.definitions[token], tier) for token, tier in source.trailing_ic.components
+        ]
+    else:
+        pairs = [(request.definitions[token], tier) for token, tier, _ in source.components]
+    factors = tuple(
+        dict.fromkeys(
+            dataset
+            for definition, tier in sorted(pairs, key=lambda pair: (pair[0].qualified_key, pair[1]))
+            for dataset in _tier_datasets(definition, tier)
+        )
     )
-    return (*PRICE_BASE_INPUTS, *factors)
+    labels = LABEL_INPUTS if source.walk_forward is not None or source.trailing_ic else ()
+    return (*factors, *labels)
 
 
 def registration_deadline(trading_session: date) -> datetime:

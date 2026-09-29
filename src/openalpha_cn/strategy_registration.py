@@ -70,7 +70,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Mapping, Sequence, Set
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Final, Protocol, cast
@@ -89,7 +89,11 @@ from openalpha_cn.domain.prediction_record import PredictionRecord
 from openalpha_cn.domain.trading_calendar import TradingCalendar
 from openalpha_cn.panel.catalog import DEFAULT_DATE_TIMEZONE
 from openalpha_cn.panel.store import PanelStore
-from openalpha_cn.panel_ingest import RowDigestCache, stored_rows_digest
+from openalpha_cn.panel_ingest import (
+    RowDigestCache,
+    session_publication_instant,
+    stored_rows_digest,
+)
 from openalpha_cn.strategy_view import (
     REGISTRATION_CUTOFF,
     SignalDay,
@@ -344,6 +348,40 @@ def _input_years(request: StrategyRequest, day: date) -> tuple[int, ...]:
     return tuple(range(first.year, day.year + 1))
 
 
+def _partition_state(
+    store: PanelStore,
+    request: StrategyRequest,
+    *,
+    day: date,
+    cache: RowDigestCache | None,
+    known: Mapping[tuple[str, int], InputPartition] | None = None,
+) -> dict[tuple[str, int], InputPartition]:
+    """Every partition `request`'s source reads for `day`, as it stands now: content hash, and --
+    unless `known` holds the same content hash already -- the digest of its rows through `day`
+    visible at `day`'s signal instant (`stored_rows_digest`)."""
+    instant = session_publication_instant(day)
+    state: dict[tuple[str, int], InputPartition] = {}
+    for dataset in input_datasets(request):
+        for year in _input_years(request, day):
+            coverage = store.read_coverage(dataset, year)
+            if coverage is None:
+                continue
+            content = coverage.partition_content_hash or ""
+            held = (known or {}).get((dataset, year))
+            if held is not None and held.content_hash == content:
+                state[(dataset, year)] = held
+                continue
+            digest = stored_rows_digest(
+                store, dataset, year=year, through=day, visible_at=instant, cache=cache
+            )
+            if digest is None:
+                continue
+            state[(dataset, year)] = InputPartition(
+                dataset=dataset, year=year, content_hash=content, rows_digest=digest
+            )
+    return state
+
+
 def input_provenance(
     store: PanelStore,
     request: StrategyRequest,
@@ -352,31 +390,35 @@ def input_provenance(
     day: date,
     batch: PredictionBatch,
     recorded_at: datetime,
+    cache: RowDigestCache | None = None,
 ) -> InputProvenance:
-    """Fingerprint what scoring `day` under `request` could read, for the record of `batch`."""
-    inputs = []
-    for dataset in input_datasets(request):
-        for year in _input_years(request, day):
-            coverage = store.read_coverage(dataset, year)
-            digest = stored_rows_digest(store, dataset, year=year, through=day)
-            if coverage is None or digest is None:
-                continue
-            inputs.append(
-                InputPartition(
-                    dataset=dataset,
-                    year=year,
-                    content_hash=coverage.partition_content_hash or "",
-                    rows_digest=digest,
-                )
-            )
+    """Fingerprint what scoring `day` under `request` reads (`strategy_view.input_datasets`) as
+    it was visible at `day`'s signal instant, for the record of `batch`."""
+    state = _partition_state(store, request, day=day, cache=cache)
     return InputProvenance(
         registration_sha256=registered.registration_sha256,
         config_id=registered.config_id,
         session=day,
         batch_digest=batch_digest(batch),
         recorded_at=recorded_at,
-        inputs=tuple(inputs),
+        inputs=tuple(state[key] for key in sorted(state)),
     )
+
+
+def _changes(
+    recorded: Mapping[tuple[str, int], InputPartition],
+    now: Mapping[tuple[str, int], InputPartition],
+) -> tuple[str, ...]:
+    changed: list[str] = []
+    for dataset, year in sorted(set(recorded) | set(now)):
+        before, after = recorded.get((dataset, year)), now.get((dataset, year))
+        if before is None:
+            changed.append(f"{dataset}:{year} (stored since)")
+        elif after is None:
+            changed.append(f"{dataset}:{year} (no longer stored)")
+        elif before.rows_digest != after.rows_digest:
+            changed.append(f"{dataset}:{year}")
+    return tuple(changed)
 
 
 def provenance_changes(
@@ -387,32 +429,16 @@ def provenance_changes(
     cache: RowDigestCache | None = None,
 ) -> tuple[str, ...]:
     """The inputs a record read that the store no longer holds as they were: a partition whose
-    rows through the record's day hash otherwise, or one gone, or one now there that was not.
+    rows through the record's day, visible at its signal instant, hash otherwise, or one gone,
+    or one now there that was not.
 
     A partition whose content hash has not moved is not re-read. One that moved only by rows
-    after the day -- a daily update's append -- is not a change.
+    dated after the day, or by rows that became visible after its signal instant -- a daily
+    append, a late-arriving row with an old date -- is not a change.
     """
-    day = provenance.session
     recorded = {(item.dataset, item.year): item for item in provenance.inputs}
-    changed: list[str] = []
-    for dataset in input_datasets(request):
-        for year in _input_years(request, day):
-            item = recorded.get((dataset, year))
-            coverage = store.read_coverage(dataset, year)
-            if item is not None and coverage is not None:
-                if coverage.partition_content_hash == item.content_hash:
-                    continue
-                now = stored_rows_digest(store, dataset, year=year, through=day, cache=cache)
-                if now == item.rows_digest:
-                    continue
-                changed.append(f"{dataset}:{year}")
-            elif item is not None:
-                changed.append(f"{dataset}:{year} (no longer stored)")
-            elif coverage is not None and stored_rows_digest(
-                store, dataset, year=year, through=day, cache=cache
-            ):
-                changed.append(f"{dataset}:{year} (stored since)")
-    return tuple(changed)
+    now = _partition_state(store, request, day=provenance.session, cache=cache, known=recorded)
+    return _changes(recorded, now)
 
 
 def record_is_bound(
@@ -438,10 +464,21 @@ def record_is_bound(
 
 
 class VerdictCache(Protocol):
-    """Where a record's `verified` verdict is kept, keyed by record id and provenance digest."""
+    """Where a record's `verified` verdict is kept (`V2-P6-011` round 12).
 
-    def verified(self, record_id: str, provenance_digest: str) -> bool: ...
-    def keep(self, record_id: str, provenance_digest: str) -> None: ...
+    A cache and nothing more: keyed by the record id, the provenance digest and the partitions
+    that verified it (each one's content hash and row digest). `verified_under` returns every
+    partition set a `verified` verdict was kept under; the check trusts one only while every one
+    of those partitions still stands as it was, and otherwise verifies again.
+    """
+
+    def verified_under(
+        self, record_id: str, provenance_digest: str
+    ) -> tuple[tuple[InputPartition, ...], ...]: ...
+
+    def keep(
+        self, record_id: str, provenance_digest: str, partitions: tuple[InputPartition, ...]
+    ) -> None: ...
 
 
 class RecordCheck:
@@ -457,9 +494,11 @@ class RecordCheck:
        `UNVERIFIABLE`: admitted -- it is an on-time record in the append-only store -- and listed
        in `unverifiable`, never silently. With no correction to point to, it is refused.
 
-    A `verified` verdict is kept in `verdicts` under the record id and its provenance digest,
-    and served from there while no input has changed since; `fit_cache` shares walk-forward
-    fits between the days a report re-scores.
+    A `verified` verdict is kept in `verdicts` under the record id, its provenance digest and
+    the partitions it was verified under; it is served from there only while every one of those
+    partitions still hashes as it did -- a content hash compared, and a partition that moved
+    re-hashed through the day -- and otherwise the record is verified again. `fit_cache` shares
+    walk-forward fits between the days a report re-scores.
     """
 
     def __init__(
@@ -499,16 +538,15 @@ class RecordCheck:
                 "registration names its batch; a record registered after its signal instant is "
                 "read only when it is bound to the registration"
             )
-        if (
-            provenance is not None
-            and self._verdicts is not None
-            and self._verdicts.verified(record.record_id, provenance.digest)
-            and not provenance_changes(
-                self._store, provenance, request=request, cache=self._digests
-            )
-        ):
-            self.verified.append(record.record_id)
-            return None
+        if provenance is not None and self._verdicts is not None:
+            for kept in self._verdicts.verified_under(record.record_id, provenance.digest):
+                held = {(item.dataset, item.year): item for item in kept}
+                now = _partition_state(
+                    self._store, request, day=day, cache=self._digests, known=held
+                )
+                if not _changes(held, now):
+                    self.verified.append(record.record_id)
+                    return None
         try:
             again = signal_day_batch(
                 score_day(
@@ -538,7 +576,10 @@ class RecordCheck:
         if not differs:
             self.verified.append(record.record_id)
             if provenance is not None and self._verdicts is not None:
-                self._verdicts.keep(record.record_id, provenance.digest)
+                state = _partition_state(self._store, request, day=day, cache=self._digests)
+                self._verdicts.keep(
+                    record.record_id, provenance.digest, tuple(state[key] for key in sorted(state))
+                )
             return None
         changes = (
             ()
@@ -649,7 +690,7 @@ def witnessed_days(
     anchor: date,
     calendar: TradingCalendar,
     through: date,
-    journalled_holds: Set[date] = frozenset(),
+    journalled_holds: Mapping[date, datetime] | None = None,
     provenance_for: ProvenanceLookup | None = None,
     fit_cache: dict[tuple[date, datetime, object], WalkForwardFit] | None = None,
 ) -> tuple[WitnessedDay, ...]:
@@ -660,13 +701,15 @@ def witnessed_days(
     the registration (`record_is_bound`). A hold before it leaves no record and cannot be told
     from a day the command never ran, so none is counted. From there, a session with one
     on-time bound record is a ranked day. One without is a held day only when the journal says
-    the command completed it holding **and** the registered configuration, scored again at
-    `as_of` (no request), ranks nothing there; any other session is not a completed day -- a
+    the command completed it holding **and** the registered configuration, scored again (no
+    request) at the instant that day's run pinned -- `journalled_holds` maps each journalled hold
+    to its journal's `as_of` -- ranks nothing there; any other session is not a completed day -- a
     missed or refused run, whose rebalance the next run caught up. `Schedule` over the completed
     days decides as the command does. Two bound records for one session are refused; a record
     filed at or after its registration cutoff is not a registration.
     """
     lookup = provenance_for or (lambda _record: None)
+    holds = dict(journalled_holds or {})
     request = request_for(anchor, as_of)
     every = request.spec.rebalance_every_sessions
     on_time: dict[date, list[str]] = {}
@@ -698,10 +741,14 @@ def witnessed_days(
             )
         if held:
             ranked = True
-        elif session in journalled_holds:
+        elif session in holds:
             try:
                 signal = score_day(
-                    store, request_for(session, as_of), day=session, anchor=anchor, fit_cache=cache
+                    store,
+                    request_for(session, holds[session]),
+                    day=session,
+                    anchor=anchor,
+                    fit_cache=cache,
                 )
             except (StrategyViewError, StrategyBacktestError):
                 continue

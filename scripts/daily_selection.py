@@ -173,7 +173,9 @@ from openalpha_cn.providers.tushare import (  # noqa: E402
 )
 from openalpha_cn.runtime.composition import build_storage  # noqa: E402
 from openalpha_cn.runtime.provenance import resolve_code_commit  # noqa: E402
-from openalpha_cn.strategy_registration import (  # noqa: E402  # noqa: E402
+from openalpha_cn.strategy_registration import (  # noqa: E402
+    UNVERIFIABLE,
+    InputPartition,
     InputProvenance,
     ProvenanceLookup,
     RecordCheck,
@@ -188,9 +190,7 @@ from openalpha_cn.strategy_registration import (  # noqa: E402  # noqa: E402
     signal_day_batch,
     witnessed_days,
 )
-from openalpha_cn.strategy_registration import (  # noqa: E402
-    schedule_of as registered_schedule_of,
-)
+from openalpha_cn.strategy_registration import schedule_of as registered_schedule_of  # noqa: E402
 from openalpha_cn.strategy_view import (  # noqa: E402
     SignalDay,
     StrategyRequest,
@@ -1103,6 +1103,8 @@ class JournalledDay:
     source_held: bool
     record_id: str | None
     weights: Mapping[str, str]
+    as_of: datetime
+    """The instant the day's run pinned its clock to: what a held day is re-scored at."""
 
 
 def journalled_days(directory: Path) -> tuple[JournalledDay, ...]:
@@ -1132,6 +1134,7 @@ def journalled_days(directory: Path) -> tuple[JournalledDay, ...]:
                         str(prediction["record_id"]) if prediction.get("registered") else None
                     ),
                     weights=dict(targets["weights"]),
+                    as_of=datetime.fromisoformat(str(result["as_of"])),
                 )
             )
         except (KeyError, TypeError, AttributeError) as error:
@@ -1214,8 +1217,17 @@ def provenance_lookup(runtime_dir: Path, registration_sha256: str) -> Provenance
         provenance = InputProvenance.from_document(json.loads(path.read_text(encoding="utf-8")))
         if provenance.digest != path.stem:
             raise StepFailedError("summary", f"{path} is not what its name says it is")
-        if provenance.registration_sha256 == registration_sha256:
-            held[(provenance.session, provenance.batch_digest)] = provenance
+        if provenance.registration_sha256 != registration_sha256:
+            continue
+        key = (provenance.session, provenance.batch_digest)
+        if key in held:
+            raise StepFailedError(
+                "summary",
+                f"two provenance files name the batch {provenance.batch_digest} of "
+                f"{provenance.session.isoformat()}: {held[key].digest}.json and {path.name}; a "
+                "filing has one, and neither can be told to be the one its run wrote",
+            )
+        held[key] = provenance
 
     def lookup(record: PredictionRecord) -> InputProvenance | None:
         day = record.batch.as_of.astimezone(SHANGHAI).date()
@@ -1226,20 +1238,53 @@ def provenance_lookup(runtime_dir: Path, registration_sha256: str) -> Provenance
 
 class FileVerdicts:
     """`strategy_registration.VerdictCache` over `VERDICT_DIRECTORY`: one write-once file per
-    verified record and provenance."""
+    verified record, provenance and partition set -- `<record>.<provenance>.<partitions>.json`.
+
+    **A cache, inside the threat model and no further.** It saves recomputing a record whose
+    inputs have not moved; it is not evidence. A kept verdict is trusted only while every
+    partition it was verified under still hashes as it did (`RecordCheck` rechecks them before
+    trusting it), so a bug or an upstream correction sends the record back to verification. Like
+    every artifact here it is a local file: someone who controls this disk can write a verdict
+    as easily as a record, and nothing local defends against that (`INTEGRITY`).
+    """
 
     def __init__(self, runtime_dir: Path, *, clock: Callable[[], datetime]) -> None:
         self._directory = runtime_dir / VERDICT_DIRECTORY
         self._clock = clock
 
-    def _path(self, record_id: str, provenance_digest: str) -> Path:
-        return self._directory / f"{record_id}.{provenance_digest}.json"
+    def verified_under(
+        self, record_id: str, provenance_digest: str
+    ) -> tuple[tuple[InputPartition, ...], ...]:
+        if not self._directory.is_dir():
+            return ()
+        kept = []
+        for path in sorted(self._directory.glob(f"{record_id}.{provenance_digest}.*.json")):
+            body = json.loads(path.read_text(encoding="utf-8"))
+            if body.get("verdict") != "verified":
+                continue
+            kept.append(
+                tuple(
+                    InputPartition(
+                        dataset=str(item[0]),
+                        year=int(item[1]),
+                        content_hash=str(item[2]),
+                        rows_digest=str(item[3]),
+                    )
+                    for item in body["partitions"]
+                )
+            )
+        return tuple(kept)
 
-    def verified(self, record_id: str, provenance_digest: str) -> bool:
-        return self._path(record_id, provenance_digest).is_file()
-
-    def keep(self, record_id: str, provenance_digest: str) -> None:
-        path = self._path(record_id, provenance_digest)
+    def keep(
+        self, record_id: str, provenance_digest: str, partitions: tuple[InputPartition, ...]
+    ) -> None:
+        listed = [
+            [item.dataset, item.year, item.content_hash, item.rows_digest] for item in partitions
+        ]
+        digest = hashlib.sha256(
+            json.dumps(listed, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        path = self._directory / f"{record_id}.{provenance_digest}.{digest}.json"
         if path.is_file():
             return
         _write_once(
@@ -1247,6 +1292,7 @@ class FileVerdicts:
             {
                 "record_id": record_id,
                 "provenance": provenance_digest,
+                "partitions": listed,
                 "verdict": "verified",
                 "verified_at": self._clock().isoformat(),
             },
@@ -1331,7 +1377,9 @@ def forward_rebalances(
             anchor=anchor,
             calendar=calendar,
             through=through,
-            journalled_holds=frozenset(day.session for day in journalled if day.decision == "held"),
+            journalled_holds={
+                day.session: day.as_of for day in journalled if day.decision == "held"
+            },
             provenance_for=provenance_lookup(runtime_dir, registration.sha256),
         )
     except StrategyRegistrationError as error:
@@ -1379,6 +1427,95 @@ def forward_rebalances(
         first_record=first,
         unprovable_holds=tuple(day.session for day in before),
     )
+
+
+INTEGRITY: Final[str] = (
+    "integrity: every artifact here -- the prediction store and its recorded_at clock, the "
+    "journal, the input provenance, the kept verdicts -- is a local file. The checks defend "
+    "against honest operation, bugs, accidental corruption and upstream corrections; they do not "
+    "defend against deliberate tampering by whoever controls this disk, which needs an external "
+    "append-only witness"
+)
+"""The threat model, stated wherever a forward book is reported (`V2-P6-011` round 12)."""
+
+
+def _book_statistics(periods: Sequence[Any]) -> dict[str, Any]:
+    """Compounded net and per-benchmark returns and the mean period net, over `periods`."""
+    net = Decimal(1)
+    benchmarks: dict[str, Decimal] = {}
+    for period in periods:
+        net *= Decimal(1) + period.net_return
+        for name, value in period.benchmark_returns.items():
+            benchmarks[name] = benchmarks.get(name, Decimal(1)) * (Decimal(1) + value)
+    count = len(periods)
+    total = sum((period.net_return for period in periods), Decimal(0))
+    return {
+        "periods": count,
+        "compounded_net_return": f"{(net - 1).quantize(_WEIGHT_QUANTUM):f}",
+        "mean_period_net_return": (
+            None if not count else f"{(total / count).quantize(_WEIGHT_QUANTUM):f}"
+        ),
+        "compounded_benchmark_returns": {
+            name: f"{(value - 1).quantize(_WEIGHT_QUANTUM):f}"
+            for name, value in sorted(benchmarks.items())
+        },
+    }
+
+
+def forward_summary(book: Any, check: RecordCheck, schedule: ForwardSchedule) -> dict[str, Any]:
+    """What a forward report shows about the evidence behind its book (`V2-P6-012`).
+
+    The book is priced as recommended -- every on-time bound record, `UNVERIFIABLE` ones
+    included -- and its statistics are computed twice: over every period, and over the periods
+    whose record verified, excluding those an `UNVERIFIABLE` record opened. Both are shown, with
+    the count and each corrected partition, so a reader sees whether the corrections matter;
+    `unprovable_holds` and `INTEGRITY` are stated beside them.
+    """
+    flagged = dict(check.unverifiable)
+    opened = {session: record for session, record in schedule.rebalances}
+    excluded = {session for session, record in opened.items() if record in flagged}
+    return {
+        UNVERIFIABLE: {
+            "count": len(flagged),
+            "records": [
+                {"record_id": record, "corrected": list(changes)}
+                for record, changes in sorted(flagged.items())
+            ],
+        },
+        "statistics": {
+            "all_periods": _book_statistics(book.periods),
+            "excluding_unverifiable": _book_statistics(
+                [period for period in book.periods if period.start not in excluded]
+            ),
+        },
+        "unprovable_holds": [day.isoformat() for day in schedule.unprovable_holds],
+        "integrity": INTEGRITY,
+    }
+
+
+def forward_summary_lines(summary: Mapping[str, Any]) -> list[str]:
+    """`forward_summary` as the lines a report prints, the unverifiable records first."""
+    flagged = summary[UNVERIFIABLE]
+    lines = [f"{UNVERIFIABLE}: {flagged['count']} record(s)"]
+    for entry in flagged["records"]:
+        lines.append(f"  {entry['record_id']} corrected: {', '.join(entry['corrected'])}")
+    for name, label in (
+        ("all_periods", "statistics, every period"),
+        ("excluding_unverifiable", f"statistics, excluding {UNVERIFIABLE}"),
+    ):
+        stats = summary["statistics"][name]
+        lines.append(
+            f"{label}: {stats['periods']} period(s), compounded net "
+            f"{stats['compounded_net_return']}, mean period net {stats['mean_period_net_return']}, "
+            f"benchmarks {json.dumps(stats['compounded_benchmark_returns'], sort_keys=True)}"
+        )
+    if summary["unprovable_holds"]:
+        lines.append(
+            "holds before the first record (unprovable, not counted): "
+            + ", ".join(summary["unprovable_holds"])
+        )
+    lines.append(summary["integrity"])
+    return lines
 
 
 # --- the day's schedule --------------------------------------------------------------------------

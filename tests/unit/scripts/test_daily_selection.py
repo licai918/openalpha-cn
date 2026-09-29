@@ -2419,6 +2419,7 @@ def _journalled(
     if complete:
         body["result"] = {
             "session": day.isoformat(),
+            "as_of": _evening(day).isoformat(),
             "candidates": {"held": decision == "held"},
             "targets": {"decision": decision, "weights": {}}
             | ({"reason": "why"} if reason else {}),
@@ -2593,7 +2594,9 @@ def test_the_store_witnesses_the_commands_holds_rebalances_and_catch_ups(tmp_pat
         anchor=anchor,
         calendar=calendar,
         through=sessions[-2],
-        journalled_holds=frozenset(day for day, decision, _ in expected if decision == "held"),
+        journalled_holds={
+            day: _evening(day) for day, decision, _ in expected if decision == "held"
+        },
     )
 
     first = next(day for day, _, record_id in expected if record_id is not None)
@@ -2827,6 +2830,27 @@ def test_a_label_restated_after_filing_makes_a_record_unverifiable_and_still_pri
     assert flagged == record.record_id
     assert "daily:2026" in changes
     assert strategy_registration.UNVERIFIABLE == "unverifiable_inputs_corrected_after_filing"
+    summary = daily.forward_summary(
+        book,
+        check,
+        daily.ForwardSchedule(
+            rebalances=((day, record.record_id),), days=(), first_record=day, unprovable_holds=()
+        ),
+    )
+    flagged = summary["unverifiable_inputs_corrected_after_filing"]
+    assert flagged["count"] == 1
+    assert "daily:2026" in flagged["records"][0]["corrected"]
+    statistics = summary["statistics"]
+    assert statistics["all_periods"]["periods"] == len(book.periods) >= 1
+    assert statistics["excluding_unverifiable"]["periods"] == 0
+    lines = daily.forward_summary_lines(summary)
+    assert lines[0] == "unverifiable_inputs_corrected_after_filing: 1 record(s)"
+    assert any(line.startswith("statistics, every period:") for line in lines)
+    assert any(
+        line.startswith("statistics, excluding unverifiable_inputs_corrected_after_filing:")
+        for line in lines
+    )
+    assert lines[-1] == daily.INTEGRITY
 
 
 def test_a_verified_verdict_is_kept_and_a_correction_asks_again(
@@ -2851,7 +2875,11 @@ def test_a_verified_verdict_is_kept_and_a_correction_asks_again(
         )
 
     assert check()(record) is None
-    assert verdicts.verified(record.record_id, held.digest)
+    ((kept,),) = [verdicts.verified_under(record.record_id, held.digest)]
+    assert {item.dataset for item in kept} == {
+        "factor_obs_reversal_1d_v1",
+        "factor_manifest_reversal_1d_v1",
+    }
     calls: list[date] = []
 
     def counted(*arguments: Any, **keywords: Any) -> Any:
@@ -2916,18 +2944,28 @@ def test_a_day_without_a_record_is_held_only_when_the_journal_and_the_configurat
     monkeypatch.setattr(strategy_registration, "score_day", holding)
     store = PanelStore(tmp_path / "panel")
     calendar = load_trading_calendar(store, exchange=EXCHANGE, years=(2026,), as_of=READ_AT)
+    pinned = _evening(sessions[3], hours=3)
+    asked: list[tuple[date, datetime]] = []
+
+    def spy(day: date, at: datetime) -> Any:
+        asked.append((day, at))
+        return request_for(day)
 
     witnessed = witnessed_days(
         store,
         FilePredictionStore(tmp_path / "predictions", clock=lambda: READ_AT),
         REGISTERED,
-        request_for=_at_read(request_for),
+        request_for=spy,
         as_of=READ_AT,
         anchor=anchor,
         calendar=calendar,
         through=sessions[6],
-        journalled_holds=frozenset({sessions[3]}),
+        journalled_holds={sessions[3]: pinned},
     )
+
+    # The hold is re-scored at the instant that day's run pinned, not the report's.
+    assert (sessions[3], pinned) in asked
+    assert all(at == READ_AT for day, at in asked if day != sessions[3])
 
     assert [(day.session, day.decision, day.record_id) for day in witnessed] == [
         (sessions[1], "rebalanced", filed[sessions[1]].record_id),
@@ -3016,3 +3054,109 @@ def test_a_reports_walk_forward_fits_are_made_once_per_refit_and_instant(
         score_day(store, request, day=day, anchor=sessions[5], fit_cache=cache)
 
     assert fitted == [sessions[5]]
+
+
+# --- round 12: what the day read, when it read it, and duplicates --------------------------------
+
+
+def _file_altered(tmp_path: Path, day: date) -> tuple[Any, Any, Callable[[date], Any]]:
+    """s1's `STATIC` scores with one moved by 0.001, filed at 18:30 with the provenance of what
+    the day read."""
+    request_for = _static_request_for(_base(**STATIC))
+    store = PanelStore(tmp_path / "panel")
+    request = request_for(day)
+    batch = signal_day_batch(
+        score_day(store, request, day=day, anchor=day),
+        request,
+        REGISTERED,
+        predicted_at=_evening(day),
+    )
+    assert batch is not None
+    first = next(index for index, row in enumerate(batch.predictions) if row.score is not None)
+    rows = list(batch.predictions)
+    rows[first] = replace_score(rows[first], rows[first].score + 0.001)
+    batch = type(batch)(
+        as_of=batch.as_of,
+        predicted_at=batch.predicted_at,
+        artifact=batch.artifact,
+        predictions=tuple(rows),
+    )
+    held = input_provenance(
+        store, request, REGISTERED, day=day, batch=batch, recorded_at=_evening(day)
+    )
+    calendar = daily._outcome_calendar(store, request.exchange, day, request.as_of)
+    written = FilePredictionStore(tmp_path / "predictions", clock=lambda: _evening(day)).put(
+        batch=batch, calendar=calendar, zone=daily.SHANGHAI
+    )
+    return written.record, held, request_for
+
+
+def test_a_price_base_correction_does_not_explain_a_static_records_mismatch(
+    tmp_path: Path,
+) -> None:
+    """A static composite reads its factor tier and build manifests, nothing else. A close the
+    upstream restates after the filing is not an input of it, so a record whose scores do not
+    recompute is still refused: the correction does not unlock it."""
+    panel = write_strategy_corpus(tmp_path)
+    day = panel.sessions[1]
+    record, held, request_for = _file_altered(tmp_path, day)
+    _restate_a_close(tmp_path, panel, panel.sessions[1])
+    check = late_record_check(
+        PanelStore(tmp_path / "panel"),
+        REGISTERED,
+        request_for=_at_read(request_for),
+        anchor=day,
+        provenance_for=_lookup(held),
+    )
+
+    assert {item.dataset for item in held.inputs} == {
+        "factor_obs_reversal_1d_v1",
+        "factor_manifest_reversal_1d_v1",
+    }
+    assert "no input it read has been corrected since" in str(check(record))
+    assert check.unverifiable == []
+
+
+def test_a_row_arriving_late_with_an_old_date_is_not_a_correction(tmp_path: Path) -> None:
+    """A build of s1 written at 17:00 -- after s1's 16:30 signal instant -- adds rows dated s1 to
+    the partition the record read. They were not visible when it was scored, so they are not a
+    correction of what it read: its provenance still matches, and it is still verified."""
+    from strategy_fixtures import _build
+
+    from openalpha_cn.panel_factors import write_factor_panels
+
+    panel = write_strategy_corpus(tmp_path)
+    day = panel.sessions[1]
+    request_for = _static_request_for(_base(**STATIC))
+    record, held = _file(tmp_path, request_for, day, day, at=_evening(day))
+    store = PanelStore(tmp_path / "panel")
+    write_factor_panels(store, [_build(store, panel, day, late=True, reversed_=True)])
+
+    request = request_for(day)
+    assert strategy_registration.provenance_changes(store, held, request=request) == ()
+    check = late_record_check(
+        store,
+        REGISTERED,
+        request_for=_at_read(request_for),
+        anchor=day,
+        provenance_for=_lookup(held),
+    )
+    assert check(record) is None and check.verified == [record.record_id]
+
+
+def test_two_provenance_files_for_one_filing_are_refused_by_name(tmp_path: Path) -> None:
+    """A filing has one provenance. Two naming the same batch of the same session -- a copy
+    edited, a run replayed with another clock -- leave nothing to choose between: refused."""
+    panel = write_strategy_corpus(tmp_path)
+    day = panel.sessions[1]
+    request_for = _static_request_for(_base(**STATIC))
+    _record, held = _file(tmp_path, request_for, day, day, at=_evening(day))
+    first = daily.write_provenance(tmp_path, held)
+    second = daily.write_provenance(
+        tmp_path, dataclasses_replace(held, recorded_at=held.recorded_at + timedelta(minutes=1))
+    )
+
+    with pytest.raises(daily.StepFailedError) as refused:
+        daily.provenance_lookup(tmp_path, REGISTERED.registration_sha256)
+
+    assert first.name in str(refused.value) and second.name in str(refused.value)
