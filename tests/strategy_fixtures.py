@@ -164,14 +164,21 @@ def _index_batch(sessions: Sequence[date]) -> ColumnarPanelBatch:
 
 
 def _build(
-    store: PanelStore, panel: GeneratedPanel, session: date, *, late: bool, reversed_: bool = False
+    store: PanelStore,
+    panel: GeneratedPanel,
+    session: date,
+    *,
+    late: bool,
+    reversed_: bool = False,
+    at: datetime | None = None,
 ) -> FactorPanel:
     """One raw cross section through the real engine, the evaluator seam supplying values.
 
     `reversed_` files the securities in the opposite order, so a second build on one session
-    carries values a reader could tell apart from the first.
+    carries values a reader could tell apart from the first. `at` stamps it at that instant
+    instead of `build_instant(session, late=late)` -- a re-run later on the session's evening.
     """
-    instant = build_instant(session, late=late)
+    instant = build_instant(session, late=late) if at is None else at
     index = panel.sessions.index(session)
     subjects = tuple(reversed(panel.securities)) if reversed_ else tuple(panel.securities)
     return compute_factor(

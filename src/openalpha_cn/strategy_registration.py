@@ -122,6 +122,7 @@ __all__ = [
     "input_provenance",
     "late_record_check",
     "provenance_changes",
+    "readable_instant",
     "record_is_bound",
     "registered_at",
     "registered_declaration",
@@ -382,6 +383,73 @@ def _partition_state(
     return state
 
 
+def readable_instant(store: PanelStore, request: StrategyRequest, *, day: date) -> datetime | None:
+    """The newest instant any partition `request`'s source reads for `day` became knowable (its
+    stored `max_available_time`), or `None` when none is stored (`V2-P6-011` fix round 14).
+
+    At or after it every one of those partitions is readable, whichever door it is read through.
+    `load_adjustment_histories`/`load_suspensions` judge `not_yet_knowable` on a year partition's
+    newest row (`V2-P4-079`/`086`/`094`), so once the panel has ingested sessions past a
+    label-consuming day, an instant on that day -- its record's filing time, its journal's pinned
+    run -- no longer reads the year at all. This is the earliest instant that surely does.
+    """
+    newest: datetime | None = None
+    for dataset in input_datasets(request):
+        for year in _input_years(request, day):
+            coverage = store.read_coverage(dataset, year)
+            if coverage is None:
+                continue
+            if newest is None or coverage.max_available_time > newest:
+                newest = coverage.max_available_time
+    return newest
+
+
+_READ_REFUSALS: Final = (StrategyViewError, StrategyBacktestError, StrategyRegistrationError)
+
+
+def _score_when_readable(
+    store: PanelStore,
+    request_for: Callable[[date, datetime], StrategyRequest],
+    *,
+    day: date,
+    at: datetime,
+    anchor: date,
+    fit_cache: dict[tuple[date, datetime, object], WalkForwardFit],
+) -> tuple[SignalDay, StrategyRequest, datetime]:
+    """`day` scored again at `at`; when the store cannot be read there, at `readable_instant`.
+
+    Only a refusal to read at `at` sends the day here; a day `at` can read is judged at `at`.
+
+    **Why the later instant verifies nothing `at` would not.** A record's numbers were fixed at
+    `at`, so they carry no row that arrived after it. What arrived between the two instants
+    either leaves the day's scoring as it was -- rows of later sessions (every counted IC's label
+    exited by the signal instant; a walk-forward fit trains on labels exited by its embargo
+    deadline and scores the cross section visible at the instant), and builds: each day's is the
+    latest at or before its own signal instant (`strategy_view._chosen_build`), so a re-run
+    filed after `at` is never taken in place of the build the day had -- or it changes the
+    scoring, and then the recompute differs and the record is not verified: `UNVERIFIABLE` when
+    `provenance_changes` names a correction of what it read (a build superseded in place, a
+    restated row), refused otherwise. The one-sided error is a refusal, never an admission.
+    The forward report's tests pin both halves:
+    `test_a_label_consuming_days_filing_time_scores_equal_the_advanced_stores` and
+    `test_a_build_superseded_after_an_older_record_files_marks_it_unverifiable`.
+
+    Returns the day, the request it was scored under and that request's `as_of`. Raises what the
+    read at the later instant raises, or -- when there is no later instant -- what the first did.
+    """
+    request = request_for(day, at)
+    try:
+        signal = score_day(store, request, day=day, anchor=anchor, fit_cache=fit_cache)
+        return signal, request, at
+    except _READ_REFUSALS:
+        readable = readable_instant(store, request, day=day)
+        if readable is None or readable <= at:
+            raise
+    later = request_for(day, readable)
+    signal = score_day(store, later, day=day, anchor=anchor, fit_cache=fit_cache)
+    return signal, later, readable
+
+
 def input_provenance(
     store: PanelStore,
     request: StrategyRequest,
@@ -489,7 +557,11 @@ class RecordCheck:
     2. **Recomputed at its own filing time**: `request_for(day, registered_at(record))` scored
        through `score_day` from the stored builds (no request) and put by `signal_day_batch`;
        equal in instant, artifact and every score, it is `verified`. Reading the store as the
-       record's writer could keep what was stored after it out of the question.
+       record's writer could keep what was stored after it out of the question. When the store
+       can no longer be read there -- a label-consuming source's `adj_factor`/`suspend_d` year
+       has since gained later rows, and those loaders gate the whole partition -- it is scored at
+       the earliest instant it can be (`readable_instant`), which changes nothing the day's
+       scoring sees (`_score_when_readable`, fix round 14).
     3. Otherwise, if its provenance shows an input corrected after it was filed, it is
        `UNVERIFIABLE`: admitted -- it is an on-time record in the append-only store -- and listed
        in `unverifiable`, never silently. With no correction to point to, it is refused.
@@ -547,31 +619,36 @@ class RecordCheck:
                 if not _changes(held, now):
                     self.verified.append(record.record_id)
                     return None
+        filed = registered_at(record)
         try:
+            signal, scored, at = _score_when_readable(
+                self._store,
+                self._request_for,
+                day=day,
+                at=filed,
+                anchor=self._anchor,
+                fit_cache=self._fit_cache,
+            )
             again = signal_day_batch(
-                score_day(
-                    self._store,
-                    request,
-                    day=day,
-                    anchor=self._anchor,
-                    fit_cache=self._fit_cache,
-                ),
-                request,
-                self._registered,
-                predicted_at=batch.predicted_at,
+                signal, scored, self._registered, predicted_at=batch.predicted_at
             )
             differs = again is None or (again.as_of, again.artifact, again.predictions) != (
                 batch.as_of,
                 batch.artifact,
                 batch.predictions,
             )
+            when = (
+                "at its filing time"
+                if at == filed
+                else f"at {at.isoformat()}, the earliest instant its inputs could be read"
+            )
             failure = (
                 f"the registered configuration holds on {day.isoformat()}"
                 if again is None
                 else "they are not the registered configuration's scored again from the stored "
-                "builds at its filing time"
+                f"builds {when}"
             )
-        except (StrategyViewError, StrategyBacktestError, StrategyRegistrationError) as error:
+        except _READ_REFUSALS as error:
             differs, failure = True, f"they cannot be recomputed from the stored builds: {error}"
         if not differs:
             self.verified.append(record.record_id)
@@ -703,7 +780,8 @@ def witnessed_days(
     on-time bound record is a ranked day. One without is a held day only when the journal says
     the command completed it holding **and** the registered configuration, scored again (no
     request) at the instant that day's run pinned -- `journalled_holds` maps each journalled hold
-    to its journal's `as_of` -- ranks nothing there; any other session is not a completed day -- a
+    to its journal's `as_of`, or the earliest instant after it the store can still be read at
+    (`_score_when_readable`) -- ranks nothing there; any other session is not a completed day -- a
     missed or refused run, whose rebalance the next run caught up. `Schedule` over the completed
     days decides as the command does. Two bound records for one session are refused; a record
     filed at or after its registration cutoff is not a registration.
@@ -743,10 +821,11 @@ def witnessed_days(
             ranked = True
         elif session in holds:
             try:
-                signal = score_day(
+                signal, _scored, _at = _score_when_readable(
                     store,
-                    request_for(session, holds[session]),
+                    request_for,
                     day=session,
+                    at=holds[session],
                     anchor=anchor,
                     fit_cache=cache,
                 )

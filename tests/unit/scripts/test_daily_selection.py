@@ -2898,7 +2898,9 @@ def test_a_verified_verdict_is_kept_and_a_correction_asks_again(
     _supersede(tmp_path, panel, day)
     asked = check()
     assert asked(record) is None
-    assert calls == [day]
+    # Recomputed -- and, `counted` refusing every read, tried once more at the instant its
+    # inputs became readable (`_score_when_readable`, fix round 14): still only this day.
+    assert calls and set(calls) == {day}
     assert [flagged for flagged, _ in asked.unverifiable] == [record.record_id]
 
 
