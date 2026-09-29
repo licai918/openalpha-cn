@@ -169,10 +169,12 @@ being reviewed for.
 from __future__ import annotations
 
 import json
+from bisect import bisect_left, bisect_right
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from functools import partial
 from types import MappingProxyType
 from typing import ClassVar, Final, Literal, Protocol, TypeVar, cast
 from zoneinfo import ZoneInfo
@@ -240,6 +242,7 @@ from openalpha_cn.domain.daily_prices import (
     RecordedReturnPath,
 )
 from openalpha_cn.domain.factor import (
+    FactorBuildManifest,
     FactorDefinition,
     FactorError,
     FactorNote,
@@ -283,11 +286,12 @@ from openalpha_cn.domain.stock_universe import (
     StockUniverseError,
 )
 from openalpha_cn.domain.trading_calendar import (
+    TRADING_CALENDAR_DATASET,
     CalendarDayStatus,
     TradingCalendar,
     TradingCalendarError,
 )
-from openalpha_cn.domain.upstream_defects import UpstreamDefectError
+from openalpha_cn.domain.upstream_defects import RETURN_PATH_KINDS, UpstreamDefectError
 from openalpha_cn.panel.catalog import (
     DEFAULT_DATE_TIMEZONE,
     PanelStorageError,
@@ -309,10 +313,14 @@ from openalpha_cn.panel_factors import (
     UnknowableReturnSession,
     apply_factor_transform,
     compute_factor,
+    factor_manifest_dataset,
     factor_observation_dataset,
+    load_factor_manifests,
     load_factor_observations,
+    load_factor_transform_manifests,
     load_processed_factor_observations,
     processed_factor_dataset,
+    session_return_links,
     write_factor_panels,
     write_processed_factor_panels,
 )
@@ -337,6 +345,7 @@ from openalpha_cn.panel_neutralization import (
     NeutralizationEngineError,
     NeutralizedFactorPanel,
     apply_factor_neutralization,
+    load_factor_neutralization_manifests,
     load_industry_market_cap_cross_section,
     load_neutralized_factor_observations,
     neutralized_factor_dataset,
@@ -4004,3 +4013,337 @@ def build_rows(report: FactorBuildReport) -> tuple[tuple[str, str, str, str], ..
             )
         )
     return tuple(rows)
+
+
+# --- stored builds a return-path decision made stale (`V2-P6-020`, review round 2) ---------------
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class StaleFactorBuild:
+    """One stored build of one tier that has to be superseded."""
+
+    tier: BuildTier
+    year: int
+    manifest_id: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class StaleReturnPathBuild:
+    """A stored raw observation the factor engine would no longer give, and what repairs it.
+
+    `stored_*` is what the build wrote and `engine_*` what `compute_factor` answers now for the
+    same security at the same instant over the same partition years -- different because a
+    return-path decision about `session` (`kind`) was recorded after the build was made, and a
+    decision is not a manifest input, so no readiness or staleness check can see it. `builds` is
+    the raw build and every processed and neutralized build made from it at that instant; each
+    of `commands` is a `factor build` argument list that re-answers them and names what it
+    supersedes, without `--runtime-dir`.
+    """
+
+    factor: str
+    as_of: datetime
+    subject: str
+    session: date
+    kind: str
+    stored_coverage: str
+    stored_value: float | None
+    engine_coverage: str
+    engine_value: float | None
+    builds: tuple[StaleFactorBuild, ...]
+    commands: tuple[tuple[str, ...], ...]
+
+
+def stale_return_path_builds(
+    store: PanelStore,
+    *,
+    exchange: str,
+    max_staleness_days: int,
+    as_of: datetime,
+    code_commit: str | None = None,
+) -> tuple[StaleReturnPathBuild, ...]:
+    """Every stored price-return factor build a recorded return-path decision made stale.
+
+    `V2-P6-020`, review round 2 (N1). A build stored before a decision existed holds the value the
+    published path gives; the engine now abstains on an unknowable session and reads a session
+    decided for the factor path on that path. Nothing in the store says so -- a decision is not a
+    manifest input -- so this asks the engine itself:
+
+    1. **Which decisions.** Every recorded decision visible at `as_of`, whichever path it names:
+       whether it moves a stored value is step 3's question, not this one's.
+    2. **Which stored raw observations can have read one.** For every factor that reads a session
+       return (`panel_factors.session_return_links`), every stored build whose instant falls on
+       the decided session or after it, with at most `max_window_sessions` + 1 stored sessions
+       from the one to the other (the + 1 is an instant before its own day's close, whose window
+       ends the session before). No window the engine can assemble holds a session further back,
+       so this bound only narrows what step 3 is asked; it decides nothing. Only a `computed`
+       observation of the decided security can move.
+    3. **Whether it moved.** `compute_factor` for the decided securities at the build's own
+       instant, over the build's own partition years and code commit -- the engine's window rule,
+       skip and decision matching, not a copy of them. A different coverage or value is stale.
+
+    Each stale raw build is listed with every processed and neutralized build made from it at
+    that instant, and with the `factor build` command that re-answers them all and names each
+    `--supersedes-*` (`_refuse_to_drop_a_stored_build` refuses a second answer that does not).
+    `code_commit` goes into the commands when given; otherwise the rebuild resolves its own.
+    """
+    daily_years = tuple(store.registered_years(DAILY_DATASET))
+    if not daily_years:
+        return ()
+    decisions = _read(
+        lambda: load_return_path_records(store, years=daily_years, as_of=as_of),
+        store=store,
+        what="the recorded return-path decisions",
+        faults=(*_PANEL_FAULTS, UpstreamDefectError),
+    )
+    kinds = {path: kind for kind, path in RETURN_PATH_KINDS.items()}
+    if not decisions:
+        return ()
+    calendar_years = tuple(store.registered_years(TRADING_CALENDAR_DATASET))
+    calendar = _read(
+        lambda: load_trading_calendar(store, exchange=exchange, years=calendar_years, as_of=as_of),
+        store=store,
+        what=f"the {exchange} trading calendar",
+    )
+    sessions = calendar.trading_days
+    found: list[StaleReturnPathBuild] = []
+    for definition in FACTOR_DEFINITIONS.definitions:
+        if session_return_links(definition) is None:
+            continue
+        reach = definition.max_window_sessions or definition.lookback_sessions or 0
+        for year in store.registered_years(factor_manifest_dataset(definition)):
+            manifests = _read(
+                partial(load_factor_manifests, store, definition, years=(year,), as_of=as_of),
+                store=store,
+                what=f"the stored {definition.qualified_key} builds of {year}",
+            )
+            candidates = [
+                (manifest, subject, session, record)
+                for manifest in manifests
+                for (subject, session), record in sorted(decisions.items())
+                if session <= manifest.as_of.astimezone(FACTOR_DATE_ZONE).date()
+                and bisect_right(sessions, manifest.as_of.astimezone(FACTOR_DATE_ZONE).date())
+                - bisect_left(sessions, session)
+                <= reach + 1
+            ]
+            if not candidates:
+                continue
+            stored = {
+                (item.manifest_id, item.subject): item
+                for item in _read(
+                    partial(
+                        load_factor_observations, store, definition, years=(year,), as_of=as_of
+                    ),
+                    store=store,
+                    what=f"the stored {definition.qualified_key} observations of {year}",
+                )
+            }
+            movable: dict[str, list[tuple[FactorObservation, date, RecordedReturnPath]]] = {}
+            by_id = {manifest.manifest_id: manifest for manifest in manifests}
+            for manifest, subject, session, record in candidates:
+                held = stored.get((manifest.manifest_id, subject))
+                if held is not None and held.coverage == "computed":
+                    movable.setdefault(manifest.manifest_id, []).append((held, session, record))
+            for manifest_id, items in movable.items():
+                manifest = by_id[manifest_id]
+                engine = _recomputed(
+                    store,
+                    definition,
+                    manifest=manifest,
+                    subjects=tuple(sorted({held.subject for held, _session, _record in items})),
+                    exchange=exchange,
+                    max_staleness_days=max_staleness_days,
+                )
+                moved = [
+                    (held, session, record)
+                    for held, session, record in items
+                    if (engine[held.subject].coverage, engine[held.subject].value)
+                    != (held.coverage, held.value)
+                ]
+                if not moved:
+                    continue
+                builds, commands = _supersession(
+                    store,
+                    definition,
+                    manifest=manifest,
+                    year=year,
+                    as_of=as_of,
+                    exchange=exchange,
+                    max_staleness_days=max_staleness_days,
+                    code_commit=code_commit,
+                )
+                found.extend(
+                    StaleReturnPathBuild(
+                        factor=definition.qualified_key,
+                        as_of=manifest.as_of,
+                        subject=held.subject,
+                        session=session,
+                        kind=kinds[record.path],
+                        stored_coverage=held.coverage,
+                        stored_value=held.value,
+                        engine_coverage=engine[held.subject].coverage,
+                        engine_value=engine[held.subject].value,
+                        builds=builds,
+                        commands=commands,
+                    )
+                    for held, session, record in moved
+                )
+    return tuple(found)
+
+
+def _recomputed(
+    store: PanelStore,
+    definition: FactorDefinition,
+    *,
+    manifest: FactorBuildManifest,
+    subjects: tuple[str, ...],
+    exchange: str,
+    max_staleness_days: int,
+) -> Mapping[str, FactorObservation]:
+    """What `compute_factor` answers now for `subjects` at a stored build's own instant, over
+    its partition years and code commit. `subjects` is also the universe: every one of them was
+    stored `computed`, so it was in the build's universe, and nothing else is asked."""
+    years = tuple(sorted({item.year for item in manifest.inputs}))
+    request = factor_build_request(
+        factor=definition.qualified_key,
+        tier="raw",
+        transform="",
+        neutralization="",
+        as_ofs=[manifest.as_of],
+        years=years,
+        exchange=exchange,
+        max_staleness_days=max_staleness_days,
+        waive_max_staleness=False,
+        subjects=list(subjects),
+        supersedes_raw=[],
+        supersedes_processed=[],
+        supersedes_neutralized=[],
+        code_commit=manifest.code_commit,
+    )
+    calendar = _read(
+        lambda: load_trading_calendar(
+            store, exchange=exchange, years=request.years, as_of=manifest.as_of
+        ),
+        store=store,
+        what=f"the {exchange} trading calendar at {manifest.as_of.isoformat()}",
+    )
+    requirements = _requirements(request, calendar=calendar, as_of=manifest.as_of)
+    panel = _read(
+        lambda: compute_factor(
+            store,
+            definition,
+            as_of=manifest.as_of,
+            subjects=subjects,
+            universe=subjects,
+            requirements=requirements,
+            code_commit=manifest.code_commit,
+            built_at=manifest.as_of,
+        ),
+        store=store,
+        what=f"{definition.qualified_key} at {manifest.as_of.isoformat()} for {len(subjects)} "
+        "decided securities",
+    )
+    return {observation.subject: observation for observation in panel.observations}
+
+
+def _supersession(
+    store: PanelStore,
+    definition: FactorDefinition,
+    *,
+    manifest: FactorBuildManifest,
+    year: int,
+    as_of: datetime,
+    exchange: str,
+    max_staleness_days: int,
+    code_commit: str | None,
+) -> tuple[tuple[StaleFactorBuild, ...], tuple[tuple[str, ...], ...]]:
+    """The builds made from one stale raw build at its instant, and the commands that re-answer
+    them: one per processed build (the neutralized builds made from it riding with it), the
+    first of them also naming the raw build."""
+    transforms = [
+        item
+        for item in _read(
+            lambda: load_factor_transform_manifests(store, definition, years=(year,), as_of=as_of),
+            store=store,
+            what=f"the stored {definition.qualified_key} transform builds of {year}",
+        )
+        if item.source_manifest_id == manifest.manifest_id
+    ]
+    neutralizations = [
+        item
+        for item in _read(
+            lambda: load_factor_neutralization_manifests(
+                store, definition, years=(year,), as_of=as_of
+            ),
+            store=store,
+            what=f"the stored {definition.qualified_key} neutralization builds of {year}",
+        )
+        if item.source_transform_manifest_id
+        in {transform.transform_manifest_id for transform in transforms}
+    ]
+    builds = (
+        StaleFactorBuild(tier="raw", year=year, manifest_id=manifest.manifest_id),
+        *(
+            StaleFactorBuild(tier="processed", year=year, manifest_id=item.transform_manifest_id)
+            for item in transforms
+        ),
+        *(
+            StaleFactorBuild(
+                tier="neutralized", year=year, manifest_id=item.neutralization_manifest_id
+            )
+            for item in neutralizations
+        ),
+    )
+    years = tuple(sorted({item.year for item in manifest.inputs}))
+
+    def command(
+        tier: str, extra: Sequence[str], supersedes: Sequence[tuple[str, str]]
+    ) -> tuple[str, ...]:
+        arguments = ["factor", "build", "--factor", definition.qualified_key, "--tier", tier]
+        arguments += list(extra)
+        arguments += ["--as-of", manifest.as_of.isoformat()]
+        for partition in years:
+            arguments += ["--year", str(partition)]
+        arguments += ["--exchange", exchange, "--max-staleness-days", str(max_staleness_days)]
+        if code_commit is not None:
+            arguments += ["--code-commit", code_commit]
+        for flag, value in supersedes:
+            arguments += [flag, value]
+        return tuple(arguments)
+
+    raw_supersedes = [("--supersedes-raw", manifest.manifest_id)]
+    if not transforms:
+        return builds, (command("raw", (), raw_supersedes),)
+    commands: list[tuple[str, ...]] = []
+    for position, transform in enumerate(transforms):
+        riding = [
+            item
+            for item in neutralizations
+            if item.source_transform_manifest_id == transform.transform_manifest_id
+        ]
+        transform_flag = [
+            "--transform",
+            f"{transform.transform_key}/v{transform.transform_version}",
+        ]
+        processed = [("--supersedes-processed", transform.transform_manifest_id)]
+        first = raw_supersedes if position == 0 else []
+        if not riding:
+            commands.append(command("processed", transform_flag, [*first, *processed]))
+            continue
+        for index, neutralization in enumerate(riding):
+            commands.append(
+                command(
+                    "neutralized",
+                    [
+                        *transform_flag,
+                        "--neutralization",
+                        f"{neutralization.neutralization_key}/v"
+                        f"{neutralization.neutralization_version}",
+                    ],
+                    [
+                        *(first if index == 0 else []),
+                        *(processed if index == 0 else []),
+                        ("--supersedes-neutralized", neutralization.neutralization_manifest_id),
+                    ],
+                )
+            )
+    return builds, tuple(commands)

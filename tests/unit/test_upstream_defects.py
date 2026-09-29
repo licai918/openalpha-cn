@@ -1926,6 +1926,18 @@ def test_a_disagreement_the_band_decides_is_recorded_by_the_limit_target_with_it
         ("adj_factor", RETURN_PATH_CODE, _compact(SESSIONS[3])),
     ]
     assert "pre_close/adj_factor disagreement" in result.output
+    assert "BUDGET return-path-reproduction 8 requests" in result.output
+    # Review round 2, Minor 5: a decision drops nothing, and the value is the implied pre_close.
+    (entry,) = [
+        item
+        for item in json.loads(result.stdout)["builds"][0]["defects"]
+        if item["kind"] == "pre_close_corroborated_over_adj_factor"
+        and item["trade_date"] == SESSIONS[2].isoformat()
+    ]
+    assert entry["implied_pre_close"] == pytest.approx(10.0 / 1.1)
+    assert "valuation_close" not in entry
+    assert "dropped" not in cli._defect_line(entry)
+    assert "implied_pre_close=" in cli._defect_line(entry)
 
 
 def test_a_disagreement_no_band_decides_is_recorded_as_unknowable(
@@ -2029,7 +2041,11 @@ def test_the_decisions_are_judged_from_the_stored_bands_without_fetching_a_band(
     assert _defects(tmp_path) == full
     assert all("ts_code" in payload["params"] for payload in upstream.payloads)
     assert len(upstream.payloads) == 8  # two disputed pairs, four requests each
+    # Review round 2, Minor 4: the reproduction states its size before it sends anything.
+    assert "BUDGET return-path-reproduction 8 requests" in result.output
     assert "RETURN-PATHS year=2013: 2 recorded from the stored stk_limit" in result.output
+    # Review round 2, N1: the stored factor builds these decisions may have made stale.
+    assert "openalpha factor stale-return-paths" in result.output
 
 
 def test_judging_from_the_store_is_the_limit_target_alone(
@@ -2145,3 +2161,62 @@ def test_the_year_before_is_read_only_for_a_first_pair_on_a_fresh_session() -> N
     judge(lambda day: day == second)
 
     assert asked == [frozenset({"600000.SH", "600001.SH"}), frozenset({"600001.SH"})]
+
+
+def test_a_first_pair_is_judged_again_when_the_year_before_under_it_changed() -> None:
+    """Review round 2, Minor 3. `600000.SH`'s first pair of the year is on a session this build
+    did not fetch, and a decision for it is stored -- judged on a previous close of 12.0. The
+    stored year before now says 10.0. A decision is a function of both closes, the `pre_close`
+    and both factors, so the pair is judged again from the year before, re-fetched, and recorded
+    as the rows now say rather than written again as stored."""
+    first, second, third = SESSIONS[:3]
+    before = date(2013, 11, 8)
+    bars = _session_batch(
+        DAILY_DATASET,
+        [
+            ("600000.SH", first, (10.0, 10.0)),
+            ("600000.SH", second, (10.0, 10.0)),
+            ("600000.SH", third, (10.0, 10.0)),
+        ],
+    )
+    factors = _session_batch("adj_factor", [("600000.SH", day, (1.1,)) for day in (first, third)])
+    earlier_bars = _session_batch(DAILY_DATASET, [("600000.SH", before, (10.0, 10.0))])
+    earlier_factors = _session_batch("adj_factor", [("600000.SH", before, (1.0,))])
+    stale = UpstreamDefect(
+        ts_code="600000.SH",
+        trade_date=first,
+        source_dataset=PRICE_LIMIT_DATASET,
+        kind="pre_close_corroborated_over_adj_factor",
+        bar_close=10.0,
+        valuation_close=12.0 * 1.0 / 1.1,
+        previous_bar_close=12.0,
+        up_limit=11.0,
+        down_limit=9.0,
+    )
+    asked: list[frozenset[str]] = []
+    refetched: list[tuple[str, date, date]] = []
+
+    def earlier(subjects: frozenset[str]) -> tuple[Sequence[Any], Sequence[Any]]:
+        asked.append(subjects)
+        return [earlier_bars], [earlier_factors]
+
+    def refetch(code: str, previous_day: date, day: date) -> tuple[list[Any], list[Any]]:
+        refetched.append((code, previous_day, day))
+        return [earlier_bars, bars], [earlier_factors, factors]
+
+    reconciled = reconcile_return_paths(
+        [_session_batch(PRICE_LIMIT_DATASET, [("600000.SH", first, (11.0, 9.0))])],
+        bars=[bars],
+        factors=[factors],
+        earlier=earlier,
+        answerable_through=third,
+        refetch=refetch,
+        fresh=lambda day: day >= third,
+        stored_decisions={("600000.SH", first): stale},
+    )
+
+    assert asked == [frozenset({"600000.SH"})]
+    assert refetched == [("600000.SH", before, first)]
+    (decision,) = reconciled.defects
+    assert decision.previous_bar_close == 10.0
+    assert decision.valuation_close == pytest.approx(10.0 / 1.1)

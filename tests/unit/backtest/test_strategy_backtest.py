@@ -1686,3 +1686,29 @@ def test_an_unknowable_session_a_position_did_not_hold_through_is_not_named() ->
     quotes[D3][C] = replace(quotes[D3][C], recorded_path="unknowable", path_ratio=JUMP_RATIO)
 
     assert all(p.unknowable_sessions == () for p in _run(quotes))
+
+
+def test_a_capped_sale_on_an_unknowable_session_prices_the_whole_position_once() -> None:
+    """Review round 2, Minor 2. A is sold at D5's open, where its factor jumps with no decided
+    path, and a thin D4 caps the sale at 4,500 of its 9,900 shares. The crossing is one entry for
+    the whole position the book held into the session -- 9,900 x 11.00 x 1.1 = 119,790.00 -- not
+    the 4,500 sold with the 5,400 kept never counted."""
+    quotes = build_quotes(turnover_on={(A, D4): Decimal("5000000")})
+    for day in (D5, D6):
+        quotes[day][A] = replace(
+            quotes[day][A],
+            adj_factor=Decimal("1.1"),
+            recorded_path="unknowable" if day == D5 else None,
+            path_ratio=JUMP_RATIO if day == D5 else None,
+        )
+
+    result = run_strategy_backtest(build_inputs(quotes=quotes), HAND_FIXTURE_SPEC)
+
+    second = result.periods[1]
+    assert [(f.subject, f.side, f.quantity) for f in second.fills if f.subject == A] == [
+        (A, "sell", 4_500)
+    ]
+    (crossing,) = result.unknowable_crossings
+    assert (crossing.subject, crossing.day) == (A, D5)
+    assert crossing.held_value == Decimal("119790.00")
+    assert crossing.valuation_difference == Decimal("-10890.00")

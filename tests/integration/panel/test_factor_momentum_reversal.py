@@ -1007,12 +1007,14 @@ DISPUTED_CODE: Final[str] = PLAIN[0]
 DISPUTED_SESSION: Final[date] = SESSIONS[-10]
 
 
-def _decision_batch(kind: str, *, close_offset: float = 0.0, implied: float) -> ColumnarPanelBatch:
-    close, _pre_close = _path(DISPUTED_CODE)[DISPUTED_SESSION]
-    earlier = SESSIONS[SESSIONS.index(DISPUTED_SESSION) - 1]
+def _decision_batch(
+    kind: str, *, close_offset: float = 0.0, implied: float, session: date = DISPUTED_SESSION
+) -> ColumnarPanelBatch:
+    close, _pre_close = _path(DISPUTED_CODE)[session]
+    earlier = SESSIONS[SESSIONS.index(session) - 1]
     previous_close = _path(DISPUTED_CODE)[earlier][0]
     values: dict[str, object] = {
-        "trade_date": DISPUTED_SESSION.isoformat(),
+        "trade_date": session.isoformat(),
         "source_dataset": "stk_limit",
         "defect_kind": kind,
         "bar_close": float(cast(float, close)) + close_offset,
@@ -1039,10 +1041,10 @@ def _decision_batch(kind: str, *, close_offset: float = 0.0, implied: float) -> 
         status="success",
         subjects=(DISPUTED_CODE,),
         timeline=TimelineColumns(
-            event_time=(_at(DISPUTED_SESSION, SESSION_CLOSE_TIME),),
-            available_time=(_at(DISPUTED_SESSION, DAILY_AVAILABILITY_TIME),),
-            ingested_time=(_at(DISPUTED_SESSION, DAILY_AVAILABILITY_TIME),),
-            revision_time=(_at(DISPUTED_SESSION, DAILY_AVAILABILITY_TIME),),
+            event_time=(_at(session, SESSION_CLOSE_TIME),),
+            available_time=(_at(session, DAILY_AVAILABILITY_TIME),),
+            ingested_time=(_at(session, DAILY_AVAILABILITY_TIME),),
+            revision_time=(_at(session, DAILY_AVAILABILITY_TIME),),
         ),
         columns=tuple(
             PanelColumn(name, kinds.get(name, "float"), (values[name],))  # type: ignore[arg-type]
@@ -1051,13 +1053,17 @@ def _decision_batch(kind: str, *, close_offset: float = 0.0, implied: float) -> 
     )
 
 
-def _decided_store(tmp_path: Path, kind: str, **decision: Any) -> PanelStore:
+def _decided_store(
+    tmp_path: Path, kind: str, *, session: date = DISPUTED_SESSION, **decision: Any
+) -> PanelStore:
     store = _written(tmp_path)
-    _close, pre_close = _path(DISPUTED_CODE)[DISPUTED_SESSION]
+    _close, pre_close = _path(DISPUTED_CODE)[session]
     write_upstream_defects(
         store,
-        _decision_batch(kind, implied=decision.pop("implied", pre_close * 0.8), **decision),
-        year=DISPUTED_SESSION.year,
+        _decision_batch(
+            kind, implied=decision.pop("implied", pre_close * 0.8), session=session, **decision
+        ),
+        year=session.year,
         source_datasets=frozenset({"stk_limit"}),
     )
     return store
@@ -1118,3 +1124,22 @@ def test_a_window_the_record_does_not_move_is_read_as_before(
 
     assert momentum.unknowable_return_sessions == ()
     assert _by_subject(momentum) == _by_subject(_compute(store, MOMENTUM_20_SESSIONS))
+
+
+def test_momentum_does_not_abstain_on_an_unknowable_session_it_skips(
+    tmp_path: Path, store: PanelStore
+) -> None:
+    """Review round 2, Minor 6: the momenta skip their five newest sessions, so an unknowable
+    session among those five is not a return they read and they keep their value. The five-session
+    reversal reads all five and abstains."""
+    tail = SESSIONS[-3]
+    decided = _decided_store(tmp_path, "pre_close_contradicts_adj_factor", session=tail)
+
+    momentum = _compute(decided, MOMENTUM_20_SESSIONS)
+    reversal = _compute(decided, REVERSAL_5_SESSIONS)
+
+    assert momentum.unknowable_return_sessions == ()
+    assert _by_subject(momentum) == _by_subject(_compute(store, MOMENTUM_20_SESSIONS))
+    assert reversal.unknowable_return_sessions == (
+        UnknowableReturnSession(subject=DISPUTED_CODE, session=tail),
+    )

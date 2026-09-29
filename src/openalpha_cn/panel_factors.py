@@ -1783,6 +1783,19 @@ def _reversal_5_sessions(window: FactorWindow) -> float | None:
     return _compounded_session_return(window, skip=0)
 
 
+RETURN_SKIP_BY_EVALUATOR: Final[Mapping[FactorEvaluator, int]] = MappingProxyType(
+    {_momentum_sessions: SHORT_REVERSAL_SESSIONS}
+)
+"""How many of a window's newest sessions an evaluator does not read, keyed by the evaluator
+itself (`V2-P6-020`, review round 2).
+
+Keyed by the function rather than the factor key so it cannot say something the arithmetic does
+not: `_momentum_sessions` is the evaluator that passes `skip=SHORT_REVERSAL_SESSIONS` to
+`_compounded_session_return`, and every other evaluator -- or a substituted one -- reads its
+whole window, which is the conservative reading. `_decided_series` uses it so a recorded
+decision about a session the evaluator never reads moves nothing."""
+
+
 _MOMENTUM_DIRECTION_PROSE: Final[str] = (
     " The declared direction is the family's conventional prior -- a security that has risen "
     "over the stated interval is taken to be the better one -- and this repository has measured "
@@ -4802,7 +4815,8 @@ def compute_factor(
         requirements=requirements,
     )
     listed = set(universe)
-    links = _return_links(definition)
+    links = session_return_links(definition)
+    skip = RETURN_SKIP_BY_EVALUATOR.get(evaluator, 0)
     decisions = _return_decisions(store, links=links, requirements=requirements, as_of=as_of)
     abstained: list[UnknowableReturnSession] = []
     # The answers are computed *before* the manifest, and the ordering is forced rather than
@@ -4824,6 +4838,7 @@ def compute_factor(
             evaluator=evaluator,
             manifest_id=_UNSEALED_MANIFEST_ID,
             links=links,
+            skip=skip,
             decisions=decisions,
             abstained=abstained,
         )
@@ -5797,6 +5812,7 @@ def _classify(
     evaluator: FactorEvaluator,
     manifest_id: str,
     links: ReturnLinks | None = None,
+    skip: int = 0,
     decisions: Mapping[tuple[str, date], RecordedReturnPath] | None = None,
     abstained: list[UnknowableReturnSession] | None = None,
 ) -> FactorObservation:
@@ -5920,7 +5936,7 @@ def _classify(
         # no answer -- `undefined_value`, decided by the same last branch as any other -- and is
         # counted; the evaluator is not asked.
         series, unknowable = _decided_series(
-            subject, sessions=sessions, series=series, links=links, decisions=decisions
+            subject, sessions=sessions, series=series, links=links, skip=skip, decisions=decisions
         )
         if unknowable is not None and abstained is not None:
             abstained.append(UnknowableReturnSession(subject=subject, session=unknowable))
@@ -5963,7 +5979,7 @@ def _classify(
     )
 
 
-def _return_links(definition: FactorDefinition) -> ReturnLinks | None:
+def session_return_links(definition: FactorDefinition) -> ReturnLinks | None:
     """Whether `definition` reads session returns, and how -- decided by its declared fields.
 
     Structural rather than a list of factor keys, so a factor added later that reads `pre_close`
@@ -6011,6 +6027,7 @@ def _decided_series(
     series: Mapping[tuple[str, str], tuple[float, ...]],
     links: ReturnLinks,
     decisions: Mapping[tuple[str, date], RecordedReturnPath],
+    skip: int = 0,
 ) -> tuple[Mapping[tuple[str, str], tuple[float, ...]], date | None]:
     """`series` with every recorded session read on its decided path, or the first session whose
     return is unknowable (`V2-P6-020`).
@@ -6026,12 +6043,17 @@ def _decided_series(
     - **adjusted** reads the session on the factor path, `close / implied_pre_close`; on a
       `close_to_close` factor, which reads neither statement, nothing moves.
     - **unknowable** is returned, and the caller abstains.
+
+    `skip` is how many of the window's newest sessions the evaluator does not read
+    (`RETURN_SKIP_BY_EVALUATOR`, review round 2): a decision on one of them moves nothing, so the
+    momenta keep their value when the unknowable session is only in the tail they skip.
     """
     closes = series[(DAILY_DATASET, CLOSE_COLUMN)]
     pre_closes = list(series.get((DAILY_DATASET, PRE_CLOSE_COLUMN), ()))
     moved = False
+    read = len(sessions) - skip
     for index, day in enumerate(sessions):
-        if links == "close_to_close" and index == 0:
+        if (links == "close_to_close" and index == 0) or index >= read:
             continue
         record = decisions.get((subject, day))
         if record is None or record.close != closes[index]:

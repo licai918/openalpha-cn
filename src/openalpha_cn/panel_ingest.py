@@ -4143,6 +4143,7 @@ def reconcile_return_paths(
     refetch: ReturnPathRefetch,
     fresh: Callable[[date], bool] | None = None,
     stored_decisions: Mapping[tuple[str, date], UpstreamDefect] | None = None,
+    budget: Callable[[int], None] | None = None,
 ) -> ReconciledRows:
     """Record, per session, which of `daily.pre_close` and `adj_factor` the day's own price
     corroborates where the two disagree, or refuse the year (`V2-P6-020`).
@@ -4181,11 +4182,14 @@ def reconcile_return_paths(
     which fetches every one. On a session it did not fetch, a disputed pair whose stored decision
     (`stored_decisions`) is exactly the decision the stored rows give now is written again
     without a re-fetch -- the rows under it are the rows it was reproduced on -- and one that
-    differs is re-fetched and decided afresh. And a security's first pair of the year, whose
-    previous close is in the year before, is judged only when its first session is fresh, so
-    the year before is read only for those securities; otherwise its stored decision is written
-    again as stored, its closes matched against the bar in hand. A full build at the same clock
-    writes the same rows.
+    differs is re-fetched and decided afresh. A security's first pair of the year, whose
+    previous close is in the year before, is judged when its first session is fresh **or** a
+    decision about it is stored -- a decision depends on both closes, the `pre_close` and both
+    factors, and the year before holds two of them (review round 2, Minor 3) -- so the year before
+    is read only for those securities. A full build at the same clock writes the same rows.
+
+    `budget` is told how many pairs will be re-fetched, once and before the first request, so the
+    caller can state it (`BUDGET return-path-reproduction`, review round 2, Minor 4).
     """
     kept = tuple(limits)
     judged_bars = [batch for batch in bars if batch.status == "success"]
@@ -4201,7 +4205,9 @@ def reconcile_return_paths(
         if subject not in first_bars or day < first_bars[subject]:
             first_bars[subject] = day
     reaching_back = frozenset(
-        subject for subject, day in first_bars.items() if fresh is None or fresh(day)
+        subject
+        for subject, day in first_bars.items()
+        if fresh is None or fresh(day) or (subject, day) in decided_before
     )
     earlier_bars, earlier_factors = (
         earlier(reaching_back) if earlier is not None and reaching_back else ((), ())
@@ -4244,16 +4250,14 @@ def reconcile_return_paths(
 
     defects: list[UpstreamDefect] = []
     positions: list[int] = []
+    reproductions: list[tuple[str, date, date, Mapping[tuple[str, date], tuple[float, ...]], float]]
+    reproductions = []
     for index in sorted(range(len(keys)), key=lambda at: keys[at]):
         subject, day = keys[index]
         close, pre_close = cast(float, closes[index]), cast(float, pre_closes[index])
         before = previous.get(subject)
         previous[subject] = (day, close)
         if day == first_bars[subject] and subject not in reaching_back:
-            carried = decided_before.get((subject, day))
-            if carried is not None and carried.bar_close == close:
-                defects.append(carried)
-                positions.append(index)
             continue
         history = histories.get(subject)
         if before is None or history is None:
@@ -4289,22 +4293,34 @@ def reconcile_return_paths(
         )
         unchanged = fresh is not None and not fresh(day) and decided_before.get((subject, day))
         if unchanged != decision:
-            _reproduce_return_path(
-                subject,
-                day=day,
-                refetch=refetch,
-                factor_rows=factor_rows,
-                stored={
-                    (DAILY_DATASET, previous_day): (previous_close,),
-                    (DAILY_DATASET, day): (close, pre_close),
-                    (ADJ_FACTOR_DATASET, previous_day): (previous_factor,),
-                    (ADJ_FACTOR_DATASET, day): (factor,),
-                },
-                previous_day=previous_day,
-                pre_close=pre_close,
+            reproductions.append(
+                (
+                    subject,
+                    previous_day,
+                    day,
+                    {
+                        (DAILY_DATASET, previous_day): (previous_close,),
+                        (DAILY_DATASET, day): (close, pre_close),
+                        (ADJ_FACTOR_DATASET, previous_day): (previous_factor,),
+                        (ADJ_FACTOR_DATASET, day): (factor,),
+                    },
+                    pre_close,
+                )
             )
         defects.append(decision)
         positions.append(index)
+    if reproductions and budget is not None:
+        budget(len(reproductions))
+    for subject, previous_day, day, stored, pre_close in reproductions:
+        _reproduce_return_path(
+            subject,
+            day=day,
+            refetch=refetch,
+            factor_rows=factor_rows,
+            stored=stored,
+            previous_day=previous_day,
+            pre_close=pre_close,
+        )
     return ReconciledRows(
         batches=kept,
         defects=tuple(defects),

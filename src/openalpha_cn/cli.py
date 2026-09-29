@@ -161,6 +161,7 @@ from openalpha_cn.factor_view import (
     factor_entry,
     factor_request,
     run_factor_experiment,
+    stale_return_path_builds,
     tier_rows,
 )
 from openalpha_cn.feature_matrix import FeatureColumn
@@ -4363,7 +4364,9 @@ def _judge_stored_return_paths(
     typer.echo(
         f"RETURN-PATHS year={year}: {len(paths.defects)} recorded from the stored "
         f"{PRICE_LIMIT_DATASET} ({counts['published']} published, {counts['adjusted']} factor "
-        f"path, {counts[None]} unknowable)",
+        f"path, {counts[None]} unknowable); a factor build stored before these decisions may "
+        "now disagree with the engine -- `openalpha factor stale-return-paths` lists each one "
+        "and the command that rebuilds it",
         err=True,
     )
 
@@ -4469,6 +4472,14 @@ def _judge_return_paths(
         ),
         fresh=fresh,
         stored_decisions=stored_decisions,
+        budget=lambda pairs: _echo_budget(
+            "return-path-reproduction",
+            4 * pairs,
+            "requests",
+            f"{pairs} disputed pre_close/adj_factor pair(s) of {year} x 2 bars and 2 factors, one "
+            "security at a time; a pair whose stored decision the stored rows still give is not "
+            "asked again",
+        ),
     )
 
 
@@ -4607,19 +4618,47 @@ def _recorded_defects(
 
 
 def _defect_entry(defect: UpstreamDefect) -> dict[str, object]:
+    """One defect as the build report carries it. Under the three `V2-P6-020` return-path kinds
+    nothing was dropped and `valuation_close` holds the adjustment factor's implied `pre_close`,
+    so the key says that (review round 2, Minor 5)."""
+    value_key = "implied_pre_close" if defect.kind in RETURN_PATH_KINDS else "valuation_close"
     return {
         "ts_code": defect.ts_code,
         "trade_date": defect.trade_date.isoformat(),
         "source_dataset": defect.source_dataset,
         "kind": defect.kind,
         "bar_close": defect.bar_close,
-        "valuation_close": defect.valuation_close,
+        value_key: defect.valuation_close,
         "previous_bar_close": defect.previous_bar_close,
         "up_limit": defect.up_limit,
         "down_limit": defect.down_limit,
         "valuation_repeats_previous_close": defect.valuation_repeats_previous_close,
         "list_date": None if defect.list_date is None else defect.list_date.isoformat(),
     }
+
+
+def _defect_line(defect: Mapping[str, object]) -> str:
+    """One `DEFECT` line of the text report. A return-path decision is `recorded`, with its
+    implied `pre_close`; every other rule `dropped` the row it names."""
+    head = (
+        f"DEFECT {defect['kind']} {defect['source_dataset']} {defect['ts_code']} "
+        f"{defect['trade_date']}"
+    )
+    if defect["kind"] in RETURN_PATH_KINDS:
+        return (
+            f"{head} recorded (bar_close={defect['bar_close']} "
+            f"implied_pre_close={defect['implied_pre_close']} "
+            f"previous_bar_close={defect['previous_bar_close']} "
+            f"up_limit={defect['up_limit']} down_limit={defect['down_limit']})"
+        )
+    return (
+        f"{head} dropped (bar_close={defect['bar_close']} "
+        f"valuation_close={defect['valuation_close']} "
+        f"previous_bar_close={defect['previous_bar_close']} "
+        f"up_limit={defect['up_limit']} down_limit={defect['down_limit']} "
+        f"repeats_previous_close={defect['valuation_repeats_previous_close']} "
+        f"list_date={defect['list_date']})"
+    )
 
 
 def _stored_universe(store: PanelStore, *, now: datetime) -> tuple[str, ...]:
@@ -7502,15 +7541,7 @@ def panel_build(
             for ref in cast(Sequence[Mapping[str, object]], entry["partitions"]):
                 typer.echo(f"WROTE {ref['dataset']} year={ref['year']} rows={ref['row_count']}")
             for defect in cast(Sequence[Mapping[str, object]], entry["defects"]):
-                typer.echo(
-                    f"DEFECT {defect['kind']} {defect['source_dataset']} {defect['ts_code']} "
-                    f"{defect['trade_date']} dropped (bar_close={defect['bar_close']} "
-                    f"valuation_close={defect['valuation_close']} "
-                    f"previous_bar_close={defect['previous_bar_close']} "
-                    f"up_limit={defect['up_limit']} down_limit={defect['down_limit']} "
-                    f"repeats_previous_close={defect['valuation_repeats_previous_close']} "
-                    f"list_date={defect['list_date']})"
-                )
+                typer.echo(_defect_line(defect))
         for landed_ref in _all_refs(span_written):
             typer.echo(
                 f"WROTE {landed_ref.dataset} year={landed_ref.year} "
@@ -8534,6 +8565,113 @@ def _factor_instant(value: str) -> datetime:
             f"2026-01-08T09:00:00+00:00; got {value!r}",
         ) from error
     return parsed
+
+
+@factor_app.command("stale-return-paths")
+def factor_stale_return_paths_command(
+    max_staleness_days: Annotated[
+        int, typer.Option("--max-staleness-days", help=_BUILD_STALENESS_HELP)
+    ],
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
+    exchange: Annotated[
+        str, typer.Option("--exchange", help=_FACTOR_EXCHANGE_HELP)
+    ] = TRADING_CALENDAR_DEFAULT_EXCHANGE,
+    code_commit: Annotated[
+        str | None,
+        typer.Option(
+            "--code-commit",
+            help="Put this commit into every printed rebuild command; omitted, each rebuild "
+            "resolves its own.",
+        ),
+    ] = None,
+    as_of: Annotated[
+        str, typer.Option("--as-of", help="ISO-8601 point-in-time clock; defaults to now.")
+    ] = "",
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit the stale builds as data.")
+    ] = False,
+) -> None:
+    """List every stored factor build a recorded return-path decision made stale, and the
+    `factor build` command that repairs each (`V2-P6-020`, review round 2).
+
+    A build stored before `openalpha panel build --dataset stk_limit --return-paths-from-store`
+    recorded its decisions holds the published-path value for a session the engine now abstains
+    on or reads on the factor path. A decision is not a manifest input, so no readiness check,
+    staleness check or doctor finding sees the difference. This asks `compute_factor` itself, at
+    each candidate build's own instant, and prints each `(factor, tier, year, as_of, manifest_id)`
+    that no longer matches with the rebuild naming every `--supersedes-*`. Run the printed
+    commands as given and run this again: it answers `none`.
+
+    `--max-staleness-days` is the bound the builds were made with; the printed commands repeat it.
+
+    Exits 0 when nothing is stale; 1 when something is, or the panel could not answer.
+    """
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+    with _panel_command("factor stale-return-paths", json_output=json_output):
+        try:
+            stale = stale_return_path_builds(
+                _panel_store(runtime_dir),
+                exchange=exchange,
+                max_staleness_days=max_staleness_days,
+                as_of=_panel_as_of(as_of),
+                code_commit=code_commit,
+            )
+        except FactorViewError as error:
+            raise _factor_fail(error) from error
+        commands = list(dict.fromkeys(command for item in stale for command in item.commands))
+        suffix = f"--runtime-dir {shlex.quote(str(runtime_dir))}"
+        if json_output:
+            typer.echo(
+                json.dumps(
+                    {
+                        "stale": [
+                            {
+                                "factor": item.factor,
+                                "as_of": item.as_of.isoformat(),
+                                "subject": item.subject,
+                                "session": item.session.isoformat(),
+                                "kind": item.kind,
+                                "stored": [item.stored_coverage, item.stored_value],
+                                "engine": [item.engine_coverage, item.engine_value],
+                                "builds": [
+                                    {
+                                        "tier": build.tier,
+                                        "year": build.year,
+                                        "manifest_id": build.manifest_id,
+                                    }
+                                    for build in item.builds
+                                ],
+                            }
+                            for item in stale
+                        ],
+                        "commands": [f"openalpha {shlex.join(c)} {suffix}" for c in commands],
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+        elif not stale:
+            typer.echo("stale return-path builds: none")
+        else:
+            typer.echo(f"stale return-path builds: {len(stale)}")
+            for item in stale:
+                for build in item.builds:
+                    typer.echo(
+                        f"STALE {item.factor} {build.tier} {build.year} "
+                        f"{item.as_of.isoformat()} {build.manifest_id}"
+                    )
+                typer.echo(
+                    f"  because {item.subject} {item.session.isoformat()} ({item.kind}): stored "
+                    f"{item.stored_coverage} {item.stored_value}, the engine now answers "
+                    f"{item.engine_coverage} {item.engine_value}"
+                )
+            typer.echo("repair, in this order:")
+            for command in commands:
+                typer.echo(f"  openalpha {shlex.join(command)} {suffix}")
+        if stale:
+            raise typer.Exit(code=int(PanelExit.unhealthy))
 
 
 def _echo_build(report: FactorBuildReport) -> None:

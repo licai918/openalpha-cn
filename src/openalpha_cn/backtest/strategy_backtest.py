@@ -2170,7 +2170,13 @@ def _sell(
         _CENT, rounding=ROUND_HALF_UP
     )
     if ratio is not None:
-        book.cross(subject, day, held_value=proceeds, ratio=ratio)
+        # The whole position held into the session, at the open it was sold at -- a capped sale
+        # sells part of it, and `observe` has already marked the session seen, so the shares kept
+        # would otherwise never be counted (review round 2, Minor 2).
+        held = (holding.shares * bar.open * holding.adjusted(quote) / holding.entry_adj).quantize(
+            _CENT, rounding=ROUND_HALF_UP
+        )
+        book.cross(subject, day, held_value=held, ratio=ratio)
     book.cash += proceeds - fees
     ledger.sold += result.notional
     holding.shares -= quantity

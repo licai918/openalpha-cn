@@ -222,6 +222,9 @@ CLI_ONLY: Final[MappingProxyType[str, str]] = MappingProxyType(
         "doctor": "probes provider credentials on this machine; deliberately not remote",
         "factor build": "writes factor partitions; `build_factor_panels` is the SDK twin",
         "factor describe": "`describe_factor` is the SDK twin; no route",
+        "factor stale-return-paths": "`V2-P6-020`'s repair list for a stored research store: it "
+        "prints `factor build` commands to run on the machine holding the runtime directory; "
+        "`factor_view.stale_return_path_builds` is the in-process twin and no route does it",
         "jobs due": "needs a stored calendar and answers about this machine's schedules",
         "jobs register": "declares a schedule; a write this unauthenticated API must not take",
         "jobs run": "takes a lease and does work on the machine holding the runtime directory",
@@ -644,6 +647,10 @@ def test_the_measured_surface_counts_are_the_ones_this_file_was_written_against(
     `V2-P6-006` moved `sdk_methods` by one and nothing else: `OpenAlphaSDK.build_factor_panel_set`,
     the twin of `openalpha factor build` with `--factor` repeated -- the command gained a repeatable
     option rather than a second command, so `cli_commands` did not move -- declared in `SDK_ONLY`.
+
+    `V2-P6-020` (review round 2) moved `cli_commands` by one and nothing else: `openalpha factor
+    stale-return-paths`, which lists the stored factor builds a later return-path decision made
+    stale with the rebuild commands that repair them -- declared in `CLI_ONLY`.
     """
     measured = {
         "routes": len(_routes()),
@@ -656,7 +663,7 @@ def test_the_measured_surface_counts_are_the_ones_this_file_was_written_against(
     assert measured == {
         "routes": 48,
         "sdk_methods": 58,
-        "cli_commands": 36,
+        "cli_commands": 37,
         "without_sdk": 11,
         "rest_only": 9,
     }

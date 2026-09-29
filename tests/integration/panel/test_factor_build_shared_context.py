@@ -39,6 +39,7 @@ from __future__ import annotations
 import gc
 import json
 import math
+import shlex
 import shutil
 from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
@@ -112,7 +113,9 @@ from openalpha_cn.panel_factors import (
     FACTOR_DEFINITIONS,
     ExcludedReportPeriod,
     UnknowableReturnSession,
+    load_factor_manifests,
     load_factor_observations,
+    load_factor_transform_manifests,
 )
 from openalpha_cn.panel_ingest import (
     UPSTREAM_DEFECTS_DATASET,
@@ -120,6 +123,7 @@ from openalpha_cn.panel_ingest import (
     write_panel_batch,
     write_upstream_defects,
 )
+from openalpha_cn.panel_neutralization import load_factor_neutralization_manifests
 from openalpha_cn.sdk import OpenAlphaSDK
 
 SHANGHAI: Final[ZoneInfo] = ZoneInfo("Asia/Shanghai")
@@ -1342,11 +1346,15 @@ def _raw_at_january(**overrides: Any) -> dict[str, Any]:
     )
 
 
-def _stored_answers(store: PanelStore, factor: str) -> dict[str, tuple[str, float | None]]:
+def _stored_answers(
+    store: PanelStore, factor: str, *, as_of: datetime = INSTANTS[0]
+) -> dict[str, tuple[str, float | None]]:
     observations = load_factor_observations(
-        store, FACTOR_DEFINITIONS.get(factor), years=(2026,), as_of=INSTANTS[0]
+        store, FACTOR_DEFINITIONS.get(factor), years=(2026,), as_of=as_of
     )
-    return {item.subject: (item.coverage, item.value) for item in observations}
+    return {
+        item.subject: (item.coverage, item.value) for item in observations if item.as_of == as_of
+    }
 
 
 def test_a_stub_filing_off_the_quarter_grid_builds_and_every_build_face_lists_it(
@@ -1505,3 +1513,116 @@ def test_an_unknowable_session_a_return_factor_crosses_is_counted_on_every_build
         f"unknowable 1 security-session(s) abstained on, whose return upstream_defects records as "
         f"unknowable: {UNKNOWABLE_SECURITY} {session.isoformat()}"
     ]
+
+
+# --- review round 2, N1: the stored builds a decision made stale, found and repaired --------------
+
+
+def test_the_detector_lists_every_build_made_before_a_decision_and_nothing_after_its_repair(
+    corpus: Path, tmp_path: Path
+) -> None:
+    """A store whose factor builds were made before any return-path decision existed holds
+    values on the published path. A decision is not a manifest input, so nothing else notices.
+    `factor stale-return-paths` recomputes, with the engine itself, every stored raw observation
+    whose window can reach a decided session, lists each build whose stored answer the engine no
+    longer gives -- raw, and the processed and neutralized builds made from it at that instant --
+    with the `factor build ... --supersedes-*` command that repairs it, and exits 1. Running the
+    printed command leaves nothing to list, and the command exits 0.
+
+    The build the next session later is a candidate too -- its window holds the decided session
+    -- but the one-session reversal reads only the return into its own newest session, so the
+    engine gives the stored answer and it is not listed: the judgement is the engine's, not the
+    window's."""
+    runtime = tmp_path / "research"
+    store = _copy(corpus, runtime / "panel")
+    next_day = INSTANTS[0] + timedelta(days=1)
+    _single(store, "reversal_1d/v1", as_ofs=(INSTANTS[0], next_day))
+    _single(store, "earnings_yield_ttm/v1", as_ofs=(INSTANTS[0],))
+    session = _with_an_unknowable_session(store)
+    definition = FACTOR_DEFINITIONS.get("reversal_1d/v1")
+    raw = [
+        item
+        for item in load_factor_manifests(store, definition, years=(2026,), as_of=FETCHED_AT)
+        if item.as_of == INSTANTS[0]
+    ]
+    processed = [
+        item
+        for item in load_factor_transform_manifests(
+            store, definition, years=(2026,), as_of=FETCHED_AT
+        )
+        if item.source_manifest_id == raw[0].manifest_id
+    ]
+    neutralized = [
+        item
+        for item in load_factor_neutralization_manifests(
+            store, definition, years=(2026,), as_of=FETCHED_AT
+        )
+        if item.source_transform_manifest_id == processed[0].transform_manifest_id
+    ]
+    kept = _stored_answers(store, "reversal_1d/v1", as_of=next_day)[UNKNOWABLE_SECURITY]
+    assert kept[0] == "computed"
+
+    (stale,) = factor_view.stale_return_path_builds(
+        store,
+        exchange=EXCHANGE,
+        max_staleness_days=STALENESS_DAYS,
+        as_of=FETCHED_AT,
+        code_commit=COMMIT,
+    )
+
+    assert (stale.factor, stale.as_of, stale.subject, stale.session) == (
+        "reversal_1d/v1",
+        INSTANTS[0],
+        UNKNOWABLE_SECURITY,
+        session,
+    )
+    assert stale.kind == "pre_close_contradicts_adj_factor"
+    assert stale.stored_coverage == "computed"
+    assert stale.engine_coverage == "undefined_value"
+    assert [(build.tier, build.year, build.manifest_id) for build in stale.builds] == [
+        ("raw", 2026, raw[0].manifest_id),
+        ("processed", 2026, processed[0].transform_manifest_id),
+        ("neutralized", 2026, neutralized[0].neutralization_manifest_id),
+    ]
+    (command,) = stale.commands
+    assert command[:6] == ("factor", "build", "--factor", "reversal_1d/v1", "--tier", "neutralized")
+    for flag, value in (
+        ("--supersedes-raw", raw[0].manifest_id),
+        ("--supersedes-processed", processed[0].transform_manifest_id),
+        ("--supersedes-neutralized", neutralized[0].neutralization_manifest_id),
+        ("--as-of", INSTANTS[0].isoformat()),
+    ):
+        assert command[command.index(flag) + 1] == value
+
+    arguments = ["factor", "stale-return-paths", "--runtime-dir", str(runtime)]
+    arguments += ["--exchange", EXCHANGE, "--max-staleness-days", str(STALENESS_DAYS)]
+    arguments += ["--code-commit", COMMIT, "--as-of", FETCHED_AT.isoformat()]
+    found = CliRunner().invoke(app, arguments)
+
+    assert found.exit_code == 1, found.output
+    printed = [line for line in found.stdout.splitlines() if line.startswith("  openalpha ")]
+    assert printed == [
+        f"  openalpha {shlex.join(command)} --runtime-dir {shlex.quote(str(runtime))}"
+    ]
+
+    repaired = CliRunner().invoke(app, [*command, "--runtime-dir", str(runtime)])
+    assert repaired.exit_code == 0, repaired.stderr
+
+    assert (
+        factor_view.stale_return_path_builds(
+            store,
+            exchange=EXCHANGE,
+            max_staleness_days=STALENESS_DAYS,
+            as_of=FETCHED_AT,
+            code_commit=COMMIT,
+        )
+        == ()
+    )
+    clean = CliRunner().invoke(app, arguments)
+    assert clean.exit_code == 0, clean.output
+    assert "stale return-path builds: none" in clean.stdout
+    assert _stored_answers(store, "reversal_1d/v1")[UNKNOWABLE_SECURITY] == (
+        "undefined_value",
+        None,
+    )
+    assert _stored_answers(store, "reversal_1d/v1", as_of=next_day)[UNKNOWABLE_SECURITY] == kept

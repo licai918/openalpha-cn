@@ -440,10 +440,17 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_factors.UnknowableReturnSession",
             "panel_factors.apply_factor_transform",
             "panel_factors.compute_factor",
+            # `V2-P6-020`, review round 2 (N1): `stale_return_path_builds` reads the stored raw,
+            # processed and neutralized build manifests and asks the engine which factors read a
+            # session return, to find the builds a later return-path decision made stale.
+            "panel_factors.factor_manifest_dataset",
             "panel_factors.factor_observation_dataset",
+            "panel_factors.load_factor_manifests",
             "panel_factors.load_factor_observations",
+            "panel_factors.load_factor_transform_manifests",
             "panel_factors.load_processed_factor_observations",
             "panel_factors.processed_factor_dataset",
+            "panel_factors.session_return_links",
             "panel_factors.write_factor_panels",
             "panel_factors.write_processed_factor_panels",
             "panel_ingest.daily_basic_requirement",
@@ -467,6 +474,7 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_neutralization.NeutralizationEngineError",
             "panel_neutralization.NeutralizedFactorPanel",
             "panel_neutralization.apply_factor_neutralization",
+            "panel_neutralization.load_factor_neutralization_manifests",
             "panel_neutralization.load_industry_market_cap_cross_section",
             "panel_neutralization.load_neutralized_factor_observations",
             "panel_neutralization.neutralized_factor_dataset",
@@ -730,6 +738,9 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
                 "index_daily",
                 "namechange",
                 "stock_basic",
+                # `V2-P6-020`, review round 2 (N1): the stale-build detector lists the calendar
+                # years the store registered, to read the sessions a window can span.
+                "trade_cal",
             }
         ),
         reached=frozenset(
