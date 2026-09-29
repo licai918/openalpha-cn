@@ -75,7 +75,9 @@ from openalpha_cn.storage.predictions import FilePredictionStore
 from openalpha_cn.strategy_registration import (
     RegisteredConfiguration,
     book_period_end,
+    late_record_check,
     signal_day_batch,
+    witnessed_days,
 )
 from openalpha_cn.strategy_view import (
     StrategyRunBlockedError,
@@ -1896,7 +1898,9 @@ def test_a_backtest_reading_the_registered_records_trades_as_the_configuration_w
     """Every signal day of a backtest from `first`, scored and registered through the daily
     command's path at 18:30 -- when the scheduled command files it, two hours after the 16:30
     signal instant; a backtest of the records, then, holds, fills and returns exactly what the
-    configuration's own backtest does, period by period.
+    configuration's own backtest does, period by period. Registered after the signal
+    instant, each is read only because it is bound to the registration and its scores recompute
+    equal from the stored builds (`late_record_check`) -- the walk-forward one by the same refit.
 
     From `first`: the trailing source answers from s3 (s1 knows no IC) and the walk-forward one
     from s5 (s1 and s3 have no admissible fit), and a source of registered records cannot hold,
@@ -1926,6 +1930,7 @@ def test_a_backtest_reading_the_registered_records_trades_as_the_configuration_w
             as_of=READ_AT,
         ),
         predictions=FilePredictionStore(tmp_path / "predictions", clock=lambda: READ_AT).get,
+        verify_late=late_record_check(store, REGISTERED, request_for=request_for, anchor=start),
     )
     by_configuration = backtest_strategy(
         store, strategy_request(**configured, start=start, end=end, as_of=READ_AT)
@@ -1934,6 +1939,25 @@ def test_a_backtest_reading_the_registered_records_trades_as_the_configuration_w
     assert not any(period.held for period in by_configuration.periods)
     assert any(period.fills for period in by_configuration.periods)
     assert _traded(by_records) == _traded(by_configuration)
+
+
+def _static_request_for(configured: Mapping[str, Any]) -> Callable[[date], Any]:
+    def request_for(day: date) -> Any:
+        return strategy_request(
+            **configured, start=day - timedelta(days=1), end=day, as_of=_read_at(day)
+        )
+
+    return request_for
+
+
+def _static_check(tmp_path: Path, panel: Any) -> Any:
+    """The registration's check of a late record, for `STATIC` from s1."""
+    return late_record_check(
+        PanelStore(tmp_path / "panel"),
+        REGISTERED,
+        request_for=_static_request_for(_base(**STATIC)),
+        anchor=panel.sessions[1],
+    )
 
 
 def _static_records(
@@ -1953,17 +1977,25 @@ def _static_records(
     return panel, days, identifiers, configured
 
 
-def _by_records(tmp_path: Path, panel: Any, identifiers: Sequence[str]) -> Any:
+def _by_records(
+    tmp_path: Path,
+    panel: Any,
+    identifiers: Sequence[str],
+    *,
+    end: int = -1,
+    checked: bool = True,
+) -> Any:
     return backtest_strategy(
         PanelStore(tmp_path / "panel"),
         strategy_request(
             **_base(rebalance_every_sessions=3),
             prediction_ids=identifiers,
             start=panel.sessions[1],
-            end=panel.sessions[-1],
+            end=panel.sessions[end],
             as_of=READ_AT,
         ),
         predictions=FilePredictionStore(tmp_path / "predictions", clock=lambda: READ_AT).get,
+        verify_late=_static_check(tmp_path, panel) if checked else None,
     )
 
 
@@ -2016,6 +2048,7 @@ def test_a_configuration_and_its_records_rebalance_alike_on_days_off_the_grid(
             as_of=READ_AT,
         ),
         predictions=FilePredictionStore(tmp_path / "predictions", clock=lambda: READ_AT).get,
+        verify_late=_static_check(tmp_path, panel),
     )
     by_configuration = backtest_strategy(
         store,
@@ -2186,16 +2219,21 @@ def test_a_book_on_the_journals_rebalance_days_holds_what_the_command_recommende
 ) -> None:
     """The command ran on 19, 21, 22 and 23 January and missed the 20th, a scheduled rebalance:
     it rebalanced on the 19th (its first day), caught the 20th up on the 21st, rebalanced on the
-    22nd on schedule and held on the 23rd. `journalled_rebalances` gives those three sessions and
-    the record each used; a backtest of those records on those days -- not the fixed grid, which
+    22nd on schedule, and the 23rd was not a rebalance day. `forward_rebalances` re-derives those
+    three sessions and the record each used from the append-only prediction store -- the journal
+    only cross-checks it; a backtest of those records on those days -- not the fixed grid, which
     would rebalance on the 20th, a day with no recommendation -- holds exactly the targets the
-    command printed, every rebalance. Every record was filed at 18:35."""
-    world = _world(tmp_path, monkeypatch, Market(open_days=OPEN_2026), config=FILLED)
-    results = {days: _next(world, capsys, days) for days in (0, 2, 3, 4)}
+    command printed, every rebalance. Every record was filed at 18:35, so each is read through
+    `forward_record_check`: bound to the registration, and its scores recomputed equal."""
+    world, results = _four_days(tmp_path, monkeypatch, capsys)
     directory = _journal(world, DAY).parent
+    registration = daily.admit_registration(world.registration, world.repo)
+    last = DAY + timedelta(days=4)
 
     journalled = daily.journalled_days(directory)
-    rebalances = daily.journalled_rebalances(directory)
+    rebalances = daily.forward_rebalances(
+        world.runtime, registration, through=last, as_of=_evening(last)
+    )
 
     assert [(day.session.day, day.decision) for day in journalled] == [
         (19, "rebalanced"),
@@ -2206,7 +2244,6 @@ def test_a_book_on_the_journals_rebalance_days_holds_what_the_command_recommende
     assert [(session.day, record_id) for session, record_id in rebalances] == [
         (19 + days, results[days]["prediction"]["record_id"]) for days in (0, 2, 3)
     ]
-    last = DAY + timedelta(days=4)
     book = backtest_strategy(
         PanelStore(world.runtime / "panel"),
         strategy_request(
@@ -2222,6 +2259,7 @@ def test_a_book_on_the_journals_rebalance_days_holds_what_the_command_recommende
             as_of=_evening(last),
         ),
         predictions=FilePredictionStore(world.runtime / "predictions", clock=lambda: RUN_CLOCK).get,
+        verify_late=daily.forward_record_check(world.runtime, registration, as_of=_evening(last)),
     )
 
     assert [period.start for period in book.periods] == [session for session, _ in rebalances]
@@ -2232,8 +2270,103 @@ def test_a_book_on_the_journals_rebalance_days_holds_what_the_command_recommende
     assert tuple(results[4]["targets"]["weights"]) == book.periods[-1].holdings
 
 
+def _four_days(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> tuple[World, dict[int, Any]]:
+    """The command on 19, 21, 22 and 23 January, the 20th missed."""
+    world = _world(tmp_path, monkeypatch, Market(open_days=OPEN_2026), config=FILLED)
+    return world, {days: _next(world, capsys, days) for days in (0, 2, 3, 4)}
+
+
+def _flip(path: Path, decision: str) -> None:
+    body = json.loads(path.read_text(encoding="utf-8"))
+    body["result"]["targets"]["decision"] = decision
+    path.write_text(json.dumps(body), encoding="utf-8")
+
+
+def test_a_journal_edited_to_move_a_rebalance_is_refused_by_the_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The journal is a local file; an edit that turns the 23rd into a rebalance -- or the 22nd
+    out of one -- would choose trading days among real, on-time records. The store says what
+    the command decided, and the edited journal is refused naming the day."""
+    world, _results = _four_days(tmp_path, monkeypatch, capsys)
+    registration = daily.admit_registration(world.registration, world.repo)
+    last = DAY + timedelta(days=4)
+    for days, decision in ((4, "rebalanced"), (3, "not a rebalance day")):
+        path = _journal(world, DAY + timedelta(days=days))
+        kept = path.read_text(encoding="utf-8")
+        _flip(path, decision)
+
+        with pytest.raises(daily.StepFailedError) as refused:
+            daily.forward_rebalances(
+                world.runtime, registration, through=last, as_of=_evening(last)
+            )
+
+        assert (DAY + timedelta(days=days)).isoformat() in str(refused.value)
+        assert "the store" in str(refused.value)
+        path.write_text(kept, encoding="utf-8")
+    assert (
+        len(
+            daily.forward_rebalances(
+                world.runtime, registration, through=last, as_of=_evening(last)
+            )
+        )
+        == 3
+    )
+
+
+OTHER: Final = RegisteredConfiguration(
+    config_id="4" * 64, registration_sha256="5" * 64, code_commit="6" * 40, seed=1
+)
+"""Another registration: its records carry another declaration."""
+
+
+def test_a_record_of_another_configuration_on_the_same_day_is_not_the_days_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A record of the 21st under another registration, filed on time, is not a record of this
+    configuration: the store derivation ignores it, and a journal naming it is refused."""
+    world, results = _four_days(tmp_path, monkeypatch, capsys)
+    registration = daily.admit_registration(world.registration, world.repo)
+    day, last = DAY + timedelta(days=2), DAY + timedelta(days=4)
+    store = PanelStore(world.runtime / "panel")
+    request = daily.day_request(FILLED, day=day, as_of=_evening(last))
+    batch = signal_day_batch(
+        score_day(store, request, day=day, anchor=date(2026, 1, 12)),
+        request,
+        OTHER,
+        predicted_at=_evening(day, hours=3),
+    )
+    assert batch is not None
+    calendar = daily._outcome_calendar(store, request.exchange, day, request.as_of)
+    other = FilePredictionStore(
+        world.runtime / "predictions", clock=lambda: _evening(day, hours=3)
+    ).put(batch=batch, calendar=calendar, zone=daily.SHANGHAI)
+
+    rebalances = daily.forward_rebalances(
+        world.runtime, registration, through=last, as_of=_evening(last)
+    )
+    assert dict(rebalances)[day] == results[2]["prediction"]["record_id"]
+
+    path = _journal(world, day)
+    body = json.loads(path.read_text(encoding="utf-8"))
+    body["result"]["prediction"]["record_id"] = other.record.record_id
+    path.write_text(json.dumps(body), encoding="utf-8")
+    with pytest.raises(daily.StepFailedError, match=day.isoformat()):
+        daily.forward_rebalances(world.runtime, registration, through=last, as_of=_evening(last))
+    check = daily.forward_record_check(world.runtime, registration, as_of=_evening(last))
+    assert "not declared under the registered configuration" in str(check(other.record))
+
+
 def _journalled(
-    directory: Path, day: date, decision: str, record_id: str | None, *, complete: bool = True
+    directory: Path,
+    day: date,
+    decision: str,
+    record_id: str | None,
+    *,
+    complete: bool = True,
+    reason: bool = True,
 ) -> None:
     body: dict[str, Any] = {
         "schema": daily.DAILY_SELECTION_SCHEMA,
@@ -2244,7 +2377,8 @@ def _journalled(
         body["result"] = {
             "session": day.isoformat(),
             "candidates": {"held": decision == "held"},
-            "targets": {"decision": decision, "reason": "why", "weights": {}},
+            "targets": {"decision": decision, "weights": {}}
+            | ({"reason": "why"} if reason else {}),
             "prediction": (
                 {"registered": False, "reason": "the source held today"}
                 if record_id is None
@@ -2278,3 +2412,147 @@ def test_the_journal_says_which_days_held_and_which_rebalanced_on_which_record(
     _journalled(tmp_path, date(2026, 1, 23), "rebalanced", None)
     with pytest.raises(daily.StepFailedError, match="no record"):
         daily.journalled_rebalances(tmp_path)
+
+
+def test_a_journal_without_a_field_the_book_reads_is_refused_by_name(tmp_path: Path) -> None:
+    _journalled(tmp_path, date(2026, 1, 19), "rebalanced", "prd_a", reason=False)
+
+    with pytest.raises(daily.StepFailedError, match=r"2026-01-19\.json.*reason"):
+        daily.journalled_days(tmp_path)
+
+
+# --- a record registered after the signal instant (V2-P6-011 round 10) --------------------------
+
+
+def _one_record(
+    tmp_path: Path,
+    *,
+    filed: Callable[[date], datetime],
+    registered: RegisteredConfiguration = REGISTERED,
+    altered: bool = False,
+) -> tuple[Any, str]:
+    """s1's `STATIC` scores filed at `filed(s1)`, under `registered`; `altered` moves one score."""
+    panel = write_strategy_corpus(tmp_path)
+    day = panel.sessions[1]
+    request = _static_request_for(_base(**STATIC))(day)
+    store = PanelStore(tmp_path / "panel")
+    at = filed(day)
+    batch = signal_day_batch(
+        score_day(store, request, day=day, anchor=day), request, registered, predicted_at=at
+    )
+    assert batch is not None
+    if altered:
+        first = next(index for index, row in enumerate(batch.predictions) if row.score is not None)
+        rows = list(batch.predictions)
+        rows[first] = replace_score(rows[first], rows[first].score + 0.001)
+        batch = type(batch)(
+            as_of=batch.as_of,
+            predicted_at=batch.predicted_at,
+            artifact=batch.artifact,
+            predictions=tuple(rows),
+        )
+    calendar = daily._outcome_calendar(store, request.exchange, day, request.as_of)
+    written = FilePredictionStore(tmp_path / "predictions", clock=lambda: at).put(
+        batch=batch, calendar=calendar, zone=daily.SHANGHAI
+    )
+    return panel, written.record.record_id
+
+
+def replace_score(row: Any, score: float) -> Any:
+    return type(row)(ts_code=row.ts_code, score=score)
+
+
+def test_a_record_filed_after_the_signal_instant_is_read_when_its_scores_recompute(
+    tmp_path: Path,
+) -> None:
+    """Filed at 18:30 with the day's honest scores: read, through the registration's check. With
+    no check to hold it to, a record registered after its signal instant is refused -- its
+    `as_of` is only what its writer declared."""
+    panel, record = _one_record(tmp_path, filed=_evening)
+
+    assert _by_records(tmp_path, panel, [record], end=3).periods
+    with pytest.raises(StrategyRunBlockedError, match="after its signal instant"):
+        _by_records(tmp_path, panel, [record], end=3, checked=False)
+
+
+def test_a_late_record_whose_scores_differ_by_one_value_is_refused(tmp_path: Path) -> None:
+    """One score moved by 0.001 -- what an evening announcement read into one name would look
+    like. The recomputation from the stored builds disagrees, and the book is refused."""
+    panel, record = _one_record(tmp_path, filed=_evening, altered=True)
+
+    with pytest.raises(StrategyRunBlockedError, match="scored again from the stored builds"):
+        _by_records(tmp_path, panel, [record], end=3)
+
+
+def test_a_late_record_not_bound_to_the_registration_is_refused(tmp_path: Path) -> None:
+    panel, record = _one_record(tmp_path, filed=_evening, registered=OTHER)
+
+    with pytest.raises(
+        StrategyRunBlockedError, match="not declared under the registered configuration"
+    ):
+        _by_records(tmp_path, panel, [record], end=3)
+
+
+def test_a_record_filed_at_the_signal_instant_is_read_on_its_custody_stamp(
+    tmp_path: Path,
+) -> None:
+    """Registered at 16:30, nothing later existed yet: the old rule reads it with no check, even
+    one whose scores the check would refuse."""
+    panel, record = _one_record(tmp_path, filed=session_publication_instant, altered=True)
+
+    assert _by_records(tmp_path, panel, [record], end=3, checked=False).periods
+
+
+def test_the_store_witnesses_the_commands_holds_rebalances_and_catch_ups(tmp_path: Path) -> None:
+    """The command's decisions for a trailing-IC configuration from s1, rebalancing every second
+    session, run day by day through its own functions with s5 -- a scheduled rebalance -- missed:
+    it holds while no IC is known, rebalances, catches s5 up on s6. `witnessed_days`, from the
+    prediction store and the stored builds alone, re-derives every decision and record; the held
+    days, which leave no record, are proven by the configuration's own hold rule."""
+    panel = write_strategy_corpus(tmp_path)
+    sessions = panel.sessions
+    configured = _base(**TRAILING)
+    anchor, missed = sessions[1], sessions[5]
+    store = PanelStore(tmp_path / "panel")
+    calendar = load_trading_calendar(store, exchange=EXCHANGE, years=(2026,), as_of=READ_AT)
+    request_for = _static_request_for(configured)
+    previous: date | None = None
+    prior: dict[str, str] = {}
+    expected: list[tuple[date, str, str | None]] = []
+    for day in sessions[1:-1]:
+        if day == missed:
+            continue
+        request = request_for(day)
+        signal = score_day(store, request, day=day, anchor=anchor)
+        schedule = daily.schedule_of(
+            calendar, anchor=anchor, session=day, every=2, previous=previous
+        )
+        targets = daily.target_weights(signal, request, prior, schedule=schedule)
+        batch = signal_day_batch(signal, request, REGISTERED, predicted_at=_evening(day))
+        record_id = None
+        if batch is not None:
+            record, _ = daily.register_prediction(
+                tmp_path,
+                batch,
+                calendar=daily._outcome_calendar(store, request.exchange, day, request.as_of),
+                clock=lambda day=day: _evening(day),
+            )
+            record_id = record.record_id
+        expected.append((day, targets["decision"], record_id))
+        previous, prior = day, targets["weights"]
+
+    witnessed = witnessed_days(
+        store,
+        FilePredictionStore(tmp_path / "predictions", clock=lambda: READ_AT),
+        REGISTERED,
+        request_for=request_for,
+        anchor=anchor,
+        calendar=calendar,
+        start=anchor,
+        through=sessions[-2],
+    )
+
+    assert [(day.session, day.decision, day.record_id) for day in witnessed] == expected
+    decisions = [decision for _, decision, _ in expected]
+    assert "held" in decisions
+    assert (sessions[6], "rebalanced") in [(day, decision) for day, decision, _ in expected]

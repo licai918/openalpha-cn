@@ -60,28 +60,23 @@ asks about, keeping a small window of recent sessions cached. The equal-weight b
 the same cached sessions. A session without a published band, or a security without an
 adjustment factor covering it, has no quote: the book cannot trade it and keeps its last mark.
 
-## A registered prediction is read on two clocks, not on its custody stamp (`V2-P6-011`)
+## A registered prediction registered late is read only when it is witnessed (`V2-P6-011`)
 
 A source of `prediction_ids` reads records the daily command filed at about 18:30, after the
-16:30 signal instant. The book's own rule -- every score row visible at the signal instant -- was
-applied to the custody stamp and so refused every production record, although nothing in one
-could have been read later than 16:30. The point-in-time argument is about two different events,
-and `_prediction_rows` checks exactly those:
+16:30 signal instant. `_prediction_rows` reads a record one of two ways:
 
-- **what the numbers were computed from** -- the batch's `as_of`, the instant its inputs were
-  read (the signal instant of the factor build or the fit's cross section). It is the row's
-  `available_time`, so the book refuses it after the signal instant as it refuses any row. A
-  record's numbers are a deterministic function of what was readable at `as_of`: the panel and
-  the factor builds are point-in-time gated at that instant, so computing them at 18:30 cannot
-  put anything later into them;
-- **when they were fixed** -- `max(predicted_at, recorded_at)`. The book trades a signal day's
-  scores at the next session's open, priced by the call auction that starts at 09:15
-  (`REGISTRATION_CUTOFF`), whose indicative price is already a piece of the outcome. A record
-  registered at or after that instant on the trading session is refused by name. That is the
-  same rule the daily command enforces before filing (`strategy_registration.registration_cutoff`).
-
-A record is never revised -- the store is append-only and a second answer for a session is
-refused -- so its `revision_time` is its `as_of` too.
+- **registered at or before its signal instant** (`max(predicted_at, recorded_at)`): nothing
+  later existed yet, and the row carries that custody stamp as its clocks -- the book's own rule
+  for every score row, unchanged;
+- **registered after it**, which the book's rule alone would refuse: the batch's `as_of` -- the
+  instant its inputs were read -- is only what its writer declares, and a record fixed at 18:30
+  or the next morning could carry what arrived since. It is read only when (1) it was registered
+  before 09:15 on the session that trades it (`REGISTRATION_CUTOFF`: the call auction that prices
+  the book's trade has not begun), and (2) the caller's `verify_late` -- the registration's check,
+  `strategy_registration.late_record_check` -- admits it: bound to the registered declaration,
+  and its scores recomputed equal from the stored builds, which are point-in-time gated at
+  `as_of`. Then its rows carry `as_of` as their clocks (a record is never revised). Without a
+  check, or refused by it, the book is refused by name.
 """
 
 from __future__ import annotations
@@ -586,11 +581,14 @@ def backtest_strategy(
     request: StrategyRequest,
     *,
     predictions: Callable[[str], PredictionRecord | None] | None = None,
+    verify_late: Callable[[PredictionRecord], str | None] | None = None,
 ) -> StrategyBacktest:
     """Read the panel into `StrategyInputs` and run the book: the one entry both faces call.
 
     `predictions` looks a registered prediction up by id; it is required exactly when the
-    source names `prediction_ids`. A `StrategyBacktestError` -- look-ahead, a signal day with no
+    source names `prediction_ids`. `verify_late` is the check a record registered after its
+    signal instant must pass; without one such a record is refused (see the module docstring).
+    A `StrategyBacktestError` -- look-ahead, a signal day with no
     cross section, a benchmark gap -- is `blocked`, and that holds for one raised while the
     inputs are ASSEMBLED as much as for one raised while the book runs: a stored score that
     `ScoreRow`'s own contract refuses (a non-finite value, a naive clock) is the same kind of
@@ -600,7 +598,9 @@ def backtest_strategy(
     that period, so memory is bounded by a window rather than by the range.
     """
     try:
-        inputs = load_strategy_inputs(store, request, predictions=predictions, stream=True)
+        inputs = load_strategy_inputs(
+            store, request, predictions=predictions, verify_late=verify_late, stream=True
+        )
         return _read(
             lambda: run_strategy_backtest(inputs, request.spec),
             store=store,
@@ -615,6 +615,7 @@ def load_strategy_inputs(
     request: StrategyRequest,
     *,
     predictions: Callable[[str], PredictionRecord | None] | None = None,
+    verify_late: Callable[[PredictionRecord], str | None] | None = None,
     stream: bool = False,
 ) -> StrategyInputs:
     """Everything the book reads, out of the panel, at `request.as_of`.
@@ -680,7 +681,9 @@ def load_strategy_inputs(
     }
     if source.prediction_ids:
         return StrategyInputs(
-            scores=_prediction_rows(source.prediction_ids, predictions, sessions=sessions),
+            scores=_prediction_rows(
+                source.prediction_ids, predictions, sessions=sessions, verify_late=verify_late
+            ),
             **shared,  # type: ignore[arg-type]
         )
     feed: ScoreFeed
@@ -869,14 +872,15 @@ def _prediction_rows(
     predictions: Callable[[str], PredictionRecord | None] | None,
     *,
     sessions: Sequence[date],
+    verify_late: Callable[[PredictionRecord], str | None] | None = None,
 ) -> tuple[ScoreRow, ...]:
-    """Each record's scored rows, on the two clocks the module docstring argues for.
+    """Each record's scored rows, read as the module docstring states.
 
-    The information instant (`batch.as_of`) becomes the rows' `available_time` and
-    `revision_time`, which the book holds to the signal instant. The registration instant
-    (`max(predicted_at, recorded_at)`) is held here to `registration_deadline` of the session
-    after the record's day in `sessions` -- the session that trades it. A record of the range's
-    last session, or of a day outside the range, trades nothing in this run.
+    Registered at or before its signal instant, a record's rows carry its custody stamp. After
+    it, the record must be registered before `registration_deadline` of the session after its
+    day in `sessions` -- the session that trades it (a record of the range's last session, or of
+    a day outside the range, trades nothing in this run) -- and admitted by `verify_late`; its
+    rows then carry `batch.as_of`, which the book still holds to the signal instant.
     """
     if predictions is None:
         raise StrategyRequestError(
@@ -891,23 +895,37 @@ def _prediction_rows(
         batch = record.batch
         day = batch.as_of.astimezone(SHANGHAI).date()
         registered = max(batch.predicted_at, record.recorded_at)
-        session = trading.get(day)
-        if session is not None and registered >= registration_deadline(session):
-            raise StrategyBacktestError(
-                f"{identifier} holds the scores of {day.isoformat()}, which the book trades at "
-                f"{session.isoformat()}'s open, and it was registered at "
-                f"{registered.astimezone(SHANGHAI).isoformat()}, at or after that session's call "
-                f"auction started ({registration_deadline(session).isoformat()}). Its scores "
-                "may have seen part of the outcome of the trade they drive"
-            )
+        instant = session_publication_instant(day)
+        available, revised = registered, record.recorded_at
+        if registered > instant:
+            session = trading.get(day)
+            if session is not None and registered >= registration_deadline(session):
+                raise StrategyBacktestError(
+                    f"{identifier} holds the scores of {day.isoformat()}, which the book trades "
+                    f"at {session.isoformat()}'s open, and it was registered at "
+                    f"{registered.astimezone(SHANGHAI).isoformat()}, at or after that session's "
+                    f"call auction started ({registration_deadline(session).isoformat()}). Its "
+                    "scores may have seen part of the outcome of the trade they drive"
+                )
+            if verify_late is None:
+                raise StrategyBacktestError(
+                    f"{identifier} was registered at {registered.astimezone(SHANGHAI).isoformat()}"
+                    f", after its signal instant {instant.isoformat()}; its as_of is only what its "
+                    "writer declared, and no registration's check (verify_late) was given to "
+                    "recompute it against"
+                )
+            refusal = verify_late(record)
+            if refusal is not None:
+                raise StrategyBacktestError(refusal)
+            available = revised = batch.as_of
         rows.extend(
             ScoreRow(
                 component=PREDICTION_COMPONENT,
                 subject=prediction.ts_code,
                 signal_day=day,
                 value=prediction.score,
-                available_time=batch.as_of,
-                revision_time=batch.as_of,
+                available_time=available,
+                revision_time=revised,
             )
             for prediction in batch.predictions
             if prediction.score is not None

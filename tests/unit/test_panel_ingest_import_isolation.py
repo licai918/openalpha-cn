@@ -556,6 +556,10 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             # one definition, re-exported here for the daily command.
             "strategy_view.REGISTRATION_CUTOFF",
             "strategy_view.registration_deadline",
+            # Round 10: a late record is admitted only when its day, scored again through the
+            # view's own reader, gives its scores; a hold is witnessed the same way.
+            "strategy_view.StrategyViewError",
+            "strategy_view.score_day",
         }
     ),
     "openalpha_cn.shortlist_compare": frozenset(
@@ -772,11 +776,23 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
         ),
     ),
     "openalpha_cn.strategy_registration": DatasetReach(
-        # V2-P6-011. Empty in both directions, `shortlist_compare`'s shape: it turns an answer
-        # `strategy_view.score_day` already produced into a `PredictionBatch` and searches a
-        # prediction store it is handed -- no loader, no dataset name.
+        # V2-P6-011. It names no dataset. Since round 10 it takes `strategy_view.score_day`
+        # across the seam -- a late record is read only when its day, scored again, gives its
+        # scores, and a hold is witnessed the same way -- and so reaches what that reader
+        # reaches through the loaders it names itself: the price base, the registry, the
+        # calendar and the industry memberships an industry cap reads.
         named=frozenset(),
-        reached=frozenset(),
+        reached=frozenset(
+            {
+                "adj_factor",
+                "daily",
+                "index_member_all",
+                "stk_limit",
+                "stock_basic",
+                "suspend_d",
+                "trade_cal",
+            }
+        ),
     ),
     "openalpha_cn.shortlist_compare": DatasetReach(
         # V2-P4-007. The only row in this table that is empty in both directions, and the

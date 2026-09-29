@@ -175,10 +175,16 @@ from openalpha_cn.runtime.composition import build_storage  # noqa: E402
 from openalpha_cn.runtime.provenance import resolve_code_commit  # noqa: E402
 from openalpha_cn.strategy_registration import (  # noqa: E402
     RegisteredConfiguration,
+    Schedule,
     StrategyRegistrationError,
+    late_record_check,
     registration_cutoff,
     session_record,
     signal_day_batch,
+    witnessed_days,
+)
+from openalpha_cn.strategy_registration import (  # noqa: E402
+    schedule_of as registered_schedule_of,
 )
 from openalpha_cn.strategy_view import (  # noqa: E402
     SignalDay,
@@ -1108,29 +1114,36 @@ def journalled_days(directory: Path) -> tuple[JournalledDay, ...]:
         body = read_journal(path)
         if body is None or "result" not in body:
             continue
-        result = body["result"]
-        targets, prediction = result["targets"], result["prediction"]
-        days.append(
-            JournalledDay(
-                session=date.fromisoformat(result["session"]),
-                decision=str(targets["decision"]),
-                reason=str(targets["reason"]),
-                source_held=bool(result["candidates"]["held"]),
-                record_id=str(prediction["record_id"]) if prediction.get("registered") else None,
-                weights=dict(targets["weights"]),
+        try:
+            result = body["result"]
+            targets, prediction = result["targets"], result["prediction"]
+            days.append(
+                JournalledDay(
+                    session=date.fromisoformat(result["session"]),
+                    decision=str(targets["decision"]),
+                    reason=str(targets["reason"]),
+                    source_held=bool(result["candidates"]["held"]),
+                    record_id=(
+                        str(prediction["record_id"]) if prediction.get("registered") else None
+                    ),
+                    weights=dict(targets["weights"]),
+                )
             )
-        )
+        except (KeyError, TypeError, AttributeError) as error:
+            raise StepFailedError(
+                "summary", f"{path} has no {error} where the journal of a completed day has one"
+            ) from error
     return tuple(days)
 
 
 def journalled_rebalances(directory: Path) -> tuple[tuple[date, str], ...]:
-    """The sessions the command actually rebalanced on, ascending, each with the record it used.
+    """The sessions the journal says the command rebalanced on, each with the record it used.
 
-    What the forward report prices (`V2-P6-012`): a backtest of these records with these days as
-    its `rebalance_days` holds, after every rebalance, the targets the command printed (every
-    order filled). It differs from the fixed grid exactly where the command did: a day the
-    source held is not a rebalance, and a missed or refused run's rebalance is made at the next
-    run. A rebalance journalled without a record is refused -- the book could not be priced.
+    **The journal's word only**: a local file an edit could move a rebalance in. The forward
+    report prices `forward_rebalances`, which re-derives these days from the prediction store
+    and holds the journal to them. It differs from the fixed grid exactly where the command did:
+    a day the source held is not a rebalance, and a missed or refused run's rebalance is made at
+    the next run. A rebalance journalled without a record is refused.
     """
     rebalances: list[tuple[date, str]] = []
     for day in journalled_days(directory):
@@ -1146,38 +1159,88 @@ def journalled_rebalances(directory: Path) -> tuple[tuple[date, str], ...]:
     return tuple(rebalances)
 
 
-# --- the day's schedule --------------------------------------------------------------------------
+def _request_for(registration: Registration, as_of: datetime) -> Callable[[date], StrategyRequest]:
+    def request_for(day: date) -> StrategyRequest:
+        return day_request(registration.config, day=day, as_of=as_of)
+
+    return request_for
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class Schedule:
-    """Where the session sits on the configuration's rebalance schedule, and what the book held.
+def forward_record_check(
+    runtime_dir: Path, registration: Registration, *, as_of: datetime
+) -> Callable[[PredictionRecord], str | None]:
+    """The check a forward book holds a record registered after its signal instant to
+    (`strategy_view.backtest_strategy(verify_late=...)`): bound to this registration, and its
+    scores recomputed equal from the panel store under `runtime_dir`, read at `as_of`."""
+    return late_record_check(
+        panel_store(runtime_dir),
+        registration.declared,
+        request_for=_request_for(registration, as_of),
+        anchor=_registered_anchor(registration),
+    )
 
-    `position` counts sessions from the configuration's first; `scheduled` is the newest
-    scheduled rebalance on or before the session; `previous` the session of the newest journalled
-    book. A rebalance is due when there is no book yet (the first day), or when a scheduled
-    rebalance has come since the book was set -- today's, or one a missed or refused day never
-    made, which is then made today rather than left for the next one.
+
+def forward_rebalances(
+    runtime_dir: Path, registration: Registration, *, through: date, as_of: datetime
+) -> tuple[tuple[date, str], ...]:
+    """The sessions the command rebalanced on through `through`, each with its record, as the
+    append-only prediction store witnesses them (`V2-P6-011` round 10, for `V2-P6-012`).
+
+    `strategy_registration.witnessed_days` re-derives every decision from the store, from the
+    journal's first day -- the first day the command ran. The journal is only the cross-check:
+    a completed day whose decision or record differs between the two, or that one has and the
+    other has not, refuses the book naming the day, because the journal is a local file an edit
+    could move a rebalance in and the store is the witness.
     """
+    journalled = [
+        day
+        for day in journalled_days(journal_directory(runtime_dir, registration))
+        if day.session <= through
+    ]
+    if not journalled:
+        raise StepFailedError("summary", f"no day of this configuration is journalled by {through}")
+    store = panel_store(runtime_dir)
+    anchor = _registered_anchor(registration)
+    request_for = _request_for(registration, as_of)
+    calendar = _stored_calendar(
+        store, request_for(anchor).exchange, tuple(range(anchor.year, through.year + 1)), as_of
+    )
+    if calendar is None:
+        raise StepFailedError(
+            "summary", f"the calendar from {anchor.year} to {through.year} is not stored"
+        )
+    records = build_storage(runtime_dir=runtime_dir, clock=lambda: as_of).prediction_store
+    try:
+        witnessed = witnessed_days(
+            store,
+            records,
+            registration.declared,
+            request_for=request_for,
+            anchor=anchor,
+            calendar=calendar,
+            start=journalled[0].session,
+            through=through,
+        )
+    except StrategyRegistrationError as error:
+        raise StepFailedError("summary", str(error)) from error
+    derived = {day.session: (day.decision, day.record_id) for day in witnessed}
+    written = {day.session: (day.decision, day.record_id) for day in journalled}
+    for session in sorted(set(derived) | set(written)):
+        if derived.get(session) != written.get(session):
+            raise StepFailedError(
+                "summary",
+                f"the journal of {session.isoformat()} says {written.get(session)} and the store "
+                f"witnesses {derived.get(session)} (decision, record); the store is the witness, "
+                "and a journal that disagrees with it is not a book to price",
+            )
+    return tuple(
+        (day.session, day.record_id)
+        for day in witnessed
+        if day.decision == "rebalanced" and day.record_id is not None
+    )
 
-    session: date
-    position: int
-    scheduled: date
-    previous: date | None
 
-    @property
-    def due(self) -> bool:
-        return self.previous is None or self.scheduled > self.previous
-
-    @property
-    def reason(self) -> str:
-        if self.previous is None:
-            return "the first day: no book yet"
-        if not self.due:
-            return f"the book set on {self.previous.isoformat()} holds until the next rebalance"
-        if self.scheduled == self.session:
-            return "scheduled"
-        return f"catching up the rebalance scheduled on {self.scheduled.isoformat()}"
+# --- the day's schedule --------------------------------------------------------------------------
 
 
 def schedule_of(
@@ -1188,19 +1251,14 @@ def schedule_of(
     every: int,
     previous: date | None,
 ) -> Schedule:
-    """The session's place on the rebalance schedule counted from `anchor`."""
-    days = calendar.trading_days_between(anchor, session)
-    if not days or days[-1] != session:
-        raise StepFailedError(
-            "panel update", f"{session.isoformat()} is not a session on or after {anchor}"
+    """The session's place on the rebalance schedule counted from `anchor`
+    (`strategy_registration.schedule_of`, which `witnessed_days` reads the store with)."""
+    try:
+        return registered_schedule_of(
+            calendar, anchor=anchor, session=session, every=every, previous=previous
         )
-    position = len(days) - 1
-    return Schedule(
-        session=session,
-        position=position,
-        scheduled=days[position - position % every],
-        previous=previous,
-    )
+    except StrategyRegistrationError as error:
+        raise StepFailedError("panel update", str(error)) from error
 
 
 def industry_day(request: StrategyRequest, builds: Sequence[TierBuild], schedule: Schedule) -> bool:

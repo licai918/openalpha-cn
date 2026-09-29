@@ -1499,8 +1499,11 @@ def test_explicit_rebalance_days_equal_to_the_grid_are_the_grid() -> None:
         replace(HAND_FIXTURE_INPUTS, rebalance_days=(D1, D4)), HAND_FIXTURE_SPEC
     )
 
-    assert explicit == grid
+    assert explicit.periods == grid.periods
     assert [(period.start, period.end) for period in grid.periods] == [(D1, D4), (D4, D6)]
+    # The answer says which it was: a run on named days cannot pass for a grid run.
+    assert (grid.rebalance_days, explicit.rebalance_days) == (None, (D1, D4))
+    assert explicit != grid
 
 
 def test_explicit_rebalance_days_off_the_grid_set_the_periods() -> None:

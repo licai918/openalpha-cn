@@ -857,6 +857,9 @@ class StrategyBacktest(BaseModel):
     """The whole answer: the rules, the score source, every period, and what it cannot say.
 
     `model_fits` is every walk-forward refit of the run, fitted or refused, in refit order.
+    `rebalance_days` are the sessions the run was told to rebalance on (`V2-P6-011`), `None` on
+    the fixed grid -- part of the answer, so a run on named days never reads as a grid run of
+    the same spec and source. An answer model, not a stored row: nothing persists it.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -866,6 +869,7 @@ class StrategyBacktest(BaseModel):
     periods: tuple[PeriodResult, ...]
     limitations: tuple[str, ...]
     model_fits: tuple[ModelFit, ...] = ()
+    rebalance_days: tuple[date, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -1188,6 +1192,7 @@ def run_strategy_backtest(inputs: StrategyInputs, spec: StrategySpec) -> Strateg
         periods=tuple(periods),
         limitations=limitation_codes_for(inputs.source.kind),
         model_fits=tuple(fit.record for fit in refits),
+        rebalance_days=inputs.rebalance_days,
     )
 
 
