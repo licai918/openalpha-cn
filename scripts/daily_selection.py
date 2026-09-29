@@ -96,6 +96,7 @@ import hashlib
 import importlib.metadata
 import io
 import json
+import logging
 import os
 import platform
 import plistlib
@@ -1167,6 +1168,8 @@ def journalled_rebalances(directory: Path) -> tuple[tuple[date, str], ...]:
     return tuple(rebalances)
 
 
+_LOG: Final = logging.getLogger("openalpha.daily_selection")
+
 PROVENANCE_DIRECTORY: Final[str] = "daily_selection_provenance"
 """Under the runtime directory: each record's input provenance, `<digest>.json`, write-once."""
 
@@ -1214,7 +1217,19 @@ def provenance_lookup(runtime_dir: Path, registration_sha256: str) -> Provenance
     directory = runtime_dir / PROVENANCE_DIRECTORY
     held: dict[tuple[date, str], InputProvenance] = {}
     for path in sorted(directory.glob("*.json")) if directory.is_dir() else ():
-        provenance = InputProvenance.from_document(json.loads(path.read_text(encoding="utf-8")))
+        try:
+            provenance = InputProvenance.from_document(json.loads(path.read_text(encoding="utf-8")))
+        except (
+            ValueError,
+            TypeError,
+            KeyError,
+            IndexError,
+            AttributeError,
+            StrategyRegistrationError,
+        ) as error:
+            raise StepFailedError(
+                "summary", f"{path} is not a provenance this command can read ({error!r})"
+            ) from error
         if provenance.digest != path.stem:
             raise StepFailedError("summary", f"{path} is not what its name says it is")
         if provenance.registration_sha256 != registration_sha256:
@@ -1259,11 +1274,11 @@ class FileVerdicts:
             return ()
         kept = []
         for path in sorted(self._directory.glob(f"{record_id}.{provenance_digest}.*.json")):
-            body = json.loads(path.read_text(encoding="utf-8"))
-            if body.get("verdict") != "verified":
-                continue
-            kept.append(
-                tuple(
+            try:
+                body = json.loads(path.read_text(encoding="utf-8"))
+                if body["verdict"] != "verified":
+                    raise ValueError(f"verdict {body['verdict']!r}")
+                partitions = tuple(
                     InputPartition(
                         dataset=str(item[0]),
                         year=int(item[1]),
@@ -1272,7 +1287,14 @@ class FileVerdicts:
                     )
                     for item in body["partitions"]
                 )
-            )
+            except (ValueError, TypeError, KeyError, IndexError, AttributeError):
+                # Accidental corruption is inside the threat model, and a cache entry that does
+                # not parse is a miss: the record is recomputed, and the file is named.
+                _LOG.warning(
+                    "ignoring the unreadable verdict file %s; the record is recomputed", path.name
+                )
+                continue
+            kept.append(partitions)
         return tuple(kept)
 
     def keep(
@@ -1500,8 +1522,13 @@ def forward_summary_lines(summary: Mapping[str, Any]) -> list[str]:
     for entry in flagged["records"]:
         lines.append(f"  {entry['record_id']} corrected: {', '.join(entry['corrected'])}")
     for name, label in (
-        ("all_periods", "statistics, every period"),
-        ("excluding_unverifiable", f"statistics, excluding {UNVERIFIABLE}"),
+        ("all_periods", "headline: the book as recommended"),
+        (
+            "excluding_unverifiable",
+            f"sensitivity: the same book's periods excluding {flagged['count']} unverifiable "
+            "records (a subset of one path, not a re-run; later periods keep the positions and "
+            "costs those periods left)",
+        ),
     ):
         stats = summary["statistics"][name]
         lines.append(

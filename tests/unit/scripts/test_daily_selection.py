@@ -2845,9 +2845,13 @@ def test_a_label_restated_after_filing_makes_a_record_unverifiable_and_still_pri
     assert statistics["excluding_unverifiable"]["periods"] == 0
     lines = daily.forward_summary_lines(summary)
     assert lines[0] == "unverifiable_inputs_corrected_after_filing: 1 record(s)"
-    assert any(line.startswith("statistics, every period:") for line in lines)
+    assert any(line.startswith("headline: the book as recommended:") for line in lines)
     assert any(
-        line.startswith("statistics, excluding unverifiable_inputs_corrected_after_filing:")
+        line.startswith(
+            "sensitivity: the same book's periods excluding 1 unverifiable records (a subset of "
+            "one path, not a re-run; later periods keep the positions and costs those periods "
+            "left):"
+        )
         for line in lines
     )
     assert lines[-1] == daily.INTEGRITY
@@ -3160,3 +3164,59 @@ def test_two_provenance_files_for_one_filing_are_refused_by_name(tmp_path: Path)
         daily.provenance_lookup(tmp_path, REGISTERED.registration_sha256)
 
     assert first.name in str(refused.value) and second.name in str(refused.value)
+
+
+# --- accidental corruption is inside the threat model ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "garbled", ['{"record_id": "prd_', "{}", '{"verdict": "verified", "partitions": [[1]]}']
+)
+def test_an_unreadable_verdict_file_is_a_cache_miss_named_in_the_log(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, garbled: str
+) -> None:
+    """A kept verdict truncated, garbled or missing its keys is ignored and the record is
+    recomputed -- still verified -- with the file named in the log."""
+    panel = write_strategy_corpus(tmp_path)
+    day = panel.sessions[1]
+    request_for = _static_request_for(_base(**STATIC))
+    record, held = _file(tmp_path, request_for, day, day, at=_evening(day))
+    directory = tmp_path / daily.VERDICT_DIRECTORY
+    directory.mkdir(parents=True)
+    broken = directory / f"{record.record_id}.{held.digest}.{'0' * 64}.json"
+    broken.write_text(garbled, encoding="utf-8")
+    check = late_record_check(
+        PanelStore(tmp_path / "panel"),
+        REGISTERED,
+        request_for=_at_read(request_for),
+        anchor=day,
+        provenance_for=_lookup(held),
+        verdicts=daily.FileVerdicts(tmp_path, clock=lambda: READ_AT),
+    )
+
+    with caplog.at_level("WARNING", logger="openalpha.daily_selection"):
+        assert check(record) is None
+
+    assert check.verified == [record.record_id]
+    assert broken.name in caplog.text
+
+
+@pytest.mark.parametrize(
+    "garbled",
+    [
+        '{"schema": ',
+        "[]",
+        '{"schema": "daily-selection-input-provenance/v1"}',
+        '{"schema": "another-document/v1"}',
+    ],
+)
+def test_an_unreadable_provenance_file_is_refused_by_name(tmp_path: Path, garbled: str) -> None:
+    directory = tmp_path / daily.PROVENANCE_DIRECTORY
+    directory.mkdir(parents=True)
+    broken = directory / f"{'0' * 64}.json"
+    broken.write_text(garbled, encoding="utf-8")
+
+    with pytest.raises(daily.StepFailedError) as refused:
+        daily.provenance_lookup(tmp_path, REGISTERED.registration_sha256)
+
+    assert broken.name in str(refused.value)
