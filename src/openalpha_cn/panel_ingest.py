@@ -324,6 +324,7 @@ from openalpha_cn.domain.adjustment import (
     ADJUSTMENT_DATE_COLUMN,
     ADJUSTMENT_FACTOR_COLUMN,
     ADJUSTMENT_PANEL_COLUMNS,
+    AdjustmentError,
     AdjustmentHistory,
     FactorObservation,
     adjustment_histories_from_panel_rows,
@@ -343,9 +344,11 @@ from openalpha_cn.domain.daily_prices import (
     DailyBar,
     DailyValuation,
     PriceDataError,
+    RecordedReturnPath,
     close_disagreements,
     daily_bars_from_panel_rows,
     daily_valuations_from_panel_rows,
+    pre_close_tolerance,
 )
 from openalpha_cn.domain.financial_statements import (
     ANNOUNCEMENT_DATE_COLUMN,
@@ -456,7 +459,9 @@ from openalpha_cn.domain.upstream_defects import (
     before_listing,
     close_disagreement_kind,
     limit_placeholder_kind,
+    recorded_return_paths,
     repeats_previous_close,
+    return_path_kind,
     upstream_defects_from_panel_rows,
     valuation_placeholder_kind,
     withdrawn_subjects,
@@ -2144,7 +2149,7 @@ def load_adjustment_histories(
     `AdjustmentHorizonError`, which is not a smaller wall but a differently shaped one.
 
     **The census cannot repair it, and that is the load-bearing measurement.** The reconciliation
-    the six callers on that door rely on works because `PartitionCoverage.dates` says how many
+    the seven callers on that door rely on works because `PartitionCoverage.dates` says how many
     rows each event date is due; its entries carry `event_date` and `row_count` and **no subject
     axis**. The
     horizon question is per security -- `KNOWN_ADJUSTMENT_LIMITATIONS.suspension_is_invisible`
@@ -4105,6 +4110,237 @@ def reconcile_limit_placeholders(
         batches=_without_rows(kept, {(defect.ts_code, defect.trade_date) for defect in defects}),
         defects=tuple(defects),
         record=_defect_record(merged, positions, defects),
+    )
+
+
+ReturnPathRefetch = Callable[
+    [str, date, date], tuple[Sequence[ColumnarPanelBatch], Sequence[ColumnarPanelBatch]]
+]
+"""A re-fetch of one disputed session pair (`V2-P6-020`): `(ts_code, previous_day, day)` to the
+`daily` batches carrying both bars and the `adj_factor` batches carrying both factors.
+
+Injected for `PriceRefetch`'s reason: this module is pinned to importing `domain` and `panel`
+only. `cli._refetch_return_path` asks for exactly that security on exactly those two sessions --
+four requests -- and a test passes one built on a fake transport."""
+
+
+def reconcile_return_paths(
+    limits: Sequence[ColumnarPanelBatch],
+    *,
+    bars: Sequence[ColumnarPanelBatch],
+    earlier_bars: Sequence[ColumnarPanelBatch],
+    factors: Sequence[ColumnarPanelBatch],
+    answerable_through: date,
+    refetch: ReturnPathRefetch,
+    judged: Callable[[date], bool] | None = None,
+) -> ReconciledRows:
+    """Record, per session, which of `daily.pre_close` and `adj_factor` the day's own price
+    corroborates where the two disagree, or refuse the year (`V2-P6-020`).
+
+    `session_returns` refuses a session whose published `pre_close` and the one implied by the
+    factor series differ past `pre_close_tolerance`, and one refusal anywhere inside a backtest
+    or an IC window refused the whole run. With the tolerance read at each factor's own tick the
+    2013..2026 research store holds 24 such sessions of 12,829,600 consecutive-bar pairs. They
+    are in the upstream's own data, so -- as for every `V2-P6-013` rule -- they are decided once,
+    here, and every reader follows the record instead of deciding again.
+
+    `limits` is the `stk_limit` year this target is about to write, `bars` the stored `daily`
+    year, `earlier_bars` the stored `daily` year before it (each security's last bar there is the
+    previous close of its first bar of the year), and `factors` the stored `adj_factor` years the
+    pairs reach. Nothing is dropped: `batches` come back as `limits`, and `record` is the
+    `upstream_defects` batch of the decisions, source `stk_limit`, each carrying the disputed
+    bar's own four clocks.
+
+    1. **Find every consecutive-bar pair** of a security whose two statements disagree past
+       `pre_close_tolerance`, on the sessions `judged` admits (all of them for a full build).
+       A pair the stored factor series does not cover is left alone: a reader cannot price it
+       either, and refuses it by its own error.
+    2. **Re-fetch each disputed pair** (`refetch`): both bars and both factors, one security at a
+       time. A re-fetched close, `pre_close` or factor that differs from the stored one is a
+       stale or partial store, and the year is refused by name -- only a disagreement the
+       upstream publishes twice is recorded.
+    3. **Decide it** (`upstream_defects.return_path_kind`): the band centred on one statement,
+       with the close inside the band, corroborates that statement; otherwise neither is, and the
+       session's return is unknowable. Every reproduced disagreement is recorded one way or the
+       other; a reader refuses only a disagreement nobody recorded.
+    """
+    kept = tuple(limits)
+    judged_bars = [batch for batch in bars if batch.status == "success"]
+    if not judged_bars:
+        return ReconciledRows(batches=kept, defects=(), record=None)
+    merged = merge_panel_batches(judged_bars)
+    keys = _row_keys(merged)
+    closes = _column_values(merged, CLOSE_COLUMN)
+    pre_closes = _column_values(merged, PRE_CLOSE_COLUMN)
+    factor_table = [
+        row
+        for batch in factors
+        if batch.status == "success"
+        for row in zip(
+            batch.subjects,
+            _column_values(batch, ADJUSTMENT_DATE_COLUMN),
+            _column_values(batch, ADJUSTMENT_FACTOR_COLUMN),
+            strict=True,
+        )
+    ]
+    histories = adjustment_histories_from_panel_rows(
+        factor_table, answerable_through=answerable_through
+    )
+    factor_rows = {(str(subject), date.fromisoformat(str(day))) for subject, day, _ in factor_table}
+    previous: dict[str, tuple[date, float]] = {}
+    for batch in earlier_bars:
+        if batch.status != "success":
+            continue
+        for (subject, day), close in zip(
+            _row_keys(batch), _column_values(batch, CLOSE_COLUMN), strict=True
+        ):
+            if subject not in previous or day > previous[subject][0]:
+                previous[subject] = (day, cast(float, close))
+    bands: dict[tuple[str, date], tuple[float, float]] = {}
+    for batch in kept:
+        if batch.status != "success":
+            continue
+        for key, up, down in zip(
+            _row_keys(batch),
+            _column_values(batch, UP_LIMIT_COLUMN),
+            _column_values(batch, DOWN_LIMIT_COLUMN),
+            strict=True,
+        ):
+            bands[key] = (cast(float, up), cast(float, down))
+
+    disputed: list[tuple[int, date, float, float, float]] = []
+    for index in sorted(range(len(keys)), key=lambda at: keys[at]):
+        subject, day = keys[index]
+        close, pre_close = cast(float, closes[index]), cast(float, pre_closes[index])
+        before = previous.get(subject)
+        previous[subject] = (day, close)
+        history = histories.get(subject)
+        if before is None or history is None or (judged is not None and not judged(day)):
+            continue
+        previous_day, previous_close = before
+        try:
+            factor = history.factor_on(day)
+            previous_factor = history.factor_on(previous_day)
+        except AdjustmentError:
+            continue
+        implied = previous_close * previous_factor / factor
+        allowed = pre_close_tolerance(implied, factor=factor, previous_factor=previous_factor)
+        if abs(implied - pre_close) > allowed:
+            disputed.append((index, previous_day, previous_close, previous_factor, factor))
+    if not disputed:
+        return ReconciledRows(batches=kept, defects=(), record=None)
+
+    defects: list[UpstreamDefect] = []
+    positions: list[int] = []
+    for index, previous_day, previous_close, previous_factor, factor in disputed:
+        subject, day = keys[index]
+        close, pre_close = cast(float, closes[index]), cast(float, pre_closes[index])
+        again_bars, again_factors = refetch(subject, previous_day, day)
+        stored = {
+            (DAILY_DATASET, previous_day): (previous_close,),
+            (DAILY_DATASET, day): (close, pre_close),
+            (ADJ_FACTOR_DATASET, previous_day): (previous_factor,),
+            (ADJ_FACTOR_DATASET, day): (factor,),
+        }
+        served = {
+            **{
+                (DAILY_DATASET, when): values
+                for when, values in _refetched_return_path_rows(
+                    again_bars, subject, PRICE_DATE_COLUMN, (CLOSE_COLUMN, PRE_CLOSE_COLUMN)
+                ).items()
+            },
+            **{
+                (ADJ_FACTOR_DATASET, when): values
+                for when, values in _refetched_return_path_rows(
+                    again_factors, subject, ADJUSTMENT_DATE_COLUMN, (ADJUSTMENT_FACTOR_COLUMN,)
+                ).items()
+            },
+        }
+        for (dataset, when), values in stored.items():
+            answer = served.get((dataset, when))
+            if (
+                answer is None
+                and dataset == ADJ_FACTOR_DATASET
+                and (subject, when) not in factor_rows
+            ):
+                # The stored factor there is an earlier step carried forward -- the partition is
+                # compressed to its change rows -- and an absent row is what the upstream serves
+                # on such a session when it withdrew the step (`V2-P6-016`). Only a served value
+                # can contradict a carried one.
+                continue
+            if answer is None or answer[: len(values)] != values:
+                raise PanelBatchError(
+                    f"{subject} on {day.isoformat()}: the stored {DAILY_DATASET} pre_close "
+                    f"{pre_close!r} and the one {ADJ_FACTOR_DATASET} implies from "
+                    f"{previous_day.isoformat()}'s close disagree, and a re-fetch of {dataset} "
+                    f"on {when.isoformat()} answered {answer!r} where the store holds "
+                    f"{values!r}. A disagreement is recorded only once the upstream publishes it "
+                    f"twice; rebuild {dataset} for the year, whose stored rows are not what the "
+                    "upstream now serves"
+                )
+        band = bands.get((subject, day))
+        up, down = band if band is not None else (None, None)
+        defects.append(
+            UpstreamDefect(
+                ts_code=subject,
+                trade_date=day,
+                source_dataset=PRICE_LIMIT_DATASET,
+                kind=return_path_kind(
+                    published_pre_close=pre_close,
+                    implied_pre_close=previous_close * previous_factor / factor,
+                    close=close,
+                    up_limit=up,
+                    down_limit=down,
+                ),
+                bar_close=close,
+                previous_bar_close=previous_close,
+                up_limit=up,
+                down_limit=down,
+            )
+        )
+        positions.append(index)
+    return ReconciledRows(
+        batches=kept,
+        defects=tuple(defects),
+        record=_defect_record(merged, positions, defects),
+    )
+
+
+def _refetched_return_path_rows(
+    batches: Sequence[ColumnarPanelBatch],
+    subject: str,
+    date_column: str,
+    columns: tuple[str, ...],
+) -> dict[date, tuple[object, ...]]:
+    """`subject`'s rows in re-fetched batches, by session, as the values of `columns`."""
+    found: dict[date, tuple[object, ...]] = {}
+    for batch in batches:
+        if batch.status != "success":
+            continue
+        values = [_column_values(batch, name) for name in columns]
+        for index, (code, day) in enumerate(_row_keys(batch, date_column)):
+            if code == subject:
+                found[day] = tuple(column[index] for column in values)
+    return found
+
+
+def load_return_path_records(
+    store: PanelStore, *, years: Sequence[int], as_of: datetime
+) -> Mapping[tuple[str, date], RecordedReturnPath]:
+    """Every `V2-P6-020` decision recorded for `years` and knowable at `as_of`, keyed by
+    `(ts_code, session)` -- what a label reader or the strategy book hands `session_returns`.
+
+    A year with no `upstream_defects` partition has no decisions, and is read as that rather than
+    refused: the record is written only by a build that found something, and a disagreement on a
+    year nobody recorded still refuses at the reader, which is the fail-closed direction. A year
+    that is registered and cannot be read refuses, as `load_upstream_defects` does.
+    """
+    registered = set(store.registered_years(UPSTREAM_DEFECTS_DATASET))
+    held = tuple(sorted({year for year in years if year in registered}))
+    if not held:
+        return MappingProxyType({})
+    return MappingProxyType(
+        recorded_return_paths(load_upstream_defects(store, years=held, as_of=as_of))
     )
 
 
@@ -6096,10 +6332,11 @@ def _read_visible_event_dated_rows(
     """Every row of `requirement.years` that was knowable at `as_of`, reconciled per event date.
 
     **The only door onto a whole-year partition of an event-driven dataset, since `V2-P4-076`.**
-    It is taken by six loaders -- `load_stock_universe`, `load_suspensions`,
+    It is taken by seven loaders -- `load_stock_universe`, `load_suspensions`,
     `load_name_histories`, `load_statement_histories` since `V2-P4-083`,
-    `load_upstream_defects` since `V2-P6-013`, and `load_industry_cross_section` through
-    `_read_visible_membership_rows` -- and it is one function rather than six because
+    `load_upstream_defects` since `V2-P6-013`, `load_return_path_records` through it since
+    `V2-P6-020`, and `load_industry_cross_section` through `_read_visible_membership_rows` --
+    and it is one function rather than seven because
     `_read_visible_price_session`'s own docstring records what two doors onto one question cost
     the last time there were two.
 

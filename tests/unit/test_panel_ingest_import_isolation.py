@@ -335,6 +335,10 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_ingest.load_industry_histories",
             "panel_ingest.load_industry_trees",
             "panel_ingest.load_name_histories",
+            # `V2-P6-020`: the recorded return-path decisions, read out of the derived
+            # `upstream_defects` record so a disagreement the build decided is followed rather
+            # than refused. A derived record, so it reaches no fetched dataset.
+            "panel_ingest.load_return_path_records",
             "panel_ingest.load_statement_histories",
             "panel_ingest.load_stock_universe",
             "panel_ingest.load_suspensions",
@@ -444,6 +448,10 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_ingest.load_daily_bars",
             "panel_ingest.load_name_histories",
             "panel_ingest.load_price_limits",
+            # `V2-P6-020`: the recorded return-path decisions, read out of the derived
+            # `upstream_defects` record so a disagreement the build decided is followed rather
+            # than refused. A derived record, so it reaches no fetched dataset.
+            "panel_ingest.load_return_path_records",
             "panel_ingest.load_stock_universe",
             "panel_ingest.load_suspensions",
             "panel_ingest.load_trading_calendar",
@@ -494,6 +502,10 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_ingest.load_adjustment_histories",
             "panel_ingest.load_daily_bars",
             "panel_ingest.load_price_limits",
+            # `V2-P6-020`: the recorded return-path decisions, read out of the derived
+            # `upstream_defects` record so a disagreement the build decided is followed rather
+            # than refused. A derived record, so it reaches no fetched dataset.
+            "panel_ingest.load_return_path_records",
             "panel_ingest.load_stock_universe",
             "panel_ingest.load_suspensions",
             "panel_ingest.load_trading_calendar",
@@ -545,6 +557,10 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_ingest.load_index_prices",
             "panel_ingest.load_industry_cross_section",
             "panel_ingest.load_price_limits",
+            # `V2-P6-020`: the recorded return-path decisions, read out of the derived
+            # `upstream_defects` record so a disagreement the build decided is followed rather
+            # than refused. A derived record, so it reaches no fetched dataset.
+            "panel_ingest.load_return_path_records",
             "panel_ingest.load_suspensions",
             "panel_ingest.load_trading_calendar",
             "panel_ingest.session_publication_instant",

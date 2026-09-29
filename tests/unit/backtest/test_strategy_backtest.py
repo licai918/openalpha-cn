@@ -740,6 +740,7 @@ def test_the_answer_carries_every_known_limitation_by_code() -> None:
         "a_rejected_buy_leaves_its_slot_in_cash_until_the_next_rebalance",
         "a_retained_position_is_not_resized_to_equal_weight",
         "the_exit_leg_is_priced_on_the_entry_share_count",
+        "a_session_whose_return_is_unknowable_is_valued_by_the_adjustment_factor",
         "dividends_are_reinvested_through_the_adjustment_factor",
         "the_industry_cap_counts_names_and_is_applied_at_the_signal",
         "a_holding_that_cannot_trade_is_marked_at_its_last_close",
@@ -766,6 +767,7 @@ def test_the_answer_carries_every_known_limitation_by_code() -> None:
             "a_rejected_buy_leaves_its_slot_in_cash_until_the_next_rebalance",
             "a_retained_position_is_not_resized_to_equal_weight",
             "the_exit_leg_is_priced_on_the_entry_share_count",
+            "a_session_whose_return_is_unknowable_is_valued_by_the_adjustment_factor",
             "dividends_are_reinvested_through_the_adjustment_factor",
             "the_industry_cap_counts_names_and_is_applied_at_the_signal",
             "a_holding_that_cannot_trade_is_marked_at_its_last_close",
@@ -1535,3 +1537,96 @@ def test_rebalance_days_the_range_cannot_trade_are_refused(
 ) -> None:
     with pytest.raises(StrategyBacktestError, match=reason):
         run_strategy_backtest(replace(HAND_FIXTURE_INPUTS, rebalance_days=days), HAND_FIXTURE_SPEC)
+
+
+# --- V2-P6-020: a held position across a recorded pre_close / adj_factor disagreement -------------
+#
+# A's factor jumps 1.0 -> 1.1 on D3 with a `pre_close` equal to D2's close: the factor path says
+# A gained 10% overnight and the published one says it did not. The hand fixture holds A from D2's
+# open through D4's close and sells it at D5's open, so it is held across D3.
+
+
+def _jumped_quotes(
+    *,
+    on: date = D3,
+    recorded: str | None = None,
+    prices: Mapping[str, Sequence[tuple[str, str]]] = PRICES,
+) -> dict[date, dict[str, SessionQuote]]:
+    quotes = build_quotes(prices)
+    for day in SESSIONS:
+        if day < on:
+            continue
+        quote = quotes[day][A]
+        quotes[day][A] = replace(
+            quote,
+            adj_factor=Decimal("1.1"),
+            recorded_path=recorded if day == on else None,  # type: ignore[arg-type]
+        )
+    return quotes
+
+
+def _run(quotes: Mapping[date, Mapping[str, SessionQuote]]) -> tuple[PeriodResult, ...]:
+    return run_strategy_backtest(build_inputs(quotes=quotes), HAND_FIXTURE_SPEC).periods
+
+
+def _values(periods: Sequence[PeriodResult]) -> list[tuple[Decimal, Decimal, Decimal]]:
+    return [(p.start_value, p.end_value, p.net_return) for p in periods]
+
+
+def test_a_held_position_follows_a_recorded_published_path_through_the_disagreement() -> None:
+    """Without the record the book marks A at 10.80 x 1.1 on D4 and sells it for 1.1 times what
+    the market paid: 10% of phantom return. With the record the D3 link is the published
+    `close / pre_close`, and every later mark and the sale are rescaled by the same factor -- the
+    book answers exactly the hand-computed ledger, to the cent."""
+    baseline = _run(build_quotes())
+    unrecorded = _run(_jumped_quotes())
+    recorded = _run(_jumped_quotes(recorded="published"))
+
+    assert _values(recorded) == _values(baseline)
+    assert [p.fills for p in recorded] == [p.fills for p in baseline]
+    assert unrecorded[0].end_value == Decimal("220815.75")
+    assert _values(unrecorded) != _values(baseline)
+    assert all(p.unknowable_sessions == () for p in recorded)
+
+
+def test_a_recorded_factor_path_needs_no_correction() -> None:
+    assert _values(_run(_jumped_quotes(recorded="adjusted"))) == _values(_run(_jumped_quotes()))
+
+
+def test_a_position_opened_on_the_disputed_session_is_not_rescaled() -> None:
+    """A bought at D2's open never held D1's close into D2, so a record on D2 is not about it:
+    the overnight link the two statements disagree over is not one this position crossed. D2
+    opens at 10.10 against a 10.00 previous close here, so rescaling the new position through
+    that link would move its value by 1%."""
+    gapped = {**PRICES, A: (PRICES[A][0], ("10.10", "10.20"), *PRICES[A][2:])}
+    jumped_on_entry = _jumped_quotes(on=D2, prices=gapped)
+    recorded_on_entry = _jumped_quotes(on=D2, recorded="published", prices=gapped)
+
+    assert _values(_run(recorded_on_entry)) == _values(_run(jumped_on_entry))
+    assert _values(_run(recorded_on_entry)) == _values(_run(build_quotes(gapped)))
+
+
+def test_an_unknowable_session_is_valued_by_the_factor_and_named_on_its_period() -> None:
+    """Neither statement is corroborated, so the book keeps the valuation it gives every other
+    session and every resumption -- `close x adj_factor / entry adj_factor` -- and names the
+    `(security, session)` on the period it fell in. It is not excluded ex ante: the D1 signal,
+    which could not know about D3, still buys A at D2's open."""
+    unknowable = _run(_jumped_quotes(recorded="unknowable"))
+    unrecorded = _run(_jumped_quotes())
+
+    assert _values(unknowable) == _values(unrecorded)
+    assert (D2, A, "buy") in [(f.day, f.subject, f.side) for f in unknowable[0].fills]
+    assert unknowable[0].unknowable_sessions == (f"{A}@{D3.isoformat()}",)
+    assert unknowable[1].unknowable_sessions == ()
+    assert (
+        "a_session_whose_return_is_unknowable_is_valued_by_the_adjustment_factor"
+        in STRATEGY_BACKTEST_LIMITATION_CODES
+    )
+
+
+def test_an_unknowable_session_a_position_did_not_hold_through_is_not_named() -> None:
+    """C is never bought. A record on its session is not the book's exposure."""
+    quotes = build_quotes()
+    quotes[D3][C] = replace(quotes[D3][C], recorded_path="unknowable")
+
+    assert all(p.unknowable_sessions == () for p in _run(quotes))

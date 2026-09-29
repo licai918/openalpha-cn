@@ -213,6 +213,7 @@ from openalpha_cn.panel_ingest import (
     WITHDRAWN_KIND,
     WITHDRAWN_ROWS_DATASETS,
     AbsenceWitness,
+    ReconciledRows,
     Withdrawals,
     _sessions_published_through,
     carry_stored_rows_forward,
@@ -234,6 +235,7 @@ from openalpha_cn.panel_ingest import (
     reconcile_limit_placeholders,
     reconcile_pre_listing_rows,
     reconcile_price_disagreements,
+    reconcile_return_paths,
     reconcile_withdrawals,
     served_keys,
     session_publication_instant,
@@ -4294,6 +4296,98 @@ def _year_end_witness(
     return witness
 
 
+def _judged_from(start: date, *, again: frozenset[date]) -> Callable[[date], bool]:
+    """The sessions an incremental `stk_limit` slice judges return paths on (`V2-P6-020`): the
+    slice, and every earlier session it asks again for a carried withdrawal -- whose carried
+    records `_carried_defects` does not carry, so they must be judged again or be lost."""
+    return lambda day: day >= start or day in again
+
+
+def _judge_return_paths(
+    store: PanelStore,
+    provider: TushareProvider,
+    *,
+    limits: Sequence[ColumnarPanelBatch],
+    year: int,
+    sessions: Sequence[date],
+    now: datetime,
+    judged: Callable[[date], bool] | None,
+) -> ReconciledRows:
+    """`panel_ingest.reconcile_return_paths` over the **stored** `daily` and `adj_factor` years
+    (`V2-P6-020`), from the `stk_limit` target, which is built after both.
+
+    The `stk_limit` target owns the record because it alone holds the band that decides it, and
+    the build order (`PANEL_BUILD_TARGETS`) has `adj_factor` and `price` written before it runs.
+    A year whose `daily` or `adj_factor` partition is not stored has nothing to judge, and none is
+    recorded: a reader that later meets a disagreement there refuses it as unrecorded, and a
+    rebuild of this target once both are stored records it. The previous year's `daily` and
+    `adj_factor` are read when stored, for each security's first pair of the year; without them
+    that pair is not judged, with the same consequence.
+
+    Read through `carry_stored_sessions_forward`, the door every build-time read of stored rows
+    takes -- its docstring states why an un-gated read is sound for rows event-dated before the
+    build's own last session.
+    """
+    kept = ReconciledRows(batches=tuple(limits), defects=(), record=None)
+    daily_years = set(store.registered_years(DAILY_DATASET))
+    factor_years = set(store.registered_years(ADJ_FACTOR_DATASET))
+    if not sessions or year not in daily_years or year not in factor_years:
+        return kept
+    after = sessions[-1] + timedelta(days=1)
+    opening = date(year, 1, 1)
+
+    def stored(dataset: str, of: int, before: date) -> list[ColumnarPanelBatch]:
+        return carry_stored_sessions_forward(
+            store, (), dataset=dataset, year=of, before=before, observed_at=now
+        )
+
+    earlier_bars = stored(DAILY_DATASET, year - 1, opening) if year - 1 in daily_years else []
+    earlier_factors = (
+        stored(ADJ_FACTOR_DATASET, year - 1, opening) if year - 1 in factor_years else []
+    )
+    return reconcile_return_paths(
+        limits,
+        bars=stored(DAILY_DATASET, year, after),
+        earlier_bars=earlier_bars,
+        factors=[*earlier_factors, *stored(ADJ_FACTOR_DATASET, year, after)],
+        answerable_through=sessions[-1],
+        refetch=lambda code, previous_day, day: _refetch_return_path(
+            provider, code, previous_day, day
+        ),
+        judged=judged,
+    )
+
+
+def _refetch_return_path(
+    provider: TushareProvider, ts_code: str, previous_day: date, day: date
+) -> tuple[list[ColumnarPanelBatch], list[ColumnarPanelBatch]]:
+    """One disputed pair's two bars and two factors again, for that security alone
+    (`V2-P6-020`): four requests, stated on a `REFETCH` line.
+
+    The same `ts_code`-filtered shape `_refetch_price_session` uses for one disputed security --
+    a differently shaped request than the whole-session ones the stored rows came from, and so
+    the stronger witness that the upstream publishes the disagreement rather than a fetch having
+    produced it.
+    """
+    typer.echo(
+        f"REFETCH {day.isoformat()} {ts_code} from {previous_day.isoformat()} "
+        f"({DAILY_DATASET}+{ADJ_FACTOR_DATASET}, a pre_close/adj_factor disagreement)",
+        err=True,
+    )
+    return (
+        [
+            _fetch_panel(provider, DAILY_DATASET, as_of=_session_as_of(when), subjects=(ts_code,))
+            for when in (previous_day, day)
+        ],
+        [
+            _fetch_panel(
+                provider, ADJ_FACTOR_DATASET, as_of=_session_as_of(when), subjects=(ts_code,)
+            )
+            for when in (previous_day, day)
+        ],
+    )
+
+
 def _refetch_price_session(
     provider: TushareProvider, day: date, ts_codes: tuple[str, ...]
 ) -> tuple[ColumnarPanelBatch, ColumnarPanelBatch]:
@@ -6023,6 +6117,21 @@ def _build_panel(
         limits = reconcile_limit_placeholders(
             listed_limits.batches, halts=lambda: _stored_halts(store, year=year, now=now)
         )
+        # `V2-P6-020`: every stored `daily`/`adj_factor` disagreement on the sessions this slice
+        # judges, decided by this year's bands and recorded beside the target's other defects.
+        paths = _judge_return_paths(
+            store,
+            provider,
+            limits=limits.batches,
+            year=year,
+            sessions=sessions,
+            now=now,
+            judged=(
+                None
+                if limit_start is None
+                else _judged_from(limit_start, again=frozenset(asked_limits))
+            ),
+        )
         limit_refs = written.setdefault(PRICE_LIMIT_DATASET, [])
         limit_index = combine_defect_records(
             _carried_defects(
@@ -6036,6 +6145,7 @@ def _build_panel(
             settled_limits.records_of(frozenset({PRICE_LIMIT_DATASET})),
             listed_limits.record,
             limits.record,
+            paths.record,
         )
         limit_refs.append(
             write_price_limits(

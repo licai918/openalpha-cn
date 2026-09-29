@@ -111,6 +111,11 @@ FILTERED_READ_REACHERS: dict[str, frozenset[str]] = {
             # row carries its dropped row's own `daily_close` clocks, so it takes
             # `_read_visible_event_dated_rows` with `load_suspensions`' census bound.
             "load_upstream_defects",
+            # `V2-P6-020`: `load_upstream_defects` narrowed to the return-path decisions. On
+            # shortness it inherits that loader's answer: a registered year that cannot be read
+            # refuses, and a year with no partition is "no decision recorded", which a reader
+            # meets as the fail-closed refusal of an unrecorded disagreement, never as a return.
+            "load_return_path_records",
             # `V2-P6-013` round 5: one security's first stored bar of a year, the year-end
             # witness for a disputed close -- one subject-filtered read, not a market walk.
             "load_first_daily_bar",

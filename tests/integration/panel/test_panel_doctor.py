@@ -34,6 +34,7 @@ from openalpha_cn.domain.trading_calendar import (
     TradingCalendar,
     build_trading_calendar,
 )
+from openalpha_cn.domain.upstream_defects import UPSTREAM_DEFECT_DATA_COLUMNS
 from openalpha_cn.panel.catalog import KNOWN_STORAGE_LIMITATIONS
 from openalpha_cn.panel.store import ColumnSpec, PanelStorageError, PanelStore
 from openalpha_cn.panel_doctor import (
@@ -52,6 +53,7 @@ from openalpha_cn.panel_ingest import (
     STOCK_BASIC_DATASET,
     SUSPENSION_DATASET,
     TRADING_CALENDAR_DATASET,
+    UPSTREAM_DEFECTS_DATASET,
     load_stock_universe,
     load_suspensions,
     write_adjustment_factors,
@@ -63,6 +65,7 @@ from openalpha_cn.panel_ingest import (
     write_stock_universe,
     write_suspensions,
     write_trading_calendar,
+    write_upstream_defects,
 )
 
 EXCHANGE = "SZSE"
@@ -1081,6 +1084,80 @@ def test_a_factor_step_the_price_panel_does_not_corroborate_is_reported(tmp_path
     (finding,) = report.findings_with_code("return_path_disagreement")
     assert finding.datasets == (DAILY_DATASET, ADJ_FACTOR_DATASET)
     assert SECURITIES[0] in finding.detail
+
+
+def _record_return_path(store: PanelStore, kind: str, *, close_offset: float = 0.0) -> None:
+    """A `V2-P6-020` decision about `SECURITIES[0]` on the last session, as the `stk_limit`
+    target stores one: judged on the two stored closes."""
+    values: dict[str, object] = {
+        "trade_date": LAST_SESSION.isoformat(),
+        "source_dataset": PRICE_LIMIT_DATASET,
+        "defect_kind": kind,
+        "bar_close": _bar_price(SECURITIES[0], LAST_SESSION) + close_offset,
+        "valuation_close": None,
+        "previous_bar_close": _bar_price(SECURITIES[0], PREVIOUS_SESSION),
+        "up_limit": None,
+        "down_limit": None,
+        "valuation_repeats_previous_close": None,
+        "list_date": None,
+    }
+    kinds = {"valuation_repeats_previous_close": "boolean"}
+    write_upstream_defects(
+        store,
+        _batch(
+            UPSTREAM_DEFECTS_DATASET,
+            subjects=(SECURITIES[0],),
+            columns=[
+                PanelColumn(
+                    name,
+                    kinds.get(name, "string" if isinstance(values[name], str) else "float"),
+                    (values[name],),
+                )
+                for name in UPSTREAM_DEFECT_DATA_COLUMNS
+            ],
+            event_time=[_close_time(LAST_SESSION)],
+            available_time=[_published_time(LAST_SESSION)],
+        ),
+        year=YEAR,
+        source_datasets=frozenset({PRICE_LIMIT_DATASET}),
+    )
+
+
+def test_a_factor_step_upstream_defects_decided_is_not_an_unrecorded_disagreement(
+    tmp_path: Path,
+) -> None:
+    """`V2-P6-020`: the doctor reads the record the readers follow, so a session the build
+    decided for one statement is not reported as a disagreement nobody has looked at."""
+    store = seed(tmp_path, factors=factor_batch(factors={(SECURITIES[0], LAST_SESSION): 2.0}))
+    _record_return_path(store, "pre_close_corroborated_over_adj_factor")
+
+    report = report_for(store)
+
+    assert report.findings_with_code("return_path_disagreement") == ()
+    (check,) = [c for c in report.cross_checks if c.name == "return_paths"]
+    assert check.ran
+
+
+def test_a_session_recorded_as_unknowable_is_still_reported_and_says_so(tmp_path: Path) -> None:
+    """Recorded, but with neither statement corroborated: the session's return is unknowable
+    and every label across it is dropped. That is a fact a health report owes its reader."""
+    store = seed(tmp_path, factors=factor_batch(factors={(SECURITIES[0], LAST_SESSION): 2.0}))
+    _record_return_path(store, "pre_close_contradicts_adj_factor")
+
+    report = report_for(store)
+
+    (finding,) = report.findings_with_code("return_path_disagreement")
+    assert "unknowable" in finding.detail
+
+
+def test_a_record_judged_on_another_close_does_not_quiet_the_doctor(tmp_path: Path) -> None:
+    store = seed(tmp_path, factors=factor_batch(factors={(SECURITIES[0], LAST_SESSION): 2.0}))
+    _record_return_path(store, "pre_close_corroborated_over_adj_factor", close_offset=0.01)
+
+    report = report_for(store)
+
+    (finding,) = report.findings_with_code("return_path_disagreement")
+    assert "was judged on close" in finding.detail
 
 
 # --- injection: an ambiguous filing -----------------------------------------------------------

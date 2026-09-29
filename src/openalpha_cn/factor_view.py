@@ -237,6 +237,7 @@ from openalpha_cn.domain.daily_prices import (
     DAILY_DATASET,
     DailyBar,
     PriceDataError,
+    RecordedReturnPath,
 )
 from openalpha_cn.domain.factor import (
     FactorDefinition,
@@ -286,6 +287,7 @@ from openalpha_cn.domain.trading_calendar import (
     TradingCalendar,
     TradingCalendarError,
 )
+from openalpha_cn.domain.upstream_defects import UpstreamDefectError
 from openalpha_cn.panel.catalog import (
     DEFAULT_DATE_TIMEZONE,
     PanelStorageError,
@@ -322,6 +324,7 @@ from openalpha_cn.panel_ingest import (
     load_daily_bars,
     load_name_histories,
     load_price_limits,
+    load_return_path_records,
     load_stock_universe,
     load_suspensions,
     load_trading_calendar,
@@ -1452,6 +1455,14 @@ class _PanelInputs:
             ),
             years=years,
         )
+        # `V2-P6-020`: see `model_view._LabelInputs`, which reads the same record for the same
+        # reason.
+        self.return_paths: Mapping[tuple[str, date], RecordedReturnPath] = _read(
+            lambda: load_return_path_records(store, years=years, as_of=as_of),
+            store=store,
+            what="the recorded return-path decisions",
+            faults=(*_PANEL_FAULTS, UpstreamDefectError),
+        )
 
     def bars_on(self, day: date) -> Mapping[str, DailyBar]:
         if day not in self._bars:
@@ -1646,6 +1657,7 @@ class _PanelInputs:
                 limits=limits,
                 halts=self.halts,
                 universe=self.universe,
+                recorded=self.return_paths,
             )
         except LabelError as error:
             raise FactorRunBlockedError(

@@ -16,9 +16,11 @@ The fixed window every fixture below uses: a signal dated 16:30 Asia/Shanghai on
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, time, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -29,7 +31,12 @@ from openalpha_cn.domain.adjustment import (
     FactorObservation,
     build_adjustment_history,
 )
-from openalpha_cn.domain.daily_prices import DailyBar, PriceDataError, SessionReturns
+from openalpha_cn.domain.daily_prices import (
+    DailyBar,
+    PriceDataError,
+    RecordedReturnPath,
+    SessionReturns,
+)
 from openalpha_cn.domain.horizon import HorizonError, parse_horizon
 from openalpha_cn.domain.labels import (
     KNOWN_LABEL_LIMITATIONS,
@@ -42,6 +49,7 @@ from openalpha_cn.domain.labels import (
     REFUSAL_LOCKED_AT_LIMIT,
     REFUSAL_MISSING_BAR,
     REFUSAL_NOT_YET_LISTED,
+    REFUSAL_UNKNOWABLE_RETURN,
     REFUSAL_UNPUBLISHED_BAND,
     HaltCorpus,
     LabelError,
@@ -504,13 +512,14 @@ def test_the_label_return_is_right_across_an_ex_rights_day_where_the_naive_path_
 def test_the_two_correct_paths_agree_inside_the_bound_the_published_precision_allows() -> None:
     """Magnitudes, not merely `<=`: the residue is 2.0e-7 against a 9.2e-4 bound, and the naive
     path's error on the same session is 3.3e-2 -- five orders of magnitude above the
-    residue and 36 times the bound.
+    residue and 36 times the bound. (139.008 is read at its three-decimal tick since
+    `V2-P6-020`, which moved the bound from 9.155e-4 to 9.220e-4.)
     """
     computed = _label().window_return
 
     assert computed is not None
     assert computed.disagreement == pytest.approx(1.972714e-07, rel=1e-4)
-    assert computed.tolerance == pytest.approx(0.0009155392, rel=1e-6)
+    assert computed.tolerance == pytest.approx(0.0009220137, rel=1e-6)
     assert computed.disagreement <= computed.tolerance
     assert abs(computed.unadjusted - computed.adjusted) > 30.0 * computed.tolerance
 
@@ -547,7 +556,7 @@ def test_a_multi_session_window_chains_the_published_path_and_telescopes_the_fac
     assert computed.published == pytest.approx(0.05118829981718487, abs=1e-15)
     assert computed.adjusted == pytest.approx(0.05118850718661849, abs=1e-15)
     assert computed.unadjusted == pytest.approx(0.017699115044247815, abs=1e-15)
-    assert computed.tolerance == pytest.approx(0.001807473, rel=1e-6)
+    assert computed.tolerance == pytest.approx(0.001826915, rel=1e-6)
     assert computed.disagreement <= computed.tolerance
 
 
@@ -919,6 +928,7 @@ def test_every_declared_refusal_code_is_reachable_from_a_real_window() -> None:
             _label(bars=_bars(ENTRY), universe=_universe(delisted_on=EXIT)),
             _label(universe=_universe(listed_on=date(2026, 6, 22))),
             _label(universe=_universe(snapshot=ENTRY)),
+            _disputed_label(_recorded(None)),
         )
         for item in label.refusals
     }
@@ -945,7 +955,7 @@ def test_the_refusal_table_reconciles_against_the_modules_own_constants_in_both_
     }
 
     assert declared == set(LABEL_REFUSAL_CODES)
-    assert len(LABEL_REFUSAL_CODES) == len(declared) == 8
+    assert len(LABEL_REFUSAL_CODES) == len(declared) == 9
     assert list(LABEL_REFUSAL_CODES) == sorted(LABEL_REFUSAL_CODES)
 
 
@@ -981,7 +991,8 @@ def test_the_tolerance_is_scaled_by_the_published_pre_close_and_not_the_implied_
         per_session=(session,),
     )
 
-    assert session.tolerance == pytest.approx(0.0122, abs=1e-12)
+    # A unit factor is representable at three decimals, so each is allowed 1e-3 (`V2-P6-020`).
+    assert session.tolerance == pytest.approx(0.032, abs=1e-12)
     assert computed.tolerance == pytest.approx(session.tolerance / 10.0, rel=1e-12)
     assert computed.tolerance != pytest.approx(session.tolerance / 11.0, rel=1e-9)
 
@@ -990,9 +1001,10 @@ def test_the_reported_bound_inflates_to_uselessness_over_a_long_window() -> None
     """Stated because `disagreement <= tolerance` reads like a guarantee and stops being one.
 
     The per-session term is dominated by `MAX_PRE_CLOSE_DISAGREEMENT`, a flat 0.01 yuan, so it
-    is largest exactly where the price is smallest. A 10-yuan `pre_close` on unit factors is
-    allowed 0.0012 a session, and sixty of those compound to 7.46% -- wider than most things a
-    sixty-session return could be.
+    is largest exactly where the price is smallest. A 10-yuan `pre_close` on four-decimal
+    factors near 1 is allowed 0.0012 a session, and sixty of those compound to 7.46% -- wider
+    than most things a sixty-session return could be. On unit factors, which read at the
+    three-decimal tick since `V2-P6-020`, it is 0.003 a session and 19.69% over sixty.
     """
     session = SessionReturns(
         ts_code=CODE,
@@ -1004,9 +1016,10 @@ def test_the_reported_bound_inflates_to_uselessness_over_a_long_window() -> None
         upstream=0.0,
         published_pre_close=10.0,
         implied_pre_close=10.0,
-        factor=1.0,
-        previous_factor=1.0,
+        factor=1.0001,
+        previous_factor=1.0001,
     )
+    unit = dataclasses.replace(session, factor=1.0, previous_factor=1.0)
     one = WindowReturn(
         ts_code=CODE,
         entry_day=ENTRY,
@@ -1030,8 +1043,12 @@ def test_the_reported_bound_inflates_to_uselessness_over_a_long_window() -> None
         per_session=(session,) * 60,
     )
 
-    assert one.tolerance == pytest.approx(0.0012, abs=1e-12)
+    assert one.tolerance == pytest.approx(0.0012, rel=1e-3)
     assert sixty.tolerance == pytest.approx(0.0746, abs=5e-5)
+    assert dataclasses.replace(one, per_session=(unit,)).tolerance == pytest.approx(0.003)
+    assert dataclasses.replace(sixty, per_session=(unit,) * 60).tolerance == pytest.approx(
+        0.1969, abs=5e-5
+    )
 
 
 def test_the_declared_limitations_are_distinct_and_each_carries_a_reason() -> None:
@@ -1251,3 +1268,102 @@ def test_overlap_is_reported_and_purging_is_declared_unimplemented() -> None:
     assert "5k - 15" in entry.detail
     assert not hasattr(labels_module, "purge")
     assert not hasattr(labels_module, "embargo")
+
+
+# --- V2-P6-020: a recorded pre_close / adj_factor disagreement -----------------------------------
+#
+# The ex-rights pair above, with the factor on the 12th published 3% too high: the implied
+# previous close is then 10.62 against a published 10.94, far past the tolerance. The 15th
+# carries the same factor and agrees with its own pre_close, so only the 12th is in dispute.
+
+WRONG_EXIT_FACTOR = 143.1782
+
+
+def _disputed_factors() -> AdjustmentHistory:
+    return _history((ENTRY, ENTRY_FACTOR), (EXIT, WRONG_EXIT_FACTOR), (AFTER, WRONG_EXIT_FACTOR))
+
+
+def _recorded(path: str | None, *, close: float = EXIT_CLOSE) -> dict[tuple[str, date], Any]:
+    return {
+        (CODE, EXIT): RecordedReturnPath(
+            ts_code=CODE,
+            day=EXIT,
+            close=close,
+            previous_close=ENTRY_CLOSE,
+            path=path,  # type: ignore[arg-type]
+        )
+    }
+
+
+def _disputed_label(recorded: Mapping[tuple[str, date], Any] | None) -> OutcomeLabel:
+    window = _window("2d")
+    return label_outcome(
+        window,
+        ts_code=CODE,
+        bars=_bars(ENTRY, EXIT, AFTER),
+        factors=_disputed_factors(),
+        limits=_band(window.sessions),
+        halts=_no_halts(),
+        universe=_universe(),
+        recorded=recorded,
+    )
+
+
+def test_an_unrecorded_disagreement_inside_a_window_still_refuses_the_label() -> None:
+    with pytest.raises(PriceDataError, match="no upstream_defects record decides it"):
+        _disputed_label(None)
+    with pytest.raises(PriceDataError, match="no upstream_defects record decides it"):
+        _disputed_label({})
+
+
+def test_a_corroborated_published_path_is_followed_through_the_rest_of_the_window() -> None:
+    """The label chains the published link on the 12th and the factor path after it, so the
+    window's return is `11.50 / 10.94 - 1`; the factor path alone would have said +8.27%."""
+    label = _disputed_label(_recorded("published"))
+
+    assert label.is_labelled
+    returned = label.window_return
+    assert returned is not None
+    assert returned.recorded_sessions == (EXIT,)
+    assert label.realized_return == pytest.approx(AFTER_CLOSE / EXIT_PRE_CLOSE - 1.0, abs=1e-12)
+    unrecorded = (AFTER_CLOSE * WRONG_EXIT_FACTOR) / (ENTRY_CLOSE * ENTRY_FACTOR) - 1.0
+    assert unrecorded == pytest.approx(0.0827, abs=5e-4)
+    # The two adjusted prices are still exactly the return: `observation_from_label`'s identity.
+    assert returned.exit_adjusted_close / returned.entry_adjusted_close - 1.0 == pytest.approx(
+        returned.adjusted, abs=1e-15
+    )
+    assert [entry.path for entry in returned.per_session] == ["published", "agreed"]
+
+
+def test_a_corroborated_factor_path_is_followed_and_needs_no_correction() -> None:
+    label = _disputed_label(_recorded("adjusted"))
+
+    assert label.window_return is not None
+    assert label.window_return.recorded_sessions == (EXIT,)
+    assert label.realized_return == pytest.approx(
+        (AFTER_CLOSE * WRONG_EXIT_FACTOR) / (ENTRY_CLOSE * ENTRY_FACTOR) - 1.0, abs=1e-15
+    )
+
+
+def test_an_uncorroborated_session_drops_exactly_this_label_and_names_why() -> None:
+    label = _disputed_label(_recorded(None))
+
+    assert not label.is_labelled
+    assert _codes(label) == [(REFUSAL_UNKNOWABLE_RETURN, EXIT)]
+    assert label.window_return is None
+    with pytest.raises(LabelError, match="unknowable_session_return on 2026-06-12"):
+        _ = label.realized_return
+
+
+def test_a_record_judged_on_another_close_does_not_decide_this_window() -> None:
+    with pytest.raises(PriceDataError, match=r"was judged on close 11\.25"):
+        _disputed_label(_recorded("published", close=11.25))
+
+
+def test_a_label_without_a_disagreement_is_computed_exactly_as_before() -> None:
+    """No recorded session: the factor path's endpoints, the same double as before."""
+    label = _label()
+
+    assert label.window_return is not None
+    assert label.window_return.recorded_sessions == ()
+    assert label.realized_return == ADJUSTED_RETURN

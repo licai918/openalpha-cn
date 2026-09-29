@@ -279,6 +279,24 @@ KNOWN_STRATEGY_BACKTEST_LIMITATIONS: Final[tuple[StrategyBacktestLimitation, ...
         ),
     ),
     StrategyBacktestLimitation(
+        code="a_session_whose_return_is_unknowable_is_valued_by_the_adjustment_factor",
+        detail=(
+            "V2-P6-020. Where daily's pre_close and adj_factor disagree about a session, "
+            "upstream_defects records which one the day's own stk_limit band corroborates, and "
+            "a held position follows that path: through a corroborated pre_close the session "
+            "return is close / pre_close and every later mark and sale is rescaled to match. "
+            "Where neither is corroborated the return is unknowable, and the book values the "
+            "position exactly as it values every other session and every resumption after a "
+            "halt -- close x adj_factor / entry adj_factor -- and names the (security, session) "
+            "on that period's unknowable_sessions. It does not exclude the security before the "
+            "session (no signal could have known of it) and it does not refuse the period: a "
+            "refused period leaves the book's value unknown until the position is sold, which "
+            "is every later period rather than one. The 2013..2026 research store holds seven "
+            "such sessions, every one a resumption after a halt that spanned a corporate action; "
+            "a period that names one carries a number the data does not decide."
+        ),
+    ),
+    StrategyBacktestLimitation(
         code="dividends_are_reinvested_through_the_adjustment_factor",
         detail=(
             "A holding is valued at close x adj_factor / entry adj_factor, which reinvests every "
@@ -839,6 +857,10 @@ class PeriodResult(BaseModel):
     held: bool = False
     ic_weights: tuple[TrailingICWeight, ...] = ()
     model_fit: ModelFit | None = None
+    unknowable_sessions: tuple[str, ...] = ()
+    """`<security>@<session>` for every session inside the period whose return a held position
+    crossed and no witness decides (`V2-P6-020`); valued by the adjustment factor, see
+    `a_session_whose_return_is_unknowable_is_valued_by_the_adjustment_factor`."""
 
     @model_validator(mode="after")
     def validate_ledger(self) -> Self:
@@ -906,11 +928,18 @@ class SessionQuote:
     `bar` is the stored bar with the exchange's published band; `bar.suspended` means no fill
     was possible at the OPEN. `turnover_yuan` is the session's traded value in yuan and
     `adj_factor` its cumulative adjustment factor.
+
+    `recorded_path` (`V2-P6-020`) is set only on a session whose `pre_close` and `adj_factor`
+    disagree and whose `upstream_defects` record decided it: `published` (the book follows
+    `close / bar.previous_close` through the session), `adjusted` (the factor path, which the
+    book follows anyway) or `unknowable` (neither is corroborated). See
+    `a_session_whose_return_is_unknowable_is_valued_by_the_adjustment_factor`.
     """
 
     bar: MarketBar
     turnover_yuan: Decimal
     adj_factor: Decimal
+    recorded_path: Literal["published", "adjusted", "unknowable"] | None = None
 
     def __post_init__(self) -> None:
         if self.turnover_yuan < 0:
@@ -1767,10 +1796,19 @@ class _Holding:
     opened: date
     entry_adj: Decimal
     mark: Decimal
-    """The last close times its adjustment factor."""
+    """The last close times its adjustment factor, times `correction`."""
+    correction: Decimal = Decimal(1)
+    """What the adjustment factor is rescaled by after a session whose recorded path is the
+    published one (`V2-P6-020`); exactly `1` until one is crossed."""
+    observed: date | None = None
+    """The newest session whose recorded path this holding has taken into account."""
 
     def value(self) -> Decimal:
         return (self.shares * self.mark / self.entry_adj).quantize(_CENT, rounding=ROUND_HALF_UP)
+
+    def adjusted(self, quote: SessionQuote) -> Decimal:
+        """The session's adjustment factor on this holding's own scale."""
+        return quote.adj_factor * self.correction
 
 
 @dataclass(slots=True, kw_only=True)
@@ -1778,15 +1816,37 @@ class _Book:
     spec: StrategySpec
     cash: Decimal
     holdings: dict[str, _Holding] = field(default_factory=dict)
+    unknowable: list[str] = field(default_factory=list)
+    """Every `<security>@<session>` a held position crossed with no decided return."""
 
     def value(self) -> Decimal:
         return self.cash + sum((holding.value() for holding in self.holdings.values()), _ZERO_MONEY)
+
+    def observe(self, subject: str, holding: _Holding, quote: SessionQuote) -> None:
+        """Take a session's recorded path into account, once, before its first price is used.
+
+        Only for a position held into the session -- opened on an earlier one -- because the
+        disagreement is about the overnight link from the previous close, which a position
+        bought at this session's open never held. On `published` the correction becomes
+        `last mark / (adj_factor x pre_close)`, which makes this session's mark `last mark x
+        close / pre_close` and rescales every later one by the same factor. On `unknowable`
+        nothing is rescaled and the crossing is named.
+        """
+        day = quote.bar.trade_date
+        if holding.opened >= day or holding.observed == day:
+            return
+        holding.observed = day
+        if quote.recorded_path == "published":
+            holding.correction = holding.mark / (quote.adj_factor * quote.bar.previous_close)
+        elif quote.recorded_path == "unknowable":
+            self.unknowable.append(f"{subject}@{day.isoformat()}")
 
     def mark(self, day_quotes: Mapping[str, SessionQuote]) -> None:
         for subject, holding in self.holdings.items():
             quote = day_quotes.get(subject)
             if quote is not None:
-                holding.mark = quote.bar.close * quote.adj_factor
+                self.observe(subject, holding, quote)
+                holding.mark = quote.bar.close * holding.adjusted(quote)
 
 
 @dataclass(slots=True)
@@ -1817,6 +1877,7 @@ def _run_period(
     signal_day = sessions[signal_index]
     trade_day = sessions[signal_index + 1]
     book.mark(inputs.quotes.get(signal_day, {}))
+    crossed = len(book.unknowable)
     start_value = book.value()
     if start_value <= 0:
         raise StrategyBacktestError(f"the book is worth {start_value} on {signal_day.isoformat()}")
@@ -1858,6 +1919,7 @@ def _run_period(
         held=signal.ranked is None,
         ic_weights=signal.ic_weights,
         model_fit=signal.model_fit,
+        unknowable_sessions=tuple(book.unknowable[crossed:]),
     )
 
 
@@ -2023,7 +2085,8 @@ def _sell(
     if quantity < holding.shares:
         ledger.capped += 1
     fees = _record_fill(ledger, spec, result, subject=subject, day=day, price=bar.open)
-    proceeds = (quantity * bar.open * quote.adj_factor / holding.entry_adj).quantize(
+    book.observe(subject, holding, quote)
+    proceeds = (quantity * bar.open * holding.adjusted(quote) / holding.entry_adj).quantize(
         _CENT, rounding=ROUND_HALF_UP
     )
     book.cash += proceeds - fees

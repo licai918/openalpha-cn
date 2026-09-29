@@ -75,10 +75,12 @@ direction -- and both reasons it cannot fire are pinned in the last test here.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Final
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
@@ -94,7 +96,7 @@ from panel_fixtures import (
     generate_panel,
     write_generated_panel,
 )
-from test_factor_interfaces import BASELINE, store_three_tiers
+from test_factor_interfaces import BASELINE, RUN_AS_OF, store_three_tiers
 from typer.testing import CliRunner
 
 from openalpha_cn.api.app import FACTOR_HTTP_STATUS, create_app
@@ -109,15 +111,24 @@ from openalpha_cn.domain.labels import (
     label_outcome,
 )
 from openalpha_cn.domain.panel_batch import PanelColumn
+from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET
 from openalpha_cn.domain.stock_universe import (
     SecurityLifecycle,
     StockUniverseError,
     build_stock_universe,
 )
 from openalpha_cn.domain.trading_calendar import CalendarHorizonError
+from openalpha_cn.domain.upstream_defects import UPSTREAM_DEFECT_DATA_COLUMNS
 from openalpha_cn.factor_view import FACTOR_DATE_ZONE, FactorPanelUnreadableError
 from openalpha_cn.panel.store import PanelStore
-from openalpha_cn.panel_ingest import load_stock_universe, write_stock_universe
+from openalpha_cn.panel_ingest import (
+    UPSTREAM_DEFECTS_DATASET,
+    load_stock_universe,
+    load_trading_calendar,
+    session_publication_instant,
+    write_stock_universe,
+    write_upstream_defects,
+)
 from openalpha_cn.panel_view import PANEL_STORE_PLACEHOLDER
 from openalpha_cn.sdk import OpenAlphaSDK
 from openalpha_cn.shortlist_view import (
@@ -126,8 +137,15 @@ from openalpha_cn.shortlist_view import (
     _pricing_session,
     _read_registry,
 )
+from openalpha_cn.strategy_view import (
+    StrategyPanelUnreadableError,
+    _PanelDays,
+    factor_ic_series,
+    ic_series_request,
+)
 
 runner = CliRunner()
+SHANGHAI: Final = ZoneInfo("Asia/Shanghai")
 
 MOVING: Final[str] = "daily.close_moves_between_sessions"
 """Every case's control requirement rather than any case's shape: with a flat grid every
@@ -723,3 +741,174 @@ def test_the_label_error_arm_is_unreachable_from_this_face_and_here_is_each_reas
 
     assert REFUSAL_MISSING_BAR in {refusal.code for refusal in outcome.refusals}
     assert outcome.window_return is None
+
+
+# --- V2-P6-020: the same disagreement, once `upstream_defects` has decided it ------------------
+#
+# The `disagreeing` store's corpus, with a decision about `DISAGREEING` on the panel's last
+# session written beside it the way the `stk_limit` target writes one. The record is judged on
+# the two stored closes; a record judged on another close decides nothing.
+
+
+def _decided(
+    tmp_path_factory: pytest.TempPathFactory, name: str, kind: str, *, close_offset: float = 0.0
+) -> Path:
+    runtime = _runtime(
+        tmp_path_factory,
+        name,
+        shapes=(MOVING, "daily.uncorroborated_factor_step"),
+        days=(*EARLY_DAYS, *RETURN_PATH_DAYS),
+    )
+    panel = generate_panel(shapes=(MOVING, "daily.uncorroborated_factor_step"))
+    closes = {
+        (str(subject), str(day)): float(close)  # type: ignore[arg-type]
+        for subject, day, close in zip(
+            panel.batch("daily").subjects,
+            panel.column("daily", "trade_date"),
+            panel.column("daily", "close"),
+            strict=True,
+        )
+    }
+    last, previous = panel.sessions[-1], panel.sessions[-2]
+    values = {
+        "trade_date": last.isoformat(),
+        "source_dataset": PRICE_LIMIT_DATASET,
+        "defect_kind": kind,
+        "bar_close": closes[(DISAGREEING, last.isoformat())] + close_offset,
+        "valuation_close": None,
+        "previous_bar_close": closes[(DISAGREEING, previous.isoformat())],
+        "up_limit": None,
+        "down_limit": None,
+        "valuation_repeats_previous_close": None,
+        "list_date": None,
+    }
+    kinds = {
+        "trade_date": "string",
+        "source_dataset": "string",
+        "defect_kind": "string",
+        "valuation_repeats_previous_close": "boolean",
+        "list_date": "string",
+    }
+    close_of_session = datetime.combine(last, time(15, 0), tzinfo=SHANGHAI)
+    record = _batch(
+        UPSTREAM_DEFECTS_DATASET,
+        subjects=(DISAGREEING,),
+        columns=[
+            PanelColumn(name, kinds.get(name, "float"), (values[name],))
+            for name in UPSTREAM_DEFECT_DATA_COLUMNS
+        ],
+        event_time=(close_of_session,),
+        available_time=(session_publication_instant(last),),
+    )
+    write_upstream_defects(
+        PanelStore(runtime / "panel"),
+        record,
+        year=YEAR,
+        source_datasets=frozenset({PRICE_LIMIT_DATASET}),
+    )
+    return runtime
+
+
+@pytest.fixture(scope="module")
+def decided_published(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return _decided(tmp_path_factory, "decided-published", "pre_close_corroborated_over_adj_factor")
+
+
+@pytest.fixture(scope="module")
+def decided_unknowable(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return _decided(tmp_path_factory, "decided-unknowable", "pre_close_contradicts_adj_factor")
+
+
+@pytest.fixture(scope="module")
+def decided_elsewhere(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return _decided(
+        tmp_path_factory,
+        "decided-elsewhere",
+        "pre_close_corroborated_over_adj_factor",
+        close_offset=0.01,
+    )
+
+
+def _series(runtime: Path) -> Any:
+    return factor_ic_series(
+        PanelStore(runtime / "panel"),
+        ic_series_request(
+            factor="reversal_1d/v1",
+            tier="raw",
+            transform=None,
+            neutralization=None,
+            horizon_sessions=1,
+            ic_method="spearman",
+            min_securities=4,
+            start=RETURN_PATH_DAYS[0],
+            end=RETURN_PATH_DAYS[-1],
+            as_of=RUN_AS_OF,
+            exchange=EXCHANGE,
+        ),
+    )
+
+
+def test_a_decided_disagreement_is_followed_by_the_factor_run_rather_than_refused(
+    decided_published: Path, decided_unknowable: Path
+) -> None:
+    for runtime in (decided_published, decided_unknowable):
+        result = _run(runtime, RETURN_PATH_DAYS)
+        assert result.exit_code == PanelExit.ok, result.stderr
+
+
+def test_a_record_judged_on_another_close_still_refuses_the_factor_run(
+    decided_elsewhere: Path,
+) -> None:
+    result = _run(decided_elsewhere, RETURN_PATH_DAYS)
+
+    assert result.exit_code == FACTOR_EXIT["panel_unreadable"], result.stderr
+    assert "was judged on close" in result.stderr
+
+
+def test_the_ic_series_refuses_an_unrecorded_disagreement_and_follows_a_recorded_one(
+    disagreeing: Path, decided_published: Path, decided_unknowable: Path
+) -> None:
+    """The label reader the trailing-IC source and the walk-forward model share
+    (`model_view.OutcomeLabels`), through `factor_ic_series`. Unrecorded: refused. Decided for
+    the published statement: every name on the second prediction day is labelled. Unknowable:
+    exactly that one `(security, window)` is dropped and counted as unlabelled, and the first
+    prediction day, whose window does not cross the session, is untouched."""
+    with pytest.raises(StrategyPanelUnreadableError, match="no upstream_defects record"):
+        _series(disagreeing)
+
+    followed = _series(decided_published)
+    dropped = _series(decided_unknowable)
+
+    assert [p.prediction_day for p in followed.points] == list(RETURN_PATH_DAYS)
+    assert [p.prediction_day for p in dropped.points] == list(RETURN_PATH_DAYS)
+    assert followed.points[0].census == dropped.points[0].census
+    assert (
+        dropped.points[1].census.unlabelled_count == followed.points[1].census.unlabelled_count + 1
+    )
+    assert dropped.points[1].census.admitted_count == followed.points[1].census.admitted_count - 1
+
+
+def test_the_book_is_told_which_path_a_held_position_takes_through_the_session(
+    decided_published: Path, decided_unknowable: Path, disagreeing: Path
+) -> None:
+    """`strategy_view`'s session quote carries the recorded decision, matched on the stored
+    close, and nothing on a session nobody recorded."""
+    last = generate_panel(shapes=(MOVING,)).sessions[-1]
+    expected = {
+        decided_published: "published",
+        decided_unknowable: "unknowable",
+        disagreeing: None,
+    }
+    for runtime, path in expected.items():
+        store = PanelStore(runtime / "panel")
+        calendar = load_trading_calendar(store, exchange=EXCHANGE, years=(YEAR,), as_of=RUN_AS_OF)
+        days = _PanelDays(
+            store,
+            SimpleNamespace(years=(YEAR,), as_of=RUN_AS_OF),  # type: ignore[arg-type]
+            calendar,
+        )
+        quote = days.quote(last, DISAGREEING)
+        assert quote is not None
+        assert quote.recorded_path == path, runtime
+        other = days.quote(last, SECURITIES[0])
+        assert other is not None and other.recorded_path is None

@@ -194,7 +194,12 @@ from openalpha_cn.domain.alpha_model import (
     TrainingExample,
     TrainingSet,
 )
-from openalpha_cn.domain.daily_prices import DAILY_DATASET, DailyBar, PriceDataError
+from openalpha_cn.domain.daily_prices import (
+    DAILY_DATASET,
+    DailyBar,
+    PriceDataError,
+    RecordedReturnPath,
+)
 from openalpha_cn.domain.factor import FactorDefinition, FactorError, FactorRegistry
 from openalpha_cn.domain.factor_neutralization import (
     FactorNeutralizationRegistry,
@@ -231,6 +236,7 @@ from openalpha_cn.domain.trading_calendar import (
     TradingCalendar,
     TradingCalendarError,
 )
+from openalpha_cn.domain.upstream_defects import UpstreamDefectError
 from openalpha_cn.feature_matrix import (
     FeatureColumn,
     FeatureMatrix,
@@ -256,6 +262,7 @@ from openalpha_cn.panel_ingest import (
     load_adjustment_histories,
     load_daily_bars,
     load_price_limits,
+    load_return_path_records,
     load_stock_universe,
     load_suspensions,
     load_trading_calendar,
@@ -1692,6 +1699,15 @@ class _LabelInputs:
             ),
             years=years,
         )
+        # `V2-P6-020`: every recorded decision about a session whose `pre_close` and `adj_factor`
+        # disagree, so a label crossing one follows it -- or drops, where neither statement was
+        # corroborated -- instead of refusing the run. A disagreement nobody recorded still does.
+        self.return_paths: Mapping[tuple[str, date], RecordedReturnPath] = _read(
+            lambda: load_return_path_records(store, years=years, as_of=as_of),
+            store=store,
+            what="the recorded return-path decisions",
+            faults=(*_PANEL_FAULTS, UpstreamDefectError),
+        )
 
     def bars_on(self, day: date) -> Mapping[str, DailyBar]:
         if day not in self._bars:
@@ -1786,6 +1802,7 @@ class _LabelInputs:
                 limits=limits,
                 halts=self.halts,
                 universe=self.universe,
+                recorded=self.return_paths,
             )
         except LabelError as error:
             raise ModelRunBlockedError(

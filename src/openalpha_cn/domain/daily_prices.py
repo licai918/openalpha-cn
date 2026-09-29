@@ -91,6 +91,46 @@ normalised so its earliest session is 1.0: across the 75,204 factor cells of tho
 the minimum is exactly 1.0 and the maximum 10,055.6401, so the tolerance never exceeds
 `0.01 + 2e-4 * implied`. It is not bounded by contract, and a factor below 1.0 would widen it.
 
+### The factor's own tick, and what the whole store says about it (`V2-P6-020`)
+
+The seven pairs above are recent, and recent factors are four-decimal. The 2013..2026 research
+store is not: of its 174,310 stored factor rows 22,133 have at most two decimals, 118,892 three
+and 33,285 four, and the three-decimal ones are the norm before 2018. A value stored as `1.527`
+may have been published as `1.527` or `1.5270` and the float cannot say which, so the tick is
+read off each value (`adj_factor_publication_tick`): 1e-3 when it is representable at three
+decimals, 1e-4 otherwise. Every consecutive-bar pair of the store, 12,829,600 of them, measured
+read-only on 2026-09-28:
+
+    tolerance                          refused        of which the factor moved
+    one 1e-4 tick of each factor       1,647 (935 securities)   1,626
+    each factor's own tick                24 ( 12 securities)      23
+
+What the wider tick costs is bounded by its own arithmetic and measured. Its factor term is
+`tick_prev/f_prev + tick/f` of the price, at most **0.2%** for factors of 1 or more and 0.2064%
+anywhere in the store (66 factor rows sit below 1, the smallest 0.645). Over the store's 43,442
+real corporate actions (the factor moved and `pre_close` differs from the previous close by more
+than half a fen), deleting the step -- a factor partition with a hole in it, which is also what a
+naive close-to-close computes -- is refused on 41,885 (96.42%) under the old tick and 40,753
+(93.81%) under the new; on the 37,369 actions of 0.3% or more, 37,210 (99.57%) against 37,197
+(99.54%). Taking the close two bars back as the previous close is refused on 94.77% and 93.07% of
+the 12,473,872 pairs where the two closes differ. The smallest action in the store is 0.0094%,
+below any tolerance either rule could have. The honest-row refusals fall 69-fold for a loss of 13
+detections among actions of 0.3% or more.
+
+### The 24 that remain are in the upstream's own data (`V2-P6-020`)
+
+Seventeen are a factor that steps on a session whose `pre_close` equals the previous close and
+steps back later (`000998.SZ` 11.267 -> 10.97 on 2020-01-02, back on 2021-01-07, again on
+2023-06-01; `000011.SZ`, `000545.SZ`, `603081.SH`), plus `600610.SH` on 2015-11-10 and
+`000022.SZ` across the bar the upstream omits on 2013-11-14. On every one `stk_limit`'s band is
+centred on the published `pre_close` and holds the session's close -- `000998.SZ` closed on its
+upper limit of 16.18, exactly 1.1 x 14.71. Seven span a halt across a corporate action
+(`000010.SZ` 2013-04-25 -> 2013-07-19, factor 2.694 -> 10.775, `pre_close` still the last close);
+each resumed with a close **outside** the band centred on its published `pre_close`, so that band
+did not govern the session and corroborates nothing. `corroborated_return_path` is that rule, and
+`upstream_defects` records its answer per session at ingest, so `session_returns(recorded=...)`
+follows the corroborated path and refuses only a disagreement nobody recorded.
+
 ## The third witness, and the column `close` it is the only one that watches
 
 The `pre_close` check above is a cross-examination of `daily` and `adj_factor` about one
@@ -179,10 +219,10 @@ clock; the same placement, and the same reason, as `domain/adjustment.py`.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, time
 from math import isfinite
-from typing import Final
+from typing import Final, Literal
 
 from openalpha_cn.domain.adjustment import AdjustmentHistory, adjustment_factors_on
 from openalpha_cn.domain.panel_batch import SUBJECT_COLUMN_NAME
@@ -413,7 +453,7 @@ The whole tolerance is `pre_close_tolerance`, of which this is the part that doe
 """
 
 ADJ_FACTOR_PUBLICATION_TICK: Final[float] = 1e-4
-"""The `adj_factor` term of the tolerance: one published tick of a four-decimal factor.
+"""The `adj_factor` term of the tolerance for a **four**-decimal factor: one published tick.
 
 Carried into price space by `pre_close_tolerance`, because a tick of `f` is worth
 `implied * 1e-4 / f` yuan of implied previous close and therefore grows with the price. One
@@ -421,6 +461,19 @@ full tick rather than the 5e-5 half-tick that pure round-to-nearest would give: 
 residue is not only rounding but the upstream restating the fourth digit, and a factor of two
 here costs 1.3 points of missing-step detection while removing three quarters of the false
 refusals. Both numbers are measured in this module's docstring.
+
+Since `V2-P6-020` this is the tick of a factor that **needs** four decimals, not of every
+factor: see `adj_factor_publication_tick`.
+"""
+
+ADJ_FACTOR_COARSE_TICK: Final[float] = 1e-3
+"""The `adj_factor` tick of a factor representable at **three** decimals (`V2-P6-020`).
+
+The store holds 141,025 factor rows with at most three decimals and 33,285 with four, and the
+three-decimal ones are the norm before 2018. A value stored as `1.527` may have been published
+as `1.527` or as `1.5270`; nothing in the stored float says which, so the conservative reading is
+the coarser grid. `adj_factor_publication_tick` applies it per value, and this module's docstring
+measures what it costs in detection.
 """
 
 MAX_PUBLISHED_RETURN_DISAGREEMENT: Final[float] = 1e-4
@@ -445,6 +498,108 @@ class PriceDataError(ValueError):
     A `ValueError` subclass to match `domain/adjustment.py`'s `AdjustmentError` and
     `domain/trading_calendar.py`'s `TradingCalendarError`.
     """
+
+
+class UnknowableSessionReturnError(PriceDataError):
+    """A session whose two return statements disagree and neither is corroborated (`V2-P6-020`).
+
+    Raised by `session_returns` only when a matching `RecordedReturnPath` says so. A subclass of
+    `PriceDataError` so that every caller that does not know the distinction still refuses; the
+    ones that do -- a label drops the `(security, window)` pair, the panel doctor does not
+    report a recorded session as an unrecorded disagreement -- catch it by name.
+    """
+
+    def __init__(self, message: str, *, ts_code: str, day: date) -> None:
+        super().__init__(message)
+        self.ts_code = ts_code
+        self.day = day
+
+
+ReturnPath = Literal["published", "adjusted"]
+"""The two correct ways to compute one session's return; see `SessionReturns`."""
+
+SessionPath = Literal["agreed", "published", "adjusted"]
+"""How a `SessionReturns` was decided: its two paths agreed within `pre_close_tolerance`, or a
+recorded `upstream_defects` decision (`V2-P6-020`) named the path the day's own price
+corroborates."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RecordedReturnPath:
+    """The stored decision about one session whose `pre_close` and `adj_factor` disagree.
+
+    `V2-P6-020`. Built from an `upstream_defects` row by
+    `domain.upstream_defects.recorded_return_paths`; `session_returns` follows it only when the
+    two rows it was judged on are the two rows in hand -- `close` is the session's close and
+    `previous_close` the previous bar's close, as they were stored when the record was made.
+
+    `path` is the corroborated statement's path, or `None` when neither was corroborated: the
+    session's return is then unknowable, and `session_returns` raises
+    `UnknowableSessionReturnError` rather than choosing one.
+    """
+
+    ts_code: str
+    day: date
+    close: float
+    previous_close: float
+    path: ReturnPath | None
+
+
+def corroborated_return_path(
+    *,
+    published_pre_close: float,
+    implied_pre_close: float,
+    close: float,
+    up_limit: float | None,
+    down_limit: float | None,
+) -> ReturnPath | None:
+    """Which of the session's two `pre_close` statements the day's own price corroborates.
+
+    `V2-P6-020`. The witness is `stk_limit`'s band, which the exchange computes from its own
+    ex-rights reference price: a daily price limit is symmetric about that reference, so the
+    band's centre `(up + down) / 2` is the reference to within the bands' own rounding. A
+    statement is corroborated when **both** hold:
+
+    - the band is centred on it, within one published tick of `pre_close`
+      (`MAX_PRE_CLOSE_DISAGREEMENT`) -- and on it alone: a band centred on both corroborates
+      neither;
+    - the session's close lies inside the band. A close outside the band means the band did not
+      govern that session -- a resumption with no effective limit, measured on all seven of the
+      research store's halt-spanning disagreements -- so it cannot testify to the reference the
+      session actually traded from.
+
+    `pct_chg` is deliberately not a witness here: it is the upstream's `close / pre_close - 1`
+    and so restates the published statement rather than testifying about it (every one of the
+    24 residual disagreements in the 2013..2026 census carries a `pct_chg` equal to its own
+    published return). No band -- none published, or none on this session -- corroborates
+    nothing. See this module's docstring for the census.
+    """
+    if up_limit is None or down_limit is None:
+        return None
+    if not down_limit <= close <= up_limit:
+        return None
+    centre = (up_limit + down_limit) / 2.0
+    on_published = abs(centre - published_pre_close) <= MAX_PRE_CLOSE_DISAGREEMENT
+    on_implied = abs(centre - implied_pre_close) <= MAX_PRE_CLOSE_DISAGREEMENT
+    if on_published and not on_implied:
+        return "published"
+    if on_implied and not on_published:
+        return "adjusted"
+    return None
+
+
+def adj_factor_publication_tick(factor: float) -> float:
+    """One published tick of `factor`: `ADJ_FACTOR_COARSE_TICK` when the value is representable
+    at three decimals, else `ADJ_FACTOR_PUBLICATION_TICK` (`V2-P6-020`).
+
+    `round(factor, 3) == factor` is exact on a stored double: a value decoded from a decimal of
+    at most three places rounds back to the same double, and one that needed four does not
+    (checked on all 23,586 distinct stored factor values against an integer test of
+    `factor * 1000`, with no disagreement). A four-decimal value that happens to end in zero is
+    read as three-decimal and given the wider tick -- the conservative direction, and the one
+    whose cost this module's docstring measures.
+    """
+    return ADJ_FACTOR_COARSE_TICK if round(factor, 3) == factor else ADJ_FACTOR_PUBLICATION_TICK
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -685,6 +840,33 @@ class SessionReturns:
     """`adj_factor` on `day`. Carried so `tolerance` can be recomputed from the record."""
     previous_factor: float
     """`adj_factor` on `previous_day`."""
+    path: SessionPath = "agreed"
+    """`agreed` when the two paths agree within `tolerance`; otherwise the path a recorded
+    `upstream_defects` decision named (`V2-P6-020`). An unrecorded disagreement never gets
+    this far -- `session_returns` refuses it."""
+
+    @property
+    def decided(self) -> float:
+        """The session's return: `published` where a record named that path, else `adjusted`.
+
+        `adjusted` on an agreed session is the choice `domain/labels.py` already makes for a
+        window (reproducible from two prices on one scale); the two agree there by
+        construction.
+        """
+        return self.published if self.path == "published" else self.adjusted
+
+    @property
+    def correction(self) -> float:
+        """What the factor path's later prices are rescaled by for a chain through this session
+        to follow `decided`: `implied_pre_close / published_pre_close` on a recorded `published`
+        session, `1.0` otherwise.
+
+        `(1 + adjusted) * correction == 1 + published`, because the factor path's gross return
+        is `close / implied_pre_close` and the published one `close / published_pre_close`.
+        """
+        if self.path != "published":
+            return 1.0
+        return self.implied_pre_close / self.published_pre_close
 
     @property
     def disagreement(self) -> float:
@@ -876,6 +1058,7 @@ def session_returns(
     previous_close: float,
     previous_day: date,
     factors: AdjustmentHistory,
+    recorded: RecordedReturnPath | None = None,
 ) -> SessionReturns:
     """The three return paths for one session, cross-checked against each other and the row.
 
@@ -902,6 +1085,14 @@ def session_returns(
     both days. That is the honest answer: a return across a window the factor read never saw is
     not computable, and carrying the nearest factor forward is the fail-open this repository
     has rejected before.
+
+    **A recorded decision (`V2-P6-020`).** `recorded` is the `upstream_defects` decision about
+    this session, if the caller holds one. It is consulted only when the `pre_close` comparison
+    fails, and only when it was judged on the two rows in hand -- same security and session,
+    same close, same previous close; any other record decides nothing and the session refuses
+    as an unrecorded disagreement does. A matching record with a corroborated path returns the
+    session with `path` set to it; one with no corroborated path raises
+    `UnknowableSessionReturnError`. The `pct_chg` check is never waived.
     """
     if factors.ts_code != bar.ts_code:
         raise PriceDataError(
@@ -942,18 +1133,46 @@ def session_returns(
         factor=factor,
         previous_factor=previous_factor,
     )
-    if returns.disagreement > returns.tolerance:
-        raise PriceDataError(
-            f"{bar.ts_code} on {bar.trade_date.isoformat()}: the implied pre_close from "
-            f"{previous_day.isoformat()}'s close and the adjustment factors is "
-            f"{implied_pre_close!r}, and daily published {bar.pre_close!r} -- a gap of "
-            f"{returns.disagreement!r}, past the {returns.tolerance!r} that one tick of "
-            f"pre_close ({MAX_PRE_CLOSE_DISAGREEMENT}) plus one tick of each adj_factor "
-            f"({ADJ_FACTOR_PUBLICATION_TICK}, carried into price space at this price and "
-            "these factors) allows. The two datasets disagree about that session's corporate "
-            "action, so neither return can be trusted"
-        )
-    return returns
+    if returns.disagreement <= returns.tolerance:
+        return returns
+    judged = (
+        recorded is not None
+        and recorded.ts_code == bar.ts_code
+        and recorded.day == bar.trade_date
+        and recorded.close == bar.close
+        and recorded.previous_close == previous_close
+    )
+    disagreement = (
+        f"{bar.ts_code} on {bar.trade_date.isoformat()}: the implied pre_close from "
+        f"{previous_day.isoformat()}'s close and the adjustment factors is "
+        f"{implied_pre_close!r}, and daily published {bar.pre_close!r} -- a gap of "
+        f"{returns.disagreement!r}, past the {returns.tolerance!r} that one tick of "
+        f"pre_close ({MAX_PRE_CLOSE_DISAGREEMENT}) plus one published tick of each adj_factor "
+        f"({adj_factor_publication_tick(previous_factor)} and "
+        f"{adj_factor_publication_tick(factor)}, carried into price space at this price and "
+        "these factors) allows"
+    )
+    if recorded is not None and judged:
+        if recorded.path is None:
+            raise UnknowableSessionReturnError(
+                f"{disagreement}. The upstream_defects record for the session found neither "
+                "statement corroborated by the day's own price, so the session's return is "
+                "unknowable rather than either of the two",
+                ts_code=bar.ts_code,
+                day=bar.trade_date,
+            )
+        return replace(returns, path=recorded.path)
+    stale = (
+        f". A record for the session was judged on close {recorded.close!r} after "
+        f"{recorded.previous_close!r}, and these rows are {bar.close!r} after "
+        f"{previous_close!r}, so it is not a decision about them"
+        if recorded is not None
+        else ""
+    )
+    raise PriceDataError(
+        f"{disagreement}, and no upstream_defects record decides it. The two datasets disagree "
+        "about that session's corporate action, so neither return can be trusted" + stale
+    )
 
 
 def pre_close_tolerance(
@@ -964,17 +1183,20 @@ def pre_close_tolerance(
     Two terms, one per published input, both carried into yuan of `pre_close`:
 
     - `MAX_PRE_CLOSE_DISAGREEMENT` (0.01), one tick of a two-decimal price. Flat.
-    - `implied * ADJ_FACTOR_PUBLICATION_TICK * (1/f_prev + 1/f)`, one tick of each four-decimal
-      factor. `implied = prev_close * f_prev / f`, so a perturbation of either factor moves it
-      by `implied * delta / f_i` -- **linear in the price**, which is the term the flat 0.01
-      was missing and the reason a 450-yuan stock broke it on an ordinary session.
+    - `implied * (tick(f_prev)/f_prev + tick(f)/f)`, one published tick of each factor.
+      `implied = prev_close * f_prev / f`, so a perturbation of either factor moves it by
+      `implied * delta / f_i` -- **linear in the price**, which is the term the flat 0.01 was
+      missing and the reason a 450-yuan stock broke it on an ordinary session. The tick is each
+      value's own (`adj_factor_publication_tick`, `V2-P6-020`): 1e-3 for a factor representable
+      at three decimals, 1e-4 otherwise.
 
     Exposed as a function rather than folded into `session_returns` so a caller can ask what a
     given pair of rows was allowed, and so the measured rejection and detection rates in this
     module's docstring are checkable against the same arithmetic the guard runs.
     """
-    return MAX_PRE_CLOSE_DISAGREEMENT + implied_pre_close * ADJ_FACTOR_PUBLICATION_TICK * (
-        1.0 / previous_factor + 1.0 / factor
+    return MAX_PRE_CLOSE_DISAGREEMENT + implied_pre_close * (
+        adj_factor_publication_tick(previous_factor) / previous_factor
+        + adj_factor_publication_tick(factor) / factor
     )
 
 

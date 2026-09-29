@@ -220,6 +220,7 @@ from openalpha_cn.domain.trading_calendar import (
     TradingCalendar,
     TradingCalendarError,
 )
+from openalpha_cn.domain.upstream_defects import UpstreamDefectError
 from openalpha_cn.panel.catalog import (
     DEFAULT_DATE_TIMEZONE,
     KNOWN_STORAGE_LIMITATIONS,
@@ -249,6 +250,7 @@ from openalpha_cn.panel_ingest import (
     load_industry_histories,
     load_industry_trees,
     load_name_histories,
+    load_return_path_records,
     load_statement_histories,
     load_stock_universe,
     load_suspensions,
@@ -2042,6 +2044,15 @@ def _unpriced_check(
     )
 
 
+_RETURN_PATH_LOAD_FAILURES: Final[tuple[type[Exception], ...]] = (
+    *_LOAD_FAILURES,
+    UpstreamDefectError,
+)
+"""`_LOAD_FAILURES` and the one refusal only `_return_path_check` can meet: a malformed
+`V2-P6-020` return-path record. Kept apart rather than widening `_LOAD_FAILURES`, which is one set
+with `cli._PANEL_WRITE_REFUSALS`."""
+
+
 def _return_path_check(
     store: PanelStore,
     *,
@@ -2058,9 +2069,17 @@ def _return_path_check(
     own `pct_chg` does not corroborate the `close / pre_close` it publishes -- the second being
     the only one of the two that reads `close` at all. Either refusal is right for a reader and
     wrong for a health check, whose job is to survive the panel it is inspecting -- so both are
-    caught per security and turned into a line."""
+    caught per security and turned into a line.
+
+    A session `upstream_defects` has decided for one statement (`V2-P6-020`) is not a line: every
+    reader follows that record. One it recorded with neither statement corroborated is still a
+    line -- the session's return is unknowable and a label crossing it is dropped, which is a
+    fact about the panel a health report owes its reader -- and says so. A record is matched
+    exactly as `session_returns` matches it, so one judged on other closes quiets nothing and the
+    finding names why."""
     findings: list[HealthFinding] = []
     try:
+        recorded = load_return_path_records(store, years=years[DAILY_DATASET], as_of=as_of)
         histories = load_adjustment_histories(
             store,
             years=years[ADJ_FACTOR_DATASET],
@@ -2094,6 +2113,7 @@ def _return_path_check(
                         previous_close=earlier.close,
                         previous_day=previous_day,
                         factors=factors,
+                        recorded=recorded.get((ts_code, day)),
                     )
                 except (PriceDataError, AdjustmentError) as error:
                     findings.append(
@@ -2109,7 +2129,7 @@ def _return_path_check(
                             items=(ts_code,),
                         )
                     )
-    except _LOAD_FAILURES as error:
+    except _RETURN_PATH_LOAD_FAILURES as error:
         return _unavailable("return_paths", (DAILY_DATASET, ADJ_FACTOR_DATASET), error)
     return tuple(findings), CrossCheckOutcome(
         name="return_paths",

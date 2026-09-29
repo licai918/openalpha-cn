@@ -46,6 +46,7 @@ from openalpha_cn.domain.daily_prices import (
     DAILY_BASIC_DATASET,
     DAILY_BASIC_PANEL_COLUMNS,
     DAILY_DATASET,
+    RecordedReturnPath,
 )
 from openalpha_cn.domain.panel_batch import PanelBatchError
 from openalpha_cn.domain.price_limits import (
@@ -59,10 +60,14 @@ from openalpha_cn.domain.trading_calendar import (
     build_trading_calendar,
 )
 from openalpha_cn.domain.upstream_defects import (
+    RETURN_PATH_KINDS,
     UpstreamDefect,
+    UpstreamDefectError,
     close_disagreement_kind,
     limit_placeholder_kind,
+    recorded_return_paths,
     repeats_previous_close,
+    return_path_kind,
     upstream_defects_from_panel_rows,
     valuation_placeholder_kind,
     withdrawn_subjects,
@@ -97,6 +102,7 @@ HALTED = "000509.SZ"
 HALT_DAY = date(2013, 11, 13)
 RESUMED = "600006.SH"
 FILLERS: tuple[str, ...] = tuple(f"{600000 + index}.SH" for index in range(17))
+RETURN_PATH_CODE = FILLERS[6]
 SECURITIES: tuple[str, ...] = (NO_BAR, HALTED, STALE, *FILLERS)
 
 # `V2-P6-013` round 2: `920476.BJ` traded on another venue years before it listed (2022-10-14),
@@ -251,6 +257,15 @@ class Frame:
     """`suspend_d` serves nothing on any session."""
     delisted_code: str | None = None
     """A security the registry has delisted on 2013-12-31, with no bar after 2013."""
+    return_path: str | None = None
+    """`V2-P6-020`: `RETURN_PATH_CODE`'s `pre_close` and `adj_factor` disagree on `SESSIONS[2]`.
+    `published`: the factor steps 1.0 -> 1.1 on that session alone and back on the next, with
+    `pre_close` equal to the previous close and the band centred on it (`000998.SZ`'s shape);
+    `unknowable`: the factor steps to 1.1 for good and the session closes at 12.0, outside the
+    band centred on its published 10.0 (`000010.SZ`'s shape)."""
+    return_path_refetch_factor: float | None = None
+    """What a per-security `adj_factor` re-fetch answers for `RETURN_PATH_CODE` on
+    `SESSIONS[2]`; `None`: what the whole-market fetch served."""
     """`FILLERS[5]` is halted all of `SESSIONS[-1]`, so its last 2013 bar is on `SESSIONS[-2]`."""
 
 
@@ -273,9 +288,16 @@ class ScriptedUpstream:
     def _close(self, code: str, day: date) -> float:
         if code == STALE:
             return STALE_CLOSES.get(day, 6.8)
+        if self.frame.return_path == "unknowable" and code == RETURN_PATH_CODE:
+            return 12.0 if day >= SESSIONS[2] else 10.0
         return 13.75 if code == NO_BAR else 10.0
 
     def _pre_close(self, code: str, day: date) -> float:
+        if self.frame.return_path == "unknowable" and (code, day) == (
+            RETURN_PATH_CODE,
+            SESSIONS[2],
+        ):
+            return 10.0
         if self.frame.uncorroborated_mismatch and code == FILLERS[0] and day == SESSIONS[3]:
             return 10.5
         mismatch = self.frame.mismatch_day
@@ -401,8 +423,20 @@ class ScriptedUpstream:
             rows.append([HALTED, _compact(day), "S", None])
         return rows
 
-    def _factors(self, day: date) -> list[list[Any]]:
-        rows = [[code, _compact(day), 1.0] for code in self._codes()]
+    def _factor(self, code: str, day: date, *, refetch: bool) -> float:
+        if code != RETURN_PATH_CODE or self.frame.return_path is None:
+            return 1.0
+        if refetch and day == SESSIONS[2] and self.frame.return_path_refetch_factor is not None:
+            return self.frame.return_path_refetch_factor
+        if self.frame.return_path == "published":
+            return 1.1 if day == SESSIONS[2] else 1.0
+        return 1.1 if day >= SESSIONS[2] else 1.0
+
+    def _factors(self, day: date, *, refetch: bool = False) -> list[list[Any]]:
+        rows = [
+            [code, _compact(day), self._factor(code, day, refetch=refetch)]
+            for code in self._codes()
+        ]
         if self._prelisted(day):
             rows.append([PRELISTED, _compact(day), 1.0])
         return rows
@@ -471,7 +505,7 @@ class ScriptedUpstream:
             rows = self._limits(day)
             fields = LIMIT_FIELDS
         elif api_name == "adj_factor":
-            rows = self._factors(day)
+            rows = self._factors(day, refetch="ts_code" in params)
             fields = FACTOR_FIELDS
         else:
             raise AssertionError(f"unscripted dataset {api_name}")
@@ -1698,3 +1732,230 @@ def test_the_withdrawal_kind_and_a_halt_source_read_back() -> None:
     )
     assert defect.kind == "withdrawn_after_publication"
     assert defect.source_dataset == SUSPENSION_DATASET
+
+
+# --- V2-P6-020: a pre_close / adj_factor disagreement, decided by the day's own price -----------
+
+
+def test_the_return_path_kind_names_the_corroborated_statement_or_neither() -> None:
+    """The measured shapes: `000998.SZ` 2020-01-02 (band centred on the published 14.71, close on
+    its upper edge), `000010.SZ` 2013-07-19 (close 7.0 outside a band centred on 23.87), a band
+    centred on the factor path's statement, and no band at all."""
+    assert (
+        return_path_kind(
+            published_pre_close=14.71,
+            implied_pre_close=14.71 * 11.267 / 10.97,
+            close=16.18,
+            up_limit=16.18,
+            down_limit=13.24,
+        )
+        == "pre_close_corroborated_over_adj_factor"
+    )
+    assert (
+        return_path_kind(
+            published_pre_close=10.5,
+            implied_pre_close=10.0,
+            close=10.2,
+            up_limit=11.0,
+            down_limit=9.0,
+        )
+        == "adj_factor_corroborated_over_pre_close"
+    )
+    for up, down, close in ((26.26, 21.48, 7.0), (None, None, 7.0)):
+        assert (
+            return_path_kind(
+                published_pre_close=23.87,
+                implied_pre_close=23.87 * 2.694 / 10.775,
+                close=close,
+                up_limit=up,
+                down_limit=down,
+            )
+            == "pre_close_contradicts_adj_factor"
+        )
+
+
+def _return_path_row(kind: str, **values: Any) -> tuple[object, ...]:
+    return (
+        values.get("ts_code", "000998.SZ"),
+        values.get("day", "2020-01-02"),
+        values.get("source", PRICE_LIMIT_DATASET),
+        kind,
+        values.get("bar_close", 16.18),
+        None,
+        values.get("previous_bar_close", 14.71),
+        values.get("up_limit", 16.18),
+        values.get("down_limit", 13.24),
+        None,
+        None,
+    )
+
+
+def test_the_three_return_path_kinds_read_back_as_the_decisions_a_reader_follows() -> None:
+    defects = upstream_defects_from_panel_rows(
+        [
+            _return_path_row("pre_close_corroborated_over_adj_factor"),
+            _return_path_row(
+                "adj_factor_corroborated_over_pre_close", ts_code="600000.SH", bar_close=10.2
+            ),
+            _return_path_row(
+                "pre_close_contradicts_adj_factor",
+                ts_code="000010.SZ",
+                day="2013-07-19",
+                bar_close=7.0,
+                previous_bar_close=23.87,
+                up_limit=None,
+                down_limit=None,
+            ),
+            # Any other kind is not a return-path decision and is not read as one.
+            _return_path_row("limit_placeholder_on_halt", ts_code="000509.SZ"),
+        ]
+    )
+
+    decided = recorded_return_paths(defects)
+
+    assert decided == {
+        ("000998.SZ", date(2020, 1, 2)): RecordedReturnPath(
+            ts_code="000998.SZ",
+            day=date(2020, 1, 2),
+            close=16.18,
+            previous_close=14.71,
+            path="published",
+        ),
+        ("600000.SH", date(2020, 1, 2)): RecordedReturnPath(
+            ts_code="600000.SH",
+            day=date(2020, 1, 2),
+            close=10.2,
+            previous_close=14.71,
+            path="adjusted",
+        ),
+        ("000010.SZ", date(2013, 7, 19)): RecordedReturnPath(
+            ts_code="000010.SZ",
+            day=date(2013, 7, 19),
+            close=7.0,
+            previous_close=23.87,
+            path=None,
+        ),
+    }
+    assert set(RETURN_PATH_KINDS) == {
+        "pre_close_corroborated_over_adj_factor",
+        "adj_factor_corroborated_over_pre_close",
+        "pre_close_contradicts_adj_factor",
+    }
+
+
+def test_a_return_path_record_without_the_two_closes_it_was_judged_on_is_refused() -> None:
+    """A decision a reader cannot match against the rows in hand is not a decision about them."""
+    (defect,) = upstream_defects_from_panel_rows(
+        [_return_path_row("pre_close_contradicts_adj_factor", previous_bar_close=None)]
+    )
+    with pytest.raises(UpstreamDefectError, match="previous_bar_close"):
+        recorded_return_paths([defect])
+    twice = upstream_defects_from_panel_rows(
+        [
+            _return_path_row("pre_close_contradicts_adj_factor"),
+            _return_path_row("pre_close_corroborated_over_adj_factor"),
+        ]
+    )
+    with pytest.raises(UpstreamDefectError, match="two return-path records"):
+        recorded_return_paths(twice)
+
+
+def _return_path_defects(runtime_dir: Path) -> list[UpstreamDefect]:
+    return [d for d in _defects(runtime_dir) if d.kind in RETURN_PATH_KINDS]
+
+
+RETURN_PATH_REFETCHES: list[tuple[str, str, str]] = [
+    (DAILY_DATASET, RETURN_PATH_CODE, _compact(SESSIONS[1])),
+    (DAILY_DATASET, RETURN_PATH_CODE, _compact(SESSIONS[2])),
+    ("adj_factor", RETURN_PATH_CODE, _compact(SESSIONS[1])),
+    ("adj_factor", RETURN_PATH_CODE, _compact(SESSIONS[2])),
+]
+
+
+def test_a_disagreement_the_band_decides_is_recorded_by_the_limit_target_with_its_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`000998.SZ`'s shape: the factor steps on a session whose `pre_close` is the previous
+    close, and steps back on the next. Both sessions disagree; both bands are centred on the
+    published statement with the close inside; both are recorded as the published path, with
+    the two closes they were judged on and the band that decided them."""
+    frame = Frame(return_path="published")
+    result, upstream = _build(tmp_path, frame, monkeypatch, "adj_factor", "price", "stk_limit")
+
+    assert result.exit_code == PanelExit.ok, result.output
+    assert _return_path_defects(tmp_path) == [
+        UpstreamDefect(
+            ts_code=RETURN_PATH_CODE,
+            trade_date=day,
+            source_dataset=PRICE_LIMIT_DATASET,
+            kind="pre_close_corroborated_over_adj_factor",
+            bar_close=10.0,
+            previous_bar_close=10.0,
+            up_limit=11.0,
+            down_limit=9.0,
+        )
+        for day in (SESSIONS[2], SESSIONS[3])
+    ]
+    # Reproduced before it was recorded: both bars and both factors, one security at a time.
+    assert upstream.refetches() == [
+        *RETURN_PATH_REFETCHES,
+        (DAILY_DATASET, RETURN_PATH_CODE, _compact(SESSIONS[2])),
+        (DAILY_DATASET, RETURN_PATH_CODE, _compact(SESSIONS[3])),
+        ("adj_factor", RETURN_PATH_CODE, _compact(SESSIONS[2])),
+        ("adj_factor", RETURN_PATH_CODE, _compact(SESSIONS[3])),
+    ]
+    assert "pre_close/adj_factor disagreement" in result.output
+
+
+def test_a_disagreement_no_band_decides_is_recorded_as_unknowable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`000010.SZ`'s shape: the band is centred on the published 10.0, and the session closes at
+    12.0 outside it, so the band did not govern that session and corroborates nothing."""
+    frame = Frame(return_path="unknowable")
+    result, upstream = _build(tmp_path, frame, monkeypatch, "adj_factor", "price", "stk_limit")
+
+    assert result.exit_code == PanelExit.ok, result.output
+    assert _return_path_defects(tmp_path) == [
+        UpstreamDefect(
+            ts_code=RETURN_PATH_CODE,
+            trade_date=SESSIONS[2],
+            source_dataset=PRICE_LIMIT_DATASET,
+            kind="pre_close_contradicts_adj_factor",
+            bar_close=12.0,
+            previous_bar_close=10.0,
+            up_limit=11.0,
+            down_limit=9.0,
+        )
+    ]
+    assert upstream.refetches() == RETURN_PATH_REFETCHES
+    (decided,) = recorded_return_paths(_defects(tmp_path)).values()
+    assert decided.path is None
+
+
+def test_a_disagreement_a_re_fetch_does_not_reproduce_refuses_the_limit_year(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A disagreement is recorded only once the upstream publishes it twice. A per-security
+    re-fetch answering another factor says the stored `adj_factor` is not what the upstream now
+    serves, and the `stk_limit` year -- whose record would decide from it -- is refused."""
+    frame = Frame(return_path="published", return_path_refetch_factor=1.2)
+    result, _ = _build(tmp_path, frame, monkeypatch, "adj_factor", "price", "stk_limit")
+
+    assert result.exit_code == PanelExit.unhealthy, result.output
+    assert "a re-fetch of adj_factor on 2013-11-13 answered (1.2,)" in result.output
+    assert _store(tmp_path).registered_years(PRICE_LIMIT_DATASET) == ()
+    assert _store(tmp_path).registered_years(UPSTREAM_DEFECTS_DATASET) == ()
+
+
+def test_a_limit_year_with_no_stored_price_year_judges_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The record is the `stk_limit` target's, and it decides from the stored `daily` and
+    `adj_factor` years. With neither stored there is nothing to judge and nothing is asked."""
+    frame = Frame(return_path="published")
+    result, upstream = _build(tmp_path, frame, monkeypatch, "stk_limit")
+
+    assert result.exit_code == PanelExit.ok, result.output
+    assert upstream.refetches() == []
+    assert _store(tmp_path).registered_years(UPSTREAM_DEFECTS_DATASET) == ()

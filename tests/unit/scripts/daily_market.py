@@ -14,7 +14,10 @@ history, the four statement sweeps (`*_vip`) and the SW2021 industry tree and me
 records each request's `api_name` and parameters. What it publishes can be moved on:
 
 - `disputed`: `DISPUTED_CODE`'s adjustment factor steps on that session while its published
-  `pre_close` does not, so the doctor's `return_paths` check reports it;
+  `pre_close` does not, and the band published for it that session lies wholly above its close
+  -- a resumption's shape, which corroborates neither statement -- so the `stk_limit` target
+  records the session as `pre_close_contradicts_adj_factor` (`V2-P6-020`) and the doctor's
+  `return_paths` check still reports it as a return nobody can know;
 - `bands_only`: codes that are published a band on that session and nothing else (the shape of
   the funds Tushare withdrew from a stored session in the live check);
 - `unsteady_bands`: codes served on every second request for a session only;
@@ -337,6 +340,13 @@ class Market:
                     compact(day),
                     round(self._pre_close(code, day) * 1.1, 2),
                     round(self._pre_close(code, day) * 0.9, 2),
+                ]
+                if not (code == DISPUTED_CODE and day == self.disputed)
+                else [
+                    code,
+                    compact(day),
+                    round(self._pre_close(code, day) * 1.3, 2),
+                    round(self._pre_close(code, day) * 1.2, 2),
                 ]
                 for code in rows_for
             ]

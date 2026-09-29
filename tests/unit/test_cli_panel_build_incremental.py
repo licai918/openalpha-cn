@@ -48,6 +48,7 @@ from openalpha_cn.domain.panel_batch import PanelBatchError
 from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET, SUSPENSION_DATASET
 from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET
 from openalpha_cn.domain.trading_calendar import TRADING_CALENDAR_DATASET
+from openalpha_cn.domain.upstream_defects import RETURN_PATH_KINDS
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_doctor import panel_health_report
 from openalpha_cn.panel_ingest import (
@@ -122,6 +123,8 @@ MISMATCH_LAST = FILLERS[3]
 ADJUSTED = FILLERS[4]
 RESUMING = FILLERS[6]
 HALTED_ACROSS = FILLERS[7]
+OSCILLATING = FILLERS[8]
+UNKNOWABLE = FILLERS[9]
 # `V2-P6-017`: `daily_basic` placeholders with a null close and no bar -- one halted all day on a
 # carried session, one with no halt row on the overlap session.
 PLACEHOLDER_CARRIED = "000029.SZ"
@@ -217,6 +220,12 @@ class Corpus:
     misdated_on_refetch: bool = False
     """`misdated` applies only from the second whole-market request for the session on: the
     build's own answer is sound and the one confirming a withdrawal is misfiled."""
+    return_paths: bool = False
+    """`V2-P6-020`: `OSCILLATING`'s factor is 1.1 on `SESSIONS[2:5]` and 1.0 around it with a
+    `pre_close` that never moves -- two disagreements the band decides for the published
+    statement, one on a carried session and one on the overlap session; and `UNKNOWABLE` steps
+    its factor to 1.1 on `SESSIONS[7]`, a slice session, and closes 20% up, outside the band
+    centred on its published `pre_close` -- a disagreement nothing decides."""
 
 
 class ScriptedUpstream:
@@ -267,9 +276,13 @@ class ScriptedUpstream:
 
     def _close(self, code: str, day: date) -> float:
         base = 10.0 + self._codes().index(code) / 10
+        if self.corpus.return_paths and code == UNKNOWABLE and day >= SESSIONS[7]:
+            return round(base * 1.2, 2)
         return round(base + 0.1 * self._open().index(day), 2) if code == RESUMING else base
 
     def _pre_close(self, code: str, day: date) -> float:
+        if self.corpus.return_paths and (code, day) == (UNKNOWABLE, SESSIONS[7]):
+            return self._close(code, SESSIONS[6])
         if code != RESUMING:
             return self._close(code, day)
         position = self._open().index(day)
@@ -368,6 +381,10 @@ class ScriptedUpstream:
 
     def _factors(self, day: date) -> list[list[Any]]:
         def factor(code: str) -> float:
+            if self.corpus.return_paths and code == OSCILLATING:
+                return 1.1 if day in SESSIONS[2:5] else 1.0
+            if self.corpus.return_paths and code == UNKNOWABLE:
+                return 1.1 if day >= SESSIONS[7] else 1.0
             if code in self.corpus.stepped:
                 return 1.5 if day >= T1_LAST else 1.0
             if code in self.corpus.restepped:
@@ -558,6 +575,53 @@ def test_incremental_equals_full_rebuild_at_the_same_as_of(
         (NO_BAR_OVERLAP, DAILY_BASIC_DATASET, T1_LAST, "valuation_without_bar"),
         (MISMATCH_LAST, DAILY_BASIC_DATASET, T2_LAST, "valuation_contradicts_unconfirmed_bar"),
     } <= set(_defects(tmp_path / "inc"))
+
+
+def test_incremental_equals_full_rebuild_with_return_path_decisions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`V2-P6-020`: a decision on a carried session is carried with its record, one on the
+    overlap session is judged again from the stored rows, and one on a slice session is judged
+    for the first time -- the same `upstream_defects` bytes as a full rebuild at the same
+    `--as-of`, and every other partition's too."""
+    corpus = Corpus(return_paths=True)
+    full = run_build(tmp_path / "full", monkeypatch, as_of=T2, incremental=False, corpus=corpus)
+    assert full.exit_code == PanelExit.ok, full.output
+    first = run_build(tmp_path / "inc", monkeypatch, as_of=T1, incremental=False, corpus=corpus)
+    assert first.exit_code == PanelExit.ok, first.output
+
+    inc = run_build(tmp_path / "inc", monkeypatch, as_of=T2, incremental=True, corpus=corpus)
+
+    assert inc.exit_code == PanelExit.ok, inc.output
+    assert all(full.hashes[name] is not None for name in COMPARED)
+    for target in COMPARED:
+        assert inc.hashes[target] == full.hashes[target], target
+    assert _defects(tmp_path / "inc") == _defects(tmp_path / "full")
+    decided = {
+        (code, day, kind)
+        for code, source, day, kind in _defects(tmp_path / "inc")
+        if source == PRICE_LIMIT_DATASET and kind in RETURN_PATH_KINDS
+    }
+    assert decided == {
+        (OSCILLATING, SESSIONS[2], "pre_close_corroborated_over_adj_factor"),
+        (OSCILLATING, SESSIONS[5], "pre_close_corroborated_over_adj_factor"),
+        (UNKNOWABLE, SESSIONS[7], "pre_close_contradicts_adj_factor"),
+        (ADJUSTED, SESSIONS[3], "pre_close_corroborated_over_adj_factor"),
+        (ADJUSTED, SESSIONS[8], "pre_close_corroborated_over_adj_factor"),
+    }
+    # The incremental build re-fetched only the pairs its slice judged: the overlap session's
+    # and the slice's, never the carried one.
+    judged = {
+        (api, code, day)
+        for api, code, day in (
+            (str(p["api_name"]), p["params"].get("ts_code"), p["params"]["trade_date"])
+            for p in inc.upstream.payloads
+            if "ts_code" in p["params"] and p["api_name"] == ADJ_FACTOR_DATASET
+        )
+    }
+    assert (ADJ_FACTOR_DATASET, OSCILLATING, _compact(SESSIONS[2])) not in judged
+    assert (ADJ_FACTOR_DATASET, OSCILLATING, _compact(SESSIONS[5])) in judged
+    assert (ADJ_FACTOR_DATASET, UNKNOWABLE, _compact(SESSIONS[7])) in judged
 
 
 def test_incremental_equals_full_rebuild_with_valuation_placeholders(
@@ -1324,17 +1388,34 @@ def test_a_build_with_no_withdrawal_stores_and_asks_exactly_what_it_did_before(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Pinned against the build before `V2-P6-016` (`d5176c5`), run on this corpus: the same
-    partition bytes and the same request count, at `T1` and incrementally at `T2`."""
+    partition bytes and the same request count, at `T1` and incrementally at `T2`.
+
+    One deliberate difference since `V2-P6-020`, and it is the corpus's own: `ADJUSTED` steps its
+    factor on `SESSIONS[3]` and `SESSIONS[8]` with a `pre_close` equal to the previous close, a
+    `daily`/`adj_factor` disagreement each time. The `stk_limit` target now re-fetches each one
+    (four requests) and records it -- the band is centred on the published `pre_close`, so as
+    `pre_close_corroborated_over_adj_factor` -- which adds those rows to `upstream_defects` and
+    nothing to any other partition."""
     first = run_build(tmp_path, monkeypatch, as_of=T1, incremental=False)
     assert first.exit_code == PanelExit.ok, first.output
-    assert len(first.upstream.payloads) == 36
+    assert len(first.upstream.payloads) == 36 + 4
+    assert _return_path_decisions(tmp_path) == [(ADJUSTED, SESSIONS[3])]
     assert {name: first.hashes[name] for name in COMPARED} == BEFORE_V2_P6_016_AT_T1
     inc = run_build(tmp_path, monkeypatch, as_of=T2, incremental=True)
     assert inc.exit_code == PanelExit.ok, inc.output
-    assert len(inc.upstream.payloads) == 36
+    assert len(inc.upstream.payloads) == 36 + 4
+    assert _return_path_decisions(tmp_path) == [(ADJUSTED, SESSIONS[3]), (ADJUSTED, SESSIONS[8])]
     assert {name: inc.hashes[name] for name in COMPARED} == BEFORE_V2_P6_016_AT_T2
     assert all(inc.hashes[name] is None for name in WITHDRAWN_ROWS)
     assert "withdrawal-" not in inc.output
+
+
+def _return_path_decisions(runtime_dir: Path) -> list[tuple[str, date]]:
+    return [
+        (ts_code, day)
+        for ts_code, source, day, kind in _defects(runtime_dir)
+        if kind == "pre_close_corroborated_over_adj_factor" and source == PRICE_LIMIT_DATASET
+    ]
 
 
 BEFORE_V2_P6_016_AT_T1: dict[str, str | None] = {
@@ -1343,16 +1424,17 @@ BEFORE_V2_P6_016_AT_T1: dict[str, str | None] = {
     SUSPENSION_DATASET: "8d5fa9199cc14fb0ecddbf9def87a7d5856383f2b1d04d0e07bd6fefbaf0c285",
     ADJ_FACTOR_DATASET: "2a6465b7be21478e733f61e1a2d91aebcd6f0914a198d31ce1f848139b38183c",
     PRICE_LIMIT_DATASET: "65542ca3da0f6226dfc0ea355cb7a43819fecd17697e54776279ccbacee77b62",
-    UPSTREAM_DEFECTS_DATASET: "30240f6ba29b758756ec1d2bf67a12c2784ee2dd0a09e14ea7c7027c2345bdfc",
+    UPSTREAM_DEFECTS_DATASET: "d8ee79c955ead8b7383be6184f871a3fedcdb69cffac5845382fb49a6d8ae9ee",
 }
-"""Measured by running this module's `run_build` on the base commit `d5176c5`."""
+"""Measured by running this module's `run_build` on the base commit `d5176c5`; the
+`upstream_defects` hash since `V2-P6-020` (its return-path rows, see the test above)."""
 BEFORE_V2_P6_016_AT_T2: dict[str, str | None] = {
     DAILY_DATASET: "feae26489df535ee1d5c2fd8bf64166b0761ee4e0e00a10169261b67d5c343be",
     DAILY_BASIC_DATASET: "094f7ea0b479e48e8b8276c6abc5cb8a0fd8e80e46dd8e402f9a34e8c1852fd2",
     SUSPENSION_DATASET: "4b956b47a2d6c8fa2250f99b5d51e3ba916ac0c1f1e05dddc8955acfd18f81e0",
     ADJ_FACTOR_DATASET: "0117628270cf9e6d49209028e45c53fe002a56a3579f39a0fff25145912e0bc8",
     PRICE_LIMIT_DATASET: "40d0618aafcebcbf633e98bed5fdb7e07b3174c1028643d1acf43041dbc19ffd",
-    UPSTREAM_DEFECTS_DATASET: "baae6017b11eae62b693fc490113fa55acfc83a866b519f8e8112837bb89cc10",
+    UPSTREAM_DEFECTS_DATASET: "45f1b9bd0717851c7d1b3d9083b9d20322b3bdab6d4ac8325b199f7b2ef36759",
 }
 
 
@@ -1711,10 +1793,14 @@ def test_a_placeholder_is_not_recorded_by_a_price_write_that_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`V2-P6-017`'s records go through `write_daily_panel`'s `before_write` like every other:
-    a price write refused by its own guards leaves no placeholder on the record."""
+    a price write refused by its own guards leaves no placeholder on the record. (The clean
+    corpus still records `ADJUSTED`'s factor step as a `V2-P6-020` return-path decision, so the
+    record is compared with the stored build's rather than required absent.)"""
     clean = Corpus(defects=False)
     stored = run_build(tmp_path, monkeypatch, as_of=T1, incremental=False, corpus=clean)
     assert stored.exit_code == PanelExit.ok, stored.output
+    recorded = _defects(tmp_path)
+    assert {kind for *_, kind in recorded} == {"pre_close_corroborated_over_adj_factor"}
 
     def refused(*args: Any, **kwargs: Any) -> Any:
         raise PanelBatchError("write_daily_panel refused by its own guards")
@@ -1729,4 +1815,4 @@ def test_a_placeholder_is_not_recorded_by_a_price_write_that_is_refused(
     )
 
     assert build.exit_code == PanelExit.unhealthy, build.output
-    assert _store(tmp_path).registered_years(UPSTREAM_DEFECTS_DATASET) == ()
+    assert _defects(tmp_path) == recorded

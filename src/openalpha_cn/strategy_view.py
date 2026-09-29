@@ -154,7 +154,12 @@ from openalpha_cn.domain.alpha_model import (
     PredictionBatch,
     TrainingExample,
 )
-from openalpha_cn.domain.daily_prices import DAILY_DATASET, DailyBar, PriceDataError
+from openalpha_cn.domain.daily_prices import (
+    DAILY_DATASET,
+    DailyBar,
+    PriceDataError,
+    RecordedReturnPath,
+)
 from openalpha_cn.domain.factor import FactorDefinition
 from openalpha_cn.domain.factor_neutralization import (
     FactorNeutralizationRegistry,
@@ -185,6 +190,7 @@ from openalpha_cn.domain.trading_calendar import (
     TradingCalendar,
     TradingCalendarError,
 )
+from openalpha_cn.domain.upstream_defects import UpstreamDefectError
 from openalpha_cn.factor_view import FactorRequestError, resolve_factor
 from openalpha_cn.feature_matrix import FeatureColumn, FeatureMatrixError, feature_spec
 from openalpha_cn.model_view import (
@@ -219,6 +225,7 @@ from openalpha_cn.panel_ingest import (
     load_index_prices,
     load_industry_cross_section,
     load_price_limits,
+    load_return_path_records,
     load_suspensions,
     load_trading_calendar,
     session_publication_instant,
@@ -399,6 +406,7 @@ _PANEL_FAULTS: Final[tuple[type[Exception], ...]] = (
     PriceDataError,
     IndexPriceError,
     IndustryClassificationError,
+    UpstreamDefectError,
 )
 """Refusals that are statements about stored data, enveloped as `panel_unreadable`."""
 
@@ -1614,6 +1622,14 @@ class _PanelDays:
             years=request.years,
         )
         self._adjustments: OrderedDict[int, Mapping[str, AdjustmentHistory]] = OrderedDict()
+        # `V2-P6-020`: which path a held position takes through a session whose `pre_close` and
+        # `adj_factor` disagree. Small -- 24 sessions in the whole 2013..2026 research store --
+        # so read once for the range rather than per year.
+        self.return_paths: Mapping[tuple[str, date], RecordedReturnPath] = _read(
+            lambda: load_return_path_records(store, years=request.years, as_of=request.as_of),
+            store=store,
+            what="the recorded return-path decisions",
+        )
 
     def adjustments(self, year: int) -> Mapping[str, AdjustmentHistory]:
         """The adjustment histories a quote in `year` reads: that year's and the one before.
@@ -1682,6 +1698,7 @@ class _PanelDays:
             return None
         state = self.halts.state_on(day, subject)
         return SessionQuote(
+            recorded_path=_recorded_path(self.return_paths.get((subject, day)), bar),
             bar=MarketBar(
                 subject=subject,
                 trade_date=day,
@@ -1702,6 +1719,20 @@ class _PanelDays:
             turnover_yuan=Decimal(str(bar.amount)) * CNY_PER_TURNOVER_UNIT,
             adj_factor=adj_factor,
         )
+
+
+def _recorded_path(
+    recorded: RecordedReturnPath | None, bar: DailyBar
+) -> Literal["published", "adjusted", "unknowable"] | None:
+    """The book's reading of a `V2-P6-020` decision about this bar's session, or `None`.
+
+    Followed only when it was judged on this bar's own close, `session_returns`' matching rule
+    for the half the book can check without a second session's bar; a record about another
+    close decides nothing here, and the book values the session as it values every other.
+    """
+    if recorded is None or recorded.close != bar.close:
+        return None
+    return "unknowable" if recorded.path is None else recorded.path
 
 
 def _board(ts_code: str) -> Literal["main", "star", "growth", "bse"]:

@@ -83,10 +83,11 @@ Pure rules and a row decoder only: `panel_ingest` owns the batches, the re-fetch
 partition, and this module imports no numerical or storage library (hard rule 2).
 """
 
-from collections.abc import Iterable, Sequence, Set
+from collections.abc import Iterable, Mapping, Sequence, Set
 from dataclasses import dataclass
 from datetime import date
 from math import isfinite
+from types import MappingProxyType
 from typing import Final, Literal, get_args
 
 from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
@@ -94,6 +95,9 @@ from openalpha_cn.domain.daily_prices import (
     DAILY_BASIC_DATASET,
     DAILY_DATASET,
     PRICE_DATE_COLUMN,
+    RecordedReturnPath,
+    ReturnPath,
+    corroborated_return_path,
 )
 from openalpha_cn.domain.financial_statements import FINANCIAL_INDICATOR_DATASET
 from openalpha_cn.domain.panel_batch import SUBJECT_COLUMN_NAME
@@ -109,9 +113,12 @@ DefectKind = Literal[
     "bar_before_listing",
     "withdrawn_after_publication",
     "superseded_after_publication",
+    "pre_close_corroborated_over_adj_factor",
+    "adj_factor_corroborated_over_pre_close",
+    "pre_close_contradicts_adj_factor",
 ]
 """The named rules. See `close_disagreement_kind`, `valuation_placeholder_kind`,
-`limit_placeholder_kind`, `withdrawn_subjects` and `superseded_versions`."""
+`limit_placeholder_kind`, `withdrawn_subjects`, `superseded_versions` and `return_path_kind`."""
 
 DEFECT_KINDS: Final[frozenset[str]] = frozenset(get_args(DefectKind))
 
@@ -128,7 +135,13 @@ DEFECT_SOURCE_DATASETS: Final[frozenset[str]] = frozenset(
 """The datasets a record may name. `daily` and `adj_factor` only under `bar_before_listing` or
 `withdrawn_after_publication`, `suspend_d` only under the latter, and `fina_indicator` only under
 `superseded_after_publication` (`V2-P6-018`): no rule drops a bar or a halt the upstream still
-serves, and none drops a report whose current version is not stored in its place."""
+serves, and none drops a report whose current version is not stored in its place.
+
+The three `RETURN_PATH_KINDS` (`V2-P6-020`) name `stk_limit`: nothing is dropped under them, the
+record is the `stk_limit` target's judgement of a `daily`/`adj_factor` disagreement, and its
+band is the evidence. `write_upstream_defects` hands each source to exactly one build target, so
+naming `daily` or `adj_factor` would put the record in the hands of a target that cannot see the
+band and would erase it on its next build."""
 
 SOURCE_DATASET_COLUMN: Final[str] = "source_dataset"
 DEFECT_KIND_COLUMN: Final[str] = "defect_kind"
@@ -177,6 +190,13 @@ the two shapes of a contradicted valuation apart:
   an `adj_factor` row records only the date.
 - `withdrawn_after_publication`: the withdrawn stored row's own close or band, in the same
   columns `bar_before_listing` uses; an `adj_factor` or `suspend_d` row records only the date.
+- `pre_close_corroborated_over_adj_factor`, `adj_factor_corroborated_over_pre_close` and
+  `pre_close_contradicts_adj_factor` (`V2-P6-020`): `bar_close` is the session's close and
+  `previous_bar_close` the previous stored bar's close -- the two rows the disagreement was
+  judged on, which a reader matches before following the record -- and `up_limit`/`down_limit`
+  the band that decided it (`None` when none was published). The disputed `pre_close` and the
+  two factors are the stored `daily` and `adj_factor` rows the record keys; the kind carries the
+  decision rather than a new column, for `valuation_placeholder_*`'s reason (hard rule 3).
 """
 
 UPSTREAM_DEFECT_NUMBER_COLUMNS: Final[tuple[str, ...]] = UPSTREAM_DEFECT_DATA_COLUMNS[3:8]
@@ -369,6 +389,101 @@ def superseded_versions(
         if (version[0], version[1]) in latest and latest[(version[0], version[1])] > version[2]
     )
     return superseded, frozenset(lost) - superseded
+
+
+RETURN_PATH_KINDS: Final[Mapping[str, ReturnPath | None]] = MappingProxyType(
+    {
+        "pre_close_corroborated_over_adj_factor": "published",
+        "adj_factor_corroborated_over_pre_close": "adjusted",
+        "pre_close_contradicts_adj_factor": None,
+    }
+)
+"""The three `V2-P6-020` kinds and the session path each one decides: the published
+`close / pre_close` path, the factor path, or neither -- the session's return is unknowable."""
+
+
+def return_path_kind(
+    *,
+    published_pre_close: float,
+    implied_pre_close: float,
+    close: float,
+    up_limit: float | None,
+    down_limit: float | None,
+) -> DefectKind:
+    """The record for one session whose `daily.pre_close` and `adj_factor` disagree past
+    `daily_prices.pre_close_tolerance` (`V2-P6-020`).
+
+    Called only after a re-fetch has reproduced both statements. Which one the day's own price
+    corroborates is `daily_prices.corroborated_return_path`'s rule -- the `stk_limit` band centred
+    on it, with the session's close inside the band:
+
+    - **`pre_close_corroborated_over_adj_factor`**: the published `pre_close` is the exchange's
+      reference; the factor path is wrong for this session and the published return is the
+      session's return. 17 of the research store's 24 residual disagreements, among them every
+      one where the factor steps on a session whose `pre_close` equals the previous close
+      (`000998.SZ` 11.267 -> 10.97 on 2020-01-02 and back, `000545.SZ`, `000011.SZ`,
+      `603081.SH`).
+    - **`adj_factor_corroborated_over_pre_close`**: the factor path's implied `pre_close` is the
+      reference; the published one is wrong. Not observed in the store, and stated so that the
+      rule is symmetric rather than a preference.
+    - **`pre_close_contradicts_adj_factor`**: neither is corroborated -- no band, or a band the
+      close lies outside. The seven halt-spanning disagreements of the store (`000010.SZ`
+      2013-07-19, `000509.SZ`, `000670.SZ`, `600688.SH`, `600871.SH`, `600733.SH`, `600610.SH`
+      2014-11-25) are all this: each resumed with a close outside the band centred on its own
+      published `pre_close`. The session's return is unknowable.
+
+    Always a kind, never `None`: a reproduced disagreement is recorded one way or another, and a
+    reader refuses only the ones nobody recorded.
+    """
+    path = corroborated_return_path(
+        published_pre_close=published_pre_close,
+        implied_pre_close=implied_pre_close,
+        close=close,
+        up_limit=up_limit,
+        down_limit=down_limit,
+    )
+    if path == "published":
+        return "pre_close_corroborated_over_adj_factor"
+    if path == "adjusted":
+        return "adj_factor_corroborated_over_pre_close"
+    return "pre_close_contradicts_adj_factor"
+
+
+def recorded_return_paths(
+    defects: Iterable[UpstreamDefect],
+) -> dict[tuple[str, date], RecordedReturnPath]:
+    """The `V2-P6-020` decisions among `defects`, keyed by `(ts_code, session)`, as the
+    `daily_prices.RecordedReturnPath`s a reader hands `session_returns`.
+
+    Every other kind is left out. A return-path record without the two closes it was judged on
+    cannot be matched against the rows a reader holds, and two records for one session are two
+    answers to one question; both are refused rather than read.
+    """
+    decided: dict[tuple[str, date], RecordedReturnPath] = {}
+    for defect in defects:
+        if defect.kind not in RETURN_PATH_KINDS:
+            continue
+        key = (defect.ts_code, defect.trade_date)
+        if defect.bar_close is None or defect.previous_bar_close is None:
+            raise UpstreamDefectError(
+                f"{defect.ts_code} on {defect.trade_date.isoformat()}: a {defect.kind} record "
+                f"needs {BAR_CLOSE_COLUMN} and {PREVIOUS_BAR_CLOSE_COLUMN}, the two closes it was "
+                "judged on, and this one lacks one; a reader could not tell whether it is a "
+                "decision about the rows it holds"
+            )
+        if key in decided:
+            raise UpstreamDefectError(
+                f"{defect.ts_code} on {defect.trade_date.isoformat()} carries two return-path "
+                "records; one session has one decision"
+            )
+        decided[key] = RecordedReturnPath(
+            ts_code=defect.ts_code,
+            day=defect.trade_date,
+            close=defect.bar_close,
+            previous_close=defect.previous_bar_close,
+            path=RETURN_PATH_KINDS[defect.kind],
+        )
+    return decided
 
 
 def before_listing(*, trade_date: date, list_date: date | None) -> bool:

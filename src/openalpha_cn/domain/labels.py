@@ -73,10 +73,21 @@ What it is for is the reader who wants to see the residue -- 2.0e-7 against 9.2e
 measured pair -- rather than being told it is small. And it is worth being told how loose it
 gets: the bound compounds one `pre_close_tolerance / pre_close` term per session, and that term
 is dominated by a flat `MAX_PRE_CLOSE_DISAGREEMENT` of one 0.01 tick, so it is large exactly
-where the price is small. A 10-yuan `pre_close` on unit factors is allowed 0.0012 a session and
-**7.46% over 60 of them** -- wider than most things a 60-session return could be. It bounds the
-*published precision* of a chain, not the correctness of the return, and past a few dozen
-sessions `disagreement <= tolerance` stops constraining anything.
+where the price is small. A 10-yuan `pre_close` on four-decimal factors near 1 is allowed 0.0012
+a session and **7.46% over 60 of them** -- wider than most things a 60-session return could be;
+on unit factors, which `V2-P6-020` reads at the three-decimal tick, 0.003 a session and 19.69%.
+It bounds the *published precision* of a chain, not the correctness of the return, and past a
+few dozen sessions `disagreement <= tolerance` stops constraining anything.
+
+## A recorded disagreement (`V2-P6-020`)
+
+`session_returns` refuses a session whose two statements disagree past that bound, and a label
+built across it refuses with it. `upstream_defects` records, per session, which statement the
+day's own price corroborated -- or that neither was -- and `label_outcome(recorded=...)` follows
+the record: a corroborated path is the session's return (`window_return` rescales the factor
+path after a published one), and an uncorroborated session drops exactly the `(security,
+window)` pairs that cross it as `REFUSAL_UNKNOWABLE_RETURN`, counted wherever a refused label is
+counted (`ICCensus.unlabelled_count`). A disagreement nobody recorded still refuses.
 
 ## Tradability: three states, four flags, and one band that may not exist
 
@@ -164,7 +175,9 @@ from openalpha_cn.domain.adjustment import AdjustmentHistory
 from openalpha_cn.domain.daily_prices import (
     SESSION_CLOSE_TIME,
     DailyBar,
+    RecordedReturnPath,
     SessionReturns,
+    UnknowableSessionReturnError,
     session_returns,
 )
 from openalpha_cn.domain.horizon import ResearchHorizon
@@ -189,6 +202,7 @@ REFUSAL_UNPUBLISHED_BAND: Final[str] = "unpublished_band"
 REFUSAL_DELISTED: Final[str] = "delisted_in_window"
 REFUSAL_NOT_YET_LISTED: Final[str] = "not_yet_listed_in_window"
 REFUSAL_BEYOND_REGISTRY_SNAPSHOT: Final[str] = "beyond_registry_snapshot"
+REFUSAL_UNKNOWABLE_RETURN: Final[str] = "unknowable_session_return"
 
 LABEL_REFUSAL_CODES: Final[tuple[str, ...]] = (
     REFUSAL_BEYOND_REGISTRY_SNAPSHOT,
@@ -198,6 +212,7 @@ LABEL_REFUSAL_CODES: Final[tuple[str, ...]] = (
     REFUSAL_LOCKED_AT_LIMIT,
     REFUSAL_MISSING_BAR,
     REFUSAL_NOT_YET_LISTED,
+    REFUSAL_UNKNOWABLE_RETURN,
     REFUSAL_UNPUBLISHED_BAND,
 )
 """Every reason `label_outcome` declines to put a number on a window, as one closed set.
@@ -674,6 +689,13 @@ class WindowReturn:
     `backtest.validation.observation_from_label`'s two prices provably one path."""
     per_session: tuple[SessionReturns, ...]
     """One entry per session return, each already cross-checked by `session_returns`."""
+    recorded_sessions: tuple[date, ...] = ()
+    """The sessions whose return a recorded `upstream_defects` decision named (`V2-P6-020`).
+
+    Empty on every window whose two paths agreed session by session. On one that is not,
+    `adjusted` follows each recorded session's corroborated path -- see `window_return` -- and
+    `published`, which is the raw `pre_close` chain, is no longer bounded by `tolerance`: the
+    disagreement the record decided is in it."""
 
     @property
     def disagreement(self) -> float:
@@ -696,8 +718,9 @@ class WindowReturn:
 
         Reported rather than enforced: `session_returns` has already refused any session whose
         own term was exceeded, so this product cannot be exceeded once the window was built at
-        all. See this module's docstring, including how loose the product gets over a long
-        window.
+        all -- unless a recorded decision let a session through (`recorded_sessions`), whose
+        disagreement is in `published` by definition. See this module's docstring, including
+        how loose the product gets over a long window.
         """
         bound = 1.0
         for entry in self.per_session:
@@ -822,6 +845,7 @@ def window_return(
     ts_code: str,
     bars: Mapping[date, DailyBar],
     factors: AdjustmentHistory,
+    recorded: Mapping[tuple[str, date], RecordedReturnPath] | None = None,
 ) -> WindowReturn:
     """The window's return on both correct paths, with the wrong one carried beside them.
 
@@ -835,6 +859,16 @@ def window_return(
     Refuses a bar for another security, a bar filed under the wrong session, and a session with
     no bar at all -- the first two produce a plausible number from the wrong rows, and the third
     would have to be papered over by skipping a link in the chain.
+
+    **A recorded session (`V2-P6-020`).** `recorded` is the `upstream_defects` decisions the
+    caller holds, keyed by `(ts_code, session)`, and each link hands `session_returns` the one
+    for its own session. A link whose record names the published path makes the window's
+    `adjusted` follow it: the factor path's later prices are rescaled by that session's
+    `SessionReturns.correction`, so `adjusted` is the chain of every link's `decided` return and
+    `exit_adjusted_close / entry_adjusted_close - 1` is still exactly `adjusted`. A link whose
+    record names the factor path needs no rescaling. A link whose record corroborates neither
+    propagates `UnknowableSessionReturnError`, which `label_outcome` turns into a refusal. With
+    no recorded link the arithmetic is the one before `V2-P6-020`, to the bit.
     """
     for day in window.sessions:
         bar = bars.get(day)
@@ -860,33 +894,46 @@ def window_return(
 
     per_session: list[SessionReturns] = []
     gross_published = 1.0
+    correction = 1.0
+    decisions = recorded or {}
     for previous_day, day in zip(window.sessions, window.sessions[1:], strict=False):
         computed = session_returns(
             bars[day],
             previous_close=bars[previous_day].close,
             previous_day=previous_day,
             factors=factors,
+            recorded=decisions.get((ts_code, day)),
         )
         per_session.append(computed)
         gross_published *= 1.0 + computed.published
+        correction *= computed.correction
 
     entry_bar = bars[window.entry_day]
     exit_bar = bars[window.exit_day]
+    entry_adjusted_close = entry_bar.close * factors.factor_on(window.entry_day)
+    exit_adjusted_close = exit_bar.close * factors.factor_on(window.exit_day)
+    recorded_sessions = tuple(entry.day for entry in per_session if entry.path != "agreed")
+    if correction != 1.0:
+        exit_adjusted_close *= correction
+        adjusted = exit_adjusted_close / entry_adjusted_close - 1.0
+    else:
+        adjusted = factors.adjusted_return(
+            start=window.entry_day,
+            end=window.exit_day,
+            start_price=entry_bar.close,
+            end_price=exit_bar.close,
+        )
     return WindowReturn(
         ts_code=ts_code,
         entry_day=window.entry_day,
         exit_day=window.exit_day,
         published=gross_published - 1.0,
-        adjusted=factors.adjusted_return(
-            start=window.entry_day,
-            end=window.exit_day,
-            start_price=entry_bar.close,
-            end_price=exit_bar.close,
-        ),
+        adjusted=adjusted,
         unadjusted=exit_bar.close / entry_bar.close - 1.0,
-        entry_adjusted_close=entry_bar.close * factors.factor_on(window.entry_day),
-        exit_adjusted_close=exit_bar.close * factors.factor_on(window.exit_day),
+        entry_adjusted_close=entry_adjusted_close,
+        exit_adjusted_close=exit_adjusted_close,
         per_session=tuple(per_session),
+        recorded_sessions=recorded_sessions,
     )
 
 
@@ -899,6 +946,7 @@ def label_outcome(
     limits: Mapping[date, PriceLimit],
     halts: HaltCorpus,
     universe: StockUniverse,
+    recorded: Mapping[tuple[str, date], RecordedReturnPath] | None = None,
 ) -> OutcomeLabel:
     """Label one security over one window, or name every reason it cannot be labelled.
 
@@ -915,6 +963,15 @@ def label_outcome(
 
     Every refusal is collected rather than short-circuited, so a caller sees all of what is
     wrong with a window instead of the first thing to be checked.
+
+    **`recorded` (`V2-P6-020`)** is the `upstream_defects` decisions about sessions whose
+    `pre_close` and `adj_factor` disagree, keyed by `(ts_code, session)`; see `window_return`.
+    Its default is the stricter reading rather than a waiver: with no decision in hand, every
+    such disagreement refuses exactly as before. A session whose record corroborates neither
+    statement is `REFUSAL_UNKNOWABLE_RETURN` on that session -- this `(security, window)` pair
+    is dropped and named, and every other window of the security is labelled as before. It is
+    found by pricing the window, so it is reported only when nothing else refused the window
+    first; a window refused for another reason carries no return either way.
     """
     halts.require_coverage(window.sessions)
     refusals: list[LabelRefusal] = [
@@ -982,6 +1039,24 @@ def label_outcome(
                 )
             )
 
+    priced: WindowReturn | None = None
+    if not refusals:
+        try:
+            priced = window_return(
+                window, ts_code=ts_code, bars=bars, factors=factors, recorded=recorded
+            )
+        except UnknowableSessionReturnError as error:
+            refusals.append(
+                LabelRefusal(
+                    code=REFUSAL_UNKNOWABLE_RETURN,
+                    day=error.day,
+                    detail=(
+                        f"{ts_code}'s return on {error.day.isoformat()} is unknowable: {error}. "
+                        "This window is dropped rather than priced on either statement; the "
+                        "security's other windows are not"
+                    ),
+                )
+            )
     ordered = tuple(sorted(refusals, key=lambda item: (item.day, item.code)))
     return OutcomeLabel(
         ts_code=ts_code,
@@ -989,9 +1064,7 @@ def label_outcome(
         refusals=ordered,
         entry_touch=touches.get(window.entry_day),
         exit_touch=touches.get(window.exit_day),
-        window_return=(
-            None if ordered else window_return(window, ts_code=ts_code, bars=bars, factors=factors)
-        ),
+        window_return=None if ordered else priced,
     )
 
 

@@ -143,18 +143,19 @@ whole partition for every `as_of` inside it. This module therefore reads through
 visibility predicate -- `available_time` and `revision_time` both at or before `as_of` -- for
 that one code.
 (**Not all of them, and the arithmetic is pinned rather than remembered**: the whole-partition
-door is taken by six of `panel_ingest`'s sixteen loaders today -- `load_trading_calendar`,
+door is taken by six of `panel_ingest`'s seventeen loaders today -- `load_trading_calendar`,
 `load_adjustment_histories`, `load_index_membership`, `load_index_prices`,
-`load_industry_histories` and `load_industry_trees`. The other ten take a filtered one:
+`load_industry_histories` and `load_industry_trees`. The other eleven take a filtered one:
 `V2-P4-026` moved the three session-dated price loaders onto `_read_visible_price_session`,
 `V2-P4-076` moved `load_stock_universe`, `load_name_histories` and `load_suspensions` onto
 `_read_visible_event_dated_rows`, `V2-P4-083` moved `load_statement_histories` there too,
-`V2-P6-013`'s `load_upstream_defects` was written against it and its
+`V2-P6-013`'s `load_upstream_defects` was written against it (and `V2-P6-020`'s
+`load_return_path_records` reads through it), its
 `load_first_daily_bar` reads one security's year through `read_visible_at` directly, and
 `load_industry_cross_section` reaches the same reader through `_read_visible_membership_rows`
 (`V2-P4-027`/`028`). `tests/unit/panel/test_query_callers.py` holds `GATED_READERS`, which
 records the door each `panel_ingest` reader opens -- the six loaders above and the two shared
-readers the other ten reach rows through -- and
+readers the other eleven reach rows through -- and
 `tests/unit/test_source_counts_match_the_tree.py` holds each of these counts against the tree:
 every number here is either a claim registered in that file or a turn of phrase declared there,
 and its own docstring states what that still leaves outside. Everything this section says about

@@ -134,9 +134,11 @@ def test_a_window_across_the_generated_ex_rights_step_is_labelled_on_both_correc
     """The chained `close/pre_close` path and the telescoped factor path both give 20.75%.
 
     The naive `close_exit / close_entry - 1` gives 15.00% over the same four sessions, which is
-    5.75 points away and about 16 times the bound the two correct paths were allowed. The panel
-    was built with the ex-rights step on the exit session, so an implementation that read the
-    raw closes lands on 15.00% here rather than merely drifting.
+    5.75 points away and about 6.5 times the bound the two correct paths were allowed (16 times
+    before `V2-P6-020`: the generated factors 1.0 and 1.05 are representable at three decimals,
+    so each is now allowed its 1e-3 tick). The panel was built with the ex-rights step on the
+    exit session, so an implementation that read the raw closes lands on 15.00% here rather than
+    merely drifting.
     """
     panel, label = _labelled(
         tmp_path, code="000001.SZ", prediction_day=BEFORE_THE_WINDOW, horizon="3d"
@@ -150,7 +152,7 @@ def test_a_window_across_the_generated_ex_rights_step_is_labelled_on_both_correc
     assert computed.adjusted == pytest.approx(0.2075, abs=1e-12)
     assert computed.unadjusted == pytest.approx(0.15, abs=1e-12)
     assert computed.disagreement <= computed.tolerance
-    assert abs(computed.unadjusted - computed.adjusted) > 15.0 * computed.tolerance
+    assert abs(computed.unadjusted - computed.adjusted) > 6.0 * computed.tolerance
     assert label.realized_return == computed.adjusted
 
 

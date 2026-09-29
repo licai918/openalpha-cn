@@ -34,6 +34,7 @@ from openalpha_cn.domain.adjustment import (
     build_adjustment_history,
 )
 from openalpha_cn.domain.daily_prices import (
+    ADJ_FACTOR_COARSE_TICK,
     ADJ_FACTOR_PUBLICATION_TICK,
     DAILY_BASIC_DATASET,
     DAILY_BASIC_NULLABLE_COLUMNS,
@@ -45,9 +46,13 @@ from openalpha_cn.domain.daily_prices import (
     MAX_PUBLISHED_RETURN_DISAGREEMENT,
     DailyBar,
     PriceDataError,
+    RecordedReturnPath,
     SessionReturns,
+    UnknowableSessionReturnError,
+    adj_factor_publication_tick,
     close_disagreements,
     close_index,
+    corroborated_return_path,
     daily_bars_from_panel_rows,
     daily_valuations_from_panel_rows,
     pre_close_tolerance,
@@ -538,7 +543,8 @@ def test_the_factor_path_and_the_upstream_percentage_meet_without_a_third_consta
     assert returns.published_disagreement <= MAX_PUBLISHED_RETURN_DISAGREEMENT
     assert gap <= implied_bound
     assert gap == pytest.approx(5.0615e-7, abs=5e-11)
-    assert implied_bound == pytest.approx(1.04065e-3, abs=5e-8)
+    # 139.008 is representable at three decimals, so since `V2-P6-020` its tick is 1e-3.
+    assert implied_bound == pytest.approx(1.04730e-3, abs=5e-8)
     # Three orders of headroom, so "it is under the bound" is not the whole claim.
     assert gap * 1000 < implied_bound
 
@@ -732,15 +738,27 @@ def test_the_tolerance_carries_both_publication_precisions_into_price_space() ->
     nothing wrong.
     """
     assert ADJ_FACTOR_PUBLICATION_TICK == 1e-4
-    # At f = 1 the two factor ticks are worth 2e-4 of the price each way.
-    assert pre_close_tolerance(100.0, factor=1.0, previous_factor=1.0) == pytest.approx(0.03)
-    assert pre_close_tolerance(1000.0, factor=1.0, previous_factor=1.0) == pytest.approx(0.21)
+    # Four-decimal factors (`V2-P6-020` reads the tick off each value; see the tests below for
+    # the three-decimal ones). At f ~ 1 the two ticks are worth 2e-4 of the price each way.
+    fine = 1.0001
+    assert pre_close_tolerance(100.0, factor=fine, previous_factor=fine) == pytest.approx(
+        0.03, rel=1e-3
+    )
+    assert pre_close_tolerance(1000.0, factor=fine, previous_factor=fine) == pytest.approx(
+        0.21, rel=1e-3
+    )
     # Ten times the price is ten times the factor term, and the flat term does not move.
-    assert pre_close_tolerance(10.0, factor=1.0, previous_factor=1.0) == pytest.approx(0.012)
+    assert pre_close_tolerance(10.0, factor=fine, previous_factor=fine) == pytest.approx(
+        0.012, rel=1e-3
+    )
     # A larger factor divides the same tick into a smaller slice of price.
-    assert pre_close_tolerance(100.0, factor=100.0, previous_factor=100.0) == pytest.approx(0.0102)
+    assert pre_close_tolerance(100.0, factor=100.0001, previous_factor=100.0001) == pytest.approx(
+        0.0102, rel=1e-3
+    )
     # A one-fen price is still allowed its one published tick and essentially nothing more.
-    assert pre_close_tolerance(0.01, factor=1.0, previous_factor=1.0) == pytest.approx(0.010002)
+    assert pre_close_tolerance(0.01, factor=fine, previous_factor=fine) == pytest.approx(
+        0.010002, rel=1e-6
+    )
 
 
 def test_the_disagreement_is_unsigned_because_both_directions_are_real_failures() -> None:
@@ -1157,3 +1175,281 @@ def test_a_datetime_where_a_date_belongs_is_refused_on_both_entry_points() -> No
             calendar=_calendar(),
             day=_datetime(2026, 6, 12),
         )
+
+
+# --- V2-P6-020: the factor's own publication tick, and a recorded decision -----------------------
+#
+# Every row below is a real stored row of the 2013..2026 research store (read-only, 2026-09-28).
+# fmt: off
+TICK_BARS: dict[str, tuple[Any, ...]] = {
+    # 603197.SH across 2024-06-24/25: no corporate action (pre_close == previous close), and the
+    # factor moved one unit of its THIRD decimal, 1.527 -> 1.526. The old 1e-4 tick refused it.
+    "603197.SH": ("603197.SH", "2024-06-25", 32.78, 33.1, 31.66, 31.98, 32.53, -1.6907, 30129.9,
+                  97417.829),
+    # 000738.SZ across 2024-06-27/28: a real ex-dividend session of 0.875% on 3-decimal factors,
+    # 1.809 -> 1.825.
+    "000738.SZ": ("000738.SZ", "2024-06-28", 19.36, 20.25, 19.26, 20.07, 19.26, 4.2056, 93706.4,
+                  187241.055),
+    # 688182.SH across 2024-06-20/21: a 0.42% ex-dividend session, 1.009 -> 1.013.
+    "688182.SH": ("688182.SH", "2024-06-21", 14.18, 14.3, 13.41, 14.08, 14.12, -0.2833, 62637.25,
+                  86817.957),
+    # 000998.SZ across 2019-12-31/2020-01-02: pre_close equals the previous close, the factor
+    # jumps 11.267 -> 10.97 (2.6%), and stk_limit's band 16.18/13.24 is centred on 14.71 --
+    # the published pre_close -- with the close at the upper limit exactly.
+    "000998.SZ": ("000998.SZ", "2020-01-02", 15.78, 16.18, 15.02, 16.18, 14.71, 9.9932,
+                  1605929.24, 2529710.996),
+    # 000010.SZ across a halt, 2013-04-25 -> 2013-07-19: pre_close 23.87 is the last close, the
+    # factor jumps 2.694 -> 10.775, and the close 7.0 lies outside the band 26.26/21.48 that is
+    # centred on the published pre_close -- so the band did not govern that session.
+    "000010.SZ": ("000010.SZ", "2013-07-19", 8.0, 9.38, 7.0, 7.0, 23.87, -70.67, 859317.81,
+                  714211.492),
+}
+# fmt: on
+TICK_PAIRS: dict[str, tuple[date, float, float, float]] = {
+    # previous session, previous close, previous factor, factor
+    "603197.SH": (date(2024, 6, 24), 32.53, 1.527, 1.526),
+    "000738.SZ": (date(2024, 6, 27), 19.43, 1.809, 1.825),
+    "688182.SH": (date(2024, 6, 20), 14.18, 1.009, 1.013),
+    "000998.SZ": (date(2019, 12, 31), 14.71, 11.267, 10.97),
+    "000010.SZ": (date(2013, 4, 25), 23.87, 2.694, 10.775),
+}
+TICK_BANDS: dict[str, tuple[float, float]] = {
+    "000998.SZ": (16.18, 13.24),
+    "000010.SZ": (26.26, 21.48),
+}
+
+
+def _tick_bar(ts_code: str) -> DailyBar:
+    return daily_bars_from_panel_rows([TICK_BARS[ts_code]])[ts_code]
+
+
+def _tick_history(ts_code: str, *, previous_factor: float | None = None) -> Any:
+    previous_day, _close, stored_previous, factor = TICK_PAIRS[ts_code]
+    day = _tick_bar(ts_code).trade_date
+    return build_adjustment_history(
+        ts_code,
+        [
+            FactorObservation(
+                ts_code=ts_code,
+                observed_on=previous_day,
+                factor=stored_previous if previous_factor is None else previous_factor,
+            ),
+            FactorObservation(ts_code=ts_code, observed_on=day, factor=factor),
+        ],
+    )
+
+
+def _tick_returns(ts_code: str, **kwargs: Any) -> SessionReturns:
+    previous_day, previous_close, _pf, _f = TICK_PAIRS[ts_code]
+    return session_returns(
+        _tick_bar(ts_code),
+        previous_close=kwargs.pop("previous_close", previous_close),
+        previous_day=previous_day,
+        factors=kwargs.pop("factors", _tick_history(ts_code)),
+        **kwargs,
+    )
+
+
+def _implied(ts_code: str) -> float:
+    _day, previous_close, previous_factor, factor = TICK_PAIRS[ts_code]
+    return previous_close * previous_factor / factor
+
+
+def test_the_factor_tick_is_read_off_each_value() -> None:
+    """A factor representable at three decimals may have been published at three: its tick is
+    1e-3. Anything finer was published at four: 1e-4. The census cannot tell 1.5270 from 1.527,
+    so the coarse tick is the conservative reading of every value that fits it."""
+    assert ADJ_FACTOR_PUBLICATION_TICK == 1e-4
+    assert ADJ_FACTOR_COARSE_TICK == 1e-3
+    for value in (1.527, 1.526, 1.0, 2.5, 139.008, 10.775):
+        assert adj_factor_publication_tick(value) == ADJ_FACTOR_COARSE_TICK, value
+    for value in (1.5271, 8.0205, 134.5794, 10055.6401, 1.0617):
+        assert adj_factor_publication_tick(value) == ADJ_FACTOR_PUBLICATION_TICK, value
+    # One tick of each factor, carried into price space by its own value.
+    assert pre_close_tolerance(100.0, factor=1.0, previous_factor=1.0) == pytest.approx(0.21)
+    assert pre_close_tolerance(100.0, factor=1.0001, previous_factor=1.0001) == pytest.approx(
+        0.01 + 100.0 * 2e-4 / 1.0001
+    )
+    assert pre_close_tolerance(100.0, factor=1.0001, previous_factor=1.0) == pytest.approx(
+        0.01 + 100.0 * (1e-3 / 1.0 + 1e-4 / 1.0001)
+    )
+
+
+def test_a_three_decimal_factor_pair_inside_the_coarse_tick_is_accepted() -> None:
+    """`603197.SH` on 2024-06-25 has no corporate action and a factor that moved 1.527 -> 1.526:
+    a gap of 0.0213 against the 0.0143 a 1e-4 tick allowed, and inside the 0.0526 the coarse
+    tick allows. 1,623 of the census's 1,647 refusals were this shape."""
+    returns = _tick_returns("603197.SH")
+
+    assert returns.disagreement == pytest.approx(0.021318, abs=5e-6)
+    assert returns.disagreement > 0.01 + returns.implied_pre_close * 1e-4 * (1 / 1.527 + 1 / 1.526)
+    assert returns.tolerance == pytest.approx(0.052648, abs=5e-6)
+    assert returns.path == "agreed"
+
+
+@pytest.mark.parametrize("ts_code", ["000738.SZ", "688182.SH"])
+def test_a_missing_step_or_a_naive_close_to_close_is_still_refused_on_three_decimal_factors(
+    ts_code: str,
+) -> None:
+    """The coarse tick is worth at most 0.2% of price on a factor of 1 or more (both factors'
+    ticks together), and these are real 0.875% and 0.42% ex-dividend sessions whose factors are
+    three-decimal on both sides. Carrying the previous factor across the ex-day -- a factor
+    partition with a hole in it, which is also exactly what a naive close-to-close computes --
+    is still refused."""
+    accepted = _tick_returns(ts_code)
+    assert accepted.path == "agreed"
+
+    previous_day, _close, previous_factor, _factor = TICK_PAIRS[ts_code]
+    missing_step = build_adjustment_history(
+        ts_code,
+        [
+            FactorObservation(ts_code=ts_code, observed_on=previous_day, factor=previous_factor),
+            FactorObservation(
+                ts_code=ts_code, observed_on=_tick_bar(ts_code).trade_date, factor=previous_factor
+            ),
+        ],
+    )
+    with pytest.raises(PriceDataError, match="no upstream_defects record decides it"):
+        _tick_returns(ts_code, factors=missing_step)
+
+
+def test_a_wrong_previous_session_is_still_refused_on_three_decimal_factors() -> None:
+    """`000738.SZ`'s close two sessions back (2024-06-26, 19.93) as the previous close."""
+    with pytest.raises(PriceDataError, match="no upstream_defects record decides it"):
+        _tick_returns("000738.SZ", previous_close=19.93)
+
+
+# --- which statement the day's own price corroborates -------------------------------------------
+
+
+def test_a_band_centred_on_the_published_pre_close_with_the_close_inside_corroborates_it() -> None:
+    """`000998.SZ` on 2020-01-02: the band is centred on 14.71 and the close 16.18 sits on its
+    upper edge; the factor path's 15.1083 is 0.3983 from the band's centre."""
+    up, down = TICK_BANDS["000998.SZ"]
+    assert (
+        corroborated_return_path(
+            published_pre_close=14.71,
+            implied_pre_close=_implied("000998.SZ"),
+            close=16.18,
+            up_limit=up,
+            down_limit=down,
+        )
+        == "published"
+    )
+
+
+def test_a_band_the_close_lies_outside_corroborates_nothing() -> None:
+    """`000010.SZ` on 2013-07-19: the band is centred on the published 23.87, and the session
+    closed at 7.0 -- far outside it. That band did not govern the session (a resumption with no
+    effective limit), so it cannot testify to the reference the session traded from."""
+    up, down = TICK_BANDS["000010.SZ"]
+    assert (
+        corroborated_return_path(
+            published_pre_close=23.87,
+            implied_pre_close=_implied("000010.SZ"),
+            close=7.0,
+            up_limit=up,
+            down_limit=down,
+        )
+        is None
+    )
+
+
+def test_the_factor_path_is_corroborated_by_a_band_centred_on_the_implied_pre_close() -> None:
+    def path(up: float | None, down: float | None) -> str | None:
+        return corroborated_return_path(
+            published_pre_close=10.5,
+            implied_pre_close=10.0,
+            close=10.2,
+            up_limit=up,
+            down_limit=down,
+        )
+
+    assert path(11.0, 9.0) == "adjusted"
+    # No band, and a band centred on neither statement, corroborate nothing.
+    assert path(None, None) is None
+    assert path(11.3, 9.3) is None
+    # The centre is allowed one published tick of pre_close and no more.
+    assert path(11.02, 9.0) == "adjusted"
+    assert path(11.03, 9.0) is None
+    # And on the published side, the same one tick.
+    assert path(11.52, 9.5) == "published"
+    assert path(11.53, 9.5) is None
+    # A close outside the band voids it, on either side.
+    assert path(10.1, 9.0) is None
+
+
+# --- a recorded decision is followed, and only a matching one ----------------------------------
+
+
+def _record(
+    ts_code: str,
+    path: str | None,
+    *,
+    close: float | None = None,
+    previous_close: float | None = None,
+) -> RecordedReturnPath:
+    bar = _tick_bar(ts_code)
+    return RecordedReturnPath(
+        ts_code=ts_code,
+        day=bar.trade_date,
+        close=bar.close if close is None else close,
+        previous_close=TICK_PAIRS[ts_code][1] if previous_close is None else previous_close,
+        path=path,  # type: ignore[arg-type]
+    )
+
+
+def test_an_unrecorded_disagreement_still_refuses() -> None:
+    with pytest.raises(PriceDataError, match="no upstream_defects record decides it") as raised:
+        _tick_returns("000998.SZ")
+    assert not isinstance(raised.value, UnknowableSessionReturnError)
+
+
+def test_a_recorded_published_path_is_the_session_return() -> None:
+    """The factor path says +7.09% and the published one +9.99% (a limit-up close). With the
+    record the session answers the published return, and `correction` is the factor the factor
+    path's later prices are rescaled by so that a chain through this session equals the
+    published link."""
+    returns = _tick_returns("000998.SZ", recorded=_record("000998.SZ", "published"))
+
+    assert returns.path == "published"
+    assert returns.decided == returns.published
+    assert returns.published == pytest.approx(16.18 / 14.71 - 1)
+    assert returns.adjusted == pytest.approx(16.18 * 10.97 / (14.71 * 11.267) - 1)
+    assert returns.correction == pytest.approx(returns.implied_pre_close / 14.71)
+    assert (1 + returns.adjusted) * returns.correction == pytest.approx(1 + returns.published)
+
+
+def test_a_recorded_adjusted_path_is_the_session_return() -> None:
+    returns = _tick_returns("000998.SZ", recorded=_record("000998.SZ", "adjusted"))
+
+    assert returns.path == "adjusted"
+    assert returns.decided == returns.adjusted
+    assert returns.correction == 1.0
+
+
+def test_an_uncorroborated_record_makes_the_session_unknowable() -> None:
+    with pytest.raises(UnknowableSessionReturnError, match=r"000010\.SZ on 2013-07-19") as raised:
+        _tick_returns("000010.SZ", recorded=_record("000010.SZ", None))
+    assert raised.value.ts_code == "000010.SZ"
+    assert raised.value.day == date(2013, 7, 19)
+
+
+@pytest.mark.parametrize(
+    "stale",
+    [{"close": 16.17}, {"previous_close": 14.7}],
+    ids=["another close", "another previous close"],
+)
+def test_a_record_judged_on_other_values_decides_nothing(stale: dict[str, float]) -> None:
+    """A record is a decision about two rows as they were stored when it was made. One that no
+    longer matches them -- the upstream republished a close, the reader chained another previous
+    session -- is not that decision, and the disagreement refuses as an unrecorded one."""
+    with pytest.raises(PriceDataError, match="no upstream_defects record decides it") as raised:
+        _tick_returns("000998.SZ", recorded=_record("000998.SZ", "published", **stale))
+    assert "was judged on" in str(raised.value)
+    assert not isinstance(raised.value, UnknowableSessionReturnError)
+
+
+def test_a_record_on_a_session_that_agrees_is_not_consulted() -> None:
+    returns = _tick_returns("603197.SH", recorded=_record("603197.SH", None))
+    assert returns.path == "agreed"
