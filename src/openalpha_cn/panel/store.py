@@ -534,6 +534,37 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def _connect(database: str, *, read_only: bool = False) -> duckdb.DuckDBPyConnection:
+    """Open a DuckDB connection with the progress bar disabled (`V2-P6-021`).
+
+    This is the *only* place in this module allowed to call `duckdb.connect` directly --
+    `tests/unit/test_duckdb_progress_bar_guard.py` scans the whole `src/` tree with `ast` and
+    fails if any other call site opens one itself. Every one of this module's dozen call
+    sites used to call `duckdb.connect` directly, and DuckDB prints an ANSI progress bar to
+    the real stdout file descriptor -- bypassing Python's `sys.stdout`, so redirecting it at
+    the Python level does not help -- for any query that runs past `progress_bar_time`
+    (2000ms by default), on by default. A caller that parses this process's stdout, such as
+    the research driver's `openalpha factor stale-return-paths` precondition (which requires
+    stdout to be exactly one line) or any `--json` command, sees that text land in the middle
+    of its output whenever a query happens to run long. It is silent in the common case and
+    depends on timing, which is exactly why a manual run redirected to a file came out clean
+    while the same command run as a subprocess (a pipe, not a file, but DuckDB does not check
+    `isatty()` before printing here either) did not.
+
+    `enable_progress_bar` and `enable_progress_bar_print` are DuckDB `LOCAL`-scope settings,
+    not `GLOBAL` ones (`SELECT scope FROM duckdb_settings() WHERE name LIKE '%progress%'`), so
+    they cannot be set through `duckdb.connect(..., config=...)`: DuckDB 1.5.5 raises
+    `Invalid Input Error: Could not set option "enable_progress_bar" as a global option` if
+    you try, for both settings, regardless of the value. They have to be `SET` on the
+    connection after it opens, which is what this helper does before handing the connection
+    back.
+    """
+    connection = duckdb.connect(database, read_only=read_only)
+    connection.execute("SET enable_progress_bar = false")
+    connection.execute("SET enable_progress_bar_print = false")
+    return connection
+
+
 DUCKDB_COLUMN_TYPES: frozenset[str] = frozenset(
     {"BIGINT", "BOOLEAN", "DOUBLE", "TIMESTAMPTZ", "VARCHAR"}
 )
@@ -1067,7 +1098,7 @@ class PanelStore:
         column_ddl = ", ".join(
             f"{_quote_identifier(column.name)} {column.duckdb_type}" for column in columns
         )
-        with duckdb.connect(":memory:") as staging:
+        with _connect(":memory:") as staging:
             staging.execute(f"CREATE TABLE staging ({column_ddl})")
             if rows:
                 _insert_columnar(staging, columns, rows)
@@ -1091,7 +1122,7 @@ class PanelStore:
         # OS processes; see the module docstring's "Concurrency" section.
         with self._catalog_access.exclusive():
             try:
-                with duckdb.connect(str(self.catalog_path)) as connection:
+                with _connect(str(self.catalog_path)) as connection:
                     self._ensure_catalog_schema(connection)
                     connection.execute(
                         """
@@ -1189,7 +1220,7 @@ class PanelStore:
             return []
         with (
             self._catalog_access.shared(),
-            duckdb.connect(str(self.catalog_path), read_only=True) as connection,
+            _connect(str(self.catalog_path), read_only=True) as connection,
         ):
             _check_catalog_schema_version(connection)
             partition_path = self._resolve_partition_path(connection, dataset, year)
@@ -1238,7 +1269,7 @@ class PanelStore:
             raise PanelStorageError(f"no partition registered for {dataset} year={year}")
         with (
             self._catalog_access.shared(),
-            duckdb.connect(str(self.catalog_path), read_only=True) as connection,
+            _connect(str(self.catalog_path), read_only=True) as connection,
         ):
             _check_catalog_schema_version(connection)
             partition_path = self._resolve_partition_path(connection, dataset, year)
@@ -1297,7 +1328,7 @@ class PanelStore:
             )
         with (
             self._catalog_access.exclusive(),
-            duckdb.connect(str(self.catalog_path)) as connection,
+            _connect(str(self.catalog_path)) as connection,
         ):
             self._ensure_catalog_schema(connection)
             existing = self._lookup_with_connection(connection, validated.dataset, validated.year)
@@ -1330,7 +1361,7 @@ class PanelStore:
             return None
         with (
             self._catalog_access.shared(),
-            duckdb.connect(str(self.catalog_path), read_only=True) as connection,
+            _connect(str(self.catalog_path), read_only=True) as connection,
         ):
             _check_catalog_schema_version(connection)
             return _read_coverage(connection, dataset, year)
@@ -1342,7 +1373,7 @@ class PanelStore:
             return ()
         with (
             self._catalog_access.shared(),
-            duckdb.connect(str(self.catalog_path), read_only=True) as connection,
+            _connect(str(self.catalog_path), read_only=True) as connection,
         ):
             _check_catalog_schema_version(connection)
             if not _table_exists(connection, "panel_partitions"):
@@ -1370,7 +1401,7 @@ class PanelStore:
             return False
         with (
             self._catalog_access.exclusive(),
-            duckdb.connect(str(self.catalog_path)) as connection,
+            _connect(str(self.catalog_path)) as connection,
         ):
             self._ensure_catalog_schema(connection)
             existing = self._lookup_with_connection(connection, dataset, year)
@@ -1438,7 +1469,7 @@ class PanelStore:
         prefixes = list(excluding_prefixes)
         with (
             self._catalog_access.shared(),
-            duckdb.connect(str(self.catalog_path), read_only=True) as connection,
+            _connect(str(self.catalog_path), read_only=True) as connection,
         ):
             _check_catalog_schema_version(connection)
             if not _table_exists(connection, "panel_partitions"):
@@ -1786,7 +1817,7 @@ class PanelStore:
             )
         with (
             self._catalog_access.shared(),
-            duckdb.connect(str(self.catalog_path), read_only=True) as connection,
+            _connect(str(self.catalog_path), read_only=True) as connection,
         ):
             _check_catalog_schema_version(connection)
             partition_path = self._resolve_partition_path(connection, dataset, year)
@@ -1941,7 +1972,7 @@ class PanelStore:
         states: list[PartitionState] = []
         with (
             self._catalog_access.shared(),
-            duckdb.connect(str(self.catalog_path), read_only=True) as connection,
+            _connect(str(self.catalog_path), read_only=True) as connection,
         ):
             _check_catalog_schema_version(connection)
             catalogued = _table_exists(connection, "panel_partitions")
@@ -2045,7 +2076,7 @@ class PanelStore:
             return None
         with (
             self._catalog_access.shared(),
-            duckdb.connect(str(self.catalog_path), read_only=True) as connection,
+            _connect(str(self.catalog_path), read_only=True) as connection,
         ):
             _check_catalog_schema_version(connection)
             existing = self._lookup_with_connection(connection, dataset, year)

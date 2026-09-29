@@ -27,6 +27,7 @@ import hashlib
 import importlib
 import json
 import statistics
+import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -1148,6 +1149,107 @@ def test_the_real_detector_admits_a_clean_store_and_refuses_one_with_a_stale_bui
     )
     with pytest.raises(p6.StaleReturnPathsError, match="stale return-path builds: 1"):
         p6.require_clean_return_paths(tmp_path)
+
+
+_FORCE_SLOW_QUERIES_BOOTSTRAP = """
+import openalpha_cn.panel.store as store_module
+
+_original_connect = store_module._connect
+
+
+def _forced_connect(*args, **kwargs):
+    # The real helper already ran (its own SET statements included) by the time this wrapper
+    # sees the connection, so this does not race the fix's own setup the way patching
+    # duckdb.connect itself would -- it only forces *later* queries on this connection to be
+    # over DuckDB's default 2000ms progress_bar_time threshold, which is what "a query that
+    # happens to run long" (V2-P6-021's actual trigger) looks like from the connection's own
+    # point of view.
+    connection = _original_connect(*args, **kwargs)
+    connection.execute("SET progress_bar_time = 0")
+    return connection
+
+
+store_module._connect = _forced_connect
+
+import sys
+
+from openalpha_cn.cli import app
+
+app(prog_name="openalpha")
+"""
+"""A subprocess bootstrap, not `p6._OPENALPHA`: it forces every query `PanelStore` runs after
+this process starts to cross DuckDB's progress-bar threshold, which is how `V2-P6-021`'s bug
+report was actually triggered (a query slow enough to pass `progress_bar_time`) rather than an
+edge case. `run_openalpha`/`p6._OPENALPHA` runs the real CLI with no such forcing, so it cannot
+tell a helper that disables the progress bar from one that does not -- both look clean when
+every query finishes in milliseconds, which is also why the defect shipped unnoticed until it
+met a slower real store.
+"""
+
+
+def test_the_stale_return_paths_precondition_stays_clean_stdout_when_duckdb_queries_run_slow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`V2-P6-021`: reproduces the reported defect end to end -- a real `openalpha` subprocess,
+    a real generated store, DuckDB's progress bar forced on for every query the precondition's
+    connections run after they open -- and proves `panel/store.py::_connect` keeps stdout to
+    exactly the one clean line `require_clean_return_paths` requires.
+
+    This has to be a real subprocess captured the way `subprocess.run(capture_output=True)`
+    captures it: DuckDB's progress bar is written straight to the process's stdout file
+    descriptor, bypassing Python's `sys.stdout` object entirely, so `CliRunner.invoke(...)`
+    (used throughout this test tree) never sees it either way and cannot exercise this guard --
+    confirmed directly: a `CliRunner` invocation of a command that opens a DuckDB connection
+    with `progress_bar_time=0` and runs a query shows the bar on the real terminal while
+    `result.stdout` comes back clean, in-process, unconditionally.
+
+    Mutation check performed while writing this test, not asserted here (asserting it would
+    just re-derive `test_removing_the_helpers_config_turns_this_red` in
+    `tests/unit/panel/test_store_progress_bar.py` through a much slower path): with
+    `panel/store.py::_connect`'s two `SET enable_progress_bar...` calls removed, this exact test
+    body produces `stale return-path builds: none` preceded by a page of `▕████...▏` progress-bar
+    lines, and `require_clean_return_paths`'s own `stdout.splitlines() == [CLEAN_RETURN_PATHS]`
+    check refuses it -- which is the real research driver's own gate, unmodified.
+    """
+    write_strategy_corpus(tmp_path)
+    monkeypatch.setattr(p6, "EXCHANGE", FIXTURE_EXCHANGE)
+    argv = p6.precondition_argv(tmp_path)
+
+    completed = subprocess.run(
+        [sys.executable, "-c", _FORCE_SLOW_QUERIES_BOOTSTRAP, *argv],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.splitlines() == [p6.CLEAN_RETURN_PATHS], (
+        f"stdout was not exactly the clean line -- likely progress-bar corruption: "
+        f"{completed.stdout!r}"
+    )
+
+
+def test_a_json_command_reading_the_panel_store_stays_valid_json_when_duckdb_queries_run_slow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second half of `V2-P6-021`'s brief: "the same defect can corrupt every `--json`
+    output of every command that reads the panel store", proven the same way -- a real
+    subprocess, a real store, queries forced past the progress-bar threshold, `--json` stdout
+    required to parse."""
+    write_strategy_corpus(tmp_path)
+    monkeypatch.setattr(p6, "EXCHANGE", FIXTURE_EXCHANGE)
+    argv = [*p6.precondition_argv(tmp_path), "--json"]
+
+    completed = subprocess.run(
+        [sys.executable, "-c", _FORCE_SLOW_QUERIES_BOOTSTRAP, *argv],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    body = json.loads(completed.stdout)  # raises if a progress bar landed in the stream
+    assert body["stale"] == []
 
 
 @pytest.mark.parametrize("command", [c for c in p6.COMMANDS if c != "holdout-verdict"])

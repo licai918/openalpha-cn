@@ -16,6 +16,22 @@ class StorageIntegrityError(RuntimeError):
     """Raised when persisted provenance does not match reconstructed evidence."""
 
 
+def _connect() -> duckdb.DuckDBPyConnection:
+    """Open an in-memory DuckDB connection with the progress bar disabled (`V2-P6-021`).
+
+    This is the *only* place in this module allowed to call `duckdb.connect` directly --
+    `tests/unit/test_duckdb_progress_bar_guard.py` scans the whole `src/` tree with `ast` and
+    fails if any other call site opens one itself. See `panel/store.py::_connect`'s docstring
+    for why this has to be a `SET` after connecting rather than `duckdb.connect(...,
+    config=...)`: `enable_progress_bar`/`enable_progress_bar_print` are DuckDB `LOCAL`-scope
+    settings, and DuckDB 1.5.5 refuses to set a `LOCAL`-scope option through `config=`.
+    """
+    connection = duckdb.connect(":memory:")
+    connection.execute("SET enable_progress_bar = false")
+    connection.execute("SET enable_progress_bar_print = false")
+    return connection
+
+
 class ParquetEvidenceStore:
     """Store immutable evidence batches and query only point-in-time-visible rows."""
 
@@ -38,7 +54,7 @@ class ParquetEvidenceStore:
 
         temporary = target.with_suffix(".parquet.tmp")
         rows = [self._serialize(item) for item in items]
-        with duckdb.connect(":memory:") as connection:
+        with _connect() as connection:
             connection.execute(
                 """
                 CREATE TABLE evidence (
@@ -90,7 +106,7 @@ class ParquetEvidenceStore:
         if not files:
             return ()
         point_in_time = ensure_aware(as_of)
-        with duckdb.connect(":memory:") as connection:
+        with _connect() as connection:
             rows = connection.execute(
                 """
                 SELECT
@@ -191,7 +207,7 @@ def read_parquet_records(path: Path) -> list[dict[str, object]]:
     themselves.
     """
     try:
-        with duckdb.connect(":memory:") as connection:
+        with _connect() as connection:
             cursor = connection.execute("SELECT * FROM read_parquet(?)", [str(path)])
             columns = [item[0] for item in cursor.description]
             return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
