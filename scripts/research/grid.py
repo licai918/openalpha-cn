@@ -57,8 +57,9 @@ alone is the one run.
 
 What this module does not do: it computes no statistic of its own (`sign_flip_test` and
 `control_false_discovery_rate` are the repository's; `one_sided_p_value` is the protocol's
-declared derivation from the two-sided one), and it measures no rank IC (no SDK method returns a
-per-as-of IC series; `non_overlapping_sign_flip` tests one a caller supplies).
+declared derivation from the two-sided one), and it measures no rank IC itself
+(`OpenAlphaSDK.factor_ic_series` does; `non_overlapping_sign_flip` tests the series a caller
+supplies, as `p6.DiscoveryMeasure` does).
 """
 
 from __future__ import annotations
@@ -639,6 +640,39 @@ def non_overlapping_sign_flip(
 # --- the strategy measurement ------------------------------------------------------------------
 
 
+def max_relative_drawdown(
+    net_returns: Sequence[Decimal], benchmark_returns: Sequence[Decimal]
+) -> float:
+    """The protocol's maximum relative drawdown (section 7) over the periods given.
+
+    The relative level after period `t` is `prod(1 + net) / prod(1 + benchmark)` over periods
+    `1..t`, and the drawdown at `t` is the fall of that level from the highest level before it,
+    the starting level of 1 included. The answer is the largest such fall (0 when the level never
+    fell). The caller passes complete periods only (`result_max_relative_drawdown` does).
+    """
+    net_level = benchmark_level = peak = Decimal(1)
+    worst = Decimal(0)
+    for net, benchmark in zip(net_returns, benchmark_returns, strict=True):
+        net_level *= 1 + net
+        benchmark_level *= 1 + benchmark
+        if benchmark_level <= 0:
+            raise ValueError("the benchmark lost everything; a relative level is undefined")
+        level = net_level / benchmark_level
+        peak = max(peak, level)
+        worst = max(worst, (peak - level) / peak)
+    return float(worst)
+
+
+def result_max_relative_drawdown(result: Mapping[str, Any]) -> float:
+    """`max_relative_drawdown` of a ledgered strategy result, read from its stored per-period
+    series over complete periods only -- so a row written before the key existed reads too."""
+    complete = result["period_complete"]
+    return max_relative_drawdown(
+        [Decimal(v) for v, full in zip(result["net_return"], complete, strict=True) if full],
+        [Decimal(v) for v, full in zip(result["benchmark_return"], complete, strict=True) if full],
+    )
+
+
 def strategy_result(
     backtest: StrategyBacktest,
     *,
@@ -649,9 +683,10 @@ def strategy_result(
     """One backtest as a ledger result: its per-period series and the sign-flip test of its excess.
 
     Excess is each period's net-of-cost return less `excess_benchmark`'s return over the same
-    period. Every series is stored; the test and the means read only complete periods (as many
-    sessions as the rebalance interval), and `excluded_incomplete_periods` says how many were left
-    out -- the trailing period a window ends inside is shorter and is not a like-for-like draw.
+    period. Every series is stored; the test, the means and `max_relative_drawdown` (the
+    protocol's section 7 definition, `V2-P6-010`) read only complete periods (as many sessions as
+    the rebalance interval), and `excluded_incomplete_periods` says how many were left out -- the
+    trailing period a window ends inside is shorter and is not a like-for-like draw.
     """
     periods = backtest.periods
     interval = backtest.spec.rebalance_every_sessions
@@ -708,6 +743,10 @@ def strategy_result(
                 (item.valuation_difference for item in backtest.unknowable_crossings),
                 Decimal("0.00"),
             )
+        ),
+        "max_relative_drawdown": max_relative_drawdown(
+            [p.net_return for _, p in tested],
+            [p.benchmark_returns[excess_benchmark] for _, p in tested],
         ),
     }
 

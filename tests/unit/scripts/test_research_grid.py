@@ -697,6 +697,11 @@ def test_the_holdout_drives_the_sdk_and_ledgers_net_excess_and_its_sign_flip(
             mean / statistics.stdev(values) * math.sqrt(per_year), rel=1e-12
         )
         assert result["annualized_mean_net_excess"] == pytest.approx(mean * per_year, rel=1e-12)
+        full = [p for p, whole in zip(backtest.periods, complete, strict=True) if whole]
+        assert result["max_relative_drawdown"] == grid.max_relative_drawdown(
+            [p.net_return for p in full], [p.benchmark_returns["000905.SH"] for p in full]
+        )
+        assert result["max_relative_drawdown"] == grid.result_max_relative_drawdown(result)
     assert grid.stage_family(ledger, grid.HOLDOUT_STAGE) == 1
 
 
@@ -717,6 +722,34 @@ def test_a_backtest_with_no_complete_period_is_refused() -> None:
 
     with pytest.raises(StrategyBacktestError, match="complete"):
         grid.strategy_result(Short(), excess_benchmark="000905.SH")
+
+
+def test_the_maximum_relative_drawdown_on_a_hand_computed_series() -> None:
+    """Section 7 of the protocol: relative level = prod(1 + net) / prod(1 + benchmark), and the
+    maximum relative drawdown is its largest fall from the highest level before it, the start (1)
+    included.
+
+    net (0.10, -0.05, 0.02) against benchmark (0, 0.05, 0): levels 1.1, 1.045 / 1.05 and
+    1.0659 / 1.05. The worst fall is the second, 1 - (1.045 / 1.05) / 1.1 = 1 - 0.95 / 1.05 = 2/21.
+    """
+    net = [Decimal("0.10"), Decimal("-0.05"), Decimal("0.02")]
+    benchmark = [Decimal("0"), Decimal("0.05"), Decimal("0")]
+
+    assert grid.max_relative_drawdown(net, benchmark) == pytest.approx(2 / 21, rel=1e-12)
+    assert grid.max_relative_drawdown([Decimal("-0.1")], [Decimal("0")]) == pytest.approx(0.1)
+    assert grid.max_relative_drawdown([Decimal("0.1"), Decimal("0.1")], [Decimal("0")] * 2) == 0.0
+    assert grid.max_relative_drawdown([], []) == 0.0
+
+
+def test_the_ledgered_drawdown_reads_only_complete_periods() -> None:
+    """The trailing period a window ends inside is not a like-for-like period; a loss in it would
+    move the drawdown to 1 - 1.0659 / 1.155."""
+    result = {
+        "net_return": ["0.10", "-0.05", "0.02", "0"],
+        "benchmark_return": ["0", "0.05", "0", "0.10"],
+        "period_complete": [True, True, True, False],
+    }
+    assert grid.result_max_relative_drawdown(result) == pytest.approx(2 / 21, rel=1e-12)
 
 
 def test_the_one_sided_p_value_halves_the_two_sided_one_in_the_observed_direction() -> None:

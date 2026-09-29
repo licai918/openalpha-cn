@@ -1,0 +1,1102 @@
+"""`scripts/research/p6.py`: the P6 research stage driver (`V2-P6-010`).
+
+The pre-registered protocol (`docs/research/p6-protocol.md`) fixes every grid, every selection
+rule and every pass criterion before a research run starts. This driver turns each stage into
+code so that no person types a grid, a survivor list, a selection or a verdict. Each test here
+pins one clause of the protocol and goes red when the clause is computed any other way:
+
+* section 4: the 189-configuration discovery grid, each configuration's `end`, the measure that
+  carries both families, the survivor rule (BY rejection **and** a positive mean -- the direction
+  rule), one tier per factor, and the no-survivor fallback;
+* section 5: the 19 score sources of step 2a, the best source and the 36 strategies of step 2b
+  (the one equal to step 2a is not run twice), and the top-5 finalist rule with its "BY rejected
+  nothing" branch;
+* section 6: the validation choice by information ratio, ties to the lower turnover;
+* section 7: the registration (never the holdout run), the maximum relative drawdown on complete
+  periods, and the three pass criteria, each able to fail on its own;
+* section 1: the stale-return-path precondition, run before every command and refused by name.
+
+Nothing here touches a real research store. Selection rules are driven through hand-written
+ledger rows; the end-to-end test drives every command through a fake SDK whose requests are
+resolved by the real `strategy_view` resolvers, so a field name the SDK would refuse fails here.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import importlib
+import json
+import statistics
+import sys
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import UTC, date, datetime, time, timedelta
+from decimal import Decimal
+from pathlib import Path
+from types import ModuleType
+from typing import Any, Final
+from zoneinfo import ZoneInfo
+
+import pytest
+from panel_fixtures import EXCHANGE as FIXTURE_EXCHANGE
+from panel_fixtures import GeneratedPanel
+from panel_fixtures import _calendar_batch as calendar_batch
+from research_repo import commit_file, git, head
+from strategy_fixtures import READ_AT, REVERSAL, write_strategy_corpus
+
+from openalpha_cn import strategy_view
+from openalpha_cn.backtest.outcome_statistics import sign_flip_test
+from openalpha_cn.backtest.strategy_backtest import EQUAL_WEIGHT_ALL_A
+from openalpha_cn.domain.horizon import parse_horizon
+from openalpha_cn.domain.labels import build_label_window
+from openalpha_cn.domain.trading_calendar import CalendarDay, build_trading_calendar
+from openalpha_cn.panel.catalog import DEFAULT_DATE_TIMEZONE
+from openalpha_cn.panel_ingest import split_panel_batch_by_year, write_trading_calendar
+from openalpha_cn.panel_view import panel_store
+from openalpha_cn.sdk import OpenAlphaSDK
+from openalpha_cn.strategy_view import StrategyRequestError
+
+ROOT: Final[Path] = Path(__file__).resolve().parents[3]
+RESEARCH: Final[Path] = ROOT / "scripts" / "research"
+
+
+def _research_module(name: str) -> ModuleType:
+    if str(RESEARCH) not in sys.path:
+        sys.path.insert(0, str(RESEARCH))
+    return importlib.import_module(name)
+
+
+grid = _research_module("grid")
+registry = _research_module("registry")
+p6 = _research_module("p6")
+
+COMMIT: Final[str] = "0123456789abcdef0123456789abcdef01234567"
+OTHER_COMMIT: Final[str] = "fedcba9876543210fedcba9876543210fedcba98"
+AT: Final[datetime] = datetime(2026, 9, 27, 12, 0, tzinfo=UTC)
+
+
+def _weekdays(first: date, last: date) -> tuple[date, ...]:
+    days = (first + timedelta(days=offset) for offset in range((last - first).days + 1))
+    return tuple(day for day in days if day.weekday() < 5)
+
+
+SESSIONS: Final[tuple[date, ...]] = _weekdays(date(2015, 1, 1), date(2026, 12, 31))
+"""A weekday calendar over every stage: the stored calendar's shape, generated at test time."""
+
+
+# --- fakes -------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Period:
+    start: date
+    end: date
+    sessions: int
+    net_return: Decimal
+    benchmark_returns: Mapping[str, Decimal]
+    turnover: Decimal
+
+
+@dataclass(frozen=True)
+class _Spec:
+    rebalance_every_sessions: int
+
+
+@dataclass(frozen=True)
+class _Backtest:
+    spec: _Spec
+    periods: tuple[_Period, ...]
+
+
+def _backtest(
+    nets: Sequence[str], *, benchmarks: Sequence[str] | None = None, interval: int = 20
+) -> _Backtest:
+    benches = benchmarks if benchmarks is not None else ["0"] * len(nets)
+    start = date(2015, 1, 5)
+    periods = tuple(
+        _Period(
+            start=start + timedelta(days=index),
+            end=start + timedelta(days=index + 1),
+            sessions=interval,
+            net_return=Decimal(net),
+            benchmark_returns={EQUAL_WEIGHT_ALL_A: Decimal(bench), "000905.SH": Decimal("0")},
+            turnover=Decimal("0.5"),
+        )
+        for index, (net, bench) in enumerate(zip(nets, benches, strict=True))
+    )
+    return _Backtest(spec=_Spec(interval), periods=periods)
+
+
+@dataclass(frozen=True)
+class _ICPoint:
+    prediction_day: date
+    ic: float | None
+
+
+@dataclass(frozen=True)
+class _ICSeries:
+    points: tuple[_ICPoint, ...]
+
+
+def _resolve(config: Mapping[str, Any]) -> None:
+    """`OpenAlphaSDK.run_strategy_backtest`'s own resolution: its `components` default to `()`."""
+    strategy_view.strategy_request(**{"components": (), **config})
+
+
+def _digest(value: object) -> int:
+    return int(hashlib.sha256(grid.canonical_json(value).encode()).hexdigest()[:8], 16)
+
+
+@dataclass
+class _FakeSDK:
+    """Resolves every request with the real resolvers, then answers from a hash of it."""
+
+    backtests: list[Mapping[str, object]] = field(default_factory=list)
+    ic_calls: list[Mapping[str, object]] = field(default_factory=list)
+
+    def run_strategy_backtest(self, **config: Any) -> _Backtest:
+        _resolve(config)
+        self.backtests.append(config)
+        seed = _digest(config)
+        nets = [f"{((seed >> (4 * k)) % 31 - 12) / 10000:.4f}" for k in range(4)]
+        return _backtest(nets, interval=int(config["rebalance_every_sessions"]))
+
+    def factor_ic_series(self, **request: Any) -> _ICSeries:
+        strategy_view.ic_series_request(**request)
+        self.ic_calls.append(request)
+        seed = _digest(request)
+        days = [day for day in SESSIONS if request["start"] <= day <= request["end"]][:3]
+        return _ICSeries(
+            tuple(_ICPoint(day, ((seed >> k) % 7 - 3) / 100) for k, day in enumerate(days))
+        )
+
+
+def _result(
+    *,
+    p: float = 0.9,
+    mean: float = 0.001,
+    ir: float | None = 0.1,
+    turnover: float = 0.5,
+    nets: Sequence[str] = ("0.01", "-0.005", "0.004"),
+    benches: Sequence[str] | None = None,
+) -> dict[str, object]:
+    benches = benches if benches is not None else ["0"] * len(nets)
+    return {
+        "p_excess": p,
+        "mean_net_excess": mean,
+        "information_ratio": ir,
+        "mean_turnover": turnover,
+        "annualized_mean_net_excess": mean * 12.2,
+        "net_return": list(nets),
+        "benchmark_return": list(benches),
+        "period_complete": [True] * len(nets),
+        "code_commit": COMMIT,
+    }
+
+
+def _fill(
+    ledger: Path,
+    stage: str,
+    configs: Sequence[Mapping[str, object]],
+    special: Mapping[str, Mapping[str, object]] | None = None,
+) -> None:
+    """One hand-written row per configuration; `special` overrides a row by config id."""
+    special = special or {}
+    for config in configs:
+        identity = grid.config_id(config)
+        grid.append_ledger(ledger, stage, config, special.get(identity, _result()), recorded_at=AT)
+
+
+def _discovery(factor: str, tier: str, horizon: int) -> Mapping[str, object]:
+    for config in p6.discovery_configs(SESSIONS):
+        ((key, level, _),) = config["components"]
+        if (key, level, config["rebalance_every_sessions"]) == (factor, tier, horizon):
+            return config
+    raise AssertionError((factor, tier, horizon))
+
+
+def _id(config: Mapping[str, object]) -> str:
+    return str(grid.config_id(config))
+
+
+# --- section 4: the discovery grid ---------------------------------------------------------------
+
+
+def test_the_discovery_grid_is_21_factors_by_3_tiers_by_3_horizons_with_the_protocol_fields() -> (
+    None
+):
+    configs = p6.discovery_configs(SESSIONS)
+
+    assert len(configs) == 189
+    assert len({_id(config) for config in configs}) == 189
+    factors = {config["components"][0][0] for config in configs}
+    assert len(factors) == 21
+    assert {config["components"][0][1] for config in configs} == {
+        "raw",
+        "processed",
+        "neutralized",
+    }
+    for config in configs:
+        ((_, tier, weight),) = config["components"]
+        horizon = config["rebalance_every_sessions"]
+        assert horizon in (1, 5, 20)
+        assert weight == Decimal("1")
+        assert config["combine"] == "zscore_sum"
+        assert config["holding_count"] == 50
+        assert config["buffer_rank"] is None
+        assert config["max_industry_weight"] is None
+        assert config["start"] == date(2015, 1, 5)
+        assert config["as_of"] == datetime(2026, 9, 26, 4, 0, tzinfo=UTC)
+        assert config["exchange"] == "SSE"
+        assert config["ic"] == {
+            "horizon_sessions": horizon,
+            "ic_method": "spearman",
+            "min_securities": 100,
+        }
+        assert config["transform"] == (None if tier == "raw" else "cross_section_standard/v1")
+        assert config["neutralization"] == (
+            "industry_and_size/v1" if tier == "neutralized" else None
+        )
+
+
+def test_each_discovery_end_is_the_last_session_whose_ic_label_still_fits_the_stage() -> None:
+    """An IC label enters on the session after its prediction day and exits `horizon` sessions
+    later, so the last prediction day is `horizon + 1` sessions before the stage's last session
+    (2021-12-31). The label's exit is placed here by the domain's own `build_label_window`."""
+    first = date(2015, 1, 1)
+    calendar = build_trading_calendar(
+        "SSE",
+        [
+            CalendarDay(
+                calendar_date=first + timedelta(days=offset),
+                is_trading=(first + timedelta(days=offset)).weekday() < 5,
+            )
+            for offset in range((date(2026, 12, 31) - first).days + 1)
+        ],
+    )
+    zone = ZoneInfo(DEFAULT_DATE_TIMEZONE)
+    ends = {
+        config["rebalance_every_sessions"]: config["end"]
+        for config in p6.discovery_configs(SESSIONS)
+    }
+
+    assert ends == {1: date(2021, 12, 29), 5: date(2021, 12, 23), 20: date(2021, 12, 2)}
+    for horizon, end in ends.items():
+        window = build_label_window(
+            as_of=datetime.combine(end, time(16, 0), zone),
+            zone=zone,
+            horizon=parse_horizon(f"{horizon}d"),
+            calendar=calendar,
+        )
+        assert window.exit_day == date(2021, 12, 31)
+        later = calendar.shift(end, 1)
+        after = build_label_window(
+            as_of=datetime.combine(later, time(16, 0), zone),
+            zone=zone,
+            horizon=parse_horizon(f"{horizon}d"),
+            calendar=calendar,
+        )
+        assert after.exit_day > date(2021, 12, 31)
+
+
+def test_the_end_is_counted_on_the_stored_calendar_not_on_weekdays() -> None:
+    holiday = tuple(day for day in SESSIONS if day != date(2021, 12, 30))
+    ends = {c["rebalance_every_sessions"]: c["end"] for c in p6.discovery_configs(holiday)}
+
+    assert ends[1] == date(2021, 12, 28)
+
+
+def test_a_strategy_stage_ends_on_its_last_session_and_the_holdout_on_the_protocol_day() -> None:
+    assert p6.stage_end(SESSIONS, "composition", label_sessions=0) == date(2021, 12, 31)
+    assert p6.stage_end(SESSIONS, "validation", label_sessions=0) == date(2023, 12, 29)
+    assert p6.stage_end(SESSIONS, "holdout", label_sessions=0) == date(2026, 9, 24)
+    short = tuple(day for day in SESSIONS if day != date(2026, 9, 24))
+    assert p6.stage_end(short, "holdout", label_sessions=0) == date(2026, 9, 23)
+
+
+def test_the_sessions_are_read_from_the_stored_calendar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every stage year's partition, read at the protocol's instant through the gated loader."""
+    first = date(2015, 1, 1)
+    days = [
+        CalendarDay(
+            calendar_date=first + timedelta(days=offset),
+            is_trading=(first + timedelta(days=offset)).weekday() < 5,
+        )
+        for offset in range((date(2026, 12, 31) - first).days + 1)
+    ]
+    store = panel_store(tmp_path)
+    for _, part in split_panel_batch_by_year(calendar_batch(days)):
+        write_trading_calendar(store, part)
+    monkeypatch.setattr(p6, "EXCHANGE", FIXTURE_EXCHANGE)
+
+    assert p6.stored_sessions(tmp_path) == SESSIONS
+
+
+def test_a_stage_start_that_is_not_a_session_is_refused() -> None:
+    closed = tuple(day for day in SESSIONS if day != date(2015, 1, 5))
+    with pytest.raises(p6.ProtocolMismatchError, match="2015-01-05"):
+        p6.discovery_configs(closed)
+
+
+# --- section 4: the measure -----------------------------------------------------------------------
+
+
+def test_the_discovery_measure_ledgers_the_strategy_and_the_non_overlapping_ic_sign_flip() -> None:
+    config = _discovery("reversal_1d/v1", "processed", 5)
+    days = [day for day in SESSIONS if config["start"] <= day <= config["end"]]
+    ics = {day: (0.02 if index % 3 else -0.01) for index, day in enumerate(days[:40])}
+    asked: list[Mapping[str, object]] = []
+
+    def ic_series(**request: object) -> _ICSeries:
+        asked.append(request)
+        return _ICSeries(tuple(_ICPoint(day, value) for day, value in ics.items()))
+
+    nets = ["0.01", "-0.004", "0.006", "0.002"]
+    measure = p6.DiscoveryMeasure(
+        backtest=lambda **kw: _backtest(nets, interval=5),
+        ic_series=ic_series,
+        sessions=SESSIONS,
+        code_commit=COMMIT,
+    )
+
+    result = measure(config)
+
+    expected = grid.strategy_result(
+        _backtest(nets, interval=5), excess_benchmark=EQUAL_WEIGHT_ALL_A
+    )
+    assert {key: result[key] for key in expected} == expected
+    assert asked == [
+        {
+            "factor": "reversal_1d/v1",
+            "tier": "processed",
+            "transform": "cross_section_standard/v1",
+            "neutralization": None,
+            "horizon_sessions": 5,
+            "ic_method": "spearman",
+            "min_securities": 100,
+            "start": config["start"],
+            "end": config["end"],
+            "as_of": config["as_of"],
+            "exchange": "SSE",
+        }
+    ]
+    sampled = [ics[day] for day in days[::5] if day in ics]
+    test = sign_flip_test(tuple(sampled), bootstrap_samples=100_000, random_seed=20_260_926)
+    assert result["p_ic"] == test.p_value
+    assert result["ic_measured"] == len(sampled) == 8
+    assert result["mean_ic"] == pytest.approx(statistics.fmean(sampled))
+    assert result["code_commit"] == COMMIT
+
+
+def test_a_refused_ic_leaves_the_primary_family_measured() -> None:
+    config = _discovery("reversal_1d/v1", "raw", 1)
+
+    def refuse(**request: object) -> _ICSeries:
+        raise StrategyRequestError("no build")
+
+    measure = p6.DiscoveryMeasure(
+        backtest=lambda **kw: _backtest(["0.01", "0.02"], interval=1),
+        ic_series=refuse,
+        sessions=SESSIONS,
+        code_commit=COMMIT,
+    )
+    result = measure(config)
+
+    assert "p_excess" in result
+    assert "p_ic" not in result
+    assert result["ic_error"] == "StrategyRequestError: no build"
+
+
+def test_the_discovery_measure_drives_the_real_sdk(tmp_path: Path) -> None:
+    """The keyword arguments the measure hands both SDK methods are the ones they accept."""
+    panel: GeneratedPanel = write_strategy_corpus(tmp_path)
+    sdk = OpenAlphaSDK(runtime_dir=tmp_path)
+    config = {
+        "components": ((REVERSAL.qualified_key, "raw", Decimal("1")),),
+        "combine": "zscore_sum",
+        "transform": None,
+        "neutralization": None,
+        "start": panel.sessions[1],
+        "end": panel.sessions[7],
+        "as_of": READ_AT,
+        "exchange": FIXTURE_EXCHANGE,
+        "holding_count": 2,
+        "rebalance_every_sessions": 2,
+        "buffer_rank": None,
+        "max_industry_weight": None,
+        "ic": {"horizon_sessions": 1, "ic_method": "spearman", "min_securities": 3},
+    }
+    measure = p6.DiscoveryMeasure(
+        backtest=sdk.run_strategy_backtest,
+        ic_series=sdk.factor_ic_series,
+        sessions=tuple(panel.sessions),
+        code_commit=COMMIT,
+    )
+
+    result = measure(config)
+
+    assert result["period_count"] >= 2
+    assert result["ic_measured"] == 7
+    assert 0 < result["p_ic"] <= 1
+    assert "max_relative_drawdown" in result
+
+
+# --- section 4: survivors -------------------------------------------------------------------------
+
+
+def _survivor_ledger(tmp_path: Path, special: Mapping[str, Mapping[str, object]]) -> Path:
+    ledger = tmp_path / "ledger.jsonl"
+    _fill(ledger, "discovery", p6.discovery_configs(SESSIONS), special)
+    return ledger
+
+
+def test_a_survivor_needs_a_by_rejection_and_a_positive_mean(tmp_path: Path) -> None:
+    """The direction rule: a configuration significant in the direction opposite its declaration
+    has a negative mean and is not a survivor, however small its p-value."""
+    winner = _discovery("momentum_20_sessions/v1", "raw", 5)
+    reversed_ = _discovery("book_to_price/v1", "processed", 20)
+    positive_but_weak = _discovery("amihud_60/v1", "neutralized", 1)
+    ledger = _survivor_ledger(
+        tmp_path,
+        {
+            _id(winner): _result(p=1e-6, mean=0.002, ir=0.9),
+            _id(reversed_): _result(p=1e-6, mean=-0.002, ir=-0.9),
+            _id(positive_but_weak): _result(p=0.2, mean=0.004, ir=1.5),
+        },
+    )
+    report = grid.fdr_table(ledger, "discovery", 0.10)
+    assert report.verdict_for(_id(reversed_)).rejected
+    assert not report.verdict_for(_id(positive_but_weak)).rejected
+
+    answer = p6.survivors(ledger, SESSIONS)
+
+    assert answer["components"] == [["momentum_20_sessions/v1", "raw"]]
+    assert answer["fallback"] is False
+    assert [row["config_id"] for row in answer["survivors"]] == [_id(winner)]
+    assert answer["family_size"] == 189
+
+
+def test_each_surviving_factor_contributes_the_tier_of_its_best_information_ratio(
+    tmp_path: Path,
+) -> None:
+    raw = _discovery("turnover_60/v1", "raw", 1)
+    processed = _discovery("turnover_60/v1", "processed", 20)
+    neutralized = _discovery("turnover_60/v1", "neutralized", 5)
+    tied_low_turnover = _discovery("revenue_yoy/v1", "neutralized", 20)
+    tied_high_turnover = _discovery("revenue_yoy/v1", "raw", 5)
+    ledger = _survivor_ledger(
+        tmp_path,
+        {
+            _id(raw): _result(p=1e-6, mean=0.001, ir=0.5, turnover=0.1),
+            _id(processed): _result(p=1e-6, mean=0.001, ir=0.8, turnover=0.9),
+            _id(neutralized): _result(p=1e-6, mean=0.001, ir=0.7, turnover=0.05),
+            _id(tied_low_turnover): _result(p=1e-6, mean=0.001, ir=0.6, turnover=0.2),
+            _id(tied_high_turnover): _result(p=1e-6, mean=0.001, ir=0.6, turnover=0.3),
+        },
+    )
+
+    answer = p6.survivors(ledger, SESSIONS)
+
+    assert answer["components"] == [
+        ["turnover_60/v1", "processed"],
+        ["revenue_yoy/v1", "neutralized"],
+    ]
+
+
+def test_a_tie_the_protocol_does_not_break_is_refused_rather_than_broken(tmp_path: Path) -> None:
+    one = _discovery("turnover_60/v1", "raw", 1)
+    two = _discovery("turnover_60/v1", "processed", 1)
+    ledger = _survivor_ledger(
+        tmp_path,
+        {
+            _id(one): _result(p=1e-6, mean=0.001, ir=0.5, turnover=0.1),
+            _id(two): _result(p=1e-6, mean=0.001, ir=0.5, turnover=0.1),
+        },
+    )
+    with pytest.raises(p6.UnresolvedTieError):
+        p6.survivors(ledger, SESSIONS)
+
+
+def test_with_no_survivor_every_factor_enters_stage_two_on_its_processed_tier(
+    tmp_path: Path,
+) -> None:
+    only_negative = _discovery("reversal_1d/v1", "raw", 1)
+    ledger = _survivor_ledger(tmp_path, {_id(only_negative): _result(p=1e-9, mean=-0.01)})
+
+    answer = p6.survivors(ledger, SESSIONS)
+
+    assert answer["fallback"] is True
+    assert answer["survivors"] == []
+    assert len(answer["components"]) == 21
+    assert {tier for _, tier in answer["components"]} == {"processed"}
+
+
+def test_the_survivors_are_computed_only_from_a_complete_discovery_stage(tmp_path: Path) -> None:
+    ledger = tmp_path / "ledger.jsonl"
+    _fill(ledger, "discovery", p6.discovery_configs(SESSIONS)[:188])
+
+    with pytest.raises(p6.StageIncompleteError, match="1 configuration"):
+        p6.survivors(ledger, SESSIONS)
+
+
+def test_a_row_the_protocol_does_not_build_is_refused_rather_than_counted(tmp_path: Path) -> None:
+    """A hand-added hypothesis would enlarge the family and could be a survivor no grid tried."""
+    ledger = _survivor_ledger(tmp_path, {})
+    extra = {**_discovery("reversal_1d/v1", "raw", 5), "holding_count": 30}
+    grid.append_ledger(ledger, "discovery", extra, _result(p=1e-9, mean=0.01), recorded_at=AT)
+
+    with pytest.raises(p6.StageIncompleteError, match="holds 1"):
+        p6.survivors(ledger, SESSIONS)
+
+
+# --- section 5: step 2a ---------------------------------------------------------------------------
+
+
+COMPONENTS: Final = (
+    ("momentum_20_sessions/v1", "raw"),
+    ("book_to_price/v1", "neutralized"),
+    ("revenue_yoy/v1", "processed"),
+)
+
+
+def test_the_composition_sources_are_the_protocols_19_configurations() -> None:
+    configs = p6.composition_source_configs(COMPONENTS, SESSIONS, COMMIT)
+
+    assert len(configs) == 19
+    base = {
+        "combine": "zscore_sum",
+        "start": date(2017, 1, 3),
+        "end": date(2021, 12, 31),
+        "as_of": datetime(2026, 9, 26, 4, 0, tzinfo=UTC),
+        "exchange": "SSE",
+        "holding_count": 50,
+        "rebalance_every_sessions": 20,
+        "buffer_rank": None,
+        "max_industry_weight": None,
+    }
+    static, clip, keep, *forests = configs
+    assert static == {
+        **base,
+        "components": tuple((factor, tier, Decimal("1")) for factor, tier in COMPONENTS),
+        "transform": "cross_section_standard/v1",
+        "neutralization": "industry_and_size/v1",
+    }
+    trailing = {
+        "components": COMPONENTS,
+        "ic_window_sessions": 488,
+        "min_ic_observations": 120,
+        "ic_method": "spearman",
+        "horizon_sessions": 20,
+        "min_ic_securities": 100,
+    }
+    assert clip == {
+        **base,
+        "transform": "cross_section_standard/v1",
+        "neutralization": "industry_and_size/v1",
+        "trailing_ic": {**trailing, "negative_ic": "clip_to_zero"},
+    }
+    assert keep == {**clip, "trailing_ic": {**trailing, "negative_ic": "keep_sign"}}
+    assert len(forests) == 16
+    grids = set()
+    for forest in forests:
+        model = forest["walk_forward"]
+        assert forest == {
+            **base,
+            "transform": None,
+            "neutralization": None,
+            "walk_forward": model,
+        }
+        assert model["family"] == "boosted_rank_trees"
+        assert model["features"] == (
+            "momentum_20_sessions/v1@raw",
+            "book_to_price/v1@processed:cross_section_standard/v1",
+            "revenue_yoy/v1@processed:cross_section_standard/v1",
+        )
+        assert {key: model[key] for key in model if key not in ("hyperparameters", "features")} == {
+            "family": "boosted_rank_trees",
+            "seed": 20_260_926,
+            "code_commit": COMMIT,
+            "train_sessions": 488,
+            "refit_every_sessions": 122,
+            "embargo_sessions": 20,
+            "horizon_sessions": 20,
+            "missing": "abstain",
+        }
+        hyper = model["hyperparameters"]
+        grids.add(
+            (
+                hyper["tree_count"],
+                hyper["max_depth"],
+                hyper["learning_rate"],
+                hyper["min_leaf_securities"],
+            )
+        )
+    assert grids == {
+        (trees, depth, rate, leaf)
+        for trees in (50, 200)
+        for depth in (2, 3)
+        for rate in (0.05, 0.1)
+        for leaf in (200, 1000)
+    }
+
+
+def test_every_protocol_configuration_resolves_through_the_real_request_resolvers() -> None:
+    sources = p6.composition_source_configs(COMPONENTS, SESSIONS, COMMIT)
+    strategies = p6.composition_strategy_configs(sources[-1])
+    validation = p6.validation_configs(sources[:3], SESSIONS, COMMIT)
+    for config in (*sources, *strategies, *validation):
+        _resolve(config)
+    for config in p6.discovery_configs(SESSIONS):
+        _resolve({k: v for k, v in config.items() if k != "ic"})
+        ((factor, tier, _),) = config["components"]
+        strategy_view.ic_series_request(
+            factor=factor,
+            tier=tier,
+            transform=config["transform"],
+            neutralization=config["neutralization"],
+            start=config["start"],
+            end=config["end"],
+            as_of=config["as_of"],
+            exchange=config["exchange"],
+            **config["ic"],
+        )
+
+
+# --- section 5: step 2b ---------------------------------------------------------------------------
+
+
+def _composition_ledger(
+    tmp_path: Path, components: Sequence[tuple[str, str]], special: Mapping[str, Any]
+) -> tuple[Path, tuple[Mapping[str, object], ...]]:
+    """A complete discovery stage whose survivors are `components`, then the 2a rows."""
+    ledger = tmp_path / "ledger.jsonl"
+    winners = {
+        _id(_discovery(factor, tier, 5)): _result(p=1e-6, mean=0.002, ir=0.5)
+        for factor, tier in components
+    }
+    _fill(ledger, "discovery", p6.discovery_configs(SESSIONS), winners)
+    sources = p6.composition_source_configs(components, SESSIONS, COMMIT)
+    _fill(ledger, "composition", sources, special)
+    return ledger, sources
+
+
+def test_step_2b_takes_the_best_source_and_does_not_run_the_step_2a_configuration_twice(
+    tmp_path: Path,
+) -> None:
+    components = (("momentum_20_sessions/v1", "raw"),)
+    sources = p6.composition_source_configs(components, SESSIONS, COMMIT)
+    best, tied_higher_turnover = sources[4], sources[7]
+    ledger, _ = _composition_ledger(
+        tmp_path,
+        components,
+        {
+            _id(best): _result(ir=0.9, turnover=0.2),
+            _id(tied_higher_turnover): _result(ir=0.9, turnover=0.4),
+            _id(sources[0]): _result(ir=0.3, turnover=0.01),
+        },
+    )
+    sdk = _FakeSDK()
+
+    run = p6.run_composition_strategies(
+        ledger,
+        SESSIONS,
+        sdk.run_strategy_backtest,
+        COMMIT,
+        echo=lambda line: None,
+        clock=lambda: AT,
+    )
+
+    configs = p6.composition_strategy_configs(best)
+    assert len(configs) == 36
+    assert len({_id(config) for config in configs}) == 36
+    assert [c for c in configs if _id(c) == _id(best)] == [best]
+    assert (run.ran, run.skipped) == (35, 1)
+    assert grid.stage_family(ledger, "composition") == 19 + 35
+    assert all(call["walk_forward"] == best["walk_forward"] for call in sdk.backtests)
+    rules = {
+        (
+            c["holding_count"],
+            c["rebalance_every_sessions"],
+            c["buffer_rank"],
+            c["max_industry_weight"],
+        )
+        for c in configs
+    }
+    assert rules == {
+        (holding, rebalance, buffer, cap)
+        for holding, buffered in ((30, 45), (50, 75), (100, 150))
+        for rebalance in (5, 10, 20)
+        for buffer in (None, buffered)
+        for cap in (None, Decimal("0.2"))
+    }
+
+
+def test_step_2b_refuses_to_resume_the_stage_at_another_commit(tmp_path: Path) -> None:
+    """A walk-forward source names its code commit, so the same configuration at another commit is
+    another hypothesis: the stage would count it twice."""
+    ledger, _ = _composition_ledger(tmp_path, (("momentum_20_sessions/v1", "raw"),), {})
+
+    with pytest.raises(p6.StageCommitError, match=COMMIT):
+        p6.run_composition_strategies(
+            ledger, SESSIONS, _FakeSDK().run_strategy_backtest, OTHER_COMMIT, echo=print
+        )
+    with pytest.raises(p6.StageCommitError, match="dirty"):
+        p6.run_composition_strategies(
+            ledger, SESSIONS, _FakeSDK().run_strategy_backtest, f"{COMMIT}-dirty", echo=print
+        )
+
+
+# --- section 5: finalists -------------------------------------------------------------------------
+
+
+def _full_composition(
+    tmp_path: Path, special: Callable[[list[Mapping[str, object]]], Mapping[str, Any]]
+) -> tuple[Path, list[Mapping[str, object]]]:
+    """Discovery + every stage-2 row: 19 sources (source 0 is the best, at IR 5) and the 35 step
+    2b strategies, which `special` is handed and returns overriding rows for."""
+    components = (("momentum_20_sessions/v1", "raw"),)
+    sources = p6.composition_source_configs(components, SESSIONS, COMMIT)
+    strategies = [
+        c for c in p6.composition_strategy_configs(sources[0]) if _id(c) != _id(sources[0])
+    ]
+    rows = {_id(sources[0]): _result(ir=5.0), **special(strategies)}
+    ledger, _ = _composition_ledger(tmp_path, components, rows)
+    _fill(ledger, "composition", strategies, rows)
+    return ledger, strategies
+
+
+def test_the_finalists_are_the_best_five_passing_configurations_by_information_ratio(
+    tmp_path: Path,
+) -> None:
+    def special(configs: list[Mapping[str, object]]) -> Mapping[str, Any]:
+        passing = {_id(configs[k]): _result(p=1e-9, mean=0.002, ir=1.0 + k / 10) for k in range(6)}
+        negative = {_id(configs[10]): _result(p=1e-9, mean=-0.002, ir=9.0)}
+        weak = {_id(configs[11]): _result(p=0.5, mean=0.002, ir=8.0)}
+        return {**passing, **negative, **weak}
+
+    ledger, configs = _full_composition(tmp_path, special)
+
+    answer, finalists = p6.finalists(ledger, SESSIONS)
+
+    assert [_id(c) for c in finalists] == [_id(configs[k]) for k in (5, 4, 3, 2, 1)]
+    assert answer["no_configuration_passed_multiple_testing"] is False
+    assert answer["family_size"] == 54
+    assert answer["fdr_table"]["family_size"] == 54
+
+
+def test_fewer_than_five_passing_configurations_are_all_finalists(tmp_path: Path) -> None:
+    def special(configs: list[Mapping[str, object]]) -> Mapping[str, Any]:
+        return {_id(configs[20 + k]): _result(p=1e-9, mean=0.002, ir=float(k)) for k in range(2)}
+
+    ledger, configs = _full_composition(tmp_path, special)
+
+    _, finalists = p6.finalists(ledger, SESSIONS)
+
+    assert [_id(c) for c in finalists] == [_id(configs[21]), _id(configs[20])]
+
+
+def test_when_by_rejects_nothing_the_best_five_by_information_ratio_still_go_on_flagged(
+    tmp_path: Path,
+) -> None:
+    def special(configs: list[Mapping[str, object]]) -> Mapping[str, Any]:
+        return {_id(configs[10 + k]): _result(p=0.4, mean=-0.001, ir=6.0 + k) for k in range(6)}
+
+    ledger, configs = _full_composition(tmp_path, special)
+
+    answer, finalists = p6.finalists(ledger, SESSIONS)
+
+    assert [_id(c) for c in finalists] == [_id(configs[10 + k]) for k in (5, 4, 3, 2, 1)]
+    assert answer["no_configuration_passed_multiple_testing"] is True
+    assert answer["note"] == "阶段 2 无配置通过多重检验"
+
+
+def test_rejections_that_are_all_negative_leave_no_finalist_and_are_refused(
+    tmp_path: Path,
+) -> None:
+    """The protocol's fallback is written for "BY rejected nothing" only."""
+
+    def special(configs: list[Mapping[str, object]]) -> Mapping[str, Any]:
+        return {_id(configs[12]): _result(p=1e-12, mean=-0.004, ir=-3.0)}
+
+    ledger, _ = _full_composition(tmp_path, special)
+
+    with pytest.raises(p6.NoFinalistsError):
+        p6.finalists(ledger, SESSIONS)
+
+
+# --- section 6: validation ------------------------------------------------------------------------
+
+
+def _validation_ledger(
+    tmp_path: Path, results: Callable[[list[Mapping[str, object]]], Mapping[str, Any]]
+) -> tuple[Path, list[Mapping[str, object]]]:
+    def special(configs: list[Mapping[str, object]]) -> Mapping[str, Any]:
+        return {_id(configs[k]): _result(p=1e-9, mean=0.002, ir=1.0 + k) for k in range(5)}
+
+    ledger, _ = _full_composition(tmp_path, special)
+    _, finalists = p6.finalists(ledger, SESSIONS)
+    configs = list(p6.validation_configs(finalists, SESSIONS, COMMIT))
+    _fill(ledger, "validation", configs, results(configs))
+    return ledger, configs
+
+
+def test_validation_chooses_the_best_information_ratio_and_breaks_a_tie_by_lower_turnover(
+    tmp_path: Path,
+) -> None:
+    def results(configs: list[Mapping[str, object]]) -> Mapping[str, Any]:
+        return {
+            _id(configs[0]): _result(ir=0.7, turnover=0.9),
+            _id(configs[1]): _result(ir=0.9, turnover=0.6),
+            _id(configs[2]): _result(ir=0.9, turnover=0.4),
+            _id(configs[3]): _result(ir=0.2, turnover=0.01),
+        }
+
+    ledger, configs = _validation_ledger(tmp_path, results)
+
+    answer, chosen, row = p6.validation_selection(ledger, SESSIONS)
+
+    assert chosen == configs[2]
+    assert row.config_id == _id(configs[2])
+    assert answer["chosen"] == _id(configs[2])
+    assert len(answer["results"]) == 5
+    assert configs[2]["start"] == date(2022, 1, 4)
+    assert configs[2]["end"] == date(2023, 12, 29)
+
+
+# --- section 7: drawdown and the criteria ---------------------------------------------------------
+
+
+def _holdout(
+    *,
+    annual: float = 0.05,
+    p: float = 0.02,
+    mean: float = 0.001,
+    nets: Sequence[str] = ("0", "-0.2"),
+) -> dict[str, object]:
+    return {**_result(p=p, mean=mean, nets=nets), "annualized_mean_net_excess": annual}
+
+
+VALIDATION: Final = _result(nets=("0.1", "-0.1"))
+"""Relative levels 1.1 then 0.99: a maximum relative drawdown of exactly 0.1."""
+CRITERIA: Final = {
+    "annualized_mean_net_excess_above": "0",
+    "one_sided_p_excess_below": "0.05",
+    "max_relative_drawdown_multiple_of_validation": "2",
+    "validation_config_id": "v" * 64,
+    "validation_max_relative_drawdown": 0.1,
+}
+
+
+def test_the_holdout_passes_only_when_all_three_hold_and_the_drawdown_bound_is_inclusive() -> None:
+    verdict = p6.evaluate_holdout(_holdout(), CRITERIA, VALIDATION)
+
+    assert verdict["verdict"] == "通过"
+    drawdown = verdict["criteria"]["max_relative_drawdown"]
+    assert drawdown["value"] == pytest.approx(0.2)
+    assert drawdown["threshold"] == pytest.approx(0.2)
+    assert all(item["passed"] for item in verdict["criteria"].values())
+
+
+@pytest.mark.parametrize(
+    ("holdout", "failing"),
+    [
+        (_holdout(annual=0.0), "annualized_mean_net_excess"),
+        (_holdout(p=0.1), "one_sided_p_excess"),
+        (_holdout(nets=("0", "-0.21")), "max_relative_drawdown"),
+    ],
+)
+def test_each_holdout_criterion_fails_the_verdict_on_its_own(
+    holdout: dict[str, object], failing: str
+) -> None:
+    verdict = p6.evaluate_holdout(holdout, CRITERIA, VALIDATION)
+
+    assert verdict["verdict"] == "不通过"
+    assert {name for name, item in verdict["criteria"].items() if not item["passed"]} == {failing}
+
+
+def test_the_one_sided_p_is_the_protocols_derivation_from_the_two_sided_one() -> None:
+    """p = 0.08 two-sided with a positive mean is 0.04 one-sided (passes); with a negative mean it
+    is 0.96 (fails) -- a two-sided reading would fail the first and pass nothing."""
+    assert p6.evaluate_holdout(_holdout(p=0.08), CRITERIA, VALIDATION)["verdict"] == "通过"
+    negative = p6.evaluate_holdout(_holdout(p=0.08, mean=-0.001), CRITERIA, VALIDATION)
+    assert negative["criteria"]["one_sided_p_excess"]["value"] == pytest.approx(0.96)
+
+
+def test_an_unmeasured_holdout_does_not_pass() -> None:
+    verdict = p6.evaluate_holdout({"error": "StrategyRunBlockedError: x"}, CRITERIA, VALIDATION)
+    assert verdict["verdict"] == "不通过"
+
+
+def test_the_validation_drawdown_must_be_the_registered_one() -> None:
+    with pytest.raises(p6.HoldoutEvaluationError):
+        p6.evaluate_holdout(
+            _holdout(), {**CRITERIA, "validation_max_relative_drawdown": 0.05}, VALIDATION
+        )
+
+
+# --- section 1: the precondition ------------------------------------------------------------------
+
+
+def test_the_precondition_runs_the_protocols_command_line(tmp_path: Path) -> None:
+    assert p6.precondition_argv(tmp_path) == (
+        "factor",
+        "stale-return-paths",
+        "--runtime-dir",
+        str(tmp_path),
+        "--exchange",
+        "SSE",
+        "--max-staleness-days",
+        "30",
+    )
+    seen: list[tuple[str, ...]] = []
+
+    def runner(argv: Sequence[str]) -> p6.CommandOutcome:
+        seen.append(tuple(argv))
+        return p6.CommandOutcome(exit_code=0, stdout="none\n", stderr="")
+
+    p6.require_clean_return_paths(tmp_path, runner=runner)
+    assert seen == [p6.precondition_argv(tmp_path)]
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "stdout"),
+    [
+        (1, "STALE reversal_1d/v1 raw 2020 ...\n"),
+        (0, "STALE ...\n"),
+        (1, "none\n"),
+        (2, ""),
+        (0, ""),
+    ],
+)
+def test_a_precondition_that_is_not_clean_is_refused_by_name(
+    tmp_path: Path, exit_code: int, stdout: str
+) -> None:
+    def runner(argv: Sequence[str]) -> p6.CommandOutcome:
+        return p6.CommandOutcome(exit_code=exit_code, stdout=stdout, stderr="Usage: ...")
+
+    with pytest.raises(p6.StaleReturnPathsError, match="stale-return-paths"):
+        p6.require_clean_return_paths(tmp_path, runner=runner)
+
+
+def test_the_default_runner_reports_a_command_the_cli_does_not_have() -> None:
+    outcome = p6.run_openalpha(("no-such-command",))
+    assert outcome.exit_code != 0
+
+
+@pytest.mark.parametrize("command", p6.COMMANDS)
+def test_every_command_runs_the_precondition_first_and_stops_on_it(
+    tmp_path: Path, command: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    touched: list[str] = []
+
+    def refuse(runtime_dir: Path) -> None:
+        raise p6.StaleReturnPathsError("`openalpha factor stale-return-paths` listed 3 builds")
+
+    environment = p6.Environment(
+        precondition=refuse,
+        sessions=lambda runtime_dir: touched.append("sessions") or SESSIONS,  # type: ignore[func-returns-value]
+        sdk=lambda runtime_dir: touched.append("sdk") or _FakeSDK(),  # type: ignore[func-returns-value]
+        code_commit=lambda: touched.append("commit") or COMMIT,  # type: ignore[func-returns-value]
+        repo=tmp_path,
+    )
+    ledger = tmp_path / "ledger.jsonl"
+
+    code = p6.main(
+        [command, "--runtime-dir", str(tmp_path), "--ledger", str(ledger)], environment=environment
+    )
+
+    assert code == 1
+    assert "StaleReturnPathsError" in capsys.readouterr().err
+    assert touched == []
+    assert not ledger.exists()
+
+
+# --- the whole chain, through the command line ----------------------------------------------------
+
+
+def test_every_stage_runs_from_the_command_line_and_nothing_is_typed_by_hand(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q", "--template=")
+    (repo / "README.md").write_text("research\n", encoding="utf-8")
+    commit_file(repo, repo / "README.md", "initial", at=datetime(2026, 9, 26, 0, 0, tzinfo=UTC))
+    research = repo / "scripts" / "research"
+    monkeypatch.setattr(
+        registry, "_imported_package", lambda: repo / "src" / "openalpha_cn" / "__init__.py"
+    )
+    monkeypatch.setattr(
+        registry, "_imported_scripts", lambda: (research / "grid.py", research / "registry.py")
+    )
+    sdk = _FakeSDK()
+    checks: list[Path] = []
+    environment = p6.Environment(
+        precondition=checks.append,
+        sessions=lambda runtime_dir: SESSIONS,
+        sdk=lambda runtime_dir: sdk,
+        code_commit=lambda: head(repo),
+        repo=repo,
+    )
+    runtime = tmp_path / "runtime"
+    ledger = tmp_path / "research" / "ledger.jsonl"
+    registration = repo / "docs" / "research" / "p6-registration.json"
+
+    def run(command: str, *extra: str) -> str:
+        code = p6.main(
+            [command, "--runtime-dir", str(runtime), "--ledger", str(ledger), *extra],
+            environment=environment,
+        )
+        captured = capsys.readouterr()
+        assert code == 0, captured.err
+        return captured.out
+
+    out = run("discovery")
+    assert "189/189" in out
+    assert grid.stage_family(ledger, "discovery") == 189
+    assert len(sdk.ic_calls) == 189
+    assert "189 skipped" in run("discovery")  # resumable: nothing is measured twice
+
+    run("survivors")
+    survivors = json.loads((ledger.parent / "p6-survivors.json").read_text(encoding="utf-8"))
+    assert survivors["family_size"] == 189
+    assert survivors["fdr_table"]["family_size"] == 189
+
+    run("composition-sources")
+    assert grid.stage_family(ledger, "composition") == 19
+    run("composition-strategies")
+    assert grid.stage_family(ledger, "composition") == 54
+
+    run("finalists")
+    finalists = json.loads((ledger.parent / "p6-finalists.json").read_text(encoding="utf-8"))
+    assert len(finalists["finalists"]) == len(set(finalists["finalists"])) <= 5
+
+    run("validation")
+    assert grid.stage_family(ledger, "validation") == len(finalists["finalists"])
+    validation = json.loads((ledger.parent / "p6-validation.json").read_text(encoding="utf-8"))
+
+    run("register", "--registration", str(registration))
+    body = json.loads(registration.read_text(encoding="utf-8"))
+    assert body["config"]["start"] == "2024-01-02"
+    assert body["config"]["end"] == "2026-09-24"
+    assert body["criteria"]["validation_config_id"] == validation["chosen"]
+    assert grid.stage_family(ledger, "holdout") == 0  # registering never runs the holdout
+    commit_file(repo, registration, "register", at=datetime(2026, 9, 27, 0, 0, tzinfo=UTC))
+
+    out = run("holdout", "--registration", str(registration), "--repo", str(repo))
+    verdict = json.loads((ledger.parent / "p6-holdout-verdict.json").read_text(encoding="utf-8"))
+    assert verdict["verdict"] in ("通过", "不通过")
+    assert verdict["verdict"] in out
+    rows = [row for row in grid.read_ledger(ledger) if row.stage == "holdout"]
+    assert [row.kind for row in rows] == ["holdout_claim", "measurement"]
+    validation_row = next(
+        row for row in grid.read_ledger(ledger) if row.config_id == validation["chosen"]
+    )
+    computed = p6.evaluate_holdout(rows[1].result, body["criteria"], validation_row.result)
+    assert (verdict["verdict"], verdict["criteria"]) == (
+        computed["verdict"],
+        grid.to_json_value(computed["criteria"]),
+    )
+    assert len(checks) == 9
