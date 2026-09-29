@@ -7,7 +7,8 @@ list, a selection or a verdict. Each stage is one command::
 
     python scripts/research/p6.py <command> --runtime-dir <store> --ledger <ledger.jsonl>
 
-Before any command does anything else it runs the section 1 precondition,
+Before any command but the read-only `holdout-verdict` (`READ_ONLY_COMMANDS` says why) does
+anything else, it runs the section 1 precondition,
 `openalpha factor stale-return-paths --runtime-dir <store> --exchange SSE --max-staleness-days 30`,
 and refuses by name (`StaleReturnPathsError`) unless it exited 0, printed exactly
 `stale return-path builds: none` on stdout, and stated its `BUDGET stale-return-path-recompute N`
@@ -72,6 +73,10 @@ another configuration. So:
   R == V because a report or a protocol record is committed between validation and
   registration, and a byte-identical diff over the bound code is the same guarantee git gives
   the holdout guard; `run_holdout_stage` repeats the check before the one run;
+* every command that records a commit (`LEDGER_WRITING_COMMANDS`) refuses to run with
+  `openalpha_cn` or the research scripts imported from anywhere but this repository --
+  `registry`'s own `ForeignPackageError` / `ForeignScriptsError` -- since the recorded commit
+  names this checkout, not the code another checkout's editable install would run;
 * every stage refuses a checkout with uncommitted changes (`_clean_commit`). The discovery stage
   may be resumed at another commit (a crash fixed); the survivors report lists every commit its
   rows name (`code_commits`).
@@ -221,6 +226,18 @@ COMMANDS: Final[tuple[str, ...]] = (
     "holdout",
     "holdout-verdict",
 )
+LEDGER_WRITING_COMMANDS: Final[frozenset[str]] = frozenset(
+    {"discovery", "composition-sources", "composition-strategies", "validation", "register"}
+)
+"""The commands that record a commit (a ledger row or the registration) and so must run the code
+of the checkout that commit names: `openalpha_cn` and the research scripts imported from this
+repository (`registry`'s `ForeignPackageError` / `ForeignScriptsError`). `holdout` gets the same
+two checks from `registry.run_holdout`'s own guard."""
+READ_ONLY_COMMANDS: Final[frozenset[str]] = frozenset({"holdout-verdict"})
+"""Commands exempt from section 1's precondition. `holdout-verdict` reads the ledger's holdout
+rows and the registration and nothing in the panel store, and the one run it judges has already
+happened: a panel that went stale afterwards changes nothing it reads, and must not stand
+between the protocol and the verdict of its one holdout run."""
 _FULL_COMMIT: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{40}")
 CLEAN_RETURN_PATHS: Final[str] = "stale return-path builds: none"
 """The detector's whole stdout when no stored build is stale (`V2-P6-020`)."""
@@ -278,6 +295,11 @@ class ArtifactConflictError(P6Error):
 
 class HoldoutEvaluationError(P6Error):
     """The holdout's verdict cannot be computed against the registration it ran under."""
+
+
+class HoldoutClaimMissingError(HoldoutEvaluationError):
+    """The ledger holds holdout rows and no claim: `grid` writes a measurement only after its
+    claim, so the ledger was edited by hand."""
 
 
 # --- section 1: the precondition -----------------------------------------------------------------
@@ -745,7 +767,8 @@ def survivors(ledger: Path, sessions: Sequence[date]) -> dict[str, Any]:
         else [[factor, tier_of[row.config_id]] for factor, row in chosen]
     )
     surviving = [row for factor in by_factor for row in by_factor[factor]]
-    measured_ic = any("p_ic" in row.result for row in rows.values())
+    with_ic = sum(1 for row in rows.values() if "p_ic" in row.result)
+    measured_ic = with_ic > 0
     return {
         "schema": "openalpha-p6-survivors/v1",
         "stage": DISCOVERY,
@@ -758,7 +781,7 @@ def survivors(ledger: Path, sessions: Sequence[date]) -> dict[str, Any]:
             if measured_ic
             else None
         ),
-        "ic_fdr_note": None if measured_ic else "no discovery row carries p_ic",
+        "ic_fdr_note": _secondary_family_note(list(rows.values()), with_ic),
         "code_commits": sorted(
             {
                 row.result["code_commit"]
@@ -772,6 +795,22 @@ def survivors(ledger: Path, sessions: Sequence[date]) -> dict[str, Any]:
         "fallback": fallback,
         "stage_rows_sha256": _rows_digest(list(rows.values())),
     }
+
+
+def _secondary_family_note(rows: Sequence[LedgerRow], with_ic: int) -> str | None:
+    """What the secondary family is missing, with its counts; `None` when every hypothesis has a
+    `p_ic`. The survivors command prints it as a warning (sections 3 and 8 require the table)."""
+    total = len(rows)
+    if with_ic == total:
+        return None
+    ic_errors = sum(1 for row in rows if "ic_error" in row.result)
+    errors = sum(1 for row in rows if "error" in row.result)
+    counts = (
+        f"次家族 {total} 个假设，{with_ic} 个有 p_ic（{ic_errors} 行 ic_error、{errors} 行 error）"
+    )
+    if with_ic == 0:
+        return f"{counts}，§3/§8 次家族 FDR 表缺失"
+    return f"{counts}，{total - with_ic} 个假设在次家族 FDR 表中 withheld"
 
 
 def _components(ledger: Path, sessions: Sequence[date]) -> tuple[tuple[str, str], ...]:
@@ -1240,7 +1279,13 @@ def holdout_verdict(ledger: Path, sessions: Sequence[date], registration: Path) 
             )
         if row.config_id != registered.body["config_id"]:
             raise HoldoutEvaluationError(f"holdout row {row.line} is not the registered config")
-    claim = next(row for row in rows if row.kind == grid.HOLDOUT_CLAIM)
+    claims = [row for row in rows if row.kind == grid.HOLDOUT_CLAIM]
+    if not claims:
+        raise HoldoutClaimMissingError(
+            f"{ledger} holds {len(rows)} holdout row(s) and no claim; a measurement is written "
+            "only after its claim, so the ledger was edited"
+        )
+    claim = claims[0]
     measured = [row for row in rows if row.kind == grid.MEASUREMENT]
     criteria = registered.body["criteria"]
     if measured:
@@ -1513,6 +1558,8 @@ def _dispatch(arguments: argparse.Namespace, environment: Environment, echo: Ech
     if command == "survivors":
         body = survivors(ledger, sessions)
         write_artifact(artifacts / "p6-survivors.json", body)
+        if body["ic_fdr_note"]:
+            echo(f"warning: {body['ic_fdr_note']}")
         echo(f"survivors: {len(body['survivors'])}, fallback {body['fallback']}")
         echo(f"components: {body['components']}")
         return
@@ -1573,7 +1620,12 @@ def main(argv: Sequence[str] | None = None, *, environment: Environment | None =
     arguments = _parser().parse_args(argv)
     world = default_environment() if environment is None else environment
     try:
-        world.precondition(arguments.runtime_dir)
+        if arguments.command not in READ_ONLY_COMMANDS:
+            world.precondition(arguments.runtime_dir)
+        if arguments.command in LEDGER_WRITING_COMMANDS:
+            root = world.repo.resolve()
+            registry._refuse_a_foreign_package(root)
+            registry._refuse_foreign_scripts(root)
         _dispatch(arguments, world, print)
     except (
         P6Error,

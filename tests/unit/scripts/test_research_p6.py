@@ -1150,7 +1150,7 @@ def test_the_real_detector_admits_a_clean_store_and_refuses_one_with_a_stale_bui
         p6.require_clean_return_paths(tmp_path)
 
 
-@pytest.mark.parametrize("command", p6.COMMANDS)
+@pytest.mark.parametrize("command", [c for c in p6.COMMANDS if c != "holdout-verdict"])
 def test_every_command_runs_the_precondition_first_and_stops_on_it(
     tmp_path: Path, command: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1280,7 +1280,7 @@ def test_every_stage_runs_from_the_command_line_and_nothing_is_typed_by_hand(
         computed["verdict"],
         grid.to_json_value(computed["criteria"]),
     )
-    assert len(checks) == 11
+    assert len(checks) == 10  # every command but the read-only `holdout-verdict`
 
 
 # --- review round 1: one commit through composition and validation ------------------------------
@@ -1554,9 +1554,53 @@ def test_the_secondary_family_is_controlled_over_the_whole_stage_and_reported_on
 
 
 def test_a_stage_with_no_ic_p_value_reports_the_secondary_family_as_absent(tmp_path: Path) -> None:
-    answer = p6.survivors(_survivor_ledger(tmp_path, {}), SESSIONS)
+    configs = p6.discovery_configs(SESSIONS)
+    refused = {"error": "StrategyRunBlockedError: x", "code_commit": COMMIT}
+    special = {
+        _id(configs[0]): {**_result(p=0.01), "ic_error": "no build"},
+        _id(configs[1]): refused,
+    }
+    answer = p6.survivors(_survivor_ledger(tmp_path, special), SESSIONS)
+
     assert answer["ic_fdr_table"] is None
-    assert "p_ic" in answer["ic_fdr_note"]
+    assert answer["ic_fdr_note"] == (
+        "次家族 189 个假设，0 个有 p_ic（1 行 ic_error、1 行 error），§3/§8 次家族 FDR 表缺失"
+    )
+
+
+def test_the_survivors_command_warns_when_the_secondary_family_is_incomplete(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    configs = p6.discovery_configs(SESSIONS)
+    rows = {
+        _id(config): (
+            {**_result(), "ic_error": "no build"} if index < 3 else {**_result(), "p_ic": 0.5}
+        )
+        for index, config in enumerate(configs)
+    }
+    ledger = tmp_path / "research" / "ledger.jsonl"
+    _fill(ledger, "discovery", configs, rows)
+    environment = p6.Environment(
+        precondition=lambda runtime_dir: None,
+        sessions=lambda runtime_dir: SESSIONS,
+        sdk=lambda runtime_dir: _FakeSDK(),
+        code_commit=lambda: COMMIT,
+        repo=tmp_path,
+    )
+
+    code = p6.main(
+        ["survivors", "--runtime-dir", str(tmp_path), "--ledger", str(ledger)],
+        environment=environment,
+    )
+
+    out = capsys.readouterr().out
+    assert code == 0
+    note = (
+        "次家族 189 个假设，186 个有 p_ic（3 行 ic_error、0 行 error），"
+        "3 个假设在次家族 FDR 表中 withheld"
+    )
+    assert f"warning: {note}" in out
+    assert json.loads((ledger.parent / "p6-survivors.json").read_text())["ic_fdr_note"] == note
 
 
 def test_a_discovery_stage_that_measured_nothing_is_refused_not_taken_as_no_survivor(
@@ -1633,3 +1677,120 @@ def test_a_row_the_window_refuses_carries_the_stages_commit(tmp_path: Path) -> N
     (row,) = grid.read_ledger(ledger)
     assert row.result["error"].startswith("StageWindowError: ")
     assert row.result["code_commit"] == COMMIT
+
+
+# --- re-review: the imported code, the read-only verdict, the missing claim ----------------------
+
+WRITING: Final[tuple[str, ...]] = (
+    "discovery",
+    "composition-sources",
+    "composition-strategies",
+    "validation",
+    "register",
+)
+
+
+@pytest.mark.parametrize("command", WRITING)
+def test_a_ledger_writing_command_refuses_code_imported_from_another_checkout(
+    tmp_path: Path, command: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`code_commit` names this checkout; a stage measured with `openalpha_cn` or the research
+    scripts imported from another (a worktree's editable install points at the main checkout's
+    `src`) would record a commit that is not the code that ran."""
+    touched: list[str] = []
+    environment = p6.Environment(
+        precondition=lambda runtime_dir: None,
+        sessions=lambda runtime_dir: touched.append("sessions") or SESSIONS,  # type: ignore[func-returns-value]
+        sdk=lambda runtime_dir: touched.append("sdk") or _FakeSDK(),  # type: ignore[func-returns-value]
+        code_commit=lambda: touched.append("commit") or COMMIT,  # type: ignore[func-returns-value]
+        repo=tmp_path,
+    )
+    ledger = tmp_path / "ledger.jsonl"
+
+    code = p6.main(
+        [command, "--runtime-dir", str(tmp_path), "--ledger", str(ledger)], environment=environment
+    )
+
+    assert code == 1
+    assert "ForeignPackageError" in capsys.readouterr().err
+    assert touched == []
+    assert not ledger.exists()
+
+
+def test_research_scripts_imported_from_another_checkout_are_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        registry, "_imported_package", lambda: tmp_path / "src" / "openalpha_cn" / "__init__.py"
+    )
+    environment = p6.Environment(
+        precondition=lambda runtime_dir: None,
+        sessions=lambda runtime_dir: SESSIONS,
+        sdk=lambda runtime_dir: _FakeSDK(),
+        code_commit=lambda: COMMIT,
+        repo=tmp_path,
+    )
+    ledger = tmp_path / "ledger.jsonl"
+
+    code = p6.main(
+        ["discovery", "--runtime-dir", str(tmp_path), "--ledger", str(ledger)],
+        environment=environment,
+    )
+
+    assert code == 1
+    assert "ForeignScriptsError" in capsys.readouterr().err
+    assert not ledger.exists()
+
+
+def test_the_read_only_verdict_does_not_depend_on_the_panel_staying_fresh(
+    validated_repo: tuple[Path, Path, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Recovering a verdict reads the ledger and the registration only; a panel that went stale
+    after the holdout ran must not stop the one run's verdict from being read."""
+    repo, ledger, _ = validated_repo
+    registration = _registered(repo, ledger)
+    p6.run_holdout_stage(ledger, SESSIONS, registration, repo, _FakeSDK().run_strategy_backtest)
+
+    def stale(runtime_dir: Path) -> None:
+        raise p6.StaleReturnPathsError("stale return-path builds: 4")
+
+    environment = p6.Environment(
+        precondition=stale,
+        sessions=lambda runtime_dir: SESSIONS,
+        sdk=lambda runtime_dir: _FakeSDK(),
+        code_commit=lambda: COMMIT,
+        repo=repo,
+    )
+    arguments = ["holdout-verdict", "--runtime-dir", str(repo), "--ledger", str(ledger)]
+
+    code = p6.main([*arguments, "--registration", str(registration)], environment=environment)
+
+    assert code == 0, capsys.readouterr().err
+    assert (ledger.parent / "p6-holdout-verdict.json").exists()
+
+
+def test_holdout_rows_with_no_claim_are_refused_by_name(
+    validated_repo: tuple[Path, Path, str],
+) -> None:
+    """`grid` writes a measurement only after its claim, so a ledger with one and not the other
+    was edited by hand."""
+    repo, ledger, _ = validated_repo
+    registration = _registered(repo, ledger)
+    body = json.loads(registration.read_text(encoding="utf-8"))
+    row = {
+        "schema": grid.LEDGER_SCHEMA,
+        "stage": "holdout",
+        "kind": "measurement",
+        "config_id": body["config_id"],
+        "config": body["config"],
+        "result": {
+            "registration_sha256": hashlib.sha256(registration.read_bytes()).hexdigest(),
+            "registration_commit": head(repo),
+        },
+        "recorded_at": AT.isoformat(),
+    }
+    with ledger.open("a", encoding="utf-8") as handle:
+        handle.write(grid.canonical_json(row) + "\n")
+
+    with pytest.raises(p6.HoldoutClaimMissingError, match="no claim"):
+        p6.holdout_verdict(ledger, SESSIONS, registration)

@@ -134,11 +134,11 @@ PROTOCOL_RANDOM_SEED: Final[int] = 20_260_926
 PROTOCOL_FALSE_DISCOVERY_RATE: Final[float] = 0.10
 PROTOCOL_DEPENDENCE: Final[DependenceAssumption] = "arbitrary"
 PRIMARY_EXCESS_BENCHMARK: Final[str] = EQUAL_WEIGHT_ALL_A
+"""The benchmark the primary family's excess return is measured against (the protocol's
+decision); `000905.SH` is reported beside it and tests nothing."""
 REPORTED_BENCHMARK: Final[str] = "000905.SH"
 """The benchmark section 3 reports beside the primary one. Its series and statistics are stored
 under `reported_*` keys and no selection or test reads them."""
-"""The benchmark the primary family's excess return is measured against (the protocol's
-decision); `000905.SH` is reported beside it and tests nothing."""
 DEFAULT_P_VALUE_KEY: Final[str] = "p_excess"
 """The primary family's p-value. `p_ic` is the secondary family's, controlled by naming it."""
 
