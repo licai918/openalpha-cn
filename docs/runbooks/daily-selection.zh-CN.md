@@ -103,6 +103,15 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file "<主检出>/.en
 
 实测：18:30 和次日 09:14 登记的记录，回测结果与配置自己的回测逐期相同；09:15 登记的记录被拒绝。
 
+### 记录的结果窗口比账面期晚一个交易日（`V2-P6-012`）
+
+组合记录声明 `horizon = Rd`，它的 `outcome_known_at` 采用标签口径：在信号日之后第一个交易日的收盘入场，再往后数 R 个交易日。账面则是从下一个交易日的开盘持有到下一次调仓日的收盘，按固定网格就是信号日之后第 R 个交易日。所以账面期比记录的结果窗口早结束一个交易日。
+
+两者都成立，只是回答的问题不同：
+
+- 记录的 `outcome_known_at` 是评判它的那个标签何时存在，保持不变。改成 `R-1` 天会让每条已存记录变成另一个声明，而 `0d` 根本不是合法的期限。
+- 前向报告判断哪一期已经完整时，用 `strategy_registration.book_period_end`：给它下一次实际调仓日，或者固定网格的间隔。
+
 ### 前向账面按命令实际调仓的日子定价（`V2-P6-011` / `V2-P6-012`）
 
 `scripts/daily_selection.py` 的 `journalled_days(目录)` 按日期列出命令完成的每一天，包括决定（`rebalanced`、`held`、`not a rebalance day`）、所用记录和打印出的目标。`journalled_rebalances(目录)` 只列出实际调仓的日子及各自的记录。

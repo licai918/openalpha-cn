@@ -46,7 +46,11 @@ from strategy_fixtures import READ_AT, REVERSAL, write_strategy_corpus
 from openalpha_cn import cli
 from openalpha_cn.backtest.strategy_backtest import EQUAL_WEIGHT_ALL_A
 from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
-from openalpha_cn.domain.daily_prices import DAILY_BASIC_DATASET, DAILY_DATASET
+from openalpha_cn.domain.daily_prices import (
+    DAILY_BASIC_DATASET,
+    DAILY_DATASET,
+    SESSION_CLOSE_TIME,
+)
 from openalpha_cn.domain.financial_statements import (
     BALANCE_SHEET_DATASET,
     CASH_FLOW_DATASET,
@@ -68,7 +72,11 @@ from openalpha_cn.panel_ingest import (
     session_publication_instant,
 )
 from openalpha_cn.storage.predictions import FilePredictionStore
-from openalpha_cn.strategy_registration import RegisteredConfiguration, signal_day_batch
+from openalpha_cn.strategy_registration import (
+    RegisteredConfiguration,
+    book_period_end,
+    signal_day_batch,
+)
 from openalpha_cn.strategy_view import (
     StrategyRunBlockedError,
     backtest_strategy,
@@ -2051,6 +2059,33 @@ def test_a_record_filed_as_the_next_call_auction_starts_refuses_the_book(tmp_pat
 
     assert late.isoformat() in str(refused.value)
     assert "call auction" in str(refused.value)
+
+
+def test_a_records_book_period_ends_one_session_before_its_outcome_window(tmp_path: Path) -> None:
+    """`V2-P6-012`'s question of a record: when did the book period it traded end? A composite
+    record declares `horizon = Rd`, the label's convention -- entered at the next session's close
+    and measured to the close `R` sessions after that -- so its `outcome_known_at` is one session
+    after the book's period, which opens at the next session's open and ends at the close of the
+    next rebalance. `book_period_end` answers the book's question and the record keeps the
+    label's answer; both are asserted against the book itself."""
+    panel, days, identifiers, _configured = _static_records(tmp_path, _after_the_close)
+    result = _by_records(tmp_path, panel, identifiers)
+    store = FilePredictionStore(tmp_path / "predictions", clock=lambda: READ_AT)
+    calendar = load_trading_calendar(
+        PanelStore(tmp_path / "panel"), exchange=EXCHANGE, years=(2026,), as_of=READ_AT
+    )
+    complete = [period for period in result.periods if period.start in days[:-1]]
+    assert complete
+
+    for period in complete:
+        record = store.get(identifiers[days.index(period.start)])
+        assert record is not None
+        close = datetime.combine(period.end, SESSION_CLOSE_TIME, daily.SHANGHAI)
+        assert book_period_end(record, calendar=calendar, rebalance_every_sessions=3) == close
+        assert book_period_end(record, calendar=calendar, next_rebalance=period.end) == close
+        assert record.outcome_known_at == datetime.combine(
+            calendar.next_trading_day(period.end), SESSION_CLOSE_TIME, daily.SHANGHAI
+        )
 
 
 def test_the_days_targets_are_the_book_the_backtest_holds_after_that_rebalance(

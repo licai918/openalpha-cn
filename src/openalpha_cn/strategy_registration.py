@@ -25,6 +25,18 @@ rows and ICs that was. A reader of such a record must take those two fields in t
 ranked security carries its composite -- the number the book ordered the market by -- and a
 security carrying some component but not all abstains with `ABSTAIN_INCOMPLETE_FEATURES`.
 
+## A record's outcome window and the book period it traded are one session apart
+
+A composite record declares `horizon = Rd`, and its `outcome_known_at` is the label's:
+`build_label_window` enters at the close of the session after the signal day and measures `R`
+sessions from there, so the window closes `R + 1` sessions after the signal day. The book prices
+the same scores from the next session's **open** to the close of the next rebalance -- on the
+grid `R` sessions after the signal day -- so the book period ends one session before the record's
+outcome window does. Both are true of the record, and they answer different questions: the
+record's `outcome_known_at` is when the label it is judged against exists, and it stays the
+label's (declaring `R - 1` sessions would move every stored record to a second declaration, and
+`0d` is no horizon at all). A reader that needs the book's -- the forward report deciding which
+periods are complete -- asks `book_period_end`.
 """
 
 from __future__ import annotations
@@ -41,6 +53,7 @@ from openalpha_cn.domain.alpha_model import (
     Prediction,
     PredictionBatch,
 )
+from openalpha_cn.domain.daily_prices import SESSION_CLOSE_TIME
 from openalpha_cn.domain.prediction_record import PredictionRecord
 from openalpha_cn.domain.trading_calendar import TradingCalendar
 from openalpha_cn.panel.catalog import DEFAULT_DATE_TIMEZONE
@@ -57,6 +70,7 @@ __all__ = [
     "HeldRecordLookup",
     "RegisteredConfiguration",
     "StrategyRegistrationError",
+    "book_period_end",
     "registration_cutoff",
     "session_record",
     "signal_day_batch",
@@ -184,3 +198,38 @@ def registration_cutoff(calendar: TradingCalendar, session: date) -> datetime:
     (`strategy_view.REGISTRATION_CUTOFF`; a backtest reading the record holds it to the same
     instant)."""
     return registration_deadline(calendar.next_trading_day(session))
+
+
+def book_period_end(
+    record: PredictionRecord,
+    *,
+    calendar: TradingCalendar,
+    rebalance_every_sessions: int | None = None,
+    next_rebalance: date | None = None,
+) -> datetime:
+    """The close that ends the book period `record`'s scores were traded over (`V2-P6-012`).
+
+    The book trades a signal day's scores from the next session's open to the close of the next
+    rebalance: `next_rebalance` when the caller has it -- a forward book on the days its daily
+    command rebalanced -- or, on the fixed grid, the session `rebalance_every_sessions` after the
+    record's day. Exactly one of the two. The record's own `outcome_known_at` is the label
+    window's close, one session later; see the module docstring for why both stand.
+    """
+    if (rebalance_every_sessions is None) == (next_rebalance is None):
+        raise StrategyRegistrationError(
+            "a book period ends at the next rebalance: name it, or the grid's interval -- one"
+        )
+    day = record.batch.as_of.astimezone(SHANGHAI).date()
+    if next_rebalance is not None:
+        if next_rebalance <= day:
+            raise StrategyRegistrationError(
+                f"the next rebalance {next_rebalance.isoformat()} is not after the record's day "
+                f"{day.isoformat()}"
+            )
+        end = next_rebalance
+    else:
+        assert rebalance_every_sessions is not None
+        if rebalance_every_sessions < 1:
+            raise StrategyRegistrationError("a rebalance interval is at least one session")
+        end = calendar.shift(day, rebalance_every_sessions)
+    return datetime.combine(end, SESSION_CLOSE_TIME, SHANGHAI)
