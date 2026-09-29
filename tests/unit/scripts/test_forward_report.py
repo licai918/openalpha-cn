@@ -65,14 +65,16 @@ from strategy_fixtures import READ_AT, write_strategy_corpus, write_strategy_cor
 from openalpha_cn import strategy_registration
 from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
 from openalpha_cn.domain.panel_batch import PanelColumn, TimelineColumns
-from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET
+from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET, SUSPENSION_DATASET
 from openalpha_cn.domain.upstream_defects import UPSTREAM_DEFECT_DATA_COLUMNS
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import write_factor_panels
 from openalpha_cn.panel_ingest import (
     UPSTREAM_DEFECTS_DATASET,
+    session_publication_instant,
     split_panel_batch_by_year,
     write_adjustment_factors,
+    write_suspensions,
     write_upstream_defects,
 )
 from openalpha_cn.storage.predictions import FilePredictionStore
@@ -1731,11 +1733,12 @@ LATE: Final[datetime] = datetime(2027, 1, 15, 21, 0, tzinfo=daily.SHANGHAI)
 
 def _corrupted_late_record(
     root: Path, source: Mapping[str, Any], *, day: date, anchor: date
-) -> tuple[Any, Any]:
+) -> tuple[Any, Any, Any]:
     """`day`'s record under `source` on the two-year corpus, filed at its evening with every score
     negated -- so its recompute differs whatever else does -- and the provenance written then;
-    and the registration's check of it. The recompute reads the corpus at its readable instant:
-    the 2027 partitions reach past the filing, so the filing time cannot read them."""
+    and the registration's check of it, and the provenance. The recompute reads the corpus at its
+    readable instant: the 2027 partitions reach past the filing, so the filing time cannot read
+    them."""
     store = PanelStore(root / "panel")
     configured = tds._base(**source)
     filed = tds._evening(day)
@@ -1776,7 +1779,7 @@ def _corrupted_late_record(
         anchor=anchor,
         provenance_for=lambda _record: held,
     )
-    return record, check
+    return record, check, held
 
 
 def _a_late_factor_step(root: Path, subject: str, *, on: date, back_on: date) -> None:
@@ -1839,7 +1842,7 @@ def test_a_late_factor_step_in_force_before_the_window_is_a_correction_not_a_ref
     naming `adj_factor:2026` (fix round 16). With nothing restated it is refused."""
     strategy_fixtures.write_two_year_corpus(tmp_path)
     day = date(2027, 1, 12)
-    record, check = _corrupted_late_record(tmp_path, tds.TRAILING, day=day, anchor=day)
+    record, check, _held = _corrupted_late_record(tmp_path, tds.TRAILING, day=day, anchor=day)
     if stepped:
         subject = strategy_fixtures._two_year_panel().securities[1]
         _a_late_factor_step(tmp_path, subject, on=date(2026, 11, 30), back_on=date(2026, 12, 1))
@@ -1870,7 +1873,9 @@ def test_a_walk_forward_records_window_is_counted_from_its_refit_day(
     assert len(full.calendar().trading_days_between(anchor, day)) - 1 == 23
     early = (date(2026, 11, 2), tds._evening(date(2026, 11, 2)))
     _record_return_path_decisions(tmp_path, [early], full=full)
-    record, check = _corrupted_late_record(tmp_path, TWO_YEAR_WALK_FORWARD, day=day, anchor=anchor)
+    record, check, _held = _corrupted_late_record(
+        tmp_path, TWO_YEAR_WALK_FORWARD, day=day, anchor=anchor
+    )
     if decided:
         _record_return_path_decisions(tmp_path, [early, (date(2026, 12, 4), LATE)], full=full)
 
@@ -1901,3 +1906,67 @@ def test_a_step_series_is_read_from_the_year_before_its_window_opens() -> None:
     assert strategy_registration._dataset_years(request, day, "daily") == (2026, 2027)
     for step in ("adj_factor", "suspend_d"):
         assert strategy_registration._dataset_years(request, day, step) == (2025, 2026, 2027)
+
+
+@pytest.mark.parametrize("schema", ["v1", "v2"])
+def test_a_partition_a_v1_provenance_never_covered_is_not_compared(
+    tmp_path: Path, schema: str
+) -> None:
+    """A provenance file written before fix round 16 (`.../v1`) fingerprints the years its
+    window reached then: not the year before a step series' window. Verifying it against the
+    store as the current rule reads it would find that year "stored since" and flag an honest
+    record `UNVERIFIABLE` for a change of format, not of data. A v1 file's uncovered partitions
+    are not compared (`V2-P6-011` follow-up): the corrupted record here, with nothing corrected,
+    is refused. The same inputs under the current schema do name the partition -- it is a
+    partition the file should have covered."""
+    strategy_fixtures.write_two_year_corpus(tmp_path)
+    halted = strategy_fixtures._two_year_panel().securities[2]
+    session = date(2025, 12, 15)
+    write_suspensions(
+        PanelStore(tmp_path / "panel"),
+        [
+            panel_fixtures._batch(
+                SUSPENSION_DATASET,
+                subjects=(halted,),
+                columns=[
+                    PanelColumn("trade_date", "string", (session.isoformat(),)),
+                    PanelColumn("suspend_type", "string", ("S",)),
+                    PanelColumn("suspend_timing", "string", (None,)),
+                ],
+                event_time=(datetime.combine(session, time(15, 0), tzinfo=daily.SHANGHAI),),
+                available_time=(session_publication_instant(session),),
+                fetched_at=session_publication_instant(session),
+            )
+        ],
+    )
+    day = date(2027, 1, 12)
+    record, _check, held = _corrupted_late_record(tmp_path, tds.TRAILING, day=day, anchor=day)
+    assert ("suspend_d", 2025) in {(item.dataset, item.year) for item in held.inputs}
+    written = dataclasses.replace(
+        held,
+        schema=f"daily-selection-input-provenance/{schema}",
+        inputs=tuple(
+            item for item in held.inputs if (item.dataset, item.year) != ("suspend_d", 2025)
+        ),
+    )
+    read_back = strategy_registration.InputProvenance.from_document(written.document())
+    assert (read_back.schema, read_back.digest) == (written.schema, written.digest)
+    configured = tds._base(**tds.TRAILING)
+    check = strategy_registration.RecordCheck(
+        PanelStore(tmp_path / "panel"),
+        tds.REGISTERED,
+        request_for=lambda session, at: strategy_request(
+            **configured, start=session - timedelta(days=1), end=session, as_of=at
+        ),
+        anchor=day,
+        provenance_for=lambda _record: read_back,
+    )
+
+    refusal = check(record)
+
+    if schema == "v1":
+        assert refusal is not None and "no input it read has been corrected since" in refusal
+        assert check.unverifiable == []
+        return
+    assert refusal is None
+    assert check.unverifiable == [(record.record_id, ("suspend_d:2025 (stored since)",))]

@@ -266,6 +266,14 @@ class InputPartition:
     """`panel_ingest.stored_rows_digest` through the record's day."""
 
 
+INPUT_PROVENANCE_SCHEMA: Final[str] = "daily-selection-input-provenance/v2"
+"""The provenance written now: the partitions fix round 16's window covers."""
+INPUT_PROVENANCE_V1: Final[str] = "daily-selection-input-provenance/v1"
+"""Provenance written before fix round 16: the window counted from the day, no year before a step
+series'. Still read; the partitions it never covered are not compared (`_v1_partitions`)."""
+_PROVENANCE_SCHEMAS: Final = frozenset({INPUT_PROVENANCE_SCHEMA, INPUT_PROVENANCE_V1})
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class InputProvenance:
     """What a daily run read before filing a day's record (`V2-P6-011` round 11).
@@ -283,10 +291,12 @@ class InputProvenance:
     batch_digest: str
     recorded_at: datetime
     inputs: tuple[InputPartition, ...]
+    schema: str = INPUT_PROVENANCE_SCHEMA
+    """The version it was written under: its digest -- its file name -- is of that document."""
 
     def document(self) -> dict[str, object]:
         return {
-            "schema": INPUT_PROVENANCE_SCHEMA,
+            "schema": self.schema,
             "registration_sha256": self.registration_sha256,
             "config_id": self.config_id,
             "session": self.session.isoformat(),
@@ -306,10 +316,12 @@ class InputProvenance:
 
     @classmethod
     def from_document(cls, body: Mapping[str, object]) -> InputProvenance:
-        if body.get("schema") != INPUT_PROVENANCE_SCHEMA:
+        schema = body.get("schema")
+        if schema not in _PROVENANCE_SCHEMAS:
             raise StrategyRegistrationError(f"not a {INPUT_PROVENANCE_SCHEMA} document")
         inputs = cast(Sequence[Sequence[object]], body["inputs"])
         return cls(
+            schema=str(schema),
             registration_sha256=str(body["registration_sha256"]),
             config_id=str(body["config_id"]),
             session=date.fromisoformat(str(body["session"])),
@@ -326,8 +338,6 @@ class InputProvenance:
             ),
         )
 
-
-INPUT_PROVENANCE_SCHEMA: Final[str] = "daily-selection-input-provenance/v1"
 
 ProvenanceLookup = Callable[[PredictionRecord], "InputProvenance | None"]
 """The provenance a daily run wrote for a record's batch, or `None`."""
@@ -359,6 +369,25 @@ def _window_start(request: StrategyRequest, day: date) -> date:
             + spec.horizon_sessions
         )
     return day - timedelta(days=int(sessions * 1.5) + 31)
+
+
+def _v1_partitions(request: StrategyRequest, day: date) -> frozenset[tuple[str, int]]:
+    """The partitions a `INPUT_PROVENANCE_V1` file fingerprinted: every input dataset, in the
+    years from the window counted from the day itself (not a walk-forward fit's refit day) --
+    the rule before fix round 16. Kept only to read those files."""
+    source = request.source
+    sessions = 1
+    if source.trailing_ic is not None:
+        sessions = source.trailing_ic.ic_window_sessions + source.trailing_ic.horizon_sessions
+    elif source.walk_forward is not None:
+        spec = source.walk_forward
+        sessions = spec.train_sessions + spec.embargo_sessions + spec.horizon_sessions
+    first = day - timedelta(days=int(sessions * 1.5) + 31)
+    return frozenset(
+        (dataset, year)
+        for dataset in input_datasets(request)
+        for year in range(first.year, day.year + 1)
+    )
 
 
 _IN_FORCE_DATASETS: Final = frozenset({ADJ_FACTOR_DATASET, SUSPENSION_DATASET})
@@ -458,7 +487,9 @@ def _score_when_readable(
 
     Only that refusal (`PartitionNotYetKnowableError`, `V2-P6-011` fix round 15) sends the day to
     the later instant; any other refusal at `at` is the answer, and a day `at` can read is judged
-    at `at`.
+    at `at`. The second read is made once and never retried: a census shortfall from rows that
+    are genuinely missing (not merely clocked later) is re-checked by it, at the readable
+    instant, and refused there -- a retry around it would turn that refusal into a loop.
 
     **What the later instant can and cannot do.** A record's numbers were fixed at `at`, so they
     carry no row that arrived after it. What arrived between the two instants either leaves the
@@ -525,10 +556,17 @@ def input_provenance(
 def _changes(
     recorded: Mapping[tuple[str, int], InputPartition],
     now: Mapping[tuple[str, int], InputPartition],
+    *,
+    covered: frozenset[tuple[str, int]] | None = None,
 ) -> tuple[str, ...]:
+    """The partitions that moved between `recorded` and `now`. With `covered`, a partition the
+    record's provenance never covered -- a file of an earlier schema -- is not compared: a format
+    change is not a change of data, and must never make a record `UNVERIFIABLE`."""
     changed: list[str] = []
     for dataset, year in sorted(set(recorded) | set(now)):
         before, after = recorded.get((dataset, year)), now.get((dataset, year))
+        if before is None and covered is not None and (dataset, year) not in covered:
+            continue
         if before is None:
             changed.append(f"{dataset}:{year} (stored since)")
         elif after is None:
@@ -571,7 +609,8 @@ def provenance_changes(
     recorded = {(item.dataset, item.year): item for item in provenance.inputs}
     day = provenance.session
     now = _partition_state(store, request, day=day, cache=cache, known=recorded)
-    changed = list(_changes(recorded, now))
+    covered = _v1_partitions(request, day) if provenance.schema == INPUT_PROVENANCE_V1 else None
+    changed = list(_changes(recorded, now, covered=covered))
     filed = provenance.recorded_at
     if read_at is not None and read_at > filed:
         since = _window_start(request, day)
