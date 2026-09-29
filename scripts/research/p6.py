@@ -9,14 +9,16 @@ list, a selection or a verdict. Each stage is one command::
 
 Before any command does anything else it runs the section 1 precondition,
 `openalpha factor stale-return-paths --runtime-dir <store> --exchange SSE --max-staleness-days 30`,
-and refuses by name (`StaleReturnPathsError`) unless that printed `none` and exited 0.
+and refuses by name (`StaleReturnPathsError`) unless it exited 0, printed exactly
+`stale return-path builds: none` on stdout, and stated its `BUDGET stale-return-path-recompute N`
+line on stderr before answering (`V2-P6-020`).
 
 Protocol clause -> code:
 
 * **Section 1** -- the precondition: `precondition_argv`, `require_clean_return_paths`. The
   research code's commit enters every row this driver measures as the result's `code_commit`
-  (`grid` itself records none; see "What the protocol says that the code does not" below). The
-  reading instant `AS_OF` is every configuration's `as_of`.
+  (the measures here record it; `grid.run_grid` itself records none). The reading instant
+  `AS_OF` is every configuration's `as_of`.
 * **Section 2** -- each configuration's `end`: `stage_end`, the last stored-calendar session from
   which the configuration's label length in sessions still ends inside the stage. A strategy
   backtest's label length is 0 (`grid.strategy_label_sessions`: its last period is marked at
@@ -32,13 +34,17 @@ Protocol clause -> code:
   no-survivor fallback: `survivors`.
 * **Section 5** -- step 2a's 19 sources: `composition_source_configs`; step 2b's source and 36
   strategies: `best_source`, `composition_strategy_configs` (the one equal to the source has its
-  `config_id`, so `grid.run_grid` skips it); the finalists and the "BY rejected nothing" branch:
-  `finalists`.
-* **Section 6** -- `validation_configs`, and the choice by information ratio (ties to the lower
-  mean turnover): `validation_selection`.
+  `config_id`, so `grid.run_grid` skips it); the finalists and the "no configuration passes"
+  fallback (BY rejected nothing, or every rejected one has a mean <= 0): `finalists`. The
+  trailing-IC source combines with `zscore_sum`, as section 5 states.
+* **The tie rule before section 6** -- every selection of sections 4, 5 and 6 ranks by
+  information ratio descending, then mean turnover ascending, then `config_id` ascending:
+  `rank_by_information_ratio`, the only ranking here.
+* **Section 6** -- `validation_configs`, and the choice: `validation_selection`.
 * **Section 7** -- the registration, which never runs the holdout: `register_holdout`; the one
-  run and its verdict: `run_holdout_stage` and `evaluate_holdout`, with the maximum relative
-  drawdown from `grid.result_max_relative_drawdown`.
+  run and its verdict: `run_holdout_stage` and `evaluate_holdout`, with the compounded annual
+  relative return from `grid.result_compounded_annual_relative_return` and the maximum relative
+  drawdown from `grid.result_max_relative_drawdown`, both over complete periods.
 
 **Nothing upstream is read from a file a person could edit.** Every command rebuilds the
 configurations of the stages before it from the protocol's constants and the stored calendar,
@@ -48,21 +54,11 @@ because a family with a hand-added or a dropped row is not the protocol's family
 artifacts written next to the ledger are reports of those computations; they are written once
 and a recomputation that disagrees with one is refused (`ArtifactConflictError`).
 
-**A tie the protocol does not break is refused, not broken** (`UnresolvedTieError`): the protocol
-breaks an information-ratio tie by the lower turnover and says nothing past that.
-
 **One commit per stage where a configuration names one.** A walk-forward source carries its
 `code_commit` (rule 8), so the same source at another commit is another configuration: resuming
 the composition or validation stage at a commit other than the one its rows were measured at
 would count one hypothesis twice. Those stages refuse (`StageCommitError`), as does every stage
 asked to run from a checkout with uncommitted changes.
-
-What the protocol says that the code does not (reported in `.superpowers/sdd/`, not repaired):
-
-* Section 1 says `grid` records the research code's commit in every stage row. It does not;
-  this driver records it in each result it writes (`code_commit`).
-* Section 5 names no `combine` for the trailing-IC source. The request requires one;
-  `zscore_sum`, the only combination the protocol names, is used, and the report says so.
 """
 
 from __future__ import annotations
@@ -172,7 +168,7 @@ NO_PASS_NOTE: Final[str] = "阶段 2 无配置通过多重检验"
 PASS: Final[str] = "通过"
 FAIL: Final[str] = "不通过"
 HOLDOUT_CRITERIA: Final[Mapping[str, str]] = {
-    "annualized_mean_net_excess_above": "0",
+    "compounded_annualized_relative_return_above": "0",
     "one_sided_p_excess_below": "0.05",
     "max_relative_drawdown_multiple_of_validation": "2",
 }
@@ -189,6 +185,12 @@ COMMANDS: Final[tuple[str, ...]] = (
     "holdout",
 )
 _FULL_COMMIT: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{40}")
+CLEAN_RETURN_PATHS: Final[str] = "stale return-path builds: none"
+"""The detector's whole stdout when no stored build is stale (`V2-P6-020`)."""
+_RETURN_PATH_BUDGET: Final[re.Pattern[str]] = re.compile(
+    r"BUDGET stale-return-path-recompute (0|[1-9][0-9]*) "
+)
+"""The cost line the detector states on stderr before it recomputes anything."""
 _OPENALPHA: Final[str] = "import sys; from openalpha_cn.cli import app; app(prog_name='openalpha')"
 """The `openalpha` application, without `cli.main`'s `.env` load: the precondition reads the panel
 store and needs no credential."""
@@ -206,7 +208,7 @@ class P6Error(RuntimeError):
 
 
 class StaleReturnPathsError(P6Error):
-    """Section 1's precondition did not answer `none` with exit 0."""
+    """Section 1's precondition did not answer `stale return-path builds: none` with exit 0."""
 
 
 class ProtocolMismatchError(P6Error):
@@ -217,10 +219,6 @@ class StageIncompleteError(P6Error):
     """A stage does not hold exactly the configurations the protocol builds for it."""
 
 
-class UnresolvedTieError(P6Error):
-    """Two configurations tie on information ratio and turnover where the choice matters."""
-
-
 class UnrankableRowError(P6Error):
     """A measured configuration has no information ratio to rank it by."""
 
@@ -229,8 +227,8 @@ class StageCommitError(P6Error):
     """The checkout is not a clean commit, or not the commit the stage's rows were measured at."""
 
 
-class NoFinalistsError(P6Error):
-    """No configuration qualifies for the next stage, and the protocol names no fallback."""
+class NothingMeasuredError(P6Error):
+    """Every configuration a selection ranks was refused; there is nothing to choose from."""
 
 
 class ArtifactConflictError(P6Error):
@@ -283,17 +281,22 @@ def run_openalpha(argv: Sequence[str]) -> CommandOutcome:
 def require_clean_return_paths(
     runtime_dir: Path, *, runner: Callable[[Sequence[str]], CommandOutcome] = run_openalpha
 ) -> None:
-    """Refuse (`StaleReturnPathsError`) unless the stale-return-path detector printed exactly
-    `none` and exited 0. Any other answer -- a stale build listed, a panel it could not read, a
-    build of the CLI that lacks the command -- is not clean."""
+    """Refuse (`StaleReturnPathsError`) unless the stale-return-path detector exited 0, its
+    stdout is exactly the one line `CLEAN_RETURN_PATHS`, and its stderr states the
+    `BUDGET stale-return-path-recompute N` line -- the proof it reached the recomputation rather
+    than answering before it. Any other answer -- a stale build listed, a panel it could not
+    read, a build of the CLI that lacks the command, a bare `none` -- is not clean."""
     argv = precondition_argv(runtime_dir)
     outcome = runner(argv)
-    if outcome.exit_code == 0 and outcome.stdout.strip() == "none":
+    lines = [line for line in outcome.stdout.splitlines() if line.strip()]
+    budgeted = any(_RETURN_PATH_BUDGET.match(line) for line in outcome.stderr.splitlines())
+    if outcome.exit_code == 0 and lines == [CLEAN_RETURN_PATHS] and budgeted:
         return
     said = (outcome.stdout.strip() or outcome.stderr.strip() or "nothing")[:2000]
     raise StaleReturnPathsError(
         f"section 1's precondition `openalpha {' '.join(argv)}` exited {outcome.exit_code} and "
-        f"did not answer `none`; no stage runs on stale factor builds. It said: {said}"
+        f"did not answer `{CLEAN_RETURN_PATHS}` after its budget line; no stage runs on stale "
+        f"factor builds. It said: {said}"
     )
 
 
@@ -568,28 +571,21 @@ def _measured(rows: Sequence[LedgerRow]) -> list[LedgerRow]:
     return [row for row in rows if "error" not in row.result]
 
 
-def _rank_key(row: LedgerRow) -> tuple[float, float]:
+def _rank_key(row: LedgerRow) -> tuple[float, float, str]:
     ratio, turnover = row.result.get("information_ratio"), row.result.get("mean_turnover")
     if not isinstance(ratio, int | float) or not isinstance(turnover, int | float):
         raise UnrankableRowError(
             f"configuration {row.config_id} has information ratio {ratio!r} and mean turnover "
             f"{turnover!r}; it cannot be ranked"
         )
-    return (-float(ratio), float(turnover))
+    return (-float(ratio), float(turnover), row.config_id)
 
 
 def rank_by_information_ratio(rows: Sequence[LedgerRow], take: int) -> list[LedgerRow]:
-    """The best `take` rows by information ratio, a tie going to the lower mean turnover.
-
-    Refuses (`UnresolvedTieError`) when two rows equal on both straddle the cut, since which one
-    goes on is then a choice the protocol does not make."""
-    ordered = sorted(rows, key=_rank_key)
-    if 0 < take < len(ordered) and _rank_key(ordered[take - 1]) == _rank_key(ordered[take]):
-        raise UnresolvedTieError(
-            f"configurations {ordered[take - 1].config_id} and {ordered[take].config_id} tie on "
-            "information ratio and mean turnover at the cut; the protocol breaks no further tie"
-        )
-    return ordered[:take]
+    """The best `take` rows under the protocol's tie rule (before section 6): information ratio
+    descending, then mean turnover ascending, then `config_id` ascending -- a last level that
+    reads no result, so every selection is a total order."""
+    return sorted(rows, key=_rank_key)[:take]
 
 
 def _passes(row: LedgerRow, report: Any) -> bool:
@@ -756,13 +752,14 @@ def composition_source_configs(
 def best_source(
     ledger: Path, sessions: Sequence[date], code_commit: str
 ) -> tuple[tuple[dict[str, Any], ...], dict[str, Any], LedgerRow]:
-    """Step 2b's source: of step 2a's 19 rows, the highest information ratio (a tie to the lower
-    turnover). Returns the 19 source configurations, the chosen one and its row."""
+    """Step 2b's source: the first of step 2a's 19 rows under the protocol's tie rule
+    (`rank_by_information_ratio`). Returns the 19 source configurations, the chosen one and its
+    row."""
     sources = composition_source_configs(_components(ledger, sessions), sessions, code_commit)
     rows = _rows_for(ledger, COMPOSITION, sources, exact=False)
     measured = _measured(list(rows.values()))
     if not measured:
-        raise NoFinalistsError("no step 2a score source was measured; step 2b has no source")
+        raise NothingMeasuredError("no step 2a score source was measured; step 2b has no source")
     (best,) = rank_by_information_ratio(measured, take=1)
     config = next(config for config in sources if grid.config_id(config) == best.config_id)
     return sources, config, best
@@ -800,12 +797,12 @@ def finalists(
 ) -> tuple[dict[str, Any], tuple[dict[str, Any], ...]]:
     """Section 5's finalists and their configurations, best first.
 
-    The family is the whole composition stage (19 sources and step 2b's 35 new rows). A finalist
-    is BY-rejected with a positive mean; the best five by information ratio go on, or all of them
-    when fewer. **When BY rejects nothing** the best five measured configurations by information
-    ratio go on regardless, and `no_configuration_passed_multiple_testing` is set with the note
-    the report must carry. Rejections that all fail the mean leave no finalist, which the
-    protocol provides no fallback for (`NoFinalistsError`).
+    The family is the whole composition stage (19 sources and step 2b's 35 new rows). A
+    configuration passes when BY rejects it and its mean net excess is positive; the best five
+    passing ones go on, or all of them when fewer. **When none passes** -- BY rejected nothing,
+    or every one it rejected has a mean <= 0 -- the best five of every measured stage-2
+    configuration go on regardless, and `no_configuration_passed_multiple_testing` is set with
+    the note the report must carry. Ranking is `rank_by_information_ratio`'s three-level rule.
     """
     commit = stage_commit(ledger, COMPOSITION)
     if commit is None:
@@ -817,18 +814,12 @@ def finalists(
     }
     rows = _rows_for(ledger, COMPOSITION, list(expected.values()), exact=True)
     report = _fdr(ledger, COMPOSITION)
-    no_pass = report.discoveries == 0
-    candidates = (
-        _measured(list(rows.values()))
-        if no_pass
-        else [row for row in rows.values() if _passes(row, report)]
-    )
+    passing = [row for row in rows.values() if _passes(row, report)]
+    no_pass = not passing
+    candidates = _measured(list(rows.values())) if no_pass else passing
     chosen = rank_by_information_ratio(candidates, take=FINALIST_COUNT)
     if not chosen:
-        raise NoFinalistsError(
-            f"BY rejected {report.discoveries} composition configuration(s) and none has a "
-            "positive mean net excess; the protocol's fallback is written for no rejection only"
-        )
+        raise NothingMeasuredError("no stage-2 configuration was measured; nothing can go on")
     body = {
         "schema": "openalpha-p6-finalists/v1",
         "stage": COMPOSITION,
@@ -867,9 +858,10 @@ def validation_configs(
 def validation_selection(
     ledger: Path, sessions: Sequence[date]
 ) -> tuple[dict[str, Any], dict[str, Any], LedgerRow]:
-    """Section 6: of the finalists' validation rows, the highest information ratio of the net
-    excess (a tie to the lower mean turnover). Returns the report of every finalist's result,
-    the chosen configuration and its row."""
+    """Section 6: of the finalists' validation rows, the first under the protocol's tie rule
+    (`rank_by_information_ratio`: the annualized information ratio of the net excess, then the
+    lower mean turnover, then the lower `config_id`). Returns the report of every finalist's
+    result, the chosen configuration and its row."""
     commit = stage_commit(ledger, VALIDATION)
     if commit is None:
         raise StageIncompleteError(f"the validation stage has no row in {ledger}")
@@ -878,7 +870,7 @@ def validation_selection(
     rows = _rows_for(ledger, VALIDATION, configs, exact=True)
     measured = _measured(list(rows.values()))
     if not measured:
-        raise NoFinalistsError("no finalist was measured over the validation window")
+        raise NothingMeasuredError("no finalist was measured over the validation window")
     (best,) = rank_by_information_ratio(measured, take=1)
     chosen = next(config for config in configs if grid.config_id(config) == best.config_id)
     body = {
@@ -941,13 +933,18 @@ def evaluate_holdout(
 ) -> dict[str, Any]:
     """Section 7's verdict on the holdout's measurement, computed from the ledgered numbers.
 
-    1. annualized net excess over the all-A equal-weight benchmark above the registered bound;
+    1. the compounded annualized relative return against the all-A equal-weight benchmark,
+       `(prod(1 + net) / prod(1 + benchmark)) ** (244 / complete-period sessions) - 1`
+       (`grid.result_compounded_annual_relative_return`), above the registered bound;
     2. the one-sided sign-flip p of the per-period excess (`grid.one_sided_p_value`) below its
        bound;
     3. the maximum relative drawdown over complete periods at most the registered multiple of the
        validation row's, which must be the drawdown the registration recorded.
 
-    "通过" only when all three hold; otherwise "不通过", an unmeasured holdout included.
+    All three read complete periods only. "通过" only when all three hold; otherwise "不通过",
+    an unmeasured holdout included. Criterion 1 compounds, so it can fail while the arithmetic
+    mean excess is significantly positive (a loss in a period the benchmark fell is divided by
+    that period's small `1 + benchmark`).
     """
     validation = grid.result_max_relative_drawdown(validation_result)
     if validation != criteria["validation_max_relative_drawdown"]:
@@ -957,8 +954,8 @@ def evaluate_holdout(
         )
     multiple = _number(criteria["max_relative_drawdown_multiple_of_validation"], "the multiple")
     bounds = {
-        "annualized_mean_net_excess": _number(
-            criteria["annualized_mean_net_excess_above"], "the excess bound"
+        "compounded_annualized_relative_return": _number(
+            criteria["compounded_annualized_relative_return_above"], "the return bound"
         ),
         "one_sided_p_excess": _number(criteria["one_sided_p_excess_below"], "the p bound"),
         "max_relative_drawdown": multiple * validation,
@@ -970,8 +967,8 @@ def evaluate_holdout(
         }
         return {"verdict": FAIL, "criteria": items, "error": result["error"]}
     values = {
-        "annualized_mean_net_excess": _number(
-            result["annualized_mean_net_excess"], "annualized_mean_net_excess"
+        "compounded_annualized_relative_return": grid.result_compounded_annual_relative_return(
+            result
         ),
         "one_sided_p_excess": grid.one_sided_p_value(
             _number(result["p_excess"], "p_excess"),
@@ -980,8 +977,8 @@ def evaluate_holdout(
         "max_relative_drawdown": grid.result_max_relative_drawdown(result),
     }
     passed = {
-        "annualized_mean_net_excess": values["annualized_mean_net_excess"]
-        > bounds["annualized_mean_net_excess"],
+        "compounded_annualized_relative_return": values["compounded_annualized_relative_return"]
+        > bounds["compounded_annualized_relative_return"],
         "one_sided_p_excess": values["one_sided_p_excess"] < bounds["one_sided_p_excess"],
         "max_relative_drawdown": values["max_relative_drawdown"] <= bounds["max_relative_drawdown"],
     }

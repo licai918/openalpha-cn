@@ -702,6 +702,9 @@ def test_the_holdout_drives_the_sdk_and_ledgers_net_excess_and_its_sign_flip(
             [p.net_return for p in full], [p.benchmark_returns["000905.SH"] for p in full]
         )
         assert result["max_relative_drawdown"] == grid.result_max_relative_drawdown(result)
+        assert result[
+            "compounded_annual_relative_return"
+        ] == grid.result_compounded_annual_relative_return(result)
     assert grid.stage_family(ledger, grid.HOLDOUT_STAGE) == 1
 
 
@@ -750,6 +753,29 @@ def test_the_ledgered_drawdown_reads_only_complete_periods() -> None:
         "period_complete": [True, True, True, False],
     }
     assert grid.result_max_relative_drawdown(result) == pytest.approx(2 / 21, rel=1e-12)
+
+
+def test_the_compounded_annual_relative_return_on_a_hand_computed_series() -> None:
+    """Section 7's criterion 1: (prod(1 + net) / prod(1 + benchmark)) ** (244 / sessions) - 1.
+
+    net (0.10, -0.05) against benchmark (0, 0.05) over two 20-session periods: the relative
+    level is 1.1 x 0.95 / 1.05 = 1.045 / 1.05, compounded over 244 / 40 = 6.1 periods a year."""
+    value = grid.compounded_annual_relative_return(
+        [Decimal("0.10"), Decimal("-0.05")], [Decimal("0"), Decimal("0.05")], [20, 20]
+    )
+    assert value == pytest.approx((1.045 / 1.05) ** 6.1 - 1, rel=1e-12)
+
+
+def test_the_ledgered_compounded_return_reads_only_complete_periods() -> None:
+    result = {
+        "net_return": ["0.10", "-0.05", "-0.5"],
+        "benchmark_return": ["0", "0.05", "0"],
+        "period_sessions": [20, 20, 3],
+        "period_complete": [True, True, False],
+    }
+    assert grid.result_compounded_annual_relative_return(result) == pytest.approx(
+        (1.045 / 1.05) ** 6.1 - 1, rel=1e-12
+    )
 
 
 def test_the_one_sided_p_value_halves_the_two_sided_one_in_the_observed_direction() -> None:

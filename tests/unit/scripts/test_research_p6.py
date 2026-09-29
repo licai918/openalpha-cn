@@ -49,9 +49,17 @@ from openalpha_cn.backtest.outcome_statistics import sign_flip_test
 from openalpha_cn.backtest.strategy_backtest import EQUAL_WEIGHT_ALL_A
 from openalpha_cn.domain.horizon import parse_horizon
 from openalpha_cn.domain.labels import build_label_window
+from openalpha_cn.domain.panel_batch import ColumnarPanelBatch, PanelColumn, TimelineColumns
 from openalpha_cn.domain.trading_calendar import CalendarDay, build_trading_calendar
+from openalpha_cn.domain.upstream_defects import UPSTREAM_DEFECT_DATA_COLUMNS
 from openalpha_cn.panel.catalog import DEFAULT_DATE_TIMEZONE
-from openalpha_cn.panel_ingest import split_panel_batch_by_year, write_trading_calendar
+from openalpha_cn.panel.store import PanelStore
+from openalpha_cn.panel_ingest import (
+    UPSTREAM_DEFECTS_DATASET,
+    split_panel_batch_by_year,
+    write_trading_calendar,
+    write_upstream_defects,
+)
 from openalpha_cn.panel_view import panel_store
 from openalpha_cn.sdk import OpenAlphaSDK
 from openalpha_cn.strategy_view import StrategyRequestError
@@ -106,6 +114,7 @@ class _Spec:
 class _Backtest:
     spec: _Spec
     periods: tuple[_Period, ...]
+    unknowable_crossings: tuple[Any, ...] = ()
 
 
 def _backtest(
@@ -190,6 +199,7 @@ def _result(
         "net_return": list(nets),
         "benchmark_return": list(benches),
         "period_complete": [True] * len(nets),
+        "period_sessions": [20] * len(nets),
         "code_commit": COMMIT,
     }
 
@@ -505,18 +515,22 @@ def test_each_surviving_factor_contributes_the_tier_of_its_best_information_rati
     ]
 
 
-def test_a_tie_the_protocol_does_not_break_is_refused_rather_than_broken(tmp_path: Path) -> None:
+def test_a_tie_on_ratio_and_turnover_goes_to_the_lower_config_id(tmp_path: Path) -> None:
+    """The protocol's third tie level: `config_id` ascending, a rule that reads no result."""
     one = _discovery("turnover_60/v1", "raw", 1)
     two = _discovery("turnover_60/v1", "processed", 1)
+    lower, higher = sorted((one, two), key=_id)
     ledger = _survivor_ledger(
         tmp_path,
         {
-            _id(one): _result(p=1e-6, mean=0.001, ir=0.5, turnover=0.1),
-            _id(two): _result(p=1e-6, mean=0.001, ir=0.5, turnover=0.1),
+            _id(higher): _result(p=1e-6, mean=0.001, ir=0.5, turnover=0.1),
+            _id(lower): _result(p=1e-6, mean=0.001, ir=0.5, turnover=0.1),
         },
     )
-    with pytest.raises(p6.UnresolvedTieError):
-        p6.survivors(ledger, SESSIONS)
+
+    answer = p6.survivors(ledger, SESSIONS)
+
+    assert answer["components"] == [["turnover_60/v1", lower["components"][0][1]]]
 
 
 def test_with_no_survivor_every_factor_enters_stage_two_on_its_processed_tier(
@@ -812,18 +826,39 @@ def test_when_by_rejects_nothing_the_best_five_by_information_ratio_still_go_on_
     assert answer["note"] == "阶段 2 无配置通过多重检验"
 
 
-def test_rejections_that_are_all_negative_leave_no_finalist_and_are_refused(
+def test_rejections_whose_means_are_all_negative_take_the_same_fallback(
     tmp_path: Path,
 ) -> None:
-    """The protocol's fallback is written for "BY rejected nothing" only."""
+    """Section 5: "no configuration passes" is BY rejecting nothing **or** every rejected one
+    having a mean <= 0. The best five by information ratio over every stage-2 configuration go
+    on -- the rejected negative one included, since the fallback ranks all of them."""
 
     def special(configs: list[Mapping[str, object]]) -> Mapping[str, Any]:
-        return {_id(configs[12]): _result(p=1e-12, mean=-0.004, ir=-3.0)}
+        rejected = {_id(configs[12]): _result(p=1e-12, mean=-0.004, ir=20.0)}
+        return {**rejected, **{_id(configs[k]): _result(ir=6.0 + k) for k in range(4)}}
 
-    ledger, _ = _full_composition(tmp_path, special)
+    ledger, configs = _full_composition(tmp_path, special)
 
-    with pytest.raises(p6.NoFinalistsError):
-        p6.finalists(ledger, SESSIONS)
+    answer, finalists = p6.finalists(ledger, SESSIONS)
+
+    assert answer["fdr_table"]["discoveries"] == 1
+    assert [_id(c) for c in finalists] == [_id(configs[k]) for k in (12, 3, 2, 1, 0)]
+    assert answer["no_configuration_passed_multiple_testing"] is True
+    assert answer["note"] == "阶段 2 无配置通过多重检验"
+
+
+def test_the_finalist_cut_breaks_a_tie_by_the_lower_config_id(tmp_path: Path) -> None:
+    def special(configs: list[Mapping[str, object]]) -> Mapping[str, Any]:
+        passing = {_id(configs[k]): _result(p=1e-9, mean=0.002, ir=2.0 + k) for k in range(4)}
+        tied = {_id(configs[k]): _result(p=1e-9, mean=0.002, ir=1.5) for k in (20, 21)}
+        return {**passing, **tied}
+
+    ledger, configs = _full_composition(tmp_path, special)
+
+    _, finalists = p6.finalists(ledger, SESSIONS)
+
+    lower = min(_id(configs[20]), _id(configs[21]))
+    assert [_id(c) for c in finalists] == [*(_id(configs[k]) for k in (3, 2, 1, 0)), lower]
 
 
 # --- section 6: validation ------------------------------------------------------------------------
@@ -865,23 +900,43 @@ def test_validation_chooses_the_best_information_ratio_and_breaks_a_tie_by_lower
     assert configs[2]["end"] == date(2023, 12, 29)
 
 
+def test_validation_breaks_a_tie_on_both_by_the_lower_config_id(tmp_path: Path) -> None:
+    def results(configs: list[Mapping[str, object]]) -> Mapping[str, Any]:
+        return {_id(configs[k]): _result(ir=0.9, turnover=0.4) for k in (1, 3)}
+
+    ledger, configs = _validation_ledger(tmp_path, results)
+
+    answer, _, _ = p6.validation_selection(ledger, SESSIONS)
+
+    assert answer["chosen"] == min(_id(configs[1]), _id(configs[3]))
+
+
 # --- section 7: drawdown and the criteria ---------------------------------------------------------
 
 
 def _holdout(
-    *,
-    annual: float = 0.05,
-    p: float = 0.02,
-    mean: float = 0.001,
-    nets: Sequence[str] = ("0", "-0.2"),
+    *, p: float = 0.02, mean: float = 0.001, nets: Sequence[str] = ("0.3", "-0.2")
 ) -> dict[str, object]:
-    return {**_result(p=p, mean=mean, nets=nets), "annualized_mean_net_excess": annual}
+    """Relative levels 1.3 then 1.04 by default: a drawdown of exactly 0.2 and a compounded
+    annual relative return of 1.04 ** (244 / 40) - 1 > 0."""
+    return _result(p=p, mean=mean, nets=nets)
+
+
+def _compounding_trap() -> dict[str, object]:
+    """Eleven 20-session periods in which the benchmark doubles and the book gains 102%
+    (excess +0.02, relative x1.01), then one in which the benchmark loses 90% and the book 91.1%
+    (excess -0.011, relative 0.089 / 0.1 = x0.89) -- measured by `grid.strategy_result` itself."""
+    nets = ["1.02"] * 11 + ["-0.911"]
+    benches = ["1.0"] * 11 + ["-0.9"]
+    return grid.strategy_result(
+        _backtest(nets, benchmarks=benches, interval=20), excess_benchmark=EQUAL_WEIGHT_ALL_A
+    )
 
 
 VALIDATION: Final = _result(nets=("0.1", "-0.1"))
 """Relative levels 1.1 then 0.99: a maximum relative drawdown of exactly 0.1."""
 CRITERIA: Final = {
-    "annualized_mean_net_excess_above": "0",
+    "compounded_annualized_relative_return_above": "0",
     "one_sided_p_excess_below": "0.05",
     "max_relative_drawdown_multiple_of_validation": "2",
     "validation_config_id": "v" * 64,
@@ -902,9 +957,9 @@ def test_the_holdout_passes_only_when_all_three_hold_and_the_drawdown_bound_is_i
 @pytest.mark.parametrize(
     ("holdout", "failing"),
     [
-        (_holdout(annual=0.0), "annualized_mean_net_excess"),
+        (_compounding_trap(), "compounded_annualized_relative_return"),
         (_holdout(p=0.1), "one_sided_p_excess"),
-        (_holdout(nets=("0", "-0.21")), "max_relative_drawdown"),
+        (_holdout(nets=("0.3", "-0.21")), "max_relative_drawdown"),
     ],
 )
 def test_each_holdout_criterion_fails_the_verdict_on_its_own(
@@ -914,6 +969,38 @@ def test_each_holdout_criterion_fails_the_verdict_on_its_own(
 
     assert verdict["verdict"] == "不通过"
     assert {name for name, item in verdict["criteria"].items() if not item["passed"]} == {failing}
+
+
+def test_the_compounded_return_fails_where_the_mean_excess_is_significantly_positive() -> None:
+    """Section 7's criterion 1 is not implied by criterion 2 (version record, 2026-09-29).
+
+    The arithmetic mean excess is (11 x 0.02 - 0.011) / 12 = 0.0174 > 0. Over twelve values the
+    sign-flip test is exact: |sum| >= 0.209 needs all eleven +0.02 on one side (either sign on
+    -0.011), 4 of 4096 patterns, so p = 4/4096 and the one-sided p is 2/4096 < 0.05. The relative
+    level is 1.01 ** 11 x 0.89 = 0.9930 < 1, so the compounded annual relative return,
+    0.9930 ** (244 / 240) - 1, is negative: the loss in the period the benchmark fell 90% is
+    divided by 0.1, the gains in the periods it doubled by 2."""
+    result = _compounding_trap()
+
+    assert result["mean_net_excess"] == pytest.approx(0.209 / 12)
+    assert result["p_excess"] == 4 / 4096
+    assert grid.one_sided_p_value(result["p_excess"], result["mean_net_excess"]) < 0.05
+    compounded = grid.result_compounded_annual_relative_return(result)
+    assert compounded == pytest.approx((1.01**11 * 0.89) ** (244 / 240) - 1)
+    assert compounded < 0
+    verdict = p6.evaluate_holdout(result, CRITERIA, VALIDATION)
+    assert verdict["criteria"]["compounded_annualized_relative_return"]["value"] == compounded
+
+
+def test_a_compounded_relative_return_of_exactly_zero_does_not_pass() -> None:
+    """Criterion 1 is strict: a book that matched its benchmark every period earned nothing."""
+    level = _result(p=0.02, mean=0.001, nets=("0.3", "-0.2"), benches=("0.3", "-0.2"))
+
+    verdict = p6.evaluate_holdout(level, CRITERIA, VALIDATION)
+
+    item = verdict["criteria"]["compounded_annualized_relative_return"]
+    assert (item["value"], item["passed"]) == (0.0, False)
+    assert verdict["verdict"] == "不通过"
 
 
 def test_the_one_sided_p_is_the_protocols_derivation_from_the_two_sided_one() -> None:
@@ -954,27 +1041,37 @@ def test_the_precondition_runs_the_protocols_command_line(tmp_path: Path) -> Non
 
     def runner(argv: Sequence[str]) -> p6.CommandOutcome:
         seen.append(tuple(argv))
-        return p6.CommandOutcome(exit_code=0, stdout="none\n", stderr="")
+        return p6.CommandOutcome(exit_code=0, stdout=CLEAN, stderr=BUDGET)
 
     p6.require_clean_return_paths(tmp_path, runner=runner)
     assert seen == [p6.precondition_argv(tmp_path)]
 
 
+CLEAN: Final[str] = "stale return-path builds: none\n"
+BUDGET: Final[str] = (
+    "BUDGET stale-return-path-recompute 0 compute_factor calls (one per stored raw build ...)\n"
+)
+
+
 @pytest.mark.parametrize(
-    ("exit_code", "stdout"),
+    ("exit_code", "stdout", "stderr"),
     [
-        (1, "STALE reversal_1d/v1 raw 2020 ...\n"),
-        (0, "STALE ...\n"),
-        (1, "none\n"),
-        (2, ""),
-        (0, ""),
+        (1, "stale return-path builds: 1\nSTALE reversal_1d/v1 raw 2020 ...\n", BUDGET),
+        (0, "stale return-path builds: 1\n", BUDGET),
+        (1, CLEAN, BUDGET),
+        (0, "none\n", BUDGET),
+        (0, CLEAN + "stale return-path builds: none\n", BUDGET),
+        (0, CLEAN, ""),
+        (0, CLEAN, "BUDGET stale-return-path-recompute many\n"),
+        (2, "", "Usage: ... No such command 'stale-return-paths'."),
+        (0, "", BUDGET),
     ],
 )
 def test_a_precondition_that_is_not_clean_is_refused_by_name(
-    tmp_path: Path, exit_code: int, stdout: str
+    tmp_path: Path, exit_code: int, stdout: str, stderr: str
 ) -> None:
     def runner(argv: Sequence[str]) -> p6.CommandOutcome:
-        return p6.CommandOutcome(exit_code=exit_code, stdout=stdout, stderr="Usage: ...")
+        return p6.CommandOutcome(exit_code=exit_code, stdout=stdout, stderr=stderr)
 
     with pytest.raises(p6.StaleReturnPathsError, match="stale-return-paths"):
         p6.require_clean_return_paths(tmp_path, runner=runner)
@@ -983,6 +1080,72 @@ def test_a_precondition_that_is_not_clean_is_refused_by_name(
 def test_the_default_runner_reports_a_command_the_cli_does_not_have() -> None:
     outcome = p6.run_openalpha(("no-such-command",))
     assert outcome.exit_code != 0
+
+
+def _record_a_return_path_decision(root: Path, subject: str, session: date) -> None:
+    """Record `subject`'s `session` as one whose return no witness decides, as the `stk_limit`
+    target writes a `V2-P6-020` decision -- after the factor builds, so a build is now stale."""
+    values: dict[str, object] = {
+        "trade_date": session.isoformat(),
+        "source_dataset": "stk_limit",
+        "defect_kind": "pre_close_contradicts_adj_factor",
+        "bar_close": 10.0,
+        "valuation_close": 5.0,
+        "previous_bar_close": 10.0,
+        "up_limit": None,
+        "down_limit": None,
+        "valuation_repeats_previous_close": None,
+        "list_date": None,
+    }
+    kinds = {"valuation_repeats_previous_close": "boolean"}
+    at = datetime.combine(session, time(16, 0), ZoneInfo(DEFAULT_DATE_TIMEZONE))
+    fetched = datetime(2026, 1, 20, tzinfo=UTC)
+    write_upstream_defects(
+        PanelStore(root / "panel"),
+        ColumnarPanelBatch(
+            provider_id="openalpha-cn/tests",
+            dataset=UPSTREAM_DEFECTS_DATASET,
+            kind=UPSTREAM_DEFECTS_DATASET,
+            as_of=fetched,
+            fetched_at=fetched,
+            status="success",
+            subjects=(subject,),
+            timeline=TimelineColumns(
+                event_time=(at - timedelta(hours=1),),
+                available_time=(at,),
+                ingested_time=(at,),
+                revision_time=(at,),
+            ),
+            columns=tuple(
+                PanelColumn(
+                    name,
+                    kinds.get(name, "string" if isinstance(values[name], str) else "float"),
+                    (values[name],),
+                )
+                for name in UPSTREAM_DEFECT_DATA_COLUMNS
+            ),
+        ),
+        year=session.year,
+        source_datasets=frozenset({"stk_limit"}),
+    )
+
+
+def test_the_real_detector_admits_a_clean_store_and_refuses_one_with_a_stale_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`openalpha factor stale-return-paths` itself, in a child process, over a generated store:
+    its raw `reversal_1d` builds are clean until a return-path decision is recorded inside one's
+    window, which makes that build stale."""
+    panel = write_strategy_corpus(tmp_path)
+    monkeypatch.setattr(p6, "EXCHANGE", FIXTURE_EXCHANGE)
+
+    p6.require_clean_return_paths(tmp_path)
+
+    _record_a_return_path_decision(
+        tmp_path, str(panel.batch("daily").subjects[0]), panel.sessions[5]
+    )
+    with pytest.raises(p6.StaleReturnPathsError, match="stale return-path builds: 1"):
+        p6.require_clean_return_paths(tmp_path)
 
 
 @pytest.mark.parametrize("command", p6.COMMANDS)

@@ -673,6 +673,41 @@ def result_max_relative_drawdown(result: Mapping[str, Any]) -> float:
     )
 
 
+def compounded_annual_relative_return(
+    net_returns: Sequence[Decimal], benchmark_returns: Sequence[Decimal], sessions: Sequence[int]
+) -> float:
+    """The protocol's compounded annualized relative return (section 7, criterion 1).
+
+    `(prod(1 + net) / prod(1 + benchmark)) ** (SESSIONS_PER_YEAR / sum(sessions)) - 1` over the
+    periods given, which the caller limits to complete ones (`result_compounded_annual_relative_
+    return` does). Unlike `annualized_mean_net_excess` it compounds: a loss in a period the
+    benchmark fell is divided by that period's small `1 + benchmark`.
+    """
+    net_level = benchmark_level = Decimal(1)
+    for net, benchmark in zip(net_returns, benchmark_returns, strict=True):
+        net_level *= 1 + net
+        benchmark_level *= 1 + benchmark
+    total = sum(sessions)
+    if total <= 0 or net_level <= 0 or benchmark_level <= 0:
+        raise ValueError("a compounded relative return needs sessions and two positive levels")
+    return math.pow(float(net_level / benchmark_level), SESSIONS_PER_YEAR / total) - 1
+
+
+def result_compounded_annual_relative_return(result: Mapping[str, Any]) -> float:
+    """`compounded_annual_relative_return` of a ledgered strategy result, read from its stored
+    per-period series over complete periods only."""
+    complete = result["period_complete"]
+
+    def full(key: str) -> list[Any]:
+        return [v for v, whole in zip(result[key], complete, strict=True) if whole]
+
+    return compounded_annual_relative_return(
+        [Decimal(v) for v in full("net_return")],
+        [Decimal(v) for v in full("benchmark_return")],
+        [int(v) for v in full("period_sessions")],
+    )
+
+
 def strategy_result(
     backtest: StrategyBacktest,
     *,
@@ -683,8 +718,9 @@ def strategy_result(
     """One backtest as a ledger result: its per-period series and the sign-flip test of its excess.
 
     Excess is each period's net-of-cost return less `excess_benchmark`'s return over the same
-    period. Every series is stored; the test, the means and `max_relative_drawdown` (the
-    protocol's section 7 definition, `V2-P6-010`) read only complete periods (as many sessions as
+    period. Every series is stored; the test, the means, `max_relative_drawdown` and
+    `compounded_annual_relative_return` (the protocol's section 7 definitions, `V2-P6-010`) read
+    only complete periods (as many sessions as
     the rebalance interval), and `excluded_incomplete_periods` says how many were left out -- the
     trailing period a window ends inside is shorter and is not a like-for-like draw.
     """
@@ -747,6 +783,11 @@ def strategy_result(
         "max_relative_drawdown": max_relative_drawdown(
             [p.net_return for _, p in tested],
             [p.benchmark_returns[excess_benchmark] for _, p in tested],
+        ),
+        "compounded_annual_relative_return": compounded_annual_relative_return(
+            [p.net_return for _, p in tested],
+            [p.benchmark_returns[excess_benchmark] for _, p in tested],
+            [p.sessions for _, p in tested],
         ),
     }
 
