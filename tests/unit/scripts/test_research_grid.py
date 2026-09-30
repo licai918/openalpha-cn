@@ -968,7 +968,7 @@ def test_a_pooled_run_writes_the_rows_a_serial_run_writes(tmp_path: Path) -> Non
         clock=lambda: AT,
         result_extra=extra,
     )
-    landed: list[tuple[int, bool]] = []
+    landed: list[tuple[int, str]] = []
 
     with ProcessPoolExecutor(2, mp_context=multiprocessing.get_context("spawn")) as executor:
         run = grid.run_grid_in_pool(
@@ -980,7 +980,7 @@ def test_a_pooled_run_writes_the_rows_a_serial_run_writes(tmp_path: Path) -> Non
             label_sessions=NO_LABEL,
             clock=lambda: LATER,
             result_extra=extra,
-            landed=lambda index, config, ran: landed.append((index, ran)),
+            landed=lambda index, config, landing: landed.append((index, landing)),
         )
 
     assert run == grid.GridRun(stage="discovery", ran=5, skipped=0)
@@ -990,7 +990,7 @@ def test_a_pooled_run_writes_the_rows_a_serial_run_writes(tmp_path: Path) -> Non
     assert errors[1] == "StrategyRequestError: no cross section for 1"
     assert errors[2].startswith("StageWindowError: ")
     assert [row["result"]["code_commit"] for row in _rows(pooled)[1:3]] == ["a" * 40] * 2
-    assert landed == [(1, True), (2, True), (3, True), (4, True), (5, True)]
+    assert landed == [(index, "ran") for index in range(1, 6)]
 
 
 def test_a_result_that_finishes_early_waits_for_every_earlier_row(tmp_path: Path) -> None:
@@ -1017,7 +1017,7 @@ def test_a_result_that_finishes_early_waits_for_every_earlier_row(tmp_path: Path
             executor=executor,
             label_sessions=NO_LABEL,
             clock=lambda: AT,
-            landed=lambda index, config, ran: seen_at_landing.append(list(finished)),
+            landed=lambda index, config, landing: seen_at_landing.append(list(finished)),
         )
 
     assert finished[-1] == 0  # the later two finished first ...
@@ -1030,7 +1030,7 @@ def test_a_pooled_run_skips_what_the_ledger_holds_and_never_submits_it(tmp_path:
     configs = tuple({"i": i, **WINDOW} for i in range(4))
     for held in (configs[0], configs[2]):
         grid.append_ledger(ledger, "discovery", held, {"p_excess": 0.25}, recorded_at=AT)
-    landed: list[tuple[int, bool]] = []
+    landed: list[tuple[int, str]] = []
 
     with _RecordingExecutor(2) as executor:
         run = grid.run_grid_in_pool(
@@ -1041,12 +1041,12 @@ def test_a_pooled_run_skips_what_the_ledger_holds_and_never_submits_it(tmp_path:
             executor=executor,
             label_sessions=NO_LABEL,
             clock=lambda: AT,
-            landed=lambda index, config, ran: landed.append((index, ran)),
+            landed=lambda index, config, landing: landed.append((index, landing)),
         )
 
     assert executor.submitted == [configs[1], configs[3]]
     assert (run.ran, run.skipped) == (2, 2)
-    assert landed == [(1, False), (2, True), (3, False), (4, True)]
+    assert landed == [(1, "held"), (2, "ran"), (3, "held"), (4, "ran")]
     assert [row["config"]["i"] for row in _rows(ledger)] == [0, 2, 1, 3]
 
 
@@ -1100,7 +1100,7 @@ def test_a_row_another_writer_lands_during_a_pooled_run_is_not_written_twice(
             label_sessions=NO_LABEL,
             clock=lambda: AT,
         )
-    landed: list[tuple[int, bool]] = []
+    landed: list[tuple[int, str]] = []
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         run = grid.run_grid_in_pool(
@@ -1111,14 +1111,14 @@ def test_a_row_another_writer_lands_during_a_pooled_run_is_not_written_twice(
             executor=executor,
             label_sessions=NO_LABEL,
             clock=lambda: AT,
-            landed=lambda index, config, ran: landed.append((index, ran)),
+            landed=lambda index, config, landing: landed.append((index, landing)),
         )
 
     assert [row["config"]["i"] for row in _rows(pooled)] == [2, 0, 1]
     assert _rows(pooled) == _rows(serial)
     assert grid.stage_family(pooled, "discovery") == grid.stage_family(serial, "discovery") == 3
     assert (run.ran, run.skipped) == (2, 1)
-    assert landed == [(1, True), (2, True), (3, False)]
+    assert landed == [(1, "ran"), (2, "ran"), (3, "measured-but-held")]
 
 
 def test_an_error_in_a_pooled_measurement_stops_the_run_after_the_rows_before_it(

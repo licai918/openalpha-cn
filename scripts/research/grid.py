@@ -149,6 +149,14 @@ DEFAULT_P_VALUE_KEY: Final[str] = "p_excess"
 SESSIONS_PER_YEAR: Final[int] = 244
 """The trading sessions a year is annualised over, fixed by the protocol."""
 
+Landing = Literal["ran", "held", "measured-but-held"]
+"""What `run_grid_in_pool` did with one configuration: appended its row (`ran`), skipped it
+because the ledger held it when the run planned (`held`), or measured it and then skipped it
+because another writer had landed its row by the time its turn came (`measured-but-held`)."""
+RAN: Final[Landing] = "ran"
+HELD: Final[Landing] = "held"
+MEASURED_BUT_HELD: Final[Landing] = "measured-but-held"
+
 Measure = Callable[[Mapping[str, object]], Mapping[str, object]]
 """One configuration in, one ledger result out. Raising a refusal records a failed row."""
 
@@ -1020,7 +1028,7 @@ def run_grid_in_pool(
     refusals: tuple[type[Exception], ...] = DEFAULT_REFUSALS,
     clock: Callable[[], datetime] | None = None,
     result_extra: Mapping[str, object] | None = None,
-    landed: Callable[[int, Mapping[str, object], bool], None] | None = None,
+    landed: Callable[[int, Mapping[str, object], Landing], None] | None = None,
 ) -> GridRun:
     """`run_grid`'s rows, with the measurements run by `executor` (`V2-P6-023`).
 
@@ -1038,8 +1046,8 @@ def run_grid_in_pool(
     a configuration whose window cannot be placed -- is raised once the rows of every earlier
     configuration are appended, and no later row is written: a later result that already arrived
     is dropped and measured again by the next run. Submitted configurations not yet started are
-    cancelled; the caller owns `executor` and shuts it down. `landed(index, config, ran)` is
-    called as each configuration is appended (`ran`) or skipped, in order, `index` from 1.
+    cancelled; the caller owns `executor` and shuts it down. `landed(index, config, landing)` is
+    called for each configuration in order, `index` from 1, with `Landing`'s account of it.
     """
     stage = _grid_stage(stage)
     now = _utc_now if clock is None else clock
@@ -1077,7 +1085,7 @@ def run_grid_in_pool(
             if step.outcome is None:
                 skipped += 1
                 if landed is not None:
-                    landed(index, step.config, False)
+                    landed(index, step.config, HELD)
                 continue
             answer = step.outcome.result()
             # The ledger again, as `run_grid` reads it before every configuration: a run lasts
@@ -1086,13 +1094,13 @@ def run_grid_in_pool(
             if _holds(existing, stage, config_id(step.config)):
                 skipped += 1
                 if landed is not None:
-                    landed(index, step.config, False)
+                    landed(index, step.config, MEASURED_BUT_HELD)
                 continue
             result = answer if isinstance(answer, dict) else _refused_result(answer, result_extra)
             _append(ledger, existing, stage, step.config, result, recorded_at=now())
             ran += 1
             if landed is not None:
-                landed(index, step.config, True)
+                landed(index, step.config, RAN)
     finally:
         for step in plan:
             if step.outcome is not None:

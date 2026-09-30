@@ -2035,14 +2035,34 @@ def _rows_without_time(ledger: Path) -> list[dict[str, Any]]:
     ]
 
 
-def _no_worker_left(pids: set[int]) -> bool:
-    for pid in pids:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            continue
-        return False
+def _no_worker_left() -> bool:
+    """No process this one started is still alive. `active_children` is the pool's own record
+    of its workers (they are `multiprocessing` processes of this one) and joins any that have
+    exited, on every platform -- unlike probing a pid with signal 0, which on Windows
+    sends Ctrl-C to the console."""
     return not multiprocessing.active_children()
+
+
+def _workers_alive_after_measuring(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """How many child processes were alive when each pooled run finished measuring, before its
+    pool shut down: the proof that `_no_worker_left` afterwards observed real workers."""
+    alive: list[int] = []
+    measured = grid.run_grid_in_pool
+
+    def counting(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return measured(*args, **kwargs)
+        finally:
+            alive.append(len(multiprocessing.active_children()))
+
+    monkeypatch.setattr(grid, "run_grid_in_pool", counting)
+    return alive
+
+
+def _cores(monkeypatch: pytest.MonkeyPatch, count: int = 8) -> None:
+    """The machine's core count, which caps `--workers`, fixed so the tests do not depend on
+    the host."""
+    monkeypatch.setattr(os, "cpu_count", lambda: count)
 
 
 def test_a_stage_measured_by_worker_processes_writes_the_serial_runs_ledger(
@@ -2058,6 +2078,8 @@ def test_a_stage_measured_by_worker_processes_writes_the_serial_runs_ledger(
     monkeypatch.setattr(p6, "discovery_configs", lambda sessions: tuple(configs))
     for name in thread_count_pins():
         monkeypatch.delenv(name, raising=False)
+    _cores(monkeypatch)
+    alive = _workers_alive_after_measuring(monkeypatch)
     serial_world = _pooled_world(tmp_path, monkeypatch, AT)
     pooled_world = _pooled_world(tmp_path, monkeypatch, AT + timedelta(hours=1))
     serial, pooled = tmp_path / "serial" / "ledger.jsonl", tmp_path / "pooled" / "ledger.jsonl"
@@ -2086,7 +2108,8 @@ def test_a_stage_measured_by_worker_processes_writes_the_serial_runs_ledger(
     assert os.getpid() not in {entry["pid"] for entry in measured}
     assert all(entry["pins"] == thread_count_pins() for entry in measured)
     assert not any(name in os.environ for name in thread_count_pins())
-    assert _no_worker_left({entry["pid"] for entry in measured})
+    assert len(alive) == 1 and alive[0] >= 2  # the workers were there while it measured ...
+    assert _no_worker_left()  # ... and none outlived the pool
 
 
 def test_a_stage_resumed_in_worker_processes_never_submits_what_the_ledger_holds(
@@ -2123,6 +2146,8 @@ def test_an_error_in_a_worker_stops_the_stage_after_the_rows_before_it_and_leave
     failure surfaced. The pool is shut down with no worker process left."""
     configs = _pooled_configs(SLOW, 50, CRASH, 50, LATE, 50)
     monkeypatch.setattr(p6, "discovery_configs", lambda sessions: configs)
+    _cores(monkeypatch)
+    alive = _workers_alive_after_measuring(monkeypatch)
     ledger, runtime = tmp_path / "ledger.jsonl", tmp_path / "runtime"
 
     with pytest.raises(RuntimeError, match="a bug in the worker"):
@@ -2134,7 +2159,8 @@ def test_an_error_in_a_worker_stops_the_stage_after_the_rows_before_it_and_leave
     ]
     measured = _calls(runtime)
     assert _strategy_id(configs[4]) in [entry["config_id"] for entry in measured]
-    assert _no_worker_left({entry["pid"] for entry in measured})
+    assert len(alive) == 1 and alive[0] >= 2
+    assert _no_worker_left()
 
 
 def test_workers_need_a_factory_a_worker_process_can_import(
@@ -2179,7 +2205,7 @@ def test_a_worker_that_cannot_start_is_a_refusal_by_name_not_a_traceback(
     assert "refused: WorkerPoolBrokenError: " in err
     assert "rerun" in err
     assert grid.stage_family(ledger, "discovery") == 0
-    assert not multiprocessing.active_children()
+    assert _no_worker_left()
 
 
 def test_a_worker_that_dies_mid_run_stops_the_stage_with_a_correct_prefix(
@@ -2197,20 +2223,36 @@ def test_a_worker_that_dies_mid_run_stops_the_stage_with_a_correct_prefix(
     written = [row.config_id for row in grid.read_ledger(ledger)]
     assert written == [_id(config) for config in configs[: len(written)]]
     assert len(written) <= 2
-    assert _no_worker_left({entry["pid"] for entry in _calls(runtime)})
+    assert _no_worker_left()
 
 
-def test_the_worker_count_is_capped_at_the_machines_cores() -> None:
-    cores = os.cpu_count() or 1
+def test_the_worker_count_is_capped_at_the_machines_cores(monkeypatch: pytest.MonkeyPatch) -> None:
+    _cores(monkeypatch, 4)
     arguments = ["discovery", "--runtime-dir", "runtime", "--ledger", "ledger.jsonl"]
-    assert p6._parser().parse_args([*arguments, "--workers", str(cores)]).workers == cores
+    assert p6._parser().parse_args([*arguments, "--workers", "4"]).workers == 4
     with pytest.raises(SystemExit) as refused:
-        p6._parser().parse_args([*arguments, "--workers", str(cores + 1)])
+        p6._parser().parse_args([*arguments, "--workers", "5"])
     assert refused.value.code == 2
 
 
+def test_a_result_dropped_for_a_row_another_writer_landed_says_so() -> None:
+    """The serial run never measures a held configuration, so its lines are `ran` or
+    `skipped`; a pooled run that measured one another writer landed first says why it skipped."""
+    (config,) = _pooled_configs(50)
+    ran = p6._landed_line(1, 2, config, "ran")
+    held = p6._landed_line(2, 2, config, "held")
+    dropped = p6._landed_line(2, 2, config, "measured-but-held")
+
+    assert ran == p6._progress(1, 2, config, ran=True)
+    assert held == p6._progress(2, 2, config, ran=False)
+    assert dropped == f"{held} (measured, but the ledger already held it)"
+
+
 @pytest.mark.parametrize("command", WORKER_COMMANDS)
-def test_a_measuring_command_takes_a_worker_count_of_at_least_one(command: str) -> None:
+def test_a_measuring_command_takes_a_worker_count_of_at_least_one(
+    command: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _cores(monkeypatch)
     arguments = [command, "--runtime-dir", "runtime", "--ledger", "ledger.jsonl"]
     assert p6._parser().parse_args(arguments).workers == 1
     assert p6._parser().parse_args([*arguments, "--workers", "3"]).workers == 3

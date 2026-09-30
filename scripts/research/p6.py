@@ -332,8 +332,10 @@ class HoldoutClaimMissingError(HoldoutEvaluationError):
 
 
 class WorkerFactoryError(P6Error):
-    """`--workers` was asked for and a worker process cannot build its SDK: the environment's
-    factory does not pickle, or a worker started without the thread pins."""
+    """`--workers` was asked for and the environment's SDK factory does not pickle, so no worker
+    process could build its SDK; refused before a worker starts. (`_start_worker` also raises it
+    inside a worker that started without the thread pins, but there it stops the pool, and the
+    command reports that as `WorkerPoolBrokenError`.)"""
 
 
 class WorkerPoolBrokenError(P6Error):
@@ -1441,6 +1443,15 @@ def _progress(index: int, count: int, config: Config, *, ran: bool) -> str:
     )
 
 
+def _landed_line(index: int, count: int, config: Config, landing: grid.Landing) -> str:
+    """A pooled run's progress line: the serial run's `_progress` line, and for a configuration
+    measured and then skipped because another writer landed its row first, the reason."""
+    line = _progress(index, count, config, ran=landing == grid.RAN)
+    if landing == grid.MEASURED_BUT_HELD:
+        return f"{line} (measured, but the ledger already held it)"
+    return line
+
+
 def _tally(ledger: Path, run: GridRun) -> str:
     return (
         f"{run.stage}: {run.ran} ran, {run.skipped} skipped, family "
@@ -1559,8 +1570,8 @@ def _run_in_workers(
                 sessions=sessions,
                 clock=clock,
                 result_extra={"code_commit": recipe.code_commit},
-                landed=lambda index, config, ran: echo(
-                    _progress(index, len(configs), config, ran=ran)
+                landed=lambda index, config, landing: echo(
+                    _landed_line(index, len(configs), config, landing)
                 ),
             )
     except BrokenProcessPool as error:
