@@ -2149,6 +2149,45 @@ def identity_inputs() -> StrategyInputs:
     )
 
 
+def test_a_retained_name_that_is_not_resized_is_the_whole_gap_to_the_benchmark() -> None:
+    """Review of round 2 (m3): move X's D4 open from 10.00 to 10.50 and the identity breaks by
+    exactly the book's one limitation here, `a_retained_position_is_not_resized_to_equal_weight`.
+
+    At D4's open the book keeps X, now worth 105,000.00, and buys Z with Y's 100,000.00; the
+    notional book sells both and puts 102,500.00 into each. Everything else is equal -- same
+    names, same prices, no cost, the same 194,880.00 at D3's close -- so the book's value at D5's
+    close exceeds the notional book's by 2,500 x (X's D4-open-to-D5-close ratio 10.60 / 10.50
+    less Z's 19.50 / 20.00), and the period's returns differ by that over 194,880:
+    0.0442323481 - 0.0437894626 = 0.0004428855, the rounded 0.00044288548752834...; each return
+    is rounded to ten places on its own, so their difference is within one quantum of the
+    rounded gap, and here equals it."""
+    inputs = identity_inputs()
+    quotes = {day: dict(by_subject) for day, by_subject in inputs.quotes.items()}
+    x_d4 = quotes[D4][HELD_P]
+    quotes[D4][HELD_P] = replace(
+        x_d4,
+        bar=_bar(
+            HELD_P,
+            D4,
+            previous_close=Decimal("10.40"),
+            open_=Decimal("10.50"),
+            close=Decimal("10.50"),
+        ),
+    )
+    result = run_strategy_backtest(replace(inputs, quotes=quotes), IDENTITY_SPEC)
+
+    period = result.periods[1]
+    book, benchmark = period.gross_return, period.benchmark_returns[EQUAL_WEIGHT_ALL_A_HELD]
+    x_open, total_open = Decimal("105000.00"), Decimal("205000.00")
+    x_intraday, z_intraday = Decimal("10.60") / Decimal("10.50"), Decimal("19.50") / Decimal("20")
+    gap = (x_open - total_open / 2) * (x_intraday - z_intraday) / period.start_value
+
+    assert (book, benchmark) == (Decimal("0.0442323481"), Decimal("0.0437894626"))
+    assert period.start_value == Decimal("194880.00")
+    assert book - benchmark == gap.quantize(Decimal("0.0000000001")) == Decimal("0.0004428855")
+    assert result.periods[0].gross_return == _held(result.periods)[0]
+
+
 def test_a_frictionless_book_holding_exactly_the_members_earns_the_benchmark() -> None:
     """The correctness criterion, by hand and by the book.
 

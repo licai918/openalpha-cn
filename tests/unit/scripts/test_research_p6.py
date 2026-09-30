@@ -225,6 +225,14 @@ def _result(
     }
 
 
+REFUSED_ROW: Final[Mapping[str, object]] = {
+    "error": "StrategyRunBlockedError: x",
+    "code_commit": COMMIT,
+    "excess_benchmark": EQUAL_WEIGHT_ALL_A_HELD,
+}
+"""A refused row as this driver writes one: the refusal, the commit, and the benchmark."""
+
+
 def _fill(
     ledger: Path,
     stage: str,
@@ -623,17 +631,53 @@ def test_a_row_measured_against_another_benchmark_is_refused_by_name(
     assert "equal_weight_all_a_held" in str(refused.value)
 
 
-def test_a_refused_row_names_no_benchmark_and_still_counts_in_the_family(tmp_path: Path) -> None:
-    """A refused configuration measured nothing, so it tested no excess and names none; it is
-    a withheld hypothesis of the family, which it must still enlarge."""
+def test_a_refused_row_carries_the_primary_and_still_counts_in_the_family(tmp_path: Path) -> None:
+    """A refused configuration measured nothing, but the driver writes the benchmark it was to
+    be measured against into its row (`V2-P6-024` m1); it is a withheld hypothesis of the
+    family, which it must still enlarge."""
     refused = _discovery("reversal_1d/v1", "raw", 5)
-    ledger = _survivor_ledger(
-        tmp_path, {_id(refused): {"error": "StrategyRunBlockedError: x", "code_commit": COMMIT}}
-    )
+    ledger = _survivor_ledger(tmp_path, {_id(refused): REFUSED_ROW})
 
     answer = p6.survivors(ledger, SESSIONS)
 
     assert answer["family_size"] == 189
+    assert answer["fdr_table"]["withheld_hypotheses"] == 1
+
+
+def test_a_refused_row_without_a_benchmark_is_refused_by_name(tmp_path: Path) -> None:
+    """No writer of this driver leaves the key out any more -- the measures' refusals and the
+    runner's own (`result_extra`) carry it -- so a refused row without one was written by
+    something else (a pre-round-2 ledger, a hand) and is not admitted as this family's."""
+    refused = _discovery("reversal_1d/v1", "raw", 5)
+    unmarked = {key: value for key, value in REFUSED_ROW.items() if key != "excess_benchmark"}
+    ledger = _survivor_ledger(tmp_path, {_id(refused): unmarked})
+
+    with pytest.raises(p6.BenchmarkMismatchError, match=_id(refused)):
+        p6.survivors(ledger, SESSIONS)
+
+
+@pytest.mark.parametrize("measure_kind", ["discovery", "stage"])
+def test_a_measure_s_refusal_names_the_primary_benchmark(measure_kind: str) -> None:
+    """m1: the row a measure writes for a refused backtest carries the benchmark it would have
+    been measured against, like every measured row."""
+
+    def refuse(**config: object) -> Any:
+        raise StrategyRequestError("no build")
+
+    measure: Any = (
+        p6.DiscoveryMeasure(
+            backtest=refuse, ic_series=refuse, sessions=SESSIONS, code_commit=COMMIT
+        )
+        if measure_kind == "discovery"
+        else p6.StrategyStageMeasure(backtest=refuse, code_commit=COMMIT)
+    )
+    config = _discovery("reversal_1d/v1", "raw", 1) if measure_kind == "discovery" else {}
+
+    assert measure(config) == {
+        "error": "StrategyRequestError: no build",
+        "code_commit": COMMIT,
+        "excess_benchmark": grid.PRIMARY_EXCESS_BENCHMARK,
+    }
 
 
 def test_a_validation_row_against_another_benchmark_is_refused(tmp_path: Path) -> None:
@@ -1767,7 +1811,7 @@ def test_the_secondary_family_is_controlled_over_the_whole_stage_and_reported_on
 
 def test_a_stage_with_no_ic_p_value_reports_the_secondary_family_as_absent(tmp_path: Path) -> None:
     configs = p6.discovery_configs(SESSIONS)
-    refused = {"error": "StrategyRunBlockedError: x", "code_commit": COMMIT}
+    refused = REFUSED_ROW
     special = {
         _id(configs[0]): {**_result(p=0.01), "ic_error": "no build"},
         _id(configs[1]): refused,
@@ -1822,8 +1866,7 @@ def test_a_discovery_stage_that_measured_nothing_is_refused_not_taken_as_no_surv
     nothing, and there is no p-value to control."""
     configs = p6.discovery_configs(SESSIONS)
     ledger = tmp_path / "ledger.jsonl"
-    refused = {"error": "StrategyRunBlockedError: no build", "code_commit": COMMIT}
-    _fill(ledger, "discovery", configs, {_id(c): refused for c in configs})
+    _fill(ledger, "discovery", configs, {_id(c): REFUSED_ROW for c in configs})
 
     with pytest.raises(grid.ResearchLedgerError, match="p_excess"):
         p6.survivors(ledger, SESSIONS)
@@ -1889,6 +1932,7 @@ def test_a_row_the_window_refuses_carries_the_stages_commit(tmp_path: Path) -> N
     (row,) = grid.read_ledger(ledger)
     assert row.result["error"].startswith("StageWindowError: ")
     assert row.result["code_commit"] == COMMIT
+    assert row.result["excess_benchmark"] == grid.PRIMARY_EXCESS_BENCHMARK  # V2-P6-024 m1
 
 
 # --- re-review: the imported code, the read-only verdict, the missing claim ----------------------
@@ -2215,9 +2259,11 @@ def test_a_stage_measured_by_worker_processes_writes_the_serial_runs_ledger(
     assert results[2] == {
         "error": "StrategyBacktestError: the fake book refuses it",
         "code_commit": COMMIT,
+        "excess_benchmark": grid.PRIMARY_EXCESS_BENCHMARK,
     }
     assert results[4]["error"].startswith("StageWindowError: ")
     assert results[4]["code_commit"] == COMMIT
+    assert results[4]["excess_benchmark"] == grid.PRIMARY_EXCESS_BENCHMARK
     assert pooled_out == serial_out  # the same progress lines, in the same order
     measured = _calls(tmp_path / "pooled-runtime")
     order = [entry["config_id"] for entry in measured]

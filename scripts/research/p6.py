@@ -558,6 +558,18 @@ def _refusal(error: Exception) -> str:
     return f"{type(error).__name__}: {error}"
 
 
+def _refused_row_extra(code_commit: str) -> dict[str, object]:
+    """What every refused row this driver writes carries beside its `error`: the commit it ran
+    at and the benchmark it would have been measured against (`V2-P6-024`), so a refused row is
+    marked as this family's by the same key a measured one is (`_require_the_primary_benchmark`).
+    The runner's own refusals get it as `result_extra`; the measures' through `_refused`."""
+    return {"code_commit": code_commit, "excess_benchmark": grid.PRIMARY_EXCESS_BENCHMARK}
+
+
+def _refused(error: Exception, code_commit: str) -> dict[str, object]:
+    return {"error": _refusal(error), **_refused_row_extra(code_commit)}
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class DiscoveryMeasure:
     """One discovery configuration as one ledger row carrying both families.
@@ -583,7 +595,7 @@ class DiscoveryMeasure:
                 self.backtest(**strategy), excess_benchmark=grid.PRIMARY_EXCESS_BENCHMARK
             )
         except grid.DEFAULT_REFUSALS as error:
-            return {"error": _refusal(error), "code_commit": self.code_commit}
+            return _refused(error, self.code_commit)
         result["code_commit"] = self.code_commit
         result.update(self._ic(config))
         return result
@@ -639,7 +651,7 @@ class StrategyStageMeasure:
                 self.backtest(**config), excess_benchmark=grid.PRIMARY_EXCESS_BENCHMARK
             )
         except grid.DEFAULT_REFUSALS as error:
-            return {"error": _refusal(error), "code_commit": self.code_commit}
+            return _refused(error, self.code_commit)
         result["code_commit"] = self.code_commit
         return result
 
@@ -712,29 +724,31 @@ def _rows_for(
 
 
 def _require_the_primary_benchmark(ledger: Path, stage: str, rows: Sequence[LedgerRow]) -> None:
-    """Refuse, by name, a stage holding a measured row whose `excess_benchmark` is not
-    `grid.PRIMARY_EXCESS_BENCHMARK` (`V2-P6-024`) -- a row measured against the retired
-    `equal_weight_all_a`, or one that names none. Every selection (`survivors`, `best_source`,
+    """Refuse, by name, a stage holding a row whose `excess_benchmark` is not
+    `grid.PRIMARY_EXCESS_BENCHMARK` (`V2-P6-024`). Every selection (`survivors`, `best_source`,
     `finalists`, `validation_selection`) reads its stage through `_rows_for`, so none selects on,
     or hands `grid.fdr_table`, a family mixing two tests.
 
-    A refused row (`error`) measured nothing, so it tested no excess and names no benchmark; it
-    is accepted without one, because it is still a hypothesis the stage tried and must still
-    enlarge the family (`grid.fdr_table` counts it as withheld). One that does name a benchmark
-    must name the primary.
+    A row is admitted if and only if it names the primary -- refused rows included. A refused
+    row measured nothing, but this driver writes the benchmark it was to be measured against
+    into every one (`_refused_row_extra`: the measures' refusals and, as `result_extra`, the
+    runner's own window refusals, serial and pooled), so no path of it leaves the key out. A
+    refused row without the key is therefore from before round 2 of `V2-P6-024` or from a hand,
+    and is refused like a row against the retired `equal_weight_all_a`: the stage must be run
+    again. An admitted refused row still counts in the family (`grid.fdr_table` withholds it).
     """
     primary = grid.PRIMARY_EXCESS_BENCHMARK
     wrong = [
         f"{row.config_id} (line {row.line}: {row.result.get('excess_benchmark')!r})"
         for row in rows
         if row.result.get("excess_benchmark") != primary
-        and not ("error" in row.result and "excess_benchmark" not in row.result)
     ]
     if wrong:
         raise BenchmarkMismatchError(
-            f"the {stage} stage in {ledger} holds {len(wrong)} measured row(s) whose excess is not "
-            f"against {primary}, the protocol's primary benchmark: {', '.join(wrong[:3])}. A "
-            "family mixing two benchmarks tests nothing; re-measure the stage"
+            f"the {stage} stage in {ledger} holds {len(wrong)} row(s) that do not name {primary}, "
+            f"the protocol's primary benchmark, as their excess benchmark: {', '.join(wrong[:3])}. "
+            "A family mixing two benchmarks tests nothing, and a refused row without the key was "
+            "not written by this driver; re-measure the stage"
         )
 
 
@@ -1563,7 +1577,7 @@ def _run(
             label_sessions=label_sessions,
             sessions=sessions,
             clock=clock,
-            result_extra={"code_commit": code_commit},
+            result_extra=_refused_row_extra(code_commit),
             before_append=verify,
         )
         ran, skipped = ran + run.ran, skipped + run.skipped
@@ -1776,7 +1790,7 @@ def _run_in_workers(
                 label_sessions=label_sessions,
                 sessions=sessions,
                 clock=clock,
-                result_extra={"code_commit": recipe.code_commit},
+                result_extra=_refused_row_extra(recipe.code_commit),
                 landed=lambda index, config, landing: echo(
                     _landed_line(index, len(configs), config, landing)
                 ),
