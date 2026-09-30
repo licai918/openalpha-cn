@@ -266,6 +266,7 @@ from openalpha_cn.domain.index_prices import INDEX_DAILY_DATASET
 from openalpha_cn.domain.labels import (
     HaltCorpus,
     LabelError,
+    LabelSessionMemo,
     LabelWindow,
     OutcomeLabel,
     build_label_window,
@@ -1038,6 +1039,10 @@ def factor_request(
     )
 
 
+_LABEL_MEMO_SESSIONS: Final[int] = 64
+"""How many sessions' label answers `_PanelInputs` keeps (`V2-P6-022`); `model_view`'s bound, for
+its reason. An evicted answer is recomputed, never wrong."""
+
 _PANEL_FAULTS: Final[tuple[type[Exception], ...]] = (
     PanelStorageError,
     FactorEngineError,
@@ -1437,6 +1442,8 @@ class _PanelInputs:
         self._store = store
         self._request = request
         self._bars: dict[date, Mapping[str, DailyBar]] = {}
+        # `V2-P6-022`: `model_view._LabelInputs`' memo, for the same overlapping windows.
+        self._memo = LabelSessionMemo(max_sessions=_LABEL_MEMO_SESSIONS)
         self._limits: dict[date, Mapping[str, PriceLimit]] = {}
         years = request.years
         as_of = request.as_of
@@ -1672,6 +1679,7 @@ class _PanelInputs:
                 halts=self.halts,
                 universe=self.universe,
                 recorded=self.return_paths,
+                memo=self._memo,
             )
         except LabelError as error:
             raise FactorRunBlockedError(

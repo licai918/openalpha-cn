@@ -101,7 +101,7 @@ from __future__ import annotations
 
 from bisect import bisect_right
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
 from math import isfinite
@@ -329,6 +329,16 @@ class AdjustmentHistory:
     split `SecurityIndustryHistory.answerable_through` makes, and for its reason: the read knows
     the bound and the rows cannot.
     """
+    _observed_days: tuple[date, ...] = field(
+        init=False, repr=False, compare=False, hash=False, default=()
+    )
+    """Each observation's `observed_on`, in order: `factor_on`'s bisect index, built once here
+    (`V2-P6-022`) rather than rebuilt as a list on every call. Not part of the value."""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "_observed_days", tuple(entry.observed_on for entry in self.observations)
+        )
 
     @property
     def covered_from(self) -> date:
@@ -396,7 +406,7 @@ class AdjustmentHistory:
                 "forward would assert that no corporate action happened in a window this read "
                 "never covered"
             )
-        position = bisect_right([entry.observed_on for entry in self.observations], day)
+        position = bisect_right(self._observed_days, day)
         return self.observations[position - 1].factor
 
     def adjustment_ratio(

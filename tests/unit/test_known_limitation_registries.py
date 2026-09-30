@@ -707,7 +707,7 @@ REGISTRY_ENTRY_COUNTS: Final[dict[str, int]] = {
     "KNOWN_FACTOR_SEAL_LIMITATIONS": 3,
     "KNOWN_SUSPENSION_LIMITATIONS": 9,
     "KNOWN_UNIVERSE_LIMITATIONS": 7,
-    "KNOWN_STORAGE_LIMITATIONS": 6,
+    "KNOWN_STORAGE_LIMITATIONS": 7,
 }
 """How many entries each hand-written registry carries -- an equality, one registry per line.
 
@@ -753,10 +753,10 @@ no longer written in prose at all. `DOCSTRING_TOTALS` below holds them as an equ
 DOCSTRING_TOTALS: Final[Mapping[str, int]] = MappingProxyType(
     {
         "registries": 42,
-        "entries": 399,
-        "derived_entries": 74,
+        "entries": 401,
+        "derived_entries": 75,
         "table_rows": 41,
-        "table_entries": 325,
+        "table_entries": 326,
     }
 )
 """Every number this module would otherwise have stated in prose, as an equality.

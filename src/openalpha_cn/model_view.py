@@ -215,6 +215,7 @@ from openalpha_cn.domain.horizon import (
 from openalpha_cn.domain.labels import (
     HaltCorpus,
     LabelError,
+    LabelSessionMemo,
     LabelWindow,
     OutcomeLabel,
     build_label_window,
@@ -863,6 +864,11 @@ _REGISTRY_FAULTS: Final[tuple[type[Exception], ...]] = (
 restated. `load_stock_universe` is the one read here that can fail with a statement about the
 stored registry's *shape* -- an orphan delisting row, a duplicated `ts_code` -- rather than about
 its partitions."""
+
+_LABEL_MEMO_SESSIONS: Final[int] = 64
+"""How many sessions' label answers `_LabelInputs` keeps when its caller bounds nothing
+(`V2-P6-022`). Every window of a 60-session horizon fits, and an evicted answer is recomputed,
+never wrong -- `LabelSessionMemo` serves an entry only for the inputs it was computed from."""
 
 _OUTCOME_WINDOW_FAULTS: Final[tuple[type[Exception], ...]] = (LabelError, TradingCalendarError)
 """The two refusals building an outcome window raises, named once for the **two** places that
@@ -1665,8 +1671,22 @@ class _LabelInputs:
         self._store = store
         self._as_of = request.as_of
         self._cached_sessions = cached_sessions
+        # `V2-P6-022`: each (security, session)'s refusals and return, shared by the overlapping
+        # windows that span it. Bounded like the bar caches, or at `_LABEL_MEMO_SESSIONS` for a
+        # caller that keeps every session's bars; an evicted answer is recomputed, never wrong.
+        self._memo = LabelSessionMemo(
+            max_sessions=_LABEL_MEMO_SESSIONS if cached_sessions is None else cached_sessions
+        )
         self._bars: dict[date, Mapping[str, DailyBar]] = {}
         self._limits: dict[date, Mapping[str, PriceLimit]] = {}
+        self._held_window: (
+            tuple[
+                tuple[date, ...],
+                tuple[tuple[date, Mapping[str, DailyBar]], ...],
+                tuple[tuple[date, Mapping[str, PriceLimit]], ...],
+            ]
+            | None
+        ) = None
         years = request.years
         as_of = request.as_of
         self.calendar: TradingCalendar = _read(
@@ -1743,6 +1763,27 @@ class _LabelInputs:
             self._bound(self._limits)
         return self._limits[day]
 
+    def _window_maps(
+        self, window: LabelWindow
+    ) -> tuple[
+        tuple[tuple[date, Mapping[str, DailyBar]], ...],
+        tuple[tuple[date, Mapping[str, PriceLimit]], ...],
+    ]:
+        """Every session of `window` with its bars and its bands, read in that order.
+
+        `V2-P6-022`: one IC day labels every security over one window, so the window's session
+        mappings are resolved once for all of them rather than `2 * len(sessions)` cache lookups
+        per security. Held for the last window asked about; every mapping is the one
+        `bars_on`/`limits_on` answers, bars first, as the per-security reads took them.
+        """
+        held = self._held_window
+        if held is not None and held[0] == window.sessions:
+            return held[1], held[2]
+        bar_maps = tuple((day, self.bars_on(day)) for day in window.sessions)
+        limit_maps = tuple((day, self.limits_on(day)) for day in window.sessions)
+        self._held_window = (window.sessions, bar_maps, limit_maps)
+        return bar_maps, limit_maps
+
     def _bound(self, cache: dict[date, _T]) -> None:
         """Drop the oldest-read sessions past `cached_sessions`; unbounded when it is `None`."""
         if self._cached_sessions is not None:
@@ -1781,18 +1822,11 @@ class _LabelInputs:
         if history is None:
             return None
         try:
-            bars = {
-                day: session[ts_code]
-                for day in window.sessions
-                if ts_code in (session := self.bars_on(day))
-            }
-            limits = {
-                day: band[ts_code]
-                for day in window.sessions
-                if ts_code in (band := self.limits_on(day))
-            }
+            bar_maps, limit_maps = self._window_maps(window)
         except ModelPanelUnreadableError as error:
             raise _window_reach_refusal(error, window=window) from error
+        bars = {day: session[ts_code] for day, session in bar_maps if ts_code in session}
+        limits = {day: band[ts_code] for day, band in limit_maps if ts_code in band}
         try:
             return label_outcome(
                 window,
@@ -1803,6 +1837,7 @@ class _LabelInputs:
                 halts=self.halts,
                 universe=self.universe,
                 recorded=self.return_paths,
+                memo=self._memo,
             )
         except LabelError as error:
             raise ModelRunBlockedError(

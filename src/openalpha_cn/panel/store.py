@@ -436,6 +436,7 @@ scratch):
 from __future__ import annotations
 
 import json
+import os
 import threading
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -856,6 +857,76 @@ its only two outcomes. Eight bytes per partition per assessment, independent of 
 """
 
 
+_CATALOG_HEADER_BYTES: Final[int] = 12_288
+"""How much of the catalog file's head a readiness fingerprint reads (`V2-P6-022`).
+
+DuckDB's file begins with a main header and two database headers, one 4 KiB block each, and every
+checkpoint rewrites one of the database headers with an incremented iteration count. The bytes are
+compared as bytes -- nothing here parses them -- so they are one more witness beside the file's
+size and timestamps, and the one that does not depend on a filesystem's timestamp resolution."""
+
+_PARQUET_HEAD_BYTES: Final[int] = 4
+_PARQUET_TAIL_BYTES: Final[int] = 8
+"""The bytes of a partition file `_partition_states` reads facts from: Parquet's magic at the head,
+and at the tail the footer's length and the magic again (`V2-P6-022`)."""
+
+_FileFingerprint = tuple[object, ...]
+
+_CATALOG_WRITES: dict[str, int] = {}
+_CATALOG_WRITES_LOCK = threading.Lock()
+
+
+def _note_catalog_write(key: str) -> None:
+    """Count one finished catalog write in this process, for every `PanelStore` on that catalog.
+
+    `V2-P6-022`. Called as `_CatalogAccess.exclusive()` releases, which is after the catalog
+    commit and the partition rename it guards, so a readiness state read before the write is held
+    under the old count and never served after it -- whichever `PanelStore` instance on the same
+    root made the write. A write from another process is seen by the files instead; see
+    `_file_fingerprint`.
+    """
+    with _CATALOG_WRITES_LOCK:
+        _CATALOG_WRITES[key] = _CATALOG_WRITES.get(key, 0) + 1
+
+
+def _catalog_writes(key: str) -> int:
+    return _CATALOG_WRITES.get(key, 0)
+
+
+def _file_fingerprint(path: Path, *, head: int, tail: int) -> _FileFingerprint | None:
+    """What a file is now, as far as a reader can tell without parsing it (`V2-P6-022`).
+
+    Identity, size and both timestamps from the open handle -- `ctime` cannot be set from user
+    space, so restoring an `mtime` does not hide a write -- and the first `head` and last `tail`
+    bytes. `None` when there is nothing at `path`; a path that exists but cannot be opened is
+    fingerprinted by its `stat` alone.
+    """
+    try:
+        with path.open("rb") as handle:
+            status = os.fstat(handle.fileno())
+            first = handle.read(head) if head else b""
+            last = b""
+            if tail and status.st_size > len(first):
+                handle.seek(-min(tail, status.st_size - len(first)), os.SEEK_END)
+                last = handle.read(tail)
+    except OSError:
+        try:
+            status = os.stat(path)
+        except OSError:
+            return None
+        first = last = None  # type: ignore[assignment]
+    return (
+        status.st_dev,
+        status.st_ino,
+        status.st_mode,
+        status.st_size,
+        status.st_mtime_ns,
+        status.st_ctime_ns,
+        first,
+        last,
+    )
+
+
 class _CatalogAccess:
     """Readers together, a writer alone -- DuckDB's own rule about this file, as a lock.
 
@@ -893,7 +964,8 @@ class _CatalogAccess:
     "Concurrency".
     """
 
-    def __init__(self) -> None:
+    def __init__(self, written: Callable[[], None] = lambda: None) -> None:
+        self._written = written
         self._condition = threading.Condition()
         self._readers = 0
         self._writer = False
@@ -945,6 +1017,9 @@ class _CatalogAccess:
             yield
         finally:
             self._local.writing = False
+            # Before any reader can take the shared side again (`V2-P6-022`): a readiness state
+            # held from before this write is then already stale for every reader that follows.
+            self._written()
             with self._condition:
                 self._writer = False
                 self._condition.notify_all()
@@ -1037,7 +1112,14 @@ class PanelStore:
         # with each other. It cannot, and is not meant to, coordinate across separate OS
         # processes; see the module docstring's "Concurrency" section for why that remains a
         # deliberately separate, still-open concern.
-        self._catalog_access = _CatalogAccess()
+        self._catalog_key = str(self.catalog_path.resolve())
+        self._catalog_access = _CatalogAccess(lambda: _note_catalog_write(self._catalog_key))
+        # `V2-P6-022`: each (dataset, year)'s `PartitionState`, held beside the catalog and file
+        # fingerprints it was read under and served again only while both still stand. See
+        # `_partition_states`.
+        self._held_states: dict[
+            tuple[str, int], tuple[_FileFingerprint, _FileFingerprint | None, PartitionState]
+        ] = {}
 
     def write_partition(
         self,
@@ -1969,6 +2051,10 @@ class PanelStore:
         years = sorted(set(requirement.years))
         if not self.catalog_path.exists():
             return tuple(_absent_partition(year) for year in years)
+        catalog = self._catalog_fingerprint()
+        held = self._held_partition_states(requirement.dataset, years, catalog)
+        if held is not None:
+            return held
         states: list[PartitionState] = []
         with (
             self._catalog_access.shared(),
@@ -1983,24 +2069,88 @@ class PanelStore:
                     else None
                 )
                 if reference is None:
-                    states.append(_absent_partition(year))
+                    state = _absent_partition(year)
+                    self._hold(requirement.dataset, catalog, None, state)
+                    states.append(state)
                     continue
+                # Taken before any fact is read from the file, so a change made while they are
+                # being read leaves this state held under the fingerprint from before it.
+                file = _file_fingerprint(
+                    reference.path, head=_PARQUET_HEAD_BYTES, tail=_PARQUET_TAIL_BYTES
+                )
                 present = reference.path.is_file()
                 readable = present and _looks_like_parquet(reference.path)
-                states.append(
-                    PartitionState(
-                        year=year,
-                        registered=True,
-                        file_present=present,
-                        file_readable=readable,
-                        content_hash=reference.content_hash,
-                        file_row_count=(
-                            _parquet_row_count(connection, reference.path) if readable else None
-                        ),
-                        coverage=_read_coverage(connection, requirement.dataset, year),
-                        path=reference.path,
-                    )
+                state = PartitionState(
+                    year=year,
+                    registered=True,
+                    file_present=present,
+                    file_readable=readable,
+                    content_hash=reference.content_hash,
+                    file_row_count=(
+                        _parquet_row_count(connection, reference.path) if readable else None
+                    ),
+                    coverage=_read_coverage(connection, requirement.dataset, year),
+                    path=reference.path,
                 )
+                self._hold(requirement.dataset, catalog, file, state)
+                states.append(state)
+        return tuple(states)
+
+    def _catalog_fingerprint(self) -> _FileFingerprint | None:
+        """This process's catalog-write count, the catalog file's fingerprint and its WAL's.
+
+        `V2-P6-022`. Taken **before** a readiness read opens the catalog, so a state read while a
+        write lands is held under the fingerprint from before the write and never served after
+        it. `None` when the catalog file cannot be fingerprinted, which holds nothing.
+        """
+        catalog = _file_fingerprint(self.catalog_path, head=_CATALOG_HEADER_BYTES, tail=0)
+        if catalog is None:
+            return None
+        wal = _file_fingerprint(
+            self.catalog_path.with_name(self.catalog_path.name + ".wal"), head=0, tail=0
+        )
+        return (_catalog_writes(self._catalog_key), catalog, wal)
+
+    def _hold(
+        self,
+        dataset: str,
+        catalog: _FileFingerprint | None,
+        file: _FileFingerprint | None,
+        state: PartitionState,
+    ) -> None:
+        if catalog is not None:
+            self._held_states[(dataset, state.year)] = (catalog, file, state)
+
+    def _held_partition_states(
+        self, dataset: str, years: Sequence[int], catalog: _FileFingerprint | None
+    ) -> tuple[PartitionState, ...] | None:
+        """Every requested year's held `PartitionState`, or `None` unless all of them still stand.
+
+        `V2-P6-022`. `load_daily_bars` and `load_price_limits` read one session per call and each
+        call assessed its year's partition from scratch -- a DuckDB connection, the catalog row,
+        the file's magic and footer, and the coverage record with its census: 13,483 assessments
+        and 206 s of one horizon-20 backtest of the research store, against partitions that did
+        not change once during it. A held state is served only while the catalog fingerprint it
+        was read under is the catalog's now -- this process's write count, the catalog file's and
+        the WAL's identity, size, timestamps and header bytes -- and, for a registered partition,
+        while the partition file's own fingerprint is too: the file facts the state carries
+        (present, Parquet's magic at both ends, the footer's row count) are re-witnessed on every
+        call by the bytes and the `stat` they come from. `KNOWN_STORAGE_LIMITATIONS` names what
+        a fingerprint cannot see.
+        """
+        if catalog is None:
+            return None
+        states: list[PartitionState] = []
+        for year in years:
+            held = self._held_states.get((dataset, year))
+            if held is None or held[0] != catalog:
+                return None
+            state = held[2]
+            if state.path is not None and held[1] != _file_fingerprint(
+                state.path, head=_PARQUET_HEAD_BYTES, tail=_PARQUET_TAIL_BYTES
+            ):
+                return None
+            states.append(state)
         return tuple(states)
 
     def _now(self) -> datetime:

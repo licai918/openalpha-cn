@@ -361,8 +361,14 @@ PROTOCOL_BENCHMARKS: Final[tuple[str, ...]] = ("000905.SH", EQUAL_WEIGHT_ALL_A)
 """The protocol's two benchmarks, side by side: 中证500 and the all-A equal-weight series."""
 
 _CACHED_SESSIONS: Final[int] = 8
-"""How many sessions' bars and bands stay in memory. The book walks sessions in order and asks
-about the signal session, the next one and each marked session, so a small window suffices."""
+"""The fewest sessions' bars and bands that stay in memory. The book walks sessions in order and
+asks about the signal session, the next one and each marked session.
+
+**At least one period's worth, since `V2-P6-022`** (`_session_cache_depth`). A period is
+walked twice -- the book marks every session of it, then `_compound` walks the same sessions for
+the equal-weight benchmark -- so a window smaller than the period read every session twice: 3,364
+`load_daily_bars` calls for about 1,700 sessions on one horizon-20 backtest of the research store.
+Holding `rebalance_every_sessions + 2` of them reads each once."""
 
 _ADJUSTMENT_YEARS_HELD: Final[int] = 2
 """How many quote years' adjustment histories stay resident: a period spans at most two years."""
@@ -738,7 +744,7 @@ def load_strategy_inputs(
     elif source.walk_forward is not None:
         lookback, years = _lookback(store, request, source.walk_forward.train_sessions - 1)
     instants = {day: session_publication_instant(day) for day in lookback + sessions}
-    days = _PanelDays(store, request, calendar)
+    days = _PanelDays(store, request, calendar, cached_sessions=_session_cache_depth(request))
     benchmarks: dict[str, Mapping[date, Decimal]] = {}
     for name in request.spec.benchmarks:
         if name == EQUAL_WEIGHT_ALL_A:
@@ -802,6 +808,12 @@ def load_strategy_inputs(
         fit_for_day=fits,
         **shared,  # type: ignore[arg-type]
     )
+
+
+def _session_cache_depth(request: StrategyRequest) -> int:
+    """How many sessions `_PanelDays` keeps for `request`: one period and its two ends, and never
+    fewer than `_CACHED_SESSIONS` (`V2-P6-022`). See `_CACHED_SESSIONS` for why a period."""
+    return max(_CACHED_SESSIONS, request.spec.rebalance_every_sessions + 2)
 
 
 def _from_the_model_plane(reader: Callable[[], _T]) -> _T:
@@ -1604,13 +1616,21 @@ def _drained(feed: ScoreFeed, signal_days: frozenset[date], calendar: Sequence[d
 class _PanelDays:
     """One session's bars and bands, read on demand and kept for a few sessions."""
 
-    def __init__(self, store: PanelStore, request: StrategyRequest, calendar: TradingCalendar):
+    def __init__(
+        self,
+        store: PanelStore,
+        request: StrategyRequest,
+        calendar: TradingCalendar,
+        *,
+        cached_sessions: int = _CACHED_SESSIONS,
+    ):
         self._store = store
         self._request = request
         self._calendar = calendar
         self._sessions: OrderedDict[date, tuple[dict[str, DailyBar], dict[str, PriceLimit]]] = (
             OrderedDict()
         )
+        self._cached_sessions = cached_sessions
         self.halts: HaltCorpus = halt_corpus_for_years(
             _read(
                 lambda: load_suspensions(
@@ -1682,7 +1702,7 @@ class _PanelDays:
             what=f"the published limit bands for {day.isoformat()}",
         )
         self._sessions[day] = (bars, limits)
-        if len(self._sessions) > _CACHED_SESSIONS:
+        if len(self._sessions) > self._cached_sessions:
             self._sessions.popitem(last=False)
         return bars, limits
 

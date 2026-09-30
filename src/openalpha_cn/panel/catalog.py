@@ -673,6 +673,28 @@ KNOWN_STORAGE_LIMITATIONS: Final[tuple[StorageLimitation, ...]] = (
         ),
     ),
     StorageLimitation(
+        code="a_partition_state_is_reused_while_its_catalog_and_file_fingerprints_stand",
+        detail=(
+            "V2-P6-022. PanelStore keeps each (dataset, year)'s PartitionState and serves it "
+            "again without opening the catalog while two fingerprints are unchanged: the "
+            "catalog's -- a count this process bumps as every catalog write releases, plus the "
+            "catalog file's and its WAL's device, inode, mode, size, mtime and ctime in "
+            "nanoseconds and the catalog's first 12 KiB, where DuckDB's headers and their "
+            "checkpoint iteration live -- and the partition file's, the same stat fields plus "
+            "Parquet's magic and the footer length at its two ends. It exists because one "
+            "horizon-20 backtest of the research store re-assessed unchanged partitions 13,483 "
+            "times for 206 s. WHAT A FINGERPRINT CANNOT SEE: a change made by ANOTHER PROCESS "
+            "that leaves every one of those fields as it was -- a same-size edit to the middle "
+            "of a partition file landing inside the same timestamp tick as the file's previous "
+            "write, or a catalog write that neither moves the catalog's header bytes nor its "
+            "size, timestamps or WAL. In this process every catalog write is counted, so the "
+            "residue is cross-process only, and on a filesystem with nanosecond timestamps "
+            "(APFS, ext4 with fine-grained timestamps) it needs two writes inside one "
+            "nanosecond tick. The middle of a partition file was never re-read by the "
+            "uncached gate either, which reads only its magic, footer length and row count"
+        ),
+    ),
+    StorageLimitation(
         code="date_gap_clears_on_partition_rows_the_filtered_read_withholds",
         detail=(
             "date_gap asks whether every required session is present in the partition's "

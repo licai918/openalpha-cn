@@ -116,7 +116,7 @@ alignment). No provider, no store, no clock -- the same placement, and the same 
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
 from typing import Final
@@ -356,6 +356,22 @@ class StockUniverse:
     securities: tuple[SecurityLifecycle, ...]
     years_read: tuple[int, ...] = ()
     """Which lifecycle-year partitions this universe came from; see `UniverseCompleteness`."""
+    _by_code: dict[str, SecurityLifecycle] = field(
+        init=False, repr=False, compare=False, hash=False, default_factory=dict
+    )
+    """`securities` keyed by `ts_code`, built once here rather than scanned per lookup
+    (`V2-P6-022`). Not part of the value: equality, hashing and `repr` never see it.
+
+    `security()` walked every row for every lookup, and a label asks it once per session of every
+    window -- 114.9M calls and 5,623 s of one horizon-20 IC series on the research store. The
+    first entry for a code is the one kept, which is the one the scan returned; the constructor
+    validates nothing, so a duplicate is its caller's and answers as it always did."""
+
+    def __post_init__(self) -> None:
+        index: dict[str, SecurityLifecycle] = {}
+        for entry in self.securities:
+            index.setdefault(entry.ts_code, entry)
+        object.__setattr__(self, "_by_code", index)
 
     @property
     def security_count(self) -> int:
@@ -372,9 +388,9 @@ class StockUniverse:
         snapshot" and "this code was not listed that day" are different facts and only the
         second one is an answer.
         """
-        for entry in self.securities:
-            if entry.ts_code == ts_code:
-                return entry
+        entry = self._by_code.get(ts_code)
+        if entry is not None:
+            return entry
         raise StockUniverseError(
             f"{ts_code!r} is not in the {self.snapshot_date.isoformat()} registry snapshot; "
             "an absent code is not a security that was never listed"

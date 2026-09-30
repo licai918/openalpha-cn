@@ -1959,6 +1959,8 @@ def load_neutralized_factor_observations(
     """
     requirement = neutralized_factor_requirement(definition, years=years, as_of=as_of)
     dataset = requirement.dataset
+    # Once, not once per row (`V2-P6-022`), for `load_processed_factor_observations`' reason.
+    wanted = spec.neutralization_id
     found: list[NeutralizedFactorObservation] = []
     for year in sorted(set(years)):
         outcome = store.read_visible_at(
@@ -1976,7 +1978,7 @@ def load_neutralized_factor_observations(
             for row in (
                 _neutralized_observation_from_row(cells, dataset=dataset) for cells in outcome.rows
             )
-            if row.neutralization_id == spec.neutralization_id
+            if row.neutralization_id == wanted
         )
     _refuse_rows_that_are_not_the_answers_their_manifest_addresses(
         found,

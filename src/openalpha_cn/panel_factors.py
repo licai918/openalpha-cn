@@ -9253,6 +9253,10 @@ def load_processed_factor_observations(
     """
     requirement = processed_factor_requirement(definition, years=years, as_of=as_of)
     dataset = requirement.dataset
+    # Once, not once per row (`V2-P6-022`): `transform_id` is a digest of the spec's canonical
+    # JSON, recomputed on every access -- 915k JSON encodings and SHA-256s for one year of one
+    # factor, a third of this read, for a value the frozen spec cannot change.
+    wanted = spec.transform_id
     found: list[ProcessedFactorObservation] = []
     for year in sorted(set(years)):
         outcome = store.read_visible_at(
@@ -9270,7 +9274,7 @@ def load_processed_factor_observations(
             for row in (
                 _processed_observation_from_row(cells, dataset=dataset) for cells in outcome.rows
             )
-            if row.transform_id == spec.transform_id
+            if row.transform_id == wanted
         )
     _refuse_rows_that_are_not_the_answers_their_manifest_addresses(
         found,

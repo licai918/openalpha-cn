@@ -502,6 +502,117 @@ def halt_corpus_for_years(
     )
 
 
+class LabelSessionMemo:
+    """Per-`(security, session)` answers a set of overlapping label windows shares (`V2-P6-022`).
+
+    `label_outcome` derives two things for every session of a window: the registry, halt and bar
+    verdict (`_session_refusals`) and, when the window is priced, that session's return
+    (`session_returns`). Both are functions of the one session and its inputs, never of the
+    window, and a horizon-`h` IC series puts each session inside `h + 1` windows -- so on one
+    horizon-20 configuration of the research store they were derived 114.9M and 100.6M times
+    for about 5.5M distinct `(security, session)` pairs. A memo handed to `label_outcome` keeps
+    each answer for the other windows that ask.
+
+    **An entry is served only for the inputs it was computed from.** It is held beside those
+    inputs -- the registry and halt corpus objects, the bar, the previous session and its close,
+    the factor series and the recorded decision -- and a call that hands in any other one is
+    computed afresh and replaces it. Identity rather than equality for the objects, because the
+    measuring layer hands the same frozen objects to every window and identity costs nothing to
+    compare; a reader that re-loads a session gets new objects and a recomputation, never a
+    stale answer. So the memo cannot change a label, only how often one is derived, and
+    `tests/unit/domain/test_label_session_memo.py` holds both halves: every window of a
+    generated market is the same through the memo as without it, and a warm memo handed a
+    changed bar, previous bar, factor series, decision, registry or halt corpus answers for the
+    new one.
+
+    **A refusal is not kept.** A session whose return raises -- a disagreement nobody decided,
+    an unknowable one, a factor series that does not reach it -- raises again for every window
+    that asks, from the same arithmetic, so the error is the one it always was.
+
+    **Bounded by sessions**, oldest first: `max_sessions` is how many sessions' answers are kept,
+    and a reader walking forward through a range never asks about a session older than its
+    current window. Evicting an answer costs its recomputation and nothing else.
+
+    Plain dictionaries and no numerical library: this is `domain/`.
+    """
+
+    __slots__ = ("_max_sessions", "_sessions")
+
+    def __init__(self, *, max_sessions: int) -> None:
+        if type(max_sessions) is not int or max_sessions < 1:
+            raise ValueError(
+                f"a label session memo keeps at least one session; got {max_sessions!r}"
+            )
+        self._max_sessions = max_sessions
+        self._sessions: dict[date, dict[tuple[str, str, bool], tuple[object, ...]]] = {}
+
+    @property
+    def session_count(self) -> int:
+        """How many sessions' answers are held now; never more than `max_sessions`."""
+        return len(self._sessions)
+
+    def _session(self, day: date) -> dict[tuple[str, str, bool], tuple[object, ...]]:
+        held = self._sessions.get(day)
+        if held is None:
+            held = self._sessions[day] = {}
+            while len(self._sessions) > self._max_sessions:
+                del self._sessions[next(iter(self._sessions))]
+        return held
+
+    def session_refusals(
+        self,
+        day: date,
+        *,
+        ts_code: str,
+        bars: Mapping[date, DailyBar],
+        halts: HaltCorpus,
+        universe: StockUniverse,
+    ) -> tuple[LabelRefusal, ...]:
+        """`_session_refusals` for one session, served from the memo when its inputs match."""
+        has_bar = day in bars
+        entries = self._session(day)
+        key = ("refusals", ts_code, has_bar)
+        held = entries.get(key)
+        if held is not None and held[0] is universe and held[1] is halts:
+            return held[2]  # type: ignore[return-value]
+        found = _session_refusals(day, ts_code=ts_code, bars=bars, halts=halts, universe=universe)
+        entries[key] = (universe, halts, found)
+        return found
+
+    def session_returns(
+        self,
+        bar: DailyBar,
+        *,
+        previous_close: float,
+        previous_day: date,
+        factors: AdjustmentHistory,
+        recorded: RecordedReturnPath | None,
+    ) -> SessionReturns:
+        """`daily_prices.session_returns` for one link, served from the memo when every input
+        it reads is the one it was computed from."""
+        entries = self._session(bar.trade_date)
+        key = ("returns", bar.ts_code, True)
+        held = entries.get(key)
+        if (
+            held is not None
+            and held[0] is bar
+            and held[1] == previous_day
+            and held[2] == previous_close
+            and held[3] is factors
+            and held[4] is recorded
+        ):
+            return held[5]  # type: ignore[return-value]
+        computed = session_returns(
+            bar,
+            previous_close=previous_close,
+            previous_day=previous_day,
+            factors=factors,
+            recorded=recorded,
+        )
+        entries[key] = (bar, previous_day, previous_close, factors, recorded, computed)
+        return computed
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class LabelWindow:
     """The sessions a label is measured over, and what it was derived from.
@@ -846,6 +957,7 @@ def window_return(
     bars: Mapping[date, DailyBar],
     factors: AdjustmentHistory,
     recorded: Mapping[tuple[str, date], RecordedReturnPath] | None = None,
+    memo: LabelSessionMemo | None = None,
 ) -> WindowReturn:
     """The window's return on both correct paths, with the wrong one carried beside them.
 
@@ -869,6 +981,11 @@ def window_return(
     record names the factor path needs no rescaling. A link whose record corroborates neither
     propagates `UnknowableSessionReturnError`, which `label_outcome` turns into a refusal. With
     no recorded link the arithmetic is the one before `V2-P6-020`, to the bit.
+
+    **`memo` (`V2-P6-022`)** serves each link's `SessionReturns` from a `LabelSessionMemo` when
+    that link was computed before from the same bar, previous close, factor series and decision,
+    which is what overlapping windows share. It changes how often a link is computed, never what
+    it is; `None` computes every link here.
     """
     for day in window.sessions:
         bar = bars.get(day)
@@ -896,8 +1013,9 @@ def window_return(
     gross_published = 1.0
     correction = 1.0
     decisions = recorded or {}
+    measure = session_returns if memo is None else memo.session_returns
     for previous_day, day in zip(window.sessions, window.sessions[1:], strict=False):
-        computed = session_returns(
+        computed = measure(
             bars[day],
             previous_close=bars[previous_day].close,
             previous_day=previous_day,
@@ -947,6 +1065,7 @@ def label_outcome(
     halts: HaltCorpus,
     universe: StockUniverse,
     recorded: Mapping[tuple[str, date], RecordedReturnPath] | None = None,
+    memo: LabelSessionMemo | None = None,
 ) -> OutcomeLabel:
     """Label one security over one window, or name every reason it cannot be labelled.
 
@@ -972,14 +1091,18 @@ def label_outcome(
     is dropped and named, and every other window of the security is labelled as before. It is
     found by pricing the window, so it is reported only when nothing else refused the window
     first; a window refused for another reason carries no return either way.
+
+    **`memo` (`V2-P6-022`)** is a `LabelSessionMemo` shared across the windows of one IC series
+    or training panel. Each session's refusals and return are functions of that session alone,
+    and a session sits inside every window that spans it; the memo keeps each for the next
+    window that asks with the same inputs. `None` derives everything here, as before.
     """
     halts.require_coverage(window.sessions)
+    refused = _session_refusals if memo is None else memo.session_refusals
     refusals: list[LabelRefusal] = [
         refusal
         for day in window.sessions
-        for refusal in _session_refusals(
-            day, ts_code=ts_code, bars=bars, halts=halts, universe=universe
-        )
+        for refusal in refused(day, ts_code=ts_code, bars=bars, halts=halts, universe=universe)
     ]
     touches: dict[date, LimitTouch] = {}
     for day in (window.entry_day, window.exit_day):
@@ -1043,7 +1166,7 @@ def label_outcome(
     if not refusals:
         try:
             priced = window_return(
-                window, ts_code=ts_code, bars=bars, factors=factors, recorded=recorded
+                window, ts_code=ts_code, bars=bars, factors=factors, recorded=recorded, memo=memo
             )
         except UnknowableSessionReturnError as error:
             refusals.append(
