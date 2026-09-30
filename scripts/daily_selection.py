@@ -197,6 +197,7 @@ from openalpha_cn.strategy_registration import (  # noqa: E402
 )
 from openalpha_cn.strategy_registration import schedule_of as registered_schedule_of  # noqa: E402
 from openalpha_cn.strategy_view import (  # noqa: E402
+    PROTOCOL_BENCHMARKS,
     SignalDay,
     StrategyRequest,
     StrategyViewError,
@@ -1539,6 +1540,24 @@ _SIGNIFICANCE_KEYS: Final[tuple[str, ...]] = (
 )
 
 
+def registered_excess_benchmark(settings: Mapping[str, Any]) -> str:
+    """The benchmark a registration's forward excess is tested against: the name its settings
+    recorded, which a registration made before `V2-P6-024` gives as `equal_weight_all_a` and keeps
+    reading under that name; `grid.PRIMARY_EXCESS_BENCHMARK` only when it recorded none."""
+    return str(settings.get("excess_benchmark", grid.PRIMARY_EXCESS_BENCHMARK))
+
+
+def priced_benchmarks(
+    benchmarks: Sequence[str] | None, settings: Mapping[str, Any]
+) -> tuple[str, ...]:
+    """The benchmarks a forward book is priced with: the configuration's own (the protocol's two
+    when it names none) and the registration's excess benchmark beside them when they lack it --
+    so a registration whose recorded benchmark is no longer a default (`V2-P6-024`) is still
+    tested against it rather than refused for a series nobody priced."""
+    named = tuple(PROTOCOL_BENCHMARKS if benchmarks is None else benchmarks)
+    return tuple(dict.fromkeys((*named, registered_excess_benchmark(settings))))
+
+
 def _registered_count(settings: Mapping[str, Any], key: str) -> int:
     """`settings[key]` as an integer, refusing a missing one and a bool -- which Python counts
     as an int and no registration means as one (`Registration.seed`'s rule)."""
@@ -1611,7 +1630,7 @@ def forward_summary(
     """
     samples = _registered_count(settings, "bootstrap_samples")
     seed = _registered_count(settings, "random_seed")
-    primary = str(settings.get("excess_benchmark", grid.PRIMARY_EXCESS_BENCHMARK))
+    primary = registered_excess_benchmark(settings)
     flagged = dict(check.unverifiable)
     opened = {session: record for session, record in schedule.rebalances}
     excluded = {session for session, record in opened.items() if record in flagged}

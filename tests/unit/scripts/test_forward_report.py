@@ -452,9 +452,38 @@ SETTINGS: Final[dict[str, object]] = {
     **grid.protocol_settings(),
     "bootstrap_samples": 4_321,
     "random_seed": 97,
+    "excess_benchmark": "equal_weight_all_a",
 }
 """Measurement settings no default carries, so a result read under them came from the
-registration."""
+registration. The `excess_benchmark` is the one registrations named before `V2-P6-024` made the
+held all-A benchmark the protocol's: a registration keeps reading the name it recorded, and its
+configuration names no `benchmarks`, so the report must price that one itself."""
+
+
+def test_a_registration_under_the_current_protocol_is_tested_against_the_held_benchmark(
+    tmp_path: Path, repo: Path
+) -> None:
+    """`V2-P6-024`: a registration made under `grid.protocol_settings()` records
+    `equal_weight_all_a_held`, the book prices it, and the forward test is against it."""
+    settings = {**grid.protocol_settings(), "bootstrap_samples": 100, "random_seed": 5}
+    panel_root, admitted, _sessions, _signal_days = build_static_fixture(
+        tmp_path, repo, settings=settings
+    )
+
+    report = forward_report.forward_report(
+        PanelStore(panel_root / "panel"),
+        prediction_store(panel_root, clock_at=READ_AT),
+        panel_root,
+        registration=admitted.path,
+        repo=repo,
+        as_of=READ_AT,
+    )
+
+    assert admitted.settings["excess_benchmark"] == "equal_weight_all_a_held"
+    shown = report.summary["significance"]["all_periods"]["equal_weight_all_a_held"]
+    assert "refused" not in shown
+    assert shown["excess_benchmark"] == "equal_weight_all_a_held"
+    assert "equal_weight_all_a" not in report.backtest.periods[0].benchmark_returns
 
 
 def test_the_forward_summary_tests_both_statistic_sets_with_the_holdouts_own_function(
@@ -462,7 +491,8 @@ def test_the_forward_summary_tests_both_statistic_sets_with_the_holdouts_own_fun
 ) -> None:
     """`grid.strategy_result` -- the holdout's sign-flip test of non-overlapping periods' net
     excess, one-sided p -- over the headline book and the sensitivity subset, against all-A
-    equal weight (the registration's `excess_benchmark`), under the registration's own
+    equal weight (the registration's `excess_benchmark`, recorded before `V2-P6-024` and still
+    read under that name), under the registration's own
     `bootstrap_samples`/`random_seed`, with 000905.SH reported beside it from the same result's
     `reported_*` keys (one call per set, one source; it tests nothing, as the protocol says).
     Only complete periods are tested, each one's session count shown; the short last one is
@@ -692,7 +722,7 @@ def test_a_missed_rebalance_is_caught_up_on_the_next_record_the_store_witnesses(
     assert report.backtest.periods[-1].end == sessions[7]
     # A journalled book's periods are the days it rebalanced on: the tested one's length is
     # stated, not assumed to be the interval (round 16).
-    shown = report.summary["significance"]["all_periods"]["equal_weight_all_a"]
+    shown = report.summary["significance"]["all_periods"][grid.PRIMARY_EXCESS_BENCHMARK]
     assert shown["tested_period_sessions"] == [4]
     assert shown["excluded_incomplete_periods"] == 1
 
@@ -992,13 +1022,19 @@ def test_main_writes_a_json_report_under_the_runtime_directory(tmp_path: Path, r
 
 
 def _label_consuming_scenario(
-    tmp_path: Path, repo: Path, *, source: Mapping[str, Any]
+    tmp_path: Path, repo: Path, *, source: Mapping[str, Any], index_only: bool = True
 ) -> tuple[Path, Any, Any, date, Callable[[date], Any]]:
     """A `source` (`test_daily_selection.TRAILING` or `.WALK_FORWARD`) registration, admitted,
     on an incrementally-published corpus built exactly through the signal day for
     `adj_factor`/`suspend_d` and two sessions further for `daily`/`daily_basic`/`stk_limit` --
     enough for the book to hold one period past it (`forward_report`'s own boundary: the book's
     end must be after its first rebalance day).
+
+    With no adjustment factor past the signal day the execution session has no quote at all, so
+    the book buys nothing and `equal_weight_all_a_held` has no member -- a refusal
+    (`test_a_forward_book_whose_execution_session_has_no_quote_is_refused_by_its_benchmark`).
+    These scenarios are about record verification, so by default (`index_only`) the
+    registration names 000905.SH as its only benchmark and its excess benchmark (`V2-P6-024`).
 
     Returns `(runtime_dir, admitted, panel, signal_day, request_for)`; nothing is filed yet.
     """
@@ -1008,7 +1044,15 @@ def _label_consuming_scenario(
     book_through = probe_sessions[8]
     configured = tds._base(**source)
     config = dict(configured, start=anchor)
-    registration_path = register_config(repo, config)
+    if index_only:
+        config["benchmarks"] = ("000905.SH",)
+    registration_path = register_config(
+        repo,
+        config,
+        settings={**grid.protocol_settings(), "excess_benchmark": "000905.SH"}
+        if index_only
+        else None,
+    )
     admitted = daily.admit_registration(registration_path, repo)
     panel = write_strategy_corpus_published_daily(
         tmp_path, label_inputs_through=signal_day, through=book_through
@@ -1021,6 +1065,41 @@ def _label_consuming_scenario(
         )
 
     return tmp_path, admitted, panel, signal_day, request_for
+
+
+def test_a_forward_book_whose_execution_session_has_no_quote_is_refused_by_its_benchmark(
+    tmp_path: Path, repo: Path
+) -> None:
+    """`V2-P6-024`: no security has a quote on the session after the signal (no adjustment
+    factor is stored for it yet), so nothing could have been bought at its open. The book alone
+    would report a period of refused buys; the protocol's benchmark has no member and the report
+    says so rather than testing against a zero it did not measure."""
+    runtime_dir, admitted, panel, signal_day, request_for = _label_consuming_scenario(
+        tmp_path, repo, source=tds.TRAILING, index_only=False
+    )
+    identifiers = register_days(
+        runtime_dir, request_for, [signal_day], panel.sessions[1], registered=admitted.declared
+    )
+    write_journal_day(
+        runtime_dir,
+        admitted,
+        session=signal_day,
+        as_of=tds._evening(signal_day),
+        decision="rebalanced",
+        reason="scheduled",
+        held=False,
+        record_id=identifiers[0],
+    )
+
+    with pytest.raises(forward_report.ForwardReportError, match="equal_weight_all_a_held has no"):
+        forward_report.forward_report(
+            PanelStore(runtime_dir / "panel"),
+            prediction_store(runtime_dir, clock_at=panel.as_of),
+            runtime_dir,
+            registration=admitted.path,
+            repo=repo,
+            as_of=panel.as_of,
+        )
 
 
 @pytest.mark.parametrize(
@@ -1197,7 +1276,7 @@ def test_a_label_restated_after_a_late_record_files_marks_it_unverifiable_and_st
     assert report.summary["statistics"]["excluding_unverifiable"]["periods"] == 0
     # Not tested, and said so: the sensitivity set has no period at all.
     significance = report.summary["significance"]
-    assert "no complete" in significance["excluding_unverifiable"]["equal_weight_all_a"]["refused"]
+    assert "no complete" in significance["excluding_unverifiable"]["000905.SH"]["refused"]
 
 
 # --- Fix round 14: an older label-consuming record, checked after the panel has advanced ---------

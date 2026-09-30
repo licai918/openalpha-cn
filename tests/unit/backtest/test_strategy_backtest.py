@@ -28,9 +28,11 @@ from openalpha_cn.backtest.alpha_baseline import BASELINE_FAMILY, CrossSectional
 from openalpha_cn.backtest.execution import CostSchedule, MarketBar
 from openalpha_cn.backtest.strategy_backtest import (
     EQUAL_WEIGHT_ALL_A,
+    EQUAL_WEIGHT_ALL_A_HELD,
     KNOWN_STRATEGY_BACKTEST_LIMITATIONS,
     MODEL_COMPONENT,
     STRATEGY_BACKTEST_LIMITATION_CODES,
+    HeldBenchmarkPeriod,
     ICObservation,
     PeriodResult,
     ScoreRow,
@@ -747,6 +749,7 @@ def test_the_answer_carries_every_known_limitation_by_code() -> None:
         "the_last_period_may_be_shorter_than_the_rebalance_interval",
         "an_intraday_halt_makes_the_whole_session_untradeable_at_the_open",
         "the_equal_weight_benchmark_is_every_priced_name_and_is_not_investable",
+        "the_held_equal_weight_benchmark_asks_the_open_auction_and_not_the_money",
         "a_passing_backtest_is_not_evidence_that_a_signal_is_real",
         "a_dynamic_score_is_a_walk_forward_reconstruction_made_now",
         "the_labels_behind_a_dynamic_score_are_read_at_the_backtests_as_of",
@@ -774,6 +777,7 @@ def test_the_answer_carries_every_known_limitation_by_code() -> None:
             "the_last_period_may_be_shorter_than_the_rebalance_interval",
             "an_intraday_halt_makes_the_whole_session_untradeable_at_the_open",
             "the_equal_weight_benchmark_is_every_priced_name_and_is_not_investable",
+            "the_held_equal_weight_benchmark_asks_the_open_auction_and_not_the_money",
             "a_passing_backtest_is_not_evidence_that_a_signal_is_real",
         }
     )
@@ -1712,3 +1716,250 @@ def test_a_capped_sale_on_an_unknowable_session_prices_the_whole_position_once()
     assert (crossing.subject, crossing.day) == (A, D5)
     assert crossing.held_value == Decimal("119790.00")
     assert crossing.valuation_difference == Decimal("-10890.00")
+
+
+# --- V2-P6-024: the all-A equal-weight benchmark the book could have bought and held ------------
+#
+# Six main-board names over the hand fixture's six sessions, signals on D1 and D4 (every three
+# sessions), so period 1 buys at D2's open and runs to D4's close and period 2 buys at D5's open
+# and runs to D6's close. Each bar is `(previous close, open, close)`; the band is +-10% of the
+# previous close, as `_band` builds it. `None` is a session with no bar.
+#
+#   P  a plain name whose D2 open (10.00) is above its D1 close (9.80): the overnight gap is
+#      not in the benchmark, exactly as it is not in a position bought at D2's open.
+#   Q  opens D2 AT its limit-up (11.00) and trades down to 10.80: refused at the open, so out of
+#      period 1 -- the open-auction verdict, not the close.
+#   R  suspended on D2: out of period 1.
+#   S  no bar on D3 (mid period 1) and none on D6 (the last session of period 2), where it keeps
+#      D5's mark.
+#   T  delisted after D2: marked at D2's close for the rest of period 1, no bar on D4 so not a
+#      member of period 2.
+#   U  a 2-for-1 split between D2 and D3: the factor goes 1 -> 2 and the price halves.
+
+HELD_P, HELD_Q, HELD_R, HELD_S, HELD_T, HELD_U, HELD_V = (
+    "600101.SH",
+    "600102.SH",
+    "600103.SH",
+    "600104.SH",
+    "600105.SH",
+    "600106.SH",
+    "600107.SH",
+)
+Bar = tuple[str, str, str] | None
+HELD_BARS: Final[dict[str, tuple[Bar, ...]]] = {
+    HELD_P: (
+        ("9.80", "9.80", "9.80"),
+        ("9.80", "10.00", "10.50"),
+        ("10.50", "10.50", "11.00"),
+        ("11.00", "11.00", "11.00"),
+        ("11.00", "11.00", "11.00"),
+        ("11.00", "11.00", "12.10"),
+    ),
+    HELD_Q: (
+        ("10.00", "10.00", "10.00"),
+        ("10.00", "11.00", "10.80"),
+        ("10.80", "10.80", "11.00"),
+        ("11.00", "11.00", "11.00"),
+        ("11.00", "11.00", "11.55"),
+        ("11.55", "11.55", "11.55"),
+    ),
+    HELD_R: (
+        ("20.00", "20.00", "20.00"),
+        ("20.00", "20.00", "20.00"),
+        ("20.00", "20.00", "20.00"),
+        ("20.00", "20.00", "20.00"),
+        ("20.00", "20.00", "20.00"),
+        ("20.00", "20.00", "19.00"),
+    ),
+    HELD_S: (
+        ("4.90", "4.90", "4.90"),
+        ("4.90", "5.00", "5.10"),
+        None,
+        ("5.10", "5.10", "5.20"),
+        ("5.20", "5.20", "5.46"),
+        None,
+    ),
+    HELD_T: (("8.00", "8.00", "8.00"), ("8.00", "8.00", "7.60"), None, None, None, None),
+    HELD_U: (
+        ("20.00", "20.00", "20.00"),
+        ("20.00", "20.00", "20.00"),
+        ("10.00", "10.00", "10.50"),
+        ("10.50", "10.50", "11.00"),
+        ("11.00", "11.00", "11.00"),
+        ("11.00", "11.00", "12.10"),
+    ),
+}
+HELD_ADJ: Final[dict[str, tuple[str, ...]]] = {HELD_U: ("1", "1", "2", "2", "2", "2")}
+HELD_SUSPENDED: Final[frozenset[tuple[str, date]]] = frozenset({(HELD_R, D2)})
+HELD_SPEC: Final[StrategySpec] = HAND_FIXTURE_SPEC.model_copy(
+    update={"benchmarks": (EQUAL_WEIGHT_ALL_A_HELD,)}
+)
+
+
+def held_quotes(
+    bars: Mapping[str, Sequence[Bar]] = HELD_BARS,
+    *,
+    adj: Mapping[str, Sequence[str]] = HELD_ADJ,
+    suspended: frozenset[tuple[str, date]] = HELD_SUSPENDED,
+) -> dict[date, dict[str, SessionQuote]]:
+    quotes: dict[date, dict[str, SessionQuote]] = {day: {} for day in SESSIONS}
+    for subject, series in bars.items():
+        factors = adj.get(subject, ("1",) * len(SESSIONS))
+        for day, bar, factor in zip(SESSIONS, series, factors, strict=True):
+            if bar is None:
+                continue
+            previous, open_, close = (Decimal(text) for text in bar)
+            quotes[day][subject] = SessionQuote(
+                bar=_bar(
+                    subject,
+                    day,
+                    previous_close=previous,
+                    open_=open_,
+                    close=close,
+                    suspended=(subject, day) in suspended,
+                ),
+                turnover_yuan=Decimal("20000000"),
+                adj_factor=Decimal(factor),
+            )
+    return quotes
+
+
+def held_inputs(
+    quotes: Mapping[date, Mapping[str, SessionQuote]] | None = None,
+) -> StrategyInputs:
+    """The book trades P and U on the fixture's scores; the benchmark reads every quote."""
+    return StrategyInputs(
+        source=RAW_SOURCE,
+        sessions=SESSIONS,
+        signal_instants={day: signal_instant(day) for day in SESSIONS},
+        scores=score_rows({D1: {HELD_P: 2.0, HELD_U: 1.0}, D4: {HELD_P: 1.0, HELD_U: 2.0}}),
+        quotes=held_quotes() if quotes is None else quotes,
+        benchmark_returns={},
+    )
+
+
+def _held(result_periods: Sequence[PeriodResult]) -> list[Decimal]:
+    return [period.benchmark_returns[EQUAL_WEIGHT_ALL_A_HELD] for period in result_periods]
+
+
+def test_the_held_benchmark_matches_the_hand_computed_periods() -> None:
+    """Every number by hand, each member entered at the execution session's OPEN (times its
+    factor there) and marked at each session's close times its factor, keeping its last mark.
+
+    PERIOD 1 (signal D1, bought at D2's open, marked to D4's close). Members: every name with a
+    bar on D1 that the policy would buy at D2's open -- not Q (open at limit-up), not R (halted).
+      P  11.00 / 10.00 - 1 = +0.10  (the 9.80 -> 10.00 overnight is not in it)
+      S   5.20 /  5.00 - 1 = +0.04  (no bar on D3; D4 marks it again)
+      T   7.60 /  8.00 - 1 = -0.05  (delisted: D2's close is its last mark)
+      U  11.00 x 2 / (20.00 x 1) - 1 = +0.10  (the split is in the factor)
+      mean = 0.19 / 4 = 0.0475
+    PERIOD 2 (signal D4, bought at D5's open, marked to D6's close). T has no bar on D4.
+      P  12.10 / 11.00 - 1 = +0.10
+      Q  11.55 / 11.00 - 1 = +0.05
+      R  19.00 / 20.00 - 1 = -0.05
+      S   5.46 /  5.20 - 1 = +0.05  (no bar on D6: D5's mark stands)
+      U  12.10 x 2 / (11.00 x 2) - 1 = +0.10
+      mean = 0.25 / 5 = 0.05
+    """
+    result = run_strategy_backtest(held_inputs(), HELD_SPEC)
+
+    assert _held(result.periods) == [Decimal("0.0475000000"), Decimal("0.0500000000")]
+    assert all(period.benchmark_unknowable_sessions == () for period in result.periods)
+
+
+def test_a_new_listing_is_a_member_only_when_its_first_open_could_be_bought() -> None:
+    """V lists on D4, the signal day: it has a bar there, so it is a candidate for period 2.
+    At D5 its band is 14.40 x 1.1 = 15.84. Opening AT 15.84 it is refused and period 2 is the
+    five names above (0.05); opening at 15.00 and closing D6 at 16.50 it is bought, +0.10, and
+    period 2 is (0.25 + 0.10) / 6."""
+    first: Bar = ("10.00", "12.00", "14.40")
+
+    def with_v(d5: Bar, d6: Bar) -> list[Decimal]:
+        bars = {**HELD_BARS, HELD_V: (None, None, None, first, d5, d6)}
+        return _held(run_strategy_backtest(held_inputs(held_quotes(bars)), HELD_SPEC).periods)
+
+    locked = with_v(("14.40", "15.84", "15.84"), ("15.84", "15.84", "17.42"))
+    opened = with_v(("14.40", "15.00", "15.84"), ("15.84", "15.84", "16.50"))
+
+    assert locked == [Decimal("0.0475000000"), Decimal("0.0500000000")]
+    assert opened == [Decimal("0.0475000000"), Decimal("0.0583333333")]
+
+
+def test_the_held_benchmark_is_the_books_own_valuation_across_a_recorded_path() -> None:
+    """P's factor jumps 1.0 -> 1.1 on D3, inside period 1 (V2-P6-020). Recorded `published`,
+    the member is rescaled exactly as a holding is and the period is the unjumped 0.0475.
+    Recorded `unknowable`, it is valued by the factor path -- 11.00 x 1.1 / 10.00 - 1 = +0.21,
+    so (0.21 + 0.04 - 0.05 + 0.10) / 4 = 0.075 -- and the crossing is named on the period."""
+
+    def jumped(recorded: str | None) -> dict[date, dict[str, SessionQuote]]:
+        quotes = held_quotes()
+        for day in (D3, D4, D5, D6):
+            quotes[day][HELD_P] = replace(
+                quotes[day][HELD_P],
+                adj_factor=Decimal("1.1"),
+                recorded_path=recorded if day == D3 else None,  # type: ignore[arg-type]
+                path_ratio=JUMP_RATIO if day == D3 and recorded is not None else None,
+            )
+        return quotes
+
+    published = run_strategy_backtest(held_inputs(jumped("published")), HELD_SPEC).periods
+    unknowable = run_strategy_backtest(held_inputs(jumped("unknowable")), HELD_SPEC).periods
+
+    assert _held(published) == [Decimal("0.0475000000"), Decimal("0.0500000000")]
+    assert _held(unknowable) == [Decimal("0.0750000000"), Decimal("0.0500000000")]
+    assert unknowable[0].benchmark_unknowable_sessions == (f"{HELD_P}@{D3.isoformat()}",)
+    assert unknowable[1].benchmark_unknowable_sessions == ()
+    assert published[0].benchmark_unknowable_sessions == ()
+
+
+def test_a_record_on_the_execution_session_is_not_a_members_crossing() -> None:
+    """Bought at D2's open, a member never held D1's close into D2, so a record on D2 is not
+    about it -- the book's own rule for a position opened on the disputed session."""
+    quotes = held_quotes()
+    quotes[D2][HELD_P] = replace(
+        quotes[D2][HELD_P], recorded_path="unknowable", path_ratio=JUMP_RATIO
+    )
+
+    periods = run_strategy_backtest(held_inputs(quotes), HELD_SPEC).periods
+
+    assert _held(periods) == [Decimal("0.0475000000"), Decimal("0.0500000000")]
+    assert all(period.benchmark_unknowable_sessions == () for period in periods)
+
+
+def test_a_period_no_name_could_be_bought_into_is_refused() -> None:
+    everything = frozenset((subject, D2) for subject in HELD_BARS)
+    with pytest.raises(StrategyBacktestError, match="equal_weight_all_a_held"):
+        run_strategy_backtest(held_inputs(held_quotes(suspended=everything)), HELD_SPEC)
+
+
+def test_the_held_benchmark_changes_nothing_else_the_book_reports() -> None:
+    """The book's periods are the same with and without it; only `benchmark_returns` grows,
+    and the all-A equal-weight series beside it is the one the hand ledger above computes."""
+    both = HAND_FIXTURE_SPEC.model_copy(
+        update={"benchmarks": (CSI500, EQUAL_WEIGHT_ALL_A, EQUAL_WEIGHT_ALL_A_HELD)}
+    )
+    with_held = run_strategy_backtest(HAND_FIXTURE_INPUTS, both)
+    without = run_strategy_backtest(HAND_FIXTURE_INPUTS, HAND_FIXTURE_SPEC)
+
+    for held_period, plain in zip(with_held.periods, without.periods, strict=True):
+        returns = dict(held_period.benchmark_returns)
+        del returns[EQUAL_WEIGHT_ALL_A_HELD]
+        assert returns == dict(plain.benchmark_returns)
+        assert held_period.model_copy(update={"benchmark_returns": returns}) == plain
+
+
+def test_the_held_benchmark_memo_serves_what_a_fresh_run_computes() -> None:
+    """A caller-owned memo is keyed by (signal day, execution session, period end), filled on
+    the first run and read on the next; the answers equal a run with no memo at all."""
+    memo: dict[tuple[date, date, date], HeldBenchmarkPeriod] = {}
+    fresh = run_strategy_backtest(held_inputs(), HELD_SPEC)
+    first = run_strategy_backtest(replace(held_inputs(), held_benchmark=memo), HELD_SPEC)
+
+    assert set(memo) == {(D1, D2, D4), (D4, D5, D6)}
+    assert memo[(D1, D2, D4)].members == 4
+    served = run_strategy_backtest(replace(held_inputs(), held_benchmark=memo), HELD_SPEC)
+    assert fresh == first == served
+    # And it is read, not recomputed: a planted value comes back.
+    memo[(D4, D5, D6)] = replace(memo[(D4, D5, D6)], value=Decimal("0.5000000000"))
+    planted = run_strategy_backtest(replace(held_inputs(), held_benchmark=memo), HELD_SPEC)
+    assert _held(planted.periods) == [Decimal("0.0475000000"), Decimal("0.5000000000")]

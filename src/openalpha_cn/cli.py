@@ -11488,8 +11488,10 @@ _STRATEGY_PARTICIPATION_HELP: Final[str] = (
 )
 _STRATEGY_RATE_HELP: Final[str] = "A cost rate as a decimal fraction. Protocol default."
 _STRATEGY_BENCHMARK_HELP: Final[str] = (
-    "A benchmark, repeatable: an index code stored in index_daily (`000905.SH`) or "
-    "`equal_weight_all_a`. Defaults to the protocol's two, side by side."
+    "A benchmark, repeatable: an index code stored in index_daily (`000905.SH`), "
+    "`equal_weight_all_a_held` (every name buyable at each period's open, held to its end) or "
+    "`equal_weight_all_a` (the daily-rebalanced series, not investable). Defaults to the "
+    "protocol's two, side by side: `000905.SH` and `equal_weight_all_a_held`."
 )
 
 

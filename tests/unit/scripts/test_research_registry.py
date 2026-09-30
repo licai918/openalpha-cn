@@ -174,7 +174,7 @@ def test_register_writes_the_file_and_returns_the_sha256_of_its_bytes(tmp_path: 
     assert body["settings"] == {
         "bootstrap_samples": 100_000,
         "random_seed": 20_260_926,
-        "excess_benchmark": "equal_weight_all_a",
+        "excess_benchmark": "equal_weight_all_a_held",  # V2-P6-024
         "sessions_per_year": 244,
     }
     assert registry.register(CONFIG, CRITERIA, path, code_commit=CODE_COMMIT) == digest

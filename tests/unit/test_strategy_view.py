@@ -38,6 +38,8 @@ from strategy_fixtures import (
     write_two_year_corpus,
 )
 
+from openalpha_cn import strategy_view
+from openalpha_cn.backtest import strategy_backtest
 from openalpha_cn.backtest.execution import (
     MarketBar,
     published_limit_fields,
@@ -52,6 +54,7 @@ from openalpha_cn.backtest.factor_ic import (
 from openalpha_cn.backtest.factor_tradeability import CNY_PER_TURNOVER_UNIT
 from openalpha_cn.backtest.strategy_backtest import (
     EQUAL_WEIGHT_ALL_A,
+    EQUAL_WEIGHT_ALL_A_HELD,
     MODEL_COMPONENT,
     STRATEGY_BACKTEST_LIMITATION_CODES,
     ICObservation,
@@ -146,7 +149,7 @@ def test_the_measurement_defaults_are_the_research_protocols() -> None:
     assert PROTOCOL_COSTS.sell_stamp_duty_rate == Decimal("0.0005")
     assert PROTOCOL_COSTS.transfer_fee_rate == Decimal("0")
     assert Decimal("0.001") == PROTOCOL_SLIPPAGE_RATE
-    assert PROTOCOL_BENCHMARKS == ("000905.SH", EQUAL_WEIGHT_ALL_A)
+    assert PROTOCOL_BENCHMARKS == ("000905.SH", EQUAL_WEIGHT_ALL_A_HELD)
 
 
 def test_every_signal_instant_is_1630_shanghai_on_its_own_session(
@@ -211,14 +214,105 @@ def test_a_lower_is_better_factor_is_negated_and_every_row_is_stamped_at_its_bui
 def test_the_equal_weight_benchmark_is_the_mean_stored_session_return(
     corpus: tuple[PanelStore, GeneratedPanel],
 ) -> None:
+    """No longer the protocol's (`V2-P6-024`), still read unchanged for a caller naming it."""
     store, panel = corpus
-    inputs = load_strategy_inputs(store, _request(panel))
+    inputs = load_strategy_inputs(
+        store, _request(panel, benchmarks=("000905.SH", EQUAL_WEIGHT_ALL_A))
+    )
     day = panel.sessions[4]
     calendar = load_trading_calendar(store, exchange=EXCHANGE, years=(day.year,), as_of=READ_AT)
     stored = load_daily_bars(store, day=day, calendar=calendar, as_of=READ_AT, max_staleness=None)
     expected = statistics.fmean(bar.close / bar.pre_close - 1.0 for bar in stored.values())
 
     assert inputs.benchmark_returns[EQUAL_WEIGHT_ALL_A][day] == Decimal(repr(expected))
+
+
+def _held_by_hand(
+    quotes: Mapping[date, Mapping[str, SessionQuote]], period: Sequence[date]
+) -> tuple[Decimal, int]:
+    """`EQUAL_WEIGHT_ALL_A_HELD` over one period, restated from the quotes the view hands the
+    book: a member has a quote on the signal day and, at the execution session, is not halted and
+    opens below its published limit-up; it is worth its last close x factor over its open x
+    factor there. No recorded path in this panel, so no correction."""
+    signal_day, trade_day, *_ = period
+    returns: list[Decimal] = []
+    for subject in quotes[signal_day]:
+        entry = quotes[trade_day].get(subject)
+        if entry is None or entry.bar.suspended:
+            continue
+        assert entry.bar.up_limit is not None
+        if entry.bar.open >= entry.bar.up_limit:
+            continue
+        last = next(quotes[day][subject] for day in reversed(period[1:]) if subject in quotes[day])
+        returns.append(last.bar.close * last.adj_factor / (entry.bar.open * entry.adj_factor) - 1)
+    return sum(returns, Decimal(0)) / len(returns), len(returns)
+
+
+def test_the_held_benchmark_is_the_book_bought_at_each_open_and_held(
+    corpus: tuple[PanelStore, GeneratedPanel],
+) -> None:
+    """The protocol's default now: every period's value is the hand restatement's."""
+    store, panel = corpus
+    request = _request(panel)
+    result = backtest_strategy(store, request)
+    inputs = load_strategy_inputs(store, request)
+
+    assert set(request.spec.benchmarks) == {"000905.SH", EQUAL_WEIGHT_ALL_A_HELD}
+    assert EQUAL_WEIGHT_ALL_A_HELD not in inputs.benchmark_returns
+    for period in result.periods:
+        span = inputs.sessions[
+            inputs.sessions.index(period.start) : inputs.sessions.index(period.end) + 1
+        ]
+        expected, members = _held_by_hand(inputs.quotes, span)
+        assert members > 0
+        assert period.benchmark_returns[EQUAL_WEIGHT_ALL_A_HELD] == expected.quantize(
+            Decimal("0.0000000001")
+        )
+
+
+def test_the_held_benchmark_is_computed_once_per_store_range_instant_and_exchange(
+    corpus: tuple[PanelStore, GeneratedPanel], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`V2-P6-024`: every configuration sharing a range and a schedule shares the benchmark,
+    so a process computes each period once. The served answer is the fresh one; another
+    configuration on the same schedule computes nothing; another range, or a store whose catalog
+    moved, computes afresh."""
+    store, panel = corpus
+    computed: list[date] = []
+    real = strategy_backtest.held_equal_weight_period
+
+    def counted(quotes: Any, sessions: Sequence[date]) -> Any:
+        computed.append(sessions[0])
+        return real(quotes, sessions)
+
+    monkeypatch.setattr(strategy_backtest, "held_equal_weight_period", counted)
+    strategy_view.forget_held_benchmarks()
+    fresh = backtest_strategy(store, _request(panel))
+    assert len(computed) == len(fresh.periods) == 3
+
+    served = backtest_strategy(store, _request(panel))
+    other_book = backtest_strategy(store, _request(panel, holding_count=2))
+    assert len(computed) == 3
+    assert served == fresh
+    assert [p.benchmark_returns[EQUAL_WEIGHT_ALL_A_HELD] for p in other_book.periods] == [
+        p.benchmark_returns[EQUAL_WEIGHT_ALL_A_HELD] for p in fresh.periods
+    ]
+
+    strategy_view.forget_held_benchmarks()
+    again = backtest_strategy(store, _request(panel))
+    assert len(computed) == 6
+    assert again == fresh
+
+    backtest_strategy(store, _request(panel, start=panel.sessions[2]))
+    assert len(computed) == 9
+
+    stamps = store.partition_stamps()
+    monkeypatch.setattr(
+        store, "partition_stamps", lambda **_: (*stamps, ("daily", 2099, "moved", ()))
+    )
+    moved = backtest_strategy(store, _request(panel))
+    assert len(computed) == 12
+    assert moved == fresh
 
 
 def test_the_index_benchmark_is_close_over_previous_close(

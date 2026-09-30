@@ -538,6 +538,10 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
         {
             "factor_view.FactorRequestError",
             "factor_view.resolve_factor",
+            # V2-P6-024: the held-benchmark memo is served while the catalog stamps of what a
+            # quote is built from stand, read as `factor_view`'s shared context reads them --
+            # with the factor planes, which no quote reads, left out of the one catalog query.
+            "factor_view.FACTOR_PLANE_DATASET_PREFIXES",
             # V2-P6-011 round 11: `input_datasets` names every dataset of every factor a source
             # reads, for the input provenance a daily run files before its record; round 12
             # adds `upstream_defects`, where the decisions a return path follows are recorded.
@@ -814,8 +818,10 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
         # rather than restate. V2-P6-011 round 12 names what a label is priced from in
         # `LABEL_INPUTS` -- `daily`, `adj_factor`, `suspend_d` (and `upstream_defects`) -- the
         # datasets a trailing-IC or walk-forward day's input provenance fingerprints, which is a
-        # naming and not a read.
-        named=frozenset({"adj_factor", "daily", "suspend_d", "trade_cal"}),
+        # naming and not a read. V2-P6-024 names `stk_limit` beside them in
+        # `_HELD_BENCHMARK_DATASETS`, the partitions a quote is built from, whose catalog stamps
+        # decide whether a held-benchmark memo may be served -- a naming, not a read.
+        named=frozenset({"adj_factor", "daily", "stk_limit", "suspend_d", "trade_cal"}),
         reached=frozenset(
             {
                 "adj_factor",

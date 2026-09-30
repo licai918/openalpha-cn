@@ -558,7 +558,8 @@ class DiscoveryMeasure:
     """One discovery configuration as one ledger row carrying both families.
 
     The strategy half is `grid.strategy_result` over `backtest(**config without "ic")` against
-    the all-A equal-weight benchmark (`p_excess`, the primary family). The IC half asks
+    `grid.PRIMARY_EXCESS_BENCHMARK`, the all-A equal-weight book held for the same period
+    (`V2-P6-024`; `p_excess`, the primary family). The IC half asks
     `ic_series` for the component's IC on every prediction day of the window and tests it with
     `grid.non_overlapping_sign_flip`, one session in every `horizon` (`p_ic`, the secondary
     family). A refused backtest is the row's `error`, as `grid.run_grid` would write it; a refused
@@ -1306,7 +1307,8 @@ def evaluate_holdout(
 ) -> dict[str, Any]:
     """Section 7's verdict on the holdout's measurement, computed from the ledgered numbers.
 
-    1. the compounded annualized relative return against the all-A equal-weight benchmark,
+    1. the compounded annualized relative return against the registration's excess benchmark
+       (the held all-A equal weight since `V2-P6-024`),
        `(prod(1 + net) / prod(1 + benchmark)) ** (244 / complete-period sessions) - 1`
        (`grid.result_compounded_annual_relative_return`), above the registered bound;
     2. the one-sided sign-flip p of the per-period excess (`grid.one_sided_p_value`) below its

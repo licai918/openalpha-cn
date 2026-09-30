@@ -714,6 +714,56 @@ def test_the_holdout_drives_the_sdk_and_ledgers_net_excess_and_its_sign_flip(
     assert grid.stage_family(ledger, grid.HOLDOUT_STAGE) == 1
 
 
+def test_the_strategy_result_against_the_held_benchmark_is_the_same_reduction(
+    runtime: tuple[Path, GeneratedPanel],
+) -> None:
+    """`V2-P6-024`: the protocol's primary benchmark is now the held all-A equal weight, and
+    `strategy_result` reduces a real backtest against it exactly as against any benchmark -- the
+    excess is net less that benchmark's own per-period return, tested by the same sign flip;
+    only the benchmark differs. A member's unknowable crossing is ledgered beside the book's."""
+    root, panel = runtime
+    sdk = OpenAlphaSDK(runtime_dir=root)
+    backtest = sdk.run_strategy_backtest(
+        **{**_base_config(panel), "holding_count": 2, "rebalance_every_sessions": 3}
+    )
+    primary = grid.PRIMARY_EXCESS_BENCHMARK
+
+    result = grid.strategy_result(backtest, excess_benchmark=primary)
+
+    held = [period.benchmark_returns[primary] for period in backtest.periods]
+    excess = [
+        period.net_return - value for period, value in zip(backtest.periods, held, strict=True)
+    ]
+    complete = [period.sessions >= 3 for period in backtest.periods]
+    assert result["excess_benchmark"] == "equal_weight_all_a_held"
+    assert result["benchmark_return"] == [str(value) for value in held]
+    assert result["net_excess"] == [str(value) for value in excess]
+    tested = [float(value) for value, full in zip(excess, complete, strict=True) if full]
+    expected = sign_flip_test(
+        tuple(tested),
+        bootstrap_samples=grid.PROTOCOL_BOOTSTRAP_SAMPLES,
+        random_seed=grid.PROTOCOL_RANDOM_SEED,
+    )
+    assert result["p_excess"] == expected.p_value
+    assert result["p_excess_one_sided"] == grid.one_sided_p_value(
+        expected.p_value, statistics.fmean(tested)
+    )
+    assert result["benchmark_unknowable_crossings"] == []
+    crossed = backtest.model_copy(
+        update={
+            "periods": (
+                backtest.periods[0].model_copy(
+                    update={"benchmark_unknowable_sessions": ("600733.SH@2026-01-08",)}
+                ),
+                *backtest.periods[1:],
+            )
+        }
+    )
+    assert grid.strategy_result(crossed, excess_benchmark=primary)[
+        "benchmark_unknowable_crossings"
+    ] == ["600733.SH@2026-01-08"]
+
+
 def test_a_backtest_with_no_complete_period_is_refused() -> None:
     """A window shorter than one rebalance interval has nothing the tests may read."""
 
@@ -794,6 +844,7 @@ class _Period:
         if reported is not None:
             self.benchmark_returns["000905.SH"] = Decimal(reported)
         self.turnover = Decimal("0.5")
+        self.benchmark_unknowable_sessions: tuple[str, ...] = ()
 
 
 class _Spec:
@@ -893,15 +944,15 @@ def test_the_protocol_constants_are_the_protocols() -> None:
     assert grid.PROTOCOL_BOOTSTRAP_SAMPLES == 100_000
     assert grid.PROTOCOL_RANDOM_SEED == 20_260_926
     assert grid.PROTOCOL_FALSE_DISCOVERY_RATE == 0.10
-    assert grid.PRIMARY_EXCESS_BENCHMARK == "equal_weight_all_a"
+    assert grid.PRIMARY_EXCESS_BENCHMARK == "equal_weight_all_a_held"  # V2-P6-024
     assert grid.SESSIONS_PER_YEAR == 244
     assert grid.protocol_settings() == {
         "bootstrap_samples": 100_000,
         "random_seed": 20_260_926,
-        "excess_benchmark": "equal_weight_all_a",
+        "excess_benchmark": "equal_weight_all_a_held",
         "sessions_per_year": 244,
     }
-    primary = grid.strategy_measure(lambda **kw: None, excess_benchmark="equal_weight_all_a")
+    primary = grid.strategy_measure(lambda **kw: None, excess_benchmark="equal_weight_all_a_held")
     assert primary.settings == grid.protocol_settings()
 
 

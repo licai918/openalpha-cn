@@ -57,7 +57,10 @@ from strategy_fixtures import READ_AT, REVERSAL, write_strategy_corpus
 
 from openalpha_cn import strategy_view
 from openalpha_cn.backtest.outcome_statistics import sign_flip_test
-from openalpha_cn.backtest.strategy_backtest import EQUAL_WEIGHT_ALL_A, StrategyBacktestError
+from openalpha_cn.backtest.strategy_backtest import (
+    EQUAL_WEIGHT_ALL_A_HELD,
+    StrategyBacktestError,
+)
 from openalpha_cn.domain.horizon import parse_horizon
 from openalpha_cn.domain.labels import build_label_window
 from openalpha_cn.domain.panel_batch import ColumnarPanelBatch, PanelColumn, TimelineColumns
@@ -115,6 +118,7 @@ class _Period:
     net_return: Decimal
     benchmark_returns: Mapping[str, Decimal]
     turnover: Decimal
+    benchmark_unknowable_sessions: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -140,7 +144,10 @@ def _backtest(
             end=start + timedelta(days=index + 1),
             sessions=interval,
             net_return=Decimal(net),
-            benchmark_returns={EQUAL_WEIGHT_ALL_A: Decimal(bench), "000905.SH": Decimal("0")},
+            benchmark_returns={
+                EQUAL_WEIGHT_ALL_A_HELD: Decimal(bench),
+                "000905.SH": Decimal("0"),
+            },
             turnover=Decimal("0.5"),
         )
         for index, (net, bench) in enumerate(zip(nets, benches, strict=True))
@@ -390,8 +397,9 @@ def test_the_discovery_measure_ledgers_the_strategy_and_the_non_overlapping_ic_s
     result = measure(config)
 
     expected = grid.strategy_result(
-        _backtest(nets, interval=5), excess_benchmark=EQUAL_WEIGHT_ALL_A
+        _backtest(nets, interval=5), excess_benchmark=EQUAL_WEIGHT_ALL_A_HELD
     )
+    assert result["excess_benchmark"] == EQUAL_WEIGHT_ALL_A_HELD  # V2-P6-024
     assert {key: result[key] for key in expected} == expected
     assert asked == [
         {
@@ -467,6 +475,27 @@ def test_the_discovery_measure_drives_the_real_sdk(tmp_path: Path) -> None:
     assert result["ic_measured"] == 7
     assert 0 < result["p_ic"] <= 1
     assert "max_relative_drawdown" in result
+    # V2-P6-024: the SDK's default benchmarks price the protocol's primary, and it is measured.
+    assert result["excess_benchmark"] == EQUAL_WEIGHT_ALL_A_HELD
+    assert "error" not in result
+
+
+def test_a_stage_measure_tests_against_the_held_benchmark() -> None:
+    """`V2-P6-024`: stage 2, validation and the holdout reduce against the held all-A benchmark."""
+    nets = ["0.01", "-0.004", "0.006"]
+    measure = p6.StrategyStageMeasure(
+        backtest=lambda **kw: _backtest(nets, benchmarks=["0.002", "0", "-0.001"]),
+        code_commit=COMMIT,
+    )
+
+    result = measure({})
+
+    expected = grid.strategy_result(
+        _backtest(nets, benchmarks=["0.002", "0", "-0.001"]),
+        excess_benchmark=EQUAL_WEIGHT_ALL_A_HELD,
+    )
+    assert result == {**expected, "code_commit": COMMIT}
+    assert result["net_excess"] == ["0.008", "-0.004", "0.007"]
 
 
 # --- section 4: survivors -------------------------------------------------------------------------
@@ -956,7 +985,8 @@ def _compounding_trap() -> dict[str, object]:
     nets = ["1.02"] * 11 + ["-0.911"]
     benches = ["1.0"] * 11 + ["-0.9"]
     return grid.strategy_result(
-        _backtest(nets, benchmarks=benches, interval=20), excess_benchmark=EQUAL_WEIGHT_ALL_A
+        _backtest(nets, benchmarks=benches, interval=20),
+        excess_benchmark=EQUAL_WEIGHT_ALL_A_HELD,
     )
 
 

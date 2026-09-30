@@ -29,7 +29,8 @@ computed:
   never dropped from the grid**: the family counts it only once it has a row, so removing it from
   the grid instead removes a hypothesis that was tried.
 * **The families.** Per the protocol, a stage's primary family is the sign-flip p-value of the
-  per-period net excess over the all-A equal-weight benchmark (`p_excess`, the default
+  per-period net excess over the all-A equal-weight benchmark held for the same period
+  (`equal_weight_all_a_held`, 全 A 等权同期持有, `V2-P6-024`; `p_excess`, the default
   `p_value_key`), and rank-IC p-values (`p_ic`) are a separate, secondary family of the same
   size. One `fdr_table` call controls one family; there is no combined family.
 * **The non-overlapping sample.** `non_overlapping` takes one session in every `horizon`, so the
@@ -92,7 +93,7 @@ from openalpha_cn.backtest.multiple_testing import (
 )
 from openalpha_cn.backtest.outcome_statistics import sign_flip_test
 from openalpha_cn.backtest.strategy_backtest import (
-    EQUAL_WEIGHT_ALL_A,
+    EQUAL_WEIGHT_ALL_A_HELD,
     StrategyBacktest,
     StrategyBacktestError,
 )
@@ -137,9 +138,16 @@ PROTOCOL_BOOTSTRAP_SAMPLES: Final[int] = 100_000
 PROTOCOL_RANDOM_SEED: Final[int] = 20_260_926
 PROTOCOL_FALSE_DISCOVERY_RATE: Final[float] = 0.10
 PROTOCOL_DEPENDENCE: Final[DependenceAssumption] = "arbitrary"
-PRIMARY_EXCESS_BENCHMARK: Final[str] = EQUAL_WEIGHT_ALL_A
+PRIMARY_EXCESS_BENCHMARK: Final[str] = EQUAL_WEIGHT_ALL_A_HELD
 """The benchmark the primary family's excess return is measured against (the protocol's
-decision); `000905.SH` is reported beside it and tests nothing."""
+decision); `000905.SH` is reported beside it and tests nothing.
+
+`equal_weight_all_a_held` since `V2-P6-024`: every name the book could have bought at the
+period's open, held to its end, computed by the backtest itself. The daily-rebalanced
+`equal_weight_all_a` it replaced is not investable and inflated the benchmark by about 12
+percentage points a year (`strategy_backtest`'s
+`the_equal_weight_benchmark_is_every_priced_name_and_is_not_investable`). A ledger row or a
+registration keeps the `excess_benchmark` it was written with and is read under that name."""
 REPORTED_BENCHMARK: Final[str] = "000905.SH"
 """The benchmark section 3 reports beside the primary one. Its series and statistics are stored
 under `reported_*` keys and no selection or test reads them."""
@@ -795,6 +803,11 @@ def strategy_result(
                 Decimal("0.00"),
             )
         ),
+        # V2-P6-024: the same, for the members of the held all-A benchmark (valued as a holding
+        # is, by the factor path) -- so a row also says whether its benchmark carries one.
+        "benchmark_unknowable_crossings": [
+            crossing for p in periods for crossing in p.benchmark_unknowable_sessions
+        ],
         "max_relative_drawdown": max_relative_drawdown(
             [p.net_return for _, p in tested],
             [p.benchmark_returns[excess_benchmark] for _, p in tested],

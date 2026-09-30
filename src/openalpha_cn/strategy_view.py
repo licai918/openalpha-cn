@@ -60,6 +60,18 @@ asks about, keeping a small window of recent sessions cached. The equal-weight b
 the same cached sessions. A session without a published band, or a security without an
 adjustment factor covering it, has no quote: the book cannot trade it and keeps its last mark.
 
+## The protocol's benchmark is computed by the book, once per process (`V2-P6-024`)
+
+`EQUAL_WEIGHT_ALL_A_HELD` -- every name the book could have bought at a period's open, held to
+its end -- asks for a quote of every priced security on every session, which is the one reader
+here that touches the whole market rather than a few dozen names. It depends on the quotes and
+the period's three sessions and on nothing a configuration chooses, so every configuration of a
+research stage that shares a range and a schedule shares it. `load_strategy_inputs` hands the
+book a memo (`StrategyInputs.held_benchmark`) held in this process per store, range, `as_of` and
+exchange, beside the catalog stamps of the datasets a quote is built from; the book fills it per
+`(signal, execution, end)` period and reads it on every later run. A catalog that moved since
+(`PanelStore.partition_stamps`) is a fresh memo, never a stale value.
+
 ## A registered prediction registered late is read only when it is witnessed (`V2-P6-011`)
 
 A source of `prediction_ids` reads records the daily command filed at about 18:30, after the
@@ -84,6 +96,7 @@ from __future__ import annotations
 import dataclasses
 import math
 import statistics
+import threading
 from array import array
 from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
@@ -117,10 +130,13 @@ from openalpha_cn.backtest.factor_ic import (
 from openalpha_cn.backtest.factor_tradeability import CNY_PER_TURNOVER_UNIT
 from openalpha_cn.backtest.strategy_backtest import (
     EQUAL_WEIGHT_ALL_A,
+    EQUAL_WEIGHT_ALL_A_HELD,
     KNOWN_STRATEGY_BACKTEST_LIMITATIONS,
     MODEL_COMPONENT,
     PREDICTION_COMPONENT,
     STRATEGY_TIERS,
+    HeldBenchmarkKey,
+    HeldBenchmarkPeriod,
     ICObservation,
     ScoreFeed,
     ScoreRow,
@@ -181,6 +197,7 @@ from openalpha_cn.domain.labels import (
 )
 from openalpha_cn.domain.prediction_record import PredictionRecord
 from openalpha_cn.domain.price_limits import (
+    PRICE_LIMIT_DATASET,
     SUSPENSION_DATASET,
     PriceLimit,
     TradingState,
@@ -191,7 +208,11 @@ from openalpha_cn.domain.trading_calendar import (
     TradingCalendarError,
 )
 from openalpha_cn.domain.upstream_defects import UpstreamDefectError
-from openalpha_cn.factor_view import FactorRequestError, resolve_factor
+from openalpha_cn.factor_view import (
+    FACTOR_PLANE_DATASET_PREFIXES,
+    FactorRequestError,
+    resolve_factor,
+)
 from openalpha_cn.feature_matrix import FeatureColumn, FeatureMatrixError, feature_spec
 from openalpha_cn.model_view import (
     MODEL_FAMILIES,
@@ -207,7 +228,7 @@ from openalpha_cn.model_view import (
     training_panel,
 )
 from openalpha_cn.panel.catalog import DEFAULT_DATE_TIMEZONE, PanelStorageError
-from openalpha_cn.panel.store import PanelStore
+from openalpha_cn.panel.store import PanelStore, PartitionStamp
 from openalpha_cn.panel_factors import (
     FACTOR_TRANSFORMS,
     FactorEngineError,
@@ -258,6 +279,7 @@ __all__ = [
     "backtest_strategy",
     "backtest_view",
     "factor_ic_series",
+    "forget_held_benchmarks",
     "ic_series_request",
     "ic_series_view",
     "input_datasets",
@@ -357,8 +379,10 @@ PROTOCOL_COSTS: Final[CostSchedule] = CostSchedule(
 mille on sells. The protocol names no transfer fee, so none is charged."""
 PROTOCOL_SLIPPAGE_RATE: Final[Decimal] = Decimal("0.001")
 """The protocol's slippage: 10bp per side."""
-PROTOCOL_BENCHMARKS: Final[tuple[str, ...]] = ("000905.SH", EQUAL_WEIGHT_ALL_A)
-"""The protocol's two benchmarks, side by side: 中证500 and the all-A equal-weight series."""
+PROTOCOL_BENCHMARKS: Final[tuple[str, ...]] = ("000905.SH", EQUAL_WEIGHT_ALL_A_HELD)
+"""The protocol's two benchmarks, side by side: 中证500 and 全 A 等权同期持有, the all-A
+equal-weight book bought at each period's open and held (`V2-P6-024`). The daily-rebalanced
+`EQUAL_WEIGHT_ALL_A` it replaced is still requestable by name."""
 
 _CACHED_SESSIONS: Final[int] = 8
 """The fewest sessions' bars and bands that stay in memory. The book walks sessions in order and
@@ -368,7 +392,76 @@ asks about the signal session, the next one and each marked session.
 walked twice -- the book marks every session of it, then `_compound` walks the same sessions for
 the equal-weight benchmark -- so a window smaller than the period read every session twice: 3,364
 `load_daily_bars` calls for about 1,700 sessions on one horizon-20 backtest of the research store.
-Holding `rebalance_every_sessions + 2` of them reads each once."""
+Holding `rebalance_every_sessions + 2` of them reads each once. `EQUAL_WEIGHT_ALL_A_HELD`
+(`V2-P6-024`) walks the same period again after the book, signal session included, inside the
+same window."""
+
+_HELD_BENCHMARK_DATASETS: Final[frozenset[str]] = frozenset(
+    {
+        DAILY_DATASET,
+        PRICE_LIMIT_DATASET,
+        ADJ_FACTOR_DATASET,
+        SUSPENSION_DATASET,
+        UPSTREAM_DEFECTS_DATASET,
+        TRADING_CALENDAR_DATASET,
+    }
+)
+"""What a `SessionQuote` is built from (`_PanelDays.quote`): a held-benchmark memo is served only
+while every one of these partitions stands as the catalog recorded it when the memo was made."""
+
+_HELD_BENCHMARK_MEMOS_KEPT: Final[int] = 8
+"""How many (store, range, instant, exchange) memos a process keeps: a research stage asks for
+one per horizon, so a handful; the oldest is dropped past this."""
+
+_HeldMemoKey = tuple[str, date, date, datetime, str]
+_held_benchmark_memos: OrderedDict[
+    _HeldMemoKey,
+    tuple[tuple[PartitionStamp, ...], dict[HeldBenchmarkKey, HeldBenchmarkPeriod]],
+] = OrderedDict()
+_held_benchmark_lock: Final[threading.Lock] = threading.Lock()
+
+
+def forget_held_benchmarks() -> None:
+    """Drop every held-benchmark memo this process keeps (`V2-P6-024`); the next run computes."""
+    with _held_benchmark_lock:
+        _held_benchmark_memos.clear()
+
+
+def _held_benchmark_memo(
+    store: PanelStore, request: StrategyRequest
+) -> dict[HeldBenchmarkKey, HeldBenchmarkPeriod]:
+    """The process's memo for `request`'s store, range, `as_of` and exchange (`V2-P6-024`).
+
+    The range is part of the key, not only the periods, because a quote is not a function of its
+    session alone: `_PanelDays` reads halts, adjustment histories and return-path decisions for
+    the range's partition years, so one session's quote can differ between two ranges. The memo is
+    served only while the catalog stamps of `_HELD_BENCHMARK_DATASETS` are the ones it was made
+    under; otherwise it is replaced by an empty one.
+    """
+    stamps = tuple(
+        stamp
+        for stamp in store.partition_stamps(excluding_prefixes=FACTOR_PLANE_DATASET_PREFIXES)
+        if stamp[0] in _HELD_BENCHMARK_DATASETS
+    )
+    key: _HeldMemoKey = (
+        str(store.root.resolve()),
+        request.start,
+        request.end,
+        request.as_of,
+        request.exchange,
+    )
+    with _held_benchmark_lock:
+        held = _held_benchmark_memos.get(key)
+        if held is not None and held[0] == stamps:
+            _held_benchmark_memos.move_to_end(key)
+            return held[1]
+        memo: dict[HeldBenchmarkKey, HeldBenchmarkPeriod] = {}
+        _held_benchmark_memos[key] = (stamps, memo)
+        _held_benchmark_memos.move_to_end(key)
+        while len(_held_benchmark_memos) > _HELD_BENCHMARK_MEMOS_KEPT:
+            _held_benchmark_memos.popitem(last=False)
+        return memo
+
 
 _ADJUSTMENT_YEARS_HELD: Final[int] = 2
 """How many quote years' adjustment histories stay resident: a period spans at most two years."""
@@ -747,6 +840,8 @@ def load_strategy_inputs(
     days = _PanelDays(store, request, calendar, cached_sessions=_session_cache_depth(request))
     benchmarks: dict[str, Mapping[date, Decimal]] = {}
     for name in request.spec.benchmarks:
+        if name == EQUAL_WEIGHT_ALL_A_HELD:
+            continue  # the book computes it per period (`V2-P6-024`)
         if name == EQUAL_WEIGHT_ALL_A:
             benchmarks[name] = _EqualWeightReturns(days, sessions)
         else:
@@ -765,6 +860,11 @@ def load_strategy_inputs(
         "industries": industries,
         "lookback_sessions": lookback,
         "rebalance_days": request.rebalance_days,
+        "held_benchmark": (
+            _held_benchmark_memo(store, request)
+            if EQUAL_WEIGHT_ALL_A_HELD in request.spec.benchmarks
+            else None
+        ),
     }
     if source.prediction_ids:
         return StrategyInputs(
