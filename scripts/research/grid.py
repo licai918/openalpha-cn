@@ -76,7 +76,7 @@ import os
 import statistics
 import sys
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import Executor, Future
+from concurrent.futures import Executor, Future, wait
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -918,6 +918,7 @@ def run_grid(
     refusals: tuple[type[Exception], ...] = DEFAULT_REFUSALS,
     clock: Callable[[], datetime] | None = None,
     result_extra: Mapping[str, object] | None = None,
+    before_append: Callable[[], None] | None = None,
 ) -> GridRun:
     """Measure every configuration the ledger does not already hold for `stage`, one row each.
 
@@ -932,6 +933,10 @@ def run_grid(
 
     `result_extra` is added to every refused row the runner writes itself -- the commit a stage
     ran at, say (`V2-P6-010`) -- so a refused row states what a measured one does.
+
+    `before_append()` is called immediately before every row is appended, after its measurement;
+    raising from it stops the run with the rows before it kept (`V2-P6-023`: the caller's check
+    that the checkout is still the commit its rows record).
     """
     stage = _grid_stage(stage)
     now = _utc_now if clock is None else clock
@@ -954,6 +959,8 @@ def run_grid(
             result = dict(measure(config))
         except recorded as error:
             result = _refused_result(_refusal_text(error), result_extra)
+        if before_append is not None:
+            before_append()
         _append(ledger, existing, stage, config, result, recorded_at=now())
         ran += 1
     return GridRun(stage=stage, ran=ran, skipped=skipped)
@@ -1010,6 +1017,18 @@ class _Planned:
     error: Exception | None = None
 
 
+RESULT_WAIT_SECONDS: Final[float] = 0.25
+"""How long `run_grid_in_pool` waits for a result before it looks for an interrupt again."""
+
+
+def _awaited(future: Future[dict[str, object] | str]) -> dict[str, object] | str:
+    """`future`'s result, waited for in slices so an interrupt is raised between them. A
+    measurement that itself raised `TimeoutError` is told apart by `done()`, not by the wait."""
+    while not future.done():
+        wait((future,), timeout=RESULT_WAIT_SECONDS)
+    return future.result()
+
+
 def _settled(refusal: str) -> Future[dict[str, object] | str]:
     future: Future[dict[str, object] | str] = Future()
     future.set_result(refusal)
@@ -1029,6 +1048,7 @@ def run_grid_in_pool(
     clock: Callable[[], datetime] | None = None,
     result_extra: Mapping[str, object] | None = None,
     landed: Callable[[int, Mapping[str, object], Landing], None] | None = None,
+    before_append: Callable[[], None] | None = None,
 ) -> GridRun:
     """`run_grid`'s rows, with the measurements run by `executor` (`V2-P6-023`).
 
@@ -1047,7 +1067,13 @@ def run_grid_in_pool(
     configuration are appended, and no later row is written: a later result that already arrived
     is dropped and measured again by the next run. Submitted configurations not yet started are
     cancelled; the caller owns `executor` and shuts it down. `landed(index, config, landing)` is
-    called for each configuration in order, `index` from 1, with `Landing`'s account of it.
+    called for each configuration in order, `index` from 1, with `Landing`'s account of it;
+    `before_append()` as in `run_grid`, immediately before each append.
+
+    **An interrupt is not held up by a measurement.** Each result is waited for in slices of
+    `RESULT_WAIT_SECONDS`, so a Ctrl-C raises `KeyboardInterrupt` here within one slice -- a
+    blocking wait of the whole measurement would not see the signal until it ended, or at all
+    when the signal lands on another thread.
     """
     stage = _grid_stage(stage)
     now = _utc_now if clock is None else clock
@@ -1087,7 +1113,7 @@ def run_grid_in_pool(
                 if landed is not None:
                     landed(index, step.config, HELD)
                 continue
-            answer = step.outcome.result()
+            answer = _awaited(step.outcome)
             # The ledger again, as `run_grid` reads it before every configuration: a run lasts
             # hours, and a row another writer landed meanwhile is this configuration's row.
             existing = list(read_ledger(ledger))
@@ -1097,6 +1123,8 @@ def run_grid_in_pool(
                     landed(index, step.config, MEASURED_BUT_HELD)
                 continue
             result = answer if isinstance(answer, dict) else _refused_result(answer, result_extra)
+            if before_append is not None:
+                before_append()
             _append(ledger, existing, stage, step.config, result, recorded_at=now())
             ran += 1
             if landed is not None:

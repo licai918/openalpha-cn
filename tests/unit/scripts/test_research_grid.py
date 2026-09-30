@@ -10,6 +10,7 @@ that goes red when the number is computed any other way.
 
 from __future__ import annotations
 
+import _thread
 import importlib
 import json
 import math
@@ -22,6 +23,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from time import monotonic
 from types import ModuleType
 from typing import Any, Final
 
@@ -1197,3 +1199,106 @@ def test_the_pooled_runner_will_not_run_the_holdout(tmp_path: Path) -> None:
         )
     assert executor.submitted == []
     assert not ledger.exists()
+
+
+class _CheckoutMoved(Exception):
+    """A caller's refusal to append once the code it runs has changed under it."""
+
+
+def _refusing_from(call: int) -> Any:
+    """A `before_append` hook that admits `call - 1` appends and refuses from the `call`-th."""
+    calls: list[int] = []
+
+    def before_append() -> None:
+        calls.append(len(calls) + 1)
+        if len(calls) >= call:
+            raise _CheckoutMoved(f"refused append {len(calls)}")
+
+    return before_append
+
+
+def test_a_serial_runner_asks_before_every_append_and_appends_nothing_once_refused(
+    tmp_path: Path,
+) -> None:
+    """`before_append` runs after the measurement and before its row -- a window-refused row
+    included -- and a refusal stops the run with the rows before it kept."""
+    ledger = tmp_path / "ledger.jsonl"
+    configs = (
+        {"i": 0, **WINDOW},
+        {"i": 1, "start": date(2021, 6, 1), "end": date(2022, 1, 5)},
+        {"i": 2, **WINDOW},
+    )
+
+    with pytest.raises(_CheckoutMoved, match="refused append 3"):
+        grid.run_grid(
+            ledger,
+            "discovery",
+            configs,
+            _pooled_measure,
+            label_sessions=NO_LABEL,
+            clock=lambda: AT,
+            before_append=_refusing_from(3),
+        )
+
+    assert [row["config"]["i"] for row in _rows(ledger)] == [0, 1]
+
+
+def test_a_pooled_runner_asks_before_every_append_and_appends_nothing_once_refused(
+    tmp_path: Path,
+) -> None:
+    ledger = tmp_path / "ledger.jsonl"
+    configs = tuple({"i": i, **WINDOW} for i in range(4))
+
+    with ThreadPoolExecutor(max_workers=2) as executor, pytest.raises(_CheckoutMoved):
+        grid.run_grid_in_pool(
+            ledger,
+            "discovery",
+            configs,
+            _pooled_measure,
+            executor=executor,
+            label_sessions=NO_LABEL,
+            clock=lambda: AT,
+            before_append=_refusing_from(3),
+        )
+
+    assert [row["config"]["i"] for row in _rows(ledger)] == [0, 1]
+
+
+def test_an_interrupt_reaches_a_pooled_run_while_it_waits_for_a_measurement(
+    tmp_path: Path,
+) -> None:
+    """The parent waits for each result in short slices, so a Ctrl-C (here `interrupt_main`, the
+    platform-neutral way to deliver one to the main thread) is raised within a slice rather than
+    once a measurement of hours ends; the rows before it stay a correct prefix."""
+    ledger = tmp_path / "ledger.jsonl"
+    configs = tuple({"i": i, **WINDOW} for i in range(3))
+    release = threading.Event()
+
+    def measure(config: Mapping[str, object]) -> Mapping[str, object]:
+        if config["i"] == 1:
+            release.wait(timeout=60)
+        return {"p_excess": 0.5}
+
+    interrupter = threading.Timer(0.5, _thread.interrupt_main)
+    began = monotonic()
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            interrupter.start()
+            with pytest.raises(KeyboardInterrupt):
+                grid.run_grid_in_pool(
+                    ledger,
+                    "discovery",
+                    configs,
+                    measure,
+                    executor=executor,
+                    label_sessions=NO_LABEL,
+                    clock=lambda: AT,
+                )
+            waited = monotonic() - began
+            release.set()
+    finally:
+        release.set()
+        interrupter.cancel()
+
+    assert waited < 10
+    assert [row["config"]["i"] for row in _rows(ledger)] == [0]

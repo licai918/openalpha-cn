@@ -23,15 +23,20 @@ resolved by the real `strategy_view` resolvers, so a field name the SDK would re
 
 from __future__ import annotations
 
+import _thread
+import dataclasses
 import hashlib
 import importlib
 import json
 import multiprocessing
 import os
+import signal
 import statistics
 import subprocess
 import sys
+import threading
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
@@ -1280,7 +1285,8 @@ def test_every_command_runs_the_precondition_first_and_stops_on_it(
 
     assert code == 1
     assert "StaleReturnPathsError" in capsys.readouterr().err
-    assert touched == []
+    # A ledger-writing command resolves its commit first (V2-P6-023); nothing else runs.
+    assert touched == (["commit"] if command in p6.LEDGER_WRITING_COMMANDS else [])
     assert not ledger.exists()
 
 
@@ -1819,7 +1825,7 @@ def test_a_ledger_writing_command_refuses_code_imported_from_another_checkout(
 
     assert code == 1
     assert "ForeignPackageError" in capsys.readouterr().err
-    assert touched == []
+    assert touched == ["commit"]  # resolved before any check (V2-P6-023), and nothing else
     assert not ledger.exists()
 
 
@@ -1920,6 +1926,10 @@ CRASH: Final[int] = 47
 """A holding count the pooled fake crashes on: an error that is not a refusal."""
 KILLED: Final[int] = 45
 """A holding count on which a worker process dies outright, as an out-of-memory kill would."""
+STALL: Final[int] = 44
+"""A holding count a worker process measures for a minute, after marking `stalled` in the
+runtime directory: a measurement an interrupt must not wait for."""
+STALL_SECONDS: Final[float] = 60.0
 LATE_WAIT_SECONDS: Final[float] = 30.0
 
 
@@ -1956,6 +1966,9 @@ class _PooledSDK(_FakeSDK):
         in_worker = multiprocessing.parent_process() is not None
         if holding == KILLED and in_worker:
             os._exit(1)
+        if holding == STALL and in_worker:
+            (self.log.parent / "stalled").touch()
+            sleep(STALL_SECONDS)
         try:
             if holding == SLOW and in_worker:
                 self._wait_for_a_late_configuration()
@@ -1970,6 +1983,7 @@ class _PooledSDK(_FakeSDK):
                 "holding_count": holding,
                 "pid": os.getpid(),
                 "pins": {name: os.environ.get(name) for name in thread_count_pins()},
+                "sigint_ignored": signal.getsignal(signal.SIGINT) == signal.SIG_IGN,
             }
             with self.log.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(entry) + "\n")
@@ -2107,6 +2121,8 @@ def test_a_stage_measured_by_worker_processes_writes_the_serial_runs_ledger(
     assert {entry["pid"] for entry in _calls(tmp_path / "serial-runtime")} == {os.getpid()}
     assert os.getpid() not in {entry["pid"] for entry in measured}
     assert all(entry["pins"] == thread_count_pins() for entry in measured)
+    assert all(entry["sigint_ignored"] for entry in measured)  # a Ctrl-C is the parent's
+    assert not any(entry["sigint_ignored"] for entry in _calls(tmp_path / "serial-runtime"))
     assert not any(name in os.environ for name in thread_count_pins())
     assert len(alive) == 1 and alive[0] >= 2  # the workers were there while it measured ...
     assert _no_worker_left()  # ... and none outlived the pool
@@ -2270,3 +2286,151 @@ def test_no_other_command_takes_a_worker_count(command: str) -> None:
     with pytest.raises(SystemExit) as refused:
         p6._parser().parse_args([*arguments, "--workers", "2"])
     assert refused.value.code == 2
+
+
+# --- V2-P6-023 follow-up: the recorded commit is the code that ran; Ctrl-C stops a pool ----------
+
+
+def test_a_ledger_writing_command_resolves_a_clean_commit_before_its_precondition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The precondition takes minutes on the research store; the commit a stage records is the
+    one checked out when the command started, and a dirty tree is refused before anything."""
+    order: list[str] = []
+    world = dataclasses.replace(
+        _pooled_world(tmp_path, monkeypatch, AT),
+        precondition=lambda runtime_dir: order.append("precondition"),
+        code_commit=lambda: order.append("commit") or f"{COMMIT}-dirty",  # type: ignore[func-returns-value]
+    )
+
+    assert _discover(world, tmp_path / "runtime", tmp_path / "ledger.jsonl", 1) == 1
+
+    assert "StageCommitError" in capsys.readouterr().err
+    assert order == ["commit"]
+
+
+class _Checkout:
+    """The checkout's commit as `Environment.code_commit` answers it, moved on by the test."""
+
+    def __init__(self) -> None:
+        self.head = COMMIT
+        self.appended = 0
+
+    def moved(self) -> None:
+        self.head = OTHER_COMMIT
+
+    def clock_moving_after(self, appends: int) -> Callable[[], datetime]:
+        """A clock read once per appended row that moves the checkout after `appends` rows."""
+
+        def clock() -> datetime:
+            self.appended += 1
+            if self.appended == appends:
+                self.moved()
+            return AT
+
+        return clock
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_a_commit_landing_during_the_precondition_refuses_the_stage_before_any_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    workers: int,
+) -> None:
+    configs = _pooled_configs(50, 50, 50)
+    monkeypatch.setattr(p6, "discovery_configs", lambda sessions: configs)
+    checkout = _Checkout()
+    world = dataclasses.replace(
+        _pooled_world(tmp_path, monkeypatch, AT),
+        precondition=lambda runtime_dir: checkout.moved(),
+        code_commit=lambda: checkout.head,
+    )
+    ledger, runtime = tmp_path / "ledger.jsonl", tmp_path / "runtime"
+
+    assert _discover(world, runtime, ledger, workers) == 1
+
+    err = capsys.readouterr().err
+    assert "refused: CheckoutMovedError: " in err
+    assert COMMIT in err and OTHER_COMMIT in err
+    assert grid.stage_family(ledger, "discovery") == 0
+    if workers > 1:
+        assert _calls(runtime) == []  # refused before a worker was spawned
+    assert _no_worker_left()
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_a_commit_landing_mid_stage_keeps_the_rows_before_it_and_appends_no_more(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    workers: int,
+) -> None:
+    """Rows already appended were measured at the recorded commit and stay; the next append
+    finds the checkout moved and the stage stops by name."""
+    configs = _pooled_configs(50, 50, 50, 50)
+    monkeypatch.setattr(p6, "discovery_configs", lambda sessions: configs)
+    checkout = _Checkout()
+    world = dataclasses.replace(
+        _pooled_world(tmp_path, monkeypatch, AT),
+        code_commit=lambda: checkout.head,
+        clock=checkout.clock_moving_after(2),
+    )
+    ledger = tmp_path / "ledger.jsonl"
+
+    assert _discover(world, tmp_path / "runtime", ledger, workers) == 1
+
+    err = capsys.readouterr().err
+    assert "refused: CheckoutMovedError: " in err
+    assert COMMIT in err and OTHER_COMMIT in err
+    rows = grid.read_ledger(ledger)
+    assert [row.config_id for row in rows] == [_id(configs[0]), _id(configs[1])]
+    assert {row.result["code_commit"] for row in rows} == {COMMIT}
+    assert _no_worker_left()
+
+
+def test_an_interrupted_pooled_run_stops_its_workers_at_once_and_keeps_a_correct_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ctrl-C while a worker is a minute into a measurement: the run leaves within seconds,
+    its workers terminated rather than waited for, and the ledger is a prefix of the stage.
+    (`interrupt_main` delivers the interrupt to the main thread on every platform.)"""
+    configs = _pooled_configs(50, STALL, 50)
+    monkeypatch.setattr(p6, "discovery_configs", lambda sessions: configs)
+    ledger, runtime = tmp_path / "ledger.jsonl", tmp_path / "runtime"
+    interrupted: list[float] = []
+
+    def interrupt_once_stalled() -> None:
+        deadline = monotonic() + 30
+        while not (runtime / "stalled").exists() and monotonic() < deadline:
+            sleep(0.05)
+        interrupted.append(monotonic())
+        _thread.interrupt_main()
+
+    watcher = threading.Thread(target=interrupt_once_stalled, daemon=True)
+    watcher.start()
+    with pytest.raises(KeyboardInterrupt):
+        _discover(_pooled_world(tmp_path, monkeypatch, AT), runtime, ledger, 2)
+    left = monotonic()
+    watcher.join(timeout=5)
+
+    assert (runtime / "stalled").exists()
+    assert left - interrupted[0] < 10  # not the STALL_SECONDS the measurement had left
+    written = [row.config_id for row in grid.read_ledger(ledger)]
+    assert written == [_id(config) for config in configs[: len(written)]]
+    assert len(written) <= 1
+    assert _no_worker_left()
+
+
+def test_the_pool_records_its_workers_where_a_prompt_stop_reads_them() -> None:
+    """`_pool_workers` reads `ProcessPoolExecutor._processes`, a private attribute (Python 3.11
+    has no public way to terminate a pool's workers). This pins what it relies on: while the pool
+    runs, the attribute names its live worker processes, which are this process's children."""
+    context = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=1, mp_context=context) as executor:
+        assert executor.submit(abs, -1).result() == 1
+        workers = p6._pool_workers(executor)
+        assert workers
+        assert all(worker.is_alive() for worker in workers)
+        assert set(workers) <= set(multiprocessing.active_children())
+    assert _no_worker_left()

@@ -16,12 +16,22 @@ one `--workers 1` writes**: this process alone appends every row, in configurati
 ledger holds is skipped and never submitted, and the ledger is read again before every append, so
 a row another writer landed meanwhile is not written twice. An interrupted run keeps every row it
 appended and measures the rest again; an error that is not a refusal stops the run after the rows
-before it, as the serial run stops, but only once the configurations already being measured
-finish; a worker that cannot start or dies is `WorkerPoolBrokenError`, the ledger a correct
-prefix. N is at most the machine's core count: each worker holds its own SDK and panel caches and
-DuckDB uses every core per connection, so memory and CPU grow with N. For the pooled run's
-duration this process's environment carries the thread pins. `holdout` takes no `--workers`: it
-runs one configuration once.
+before it, as the serial run stops. Workers ignore Ctrl-C, and on any failure, refusal or Ctrl-C
+this process terminates them at once rather than waiting for the configurations they are
+measuring, whose results would be dropped anyway; a worker that cannot start or dies is
+`WorkerPoolBrokenError`. Every way out leaves the ledger a correct prefix of the stage. N is at
+most the machine's core count: each worker holds its own SDK and panel caches and DuckDB uses
+every core per connection, so memory and CPU grow with N. For the pooled run's duration this
+process's environment carries the thread pins. `holdout` takes no `--workers`: it runs one
+configuration once.
+
+**The recorded commit is the code that ran** (`V2-P6-023`). A command that records a commit
+(`LEDGER_WRITING_COMMANDS`) resolves it -- clean, or refused -- as it starts, before the
+precondition of minutes, and every row it writes names that commit. `_CheckoutGuard` then holds
+the checkout to it immediately before a pool spawns its workers and immediately before every
+append, serial or pooled: a commit that lands, or an edit to the tree, stops the stage by name
+(`CheckoutMovedError`) with the rows already appended -- measured at the recorded commit --
+kept and nothing more appended.
 
 Before any command but the read-only `holdout-verdict` (`READ_ONLY_COMMANDS` says why) does
 anything else, it runs the section 1 precondition,
@@ -126,6 +136,7 @@ import multiprocessing
 import os
 import pickle
 import re
+import signal
 import subprocess
 import sys
 from collections import Counter
@@ -312,6 +323,12 @@ class UnrankableRowError(P6Error):
 
 class StageCommitError(P6Error):
     """The checkout is not a clean commit, or not the commit the stage's rows were measured at."""
+
+
+class CheckoutMovedError(StageCommitError):
+    """The checkout stopped being the clean commit this run recorded as it started: a commit
+    landed, or the tree was edited. The rows already appended were measured at the recorded
+    commit and stay; nothing more is appended."""
 
 
 class NothingMeasuredError(P6Error):
@@ -681,6 +698,27 @@ def _clean_commit(code_commit: str) -> str:
             "unknown checkout); a stage runs from committed code only"
         )
     return code_commit
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _CheckoutGuard:
+    """Holds the checkout to the commit a run recorded as it started (`V2-P6-023`).
+
+    Called immediately before a pool spawns its workers (which import the code then) and before
+    every ledger append, serial or pooled: `resolve` -- `Environment.code_commit`, which names a
+    dirty tree `<commit>-dirty` -- must still answer `recorded`, or `CheckoutMovedError`."""
+
+    recorded: str
+    resolve: Callable[[], str]
+
+    def __call__(self) -> None:
+        now = self.resolve()
+        if now != self.recorded:
+            raise CheckoutMovedError(
+                f"this run recorded commit {self.recorded} as it started and the checkout is now "
+                f"{now}; the rows it appended were measured at {self.recorded} and stay, and "
+                "nothing more is appended. Resume from a clean checkout of the stage's commit"
+            )
 
 
 def stage_commit(ledger: Path, stage: str) -> str | None:
@@ -1413,10 +1451,12 @@ def _run(
     echo: Echo,
     clock: Clock,
     code_commit: str,
+    verify: Callable[[], None] | None = None,
 ) -> GridRun:
     """`grid.run_grid` one configuration at a time, so each is reported as it lands; resumable
     exactly as `run_grid` is. A row the runner refuses itself (a window outside the stage)
-    carries `code_commit` like every row the measures write."""
+    carries `code_commit` like every row the measures write. `verify` (`_CheckoutGuard`) runs
+    immediately before every append."""
     ran = skipped = 0
     for index, config in enumerate(configs, start=1):
         run = grid.run_grid(
@@ -1428,6 +1468,7 @@ def _run(
             sessions=sessions,
             clock=clock,
             result_extra={"code_commit": code_commit},
+            before_append=verify,
         )
         ran, skipped = ran + run.ran, skipped + run.skipped
         echo(_progress(index, len(configs), config, ran=bool(run.ran)))
@@ -1481,9 +1522,15 @@ _WORKER_MEASURE: grid.Measure | None = None
 def _start_worker(
     sdk: Callable[[Path], ResearchSDK], runtime_dir: Path, recipe: StageMeasureRecipe
 ) -> None:
-    """A worker process's start: refuse to measure without the thread pins, then build the SDK
-    and the stage's measure once for every configuration this process measures."""
+    """A worker process's start: ignore SIGINT, refuse to measure without the thread pins, then
+    build the SDK and the stage's measure once for every configuration this process measures.
+
+    A Ctrl-C at the terminal reaches every process of the group. `concurrent.futures`' worker
+    loop catches it as the task's exception and moves on to the calls it has already fetched,
+    so a worker that let it through would neither stop nor stop the run; the parent, which does
+    receive it, terminates its workers (`_worker_processes`)."""
     global _WORKER_MEASURE
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     unpinned = sorted(
         name for name, value in thread_count_pins().items() if os.environ.get(name) != value
     )
@@ -1514,9 +1561,12 @@ def _worker_processes(
     environment therefore carries the pins for the whole pooled run**; its own values are
     restored once the pool is shut down.
 
-    The shutdown cancels what no worker has started and **waits for every configuration a worker
-    is already measuring** -- after a failure too, so a stopped run exits only once those finish
-    (their results are dropped) -- and no worker process outlives the pool.
+    **Leaving by an exception -- a failure, a refusal, Ctrl-C -- terminates the workers at
+    once** (`_stop_workers`) rather than waiting for the configurations they are measuring, which
+    can take many minutes each: their results were going to be dropped anyway, and the rows
+    already appended are a correct prefix of the stage that a rerun resumes. A normal end
+    shuts the pool down and waits, which by then waits for nothing. Either way no worker process
+    outlives the pool.
     """
     pins = thread_count_pins()
     saved = {name: os.environ.get(name) for name in pins}
@@ -1530,6 +1580,9 @@ def _worker_processes(
         )
         try:
             yield executor
+        except BaseException:
+            _stop_workers(executor)
+            raise
         finally:
             executor.shutdown(wait=True, cancel_futures=True)
     finally:
@@ -1538,6 +1591,39 @@ def _worker_processes(
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
+
+
+WORKER_STOP_SECONDS: Final[float] = 10.0
+"""How long `_stop_workers` waits for a terminated worker before killing it."""
+
+
+def _pool_workers(executor: ProcessPoolExecutor) -> list[multiprocessing.process.BaseProcess]:
+    """The pool's live worker processes.
+
+    **Reads a private attribute**, `ProcessPoolExecutor._processes` (pid -> process), because
+    Python 3.11 offers no public way to stop a pool's workers (`terminate_workers` arrives in
+    3.14, and `_stop_workers` prefers it where it exists). The attribute is the pool's own record
+    of the processes it spawned; `test_the_pool_records_its_workers_where_a_prompt_stop_reads_them`
+    pins what this relies on, so a Python that changes it fails there rather than here.
+    """
+    processes = getattr(executor, "_processes", None) or {}
+    return list(processes.values())
+
+
+def _stop_workers(executor: ProcessPoolExecutor) -> None:
+    """Terminate the pool's workers now, then join them, killing one that outlives the join."""
+    terminate = getattr(executor, "terminate_workers", None)
+    if callable(terminate):
+        terminate()
+        return
+    workers = _pool_workers(executor)
+    for worker in workers:
+        worker.terminate()
+    for worker in workers:
+        worker.join(WORKER_STOP_SECONDS)
+        if worker.is_alive():
+            worker.kill()
+            worker.join()
 
 
 def _run_in_workers(
@@ -1551,13 +1637,18 @@ def _run_in_workers(
     sessions: Sequence[date],
     echo: Echo,
     clock: Clock,
+    verify: Callable[[], None] | None = None,
 ) -> GridRun:
     """`_run`'s ledger and progress lines, measured by `pool`'s worker processes through
     `grid.run_grid_in_pool`: this process alone appends the rows, in configuration order, through
-    `grid`'s own writer; a configuration the ledger holds is never submitted.
+    `grid`'s own writer; a configuration the ledger holds is never submitted. `verify`
+    (`_CheckoutGuard`) runs immediately before the workers spawn -- they import the code then --
+    and immediately before every append.
 
     A worker that cannot start or dies mid-run breaks the pool; that is `WorkerPoolBrokenError`,
     a refusal by name: the rows already appended are a correct prefix of the stage."""
+    if verify is not None:
+        verify()
     try:
         with _worker_processes(pool, recipe) as executor:
             run = grid.run_grid_in_pool(
@@ -1573,6 +1664,7 @@ def _run_in_workers(
                 landed=lambda index, config, landing: echo(
                     _landed_line(index, len(configs), config, landing)
                 ),
+                before_append=verify,
             )
     except BrokenProcessPool as error:
         raise WorkerPoolBrokenError(
@@ -1598,10 +1690,11 @@ def _measure_stage(
     echo: Echo,
     clock: Clock,
     pool: WorkerPool | None,
+    verify: Callable[[], None] | None = None,
 ) -> GridRun:
     """The stage in this process (`_run`, with the measure over `backtest`), or with `pool` in
     its worker processes, which build the same measure over their own SDK and never call
-    `backtest` or `ic_series`."""
+    `backtest` or `ic_series`. Both call `verify` before every append."""
     if pool is None:
         return _run(
             ledger,
@@ -1613,6 +1706,7 @@ def _measure_stage(
             echo=echo,
             clock=clock,
             code_commit=recipe.code_commit,
+            verify=verify,
         )
     return _run_in_workers(
         ledger,
@@ -1624,6 +1718,7 @@ def _measure_stage(
         sessions=sessions,
         echo=echo,
         clock=clock,
+        verify=verify,
     )
 
 
@@ -1637,6 +1732,7 @@ def run_discovery(
     echo: Echo,
     clock: Clock = None,
     pool: WorkerPool | None = None,
+    verify: Callable[[], None] | None = None,
 ) -> GridRun:
     """Section 4's stage: every discovery configuration the ledger does not hold yet."""
     head = _clean_commit(code_commit)
@@ -1652,6 +1748,7 @@ def run_discovery(
         echo=echo,
         clock=clock,
         pool=pool,
+        verify=verify,
     )
 
 
@@ -1664,6 +1761,7 @@ def run_composition_sources(
     echo: Echo,
     clock: Clock = None,
     pool: WorkerPool | None = None,
+    verify: Callable[[], None] | None = None,
 ) -> GridRun:
     """Section 5 step 2a: the 19 sources over the survivors' components."""
     head = _require_stage_commit(ledger, COMPOSITION, code_commit)
@@ -1680,6 +1778,7 @@ def run_composition_sources(
         echo=echo,
         clock=clock,
         pool=pool,
+        verify=verify,
     )
 
 
@@ -1692,6 +1791,7 @@ def run_composition_strategies(
     echo: Echo,
     clock: Clock = None,
     pool: WorkerPool | None = None,
+    verify: Callable[[], None] | None = None,
 ) -> GridRun:
     """Section 5 step 2b: the 36 strategies of the best source; `run_grid` skips the one that
     is step 2a's own configuration."""
@@ -1710,6 +1810,7 @@ def run_composition_strategies(
         echo=echo,
         clock=clock,
         pool=pool,
+        verify=verify,
     )
 
 
@@ -1722,6 +1823,7 @@ def run_validation(
     echo: Echo,
     clock: Clock = None,
     pool: WorkerPool | None = None,
+    verify: Callable[[], None] | None = None,
 ) -> GridRun:
     """Section 6's stage: each finalist once over the validation window, at the commit the
     composition stage measured it at (`StageCommitError` otherwise)."""
@@ -1740,6 +1842,7 @@ def run_validation(
         echo=echo,
         clock=clock,
         pool=pool,
+        verify=verify,
     )
 
 
@@ -1823,8 +1926,9 @@ WORKERS_HELP: Final[str] = (
     "machine's core count; the ledger is the one a single worker writes. Each worker holds its "
     "own SDK and panel caches and DuckDB uses every core per connection, so memory and CPU grow "
     "with N. For the run's duration this process's environment carries the BLAS/OpenMP thread "
-    "pins the workers start with. After a failure the run stops only once the configurations "
-    "already being measured finish; their results are dropped and measured again by a rerun."
+    "pins the workers start with. Workers ignore Ctrl-C; on a failure, a refusal or Ctrl-C "
+    "this process terminates them at once, so the configurations they were measuring are "
+    "dropped and measured again by a rerun, and the ledger is a correct prefix of the stage."
 )
 
 
@@ -1875,7 +1979,11 @@ def _report_verdict(verdict: Mapping[str, Any], artifacts: Path, echo: Echo) -> 
         echo(f"  {name}: {item['value']} vs {item['threshold']} -> {item['passed']}")
 
 
-def _dispatch(arguments: argparse.Namespace, environment: Environment, echo: Echo) -> None:
+def _dispatch(
+    arguments: argparse.Namespace, environment: Environment, echo: Echo, commit: str | None = None
+) -> None:
+    """Run `arguments.command`. `commit` is the clean commit `main` resolved as the command
+    started, which the commands that record one (`LEDGER_WRITING_COMMANDS`) require."""
     command, runtime_dir, ledger = arguments.command, arguments.runtime_dir, arguments.ledger
     pool = _worker_pool(arguments, environment)
     sessions = tuple(environment.sessions(runtime_dir))
@@ -1907,34 +2015,39 @@ def _dispatch(arguments: argparse.Namespace, environment: Environment, echo: Ech
         )
         _report_verdict(verdict, artifacts, echo)
         return
-    commit = environment.code_commit()
+    if commit is None:
+        raise StageCommitError(f"`{command}` records a commit and was handed none")
+    verify = _CheckoutGuard(recorded=commit, resolve=environment.code_commit)
+    backtest = sdk.run_strategy_backtest
     if command == "discovery":
         run_discovery(
             ledger,
             sessions,
-            sdk.run_strategy_backtest,
+            backtest,
             sdk.factor_ic_series,
             commit,
             echo=echo,
             clock=clock,
             pool=pool,
+            verify=verify,
         )
     elif command == "composition-sources":
         run_composition_sources(
-            ledger, sessions, sdk.run_strategy_backtest, commit, echo=echo, clock=clock, pool=pool
+            ledger, sessions, backtest, commit, echo=echo, clock=clock, pool=pool, verify=verify
         )
     elif command == "composition-strategies":
         run_composition_strategies(
-            ledger, sessions, sdk.run_strategy_backtest, commit, echo=echo, clock=clock, pool=pool
+            ledger, sessions, backtest, commit, echo=echo, clock=clock, pool=pool, verify=verify
         )
     elif command == "validation":
         run_validation(
-            ledger, sessions, sdk.run_strategy_backtest, commit, echo=echo, clock=clock, pool=pool
+            ledger, sessions, backtest, commit, echo=echo, clock=clock, pool=pool, verify=verify
         )
         body, _, _ = validation_selection(ledger, sessions)
         write_artifact(artifacts / "p6-validation.json", body)
         echo(f"validation chose {body['chosen']}")
     elif command == "register":
+        verify()
         digest = register_holdout(
             ledger, sessions, arguments.registration, commit, environment.repo
         )
@@ -1949,13 +2062,21 @@ def main(argv: Sequence[str] | None = None, *, environment: Environment | None =
     arguments = _parser().parse_args(argv)
     world = default_environment() if environment is None else environment
     try:
+        # V2-P6-023: the commit a command records is the one checked out as it starts -- before
+        # a precondition of minutes, and before any worker imports the code -- and it must be
+        # clean. `_CheckoutGuard` holds the checkout to it for the rest of the run.
+        commit = (
+            _clean_commit(world.code_commit())
+            if arguments.command in LEDGER_WRITING_COMMANDS
+            else None
+        )
         if arguments.command not in READ_ONLY_COMMANDS:
             world.precondition(arguments.runtime_dir)
         if arguments.command in LEDGER_WRITING_COMMANDS:
             root = world.repo.resolve()
             registry._refuse_a_foreign_package(root)
             registry._refuse_foreign_scripts(root)
-        _dispatch(arguments, world, print)
+        _dispatch(arguments, world, print, commit)
     except (
         P6Error,
         grid.ResearchLedgerError,
