@@ -225,9 +225,12 @@ def forward_report(
     )
     # V2-P6-024: the registration's own excess benchmark is priced even when it is no longer
     # one of the protocol's defaults, so an older registration is tested against what it named.
-    arguments["benchmarks"] = daily_selection.priced_benchmarks(
-        arguments.get("benchmarks"), admitted.settings
-    )
+    try:
+        arguments["benchmarks"] = daily_selection.priced_benchmarks(
+            arguments.get("benchmarks"), admitted.settings
+        )
+    except daily_selection.StepFailedError as error:
+        raise ForwardReportError(str(error)) from error
     rebalance_every_sessions = int(arguments["rebalance_every_sessions"])
 
     # Through the next year when it is stored: the newest period may end in January.

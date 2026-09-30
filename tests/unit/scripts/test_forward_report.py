@@ -593,6 +593,10 @@ def test_the_forward_summary_tests_both_statistic_sets_with_the_holdouts_own_fun
         pytest.param(
             {"bootstrap_samples": False, "random_seed": 1}, "bootstrap_samples", id="bool"
         ),
+        # V2-P6-024 (M6): no default benchmark stands in for the one the registration recorded.
+        pytest.param(
+            {"bootstrap_samples": 100, "random_seed": 1}, "excess_benchmark", id="no_benchmark"
+        ),
     ],
 )
 def test_forward_summary_refuses_a_registration_without_its_measurement_settings(

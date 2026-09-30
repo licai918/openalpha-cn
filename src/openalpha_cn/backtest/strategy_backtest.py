@@ -83,7 +83,7 @@ import math
 import statistics
 from bisect import bisect_left, bisect_right
 from collections.abc import Collection, Mapping, MutableMapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
 from itertools import pairwise
@@ -378,14 +378,15 @@ KNOWN_STRATEGY_BACKTEST_LIMITATIONS: Final[tuple[StrategyBacktestLimitation, ...
             "limit and names no order could have reached, pays no cost and rebalances daily, so "
             "it is a market measurement rather than a portfolio anyone could have held; an excess "
             "return over it is not an excess over an alternative investment. Measured on the "
-            "research store (V2-P6-024), it inflates the benchmark by about 12 percentage points "
-            "a year: over 2015-2021 the arithmetic annualised mean of its daily cross-sectional "
-            "mean is 25.2% with every name and 12.7% without the names listed 90 calendar days or "
-            "less (2017: +2.0% against -16.2%) -- a new listing counts from its first session, "
-            "IPO-day gains of up to 44% and one-price limit-up streaks no order reaches -- and "
-            "the daily rebalance harvests a short-term reversal no period-held book can. Every "
-            "one of the 183 measured stage-1 configurations had a negative information ratio "
-            "against it. It is no longer the protocol's benchmark: equal_weight_all_a_held is "
+            "research store (V2-P6-024): new listings alone lift it by about 12.5 percentage "
+            "points a year (25.2% against 12.7%, the 2015-2021 arithmetic annualised mean of its "
+            "daily cross-sectional mean with every name and without the names listed 90 calendar "
+            "days or less; 2017: +2.0% against -16.2%) -- a new listing counts from its first "
+            "session, IPO-day gains of up to 44% and one-price limit-up streaks no order reaches. "
+            "It also rebalances daily, which no period-held book can; that part is not measured "
+            "separately. Every one of the 183 measured stage-1 configurations had a negative "
+            "information ratio against it. It is no longer the protocol's benchmark: "
+            "equal_weight_all_a_held is "
             "(the_held_equal_weight_benchmark_asks_the_open_auction_and_not_the_money). This "
             "series is still computed, unchanged, for every caller that names it."
         ),
@@ -393,25 +394,32 @@ KNOWN_STRATEGY_BACKTEST_LIMITATIONS: Final[tuple[StrategyBacktestLimitation, ...
     StrategyBacktestLimitation(
         code="the_held_equal_weight_benchmark_asks_the_open_auction_and_not_the_money",
         detail=(
-            "V2-P6-024. equal_weight_all_a_held (全 A 等权同期持有) is computed by the book, per "
-            "period. Its members are every security with a bar on the signal session that the "
-            "book's own open-auction judgement would buy at the execution session's open -- "
-            "AShareExecutionPolicy against that session's bar collapsed to its open print, so not "
-            "halted, opening below its limit-up price, with a bar there at all. The rules that "
-            "depend on money rather than on the security -- whole lots, the STAR floor, the "
-            "capital and cash bounds, the participation cap -- are not applied: a member is judged "
-            "on a board-minimum order. Each member is entered at the execution session's open "
-            "and marked exactly as a holding is (close x adj_factor / entry adj_factor, the last "
-            "mark kept through a session with no bar, a delisted name at its last close, a "
-            "recorded published path rescaled and an unknowable one valued by the factor path "
-            "and named on the period's benchmark_unknowable_sessions), up to the close of the "
-            "period's last session; the period's return is the plain mean of the members' "
-            "returns, with no cost. The overnight from the signal close to the execution open is "
-            "not in it -- the span a position bought at that open holds, which is every new "
-            "position of the book; a position the book keeps across a rebalance does carry that "
-            "overnight in net_return. A period with no member is refused, never read as zero. "
-            "The members are fixed at the open and not rebalanced, so the weights drift with "
-            "prices inside the period, as the book's do."
+            "V2-P6-024. equal_weight_all_a_held (全 A 等权同期持有) is the period return of a "
+            "notional equal-weight book the backtest runs beside its own, frictionless -- no "
+            "cost, no lot, no STAR floor, no capital, cash or participation bound -- and "
+            "rebalanced on the book's own schedule. Like the book it starts in cash at the first "
+            "signal close. At each execution session's open it sells every member it holds and "
+            "buys that period's members in equal amounts. A period's members are every security "
+            "with a complete quote on the signal session (a bar, a published band and an "
+            "adjustment factor) that the book's own open-auction judgement would buy at the "
+            "execution session's open: AShareExecutionPolicy against that session's bar "
+            "collapsed to its open print, on a board-minimum order, so not halted, opening below "
+            "its limit-up price, with a quote there at all. The halt test reads the execution "
+            "session's session-level suspension flag (suspended_at_the_close, or any timed "
+            "interruption), which is information from after that open -- the same flag, and the "
+            "same look past the open, as the book's own orders. Each member is marked exactly as "
+            "a holding is: close x adj_factor / entry adj_factor, the last mark kept through a "
+            "session with no quote (a delisted name at its last close), a recorded published path "
+            "rescaled and an unknowable one valued by the factor path. A member sold at the next "
+            "execution open is valued at that open -- its bar collapsed to the open print, "
+            "through the same observation a retained holding makes, so a record dated that "
+            "session is taken into account and an unknowable one is a crossing -- or at its last "
+            "mark when it has no quote there. Every crossing is named on the period's "
+            "benchmark_unknowable_sessions. So a period's return runs from the signal close, "
+            "as the book's does: the overnight into the execution open is in it through the "
+            "members sold there, weighted by what each was worth at the close, and a book "
+            "holding exactly the members with no friction earns it exactly. A period with no "
+            "member is refused, never read as zero; benchmark_members counts them."
         ),
     ),
     StrategyBacktestLimitation(
@@ -924,6 +932,9 @@ class PeriodResult(BaseModel):
     it: each is valued exactly as a holding is, and a session its return is unknowable on is named
     here rather than on `unknowable_sessions` -- the book held no yuan in it, so there is no
     `UnknowableCrossing` to price."""
+    benchmark_members: int | None = None
+    """How many securities `EQUAL_WEIGHT_ALL_A_HELD` bought for this period (`V2-P6-024`), or
+    `None` when the run did not ask for it."""
 
     @model_validator(mode="after")
     def validate_ledger(self) -> Self:
@@ -1143,10 +1154,11 @@ class HeldBenchmarkPeriod:
     """One period of `EQUAL_WEIGHT_ALL_A_HELD` (`V2-P6-024`): what the book computes for it.
 
     `value` is the period's return, quantized as every return is; `members` how many securities
-    it averaged over; `unknowable_sessions` the `<security>@<session>` crossings its members made
-    (`PeriodResult.benchmark_unknowable_sessions`). A function of the quotes from the signal
-    session to the period's end and of nothing the book decides, which is why a caller may keep
-    it for another run over the same quotes (`StrategyInputs.held_benchmark`).
+    it bought; `unknowable_sessions` the `<security>@<session>` crossings its members -- this
+    period's, and the previous period's sold at its open -- made
+    (`PeriodResult.benchmark_unknowable_sessions`). A function of the quotes over this period and
+    the previous one and of nothing the book decides, which is why a caller may keep it for
+    another run over the same quotes (`StrategyInputs.held_benchmark`, `HeldBenchmarkKey`).
     """
 
     value: Decimal
@@ -1154,8 +1166,12 @@ class HeldBenchmarkPeriod:
     unknowable_sessions: tuple[str, ...] = ()
 
 
-HeldBenchmarkKey = tuple[date, date, date]
-"""`(signal session, execution session, period end)`: what a held-benchmark period is keyed by."""
+HeldBenchmarkKey = tuple[date | None, date | None, date, date, date]
+"""`(previous signal session, previous execution session, signal session, execution session,
+period end)`, the first two `None` for a run's first period: what a held-benchmark period is keyed
+by. The previous period is in the key because the notional book sells that period's members at
+this one's open, so the value depends on them; the previous period's end is this one's signal
+session, so it needs no slot of its own."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -1183,10 +1199,11 @@ class StrategyInputs:
     held. `None`, the default, is the grid; see `rebalance_indices`.
 
     `held_benchmark` (`V2-P6-024`) is a memo the caller owns for `EQUAL_WEIGHT_ALL_A_HELD`,
-    keyed by `HeldBenchmarkKey`: the book reads a period from it when it is there and writes the
-    period it computed when it is not. It is only correct across runs whose `quotes` are the same
-    -- the caller's promise, which `strategy_view` keeps by holding one memo per store state,
-    range, instant and exchange. `None` computes every period afresh.
+    keyed by `HeldBenchmarkKey` -- the period and the one before it: the book reads a period from
+    it when it is there and writes the period it computed when it is not. It is only correct
+    across runs whose `quotes` are the same -- the caller's promise, which `strategy_view` keeps
+    by holding one memo per store state, range, instant and exchange. `None` computes every
+    period afresh.
     """
 
     source: ScoreSource
@@ -1332,6 +1349,11 @@ def run_strategy_backtest(inputs: StrategyInputs, spec: StrategySpec) -> Strateg
     feed: ScoreFeed = inputs.feed or _MaterialisedFeed(inputs, signal_days)
     scorer = _Scorer(inputs, feed)
     book = _Book(spec=spec, cash=spec.initial_capital)
+    notional = (
+        _HeldBook(inputs, AShareExecutionPolicy(spec.costs))
+        if EQUAL_WEIGHT_ALL_A_HELD in spec.benchmarks
+        else None
+    )
     periods: list[PeriodResult] = []
     for position, index in enumerate(signal_indices):
         end_index = (
@@ -1347,6 +1369,7 @@ def run_strategy_backtest(inputs: StrategyInputs, spec: StrategySpec) -> Strateg
                 signal_index=index,
                 end_index=end_index,
                 signal=scorer.signal(sessions[index]),
+                notional=notional,
             )
         )
     refits = feed.refits()
@@ -2042,6 +2065,7 @@ def _run_period(
     signal_index: int,
     end_index: int,
     signal: _Signal,
+    notional: _HeldBook | None = None,
 ) -> PeriodResult:
     sessions = inputs.sessions
     signal_day = sessions[signal_index]
@@ -2064,11 +2088,9 @@ def _run_period(
             _buy(book, ledger, policy, spec, subject, trade_day, signal_quotes, trade_quotes)
     for index in range(signal_index + 1, end_index + 1):
         book.mark(inputs.quotes.get(sessions[index], {}))
-    held = (
-        _held_period(inputs, signal_index=signal_index, end_index=end_index)
-        if EQUAL_WEIGHT_ALL_A_HELD in spec.benchmarks
-        else None
-    )
+    # After the book has marked the period, so a view that reads sessions lazily and keeps one
+    # period of them (`strategy_view._session_cache_depth`) still holds every one asked for.
+    held = None if notional is None else notional.period(signal_index, end_index)
     end_value = book.value()
     net = _quantized((end_value - start_value) / start_value)
     cost = _quantized(ledger.cost / start_value)
@@ -2103,86 +2125,197 @@ def _run_period(
             f"{item.subject}@{item.day.isoformat()}" for item in book.unknowable[crossed:]
         ),
         benchmark_unknowable_sessions=() if held is None else held.unknowable_sessions,
+        benchmark_members=None if held is None else held.members,
     )
 
 
-def _held_period(
-    inputs: StrategyInputs, *, signal_index: int, end_index: int
-) -> HeldBenchmarkPeriod:
-    """`EQUAL_WEIGHT_ALL_A_HELD` over one period, from the caller's memo when it keeps one.
+@dataclass(slots=True)
+class _Members:
+    """One period's members in the notional book: each a `_Holding`, beside its entry mark."""
 
-    Called after the book has marked the period, so a view that reads sessions lazily and keeps
-    one period of them (`strategy_view._session_cache_depth`) still holds every one asked for.
+    holdings: dict[str, _Holding]
+    entries: dict[str, Decimal]
+
+    def worth(self) -> Decimal:
+        """The sum of mark / entry: what the members are worth per unit put into each."""
+        return sum(
+            (holding.mark / self.entries[subject] for subject, holding in self.holdings.items()),
+            Decimal(0),
+        )
+
+
+def _enter(
+    quotes: Mapping[date, Mapping[str, SessionQuote]],
+    signal_day: date,
+    trade_day: date,
+    policy: AShareExecutionPolicy,
+) -> _Members:
+    """The members bought at `trade_day`'s open, marked at its close.
+
+    Every security with a quote on `signal_day` that `_buyable_at_the_open` admits on
+    `trade_day`, opened as `_buy` opens a holding -- `mark = open x adj_factor`, `entry_adj =
+    adj_factor` -- and remarked by `_Holding.remark` at that session's close, which observes
+    nothing: a position opened at a session's open held nothing into it.
     """
-    sessions = inputs.sessions
-    key = (sessions[signal_index], sessions[signal_index + 1], sessions[end_index])
-    memo = inputs.held_benchmark
-    if memo is not None and key in memo:
-        return memo[key]
-    period = held_equal_weight_period(inputs.quotes, sessions[signal_index : end_index + 1])
-    if memo is not None:
-        memo[key] = period
-    return period
-
-
-def held_equal_weight_period(
-    quotes: Mapping[date, Mapping[str, SessionQuote]], sessions: Sequence[date]
-) -> HeldBenchmarkPeriod:
-    """One period of `EQUAL_WEIGHT_ALL_A_HELD` (`V2-P6-024`): `sessions` are the signal session,
-    the execution session and every later session of the period, ascending.
-
-    See `the_held_equal_weight_benchmark_asks_the_open_auction_and_not_the_money`. Members are
-    the securities with a quote on the signal session that `_buyable_at_the_open` admits on the
-    execution session. Each is a `_Holding` opened at the execution session's open --
-    `mark = open x adj_factor` and `entry_adj = adj_factor`, as `_buy` opens one -- and remarked by
-    `_Holding.remark` on every session it has a quote, the execution session included, so it keeps
-    its last mark through a session with no quote. Its return is its last mark over its entry
-    mark, less one; the period's is their mean, quantized. A member crossing an unknowable session
-    is valued by the factor path, as a holding is, and named.
-
-    **The span is the one a position bought at the execution open holds.** The book's
-    `net_return` runs from the signal session's close, but a position `_buy` opens is booked at
-    that open (`mark = bar.open x adj_factor`, paid for in cash that did not move overnight), so
-    the signal-close-to-execution-open overnight is in the return of no new position -- nor here.
-    """
-    if len(sessions) < 2:
-        raise StrategyBacktestError("a held-benchmark period needs a signal and a trade session")
-    signal_day, trade_day = sessions[0], sessions[1]
     trade_quotes = quotes.get(trade_day, {})
-    policy = AShareExecutionPolicy()
-    members: dict[str, _Holding] = {}
-    entries: dict[str, Decimal] = {}
+    members = _Members(holdings={}, entries={})
     for subject in quotes.get(signal_day, {}):
         quote = trade_quotes.get(subject)
         if quote is None or not _buyable_at_the_open(policy, quote):
             continue
         entry = quote.bar.open * quote.adj_factor
-        member = _Holding(shares=1, opened=trade_day, entry_adj=quote.adj_factor, mark=entry)
-        member.remark(quote)  # its first close, from the quote in hand; nothing to observe yet
-        members[subject] = member
-        entries[subject] = entry
-    if not members:
+        holding = _Holding(shares=1, opened=trade_day, entry_adj=quote.adj_factor, mark=entry)
+        holding.remark(quote)
+        members.holdings[subject] = holding
+        members.entries[subject] = entry
+    if not members.holdings:
         raise StrategyBacktestError(
             f"{EQUAL_WEIGHT_ALL_A_HELD} has no member for the period starting "
-            f"{signal_day.isoformat()}: no security with a bar that session could have been "
-            f"bought at {trade_day.isoformat()}'s open, and a benchmark of nothing is not a zero "
-            "return"
+            f"{signal_day.isoformat()}: no security with a complete quote that session could have "
+            f"been bought at {trade_day.isoformat()}'s open, and a benchmark of nothing is not a "
+            "zero return"
         )
+    return members
+
+
+def _mark_through(
+    members: _Members, quotes: Mapping[date, Mapping[str, SessionQuote]], days: Sequence[date]
+) -> list[str]:
+    """Remark every member at each of `days`' closes it has a quote on; the crossings met."""
     crossed: list[str] = []
-    for day in sessions[2:]:
+    for day in days:
         day_quotes = quotes.get(day, {})
-        for subject, member in members.items():
+        for subject, holding in members.holdings.items():
             quote = day_quotes.get(subject)
-            if quote is not None and member.remark(quote) is not None:
+            if quote is not None and holding.remark(quote) is not None:
                 crossed.append(f"{subject}@{day.isoformat()}")
-    total = sum(
-        (member.mark / entries[subject] - 1 for subject, member in members.items()), Decimal(0)
-    )
-    return HeldBenchmarkPeriod(
-        value=_quantized(total / len(members)),
-        members=len(members),
-        unknowable_sessions=tuple(crossed),
-    )
+    return crossed
+
+
+def _mark_at_the_open(
+    members: _Members, quotes: Mapping[date, Mapping[str, SessionQuote]], day: date
+) -> list[str]:
+    """Value every member at `day`'s open, where the notional book sells it: its quote with the
+    bar collapsed to the open print (`_at_the_open`), through `_Holding.remark` -- so the session
+    is observed exactly as a holding kept through it observes it. A member with no quote there
+    keeps its last mark. Returns the crossings met."""
+    crossed: list[str] = []
+    day_quotes = quotes.get(day, {})
+    for subject, holding in members.holdings.items():
+        quote = day_quotes.get(subject)
+        if quote is None:
+            continue
+        opened = replace(quote, bar=_at_the_open(quote.bar))
+        if holding.remark(opened) is not None:
+            crossed.append(f"{subject}@{day.isoformat()}")
+    return crossed
+
+
+def _held_members(
+    quotes: Mapping[date, Mapping[str, SessionQuote]],
+    sessions: Sequence[date],
+    policy: AShareExecutionPolicy,
+) -> _Members:
+    """One period's members, bought and marked to its end: what the next period sells."""
+    members = _enter(quotes, sessions[0], sessions[1], policy)
+    _mark_through(members, quotes, sessions[2:])
+    return members
+
+
+def _held_step(
+    quotes: Mapping[date, Mapping[str, SessionQuote]],
+    sessions: Sequence[date],
+    previous: _Members | None,
+    policy: AShareExecutionPolicy,
+) -> tuple[HeldBenchmarkPeriod, _Members]:
+    """One period of the notional book, from the previous period's members at their marks.
+
+    Value at the signal close is the previous members' `worth()`; at the execution open it is
+    their worth after `_mark_at_the_open`, and all of it is put into the new members equally;
+    at the period's end it is that times the new members' mean mark / entry. So the return is
+    `(open worth / close worth) x (new worth / new count) - 1`, the overnight factor weighted by
+    what each sold member was worth at the close -- the book's own weights. With no previous
+    period the book starts in cash and the first factor is 1. One division, then quantized.
+    """
+    crossed: list[str] = []
+    before = after = Decimal(1)
+    if previous is not None:
+        before = previous.worth()
+        crossed.extend(_mark_at_the_open(previous, quotes, sessions[1]))
+        after = previous.worth()
+    members = _enter(quotes, sessions[0], sessions[1], policy)
+    crossed.extend(_mark_through(members, quotes, sessions[2:]))
+    count = len(members.holdings)
+    value = _quantized(after * members.worth() / (before * count) - 1)
+    period = HeldBenchmarkPeriod(value=value, members=count, unknowable_sessions=tuple(crossed))
+    return period, members
+
+
+class _HeldBook:
+    """The notional book of `EQUAL_WEIGHT_ALL_A_HELD` across one run's periods, in order.
+
+    It carries the last period's members to the next, which sells them at its open. A period
+    served from the caller's memo (`StrategyInputs.held_benchmark`) carries nothing, so the
+    period after it, if computed, rebuilds those members from the quotes (`_held_members`) --
+    the same members, marked the same way, computed again rather than remembered.
+    """
+
+    def __init__(self, inputs: StrategyInputs, policy: AShareExecutionPolicy) -> None:
+        self._inputs = inputs
+        self._policy = policy
+        self._previous: tuple[date, ...] | None = None
+        self._members: _Members | None = None
+
+    def period(self, signal_index: int, end_index: int) -> HeldBenchmarkPeriod:
+        inputs = self._inputs
+        span = inputs.sessions[signal_index : end_index + 1]
+        previous = self._previous
+        key: HeldBenchmarkKey = (
+            None if previous is None else previous[0],
+            None if previous is None else previous[1],
+            span[0],
+            span[1],
+            span[-1],
+        )
+        self._previous = span
+        memo = inputs.held_benchmark
+        if memo is not None and key in memo:
+            self._members = None
+            return memo[key]
+        carried = self._members
+        if previous is not None and carried is None:
+            carried = _held_members(inputs.quotes, previous, self._policy)
+        period, self._members = _held_step(inputs.quotes, span, carried, self._policy)
+        if memo is not None:
+            memo[key] = period
+        return period
+
+
+def held_equal_weight_period(
+    quotes: Mapping[date, Mapping[str, SessionQuote]],
+    sessions: Sequence[date],
+    *,
+    previous: Sequence[date] | None = None,
+    costs: CostSchedule | None = None,
+) -> HeldBenchmarkPeriod:
+    """One period of `EQUAL_WEIGHT_ALL_A_HELD` (`V2-P6-024`), computed from the quotes alone.
+
+    `sessions` are the period's signal session, its execution session and every later session
+    of it, ascending; `previous` the same for the period before it, `None` for a run's first
+    (which starts in cash). See `the_held_equal_weight_benchmark_asks_the_open_auction_and_not_
+    the_money` and `_held_step`. A run computes the same value while carrying the previous
+    period's members instead of rebuilding them.
+    """
+    if len(sessions) < 2 or (previous is not None and len(previous) < 2):
+        raise StrategyBacktestError("a held-benchmark period needs a signal and a trade session")
+    if previous is not None and previous[-1] != sessions[0]:
+        raise StrategyBacktestError(
+            f"the previous period ends {previous[-1].isoformat()}, not on this period's signal "
+            f"session {sessions[0].isoformat()}"
+        )
+    policy = AShareExecutionPolicy(costs)
+    carried = None if previous is None else _held_members(quotes, previous, policy)
+    return _held_step(quotes, sessions, carried, policy)[0]
 
 
 def _buyable_at_the_open(policy: AShareExecutionPolicy, quote: SessionQuote) -> bool:

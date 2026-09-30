@@ -142,10 +142,12 @@ PRIMARY_EXCESS_BENCHMARK: Final[str] = EQUAL_WEIGHT_ALL_A_HELD
 """The benchmark the primary family's excess return is measured against (the protocol's
 decision); `000905.SH` is reported beside it and tests nothing.
 
-`equal_weight_all_a_held` since `V2-P6-024`: every name the book could have bought at the
-period's open, held to its end, computed by the backtest itself. The daily-rebalanced
-`equal_weight_all_a` it replaced is not investable and inflated the benchmark by about 12
-percentage points a year (`strategy_backtest`'s
+`equal_weight_all_a_held` since `V2-P6-024`: a frictionless notional book that buys, at each
+period's open, every name the book could have bought there in equal amounts and holds them to the
+next rebalance, computed by the backtest itself. The daily-rebalanced `equal_weight_all_a` it
+replaced is not investable: new listings alone lift it by about 12.5 percentage points a year
+(25.2 % against 12.7 %, 2015-2021 arithmetic); the daily-rebalancing part is not measured
+separately (`strategy_backtest`'s
 `the_equal_weight_benchmark_is_every_priced_name_and_is_not_investable`). A ledger row or a
 registration keeps the `excess_benchmark` it was written with and is read under that name."""
 REPORTED_BENCHMARK: Final[str] = "000905.SH"
@@ -808,6 +810,9 @@ def strategy_result(
         "benchmark_unknowable_crossings": [
             crossing for p in periods for crossing in p.benchmark_unknowable_sessions
         ],
+        # V2-P6-024: each period's member count of the held all-A benchmark (`None` for a run
+        # that did not price it), for a sanity check of the benchmark against the store.
+        "benchmark_members": [p.benchmark_members for p in periods],
         "max_relative_drawdown": max_relative_drawdown(
             [p.net_return for _, p in tested],
             [p.benchmark_returns[excess_benchmark] for _, p in tested],

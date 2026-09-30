@@ -749,6 +749,9 @@ def test_the_strategy_result_against_the_held_benchmark_is_the_same_reduction(
         expected.p_value, statistics.fmean(tested)
     )
     assert result["benchmark_unknowable_crossings"] == []
+    # M6: each period's member count, for a real-store sanity check of the benchmark.
+    assert result["benchmark_members"] == [p.benchmark_members for p in backtest.periods]
+    assert all(isinstance(count, int) and count > 0 for count in result["benchmark_members"])
     crossed = backtest.model_copy(
         update={
             "periods": (
@@ -845,6 +848,7 @@ class _Period:
             self.benchmark_returns["000905.SH"] = Decimal(reported)
         self.turnover = Decimal("0.5")
         self.benchmark_unknowable_sessions: tuple[str, ...] = ()
+        self.benchmark_members: int | None = None
 
 
 class _Spec:

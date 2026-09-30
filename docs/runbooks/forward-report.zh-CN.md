@@ -33,6 +33,8 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file "<主检出>/.en
 
 - **哪些日子调仓、每天用哪条记录**：`daily_selection.forward_rebalances` 从预测库的第一条被这份登记绑定的、准时的记录开始往后数——不是日志说了算,也不是这份登记第一次被信号覆盖的那天。日志只用来交叉核对；日志与库不一致时,报告直接拒绝（`ForwardReportError`）,不会悄悄选一边。
 - **一条晚于信号时刻才登记的记录能不能读**：`daily_selection.forward_record_check`（`strategy_registration.RecordCheck`),作为 `backtest_strategy(verify_late=...)` 传入——先看它是否绑定这份登记（`record_is_bound`：组合模型比对声明本身；走前向模型比对它自己写的输入溯源),再在它自己登记的那一刻从已存的构建重新算一遍分数。算出来一样就正常计入;算出来不一样、但它读过的某个输入后来被订正过,记作 `unverifiable_inputs_corrected_after_filing`——照样计入账本（推荐了就是推荐了）,只是在汇总里单独标出、单独统计;算出来不一样又没有输入被订正的解释,直接拒绝整份报告。
+- **账本对照的基准（V2-P6-024）**：账本同时计价登记里记下的 `excess_benchmark`（现行协议是 `equal_weight_all_a_held`，全 A 等权同期持有；之前的登记记的是 `equal_weight_all_a`，仍按它读）。登记的 settings 里没有 `excess_benchmark` 就直接拒绝，不拿协议默认值顶替。`equal_weight_all_a_held` 由回测自己按期计算：一个无摩擦的名义账本，每期在执行日（信号日的下一交易日）开盘卖出上期全部成员、等额买入本期成员——信号日有完整报价（日线、已发布的涨跌停价、复权因子）且执行日开盘按账本自己的规则能买进的全部股票。
+- **执行日的复权因子或涨跌停价还没入库，整份报告会被拒绝**：执行日没有 `adj_factor`（或没有 `stk_limit`）时，那一天没有任何股票有报价，这一期的基准一个成员都没有；回测不把它当成 0，而是拒绝（`ForwardReportError`，信息里写着 `equal_weight_all_a_held has no member for the period starting …`）。处理：等当天的 `adj_factor`、`stk_limit` 发布后，按每日运行手册补建这两个数据集（`openalpha panel build --dataset adj_factor --year <年份>`、`openalpha panel build --dataset stk_limit --year <年份>`，或整套每日构建），再重跑本报告；不要为了出报告把基准从登记里拿掉。
 - **账本的终点**：最新一次调仓那条记录的 `book_period_end`（登记的调仓间隔,下一交易日起才算收益、再往后数一个调仓周期),再取面板已发布的最新交易日与它的较小值——面板还没发布到的日子不会出现在账本里。
 
 ## 输出怎么读

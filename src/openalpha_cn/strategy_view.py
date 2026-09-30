@@ -62,15 +62,17 @@ adjustment factor covering it, has no quote: the book cannot trade it and keeps 
 
 ## The protocol's benchmark is computed by the book, once per process (`V2-P6-024`)
 
-`EQUAL_WEIGHT_ALL_A_HELD` -- every name the book could have bought at a period's open, held to
-its end -- asks for a quote of every priced security on every session, which is the one reader
-here that touches the whole market rather than a few dozen names. It depends on the quotes and
-the period's three sessions and on nothing a configuration chooses, so every configuration of a
-research stage that shares a range and a schedule shares it. `load_strategy_inputs` hands the
-book a memo (`StrategyInputs.held_benchmark`) held in this process per store, range, `as_of` and
-exchange, beside the catalog stamps of the datasets a quote is built from; the book fills it per
-`(signal, execution, end)` period and reads it on every later run. A catalog that moved since
-(`PanelStore.partition_stamps`) is a fresh memo, never a stale value.
+`EQUAL_WEIGHT_ALL_A_HELD` -- a frictionless notional book that sells its members and buys every
+name the book could have bought at each execution open -- asks for a quote of every priced
+security on every session, which is the one reader here that touches the whole market rather
+than a few dozen names. A period's value depends on the quotes over that period and the one
+before it (whose members are sold at its open) and on nothing a configuration chooses, so every
+configuration of a research stage that shares a range and a schedule shares it.
+`load_strategy_inputs` hands the book a memo (`StrategyInputs.held_benchmark`) held in this
+process per store, range, `as_of` and exchange, beside the catalog stamps of the datasets a quote
+is built from; the book fills it per `HeldBenchmarkKey` -- the previous period's signal and
+execution sessions, this period's, and its end -- and reads it on every later run. A catalog that
+moved since (`PanelStore.partition_stamps`) is a fresh memo, never a stale value.
 
 ## A registered prediction registered late is read only when it is witnessed (`V2-P6-011`)
 

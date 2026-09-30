@@ -1543,8 +1543,18 @@ _SIGNIFICANCE_KEYS: Final[tuple[str, ...]] = (
 def registered_excess_benchmark(settings: Mapping[str, Any]) -> str:
     """The benchmark a registration's forward excess is tested against: the name its settings
     recorded, which a registration made before `V2-P6-024` gives as `equal_weight_all_a` and keeps
-    reading under that name; `grid.PRIMARY_EXCESS_BENCHMARK` only when it recorded none."""
-    return str(settings.get("excess_benchmark", grid.PRIMARY_EXCESS_BENCHMARK))
+    reading under that name. A registration that recorded none is refused: no default stands in
+    for it, as none does for `bootstrap_samples` (`_registered_count`), because the protocol's
+    default is not what that registration was measured against."""
+    value = settings.get("excess_benchmark")
+    if not isinstance(value, str) or not value.strip():
+        raise StepFailedError(
+            "summary",
+            f"the registration's settings give excess_benchmark as {value!r}; the forward book "
+            "is tested against the benchmark the registration recorded, and without one there is "
+            "none to test it against",
+        )
+    return value
 
 
 def priced_benchmarks(

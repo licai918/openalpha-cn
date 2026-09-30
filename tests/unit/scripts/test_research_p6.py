@@ -119,6 +119,7 @@ class _Period:
     benchmark_returns: Mapping[str, Decimal]
     turnover: Decimal
     benchmark_unknowable_sessions: tuple[str, ...] = ()
+    benchmark_members: int | None = None
 
 
 @dataclass(frozen=True)
@@ -220,6 +221,7 @@ def _result(
         "period_complete": [True] * len(nets),
         "period_sessions": [20] * len(nets),
         "code_commit": COMMIT,
+        "excess_benchmark": EQUAL_WEIGHT_ALL_A_HELD,
     }
 
 
@@ -598,6 +600,52 @@ def test_the_survivors_are_computed_only_from_a_complete_discovery_stage(tmp_pat
 
     with pytest.raises(p6.StageIncompleteError, match="1 configuration"):
         p6.survivors(ledger, SESSIONS)
+
+
+@pytest.mark.parametrize(
+    "benchmark",
+    [pytest.param("equal_weight_all_a", id="the_old_primary"), pytest.param(None, id="unnamed")],
+)
+def test_a_row_measured_against_another_benchmark_is_refused_by_name(
+    tmp_path: Path, benchmark: str | None
+) -> None:
+    """`V2-P6-024` (M4): a stage's family is one hypothesis family only when every measured row
+    tested the same excess. A row against the retired `equal_weight_all_a` -- stage 1 as first
+    run -- or one naming no benchmark is refused by name rather than selected on."""
+    old = _discovery("reversal_1d/v1", "raw", 5)
+    result = {key: value for key, value in _result().items() if key != "excess_benchmark"}
+    if benchmark is not None:
+        result["excess_benchmark"] = benchmark
+    ledger = _survivor_ledger(tmp_path, {_id(old): result})
+
+    with pytest.raises(p6.BenchmarkMismatchError, match=_id(old)) as refused:
+        p6.survivors(ledger, SESSIONS)
+    assert "equal_weight_all_a_held" in str(refused.value)
+
+
+def test_a_refused_row_names_no_benchmark_and_still_counts_in_the_family(tmp_path: Path) -> None:
+    """A refused configuration measured nothing, so it tested no excess and names none; it is
+    a withheld hypothesis of the family, which it must still enlarge."""
+    refused = _discovery("reversal_1d/v1", "raw", 5)
+    ledger = _survivor_ledger(
+        tmp_path, {_id(refused): {"error": "StrategyRunBlockedError: x", "code_commit": COMMIT}}
+    )
+
+    answer = p6.survivors(ledger, SESSIONS)
+
+    assert answer["family_size"] == 189
+
+
+def test_a_validation_row_against_another_benchmark_is_refused(tmp_path: Path) -> None:
+    """The same rule on section 6's selection, which reads the finalists' stage too."""
+
+    def results(configs: list[Mapping[str, object]]) -> Mapping[str, Any]:
+        return {_id(configs[0]): {**_result(), "excess_benchmark": "equal_weight_all_a"}}
+
+    ledger, _ = _validation_ledger(tmp_path, results)
+
+    with pytest.raises(p6.BenchmarkMismatchError, match="equal_weight_all_a"):
+        p6.validation_selection(ledger, SESSIONS)
 
 
 def test_a_row_the_protocol_does_not_build_is_refused_rather_than_counted(tmp_path: Path) -> None:

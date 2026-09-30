@@ -227,15 +227,15 @@ def test_the_equal_weight_benchmark_is_the_mean_stored_session_return(
     assert inputs.benchmark_returns[EQUAL_WEIGHT_ALL_A][day] == Decimal(repr(expected))
 
 
-def _held_by_hand(
+def _held_members_by_hand(
     quotes: Mapping[date, Mapping[str, SessionQuote]], period: Sequence[date]
-) -> tuple[Decimal, int]:
-    """`EQUAL_WEIGHT_ALL_A_HELD` over one period, restated from the quotes the view hands the
-    book: a member has a quote on the signal day and, at the execution session, is not halted and
-    opens below its published limit-up; it is worth its last close x factor over its open x
-    factor there. No recorded path in this panel, so no correction."""
+) -> dict[str, tuple[Decimal, Decimal]]:
+    """Each member's `(entry mark, last mark)` over one period, restated from the quotes the view
+    hands the book: a member has a quote on the signal day and, at the execution session, is not
+    halted and opens below its published limit-up; it enters at open x factor and its last mark
+    is its last close x factor in the period. No recorded path in this panel, so no correction."""
     signal_day, trade_day, *_ = period
-    returns: list[Decimal] = []
+    members: dict[str, tuple[Decimal, Decimal]] = {}
     for subject in quotes[signal_day]:
         entry = quotes[trade_day].get(subject)
         if entry is None or entry.bar.suspended:
@@ -244,14 +244,44 @@ def _held_by_hand(
         if entry.bar.open >= entry.bar.up_limit:
             continue
         last = next(quotes[day][subject] for day in reversed(period[1:]) if subject in quotes[day])
-        returns.append(last.bar.close * last.adj_factor / (entry.bar.open * entry.adj_factor) - 1)
-    return sum(returns, Decimal(0)) / len(returns), len(returns)
+        members[subject] = (
+            entry.bar.open * entry.adj_factor,
+            last.bar.close * last.adj_factor,
+        )
+    return members
 
 
-def test_the_held_benchmark_is_the_book_bought_at_each_open_and_held(
+def _held_by_hand(
+    quotes: Mapping[date, Mapping[str, SessionQuote]],
+    period: Sequence[date],
+    previous: Sequence[date] | None,
+) -> tuple[Decimal, int]:
+    """`EQUAL_WEIGHT_ALL_A_HELD` over one period (round 2): the previous period's members, worth
+    their last mark / entry at the signal close, are sold at the execution open at open x factor
+    (their last mark when they have no quote there); the proceeds go into this period's members
+    equally, worth their last mark / entry at the end."""
+    members = _held_members_by_hand(quotes, period)
+    before = after = Decimal(1)
+    if previous is not None:
+        sold = _held_members_by_hand(quotes, previous)
+        before = sum((last / entry for entry, last in sold.values()), Decimal(0))
+        opens = quotes[period[1]]
+        after = sum(
+            (
+                (opens[s].bar.open * opens[s].adj_factor if s in opens else last) / entry
+                for s, (entry, last) in sold.items()
+            ),
+            Decimal(0),
+        )
+    held = sum((last / entry for entry, last in members.values()), Decimal(0))
+    return after * held / (before * len(members)) - 1, len(members)
+
+
+def test_the_held_benchmark_is_the_notional_book_bought_at_each_open(
     corpus: tuple[PanelStore, GeneratedPanel],
 ) -> None:
-    """The protocol's default now: every period's value is the hand restatement's."""
+    """The protocol's default now: every period's value is the hand restatement's, and some
+    period's overnight factor is not 1 -- the panel's names gap between close and open."""
     store, panel = corpus
     request = _request(panel)
     result = backtest_strategy(store, request)
@@ -259,15 +289,23 @@ def test_the_held_benchmark_is_the_book_bought_at_each_open_and_held(
 
     assert set(request.spec.benchmarks) == {"000905.SH", EQUAL_WEIGHT_ALL_A_HELD}
     assert EQUAL_WEIGHT_ALL_A_HELD not in inputs.benchmark_returns
+    previous: Sequence[date] | None = None
+    without_overnight: list[Decimal] = []
     for period in result.periods:
         span = inputs.sessions[
             inputs.sessions.index(period.start) : inputs.sessions.index(period.end) + 1
         ]
-        expected, members = _held_by_hand(inputs.quotes, span)
+        expected, members = _held_by_hand(inputs.quotes, span, previous)
+        without_overnight.append(_held_by_hand(inputs.quotes, span, None)[0])
         assert members > 0
+        assert period.benchmark_members == members
         assert period.benchmark_returns[EQUAL_WEIGHT_ALL_A_HELD] == expected.quantize(
             Decimal("0.0000000001")
         )
+        previous = span
+    assert [p.benchmark_returns[EQUAL_WEIGHT_ALL_A_HELD] for p in result.periods] != [
+        value.quantize(Decimal("0.0000000001")) for value in without_overnight
+    ]
 
 
 def test_the_held_benchmark_is_computed_once_per_store_range_instant_and_exchange(
@@ -279,13 +317,13 @@ def test_the_held_benchmark_is_computed_once_per_store_range_instant_and_exchang
     moved, computes afresh."""
     store, panel = corpus
     computed: list[date] = []
-    real = strategy_backtest.held_equal_weight_period
+    real = strategy_backtest._held_step
 
-    def counted(quotes: Any, sessions: Sequence[date]) -> Any:
+    def counted(quotes: Any, sessions: Sequence[date], *rest: Any) -> Any:
         computed.append(sessions[0])
-        return real(quotes, sessions)
+        return real(quotes, sessions, *rest)
 
-    monkeypatch.setattr(strategy_backtest, "held_equal_weight_period", counted)
+    monkeypatch.setattr(strategy_backtest, "_held_step", counted)
     strategy_view.forget_held_benchmarks()
     fresh = backtest_strategy(store, _request(panel))
     assert len(computed) == len(fresh.periods) == 3

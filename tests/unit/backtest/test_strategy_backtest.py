@@ -32,6 +32,7 @@ from openalpha_cn.backtest.strategy_backtest import (
     KNOWN_STRATEGY_BACKTEST_LIMITATIONS,
     MODEL_COMPONENT,
     STRATEGY_BACKTEST_LIMITATION_CODES,
+    HeldBenchmarkKey,
     HeldBenchmarkPeriod,
     ICObservation,
     PeriodResult,
@@ -44,6 +45,7 @@ from openalpha_cn.backtest.strategy_backtest import (
     TrailingICWeights,
     WalkForwardFit,
     WalkForwardModel,
+    held_equal_weight_period,
     limitation_codes_for,
     run_strategy_backtest,
     trailing_ic_weights,
@@ -1846,14 +1848,18 @@ def test_the_held_benchmark_matches_the_hand_computed_periods() -> None:
     """Every number by hand, each member entered at the execution session's OPEN (times its
     factor there) and marked at each session's close times its factor, keeping its last mark.
 
-    PERIOD 1 (signal D1, bought at D2's open, marked to D4's close). Members: every name with a
-    bar on D1 that the policy would buy at D2's open -- not Q (open at limit-up), not R (halted).
-      P  11.00 / 10.00 - 1 = +0.10  (the 9.80 -> 10.00 overnight is not in it)
+    PERIOD 1 (signal D1, bought at D2's open, marked to D4's close). The notional book starts in
+    cash at D1's close, as the book does, so the 9.80 -> 10.00 overnight of P is in no position.
+    Members: every name with a complete quote on D1 that the policy would buy at D2's open -- not
+    Q (open at limit-up), not R (halted).
+      P  11.00 / 10.00 - 1 = +0.10
       S   5.20 /  5.00 - 1 = +0.04  (no bar on D3; D4 marks it again)
       T   7.60 /  8.00 - 1 = -0.05  (delisted: D2's close is its last mark)
       U  11.00 x 2 / (20.00 x 1) - 1 = +0.10  (the split is in the factor)
       mean = 0.19 / 4 = 0.0475
-    PERIOD 2 (signal D4, bought at D5's open, marked to D6's close). T has no bar on D4.
+    PERIOD 2 (signal D4). At D5's open the notional book sells period 1's members; every one
+    opens where it closed D4 (T at its last mark), so the overnight factor is 1. It buys the new
+    members -- T has no bar on D4 -- and holds them to D6's close.
       P  12.10 / 11.00 - 1 = +0.10
       Q  11.55 / 11.00 - 1 = +0.05
       R  19.00 / 20.00 - 1 = -0.05
@@ -1945,21 +1951,240 @@ def test_the_held_benchmark_changes_nothing_else_the_book_reports() -> None:
         returns = dict(held_period.benchmark_returns)
         del returns[EQUAL_WEIGHT_ALL_A_HELD]
         assert returns == dict(plain.benchmark_returns)
-        assert held_period.model_copy(update={"benchmark_returns": returns}) == plain
+        assert (held_period.benchmark_members, plain.benchmark_members) == (4, None)
+        assert (
+            held_period.model_copy(update={"benchmark_returns": returns, "benchmark_members": None})
+            == plain
+        )
 
 
 def test_the_held_benchmark_memo_serves_what_a_fresh_run_computes() -> None:
-    """A caller-owned memo is keyed by (signal day, execution session, period end), filled on
-    the first run and read on the next; the answers equal a run with no memo at all."""
-    memo: dict[tuple[date, date, date], HeldBenchmarkPeriod] = {}
+    """A caller-owned memo is keyed by (previous signal day, previous execution session, signal
+    day, execution session, period end) -- `None` twice for a period with no previous one --
+    filled on the first run and read on the next; the answers equal a run with no memo at all."""
+    memo: dict[HeldBenchmarkKey, HeldBenchmarkPeriod] = {}
     fresh = run_strategy_backtest(held_inputs(), HELD_SPEC)
     first = run_strategy_backtest(replace(held_inputs(), held_benchmark=memo), HELD_SPEC)
 
-    assert set(memo) == {(D1, D2, D4), (D4, D5, D6)}
-    assert memo[(D1, D2, D4)].members == 4
+    assert set(memo) == {(None, None, D1, D2, D4), (D1, D2, D4, D5, D6)}
+    assert memo[(None, None, D1, D2, D4)].members == 4
     served = run_strategy_backtest(replace(held_inputs(), held_benchmark=memo), HELD_SPEC)
     assert fresh == first == served
+    assert [period.benchmark_members for period in served.periods] == [4, 5]
     # And it is read, not recomputed: a planted value comes back.
-    memo[(D4, D5, D6)] = replace(memo[(D4, D5, D6)], value=Decimal("0.5000000000"))
+    second = (D1, D2, D4, D5, D6)
+    memo[second] = replace(memo[second], value=Decimal("0.5000000000"))
     planted = run_strategy_backtest(replace(held_inputs(), held_benchmark=memo), HELD_SPEC)
     assert _held(planted.periods) == [Decimal("0.0475000000"), Decimal("0.5000000000")]
+
+
+def test_a_memo_hit_is_never_a_value_computed_under_another_previous_period() -> None:
+    """Round 2: a period's value depends on the members of the period before it, which the
+    notional book sells at its open. Schedule A rebalances on (D1, D4), schedule B on (D1, D3,
+    D4): both have the period D4 -> D6 bought at D5, after different periods -- members bought
+    at D2 against members bought at D4 -- and, with P gapping up into D5, the two values differ.
+    Sharing one memo, each schedule is served the value a fresh run computes. Schedule C,
+    (D1, D3), runs first, so B's first period is a memo hit and its second is not: the members
+    it sells at D4 are rebuilt from the quotes rather than carried."""
+    quotes = held_quotes()
+    quotes[D5][HELD_P] = SessionQuote(
+        bar=_bar(
+            HELD_P,
+            D5,
+            previous_close=Decimal("11.00"),
+            open_=Decimal("12.00"),
+            close=Decimal("12.00"),
+        ),
+        turnover_yuan=Decimal("20000000"),
+        adj_factor=Decimal("1"),
+    )
+    inputs = replace(
+        held_inputs(quotes),
+        scores=score_rows(
+            {
+                D1: {HELD_P: 2.0, HELD_U: 1.0},
+                D3: {HELD_P: 1.0, HELD_U: 2.0},
+                D4: {HELD_P: 1.0, HELD_U: 2.0},
+            }
+        ),
+    )
+
+    def run(
+        days: tuple[date, ...], memo: dict[HeldBenchmarkKey, HeldBenchmarkPeriod] | None = None
+    ) -> list[Decimal]:
+        spec_inputs = replace(inputs, rebalance_days=days, held_benchmark=memo)
+        return _held(run_strategy_backtest(spec_inputs, HELD_SPEC).periods)
+
+    fresh_a, fresh_b, fresh_c = run((D1, D4)), run((D1, D3, D4)), run((D1, D3))
+    assert fresh_a[-1] != fresh_b[-1]
+
+    memo: dict[HeldBenchmarkKey, HeldBenchmarkPeriod] = {}
+    assert run((D1, D3), memo) == fresh_c
+    assert run((D1, D3, D4), memo) == fresh_b
+    assert run((D1, D4), memo) == fresh_a
+    assert run((D1, D3, D4), memo) == fresh_b
+    assert {(D1, D2, D4, D5, D6), (D3, D4, D4, D5, D6), (D1, D2, D3, D4, D4)} <= set(memo)
+
+
+def test_the_reference_period_is_the_run_s_period() -> None:
+    """`held_equal_weight_period` computes one period from nothing but the quotes and the two
+    periods' sessions; the run carries the previous members instead of rebuilding them, and
+    answers the same."""
+    quotes = held_quotes()
+    periods = run_strategy_backtest(held_inputs(quotes), HELD_SPEC).periods
+
+    first = held_equal_weight_period(quotes, (D1, D2, D3, D4))
+    second = held_equal_weight_period(quotes, (D4, D5, D6), previous=(D1, D2, D3, D4))
+
+    assert [first.value, second.value] == _held(periods)
+    assert [first.members, second.members] == [4, 5]
+
+
+def test_a_record_on_the_execution_session_is_observed_by_the_members_sold_there() -> None:
+    """P's factor jumps 1.0 -> 1.1 at D5, the session period 1's members are sold at the open
+    and period 2's bought. Recorded `published`, the sold P is rescaled exactly as a retained
+    holding would be -- it opens where it closed, and the period is the unjumped 0.05.
+    Recorded `unknowable`, it is valued by the factor path: its D5 open mark is 11.00 x 1.1
+    against 10.00 at entry, so the overnight factor is (1.21 + 1.04 + 0.95 + 1.10) /
+    (1.10 + 1.04 + 0.95 + 1.10) = 4.30 / 4.19, and the period is 4.30 / 4.19 x 1.05 - 1 =
+    0.0775656325; the crossing is named on period 2. The P bought at D5 enters at 11.00 x 1.1 and
+    is not rescaled -- it held nothing overnight."""
+
+    def jumped(recorded: str) -> dict[date, dict[str, SessionQuote]]:
+        quotes = held_quotes()
+        for day in (D5, D6):
+            quotes[day][HELD_P] = replace(
+                quotes[day][HELD_P],
+                adj_factor=Decimal("1.1"),
+                recorded_path=recorded if day == D5 else None,  # type: ignore[arg-type]
+                path_ratio=JUMP_RATIO if day == D5 else None,
+            )
+        return quotes
+
+    published = run_strategy_backtest(held_inputs(jumped("published")), HELD_SPEC).periods
+    unknowable = run_strategy_backtest(held_inputs(jumped("unknowable")), HELD_SPEC).periods
+
+    assert _held(published) == [Decimal("0.0475000000"), Decimal("0.0500000000")]
+    assert _held(unknowable) == [Decimal("0.0475000000"), Decimal("0.0775656325")]
+    assert unknowable[1].benchmark_unknowable_sessions == (f"{HELD_P}@{D5.isoformat()}",)
+    assert published[1].benchmark_unknowable_sessions == ()
+
+
+# --- round 2: the identity -- a frictionless book holding exactly the members earns the benchmark
+#
+# Three names, two held, a signal every two sessions: periods D1->D3 (bought D2), D3->D5 (D4),
+# D5->D6 (D6). Zero costs and slippage, 20,000,000 yuan of turnover (a 200,000 cap), prices that
+# divide 100,000 yuan into whole lots, and the score ranks exactly each period's members, so no
+# rule of the book binds. Each name the book holds into a rebalance opens that session exactly
+# where it was bought (value 100,000.00), so the book is equal weight at every open and fully
+# invested with no idle cash -- the one arrangement under which a book that does not resize a
+# retained name holds the notional book's weights. Every close in between moves freely.
+#
+#   X  bought D2 at 10.00 and kept to the end; its factor jumps 1.0 -> 1.1 at D4 with the
+#      published path recorded (the session's return is close / pre_close), and it gaps
+#      10.40 -> 10.00 into D4 and 10.60 -> 10.00 into D6.
+#   Y  bought D2 at 12.50, gaps 11.36 -> 12.50 (its limit-up) into D4, where it is sold and
+#      cannot be bought: out of period 2's members. No bar after D4.
+#   Z  opens D2 at its limit-up, so it is not a member of period 1; bought D4 at 20.00 after a
+#      21.00 -> 20.00 gap, kept, gaps 19.50 -> 20.00 into D6.
+
+IDENTITY_BARS: Final[dict[str, tuple[Bar, ...]]] = {
+    HELD_P: (
+        ("10.00", "10.00", "10.00"),
+        ("10.00", "10.00", "10.20"),
+        ("10.20", "10.20", "10.40"),
+        ("10.40", "10.00", "10.50"),
+        ("10.50", "10.50", "10.60"),
+        ("10.60", "10.00", "10.30"),
+    ),
+    HELD_Q: (
+        ("12.50", "12.50", "12.50"),
+        ("12.50", "12.50", "12.00"),
+        ("12.00", "12.00", "11.36"),
+        ("11.36", "12.50", "12.50"),
+        None,
+        None,
+    ),
+    HELD_R: (
+        ("20.00", "20.00", "20.00"),
+        ("20.00", "22.00", "22.00"),
+        ("22.00", "22.00", "21.00"),
+        ("21.00", "20.00", "19.80"),
+        ("19.80", "19.80", "19.50"),
+        ("19.50", "20.00", "20.80"),
+    ),
+}
+ZERO_COSTS: Final[CostSchedule] = CostSchedule(
+    commission_rate=Decimal("0"),
+    minimum_commission=Decimal("0"),
+    transfer_fee_rate=Decimal("0"),
+    sell_stamp_duty_rate=Decimal("0"),
+)
+IDENTITY_SPEC: Final[StrategySpec] = StrategySpec(
+    rebalance_every_sessions=2,
+    holding_count=2,
+    buffer_rank=None,
+    max_industry_weight=None,
+    position_capital=Decimal("100000"),
+    participation_cap=Decimal("0.01"),
+    costs=ZERO_COSTS,
+    slippage_rate=Decimal("0"),
+    benchmarks=(EQUAL_WEIGHT_ALL_A_HELD,),
+)
+
+
+def identity_inputs() -> StrategyInputs:
+    quotes = held_quotes(IDENTITY_BARS, adj={HELD_P: ("1", "1", "1", "1.1", "1.1", "1.1")})
+    quotes[D4][HELD_P] = replace(
+        quotes[D4][HELD_P], recorded_path="published", path_ratio=JUMP_RATIO
+    )
+    ranked = {HELD_P: 2.0, HELD_R: 1.0}
+    return StrategyInputs(
+        source=RAW_SOURCE,
+        sessions=SESSIONS,
+        signal_instants={day: signal_instant(day) for day in SESSIONS},
+        scores=score_rows({D1: {HELD_P: 2.0, HELD_Q: 1.0}, D3: ranked, D5: ranked}),
+        quotes=quotes,
+        benchmark_returns={},
+    )
+
+
+def test_a_frictionless_book_holding_exactly_the_members_earns_the_benchmark() -> None:
+    """The correctness criterion, by hand and by the book.
+
+    PERIOD 1 (D1 close -> D3 close): cash at D1's close, X and Y bought at D2's open. The book
+    is 200,000.00 -> 104,000.00 + 90,880.00 = 194,880.00: -0.0256.
+    PERIOD 2 (D3 -> D5): at D4's open Y is sold at 12.50 (100,000.00) and Z bought; X is kept.
+    D5: X 10,000 x 10.60 = 106,000.00 and Z 5,000 x 19.50 = 97,500.00, so 203,500 / 194,880 - 1
+    = 0.0442323481. The notional book: the members of period 1 open D4 at 1.00 and 1.00 of
+    their entry and closed D3 at 1.04 and 0.9088, so the overnight factor is 2 / 1.9488; the new
+    members earn (1.06 + 0.975) / 2 -- the same number.
+    PERIOD 3 (D5 -> D6): nothing trades; 207,000 / 203,500 - 1 = 0.0171990172.
+
+    Exact on the quantized ten-place returns. The book rounds each holding to the cent and the
+    benchmark does not, and the two divide in a different order at 28 significant digits, so
+    they are the same rational number computed two ways: equal after quantizing unless that
+    number lies within about 1e-27 of a rounding midpoint, and here every holding is an exact
+    number of cents. The overnight factor is the value-weighted one -- what the notional book,
+    holding its members at their marks, is worth at the open over what it was worth at the
+    close; a plain mean of each member's open / last mark would give 0.0489868296 and
+    0.0189767779, and no book earns those."""
+    result = run_strategy_backtest(identity_inputs(), IDENTITY_SPEC)
+
+    gross = [period.gross_return for period in result.periods]
+    assert gross == [
+        Decimal("-0.0256000000"),
+        Decimal("0.0442323481"),
+        Decimal("0.0171990172"),
+    ]
+    assert _held(result.periods) == gross
+    assert all(period.cost == 0 and not period.rejections for period in result.periods)
+    assert [period.capped_orders for period in result.periods] == [0, 0, 0]
+    assert [period.holdings for period in result.periods] == [
+        (HELD_P, HELD_Q),
+        (HELD_P, HELD_R),
+        (HELD_P, HELD_R),
+    ]
+    assert [p.benchmark_members for p in result.periods] == [2, 2, 2]
+    assert result.periods[1].end_value - result.periods[1].start_value != 0
+    assert all(period.benchmark_unknowable_sessions == () for period in result.periods)

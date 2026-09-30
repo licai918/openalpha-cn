@@ -321,6 +321,11 @@ class StageIncompleteError(P6Error):
     """A stage does not hold exactly the configurations the protocol builds for it."""
 
 
+class BenchmarkMismatchError(P6Error):
+    """A measured row of a stage tested its excess against another benchmark than
+    `grid.PRIMARY_EXCESS_BENCHMARK` (`V2-P6-024`), so the stage is not one family."""
+
+
 class DuplicateRowError(P6Error):
     """A stage holds one configuration twice; its family would count one hypothesis twice."""
 
@@ -693,6 +698,7 @@ def _rows_for(
             f"the {stage} stage in {ledger} holds a configuration twice (lines {lines}); the "
             "family would count one hypothesis twice -- the ledger was edited by hand"
         )
+    _require_the_primary_benchmark(ledger, stage, stage_rows)
     wanted = [grid.config_id(config) for config in expected]
     missing = [identity for identity in wanted if identity not in rows]
     extra = sorted(set(rows) - set(wanted)) if exact else []
@@ -703,6 +709,33 @@ def _rows_for(
             f"{(missing + extra)[0]}); run the stage to completion with this driver"
         )
     return {identity: rows[identity] for identity in wanted}
+
+
+def _require_the_primary_benchmark(ledger: Path, stage: str, rows: Sequence[LedgerRow]) -> None:
+    """Refuse, by name, a stage holding a measured row whose `excess_benchmark` is not
+    `grid.PRIMARY_EXCESS_BENCHMARK` (`V2-P6-024`) -- a row measured against the retired
+    `equal_weight_all_a`, or one that names none. Every selection (`survivors`, `best_source`,
+    `finalists`, `validation_selection`) reads its stage through `_rows_for`, so none selects on,
+    or hands `grid.fdr_table`, a family mixing two tests.
+
+    A refused row (`error`) measured nothing, so it tested no excess and names no benchmark; it
+    is accepted without one, because it is still a hypothesis the stage tried and must still
+    enlarge the family (`grid.fdr_table` counts it as withheld). One that does name a benchmark
+    must name the primary.
+    """
+    primary = grid.PRIMARY_EXCESS_BENCHMARK
+    wrong = [
+        f"{row.config_id} (line {row.line}: {row.result.get('excess_benchmark')!r})"
+        for row in rows
+        if row.result.get("excess_benchmark") != primary
+        and not ("error" in row.result and "excess_benchmark" not in row.result)
+    ]
+    if wrong:
+        raise BenchmarkMismatchError(
+            f"the {stage} stage in {ledger} holds {len(wrong)} measured row(s) whose excess is not "
+            f"against {primary}, the protocol's primary benchmark: {', '.join(wrong[:3])}. A "
+            "family mixing two benchmarks tests nothing; re-measure the stage"
+        )
 
 
 def _clean_commit(code_commit: str) -> str:
