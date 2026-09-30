@@ -368,9 +368,10 @@ class WorkerFactoryError(P6Error):
 
 
 class WorkerPoolBrokenError(P6Error):
-    """A worker process could not start or died mid-run (an out-of-memory kill, say). The run
-    stopped there; every row it appended is complete and in configuration order, so the ledger
-    is a correct prefix of the stage and a rerun resumes it."""
+    """A worker process could not start or died mid-run (an out-of-memory kill, say), or its
+    commit check failed as it started (its `CheckoutMovedError`, with both commits, is on
+    stderr). The run stopped there; every row it appended is complete and in configuration
+    order, so the ledger is a correct prefix of the stage and a rerun resumes it."""
 
 
 # --- section 1: the precondition -----------------------------------------------------------------
@@ -746,10 +747,35 @@ def _moved(recorded: str, now: str, when: str) -> str:
     )
 
 
+def _at_or_below(path: Path, root: Path) -> bool:
+    """Whether `path` is `root` or lies under it: by spelling, or -- for a `root` that exists --
+    by an existing directory of `path` that is `root` itself (same device and inode)."""
+    if path.is_relative_to(root):
+        return True
+    try:
+        checkout = root.stat()
+    except OSError:
+        return False
+    for directory in (path, *path.parents):
+        try:
+            here = directory.stat()
+        except OSError:
+            continue
+        if os.path.samestat(here, checkout):
+            return True
+    return False
+
+
 def _refuse_a_ledger_in_the_checkout(ledger: Path, repo: Path) -> None:
     """A ledger inside the checkout dirties it with its first row, so `_CheckoutGuard` would
-    stop the stage at its second append; refuse it before anything runs."""
-    if ledger.resolve().is_relative_to(repo.resolve()):
+    stop the stage at its second append; refuse it before anything runs.
+
+    Compared by directory, not by spelling: on a case-insensitive filesystem (APFS by default)
+    `CHECKOUT/research` is the checkout's `research`, and `resolve()` keeps the case it was
+    given. So the ledger's resolved path and each existing parent of it are compared with the
+    checkout by device and inode (`os.path.samestat`), besides the path comparison, which alone
+    covers a checkout that does not exist."""
+    if _at_or_below(ledger.resolve(), repo.resolve()):
         raise LedgerInCheckoutError(
             f"the ledger {ledger} is inside the checkout {repo.resolve()}; its rows would dirty "
             "the tree the stage's commit is held to. Keep the ledger outside the checkout"
@@ -1726,7 +1752,10 @@ def _run_in_workers(
             f"a worker process could not start or died mid-run ({error}); the {stage} run "
             f"stopped. Every row it appended is complete and in configuration order, so "
             f"{ledger} holds a correct prefix of the stage ({grid.stage_family(ledger, stage)} "
-            "row(s)); rerun the command to resume, with fewer --workers if memory ran out"
+            "row(s)). A worker whose commit check failed stops the pool this way too: its "
+            "CheckoutMovedError, naming the recorded commit and the checkout's, is printed above "
+            "on stderr, and the stage resumes only from a clean checkout of the recorded commit. "
+            "Otherwise rerun the command to resume, with fewer --workers if memory ran out"
         ) from error
     echo(_tally(ledger, run))
     return run

@@ -2249,9 +2249,13 @@ def test_a_worker_that_cannot_start_is_a_refusal_by_name_not_a_traceback(
 
     assert _discover(world, tmp_path / "runtime", ledger, 2) == 1
 
-    err = capsys.readouterr().err
-    assert "refused: WorkerPoolBrokenError: " in err
-    assert "rerun" in err
+    err = capsys.readouterr().err  # this process's own lines only, not a worker's
+    (refusal,) = [line for line in err.splitlines() if line.startswith("refused: ")]
+    assert refusal.startswith("refused: WorkerPoolBrokenError: ")
+    assert "rerun" in refusal
+    # The operator is told that a worker's failed commit check lands here too, and where to
+    # find the two commits it compared.
+    assert "CheckoutMovedError" in refusal and "stderr" in refusal
     assert grid.stage_family(ledger, "discovery") == 0
     assert _no_worker_left()
 
@@ -2509,10 +2513,11 @@ def test_stopping_workers_always_joins_them_even_where_the_pool_terminates_them_
     assert _no_worker_left()
 
 
-def test_the_driver_reads_head_before_any_heavy_import() -> None:
+def test_the_driver_reads_head_before_any_heavy_import(tmp_path: Path) -> None:
     """`_p6_head` is the first non-standard-library import of `p6.py` and imports only the
     standard library, so the commit a run starts at is read before `openalpha_cn` (about a third
-    of a second) loads -- and it is the checkout's HEAD."""
+    of a second) loads -- and what it reads is HEAD, checked on a repository this test owns
+    (the checkout's own HEAD may move while a long suite runs)."""
     tree = ast.parse((RESEARCH / "p6.py").read_text(encoding="utf-8"))
     imported = [
         alias.name.split(".")[0] if isinstance(node, ast.Import) else str(node.module).split(".")[0]
@@ -2535,8 +2540,24 @@ def test_the_driver_reads_head_before_any_heavy_import() -> None:
         if isinstance(node, ast.ImportFrom) and node.module != "__future__"
     ]
     assert all(name in sys.stdlib_module_names for name in head_imports)
-    assert git(ROOT, "rev-parse", "HEAD").strip() == p6.HEAD_AT_START
-    assert p6.default_environment().started_at == p6.HEAD_AT_START
+
+    p6_head = _research_module("_p6_head")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q", "--template=")
+    assert p6_head.read_head(repo) is None  # a repository with no commit has no HEAD
+    (repo / "a.txt").write_text("a\n", encoding="utf-8")
+    commit_file(repo, repo / "a.txt", "a", at=datetime(2026, 9, 26, tzinfo=UTC))
+    assert p6_head.read_head(repo) == head(repo)
+    (repo / "b.txt").write_text("b\n", encoding="utf-8")
+    commit_file(repo, repo / "b.txt", "b", at=datetime(2026, 9, 27, tzinfo=UTC))
+    assert p6_head.read_head(repo) == head(repo)  # HEAD as it is when asked
+    assert p6_head.read_head(tmp_path / "no-repository") is None
+    assert p6_head.ANCHOR == RESEARCH.resolve() == p6.DRIVER_ANCHOR
+    started = p6.HEAD_AT_START
+    assert started is not None and len(started) == 40
+    assert set(started) <= set("0123456789abcdef")
+    assert p6.default_environment().started_at == started
 
 
 def test_a_commit_landing_while_the_driver_imports_is_refused_before_the_precondition(
@@ -2607,6 +2628,51 @@ def test_a_worker_that_starts_on_another_commit_fails_its_start_and_writes_no_ro
     assert "CheckoutMovedError" in err and recorded in err
     assert grid.stage_family(ledger, "discovery") == 0
     assert _no_worker_left()
+
+
+def test_a_ledger_named_with_other_letter_case_is_still_inside_the_checkout(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """On a case-insensitive filesystem (APFS by default) `CHECKOUT/research` is the checkout's
+    `research` directory, and `resolve()` does not canonicalise the case; the check compares
+    the directories themselves."""
+    checkout = tmp_path / "checkout"
+    (checkout / "research").mkdir(parents=True)
+    if not (tmp_path / "CHECKOUT").exists():
+        pytest.skip("this filesystem tells letter case apart; the path is another directory")
+    touched: list[str] = []
+    environment = p6.Environment(
+        precondition=lambda runtime_dir: touched.append("precondition"),  # type: ignore[func-returns-value]
+        sessions=lambda runtime_dir: SESSIONS,
+        sdk=lambda runtime_dir: _FakeSDK(),
+        code_commit=lambda: touched.append("commit") or COMMIT,  # type: ignore[func-returns-value]
+        repo=checkout,
+    )
+    ledger = tmp_path / "CHECKOUT" / "Research" / "ledger.jsonl"
+
+    code = p6.main(
+        ["discovery", "--runtime-dir", str(tmp_path), "--ledger", str(ledger)],
+        environment=environment,
+    )
+
+    assert code == 1
+    assert "refused: LedgerInCheckoutError: " in capsys.readouterr().err
+    assert touched == []
+    assert not ledger.exists()
+
+
+def test_a_ledger_beside_the_checkout_is_not_taken_for_one_inside_it(tmp_path: Path) -> None:
+    """The comparison is by directory, so a sibling whose name only starts like the checkout's,
+    or a checkout that does not exist yet, is not inside it."""
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (tmp_path / "checkout-ledgers").mkdir()
+
+    p6._refuse_a_ledger_in_the_checkout(tmp_path / "checkout-ledgers" / "l.jsonl", checkout)
+    p6._refuse_a_ledger_in_the_checkout(tmp_path / "l.jsonl", checkout)
+    p6._refuse_a_ledger_in_the_checkout(tmp_path / "l.jsonl", tmp_path / "missing")
+    with pytest.raises(p6.LedgerInCheckoutError):
+        p6._refuse_a_ledger_in_the_checkout(checkout / "deep" / "er" / "l.jsonl", checkout)
 
 
 @pytest.mark.parametrize("command", WORKER_COMMANDS)
