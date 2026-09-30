@@ -25,13 +25,16 @@ every core per connection, so memory and CPU grow with N. For the pooled run's d
 process's environment carries the thread pins. `holdout` takes no `--workers`: it runs one
 configuration once.
 
-**The recorded commit is the code that ran** (`V2-P6-023`). A command that records a commit
-(`LEDGER_WRITING_COMMANDS`) resolves it -- clean, or refused -- as it starts, before the
-precondition of minutes, and every row it writes names that commit. `_CheckoutGuard` then holds
-the checkout to it immediately before a pool spawns its workers and immediately before every
-append, serial or pooled: a commit that lands, or an edit to the tree, stops the stage by name
-(`CheckoutMovedError`) with the rows already appended -- measured at the recorded commit --
-kept and nothing more appended.
+**The recorded commit is the code that ran** (`V2-P6-023`). `_p6_head` reads HEAD before this
+driver's heavy imports; a command that records a commit (`LEDGER_WRITING_COMMANDS`) then resolves
+it -- clean, and still that HEAD, or refused -- before the precondition of minutes, and every row
+it writes names it. `_CheckoutGuard` holds the checkout to it immediately before a pool spawns
+its workers and immediately before every append, serial or pooled, and each worker checks it
+again once it has imported the code: a commit that lands, or an edit to the tree, stops the
+stage by name (`CheckoutMovedError`, or `WorkerPoolBrokenError` from a worker) with the rows
+already appended -- measured at the recorded commit -- kept and nothing more appended. **So keep
+the ledger outside the checkout** (a measuring command refuses one inside it,
+`LedgerInCheckoutError`) **and do not edit or commit to the checkout while a stage runs.**
 
 Before any command but the read-only `holdout-verdict` (`READ_ONLY_COMMANDS` says why) does
 anything else, it runs the section 1 precondition,
@@ -150,6 +153,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final, Protocol
 
+import _p6_head  # first: it reads HEAD before `grid` and `openalpha_cn` load (V2-P6-023)
 import grid
 import registry
 from grid import GridRun, LedgerRow
@@ -165,6 +169,10 @@ from openalpha_cn.strategy_view import ICSeries
 
 REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 DEFAULT_REGISTRATION: Final[Path] = REPO_ROOT / "docs" / "research" / "p6-registration.json"
+DRIVER_ANCHOR: Final[Path] = _p6_head.ANCHOR
+"""Where the checkout's commit is read from: this driver's directory."""
+HEAD_AT_START: Final[str | None] = _p6_head.HEAD_AT_START
+"""HEAD as this process started, read before the heavy imports (`_p6_head`)."""
 
 # --- section 1 ---------------------------------------------------------------------------------
 
@@ -329,6 +337,10 @@ class CheckoutMovedError(StageCommitError):
     """The checkout stopped being the clean commit this run recorded as it started: a commit
     landed, or the tree was edited. The rows already appended were measured at the recorded
     commit and stay; nothing more is appended."""
+
+
+class LedgerInCheckoutError(P6Error):
+    """A measuring stage was pointed at a ledger inside the repository checkout."""
 
 
 class NothingMeasuredError(P6Error):
@@ -706,7 +718,16 @@ class _CheckoutGuard:
 
     Called immediately before a pool spawns its workers (which import the code then) and before
     every ledger append, serial or pooled: `resolve` -- `Environment.code_commit`, which names a
-    dirty tree `<commit>-dirty` -- must still answer `recorded`, or `CheckoutMovedError`."""
+    dirty tree `<commit>-dirty` -- must still answer `recorded`, or `CheckoutMovedError`. Each
+    worker makes the same comparison once it has imported the code (`_start_worker`).
+
+    **What "clean" rests on.** `resolve_code_commit` appends `-dirty` only when
+    `git status --porcelain` answers with a change; a `git status` that fails (a hang past its
+    timeout, a git error) reads as clean. This guard inherits that: it catches every commit
+    that lands and every edit git reports, and not an edit git cannot report. That semantics is
+    `runtime.provenance`'s and is left as it is here; the run's own defence is procedural --
+    the ledger lives outside the checkout (`LedgerInCheckoutError`) and nobody edits the checkout
+    while a stage runs."""
 
     recorded: str
     resolve: Callable[[], str]
@@ -714,11 +735,25 @@ class _CheckoutGuard:
     def __call__(self) -> None:
         now = self.resolve()
         if now != self.recorded:
-            raise CheckoutMovedError(
-                f"this run recorded commit {self.recorded} as it started and the checkout is now "
-                f"{now}; the rows it appended were measured at {self.recorded} and stay, and "
-                "nothing more is appended. Resume from a clean checkout of the stage's commit"
-            )
+            raise CheckoutMovedError(_moved(self.recorded, now, "recorded"))
+
+
+def _moved(recorded: str, now: str, when: str) -> str:
+    return (
+        f"this run {when} commit {recorded} and the checkout is now {now}; the rows it appended "
+        f"were measured at {recorded} and stay, and nothing more is appended. Resume from a "
+        "clean checkout of the stage's commit, with no edit to it while the stage runs"
+    )
+
+
+def _refuse_a_ledger_in_the_checkout(ledger: Path, repo: Path) -> None:
+    """A ledger inside the checkout dirties it with its first row, so `_CheckoutGuard` would
+    stop the stage at its second append; refuse it before anything runs."""
+    if ledger.resolve().is_relative_to(repo.resolve()):
+        raise LedgerInCheckoutError(
+            f"the ledger {ledger} is inside the checkout {repo.resolve()}; its rows would dirty "
+            "the tree the stage's commit is held to. Keep the ledger outside the checkout"
+        )
 
 
 def stage_commit(ledger: Path, stage: str) -> str | None:
@@ -1508,11 +1543,14 @@ class WorkerPool:
     """`--workers N` for N >= 2: the stage's configurations are measured in `workers` spawned
     processes, each of which builds its own SDK as `sdk(runtime_dir)` -- a module-level factory,
     since the SDK's bound methods do not pickle -- and its own measure from the stage's
-    `StageMeasureRecipe`."""
+    `StageMeasureRecipe`. With `anchor`, each worker compares the checkout's commit there with
+    `recorded_commit` once it has imported the code (`_start_worker`)."""
 
     workers: int
     sdk: Callable[[Path], ResearchSDK]
     runtime_dir: Path
+    recorded_commit: str | None = None
+    anchor: Path | None = None
 
 
 _WORKER_MEASURE: grid.Measure | None = None
@@ -1520,15 +1558,25 @@ _WORKER_MEASURE: grid.Measure | None = None
 
 
 def _start_worker(
-    sdk: Callable[[Path], ResearchSDK], runtime_dir: Path, recipe: StageMeasureRecipe
+    sdk: Callable[[Path], ResearchSDK],
+    runtime_dir: Path,
+    recipe: StageMeasureRecipe,
+    recorded_commit: str | None = None,
+    anchor: Path | None = None,
 ) -> None:
-    """A worker process's start: ignore SIGINT, refuse to measure without the thread pins, then
-    build the SDK and the stage's measure once for every configuration this process measures.
+    """A worker process's start: ignore SIGINT, refuse to measure without the thread pins, build
+    the SDK and the stage's measure once for every configuration this process measures, then --
+    with `anchor` -- refuse to measure unless the checkout is still `recorded_commit`.
 
     A Ctrl-C at the terminal reaches every process of the group. `concurrent.futures`' worker
     loop catches it as the task's exception and moves on to the calls it has already fetched,
     so a worker that let it through would neither stop nor stop the run; the parent, which does
-    receive it, terminates its workers (`_worker_processes`)."""
+    receive it, terminates its workers (`_worker_processes`).
+
+    **The commit check comes last**, after this process has imported the code and built its SDK:
+    the parent checked the checkout just before spawning, and a commit that landed and was
+    undone in between (A, B, A) would otherwise go unseen by every check the parent makes. A
+    failure stops the pool, which the command reports as `WorkerPoolBrokenError`."""
     global _WORKER_MEASURE
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     unpinned = sorted(
@@ -1537,7 +1585,12 @@ def _start_worker(
     if unpinned:
         raise WorkerFactoryError(f"a worker started without the thread pins {unpinned}")
     world = sdk(runtime_dir)
-    _WORKER_MEASURE = recipe.build(world.run_strategy_backtest, world.factor_ic_series)
+    measure = recipe.build(world.run_strategy_backtest, world.factor_ic_series)
+    if anchor is not None and recorded_commit is not None:
+        now = resolve_code_commit(anchor=anchor)
+        if now != recorded_commit:
+            raise CheckoutMovedError(_moved(recorded_commit, now, "recorded"))
+    _WORKER_MEASURE = measure
 
 
 def _measure_in_worker(config: Mapping[str, object]) -> Mapping[str, object]:
@@ -1576,7 +1629,7 @@ def _worker_processes(
             max_workers=pool.workers,
             mp_context=multiprocessing.get_context("spawn"),
             initializer=_start_worker,
-            initargs=(pool.sdk, pool.runtime_dir, recipe),
+            initargs=(pool.sdk, pool.runtime_dir, recipe, pool.recorded_commit, pool.anchor),
         )
         try:
             yield executor
@@ -1611,14 +1664,16 @@ def _pool_workers(executor: ProcessPoolExecutor) -> list[multiprocessing.process
 
 
 def _stop_workers(executor: ProcessPoolExecutor) -> None:
-    """Terminate the pool's workers now, then join them, killing one that outlives the join."""
+    """Terminate the pool's workers now -- the pool's own `terminate_workers` where it has one
+    (Python 3.14), each worker's `terminate` otherwise -- then join every worker captured before
+    it, killing one that outlives the join. One path: `terminate_workers` does not join."""
+    workers = _pool_workers(executor)
     terminate = getattr(executor, "terminate_workers", None)
     if callable(terminate):
         terminate()
-        return
-    workers = _pool_workers(executor)
-    for worker in workers:
-        worker.terminate()
+    else:
+        for worker in workers:
+            worker.terminate()
     for worker in workers:
         worker.join(WORKER_STOP_SECONDS)
         if worker.is_alive():
@@ -1690,7 +1745,7 @@ def _measure_stage(
     echo: Echo,
     clock: Clock,
     pool: WorkerPool | None,
-    verify: Callable[[], None] | None = None,
+    verify: Callable[[], None],
 ) -> GridRun:
     """The stage in this process (`_run`, with the measure over `backtest`), or with `pool` in
     its worker processes, which build the same measure over their own SDK and never call
@@ -1732,7 +1787,7 @@ def run_discovery(
     echo: Echo,
     clock: Clock = None,
     pool: WorkerPool | None = None,
-    verify: Callable[[], None] | None = None,
+    verify: Callable[[], None],
 ) -> GridRun:
     """Section 4's stage: every discovery configuration the ledger does not hold yet."""
     head = _clean_commit(code_commit)
@@ -1761,7 +1816,7 @@ def run_composition_sources(
     echo: Echo,
     clock: Clock = None,
     pool: WorkerPool | None = None,
-    verify: Callable[[], None] | None = None,
+    verify: Callable[[], None],
 ) -> GridRun:
     """Section 5 step 2a: the 19 sources over the survivors' components."""
     head = _require_stage_commit(ledger, COMPOSITION, code_commit)
@@ -1791,7 +1846,7 @@ def run_composition_strategies(
     echo: Echo,
     clock: Clock = None,
     pool: WorkerPool | None = None,
-    verify: Callable[[], None] | None = None,
+    verify: Callable[[], None],
 ) -> GridRun:
     """Section 5 step 2b: the 36 strategies of the best source; `run_grid` skips the one that
     is step 2a's own configuration."""
@@ -1823,7 +1878,7 @@ def run_validation(
     echo: Echo,
     clock: Clock = None,
     pool: WorkerPool | None = None,
-    verify: Callable[[], None] | None = None,
+    verify: Callable[[], None],
 ) -> GridRun:
     """Section 6's stage: each finalist once over the validation window, at the commit the
     composition stage measured it at (`StageCommitError` otherwise)."""
@@ -1881,7 +1936,13 @@ class Environment:
 
     `sdk` is also what each worker process builds its own SDK with under `--workers N` (N >= 2),
     so there it must pickle: a module-level function such as `open_sdk`, not a lambda
-    (`WorkerFactoryError`)."""
+    (`WorkerFactoryError`).
+
+    `started_at` is HEAD as the process started (`HEAD_AT_START`): the commit `code_commit`
+    must still answer when `main` resolves it, or a commit landed while the driver imported.
+    `anchor` is where a worker process reads the checkout's commit
+    (`resolve_code_commit(anchor=...)`) to compare it with the recorded one. Either `None`
+    skips its check -- a test environment's fake commit is no checkout's."""
 
     precondition: Callable[[Path], None]
     sessions: Callable[[Path], Sequence[date]]
@@ -1889,6 +1950,8 @@ class Environment:
     code_commit: Callable[[], str]
     repo: Path
     clock: Clock = None
+    started_at: str | None = None
+    anchor: Path | None = None
 
 
 def open_sdk(runtime_dir: Path) -> OpenAlphaSDK:
@@ -1896,13 +1959,19 @@ def open_sdk(runtime_dir: Path) -> OpenAlphaSDK:
     return OpenAlphaSDK(runtime_dir=runtime_dir)
 
 
+UNREAD_HEAD: Final[str] = "HEAD could not be read as the driver started"
+"""`started_at` when git had no answer at start: no commit equals it, so the run is refused."""
+
+
 def default_environment() -> Environment:
     return Environment(
         precondition=require_clean_return_paths,
         sessions=stored_sessions,
         sdk=open_sdk,
-        code_commit=lambda: resolve_code_commit(anchor=Path(__file__).resolve().parent),
+        code_commit=lambda: resolve_code_commit(anchor=DRIVER_ANCHOR),
         repo=REPO_ROOT,
+        started_at=HEAD_AT_START if HEAD_AT_START is not None else UNREAD_HEAD,
+        anchor=DRIVER_ANCHOR,
     )
 
 
@@ -1928,7 +1997,9 @@ WORKERS_HELP: Final[str] = (
     "with N. For the run's duration this process's environment carries the BLAS/OpenMP thread "
     "pins the workers start with. Workers ignore Ctrl-C; on a failure, a refusal or Ctrl-C "
     "this process terminates them at once, so the configurations they were measuring are "
-    "dropped and measured again by a rerun, and the ledger is a correct prefix of the stage."
+    "dropped and measured again by a rerun, and the ledger is a correct prefix of the stage. "
+    "Keep the ledger outside the checkout and do not edit or commit to the checkout while the "
+    "stage runs: every append checks the checkout is still the commit the run started at."
 )
 
 
@@ -1953,9 +2024,12 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _worker_pool(arguments: argparse.Namespace, environment: Environment) -> WorkerPool | None:
+def _worker_pool(
+    arguments: argparse.Namespace, environment: Environment, commit: str | None
+) -> WorkerPool | None:
     """`--workers N` as a `WorkerPool`, `None` for one worker (the serial path); refuses a factory
-    a worker process could not import before anything is measured."""
+    a worker process could not import before anything is measured. Each worker holds the
+    checkout to `commit` at `environment.anchor`."""
     workers = getattr(arguments, "workers", 1)
     if workers == 1:
         return None
@@ -1967,7 +2041,13 @@ def _worker_pool(arguments: argparse.Namespace, environment: Environment) -> Wor
             f"SDK factory {environment.sdk!r} cannot be sent to one ({error}); give a "
             "module-level function such as `open_sdk`"
         ) from error
-    return WorkerPool(workers=workers, sdk=environment.sdk, runtime_dir=arguments.runtime_dir)
+    return WorkerPool(
+        workers=workers,
+        sdk=environment.sdk,
+        runtime_dir=arguments.runtime_dir,
+        recorded_commit=commit,
+        anchor=environment.anchor,
+    )
 
 
 def _report_verdict(verdict: Mapping[str, Any], artifacts: Path, echo: Echo) -> None:
@@ -1985,7 +2065,7 @@ def _dispatch(
     """Run `arguments.command`. `commit` is the clean commit `main` resolved as the command
     started, which the commands that record one (`LEDGER_WRITING_COMMANDS`) require."""
     command, runtime_dir, ledger = arguments.command, arguments.runtime_dir, arguments.ledger
-    pool = _worker_pool(arguments, environment)
+    pool = _worker_pool(arguments, environment, commit)
     sessions = tuple(environment.sessions(runtime_dir))
     artifacts = ledger.parent
     clock = environment.clock
@@ -2062,14 +2142,17 @@ def main(argv: Sequence[str] | None = None, *, environment: Environment | None =
     arguments = _parser().parse_args(argv)
     world = default_environment() if environment is None else environment
     try:
+        if arguments.command in WORKER_COMMANDS:
+            _refuse_a_ledger_in_the_checkout(arguments.ledger, world.repo)
         # V2-P6-023: the commit a command records is the one checked out as it starts -- before
         # a precondition of minutes, and before any worker imports the code -- and it must be
-        # clean. `_CheckoutGuard` holds the checkout to it for the rest of the run.
-        commit = (
-            _clean_commit(world.code_commit())
-            if arguments.command in LEDGER_WRITING_COMMANDS
-            else None
-        )
+        # clean and still the HEAD this process started at, read before its imports.
+        # `_CheckoutGuard` holds the checkout to it for the rest of the run.
+        commit = None
+        if arguments.command in LEDGER_WRITING_COMMANDS:
+            commit = _clean_commit(world.code_commit())
+            if world.started_at is not None and commit != world.started_at:
+                raise CheckoutMovedError(_moved(world.started_at, commit, "started at"))
         if arguments.command not in READ_ONLY_COMMANDS:
             world.precondition(arguments.runtime_dir)
         if arguments.command in LEDGER_WRITING_COMMANDS:

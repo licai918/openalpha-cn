@@ -24,9 +24,11 @@ resolved by the real `strategy_view` resolvers, so a field name the SDK would re
 from __future__ import annotations
 
 import _thread
+import ast
 import dataclasses
 import hashlib
 import importlib
+import inspect
 import json
 import multiprocessing
 import os
@@ -35,7 +37,7 @@ import statistics
 import subprocess
 import sys
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
@@ -237,6 +239,10 @@ def _discovery(factor: str, tier: str, horizon: int) -> Mapping[str, object]:
 
 def _id(config: Mapping[str, object]) -> str:
     return str(grid.config_id(config))
+
+
+def _no_guard() -> None:
+    """The checkout guard of a test that is not about the checkout: it never refuses."""
 
 
 # --- section 4: the discovery grid ---------------------------------------------------------------
@@ -730,6 +736,7 @@ def test_step_2b_takes_the_best_source_and_does_not_run_the_step_2a_configuratio
         COMMIT,
         echo=lambda line: None,
         clock=lambda: AT,
+        verify=_no_guard,
     )
 
     configs = p6.composition_strategy_configs(best)
@@ -764,11 +771,21 @@ def test_step_2b_refuses_to_resume_the_stage_at_another_commit(tmp_path: Path) -
 
     with pytest.raises(p6.StageCommitError, match=COMMIT):
         p6.run_composition_strategies(
-            ledger, SESSIONS, _FakeSDK().run_strategy_backtest, OTHER_COMMIT, echo=print
+            ledger,
+            SESSIONS,
+            _FakeSDK().run_strategy_backtest,
+            OTHER_COMMIT,
+            echo=print,
+            verify=_no_guard,
         )
     with pytest.raises(p6.StageCommitError, match="dirty"):
         p6.run_composition_strategies(
-            ledger, SESSIONS, _FakeSDK().run_strategy_backtest, f"{COMMIT}-dirty", echo=print
+            ledger,
+            SESSIONS,
+            _FakeSDK().run_strategy_backtest,
+            f"{COMMIT}-dirty",
+            echo=print,
+            verify=_no_guard,
         )
 
 
@@ -1275,7 +1292,7 @@ def test_every_command_runs_the_precondition_first_and_stops_on_it(
         sessions=lambda runtime_dir: touched.append("sessions") or SESSIONS,  # type: ignore[func-returns-value]
         sdk=lambda runtime_dir: touched.append("sdk") or _FakeSDK(),  # type: ignore[func-returns-value]
         code_commit=lambda: touched.append("commit") or COMMIT,  # type: ignore[func-returns-value]
-        repo=tmp_path,
+        repo=tmp_path / "checkout",
     )
     ledger = tmp_path / "ledger.jsonl"
 
@@ -1414,7 +1431,12 @@ def test_validation_refuses_to_run_at_a_commit_other_than_the_compositions(tmp_p
 
     with pytest.raises(p6.StageCommitError, match=COMMIT):
         p6.run_validation(
-            ledger, SESSIONS, _FakeSDK().run_strategy_backtest, OTHER_COMMIT, echo=print
+            ledger,
+            SESSIONS,
+            _FakeSDK().run_strategy_backtest,
+            OTHER_COMMIT,
+            echo=print,
+            verify=_no_guard,
         )
     assert grid.stage_family(ledger, "validation") == 0
 
@@ -1815,7 +1837,7 @@ def test_a_ledger_writing_command_refuses_code_imported_from_another_checkout(
         sessions=lambda runtime_dir: touched.append("sessions") or SESSIONS,  # type: ignore[func-returns-value]
         sdk=lambda runtime_dir: touched.append("sdk") or _FakeSDK(),  # type: ignore[func-returns-value]
         code_commit=lambda: touched.append("commit") or COMMIT,  # type: ignore[func-returns-value]
-        repo=tmp_path,
+        repo=tmp_path / "checkout",
     )
     ledger = tmp_path / "ledger.jsonl"
 
@@ -1833,14 +1855,16 @@ def test_research_scripts_imported_from_another_checkout_are_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(
-        registry, "_imported_package", lambda: tmp_path / "src" / "openalpha_cn" / "__init__.py"
+        registry,
+        "_imported_package",
+        lambda: tmp_path / "checkout" / "src" / "openalpha_cn" / "__init__.py",
     )
     environment = p6.Environment(
         precondition=lambda runtime_dir: None,
         sessions=lambda runtime_dir: SESSIONS,
         sdk=lambda runtime_dir: _FakeSDK(),
         code_commit=lambda: COMMIT,
-        repo=tmp_path,
+        repo=tmp_path / "checkout",
     )
     ledger = tmp_path / "ledger.jsonl"
 
@@ -2015,9 +2039,11 @@ def _pooled_configs(*holdings: int) -> tuple[dict[str, Any], ...]:
 
 
 def _pooled_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, at: datetime) -> p6.Environment:
-    research = tmp_path / "scripts" / "research"
+    research = tmp_path / "checkout" / "scripts" / "research"
     monkeypatch.setattr(
-        registry, "_imported_package", lambda: tmp_path / "src" / "openalpha_cn" / "__init__.py"
+        registry,
+        "_imported_package",
+        lambda: tmp_path / "checkout" / "src" / "openalpha_cn" / "__init__.py",
     )
     monkeypatch.setattr(
         registry, "_imported_scripts", lambda: (research / "grid.py", research / "registry.py")
@@ -2027,7 +2053,7 @@ def _pooled_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, at: datetime)
         sessions=lambda runtime_dir: SESSIONS,
         sdk=_pooled_sdk,
         code_commit=lambda: COMMIT,
-        repo=tmp_path,
+        repo=tmp_path / "checkout",
         clock=lambda: at,
     )
 
@@ -2087,6 +2113,7 @@ def test_a_stage_measured_by_worker_processes_writes_the_serial_runs_ledger(
     window-refused row included -- though the first configuration finished after a later one;
     only `recorded_at` differs. Each worker ran with the thread counts pinned; this process's
     environment is left as it was."""
+    ignored_at_start = signal.getsignal(signal.SIGINT) == signal.SIG_IGN
     configs = list(_pooled_configs(SLOW, 50, REFUSED, LATE, 50, 50))
     configs[4] = {**configs[4], "end": date(2021, 12, 31)}  # its IC label leaves the stage
     monkeypatch.setattr(p6, "discovery_configs", lambda sessions: tuple(configs))
@@ -2122,7 +2149,12 @@ def test_a_stage_measured_by_worker_processes_writes_the_serial_runs_ledger(
     assert os.getpid() not in {entry["pid"] for entry in measured}
     assert all(entry["pins"] == thread_count_pins() for entry in measured)
     assert all(entry["sigint_ignored"] for entry in measured)  # a Ctrl-C is the parent's
-    assert not any(entry["sigint_ignored"] for entry in _calls(tmp_path / "serial-runtime"))
+    # The serial run is this process: its disposition is whatever this test started with (a
+    # pytest launched with SIGINT ignored inherits that), untouched by the pooled run.
+    assert {entry["sigint_ignored"] for entry in _calls(tmp_path / "serial-runtime")} == {
+        ignored_at_start
+    }
+    assert (signal.getsignal(signal.SIGINT) == signal.SIG_IGN) == ignored_at_start
     assert not any(name in os.environ for name in thread_count_pins())
     assert len(alive) == 1 and alive[0] >= 2  # the workers were there while it measured ...
     assert _no_worker_left()  # ... and none outlived the pool
@@ -2210,7 +2242,7 @@ def test_a_worker_that_cannot_start_is_a_refusal_by_name_not_a_traceback(
         sessions=lambda runtime_dir: SESSIONS,
         sdk=_unbuildable_sdk,
         code_commit=lambda: COMMIT,
-        repo=tmp_path,
+        repo=tmp_path / "checkout",
     )
     _pooled_world(tmp_path, monkeypatch, AT)  # the foreign-package checks admit tmp_path
     ledger = tmp_path / "ledger.jsonl"
@@ -2389,6 +2421,19 @@ def test_a_commit_landing_mid_stage_keeps_the_rows_before_it_and_appends_no_more
     assert _no_worker_left()
 
 
+@pytest.fixture
+def sigint_raises() -> Iterator[None]:
+    """Python's own SIGINT handler for the test's duration, restored after. A pytest launched
+    with SIGINT ignored (`trap '' INT`) inherits `SIG_IGN`, under which `interrupt_main` does
+    nothing and an interrupt test would prove nothing."""
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+@pytest.mark.usefixtures("sigint_raises")
 def test_an_interrupted_pooled_run_stops_its_workers_at_once_and_keeps_a_correct_prefix(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2434,3 +2479,168 @@ def test_the_pool_records_its_workers_where_a_prompt_stop_reads_them() -> None:
         assert all(worker.is_alive() for worker in workers)
         assert set(workers) <= set(multiprocessing.active_children())
     assert _no_worker_left()
+
+
+# --- V2-P6-023 review minors: before stage 2 freezes the code ------------------------------------
+
+
+def test_stopping_workers_always_joins_them_even_where_the_pool_terminates_them_itself(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Python 3.14's `terminate_workers` terminates and does not join; `_stop_workers` then
+    joins every worker it captured, and kills one still alive past the join. Here the pool's own
+    terminate does nothing at all, so only the join-and-kill stops the busy worker."""
+    monkeypatch.setattr(p6, "WORKER_STOP_SECONDS", 0.5)
+    asked: list[str] = []
+    context = multiprocessing.get_context("spawn")
+    executor = ProcessPoolExecutor(max_workers=1, mp_context=context)
+    try:
+        executor.submit(sleep, 60)
+        workers = p6._pool_workers(executor)
+        assert workers
+        executor.terminate_workers = lambda: asked.append("terminate_workers")  # type: ignore[attr-defined]
+
+        p6._stop_workers(executor)
+
+        assert asked == ["terminate_workers"]
+        assert not any(worker.is_alive() for worker in workers)
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+    assert _no_worker_left()
+
+
+def test_the_driver_reads_head_before_any_heavy_import() -> None:
+    """`_p6_head` is the first non-standard-library import of `p6.py` and imports only the
+    standard library, so the commit a run starts at is read before `openalpha_cn` (about a third
+    of a second) loads -- and it is the checkout's HEAD."""
+    tree = ast.parse((RESEARCH / "p6.py").read_text(encoding="utf-8"))
+    imported = [
+        alias.name.split(".")[0] if isinstance(node, ast.Import) else str(node.module).split(".")[0]
+        for node in tree.body
+        if isinstance(node, ast.Import | ast.ImportFrom)
+        for alias in (node.names if isinstance(node, ast.Import) else node.names[:1])
+    ]
+    local = [name for name in imported if name not in sys.stdlib_module_names]
+    assert local[0] == "_p6_head"
+    assert local.index("_p6_head") < local.index("grid") < local.index("openalpha_cn")
+    head_tree = ast.parse((RESEARCH / "_p6_head.py").read_text(encoding="utf-8"))
+    head_imports = [
+        alias.name.split(".")[0]
+        for node in ast.walk(head_tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    ] + [
+        str(node.module).split(".")[0]
+        for node in ast.walk(head_tree)
+        if isinstance(node, ast.ImportFrom) and node.module != "__future__"
+    ]
+    assert all(name in sys.stdlib_module_names for name in head_imports)
+    assert git(ROOT, "rev-parse", "HEAD").strip() == p6.HEAD_AT_START
+    assert p6.default_environment().started_at == p6.HEAD_AT_START
+
+
+def test_a_commit_landing_while_the_driver_imports_is_refused_before_the_precondition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    order: list[str] = []
+    world = dataclasses.replace(
+        _pooled_world(tmp_path, monkeypatch, AT),
+        precondition=lambda runtime_dir: order.append("precondition"),
+        code_commit=lambda: OTHER_COMMIT,
+        started_at=COMMIT,
+    )
+
+    assert _discover(world, tmp_path / "runtime", tmp_path / "ledger.jsonl", 1) == 1
+
+    err = capsys.readouterr().err
+    assert "refused: CheckoutMovedError: " in err
+    assert COMMIT in err and OTHER_COMMIT in err
+    assert order == []
+
+
+def _committing_sdk(runtime_dir: Path) -> _PooledSDK:
+    """A factory that, in a worker, moves the checkout at `<runtime>/../repo` on before the
+    worker's own commit check: the first worker commits, every other waits until it has."""
+    if multiprocessing.parent_process() is not None:
+        repo = runtime_dir.parent / "repo"
+        try:
+            os.close(os.open(runtime_dir / "committing", os.O_CREAT | os.O_EXCL))
+        except FileExistsError:
+            deadline = monotonic() + 30
+            while not (runtime_dir / "moved").exists() and monotonic() < deadline:
+                sleep(0.05)
+        else:
+            (repo / "later.txt").write_text("a commit that landed mid-run\n", encoding="utf-8")
+            commit_file(repo, repo / "later.txt", "later", at=datetime(2026, 9, 28, tzinfo=UTC))
+            (runtime_dir / "moved").touch()
+    return _PooledSDK(runtime_dir)
+
+
+def test_a_worker_that_starts_on_another_commit_fails_its_start_and_writes_no_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """HEAD moved on after this process last looked (and may move back before it looks again):
+    each worker compares the checkout's commit, read after its own imports and SDK build, with
+    the one the run recorded, and does not start on another."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q", "--template=")
+    (repo / "README.md").write_text("research\n", encoding="utf-8")
+    commit_file(repo, repo / "README.md", "initial", at=datetime(2026, 9, 26, tzinfo=UTC))
+    recorded = head(repo)
+    configs = _pooled_configs(50, 50, 50)
+    monkeypatch.setattr(p6, "discovery_configs", lambda sessions: configs)
+    world = dataclasses.replace(
+        _pooled_world(tmp_path, monkeypatch, AT),
+        sdk=_committing_sdk,
+        code_commit=lambda: recorded,  # this process never sees the move
+        anchor=repo,
+    )
+    ledger = tmp_path / "ledger.jsonl"
+
+    assert _discover(world, tmp_path / "runtime", ledger, 2) == 1
+
+    err = capfd.readouterr().err
+    assert "refused: WorkerPoolBrokenError: " in err
+    assert "CheckoutMovedError" in err and recorded in err
+    assert grid.stage_family(ledger, "discovery") == 0
+    assert _no_worker_left()
+
+
+@pytest.mark.parametrize("command", WORKER_COMMANDS)
+def test_a_ledger_inside_the_checkout_is_refused_before_anything_runs(
+    tmp_path: Path, command: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A ledger inside the checkout dirties the tree with its first row, which would stop the
+    stage at its second append; it is refused before the commit, the precondition or anything."""
+    touched: list[str] = []
+    checkout = tmp_path / "checkout"
+    environment = p6.Environment(
+        precondition=lambda runtime_dir: touched.append("precondition"),  # type: ignore[func-returns-value]
+        sessions=lambda runtime_dir: touched.append("sessions") or SESSIONS,  # type: ignore[func-returns-value]
+        sdk=lambda runtime_dir: touched.append("sdk") or _FakeSDK(),  # type: ignore[func-returns-value]
+        code_commit=lambda: touched.append("commit") or COMMIT,  # type: ignore[func-returns-value]
+        repo=checkout,
+    )
+    ledger = checkout / "research" / "ledger.jsonl"
+
+    code = p6.main(
+        [command, "--runtime-dir", str(tmp_path), "--ledger", str(ledger)], environment=environment
+    )
+
+    assert code == 1
+    assert "refused: LedgerInCheckoutError: " in capsys.readouterr().err
+    assert touched == []
+    assert not ledger.exists()
+
+
+@pytest.mark.parametrize(
+    "stage",
+    ["run_discovery", "run_composition_sources", "run_composition_strategies", "run_validation"],
+)
+def test_a_stage_function_cannot_be_called_without_naming_its_checkout_guard(stage: str) -> None:
+    parameter = inspect.signature(getattr(p6, stage)).parameters["verify"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is inspect.Parameter.empty

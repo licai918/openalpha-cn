@@ -15,10 +15,11 @@ import importlib
 import json
 import math
 import multiprocessing
+import signal
 import statistics
 import sys
 import threading
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -1264,6 +1265,19 @@ def test_a_pooled_runner_asks_before_every_append_and_appends_nothing_once_refus
     assert [row["config"]["i"] for row in _rows(ledger)] == [0, 1]
 
 
+@pytest.fixture
+def sigint_raises() -> Iterator[None]:
+    """Python's own SIGINT handler for the test's duration, restored after. A pytest launched
+    with SIGINT ignored (`trap '' INT`) inherits `SIG_IGN`, under which `interrupt_main` does
+    nothing and an interrupt test would prove nothing."""
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+@pytest.mark.usefixtures("sigint_raises")
 def test_an_interrupt_reaches_a_pooled_run_while_it_waits_for_a_measurement(
     tmp_path: Path,
 ) -> None:
