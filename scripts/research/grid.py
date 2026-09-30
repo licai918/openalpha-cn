@@ -961,6 +961,12 @@ def _grid_stage(stage: str) -> str:
     return stage
 
 
+def _holds(rows: Sequence[LedgerRow], stage: str, identity: str) -> bool:
+    return any(
+        row.stage == stage and row.kind == MEASUREMENT and row.config_id == identity for row in rows
+    )
+
+
 def _refusal_text(error: Exception) -> str:
     return f"{type(error).__name__}: {error}"
 
@@ -1024,7 +1030,9 @@ def run_grid_in_pool(
     for a process pool (a module-level function does). **Only this process writes the ledger,
     through `_append`, in configuration order**: a result that finishes early is held until every
     earlier configuration's row has been appended, so the rows are `run_grid`'s rows, in its
-    order, value for value; only `recorded_at` differs.
+    order, value for value; only `recorded_at` differs. **The ledger is read again before every
+    append**, as `run_grid` reads it before every configuration: a configuration another writer
+    landed while this run measured it is skipped, not written a second time into its family.
 
     It stops where `run_grid` stops. An error outside `refusals` -- raised by a measurement, or by
     a configuration whose window cannot be placed -- is raised once the rows of every earlier
@@ -1072,6 +1080,14 @@ def run_grid_in_pool(
                     landed(index, step.config, False)
                 continue
             answer = step.outcome.result()
+            # The ledger again, as `run_grid` reads it before every configuration: a run lasts
+            # hours, and a row another writer landed meanwhile is this configuration's row.
+            existing = list(read_ledger(ledger))
+            if _holds(existing, stage, config_id(step.config)):
+                skipped += 1
+                if landed is not None:
+                    landed(index, step.config, False)
+                continue
             result = answer if isinstance(answer, dict) else _refused_result(answer, result_extra)
             _append(ledger, existing, stage, step.config, result, recorded_at=now())
             ran += 1

@@ -1918,6 +1918,18 @@ REFUSED: Final[int] = 48
 """A holding count the pooled fake's book refuses: a refused row the measure records."""
 CRASH: Final[int] = 47
 """A holding count the pooled fake crashes on: an error that is not a refusal."""
+KILLED: Final[int] = 45
+"""A holding count on which a worker process dies outright, as an out-of-memory kill would."""
+LATE_WAIT_SECONDS: Final[float] = 30.0
+
+
+def _read_calls(log: Path) -> list[dict[str, Any]]:
+    """The complete lines of a call log other processes may be appending to right now: a last
+    line without its newline is a write still in progress, not a torn record."""
+    if not log.exists():
+        return []
+    text = log.read_text(encoding="utf-8")
+    return [json.loads(line) for line in text.split("\n")[:-1] if line]
 
 
 class _PooledSDK(_FakeSDK):
@@ -1929,20 +1941,24 @@ class _PooledSDK(_FakeSDK):
         super().__init__()
         self.log = runtime_dir / "calls.jsonl"
 
-    def _finished(self) -> list[dict[str, Any]]:
-        if not self.log.exists():
-            return []
-        return [json.loads(line) for line in self.log.read_text(encoding="utf-8").splitlines()]
+    def _wait_for_a_late_configuration(self) -> None:
+        deadline = monotonic() + LATE_WAIT_SECONDS
+        while all(entry["holding_count"] != LATE for entry in _read_calls(self.log)):
+            if monotonic() > deadline:
+                raise RuntimeError(
+                    f"the SLOW configuration waited {LATE_WAIT_SECONDS:.0f} s for a LATE one to "
+                    "finish in another worker, and none did: the pool is not measuring in parallel"
+                )
+            sleep(0.05)
 
     def run_strategy_backtest(self, **config: Any) -> _Backtest:
         holding = config["holding_count"]
+        in_worker = multiprocessing.parent_process() is not None
+        if holding == KILLED and in_worker:
+            os._exit(1)
         try:
-            if holding == SLOW and multiprocessing.parent_process() is not None:
-                deadline = monotonic() + 30
-                while monotonic() < deadline and all(
-                    entry["holding_count"] != LATE for entry in self._finished()
-                ):
-                    sleep(0.05)
+            if holding == SLOW and in_worker:
+                self._wait_for_a_late_configuration()
             if holding == CRASH:
                 raise RuntimeError("a bug in the worker, not a refusal")
             if holding == REFUSED:
@@ -1961,6 +1977,13 @@ class _PooledSDK(_FakeSDK):
 
 def _pooled_sdk(runtime_dir: Path) -> _PooledSDK:
     """The picklable, module-level factory a worker process builds its SDK with."""
+    return _PooledSDK(runtime_dir)
+
+
+def _unbuildable_sdk(runtime_dir: Path) -> _PooledSDK:
+    """A factory that builds in this process and fails in every worker process."""
+    if multiprocessing.parent_process() is not None:
+        raise RuntimeError("this worker cannot open the store")
     return _PooledSDK(runtime_dir)
 
 
@@ -2002,8 +2025,7 @@ def _discover(environment: p6.Environment, runtime: Path, ledger: Path, workers:
 
 
 def _calls(runtime: Path) -> list[dict[str, Any]]:
-    log = runtime / "calls.jsonl"
-    return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    return _read_calls(runtime / "calls.jsonl")
 
 
 def _rows_without_time(ledger: Path) -> list[dict[str, Any]]:
@@ -2134,6 +2156,57 @@ def test_workers_need_a_factory_a_worker_process_can_import(
 
     assert "WorkerFactoryError" in capsys.readouterr().err
     assert not ledger.exists()
+
+
+def test_a_worker_that_cannot_start_is_a_refusal_by_name_not_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    configs = _pooled_configs(50, 50)
+    monkeypatch.setattr(p6, "discovery_configs", lambda sessions: configs)
+    world = p6.Environment(
+        precondition=lambda runtime_dir: None,
+        sessions=lambda runtime_dir: SESSIONS,
+        sdk=_unbuildable_sdk,
+        code_commit=lambda: COMMIT,
+        repo=tmp_path,
+    )
+    _pooled_world(tmp_path, monkeypatch, AT)  # the foreign-package checks admit tmp_path
+    ledger = tmp_path / "ledger.jsonl"
+
+    assert _discover(world, tmp_path / "runtime", ledger, 2) == 1
+
+    err = capsys.readouterr().err
+    assert "refused: WorkerPoolBrokenError: " in err
+    assert "rerun" in err
+    assert grid.stage_family(ledger, "discovery") == 0
+    assert not multiprocessing.active_children()
+
+
+def test_a_worker_that_dies_mid_run_stops_the_stage_with_a_correct_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A worker killed outright (an out-of-memory kill, say) breaks the pool: the run stops by
+    name with exit 1, and the ledger holds a prefix of the configurations, each row complete."""
+    configs = _pooled_configs(50, 50, KILLED, 50, 50)
+    monkeypatch.setattr(p6, "discovery_configs", lambda sessions: configs)
+    ledger, runtime = tmp_path / "ledger.jsonl", tmp_path / "runtime"
+
+    assert _discover(_pooled_world(tmp_path, monkeypatch, AT), runtime, ledger, 2) == 1
+
+    assert "refused: WorkerPoolBrokenError: " in capsys.readouterr().err
+    written = [row.config_id for row in grid.read_ledger(ledger)]
+    assert written == [_id(config) for config in configs[: len(written)]]
+    assert len(written) <= 2
+    assert _no_worker_left({entry["pid"] for entry in _calls(runtime)})
+
+
+def test_the_worker_count_is_capped_at_the_machines_cores() -> None:
+    cores = os.cpu_count() or 1
+    arguments = ["discovery", "--runtime-dir", "runtime", "--ledger", "ledger.jsonl"]
+    assert p6._parser().parse_args([*arguments, "--workers", str(cores)]).workers == cores
+    with pytest.raises(SystemExit) as refused:
+        p6._parser().parse_args([*arguments, "--workers", str(cores + 1)])
+    assert refused.value.code == 2
 
 
 @pytest.mark.parametrize("command", WORKER_COMMANDS)

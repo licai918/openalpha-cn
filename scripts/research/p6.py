@@ -13,10 +13,15 @@ The four commands that measure a grid -- `discovery`, `composition-sources`,
 its own SDK and the BLAS/OpenMP thread counts pinned (`_worker_processes`), and **the ledger is the
 one `--workers 1` writes**: this process alone appends every row, in configuration order, through
 `grid`'s own writer (`grid.run_grid_in_pool`), so only `recorded_at` differs. A configuration the
-ledger holds is skipped and never submitted; an interrupted run keeps every row it appended and
-measures the rest again; an error that is not a refusal stops the run after the rows before it,
-as the serial run stops. Each worker holds its own panel caches, so memory grows with N.
-`holdout` takes no `--workers`: it runs one configuration once.
+ledger holds is skipped and never submitted, and the ledger is read again before every append, so
+a row another writer landed meanwhile is not written twice. An interrupted run keeps every row it
+appended and measures the rest again; an error that is not a refusal stops the run after the rows
+before it, as the serial run stops, but only once the configurations already being measured
+finish; a worker that cannot start or dies is `WorkerPoolBrokenError`, the ledger a correct
+prefix. N is at most the machine's core count: each worker holds its own SDK and panel caches and
+DuckDB uses every core per connection, so memory and CPU grow with N. For the pooled run's
+duration this process's environment carries the thread pins. `holdout` takes no `--workers`: it
+runs one configuration once.
 
 Before any command but the read-only `holdout-verdict` (`READ_ONLY_COMMANDS` says why) does
 anything else, it runs the section 1 precondition,
@@ -126,6 +131,7 @@ import sys
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -328,6 +334,12 @@ class HoldoutClaimMissingError(HoldoutEvaluationError):
 class WorkerFactoryError(P6Error):
     """`--workers` was asked for and a worker process cannot build its SDK: the environment's
     factory does not pickle, or a worker started without the thread pins."""
+
+
+class WorkerPoolBrokenError(P6Error):
+    """A worker process could not start or died mid-run (an out-of-memory kill, say). The run
+    stopped there; every row it appended is complete and in configuration order, so the ledger
+    is a correct prefix of the stage and a rerun resumes it."""
 
 
 # --- section 1: the precondition -----------------------------------------------------------------
@@ -1487,9 +1499,13 @@ def _worker_processes(
     re-imports this driver before it runs anything handed to it, and so loads every library the
     driver does; a library reads its thread count when it loads. So the pins
     (`seeding.thread_count_pins`, ADR-0003's list) are put into this process's environment
-    before the first worker is spawned, which every worker inherits, and this process's own
-    values are restored once the pool is shut down. The shutdown cancels what no worker has
-    started and waits for what one has, so no worker process outlives the pool.
+    before the first worker is spawned, which every worker inherits. **This process's
+    environment therefore carries the pins for the whole pooled run**; its own values are
+    restored once the pool is shut down.
+
+    The shutdown cancels what no worker has started and **waits for every configuration a worker
+    is already measuring** -- after a failure too, so a stopped run exits only once those finish
+    (their results are dropped) -- and no worker process outlives the pool.
     """
     pins = thread_count_pins()
     saved = {name: os.environ.get(name) for name in pins}
@@ -1527,20 +1543,33 @@ def _run_in_workers(
 ) -> GridRun:
     """`_run`'s ledger and progress lines, measured by `pool`'s worker processes through
     `grid.run_grid_in_pool`: this process alone appends the rows, in configuration order, through
-    `grid`'s own writer; a configuration the ledger holds is never submitted."""
-    with _worker_processes(pool, recipe) as executor:
-        run = grid.run_grid_in_pool(
-            ledger,
-            stage,
-            configs,
-            _measure_in_worker,
-            executor=executor,
-            label_sessions=label_sessions,
-            sessions=sessions,
-            clock=clock,
-            result_extra={"code_commit": recipe.code_commit},
-            landed=lambda index, config, ran: echo(_progress(index, len(configs), config, ran=ran)),
-        )
+    `grid`'s own writer; a configuration the ledger holds is never submitted.
+
+    A worker that cannot start or dies mid-run breaks the pool; that is `WorkerPoolBrokenError`,
+    a refusal by name: the rows already appended are a correct prefix of the stage."""
+    try:
+        with _worker_processes(pool, recipe) as executor:
+            run = grid.run_grid_in_pool(
+                ledger,
+                stage,
+                configs,
+                _measure_in_worker,
+                executor=executor,
+                label_sessions=label_sessions,
+                sessions=sessions,
+                clock=clock,
+                result_extra={"code_commit": recipe.code_commit},
+                landed=lambda index, config, ran: echo(
+                    _progress(index, len(configs), config, ran=ran)
+                ),
+            )
+    except BrokenProcessPool as error:
+        raise WorkerPoolBrokenError(
+            f"a worker process could not start or died mid-run ({error}); the {stage} run "
+            f"stopped. Every row it appended is complete and in configuration order, so "
+            f"{ledger} holds a correct prefix of the stage ({grid.stage_family(ledger, stage)} "
+            "row(s)); rerun the command to resume, with fewer --workers if memory ran out"
+        ) from error
     echo(_tally(ledger, run))
     return run
 
@@ -1764,15 +1793,28 @@ def default_environment() -> Environment:
 
 
 def _worker_count(text: str) -> int:
+    """A whole number from 1 to the machine's cores: every worker is a whole measuring process
+    (its own SDK and panel caches), so more workers than cores only adds memory."""
+    cores = os.cpu_count() or 1
     try:
         count = int(text)
     except ValueError:
         count = 0
-    if count < 1:
+    if not 1 <= count <= cores:
         raise argparse.ArgumentTypeError(
-            f"a worker count is a whole number of at least 1: {text!r}"
+            f"a worker count is a whole number from 1 to this machine's {cores} cores: {text!r}"
         )
     return count
+
+
+WORKERS_HELP: Final[str] = (
+    "measure the configurations in N worker processes, 1 (the default, this process) to the "
+    "machine's core count; the ledger is the one a single worker writes. Each worker holds its "
+    "own SDK and panel caches and DuckDB uses every core per connection, so memory and CPU grow "
+    "with N. For the run's duration this process's environment carries the BLAS/OpenMP thread "
+    "pins the workers start with. After a failure the run stops only once the configurations "
+    "already being measured finish; their results are dropped and measured again by a rerun."
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1791,7 +1833,7 @@ def _parser() -> argparse.ArgumentParser:
                 "--workers",
                 type=_worker_count,
                 default=1,
-                help="measure configurations in N worker processes; the ledger is the same",
+                help=WORKERS_HELP,
             )
     return parser
 

@@ -1072,6 +1072,55 @@ def test_a_configuration_repeated_in_one_pooled_run_is_measured_once(tmp_path: P
     assert grid.stage_family(ledger, "discovery") == 1
 
 
+def test_a_row_another_writer_lands_during_a_pooled_run_is_not_written_twice(
+    tmp_path: Path,
+) -> None:
+    """The serial runner reads the ledger before every configuration; a pooled run that planned
+    hours earlier must read it again before every append, or a configuration another writer
+    landed meanwhile becomes a second row -- a hypothesis the family counts twice."""
+    configs = tuple({"i": i, **WINDOW} for i in range(3))
+
+    def measured(ledger: Path) -> Any:
+        def measure(config: Mapping[str, object]) -> Mapping[str, object]:
+            if config["i"] == 0:  # a second terminal lands configuration 2 meanwhile
+                grid.append_ledger(
+                    ledger, "discovery", configs[2], {"p_excess": 0.9}, recorded_at=AT
+                )
+            return {"p_excess": 0.5}
+
+        return measure
+
+    serial, pooled = tmp_path / "serial.jsonl", tmp_path / "pooled.jsonl"
+    for config in configs:
+        grid.run_grid(
+            serial,
+            "discovery",
+            (config,),
+            measured(serial),
+            label_sessions=NO_LABEL,
+            clock=lambda: AT,
+        )
+    landed: list[tuple[int, bool]] = []
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        run = grid.run_grid_in_pool(
+            pooled,
+            "discovery",
+            configs,
+            measured(pooled),
+            executor=executor,
+            label_sessions=NO_LABEL,
+            clock=lambda: AT,
+            landed=lambda index, config, ran: landed.append((index, ran)),
+        )
+
+    assert [row["config"]["i"] for row in _rows(pooled)] == [2, 0, 1]
+    assert _rows(pooled) == _rows(serial)
+    assert grid.stage_family(pooled, "discovery") == grid.stage_family(serial, "discovery") == 3
+    assert (run.ran, run.skipped) == (2, 1)
+    assert landed == [(1, True), (2, True), (3, False)]
+
+
 def test_an_error_in_a_pooled_measurement_stops_the_run_after_the_rows_before_it(
     tmp_path: Path,
 ) -> None:
