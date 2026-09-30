@@ -22,6 +22,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final
+from zoneinfo import ZoneInfo
 
 from panel_fixtures import (
     DAILY_BASIC_DATASET,
@@ -510,8 +511,42 @@ def _write_by_year(store: PanelStore, panel: GeneratedPanel) -> None:
         write_price_limits(store, [part], calendar=calendar)
 
 
+SHANGHAI_ZONE: Final[ZoneInfo] = ZoneInfo("Asia/Shanghai")
+
+
+def _calendar_published_yearly(batch: ColumnarPanelBatch) -> ColumnarPanelBatch:
+    """`batch` with each row knowable from its own year's first midnight in Asia/Shanghai.
+
+    The real `trade_cal`'s clocks (`providers/tushare.py::_calendar_publication_timeline`): on
+    the research store the 2016 partition's rows all became knowable at 2016-01-01 00:00, so an
+    instant in 2015 cannot read that partition at all. `_calendar_batch` dates every row at the
+    panel's first day, which is what let a read at a 2026 instant open the 2027 partition here.
+    """
+    known = tuple(
+        max(midnight_shanghai(date(event.astimezone(SHANGHAI_ZONE).year, 1, 1)), first)
+        for event, first in zip(
+            batch.timeline.event_time, batch.timeline.available_time, strict=True
+        )
+    )
+    fetched = max(batch.fetched_at, *known)
+    return dataclasses.replace(
+        batch,
+        as_of=fetched,
+        fetched_at=fetched,
+        timeline=TimelineColumns(
+            event_time=batch.timeline.event_time,
+            available_time=known,
+            ingested_time=known,
+            revision_time=known,
+        ),
+    )
+
+
 def write_two_year_corpus(
-    root: Path, *, builds_from: date = TWO_YEAR_BUILDS_FROM
+    root: Path,
+    *,
+    builds_from: date = TWO_YEAR_BUILDS_FROM,
+    calendar_published_yearly: bool = False,
 ) -> GeneratedPanel:
     """A panel priced 2026-01-05 .. 2027-01-22, with a raw build on every session from 12-01.
 
@@ -522,9 +557,24 @@ def write_two_year_corpus(
     `builds_from` moves the first build (`V2-P6-025`): from `TWO_YEAR_FACTOR_YEAR_START` the factor
     store holds 2027 alone while every other dataset still holds 2026 -- the research store's
     shape, whose factor builds begin two years after its price warm-up does.
+
+    `calendar_published_yearly` dates each calendar row at its own year's start, as the real
+    provider does (`_calendar_published_yearly`); the rows and every other dataset are unchanged.
     """
     store = PanelStore(root / "panel")
     panel = _two_year_panel()
+    if calendar_published_yearly:
+        panel = dataclasses.replace(
+            panel,
+            batches=MappingProxyType(
+                {
+                    **panel.batches,
+                    TRADING_CALENDAR_DATASET: _calendar_published_yearly(
+                        panel.batch(TRADING_CALENDAR_DATASET)
+                    ),
+                }
+            ),
+        )
     _write_by_year(store, panel)
     write_factor_panels(
         store,

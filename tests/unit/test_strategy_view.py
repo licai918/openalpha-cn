@@ -1563,3 +1563,94 @@ def test_every_cross_section_across_the_year_boundary_is_the_whole_range_reads_n
             for row in section.cross_section.rows
             if row.values[0] is not None
         } == expected
+
+
+# --- V2-P6-025 (2): a calendar year that is not yet knowable at a build's instant ---------------
+#
+# The real `trade_cal` dates every row of year Y knowable from Y-01-01 00:00 Shanghai, so its 2016
+# partition cannot be read at any 2015 instant (`not_yet_knowable`, judged per partition). The
+# model plane cuts each training cross section at its build's own instant and read the calendar
+# over every year of the run -- the year after included, because the run's labels reach it -- so
+# the first real-store refit was refused on 2016's partition at a 2015-01-06 build. Here the
+# calendar is dated the real provider's way and every other byte of the two-year corpus is kept.
+
+
+@pytest.fixture(scope="module")
+def yearly_calendar(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> tuple[PanelStore, GeneratedPanel]:
+    root = tmp_path_factory.mktemp("strategy-view-yearly-calendar")
+    panel = write_two_year_corpus(root, calendar_published_yearly=True)
+    return PanelStore(root / "panel"), panel
+
+
+def test_the_next_years_calendar_is_not_yet_knowable_at_a_december_build(
+    yearly_calendar: tuple[PanelStore, GeneratedPanel],
+) -> None:
+    """The real store's shape, reproduced: at 16:30 on 2026-12-31 the 2026 calendar reads and a
+    read naming 2027 as well is refused whole."""
+    store, _ = yearly_calendar
+    instant = session_publication_instant(BOUNDARY_SIGNAL)
+
+    assert load_trading_calendar(store, exchange=EXCHANGE, years=(2026,), as_of=instant)
+    with pytest.raises(Exception, match="not_yet_knowable"):
+        load_trading_calendar(store, exchange=EXCHANGE, years=TWO_YEARS, as_of=instant)
+
+
+@pytest.mark.parametrize("kind", sorted(TWO_YEAR_KINDS))
+def test_a_run_across_the_year_boundary_is_answered_as_if_the_calendar_were_known_early(
+    yearly_calendar: tuple[PanelStore, GeneratedPanel],
+    two_years: tuple[PanelStore, GeneratedPanel],
+    kind: str,
+) -> None:
+    """Training windows in December whose labels and deadlines reach January: measured, and
+    answered period for period as the corpus whose whole calendar was knowable from its first
+    day -- the 2027 partition's clocks change no answer, because no cross section cut in 2026
+    resolves its session from a 2027 row."""
+    store, panel = yearly_calendar
+    fuller, _ = two_years
+    request = _two_year_request(panel, kind)
+
+    answered = backtest_strategy(store, request)
+
+    assert backtest_view(answered) == backtest_view(backtest_strategy(fuller, request))
+    if kind == "walk_forward":
+        assert any(fit.refusal is None for fit in answered.model_fits)
+
+
+def test_a_cross_section_resolves_its_session_on_the_calendar_its_own_instant_could_read(
+    yearly_calendar: tuple[PanelStore, GeneratedPanel],
+    two_years: tuple[PanelStore, GeneratedPanel],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Point in time still holds: the calendar is read at the build's instant, over the years
+    at or before it -- never at the run's later `as_of` -- and the answer is the fuller store's."""
+    from openalpha_cn import feature_matrix
+
+    store, panel = yearly_calendar
+    fuller, _ = two_years
+    run = _model_run(
+        _two_year_request(panel, "walk_forward"), start=BOUNDARY_START, end=BOUNDARY_SIGNAL
+    )
+    reads: list[tuple[tuple[int, ...], datetime]] = []
+    real = feature_matrix.load_trading_calendar
+
+    def recorded(*args: Any, **kwargs: Any) -> Any:
+        reads.append((tuple(kwargs["years"]), kwargs["as_of"]))
+        return real(*args, **kwargs)
+
+    for instant in (
+        session_publication_instant(BOUNDARY_SIGNAL),
+        datetime.combine(BOUNDARY_TRADE, time(9, 0), tzinfo=SHANGHAI),
+    ):
+        expected = feature_cross_section(fuller, run, as_of=instant)
+        monkeypatch.setattr(feature_matrix, "load_trading_calendar", recorded)
+        answered = feature_cross_section(store, run, as_of=instant)
+        monkeypatch.setattr(feature_matrix, "load_trading_calendar", real)
+
+        assert answered == expected
+        assert reads[-1] == (
+            tuple(year for year in TWO_YEARS if year <= answered.as_of.astimezone(SHANGHAI).year),
+            answered.as_of,
+        )
+    assert [years for years, _ in reads] == [(2026,), (2026,)]

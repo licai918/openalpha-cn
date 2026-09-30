@@ -897,6 +897,27 @@ def _newest_visible_rows(
     return ()
 
 
+def _years_through(years: Sequence[int], instant: datetime) -> tuple[int, ...]:
+    """The calendar years a cross section at `instant` resolves its session from.
+
+    `V2-P6-025`. `_session_for` asks the calendar about the newest day published at `instant`
+    and the open sessions before it, so a year after the instant's own holds no row the answer
+    reads. It is also a year whose partition the instant usually cannot read at all: the real
+    `trade_cal` dates every row of year Y knowable from Y-01-01 00:00 in Asia/Shanghai
+    (`providers/tushare.py::_calendar_publication_timeline`), and `load_trading_calendar` judges
+    `not_yet_knowable` per partition. A walk-forward's run names the year its labels reach, so
+    every training cross section built in the year before was refused on a partition none of
+    them read a row of -- the research store's first refit, at a 2015-01-06 build, on 2016's.
+
+    Nothing that answered is changed: the rows dropped are dated after `instant`'s year, and
+    the calendar is still read at `instant`, so a year it does read that holds a row not yet
+    knowable then still refuses. A request with no year at or before `instant`'s reads what it
+    declared, and is refused by it as before.
+    """
+    through = instant.astimezone(ZoneInfo(FEATURE_DATE_ZONE)).year
+    return tuple(year for year in years if year <= through) or tuple(years)
+
+
 def _declared_addresses(column: FeatureColumn) -> tuple[str, ...]:
     """The content addresses a stored row of this column must carry, in the read's own order.
 
@@ -1143,16 +1164,18 @@ def load_feature_cross_section(
     honest rather than merely old.
 
     Step 1 reads each column's newest year holding a build visible at `as_of`, not every year of
-    `request.years` (`_newest_visible_rows`, `V2-P6-025`); step 3 still reads all of them.
+    `request.years` (`_newest_visible_rows`, `V2-P6-025`). Step 3 reads the calendar over the
+    years at or before the instant's (`_years_through`) and the registry over all of them.
     """
     by_column = {
         column.feature_id: _newest_visible_rows(store, column, years=request.years, as_of=as_of)
         for column in request.columns
     }
     instant = _resolve_instant(by_column, as_of=as_of)
+    calendar_years = _years_through(request.years, instant)
     calendar = _read(
         lambda: load_trading_calendar(
-            store, exchange=request.exchange, years=request.years, as_of=instant
+            store, exchange=request.exchange, years=calendar_years, as_of=instant
         ),
         what=f"the {request.exchange} trading calendar",
     )
