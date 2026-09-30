@@ -13,9 +13,12 @@ from __future__ import annotations
 import importlib
 import json
 import math
+import multiprocessing
 import statistics
 import sys
+import threading
 from collections.abc import Mapping
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -912,3 +915,236 @@ def test_the_command_line_prints_the_family_and_the_table(
     table = json.loads(capsys.readouterr().out)
     assert table == json.loads(grid.fdr_table(ledger, "discovery", 0.10).model_dump_json())
     assert (table["family_size"], table["withheld_hypotheses"]) == (2, 1)
+
+
+# --- the pooled runner (V2-P6-023) ----------------------------------------------------------------
+
+LATER: Final[datetime] = AT + timedelta(hours=5)
+
+
+def _pooled_measure(config: Mapping[str, object]) -> Mapping[str, object]:
+    """Module level, so a spawned worker imports it by name: bound methods and closures do not
+    pickle."""
+    if config.get("refused"):
+        raise StrategyRequestError(f"no cross section for {config['i']}")
+    return {"p_excess": 1 / (2 + int(str(config["i"]))), "i": config["i"], "on": config["end"]}
+
+
+def _without_time(path: Path) -> list[dict[str, Any]]:
+    return [{k: v for k, v in row.items() if k != "recorded_at"} for row in _rows(path)]
+
+
+class _RecordingExecutor(ThreadPoolExecutor):
+    """A thread pool that records the configurations submitted to it, in order."""
+
+    def __init__(self, workers: int) -> None:
+        super().__init__(max_workers=workers)
+        self.submitted: list[Mapping[str, object]] = []
+
+    def submit(self, fn: Any, /, *args: Any, **kwargs: Any) -> Any:
+        self.submitted.append(args[1])
+        return super().submit(fn, *args, **kwargs)
+
+
+def test_a_pooled_run_writes_the_rows_a_serial_run_writes(tmp_path: Path) -> None:
+    """The same configurations, in the same order, with the same results value for value -- a
+    refused row and a window-refused row included -- measured by spawned worker processes; only
+    `recorded_at` differs."""
+    configs = (
+        {"i": 0, **WINDOW},
+        {"i": 1, **WINDOW, "refused": True},
+        {"i": 2, "start": date(2021, 6, 1), "end": date(2022, 1, 5)},
+        {"i": 3, **WINDOW},
+        {"i": 4, **WINDOW},
+    )
+    serial, pooled = tmp_path / "serial.jsonl", tmp_path / "pooled.jsonl"
+    extra = {"code_commit": "a" * 40}
+    grid.run_grid(
+        serial,
+        "discovery",
+        configs,
+        _pooled_measure,
+        label_sessions=NO_LABEL,
+        clock=lambda: AT,
+        result_extra=extra,
+    )
+    landed: list[tuple[int, bool]] = []
+
+    with ProcessPoolExecutor(2, mp_context=multiprocessing.get_context("spawn")) as executor:
+        run = grid.run_grid_in_pool(
+            pooled,
+            "discovery",
+            configs,
+            _pooled_measure,
+            executor=executor,
+            label_sessions=NO_LABEL,
+            clock=lambda: LATER,
+            result_extra=extra,
+            landed=lambda index, config, ran: landed.append((index, ran)),
+        )
+
+    assert run == grid.GridRun(stage="discovery", ran=5, skipped=0)
+    assert _without_time(pooled) == _without_time(serial)
+    assert {row["recorded_at"] for row in _rows(pooled)} == {LATER.isoformat()}
+    errors = [row["result"].get("error", "") for row in _rows(pooled)]
+    assert errors[1] == "StrategyRequestError: no cross section for 1"
+    assert errors[2].startswith("StageWindowError: ")
+    assert [row["result"]["code_commit"] for row in _rows(pooled)[1:3]] == ["a" * 40] * 2
+    assert landed == [(1, True), (2, True), (3, True), (4, True), (5, True)]
+
+
+def test_a_result_that_finishes_early_waits_for_every_earlier_row(tmp_path: Path) -> None:
+    ledger = tmp_path / "ledger.jsonl"
+    configs = tuple({"i": i, **WINDOW} for i in range(3))
+    finished: list[int] = []
+    later_done = threading.Semaphore(0)
+    seen_at_landing: list[list[int]] = []
+
+    def measure(config: Mapping[str, object]) -> Mapping[str, object]:
+        if config["i"] == 0:  # the first configuration is the slow one
+            assert later_done.acquire(timeout=10) and later_done.acquire(timeout=10)
+        finished.append(int(str(config["i"])))
+        if config["i"] != 0:
+            later_done.release()
+        return {"p_excess": 0.5}
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        grid.run_grid_in_pool(
+            ledger,
+            "discovery",
+            configs,
+            measure,
+            executor=executor,
+            label_sessions=NO_LABEL,
+            clock=lambda: AT,
+            landed=lambda index, config, ran: seen_at_landing.append(list(finished)),
+        )
+
+    assert finished[-1] == 0  # the later two finished first ...
+    assert sorted(seen_at_landing[0]) == [0, 1, 2]  # ... and were held until the first landed
+    assert [row["config"]["i"] for row in _rows(ledger)] == [0, 1, 2]
+
+
+def test_a_pooled_run_skips_what_the_ledger_holds_and_never_submits_it(tmp_path: Path) -> None:
+    ledger = tmp_path / "ledger.jsonl"
+    configs = tuple({"i": i, **WINDOW} for i in range(4))
+    for held in (configs[0], configs[2]):
+        grid.append_ledger(ledger, "discovery", held, {"p_excess": 0.25}, recorded_at=AT)
+    landed: list[tuple[int, bool]] = []
+
+    with _RecordingExecutor(2) as executor:
+        run = grid.run_grid_in_pool(
+            ledger,
+            "discovery",
+            configs,
+            _pooled_measure,
+            executor=executor,
+            label_sessions=NO_LABEL,
+            clock=lambda: AT,
+            landed=lambda index, config, ran: landed.append((index, ran)),
+        )
+
+    assert executor.submitted == [configs[1], configs[3]]
+    assert (run.ran, run.skipped) == (2, 2)
+    assert landed == [(1, False), (2, True), (3, False), (4, True)]
+    assert [row["config"]["i"] for row in _rows(ledger)] == [0, 2, 1, 3]
+
+
+def test_a_configuration_repeated_in_one_pooled_run_is_measured_once(tmp_path: Path) -> None:
+    """The serial runner skips a repeat because the first one's row is in the ledger by then; the
+    pooled runner plans before that row lands and must still measure the configuration once."""
+    ledger = tmp_path / "ledger.jsonl"
+    config = {"i": 0, **WINDOW}
+
+    with _RecordingExecutor(2) as executor:
+        run = grid.run_grid_in_pool(
+            ledger,
+            "discovery",
+            (config, dict(config)),
+            _pooled_measure,
+            executor=executor,
+            label_sessions=NO_LABEL,
+            clock=lambda: AT,
+        )
+
+    assert executor.submitted == [config]
+    assert (run.ran, run.skipped) == (1, 1)
+    assert grid.stage_family(ledger, "discovery") == 1
+
+
+def test_an_error_in_a_pooled_measurement_stops_the_run_after_the_rows_before_it(
+    tmp_path: Path,
+) -> None:
+    """Rows of the configurations before the failing one land; nothing after it does, not even a
+    configuration that finished before the failure surfaced; the error propagates."""
+    ledger = tmp_path / "ledger.jsonl"
+    configs = tuple({"i": i, **WINDOW} for i in range(4))
+    last_done = threading.Event()
+    finished: list[int] = []
+
+    def measure(config: Mapping[str, object]) -> Mapping[str, object]:
+        if config["i"] == 0:
+            assert last_done.wait(timeout=10)
+        if config["i"] == 1:
+            raise KeyError("a bug, not a refusal")
+        finished.append(int(str(config["i"])))
+        if config["i"] == 3:
+            last_done.set()
+        return {"p_excess": 0.5}
+
+    with ThreadPoolExecutor(max_workers=4) as executor, pytest.raises(KeyError, match="a bug"):
+        grid.run_grid_in_pool(
+            ledger,
+            "discovery",
+            configs,
+            measure,
+            executor=executor,
+            label_sessions=NO_LABEL,
+            clock=lambda: AT,
+        )
+
+    assert 3 in finished
+    assert [row["config"]["i"] for row in _rows(ledger)] == [0]
+
+
+def test_a_window_that_cannot_be_placed_stops_a_pooled_run_where_it_stops_a_serial_one(
+    tmp_path: Path,
+) -> None:
+    configs = ({"i": 0, **WINDOW}, {"i": 1, "start": date(2015, 1, 5)}, {"i": 2, **WINDOW})
+    serial, pooled = tmp_path / "serial.jsonl", tmp_path / "pooled.jsonl"
+    with pytest.raises(grid.ResearchLedgerError, match="'end'"):
+        grid.run_grid(
+            serial, "discovery", configs, _pooled_measure, label_sessions=NO_LABEL, clock=lambda: AT
+        )
+
+    with _RecordingExecutor(2) as executor, pytest.raises(grid.ResearchLedgerError, match="'end'"):
+        grid.run_grid_in_pool(
+            pooled,
+            "discovery",
+            configs,
+            _pooled_measure,
+            executor=executor,
+            label_sessions=NO_LABEL,
+            clock=lambda: AT,
+        )
+
+    assert executor.submitted == [configs[0]]
+    assert _rows(pooled) == _rows(serial)
+
+
+def test_the_pooled_runner_will_not_run_the_holdout(tmp_path: Path) -> None:
+    ledger = tmp_path / "ledger.jsonl"
+    with (
+        _RecordingExecutor(1) as executor,
+        pytest.raises(grid.ResearchLedgerError, match="run_holdout"),
+    ):
+        grid.run_grid_in_pool(
+            ledger,
+            "holdout",
+            ({"i": 0, "start": date(2024, 1, 2), "end": date(2024, 6, 28)},),
+            _pooled_measure,
+            executor=executor,
+            label_sessions=NO_LABEL,
+        )
+    assert executor.submitted == []
+    assert not ledger.exists()

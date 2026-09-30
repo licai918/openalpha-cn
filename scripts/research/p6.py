@@ -7,6 +7,17 @@ list, a selection or a verdict. Each stage is one command::
 
     python scripts/research/p6.py <command> --runtime-dir <store> --ledger <ledger.jsonl>
 
+The four commands that measure a grid -- `discovery`, `composition-sources`,
+`composition-strategies`, `validation` (`WORKER_COMMANDS`) -- take `--workers N` (default 1;
+`V2-P6-023`). With N >= 2 the configurations are measured in N spawned worker processes, each with
+its own SDK and the BLAS/OpenMP thread counts pinned (`_worker_processes`), and **the ledger is the
+one `--workers 1` writes**: this process alone appends every row, in configuration order, through
+`grid`'s own writer (`grid.run_grid_in_pool`), so only `recorded_at` differs. A configuration the
+ledger holds is skipped and never submitted; an interrupted run keeps every row it appended and
+measures the rest again; an error that is not a refusal stops the run after the rows before it,
+as the serial run stops. Each worker holds its own panel caches, so memory grows with N.
+`holdout` takes no `--workers`: it runs one configuration once.
+
 Before any command but the read-only `holdout-verdict` (`READ_ONLY_COMMANDS` says why) does
 anything else, it runs the section 1 precondition,
 `openalpha factor stale-return-paths --runtime-dir <store> --exchange SSE --max-staleness-days 30`,
@@ -106,11 +117,16 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import multiprocessing
+import os
+import pickle
 import re
 import subprocess
 import sys
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from concurrent.futures import ProcessPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -126,6 +142,7 @@ from openalpha_cn.panel_factors import FACTOR_DEFINITIONS
 from openalpha_cn.panel_ingest import load_trading_calendar
 from openalpha_cn.panel_view import panel_store
 from openalpha_cn.runtime.provenance import resolve_code_commit
+from openalpha_cn.runtime.seeding import thread_count_pins
 from openalpha_cn.sdk import OpenAlphaSDK
 from openalpha_cn.strategy_view import ICSeries
 
@@ -233,6 +250,12 @@ LEDGER_WRITING_COMMANDS: Final[frozenset[str]] = frozenset(
 of the checkout that commit names: `openalpha_cn` and the research scripts imported from this
 repository (`registry`'s `ForeignPackageError` / `ForeignScriptsError`). `holdout` gets the same
 two checks from `registry.run_holdout`'s own guard."""
+WORKER_COMMANDS: Final[frozenset[str]] = frozenset(
+    {"discovery", "composition-sources", "composition-strategies", "validation"}
+)
+"""The commands that measure a grid of configurations and so take `--workers N` (`V2-P6-023`).
+Not `holdout`, which runs one configuration once through `registry.run_holdout`, and not
+`register` or the reports, which measure nothing."""
 READ_ONLY_COMMANDS: Final[frozenset[str]] = frozenset({"holdout-verdict"})
 """Commands exempt from section 1's precondition. `holdout-verdict` reads the ledger's holdout
 rows and the registration and nothing in the panel store, and the one run it judges has already
@@ -300,6 +323,11 @@ class HoldoutEvaluationError(P6Error):
 class HoldoutClaimMissingError(HoldoutEvaluationError):
     """The ledger holds holdout rows and no claim: `grid` writes a measurement only after its
     claim, so the ledger was edited by hand."""
+
+
+class WorkerFactoryError(P6Error):
+    """`--workers` was asked for and a worker process cannot build its SDK: the environment's
+    factory does not pickle, or a worker started without the thread pins."""
 
 
 # --- section 1: the precondition -----------------------------------------------------------------
@@ -564,6 +592,33 @@ class StrategyStageMeasure:
             return {"error": _refusal(error), "code_commit": self.code_commit}
         result["code_commit"] = self.code_commit
         return result
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class StageMeasureRecipe:
+    """A stage's measure without the SDK methods it calls, which do not pickle: a
+    `DiscoveryMeasure` over `discovery_sessions` when they are given, a `StrategyStageMeasure`
+    otherwise, both at `code_commit`. The serial run and every worker process (`--workers`)
+    build the stage's measure through `build`, so they measure with the same object."""
+
+    code_commit: str
+    discovery_sessions: tuple[date, ...] | None = None
+
+    def build(
+        self,
+        backtest: Callable[..., StrategyBacktest],
+        ic_series: Callable[..., ICSeries] | None = None,
+    ) -> grid.Measure:
+        if self.discovery_sessions is None:
+            return StrategyStageMeasure(backtest=backtest, code_commit=self.code_commit)
+        if ic_series is None:
+            raise TypeError("a discovery measure reads the IC series as well as the backtest")
+        return DiscoveryMeasure(
+            backtest=backtest,
+            ic_series=ic_series,
+            sessions=self.discovery_sessions,
+            code_commit=self.code_commit,
+        )
 
 
 # --- the ledger, read for a stage ----------------------------------------------------------------
@@ -1361,12 +1416,175 @@ def _run(
             result_extra={"code_commit": code_commit},
         )
         ran, skipped = ran + run.ran, skipped + run.skipped
-        echo(
-            f"[{index}/{len(configs)}] {'ran' if run.ran else 'skipped'} {_describe(config)} "
-            f"{grid.config_id(config)[:12]}"
+        echo(_progress(index, len(configs), config, ran=bool(run.ran)))
+    total = GridRun(stage=stage, ran=ran, skipped=skipped)
+    echo(_tally(ledger, total))
+    return total
+
+
+def _progress(index: int, count: int, config: Config, *, ran: bool) -> str:
+    return (
+        f"[{index}/{count}] {'ran' if ran else 'skipped'} {_describe(config)} "
+        f"{grid.config_id(config)[:12]}"
+    )
+
+
+def _tally(ledger: Path, run: GridRun) -> str:
+    return (
+        f"{run.stage}: {run.ran} ran, {run.skipped} skipped, family "
+        f"{grid.stage_family(ledger, run.stage)}"
+    )
+
+
+# --- running a stage in worker processes (`V2-P6-023`) -------------------------------------------
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class WorkerPool:
+    """`--workers N` for N >= 2: the stage's configurations are measured in `workers` spawned
+    processes, each of which builds its own SDK as `sdk(runtime_dir)` -- a module-level factory,
+    since the SDK's bound methods do not pickle -- and its own measure from the stage's
+    `StageMeasureRecipe`."""
+
+    workers: int
+    sdk: Callable[[Path], ResearchSDK]
+    runtime_dir: Path
+
+
+_WORKER_MEASURE: grid.Measure | None = None
+"""The stage's measure in a worker process, built once by `_start_worker`."""
+
+
+def _start_worker(
+    sdk: Callable[[Path], ResearchSDK], runtime_dir: Path, recipe: StageMeasureRecipe
+) -> None:
+    """A worker process's start: refuse to measure without the thread pins, then build the SDK
+    and the stage's measure once for every configuration this process measures."""
+    global _WORKER_MEASURE
+    unpinned = sorted(
+        name for name, value in thread_count_pins().items() if os.environ.get(name) != value
+    )
+    if unpinned:
+        raise WorkerFactoryError(f"a worker started without the thread pins {unpinned}")
+    world = sdk(runtime_dir)
+    _WORKER_MEASURE = recipe.build(world.run_strategy_backtest, world.factor_ic_series)
+
+
+def _measure_in_worker(config: Mapping[str, object]) -> Mapping[str, object]:
+    if _WORKER_MEASURE is None:
+        raise RuntimeError("this process was not started as a stage worker (`_start_worker`)")
+    return _WORKER_MEASURE(config)
+
+
+@contextmanager
+def _worker_processes(
+    pool: WorkerPool, recipe: StageMeasureRecipe
+) -> Iterator[ProcessPoolExecutor]:
+    """`pool.workers` processes started with `spawn` (a forked DuckDB or thread pool is unsafe),
+    each running `_start_worker`.
+
+    **The thread pins are in each worker's environment from its first instruction.** A worker
+    re-imports this driver before it runs anything handed to it, and so loads every library the
+    driver does; a library reads its thread count when it loads. So the pins
+    (`seeding.thread_count_pins`, ADR-0003's list) are put into this process's environment
+    before the first worker is spawned, which every worker inherits, and this process's own
+    values are restored once the pool is shut down. The shutdown cancels what no worker has
+    started and waits for what one has, so no worker process outlives the pool.
+    """
+    pins = thread_count_pins()
+    saved = {name: os.environ.get(name) for name in pins}
+    os.environ.update(pins)
+    try:
+        executor = ProcessPoolExecutor(
+            max_workers=pool.workers,
+            mp_context=multiprocessing.get_context("spawn"),
+            initializer=_start_worker,
+            initargs=(pool.sdk, pool.runtime_dir, recipe),
         )
-    echo(f"{stage}: {ran} ran, {skipped} skipped, family {grid.stage_family(ledger, stage)}")
-    return GridRun(stage=stage, ran=ran, skipped=skipped)
+        try:
+            yield executor
+        finally:
+            executor.shutdown(wait=True, cancel_futures=True)
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+def _run_in_workers(
+    ledger: Path,
+    stage: str,
+    configs: Sequence[Config],
+    recipe: StageMeasureRecipe,
+    pool: WorkerPool,
+    *,
+    label_sessions: Callable[[Mapping[str, object]], int],
+    sessions: Sequence[date],
+    echo: Echo,
+    clock: Clock,
+) -> GridRun:
+    """`_run`'s ledger and progress lines, measured by `pool`'s worker processes through
+    `grid.run_grid_in_pool`: this process alone appends the rows, in configuration order, through
+    `grid`'s own writer; a configuration the ledger holds is never submitted."""
+    with _worker_processes(pool, recipe) as executor:
+        run = grid.run_grid_in_pool(
+            ledger,
+            stage,
+            configs,
+            _measure_in_worker,
+            executor=executor,
+            label_sessions=label_sessions,
+            sessions=sessions,
+            clock=clock,
+            result_extra={"code_commit": recipe.code_commit},
+            landed=lambda index, config, ran: echo(_progress(index, len(configs), config, ran=ran)),
+        )
+    echo(_tally(ledger, run))
+    return run
+
+
+def _measure_stage(
+    ledger: Path,
+    stage: str,
+    configs: Sequence[Config],
+    recipe: StageMeasureRecipe,
+    backtest: Callable[..., StrategyBacktest],
+    ic_series: Callable[..., ICSeries] | None,
+    *,
+    label_sessions: Callable[[Mapping[str, object]], int],
+    sessions: Sequence[date],
+    echo: Echo,
+    clock: Clock,
+    pool: WorkerPool | None,
+) -> GridRun:
+    """The stage in this process (`_run`, with the measure over `backtest`), or with `pool` in
+    its worker processes, which build the same measure over their own SDK and never call
+    `backtest` or `ic_series`."""
+    if pool is None:
+        return _run(
+            ledger,
+            stage,
+            configs,
+            recipe.build(backtest, ic_series),
+            label_sessions=label_sessions,
+            sessions=sessions,
+            echo=echo,
+            clock=clock,
+            code_commit=recipe.code_commit,
+        )
+    return _run_in_workers(
+        ledger,
+        stage,
+        configs,
+        recipe,
+        pool,
+        label_sessions=label_sessions,
+        sessions=sessions,
+        echo=echo,
+        clock=clock,
+    )
 
 
 def run_discovery(
@@ -1378,22 +1596,22 @@ def run_discovery(
     *,
     echo: Echo,
     clock: Clock = None,
+    pool: WorkerPool | None = None,
 ) -> GridRun:
     """Section 4's stage: every discovery configuration the ledger does not hold yet."""
     head = _clean_commit(code_commit)
-    measure = DiscoveryMeasure(
-        backtest=backtest, ic_series=ic_series, sessions=tuple(sessions), code_commit=head
-    )
-    return _run(
+    return _measure_stage(
         ledger,
         DISCOVERY,
         discovery_configs(sessions),
-        measure,
+        StageMeasureRecipe(code_commit=head, discovery_sessions=tuple(sessions)),
+        backtest,
+        ic_series,
         label_sessions=discovery_label_sessions,
         sessions=sessions,
         echo=echo,
         clock=clock,
-        code_commit=head,
+        pool=pool,
     )
 
 
@@ -1405,20 +1623,23 @@ def run_composition_sources(
     *,
     echo: Echo,
     clock: Clock = None,
+    pool: WorkerPool | None = None,
 ) -> GridRun:
     """Section 5 step 2a: the 19 sources over the survivors' components."""
     head = _require_stage_commit(ledger, COMPOSITION, code_commit)
     configs = composition_source_configs(_components(ledger, sessions), sessions, head)
-    return _run(
+    return _measure_stage(
         ledger,
         COMPOSITION,
         configs,
-        StrategyStageMeasure(backtest=backtest, code_commit=head),
+        StageMeasureRecipe(code_commit=head),
+        backtest,
+        None,
         label_sessions=grid.strategy_label_sessions,
         sessions=sessions,
         echo=echo,
         clock=clock,
-        code_commit=head,
+        pool=pool,
     )
 
 
@@ -1430,22 +1651,25 @@ def run_composition_strategies(
     *,
     echo: Echo,
     clock: Clock = None,
+    pool: WorkerPool | None = None,
 ) -> GridRun:
     """Section 5 step 2b: the 36 strategies of the best source; `run_grid` skips the one that
     is step 2a's own configuration."""
     head = _require_stage_commit(ledger, COMPOSITION, code_commit)
     _, source, row = best_source(ledger, sessions, head)
     echo(f"step 2b source: {_describe(source)} {row.config_id[:12]}")
-    return _run(
+    return _measure_stage(
         ledger,
         COMPOSITION,
         composition_strategy_configs(source),
-        StrategyStageMeasure(backtest=backtest, code_commit=head),
+        StageMeasureRecipe(code_commit=head),
+        backtest,
+        None,
         label_sessions=grid.strategy_label_sessions,
         sessions=sessions,
         echo=echo,
         clock=clock,
-        code_commit=head,
+        pool=pool,
     )
 
 
@@ -1457,22 +1681,25 @@ def run_validation(
     *,
     echo: Echo,
     clock: Clock = None,
+    pool: WorkerPool | None = None,
 ) -> GridRun:
     """Section 6's stage: each finalist once over the validation window, at the commit the
     composition stage measured it at (`StageCommitError` otherwise)."""
     head = _require_stage_commit(ledger, VALIDATION, code_commit)
     _require_composition_commit(ledger, head, "this checkout")
     _, finalist_configs = finalists(ledger, sessions)
-    return _run(
+    return _measure_stage(
         ledger,
         VALIDATION,
         validation_configs(finalist_configs, sessions, head),
-        StrategyStageMeasure(backtest=backtest, code_commit=head),
+        StageMeasureRecipe(code_commit=head),
+        backtest,
+        None,
         label_sessions=grid.strategy_label_sessions,
         sessions=sessions,
         echo=echo,
         clock=clock,
-        code_commit=head,
+        pool=pool,
     )
 
 
@@ -1507,7 +1734,11 @@ class ResearchSDK(Protocol):
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Environment:
     """What a command reads from the world: the precondition, the stored calendar, the SDK, the
-    checkout's commit and the repository. `default_environment` is the real one."""
+    checkout's commit and the repository. `default_environment` is the real one.
+
+    `sdk` is also what each worker process builds its own SDK with under `--workers N` (N >= 2),
+    so there it must pickle: a module-level function such as `open_sdk`, not a lambda
+    (`WorkerFactoryError`)."""
 
     precondition: Callable[[Path], None]
     sessions: Callable[[Path], Sequence[date]]
@@ -1517,14 +1748,31 @@ class Environment:
     clock: Clock = None
 
 
+def open_sdk(runtime_dir: Path) -> OpenAlphaSDK:
+    """The real SDK over `runtime_dir`: module level, so a worker process can import it."""
+    return OpenAlphaSDK(runtime_dir=runtime_dir)
+
+
 def default_environment() -> Environment:
     return Environment(
         precondition=require_clean_return_paths,
         sessions=stored_sessions,
-        sdk=lambda runtime_dir: OpenAlphaSDK(runtime_dir=runtime_dir),
+        sdk=open_sdk,
         code_commit=lambda: resolve_code_commit(anchor=Path(__file__).resolve().parent),
         repo=REPO_ROOT,
     )
+
+
+def _worker_count(text: str) -> int:
+    try:
+        count = int(text)
+    except ValueError:
+        count = 0
+    if count < 1:
+        raise argparse.ArgumentTypeError(
+            f"a worker count is a whole number of at least 1: {text!r}"
+        )
+    return count
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1538,7 +1786,31 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument("--registration", type=Path, default=DEFAULT_REGISTRATION)
         if name == "holdout":
             command.add_argument("--repo", type=Path, default=None)
+        if name in WORKER_COMMANDS:
+            command.add_argument(
+                "--workers",
+                type=_worker_count,
+                default=1,
+                help="measure configurations in N worker processes; the ledger is the same",
+            )
     return parser
+
+
+def _worker_pool(arguments: argparse.Namespace, environment: Environment) -> WorkerPool | None:
+    """`--workers N` as a `WorkerPool`, `None` for one worker (the serial path); refuses a factory
+    a worker process could not import before anything is measured."""
+    workers = getattr(arguments, "workers", 1)
+    if workers == 1:
+        return None
+    try:
+        pickle.dumps(environment.sdk)
+    except (pickle.PicklingError, AttributeError, TypeError) as error:
+        raise WorkerFactoryError(
+            f"--workers {workers} builds an SDK in each worker process, and the environment's "
+            f"SDK factory {environment.sdk!r} cannot be sent to one ({error}); give a "
+            "module-level function such as `open_sdk`"
+        ) from error
+    return WorkerPool(workers=workers, sdk=environment.sdk, runtime_dir=arguments.runtime_dir)
 
 
 def _report_verdict(verdict: Mapping[str, Any], artifacts: Path, echo: Echo) -> None:
@@ -1552,6 +1824,7 @@ def _report_verdict(verdict: Mapping[str, Any], artifacts: Path, echo: Echo) -> 
 
 def _dispatch(arguments: argparse.Namespace, environment: Environment, echo: Echo) -> None:
     command, runtime_dir, ledger = arguments.command, arguments.runtime_dir, arguments.ledger
+    pool = _worker_pool(arguments, environment)
     sessions = tuple(environment.sessions(runtime_dir))
     artifacts = ledger.parent
     clock = environment.clock
@@ -1591,17 +1864,20 @@ def _dispatch(arguments: argparse.Namespace, environment: Environment, echo: Ech
             commit,
             echo=echo,
             clock=clock,
+            pool=pool,
         )
     elif command == "composition-sources":
         run_composition_sources(
-            ledger, sessions, sdk.run_strategy_backtest, commit, echo=echo, clock=clock
+            ledger, sessions, sdk.run_strategy_backtest, commit, echo=echo, clock=clock, pool=pool
         )
     elif command == "composition-strategies":
         run_composition_strategies(
-            ledger, sessions, sdk.run_strategy_backtest, commit, echo=echo, clock=clock
+            ledger, sessions, sdk.run_strategy_backtest, commit, echo=echo, clock=clock, pool=pool
         )
     elif command == "validation":
-        run_validation(ledger, sessions, sdk.run_strategy_backtest, commit, echo=echo, clock=clock)
+        run_validation(
+            ledger, sessions, sdk.run_strategy_backtest, commit, echo=echo, clock=clock, pool=pool
+        )
         body, _, _ = validation_selection(ledger, sessions)
         write_artifact(artifacts / "p6-validation.json", body)
         echo(f"validation chose {body['chosen']}")

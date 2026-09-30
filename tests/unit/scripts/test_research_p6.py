@@ -26,6 +26,8 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import multiprocessing
+import os
 import statistics
 import subprocess
 import sys
@@ -34,6 +36,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
+from time import monotonic, sleep
 from types import ModuleType
 from typing import Any, Final
 from zoneinfo import ZoneInfo
@@ -47,7 +50,7 @@ from strategy_fixtures import READ_AT, REVERSAL, write_strategy_corpus
 
 from openalpha_cn import strategy_view
 from openalpha_cn.backtest.outcome_statistics import sign_flip_test
-from openalpha_cn.backtest.strategy_backtest import EQUAL_WEIGHT_ALL_A
+from openalpha_cn.backtest.strategy_backtest import EQUAL_WEIGHT_ALL_A, StrategyBacktestError
 from openalpha_cn.domain.horizon import parse_horizon
 from openalpha_cn.domain.labels import build_label_window
 from openalpha_cn.domain.panel_batch import ColumnarPanelBatch, PanelColumn, TimelineColumns
@@ -62,6 +65,7 @@ from openalpha_cn.panel_ingest import (
     write_upstream_defects,
 )
 from openalpha_cn.panel_view import panel_store
+from openalpha_cn.runtime.seeding import thread_count_pins
 from openalpha_cn.sdk import OpenAlphaSDK
 from openalpha_cn.strategy_view import StrategyRequestError
 
@@ -1896,3 +1900,258 @@ def test_holdout_rows_with_no_claim_are_refused_by_name(
 
     with pytest.raises(p6.HoldoutClaimMissingError, match="no claim"):
         p6.holdout_verdict(ledger, SESSIONS, registration)
+
+
+# --- V2-P6-023: the measuring stages in worker processes ------------------------------------------
+
+WORKER_COMMANDS: Final[tuple[str, ...]] = (
+    "discovery",
+    "composition-sources",
+    "composition-strategies",
+    "validation",
+)
+SLOW: Final[int] = 49
+"""A holding count the pooled fake answers only once a `LATE` configuration has finished, when it
+runs in a worker process: an earlier configuration that finishes after a later one."""
+LATE: Final[int] = 46
+REFUSED: Final[int] = 48
+"""A holding count the pooled fake's book refuses: a refused row the measure records."""
+CRASH: Final[int] = 47
+"""A holding count the pooled fake crashes on: an error that is not a refusal."""
+
+
+class _PooledSDK(_FakeSDK):
+    """`_FakeSDK`, built in each worker process by `_pooled_sdk`, logging every backtest it
+    answers to `calls.jsonl` in the runtime directory -- the process, the thread pins it ran
+    under -- in the order they finished."""
+
+    def __init__(self, runtime_dir: Path) -> None:
+        super().__init__()
+        self.log = runtime_dir / "calls.jsonl"
+
+    def _finished(self) -> list[dict[str, Any]]:
+        if not self.log.exists():
+            return []
+        return [json.loads(line) for line in self.log.read_text(encoding="utf-8").splitlines()]
+
+    def run_strategy_backtest(self, **config: Any) -> _Backtest:
+        holding = config["holding_count"]
+        try:
+            if holding == SLOW and multiprocessing.parent_process() is not None:
+                deadline = monotonic() + 30
+                while monotonic() < deadline and all(
+                    entry["holding_count"] != LATE for entry in self._finished()
+                ):
+                    sleep(0.05)
+            if holding == CRASH:
+                raise RuntimeError("a bug in the worker, not a refusal")
+            if holding == REFUSED:
+                raise StrategyBacktestError("the fake book refuses it")
+            return super().run_strategy_backtest(**config)
+        finally:
+            entry = {
+                "config_id": grid.config_id(config),
+                "holding_count": holding,
+                "pid": os.getpid(),
+                "pins": {name: os.environ.get(name) for name in thread_count_pins()},
+            }
+            with self.log.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry) + "\n")
+
+
+def _pooled_sdk(runtime_dir: Path) -> _PooledSDK:
+    """The picklable, module-level factory a worker process builds its SDK with."""
+    return _PooledSDK(runtime_dir)
+
+
+def _strategy_id(config: Mapping[str, object]) -> str:
+    """The identity of the backtest request a discovery configuration makes."""
+    return _id({key: value for key, value in config.items() if key != "ic"})
+
+
+def _pooled_configs(*holdings: int) -> tuple[dict[str, Any], ...]:
+    """The first discovery configurations, with the holding counts that steer the pooled fake."""
+    return tuple(
+        {**config, "holding_count": holding}
+        for config, holding in zip(p6.discovery_configs(SESSIONS), holdings, strict=False)
+    )
+
+
+def _pooled_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, at: datetime) -> p6.Environment:
+    research = tmp_path / "scripts" / "research"
+    monkeypatch.setattr(
+        registry, "_imported_package", lambda: tmp_path / "src" / "openalpha_cn" / "__init__.py"
+    )
+    monkeypatch.setattr(
+        registry, "_imported_scripts", lambda: (research / "grid.py", research / "registry.py")
+    )
+    return p6.Environment(
+        precondition=lambda runtime_dir: None,
+        sessions=lambda runtime_dir: SESSIONS,
+        sdk=_pooled_sdk,
+        code_commit=lambda: COMMIT,
+        repo=tmp_path,
+        clock=lambda: at,
+    )
+
+
+def _discover(environment: p6.Environment, runtime: Path, ledger: Path, workers: int) -> int:
+    runtime.mkdir(parents=True, exist_ok=True)
+    arguments = ["discovery", "--runtime-dir", str(runtime), "--ledger", str(ledger)]
+    return p6.main([*arguments, "--workers", str(workers)], environment=environment)
+
+
+def _calls(runtime: Path) -> list[dict[str, Any]]:
+    log = runtime / "calls.jsonl"
+    return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+
+
+def _rows_without_time(ledger: Path) -> list[dict[str, Any]]:
+    return [
+        {key: value for key, value in json.loads(line).items() if key != "recorded_at"}
+        for line in ledger.read_text(encoding="utf-8").splitlines()
+    ]
+
+
+def _no_worker_left(pids: set[int]) -> bool:
+    for pid in pids:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            continue
+        return False
+    return not multiprocessing.active_children()
+
+
+def test_a_stage_measured_by_worker_processes_writes_the_serial_runs_ledger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The rows `--workers 3` writes are the rows `--workers 1` writes -- the same
+    configurations, in configuration order, the same results value for value, a refused row and a
+    window-refused row included -- though the first configuration finished after a later one;
+    only `recorded_at` differs. Each worker ran with the thread counts pinned; this process's
+    environment is left as it was."""
+    configs = list(_pooled_configs(SLOW, 50, REFUSED, LATE, 50, 50))
+    configs[4] = {**configs[4], "end": date(2021, 12, 31)}  # its IC label leaves the stage
+    monkeypatch.setattr(p6, "discovery_configs", lambda sessions: tuple(configs))
+    for name in thread_count_pins():
+        monkeypatch.delenv(name, raising=False)
+    serial_world = _pooled_world(tmp_path, monkeypatch, AT)
+    pooled_world = _pooled_world(tmp_path, monkeypatch, AT + timedelta(hours=1))
+    serial, pooled = tmp_path / "serial" / "ledger.jsonl", tmp_path / "pooled" / "ledger.jsonl"
+
+    assert _discover(serial_world, tmp_path / "serial-runtime", serial, 1) == 0
+    serial_out = capsys.readouterr().out
+    assert _discover(pooled_world, tmp_path / "pooled-runtime", pooled, 3) == 0
+    pooled_out = capsys.readouterr().out
+
+    assert _rows_without_time(pooled) == _rows_without_time(serial)
+    assert [row.recorded_at for row in grid.read_ledger(pooled)] == [AT + timedelta(hours=1)] * 6
+    assert [row.config_id for row in grid.read_ledger(pooled)] == [_id(c) for c in configs]
+    results = [row.result for row in grid.read_ledger(pooled)]
+    assert results[2] == {
+        "error": "StrategyBacktestError: the fake book refuses it",
+        "code_commit": COMMIT,
+    }
+    assert results[4]["error"].startswith("StageWindowError: ")
+    assert results[4]["code_commit"] == COMMIT
+    assert pooled_out == serial_out  # the same progress lines, in the same order
+    measured = _calls(tmp_path / "pooled-runtime")
+    order = [entry["config_id"] for entry in measured]
+    assert order.index(_strategy_id(configs[3])) < order.index(_strategy_id(configs[0]))
+    assert _strategy_id(configs[4]) not in order  # a window refusal is never measured
+    assert {entry["pid"] for entry in _calls(tmp_path / "serial-runtime")} == {os.getpid()}
+    assert os.getpid() not in {entry["pid"] for entry in measured}
+    assert all(entry["pins"] == thread_count_pins() for entry in measured)
+    assert not any(name in os.environ for name in thread_count_pins())
+    assert _no_worker_left({entry["pid"] for entry in measured})
+
+
+def test_a_stage_resumed_in_worker_processes_never_submits_what_the_ledger_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    configs = _pooled_configs(50, 50, 50, 50)
+    monkeypatch.setattr(p6, "discovery_configs", lambda sessions: configs)
+    ledger = tmp_path / "ledger.jsonl"
+    for held in (configs[1], configs[3]):
+        grid.append_ledger(ledger, "discovery", held, _result(), recorded_at=AT)
+    runtime = tmp_path / "runtime"
+
+    assert _discover(_pooled_world(tmp_path, monkeypatch, AT), runtime, ledger, 2) == 0
+
+    out = capsys.readouterr().out
+    assert sorted(entry["config_id"] for entry in _calls(runtime)) == sorted(
+        _strategy_id(config) for config in (configs[0], configs[2])
+    )
+    assert [line.split()[1] for line in out.splitlines()[:4]] == ["ran", "skipped"] * 2
+    assert "discovery: 2 ran, 2 skipped, family 4" in out
+    assert [row.config_id for row in grid.read_ledger(ledger)] == [
+        _id(configs[1]),
+        _id(configs[3]),
+        _id(configs[0]),
+        _id(configs[2]),
+    ]
+
+
+def test_an_error_in_a_worker_stops_the_stage_after_the_rows_before_it_and_leaves_no_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The serial run's stop: the rows before the failing configuration land, the error
+    propagates, and no row after it is written -- not even one a worker finished before the
+    failure surfaced. The pool is shut down with no worker process left."""
+    configs = _pooled_configs(SLOW, 50, CRASH, 50, LATE, 50)
+    monkeypatch.setattr(p6, "discovery_configs", lambda sessions: configs)
+    ledger, runtime = tmp_path / "ledger.jsonl", tmp_path / "runtime"
+
+    with pytest.raises(RuntimeError, match="a bug in the worker"):
+        _discover(_pooled_world(tmp_path, monkeypatch, AT), runtime, ledger, 3)
+
+    assert [row.config_id for row in grid.read_ledger(ledger)] == [
+        _id(configs[0]),
+        _id(configs[1]),
+    ]
+    measured = _calls(runtime)
+    assert _strategy_id(configs[4]) in [entry["config_id"] for entry in measured]
+    assert _no_worker_left({entry["pid"] for entry in measured})
+
+
+def test_workers_need_a_factory_a_worker_process_can_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A worker builds its own SDK; a lambda does not pickle, so it is refused before anything
+    is measured rather than failing inside the pool."""
+    environment = _pooled_world(tmp_path, monkeypatch, AT)
+    world = p6.Environment(
+        precondition=environment.precondition,
+        sessions=environment.sessions,
+        sdk=lambda runtime_dir: _FakeSDK(),
+        code_commit=environment.code_commit,
+        repo=environment.repo,
+    )
+    ledger = tmp_path / "ledger.jsonl"
+
+    assert _discover(world, tmp_path / "runtime", ledger, 2) == 1
+
+    assert "WorkerFactoryError" in capsys.readouterr().err
+    assert not ledger.exists()
+
+
+@pytest.mark.parametrize("command", WORKER_COMMANDS)
+def test_a_measuring_command_takes_a_worker_count_of_at_least_one(command: str) -> None:
+    arguments = [command, "--runtime-dir", "runtime", "--ledger", "ledger.jsonl"]
+    assert p6._parser().parse_args(arguments).workers == 1
+    assert p6._parser().parse_args([*arguments, "--workers", "3"]).workers == 3
+    for count in ("0", "-2", "two"):
+        with pytest.raises(SystemExit) as refused:
+            p6._parser().parse_args([*arguments, "--workers", count])
+        assert refused.value.code == 2
+
+
+@pytest.mark.parametrize("command", [c for c in p6.COMMANDS if c not in WORKER_COMMANDS])
+def test_no_other_command_takes_a_worker_count(command: str) -> None:
+    """`holdout` runs once through `registry.run_holdout`; `register` and the reports measure
+    nothing."""
+    arguments = [command, "--runtime-dir", "runtime", "--ledger", "ledger.jsonl"]
+    with pytest.raises(SystemExit) as refused:
+        p6._parser().parse_args([*arguments, "--workers", "2"])
+    assert refused.value.code == 2

@@ -47,6 +47,9 @@ here. The ledger stores a configuration in its canonical JSON form (dates and da
 text, decimals as their exact text, tuples as lists, keys sorted), and a configuration's identity
 is the SHA-256 of that form. A configuration is one row of its stage: a second is refused, which
 is also what lets an interrupted `run_grid` resume by skipping what the ledger already holds.
+`run_grid_in_pool` (`V2-P6-023`) writes `run_grid`'s rows with the measurements run by an
+executor -- worker processes -- while the calling process alone appends them, in configuration
+order, through the same writer.
 
 The holdout is not written here by any public function. `run_grid` refuses the holdout stage and
 `append_ledger` refuses it too; the only writer is `registry.run_holdout`, which goes through the
@@ -73,6 +76,7 @@ import os
 import statistics
 import sys
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import Executor, Future
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -921,12 +925,7 @@ def run_grid(
     `result_extra` is added to every refused row the runner writes itself -- the commit a stage
     ran at, say (`V2-P6-010`) -- so a refused row states what a measured one does.
     """
-    stage = _checked_stage(stage)
-    if stage == HOLDOUT_STAGE:
-        raise ResearchLedgerError(
-            f"the {HOLDOUT_STAGE!r} stage runs once, through registry.run_holdout behind its "
-            "registration guard, and never from a grid"
-        )
+    stage = _grid_stage(stage)
     now = _utc_now if clock is None else clock
     existing = list(read_ledger(ledger))
     ran = skipped = 0
@@ -946,9 +945,142 @@ def run_grid(
             check_window(stage, first, last)
             result = dict(measure(config))
         except recorded as error:
-            result = {"error": f"{type(error).__name__}: {error}", **(result_extra or {})}
+            result = _refused_result(_refusal_text(error), result_extra)
         _append(ledger, existing, stage, config, result, recorded_at=now())
         ran += 1
+    return GridRun(stage=stage, ran=ran, skipped=skipped)
+
+
+def _grid_stage(stage: str) -> str:
+    stage = _checked_stage(stage)
+    if stage == HOLDOUT_STAGE:
+        raise ResearchLedgerError(
+            f"the {HOLDOUT_STAGE!r} stage runs once, through registry.run_holdout behind its "
+            "registration guard, and never from a grid"
+        )
+    return stage
+
+
+def _refusal_text(error: Exception) -> str:
+    return f"{type(error).__name__}: {error}"
+
+
+def _refused_result(refusal: str, result_extra: Mapping[str, object] | None) -> dict[str, object]:
+    return {"error": refusal, **(result_extra or {})}
+
+
+def measure_or_refusal(
+    measure: Measure, config: Mapping[str, object], recorded: tuple[type[Exception], ...]
+) -> dict[str, object] | str:
+    """One configuration measured where the measure runs -- a worker process of
+    `run_grid_in_pool` -- as its result, or as the text of the refusal `run_grid` would record.
+
+    The refusal travels as text because an exception does not always survive pickling back to
+    the parent, and the text is all a refused row keeps. Anything outside `recorded` propagates.
+    """
+    try:
+        return dict(measure(config))
+    except recorded as error:
+        return _refusal_text(error)
+
+
+@dataclass(frozen=True, slots=True)
+class _Planned:
+    """One configuration of a pooled run, in configuration order: held by the ledger already,
+    its outcome to come (a measurement submitted, or a window refusal settled at once), or the
+    error that stops the run here."""
+
+    config: Mapping[str, object]
+    held: bool = False
+    outcome: Future[dict[str, object] | str] | None = None
+    error: Exception | None = None
+
+
+def _settled(refusal: str) -> Future[dict[str, object] | str]:
+    future: Future[dict[str, object] | str] = Future()
+    future.set_result(refusal)
+    return future
+
+
+def run_grid_in_pool(
+    ledger: Path,
+    stage: str,
+    configs: Sequence[Mapping[str, object]],
+    measure: Measure,
+    *,
+    executor: Executor,
+    label_sessions: Callable[[Mapping[str, object]], int],
+    sessions: Sequence[date] = (),
+    refusals: tuple[type[Exception], ...] = DEFAULT_REFUSALS,
+    clock: Callable[[], datetime] | None = None,
+    result_extra: Mapping[str, object] | None = None,
+    landed: Callable[[int, Mapping[str, object], bool], None] | None = None,
+) -> GridRun:
+    """`run_grid`'s rows, with the measurements run by `executor` (`V2-P6-023`).
+
+    Every configuration the ledger already holds for `stage` is skipped and never submitted; one
+    whose window leaves the stage is a refused row and is never submitted; every other one is
+    handed to `executor` as `measure_or_refusal(measure, config, ...)`, so `measure` must pickle
+    for a process pool (a module-level function does). **Only this process writes the ledger,
+    through `_append`, in configuration order**: a result that finishes early is held until every
+    earlier configuration's row has been appended, so the rows are `run_grid`'s rows, in its
+    order, value for value; only `recorded_at` differs.
+
+    It stops where `run_grid` stops. An error outside `refusals` -- raised by a measurement, or by
+    a configuration whose window cannot be placed -- is raised once the rows of every earlier
+    configuration are appended, and no later row is written: a later result that already arrived
+    is dropped and measured again by the next run. Submitted configurations not yet started are
+    cancelled; the caller owns `executor` and shuts it down. `landed(index, config, ran)` is
+    called as each configuration is appended (`ran`) or skipped, in order, `index` from 1.
+    """
+    stage = _grid_stage(stage)
+    now = _utc_now if clock is None else clock
+    existing = list(read_ledger(ledger))
+    recorded: tuple[type[Exception], ...] = (StageWindowError, *refusals)
+    held = {row.config_id for row in existing if row.stage == stage and row.kind == MEASUREMENT}
+    plan: list[_Planned] = []
+    ran = skipped = 0
+    try:
+        for config in configs:
+            try:
+                identity = config_id(config)
+                if identity in held:
+                    plan.append(_Planned(config, held=True))
+                    continue
+                first, last = measured_window(
+                    config, label_sessions=label_sessions(config), sessions=sessions
+                )
+                try:
+                    check_window(stage, first, last)
+                except StageWindowError as error:
+                    outcome = _settled(_refusal_text(error))
+                else:
+                    outcome = executor.submit(measure_or_refusal, measure, config, recorded)
+            except Exception as error:
+                plan.append(_Planned(config, error=error))
+                break
+            # A repeat later in `configs` is held by the time the append loop reaches it, as the
+            # serial runner finds this row in the ledger by then.
+            held.add(identity)
+            plan.append(_Planned(config, outcome=outcome))
+        for index, step in enumerate(plan, start=1):
+            if step.error is not None:
+                raise step.error
+            if step.outcome is None:
+                skipped += 1
+                if landed is not None:
+                    landed(index, step.config, False)
+                continue
+            answer = step.outcome.result()
+            result = answer if isinstance(answer, dict) else _refused_result(answer, result_extra)
+            _append(ledger, existing, stage, step.config, result, recorded_at=now())
+            ran += 1
+            if landed is not None:
+                landed(index, step.config, True)
+    finally:
+        for step in plan:
+            if step.outcome is not None:
+                step.outcome.cancel()
     return GridRun(stage=stage, ran=ran, skipped=skipped)
 
 

@@ -84,6 +84,22 @@ def test_seed_everything_pins_every_blas_thread_env_var_to_one(
         assert os.environ[name] == "1"
 
 
+def test_the_thread_count_pins_are_the_variables_seed_everything_pins_each_to_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`thread_count_pins` is the one list, for a caller that must pin a process it spawns
+    before that process loads a numerical library (`scripts/research/p6.py --workers`,
+    `V2-P6-023`) rather than reseed this one."""
+    pins = seeding.thread_count_pins()
+    for name in _BLAS_THREAD_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+    seed_everything(1)
+
+    assert pins == dict.fromkeys(_BLAS_THREAD_ENV_VARS, "1")
+    assert {name: os.environ[name] for name in pins} == pins
+
+
 def test_seed_everything_sets_pythonhashseed_for_processes_spawned_afterward(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -48,7 +48,7 @@ import os
 import random
 from collections.abc import Callable
 
-__all__ = ["register_random_source", "seed_everything"]
+__all__ = ["register_random_source", "seed_everything", "thread_count_pins"]
 
 RandomSeeder = Callable[[int], None]
 
@@ -75,6 +75,17 @@ def register_random_source(name: str, seeder: RandomSeeder) -> None:
     _registered_sources[name] = seeder
 
 
+def thread_count_pins() -> dict[str, str]:
+    """Every BLAS/OpenMP thread-count variable ADR-0003 names, each pinned to `"1"`.
+
+    A library reads these once, when it loads, so they pin only a process that starts with them
+    in its environment: `seed_everything` sets them for processes spawned after it, and a caller
+    that spawns worker processes (`scripts/research/p6.py --workers`, `V2-P6-023`) puts them in
+    the environment its workers start with.
+    """
+    return dict.fromkeys(_BLAS_THREAD_ENV_VARS, "1")
+
+
 def seed_everything(seed: int) -> None:
     """Seed every registered random source and pin BLAS/OpenMP thread counts.
 
@@ -82,8 +93,7 @@ def seed_everything(seed: int) -> None:
     `request.random_seed`. Idempotent and side-effect-safe to call repeatedly with the
     same seed.
     """
-    for pinned_var in _BLAS_THREAD_ENV_VARS:
-        os.environ[pinned_var] = "1"
+    os.environ.update(thread_count_pins())
     os.environ["PYTHONHASHSEED"] = str(seed)
     for seeder in _registered_sources.values():
         seeder(seed)
