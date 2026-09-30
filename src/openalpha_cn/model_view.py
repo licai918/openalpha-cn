@@ -1931,10 +1931,26 @@ def _prediction_instants(store: PanelStore, request: ModelRunRequest) -> tuple[d
 
 
 def _instants_in_range(store: PanelStore, request: ModelRunRequest) -> tuple[datetime, ...]:
-    """`_prediction_instants` without its refusal: `()` when the range holds no stored build."""
+    """`_prediction_instants` without its refusal: `()` when the range holds no stored build.
+
+    Only the years `start..end` spans are read (`V2-P6-025`). A build is kept here only when its
+    day in `MODEL_DATE_ZONE` falls in the range, and the factor tiers file a build under its
+    instant's year in `feature_matrix.FEATURE_DATE_ZONE` -- the same zone -- so a year outside
+    the range holds no build this could keep. `request.years` is wider on purpose: the label,
+    calendar and registry reads beside this one need the year before the range (a halt or an
+    adjustment factor in force when a window opens), and the factor store need not hold it.
+
+    A request that declares none of the years its range spans reads what it declared, as it
+    always did, so it is still refused by the partition it named or answered with no build in
+    range -- narrowing it to nothing would turn the first into the second.
+    """
+    spanned = tuple(
+        year for year in request.years if request.start.year <= year <= request.end.year
+    )
+    years = spanned or request.years
     try:
         stored = stored_cross_section_instants(
-            store, columns=request.columns, years=request.years, as_of=request.as_of
+            store, columns=request.columns, years=years, as_of=request.as_of
         )
     except FeatureMatrixError as error:
         raise ModelPanelUnreadableError(

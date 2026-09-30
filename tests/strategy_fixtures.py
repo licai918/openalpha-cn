@@ -370,6 +370,8 @@ TWO_YEAR_FIRST: Final[date] = date(2026, 1, 5)
 (`panel_ingest._refuse_missing_factor_sessions`), so all of 2026 is priced."""
 TWO_YEAR_BUILDS_FROM: Final[date] = date(2026, 12, 1)
 """Factor builds start here: every lookback the two-year tests declare fits inside December."""
+TWO_YEAR_FACTOR_YEAR_START: Final[date] = date(2027, 1, 4)
+"""2027's first session: a store built from here holds no factor partition for 2026 at all."""
 TWO_YEAR_LAST: Final[date] = date(2027, 1, 22)
 TWO_YEAR_NEW_YEAR_HOLIDAY: Final[date] = date(2027, 1, 1)
 TWO_YEAR_LATE_LISTING: Final[tuple[str, date]] = ("000011.SZ", date(2027, 1, 11))
@@ -508,12 +510,18 @@ def _write_by_year(store: PanelStore, panel: GeneratedPanel) -> None:
         write_price_limits(store, [part], calendar=calendar)
 
 
-def write_two_year_corpus(root: Path) -> GeneratedPanel:
+def write_two_year_corpus(
+    root: Path, *, builds_from: date = TWO_YEAR_BUILDS_FROM
+) -> GeneratedPanel:
     """A panel priced 2026-01-05 .. 2027-01-22, with a raw build on every session from 12-01.
 
     Two calendar years in every dataset a strategy backtest reads, so a signal day in December
     trades in January and every year-scoped read the streamed feeds make is exercised across the
     boundary. No `index_daily`: a test over it benchmarks against `equal_weight_all_a` alone.
+
+    `builds_from` moves the first build (`V2-P6-025`): from `TWO_YEAR_FACTOR_YEAR_START` the factor
+    store holds 2027 alone while every other dataset still holds 2026 -- the research store's
+    shape, whose factor builds begin two years after its price warm-up does.
     """
     store = PanelStore(root / "panel")
     panel = _two_year_panel()
@@ -523,7 +531,7 @@ def write_two_year_corpus(root: Path) -> GeneratedPanel:
         [
             _two_year_build(store, panel, session)
             for session in panel.sessions
-            if session >= TWO_YEAR_BUILDS_FROM
+            if session >= builds_from
         ],
     )
     return panel

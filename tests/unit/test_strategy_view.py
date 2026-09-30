@@ -15,7 +15,7 @@ import math
 import statistics
 from array import array
 from collections.abc import Mapping, Sequence
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any, Final, Literal
 from zoneinfo import ZoneInfo
@@ -31,6 +31,7 @@ from strategy_fixtures import (
     PROBE_TRANSFORMS,
     READ_AT,
     REVERSAL,
+    TWO_YEAR_FACTOR_YEAR_START,
     TieredCorpus,
     stored_value,
     write_strategy_corpus,
@@ -67,13 +68,18 @@ from openalpha_cn.backtest.strategy_backtest import (
     usable_fit,
     walk_forward_fits,
 )
+from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
+from openalpha_cn.domain.daily_prices import DAILY_DATASET
 from openalpha_cn.domain.horizon import parse_horizon
 from openalpha_cn.domain.labels import halt_corpus_for_years
 from openalpha_cn.domain.price_limits import TradingState
-from openalpha_cn.domain.trading_calendar import TradingCalendar
+from openalpha_cn.domain.trading_calendar import TRADING_CALENDAR_DATASET, TradingCalendar
+from openalpha_cn.feature_matrix import FEATURE_DATE_ZONE
 from openalpha_cn.model_view import (
+    MODEL_DATE_ZONE,
     UNFILED_CONFIG_DIGEST,
     LabelReach,
+    ModelPanelUnreadableError,
     ModelRunRequest,
     OutcomeLabels,
     feature_cross_section,
@@ -81,7 +87,11 @@ from openalpha_cn.model_view import (
 )
 from openalpha_cn.panel.catalog import DEFAULT_DATE_TIMEZONE
 from openalpha_cn.panel.store import PanelStore
-from openalpha_cn.panel_factors import load_factor_observations
+from openalpha_cn.panel_factors import (
+    factor_manifest_dataset,
+    factor_observation_dataset,
+    load_factor_observations,
+)
 from openalpha_cn.panel_ingest import (
     load_adjustment_histories,
     load_daily_bars,
@@ -96,6 +106,7 @@ from openalpha_cn.strategy_view import (
     PROTOCOL_PARTICIPATION_CAP,
     PROTOCOL_POSITION_CAPITAL,
     PROTOCOL_SLIPPAGE_RATE,
+    StrategyPanelUnreadableError,
     StrategyRequestError,
     StrategyRunBlockedError,
     backtest_strategy,
@@ -1343,3 +1354,212 @@ def test_a_held_training_window_return_refuses_the_tolerance_its_chain_would_giv
     with pytest.raises(AttributeError, match="tolerance"):
         _ = returned.tolerance
     assert _held_example(held) is held
+
+
+# --- V2-P6-025: a factor store that begins a year after every other dataset does ----------------
+#
+# The research store prices 2013 onward and builds its factor tiers from 2015-01-05 alone; the
+# protocol's stage-2 lookbacks open on 2015-01-06. The walk-forward source asked the model plane
+# for the year before its first training day, the model plane read the factor tiers over every
+# year it was handed, and the factor store -- which holds no 2014 on purpose -- refused every
+# configuration by `partition_missing`. Here the factor store begins on 2027-01-04 while the
+# calendar, registry, prices and halts hold 2026 too, and the store it is held against holds the
+# same builds plus December 2026's.
+
+FACTOR_START_SIGNAL: Final[date] = date(2027, 1, 13)
+"""The seventh session after the first build: a lookback of seven sessions opens on it exactly."""
+FACTOR_START_BEFORE: Final[date] = date(2027, 1, 6)
+"""Two sessions after the first build: the same lookback opens on 2026-12-24, before it."""
+FACTOR_START_KINDS: Final[dict[str, dict[str, Any]]] = {
+    "trailing_ic": {
+        "components": (),
+        "trailing_ic": {**TRAILING, "ic_window_sessions": 8},
+    },
+    "walk_forward": {"components": (), "walk_forward": TWO_YEAR_WALK_FORWARD},
+}
+
+
+@pytest.fixture(scope="module")
+def factor_year_start(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> tuple[PanelStore, GeneratedPanel]:
+    root = tmp_path_factory.mktemp("strategy-view-factor-year-start")
+    panel = write_two_year_corpus(root, builds_from=TWO_YEAR_FACTOR_YEAR_START)
+    return PanelStore(root / "panel"), panel
+
+
+def _factor_start_request(panel: GeneratedPanel, kind: str, *, start: date) -> Any:
+    return strategy_request(
+        combine="zscore_sum",
+        transform=None,
+        neutralization=None,
+        start=start,
+        end=panel.sessions[-1],
+        as_of=panel.as_of,
+        exchange=EXCHANGE,
+        rebalance_every_sessions=4,
+        holding_count=3,
+        buffer_rank=None,
+        max_industry_weight=None,
+        benchmarks=(EQUAL_WEIGHT_ALL_A,),
+        **FACTOR_START_KINDS[kind],
+    )
+
+
+def _model_run(request: Any, *, start: date, end: date) -> ModelRunRequest:
+    """The run `_ModelFeed` hands the model plane, over both years every other dataset holds."""
+    spec = request.source.walk_forward
+    return ModelRunRequest(
+        declaration=request.model.declaration,
+        columns=request.columns,
+        missing=spec.missing,
+        start=start,
+        end=end,
+        as_of=request.as_of,
+        years=TWO_YEARS,
+        exchange=EXCHANGE,
+        horizon=parse_horizon(f"{spec.horizon_sessions}d"),
+        minimum_scored_ratio=0.0,
+        shelf_life=None,
+        config_digest=UNFILED_CONFIG_DIGEST,
+        declared_feature_version=None,
+    )
+
+
+def test_the_factor_store_begins_a_year_after_every_other_dataset(
+    factor_year_start: tuple[PanelStore, GeneratedPanel],
+) -> None:
+    """And a build's day, a prediction day and a factor partition's year are one zone's: the
+    model plane reads only the years its range spans on the strength of it."""
+    store, _ = factor_year_start
+
+    assert MODEL_DATE_ZONE.key == FEATURE_DATE_ZONE == DEFAULT_DATE_TIMEZONE
+    assert store.registered_years(factor_observation_dataset(REVERSAL)) == (2027,)
+    assert store.registered_years(factor_manifest_dataset(REVERSAL)) == (2027,)
+    for dataset in (TRADING_CALENDAR_DATASET, ADJ_FACTOR_DATASET, DAILY_DATASET):
+        assert store.registered_years(dataset) == TWO_YEARS
+
+
+@pytest.mark.parametrize("kind", sorted(FACTOR_START_KINDS))
+def test_a_lookback_opening_on_the_first_factor_year_is_measured_as_if_the_year_before_were_held(
+    factor_year_start: tuple[PanelStore, GeneratedPanel],
+    two_years: tuple[PanelStore, GeneratedPanel],
+    kind: str,
+) -> None:
+    """The protocol's stage-2 shape: the lookback opens on the factor store's first build.
+
+    Measured, not refused -- and answered exactly as a store that also holds the year before's
+    builds answers it, period for period and fit for fit, so that year contributes nothing."""
+    store, panel = factor_year_start
+    held, _ = two_years
+    request = _factor_start_request(panel, kind, start=FACTOR_START_SIGNAL)
+
+    answered = backtest_strategy(store, request)
+
+    assert load_strategy_inputs(store, request).lookback_sessions[0] == (TWO_YEAR_FACTOR_YEAR_START)
+    assert any(not period.held for period in answered.periods)
+    if kind == "walk_forward":
+        assert any(fit.refusal is None for fit in answered.model_fits)
+    assert backtest_view(answered) == backtest_view(backtest_strategy(held, request))
+
+
+@pytest.mark.parametrize("kind", sorted(FACTOR_START_KINDS))
+def test_a_lookback_reaching_before_the_first_factor_year_is_refused_naming_the_partition(
+    factor_year_start: tuple[PanelStore, GeneratedPanel], kind: str
+) -> None:
+    """A window that does ask about 2026's sessions is refused, never read as an empty year: the
+    store cannot say whether a 2026 build would have scored, so it is not told that none did."""
+    store, panel = factor_year_start
+    request = _factor_start_request(panel, kind, start=FACTOR_START_BEFORE)
+
+    with pytest.raises(StrategyPanelUnreadableError, match=r"year=2026 .*partition_missing"):
+        backtest_strategy(store, request)
+
+
+def test_a_cross_section_reads_the_year_before_only_when_its_instant_could_draw_on_it(
+    factor_year_start: tuple[PanelStore, GeneratedPanel],
+    two_years: tuple[PanelStore, GeneratedPanel],
+) -> None:
+    """At 16:30 on 2027-01-04 the newest visible build is that day's own, and the answer does not
+    depend on 2026. At 09:00 the same morning it is 2026-12-31's -- the year before is read, and a
+    store that does not hold it refuses by name rather than answering with nothing."""
+    store, panel = factor_year_start
+    held, _ = two_years
+    run = _model_run(
+        _factor_start_request(panel, "walk_forward", start=FACTOR_START_SIGNAL),
+        start=TWO_YEAR_FACTOR_YEAR_START,
+        end=TWO_YEAR_FACTOR_YEAR_START,
+    )
+    evening = session_publication_instant(TWO_YEAR_FACTOR_YEAR_START)
+    morning = datetime.combine(TWO_YEAR_FACTOR_YEAR_START, time(9, 0), tzinfo=SHANGHAI)
+
+    answered = feature_cross_section(store, run, as_of=evening)
+    assert answered.as_of == evening
+    assert answered == feature_cross_section(held, run, as_of=evening)
+    assert feature_cross_section(held, run, as_of=morning).as_of == session_publication_instant(
+        date(2026, 12, 31)
+    )
+    with pytest.raises(ModelPanelUnreadableError, match=r"year=2026 .*partition_missing"):
+        feature_cross_section(store, run, as_of=morning)
+
+
+def test_a_training_panel_opening_on_the_first_factor_year_is_the_one_a_fuller_store_labels(
+    factor_year_start: tuple[PanelStore, GeneratedPanel],
+    two_years: tuple[PanelStore, GeneratedPanel],
+) -> None:
+    store, panel = factor_year_start
+    held, _ = two_years
+    run = _model_run(
+        _factor_start_request(panel, "walk_forward", start=FACTOR_START_SIGNAL),
+        start=TWO_YEAR_FACTOR_YEAR_START,
+        end=date(2027, 1, 8),
+    )
+    deadline = session_publication_instant(FACTOR_START_SIGNAL)
+
+    answered = training_panel(store, run, deadline=deadline)
+
+    assert answered is not None
+    first = panel.sessions.index(TWO_YEAR_FACTOR_YEAR_START)
+    assert {example.label.window.prediction_day for example in answered.examples} == set(
+        panel.sessions[first : first + 5]
+    )
+    assert answered == training_panel(held, run, deadline=deadline)
+
+
+def test_every_cross_section_across_the_year_boundary_is_the_whole_range_reads_newest_build(
+    two_years: tuple[PanelStore, GeneratedPanel],
+) -> None:
+    """Morning and evening of every session from 12-28 to 01-08, on the store holding both years:
+    the cross section is the newest build at or before the instant among every build of both
+    years, read here with one whole-range load, value for value."""
+    store, panel = two_years
+    run = _model_run(
+        _factor_start_request(panel, "walk_forward", start=FACTOR_START_SIGNAL),
+        start=date(2026, 12, 28),
+        end=date(2027, 1, 8),
+    )
+    stored = load_factor_observations(store, REVERSAL, years=TWO_YEARS, as_of=panel.as_of)
+    days = [day for day in panel.sessions if date(2026, 12, 28) <= day <= date(2027, 1, 8)]
+    asked = [
+        instant
+        for day in days
+        for instant in (
+            datetime.combine(day, time(9, 0), tzinfo=SHANGHAI),
+            session_publication_instant(day),
+        )
+    ]
+
+    for instant in asked:
+        newest = max(row.as_of for row in stored if row.as_of <= instant)
+        expected = {
+            row.subject: row.value
+            for row in stored
+            if row.as_of == newest and row.coverage == "computed" and row.value is not None
+        }
+        section = feature_cross_section(store, run, as_of=instant)
+        assert section.as_of == newest
+        assert {
+            row.ts_code: row.values[0]
+            for row in section.cross_section.rows
+            if row.values[0] is not None
+        } == expected

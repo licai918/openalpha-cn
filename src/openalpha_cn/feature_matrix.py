@@ -218,6 +218,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Final, Literal, Self, TypeVar, get_args
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
@@ -288,6 +289,9 @@ FEATURE_DATE_ZONE: Final[str] = DEFAULT_DATE_TIMEZONE
 `shortlist_view.SHORTLIST_DATE_ZONE` and this one differ in form and not in value: that face
 needs a `ZoneInfo` because it also takes an instant's calendar day, and this module never does --
 every day it computes comes back from `newest_published_session`, which takes the zone by name.
+The one date it does take is a year: `_newest_visible_rows` resolves an instant to the factor
+partition year it is filed under, which is this zone's year because the factor writers split at
+the same default (`V2-P6-025`).
 Aliased rather than used inline so the one place a zone is decided is greppable.
 """
 
@@ -853,6 +857,46 @@ def _rows_for(
     )
 
 
+def _newest_visible_rows(
+    store: PanelStore, column: FeatureColumn, *, years: Sequence[int], as_of: datetime
+) -> tuple[_StoredRow, ...]:
+    """One column's rows in the newest of `years` that holds a build visible at `as_of`.
+
+    `V2-P6-025`. A cross section uses one build per column -- the newest at or before `as_of`
+    (`_resolve_instant`) -- and only that build's rows (`_admitted_cells`). Every row of a factor
+    partition carries its build's `as_of` on all four clocks, and the tiers file a build under
+    its instant's year in `FEATURE_DATE_ZONE` (the writers take `split_panel_batch_by_year` at
+    `panel/catalog.py`'s default zone, and `PanelStore.record_coverage` refuses a partition whose
+    dates leave its year). So a partition after `as_of`'s year holds nothing visible, and one
+    before the newest year holding a visible build holds only older builds: neither can be the
+    newest, and neither is read. Walking the years newest first and stopping at the first with a
+    visible row is the whole-range read's answer, row for row, for every question it answered.
+
+    What changes is only what it refused. A year that cannot hold the build this cross section
+    uses is no longer opened, so the factor store's absence of a year before its first build is
+    not a refusal of a question whose answer lies after it -- the research store holds factor
+    tiers from 2015-01-05 and prices from 2013, and a walk-forward whose window opened on
+    2015-01-06 was refused by `factor_* year=2014 ... partition_missing`. A year that *can* hold
+    it is read and still refuses: an instant before its own year's first visible build walks back
+    into the year before, and a store without that year refuses by name rather than answering
+    with nothing -- `tests/unit/test_strategy_view.py::
+    test_a_cross_section_reads_the_year_before_only_when_its_instant_could_draw_on_it`.
+
+    A request none of whose years is at or before `as_of`'s reads what it declared, as it always
+    did: its answer is a refusal either way, and it stays the one naming the partition it asked
+    for rather than becoming "no stored cross section".
+    """
+    through = as_of.astimezone(ZoneInfo(FEATURE_DATE_ZONE)).year
+    candidates = sorted({year for year in years if year <= through}, reverse=True)
+    if not candidates:
+        return _rows_for(store, column, years=years, as_of=as_of)
+    for year in candidates:
+        rows = _rows_for(store, column, years=(year,), as_of=as_of)
+        if rows:
+            return rows
+    return ()
+
+
 def _declared_addresses(column: FeatureColumn) -> tuple[str, ...]:
     """The content addresses a stored row of this column must carry, in the read's own order.
 
@@ -1097,9 +1141,12 @@ def load_feature_cross_section(
     Step 3 is strictly more conservative than step 1 and never less, which is the asymmetry
     `load_shortlist_cross_section` documents and the reason a fortnight-old cross section is
     honest rather than merely old.
+
+    Step 1 reads each column's newest year holding a build visible at `as_of`, not every year of
+    `request.years` (`_newest_visible_rows`, `V2-P6-025`); step 3 still reads all of them.
     """
     by_column = {
-        column.feature_id: _rows_for(store, column, years=request.years, as_of=as_of)
+        column.feature_id: _newest_visible_rows(store, column, years=request.years, as_of=as_of)
         for column in request.columns
     }
     instant = _resolve_instant(by_column, as_of=as_of)
