@@ -627,6 +627,9 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             # Round 15: rows of a label input that became visible between a record's filing and
             # a later recompute are a correction -- the labels are read at the request's as_of.
             "strategy_view.LABEL_INPUTS",
+            # V2-P6-026: the type of the walk-forward fit cache `score_day` keeps fits in, now
+            # keyed by everything a fit reads; a type, not a read.
+            "strategy_view.FitCache",
         }
     ),
     "openalpha_cn.shortlist_compare": frozenset(

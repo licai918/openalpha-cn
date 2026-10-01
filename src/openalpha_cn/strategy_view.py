@@ -96,6 +96,7 @@ A source of `prediction_ids` reads records the daily command filed at about 18:3
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import math
 import statistics
 import threading
@@ -274,6 +275,8 @@ __all__ = [
     "PROTOCOL_POSITION_CAPITAL",
     "PROTOCOL_SLIPPAGE_RATE",
     "REGISTRATION_CUTOFF",
+    "WALK_FORWARD_FITS_KEPT",
+    "FitCache",
     "ICSeries",
     "ICSeriesPoint",
     "ICSeriesRequest",
@@ -283,6 +286,8 @@ __all__ = [
     "StrategyRequestError",
     "StrategyRunBlockedError",
     "StrategyViewError",
+    "WalkForwardFitCache",
+    "WalkForwardFitKey",
     "backtest_strategy",
     "backtest_view",
     "factor_ic_series",
@@ -769,6 +774,7 @@ def backtest_strategy(
     *,
     predictions: Callable[[str], PredictionRecord | None] | None = None,
     verify_late: Callable[[PredictionRecord], str | None] | None = None,
+    fit_cache: FitCache | None = None,
 ) -> StrategyBacktest:
     """Read the panel into `StrategyInputs` and run the book: the one entry both faces call.
 
@@ -783,10 +789,19 @@ def backtest_strategy(
 
     The run is STREAMED (`V2-P6-014`): the book asks for each signal day's scores when it books
     that period, so memory is bounded by a window rather than by the range.
+
+    `fit_cache` (`V2-P6-026`) is where a walk-forward source keeps its fits and finds those an
+    earlier run of this process made under the same `WalkForwardFitKey`; the answer is the one
+    the run gives without it, byte for byte.
     """
     try:
         inputs = load_strategy_inputs(
-            store, request, predictions=predictions, verify_late=verify_late, stream=True
+            store,
+            request,
+            predictions=predictions,
+            verify_late=verify_late,
+            stream=True,
+            fit_cache=fit_cache,
         )
         return _read(
             lambda: run_strategy_backtest(inputs, request.spec),
@@ -804,6 +819,7 @@ def load_strategy_inputs(
     predictions: Callable[[str], PredictionRecord | None] | None = None,
     verify_late: Callable[[PredictionRecord], str | None] | None = None,
     stream: bool = False,
+    fit_cache: FitCache | None = None,
 ) -> StrategyInputs:
     """Everything the book reads, out of the panel, at `request.as_of`.
 
@@ -811,7 +827,8 @@ def load_strategy_inputs(
     are read as the book asks for them, which is how `backtest_strategy` runs. With the default
     the same feed is drained into `StrategyInputs`' four score fields -- the materialised run, the
     same answer held all at once. A registered-prediction source is always materialised: its
-    batches are already in memory.
+    batches are already in memory. `fit_cache` is `backtest_strategy`'s, handed to a walk-forward
+    source's feed; no other source reads it.
     """
     calendar = _read(
         lambda: load_trading_calendar(
@@ -890,6 +907,7 @@ def load_strategy_inputs(
             signal_days=signal_days,
             instants=instants,
             years=years,
+            fit_cache=fit_cache,
         )
     else:
         feed = _FactorFeed(
@@ -1494,6 +1512,113 @@ class _FactorFeed:
         )
 
 
+WALK_FORWARD_FITS_KEPT: Final[int] = 32
+"""How many walk-forward fits a `WalkForwardFitCache` keeps by default (`V2-P6-026`).
+
+A fit is its artifact: the protocol's largest tree (200 trees of depth 3 over 21 features) is a
+6,000-entry parameter table, measured at 1.76 MB of live allocation (179 KB pickled); the smallest
+(50 trees of depth 2) at 0.18 MB. Thirty-two of the largest are about 56 MB. A step 2b run over
+the composition window refits ten times (1,217 sessions, one refit every 122), and its 35
+strategies share one source, so 32 holds three such sources -- or a validation stage's five
+finalists at four refits each -- before the least recently used is dropped. An evicted fit is
+refitted when it is next asked for, which costs time and never changes an answer."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class WalkForwardFitKey:
+    """Everything one walk-forward refit is a function of (`V2-P6-026`).
+
+    `_ModelFeed._refit` labels the training window's cross sections through
+    `model_view.training_panel` and fits them through `walk_forward_fits`, and what those read is:
+
+    - **the store** -- `store_root`, resolved, and `catalog`, a digest of every partition's catalog
+      stamp (`PanelStore.partition_stamps`) when the run began: one store rewritten between two
+      runs of a process is another store;
+    - **the read** -- `as_of`, the ceiling every partition is read at, and `exchange`, whose
+      calendar counts the window;
+    - **the model** -- `declaration` (name, family, horizon, the features and their missing-value
+      rule through `feature_version`, seed, code commit, hyperparameters) and the two schedule
+      numbers the declaration does not carry, `train_sessions` and `embargo_sessions`;
+    - **the window** -- `refit_day`, `window_first` (the first session the window holds, which the
+      calendar the run read can clip), `deadline` (the embargo session's signal instant, before
+      which a training label must be known) and `label_years`, the partition years the window's
+      labels and features are read over. Those come from the run's lookback, which reaches back a
+      number of calendar years counted from the run's own start (`_lookback`): two starts can share
+      a refit day and its window and still read different years, so they do not share its fit.
+
+    `walk_forward_fits`' refusal names `train_sessions`, so a refusal is keyed by it too.
+    `refit_every_sessions` is not here: it decides which sessions are refit days, and a fit is
+    asked for by its day. Neither is anything a strategy chooses -- holdings, rebalance, buffer,
+    industry cap, costs, benchmarks, `end` -- since a fit reads none of them.
+    """
+
+    store_root: str
+    catalog: str
+    as_of: datetime
+    exchange: str
+    declaration: AlphaModelDeclaration
+    train_sessions: int
+    embargo_sessions: int
+    refit_day: date
+    window_first: date
+    deadline: datetime | None
+    label_years: tuple[int, ...]
+
+
+FitCache = MutableMapping[WalkForwardFitKey, WalkForwardFit]
+"""Where a walk-forward feed keeps the fits it made and finds the ones made before."""
+
+
+class WalkForwardFitCache(MutableMapping[WalkForwardFitKey, WalkForwardFit]):
+    """A process's walk-forward fits, the least recently used dropped past `max_fits`.
+
+    `V2-P6-026`: the research driver measures many strategies of one walk-forward source in one
+    process, and every one of them refitted the same models. One of these, handed to every
+    backtest the process runs (`OpenAlphaSDK(walk_forward_fits=...)`), serves a refit made before
+    whenever its `WalkForwardFitKey` -- everything the fit reads -- is the same. Nothing leaves the
+    process: no disk, no other process. Reading a fit makes it the most recently used.
+    """
+
+    def __init__(self, max_fits: int = WALK_FORWARD_FITS_KEPT) -> None:
+        if max_fits < 1:
+            raise ValueError(f"a fit cache keeps at least one fit; got max_fits={max_fits}")
+        self.max_fits = max_fits
+        self._fits: OrderedDict[WalkForwardFitKey, WalkForwardFit] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def __getitem__(self, key: WalkForwardFitKey) -> WalkForwardFit:
+        with self._lock:
+            fit = self._fits[key]
+            self._fits.move_to_end(key)
+            return fit
+
+    def __setitem__(self, key: WalkForwardFitKey, fit: WalkForwardFit) -> None:
+        with self._lock:
+            self._fits[key] = fit
+            self._fits.move_to_end(key)
+            while len(self._fits) > self.max_fits:
+                self._fits.popitem(last=False)
+
+    def __delitem__(self, key: WalkForwardFitKey) -> None:
+        with self._lock:
+            del self._fits[key]
+
+    def __iter__(self) -> Iterator[WalkForwardFitKey]:
+        with self._lock:
+            return iter(tuple(self._fits))
+
+    def __len__(self) -> int:
+        return len(self._fits)
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._fits
+
+
+def _catalog_digest(store: PanelStore) -> str:
+    """One digest of every partition's catalog stamp: what `WalkForwardFitKey.catalog` holds."""
+    return hashlib.sha256(repr(store.partition_stamps()).encode("utf-8")).hexdigest()
+
+
 class _ModelFeed:
     """A `ScoreFeed` for a walk-forward source: rolling training windows, fitted as asked.
 
@@ -1517,7 +1642,7 @@ class _ModelFeed:
         signal_days: frozenset[date],
         instants: Mapping[date, datetime],
         years: Sequence[int],
-        fit_cache: MutableMapping[tuple[date, datetime, object], WalkForwardFit] | None = None,
+        fit_cache: FitCache | None = None,
     ) -> None:
         spec, model = request.source.walk_forward, request.model
         assert spec is not None and model is not None  # strategy_request resolved both together
@@ -1536,6 +1661,8 @@ class _ModelFeed:
         )
         self._fits: list[WalkForwardFit] = []
         self._fit_cache = fit_cache
+        self._catalog: str | None = None
+        """`WalkForwardFitKey.catalog`, read once, when the first refit is keyed."""
         self._window: dict[date, tuple[TrainingExample, ...]] = {}
         self._rows = FeatureRowReader(store, ceiling=request.as_of)
         """Every factor partition this feed's refits and scored days read, each read once at the
@@ -1589,16 +1716,52 @@ class _ModelFeed:
         return usable_fit(self._fits, signal_day=day)
 
     def _cached_refit(self, refit_day: date) -> WalkForwardFit:
-        """`_refit`, served from `fit_cache` when one was handed in: a fit is a function of the
-        refit day, the instant the store is read at and the model declared, so one computed
-        for another day of the same report is that day's too (`V2-P6-011` round 11)."""
+        """`_refit`, served from `fit_cache` when one was handed in and holds `_fit_key`'s fit:
+        one computed for another day of the same report (`V2-P6-011` round 11) or by another
+        configuration's run in this process (`V2-P6-026`).
+
+        A served refit still moves the window on (`_move_window`): the days it has passed are
+        dropped and the factor years before it forgotten, as a computed one would. What it does
+        not do is label the days the window moved onto, so the next refit this feed computes
+        labels every day of its window it does not hold -- the same examples, read in one panel
+        rather than several (`tests/unit/test_strategy_view.py::
+        test_a_run_past_the_cached_refits_fits_only_the_new_ones_as_if_alone`)."""
         if self._fit_cache is None:
             return self._refit(refit_day)
-        key = (refit_day, self._request.as_of, self._model.declaration)
+        key = self._fit_key(refit_day)
         held = self._fit_cache.get(key)
         if held is None:
             held = self._fit_cache[key] = self._refit(refit_day)
+        else:
+            self._move_window(refit_day)
         return held
+
+    def _fit_key(self, refit_day: date) -> WalkForwardFitKey:
+        """Everything `_refit(refit_day)` reads, as `WalkForwardFitKey` lists it."""
+        spec, calendar = self._spec, self._calendar
+        at = self._position[refit_day]
+        window_first = calendar[max(at - spec.train_sessions + 1, 0)]
+        embargo = at - spec.embargo_sessions
+        deadline_day = calendar[embargo] if embargo >= 0 else None
+        if self._catalog is None:
+            self._catalog = _catalog_digest(self._store)
+        return WalkForwardFitKey(
+            store_root=str(self._store.root.resolve()),
+            catalog=self._catalog,
+            as_of=self._request.as_of,
+            exchange=self._request.exchange,
+            declaration=self._model.declaration,
+            train_sessions=spec.train_sessions,
+            embargo_sessions=spec.embargo_sessions,
+            refit_day=refit_day,
+            window_first=window_first,
+            deadline=None if deadline_day is None else self._instants[deadline_day],
+            label_years=_years_around(
+                self._years,
+                first=window_first.year - 1,
+                last=(refit_day if deadline_day is None else deadline_day).year,
+            ),
+        )
 
     def refits(self) -> tuple[WalkForwardFit, ...]:
         return tuple(self._fits)
@@ -1621,14 +1784,21 @@ class _ModelFeed:
             declared_feature_version=None,
         )
 
+    def _move_window(self, refit_day: date) -> int:
+        """Drop the labelled days and factor years `refit_day`'s window has moved past; return
+        the calendar position of the window's first session."""
+        at = self._position[refit_day]
+        first = max(at - self._spec.train_sessions + 1, 0)
+        for day in [day for day in self._window if self._position[day] < first]:
+            del self._window[day]
+        self._rows.forget_years_before(self._calendar[first].year)
+        return first
+
     def _refit(self, refit_day: date) -> WalkForwardFit:
         spec, calendar = self._spec, self._calendar
         at = self._position[refit_day]
-        first = max(at - spec.train_sessions + 1, 0)
+        first = self._move_window(refit_day)
         newest = at - spec.embargo_sessions - spec.horizon_sessions - 2
-        for day in [day for day in self._window if self._position[day] < first]:
-            del self._window[day]
-        self._rows.forget_years_before(calendar[first].year)
         if newest >= first:
             missing = [
                 calendar[index]
@@ -2091,7 +2261,7 @@ def score_day(
     day: date,
     anchor: date,
     read_industries: bool | None = None,
-    fit_cache: MutableMapping[tuple[date, datetime, object], WalkForwardFit] | None = None,
+    fit_cache: FitCache | None = None,
 ) -> SignalDay:
     """Score one session under `request`'s source, as a backtest over it would (`V2-P6-011`).
 

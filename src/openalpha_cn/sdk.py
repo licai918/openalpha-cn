@@ -136,6 +136,7 @@ from openalpha_cn.strategy_view import (
     PROTOCOL_PARTICIPATION_CAP,
     PROTOCOL_POSITION_CAPITAL,
     PROTOCOL_SLIPPAGE_RATE,
+    FitCache,
     ICSeries,
     backtest_strategy,
     factor_ic_series,
@@ -154,6 +155,7 @@ class OpenAlphaSDK:
         clock: Callable[[], datetime] = utc_now,
         agents: Sequence[ResearchAgent] | None = None,
         features: FeaturePlane | None = None,
+        walk_forward_fits: FitCache | None = None,
     ) -> None:
         self.runtime_dir = runtime_dir
         self.clock = clock
@@ -165,6 +167,11 @@ class OpenAlphaSDK:
         # product path a feature-dependent agent is reachable through:
         # `tests/integration/test_feature_dependent_routing.py` drives it.
         self.features = features
+        # V2-P6-026: the walk-forward fits every `run_strategy_backtest` of this SDK keeps and
+        # reuses (`strategy_view.WalkForwardFitCache`), or `None` -- the default -- for none. A
+        # research driver builds one SDK per process with one, so the strategies of a stage that
+        # share a walk-forward source fit its models once; the answers are those of a run without.
+        self.walk_forward_fits = walk_forward_fits
         storage = build_storage(runtime_dir=runtime_dir, clock=clock)
         self.evidence_store = storage.evidence_store
         self.repository = storage.repository
@@ -1339,7 +1346,8 @@ class OpenAlphaSDK:
         `trailing_ic` and `walk_forward` (`V2-P6-014`) are the two dynamic score sources --
         trailing-IC weights and a walk-forward model -- as a model or as a plain mapping, in
         place of `components` or `prediction_ids`. The command line does not offer them; a
-        research grid passes them here as data.
+        research grid passes them here as data. A walk-forward source's fits are kept in, and
+        served from, this SDK's `walk_forward_fits` when it holds one (`V2-P6-026`).
         """
         request = strategy_request(
             components=components,
@@ -1364,7 +1372,10 @@ class OpenAlphaSDK:
             walk_forward=walk_forward,
         )
         return backtest_strategy(
-            panel_store(self.runtime_dir), request, predictions=self.prediction_store.get
+            panel_store(self.runtime_dir),
+            request,
+            predictions=self.prediction_store.get,
+            fit_cache=self.walk_forward_fits,
         )
 
     def factor_ic_series(

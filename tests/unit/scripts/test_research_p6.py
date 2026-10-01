@@ -2834,3 +2834,129 @@ def test_a_stage_function_cannot_be_called_without_naming_its_checkout_guard(sta
     parameter = inspect.signature(getattr(p6, stage)).parameters["verify"]
     assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
     assert parameter.default is inspect.Parameter.empty
+
+
+# --- V2-P6-026: one process's backtests share their walk-forward fits ---------------------------
+
+
+def _uncached_sdk(runtime_dir: Path) -> OpenAlphaSDK:
+    """The real SDK holding no fit cache: every backtest refits, as every one did before
+    `V2-P6-026`. Module level, so a worker process could build it."""
+    return OpenAlphaSDK(runtime_dir=runtime_dir)
+
+
+@dataclass(frozen=True)
+class _SourceRow:
+    config_id: str
+
+
+def _walk_forward_strategies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, GeneratedPanel, tuple[dict[str, Any], ...]]:
+    """A generated store in `runtime`, and step 2b over a walk-forward source of it: the source
+    and three of its strategies, holding, rebalance, buffer and cap varied. `best_source` and
+    `composition_strategy_configs` are this store's, and the composition window is moved onto
+    its sessions -- the protocol's is 2015..2021 and a generated panel sits in 2026."""
+    runtime = tmp_path / "runtime"
+    panel = write_strategy_corpus(runtime)
+    source: dict[str, Any] = {
+        "combine": "zscore_sum",
+        "start": panel.sessions[1],
+        "end": panel.sessions[-1],
+        "as_of": READ_AT,
+        "exchange": FIXTURE_EXCHANGE,
+        "holding_count": 3,
+        "rebalance_every_sessions": 2,
+        "buffer_rank": None,
+        "max_industry_weight": None,
+        "transform": None,
+        "neutralization": None,
+        "walk_forward": {
+            "family": "cross_sectional_rank",
+            "features": (f"{REVERSAL.qualified_key}@raw",),
+            "hyperparameters": {},
+            "seed": 0,
+            "code_commit": COMMIT,
+            "train_sessions": 5,
+            "refit_every_sessions": 2,
+            "embargo_sessions": 1,
+            "horizon_sessions": 1,
+        },
+    }
+    configs = (
+        source,
+        {**source, "holding_count": 4, "max_industry_weight": Decimal("0.25")},
+        {**source, "rebalance_every_sessions": 3, "buffer_rank": 5},
+        {**source, "holding_count": 2, "rebalance_every_sessions": 1, "buffer_rank": 3},
+    )
+    monkeypatch.setattr(
+        p6,
+        "best_source",
+        lambda ledger, sessions, head: ((), source, _SourceRow(grid.config_id(source))),
+    )
+    monkeypatch.setattr(p6, "composition_strategy_configs", lambda chosen: configs)
+    monkeypatch.setitem(
+        grid.PROTOCOL_STAGE_WINDOWS,
+        p6.COMPOSITION,
+        grid.StageWindow(panel.sessions[0], panel.sessions[-1]),
+    )
+    return runtime, panel, configs
+
+
+def test_a_walk_forward_stage_writes_one_ledger_with_or_without_shared_fits_serial_or_pooled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Step 2b over a walk-forward source, measured by the real SDK three ways: in this process
+    with no fit cache, in this process through `open_sdk` (one cache for the run), and in two
+    spawned worker processes through `open_sdk` (one cache each). The three ledgers are one
+    ledger but for `recorded_at`, every row a measurement; the cached run in this process fitted
+    each refit once where the uncached one fitted it once per strategy."""
+    runtime, _panel, configs = _walk_forward_strategies(tmp_path, monkeypatch)
+    _cores(monkeypatch)
+    fitted: list[date] = []
+    real = strategy_view.walk_forward_fits
+
+    def counted(*args: Any, **kwargs: Any) -> Any:
+        fitted.extend(kwargs["refit_days"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(strategy_view, "walk_forward_fits", counted)
+
+    def stage(sdk: Callable[[Path], Any], name: str, workers: int, hours: int) -> Path:
+        world = dataclasses.replace(
+            _pooled_world(tmp_path, monkeypatch, AT + timedelta(hours=hours)), sdk=sdk
+        )
+        ledger = tmp_path / name / "ledger.jsonl"
+        arguments = ["composition-strategies", "--runtime-dir", str(runtime)]
+        argv = [*arguments, "--ledger", str(ledger), "--workers", str(workers)]
+        assert p6.main(argv, environment=world) == 0, capsys.readouterr().err
+        return ledger
+
+    uncached = stage(_uncached_sdk, "uncached", 1, 0)
+    refits_uncached = list(fitted)
+    fitted.clear()
+    serial = stage(p6.open_sdk, "serial", 1, 1)
+    refits_serial = list(fitted)
+    pooled = stage(p6.open_sdk, "pooled", 2, 2)
+
+    rows = _rows_without_time(uncached)
+    assert [row["config_id"] for row in rows] == [_id(config) for config in configs]
+    assert all("error" not in row["result"] for row in rows)
+    assert all(row["result"]["period_count"] >= 2 for row in rows)
+    assert _rows_without_time(serial) == rows
+    assert _rows_without_time(pooled) == rows
+    assert len(refits_uncached) > len(refits_serial)
+    assert sorted(refits_serial) == sorted(set(refits_uncached))
+    assert _no_worker_left()
+
+
+def test_each_process_s_sdk_holds_its_own_fit_cache(tmp_path: Path) -> None:
+    """`open_sdk` is what the serial run builds once and every worker builds once at its start
+    (`_start_worker`): each gets a fresh, bounded cache, so fits are shared for the life of one
+    process and never between two."""
+    first, second = p6.open_sdk(tmp_path), p6.open_sdk(tmp_path)
+
+    assert isinstance(first.walk_forward_fits, strategy_view.WalkForwardFitCache)
+    assert first.walk_forward_fits is not second.walk_forward_fits
+    assert first.walk_forward_fits.max_fits == strategy_view.WALK_FORWARD_FITS_KEPT
+    assert OpenAlphaSDK(runtime_dir=tmp_path).walk_forward_fits is None

@@ -76,7 +76,7 @@ from datetime import date, datetime, timedelta
 from typing import Final, Protocol, cast
 from zoneinfo import ZoneInfo
 
-from openalpha_cn.backtest.strategy_backtest import StrategyBacktestError, WalkForwardFit
+from openalpha_cn.backtest.strategy_backtest import StrategyBacktestError
 from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
 from openalpha_cn.domain.alpha_model import (
     ABSTAIN_INCOMPLETE_FEATURES,
@@ -99,6 +99,7 @@ from openalpha_cn.panel_ingest import (
 from openalpha_cn.strategy_view import (
     LABEL_INPUTS,
     REGISTRATION_CUTOFF,
+    FitCache,
     SignalDay,
     StrategyRequest,
     StrategyViewError,
@@ -480,7 +481,7 @@ def _score_when_readable(
     day: date,
     at: datetime,
     anchor: date,
-    fit_cache: dict[tuple[date, datetime, object], WalkForwardFit],
+    fit_cache: FitCache,
 ) -> tuple[SignalDay, StrategyRequest, datetime]:
     """`day` scored again at `at`; when a partition cannot be read there only because it is not
     yet knowable, at `readable_instant`.
@@ -710,7 +711,7 @@ class RecordCheck:
         anchor: date,
         provenance_for: ProvenanceLookup | None = None,
         verdicts: VerdictCache | None = None,
-        fit_cache: dict[tuple[date, datetime, object], WalkForwardFit] | None = None,
+        fit_cache: FitCache | None = None,
     ) -> None:
         self._store = store
         self._registered = registered
@@ -900,7 +901,7 @@ def witnessed_days(
     through: date,
     journalled_holds: Mapping[date, datetime] | None = None,
     provenance_for: ProvenanceLookup | None = None,
-    fit_cache: dict[tuple[date, datetime, object], WalkForwardFit] | None = None,
+    fit_cache: FitCache | None = None,
 ) -> tuple[WitnessedDay, ...]:
     """The command's decisions from its first record through `through`, re-derived from the
     store; the schedule is counted from the configuration's `anchor`.

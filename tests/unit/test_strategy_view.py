@@ -12,6 +12,7 @@ independent read of the same store rather than against the module's own output.
 from __future__ import annotations
 
 import dataclasses
+import json
 import math
 import statistics
 from array import array
@@ -1961,3 +1962,295 @@ def test_a_walk_forward_run_reads_the_registry_once_per_span_of_years(
     assert made
     assert all(reader.reads == 1 for reader in made)
     assert len(asked) > 10 * len(made)
+
+
+# --- V2-P6-026: walk-forward fits shared across the configurations one process measures ---------
+#
+# A research stage runs many strategies over one walk-forward source, and every one refitted the
+# same models. `backtest_strategy(fit_cache=...)` serves a refit from a cache keyed by everything
+# the fit reads (`strategy_view.WalkForwardFitKey`); each test below holds an answer served from a
+# shared cache to the answer of the same request run alone, byte for byte, and counts the refits
+# the shared run actually made.
+
+
+def _answer(result: Any) -> str:
+    """The whole answer as the CLI prints it, as one string: byte-identical means equal here."""
+    return json.dumps(backtest_view(result), sort_keys=True)
+
+
+def _counted_refits(monkeypatch: pytest.MonkeyPatch) -> tuple[list[date], list[date]]:
+    """The refit days `walk_forward_fits` fitted, and the first day of every training panel
+    labelled, from here on: the two costs a refit is made of."""
+    fitted: list[date] = []
+    labelled: list[date] = []
+    real_fits = strategy_view.walk_forward_fits
+    real_panel = strategy_view.training_panel
+
+    def fits(*args: Any, **kwargs: Any) -> Any:
+        fitted.extend(kwargs["refit_days"])
+        return real_fits(*args, **kwargs)
+
+    def panel(store: PanelStore, run: ModelRunRequest, **kwargs: Any) -> Any:
+        labelled.append(run.start)
+        return real_panel(store, run, **kwargs)
+
+    monkeypatch.setattr(strategy_view, "walk_forward_fits", fits)
+    monkeypatch.setattr(strategy_view, "training_panel", panel)
+    return fitted, labelled
+
+
+def _walk_forward_request(panel: GeneratedPanel, model: Mapping[str, Any], **rules: Any) -> Any:
+    return _request(
+        panel, components=(), walk_forward=dict(model), **{"rebalance_every_sessions": 2, **rules}
+    )
+
+
+STRATEGY_VARIANTS: Final[tuple[dict[str, Any], ...]] = (
+    {},
+    {"holding_count": 4, "max_industry_weight": Decimal("0.25")},
+    {"rebalance_every_sessions": 3, "buffer_rank": 5},
+    {"holding_count": 2, "rebalance_every_sessions": 1, "buffer_rank": 3},
+)
+"""Step 2b's shape at fixture scale: one source, the holding, rebalance, buffer and cap varied."""
+
+
+def test_strategies_of_one_walk_forward_source_share_its_fits_and_answer_as_if_alone(
+    corpus: tuple[PanelStore, GeneratedPanel], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Four strategies of one model, run in turn over one cache: each answer is its answer with
+    a fresh cache, and only the first run refits -- every later one makes no fit and labels no
+    training panel."""
+    store, panel = corpus
+    requests = [_walk_forward_request(panel, WALK_FORWARD, **rules) for rules in STRATEGY_VARIANTS]
+    alone = [
+        _answer(backtest_strategy(store, request, fit_cache=strategy_view.WalkForwardFitCache()))
+        for request in requests
+    ]
+    fitted, labelled = _counted_refits(monkeypatch)
+    cache = strategy_view.WalkForwardFitCache()
+    shared: list[str] = []
+    refits: list[int] = []
+    panels: list[int] = []
+    for request in requests:
+        before = (len(fitted), len(labelled))
+        result = backtest_strategy(store, request, fit_cache=cache)
+        shared.append(_answer(result))
+        refits.append(len(fitted) - before[0])
+        panels.append(len(labelled) - before[1])
+
+    assert shared == alone
+    first = backtest_strategy(store, requests[0])
+    assert refits[0] == len(first.model_fits) > 0
+    assert sum(fit.refusal is None for fit in first.model_fits) >= 2  # real fits, not refusals
+    assert panels[0] > 0
+    assert refits[1:] == [0, 0, 0]
+    assert panels[1:] == [0, 0, 0]
+
+
+def test_a_run_past_the_cached_refits_fits_only_the_new_ones_as_if_alone(
+    corpus: tuple[PanelStore, GeneratedPanel], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A shorter run fills the cache; a longer one is served its refits and fits the rest on a
+    training window it never built incrementally -- and still answers as it does alone."""
+    store, panel = corpus
+    model = {**WALK_FORWARD, "refit_every_sessions": 1}
+    short = _walk_forward_request(panel, model, end=panel.sessions[6])
+    long = _walk_forward_request(panel, model)
+    alone = _answer(backtest_strategy(store, long))
+    cache = strategy_view.WalkForwardFitCache()
+    held = {fit.refit_day for fit in backtest_strategy(store, short, fit_cache=cache).model_fits}
+    fitted, _ = _counted_refits(monkeypatch)
+
+    answered = backtest_strategy(store, long, fit_cache=cache)
+
+    assert _answer(answered) == alone
+    new = [fit.refit_day for fit in answered.model_fits if fit.refit_day not in held]
+    assert new and fitted == new
+    assert any(fit.refusal is None for fit in answered.model_fits if fit.refit_day in new)
+
+
+MODEL_BASE: Final[dict[str, Any]] = {**WALK_FORWARD, "train_sessions": 7}
+TREES: Final[dict[str, Any]] = {
+    **MODEL_BASE,
+    "family": "boosted_rank_trees",
+    "hyperparameters": {
+        "tree_count": 3,
+        "max_depth": 1,
+        "learning_rate": 0.1,
+        "min_leaf_securities": 2,
+    },
+}
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        pytest.param(MODEL_BASE, {**MODEL_BASE, "seed": 1}, id="seed"),
+        pytest.param(MODEL_BASE, {**MODEL_BASE, "code_commit": "fedcba7654321"}, id="code_commit"),
+        pytest.param(MODEL_BASE, {**MODEL_BASE, "missing": "drop_security"}, id="missing"),
+        pytest.param(MODEL_BASE, {**MODEL_BASE, "train_sessions": 8}, id="train_sessions"),
+        pytest.param(MODEL_BASE, {**MODEL_BASE, "embargo_sessions": 2}, id="embargo_sessions"),
+        pytest.param(
+            TREES,
+            {**TREES, "hyperparameters": {**TREES["hyperparameters"], "tree_count": 4}},
+            id="hyperparameter",
+        ),
+    ],
+)
+def test_models_that_differ_in_anything_a_fit_reads_never_share_one(
+    corpus: tuple[PanelStore, GeneratedPanel],
+    monkeypatch: pytest.MonkeyPatch,
+    first: dict[str, Any],
+    second: dict[str, Any],
+) -> None:
+    """The second model, run after the first over one cache, refits every refit it would alone
+    and answers as it would alone. `train_sessions` and `embargo_sessions` are not in the model's
+    declaration, which is all of the model the daily path's key held (`V2-P6-011` round 11)."""
+    store, panel = corpus
+    request = _walk_forward_request(panel, second)
+    alone = backtest_strategy(store, request)
+    cache = strategy_view.WalkForwardFitCache()
+    backtest_strategy(store, _walk_forward_request(panel, first), fit_cache=cache)
+    fitted, _ = _counted_refits(monkeypatch)
+
+    answered = backtest_strategy(store, request, fit_cache=cache)
+
+    assert _answer(answered) == _answer(alone)
+    assert fitted == [fit.refit_day for fit in alone.model_fits]
+
+
+@pytest.fixture(scope="module")
+def corpus_twin(tmp_path_factory: pytest.TempPathFactory) -> tuple[PanelStore, GeneratedPanel]:
+    """`corpus` written again, to a second store."""
+    root = tmp_path_factory.mktemp("strategy-view-twin")
+    panel = write_strategy_corpus(root)
+    return PanelStore(root / "panel"), panel
+
+
+def test_one_request_over_two_stores_never_shares_a_fit(
+    corpus: tuple[PanelStore, GeneratedPanel],
+    corpus_twin: tuple[PanelStore, GeneratedPanel],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same request read out of another store refits everything, though this one was written
+    from the same corpus: a cache cannot see that two stores hold the same rows, so the store is
+    in the key."""
+    store, panel = corpus
+    other, _ = corpus_twin
+    request = _walk_forward_request(panel, WALK_FORWARD)
+    alone = backtest_strategy(other, request)
+    cache = strategy_view.WalkForwardFitCache()
+    backtest_strategy(store, request, fit_cache=cache)
+    fitted, _ = _counted_refits(monkeypatch)
+
+    assert _answer(backtest_strategy(other, request, fit_cache=cache)) == _answer(alone)
+    assert fitted == [fit.refit_day for fit in alone.model_fits]
+
+
+def test_a_later_start_whose_refits_read_the_same_window_is_served_them(
+    corpus: tuple[PanelStore, GeneratedPanel], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Starting on s3 instead of s1 moves no refit's window here -- the stored calendar opens on
+    s0 for both, and both read 2026 alone -- so s3's, s5's and s7's fits are the earlier run's,
+    and the later start answers as it does alone."""
+    store, panel = corpus
+    later = _walk_forward_request(panel, WALK_FORWARD, start=panel.sessions[3])
+    alone = _answer(backtest_strategy(store, later))
+    cache = strategy_view.WalkForwardFitCache()
+    backtest_strategy(store, _walk_forward_request(panel, WALK_FORWARD), fit_cache=cache)
+    fitted, _ = _counted_refits(monkeypatch)
+
+    assert _answer(backtest_strategy(store, later, fit_cache=cache)) == alone
+    assert fitted == []
+
+
+def test_a_start_whose_training_window_reads_other_years_never_shares_a_fit(
+    research_shape: tuple[PanelStore, GeneratedPanel], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two starts ten sessions apart refit on the same two sessions of January Y+2 (where a build
+    lands on every session), on the same thirty-session window opening in November of Y+1, and
+    do not read it alike: the run from Y+2's first session reaches one calendar year back
+    (`_lookback`), so its window's labels are read without Y's halts and adjustment factors --
+    the year before the window opens -- which the run from December of Y+1 reads. Its fits are
+    not the other's."""
+    store, panel = research_shape
+    first = next(day for day in panel.sessions if day.year == FIRST_FACTOR_YEAR + 2)
+    at = panel.sessions.index(first)
+    model = {**WALK_FORWARD, "train_sessions": 30, "refit_every_sessions": 10}
+
+    def request(start: date) -> Any:
+        return strategy_request(
+            combine="zscore_sum",
+            transform=None,
+            neutralization=None,
+            components=(),
+            start=start,
+            end=panel.sessions[at + 15],
+            as_of=panel.as_of,
+            exchange=EXCHANGE,
+            rebalance_every_sessions=5,
+            holding_count=3,
+            buffer_rank=None,
+            max_industry_weight=None,
+            benchmarks=(EQUAL_WEIGHT_ALL_A,),
+            walk_forward=model,
+        )
+
+    december, january = request(panel.sessions[at - 10]), request(first)
+    alone = backtest_strategy(store, january)
+    assert [fit.refit_day for fit in alone.model_fits] == [first, panel.sessions[at + 10]]
+    assert any(fit.refusal is None for fit in alone.model_fits)
+    cache = strategy_view.WalkForwardFitCache()
+    earlier = backtest_strategy(store, december, fit_cache=cache)
+    assert {fit.refit_day for fit in alone.model_fits} <= {
+        fit.refit_day for fit in earlier.model_fits
+    }
+    fitted, _ = _counted_refits(monkeypatch)
+
+    assert _answer(backtest_strategy(store, january, fit_cache=cache)) == _answer(alone)
+    assert fitted == [first, panel.sessions[at + 10]]
+
+
+def test_a_bounded_cache_refits_what_it_evicted_and_answers_as_if_alone(
+    corpus: tuple[PanelStore, GeneratedPanel], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two fits held, four asked for in order: every one was evicted before it was asked again,
+    so the second strategy refits all four -- and its answer does not move."""
+    store, panel = corpus
+    requests = [_walk_forward_request(panel, WALK_FORWARD, **rules) for rules in STRATEGY_VARIANTS]
+    alone = _answer(backtest_strategy(store, requests[1]))
+    cache = strategy_view.WalkForwardFitCache(max_fits=2)
+    backtest_strategy(store, requests[0], fit_cache=cache)
+    assert len(cache) == 2
+    fitted, _ = _counted_refits(monkeypatch)
+
+    assert _answer(backtest_strategy(store, requests[1], fit_cache=cache)) == alone
+    assert len(fitted) == 4
+    assert len(cache) == 2
+
+
+def _refused_fit(day: date) -> Any:
+    return strategy_backtest.WalkForwardFit(
+        refit_day=day,
+        fitted=None,
+        artifact=None,
+        refusal="none",
+        labels_known_at=None,
+        example_count=0,
+        prediction_day_count=0,
+    )
+
+
+def test_the_fit_cache_evicts_the_least_recently_used_fit() -> None:
+    days = [date(2026, 1, day) for day in (5, 6, 7)]
+    keys: list[Any] = [object() for _ in days]
+    cache = strategy_view.WalkForwardFitCache(max_fits=2)
+    cache[keys[0]] = _refused_fit(days[0])
+    cache[keys[1]] = _refused_fit(days[1])
+    assert cache.get(keys[0]) == _refused_fit(days[0])  # now the most recently used
+    cache[keys[2]] = _refused_fit(days[2])
+
+    assert list(cache) == [keys[0], keys[2]]
+    assert keys[1] not in cache
+    with pytest.raises(ValueError, match="at least one"):
+        strategy_view.WalkForwardFitCache(max_fits=0)

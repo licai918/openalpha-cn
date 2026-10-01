@@ -25,6 +25,12 @@ every core per connection, so memory and CPU grow with N. For the pooled run's d
 process's environment carries the thread pins. `holdout` takes no `--workers`: it runs one
 configuration once.
 
+**One process fits a walk-forward model once** (`V2-P6-026`). The serial run and each worker hold
+one SDK for their lifetime (`open_sdk`), and it keeps the walk-forward fits its backtests make in
+a bounded cache keyed by everything a fit reads (`strategy_view.WalkForwardFitKey`); a strategy
+whose source another strategy of the process already fitted is served those fits. The rows are
+the ones a run without the cache writes.
+
 **The recorded commit is the code that ran** (`V2-P6-023`). `_p6_head` reads HEAD before this
 driver's heavy imports; a command that records a commit (`LEDGER_WRITING_COMMANDS`) then resolves
 it -- clean, and still that HEAD, or refused -- before the precondition of minutes, and every row
@@ -165,7 +171,7 @@ from openalpha_cn.panel_view import panel_store
 from openalpha_cn.runtime.provenance import resolve_code_commit
 from openalpha_cn.runtime.seeding import thread_count_pins
 from openalpha_cn.sdk import OpenAlphaSDK
-from openalpha_cn.strategy_view import ICSeries
+from openalpha_cn.strategy_view import ICSeries, WalkForwardFitCache
 
 REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 DEFAULT_REGISTRATION: Final[Path] = REPO_ROOT / "docs" / "research" / "p6-registration.json"
@@ -2033,8 +2039,15 @@ class Environment:
 
 
 def open_sdk(runtime_dir: Path) -> OpenAlphaSDK:
-    """The real SDK over `runtime_dir`: module level, so a worker process can import it."""
-    return OpenAlphaSDK(runtime_dir=runtime_dir)
+    """The real SDK over `runtime_dir`: module level, so a worker process can import it.
+
+    It holds a fresh `WalkForwardFitCache` (`V2-P6-026`). The serial run builds its SDK once
+    (`_dispatch`) and every worker once at its start (`_start_worker`), so each process keeps one
+    cache for its lifetime: the strategies of a stage that share a walk-forward source -- step
+    2b's 35, the validation finalists -- fit its models once per process instead of once per
+    strategy, and write the rows a run without the cache writes. Nothing is shared between
+    processes or written to disk; the cache is bounded (`WALK_FORWARD_FITS_KEPT`)."""
+    return OpenAlphaSDK(runtime_dir=runtime_dir, walk_forward_fits=WalkForwardFitCache())
 
 
 UNREAD_HEAD: Final[str] = "HEAD could not be read as the driver started"

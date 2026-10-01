@@ -832,6 +832,11 @@ DECLARED_PLAIN_DIGESTS: Final[dict[str, str]] = {
         "the whole 64 hex of one prediction batch, naming which filing a provenance belongs to; "
         "compared for equality, never an id"
     ),
+    "strategy_view.py::_catalog_digest": (
+        "the whole 64 hex of a store's catalog stamps, one field of a walk-forward fit's cache "
+        "key: compared for equality inside one process, never stored and never an id "
+        "(V2-P6-026)"
+    ),
 }
 """Every function under `src/` that hashes and does **not** narrow the result.
 
