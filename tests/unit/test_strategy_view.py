@@ -1914,3 +1914,50 @@ def test_a_factor_partition_deleted_inside_the_build_range_is_refused_by_name(
 
     with pytest.raises(StrategyPanelUnreadableError, match=r"year=2027 .*partition_missing"):
         backtest_strategy(store, _research_request(panel, kind))
+
+
+# --- V2-P6-025 (4): the registry read once per run, not once per cross section ----------------
+#
+# With each factor partition read once, the forest-light probe completed in 8,544 s, and the
+# largest remaining cost was the security registry: each training and scored cross section read
+# it at its own instant, 1.6 s and 713 DuckDB statements a call on the research store. The
+# equivalence of the read-once answer at every instant is held in
+# `tests/integration/panel/test_event_dated_visible_reads.py`; this holds that a walk-forward
+# takes it, and the year-boundary whole-range reference above still holds its answer.
+
+
+def test_a_walk_forward_run_reads_the_registry_once_per_span_of_years(
+    research_shape: tuple[PanelStore, GeneratedPanel], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openalpha_cn import feature_matrix
+    from openalpha_cn.panel_ingest import StockUniverseReader
+
+    store, panel = research_shape
+    made: list[StockUniverseReader] = []
+    asked: list[datetime] = []
+
+    class Recorded(StockUniverseReader):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            made.append(self)
+
+        def at(self, as_of: datetime) -> Any:
+            asked.append(as_of)
+            return super().at(as_of)
+
+    real = feature_matrix.load_stock_universe
+    per_instant: list[datetime] = []
+
+    def counted(*args: Any, **kwargs: Any) -> Any:
+        per_instant.append(kwargs["as_of"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(feature_matrix, "StockUniverseReader", Recorded)
+    monkeypatch.setattr(feature_matrix, "load_stock_universe", counted)
+    result = backtest_strategy(store, _research_request(panel, "walk_forward"))
+
+    assert sum(fit.refusal is None for fit in result.model_fits) >= 2
+    assert per_instant == []
+    assert made
+    assert all(reader.reads == 1 for reader in made)
+    assert len(asked) > 10 * len(made)

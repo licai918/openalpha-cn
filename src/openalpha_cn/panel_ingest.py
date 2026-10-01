@@ -1217,6 +1217,48 @@ def load_stock_universe(
     per-year row set and cannot be shared -- `V2-P4-034` is what says why. So a 36-year read is
     36 partition lookups plus 36 census reads rather than 1,332.
     """
+    resolved, registered = _registry_years(
+        store, years=years, require_years_through=require_years_through
+    )
+    requirement = stock_universe_requirement(
+        years=resolved, as_of=as_of, max_staleness=max_staleness
+    )
+    rows = list(
+        _read_visible_event_dated_rows(
+            store,
+            requirement,
+            UNIVERSE_PANEL_COLUMNS,
+            as_of=as_of,
+            what=_REGISTRY_WHAT,
+            availability_rule=_REGISTRY_AVAILABILITY_RULE,
+            census_through=_knowable_through_the_same_day,
+        )
+    )
+    return stock_universe_from_panel_rows(
+        rows,
+        snapshot_date=_registry_snapshot_date(
+            as_of, resolved=resolved, registered=registered, date_timezone=date_timezone
+        ),
+        years_read=resolved,
+    )
+
+
+_REGISTRY_WHAT: Final[str] = "the security registry"
+_REGISTRY_AVAILABILITY_RULE: Final[str] = (
+    "A lifecycle row's availability is midnight on the day it is about, because the response row "
+    "is split so that a listing and a termination carry their own instants"
+)
+
+
+def _registry_years(
+    store: PanelStore, *, years: Sequence[int], require_years_through: int | None
+) -> tuple[tuple[int, ...], set[int]]:
+    """The lifecycle years a registry read covers, and the stored years it does not.
+
+    `load_stock_universe`'s year rules, written once for it and `StockUniverseReader`: see that
+    function for why the history beneath the window is read unasked, why a skipped year inside
+    it is refused and what `require_years_through` demands.
+    """
     requested = tuple(sorted(set(years)))
     if not requested:
         raise PanelBatchError(
@@ -1252,29 +1294,173 @@ def load_stock_universe(
             f"{skipped}, which the store holds; a skipped year drops that year's listings and "
             "terminations and produces a smaller universe that looks entirely plausible"
         )
-    requirement = stock_universe_requirement(
-        years=resolved, as_of=as_of, max_staleness=max_staleness
-    )
-    rows = list(
-        _read_visible_event_dated_rows(
-            store,
-            requirement,
-            UNIVERSE_PANEL_COLUMNS,
-            as_of=as_of,
-            what="the security registry",
-            availability_rule=(
-                "A lifecycle row's availability is midnight on the day it is about, because "
-                "the response row is split so that a listing and a termination carry their own "
-                "instants"
-            ),
-            census_through=_knowable_through_the_same_day,
-        )
-    )
+    return resolved, registered
+
+
+def _registry_snapshot_date(
+    as_of: datetime, *, resolved: Sequence[int], registered: set[int], date_timezone: str
+) -> date:
+    """`as_of`'s day, pulled back before the first stored lifecycle year the read skipped."""
     snapshot_date = as_of.astimezone(_resolve_timezone(date_timezone)).date()
     unread_after = sorted(year for year in registered if year > resolved[-1])
     if unread_after:
         snapshot_date = min(snapshot_date, date(unread_after[0], 1, 1) - timedelta(days=1))
-    return stock_universe_from_panel_rows(rows, snapshot_date=snapshot_date, years_read=resolved)
+    return snapshot_date
+
+
+class StockUniverseReader:
+    """`load_stock_universe(..., max_staleness=None)` at many instants, the registry read once.
+
+    `V2-P6-025`. A walk-forward cuts a training cross section at each build's instant and each one
+    read the registry at that instant: on the research store 1.6 s and 713 DuckDB statements a
+    call, about 45 minutes of one stage-2 source, for an answer that differs between two instants
+    only by the lifecycle rows that became knowable between them. This reads every lifecycle year
+    once, at `ceiling`, with each row's clocks, and answers an instant at or before it from those
+    rows -- through the same rules, in the same order, as the read at that instant.
+
+    ## Why the answer is that read's, refusals included
+
+    `load_stock_universe` at an instant is: the year rules (`_registry_years`, which do not
+    depend on the instant); a readiness gate on every lifecycle year at the instant; per year,
+    the rows whose `available_time` and `revision_time` are at or before it, reconciled against
+    the partition's date census through the instant's day
+    (`_refuse_a_slice_the_census_disagrees_with`); and `stock_universe_from_panel_rows` over
+    them at the instant's snapshot date.
+
+    - **The gate.** With no staleness bound the only check in `evaluate_readiness` an instant can
+      move is `not_yet_knowable`, which this door filters rather than refuses; every other code
+      is a fact about the partitions. So the gate passes at every instant exactly when it passes
+      at `ceiling`.
+    - **The rows.** Every row visible at an instant at or before `ceiling` is visible at
+      `ceiling`, so the instant's rows are the ceiling's filtered by the same predicate, in the
+      same order.
+    - **The census.** The reconciliation is re-run per instant on those rows, with the census
+      read once per year; a row withheld at an instant counts as `read_visible_at` counts it
+      (the partition's rows less the visible ones), and no row is withheld for its revision
+      because this path is taken only when every row's revision is its availability.
+    - **The universe.** Built from those rows at that instant's snapshot date.
+
+    **Whenever any of that cannot be shown from what was read, each instant reads its own**,
+    which is the old path and its answer by definition: when the ceiling read or the year rules
+    refuse, when a row's revision differs from its availability, when a partition holds a row
+    the ceiling cannot see, or when a year was filed in another zone. `reads` counts the
+    registry reads made, so a test can tell the two paths apart.
+    """
+
+    def __init__(
+        self,
+        store: PanelStore,
+        *,
+        years: Sequence[int],
+        ceiling: datetime,
+        date_timezone: str = DEFAULT_DATE_TIMEZONE,
+    ) -> None:
+        self._store = store
+        self._years = tuple(years)
+        self.ceiling = ceiling
+        self._date_timezone = date_timezone
+        self.reads = 0
+        self._resolved: tuple[int, ...] = ()
+        self._registered: set[int] = set()
+        self._census: dict[int, PartitionCoverage] = {}
+        self._by_year = self._read_once()
+
+    def at(self, as_of: datetime) -> StockUniverse:
+        """The registry `load_stock_universe` reads at `as_of`, with no staleness bound."""
+        if as_of > self.ceiling:
+            raise PanelStorageError(
+                f"the registry was read at {self.ceiling.isoformat()} and asked about "
+                f"{as_of.isoformat()}; the rows knowable between the two were never read"
+            )
+        by_year = self._by_year
+        if by_year is None:
+            self.reads += 1
+            return load_stock_universe(
+                self._store,
+                years=self._years,
+                as_of=as_of,
+                max_staleness=None,
+                date_timezone=self._date_timezone,
+            )
+        rows: list[tuple[object, ...]] = []
+        for year in self._resolved:
+            coverage = self._census[year]
+            zone = _resolve_timezone(coverage.date_timezone)
+            census_day = _knowable_through_the_same_day(as_of, zone)
+            visible = [clocks for clocks in by_year[year] if clocks[1] <= as_of]
+            _refuse_a_slice_the_census_disagrees_with(
+                Counter(clocks[0].astimezone(zone).date() for clocks in visible),
+                Counter(
+                    {
+                        entry.event_date: entry.row_count
+                        for entry in coverage.dates
+                        if entry.event_date <= census_day
+                    }
+                ),
+                dataset=STOCK_BASIC_DATASET,
+                year=year,
+                as_of=as_of,
+                census_day=census_day,
+                withheld_row_count=coverage.row_count - len(visible),
+                availability_rule=_REGISTRY_AVAILABILITY_RULE,
+                revision_withheld=Counter(),
+            )
+            rows.extend(clocks[2] for clocks in visible)
+        return stock_universe_from_panel_rows(
+            rows,
+            snapshot_date=_registry_snapshot_date(
+                as_of,
+                resolved=self._resolved,
+                registered=self._registered,
+                date_timezone=self._date_timezone,
+            ),
+            years_read=self._resolved,
+        )
+
+    def _read_once(
+        self,
+    ) -> dict[int, tuple[tuple[datetime, datetime, tuple[object, ...]], ...]] | None:
+        """Every lifecycle row as `(event_time, available_time, row)` by partition year -- or
+        `None` where those rows cannot show an instant's answer and each instant reads its own."""
+        store = self._store
+        try:
+            self._resolved, self._registered = _registry_years(
+                store, years=self._years, require_years_through=None
+            )
+            self.reads += 1
+            read = _read_visible_event_dated_rows(
+                store,
+                stock_universe_requirement(
+                    years=self._resolved, as_of=self.ceiling, max_staleness=None
+                ),
+                (EVENT_TIME_COLUMN, "available_time", "revision_time", *UNIVERSE_PANEL_COLUMNS),
+                as_of=self.ceiling,
+                what=_REGISTRY_WHAT,
+                availability_rule=_REGISTRY_AVAILABILITY_RULE,
+                census_through=_knowable_through_the_same_day,
+            )
+        except (PanelStorageError, PanelBatchError):
+            return None
+        for year in self._resolved:
+            coverage = store.read_coverage(STOCK_BASIC_DATASET, year)
+            if coverage is None or coverage.date_timezone != self._date_timezone:
+                return None
+            self._census[year] = coverage
+        zone = _resolve_timezone(self._date_timezone)
+        by_year: dict[int, list[tuple[datetime, datetime, tuple[object, ...]]]] = {
+            year: [] for year in self._resolved
+        }
+        for row in read:
+            event, available, revised = row[0], row[1], row[2]
+            if not isinstance(event, datetime) or not isinstance(available, datetime):
+                return None
+            year = event.astimezone(zone).year
+            if available != revised or year not in by_year:
+                return None
+            by_year[year].append((event, available, tuple(row[3:])))
+        if any(len(by_year[year]) != self._census[year].row_count for year in self._resolved):
+            return None
+        return {year: tuple(held) for year, held in by_year.items()}
 
 
 def write_name_history(

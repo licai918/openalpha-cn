@@ -246,6 +246,7 @@ from openalpha_cn.panel_factors import (
     load_processed_factor_observations,
 )
 from openalpha_cn.panel_ingest import (
+    StockUniverseReader,
     load_stock_universe,
     load_trading_calendar,
     newest_published_session,
@@ -910,6 +911,7 @@ class FeatureRowReader:
         self.ceiling = ceiling
         self._builds: dict[tuple[str, int], dict[datetime, _StoredBuild]] = {}
         self._names: dict[str, str] = {}
+        self._registries: dict[tuple[int, ...], StockUniverseReader] = {}
 
     def builds(
         self, column: FeatureColumn, year: int, *, as_of: datetime
@@ -927,9 +929,25 @@ class FeatureRowReader:
         return {instant: build for instant, build in held.items() if instant <= as_of}
 
     def forget_years_before(self, year: int) -> None:
-        """Drop every held partition of a year before `year`; a later ask reads it again."""
+        """Drop every held partition of a year before `year`, and every registry read whose
+        years all are; a later ask reads it again."""
         for key in [key for key in self._builds if key[1] < year]:
             del self._builds[key]
+        for years in [years for years in self._registries if max(years) < year]:
+            del self._registries[years]
+
+    def registry(self, years: Sequence[int], *, as_of: datetime) -> StockUniverse:
+        """`load_stock_universe(years, as_of, max_staleness=None)`, the registry read once per
+        `years` at `ceiling` (`panel_ingest.StockUniverseReader`, which carries the argument that
+        the answer is the read at `as_of`'s, refusals included). `V2-P6-025`: the per-instant read
+        was 1.6 s on the research store, once per training cross section."""
+        key = tuple(sorted(set(years)))
+        held = self._registries.get(key)
+        if held is None:
+            held = self._registries[key] = StockUniverseReader(
+                self._store, years=key, ceiling=self.ceiling
+            )
+        return held.at(as_of)
 
     def _read(self, column: FeatureColumn, year: int) -> dict[datetime, _StoredBuild]:
         by_instant: dict[datetime, list[_StoredRow]] = {}
@@ -1296,7 +1314,11 @@ def load_feature_cross_section(
     )
     session = _session_for(instant, calendar=calendar)
     registry = _read(
-        lambda: load_stock_universe(store, years=request.years, as_of=instant, max_staleness=None),
+        lambda: (
+            load_stock_universe(store, years=request.years, as_of=instant, max_staleness=None)
+            if rows is None
+            else rows.registry(request.years, as_of=instant)
+        ),
         what="the security registry",
     )
     universe = _universe_for(registry, session=session, instant=instant)

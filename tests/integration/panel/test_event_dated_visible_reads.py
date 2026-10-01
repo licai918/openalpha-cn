@@ -52,11 +52,17 @@ from openalpha_cn.domain.financial_statements import (
 from openalpha_cn.domain.name_history import (
     NAMECHANGE_DATASET,
 )
-from openalpha_cn.domain.panel_batch import ColumnarPanelBatch, PanelColumn, TimelineColumns
+from openalpha_cn.domain.panel_batch import (
+    ColumnarPanelBatch,
+    PanelBatchError,
+    PanelColumn,
+    TimelineColumns,
+)
 from openalpha_cn.domain.price_limits import SUSPENSION_DATASET
-from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET
+from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET, StockUniverseError
 from openalpha_cn.panel.store import PanelStorageError, PanelStore
 from openalpha_cn.panel_ingest import (
+    StockUniverseReader,
     load_name_histories,
     load_statement_histories,
     load_stock_universe,
@@ -599,3 +605,173 @@ def test_a_row_visible_before_its_own_event_is_reported_as_a_look_ahead_and_not_
     assert "answered 1 visible row(s) dated 2026-01-14" in message
     assert "whose event had not happened at" in message
     assert "date census counts" not in message
+
+
+# --- V2-P6-025: the registry read once, answered at every instant ------------------------------
+#
+# A walk-forward cuts a cross section at each build's instant, and each one read the registry at
+# that instant: 1.6 s and 713 DuckDB statements a call on the research store, ~45 minutes of one
+# stage-2 source. `StockUniverseReader` reads it once, at a ceiling, and answers every earlier
+# instant from those rows. These tests hold it to `load_stock_universe` at every instant around
+# every lifecycle event of a three-year registry -- answers and refusals alike -- on a registry
+# with the provider's clock and on three whose clocks say something else.
+
+REGISTRY_EVENTS: Final[tuple[tuple[str, str, date], ...]] = (
+    ("000001.SZ", "listing", date(2025, 3, 3)),
+    ("000002.SZ", "listing", date(2025, 3, 3)),
+    ("600000.SH", "listing", date(2025, 3, 3)),
+    ("000004.SZ", "listing", date(2026, 2, 10)),
+    ("000002.SZ", "delisting", date(2026, 6, 15)),
+    ("000005.SZ", "listing", date(2027, 1, 11)),
+    ("000001.SZ", "delisting", date(2027, 1, 20)),
+)
+"""Listings in the history beneath the window, a listing and a termination inside it, and a
+listing and a termination dated after most of the instants asked about."""
+REGISTRY_CEILING: Final[datetime] = datetime(2027, 2, 1, 4, 0, tzinfo=UTC)
+LATE_LISTING: Final[int] = 3
+"""`000004.SZ`'s listing, which the late registry makes knowable three days after its date."""
+REVISED_TERMINATION: Final[int] = 4
+"""`000002.SZ`'s termination, which the revised registry revises five days after its date."""
+EARLY_LISTING: Final[int] = 5
+"""`000005.SZ`'s listing, which the early registry makes knowable five days before its date."""
+
+
+def _clocked_registry(
+    root: Path, *, available: dict[int, datetime], revised: dict[int, datetime]
+) -> PanelStore:
+    """`REGISTRY_EVENTS` written one partition per year, with the stated clocks overridden."""
+    store = PanelStore(root / "panel")
+    for year in (2025, 2026, 2027):
+        indices = [index for index, event in enumerate(REGISTRY_EVENTS) if event[2].year == year]
+        events = tuple(_midnight(REGISTRY_EVENTS[index][2]) for index in indices)
+        knowable = tuple(
+            available.get(index, event) for index, event in zip(indices, events, strict=True)
+        )
+        revisions = tuple(
+            revised.get(index, instant) for index, instant in zip(indices, knowable, strict=True)
+        )
+        fetched = max(revisions)
+        batch = ColumnarPanelBatch(
+            provider_id="openalpha-cn/p6-025-probe",
+            dataset=STOCK_BASIC_DATASET,
+            kind=STOCK_BASIC_DATASET,
+            as_of=fetched,
+            fetched_at=fetched,
+            status="success",
+            subjects=tuple(REGISTRY_EVENTS[index][0] for index in indices),
+            timeline=TimelineColumns(
+                event_time=events,
+                available_time=knowable,
+                ingested_time=revisions,
+                revision_time=revisions,
+            ),
+            columns=(
+                PanelColumn(
+                    "lifecycle_event",
+                    "string",
+                    tuple(REGISTRY_EVENTS[index][1] for index in indices),
+                ),
+                PanelColumn(
+                    "lifecycle_date",
+                    "string",
+                    tuple(REGISTRY_EVENTS[index][2].isoformat() for index in indices),
+                ),
+                PanelColumn("exchange", "string", tuple("SZSE" for _ in indices)),
+            ),
+        )
+        write_panel_batch(store, batch, year=year)
+    return store
+
+
+def _registry_instants() -> list[datetime]:
+    """Around every event day -- the midnight before and after it, the midnight itself and its
+    16:30 -- and around every overridden clock, plus a four-weekly grid through the ceiling."""
+    days = {event[2] for event in REGISTRY_EVENTS} | {
+        date(2026, 2, 13),
+        date(2026, 6, 20),
+        date(2027, 1, 6),
+        date(2026, 12, 31),
+        date(2027, 1, 1),
+    }
+    instants: set[datetime] = set()
+    for day in days:
+        midnight = _midnight(day)
+        instants |= {
+            midnight - timedelta(minutes=1),
+            midnight,
+            midnight + timedelta(minutes=1),
+            _published(day),
+        }
+    grid = _midnight(date(2025, 12, 29)) + timedelta(hours=10)
+    while grid <= REGISTRY_CEILING:
+        instants.add(grid)
+        grid += timedelta(days=28)
+    instants.add(REGISTRY_CEILING)
+    return sorted(instant for instant in instants if instant <= REGISTRY_CEILING)
+
+
+def _answer(read: Any) -> tuple[object, ...]:
+    """The universe a read answers, or the refusal it raises: type and message."""
+    try:
+        return ("answered", read())
+    except (PanelStorageError, PanelBatchError, StockUniverseError) as refusal:
+        return ("refused", type(refusal), str(refusal))
+
+
+@pytest.mark.parametrize(
+    "clocks",
+    [
+        pytest.param({}, id="provider-clock"),
+        pytest.param(
+            {"available": {LATE_LISTING: _midnight(date(2026, 2, 13))}}, id="late-listing"
+        ),
+        pytest.param(
+            {"revised": {REVISED_TERMINATION: _midnight(date(2026, 6, 20))}},
+            id="revised-termination",
+        ),
+        pytest.param(
+            {"available": {EARLY_LISTING: _midnight(date(2027, 1, 6))}}, id="early-listing"
+        ),
+    ],
+)
+@pytest.mark.parametrize("years", [(2026, 2027), (2026,)])
+def test_the_registry_read_once_answers_every_instant_as_its_own_read_does(
+    tmp_path: Path, clocks: dict[str, dict[int, datetime]], years: tuple[int, ...]
+) -> None:
+    """Every instant's answer -- universe, snapshot horizon and years read, or the refusal with
+    its message -- is `load_stock_universe`'s at that instant, and on the provider's clock the
+    registry is read once rather than once per instant."""
+    store = _clocked_registry(
+        tmp_path, available=clocks.get("available", {}), revised=clocks.get("revised", {})
+    )
+    reader = StockUniverseReader(store, years=years, ceiling=REGISTRY_CEILING)
+    instants = _registry_instants()
+
+    answers = [_answer(lambda instant=instant: reader.at(instant)) for instant in instants]
+
+    for instant, answer in zip(instants, answers, strict=True):
+        assert answer == _answer(
+            lambda instant=instant: load_stock_universe(
+                store, years=years, as_of=instant, max_staleness=None
+            )
+        ), instant.isoformat()
+    refused = {
+        instant for instant, answer in zip(instants, answers, strict=True) if answer[0] == "refused"
+    }
+    before_any_listing = {instant for instant in instants if instant < _midnight(date(2025, 3, 3))}
+    if "revised" in clocks:
+        # A revision the ceiling's rows cannot place: every instant reads its own registry.
+        assert reader.reads == 1 + len(instants)
+        assert refused == before_any_listing
+        return
+    assert reader.reads == 1
+    if "available" not in clocks:
+        assert refused == before_any_listing
+    elif LATE_LISTING in clocks["available"]:
+        assert _published(date(2026, 2, 10)) in refused
+        assert _midnight(date(2026, 2, 13)) not in refused
+    elif 2027 in years:
+        assert _published(date(2027, 1, 6)) in refused
+        assert _midnight(date(2027, 1, 11)) not in refused
+    else:  # the early row sits in 2027, which a read of 2026 never opens
+        assert refused == before_any_listing

@@ -496,6 +496,8 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_factors.FactorEngineError",
             "panel_factors.load_factor_observations",
             "panel_factors.load_processed_factor_observations",
+            # V2-P6-025: a matrix's cross sections share one registry read per span of years.
+            "panel_ingest.StockUniverseReader",
             "panel_ingest.load_stock_universe",
             "panel_ingest.load_trading_calendar",
             "panel_ingest.newest_published_session",

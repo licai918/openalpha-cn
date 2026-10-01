@@ -99,6 +99,12 @@ FILTERED_READ_REACHERS: dict[str, frozenset[str]] = {
             "_read_visible_event_dated_rows",
             "_read_visible_membership_rows",
             "_read_visible_price_session",
+            # `V2-P6-025`: `load_stock_universe` read once at a ceiling and answered at every
+            # earlier instant from those rows by the same predicate and census reconciliation;
+            # wherever its rows cannot show that, each instant takes `load_stock_universe` itself.
+            "StockUniverseReader.__init__",
+            "StockUniverseReader._read_once",
+            "StockUniverseReader.at",
             "load_daily_bars",
             "load_daily_valuations",
             "load_industry_cross_section",
