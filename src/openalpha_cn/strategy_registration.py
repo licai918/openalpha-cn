@@ -951,6 +951,16 @@ def witnessed_days(
         if held:
             ranked = True
         elif session in holds:
+            published = session_publication_instant(session)
+            if holds[session] < published:
+                # `V2-P6-025` review m2: scored at an instant before its session published, a
+                # walk-forward day asks its shared reader about a cross section past the store it
+                # was read at, and the refusal below would skip the day without a word.
+                raise StrategyRegistrationError(
+                    f"{session.isoformat()} is journalled held at {holds[session].isoformat()}, "
+                    f"before the session published at {published.isoformat()}; a run reads its "
+                    "session after it publishes, so a hold pinned earlier cannot have scored it"
+                )
             try:
                 signal, _scored, _at = _score_when_readable(
                     store,

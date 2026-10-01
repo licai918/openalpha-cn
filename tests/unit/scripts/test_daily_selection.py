@@ -74,6 +74,7 @@ from openalpha_cn.panel_ingest import (
 from openalpha_cn.storage.predictions import FilePredictionStore
 from openalpha_cn.strategy_registration import (
     RegisteredConfiguration,
+    StrategyRegistrationError,
     batch_digest,
     book_period_end,
     input_provenance,
@@ -2988,6 +2989,42 @@ def dataclasses_replace(value: Any, **changes: Any) -> Any:
     import dataclasses
 
     return dataclasses.replace(value, **changes)
+
+
+def test_a_hold_pinned_before_its_session_published_is_refused_by_name(tmp_path: Path) -> None:
+    """`V2-P6-025` review m2. A journalled hold is re-scored at the instant its run pinned, and a
+    run reads its session after that session publishes. A hold pinned earlier cannot have scored
+    it; scored there, the walk-forward's shared reader refuses a cross section asked past the
+    store it was read at, and the replay -- which skips a day it cannot score -- would drop the
+    day without a word. It is refused instead, naming the day and both instants."""
+    panel = write_strategy_corpus(tmp_path)
+    sessions = panel.sessions
+    request_for = _static_request_for(_base(**{**STATIC, "rebalance_every_sessions": 2}))
+    anchor = sessions[1]
+    for day in (sessions[1], sessions[2], sessions[4]):
+        _file(tmp_path, request_for, day, anchor, at=_evening(day))
+    store = PanelStore(tmp_path / "panel")
+    calendar = load_trading_calendar(store, exchange=EXCHANGE, years=(2026,), as_of=READ_AT)
+    published = session_publication_instant(sessions[3])
+    early = published - timedelta(hours=7)
+
+    with pytest.raises(StrategyRegistrationError) as refused:
+        witnessed_days(
+            store,
+            FilePredictionStore(tmp_path / "predictions", clock=lambda: READ_AT),
+            REGISTERED,
+            request_for=lambda day, _at: request_for(day),
+            as_of=READ_AT,
+            anchor=anchor,
+            calendar=calendar,
+            through=sessions[4],
+            journalled_holds={sessions[3]: early},
+        )
+
+    message = str(refused.value)
+    assert sessions[3].isoformat() in message
+    assert early.isoformat() in message
+    assert published.isoformat() in message
 
 
 def test_another_writers_record_of_the_same_model_is_not_this_registrations(

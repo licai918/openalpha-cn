@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import ast
 import inspect
+import traceback
+from array import array
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Final
@@ -31,6 +33,7 @@ from openalpha_cn.feature_matrix import (
     FeatureSpecError,
     _admitted_cells,
     _rows_after_preprocessing,
+    _StoredBuild,
     feature_spec,
 )
 from openalpha_cn.panel_factors import FACTOR_DEFINITIONS, FACTOR_TRANSFORMS
@@ -201,6 +204,35 @@ def test_a_row_written_under_another_specs_address_is_refused_and_names_both() -
 
     assert TRANSFORM.transform_id in str(refused.value)
     assert "ftx_" + "0" * 24 in str(refused.value)
+
+
+def test_a_held_builds_refusal_is_a_fresh_exception_each_time_it_is_raised() -> None:
+    """`V2-P6-025` review m3. A shared reader holds a build whose rows carry another definition's
+    addresses and refuses each cross section that uses it. Re-raising one stored exception would
+    grow its `__traceback__` with every raise and overwrite its `__context__`, so each raise is a
+    new exception with the same message and a traceback of its own."""
+    foreign = ("000001.SZ", 1.5, "processed", INSTANT, (REVERSAL.factor_id, "ftx_" + "0" * 24))
+    with pytest.raises(FeatureMatrixBlockedError) as expected:
+        _admitted_cells(PROCESSED, [foreign], instant=INSTANT)  # type: ignore[arg-type]
+    held = _StoredBuild(subjects=(), values=array("d"), refusal=str(expected.value))
+
+    raised = []
+    for context in (ValueError("first"), ValueError("second")):
+        try:
+            try:
+                raise context
+            except ValueError:
+                held.cells()
+        except FeatureMatrixBlockedError as refusal:
+            raised.append(refusal)
+
+    first, second = raised
+    assert first is not second
+    assert str(first) == str(second) == str(expected.value)
+    assert first.__context__ is not second.__context__
+    assert len(traceback.extract_tb(first.__traceback__)) == len(
+        traceback.extract_tb(second.__traceback__)
+    )
 
 
 # --- the three policies, at the two boundaries a panel cannot cheaply reach ---------------------

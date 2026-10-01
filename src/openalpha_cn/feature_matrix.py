@@ -866,16 +866,18 @@ class _StoredBuild:
 
     `_admitted_cells`' answer, taken when the partition is read and held compactly: the admitted
     securities and their values, in the dict's own order. A build whose rows carry another
-    definition's addresses holds that refusal instead, raised only if a cross section uses it.
+    definition's addresses holds that refusal's message instead, raised only if a cross section
+    uses it -- as a new exception each time, so two cross sections that use it raise two
+    exceptions with their own tracebacks and contexts rather than one object re-raised.
     """
 
     subjects: tuple[str, ...]
     values: array[float]
-    refusal: FeatureMatrixBlockedError | None
+    refusal: str | None
 
     def cells(self) -> dict[str, float]:
         if self.refusal is not None:
-            raise self.refusal
+            raise FeatureMatrixBlockedError(self.refusal)
         return dict(zip(self.subjects, self.values, strict=True))
 
 
@@ -959,7 +961,7 @@ class FeatureRowReader:
             try:
                 cells = _admitted_cells(column, by_instant[instant], instant=instant)
             except FeatureMatrixBlockedError as refusal:
-                builds[instant] = _StoredBuild(subjects=(), values=array("d"), refusal=refusal)
+                builds[instant] = _StoredBuild(subjects=(), values=array("d"), refusal=str(refusal))
                 continue
             builds[instant] = _StoredBuild(
                 subjects=tuple(names.setdefault(subject, subject) for subject in cells),
