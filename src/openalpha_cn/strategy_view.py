@@ -215,7 +215,12 @@ from openalpha_cn.factor_view import (
     FactorRequestError,
     resolve_factor,
 )
-from openalpha_cn.feature_matrix import FeatureColumn, FeatureMatrixError, feature_spec
+from openalpha_cn.feature_matrix import (
+    FeatureColumn,
+    FeatureMatrixError,
+    FeatureRowReader,
+    feature_spec,
+)
 from openalpha_cn.model_view import (
     MODEL_FAMILIES,
     UNFILED_CONFIG_DIGEST,
@@ -1532,6 +1537,10 @@ class _ModelFeed:
         self._fits: list[WalkForwardFit] = []
         self._fit_cache = fit_cache
         self._window: dict[date, tuple[TrainingExample, ...]] = {}
+        self._rows = FeatureRowReader(store, ceiling=request.as_of)
+        """Every factor partition this feed's refits and scored days read, each read once at the
+        request's `as_of` and dropped once the training window has moved past its year
+        (`V2-P6-025`): a refit's matrix and a signal day's cross section are cut from it."""
         self.last_batch: PredictionBatch | None = None
         """The batch `rows_on` scored last: the one a caller registering that day's scores files
         (`score_day`). Only the last is kept, so a long run holds one batch, not the history."""
@@ -1547,6 +1556,7 @@ class _ModelFeed:
                 self._store,
                 self._run(start=day, end=day, first_year=day.year - 1, last_year=day.year),
                 as_of=instant,
+                rows=self._rows,
             )
         )
         try:
@@ -1618,6 +1628,7 @@ class _ModelFeed:
         newest = at - spec.embargo_sessions - spec.horizon_sessions - 2
         for day in [day for day in self._window if self._position[day] < first]:
             del self._window[day]
+        self._rows.forget_years_before(calendar[first].year)
         if newest >= first:
             missing = [
                 calendar[index]
@@ -1637,6 +1648,7 @@ class _ModelFeed:
                         ),
                         deadline=self._instants[deadline_day],
                         cached_sessions=_cached_label_sessions(spec.horizon_sessions),
+                        rows=self._rows,
                     )
                 )
                 by_day: dict[date, list[TrainingExample]] = {day: [] for day in missing}

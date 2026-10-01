@@ -18,7 +18,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final
@@ -27,6 +27,8 @@ from zoneinfo import ZoneInfo
 from panel_fixtures import (
     DAILY_BASIC_DATASET,
     EXCHANGE,
+    LISTED_ON,
+    NEWEST_HALT_SECURITY_INDEX,
     WINDOW_FIRST,
     GeneratedPanel,
     generate_panel,
@@ -502,7 +504,8 @@ def _write_by_year(store: PanelStore, panel: GeneratedPanel) -> None:
         write_adjustment_factors(store, [part], calendar=calendar)
     for part in parts(SUSPENSION_DATASET):
         write_suspensions(store, [part])
-    halts = load_suspensions(store, years=(2026, 2027), as_of=panel.as_of, max_staleness=None)
+    years = tuple(sorted({session.year for session in panel.sessions}))
+    halts = load_suspensions(store, years=years, as_of=panel.as_of, max_staleness=None)
     for bars, fundamentals in zip(parts(DAILY_DATASET), parts(DAILY_BASIC_DATASET), strict=True):
         write_daily_panel(
             store, bars=[bars], fundamentals=[fundamentals], calendar=calendar, halts=halts
@@ -547,6 +550,7 @@ def write_two_year_corpus(
     *,
     builds_from: date = TWO_YEAR_BUILDS_FROM,
     calendar_published_yearly: bool = False,
+    processed: Mapping[FactorTransformSpec, date] | None = None,
 ) -> GeneratedPanel:
     """A panel priced 2026-01-05 .. 2027-01-22, with a raw build on every session from 12-01.
 
@@ -560,6 +564,8 @@ def write_two_year_corpus(
 
     `calendar_published_yearly` dates each calendar row at its own year's start, as the real
     provider does (`_calendar_published_yearly`); the rows and every other dataset are unchanged.
+    `processed` writes each transform of the raw builds on the sessions through its date, in the
+    one call the processed writer requires of a factor's transforms.
     """
     store = PanelStore(root / "panel")
     panel = _two_year_panel()
@@ -576,12 +582,241 @@ def write_two_year_corpus(
             ),
         )
     _write_by_year(store, panel)
+    raws = [
+        _two_year_build(store, panel, session)
+        for session in panel.sessions
+        if session >= builds_from
+    ]
+    write_factor_panels(store, raws)
+    if processed:
+        write_processed_factor_panels(
+            store,
+            [
+                apply_factor_transform(raw, spec, code_commit=COMMIT, built_at=raw.built_at)
+                for spec, through in processed.items()
+                for raw in raws
+                if raw.as_of.astimezone(SHANGHAI_ZONE).date() <= through
+            ],
+        )
+    return panel
+
+
+# --- the research store's shape: factors from Y, prices from Y-1, a run starting in Y+2 ----------
+#
+# `V2-P6-025`. The protocol's stage-2 window starts on 2017-01-03 with 488-session lookbacks, so
+# its first training window opens on the factor store's first year (2015) and a walk-forward
+# asks the model plane for the year before (2014), which holds prices and no factor. This corpus
+# has that shape at fixture scale: prices for every session of 2025 (Y-1), 2026 (Y) and 2027, and
+# January 2028 (Y+2); factor builds from Y's first session; and the calendar dated the real
+# provider's way. Every year is a full one of weekday sessions, because `strategy_view._lookback`
+# reaches back `needed // 200 + 1` calendar years and so needs a real year's sessions to reach
+# into the year before the lookback's first.
+
+FIRST_FACTOR_YEAR: Final[int] = 2026
+FIRST_FACTOR_YEAR_PRICED_FROM: Final[date] = date(2025, 1, 2)
+FIRST_FACTOR_YEAR_LAST: Final[date] = date(2028, 1, 31)
+FIRST_FACTOR_YEAR_EVERY: Final[int] = 5
+"""Before December of Y+1 a build lands on every fifth session; from then on on every one."""
+FIRST_FACTOR_YEAR_DENSE_FROM: Final[date] = date(2027, 12, 1)
+FIRST_FACTOR_YEAR_LISTINGS: Final[tuple[tuple[str, date], ...]] = (
+    ("000011.SZ", date(2026, 6, 1)),
+    ("000012.SZ", date(2027, 6, 1)),
+    ("000013.SZ", date(2028, 1, 12)),
+)
+"""Registry-only listings, so `stock_basic` holds a partition for every year after the first,
+as a real registry does (the market itself is listed on Y-1's first session)."""
+
+
+def _weekday_sessions(first: date, last: date, *, closed: frozenset[date]) -> list[CalendarDay]:
+    return [
+        CalendarDay(
+            calendar_date=day,
+            is_trading=day.weekday() < 5 and day not in closed,
+        )
+        for day in (first + timedelta(days=offset) for offset in range((last - first).days + 1))
+    ]
+
+
+def _first_factor_year_panel() -> GeneratedPanel:
+    """`_two_year_panel`'s construction over 2025-01-01 .. 2028-02-29, every year in full."""
+    base = generate_panel(shapes=TWO_YEAR_SHAPES, window=(TWO_YEAR_FIRST, date(2026, 12, 31)))
+    new_years = frozenset({date(2025, 1, 1), date(2027, 1, 1), date(2028, 1, 1)})
+    days = (
+        *_weekday_sessions(date(2025, 1, 1), date(2025, 12, 31), closed=new_years),
+        *base.calendar_days,
+        *_weekday_sessions(date(2027, 1, 1), date(2028, 2, 29), closed=new_years),
+    )
+    sessions = tuple(
+        day.calendar_date
+        for day in days
+        if day.is_trading
+        and FIRST_FACTOR_YEAR_PRICED_FROM <= day.calendar_date <= FIRST_FACTOR_YEAR_LAST
+    )
+    grid = {"sessions": sessions, "securities": base.securities, "shapes": base.shapes}
+    universe = base.batch(STOCK_BASIC_DATASET)
+    listed = midnight_shanghai(FIRST_FACTOR_YEAR_PRICED_FROM)
+    dates = next(column for column in universe.columns if column.name == "lifecycle_date")
+    assert set(dates.values) == {LISTED_ON.isoformat()}, "every base row is one listing day"
+    late = [(code, midnight_shanghai(day), day) for code, day in FIRST_FACTOR_YEAR_LISTINGS]
+    registry = dataclasses.replace(
+        universe,
+        as_of=max(universe.as_of, *(instant for _, instant, _ in late)),
+        fetched_at=max(universe.fetched_at, *(instant for _, instant, _ in late)),
+        subjects=(*universe.subjects, *(code for code, _, _ in late)),
+        timeline=TimelineColumns(
+            event_time=(*(listed for _ in universe.subjects), *(at for _, at, _ in late)),
+            available_time=(*(listed for _ in universe.subjects), *(at for _, at, _ in late)),
+            ingested_time=(*(listed for _ in universe.subjects), *(at for _, at, _ in late)),
+            revision_time=(*(listed for _ in universe.subjects), *(at for _, at, _ in late)),
+        ),
+        columns=tuple(
+            PanelColumn(
+                column.name,
+                column.kind,
+                (
+                    *(
+                        FIRST_FACTOR_YEAR_PRICED_FROM.isoformat()
+                        if column.name == "lifecycle_date"
+                        else value
+                        for value in column.values
+                    ),
+                    *(
+                        {
+                            "lifecycle_event": LISTING_EVENT,
+                            "lifecycle_date": day.isoformat(),
+                            "exchange": EXCHANGE,
+                        }[column.name]
+                        for _, _, day in late
+                    ),
+                ),
+            )
+            for column in universe.columns
+        ),
+    )
+    halts = suspension_batch(**grid)
+    yearly = [
+        next(session for session in sessions if session.year == year)
+        for year in (FIRST_FACTOR_YEAR, FIRST_FACTOR_YEAR + 1)
+    ]
+    timed = [_published(day) for day in yearly]
+    halts = dataclasses.replace(
+        halts,
+        subjects=(*halts.subjects, *(base.securities[NEWEST_HALT_SECURITY_INDEX] for _ in yearly)),
+        timeline=TimelineColumns(
+            event_time=(*halts.timeline.event_time, *(_closed(day) for day in yearly)),
+            available_time=(*halts.timeline.available_time, *timed),
+            ingested_time=(*halts.timeline.ingested_time, *timed),
+            revision_time=(*halts.timeline.revision_time, *timed),
+        ),
+        columns=tuple(
+            PanelColumn(
+                column.name,
+                column.kind,
+                (
+                    *column.values,
+                    *(
+                        {
+                            "trade_date": day.isoformat(),
+                            "suspend_type": "S",
+                            "suspend_timing": "13:00-15:00",
+                        }[column.name]
+                        for day in yearly
+                    ),
+                ),
+            )
+            for column in halts.columns
+        ),
+    )
+    batches = {
+        **base.batches,
+        TRADING_CALENDAR_DATASET: _calendar_published_yearly(calendar_batch(days)),
+        STOCK_BASIC_DATASET: registry,
+        ADJ_FACTOR_DATASET: factor_batch(**grid),
+        DAILY_DATASET: bar_batch(**grid),
+        DAILY_BASIC_DATASET: valuation_batch(**grid),
+        SUSPENSION_DATASET: halts,
+        PRICE_LIMIT_DATASET: limit_batch(**grid),
+        INDEX_WEIGHT_DATASET: index_weight_batch(**grid),
+    }
+    return dataclasses.replace(
+        base,
+        calendar_days=days,
+        sessions=sessions,
+        batches=MappingProxyType(batches),
+        as_of=read_instant(sessions[-1]),
+    )
+
+
+def _published(day: date) -> datetime:
+    """16:30 Asia/Shanghai on `day`, when its session became knowable."""
+    return session_publication_instant(day)
+
+
+def _closed(day: date) -> datetime:
+    """15:00 Asia/Shanghai on `day`, a session's event instant."""
+    return datetime.combine(day, time(15, 0), tzinfo=SHANGHAI_ZONE)
+
+
+def first_factor_year_build_days(panel: GeneratedPanel, *, from_year: int) -> tuple[date, ...]:
+    """The sessions this corpus builds on from `from_year`: every fifth, then every one -- never
+    the first priced session, whose one-session reversal has no session before it. The phase is
+    counted from Y's first session whatever `from_year` is, so two stores built from different
+    years hold the same builds in the years both hold."""
+    phase = next(index for index, day in enumerate(panel.sessions) if day.year == FIRST_FACTOR_YEAR)
+    return tuple(
+        day
+        for index, day in enumerate(panel.sessions)
+        if index > 0
+        and day.year >= from_year
+        and (day >= FIRST_FACTOR_YEAR_DENSE_FROM or (index - phase) % FIRST_FACTOR_YEAR_EVERY == 0)
+    )
+
+
+def _first_factor_year_build(
+    store: PanelStore, panel: GeneratedPanel, session: date
+) -> FactorPanel:
+    """One raw `reversal_1d/v1` build at `session`'s 16:30, `_two_year_build`'s evaluator."""
+    instant = build_instant(session)
+    index = panel.sessions.index(session)
+    subjects = tuple(panel.securities)
+    years = tuple(
+        year
+        for year in (session.year - 1, session.year)
+        if year >= FIRST_FACTOR_YEAR_PRICED_FROM.year
+    )
+    return compute_factor(
+        store,
+        REVERSAL,
+        as_of=instant,
+        subjects=subjects,
+        universe=frozenset(panel.securities),
+        requirements={
+            "daily": daily_requirement(
+                panel.calendar(), years=years, as_of=instant, max_staleness=timedelta(days=30)
+            )
+        },
+        code_commit=COMMIT,
+        built_at=instant,
+        evaluators={
+            REVERSAL.qualified_key: lambda context: stored_value(subjects, context.subject, index)
+        },
+    )
+
+
+def write_first_factor_year_corpus(
+    root: Path, *, builds_from_year: int = FIRST_FACTOR_YEAR
+) -> GeneratedPanel:
+    """The research store's shape (see the section comment), its factor builds from
+    `builds_from_year`: `FIRST_FACTOR_YEAR` for the store the protocol runs on, a year earlier
+    for one that also holds the year before's builds."""
+    store = PanelStore(root / "panel")
+    panel = _first_factor_year_panel()
+    _write_by_year(store, panel)
     write_factor_panels(
         store,
         [
-            _two_year_build(store, panel, session)
-            for session in panel.sessions
-            if session >= builds_from
+            _first_factor_year_build(store, panel, session)
+            for session in first_factor_year_build_days(panel, from_year=builds_from_year)
         ],
     )
     return panel

@@ -11,6 +11,7 @@ independent read of the same store rather than against the module's own output.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import statistics
 from array import array
@@ -24,6 +25,7 @@ import pytest
 from panel_fixtures import EXCHANGE, GeneratedPanel
 from strategy_fixtures import (
     COMMIT,
+    FIRST_FACTOR_YEAR,
     INDEX_LEVELS,
     PROBE_NEUTRALIZATION,
     PROBE_NEUTRALIZATIONS,
@@ -34,6 +36,7 @@ from strategy_fixtures import (
     TWO_YEAR_FACTOR_YEAR_START,
     TieredCorpus,
     stored_value,
+    write_first_factor_year_corpus,
     write_strategy_corpus,
     write_tiered_corpus,
     write_two_year_corpus,
@@ -47,6 +50,7 @@ from openalpha_cn.backtest.execution import (
     suspended_at_the_close,
 )
 from openalpha_cn.backtest.factor_ic import (
+    TIER_ADMITTED_CODES,
     FactorICSpec,
     FactorICStudy,
     average_ranks,
@@ -74,7 +78,13 @@ from openalpha_cn.domain.horizon import parse_horizon
 from openalpha_cn.domain.labels import halt_corpus_for_years
 from openalpha_cn.domain.price_limits import TradingState
 from openalpha_cn.domain.trading_calendar import TRADING_CALENDAR_DATASET, TradingCalendar
-from openalpha_cn.feature_matrix import FEATURE_DATE_ZONE
+from openalpha_cn.feature_matrix import (
+    FEATURE_DATE_ZONE,
+    FeatureColumn,
+    FeatureMatrixBlockedError,
+    FeatureMatrixRequest,
+    load_feature_cross_section,
+)
 from openalpha_cn.model_view import (
     MODEL_DATE_ZONE,
     UNFILED_CONFIG_DIGEST,
@@ -91,6 +101,7 @@ from openalpha_cn.panel_factors import (
     factor_manifest_dataset,
     factor_observation_dataset,
     load_factor_observations,
+    load_processed_factor_observations,
 )
 from openalpha_cn.panel_ingest import (
     load_adjustment_histories,
@@ -1406,24 +1417,13 @@ def _factor_start_request(panel: GeneratedPanel, kind: str, *, start: date) -> A
     )
 
 
-def _model_run(request: Any, *, start: date, end: date) -> ModelRunRequest:
-    """The run `_ModelFeed` hands the model plane, over both years every other dataset holds."""
-    spec = request.source.walk_forward
-    return ModelRunRequest(
-        declaration=request.model.declaration,
-        columns=request.columns,
-        missing=spec.missing,
-        start=start,
-        end=end,
-        as_of=request.as_of,
-        years=TWO_YEARS,
-        exchange=EXCHANGE,
-        horizon=parse_horizon(f"{spec.horizon_sessions}d"),
-        minimum_scored_ratio=0.0,
-        shelf_life=None,
-        config_digest=UNFILED_CONFIG_DIGEST,
-        declared_feature_version=None,
-    )
+def _model_run(store: PanelStore, request: Any, *, start: date, end: date) -> ModelRunRequest:
+    """The run a refit whose window is `start..end` hands the model plane, taken from the feed
+    `load_strategy_inputs` builds for `request` rather than restated here, so it cannot drift from
+    `_ModelFeed._run` (the year before `start` through `end`'s, as `_refit` asks)."""
+    feed = load_strategy_inputs(store, request, stream=True).feed
+    assert isinstance(feed, strategy_view._ModelFeed)
+    return feed._run(start=start, end=end, first_year=start.year - 1, last_year=end.year)
 
 
 def test_the_factor_store_begins_a_year_after_every_other_dataset(
@@ -1486,6 +1486,7 @@ def test_a_cross_section_reads_the_year_before_only_when_its_instant_could_draw_
     store, panel = factor_year_start
     held, _ = two_years
     run = _model_run(
+        store,
         _factor_start_request(panel, "walk_forward", start=FACTOR_START_SIGNAL),
         start=TWO_YEAR_FACTOR_YEAR_START,
         end=TWO_YEAR_FACTOR_YEAR_START,
@@ -1510,6 +1511,7 @@ def test_a_training_panel_opening_on_the_first_factor_year_is_the_one_a_fuller_s
     store, panel = factor_year_start
     held, _ = two_years
     run = _model_run(
+        store,
         _factor_start_request(panel, "walk_forward", start=FACTOR_START_SIGNAL),
         start=TWO_YEAR_FACTOR_YEAR_START,
         end=date(2027, 1, 8),
@@ -1534,6 +1536,7 @@ def test_every_cross_section_across_the_year_boundary_is_the_whole_range_reads_n
     years, read here with one whole-range load, value for value."""
     store, panel = two_years
     run = _model_run(
+        store,
         _factor_start_request(panel, "walk_forward", start=FACTOR_START_SIGNAL),
         start=date(2026, 12, 28),
         end=date(2027, 1, 8),
@@ -1630,8 +1633,9 @@ def test_a_cross_section_resolves_its_session_on_the_calendar_its_own_instant_co
     store, panel = yearly_calendar
     fuller, _ = two_years
     run = _model_run(
-        _two_year_request(panel, "walk_forward"), start=BOUNDARY_START, end=BOUNDARY_SIGNAL
+        store, _two_year_request(panel, "walk_forward"), start=BOUNDARY_START, end=BOUNDARY_TRADE
     )
+    assert run.years == TWO_YEARS
     reads: list[tuple[tuple[int, ...], datetime]] = []
     real = feature_matrix.load_trading_calendar
 
@@ -1642,6 +1646,7 @@ def test_a_cross_section_resolves_its_session_on_the_calendar_its_own_instant_co
     for instant in (
         session_publication_instant(BOUNDARY_SIGNAL),
         datetime.combine(BOUNDARY_TRADE, time(9, 0), tzinfo=SHANGHAI),
+        session_publication_instant(BOUNDARY_TRADE),
     ):
         expected = feature_cross_section(fuller, run, as_of=instant)
         monkeypatch.setattr(feature_matrix, "load_trading_calendar", recorded)
@@ -1653,4 +1658,259 @@ def test_a_cross_section_resolves_its_session_on_the_calendar_its_own_instant_co
             tuple(year for year in TWO_YEARS if year <= answered.as_of.astimezone(SHANGHAI).year),
             answered.as_of,
         )
-    assert [years for years, _ in reads] == [(2026,), (2026,)]
+    assert [years for years, _ in reads] == [(2026,), (2026,), TWO_YEARS]
+
+
+# --- V2-P6-025 review: the fallbacks, and two processed columns a year apart -------------------
+
+
+def test_a_run_naming_no_year_its_reads_could_use_is_refused_by_the_partition_it_named(
+    factor_year_start: tuple[PanelStore, GeneratedPanel],
+) -> None:
+    """Both narrowings fall back to the years the run declared when none of them is one the
+    answer could come from, so a refusal stays the partition's rather than turning into an
+    empty answer: a training range in 2027 declaring only 2026, and a cross section at a 2027
+    instant declaring only 2028."""
+    store, panel = factor_year_start
+    run = _model_run(
+        store,
+        _factor_start_request(panel, "walk_forward", start=FACTOR_START_SIGNAL),
+        start=TWO_YEAR_FACTOR_YEAR_START,
+        end=date(2027, 1, 8),
+    )
+
+    with pytest.raises(ModelPanelUnreadableError, match=r"year=2026 .*partition_missing"):
+        training_panel(
+            store,
+            dataclasses.replace(run, years=(2026,)),
+            deadline=session_publication_instant(FACTOR_START_SIGNAL),
+        )
+    with pytest.raises(ModelPanelUnreadableError, match=r"year=2028 .*partition_missing"):
+        feature_cross_section(
+            store,
+            dataclasses.replace(run, years=(2028,)),
+            as_of=session_publication_instant(date(2027, 1, 8)),
+        )
+
+
+PROCESSED_TO_DECEMBER: Final = PROBE_TRANSFORM.model_copy(update={"key": "probe_zscore_december"})
+"""A second transform of the same raw builds, written only through 2026-12-31."""
+
+
+@pytest.fixture(scope="module")
+def two_processed(tmp_path_factory: pytest.TempPathFactory) -> tuple[PanelStore, GeneratedPanel]:
+    root = tmp_path_factory.mktemp("strategy-view-two-processed")
+    panel = write_two_year_corpus(
+        root,
+        processed={PROBE_TRANSFORM: date(2027, 1, 22), PROCESSED_TO_DECEMBER: BOUNDARY_SIGNAL},
+    )
+    return PanelStore(root / "panel"), panel
+
+
+def test_two_processed_columns_whose_newest_builds_sit_in_two_years_walk_back_one_at_a_time(
+    two_processed: tuple[PanelStore, GeneratedPanel],
+) -> None:
+    """At 16:30 on 2027-01-04 one processed column's newest build is that day's and the other's
+    is 2026-12-31's, which only a walk back into 2026 finds: each column walks on its own, and the
+    pair is refused naming both instants. At 09:00 the same morning both walk back to
+    2026-12-31, and the cross section carries each column's stored values there."""
+    store, panel = two_processed
+    january = FeatureColumn(definition=REVERSAL, tier="processed", transform=PROBE_TRANSFORM)
+    december = FeatureColumn(definition=REVERSAL, tier="processed", transform=PROCESSED_TO_DECEMBER)
+    evening = session_publication_instant(BOUNDARY_TRADE)
+    year_end = session_publication_instant(BOUNDARY_SIGNAL)
+    morning = datetime.combine(BOUNDARY_TRADE, time(9, 0), tzinfo=SHANGHAI)
+
+    def section(as_of: datetime, *columns: FeatureColumn) -> Any:
+        request = FeatureMatrixRequest(
+            columns=columns, years=TWO_YEARS, exchange=EXCHANGE, as_ofs=(as_of,)
+        )
+        return load_feature_cross_section(store, request, as_of=as_of)
+
+    assert section(evening, january).as_of == evening
+    assert section(evening, december).as_of == year_end
+    with pytest.raises(FeatureMatrixBlockedError) as refused:
+        section(evening, january, december)
+    assert evening.astimezone(UTC).isoformat() in str(refused.value)
+    assert year_end.astimezone(UTC).isoformat() in str(refused.value)
+
+    shared = section(morning, january, december)
+    assert shared.as_of == year_end
+    for index, column in enumerate(
+        sorted((january, december), key=lambda column: column.feature_id)
+    ):
+        stored = {
+            row.subject: row.value
+            for row in load_processed_factor_observations(
+                store, REVERSAL, column.transform, years=TWO_YEARS, as_of=panel.as_of
+            )
+            if row.as_of == year_end
+            and row.coverage in TIER_ADMITTED_CODES["processed"]
+            and row.value is not None
+        }
+        assert stored
+        assert {
+            row.ts_code: row.values[index]
+            for row in shared.cross_section.rows
+            if row.values[index] is not None
+        } == stored
+
+
+# --- V2-P6-025 (3): a walk-forward re-read each factor year once per cross section --------------
+#
+# With the calendar fixed, the research-store probe ran twenty minutes inside its first refit's
+# training matrix. Each training cross section re-read every declared column's whole year
+# partition at its own instant: 15.3 s for one processed year of one factor (686,039 rows,
+# measured), times 21 columns, times the ~446 cross sections of a 488-session window, and again
+# for every later refit and every scored signal day. That is days of reading for one source.
+
+
+@pytest.mark.parametrize("kind", ["walk_forward"])
+def test_a_walk_forward_run_reads_each_factor_partition_once(
+    two_years: tuple[PanelStore, GeneratedPanel],
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    """Every refit and every scored signal day across the year boundary, one read per factor
+    partition -- and the answer is still the whole-range reference's
+    (`test_across_a_year_boundary_the_streamed_run_is_the_whole_range_reference`)."""
+    from openalpha_cn import feature_matrix
+
+    store, panel = two_years
+    reads: list[tuple[str, tuple[int, ...]]] = []
+    real = feature_matrix.load_factor_observations
+
+    def counted(*args: Any, **kwargs: Any) -> Any:
+        reads.append((args[1].qualified_key, tuple(kwargs["years"])))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(feature_matrix, "load_factor_observations", counted)
+    result = backtest_strategy(store, _two_year_request(panel, kind))
+
+    assert sum(fit.refusal is None for fit in result.model_fits) >= 2
+    assert sorted(reads) == [(REVERSAL.qualified_key, (2026,)), (REVERSAL.qualified_key, (2027,))]
+
+
+# --- V2-P6-025: the brief's shape -- factors from Y, prices from Y-1, a run starting in Y+2 ------
+#
+# `strategy_fixtures.write_first_factor_year_corpus`: every session of 2025, 2026 and 2027 priced,
+# January 2028 too, factor builds from 2026's first session, and the calendar dated the real
+# provider's way. A run starting on 2028-01-10 with a window opening on 2026-01-05 reaches back
+# three calendar years (`_lookback`), so its first refit asks the model plane for 2025 as well --
+# the stage-2 configs' 2014 -- while every scored day and every IC's label reads at its own
+# instant across two year boundaries.
+
+RESEARCH_START: Final[date] = date(2028, 1, 10)
+RESEARCH_FIRST_BUILD: Final[date] = date(FIRST_FACTOR_YEAR, 1, 5)
+
+
+@pytest.fixture(scope="module")
+def research_shape(tmp_path_factory: pytest.TempPathFactory) -> tuple[PanelStore, GeneratedPanel]:
+    root = tmp_path_factory.mktemp("strategy-view-research-shape")
+    panel = write_first_factor_year_corpus(root)
+    return PanelStore(root / "panel"), panel
+
+
+@pytest.fixture(scope="module")
+def research_shape_fuller(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> tuple[PanelStore, GeneratedPanel]:
+    """The same corpus with factor builds from 2025 as well."""
+    root = tmp_path_factory.mktemp("strategy-view-research-shape-fuller")
+    panel = write_first_factor_year_corpus(root, builds_from_year=FIRST_FACTOR_YEAR - 1)
+    return PanelStore(root / "panel"), panel
+
+
+@pytest.fixture(scope="module")
+def research_shape_without_2027(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> tuple[PanelStore, GeneratedPanel]:
+    """The same corpus with 2027's raw observation partition deleted afterwards."""
+    root = tmp_path_factory.mktemp("strategy-view-research-shape-without-2027")
+    panel = write_first_factor_year_corpus(root)
+    store = PanelStore(root / "panel")
+    assert store.remove_partition(factor_observation_dataset(REVERSAL), FIRST_FACTOR_YEAR + 1)
+    return store, panel
+
+
+def _research_request(panel: GeneratedPanel, kind: str) -> Any:
+    window = panel.sessions.index(RESEARCH_START) - panel.sessions.index(RESEARCH_FIRST_BUILD) + 1
+    source = (
+        {"walk_forward": {**WALK_FORWARD, "train_sessions": window, "refit_every_sessions": 4}}
+        if kind == "walk_forward"
+        else {"trailing_ic": {**TRAILING, "ic_window_sessions": window}}
+    )
+    return strategy_request(
+        combine="zscore_sum",
+        transform=None,
+        neutralization=None,
+        components=(),
+        start=RESEARCH_START,
+        end=panel.sessions[-1],
+        as_of=panel.as_of,
+        exchange=EXCHANGE,
+        rebalance_every_sessions=4,
+        holding_count=3,
+        buffer_rank=None,
+        max_industry_weight=None,
+        benchmarks=(EQUAL_WEIGHT_ALL_A,),
+        **source,
+    )
+
+
+def test_the_research_shape_is_the_research_stores(
+    research_shape: tuple[PanelStore, GeneratedPanel],
+) -> None:
+    """Factor partitions from Y, every other dataset from Y-1; a lookback opening on Y's first
+    session over three calendar years; and Y's calendar unreadable at any instant of Y-1."""
+    store, panel = research_shape
+    request = _research_request(panel, "walk_forward")
+
+    assert store.registered_years(factor_observation_dataset(REVERSAL)) == (2026, 2027, 2028)
+    for dataset in (TRADING_CALENDAR_DATASET, ADJ_FACTOR_DATASET, DAILY_DATASET):
+        assert store.registered_years(dataset) == (2025, 2026, 2027, 2028)
+    inputs = load_strategy_inputs(store, request, stream=True)
+    assert inputs.lookback_sessions[0] == RESEARCH_FIRST_BUILD
+    feed = inputs.feed
+    assert isinstance(feed, strategy_view._ModelFeed)
+    assert feed._years == (2025, 2026, 2027, 2028)
+    with pytest.raises(Exception, match="not_yet_knowable"):
+        load_trading_calendar(
+            store,
+            exchange=EXCHANGE,
+            years=(2025, 2026),
+            as_of=session_publication_instant(date(2025, 12, 31)),
+        )
+
+
+@pytest.mark.parametrize("kind", ["trailing_ic", "walk_forward"])
+def test_a_run_from_y_plus_2_whose_lookback_opens_on_y_is_the_one_a_fuller_store_answers(
+    research_shape: tuple[PanelStore, GeneratedPanel],
+    research_shape_fuller: tuple[PanelStore, GeneratedPanel],
+    kind: str,
+) -> None:
+    """Measured, not refused, and period for period, fit for fit, IC for IC the answer of a
+    store that also holds Y-1's builds: the year before the factor store begins contributes
+    nothing to a window that opens on its first build."""
+    store, panel = research_shape
+    fuller, _ = research_shape_fuller
+    request = _research_request(panel, kind)
+
+    answered = backtest_strategy(store, request)
+
+    assert any(not period.held for period in answered.periods)
+    if kind == "walk_forward":
+        assert sum(fit.refusal is None for fit in answered.model_fits) >= 2
+    assert backtest_view(answered) == backtest_view(backtest_strategy(fuller, request))
+
+
+@pytest.mark.parametrize("kind", ["trailing_ic", "walk_forward"])
+def test_a_factor_partition_deleted_inside_the_build_range_is_refused_by_name(
+    research_shape_without_2027: tuple[PanelStore, GeneratedPanel], kind: str
+) -> None:
+    """2027 sits between the factor store's first and last builds and every window of the run
+    spans it: its absence is refused, never read as a year that held nothing."""
+    store, panel = research_shape_without_2027
+
+    with pytest.raises(StrategyPanelUnreadableError, match=r"year=2027 .*partition_missing"):
+        backtest_strategy(store, _research_request(panel, kind))

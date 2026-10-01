@@ -413,6 +413,9 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_factors.FactorEngineError",
             "panel_factors.ProcessedFactorPanel",
             "panel_factors._refuse_a_merge_that_lost_a_stored_build",
+            # V2-P6-025: all three tiers' writers refuse a zone the factor readers do not file
+            # years in, through the one guard that states why.
+            "panel_factors._refuse_a_zone_the_readers_do_not_file_years_in",
             "panel_factors._refuse_rows_that_are_not_the_answers_their_manifest_addresses",
             "panel_factors._refuse_to_drop_a_stored_build",
             "panel_factors.appended_to_the_stored_year",
@@ -509,6 +512,8 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "feature_matrix.FeatureMatrixSection",
             "feature_matrix.FeatureMatrixUnreadableError",
             "feature_matrix.FeatureMissingPolicy",
+            # V2-P6-025: a run reads each factor partition once for its instants and its matrix.
+            "feature_matrix.FeatureRowReader",
             "feature_matrix.FeatureSpec",
             "feature_matrix.build_feature_matrix",
             "feature_matrix.load_feature_cross_section",
@@ -558,6 +563,9 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             # derived a third way.
             "feature_matrix.FeatureColumn",
             "feature_matrix.FeatureMatrixError",
+            # V2-P6-025: the walk-forward feed reads each factor partition once across its
+            # refits and scored days, not once per cross section.
+            "feature_matrix.FeatureRowReader",
             "feature_matrix.feature_spec",
             "model_view.LabelReach",
             "model_view.MODEL_FAMILIES",

@@ -6561,6 +6561,7 @@ def write_factor_panels(
     still no cross-partition atomicity on offer here; what the ordering buys is that a refusal
     changes nothing at all.
     """
+    _refuse_a_zone_the_readers_do_not_file_years_in(date_timezone, writer="write_factor_panels")
     if not panels:
         raise FactorEngineError(
             "write_factor_panels needs at least one panel; an empty write would be a call that "
@@ -6640,6 +6641,29 @@ def _batches_by_dataset(
             batch = build(panel)
             grouped.setdefault(batch.dataset, []).append(batch)
     return tuple(tuple(batches) for batches in grouped.values())
+
+
+def _refuse_a_zone_the_readers_do_not_file_years_in(date_timezone: str, *, writer: str) -> None:
+    """Refuse to file a factor tier's builds under any zone's years but `DEFAULT_DATE_TIMEZONE`'s.
+
+    `V2-P6-025`. The readers depend on one invariant: a build sits in the partition of its
+    instant's Asia/Shanghai year. `feature_matrix._newest_visible_build` and
+    `model_view._instants_in_range` read only the years such a build can sit in, and
+    `strategy_view._year_sections` maps a partition's rows to Shanghai days of that year. A
+    partition split in another zone would file a Shanghai-January build under the year before,
+    and those reads would skip it without saying so. The rule is enforced here, where the year is
+    decided, and not checked on each read: a reader would need a catalog lookup per partition per
+    cross section (about nine thousand per refit on the research store) to find what one check
+    here rules out. No caller in the tree has ever passed a zone to these writers, so nothing
+    already stored breaks the rule. All three tiers' writers call this before their first guard.
+    """
+    if date_timezone != DEFAULT_DATE_TIMEZONE:
+        raise FactorEngineError(
+            f"{writer} files factor builds by their instant's year in {DEFAULT_DATE_TIMEZONE} and "
+            f"was asked to use {date_timezone!r}; the factor readers open only the years a build "
+            f"can be filed under in {DEFAULT_DATE_TIMEZONE}, so a build filed under another "
+            "zone's year would be one they never read"
+        )
 
 
 def _refuse_two_builds_of_one_factor_at_one_as_of(panels: Sequence[FactorPanel]) -> None:
@@ -9051,6 +9075,9 @@ def write_processed_factor_panels(
     choice, and it is *enforced* rather than documented: a second transform written on its own
     would drop the first's build and the guard refuses it.
     """
+    _refuse_a_zone_the_readers_do_not_file_years_in(
+        date_timezone, writer="write_processed_factor_panels"
+    )
     if not panels:
         raise FactorEngineError(
             "write_processed_factor_panels needs at least one panel; an empty write would be a "

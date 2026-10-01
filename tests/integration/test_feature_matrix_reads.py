@@ -51,6 +51,7 @@ from openalpha_cn.domain.factor import FactorDefinition, set_digest
 from openalpha_cn.domain.panel_batch import ColumnarPanelBatch, PanelColumn, TimelineColumns
 from openalpha_cn.domain.stock_universe import LISTING_EVENT, STOCK_BASIC_DATASET
 from openalpha_cn.feature_matrix import (
+    FEATURE_DATE_ZONE,
     FeatureColumn,
     FeatureMatrixBlockedError,
     FeatureMatrixRequest,
@@ -62,17 +63,22 @@ from openalpha_cn.feature_matrix import (
     require_declared_features,
     stored_cross_section_instants,
 )
+from openalpha_cn.panel.catalog import DEFAULT_DATE_TIMEZONE
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import (
     FACTOR_DEFINITIONS,
     FACTOR_TRANSFORMS,
+    FactorEngineError,
     FactorPanel,
     apply_factor_transform,
     compute_factor,
+    factor_observation_dataset,
+    processed_factor_dataset,
     write_factor_panels,
     write_processed_factor_panels,
 )
 from openalpha_cn.panel_ingest import daily_requirement, write_stock_universe
+from openalpha_cn.panel_neutralization import write_neutralized_factor_panels
 
 REVERSAL: Final = FACTOR_DEFINITIONS.get("reversal_1d/v1")
 MOMENTUM: Final = FACTOR_DEFINITIONS.get("momentum_20_sessions/v1")
@@ -699,3 +705,30 @@ def test_a_request_declaring_no_column_has_no_instants_to_share(store: PanelStor
     """
     with pytest.raises(FeatureSpecError, match="no column was declared"):
         stored_cross_section_instants(store, columns=(), years=(YEAR,), as_of=AT_B3)
+
+
+@pytest.mark.parametrize("zone", ["UTC", "America/New_York"])
+def test_a_factor_writer_refuses_a_zone_the_readers_do_not_file_years_in(
+    tmp_path: Path, zone: str
+) -> None:
+    """`V2-P6-025`: `load_feature_cross_section` and the model plane read only the factor years
+    a build can be filed under, which is the build instant's year in `FEATURE_DATE_ZONE` because
+    every tier's writer splits there. A writer asked to split anywhere else would file a
+    Shanghai-January build under the year before and those reads would never open it, so all
+    three refuse before writing anything."""
+    store = PanelStore(tmp_path / "panel")
+    panel = generate_panel()
+    write_generated_panel(store, panel)
+    raw = _build(store, panel, B1)
+    processed = apply_factor_transform(raw, NARROW, code_commit=COMMIT, built_at=B1)
+
+    with pytest.raises(FactorEngineError, match=FEATURE_DATE_ZONE):
+        write_factor_panels(store, [raw], date_timezone=zone)
+    with pytest.raises(FactorEngineError, match=FEATURE_DATE_ZONE):
+        write_processed_factor_panels(store, [processed], date_timezone=zone)
+    with pytest.raises(FactorEngineError, match=FEATURE_DATE_ZONE):
+        write_neutralized_factor_panels(store, [], date_timezone=zone)
+    assert store.registered_years(factor_observation_dataset(REVERSAL)) == ()
+    assert store.registered_years(processed_factor_dataset(REVERSAL)) == ()
+    assert FEATURE_DATE_ZONE == DEFAULT_DATE_TIMEZONE
+    assert write_factor_panels(store, [raw], date_timezone=DEFAULT_DATE_TIMEZONE)

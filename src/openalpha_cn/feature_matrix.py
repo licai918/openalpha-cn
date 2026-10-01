@@ -214,6 +214,7 @@ is wrong -- which is the direction to be slow in.
 from __future__ import annotations
 
 import statistics
+from array import array
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -271,6 +272,7 @@ __all__ = [
     "FeatureMatrixSection",
     "FeatureMatrixUnreadableError",
     "FeatureMissingPolicy",
+    "FeatureRowReader",
     "FeatureSpec",
     "FeatureSpecError",
     "build_feature_matrix",
@@ -289,7 +291,7 @@ FEATURE_DATE_ZONE: Final[str] = DEFAULT_DATE_TIMEZONE
 `shortlist_view.SHORTLIST_DATE_ZONE` and this one differ in form and not in value: that face
 needs a `ZoneInfo` because it also takes an instant's calendar day, and this module never does --
 every day it computes comes back from `newest_published_session`, which takes the zone by name.
-The one date it does take is a year: `_newest_visible_rows` resolves an instant to the factor
+The one date it does take is a year: `_newest_visible_build` resolves an instant to the factor
 partition year it is filed under, which is this zone's year because the factor writers split at
 the same default (`V2-P6-025`).
 Aliased rather than used inline so the one place a zone is decided is greppable.
@@ -857,20 +859,113 @@ def _rows_for(
     )
 
 
-def _newest_visible_rows(
-    store: PanelStore, column: FeatureColumn, *, years: Sequence[int], as_of: datetime
-) -> tuple[_StoredRow, ...]:
-    """One column's rows in the newest of `years` that holds a build visible at `as_of`.
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _StoredBuild:
+    """One column's stored build at one instant, as a cross section reads it.
+
+    `_admitted_cells`' answer, taken when the partition is read and held compactly: the admitted
+    securities and their values, in the dict's own order. A build whose rows carry another
+    definition's addresses holds that refusal instead, raised only if a cross section uses it.
+    """
+
+    subjects: tuple[str, ...]
+    values: array[float]
+    refusal: FeatureMatrixBlockedError | None
+
+    def cells(self) -> dict[str, float]:
+        if self.refusal is not None:
+            raise self.refusal
+        return dict(zip(self.subjects, self.values, strict=True))
+
+
+class FeatureRowReader:
+    """Each declared column's factor partitions, each read at most once, held by build.
+
+    `V2-P6-025`. A walk-forward cuts hundreds of cross sections out of the same few partitions,
+    and each one used to re-read every declared column's whole year at its own instant. On the
+    research store one processed year of one factor is 686,039 rows and 15.3 s to read, so the
+    first refit of a 21-column source spent hours reading one window. This reader reads each
+    `(column, year)` once, at `ceiling`, and keeps each build's admitted cells.
+
+    **Reading at `ceiling` and choosing by instant is the read at each instant, row for row.**
+    Every row of a factor partition carries its build's instant on all four clocks
+    (`panel_factors.factor_observation_batch`), and `read_visible_at` keeps a row when its
+    `available_time` and `revision_time` are at or before the read's `as_of`. So the rows visible
+    at any `as_of` at or before `ceiling` are exactly the builds at or before that `as_of`.
+    `strategy_view._FactorFeed` has always read its tier-years this way -- at the request's
+    `as_of`, choosing each signal day's build by instant -- and stage 1 ran on it.
+
+    What can differ is a refusal about a build no instant uses: the tier loaders check every
+    build they return against its manifest, and a partition read at `ceiling` checks the builds
+    after an earlier instant too. The model plane already reads every such build at the run's
+    `as_of` (`model_view._instants_in_range`) before it cuts one cross section, so on that path
+    nothing is refused that was not already.
+
+    A question at an `as_of` after `ceiling` is refused: the rows it could see were not read.
+    `forget_years_before` drops what a caller walking forward no longer needs.
+    """
+
+    def __init__(self, store: PanelStore, *, ceiling: datetime) -> None:
+        self._store = store
+        self.ceiling = ceiling
+        self._builds: dict[tuple[str, int], dict[datetime, _StoredBuild]] = {}
+        self._names: dict[str, str] = {}
+
+    def builds(
+        self, column: FeatureColumn, year: int, *, as_of: datetime
+    ) -> Mapping[datetime, _StoredBuild]:
+        """The column's builds in `year` visible at `as_of`, ascending by instant."""
+        if as_of > self.ceiling:
+            raise FeatureSpecError(
+                f"a cross section at {as_of.isoformat()} was asked of rows read at "
+                f"{self.ceiling.isoformat()}; the builds between the two were never read"
+            )
+        key = (column.feature_id, year)
+        held = self._builds.get(key)
+        if held is None:
+            held = self._builds[key] = self._read(column, year)
+        return {instant: build for instant, build in held.items() if instant <= as_of}
+
+    def forget_years_before(self, year: int) -> None:
+        """Drop every held partition of a year before `year`; a later ask reads it again."""
+        for key in [key for key in self._builds if key[1] < year]:
+            del self._builds[key]
+
+    def _read(self, column: FeatureColumn, year: int) -> dict[datetime, _StoredBuild]:
+        by_instant: dict[datetime, list[_StoredRow]] = {}
+        for row in _rows_for(self._store, column, years=(year,), as_of=self.ceiling):
+            by_instant.setdefault(row[3], []).append(row)
+        names = self._names
+        builds: dict[datetime, _StoredBuild] = {}
+        for instant in sorted(by_instant):
+            try:
+                cells = _admitted_cells(column, by_instant[instant], instant=instant)
+            except FeatureMatrixBlockedError as refusal:
+                builds[instant] = _StoredBuild(subjects=(), values=array("d"), refusal=refusal)
+                continue
+            builds[instant] = _StoredBuild(
+                subjects=tuple(names.setdefault(subject, subject) for subject in cells),
+                values=array("d", cells.values()),
+                refusal=None,
+            )
+        return builds
+
+
+def _newest_visible_build(
+    reader: FeatureRowReader, column: FeatureColumn, *, years: Sequence[int], as_of: datetime
+) -> tuple[datetime, _StoredBuild] | None:
+    """One column's newest build visible at `as_of`, from the newest of `years` holding one.
 
     `V2-P6-025`. A cross section uses one build per column -- the newest at or before `as_of`
     (`_resolve_instant`) -- and only that build's rows (`_admitted_cells`). Every row of a factor
     partition carries its build's `as_of` on all four clocks, and the tiers file a build under
-    its instant's year in `FEATURE_DATE_ZONE` (the writers take `split_panel_batch_by_year` at
-    `panel/catalog.py`'s default zone, and `PanelStore.record_coverage` refuses a partition whose
-    dates leave its year). So a partition after `as_of`'s year holds nothing visible, and one
-    before the newest year holding a visible build holds only older builds: neither can be the
-    newest, and neither is read. Walking the years newest first and stopping at the first with a
-    visible row is the whole-range read's answer, row for row, for every question it answered.
+    its instant's year in `FEATURE_DATE_ZONE` (the writers refuse any other zone,
+    `panel_factors._refuse_a_zone_the_readers_do_not_file_years_in`, and
+    `PanelStore.record_coverage` refuses a partition whose dates leave its year). So a partition
+    after `as_of`'s year holds nothing visible, and one before the newest year holding a visible
+    build holds only older builds: neither can be the newest, and neither is read. Walking the
+    years newest first and stopping at the first with a visible build is the whole-range read's
+    answer, row for row, for every question it answered.
 
     What changes is only what it refused. A year that cannot hold the build this cross section
     uses is no longer opened, so the factor store's absence of a year before its first build is
@@ -889,12 +984,15 @@ def _newest_visible_rows(
     through = as_of.astimezone(ZoneInfo(FEATURE_DATE_ZONE)).year
     candidates = sorted({year for year in years if year <= through}, reverse=True)
     if not candidates:
-        return _rows_for(store, column, years=years, as_of=as_of)
+        declared = [reader.builds(column, year, as_of=as_of) for year in sorted(set(years))]
+        visible = [(instant, build) for held in declared for instant, build in held.items()]
+        return max(visible, key=lambda item: item[0]) if visible else None
     for year in candidates:
-        rows = _rows_for(store, column, years=(year,), as_of=as_of)
-        if rows:
-            return rows
-    return ()
+        held = reader.builds(column, year, as_of=as_of)
+        if held:
+            newest = max(held)
+            return newest, held[newest]
+    return None
 
 
 def _years_through(years: Sequence[int], instant: datetime) -> tuple[int, ...]:
@@ -911,11 +1009,14 @@ def _years_through(years: Sequence[int], instant: datetime) -> tuple[int, ...]:
 
     Nothing that answered is changed: the rows dropped are dated after `instant`'s year, and
     the calendar is still read at `instant`, so a year it does read that holds a row not yet
-    knowable then still refuses. A request with no year at or before `instant`'s reads what it
-    declared, and is refused by it as before.
+    knowable then still refuses.
+
+    Never empty, so there is no fallback to write: `instant` is a stored build's, read out of
+    one of `years`, and a build sits in its own instant's year (the writers refuse any other zone,
+    `panel_factors._refuse_a_zone_the_readers_do_not_file_years_in`), so that year is kept.
     """
     through = instant.astimezone(ZoneInfo(FEATURE_DATE_ZONE)).year
-    return tuple(year for year in years if year <= through) or tuple(years)
+    return tuple(year for year in years if year <= through)
 
 
 def _declared_addresses(column: FeatureColumn) -> tuple[str, ...]:
@@ -934,7 +1035,7 @@ def _declared_addresses(column: FeatureColumn) -> tuple[str, ...]:
     )
 
 
-def _resolve_instant(by_column: Mapping[str, Sequence[_StoredRow]], *, as_of: datetime) -> datetime:
+def _resolve_instant(newest: Mapping[str, datetime | None], *, as_of: datetime) -> datetime:
     """The one instant this cross section is at: the newest every declared column shares.
 
     `factor_view`'s `the_three_tiers_must_have_been_built_at_the_same_instants` and
@@ -946,11 +1047,9 @@ def _resolve_instant(by_column: Mapping[str, Sequence[_StoredRow]], *, as_of: da
     Refused rather than reconciled, in both directions. Taking each column's own newest instant
     is the mixed row above; taking the newest instant every column *happens* to share would
     answer a matrix whose first column is a week stale with nothing to say so.
+
+    `newest` is each column's newest build visible at `as_of`, or `None` for a column with none.
     """
-    newest = {
-        feature_id: max((instant for _s, _v, _c, instant, _a in rows), default=None)
-        for feature_id, rows in by_column.items()
-    }
     empty = sorted(feature_id for feature_id, instant in newest.items() if instant is None)
     if empty:
         raise FeatureMatrixBlockedError(
@@ -1111,6 +1210,7 @@ def stored_cross_section_instants(
     columns: Sequence[FeatureColumn],
     years: Sequence[int],
     as_of: datetime,
+    rows: FeatureRowReader | None = None,
 ) -> tuple[datetime, ...]:
     """Every instant **every** declared column has a stored build at, visible at `as_of`.
 
@@ -1129,18 +1229,21 @@ def stored_cross_section_instants(
     request was; the caller who knows compares the result against its own range and refuses with
     both endpoints in the message. `_resolve_instant` is where a column with nothing in it is
     refused, and it stays there.
+
+    `rows` is a reader a caller shares with the cross sections it cuts next (`V2-P6-025`); without
+    one the partitions are read here, at `as_of`.
     """
     if not columns:
         raise FeatureSpecError(
             "no column was declared, so there is no cross section for stored instants to be "
             "shared across; a matrix with no column is a model fitted on nothing"
         )
+    reader = FeatureRowReader(store, ceiling=as_of) if rows is None else rows
     per_column = [
         {
-            row_as_of
-            for _subject, _value, _coverage, row_as_of, _addresses in _rows_for(
-                store, column, years=years, as_of=as_of
-            )
+            instant
+            for year in sorted(set(years))
+            for instant in reader.builds(column, year, as_of=as_of)
         }
         for column in columns
     ]
@@ -1148,7 +1251,11 @@ def stored_cross_section_instants(
 
 
 def load_feature_cross_section(
-    store: PanelStore, request: FeatureMatrixRequest, *, as_of: datetime
+    store: PanelStore,
+    request: FeatureMatrixRequest,
+    *,
+    as_of: datetime,
+    rows: FeatureRowReader | None = None,
 ) -> FeatureMatrixSection:
     """One instant of the matrix: the stored tiers, the market they were computed for, and both.
 
@@ -1164,14 +1271,22 @@ def load_feature_cross_section(
     honest rather than merely old.
 
     Step 1 reads each column's newest year holding a build visible at `as_of`, not every year of
-    `request.years` (`_newest_visible_rows`, `V2-P6-025`). Step 3 reads the calendar over the
-    years at or before the instant's (`_years_through`) and the registry over all of them.
+    `request.years` (`_newest_visible_build`, `V2-P6-025`), through `rows` when a caller shares
+    one and otherwise at `as_of`. Step 3 reads the calendar over the years at or before the
+    instant's (`_years_through`) and the registry over all of them.
     """
+    reader = FeatureRowReader(store, ceiling=as_of) if rows is None else rows
     by_column = {
-        column.feature_id: _newest_visible_rows(store, column, years=request.years, as_of=as_of)
+        column.feature_id: _newest_visible_build(reader, column, years=request.years, as_of=as_of)
         for column in request.columns
     }
-    instant = _resolve_instant(by_column, as_of=as_of)
+    instant = _resolve_instant(
+        {
+            feature_id: None if found is None else found[0]
+            for feature_id, found in by_column.items()
+        },
+        as_of=as_of,
+    )
     calendar_years = _years_through(request.years, instant)
     calendar = _read(
         lambda: load_trading_calendar(
@@ -1186,11 +1301,12 @@ def load_feature_cross_section(
     )
     universe = _universe_for(registry, session=session, instant=instant)
     ordered = sorted(request.columns, key=lambda column: column.feature_id)
-    cells = {
-        column.feature_id: _admitted_cells(column, by_column[column.feature_id], instant=instant)
-        for column in ordered
-    }
-    rows = _rows_after_preprocessing(
+    cells: dict[str, dict[str, float]] = {}
+    for column in ordered:
+        found = by_column[column.feature_id]
+        assert found is not None and found[0] == instant  # `_resolve_instant` refused otherwise
+        cells[column.feature_id] = found[1].cells()
+    feature_rows = _rows_after_preprocessing(
         universe=universe,
         columns=ordered,
         cells=cells,
@@ -1203,12 +1319,14 @@ def load_feature_cross_section(
         universe=universe,
         universe_version=set_digest(universe),
         cross_section=FeatureCrossSection(
-            as_of=instant, feature_ids=request.spec.feature_ids, rows=rows
+            as_of=instant, feature_ids=request.spec.feature_ids, rows=feature_rows
         ),
     )
 
 
-def build_feature_matrix(store: PanelStore, request: FeatureMatrixRequest) -> FeatureMatrix:
+def build_feature_matrix(
+    store: PanelStore, request: FeatureMatrixRequest, *, rows: FeatureRowReader | None = None
+) -> FeatureMatrix:
     """Every requested instant's cross section, under one recipe.
 
     The requested instants are strictly increasing (`FeatureMatrixRequest.__post_init__`) and
@@ -1224,9 +1342,15 @@ def build_feature_matrix(store: PanelStore, request: FeatureMatrixRequest) -> Fe
     out-of-sample evaluation on a market the first had already fitted. It is also what lets
     `FeatureMatrix.universe_version` be a `set_digest` over `(session, universe)` pairs without a
     duplicate silently collapsing into one.
+
+    Every instant's factor rows come through one `FeatureRowReader` -- `rows`, or one read at the
+    newest requested instant -- so each partition is read once, not once per instant
+    (`V2-P6-025`); see that class for why the answer is the per-instant read's.
     """
+    reader = FeatureRowReader(store, ceiling=max(request.as_ofs)) if rows is None else rows
     sections = tuple(
-        load_feature_cross_section(store, request, as_of=as_of) for as_of in request.as_ofs
+        load_feature_cross_section(store, request, as_of=as_of, rows=reader)
+        for as_of in request.as_ofs
     )
     seen: dict[date, tuple[datetime, datetime]] = {}
     for section, asked in zip(sections, request.as_ofs, strict=True):

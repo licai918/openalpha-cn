@@ -246,6 +246,7 @@ from openalpha_cn.feature_matrix import (
     FeatureMatrixSection,
     FeatureMatrixUnreadableError,
     FeatureMissingPolicy,
+    FeatureRowReader,
     FeatureSpec,
     build_feature_matrix,
     load_feature_cross_section,
@@ -1884,6 +1885,7 @@ def training_panel(
     *,
     deadline: datetime,
     cached_sessions: int | None = None,
+    rows: FeatureRowReader | None = None,
 ) -> LabelledPanel | None:
     """Every stored cross section in `run`'s range whose outcome had closed by `deadline`,
     joined to its labels -- `run_daily`'s training assembly, without the fit or the store.
@@ -1892,11 +1894,15 @@ def training_panel(
     further by its own embargo rule. `None` when no cross section's outcome had closed, which is
     a statement about history (no fit is possible yet) rather than a refusal -- and so, for the
     same reason, is a range holding no stored build at all.
+
+    The factor partitions are read once for the range and its matrix (`V2-P6-025`): through
+    `rows` when a caller walking forward shares one across calls, else one read at `run.as_of`.
     """
-    instants = _instants_in_range(store, run)
+    reader = FeatureRowReader(store, ceiling=run.as_of) if rows is None else rows
+    instants = _instants_in_range(store, run, rows=reader)
     if not instants:
         return None
-    matrix = _matrix(store, run, as_ofs=instants)
+    matrix = _matrix(store, run, as_ofs=instants, rows=reader)
     inputs = _LabelInputs(store, run, cached_sessions=cached_sessions)
     closed = _cross_sections_whose_outcome_had_closed(
         inputs, sections=matrix.sections, horizon=run.horizon, deadline=deadline
@@ -1907,18 +1913,28 @@ def training_panel(
 
 
 def feature_cross_section(
-    store: PanelStore, run: ModelRunRequest, *, as_of: datetime
+    store: PanelStore,
+    run: ModelRunRequest,
+    *,
+    as_of: datetime,
+    rows: FeatureRowReader | None = None,
 ) -> FeatureMatrixSection:
-    """The declared columns' cross section visible at `as_of`: the one a fit scores then."""
-    return _section(store, run, as_of=as_of)
+    """The declared columns' cross section visible at `as_of`: the one a fit scores then.
+
+    `rows` is a reader shared across calls (`V2-P6-025`); without one the partitions are read at
+    `as_of`.
+    """
+    return _section(store, run, as_of=as_of, rows=rows)
 
 
-def _prediction_instants(store: PanelStore, request: ModelRunRequest) -> tuple[datetime, ...]:
+def _prediction_instants(
+    store: PanelStore, request: ModelRunRequest, *, rows: FeatureRowReader
+) -> tuple[datetime, ...]:
     """The stored builds inside the declared range, one per prediction day, ascending.
 
     Three steps, and each is a rule borrowed rather than invented. See this module's docstring.
     """
-    newest = _instants_in_range(store, request)
+    newest = _instants_in_range(store, request, rows=rows)
     if not newest:
         raise ModelRunBlockedError(
             f"no stored cross section of {list(request.feature_ids)} falls between "
@@ -1930,7 +1946,9 @@ def _prediction_instants(store: PanelStore, request: ModelRunRequest) -> tuple[d
     return newest
 
 
-def _instants_in_range(store: PanelStore, request: ModelRunRequest) -> tuple[datetime, ...]:
+def _instants_in_range(
+    store: PanelStore, request: ModelRunRequest, *, rows: FeatureRowReader
+) -> tuple[datetime, ...]:
     """`_prediction_instants` without its refusal: `()` when the range holds no stored build.
 
     Only the years `start..end` spans are read (`V2-P6-025`). A build is kept here only when its
@@ -1950,7 +1968,7 @@ def _instants_in_range(store: PanelStore, request: ModelRunRequest) -> tuple[dat
     years = spanned or request.years
     try:
         stored = stored_cross_section_instants(
-            store, columns=request.columns, years=years, as_of=request.as_of
+            store, columns=request.columns, years=years, as_of=request.as_of, rows=rows
         )
     except FeatureMatrixError as error:
         raise ModelPanelUnreadableError(
@@ -1978,7 +1996,11 @@ def _instants_in_range(store: PanelStore, request: ModelRunRequest) -> tuple[dat
 
 
 def _matrix(
-    store: PanelStore, request: ModelRunRequest, *, as_ofs: Sequence[datetime]
+    store: PanelStore,
+    request: ModelRunRequest,
+    *,
+    as_ofs: Sequence[datetime],
+    rows: FeatureRowReader,
 ) -> FeatureMatrix:
     """Every requested instant's cross section, under one recipe, or this face's refusal."""
     try:
@@ -1991,13 +2013,18 @@ def _matrix(
                 as_ofs=tuple(as_ofs),
                 missing=request.missing,
             ),
+            rows=rows,
         )
     except FeatureMatrixError as error:
         raise _matrix_refusal(error) from error
 
 
 def _section(
-    store: PanelStore, request: ModelRunRequest, *, as_of: datetime
+    store: PanelStore,
+    request: ModelRunRequest,
+    *,
+    as_of: datetime,
+    rows: FeatureRowReader | None = None,
 ) -> FeatureMatrixSection:
     """One instant's cross section, for the face that predicts about exactly one."""
     try:
@@ -2011,6 +2038,7 @@ def _section(
                 missing=request.missing,
             ),
             as_of=as_of,
+            rows=rows,
         )
     except FeatureMatrixError as error:
         raise _matrix_refusal(error) from error
@@ -2215,8 +2243,9 @@ def evaluate_model(store: PanelStore, request: EvaluationRequest) -> ModelEvalua
     `an_evaluation_registers_nothing_because_every_record_it_could_write_would_be_unwitnessed`.
     """
     run = request.run
-    instants = _prediction_instants(store, run)
-    matrix = _matrix(store, run, as_ofs=instants)
+    rows = FeatureRowReader(store, ceiling=run.as_of)
+    instants = _prediction_instants(store, run, rows=rows)
+    matrix = _matrix(store, run, as_ofs=instants, rows=rows)
     inputs = _LabelInputs(store, run)
     panel = _labelled(inputs, sections=matrix.sections, horizon=run.horizon)
     try:
@@ -2320,8 +2349,9 @@ def run_daily(
     nothing to do with how far back `--start` reaches.
     """
     run = request.run
-    instants = _prediction_instants(store, run)
-    matrix = _matrix(store, run, as_ofs=instants)
+    rows = FeatureRowReader(store, ceiling=run.as_of)
+    instants = _prediction_instants(store, run, rows=rows)
+    matrix = _matrix(store, run, as_ofs=instants, rows=rows)
     inputs = _LabelInputs(store, run)
     section = _section(store, run, as_of=request.predict_at)
     closed = _cross_sections_whose_outcome_had_closed(

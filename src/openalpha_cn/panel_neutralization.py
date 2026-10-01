@@ -303,6 +303,7 @@ from openalpha_cn.panel_factors import (
     FactorEngineError,
     ProcessedFactorPanel,
     _refuse_a_merge_that_lost_a_stored_build,
+    _refuse_a_zone_the_readers_do_not_file_years_in,
     _refuse_rows_that_are_not_the_answers_their_manifest_addresses,
     _refuse_to_drop_a_stored_build,
     appended_to_the_stored_year,
@@ -1765,6 +1766,9 @@ def write_neutralized_factor_panels(
     *enforced* rather than documented: a second neutralisation written on its own would drop the
     first's build and the guard refuses it.
     """
+    _refuse_a_zone_the_readers_do_not_file_years_in(
+        date_timezone, writer="write_neutralized_factor_panels"
+    )
     if not panels:
         raise FactorEngineError(
             "write_neutralized_factor_panels needs at least one panel; an empty write would be a "
