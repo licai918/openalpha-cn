@@ -286,14 +286,17 @@ profiling-output filename used to have no per-call uniqueness, so 8 concurrent t
 against the same partition produced 3-6 failures per run across 5 runs; it is now
 `uuid.uuid4()`-suffixed per call).
 
-`write_partition()`'s catalog upsert is guarded by an in-process readers-writer lock
-(`self._catalog_access`, see `_CatalogAccess`), so concurrent same-process writer
-*threads* -- the regime
-`ThreadPoolExecutor`-based callers actually create -- no longer race each other for the
-catalog: the Parquet `COPY` (the expensive part) still runs unlocked and concurrently across
-threads, and only the few-millisecond catalog upsert *and the one `rename(2)` that follows
-it* are serialized, eliminating the `TransactionException` above by construction rather than
-by retrying after it happens. The rename is inside the lock rather than before it because the
+Every catalog connection is taken under a readers-writer lock (`self._catalog_access`, see
+`_CatalogAccess`) -- shared for a `read_only=True` connection, exclusive for a read-write one,
+held exactly as long as the connection is open -- which is DuckDB's own rule above, enforced
+before DuckDB has to. It is held at two levels, in this order: an in-process lock among this
+process's threads, then an OS advisory lock among processes (`_CatalogFileLock`, below). So
+concurrent same-process writer *threads* -- the regime `ThreadPoolExecutor`-based callers
+actually create -- no longer race each other for the catalog: the Parquet `COPY` (the
+expensive part) still runs unlocked and concurrently across threads, and only the
+few-millisecond catalog upsert *and the one `rename(2)` that follows it* are serialized,
+eliminating the `TransactionException` above by construction rather than by retrying after it
+happens. The rename is inside the lock rather than before it because the
 two facts have to land in the same order for every writer: with the rename outside, two
 threads could commit A then B and rename B then A, leaving the catalog naming A while the
 disk holds B -- a disagreement no reader could see, since readiness reads both facts from the
@@ -308,19 +311,71 @@ well-defined "last write to complete wins" outcome, consistent with `write_parti
 already-stated overwrite-per-partition semantics -- this store adds no extra isolation
 beyond that, and does not need to.
 
-Cross-process writers are a different story this in-process lock cannot help with: a
-`threading.Lock` coordinates threads within one Python process, never across OS process
-boundaries. Two independent `PanelStore` instances in two OS processes racing to write still
-hit the DuckDB file-locking rule at the top of this section -- whichever process's
-`duckdb.connect(catalog_path)` (default, read-write) loses the race gets
-`duckdb.IOException` immediately, not retried. This module makes a deliberate choice not to
-solve that here: retrying blindly on `duckdb.IOException` would hide a design question
-(should concurrent multi-process writers serialize, queue, or simply not happen?) that
-belongs to whatever ingestion scheduler is eventually built on top of this storage skeleton,
-not to the skeleton itself. Multi-process ingestion that needs concurrent writers must
-serialize them itself (a single writer process, or an external lock) -- documented here as a
-known, still-open limitation, not fixed by this task; see this task's report for the
-concrete recommendation this leaves for `V2-P1-004`+.
+### Across processes (`V2-P6-028`)
+
+Until `V2-P6-028` the lock above was a `threading.Condition` and nothing more, and this section
+recorded the consequence as a known, still-open limitation: two `PanelStore` instances in two
+OS processes -- two writers, or a reader beside a writer -- met the DuckDB rule at the top of
+this section, and the loser's `duckdb.connect` raised `duckdb.IOException` immediately. It cost
+real things. Factor builds had to run one at a time, although different factors write
+different datasets and only the catalog collides (the `V2-P6-027` rebuild is 125 `openalpha
+factor build` commands at ~3.9 s per instant, about 20 hours serially). And a read beside a
+write in another process failed outright, which `_scan_failures_as_storage_errors` turned into
+a `PanelStorageError` -- a refused row the research driver never re-measures, so a research
+run beside a daily-selection write could quietly lose configurations.
+
+The lock is now held across processes too. After the in-process side, every acquisition takes
+an OS advisory lock on a sidecar file beside the catalog -- `catalog.duckdb.lock`, through
+`flock(2)` on POSIX -- shared or exclusive to match, passing first through a second sidecar,
+`catalog.duckdb.gate`, that keeps a writer from being starved by readers in other processes.
+`_CatalogFileLock` and `_CatalogAccess` state the details; what follows is what a caller
+relies on.
+
+- **Blocking, bounded, named.** A reader waits for a write in progress and a writer waits for
+  the reads in flight, each for at most `catalog_lock_timeout` seconds
+  (`DEFAULT_CATALOG_LOCK_TIMEOUT_SECONDS`, ten minutes, per acquisition across both levels),
+  and then raises `PanelCatalogBusyError`, naming the catalog, the lock file and the side it
+  needed. That error is deliberately not a `PanelStorageError` (see its docstring), and no
+  `duckdb.IOException` is ever retried: the lock makes the conflict impossible rather than
+  catching it after the fact.
+- **No deadlock.** Every acquisition takes the in-process lock, then the gate, then the lock,
+  in that one order, and the holder of the last one waits for nothing; `_CatalogAccess` gives
+  the argument. The bound would turn a missed case into a named error rather than a hang.
+- **A crash does not wedge the store.** An advisory lock belongs to an open file, and the
+  kernel closes a process's files when it ends however it ends, `SIGKILL` included; the sidecar
+  files hold no owner record to go stale.
+  `test_a_process_killed_while_holding_the_catalog_lock_does_not_wedge_the_store` kills a
+  holder of each side and writes straight after.
+- **What stays outside the lock.** The Parquet `COPY` to the per-writer temp file: the
+  expensive part of a write still runs fully in parallel across processes. Only the catalog
+  connection and, for a write, the one `rename(2)` that publishes the partition are inside it
+  -- the rename inside the *exclusive* section, for the ordering reason given above, which now
+  holds between processes as it already did between threads.
+- **Readers of partition files see no more than before, and less.** A partition file is read
+  through a connection opened under the shared lock, which resolves the file's path from the
+  catalog and scans it inside one hold. The only operation that replaces a partition file, the
+  rename, runs inside the exclusive hold, after the new file was written to completion under a
+  different name. So a scan runs wholly before a write's exclusive section -- the old catalog
+  row and the old file -- or wholly after it -- the new row and the new file -- and never
+  across it. Before `V2-P6-028` the same held between threads, while a reader in another
+  process could open the catalog in the window between a commit and its rename; it now waits
+  for the rename instead. The readiness fingerprints read outside the lock
+  (`_catalog_fingerprint`, `_held_partition_states`) only decide whether a held state may be
+  served again; `rename(2)` is atomic, so they see the old file or the new one, and either
+  change refuses the held state.
+- **Windows.** `msvcrt.locking` has no shared mode, so both sides take the lock exclusively
+  there: readers serialise on Windows -- between processes and between threads -- where on POSIX
+  they share. Every guarantee about writers is unchanged, because an exclusive lock is a
+  stricter shared one; only read parallelism is lost. Windows CI runs this suite against it.
+- **Local filesystems only.** Advisory locks over NFS or SMB are as good as the server's lock
+  manager, and this store has never claimed to run on one.
+
+Verified with real, separate interpreters in `tests/integration/panel/test_panel_store.py`:
+four processes writing different datasets to a store with no catalog yet all succeed and match
+a serial run byte for byte; readers in three processes beside two rewriting processes never
+fail and always read a whole before-state or after-state; a writer gets in past readers in
+three processes that never all let go at once (and, measured, waits out its whole bound without
+the gate); the bound refuses by name.
 
 ## Write and idempotency semantics
 
@@ -353,8 +408,8 @@ only then
 
 The previous order was the other one, and it was measured to fail open. Making
 `catalog.duckdb` read-only -- which stands in for a read-only mount, a full disk, a
-kill between the two steps, and the cross-process writer race this module deliberately does
-not solve -- produced exactly this against `676cba3`:
+kill between the two steps, and the cross-process writer race this module did not then solve
+(it does since `V2-P6-028`; see "Concurrency") -- produced exactly this against `676cba3`:
 
     write raises IOException
     readiness  : ready, issues == []
@@ -436,8 +491,11 @@ scratch):
 from __future__ import annotations
 
 import json
+import math
 import os
+import sys
 import threading
+import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -468,6 +526,11 @@ from openalpha_cn.panel.catalog import (
     evaluate_readiness,
     evaluate_visible_slice,
 )
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 AVAILABILITY_COLUMN: Final[str] = "available_time"
 """The clock column every panel partition carries, and one of the two this module compares.
@@ -510,8 +573,10 @@ column shadowing it.
 """
 
 __all__ = [
+    "DEFAULT_CATALOG_LOCK_TIMEOUT_SECONDS",
     "DUCKDB_COLUMN_TYPES",
     "ColumnSpec",
+    "PanelCatalogBusyError",
     # Re-exported, not redefined: `panel/catalog.py` owns it so that
     # `PanelReadOutcome.rows` can raise it without importing this module (the dependency
     # runs store -> catalog and must not run back). Every existing
@@ -521,6 +586,31 @@ __all__ = [
     "PartitionRef",
     "PartitionStamp",
 ]
+
+
+DEFAULT_CATALOG_LOCK_TIMEOUT_SECONDS: Final[float] = 600.0
+"""How long one catalog acquisition waits, in total, before `PanelCatalogBusyError` (`V2-P6-028`).
+
+The waits it bounds are short by construction: a reader waits for a write, and a write holds the
+catalog for its upsert and one `rename(2)` -- milliseconds -- while a writer waits for the reads
+in flight to close their connections, the longest of which is one partition scan. Ten minutes is
+far past either. It is a bound rather than a timeout tuned to a workload: what it exists to turn
+into a named error is a holder that will not finish -- a process stopped under a debugger or by
+`SIGSTOP`, a read wedged on a dead network mount -- which an unbounded wait would turn into a
+build that silently never ends. A crashed holder is not such a case; see `_CatalogFileLock`."""
+
+
+class PanelCatalogBusyError(RuntimeError):
+    """The catalog stayed held by someone else for the whole bounded wait (`V2-P6-028`).
+
+    Deliberately **not** a `PanelStorageError`. Every handler of that type in this codebase turns
+    it into a refusal *about the data* -- `panel doctor` reports the dataset unhealthy, a factor
+    build refuses the partition, and the research driver records the configuration as a refused
+    row that resume never re-measures. Contention says nothing about the data: the same read
+    answers the moment the holder lets go. So it escapes those handlers and stops the command
+    loudly, which is the honest outcome for "could not look", rather than being filed as a
+    verdict on what the look would have found.
+    """
 
 
 def _utc_now() -> datetime:
@@ -927,8 +1017,144 @@ def _file_fingerprint(path: Path, *, head: int, tail: int) -> _FileFingerprint |
     )
 
 
+_LOCK_POLL_FIRST_SECONDS: Final[float] = 0.0005
+_LOCK_POLL_MAX_SECONDS: Final[float] = 0.025
+"""The bounded wait polls a non-blocking lock attempt, backing off from half a millisecond to 25 ms.
+
+Polling because neither `flock(2)` nor `msvcrt.locking` can block with a deadline: a blocking
+`flock` waits forever, and `LK_LOCK` retries ten times a second apart. The first sleeps are short
+because the common wait -- a reader behind a write -- is a few milliseconds; the cap keeps a writer
+waiting behind a long scan from spinning."""
+
+
+if sys.platform == "win32":
+
+    def _try_lock(descriptor: int, *, exclusive: bool) -> bool:
+        """Windows: `msvcrt.locking` has no shared mode, so both sides take byte 0 exclusively.
+
+        Readers therefore serialise on Windows -- across processes *and* across threads of one
+        process, since a byte-range lock taken through one descriptor excludes every other one --
+        where on POSIX they share. That costs read parallelism and nothing else: every guarantee
+        `_CatalogAccess` states about writers holds, because an exclusive lock is a stricter
+        shared one. Windows CI runs the suite, which is what this branch is tested by; the
+        locking itself is the standard library's.
+        """
+        del exclusive  # one mode only; see above
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        except OSError:
+            return False
+        return True
+
+    def _unlock(descriptor: int) -> None:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+
+else:
+
+    def _try_lock(descriptor: int, *, exclusive: bool) -> bool:
+        """POSIX: `flock(2)`, which locks an *open file description* -- not a process, as
+        `fcntl(F_SETLK)`/`lockf` do -- so two descriptors opened by two threads of one process
+        conflict exactly as two processes would, and closing some other descriptor on the same
+        file releases nothing."""
+        try:
+            fcntl.flock(descriptor, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        return True
+
+    def _unlock(descriptor: int) -> None:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+
+
+def _lock_file(path: Path, *, exclusive: bool, deadline: float) -> int | None:
+    """Open `path` and take its advisory lock: the descriptor holding it, or `None` once
+    `deadline` (a `time.monotonic()` instant) has passed without it.
+
+    One attempt is always made, so a deadline already spent waiting on the in-process side still
+    gets the lock when it happens to be free.
+    """
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        delay = _LOCK_POLL_FIRST_SECONDS
+        while not _try_lock(descriptor, exclusive=exclusive):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                os.close(descriptor)
+                return None
+            time.sleep(min(delay, remaining))
+            delay = min(delay * 2, _LOCK_POLL_MAX_SECONDS)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _unlock_file(descriptor: int) -> None:
+    try:
+        _unlock(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+class _CatalogFileLock:
+    """The catalog's readers-writer lock across OS processes (`V2-P6-028`).
+
+    Two sidecar files beside the catalog, each locked with the operating system's advisory lock
+    (`flock(2)` on POSIX, `msvcrt.locking` on Windows -- see `_try_lock`):
+
+    * `catalog.duckdb.lock` is the lock itself: shared for as long as a `read_only=True`
+      connection is open, exclusive for as long as a read-write one is. That is exactly DuckDB's
+      own rule for the file (any number of read-only openers, or one writer and nobody else), so
+      a connection taken under it never meets DuckDB's immediate `IOException`.
+    * `catalog.duckdb.gate` is a turnstile in front of it, there so a writer cannot be starved.
+      `flock` grants a free shared lock to any asker, so with readers arriving faster than the
+      last one leaves a writer could poll forever; every acquirer passes through the gate first
+      -- in the side it wants, holding it only until it has `catalog.duckdb.lock` -- so a writer
+      waiting there blocks *new* readers at the gate while the ones already inside drain. This is
+      `_CatalogAccess`'s `_waiting_writers` rule, restated across processes.
+
+    **Why a crash cannot wedge the store.** Both locks belong to an open file description, and
+    the kernel closes every descriptor of a process when it ends, however it ends -- `SIGKILL`,
+    an OOM kill and a segfault included -- which drops its locks. Nothing is written into the
+    files, so there is no stale owner record to clean up and no PID to check: the files exist
+    and are empty, and a lock on one is a fact about a live process or it is no fact at all.
+    `test_a_process_killed_while_holding_the_catalog_lock_does_not_wedge_the_store` kills a
+    holder of each side with `SIGKILL` and writes straight after it.
+
+    Local filesystems only: advisory locks over NFS or SMB are as good as the server's lock
+    manager, and this store has never claimed to run on one.
+    """
+
+    def __init__(self, catalog_path: Path) -> None:
+        self.path = catalog_path.with_name(catalog_path.name + ".lock")
+        self.gate_path = catalog_path.with_name(catalog_path.name + ".gate")
+
+    @contextmanager
+    def hold(self, *, exclusive: bool, deadline: float) -> Iterator[bool]:
+        """Yield `True` while holding the lock in the side asked for, or `False` -- holding
+        nothing -- if `deadline` passed first. The caller turns `False` into its refusal."""
+        gate = _lock_file(self.gate_path, exclusive=exclusive, deadline=deadline)
+        if gate is None:
+            yield False
+            return
+        try:
+            held = _lock_file(self.path, exclusive=exclusive, deadline=deadline)
+        finally:
+            _unlock_file(gate)
+        if held is None:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            _unlock_file(held)
+
+
 class _CatalogAccess:
-    """Readers together, a writer alone -- DuckDB's own rule about this file, as a lock.
+    """Readers together, a writer alone -- DuckDB's own rule about this file, as a lock held both
+    inside this process and across every process on the machine.
 
     `V2-P5-067`. DuckDB keeps one database instance per file per *process* and refuses a second
     connection whose configuration differs from the open ones:
@@ -960,11 +1186,38 @@ class _CatalogAccess:
     Neither happens in this module today (measured: no read-only connection site calls another,
     and `write_partition` calls `_reusable_partition` *before* taking the exclusive side rather
     than inside it). They are handled so the next caller who does it gets an answer, not a hang.
-    Cross-process coordination is unchanged and still out of scope; see the module docstring's
-    "Concurrency".
+    Neither nested case takes the file lock again either: the thread's outer acquisition already
+    holds it in a side that covers the inner one.
+
+    ## Across processes (`V2-P6-028`)
+
+    After the in-process side is held, the same side of `_CatalogFileLock` is taken, and they are
+    released in reverse. The in-process side comes first because it is what makes the file lock
+    simple: inside one process, at most one writer thread, or any number of reader threads, are
+    ever asking for the file at once, never both.
+
+    **Why this cannot deadlock.** Every acquisition takes three locks in one fixed order -- this
+    process's in-process lock, then the gate, then `catalog.duckdb.lock` -- and the gate is let go
+    only once the lock behind it is held or abandoned. A wait-for cycle needs some thread to wait
+    for a lock ordered at or before one it already holds, and with a single global order no thread
+    ever does: it waits only for the *next* lock in the order. Nothing is waited for by a holder
+    of the last lock either -- the body opens one DuckDB connection, which cannot conflict under
+    this lock, and DuckDB never blocks on a conflict anyway. The nested cases above take nothing.
+    And every wait is bounded besides: one deadline per acquisition (`timeout` seconds from its
+    start) is spent across all three locks, so even a cycle this argument missed would end as a
+    `PanelCatalogBusyError`, not a hang.
     """
 
-    def __init__(self, written: Callable[[], None] = lambda: None) -> None:
+    def __init__(
+        self,
+        catalog_path: Path,
+        *,
+        timeout: float,
+        written: Callable[[], None] = lambda: None,
+    ) -> None:
+        self._catalog_path = catalog_path
+        self._file = _CatalogFileLock(catalog_path)
+        self._timeout = timeout
         self._written = written
         self._condition = threading.Condition()
         self._readers = 0
@@ -975,6 +1228,15 @@ class _CatalogAccess:
     @property
     def _depth(self) -> int:
         return int(getattr(self._local, "depth", 0))
+
+    def _refusal(self, side: str) -> PanelCatalogBusyError:
+        return PanelCatalogBusyError(
+            f"the panel catalog {self._catalog_path} was not free for {side} access within "
+            f"the {self._timeout:g}s bound: another process, or another thread of this one, "
+            f"held it the whole time (lock file {self._file.path}). Nothing was read or "
+            "written. This is contention, not a verdict about the data -- run the command "
+            "again once the holder finishes"
+        )
 
     @contextmanager
     def shared(self) -> Iterator[None]:
@@ -987,15 +1249,22 @@ class _CatalogAccess:
                 self._local.depth -= 1
             return
 
+        deadline = time.monotonic() + self._timeout
         with self._condition:
             # `_waiting_writers` is what stops a steady stream of readers starving a writer
             # forever; without it a busy panel could never finish a `write_partition`.
             while self._writer or self._waiting_writers:
-                self._condition.wait()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise self._refusal("shared")
+                self._condition.wait(remaining)
             self._readers += 1
         self._local.depth = 1
         try:
-            yield
+            with self._file.hold(exclusive=False, deadline=deadline) as held:
+                if not held:
+                    raise self._refusal("shared")
+                yield
         finally:
             self._local.depth = 0
             with self._condition:
@@ -1006,20 +1275,35 @@ class _CatalogAccess:
     @contextmanager
     def exclusive(self) -> Iterator[None]:
         """Hold the catalog open for writing; no reader and no other writer may hold it."""
+        deadline = time.monotonic() + self._timeout
         with self._condition:
             self._waiting_writers += 1
-            while self._writer or self._readers:
-                self._condition.wait()
-            self._waiting_writers -= 1
+            try:
+                while self._writer or self._readers:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise self._refusal("exclusive")
+                    self._condition.wait(remaining)
+            finally:
+                self._waiting_writers -= 1
+                # Readers parked on `_waiting_writers` re-check it, whether this writer goes on
+                # to hold the lock or has just given up waiting for it.
+                self._condition.notify_all()
             self._writer = True
-        self._local.writing = True
         try:
-            yield
+            with self._file.hold(exclusive=True, deadline=deadline) as held:
+                if not held:
+                    raise self._refusal("exclusive")
+                self._local.writing = True
+                try:
+                    yield
+                finally:
+                    self._local.writing = False
+                    # Before any reader can take the shared side again (`V2-P6-022`): a readiness
+                    # state held from before this write is then already stale for every reader
+                    # that follows.
+                    self._written()
         finally:
-            self._local.writing = False
-            # Before any reader can take the shared side again (`V2-P6-022`): a readiness state
-            # held from before this write is then already stale for every reader that follows.
-            self._written()
             with self._condition:
                 self._writer = False
                 self._condition.notify_all()
@@ -1083,7 +1367,13 @@ class PanelStore:
     behavior, and write/idempotency semantics this class implements.
     """
 
-    def __init__(self, root: Path, *, clock: Callable[[], datetime] = _utc_now) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        clock: Callable[[], datetime] = _utc_now,
+        catalog_lock_timeout: float = DEFAULT_CATALOG_LOCK_TIMEOUT_SECONDS,
+    ) -> None:
         self.root = root
         self.root.mkdir(parents=True, exist_ok=True)
         self.catalog_path = self.root / "catalog.duckdb"
@@ -1103,17 +1393,24 @@ class PanelStore:
         # concurrently raised `duckdb.IOException` (lock conflict) inside `__init__`,
         # exactly the failure this comment now prevents structurally.
         #
-        # Not a duckdb connection: it costs nothing to create (no I/O, no catalog touched).
-        # It guards `write_partition()`'s catalog upsert and the `rename(2)` that follows it,
-        # and `record_coverage()`'s upsert, against *same-process* writer threads -- the
-        # concurrency regime `runtime/batch.py`'s `ThreadPoolExecutor` creates -- and since
-        # `V2-P5-067` it guards every catalog *read* against those writers too, which is a
-        # DuckDB rule rather than a choice: see `_CatalogAccess`. Readers still run in parallel
-        # with each other. It cannot, and is not meant to, coordinate across separate OS
-        # processes; see the module docstring's "Concurrency" section for why that remains a
-        # deliberately separate, still-open concern.
+        # Not a duckdb connection: it costs nothing to create (no I/O, no catalog touched; the
+        # lock files are opened per acquisition). It guards `write_partition()`'s catalog upsert
+        # and the `rename(2)` that follows it, `record_coverage()`'s and `remove_partition()`'s
+        # writes, and every catalog *read*, against writers in this process's other threads
+        # (`V2-P5-067`) and, since `V2-P6-028`, in every other process too: see `_CatalogAccess`
+        # and the module docstring's "Concurrency". Readers still run in parallel with each
+        # other.
+        if not (math.isfinite(catalog_lock_timeout) and catalog_lock_timeout >= 0):
+            raise PanelStorageError(
+                f"catalog_lock_timeout must be a finite number of seconds >= 0, got "
+                f"{catalog_lock_timeout!r}: the wait for the catalog is bounded by design"
+            )
         self._catalog_key = str(self.catalog_path.resolve())
-        self._catalog_access = _CatalogAccess(lambda: _note_catalog_write(self._catalog_key))
+        self._catalog_access = _CatalogAccess(
+            self.catalog_path,
+            timeout=catalog_lock_timeout,
+            written=lambda: _note_catalog_write(self._catalog_key),
+        )
         # `V2-P6-022`: each (dataset, year)'s `PartitionState`, held beside the catalog and file
         # fingerprints it was read under and served again only while both still stand. See
         # `_partition_states`.
@@ -1196,14 +1493,14 @@ class PanelStore:
         # threads writing 4 *different* datasets against a cold-start store (no catalog
         # file yet) before this fix, 3 of 4 failing, reproducibly; see
         # `test_write_partition_survives_four_concurrent_threads_writing_four_different_datasets`.
-        # The lock wraps the catalog upsert *and* the rename, not the Parquet `COPY` above --
-        # that stays unlocked and concurrent across writer threads. Holding the rename inside
-        # the lock is what keeps the two facts in the same order for every same-process
-        # writer: without it, two threads could commit A then B and rename B then A, leaving
-        # the catalog naming A while the disk holds B. It cannot coordinate across separate
-        # OS processes; see the module docstring's "Concurrency" section.
-        with self._catalog_access.exclusive():
-            try:
+        # Since `V2-P6-028` the same lock is held across processes too, where the loser used to
+        # get `duckdb.IOException` instead. The lock wraps the catalog upsert *and* the rename,
+        # not the Parquet `COPY` above -- that stays unlocked and concurrent across writer
+        # threads and processes. Holding the rename inside the lock is what keeps the two facts
+        # in the same order for every writer: without it, two writers could commit A then B and
+        # rename B then A, leaving the catalog naming A while the disk holds B.
+        try:
+            with self._catalog_access.exclusive():
                 with _connect(str(self.catalog_path)) as connection:
                     self._ensure_catalog_schema(connection)
                     connection.execute(
@@ -1222,11 +1519,12 @@ class PanelStore:
                 # Last, and only once the catalog has committed. See the module docstring's
                 # "The catalog upsert commits before the rename".
                 temporary.replace(target)
-            finally:
-                # A no-op after a successful `replace`, which consumed the temp file. It
-                # matters when the catalog upsert raised: the staged Parquet would otherwise
-                # be left behind as an orphan `data.parquet.<uuid>.tmp` beside the partition.
-                temporary.unlink(missing_ok=True)
+        finally:
+            # A no-op after a successful `replace`, which consumed the temp file. It matters
+            # when the catalog upsert raised, or when the lock was never granted
+            # (`PanelCatalogBusyError`): the staged Parquet would otherwise be left behind as
+            # an orphan `data.parquet.<uuid>.tmp` beside the partition.
+            temporary.unlink(missing_ok=True)
         return PartitionRef(dataset, year, target, len(rows), content_hash)
 
     def query(
@@ -2305,7 +2603,8 @@ class AssessedPanelRead:
         A blocked dataset still short-circuits before any scan, and the scan is still wrapped
         per read: a partition that passes readiness and then fails to open becomes a
         `PanelStorageError` naming it, not a bare DuckDB exception escaping a method that
-        promises a verdict.
+        promises a verdict. `PanelCatalogBusyError` alone passes through unwrapped: a catalog
+        another process held past the bound is not a verdict about this partition (`V2-P6-028`).
         """
         requirement = self._year_in_scope(year)
         readiness = self.readiness
@@ -2315,7 +2614,7 @@ class AssessedPanelRead:
             rows = self.store.query(
                 requirement.dataset, year=year, columns=columns, filters=filters
             )
-        except PanelStorageError:
+        except (PanelStorageError, PanelCatalogBusyError):
             raise
         except Exception as error:
             raise PanelStorageError(
@@ -2376,7 +2675,7 @@ class AssessedPanelRead:
                 event_time_as_naive_utc=event_time_as_naive_utc,
                 newly_visible_since=newly_visible_since,
             )
-        except PanelStorageError:
+        except (PanelStorageError, PanelCatalogBusyError):
             raise
         except Exception as error:
             raise PanelStorageError(

@@ -20,7 +20,12 @@ import pytest
 
 from openalpha_cn.domain.panel_batch import ColumnarPanelBatch, PanelColumn, TimelineColumns
 from openalpha_cn.panel.catalog import ReadinessRequirement
-from openalpha_cn.panel.store import ColumnSpec, PanelStorageError, PanelStore
+from openalpha_cn.panel.store import (
+    ColumnSpec,
+    PanelCatalogBusyError,
+    PanelStorageError,
+    PanelStore,
+)
 from openalpha_cn.panel_ingest import panel_column_specs, write_panel_batch
 
 DATASET = "prices_daily"
@@ -377,6 +382,31 @@ def test_a_scan_that_fails_after_a_ready_verdict_surfaces_as_a_panel_storage_err
 
     with pytest.raises(PanelStorageError, match="passed readiness but could not be read"):
         store.read_if_ready(waived, year=2024, columns=["close"])
+
+
+def test_a_catalog_too_busy_to_read_is_not_rewrapped_as_a_storage_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`V2-P6-028`. The two read doors above wrap every exception that is not already a
+    `PanelStorageError` into one, so that a scan failing after a ready verdict is reported in the
+    store's vocabulary. `PanelCatalogBusyError` must escape that wrapping: it is deliberately not
+    a `PanelStorageError`, because every handler of that type files it as a fact about the data
+    -- a refused row a research run never re-measures -- and contention is no such fact."""
+    store = _ready_store(tmp_path)
+    busy = PanelCatalogBusyError("held by another process")
+
+    def refuse(*_: object, **__: object) -> None:
+        raise busy
+
+    monkeypatch.setattr(store, "query", refuse)
+    monkeypatch.setattr(store, "_scan_visible", refuse)
+
+    with pytest.raises(PanelCatalogBusyError) as whole:
+        store.read_if_ready(_requirement(), year=2024, columns=["close"])
+    with pytest.raises(PanelCatalogBusyError) as visible:
+        store.read_visible_at(_requirement(), year=2024, columns=["close"])
+    assert whole.value is busy
+    assert visible.value is busy
 
 
 def test_a_valid_parquet_file_of_a_different_length_is_refused_before_anything_scans_it(

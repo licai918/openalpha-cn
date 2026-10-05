@@ -39,7 +39,13 @@ from openalpha_cn.panel.catalog import (
     RevisionCoverage,
     evaluate_readiness,
 )
-from openalpha_cn.panel.store import ColumnSpec, PanelStorageError, PanelStore, PartitionRef
+from openalpha_cn.panel.store import (
+    ColumnSpec,
+    PanelCatalogBusyError,
+    PanelStorageError,
+    PanelStore,
+    PartitionRef,
+)
 
 __all__ = [
     "DEFAULT_DATE_TIMEZONE",
@@ -53,6 +59,7 @@ __all__ = [
     "DatasetReadiness",
     "DateCoverage",
     "FieldCoverage",
+    "PanelCatalogBusyError",
     "PanelReadOutcome",
     "PanelStorageError",
     "PanelStore",

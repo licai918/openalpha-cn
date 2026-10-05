@@ -20,7 +20,13 @@ fail CI on either suffix).
 
 from __future__ import annotations
 
+import ast
+import hashlib
 import multiprocessing
+import multiprocessing.process
+import threading
+import time
+from collections.abc import Sequence
 from multiprocessing import Queue
 from multiprocessing.synchronize import Barrier
 from pathlib import Path
@@ -28,7 +34,12 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from openalpha_cn.panel.store import ColumnSpec, PanelStorageError, PanelStore
+from openalpha_cn.panel.store import (
+    ColumnSpec,
+    PanelCatalogBusyError,
+    PanelStorageError,
+    PanelStore,
+)
 
 _COLUMNS = (
     ColumnSpec("ts_code", "VARCHAR"),
@@ -287,3 +298,343 @@ def test_concurrent_read_only_queries_from_separate_processes_do_not_fail_each_o
             if process.is_alive():
                 process.terminate()
                 process.join(timeout=5)
+
+
+# --- the catalog is safe across processes (`V2-P6-028`) ---------------------------------
+#
+# Until `V2-P6-028` the module docstring's "Concurrency" section recorded, as a known and
+# still-open limitation, that two processes touching the catalog at once -- two writers, or a
+# reader beside a writer -- made the loser's `duckdb.connect` raise `duckdb.IOException`
+# immediately. It cost the factor rebuild its parallelism (125 `openalpha factor build`
+# commands had to run one after another) and let a research read running beside a write turn
+# into a `PanelStorageError`, which the research driver records as a refused row. These tests
+# run real, separate interpreters against one store, with the store generated here.
+
+_LOCK_DATASETS = ("alpha", "beta", "gamma", "delta")
+_LOCK_YEARS = (2019, 2020, 2021, 2022, 2023, 2024)
+
+
+def _dataset_rows(dataset: str, year: int) -> tuple[tuple[object, ...], ...]:
+    """Content that differs per `(dataset, year)`, so a partition written under the wrong key
+    could not hash equal to the serial run's."""
+    offset = float(_LOCK_DATASETS.index(dataset) * 1000 + year)
+    return tuple((f"{index:06d}.SZ", f"{year}-01-02", offset + index + 0.5) for index in range(200))
+
+
+def _partition_writer_worker(
+    root_str: str, dataset: str, barrier: Barrier, queue: Queue[tuple[str, str]]
+) -> None:
+    try:
+        barrier.wait(timeout=_RENDEZVOUS_TIMEOUT_SECONDS)
+        store = PanelStore(Path(root_str))
+        for year in _LOCK_YEARS:
+            store.write_partition(dataset, year, _COLUMNS, _dataset_rows(dataset, year))
+        queue.put((dataset, "ok"))
+    except Exception as error:
+        queue.put((dataset, f"fail:{type(error).__name__}:{error}"))
+
+
+def _catalog_rows(root: Path) -> list[tuple[object, ...]]:
+    with duckdb.connect(str(root / "catalog.duckdb"), read_only=True) as connection:
+        rows: list[tuple[object, ...]] = connection.execute(
+            "SELECT dataset, year, relative_path, row_count, content_hash "
+            "FROM panel_partitions ORDER BY dataset, year"
+        ).fetchall()
+    return rows
+
+
+def _partition_bytes(root: Path) -> dict[str, str]:
+    return {
+        path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(root.glob("*/*/data.parquet"))
+    }
+
+
+def _stop_all(processes: Sequence[multiprocessing.process.BaseProcess]) -> None:
+    """Leave no live child behind on any exit; see `_RENDEZVOUS_TIMEOUT_SECONDS`."""
+    for process in processes:
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=10)
+
+
+def test_writers_in_separate_processes_all_land_and_match_a_serial_run(tmp_path: Path) -> None:
+    """Four processes, released together at a barrier against a store with no catalog yet,
+    each write six partitions of their own dataset. Every one succeeds, the catalog ends
+    holding all twenty-four partitions, and catalog and files alike are what writing the same
+    partitions one after another in one process produces."""
+    root = tmp_path / "concurrent"
+    barrier = ctx.Barrier(len(_LOCK_DATASETS))
+    queue: multiprocessing.Queue[tuple[str, str]] = ctx.Queue()
+    writers = [
+        ctx.Process(target=_partition_writer_worker, args=(str(root), dataset, barrier, queue))
+        for dataset in _LOCK_DATASETS
+    ]
+    for process in writers:
+        process.start()
+    try:
+        outcomes = sorted(queue.get(timeout=120) for _ in writers)
+        for process in writers:
+            process.join(timeout=30)
+            assert process.exitcode == 0, f"a writer process crashed: {process.exitcode}"
+    finally:
+        _stop_all(writers)
+
+    assert outcomes == [(dataset, "ok") for dataset in sorted(_LOCK_DATASETS)]
+
+    serial_root = tmp_path / "serial"
+    serial = PanelStore(serial_root)
+    for dataset in _LOCK_DATASETS:
+        for year in _LOCK_YEARS:
+            serial.write_partition(dataset, year, _COLUMNS, _dataset_rows(dataset, year))
+
+    concurrent_rows = _catalog_rows(root)
+    assert len(concurrent_rows) == len(_LOCK_DATASETS) * len(_LOCK_YEARS)
+    assert concurrent_rows == _catalog_rows(serial_root)
+    assert _partition_bytes(root) == _partition_bytes(serial_root)
+    assert not list(root.glob("*/*/*.tmp")), "a writer left a staged temp file behind"
+
+
+_BEFORE = (10.5, 22.5)
+_AFTER = (11.5, 23.5)
+
+
+def _toggling_writer_worker(
+    root_str: str, year: int, barrier: Barrier, queue: Queue[tuple[str, str]]
+) -> None:
+    try:
+        barrier.wait(timeout=_RENDEZVOUS_TIMEOUT_SECONDS)
+        store = PanelStore(Path(root_str))
+        for iteration in range(30):
+            closes = _AFTER if iteration % 2 == 0 else _BEFORE
+            store.write_partition("prices_daily", year, _COLUMNS, _rows(closes=closes))
+        queue.put((f"writer{year}", "ok"))
+    except Exception as error:
+        queue.put((f"writer{year}", f"fail:{type(error).__name__}:{error}"))
+
+
+def _observing_reader_worker(
+    root_str: str, barrier: Barrier, queue: Queue[tuple[str, str]], tag: str
+) -> None:
+    try:
+        barrier.wait(timeout=_RENDEZVOUS_TIMEOUT_SECONDS)
+        store = PanelStore(Path(root_str))
+        observed: set[tuple[int, tuple[object, ...]]] = set()
+        for _ in range(60):
+            for year in (2024, 2025):
+                rows = store.query("prices_daily", year=year, columns=["close"])
+                observed.add((year, tuple(row[0] for row in rows)))
+        queue.put((tag, "ok:" + repr(sorted(observed))))
+    except Exception as error:
+        queue.put((tag, f"fail:{type(error).__name__}:{error}"))
+
+
+def test_readers_in_other_processes_see_each_partition_before_or_after_a_write_and_never_fail(
+    tmp_path: Path,
+) -> None:
+    """Two processes rewrite two partitions back and forth while three more read both of them
+    in a loop. No read raises -- not `duckdb.IOException`, not `PanelStorageError` -- and every
+    read answers one whole state of its partition: the rows before a write or the rows after
+    it, never a mixture and never nothing."""
+    root = tmp_path / "panel"
+    store = PanelStore(root)
+    for year in (2024, 2025):
+        store.write_partition("prices_daily", year, _COLUMNS, _rows(closes=_BEFORE))
+
+    barrier = ctx.Barrier(5)
+    queue: multiprocessing.Queue[tuple[str, str]] = ctx.Queue()
+    processes = [
+        ctx.Process(target=_toggling_writer_worker, args=(str(root), year, barrier, queue))
+        for year in (2024, 2025)
+    ] + [
+        ctx.Process(
+            target=_observing_reader_worker, args=(str(root), barrier, queue, f"reader{index}")
+        )
+        for index in range(3)
+    ]
+    for process in processes:
+        process.start()
+    try:
+        outcomes = dict(queue.get(timeout=180) for _ in processes)
+        for process in processes:
+            process.join(timeout=30)
+            assert process.exitcode == 0, f"a process crashed: {process.exitcode}"
+    finally:
+        _stop_all(processes)
+
+    failures = {tag: outcome for tag, outcome in outcomes.items() if not outcome.startswith("ok")}
+    assert failures == {}
+    allowed = {(year, state) for year in (2024, 2025) for state in (_BEFORE, _AFTER)}
+    for tag in ("reader0", "reader1", "reader2"):
+        observed = set(ast.literal_eval(outcomes[tag].removeprefix("ok:")))
+        assert observed <= allowed, f"{tag} read a state no write produced: {observed - allowed}"
+
+
+def _lock_holder_worker(root_str: str, mode: str, queue: Queue[str]) -> None:
+    store = PanelStore(Path(root_str))
+    access = (
+        store._catalog_access.exclusive() if mode == "exclusive" else store._catalog_access.shared()
+    )
+    with access:
+        queue.put("held")
+        time.sleep(600)
+
+
+def _start_holder(root: Path, mode: str) -> multiprocessing.process.BaseProcess:
+    queue: multiprocessing.Queue[str] = ctx.Queue()
+    holder = ctx.Process(target=_lock_holder_worker, args=(str(root), mode, queue))
+    holder.start()
+    try:
+        assert queue.get(timeout=60) == "held"
+    except BaseException:
+        _stop_all([holder])
+        raise
+    return holder
+
+
+def test_a_wait_past_the_bound_is_refused_by_name_and_is_not_a_storage_refusal(
+    tmp_path: Path,
+) -> None:
+    """While another process holds the catalog for writing, a read here waits its bound and
+    then refuses with `PanelCatalogBusyError`; while another process holds it for reading, so
+    does a write. Each refusal names the catalog, the lock file and the side it needed. It is
+    deliberately *not* a `PanelStorageError`: every handler of that type turns it into a refusal
+    about the data, and a research driver records such a refusal as a row it never re-measures
+    -- contention is not a fact about the data."""
+    root = tmp_path / "panel"
+    PanelStore(root).write_partition("prices_daily", 2024, _COLUMNS, _rows())
+    bounded = PanelStore(root, catalog_lock_timeout=0.5)
+    holder = _start_holder(root, "exclusive")
+    try:
+        started = time.monotonic()
+        with pytest.raises(PanelCatalogBusyError) as read_refusal:
+            bounded.query("prices_daily", year=2024, columns=["close"])
+        waited = time.monotonic() - started
+    finally:
+        _stop_all([holder])
+    holder = _start_holder(root, "shared")
+    try:
+        # A read beside a reader is no contention at all.
+        assert bounded.query("prices_daily", year=2024, columns=["close"]) == [(10.5,), (22.5,)]
+        with pytest.raises(PanelCatalogBusyError) as write_refusal:
+            bounded.write_partition("prices_daily", 2025, _COLUMNS, _rows())
+    finally:
+        _stop_all([holder])
+
+    assert 0.5 <= waited < 10.0
+    assert not isinstance(read_refusal.value, PanelStorageError)
+    for refusal, side in ((read_refusal.value, "shared"), (write_refusal.value, "exclusive")):
+        message = str(refusal)
+        assert str(root / "catalog.duckdb") in message
+        assert "catalog.duckdb.lock" in message
+        assert side in message
+        assert "0.5" in message
+    assert not list(root.glob("prices_daily/2025/*")), "a refused write left a file behind"
+
+
+@pytest.mark.parametrize("mode", ["exclusive", "shared"])
+def test_a_process_killed_while_holding_the_catalog_lock_does_not_wedge_the_store(
+    tmp_path: Path, mode: str
+) -> None:
+    """The lock is an OS advisory lock, so the kernel releases it when its holder's process
+    ends however it ends. Proved with `kill` (SIGKILL on POSIX, `TerminateProcess` on Windows),
+    which runs no `finally`, no `atexit` and no destructor: while the holder lives the write
+    below is refused, and once it is dead the same write and a read both go through."""
+    root = tmp_path / "panel"
+    PanelStore(root).write_partition("prices_daily", 2024, _COLUMNS, _rows())
+    holder = _start_holder(root, mode)
+    try:
+        with pytest.raises(PanelCatalogBusyError):
+            PanelStore(root, catalog_lock_timeout=0.3).write_partition(
+                "prices_daily", 2024, _COLUMNS, _rows(closes=_AFTER)
+            )
+        holder.kill()
+        holder.join(timeout=30)
+        assert not holder.is_alive()
+    finally:
+        _stop_all([holder])
+
+    after = PanelStore(root, catalog_lock_timeout=10.0)
+    after.write_partition("prices_daily", 2024, _COLUMNS, _rows(closes=_AFTER))
+    assert after.query("prices_daily", year=2024, columns=["close"]) == [(11.5,), (23.5,)]
+
+
+def _churning_reader_worker(root_str: str, queue: Queue[str]) -> None:
+    """Hold the shared side for 0.2 s at a time and take it again at once, for a minute."""
+    store = PanelStore(Path(root_str))
+    announced = False
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        with store._catalog_access.shared():
+            if not announced:
+                queue.put("holding")
+                announced = True
+            time.sleep(0.2)
+
+
+def test_a_writer_is_not_starved_by_readers_in_other_processes_that_never_all_let_go(
+    tmp_path: Path,
+) -> None:
+    """Three processes take turns holding the catalog for reading so that at every moment at
+    least one of them holds it. A shared lock is granted to any asker while only shared locks
+    are held, so a writer that merely polled for the exclusive side would never find the
+    catalog free and would wait out its whole bound. The gate in front of the lock is what lets
+    it in: once the writer holds the gate, readers coming back for another turn queue behind it,
+    and the ones already inside finish their 0.2 s and leave."""
+    root = tmp_path / "panel"
+    PanelStore(root).write_partition("prices_daily", 2024, _COLUMNS, _rows())
+    queue: multiprocessing.Queue[str] = ctx.Queue()
+    readers = [
+        ctx.Process(target=_churning_reader_worker, args=(str(root), queue)) for _ in range(3)
+    ]
+    for process in readers:
+        process.start()
+    try:
+        assert [queue.get(timeout=60) for _ in readers] == ["holding"] * 3
+        time.sleep(0.5)
+        writer = PanelStore(root, catalog_lock_timeout=20.0)
+        started = time.monotonic()
+        writer.write_partition("prices_daily", 2024, _COLUMNS, _rows(closes=_AFTER))
+        waited = time.monotonic() - started
+    finally:
+        _stop_all(readers)
+
+    assert waited < 20.0
+    assert writer.query("prices_daily", year=2024, columns=["close"]) == [(11.5,), (23.5,)]
+
+
+def test_the_bound_also_covers_a_wait_behind_a_writer_thread_in_the_same_process(
+    tmp_path: Path,
+) -> None:
+    """One deadline per acquisition, spent across both locks: a reader queued behind a writer
+    *thread* of its own process waits its bound there too, rather than unboundedly on the
+    in-process side and only then boundedly on the file."""
+    root = tmp_path / "panel"
+    store = PanelStore(root, catalog_lock_timeout=0.3)
+    store.write_partition("prices_daily", 2024, _COLUMNS, _rows())
+    holding = threading.Event()
+    release = threading.Event()
+
+    def hold() -> None:
+        with store._catalog_access.exclusive():
+            holding.set()
+            release.wait(timeout=60)
+
+    thread = threading.Thread(target=hold)
+    thread.start()
+    try:
+        assert holding.wait(timeout=30)
+        with pytest.raises(PanelCatalogBusyError, match="shared"):
+            store.query("prices_daily", year=2024, columns=["close"])
+    finally:
+        release.set()
+        thread.join(timeout=30)
+    assert store.query("prices_daily", year=2024, columns=["close"]) == [(10.5,), (22.5,)]
+
+
+@pytest.mark.parametrize("timeout", [-1.0, float("inf"), float("nan")])
+def test_the_catalog_wait_must_be_a_finite_bound(tmp_path: Path, timeout: float) -> None:
+    """An infinite (or meaningless) wait would bring back the silent hang the bound exists to
+    name, so it is refused at construction rather than accepted and honoured."""
+    with pytest.raises(PanelStorageError, match="catalog_lock_timeout"):
+        PanelStore(tmp_path / "panel", catalog_lock_timeout=timeout)
