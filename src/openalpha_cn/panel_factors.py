@@ -221,16 +221,17 @@ years that is 13 `read_visible_at` calls per statement dataset per instant where
 do (about 20 ms each): measured 2026-10-05 on a copy of the store, `accruals_ttm` (three
 statement datasets) took 1.3 s per carried instant against roughly a third of that before, and
 `revenue_yoy` 0.4 s. A whole-history rebuild of the statement factors, and
-`openalpha factor stale-statement-reach` (about 2.6 hours over the research store), pay it. The
+`openalpha factor stale-statement-builds` (about 2.6 hours over the research store), pay it. The
 obvious remedy -- skipping, in a carried read, a partition whose newest row cannot be newly
 visible -- touches `FactorReadCarry`'s equivalence argument and is not made here.
 
-**And what it means for a security that stopped filing.** No factor bounds how old a window's
-newest filing may be, so a listed security whose filings stopped years ago is valued on its last
-ones (`book_to_price` moved 592 security-instants from `insufficient_history` to `computed` on
-the research store). That is disclosed as `factor_view.KNOWN_FACTOR_RUN_LIMITATIONS
-.a_security_that_stopped_filing_is_valued_on_its_last_filings_however_old`; the stored
-`input_period_last` says how old the newest filing is.
+**And how old a window may be.** Reading every stored year would let years-old filings into a
+cross section -- the span check bounds a window's width, not its age -- so `_classify` also
+refuses a window whose newest period is more than one missed statutory deadline old
+(`oldest_admissible_newest_period`), as `insufficient_history` with the window recorded. The
+bound is the statute's and the instant's, never the caller's years; what it still admits is
+disclosed as `factor_view.KNOWN_FACTOR_RUN_LIMITATIONS
+.a_statement_window_may_end_one_missed_statutory_deadline_behind`.
 
 ## Two axes, because a filing does not live on the session one
 
@@ -859,6 +860,7 @@ an upstream's publication cadence, and `DATASET_CADENCE` has no honest entry for
 
 import bisect
 import math
+from calendar import monthrange
 from collections import defaultdict
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -4844,6 +4846,13 @@ def compute_factor(
     skip = RETURN_SKIP_BY_EVALUATOR.get(evaluator, 0)
     decisions = _return_decisions(store, links=links, requirements=requirements, as_of=as_of)
     abstained: list[UnknowableReturnSession] = []
+    # `V2-P6-027`, round 4: the oldest a period window's newest period may be, from the statutory
+    # deadlines and this instant's date alone.
+    period_floor = (
+        None
+        if definition.lookback_periods is None
+        else oldest_admissible_newest_period(as_of.astimezone(zone).date())
+    )
     # The answers are computed *before* the manifest, and the ordering is forced rather than
     # stylistic: `observation_digest` is a field of `FactorBuildManifest`, so the manifest cannot
     # exist until the cross section does -- while every observation carries the `manifest_id` the
@@ -4866,6 +4875,7 @@ def compute_factor(
             skip=skip,
             decisions=decisions,
             abstained=abstained,
+            period_floor=period_floor,
         )
         for subject in ordered_subjects
     )
@@ -5107,7 +5117,7 @@ def statement_newest_periods(
     """Each security's newest quarter-grid report period among `dataset`'s rows stored in
     `years` and visible at `as_of`.
 
-    `V2-P6-027`'s narrowing for `factor_view.stale_statement_reach_builds`, which asks which
+    `V2-P6-027`'s narrowing for `factor_view.stale_statement_builds`, which asks which
     stored builds a read of older announcement years can change. It is a bound, never an answer:
     it decides which securities are asked again, and the engine answers them. So the read is the
     store's own visibility-filtered one, with the freshness bound waived on the record -- the
@@ -5116,16 +5126,26 @@ def statement_newest_periods(
     asking with the latest `as_of` it knows can only over-ask. A period off `FISCAL_QUARTER_ENDS`
     is skipped, because `_read_into` excludes it from every window.
     """
+    # An announcement year recorded empty (`panel_ingest.write_empty_announcement_year`) holds no
+    # row to bound anything with, and read after its first statutory deadline it is refused as
+    # stale whatever the bound -- so it is skipped rather than allowed to fail the whole listing.
+    holding = tuple(
+        year
+        for year in sorted(set(years))
+        if (coverage := store.read_coverage(dataset, year)) is None or coverage.row_count
+    )
+    newest: dict[str, date] = {}
+    if not holding:
+        return MappingProxyType(newest)
     requirement = ReadinessRequirement(
         dataset=dataset,
         as_of=as_of,
-        years=tuple(sorted(set(years))),
+        years=holding,
         required_dates=None,
         required_subjects=None,
         required_fields=(REPORT_PERIOD_COLUMN,),
         max_staleness=None,
     )
-    newest: dict[str, date] = {}
     for year in requirement.years:
         outcome = store.read_visible_at(
             requirement, year=year, columns=(SUBJECT_COLUMN_NAME, REPORT_PERIOD_COLUMN)
@@ -5832,6 +5852,88 @@ def _is_a_fiscal_quarter_end(period: date) -> bool:
     return (period.month, period.day) in FISCAL_QUARTER_ENDS
 
 
+STATUTORY_FILING_MONTHS: Final[Mapping[int, int]] = MappingProxyType({3: 1, 6: 2, 9: 1, 12: 4})
+"""How many calendar months after each fiscal quarter end its periodic report is due, by the
+quarter end's month (`V2-P6-027`).
+
+The CSRC's disclosure rules for listed companies, as statute rather than as a habit this module
+measured: the annual report within four months of the fiscal year end (30 April), the half-year
+report within two months of 30 June (31 August), and the first- and third-quarter reports within
+one month of their quarter ends (30 April, 31 October). The deadline is the last day of the month
+the count lands in. `statutory_filing_deadline` reads it, and `oldest_admissible_newest_period`
+is the only consumer: it is what lets the engine bound how far behind a window's newest period
+may be without reading a row (round 4 of `V2-P6-027`).
+"""
+
+
+def statutory_filing_deadline(period_end: date) -> date:
+    """The last day an A-share issuer may announce `period_end`'s periodic report on.
+
+    A period off `FISCAL_QUARTER_ENDS` has no periodic deadline and is refused rather than
+    rounded -- `_quarter_index`'s rule, for its reason.
+    """
+    if not _is_a_fiscal_quarter_end(period_end):
+        raise FactorEngineError(
+            f"report period {period_end.isoformat()} is not an A-share fiscal quarter end, so no "
+            "periodic-report deadline applies to it"
+        )
+    year, month = divmod(period_end.month - 1 + STATUTORY_FILING_MONTHS[period_end.month], 12)
+    year += period_end.year
+    return date(year, month + 1, monthrange(year, month + 1)[1])
+
+
+def _period_at(index: int) -> date:
+    """`_quarter_index`'s inverse: the fiscal quarter end at one ordinal of the quarter grid."""
+    year, quarter = divmod(index, 4)
+    month, day = FISCAL_QUARTER_ENDS[quarter]
+    return date(year, month, day)
+
+
+def newest_period_due_before(day: date) -> date:
+    """The newest fiscal quarter end whose periodic report was due **before** `day`.
+
+    So the newest period every on-time issuer has announced by the time `day` opens. A deadline
+    day is not yet past: a report announced on it is stamped with it and is visible from the next
+    day, so on 30 April the newest period owed is still the previous year's third quarter -- the
+    annual and the first quarter fall due that same day. That is the month the calendar and the
+    filings are furthest apart, two quarter ends rather than one, and the reason this is a walk
+    down the deadlines rather than "the quarter before `day`'s".
+    """
+    index = day.year * 4 + (day.month - 1) // 3 - 1
+    while statutory_filing_deadline(_period_at(index)) >= day:
+        index -= 1
+    return _period_at(index)
+
+
+def oldest_admissible_newest_period(day: date) -> date:
+    """The oldest a statement window's newest period may be on `day`: the recency rule
+    (`V2-P6-027`, round 4).
+
+    **The rule.** An issuer may have missed at most **one** statutory filing deadline. Take the
+    latest deadline that has passed before `day` (a deadline day itself is not yet past -- a
+    report announced on it is visible from the next day), and the deadline before that one; a
+    window is admissible only if its newest period is at least the newest period that was due by
+    that earlier deadline. Otherwise its observation is `insufficient_history`, with the window
+    recorded, exactly as a span overrun is.
+
+    **Why one deadline and not one period.** The annual report and the first quarter share 30
+    April, so missing that one deadline leaves an issuer two periods behind; that is still one
+    missed deadline and still admissible. On 6 May the floor is therefore the previous year's
+    third quarter (due 31 October), two quarter ends behind the newest period owed.
+
+    **Why this exists.** A statement factor reads its whole stored history
+    (`factor_view._statement_years`), and nothing else bounds how old a window's newest filing
+    may be -- the span check bounds its width, not its age. So a security that stopped filing,
+    or whose later filings are visible only from a much later revision, was valued on years-old
+    statements: measured on the research store, `300094.SZ`'s 2016Q1-2019Q2 balance sheets carry
+    an `f_ann_date` of 2021-02-03, so in 2019 its newest visible period was 2015-12-31 and its
+    `book_to_price` on 2019-06-14 paired 2015 equity with a 2019 price. The bound depends on the
+    data and `day` only, never on the years a caller names.
+    """
+    latest = statutory_filing_deadline(newest_period_due_before(day))
+    return newest_period_due_before(latest)
+
+
 def _report_period(value: object, *, dataset: str, subject: str) -> date:
     """A stored `report_period` cell as a date, or a refusal that names the row.
 
@@ -5935,6 +6037,7 @@ def _classify(
     skip: int = 0,
     decisions: Mapping[tuple[str, date], RecordedReturnPath] | None = None,
     abstained: list[UnknowableReturnSession] | None = None,
+    period_floor: date | None = None,
 ) -> FactorObservation:
     """One security's coverage code and, if there is one, its value.
 
@@ -5960,6 +6063,15 @@ def _classify(
     on the stored row without a fifth or sixth coverage code, and that is what the two window
     pairs buy: a count shortfall carries no window on the axis that fell short (there was none to
     record) and a span overrun carries the window it was refused for, on each axis independently.
+
+    **A fifth question, on the period axis only (`V2-P6-027`, round 4): is the window recent?** A
+    window whose newest period is older than `period_floor` -- the newest period due by the
+    deadline before the latest statutory deadline that has passed
+    (`oldest_admissible_newest_period`) -- is `insufficient_history` too, with its window recorded
+    as a span overrun's is. An issuer may have missed one statutory deadline, not two. Without it
+    the full-history statement read let a security's years-old filings into today's cross section;
+    with it, what counts as recent is decided by the statute and `as_of` alone. Every period-axis
+    factor meets it here, through the one window formation they share.
 
     **The report-period axis reuses `insufficient_history` rather than earning its own code**, and
     that is the `max_window_sessions` precedent applied rather than a convenience. A security with
@@ -6016,7 +6128,10 @@ def _classify(
     }
     if _overruns_its_span(
         definition, sessions=sessions, periods=periods, panel_sessions=panel_sessions
-    ):
+    ) or (period_floor is not None and bool(periods) and periods[-1] < period_floor):
+        # `V2-P6-027`, round 4: a window whose newest period is more than one missed statutory
+        # deadline old is `insufficient_history` with the window recorded, like a span overrun:
+        # it is not enough history *near as_of*. See `oldest_admissible_newest_period`.
         return FactorObservation(
             subject=subject,
             as_of=as_of,

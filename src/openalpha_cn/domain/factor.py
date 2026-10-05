@@ -691,6 +691,11 @@ class FactorDefinition(BaseModel):
     periods" spanning twelve, and a year-on-year computed from `window[-1]` against `window[-5]`
     on such a window compares two periods that are not a year apart.
 
+    It bounds a window's **width**, not its **age**. How old the newest period may be is not a
+    field of any definition: the engine applies one rule to every period-axis factor -- at most
+    one missed statutory filing deadline (`V2-P6-027`;
+    `panel_factors.oldest_admissible_newest_period`) -- so it moves no `factor_id`.
+
     **Counted on the calendar's quarter grid and not on the panel's period set**, which is where
     the two axes part company and is the correction of a real defect rather than a preference.
     `max_window_sessions` counts panel sessions because the sessions a cross section returns *are*

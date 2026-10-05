@@ -454,9 +454,12 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_factors.load_factor_observations",
             "panel_factors.load_factor_transform_manifests",
             "panel_factors.load_processed_factor_observations",
+            # `V2-P6-027`, round 4: the recency rule's floor, so `stale_statement_builds` decides a
+            # stored window the rule now refuses without asking the engine. A rule over dates.
+            "panel_factors.oldest_admissible_newest_period",
             "panel_factors.processed_factor_dataset",
             "panel_factors.session_return_links",
-            # `V2-P6-027`, round 2: `stale_statement_reach_builds` narrows the securities it asks
+            # `V2-P6-027`, round 2: `stale_statement_builds` narrows the securities it asks
             # the engine about again to those holding a filing in a year their build did not
             # read. A statement dataset the engine already reads, through the engine's own door.
             "panel_factors.statement_newest_periods",

@@ -225,9 +225,10 @@ CLI_ONLY: Final[MappingProxyType[str, str]] = MappingProxyType(
         "factor stale-return-paths": "`V2-P6-020`'s repair list for a stored research store: it "
         "prints `factor build` commands to run on the machine holding the runtime directory; "
         "`factor_view.stale_return_path_builds` is the in-process twin and no route does it",
-        "factor stale-statement-reach": "`V2-P6-027`'s repair list for a stored research store: "
-        "it prints `factor build` commands to run on the machine holding the runtime directory; "
-        "`factor_view.stale_statement_reach_builds` is the in-process twin and no route does it",
+        "factor stale-statement-builds": "`V2-P6-027`'s repair list for a stored research "
+        "store: it prints `factor build` commands to run on the machine holding the runtime "
+        "directory; `factor_view.stale_statement_builds` is the in-process twin and no route "
+        "does it",
         "jobs due": "needs a stored calendar and answers about this machine's schedules",
         "jobs register": "declares a schedule; a write this unauthenticated API must not take",
         "jobs run": "takes a lease and does work on the machine holding the runtime directory",
@@ -655,9 +656,9 @@ def test_the_measured_surface_counts_are_the_ones_this_file_was_written_against(
     stale-return-paths`, which lists the stored factor builds a later return-path decision made
     stale with the rebuild commands that repair them -- declared in `CLI_ONLY`.
 
-    `V2-P6-027` (round 2) moved `cli_commands` by one and nothing else: `openalpha factor
-    stale-statement-reach`, which lists the stored statement-factor builds a read of the whole
-    stored statement history answers differently, with the rebuild commands -- declared in
+    `V2-P6-027` moved `cli_commands` by one and nothing else: `openalpha factor
+    stale-statement-builds`, which lists the stored statement-factor builds the full-history
+    read and the recency rule answer differently, with the rebuild commands -- declared in
     `CLI_ONLY`.
     """
     measured = {

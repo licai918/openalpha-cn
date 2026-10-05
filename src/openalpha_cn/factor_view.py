@@ -323,6 +323,7 @@ from openalpha_cn.panel_factors import (
     load_factor_observations,
     load_factor_transform_manifests,
     load_processed_factor_observations,
+    oldest_admissible_newest_period,
     processed_factor_dataset,
     session_return_links,
     statement_newest_periods,
@@ -374,7 +375,7 @@ __all__ = [
     "KNOWN_FACTOR_RUN_LIMITATIONS",
     "OFF_GRID_REPORT_PERIOD_LIMITATION",
     "REQUIREMENT_BUILDERS",
-    "STOPPED_FILER_LIMITATION",
+    "STATEMENT_RECENCY_LIMITATION",
     "VIEW_SCHEMA_VERSION",
     "ExperimentDocumentStore",
     "ExperimentWrite",
@@ -491,10 +492,10 @@ OFF_GRID_REPORT_PERIOD_LIMITATION: Final[str] = (
 )
 """`V2-P6-019`'s entry below, named once because the terminal face cites it beside the list."""
 
-STOPPED_FILER_LIMITATION: Final[str] = (
-    "a_security_that_stopped_filing_is_valued_on_its_last_filings_however_old"
+STATEMENT_RECENCY_LIMITATION: Final[str] = (
+    "a_statement_window_may_end_one_missed_statutory_deadline_behind"
 )
-"""`V2-P6-027`'s entry below: the cost of a statement read that does not depend on `--year`."""
+"""`V2-P6-027`'s entry below: how far behind a statement window's newest period may be."""
 
 KNOWN_FACTOR_RUN_LIMITATIONS: Final[tuple[FactorRunLimitation, ...]] = (
     FactorRunLimitation(
@@ -743,24 +744,25 @@ KNOWN_FACTOR_RUN_LIMITATIONS: Final[tuple[FactorRunLimitation, ...]] = (
         ),
     ),
     FactorRunLimitation(
-        code=STOPPED_FILER_LIMITATION,
+        code=STATEMENT_RECENCY_LIMITATION,
         detail=(
             "V2-P6-027. A statement factor reads every stored announcement year at or below the "
-            "newest one a build names (factor_view._statement_years), and its window is a "
-            "security's last lookback_periods filings with a bound on their SPAN only -- no "
-            "factor declares a bound on how old the newest one may be. So a security that "
-            "stopped filing years ago and is still listed is valued on its last filings, however "
-            "old, where a build naming only as_of's year and the two before it answered "
-            "insufficient_history. MEASURED on the research store's copy (2026-10-05): "
-            "book_to_price, whose window is one period, moved 592 security-instants from "
-            "insufficient_history to computed across 519 stored builds of 2019-2021 when the "
-            "full history was read; every statement factor but deducted_earnings_yield_ttm "
-            "moved some (`openalpha factor stale-statement-reach` lists them). THIS IS NOT A "
-            "DEFINITION CHANGE AND NONE WAS MADE: a recency bound on the newest filing would be "
-            "a new factor version and a research decision. What the read now guarantees is that "
-            "the answer depends on the store and as_of only, never on the years a caller named; "
-            "the stored observation's input_period_last says how old the newest filing it was "
-            "valued on is, for a reader who wants to exclude stale ones."
+            "newest one a build names (factor_view._statement_years), and a window is admissible "
+            "only if its newest period is no older than the newest period due by the deadline "
+            "BEFORE the latest statutory deadline that has passed (panel_factors."
+            "oldest_admissible_newest_period): an issuer may have missed one deadline, not two; a "
+            "window that fails is insufficient_history with its window recorded. What that still "
+            "admits, stated: (1) a window up to one missed deadline behind, which after 30 April "
+            "-- the annual and the first quarter share that deadline -- is two periods behind the "
+            "newest period owed; (2) deadlines are the statute's (Q1 30 Apr, H1 31 Aug, Q3 31 "
+            "Oct, annual 30 Apr of the next year), so an exchange-approved delay counts as "
+            "missed; (3) the rule is on the newest PERIOD, so restating old periods later does "
+            "not make a stale window fresh. Before the rule a security whose visible filings had "
+            "stopped was valued on them however old -- 300094.SZ's 2016Q1-2019Q2 balance sheets "
+            "carry f_ann_date 2021-02-03, so its book_to_price on 2019-06-14 paired 2015 equity "
+            "with a 2019 price -- and the stored research builds' three-year span cut that off "
+            "only by accident. `openalpha factor stale-statement-builds` lists the stored builds "
+            "the rule and the full-history read change."
         ),
     ),
 )
@@ -3926,10 +3928,11 @@ def _statement_years(
     disagreement in it still marks its period `ambiguous_filing` for a window that reaches it.
     The year set no longer depends on `as_of`, so one `FactorReadCarry` serves every instant.
 
-    A listed security that stopped filing years ago is therefore valued on its last filings, as
-    `STOPPED_FILER_LIMITATION` discloses: no factor bounds how old a window's newest filing may
-    be, and none was given one here. The session datasets are still read over the years named,
-    which is why the daily selection names `factor_build_years`.
+    Reading every year would let years-old filings into a cross section, so the engine bounds a
+    window's newest period by the statutory deadlines instead (`STATEMENT_RECENCY_LIMITATION`,
+    `panel_factors.oldest_admissible_newest_period`) -- a rule on the data and `as_of`, never on
+    the years named. The session datasets are still read over the years named, which is why the
+    daily selection names `factor_build_years`.
     """
     named = request.years
     if dataset not in PERIOD_INDEXED_DATASETS:
@@ -4571,20 +4574,28 @@ def _supersession(
     return builds, tuple(commands)
 
 
-# --- stored statement builds an older announcement year changes (`V2-P6-027`, round 2) -----------
+# --- stored statement builds the current reading answers differently (`V2-P6-027`) ---------------
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class StaleStatementReachBuild:
-    """A stored statement-factor build the full-history read answers differently, and its repair.
+class StaleStatementBuild:
+    """A stored statement-factor build the current reading answers differently, and its repair.
 
+    Two changes of `V2-P6-027` can move a stored answer: the read of every stored announcement
+    year (`_statement_years`) and the recency rule
+    (`panel_factors.oldest_admissible_newest_period`).
     `read` is the announcement years the stored build read, per statement dataset; `reads_now`
-    what a build of the same request reads today (`_statement_years`). `asked` is how many of its
-    securities could have moved and were put to `compute_factor` again; `transitions` counts the
-    ones that did, by `(stored coverage, engine coverage)` -- a pair with one coverage on both
-    sides is a value that moved -- and `examples` names the first few. `builds` and `commands`
-    are `stale_return_path_builds`' own: this raw build, every processed and neutralized build
-    made from it at that instant, and the `factor build` argument lists that re-answer them.
+    what a build of the same request reads today. `asked` is how many of its securities a newly
+    read year can move, each put to `compute_factor` again; `decided` how many of the rest the
+    recency rule alone moves, decided without it (`stale_statement_builds` proves why that is
+    exact). `transitions` counts the securities that moved, by `(stored coverage, current
+    coverage)` -- a pair with one coverage on both sides is a value that moved -- and `examples`
+    names the first few. `refusal` is set, and `transitions` empty, when the engine refused to
+    answer the build at all (an old announcement year recorded empty and read after its deadline
+    is the shape that does); such a build is listed rather than allowed to stop the listing.
+    `builds` and `commands` are `stale_return_path_builds`' own: this raw build, every processed
+    and neutralized build made from it at that instant, and the `factor build` argument lists
+    that re-answer them.
     """
 
     factor: str
@@ -4593,15 +4604,17 @@ class StaleStatementReachBuild:
     read: Mapping[str, tuple[int, ...]]
     reads_now: Mapping[str, tuple[int, ...]]
     asked: int
+    decided: int
     transitions: Mapping[tuple[str, str], int]
     examples: tuple[str, ...]
+    refusal: str | None
     builds: tuple[StaleFactorBuild, ...]
     commands: tuple[tuple[str, ...], ...]
 
 
 @dataclass(frozen=True, slots=True)
-class _ReachRecompute:
-    """One stored raw statement build to ask the engine about again, and whom."""
+class _StatementRecompute:
+    """One stored raw statement build, whom to ask the engine about, and what is already known."""
 
     definition: FactorDefinition
     year: int
@@ -4609,81 +4622,116 @@ class _ReachRecompute:
     read: Mapping[str, tuple[int, ...]]
     reads_now: Mapping[str, tuple[int, ...]]
     asked: tuple[FactorObservation, ...]
+    decided: tuple[FactorObservation, ...]
 
 
-STALE_STATEMENT_REACH_EXAMPLES: Final[int] = 5
-"""How many moved securities `StaleStatementReachBuild.examples` names. A build cut short on a
+STALE_STATEMENT_EXAMPLES: Final[int] = 5
+"""How many moved securities `StaleStatementBuild.examples` names. A build cut short on a
 February day moves thousands, and the count is the finding; the names are for a reader to look
 one up."""
 
+RECENCY_MOVABLE: Final[frozenset[str]] = frozenset(
+    {"computed", "undefined_value", "input_missing", "ambiguous_filing"}
+)
+"""The stored codes the recency rule can turn into `insufficient_history`: every code decided
+after a window was formed and admitted. `insufficient_history` is that already, and
+`not_in_universe` never had a window."""
 
-def stale_statement_reach_builds(
+
+def stale_statement_builds(
     store: PanelStore,
     *,
     exchange: str,
     max_staleness_days: int,
     as_of: datetime,
+    factors: Sequence[str] = (),
     code_commit: str | None = None,
     budget: Callable[[int], None] | None = None,
-) -> tuple[StaleStatementReachBuild, ...]:
-    """Every stored statement-factor build that a read of the whole stored history answers
-    differently, with the `factor build` commands that repair it (`V2-P6-027`, round 2).
+) -> tuple[StaleStatementBuild, ...]:
+    """Every stored statement-factor build the current reading answers differently, with the
+    `factor build` commands that repair it (`V2-P6-027`).
 
-    Before `V2-P6-027` a statement factor read the announcement years its build named, and every
-    stored research build named `as_of`'s year and the two before it. It now reads every stored
-    year at or below the newest one named. A manifest records the years it read, so which builds
-    read less is a fact the store holds; what this asks the engine is whether that changed any
-    answer, about as few securities as can have changed:
+    Two things changed what a statement factor answers. It reads every stored announcement year
+    at or below the newest one its build names, where stored research builds read only the years
+    they named; and a window whose newest period is more than one missed statutory deadline old
+    is `insufficient_history`. A manifest records the years it read and an observation the
+    window it was answered from, so this finds every observation either change moves, asking
+    the engine only where it has to:
 
-    1. **Builds.** A raw build whose every statement dataset already read every stored year at or
-       below its newest named year reads exactly what a build reads now, and is not asked.
-    2. **Securities.** A newly read year adds only that year's filings. A security with none of
-       them has the rows it had. One with some is asked again only if a period of them is at or
-       after the first period of the window it was stored with (`input_period_first`), or it was
-       stored with no period window at all: the window is a security's last `lookback_periods`
-       held periods, so a filing of an older period changes neither which periods it holds nor
-       their versions nor an ambiguity inside it -- every row of a period at or after the
-       window's first came from the years already read. `not_in_universe` never moves. The
-       periods are taken from the rows visible at this command's `as_of`, which include every
-       row visible at any build's earlier instant, so the narrowing can only over-ask
-       (`panel_factors.statement_newest_periods`).
-    3. **Whether it moved.** `compute_factor` for those securities at the build's own instant,
-       over the build's own named years and code commit, through `_requirements` -- the reading
-       every build makes now -- with one `FactorReadCarry` per `(factor, year)`, in ascending
-       instant order. A different coverage or value is stale. `budget` is told the number of
-       those calls once, before the first.
+    1. **A newly read year (asked).** A build that read every stored year at or below its newest
+       named one reads what a build reads now. Otherwise a newly read year adds only its own
+       filings, and a security with none of them holds the rows it held. One with some is asked
+       again if a period of them is at or after the first period of the window it was stored
+       with (`input_period_first`), or it was stored with no period window at all; otherwise its
+       window is unchanged -- the window is its last `lookback_periods` held periods, so an older
+       filing changes neither which periods it holds nor their versions nor an ambiguity inside
+       it, because every row of a period at or after the window's first came from the years
+       already read. One stored `insufficient_history` is not asked when even its newest
+       period over every year read now is older than the recency floor at the build's instant:
+       any window it could form would end there and be refused, so it stays
+       `insufficient_history`. The periods are taken from rows visible at this command's `as_of`,
+       a superset of those visible at any build's instant -- newer bounds, more rows -- so both
+       tests can only over-ask (`panel_factors.statement_newest_periods`). `compute_factor`
+       answers the asked securities at the build's own instant through `_requirements` -- the
+       reading every build makes now -- with one `FactorReadCarry` per `(factor, year)`, in
+       ascending instant order.
+    2. **The recency rule alone (decided).** Every other security's window is the stored one, by
+       (1). Its window's newest period is `input_period_last`; if that is older than the rule's
+       floor at the build's instant and it was stored with a code decided after the window was
+       admitted (`RECENCY_MOVABLE`), the engine answers `insufficient_history` with no value now
+       -- the count and span checks it passed are unchanged and the recency check comes before
+       every later one -- and otherwise its answer is the stored one. That is decided here
+       without a call. `budget` is told the number of `compute_factor` calls once, before the
+       first.
 
-    A build whose answers did not move is not listed even though a rebuild would record more
-    input years: its observations, and so everything built from them, are what a rebuild stores.
-    `code_commit` goes into the commands when given; otherwise the rebuild resolves its own.
+    **What "not listed" means, exactly.** A build is listed when any security's coverage or
+    value moved. One that is not listed stores the answers a rebuild stores, and so everything
+    built from them -- but not every byte: a rebuild records the years it read in its manifest,
+    and an `insufficient_history` row with no window counts every row the security holds
+    (`input_row_count`), which a newly read year can raise. Neither is an answer.
+
+    `factors` limits the listing to those factors (qualified keys), so independent factors can
+    be listed by separate processes. `code_commit` goes into the commands when given; otherwise
+    the rebuild resolves its own.
     """
-    plans = _reach_recomputes(store, as_of=as_of)
+    plans = _statement_recomputes(store, as_of=as_of, factors=factors)
     if budget is not None:
-        budget(len(plans))
-    found: list[StaleStatementReachBuild] = []
+        budget(sum(1 for plan in plans if plan.asked))
+    found: list[StaleStatementBuild] = []
     carries: dict[tuple[str, int], FactorReadCarry] = {}
     for plan in plans:
-        carry = carries.setdefault((plan.definition.qualified_key, plan.year), FactorReadCarry())
-        engine = _recomputed(
-            store,
-            plan.definition,
-            manifest=plan.manifest,
-            subjects=tuple(sorted(item.subject for item in plan.asked)),
-            exchange=exchange,
-            max_staleness_days=max_staleness_days,
-            carry=carry,
+        moved: list[tuple[str, tuple[str, str]]] = []
+        refusal: str | None = None
+        if plan.asked:
+            carry = carries.setdefault(
+                (plan.definition.qualified_key, plan.year), FactorReadCarry()
+            )
+            try:
+                engine = _recomputed(
+                    store,
+                    plan.definition,
+                    manifest=plan.manifest,
+                    subjects=tuple(sorted(item.subject for item in plan.asked)),
+                    exchange=exchange,
+                    max_staleness_days=max_staleness_days,
+                    carry=carry,
+                )
+            except FactorViewError as error:
+                carries.pop((plan.definition.qualified_key, plan.year), None)
+                refusal = error.disclosable
+            else:
+                for stored in plan.asked:
+                    now = engine[stored.subject]
+                    if (now.coverage, now.value) != (stored.coverage, stored.value):
+                        moved.append((stored.subject, (stored.coverage, now.coverage)))
+        moved.extend(
+            (stored.subject, (stored.coverage, "insufficient_history")) for stored in plan.decided
         )
         transitions: dict[tuple[str, str], int] = {}
-        examples: list[str] = []
-        for stored in plan.asked:
-            now = engine[stored.subject]
-            if (now.coverage, now.value) == (stored.coverage, stored.value):
-                continue
-            key = (stored.coverage, now.coverage)
-            transitions[key] = transitions.get(key, 0) + 1
-            if len(examples) < STALE_STATEMENT_REACH_EXAMPLES:
-                examples.append(stored.subject)
-        if not transitions:
+        for _subject, change in moved:
+            transitions[change] = transitions.get(change, 0) + 1
+        examples = [subject for subject, _change in moved[:STALE_STATEMENT_EXAMPLES]]
+        if not transitions and refusal is None:
             continue
         builds, commands = _supersession(
             store,
@@ -4696,15 +4744,17 @@ def stale_statement_reach_builds(
             code_commit=code_commit,
         )
         found.append(
-            StaleStatementReachBuild(
+            StaleStatementBuild(
                 factor=plan.definition.qualified_key,
                 year=plan.year,
                 as_of=plan.manifest.as_of,
                 read=plan.read,
                 reads_now=plan.reads_now,
                 asked=len(plan.asked),
+                decided=len(plan.decided),
                 transitions=MappingProxyType(dict(sorted(transitions.items()))),
                 examples=tuple(examples),
+                refusal=refusal,
                 builds=builds,
                 commands=commands,
             )
@@ -4712,13 +4762,16 @@ def stale_statement_reach_builds(
     return tuple(found)
 
 
-def _reach_recomputes(store: PanelStore, *, as_of: datetime) -> tuple[_ReachRecompute, ...]:
-    """Steps 1 and 2 of `stale_statement_reach_builds`, in `(factor, year, instant)` order."""
-    plans: list[_ReachRecompute] = []
+def _statement_recomputes(
+    store: PanelStore, *, as_of: datetime, factors: Sequence[str]
+) -> tuple[_StatementRecompute, ...]:
+    """Steps 1 and 2 of `stale_statement_builds`, in `(factor, year, instant)` order."""
+    wanted = {resolve_factor(name).qualified_key for name in factors}
+    plans: list[_StatementRecompute] = []
     newest: dict[tuple[str, tuple[int, ...]], Mapping[str, date]] = {}
     for definition in FACTOR_DEFINITIONS.definitions:
         statements = tuple(name for name in definition.datasets if name in PERIOD_INDEXED_DATASETS)
-        if not statements:
+        if not statements or (wanted and definition.qualified_key not in wanted):
             continue
         stored = {name: tuple(store.registered_years(name)) for name in statements}
         for year in store.registered_years(factor_manifest_dataset(definition)):
@@ -4730,14 +4783,15 @@ def _reach_recomputes(store: PanelStore, *, as_of: datetime) -> tuple[_ReachReco
                 ),
                 key=lambda item: item.as_of,
             )
-            pending: list[
-                tuple[
-                    FactorBuildManifest,
-                    dict[str, tuple[int, ...]],
-                    dict[str, tuple[int, ...]],
-                    dict[str, tuple[int, ...]],
-                ]
-            ] = []
+            if not manifests:
+                continue
+            held: dict[str, list[FactorObservation]] = {}
+            for observation in _read(
+                partial(load_factor_observations, store, definition, years=(year,), as_of=as_of),
+                store=store,
+                what=f"the stored {definition.qualified_key} observations of {year}",
+            ):
+                held.setdefault(observation.manifest_id, []).append(observation)
             for manifest in manifests:
                 # The request `_recomputed` makes names every year the build's inputs name, and
                 # `_statement_years` adds the stored years beneath them: the reading of today.
@@ -4752,61 +4806,65 @@ def _reach_recomputes(store: PanelStore, *, as_of: datetime) -> tuple[_ReachReco
                     name: tuple(sorted({*(y for y in stored[name] if y < named[0]), *named}))
                     for name in statements
                 }
-                added = {
-                    name: tuple(y for y in reads_now[name] if y not in read[name])
-                    for name in statements
-                }
-                if any(added.values()):
-                    pending.append((manifest, read, reads_now, added))
-            if not pending:
-                continue
-            held: dict[str, dict[str, FactorObservation]] = {}
-            for observation in _read(
-                partial(load_factor_observations, store, definition, years=(year,), as_of=as_of),
-                store=store,
-                what=f"the stored {definition.qualified_key} observations of {year}",
-            ):
-                held.setdefault(observation.manifest_id, {})[observation.subject] = observation
-            for manifest, read, reads_now, added in pending:
                 reach: dict[str, date] = {}
-                for name, years in added.items():
-                    if not years:
+                latest: dict[str, date] = {}
+                for name in statements:
+                    added = tuple(y for y in reads_now[name] if y not in read[name])
+                    if not added:
                         continue
-                    key = (name, years)
-                    if key not in newest:
-                        newest[key] = _read(
-                            partial(
-                                statement_newest_periods,
-                                store,
-                                dataset=name,
-                                years=years,
-                                as_of=as_of,
-                            ),
-                            store=store,
-                            what=f"the stored {name} filings of {list(years)}",
-                        )
-                    for subject, period in newest[key].items():
-                        if period > reach.get(subject, date.min):
-                            reach[subject] = period
-                asked = tuple(
-                    observation
-                    for subject, observation in sorted(held.get(manifest.manifest_id, {}).items())
-                    if observation.coverage != "not_in_universe"
-                    and subject in reach
-                    and (
-                        observation.input_period_first is None
-                        or reach[subject] >= observation.input_period_first
-                    )
+                    for years, into in ((added, reach), (reads_now[name], latest)):
+                        key = (name, years)
+                        if key not in newest:
+                            newest[key] = _read(
+                                partial(
+                                    statement_newest_periods,
+                                    store,
+                                    dataset=name,
+                                    years=years,
+                                    as_of=as_of,
+                                ),
+                                store=store,
+                                what=f"the stored {name} filings of {list(years)}",
+                            )
+                        for subject, period in newest[key].items():
+                            if period > into.get(subject, date.min):
+                                into[subject] = period
+                floor = oldest_admissible_newest_period(
+                    manifest.as_of.astimezone(ZoneInfo(manifest.date_timezone)).date()
                 )
-                if asked:
+                asked: list[FactorObservation] = []
+                decided: list[FactorObservation] = []
+                for observation in sorted(
+                    held.get(manifest.manifest_id, ()), key=lambda item: item.subject
+                ):
+                    if observation.coverage == "not_in_universe":
+                        continue
+                    first = observation.input_period_first
+                    if (
+                        observation.subject in reach
+                        and (first is None or reach[observation.subject] >= first)
+                        and not (
+                            observation.coverage == "insufficient_history"
+                            and latest.get(observation.subject, date.min) < floor
+                        )
+                    ):
+                        asked.append(observation)
+                    elif (
+                        observation.coverage in RECENCY_MOVABLE
+                        and observation.input_period_last is not None
+                        and observation.input_period_last < floor
+                    ):
+                        decided.append(observation)
+                if asked or decided:
                     plans.append(
-                        _ReachRecompute(
+                        _StatementRecompute(
                             definition,
                             year,
                             manifest,
                             MappingProxyType(read),
                             MappingProxyType(reads_now),
-                            asked,
+                            tuple(asked),
+                            tuple(decided),
                         )
                     )
     return tuple(plans)

@@ -35,6 +35,9 @@ names carry the shapes that decide which windows were computable over the old th
   `ambiguous_filing` -- the one way it can change a value the old read computed.
 - `LATE` announces its 2025 annual and 2026Q1 on 8 May 2026, after the 30 April deadline. On
   6 May its nine-period window still starts at 2023Q3, which the three named years do not hold.
+- `STALE` stops filing after 2024Q3 and keeps trading, so at every instant here its newest period
+  is more than one missed statutory deadline old and the recency rule codes it
+  `insufficient_history` -- in both stores alike, so the differential below does not see it.
 - `HALTED` stops trading after 2024-11-29 and keeps filing. A factor that reads `daily_basic` takes
   its newest session in the years a build names, so in 2026 it is valued from 2024 by a build
   naming 2024 and not by one naming only 2025 and 2026 -- the session axis, which the full
@@ -66,7 +69,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from typer.testing import CliRunner
 
-from openalpha_cn import factor_view
+from openalpha_cn import factor_view, panel_factors
 from openalpha_cn.cli import app
 from openalpha_cn.domain.daily_prices import (
     DAILY_AVAILABILITY_TIME,
@@ -76,6 +79,7 @@ from openalpha_cn.domain.daily_prices import (
     DAILY_DATASET,
     SESSION_CLOSE_TIME,
 )
+from openalpha_cn.domain.factor import FactorObservation
 from openalpha_cn.domain.financial_statements import (
     ANNOUNCEMENT_DATE_COLUMN,
     FIRST_ANNOUNCEMENT_COLUMN,
@@ -115,11 +119,11 @@ from openalpha_cn.domain.trading_calendar import (
 )
 from openalpha_cn.factor_view import (
     FACTOR_RUN_LIMITATION_CODES,
-    STOPPED_FILER_LIMITATION,
-    StaleStatementReachBuild,
+    STATEMENT_RECENCY_LIMITATION,
+    StaleStatementBuild,
     factor_build_requests,
     merged_build_commands,
-    stale_statement_reach_builds,
+    stale_statement_builds,
 )
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import (
@@ -133,7 +137,9 @@ from openalpha_cn.panel_factors import (
 )
 from openalpha_cn.panel_ingest import (
     financial_statement_requirement,
+    merge_panel_batches,
     split_panel_batch_by_year,
+    write_empty_announcement_year,
     write_panel_batch,
 )
 from openalpha_cn.panel_neutralization import (
@@ -174,6 +180,10 @@ SECURITIES: Final[tuple[str, ...]] = tuple(
 )
 EARLY, BACKFILLED, RESTATED, LATE, CONFLICTED, HALTED = SECURITIES[30:36]
 HALTED_AFTER: Final[date] = date(2024, 11, 29)
+STALE: Final[str] = SECURITIES[36]
+STALE_THROUGH: Final[date] = date(2024, 9, 30)
+"""`STALE` files nothing after 2024Q3 and keeps trading: more than one deadline behind at every
+instant here."""
 YOUNG, DELISTED, LISTED_IN_2025 = SECURITIES[100:103]
 YOUNG_FROM: Final[date] = date(2026, 5, 25)
 LISTED_IN_2025_FROM: Final[date] = date(2025, 4, 1)
@@ -443,6 +453,8 @@ def _statement_batch(dataset: str) -> ColumnarPanelBatch:
 
     for index, code in enumerate(SECURITIES):
         for position, period in enumerate(PERIODS):
+            if code == STALE and period > STALE_THROUGH:
+                continue
             values = [
                 (50.0 if name == "total_assets" else 1.0)
                 * (100.0 + 37.0 * offset)
@@ -658,7 +670,8 @@ def test_a_nine_period_window_reaching_three_announcement_years_back_is_computed
     assert _statement_years(store, ACCELERATION) == {FEBRUARY: {"income": STORED_STATEMENT_YEARS}}
     assert listed == set(SECURITIES) - {YOUNG}  # it lists in May
     assert coverage[CONFLICTED] == "ambiguous_filing"
-    assert {coverage[name] for name in listed - {CONFLICTED}} == {"computed"}
+    assert coverage[STALE] == "insufficient_history"  # more than one deadline behind
+    assert {coverage[name] for name in listed - {CONFLICTED, STALE}} == {"computed"}
 
 
 def test_a_late_filers_answer_does_not_depend_on_the_years_named(
@@ -867,8 +880,8 @@ def test_where_a_window_was_cut_short_what_moved_is_exactly_the_shapes_that_expl
     listed_in_spring = set(SECURITIES) - {YOUNG}
     expected_then_computed = {
         FEBRUARY: {EARLY, BACKFILLED, RESTATED, CONFLICTED},
-        DEADLINE_DAY: listed_in_spring - {DELISTED, LATE},
-        MAY: listed_in_spring - {DELISTED, LATE},
+        DEADLINE_DAY: listed_in_spring - {DELISTED, LATE, STALE},
+        MAY: listed_in_spring - {DELISTED, LATE, STALE},
     }
     for instant in (FEBRUARY, DEADLINE_DAY, MAY):
         computed_then = {s for s, answer in then[instant].items() if answer[0] == "computed"}
@@ -883,7 +896,7 @@ def test_where_a_window_was_cut_short_what_moved_is_exactly_the_shapes_that_expl
     assert then[FEBRUARY][CONFLICTED][0] == "computed"
     assert now[DEADLINE_DAY][CONFLICTED] == then[DEADLINE_DAY][CONFLICTED]
     assert {s for s, answer in now[FEBRUARY].items() if answer[0] == "computed"} == (
-        listed_in_spring - {CONFLICTED}
+        listed_in_spring - {CONFLICTED, STALE}
     )
     assert now[DEADLINE_DAY][LATE][0] == now[MAY][LATE][0] == "computed"
 
@@ -891,15 +904,20 @@ def test_where_a_window_was_cut_short_what_moved_is_exactly_the_shapes_that_expl
 # --- the detector: what a store built before this change has to rebuild --------------------------
 
 
-def _store_built_before_this_change(corpus: Path, truncated: Path, root: Path) -> PanelStore:
-    """Every statement factor built over the three named years, then the older years stored.
+def _store_built_before_this_change(
+    corpus: Path, truncated: Path, root: Path, monkeypatch: pytest.MonkeyPatch
+) -> PanelStore:
+    """Every statement factor built as the stored research builds were, then the older years
+    stored.
 
-    The build is the old reading exactly (nothing beneath to read); writing the older statement
-    partitions afterwards leaves the store in the research store's shape: builds whose manifests
-    read fewer announcement years than the store now holds.
+    The builds read the three named years -- nothing older is stored yet -- under an engine with
+    no recency rule, which is the stored builds' engine exactly; writing the older statement
+    partitions afterwards leaves the store in the research store's shape.
     """
     store = _copy(truncated, root / "panel")
-    _build(store, STATEMENT_FACTORS, INSTANTS)
+    with monkeypatch.context() as patched:
+        patched.setattr(panel_factors, "oldest_admissible_newest_period", lambda _day: date.min)
+        _build(store, STATEMENT_FACTORS, INSTANTS)
     for dataset in STATEMENT_DATA_COLUMNS:
         for year, part in split_panel_batch_by_year(_statement_batch(dataset)):
             if year < BUILD_YEARS[0]:
@@ -908,8 +926,8 @@ def _store_built_before_this_change(corpus: Path, truncated: Path, root: Path) -
     return store
 
 
-def _detect(store: PanelStore, calls: list[int]) -> tuple[StaleStatementReachBuild, ...]:
-    return stale_statement_reach_builds(
+def _detect(store: PanelStore, calls: list[int]) -> tuple[StaleStatementBuild, ...]:
+    return stale_statement_builds(
         store,
         exchange=EXCHANGE,
         max_staleness_days=STALENESS_DAYS,
@@ -919,62 +937,95 @@ def _detect(store: PanelStore, calls: list[int]) -> tuple[StaleStatementReachBui
     )
 
 
+BOOK_TO_PRICE: Final[str] = "book_to_price/v1"
+
+
 def test_the_detector_lists_exactly_the_builds_whose_answers_moved_and_its_repair_clears_them(
     corpus: Path,
     truncated: Path,
     tmp_path: Path,
     both_builds: tuple[PanelStore, PanelStore],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """55 stored raw builds read fewer years than a build reads now; three of them hold a
-    security a newly read year can move, and those three are the ones that moved. The printed
-    repair is one command, and once it has run the detector answers none and the factor's stored
-    answers are a fresh full-history build's."""
-    store = _store_built_before_this_change(corpus, truncated, tmp_path)
+    """55 stored raw builds read fewer years than a build reads now. Three hold a security a
+    newly read year can move and are asked again -- the three that moved that way. Five more
+    hold `STALE`'s `book_to_price`, computed from its 2024Q3 balance sheet by an engine with no
+    recency rule and `insufficient_history` now, which is decided without asking: its window is
+    the stored one and its newest period is older than the floor. The printed repair is two
+    commands; once they have run the detector answers none and both factors' stored answers are
+    a fresh build's."""
+    store = _store_built_before_this_change(corpus, truncated, tmp_path, monkeypatch)
     calls: list[int] = []
 
     stale = _detect(store, calls)
 
     assert calls == [3]
     assert [(item.factor, item.as_of) for item in stale] == [
+        *((BOOK_TO_PRICE, instant) for instant in INSTANTS),
         (ACCELERATION, FEBRUARY),
         (ACCELERATION, DEADLINE_DAY),
         (ACCELERATION, MAY),
     ]
-    by_instant = {item.as_of: item for item in stale}
+    for item in stale[:5]:
+        assert (item.asked, item.decided) == (0, 1)
+        assert dict(item.transitions) == {("computed", "insufficient_history"): 1}
+        assert item.examples == (STALE,)
+    by_instant = {item.as_of: item for item in stale[5:]}
     february = by_instant[FEBRUARY].transitions
     assert february[("computed", "ambiguous_filing")] == 1
-    assert february[("insufficient_history", "computed")] == len(SECURITIES) - 1 - 4
+    assert february[("insufficient_history", "computed")] == len(SECURITIES) - 1 - 4 - 1
     assert dict(by_instant[DEADLINE_DAY].transitions) == {("insufficient_history", "computed"): 1}
     assert by_instant[MAY].examples == (LATE,)
-    for item in stale:
+    for item in stale[5:]:
         assert item.read == {"income": BUILD_YEARS}
         assert item.reads_now == {"income": STORED_STATEMENT_YEARS}
+    for item in stale:
+        assert item.refusal is None
         assert [build.tier for build in item.builds] == ["raw", "processed", "neutralized"]
 
     commands = merged_build_commands([c for item in stale for c in item.commands])
-    assert len(commands) == 1
-    (command,) = commands
-    assert command.count("--as-of") == 3
-    for flag in ("--supersedes-raw", "--supersedes-processed", "--supersedes-neutralized"):
-        assert command.count(flag) == 3
-
-    result = CliRunner().invoke(app, [*command, "--runtime-dir", str(tmp_path)])
-    assert result.exit_code == 0, result.output
+    assert [command.count("--as-of") for command in commands] == [5, 3]
+    for command in commands:
+        result = CliRunner().invoke(app, [*command, "--runtime-dir", str(tmp_path)])
+        assert result.exit_code == 0, result.output
 
     assert _detect(store, calls) == ()
     full, _before = both_builds
-    assert _raw(store, ACCELERATION) == _raw(full, ACCELERATION)
-    assert _processed(store, ACCELERATION) == _processed(full, ACCELERATION)
-    assert _neutralized(store, ACCELERATION) == _neutralized(full, ACCELERATION)
+    for key in (BOOK_TO_PRICE, ACCELERATION):
+        assert _raw(store, key) == _raw(full, key), key
+        assert _processed(store, key) == _processed(full, key), key
+        assert _neutralized(store, key) == _neutralized(full, key), key
+
+
+def test_an_old_announcement_year_recorded_empty_does_not_stop_the_listing(
+    corpus: Path, truncated: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An announcement year recorded empty holds no row to narrow with and is refused as stale
+    after its first deadline. The narrowing skips it, and a build the engine then refuses to
+    answer is listed with the refusal instead of ending the listing."""
+    store = _store_built_before_this_change(corpus, truncated, tmp_path, monkeypatch)
+    write_empty_announcement_year(
+        store,
+        dataset=INCOME_DATASET,
+        year=2020,
+        observed_at=datetime(2020, 1, 2, 1, 0, tzinfo=UTC),
+    )
+
+    stale = _detect(store, [])
+
+    refused = [item for item in stale if item.refusal is not None]
+    assert {item.factor for item in refused} == {ACCELERATION}
+    assert all("2020" in str(item.refusal) for item in refused)
+    assert [item.factor for item in stale if item.refusal is None] == [BOOK_TO_PRICE] * 5
 
 
 def test_the_command_lists_and_exits_one_then_says_none(
-    corpus: Path, truncated: Path, tmp_path: Path
+    corpus: Path, truncated: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    store = _store_built_before_this_change(corpus, truncated, tmp_path)
+    store = _store_built_before_this_change(corpus, truncated, tmp_path, monkeypatch)
     arguments = [
         "factor",
-        "stale-statement-reach",
+        "stale-statement-builds",
         "--runtime-dir",
         str(tmp_path),
         "--max-staleness-days",
@@ -988,20 +1039,24 @@ def test_the_command_lists_and_exits_one_then_says_none(
     listed = CliRunner().invoke(app, arguments)
 
     assert listed.exit_code == 1, listed.output
-    assert "stale statement-reach builds: 3" in listed.output
+    assert "stale statement builds: 8" in listed.output
     assert f"STALE {ACCELERATION} neutralized 2026 {MAY.isoformat()}" in listed.output
     assert "insufficient_history->computed 1" in listed.output
-    assert "repair, in this order (1 commands):" in listed.output
-    repair = next(
+    assert "computed->insufficient_history 1" in listed.output
+    assert "repair, in this order (2 commands):" in listed.output
+    repairs = [
         line.strip() for line in listed.output.splitlines() if line.startswith("  openalpha ")
-    )
-
-    rebuilt = CliRunner().invoke(app, shlex.split(repair)[1:])
-    assert rebuilt.exit_code == 0, rebuilt.output
+    ]
+    assert len(repairs) == 2
+    for repair in repairs:
+        rebuilt = CliRunner().invoke(app, shlex.split(repair)[1:])
+        assert rebuilt.exit_code == 0, rebuilt.output
 
     cleared = CliRunner().invoke(app, arguments)
     assert cleared.exit_code == 0, cleared.output
-    assert "stale statement-reach builds: none" in cleared.output
+    assert "stale statement builds: none" in cleared.output
+    one = CliRunner().invoke(app, [*arguments, "--factor", BOOK_TO_PRICE])
+    assert one.exit_code == 0, one.output
     assert set(store.registered_years(INCOME_DATASET)) == set(STORED_STATEMENT_YEARS)
 
 
@@ -1036,18 +1091,24 @@ def _income_rows_of(code: str, index: int, periods: Sequence[date]) -> ColumnarP
     )
 
 
-def test_a_security_that_stopped_filing_is_valued_on_its_last_filings(tmp_path: Path) -> None:
-    """The disclosed cost of a read that does not depend on `--year`: no factor bounds how old
-    a window's newest filing may be, so a security that stopped filing in 2023 is valued in June
-    2026 on its 2022Q3..2023Q3 filings, and its stored row says how old they are."""
+def test_a_security_that_stopped_filing_years_ago_is_not_valued_on_its_last_filings(
+    tmp_path: Path,
+) -> None:
+    """The full history holds a security that stopped filing in 2023, and the recency rule is
+    what keeps it out of a June 2026 cross section: its window 2022Q3..2023Q3 is many missed
+    deadlines old, so it is `insufficient_history` with that window recorded."""
     store = PanelStore(tmp_path / "panel")
     regular, stopped = SECURITIES[0], STOPPED
-    for batch in (
-        _income_rows_of(regular, 0, PERIODS),
-        _income_rows_of(stopped, 7, [period for period in PERIODS if period <= RESTATED_PERIOD]),
-    ):
-        for year, part in split_panel_batch_by_year(batch):
-            write_panel_batch(store, part, year=year)
+    merged = merge_panel_batches(
+        (
+            _income_rows_of(regular, 0, PERIODS),
+            _income_rows_of(
+                stopped, 7, [period for period in PERIODS if period <= RESTATED_PERIOD]
+            ),
+        )
+    )
+    for year, part in split_panel_batch_by_year(merged):
+        write_panel_batch(store, part, year=year)
     requirements = {
         INCOME_DATASET: financial_statement_requirement(
             dataset=INCOME_DATASET,
@@ -1069,10 +1130,189 @@ def test_a_security_that_stopped_filing_is_valued_on_its_last_filings(tmp_path: 
     )
 
     answers = {item.subject: item for item in panel.observations}
-    assert STOPPED_FILER_LIMITATION == (
-        "a_security_that_stopped_filing_is_valued_on_its_last_filings_however_old"
+    assert STATEMENT_RECENCY_LIMITATION == (
+        "a_statement_window_may_end_one_missed_statutory_deadline_behind"
     )
-    assert STOPPED_FILER_LIMITATION in FACTOR_RUN_LIMITATION_CODES
-    assert answers[stopped].coverage == "computed"
+    assert STATEMENT_RECENCY_LIMITATION in FACTOR_RUN_LIMITATION_CODES
+    assert answers[stopped].coverage == "insufficient_history"
     assert answers[stopped].input_period_last == RESTATED_PERIOD
+    assert answers[regular].coverage == "computed"
     assert answers[regular].input_period_last == date(2026, 3, 31)
+
+
+# --- the recency rule: at most one missed statutory deadline (`V2-P6-027`, round 4) -------------
+
+
+RECENCY_PERIODS: Final[tuple[date, ...]] = tuple(
+    period for period in PERIODS if date(2023, 3, 31) <= period <= date(2026, 3, 31)
+)
+
+
+def _on_time(period: date) -> date:
+    """Twenty days after the quarter for an interim, 20 March for an annual: inside every
+    deadline."""
+    return {
+        3: date(period.year, 4, 20),
+        6: date(period.year, 8, 20),
+        9: date(period.year, 10, 20),
+        12: date(period.year + 1, 3, 20),
+    }[period.month]
+
+
+def _filings(
+    code: str, through: date, *, extra: Sequence[tuple[date, date]] = ()
+) -> ColumnarPanelBatch:
+    """`code`'s income filings of every recency period up to `through`, each on time, plus
+    `(period, announced)` pairs in `extra` -- a late filing or a restatement."""
+    rows: list[tuple[str, datetime, datetime, datetime]] = []
+    cells: dict[str, list[object]] = {name: [] for name in statement_panel_columns(INCOME_DATASET)}
+    filings = [(period, _on_time(period)) for period in RECENCY_PERIODS if period <= through]
+    for position, (period, announced) in enumerate([*filings, *extra]):
+        stamp = _midnight(announced)
+        rows.append((code, stamp, stamp, stamp))
+        cells[REPORT_PERIOD_COLUMN].append(period.isoformat())
+        cells[ANNOUNCEMENT_DATE_COLUMN].append(announced.isoformat())
+        if FIRST_ANNOUNCEMENT_COLUMN in cells:
+            cells[FIRST_ANNOUNCEMENT_COLUMN].append(announced.isoformat())
+            cells[REVISION_LABEL_COLUMN].append("0")
+        index = RECENCY_PERIODS.index(period)
+        for offset, name in enumerate(STATEMENT_DATA_COLUMNS[INCOME_DATASET]):
+            cells[name].append((100.0 + 37.0 * offset) * (1.0 + 0.05 * index) + position % 2)
+    return _batch(
+        INCOME_DATASET,
+        rows,
+        cells,
+        (
+            REPORT_PERIOD_COLUMN,
+            ANNOUNCEMENT_DATE_COLUMN,
+            FIRST_ANNOUNCEMENT_COLUMN,
+            REVISION_LABEL_COLUMN,
+        ),
+    )
+
+
+ON_TIME, ONE_MISSED, TWO_MISSED, BOTH_APRIL, RESTATED_ONLY, CAUGHT_UP = (
+    "600001.SH",
+    "600002.SH",
+    "600003.SH",
+    "600004.SH",
+    "600005.SH",
+    "600006.SH",
+)
+RECENCY_SHAPES: Final[dict[str, ColumnarPanelBatch]] = {
+    # Every report, through 2026Q1.
+    ON_TIME: _filings(ON_TIME, date(2026, 3, 31)),
+    # Nothing after 2025H1: on 5 February 2026 it has missed one deadline (31 October).
+    ONE_MISSED: _filings(ONE_MISSED, date(2025, 6, 30)),
+    # Nothing after 2025Q1: it has missed 31 August and 31 October.
+    TWO_MISSED: _filings(TWO_MISSED, date(2025, 3, 31)),
+    # Through 2025Q3, then neither its 2025 annual nor its 2026Q1 by 30 April 2026: one missed
+    # deadline, two periods behind.
+    BOTH_APRIL: _filings(BOTH_APRIL, date(2025, 9, 30)),
+    # Nothing after 2025Q1, and both its last periods restated in January 2026: restating old
+    # periods is a later announcement, not a newer period.
+    RESTATED_ONLY: _filings(
+        RESTATED_ONLY,
+        date(2025, 3, 31),
+        extra=((date(2024, 12, 31), date(2026, 1, 15)), (date(2025, 3, 31), date(2026, 1, 15))),
+    ),
+    # Nothing after 2025Q1 on time, then 2025H1 filed late on 20 January 2026.
+    CAUGHT_UP: _filings(
+        CAUGHT_UP, date(2025, 3, 31), extra=((date(2025, 6, 30), date(2026, 1, 20)),)
+    ),
+}
+
+
+@pytest.fixture(scope="module")
+def recency_store(tmp_path_factory: pytest.TempPathFactory) -> PanelStore:
+    store = PanelStore(tmp_path_factory.mktemp("recency") / "panel")
+    merged = merge_panel_batches(tuple(RECENCY_SHAPES.values()))
+    for year, part in split_panel_batch_by_year(merged):
+        write_panel_batch(store, part, year=year)
+    return store
+
+
+def _recency(store: PanelStore, as_of: datetime) -> dict[str, FactorObservation]:
+    years = tuple(store.registered_years(INCOME_DATASET))
+    panel = compute_factor(
+        store,
+        FACTOR_DEFINITIONS.get("revenue_yoy/v1"),
+        as_of=as_of,
+        subjects=tuple(RECENCY_SHAPES),
+        universe=tuple(RECENCY_SHAPES),
+        requirements={
+            INCOME_DATASET: financial_statement_requirement(
+                dataset=INCOME_DATASET,
+                years=years,
+                as_of=as_of,
+                max_staleness=timedelta(days=STALENESS_DAYS),
+            )
+        },
+        code_commit=COMMIT,
+        built_at=BUILT_AT,
+    )
+    return {item.subject: item for item in panel.observations}
+
+
+def _shanghai(day: date, hour: int, minute: int) -> datetime:
+    return datetime(day.year, day.month, day.day, hour, minute, tzinfo=SHANGHAI)
+
+
+def test_one_missed_deadline_is_admissible_and_two_are_not(recency_store: PanelStore) -> None:
+    """On 5 February 2026 the deadlines passed are 31 October (2025Q3) and, before it, 31 August
+    (2025H1): a window ending at 2025H1 has missed one, one ending at 2025Q1 two. The stale one is
+    `insufficient_history` with its window recorded, the code a span overrun gets."""
+    answers = _recency(recency_store, FEBRUARY)
+
+    assert answers[ON_TIME].coverage == "computed"
+    assert answers[ON_TIME].input_period_last == date(2025, 9, 30)
+    assert answers[ONE_MISSED].coverage == "computed"
+    assert answers[TWO_MISSED].coverage == "insufficient_history"
+    assert answers[TWO_MISSED].input_period_last == date(2025, 3, 31)
+    assert answers[TWO_MISSED].input_period_first == date(2024, 3, 31)
+
+
+def test_one_missed_april_deadline_two_periods_behind_is_admissible(
+    recency_store: PanelStore,
+) -> None:
+    """The annual and the first quarter share 30 April, so one missed deadline can leave an
+    issuer two periods behind. On 6 May 2026 `BOTH_APRIL` (through 2025Q3) is computed and
+    `ONE_MISSED` (through 2025H1, so 31 October missed too) is not."""
+    answers = _recency(recency_store, MAY)
+
+    assert answers[BOTH_APRIL].coverage == "computed"
+    assert answers[BOTH_APRIL].input_period_last == date(2025, 9, 30)
+    assert answers[ONE_MISSED].coverage == "insufficient_history"
+    assert answers[ON_TIME].input_period_last == date(2026, 3, 31)
+
+
+@pytest.mark.parametrize(
+    ("as_of", "admissible"),
+    [
+        pytest.param(_shanghai(date(2026, 4, 30), 0, 0), True, id="deadline-day-midnight"),
+        pytest.param(_shanghai(date(2026, 4, 30), 16, 30), True, id="deadline-day-close"),
+        pytest.param(_shanghai(date(2026, 5, 1), 0, 0), False, id="the-day-after"),
+    ],
+)
+def test_a_deadline_day_is_not_yet_past(
+    recency_store: PanelStore, as_of: datetime, admissible: bool
+) -> None:
+    """On 30 April, at any hour, the deadline that day is not yet past -- a report announced that
+    evening is visible the next day -- so a window ending at 2025H1 has missed only 31 October.
+    From 1 May it has missed 30 April too."""
+    answers = _recency(recency_store, as_of)
+
+    assert (answers[ONE_MISSED].coverage == "computed") is admissible
+
+
+def test_restating_old_periods_does_not_make_a_stale_issuer_fresh(
+    recency_store: PanelStore,
+) -> None:
+    """The rule is on the window's newest **period**, not its newest announcement: restating
+    2024Q4 and 2025Q1 in January 2026 leaves `RESTATED_ONLY` two deadlines behind, while filing
+    2025H1 late on 20 January 2026 brings `CAUGHT_UP` back within one."""
+    answers = _recency(recency_store, FEBRUARY)
+
+    assert answers[RESTATED_ONLY].coverage == "insufficient_history"
+    assert answers[CAUGHT_UP].coverage == "computed"
+    assert answers[CAUGHT_UP].input_period_last == date(2025, 6, 30)

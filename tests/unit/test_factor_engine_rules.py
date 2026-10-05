@@ -78,6 +78,9 @@ from openalpha_cn.panel_factors import (
     factor_manifest_batch,
     factor_manifest_dataset,
     factor_observation_dataset,
+    newest_period_due_before,
+    oldest_admissible_newest_period,
+    statutory_filing_deadline,
 )
 from openalpha_cn.panel_neutralization import FACTOR_NEUTRALIZATIONS
 
@@ -874,3 +877,69 @@ def test_every_shipped_factor_discloses_the_direction_it_declares_and_that_it_is
 
     assert len(FACTOR_DEFINITIONS.qualified_keys) == 21
     assert missing == {}, "a shipped factor's note no longer discloses its declared direction"
+
+
+# --- the statutory deadlines and the recency floor (`V2-P6-027`, round 4) ----------------------
+
+
+@pytest.mark.parametrize(
+    ("period_end", "deadline"),
+    [
+        (date(2024, 3, 31), date(2024, 4, 30)),
+        (date(2024, 6, 30), date(2024, 8, 31)),
+        (date(2024, 9, 30), date(2024, 10, 31)),
+        (date(2024, 12, 31), date(2025, 4, 30)),
+    ],
+)
+def test_each_fiscal_quarter_has_its_statutory_filing_deadline(
+    period_end: date, deadline: date
+) -> None:
+    """One month after a first or third quarter, two after a half year, four after a year."""
+    assert statutory_filing_deadline(period_end) == deadline
+
+
+def test_a_period_off_the_quarter_grid_has_no_deadline() -> None:
+    with pytest.raises(FactorEngineError, match="2024-05-31"):
+        statutory_filing_deadline(date(2024, 5, 31))
+
+
+@pytest.mark.parametrize(
+    ("day", "newest"),
+    [
+        (date(2025, 1, 2), date(2024, 9, 30)),
+        (date(2025, 4, 30), date(2024, 9, 30)),
+        (date(2025, 5, 1), date(2025, 3, 31)),
+        (date(2025, 8, 31), date(2025, 3, 31)),
+        (date(2025, 9, 1), date(2025, 6, 30)),
+        (date(2025, 10, 31), date(2025, 6, 30)),
+        (date(2025, 11, 1), date(2025, 9, 30)),
+    ],
+)
+def test_the_newest_period_owed_is_the_one_whose_deadline_has_passed(
+    day: date, newest: date
+) -> None:
+    """A deadline day is not yet past: a report filed that evening is visible the next day."""
+    assert newest_period_due_before(day) == newest
+
+
+@pytest.mark.parametrize(
+    ("day", "floor"),
+    [
+        # Passed: 31 Oct 2024 (2024Q3) and before it 31 Aug 2024 (2024H1).
+        (date(2025, 2, 5), date(2024, 6, 30)),
+        # 30 April is not yet past on 30 April.
+        (date(2025, 4, 30), date(2024, 6, 30)),
+        # Passed: 30 Apr 2025 (2024 annual and 2025Q1 both) and before it 31 Oct 2024 (2024Q3):
+        # one missed deadline can leave an issuer two periods behind, and that is admissible.
+        (date(2025, 5, 1), date(2024, 9, 30)),
+        (date(2025, 8, 31), date(2024, 9, 30)),
+        # Passed: 31 Aug 2025 (2025H1) and before it 30 Apr 2025 (2025Q1).
+        (date(2025, 9, 1), date(2025, 3, 31)),
+        # Passed: 31 Oct 2025 (2025Q3) and before it 31 Aug 2025 (2025H1).
+        (date(2025, 11, 1), date(2025, 6, 30)),
+    ],
+)
+def test_a_window_may_be_one_missed_deadline_behind_and_no_more(day: date, floor: date) -> None:
+    """The oldest a window's newest period may be: the newest period due by the deadline before
+    the latest one that has passed."""
+    assert oldest_admissible_newest_period(day) == floor

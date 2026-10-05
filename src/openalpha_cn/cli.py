@@ -163,7 +163,7 @@ from openalpha_cn.factor_view import (
     merged_build_commands,
     run_factor_experiment,
     stale_return_path_builds,
-    stale_statement_reach_builds,
+    stale_statement_builds,
     tier_rows,
 )
 from openalpha_cn.feature_matrix import FeatureColumn
@@ -8724,8 +8724,8 @@ def factor_stale_return_paths_command(
             raise typer.Exit(code=int(PanelExit.unhealthy))
 
 
-@factor_app.command("stale-statement-reach")
-def factor_stale_statement_reach_command(
+@factor_app.command("stale-statement-builds")
+def factor_stale_statement_builds_command(
     max_staleness_days: Annotated[
         int, typer.Option("--max-staleness-days", help=_BUILD_STALENESS_HELP)
     ],
@@ -8735,6 +8735,14 @@ def factor_stale_statement_reach_command(
     exchange: Annotated[
         str, typer.Option("--exchange", help=_FACTOR_EXCHANGE_HELP)
     ] = TRADING_CALENDAR_DEFAULT_EXCHANGE,
+    factor: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--factor",
+            help="List only this statement factor's builds, repeatable; omitted, every one. "
+            "Factors are independent, so separate processes can each list some.",
+        ),
+    ] = None,
     code_commit: Annotated[
         str | None,
         typer.Option(
@@ -8750,42 +8758,47 @@ def factor_stale_statement_reach_command(
         bool, typer.Option("--json", help="Emit the stale builds as data.")
     ] = False,
 ) -> None:
-    """List every stored statement-factor build that reading the whole stored statement history
-    answers differently, and the `factor build` commands that repair them (`V2-P6-027`).
+    """List every stored statement-factor build the current reading answers differently, and
+    the `factor build` commands that repair them (`V2-P6-027`).
 
-    A statement factor reads every stored announcement year at or below the newest year its
-    build names. Builds stored before that read only the years they named -- the research
-    builds named `as_of`'s year and the two before it -- and a manifest records which. This asks
-    `compute_factor` again, at each such build's own instant, about every security a newly read
-    year can move: one with a filing in those years whose period is at or after the first period
-    of its stored window, or with no stored period window at all. It states how many
-    `compute_factor` calls that is on a `BUDGET stale-statement-reach-recompute` line before the
-    first, and prints each build whose answers moved with the raw, processed and neutralized
-    builds made from it, how many securities moved and from which coverage to which. The repair
-    commands follow, one per factor, year and tier policy, each naming every `--supersedes-*`;
-    run them as given and run this again: it answers `none`. A build whose answers did not move
-    is not listed: what a rebuild would store for it is what is stored.
+    Two changes moved what a statement factor answers: it reads every stored announcement year at
+    or below the newest year its build names, where the stored research builds read only the
+    years they named; and a window whose newest period is more than one missed statutory
+    deadline old is `insufficient_history`. This finds every stored observation either moves.
+    Securities a newly read year can move -- a filing there at or after the first period of
+    their stored window, or no stored period window -- are put to `compute_factor` again at the
+    build's own instant (`BUDGET stale-statement-recompute N` on stderr counts those calls);
+    every other security keeps its stored window, so the recency rule's answer for it follows
+    from that window's newest period and is decided without a call. Each build whose answers
+    moved is printed with the raw, processed and neutralized builds made from it, how many
+    securities moved and from which coverage to which; a build the engine refuses to answer is
+    printed with the refusal. The repair commands follow, one per factor, year and tier policy,
+    each naming every `--supersedes-*`; run them as given and run this again: it answers `none`.
+
+    A build that is not listed stores the answers a rebuild would. Not every byte: a rebuild
+    records the years it read, and an `insufficient_history` row with no window counts every row
+    its security holds, which a newly read year can raise.
 
     `--max-staleness-days` is the bound the builds were made with; the printed commands repeat it.
 
     Exits 0 when nothing is stale; 1 when something is, or the panel could not answer.
     """
     runtime_dir = _resolved_runtime_dir(runtime_dir)
-    with _panel_command("factor stale-statement-reach", json_output=json_output):
+    with _panel_command("factor stale-statement-builds", json_output=json_output):
         try:
-            stale = stale_statement_reach_builds(
+            stale = stale_statement_builds(
                 _panel_store(runtime_dir),
                 exchange=exchange,
                 max_staleness_days=max_staleness_days,
                 as_of=_panel_as_of(as_of),
+                factors=factor or [],
                 code_commit=code_commit,
                 budget=lambda calls: _echo_budget(
-                    "stale-statement-reach-recompute",
+                    "stale-statement-recompute",
                     calls,
                     "compute_factor calls",
-                    "one per stored raw statement build that read fewer announcement years than "
-                    "a build reads now and holds a security a newly read year can move; reads "
-                    "carried within a factor and year",
+                    "one per stored raw statement build holding a security a newly read "
+                    "announcement year can move; reads carried within a factor and year",
                 ),
             )
         except FactorViewError as error:
@@ -8813,11 +8826,13 @@ def factor_stale_statement_reach_command(
                                     name: list(spans) for name, spans in item.reads_now.items()
                                 },
                                 "asked": item.asked,
+                                "decided": item.decided,
                                 "moved": {
                                     f"{stored}->{engine}": count
                                     for (stored, engine), count in item.transitions.items()
                                 },
                                 "examples": list(item.examples),
+                                "refusal": item.refusal,
                                 "builds": [
                                     {
                                         "tier": build.tier,
@@ -8836,23 +8851,26 @@ def factor_stale_statement_reach_command(
                 )
             )
         elif not stale:
-            typer.echo("stale statement-reach builds: none")
+            typer.echo("stale statement builds: none")
         else:
-            typer.echo(f"stale statement-reach builds: {len(stale)}")
+            typer.echo(f"stale statement builds: {len(stale)}")
             for item in stale:
                 for build in item.builds:
                     typer.echo(
                         f"STALE {item.factor} {build.tier} {build.year} "
                         f"{item.as_of.isoformat()} {build.manifest_id}"
                     )
+                if item.refusal is not None:
+                    typer.echo(f"  the engine refused to answer it: {item.refusal}")
+                    continue
                 moved = ", ".join(
                     f"{stored}->{engine} {count}"
                     for (stored, engine), count in item.transitions.items()
                 )
                 typer.echo(
-                    f"  {sum(item.transitions.values())} of {item.asked} asked moved ({moved}); "
-                    f"read {years(item.read)}, a build now reads {years(item.reads_now)}; "
-                    f"e.g. {', '.join(item.examples)}"
+                    f"  {sum(item.transitions.values())} moved ({moved}) of {item.asked} asked "
+                    f"and {item.decided} decided by the recency rule; read {years(item.read)}, a "
+                    f"build now reads {years(item.reads_now)}; e.g. {', '.join(item.examples)}"
                 )
             typer.echo(f"repair, in this order ({len(commands)} commands):")
             for command in commands:
