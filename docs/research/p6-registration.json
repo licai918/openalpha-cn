@@ -1,0 +1,140 @@
+{
+  "code_commit": "07772efe89cff3775b0d152fdaea0b8a0ae56ddb",
+  "config": {
+    "as_of": "2026-09-26T04:00:00+00:00",
+    "buffer_rank": 150,
+    "combine": "zscore_sum",
+    "components": [
+      [
+        "reversal_1d/v1",
+        "processed",
+        "1"
+      ],
+      [
+        "momentum_20_sessions/v1",
+        "processed",
+        "1"
+      ],
+      [
+        "momentum_60_sessions/v1",
+        "processed",
+        "1"
+      ],
+      [
+        "momentum_120_sessions/v1",
+        "processed",
+        "1"
+      ],
+      [
+        "reversal_5_sessions/v1",
+        "processed",
+        "1"
+      ],
+      [
+        "return_vol_60/v1",
+        "processed",
+        "1"
+      ],
+      [
+        "downside_vol_60/v1",
+        "processed",
+        "1"
+      ],
+      [
+        "turnover_60/v1",
+        "processed",
+        "1"
+      ],
+      [
+        "amihud_60/v1",
+        "processed",
+        "1"
+      ],
+      [
+        "residual_vol_60/v1",
+        "processed",
+        "1"
+      ],
+      [
+        "earnings_yield_ttm/v1",
+        "processed",
+        "1"
+      ],
+      [
+        "book_to_price/v1",
+        "processed",
+        "1"
+      ],
+      [
+        "sales_yield_ttm/v1",
+        "processed",
+        "1"
+      ],
+      [
+        "deducted_earnings_yield_ttm/v1",
+        "processed",
+        "1"
+      ],
+      [
+        "return_on_equity_ttm/v1",
+        "processed",
+        "1"
+      ],
+      [
+        "return_on_capital_ttm/v1",
+        "processed",
+        "1"
+      ],
+      [
+        "gross_margin_stability/v1",
+        "processed",
+        "1"
+      ],
+      [
+        "accruals_ttm/v1",
+        "processed",
+        "1"
+      ],
+      [
+        "revenue_yoy/v1",
+        "processed",
+        "1"
+      ],
+      [
+        "net_profit_yoy/v1",
+        "processed",
+        "1"
+      ],
+      [
+        "revenue_yoy_acceleration/v1",
+        "processed",
+        "1"
+      ]
+    ],
+    "end": "2026-09-24",
+    "exchange": "SSE",
+    "holding_count": 100,
+    "max_industry_weight": "0.2",
+    "neutralization": null,
+    "rebalance_every_sessions": 20,
+    "start": "2024-01-02",
+    "transform": "cross_section_standard/v1"
+  },
+  "config_id": "95bcad91841b0c2a1507325c3d8e717e4ef8538b96bb424fb50ebfcaea08b99d",
+  "criteria": {
+    "compounded_annualized_relative_return_above": "0",
+    "max_relative_drawdown_multiple_of_validation": "2",
+    "one_sided_p_excess_below": "0.05",
+    "validation_config_id": "1aef419ae6e650f4cedafe7d33c9ca78dfc1104a1f5474847076d120c73ad43a",
+    "validation_max_relative_drawdown": 0.20264443619445743
+  },
+  "dependence": "arbitrary",
+  "false_discovery_rate": 0.1,
+  "schema": "openalpha-research-registration/v1",
+  "settings": {
+    "bootstrap_samples": 100000,
+    "excess_benchmark": "equal_weight_all_a_held",
+    "random_seed": 20260926,
+    "sessions_per_year": 244
+  }
+}
