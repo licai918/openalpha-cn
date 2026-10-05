@@ -242,6 +242,7 @@ from openalpha_cn.domain.daily_prices import (
     RecordedReturnPath,
 )
 from openalpha_cn.domain.factor import (
+    PERIOD_INDEXED_DATASETS,
     FactorBuildManifest,
     FactorDefinition,
     FactorError,
@@ -322,6 +323,7 @@ from openalpha_cn.panel_factors import (
     load_factor_observations,
     load_factor_transform_manifests,
     load_processed_factor_observations,
+    period_reach_years,
     processed_factor_dataset,
     session_return_links,
     unread_newest_sessions,
@@ -2894,8 +2896,10 @@ class FactorBuildRequest:
 
     - The **statement** partitions are keyed by *announcement* year, not by report period. A factor
       declaring `lookback_periods=5` needs five contiguous filings, which is at least two
-      announcement years, and a one-year `--year` gets `insufficient_history` for the whole cross
-      section rather than an error.
+      announcement years. Since `V2-P6-027` the build supplies them: every stored announcement
+      year beneath this range that the factor's reach can need at the instant is read too
+      (`_statement_years`), because the stored research builds named `as_of`'s year and the two
+      before it and a nine-period window needs the one before that from January to April.
     - The **registry** partitions are keyed by *lifecycle* year, and this year set is therefore
       the one dataset it is **not** the whole scope of. A security's row lives in the year it
       listed, so the newest partition is that year's listings rather than that year's market, and
@@ -3771,7 +3775,7 @@ def _computed(
             f"the stored registry cannot say who was listed on {day.isoformat()}: {error}"
         ) from error
     subjects = request.subjects or tuple(entry.ts_code for entry in universe.securities)
-    requirements = _requirements(request, calendar=calendar, as_of=as_of)
+    requirements = _requirements(store, request, calendar=calendar, as_of=as_of)
     panel = _read(
         lambda: compute_factor(
             store,
@@ -3791,7 +3795,11 @@ def _computed(
 
 
 def _requirements(
-    request: FactorBuildRequest, *, calendar: TradingCalendar, as_of: datetime
+    store: PanelStore,
+    request: FactorBuildRequest,
+    *,
+    calendar: TradingCalendar,
+    as_of: datetime,
 ) -> dict[str, ReadinessRequirement]:
     """One `ReadinessRequirement` per dataset this factor reads, from `REQUIREMENT_BUILDERS`.
 
@@ -3799,6 +3807,12 @@ def _requirements(
     is handed -- the key, the `as_of` and the `required_fields` -- so a wrong one fails there
     rather than several layers down; what it cannot check is a requirement nobody built, and that
     is what this refusal is for.
+
+    **A statement dataset is read over the years its period reach needs, not only the ones
+    named** (`V2-P6-027`). `_statement_years` adds, beneath `request.years`, every stored
+    announcement year `period_reach_years` says this factor's window can need at `as_of` -- the
+    registry's arrangement since `V2-P4-059`, for the same reason: the unit the caller counts in
+    is not the unit the partitions are filed by.
     """
     missing = [name for name in request.definition.datasets if name not in REQUIREMENT_BUILDERS]
     if missing:
@@ -3819,7 +3833,7 @@ def _requirements(
             else:
                 built[name] = builder(
                     dataset=name,
-                    years=request.years,
+                    years=_statement_years(store, request, dataset=name, as_of=as_of),
                     as_of=as_of,
                     max_staleness=request.max_staleness,
                 )
@@ -3829,6 +3843,40 @@ def _requirements(
                 f"{list(request.years)}: {error}"
             ) from error
     return built
+
+
+def _statement_years(
+    store: PanelStore, request: FactorBuildRequest, *, dataset: str, as_of: datetime
+) -> tuple[int, ...]:
+    """`request.years`, and beneath them every stored year `dataset`'s period reach needs.
+
+    `V2-P6-027`. A statement partition is filed by announcement year and a reach is counted in
+    report periods, so the years a caller names say little about the filings a window holds:
+    every stored research build named `as_of`'s year and the two before it, and from January to
+    April a nine-period window's oldest filing was announced the year before that -- so
+    `revenue_yoy_acceleration` was `insufficient_history` for 5,375 of 5,395 listed names on
+    2025-02-05 and the registered holdout refused that day. `period_reach_years` decides the years
+    from the factor's declared reach, the statutory filing deadlines and `as_of` alone;
+    `compute_factor` refuses a requirement that leaves a stored one out.
+
+    **Only beneath, and only stored.** A year the caller named is kept whether or not the reach
+    needs it, so a build that already covered its reach reads exactly what it read before -- at
+    every instant from May to December, and for every factor with a reach of eight periods or
+    fewer at every instant of the stored span. A year inside the named range that the caller left
+    out stays theirs to answer for (`_refuse_a_read_that_cannot_see_what_as_of_holds`). A year the
+    store does not hold has nothing to read: a window that needs it is `insufficient_history`,
+    which is then a statement about the data.
+    """
+    named = request.years
+    if dataset not in PERIOD_INDEXED_DATASETS:
+        return named
+    stored = set(store.registered_years(dataset))
+    beneath = {
+        year
+        for year in period_reach_years(request.definition, as_of=as_of)
+        if year < named[0] and year in stored
+    }
+    return tuple(sorted(beneath.union(named)))
 
 
 RESIDUAL_REMEDIES: Final[Mapping[CalendarDayStatus, str]] = MappingProxyType(
@@ -4328,7 +4376,7 @@ def _recomputed(
         store=store,
         what=f"the {exchange} trading calendar at {manifest.as_of.isoformat()}",
     )
-    requirements = _requirements(request, calendar=calendar, as_of=manifest.as_of)
+    requirements = _requirements(store, request, calendar=calendar, as_of=manifest.as_of)
     panel = _read(
         lambda: compute_factor(
             store,

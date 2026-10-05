@@ -454,6 +454,9 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_factors.load_factor_observations",
             "panel_factors.load_factor_transform_manifests",
             "panel_factors.load_processed_factor_observations",
+            # `V2-P6-027`: the announcement years a statement factor's period reach needs, so a
+            # build reads them beneath the years it names. A rule over dates; it reads nothing.
+            "panel_factors.period_reach_years",
             "panel_factors.processed_factor_dataset",
             "panel_factors.session_return_links",
             "panel_factors.unread_newest_sessions",
