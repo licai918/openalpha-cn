@@ -43,6 +43,9 @@ from openalpha_cn.panel.store import (
     PanelCatalogBusyError,
     PanelStorageError,
     PanelStore,
+    PanelWriteConflictError,
+    PartitionExpectation,
+    PartitionWrite,
 )
 
 _COLUMNS = (
@@ -738,3 +741,108 @@ def test_a_read_only_filesystem_needs_no_lock_because_nothing_can_write_it(
     assert store.query("prices_daily", year=2024, columns=["close"]) == [(10.5,), (22.5,)]
     with pytest.raises(PanelStorageError, match=rf"errno {errno.EROFS}\b"):
         store.write_partition("prices_daily", 2025, _COLUMNS, _rows())
+
+
+# --- a group write, compare-and-swap (`V2-P6-028`) ---------------------------------------------
+
+
+def _group(
+    *, closes: tuple[float, float], expected: dict[tuple[str, int], str | None] | None = None
+) -> list[PartitionWrite]:
+    return [
+        PartitionWrite(
+            dataset=dataset,
+            year=2024,
+            columns=_COLUMNS,
+            rows=_rows(closes=closes),
+            expected=(
+                None
+                if expected is None
+                else PartitionExpectation(content_hash=expected[(dataset, 2024)])
+            ),
+        )
+        for dataset in ("observations", "manifests")
+    ]
+
+
+def test_a_group_write_lands_every_partition_and_hands_back_one_ref_each(tmp_path: Path) -> None:
+    store = PanelStore(tmp_path / "panel")
+    nothing_stored: dict[tuple[str, int], str | None] = {
+        ("observations", 2024): None,
+        ("manifests", 2024): None,
+    }
+
+    refs = store.write_partitions(_group(closes=_BEFORE, expected=nothing_stored))
+
+    assert [(ref.dataset, ref.year, ref.row_count) for ref in refs] == [
+        ("observations", 2024, 2),
+        ("manifests", 2024, 2),
+    ]
+    for ref in refs:
+        assert store.query(ref.dataset, year=2024, columns=["close"]) == [(10.5,), (22.5,)]
+        assert store.partition_content_hash(ref.dataset, 2024) == ref.content_hash
+
+
+def test_a_group_write_whose_base_moved_writes_nothing_and_names_what_moved(
+    tmp_path: Path,
+) -> None:
+    """Two writers plan against one stored state; the first commits. The second's expectation
+    -- the content it read when it planned -- no longer holds for either partition, so it writes
+    nothing at all and raises `PanelWriteConflictError`, which is not a `PanelStorageError`."""
+    store = PanelStore(tmp_path / "panel")
+    store.write_partitions(_group(closes=_BEFORE))
+    planned_against = {
+        (dataset, 2024): store.partition_content_hash(dataset, 2024)
+        for dataset in ("observations", "manifests")
+    }
+    store.write_partitions(_group(closes=_AFTER, expected=planned_against))
+    after_first = {key: store.partition_content_hash(*key) for key in planned_against}
+
+    with pytest.raises(PanelWriteConflictError) as conflict:
+        store.write_partitions(_group(closes=(12.5, 24.5), expected=planned_against))
+
+    assert not isinstance(conflict.value, PanelStorageError)
+    assert conflict.value.targets == ("manifests@2024", "observations@2024")
+    assert {key: store.partition_content_hash(*key) for key in planned_against} == after_first
+    assert store.query("observations", year=2024, columns=["close"]) == [(11.5,), (23.5,)]
+    assert not list((tmp_path / "panel").glob("*/*/*.tmp"))
+
+
+def test_a_group_write_expecting_an_absent_partition_conflicts_with_one_that_appeared(
+    tmp_path: Path,
+) -> None:
+    """`content_hash=None` means "nothing was stored when I planned"; a partition someone else
+    wrote since is a moved base like any other -- and the group's other, untouched target is not
+    written either."""
+    store = PanelStore(tmp_path / "panel")
+    store.write_partition("manifests", 2024, _COLUMNS, _rows())
+
+    with pytest.raises(PanelWriteConflictError) as conflict:
+        store.write_partitions(
+            _group(
+                closes=_AFTER,
+                expected={("observations", 2024): None, ("manifests", 2024): None},
+            )
+        )
+
+    assert conflict.value.targets == ("manifests@2024",)
+    assert store.registered_years("observations") == ()
+
+
+def test_a_group_write_refuses_two_writes_to_one_partition(tmp_path: Path) -> None:
+    store = PanelStore(tmp_path / "panel")
+    twice = [*_group(closes=_BEFORE)[:1], *_group(closes=_AFTER)[:1]]
+    with pytest.raises(PanelStorageError, match="observations@2024"):
+        store.write_partitions(twice)
+    assert store.registered_years("observations") == ()
+
+
+def test_a_reader_inside_one_read_hold_sees_a_group_write_whole(tmp_path: Path) -> None:
+    """`PanelStore.reading()` is the reader's half: every catalog read inside it is one shared
+    hold, so a group write lands wholly before or wholly after it."""
+    store = PanelStore(tmp_path / "panel")
+    store.write_partitions(_group(closes=_BEFORE))
+    with store.reading():
+        first = store.query("observations", year=2024, columns=["close"])
+        second = store.query("manifests", year=2024, columns=["close"])
+    assert first == second == [(10.5,), (22.5,)]

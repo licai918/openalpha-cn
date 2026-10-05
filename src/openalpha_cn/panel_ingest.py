@@ -478,7 +478,14 @@ from openalpha_cn.panel.catalog import (
     RevisionCoverage,
     refusal_type,
 )
-from openalpha_cn.panel.store import EVENT_TIME_COLUMN, ColumnSpec, PanelStore, PartitionRef
+from openalpha_cn.panel.store import (
+    EVENT_TIME_COLUMN,
+    ColumnSpec,
+    PanelStore,
+    PartitionExpectation,
+    PartitionRef,
+    PartitionWrite,
+)
 
 PANEL_DUCKDB_TYPES: Final[Mapping[PanelColumnKind, str]] = MappingProxyType(
     {
@@ -598,6 +605,54 @@ def write_panel_batch(
     return store.write_partition(
         batch.dataset, year, panel_column_specs(batch), batch.to_rows(), coverage=coverage
     )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BatchWrite:
+    """One partition of a `write_panel_batches` group: `write_panel_batch`'s arguments, plus the
+    compare-and-swap expectation `PanelStore.write_partitions` checks (`None`: none)."""
+
+    batch: ColumnarPanelBatch
+    year: int
+    revision_field: str | None = None
+    expected: PartitionExpectation | None = None
+
+
+def write_panel_batches(
+    store: PanelStore,
+    writes: Sequence[BatchWrite],
+    *,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> tuple[PartitionRef, ...]:
+    """`write_panel_batch` for several partitions at once: one `PanelStore.write_partitions`
+    call, so a reader joining them sees all or none (`V2-P6-028`).
+
+    Every batch is checked and its coverage summarised before anything is staged, exactly as
+    `write_panel_batch` does for one, so a refusal of the last leaves the first unwritten.
+    """
+    targets: list[PartitionWrite] = []
+    for write in writes:
+        if write.batch.status != "success":
+            raise PanelBatchError(
+                f"cannot write a {write.batch.status!r} batch to a partition: "
+                f"{write.batch.no_data_reason!r}"
+            )
+        targets.append(
+            PartitionWrite(
+                dataset=write.batch.dataset,
+                year=write.year,
+                columns=panel_column_specs(write.batch),
+                rows=write.batch.to_rows(),
+                coverage=panel_coverage(
+                    write.batch,
+                    year=write.year,
+                    date_timezone=date_timezone,
+                    revision_field=write.revision_field,
+                ),
+                expected=write.expected,
+            )
+        )
+    return store.write_partitions(targets)
 
 
 def panel_partition_year(
@@ -1004,9 +1059,12 @@ def write_stock_universe(
                 "list_status='L,D'"
             ),
         )
-    return tuple(
-        write_panel_batch(store, yearly, year=year, date_timezone=date_timezone)
-        for year, yearly in by_year
+    # Every year of one fetch in one group write (`V2-P6-028`), so a reader walking the years
+    # never sees some from this fetch and some from the last.
+    return write_panel_batches(
+        store,
+        [BatchWrite(batch=yearly, year=year) for year, yearly in by_year],
+        date_timezone=date_timezone,
     )
 
 
@@ -2857,10 +2915,17 @@ def write_daily_panel(
         )
     if before_write is not None:
         before_write()
-    return (
-        write_panel_batch(store, merged_bars, year=year, date_timezone=date_timezone),
-        write_panel_batch(store, merged_fundamentals, year=year, date_timezone=date_timezone),
+    # One group write (`V2-P6-028`): a reader joining a session's bars to its `daily_basic`
+    # sees both partitions from one build or both from the other, never one of each.
+    bars_ref, fundamentals_ref = write_panel_batches(
+        store,
+        (
+            BatchWrite(batch=merged_bars, year=year),
+            BatchWrite(batch=merged_fundamentals, year=year),
+        ),
+        date_timezone=date_timezone,
     )
+    return bars_ref, fundamentals_ref
 
 
 def _sessions_published_through(as_of: datetime, zone: ZoneInfo) -> date:
@@ -6127,9 +6192,12 @@ def write_industry_memberships(
                 "every slice that year touches has to arrive in one call or not at all"
             ),
         )
-    return tuple(
-        write_panel_batch(store, yearly, year=year, date_timezone=date_timezone)
-        for year, yearly in by_year
+    # Every year of one fetch in one group write (`V2-P6-028`), so a reader walking the years
+    # never sees some from this fetch and some from the last.
+    return write_panel_batches(
+        store,
+        [BatchWrite(batch=yearly, year=year) for year, yearly in by_year],
+        date_timezone=date_timezone,
     )
 
 
@@ -7211,15 +7279,14 @@ def write_financial_statements(
         )
     if before_write is not None:
         before_write()
-    return tuple(
-        write_panel_batch(
-            store,
-            yearly,
-            year=year,
-            date_timezone=date_timezone,
-            revision_field=revision_field,
-        )
-        for year, yearly in by_year
+    # Every year of one fetch in one group write (`V2-P6-028`).
+    return write_panel_batches(
+        store,
+        [
+            BatchWrite(batch=yearly, year=year, revision_field=revision_field)
+            for year, yearly in by_year
+        ],
+        date_timezone=date_timezone,
     )
 
 

@@ -445,7 +445,7 @@ def test_a_catalog_too_busy_to_read_is_not_rewrapped_as_a_storage_refusal(
     a `PanelStorageError`, because every handler of that type files it as a fact about the data
     -- a refused row a research run never re-measures -- and contention is no such fact."""
     store = _ready_store(tmp_path)
-    busy = PanelCatalogBusyError("held by another process")
+    busy = PanelCatalogBusyError("held by another process", side="shared", timeout=1.0)
 
     def refuse(*_: object, **__: object) -> None:
         raise busy

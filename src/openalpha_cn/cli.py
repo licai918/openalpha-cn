@@ -202,7 +202,12 @@ from openalpha_cn.panel.catalog import (
     PanelStorageError,
     PartitionCoverage,
 )
-from openalpha_cn.panel.store import PanelCatalogBusyError, PanelStore, PartitionRef
+from openalpha_cn.panel.store import (
+    PanelCatalogBusyError,
+    PanelStore,
+    PanelWriteConflictError,
+    PartitionRef,
+)
 from openalpha_cn.panel_doctor import (
     PanelDoctorError,
     PanelHealthReport,
@@ -1902,6 +1907,9 @@ class PanelExit(IntEnum):
       here broke and there is no bug to file. The remedy is to run the command again once the
       holder finishes, and a scheduler can retry this code and only this code. The message is
       the error's own -- the catalog, the lock file and the bound -- and is printed whole.
+      The same code answers `panel.store.PanelWriteConflictError`: another writer committed the
+      partitions this write had read to plan itself (two builds of one factor racing), so nothing
+      of this one was stored, and running it again re-reads and merges onto what that one wrote.
 
     **2 is deliberately absent.** Click raises its own `UsageError` with exit code 2 for a
     misspelled flag or a missing required option, and that is not a code this module can take
@@ -2412,6 +2420,11 @@ def _panel_command(name: str, *, json_output: bool = False) -> Iterator[None]:
             f"`{name}` did not finish: {error}. Nothing was checked, so this says nothing about "
             "the panel; run the command again once the holder finishes",
         ) from error
+    except PanelWriteConflictError as error:
+        # The same class of outcome (`V2-P6-028`): another writer committed the partitions this
+        # one had read to plan its write, so nothing of it was stored. Its message names datasets
+        # and years only, and already says to run it again.
+        raise _panel_fail(PanelExit.catalog_busy, f"`{name}` did not finish: {error}") from error
     except Exception as error:
         raise _panel_fail(
             PanelExit.internal_error,

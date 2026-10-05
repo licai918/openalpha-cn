@@ -382,15 +382,27 @@ relies on.
   rename. The readiness fingerprints read outside the lock (`_catalog_fingerprint`,
   `_held_partition_states`) only decide whether a held state may be served again; `rename(2)`
   is atomic, so they see the old file or the new one, and either change refuses the held state.
-- **What one hold does not cover.** A write of *several* partitions -- a factor build's
-  observations then its manifests, `write_daily_panel`'s `daily` then `daily_basic` -- is
-  atomic per partition, not as a group: a reader between two of them sees one new and one old,
-  each whole and each with its own coverage. And a read-modify-write of *one* dataset by two
-  processes at once -- two builds of the same factor, each merging its rows into what it read
-  -- is last-writer-wins at the partition: the second write replaces the first, and the rows
-  only the first carried are gone. Different factors write different datasets, which is the
-  concurrency this lock was built for; the same factor in two processes at once is not
-  supported.
+- **Several partitions read together are written and read in one hold too.** A factor build
+  writes every tier's observations and the manifests that address them, and a factor read joins
+  the two; written one partition per hold, a reader in another process between two of them met
+  observations whose manifest was not stored yet -- a `FactorEngineError` a research run filed
+  as a refused row. `write_partitions` (through `panel_ingest.write_panel_batches`) lands a group
+  in one exclusive hold, and `reading()` holds the shared side across a reader's several reads:
+  every tier of one factor build, `write_daily_panel`'s `daily` and `daily_basic`, and the years
+  of one registry or statement fetch are group writes, and the factor loaders read their
+  rows and their manifests inside `reading()`. Pinned by
+  `test_factor_build_shared_context.py::
+  test_readers_in_other_processes_see_a_factor_rebuild_whole_and_are_never_refused`.
+- **Two writers merging into one partition are refused, not lost.** A factor build is a
+  read-modify-write: it reads the stored rows of each partition and writes them back with its
+  own. Two builds of one factor racing (A reads, B reads, B writes, A writes) used to leave
+  observations answering one build and manifests the other -- each partition self-consistent, so
+  readiness could not see it, and every later read of those instants refused. Each target of a
+  group write now carries the content its merge was made on (`PartitionExpectation`), compared
+  inside the hold: the second writer gets `PanelWriteConflictError`, writes nothing, and re-running
+  it merges onto what the first stored. Pinned by `test_factor_build_shared_context.py::
+  test_two_builds_of_one_factor_racing_store_one_whole_build_and_refuse_the_other`. A single
+  `write_partition` without an expectation stays last-writer-wins, as it always was.
 - **Two `PanelStore` instances on one catalog in one thread.** The in-process side belongs to
   an instance, the file lock to the catalog, so a thread that holds one instance's side and asks
   another instance on the same root for any side waits on the file lock it holds itself (or, for
@@ -408,7 +420,10 @@ relies on.
 - **A lock file this account cannot write.** A reader opens it read-only, which is all a shared
   lock needs; a read-only filesystem needs no lock at all, since nothing can write the catalog
   there. Anything else that stops the lock file opening is refused as a `PanelStorageError`
-  naming the file, never a bare `OSError`; see `_open_lock_file`.
+  naming the file, never a bare `OSError`; see `_open_lock_file`. The read-only-filesystem case
+  assumes the store is read-only *everywhere*: a read-only bind mount (`:ro`) of a store some
+  other mount still writes is not covered, because the reader takes no lock there and a writer
+  through the other mount takes it alone.
 - **Local filesystems only.** Advisory locks over NFS or SMB are as good as the server's lock
   manager, and this store has never claimed to run on one.
 
@@ -626,8 +641,11 @@ __all__ = [
     # `from openalpha_cn.panel.store import PanelStorageError` keeps working.
     "PanelStorageError",
     "PanelStore",
+    "PanelWriteConflictError",
+    "PartitionExpectation",
     "PartitionRef",
     "PartitionStamp",
+    "PartitionWrite",
 ]
 
 
@@ -653,7 +671,56 @@ class PanelCatalogBusyError(RuntimeError):
     answers the moment the holder lets go. So it escapes those handlers and stops the command
     loudly, which is the honest outcome for "could not look", rather than being filed as a
     verdict on what the look would have found.
+
+    Its facts are fields as well as a sentence. `str(error)` names the catalog and its lock file
+    by absolute path, which an operator at a terminal needs; `disclosable` says the same thing
+    without a path, which is what a response body may carry (`panel_view.PANEL_STORE_PLACEHOLDER`
+    is this codebase's rule that no refusal body says where a service keeps its store).
     """
+
+    def __init__(
+        self, message: str, *, side: str, timeout: float, catalog_path: Path | None = None
+    ) -> None:
+        super().__init__(message)
+        self.side = side
+        """`"shared"` or `"exclusive"`: which side of the catalog the call needed."""
+        self.timeout = timeout
+        """The bound, in seconds, that was waited out."""
+        self.catalog_path = catalog_path
+        """The catalog that stayed held. Never put in a response body; see `disclosable`."""
+
+    @property
+    def disclosable(self) -> str:
+        """The refusal without any path: safe for a response body."""
+        return (
+            f"the panel catalog was not free for {self.side} access within the "
+            f"{self.timeout:g}s bound: another process held it the whole time; nothing was read "
+            "or written, and the same request can be made again once the holder finishes"
+        )
+
+
+class PanelWriteConflictError(RuntimeError):
+    """A group write's compare-and-swap failed: a partition it read moved before it wrote
+    (`V2-P6-028`).
+
+    `PanelStore.write_partitions` is handed, per target, the content the caller read when it
+    planned the write -- the stored rows a factor build merged its own into. Inside its one
+    exclusive hold it checks that every target still holds exactly that, and if any does not it
+    writes **nothing** and raises this. Two builds of one factor racing (A reads, B reads, B
+    writes, A writes) used to end with each partition self-consistent and the pair wrong --
+    observations holding only B's build, manifests only A's -- so every later read of those
+    instants was refused until a rebuild. Now A is refused instead, whole, and re-running it
+    re-reads B's rows and merges onto them.
+
+    Not a `PanelStorageError`, for `PanelCatalogBusyError`'s reason: it is contention, not a fact
+    about the data, and the remedy is to run the write again. `str(error)` names only datasets and
+    years, so it is disclosable as it stands.
+    """
+
+    def __init__(self, message: str, *, targets: tuple[str, ...]) -> None:
+        super().__init__(message)
+        self.targets = targets
+        """Every `dataset@year` that had moved, sorted."""
 
 
 def _utc_now() -> datetime:
@@ -819,6 +886,33 @@ class PartitionRef:
     path: Path
     row_count: int
     content_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class PartitionExpectation:
+    """What a group write expects a target partition to hold when it commits (`V2-P6-028`).
+
+    `content_hash` is the `panel_partitions.content_hash` the caller read when it planned the
+    write -- the stored rows a merge put its own in front of -- or `None` for "nothing was
+    stored". `PanelStore.write_partitions` compares it inside its exclusive hold and writes
+    nothing if any target has moved; see `PanelWriteConflictError`.
+    """
+
+    content_hash: str | None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PartitionWrite:
+    """One target of `PanelStore.write_partitions`: `write_partition`'s arguments, plus an
+    optional compare-and-swap expectation (`None` writes whatever is stored now)."""
+
+    dataset: str
+    year: int
+    columns: Sequence[ColumnSpec]
+    rows: Sequence[tuple[object, ...]]
+    coverage: PartitionCoverage | None = None
+    allow_empty: bool = False
+    expected: PartitionExpectation | None = None
 
 
 PartitionStamp = tuple[str, int, str, tuple[object, ...]]
@@ -1158,6 +1252,9 @@ def _open_lock_file(path: Path, *, exclusive: bool) -> int:
     through exactly as before the lock existed. One case needs no lock at all: a **read-only
     filesystem** (`EROFS`), where no process can write the catalog -- DuckDB cannot open it
     read-write there -- so there is no writer to exclude; the reader proceeds holding nothing.
+    That holds only if no *other* mount of the same files is writable: a `:ro` bind mount of a
+    store a writer still uses through another mount is not covered, and is not a supported way
+    to share a store -- give the reader the writable path, or a copy.
     Every other failure to open is refused by name, never a bare `OSError`: a reader without the
     lock beside a writer of another account would meet DuckDB's `IOException` again.
     """
@@ -1330,7 +1427,10 @@ class _CatalogAccess:
             f"the panel catalog {self._catalog_path} was not free for {side} access within "
             f"the {self._timeout:g}s bound: another process, or another thread of this one, "
             f"held it the whole time (lock file {self._file.path}); nothing was read or "
-            "written, and the same call can be made again once the holder finishes"
+            "written, and the same call can be made again once the holder finishes",
+            side=side,
+            timeout=self._timeout,
+            catalog_path=self._catalog_path,
         )
 
     @contextmanager
@@ -1453,6 +1553,38 @@ def _insert_columnar(
     for start in range(0, len(rows), _INSERT_CHUNK_ROWS):
         chunk = rows[start : start + _INSERT_CHUNK_ROWS]
         connection.execute(statement, [list(values) for values in zip(*chunk, strict=True)])
+
+
+def _upsert_partition_row(
+    connection: duckdb.DuckDBPyConnection,
+    dataset: str,
+    year: int,
+    *,
+    row_count: int,
+    content_hash: str,
+    written_at: datetime,
+) -> None:
+    """Register (or replace) one partition's catalog row; the caller holds the exclusive side."""
+    connection.execute(
+        """
+        INSERT INTO panel_partitions
+            (dataset, year, relative_path, row_count, content_hash, written_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT (dataset, year) DO UPDATE SET
+            relative_path = excluded.relative_path,
+            row_count = excluded.row_count,
+            content_hash = excluded.content_hash,
+            written_at = excluded.written_at
+        """,
+        [
+            dataset,
+            year,
+            str(Path(dataset) / str(year) / "data.parquet"),
+            row_count,
+            content_hash,
+            written_at,
+        ],
+    )
 
 
 class PanelStore:
@@ -1638,18 +1770,13 @@ class PanelStore:
             with self._catalog_access.exclusive():
                 with _connect(str(self.catalog_path)) as connection:
                     self._ensure_catalog_schema(connection)
-                    connection.execute(
-                        """
-                        INSERT INTO panel_partitions
-                            (dataset, year, relative_path, row_count, content_hash, written_at)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                        ON CONFLICT (dataset, year) DO UPDATE SET
-                            relative_path = excluded.relative_path,
-                            row_count = excluded.row_count,
-                            content_hash = excluded.content_hash,
-                            written_at = excluded.written_at
-                        """,
-                        [dataset, year, str(relative_path), len(rows), content_hash, written_at],
+                    _upsert_partition_row(
+                        connection,
+                        dataset,
+                        year,
+                        row_count=len(rows),
+                        content_hash=content_hash,
+                        written_at=written_at,
                     )
                 # Only once the catalog has committed. See the module docstring's "The catalog
                 # upsert commits before the rename".
@@ -1674,6 +1801,214 @@ class PanelStore:
             # an orphan `data.parquet.<uuid>.tmp` beside the partition.
             temporary.unlink(missing_ok=True)
         return PartitionRef(dataset, year, target, len(rows), content_hash)
+
+    def write_partitions(self, writes: Sequence[PartitionWrite]) -> tuple[PartitionRef, ...]:
+        """Write several partitions as one: every reader sees all of them or none (`V2-P6-028`).
+
+        The group form of `write_partition`, for a write whose partitions a reader joins -- a
+        factor build's observations and the manifests that address them, every tier of one build,
+        `write_daily_panel`'s `daily` and `daily_basic`, the years of one registry fetch. Written
+        as separate calls, each landed in its own exclusive hold and a reader in another process
+        between two of them saw one new and one old: an observation row whose manifest was not
+        there yet is `_refuse_rows_that_are_not_the_answers_their_manifest_addresses`, and a
+        research run files that as a refused row.
+
+        **What is inside the one exclusive hold, in order:** the compare-and-swap of every target
+        (below), then every catalog row in one transaction, then every rename, then every coverage
+        record. Everything expensive is outside it: each partition's Parquet `COPY` is staged
+        first, unlocked, as `write_partition` stages its one. A target whose content is already
+        stored (the idempotent case) is not staged, and only its coverage is re-recorded.
+
+        **Compare-and-swap.** A target with `expected` must still hold exactly
+        `expected.content_hash` (or nothing, for `None`) when the hold is taken. If any does not,
+        nothing at all is written and `PanelWriteConflictError` names every target that moved. That
+        is the lost update two builds of one factor used to make between them -- each merged its
+        rows into what it read, and the second to commit replaced the first's -- turned into a
+        refusal the second build can answer by running again. A target written without `expected`
+        is last-writer-wins, as `write_partition` is; an idempotent target whose content moved
+        since it was found already stored is a conflict either way, since there is no staged file
+        to write.
+
+        **A crash is not atomic.** The catalog rows commit together, but a kill between two
+        renames leaves some partitions renamed and some not; each one left behind is in one of
+        the fail-closed states the module docstring describes (`coverage_stale` or
+        `partition_file_missing`), as an interrupted `write_partition` is. What the group adds is
+        atomicity against *readers*, which a crash cannot break: no reader holds the shared side
+        while the hold is held.
+        """
+        if not writes:
+            raise PanelStorageError("a group write needs at least one partition")
+        keys = [(write.dataset, write.year) for write in writes]
+        repeated = sorted({f"{d}@{y}" for d, y in keys if keys.count((d, y)) > 1})
+        if repeated:
+            raise PanelStorageError(
+                f"a group write names {repeated} more than once; one partition is written once"
+            )
+        written_at = self._now()
+        recorded_at = self._now()
+        prepared = [self._prepared_write(write) for write in writes]
+        staged: dict[int, Path] = {}
+        try:
+            for index, (write, _covered, content_hash) in enumerate(prepared):
+                if self._reusable_partition(write.dataset, write.year, content_hash) is None:
+                    staged[index] = self._staged_partition(write)
+            with self._catalog_access.exclusive():
+                self._commit_group(prepared, staged, written_at=written_at, recorded_at=recorded_at)
+        finally:
+            for temporary in staged.values():
+                temporary.unlink(missing_ok=True)
+        return tuple(
+            PartitionRef(
+                write.dataset,
+                write.year,
+                self.root / write.dataset / str(write.year) / "data.parquet",
+                len(write.rows),
+                content_hash,
+            )
+            for write, _covered, content_hash in prepared
+        )
+
+    def _prepared_write(
+        self, write: PartitionWrite
+    ) -> tuple[PartitionWrite, PartitionCoverage | None, str]:
+        """Validate one group target as `write_partition` validates its arguments, before
+        anything is staged; hand back its validated coverage and its content hash."""
+        _validate_dataset(write.dataset)
+        if not write.columns:
+            raise PanelStorageError("cannot write a partition with zero columns")
+        if not write.rows and not write.allow_empty:
+            raise PanelStorageError("cannot write an empty partition batch")
+        covered: PartitionCoverage | None = None
+        if write.coverage is not None:
+            covered = _validated_coverage(write.coverage)
+            if (covered.dataset, covered.year) != (write.dataset, write.year):
+                raise PanelStorageError(
+                    f"coverage for {covered.dataset} year={covered.year} cannot be recorded "
+                    f"with a write of {write.dataset} year={write.year}"
+                )
+            if covered.row_count != len(write.rows):
+                raise PanelStorageError(
+                    f"coverage row_count {covered.row_count} disagrees with the "
+                    f"{len(write.rows)} row(s) being written to {write.dataset} year={write.year}"
+                )
+        return write, covered, _content_hash(write.dataset, write.year, write.columns, write.rows)
+
+    def _staged_partition(self, write: PartitionWrite) -> Path:
+        """`COPY` one target's rows to a per-writer temp file beside its partition, unlocked."""
+        target = self.root / write.dataset / str(write.year) / "data.parquet"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(f"{target.name}.{uuid.uuid4().hex}.tmp")
+        column_ddl = ", ".join(
+            f"{_quote_identifier(column.name)} {column.duckdb_type}" for column in write.columns
+        )
+        try:
+            with _connect(":memory:") as staging:
+                staging.execute(f"CREATE TABLE staging ({column_ddl})")
+                if write.rows:
+                    _insert_columnar(staging, write.columns, write.rows)
+                staging.execute(
+                    "COPY staging TO ? (FORMAT PARQUET, COMPRESSION ZSTD)", [str(temporary)]
+                )
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+        return temporary
+
+    def _commit_group(
+        self,
+        prepared: Sequence[tuple[PartitionWrite, PartitionCoverage | None, str]],
+        staged: Mapping[int, Path],
+        *,
+        written_at: datetime,
+        recorded_at: datetime,
+    ) -> None:
+        """`write_partitions`' exclusive section: compare, then rows, renames, coverage."""
+        with _connect(str(self.catalog_path)) as connection:
+            self._ensure_catalog_schema(connection)
+            moved: list[str] = []
+            for index, (write, _covered, content_hash) in enumerate(prepared):
+                current = self._lookup_with_connection(connection, write.dataset, write.year)
+                stored = None if current is None else current.content_hash
+                expected = write.expected
+                if (expected is not None and stored != expected.content_hash) or (
+                    index not in staged and stored != content_hash
+                ):
+                    moved.append(f"{write.dataset}@{write.year}")
+            if moved:
+                raise PanelWriteConflictError(
+                    f"{sorted(moved)} changed after this write read them to plan itself -- "
+                    "another writer committed in between -- so nothing of this write was stored. "
+                    "Run it again: it re-reads what is stored now and merges onto that",
+                    targets=tuple(sorted(moved)),
+                )
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                for index in staged:
+                    write, _covered, content_hash = prepared[index]
+                    _upsert_partition_row(
+                        connection,
+                        write.dataset,
+                        write.year,
+                        row_count=len(write.rows),
+                        content_hash=content_hash,
+                        written_at=written_at,
+                    )
+                connection.execute("COMMIT")
+            except BaseException:
+                connection.execute("ROLLBACK")
+                raise
+        # Renames only once every catalog row has committed, for `write_partition`'s reason.
+        for index, temporary in staged.items():
+            write = prepared[index][0]
+            temporary.replace(self.root / write.dataset / str(write.year) / "data.parquet")
+        for write, covered, content_hash in prepared:
+            if covered is not None and (
+                self._record_coverage_held(
+                    covered, recorded_at=recorded_at, content_hash=content_hash
+                )
+                is None
+            ):
+                raise PanelStorageError(
+                    f"{write.dataset} year={write.year} no longer names the content just written "
+                    "to it, inside the exclusive hold that wrote it; the catalog lock was bypassed"
+                )
+
+    @contextmanager
+    def reading(self) -> Iterator[None]:
+        """Hold the catalog's shared side across several reads, so they see one state.
+
+        `V2-P6-028`. Every read method takes the shared side itself and lets it go when it
+        returns, so two reads in a row can straddle a write -- a factor's observations read, a
+        build committed, its manifests read -- and a caller that joins them sees a pair no
+        state of the store ever held. Inside this block the reads nest in one hold (a nested
+        acquisition on the same thread takes nothing), and a write -- including a whole group
+        write (`write_partitions`) -- lands wholly before the block or wholly after it.
+
+        Writers wait for the block, so hold it across reads, not across computation. A write
+        inside the block on the same thread cannot take the exclusive side and ends in
+        `PanelCatalogBusyError` after the bound.
+        """
+        with self._catalog_access.shared():
+            yield
+
+    def partition_content_hash(self, dataset: str, year: int) -> str | None:
+        """The catalog's `content_hash` for one partition, or `None` when none is registered.
+
+        What a writer records, inside the `reading()` hold its merge reads under, as the
+        `PartitionExpectation` of a later `write_partitions`.
+        """
+        _validate_dataset(dataset)
+        if not self.catalog_path.exists():
+            return None
+        with (
+            self._catalog_access.shared(),
+            _connect(str(self.catalog_path), read_only=True) as connection,
+        ):
+            _check_catalog_schema_version(connection)
+            if not _table_exists(connection, "panel_partitions"):
+                return None
+            found = self._lookup_with_connection(connection, dataset, year)
+        return None if found is None else found.content_hash
 
     def query(
         self,

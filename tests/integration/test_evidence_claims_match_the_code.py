@@ -304,7 +304,12 @@ RETRY_AFTER_HEADER: Final[re.Pattern[str]] = re.compile(r"retry-after", re.IGNOR
 def _retry_after_readers(package: Path) -> list[str]:
     """Each place a module under `package` passes the header's name to a call or a comparison, or
     reads it through a subscript, as `path:line`. A subscript that assigns or deletes it is not a
-    read."""
+    read.
+
+    Since `V2-P6-028` a response that *sends* the header counts as well: a dict key of a call's
+    `headers=` argument (`JSONResponse(..., headers={"Retry-After": ...})`). A document naming
+    the header is then describing something the code does, which is this guard's whole rule; a
+    mention with no reader and no sender is still refused."""
     readers: list[str] = []
     for path in sorted(package.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -312,6 +317,13 @@ def _retry_after_readers(package: Path) -> list[str]:
             candidates: list[ast.expr] = []
             if isinstance(node, ast.Call):
                 candidates = [*node.args, *(keyword.value for keyword in node.keywords)]
+                candidates.extend(
+                    key
+                    for keyword in node.keywords
+                    if keyword.arg == "headers" and isinstance(keyword.value, ast.Dict)
+                    for key in keyword.value.keys
+                    if key is not None
+                )
             elif isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load):
                 candidates = [node.slice]
             elif isinstance(node, ast.Compare):
@@ -337,7 +349,8 @@ def _retry_after_mentions(
 
 
 def test_retry_after_is_mentioned_only_while_something_reads_it() -> None:
-    """No document or diagram may name the Retry-After header while nothing under `src/` reads it.
+    """No document or diagram may name the Retry-After header while nothing under `src/` reads or
+    sends it.
 
     Written against brain-02's Provider Contract panel, which drew "错误分类与 Retry-After" when
     no module under `src/` named the header at all.

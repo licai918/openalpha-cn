@@ -2091,34 +2091,37 @@ def _built_at_instant(
     if years[0] not in store.registered_years(factor_manifest_dataset(definition)):
         return False
     try:
-        raw = {
-            manifest.manifest_id
-            for manifest in load_factor_manifests(store, definition, years=years, as_of=as_of)
-            if manifest.as_of == instant
-        }
-        if not raw or build.tier == "raw":
-            return bool(raw)
-        assert build.transform is not None  # a processed or neutralized tier names one
-        transform = FACTOR_TRANSFORMS.get(build.transform)
-        processed = {
-            manifest.transform_manifest_id
-            for manifest in load_factor_transform_manifests(
-                store, definition, years=years, as_of=as_of
+        # The three tiers' manifests in one shared hold (`V2-P6-028`): a build of every tier
+        # lands as one group write, and reads in three holds could see some tiers of it.
+        with store.reading():
+            raw = {
+                manifest.manifest_id
+                for manifest in load_factor_manifests(store, definition, years=years, as_of=as_of)
+                if manifest.as_of == instant
+            }
+            if not raw or build.tier == "raw":
+                return bool(raw)
+            assert build.transform is not None  # a processed or neutralized tier names one
+            transform = FACTOR_TRANSFORMS.get(build.transform)
+            processed = {
+                manifest.transform_manifest_id
+                for manifest in load_factor_transform_manifests(
+                    store, definition, years=years, as_of=as_of
+                )
+                if manifest.source_manifest_id in raw
+                and manifest.transform_id == transform.transform_id
+            }
+            if not processed or build.tier == "processed":
+                return bool(processed)
+            assert build.neutralization is not None
+            neutralization = FACTOR_NEUTRALIZATIONS.get(build.neutralization)
+            return any(
+                manifest.source_transform_manifest_id in processed
+                and manifest.neutralization_id == neutralization.neutralization_id
+                for manifest in load_factor_neutralization_manifests(
+                    store, definition, years=years, as_of=as_of
+                )
             )
-            if manifest.source_manifest_id in raw
-            and manifest.transform_id == transform.transform_id
-        }
-        if not processed or build.tier == "processed":
-            return bool(processed)
-        assert build.neutralization is not None
-        neutralization = FACTOR_NEUTRALIZATIONS.get(build.neutralization)
-        return any(
-            manifest.source_transform_manifest_id in processed
-            and manifest.neutralization_id == neutralization.neutralization_id
-            for manifest in load_factor_neutralization_manifests(
-                store, definition, years=years, as_of=as_of
-            )
-        )
     except FactorEngineError:
         return False
 

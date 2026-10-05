@@ -430,6 +430,28 @@ the body. Only `/panel/gate`'s `200` is a permission, which is why a refusal the
 category, severity and detail, the notices, the unverified checks, and the health report
 the verdict rests on. A `notice` never produces a non-2xx response.
 
+### `503` on every route: the panel was busy, not judged (`V2-P6-028`)
+
+The panel store is shared between processes -- several `openalpha factor build` commands, a
+research run and this service can use one store at once -- under a readers-writer lock with a
+bounded wait. Two outcomes of that sharing are answered the same way by **every** route, by an
+application-level handler rather than by any of the tables in this document
+(`api/app.py#CATALOG_BUSY_HTTP_STATUS`):
+
+| Situation | Code | `detail.reason` |
+|---|---|---|
+| another process held the panel catalog for the whole bounded wait; nothing was read or written | `503` | `catalog_busy` |
+| a write (a factor build) found the partitions it had read to plan itself replaced by another write that committed first; nothing of it was stored | `503` | `write_conflict` |
+
+Both carry `Retry-After` (seconds) and `{"detail": {"reason", "message"}}`. Neither is a verdict
+about the panel, and neither is a defect: the same request answers once the holder finishes (or,
+for `write_conflict`, re-plans from what the other write stored). The message names the side of
+the lock, the bound and, for a conflict, the `dataset@year` partitions that moved -- and, like
+every refusal body here, never the path the service keeps its store at.
+
+`openalpha` answers the same two with exit `6` (`cli.py#PanelExit.catalog_busy`), on every
+command that reads or writes the panel: exit `6` means "run it again", and only that.
+
 ### `panel doctor`'s exit 1 has no status code here
 
 The CLI's `PanelExit` is this table's sibling, and **one row does not correspond**.
@@ -588,7 +610,7 @@ code and are told apart by `detail.reason`, exactly as the panel plane's two are
 
 `openalpha factor run` maps the same names onto exit codes (`cli.py#FACTOR_EXIT`) and
 reuses `PanelExit`: `0` answered, `1` for all three `409` rows, `3` for `422`, `5` for an
-unhandled defect. **Exit `0` includes an experiment whose grid says `removed` on every
+unhandled defect, `6` for the two `503`s above (a busy catalog, a write conflict). **Exit `0` includes an experiment whose grid says `removed` on every
 cell** — a `removed` verdict is the report succeeding at its job, and an exit code that
 treated it as failure would make every honest three-tier report look like a broken
 command.
@@ -989,7 +1011,7 @@ at the hand-off to the store for the fourth.
 `openalpha shortlist run` maps the same names onto exit codes
 (`cli.py#SHORTLIST_EXIT`) and reuses `PanelExit`: `0` admitted, `1` for every `409` row —
 **including a refused list** — and for the `404` one, `3` for `422`, `5` for an unhandled
-defect, and `2` for Click's own usage errors (a missing or misspelled flag), which this
+defect, `6` for a busy catalog (the `503` above), and `2` for Click's own usage errors (a missing or misspelled flag), which this
 table does not own. A scheduled job that cut a shortlist, had it refused and exited `0`
 would be no gate at all. `openalpha shortlist get` uses the same two: `1` when nothing is
 held under the address, `3` when the token is not an address.
@@ -1168,7 +1190,7 @@ while a body FastAPI itself rejected is a **list** of field errors, so a client 
 `openalpha model evaluate` / `daily-run` map the same names onto exit codes
 (`cli.py#MODEL_EXIT`) and reuse `PanelExit`: `0` admitted, `1` for every `409` row —
 **including a refused run** — and for the `404` one, `3` for `422`, `5` for an unhandled
-defect, and `2` for Click's own usage errors. `openalpha model prediction` uses the same two:
+defect, `6` for a busy catalog (the `503` above), and `2` for Click's own usage errors. `openalpha model prediction` uses the same two:
 `1` when nothing is held under the address, `3` when the token is not an address.
 
 The portfolio endpoint is intentionally stateless: callers submit the immutable

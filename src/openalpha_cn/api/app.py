@@ -87,7 +87,7 @@ from openalpha_cn.model_view import (
     prediction_index_view,
     run_daily,
 )
-from openalpha_cn.panel.store import PanelCatalogBusyError, PanelStore
+from openalpha_cn.panel.store import PanelCatalogBusyError, PanelStore, PanelWriteConflictError
 from openalpha_cn.panel_doctor import PanelDoctorError, panel_health_report
 from openalpha_cn.panel_gate import DependencyRequest, PanelGateError, require_datasets
 from openalpha_cn.panel_view import (
@@ -871,8 +871,9 @@ CATALOG_BUSY_HTTP_STATUS: Final[int] = 503
 so nothing was read or written. It is the `cli.PanelExit.catalog_busy` row of every table here --
 not a verdict (`409`), not a request that cannot be put (`422`), and not this application
 breaking (`500`) -- so it is answered once, by an application-level handler, with a
-`Retry-After` and the error's own message, which names the catalog, the lock file and the bound
-and nothing else."""
+`Retry-After` and `PanelCatalogBusyError.disclosable` -- the side and the bound, and no path.
+`panel.store.PanelWriteConflictError` (`reason: "write_conflict"`) is answered the same way: a
+write whose base another writer replaced first stored nothing and can be made again."""
 
 CATALOG_BUSY_RETRY_AFTER_SECONDS: Final[int] = 30
 """The `Retry-After` a `503` carries: long enough for a batch of catalog writes to drain."""
@@ -2924,9 +2925,22 @@ def create_app(
     async def catalog_busy(request: Request, error: PanelCatalogBusyError) -> JSONResponse:
         """Answer a catalog held past its bound as retryable, on every route; see
         `CATALOG_BUSY_HTTP_STATUS`."""
+        # `disclosable`, never `str(error)`: the latter names the catalog by absolute path, and
+        # no refusal body says where this service keeps its store (`PANEL_STORE_PLACEHOLDER`).
         return JSONResponse(
             status_code=CATALOG_BUSY_HTTP_STATUS,
-            content={"detail": _panel_detail("catalog_busy", str(error))},
+            content={"detail": _panel_detail("catalog_busy", error.disclosable)},
+            headers={"Retry-After": str(CATALOG_BUSY_RETRY_AFTER_SECONDS)},
+        )
+
+    @application.exception_handler(PanelWriteConflictError)
+    async def write_conflict(request: Request, error: PanelWriteConflictError) -> JSONResponse:
+        """A group write whose base another writer replaced first: nothing was stored, and the
+        same request re-plans from what is stored now. `CATALOG_BUSY_HTTP_STATUS` for the same
+        reason; the message names datasets and years only."""
+        return JSONResponse(
+            status_code=CATALOG_BUSY_HTTP_STATUS,
+            content={"detail": _panel_detail("write_conflict", str(error))},
             headers={"Retry-After": str(CATALOG_BUSY_RETRY_AFTER_SECONDS)},
         )
 

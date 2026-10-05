@@ -69,7 +69,7 @@ from openalpha_cn.domain.trading_calendar import (
     TradingCalendarError,
 )
 from openalpha_cn.panel.catalog import PanelStorageError
-from openalpha_cn.panel.store import PanelCatalogBusyError
+from openalpha_cn.panel.store import PanelCatalogBusyError, PanelWriteConflictError
 from openalpha_cn.panel_doctor import _LOAD_FAILURES, PanelHealthReport
 from openalpha_cn.panel_gate import DependencyClearance, DependencyRequest, PanelGateError
 from openalpha_cn.providers.tushare import TUSHARE_DATASETS
@@ -110,7 +110,9 @@ def test_a_catalog_held_past_its_bound_exits_with_its_own_code_and_its_own_messa
     printed with the advice to run the command again."""
     refusal = PanelCatalogBusyError(
         "the panel catalog /runtime/panel/catalog.duckdb was not free for exclusive access "
-        "within the 600s bound"
+        "within the 600s bound",
+        side="exclusive",
+        timeout=600.0,
     )
     with pytest.raises(typer.Exit) as exited, cli_module._panel_command("factor build"):
         raise refusal
@@ -120,6 +122,26 @@ def test_a_catalog_held_past_its_bound_exits_with_its_own_code_and_its_own_messa
     assert "`factor build`" in stderr
     assert "/runtime/panel/catalog.duckdb" in stderr
     assert "run the command again" in stderr
+    assert "defect" not in stderr
+
+
+def test_a_write_whose_base_moved_exits_with_the_contention_code_and_names_what_moved(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`V2-P6-028`. A `PanelWriteConflictError` -- another build of the same partitions committed
+    after this one read them -- stored nothing, and running the command again re-plans from what
+    is stored now. The contention code, the partitions that moved, and the advice."""
+    refusal = PanelWriteConflictError(
+        "['factor_obs_x_v1@2026'] changed after this write read them to plan itself; run it again",
+        targets=("factor_obs_x_v1@2026",),
+    )
+    with pytest.raises(typer.Exit) as exited, cli_module._panel_command("factor build"):
+        raise refusal
+
+    assert exited.value.exit_code == PanelExit.catalog_busy
+    stderr = capsys.readouterr().err
+    assert "factor_obs_x_v1@2026" in stderr
+    assert "run it again" in stderr
     assert "defect" not in stderr
 
 

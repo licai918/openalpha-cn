@@ -36,9 +36,11 @@ never older than the freshness bound. Filings before 2024's annual report are an
 
 from __future__ import annotations
 
+import ast
 import gc
 import json
 import math
+import multiprocessing
 import shlex
 import shutil
 from collections import Counter
@@ -46,6 +48,8 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
 from datetime import UTC, date, datetime, time, timedelta
 from itertools import pairwise
+from multiprocessing import Queue
+from multiprocessing.synchronize import Barrier, Event
 from pathlib import Path
 from typing import Any, Final
 from zoneinfo import ZoneInfo
@@ -110,15 +114,17 @@ from openalpha_cn.factor_view import (
     build_view,
     factor_build_request,
 )
-from openalpha_cn.panel.store import PanelStore
+from openalpha_cn.panel.store import PanelStore, PanelWriteConflictError
 from openalpha_cn.panel_factors import (
     CROSS_SECTION_STANDARD,
     FACTOR_DEFINITIONS,
+    FACTOR_TRANSFORMS,
     ExcludedReportPeriod,
     UnknowableReturnSession,
     load_factor_manifests,
     load_factor_observations,
     load_factor_transform_manifests,
+    load_processed_factor_observations,
 )
 from openalpha_cn.panel_ingest import (
     UPSTREAM_DEFECTS_DATASET,
@@ -126,7 +132,11 @@ from openalpha_cn.panel_ingest import (
     write_panel_batch,
     write_upstream_defects,
 )
-from openalpha_cn.panel_neutralization import load_factor_neutralization_manifests
+from openalpha_cn.panel_neutralization import (
+    FACTOR_NEUTRALIZATIONS,
+    load_factor_neutralization_manifests,
+    load_neutralized_factor_observations,
+)
 from openalpha_cn.sdk import OpenAlphaSDK
 
 SHANGHAI: Final[ZoneInfo] = ZoneInfo("Asia/Shanghai")
@@ -1092,8 +1102,8 @@ def test_what_a_build_shares_is_its_own_instants_and_nothing_outlives_it(
 def _after_the_first_factor_writes(
     monkeypatch: pytest.MonkeyPatch, action: Callable[[], None]
 ) -> None:
-    """Run `action` once, right after the first factor of a build has written its raw tier."""
-    original = factor_view.write_factor_panels
+    """Run `action` once, right after the first factor of a build has written its tiers."""
+    original = factor_view.write_panel_batches
     done: list[bool] = []
 
     def writing(*args: Any, **kwargs: Any) -> Any:
@@ -1103,7 +1113,7 @@ def _after_the_first_factor_writes(
             action()
         return written
 
-    monkeypatch.setattr(factor_view, "write_factor_panels", writing)
+    monkeypatch.setattr(factor_view, "write_panel_batches", writing)
 
 
 def test_a_registry_year_rewritten_between_two_factors_is_read_afresh_by_the_second(
@@ -1855,3 +1865,250 @@ def test_a_raw_build_under_two_transforms_is_repaired_by_one_command_per_transfo
         "undefined_value",
         None,
     )
+
+
+# --- a build and its readers in different processes (`V2-P6-028`) --------------------------------
+#
+# One factor build writes several partitions -- every tier's observations and the manifests that
+# address them -- and one factor read joins observations to manifests. Each landing in its own
+# exclusive hold, a reader in another process between two of them met observations whose manifest
+# was not stored yet: `_refuse_rows_that_are_not_the_answers_their_manifest_addresses`, a
+# `FactorEngineError`, which the research grid files as a refused row resume never re-measures.
+# And two builds of one factor racing (A reads, B reads, B writes, A writes) left observations
+# answering one build and manifests the other, each partition self-consistent, so readiness could
+# not see it and every later read of those instants was refused until a rebuild. Real processes,
+# the generated corpus above.
+
+ctx = multiprocessing.get_context("spawn")
+"""Every `Process`/`Queue`/`Event`/`Barrier` below; see `test_panel_store.py`'s `ctx`."""
+
+RACED: Final[str] = "reversal_1d/v1"
+OTHER_COMMIT: Final[str] = "fedcba9876543210"
+READ_AT: Final[datetime] = INSTANTS[2]
+NEUTRAL_PLANNER: Final[str] = "plan_neutralized_factor_panels"
+
+
+def _ids(report: FactorBuildReport) -> dict[str, list[str]]:
+    return {tier: list(ids) for tier, ids in report.manifest_ids.items()}
+
+
+def _rebuilding_worker(
+    root_str: str,
+    first: dict[str, list[str]],
+    rounds: int,
+    stop: Event,
+    queue: Queue[tuple[str, str]],
+) -> None:
+    """Rebuild `RACED` at one instant `rounds` times, each build superseding the one before.
+
+    The first two rebuilds are real `build_factor_panels` calls (under the other commit, then
+    under the first again), and record the panels each one planned. Every rebuild after that
+    re-plans and re-commits one of those two recorded builds through the very functions
+    `factor_view._build_one` uses -- the three plan functions, then `_committed` -- which costs
+    milliseconds where a recompute costs seconds, so the readers meet many more commits.
+    """
+    try:
+        store = PanelStore(Path(root_str))
+        recorded: list[dict[str, Any]] = []
+        planners = ("plan_factor_panels", "plan_processed_factor_panels")
+        real = {name: getattr(factor_view, name) for name in (*planners, NEUTRAL_PLANNER)}
+
+        def recording(name: str) -> Callable[..., Any]:
+            def plan(store: PanelStore, panels: Any, **kwargs: Any) -> Any:
+                recorded[-1][name] = panels
+                return real[name](store, panels, **kwargs)
+
+            return plan
+
+        for name in real:
+            setattr(factor_view, name, recording(name))
+        previous = first
+        builds: list[tuple[dict[str, Any], dict[str, list[str]]]] = []
+        for commit in (OTHER_COMMIT, COMMIT):
+            recorded.append({})
+            report = _single(
+                store,
+                RACED,
+                as_ofs=(INSTANTS[0],),
+                code_commit=commit,
+                supersedes_raw=previous["raw"],
+                supersedes_processed=previous["processed"],
+                supersedes_neutralized=previous["neutralized"],
+            )
+            previous = _ids(report)
+            builds.append((recorded[-1], previous))
+        for name, function in real.items():
+            setattr(factor_view, name, function)
+        for round_ in range(rounds):
+            panels, _ids_written = builds[round_ % 2]
+            _panels_stored, stored = builds[(round_ + 1) % 2]
+            plan = [
+                *factor_view.plan_factor_panels(
+                    store, panels["plan_factor_panels"], supersedes=stored["raw"]
+                ),
+                *factor_view.plan_processed_factor_panels(
+                    store, panels["plan_processed_factor_panels"], supersedes=stored["processed"]
+                ),
+                *getattr(factor_view, NEUTRAL_PLANNER)(
+                    store, panels[NEUTRAL_PLANNER], supersedes=stored["neutralized"]
+                ),
+            ]
+            factor_view._committed(store, plan)
+        queue.put(("writer", "ok:" + repr([repr(ids) for _panels, ids in builds])))
+    except Exception as error:
+        queue.put(("writer", f"fail:{type(error).__name__}:{error}"))
+    finally:
+        stop.set()
+
+
+def _factor_reader_worker(
+    root_str: str, stop: Event, queue: Queue[tuple[str, str]], tag: str
+) -> None:
+    """Read `RACED` through all three loaders until the writer stops; report each read's builds."""
+    try:
+        store = PanelStore(Path(root_str))
+        definition = FACTOR_DEFINITIONS.get(RACED)
+        transform = FACTOR_TRANSFORMS.get(TRANSFORM)
+        neutralization = FACTOR_NEUTRALIZATIONS.get(NEUTRALIZATION)
+        answers: set[tuple[str, tuple[str, ...]]] = set()
+        refusals: list[str] = []
+        reads = 0
+        while not stop.is_set() or reads < 3:
+            reads += 1
+            try:
+                raw = load_factor_observations(store, definition, years=(2026,), as_of=READ_AT)
+                processed = load_processed_factor_observations(
+                    store, definition, transform, years=(2026,), as_of=READ_AT
+                )
+                neutralized = load_neutralized_factor_observations(
+                    store, definition, neutralization, years=(2026,), as_of=READ_AT
+                )
+            except Exception as error:
+                refusals.append(f"{type(error).__name__}: {str(error)[:200]}")
+                continue
+            answers.add(("raw", tuple(sorted({row.manifest_id for row in raw}))))
+            answers.add(
+                ("processed", tuple(sorted({row.transform_manifest_id for row in processed})))
+            )
+            answers.add(
+                (
+                    "neutralized",
+                    tuple(sorted({row.neutralization_manifest_id for row in neutralized})),
+                )
+            )
+        queue.put((tag, repr((sorted(answers), refusals[:3], len(refusals), reads))))
+    except Exception as error:
+        queue.put((tag, f"fail:{type(error).__name__}:{error}"))
+
+
+def test_readers_in_other_processes_see_a_factor_rebuild_whole_and_are_never_refused(
+    corpus: Path, tmp_path: Path
+) -> None:
+    """One process rebuilds a factor at one instant, every tier, sixty times over -- each build
+    superseding the last -- while three others read it back through the three factor loaders (the
+    reads a strategy backtest and the research grid make, `strategy_view` calling these same three
+    functions). No read is refused, and every read answers exactly one build per tier."""
+    store = _copy(corpus, tmp_path / "panel")
+    first = _ids(_single(store, RACED, as_ofs=(INSTANTS[0],)))
+    stop = ctx.Event()
+    queue: multiprocessing.Queue[tuple[str, str]] = ctx.Queue()
+    writer = ctx.Process(target=_rebuilding_worker, args=(str(store.root), first, 60, stop, queue))
+    readers = [
+        ctx.Process(target=_factor_reader_worker, args=(str(store.root), stop, queue, f"r{i}"))
+        for i in range(3)
+    ]
+    for process in (writer, *readers):
+        process.start()
+    outcomes: dict[str, str] = {}
+    try:
+        while len(outcomes) < 4:
+            tag, outcome = queue.get(timeout=600)
+            outcomes[tag] = outcome
+        for process in (writer, *readers):
+            process.join(timeout=60)
+    finally:
+        stop.set()
+        for process in (writer, *readers):
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=10)
+
+    assert outcomes["writer"].startswith("ok:"), outcomes["writer"]
+    builds = [first, *(ast.literal_eval(item) for item in ast.literal_eval(outcomes["writer"][3:]))]
+    known = {(tier, tuple(sorted(build[tier]))) for build in builds for tier in build}
+    for tag in ("r0", "r1", "r2"):
+        assert not outcomes[tag].startswith("fail:"), outcomes[tag]
+        answers, first_refusals, refusal_count, reads = ast.literal_eval(outcomes[tag])
+        assert refusal_count == 0, (
+            f"{tag}: {refusal_count} of {reads} reads refused: {first_refusals}"
+        )
+        for tier, answered in answers:
+            assert len(answered) == 1, f"{tag} read {tier} rows of {len(answered)} builds at once"
+            assert (tier, answered) in known, f"{tag} read a {tier} build nobody wrote: {answered}"
+
+
+def _racing_build_worker(
+    root_str: str, instant: datetime, barrier: Barrier, queue: Queue[tuple[str, str]]
+) -> None:
+    """Build `RACED` (raw) at `instant`, pausing between planning and committing until the other
+    racer has planned too, so both plan against one stored state."""
+    try:
+        real = factor_view.write_panel_batches
+
+        def after_both_planned(*args: Any, **kwargs: Any) -> Any:
+            barrier.wait(timeout=120)
+            return real(*args, **kwargs)
+
+        factor_view.write_panel_batches = after_both_planned  # type: ignore[assignment]
+        _raw_only(PanelStore(Path(root_str)), RACED, as_ofs=(instant,))
+        queue.put((instant.isoformat(), "ok"))
+    except PanelWriteConflictError as error:
+        queue.put((instant.isoformat(), f"conflict:{list(error.targets)}"))
+    except Exception as error:
+        queue.put((instant.isoformat(), f"fail:{type(error).__name__}:{error}"))
+
+
+def test_two_builds_of_one_factor_racing_store_one_whole_build_and_refuse_the_other(
+    corpus: Path, tmp_path: Path
+) -> None:
+    """Two processes build the same factor at two instants of one year, both planning -- reading
+    the stored partitions and merging their own rows onto them -- before either commits. One
+    commits; the other's base has moved, so it is a `PanelWriteConflictError` and stores nothing.
+    The store is whole after it: every read of the factor answers, and holds the winner's build
+    and nothing of the loser's. Running the loser again stores both."""
+    store = _copy(corpus, tmp_path / "panel")
+    barrier = ctx.Barrier(2)
+    queue: multiprocessing.Queue[tuple[str, str]] = ctx.Queue()
+    racers = [
+        ctx.Process(target=_racing_build_worker, args=(str(store.root), instant, barrier, queue))
+        for instant in INSTANTS[:2]
+    ]
+    for process in racers:
+        process.start()
+    try:
+        outcomes = dict(queue.get(timeout=600) for _ in racers)
+        for process in racers:
+            process.join(timeout=60)
+    finally:
+        for process in racers:
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=10)
+
+    assert sorted(outcome.split(":")[0] for outcome in outcomes.values()) == ["conflict", "ok"], (
+        outcomes
+    )
+    winner = next(datetime.fromisoformat(at) for at, outcome in outcomes.items() if outcome == "ok")
+    loser = next(at for at in INSTANTS[:2] if at != winner)
+    definition = FACTOR_DEFINITIONS.get(RACED)
+
+    stored = load_factor_observations(store, definition, years=(2026,), as_of=READ_AT)
+    manifests = load_factor_manifests(store, definition, years=(2026,), as_of=READ_AT)
+    assert {manifest.as_of for manifest in manifests} == {winner}
+    assert {row.manifest_id for row in stored} == {manifest.manifest_id for manifest in manifests}
+
+    _raw_only(store, RACED, as_ofs=(loser,))
+    manifests = load_factor_manifests(store, definition, years=(2026,), as_of=READ_AT)
+    assert {manifest.as_of for manifest in manifests} == {winner, loser}
+    stored = load_factor_observations(store, definition, years=(2026,), as_of=READ_AT)
+    assert {row.manifest_id for row in stored} == {manifest.manifest_id for manifest in manifests}

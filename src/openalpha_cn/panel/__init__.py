@@ -44,6 +44,7 @@ from openalpha_cn.panel.store import (
     PanelCatalogBusyError,
     PanelStorageError,
     PanelStore,
+    PanelWriteConflictError,
     PartitionRef,
 )
 
@@ -64,6 +65,7 @@ __all__ = [
     "PanelStorageError",
     "PanelStore",
     "PanelVisibleReadOutcome",
+    "PanelWriteConflictError",
     "PartitionCoverage",
     "PartitionRef",
     "PartitionState",

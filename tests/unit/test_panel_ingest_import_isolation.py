@@ -402,7 +402,10 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_ingest.load_return_path_records",
             "panel_ingest.merge_panel_batches",
             "panel_ingest.split_panel_batch_by_year",
-            "panel_ingest.write_panel_batch",
+            # `V2-P6-028`: a build's partitions land as one group write, against the stored
+            # content each merge was made on. A write door, so it reaches no dataset.
+            "panel_ingest.BatchWrite",
+            "panel_ingest.write_panel_batches",
         }
     ),
     "openalpha_cn.panel_neutralization": frozenset(
@@ -423,7 +426,10 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_ingest.load_industry_cross_section",
             "panel_ingest.merge_panel_batches",
             "panel_ingest.split_panel_batch_by_year",
-            "panel_ingest.write_panel_batch",
+            # `V2-P6-028`: a build's partitions land as one group write, against the stored
+            # content each merge was made on. A write door, so it reaches no dataset.
+            "panel_ingest.BatchWrite",
+            "panel_ingest.write_panel_batches",
         }
     ),
     "openalpha_cn.factor_view": frozenset(
@@ -464,8 +470,8 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             # read. A statement dataset the engine already reads, through the engine's own door.
             "panel_factors.statement_newest_periods",
             "panel_factors.unread_newest_sessions",
-            "panel_factors.write_factor_panels",
-            "panel_factors.write_processed_factor_panels",
+            "panel_factors.plan_factor_panels",
+            "panel_factors.plan_processed_factor_panels",
             "panel_ingest.daily_basic_requirement",
             "panel_ingest.daily_requirement",
             "panel_ingest.financial_statement_requirement",
@@ -492,10 +498,14 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_neutralization.load_industry_market_cap_cross_section",
             "panel_neutralization.load_neutralized_factor_observations",
             "panel_neutralization.neutralized_factor_dataset",
-            "panel_neutralization.write_neutralized_factor_panels",
+            "panel_neutralization.plan_neutralized_factor_panels",
             "panel_view.PANEL_STORE_PLACEHOLDER",
             "panel_view.panel_store",
             "panel_view.without_store_path",
+            # `V2-P6-028`: every tier of one build is planned, then committed as one group
+            # write. Write doors, so they reach no dataset.
+            "panel_ingest.BatchWrite",
+            "panel_ingest.write_panel_batches",
         }
     ),
     "openalpha_cn.feature_matrix": frozenset(

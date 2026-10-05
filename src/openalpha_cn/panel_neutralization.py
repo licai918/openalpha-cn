@@ -309,11 +309,12 @@ from openalpha_cn.panel_factors import (
     appended_to_the_stored_year,
 )
 from openalpha_cn.panel_ingest import (
+    BatchWrite,
     load_daily_valuations,
     load_industry_cross_section,
     merge_panel_batches,
     split_panel_batch_by_year,
-    write_panel_batch,
+    write_panel_batches,
 )
 
 # --- the two datasets a neutralisation writes -----------------------------------------------------
@@ -1738,6 +1739,34 @@ def write_neutralized_factor_panels(
 ) -> tuple[PartitionRef, ...]:
     """Write every neutralised panel and its manifest, merged into one partition per year.
 
+    `plan_neutralized_factor_panels` and then one `write_panel_batches` call (`V2-P6-028`):
+    every partition lands in one exclusive hold, against the stored content each merge was
+    made on, so a reader joining them sees all or none and a racing writer of the same
+    partitions makes this a `PanelWriteConflictError` rather than a lost update. See the plan
+    for every guard and its reason.
+    """
+    return write_panel_batches(
+        store,
+        plan_neutralized_factor_panels(
+            store, panels, supersedes=supersedes, date_timezone=date_timezone
+        ),
+        date_timezone=date_timezone,
+    )
+
+
+def plan_neutralized_factor_panels(
+    store: PanelStore,
+    panels: Sequence[NeutralizedFactorPanel],
+    *,
+    supersedes: Collection[str] = (),
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> tuple[BatchWrite, ...]:
+    """Plan the write of every neutralised panel and its manifest, one merged batch per year.
+
+    Each batch is guarded and carries the stored content it was merged onto as its
+    compare-and-swap expectation (`V2-P6-028`). Nothing is written here;
+    `write_panel_batches` commits the plan, in one exclusive hold.
+
     `write_processed_factor_panels`' shape, and every one of its arguments applies unchanged: a
     partition is replaced whole and has no append, so everything belonging to one `(dataset, year)`
     has to reach the store in one call; `supersedes` names the `neutralization_manifest_id`s this
@@ -1821,7 +1850,7 @@ def write_neutralized_factor_panels(
     for year, appended in planned:
         _refuse_a_merge_that_lost_a_stored_build(appended, year)
     return tuple(
-        write_panel_batch(store, appended.batch, year=year, date_timezone=date_timezone)
+        BatchWrite(batch=appended.batch, year=year, expected=appended.base)
         for year, appended in planned
     )
 
@@ -1961,43 +1990,48 @@ def load_neutralized_factor_observations(
     Python, because `read_visible_at` projects columns and takes no predicate -- 4.9x at eight
     variants for the same answer on a 2,000-name cross section.
     """
-    requirement = neutralized_factor_requirement(definition, years=years, as_of=as_of)
-    dataset = requirement.dataset
-    # Once, not once per row (`V2-P6-022`), for `load_processed_factor_observations`' reason.
-    wanted = spec.neutralization_id
-    found: list[NeutralizedFactorObservation] = []
-    for year in sorted(set(years)):
-        outcome = store.read_visible_at(
-            requirement,
-            year=year,
-            columns=(EVENT_TIME_COLUMN, *NEUTRALIZED_OBSERVATION_PANEL_COLUMNS),
+    # One shared hold for the rows and the manifests that address them (`V2-P6-028`): read in
+    # two holds, a build committed between them is observations without their manifest,
+    # which the check below refuses -- and a research run files that as a refused row.
+    with store.reading():
+        requirement = neutralized_factor_requirement(definition, years=years, as_of=as_of)
+        dataset = requirement.dataset
+        # Once, not once per row (`V2-P6-022`), for `load_processed_factor_observations`' reason.
+        wanted = spec.neutralization_id
+        found: list[NeutralizedFactorObservation] = []
+        for year in sorted(set(years)):
+            outcome = store.read_visible_at(
+                requirement,
+                year=year,
+                columns=(EVENT_TIME_COLUMN, *NEUTRALIZED_OBSERVATION_PANEL_COLUMNS),
+            )
+            if outcome.is_blocked:
+                raise FactorEngineError(
+                    f"{dataset} year={year} cannot be read at {as_of.isoformat()}: "
+                    f"{[issue.code for issue in outcome.blocking_issues]}"
+                )
+            found.extend(
+                row
+                for row in (
+                    _neutralized_observation_from_row(cells, dataset=dataset)
+                    for cells in outcome.rows
+                )
+                if row.neutralization_id == wanted
+            )
+        _refuse_rows_that_are_not_the_answers_their_manifest_addresses(
+            found,
+            dataset=dataset,
+            build_of=lambda row: row.neutralization_manifest_id,
+            addressed={
+                manifest.neutralization_manifest_id: manifest.neutralized_observation_digest
+                for manifest in load_factor_neutralization_manifests(
+                    store, definition, years=years, as_of=as_of
+                )
+                if manifest.neutralization_id == spec.neutralization_id
+            },
+            digest_of=neutralized_observation_digest,
         )
-        if outcome.is_blocked:
-            raise FactorEngineError(
-                f"{dataset} year={year} cannot be read at {as_of.isoformat()}: "
-                f"{[issue.code for issue in outcome.blocking_issues]}"
-            )
-        found.extend(
-            row
-            for row in (
-                _neutralized_observation_from_row(cells, dataset=dataset) for cells in outcome.rows
-            )
-            if row.neutralization_id == wanted
-        )
-    _refuse_rows_that_are_not_the_answers_their_manifest_addresses(
-        found,
-        dataset=dataset,
-        build_of=lambda row: row.neutralization_manifest_id,
-        addressed={
-            manifest.neutralization_manifest_id: manifest.neutralized_observation_digest
-            for manifest in load_factor_neutralization_manifests(
-                store, definition, years=years, as_of=as_of
-            )
-            if manifest.neutralization_id == spec.neutralization_id
-        },
-        digest_of=neutralized_observation_digest,
-    )
-    return tuple(found)
+        return tuple(found)
 
 
 def load_factor_neutralization_manifests(

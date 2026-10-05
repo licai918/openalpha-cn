@@ -940,13 +940,14 @@ from openalpha_cn.panel.catalog import (
     PanelStorageError,
     ReadinessRequirement,
 )
-from openalpha_cn.panel.store import PanelStore, PartitionRef
+from openalpha_cn.panel.store import PanelStore, PartitionExpectation, PartitionRef
 from openalpha_cn.panel_ingest import (
+    BatchWrite,
     carry_stored_rows_forward,
     load_return_path_records,
     merge_panel_batches,
     split_panel_batch_by_year,
-    write_panel_batch,
+    write_panel_batches,
 )
 
 FactorAxis = Literal["session", "period"]
@@ -6754,6 +6755,32 @@ def write_factor_panels(
 ) -> tuple[PartitionRef, ...]:
     """Write every panel's observations and manifests, merged into one partition per year.
 
+    `plan_factor_panels` and then one `write_panel_batches` call (`V2-P6-028`):
+    every partition lands in one exclusive hold, against the stored content each merge was
+    made on, so a reader joining them sees all or none and a racing writer of the same
+    partitions makes this a `PanelWriteConflictError` rather than a lost update. See the plan
+    for every guard and its reason.
+    """
+    return write_panel_batches(
+        store,
+        plan_factor_panels(store, panels, supersedes=supersedes, date_timezone=date_timezone),
+        date_timezone=date_timezone,
+    )
+
+
+def plan_factor_panels(
+    store: PanelStore,
+    panels: Sequence[FactorPanel],
+    *,
+    supersedes: Collection[str] = (),
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> tuple[BatchWrite, ...]:
+    """Plan the write of every panel's observations and manifests, one merged batch per year.
+
+    Each batch is guarded and carries the stored content it was merged onto as its
+    compare-and-swap expectation (`V2-P6-028`). Nothing is written here;
+    `write_panel_batches` commits the plan, in one exclusive hold.
+
     Takes a **sequence** for the reason `write_daily_panel` and `write_adjustment_factors` do:
     `PanelStore.write_partition` replaces a partition whole and has no append, so a caller
     writing one `as_of` at a time would destroy the year each time. Every `as_of` of one factor
@@ -6853,7 +6880,7 @@ def write_factor_panels(
     for year, appended in planned:
         _refuse_a_merge_that_lost_a_stored_build(appended, year)
     return tuple(
-        write_panel_batch(store, appended.batch, year=year, date_timezone=date_timezone)
+        BatchWrite(batch=appended.batch, year=year, expected=appended.base)
         for year, appended in planned
     )
 
@@ -6939,6 +6966,12 @@ class AppendedYear:
     superseded build is subtracted by name, and a build this write re-answers is in `batch`
     already. A non-empty value is either a rebuild that has not said what it replaces or a hole in
     the merge, and both are refusals rather than warnings.
+    """
+
+    base: PartitionExpectation
+    """What the partition held when its stored rows were read for this merge (`V2-P6-028`): the
+    compare-and-swap a group write commits against, so a merge whose base another writer has
+    replaced since is refused (`PanelWriteConflictError`) instead of replacing that writer's rows.
     """
 
 
@@ -7048,14 +7081,18 @@ def appended_to_the_stored_year(
             return False
         return tuple(row[name] for name in identity_columns) not in occupied
 
-    merged = carry_stored_rows_forward(store, batch, year=year, retain=retain)
+    # The base the merge is made on and its content hash in one shared hold (`V2-P6-028`), so the
+    # expectation names exactly the rows the merge carried.
+    with store.reading():
+        base = PartitionExpectation(store.partition_content_hash(batch.dataset, year))
+        merged = carry_stored_rows_forward(store, batch, year=year, retain=retain)
     carried = {
         str(value)
         for column in merged.storage_columns()
         if column.name == build_column
         for value in column.values
     }
-    return AppendedYear(batch=merged, lost=tuple(sorted(held - carried - replaced)))
+    return AppendedYear(batch=merged, lost=tuple(sorted(held - carried - replaced)), base=base)
 
 
 def _refuse_a_merge_that_lost_a_stored_build(appended: AppendedYear, year: int) -> None:
@@ -7282,32 +7319,36 @@ def load_factor_observations(
     the raw partition is for, and this function's whole contract is that what it returns is what
     the build wrote.
     """
-    requirement = factor_observation_requirement(definition, years=years, as_of=as_of)
-    dataset = requirement.dataset
-    found: list[FactorObservation] = []
-    for year in sorted(set(years)):
-        outcome = store.read_visible_at(
-            requirement,
-            year=year,
-            columns=(EVENT_TIME_COLUMN, *FACTOR_OBSERVATION_PANEL_COLUMNS),
-        )
-        if outcome.is_blocked:
-            raise FactorEngineError(
-                f"{dataset} year={year} cannot be read at "
-                f"{as_of.isoformat()}: {[issue.code for issue in outcome.blocking_issues]}"
+    # One shared hold for the rows and the manifests that address them (`V2-P6-028`): read in
+    # two holds, a build committed between them is observations without their manifest,
+    # which the check below refuses -- and a research run files that as a refused row.
+    with store.reading():
+        requirement = factor_observation_requirement(definition, years=years, as_of=as_of)
+        dataset = requirement.dataset
+        found: list[FactorObservation] = []
+        for year in sorted(set(years)):
+            outcome = store.read_visible_at(
+                requirement,
+                year=year,
+                columns=(EVENT_TIME_COLUMN, *FACTOR_OBSERVATION_PANEL_COLUMNS),
             )
-        found.extend(_observation_from_row(row, dataset=dataset) for row in outcome.rows)
-    _refuse_rows_that_are_not_the_answers_their_manifest_addresses(
-        found,
-        dataset=dataset,
-        build_of=lambda row: row.manifest_id,
-        addressed={
-            manifest.manifest_id: manifest.observation_digest
-            for manifest in load_factor_manifests(store, definition, years=years, as_of=as_of)
-        },
-        digest_of=observation_digest,
-    )
-    return tuple(found)
+            if outcome.is_blocked:
+                raise FactorEngineError(
+                    f"{dataset} year={year} cannot be read at "
+                    f"{as_of.isoformat()}: {[issue.code for issue in outcome.blocking_issues]}"
+                )
+            found.extend(_observation_from_row(row, dataset=dataset) for row in outcome.rows)
+        _refuse_rows_that_are_not_the_answers_their_manifest_addresses(
+            found,
+            dataset=dataset,
+            build_of=lambda row: row.manifest_id,
+            addressed={
+                manifest.manifest_id: manifest.observation_digest
+                for manifest in load_factor_manifests(store, definition, years=years, as_of=as_of)
+            },
+            digest_of=observation_digest,
+        )
+        return tuple(found)
 
 
 _Row = TypeVar("_Row")
@@ -9279,6 +9320,34 @@ def write_processed_factor_panels(
 ) -> tuple[PartitionRef, ...]:
     """Write every processed panel and its manifest, merged into one partition per year.
 
+    `plan_processed_factor_panels` and then one `write_panel_batches` call (`V2-P6-028`):
+    every partition lands in one exclusive hold, against the stored content each merge was
+    made on, so a reader joining them sees all or none and a racing writer of the same
+    partitions makes this a `PanelWriteConflictError` rather than a lost update. See the plan
+    for every guard and its reason.
+    """
+    return write_panel_batches(
+        store,
+        plan_processed_factor_panels(
+            store, panels, supersedes=supersedes, date_timezone=date_timezone
+        ),
+        date_timezone=date_timezone,
+    )
+
+
+def plan_processed_factor_panels(
+    store: PanelStore,
+    panels: Sequence[ProcessedFactorPanel],
+    *,
+    supersedes: Collection[str] = (),
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> tuple[BatchWrite, ...]:
+    """Plan the write of every processed panel and its manifest, one merged batch per year.
+
+    Each batch is guarded and carries the stored content it was merged onto as its
+    compare-and-swap expectation (`V2-P6-028`). Nothing is written here;
+    `write_panel_batches` commits the plan, in one exclusive hold.
+
     `write_factor_panels`' shape, and every one of its arguments applies unchanged: a partition
     is replaced whole and has no append, so everything belonging to one `(dataset, year)` has to
     reach the store in one call; `supersedes` names the `transform_manifest_id`s this call is
@@ -9365,7 +9434,7 @@ def write_processed_factor_panels(
     for year, appended in planned:
         _refuse_a_merge_that_lost_a_stored_build(appended, year)
     return tuple(
-        write_panel_batch(store, appended.batch, year=year, date_timezone=date_timezone)
+        BatchWrite(batch=appended.batch, year=year, expected=appended.base)
         for year, appended in planned
     )
 
@@ -9513,45 +9582,50 @@ def load_processed_factor_observations(
     one. `V2-P3-014` is where a report that needs several transforms should read the year once
     and group in Python instead of calling this function per transform.
     """
-    requirement = processed_factor_requirement(definition, years=years, as_of=as_of)
-    dataset = requirement.dataset
-    # Once, not once per row (`V2-P6-022`): `transform_id` is a digest of the spec's canonical
-    # JSON, recomputed on every access -- 915k JSON encodings and SHA-256s for one year of one
-    # factor, a third of this read, for a value the frozen spec cannot change.
-    wanted = spec.transform_id
-    found: list[ProcessedFactorObservation] = []
-    for year in sorted(set(years)):
-        outcome = store.read_visible_at(
-            requirement,
-            year=year,
-            columns=(EVENT_TIME_COLUMN, *PROCESSED_OBSERVATION_PANEL_COLUMNS),
+    # One shared hold for the rows and the manifests that address them (`V2-P6-028`): read in
+    # two holds, a build committed between them is observations without their manifest,
+    # which the check below refuses -- and a research run files that as a refused row.
+    with store.reading():
+        requirement = processed_factor_requirement(definition, years=years, as_of=as_of)
+        dataset = requirement.dataset
+        # Once, not once per row (`V2-P6-022`): `transform_id` is a digest of the spec's canonical
+        # JSON, recomputed on every access -- 915k JSON encodings and SHA-256s for one year of one
+        # factor, a third of this read, for a value the frozen spec cannot change.
+        wanted = spec.transform_id
+        found: list[ProcessedFactorObservation] = []
+        for year in sorted(set(years)):
+            outcome = store.read_visible_at(
+                requirement,
+                year=year,
+                columns=(EVENT_TIME_COLUMN, *PROCESSED_OBSERVATION_PANEL_COLUMNS),
+            )
+            if outcome.is_blocked:
+                raise FactorEngineError(
+                    f"{dataset} year={year} cannot be read at "
+                    f"{as_of.isoformat()}: {[issue.code for issue in outcome.blocking_issues]}"
+                )
+            found.extend(
+                row
+                for row in (
+                    _processed_observation_from_row(cells, dataset=dataset)
+                    for cells in outcome.rows
+                )
+                if row.transform_id == wanted
+            )
+        _refuse_rows_that_are_not_the_answers_their_manifest_addresses(
+            found,
+            dataset=dataset,
+            build_of=lambda row: row.transform_manifest_id,
+            addressed={
+                manifest.transform_manifest_id: manifest.processed_observation_digest
+                for manifest in load_factor_transform_manifests(
+                    store, definition, years=years, as_of=as_of
+                )
+                if manifest.transform_id == spec.transform_id
+            },
+            digest_of=processed_observation_digest,
         )
-        if outcome.is_blocked:
-            raise FactorEngineError(
-                f"{dataset} year={year} cannot be read at "
-                f"{as_of.isoformat()}: {[issue.code for issue in outcome.blocking_issues]}"
-            )
-        found.extend(
-            row
-            for row in (
-                _processed_observation_from_row(cells, dataset=dataset) for cells in outcome.rows
-            )
-            if row.transform_id == wanted
-        )
-    _refuse_rows_that_are_not_the_answers_their_manifest_addresses(
-        found,
-        dataset=dataset,
-        build_of=lambda row: row.transform_manifest_id,
-        addressed={
-            manifest.transform_manifest_id: manifest.processed_observation_digest
-            for manifest in load_factor_transform_manifests(
-                store, definition, years=years, as_of=as_of
-            )
-            if manifest.transform_id == spec.transform_id
-        },
-        digest_of=processed_observation_digest,
-    )
-    return tuple(found)
+        return tuple(found)
 
 
 def load_factor_transform_manifests(

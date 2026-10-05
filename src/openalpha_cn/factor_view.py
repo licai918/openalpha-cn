@@ -324,14 +324,15 @@ from openalpha_cn.panel_factors import (
     load_factor_transform_manifests,
     load_processed_factor_observations,
     oldest_admissible_newest_period,
+    plan_factor_panels,
+    plan_processed_factor_panels,
     processed_factor_dataset,
     session_return_links,
     statement_newest_periods,
     unread_newest_sessions,
-    write_factor_panels,
-    write_processed_factor_panels,
 )
 from openalpha_cn.panel_ingest import (
+    BatchWrite,
     daily_basic_requirement,
     daily_requirement,
     financial_statement_requirement,
@@ -344,6 +345,7 @@ from openalpha_cn.panel_ingest import (
     load_stock_universe,
     load_suspensions,
     load_trading_calendar,
+    write_panel_batches,
 )
 from openalpha_cn.panel_neutralization import (
     FACTOR_NEUTRALIZATION_MANIFEST_DATASET_PREFIX,
@@ -357,7 +359,7 @@ from openalpha_cn.panel_neutralization import (
     load_industry_market_cap_cross_section,
     load_neutralized_factor_observations,
     neutralized_factor_dataset,
-    write_neutralized_factor_panels,
+    plan_neutralized_factor_panels,
 )
 from openalpha_cn.panel_view import (
     PANEL_STORE_PLACEHOLDER,
@@ -410,6 +412,7 @@ __all__ = [
 ]
 
 _T = TypeVar("_T")
+_Planned = TypeVar("_Planned")
 
 TierObservation = FactorObservation | ProcessedFactorObservation | NeutralizedFactorObservation
 """The three stored observation contracts, as the one type this module walks them under.
@@ -3683,17 +3686,24 @@ def _build_one(
             _neutralized(store, request, panel=panel, built_at=built_at, context=context)
             for panel in processed
         ]
-    written = list(
+    # Every tier is planned -- merged onto what is stored and guarded -- and then the whole build
+    # is committed as one group write (`V2-P6-028`). As one write per tier, and within a tier one
+    # per partition, a reader in another process between two of them met observations whose
+    # manifest was not stored yet, which is a refusal a research run files as a refused row; and
+    # two builds of this factor racing could each commit half, leaving observations and manifests
+    # that answer different builds. Now a reader sees the whole build or none of it, and a racing
+    # build that committed first makes this one a `PanelWriteConflictError` that writes nothing.
+    plan = list(
         _written(
-            lambda: write_factor_panels(store, panels, supersedes=request.supersedes_raw),
+            lambda: plan_factor_panels(store, panels, supersedes=request.supersedes_raw),
             tier="raw",
             flag="--supersedes-raw",
         )
     )
     if processed:
-        written.extend(
+        plan.extend(
             _written(
-                lambda: write_processed_factor_panels(
+                lambda: plan_processed_factor_panels(
                     store, processed, supersedes=request.supersedes_processed
                 ),
                 tier="processed",
@@ -3701,15 +3711,16 @@ def _build_one(
             )
         )
     if neutralized:
-        written.extend(
+        plan.extend(
             _written(
-                lambda: write_neutralized_factor_panels(
+                lambda: plan_neutralized_factor_panels(
                     store, neutralized, supersedes=request.supersedes_neutralized
                 ),
                 tier="neutralized",
                 flag="--supersedes-neutralized",
             )
         )
+    written = _committed(store, plan)
     return FactorBuildReport(
         factor=request.definition.qualified_key,
         factor_id=request.definition.factor_id,
@@ -3756,9 +3767,14 @@ def _build_one(
 
 
 def _written(
-    write: Callable[[], Sequence[PartitionRef]], *, tier: BuildTier, flag: str
-) -> Sequence[PartitionRef]:
-    """One tier's write, with a refused write turned into this module's own `blocked`.
+    write: Callable[[], Sequence[_Planned]], *, tier: BuildTier, flag: str
+) -> Sequence[_Planned]:
+    """One tier's planned write, with a refused plan turned into this module's own `blocked`.
+
+    Since `V2-P6-028` a tier is *planned* here -- merged onto what is stored and run past every
+    guard -- and the whole build is committed afterwards in one group write (`_committed`), so a
+    refusal of any tier now leaves nothing of the build written, where it used to leave the
+    tiers before it stored.
 
     The write-time guards raise the panel plane's own exception types, and every one of them here
     is a statement about what the store already holds rather than about the request: a partition is
@@ -3782,7 +3798,28 @@ def _written(
             "no longer needs the year rebuilt -- the write carries the stored builds forward "
             "(`V2-P4-071`) -- so what is left here is a build that answers a question the "
             f"partition already has an answer to, and a rebuild that means to replace one names "
-            f"it with {flag}. Nothing this invocation computed after this point was written"
+            f"it with {flag}. Nothing of this build was written"
+        ) from error
+
+
+def _committed(store: PanelStore, plan: Sequence[BatchWrite]) -> tuple[PartitionRef, ...]:
+    """Commit a build's planned tiers as one group write (`V2-P6-028`).
+
+    A `PanelStorageError` here is a write the store refused after every guard passed, and it is
+    this module's `blocked` like the guards' refusals. A `PanelWriteConflictError` is not caught:
+    another build of the same partitions committed after this one read them, nothing of this one
+    was written, and the remedy is to run it again -- which re-reads what that build stored and
+    merges onto it. It is contention, not a verdict, so it reaches the face as its own class
+    (`cli.PanelExit.catalog_busy`, HTTP `503`) rather than as a `blocked` a research run would
+    file as a refused row. No retry loop here: a re-run has to re-plan from fresh reads, which is
+    the whole build.
+    """
+    try:
+        return write_panel_batches(store, plan)
+    except PanelStorageError as error:
+        raise FactorRunBlockedError(
+            f"the build's partitions were refused when they were written: {error}. Nothing of "
+            "this build was written"
         ) from error
 
 

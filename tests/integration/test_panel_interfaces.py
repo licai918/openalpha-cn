@@ -54,7 +54,7 @@ from openalpha_cn.domain.index_membership import INDEX_WEIGHT_DATASET
 from openalpha_cn.domain.price_limits import SUSPENSION_DATASET
 from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET
 from openalpha_cn.domain.trading_calendar import TRADING_CALENDAR_DATASET
-from openalpha_cn.panel.store import PanelCatalogBusyError, PanelStore
+from openalpha_cn.panel.store import PanelCatalogBusyError, PanelStore, PanelWriteConflictError
 from openalpha_cn.panel_doctor import (
     HEALTH_CATEGORIES,
     HEALTH_CODE_CATEGORY,
@@ -870,12 +870,20 @@ def test_a_catalog_held_past_its_bound_is_a_retryable_503_and_not_a_crash(
 ) -> None:
     """`V2-P6-028`. `PanelCatalogBusyError` means another process held the catalog for the
     whole bounded wait: nothing was judged and nothing broke. Every route answers it the same
-    way, `503` with a `Retry-After` and the error's own message (the catalog, the lock file, the
-    bound -- no credential), rather than the `500` an unanticipated exception gets."""
-    seed_panel(tmp_path)
+    way, `503` with a `Retry-After`, the side and the bound -- and, like every other refusal
+    body here, without saying where the store lives: `str(error)` names the catalog and its lock
+    file by absolute path, and only `disclosable` crosses the process boundary."""
+    store = seed_panel(tmp_path)
+    locations = {str(store.root), str(store.root.resolve()), str(tmp_path)}
 
     def busy(self: PanelStore, requirement: object) -> object:
-        raise PanelCatalogBusyError(f"the panel catalog {self.catalog_path} was not free")
+        raise PanelCatalogBusyError(
+            f"the panel catalog {self.catalog_path} was not free (lock file "
+            f"{self.catalog_path}.lock)",
+            side="shared",
+            timeout=600.0,
+            catalog_path=self.catalog_path,
+        )
 
     monkeypatch.setattr(PanelStore, "_partition_states", busy)
     client = TestClient(create_app(runtime_dir=tmp_path), raise_server_exceptions=False)
@@ -888,7 +896,37 @@ def test_a_catalog_held_past_its_bound_is_a_retryable_503_and_not_a_crash(
     assert response.headers["retry-after"]
     detail = response.json()["detail"]
     assert detail["reason"] == "catalog_busy"
-    assert "catalog.duckdb" in detail["message"]
+    assert "shared" in detail["message"]
+    assert "600s" in detail["message"]
+    for location in locations:
+        assert location not in response.text, response.text
+    assert "catalog.duckdb" not in response.text
+
+
+def test_a_write_whose_base_moved_is_the_same_retryable_503_under_its_own_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`V2-P6-028`. `PanelWriteConflictError` stored nothing and the same request re-plans from
+    what is stored now: `503`, `Retry-After`, `reason: write_conflict`, the partitions named."""
+    seed_panel(tmp_path)
+
+    def moved(self: PanelStore, requirement: object) -> object:
+        raise PanelWriteConflictError(
+            "['factor_obs_x_v1@2026'] changed after this write read them to plan itself",
+            targets=("factor_obs_x_v1@2026",),
+        )
+
+    monkeypatch.setattr(PanelStore, "_partition_states", moved)
+    client = TestClient(create_app(runtime_dir=tmp_path), raise_server_exceptions=False)
+
+    response = client.get(
+        "/api/v1/panel/readiness", params=without(query(sessions=(), calendar=False), "session")
+    )
+
+    assert response.status_code == CATALOG_BUSY_HTTP_STATUS
+    assert response.headers["retry-after"]
+    assert response.json()["detail"]["reason"] == "write_conflict"
+    assert "factor_obs_x_v1@2026" in response.json()["detail"]["message"]
 
 
 def test_a_catalog_that_is_not_a_database_is_the_endpoint_breaking_and_not_a_verdict(
