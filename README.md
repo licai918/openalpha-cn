@@ -582,6 +582,12 @@ it, extend the factor series over the window -- `openalpha panel build --dataset
   「不允许丢弃已存构建」的守卫拒绝，除非用 `--supersedes-raw` / `--supersedes-processed` /
   `--supersedes-neutralized` 点名它要替换掉哪些 `manifest_id`。三个选项而不是一个，因为三档
   是三份不同的 manifest 分区，每个 writer 都会拒绝一个「它触碰的分区都不持有」的名字。
+- **一次构建整体写入（`V2-P6-028`）。** 一次 `factor build` 存的每一档——raw、processed、
+  neutralized 及各自的 manifest——在同一次写入里落盘，其他进程的读取要么看到全部，要么一点也
+  看不到。代价是：较高一档被拒时，这次构建的任何一档都不写（以前较低档位会先写入）；需要时用
+  `--tier raw` 或 `--tier processed` 单独构建较低档位。多个 `factor build` 进程可以同时使用同一
+  个面板；其中一个以**退出码 6** 停下，要么是面板被其他进程占用超过等待上限，要么是同一个因子
+  的另一次构建先提交了它读过的分区。两者都不是数据问题，什么都没写，原样重跑即可。
 - **`--year` 是分区年，不是 `factor run` 的 `--start/--end`（那是预测日）。** 一年一年数：
   125 个会话回看的因子在年初需要上一年；财报分区按**公告年**归档，五个报告期通常要两个公告年。
 - **登记簿是唯一一个 `--year` 不必数全的数据集，因为它数不全。** `trade_cal` 与 `daily` 按

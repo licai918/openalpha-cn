@@ -2786,117 +2786,125 @@ def panel_health_report(
     health report that raises on an unhealthy panel is a health report that is never there
     when it is needed.
     """
-    requested = tuple(dict.fromkeys(datasets))
-    per_dataset_years = dict(years_by_dataset or {})
-    overrides = dict(freshness_overrides or {})
-    years_for: dict[str, tuple[int, ...]] = {
-        name: tuple(per_dataset_years.get(name, years)) for name in requested
-    }
+    # One shared hold for every dataset this report reads (`V2-P6-028`): the cross-dataset checks
+    # below (`SUBJECT_CONTAINMENTS`, the rebuild and seal checks) compare datasets with each other,
+    # and read in separate holds a group write landing between two of them is a disagreement no
+    # stored state ever held. Writers wait for the report; it reads catalogs and footers, not rows.
+    with store.reading():
+        requested = tuple(dict.fromkeys(datasets))
+        per_dataset_years = dict(years_by_dataset or {})
+        overrides = dict(freshness_overrides or {})
+        years_for: dict[str, tuple[int, ...]] = {
+            name: tuple(per_dataset_years.get(name, years)) for name in requested
+        }
 
-    healths: list[DatasetHealth] = []
-    for name in requested:
-        policy = freshness_policy(name, calendar=calendar)
-        if name in overrides:
-            policy = replace(
-                policy,
-                max_staleness=overrides[name],
-                basis=f"stated by the caller, replacing: {policy.basis}",
+        healths: list[DatasetHealth] = []
+        for name in requested:
+            policy = freshness_policy(name, calendar=calendar)
+            if name in overrides:
+                policy = replace(
+                    policy,
+                    max_staleness=overrides[name],
+                    basis=f"stated by the caller, replacing: {policy.basis}",
+                )
+            healths.append(
+                dataset_health(
+                    store,
+                    dataset=name,
+                    as_of=as_of,
+                    years=years_for[name],
+                    calendar=calendar,
+                    index_codes=index_codes,
+                    freshness=policy,
+                    date_timezone=date_timezone,
+                )
             )
-        healths.append(
-            dataset_health(
+
+        bounds = {health.dataset: health.freshness.max_staleness for health in healths}
+        cross_findings: list[HealthFinding] = []
+        checks: list[CrossCheckOutcome] = []
+
+        findings, outcome = _calendar_lookahead_check(calendar)
+        cross_findings.extend(findings)
+        checks.append(outcome)
+
+        findings, outcome = _subject_check(store, healths)
+        cross_findings.extend(findings)
+        checks.append(outcome)
+
+        findings, outcome = _rebuild_check(
+            store,
+            healths=healths,
+            as_of=as_of,
+            years=years_for,
+            bounds=bounds,
+            calendar=calendar,
+            date_timezone=date_timezone,
+        )
+        cross_findings.extend(findings)
+        checks.append(outcome)
+
+        findings, outcome = _factor_seal_check(store, healths=healths, as_of=as_of, years=years_for)
+        cross_findings.extend(findings)
+        checks.append(outcome)
+
+        in_scope = set(requested)
+        days = tuple(cross_section_days)
+
+        if days and calendar is not None and {DAILY_DATASET, DAILY_BASIC_DATASET} <= in_scope:
+            findings, outcome = _close_check(
+                store, days=days, calendar=calendar, as_of=as_of, bounds=bounds
+            )
+            cross_findings.extend(findings)
+            checks.append(outcome)
+
+        if (
+            days
+            and calendar is not None
+            and {DAILY_DATASET, ADJ_FACTOR_DATASET, STOCK_BASIC_DATASET, SUSPENSION_DATASET}
+            <= in_scope
+        ):
+            findings, outcome = _unpriced_check(
                 store,
-                dataset=name,
-                as_of=as_of,
-                years=years_for[name],
+                days=days,
                 calendar=calendar,
-                index_codes=index_codes,
-                freshness=policy,
-                date_timezone=date_timezone,
+                as_of=as_of,
+                years=years_for,
+                bounds=bounds,
             )
+            cross_findings.extend(findings)
+            checks.append(outcome)
+
+        if days and calendar is not None and {DAILY_DATASET, ADJ_FACTOR_DATASET} <= in_scope:
+            findings, outcome = _return_path_check(
+                store,
+                days=days,
+                calendar=calendar,
+                as_of=as_of,
+                years=years_for,
+                bounds=bounds,
+            )
+            cross_findings.extend(findings)
+            checks.append(outcome)
+
+        statement_datasets = tuple(
+            name for name in requested if name in FINANCIAL_STATEMENT_DATASETS
         )
+        if statement_datasets:
+            findings, outcome = _ambiguity_check(
+                store,
+                datasets=statement_datasets,
+                as_of=as_of,
+                years=years_for,
+                bounds=bounds,
+            )
+            cross_findings.extend(findings)
+            checks.append(outcome)
 
-    bounds = {health.dataset: health.freshness.max_staleness for health in healths}
-    cross_findings: list[HealthFinding] = []
-    checks: list[CrossCheckOutcome] = []
-
-    findings, outcome = _calendar_lookahead_check(calendar)
-    cross_findings.extend(findings)
-    checks.append(outcome)
-
-    findings, outcome = _subject_check(store, healths)
-    cross_findings.extend(findings)
-    checks.append(outcome)
-
-    findings, outcome = _rebuild_check(
-        store,
-        healths=healths,
-        as_of=as_of,
-        years=years_for,
-        bounds=bounds,
-        calendar=calendar,
-        date_timezone=date_timezone,
-    )
-    cross_findings.extend(findings)
-    checks.append(outcome)
-
-    findings, outcome = _factor_seal_check(store, healths=healths, as_of=as_of, years=years_for)
-    cross_findings.extend(findings)
-    checks.append(outcome)
-
-    in_scope = set(requested)
-    days = tuple(cross_section_days)
-
-    if days and calendar is not None and {DAILY_DATASET, DAILY_BASIC_DATASET} <= in_scope:
-        findings, outcome = _close_check(
-            store, days=days, calendar=calendar, as_of=as_of, bounds=bounds
-        )
-        cross_findings.extend(findings)
-        checks.append(outcome)
-
-    if (
-        days
-        and calendar is not None
-        and {DAILY_DATASET, ADJ_FACTOR_DATASET, STOCK_BASIC_DATASET, SUSPENSION_DATASET} <= in_scope
-    ):
-        findings, outcome = _unpriced_check(
-            store,
-            days=days,
-            calendar=calendar,
+        return PanelHealthReport(
             as_of=as_of,
-            years=years_for,
-            bounds=bounds,
+            datasets=tuple(healths),
+            cross_dataset_findings=tuple(cross_findings),
+            cross_checks=tuple(checks),
+            limitations=(*known_limitations(requested), *storage_limitations()),
         )
-        cross_findings.extend(findings)
-        checks.append(outcome)
-
-    if days and calendar is not None and {DAILY_DATASET, ADJ_FACTOR_DATASET} <= in_scope:
-        findings, outcome = _return_path_check(
-            store,
-            days=days,
-            calendar=calendar,
-            as_of=as_of,
-            years=years_for,
-            bounds=bounds,
-        )
-        cross_findings.extend(findings)
-        checks.append(outcome)
-
-    statement_datasets = tuple(name for name in requested if name in FINANCIAL_STATEMENT_DATASETS)
-    if statement_datasets:
-        findings, outcome = _ambiguity_check(
-            store,
-            datasets=statement_datasets,
-            as_of=as_of,
-            years=years_for,
-            bounds=bounds,
-        )
-        cross_findings.extend(findings)
-        checks.append(outcome)
-
-    return PanelHealthReport(
-        as_of=as_of,
-        datasets=tuple(healths),
-        cross_dataset_findings=tuple(cross_findings),
-        cross_checks=tuple(checks),
-        limitations=(*known_limitations(requested), *storage_limitations()),
-    )

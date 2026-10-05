@@ -7084,7 +7084,7 @@ def appended_to_the_stored_year(
     # The base the merge is made on and its content hash in one shared hold (`V2-P6-028`), so the
     # expectation names exactly the rows the merge carried.
     with store.reading():
-        base = PartitionExpectation(store.partition_content_hash(batch.dataset, year))
+        base = store.merge_base(batch.dataset, year)
         merged = carry_stored_rows_forward(store, batch, year=year, retain=retain)
     carried = {
         str(value)

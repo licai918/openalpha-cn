@@ -293,8 +293,10 @@ def bar() -> Callable[..., MarketBar]:
 #     interpreter, and `forkserver` from it).
 #     `tests/unit/test_repository_assets.py` shells out to `git`, and
 #     `tests/integration/storage/test_migrations.py`,
-#     `tests/integration/panel/test_panel_store.py` and
-#     `tests/integration/panel/test_panel_readiness.py` each spawn worker processes this way; none
+#     `tests/integration/panel/test_panel_store.py`,
+#     `tests/integration/panel/test_panel_readiness.py` and
+#     `tests/integration/panel/test_factor_build_shared_context.py` each spawn worker processes
+#     this way; none
 #     of that is a network call. `tests/e2e/` reaches Tushare exactly this way, through the
 #     real `openalpha` binary.
 #   - It does not intercept name resolution. `getaddrinfo` alone transfers nothing, and refusing

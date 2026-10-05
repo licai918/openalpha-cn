@@ -110,6 +110,16 @@ tier in every cell computed nothing, yet it looks like a clean pass to anyone gr
 `factor build --tier neutralized` is refused by name, and writes nothing, at a prediction
 instant before that day's own 16:30 close or on a day the exchange was shut.
 
+**One build is written whole (`V2-P6-028`).** Every tier a `factor build` stores -- raw,
+processed, neutralized, each with its manifests -- lands in one write, so a reader in another
+process sees all of it or none of it. The other side of that: when a higher tier is refused, no
+tier of that build is written, where the lower tiers used to be; build them alone with
+`--tier raw` or `--tier processed` if that is what you want. Several `factor build` processes
+may share one panel at once. One of them exits `6` either when another process held the panel
+past the bounded wait, or when another build of the *same* factor committed the partitions it
+had read first; neither is a verdict, nothing of it was written, and running it again is the
+remedy.
+
 ## The model plane
 
 Above the factor tiers sits the model chain: a versioned feature matrix, a walk-forward split

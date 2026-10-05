@@ -401,8 +401,19 @@ relies on.
   group write now carries the content its merge was made on (`PartitionExpectation`), compared
   inside the hold: the second writer gets `PanelWriteConflictError`, writes nothing, and re-running
   it merges onto what the first stored. Pinned by `test_factor_build_shared_context.py::
-  test_two_builds_of_one_factor_racing_store_one_whole_build_and_refuse_the_other`. A single
-  `write_partition` without an expectation stays last-writer-wins, as it always was.
+  test_two_builds_of_one_factor_racing_store_one_whole_build_and_refuse_the_other`.
+- **Every merge, not only a factor build's, is compared.** An incremental ingest is the same
+  read-modify-write -- `panel_ingest.carry_stored_rows_forward` reads the stored year and the
+  write puts it back with the fetched rows -- and so is the defects record keeping every other
+  target's rows. The merge read records its base on the store (`merge_base`, inside the
+  `reading()` hold that reads the rows), and every write or removal of that partition by the same
+  thread is compared against it whichever writer function it goes through, so a merge cannot be
+  written without its base: no writer carries it to drop it. Two ingests of one dataset and year
+  racing therefore end with one stored and the other a `PanelWriteConflictError` (exit `6`), not
+  with one of them silently gone (`test_panel_readiness.py::
+  test_two_merging_ingests_of_one_partition_racing_store_one_and_refuse_the_other`). A partition
+  written with no merge read before it -- a whole-year replacement, such as a full
+  `panel build` of `daily` -- is last-writer-wins, as it always was, and says so.
 - **Two `PanelStore` instances on one catalog in one thread.** The in-process side belongs to
   an instance, the file lock to the catalog, so a thread that holds one instance's side and asks
   another instance on the same root for any side waits on the file lock it holds itself (or, for
@@ -1166,6 +1177,9 @@ _LOCK_POLL_MAX_SECONDS: Final[float] = 0.025
 this, so a writer waiting behind a long scan does not spin."""
 
 _NO_LOCK_NEEDED: Final[int] = -1
+
+_NO_BASE: Final[object] = object()
+"""`remove_partition`'s "no merge base was recorded", distinct from a recorded `None` (absent)."""
 """What `_lock_file` answers for a reader on a read-only filesystem; see `_open_lock_file`."""
 
 
@@ -1644,6 +1658,56 @@ class PanelStore:
         self._held_states: dict[
             tuple[str, int], tuple[_FileFingerprint, _FileFingerprint | None, PartitionState]
         ] = {}
+        # `V2-P6-028`: the merge bases this thread has read, per `(dataset, year)`; see
+        # `merge_base`. Per thread because a base is a fact about one read-modify-write, and two
+        # threads of one store merging are two of them.
+        self._merge_bases = threading.local()
+
+    def _recorded_bases(self) -> dict[tuple[str, int], str | None]:
+        bases = getattr(self._merge_bases, "bases", None)
+        if bases is None:
+            bases = {}
+            self._merge_bases.bases = bases
+        return cast(dict[tuple[str, int], str | None], bases)
+
+    def merge_base(self, dataset: str, year: int) -> PartitionExpectation:
+        """Record what `(dataset, year)` holds now as this thread's merge base, and return it.
+
+        `V2-P6-028`. A merge-type write -- an incremental ingest carrying the stored sessions
+        forward, a defects record keeping every other target's rows, a factor build appending an
+        instant -- reads a partition's stored rows and writes them back with its own, and two of
+        them racing used to lose one side's rows silently: each partition and its coverage
+        self-consistent, both commands reporting success. So the read that a merge is made on
+        records the partition's content hash here, and **every** later write or removal of that
+        partition by this thread on this store -- `write_partition`, `write_partitions`,
+        `remove_partition`, whichever writer function it goes through -- is compared against it
+        inside its exclusive hold and refused as `PanelWriteConflictError` if another writer has
+        replaced it since. Enforced at the store rather than threaded through the writers'
+        signatures: the read seam records, the write seam consumes, and no writer between them can
+        drop the base, because none of them carries it.
+
+        The first read wins: a second call before the write returns the base already recorded, so
+        a write is compared against the oldest state any of its reads saw. Call it inside the same
+        `reading()` hold as the rows it describes. A write (or a conflict) consumes the entry;
+        an entry whose write never came -- a merge refused by a guard -- stays until the next
+        write of that partition, which is then compared against it: at worst a needless conflict,
+        never a lost row. A partition written without any recorded base is last-writer-wins, as a
+        whole-year replacement means to be.
+        """
+        bases = self._recorded_bases()
+        key = (dataset, year)
+        if key not in bases:
+            bases[key] = self.partition_content_hash(dataset, year)
+        return PartitionExpectation(bases[key])
+
+    def discard_merge_bases(self) -> None:
+        """Forget every merge base this thread recorded and has not written.
+
+        For a caller abandoning a planned write -- a factor build one of whose tiers a guard
+        refused -- so a later, unrelated write of the same partitions by this thread on this
+        store is not compared against a read nobody acted on.
+        """
+        self._recorded_bases().clear()
 
     def write_partition(
         self,
@@ -1689,8 +1753,25 @@ class PanelStore:
         not understand, *before* the Parquet file is built -- see `_reusable_partition`, and
         the module docstring's "The catalog upsert commits before the rename" for the
         ordering this method now guarantees and the one failure window it does not close.
+
+        A partition this thread read as a merge base (`merge_base`) is written through
+        `write_partitions` instead, so the write is compared against that base (`V2-P6-028`).
         """
         _validate_dataset(dataset)
+        if (dataset, year) in self._recorded_bases():
+            (written,) = self.write_partitions(
+                [
+                    PartitionWrite(
+                        dataset=dataset,
+                        year=year,
+                        columns=columns,
+                        rows=rows,
+                        coverage=coverage,
+                        allow_empty=allow_empty,
+                    )
+                ]
+            )
+            return written
         if not columns:
             raise PanelStorageError("cannot write a partition with zero columns")
         if not rows and not allow_empty:
@@ -1844,11 +1925,20 @@ class PanelStore:
             raise PanelStorageError(
                 f"a group write names {repeated} more than once; one partition is written once"
             )
-        written_at = self._now()
-        recorded_at = self._now()
-        prepared = [self._prepared_write(write) for write in writes]
+        # A target this thread read as a merge base and that names no expectation of its own is
+        # compared against that base (`merge_base`); either way the base is consumed below.
+        bases = self._recorded_bases()
+        writes = [
+            write
+            if write.expected is not None or (write.dataset, write.year) not in bases
+            else replace(write, expected=PartitionExpectation(bases[(write.dataset, write.year)]))
+            for write in writes
+        ]
         staged: dict[int, Path] = {}
         try:
+            written_at = self._now()
+            recorded_at = self._now()
+            prepared = [self._prepared_write(write) for write in writes]
             for index, (write, _covered, content_hash) in enumerate(prepared):
                 if self._reusable_partition(write.dataset, write.year, content_hash) is None:
                     staged[index] = self._staged_partition(write)
@@ -1857,6 +1947,8 @@ class PanelStore:
         finally:
             for temporary in staged.values():
                 temporary.unlink(missing_ok=True)
+            for key in keys:
+                bases.pop(key, None)
         return tuple(
             PartitionRef(
                 write.dataset,
@@ -1930,8 +2022,12 @@ class PanelStore:
                 current = self._lookup_with_connection(connection, write.dataset, write.year)
                 stored = None if current is None else current.content_hash
                 expected = write.expected
-                if (expected is not None and stored != expected.content_hash) or (
-                    index not in staged and stored != content_hash
+                # A target already holding exactly this write's content has lost nothing,
+                # whatever it held when the write was planned: the merge another writer made
+                # holds every row this one would have stored.
+                if stored != content_hash and (
+                    (expected is not None and stored != expected.content_hash)
+                    or index not in staged
                 ):
                     moved.append(f"{write.dataset}@{write.year}")
             if moved:
@@ -1961,17 +2057,41 @@ class PanelStore:
         for index, temporary in staged.items():
             write = prepared[index][0]
             temporary.replace(self.root / write.dataset / str(write.year) / "data.parquet")
-        for write, covered, content_hash in prepared:
-            if covered is not None and (
-                self._record_coverage_held(
-                    covered, recorded_at=recorded_at, content_hash=content_hash
-                )
-                is None
-            ):
-                raise PanelStorageError(
-                    f"{write.dataset} year={write.year} no longer names the content just written "
-                    "to it, inside the exclusive hold that wrote it; the catalog lock was bypassed"
-                )
+        covered_writes = [item for item in prepared if item[1] is not None]
+        if not covered_writes:
+            return
+        # Every coverage record on one connection, in one transaction: one checkpoint for the
+        # group rather than one per partition, and a failure leaves every record as it was.
+        with _connect(str(self.catalog_path)) as connection:
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                for write, covered, content_hash in covered_writes:
+                    assert covered is not None  # filtered above
+                    current = self._lookup_with_connection(connection, write.dataset, write.year)
+                    if current is None or current.content_hash != content_hash:
+                        raise PanelStorageError(
+                            f"{write.dataset} year={write.year} no longer names the content just "
+                            "written to it, inside the exclusive hold that wrote it; the catalog "
+                            "lock was bypassed"
+                        )
+                    if current.row_count != covered.row_count:
+                        raise PanelStorageError(
+                            f"coverage row_count {covered.row_count} disagrees with the registered "
+                            f"partition's {current.row_count} for {write.dataset} "
+                            f"year={write.year}"
+                        )
+                    _write_coverage(
+                        connection,
+                        replace(
+                            covered, recorded_at=recorded_at, partition_content_hash=content_hash
+                        ),
+                        recorded_at=recorded_at,
+                        transaction=False,
+                    )
+                connection.execute("COMMIT")
+            except BaseException:
+                connection.execute("ROLLBACK")
+                raise
 
     @contextmanager
     def reading(self) -> Iterator[None]:
@@ -2283,9 +2403,21 @@ class PanelStore:
         The catalog rows go in one transaction, before the file, for `write_partition`'s reason
         in reverse: a crash between the two leaves an orphan file nobody reads rather than a
         catalog row pointing at nothing. Returns whether a partition was registered.
+
+        A removal is the end of a merge too -- the defects record removes a year when no other
+        target's rows are left in what it read -- so a partition this thread read as a merge base
+        (`merge_base`) is removed only while it still holds that base; otherwise
+        `PanelWriteConflictError`, and nothing is removed (`V2-P6-028`).
         """
         _validate_dataset(dataset)
+        base = self._recorded_bases().pop((dataset, year), _NO_BASE)
         if not self.catalog_path.exists():
+            if base is not _NO_BASE and base is not None:
+                raise PanelWriteConflictError(
+                    f"['{dataset}@{year}'] changed after this removal read it -- another writer "
+                    "committed in between -- so nothing was removed. Run it again",
+                    targets=(f"{dataset}@{year}",),
+                )
             return False
         with (
             self._catalog_access.exclusive(),
@@ -2293,6 +2425,13 @@ class PanelStore:
         ):
             self._ensure_catalog_schema(connection)
             existing = self._lookup_with_connection(connection, dataset, year)
+            stored = None if existing is None else existing.content_hash
+            if base is not _NO_BASE and stored != base:
+                raise PanelWriteConflictError(
+                    f"['{dataset}@{year}'] changed after this removal read it -- another writer "
+                    "committed in between -- so nothing was removed. Run it again",
+                    targets=(f"{dataset}@{year}",),
+                )
             if existing is None:
                 return False
             key: list[object] = [dataset, year]
@@ -3771,7 +3910,11 @@ def _check_batch_schema_version(version: str) -> None:
 
 
 def _write_coverage(
-    connection: duckdb.DuckDBPyConnection, coverage: PartitionCoverage, *, recorded_at: datetime
+    connection: duckdb.DuckDBPyConnection,
+    coverage: PartitionCoverage,
+    *,
+    recorded_at: datetime,
+    transaction: bool = True,
 ) -> None:
     """Replace one partition's coverage record and all four of its census tables, atomically.
 
@@ -3782,7 +3925,10 @@ def _write_coverage(
     record intact instead.
     """
     key: list[object] = [coverage.dataset, coverage.year]
-    connection.execute("BEGIN TRANSACTION")
+    # `transaction=False` (`V2-P6-028`): the caller holds one transaction around several records,
+    # as a group write does, and rolls them back together.
+    if transaction:
+        connection.execute("BEGIN TRANSACTION")
     try:
         for table in _COVERAGE_CHILD_TABLES:
             connection.execute(
@@ -3854,9 +4000,11 @@ def _write_coverage(
                 [(*key, item.label, item.row_count) for item in coverage.revisions],
             )
     except Exception:
-        connection.execute("ROLLBACK")
+        if transaction:
+            connection.execute("ROLLBACK")
         raise
-    connection.execute("COMMIT")
+    if transaction:
+        connection.execute("COMMIT")
 
 
 _COVERAGE_STAMP_COLUMNS: tuple[str, ...] = (

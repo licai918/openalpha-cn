@@ -3693,34 +3693,40 @@ def _build_one(
     # two builds of this factor racing could each commit half, leaving observations and manifests
     # that answer different builds. Now a reader sees the whole build or none of it, and a racing
     # build that committed first makes this one a `PanelWriteConflictError` that writes nothing.
-    plan = list(
-        _written(
-            lambda: plan_factor_panels(store, panels, supersedes=request.supersedes_raw),
-            tier="raw",
-            flag="--supersedes-raw",
-        )
-    )
-    if processed:
-        plan.extend(
+    try:
+        plan = list(
             _written(
-                lambda: plan_processed_factor_panels(
-                    store, processed, supersedes=request.supersedes_processed
-                ),
-                tier="processed",
-                flag="--supersedes-processed",
+                lambda: plan_factor_panels(store, panels, supersedes=request.supersedes_raw),
+                tier="raw",
+                flag="--supersedes-raw",
             )
         )
-    if neutralized:
-        plan.extend(
-            _written(
-                lambda: plan_neutralized_factor_panels(
-                    store, neutralized, supersedes=request.supersedes_neutralized
-                ),
-                tier="neutralized",
-                flag="--supersedes-neutralized",
+        if processed:
+            plan.extend(
+                _written(
+                    lambda: plan_processed_factor_panels(
+                        store, processed, supersedes=request.supersedes_processed
+                    ),
+                    tier="processed",
+                    flag="--supersedes-processed",
+                )
             )
-        )
-    written = _committed(store, plan)
+        if neutralized:
+            plan.extend(
+                _written(
+                    lambda: plan_neutralized_factor_panels(
+                        store, neutralized, supersedes=request.supersedes_neutralized
+                    ),
+                    tier="neutralized",
+                    flag="--supersedes-neutralized",
+                )
+            )
+        written = _committed(store, plan)
+    except BaseException:
+        # A refused tier abandons the whole build; the merge bases its planning recorded on
+        # the store describe a write that is not coming (`V2-P6-028`).
+        store.discard_merge_bases()
+        raise
     return FactorBuildReport(
         factor=request.definition.qualified_key,
         factor_id=request.definition.factor_id,
@@ -4553,105 +4559,111 @@ def _supersession(
     them: one per processed build (the neutralized builds made from it riding with it), the
     first of them also naming the raw build. A factor built only to a lower tier has no
     partition of the tier above it that year, and nothing of that tier to supersede."""
-    transforms = [
-        item
-        for item in (
-            _read(
-                lambda: load_factor_transform_manifests(
-                    store, definition, years=(year,), as_of=as_of
-                ),
-                store=store,
-                what=f"the stored {definition.qualified_key} transform builds of {year}",
-            )
-            if year in store.registered_years(factor_transform_manifest_dataset(definition))
-            else ()
-        )
-        if item.source_manifest_id == manifest.manifest_id
-    ]
-    neutralizations = [
-        item
-        for item in (
-            _read(
-                lambda: load_factor_neutralization_manifests(
-                    store, definition, years=(year,), as_of=as_of
-                ),
-                store=store,
-                what=f"the stored {definition.qualified_key} neutralization builds of {year}",
-            )
-            if transforms
-            and year in store.registered_years(factor_neutralization_manifest_dataset(definition))
-            else ()
-        )
-        if item.source_transform_manifest_id
-        in {transform.transform_manifest_id for transform in transforms}
-    ]
-    builds = (
-        StaleFactorBuild(tier="raw", year=year, manifest_id=manifest.manifest_id),
-        *(
-            StaleFactorBuild(tier="processed", year=year, manifest_id=item.transform_manifest_id)
-            for item in transforms
-        ),
-        *(
-            StaleFactorBuild(
-                tier="neutralized", year=year, manifest_id=item.neutralization_manifest_id
-            )
-            for item in neutralizations
-        ),
-    )
-    years = _named_years(manifest)
-
-    def command(
-        tier: str, extra: Sequence[str], supersedes: Sequence[tuple[str, str]]
-    ) -> tuple[str, ...]:
-        arguments = ["factor", "build", "--factor", definition.qualified_key, "--tier", tier]
-        arguments += list(extra)
-        arguments += ["--as-of", manifest.as_of.isoformat()]
-        for partition in years:
-            arguments += ["--year", str(partition)]
-        arguments += ["--exchange", exchange, "--max-staleness-days", str(max_staleness_days)]
-        if code_commit is not None:
-            arguments += ["--code-commit", code_commit]
-        for flag, value in supersedes:
-            arguments += [flag, value]
-        return tuple(arguments)
-
-    raw_supersedes = [("--supersedes-raw", manifest.manifest_id)]
-    if not transforms:
-        return builds, (command("raw", (), raw_supersedes),)
-    commands: list[tuple[str, ...]] = []
-    for position, transform in enumerate(transforms):
-        riding = [
+    # The transform and neutralization manifests in one shared hold (`V2-P6-028`): a build of every
+    # tier lands as one group write, and two reads could see one tier of it and not the next.
+    with store.reading():
+        transforms = [
             item
-            for item in neutralizations
-            if item.source_transform_manifest_id == transform.transform_manifest_id
-        ]
-        transform_flag = [
-            "--transform",
-            f"{transform.transform_key}/v{transform.transform_version}",
-        ]
-        processed = [("--supersedes-processed", transform.transform_manifest_id)]
-        first = raw_supersedes if position == 0 else []
-        if not riding:
-            commands.append(command("processed", transform_flag, [*first, *processed]))
-            continue
-        for index, neutralization in enumerate(riding):
-            commands.append(
-                command(
-                    "neutralized",
-                    [
-                        *transform_flag,
-                        "--neutralization",
-                        f"{neutralization.neutralization_key}/v"
-                        f"{neutralization.neutralization_version}",
-                    ],
-                    [
-                        *(first if index == 0 else []),
-                        *(processed if index == 0 else []),
-                        ("--supersedes-neutralized", neutralization.neutralization_manifest_id),
-                    ],
+            for item in (
+                _read(
+                    lambda: load_factor_transform_manifests(
+                        store, definition, years=(year,), as_of=as_of
+                    ),
+                    store=store,
+                    what=f"the stored {definition.qualified_key} transform builds of {year}",
                 )
+                if year in store.registered_years(factor_transform_manifest_dataset(definition))
+                else ()
             )
-    return builds, tuple(commands)
+            if item.source_manifest_id == manifest.manifest_id
+        ]
+        neutralizations = [
+            item
+            for item in (
+                _read(
+                    lambda: load_factor_neutralization_manifests(
+                        store, definition, years=(year,), as_of=as_of
+                    ),
+                    store=store,
+                    what=f"the stored {definition.qualified_key} neutralization builds of {year}",
+                )
+                if transforms
+                and year
+                in store.registered_years(factor_neutralization_manifest_dataset(definition))
+                else ()
+            )
+            if item.source_transform_manifest_id
+            in {transform.transform_manifest_id for transform in transforms}
+        ]
+        builds = (
+            StaleFactorBuild(tier="raw", year=year, manifest_id=manifest.manifest_id),
+            *(
+                StaleFactorBuild(
+                    tier="processed", year=year, manifest_id=item.transform_manifest_id
+                )
+                for item in transforms
+            ),
+            *(
+                StaleFactorBuild(
+                    tier="neutralized", year=year, manifest_id=item.neutralization_manifest_id
+                )
+                for item in neutralizations
+            ),
+        )
+        years = _named_years(manifest)
+
+        def command(
+            tier: str, extra: Sequence[str], supersedes: Sequence[tuple[str, str]]
+        ) -> tuple[str, ...]:
+            arguments = ["factor", "build", "--factor", definition.qualified_key, "--tier", tier]
+            arguments += list(extra)
+            arguments += ["--as-of", manifest.as_of.isoformat()]
+            for partition in years:
+                arguments += ["--year", str(partition)]
+            arguments += ["--exchange", exchange, "--max-staleness-days", str(max_staleness_days)]
+            if code_commit is not None:
+                arguments += ["--code-commit", code_commit]
+            for flag, value in supersedes:
+                arguments += [flag, value]
+            return tuple(arguments)
+
+        raw_supersedes = [("--supersedes-raw", manifest.manifest_id)]
+        if not transforms:
+            return builds, (command("raw", (), raw_supersedes),)
+        commands: list[tuple[str, ...]] = []
+        for position, transform in enumerate(transforms):
+            riding = [
+                item
+                for item in neutralizations
+                if item.source_transform_manifest_id == transform.transform_manifest_id
+            ]
+            transform_flag = [
+                "--transform",
+                f"{transform.transform_key}/v{transform.transform_version}",
+            ]
+            processed = [("--supersedes-processed", transform.transform_manifest_id)]
+            first = raw_supersedes if position == 0 else []
+            if not riding:
+                commands.append(command("processed", transform_flag, [*first, *processed]))
+                continue
+            for index, neutralization in enumerate(riding):
+                commands.append(
+                    command(
+                        "neutralized",
+                        [
+                            *transform_flag,
+                            "--neutralization",
+                            f"{neutralization.neutralization_key}/v"
+                            f"{neutralization.neutralization_version}",
+                        ],
+                        [
+                            *(first if index == 0 else []),
+                            *(processed if index == 0 else []),
+                            ("--supersedes-neutralized", neutralization.neutralization_manifest_id),
+                        ],
+                    )
+                )
+        return builds, tuple(commands)
 
 
 # --- stored statement builds the current reading answers differently (`V2-P6-027`) ---------------

@@ -16,7 +16,7 @@ import ast
 import multiprocessing
 from datetime import UTC, date, datetime, timedelta
 from multiprocessing import Queue
-from multiprocessing.synchronize import Event
+from multiprocessing.synchronize import Barrier, Event
 from pathlib import Path
 
 import duckdb
@@ -33,8 +33,14 @@ from openalpha_cn.panel.store import (
     PanelCatalogBusyError,
     PanelStorageError,
     PanelStore,
+    PanelWriteConflictError,
 )
-from openalpha_cn.panel_ingest import panel_column_specs, panel_coverage, write_panel_batch
+from openalpha_cn.panel_ingest import (
+    carry_stored_rows_forward,
+    panel_column_specs,
+    panel_coverage,
+    write_panel_batch,
+)
 
 DATASET = "prices_daily"
 SUBJECTS = ("000001.SZ", "000002.SZ")
@@ -869,3 +875,76 @@ def test_gated_reads_in_other_processes_never_see_a_batch_write_half_landed(
                 f"answered with {rows_read}"
             )
             assert rows_read in (6, 9)
+
+
+# --- two merge-type ingests of one partition racing (`V2-P6-028`) -------------------------------
+#
+# Every incremental ingest is a read-modify-write through `carry_stored_rows_forward`: read the
+# stored rows, put the fetched ones behind them, write the year back whole. Two of them racing
+# (A reads, B reads, B writes, A writes) used to lose B's rows without a word -- each partition
+# and its coverage self-consistent, both commands reporting success. The merge read now records
+# its base on the store and the write is compared against it.
+
+
+def _merging_ingest_worker(
+    root_str: str, subject: str, barrier: Barrier, queue: Queue[tuple[str, str]]
+) -> None:
+    """Carry the stored year forward with `subject`'s rows behind it, wait until the other
+    ingest has read too, then write."""
+    try:
+        store = _store(Path(root_str))
+        merged = carry_stored_rows_forward(
+            store, _batch(subjects=(subject,)), year=2024, retain=lambda _row: True
+        )
+        barrier.wait(timeout=120)
+        write_panel_batch(store, merged, year=2024)
+        queue.put((subject, "ok"))
+    except PanelWriteConflictError as error:
+        queue.put((subject, f"conflict:{list(error.targets)}"))
+    except Exception as error:
+        queue.put((subject, f"fail:{type(error).__name__}:{error}"))
+
+
+def test_two_merging_ingests_of_one_partition_racing_store_one_and_refuse_the_other(
+    tmp_path: Path,
+) -> None:
+    """Both read the same stored year before either writes. One writes; the other's base has
+    moved, so it is refused whole and writes nothing -- no row of either is lost, and the store
+    is ready. Running the refused one again (re-reading) stores both."""
+    root = tmp_path / "panel"
+    write_panel_batch(_store(root), _batch(), year=2024)
+    barrier = ctx.Barrier(2)
+    queue: multiprocessing.Queue[tuple[str, str]] = ctx.Queue()
+    ingests = [
+        ctx.Process(target=_merging_ingest_worker, args=(str(root), subject, barrier, queue))
+        for subject in ("000003.SZ", "000004.SZ")
+    ]
+    for process in ingests:
+        process.start()
+    try:
+        outcomes = dict(queue.get(timeout=300) for _ in ingests)
+        for process in ingests:
+            process.join(timeout=60)
+    finally:
+        for process in ingests:
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=10)
+
+    assert sorted(outcome.split(":")[0] for outcome in outcomes.values()) == ["conflict", "ok"], (
+        outcomes
+    )
+    winner = next(subject for subject, outcome in outcomes.items() if outcome == "ok")
+    loser = next(subject for subject in outcomes if subject != winner)
+    store = _store(root)
+    stored = {row[0] for row in store.query(DATASET, year=2024, columns=["subject"])}
+    assert stored == {*SUBJECTS, winner}
+    assert store.assess_readiness(_requirement()).state == "ready"
+
+    merged = carry_stored_rows_forward(
+        store, _batch(subjects=(loser,)), year=2024, retain=lambda _row: True
+    )
+    write_panel_batch(store, merged, year=2024)
+    stored = {row[0] for row in store.query(DATASET, year=2024, columns=["subject"])}
+    assert stored == {*SUBJECTS, winner, loser}
+    assert store.assess_readiness(_requirement()).state == "ready"

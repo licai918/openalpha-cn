@@ -43,6 +43,7 @@ import math
 import multiprocessing
 import shlex
 import shutil
+import threading
 from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
@@ -114,6 +115,7 @@ from openalpha_cn.factor_view import (
     build_view,
     factor_build_request,
 )
+from openalpha_cn.panel import store as store_module
 from openalpha_cn.panel.store import PanelStore, PanelWriteConflictError
 from openalpha_cn.panel_factors import (
     CROSS_SECTION_STANDARD,
@@ -125,6 +127,7 @@ from openalpha_cn.panel_factors import (
     load_factor_observations,
     load_factor_transform_manifests,
     load_processed_factor_observations,
+    write_factor_panels,
 )
 from openalpha_cn.panel_ingest import (
     UPSTREAM_DEFECTS_DATASET,
@@ -2112,3 +2115,122 @@ def test_two_builds_of_one_factor_racing_store_one_whole_build_and_refuse_the_ot
     assert {manifest.as_of for manifest in manifests} == {winner, loser}
     stored = load_factor_observations(store, definition, years=(2026,), as_of=READ_AT)
     assert {row.manifest_id for row in stored} == {manifest.manifest_id for manifest in manifests}
+
+
+# --- the same, deterministically: two threads, two stores, the writer paused ------------------
+#
+# `flock` locks an open file description, so two `PanelStore` instances on one root in two
+# threads exclude each other exactly as two processes do -- and in one process the writer can be
+# paused at a chosen point and the reader timed against it.
+
+
+def _a_second_raw_build(
+    corpus: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[PanelStore, list[str], Any]:
+    """A store holding `RACED`'s raw build at `INSTANTS[0]`, the ids of that build, and the
+    panels of a second build at the same instant (under another commit), planned on a copy."""
+    store = _copy(corpus, tmp_path / "panel")
+    first = _raw_only(store, RACED, as_ofs=(INSTANTS[0],))
+    captured: list[Any] = []
+    real = factor_view.plan_factor_panels
+
+    def capturing(store: PanelStore, panels: Any, **kwargs: Any) -> Any:
+        captured.append(panels)
+        return real(store, panels, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(factor_view, "plan_factor_panels", capturing)
+        _raw_only(
+            _copy(corpus, tmp_path / "planning"),
+            RACED,
+            as_ofs=(INSTANTS[0],),
+            code_commit=OTHER_COMMIT,
+        )
+    return store, list(first.manifest_ids["raw"]), captured[0]
+
+
+def _paused_on_the_nth(
+    monkeypatch: pytest.MonkeyPatch, name: str, n: int, *, in_thread: str
+) -> tuple[threading.Event, threading.Event]:
+    """Pause `panel.store.<name>`'s `n`th call made from the thread named `in_thread` until
+    released; answer the (paused, release) pair."""
+    paused, release = threading.Event(), threading.Event()
+    real = getattr(store_module, name)
+    calls: list[int] = []
+
+    def pausing(*args: Any, **kwargs: Any) -> Any:
+        if threading.current_thread().name == in_thread:
+            calls.append(1)
+            if len(calls) == n:
+                paused.set()
+                assert release.wait(timeout=60)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(store_module, name, pausing)
+    return paused, release
+
+
+def _builds_read(root: Path) -> set[str]:
+    """The raw builds a fresh store reads back for `RACED`, through the loader that joins its
+    observations to their manifests."""
+    definition = FACTOR_DEFINITIONS.get(RACED)
+    rows = load_factor_observations(PanelStore(root), definition, years=(2026,), as_of=READ_AT)
+    return {row.manifest_id for row in rows}
+
+
+def test_a_reader_waits_out_a_factor_commit_and_then_reads_it_whole(
+    corpus: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The writer is paused inside its commit -- every catalog row and rename done, the first
+    coverage record not yet written -- and a reader of the factor in another thread, on its own
+    store, does not return within half a second: the exclusive hold covers the whole build.
+    Released, the reader answers with the new build and nothing of the old."""
+    store, old, panels = _a_second_raw_build(corpus, tmp_path, monkeypatch)
+    paused, release = _paused_on_the_nth(monkeypatch, "_write_coverage", 1, in_thread="writer")
+    writer = threading.Thread(
+        name="writer",
+        target=lambda: write_factor_panels(PanelStore(store.root), panels, supersedes=old),
+    )
+    answers: list[set[str]] = []
+    reader = threading.Thread(target=lambda: answers.append(_builds_read(store.root)))
+    writer.start()
+    try:
+        assert paused.wait(timeout=60)
+        reader.start()
+        reader.join(timeout=0.5)
+        assert reader.is_alive(), "the reader answered while a factor build was half committed"
+    finally:
+        release.set()
+        writer.join(timeout=60)
+        reader.join(timeout=60)
+
+    assert len(answers) == 1
+    (built,) = answers[0]
+    assert built not in old
+
+
+def test_a_reader_between_two_partitions_of_a_build_reads_the_old_build_whole(
+    corpus: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The writer is paused after staging the first of its two partitions and before the
+    second -- the point a build writing one partition per hold would have committed its
+    observations and not their manifest. A reader there answers at once, with the old build
+    whole: nothing is committed until every partition is staged. (Against one hold per partition
+    this read is refused every time, `rows filed under build(s) ... that no visible manifest
+    claims`.)"""
+    store, old, panels = _a_second_raw_build(corpus, tmp_path, monkeypatch)
+    paused, release = _paused_on_the_nth(monkeypatch, "_insert_columnar", 2, in_thread="writer")
+    writer = threading.Thread(
+        name="writer",
+        target=lambda: write_factor_panels(PanelStore(store.root), panels, supersedes=old),
+    )
+    writer.start()
+    try:
+        assert paused.wait(timeout=60)
+        assert _builds_read(store.root) == set(old)
+    finally:
+        release.set()
+        writer.join(timeout=60)
+
+    (built,) = _builds_read(store.root)
+    assert built not in old

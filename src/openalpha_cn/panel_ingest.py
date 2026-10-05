@@ -574,7 +574,12 @@ def write_panel_batch(
 
     Overwrite-per-partition and content-hash-idempotent, exactly as
     `PanelStore.write_partition` documents -- this function adds no storage semantics of its
-    own. The coverage record is summarised *before* the write, so a malformed
+    own. That includes concurrency (`V2-P6-028`): if this thread read the partition for a merge
+    (`carry_stored_rows_forward` records the base), the write is compared against that read and
+    refused as `PanelWriteConflictError` if another writer replaced the partition since; a batch
+    built without reading the stored year -- a whole-year replacement -- is last-writer-wins.
+
+    The coverage record is summarised *before* the write, so a malformed
     `revision_field` or timezone fails without leaving a partition on disk, and recorded
     *after* it, so the interrupted case leaves a partition the readiness contract reports as
     `coverage_missing` (blocked) rather than one it silently trusts.
@@ -628,7 +633,9 @@ def write_panel_batches(
     call, so a reader joining them sees all or none (`V2-P6-028`).
 
     Every batch is checked and its coverage summarised before anything is staged, exactly as
-    `write_panel_batch` does for one, so a refusal of the last leaves the first unwritten.
+    `write_panel_batch` does for one, so a refusal of the last leaves the first unwritten. Each
+    target is compared against its `expected`, or failing that against the merge base this thread
+    recorded reading it; a target with neither -- a whole-year replacement -- is last-writer-wins.
     """
     targets: list[PartitionWrite] = []
     for write in writes:
@@ -1825,21 +1832,27 @@ def carry_stored_rows_forward(
       earlier or later than the stored one. `None`, the default, keeps the stored clocks, which
       is what every derived-plane caller wants.
     """
-    coverage = store.read_coverage(batch.dataset, year)
-    if coverage is None:
-        return batch
-    arriving = batch.status == "success"
-    shape: tuple[tuple[str, PanelColumnKind], ...] = (
-        tuple((column.name, column.kind) for column in batch.columns)
-        if arriving
-        else tuple(
-            (entry.name, cast(PanelColumnKind, entry.kind))
-            for entry in coverage.fields
-            if entry.name not in RESERVED_COLUMN_NAMES
+    # The merge base, the coverage and the stored rows in one shared hold (`V2-P6-028`): the
+    # base is recorded on the store, and every later write or removal of this partition by this
+    # thread is compared against it, so a merge another writer's commit has overtaken is refused
+    # as `PanelWriteConflictError` instead of silently dropping that writer's rows.
+    with store.reading():
+        store.merge_base(batch.dataset, year)
+        coverage = store.read_coverage(batch.dataset, year)
+        if coverage is None:
+            return batch
+        arriving = batch.status == "success"
+        shape: tuple[tuple[str, PanelColumnKind], ...] = (
+            tuple((column.name, column.kind) for column in batch.columns)
+            if arriving
+            else tuple(
+                (entry.name, cast(PanelColumnKind, entry.kind))
+                for entry in coverage.fields
+                if entry.name not in RESERVED_COLUMN_NAMES
+            )
         )
-    )
-    names = (SUBJECT_COLUMN_NAME, *CLOCK_COLUMN_NAMES, *(name for name, _ in shape))
-    stored = store.query(batch.dataset, year=year, columns=names)
+        names = (SUBJECT_COLUMN_NAME, *CLOCK_COLUMN_NAMES, *(name for name, _ in shape))
+        stored = store.query(batch.dataset, year=year, columns=names)
     kept = [row for row in stored if retain(dict(zip(names, row, strict=True)))]
     if not kept:
         return batch
@@ -2795,6 +2808,16 @@ def write_daily_panel(
     before_write: Callable[[], None] | None = None,
 ) -> tuple[PartitionRef, PartitionRef]:
     """Write one year of `daily` and `daily_basic` cross sections as two partitions (`V2-P1-007`).
+
+    ## Two of these writes at once (`V2-P6-028`)
+
+    The pair lands as one group write, so a reader sees both partitions from one write. Whether
+    a second, concurrent write of the same year is refused or replaces this one depends on how
+    `bars` was assembled: an incremental build carries the stored sessions forward
+    (`carry_stored_sessions_forward`), which records the merge base, and the write is then
+    compared against it and refused (`PanelWriteConflictError`) if the year moved; a full build
+    fetches the whole year and reads nothing back, and is a **whole-year replacement** --
+    last-writer-wins, deliberately, since every row it writes is one it fetched.
 
     ## Why one writer takes both datasets
 
@@ -5461,12 +5484,18 @@ def write_upstream_defects(
                 f"the defects are dated {record_year} and the write is for {year}; a defect is "
                 "filed with the partition its dropped row would have been stored in"
             )
-    coverage = store.read_coverage(UPSTREAM_DEFECTS_DATASET, year)
-    stored = (
-        store.query(UPSTREAM_DEFECTS_DATASET, year=year, columns=UPSTREAM_DEFECT_STORAGE_COLUMNS)
-        if coverage is not None
-        else []
-    )
+    # The merge base and the stored rows in one shared hold (`V2-P6-028`); see
+    # `carry_stored_rows_forward`. The write or the removal below is compared against it.
+    with store.reading():
+        store.merge_base(UPSTREAM_DEFECTS_DATASET, year)
+        coverage = store.read_coverage(UPSTREAM_DEFECTS_DATASET, year)
+        stored = (
+            store.query(
+                UPSTREAM_DEFECTS_DATASET, year=year, columns=UPSTREAM_DEFECT_STORAGE_COLUMNS
+            )
+            if coverage is not None
+            else []
+        )
     source_at = UPSTREAM_DEFECT_STORAGE_COLUMNS.index(SOURCE_DATASET_COLUMN)
     kind_at = UPSTREAM_DEFECT_STORAGE_COLUMNS.index(DEFECT_KIND_COLUMN)
 

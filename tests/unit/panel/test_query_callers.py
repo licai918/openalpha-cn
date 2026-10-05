@@ -285,6 +285,76 @@ def test_no_other_function_in_this_module_takes_the_un_gated_door() -> None:
     )
 
 
+MERGE_READERS: frozenset[str] = frozenset({"carry_stored_rows_forward", "write_upstream_defects"})
+"""The un-gated readers whose rows are written back: read-modify-writes (`V2-P6-028`)."""
+
+NOT_MERGE_READERS: dict[str, str] = {
+    "stored_rows_digest": (
+        "answers with a sha256 of the rows and writes nothing; there is no write to compare"
+    ),
+}
+"""The un-gated readers that write nothing back, each with the reason."""
+
+
+def _reads_outside_a_recorded_merge(node: ast.AST) -> list[int]:
+    """The line of every un-gated read in `node` that is not inside a `with <store>.reading():`
+    block whose body records the merge base (`<store>.merge_base(...)`)."""
+    covered: set[int] = set()
+    for block in ast.walk(node):
+        if not isinstance(block, ast.With):
+            continue
+        holds = any(
+            isinstance(item.context_expr, ast.Call)
+            and isinstance(item.context_expr.func, ast.Attribute)
+            and item.context_expr.func.attr == "reading"
+            for item in block.items
+        )
+        records = any(
+            isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Attribute)
+            and inner.func.attr == "merge_base"
+            for statement in block.body
+            for inner in ast.walk(statement)
+        )
+        if holds and records:
+            covered.update(
+                id(inner)
+                for statement in block.body
+                for inner in ast.walk(statement)
+                if _read_method(inner, UNGATED_READS) is not None
+            )
+    return [
+        inner.lineno
+        for inner in ast.walk(node)
+        if _read_method(inner, UNGATED_READS) is not None and id(inner) not in covered
+    ]
+
+
+def test_every_merge_read_records_its_base_in_the_same_hold() -> None:
+    """`V2-P6-028`. A merge-type writer reads the stored rows of a partition and writes the year
+    back with its own, and two of them racing used to lose one side's rows silently. The store
+    compares every write of a partition against the base its merge read recorded
+    (`PanelStore.merge_base`) -- so the guarantee is only as good as every merge read recording
+    one. Each un-gated read here is therefore classified, a merge or not, and every read of a
+    merge must sit inside a `with store.reading():` that calls `store.merge_base(...)`, so the
+    base and the rows describe one stored state. A new un-gated reader arrives unclassified and
+    fails here before it can write a merge nobody compares."""
+    ingest = ast.parse((SOURCE / "panel_ingest.py").read_text(encoding="utf-8"))
+    functions = _functions(ingest)
+
+    assert MERGE_READERS | set(NOT_MERGE_READERS) == set(UNGATED_READERS)
+    assert not MERGE_READERS & set(NOT_MERGE_READERS)
+    unrecorded = {
+        name: lines
+        for name in sorted(MERGE_READERS)
+        if (lines := _reads_outside_a_recorded_merge(functions[name]))
+    }
+    assert unrecorded == {}, (
+        f"{unrecorded}: a merge read outside a `with store.reading():` that records "
+        "`store.merge_base(...)`; its write would not be compared against what it merged onto"
+    )
+
+
 GATED_READS: frozenset[str] = frozenset({"read_if_ready", "read_visible_at", "assessed"})
 """The `PanelStore` methods that consult a readiness verdict before returning rows.
 
