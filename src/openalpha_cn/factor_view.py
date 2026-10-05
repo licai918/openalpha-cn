@@ -765,6 +765,26 @@ KNOWN_FACTOR_RUN_LIMITATIONS: Final[tuple[FactorRunLimitation, ...]] = (
             "the rule and the full-history read change."
         ),
     ),
+    FactorRunLimitation(
+        code="a_valuation_factor_takes_the_newest_market_cap_in_the_named_years_however_old",
+        detail=(
+            "V2-P6-027. The session axis has no recency bound. The four statement factors that "
+            "divide by a market capitalisation -- earnings_yield_ttm, book_to_price, "
+            "sales_yield_ttm, deducted_earnings_yield_ttm -- read daily_basic with "
+            "panel_factors.MARKET_CAP_SESSIONS = 1, i.e. each security's newest session in the "
+            "years the build NAMES, however long ago that session was. A security suspended for "
+            "a long time is therefore valued on its last traded market cap, up to about two "
+            "years old under the research span (factor_build_years: as_of's year and the two "
+            "before it). MEASURED on the research store by the V2-P6-027 review: 64 names on "
+            "2025-06-16 and 14 on 2020-06-15 were valued on a daily_basic row more than 365 days "
+            "old. Such a name cannot be bought while it is suspended, so it reaches a portfolio "
+            "only through the score it lends the cross section's standardisation. NOT FIXED, "
+            "DISCLOSED: a session recency bound is a definition question, like the statement "
+            "rule was. What is guaranteed is that the daily selection and the research builds "
+            "name the same years (factor_build_years), so the two value such a name alike; a "
+            "build naming fewer years codes it insufficient_history instead."
+        ),
+    ),
 )
 """What a factor run does not answer, as a closed registry rather than as prose.
 
@@ -4400,6 +4420,29 @@ _MOVABLE_COVERAGE: Final[frozenset[str]] = frozenset({"computed", "undefined_val
 before `panel_factors._classify` reads a single return."""
 
 
+def _named_years(manifest: FactorBuildManifest) -> tuple[int, ...]:
+    """The `--year`s a stored build was asked for, recovered from what it read (`V2-P6-027`).
+
+    A session dataset is read over exactly the years a build names, so where the build read one,
+    its years are the answer -- for every build, old or new. A statement dataset is read over
+    every stored year at or below the newest one named (`_statement_years`), so a statement-only
+    build's inputs say only which year is newest: what it names beyond that decides no answer --
+    its statement reads are the whole history whatever is named -- and only which calendar and
+    registry years a rebuild loads. So it is given the research span (`factor_build_years`) of
+    its newest year, limited to the years it read: what every stored research build named. A
+    build stored before the full-history read read exactly the years it named, so its inputs
+    answer either way.
+    """
+    session = sorted(
+        {item.year for item in manifest.inputs if item.dataset not in PERIOD_INDEXED_DATASETS}
+    )
+    if session:
+        return tuple(session)
+    read = {item.year for item in manifest.inputs}
+    newest = max(read)
+    return tuple(year for year in factor_build_years(newest) if year in read) or (newest,)
+
+
 def _recomputed(
     store: PanelStore,
     definition: FactorDefinition,
@@ -4414,7 +4457,7 @@ def _recomputed(
     its partition years and code commit. `subjects` is also the universe: every one of them was
     stored `computed` or `undefined_value`, so it was in the build's universe, and nothing else
     is asked."""
-    years = tuple(sorted({item.year for item in manifest.inputs}))
+    years = _named_years(manifest)
     request = factor_build_request(
         factor=definition.qualified_key,
         tier="raw",
@@ -4518,7 +4561,7 @@ def _supersession(
             for item in neutralizations
         ),
     )
-    years = tuple(sorted({item.year for item in manifest.inputs}))
+    years = _named_years(manifest)
 
     def command(
         tier: str, extra: Sequence[str], supersedes: Sequence[tuple[str, str]]
@@ -4667,7 +4710,9 @@ def stale_statement_builds(
        filing changes neither which periods it holds nor their versions nor an ambiguity inside
        it, because every row of a period at or after the window's first came from the years
        already read. One stored `insufficient_history` is not asked when even its newest
-       period over every year read now is older than the recency floor at the build's instant:
+       period over every statement dataset the factor reads, on every year read now -- the
+       periods the engine pools into one window -- is older than the recency floor at the
+       build's instant:
        any window it could form would end there and be refused, so it stays
        `insufficient_history`. The periods are taken from rows visible at this command's `as_of`,
        a superset of those visible at any build's instant -- newer bounds, more rows -- so both
@@ -4795,7 +4840,7 @@ def _statement_recomputes(
             for manifest in manifests:
                 # The request `_recomputed` makes names every year the build's inputs name, and
                 # `_statement_years` adds the stored years beneath them: the reading of today.
-                named = sorted({item.year for item in manifest.inputs})
+                named = list(_named_years(manifest))
                 read = {
                     name: tuple(
                         sorted(item.year for item in manifest.inputs if item.dataset == name)
@@ -4808,27 +4853,37 @@ def _statement_recomputes(
                 }
                 reach: dict[str, date] = {}
                 latest: dict[str, date] = {}
-                for name in statements:
-                    added = tuple(y for y in reads_now[name] if y not in read[name])
-                    if not added:
-                        continue
-                    for years, into in ((added, reach), (reads_now[name], latest)):
-                        key = (name, years)
-                        if key not in newest:
-                            newest[key] = _read(
-                                partial(
-                                    statement_newest_periods,
-                                    store,
-                                    dataset=name,
-                                    years=years,
-                                    as_of=as_of,
-                                ),
-                                store=store,
-                                what=f"the stored {name} filings of {list(years)}",
-                            )
-                        for subject, period in newest[key].items():
-                            if period > into.get(subject, date.min):
-                                into[subject] = period
+                # `reach` from the years each dataset gained; `latest` from every statement
+                # dataset over every year read now, because the engine's window pools them all --
+                # a year added to `income` alone can complete a window whose newest period is a
+                # `balancesheet` one (review m1). Only read when some dataset gained a year.
+                gained = {
+                    name: tuple(y for y in reads_now[name] if y not in read[name])
+                    for name in statements
+                }
+                passes = (
+                    [(name, years, reach) for name, years in gained.items() if years]
+                    + [(name, reads_now[name], latest) for name in statements]
+                    if any(gained.values())
+                    else []
+                )
+                for name, years, into in passes:
+                    key = (name, years)
+                    if key not in newest:
+                        newest[key] = _read(
+                            partial(
+                                statement_newest_periods,
+                                store,
+                                dataset=name,
+                                years=years,
+                                as_of=as_of,
+                            ),
+                            store=store,
+                            what=f"the stored {name} filings of {list(years)}",
+                        )
+                    for subject, period in newest[key].items():
+                        if period > into.get(subject, date.min):
+                            into[subject] = period
                 floor = oldest_admissible_newest_period(
                     manifest.as_of.astimezone(ZoneInfo(manifest.date_timezone)).date()
                 )

@@ -137,6 +137,7 @@ from openalpha_cn.panel_factors import (
 )
 from openalpha_cn.panel_ingest import (
     financial_statement_requirement,
+    keep_panel_subjects,
     merge_panel_batches,
     split_panel_batch_by_year,
     write_empty_announcement_year,
@@ -1316,3 +1317,99 @@ def test_restating_old_periods_does_not_make_a_stale_issuer_fresh(
     assert answers[RESTATED_ONLY].coverage == "insufficient_history"
     assert answers[CAUGHT_UP].coverage == "computed"
     assert answers[CAUGHT_UP].input_period_last == date(2025, 6, 30)
+
+
+# --- a year added to one statement dataset of a multi-dataset factor (round 5, review m1) ---------
+
+
+ROE: Final[str] = "return_on_equity_ttm/v1"
+SPLIT: Final[str] = SECURITIES[38]
+"""Files income for 2024Q3..2025Q1 and a balance sheet for 2025Q2..2025Q3 only."""
+
+
+def _rows_of(dataset: str, code: str, periods: Sequence[date]) -> ColumnarPanelBatch:
+    rows: list[tuple[str, datetime, datetime, datetime]] = []
+    cells: dict[str, list[object]] = {name: [] for name in statement_panel_columns(dataset)}
+    for position, period in enumerate(periods):
+        announced = _on_time(period)
+        stamp = _midnight(announced)
+        rows.append((code, stamp, stamp, stamp))
+        cells[REPORT_PERIOD_COLUMN].append(period.isoformat())
+        cells[ANNOUNCEMENT_DATE_COLUMN].append(announced.isoformat())
+        if FIRST_ANNOUNCEMENT_COLUMN in cells:
+            cells[FIRST_ANNOUNCEMENT_COLUMN].append(announced.isoformat())
+            cells[REVISION_LABEL_COLUMN].append("0")
+        for offset, name in enumerate(STATEMENT_DATA_COLUMNS[dataset]):
+            cells[name].append((100.0 + 37.0 * offset) * (1.0 + 0.05 * position))
+    return _batch(
+        dataset,
+        rows,
+        cells,
+        (
+            REPORT_PERIOD_COLUMN,
+            ANNOUNCEMENT_DATE_COLUMN,
+            FIRST_ANNOUNCEMENT_COLUMN,
+            REVISION_LABEL_COLUMN,
+        ),
+    )
+
+
+def _with_split(dataset: str, periods: Sequence[date]) -> ColumnarPanelBatch:
+    """The corpus's `dataset` with `SPLIT`'s rows replaced by `periods`."""
+    others = keep_panel_subjects(_statement_batch(dataset), frozenset(SECURITIES) - {SPLIT})
+    assert others is not None
+    return merge_panel_batches((others, _rows_of(dataset, SPLIT, periods)))
+
+
+def test_a_year_added_to_one_dataset_of_a_multi_dataset_factor_is_judged_on_every_dataset(
+    corpus: Path, tmp_path: Path
+) -> None:
+    """`return_on_equity_ttm` pools `income` and `balancesheet` periods into one window. Built at
+    2026-02-05 over a store holding no `income` before 2026, `SPLIT` held two balance-sheet
+    periods and was `insufficient_history` with no window. Then `income` 2021-2025 is stored --
+    a year added to one dataset only. Its income now reaches 2025Q1, older than the recency floor
+    (2025H1), but the pooled window 2024Q3..2025Q3 ends at its 2025Q3 balance sheet, so the
+    engine answers `input_missing` (no income at 2025Q2-Q3). The listing has to judge the floor
+    on the pooled periods, not on the dataset that gained the year."""
+    store = _copy(corpus, tmp_path / "panel")
+    balance = _with_split("balancesheet", (date(2025, 6, 30), date(2025, 9, 30)))
+    for year, part in split_panel_batch_by_year(balance):
+        write_panel_batch(store, part, year=year)
+    income = dict(
+        split_panel_batch_by_year(
+            _with_split(INCOME_DATASET, (date(2024, 9, 30), date(2024, 12, 31), date(2025, 3, 31)))
+        )
+    )
+    for year in store.registered_years(INCOME_DATASET):
+        if year < 2026:
+            store.remove_partition(INCOME_DATASET, year)
+    write_panel_batch(store, income[2026], year=2026)
+    _build(store, [ROE], [FEBRUARY], years=(2026,), tier="raw")
+    assert _raw(store, ROE)[FEBRUARY][SPLIT][0] == "insufficient_history"
+    for year, part in income.items():
+        if year < 2026:
+            write_panel_batch(store, part, year=year)
+
+    stale = stale_statement_builds(
+        store,
+        exchange=EXCHANGE,
+        max_staleness_days=STALENESS_DAYS,
+        as_of=FETCHED_AT,
+        factors=[ROE],
+    )
+
+    (build,) = stale
+    assert build.reads_now["income"] == STORED_STATEMENT_YEARS
+    assert build.transitions[("insufficient_history", "input_missing")] == 1
+    (manifest,) = load_factor_manifests(
+        store, FACTOR_DEFINITIONS.get(ROE), years=(2026,), as_of=FETCHED_AT
+    )
+    engine = factor_view._recomputed(
+        store,
+        FACTOR_DEFINITIONS.get(ROE),
+        manifest=manifest,
+        subjects=(SPLIT,),
+        exchange=EXCHANGE,
+        max_staleness_days=STALENESS_DAYS,
+    )
+    assert engine[SPLIT].coverage == "input_missing"

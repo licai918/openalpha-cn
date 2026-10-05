@@ -412,7 +412,9 @@ def test_the_declared_limitations_are_the_ones_this_face_carries() -> None:
     **`V2-P6-027` added a twelfth**: a statement factor reads its whole stored history and a
     window may end at most one missed statutory deadline behind. Its first wording -- a security
     that stopped filing is valued on its last filings however old -- was made false by the
-    recency rule in the same issue and replaced, the mechanism this literal exists for.
+    recency rule in the same issue and replaced, the mechanism this literal exists for. A thirteenth
+    from the same issue discloses that the session axis has no such bound: a valuation factor
+    takes each security's newest market cap in the years named, however old.
     """
     assert {
         "the_unbuilt_factor_remedy_fires_only_when_no_year_of_the_tier_is_registered",
@@ -427,6 +429,7 @@ def test_the_declared_limitations_are_the_ones_this_face_carries() -> None:
         "the_freshness_bar_is_waived_by_cadence_only_where_the_read_is_outside_the_engine",
         "a_report_period_off_the_quarter_grid_is_excluded_and_listed_rather_than_rounded",
         "a_statement_window_may_end_one_missed_statutory_deadline_behind",
+        "a_valuation_factor_takes_the_newest_market_cap_in_the_named_years_however_old",
     } == FACTOR_RUN_LIMITATION_CODES
     assert all(limitation.detail.strip() for limitation in KNOWN_FACTOR_RUN_LIMITATIONS)
 
