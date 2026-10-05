@@ -2819,6 +2819,16 @@ def write_daily_panel(
     fetches the whole year and reads nothing back, and is a **whole-year replacement** --
     last-writer-wins, deliberately, since every row it writes is one it fetched.
 
+    `before_write` is not part of that group write. It stores the record of the rows this write
+    withdraws (`V2-P6-016`) once every guard has passed and *before* the pair, so the record is
+    on disk before the rows leave -- and a conflict on the pair (`PanelWriteConflictError`)
+    therefore leaves the record written and the pair not, with the record naming rows still
+    stored. That is the window every failure of the pair after its `before_write` already had (a
+    refused rename, a kill), and it closes the same way: the conflict exits `6`, the re-run
+    re-reads the year, decides the withdrawals again from what it reads and rewrites that record
+    whole before writing the pair. Folding the record into the pair's group write would close it,
+    at the cost of the "record before the rows leave" order a crash relies on; that order is kept.
+
     ## Why one writer takes both datasets
 
     They are not independent. `daily_basic` republishes `close`, which makes the two fetches a

@@ -413,7 +413,13 @@ relies on.
   with one of them silently gone (`test_panel_readiness.py::
   test_two_merging_ingests_of_one_partition_racing_store_one_and_refuse_the_other`). A partition
   written with no merge read before it -- a whole-year replacement, such as a full
-  `panel build` of `daily` -- is last-writer-wins, as it always was, and says so.
+  `panel build` of `daily` -- is last-writer-wins, as it always was, and says so. A merge that
+  reads the same partition twice is refused at the second read if it differs from the first
+  (an A-B-A write between them would otherwise pass the comparison and lose `B`'s rows). What
+  this does not cover: a merge read on one thread and written on another, and a merge built on
+  a gated read (`read_visible_at`, a `load_*` loader) rather than the un-gated merge reads the
+  audit `test_every_merge_read_records_its_base_in_the_same_hold` holds to `merge_base` --
+  neither exists today; `merge_base`'s docstring says why.
 - **Two `PanelStore` instances on one catalog in one thread.** The in-process side belongs to
   an instance, the file lock to the catalog, so a thread that holds one instance's side and asks
   another instance on the same root for any side waits on the file lock it holds itself (or, for
@@ -559,6 +565,7 @@ scratch):
 from __future__ import annotations
 
 import errno
+import functools
 import json
 import math
 import os
@@ -566,6 +573,7 @@ import sys
 import threading
 import time
 import uuid
+import weakref
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -1110,6 +1118,73 @@ and at the tail the footer's length and the magic again (`V2-P6-022`)."""
 
 _FileFingerprint = tuple[object, ...]
 
+_MERGE_BASES = threading.local()
+"""Per thread: catalog key -> `(dataset, year)` -> the content hash a merge read (`V2-P6-028`).
+
+Module-level and keyed by the catalog, as `_CATALOG_WRITES` is, so two `PanelStore` instances
+on one root in one thread share them: a merge read through one and written through the other is
+still compared. Per thread, because a base is a fact about one read-modify-write; see
+`PanelStore.merge_base`. Each entry also holds a weak reference to the instance that recorded
+it, and lives only as long as that instance does (`_MergeBases`)."""
+
+
+class _MergeBases:
+    """One thread's merge bases on one catalog, as the live entries of `_MERGE_BASES`.
+
+    An entry lives as long as the `PanelStore` that recorded it. A command builds one store and
+    drops it when it returns, so a merge read that no write followed -- a pure read through the
+    merge seam, or a merge a guard refused -- is forgotten with the command, instead of
+    outliving it and making the same thread's next, unrelated merge of that partition a
+    conflict once anyone else has written it. `PanelStore` holds no reference to itself (see
+    `_note_catalog_write`'s partial in `__init__`), so CPython frees it, and its entries, the
+    moment the last reference goes.
+    """
+
+    def __init__(
+        self,
+        entries: dict[tuple[str, int], tuple[weakref.ReferenceType[PanelStore], str | None]],
+        *,
+        owner: PanelStore,
+    ) -> None:
+        self._entries = entries
+        self._owner = owner
+
+    def _live(self, key: tuple[str, int]) -> bool:
+        entry = self._entries.get(key)
+        if entry is None:
+            return False
+        if entry[0]() is None:
+            del self._entries[key]
+            return False
+        return True
+
+    def __contains__(self, key: tuple[str, int]) -> bool:
+        return self._live(key)
+
+    def __getitem__(self, key: tuple[str, int]) -> str | None:
+        if not self._live(key):
+            raise KeyError(key)
+        return self._entries[key][1]
+
+    def record(self, key: tuple[str, int], content_hash: str | None) -> None:
+        """Record `content_hash` for `key`, unless a live base is recorded already."""
+        if not self._live(key):
+            self._entries[key] = (weakref.ref(self._owner), content_hash)
+
+    def pop(self, key: tuple[str, int], default: object = None) -> object:
+        """Consume `key`'s base: its hash if a live one was recorded, else `default`."""
+        if not self._live(key):
+            self._entries.pop(key, None)
+            return default
+        return self._entries.pop(key)[1]
+
+    def forget(self, key: tuple[str, int]) -> None:
+        self._entries.pop(key, None)
+
+    def clear(self) -> None:
+        self._entries.clear()
+
+
 _CATALOG_WRITES: dict[str, int] = {}
 _CATALOG_WRITES_LOCK = threading.Lock()
 
@@ -1650,7 +1725,9 @@ class PanelStore:
         self._catalog_access = _CatalogAccess(
             self.catalog_path,
             timeout=catalog_lock_timeout,
-            written=lambda: _note_catalog_write(self._catalog_key),
+            # A partial, not a lambda over `self`: no reference cycle, so the store -- and the
+            # merge bases it recorded (`_MergeBases`) -- go the moment its last user lets go.
+            written=functools.partial(_note_catalog_write, self._catalog_key),
         )
         # `V2-P6-022`: each (dataset, year)'s `PartitionState`, held beside the catalog and file
         # fingerprints it was read under and served again only while both still stand. See
@@ -1658,17 +1735,15 @@ class PanelStore:
         self._held_states: dict[
             tuple[str, int], tuple[_FileFingerprint, _FileFingerprint | None, PartitionState]
         ] = {}
-        # `V2-P6-028`: the merge bases this thread has read, per `(dataset, year)`; see
-        # `merge_base`. Per thread because a base is a fact about one read-modify-write, and two
-        # threads of one store merging are two of them.
-        self._merge_bases = threading.local()
 
-    def _recorded_bases(self) -> dict[tuple[str, int], str | None]:
-        bases = getattr(self._merge_bases, "bases", None)
-        if bases is None:
-            bases = {}
-            self._merge_bases.bases = bases
-        return cast(dict[tuple[str, int], str | None], bases)
+    def _recorded_bases(self) -> _MergeBases:
+        """This thread's merge bases on this catalog -- whichever live `PanelStore` instance on
+        the same root recorded them (`_MERGE_BASES`)."""
+        by_catalog = getattr(_MERGE_BASES, "by_catalog", None)
+        if by_catalog is None:
+            by_catalog = {}
+            _MERGE_BASES.by_catalog = by_catalog
+        return _MergeBases(by_catalog.setdefault(self._catalog_key, {}), owner=self)
 
     def merge_base(self, dataset: str, year: int) -> PartitionExpectation:
         """Record what `(dataset, year)` holds now as this thread's merge base, and return it.
@@ -1679,33 +1754,61 @@ class PanelStore:
         them racing used to lose one side's rows silently: each partition and its coverage
         self-consistent, both commands reporting success. So the read that a merge is made on
         records the partition's content hash here, and **every** later write or removal of that
-        partition by this thread on this store -- `write_partition`, `write_partitions`,
-        `remove_partition`, whichever writer function it goes through -- is compared against it
-        inside its exclusive hold and refused as `PanelWriteConflictError` if another writer has
-        replaced it since. Enforced at the store rather than threaded through the writers'
-        signatures: the read seam records, the write seam consumes, and no writer between them can
-        drop the base, because none of them carries it.
+        partition by this thread on this catalog -- `write_partition`, `write_partitions`,
+        `remove_partition`, through whichever writer function and whichever `PanelStore`
+        instance on the same root -- is compared against it inside its exclusive hold and refused
+        as `PanelWriteConflictError` if another writer has replaced it since. Enforced at the
+        store rather than threaded through the writers' signatures: the read seam records, the
+        write seam consumes, and no writer between them can drop the base, because none of them
+        carries it.
 
-        The first read wins: a second call before the write returns the base already recorded, so
-        a write is compared against the oldest state any of its reads saw. Call it inside the same
-        `reading()` hold as the rows it describes. A write (or a conflict) consumes the entry;
-        an entry whose write never came -- a merge refused by a guard -- stays until the next
-        write of that partition, which is then compared against it: at worst a needless conflict,
-        never a lost row. A partition written without any recorded base is last-writer-wins, as a
-        whole-year replacement means to be.
+        **One base per merge, and a second read must agree with it.** A merge may read a
+        partition more than once before it writes. Each read here compares the partition with the
+        base already recorded, and a difference is a conflict at once: otherwise a merge that read
+        `S0`, then `S1` (another writer's), would build on `S1`'s rows, and a write landing `S0`
+        again before it committed would let the comparison pass -- `S0` against `S0` -- and lose
+        the rows only `S1` had. Call this inside the same `reading()` hold as the rows it
+        describes.
+
+        **What it covers, and what it does not.** The base belongs to a thread and a catalog: the
+        same writer is the same thread, and a second thread -- or process -- is another writer,
+        compared against its own reads and not against this one's. A merge whose reading and
+        writing happen on different threads is therefore not covered; nothing in this codebase
+        does that. It covers the reads that call it: `panel_ingest`'s un-gated merge reads, held
+        to it by `tests/unit/panel/test_query_callers.py::
+        test_every_merge_read_records_its_base_in_the_same_hold`, and the factor plane's merges.
+        A merge built on a **gated** read (`read_visible_at`, `assessed`, a `load_*` loader) and
+        written back to the same dataset would not be seen by that audit; none exists today, and
+        the audit's own docstring says so.
+
+        The write (once it holds the exclusive side) consumes the entry. An entry whose write never
+        came -- a pure read through the merge seam, a merge refused by a guard -- lives as long as
+        the store instance that recorded it (`_MergeBases`): within that operation a later merge
+        read or write of the partition is compared against it (at worst a needless conflict, never
+        a lost row), and once the operation drops its store the entry goes with it. A partition
+        written without any recorded base is last-writer-wins, as a whole-year replacement means
+        to be.
         """
         bases = self._recorded_bases()
         key = (dataset, year)
-        if key not in bases:
-            bases[key] = self.partition_content_hash(dataset, year)
-        return PartitionExpectation(bases[key])
+        current = self.partition_content_hash(dataset, year)
+        if key in bases and bases[key] != current:
+            bases.forget(key)
+            raise PanelWriteConflictError(
+                f"['{dataset}@{year}'] changed between two reads this merge made of it -- another "
+                "writer committed in between -- so its rows cannot be put back as they were read. "
+                "Nothing was written. Run it again: it re-reads what is stored now",
+                targets=(f"{dataset}@{year}",),
+            )
+        bases.record(key, current)
+        return PartitionExpectation(current)
 
     def discard_merge_bases(self) -> None:
-        """Forget every merge base this thread recorded and has not written.
+        """Forget every merge base this thread recorded on this catalog and has not written.
 
         For a caller abandoning a planned write -- a factor build one of whose tiers a guard
-        refused -- so a later, unrelated write of the same partitions by this thread on this
-        store is not compared against a read nobody acted on.
+        refused -- so a later, unrelated write of the same partitions by this thread is not
+        compared against a read nobody acted on.
         """
         self._recorded_bases().clear()
 
@@ -1943,12 +2046,14 @@ class PanelStore:
                 if self._reusable_partition(write.dataset, write.year, content_hash) is None:
                     staged[index] = self._staged_partition(write)
             with self._catalog_access.exclusive():
+                # Consumed once the hold is held, and only then: a `PanelCatalogBusyError` on the
+                # way in leaves the bases standing for the write's retry.
+                for key in keys:
+                    bases.pop(key, None)
                 self._commit_group(prepared, staged, written_at=written_at, recorded_at=recorded_at)
         finally:
             for temporary in staged.values():
                 temporary.unlink(missing_ok=True)
-            for key in keys:
-                bases.pop(key, None)
         return tuple(
             PartitionRef(
                 write.dataset,
@@ -2410,30 +2515,29 @@ class PanelStore:
         `PanelWriteConflictError`, and nothing is removed (`V2-P6-028`).
         """
         _validate_dataset(dataset)
-        base = self._recorded_bases().pop((dataset, year), _NO_BASE)
+        bases = self._recorded_bases()
         if not self.catalog_path.exists():
-            if base is not _NO_BASE and base is not None:
-                raise PanelWriteConflictError(
-                    f"['{dataset}@{year}'] changed after this removal read it -- another writer "
-                    "committed in between -- so nothing was removed. Run it again",
-                    targets=(f"{dataset}@{year}",),
-                )
+            # Nothing to remove: the state the removal wanted holds already, so no conflict.
+            bases.pop((dataset, year), None)
             return False
         with (
             self._catalog_access.exclusive(),
             _connect(str(self.catalog_path)) as connection,
         ):
+            # Consumed once the hold is held; see `write_partitions`.
+            base = bases.pop((dataset, year), _NO_BASE)
             self._ensure_catalog_schema(connection)
             existing = self._lookup_with_connection(connection, dataset, year)
-            stored = None if existing is None else existing.content_hash
-            if base is not _NO_BASE and stored != base:
+            if existing is None:
+                # Already absent -- whoever removed it, the removal's target state is reached,
+                # which is `write_partitions`' "already holds this content" rule for a removal.
+                return False
+            if base is not _NO_BASE and existing.content_hash != base:
                 raise PanelWriteConflictError(
                     f"['{dataset}@{year}'] changed after this removal read it -- another writer "
                     "committed in between -- so nothing was removed. Run it again",
                     targets=(f"{dataset}@{year}",),
                 )
-            if existing is None:
-                return False
             key: list[object] = [dataset, year]
             connection.execute("BEGIN TRANSACTION")
             try:

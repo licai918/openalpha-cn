@@ -338,7 +338,23 @@ def test_every_merge_read_records_its_base_in_the_same_hold() -> None:
     one. Each un-gated read here is therefore classified, a merge or not, and every read of a
     merge must sit inside a `with store.reading():` that calls `store.merge_base(...)`, so the
     base and the rows describe one stored state. A new un-gated reader arrives unclassified and
-    fails here before it can write a merge nobody compares."""
+    fails here before it can write a merge nobody compares.
+
+    **What this does not see**, stated so it is not mistaken for more:
+
+    - A merge built on a **gated** read -- `read_visible_at`, `assessed`, a `load_*` loader --
+      whose rows are then written back to the same dataset. This audit walks the un-gated door
+      only. None exists today: every writer that puts stored rows back reads them through
+      `carry_stored_rows_forward` or `write_upstream_defects`, both on this list, because a
+      point-in-time read would drop the withheld rows from what it writes (see `QUERY_CALLERS`).
+    - A merge whose read and write are in different functions is seen at the read only, which is
+      where the rule lives; the write is compared by the store whatever function makes it.
+    - A merge read on one thread and written on another; see `PanelStore.merge_base`.
+
+    Anchoring the rule on writes instead -- "every write of a dataset that is ever merged must
+    carry a base" -- was considered and declined: whether a write's rows came from a read is
+    not visible to an AST, and a whole-year replacement, which reads nothing back, is correctly
+    last-writer-wins and would be refused by it."""
     ingest = ast.parse((SOURCE / "panel_ingest.py").read_text(encoding="utf-8"))
     functions = _functions(ingest)
 

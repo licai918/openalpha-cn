@@ -29,7 +29,7 @@ import os
 import sys
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from multiprocessing import Queue
 from multiprocessing.synchronize import Barrier
 from pathlib import Path
@@ -849,28 +849,106 @@ def test_a_reader_inside_one_read_hold_sees_a_group_write_whole(tmp_path: Path) 
 
 
 # --- the merge base, recorded at the read and compared at the write (`V2-P6-028`) ---------------
+#
+# A base belongs to a thread and a catalog: the same thread is the same writer, so "another
+# writer" in these tests is another thread, as a second process would be.
+
+
+def _elsewhere(action: Callable[[], object]) -> None:
+    """Run `action` on another thread -- another writer -- and wait for it."""
+    failures: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            action()
+        except BaseException as error:
+            failures.append(error)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    thread.join(timeout=60)
+    assert not thread.is_alive()
+    assert failures == []
+
+
+def _other_writes(root: Path, closes: tuple[float, float]) -> None:
+    _elsewhere(
+        lambda: PanelStore(root).write_partition(
+            "prices_daily", 2024, _COLUMNS, _rows(closes=closes)
+        )
+    )
 
 
 def test_a_write_after_a_merge_read_is_compared_against_that_read(tmp_path: Path) -> None:
     """A merge reads a partition (`merge_base`) and writes it back with its own rows. If another
-    writer -- here a second store on the same root, as a second process would be -- replaced it
-    in between, the write is refused whole, through plain `write_partition` and with no
-    expectation passed: the store recorded the base at the read."""
+    writer replaced it in between, the write is refused whole, through plain `write_partition`
+    and with no expectation passed: the store recorded the base at the read."""
     root = tmp_path / "panel"
     merger = PanelStore(root)
     merger.write_partition("prices_daily", 2024, _COLUMNS, _rows())
     merger.merge_base("prices_daily", 2024)
-    PanelStore(root).write_partition("prices_daily", 2024, _COLUMNS, _rows(closes=_AFTER))
+    _other_writes(root, _AFTER)
 
     with pytest.raises(PanelWriteConflictError) as conflict:
         merger.write_partition("prices_daily", 2024, _COLUMNS, _rows(closes=(12.5, 24.5)))
 
     assert conflict.value.targets == ("prices_daily@2024",)
     assert merger.query("prices_daily", year=2024, columns=["close"]) == [(11.5,), (23.5,)]
-    # The conflict consumed the base: running the write again (re-reading first) goes through,
-    # and a write with no merge read before it is last-writer-wins, as a whole replacement is.
+    # The conflict consumed the base: a write with no merge read before it is last-writer-wins,
+    # as a whole replacement is.
     merger.write_partition("prices_daily", 2024, _COLUMNS, _rows(closes=(12.5, 24.5)))
     assert merger.query("prices_daily", year=2024, columns=["close"]) == [(12.5,), (24.5,)]
+
+
+def test_a_merge_read_through_one_store_is_compared_at_a_write_through_another(
+    tmp_path: Path,
+) -> None:
+    """Bases are kept per catalog, not per `PanelStore`: a merge read through one instance and
+    written through a second on the same root is still compared, for as long as the instance
+    that read is alive. Once it is gone, so is its base -- a command's reads end with the
+    command -- and a later write is last-writer-wins."""
+    root = tmp_path / "panel"
+    PanelStore(root).write_partition("prices_daily", 2024, _COLUMNS, _rows())
+    reader = PanelStore(root)
+    reader.merge_base("prices_daily", 2024)
+    _other_writes(root, _AFTER)
+
+    with pytest.raises(PanelWriteConflictError):
+        PanelStore(root).write_partition("prices_daily", 2024, _COLUMNS, _rows())
+
+    reader.merge_base("prices_daily", 2024)
+    _other_writes(root, _BEFORE)
+    del reader
+    PanelStore(root).write_partition("prices_daily", 2024, _COLUMNS, _rows(closes=(12.5, 24.5)))
+    assert PanelStore(root).query("prices_daily", year=2024, columns=["close"]) == [
+        (12.5,),
+        (24.5,),
+    ]
+
+
+def test_a_merge_whose_second_read_disagrees_with_its_first_is_refused_at_that_read(
+    tmp_path: Path,
+) -> None:
+    """The A-B-A case a review reproduced. A merge reads `S0` (its base), another writer stores
+    `S1`, the merge reads again -- now building on `S1`'s rows -- and a third write puts `S0`
+    back. Compared at the write alone, `S0` against `S0` passes and the rows only `S0` held are
+    lost. So the second read is compared with the base already recorded, and refused there."""
+    root = tmp_path / "panel"
+    merger = PanelStore(root)
+    merger.write_partition("prices_daily", 2024, _COLUMNS, _rows())
+    with merger.reading():
+        merger.merge_base("prices_daily", 2024)
+        merger.query("prices_daily", year=2024, columns=["close"])
+    _other_writes(root, _AFTER)
+
+    with pytest.raises(PanelWriteConflictError), merger.reading():
+        merger.merge_base("prices_daily", 2024)
+
+    _other_writes(root, _BEFORE)
+    # The refused read left nothing recorded, so a merge started again from here reads afresh.
+    assert merger.merge_base("prices_daily", 2024) == PartitionExpectation(
+        merger.partition_content_hash("prices_daily", 2024)
+    )
 
 
 def test_a_merge_base_that_moved_to_exactly_this_writes_content_is_not_a_conflict(
@@ -882,7 +960,7 @@ def test_a_merge_base_that_moved_to_exactly_this_writes_content_is_not_a_conflic
     merger = PanelStore(root)
     merger.write_partition("prices_daily", 2024, _COLUMNS, _rows())
     merger.merge_base("prices_daily", 2024)
-    PanelStore(root).write_partition("prices_daily", 2024, _COLUMNS, _rows(closes=_AFTER))
+    _other_writes(root, _AFTER)
 
     merger.write_partition("prices_daily", 2024, _COLUMNS, _rows(closes=_AFTER))
 
@@ -896,10 +974,30 @@ def test_a_merge_read_of_an_absent_partition_conflicts_with_one_written_since(
     merger = PanelStore(root)
     merger.write_partition("other", 2024, _COLUMNS, _rows())
     assert merger.merge_base("prices_daily", 2024) == PartitionExpectation(None)
-    PanelStore(root).write_partition("prices_daily", 2024, _COLUMNS, _rows(closes=_AFTER))
+    _other_writes(root, _AFTER)
 
     with pytest.raises(PanelWriteConflictError):
         merger.write_partition("prices_daily", 2024, _COLUMNS, _rows())
+
+
+def test_a_write_refused_at_the_lock_keeps_its_merge_base(tmp_path: Path) -> None:
+    """The base is consumed only once the exclusive side is held. A write that waited out its
+    bound (`PanelCatalogBusyError`) wrote nothing and compared nothing, so its retry is still
+    compared against the read it was made on."""
+    root = tmp_path / "panel"
+    merger = PanelStore(root, catalog_lock_timeout=0.3)
+    merger.write_partition("prices_daily", 2024, _COLUMNS, _rows())
+    merger.merge_base("prices_daily", 2024)
+    holder = _start_holder(root, "shared")
+    try:
+        with pytest.raises(PanelCatalogBusyError):
+            merger.write_partition("prices_daily", 2024, _COLUMNS, _rows(closes=(12.5, 24.5)))
+    finally:
+        _stop_all([holder])
+    _other_writes(root, _AFTER)
+
+    with pytest.raises(PanelWriteConflictError):
+        merger.write_partition("prices_daily", 2024, _COLUMNS, _rows(closes=(12.5, 24.5)))
 
 
 def test_a_removal_after_a_merge_read_is_compared_against_that_read(tmp_path: Path) -> None:
@@ -909,12 +1007,26 @@ def test_a_removal_after_a_merge_read_is_compared_against_that_read(tmp_path: Pa
     merger = PanelStore(root)
     merger.write_partition("upstream", 2024, _COLUMNS, _rows())
     merger.merge_base("upstream", 2024)
-    PanelStore(root).write_partition("upstream", 2024, _COLUMNS, _rows(closes=_AFTER))
+    _elsewhere(
+        lambda: PanelStore(root).write_partition("upstream", 2024, _COLUMNS, _rows(closes=_AFTER))
+    )
 
     with pytest.raises(PanelWriteConflictError):
         merger.remove_partition("upstream", 2024)
 
     assert merger.registered_years("upstream") == (2024,)
+
+
+def test_a_removal_of_a_partition_already_gone_is_not_a_conflict(tmp_path: Path) -> None:
+    """Whoever removed it, the state the removal wanted holds: the "already holds this content"
+    rule, for a removal."""
+    root = tmp_path / "panel"
+    merger = PanelStore(root)
+    merger.write_partition("upstream", 2024, _COLUMNS, _rows())
+    merger.merge_base("upstream", 2024)
+    _elsewhere(lambda: PanelStore(root).remove_partition("upstream", 2024))
+
+    assert merger.remove_partition("upstream", 2024) is False
 
 
 def test_merge_bases_belong_to_the_thread_that_read_them(tmp_path: Path) -> None:
@@ -923,11 +1035,7 @@ def test_merge_bases_belong_to_the_thread_that_read_them(tmp_path: Path) -> None
     store = PanelStore(tmp_path / "panel")
     store.write_partition("prices_daily", 2024, _COLUMNS, _rows())
     store.merge_base("prices_daily", 2024)
-    other = threading.Thread(
-        target=lambda: store.write_partition("prices_daily", 2024, _COLUMNS, _rows(closes=_AFTER))
-    )
-    other.start()
-    other.join(timeout=30)
+    _elsewhere(lambda: store.write_partition("prices_daily", 2024, _COLUMNS, _rows(closes=_AFTER)))
 
     assert store.query("prices_daily", year=2024, columns=["close"]) == [(11.5,), (23.5,)]
     with pytest.raises(PanelWriteConflictError):
