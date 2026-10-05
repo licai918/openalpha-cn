@@ -87,7 +87,7 @@ from openalpha_cn.model_view import (
     prediction_index_view,
     run_daily,
 )
-from openalpha_cn.panel.store import PanelStore
+from openalpha_cn.panel.store import PanelCatalogBusyError, PanelStore
 from openalpha_cn.panel_doctor import PanelDoctorError, panel_health_report
 from openalpha_cn.panel_gate import DependencyRequest, PanelGateError, require_datasets
 from openalpha_cn.panel_view import (
@@ -862,6 +862,20 @@ A face that refused those would refuse every honest financial panel, be worked a
 first client that met it, and protect nothing. The notices ride on the clearance instead, so
 a cleared caller still sees them.
 """
+
+
+CATALOG_BUSY_HTTP_STATUS: Final[int] = 503
+"""What every route answers when the panel catalog stayed held past its bound (`V2-P6-028`).
+
+`panel.store.PanelCatalogBusyError`: another process held the catalog for the whole bounded wait,
+so nothing was read or written. It is the `cli.PanelExit.catalog_busy` row of every table here --
+not a verdict (`409`), not a request that cannot be put (`422`), and not this application
+breaking (`500`) -- so it is answered once, by an application-level handler, with a
+`Retry-After` and the error's own message, which names the catalog, the lock file and the bound
+and nothing else."""
+
+CATALOG_BUSY_RETRY_AFTER_SECONDS: Final[int] = 30
+"""The `Retry-After` a `503` carries: long enough for a batch of catalog writes to drain."""
 
 
 FACTOR_HTTP_STATUS: Final[Mapping[str, int]] = MappingProxyType(
@@ -2905,6 +2919,16 @@ def create_app(
         which is `V2-P4-067(b)`'s shape one wave later. See `_validation_refusal`.
         """
         return _validation_refusal(error)
+
+    @application.exception_handler(PanelCatalogBusyError)
+    async def catalog_busy(request: Request, error: PanelCatalogBusyError) -> JSONResponse:
+        """Answer a catalog held past its bound as retryable, on every route; see
+        `CATALOG_BUSY_HTTP_STATUS`."""
+        return JSONResponse(
+            status_code=CATALOG_BUSY_HTTP_STATUS,
+            content={"detail": _panel_detail("catalog_busy", str(error))},
+            headers={"Retry-After": str(CATALOG_BUSY_RETRY_AFTER_SECONDS)},
+        )
 
     configured_web_dir = web_dir if web_dir is not None else config.web_dir
     if configured_web_dir is not None:

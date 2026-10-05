@@ -12,21 +12,29 @@ I/O; this module is about the store actually producing those states from what is
 
 from __future__ import annotations
 
+import ast
+import multiprocessing
 from datetime import UTC, date, datetime, timedelta
+from multiprocessing import Queue
+from multiprocessing.synchronize import Event
 from pathlib import Path
 
 import duckdb
 import pytest
 
 from openalpha_cn.domain.panel_batch import ColumnarPanelBatch, PanelColumn, TimelineColumns
-from openalpha_cn.panel.catalog import ReadinessRequirement
+from openalpha_cn.panel.catalog import (
+    PanelReadOutcome,
+    PanelVisibleReadOutcome,
+    ReadinessRequirement,
+)
 from openalpha_cn.panel.store import (
     ColumnSpec,
     PanelCatalogBusyError,
     PanelStorageError,
     PanelStore,
 )
-from openalpha_cn.panel_ingest import panel_column_specs, write_panel_batch
+from openalpha_cn.panel_ingest import panel_column_specs, panel_coverage, write_panel_batch
 
 DATASET = "prices_daily"
 SUBJECTS = ("000001.SZ", "000002.SZ")
@@ -384,6 +392,50 @@ def test_a_scan_that_fails_after_a_ready_verdict_surfaces_as_a_panel_storage_err
         store.read_if_ready(waived, year=2024, columns=["close"])
 
 
+def test_coverage_written_with_its_partition_is_checked_before_anything_is_staged(
+    tmp_path: Path,
+) -> None:
+    """`write_partition(..., coverage=...)` (`V2-P6-028`) validates the record against the write
+    it rides with before anything lands: a record for another partition, or one counting other
+    rows, writes neither the partition nor the record."""
+    store = _store(tmp_path / "panel")
+    batch = _batch()
+    coverage = panel_coverage(batch, year=2024)
+    columns, rows = panel_column_specs(batch), batch.to_rows()
+
+    with pytest.raises(PanelStorageError, match="cannot be recorded with a write of"):
+        store.write_partition(DATASET, 2025, columns, rows, coverage=coverage)
+    with pytest.raises(PanelStorageError, match="disagrees with the 5 row"):
+        store.write_partition(DATASET, 2024, columns, rows[:5], coverage=coverage)
+
+    assert store.registered_years(DATASET) == ()
+    assert not list((tmp_path / "panel").glob(f"{DATASET}/*/*"))
+
+
+def test_an_idempotent_write_whose_partition_moved_meanwhile_becomes_a_full_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reuse decision is taken under a shared hold and the coverage recorded under a later
+    exclusive one. If another writer replaced the partition in between, recording this batch's
+    coverage would stamp it onto content it does not describe; the write goes ahead instead,
+    and the store ends holding this batch and this batch's coverage."""
+    store = _store(tmp_path / "panel")
+    first = write_panel_batch(store, _batch(), year=2024)
+    other = _batch(subjects=(*SUBJECTS, "000003.SZ"))
+    write_panel_batch(store, other, year=2024)
+    # The stale answer the reuse check would have given had it run before `other` landed.
+    monkeypatch.setattr(store, "_reusable_partition", lambda *_: first)
+
+    written = write_panel_batch(store, _batch(), year=2024)
+
+    assert written.content_hash == first.content_hash
+    stored = store.read_coverage(DATASET, 2024)
+    assert stored is not None
+    assert stored.partition_content_hash == first.content_hash
+    assert stored.row_count == 6
+    assert store.assess_readiness(_requirement()).state == "ready"
+
+
 def test_a_catalog_too_busy_to_read_is_not_rewrapped_as_a_storage_refusal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -697,3 +749,123 @@ def test_a_requirement_carrying_malformed_values_is_refused_at_the_boundary(
     for requirement in malformed:
         with pytest.raises(PanelStorageError):
             store.assess_readiness(requirement)
+
+
+# --- a gated read in one process beside a batch write in another (`V2-P6-028`) ---------------
+#
+# A batch write lands two catalog facts, the partition and its coverage record, and a gated read
+# asks the catalog for the verdict and then scans. Until both pairs were made atomic against
+# readers in other processes, a reader landing between the partition write and the coverage
+# write judged the new partition by the old coverage -- `blocked: coverage_stale`, which
+# `PanelReadOutcome.rows` turns into a `PanelStorageError` and the research grid into a refused
+# row that resume never re-measures -- and a reader landing between its own verdict and its own
+# scan answered with rows the verdict had never seen. Both batches here are complete and ready;
+# they differ in how many rows they hold, so a verdict describing one state and rows from the
+# other cannot pass as a whole answer.
+
+ctx = multiprocessing.get_context("spawn")
+"""Every `Process`/`Queue`/`Event` below; see `test_panel_store.py`'s `ctx` for why spawn."""
+
+_NARROW = SUBJECTS
+_WIDE = (*SUBJECTS, "000003.SZ")
+
+
+def _rewriting_worker(root_str: str, stop: Event, queue: Queue[tuple[str, str]]) -> None:
+    try:
+        store = _store(Path(root_str))
+        writes = 0
+        while not stop.is_set():
+            subjects = _WIDE if writes % 2 == 0 else _NARROW
+            write_panel_batch(store, _batch(subjects=subjects), year=2024)
+            writes += 1
+        queue.put(("writer", f"ok:{writes}"))
+    except Exception as error:
+        queue.put(("writer", f"fail:{type(error).__name__}:{error}"))
+
+
+def _gated_reader_worker(root_str: str, queue: Queue[tuple[str, str]], tag: str) -> None:
+    """Every gated door, many times: report each answer as `(door, verdict rows, rows read)`,
+    or what it was refused with."""
+    try:
+        store = _store(Path(root_str))
+        answers: set[tuple[str, int | None, int]] = set()
+        refusals: list[str] = []
+        for _ in range(40):
+            outcomes: list[tuple[str, PanelReadOutcome | PanelVisibleReadOutcome]] = [
+                (
+                    "read_if_ready",
+                    store.read_if_ready(_requirement(), year=2024, columns=["close"]),
+                ),
+                (
+                    "read_visible_at",
+                    store.read_visible_at(_requirement(), year=2024, columns=["close"]),
+                ),
+            ]
+            scope = store.assessed(_requirement())
+            for _ in range(3):
+                outcomes.append(("scope.read", scope.read(year=2024, columns=["close"])))
+                outcomes.append(
+                    ("scope.read_visible_at", scope.read_visible_at(year=2024, columns=["close"]))
+                )
+            for door, outcome in outcomes:
+                if outcome.is_blocked:
+                    codes = [issue.code for issue in outcome.readiness.issues]
+                    codes += [str(issue) for issue in getattr(outcome, "visible_slice_issues", ())]
+                    refusals.append(f"{door}: {','.join(codes)}")
+                else:
+                    answers.add((door, outcome.readiness.row_count, len(outcome.rows)))
+        queue.put((tag, repr((sorted(answers), refusals[:5], len(refusals)))))
+    except Exception as error:
+        queue.put((tag, f"fail:{type(error).__name__}:{error}"))
+
+
+def test_gated_reads_in_other_processes_never_see_a_batch_write_half_landed(
+    tmp_path: Path,
+) -> None:
+    """One process rewrites a partition through `write_panel_batch` -- the path every ingest and
+    factor build takes -- alternating a 6-row and a 9-row batch, while three others read it
+    through every readiness-gated door: `read_if_ready`, `read_visible_at`, and a scope taken
+    once and read six times. Every answer is ready, and every answer's rows are the rows its own
+    verdict describes."""
+    root = tmp_path / "panel"
+    write_panel_batch(_store(root), _batch(subjects=_NARROW), year=2024)
+    stop = ctx.Event()
+    queue: multiprocessing.Queue[tuple[str, str]] = ctx.Queue()
+    writer = ctx.Process(target=_rewriting_worker, args=(str(root), stop, queue))
+    readers = [
+        ctx.Process(target=_gated_reader_worker, args=(str(root), queue, f"reader{index}"))
+        for index in range(3)
+    ]
+    writer.start()
+    for process in readers:
+        process.start()
+    outcomes: dict[str, str] = {}
+    try:
+        for _ in readers:
+            tag, outcome = queue.get(timeout=300)
+            outcomes[tag] = outcome
+        stop.set()
+        while "writer" not in outcomes:
+            tag, outcome = queue.get(timeout=120)
+            outcomes[tag] = outcome
+        for process in (writer, *readers):
+            process.join(timeout=30)
+    finally:
+        stop.set()
+        for process in (writer, *readers):
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=10)
+
+    assert outcomes["writer"].startswith("ok:"), outcomes["writer"]
+    assert int(outcomes["writer"].removeprefix("ok:")) >= 2, "the writer never rewrote"
+    for tag in ("reader0", "reader1", "reader2"):
+        assert not outcomes[tag].startswith("fail:"), f"{tag} raised: {outcomes[tag]}"
+        answers, first_refusals, refusal_count = ast.literal_eval(outcomes[tag])
+        assert refusal_count == 0, f"{tag} was refused {refusal_count} times: {first_refusals}"
+        for door, verdict_rows, rows_read in answers:
+            assert verdict_rows == rows_read, (
+                f"{tag} {door}: the verdict describes {verdict_rows} rows and the read "
+                f"answered with {rows_read}"
+            )
+            assert rows_read in (6, 9)

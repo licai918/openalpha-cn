@@ -69,6 +69,7 @@ from openalpha_cn.domain.trading_calendar import (
     TradingCalendarError,
 )
 from openalpha_cn.panel.catalog import PanelStorageError
+from openalpha_cn.panel.store import PanelCatalogBusyError
 from openalpha_cn.panel_doctor import _LOAD_FAILURES, PanelHealthReport
 from openalpha_cn.panel_gate import DependencyClearance, DependencyRequest, PanelGateError
 from openalpha_cn.providers.tushare import TUSHARE_DATASETS
@@ -92,9 +93,34 @@ def test_the_exit_code_table_is_five_distinct_codes_and_none_of_them_is_clicks()
         "bad_request": 3,
         "provider_failure": 4,
         "internal_error": 5,
+        "catalog_busy": 6,
     }
     assert CLICK_USAGE_EXIT_CODE == 2
     assert CLICK_USAGE_EXIT_CODE not in {int(member) for member in PanelExit}
+
+
+def test_a_catalog_held_past_its_bound_exits_with_its_own_code_and_its_own_message(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`V2-P6-028`. A `PanelCatalogBusyError` reaching the top of a panel command is neither a
+    defect in the command (`internal_error`, whose sentence says "file a bug" and withholds the
+    message) nor a verdict about the panel (`unhealthy`): another process held the catalog for
+    the whole bounded wait. It gets its own code, so a scheduler can retry exactly that, and its
+    own message -- which names the catalog and the lock file and carries no credential -- is
+    printed with the advice to run the command again."""
+    refusal = PanelCatalogBusyError(
+        "the panel catalog /runtime/panel/catalog.duckdb was not free for exclusive access "
+        "within the 600s bound"
+    )
+    with pytest.raises(typer.Exit) as exited, cli_module._panel_command("factor build"):
+        raise refusal
+
+    assert exited.value.exit_code == PanelExit.catalog_busy
+    stderr = capsys.readouterr().err
+    assert "`factor build`" in stderr
+    assert "/runtime/panel/catalog.duckdb" in stderr
+    assert "run the command again" in stderr
+    assert "defect" not in stderr
 
 
 def test_the_build_targets_are_a_closed_table_in_dependency_order() -> None:

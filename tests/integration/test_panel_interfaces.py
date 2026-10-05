@@ -47,14 +47,14 @@ from panel_fixtures import (
     write_generated_panel,
 )
 
-from openalpha_cn.api.app import PANEL_HTTP_STATUS, create_app
+from openalpha_cn.api.app import CATALOG_BUSY_HTTP_STATUS, PANEL_HTTP_STATUS, create_app
 from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
 from openalpha_cn.domain.daily_prices import DAILY_BASIC_DATASET, DAILY_DATASET
 from openalpha_cn.domain.index_membership import INDEX_WEIGHT_DATASET
 from openalpha_cn.domain.price_limits import SUSPENSION_DATASET
 from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET
 from openalpha_cn.domain.trading_calendar import TRADING_CALENDAR_DATASET
-from openalpha_cn.panel.store import PanelStore
+from openalpha_cn.panel.store import PanelCatalogBusyError, PanelStore
 from openalpha_cn.panel_doctor import (
     HEALTH_CATEGORIES,
     HEALTH_CODE_CATEGORY,
@@ -863,6 +863,32 @@ def test_no_panel_refusal_body_says_where_this_service_keeps_its_store(tmp_path:
     sdk = OpenAlphaSDK(runtime_dir=tmp_path)
     with pytest.raises(PanelUnreadableError, match=re.escape(str(store.root))):
         sdk.panel_health(**sdk_arguments(query()))
+
+
+def test_a_catalog_held_past_its_bound_is_a_retryable_503_and_not_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`V2-P6-028`. `PanelCatalogBusyError` means another process held the catalog for the
+    whole bounded wait: nothing was judged and nothing broke. Every route answers it the same
+    way, `503` with a `Retry-After` and the error's own message (the catalog, the lock file, the
+    bound -- no credential), rather than the `500` an unanticipated exception gets."""
+    seed_panel(tmp_path)
+
+    def busy(self: PanelStore, requirement: object) -> object:
+        raise PanelCatalogBusyError(f"the panel catalog {self.catalog_path} was not free")
+
+    monkeypatch.setattr(PanelStore, "_partition_states", busy)
+    client = TestClient(create_app(runtime_dir=tmp_path), raise_server_exceptions=False)
+
+    response = client.get(
+        "/api/v1/panel/readiness", params=without(query(sessions=(), calendar=False), "session")
+    )
+
+    assert response.status_code == CATALOG_BUSY_HTTP_STATUS == 503
+    assert response.headers["retry-after"]
+    detail = response.json()["detail"]
+    assert detail["reason"] == "catalog_busy"
+    assert "catalog.duckdb" in detail["message"]
 
 
 def test_a_catalog_that_is_not_a_database_is_the_endpoint_breaking_and_not_a_verdict(

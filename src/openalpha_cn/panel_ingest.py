@@ -592,11 +592,12 @@ def write_panel_batch(
     coverage = panel_coverage(
         batch, year=year, date_timezone=date_timezone, revision_field=revision_field
     )
-    reference = store.write_partition(
-        batch.dataset, year, panel_column_specs(batch), batch.to_rows()
+    # One call, so the partition and its coverage land in one exclusive hold (`V2-P6-028`): as
+    # two calls, a reader in another process landing between them judged the new partition by
+    # the old coverage, `coverage_stale`, and a research run filed that as a refused row.
+    return store.write_partition(
+        batch.dataset, year, panel_column_specs(batch), batch.to_rows(), coverage=coverage
     )
-    store.record_coverage(coverage)
-    return reference
 
 
 def panel_partition_year(
@@ -7311,7 +7312,8 @@ def write_empty_announcement_year(
         status="no_data",
         no_data_reason=reason,
     )
-    reference = store.write_partition(
+    # The partition and its coverage in one exclusive hold; see `write_panel_batch`.
+    return store.write_partition(
         dataset,
         year,
         tuple(
@@ -7320,9 +7322,7 @@ def write_empty_announcement_year(
         ),
         (),
         allow_empty=True,
-    )
-    store.record_coverage(
-        PartitionCoverage(
+        coverage=PartitionCoverage(
             dataset=dataset,
             year=year,
             provider_id=template.provider_id,
@@ -7340,9 +7340,8 @@ def write_empty_announcement_year(
             fields=template.fields,
             dates=(),
             revisions=(),
-        )
+        ),
     )
-    return reference
 
 
 SUPERSEDED_INDICATOR_DATASET: Final[str] = "superseded_fina_indicator"

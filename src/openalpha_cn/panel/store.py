@@ -159,11 +159,15 @@ mistaken for a `DROP` and re-derive.
 
 ## Coverage, readiness, and where each rule lives
 
-`record_coverage()` is a separate call from `write_partition()`, not an extra argument to it.
-The storage primitive takes raw rows and knows nothing about providers or batches, so it has
-nothing to say about provenance.
+`record_coverage()` is a separate call from `write_partition()`. The storage primitive takes
+raw rows and knows nothing about providers or batches, so it has nothing to say about
+provenance; a caller that has a coverage record in hand may pass it along
+(`write_partition(..., coverage=...)`, `V2-P6-028`), and the two then land in one exclusive
+hold, so no reader anywhere sees the partition without its record -- see "Concurrency". The
+order inside that hold is the order of the two calls, so everything below about an interrupted
+write holds for both spellings.
 
-That split is not atomic, and the interrupted case (`write_partition()` succeeded,
+The split is not atomic against a crash, and the interrupted case (`write_partition()` succeeded,
 `record_coverage()` did not) needs stating precisely, because an earlier version of this
 docstring got it wrong. On a **first** write there is no coverage row at all, so readiness
 reports `coverage_missing` and blocks. On a **re-write** -- a backfill or a correction, which
@@ -351,22 +355,60 @@ relies on.
   connection and, for a write, the one `rename(2)` that publishes the partition are inside it
   -- the rename inside the *exclusive* section, for the ordering reason given above, which now
   holds between processes as it already did between threads.
-- **Readers of partition files see no more than before, and less.** A partition file is read
-  through a connection opened under the shared lock, which resolves the file's path from the
-  catalog and scans it inside one hold. The only operation that replaces a partition file, the
-  rename, runs inside the exclusive hold, after the new file was written to completion under a
-  different name. So a scan runs wholly before a write's exclusive section -- the old catalog
-  row and the old file -- or wholly after it -- the new row and the new file -- and never
-  across it. Before `V2-P6-028` the same held between threads, while a reader in another
-  process could open the catalog in the window between a commit and its rename; it now waits
-  for the rename instead. The readiness fingerprints read outside the lock
-  (`_catalog_fingerprint`, `_held_partition_states`) only decide whether a held state may be
-  served again; `rename(2)` is atomic, so they see the old file or the new one, and either
-  change refuses the held state.
+- **A lock makes two facts consistent only if one hold covers both, so the writes and reads
+  that pair facts take one hold for the pair.** A first cut of this section claimed whole
+  before-or-after states while two pairs still straddled two holds, and a review measured
+  about 70% of readiness verdicts `blocked` in a process reading beside a batch rewrite. Both
+  pairs are now one hold:
+  - *A batch write.* `panel_ingest.write_panel_batch` and `write_empty_announcement_year` --
+    every writer of a partition and its coverage, which is every ingest and every factor build
+    -- pass the record to `write_partition(..., coverage=...)`: catalog row, rename, coverage,
+    in one exclusive hold. As two holds, a reader between them judged the new partition by the
+    old coverage (`coverage_stale`), and `PanelReadOutcome.rows` turned that into the
+    `PanelStorageError` a research grid files as a refused row resume never re-measures.
+  - *A gated read.* `read_if_ready` and `read_visible_at` take the verdict and scan inside one
+    shared hold; a scope (`assessed`) re-checks the catalog's fingerprint inside each read's
+    hold and re-takes its verdict there if the catalog moved (see `AssessedPanelRead`). As two
+    holds, a write between them gave rows the verdict had never seen.
+  Pinned by `test_panel_readiness.py::
+  test_gated_reads_in_other_processes_never_see_a_batch_write_half_landed`.
+- **Readers of partition files see a whole state.** A partition file is read through a
+  connection opened under the shared lock, which resolves the file's path from the catalog and
+  scans it inside one hold. The only operation that replaces a partition file, the rename, runs
+  inside the exclusive hold, after the new file was written to completion under a different
+  name. So a scan runs wholly before a write's exclusive section -- the old catalog row and the
+  old file -- or wholly after it, and never across it. Before `V2-P6-028` the same held between
+  threads, while a reader in another process could open the catalog between a commit and its
+  rename. The readiness fingerprints read outside the lock (`_catalog_fingerprint`,
+  `_held_partition_states`) only decide whether a held state may be served again; `rename(2)`
+  is atomic, so they see the old file or the new one, and either change refuses the held state.
+- **What one hold does not cover.** A write of *several* partitions -- a factor build's
+  observations then its manifests, `write_daily_panel`'s `daily` then `daily_basic` -- is
+  atomic per partition, not as a group: a reader between two of them sees one new and one old,
+  each whole and each with its own coverage. And a read-modify-write of *one* dataset by two
+  processes at once -- two builds of the same factor, each merging its rows into what it read
+  -- is last-writer-wins at the partition: the second write replaces the first, and the rows
+  only the first carried are gone. Different factors write different datasets, which is the
+  concurrency this lock was built for; the same factor in two processes at once is not
+  supported.
+- **Two `PanelStore` instances on one catalog in one thread.** The in-process side belongs to
+  an instance, the file lock to the catalog, so a thread that holds one instance's side and asks
+  another instance on the same root for any side waits on the file lock it holds itself (or, for
+  shared-in-shared, behind a writer queued at the gate) and ends in `PanelCatalogBusyError` after
+  the bound, never a hang. Nothing in this codebase nests two instances; one instance per root
+  per thread is the rule.
+- **`fork`.** A child forked while a thread holds the lock inherits the in-process state as
+  held and the descriptor, and no thread in the child will ever release either: the child's
+  first catalog call waits out its bound. Start processes with `spawn`, as this repository's
+  own tests and workers do.
 - **Windows.** `msvcrt.locking` has no shared mode, so both sides take the lock exclusively
   there: readers serialise on Windows -- between processes and between threads -- where on POSIX
   they share. Every guarantee about writers is unchanged, because an exclusive lock is a
   stricter shared one; only read parallelism is lost. Windows CI runs this suite against it.
+- **A lock file this account cannot write.** A reader opens it read-only, which is all a shared
+  lock needs; a read-only filesystem needs no lock at all, since nothing can write the catalog
+  there. Anything else that stops the lock file opening is refused as a `PanelStorageError`
+  naming the file, never a bare `OSError`; see `_open_lock_file`.
 - **Local filesystems only.** Advisory locks over NFS or SMB are as good as the server's lock
   manager, and this store has never claimed to run on one.
 
@@ -490,6 +532,7 @@ scratch):
 
 from __future__ import annotations
 
+import errno
 import json
 import math
 import os
@@ -1018,16 +1061,22 @@ def _file_fingerprint(path: Path, *, head: int, tail: int) -> _FileFingerprint |
 
 
 _LOCK_POLL_FIRST_SECONDS: Final[float] = 0.0005
-_LOCK_POLL_MAX_SECONDS: Final[float] = 0.025
-"""The bounded wait polls a non-blocking lock attempt, backing off from half a millisecond to 25 ms.
+"""The bounded wait polls a non-blocking lock attempt, first sleeping half a millisecond.
 
 Polling because neither `flock(2)` nor `msvcrt.locking` can block with a deadline: a blocking
 `flock` waits forever, and `LK_LOCK` retries ten times a second apart. The first sleeps are short
-because the common wait -- a reader behind a write -- is a few milliseconds; the cap keeps a writer
-waiting behind a long scan from spinning."""
+because the common wait -- a reader behind a write -- is a few milliseconds."""
+
+_LOCK_POLL_MAX_SECONDS: Final[float] = 0.025
+"""The longest sleep between two attempts; the sleep doubles from `_LOCK_POLL_FIRST_SECONDS` up to
+this, so a writer waiting behind a long scan does not spin."""
+
+_NO_LOCK_NEEDED: Final[int] = -1
+"""What `_lock_file` answers for a reader on a read-only filesystem; see `_open_lock_file`."""
 
 
 if sys.platform == "win32":
+    _WINDOWS_LOCK_CONTENTION: Final[frozenset[int]] = frozenset({errno.EACCES, errno.EDEADLK})
 
     def _try_lock(descriptor: int, *, exclusive: bool) -> bool:
         """Windows: `msvcrt.locking` has no shared mode, so both sides take byte 0 exclusively.
@@ -1043,8 +1092,13 @@ if sys.platform == "win32":
         os.lseek(descriptor, 0, os.SEEK_SET)
         try:
             msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
-        except OSError:
-            return False
+        except OSError as error:
+            # Contention is `EACCES` or `EDEADLK` (`EDEADLOCK`) -- the two the C runtime's
+            # `_locking` documents for a region already locked. Anything else is a real failure
+            # and is raised, not waited out as if it were a holder that would let go.
+            if error.errno in _WINDOWS_LOCK_CONTENTION:
+                return False
+            raise
         return True
 
     def _unlock(descriptor: int) -> None:
@@ -1073,9 +1127,12 @@ def _lock_file(path: Path, *, exclusive: bool, deadline: float) -> int | None:
     `deadline` (a `time.monotonic()` instant) has passed without it.
 
     One attempt is always made, so a deadline already spent waiting on the in-process side still
-    gets the lock when it happens to be free.
+    gets the lock when it happens to be free. `_NO_LOCK_NEEDED` for a reader on a read-only
+    filesystem, which holds nothing and releases nothing.
     """
-    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    descriptor = _open_lock_file(path, exclusive=exclusive)
+    if descriptor == _NO_LOCK_NEEDED:
+        return descriptor
     try:
         delay = _LOCK_POLL_FIRST_SECONDS
         while not _try_lock(descriptor, exclusive=exclusive):
@@ -1091,7 +1148,46 @@ def _lock_file(path: Path, *, exclusive: bool, deadline: float) -> int | None:
     return descriptor
 
 
+def _open_lock_file(path: Path, *, exclusive: bool) -> int:
+    """A descriptor to lock `path` through, creating the file if it is not there.
+
+    The writer side needs the file writable and creatable, and a writer needs the panel root
+    writable anyway, so failing that is refused by name. The reader side does not: `flock` takes
+    a shared lock through a read-only descriptor (and `msvcrt.locking` through a read one), so a
+    lock file another account owns, or a root this account may only read, still lets a read
+    through exactly as before the lock existed. One case needs no lock at all: a **read-only
+    filesystem** (`EROFS`), where no process can write the catalog -- DuckDB cannot open it
+    read-write there -- so there is no writer to exclude; the reader proceeds holding nothing.
+    Every other failure to open is refused by name, never a bare `OSError`: a reader without the
+    lock beside a writer of another account would meet DuckDB's `IOException` again.
+    """
+    try:
+        return os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError as error:
+        if exclusive:
+            raise _lock_file_refusal(path, error, side="exclusive") from error
+        try:
+            return os.open(path, os.O_RDONLY)
+        except FileNotFoundError:
+            if error.errno == errno.EROFS:
+                return _NO_LOCK_NEEDED
+            raise _lock_file_refusal(path, error, side="shared") from error
+        except OSError as second:
+            raise _lock_file_refusal(path, second, side="shared") from second
+
+
+def _lock_file_refusal(path: Path, error: OSError, *, side: str) -> PanelStorageError:
+    return PanelStorageError(
+        f"the panel catalog's lock file {path} cannot be opened for {side} access "
+        f"({error.strerror or error}; errno {error.errno}): the panel root must be writable by "
+        "this account, or -- for a read -- the lock file must already exist and be readable. "
+        "Nothing was read or written"
+    )
+
+
 def _unlock_file(descriptor: int) -> None:
+    if descriptor == _NO_LOCK_NEEDED:
+        return
     try:
         _unlock(descriptor)
     finally:
@@ -1233,9 +1329,8 @@ class _CatalogAccess:
         return PanelCatalogBusyError(
             f"the panel catalog {self._catalog_path} was not free for {side} access within "
             f"the {self._timeout:g}s bound: another process, or another thread of this one, "
-            f"held it the whole time (lock file {self._file.path}). Nothing was read or "
-            "written. This is contention, not a verdict about the data -- run the command "
-            "again once the holder finishes"
+            f"held it the whole time (lock file {self._file.path}); nothing was read or "
+            "written, and the same call can be made again once the holder finishes"
         )
 
     @contextmanager
@@ -1401,7 +1496,7 @@ class PanelStore:
         # and the module docstring's "Concurrency". Readers still run in parallel with each
         # other.
         if not (math.isfinite(catalog_lock_timeout) and catalog_lock_timeout >= 0):
-            raise PanelStorageError(
+            raise ValueError(
                 f"catalog_lock_timeout must be a finite number of seconds >= 0, got "
                 f"{catalog_lock_timeout!r}: the wait for the catalog is bounded by design"
             )
@@ -1426,10 +1521,24 @@ class PanelStore:
         rows: Sequence[tuple[object, ...]],
         *,
         allow_empty: bool = False,
+        coverage: PartitionCoverage | None = None,
     ) -> PartitionRef:
         """Write (or idempotently no-op, or overwrite) one `(dataset, year)` partition.
 
         See the module docstring's "Write and idempotency semantics" section.
+
+        `coverage` (`V2-P6-028`) records the partition's coverage in the **same exclusive hold**
+        as the partition itself, exactly as a following `record_coverage(coverage)` would record
+        it, so no reader in any thread or process can see the new partition beside the old
+        coverage -- a `coverage_stale` verdict about a write that is in fact complete. It is
+        validated before anything is staged: a malformed record, one naming another partition,
+        or one whose `row_count` is not `len(rows)` writes nothing. Inside the hold the order is
+        still catalog row, rename, coverage, so a crash between any two of them leaves the
+        fail-closed states the module docstring describes. On the idempotent branch the coverage
+        alone is re-recorded, in its own exclusive hold, and only while the catalog still names
+        this content; if another writer has moved the partition since, this becomes a full
+        write. `panel_ingest.write_panel_batch` and `write_empty_announcement_year` -- every
+        writer of a partition with coverage -- pass it here.
 
         `allow_empty` (`V2-P6-018`) is how a zero-row partition gets written, and it is opt-in at
         the call so an empty batch can never reach it by accident: its only caller is
@@ -1457,11 +1566,37 @@ class PanelStore:
         # Read (and check) the clock before anything is written, so a caller whose clock is
         # unusable fails without leaving a half-registered partition on disk.
         written_at = self._now()
+        covered: PartitionCoverage | None = None
+        recorded_at = written_at
+        if coverage is not None:
+            covered = _validated_coverage(coverage)
+            if (covered.dataset, covered.year) != (dataset, year):
+                raise PanelStorageError(
+                    f"coverage for {covered.dataset} year={covered.year} cannot be recorded "
+                    f"with a write of {dataset} year={year}"
+                )
+            if covered.row_count != len(rows):
+                raise PanelStorageError(
+                    f"coverage row_count {covered.row_count} disagrees with the {len(rows)} "
+                    f"row(s) being written to {dataset} year={year}"
+                )
+            recorded_at = self._now()
 
         content_hash = _content_hash(dataset, year, columns, rows)
         existing = self._reusable_partition(dataset, year, content_hash)
         if existing is not None:
-            return existing
+            if covered is None:
+                return existing
+            with self._catalog_access.exclusive():
+                if (
+                    self._record_coverage_held(
+                        covered, recorded_at=recorded_at, content_hash=content_hash
+                    )
+                    is not None
+                ):
+                    return existing
+            # Another writer moved the partition between the reuse check and this hold: the
+            # content is no longer there to describe, so write it.
 
         relative_path = Path(dataset) / str(year) / "data.parquet"
         partition_dir = self.root / dataset / str(year)
@@ -1516,9 +1651,22 @@ class PanelStore:
                         """,
                         [dataset, year, str(relative_path), len(rows), content_hash, written_at],
                     )
-                # Last, and only once the catalog has committed. See the module docstring's
-                # "The catalog upsert commits before the rename".
+                # Only once the catalog has committed. See the module docstring's "The catalog
+                # upsert commits before the rename".
                 temporary.replace(target)
+                # And the coverage last, still inside the hold (`V2-P6-028`): after the rename,
+                # so a crash before it leaves `coverage_stale` (fail closed) exactly as two
+                # separate calls did, and inside the hold, so no reader ever sees the gap.
+                if covered is not None and (
+                    self._record_coverage_held(
+                        covered, recorded_at=recorded_at, content_hash=content_hash
+                    )
+                    is None
+                ):
+                    raise PanelStorageError(
+                        f"{dataset} year={year} no longer names the content just written to it, "
+                        "inside the exclusive hold that wrote it; the catalog lock was bypassed"
+                    )
         finally:
             # A no-op after a successful `replace`, which consumed the temp file. It matters
             # when the catalog upsert raised, or when the lock was never granted
@@ -1697,8 +1845,11 @@ class PanelStore:
         record; see `PartitionCoverage.partition_content_hash` and the module docstring's
         "Coverage, readiness, and where each rule lives".
 
-        Deliberately a separate call from `write_partition()`; the module docstring's
-        "Coverage, readiness, and where each rule lives" explains why.
+        A separate call from `write_partition()` for the module docstring's reason ("Coverage,
+        readiness, and where each rule lives"); a writer that has both in hand passes the record
+        to `write_partition(..., coverage=...)` instead, which lands the two in one exclusive
+        hold (`V2-P6-028`). Two separate calls leave a gap a reader in another thread or
+        process can land in.
         """
         validated = _validated_coverage(coverage)
         recorded_at = self._now()
@@ -1706,16 +1857,38 @@ class PanelStore:
             raise PanelStorageError(
                 f"no partition registered for {validated.dataset} year={validated.year}"
             )
-        with (
-            self._catalog_access.exclusive(),
-            _connect(str(self.catalog_path)) as connection,
-        ):
+        with self._catalog_access.exclusive():
+            stored = self._record_coverage_held(validated, recorded_at=recorded_at)
+        if stored is None:  # unreachable: `None` answers only a required `content_hash`
+            raise PanelStorageError(
+                f"coverage for {validated.dataset} year={validated.year} was not recorded"
+            )
+        return stored
+
+    def _record_coverage_held(
+        self,
+        validated: PartitionCoverage,
+        *,
+        recorded_at: datetime,
+        content_hash: str | None = None,
+    ) -> PartitionCoverage | None:
+        """`record_coverage`'s body, for a caller already holding the exclusive side.
+
+        With `content_hash`, records nothing and answers `None` unless the catalog's row for the
+        partition still names that content -- the check `write_partition`'s idempotent branch
+        needs, because its reuse decision was taken under an earlier, shared hold.
+        """
+        with _connect(str(self.catalog_path)) as connection:
             self._ensure_catalog_schema(connection)
             existing = self._lookup_with_connection(connection, validated.dataset, validated.year)
             if existing is None:
+                if content_hash is not None:
+                    return None
                 raise PanelStorageError(
                     f"no partition registered for {validated.dataset} year={validated.year}"
                 )
+            if content_hash is not None and existing.content_hash != content_hash:
+                return None
             if existing.row_count != validated.row_count:
                 raise PanelStorageError(
                     f"coverage row_count {validated.row_count} disagrees with the registered "
@@ -1925,8 +2098,17 @@ class PanelStore:
         lost is re-checking year `k`'s file after years `0..k-1` have been read, which the
         per-call door did N times and this does once.
         """
+        # The fingerprint and the verdict inside one shared hold, so they describe one catalog
+        # state; each read of the scope checks the first before trusting the second
+        # (`V2-P6-028`, see `AssessedPanelRead`).
+        with self._catalog_access.shared():
+            fingerprint = self._catalog_fingerprint()
+            readiness = self.assess_readiness(requirement)
         return AssessedPanelRead(
-            store=self, requirement=requirement, readiness=self.assess_readiness(requirement)
+            store=self,
+            requirement=requirement,
+            readiness=readiness,
+            verdict_fingerprint=fingerprint,
         )
 
     def read_if_ready(
@@ -1963,7 +2145,10 @@ class PanelStore:
         years to say so and pay for one verdict instead of N -- see `assessed`, which carries
         the measurement and the one thing a scope gives up.
         """
-        return self.assessed(requirement).read(year=year, columns=columns, filters=filters)
+        # One shared hold across the verdict and the scan (`V2-P6-028`): the scope's own reads
+        # nest inside it, so no write lands between what was judged and what is read.
+        with self._catalog_access.shared():
+            return self.assessed(requirement).read(year=year, columns=columns, filters=filters)
 
     def read_visible_at(
         self,
@@ -2138,13 +2323,15 @@ class PanelStore:
         The outcome says which kind of read it is (`newly_visible_since_or_none`) and refuses
         `visible_row_count` on the slice.
         """
-        return self.assessed(requirement).read_visible_at(
-            year=year,
-            columns=columns,
-            filters=filters,
-            event_time_as_naive_utc=event_time_as_naive_utc,
-            newly_visible_since=newly_visible_since,
-        )
+        # One shared hold across the verdict and the scan; see `read_if_ready`.
+        with self._catalog_access.shared():
+            return self.assessed(requirement).read_visible_at(
+                year=year,
+                columns=columns,
+                filters=filters,
+                event_time_as_naive_utc=event_time_as_naive_utc,
+                newly_visible_since=newly_visible_since,
+            )
 
     def _scan_visible(
         self,
@@ -2569,12 +2756,38 @@ class AssessedPanelRead:
     `PanelStore` namesakes are now one line on top of this -- `self.assessed(requirement)` and
     then one read -- so a single-year caller pays exactly what it always did, and only a caller
     that opens the scope itself sees the difference.
+
+    **A verdict and the rows it licenses come from one catalog state (`V2-P6-028`).** A scope
+    outlives the shared hold its verdict was taken under -- a caller reads year after year, in
+    its own time -- and another thread or process may write in between. So every read takes the
+    shared side again and, inside it, compares the catalog's fingerprint (`_catalog_fingerprint`:
+    this process's write count, and the catalog file's and its WAL's identity, size, timestamps
+    and header bytes) with the one the verdict was taken under. Unchanged, the verdict stands
+    and nothing is re-assessed, which is the whole point of a scope. Changed, the verdict is
+    taken again inside that same hold and replaces `readiness` before the scan, so the read
+    answers with rows its own verdict describes rather than a verdict about rows that are gone.
+    The fingerprint's one blind spot is `KNOWN_STORAGE_LIMITATIONS`'s cross-process residue: a
+    write in another process inside one timestamp tick that moves none of those fields.
     """
 
     store: PanelStore
     requirement: ReadinessRequirement
     readiness: DatasetReadiness
-    """The verdict, taken at construction. Not re-derived: that is the entire point."""
+    """The verdict. Taken at construction and re-derived only when the catalog has moved."""
+    verdict_fingerprint: _FileFingerprint | None = None
+    """The catalog fingerprint `readiness` was taken under; `None` matches nothing."""
+
+    @contextmanager
+    def _held_verdict(self) -> Iterator[DatasetReadiness]:
+        """Hold the catalog's shared side and yield the verdict that is true inside the hold."""
+        with self.store._catalog_access.shared():
+            current = self.store._catalog_fingerprint()
+            if current is None or current != self.verdict_fingerprint:
+                # The scope is frozen to its callers; the verdict is the one field a write in
+                # the meantime is allowed to move, and only here.
+                object.__setattr__(self, "readiness", self.store.assess_readiness(self.requirement))
+                object.__setattr__(self, "verdict_fingerprint", current)
+            yield self.readiness
 
     def _year_in_scope(self, year: int) -> ReadinessRequirement:
         """Refuse a year this scope was not assessed over, and hand back the requirement.
@@ -2607,7 +2820,21 @@ class AssessedPanelRead:
         another process held past the bound is not a verdict about this partition (`V2-P6-028`).
         """
         requirement = self._year_in_scope(year)
-        readiness = self.readiness
+        with self._held_verdict() as readiness:
+            return self._read_held(
+                readiness, requirement, year=year, columns=columns, filters=filters
+            )
+
+    def _read_held(
+        self,
+        readiness: DatasetReadiness,
+        requirement: ReadinessRequirement,
+        *,
+        year: int,
+        columns: Sequence[str],
+        filters: Mapping[str, object] | None,
+    ) -> PanelReadOutcome:
+        """`read`, inside the shared hold its verdict was confirmed under."""
         if readiness.state == "blocked":
             return PanelReadOutcome(readiness=readiness, rows_or_none=None)
         try:
@@ -2649,7 +2876,29 @@ class AssessedPanelRead:
                     f"{requirement.as_of.isoformat()} it narrows; the rows that became visible "
                     "since a later instant are not a slice of the rows visible now"
                 )
-        readiness = self.readiness
+        with self._held_verdict() as readiness:
+            return self._read_visible_held(
+                readiness,
+                requirement,
+                year=year,
+                columns=columns,
+                filters=filters,
+                event_time_as_naive_utc=event_time_as_naive_utc,
+                newly_visible_since=newly_visible_since,
+            )
+
+    def _read_visible_held(
+        self,
+        readiness: DatasetReadiness,
+        requirement: ReadinessRequirement,
+        *,
+        year: int,
+        columns: Sequence[str],
+        filters: Mapping[str, object] | None,
+        event_time_as_naive_utc: bool,
+        newly_visible_since: datetime | None,
+    ) -> PanelVisibleReadOutcome:
+        """`read_visible_at`, inside the shared hold its verdict was confirmed under."""
         found = {issue.code for issue in readiness.issues}
         if found - ROW_FILTERABLE_ISSUE_CODES:
             return PanelVisibleReadOutcome(

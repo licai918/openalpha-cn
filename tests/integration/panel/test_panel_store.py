@@ -21,15 +21,19 @@ fail CI on either suffix).
 from __future__ import annotations
 
 import ast
+import errno
 import hashlib
 import multiprocessing
 import multiprocessing.process
+import os
+import sys
 import threading
 import time
 from collections.abc import Sequence
 from multiprocessing import Queue
 from multiprocessing.synchronize import Barrier
 from pathlib import Path
+from typing import Any
 
 import duckdb
 import pytest
@@ -310,6 +314,11 @@ def test_concurrent_read_only_queries_from_separate_processes_do_not_fail_each_o
 # into a `PanelStorageError`, which the research driver records as a refused row. These tests
 # run real, separate interpreters against one store, with the store generated here.
 
+_READERS_SHARE = sys.platform != "win32"
+"""Whether two readers can hold the catalog at once. Not on Windows, where `msvcrt.locking` has
+no shared mode and the store takes both sides exclusively (see `panel.store._try_lock`); every
+expectation below that depends on readers sharing branches on this rather than assuming it."""
+
 _LOCK_DATASETS = ("alpha", "beta", "gamma", "delta")
 _LOCK_YEARS = (2019, 2020, 2021, 2022, 2023, 2024)
 
@@ -514,8 +523,16 @@ def test_a_wait_past_the_bound_is_refused_by_name_and_is_not_a_storage_refusal(
         _stop_all([holder])
     holder = _start_holder(root, "shared")
     try:
-        # A read beside a reader is no contention at all.
-        assert bounded.query("prices_daily", year=2024, columns=["close"]) == [(10.5,), (22.5,)]
+        if _READERS_SHARE:
+            # A read beside a reader is no contention at all.
+            assert bounded.query("prices_daily", year=2024, columns=["close"]) == [
+                (10.5,),
+                (22.5,),
+            ]
+        else:
+            # Windows has no shared lock: a read beside a reader waits like any other.
+            with pytest.raises(PanelCatalogBusyError):
+                bounded.query("prices_daily", year=2024, columns=["close"])
         with pytest.raises(PanelCatalogBusyError) as write_refusal:
             bounded.write_partition("prices_daily", 2025, _COLUMNS, _rows())
     finally:
@@ -523,7 +540,10 @@ def test_a_wait_past_the_bound_is_refused_by_name_and_is_not_a_storage_refusal(
 
     assert 0.5 <= waited < 10.0
     assert not isinstance(read_refusal.value, PanelStorageError)
-    for refusal, side in ((read_refusal.value, "shared"), (write_refusal.value, "exclusive")):
+    # On Windows the write is refused at its first step, the shared read that decides whether
+    # the content is already there, because there even that waits for the holder.
+    write_side = "exclusive" if _READERS_SHARE else "shared"
+    for refusal, side in ((read_refusal.value, "shared"), (write_refusal.value, write_side)):
         message = str(refusal)
         assert str(root / "catalog.duckdb") in message
         assert "catalog.duckdb.lock" in message
@@ -572,6 +592,11 @@ def _churning_reader_worker(root_str: str, queue: Queue[str]) -> None:
             time.sleep(0.2)
 
 
+@pytest.mark.skipif(
+    not _READERS_SHARE,
+    reason="Windows has no shared lock, so readers there never hold the catalog together and "
+    "there is no stream of overlapping readers to starve a writer",
+)
 def test_a_writer_is_not_starved_by_readers_in_other_processes_that_never_all_let_go(
     tmp_path: Path,
 ) -> None:
@@ -635,6 +660,81 @@ def test_the_bound_also_covers_a_wait_behind_a_writer_thread_in_the_same_process
 @pytest.mark.parametrize("timeout", [-1.0, float("inf"), float("nan")])
 def test_the_catalog_wait_must_be_a_finite_bound(tmp_path: Path, timeout: float) -> None:
     """An infinite (or meaningless) wait would bring back the silent hang the bound exists to
-    name, so it is refused at construction rather than accepted and honoured."""
-    with pytest.raises(PanelStorageError, match="catalog_lock_timeout"):
+    name, so it is refused at construction rather than accepted and honoured. A `ValueError`:
+    it is a malformed argument, not a fact about any store."""
+    with pytest.raises(ValueError, match="catalog_lock_timeout") as refused:
         PanelStore(tmp_path / "panel", catalog_lock_timeout=timeout)
+    assert not isinstance(refused.value, PanelStorageError)
+
+
+_POSIX_PERMISSIONS = pytest.mark.skipif(
+    sys.platform == "win32" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="POSIX permission bits, which root and Windows do not enforce the same way",
+)
+
+
+@_POSIX_PERMISSIONS
+def test_a_reader_may_lock_a_lock_file_it_cannot_write(tmp_path: Path) -> None:
+    """A lock file owned by another account, or a panel root this account may only read: the
+    shared side needs only a descriptor, and `flock` takes a shared lock through a read-only one,
+    so a read still works exactly as it did before the lock existed. Only the exclusive side
+    needs to write the file -- and a writer needs the root writable anyway."""
+    root = tmp_path / "panel"
+    PanelStore(root).write_partition("prices_daily", 2024, _COLUMNS, _rows())
+    lock_files = [root / "catalog.duckdb.lock", root / "catalog.duckdb.gate"]
+    for path in lock_files:
+        path.chmod(0o444)
+    try:
+        assert PanelStore(root).query("prices_daily", year=2024, columns=["close"]) == [
+            (10.5,),
+            (22.5,),
+        ]
+        with pytest.raises(PanelStorageError, match=r"catalog\.duckdb\.(gate|lock)"):
+            PanelStore(root).write_partition("prices_daily", 2025, _COLUMNS, _rows())
+    finally:
+        for path in lock_files:
+            path.chmod(0o644)
+
+
+@_POSIX_PERMISSIONS
+def test_a_lock_file_that_cannot_be_created_is_refused_by_name(tmp_path: Path) -> None:
+    """A root this account may only read, holding a catalog written before the lock existed:
+    the lock file cannot be created, and a read without it could meet a writer of another
+    account mid-write. Refused naming the lock file and the cause, instead of the bare `OSError`
+    the `open` raises."""
+    root = tmp_path / "panel"
+    PanelStore(root).write_partition("prices_daily", 2024, _COLUMNS, _rows())
+    for name in ("catalog.duckdb.lock", "catalog.duckdb.gate"):
+        (root / name).unlink()
+    root.chmod(0o555)
+    try:
+        with pytest.raises(PanelStorageError, match=r"catalog\.duckdb\.(gate|lock)") as refused:
+            PanelStore(root).query("prices_daily", year=2024, columns=["close"])
+    finally:
+        root.chmod(0o755)
+    assert "Permission denied" in str(refused.value) or "EACCES" in str(refused.value)
+
+
+def test_a_read_only_filesystem_needs_no_lock_because_nothing_can_write_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On a read-only filesystem (`EROFS`) the lock file cannot be created and no process can
+    write the catalog either, so a reader goes ahead without one. Simulated at `os.open`: the
+    lock files' create fails with `EROFS` and they do not exist."""
+    root = tmp_path / "panel"
+    PanelStore(root).write_partition("prices_daily", 2024, _COLUMNS, _rows())
+    real_open = os.open
+
+    def read_only_filesystem(path: str | os.PathLike[str], flags: int, *args: Any) -> int:
+        if str(path).endswith((".duckdb.lock", ".duckdb.gate")):
+            if flags & os.O_CREAT:
+                raise OSError(errno.EROFS, os.strerror(errno.EROFS), str(path))
+            raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(path))
+        return real_open(path, flags, *args)
+
+    monkeypatch.setattr(os, "open", read_only_filesystem)
+    store = PanelStore(root)
+
+    assert store.query("prices_daily", year=2024, columns=["close"]) == [(10.5,), (22.5,)]
+    with pytest.raises(PanelStorageError, match=rf"errno {errno.EROFS}\b"):
+        store.write_partition("prices_daily", 2025, _COLUMNS, _rows())

@@ -202,7 +202,7 @@ from openalpha_cn.panel.catalog import (
     PanelStorageError,
     PartitionCoverage,
 )
-from openalpha_cn.panel.store import PanelStore, PartitionRef
+from openalpha_cn.panel.store import PanelCatalogBusyError, PanelStore, PartitionRef
 from openalpha_cn.panel_doctor import (
     PanelDoctorError,
     PanelHealthReport,
@@ -1895,6 +1895,13 @@ class PanelExit(IntEnum):
       `tests/integration/test_unlabelled_corpus_faces.py`, which drive stores at both faces and
       at both HTTP routes. The withholding of an unanticipated exception's own message stays
       right; being unanticipated is what was wrong.
+    - `catalog_busy` -- **nothing was looked at, and nothing is wrong** (`V2-P6-028`). Another
+      process held the panel catalog for the whole bounded wait
+      (`panel.store.PanelCatalogBusyError`), so the command could neither read nor write. Not
+      `unhealthy`, because the panel was never judged; not `internal_error`, because nothing
+      here broke and there is no bug to file. The remedy is to run the command again once the
+      holder finishes, and a scheduler can retry this code and only this code. The message is
+      the error's own -- the catalog, the lock file and the bound -- and is printed whole.
 
     **2 is deliberately absent.** Click raises its own `UsageError` with exit code 2 for a
     misspelled flag or a missing required option, and that is not a code this module can take
@@ -1936,6 +1943,7 @@ class PanelExit(IntEnum):
     bad_request = 3
     provider_failure = 4
     internal_error = 5
+    catalog_busy = 6
 
 
 CLICK_USAGE_EXIT_CODE: Final[int] = 2
@@ -2395,6 +2403,15 @@ def _panel_command(name: str, *, json_output: bool = False) -> Iterator[None]:
         yield
     except (typer.Exit, typer.Abort):
         raise
+    except PanelCatalogBusyError as error:
+        # Anticipated, and neither a defect here nor a verdict about the panel (`V2-P6-028`):
+        # another process held the catalog for the whole bounded wait. Its own message names
+        # the catalog and the lock file and carries nothing else, so it is printed.
+        raise _panel_fail(
+            PanelExit.catalog_busy,
+            f"`{name}` did not finish: {error}. Nothing was checked, so this says nothing about "
+            "the panel; run the command again once the holder finishes",
+        ) from error
     except Exception as error:
         raise _panel_fail(
             PanelExit.internal_error,
