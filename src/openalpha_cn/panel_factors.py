@@ -215,6 +215,23 @@ newest one a build names -- `factor_view._statement_years` supplies them, and
 `_refuse_a_statement_read_that_skips_a_stored_year` refuses a requirement that leaves one out --
 so its answer no longer depends on the years a caller listed.
 
+**What that costs, measured rather than assumed.** A carried read still asks every stored year
+for its newly visible rows at every instant, and at the research store's thirteen statement
+years that is 13 `read_visible_at` calls per statement dataset per instant where three used to
+do (about 20 ms each): measured 2026-10-05 on a copy of the store, `accruals_ttm` (three
+statement datasets) took 1.3 s per carried instant against roughly a third of that before, and
+`revenue_yoy` 0.4 s. A whole-history rebuild of the statement factors, and
+`openalpha factor stale-statement-reach` (about 2.6 hours over the research store), pay it. The
+obvious remedy -- skipping, in a carried read, a partition whose newest row cannot be newly
+visible -- touches `FactorReadCarry`'s equivalence argument and is not made here.
+
+**And what it means for a security that stopped filing.** No factor bounds how old a window's
+newest filing may be, so a listed security whose filings stopped years ago is valued on its last
+ones (`book_to_price` moved 592 security-instants from `insufficient_history` to `computed` on
+the research store). That is disclosed as `factor_view.KNOWN_FACTOR_RUN_LIMITATIONS
+.a_security_that_stopped_filing_is_valued_on_its_last_filings_however_old`; the stored
+`input_period_last` says how old the newest filing is.
+
 ## Two axes, because a filing does not live on the session one
 
 `V2-P3-009`..`011` are all built on filings, and `providers/tushare.py::_announcement_timeline`

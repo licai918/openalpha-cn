@@ -35,6 +35,10 @@ names carry the shapes that decide which windows were computable over the old th
   `ambiguous_filing` -- the one way it can change a value the old read computed.
 - `LATE` announces its 2025 annual and 2026Q1 on 8 May 2026, after the 30 April deadline. On
   6 May its nine-period window still starts at 2023Q3, which the three named years do not hold.
+- `HALTED` stops trading after 2024-11-29 and keeps filing. A factor that reads `daily_basic` takes
+  its newest session in the years a build names, so in 2026 it is valued from 2024 by a build
+  naming 2024 and not by one naming only 2025 and 2026 -- the session axis, which the full
+  statement read does not touch, and why the daily selection names the research builds' years.
 
 ## The differential
 
@@ -47,12 +51,15 @@ from February to November, are compared between the two stores.
 
 from __future__ import annotations
 
+import importlib
 import math
 import shlex
 import shutil
+import sys
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
+from types import ModuleType
 from typing import Final
 from zoneinfo import ZoneInfo
 
@@ -107,6 +114,8 @@ from openalpha_cn.domain.trading_calendar import (
     TRADING_CALENDAR_DATASET,
 )
 from openalpha_cn.factor_view import (
+    FACTOR_RUN_LIMITATION_CODES,
+    STOPPED_FILER_LIMITATION,
     StaleStatementReachBuild,
     factor_build_requests,
     merged_build_commands,
@@ -163,7 +172,8 @@ REACH_BEYOND_THE_BUILD: Final[frozenset[datetime]] = frozenset({FEBRUARY, DEADLI
 SECURITIES: Final[tuple[str, ...]] = tuple(
     f"{600000 + index:06d}.SH" if index % 2 else f"{index + 1:06d}.SZ" for index in range(120)
 )
-EARLY, BACKFILLED, RESTATED, LATE, CONFLICTED = SECURITIES[30:35]
+EARLY, BACKFILLED, RESTATED, LATE, CONFLICTED, HALTED = SECURITIES[30:36]
+HALTED_AFTER: Final[date] = date(2024, 11, 29)
 YOUNG, DELISTED, LISTED_IN_2025 = SECURITIES[100:103]
 YOUNG_FROM: Final[date] = date(2026, 5, 25)
 LISTED_IN_2025_FROM: Final[date] = date(2025, 4, 1)
@@ -282,6 +292,8 @@ def _listed_on(index: int, code: str) -> date:
 def _traded(index: int, code: str, day: date) -> bool:
     if day < _listed_on(index, code):
         return False
+    if code == HALTED:
+        return day <= HALTED_AFTER
     return not (code == DELISTED and day >= DELISTED_ON)
 
 
@@ -524,6 +536,14 @@ def _copy(source: Path, target: Path) -> PanelStore:
     return PanelStore(target)
 
 
+def _daily_selection_script() -> ModuleType:
+    """`scripts/daily_selection.py`, imported the way `tests/unit/scripts` imports it."""
+    directory = str(Path(__file__).resolve().parents[3] / "scripts")
+    if directory not in sys.path:
+        sys.path.insert(0, directory)
+    return importlib.import_module("daily_selection")
+
+
 def _build(
     store: PanelStore,
     factors: Sequence[str],
@@ -608,6 +628,11 @@ STATEMENT_FACTORS: Final[tuple[str, ...]] = tuple(
     if set(FACTOR_DEFINITIONS.get(key).datasets) & set(STATEMENT_DATA_COLUMNS)
 )
 STORED_STATEMENT_YEARS: Final[tuple[int, ...]] = tuple(range(PERIODS[0].year, 2027))
+VALUATION_FACTORS: Final[tuple[str, ...]] = tuple(
+    key for key in STATEMENT_FACTORS if DAILY_BASIC_DATASET in FACTOR_DEFINITIONS.get(key).datasets
+)
+"""The four statement factors that also read a session: each security's newest `daily_basic`
+row in the years a build names, so their answer for a long-halted name depends on those years."""
 
 
 # --- the defect, reproduced and closed ------------------------------------------------------------
@@ -661,10 +686,11 @@ def test_a_late_filers_answer_does_not_depend_on_the_years_named(
 def test_every_statement_factor_answers_the_same_whatever_years_are_named(
     corpus: Path, tmp_path: Path, years: tuple[int, ...]
 ) -> None:
-    """The daily selection names `as_of`'s year and the one before (`scripts/daily_selection.py::
-    _factor_years`), a hand-typed build may name one; the research builds named three. All 11
-    statement factors, in February and June, store the research span's answers either way, read
-    over the same announcement years."""
+    """A build may name two years or one; the research builds named three. All 11 statement
+    factors, in February and June, read the same announcement years either way, and the seven
+    that read nothing but statements store the research span's answers. The four that also read
+    `daily_basic` are held to the research span by the daily selection's own years instead
+    (`test_the_daily_selection_builds_what_the_research_span_builds`)."""
     research = _copy(corpus, tmp_path / "research")
     other = _copy(corpus, tmp_path / "other")
     instants = [FEBRUARY, JUNE]
@@ -673,11 +699,38 @@ def test_every_statement_factor_answers_the_same_whatever_years_are_named(
     _build(other, STATEMENT_FACTORS, instants, tier="raw", years=years)
 
     assert len(STATEMENT_FACTORS) == 11
+    assert len(VALUATION_FACTORS) == 4
     for key in STATEMENT_FACTORS:
-        assert _raw(other, key) == _raw(research, key), key
+        if key not in VALUATION_FACTORS:
+            assert _raw(other, key) == _raw(research, key), key
         assert _statement_years(other, key) == _statement_years(research, key), key
         for read in _statement_years(other, key).values():
             assert set(read.values()) == {STORED_STATEMENT_YEARS}, key
+
+
+def test_the_daily_selection_builds_what_the_research_span_builds(
+    corpus: Path, tmp_path: Path
+) -> None:
+    """`scripts/daily_selection.py::_factor_years` names `factor_view.factor_build_years`, the
+    research builds' span, so the live selection and the research store agree row for row on the
+    four statement factors that read `daily_basic` -- including `HALTED`, whose newest session is
+    in 2024. Naming only 2025 and 2026 would value it in research and not live."""
+    daily = _daily_selection_script()
+    research = _copy(corpus, tmp_path / "research")
+    live = _copy(corpus, tmp_path / "live")
+    narrow = _copy(corpus, tmp_path / "narrow")
+    session = FEBRUARY.astimezone(SHANGHAI).date()
+
+    live_years = daily._factor_years(live, session)
+    _build(research, VALUATION_FACTORS, [FEBRUARY], tier="raw")
+    _build(live, VALUATION_FACTORS, [FEBRUARY], tier="raw", years=live_years)
+    _build(narrow, VALUATION_FACTORS, [FEBRUARY], tier="raw", years=(2025, 2026))
+
+    assert live_years == factor_view.factor_build_years(2026) == BUILD_YEARS
+    for key in VALUATION_FACTORS:
+        assert _raw(live, key) == _raw(research, key), key
+        assert _raw(research, key)[FEBRUARY][HALTED][0] == "computed", key
+        assert _raw(narrow, key)[FEBRUARY][HALTED][0] == "insufficient_history", key
 
 
 def test_the_engine_refuses_a_statement_read_that_skips_a_stored_year_before_reading(
@@ -950,3 +1003,76 @@ def test_the_command_lists_and_exits_one_then_says_none(
     assert cleared.exit_code == 0, cleared.output
     assert "stale statement-reach builds: none" in cleared.output
     assert set(store.registered_years(INCOME_DATASET)) == set(STORED_STATEMENT_YEARS)
+
+
+STOPPED: Final[str] = "699999.SH"
+"""A security outside the corpus that filed through 2023Q3 and never again."""
+
+
+def _income_rows_of(code: str, index: int, periods: Sequence[date]) -> ColumnarPanelBatch:
+    rows: list[tuple[str, datetime, datetime, datetime]] = []
+    cells: dict[str, list[object]] = {name: [] for name in statement_panel_columns(INCOME_DATASET)}
+    for position, period in enumerate(periods):
+        announced = _announced(index, code, period)
+        stamp = _midnight(announced)
+        rows.append((code, stamp, stamp, stamp))
+        cells[REPORT_PERIOD_COLUMN].append(period.isoformat())
+        cells[ANNOUNCEMENT_DATE_COLUMN].append(announced.isoformat())
+        if FIRST_ANNOUNCEMENT_COLUMN in cells:
+            cells[FIRST_ANNOUNCEMENT_COLUMN].append(announced.isoformat())
+            cells[REVISION_LABEL_COLUMN].append("0")
+        for offset, name in enumerate(STATEMENT_DATA_COLUMNS[INCOME_DATASET]):
+            cells[name].append((100.0 + 37.0 * offset) * (1.0 + 0.03 * position) + index)
+    return _batch(
+        INCOME_DATASET,
+        rows,
+        cells,
+        (
+            REPORT_PERIOD_COLUMN,
+            ANNOUNCEMENT_DATE_COLUMN,
+            FIRST_ANNOUNCEMENT_COLUMN,
+            REVISION_LABEL_COLUMN,
+        ),
+    )
+
+
+def test_a_security_that_stopped_filing_is_valued_on_its_last_filings(tmp_path: Path) -> None:
+    """The disclosed cost of a read that does not depend on `--year`: no factor bounds how old
+    a window's newest filing may be, so a security that stopped filing in 2023 is valued in June
+    2026 on its 2022Q3..2023Q3 filings, and its stored row says how old they are."""
+    store = PanelStore(tmp_path / "panel")
+    regular, stopped = SECURITIES[0], STOPPED
+    for batch in (
+        _income_rows_of(regular, 0, PERIODS),
+        _income_rows_of(stopped, 7, [period for period in PERIODS if period <= RESTATED_PERIOD]),
+    ):
+        for year, part in split_panel_batch_by_year(batch):
+            write_panel_batch(store, part, year=year)
+    requirements = {
+        INCOME_DATASET: financial_statement_requirement(
+            dataset=INCOME_DATASET,
+            years=STORED_STATEMENT_YEARS,
+            as_of=JUNE,
+            max_staleness=timedelta(days=STALENESS_DAYS),
+        )
+    }
+
+    panel = compute_factor(
+        store,
+        FACTOR_DEFINITIONS.get("revenue_yoy/v1"),
+        as_of=JUNE,
+        subjects=(regular, stopped),
+        universe=(regular, stopped),
+        requirements=requirements,
+        code_commit=COMMIT,
+        built_at=BUILT_AT,
+    )
+
+    answers = {item.subject: item for item in panel.observations}
+    assert STOPPED_FILER_LIMITATION == (
+        "a_security_that_stopped_filing_is_valued_on_its_last_filings_however_old"
+    )
+    assert STOPPED_FILER_LIMITATION in FACTOR_RUN_LIMITATION_CODES
+    assert answers[stopped].coverage == "computed"
+    assert answers[stopped].input_period_last == RESTATED_PERIOD
+    assert answers[regular].input_period_last == date(2026, 3, 31)

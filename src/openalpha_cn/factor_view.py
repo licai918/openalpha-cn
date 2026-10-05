@@ -368,11 +368,13 @@ __all__ = [
     "ACCEPTANCE_STEP",
     "ATTRIBUTION_VERDICT_MEANINGS",
     "CATALOG_SCHEMA_VERSION",
+    "FACTOR_BUILD_PRIOR_YEARS",
     "FACTOR_DATE_ZONE",
     "FACTOR_RUN_LIMITATION_CODES",
     "KNOWN_FACTOR_RUN_LIMITATIONS",
     "OFF_GRID_REPORT_PERIOD_LIMITATION",
     "REQUIREMENT_BUILDERS",
+    "STOPPED_FILER_LIMITATION",
     "VIEW_SCHEMA_VERSION",
     "ExperimentDocumentStore",
     "ExperimentWrite",
@@ -396,6 +398,7 @@ __all__ = [
     "experiment_view",
     "factor_build_request",
     "factor_build_requests",
+    "factor_build_years",
     "factor_catalog",
     "factor_entry",
     "factor_request",
@@ -487,6 +490,11 @@ OFF_GRID_REPORT_PERIOD_LIMITATION: Final[str] = (
     "a_report_period_off_the_quarter_grid_is_excluded_and_listed_rather_than_rounded"
 )
 """`V2-P6-019`'s entry below, named once because the terminal face cites it beside the list."""
+
+STOPPED_FILER_LIMITATION: Final[str] = (
+    "a_security_that_stopped_filing_is_valued_on_its_last_filings_however_old"
+)
+"""`V2-P6-027`'s entry below: the cost of a statement read that does not depend on `--year`."""
 
 KNOWN_FACTOR_RUN_LIMITATIONS: Final[tuple[FactorRunLimitation, ...]] = (
     FactorRunLimitation(
@@ -732,6 +740,27 @@ KNOWN_FACTOR_RUN_LIMITATIONS: Final[tuple[FactorRunLimitation, ...]] = (
             "the terminal. Nothing is deleted: the rows stay in the store as evidence, and no "
             "ingest path changed. What still refuses: a report_period that is not a date at all, "
             "which is a damaged partition rather than a stub."
+        ),
+    ),
+    FactorRunLimitation(
+        code=STOPPED_FILER_LIMITATION,
+        detail=(
+            "V2-P6-027. A statement factor reads every stored announcement year at or below the "
+            "newest one a build names (factor_view._statement_years), and its window is a "
+            "security's last lookback_periods filings with a bound on their SPAN only -- no "
+            "factor declares a bound on how old the newest one may be. So a security that "
+            "stopped filing years ago and is still listed is valued on its last filings, however "
+            "old, where a build naming only as_of's year and the two before it answered "
+            "insufficient_history. MEASURED on the research store's copy (2026-10-05): "
+            "book_to_price, whose window is one period, moved 592 security-instants from "
+            "insufficient_history to computed across 519 stored builds of 2019-2021 when the "
+            "full history was read; every statement factor but deducted_earnings_yield_ttm "
+            "moved some (`openalpha factor stale-statement-reach` lists them). THIS IS NOT A "
+            "DEFINITION CHANGE AND NONE WAS MADE: a recency bound on the newest filing would be "
+            "a new factor version and a research decision. What the read now guarantees is that "
+            "the answer depends on the store and as_of only, never on the years a caller named; "
+            "the stored observation's input_period_last says how old the newest filing it was "
+            "valued on is, for a reader who wants to exclude stale ones."
         ),
     ),
 )
@@ -3188,6 +3217,33 @@ def _build_instants(as_ofs: Sequence[datetime]) -> tuple[datetime, ...]:
     return ordered
 
 
+FACTOR_BUILD_PRIOR_YEARS: Final[int] = 2
+"""How many years before an instant's own a factor build names: the research span (`V2-P6-027`).
+
+Every stored research build named its instant's year and the two before it -- the manifests
+record `(Y-2, Y-1, Y)` -- and `scripts/daily_selection.py::_factor_years` names the same span
+through `factor_build_years`, so the live selection and the research store cannot disagree about
+what one build at one instant reads. That matters on the session axis only: a statement dataset
+is read over its whole stored history whatever is named (`_statement_years`), but a factor that
+reads `daily_basic` answers each security from its newest session in the named years, so a name
+halted since the year before last is valued by a build naming three years and coded
+`insufficient_history` by one naming two. Measured on the research store: on 2015-01-05 and
+2015-02-05 the four statement factors that read `daily_basic` answered one name differently over
+`(Y-1, Y)` than over the research span, and up to 252 over `(Y,)` alone.
+"""
+
+
+def factor_build_years(year: int) -> tuple[int, ...]:
+    """The partition years a factor build of an instant in `year` names: the research span.
+
+    The one source of that span for every caller that chooses years for a build rather than
+    taking them from a person -- `openalpha factor build --year` is still whatever is typed, and
+    a research build typed by hand should name these. `FACTOR_BUILD_PRIOR_YEARS` says why it is
+    shared.
+    """
+    return tuple(range(year - FACTOR_BUILD_PRIOR_YEARS, year + 1))
+
+
 def _build_years(years: Sequence[int]) -> tuple[int, ...]:
     """The partition years, refusing an empty set, a repeat and a year no panel can hold."""
     if not years:
@@ -3869,6 +3925,11 @@ def _statement_years(
     stated there: an older filing loses to a later announcement of the same period, and a same-day
     disagreement in it still marks its period `ambiguous_filing` for a window that reaches it.
     The year set no longer depends on `as_of`, so one `FactorReadCarry` serves every instant.
+
+    A listed security that stopped filing years ago is therefore valued on its last filings, as
+    `STOPPED_FILER_LIMITATION` discloses: no factor bounds how old a window's newest filing may
+    be, and none was given one here. The session datasets are still read over the years named,
+    which is why the daily selection names `factor_build_years`.
     """
     named = request.years
     if dataset not in PERIOD_INDEXED_DATASETS:

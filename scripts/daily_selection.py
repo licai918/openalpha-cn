@@ -150,6 +150,7 @@ from openalpha_cn.factor_view import (  # noqa: E402
     FactorViewError,
     build_factor_panel_set,
     factor_build_requests,
+    factor_build_years,
     resolve_factor,
 )
 from openalpha_cn.panel.catalog import DEFAULT_DATE_TIMEZONE, PanelStorageError  # noqa: E402
@@ -2123,10 +2124,19 @@ def _built_at_instant(
 
 
 def _factor_years(store: PanelStore, session: date) -> tuple[int, ...]:
-    """The session's year and, when the calendar holds it, the year before: a lookback at the
-    start of a year reaches back across it."""
+    """The years every research build names for an instant in the session's year
+    (`factor_view.factor_build_years`: that year and the two before it), as far as the stored
+    calendar holds them.
+
+    `V2-P6-027`, round 3. This used to be the session's year and the one before, and the research
+    builds name three: a factor that reads `daily_basic` answers each security from its newest
+    session in the years named, so a security halted since the year before last was valued in
+    research and `insufficient_history` here. One shared span keeps the two from drifting again.
+    A year the calendar does not hold cannot be read by either, so it is left out rather than
+    named and refused.
+    """
     stored = set(store.registered_years(TRADING_CALENDAR_DATASET))
-    return tuple(year for year in (session.year - 1, session.year) if year in stored) or (
+    return tuple(year for year in factor_build_years(session.year) if year in stored) or (
         session.year,
     )
 

@@ -43,7 +43,7 @@ from panel_fixtures import EXCHANGE
 from research_repo import commit_file, git, head
 from strategy_fixtures import READ_AT, REVERSAL, write_strategy_corpus
 
-from openalpha_cn import cli, strategy_registration, strategy_view
+from openalpha_cn import cli, factor_view, strategy_registration, strategy_view
 from openalpha_cn.backtest.strategy_backtest import EQUAL_WEIGHT_ALL_A
 from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
 from openalpha_cn.domain.daily_prices import (
@@ -3261,3 +3261,37 @@ def test_an_unreadable_provenance_file_is_refused_by_name(tmp_path: Path, garble
         daily.provenance_lookup(tmp_path, REGISTERED.registration_sha256)
 
     assert broken.name in str(refused.value)
+
+
+# --- the years a factor build names (`V2-P6-027`, round 3) ---------------------------------------
+
+
+class _Calendar:
+    """A store that answers only which `trade_cal` years it holds."""
+
+    def __init__(self, years: Sequence[int]) -> None:
+        self._years = tuple(years)
+
+    def registered_years(self, dataset: str) -> tuple[int, ...]:
+        assert dataset == TRADING_CALENDAR_DATASET
+        return self._years
+
+
+def test_the_daily_selection_names_the_research_builds_years() -> None:
+    """Every stored research build names its instant's year and the two before it, and a factor
+    that reads `daily_basic` answers a suspended security from the newest session those years
+    hold -- so the live selection names the same years, from the one shared span, or a name
+    halted since the year before last is valued in research and not live."""
+    session = date(2026, 2, 5)
+
+    named = daily._factor_years(_Calendar(range(2013, 2027)), session)
+
+    assert factor_view.factor_build_years(2025) == (2023, 2024, 2025)
+    assert named == factor_view.factor_build_years(session.year) == (2024, 2025, 2026)
+
+
+def test_the_daily_selection_names_only_the_span_years_its_calendar_holds() -> None:
+    session = date(2026, 2, 5)
+
+    assert daily._factor_years(_Calendar((2025, 2026)), session) == (2025, 2026)
+    assert daily._factor_years(_Calendar(()), session) == (2026,)
