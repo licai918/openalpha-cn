@@ -1,49 +1,54 @@
-"""`V2-P6-027`: a factor build reads every announcement year its report-period reach needs.
+"""`V2-P6-027`: a statement factor reads every stored announcement year, whatever years are named.
 
 The P6 holdout was refused at 2025-02-05 because `revenue_yoy_acceleration/v1@processed` had no
 cross section: 5,375 of 5,395 listed names were `insufficient_history` in raw. Every stored
 research build had named `--year` as `as_of`'s year and the two before it, and a statement
 partition is filed by **announcement** year. From January to April the newest report every issuer
 owes is the previous year's third quarter, so a nine-period window reaches the third quarter three
-calendar years back -- announced that October, in a partition the build never read. Every shorter
-reach fits inside the three years all year round, which is why no other factor showed it.
+calendar years back -- announced that October, in a partition the build never read.
 
-`factor_view._requirements` now adds, beneath the years a build names, every stored announcement
-year `panel_factors.period_reach_years` says the factor's reach can need at that instant, and
-`compute_factor` refuses a requirement set that leaves one out -- so the shape cannot come back
-through a caller that builds its own requirements.
+A bound derived from the statutory filing deadlines (this issue's first round) closed that day
+and left a late filer's answer depending on the years a caller listed. So the read is the whole
+stored history: `factor_view._requirements` adds every stored announcement year beneath the years
+a build names, and `compute_factor` refuses, before reading anything, a requirement that leaves
+one out.
 
 ## The corpus
 
 Generated at test time (`AGENTS.md` rule 6). 120 securities -- above the 100-name floors of the
 shipped transform and neutralisation -- with three calendar years of sessions (2024-2026), the
 registry, the industry membership, and the four statement endpoints from 2021Q1 to 2026Q3, each
-report announced inside its statutory deadline, so announcement years 2021-2026 are stored. Four
-names carry the shapes that decide which windows were computable before:
+report announced inside its statutory deadline, so announcement years 2021-2026 are stored. Five
+names carry the shapes that decide which windows were computable over the old three years:
 
 - `EARLY` announces its 2025 annual on 2026-01-20, so in February its window ends at 2025Q4 and
   starts at 2023Q4, announced in 2024.
 - `BACKFILLED` lists in January 2024 and publishes every period through 2023Q3 then -- the shape
   of most of the 20 names the research store did compute on 2025-02-05.
-- `RESTATED` restates its 2023Q3 in June 2025: the later announcement wins, and it sits in a year
-  the old read did see.
+- `RESTATED` restates its 2023Q3 in June 2025: the later announcement wins over the October 2023
+  original the full read adds.
+- `CONFLICTED` announced its 2023Q3 in October 2023 as two rows of one day that disagree about
+  `total_revenue`, and restated it in June 2025. The old read saw only the restatement and
+  computed; the full read also sees the same-day disagreement, and the engine's rule is that such
+  a disagreement marks its period `ambiguous_filing` for every window that reaches it whether or
+  not a later announcement exists. So reading an older year **can** turn a computed value into
+  `ambiguous_filing` -- the one way it can change a value the old read computed.
 - `LATE` announces its 2025 annual and 2026Q1 on 8 May 2026, after the 30 April deadline. On
-  6 May its window still reaches 2023Q3, which the statute does not make anybody owe -- the one
-  bound `period_reach_years` states rather than removes.
+  6 May its nine-period window still starts at 2023Q3, which the three named years do not hold.
 
 ## The differential
 
-"Values that were already correct are unchanged" is measured rather than argued. Every build here
-names `--year 2024 --year 2025 --year 2026`, the stored builds' span for 2026. The same build over
-a copy of the corpus with no statement partition before 2024 is the build before this change,
-exactly: there is nothing beneath the named years to add and nothing to refuse, so it reads the
-rows the old code read. All 21 factors, all three tiers, at five instants from February to
-November, are compared between the two stores.
+Every build here names `--year 2024 --year 2025 --year 2026`, the stored builds' span for 2026.
+The same build over a copy of the corpus with no statement partition before 2024 is the build
+before this change, exactly: there is nothing beneath the named years to add and nothing to
+refuse, so it reads the rows the old code read. All 21 factors, all three tiers, at five instants
+from February to November, are compared between the two stores.
 """
 
 from __future__ import annotations
 
 import math
+import shlex
 import shutil
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, time, timedelta
@@ -52,8 +57,10 @@ from typing import Final
 from zoneinfo import ZoneInfo
 
 import pytest
+from typer.testing import CliRunner
 
 from openalpha_cn import factor_view
+from openalpha_cn.cli import app
 from openalpha_cn.domain.daily_prices import (
     DAILY_AVAILABILITY_TIME,
     DAILY_BASIC_DATA_COLUMNS,
@@ -99,7 +106,12 @@ from openalpha_cn.domain.trading_calendar import (
     CALENDAR_PRETRADE_COLUMN,
     TRADING_CALENDAR_DATASET,
 )
-from openalpha_cn.factor_view import factor_build_requests
+from openalpha_cn.factor_view import (
+    StaleStatementReachBuild,
+    factor_build_requests,
+    merged_build_commands,
+    stale_statement_reach_builds,
+)
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import (
     FACTOR_DEFINITIONS,
@@ -109,7 +121,6 @@ from openalpha_cn.panel_factors import (
     load_factor_manifests,
     load_factor_observations,
     load_processed_factor_observations,
-    period_reach_years,
 )
 from openalpha_cn.panel_ingest import (
     financial_statement_requirement,
@@ -152,7 +163,7 @@ REACH_BEYOND_THE_BUILD: Final[frozenset[datetime]] = frozenset({FEBRUARY, DEADLI
 SECURITIES: Final[tuple[str, ...]] = tuple(
     f"{600000 + index:06d}.SH" if index % 2 else f"{index + 1:06d}.SZ" for index in range(120)
 )
-EARLY, BACKFILLED, RESTATED, LATE = SECURITIES[30:34]
+EARLY, BACKFILLED, RESTATED, LATE, CONFLICTED = SECURITIES[30:35]
 YOUNG, DELISTED, LISTED_IN_2025 = SECURITIES[100:103]
 YOUNG_FROM: Final[date] = date(2026, 5, 25)
 LISTED_IN_2025_FROM: Final[date] = date(2025, 4, 1)
@@ -429,8 +440,12 @@ def _statement_batch(dataset: str) -> ColumnarPanelBatch:
                 for offset, name in enumerate(STATEMENT_DATA_COLUMNS[dataset])
             ]
             filing(code, period, _announced(index, code, period), values)
-            if code == RESTATED and period == RESTATED_PERIOD:
+            if code in (RESTATED, CONFLICTED) and period == RESTATED_PERIOD:
                 filing(code, period, RESTATED_ON, [value * 1.5 for value in values])
+            if code == CONFLICTED and period == RESTATED_PERIOD and dataset == INCOME_DATASET:
+                disputed = list(values)
+                disputed[STATEMENT_DATA_COLUMNS[dataset].index("total_revenue")] += 7.0
+                filing(code, period, _announced(index, code, period), disputed)
     return _batch(
         dataset,
         rows,
@@ -509,14 +524,21 @@ def _copy(source: Path, target: Path) -> PanelStore:
     return PanelStore(target)
 
 
-def _build(store: PanelStore, factors: Sequence[str], instants: Sequence[datetime]) -> None:
+def _build(
+    store: PanelStore,
+    factors: Sequence[str],
+    instants: Sequence[datetime],
+    *,
+    years: Sequence[int] = BUILD_YEARS,
+    tier: str = "neutralized",
+) -> None:
     requests = factor_build_requests(
         factors=factors,
-        tier="neutralized",
-        transform=TRANSFORM,
-        neutralization=NEUTRALIZATION,
+        tier=tier,
+        transform=TRANSFORM if tier != "raw" else "",
+        neutralization=NEUTRALIZATION if tier == "neutralized" else "",
         as_ofs=instants,
-        years=BUILD_YEARS,
+        years=years,
         exchange=EXCHANGE,
         max_staleness_days=STALENESS_DAYS,
         waive_max_staleness=False,
@@ -567,16 +589,25 @@ def _neutralized(store: PanelStore, factor: str) -> Answers:
     return answers
 
 
-def _income_years(store: PanelStore, factor: str) -> dict[datetime, tuple[int, ...]]:
-    """The `income` announcement years each stored build of `factor` read, by instant."""
+def _statement_years(store: PanelStore, factor: str) -> dict[datetime, dict[str, tuple[int, ...]]]:
+    """The announcement years each stored build of `factor` read, by instant and statement."""
+    definition = FACTOR_DEFINITIONS.get(factor)
     return {
-        manifest.as_of: tuple(
-            sorted(ref.year for ref in manifest.inputs if ref.dataset == "income")
-        )
-        for manifest in load_factor_manifests(
-            store, FACTOR_DEFINITIONS.get(factor), years=(2026,), as_of=FETCHED_AT
-        )
+        manifest.as_of: {
+            dataset: tuple(sorted(ref.year for ref in manifest.inputs if ref.dataset == dataset))
+            for dataset in definition.datasets
+            if dataset in STATEMENT_DATA_COLUMNS
+        }
+        for manifest in load_factor_manifests(store, definition, years=(2026,), as_of=FETCHED_AT)
     }
+
+
+STATEMENT_FACTORS: Final[tuple[str, ...]] = tuple(
+    key
+    for key in FACTOR_DEFINITIONS.qualified_keys
+    if set(FACTOR_DEFINITIONS.get(key).datasets) & set(STATEMENT_DATA_COLUMNS)
+)
+STORED_STATEMENT_YEARS: Final[tuple[int, ...]] = tuple(range(PERIODS[0].year, 2027))
 
 
 # --- the defect, reproduced and closed ------------------------------------------------------------
@@ -588,8 +619,9 @@ def test_a_nine_period_window_reaching_three_announcement_years_back_is_computed
     """The holdout's refusal in miniature, through the face every stored build was made with.
 
     `--year 2024 --year 2025 --year 2026` at 2026-02-05: the window's oldest filing is 2023Q3,
-    announced in October 2023. The build reads 2023 beneath the years it names, and every name
-    with nine filings is computed -- including the ones the old read could already answer.
+    announced in October 2023. The build reads every stored announcement year, and every listed
+    name with nine filings is computed -- except `CONFLICTED`, whose 2023Q3 the full read shows
+    was stated twice on one day with two different revenues.
     """
     store = _copy(corpus, tmp_path / "panel")
 
@@ -598,55 +630,83 @@ def test_a_nine_period_window_reaching_three_announcement_years_back_is_computed
     answers = _raw(store, ACCELERATION)[FEBRUARY]
     coverage = {subject: code for subject, (code, _value) in answers.items()}
     listed = {subject for subject, code in coverage.items() if code != "not_in_universe"}
-    assert _income_years(store, ACCELERATION) == {FEBRUARY: (2023, 2024, 2025, 2026)}
-    assert {coverage[name] for name in listed} == {"computed"}
-    assert {EARLY, BACKFILLED, RESTATED, LATE} <= listed
+    assert _statement_years(store, ACCELERATION) == {FEBRUARY: {"income": STORED_STATEMENT_YEARS}}
     assert listed == set(SECURITIES) - {YOUNG}  # it lists in May
+    assert coverage[CONFLICTED] == "ambiguous_filing"
+    assert {coverage[name] for name in listed - {CONFLICTED}} == {"computed"}
 
 
-def test_a_filer_later_than_its_deadline_is_the_one_bound_the_reach_states(
+def test_a_late_filers_answer_does_not_depend_on_the_years_named(
     corpus: Path, tmp_path: Path
 ) -> None:
     """`LATE` owes its 2025 annual and 2026Q1 by 30 April and announces them on 8 May.
 
-    On 6 May every on-time issuer's window starts at 2024Q1, so nothing beneath 2024 is read and
-    `LATE`, whose window still starts at 2023Q3, is `insufficient_history` -- exactly as before
-    this change. By June its reports are in and it is computed.
+    On 6 May its nine-period window is 2023Q3..2025Q3. The deadline-derived bound of this issue's
+    first round read nothing beneath 2024 that day and coded it `insufficient_history`; the
+    stored history holds the filing and it is computed.
     """
     store = _copy(corpus, tmp_path / "panel")
 
     _build(store, [ACCELERATION], [MAY, JUNE])
 
     answers = _raw(store, ACCELERATION)
-    assert _income_years(store, ACCELERATION) == {MAY: BUILD_YEARS, JUNE: BUILD_YEARS}
-    assert answers[MAY][LATE][0] == "insufficient_history"
-    assert answers[MAY][EARLY][0] == "computed"
+    assert answers[MAY][LATE][0] == "computed"
     assert answers[JUNE][LATE][0] == "computed"
 
 
-def test_the_engine_refuses_a_requirement_that_cuts_a_stored_reach_short(corpus: Path) -> None:
-    """A caller that builds its own requirements cannot bring the shape back.
+@pytest.mark.parametrize(
+    "years",
+    [pytest.param((2025, 2026), id="daily-selection-span"), pytest.param((2026,), id="one-year")],
+)
+def test_every_statement_factor_answers_the_same_whatever_years_are_named(
+    corpus: Path, tmp_path: Path, years: tuple[int, ...]
+) -> None:
+    """The daily selection names `as_of`'s year and the one before (`scripts/daily_selection.py::
+    _factor_years`), a hand-typed build may name one; the research builds named three. All 11
+    statement factors, in February and June, store the research span's answers either way, read
+    over the same announcement years."""
+    research = _copy(corpus, tmp_path / "research")
+    other = _copy(corpus, tmp_path / "other")
+    instants = [FEBRUARY, JUNE]
 
-    The years named are the stored builds' own, and 2023 is stored: a read that leaves it out
-    answers `insufficient_history` for nearly everybody, which is a fault in the request -- so it
-    is refused, by name, rather than stored as coverage.
-    """
+    _build(research, STATEMENT_FACTORS, instants, tier="raw")
+    _build(other, STATEMENT_FACTORS, instants, tier="raw", years=years)
+
+    assert len(STATEMENT_FACTORS) == 11
+    for key in STATEMENT_FACTORS:
+        assert _raw(other, key) == _raw(research, key), key
+        assert _statement_years(other, key) == _statement_years(research, key), key
+        for read in _statement_years(other, key).values():
+            assert set(read.values()) == {STORED_STATEMENT_YEARS}, key
+
+
+def test_the_engine_refuses_a_statement_read_that_skips_a_stored_year_before_reading(
+    corpus: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A caller that builds its own requirements cannot bring the shape back, and the refusal
+    comes before a single partition is read."""
     store = PanelStore(corpus)
     definition = FACTOR_DEFINITIONS.get(ACCELERATION)
     requirements = {
         INCOME_DATASET: financial_statement_requirement(
             dataset=INCOME_DATASET,
             years=BUILD_YEARS,
-            as_of=FEBRUARY,
+            as_of=JUNE,
             max_staleness=timedelta(days=STALENESS_DAYS),
         )
     }
 
-    with pytest.raises(FactorEngineError, match=r"income .*\[2023\]"):
+    def no_read(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("a partition was read before the refusal")
+
+    monkeypatch.setattr(PanelStore, "read_visible_at", no_read)
+    with pytest.raises(
+        FactorEngineError, match=r"income, which is stored for \[2021, 2022, 2023\]"
+    ):
         compute_factor(
             store,
             definition,
-            as_of=FEBRUARY,
+            as_of=JUNE,
             subjects=SECURITIES,
             universe=SECURITIES,
             requirements=requirements,
@@ -655,11 +715,12 @@ def test_the_engine_refuses_a_requirement_that_cuts_a_stored_reach_short(corpus:
         )
 
 
-def test_a_reach_beneath_the_first_stored_year_is_not_refused(truncated: Path) -> None:
+def test_a_store_with_nothing_beneath_the_named_years_reads_what_it_holds(
+    truncated: Path,
+) -> None:
     """Nothing older is stored, so there is nothing to name: the read answers from what exists,
     and a window that needs a filing the store does not hold is `insufficient_history`."""
     store = PanelStore(truncated)
-    definition = FACTOR_DEFINITIONS.get(ACCELERATION)
     requirements = {
         INCOME_DATASET: financial_statement_requirement(
             dataset=INCOME_DATASET,
@@ -671,7 +732,7 @@ def test_a_reach_beneath_the_first_stored_year_is_not_refused(truncated: Path) -
 
     panel = compute_factor(
         store,
-        definition,
+        FACTOR_DEFINITIONS.get(ACCELERATION),
         as_of=FEBRUARY,
         subjects=SECURITIES,
         universe=SECURITIES,
@@ -680,16 +741,16 @@ def test_a_reach_beneath_the_first_stored_year_is_not_refused(truncated: Path) -
         built_at=BUILT_AT,
     )
 
-    assert period_reach_years(definition, as_of=FEBRUARY)[0] == 2023
     coverage = {item.subject: item.coverage for item in panel.observations}
     assert {name for name, code in coverage.items() if code == "computed"} == {
         EARLY,
         BACKFILLED,
         RESTATED,
+        CONFLICTED,
     }
 
 
-# --- the differential: what was already right did not move ----------------------------------------
+# --- the differential: what moved, and what did not -----------------------------------------------
 
 
 @pytest.fixture(scope="module")
@@ -706,61 +767,186 @@ def both_builds(
     return full, before
 
 
-def test_the_reads_change_only_where_a_reach_was_cut_short(
+MOVED: Final[frozenset[tuple[str, datetime]]] = frozenset(
+    {(ACCELERATION, FEBRUARY), (ACCELERATION, DEADLINE_DAY), (ACCELERATION, MAY)}
+)
+"""Where the old three-year read cut a window short: February and 30 April for every issuer that
+had not yet announced its annual, 6 May for `LATE`."""
+
+
+def test_every_statement_build_reads_the_whole_stored_history(
     both_builds: tuple[PanelStore, PanelStore],
 ) -> None:
-    """Every factor's `income` read is the old one except the nine-period reach in February and on
-    30 April -- so every other build reads exactly the rows the old code read."""
     full, before = both_builds
-    moved = {
-        (key, instant)
-        for key in FACTOR_DEFINITIONS.qualified_keys
-        if "income" in FACTOR_DEFINITIONS.get(key).datasets
-        for instant, years in _income_years(full, key).items()
-        if years != _income_years(before, key)[instant]
-    }
-
-    assert moved == {(ACCELERATION, instant) for instant in REACH_BEYOND_THE_BUILD}
-    assert {
-        _income_years(full, ACCELERATION)[instant][0] for instant in REACH_BEYOND_THE_BUILD
-    } == {2023}
+    for key in STATEMENT_FACTORS:
+        for read in _statement_years(full, key).values():
+            assert set(read.values()) == {STORED_STATEMENT_YEARS}, key
+        for read in _statement_years(before, key).values():
+            assert set(read.values()) == {BUILD_YEARS}, key
 
 
 @pytest.mark.parametrize("tier", ["raw", "processed", "neutralized"])
-def test_every_answer_that_was_already_computable_is_unchanged(
+def test_every_answer_outside_a_cut_short_window_is_unchanged(
     both_builds: tuple[PanelStore, PanelStore], tier: str
 ) -> None:
-    """All 21 factors, every instant, one tier per case: every answer is the old build's, except
-    the nine-period reach where it was cut short -- and there every security the old build
-    computed has the same value, and the rest of the cross section is now computed beside it."""
+    """All 21 factors, every instant, one tier per case: identical wherever the old read already
+    held every window. Where it did not, see the next test."""
     full, before = both_builds
     read = {"raw": _raw, "processed": _processed, "neutralized": _neutralized}[tier]
     for key in FACTOR_DEFINITIONS.qualified_keys:
         now, then = read(full, key), read(before, key)
         assert set(now) == set(INSTANTS), key
         for instant in INSTANTS:
-            if key == ACCELERATION and instant in REACH_BEYOND_THE_BUILD:
-                continue
-            assert now[instant] == then[instant], (key, tier, instant)
+            if (key, instant) not in MOVED:
+                assert now[instant] == then[instant], (key, tier, instant)
 
-    raw_now, raw_then = _raw(full, ACCELERATION), _raw(before, ACCELERATION)
-    computed_then: dict[datetime, set[str]] = {}
-    computed_now: dict[datetime, set[str]] = {}
-    for instant in REACH_BEYOND_THE_BUILD:
-        then = {subject for subject, answer in raw_then[instant].items() if answer[0] == "computed"}
-        assert {subject: raw_now[instant][subject] for subject in then} == {
-            subject: raw_then[instant][subject] for subject in then
-        }, instant
-        computed_then[instant] = then
-        computed_now[instant] = {
-            subject for subject, answer in raw_now[instant].items() if answer[0] == "computed"
-        }
-    listed = set(SECURITIES) - {YOUNG}
-    # February: the old read answered only the three names whose oldest filing sat in a later year.
-    assert computed_then[FEBRUARY] == {EARLY, BACKFILLED, RESTATED}
-    assert computed_now[FEBRUARY] == listed
-    # 30 April: every on-time issuer has filed its annual and its 2026Q1 here, so the old read
-    # already answered them; `LATE` is not late yet, still owes nothing past 2025Q3, and only the
-    # reach reads the 2023Q3 its window starts at.
-    assert computed_then[DEADLINE_DAY] == listed - {DELISTED, LATE}
-    assert computed_now[DEADLINE_DAY] == listed - {DELISTED}
+
+def test_where_a_window_was_cut_short_what_moved_is_exactly_the_shapes_that_explain_it(
+    both_builds: tuple[PanelStore, PanelStore],
+) -> None:
+    """Every raw answer the old read gave at the three moved instants is unchanged, with one
+    exception the engine's rule makes on purpose: `CONFLICTED`, computed from its June 2025
+    restatement over the old read, is `ambiguous_filing` once the October 2023 same-day pair is
+    read -- a disagreement marks its period whether or not a later announcement exists. Every
+    other change is an `insufficient_history` the full read answers."""
+    full, before = both_builds
+    now, then = _raw(full, ACCELERATION), _raw(before, ACCELERATION)
+    listed_in_spring = set(SECURITIES) - {YOUNG}
+    expected_then_computed = {
+        FEBRUARY: {EARLY, BACKFILLED, RESTATED, CONFLICTED},
+        DEADLINE_DAY: listed_in_spring - {DELISTED, LATE},
+        MAY: listed_in_spring - {DELISTED, LATE},
+    }
+    for instant in (FEBRUARY, DEADLINE_DAY, MAY):
+        computed_then = {s for s, answer in then[instant].items() if answer[0] == "computed"}
+        assert computed_then == expected_then_computed[instant], instant
+        moved = {s for s in then[instant] if now[instant][s] != then[instant][s]}
+        for subject in moved:
+            assert then[instant][subject][0] == "insufficient_history" or subject == CONFLICTED, (
+                instant,
+                subject,
+            )
+    assert now[FEBRUARY][CONFLICTED][0] == "ambiguous_filing"
+    assert then[FEBRUARY][CONFLICTED][0] == "computed"
+    assert now[DEADLINE_DAY][CONFLICTED] == then[DEADLINE_DAY][CONFLICTED]
+    assert {s for s, answer in now[FEBRUARY].items() if answer[0] == "computed"} == (
+        listed_in_spring - {CONFLICTED}
+    )
+    assert now[DEADLINE_DAY][LATE][0] == now[MAY][LATE][0] == "computed"
+
+
+# --- the detector: what a store built before this change has to rebuild --------------------------
+
+
+def _store_built_before_this_change(corpus: Path, truncated: Path, root: Path) -> PanelStore:
+    """Every statement factor built over the three named years, then the older years stored.
+
+    The build is the old reading exactly (nothing beneath to read); writing the older statement
+    partitions afterwards leaves the store in the research store's shape: builds whose manifests
+    read fewer announcement years than the store now holds.
+    """
+    store = _copy(truncated, root / "panel")
+    _build(store, STATEMENT_FACTORS, INSTANTS)
+    for dataset in STATEMENT_DATA_COLUMNS:
+        for year, part in split_panel_batch_by_year(_statement_batch(dataset)):
+            if year < BUILD_YEARS[0]:
+                write_panel_batch(store, part, year=year)
+    assert set(store.registered_years(INCOME_DATASET)) == set(STORED_STATEMENT_YEARS)
+    return store
+
+
+def _detect(store: PanelStore, calls: list[int]) -> tuple[StaleStatementReachBuild, ...]:
+    return stale_statement_reach_builds(
+        store,
+        exchange=EXCHANGE,
+        max_staleness_days=STALENESS_DAYS,
+        as_of=FETCHED_AT,
+        code_commit=COMMIT,
+        budget=calls.append,
+    )
+
+
+def test_the_detector_lists_exactly_the_builds_whose_answers_moved_and_its_repair_clears_them(
+    corpus: Path,
+    truncated: Path,
+    tmp_path: Path,
+    both_builds: tuple[PanelStore, PanelStore],
+) -> None:
+    """55 stored raw builds read fewer years than a build reads now; three of them hold a
+    security a newly read year can move, and those three are the ones that moved. The printed
+    repair is one command, and once it has run the detector answers none and the factor's stored
+    answers are a fresh full-history build's."""
+    store = _store_built_before_this_change(corpus, truncated, tmp_path)
+    calls: list[int] = []
+
+    stale = _detect(store, calls)
+
+    assert calls == [3]
+    assert [(item.factor, item.as_of) for item in stale] == [
+        (ACCELERATION, FEBRUARY),
+        (ACCELERATION, DEADLINE_DAY),
+        (ACCELERATION, MAY),
+    ]
+    by_instant = {item.as_of: item for item in stale}
+    february = by_instant[FEBRUARY].transitions
+    assert february[("computed", "ambiguous_filing")] == 1
+    assert february[("insufficient_history", "computed")] == len(SECURITIES) - 1 - 4
+    assert dict(by_instant[DEADLINE_DAY].transitions) == {("insufficient_history", "computed"): 1}
+    assert by_instant[MAY].examples == (LATE,)
+    for item in stale:
+        assert item.read == {"income": BUILD_YEARS}
+        assert item.reads_now == {"income": STORED_STATEMENT_YEARS}
+        assert [build.tier for build in item.builds] == ["raw", "processed", "neutralized"]
+
+    commands = merged_build_commands([c for item in stale for c in item.commands])
+    assert len(commands) == 1
+    (command,) = commands
+    assert command.count("--as-of") == 3
+    for flag in ("--supersedes-raw", "--supersedes-processed", "--supersedes-neutralized"):
+        assert command.count(flag) == 3
+
+    result = CliRunner().invoke(app, [*command, "--runtime-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+
+    assert _detect(store, calls) == ()
+    full, _before = both_builds
+    assert _raw(store, ACCELERATION) == _raw(full, ACCELERATION)
+    assert _processed(store, ACCELERATION) == _processed(full, ACCELERATION)
+    assert _neutralized(store, ACCELERATION) == _neutralized(full, ACCELERATION)
+
+
+def test_the_command_lists_and_exits_one_then_says_none(
+    corpus: Path, truncated: Path, tmp_path: Path
+) -> None:
+    store = _store_built_before_this_change(corpus, truncated, tmp_path)
+    arguments = [
+        "factor",
+        "stale-statement-reach",
+        "--runtime-dir",
+        str(tmp_path),
+        "--max-staleness-days",
+        str(STALENESS_DAYS),
+        "--code-commit",
+        COMMIT,
+        "--as-of",
+        FETCHED_AT.isoformat(),
+    ]
+
+    listed = CliRunner().invoke(app, arguments)
+
+    assert listed.exit_code == 1, listed.output
+    assert "stale statement-reach builds: 3" in listed.output
+    assert f"STALE {ACCELERATION} neutralized 2026 {MAY.isoformat()}" in listed.output
+    assert "insufficient_history->computed 1" in listed.output
+    assert "repair, in this order (1 commands):" in listed.output
+    repair = next(
+        line.strip() for line in listed.output.splitlines() if line.startswith("  openalpha ")
+    )
+
+    rebuilt = CliRunner().invoke(app, shlex.split(repair)[1:])
+    assert rebuilt.exit_code == 0, rebuilt.output
+
+    cleared = CliRunner().invoke(app, arguments)
+    assert cleared.exit_code == 0, cleared.output
+    assert "stale statement-reach builds: none" in cleared.output
+    assert set(store.registered_years(INCOME_DATASET)) == set(STORED_STATEMENT_YEARS)

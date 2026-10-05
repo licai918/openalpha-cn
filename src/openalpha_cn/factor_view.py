@@ -323,9 +323,9 @@ from openalpha_cn.panel_factors import (
     load_factor_observations,
     load_factor_transform_manifests,
     load_processed_factor_observations,
-    period_reach_years,
     processed_factor_dataset,
     session_return_links,
+    statement_newest_periods,
     unread_newest_sessions,
     write_factor_panels,
     write_processed_factor_panels,
@@ -2896,12 +2896,11 @@ class FactorBuildRequest:
 
     - The **statement** partitions are keyed by *announcement* year, not by report period. A factor
       declaring `lookback_periods=5` needs five contiguous filings, which is at least two
-      announcement years. Since `V2-P6-027` the build supplies them: every stored announcement
-      year beneath this range that the factor's reach can need at the instant is read too
-      (`_statement_years`), because the stored research builds named `as_of`'s year and the two
-      before it and a nine-period window needs the one before that from January to April.
+      announcement years. Since `V2-P6-027` the build supplies them: a statement dataset is read
+      over every stored announcement year at or below the newest one named (`_statement_years`),
+      so a statement factor's answer does not depend on how many years are named.
     - The **registry** partitions are keyed by *lifecycle* year, and this year set is therefore
-      the one dataset it is **not** the whole scope of. A security's row lives in the year it
+      the other dataset it is **not** the whole scope of. A security's row lives in the year it
       listed, so the newest partition is that year's listings rather than that year's market, and
       `load_stock_universe` reads every lifecycle year the store holds beneath the range asked for
       here. This paragraph used to say the opposite -- that naming a prefix "silently shortens the
@@ -3808,11 +3807,10 @@ def _requirements(
     rather than several layers down; what it cannot check is a requirement nobody built, and that
     is what this refusal is for.
 
-    **A statement dataset is read over the years its period reach needs, not only the ones
-    named** (`V2-P6-027`). `_statement_years` adds, beneath `request.years`, every stored
-    announcement year `period_reach_years` says this factor's window can need at `as_of` -- the
-    registry's arrangement since `V2-P4-059`, for the same reason: the unit the caller counts in
-    is not the unit the partitions are filed by.
+    **A statement dataset is read over its whole stored history, not only the years named**
+    (`V2-P6-027`). `_statement_years` adds every stored announcement year beneath
+    `request.years` -- the registry's arrangement since `V2-P4-059`, for the same reason: the
+    unit the caller counts in is not the unit the partitions are filed by.
     """
     missing = [name for name in request.definition.datasets if name not in REQUIREMENT_BUILDERS]
     if missing:
@@ -3833,7 +3831,7 @@ def _requirements(
             else:
                 built[name] = builder(
                     dataset=name,
-                    years=_statement_years(store, request, dataset=name, as_of=as_of),
+                    years=_statement_years(store, request, dataset=name),
                     as_of=as_of,
                     max_staleness=request.max_staleness,
                 )
@@ -3846,36 +3844,36 @@ def _requirements(
 
 
 def _statement_years(
-    store: PanelStore, request: FactorBuildRequest, *, dataset: str, as_of: datetime
+    store: PanelStore, request: FactorBuildRequest, *, dataset: str
 ) -> tuple[int, ...]:
-    """`request.years`, and beneath them every stored year `dataset`'s period reach needs.
+    """`request.years`, and for a statement dataset every stored announcement year beneath them.
 
     `V2-P6-027`. A statement partition is filed by announcement year and a reach is counted in
-    report periods, so the years a caller names say little about the filings a window holds:
+    report periods, so the years a caller names said too little about the filings a window holds:
     every stored research build named `as_of`'s year and the two before it, and from January to
-    April a nine-period window's oldest filing was announced the year before that -- so
+    April a nine-period window's oldest filing was announced the year before that --
     `revenue_yoy_acceleration` was `insufficient_history` for 5,375 of 5,395 listed names on
-    2025-02-05 and the registered holdout refused that day. `period_reach_years` decides the years
-    from the factor's declared reach, the statutory filing deadlines and `as_of` alone;
-    `compute_factor` refuses a requirement that leaves a stored one out.
+    2025-02-05 and the registered holdout refused that day.
 
-    **Only beneath, and only stored.** A year the caller named is kept whether or not the reach
-    needs it, so a build that already covered its reach reads exactly what it read before -- at
-    every instant from May to December, and for every factor with a reach of eight periods or
-    fewer at every instant of the stored span. A year inside the named range that the caller left
-    out stays theirs to answer for (`_refuse_a_read_that_cannot_see_what_as_of_holds`). A year the
-    store does not hold has nothing to read: a window that needs it is `insufficient_history`,
-    which is then a statement about the data.
+    **The whole stored history beneath, not a computed reach.** A bound derived from the
+    statutory filing deadlines closes that day and still leaves a late filer's answer depending on
+    the caller's list -- the daily selection names two years and a research build three, and
+    measured on the research store they disagreed for a handful of names on ordinary dates
+    (`revenue_yoy` on 2025-06-16: 5,342 against 5,347). With every stored year at or below the
+    newest named one read, a statement factor's answer is a function of the store and `as_of`
+    alone: `--year 2026`, `--year 2025 --year 2026` and the research span build the same values.
+    `compute_factor` refuses a requirement that leaves one out
+    (`_refuse_a_statement_read_that_skips_a_stored_year`).
+
+    What a read of an older year can change, and what it cannot, is the engine's rule and is
+    stated there: an older filing loses to a later announcement of the same period, and a same-day
+    disagreement in it still marks its period `ambiguous_filing` for a window that reaches it.
+    The year set no longer depends on `as_of`, so one `FactorReadCarry` serves every instant.
     """
     named = request.years
     if dataset not in PERIOD_INDEXED_DATASETS:
         return named
-    stored = set(store.registered_years(dataset))
-    beneath = {
-        year
-        for year in period_reach_years(request.definition, as_of=as_of)
-        if year < named[0] and year in stored
-    }
+    beneath = {year for year in store.registered_years(dataset) if year < named[0]}
     return tuple(sorted(beneath.union(named)))
 
 
@@ -4510,3 +4508,276 @@ def _supersession(
                 )
             )
     return builds, tuple(commands)
+
+
+# --- stored statement builds an older announcement year changes (`V2-P6-027`, round 2) -----------
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class StaleStatementReachBuild:
+    """A stored statement-factor build the full-history read answers differently, and its repair.
+
+    `read` is the announcement years the stored build read, per statement dataset; `reads_now`
+    what a build of the same request reads today (`_statement_years`). `asked` is how many of its
+    securities could have moved and were put to `compute_factor` again; `transitions` counts the
+    ones that did, by `(stored coverage, engine coverage)` -- a pair with one coverage on both
+    sides is a value that moved -- and `examples` names the first few. `builds` and `commands`
+    are `stale_return_path_builds`' own: this raw build, every processed and neutralized build
+    made from it at that instant, and the `factor build` argument lists that re-answer them.
+    """
+
+    factor: str
+    year: int
+    as_of: datetime
+    read: Mapping[str, tuple[int, ...]]
+    reads_now: Mapping[str, tuple[int, ...]]
+    asked: int
+    transitions: Mapping[tuple[str, str], int]
+    examples: tuple[str, ...]
+    builds: tuple[StaleFactorBuild, ...]
+    commands: tuple[tuple[str, ...], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _ReachRecompute:
+    """One stored raw statement build to ask the engine about again, and whom."""
+
+    definition: FactorDefinition
+    year: int
+    manifest: FactorBuildManifest
+    read: Mapping[str, tuple[int, ...]]
+    reads_now: Mapping[str, tuple[int, ...]]
+    asked: tuple[FactorObservation, ...]
+
+
+STALE_STATEMENT_REACH_EXAMPLES: Final[int] = 5
+"""How many moved securities `StaleStatementReachBuild.examples` names. A build cut short on a
+February day moves thousands, and the count is the finding; the names are for a reader to look
+one up."""
+
+
+def stale_statement_reach_builds(
+    store: PanelStore,
+    *,
+    exchange: str,
+    max_staleness_days: int,
+    as_of: datetime,
+    code_commit: str | None = None,
+    budget: Callable[[int], None] | None = None,
+) -> tuple[StaleStatementReachBuild, ...]:
+    """Every stored statement-factor build that a read of the whole stored history answers
+    differently, with the `factor build` commands that repair it (`V2-P6-027`, round 2).
+
+    Before `V2-P6-027` a statement factor read the announcement years its build named, and every
+    stored research build named `as_of`'s year and the two before it. It now reads every stored
+    year at or below the newest one named. A manifest records the years it read, so which builds
+    read less is a fact the store holds; what this asks the engine is whether that changed any
+    answer, about as few securities as can have changed:
+
+    1. **Builds.** A raw build whose every statement dataset already read every stored year at or
+       below its newest named year reads exactly what a build reads now, and is not asked.
+    2. **Securities.** A newly read year adds only that year's filings. A security with none of
+       them has the rows it had. One with some is asked again only if a period of them is at or
+       after the first period of the window it was stored with (`input_period_first`), or it was
+       stored with no period window at all: the window is a security's last `lookback_periods`
+       held periods, so a filing of an older period changes neither which periods it holds nor
+       their versions nor an ambiguity inside it -- every row of a period at or after the
+       window's first came from the years already read. `not_in_universe` never moves. The
+       periods are taken from the rows visible at this command's `as_of`, which include every
+       row visible at any build's earlier instant, so the narrowing can only over-ask
+       (`panel_factors.statement_newest_periods`).
+    3. **Whether it moved.** `compute_factor` for those securities at the build's own instant,
+       over the build's own named years and code commit, through `_requirements` -- the reading
+       every build makes now -- with one `FactorReadCarry` per `(factor, year)`, in ascending
+       instant order. A different coverage or value is stale. `budget` is told the number of
+       those calls once, before the first.
+
+    A build whose answers did not move is not listed even though a rebuild would record more
+    input years: its observations, and so everything built from them, are what a rebuild stores.
+    `code_commit` goes into the commands when given; otherwise the rebuild resolves its own.
+    """
+    plans = _reach_recomputes(store, as_of=as_of)
+    if budget is not None:
+        budget(len(plans))
+    found: list[StaleStatementReachBuild] = []
+    carries: dict[tuple[str, int], FactorReadCarry] = {}
+    for plan in plans:
+        carry = carries.setdefault((plan.definition.qualified_key, plan.year), FactorReadCarry())
+        engine = _recomputed(
+            store,
+            plan.definition,
+            manifest=plan.manifest,
+            subjects=tuple(sorted(item.subject for item in plan.asked)),
+            exchange=exchange,
+            max_staleness_days=max_staleness_days,
+            carry=carry,
+        )
+        transitions: dict[tuple[str, str], int] = {}
+        examples: list[str] = []
+        for stored in plan.asked:
+            now = engine[stored.subject]
+            if (now.coverage, now.value) == (stored.coverage, stored.value):
+                continue
+            key = (stored.coverage, now.coverage)
+            transitions[key] = transitions.get(key, 0) + 1
+            if len(examples) < STALE_STATEMENT_REACH_EXAMPLES:
+                examples.append(stored.subject)
+        if not transitions:
+            continue
+        builds, commands = _supersession(
+            store,
+            plan.definition,
+            manifest=plan.manifest,
+            year=plan.year,
+            as_of=as_of,
+            exchange=exchange,
+            max_staleness_days=max_staleness_days,
+            code_commit=code_commit,
+        )
+        found.append(
+            StaleStatementReachBuild(
+                factor=plan.definition.qualified_key,
+                year=plan.year,
+                as_of=plan.manifest.as_of,
+                read=plan.read,
+                reads_now=plan.reads_now,
+                asked=len(plan.asked),
+                transitions=MappingProxyType(dict(sorted(transitions.items()))),
+                examples=tuple(examples),
+                builds=builds,
+                commands=commands,
+            )
+        )
+    return tuple(found)
+
+
+def _reach_recomputes(store: PanelStore, *, as_of: datetime) -> tuple[_ReachRecompute, ...]:
+    """Steps 1 and 2 of `stale_statement_reach_builds`, in `(factor, year, instant)` order."""
+    plans: list[_ReachRecompute] = []
+    newest: dict[tuple[str, tuple[int, ...]], Mapping[str, date]] = {}
+    for definition in FACTOR_DEFINITIONS.definitions:
+        statements = tuple(name for name in definition.datasets if name in PERIOD_INDEXED_DATASETS)
+        if not statements:
+            continue
+        stored = {name: tuple(store.registered_years(name)) for name in statements}
+        for year in store.registered_years(factor_manifest_dataset(definition)):
+            manifests = sorted(
+                _read(
+                    partial(load_factor_manifests, store, definition, years=(year,), as_of=as_of),
+                    store=store,
+                    what=f"the stored {definition.qualified_key} builds of {year}",
+                ),
+                key=lambda item: item.as_of,
+            )
+            pending: list[
+                tuple[
+                    FactorBuildManifest,
+                    dict[str, tuple[int, ...]],
+                    dict[str, tuple[int, ...]],
+                    dict[str, tuple[int, ...]],
+                ]
+            ] = []
+            for manifest in manifests:
+                # The request `_recomputed` makes names every year the build's inputs name, and
+                # `_statement_years` adds the stored years beneath them: the reading of today.
+                named = sorted({item.year for item in manifest.inputs})
+                read = {
+                    name: tuple(
+                        sorted(item.year for item in manifest.inputs if item.dataset == name)
+                    )
+                    for name in statements
+                }
+                reads_now = {
+                    name: tuple(sorted({*(y for y in stored[name] if y < named[0]), *named}))
+                    for name in statements
+                }
+                added = {
+                    name: tuple(y for y in reads_now[name] if y not in read[name])
+                    for name in statements
+                }
+                if any(added.values()):
+                    pending.append((manifest, read, reads_now, added))
+            if not pending:
+                continue
+            held: dict[str, dict[str, FactorObservation]] = {}
+            for observation in _read(
+                partial(load_factor_observations, store, definition, years=(year,), as_of=as_of),
+                store=store,
+                what=f"the stored {definition.qualified_key} observations of {year}",
+            ):
+                held.setdefault(observation.manifest_id, {})[observation.subject] = observation
+            for manifest, read, reads_now, added in pending:
+                reach: dict[str, date] = {}
+                for name, years in added.items():
+                    if not years:
+                        continue
+                    key = (name, years)
+                    if key not in newest:
+                        newest[key] = _read(
+                            partial(
+                                statement_newest_periods,
+                                store,
+                                dataset=name,
+                                years=years,
+                                as_of=as_of,
+                            ),
+                            store=store,
+                            what=f"the stored {name} filings of {list(years)}",
+                        )
+                    for subject, period in newest[key].items():
+                        if period > reach.get(subject, date.min):
+                            reach[subject] = period
+                asked = tuple(
+                    observation
+                    for subject, observation in sorted(held.get(manifest.manifest_id, {}).items())
+                    if observation.coverage != "not_in_universe"
+                    and subject in reach
+                    and (
+                        observation.input_period_first is None
+                        or reach[subject] >= observation.input_period_first
+                    )
+                )
+                if asked:
+                    plans.append(
+                        _ReachRecompute(
+                            definition,
+                            year,
+                            manifest,
+                            MappingProxyType(read),
+                            MappingProxyType(reads_now),
+                            asked,
+                        )
+                    )
+    return tuple(plans)
+
+
+def merged_build_commands(commands: Sequence[Sequence[str]]) -> tuple[tuple[str, ...], ...]:
+    """`factor build` argument lists that differ only in `--as-of` and `--supersedes-*`, as one.
+
+    A stale-build listing repairs one instant per command, and a February day cut short is 78
+    instants of one factor-year: one invocation per instant would load each instant's registry,
+    calendar and industry cross section once per command instead of once. Every option of these
+    commands is a flag and a value, so two commands whose other flags and values are equal are
+    one build over the union of their instants that supersedes the union of what they name --
+    each instant's builds sit in that year's partitions, which is where each writer looks. Order
+    is kept: first appearance decides a merged command's place.
+    """
+    merged: dict[tuple[str, ...], tuple[list[str], list[str]]] = {}
+    for command in commands:
+        verb, options = tuple(command[:2]), command[2:]
+        if len(options) % 2:
+            raise FactorRequestError(f"not a flag-and-value argument list: {list(command)}")
+        base: list[str] = list(verb)
+        instants: list[str] = []
+        supersedes: list[str] = []
+        for flag, value in zip(options[::2], options[1::2], strict=True):
+            if flag == "--as-of":
+                instants += [flag, value]
+            elif flag.startswith("--supersedes-"):
+                supersedes += [flag, value]
+            else:
+                base += [flag, value]
+        slot = merged.setdefault(tuple(base), ([], []))
+        slot[0].extend(instants)
+        slot[1].extend(supersedes)
+    return tuple((*base, *instants, *supersedes) for base, (instants, supersedes) in merged.items())

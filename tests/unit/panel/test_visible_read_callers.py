@@ -86,6 +86,10 @@ FILTERED_READ_REACHERS: dict[str, frozenset[str]] = {
             "load_factor_observations",
             "load_factor_transform_manifests",
             "load_processed_factor_observations",
+            # `V2-P6-027`, round 2: each security's newest report period in the announcement
+            # years a stored build did not read -- a bound on whom the stale-build detector asks
+            # the engine about again, never an answer; rows visible later only over-ask.
+            "statement_newest_periods",
         }
     ),
     "panel_neutralization.py": frozenset(

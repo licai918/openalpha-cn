@@ -160,8 +160,10 @@ from openalpha_cn.factor_view import (
     factor_catalog,
     factor_entry,
     factor_request,
+    merged_build_commands,
     run_factor_experiment,
     stale_return_path_builds,
+    stale_statement_reach_builds,
     tier_rows,
 )
 from openalpha_cn.feature_matrix import FeatureColumn
@@ -8396,10 +8398,8 @@ _BUILD_FACTOR_YEAR_HELP: Final[str] = (
     "`factor run --start/--end` are prediction DAYS and these are partition YEARS. A session "
     "factor with a 125-session lookback at the start of a year needs the year before it too. The "
     "statement partitions are keyed by ANNOUNCEMENT year and do not have to be counted "
-    "(V2-P6-027): every stored announcement year beneath this range that a factor's report-period "
-    "reach can "
-    "need at the instant -- decided from the statutory filing deadlines -- is read as well, so a "
-    "nine-period window in February reads the filing announced three calendar years earlier. The "
+    "(V2-P6-027): a statement factor reads every stored announcement year at or below the newest "
+    "one named, so its answer does not depend on how many years are listed here. The "
     "registry is the other exception and does not have to be counted either: its partitions "
     "are keyed by LIFECYCLE year, so one year's partition is that year's listings rather than "
     "that year's market, and load_stock_universe reads every lifecycle year the store holds "
@@ -8718,6 +8718,143 @@ def factor_stale_return_paths_command(
                     "inside its window"
                 )
             typer.echo("repair, in this order:")
+            for command in commands:
+                typer.echo(f"  openalpha {shlex.join(command)} {suffix}")
+        if stale:
+            raise typer.Exit(code=int(PanelExit.unhealthy))
+
+
+@factor_app.command("stale-statement-reach")
+def factor_stale_statement_reach_command(
+    max_staleness_days: Annotated[
+        int, typer.Option("--max-staleness-days", help=_BUILD_STALENESS_HELP)
+    ],
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
+    exchange: Annotated[
+        str, typer.Option("--exchange", help=_FACTOR_EXCHANGE_HELP)
+    ] = TRADING_CALENDAR_DEFAULT_EXCHANGE,
+    code_commit: Annotated[
+        str | None,
+        typer.Option(
+            "--code-commit",
+            help="Put this commit into every printed rebuild command; omitted, each rebuild "
+            "resolves its own.",
+        ),
+    ] = None,
+    as_of: Annotated[
+        str, typer.Option("--as-of", help="ISO-8601 point-in-time clock; defaults to now.")
+    ] = "",
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit the stale builds as data.")
+    ] = False,
+) -> None:
+    """List every stored statement-factor build that reading the whole stored statement history
+    answers differently, and the `factor build` commands that repair them (`V2-P6-027`).
+
+    A statement factor reads every stored announcement year at or below the newest year its
+    build names. Builds stored before that read only the years they named -- the research
+    builds named `as_of`'s year and the two before it -- and a manifest records which. This asks
+    `compute_factor` again, at each such build's own instant, about every security a newly read
+    year can move: one with a filing in those years whose period is at or after the first period
+    of its stored window, or with no stored period window at all. It states how many
+    `compute_factor` calls that is on a `BUDGET stale-statement-reach-recompute` line before the
+    first, and prints each build whose answers moved with the raw, processed and neutralized
+    builds made from it, how many securities moved and from which coverage to which. The repair
+    commands follow, one per factor, year and tier policy, each naming every `--supersedes-*`;
+    run them as given and run this again: it answers `none`. A build whose answers did not move
+    is not listed: what a rebuild would store for it is what is stored.
+
+    `--max-staleness-days` is the bound the builds were made with; the printed commands repeat it.
+
+    Exits 0 when nothing is stale; 1 when something is, or the panel could not answer.
+    """
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+    with _panel_command("factor stale-statement-reach", json_output=json_output):
+        try:
+            stale = stale_statement_reach_builds(
+                _panel_store(runtime_dir),
+                exchange=exchange,
+                max_staleness_days=max_staleness_days,
+                as_of=_panel_as_of(as_of),
+                code_commit=code_commit,
+                budget=lambda calls: _echo_budget(
+                    "stale-statement-reach-recompute",
+                    calls,
+                    "compute_factor calls",
+                    "one per stored raw statement build that read fewer announcement years than "
+                    "a build reads now and holds a security a newly read year can move; reads "
+                    "carried within a factor and year",
+                ),
+            )
+        except FactorViewError as error:
+            raise _factor_fail(error) from error
+        commands = merged_build_commands([command for item in stale for command in item.commands])
+        suffix = f"--runtime-dir {shlex.quote(str(runtime_dir))}"
+
+        def years(read: Mapping[str, tuple[int, ...]]) -> str:
+            return ", ".join(
+                f"{name} {min(spans)}-{max(spans)}" if spans else f"{name} none"
+                for name, spans in read.items()
+            )
+
+        if json_output:
+            typer.echo(
+                json.dumps(
+                    {
+                        "stale": [
+                            {
+                                "factor": item.factor,
+                                "year": item.year,
+                                "as_of": item.as_of.isoformat(),
+                                "read": {name: list(spans) for name, spans in item.read.items()},
+                                "reads_now": {
+                                    name: list(spans) for name, spans in item.reads_now.items()
+                                },
+                                "asked": item.asked,
+                                "moved": {
+                                    f"{stored}->{engine}": count
+                                    for (stored, engine), count in item.transitions.items()
+                                },
+                                "examples": list(item.examples),
+                                "builds": [
+                                    {
+                                        "tier": build.tier,
+                                        "year": build.year,
+                                        "manifest_id": build.manifest_id,
+                                    }
+                                    for build in item.builds
+                                ],
+                            }
+                            for item in stale
+                        ],
+                        "commands": [f"openalpha {shlex.join(c)} {suffix}" for c in commands],
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+        elif not stale:
+            typer.echo("stale statement-reach builds: none")
+        else:
+            typer.echo(f"stale statement-reach builds: {len(stale)}")
+            for item in stale:
+                for build in item.builds:
+                    typer.echo(
+                        f"STALE {item.factor} {build.tier} {build.year} "
+                        f"{item.as_of.isoformat()} {build.manifest_id}"
+                    )
+                moved = ", ".join(
+                    f"{stored}->{engine} {count}"
+                    for (stored, engine), count in item.transitions.items()
+                )
+                typer.echo(
+                    f"  {sum(item.transitions.values())} of {item.asked} asked moved ({moved}); "
+                    f"read {years(item.read)}, a build now reads {years(item.reads_now)}; "
+                    f"e.g. {', '.join(item.examples)}"
+                )
+            typer.echo(f"repair, in this order ({len(commands)} commands):")
             for command in commands:
                 typer.echo(f"  openalpha {shlex.join(command)} {suffix}")
         if stale:

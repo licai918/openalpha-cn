@@ -210,9 +210,10 @@ eight-period window can need four announcement years named in `requirement.years
 On that axis the panel is a census rather than a calendar, so the whole-panel refusal cannot see
 a reach cut short for nearly everybody: `V2-P6-027` found `revenue_yoy_acceleration` coded
 `insufficient_history` for 5,375 of 5,395 listed names on 2025-02-05 behind a panel that held
-plenty of periods. `period_reach_years` now states the years a reach needs from the statutory
-filing deadlines, `factor_view` reads them beneath the years a build names, and
-`_refuse_a_period_reach_the_years_cut_short` refuses a requirement that leaves a stored one out.
+plenty of periods. A statement factor now reads every stored announcement year at or below the
+newest one a build names -- `factor_view._statement_years` supplies them, and
+`_refuse_a_statement_read_that_skips_a_stored_year` refuses a requirement that leaves one out --
+so its answer no longer depends on the years a caller listed.
 
 ## Two axes, because a filing does not live on the session one
 
@@ -841,11 +842,10 @@ an upstream's publication cadence, and `DATASET_CADENCE` has no honest entry for
 
 import bisect
 import math
-from calendar import monthrange
 from collections import defaultdict
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from types import MappingProxyType
 from typing import Any, Final, Literal, Protocol, TypeVar, cast
 from zoneinfo import ZoneInfo
@@ -4795,6 +4795,7 @@ def compute_factor(
     evaluator = _resolve_evaluator(definition, table)
     ordered_subjects = _validated_subjects(subjects)
     _validate_requirements(definition, requirements, as_of=as_of)
+    _refuse_a_statement_read_that_skips_a_stored_year(store, definition, requirements)
     zone = _resolve_timezone(date_timezone)
 
     readings: dict[str, _DatasetReading] = {}
@@ -4820,13 +4821,6 @@ def compute_factor(
         panel_sessions=panel_sessions,
         panel_periods=panel_periods,
         requirements=requirements,
-    )
-    _refuse_a_period_reach_the_years_cut_short(
-        store,
-        definition,
-        requirements=requirements,
-        as_of=as_of,
-        date_timezone=date_timezone,
     )
     listed = set(universe)
     links = session_return_links(definition)
@@ -5041,52 +5035,96 @@ def _refuse_a_panel_narrower_than_the_lookback(
         )
 
 
-def _refuse_a_period_reach_the_years_cut_short(
+def _refuse_a_statement_read_that_skips_a_stored_year(
     store: PanelStore,
     definition: FactorDefinition,
-    *,
     requirements: Mapping[str, ReadinessRequirement],
-    as_of: datetime,
-    date_timezone: str,
 ) -> None:
-    """Refuse a statement read that leaves out a stored year the factor's period reach needs.
+    """Refuse a statement read that leaves out a stored announcement year beneath the ones it names.
 
-    `V2-P6-027`. `_refuse_a_panel_narrower_than_the_lookback` cannot see this shape, because on the
-    period axis the panel is a census rather than a calendar: on 2025-02-05 the research store's
-    `income` over 2023-2025 held well over nine report periods between its 5,395 listed names, so
-    the build passed that check -- and 5,375 of them were `insufficient_history` for a
-    nine-period reach whose oldest filing was announced in 2022. That is the same fault in the
-    request the session axis refuses, made silently, and the stored build was what the
-    registered holdout then refused to rank.
+    `V2-P6-027`. A statement factor reads **every stored announcement year at or below the newest
+    year its request names** -- the full history, so that its answer depends on the store and
+    `as_of` and never on how many years a caller happened to list. `factor_view._requirements`
+    builds every requirement that way; this is the engine's half, for a caller that builds its
+    own, and it runs before any row is read.
 
-    The years a read needs are `period_reach_years`'; only a year **beneath** the earliest one
-    named is judged here, because a skipped year inside the named range is
-    `_refuse_a_read_that_cannot_see_what_as_of_holds`' and has its own remedy. A year the store
-    does not hold is not refused either: there is nothing to name, and a window that needs a
-    filing the store does not have is `insufficient_history` as a statement about the data.
-    `factor_view._requirements` supplies these years beneath the ones a build names, so a build
-    through either face never meets this; a caller that builds its own requirements does.
+    **Why the full history and not a bound.** Every stored research build named `as_of`'s year and
+    the two before it, and a statement partition is filed by announcement year while a reach is
+    counted in report periods: from January to April a nine-period window's oldest filing was
+    announced three calendar years back, and `revenue_yoy_acceleration` was
+    `insufficient_history` for 5,375 of 5,395 listed names on 2025-02-05 -- the registered
+    holdout refused that day. A bound derived from the statutory filing deadlines closed that and
+    left a late filer's answer depending on the caller's year list: measured on the research
+    store, `revenue_yoy` on 2025-06-16 computed 5,342 names over the daily selection's two years
+    and 5,347 over the research span's three. No bound short of the stored history has that
+    property, so none is used.
+
+    `_refuse_a_panel_narrower_than_the_lookback` could never see this: on the period axis the
+    panel is a census, not a calendar, and it held plenty of periods on the day it went wrong.
+
+    Only a year **beneath** the earliest one named is judged here; a stored year skipped inside
+    the named range is `_refuse_a_read_that_cannot_see_what_as_of_holds`', with its own remedy.
+    A year the store does not hold has nothing in it to name.
     """
-    reach = period_reach_years(definition, as_of=as_of, date_timezone=date_timezone)
-    if not reach:
-        return
     for dataset in definition.datasets:
         if dataset not in PERIOD_INDEXED_DATASETS:
             continue
         named = sorted(set(requirements[dataset].years))
-        stored = set(store.registered_years(dataset))
-        skipped = [year for year in reach if year < named[0] and year in stored]
+        skipped = [year for year in store.registered_years(dataset) if year < named[0]]
         if skipped:
             raise FactorEngineError(
-                f"{definition.qualified_key} reaches {definition.max_window_periods} report "
-                f"periods back, so at {as_of.isoformat()} the oldest filing an on-time issuer's "
-                f"window can need was announced in {reach[0]}; {dataset} is stored for {skipped} "
-                f"and the requirement names only {named}. A statement partition is filed by "
-                "announcement year, so a read that leaves those years out answers "
-                "insufficient_history for every security whose oldest filing is in them -- a "
-                "fault in the request rather than an answer about the data. Name every year "
-                "from the first of these"
+                f"{definition.qualified_key} reads {dataset}, which is stored for {skipped} "
+                f"beneath the years {named} this requirement names. A statement factor reads "
+                "every stored announcement year at or below the newest one it names, because a "
+                "partition is filed by announcement year while a window is counted in report "
+                "periods: a read that leaves the older years out answers insufficient_history "
+                "for every security whose window reaches them, and how many that is would "
+                "depend on the years a caller listed rather than on the data. Name every stored "
+                "year from the first"
             )
+
+
+def statement_newest_periods(
+    store: PanelStore, *, dataset: str, years: Sequence[int], as_of: datetime
+) -> Mapping[str, date]:
+    """Each security's newest quarter-grid report period among `dataset`'s rows stored in
+    `years` and visible at `as_of`.
+
+    `V2-P6-027`'s narrowing for `factor_view.stale_statement_reach_builds`, which asks which
+    stored builds a read of older announcement years can change. It is a bound, never an answer:
+    it decides which securities are asked again, and the engine answers them. So the read is the
+    store's own visibility-filtered one, with the freshness bound waived on the record -- the
+    years read here are history, and "their newest row is old" is what they are -- and the rows
+    visible at `as_of` include every row that was visible at any earlier instant, so a caller
+    asking with the latest `as_of` it knows can only over-ask. A period off `FISCAL_QUARTER_ENDS`
+    is skipped, because `_read_into` excludes it from every window.
+    """
+    requirement = ReadinessRequirement(
+        dataset=dataset,
+        as_of=as_of,
+        years=tuple(sorted(set(years))),
+        required_dates=None,
+        required_subjects=None,
+        required_fields=(REPORT_PERIOD_COLUMN,),
+        max_staleness=None,
+    )
+    newest: dict[str, date] = {}
+    for year in requirement.years:
+        outcome = store.read_visible_at(
+            requirement, year=year, columns=(SUBJECT_COLUMN_NAME, REPORT_PERIOD_COLUMN)
+        )
+        if outcome.is_blocked:
+            raise FactorEngineError(
+                f"{dataset} year={year} cannot be read at {as_of.isoformat()}: "
+                f"{[issue.code for issue in outcome.blocking_issues]}; "
+                f"{'; '.join(issue.detail for issue in outcome.blocking_issues)}"
+            )
+        for subject, cell in outcome.rows:
+            name = str(subject)
+            period = _report_period(cell, dataset=dataset, subject=name)
+            if _is_a_fiscal_quarter_end(period) and period > newest.get(name, date.min):
+                newest[name] = period
+    return MappingProxyType(newest)
 
 
 def _resolve_evaluator(
@@ -5686,9 +5724,10 @@ def _refuse_a_read_that_cannot_see_what_as_of_holds(
 
     **Only a year at or after the earliest year this read covers can hide anything.** A stored
     year *below* that is history the factor chose not to reach for, and its cost is
-    `insufficient_history` on securities that needed it -- an honest, visible answer, unless the
-    factor's own period reach needs it, which `_refuse_a_period_reach_the_years_cut_short` refuses
-    (`V2-P6-027`: a nine-period read of `as_of`'s year and the two before it in February). A stored
+    `insufficient_history` on securities that needed it -- except on the period axis, where
+    `V2-P6-027` made the full stored history the read and
+    `_refuse_a_statement_read_that_skips_a_stored_year` refuses such a year before this runs. A
+    stored
     year at or after it is an announcement a reader standing at `as_of` holds and this read cannot
     see, so the bound is the year before the first such year, and a build stamped after it is
     refused. A registered year later than `as_of`'s own is no bound at all: nothing in it is
@@ -5774,106 +5813,6 @@ arithmetic stays exactly as strict as it was when the decoder refused such a row
 def _is_a_fiscal_quarter_end(period: date) -> bool:
     """Whether `period` is on the quarter grid -- the one test the reader excludes a row by."""
     return (period.month, period.day) in FISCAL_QUARTER_ENDS
-
-
-STATUTORY_FILING_MONTHS: Final[Mapping[int, int]] = MappingProxyType({3: 1, 6: 2, 9: 1, 12: 4})
-"""How many calendar months after each fiscal quarter end its periodic report is due, by the
-quarter end's month (`V2-P6-027`).
-
-The CSRC's disclosure rules for listed companies, as statute rather than as a habit this module
-measured: the annual report within four months of the fiscal year end (30 April), the half-year
-report within two months of 30 June (31 August), and the first- and third-quarter reports within
-one month of their quarter ends (30 April, 31 October). The deadline is the last day of the month
-the count lands in. `statutory_filing_deadline` reads it, and `period_reach_years` is the only
-consumer: it is what lets the engine know, without reading a row, which announcement years an
-on-time issuer's window can be filed in.
-"""
-
-
-def statutory_filing_deadline(period_end: date) -> date:
-    """The last day an A-share issuer may announce `period_end`'s periodic report on.
-
-    A period off `FISCAL_QUARTER_ENDS` has no periodic deadline and is refused rather than
-    rounded -- `_quarter_index`'s rule, for its reason.
-    """
-    if not _is_a_fiscal_quarter_end(period_end):
-        raise FactorEngineError(
-            f"report period {period_end.isoformat()} is not an A-share fiscal quarter end, so no "
-            "periodic-report deadline applies to it"
-        )
-    year, month = divmod(period_end.month - 1 + STATUTORY_FILING_MONTHS[period_end.month], 12)
-    year += period_end.year
-    return date(year, month + 1, monthrange(year, month + 1)[1])
-
-
-def _period_at(index: int) -> date:
-    """`_quarter_index`'s inverse: the fiscal quarter end at one ordinal of the quarter grid."""
-    year, quarter = divmod(index, 4)
-    month, day = FISCAL_QUARTER_ENDS[quarter]
-    return date(year, month, day)
-
-
-def newest_period_due_before(day: date) -> date:
-    """The newest fiscal quarter end whose periodic report was due **before** `day`.
-
-    So the newest period every on-time issuer has announced by the time `day` opens. A deadline
-    day is not yet past: a report announced on it is stamped with it and is visible from the next
-    day, so on 30 April the newest period owed is still the previous year's third quarter -- the
-    annual and the first quarter fall due that same day. That is the month the calendar and the
-    filings are furthest apart, two quarter ends rather than one, and the reason this is a walk
-    down the deadlines rather than "the quarter before `day`'s".
-    """
-    index = day.year * 4 + (day.month - 1) // 3 - 1
-    while statutory_filing_deadline(_period_at(index)) >= day:
-        index -= 1
-    return _period_at(index)
-
-
-def period_reach_years(
-    definition: FactorDefinition,
-    *,
-    as_of: datetime,
-    date_timezone: str = DEFAULT_DATE_TIMEZONE,
-) -> tuple[int, ...]:
-    """Every announcement year a filing in `definition`'s report-period window can sit in at
-    `as_of`, for an issuer that has announced every report by its deadline (`V2-P6-027`).
-
-    `()` for a factor with no report-period reach. Otherwise the years from the first one through
-    `as_of`'s own, where the first is decided without reading a row: the window's newest period is
-    at least `newest_period_due_before(as_of's date)`, its oldest is at most `max_window_periods -
-    1` quarters before that (`_overruns_its_span` refuses a wider one), and nothing is announced
-    before its period has ended -- so the oldest filing a window can need was announced no
-    earlier than the day after that oldest period's end. That day is in the period's own year for
-    the first three quarters and in the next one for an annual, which is why
-    `gross_margin_stability`'s eight periods need one announcement year fewer than
-    `revenue_yoy_acceleration`'s nine.
-
-    **Why this exists.** A statement partition is filed by announcement year and a reach is
-    counted in periods, so the years a build reads decide which windows can be formed -- and
-    until this function they were whatever the caller named. Every stored research build named
-    `as_of`'s year and the two before it, which holds every reach of eight periods or fewer all
-    year round and a nine-period one only from 1 May: from January to April the window's oldest
-    filing is the third quarter three calendar years back, announced in that October, and it was
-    never read. `revenue_yoy_acceleration` was `insufficient_history` for 5,375 of 5,395 listed
-    names on 2025-02-05, and the registered holdout refused that day. The 20 it did compute were
-    the ones whose oldest window filing happened to sit in a later partition: issuers that listed
-    in 2023 and published their pre-listing third quarter there, and two that announced their
-    annual report early.
-
-    **What it does not promise.** An issuer later than its deadline -- a delayed annual report,
-    a suspended company that stopped filing -- can need an older year than this names, and is
-    `insufficient_history` exactly as before unless the caller's own years reach it. The bound
-    has to be somewhere; this one is the statute's, it is the same for every security, and it is
-    decided by `as_of` and the definition alone.
-    """
-    reach = definition.max_window_periods
-    if reach is None:
-        return ()
-    day = as_of.astimezone(_resolve_timezone(date_timezone)).date()
-    newest = newest_period_due_before(day)
-    oldest = _period_at(_quarter_index(newest) - (reach - 1))
-    first = (oldest + timedelta(days=1)).year
-    return tuple(range(first, day.year + 1))
 
 
 def _report_period(value: object, *, dataset: str, subject: str) -> date:

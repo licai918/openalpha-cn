@@ -454,11 +454,12 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_factors.load_factor_observations",
             "panel_factors.load_factor_transform_manifests",
             "panel_factors.load_processed_factor_observations",
-            # `V2-P6-027`: the announcement years a statement factor's period reach needs, so a
-            # build reads them beneath the years it names. A rule over dates; it reads nothing.
-            "panel_factors.period_reach_years",
             "panel_factors.processed_factor_dataset",
             "panel_factors.session_return_links",
+            # `V2-P6-027`, round 2: `stale_statement_reach_builds` narrows the securities it asks
+            # the engine about again to those holding a filing in a year their build did not
+            # read. A statement dataset the engine already reads, through the engine's own door.
+            "panel_factors.statement_newest_periods",
             "panel_factors.unread_newest_sessions",
             "panel_factors.write_factor_panels",
             "panel_factors.write_processed_factor_panels",

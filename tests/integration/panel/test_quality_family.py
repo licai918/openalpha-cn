@@ -865,7 +865,7 @@ def test_a_security_outside_the_universe_is_not_in_universe_on_every_factor(
 
 
 def test_a_request_that_names_too_few_announcement_years_is_refused_rather_than_answered_emptily(
-    store: PanelStore,
+    store: PanelStore, tmp_path: Path
 ) -> None:
     """The refusal `compute_factor` makes when the panel cannot satisfy a reach for anybody.
 
@@ -878,6 +878,11 @@ def test_a_request_that_names_too_few_announcement_years_is_refused_rather_than_
     This is the report-period half of a guard whose session half `V2-P3-002` measured; it has a
     longer lever here, which is why `GROSS_MARGIN_PERIODS` is the first reach to make it easy to
     trip.
+
+    **Since `V2-P6-027` a statement read covers every stored announcement year at or below the
+    newest one named**, so naming one year over a store that holds three is refused before
+    anything is read, by name, as a requirement that skips stored years. The panel-width refusal
+    is still what a store holding only that one year meets.
     """
     narrow = {
         name: financial_statement_requirement(
@@ -886,8 +891,14 @@ def test_a_request_that_names_too_few_announcement_years_is_refused_rather_than_
         for name in GROSS_MARGIN_STABILITY.datasets
     }
 
-    with pytest.raises(FactorEngineError, match=r"needs 8 report periods"):
+    with pytest.raises(FactorEngineError, match=r"stored for \[2023, 2024\] beneath"):
         _compute(store, GROSS_MARGIN_STABILITY, requirements=narrow)
+
+    one_year = PanelStore(tmp_path / "one_year")
+    rows = tuple(item for item in _statement_rows(INCOME_DATASET) if item[2].year == 2025)
+    _write_statements(one_year, INCOME_DATASET, rows)
+    with pytest.raises(FactorEngineError, match=r"needs 8 report periods"):
+        _compute(one_year, GROSS_MARGIN_STABILITY, requirements=narrow)
 
 
 # --- the duplicate rows, at this family's own reaches ---------------------------------------------
