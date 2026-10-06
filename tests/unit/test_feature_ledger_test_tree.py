@@ -68,23 +68,25 @@ LEDGER_TEST_FILE_COUNTS = {
     "tests/contract/providers": 14,
     "tests/e2e": 3,
     "tests/integration": 34,
-    "tests/integration/panel": 35,
+    "tests/integration/panel": 36,
     "tests/integration/storage": 8,
     "tests/replay": 2,
-    "tests/unit": 32,
+    "tests/unit": 37,
     "tests/unit/agents": 2,
     "tests/unit/backtest": 16,
     "tests/unit/domain": 25,
     "tests/unit/evidence": 1,
     "tests/unit/models": 2,
-    "tests/unit/panel": 3,
+    "tests/unit/panel": 6,
     "tests/unit/product": 1,
+    "tests/unit/providers": 1,
     "tests/unit/runtime": 9,
+    "tests/unit/scripts": 5,
     "tests/unit/tools": 1,
     "web/e2e": 1,
     "web/src": 1,
 }
-LEDGER_TEST_FILE_TOTAL = 194
+LEDGER_TEST_FILE_TOTAL = 209
 
 FIELDNAMES = [
     "feature_id",
