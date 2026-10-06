@@ -27,6 +27,7 @@ from __future__ import annotations
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import duckdb
 import pytest
@@ -62,6 +63,46 @@ def test_every_panel_type_round_trips_through_the_columnar_insert(
     with duckdb.connect() as con:
         got = con.execute("SELECT subject, v FROM read_parquet(?)", [str(ref.path)]).fetchall()
     assert [tuple(row) for row in got] == rows  # order and values, across chunk boundaries
+
+
+def test_write_partition_stages_its_rows_through_the_columnar_insert_in_bounded_chunks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one test here that fails under the row-at-a-time insert: it observes the path
+    (`write_partition` hands its rows to `_insert_columnar`, which cuts them at
+    `_INSERT_CHUNK_ROWS`), where the round-trip and hash tests observe only the result, which an
+    `executemany` insert gives as well. The chunk size is shrunk so the boundary is crossed with
+    25 rows."""
+    import openalpha_cn.panel.store as store_module
+
+    monkeypatch.setattr(store_module, "_INSERT_CHUNK_ROWS", 7)
+    handed: list[int] = []
+    inserts: list[str] = []
+    real = store_module._insert_columnar
+
+    class CountingConnection:
+        def __init__(self, connection: Any) -> None:
+            self._connection = connection
+
+        def execute(self, statement: str, parameters: Any = None) -> Any:
+            inserts.append(statement)
+            return self._connection.execute(statement, parameters)
+
+    def spy(connection: Any, columns: Any, rows: Any) -> None:
+        handed.append(len(rows))
+        real(CountingConnection(connection), columns, rows)
+
+    monkeypatch.setattr(store_module, "_insert_columnar", spy)
+    rows = [(f"s{i}", float(i)) for i in range(25)]
+    ref = PanelStore(tmp_path).write_partition(
+        "t", 2026, (ColumnSpec("subject", "VARCHAR"), ColumnSpec("v", "DOUBLE")), rows
+    )
+
+    assert handed == [25]
+    assert len(inserts) == 4  # ceil(25 / 7) statements, not one per row
+    with duckdb.connect() as con:
+        got = con.execute("SELECT subject, v FROM read_parquet(?)", [str(ref.path)]).fetchall()
+    assert [tuple(row) for row in got] == rows
 
 
 def test_content_hash_is_unchanged_by_the_insert_path(tmp_path: Path) -> None:
