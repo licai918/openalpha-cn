@@ -55,12 +55,23 @@ by construction.
 
 **Measured across the whole stored year: five sessions out of 151, one security each.**
 `_contested_sessions` below is the scan, and it uses the repository's own `pre_close_tolerance`
-rather than a re-derivation of the bound. Those five sessions are what `_clean_run` steers the
+rather than a re-derivation of the bound. Those five sessions are what `_clean_runs` steers the
 evaluation window around, and steering around them is the only reason this module reaches a
 per-fold statistic at all. The same scan supplies the window that deliberately meets one, which is
 `test_an_outcome_window_the_two_price_datasets_disagree_about_is_refused_by_name` -- the
-wrong-answer control for the headline test, and the one refusal here that real data alone
-produces.
+wrong-answer control for the headline test.
+
+**Since `V2-P6-020` real data may offer none, and on the panel built 2026-10-07 it offers none
+(`V2-P6-035`).** `V2-P6-020` read each `adj_factor` at its own published tick -- 1e-3 for a value
+representable at three decimals -- and recorded every disagreement a build judges in
+`upstream_defects`, which `session_returns` follows instead of refusing. `689009.SH`'s factors on
+2026-08-07 are 1.033 and 1.064, so its 0.0212 gap now sits inside the tolerance; across that
+panel's 181 sessions (2026-01-05..2026-09-30, 990,632 consecutive-bar pairs) not one pair is
+contested and the build recorded no decision. The product refuses nothing there, so the scan --
+which now also honours a recorded decision, as the product does -- finds nothing, and the refusal
+test produces the disagreement on purpose in a private view rather than find it; see that test
+and `_chosen_window`. Until then this module raised `E2EEnvironmentError` on every test, because
+the probe for a contested session sat in the fixture every test shares.
 
 ## What is asserted, on a panel whose contents nobody chose
 
@@ -123,7 +134,10 @@ assumed: nothing here builds a `MarketBar`).
 Measured on the panel this was written against: one `factor build` over 22 instants x 60 subjects
 is about 150s, one `model evaluate` about 120s, one `model daily-run` about 60s. The module-scoped
 `fitted` fixture runs each of those **once** and every assertion below reads its cached answer;
-only the four refusal tests spend their own invocation, and each of those aborts early.
+only the four refusal tests spend their own invocation, and each of those aborts early. When the
+disagreement refusal has to be injected (`V2-P6-035`) it adds one more hard-linked view and one
+rewrite of the `adj_factor` partition, about 15,000 rows: 6.9s for the whole test on the panel
+built 2026-10-07, whose full module ran in about 80s.
 
 `private_panel` hard-links the Parquet files and copies only the catalog, `_link_panel`'s idiom
 from the shortlist module and for its reason: the `daily` partition is around 835,000 rows, and a
@@ -151,6 +165,8 @@ from e2e_support import (
     E2EEnvironmentError,
     catalogued_path,
     http_get,
+    read_stored_partition,
+    rewrite_partition,
     run_cli,
     stored_sessions,
 )
@@ -168,6 +184,7 @@ from openalpha_cn.model_view import (
     held_prediction_view,
 )
 from openalpha_cn.panel.store import PanelStore
+from openalpha_cn.panel_ingest import load_return_path_records
 from openalpha_cn.panel_view import panel_store
 from openalpha_cn.sdk import OpenAlphaSDK
 
@@ -286,8 +303,9 @@ def _stamped(session: date) -> datetime:
     )
 
 
-def _contested_sessions(store: PanelStore, *, year: int) -> frozenset[date]:
-    """Every stored session on which some security's two price datasets disagree about it.
+def _contested_sessions(store: PanelStore, *, year: int, as_of: datetime) -> frozenset[date]:
+    """Every stored session on which some security's two price datasets disagree about it and
+    no `upstream_defects` record decides the disagreement.
 
     `daily` publishes `pre_close` and `adj_factor` publishes the corporate action behind it, and
     `session_returns` refuses a pair whose implied and published `pre_close` differ by more than
@@ -299,16 +317,26 @@ def _contested_sessions(store: PanelStore, *, year: int) -> frozenset[date]:
     with the repository's **own** `pre_close_tolerance` rather than a bound restated here: a
     re-derivation that drifted would silently choose windows the chain still refuses.
 
+    **And with the product's own exemption (`V2-P6-035`).** Since `V2-P6-020` a disagreement the
+    build judged is recorded in `upstream_defects`, and `session_returns` follows a matching
+    record -- the corroborated path, or a dropped `(security, window)` pair when neither path was
+    corroborated -- instead of refusing. Only an *unrecorded* disagreement refuses a label read,
+    so a session is contested here only when some disagreeing pair on it carries no record judged
+    on the same two closes. `load_return_path_records` is the reader the label chain hands
+    `session_returns`, at the instant the labels are read; restating the match here is the
+    narrowest form of that rule (`session_returns` checks security, session and both closes).
+
     `adj_factor` is stored only where the factor changes, so the factor in force on a day is the
     latest one dated at or before it -- an ASOF join, which is `AdjustmentHistory.factor_on`'s
     step function expressed in SQL.
     """
     daily = catalogued_path(store, dataset=DAILY_DATASET, year=year)
     adjustments = catalogued_path(store, dataset=ADJ_FACTOR_DATASET, year=year)
+    recorded = load_return_path_records(store, years=(year,), as_of=as_of)
     with duckdb.connect() as reader:
         rows = reader.execute(
             "WITH factors AS (SELECT subject, factor_date, adj_factor FROM read_parquet(?)), "
-            "bars AS (SELECT subject, trade_date, pre_close, "
+            "bars AS (SELECT subject, trade_date, pre_close, close, "
             "  LAG(close) OVER (PARTITION BY subject ORDER BY trade_date) AS previous_close, "
             "  LAG(trade_date) OVER (PARTITION BY subject ORDER BY trade_date) AS previous_day "
             "  FROM read_parquet(?)), "
@@ -317,20 +345,25 @@ def _contested_sessions(store: PanelStore, *, year: int) -> frozenset[date]:
             "on_the_day AS (SELECT p.*, f.adj_factor AS factor FROM pairs p "
             "  ASOF LEFT JOIN factors f "
             "  ON p.subject = f.subject AND p.trade_date >= f.factor_date) "
-            "SELECT d.trade_date, d.pre_close, d.previous_close, d.factor, "
+            "SELECT d.subject, d.trade_date, d.pre_close, d.close, d.previous_close, d.factor, "
             "       f.adj_factor AS previous_factor "
             "FROM on_the_day d ASOF LEFT JOIN factors f "
             "  ON d.subject = f.subject AND d.previous_day >= f.factor_date",
             [str(adjustments), str(daily)],
         ).fetchall()
     contested: set[date] = set()
-    for day, pre_close, previous_close, factor, previous_factor in rows:
+    for subject, day, pre_close, close, previous_close, factor, previous_factor in rows:
         if not factor or not previous_factor or not previous_close:
             continue
         implied = previous_close * previous_factor / factor
         tolerance = pre_close_tolerance(implied, factor=factor, previous_factor=previous_factor)
-        if abs(implied - pre_close) > tolerance:
-            contested.add(date.fromisoformat(str(day)))
+        if abs(implied - pre_close) <= tolerance:
+            continue
+        session = date.fromisoformat(str(day))
+        record = recorded.get((str(subject), session))
+        if record is not None and record.close == close and record.previous_close == previous_close:
+            continue
+        contested.add(session)
     return frozenset(contested)
 
 
@@ -348,13 +381,14 @@ def _label_span(sessions: Sequence[date], index: int, *, horizon: int) -> tuple[
     return None if last >= len(sessions) else (index, last)
 
 
-def _clean_run(
+def _clean_runs(
     sessions: Sequence[date], contested: frozenset[date], *, horizon: int
-) -> tuple[int, ...]:
-    """The longest run of consecutive prediction days whose whole label span is uncontested.
+) -> tuple[tuple[int, ...], ...]:
+    """Every run of consecutive prediction days whose whole label span is uncontested.
 
-    Returned as indices into `sessions` so that a caller can ask what follows the run, which is
-    what `_contested_horizon` needs.
+    Returned as indices into `sessions` so that a caller can ask what follows a run, which is
+    what `_contested_horizon` needs, and as *every* run rather than the longest one because the
+    longest is not always the one that can carry the refusal probe; see `_chosen_window`.
     """
     usable: list[int] = []
     for index in range(len(sessions)):
@@ -380,18 +414,24 @@ def _clean_run(
             f"containing one of the {len(contested)} session(s) whose price datasets disagree "
             "about a corporate action; no window can be evaluated at all"
         )
-    return tuple(max(runs, key=len))
+    return tuple(tuple(run) for run in runs)
 
 
 def _contested_horizon(
     sessions: Sequence[date], window: Sequence[int], contested: frozenset[date]
-) -> int:
-    """The shortest horizon at which `window`'s own label spans reach a contested session.
+) -> int | None:
+    """The shortest horizon at which `window`'s own label spans reach a contested session, or
+    `None` when no horizon the window can still carry a schedule at reaches one.
 
     The point of asking is cost: a refusal test that chose a *different* window would need its own
     twenty `factor build` instants, and lengthening the horizon over the window already built
     reaches the same refusal for nothing. It is also the more honest probe -- "the same twenty days
     a longer outcome" is a thing a reader would actually try next.
+
+    `None` is an answer rather than an environment error (`V2-P6-035`): a longer horizon only
+    reaches *forward*, so a window at the tail of the panel, or a panel with no unrecorded
+    disagreement at all, has none -- and `test_an_outcome_window_the_two_price_datasets_disagree_
+    about_is_refused_by_name` then produces the disagreement on purpose instead.
     """
     for horizon in range(HORIZON_SESSIONS + 1, len(sessions)):
         if len(window) < FOLDS * TEST_DAYS_PER_FOLD + horizon + 1:
@@ -403,11 +443,57 @@ def _contested_horizon(
             first, last = span
             if any(sessions[step] in contested for step in range(first, last + 1)):
                 return horizon
-    raise E2EEnvironmentError(
-        "no horizon this window can still carry a schedule at reaches a session whose price "
-        "datasets disagree; the refusal this panel produced when the module was written is not "
-        "reproducible on it"
-    )
+    return None
+
+
+def _chosen_window(
+    sessions: Sequence[date], contested: frozenset[date]
+) -> tuple[tuple[int, ...], int | None]:
+    """The prediction days the evaluation reads, and the horizon at which they meet a contested
+    session (`None` when none does).
+
+    The module needs two things of one window (`V2-P6-035`): (a) `PREDICTION_DAYS` consecutive
+    days whose `HORIZON` label spans are all uncontested, for the statistics; and (b) a longer
+    horizon over the *same* days that reaches an unrecorded disagreement, for the refusal. Each
+    clean run long enough for (a) offers its last `PREDICTION_DAYS` days -- the ones whose spans
+    reach furthest forward, so the likeliest to satisfy (b) -- and the longest run whose window
+    satisfies (b) is taken. When none does, the longest run is taken anyway and (b) is left to the
+    refusal test, which then injects the disagreement into a private view rather than finding it.
+
+    Measured on the panel built 2026-10-07 (2026-01-05..2026-09-30, 181 sessions): **no** session
+    is contested under `pre_close_tolerance`, so no window satisfies (b) and the refusal is
+    injected. The one disagreement the 1e-4 factor tick used to refuse on that year,
+    `689009.SH` on 2026-08-07 (factor 1.033 -> 1.064, gap 0.0212 against 0.0179), sits inside
+    the per-value tick `V2-P6-020` introduced, and the product no longer refuses it either.
+    """
+    runs = [
+        run
+        for run in _clean_runs(sessions, contested, horizon=HORIZON_SESSIONS)
+        if len(run) >= PREDICTION_DAYS
+    ]
+    if not runs:
+        longest = max(
+            (len(run) for run in _clean_runs(sessions, contested, horizon=HORIZON_SESSIONS)),
+            default=0,
+        )
+        raise E2EEnvironmentError(
+            f"the longest run of consecutive prediction days whose {HORIZON} label spans avoid "
+            f"all {len(contested)} contested session(s) is {longest} day(s); this module reads "
+            f"{PREDICTION_DAYS}"
+        )
+    probed = [
+        (run[-PREDICTION_DAYS:], _contested_horizon(sessions, run[-PREDICTION_DAYS:], contested))
+        for run in runs
+    ]
+    reaching = [
+        (len(run), window, horizon)
+        for run, (window, horizon) in zip(runs, probed, strict=True)
+        if horizon is not None
+    ]
+    if reaching:
+        _, window, horizon = max(reaching, key=lambda candidate: candidate[0])
+        return window, horizon
+    return max(runs, key=len)[-PREDICTION_DAYS:], None
 
 
 def _most_traded(store: PanelStore, *, year: int, session: date, count: int) -> tuple[str, ...]:
@@ -460,14 +546,16 @@ class ModelPanel:
     exchange: str
     sessions: tuple[date, ...]
     contested: frozenset[date]
-    """Every stored session the two price datasets disagree about. See `_contested_sessions`."""
+    """Every stored session the two price datasets disagree about and no `upstream_defects`
+    record decides. See `_contested_sessions`."""
 
     window: tuple[date, ...]
     """The prediction days the evaluation reads, ascending: `PREDICTION_DAYS` consecutive
-    sessions whose label spans are all uncontested."""
+    sessions whose label spans are all uncontested. See `_chosen_window`."""
 
-    contested_horizon: int
-    """The shortest horizon at which `window`'s own spans reach a contested session."""
+    contested_horizon: int | None
+    """The shortest horizon at which `window`'s own spans reach a contested session, or `None`
+    when none does and the refusal test injects the disagreement instead."""
 
     universe: tuple[str, ...]
     prediction_session: date
@@ -509,22 +597,16 @@ def _model_panel(built_panel: BuiltPanel, root: Path, workspace: Path) -> ModelP
             f"{HORIZON} horizon needs at least {_MINIMUM_PREDICTION_DAYS} prediction days and a "
             "label span past the last of them"
         )
-    contested = _contested_sessions(store, year=year)
-    run = _clean_run(sessions, contested, horizon=HORIZON_SESSIONS)
-    if len(run) < PREDICTION_DAYS:
-        raise E2EEnvironmentError(
-            f"the longest run of consecutive prediction days whose {HORIZON} label spans avoid "
-            f"all {len(contested)} contested session(s) is {len(run)} day(s); this module reads "
-            f"{PREDICTION_DAYS}"
-        )
-    chosen = run[-PREDICTION_DAYS:]
-    window = tuple(sessions[index] for index in chosen)
     prediction_session = sessions[-1]
-    universe = _most_traded(store, year=year, session=prediction_session, count=UNIVERSE_SIZE)
     instants = (
         _stamped(prediction_session),
         datetime.combine(prediction_session, SECOND_INSTANT_TIME, tzinfo=PANEL_ZONE),
     )
+    label_as_of = instants[1] + timedelta(hours=1)
+    contested = _contested_sessions(store, year=year, as_of=label_as_of)
+    chosen, contested_horizon = _chosen_window(sessions, contested)
+    window = tuple(sessions[index] for index in chosen)
+    universe = _most_traded(store, year=year, session=prediction_session, count=UNIVERSE_SIZE)
     build = run_cli(
         "factor",
         "build",
@@ -561,11 +643,11 @@ def _model_panel(built_panel: BuiltPanel, root: Path, workspace: Path) -> ModelP
         sessions=sessions,
         contested=contested,
         window=window,
-        contested_horizon=_contested_horizon(sessions, chosen, contested),
+        contested_horizon=contested_horizon,
         universe=universe,
         prediction_session=prediction_session,
         prediction_instants=instants,
-        label_as_of=instants[1] + timedelta(hours=1),
+        label_as_of=label_as_of,
     )
 
 
@@ -583,9 +665,15 @@ def model_panel(built_panel: BuiltPanel, tmp_path_factory: pytest.TempPathFactor
 
 
 def _evaluate(
-    model_panel: ModelPanel, *, floor: str, horizon: str = HORIZON, cwd: Path | None = None
+    model_panel: ModelPanel,
+    *,
+    floor: str,
+    horizon: str = HORIZON,
+    cwd: Path | None = None,
+    runtime_dir: Path | None = None,
 ) -> CLIResult:
-    """One `openalpha model evaluate` over the derived window."""
+    """One `openalpha model evaluate` over the derived window, against `model_panel`'s own view
+    unless `runtime_dir` names another view of it."""
     return run_cli(
         "model",
         "evaluate",
@@ -622,7 +710,7 @@ def _evaluate(
         "--config-digest",
         CONFIG_DIGEST,
         "--runtime-dir",
-        str(model_panel.runtime_dir),
+        str(model_panel.runtime_dir if runtime_dir is None else runtime_dir),
         "--json",
         cwd=cwd if cwd is not None else model_panel.workspace,
     )
@@ -800,25 +888,177 @@ def test_every_fold_was_fitted_on_examples_the_purge_and_the_embargo_left_behind
     assert counts == sorted(counts)
 
 
-def test_an_outcome_window_the_two_price_datasets_disagree_about_is_refused_by_name(
-    model_panel: ModelPanel, fitted: Fitted
-) -> None:
-    """The wrong-answer run for the headline: the same twenty days, an outcome long enough to
-    reach a corporate action `daily` and `adj_factor` tell differently.
+INJECTED_FACTOR_STEP: Final[float] = 1.1
+"""The adjustment-factor step the refusal test states on a session `daily` knows nothing about.
 
-    **The one refusal here that only real data produces.** A generated panel's closes and
-    adjustment factors are generated together and therefore agree by construction, which is why
-    four rounds of offline acceptance never met this shape. What it proves about the test above is
-    that its window was *chosen* -- lengthen the outcome by a session or two and the same command
-    over the same partitions stops answering.
+A tenth of the price in implied `pre_close` space: `pre_close_tolerance` allows one fen plus at
+most about 0.2% of the price, so a step this size is refused whatever the security's price or
+factor, and a real corporate action of this size would have moved `pre_close` with it."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class InjectedDisagreement:
+    """One private view of the model panel whose `adj_factor` states a step `daily` does not."""
+
+    runtime_dir: Path
+    subject: str
+    previous_day: date
+    session: date
+
+
+def _a_name_outside_the_universe(model_panel: ModelPanel, *, previous_day: date, day: date) -> str:
+    """The most-traded security on `day` that is not in the factor's universe, carries a bar on
+    both `previous_day` and `day`, and has no stored factor step on `day`.
+
+    Outside the universe because that is where the shape was first met (`689009.SH` was a row of
+    the cross section, never of the universe) and because the factor tier built for the
+    universe then reads nothing the injection changed. The most traded because a liquid name is
+    the one certain to be labelled over the window rather than dropped for a halt.
+    """
+    daily = catalogued_path(model_panel.store, dataset=DAILY_DATASET, year=model_panel.year)
+    adjustments = catalogued_path(
+        model_panel.store, dataset=ADJ_FACTOR_DATASET, year=model_panel.year
+    )
+    with duckdb.connect() as reader:
+        rows = reader.execute(
+            "SELECT today.subject FROM read_parquet(?) today "
+            "JOIN read_parquet(?) yesterday "
+            "  ON yesterday.subject = today.subject AND yesterday.trade_date = ? "
+            "WHERE today.trade_date = ? "
+            "  AND today.subject NOT IN "
+            "    (SELECT subject FROM read_parquet(?) WHERE factor_date = ?) "
+            "ORDER BY today.amount DESC NULLS LAST, today.subject",
+            [
+                str(daily),
+                str(daily),
+                previous_day.isoformat(),
+                day.isoformat(),
+                str(adjustments),
+                day.isoformat(),
+            ],
+        ).fetchall()
+    held = set(model_panel.universe)
+    for (subject,) in rows:
+        if str(subject) not in held:
+            return str(subject)
+    raise E2EEnvironmentError(
+        f"no security outside the {UNIVERSE_SIZE}-name universe carries a bar on both "
+        f"{previous_day.isoformat()} and {day.isoformat()}"
+    )
+
+
+def _inject_a_disagreement(model_panel: ModelPanel, root: Path) -> InjectedDisagreement:
+    """A private view of `model_panel` whose `adj_factor` partition carries one corporate action
+    `daily` never published, on the first session past the window's last prediction day.
+
+    `V2-P6-035`. Real data is the better witness and `_chosen_window` prefers it; this is the
+    construction for a panel that offers none. The step is stated on the session *after* the
+    window's last prediction day, so it lies inside the `HORIZON` label span `model evaluate` reads
+    for that day and every run over the window has to price it. It is written through
+    `e2e_support.rewrite_partition` -- `write_panel_batch`, the writer `panel build` uses -- so the
+    catalog's coverage and content hash agree with the file, and it is written into a view of its
+    own: `_link_panel` hard-links the Parquet files and the writer replaces a file by rename, so the
+    shared `model_panel` view every other test reads is untouched.
+
+    The new row is a copy of the factor row in force on the previous session, its clocks moved
+    forward to the injected session by whole days on the Shanghai wall clock -- a factor row is
+    stamped at a fixed time of its own session's Shanghai day, and DuckDB hands the instants back in
+    the reader's zone, whose daylight saving would otherwise move them by an hour -- and its factor
+    multiplied by `INJECTED_FACTOR_STEP`.
+    """
+    sessions = model_panel.sessions
+    last = sessions.index(model_panel.window[-1])
+    previous_day, day = sessions[last], sessions[last + 1]
+    subject = _a_name_outside_the_universe(model_panel, previous_day=previous_day, day=day)
+    _link_panel(model_panel.runtime_dir / "panel", root / "panel")
+    store = panel_store(root)
+    stored = read_stored_partition(store, dataset=ADJ_FACTOR_DATASET, year=model_panel.year)
+    factor_dates = stored.column("factor_date").values
+    factors = stored.column("adj_factor").values
+    in_force = max(
+        (
+            index
+            for index, (code, factor_date) in enumerate(
+                zip(stored.subjects, factor_dates, strict=True)
+            )
+            if code == subject and date.fromisoformat(str(factor_date)) <= previous_day
+        ),
+        key=lambda index: str(factor_dates[index]),
+        default=None,
+    )
+    if in_force is None:
+        raise E2EEnvironmentError(
+            f"{subject} carries a bar on {previous_day.isoformat()} and no {ADJ_FACTOR_DATASET} "
+            "row at or before it"
+        )
+    shift = day - date.fromisoformat(str(factor_dates[in_force]))
+    factor = factors[in_force]
+    assert isinstance(factor, float)
+    appended = stored.row_count
+    injected = stored.taking((*range(stored.row_count), in_force)).with_row(
+        appended,
+        clocks={
+            name: stored.clocks[name][in_force].astimezone(PANEL_ZONE) + shift
+            for name in ("event_time", "available_time", "revision_time")
+        },
+        values={"factor_date": day.isoformat(), "adj_factor": factor * INJECTED_FACTOR_STEP},
+    )
+    rewrite_partition(
+        store, injected, as_of=stored.coverage.as_of, fetched_at=stored.coverage.fetched_at
+    )
+    return InjectedDisagreement(
+        runtime_dir=root, subject=subject, previous_day=previous_day, session=day
+    )
+
+
+def test_an_outcome_window_the_two_price_datasets_disagree_about_is_refused_by_name(
+    model_panel: ModelPanel, fitted: Fitted, tmp_path: Path
+) -> None:
+    """The wrong-answer run for the headline: the same twenty days, and an outcome that has to
+    price a corporate action `daily` and `adj_factor` tell differently.
+
+    Two constructions, and which one runs is decided by the panel (`V2-P6-035`):
+
+    - **Found.** When `_chosen_window` found a horizon over the same twenty days that reaches an
+      unrecorded disagreement, the same command over the same partitions at that longer horizon.
+      That proves the headline's window was *chosen* -- lengthen the outcome by a session or two
+      and the command stops answering -- and it is the shape this test was written on, from
+      `689009.SH` on 2026-08-07.
+    - **Injected.** Since `V2-P6-020` widened `pre_close_tolerance` to each factor's own
+      published tick, that disagreement is inside it and the panel built 2026-10-07 holds no
+      contested session at all, so the found construction has nothing to find. The refusal is then
+      produced on purpose -- `e2e_support`'s third kind of assertion -- in a private view whose
+      `adj_factor` states a step `daily` never published: the same command, window and horizon
+      as the headline, which answered over the untouched view, and the only difference is the
+      one stored row. It is never skipped and never optional.
+
+    A generated panel's closes and adjustment factors are generated together and therefore agree
+    by construction, which is why four rounds of offline acceptance never met this shape; the
+    injected row is stated over rows Tushare served, and goes through the writer `panel build`
+    uses.
 
     Exit 1 and a message naming the security and both numbers, rather than a traceback: this is
     `panel_unreadable`, a statement about the stored corpus, and `V2-P4-084`'s separation of that
     from a `LabelError` about the window is what puts it on this row.
     """
     del fitted  # ordering only: the shared build must have happened before this spends a run.
-    refused = _evaluate(model_panel, floor=NO_FLOOR, horizon=f"{model_panel.contested_horizon}d")
-    assert refused.exit_code == EXIT_UNHEALTHY
+    if model_panel.contested_horizon is not None:
+        runtime_dir = model_panel.runtime_dir
+        refused = _evaluate(
+            model_panel, floor=NO_FLOOR, horizon=f"{model_panel.contested_horizon}d"
+        )
+        named = "could not be priced out of"
+    else:
+        injected = _inject_a_disagreement(model_panel, tmp_path / "injected")
+        runtime_dir = injected.runtime_dir
+        workspace = tmp_path / "cwd"
+        workspace.mkdir()
+        refused = _evaluate(model_panel, floor=NO_FLOOR, cwd=workspace, runtime_dir=runtime_dir)
+        named = (
+            f"{injected.subject} on {injected.session.isoformat()}: the implied pre_close from "
+            f"{injected.previous_day.isoformat()}'s close"
+        )
+    assert refused.exit_code == EXIT_UNHEALTHY, refused.stderr[:1500]
     # `V2-P5-047`: this read `refused.stdout == ""` until `--json` started answering a refusal
     # with a document. `_evaluate` passes `--json`, so the document is what a machine caller
     # gets here; `status: refused` is what tells it apart from an answer, and the sentence it
@@ -828,8 +1068,10 @@ def test_an_outcome_window_the_two_price_datasets_disagree_about_is_refused_by_n
     message = refused.stderr
     assert "could not be priced out of" in message
     assert "the implied pre_close from" in message
+    assert named in message
+    assert "no upstream_defects record decides it" in message
     assert "disagree about that session's corporate action" in message
-    assert str(model_panel.runtime_dir) not in message
+    assert str(runtime_dir) not in message
 
 
 def test_a_narrow_universe_cannot_clear_a_floor_the_whole_market_sets(

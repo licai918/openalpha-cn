@@ -243,6 +243,7 @@ from openalpha_cn.domain.price_limits import SUSPENSION_DATASET
 from openalpha_cn.domain.run import RunManifest
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET, UniverseHorizonError
+from openalpha_cn.factor_view import resolve_factor
 from openalpha_cn.panel.store import PanelStorageError, PanelStore
 from openalpha_cn.panel_ingest import load_adjustment_histories, load_stock_universe
 from openalpha_cn.panel_view import panel_store
@@ -1447,13 +1448,48 @@ def test_a_cross_section_earlier_than_the_registrys_own_availability_withholds_r
     # module's docstring forbids asserting, so the expectation is derived from `withheld`, which
     # the loop above has already checked holds only securities that had not listed by
     # `earlier_sessions[-1]`. A name dropped for any other reason still fails here.
+    #
+    # `V2-P6-035`: the same shape one code over. The rebuild of 2026-10-07 held `301716.SZ`,
+    # which listed on 2026-09-29 -- `earlier_sessions[-1]` itself -- so the registry answers it at
+    # `earlier_instant` and the panel holds exactly one of its sessions by then, one short of
+    # `REVERSAL_1D`'s two-session lookback: `insufficient_history`, the factor contract's
+    # first-class answer for a name too young to score, and the build was right to give it. That
+    # expectation is derived the same way: from the listing date the later registry carries for
+    # a name the earlier read *answered*, counted against the stored sessions and the factor's
+    # own declared `lookback_sessions` -- not from the name's bars, which are what the build
+    # reads. A name with enough sessions since listing that is dropped anyway still fails here.
+    listed_on = {entry.ts_code: entry.listed_on for entry in later_registry.securities}
+    lookback = resolve_factor(FACTOR).lookback_sessions
+    assert lookback is not None, f"{FACTOR} declares no session lookback"
+
+    def _sessions_since_listing(code: str) -> int:
+        listed = listed_on.get(code)
+        return sum(
+            1
+            for session in private_panel.sessions
+            if (listed is None or listed <= session) and session <= earlier_sessions[-1]
+        )
+
     withheld_from_the_universe = [code for code in private_panel.universes[0] if code in withheld]
-    expected_coverage = {"computed": UNIVERSE_SIZE - len(withheld_from_the_universe)}
+    too_young_for_the_lookback = [
+        code
+        for code in private_panel.universes[0]
+        if code not in withheld and _sessions_since_listing(code) < lookback
+    ]
+    expected_coverage = {
+        "computed": UNIVERSE_SIZE
+        - len(withheld_from_the_universe)
+        - len(too_young_for_the_lookback)
+    }
     if withheld_from_the_universe:
         expected_coverage["not_in_universe"] = len(withheld_from_the_universe)
+    if too_young_for_the_lookback:
+        expected_coverage["insufficient_history"] = len(too_young_for_the_lookback)
     assert built["coverage"]["raw"] == expected_coverage, (
         f"the build covered {built['coverage']['raw']} over a universe of {UNIVERSE_SIZE} whose "
-        f"names withheld at {earlier_instant.isoformat()} are {withheld_from_the_universe}"
+        f"names withheld at {earlier_instant.isoformat()} are {withheld_from_the_universe} and "
+        f"whose names listed fewer than {lookback} stored session(s) before it are "
+        f"{too_young_for_the_lookback}"
     )
     observations = next(
         name.split("@", 1)[0] for name in built["partitions"] if name.startswith("factor_obs_")
@@ -1482,17 +1518,43 @@ def _assert_no_session_later_than(
     past its own `as_of` is visible here and nowhere else on the body.
     """
     path = catalogued_path(screened.store, dataset=dataset, year=screened.year)
+    bars = catalogued_path(screened.store, dataset=DAILY_DATASET, year=screened.year)
     with duckdb.connect() as connection:
         rows = connection.execute(
             "SELECT DISTINCT input_session_first, input_session_last, available_time, "
-            f"input_row_count, coverage FROM read_parquet('{path}')",
+            f"input_row_count, coverage, subject FROM read_parquet('{path}')",
         ).fetchall()
+        bars_through = dict(
+            connection.execute(
+                "SELECT subject, count(*) FROM read_parquet(?) WHERE trade_date <= ? "
+                "GROUP BY subject",
+                [str(bars), through.isoformat()],
+            ).fetchall()
+        )
+    lookback = resolve_factor(FACTOR).lookback_sessions
     stamped = [row for row in rows if row[2] == instant]
     assert stamped, (
         f"no stored observation carries available_time {instant.isoformat()}; the partition holds "
         f"{sorted({str(row[2]) for row in rows})}"
     )
-    for first_session, last_session, _stamp, row_count, coverage in stamped:
+    for first_session, last_session, _stamp, row_count, coverage, subject in stamped:
+        if last_session is None and coverage == "insufficient_history":
+            # `V2-P6-035`: a name in the universe with fewer of its own sessions than the factor's
+            # lookback. The engine forms no window for a count shortfall, so it records none
+            # (`panel_factors._classify`: "a count shortfall carries no window on the axis that
+            # fell short") and `input_row_count` is the rows it did hold. Those are checked
+            # against the name's stored bars at or before `through`: had a later bar been
+            # visible the count would exceed them -- and at the lookback it would have been
+            # computed, with a window this function's last branch reads.
+            assert first_session is None and lookback is not None and row_count < lookback, (
+                f"{subject} at {instant.isoformat()} is insufficient_history over {row_count} "
+                f"rows with no window, against a lookback of {lookback}"
+            )
+            assert row_count == bars_through.get(subject, 0), (
+                f"{subject} at {instant.isoformat()} held {row_count} row(s), and the panel stores "
+                f"{bars_through.get(subject, 0)} of its bars at or before {through.isoformat()}"
+            )
+            continue
         if last_session is None:
             # A subject the universe did not hold at `instant`: the build stores the row anyway,
             # saying `not_in_universe` with `input_row_count` 0 and no value, which is how a
