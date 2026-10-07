@@ -1618,7 +1618,11 @@ def test_a_registration_committed_with_a_change_to_bound_code_has_no_checkout_to
     repo, registration = _repository(tmp_path, CONFIG)
     source = repo / "src" / "openalpha_cn" / "strategy.py"
     source.write_text("RULES = 2\n", encoding="utf-8")
-    registration.write_text(registration.read_text() + " ", encoding="utf-8")
+    # Bytes, not text: on Windows `write_text` turns `\n` into `\r\n`, and this repository's
+    # `.gitattributes` (`eol=lf`, as the real one) stores LF, so the file on disk would no longer
+    # be the bytes HEAD holds and the registration would be refused for that before the bound
+    # code is ever compared (CI run 37617654918, windows-latest, V2-P6-034).
+    registration.write_bytes(registration.read_bytes() + b" ")
     git(repo, "add", "-A")
     git(repo, "commit", "-q", "-m", "registration and code together", at=COMMITTED)
 
