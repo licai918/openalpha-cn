@@ -26,8 +26,9 @@ return. `docs/research/p6-results.md` holds every table; the wording stays "cand
 - **Daily command (`V2-P6-011`) and forward report (`V2-P6-012`).** `scripts/daily_selection.py`
   updates the panel, checks it, builds the day's factors, prints the candidate list and target
   weights and registers the scores before 09:15 of the next session; a second run of a complete
-  day sends no request and writes nothing (measured on the research store: 92 requests, then 0,
-  2663 files unchanged). It runs from a worktree pinned to the registration commit
+  day sends no request and changes no stored file (measured on 2026-10-07: 92 requests, then 0;
+  the 1,847 files of the research store and the 816 of the pinned worktree kept their size and
+  mtime, though opening the state database touched the store's root directory). It runs from a worktree pinned to the registration commit
   (`--pin-worktree`). `scripts/forward_report.py` reports registered predictions net of cost with
   a sign-flip p-value. **`V2-P6-029`**: uv splits `--env-file` on spaces, so the generated launchd
   job and the runbook command failed on any checkout path with a space; `--pin-worktree` now links
