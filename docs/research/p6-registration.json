@@ -1,0 +1,72 @@
+{
+  "code_commit": "253d7095f407437689cfe26c507db9efb9336274",
+  "config": {
+    "as_of": "2026-09-26T04:00:00+00:00",
+    "buffer_rank": null,
+    "combine": "zscore_sum",
+    "end": "2026-09-24",
+    "exchange": "SSE",
+    "holding_count": 50,
+    "max_industry_weight": "0.2",
+    "neutralization": null,
+    "rebalance_every_sessions": 20,
+    "start": "2024-01-02",
+    "transform": null,
+    "walk_forward": {
+      "code_commit": "f04296a657fc91c1e153735920c7f91dfbac0ce7",
+      "embargo_sessions": 20,
+      "family": "boosted_rank_trees",
+      "features": [
+        "reversal_1d/v1@processed:cross_section_standard/v1",
+        "momentum_20_sessions/v1@processed:cross_section_standard/v1",
+        "momentum_60_sessions/v1@processed:cross_section_standard/v1",
+        "momentum_120_sessions/v1@processed:cross_section_standard/v1",
+        "reversal_5_sessions/v1@processed:cross_section_standard/v1",
+        "return_vol_60/v1@processed:cross_section_standard/v1",
+        "downside_vol_60/v1@processed:cross_section_standard/v1",
+        "turnover_60/v1@processed:cross_section_standard/v1",
+        "amihud_60/v1@processed:cross_section_standard/v1",
+        "residual_vol_60/v1@processed:cross_section_standard/v1",
+        "earnings_yield_ttm/v1@processed:cross_section_standard/v1",
+        "book_to_price/v1@processed:cross_section_standard/v1",
+        "sales_yield_ttm/v1@processed:cross_section_standard/v1",
+        "deducted_earnings_yield_ttm/v1@processed:cross_section_standard/v1",
+        "return_on_equity_ttm/v1@processed:cross_section_standard/v1",
+        "return_on_capital_ttm/v1@processed:cross_section_standard/v1",
+        "gross_margin_stability/v1@processed:cross_section_standard/v1",
+        "accruals_ttm/v1@processed:cross_section_standard/v1",
+        "revenue_yoy/v1@processed:cross_section_standard/v1",
+        "net_profit_yoy/v1@processed:cross_section_standard/v1",
+        "revenue_yoy_acceleration/v1@processed:cross_section_standard/v1"
+      ],
+      "horizon_sessions": 20,
+      "hyperparameters": {
+        "learning_rate": 0.1,
+        "max_depth": 3,
+        "min_leaf_securities": 1000,
+        "tree_count": 200
+      },
+      "missing": "abstain",
+      "refit_every_sessions": 122,
+      "seed": 20260926,
+      "train_sessions": 488
+    }
+  },
+  "config_id": "a9ecdb37065f0d6bf702495c26ceecb6c531ee26429117bbcd45f61bb9048034",
+  "criteria": {
+    "compounded_annualized_relative_return_above": "0",
+    "max_relative_drawdown_multiple_of_validation": "2",
+    "one_sided_p_excess_below": "0.05",
+    "validation_config_id": "b18c1b9b29238e10e2dc25c8041276837970086f9fe1d3710b3754e96f68a319",
+    "validation_max_relative_drawdown": 0.06197562526094217
+  },
+  "dependence": "arbitrary",
+  "false_discovery_rate": 0.1,
+  "schema": "openalpha-research-registration/v1",
+  "settings": {
+    "bootstrap_samples": 100000,
+    "excess_benchmark": "equal_weight_all_a_held",
+    "random_seed": 20260926,
+    "sessions_per_year": 244
+  }
+}
