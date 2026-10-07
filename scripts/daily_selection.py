@@ -2919,6 +2919,28 @@ ENV_FILE: Final[str] = ".env"
 """The credentials file, git-ignored: the main checkout's, and the link to it in the worktree."""
 
 
+_EXTENDED_LENGTH: Final[str] = "\\\\?\\"
+_EXTENDED_LENGTH_UNC: Final[str] = "\\\\?\\UNC\\"
+
+
+def link_text_as_path(text: str, *, windows: bool = os.name == "nt") -> str:
+    """The path a symbolic link was made to, from what `os.readlink` returned for it.
+
+    On Windows `os.readlink` gives an absolute target back with the extended-length prefix --
+    `\\\\?\\C:\\repo\\.env`, `\\\\?\\UNC\\server\\share\\.env` -- and no `Path` comparison takes
+    that for `C:\\repo\\.env`, so `link_env_file` refused its own link the second time
+    (`V2-P6-034`). The prefix is dropped on Windows only: on POSIX a link's text is its path,
+    whatever it spells.
+    """
+    if not windows:
+        return text
+    if text.startswith(_EXTENDED_LENGTH_UNC):
+        return "\\\\" + text[len(_EXTENDED_LENGTH_UNC) :]
+    if text.startswith(_EXTENDED_LENGTH):
+        return text[len(_EXTENDED_LENGTH) :]
+    return text
+
+
 def link_env_file(repo: Path, worktree: Path) -> str:
     """Link `<worktree>/.env` to `<repo>/.env` (`V2-P6-029`); return one line saying what happened.
 
@@ -2930,8 +2952,10 @@ def link_env_file(repo: Path, worktree: Path) -> str:
     worktree stays clean and `pin_worktree` can still move it.
 
     No `.env` in `repo` links nothing and says so. An existing link to the same file is finished
-    work. Anything else called `.env` in the worktree -- an ordinary file, or a link to another
-    file -- is refused and left as it was.
+    work -- read back through `link_text_as_path`, so Windows' `\\\\?\\` spelling of it is too.
+    Anything else called `.env` in the worktree -- an ordinary file, or a link to another
+    file -- is refused and left as it was. A link the platform will not make (Windows without
+    Developer Mode or an elevated shell) is a named refusal.
     """
     source = repo / ENV_FILE
     link = worktree / ENV_FILE
@@ -2941,7 +2965,7 @@ def link_env_file(repo: Path, worktree: Path) -> str:
             f"{ENV_FILE} (create it, then --pin-worktree again)"
         )
     if link.is_symlink():
-        target = Path(os.path.normpath(link.parent / os.readlink(link)))
+        target = Path(os.path.normpath(link.parent / link_text_as_path(os.readlink(link))))
         if target != Path(os.path.normpath(source)):
             raise StepFailedError(
                 "registration",
@@ -2953,7 +2977,14 @@ def link_env_file(repo: Path, worktree: Path) -> str:
             "registration",
             f"{link} is a file of its own; it was not replaced by a link to {source}",
         )
-    link.symlink_to(source)
+    try:
+        link.symlink_to(source)
+    except OSError as error:
+        raise StepFailedError(
+            "registration",
+            f"could not link {link} to {source}: {error}. On Windows a symbolic link needs "
+            "Developer Mode on, or an elevated shell; nothing was linked",
+        ) from error
     return f"linked {link} -> {source}"
 
 

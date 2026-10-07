@@ -341,8 +341,9 @@ uv run --no-sync python scripts/daily_selection.py --pin-worktree ~/openalpha-da
 **`.env` 链接（`V2-P6-029`）。** uv 会按空格拆分 `--env-file`，而主检出的路径含空格，所以定时运行和手动运行都不写主检出的绝对路径，而是在 worktree 里读相对的 `.env`。`--pin-worktree` 在建好或移动 worktree 之后，在 `<worktree>/.env` 建一个符号链接指向运行 `--pin-worktree` 的那个检出（主检出）的 `<repo>/.env`。只建链接，从不打开 `.env`，所以不读取其中的凭据；`.env` 在 `.gitignore` 里，worktree 的 `git status` 仍然干净。
 
 - 主检出没有 `.env`：不建链接，不报错，打印一行 `no <repo>/.env; nothing was linked …`。建好 `.env` 后再跑一次 `--pin-worktree`。
-- 已有指向同一目标的链接：视为已完成，可以重复运行。
+- 已有指向同一目标的链接：视为已完成，可以重复运行。Windows 上 `os.readlink` 读回的目标带 `\\?\` 前缀（`\\?\C:\...\.env`），比较前先去掉它（`link_text_as_path`，`V2-P6-034`），否则第二次运行会把自己建的链接当成"指向别处"而拒绝。
 - worktree 里已有同名的普通文件，或指向别处的链接：拒绝覆盖，退出 1，原样保留。
+- 系统不允许建符号链接：拒绝，退出 1，错误里写明原因，不留下任何链接。Windows 上建符号链接需要打开「开发者模式」或在管理员权限的终端里运行，否则会得到 `A required privilege is not held by the client`。
 
 接着它给这个 worktree 建**自己的环境**：`UV_PROJECT_ENVIRONMENT=<worktree>/.venv uv sync --frozen --offline --no-python-downloads --all-extras --python <worktree 的 .python-version> --project <worktree>`。它按 worktree 自己的 `uv.lock` 原样安装、不重新解析。
 

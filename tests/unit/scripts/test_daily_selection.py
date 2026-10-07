@@ -246,8 +246,12 @@ def _repository(
     python_version: str = RUNNING_PYTHON,
 ) -> tuple[Path, Path]:
     """A throwaway repository holding one file under each bound path, a `.python-version`, the
-    `.venv/` and `.env` ignore rules the real repository has, and a committed registration of
-    `config`."""
+    `.venv/` and `.env` ignore rules and the `eol=lf` attribute the real repository has, and a
+    committed registration of `config`.
+
+    The attribute is what keeps a pinned worktree's registration byte for byte its commit's: the
+    worktree is checked out by `daily_selection` with the host's own git configuration, and Git
+    for Windows' system `core.autocrlf=true` would otherwise write it with CRLF (`V2-P6-034`)."""
     repo = root / "repo"
     repo.mkdir(parents=True)
     git(repo, "init", "-q", "--template=")
@@ -257,7 +261,8 @@ def _repository(
         git(repo, "add", name)
     (repo / ".python-version").write_text(f"{python_version}\n", encoding="utf-8")
     (repo / ".gitignore").write_text(".venv/\n.env\n", encoding="utf-8")
-    git(repo, "add", ".python-version", ".gitignore")
+    (repo / ".gitattributes").write_text("* text=auto eol=lf\n", encoding="utf-8")
+    git(repo, "add", ".python-version", ".gitignore", ".gitattributes")
     git(repo, "commit", "-q", "-m", "initial", at=COMMITTED - timedelta(days=1))
     registration = repo / "docs" / "research" / "p6-registration.json"
     registry.register(config, CRITERIA, registration, code_commit=head(repo))
@@ -1512,6 +1517,14 @@ def test_a_full_update_with_statements_runs_every_step_and_states_its_budget(
 
 # --- the scheduled run: a checkout pinned at the registration -----------------------------------
 
+ODD_DIRECTORY_NAME: Final[str] = (
+    "pinned daily $HOME %PATH% 'x'" if os.name == "nt" else 'pinned daily $HOME "x"'
+)
+"""A directory name a shell would split, expand or unquote, made only of characters the platform
+allows in one. Windows forbids `"` in a file name -- git could not create
+`.git/worktrees/pinned-daily-$HOME-"x"` there (`V2-P6-034`) -- so it gets cmd's `%` and
+PowerShell's `'` beside the space and `$` instead."""
+
 
 def test_the_scheduled_checkout_is_pinned_at_the_registration_whatever_development_did(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -1530,7 +1543,7 @@ def test_the_scheduled_checkout_is_pinned_at_the_registration_whatever_developme
     source = repo / "src" / "openalpha_cn" / "strategy.py"
     source.write_text("RULES = 2\n", encoding="utf-8")
     commit_file(repo, source, "development moves on", at=COMMITTED + timedelta(days=3))
-    pinned = tmp_path / 'pinned daily $HOME "x"'
+    pinned = tmp_path / ODD_DIRECTORY_NAME
     uv = tmp_path / "bin" / "uv"
     synced: list[tuple[list[str], dict[str, str], Path]] = []
 
@@ -1747,14 +1760,16 @@ def test_pinning_links_the_main_checkouts_env_file_and_leaves_the_worktree_clean
 
     link = pinned.resolve() / ".env"
     assert link.is_symlink()
-    assert os.readlink(link) == str(repo.resolve() / ".env")
+    assert daily.link_text_as_path(os.readlink(link)) == str(repo.resolve() / ".env")
     assert f"linked {link} -> {repo.resolve() / '.env'}" in out, err
     assert git(pinned, "status", "--porcelain", "--untracked-files=all") == ""
     assert git(pinned, "check-ignore", ".env").strip() == ".env"
 
+    # On Windows `os.readlink` hands this link back as `\\?\C:\...`: the second pin is what
+    # proves the comparison is of paths, not of spellings (`V2-P6-034`).
     assert daily.main(arguments) == 0
     out, _err = capsys.readouterr()
-    assert os.readlink(link) == str(repo.resolve() / ".env")
+    assert daily.link_text_as_path(os.readlink(link)) == str(repo.resolve() / ".env")
     assert "already linked" in out
     assert git(pinned, "status", "--porcelain", "--untracked-files=all") == ""
 
@@ -1796,7 +1811,55 @@ def test_pinning_never_overwrites_an_env_file_that_is_not_its_own_link(
     assert daily.main(arguments) == int(daily.DailyExit.step_failed)
     _out, err = capsys.readouterr()
     assert "already links to" in err and str(elsewhere) in err
-    assert os.readlink(ordinary) == str(elsewhere)
+    assert daily.link_text_as_path(os.readlink(ordinary)) == str(elsewhere)
+
+
+@pytest.mark.parametrize(
+    ("text", "windows", "path"),
+    [
+        # What `os.readlink` returns on Windows for a link made to an absolute path.
+        ("\\\\?\\C:\\Users\\me\\repo\\.env", True, "C:\\Users\\me\\repo\\.env"),
+        ("\\\\?\\UNC\\server\\share\\repo\\.env", True, "\\\\server\\share\\repo\\.env"),
+        ("C:\\Users\\me\\repo\\.env", True, "C:\\Users\\me\\repo\\.env"),
+        ("..\\repo\\.env", True, "..\\repo\\.env"),
+        # POSIX link text is the path, whatever it spells.
+        ("/Users/me/repo/.env", False, "/Users/me/repo/.env"),
+        ("\\\\?\\odd but legal", False, "\\\\?\\odd but legal"),
+    ],
+)
+def test_a_links_text_is_read_as_the_path_it_was_made_to(
+    text: str, windows: bool, path: str
+) -> None:
+    """`V2-P6-034`: Windows' `os.readlink` returns an absolute target with the extended-length
+    prefix `\\\\?\\`, which no `Path` comparison takes for the path the link was made to, so a
+    second `--pin-worktree` refused its own link as "already links to \\\\?\\C:\\...\\.env, not
+    C:\\...\\.env". The prefix is dropped there and nowhere else."""
+    assert daily.link_text_as_path(text, windows=windows) == path
+
+
+def test_a_link_the_platform_will_not_make_is_refused_by_name_and_nothing_is_left(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows makes a symbolic link only with Developer Mode on or from an elevated shell; the
+    `OSError` it raises otherwise is a named registration refusal that says so, not a traceback."""
+    repo, worktree = tmp_path / "repo", tmp_path / "pinned daily"
+    repo.mkdir()
+    worktree.mkdir()
+    (repo / ".env").write_text("OPENALPHA_P6_029_PROBE=linked\n", encoding="utf-8")
+
+    def refused(self: Path, target: Path) -> None:
+        raise OSError(1314, "A required privilege is not held by the client")
+
+    monkeypatch.setattr(Path, "symlink_to", refused)
+
+    with pytest.raises(daily.StepFailedError) as failed:
+        daily.link_env_file(repo, worktree)
+
+    message = str(failed.value)
+    assert f"could not link {worktree / '.env'} to {repo / '.env'}" in message
+    assert "A required privilege is not held by the client" in message
+    assert "Developer Mode" in message
+    assert not (worktree / ".env").exists() and not (worktree / ".env").is_symlink()
 
 
 def test_the_launchd_job_loads_the_env_file_through_uv_from_a_path_with_spaces(
@@ -1862,7 +1925,11 @@ def test_a_pinned_environment_uv_cannot_build_offline_is_refused_by_package_name
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`--offline` never downloads: a package uv's cache lacks is named, with the one online
-    command that fills the cache -- which the daily command never runs itself."""
+    command that fills the cache -- which the daily command never runs itself.
+
+    That command is POSIX shell (`NAME=value uv ...`, `shlex` quoting) on every platform, and
+    `uv` is quoted as the path the platform spells: `Path("/opt/uv")` is `\\opt\\uv` on Windows
+    (`V2-P6-034`)."""
     uncached = (
         b"error: Failed to prepare distributions\n"
         b"  Caused by: Failed to download `numpy==2.3.1`\n"
@@ -1878,16 +1945,19 @@ def test_a_pinned_environment_uv_cannot_build_offline_is_refused_by_package_name
     worktree.mkdir()
     (worktree / ".python-version").write_text("3.11\n", encoding="utf-8")
 
+    uv = Path("/opt/uv")
+
     with pytest.raises(daily.StepFailedError) as refused:
-        daily.sync_pinned_environment(worktree, uv=Path("/opt/uv"))
+        daily.sync_pinned_environment(worktree, uv=uv)
 
     message = str(refused.value)
     assert "uv's cache holds no copy of numpy==2.3.1" in message
     assert "Nothing was downloaded" in message
     assert (
-        f"/opt/uv sync --frozen --all-extras --python 3.11 --project {shlex.quote(str(worktree))}"
-        in message
-    )
+        f"UV_PROJECT_ENVIRONMENT={shlex.quote(str(worktree / '.venv'))} "
+        f"{shlex.quote(str(uv))} sync --frozen --all-extras --python 3.11 "
+        f"--project {shlex.quote(str(worktree))} -- then"
+    ) in message
 
 
 def _made_environment(environment: Path, version_info: str) -> None:
