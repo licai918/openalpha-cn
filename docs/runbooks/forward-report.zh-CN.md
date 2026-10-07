@@ -16,8 +16,10 @@
 ## 手动运行
 
 ```bash
-UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file "<主检出>/.env" "$PWD/.venv/bin/python" scripts/forward_report.py --runtime-dir ~/openalpha-research
+UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv/bin/python" scripts/forward_report.py --runtime-dir ~/openalpha-research
 ```
+
+在每日命令的那个钉住的 worktree 里运行；`.env` 是 `--pin-worktree` 在那里建的、指向主检出 `.env` 的符号链接。不要把主检出的绝对路径传给 `--env-file`：路径含空格，uv 会按空格拆分它（见 `daily-selection.zh-CN.md` 的「手动运行」）。
 
 常用选项：
 

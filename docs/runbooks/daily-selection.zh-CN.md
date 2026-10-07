@@ -19,10 +19,12 @@
 在钉住的 worktree 里（路径以你的为准），用它自己的环境 `.venv`（`--pin-worktree` 建的）：
 
 ```bash
-UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file "<主检出>/.env" "$PWD/.venv/bin/python" scripts/daily_selection.py --runtime-dir ~/openalpha-research
+UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv/bin/python" scripts/daily_selection.py --runtime-dir ~/openalpha-research
 ```
 
 不需要 `PYTHONPATH`：这个环境里的项目是指向本 worktree `src/` 的可编辑安装。`uv run` 只用来读 `--env-file`。
+
+**`--env-file` 必须是不含空白的名字，在 worktree 里写相对的 `.env`。** uv 会按空格拆分 `--env-file`（`UV_ENV_FILE` 同样）：`--env-file "/x/env test/.env"` 报 `No environment file found at: test/.env`（2026-10-06，uv 0.9.29 实测）。主检出的路径含空格，所以不能把主检出的 `.env` 写成绝对路径传给它。`--pin-worktree` 在 worktree 里建一个 `.env` 符号链接指向主检出的 `.env`（见「定时」），在 worktree 里 `--env-file .env` 就读到它。
 
 常用选项：
 
@@ -36,7 +38,7 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file "<主检出>/.en
 | `--max-staleness-days N` | 因子构建的新鲜度上限，默认 30 |
 | `--top N` | 摘要打印前 N 名候选，默认持仓数 |
 | `--json` | 以 JSON 打印当天结果 |
-| `--pin-worktree DIR` | 在登记提交上创建或移动一个分离 HEAD 的 worktree，再用它自己的 `uv.lock` **离线**建它自己的环境 `DIR/.venv`（`uv sync --frozen --offline --no-python-downloads --all-extras --python <.python-version>`），建成后读回它的解释器版本，打印提交号后退出 |
+| `--pin-worktree DIR` | 在登记提交上创建或移动一个分离 HEAD 的 worktree，再用它自己的 `uv.lock` **离线**建它自己的环境 `DIR/.venv`（`uv sync --frozen --offline --no-python-downloads --all-extras --python <.python-version>`），建成后读回它的解释器版本，再在 `DIR/.env` 建指向主检出 `.env` 的符号链接（没有就只打印说明），打印提交号后退出 |
 | `--uv PATH` | 上面两个操作用的 uv，默认 `PATH` 上的 |
 | `--launchd-plist LOG_DIR` | 只打印 launchd 定时配置文本（需 `--worktree`），不安装任何东西 |
 
@@ -303,6 +305,12 @@ uv run --no-sync python scripts/daily_selection.py --pin-worktree ~/openalpha-da
 
 `--pin-worktree` 读主检出里已提交的登记文件，找到最后一次提交它的那个提交，核对那里的受约束代码与登记的 `code_commit` 完全相同，然后在那个提交上创建（或把已有的、干净的 worktree 移到）一个分离 HEAD 的 worktree。它从不改动有未提交改动的 worktree。登记换了（新的一次研究）就再跑一次它。
 
+**`.env` 链接（`V2-P6-029`）。** uv 会按空格拆分 `--env-file`，而主检出的路径含空格，所以定时运行和手动运行都不写主检出的绝对路径，而是在 worktree 里读相对的 `.env`。`--pin-worktree` 在建好或移动 worktree 之后，在 `<worktree>/.env` 建一个符号链接指向运行 `--pin-worktree` 的那个检出（主检出）的 `<repo>/.env`。只建链接，从不打开 `.env`，所以不读取其中的凭据；`.env` 在 `.gitignore` 里，worktree 的 `git status` 仍然干净。
+
+- 主检出没有 `.env`：不建链接，不报错，打印一行 `no <repo>/.env; nothing was linked …`。建好 `.env` 后再跑一次 `--pin-worktree`。
+- 已有指向同一目标的链接：视为已完成，可以重复运行。
+- worktree 里已有同名的普通文件，或指向别处的链接：拒绝覆盖，退出 1，原样保留。
+
 接着它给这个 worktree 建**自己的环境**：`UV_PROJECT_ENVIRONMENT=<worktree>/.venv uv sync --frozen --offline --no-python-downloads --all-extras --python <worktree 的 .python-version> --project <worktree>`。它按 worktree 自己的 `uv.lock` 原样安装、不重新解析。
 
 - **解释器是 worktree 的 `.python-version` 指定的那个**（目前是 3.11）。建成后读回 `.venv/pyvenv.cfg` 里的版本，`major.minor` 不同就拒绝。
@@ -318,7 +326,11 @@ uv run --no-sync python scripts/daily_selection.py --pin-worktree ~/openalpha-da
 uv run --no-sync python scripts/daily_selection.py --runtime-dir ~/openalpha-research --worktree ~/openalpha-daily --launchd-plist ~/openalpha-research/logs
 ```
 
-配置里没有 shell：`ProgramArguments` 就是 launchd 交给 exec 的参数向量，解释器是钉住的 worktree 自己的 `<worktree>/.venv/bin/python`（`uv run --no-sync` 只用来读 `--env-file`），`WorkingDirectory` 是钉住的 worktree，`EnvironmentVariables` 只设 `UV_PROJECT_ENVIRONMENT=<worktree>/.venv` 和 `PATH`——不设 `PYTHONPATH`，也不指向任何共用环境；`--env-file` 指向主检出的 `.env`。路径里有空格、`"` 或 `$` 都原样传递，不会被解析。配置由 `plistlib` 生成（`plutil -lint` 通过）。
+配置里没有 shell：`ProgramArguments` 就是 launchd 交给 exec 的参数向量，解释器是钉住的 worktree 自己的 `<worktree>/.venv/bin/python`（`uv run --no-sync` 只用来读 `--env-file`），`WorkingDirectory` 是钉住的 worktree，`EnvironmentVariables` 只设 `UV_PROJECT_ENVIRONMENT=<worktree>/.venv` 和 `PATH`——不设 `PYTHONPATH`，也不指向任何共用环境。
+
+launchd 本身不解析这些路径：路径里的空格、`"` 或 `$` 作为 `ProgramArguments` 的各个参数原样交给 exec。但 **`--env-file` 例外，它是 uv 自己的参数，uv 会按空格拆分它**，所以配置里写的是相对的 `--env-file .env`，不出现任何绝对的 env 路径；它相对 `WorkingDirectory`，即 `--pin-worktree` 建的那个指向主检出 `.env` 的链接。生成配置的 `--env-file` 选项含义与此一致：它是相对 `--worktree` 的名字（默认 `.env`），含空白字符就拒绝（退出 2）并说明 uv 会拆分它，而不会打印出一份必然失败的配置。配置由 `plistlib` 生成（`plutil -lint` 通过）。
+
+测试 `test_the_launchd_job_loads_the_env_file_through_uv_from_a_path_with_spaces` 真的调用 uv：在含空格的目录下，按生成配置的参数和 `WorkingDirectory` 执行，读回只有那个 `.env` 定义的变量。此前的测试只比较参数向量，没有让 uv 读过这个参数，所以没发现这个缺陷。
 
 launchd 不知道交易日历，所以配置为每个工作日 18:30 触发，由命令自己判断：节假日里「最新已收盘交易日」的日志已经完整，于是只打印摘要，零请求、零写入。1 月 1 日这类假日找到的是上一年的最后一个交易日（日历按当年和上一年两年读）。
 

@@ -22,8 +22,10 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import os
 import plistlib
 import shlex
+import shutil
 import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
@@ -244,7 +246,8 @@ def _repository(
     python_version: str = RUNNING_PYTHON,
 ) -> tuple[Path, Path]:
     """A throwaway repository holding one file under each bound path, a `.python-version`, the
-    `.venv/` ignore rule the real repository has, and a committed registration of `config`."""
+    `.venv/` and `.env` ignore rules the real repository has, and a committed registration of
+    `config`."""
     repo = root / "repo"
     repo.mkdir(parents=True)
     git(repo, "init", "-q", "--template=")
@@ -253,7 +256,7 @@ def _repository(
         (repo / name).write_text(lock if name == "uv.lock" else "RULES = 1\n", encoding="utf-8")
         git(repo, "add", name)
     (repo / ".python-version").write_text(f"{python_version}\n", encoding="utf-8")
-    (repo / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+    (repo / ".gitignore").write_text(".venv/\n.env\n", encoding="utf-8")
     git(repo, "add", ".python-version", ".gitignore")
     git(repo, "commit", "-q", "-m", "initial", at=COMMITTED - timedelta(days=1))
     registration = repo / "docs" / "research" / "p6-registration.json"
@@ -1401,9 +1404,11 @@ def test_the_scheduled_checkout_is_pinned_at_the_registration_whatever_developme
 
     assert code == 0, err
     where = pinned.resolve()
-    assert out.strip() == (
+    assert out.strip().splitlines()[:1] == [
         f"pinned {where} at {registered_at}; environment {where / '.venv'} synced offline"
-    )
+    ]
+    assert not (where / ".env").is_symlink() and not (where / ".env").exists()
+    assert f"no {repo.resolve() / '.env'}" in out and "nothing was linked" in out
     ((command, environment, cwd),) = synced
     assert command == [
         str(uv.resolve()),
@@ -1457,10 +1462,14 @@ def test_the_launchd_job_runs_the_pinned_checkout_with_no_shell_and_is_not_insta
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Every path is one argument of the vector launchd hands to exec, so a space, a `"` or a `$`
-    in any of them arrives verbatim; nothing is installed and no directory is created."""
+    in any of them arrives verbatim; nothing is installed and no directory is created.
+
+    The one argument that is not such a path is the env file: uv splits `--env-file` on
+    whitespace, so it is the relative `.env` the pinned worktree links to the main checkout's
+    (`WorkingDirectory` is the worktree), and no absolute env path is printed at all."""
     odd = tmp_path / 'my "daily" $HOME dir'
     worktree, runtime, logs = odd / "pinned", odd / "runtime", odd / "logs"
-    env_file, uv = odd / ".env", odd / "bin" / "uv"
+    uv = odd / "bin" / "uv"
 
     code = daily.main(
         [
@@ -1470,8 +1479,6 @@ def test_the_launchd_job_runs_the_pinned_checkout_with_no_shell_and_is_not_insta
             str(logs),
             "--worktree",
             str(worktree),
-            "--env-file",
-            str(env_file),
             "--uv",
             str(uv),
         ]
@@ -1486,7 +1493,7 @@ def test_the_launchd_job_runs_the_pinned_checkout_with_no_shell_and_is_not_insta
         "run",
         "--no-sync",
         "--env-file",
-        str(env_file),
+        ".env",
         str(worktree / ".venv" / "bin" / "python"),
         str(worktree / "scripts" / "daily_selection.py"),
         "--runtime-dir",
@@ -1507,6 +1514,193 @@ def test_the_launchd_job_runs_the_pinned_checkout_with_no_shell_and_is_not_insta
     ]
     assert job["RunAtLoad"] is False
     assert not odd.exists()
+
+
+def test_an_env_file_uv_would_split_is_refused_instead_of_printing_a_job_that_cannot_run(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--env-file` names the file relative to the worktree; whitespace in it is refused, saying
+    that uv splits it, rather than printed into a configuration that fails at 18:30."""
+    arguments = [
+        "--runtime-dir",
+        str(tmp_path / "runtime"),
+        "--launchd-plist",
+        str(tmp_path / "logs"),
+        "--worktree",
+        str(tmp_path / "pinned"),
+        "--uv",
+        str(tmp_path / "uv"),
+    ]
+
+    with pytest.raises(SystemExit) as refused:
+        daily.main([*arguments, "--env-file", str(tmp_path / "main checkout" / ".env")])
+    out, err = capsys.readouterr()
+
+    assert refused.value.code == 2
+    assert out == ""
+    assert "uv splits --env-file on whitespace" in err
+
+    assert daily.main([*arguments, "--env-file", ".env.daily"]) == 0
+    out, _err = capsys.readouterr()
+    assert plistlib.loads(out.encode("utf-8"))["ProgramArguments"][3:5] == [
+        "--env-file",
+        ".env.daily",
+    ]
+
+
+def _pinned_with_main_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, env_in_main: bool
+) -> tuple[Path, Path, list[str]]:
+    """A repository (optionally holding a throwaway `.env`), and the argument vector that pins
+    a worktree of it with the environment sync stubbed out. Returns repo, pinned, arguments."""
+    repo, registration = _repository(tmp_path, CONFIG)
+    if env_in_main:
+        (repo / ".env").write_text("OPENALPHA_P6_029_PROBE=linked\n", encoding="utf-8")
+
+    def sync(
+        command: Sequence[str], *, environment: Mapping[str, str], cwd: Path
+    ) -> subprocess.CompletedProcess[bytes]:
+        _made_environment(Path(environment["UV_PROJECT_ENVIRONMENT"]), f"{RUNNING_PYTHON}.7")
+        return subprocess.CompletedProcess(list(command), 0, b"", b"")
+
+    monkeypatch.setattr(daily, "_run_sync", sync)
+    pinned = tmp_path / "pinned daily"
+    arguments = [
+        "--pin-worktree",
+        str(pinned),
+        "--registration",
+        str(registration),
+        "--repo",
+        str(repo),
+        "--uv",
+        str(tmp_path / "bin" / "uv"),
+    ]
+    return repo, pinned, arguments
+
+
+def test_pinning_links_the_main_checkouts_env_file_and_leaves_the_worktree_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """uv splits `--env-file` on whitespace, so the scheduled run loads the relative `.env`, which
+    `--pin-worktree` makes a symbolic link to `<main checkout>/.env`. The link is git-ignored, so
+    the worktree stays clean (`pin_worktree` would otherwise refuse to move it); pinning again
+    finds the finished link."""
+    repo, pinned, arguments = _pinned_with_main_env(tmp_path, monkeypatch, env_in_main=True)
+
+    assert daily.main(arguments) == 0
+    out, err = capsys.readouterr()
+
+    link = pinned.resolve() / ".env"
+    assert link.is_symlink()
+    assert os.readlink(link) == str(repo.resolve() / ".env")
+    assert f"linked {link} -> {repo.resolve() / '.env'}" in out, err
+    assert git(pinned, "status", "--porcelain", "--untracked-files=all") == ""
+    assert git(pinned, "check-ignore", ".env").strip() == ".env"
+
+    assert daily.main(arguments) == 0
+    out, _err = capsys.readouterr()
+    assert os.readlink(link) == str(repo.resolve() / ".env")
+    assert "already linked" in out
+    assert git(pinned, "status", "--porcelain", "--untracked-files=all") == ""
+
+
+def test_pinning_without_a_main_env_file_links_nothing_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo, pinned, arguments = _pinned_with_main_env(tmp_path, monkeypatch, env_in_main=False)
+
+    assert daily.main(arguments) == 0
+    out, _err = capsys.readouterr()
+
+    assert not (pinned / ".env").is_symlink() and not (pinned / ".env").exists()
+    assert f"no {repo.resolve() / '.env'}" in out and "nothing was linked" in out
+
+
+def test_pinning_never_overwrites_an_env_file_that_is_not_its_own_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An ordinary file called `.env` in the worktree, or a link to anything else, is refused by
+    name and left exactly as it was."""
+    _repo, _pinned, arguments = _pinned_with_main_env(tmp_path, monkeypatch, env_in_main=False)
+    assert daily.main(arguments) == 0
+    (tmp_path / "repo" / ".env").write_text("OPENALPHA_P6_029_PROBE=linked\n", encoding="utf-8")
+    capsys.readouterr()
+
+    ordinary = tmp_path / "pinned daily" / ".env"
+    ordinary.write_text("OPENALPHA_P6_029_PROBE=mine\n", encoding="utf-8")
+    assert daily.main(arguments) == int(daily.DailyExit.step_failed)
+    _out, err = capsys.readouterr()
+    assert "is a file of its own" in err and str(ordinary) in err
+    assert not ordinary.is_symlink()
+    assert ordinary.read_text(encoding="utf-8") == "OPENALPHA_P6_029_PROBE=mine\n"
+
+    ordinary.unlink()
+    elsewhere = tmp_path / "elsewhere.env"
+    elsewhere.write_text("x\n", encoding="utf-8")
+    ordinary.symlink_to(elsewhere)
+    assert daily.main(arguments) == int(daily.DailyExit.step_failed)
+    _out, err = capsys.readouterr()
+    assert "already links to" in err and str(elsewhere) in err
+    assert os.readlink(ordinary) == str(elsewhere)
+
+
+def test_the_launchd_job_loads_the_env_file_through_uv_from_a_path_with_spaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The defect was invisible to a test that only compared argument vectors: uv splits
+    `--env-file` on whitespace, so an absolute path in a checkout with a space in it failed
+    ("No environment file found at: test/.env"). This one runs real uv with the generated job's
+    arguments, in the generated job's `WorkingDirectory`, under a directory with a space in its
+    name, against a link the pin helper made to a main checkout that has one too, and reads back
+    a variable only that `.env` defines. The interpreter and script that follow are replaced by a
+    one-line probe: the vector up to and including `--env-file .env` is the job's own."""
+    uv = shutil.which("uv")
+    assert uv is not None, "uv is not on PATH; the daily job cannot be exercised without it"
+    spaced = tmp_path / "env test"
+    main_checkout, worktree = spaced / "main checkout", spaced / "pinned daily"
+    main_checkout.mkdir(parents=True)
+    worktree.mkdir()
+    (main_checkout / ".env").write_text("OPENALPHA_P6_029_PROBE=linked\n", encoding="utf-8")
+    daily.link_env_file(main_checkout, worktree)
+
+    code = daily.main(
+        [
+            "--runtime-dir",
+            str(spaced / "runtime"),
+            "--launchd-plist",
+            str(spaced / "logs"),
+            "--worktree",
+            str(worktree),
+            "--uv",
+            uv,
+        ]
+    )
+    out, _err = capsys.readouterr()
+    job = plistlib.loads(out.encode("utf-8"))
+    vector = job["ProgramArguments"]
+    assert code == 0
+    assert vector[:5] == [str(Path(uv).resolve()), "run", "--no-sync", "--env-file", ".env"]
+    assert not any(" " in argument for argument in vector[1:5])
+
+    monkeypatch.delenv("OPENALPHA_P6_029_PROBE", raising=False)
+    probe = "import os; print(os.environ['OPENALPHA_P6_029_PROBE'])"
+    finished = subprocess.run(
+        [*vector[:5], sys.executable, "-c", probe],
+        cwd=job["WorkingDirectory"],
+        env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert finished.returncode == 0, finished.stderr
+    assert finished.stdout.strip() == "linked"
+
+
+def test_the_repository_ignores_the_env_file_the_pinned_worktree_links() -> None:
+    """The link is clean in the worktree only because `.env` is ignored at the pinned commit."""
+    root = Path(__file__).resolve().parents[3]
+    assert git(root, "check-ignore", "--no-index", ".env").strip() == ".env"
 
 
 def test_a_pinned_environment_uv_cannot_build_offline_is_refused_by_package_name(

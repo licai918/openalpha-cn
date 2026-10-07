@@ -2673,6 +2673,47 @@ def pin_worktree(registration: Path, repo: Path, directory: Path) -> str:
 PINNED_ENVIRONMENT: Final[str] = ".venv"
 """The pinned checkout's own environment, `<worktree>/.venv` (git-ignored)."""
 
+ENV_FILE: Final[str] = ".env"
+"""The credentials file, git-ignored: the main checkout's, and the link to it in the worktree."""
+
+
+def link_env_file(repo: Path, worktree: Path) -> str:
+    """Link `<worktree>/.env` to `<repo>/.env` (`V2-P6-029`); return one line saying what happened.
+
+    uv splits `--env-file` on whitespace -- `--env-file "/x/env test/.env"` fails with "No
+    environment file found at: `test/.env`", and so does `UV_ENV_FILE` -- and the main checkout's
+    path has a space in it. The scheduled run therefore loads the relative `.env` from the
+    worktree it stands in, and this link is what that name resolves to. Only the link is made:
+    the file is never opened, so no credential is read here. `.env` is git-ignored, so the
+    worktree stays clean and `pin_worktree` can still move it.
+
+    No `.env` in `repo` links nothing and says so. An existing link to the same file is finished
+    work. Anything else called `.env` in the worktree -- an ordinary file, or a link to another
+    file -- is refused and left as it was.
+    """
+    source = repo / ENV_FILE
+    link = worktree / ENV_FILE
+    if not source.is_file():
+        return (
+            f"no {source}; nothing was linked, and a run from {worktree} will find no "
+            f"{ENV_FILE} (create it, then --pin-worktree again)"
+        )
+    if link.is_symlink():
+        target = Path(os.path.normpath(link.parent / os.readlink(link)))
+        if target != Path(os.path.normpath(source)):
+            raise StepFailedError(
+                "registration",
+                f"{link} already links to {target}, not {source}; it was not changed",
+            )
+        return f"{link} is already linked to {source}"
+    if link.exists():
+        raise StepFailedError(
+            "registration",
+            f"{link} is a file of its own; it was not replaced by a link to {source}",
+        )
+    link.symlink_to(source)
+    return f"linked {link} -> {source}"
+
 
 def worktree_python(worktree: Path) -> str:
     """The `major.minor` the pinned checkout's `.python-version` names, or refuse."""
@@ -2792,7 +2833,7 @@ def launchd_plist(
     worktree: Path,
     runtime_dir: Path,
     log_dir: Path,
-    env_file: Path,
+    env_file: str = ENV_FILE,
     uv: Path,
 ) -> str:
     """The launchd job that runs this command from the pinned worktree at 18:30 on weekdays.
@@ -2806,11 +2847,23 @@ def launchd_plist(
     Its editable install of the project points at `<worktree>/src`, so no `PYTHONPATH` is set and
     no shared environment is named; `uv run --no-sync` is there only to load `--env-file`, and
     `UV_PROJECT_ENVIRONMENT` keeps it on the same environment. Step 1 then compares that
-    interpreter's packages with the lock (`admit_environment`). launchd has no exchange calendar,
+    interpreter's packages with the lock (`admit_environment`).
+
+    **The env file is a name relative to `WorkingDirectory`, never a path** (`V2-P6-029`): uv splits
+    `--env-file` on whitespace, so any path through the main checkout's directory fails (`No
+    environment file found at: test/.env`). `--pin-worktree` links `<worktree>/.env` to the main
+    checkout's (`link_env_file`); `env_file` containing whitespace is refused here. launchd has
+    no exchange calendar,
     so it fires every weekday and the command decides: on a holiday the newest closed session is
     one whose journal is already complete, which prints the summary again with no request and no
     write.
     """
+    if any(character.isspace() for character in env_file):
+        raise ValueError(
+            f"--env-file {env_file!r} contains whitespace: uv splits --env-file on whitespace, "
+            f"so this job would fail at 18:30. Name the file relative to --worktree "
+            f"(default {ENV_FILE}); --pin-worktree links {ENV_FILE} to the main checkout's"
+        )
     job = {
         "Label": LAUNCHD_LABEL,
         "ProgramArguments": [
@@ -2818,7 +2871,7 @@ def launchd_plist(
             "run",
             "--no-sync",
             "--env-file",
-            str(env_file),
+            env_file,
             str(worktree / PINNED_ENVIRONMENT / "bin" / "python"),
             str(worktree / THIS_SCRIPT),
             "--runtime-dir",
@@ -2895,7 +2948,12 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
         "Installs nothing.",
     )
     parser.add_argument("--worktree", type=Path, default=None, help="The pinned worktree.")
-    parser.add_argument("--env-file", type=Path, default=None, help="Default: <repo>/.env.")
+    parser.add_argument(
+        "--env-file",
+        default=ENV_FILE,
+        help="The file uv loads, relative to --worktree (default: .env, which --pin-worktree "
+        "links to <repo>/.env). Whitespace is refused: uv splits --env-file on it.",
+    )
     parser.add_argument("--uv", type=Path, default=None, help="Default: the uv on PATH.")
     arguments = parser.parse_args(argv)
     uv = (arguments.uv or Path(shutil.which("uv") or "uv")).resolve()
@@ -2907,6 +2965,7 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
             )
             environment = sync_pinned_environment(directory, uv=uv)
             print(f"pinned {directory} at {commit}; environment {environment} synced offline")
+            print(link_env_file(arguments.repo.resolve(), directory))
             return int(DailyExit.done)
     except StepFailedError as error:
         print(str(error), file=sys.stderr)
@@ -2916,17 +2975,17 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
     if arguments.launchd_plist is not None:
         if arguments.worktree is None:
             parser.error("--launchd-plist needs --worktree, the checkout pinned by --pin-worktree")
-        repo = arguments.repo.resolve()
-        print(
-            launchd_plist(
+        try:
+            job = launchd_plist(
                 worktree=arguments.worktree.resolve(),
                 runtime_dir=arguments.runtime_dir.resolve(),
                 log_dir=arguments.launchd_plist.resolve(),
-                env_file=(arguments.env_file or repo / ".env").resolve(),
+                env_file=arguments.env_file,
                 uv=uv,
-            ),
-            end="",
-        )
+            )
+        except ValueError as error:
+            parser.error(str(error))
+        print(job, end="")
         return int(DailyExit.done)
     options = DailyOptions(
         runtime_dir=arguments.runtime_dir,
