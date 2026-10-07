@@ -117,6 +117,7 @@ from openalpha_cn.backtest.execution import (
     published_limit_fields,
     suspended_at_the_close,
 )
+from openalpha_cn.backtest.execution import security_board as _board
 from openalpha_cn.backtest.factor_ic import (
     IC_METHODS,
     MINIMUM_IC_AS_OFS,
@@ -2041,17 +2042,6 @@ def _recorded_path(
         return None, None
     ratio = Decimal(str(recorded.implied_pre_close)) / Decimal(str(bar.pre_close))
     return ("unknowable" if recorded.path is None else recorded.path), ratio
-
-
-def _board(ts_code: str) -> Literal["main", "star", "growth", "bse"]:
-    """The board a security trades on, from its code."""
-    if ts_code.endswith(".BJ"):
-        return "bse"
-    if ts_code.startswith(("688", "689")):
-        return "star"
-    if ts_code.startswith(("300", "301")):
-        return "growth"
-    return "main"
 
 
 class _DayQuotes(Mapping[str, SessionQuote]):

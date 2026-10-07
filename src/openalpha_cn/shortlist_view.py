@@ -156,6 +156,7 @@ from openalpha_cn.backtest.execution import (
     published_limit_fields,
     suspended_at_the_close,
 )
+from openalpha_cn.backtest.execution import security_board as _board
 from openalpha_cn.backtest.factor_ic import (
     FACTOR_TIER_ORDER,
     TIER_ADMITTED_CODES,
@@ -1940,17 +1941,6 @@ def _unnamed_session_refusal(
         f"{session.isoformat()} -- `openalpha panel build --dataset {NAMECHANGE_DATASET} --year "
         f"<year>` -- and ask this run for that year too."
     )
-
-
-def _board(ts_code: str) -> Literal["main", "star", "growth", "bse"]:
-    """The board a code belongs to, from its prefix; see `_bars_on` for why it is not defaulted."""
-    if ts_code.startswith("688"):
-        return "star"
-    if ts_code.startswith("300"):
-        return "growth"
-    if ts_code.endswith(".BJ"):
-        return "bse"
-    return "main"
 
 
 # --- V2-P4-033: one run, for the CLI, HTTP and the SDK ------------------------------------------

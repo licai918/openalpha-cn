@@ -70,6 +70,7 @@ __all__ = [
     "ExecutionResult",
     "MarketBar",
     "published_limit_fields",
+    "security_board",
     "suspended_at_the_close",
 ]
 
@@ -178,6 +179,29 @@ def suspended_at_the_close(state: TradingState | None, timing: str | None) -> bo
     if state is TradingState.halted:
         return True
     return timing is None or halt_spans_the_close(timing)
+
+
+def security_board(ts_code: str) -> Literal["main", "star", "growth", "bse"]:
+    """The board a security trades on, from its code -- the one classifier every face uses.
+
+    Derived rather than defaulted to `"main"`, because the board decides `MarketBar.board`'s two
+    consequences here: the lot rule (STAR buys at least 200 shares in 1-share steps, every other
+    board in multiples of 100) and `_board_limit`'s fallback ratio when no `stk_limit` band is
+    supplied (20% on STAR and ChiNext, 10% on the main board). STAR is `688*` and `689*` (CDRs);
+    ChiNext is `300*` and `301*`; the Beijing board is matched on its `.BJ` suffix.
+
+    `V2-P6-031`: this lived as three private copies, in `factor_view`, `shortlist_view` and
+    `strategy_view`, and the first two tested only `688`/`300` -- filing `689*` and `301*` under
+    the main board. It sits here, beside `MarketBar`, because all three faces already import this
+    module and it imports no numeric or infrastructure library.
+    """
+    if ts_code.endswith(".BJ"):
+        return "bse"
+    if ts_code.startswith(("688", "689")):
+        return "star"
+    if ts_code.startswith(("300", "301")):
+        return "growth"
+    return "main"
 
 
 class MarketBar(BaseModel):

@@ -731,6 +731,10 @@ def test_both_faces_classify_a_board_the_same_way() -> None:
 
     The stake is not hypothetical. `V2-P4-067(b)` was fixed on `shortlist_view` while the row's
     own reproduction command ran through `factor_view`, and the row was closed anyway.
+
+    `V2-P6-031` then showed agreement was not enough: both copies filed `689*`/`301*` under the
+    main board, identically. Both faces now import `backtest.execution.security_board`; the
+    tests below pin the answers and the one shared function.
     """
     from openalpha_cn.factor_view import _board as factor_board
     from openalpha_cn.shortlist_view import _board as shortlist_board
@@ -751,6 +755,80 @@ def test_both_faces_classify_a_board_the_same_way() -> None:
     assert set(factor_answers) == {"star", "growth", "bse", "main"}, (
         "this corpus no longer reaches all four boards, so agreement above proves less"
     )
+
+
+EXPECTED_BOARDS: Final[dict[str, str]] = {
+    "688981.SH": "star",
+    "300750.SZ": "growth",
+    "430047.BJ": "bse",
+    "600519.SH": "main",
+    "000001.SZ": "main",
+    "689009.SH": "star",
+    "301029.SZ": "growth",
+}
+"""`BOARD_CODES`' answers, written out: `689*` is STAR (CDRs) and `301*` is ChiNext."""
+
+
+def test_every_face_files_301_and_689_on_their_own_boards() -> None:
+    """`V2-P6-031`. Agreement between two faces proved nothing while both were wrong the same way.
+
+    `factor_view._board` and `shortlist_view._board` tested only `688`/`300`, so `689*` (STAR
+    CDRs) and `301*` (ChiNext) were filed under the main board on both -- agreeing with each other
+    and disagreeing with `strategy_view._board`, which had the two-prefix rule. Every face must
+    give the same, correct answer.
+    """
+    from openalpha_cn import factor_view, shortlist_view, strategy_view
+
+    for module in (factor_view, shortlist_view, strategy_view):
+        answers = {code: module._board(code) for code in BOARD_CODES}
+        assert answers == EXPECTED_BOARDS, f"{module.__name__}._board: {answers}"
+
+
+def test_every_face_classifies_a_board_with_one_function() -> None:
+    """`V2-P6-031`. One classifier, imported by all three faces, so no copy can drift again."""
+    from openalpha_cn import factor_view, shortlist_view, strategy_view
+    from openalpha_cn.backtest import execution
+
+    assert factor_view._board is execution.security_board
+    assert shortlist_view._board is execution.security_board
+    assert strategy_view._board is execution.security_board
+
+
+@pytest.mark.parametrize(
+    ("code", "quantity", "price", "expected"),
+    [
+        # STAR's lot rule: 200 shares minimum, so a 100-share buy of a 689 CDR is refused.
+        ("689009.SH", 100, Decimal("10.00"), "rejected"),
+        # STAR's lot rule: at least 200 and 1-share steps, so 201 shares of a 689 CDR fill.
+        ("689009.SH", 201, Decimal("10.00"), "filled"),
+        # ChiNext's derived band is 20% when no stk_limit is supplied: 11.50 off a 10.00 close is
+        # inside it, where the main board's 10% would call it a one-price limit-up bar.
+        ("301029.SZ", 100, Decimal("11.50"), "filled"),
+    ],
+)
+def test_every_face_gives_301_and_689_the_execution_rules_of_their_board(
+    code: str, quantity: int, price: Decimal, expected: str
+) -> None:
+    """`V2-P6-031`. What the board decides: the lot rule and the fallback limit ratio."""
+    from openalpha_cn import factor_view, shortlist_view, strategy_view
+    from openalpha_cn.backtest.execution import AShareExecutionPolicy, ExecutionRequest, MarketBar
+
+    request = ExecutionRequest(side="buy", quantity=quantity)
+    for module in (factor_view, shortlist_view, strategy_view):
+        bar = MarketBar(
+            subject=code,
+            trade_date=date(2024, 6, 28),
+            board=module._board(code),
+            previous_close=Decimal("10.00"),
+            open=price,
+            high=price,
+            low=price,
+            close=price,
+            suspended=False,
+            is_st=False,
+        )
+        result = AShareExecutionPolicy().execute(request, bar)
+        assert result.status == expected, f"{module.__name__}: {code} -> {result}"
 
 
 def test_both_faces_offer_the_same_unbuilt_factor_remedy(tmp_path: Path) -> None:

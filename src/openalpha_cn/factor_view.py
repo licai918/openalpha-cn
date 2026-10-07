@@ -185,6 +185,7 @@ from openalpha_cn.backtest.execution import (
     published_limit_fields,
     suspended_at_the_close,
 )
+from openalpha_cn.backtest.execution import security_board as _board
 from openalpha_cn.backtest.factor_experiment import (
     ATTRIBUTION_CELL_ORDER,
     ATTRIBUTION_VERDICT_ORDER,
@@ -1871,23 +1872,6 @@ def _unlabelled_corpus_refusal(
         f"about the panel rather than a range to edit -- {fault.why}. To repair it, "
         f"{fault.remedy}."
     )
-
-
-def _board(ts_code: str) -> Literal["main", "star", "growth", "bse"]:
-    """The board a code belongs to, from its prefix.
-
-    Derived rather than defaulted to `"main"`: the board decides the lot rule
-    (`AShareExecutionPolicy` requires 200 shares on STAR and a multiple of 100 elsewhere), so a
-    `688*` name silently filed under the main board would be priced under a rule the exchange does
-    not apply to it.
-    """
-    if ts_code.startswith("688"):
-        return "star"
-    if ts_code.startswith("300"):
-        return "growth"
-    if ts_code.endswith(".BJ"):
-        return "bse"
-    return "main"
 
 
 def _in_range(instant: datetime, request: FactorRunRequest) -> bool:
