@@ -28,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import re
 import sys
 from collections.abc import Mapping
 from datetime import UTC, date, datetime, timedelta, timezone
@@ -348,12 +349,16 @@ def test_research_scripts_imported_from_outside_the_repository_refuse_the_holdou
     tmp_git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`grid.py` computes every holdout metric and `registry.py` is the guard; imported from
-    another checkout, neither is the code the diff over `scripts/research` checked."""
+    another checkout, neither is the code the diff over `scripts/research` checked.
+
+    The refusal names the repository's own scripts directory as the platform spells it --
+    `...\\repo\\scripts\\research` on Windows (`V2-P6-034`) -- so that is what is matched."""
     ledger = tmp_git_repo / "ledger.jsonl"
     registration = _registered(tmp_git_repo, commit_at=COMMITTED)
     monkeypatch.setattr(registry, "_imported_scripts", REAL_IMPORTED_SCRIPTS)
+    own = tmp_git_repo.resolve() / "scripts" / "research"
 
-    with pytest.raises(registry.ForeignScriptsError, match="scripts/research"):
+    with pytest.raises(registry.ForeignScriptsError, match=re.escape(f"which is not under {own};")):
         registry.assert_holdout_allowed(registration, ledger, tmp_git_repo)
 
 

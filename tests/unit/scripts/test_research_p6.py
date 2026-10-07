@@ -1856,7 +1856,8 @@ def test_the_survivors_command_warns_when_the_secondary_family_is_incomplete(
         "3 个假设在次家族 FDR 表中 withheld"
     )
     assert f"warning: {note}" in out
-    assert json.loads((ledger.parent / "p6-survivors.json").read_text())["ic_fdr_note"] == note
+    survivors = (ledger.parent / "p6-survivors.json").read_text(encoding="utf-8")
+    assert json.loads(survivors)["ic_fdr_note"] == note
 
 
 def test_a_discovery_stage_that_measured_nothing_is_refused_not_taken_as_no_survivor(
@@ -2759,11 +2760,22 @@ def test_a_ledger_named_with_other_letter_case_is_still_inside_the_checkout(
 ) -> None:
     """On a case-insensitive filesystem (APFS by default) `CHECKOUT/research` is the checkout's
     `research` directory, and `resolve()` does not canonicalise the case; the check compares
-    the directories themselves."""
+    the directories themselves.
+
+    On a case-sensitive one (ext4, the Linux CI) the same spelling is another directory, and the
+    check, comparing directories rather than spellings, must let a ledger there through -- while
+    still refusing the checkout's own. Each filesystem asserts what its answer has to be; neither
+    is skipped (`V2-P6-034`)."""
     checkout = tmp_path / "checkout"
     (checkout / "research").mkdir(parents=True)
+    ledger = tmp_path / "CHECKOUT" / "Research" / "ledger.jsonl"
     if not (tmp_path / "CHECKOUT").exists():
-        pytest.skip("this filesystem tells letter case apart; the path is another directory")
+        ledger.parent.mkdir(parents=True)
+        assert not os.path.samefile(ledger.parent.parent, checkout)
+        p6._refuse_a_ledger_in_the_checkout(ledger, checkout)
+        with pytest.raises(p6.LedgerInCheckoutError):
+            p6._refuse_a_ledger_in_the_checkout(checkout / "research" / "ledger.jsonl", checkout)
+        return
     touched: list[str] = []
     environment = p6.Environment(
         precondition=lambda runtime_dir: touched.append("precondition"),  # type: ignore[func-returns-value]
@@ -2772,7 +2784,6 @@ def test_a_ledger_named_with_other_letter_case_is_still_inside_the_checkout(
         code_commit=lambda: touched.append("commit") or COMMIT,  # type: ignore[func-returns-value]
         repo=checkout,
     )
-    ledger = tmp_path / "CHECKOUT" / "Research" / "ledger.jsonl"
 
     code = p6.main(
         ["discovery", "--runtime-dir", str(tmp_path), "--ledger", str(ledger)],
