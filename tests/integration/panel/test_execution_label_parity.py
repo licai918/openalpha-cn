@@ -73,6 +73,7 @@ from openalpha_cn.backtest.execution import (
     ExecutionRequest,
     MarketBar,
     published_limit_fields,
+    security_board,
     suspended_at_the_close,
 )
 from openalpha_cn.domain.adjustment import FactorObservation, build_adjustment_history
@@ -128,23 +129,6 @@ LOT = 200
 200 is a multiple of 100 and at least 200, so it satisfies both branches of
 `_rejection_reason`'s quantity check and the board a bar carries cannot change the answer.
 """
-
-
-def _board(ts_code: str) -> Literal["main", "star", "growth", "bse"]:
-    """The board a code belongs to, from its prefix.
-
-    Only reached by the derived-band path, which the parity tests never take -- every bar they
-    build carries the panel's published band. It is derived anyway rather than hard-coded to
-    `"main"`, because a `688*`/`300*` name silently filed under the main board would be a
-    fixture that quietly disagrees with the registry it came from.
-    """
-    if ts_code.startswith("688"):
-        return "star"
-    if ts_code.startswith("300"):
-        return "growth"
-    if ts_code.endswith(".BJ"):
-        return "bse"
-    return "main"
 
 
 class _Read:
@@ -232,7 +216,7 @@ class _Read:
         return MarketBar(
             subject=ts_code,
             trade_date=session,
-            board=_board(ts_code),
+            board=security_board(ts_code),
             previous_close=Decimal(str(bar.pre_close)),
             open=Decimal(str(bar.open)),
             high=Decimal(str(bar.high)),
@@ -453,7 +437,7 @@ def test_an_absent_band_is_derived_rather_than_refused(
     without_a_band = MarketBar(
         subject=code,
         trade_date=session,
-        board=_board(code),
+        board=security_board(code),
         previous_close=Decimal(str(stored.pre_close)),
         open=Decimal(str(stored.open)),
         high=Decimal(str(stored.high)),
@@ -520,7 +504,7 @@ def test_the_registry_verdict_is_not_an_input(tmp_path: Path) -> None:
     invented = MarketBar(
         subject=DELISTED_SECURITY,
         trade_date=session,
-        board=_board(DELISTED_SECURITY),
+        board=security_board(DELISTED_SECURITY),
         previous_close=Decimal("10.00"),
         open=Decimal("10.00"),
         high=Decimal("10.00"),

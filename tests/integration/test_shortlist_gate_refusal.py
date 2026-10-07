@@ -58,7 +58,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Final, Literal
+from typing import Any, Final
 
 import pytest
 from panel_fixtures import AS_OF, YEAR, GeneratedPanel, generate_panel, write_generated_panel
@@ -79,6 +79,7 @@ from openalpha_cn.backtest.execution import (
     AShareExecutionPolicy,
     MarketBar,
     published_limit_fields,
+    security_board,
     suspended_at_the_close,
 )
 from openalpha_cn.backtest.shortlist_gate import (
@@ -173,16 +174,6 @@ That keeps every number in this file traceable to a row in the panel.
 """
 
 
-def _board(ts_code: str) -> Literal["main", "star", "growth", "bse"]:
-    if ts_code.startswith("688"):
-        return "star"
-    if ts_code.startswith("300"):
-        return "growth"
-    if ts_code.endswith(".BJ"):
-        return "bse"
-    return "main"
-
-
 class _Screened:
     """One healthy panel, cleared by `V2-P1-013`, screened by `V2-P4-004`, ranked by `V2-P4-005`.
 
@@ -229,7 +220,7 @@ class _Screened:
             code: MarketBar(
                 subject=code,
                 trade_date=self.session,
-                board=_board(code),
+                board=security_board(code),
                 previous_close=Decimal(str(bar.pre_close)),
                 open=Decimal(str(bar.open)),
                 high=Decimal(str(bar.high)),

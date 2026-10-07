@@ -23,8 +23,9 @@ refusal, with the Tushare requests spent so far.
    over those datasets, the year and the session. Not clean stops the run before any factor is
    built.
 4. **factor build** -- every factor tier the configuration reads, at the session's signal instant
-   (16:30 Shanghai), through `factor_view.build_factor_panel_set`. A tier already built at that
-   instant is not built again.
+   (16:30 Shanghai) and at every session since the tier's newest build that a missed run left
+   unbuilt (at most `MAX_CATCH_UP_SESSIONS`; `V2-P6-032`), through
+   `factor_view.build_factor_panel_set`. A tier already built at an instant is not built again.
 5. **candidates** -- the session scored by `strategy_view.score_day`: the backtest's own feeds and
    scorer, so the ranking is the one a backtest of the registered configuration would trade on.
 6. **target weights** -- the book's rebalance rule (`strategy_backtest.target_holdings`) over that
@@ -257,6 +258,13 @@ those reads refuse on their own."""
 DEFAULT_MAX_STALENESS_DAYS: Final[int] = 30
 """The freshness bound every factor build of this command states (`factor build
 --max-staleness-days`): the value this repository's factor builds have used throughout."""
+
+MAX_CATCH_UP_SESSIONS: Final[int] = 20
+"""The most sessions a tier missed that step 4 builds before the day's (`V2-P6-032`): about four
+weeks of missed runs. By the `V2-P6-006` measurement (about 1.2 s per factor and instant, all
+three tiers) a 21-factor configuration spends roughly 25 s a session, so the bound keeps a
+catch-up near eight minutes. A longer gap is refused with the command that builds it in batches,
+rather than spent inside one scheduled run."""
 
 SHANGHAI: Final[ZoneInfo] = ZoneInfo(DEFAULT_DATE_TIMEZONE)
 _WEIGHT_QUANTUM: Final[Decimal] = Decimal("0.0000000001")
@@ -1143,7 +1151,7 @@ def journalled_days(directory: Path) -> tuple[JournalledDay, ...]:
     """Every session the command completed under `directory` (`journal_directory`), ascending.
 
     A journal without a `result` -- a run refused or stopped before its summary -- is not a day
-    the command recommended anything on, and is left out: the next run catches its rebalance up
+    the command listed anything on, and is left out: the next run catches its rebalance up
     (`Schedule.due`), and that run's journal says so.
     """
     if not directory.is_dir():
@@ -1193,7 +1201,7 @@ def journalled_rebalances(directory: Path) -> tuple[tuple[date, str], ...]:
             raise StepFailedError(
                 "summary",
                 f"the journal of {day.session.isoformat()} rebalanced with no record registered; "
-                "the book it recommended cannot be priced from the prediction store",
+                "the candidate book it listed cannot be priced from the prediction store",
             )
         rebalances.append((day.session, day.record_id))
     return tuple(rebalances)
@@ -1627,7 +1635,7 @@ def forward_summary(
 ) -> dict[str, Any]:
     """What a forward report shows about the evidence behind its book (`V2-P6-012`).
 
-    The book is priced as recommended -- every on-time bound record, `UNVERIFIABLE` ones
+    The book is priced as listed -- every on-time bound record, `UNVERIFIABLE` ones
     included -- and its statistics are computed twice: over every period, and over the periods
     whose record verified, excluding those an `UNVERIFIABLE` record opened. Both are shown, with
     the count and each corrected partition, so a reader sees whether the corrections matter;
@@ -2082,48 +2090,118 @@ def _doctor(
         )
 
 
-def _built_at_instant(
-    store: PanelStore, build: TierBuild, *, instant: datetime, as_of: datetime
-) -> bool:
-    """Whether the store already holds `build` at `instant`, through each tier's own manifest."""
+def _built_instants(
+    store: PanelStore, build: TierBuild, *, years: Sequence[int], as_of: datetime
+) -> frozenset[datetime]:
+    """Every signal instant in `years` at which the store holds `build`, through each tier's own
+    manifests: a processed or neutralized tier counts at an instant only above a raw manifest of
+    that instant."""
     definition = resolve_factor(build.factor)
-    years = (instant.astimezone(SHANGHAI).year,)
-    if years[0] not in store.registered_years(factor_manifest_dataset(definition)):
-        return False
+    held = set(store.registered_years(factor_manifest_dataset(definition)))
+    read = tuple(year for year in years if year in held)
+    if not read:
+        return frozenset()
     try:
         # The three tiers' manifests in one shared hold (`V2-P6-028`): a build of every tier
         # lands as one group write, and reads in three holds could see some tiers of it.
         with store.reading():
             raw = {
-                manifest.manifest_id
-                for manifest in load_factor_manifests(store, definition, years=years, as_of=as_of)
-                if manifest.as_of == instant
+                manifest.manifest_id: manifest.as_of
+                for manifest in load_factor_manifests(store, definition, years=read, as_of=as_of)
             }
             if not raw or build.tier == "raw":
-                return bool(raw)
+                return frozenset(raw.values())
             assert build.transform is not None  # a processed or neutralized tier names one
             transform = FACTOR_TRANSFORMS.get(build.transform)
             processed = {
-                manifest.transform_manifest_id
+                manifest.transform_manifest_id: raw[manifest.source_manifest_id]
                 for manifest in load_factor_transform_manifests(
-                    store, definition, years=years, as_of=as_of
+                    store, definition, years=read, as_of=as_of
                 )
                 if manifest.source_manifest_id in raw
                 and manifest.transform_id == transform.transform_id
             }
             if not processed or build.tier == "processed":
-                return bool(processed)
+                return frozenset(processed.values())
             assert build.neutralization is not None
             neutralization = FACTOR_NEUTRALIZATIONS.get(build.neutralization)
-            return any(
-                manifest.source_transform_manifest_id in processed
-                and manifest.neutralization_id == neutralization.neutralization_id
+            return frozenset(
+                processed[manifest.source_transform_manifest_id]
                 for manifest in load_factor_neutralization_manifests(
-                    store, definition, years=years, as_of=as_of
+                    store, definition, years=read, as_of=as_of
                 )
+                if manifest.source_transform_manifest_id in processed
+                and manifest.neutralization_id == neutralization.neutralization_id
             )
     except FactorEngineError:
-        return False
+        return frozenset()
+
+
+def _built_at_instant(
+    store: PanelStore, build: TierBuild, *, instant: datetime, as_of: datetime
+) -> bool:
+    """Whether the store already holds `build` at `instant`, through each tier's own manifest."""
+    year = instant.astimezone(SHANGHAI).year
+    return instant in _built_instants(store, build, years=(year,), as_of=as_of)
+
+
+def _newest_build(
+    store: PanelStore, build: TierBuild, *, through: datetime, as_of: datetime
+) -> datetime | None:
+    """The newest signal instant at or before `through` at which the store holds `build`,
+    searched a year at a time from `through`'s; `None` when it holds the tier at none."""
+    definition = resolve_factor(build.factor)
+    last = through.astimezone(SHANGHAI).year
+    years = sorted(
+        (
+            year
+            for year in store.registered_years(factor_manifest_dataset(definition))
+            if year <= last
+        ),
+        reverse=True,
+    )
+    for year in years:
+        built = [
+            instant
+            for instant in _built_instants(store, build, years=(year,), as_of=as_of)
+            if instant <= through
+        ]
+        if built:
+            return max(built)
+    return None
+
+
+def sessions_to_build(
+    store: PanelStore, build: TierBuild, *, session: date, exchange: str, as_of: datetime
+) -> tuple[date, ...]:
+    """The sessions step 4 builds `build` at, oldest first (`V2-P6-032`).
+
+    Every open session after the tier's newest stored signal instant, through `session`, by the
+    stored `trade_cal` (the calendar `_factor_years` reads) -- so a run the scheduler missed (the
+    machine off or asleep) leaves no session without a cross section for the trailing-IC and
+    walk-forward windows to find missing later. Nothing when the tier is built at `session`
+    already; `session` alone when the store holds the tier at no instant at all, since a history
+    is the research build's to make, not this step's.
+    """
+    instant = session_publication_instant(session)
+    newest = _newest_build(store, build, through=instant, as_of=as_of)
+    if newest is None:
+        return (session,)
+    if newest == instant:
+        return ()
+    years = tuple(range(newest.astimezone(SHANGHAI).year, session.year + 1))
+    unstored = sorted(set(years) - set(store.registered_years(TRADING_CALENDAR_DATASET)))
+    calendar = None if unstored else _stored_calendar(store, exchange, years, as_of)
+    if calendar is None:
+        raise StepFailedError(
+            "factor build",
+            f"{build.factor}@{build.tier} was last built at {newest.isoformat()}, and the "
+            f"{exchange} calendar of {', '.join(map(str, unstored or years))}, which counts the "
+            "sessions since, is not stored or cannot be read",
+        )
+    return tuple(
+        day for day in calendar.trading_days if newest < session_publication_instant(day) <= instant
+    )
 
 
 def _factor_years(store: PanelStore, session: date) -> tuple[int, ...]:
@@ -2152,51 +2230,210 @@ def build_factors(
     as_of: datetime,
     exchange: str,
     max_staleness_days: int,
+    runtime_dir: Path,
 ) -> dict[str, Any]:
-    """Step 4: every tier the configuration reads, at the session's signal instant."""
+    """Step 4: every tier the configuration reads, at the session's signal instant and at every
+    session a missed run left unbuilt since the tier's newest build (`sessions_to_build`).
+
+    At most `MAX_CATCH_UP_SESSIONS` missed sessions a tier: a longer gap is refused before
+    anything is built, naming the gap and the `openalpha factor build` that builds its oldest
+    batch. `caught_up` lists the missed sessions built, for the summary and the day's journal.
+    """
     instant = session_publication_instant(session)
-    missing = [
-        build
+    plans = {
+        build: sessions_to_build(store, build, session=session, exchange=exchange, as_of=as_of)
         for build in builds
-        if not _built_at_instant(store, build, instant=instant, as_of=as_of)
+    }
+    groups: dict[tuple[str, str | None, str | None, tuple[date, ...]], list[str]] = {}
+    for build, days in plans.items():
+        if days:
+            key = (build.tier, build.transform, build.neutralization, days)
+            groups.setdefault(key, []).append(build.factor)
+    ordered = sorted(
+        groups.items(),
+        key=lambda item: (item[0][0], item[0][1] or "", item[0][2] or "", item[0][3]),
+    )
+    too_long = [
+        (key, factors)
+        for key, factors in ordered
+        if len([day for day in key[3] if day != session]) > MAX_CATCH_UP_SESSIONS
     ]
-    groups: dict[tuple[str, str | None, str | None], list[str]] = {}
-    for build in missing:
-        groups.setdefault((build.tier, build.transform, build.neutralization), []).append(
-            build.factor
+    if too_long:
+        raise StepFailedError(
+            "factor build",
+            _catch_up_refusal(
+                store,
+                too_long,
+                session=session,
+                exchange=exchange,
+                max_staleness_days=max_staleness_days,
+                runtime_dir=runtime_dir,
+            ),
         )
     code_commit = resolve_code_commit()
     written: list[str] = []
-    for (tier, transform, neutralization), factors in sorted(
-        groups.items(), key=lambda item: (item[0][0], item[0][1] or "", item[0][2] or "")
-    ):
-        try:
-            requests = factor_build_requests(
-                factors=factors,
-                tier=tier,
-                transform=transform or "",
-                neutralization=neutralization or "",
-                as_ofs=[instant],
-                years=_factor_years(store, session),
-                exchange=exchange,
-                max_staleness_days=max_staleness_days,
-                waive_max_staleness=False,
-                subjects=[],
-                supersedes_raw=[],
-                supersedes_processed=[],
-                supersedes_neutralized=[],
-                code_commit=code_commit,
-            )
-            reports = build_factor_panel_set(store, requests, built_at=as_of)
-        except FactorViewError as error:
-            raise StepFailedError("factor build", error.disclosable) from error
-        written.extend(partition for report in reports for partition in report.partitions)
+    for (tier, transform, neutralization, days), factors in ordered:
+        for year in sorted({day.year for day in days}):
+            in_year = [day for day in days if day.year == year]
+            try:
+                requests = factor_build_requests(
+                    factors=factors,
+                    tier=tier,
+                    transform=transform or "",
+                    neutralization=neutralization or "",
+                    as_ofs=[session_publication_instant(day) for day in in_year],
+                    years=_factor_years(store, in_year[0]),
+                    exchange=exchange,
+                    max_staleness_days=max_staleness_days,
+                    waive_max_staleness=False,
+                    subjects=[],
+                    supersedes_raw=[],
+                    supersedes_processed=[],
+                    supersedes_neutralized=[],
+                    code_commit=code_commit,
+                )
+                reports = build_factor_panel_set(store, requests, built_at=as_of)
+            except FactorViewError as error:
+                raise StepFailedError("factor build", error.disclosable) from error
+            written.extend(partition for report in reports for partition in report.partitions)
+    caught_up = sorted({day for days in plans.values() for day in days if day != session})
     return {
         "instant": instant.isoformat(),
-        "built": [f"{b.factor}@{b.tier}" for b in missing],
-        "already_built": [f"{b.factor}@{b.tier}" for b in builds if b not in missing],
+        "built": [f"{b.factor}@{b.tier}" for b in builds if plans[b]],
+        "already_built": [f"{b.factor}@{b.tier}" for b in builds if not plans[b]],
+        "caught_up": [day.isoformat() for day in caught_up],
         "partitions": sorted(set(written)),
     }
+
+
+def _catch_up_command(
+    store: PanelStore,
+    factors: Sequence[str],
+    *,
+    tier: str,
+    transform: str | None,
+    neutralization: str | None,
+    days: Sequence[date],
+    exchange: str,
+    max_staleness_days: int,
+    runtime_dir: Path,
+) -> str:
+    """The `openalpha factor build` step 4 would run for `factors` at `days` (one year's)."""
+    arguments = ["openalpha", "factor", "build", "--runtime-dir", str(runtime_dir)]
+    for factor in factors:
+        arguments += ["--factor", factor]
+    arguments += ["--tier", tier]
+    if transform:
+        arguments += ["--transform", transform]
+    if neutralization:
+        arguments += ["--neutralization", neutralization]
+    for year in _factor_years(store, days[0]):
+        arguments += ["--year", str(year)]
+    arguments += ["--exchange", exchange, "--max-staleness-days", str(max_staleness_days)]
+    for day in days:
+        arguments += ["--as-of", session_publication_instant(day).astimezone(UTC).isoformat()]
+    return shlex.join(arguments)
+
+
+def _catch_up_refusal(
+    store: PanelStore,
+    groups: Sequence[tuple[tuple[str, str | None, str | None, tuple[date, ...]], list[str]]],
+    *,
+    session: date,
+    exchange: str,
+    max_staleness_days: int,
+    runtime_dir: Path,
+) -> str:
+    """Why step 4 built nothing, and the command that builds each refused gap's oldest batch."""
+    lines: list[str] = []
+    for (tier, transform, neutralization, days), factors in groups:
+        missed = [day for day in days if day != session]
+        oldest = [day for day in missed[:MAX_CATCH_UP_SESSIONS] if day.year == missed[0].year]
+        names = ", ".join(f"{factor}@{tier}" for factor in factors)
+        lines += [
+            f"{names}: {len(missed)} missed session(s), {missed[0].isoformat()} to "
+            f"{missed[-1].isoformat()}, more than the {MAX_CATCH_UP_SESSIONS} this step catches "
+            "up (MAX_CATCH_UP_SESSIONS); nothing was built. Build the oldest "
+            f"{len(oldest)} with:",
+            "  "
+            + _catch_up_command(
+                store,
+                factors,
+                tier=tier,
+                transform=transform,
+                neutralization=neutralization,
+                days=oldest,
+                exchange=exchange,
+                max_staleness_days=max_staleness_days,
+                runtime_dir=runtime_dir,
+            ),
+        ]
+    lines.append(
+        "then rerun this command: it refuses again, naming the next batch, while more than "
+        f"{MAX_CATCH_UP_SESSIONS} remain, and catches up the rest itself"
+    )
+    return "\n".join(lines)
+
+
+class FactorGapError(ValueError):
+    """`--factor-gaps` could not be answered."""
+
+
+def factor_gaps(
+    runtime_dir: Path, registration: Path, *, since: date, as_of: datetime
+) -> dict[str, Any]:
+    """`--factor-gaps SINCE`: every open session from `since` through the newest one closed at
+    `as_of` at which a factor tier the registered configuration reads has no build.
+
+    Read only, and it admits no code: it is the check for a store a checkout that catches
+    nothing up has been running on -- the worktree pinned at a registration made before
+    `V2-P6-032` builds only the day, so a missed run leaves a hole behind the newest build that
+    step 4 never looks at again. The configuration is read from the registration file as
+    registered (its `config_id` re-derived, as admission does).
+    """
+    try:
+        body = json.loads(registration.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise FactorGapError(f"{registration} cannot be read: {error}") from error
+    config = body.get("config") if isinstance(body, dict) else None
+    if not isinstance(config, dict) or grid.config_id(config) != body.get("config_id"):
+        raise FactorGapError(f"{registration} registers no configuration that is its config_id")
+    try:
+        anchor = anchor_of(config)
+        probe = day_request(config, day=anchor, as_of=session_publication_instant(anchor))
+    except (KeyError, ValueError, StepFailedError) as error:
+        raise FactorGapError(f"the registered configuration cannot be read: {error}") from error
+    store = panel_store(runtime_dir)
+    through = _stored_session(store, probe.exchange, as_of)
+    if through is None:
+        raise FactorGapError(f"no stored {probe.exchange} session had closed at {as_of}")
+    years = tuple(range(since.year, through.year + 1))
+    unstored = sorted(set(years) - set(store.registered_years(TRADING_CALENDAR_DATASET)))
+    calendar = None if unstored else _stored_calendar(store, probe.exchange, years, as_of)
+    if calendar is None:
+        raise FactorGapError(
+            f"the {probe.exchange} calendar of {', '.join(map(str, unstored or years))} is not "
+            "stored or cannot be read"
+        )
+    sessions = [day for day in calendar.trading_days if since <= day <= through]
+    gaps: dict[str, list[str]] = {}
+    for build in tiers_read(probe):
+        built = _built_instants(store, build, years=years, as_of=as_of)
+        gaps[f"{build.factor}@{build.tier}"] = [
+            day.isoformat() for day in sessions if session_publication_instant(day) not in built
+        ]
+    return {"since": since.isoformat(), "through": through.isoformat(), "gaps": gaps}
+
+
+def factor_gap_lines(report: Mapping[str, Any]) -> list[str]:
+    lines = [f"factor gaps        open sessions {report['since']} to {report['through']}"]
+    for tier, missing in report["gaps"].items():
+        lines.append(
+            f"{tier}: {len(missing)} session(s) without a build: {', '.join(missing)}"
+            if missing
+            else f"{tier}: no session without a build"
+        )
+    return lines
 
 
 def target_weights(
@@ -2487,6 +2724,7 @@ def _run_daily_selection(
             as_of=as_of,
             exchange=request.exchange,
             max_staleness_days=options.max_staleness_days,
+            runtime_dir=runtime_dir,
         )
     with _step("candidates"):
         capped = request.spec.max_industry_weight is not None
@@ -2594,6 +2832,10 @@ def summary_lines(result: Mapping[str, Any], *, top: int) -> list[str]:
         )
     else:
         lines.append(f"prediction         none: {prediction['reason']}")
+    # A journal written before `V2-P6-032` has no `caught_up`; it caught nothing up.
+    caught_up = result.get("factors", {}).get("caught_up")
+    if caught_up:
+        lines.append(f"factor catch-up    {', '.join(caught_up)}")
     lines.append(
         f"tushare requests   {run['request_count']} this run "
         f"{json.dumps(run['requests'], sort_keys=True)}"
@@ -2955,6 +3197,15 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
         "links to <repo>/.env). Whitespace is refused: uv splits --env-file on it.",
     )
     parser.add_argument("--uv", type=Path, default=None, help="Default: the uv on PATH.")
+    parser.add_argument(
+        "--factor-gaps",
+        type=date.fromisoformat,
+        default=None,
+        metavar="SINCE",
+        help="Read only: list every open session from SINCE (YYYY-MM-DD) through the newest "
+        "closed one at which a factor tier the registered configuration reads has no build, and "
+        "exit 1 when there is one. Admits no code and writes nothing.",
+    )
     arguments = parser.parse_args(argv)
     uv = (arguments.uv or Path(shutil.which("uv") or "uv")).resolve()
     try:
@@ -2972,6 +3223,22 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
         return int(error.exit_code)
     if arguments.runtime_dir is None:
         parser.error("--runtime-dir is required")
+    if arguments.factor_gaps is not None:
+        try:
+            report = factor_gaps(
+                arguments.runtime_dir,
+                arguments.registration,
+                since=arguments.factor_gaps,
+                as_of=arguments.as_of or clock(),
+            )
+        except FactorGapError as error:
+            print(f"factor gaps: {error}", file=sys.stderr)
+            return int(DailyExit.step_failed)
+        if arguments.json:
+            print(json.dumps(report, sort_keys=True))
+        else:
+            print("\n".join(factor_gap_lines(report)))
+        return int(DailyExit.step_failed if any(report["gaps"].values()) else DailyExit.done)
     if arguments.launchd_plist is not None:
         if arguments.worktree is None:
             parser.error("--launchd-plist needs --worktree, the checkout pinned by --pin-worktree")

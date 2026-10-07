@@ -604,6 +604,161 @@ def test_a_scheduled_rebalance_the_command_missed_is_made_at_its_next_run(
     assert _next(world, capsys, 4)["targets"]["decision"] == "not a rebalance day"
 
 
+# --- sessions the command missed: step 4 catches their cross sections up (`V2-P6-032`) ----------
+
+REVERSAL_RAW: Final = daily.TierBuild(
+    factor="reversal_1d/v1", tier="raw", transform=None, neutralization=None
+)
+"""The one tier `CONFIG` reads."""
+LATER: Final[datetime] = RUN_CLOCK + timedelta(days=30)
+"""A clock after every run here, to read what the store holds."""
+
+
+def _built_on(world: World, day: date) -> bool:
+    return daily._built_at_instant(
+        PanelStore(world.runtime / "panel"),
+        REVERSAL_RAW,
+        instant=session_publication_instant(day),
+        as_of=LATER,
+    )
+
+
+def _factor_partitions(runtime: Path) -> list[tuple[Any, ...]]:
+    return [row for row in _catalog(runtime) if str(row[0]).startswith("factor_")]
+
+
+def test_the_catch_up_bound_is_twenty_sessions() -> None:
+    assert daily.MAX_CATCH_UP_SESSIONS == 20
+
+
+def test_a_tier_never_built_is_built_at_the_day_only(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The panel holds sessions from 5 January and no factor build at all: the first run builds
+    19 January and nothing before it -- a history is the research build's, not this step's."""
+    result = _next(world, capsys, 0)
+
+    assert result["factors"]["caught_up"] == []
+    assert result["factors"]["built"] == ["reversal_1d/v1@raw"]
+    assert _built_on(world, DAY)
+    assert not any(_built_on(world, day) for day in weekdays(date(2026, 1, 5), date(2026, 1, 16)))
+
+
+def test_a_run_after_two_missed_sessions_builds_them_and_the_day_and_says_so(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No run on 20 or 21 January: the 22 January run builds the tier at all three sessions'
+    signal instants, and the summary and the day's journal name the two it caught up."""
+    _next(world, capsys, 0)
+    assert not _built_on(world, date(2026, 1, 20))
+
+    result = _next(world, capsys, 3)
+
+    assert result["session"] == "2026-01-22"
+    assert [
+        day for day in weekdays(date(2026, 1, 19), date(2026, 1, 22)) if _built_on(world, day)
+    ] == [
+        date(2026, 1, 19),
+        date(2026, 1, 20),
+        date(2026, 1, 21),
+        date(2026, 1, 22),
+    ]
+    assert result["factors"]["caught_up"] == ["2026-01-20", "2026-01-21"]
+    assert result["factors"]["built"] == ["reversal_1d/v1@raw"]
+    journal = json.loads(_journal(world, date(2026, 1, 22)).read_text(encoding="utf-8"))
+    assert journal["result"]["factors"]["caught_up"] == ["2026-01-20", "2026-01-21"]
+    assert "factor catch-up    2026-01-20, 2026-01-21" in daily.summary_lines(result, top=3)
+
+
+def test_a_store_already_built_through_the_day_catches_nothing_up_and_writes_nothing(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _next(world, capsys, 0)
+    assert _next(world, capsys, 1)["factors"]["caught_up"] == []
+    before = _factor_partitions(world.runtime)
+
+    again = daily.build_factors(
+        PanelStore(world.runtime / "panel"),
+        (REVERSAL_RAW,),
+        session=date(2026, 1, 20),
+        as_of=DAY_AS_OF + timedelta(days=1, hours=1),
+        exchange=EXCHANGE,
+        max_staleness_days=daily.DEFAULT_MAX_STALENESS_DAYS,
+        runtime_dir=world.runtime,
+    )
+
+    assert (again["built"], again["caught_up"], again["partitions"]) == ([], [], [])
+    assert again["already_built"] == ["reversal_1d/v1@raw"]
+    assert _factor_partitions(world.runtime) == before
+
+
+def test_a_gap_longer_than_the_bound_is_refused_with_a_command_that_runs_and_writes_nothing(
+    world: World, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With a bound of one session, two missed sessions are refused before anything is built.
+    The refusal names the gap and prints a `factor build` that builds its oldest batch; once that
+    has run, the gap is within the bound and the next run catches up the rest."""
+    _next(world, capsys, 0)
+    monkeypatch.setattr(daily, "MAX_CATCH_UP_SESSIONS", 1)
+    before = _factor_partitions(world.runtime)
+
+    code, _text, err = _run(
+        world, capsys, as_of=DAY_AS_OF + timedelta(days=3), clock=RUN_CLOCK + timedelta(days=3)
+    )
+
+    assert code == 1
+    assert "step 4 (factor build) failed" in err
+    assert "reversal_1d/v1@raw: 2 missed session(s), 2026-01-20 to 2026-01-21" in err
+    assert "more than the 1 this step catches up" in err
+    assert _factor_partitions(world.runtime) == before
+    journal = json.loads(_journal(world, date(2026, 1, 22)).read_text(encoding="utf-8"))
+    assert "result" not in journal
+    assert len(_records(world.runtime)) == 1
+    command = next(
+        line.strip() for line in err.splitlines() if line.strip().startswith("openalpha factor")
+    )
+    arguments = shlex.split(command)
+    assert arguments[arguments.index("--as-of") + 1] == "2026-01-20T08:30:00+00:00"
+    assert arguments.count("--as-of") == 1  # the oldest batch: one session under this bound
+
+    monkeypatch.setattr(cli, "_panel_clock", lambda: RUN_CLOCK + timedelta(days=3))
+    built = daily.invoke(arguments[1:])
+    assert built.exit_code == 0, built.reason()
+    assert _built_on(world, date(2026, 1, 20))
+    code, result, err = _run(
+        world, capsys, as_of=DAY_AS_OF + timedelta(days=3), clock=RUN_CLOCK + timedelta(days=3)
+    )
+    assert code == 0, err
+    assert result["factors"]["caught_up"] == ["2026-01-21"]
+    assert all(_built_on(world, day) for day in weekdays(date(2026, 1, 19), date(2026, 1, 22)))
+
+
+def test_the_factor_gap_check_names_every_session_without_a_build_and_writes_nothing(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--factor-gaps SINCE`: every open session from SINCE through the newest closed one at
+    which a tier the configuration reads has no build. Read only, and run without admitting the
+    code -- it is the check the runbook gives for a store a pinned checkout catches nothing up
+    in."""
+    _next(world, capsys, 0)
+    files = _files(world.runtime)
+    arguments = ["--runtime-dir", str(world.runtime), "--registration", str(world.registration)]
+    arguments += ["--repo", str(world.repo), "--as-of", DAY_AS_OF.isoformat()]
+
+    code = daily.main([*arguments, "--factor-gaps", "2026-01-12"])
+    out, _err = capsys.readouterr()
+
+    assert code == 1
+    assert (
+        "reversal_1d/v1@raw: 5 session(s) without a build: 2026-01-12, 2026-01-13, "
+        "2026-01-14, 2026-01-15, 2026-01-16"
+    ) in out
+    assert _files(world.runtime) == files
+
+    assert daily.main([*arguments, "--factor-gaps", "2026-01-19"]) == 0
+    assert "reversal_1d/v1@raw: no session without a build" in capsys.readouterr().out
+
+
 def test_a_panel_the_doctor_does_not_clear_stops_the_run_before_any_factor_is_built(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
