@@ -322,13 +322,25 @@ def _registry_batch(extra: Sequence[tuple[str, date]] = ()) -> ColumnarPanelBatc
     )
 
 
+def _daily_return(index: int, position: int) -> float:
+    """A return in [-2%, +2%] from integer arithmetic and one division, the same bits everywhere.
+
+    Not `math.sin`, which this was until `V2-P6-034`: the C library computes it, and macOS, glibc
+    and the Windows CRT round it differently in the last place, so the corpus -- and every pinned
+    partition that reads a price -- differed by platform. 401 is prime and the stride
+    `101 + 7 * index` is never a multiple of it here, so each security's returns cycle through
+    all 401 values, rising and falling, out of phase with every other security's.
+    """
+    return ((index * 37 + position * (101 + 7 * index)) % 401 - 200) / 10_000.0
+
+
 def _path(index: int, code: str) -> dict[date, tuple[float, float]]:
     """`(close, pre_close)` per traded session, `pre_close` the previous traded close."""
     path: dict[date, tuple[float, float]] = {}
     price = 10.0 + index * 0.25
     for position, day in enumerate(day for day in SESSIONS if _traded(index, code, day)):
         previous = price
-        price *= 1.0 + 0.02 * math.sin(index * 1.7 + position * 0.9)
+        price *= 1.0 + _daily_return(index, position)
         path[day] = (price, previous)
     return path
 
@@ -619,37 +631,37 @@ STORED_BY_SINGLE_FACTOR_BUILDS_AT_8A18532: Final[dict[str, str]] = {
         "b758c03ccc137945be56e50da33e0fd20a282f2335c1f66a769d9619d538cd3b"
     ),
     "factor_manifest_amihud_60_v1@2026": (
-        "22eecc0505fdeb3cddeb5cd1b1e978683886b0509f05d6962b90aed24df91df7"
+        "819a1367ca2196150898599b5b09a1dac7721ca427ea1633ff204e3e21f70d24"
     ),
     "factor_manifest_book_to_price_v1@2026": (
-        "472a2aa0021f31e68fd471c1d99722ffaa6bef3508caf141a83fb640229efe95"
+        "49f8cb793120f3ad9ea3334fb2a6492cb6f90989d24aea2a1010f99b49f2bc30"
     ),
     "factor_manifest_deducted_earnings_yield_ttm_v1@2026": (
-        "faa6b2f880ed91fa6c0d2af6467c44476e462c9b46d3299efc4db13be531b9c6"
+        "6289fe037fcb26b40993ab6f187e179bd875e2468b37c743a35ab534798d2682"
     ),
     "factor_manifest_downside_vol_60_v1@2026": (
-        "417f25bf2d1568fe8a8ef563b2be4f4e495c54b4a4fa05c3d930cbb03d094363"
+        "d772797a2d4647208d87a781aec65dfa1be8200cd129d67686e33aa56e46ae80"
     ),
     "factor_manifest_earnings_yield_ttm_v1@2026": (
-        "ee7c25f5bfce3a1dea7f2d1498a98c8aa537996b81ebe99d2ba81561ece70858"
+        "8de0eb70d118e80edc1c80a78ed33debbc8cc28cedfdb7488e8880d999885d04"
     ),
     "factor_manifest_gross_margin_stability_v1@2026": (
         "52822d4546820f0581b570c6a853816eda6fef7ae4979ad92f8eb2756dc1851a"
     ),
     "factor_manifest_momentum_120_sessions_v1@2026": (
-        "45595c236fed7b5c2ba72ec6d303e943c156f287be1e641dc28b335483a90e70"
+        "c3597cbfabed7f2ec0eec63725da4363bbc0ec8b9679861974ac41a4337cbf09"
     ),
     "factor_manifest_momentum_20_sessions_v1@2026": (
-        "a4f3b7cbc3662b42c9c9c6c53a33e523b8f5bb4f7bf158e9cd82142d77d7e249"
+        "6b79cdbc1d45e4a058e0e53dd6775cfafc9d305714bfb1c14917cf422be50985"
     ),
     "factor_manifest_momentum_60_sessions_v1@2026": (
-        "0fb8d1708cd2dcb80c1350005c3c639040193e5ecf33b3e1a7fc4085b90a4eb5"
+        "21b5475fd1c44162d21636f9859d3737c6aa31692e7d2d3290777052d2eebb11"
     ),
     "factor_manifest_net_profit_yoy_v1@2026": (
         "6a80a1ca208371afba276e1bcb45814509d194f24afc181e97145170d060aed0"
     ),
     "factor_manifest_residual_vol_60_v1@2026": (
-        "de78496523371c947efa2510af25f7a923611fea762ff5d9918e264422fff8fa"
+        "956f20a2d6f7c61e8bf3426ea6e01b93a27719b7d903ef0238e539d84c52b7f1"
     ),
     "factor_manifest_return_on_capital_ttm_v1@2026": (
         "0699ffafd1f787b28d4f8781aeccb6c8ec27025cd2ff9057f4f0ec242ad5d7e9"
@@ -658,7 +670,7 @@ STORED_BY_SINGLE_FACTOR_BUILDS_AT_8A18532: Final[dict[str, str]] = {
         "01cf7a43e56dd40aa6533e842da69a51cd9df195867ad719054e160a0899606a"
     ),
     "factor_manifest_return_vol_60_v1@2026": (
-        "b6a718289f80cf44050872855c1196fa3d856f8b387256af75eae9a043e48f6b"
+        "53f23acf32fd01e86de8a2bb831ca70418f224eb0477eeb8261177ba78361658"
     ),
     "factor_manifest_revenue_yoy_acceleration_v1@2026": (
         "db03dbc8bc2ab2526e4e6a84850a3fc9f1fd2423da40fccbd5374f01eb3c930c"
@@ -667,52 +679,52 @@ STORED_BY_SINGLE_FACTOR_BUILDS_AT_8A18532: Final[dict[str, str]] = {
         "8e7666af5312868ebd29ef9f62707441c793545c1eac3609ff93c01687eec320"
     ),
     "factor_manifest_reversal_1d_v1@2026": (
-        "3eac72afc27057e9167b8b536ad41d7cb6068684726c5a64eb306e431596cfe3"
+        "0b6c1abb0fa1ba46efb851076ac747225bc204c06c5f5c509d7dc44d5b774948"
     ),
     "factor_manifest_reversal_5_sessions_v1@2026": (
-        "0caa24e880ada5b9538e50b4b37bc2ecc09127cc6d3380ae8a514485162cfdf3"
+        "8338a23607555af5be7cc31024fc9757289fb0ff1adba6cdd0135c680af1e76f"
     ),
     "factor_manifest_sales_yield_ttm_v1@2026": (
-        "b2a6d7824f7e699a4015a4c0d6d2d607d45923fd49376cc2a5c50f12711a7a14"
+        "2af76943ba2393c42c7d6f07df6aeedadf1ed4fa5a4efddda5fa3409f53fbffb"
     ),
     "factor_manifest_turnover_60_v1@2026": (
-        "794494fb60087f07e1fffc769038733a56e4def436794ea8e875146c924f7e8b"
+        "850e55b49e6cd489c9cfa493e76c0113d189f8c2b2a3b9b71b90c7df87830e30"
     ),
     "factor_neut_accruals_ttm_v1@2026": (
         "b96ba8104a709c2d7e0a430a340ffe2c93a0734b32769af015d1cb08bb15ea7f"
     ),
     "factor_neut_amihud_60_v1@2026": (
-        "21eb305ffe77d8a3f31fd972d842184a845a2e1af6a26bc38f4dfd93a1935176"
+        "a60557835f0f6110f5a986ac354d6cadc10e1850d04ed8b4b4f254d3d76fb6c7"
     ),
     "factor_neut_book_to_price_v1@2026": (
-        "f206c572c5faa72db51c4eda8170c2cacd6915eda650fed349ab64f1078c1e5f"
+        "2985d2e8c4531600a1d5b19d49f99b15fd13ab280957ed8a6d97b999bb3887e2"
     ),
     "factor_neut_deducted_earnings_yield_ttm_v1@2026": (
-        "0c556ae6efa6c482d4276f8cef0f1fc938cdffcf5edcf058b91d3d2a27d3a39d"
+        "855f134ab841d65b320aa7f2179b9336c13445d96cd36e77eaf2cc038c174f4f"
     ),
     "factor_neut_downside_vol_60_v1@2026": (
-        "8968e636d05937f78f5d407b35cdac7f3f322014118e9ce4a0e79f7e667b7c11"
+        "f23ed2c868fe1d2f49b0a9116aaee0ac7618359f60ab45475c64b3cb8bf46fd6"
     ),
     "factor_neut_earnings_yield_ttm_v1@2026": (
-        "c89b0b9858de4f0b8801669b9c589449f2b1d5b24be003555433b81fec5c2f1e"
+        "1cc0e4410fb3c169e4b29212cfa8e2879126a0bf285ff4b0c38dbb26ae9b9290"
     ),
     "factor_neut_gross_margin_stability_v1@2026": (
         "58d72f79f03d9c2816d9e7e63540718c940a5d7a8f8158ef8d2b9603f4812ae2"
     ),
     "factor_neut_momentum_120_sessions_v1@2026": (
-        "e46eb468ed4a32e62ec679e53c744a8cf0b2a75a82ccfb592287e80aaaf6ea71"
+        "11413ea87b42befc9e30949a95288f1be916e309a59ca23530b8d769a9eab037"
     ),
     "factor_neut_momentum_20_sessions_v1@2026": (
-        "98ea5c5815d756e2f661ab7d4066acd90a70d1a4783520347a001d4029ba9305"
+        "4bcfaae04ecf563b41ec345cc025d29d5ae0a9fbd57cfa2ccb85a3f103a2396c"
     ),
     "factor_neut_momentum_60_sessions_v1@2026": (
-        "39cea2ceeea783eb830753ece291f0da0d175e1f110dab2171e1bc0f6165c1ac"
+        "35145e4e1cb1b5fe9140c8461047f37cb46836d16046fe82314e2919e1dd90a2"
     ),
     "factor_neut_net_profit_yoy_v1@2026": (
         "7f2ea3543fba4a57c87c5f52c537ecc4f0ee5561dc1526a13decf9404dd3f690"
     ),
     "factor_neut_residual_vol_60_v1@2026": (
-        "921e835f47ea7901cf3c8a35ea981d93e55af1959229593a84c8bb1d7b29f681"
+        "6088051ac6fbf7a28ce3d002f6be577e1cc7687fda33093a90d6d8558221d611"
     ),
     "factor_neut_return_on_capital_ttm_v1@2026": (
         "8296f88dc3901789fc1e828dfc9974eb762e7681274558f83cc3df3de31e7776"
@@ -721,7 +733,7 @@ STORED_BY_SINGLE_FACTOR_BUILDS_AT_8A18532: Final[dict[str, str]] = {
         "d197f1ea463a079616b5b23ccf0311be52b7fb45694d021accbb91303852a5a6"
     ),
     "factor_neut_return_vol_60_v1@2026": (
-        "1134ecd087d8f0a6dff2b841e0df94755ea7e51e4aa1509f685eb5490d47987b"
+        "99d1504e78e546f9bd31ee7e1b5ee7c2b1ee756cae6b8dcafa008ec376eccafc"
     ),
     "factor_neut_revenue_yoy_acceleration_v1@2026": (
         "cba8dde57dffb6d0894b19611a0cad23a5ef1939c28196328ec45073099a2e76"
@@ -730,52 +742,52 @@ STORED_BY_SINGLE_FACTOR_BUILDS_AT_8A18532: Final[dict[str, str]] = {
         "4f69ebe80dc6605af049589f7a0358ec08de94e5d21396ea56edcd173f7885f0"
     ),
     "factor_neut_reversal_1d_v1@2026": (
-        "90b67d84bb66d711ceb5beb949b263a2b72e6e118e240e2e9af913ccc2dcc31e"
+        "6c4327b5900210b65048c45f3617f1d941d7b0ef8da0271b8b6e63bb8487c460"
     ),
     "factor_neut_reversal_5_sessions_v1@2026": (
-        "4a560e85b267c98d0080f3cb32e23300659af43351034380cc781a21765d09f4"
+        "f32d0c42c1538017ce9af76fc81835e6145e35acda2ed4c4bee6898abf66502a"
     ),
     "factor_neut_sales_yield_ttm_v1@2026": (
-        "3b87eedfe08a8960cca08ad0e3cd3d536248819a49aa6fc29d77b95f9319c810"
+        "3fadbb1886adadb7edd827789d30d46f5ba15f83e2acb1c4cb48deb4e7b305eb"
     ),
     "factor_neut_turnover_60_v1@2026": (
-        "a2b1e663e3943019bcb6074ef8479ce5da8d3b310bffbdbfd800e755d202f4db"
+        "8be248eca4fd3f6e170708a881239cf90332e90fdb3b16c1f98dcd695b437eba"
     ),
     "factor_neutmn_accruals_ttm_v1@2026": (
         "7a3f826b5f7a9ee3a82cc0b6b7899d85f44e339ce9d636efef1b424f33c50206"
     ),
     "factor_neutmn_amihud_60_v1@2026": (
-        "f7dabcabec8355ec0c37860acca102b6607a5b93c7f83870a3078cdfede5fa04"
+        "e3be71a81bfde4b00696b95be686988fec7de68ff14b5c0efc4f37e2087011a0"
     ),
     "factor_neutmn_book_to_price_v1@2026": (
-        "cec3c7d2ff5428c61e9ef1e570f9b8b958d90e93aa3f1251f2daa320af0b0ccb"
+        "9165a73255a3233ecdb365cbd6081b49c62a3ba65eb2c2228b7eda5f0ee04f2b"
     ),
     "factor_neutmn_deducted_earnings_yield_ttm_v1@2026": (
-        "fe876af4f736e5e7066d2647fc3c3926964c0291bc747bcb90dca93898db2e54"
+        "1a33d38a3fedc11919b31130724dc19b065cac7408eacbd56855a75762c109eb"
     ),
     "factor_neutmn_downside_vol_60_v1@2026": (
-        "d388acf1a34e517b8eadf71b17d7e08f49b93568593d78f2b52df8a5ece5e3ac"
+        "653b062f313110f13c5bdfb3579e292698662739a69fb451c2599ed503119225"
     ),
     "factor_neutmn_earnings_yield_ttm_v1@2026": (
-        "985816bb18079a5590e8117ecb05d4790b6a15031b44be5e530ec949ddfd4b18"
+        "9c4ad44a87f8caba725099a3a3326784ff14e9bcba5f26b1bc0cd79054c9676b"
     ),
     "factor_neutmn_gross_margin_stability_v1@2026": (
         "126fcfa55ecd8c5a9c47a7660f38bd5e02c2586eead1c60745349e01b4be8c1f"
     ),
     "factor_neutmn_momentum_120_sessions_v1@2026": (
-        "410b6b1c33031159778c22bdc3080b41c186a4d11ba5b47f41f107dd773f54ca"
+        "c6d1184535240abaa9bd02479a6b6a6524be8f5d762d6ef6cb1a16a102eb4689"
     ),
     "factor_neutmn_momentum_20_sessions_v1@2026": (
-        "b27c3e70b6dd900dceef223e5a29611223c26d806d42403105dba43cd576470b"
+        "8ab574171fc37a46f04033b94959d2abca7703589c230b98d1a83833351da5f9"
     ),
     "factor_neutmn_momentum_60_sessions_v1@2026": (
-        "e99a0cb5ade6be8773553e5f7a4d8359fe6b087c0fd04af666086c57f9ad64b3"
+        "a7bcca4902dfa15223578745518511879cfe3cf88801d8166ca35e06940cb17c"
     ),
     "factor_neutmn_net_profit_yoy_v1@2026": (
         "f92d49578597e1b80e60714553a6a1edc0d39b6bc332bb1e7fcc6e5f515c4f9c"
     ),
     "factor_neutmn_residual_vol_60_v1@2026": (
-        "f03a2b79680502713d88651304e7f8f8a6b670f2436d0cd9edf0c598c98802aa"
+        "800d3a3c6218733deb0e8c308c4cb63e54da9729c8a0585e31b01705e869e1c1"
     ),
     "factor_neutmn_return_on_capital_ttm_v1@2026": (
         "9ee814b0114a98a33933be82369061d1e01bab73b93f2d57309aa0b146fae370"
@@ -784,7 +796,7 @@ STORED_BY_SINGLE_FACTOR_BUILDS_AT_8A18532: Final[dict[str, str]] = {
         "84039ea9dfdefd93554e660a1ec20485082fd5aa5fda9d1dc6b40517aca74882"
     ),
     "factor_neutmn_return_vol_60_v1@2026": (
-        "c6e1f2b2a0f725c36bba272d725813442db465fbe4c2a09d430a47cff106969a"
+        "958bf2fc55dea8054929299d02476101a30c32de24f31197c36935f627beb110"
     ),
     "factor_neutmn_revenue_yoy_acceleration_v1@2026": (
         "1d655797ce11218317d23ce241c80e781a478b9042b14d6c6a3ce989f7a6acdc"
@@ -793,52 +805,52 @@ STORED_BY_SINGLE_FACTOR_BUILDS_AT_8A18532: Final[dict[str, str]] = {
         "5754290e8f8193e92fe1ab2635d086e855193f74d4e78f0e86ce39163cb96ac2"
     ),
     "factor_neutmn_reversal_1d_v1@2026": (
-        "dffc37f6804167d5bb18dd7e9b94ad65fdbf5b04a3b76824923edf415f3d958c"
+        "9cb4da3740ee9b0e7dc77621e283d408d4cd6c08d5eaca1740229a22cefd16a2"
     ),
     "factor_neutmn_reversal_5_sessions_v1@2026": (
-        "449bbae274f5fd753bf5b15d044bbd0dc8aab61e3089dc56c77df66d622e3906"
+        "0750b61ea74c03fde4baad02c80ddd0448674c63059de64fa835f98622e0e4a5"
     ),
     "factor_neutmn_sales_yield_ttm_v1@2026": (
-        "c3e8e6c906ea7e2430954ed494ae1f1d7e705476dde22f5ddc66fba3e75c21ee"
+        "cffa29f02de61a774fc225349e810d0c80d7379d55cbc7436d71a824a92a51b6"
     ),
     "factor_neutmn_turnover_60_v1@2026": (
-        "06f73dcda1d4da97fe868a45f05b8fec3c72f76a4b7e68e4619e17be403198de"
+        "6275eb5c01c3b1b7d2d8c0925af625132d4c04fae121c152bd35bde8ab8216a6"
     ),
     "factor_obs_accruals_ttm_v1@2026": (
         "508077a2a87905dbdf24ad47fdcf54c1fd03a78099afab652d2f6a1594baa900"
     ),
     "factor_obs_amihud_60_v1@2026": (
-        "c9406d3233abde424d5164be03bac6f55d3c40dfa496f088dcecbfa4a93005fb"
+        "fbbcac1b6c96e30711e4fa2da812077925134524e350449f65a396b0e65675d0"
     ),
     "factor_obs_book_to_price_v1@2026": (
-        "bcf0793e84638a36b1a25032eabc10eeb58228d9782b5e9127c14bcbfc1d940e"
+        "ea08f2cebce03b1dc058c687ef6d4d34d006eb63a188bc4f35afbedb00ce242a"
     ),
     "factor_obs_deducted_earnings_yield_ttm_v1@2026": (
-        "85041d3c68580cc79bf4820c7027b28b2e09e7f330baa91006ee5d856690c089"
+        "bf9c270f0f480f0335ea8bf0c5e15bdfcf2fdbc59c26ad98a1bd22b94fb3af5d"
     ),
     "factor_obs_downside_vol_60_v1@2026": (
-        "78363d44d99c0bff5970a1297d270a6bda3c9e019bdd4c4928f82b8bc5c17252"
+        "a37d2f868cddaf8ccc68b0eb2ae71f1f100e8b64a7472e3b0fad57e03c389f60"
     ),
     "factor_obs_earnings_yield_ttm_v1@2026": (
-        "b3bbb97605fef08e87e63c60a4bf86a67bdd8f861bb70cf6e36d9ef1462d0cae"
+        "f5627d926b2a2d9070d091a69409890d292cc9a9c08222e57e6171e813c8ec4e"
     ),
     "factor_obs_gross_margin_stability_v1@2026": (
         "d6e43db03a1bc1ea623a22ddd4a22b8e8f46a5da646452aed68d5192d2a70ce4"
     ),
     "factor_obs_momentum_120_sessions_v1@2026": (
-        "cbaf472d443b40657abba3b051c3af624bdb1d679dbaeb3b68629adec9933efc"
+        "1d6dc3030ef9cd472d2e78efcb7e281e450337b9c3fd9c88ac0fdb2a0611a48f"
     ),
     "factor_obs_momentum_20_sessions_v1@2026": (
-        "66b12bbdc0a97aef30ca882efcd9e696981c4ff2a68f0c0374d56bdb67be3b8a"
+        "38591b2754ccfbd583642d7ea244436c47f30ddcb964bde397837e81bb6eb840"
     ),
     "factor_obs_momentum_60_sessions_v1@2026": (
-        "883639ead3215082121b8a8b42ef3282c39f0cde715b9e15d13bd2658214d2e8"
+        "5466b0fbf734c2c97b822c7b1cb6e533da61465f6ab49d96be204b0674cd349e"
     ),
     "factor_obs_net_profit_yoy_v1@2026": (
         "6dc290d4c765407b74e26a9de91eee108f663a1a5b122eb2934730bcf789c8cb"
     ),
     "factor_obs_residual_vol_60_v1@2026": (
-        "6c9ed0b439ff7100dff39084b52bc213e5747d82e6a683aa86228ed1cb100baf"
+        "4c7cf7d5d841535ab4b7beb847f8ecc3c275bc1172743e0e91b44fc6a2fb3b5c"
     ),
     "factor_obs_return_on_capital_ttm_v1@2026": (
         "06cedff61c9c5874dfabccbdc444c12cbbe6ff252d84f7cd010df195a04b155d"
@@ -847,7 +859,7 @@ STORED_BY_SINGLE_FACTOR_BUILDS_AT_8A18532: Final[dict[str, str]] = {
         "353bbf3e9db88dad46d69eb84cb12acbc80e2b0ae3a03172d95497e0e789b206"
     ),
     "factor_obs_return_vol_60_v1@2026": (
-        "1d5e29eccf99cef262f9bc87dcb695b8bead952ae16a97b57760d4ca3319802e"
+        "d1bd6944f435300bd27633e248b48e0691ceeb5cd98c5c50397c7ea88466dd0f"
     ),
     "factor_obs_revenue_yoy_acceleration_v1@2026": (
         "6339aa3cb2ef37a6c9d640016e981167f49daff76dbd9ce9f2e6f675156485f8"
@@ -856,52 +868,52 @@ STORED_BY_SINGLE_FACTOR_BUILDS_AT_8A18532: Final[dict[str, str]] = {
         "0a52418db7ed9d46a1d70a342540b9df7d6f89c20c325ed2d42b41daf19c6911"
     ),
     "factor_obs_reversal_1d_v1@2026": (
-        "ecd5dd42c03b80cbddf2699cc4b2debf5db81f3a16b283bfff97e5ed5f6e468e"
+        "7775c6d710c6225e9db1201e9f2a305a4a38da592aa12967aff73799a483c1fb"
     ),
     "factor_obs_reversal_5_sessions_v1@2026": (
-        "f4d61ebcf1418adb3b6a77d96791c0db193b70e42c5e1981e9a5cbf210f18070"
+        "d1a01279d9c9b61833d76d36d6116ab2a06265f5fb70b18f8ddcbcc1489523ec"
     ),
     "factor_obs_sales_yield_ttm_v1@2026": (
-        "e3f54b421b4d1d1ebfcaaf24a224a91d3567eb75f5babee16994dd25b30279f4"
+        "3fea7d3b7f6588b9fa01e2df6c7e810d7edf64e948a42ba3307d99425a736475"
     ),
     "factor_obs_turnover_60_v1@2026": (
-        "3a57d5314c9534f2fb038d5ca4f378ebc34c4caa674f40163dccf2e14b819708"
+        "10787f7ff2510d9e739dff0e758cb19bbd1c01e33546e78fdb52fd949b57651c"
     ),
     "factor_proc_accruals_ttm_v1@2026": (
         "d4152bbe515862f5c837e1917e14dd7eca55f7f9022bcb228793855d2b7172a3"
     ),
     "factor_proc_amihud_60_v1@2026": (
-        "a019568cd1f1b516f0015e612c6ad13ed0d2bee955180756043dace57384a129"
+        "ec42073e87ea65c4e89342a36f6ed0154c0d6b862de2ef8e11544ba116076b3c"
     ),
     "factor_proc_book_to_price_v1@2026": (
-        "e6d8f812e01f98697c0a3867f9513f581582386352df2ab2eb3f7d720ce04204"
+        "816c755ee281a5dad3b6ca9f49a6750fb4a5788dd4c590f7a329b0031d89a4e0"
     ),
     "factor_proc_deducted_earnings_yield_ttm_v1@2026": (
-        "f3e413a85c25add9985b75b5c4eb6b1e764fed1dd69cfcd5bf0422f6d054207b"
+        "cf8befbdd6fed450326a12d38d710365b88a00f7226c053cfa32b22bdaede80b"
     ),
     "factor_proc_downside_vol_60_v1@2026": (
-        "3e5db1dfd65020b5ff3c01b5a3a4803f8f269a45cd21a712516fe1983afb8ce7"
+        "3c54cb277b72bf7941847376461bb4cdfba22f87db9395c08997c54e28963168"
     ),
     "factor_proc_earnings_yield_ttm_v1@2026": (
-        "618854e1c655fc85624c9c08b0d556ea83648273e0b3b93d4993f12b1d3765e4"
+        "2cedcc41f98b93b3581a2bfe4ebdf9bdce339e8356b3d3f397e6237f20819293"
     ),
     "factor_proc_gross_margin_stability_v1@2026": (
         "5fc50383549c18e57b46fe05fe90f2131352f785e45db2132280fa7bc8fb892d"
     ),
     "factor_proc_momentum_120_sessions_v1@2026": (
-        "e03d4b611c773af7b02a898767498be0f7ce584b3c0a23d1386aa9ebc5775cf9"
+        "49ccd8c191f59f51f37703103bb319569ae2e621ecae31d6ec811c53bee360f3"
     ),
     "factor_proc_momentum_20_sessions_v1@2026": (
-        "03c6706ba51f45636133acae7c6e627d4fd115f17493705c2c11a28a391fb5f5"
+        "fa21622a57a5d41904bab5e58d24cb1b5d5a91f275123673701e36a927bd45de"
     ),
     "factor_proc_momentum_60_sessions_v1@2026": (
-        "231490cd59a79e5d9b1a27c47f5eef9f1a0fd1da2178574d0cc6d2bc6c9f6a33"
+        "2eef43bf5c30ec6fa005d6858b00137bd4ea32533f01b55288805deea378c5d6"
     ),
     "factor_proc_net_profit_yoy_v1@2026": (
         "eb92bba9314a00964ec88f015e8f42b45c6404677dac0f5c0ebfbe603e3fcb2f"
     ),
     "factor_proc_residual_vol_60_v1@2026": (
-        "c98e909d83f1a49c2ae05d52173ec48e5a25a17dc7d3dfbf1328480c0095321c"
+        "0bc8a30519f3c0e7e88a788273d1eeadb8f20b4a769b47fd44bbad62267bdfb4"
     ),
     "factor_proc_return_on_capital_ttm_v1@2026": (
         "02c85a1e5f8a4eaf98b6d7e36e67a604d27452070631f2ceca64ed688669d780"
@@ -910,7 +922,7 @@ STORED_BY_SINGLE_FACTOR_BUILDS_AT_8A18532: Final[dict[str, str]] = {
         "b7fd9fb60ba04f6b5af28cb718a25c0acdc881d33222914ff15fc97b162d7e0a"
     ),
     "factor_proc_return_vol_60_v1@2026": (
-        "a97320567217bb55331452edf99abfbaf67f69555c94c94973f82469ff030f71"
+        "49f1262bcb44d07622ca82143310780e6e585ab826bea5b8e90920cfd1d53640"
     ),
     "factor_proc_revenue_yoy_acceleration_v1@2026": (
         "bb13a99b88e39bedb1f59f1dc82172f7777a01010f2e01f0866b93caffdbea5a"
@@ -919,52 +931,52 @@ STORED_BY_SINGLE_FACTOR_BUILDS_AT_8A18532: Final[dict[str, str]] = {
         "3c36e68af074e2b4b87208b6597a2e8937de98e51e46964ab7ed09e470372d01"
     ),
     "factor_proc_reversal_1d_v1@2026": (
-        "308e37b509035c5563fe8e0bc3c311b97616f74449c8aa1790285530c99c3689"
+        "fe2144d0162d24414ca28b6ebbcae7bebe6027851a1ad9d5f6c7b16f5cfbcb59"
     ),
     "factor_proc_reversal_5_sessions_v1@2026": (
-        "da6c0164717353672a65d15d6213b1da1231711fe838a5cc0041ca3d20557cc4"
+        "f06a491e6f5ad34cc17a8b0d0c36b8aab20c7a89b2393a6bb1185bcfce958516"
     ),
     "factor_proc_sales_yield_ttm_v1@2026": (
-        "d0b5ff8ea8f52f7c1c741f8e209929c3f43d0b31bc8967f5f3463ba8c9f3725d"
+        "e43d23654b982c3736dfe0edd2593d95ebbd4a47fc27817f46d2f8670b4c69fc"
     ),
     "factor_proc_turnover_60_v1@2026": (
-        "d0fa48188413ec5428f59dc64d14104917b934af1a713f155d1a136a12441be6"
+        "b4c498a285ac7fc7d3f9e7a16eaa34b18f3a0ad99c47638030a7c8806d94feae"
     ),
     "factor_procmn_accruals_ttm_v1@2026": (
         "350b75aa592808a523ecfadae2fb8f2473cb3e7204a45c68d51c60889025f1d5"
     ),
     "factor_procmn_amihud_60_v1@2026": (
-        "4d417d9e9333a550e2531f37467aed1d993acf322a67d912d63a5137655f3cbd"
+        "efa0827ead1da569c55c2615a699c062b2cc4b35132076a512aff913ffa3fc68"
     ),
     "factor_procmn_book_to_price_v1@2026": (
-        "3eb18985cc589b5371359113590866c44700cd1c4c2211b8166a642753aa1f05"
+        "1c0f87b751061bc4da2df1f313a384a45e5ee44c89684cf5fd892d5dd48add7f"
     ),
     "factor_procmn_deducted_earnings_yield_ttm_v1@2026": (
-        "ac549c54a57c5329cabfb9cc09b4acfb231977ec4fb47afa2aecd083a0dc5b06"
+        "1b08237d3cdbc62df44d255341ba92c7a67aa8b2677fdccb93789487bbb6ad8c"
     ),
     "factor_procmn_downside_vol_60_v1@2026": (
-        "32a5af921853c4246a3107a44ea69deb9d38206f32045f09aa0f784859ef33fa"
+        "20671abc27a1f5eb975af7af8520e6eacf4cab8c52749f0b4a46f64e04a54dcc"
     ),
     "factor_procmn_earnings_yield_ttm_v1@2026": (
-        "665967a90f75ef8e5a7a9a9f249e99991d1679045cbd730a6f8a84773e40afde"
+        "12a95fa30f62e2c85957571ea62bb72f108d1bc40738f510749ddbc3c2ea8457"
     ),
     "factor_procmn_gross_margin_stability_v1@2026": (
         "923cf2ecd2a28c5dd0bc49b3bcfed711ffdfbd34611d725669a40c4026c16d53"
     ),
     "factor_procmn_momentum_120_sessions_v1@2026": (
-        "991a4e8949ed6a9823c55a94f61c65597b4411bfc8bfbb474cd49e6abf138602"
+        "13b9e4f41d74960608ab4ea0ec2a24fda34af9094d29b750a80f16f989a5a235"
     ),
     "factor_procmn_momentum_20_sessions_v1@2026": (
-        "492e7d950ac2aa73010be107ca095968b1715ccaf044beda54f1ee1b4564a491"
+        "45a62aa74170f9d510dfe56ddd384988a4cec26012c22d575c916d2bef26db9d"
     ),
     "factor_procmn_momentum_60_sessions_v1@2026": (
-        "28be53c78f5e04ecf282286dbbc31006e84cf8046eb6790e91e529a25c2c551a"
+        "dea8bc6b96349aa62c85d583049ba79769c4c4aa16e900350b4e7db1604b13be"
     ),
     "factor_procmn_net_profit_yoy_v1@2026": (
         "f3d023bcb4059da60d4fc3fea4e2d41f9e76f5aa886353536a1b58a5ca34df4c"
     ),
     "factor_procmn_residual_vol_60_v1@2026": (
-        "f99b32fb9b7e4e2bbcd175d1a1c61e90cf7835233bac30e7086597c29915dff5"
+        "eeb6ac965f19c490f6f9479814fa887defba4efb46936b90392673b8875ae3fc"
     ),
     "factor_procmn_return_on_capital_ttm_v1@2026": (
         "20ba6442f59297eda34ed8c95418082ac439f11c16e531290e69bfe07cba13e2"
@@ -973,7 +985,7 @@ STORED_BY_SINGLE_FACTOR_BUILDS_AT_8A18532: Final[dict[str, str]] = {
         "e63d5dae5dfb640a5d4dba7fcb084ffb21babb97f2596c766032e2f46d3d1aa0"
     ),
     "factor_procmn_return_vol_60_v1@2026": (
-        "860d3a4c6e3182fe3b2974fe1213cd426ff5a5abeb504398a6a8b3ba4ab906fc"
+        "008569d27f39d002bc9a1c8b5eebe6d07b2763be32f5e8f5b2940b277a4d865f"
     ),
     "factor_procmn_revenue_yoy_acceleration_v1@2026": (
         "653160e5be1cadde8aa259741cd3474d878df68b914df19a1194c03546330d5e"
@@ -982,16 +994,16 @@ STORED_BY_SINGLE_FACTOR_BUILDS_AT_8A18532: Final[dict[str, str]] = {
         "a81bcfed9241f2932185744c720eb58eb1fce2086e59f807236b190ea16f6cab"
     ),
     "factor_procmn_reversal_1d_v1@2026": (
-        "ebdd7a5d25d7e5e230cd71f860df87d5eecb57f60856a466e78909de450891d2"
+        "6caf00bb0db80a1356dc75780eeb80b3ed560917afc1739e6be20cc740dc91a7"
     ),
     "factor_procmn_reversal_5_sessions_v1@2026": (
-        "f3f1df331591debcc813384c0d59594e8632fc5ee6e84909f0111de042de4e0b"
+        "52cffe1f6701e37b5582cd2abc279c3c8574f599c9b992ba7c26bf03e08b24da"
     ),
     "factor_procmn_sales_yield_ttm_v1@2026": (
-        "57bf2b2b1e5c606a4c01edb71129dff06cdb1550ab683ca1f6f225b0a774db07"
+        "9816e3d280f9c9e177ff0eb908c4797b7e2675ebbf41380fee8b2ec9332588eb"
     ),
     "factor_procmn_turnover_60_v1@2026": (
-        "d6f34fc19454beab055a4d6113f40bb1bb53786fa7d81a46be52ec007e9025b9"
+        "d1e3e0661e010f203fa09a03343b52da2168c4ffd7876ccd92b22da554fb2c24"
     ),
 }
 """Every partition the 21 single-factor builds of this file's corpus stored **before**
@@ -1004,6 +1016,13 @@ single-factor build runs through the same `FactorBuildContext` the shared one do
 the build wrote before the context existed. Reproduced twice, independently (the review's probe and
 the implementer's run of it on an extracted `8a18532` tree), 126 of 126 equal. A change to the
 corpus generator above moves them and must re-pin them from `8a18532` the same way.
+
+**Re-pinned from `8a18532` by `V2-P6-034`**, when the price path stopped calling `math.sin`
+(`_daily_return`): `8a18532` checked out on its own, this file's corpus and `_single` run against
+its `src`, one fresh copy per factor, the catalog's `panel_partitions` read directly (it has no
+`partition_stamps`). The same run over the previous corpus reproduced all 126 previous pins first.
+84 moved -- the 14 factors that read `daily` or `daily_basic`, whose `close` the path sets -- and
+the 42 of the 7 statement-only factors did not, as on Linux and Windows before the fix.
 """
 
 
@@ -1034,6 +1053,48 @@ def test_every_partition_a_shared_build_writes_is_the_one_its_single_factor_buil
     assert together == STORED_BY_SINGLE_FACTOR_BUILDS_AT_8A18532
     assert alone == STORED_BY_SINGLE_FACTOR_BUILDS_AT_8A18532
     assert list(together_reports) == single_reports
+
+
+LIBM: Final[tuple[str, ...]] = (
+    "sin",
+    "cos",
+    "tan",
+    "atan",
+    "atan2",
+    "exp",
+    "expm1",
+    "log",
+    "log1p",
+    "log2",
+    "log10",
+    "pow",
+)
+"""The `math` functions the C library implements and IEEE 754 does not require correctly rounded."""
+
+
+def test_the_price_path_is_the_same_bits_whatever_the_c_library_rounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`V2-P6-034`: the pins above are bytes, so the corpus that feeds them must be bytes too.
+
+    The path used to step by `math.sin`, which the C library computes and IEEE 754 leaves free to
+    differ in the last place: macOS, glibc and the Windows CRT do, the corpus moved, and 84 of the
+    126 pinned partitions -- every factor that reads `daily` or `daily_basic` -- were stored
+    otherwise on Linux and Windows than on macOS. Each `math` function the C library implements
+    is moved by one unit in the last place here -- a platform whose library rounds the other way
+    -- and the path must not move a bit.
+    """
+    before = [_path(index, code) for index, code in enumerate(SECURITIES)]
+    for name in LIBM:
+        exact = getattr(math, name)
+        monkeypatch.setattr(
+            math, name, lambda *args, _exact=exact: math.nextafter(_exact(*args), math.inf)
+        )
+
+    assert [_path(index, code) for index, code in enumerate(SECURITIES)] == before
+    returns = [close / pre_close - 1.0 for path in before for close, pre_close in path.values()]
+    assert min(returns) < 0.0 < max(returns)
+    assert max(abs(value) for value in returns) <= 0.02 + 1e-12
 
 
 # --- sharing, counted ----------------------------------------------------------------------------

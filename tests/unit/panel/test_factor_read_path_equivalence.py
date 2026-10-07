@@ -200,6 +200,18 @@ def _batch(
     )
 
 
+def _daily_return(index: int, position: int) -> float:
+    """A return in [-2%, +2%] from integer arithmetic and one division, the same bits everywhere.
+
+    Not `math.sin`, which this was until `V2-P6-034`: the C library computes it, and macOS, glibc
+    and the Windows CRT round it differently in the last place, so the corpus -- and every pinned
+    partition that reads a price -- differed by platform. 401 is prime and the stride
+    `101 + 7 * index` is never a multiple of it here, so each security's returns cycle through
+    all 401 values, rising and falling, out of phase with every other security's.
+    """
+    return ((index * 37 + position * (101 + 7 * index)) % 401 - 200) / 10_000.0
+
+
 def _price_path(index: int, code: str) -> dict[date, tuple[float | None, float]]:
     """`(close, pre_close)` per traded session, `pre_close` the previous traded close."""
     path: dict[date, tuple[float | None, float]] = {}
@@ -209,7 +221,7 @@ def _price_path(index: int, code: str) -> dict[date, tuple[float | None, float]]
         if not _traded(index, code, day):
             continue
         previous = price
-        price *= 1.0 + 0.02 * math.sin(index * 1.7 + position * 0.9)
+        price *= 1.0 + _daily_return(index, position)
         position += 1
         close: float | None = price
         if code == NULL_CLOSE and day == NULL_CLOSE_ON:
@@ -495,18 +507,18 @@ def scratch(corpus: Path, tmp_path: Path) -> Iterator[Path]:
 
 
 STORED_BEFORE_THIS_CHANGE: Final[dict[str, str]] = {
-    "reversal_1d/v1": ("53a7211b10ed288907995cc7b0dde8506ebf4c83fe4cd69e982c933ce1e15ec4"),
-    "momentum_20_sessions/v1": ("93e6e57e0f7f267fce68a3b9abe607371685439308bce189de208aca6991dbf4"),
-    "momentum_60_sessions/v1": ("ff7608e199af7179ac913e3308f2bbc3cb38c6e1c15786c024856f28f0a3c35e"),
+    "reversal_1d/v1": ("e0a76a6547154a514bae891b085d211f889780620551102e97a0a1522174e312"),
+    "momentum_20_sessions/v1": ("5d168ffffdb4887cc8e86acdb1a7c886d61e477730fea971b7a9fc990f611fa7"),
+    "momentum_60_sessions/v1": ("7727d1ffeaaf7c9c8051ddf10fd674c434cedbd2ee882ed24c8d7ed0cf6a0ff3"),
     "momentum_120_sessions/v1": (
-        "7c367ba08c15822b97d0acb8a4aad1a2403ce3aeb649b2da4a503cf9a8b1fd08"
+        "3e59848c6b47bb0878358a07d7222bcb6bb4ee6caf22023816f8077d8267f90c"
     ),
-    "reversal_5_sessions/v1": ("94acbe7c1063f41b42ad697baa1e474caaf67000054120786c0d0194b89b08d9"),
-    "return_vol_60/v1": ("72d5f88b633674fa213348f067c4f94f70efd1456caa4546ca0ed2d801d4be27"),
-    "downside_vol_60/v1": ("2fbb2c4725234aa926a02988ca4262c3191920c9e5c05f582858ee8c53963513"),
+    "reversal_5_sessions/v1": ("21cd18fff876fbb009ed873968aa97b1e8897b109a80a7eb438cb6189521e70d"),
+    "return_vol_60/v1": ("5787956153fe2ea3dc102c31bf0f90a2dd5766f83b96844b76d8124a469eb9c8"),
+    "downside_vol_60/v1": ("29772fd0e45059f32510b1f2197ad0e66249bd0e01ba20bfee9d2cfba9c21892"),
     "turnover_60/v1": ("8300ffb73f8f701a9d816afad0b60e43464ecbfb6779d3a8ae41106199f4d590"),
-    "amihud_60/v1": ("82fa72a1d92c6cf3819d5f7bdea5cc024eee4161613fbcd532dd489e6b355c22"),
-    "residual_vol_60/v1": ("c37d4203d1d145251de98b28cd811adf9737d654af8d7d6c07dab34d6d81149f"),
+    "amihud_60/v1": ("98d8dfffd8839a7a1dda09c0769e0505596eafb3150cfbadf245879013dc5336"),
+    "residual_vol_60/v1": ("27401665660e85b82972b62f14b8ecbdb00e8c1bb2d644833ced468b5eb28403"),
     "earnings_yield_ttm/v1": ("c1414839e02165dc8445d1ad91473db153ed8685ed74fe245cfefba42371f4f3"),
     "book_to_price/v1": ("72cc5e25c428a3178df41c25d97f655cf74761a72097298c974be41bc60e7f98"),
     "sales_yield_ttm/v1": ("0c48e5d3ae9df10c4e5aa10e8b07bd5952b657845e3d6b0bf378462fb2d223b8"),
@@ -532,6 +544,12 @@ STORED_BEFORE_THIS_CHANGE: Final[dict[str, str]] = {
 The commit before `V2-P6-005` touched the read path, running exactly `_stored_digest` over this
 file's corpus. Pinned rather than recomputed because a reference computed by the code under test
 is that code agreeing with itself; these are what the old read path wrote.
+
+**Re-measured at `cf7ba05` by `V2-P6-034`**, when the corpus's price path stopped calling
+`math.sin` (`_daily_return`): `cf7ba05` checked out on its own, this file's corpus and
+`_stored_digest` run against its `src` with a fresh read at every instant (it has no
+`FactorReadCarry`). The same run over the previous corpus reproduced all 21 previous pins before
+the new ones were taken; the 9 factors that read `daily` moved and the 12 that do not are unchanged.
 """
 
 
@@ -544,6 +562,54 @@ def test_every_factor_stores_the_partitions_it_stored_before_the_read_path_chang
 
 def test_the_pinned_table_names_every_declared_factor_and_nothing_else() -> None:
     assert set(STORED_BEFORE_THIS_CHANGE) == set(FACTOR_DEFINITIONS.qualified_keys)
+
+
+LIBM: Final[tuple[str, ...]] = (
+    "sin",
+    "cos",
+    "tan",
+    "atan",
+    "atan2",
+    "exp",
+    "expm1",
+    "log",
+    "log1p",
+    "log2",
+    "log10",
+    "pow",
+)
+"""The `math` functions the C library implements and IEEE 754 does not require correctly rounded."""
+
+
+def test_the_price_path_is_the_same_bits_whatever_the_c_library_rounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`V2-P6-034`: the pins above are bytes, so the corpus that feeds them must be bytes too.
+
+    The path used to step by `math.sin`, which the C library computes and IEEE 754 leaves free to
+    differ in the last place: macOS, glibc and the Windows CRT do, the corpus moved, and every
+    factor that reads a price stored other partitions on Linux and Windows than the macOS pins
+    (`STORED_BEFORE_THIS_CHANGE`). Each `math` function the C library implements is moved by one
+    unit in the last place here -- a platform whose library rounds the other way -- and the path
+    must not move a bit. `+ - * /` and `math.sqrt` are correctly rounded everywhere and stay
+    untouched.
+    """
+    before = [_price_path(index, code) for index, code in enumerate(SECURITIES)]
+    for name in LIBM:
+        exact = getattr(math, name)
+        monkeypatch.setattr(
+            math, name, lambda *args, _exact=exact: math.nextafter(_exact(*args), math.inf)
+        )
+
+    assert [_price_path(index, code) for index, code in enumerate(SECURITIES)] == before
+    returns = [
+        close / pre_close - 1.0
+        for path in before
+        for close, pre_close in path.values()
+        if close is not None
+    ]
+    assert min(returns) < 0.0 < max(returns)
+    assert max(abs(value) for value in returns) <= 0.02 + 1e-12
 
 
 def _one(
