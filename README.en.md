@@ -221,6 +221,44 @@ segmented` are `CLI_ONLY`: their SDK twins exist and no route does yet. `panel b
 `jobs register` and `jobs run` must **not** become routes while this API is unauthenticated. A
 command added without updating that table is red and names itself; prose about a gap is not.
 
+## The selection workflow (P6)
+
+P6 joins the whole chain: a multi-year whole-market panel, 21 factors in three tiers, a
+pre-registered three-stage study, one holdout, a daily command that prints a candidate list and
+registers its scores, and a weekly forward report. **The wording is always "candidate"**: nothing
+here places an order or forecasts a return.
+
+**The holdout did not pass.** The configuration the protocol (`docs/research/p6-protocol.md`)
+chose -- walk-forward gradient-boosted scoring, 50 names, rebalanced every 20 sessions, industry
+cap 20% -- failed all three criteria on the one holdout run over 2024-01-02..2026-09-24: compounded
+annualized return relative to the equal-weight all-A benchmark, net of cost, −4.0% (must be > 0);
+one-sided p 0.73 (must be < 0.05); max relative drawdown 19.3% (must be ≤ 12.4%). No configuration
+passed multiple-testing control in the research or validation windows either. **The daily list
+therefore carries no evidence of excess return and is not a basis for investing**; it exists to
+be tracked forward. Every table, family size, FDR table, the two superseded runs and the
+disclosures are in `docs/research/p6-results.md`.
+
+1. **Panel and factors.** Keep the research store outside the repository (for example
+   `~/openalpha-research`), backfill it with the panel commands above and build the factors for
+   every session of the research window. Both standing detectors must answer `none`
+   (`openalpha factor stale-return-paths`, `openalpha factor stale-statement-builds`); otherwise run
+   the `--supersedes-*` rebuilds they print.
+2. **The pre-registered study.** `scripts/research/p6.py` runs `discovery → survivors →
+   composition-sources → composition-strategies → finalists → validation → register → holdout →
+   holdout-verdict` against a ledger outside the repository (`--ledger`, `--workers N`); stage 2 and
+   validation must finish on one commit, and `holdout` runs once, only after the registration
+   written by `register` is committed. `scripts/render_p6_results.py r3 OUT.md` regenerates every
+   table of the results report from the ledgers.
+3. **One command a day.** Run it from a worktree pinned to the registration commit
+   (`scripts/daily_selection.py --pin-worktree ~/openalpha-daily` builds its own environment
+   offline and links the checkout's `.env` into it), with `--env-file .env` from inside that
+   worktree. A second run of a complete day sends no request and writes nothing. The launchd job is
+   printed, never installed. See `docs/runbooks/daily-selection.zh-CN.md`.
+4. **The weekly forward report.** `scripts/forward_report.py`, from the same worktree, reports the
+   registered predictions net of cost with a sign-flip p-value
+   (`docs/runbooks/forward-report.zh-CN.md`). The forward period is the next test; the wording does
+   not change before it is passed.
+
 ## Development gates
 
 ```bash

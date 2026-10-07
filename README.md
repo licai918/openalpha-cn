@@ -1158,6 +1158,59 @@ uv run openalpha portfolio turnover-variants sla_0123456789abcdef01234567 \
 复**，修复要花掉 band 刚省下的换手。`--cost-per-unit-turnover` 没有默认值：不声明就只报换手，并说
 明为什么没有金额；编一个费率出来会被乘到报告里每一个换手数字上。
 
+## 选股工作流（P6）：从回填到每日候选榜与周报
+
+这一节把 P6 的整条链串起来：多年全市场面板 → 21 个因子三档 → 预登记的三阶段研究 → 一次性保留期 →
+每天一条命令出候选榜并登记预测 → 每周前向报告。**措辞始终是「候选」**：这条链不下单，不给任何预期收益。
+
+**保留期结论：不通过。** 预登记协议（`docs/research/p6-protocol.md`）选出的配置——walk-forward 梯度提升
+打分、持仓 50、每 20 个交易日调仓、行业上限 20%——在 2024-01-02..2026-09-24 的一次性保留期里三条判据全部
+不满足：扣成本后复合年化相对全 A 等权 −4.0%（须 > 0）、单侧 p 0.73（须 < 0.05）、最大相对回撤 19.3%
+（须 ≤ 12.4%）。研究期与验证期里也没有任何配置通过多重检验。**所以每日榜单没有超额收益的证据，不应作为
+投资依据**；它的用途是前向跟踪，为下一次检验积累样本。全部表格、家族大小、FDR 表、被取代的两轮运行与披露
+见 `docs/research/p6-results.md`。
+
+1. **面板与因子。** 研究库放在仓库外（例如 `~/openalpha-research`）。面板按上文「面板数据平面的三个命令」
+   回填到当年，再对研究窗口的每个交易日 `openalpha factor build`。两个常设检测命令必须回答 `none`，否则
+   按它们打印的 `--supersedes-*` 命令重建：
+
+   ```bash
+   uv run openalpha factor stale-return-paths --runtime-dir ~/openalpha-research
+   uv run openalpha factor stale-statement-builds --runtime-dir ~/openalpha-research
+   ```
+
+2. **预登记研究。** 协议先提交、再跑；账本放在仓库外，驱动脚本拒绝写进仓库内的账本，并在每次追加前核对
+   代码提交没有变：
+
+   ```bash
+   uv run python scripts/research/p6.py discovery --runtime-dir ~/openalpha-research \
+     --ledger ~/openalpha-research/research/r3/p6-ledger.jsonl --workers 8
+   ```
+
+   阶段依次是 `discovery → survivors → composition-sources → composition-strategies → finalists →
+   validation → register → holdout → holdout-verdict`。阶段 2 与验证期必须在同一个提交上跑完；`register`
+   写出 `docs/research/p6-registration.json`，**先提交它**，`holdout` 才会运行，且只运行一次。
+   `scripts/render_p6_results.py r3 OUT.md` 从账本复算结果报告里的全部表格。
+
+3. **每日一条命令。** 在一个钉在登记提交上的专用 worktree 里运行（离线建它自己的环境，并建一个指向主检出
+   `.env` 的符号链接，凭据只经 `uv run --env-file` 传给子进程）：
+
+   ```bash
+   uv run --no-sync python scripts/daily_selection.py --pin-worktree ~/openalpha-daily
+   ```
+
+   ```bash
+   cd ~/openalpha-daily && UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv/bin/python" scripts/daily_selection.py --runtime-dir ~/openalpha-research
+   ```
+
+   它更新面板、体检、构建当日因子、出候选榜与目标权重、在次日 09:15 之前登记预测；同一天再跑一次不发请求、
+   不写文件。定时（launchd）配置只打印、不安装，是否安装由你决定。细节见
+   `docs/runbooks/daily-selection.zh-CN.md`。
+
+4. **每周前向报告。** 同一个 worktree 里运行 `scripts/forward_report.py`，按已登记预测的实际表现给出扣成本
+   超额与 sign-flip p 值（`docs/runbooks/forward-report.zh-CN.md`）。前向期才是下一次检验；在前向数据上
+   通过之前，榜单的措辞不会升级。
+
 ## 核心独特优势
 
 OpenAlpha CN 整合 TradingAgents 和 AI Hedge Fund 的优势，接入 A 股数据源，更适合 A 股涨停量化分析。OpenAlpha CN 的竞争重点不是复制更多“投资大师人格”，而是：

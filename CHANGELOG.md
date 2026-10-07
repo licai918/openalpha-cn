@@ -4,6 +4,51 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### P6 — selection ready (`V2-P6-001` … `V2-P6-029`)
+
+The project now runs end to end from a multi-year whole-market panel to a registered daily
+candidate list. **The research result is negative and is reported as such**: the one
+pre-registered holdout did not pass, so the daily list is a candidate with no evidence of excess
+return. `docs/research/p6-results.md` holds every table; the wording stays "candidate".
+
+- **Research outcome (`V2-P6-009`, `V2-P6-010`).** The protocol (`docs/research/p6-protocol.md`,
+  committed before any research run, four version records each written before the re-run it
+  governs) ran in `research/r3/` on one frozen commit. Stage 1: 189 single-factor configurations,
+  BY rejected 21 (all negative excess), none survived. Stage 2: 54 configurations, BY rejected
+  none. Validation chose walk-forward / hold 50 / rebalance 20 / industry cap 0.2. The holdout
+  (2024-01-02..2026-09-24, registered at `aebaac5`, run once) failed all three criteria:
+  compounded annualized relative return −0.0400 (> 0), one-sided p 0.7287 (< 0.05), max
+  relative drawdown 0.1933 (≤ 0.1240). Two superseded runs are listed in full in the report: the
+  first used a benchmark no one could hold (`V2-P6-024`), the second (`r2`) had its holdout refused
+  before measuring anything because statement factors read too few announcement years
+  (`V2-P6-027`). `scripts/render_p6_results.py` regenerates every table from the ledgers and
+  checks each artifact's `stage_rows_sha256`.
+- **Daily command (`V2-P6-011`) and forward report (`V2-P6-012`).** `scripts/daily_selection.py`
+  updates the panel, checks it, builds the day's factors, prints the candidate list and target
+  weights and registers the scores before 09:15 of the next session; a second run of a complete
+  day sends no request and writes nothing (measured on the research store: 92 requests, then 0,
+  2663 files unchanged). It runs from a worktree pinned to the registration commit
+  (`--pin-worktree`). `scripts/forward_report.py` reports registered predictions net of cost with
+  a sign-flip p-value. **`V2-P6-029`**: uv splits `--env-file` on spaces, so the generated launchd
+  job and the runbook command failed on any checkout path with a space; `--pin-worktree` now links
+  the checkout's `.env` into the pinned worktree (never reading it) and the job loads a relative
+  `.env`.
+- **Panel (`V2-P6-001`–`005`, `013`, `015`–`021`, `028`).** Whole-market statement scans,
+  intra-year incremental updates byte-identical to a full rebuild, columnar inserts, a faster
+  factor read path, named records for reproducible upstream defects, the industry classification
+  in force on each day (SW2014 until 2021-12-10, SW2021 after), and a process-safe panel catalog
+  (cross-process read/write lock, group writes with compare-and-swap, `PanelWriteConflictError` →
+  CLI exit 6 / API 503).
+- **Factors and models (`V2-P6-006`, `014`, `022`, `025`–`027`).** Rolling-IC and walk-forward
+  scoring sources, walk-forward on real historical windows, a per-process fit cache keyed on
+  every input the fit depends on, and statement factors that read the full stored history under a
+  statutory-deadline recency rule, with standing detectors
+  (`openalpha factor stale-statement-builds`, `stale-return-paths`) that print the rebuilds.
+- **Research machinery (`V2-P6-007`, `008`, `023`, `024`).** A net-of-cost multi-year backtest, a
+  research driver whose ledger lives outside the repository and whose holdout runs once, pooled
+  measurement (`--workers N`) with the ledger unchanged row for row, and a holdable equal-weight
+  benchmark.
+
 ### Fixed
 
 - **Portfolio construction read a shortlist-wide rank as a position within the list it was
