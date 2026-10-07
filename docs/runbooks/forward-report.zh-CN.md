@@ -12,6 +12,7 @@
 2. 登记文件自身的 `config_id` 与它的 `config` 字段重新算出来的一致（防止登记文件被人手改过一半）；`settings.random_seed`（若存在）从登记文件读,本报告不另外选。
 3. 运行的解释器与已安装的包，和登记文件的 `.python-version`/`uv.lock` 一致（`daily_selection.admit_environment`，每日命令用的同一个检查）。
 4. 每日选股命令已经跑过至少一天，且至少完成过一次调仓：预测库（`<runtime-dir>/predictions`）里有这份登记绑定的记录，日志（`<runtime-dir>` 下每日命令自己的日志目录）里有对应的调仓日。
+5. 首个调仓日之后至少还要有一个交易日，且面板已发布到那一天：账本最早从首个调仓日的下一个交易日开盘才开始持有，面板已发布的最新交易日不晚于首个调仓日时没有可以交易的一天，报告以 `ForwardReportError`（信息里写着 `is not after the first rebalance day`）退出 1。2026-09-30 是首个调仓日，紧接着国庆休市，这期间运行本报告就是这种情形；节后第一个交易日的数据入库后再跑即可，不是故障。
 
 ## 手动运行
 
@@ -48,5 +49,7 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 - **`statistics.excluding_unverifiable`**：同一本账,去掉被标记记录开的那些期——同一条路径的子集,不是重新跑一遍（后面几期仍然沿用它们实际发生时的持仓与成本）,用来看订正是否真的影响了结论。
 - **`unprovable_holds`**：第一条记录之前、日志说「空仓」的那些日子——没有记录,无法从库里证明,只是列出来,不计入统计。
 - **`integrity`**：固定的威胁模型说明（`daily_selection.INTEGRITY`）——这些检查防的是正常运行下的误差、程序缺陷、意外损坏与上游数据订正,不防有权限直接改本地磁盘的人蓄意篡改;那需要外部的、仅可追加的见证,这份报告没有。
+
+**头条那一行的标签（`V2-P6-030`）**：打印输出里 `statistics.all_periods` 那一行的标签现在是 `headline: the candidate book as listed`——当日列出的候选组合按原样计价，是候选，不是推荐。钉在登记提交 `aebaac5` 上的 worktree 运行的是登记时的代码，仍然打印旧标签 `headline: the book as recommended`；它指的同样是当日的候选组合，不是推荐。数字与 JSON 字段都没有变，下一次登记后，钉住的 worktree 随代码一起换成新标签。
 
 报告同时写入 `<runtime-dir>/reports/forward-<报告日期>.json`。

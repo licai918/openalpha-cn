@@ -1678,7 +1678,7 @@ def forward_summary_lines(summary: Mapping[str, Any]) -> list[str]:
     for entry in flagged["records"]:
         lines.append(f"  {entry['record_id']} corrected: {', '.join(entry['corrected'])}")
     labels = (
-        ("all_periods", "headline: the book as recommended"),
+        ("all_periods", "headline: the candidate book as listed"),
         (
             "excluding_unverifiable",
             f"sensitivity: the same book's periods excluding {flagged['count']} unverifiable "

@@ -165,7 +165,7 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 
 - 首先是 `unverifiable_inputs_corrected_after_filing` 的条数，以及每条记录被更正的分区。
 - 然后是两套统计，按角色标明：
-  - `headline: the book as recommended`：当时推荐的那本账，包含所有期；
+  - `headline: the candidate book as listed`：当日列出的候选组合按原样计价的那本账，包含所有期；是候选，不是推荐（`V2-P6-030`；钉在登记提交 `aebaac5` 上的 worktree 仍打印旧标签 `headline: the book as recommended`，含义相同）；
   - `sensitivity: …`：同一本账的各期里，剔除由这类记录开启的那些期（复利净收益、期均净收益、各基准的复利收益）。它是同一条路径的子集，不是重跑：之后各期仍带着被剔除那些期留下的持仓和成本。
   - 两套都要打印，读者才看得出这些更正是否影响结论。
 - 接着是显著性检验，两套统计各做一次（fix round 15、16）：用持有期检验自己的函数 `grid.strategy_result`，每套统计只调用一次：对不重叠各期相对登记里 `excess_benchmark` 的净超额（按登记时记下的名字：现行协议是 `equal_weight_all_a_held`，全 A 等权同期持有——一个无摩擦的名义账本，每期执行日开盘卖出上期成员、等额买入本期能买进的全部股票，V2-P6-024；在那之前的登记记的是逐日再平衡的 `equal_weight_all_a`，仍按它读，前瞻账面会把登记记下的基准一并计价；登记里没有 `excess_benchmark` 就拒绝，不用默认值。执行日的 `adj_factor` 或 `stk_limit` 还没入库时这一期基准没有成员，整份前向报告会被拒绝——补建这两个数据集后重跑，见前向周报运行手册）做符号翻转检验（给出单侧 p），`bootstrap_samples`、`random_seed` 取自登记的 settings（缺了、或者是 bool，都拒绝，不用默认值）。000905.SH 取同一个结果的 `reported_*` 键，与单独按它算出的数字相同；按协议它只并列报告，不做检验。只检验完整的期（交易日数不少于登记的调仓间隔）；各期是命令实际调仓的日子，长度未必相等，所以每个被检验的期都打印它的交易日数。较短的期（账面还开着的最后一期、补做调仓后的那一期）在统计里照样显示，但不进检验，输出里写明这一点和被排除的期数。一套统计没有完整的期，或者某个基准没有收益，就写明「不检验」或「不报告」及原因。
@@ -325,6 +325,8 @@ uv run --no-sync python scripts/daily_selection.py --pin-worktree ~/openalpha-da
 ```bash
 uv run --no-sync python scripts/daily_selection.py --runtime-dir ~/openalpha-research --worktree ~/openalpha-daily --launchd-plist ~/openalpha-research/logs
 ```
+
+**`--launchd-plist` 必须在主检出里运行，不要在钉住的 worktree 里运行（`V2-P6-030`）。** 主检出要在含 `V2-P6-029` 修复的提交上（即上面那条命令，不带 `--pin-worktree`）。钉住的 worktree 是登记时的旧代码：它会把 `<worktree>/.env` 这个符号链接 `.resolve()` 成主检出里含空格的绝对路径写进 `--env-file`，uv 按空格拆分它，生成的定时任务每天都会失败。
 
 配置里没有 shell：`ProgramArguments` 就是 launchd 交给 exec 的参数向量，解释器是钉住的 worktree 自己的 `<worktree>/.venv/bin/python`（`uv run --no-sync` 只用来读 `--env-file`），`WorkingDirectory` 是钉住的 worktree，`EnvironmentVariables` 只设 `UV_PROJECT_ENVIRONMENT=<worktree>/.venv` 和 `PATH`——不设 `PYTHONPATH`，也不指向任何共用环境。
 

@@ -3042,7 +3042,9 @@ def test_a_label_restated_after_filing_makes_a_record_unverifiable_and_still_pri
     assert statistics["excluding_unverifiable"]["periods"] == 0
     lines = daily.forward_summary_lines(summary)
     assert lines[0] == "unverifiable_inputs_corrected_after_filing: 1 record(s)"
-    assert any(line.startswith("headline: the book as recommended:") for line in lines)
+    assert any(line.startswith("headline: the candidate book as listed:") for line in lines)
+    # Candidates, not recommendations (V2-P6-030): no printed line calls the book recommended.
+    assert not any("recommend" in line.lower() for line in lines)
     assert any(
         line.startswith(
             "sensitivity: the same book's periods excluding 1 unverifiable records (a subset of "

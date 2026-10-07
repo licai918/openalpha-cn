@@ -38,11 +38,11 @@ filing is shown. None of that is re-derived here anymore.
   calendar is read through the next year when stored (`daily_selection._outcome_calendar`'s
   rule), so a period that ends in January can be placed on 31 December.
 - **What the evidence means**: `daily_selection.forward_summary` /
-  `daily_selection.forward_summary_lines` -- the book as recommended, the same book's statistics
-  excluding the periods an unverifiable record opened, each tested as the holdout tested it
-  (`grid.strategy_result` under the registration's own settings), the unprovable holds before the
-  first record, and `daily_selection.INTEGRITY`, the threat model stated on every forward report.
-  This module renders exactly that; it computes no statistic of its own.
+  `daily_selection.forward_summary_lines` -- the candidate book as listed, the same book's
+  statistics excluding the periods an unverifiable record opened, each tested as the holdout
+  tested it (`grid.strategy_result` under the registration's own settings), the unprovable holds
+  before the first record, and `daily_selection.INTEGRITY`, the threat model stated on every
+  forward report. This module renders exactly that; it computes no statistic of its own.
 - **Admission**: `daily_selection.admit_registration` itself, with this file added to what the
   registration binds (`also_bound`) -- the registry's code-binding check (`V2-P6-008`), the
   running environment against the registration's `.python-version` and `uv.lock`, and the
