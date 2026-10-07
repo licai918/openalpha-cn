@@ -4,7 +4,7 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
-### P6 — selection ready (`V2-P6-001` … `V2-P6-032`)
+### P6 — selection ready (`V2-P6-001` … `V2-P6-033`)
 
 The project now runs end to end from a multi-year whole-market panel to a registered daily
 candidate list. **The research result is negative and is reported as such**: the one
@@ -55,6 +55,9 @@ return. `docs/research/p6-results.md` holds every table; the wording stays "cand
   research driver whose ledger lives outside the repository and whose holdout runs once, pooled
   measurement (`--workers N`) with the ledger unchanged row for row, and a holdable equal-weight
   benchmark.
+- **Web audit gate (`V2-P6-033`).** Five new high advisories in transitive dev dependencies
+  (undici, brace-expansion, source-map-js) turned CI's `pnpm audit --audit-level high` red with no
+  change on this side; the override floors in `web/pnpm-workspace.yaml` move to the fixed versions.
 
 ### Fixed
 
