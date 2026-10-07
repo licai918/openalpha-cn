@@ -1,0 +1,28 @@
+{
+  "//": [
+    "V2-P5-021. The e2e directory was in no tsconfig at all, so `tsc -b` never read it.",
+    "That was tolerable while `e2e/` held two spec files of literals; it is not once the",
+    "directory holds page objects that import the app's own `src/routes.ts` and",
+    "`src/test/fixtures.ts` — a contract change would then break the browser tests at run",
+    "time, in a suite that takes a minute, instead of at `tsc -b`, which is the point of",
+    "importing them. `DOM` is in `lib` because the overflow check runs `page.evaluate` over",
+    "`document`."
+  ],
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "allowJs": false,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["e2e"]
+}

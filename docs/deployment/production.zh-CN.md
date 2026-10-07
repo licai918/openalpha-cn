@@ -46,10 +46,34 @@ Invoke-RestMethod http://127.0.0.1:8000/health
 |---|---|---|
 | `OPENALPHA_PORT` | `8000` | 主机回环端口 |
 | `OPENALPHA_RUNTIME_DIR` | `/data` | 容器内持久目录 |
-| `OPENALPHA_MAX_REQUEST_BYTES` | `8388608` | 声明的最大请求体 |
+| `OPENALPHA_MAX_REQUEST_BYTES` | `33554432` | 声明的最大请求体（32 MiB），见 §8 |
 | `TUSHARE_TOKEN` | 空 | 用户自带 Tushare Token |
+| `CHAINLIN_API_BASE_URL` / `CHAINLIN_API_KEY` | 空 | 链邻数据接口地址与密钥 |
 
-真实 Token 不写入 Compose 文件、Git、Issue、日志或截图。需要 Provider 时，使用本机 `.env` 或操作系统/平台密钥存储。
+`deploy/compose.yml` 会把上述 Provider 凭据变量，以及 `.env.example` 中"Optional model
+providers"下列出的模型密钥（`OPENAI_API_KEY` 等），原样透传进容器；容器内未设置时即为空
+字符串，不会因此报错。数据 Provider 凭据缺失时由 `doctor` 报告；模型密钥则没有任何读取方：
+`src/` 中没有代码读取这五个变量，出厂路径（CLI、REST API、Web 工作台、SDK 默认配置）不调用
+模型，只有你自己的 SDK 代码构造 `OpenAICompatibleProvider(api_key_env=...)` 时才会读到其中
+一个。
+
+`Dockerfile` 的 `ENV OPENALPHA_HOST=0.0.0.0` / `OPENALPHA_PORT=8000` 现在由容器
+`CMD` 实际读取（`--host "${OPENALPHA_HOST:-0.0.0.0}" --port "${OPENALPHA_PORT:-8000}"`），
+不再被硬编码的 `--host`/`--port` 参数架空。`deploy/compose.yml` 不在 `environment:` 里
+覆盖这两个变量（容器内绑定地址必须固定为 `0.0.0.0`，Docker 的端口映射才能生效；主机侧端口
+仍然只由 `ports:` 里的 `OPENALPHA_PORT` 控制），因此这项修复只影响绕过 Compose、直接
+`docker run` 该镜像并显式设置 `-e OPENALPHA_PORT=...` 的场景——之前这样做完全无效，现在会
+真正生效。
+
+设置方式二选一：
+
+1. 在执行 `docker compose` 的 Shell 中直接导出该变量（PowerShell: `$env:TUSHARE_TOKEN = "..."`；
+   bash/zsh: `export TUSHARE_TOKEN=...`），再执行 `docker compose up`；
+2. 在 `deploy/` 目录下（与 `compose.yml` 同级）新建 `.env` 文件。Docker Compose 的项目目录
+   默认取自 `-f` 指定的第一个 Compose 文件所在目录，因此按“方式二：Python 源码环境”创建在
+   仓库根目录的 `.env` **不会**被这里的 `docker compose -f deploy/compose.yml` 自动读取。
+
+真实 Token 不写入 Compose 文件、Git、Issue、日志或截图，也不要提交 `deploy/.env`。
 
 ## 5. 数据持久化与恢复
 
@@ -72,7 +96,7 @@ docker compose -f deploy/compose.yml up -d --wait
 uv run python scripts/verify_compose_recovery.py
 ```
 
-脚本使用唯一临时 Compose 项目，写入合成证据、重启、复查同一 `evidence_id`，最后只删除它自己创建的临时容器、网络和卷。
+脚本使用唯一临时 Compose 项目：先在运行中的容器里核对 §8 列出的容器安全边界，再写入合成证据、重启、复查同一 `evidence_id`，最后只删除它自己创建的临时容器、网络和卷。
 
 ### 备份
 
@@ -109,12 +133,35 @@ docker compose -f deploy/compose.yml up -d --build --wait
 - 只读根文件系统；
 - `cap_drop: ALL`；
 - `no-new-privileges:true`；
-- 仅 `/data` 可持久写入，`/tmp` 为受限 tmpfs；
-- CSP、禁止 iframe、MIME 嗅探、Referrer/Permissions/COOP 响应头；
-- 8 MiB 默认请求上限；
-- CORS 只允许本地 Vite 开发源。
+- 仅 `/data` 可持久写入，`/tmp` 为受限 tmpfs（64 MiB，`nosuid`、`nodev`、`noexec`；后三项是 Docker
+  给每个 tmpfs 的默认挂载选项，compose 没有声明）；
+- CSP、禁止 iframe、MIME 嗅探、Referrer/Permissions/COOP/COEP/CORP/HSTS 响应头，按名**替换**而非追加，
+  路由无法给同一个策略头再加一个值（`V2-P5-012`）；
+- 32 MiB 请求上限，两道闸：声明了 `Content-Length` 的在读体之前拒，未声明长度的（chunked）边收边计数、
+  到顶即停止读取（`V2-P5-012`；此前 chunked 可完全绕过）。**这个数字在 `Dockerfile` 与 `compose.yml`
+  的环境变量里被显式设定，也就是说它覆盖 `config.py` 的默认值**：`V2-P4-043` 把默认抬到 32 MiB 时
+  只改了 `config.py`，两个容器文件都停在旧值，于是出货容器实测仍以旧上限拒绝一个 `MAX_BATCH_ITEMS`
+  批量（9,840,054 字节，正是该行自己的实测）—— `V2-P5-012` 一并修正，并由
+  `test_every_deployment_that_sets_the_ceiling_sets_the_one_this_service_declares` 钉住；
+- `openalpha serve` 与容器 `CMD` 一样不发 `server:` 头（`V2-P5-012`）；
+- CORS 只允许本地 Vite 开发源，方法覆盖 `GET/HEAD/POST/PUT/PATCH/DELETE`，不带凭据（`V2-P5-011`）。
 
-若跨机器开放，必须在反向代理增加 TLS/HSTS、认证、授权、限流、审计日志和网络 ACL。当前 API 不能裸露到公网。
+前五条是容器本身的属性，都在 Compose 实际起的容器里核对；除 `/tmp` 的 `nosuid`、`nodev`、`noexec`
+（compose 里没有它们，只有运行时看得到）外，也都核对文件里的声明。`tests/unit/test_container_security_posture.py`
+核对 `deploy/compose.yml` 与 `Dockerfile` 的声明：按结构读取而不是子串匹配，注释掉或挪走的键不算数，
+遇到读取器不认识的 YAML 写法、或服务用 `extends`/`volumes_from` 从别处拿配置，直接报错；
+`Dockerfile` 除 `/data` 外不许声明任何卷。
+`scripts/verify_compose_recovery.py`（CI 的 `container` 任务运行它）核对 Compose 实际起的容器：服务进程树
+与探针进程的 `/proc/<pid>/status`（四个 uid、四个 gid 都是 `10001`，五个能力集全为 0，`NoNewPrivs` 为 1），
+`/proc/self/mounts` 与真实写入（在 `/` 建文件得到 `EROFS`，`/data` 与 `/tmp` 可写，`/tmp` 带上述挂载选项；
+除 `/data` 外，每个持久文件系统的挂载——根文件系统、`/etc/hosts` 一类的绑定挂载、任何卷——选项里都是 `ro`，
+tmpfs、proc、sysfs 这类内存或内核视图不在此列），
+以及 `openalpha` 账户（uid/gid `10001`，home 为 `/nonexistent` 且不存在，shell 为 `/usr/sbin/nologin`，
+`/etc/shadow` 里只有锁定标记、没有口令散列）。
+
+若跨机器开放，必须在反向代理增加 TLS、认证、授权、限流、审计日志和网络 ACL。当前 API 不能裸露到公网。
+HSTS 头应用已自己发出，但按 RFC 6797 §7.2，非安全传输下用户代理必须忽略它 —— 换言之它只在反向代理已经终结
+TLS 时才生效，代理仍需负责 TLS 本身。
 
 ## 9. 监控
 

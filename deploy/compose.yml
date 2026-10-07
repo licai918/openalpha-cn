@@ -14,9 +14,48 @@ services:
     environment:
       OPENALPHA_RUNTIME_DIR: /data
       OPENALPHA_WEB_DIR: /app/web-dist
-      OPENALPHA_MAX_REQUEST_BYTES: ${OPENALPHA_MAX_REQUEST_BYTES:-8388608}
+      # 33554432 is `OpenAlphaConfig.max_request_bytes`'s declared default, and this line
+      # is configuration rather than documentation: it *overrides* that default inside the
+      # container. `V2-P4-043` raised the default and left this line at the value it
+      # replaced, so the shipped container still refused a MAX_BATCH_ITEMS batch (9,840,054
+      # bytes, that row's own measurement) with 413. Pinned against the declared default by
+      # tests/integration/test_batch_ceilings_are_documented_where_a_caller_looks.py.
+      OPENALPHA_MAX_REQUEST_BYTES: ${OPENALPHA_MAX_REQUEST_BYTES:-33554432}
+      # User-owned data provider credentials (see .env.example). Each uses a `:-`
+      # default so an unset host/`.env` variable still leaves `docker compose config`
+      # well-formed; Compose substitutes from the host shell environment first, then
+      # from a project `.env` file, so the same variable a user exports or puts in
+      # `.env` before `docker compose up` reaches the container either way.
+      TUSHARE_TOKEN: ${TUSHARE_TOKEN:-}
+      CHAINLIN_API_BASE_URL: ${CHAINLIN_API_BASE_URL:-}
+      CHAINLIN_API_KEY: ${CHAINLIN_API_KEY:-}
+      # Optional model providers (see .env.example). Nothing in this image reads these five:
+      # no module under src/ names any of them, and no shipped path -- CLI, REST API, Web
+      # workbench, SDK defaults -- calls a model. A key is read only by an
+      # OpenAICompatibleProvider built with `api_key_env` naming it, and only code a deployer
+      # writes builds one. They are passed through, with a safe default, for such code.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      QWEN_API_KEY: ${QWEN_API_KEY:-}
+      CUSTOM_MODEL_BASE_URL: ${CUSTOM_MODEL_BASE_URL:-}
+      CUSTOM_MODEL_API_KEY: ${CUSTOM_MODEL_API_KEY:-}
     volumes:
       - openalpha-runtime:/data
+    # 64 MB, unchanged, and `shm_size` deliberately unset -- both re-measured by V2-P4-015
+    # against the seam audit's F84, which asks for them to be enlarged.
+    #
+    # Nothing this image ships writes to either. `/tmp` is reached by no module under
+    # `src/` (no `tempfile`, no `TMPDIR` consumer) and `/dev/shm` exists, writable, at
+    # Docker's own 64 MB default -- F84 says there is none, and `grep /dev/shm
+    # /proc/mounts` inside the running container says otherwise. So a number raised here
+    # would be a number nobody measured, for a consumer that does not exist: the joblib
+    # spill F84 names arrives only with the dependency ADR-0003's V2-P4-015 section
+    # declined.
+    #
+    # The spill that IS real belongs to the DuckDB this repository already ships, it does
+    # not land in either of these, and enlarging a tmpfs is the wrong fix for it because a
+    # tmpfs is RAM. See the `WORKDIR /data` comment in the Dockerfile for the three-way
+    # reproduction and the fix.
     tmpfs:
       - /tmp:size=64m,mode=1777
     cap_drop:

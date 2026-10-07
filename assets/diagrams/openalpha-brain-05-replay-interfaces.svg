@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" role="img" aria-labelledby="title desc">
-  <title id="title">用同一路径回答：是否有效、为何有效、下一轮改什么</title>
-  <desc id="desc">实时研究与历史回放共享 run_cycle；统计、组合与产物层只消费可复核账本，反馈必须经人工审阅后进入规则。</desc>
+  <title id="title">三重验证回答：是否显著、组合表现如何、记录是否一致</title>
+  <desc id="desc">实时研究与历史回放共享 run_cycle；事件统计与多日组合用调用方提供的收益与订单，反馈经人工审阅后进入规则。</desc>
   <defs>
     <linearGradient id="bgGradient" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#091727" />
@@ -26,8 +26,47 @@
     <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
       <path d="M32 0H0V32" fill="none" stroke="#6D87A3" stroke-width=".55" opacity=".12" />
     </pattern>
-    <marker id="arrow" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
-      <path d="M0 0L11 5.5L0 11Z" fill="context-stroke" />
+    <marker id="arrow-2DD4BF" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L11 5.5L0 11Z" fill="#2DD4BF" />
+    </marker>
+    <marker id="arrowShort-2DD4BF" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L5 2.5L0 5Z" fill="#2DD4BF" />
+    </marker>
+    <marker id="arrow-38BDF8" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L11 5.5L0 11Z" fill="#38BDF8" />
+    </marker>
+    <marker id="arrowShort-38BDF8" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L5 2.5L0 5Z" fill="#38BDF8" />
+    </marker>
+    <marker id="arrow-A78BFA" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L11 5.5L0 11Z" fill="#A78BFA" />
+    </marker>
+    <marker id="arrowShort-A78BFA" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L5 2.5L0 5Z" fill="#A78BFA" />
+    </marker>
+    <marker id="arrow-FBBF24" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L11 5.5L0 11Z" fill="#FBBF24" />
+    </marker>
+    <marker id="arrowShort-FBBF24" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L5 2.5L0 5Z" fill="#FBBF24" />
+    </marker>
+    <marker id="arrow-FB7185" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L11 5.5L0 11Z" fill="#FB7185" />
+    </marker>
+    <marker id="arrowShort-FB7185" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L5 2.5L0 5Z" fill="#FB7185" />
+    </marker>
+    <marker id="arrow-A3E635" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L11 5.5L0 11Z" fill="#A3E635" />
+    </marker>
+    <marker id="arrowShort-A3E635" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L5 2.5L0 5Z" fill="#A3E635" />
+    </marker>
+    <marker id="arrow-263A52" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L11 5.5L0 11Z" fill="#263A52" />
+    </marker>
+    <marker id="arrowShort-263A52" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L5 2.5L0 5Z" fill="#263A52" />
     </marker>
     <style>
       text { font-family: Geist, "Plus Jakarta Sans", "Noto Sans SC", "Microsoft YaHei", sans-serif; }
@@ -36,6 +75,7 @@
       .subtitle { font-size: 16px; font-weight: 480; }
       .micro { font-size: 11px; font-weight: 760; letter-spacing: 1.25px; }
       .cardTitle { font-size: 20px; font-weight: 720; }
+      .cardTitleTight { font-size: 17px; font-weight: 720; }
       .body { font-size: 14px; font-weight: 490; }
       .small { font-size: 12px; font-weight: 520; }
       .mono { font-size: 12px; font-weight: 680; font-family: Geist Mono, "Noto Sans Mono CJK SC", monospace; }
@@ -50,17 +90,17 @@
   <rect width="1440" height="900" fill="url(#grid)" />
   <rect x="64" y="42" width="42" height="4" rx="2" fill="#38BDF8" filter="url(#softGlow)" />
   <text x="64" y="72" class="eyebrow" fill="#38BDF8">OPENALPHA CN · RESEARCH OS / 05</text>
-  <text x="64" y="115" class="title" fill="#F4F7FB">验证与反馈｜用同一路径回答：是否有效、为何有效、下一轮改什么</text>
-  <text x="64" y="148" class="subtitle" fill="#96A8BE">实时研究与历史回放共享 run_cycle；统计、组合与产物层只消费可复核账本，反馈必须经人工审阅后进入规则。</text>
+  <text x="64" y="115" class="title" fill="#F4F7FB">验证与反馈｜三重验证回答：是否显著、组合表现如何、记录是否一致</text>
+  <text x="64" y="148" class="subtitle" fill="#96A8BE">实时研究与历史回放共享 run_cycle；事件统计与多日组合用调用方提供的收益与订单，反馈经人工审阅后进入规则。</text>
   <g transform="translate(1210 50)" opacity=".92">
     <circle cx="44" cy="30" r="28" fill="#38BDF8" opacity=".09" />
     <path d="M18 42L40 20L56 32L75 11" fill="none" stroke="#38BDF8" stroke-width="2.2" />
     <circle cx="18" cy="42" r="4" fill="#38BDF8" /><circle cx="40" cy="20" r="4" fill="#38BDF8" />
     <circle cx="56" cy="32" r="4" fill="#38BDF8" /><circle cx="75" cy="11" r="4" fill="#38BDF8" />
   </g>
-  <line x1="898" y1="171" x2="938" y2="171" stroke="#2DD4BF" stroke-width="2.2" marker-end="url(#arrow)" />
+  <line x1="898" y1="171" x2="938" y2="171" stroke="#2DD4BF" stroke-width="2.2" marker-end="url(#arrow-2DD4BF)" />
   <text x="948" y="175" class="small" fill="#96A8BE" text-anchor="start" opacity="1">自动执行 / 持久化</text>
-  <line x1="1108" y1="171" x2="1148" y2="171" stroke="#FBBF24" stroke-width="2.2" stroke-dasharray="7 7" marker-end="url(#arrow)" />
+  <line x1="1108" y1="171" x2="1148" y2="171" stroke="#FBBF24" stroke-width="2.2" stroke-dasharray="7 7" marker-end="url(#arrow-FBBF24)" />
   <text x="1158" y="175" class="small" fill="#96A8BE" text-anchor="start" opacity="1">显式组合 / 人工反馈</text>
   <circle cx="76" cy="210" r="14" fill="#2DD4BF" fill-opacity=".16" stroke="#2DD4BF" stroke-opacity=".45" />
   <text x="76" y="214" class="navNum" fill="#2DD4BF" text-anchor="middle" opacity="1">A</text>
@@ -70,8 +110,8 @@
   <rect x="64" y="254" width="3" height="116" rx="1.5" fill="#2DD4BF" />
   <text x="88" y="261" class="micro" fill="#2DD4BF" text-anchor="start" opacity="1">LIVE RESEARCH</text>
   <text x="88" y="294" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">实时研究</text>
-  <text x="88" y="323" class="body" fill="#96A8BE" text-anchor="start" opacity="1">API / SDK / CLI / Web</text>
-  <text x="88" y="347" class="body" fill="#96A8BE" text-anchor="start" opacity="1">同一输入与输出契约</text>
+  <text x="88" y="323" class="body" fill="#96A8BE" text-anchor="start" opacity="1">REST / SDK / CLI / Web 发起</text>
+  <text x="88" y="347" class="body" fill="#96A8BE" text-anchor="start" opacity="1">都汇入同一 run_cycle</text>
   <text x="88" y="371" class="body" fill="#96A8BE" text-anchor="start" opacity="1">授权 Provider 载荷</text>
   <rect x="64" y="414" width="248" height="160" rx="22" fill="#0C1928" stroke="#263A52" filter="url(#shadow)" />
   <rect x="65" y="415" width="246" height="158" rx="21" fill="none" stroke="#FFFFFF" stroke-opacity=".035" />
@@ -85,14 +125,14 @@
   <rect x="349" y="287" width="256" height="228" rx="21" fill="none" stroke="#FFFFFF" stroke-opacity=".035" />
   <rect x="348" y="308" width="3" height="186" rx="1.5" fill="#A78BFA" />
   <text x="372" y="315" class="micro" fill="#A78BFA" text-anchor="start" opacity="1">SAME EXECUTION PATH</text>
-  <text x="372" y="348" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">ResearchEngine.run_cycle</text>
+  <text x="372" y="348" class="cardTitleTight" fill="#F4F7FB" text-anchor="start" opacity="1">ResearchEngine.run_cycle</text>
   <text x="372" y="377" class="body" fill="#96A8BE" text-anchor="start" opacity="1">同一 AgentRouter</text>
   <text x="372" y="401" class="body" fill="#96A8BE" text-anchor="start" opacity="1">同一 RiskGate</text>
   <text x="372" y="425" class="body" fill="#96A8BE" text-anchor="start" opacity="1">同一 DecisionLedger</text>
-  <text x="372" y="449" class="body" fill="#96A8BE" text-anchor="start" opacity="1">同一成本与恢复语义</text>
+  <text x="372" y="449" class="body" fill="#96A8BE" text-anchor="start" opacity="1">同一 Checkpoint 恢复</text>
   <text x="372" y="473" class="body" fill="#96A8BE" text-anchor="start" opacity="1">输出 ResearchRunResult</text>
-  <path d="M312 312L348 344" fill="none" stroke="#2DD4BF" stroke-width="2.2" marker-end="url(#arrow)" />
-  <path d="M312 494L348 458" fill="none" stroke="#38BDF8" stroke-width="2.2" marker-end="url(#arrow)" />
+  <path d="M312 312L348 344" fill="none" stroke="#2DD4BF" stroke-width="2.2" marker-end="url(#arrow-2DD4BF)" />
+  <path d="M312 494L348 458" fill="none" stroke="#38BDF8" stroke-width="2.2" marker-end="url(#arrow-38BDF8)" />
   <circle cx="655" cy="210" r="14" fill="#38BDF8" fill-opacity=".16" stroke="#38BDF8" stroke-opacity=".45" />
   <text x="655" y="214" class="navNum" fill="#38BDF8" text-anchor="middle" opacity="1">B</text>
   <text x="679" y="214" class="micro" fill="#38BDF8" text-anchor="start" opacity="1">三重验证</text>
@@ -105,15 +145,15 @@
   <rect x="644" y="374" width="3" height="64" rx="1.5" fill="#A78BFA" />
   <text x="666" y="383" class="micro" fill="#A78BFA" text-anchor="start" opacity="1">多日组合报告</text>
   <text x="666" y="412" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">收益 · 基准 · 主动收益 · 换手</text>
-  <text x="666" y="438" class="small" fill="#96A8BE" text-anchor="start" opacity="1">容量 · 暴露 · 标的归因</text>
+  <text x="666" y="438" class="small" fill="#96A8BE" text-anchor="start" opacity="1">最大单笔成交额 · 最大总敞口 · 标的已实现盈亏</text>
   <rect x="644" y="476" width="338" height="104" rx="19" fill="#0C1928" stroke="#263A52" />
   <rect x="644" y="496" width="3" height="64" rx="1.5" fill="#FB7185" />
   <text x="666" y="505" class="micro" fill="#FB7185" text-anchor="start" opacity="1">内容一致性验证</text>
   <text x="666" y="534" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">ID 重算 · 账本完整性</text>
-  <text x="666" y="560" class="small" fill="#96A8BE" text-anchor="start" opacity="1">结果属性与失败原因归因</text>
-  <path d="M606 360H625V284H644" fill="none" stroke="#2DD4BF" stroke-width="2.2" marker-end="url(#arrow)" opacity="1" />
-  <path d="M606 401L644 406" fill="none" stroke="#A78BFA" stroke-width="2.2" marker-end="url(#arrow)" />
-  <path d="M606 442H625V528H644" fill="none" stroke="#FB7185" stroke-width="2.2" marker-end="url(#arrow)" opacity="1" />
+  <text x="666" y="560" class="small" fill="#96A8BE" text-anchor="start" opacity="1">成本与空仓机会成本 · 显式残差</text>
+  <path d="M606 360H625V284H644" fill="none" stroke="#2DD4BF" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrowShort-2DD4BF)" opacity="1" />
+  <path d="M606 401L644 406" fill="none" stroke="#A78BFA" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow-A78BFA)" />
+  <path d="M606 442H625V528H644" fill="none" stroke="#FB7185" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrowShort-FB7185)" opacity="1" />
   <circle cx="1031" cy="210" r="14" fill="#FBBF24" fill-opacity=".16" stroke="#FBBF24" stroke-opacity=".45" />
   <text x="1031" y="214" class="navNum" fill="#FBBF24" text-anchor="middle" opacity="1">C</text>
   <text x="1055" y="214" class="micro" fill="#FBBF24" text-anchor="start" opacity="1">研究产品与交付</text>
@@ -121,39 +161,38 @@
   <rect x="1021" y="233" width="354" height="346" rx="21" fill="none" stroke="#FFFFFF" stroke-opacity=".035" />
   <rect x="1020" y="254" width="3" height="304" rx="1.5" fill="#FBBF24" />
   <text x="1044" y="261" class="micro" fill="#FBBF24" text-anchor="start" opacity="1">RESEARCH PRODUCTS</text>
-  <text x="1044" y="294" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">ValidationResult</text>
+  <text x="1044" y="294" class="cardTitle" fill="#F4F7FB" text-anchor="start" opacity="1">研究产品</text>
   <text x="1044" y="323" class="body" fill="#96A8BE" text-anchor="start" opacity="1">结构化研究筛选</text>
   <text x="1044" y="347" class="body" fill="#96A8BE" text-anchor="start" opacity="1">SQLite 持久观察池</text>
   <text x="1044" y="371" class="body" fill="#96A8BE" text-anchor="start" opacity="1">内容寻址不可变报告中心</text>
-  <text x="1044" y="395" class="body" fill="#96A8BE" text-anchor="start" opacity="1">REST / SDK / CLI / Web</text>
-  <text x="1044" y="419" class="body" fill="#96A8BE" text-anchor="start" opacity="1">Checkpoint · SQLite WAL · 灾难恢复</text>
-  <text x="1044" y="443" class="body" fill="#96A8BE" text-anchor="start" opacity="1">报告 / 指标 / 归因保留 provenance</text>
-  <path d="M982 284H1002V330H1020" fill="none" stroke="#FBBF24" stroke-width="2.2" marker-end="url(#arrow)" opacity="1" />
-  <path d="M982 406L1020 406" fill="none" stroke="#FBBF24" stroke-width="2.2" marker-end="url(#arrow)" />
-  <path d="M982 528H1002V482H1020" fill="none" stroke="#FBBF24" stroke-width="2.2" marker-end="url(#arrow)" opacity="1" />
+  <text x="1044" y="395" class="body" fill="#96A8BE" text-anchor="start" opacity="1">REST 全部 · SDK 大部分 · CLI 仅报告</text>
+  <text x="1044" y="419" class="body" fill="#96A8BE" text-anchor="start" opacity="1">SQLite WAL · 同一 runtime_dir</text>
+  <text x="1044" y="443" class="body" fill="#96A8BE" text-anchor="start" opacity="1">Compose 部署时落在持久卷</text>
+  <text x="1044" y="467" class="body" fill="#96A8BE" text-anchor="start" opacity="1">筛选与报告带 run / decision / signal ID</text>
+  <text x="1044" y="491" class="body" fill="#96A8BE" text-anchor="start" opacity="1">观察池只存标的 · 标签 · 备注</text>
   <rect x="348" y="608" width="1028" height="62" rx="19" fill="#FBBF24" fill-opacity=".075" stroke="#FBBF24" stroke-opacity=".30" />
   <text x="374" y="634" class="micro" fill="#FBBF24" text-anchor="start" opacity="1">HUMAN-IN-THE-LOOP FEEDBACK</text>
   <text x="374" y="658" class="body" fill="#F4F7FB" text-anchor="start" opacity="1">人工复核归因 → 调整数据质量规则 / AgentRouter / RiskGate 阈值 → 进入下一轮证据与配置；不自动训练模型</text>
   <path d="M1020 638H620" fill="none" stroke="#FBBF24" stroke-width="2.2" stroke-dasharray="8 8" opacity="1" />
-  <path d="M348 638H328V654H188V574" fill="none" stroke="#FBBF24" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow)" opacity="1" />
+  <path d="M348 638H328V654H188V574" fill="none" stroke="#FBBF24" stroke-width="2.2" stroke-dasharray="8 8" marker-end="url(#arrow-FBBF24)" opacity="1" />
   <text x="64" y="785" class="micro" fill="#96A8BE" text-anchor="start" opacity="1">研究闭环导航</text>
   <text x="200" y="785" class="small" fill="#6F829A" text-anchor="start" opacity="1">每一脑区交付一个可验证产物，最终回到下一轮证据与规则</text>
   <rect x="64" y="806" width="240" height="52" rx="16" fill="#0B1726" stroke="#263A52" />
   <text x="86" y="838" class="navNum" fill="#647890" text-anchor="start" opacity="1">01</text>
   <text x="119" y="838" class="nav" fill="#B7C4D4" text-anchor="start" opacity="1">系统总览</text>
-  <path d="M309 832H315" stroke="#263A52" stroke-width="1.7" marker-end="url(#arrow)" />
+  <path d="M307 832H317" stroke="#263A52" stroke-width="1.7" marker-end="url(#arrowShort-263A52)" />
   <rect x="320" y="806" width="240" height="52" rx="16" fill="#0B1726" stroke="#263A52" />
   <text x="342" y="838" class="navNum" fill="#647890" text-anchor="start" opacity="1">02</text>
   <text x="375" y="838" class="nav" fill="#B7C4D4" text-anchor="start" opacity="1">证据平面</text>
-  <path d="M565 832H571" stroke="#263A52" stroke-width="1.7" marker-end="url(#arrow)" />
+  <path d="M563 832H573" stroke="#263A52" stroke-width="1.7" marker-end="url(#arrowShort-263A52)" />
   <rect x="576" y="806" width="240" height="52" rx="16" fill="#0B1726" stroke="#263A52" />
   <text x="598" y="838" class="navNum" fill="#647890" text-anchor="start" opacity="1">03</text>
   <text x="631" y="838" class="nav" fill="#B7C4D4" text-anchor="start" opacity="1">研究编排</text>
-  <path d="M821 832H827" stroke="#263A52" stroke-width="1.7" marker-end="url(#arrow)" />
+  <path d="M819 832H829" stroke="#263A52" stroke-width="1.7" marker-end="url(#arrowShort-263A52)" />
   <rect x="832" y="806" width="240" height="52" rx="16" fill="#0B1726" stroke="#263A52" />
   <text x="854" y="838" class="navNum" fill="#647890" text-anchor="start" opacity="1">04</text>
   <text x="887" y="838" class="nav" fill="#B7C4D4" text-anchor="start" opacity="1">决策约束</text>
-  <path d="M1077 832H1083" stroke="#263A52" stroke-width="1.7" marker-end="url(#arrow)" />
+  <path d="M1075 832H1085" stroke="#263A52" stroke-width="1.7" marker-end="url(#arrowShort-263A52)" />
   <rect x="1088" y="806" width="240" height="52" rx="16" fill="url(#activeNav)" stroke="#38BDF8" stroke-opacity=".64" />
   <text x="1110" y="838" class="navNum" fill="#38BDF8" text-anchor="start" opacity="1">05</text>
   <text x="1143" y="838" class="nav" fill="#F4F7FB" text-anchor="start" opacity="1">验证反馈</text>

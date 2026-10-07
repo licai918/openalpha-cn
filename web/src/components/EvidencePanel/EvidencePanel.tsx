@@ -1,13 +1,16 @@
 import type { ChangeEvent } from "react";
 
+import { panelData, type PanelState } from "../../panelState";
+import { PanelNotice } from "../PanelNotice/PanelNotice";
 import type { Evidence } from "../../types";
 
 type EvidencePanelProps = {
   subject: string;
   asOf: string;
-  evidence: Evidence[];
-  state: "idle" | "loading" | "ready" | "empty" | "error";
-  error: string | null;
+  /** V2-P5-019: `evidence` and `error` used to be separate props, which made
+   * `{state: "error", evidence: [...]}` representable — a failure still rendering the
+   * previous query's rows. The payload now travels inside the state that admits it. */
+  state: PanelState<Evidence[]>;
   onSubjectChange: (value: string) => void;
   onAsOfChange: (value: string) => void;
   onQuery: () => void;
@@ -27,6 +30,7 @@ export function EvidencePanel(props: EvidencePanelProps) {
     const file = event.currentTarget.files?.[0];
     if (file) props.onImport(file);
   };
+  const evidence = panelData(props.state);
 
   return (
     <section className="panel evidence-panel" aria-labelledby="evidence-heading">
@@ -63,25 +67,10 @@ export function EvidencePanel(props: EvidencePanelProps) {
         </button>
       </div>
 
-      {props.state === "loading" && (
-        <div className="skeleton-stack" aria-busy="true" aria-label="正在加载证据">
-          <span />
-          <span />
-          <span />
-        </div>
-      )}
-      {props.state === "idle" && <p className="empty-state">尚未查询证据</p>}
-      {props.state === "empty" && (
-        <p className="empty-state">该标的在所选时间点没有可见证据。</p>
-      )}
-      {props.state === "error" && (
-        <p className="error-state" role="alert">
-          {props.error}
-        </p>
-      )}
-      {props.state === "ready" && (
+      <PanelNotice state={props.state} idleText="尚未查询证据" />
+      {evidence !== null && (
         <ol className="evidence-list">
-          {props.evidence.map((item) => (
+          {evidence.map((item) => (
             <li key={item.evidence_id}>
               <div className="evidence-marker" aria-hidden="true" />
               <article>

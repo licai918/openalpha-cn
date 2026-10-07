@@ -5,7 +5,11 @@ from openalpha_cn.tools.base import ToolMetadata, ToolRequest, ToolResult
 
 
 class EvidenceLookupTool:
-    """Look up evidence without crossing the request availability clock."""
+    """Look up evidence without crossing the request's point-in-time boundary.
+
+    `EvidenceSnapshot.visible_at` is the boundary: a record not yet available at `as_of`, or one
+    whose held version was revised after it, is not matched.
+    """
 
     _metadata = ToolMetadata(
         tool_id="evidence.lookup",

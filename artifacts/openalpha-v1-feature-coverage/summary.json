@@ -1,18 +1,21 @@
 {
   "category_distribution": {
     "agent": 9,
-    "backtest": 11,
+    "backtest": 20,
     "batch": 4,
-    "boundary": 5,
-    "decision": 8,
+    "boundary": 7,
+    "decision": 9,
     "evidence": 9,
-    "interface": 8,
-    "model": 4,
-    "operations": 11,
+    "factor": 28,
+    "interface": 9,
+    "model": 5,
+    "operations": 40,
+    "panel": 41,
     "product": 3,
-    "provider": 7,
+    "provider": 8,
+    "ranking": 5,
     "recovery": 2,
-    "storage": 6,
+    "storage": 9,
     "temporal": 3
   },
   "generated_on": "2026-07-24",
@@ -28,12 +31,13 @@
     "DEFERRED": 1,
     "ENHANCED_REPLACEMENT": 20,
     "EXCLUDED": 4,
-    "NATIVE_COMPLETE": 64
+    "NATIVE_COMPLETE": 185
   },
   "totals": {
-    "all_features": 90,
-    "true_completed_features": 85,
-    "true_completion_rate_pct": 94.44,
+    "all_features": 211,
+    "legacy_acceptance_rows": 26,
+    "true_completed_features": 206,
+    "true_completion_rate_pct": 97.63,
     "unknown": 0,
     "unreviewed": 0
   }

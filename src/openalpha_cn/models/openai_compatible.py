@@ -14,7 +14,7 @@ from openalpha_cn.models.base import ModelCapabilities, ModelMetadata
 from openalpha_cn.models.governance import (
     ModelRetryPolicy,
     ModelUsageRecord,
-    SQLiteModelUsageStore,
+    ModelUsageStore,
 )
 
 
@@ -108,7 +108,7 @@ class OpenAICompatibleProvider:
         transport: JsonTransport | None = None,
         retry_policy: ModelRetryPolicy | None = None,
         sleeper: Callable[[float], None] = time.sleep,
-        usage_store: SQLiteModelUsageStore | None = None,
+        usage_store: ModelUsageStore | None = None,
         input_price_per_million: Decimal = Decimal("0"),
         output_price_per_million: Decimal = Decimal("0"),
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
