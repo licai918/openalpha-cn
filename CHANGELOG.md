@@ -4,7 +4,7 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
-### P6 — selection ready (`V2-P6-001` … `V2-P6-033`)
+### P6 — selection ready (`V2-P6-001` … `V2-P6-035`)
 
 The project now runs end to end from a multi-year whole-market panel to a registered daily
 candidate list. **The research result is negative and is reported as such**: the one
@@ -58,6 +58,15 @@ return. `docs/research/p6-results.md` holds every table; the wording stays "cand
 - **Web audit gate (`V2-P6-033`).** Five new high advisories in transitive dev dependencies
   (undici, brace-expansion, source-map-js) turned CI's `pnpm audit --audit-level high` red with no
   change on this side; the override floors in `web/pnpm-workspace.yaml` move to the fixed versions.
+- **Cross-platform tests (`V2-P6-034`) and the online suite (`V2-P6-035`).** The first CI run of
+  this branch failed on Linux and Windows only: two factor-equivalence corpora stepped prices with
+  `math.sin`, whose last bit differs between macOS and glibc/MSVC, so the pinned partition hashes of
+  every price-reading factor moved. The corpora now step with integer arithmetic and one division,
+  and the pins were re-measured with the commits that preceded each change. Windows also showed a
+  real defect: a symlink read back carries a `\\?\` prefix, so a second `--pin-worktree` took its
+  own `.env` link for someone else's. The online suite, run on a panel built 2026-10-07, found no
+  price contest left after `V2-P6-020`, so the model chain's named refusal is now reproduced by an
+  injected one when the market offers none.
 
 ### Fixed
 
