@@ -1,6 +1,5 @@
-import contextlib
-import os
-from collections.abc import Iterator
+import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -13,27 +12,68 @@ from openalpha_cn.storage.parquet import ParquetEvidenceStore
 
 _PROGRESS_BAR_MARKER = "▕"
 """One of the box-drawing characters DuckDB's progress bar renders (see the V2-P6-021 section
-below); absence of it in a real-fd-1 capture is what that section's tests actually trust."""
+below); absence of it in a child process's stdout is what that section's tests actually trust."""
 
 
-@contextlib.contextmanager
-def _capture_real_stdout(target: Path) -> Iterator[None]:
-    """Redirect the real OS-level fd 1 to `target` for the duration of the block.
+_CHILD: str = """
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
 
-    DuckDB's progress bar is written by the C++ extension straight to the process's stdout file
-    descriptor, bypassing Python's `sys.stdout` object -- pytest's own capture does not see it
-    either. Mirrors `tests/unit/panel/test_store_progress_bar.py::_capture_real_stdout`.
-    """
-    target.write_text("")
-    saved_fd = os.dup(1)
-    written_fd = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
-    os.dup2(written_fd, 1)
-    os.close(written_fd)
-    try:
-        yield
-    finally:
-        os.dup2(saved_fd, 1)
-        os.close(saved_fd)
+import openalpha_cn.storage.parquet as parquet_module
+from openalpha_cn.domain.evidence import EvidenceSnapshot
+from openalpha_cn.storage.parquet import ParquetEvidenceStore
+
+root, mode, item = Path(sys.argv[1]), sys.argv[2], EvidenceSnapshot.model_validate_json(sys.argv[3])
+if mode == "unconfigured":
+    import duckdb
+
+    parquet_module._connect = lambda: duckdb.connect(":memory:")
+configured = parquet_module._connect
+
+
+def _forced():
+    connection = configured()
+    connection.execute("SET progress_bar_time = 0")
+    return connection
+
+
+parquet_module._connect = _forced
+store = ParquetEvidenceStore(root)
+store.append((item,))
+sys.stdout.write("\\n--- query ---\\n")
+sys.stdout.flush()
+result = store.query(as_of=datetime(2026, 7, 24, 12, 0, tzinfo=UTC))
+assert result == (item,), result
+"""
+"""A child process that appends one snapshot and queries it back, every connection forced past
+the progress-bar threshold (`SET progress_bar_time = 0`, applied strictly after whatever
+`_connect` already did). `configured` keeps the real `_connect`; `unconfigured` replaces it with a
+bare `duckdb.connect(":memory:")`. Mirrors `tests/unit/panel/test_store_progress_bar.py::_CHILD`,
+whose module docstring says why the stdout read is a child's pipe and not this process's fd 1
+(`V2-P6-034`: on Windows the redirected descriptor came back empty)."""
+
+_QUERY_PHASE = "\n--- query ---\n"
+
+
+def _as_input(item: EvidenceSnapshot) -> str:
+    """`item` as the JSON `EvidenceSnapshot.model_validate_json` accepts: its computed
+    `evidence_id` and `content_hash` left out, since the model forbids them as inputs."""
+    return item.model_dump_json(exclude=set(type(item).model_computed_fields))
+
+
+def _forced_stdout(root: Path, mode: str, item: EvidenceSnapshot) -> tuple[str, str]:
+    """The child's stdout around its append and around its query, as a pipe delivered it."""
+    finished = subprocess.run(
+        [sys.executable, "-c", _CHILD, str(root), mode, _as_input(item)],
+        capture_output=True,
+        check=False,
+    )
+    stdout = finished.stdout.decode("utf-8", errors="replace").replace("\r\n", "\n")
+    assert finished.returncode == 0, finished.stderr.decode("utf-8", errors="replace")
+    append, separator, query = stdout.partition(_QUERY_PHASE)
+    assert separator, f"the child never reached its query: {stdout!r}"
+    return append, query
 
 
 def evidence(*, subject: str, event_hour: int, available_hour: int) -> EvidenceSnapshot:
@@ -175,11 +215,11 @@ def test_append_is_idempotent_for_the_same_evidence_batch(tmp_path: Path) -> Non
 # `False` by default the moment it runs under `pytest` (reproduced on a single-test,
 # no-project-conftest file, so this is a DuckDB/pytest interaction, not this repository's
 # fixtures) -- yet a query forced past `progress_bar_time` on that same "False"-reporting,
-# unconfigured connection still prints the bar to real fd 1. The two `current_setting` tests
+# unconfigured connection still prints the bar to stdout. The two `current_setting` tests
 # below stay (`V2-P6-021`'s brief asks for exactly this check, and it is not actively wrong for
 # a *configured* connection, since the helper's own `SET` always lands), but the assertion this
 # file actually trusts is `test_append_and_query_print_nothing_to_stdout_even_forced_past_the_
-# threshold` and its mutation check, both against real fd 1.
+# threshold` and its mutation check, both against a child process's stdout.
 
 
 def _spy_on_connect(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
@@ -194,26 +234,6 @@ def _spy_on_connect(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
 
     monkeypatch.setattr(parquet_module, "_connect", spy)
     return observed
-
-
-def _force_every_connection_past_the_progress_bar_threshold(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Make every connection `_connect` returns behave like it is running a slow query.
-
-    Applies `SET progress_bar_time = 0` strictly after whatever the current `_connect` (real or
-    mutated) already did to the connection, so this never races the helper's own setup
-    statements -- see the twin helper in `tests/unit/panel/test_store_progress_bar.py`, which
-    this mirrors for the same reason.
-    """
-    current = parquet_module._connect
-
-    def forced() -> object:
-        connection = current()
-        connection.execute("SET progress_bar_time = 0")
-        return connection
-
-    monkeypatch.setattr(parquet_module, "_connect", forced)
 
 
 def test_an_append_connection_reports_the_progress_bar_disabled(
@@ -244,46 +264,29 @@ def test_a_query_connection_reports_the_progress_bar_disabled(
 
 
 def test_append_and_query_print_nothing_to_stdout_even_forced_past_the_threshold(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
-    """The decisive check: force every connection this store opens to behave as if its query
-    were slow, capture real fd 1 (DuckDB's progress bar bypasses Python's `sys.stdout`, so
-    nothing short of the real file descriptor sees it) around an `append` and around a `query`,
-    and assert neither left any progress-bar text there."""
-    _force_every_connection_past_the_progress_bar_threshold(monkeypatch)
-    store = ParquetEvidenceStore(tmp_path / "events")
+    """The decisive check: every connection this store opens forced to behave as if its query
+    were slow, and neither the append nor the query leaves any progress-bar text on the stdout a
+    caller reads through a pipe."""
     item = evidence(subject="000001.SZ", event_hour=9, available_hour=10)
 
-    append_capture = tmp_path / "append.stdout"
-    with _capture_real_stdout(append_capture):
-        store.append((item,))
-    assert _PROGRESS_BAR_MARKER not in append_capture.read_text()
+    append, query = _forced_stdout(tmp_path / "events", "configured", item)
 
-    query_capture = tmp_path / "query.stdout"
-    with _capture_real_stdout(query_capture):
-        result = store.query(as_of=datetime(2026, 7, 24, 12, 0, tzinfo=UTC))
-    assert result == (item,)
-    assert _PROGRESS_BAR_MARKER not in query_capture.read_text()
+    assert _PROGRESS_BAR_MARKER not in append
+    assert _PROGRESS_BAR_MARKER not in query
 
 
-def test_removing_the_helpers_config_turns_this_red(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_removing_the_helpers_config_turns_this_red(tmp_path: Path) -> None:
     """The mutation check: with the `SET` statements patched out of `_connect`, an append
-    forced past the progress-bar threshold DOES print to real fd 1 -- proving the fd assertion
-    above is actually pinned to the helper's config."""
-    import duckdb
+    forced past the progress-bar threshold DOES print to the child's stdout -- proving the
+    stdout assertion above is actually pinned to the helper's config."""
+    item = evidence(subject="000001.SZ", event_hour=9, available_hour=10)
 
-    monkeypatch.setattr(parquet_module, "_connect", lambda: duckdb.connect(":memory:"))
-    _force_every_connection_past_the_progress_bar_threshold(monkeypatch)
-    store = ParquetEvidenceStore(tmp_path / "events")
+    append, _query = _forced_stdout(tmp_path / "events", "unconfigured", item)
 
-    capture = tmp_path / "mutated.stdout"
-    with _capture_real_stdout(capture):
-        store.append((evidence(subject="000001.SZ", event_hour=9, available_hour=10),))
-
-    assert _PROGRESS_BAR_MARKER in capture.read_text(), (
+    assert _PROGRESS_BAR_MARKER in append, (
         "expected the mutated (unconfigured) _connect to leak a progress bar to stdout; it did "
-        "not, which would mean this file's fd-capture assertion is not actually testing "
-        "V2-P6-021's fix"
+        f"not ({append!r}), which would mean this file's stdout assertion is not actually "
+        "testing V2-P6-021's fix"
     )
