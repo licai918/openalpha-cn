@@ -4,7 +4,7 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
-### P6 — selection ready (`V2-P6-001` … `V2-P6-029`)
+### P6 — selection ready (`V2-P6-001` … `V2-P6-032`)
 
 The project now runs end to end from a multi-year whole-market panel to a registered daily
 candidate list. **The research result is negative and is reported as such**: the one
@@ -33,11 +33,17 @@ return. `docs/research/p6-results.md` holds every table; the wording stays "cand
   a sign-flip p-value. **`V2-P6-029`**: uv splits `--env-file` on spaces, so the generated launchd
   job and the runbook command failed on any checkout path with a space; `--pin-worktree` now links
   the checkout's `.env` into the pinned worktree (never reading it) and the job loads a relative
-  `.env`.
+  `.env`. **`V2-P6-032`**: step 4 built only the day, so the sessions between a missed run (or a
+  holiday) and the day had no factor cross section -- 2026-09-28/29 were missing after the first
+  run; it now builds every session after a tier's newest build, up to 20, refuses beyond that with
+  the batch command to run, and `--factor-gaps SINCE` reports gaps read-only. **`V2-P6-030`**: the
+  forward report's headline read "the book as recommended"; it names the candidate book.
 - **Panel (`V2-P6-001`–`005`, `013`, `015`–`021`, `028`).** Whole-market statement scans,
   intra-year incremental updates byte-identical to a full rebuild, columnar inserts, a faster
   factor read path, named records for reproducible upstream defects, the industry classification
-  in force on each day (SW2014 until 2021-12-10, SW2021 after), and a process-safe panel catalog
+  in force on each day (SW2014 until 2021-12-10, SW2021 after), one board classifier for every
+  face (`V2-P6-031`: two of three copies filed 301xxx and 689xxx under the main board), and a
+  process-safe panel catalog
   (cross-process read/write lock, group writes with compare-and-swap, `PanelWriteConflictError` →
   CLI exit 6 / API 503).
 - **Factors and models (`V2-P6-006`, `014`, `022`, `025`–`027`).** Rolling-IC and walk-forward
