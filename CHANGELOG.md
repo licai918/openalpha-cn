@@ -26,6 +26,21 @@ exploratory) show that re-picking every day gives the whole edge to costs, that 
 of the in-sample gross excess, and that a ten-name book carries a tracking error of about 12-13% a
 year, so a one-year result is mostly luck. The roadmap grows to 15 P7 issues (243 in total).
 
+The pure-Python domain core of that book landed on `feat/v2-p7-005-survivor-book-core`
+(`V2-P7-005`, with the order and cool-down parts of `V2-P7-008`): six modules,
+`domain/survivor_{book,screen,selection,policy,orders,lifecycle}.py`, that screen a day's securities
+(eligibility, composite score, survivor set), decide a sticky ten-name book (exits only on lost
+eligibility or lost survivor status, daily caps on discretionary exits and on refills, a 20-session
+cool-down, live sells and halted holdings held in place, an unaffordable lot skipped only at buy time),
+draw entrants with a seeded, per-session-salted hash, and turn the decision into a content-addressed
+trade list with order expiry. It imports no numerical or infrastructure library. Seven test files
+(165 tests) cover it, including a 120-session walk through six made-up markets that checks the book's
+promises on every session, and 45 hand-applied mutations of the six modules were all killed
+(`docs/research/p7-step0-validation/V2-P7-005-mutation-checks.md`). **This is engineering, not
+evidence**: nothing here reads the panel, registers a configuration or says anything about returns;
+the adapter, the daily entry point, the paper-ledger step builder and the pre-registration remain
+(plan 2, `V2-P7-006`, `V2-P7-009`).
+
 ### P6 — selection ready (`V2-P6-001` … `V2-P6-035`)
 
 The project now runs end to end from a multi-year whole-market panel to a registered daily
