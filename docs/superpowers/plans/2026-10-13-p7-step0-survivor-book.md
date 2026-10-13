@@ -2547,28 +2547,34 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 - [ ] **Step 1：写测试** — 创建 `tests/unit/domain/test_survivor_book_lifecycle.py`（这条测试在内核全部就位后**第一次运行就应当通过**——它不是为新代码驱动实现，而是把前面六个任务的承诺在 120 个交易日的合成市场里逐日验证；它的失败能力由 Step 3 的变异检查证明）：
 
 ```python
-"""The survivor book over many sessions, with every order assumed to fill (`V2-P7-005`).
+"""The survivor book over many sessions of a simulated market (`V2-P7-005`, `V2-P7-008`).
 
 A walk through 120 sessions of a made-up market (a seeded random walk of scores and prices, with
-the occasional suspension and special treatment) that drives `screen` -> `decide_book` ->
-`build_trade_list` and books each plan's orders at its reference prices. It asserts the
-properties the design promises on **every** session, not on the last one: the book never exceeds
-its size, never overspends, never churns faster than the cap, never sells what should be kept and
-never buys what is cooling. The mutation checks in the plan are run against these tests.
+suspensions and special treatment) drives the whole core in the order the daily flow will use
+it: **settle** the orders planned the session before (a sell on a suspended name does not fill, so
+it stays live), then `screen`, `decide_book` and `build_trade_list`. It asserts the properties
+the design promises on **every** session, not on the last one: the book never exceeds its size,
+never overspends, never churns faster than the cap, never sells what should be kept, never sells
+a name twice, leaves a suspended holding alone, and never buys what is cooling. The mutation
+checks recorded in the plan are run against these tests.
 """
 
 import random
+from collections import Counter
 from decimal import Decimal
 from itertools import pairwise
 
 from openalpha_cn.domain.survivor_book import SecurityFacts, SurvivorBookConfig
-from openalpha_cn.domain.survivor_lifecycle import update_cooldowns
-from openalpha_cn.domain.survivor_orders import build_trade_list
+from openalpha_cn.domain.survivor_lifecycle import advance_orders, update_cooldowns
+from openalpha_cn.domain.survivor_orders import TradeOrder, build_trade_list
 from openalpha_cn.domain.survivor_policy import BookState, Cooldown, Holding, decide_book
 from openalpha_cn.domain.survivor_screen import screen
 
 UNIVERSE = 80
 SESSIONS = 120
+EXERCISED: Counter[str] = Counter()
+"""What the simulated markets actually made the book do, so a test can assert that a branch it
+claims to cover was reached rather than assume it was."""
 
 
 def code(position: int) -> str:
@@ -2587,8 +2593,8 @@ def walk(market_seed: int) -> list[list[SecurityFacts]]:
         for position in range(UNIVERSE):
             scores[position] = 0.9 * scores[position] + rng.gauss(0, 0.5)
             prices[position] = max(2.0, prices[position] * (1 + rng.gauss(0, 0.02)))
-            if rng.random() < 0.01:
-                halted[position] = 3
+            if rng.random() < 0.02:
+                halted[position] = 4
         facts = []
         for position in range(UNIVERSE):
             suspended = halted.get(position, 0) > 0
@@ -2614,21 +2620,64 @@ def run(market_seed: int, config: SurvivorBookConfig) -> list[dict[str, object]]
     """Play the market through the book; return one record per session, asserting as it goes."""
     cash = config.capital
     held: dict[str, int] = {}
+    live: list[TradeOrder] = []
     cooldowns: tuple[Cooldown, ...] = ()
     initialized = False
-    last_sold: dict[str, int] = {}
+    sold_at: dict[str, int] = {}
     log: list[dict[str, object]] = []
     for session, facts in enumerate(walk(market_seed)):
         close = {fact.ts_code: fact.close for fact in facts}
+        halted = {fact.ts_code for fact in facts if fact.suspended}
+        result = screen(facts, config)
+        survivors = {name.ts_code for name in result.survivors}
+        eligible = {verdict.ts_code for verdict in result.verdicts if verdict.eligible}
+
+        # 1. Settle what was planned the session before, at its reference price. A halted name
+        #    cannot trade, so its order does not fill and stays live; a buy needs the cash.
+        filled: set[str] = set()
+        sold: set[str] = set()
+        for order in sorted(live, key=lambda o: (o.side, o.ts_code)):
+            value = order.reference_price * order.quantity
+            if order.ts_code in halted or (order.side == "buy" and value > cash):
+                EXERCISED["unfilled"] += 1
+                continue
+            if order.side == "sell":
+                cash += value
+                del held[order.ts_code]
+                sold.add(order.ts_code)
+                sold_at[order.ts_code] = session
+            else:
+                cash -= value
+                held[order.ts_code] = order.quantity
+            filled.add(order.order_id)
+        settled = advance_orders(
+            live, session=session, filled_order_ids=filled, survivors=survivors
+        )
+        live = list(settled.live)
+        EXERCISED["expired"] += len(settled.expired)
+        EXERCISED["cancelled"] += len(settled.cancelled)
+        for expired in settled.expired:
+            sold_at[expired.ts_code] = session
+        cooldowns = update_cooldowns(
+            cooldowns,
+            session=session,
+            sold=sold,
+            expired_buys={order.ts_code for order in settled.expired},
+            config=config,
+        )
+        assert cash >= 0
+
+        # 2. Decide, from the state after settlement.
         equity = cash + sum(Decimal(q) * close[c] for c, q in held.items())
-        result = screen(facts, config, equity=equity)
-        survivors = {n.ts_code for n in result.survivors}
-        eligible = {v.ts_code for v in result.verdicts if v.eligible}
+        pending_buys = tuple(sorted(o.ts_code for o in live if o.side == "buy"))
+        pending_sells = tuple(sorted(o.ts_code for o in live if o.side == "sell"))
         state = BookState(
             session=session,
             initialized=initialized,
             equity=equity,
             holdings=tuple(Holding(ts_code=c, quantity=q) for c, q in sorted(held.items())),
+            pending_buys=pending_buys,
+            pending_sells=pending_sells,
             cooldowns=cooldowns,
         )
         decision = decide_book(config=config, screen=result, state=state)
@@ -2638,49 +2687,50 @@ def run(market_seed: int, config: SurvivorBookConfig) -> list[dict[str, object]]
             decision=decision,
             reference_prices=close,
             cash=cash,
+            carried=tuple(live),
         )
+        EXERCISED["frozen"] += len(decision.frozen)
+        EXERCISED["pending_sells"] += len(pending_sells)
 
-        # Stickiness: a holding that is eligible and a survivor is never sold.
+        # 3. The promises, on every session.
         for exited in decision.exits:
             assert exited.ts_code in held
+            assert exited.ts_code not in pending_sells, "a name is sold twice"
             if exited.reason == "EXIT_SURVIVOR_LOST":
                 assert exited.ts_code in eligible and exited.ts_code not in survivors
             else:
                 assert exited.ts_code not in eligible
-        kept = {c for c in held if c in survivors}
-        assert kept.isdisjoint(e.ts_code for e in decision.exits)
+                assert exited.ts_code not in decision.frozen
+        assert {c for c in held if c in survivors}.isdisjoint(e.ts_code for e in decision.exits)
+        assert set(decision.frozen) <= halted
+        assert set(decision.frozen).isdisjoint(e.ts_code for e in decision.exits)
 
-        # Rate limits and cool-down.
         discretionary = [e for e in decision.exits if e.reason == "EXIT_SURVIVOR_LOST"]
         assert len(discretionary) <= config.max_replacements_per_session
         if initialized:
             assert len(decision.entries) <= config.max_replacements_per_session
         for entry in decision.entries:
             assert entry.ts_code not in held
+            assert entry.ts_code not in pending_buys
             assert entry.ts_code in survivors
-            sold_at = last_sold.get(entry.ts_code)
-            assert sold_at is None or session - sold_at >= config.cooldown_sessions
+            last = sold_at.get(entry.ts_code)
+            assert last is None or session - last >= config.cooldown_sessions
 
-        # Book the plan at its reference prices (every order fills).
-        for order in plan.orders:
-            value = order.reference_price * order.quantity
-            if order.side == "sell":
-                cash += value
-                del held[order.ts_code]
-                last_sold[order.ts_code] = session
-            else:
-                cash -= value
-                held[order.ts_code] = order.quantity
-        sold = {o.ts_code for o in plan.orders if o.side == "sell"}
-        cooldowns = update_cooldowns(
-            cooldowns, session=session, sold=sold, expired_buys=(), config=config
-        )
+        active = [c for c in held if c not in pending_sells]
+        assert len(decision.target_holdings) + len(pending_buys) <= config.holding_count
+        assert len(active) + len(pending_buys) <= config.holding_count
+        assert all(o.quantity % config.lot_size == 0 for o in plan.orders)
+
+        live.extend(plan.orders)
         initialized = True
-
-        assert len(held) <= config.holding_count
-        assert cash >= 0
-        assert all(q % config.lot_size == 0 and q > 0 for q in held.values())
-        log.append({"trade_list": plan.trade_list_id, "held": sorted(held), "cash": str(cash)})
+        log.append(
+            {
+                "trade_list": plan.trade_list_id,
+                "held": sorted(held),
+                "live": sorted(o.order_id for o in live),
+                "cash": str(cash),
+            }
+        )
     return log
 
 
@@ -2693,11 +2743,28 @@ def test_the_book_keeps_its_promises_on_every_session_of_several_markets() -> No
         run(market_seed, config())
 
 
+def test_the_markets_really_do_reach_the_branches_the_promises_are_about() -> None:
+    before = Counter(EXERCISED)
+    for market_seed in range(6):
+        run(market_seed, config())
+    reached = EXERCISED - before
+
+    # A halted holding that is left alone, a sell that stays live because its name is halted, and
+    # an order that could not fill: if the markets never got here the assertions above are idle.
+    assert reached["frozen"] > 0
+    assert reached["pending_sells"] > 0
+    assert reached["unfilled"] > 0
+
+
 def test_the_first_session_builds_the_book_and_most_later_sessions_do_nothing() -> None:
     log = run(0, config())
 
-    assert len(log[0]["held"]) == 10  # type: ignore[arg-type]
-    quiet = sum(1 for before, after in pairwise(log) if before["held"] == after["held"])
+    assert log[0]["held"] == []  # the first orders fill at the next session's open
+    # A name halted on its first day cannot be bought then, so the first fill may be a name short;
+    # the book is whole soon after.
+    assert len(log[1]["held"]) >= 8  # type: ignore[arg-type]
+    assert max(len(record["held"]) for record in log) == 10  # type: ignore[arg-type]
+    quiet = sum(1 for before, after in pairwise(log[1:]) if before["held"] == after["held"])
     assert quiet > len(log) // 2
 
 
@@ -2723,60 +2790,240 @@ python3 mutate.py "$PWD" "$PY/python"
 ```
 ```python
 """Apply each mutation to the survivor-book source, run its tests, expect them to fail."""
+
 import pathlib, shutil, subprocess, sys, os
 
-ROOT = pathlib.Path(sys.argv[1])            # worktree root
+ROOT = pathlib.Path(sys.argv[1])  # worktree root
 PY = sys.argv[2]
 DOMAIN = ROOT / "src/openalpha_cn/domain"
 TESTS = sorted(str(p) for p in (ROOT / "tests/unit/domain").glob("test_survivor_*.py"))
 
 MUTATIONS = [
-    ("survivor_policy.py", "state.session - cooldown.since_session < config.cooldown_sessions", "state.session - cooldown.since_session < 0", "cooldown never blocks"),
-    ("survivor_policy.py", "state.session - cooldown.since_session < config.cooldown_sessions", "state.session - cooldown.since_session <= config.cooldown_sessions", "cooldown boundary off by one"),
+    (
+        "survivor_policy.py",
+        "state.session - cooldown.since_session < config.cooldown_sessions",
+        "state.session - cooldown.since_session < 0",
+        "cooldown never blocks",
+    ),
+    (
+        "survivor_policy.py",
+        "state.session - cooldown.since_session < config.cooldown_sessions",
+        "state.session - cooldown.since_session <= config.cooldown_sessions",
+        "cooldown boundary off by one",
+    ),
     ("survivor_policy.py", "lost[:cap]", "lost", "discretionary exits uncapped"),
-    ("survivor_policy.py", "deferred = tuple(lost[cap:])", "deferred = ()", "deferred exits not reported"),
+    (
+        "survivor_policy.py",
+        "deferred = tuple(lost[cap:])",
+        "deferred = ()",
+        "deferred exits not reported",
+    ),
     ("survivor_policy.py", "min(vacancies, cap)", "vacancies", "refill not rate-limited"),
-    ("survivor_policy.py", "allowance = vacancies if not state.initialized", "allowance = vacancies if state.initialized", "first build rate-limited"),
-    ("survivor_policy.py", "affordable[:allowance]", "affordable[::-1][:allowance]", "draws the end of the queue"),
-    ("survivor_policy.py", "verdicts[code].eligible and code not in survivors", "verdicts[code].eligible and code in survivors", "sells survivors instead of losers"),
-    ("survivor_policy.py", "code not in verdicts or not verdicts[code].eligible", "code not in verdicts or verdicts[code].eligible", "forced exit inverted"),
-    ("survivor_policy.py", "key=lambda code: (composite_of(code), code)", "key=lambda code: (-composite_of(code), code)", "best composite exits first"),
-    ("survivor_policy.py", "entrant_count = len(ranked) - floor_share(len(ranked), config.entry_floor_fraction)", "entrant_count = len(ranked)", "entry floor ignored"),
-    ("survivor_policy.py", "blocked = set(held) | set(state.pending_buys) | cooling", "blocked = set(held) | cooling", "pending names redrawn"),
-    ("survivor_policy.py", "- len(exits) + len(state.pending_buys)", "- len(exits)", "pending buys ignored in occupancy"),
-    ("survivor_policy.py", "if lot_quantity(unit_budget, survivors[code].close, config.lot_size) == 0:", "if lot_quantity(unit_budget, survivors[code].close, config.lot_size) < 0:", "unaffordable never skipped"),
-    ("survivor_policy.py", "survivors[code].rank > near_cutoff", "survivors[code].rank >= near_cutoff", "near-exit band off by one"),
-    ("survivor_policy.py", "blocked = set(held) | set(state.pending_buys) | cooling", "blocked = set(state.pending_buys) | cooling", "held names redrawn"),
-    ("survivor_screen.py", "config.loser_decile_count // 10", "(config.loser_decile_count + 1) // 10", "loser cut off"),
-    ("survivor_screen.py", "if fact.board not in config.boards:", "if fact.board in config.boards:", "board test inverted"),
-    ("survivor_screen.py", "fact.listed_sessions < config.min_listing_sessions", "fact.listed_sessions <= config.min_listing_sessions", "listing boundary"),
-    ("survivor_screen.py", "allowed[: floor_share(len(allowed), config.liquidity_drop_fraction)]", "allowed[floor_share(len(allowed), config.liquidity_drop_fraction) :]", "keeps the thin names out of the cut"),
+    (
+        "survivor_policy.py",
+        "allowance = vacancies if not state.initialized",
+        "allowance = vacancies if state.initialized",
+        "first build rate-limited",
+    ),
+    (
+        "survivor_policy.py",
+        "affordable[:allowance]",
+        "affordable[::-1][:allowance]",
+        "draws the end of the queue",
+    ),
+    (
+        "survivor_policy.py",
+        "verdicts[code].eligible and code not in survivors",
+        "verdicts[code].eligible and code in survivors",
+        "sells survivors instead of losers",
+    ),
+    (
+        "survivor_policy.py",
+        "code not in verdicts or not verdicts[code].eligible",
+        "code not in verdicts or verdicts[code].eligible",
+        "forced exit inverted",
+    ),
+    (
+        "survivor_policy.py",
+        "key=lambda code: (composite_of(code), code)",
+        "key=lambda code: (-composite_of(code), code)",
+        "best composite exits first",
+    ),
+    (
+        "survivor_policy.py",
+        "entrant_count = len(ranked) - floor_share(len(ranked), config.entry_floor_fraction)",
+        "entrant_count = len(ranked)",
+        "entry floor ignored",
+    ),
+    (
+        "survivor_policy.py",
+        "blocked = set(held) | set(state.pending_buys) | cooling",
+        "blocked = set(held) | cooling",
+        "pending names redrawn",
+    ),
+    (
+        "survivor_policy.py",
+        "- len(exits) + len(state.pending_buys)",
+        "- len(exits)",
+        "pending buys ignored in occupancy",
+    ),
+    (
+        "survivor_policy.py",
+        "if lot_quantity(unit_budget, survivors[code].close, config.lot_size) == 0:",
+        "if lot_quantity(unit_budget, survivors[code].close, config.lot_size) < 0:",
+        "unaffordable never skipped",
+    ),
+    (
+        "survivor_policy.py",
+        "survivors[code].rank > near_cutoff",
+        "survivors[code].rank >= near_cutoff",
+        "near-exit band off by one",
+    ),
+    (
+        "survivor_policy.py",
+        "blocked = set(held) | set(state.pending_buys) | cooling",
+        "blocked = set(state.pending_buys) | cooling",
+        "held names redrawn",
+    ),
+    (
+        "survivor_screen.py",
+        "config.loser_decile_count // 10",
+        "(config.loser_decile_count + 1) // 10",
+        "loser cut off",
+    ),
+    (
+        "survivor_screen.py",
+        "if fact.board not in config.boards:",
+        "if fact.board in config.boards:",
+        "board test inverted",
+    ),
+    (
+        "survivor_screen.py",
+        "fact.listed_sessions < config.min_listing_sessions",
+        "fact.listed_sessions <= config.min_listing_sessions",
+        "listing boundary",
+    ),
+    (
+        "survivor_screen.py",
+        "allowed[: floor_share(len(allowed), config.liquidity_drop_fraction)]",
+        "allowed[floor_share(len(allowed), config.liquidity_drop_fraction) :]",
+        "keeps the thin names out of the cut",
+    ),
     ("survivor_screen.py", "math.fsum(present)", "sum(present)", "inexact sum"),
-    ("survivor_screen.py", "any(value is None for value in values)", "all(value is None for value in values)", "partial composite"),
-    ("survivor_screen.py", "(fact for fact in facts if fact.board in config.boards)", "(fact for fact in facts)", "liquidity over all boards"),
-    ("survivor_selection.py", "distinct = set(candidates)", "distinct = list(candidates)", "duplicates not collapsed"),
-    ("survivor_selection.py", 'f"{seed}|{session}|{ts_code}"', 'f"{session}|{ts_code}"', "seed ignored"),
+    (
+        "survivor_screen.py",
+        "any(value is None for value in values)",
+        "all(value is None for value in values)",
+        "partial composite",
+    ),
+    (
+        "survivor_screen.py",
+        "(fact for fact in facts if fact.board in config.boards)",
+        "(fact for fact in facts)",
+        "liquidity over all boards",
+    ),
+    (
+        "survivor_selection.py",
+        "distinct = set(candidates)",
+        "distinct = list(candidates)",
+        "duplicates not collapsed",
+    ),
+    (
+        "survivor_selection.py",
+        'f"{seed}|{session}|{ts_code}"',
+        'f"{session}|{ts_code}"',
+        "seed ignored",
+    ),
     ("survivor_orders.py", "quantity = held[decided.ts_code]", "quantity = 100", "sells one lot"),
     ("survivor_orders.py", "proceeds += price * quantity", "pass", "proceeds ignored"),
-    ("survivor_orders.py", "            lot_quantity(available, price, config.lot_size),\n", "            10**9,\n", "cash ignored"),
+    (
+        "survivor_orders.py",
+        "            lot_quantity(available, price, config.lot_size),\n",
+        "            10**9,\n",
+        "cash ignored",
+    ),
     ("survivor_orders.py", "available -= price * quantity", "pass", "cash not consumed"),
-    ("survivor_orders.py", "state.session + config.buy_order_expiry_sessions", "state.session + 1", "wrong expiry"),
+    (
+        "survivor_orders.py",
+        "state.session + config.buy_order_expiry_sessions",
+        "state.session + 1",
+        "wrong expiry",
+    ),
     ("survivor_orders.py", "sorted(sells, key=lambda o: o.ts_code)", "sells", "sells unsorted"),
-    ("survivor_lifecycle.py", "session >= order.expires_session", "session > order.expires_session", "expiry off by one"),
-    ("survivor_lifecycle.py", "elif order.ts_code not in survivors:", "elif order.ts_code in survivors:", "cancels survivors"),
-    ("survivor_lifecycle.py", "if session - cooldown.since_session < config.cooldown_sessions", "if session - cooldown.since_session <= config.cooldown_sessions", "cooldown prune boundary"),
-    ("survivor_lifecycle.py", "set(sold) | set(expired_buys)", "set(sold)", "expired buys do not cool down"),
+    (
+        "survivor_lifecycle.py",
+        "session >= order.expires_session",
+        "session > order.expires_session",
+        "expiry off by one",
+    ),
+    (
+        "survivor_lifecycle.py",
+        "elif order.ts_code not in survivors:",
+        "elif order.ts_code in survivors:",
+        "cancels survivors",
+    ),
+    (
+        "survivor_lifecycle.py",
+        "if session - cooldown.since_session < config.cooldown_sessions",
+        "if session - cooldown.since_session <= config.cooldown_sessions",
+        "cooldown prune boundary",
+    ),
+    (
+        "survivor_lifecycle.py",
+        "set(sold) | set(expired_buys)",
+        "set(sold)",
+        "expired buys do not cool down",
+    ),
     ("survivor_policy.py", "and code not in frozen", "", "a suspended holding is sold"),
-    ("survivor_policy.py", "active = [code for code in held if code not in set(state.pending_sells)]", "active = list(held)", "a live sell is sold again"),
-    ("survivor_policy.py", "occupied = len(active) - len(exits)", "occupied = len(held) - len(exits)", "a live sell still holds a slot"),
-    ("survivor_policy.py", 'verdicts[code].reasons == ("suspended",)', '"suspended" in verdicts[code].reasons', "any suspension freezes"),
-    ("survivor_selection.py", 'f"{seed}|{session}|{ts_code}"', 'f"{seed}|{ts_code}"', "session ignored"),
-    ("survivor_orders.py", "available = max(cash + proceeds - reserved, Decimal(0))", "available = cash + proceeds", "live buys not reserved"),
-    ("survivor_orders.py", 'raise ValueError(f"cannot sell {decided.ts_code}: it is not held")', "pass", "selling an unheld name is silent"),
-    ("survivor_book.py", "if positions != sorted(set(positions)):", "if False:", "verdict reasons unchecked"),
+    (
+        "survivor_policy.py",
+        "active = [code for code in held if code not in set(state.pending_sells)]",
+        "active = list(held)",
+        "a live sell is sold again",
+    ),
+    (
+        "survivor_policy.py",
+        "occupied = len(active) - len(exits)",
+        "occupied = len(held) - len(exits)",
+        "a live sell still holds a slot",
+    ),
+    (
+        "survivor_policy.py",
+        'verdicts[code].reasons == ("suspended",)',
+        '"suspended" in verdicts[code].reasons',
+        "any suspension freezes",
+    ),
+    (
+        "survivor_selection.py",
+        'f"{seed}|{session}|{ts_code}"',
+        'f"{seed}|{ts_code}"',
+        "session ignored",
+    ),
+    (
+        "survivor_orders.py",
+        "available = max(cash + proceeds - reserved, Decimal(0))",
+        "available = cash + proceeds",
+        "live buys not reserved",
+    ),
+    (
+        "survivor_orders.py",
+        'raise ValueError(f"cannot sell {decided.ts_code}: it is not held")',
+        "pass",
+        "selling an unheld name is silent",
+    ),
+    (
+        "survivor_book.py",
+        "if positions != sorted(set(positions)):",
+        "if False:",
+        "verdict reasons unchecked",
+    ),
     ("survivor_book.py", "if codes != sorted(set(codes)):", "if False:", "verdict order unchecked"),
-    ("survivor_policy.py", "if not set(self.pending_sells) <= set(held):", "if False:", "pending sell of an unheld name"),
-
+    (
+        "survivor_policy.py",
+        "if not set(self.pending_sells) <= set(held):",
+        "if False:",
+        "pending sell of an unheld name",
+    ),
 ]
 
 survived, killed, bad = [], [], []
@@ -2789,8 +3036,13 @@ for filename, old, new, label in MUTATIONS:
     path.write_text(original.replace(old, new))
     try:
         env = {**os.environ, "PYTHONPATH": str(ROOT / "src"), "PYTHONDONTWRITEBYTECODE": "1"}
-        done = subprocess.run([PY, "-m", "pytest", "-x", "-q", "-p", "no:cacheprovider", *TESTS],
-                              cwd=ROOT, env=env, capture_output=True, text=True)
+        done = subprocess.run(
+            [PY, "-m", "pytest", "-x", "-q", "-p", "no:cacheprovider", *TESTS],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
     finally:
         path.write_text(original)
     (killed if done.returncode != 0 else survived).append(label)

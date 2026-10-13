@@ -243,6 +243,7 @@ Definitions used throughout (each is stated again in the report):
   sessions_since_listing(d) = #SSE open sessions s with list_date <= s <= d   (new listing: < 250)
 Signal days = every 20th session in [2017-01-03, 2021-10-29], as in decile.py (59 days).
 """
+
 import bisect
 import collections
 import datetime as dt
@@ -277,22 +278,25 @@ def glob(ds, yrs):
 iso = dt.date.fromisoformat
 
 # ------------------------------------------------------------------ load (all bounded by END)
-sessions = [r[0] for r in con.execute(f"""select cal_date from read_parquet({glob('trade_cal', range(2013, 2022))})
-    where subject='SSE' and is_open and cal_date <= '{END}' order by cal_date""").fetchall()]
+sessions = [
+    r[0]
+    for r in con.execute(f"""select cal_date from read_parquet({glob("trade_cal", range(2013, 2022))})
+    where subject='SSE' and is_open and cal_date <= '{END}' order by cal_date""").fetchall()
+]
 sess_idx = {d: i for i, d in enumerate(sessions)}
 con.execute(f"""create temp table dd as select subject, trade_date, pre_close, close, amount from (
   select *, row_number() over (partition by subject, trade_date order by revision_time desc) r
-  from read_parquet({glob('daily', range(2013, 2022))}) where trade_date <= '{END}') where r=1 and close>0""")
+  from read_parquet({glob("daily", range(2013, 2022))}) where trade_date <= '{END}') where r=1 and close>0""")
 con.execute(f"""create temp table lim as select subject, trade_date, up_limit from (
   select *, row_number() over (partition by subject, trade_date order by revision_time desc) r
-  from read_parquet({glob('stk_limit', range(2013, 2022))}) where trade_date <= '{END}') where r=1""")
+  from read_parquet({glob("stk_limit", range(2013, 2022))}) where trade_date <= '{END}') where r=1""")
 bar_days = [r[0] for r in con.execute("select distinct trade_date from dd order by 1").fetchall()]
-sb = con.execute(f"""select subject, lifecycle_event, lifecycle_date from read_parquet({glob('stock_basic', range(1990, 2022))})
+sb = con.execute(f"""select subject, lifecycle_event, lifecycle_date from read_parquet({glob("stock_basic", range(1990, 2022))})
     where lifecycle_date <= '{END}'""").fetchall()
 list_date = {s: iso(d) for s, e, d in sb if e == "listing"}
 delist_date = {s: iso(d) for s, e, d in sb if e == "delisting"}
 nc_rows = con.execute(f"""select subject, name, effective_date, announcement_date, change_reason
-    from read_parquet({glob('namechange', range(2013, 2022))}) where announcement_date <= '{END}'""").fetchall()
+    from read_parquet({glob("namechange", range(2013, 2022))}) where announcement_date <= '{END}'""").fetchall()
 histories = name_histories_from_panel_rows(nc_rows)
 first_bar = dict(con.execute("select subject, min(trade_date) from dd group by 1").fetchall())
 sig_all = [d for d in bar_days if "2017-01-03" <= d <= "2021-10-29"][::20]
@@ -348,11 +352,14 @@ def band_state(pre, up):
 def analyse(d):
     i = bar_days.index(d)
     d0 = bar_days[max(0, i - 19)]
-    rows = con.execute("""
+    rows = con.execute(
+        """
       with w as (select subject, avg(amount) a20, count(*) nb from dd where trade_date between ? and ? group by 1)
       select t.subject, w.a20, w.nb, t.pre_close, l.up_limit
       from dd t join w using(subject) left join lim l on l.subject=t.subject and l.trade_date=t.trade_date
-      where t.trade_date = ?""", [d0, d, d]).fetchall()
+      where t.trade_date = ?""",
+        [d0, d, d],
+    ).fetchall()
     xs = [r for r in rows if board_ok(r[0])]
     cut = np.quantile(np.array([r[1] for r in xs]), 0.30)
     out = []
@@ -360,9 +367,19 @@ def analyse(d):
         ns, pend = name_state(code, d)
         sl = sessions_since_listing(code, d)
         main = code[:3] in MAIN
-        out.append(dict(code=code, top70=bool(a >= cut), name=ns, pend=pend, main=main,
-                        band=band_state(pre, up) if main else "-",
-                        nsess=None if sl is None else sl[0], exact=None if sl is None else sl[1], nb=nb))
+        out.append(
+            dict(
+                code=code,
+                top70=bool(a >= cut),
+                name=ns,
+                pend=pend,
+                main=main,
+                band=band_state(pre, up) if main else "-",
+                nsess=None if sl is None else sl[0],
+                exact=None if sl is None else sl[1],
+                nb=nb,
+            )
+        )
     return out
 
 
@@ -377,15 +394,43 @@ def pct(a, b):
 # ====================================================================== A. coverage of the sources
 print("=== A. source coverage (<= %s)" % END)
 print("namechange partitions on disk:", sorted(os.listdir(f"{R}/namechange")))
-print("namechange rows read (announced <= END):", len(nc_rows), "| securities with a history:", len(histories),
-      "| earliest effective/announced:", con.execute(f"select min(effective_date), min(announcement_date) from read_parquet({glob('namechange', range(2013, 2022))})").fetchone())
-print("rows by announcement year:", con.execute(f"select substr(announcement_date,1,4), count(*) from read_parquet({glob('namechange', range(2013, 2022))}) where announcement_date <= '{END}' group by 1 order by 1").fetchall())
+print(
+    "namechange rows read (announced <= END):",
+    len(nc_rows),
+    "| securities with a history:",
+    len(histories),
+    "| earliest effective/announced:",
+    con.execute(
+        f"select min(effective_date), min(announcement_date) from read_parquet({glob('namechange', range(2013, 2022))})"
+    ).fetchone(),
+)
+print(
+    "rows by announcement year:",
+    con.execute(
+        f"select substr(announcement_date,1,4), count(*) from read_parquet({glob('namechange', range(2013, 2022))}) where announcement_date <= '{END}' group by 1 order by 1"
+    ).fetchall(),
+)
 ever_st = {c for c, h in histories.items() if any(r.risk_warning in ST_SET for r in h.records)}
-print("securities whose history ever carries an ST/*ST/PT name (2013..END):", len(ever_st),
-      "| of which tradable boards:", sum(board_ok(c) for c in ever_st))
-print("stock_basic listing rows <= END:", len(list_date), "| delisting rows:", len(delist_date),
-      "| tradable-board listings:", sum(board_ok(c) for c in list_date))
-print("trade_cal SSE sessions 2013-01..2021-10:", len(sessions), "| daily bar dates equal:", sessions == bar_days)
+print(
+    "securities whose history ever carries an ST/*ST/PT name (2013..END):",
+    len(ever_st),
+    "| of which tradable boards:",
+    sum(board_ok(c) for c in ever_st),
+)
+print(
+    "stock_basic listing rows <= END:",
+    len(list_date),
+    "| delisting rows:",
+    len(delist_date),
+    "| tradable-board listings:",
+    sum(board_ok(c) for c in list_date),
+)
+print(
+    "trade_cal SSE sessions 2013-01..2021-10:",
+    len(sessions),
+    "| daily bar dates equal:",
+    sessions == bar_days,
+)
 print("signal days:", len(sig_all), sig_all[0], "..", sig_all[-1], "| 5 sampled:", pick)
 
 # ====================================================================== B/C. per-day tables
@@ -400,43 +445,108 @@ for d in sig_all:
     st = [o for o in out if o["name"] == "st"]
     new = [o for o in out if is_new(o)]
     either = [o for o in out if o["name"] == "st" or is_new(o)]
-    per_day.append(dict(
-        d=d, n=n, top=len(top), st=len(st), st_main=sum(o["main"] for o in st), st_chinext=sum(not o["main"] for o in st),
-        delisting=sum(o["name"] == "delisting" for o in out),
-        st_top=sum(o["top70"] for o in st), new=len(new), new_top=sum(o["top70"] for o in new),
-        stnew=sum(1 for o in st if is_new(o)), top_either=sum(o["top70"] for o in either),
-        band5=sum(o["band"] == "5" for o in out), pend_st=sum(1 for o in out if o["pend"] and o["name"] != "st"),
-        nolist=sum(o["nsess"] is None for o in out), exact=sum(bool(o["exact"]) for o in out),
-        no_record=sum(o["name"] == "no_record" for o in out), before_first=sum(o["name"] == "before_first" for o in out),
-        none=sum(o["name"] == "none" for o in out),
-    ))
+    per_day.append(
+        dict(
+            d=d,
+            n=n,
+            top=len(top),
+            st=len(st),
+            st_main=sum(o["main"] for o in st),
+            st_chinext=sum(not o["main"] for o in st),
+            delisting=sum(o["name"] == "delisting" for o in out),
+            st_top=sum(o["top70"] for o in st),
+            new=len(new),
+            new_top=sum(o["top70"] for o in new),
+            stnew=sum(1 for o in st if is_new(o)),
+            top_either=sum(o["top70"] for o in either),
+            band5=sum(o["band"] == "5" for o in out),
+            pend_st=sum(1 for o in out if o["pend"] and o["name"] != "st"),
+            nolist=sum(o["nsess"] is None for o in out),
+            exact=sum(bool(o["exact"]) for o in out),
+            no_record=sum(o["name"] == "no_record" for o in out),
+            before_first=sum(o["name"] == "before_first" for o in out),
+            none=sum(o["name"] == "none" for o in out),
+        )
+    )
     for o in out:
         if o["main"]:
-            confusion[({"st": "ST", "delisting": "DELISTING", "none": "NONE", "no_record": "NO_RECORD", "before_first": "BEFORE_FIRST"}[o["name"]], o["band"])] += 1
+            confusion[
+                (
+                    {
+                        "st": "ST",
+                        "delisting": "DELISTING",
+                        "none": "NONE",
+                        "no_record": "NO_RECORD",
+                        "before_first": "BEFORE_FIRST",
+                    }[o["name"]],
+                    o["band"],
+                )
+            ] += 1
         else:
             chinext_by_year[(d[:4], o["name"])] += 1
 
 print("\n=== B. five sampled signal days")
-hdr = ["d", "n", "top", "st", "st_main", "st_chinext", "delisting", "st_top", "new", "new_top", "stnew", "top_either", "band5", "nolist"]
+hdr = [
+    "d",
+    "n",
+    "top",
+    "st",
+    "st_main",
+    "st_chinext",
+    "delisting",
+    "st_top",
+    "new",
+    "new_top",
+    "stnew",
+    "top_either",
+    "band5",
+    "nolist",
+]
 print(*hdr, sep="\t")
 for p in per_day:
     if p["d"] in pick:
         print(*[p[h] for h in hdr], sep="\t")
-print("share of ST names inside liquidity top70 / share of new-listing names inside top70 / share of top70 removed by ST, new, either:")
+print(
+    "share of ST names inside liquidity top70 / share of new-listing names inside top70 / share of top70 removed by ST, new, either:"
+)
 for p in per_day:
     if p["d"] in pick:
-        print(p["d"], pct(p["st_top"], p["st"]), pct(p["new_top"], p["new"]), pct(p["st_top"], p["top"]),
-              pct(p["new_top"], p["top"]), pct(p["top_either"], p["top"]))
+        print(
+            p["d"],
+            pct(p["st_top"], p["st"]),
+            pct(p["new_top"], p["new"]),
+            pct(p["st_top"], p["top"]),
+            pct(p["new_top"], p["top"]),
+            pct(p["top_either"], p["top"]),
+        )
 
 print("\n=== C. all 59 signal days: min / median / max")
-for k in ["n", "top", "st", "st_main", "st_chinext", "delisting", "new", "stnew", "nolist", "pend_st", "before_first", "no_record", "none"]:
+for k in [
+    "n",
+    "top",
+    "st",
+    "st_main",
+    "st_chinext",
+    "delisting",
+    "new",
+    "stnew",
+    "nolist",
+    "pend_st",
+    "before_first",
+    "no_record",
+    "none",
+]:
     a = np.array([p[k] for p in per_day], dtype=float)
     print(f"{k:13s} {a.min():8.0f} {np.median(a):8.0f} {a.max():8.0f}")
-for name, f in [("ST share inside top70", lambda p: p["st_top"] / p["st"]), ("new share inside top70", lambda p: p["new_top"] / p["new"]),
-                ("top70 removed by ST", lambda p: p["st_top"] / p["top"]), ("top70 removed by new", lambda p: p["new_top"] / p["top"]),
-                ("top70 removed by ST or new", lambda p: p["top_either"] / p["top"]),
-                ("names with computable listing-day count", lambda p: 1 - p["nolist"] / p["n"]),
-                ("names with EXACT (listing>=2013-01-04) count", lambda p: p["exact"] / p["n"])]:
+for name, f in [
+    ("ST share inside top70", lambda p: p["st_top"] / p["st"]),
+    ("new share inside top70", lambda p: p["new_top"] / p["new"]),
+    ("top70 removed by ST", lambda p: p["st_top"] / p["top"]),
+    ("top70 removed by new", lambda p: p["new_top"] / p["top"]),
+    ("top70 removed by ST or new", lambda p: p["top_either"] / p["top"]),
+    ("names with computable listing-day count", lambda p: 1 - p["nolist"] / p["n"]),
+    ("names with EXACT (listing>=2013-01-04) count", lambda p: p["exact"] / p["n"]),
+]:
     a = np.array([f(p) for p in per_day])
     print(f"{name:46s} {a.min():.3f} {np.median(a):.3f} {a.max():.3f}")
 print("full table:")
@@ -450,21 +560,38 @@ print("%-14s" % "name\\band", *["%8s" % b for b in bands], "%8s" % "total")
 for nm in ["ST", "DELISTING", "NONE", "NO_RECORD", "BEFORE_FIRST"]:
     row = [confusion[(nm, b)] for b in bands]
     print("%-14s" % nm, *["%8d" % v for v in row], "%8d" % sum(row))
-print("ChiNext (band is not informative) name states by signal year:", sorted(chinext_by_year.items()))
+print(
+    "ChiNext (band is not informative) name states by signal year:", sorted(chinext_by_year.items())
+)
 
-print("distinct main-board securities that had a published 5% band on >=1 signal day:",
-      len({o["code"] for d in sig_all for o in analyse(d) if o["main"] and o["band"] == "5"}),
-      "| of which ST by name on >=1 such day:",
-      len({o["code"] for d in sig_all for o in analyse(d) if o["main"] and o["band"] == "5" and o["name"] == "st"}))
+print(
+    "distinct main-board securities that had a published 5% band on >=1 signal day:",
+    len({o["code"] for d in sig_all for o in analyse(d) if o["main"] and o["band"] == "5"}),
+    "| of which ST by name on >=1 such day:",
+    len(
+        {
+            o["code"]
+            for d in sig_all
+            for o in analyse(d)
+            if o["main"] and o["band"] == "5" and o["name"] == "st"
+        }
+    ),
+)
 
 # ====================================================================== K. does the announcement-year window matter?
-print("\n=== K. name-ST count on a signal day when only some announcement years are read (main board; band-5 count beside it)")
+print(
+    "\n=== K. name-ST count on a signal day when only some announcement years are read (main board; band-5 count beside it)"
+)
 for d in pick:
     y = int(d[:4])
     out = analyse(d)
     codes = [o["code"] for o in out if o["main"]]
     res = {}
-    for label, yrs in [("signal year only", {y}), ("signal year + previous", {y - 1, y}), ("2013..signal year", set(range(2013, y + 1)))]:
+    for label, yrs in [
+        ("signal year only", {y}),
+        ("signal year + previous", {y - 1, y}),
+        ("2013..signal year", set(range(2013, y + 1))),
+    ]:
         hm = name_histories_from_panel_rows([r for r in nc_rows if int(r[3][:4]) in yrs])
         res[label] = sum(1 for c in codes if name_state(c, d, hm)[0] == "st")
     print(d, "band-5:", sum(o["band"] == "5" for o in out), res)
@@ -474,13 +601,21 @@ print("\n=== E. every disagreement between name-ST and band-5 (main board)")
 who = collections.defaultdict(list)
 for d in sig_all:
     for o in analyse(d):
-        if o["main"] and ((o["name"] != "st" and o["band"] == "5") or (o["name"] == "st" and o["band"] != "5")):
+        if o["main"] and (
+            (o["name"] != "st" and o["band"] == "5") or (o["name"] == "st" and o["band"] != "5")
+        ):
             who[(o["code"], o["name"], o["band"])].append((d, o["nb"]))
 for k, v in who.items():
     print(k, "days:", len(v), v[0], "..", v[-1])
 h = histories.get("600182.SH")
 if h:
-    print("600182.SH records:", [(r.effective_from.isoformat(), r.announced_on.isoformat(), r.name, r.change_reason) for r in h.records])
+    print(
+        "600182.SH records:",
+        [
+            (r.effective_from.isoformat(), r.announced_on.isoformat(), r.name, r.change_reason)
+            for r in h.records
+        ],
+    )
 
 # ====================================================================== F. list_date: coverage + reconciliation
 print("\n=== F1. tradable-board securities with a bar on a signal day but no listing row (<= END)")
@@ -491,10 +626,26 @@ for d in sig_all:
             nolist[o["code"]].append(d)
 for c, ds in nolist.items():
     lb = con.execute("select max(trade_date), count(*) from dd where subject=?", [c]).fetchone()
-    print(c, "signal days", len(ds), ds[0], "..", ds[-1], "| first bar", first_bar.get(c), "| last bar/count", lb,
-          "| delisting row", delist_date.get(c), "| name history", c in histories)
+    print(
+        c,
+        "signal days",
+        len(ds),
+        ds[0],
+        "..",
+        ds[-1],
+        "| first bar",
+        first_bar.get(c),
+        "| last bar/count",
+        lb,
+        "| delisting row",
+        delist_date.get(c),
+        "| name history",
+        c in histories,
+    )
 
-print("\n=== F1b. every pair of securities whose daily (close, amount) agree on >= 30 common sessions (code migrations)")
+print(
+    "\n=== F1b. every pair of securities whose daily (close, amount) agree on >= 30 common sessions (code migrations)"
+)
 for r in con.execute("""
   select a.subject, b.subject, count(*) n, min(a.trade_date), max(a.trade_date)
   from dd a join dd b on a.trade_date=b.trade_date and a.close=b.close and a.amount=b.amount and a.subject<b.subject
@@ -506,33 +657,70 @@ diffs = []
 for c, ld in list_date.items():
     if board_ok(c) and iso("2013-01-04") <= ld <= iso("2021-10-29"):
         fb = first_bar.get(c)
-        diffs.append(None if fb is None else sess_idx[fb] - bisect.bisect_left(sessions, ld.isoformat()))
-strict = [None if first_bar.get(c) is None else sess_idx[first_bar[c]] - bisect.bisect_left(sessions, ld.isoformat())
-          for c, ld in list_date.items() if board_ok(c) and iso("2017-01-01") <= ld <= iso("2021-10-29")]
-print("listings dated 2017-01-01..2021-10-29 only:", len(strict), "| first bar == list_date session:", sum(x == 0 for x in strict))
-print("all listings from 2013-01-04 (2013-16 used only as extra evidence):", len(diffs), "| no bar at all:", sum(x is None for x in diffs),
-      "| first bar == list_date session:", sum(x == 0 for x in diffs),
-      "| first bar later:", sum(x is not None and x > 0 for x in diffs), "| earlier:", sum(x is not None and x < 0 for x in diffs))
-print("upstream_defects (research window) -- bar_before_listing by board:",
-      con.execute(f"""select case when subject like '%.BJ' then 'BJ' when subject like '688%' then 'STAR' when substr(subject,1,3) in ('300','301') then 'ChiNext' else 'main' end b,
-         count(*), count(distinct subject) from read_parquet({glob('upstream_defects', range(2013, 2022))})
-         where defect_kind='bar_before_listing' and trade_date <= '{END}' group by 1""").fetchall())
+        diffs.append(
+            None if fb is None else sess_idx[fb] - bisect.bisect_left(sessions, ld.isoformat())
+        )
+strict = [
+    None
+    if first_bar.get(c) is None
+    else sess_idx[first_bar[c]] - bisect.bisect_left(sessions, ld.isoformat())
+    for c, ld in list_date.items()
+    if board_ok(c) and iso("2017-01-01") <= ld <= iso("2021-10-29")
+]
+print(
+    "listings dated 2017-01-01..2021-10-29 only:",
+    len(strict),
+    "| first bar == list_date session:",
+    sum(x == 0 for x in strict),
+)
+print(
+    "all listings from 2013-01-04 (2013-16 used only as extra evidence):",
+    len(diffs),
+    "| no bar at all:",
+    sum(x is None for x in diffs),
+    "| first bar == list_date session:",
+    sum(x == 0 for x in diffs),
+    "| first bar later:",
+    sum(x is not None and x > 0 for x in diffs),
+    "| earlier:",
+    sum(x is not None and x < 0 for x in diffs),
+)
+print(
+    "upstream_defects (research window) -- bar_before_listing by board:",
+    con.execute(f"""select case when subject like '%.BJ' then 'BJ' when subject like '688%' then 'STAR' when substr(subject,1,3) in ('300','301') then 'ChiNext' else 'main' end b,
+         count(*), count(distinct subject) from read_parquet({glob("upstream_defects", range(2013, 2022))})
+         where defect_kind='bar_before_listing' and trade_date <= '{END}' group by 1""").fetchall(),
+)
 
-print("\n=== F3. 250-session threshold: sessions-since-listing vs own-bars-since-listing, 5 sampled days")
+print(
+    "\n=== F3. 250-session threshold: sessions-since-listing vs own-bars-since-listing, 5 sampled days"
+)
 for d in pick:
     flips, near = [], 0
     for o in analyse(d):
         if o["nsess"] is None or not o["exact"]:
             continue
         c = o["code"]
-        nb_ = con.execute("select count(*) from dd where subject=? and trade_date between ? and ?", [c, list_date[c].isoformat(), d]).fetchone()[0]
+        nb_ = con.execute(
+            "select count(*) from dd where subject=? and trade_date between ? and ?",
+            [c, list_date[c].isoformat(), d],
+        ).fetchone()[0]
         near += THRESH - 40 <= o["nsess"] < THRESH + 40
         if (o["nsess"] < THRESH) != (nb_ < THRESH):
             flips.append((c, o["nsess"], nb_))
-    print(d, "verdict differs between the two definitions:", len(flips), flips[:4], "| names within +-40 sessions of the threshold:", near)
+    print(
+        d,
+        "verdict differs between the two definitions:",
+        len(flips),
+        flips[:4],
+        "| names within +-40 sessions of the threshold:",
+        near,
+    )
 
 # ====================================================================== G. unresolved names
-print("\n=== G. 'before_first' (rows announced by d exist, none in force on d), 59 signal days, tradable boards")
+print(
+    "\n=== G. 'before_first' (rows announced by d exist, none in force on d), 59 signal days, tradable boards"
+)
 bf = collections.defaultdict(list)
 tot = 0
 for d in sig_all:
@@ -545,12 +733,32 @@ print("subject-days:", sum(len(v) for v in bf.values()), "of", tot, "| securitie
 kinds = collections.Counter()
 for c in bf:
     hh = histories[c]
-    kinds["listed before first record" if list_date.get(c) and list_date[c] < hh.records[0].effective_from else "other"] += 1
-    kinds["listed pre-2013" if list_date.get(c) and list_date[c] < iso("2013-01-04") else "listed 2013+"] += 1
+    kinds[
+        "listed before first record"
+        if list_date.get(c) and list_date[c] < hh.records[0].effective_from
+        else "other"
+    ] += 1
+    kinds[
+        "listed pre-2013"
+        if list_date.get(c) and list_date[c] < iso("2013-01-04")
+        else "listed 2013+"
+    ] += 1
 print(dict(kinds))
 for c in list(bf)[:5]:
     r0 = histories[c].records[0]
-    print(" ", c, bf[c][:2], "first record effective", r0.effective_from, "announced", r0.announced_on, r0.name, r0.change_reason, "| list", list_date.get(c))
+    print(
+        " ",
+        c,
+        bf[c][:2],
+        "first record effective",
+        r0.effective_from,
+        "announced",
+        r0.announced_on,
+        r0.name,
+        r0.change_reason,
+        "| list",
+        list_date.get(c),
+    )
 
 # ====================================================================== H. reason witness
 print("\n=== H. change_reason witness against the grammar (rows announced 2013..2021-10)")
@@ -568,7 +776,9 @@ for subj, name, eff, ann, reason in nc_rows:
 print(dict(bad), "| reasons:", dict(collections.Counter(r[4] for r in nc_rows)))
 
 # ====================================================================== I. ST entries: how early is the signal day told?
-print("\n=== I. ST *entries* effective 2017-01-01..2021-10-29 (name none -> ST), tradable boards: known at the previous session's signal?")
+print(
+    "\n=== I. ST *entries* effective 2017-01-01..2021-10-29 (name none -> ST), tradable boards: known at the previous session's signal?"
+)
 lead_known = lead_unknown = 0
 leads = collections.Counter()
 rows_ = []
@@ -578,23 +788,35 @@ for code, hh in histories.items():
     prev_state = None
     for r in hh.records:
         cur = r.risk_warning
-        if cur in ST_SET and (prev_state is None or prev_state not in ST_SET) and "2017-01-01" <= r.effective_from.isoformat() <= "2021-10-29":
+        if (
+            cur in ST_SET
+            and (prev_state is None or prev_state not in ST_SET)
+            and "2017-01-01" <= r.effective_from.isoformat() <= "2021-10-29"
+        ):
             e = r.effective_from.isoformat()
-            j = bisect.bisect_left(sessions, e)          # first session >= effective date
+            j = bisect.bisect_left(sessions, e)  # first session >= effective date
             prev_sess = sessions[j - 1] if j > 0 else None
             known = prev_sess is not None and r.announced_on.isoformat() <= prev_sess
             lead_known += known
-            lead_unknown += (not known)
+            lead_unknown += not known
             leads[(r.effective_from - r.announced_on).days] += 1
             rows_.append((code, r.name, r.announced_on.isoformat(), e, known))
         prev_state = cur
-print("entries:", lead_known + lead_unknown, "| announced on/before the previous session (a signal on that day could see it):", lead_known,
-      "| announced after it (a signal could not):", lead_unknown)
+print(
+    "entries:",
+    lead_known + lead_unknown,
+    "| announced on/before the previous session (a signal on that day could see it):",
+    lead_known,
+    "| announced after it (a signal could not):",
+    lead_unknown,
+)
 print("calendar-day lead (effective - announced) distribution:", sorted(leads.items())[:10])
 print("examples of entries a signal could not see:", [x for x in rows_ if not x[4]][:5])
 
 # ====================================================================== J. left edge
-print("\n=== J. 2017-01-03: year of the record in force for each main-board name with a published 5% band")
+print(
+    "\n=== J. 2017-01-03: year of the record in force for each main-board name with a published 5% band"
+)
 d0 = sig_all[0]
 yrs = collections.Counter()
 for o in analyse(d0):
@@ -610,16 +832,23 @@ print(sorted(yrs.items()))
 # Question: do the ST / new-listing exclusions overlap with the "drop the worst two composite deciles" survivor
 # filter that the exploratory +6.6% / +7.7% numbers were measured under?  Those numbers
 # (small_books_elig.py) were computed WITHOUT any ST or listing-age exclusion.  Composition, not performance.
-print("\n=== L. composition of the investable set and of the survivor tail (no returns) -- exploratory, not evidence")
-FACS = ("residual_vol_60", "return_vol_60", "turnover_60", "downside_vol_60")      # all lower-is-better in small_books_elig.py
+print(
+    "\n=== L. composition of the investable set and of the survivor tail (no returns) -- exploratory, not evidence"
+)
+FACS = (
+    "residual_vol_60",
+    "return_vol_60",
+    "turnover_60",
+    "downside_vol_60",
+)  # all lower-is-better in small_books_elig.py
 fvals = {}
 for f in FACS:
     rows = con.execute(f"""select subject, strftime(timezone('Asia/Shanghai', event_time), '%Y-%m-%d') td, value from (
         select *, row_number() over (partition by subject, event_time order by revision_time desc) r
-        from read_parquet({glob('factor_proc_' + f + '_v1', range(2016, 2022))})) where r=1 and value is not null""").fetchall()
+        from read_parquet({glob("factor_proc_" + f + "_v1", range(2016, 2022))})) where r=1 and value is not null""").fetchall()
     for s, td, v in rows:
         if td <= END:
-            fvals.setdefault(td, {}).setdefault(f, {})[s] = -v          # sign: lower vol/turnover is better
+            fvals.setdefault(td, {}).setdefault(f, {})[s] = -v  # sign: lower vol/turnover is better
 comp_rows = []
 for d in sig_all:
     out = {o["code"]: o for o in analyse(d)}
@@ -627,8 +856,13 @@ for d in sig_all:
     if len(have) < 1000:
         continue
     # liquidity cut over the factor-complete tradable names, exactly as small_books_elig.py does
-    a20 = {r[0]: r[1] for r in con.execute("""select subject, avg(amount) from dd where trade_date between ? and ? group by 1""",
-                                            [bar_days[max(0, bar_days.index(d) - 19)], d]).fetchall()}
+    a20 = {
+        r[0]: r[1]
+        for r in con.execute(
+            """select subject, avg(amount) from dd where trade_date between ? and ? group by 1""",
+            [bar_days[max(0, bar_days.index(d) - 19)], d],
+        ).fetchall()
+    }
     names = [c for c in have if c in a20]
     amt = np.array([a20[c] for c in names])
     comp = np.mean([[fvals[d][f][c] for c in names] for f in FACS], axis=0)
@@ -639,24 +873,49 @@ for d in sig_all:
     tail = invs - surv
     isst = lambda c: out[c]["name"] == "st" or out[c]["band"] == "5"
     isnew = lambda c: is_new(out[c])
-    comp_rows.append(dict(d=d, inv=len(invs), tail=len(tail), surv=len(surv),
-                          st_inv=sum(isst(c) for c in invs), new_inv=sum(isnew(c) for c in invs),
-                          st_tail=sum(isst(c) for c in tail), new_tail=sum(isnew(c) for c in tail),
-                          either_inv=sum(isst(c) or isnew(c) for c in invs),
-                          either_surv=sum(isst(c) or isnew(c) for c in surv)))
+    comp_rows.append(
+        dict(
+            d=d,
+            inv=len(invs),
+            tail=len(tail),
+            surv=len(surv),
+            st_inv=sum(isst(c) for c in invs),
+            new_inv=sum(isnew(c) for c in invs),
+            st_tail=sum(isst(c) for c in tail),
+            new_tail=sum(isnew(c) for c in tail),
+            either_inv=sum(isst(c) or isnew(c) for c in invs),
+            either_surv=sum(isst(c) or isnew(c) for c in surv),
+        )
+    )
 print("signal days with a factor-complete cross section:", len(comp_rows))
 for k in ("inv", "surv", "st_inv", "new_inv", "either_inv", "either_surv"):
     a = np.array([r[k] for r in comp_rows], dtype=float)
     print(f"{k:12s} min {a.min():.0f} median {np.median(a):.0f} max {a.max():.0f}")
 sh = lambda num, den: np.array([r[num] / r[den] for r in comp_rows if r[den]])
-print("share of ST names (investable) that fall in the dropped worst-2-decile tail: median %.2f (min %.2f max %.2f)" % (
-    np.median(sh("st_tail", "st_inv")), sh("st_tail", "st_inv").min(), sh("st_tail", "st_inv").max()))
-print("share of new (<250) names (investable) that fall in the dropped tail: median %.2f (min %.2f max %.2f)" % (
-    np.median(sh("new_tail", "new_inv")), sh("new_tail", "new_inv").min(), sh("new_tail", "new_inv").max()))
-print("share of the SURVIVOR set that is ST or new (what the eligibility filter would still remove): median %.3f max %.3f" % (
-    np.median(sh("either_surv", "surv")), sh("either_surv", "surv").max()))
-print("share of the investable set that is ST or new: median %.3f max %.3f" % (
-    np.median(sh("either_inv", "inv")), sh("either_inv", "inv").max()))
+print(
+    "share of ST names (investable) that fall in the dropped worst-2-decile tail: median %.2f (min %.2f max %.2f)"
+    % (
+        np.median(sh("st_tail", "st_inv")),
+        sh("st_tail", "st_inv").min(),
+        sh("st_tail", "st_inv").max(),
+    )
+)
+print(
+    "share of new (<250) names (investable) that fall in the dropped tail: median %.2f (min %.2f max %.2f)"
+    % (
+        np.median(sh("new_tail", "new_inv")),
+        sh("new_tail", "new_inv").min(),
+        sh("new_tail", "new_inv").max(),
+    )
+)
+print(
+    "share of the SURVIVOR set that is ST or new (what the eligibility filter would still remove): median %.3f max %.3f"
+    % (np.median(sh("either_surv", "surv")), sh("either_surv", "surv").max())
+)
+print(
+    "share of the investable set that is ST or new: median %.3f max %.3f"
+    % (np.median(sh("either_inv", "inv")), sh("either_inv", "inv").max())
+)
 print("for reference, a name drawn at random would be in the tail with probability 0.20")
 ```
 

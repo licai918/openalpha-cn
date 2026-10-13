@@ -235,18 +235,22 @@ def survivor_day(
     day: date,
     as_of: datetime,
     anchor: date,
-    ledger: LedgerView,   # 由纸面账本（T5）推进后得到：权益、现金、持仓、在途订单、冷却、是否已建仓
+    ledger: LedgerView,  # 由纸面账本（T5）推进后得到：权益、现金、持仓、在途订单、冷却、是否已建仓
 ) -> SurvivorDay:
     # 1. 面板 -> 纯值事实；按 ts_code 排序，板块用 backtest.execution.security_board
-    facts = security_facts(store, config, day=day, as_of=as_of)        # tuple[SecurityFacts, ...]
+    facts = security_facts(store, config, day=day, as_of=as_of)  # tuple[SecurityFacts, ...]
     # 2. 资格与幸存者（纯函数）
-    result = screen(facts, config, equity=ledger.equity)              # ScreenResult
+    result = screen(facts, config, equity=ledger.equity)  # ScreenResult
     # 3. 持仓决定（纯函数）
     state = BookState(
-        session=ordinal(anchor, day),   # trading_days_between(anchor, day) 中的位置，同 schedule_of 的取法
+        session=ordinal(
+            anchor, day
+        ),  # trading_days_between(anchor, day) 中的位置，同 schedule_of 的取法
         initialized=ledger.initialized,
         equity=ledger.equity,
-        holdings=tuple(h for h in ledger.holdings if h.ts_code not in ledger.live_sell_codes),  # 见 §6.1
+        holdings=tuple(
+            h for h in ledger.holdings if h.ts_code not in ledger.live_sell_codes
+        ),  # 见 §6.1
         pending_buys=ledger.live_buy_codes,
         cooldowns=ledger.cooldowns,
     )
