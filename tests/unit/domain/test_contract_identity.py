@@ -795,9 +795,10 @@ already legitimately holds one.
 The seven prefixes these mint (`set`, `obs`/`prc`/`nrs`/`xs`, `chr`, `rkc`, `sla`, `ev`, and
 whichever the caller hands `stable_model_id`) are a different census from the one in
 `test_manifest_component_provenance.py::live_prefixes`, which reads **prefix arguments** off
-call sites -- 27 of them carrying 24 distinct prefixes, none containing an underscore, as of
-this issue. That one answers "is `mdl` taken"; this one answers "who is allowed to mint at
-all", and neither implies the other.
+call sites -- 30 of them carrying 27 distinct prefixes, none containing an underscore, as of
+`V2-P7-005` (`sbc`, `tor` and `trl` joined the 24 that `V2-P4-017` left). That one answers
+"is `mdl` taken"; this one answers "who is allowed to mint at all", and neither implies the
+other.
 """
 
 DECLARED_PLAIN_DIGESTS: Final[dict[str, str]] = {

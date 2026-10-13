@@ -324,13 +324,14 @@ def test_a_quantitative_model_reference_must_be_something_the_one_hash_function_
     an address's prefix at all -- they are also the whole of what its "seven of them contain
     underscores" was counting, which is six. The measured census is 24 distinct prefixes over 27
     call sites, and **none** contains an underscore -- `V2-P4-017`'s `prd` is the newest, and it
-    was chosen by asking this census which three-letter prefixes were free.
+    was chosen by asking this census which three-letter prefixes were free. `V2-P7-005` added
+    `sbc`, `tor` and `trl`: 30 call sites, 27 distinct prefixes.
     """
     prefixes = live_prefixes()
     reference = AlphaModelRef(name="lgbm-baseline", artifact_id=ARTIFACT)
 
-    assert len(prefixes) == 28
-    assert len(set(prefixes)) == 25
+    assert len(prefixes) == 30
+    assert len(set(prefixes)) == 27
     assert ALPHA_MODEL_ARTIFACT_PREFIX in prefixes
     assert sum(1 for prefix in prefixes if "_" in prefix) == 0
     for prefix in prefixes:
