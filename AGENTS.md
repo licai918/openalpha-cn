@@ -5,12 +5,13 @@
 The active direction is **v2**. The workspace is `docs/specs/v2/`:
 
 - `openalpha-cn-v2-prd.md` — scope, measured baseline, decisions. Read this to know what is in and out.
-- `openalpha-cn-v2-roadmap.md` — the work breakdown: 110 issues across P0.A–P5, each with dependencies, evidence, test seam and PRD mapping. **Take work from here.**
+- `openalpha-cn-v2-roadmap.md` — the work breakdown: 241 issues across P0.A–P7, each with dependencies, evidence, test seam and PRD mapping. **Take work from here.**
+- `openalpha-cn-v2-p7-decision-chain.md` — the **current phase (P7)**: measured facts about the two decision chains, the exploratory findings (labelled as not evidence), the decisions, the order of work and its gates, and the revision log. Read it before touching P7 work; change the order or a gate only by adding a row to its section 9.
 - `openalpha-cn-v2-seam-audit.md` — 103 findings with `file:line` evidence, each mapped to a closing issue. Read the relevant section before touching a subsystem.
 
 `docs/specs/openalpha-cn-v1-spec.md` remains the **contract baseline** — the v1 domain contracts it describes are still authoritative. It is no longer the work pointer.
 
-Every change must name its issue ID (`V2-P0A-001` … `V2-P5-023`) in the branch, commit and pull request.
+Every change must name its issue ID (`V2-P0A-001` … `V2-P7-015`) in the branch, commit and pull request.
 
 ## Working agreement
 

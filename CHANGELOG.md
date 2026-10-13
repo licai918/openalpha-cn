@@ -4,6 +4,20 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### P7 — decision-chain integration and excess-return research (`V2-P7-001`)
+
+P6 ended with the pipeline running and its one pre-registered holdout not passed. This entry lands
+the planning, not any code: `docs/specs/v2/openalpha-cn-v2-p7-decision-chain.md` records what the
+two decision chains actually are at `1d7b4a3` (the research chain is not automatic, its agents'
+output reaches no position and no shipped path calls a model), the exploratory findings with their
+limits (the rank IC of the volatility and liquidity factors sits in the loser tail, so a broad book
+that drops that tail is the form to test; the benchmark leans to small caps), the user's decisions of
+2026-10-08, the order of work -- Step 0 (book form) and plan C (agents as a forward-registered signal)
+in parallel, then plan A (veto layer), then plan B (evidence as model features), each behind a gate --
+and a revision log. `ADR-0005` fixes the direction: chain two is the single engine and the agent layer
+joins as a registered prediction family, evaluated forward only. The roadmap gains P7 with 13 issues.
+**Daily registration is paused** from 2026-10-08 until a new configuration is pre-registered.
+
 ### P6 — selection ready (`V2-P6-001` … `V2-P6-035`)
 
 The project now runs end to end from a multi-year whole-market panel to a registered daily
