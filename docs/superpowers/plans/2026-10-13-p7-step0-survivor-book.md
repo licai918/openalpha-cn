@@ -2559,10 +2559,16 @@ a name twice, leaves a suspended holding alone, and never buys what is cooling. 
 checks recorded in the plan are run against these tests.
 """
 
+import hashlib
+import json
+import os
 import random
+import subprocess
+import sys
 from collections import Counter
 from decimal import Decimal
 from itertools import pairwise
+from pathlib import Path
 
 from openalpha_cn.domain.survivor_book import SecurityFacts, SurvivorBookConfig
 from openalpha_cn.domain.survivor_lifecycle import advance_orders, update_cooldowns
@@ -2636,7 +2642,7 @@ def run(market_seed: int, config: SurvivorBookConfig) -> list[dict[str, object]]
         #    cannot trade, so its order does not fill and stays live; a buy needs the cash.
         filled: set[str] = set()
         sold: set[str] = set()
-        for order in sorted(live, key=lambda o: (o.side, o.ts_code)):
+        for order in sorted(live, key=lambda o: (o.side != "sell", o.ts_code)):
             value = order.reference_price * order.quantity
             if order.ts_code in halted or (order.side == "buy" and value > cash):
                 EXERCISED["unfilled"] += 1
@@ -2689,6 +2695,19 @@ def run(market_seed: int, config: SurvivorBookConfig) -> list[dict[str, object]]
             cash=cash,
             carried=tuple(live),
         )
+        # The plan itself must fit in the cash: what today's buys cost plus what buys already live
+        # will cost cannot exceed the cash plus the proceeds of today's sells. (Live buys alone may
+        # exceed it -- then nothing new is planned.)
+        planned_buys = sum(
+            (o.reference_price * o.quantity for o in plan.orders if o.side == "buy"), Decimal(0)
+        )
+        live_buys = sum(
+            (o.reference_price * o.quantity for o in live if o.side == "buy"), Decimal(0)
+        )
+        planned_sells = sum(
+            (o.reference_price * o.quantity for o in plan.orders if o.side == "sell"), Decimal(0)
+        )
+        assert planned_buys == 0 or planned_buys + live_buys <= cash + planned_sells
         EXERCISED["frozen"] += len(decision.frozen)
         EXERCISED["pending_sells"] += len(pending_sells)
 
@@ -2774,6 +2793,38 @@ def test_the_whole_run_is_reproducible() -> None:
 
 def test_a_smaller_book_with_a_longer_cooldown_keeps_the_same_promises() -> None:
     run(1, config(holding_count=5, cooldown_sessions=40, max_replacements_per_session=1))
+
+
+def test_the_whole_chain_gives_the_same_bytes_in_processes_with_different_hash_seeds() -> None:
+    """Not only the selection rule: screen, policy, orders and lifecycle together, end to end."""
+    here = Path(__file__).resolve()
+    program = (
+        "import hashlib, importlib.util, json, sys;"
+        "spec = importlib.util.spec_from_file_location('sim', sys.argv[1]);"
+        "sim = importlib.util.module_from_spec(spec);"
+        "spec.loader.exec_module(sim);"
+        "log = sim.run(2, sim.config());"
+        "print(hashlib.sha256(json.dumps(log, sort_keys=True).encode()).hexdigest())"
+    )
+    source_root = str(here.parents[3] / "src")
+    reference = hashlib.sha256(json.dumps(run(2, config()), sort_keys=True).encode()).hexdigest()
+
+    for hash_seed in ("0", "1", "424242"):
+        completed = subprocess.run(
+            [sys.executable, "-c", program, str(here)],
+            env={
+                **os.environ,
+                "PYTHONHASHSEED": hash_seed,
+                "PYTHONPATH": os.pathsep.join(
+                    part for part in (source_root, os.environ.get("PYTHONPATH")) if part
+                ),
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert completed.stdout.strip() == reference
 ```
 
 - [ ] **Step 2：运行**
@@ -2938,7 +2989,7 @@ MUTATIONS = [
     ("survivor_orders.py", "proceeds += price * quantity", "pass", "proceeds ignored"),
     (
         "survivor_orders.py",
-        "            lot_quantity(available, price, config.lot_size),\n",
+        "            lot_quantity(available * (1 - config.cost_reserve_fraction), price, config.lot_size),\n",
         "            10**9,\n",
         "cash ignored",
     ),
@@ -2989,9 +3040,9 @@ MUTATIONS = [
     ),
     (
         "survivor_policy.py",
-        'verdicts[code].reasons == ("suspended",)',
-        '"suspended" in verdicts[code].reasons',
-        "any suspension freezes",
+        '        and "suspended" in verdicts[code].reasons\n',
+        "",
+        "a thin name freezes without any suspension",
     ),
     (
         "survivor_selection.py",
@@ -3024,9 +3075,52 @@ MUTATIONS = [
         "if False:",
         "pending sell of an unheld name",
     ),
+    (
+        "survivor_policy.py",
+        "and set(verdicts[code].reasons) <= FREEZE_COMPATIBLE_REASONS",
+        "",
+        "any halt with any problem freezes",
+    ),
+    (
+        "survivor_orders.py",
+        "lot_quantity(available * (1 - config.cost_reserve_fraction), price, config.lot_size)",
+        "lot_quantity(available, price, config.lot_size)",
+        "cash cap without reserve",
+    ),
+    (
+        "survivor_orders.py",
+        "if live_buys != set(state.pending_buys) or live_sells != set(state.pending_sells):",
+        "if False:",
+        "carried orders not checked against the state",
+    ),
+    (
+        "survivor_orders.py",
+        "if self.expires_session is None or self.expires_session < self.execute_session:",
+        "if False:",
+        "a buy that never expires",
+    ),
+    (
+        "survivor_orders.py",
+        'raise ValueError("an order executes after the session that planned it")',
+        "pass",
+        "an order that executes before it is planned",
+    ),
+    (
+        "survivor_book.py",
+        "if len({name.ts_code for name in self.survivors}) != len(self.survivors):",
+        "if False:",
+        "a survivor listed twice",
+    ),
+    (
+        "survivor_lifecycle.py",
+        "        elif order.expires_session is not None and session >= order.expires_session:\n            expired.append(order)\n        elif order.ts_code not in survivors:\n            cancelled.append(order)\n",
+        "        elif order.ts_code not in survivors:\n            cancelled.append(order)\n        elif order.expires_session is not None and session >= order.expires_session:\n            expired.append(order)\n",
+        "cancel is checked before expiry",
+    ),
 ]
 
 survived, killed, bad = [], [], []
+table: list[str] = []
 for filename, old, new, label in MUTATIONS:
     path = DOMAIN / filename
     original = path.read_text()
@@ -3046,7 +3140,12 @@ for filename, old, new, label in MUTATIONS:
     finally:
         path.write_text(original)
     (killed if done.returncode != 0 else survived).append(label)
+    table.append(
+        f"| {len(table) + 1} | {label} | `{filename}` | {'killed' if done.returncode != 0 else 'SURVIVED'} |"
+    )
 
+if os.environ.get("MUTATE_TABLE"):
+    print("\n".join(table))
 print(f"killed {len(killed)} / {len(MUTATIONS)}")
 print("SURVIVED:", survived)
 print("PATTERN NOT UNIQUE:", bad)
@@ -3095,9 +3194,10 @@ Task 1–6 按本计划的原文逐字实现并通过评审后，评审与 Phase
 |---|---|---|
 | 修复波 1 | `cbc6248` | `lot_quantity` / `floor_share` / `sizing_budget` 的取值守卫；`EligibilityVerdict` 强制"原因唯一且有序、合格者带合成分"；`Board` 与 `security_board` 的钉死测试；`config_id` 对 Decimal 排版敏感的文档与测试；选择层文档不再把探索性发现称为"evidence"；`SELECTION_RULES` 只读；子进程测试在失败时报告 stderr |
 | 修复波 2 | `66270c3` | **选择层按交易日加盐**（T1 §5）；**"买不起一手"移出资格层**，`screen()` 不再有 `equity`（T4 §6.2）；**在途卖单** `BookState.pending_sells`（T4 §6.1）；**仅因停牌的持仓冻结**（T4 §6.3，待用户确认）；`ScreenResult` 一致性校验；订单构建为在途买单预留现金、卖出未持有的代码给出具名错误（T5）；Task 3/4 评审的测试加强（顺序无关、先抽到买不起的名字、混合强制与自主退出、平局、候补名单长度、先流动性后输家的手算用例） |
-| 修复波 3 | 见 Task 7 Step 0 | 子进程测试导入被测树；去掉不可达分支；写明冷却的起算日 |
+| 修复波 3 | `dd0d17c` | 子进程测试导入被测树；去掉不可达分支；写明冷却的起算日 |
+| 修复波 4（整分支评审后） | 见特性分支上标题为 `fix(V2-P7-005): keep the cost reserve on a cash-limited buy, ...` 的提交 | 现金受限的买单也留成本预留；`build_trade_list` 拒绝自相矛盾的输入、携带订单按固定顺序；`TradeOrder` 拒绝账簿不可能下的单；冻结规则放宽到"所有问题都由停牌派生"；`ScreenResult` 拒绝重复幸存者；`lot_quantity` 精确整除；仿真改为先卖后买并核对计划本身放得进现金；整条链的哈希种子测试；过时文字更正 |
 
-**变化后的最终数字：** `domain/survivor_*.py` 六个模块，`tests/unit/domain/test_survivor_*.py` 七个文件共 166 个测试，45 个手工变异全部被杀死（变异清单随 Task 7 的脚本）。设计文档与上游文档的对应修订见 `docs/specs/v2/openalpha-cn-v2-p7-decision-chain.md` §9。
+**变化后的最终数字（修复波 4 之后）：** `domain/survivor_*.py` 六个模块，`tests/unit/domain/test_survivor_*.py` 七个文件共 182 个测试，52 个手工变异全部被杀死（变异清单随 Task 7 的脚本；脚本本身已随修复波 4 增补）。Task 7 一节里嵌入的仿真测试与变异脚本是**第三轮**的版本，最终版本以特性分支为准。设计文档与上游文档的对应修订见 `docs/specs/v2/openalpha-cn-v2-p7-decision-chain.md` §9。
 
 ## 计划 2（本计划之外，等 Phase 0 结果）
 
