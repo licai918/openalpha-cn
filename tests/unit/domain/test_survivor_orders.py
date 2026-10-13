@@ -312,3 +312,73 @@ def test_an_order_with_a_nonsense_field_is_refused(overrides: dict[str, object])
     base.update(overrides)
     with pytest.raises(ValidationError):
         TradeOrder(**base)  # type: ignore[arg-type]
+
+
+def test_a_buy_still_live_from_an_earlier_session_is_paid_for_before_todays_buys() -> None:
+    live = TradeOrder(
+        signal_session=99,
+        execute_session=100,
+        expires_session=102,
+        side="buy",
+        ts_code="B",
+        quantity=300,
+        reference_price=Decimal("12.5"),
+        reason="ENTRY_REPLACEMENT",
+    )
+
+    # Cash 5,000 less the 3,750 the live buy will spend leaves 1,250: 100 shares of A at 10. With
+    # nothing reserved the same decision would order 500 (cash / price), and the two buys together
+    # would ask for more than the book has.
+    with_live = build_trade_list(
+        config=config(),
+        state=book(),
+        decision=decision(entries=(("A", "ENTRY_REPLACEMENT"),)),
+        reference_prices=PRICES,
+        cash=Decimal("5000"),
+        carried=(live,),
+    )
+    without = build_trade_list(
+        config=config(),
+        state=book(),
+        decision=decision(entries=(("A", "ENTRY_REPLACEMENT"),)),
+        reference_prices=PRICES,
+        cash=Decimal("5000"),
+    )
+
+    assert [o.quantity for o in with_live.orders] == [100]
+    assert [o.quantity for o in without.orders] == [500]
+
+
+def test_a_live_buy_that_uses_up_the_cash_leaves_nothing_for_a_new_one() -> None:
+    live = TradeOrder(
+        signal_session=99,
+        execute_session=100,
+        expires_session=102,
+        side="buy",
+        ts_code="B",
+        quantity=800,
+        reference_price=Decimal("12.5"),
+        reason="ENTRY_REPLACEMENT",
+    )
+
+    plan = build_trade_list(
+        config=config(),
+        state=book(),
+        decision=decision(entries=(("A", "ENTRY_REPLACEMENT"),)),
+        reference_prices=PRICES,
+        cash=Decimal("5000"),
+        carried=(live,),
+    )
+
+    assert plan.orders == ()
+
+
+def test_selling_a_security_that_is_not_held_is_a_named_failure() -> None:
+    with pytest.raises(ValueError, match="cannot sell Z: it is not held"):
+        build_trade_list(
+            config=config(),
+            state=book(("A", 100)),
+            decision=decision(exits=(("Z", "EXIT_SURVIVOR_LOST"),)),
+            reference_prices={**PRICES, "Z": Decimal("10")},
+            cash=Decimal("0"),
+        )

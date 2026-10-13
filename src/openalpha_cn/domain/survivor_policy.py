@@ -2,9 +2,14 @@
 
 A holding is sold only when it **stops being eligible** (forced, never deferred) or **drops out of
 the survivors** (discretionary, at most `max_replacements_per_session` a day, the worst composite
-first; the rest wait for tomorrow). A vacancy is filled from the **entrants** -- survivors above
-the entry floor that are not already held, not already on order and not in cool-down -- in the
-order the selection rule gives, skipping any name a lot of which the current equity cannot buy.
+first; the rest wait for tomorrow). Two kinds of holding are left alone: one **already being
+sold** (`pending_sells` -- a sell order that has not filled yet; selling it again would double the
+order, and its slot is already free), and one whose **only** problem is a suspension (`frozen` --
+it cannot trade until it resumes, and a halt is not evidence about the name; it is judged like any
+other holding the first session it trades again). A vacancy is filled from the **entrants** --
+survivors above the entry floor that are not already held, not already on order and not in
+cool-down -- in the order the selection rule gives, skipping any name a lot of which the current
+equity cannot buy (an affordability limit on *buying*; it never makes a holding ineligible).
 The first build fills every vacancy at once; after that at most `max_replacements_per_session`
 buys a day.
 
@@ -60,6 +65,9 @@ class BookState(BaseModel):
     holdings: tuple[Holding, ...] = ()
     pending_buys: tuple[str, ...] = ()
     """Securities with a live buy order. They fill a slot and cannot be chosen again."""
+    pending_sells: tuple[str, ...] = ()
+    """Held securities with a live sell order. Their slot counts as free and they are not sold
+    again; the book may hold more than `holding_count` names while such a sell is unfilled."""
     cooldowns: tuple[Cooldown, ...] = ()
 
     @model_validator(mode="after")
@@ -71,6 +79,10 @@ class BookState(BaseModel):
             raise ValueError("a security has more than one pending buy")
         if set(held) & set(self.pending_buys):
             raise ValueError("a security is both held and on a pending buy")
+        if len(set(self.pending_sells)) != len(self.pending_sells):
+            raise ValueError("a security has more than one pending sell")
+        if not set(self.pending_sells) <= set(held):
+            raise ValueError("a pending sell names a security that is not held")
         return self
 
 
@@ -99,9 +111,12 @@ class BookDecision(BaseModel):
     deferred_exits: tuple[str, ...]
     """Survivor-lost holdings kept today because the replacement cap was reached."""
     near_exit: tuple[str, ...]
-    """Holdings still in the survivors but in its worst `near_exit_fraction`."""
+    """Holdings still in the survivors but in their worst `near_exit_fraction`, ordered by code."""
+    frozen: tuple[str, ...] = ()
+    """Holdings left alone today because their only problem is a suspension."""
     watch_list: tuple[str, ...]
-    """The next names the rule would draw, after today's entries."""
+    """The next names the rule would draw today, after today's entries -- not a promise about
+    tomorrow, because the draw is salted with the session."""
     unaffordable: tuple[str, ...]
     """Entrants skipped because current equity cannot buy a lot of them."""
     target_holdings: tuple[str, ...]
@@ -112,10 +127,11 @@ def decide_book(
     *, config: SurvivorBookConfig, screen: ScreenResult, state: BookState
 ) -> BookDecision:
     held = sorted(holding.ts_code for holding in state.holdings)
-    if len(held) + len(state.pending_buys) > config.holding_count:
+    active = [code for code in held if code not in set(state.pending_sells)]
+    if len(active) + len(state.pending_buys) > config.holding_count:
         raise ValueError(
-            f"{len(held)} holdings and {len(state.pending_buys)} pending buys exceed "
-            f"holding_count {config.holding_count}"
+            f"{len(active)} holdings not being sold and {len(state.pending_buys)} pending buys "
+            f"exceed holding_count {config.holding_count}"
         )
     verdicts = {verdict.ts_code: verdict for verdict in screen.verdicts}
     survivors = {name.ts_code: name for name in screen.survivors}
@@ -123,13 +139,22 @@ def decide_book(
 
     def composite_of(code: str) -> float:
         value = verdicts[code].composite
-        return 0.0 if value is None else value
+        if value is None:  # an eligible verdict always carries one; the screen enforces it
+            raise ValueError(f"{code}: an eligible verdict without a composite")
+        return value
 
-    forced = [code for code in held if code not in verdicts or not verdicts[code].eligible]
+    frozen = [
+        code for code in active if code in verdicts and verdicts[code].reasons == ("suspended",)
+    ]
+    forced = [
+        code
+        for code in active
+        if (code not in verdicts or not verdicts[code].eligible) and code not in frozen
+    ]
     lost = sorted(
         (
             code
-            for code in held
+            for code in active
             if code in verdicts and verdicts[code].eligible and code not in survivors
         ),
         key=lambda code: (composite_of(code), code),
@@ -140,7 +165,7 @@ def decide_book(
     deferred = tuple(lost[cap:])
     leaving = {decision.ts_code for decision in exits}
 
-    occupied = len(held) - len(exits) + len(state.pending_buys)
+    occupied = len(active) - len(exits) + len(state.pending_buys)
     vacancies = max(config.holding_count - occupied, 0)
     allowance = vacancies if not state.initialized else min(vacancies, cap)
 
@@ -158,7 +183,7 @@ def decide_book(
     affordable: list[str] = []
     unaffordable: list[str] = []
     drawn = selection_rule(config.selection_rule).order(
-        [name.ts_code for name in entrants], seed=config.seed
+        [name.ts_code for name in entrants], seed=config.seed, session=state.session
     )
     for code in drawn:
         if lot_quantity(unit_budget, survivors[code].close, config.lot_size) == 0:
@@ -172,17 +197,16 @@ def decide_book(
 
     near_cutoff = len(ranked) - floor_share(len(ranked), config.near_exit_fraction)
     near_exit = tuple(
-        code
-        for code in held
-        if code in survivors and code not in leaving and survivors[code].rank > near_cutoff
+        code for code in active if code in survivors and survivors[code].rank > near_cutoff
     )
-    target = sorted((set(held) - leaving) | {entry.ts_code for entry in entries})
+    target = sorted((set(active) - leaving) | {entry.ts_code for entry in entries})
     return BookDecision(
         session=state.session,
         exits=exits,
         entries=entries,
         deferred_exits=deferred,
         near_exit=near_exit,
+        frozen=tuple(frozen),
         watch_list=watch_list,
         unaffordable=tuple(unaffordable),
         target_holdings=tuple(target),

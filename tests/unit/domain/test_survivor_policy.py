@@ -7,6 +7,7 @@ pinned in `test_survivor_selection.py`; here the expectation is "the first k of 
 order over the entrants", so the two files cannot drift apart silently.
 """
 
+import random
 from decimal import Decimal
 
 import pytest
@@ -47,9 +48,15 @@ def screen_of(
     *,
     dropped: tuple[tuple[int, float], ...] = (),
     ineligible: tuple[int, ...] = (),
+    halted: tuple[int, ...] = (),
+    sick_and_halted: tuple[int, ...] = (),
     close: dict[int, str] | None = None,
 ) -> ScreenResult:
-    """Survivors best-first (`ranked` lists name positions), then dropped losers and ineligibles."""
+    """Survivors best-first (`ranked` lists name positions), then dropped losers and the rest.
+
+    `ineligible` names carry special treatment; `halted` names are suspended and nothing else;
+    `sick_and_halted` names are both.
+    """
     prices = close or {}
     total = len(ranked)
     survivors = tuple(
@@ -66,7 +73,14 @@ def screen_of(
         for survivor in survivors
     ]
     verdicts += [EligibilityVerdict(ts_code=name(p), composite=c) for p, c in dropped]
-    verdicts += [EligibilityVerdict(ts_code=name(p), reasons=("suspended",)) for p in ineligible]
+    verdicts += [
+        EligibilityVerdict(ts_code=name(p), reasons=("special_treatment",)) for p in ineligible
+    ]
+    verdicts += [EligibilityVerdict(ts_code=name(p), reasons=("suspended",)) for p in halted]
+    verdicts += [
+        EligibilityVerdict(ts_code=name(p), reasons=("special_treatment", "suspended"))
+        for p in sick_and_halted
+    ]
     return ScreenResult(
         verdicts=tuple(sorted(verdicts, key=lambda v: v.ts_code)), survivors=survivors
     )
@@ -77,6 +91,7 @@ def state(
     held: tuple[int, ...] = (),
     initialized: bool = True,
     pending: tuple[int, ...] = (),
+    selling: tuple[int, ...] = (),
     cooling: tuple[tuple[int, int], ...] = (),
     equity: str = "40000",
 ) -> BookState:
@@ -86,12 +101,15 @@ def state(
         equity=Decimal(equity),
         holdings=tuple(Holding(ts_code=name(p), quantity=100) for p in sorted(held)),
         pending_buys=tuple(name(p) for p in pending),
+        pending_sells=tuple(name(p) for p in selling),
         cooldowns=tuple(Cooldown(ts_code=name(p), since_session=s) for p, s in cooling),
     )
 
 
 def rule_order(positions: list[int], cfg: SurvivorBookConfig) -> list[str]:
-    return list(SeededHashRule().order([name(p) for p in positions], seed=cfg.seed))
+    return list(
+        SeededHashRule().order([name(p) for p in positions], seed=cfg.seed, session=SESSION)
+    )
 
 
 def test_the_first_build_buys_a_full_book_at_once_in_the_rules_order() -> None:
@@ -236,12 +254,16 @@ def test_an_entrant_the_current_equity_cannot_buy_a_lot_of_is_skipped_and_report
 
 def test_an_unaffordable_name_is_skipped_in_favour_of_the_next_draw() -> None:
     cfg = config()
-    prices = {4: "5000"}
-    screen = screen_of([0, 1, 2, 4, 5], close=prices)
+    # The name the rule would draw FIRST is the one the book cannot afford a lot of: the slot has
+    # to be filled by the second draw, and the third is the next one on the watch list.
+    first, second, third = (position_of(code) for code in rule_order([4, 5, 6], cfg))
+    screen = screen_of([0, 1, 2, 4, 5, 6], close={first: "5000"})
+
     decision = decide_book(config=cfg, screen=screen, state=state(held=(0, 1, 2)))
 
-    assert [e.ts_code for e in decision.entries] == [name(5)]
-    assert decision.unaffordable == (name(4),)
+    assert [e.ts_code for e in decision.entries] == [name(second)]
+    assert decision.unaffordable == (name(first),)
+    assert decision.watch_list == (name(third),)
 
 
 def test_the_entry_floor_keeps_the_worst_survivors_out_of_the_draw() -> None:
@@ -288,13 +310,21 @@ def test_a_name_leaving_today_is_not_also_reported_as_near_exit() -> None:
 
 
 def test_the_decision_is_the_same_however_the_holdings_are_listed() -> None:
-    screen = screen_of([0, 1, 2, 4, 5, 6], dropped=((3, -9.0),))
-    forward = state(held=(0, 1, 2, 3))
-    backward = forward.model_copy(update={"holdings": tuple(reversed(forward.holdings))})
+    # Three forced exits and a multi-name near-exit band, so that every ordered output has more
+    # than one element and a decision that followed the order of the holdings would show it.
+    cfg = config(holding_count=6, capital=Decimal("60000"))
+    screen = screen_of([3, 4, 5, 6, 7, 8, 9, 10], ineligible=(0, 1, 2), dropped=((11, -9.0),))
+    forward = state(held=(0, 1, 2, 3, 9, 10), equity="60000")
+    reference = decide_book(config=cfg, screen=screen, state=forward)
 
-    assert decide_book(config=config(), screen=screen, state=forward) == decide_book(
-        config=config(), screen=screen, state=backward
-    )
+    assert [e.ts_code for e in reference.exits] == [name(0), name(1), name(2)]
+    assert reference.near_exit == (name(9), name(10))
+    for shuffle_seed in range(6):
+        listed = list(forward.holdings)
+        random.Random(shuffle_seed).shuffle(listed)
+        shuffled = forward.model_copy(update={"holdings": tuple(listed)})
+
+        assert decide_book(config=cfg, screen=screen, state=shuffled) == reference
 
 
 def test_a_book_holding_more_than_it_may_is_refused() -> None:
@@ -339,3 +369,110 @@ def test_an_empty_screen_on_the_first_day_builds_nothing() -> None:
 
     assert decision.entries == ()
     assert decision.exits == ()
+
+
+def test_a_suspended_holding_is_left_alone_until_it_trades_again() -> None:
+    decision = decide_book(
+        config=config(),
+        screen=screen_of([0, 1, 2], halted=(3,)),
+        state=state(held=(0, 1, 2, 3)),
+    )
+
+    assert decision.exits == ()
+    assert decision.frozen == (name(3),)
+    assert decision.entries == ()
+    assert name(3) in decision.target_holdings
+    assert name(3) not in decision.near_exit
+
+
+def test_a_suspended_holding_with_another_problem_is_still_sold() -> None:
+    decision = decide_book(
+        config=config(),
+        screen=screen_of([0, 1, 2, 4], sick_and_halted=(3,)),
+        state=state(held=(0, 1, 2, 3)),
+    )
+
+    assert [(e.ts_code, e.reason) for e in decision.exits] == [(name(3), "EXIT_ELIGIBILITY_LOST")]
+    assert decision.frozen == ()
+
+
+def test_a_holding_whose_sell_is_still_live_is_not_sold_again_and_frees_its_slot() -> None:
+    cfg = config()
+    screen = screen_of([0, 1, 2, 4, 5], ineligible=(3,))
+
+    # The same screen without the pending sell would plan a second sell of name 3.
+    assert [
+        e.ts_code
+        for e in decide_book(config=cfg, screen=screen, state=state(held=(0, 1, 2, 3))).exits
+    ] == [name(3)]
+
+    # Five names are held, one of them already being sold: four are active, so the book is full.
+    full = decide_book(config=cfg, screen=screen, state=state(held=(0, 1, 2, 3, 4), selling=(3,)))
+    assert full.exits == ()
+    assert full.entries == ()
+    assert full.target_holdings == (name(0), name(1), name(2), name(4))
+
+    # Its slot is free: name 3 is on the way out, so one of the four slots is open.
+    open_slot = decide_book(config=cfg, screen=screen, state=state(held=(0, 1, 2, 3), selling=(3,)))
+    assert open_slot.exits == ()
+    assert len(open_slot.entries) == 1
+    assert name(3) not in {e.ts_code for e in open_slot.entries}
+
+
+def test_a_name_being_sold_is_never_bought_back_even_if_it_is_a_top_survivor() -> None:
+    cfg = config()
+    screen = screen_of([0, 1, 2, 3])
+
+    decision = decide_book(config=cfg, screen=screen, state=state(held=(0, 1, 2, 3), selling=(3,)))
+
+    assert decision.entries == ()
+    assert name(3) not in decision.target_holdings
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"pending_sells": ("a",)},  # not held
+        {"holdings": (Holding(ts_code="a", quantity=100),), "pending_sells": ("a", "a")},
+    ],
+)
+def test_a_pending_sell_the_book_cannot_have_is_refused(bad: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        BookState(session=1, initialized=True, equity=Decimal("1"), **bad)  # type: ignore[arg-type]
+
+
+def test_forced_exits_do_not_use_up_the_cap_on_discretionary_ones() -> None:
+    decision = decide_book(
+        config=config(),
+        screen=screen_of([3, 4, 5, 6], ineligible=(0,), dropped=((1, -1.0), (2, -2.0))),
+        state=state(held=(0, 1, 2, 3)),
+    )
+
+    assert [(e.ts_code, e.reason) for e in decision.exits] == [
+        (name(0), "EXIT_ELIGIBILITY_LOST"),
+        (name(2), "EXIT_SURVIVOR_LOST"),
+        (name(1), "EXIT_SURVIVOR_LOST"),
+    ]
+    assert decision.deferred_exits == ()
+
+
+def test_equal_composites_are_sold_in_code_order_and_the_rest_wait() -> None:
+    decision = decide_book(
+        config=config(),
+        screen=screen_of([0, 4, 5, 6], dropped=((1, -1.0), (2, -1.0), (3, -1.0))),
+        state=state(held=(1, 2, 3, 0)),
+    )
+
+    assert [e.ts_code for e in decision.exits] == [name(1), name(2)]
+    assert decision.deferred_exits == (name(3),)
+
+
+def test_the_watch_list_is_no_longer_than_the_book() -> None:
+    decision = decide_book(
+        config=config(),
+        screen=screen_of(list(range(12))),
+        state=state(initialized=False),
+    )
+
+    assert len(decision.entries) == 4
+    assert len(decision.watch_list) == 4

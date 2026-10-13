@@ -18,6 +18,7 @@ from openalpha_cn.domain.survivor_book import (
     Board,
     EligibilityVerdict,
     RankedName,
+    ScreenResult,
     SecurityFacts,
     SurvivorBookConfig,
     floor_share,
@@ -222,7 +223,6 @@ def test_the_reason_order_is_the_order_the_design_lists_them_in() -> None:
         "special_treatment",
         "suspended",
         "missing_factor_value",
-        "unaffordable_lot",
         "illiquid",
     )
 
@@ -279,3 +279,52 @@ def test_the_helpers_refuse_inputs_that_would_give_a_negative_or_nonsense_count(
         floor_share(-1, Decimal("0.3"))
     with pytest.raises(ValueError, match="equity must be positive"):
         config().sizing_budget(Decimal("-100000"))
+
+
+def ranked(code: str, rank: int, composite: float) -> RankedName:
+    return RankedName(ts_code=code, composite=composite, rank=rank, close=Decimal("10"))
+
+
+def scored(code: str, composite: float) -> EligibilityVerdict:
+    return EligibilityVerdict(ts_code=code, composite=composite)
+
+
+def test_a_consistent_screen_result_is_accepted() -> None:
+    result = ScreenResult(
+        verdicts=(
+            scored("A", 3.0),
+            scored("B", 2.0),
+            EligibilityVerdict(ts_code="C", reasons=("suspended",)),
+        ),
+        survivors=(ranked("A", 1, 3.0), ranked("B", 2, 2.0)),
+    )
+
+    assert [name.ts_code for name in result.survivors] == ["A", "B"]
+
+
+@pytest.mark.parametrize(
+    "survivors",
+    [
+        (ranked("B", 1, 2.0), ranked("A", 2, 3.0)),  # not best first
+        (ranked("A", 2, 3.0), ranked("B", 3, 2.0)),  # ranks do not start at 1
+        (ranked("A", 1, 3.0), ranked("C", 2, 1.0)),  # C has a reason against it
+        (ranked("A", 1, 3.0), ranked("Z", 2, 1.0)),  # Z was never assessed
+    ],
+)
+def test_a_screen_result_that_contradicts_itself_is_refused(
+    survivors: tuple[RankedName, ...],
+) -> None:
+    verdicts = (
+        scored("A", 3.0),
+        scored("B", 2.0),
+        EligibilityVerdict(ts_code="C", reasons=("suspended",)),
+    )
+    with pytest.raises(ValidationError):
+        ScreenResult(verdicts=verdicts, survivors=survivors)
+
+
+def test_verdicts_must_be_unique_and_ordered_by_code() -> None:
+    with pytest.raises(ValidationError, match="ordered by ts_code"):
+        ScreenResult(verdicts=(scored("B", 1.0), scored("A", 2.0)), survivors=())
+    with pytest.raises(ValidationError, match="ordered by ts_code"):
+        ScreenResult(verdicts=(scored("A", 1.0), scored("A", 1.0)), survivors=())

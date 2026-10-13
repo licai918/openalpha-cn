@@ -61,7 +61,6 @@ def code(position: int) -> str:
         ({"special": True}, "special_treatment"),
         ({"suspended": True}, "suspended"),
         ({"values": (1.0, None, 1.0, 1.0)}, "missing_factor_value"),
-        ({"close": "348.26"}, "unaffordable_lot"),
     ],
 )
 def test_each_reason_is_reported_on_its_own(overrides: dict[str, object], reason: str) -> None:
@@ -77,12 +76,9 @@ def test_each_reason_is_reported_on_its_own(overrides: dict[str, object], reason
     [
         {"board": "growth"},
         {"listed": 250},
-        {"close": "348.25"},
     ],
 )
 def test_the_boundary_value_of_each_reason_is_still_eligible(overrides: dict[str, object]) -> None:
-    # 100 shares at 348.25 cost 34,825 -- exactly the sizing budget (350,000 / 10, less the 0.5%
-    # reserve), which is affordable; one cent more is not (the case above).
     result = screen([fact(code(1), **overrides)], isolated())  # type: ignore[arg-type]
 
     assert result.verdicts[0].reasons == ()
@@ -102,19 +98,21 @@ def test_every_applicable_reason_is_listed_in_the_fixed_order() -> None:
     )
 
 
-def test_the_lot_test_follows_the_equity_it_is_given() -> None:
-    held = [fact(code(1), close="100")]
+def test_a_high_priced_name_is_not_screened_out_for_its_price() -> None:
+    # Whether the book can afford a lot is a question about the book's equity, asked when buying;
+    # it must not move who is eligible, or a holding that has risen past one lot's price would be
+    # sold for it and the survivor set would drift with the book's equity.
+    result = screen([fact(code(1), close="5000")], isolated())
 
-    assert screen(held, isolated()).verdicts[0].eligible
-    # 100,000 / 10 less the reserve is 9,950, and 100 shares at 100 cost 10,000.
-    poorer = screen(held, isolated(), equity=Decimal("100000"))
-    assert poorer.verdicts[0].reasons == ("unaffordable_lot",)
+    assert result.verdicts[0].eligible
+    assert [name.ts_code for name in result.survivors] == [code(1)]
 
 
 def test_the_liquidity_cut_drops_the_thinnest_share_of_the_allowed_boards_only() -> None:
     main = [fact(code(position), amount=str(position)) for position in range(1, 11)]
     # Ten more names on a board the account cannot trade, thinner than every allowed name: if the
-    # cut counted them it would be 6 of 20 and reach into the allowed names' middle.
+    # cut counted them it would be 6 of 20, all six of them on that board, and no allowed name
+    # would be cut at all.
     star = [fact(code(100 + position), board="star", amount="0") for position in range(10)]
 
     result = screen([*main, *star], isolated(liquidity_drop_fraction=Decimal("0.30")))
@@ -182,16 +180,22 @@ def test_tied_composites_are_cut_and_ranked_by_code() -> None:
 
 def test_ineligible_names_neither_survive_nor_shift_the_cut() -> None:
     clean = [fact(code(position), values=(float(position),) * 4) for position in range(1, 21)]
+    # Five names with a reason, which would move the cut from 4 of 20 to 5 of 25 if they were
+    # counted in the population the loser cut is taken over.
     noisy = [
         *clean,
         fact(code(101), special=True, values=(99.0,) * 4),
         fact(code(102), suspended=True, values=(-99.0,) * 4),
+        fact(code(103), special=True, values=(50.0,) * 4),
+        fact(code(104), suspended=True, values=(-50.0,) * 4),
+        fact(code(105), listed=1, values=(0.5,) * 4),
     ]
     config = isolated(loser_decile_count=2)
 
-    assert [n.ts_code for n in screen(noisy, config).survivors] == [
-        n.ts_code for n in screen(clean, config).survivors
-    ]
+    survivors = [n.ts_code for n in screen(noisy, config).survivors]
+
+    assert survivors == [n.ts_code for n in screen(clean, config).survivors]
+    assert len(survivors) == 16
 
 
 def test_a_survivor_carries_its_composite_and_its_close() -> None:
@@ -235,3 +239,42 @@ def test_an_empty_universe_screens_to_nothing() -> None:
 
     assert result.verdicts == ()
     assert result.survivors == ()
+
+
+def test_the_liquidity_cut_comes_first_and_the_loser_cut_is_taken_over_what_is_left() -> None:
+    # Twelve main-board names, thinnest first: n1..n3 are the 30% (floor of 3.6) that are
+    # illiquid, whatever their scores. n1 has the best score of all and n2 the worst, so a screen
+    # that cut losers first, or let an illiquid name rank, would answer differently. The nine left
+    # (n4..n12) lose floor(9 * 2 / 10) = 1 name, the lowest score, n12; n4..n11 survive, best first.
+    scores = {1: 100.0, 2: -100.0, 3: 5.0, 4: 4.0, 5: 3.0, 6: 2.0, 7: 1.0, 8: 0.0}
+    scores.update({9: -1.0, 10: -2.0, 11: -3.0, 12: -4.0})
+    names = [fact(code(n), amount=str(n), values=(scores[n],) * 4) for n in range(1, 13)]
+
+    result = screen(names, isolated(liquidity_drop_fraction=Decimal("0.30"), loser_decile_count=2))
+
+    illiquid = [v.ts_code for v in result.verdicts if v.reasons == ("illiquid",)]
+    assert illiquid == [code(1), code(2), code(3)]
+    assert [n.ts_code for n in result.survivors] == [code(n) for n in range(4, 12)]
+    assert code(12) not in [n.ts_code for n in result.survivors]
+    assert next(v for v in result.verdicts if v.ts_code == code(12)).eligible
+
+
+def test_a_name_that_fails_a_static_reason_still_counts_in_the_liquidity_population() -> None:
+    """The design's literal reading, pinned: it moves where the 30% is cut, so it is a choice.
+
+    Ten liquid-enough main-board names plus one suspended name with no turnover: eleven securities
+    are on an allowed board, floor(11 * 0.3) = 3 are cut, and the suspended one is among the
+    thinnest -- so n3, who would be cut if only the ten counted, is not.
+    """
+    names = [fact(code(n), amount=str(n)) for n in range(1, 11)]
+    names.append(fact(code(50), amount="0", suspended=True))
+
+    result = screen(names, isolated(liquidity_drop_fraction=Decimal("0.30")))
+
+    illiquid = {v.ts_code for v in result.verdicts if "illiquid" in v.reasons}
+    assert illiquid == {code(50), code(1), code(2)}
+
+
+def test_the_securities_listed_twice_are_named_in_the_refusal() -> None:
+    with pytest.raises(ValueError, match=r"more than once.*600001\.SH"):
+        screen([fact(code(1)), fact(code(2)), fact(code(1))], isolated())

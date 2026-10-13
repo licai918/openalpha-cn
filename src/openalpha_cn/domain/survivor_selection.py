@@ -7,8 +7,17 @@ there is lies in the filter and in not trading, not in a ranking of the survivor
 -- an agent's score (plan C/A), a model's (plan B) -- replaces it by implementing
 `SelectionRule` and being named in the registered configuration.
 
-**Determinism is the whole contract.** The order is a function of the candidate *set* and the
-seed alone: not of the order the candidates were passed in, not of the day, and not of
+**Why the order depends on the session.** A queue that ignores the day puts the same names at
+the head every time a vacancy opens, so a name that was sold and then re-qualifies is bought
+straight back. `V2-P7-005`'s T1 simulation measured this on the research window (exploratory,
+in-sample, not evidence): the day-independent queue turned the book over about twice as fast and
+returned 1.3-1.6 percentage points a year less than a draw that is fresh each session; salting the
+hash with the session removed the whole gap (`docs/research/p7-step0-validation/
+T1-stratified-vs-random.md` section 5). So the draw is a function of the session as well; the
+watch list is *today's* draw order, not a promise about tomorrow's.
+
+**Determinism is the whole contract.** The order is a function of the candidate *set*, the seed
+and the session alone: not of the order the candidates were passed in, and not of
 `PYTHONHASHSEED`. Duplicates are collapsed, and the sort key `(digest, code)` is a total order
 over the distinct codes, so no `set` or `dict` iteration order ever reaches the result. A first
 prototype that drew from a `set` produced different numbers in different processes;
@@ -25,23 +34,25 @@ from typing import Final, Protocol
 class SelectionRule(Protocol):
     rule_id: str
 
-    def order(self, candidates: Iterable[str], *, seed: int) -> tuple[str, ...]:
+    def order(self, candidates: Iterable[str], *, seed: int, session: int) -> tuple[str, ...]:
         """Return the distinct `candidates`, first pick first. Pure and deterministic."""
         ...
 
 
-def _selection_digest(seed: int, ts_code: str) -> str:
-    return sha256(f"{seed}|{ts_code}".encode()).hexdigest()
+def _selection_digest(seed: int, session: int, ts_code: str) -> str:
+    return sha256(f"{seed}|{session}|{ts_code}".encode()).hexdigest()
 
 
 class SeededHashRule:
-    """Order candidates by a seeded hash of their code, whatever the day or the input order."""
+    """Order candidates by a hash of seed, session and code, whatever the input order."""
 
     rule_id: str = "seeded_hash/v1"
 
-    def order(self, candidates: Iterable[str], *, seed: int) -> tuple[str, ...]:
+    def order(self, candidates: Iterable[str], *, seed: int, session: int) -> tuple[str, ...]:
         distinct = set(candidates)
-        return tuple(sorted(distinct, key=lambda code: (_selection_digest(seed, code), code)))
+        return tuple(
+            sorted(distinct, key=lambda code: (_selection_digest(seed, session, code), code))
+        )
 
 
 SELECTION_RULES: Final[Mapping[str, SelectionRule]] = MappingProxyType(

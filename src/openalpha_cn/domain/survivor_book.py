@@ -34,7 +34,6 @@ EligibilityReason = Literal[
     "special_treatment",
     "suspended",
     "missing_factor_value",
-    "unaffordable_lot",
     "illiquid",
 ]
 ELIGIBILITY_REASON_ORDER: Final[tuple[EligibilityReason, ...]] = get_args(EligibilityReason)
@@ -194,3 +193,18 @@ class ScreenResult(BaseModel):
     """Every security that was assessed, ordered by `ts_code`."""
     survivors: tuple[RankedName, ...]
     """The eligible securities that remain after the loser tail is dropped, best first."""
+
+    @model_validator(mode="after")
+    def _the_screen_is_internally_consistent(self) -> Self:
+        codes = [verdict.ts_code for verdict in self.verdicts]
+        if codes != sorted(set(codes)):
+            raise ValueError("verdicts must be unique and ordered by ts_code")
+        if [name.rank for name in self.survivors] != list(range(1, len(self.survivors) + 1)):
+            raise ValueError("survivors must be ranked 1..n in the order given")
+        composites = [name.composite for name in self.survivors]
+        if composites != sorted(composites, reverse=True):
+            raise ValueError("survivors must be listed best first")
+        eligible = {verdict.ts_code for verdict in self.verdicts if verdict.eligible}
+        if not {name.ts_code for name in self.survivors} <= eligible:
+            raise ValueError("every survivor must have an eligible verdict")
+        return self

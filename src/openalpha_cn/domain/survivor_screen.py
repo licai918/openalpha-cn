@@ -1,20 +1,25 @@
 """The eligibility-and-survivor screen (`V2-P7-005`): facts in, verdicts and survivors out.
 
-Pure functions over `SecurityFacts`. Three steps, in this order, and the order matters because
-each one's population is the previous one's output:
+Pure functions over `SecurityFacts`. Three steps:
 
-1. **Static reasons** -- board, listing age, special treatment, suspension, a missing factor value
-   and a lot the per-name budget cannot afford. Each is a fact about one security.
-2. **Liquidity** -- the bottom `liquidity_drop_fraction` by trailing traded amount *within the
-   allowed boards*. It is the one reason that depends on the other securities, which is why it is
-   computed after the static ones and over the board-allowed population only.
-3. **Survivors** -- of the eligible securities, drop the worst `loser_decile_count` tenths by
-   composite. Ties break on `ts_code`, so the cut never depends on input order.
+1. **Static reasons** -- board, listing age, special treatment, suspension and a missing factor
+   value. Each is a fact about one security. (Whether the book can afford a lot is *not* one of
+   them: it depends on the book's equity, and a holding that has risen past one lot's price must
+   not be sold for it. The policy skips an entrant it cannot afford, and the survivor set stays
+   a function of the market alone.)
+2. **Liquidity** -- the bottom `liquidity_drop_fraction` by trailing traded amount among *every
+   security on an allowed board*, whatever else is wrong with it. It is the one reason that
+   depends on the other securities. Names that fail a static reason still count in that
+   population (a suspended name's zero turnover is one of the thinnest, which is the literal
+   reading of the design's "within the tradable boards"); that is a choice, pinned by a test.
+3. **Survivors** -- of the securities with *no* reason, drop the worst `loser_decile_count` tenths
+   by composite, so the cut is taken over the liquidity-and-eligibility survivors and nothing
+   else. Ties break on `ts_code`, so no cut depends on input order.
 """
 
 import math
+from collections import Counter
 from collections.abc import Sequence
-from decimal import Decimal
 
 from openalpha_cn.domain.survivor_book import (
     ELIGIBILITY_REASON_ORDER,
@@ -40,25 +45,20 @@ def composite_of(values: Sequence[float | None]) -> float | None:
     return math.fsum(present) / len(present)
 
 
-def screen(
-    facts: Sequence[SecurityFacts],
-    config: SurvivorBookConfig,
-    *,
-    equity: Decimal | None = None,
-) -> ScreenResult:
-    """Assess every `facts` security; `equity` sizes the lot test (default: `config.capital`)."""
+def screen(facts: Sequence[SecurityFacts], config: SurvivorBookConfig) -> ScreenResult:
+    """Assess every security in `facts`: why it may not be held, and who survives."""
     codes = [fact.ts_code for fact in facts]
-    if len(set(codes)) != len(codes):
-        raise ValueError("a security appears more than once in the facts of one signal day")
+    repeated = sorted(code for code, seen in Counter(codes).items() if seen > 1)
+    if repeated:
+        raise ValueError(f"securities listed more than once on one signal day: {repeated}")
     width = len(config.composite_factors)
-    for fact in facts:
+    for fact in sorted(facts, key=lambda fact: fact.ts_code):
         if len(fact.oriented_values) != width:
             raise ValueError(
                 f"{fact.ts_code}: {len(fact.oriented_values)} oriented values for {width} "
                 "composite factors"
             )
 
-    budget = config.sizing_budget(equity)
     reasons: dict[str, set[EligibilityReason]] = {fact.ts_code: set() for fact in facts}
     composites: dict[str, float | None] = {}
     for fact in facts:
@@ -74,8 +74,6 @@ def screen(
             found.add("suspended")
         if composites[fact.ts_code] is None:
             found.add("missing_factor_value")
-        if fact.close * config.lot_size > budget:
-            found.add("unaffordable_lot")
 
     allowed = sorted(
         (fact for fact in facts if fact.board in config.boards),

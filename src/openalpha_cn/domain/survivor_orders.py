@@ -7,7 +7,8 @@ byte-identical and a stored list can be compared to a recomputed one.
 
 Sizing: a buy is `lot_quantity` of the equal share (less the cost reserve) at the signal-day
 reference price, and is further limited by the cash that will be there -- today's cash plus the
-estimated proceeds of today's sells -- so a book that is nearly fully invested cannot over-order.
+estimated proceeds of today's sells, less what buys still live from earlier sessions will spend --
+so a book that is nearly fully invested cannot over-order.
 A buy that cannot be afforded even one lot with what is left is **not placed**; the name stays on
 the watch list and is drawn again tomorrow.
 """
@@ -95,6 +96,8 @@ def build_trade_list(
     sells: list[TradeOrder] = []
     proceeds = Decimal(0)
     for decided in decision.exits:
+        if decided.ts_code not in held:
+            raise ValueError(f"cannot sell {decided.ts_code}: it is not held")
         price = _price_of(decided.ts_code, reference_prices)
         quantity = held[decided.ts_code]
         proceeds += price * quantity
@@ -111,7 +114,13 @@ def build_trade_list(
         )
 
     unit_budget = config.sizing_budget(state.equity)
-    available = cash + proceeds
+    # A buy still live from an earlier session will fill out of the same cash, so it is spent
+    # before today's buys see any. Live sells are not counted: when they fill is not known.
+    reserved = sum(
+        (order.reference_price * order.quantity for order in carried if order.side == "buy"),
+        Decimal(0),
+    )
+    available = max(cash + proceeds - reserved, Decimal(0))
     buys: list[TradeOrder] = []
     for entry in decision.entries:
         price = _price_of(entry.ts_code, reference_prices)
