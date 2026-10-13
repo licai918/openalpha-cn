@@ -125,7 +125,7 @@ PY="/Users/licai918me.com/Documents/OpenAlpha cn/.venv/bin"   # 之后写作 $PY
 
 ## Phase 1 — 领域内核（测试先行）
 
-**所有 Phase 1 任务共用的流程。** 每个任务由一个全新的实施子代理在隔离 worktree 里执行，任务评审（规格符合性 + 代码质量）通过后由控制者 fast-forward 合并进 `feat/v2-p7-005-survivor-book-core`，再派下一个任务。每个任务：先写测试 → 运行并确认**因预期原因失败** → 写最小实现 → 运行确认通过 → 跑静态检查 → 更新该任务点名的守卫 → 提交。**测试代码和实现代码必须逐字使用本计划里的内容**——它们已在一个一次性 worktree 里验证过（全部测试通过，36 个变异全部被杀死）；若运行结果与计划写的"预期"不同，**停下来报告**，不要自己改测试去迁就实现。
+**所有 Phase 1 任务共用的流程。** 每个任务由一个全新的实施子代理在隔离 worktree 里执行，任务评审（规格符合性 + 代码质量）通过后由控制者 fast-forward 合并进 `feat/v2-p7-005-survivor-book-core`，再派下一个任务。每个任务：先写测试 → 运行并确认**因预期原因失败** → 写最小实现 → 运行确认通过 → 跑静态检查 → 更新该任务点名的守卫 → 提交。**测试代码和实现代码必须逐字使用本计划里的内容**——它们已在一个一次性 worktree 里验证过（全部测试通过，45 个变异全部被杀死）；若运行结果与计划写的"预期"不同，**停下来报告**，不要自己改测试去迁就实现。
 
 ### Task 1：词汇与配置 `survivor_book.py`
 
@@ -2542,6 +2542,8 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 - Consumes: Task 1–6 的全部公开名字。
 - Produces: 无新接口；产出的是对内核的"逐日不变量"测试与变异报告。
 
+- [ ] **Step 0：修复波 3**（控制者在派发时给出补丁路径 `.superpowers/sdd/fix-wave-3.patch`；它只改三个文件，是前面三轮评审里剩下的小项）：`git apply` 之后运行 `tests/unit/domain/test_survivor_selection.py` 与 `tests/unit/domain/test_survivor_policy.py`，预期全过；它做三件事：(a) 选择层的子进程测试把被测树的 `src` 放进子进程的 `PYTHONPATH`，使它在隔离 worktree 里也导入被测的那份代码；(b) `survivor_policy.py` 的 `composite_of` 去掉一个因 `EligibilityVerdict` 已拒绝"合格但无合成分"而不可达的防御分支，改用带注释的 `cast`；(c) `update_cooldowns` 的文档写明 `session` 是**结算日**（卖出成交或买单过期的那一天），不是下单的信号日。提交信息：`fix(V2-P7-005): run the hash-seed children against the tree under test, and say what a cool-down counts from`。
+
 - [ ] **Step 1：写测试** — 创建 `tests/unit/domain/test_survivor_book_lifecycle.py`（这条测试在内核全部就位后**第一次运行就应当通过**——它不是为新代码驱动实现，而是把前面六个任务的承诺在 120 个交易日的合成市场里逐日验证；它的失败能力由 Step 3 的变异检查证明）：
 
 ```python
@@ -2712,7 +2714,7 @@ def test_a_smaller_book_with_a_longer_cooldown_keeps_the_same_promises() -> None
 ```bash
 PYTHONPATH="$PWD/src" "$PY/python" -m pytest tests/unit/domain/test_survivor_book_lifecycle.py tests/unit/domain/test_survivor_*.py -q -p no:cacheprovider
 ```
-预期：`135 passed`（`test_survivor_*.py` 七个文件合计，无跳过）。
+预期：`166 passed`（`test_survivor_*.py` 七个文件合计，无跳过）。
 
 - [ ] **Step 3：变异检查** — 把下面的脚本存到 **仓库之外**（例如你的临时目录 `mutate.py`），对本分支的检出运行：
 
@@ -2748,13 +2750,12 @@ MUTATIONS = [
     ("survivor_screen.py", "config.loser_decile_count // 10", "(config.loser_decile_count + 1) // 10", "loser cut off"),
     ("survivor_screen.py", "if fact.board not in config.boards:", "if fact.board in config.boards:", "board test inverted"),
     ("survivor_screen.py", "fact.listed_sessions < config.min_listing_sessions", "fact.listed_sessions <= config.min_listing_sessions", "listing boundary"),
-    ("survivor_screen.py", "fact.close * config.lot_size > budget", "fact.close * config.lot_size >= budget", "lot boundary"),
     ("survivor_screen.py", "allowed[: floor_share(len(allowed), config.liquidity_drop_fraction)]", "allowed[floor_share(len(allowed), config.liquidity_drop_fraction) :]", "keeps the thin names out of the cut"),
     ("survivor_screen.py", "math.fsum(present)", "sum(present)", "inexact sum"),
     ("survivor_screen.py", "any(value is None for value in values)", "all(value is None for value in values)", "partial composite"),
     ("survivor_screen.py", "(fact for fact in facts if fact.board in config.boards)", "(fact for fact in facts)", "liquidity over all boards"),
-    ("survivor_selection.py", "distinct = sorted(set(candidates))", "distinct = sorted(candidates)", "duplicates not collapsed"),
-    ("survivor_selection.py", 'f"{seed}|{ts_code}"', 'f"{ts_code}"', "seed ignored"),
+    ("survivor_selection.py", "distinct = set(candidates)", "distinct = list(candidates)", "duplicates not collapsed"),
+    ("survivor_selection.py", 'f"{seed}|{session}|{ts_code}"', 'f"{session}|{ts_code}"', "seed ignored"),
     ("survivor_orders.py", "quantity = held[decided.ts_code]", "quantity = 100", "sells one lot"),
     ("survivor_orders.py", "proceeds += price * quantity", "pass", "proceeds ignored"),
     ("survivor_orders.py", "            lot_quantity(available, price, config.lot_size),\n", "            10**9,\n", "cash ignored"),
@@ -2765,6 +2766,17 @@ MUTATIONS = [
     ("survivor_lifecycle.py", "elif order.ts_code not in survivors:", "elif order.ts_code in survivors:", "cancels survivors"),
     ("survivor_lifecycle.py", "if session - cooldown.since_session < config.cooldown_sessions", "if session - cooldown.since_session <= config.cooldown_sessions", "cooldown prune boundary"),
     ("survivor_lifecycle.py", "set(sold) | set(expired_buys)", "set(sold)", "expired buys do not cool down"),
+    ("survivor_policy.py", "and code not in frozen", "", "a suspended holding is sold"),
+    ("survivor_policy.py", "active = [code for code in held if code not in set(state.pending_sells)]", "active = list(held)", "a live sell is sold again"),
+    ("survivor_policy.py", "occupied = len(active) - len(exits)", "occupied = len(held) - len(exits)", "a live sell still holds a slot"),
+    ("survivor_policy.py", 'verdicts[code].reasons == ("suspended",)', '"suspended" in verdicts[code].reasons', "any suspension freezes"),
+    ("survivor_selection.py", 'f"{seed}|{session}|{ts_code}"', 'f"{seed}|{ts_code}"', "session ignored"),
+    ("survivor_orders.py", "available = max(cash + proceeds - reserved, Decimal(0))", "available = cash + proceeds", "live buys not reserved"),
+    ("survivor_orders.py", 'raise ValueError(f"cannot sell {decided.ts_code}: it is not held")', "pass", "selling an unheld name is silent"),
+    ("survivor_book.py", "if positions != sorted(set(positions)):", "if False:", "verdict reasons unchecked"),
+    ("survivor_book.py", "if codes != sorted(set(codes)):", "if False:", "verdict order unchecked"),
+    ("survivor_policy.py", "if not set(self.pending_sells) <= set(held):", "if False:", "pending sell of an unheld name"),
+
 ]
 
 survived, killed, bad = [], [], []
@@ -2787,16 +2799,13 @@ print(f"killed {len(killed)} / {len(MUTATIONS)}")
 print("SURVIVED:", survived)
 print("PATTERN NOT UNIQUE:", bad)
 ```
-预期输出 `killed 36 / 36`、`SURVIVED: []`、`PATTERN NOT UNIQUE: []`。若有变异存活：**先判断它是不是等价变异**（改了代码但行为不可能变）；若不是，说明测试有缺口——补一条会让它变红的测试（测试先行：先让变异存活 → 写测试 → 变异被杀死），不要删变异。把最终的 36 行（标签 → 文件 → 被杀死/存活）写进 `docs/research/p7-step0-validation/V2-P7-005-mutation-checks.md`，开头说明："这是对 `domain/survivor_*.py` 的手工变异检查；脚本不入库；每个变异逐个应用、跑 `tests/unit/domain/test_survivor_*.py`、还原。"
+预期输出 `killed 45 / 45`、`SURVIVED: []`、`PATTERN NOT UNIQUE: []`。若有变异存活：**先判断它是不是等价变异**（改了代码但行为不可能变）；若不是，说明测试有缺口——补一条会让它变红的测试（测试先行：先让变异存活 → 写测试 → 变异被杀死），不要删变异。把最终的 45 行（标签 → 文件 → 被杀死/存活）写进 `docs/research/p7-step0-validation/V2-P7-005-mutation-checks.md`，开头说明："这是对 `domain/survivor_*.py` 的手工变异检查；脚本不入库；每个变异逐个应用、跑 `tests/unit/domain/test_survivor_*.py`、还原。"
 
-- [ ] **Step 4：回写设计文档** — 在设计文档里：
+- [ ] **Step 4：回写设计文档** — 控制者已在设计文档里写过 §4.2、§4.3、§6（可买性、选择层、冷却、停牌的持仓）与 §12（T1/T4/T5 与内核修订）。你只补下面三处，**其余不要改动**：
   1. §6 参数表末尾加一行：`| 成本预留 | 每笔买单预算预留 0.5% | 避免费用与滑点把最后一笔买单挤出现金（`cost_reserve_fraction`，Task 1） |`。
   2. §7 的"清单列"一条里把原因枚举里的 `CARRIED` 去掉，并在下面加一行："延续的订单保留原始原因，列在 `TradeList.carried` 中；`status` 由账本推进给出。"
-  3. §7 "未成交"一条之后加："过期的买单触发与卖出同样的冷却（`update_cooldowns`）。"
-  4. §6 "每日替换上限"一行的"依据"改为 "强制退出不限；自主退出（掉出幸存集合）每日 ≤ 2 笔、按合成分由低到高；首次建仓之后每日买入 ≤ 2 笔"。
-  5. §12 回写区加一行："`V2-P7-005`/`V2-P7-008` 领域内核（`domain/survivor_*.py`，Task 1–7）：已实现并通过；对 `domain/` 的纯度闸门保持；36/36 变异被杀死。适配器与每日入口见计划 2。"
-
-- [ ] **Step 5：回写路线图与 CHANGELOG** — `docs/specs/v2/openalpha-cn-v2-roadmap.md` 里 `V2-P7-005` 与 `V2-P7-008` 两个条目，在"证据/状态"处写明：领域内核已落地（文件、测试数、变异检查报告路径），其余（适配器、交易清单入口、纸面账本推进）待计划 2。`CHANGELOG.md` 的 P7 段落加一条同样的事实。**不要**改 issue 总数（仍为 243）。
+  3. §6 "每日替换上限"一行的"依据"改为 "强制退出不限；自主退出（掉出幸存集合）每日 ≤ 2 笔、按合成分由低到高；首次建仓之后每日买入 ≤ 2 笔"。
+  并把 §12 回写区里"**领域内核**"一行末尾的"（修复波 1、2，见计划 1 的"修订记录"）"之后补上最终数字："最终：`tests/unit/domain/test_survivor_*.py` 共 166 个测试通过，45/45 个手工变异被杀死；报告 `docs/research/p7-step0-validation/V2-P7-005-mutation-checks.md`。"
 
 - [ ] **Step 6：本任务相关的全部静态与守卫检查**
 
@@ -2825,6 +2834,18 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 1. 在主检出里把 Phase 1 的提交合进 `feat/v2-p7-005-survivor-book-core`，**串行**跑完整门禁：`ruff check .`、`ruff format --check .`、`mypy src`、`lint-imports`、`pytest`（全量，约 45 分钟，用 `gate-full.sh` 形式，后台轮询）、`scripts/build_feature_coverage.py --check`、`scripts/verify_publication.py`。
 2. 派一个最强模型的整分支评审（`superpowers:requesting-code-review`），把进度账本里的 Minor 问题清单交给它做取舍。
 3. 全部通过后按 `superpowers:finishing-a-development-branch` 处理；**不要**自行 push / 合并到 main，把选择交给用户。
+
+## 修订记录（实施期间的更正；计划里 Task 1–6 的代码是**最初**版本，最终代码以特性分支为准）
+
+Task 1–6 按本计划的原文逐字实现并通过评审后，评审与 Phase 0 验证发现的缺口用三个补丁修复；每个补丁都先在一次性 worktree 里验证（全部测试通过、变异全部被杀死），再交给修复代理逐字应用并证明"新测试在旧代码上变红"。**对应提交：**
+
+| 补丁 | 提交 | 内容 |
+|---|---|---|
+| 修复波 1 | `cbc6248` | `lot_quantity` / `floor_share` / `sizing_budget` 的取值守卫；`EligibilityVerdict` 强制"原因唯一且有序、合格者带合成分"；`Board` 与 `security_board` 的钉死测试；`config_id` 对 Decimal 排版敏感的文档与测试；选择层文档不再把探索性发现称为"evidence"；`SELECTION_RULES` 只读；子进程测试在失败时报告 stderr |
+| 修复波 2 | `66270c3` | **选择层按交易日加盐**（T1 §5）；**"买不起一手"移出资格层**，`screen()` 不再有 `equity`（T4 §6.2）；**在途卖单** `BookState.pending_sells`（T4 §6.1）；**仅因停牌的持仓冻结**（T4 §6.3，待用户确认）；`ScreenResult` 一致性校验；订单构建为在途买单预留现金、卖出未持有的代码给出具名错误（T5）；Task 3/4 评审的测试加强（顺序无关、先抽到买不起的名字、混合强制与自主退出、平局、候补名单长度、先流动性后输家的手算用例） |
+| 修复波 3 | 见 Task 7 Step 0 | 子进程测试导入被测树；去掉不可达分支；写明冷却的起算日 |
+
+**变化后的最终数字：** `domain/survivor_*.py` 六个模块，`tests/unit/domain/test_survivor_*.py` 七个文件共 166 个测试，45 个手工变异全部被杀死（变异清单随 Task 7 的脚本）。设计文档与上游文档的对应修订见 `docs/specs/v2/openalpha-cn-v2-p7-decision-chain.md` §9。
 
 ## 计划 2（本计划之外，等 Phase 0 结果）
 
