@@ -69,6 +69,11 @@ def update_cooldowns(
 ) -> tuple[Cooldown, ...]:
     """Start a cool-down for names sold or whose buy expired; drop the ones that have run out.
 
+    `session` is the session the sale **filled** or the buy **expired** on -- the settlement
+    session -- not the signal session that planned the order. A name is free again once
+    `cooldown_sessions` sessions have passed since then (`BookState.cooldowns` is read the same
+    way by the policy).
+
     An expired buy cools down too: a name that could not be bought for three sessions (a run of
     limit-ups, a halt) is not chased again the next morning.
     """

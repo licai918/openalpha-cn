@@ -12,12 +12,16 @@ import random
 import subprocess
 import sys
 from hashlib import sha256
+from pathlib import Path
 
 import pytest
 
 from openalpha_cn.domain.survivor_selection import SeededHashRule, selection_rule
 
 CODES = tuple(f"{600000 + position:06d}.SH" for position in range(40))
+SOURCE_ROOT = str(Path(__file__).resolve().parents[3] / "src")
+"""The tree under test, handed to the child processes so they import it rather than whichever
+copy the interpreter's own path happens to find first (an isolated worktree, say)."""
 
 
 def test_the_order_is_each_distinct_candidate_once() -> None:
@@ -100,7 +104,13 @@ def test_the_order_is_the_same_in_processes_with_different_hash_seeds() -> None:
     for hash_seed in ("0", "1", "12345"):
         completed = subprocess.run(
             [sys.executable, "-c", program, json.dumps(list(CODES))],
-            env={**os.environ, "PYTHONHASHSEED": hash_seed},
+            env={
+                **os.environ,
+                "PYTHONHASHSEED": hash_seed,
+                "PYTHONPATH": os.pathsep.join(
+                    part for part in (SOURCE_ROOT, os.environ.get("PYTHONPATH")) if part
+                ),
+            },
             capture_output=True,
             text=True,
             check=False,

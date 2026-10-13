@@ -20,7 +20,7 @@ hand-written fixtures and no panel.
 """
 
 from decimal import Decimal
-from typing import Literal, Self
+from typing import Literal, Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -138,10 +138,9 @@ def decide_book(
     cap = config.max_replacements_per_session
 
     def composite_of(code: str) -> float:
-        value = verdicts[code].composite
-        if value is None:  # an eligible verdict always carries one; the screen enforces it
-            raise ValueError(f"{code}: an eligible verdict without a composite")
-        return value
+        # Only called for eligible verdicts, and `EligibilityVerdict` refuses to be built
+        # eligible without a composite -- so there is no value to guess at here.
+        return cast(float, verdicts[code].composite)
 
     frozen = [
         code for code in active if code in verdicts and verdicts[code].reasons == ("suspended",)
