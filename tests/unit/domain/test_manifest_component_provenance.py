@@ -329,8 +329,8 @@ def test_a_quantitative_model_reference_must_be_something_the_one_hash_function_
     prefixes = live_prefixes()
     reference = AlphaModelRef(name="lgbm-baseline", artifact_id=ARTIFACT)
 
-    assert len(prefixes) == 27
-    assert len(set(prefixes)) == 24
+    assert len(prefixes) == 28
+    assert len(set(prefixes)) == 25
     assert ALPHA_MODEL_ARTIFACT_PREFIX in prefixes
     assert sum(1 for prefix in prefixes if "_" in prefix) == 0
     for prefix in prefixes:

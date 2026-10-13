@@ -1,0 +1,169 @@
+"""Vocabulary and configuration of the survivor book (`V2-P7-005`).
+
+A *survivor book* holds at most `holding_count` securities. It first drops every security the
+account cannot or should not hold (**eligibility**), then drops the worst-scoring tail of what is
+left (**survivors**), and afterwards changes its holdings only when a holding stops being
+eligible or stops being a survivor. Which survivor fills a vacancy is the job of a pluggable
+selection rule (`domain/survivor_selection.py`); this module only names the things the three
+layers talk about.
+
+Everything here is pure Python on `Decimal`, `float` and `str`: no numeric or infrastructure
+library, so the whole core can be tested without a panel (`AGENTS.md` hard rule 2). The design is
+`docs/superpowers/specs/2026-10-13-p7-step0-survivor-book-design.md`; every number that is a
+default below is a **pre-registration candidate** there, frozen only by `V2-P7-006`.
+"""
+
+from decimal import Decimal
+from typing import Annotated, Final, Literal, Self, get_args
+
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
+
+from openalpha_cn.domain._identity import stable_model_id
+
+Board = Literal["main", "growth", "star", "bse"]
+"""The vocabulary `backtest.execution.security_board` already answers in (`growth` is ChiNext).
+
+Reused rather than re-derived: `V2-P6-031` removed three private copies of that classifier, and a
+fourth spelling here would be the same defect again. The adapter fills `SecurityFacts.board` from
+that function; this module never looks at a code's digits.
+"""
+
+EligibilityReason = Literal[
+    "board_not_allowed",
+    "listing_too_recent",
+    "special_treatment",
+    "suspended",
+    "missing_factor_value",
+    "unaffordable_lot",
+    "illiquid",
+]
+ELIGIBILITY_REASON_ORDER: Final[tuple[EligibilityReason, ...]] = get_args(EligibilityReason)
+"""The fixed order a verdict lists its reasons in, so two runs print the same line."""
+
+FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
+
+DEFAULT_COMPOSITE_FACTORS: Final[tuple[str, ...]] = (
+    "residual_vol_60/v1",
+    "return_vol_60/v1",
+    "turnover_60/v1",
+    "downside_vol_60/v1",
+)
+
+
+class SurvivorBookConfig(BaseModel):
+    """Every parameter of the survivor book. Frozen, versioned and content-addressed."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["survivor-book-config/v1"] = "survivor-book-config/v1"
+    holding_count: int = Field(default=10, ge=1, le=50)
+    capital: Decimal = Field(default=Decimal("350000"), gt=0)
+    boards: tuple[Board, ...] = ("main", "growth")
+    liquidity_drop_fraction: Decimal = Field(default=Decimal("0.30"), ge=0, lt=1)
+    min_listing_sessions: int = Field(default=250, ge=0)
+    loser_decile_count: int = Field(default=2, ge=0, le=9)
+    entry_floor_fraction: Decimal = Field(default=Decimal("0.25"), ge=0, lt=1)
+    near_exit_fraction: Decimal = Field(default=Decimal("0.10"), ge=0, lt=1)
+    cooldown_sessions: int = Field(default=20, ge=0)
+    max_replacements_per_session: int = Field(default=2, ge=1)
+    buy_order_expiry_sessions: int = Field(default=3, ge=1)
+    lot_size: int = Field(default=100, ge=1)
+    cost_reserve_fraction: Decimal = Field(default=Decimal("0.005"), ge=0, lt=Decimal("0.1"))
+    """Held back from every buy's budget so fees and slippage cannot push the last buy past the
+    cash that is left: ten buys of exactly `capital / 10` would otherwise overspend by the costs."""
+    selection_rule: Literal["seeded_hash/v1"] = "seeded_hash/v1"
+    seed: int = Field(ge=0)
+    """No default on purpose: a registration has to name the seed it was frozen with."""
+    composite_factors: tuple[str, ...] = DEFAULT_COMPOSITE_FACTORS
+
+    @model_validator(mode="after")
+    def _lists_are_nonempty_and_unique(self) -> Self:
+        if not self.boards or len(set(self.boards)) != len(self.boards):
+            raise ValueError("boards must be a non-empty list without repeats")
+        if not self.composite_factors or len(set(self.composite_factors)) != len(
+            self.composite_factors
+        ):
+            raise ValueError("composite_factors must be a non-empty list without repeats")
+        return self
+
+    def sizing_budget(self, equity: Decimal | None = None) -> Decimal:
+        """What one new holding may spend: an equal share of `equity`, less the cost reserve.
+
+        `equity` defaults to the starting `capital`; the daily flow passes the ledger's current
+        equity, so a book that has grown or shrunk is still sized to what it is worth.
+        """
+        basis = self.capital if equity is None else equity
+        return basis / self.holding_count * (1 - self.cost_reserve_fraction)
+
+    @computed_field(return_type=str)  # type: ignore[prop-decorator]
+    @property
+    def config_id(self) -> str:
+        return stable_model_id(prefix="sbc", model=self)
+
+
+def floor_share(count: int, fraction: Decimal) -> int:
+    """How many of `count` names a `fraction` of them covers, rounded down."""
+    return int(Decimal(count) * fraction)
+
+
+def lot_quantity(budget: Decimal, price: Decimal, lot_size: int) -> int:
+    """Whole lots of `lot_size` that `budget` buys at `price`, as a share count; 0 if none."""
+    if price <= 0:
+        raise ValueError("price must be positive")
+    return int(budget / price / lot_size) * lot_size
+
+
+class SecurityFacts(BaseModel):
+    """What the screen needs to know about one security on one signal day. Plain values."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    ts_code: str = Field(min_length=1)
+    board: Board
+    listed_sessions: int = Field(ge=0)
+    special_treatment: bool
+    suspended: bool
+    close: Decimal = Field(gt=0)
+    """The raw (unadjusted) close: the price a lot is bought at, not a return input."""
+    avg_amount: Decimal = Field(ge=0)
+    """Trailing average traded amount, in the unit the adapter chose; only its order matters."""
+    oriented_values: tuple[FiniteFloat | None, ...]
+    """One processed factor value per `composite_factors` entry, sign-adjusted so that a higher
+    number is better; `None` where the factor has no value for this security."""
+
+
+class EligibilityVerdict(BaseModel):
+    """Whether one security may be held, and every reason it may not."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    ts_code: str
+    reasons: tuple[EligibilityReason, ...] = ()
+    composite: FiniteFloat | None = None
+
+    @property
+    def eligible(self) -> bool:
+        return not self.reasons
+
+
+class RankedName(BaseModel):
+    """A survivor and where it stands: rank 1 is the best composite among the survivors."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    ts_code: str
+    composite: FiniteFloat
+    rank: int = Field(ge=1)
+    close: Decimal = Field(gt=0)
+    """Carried so the policy can size a lot without going back to the facts."""
+
+
+class ScreenResult(BaseModel):
+    """The output of the eligibility-and-survivor screen for one signal day."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    verdicts: tuple[EligibilityVerdict, ...]
+    """Every security that was assessed, ordered by `ts_code`."""
+    survivors: tuple[RankedName, ...]
+    """The eligible securities that remain after the loser tail is dropped, best first."""
