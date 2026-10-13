@@ -53,8 +53,13 @@ over the factor score) is testable in months.
 
 - No second engine, no second registration path. Chain one's ranking and portfolio commands stay in
   place and are not extended.
-- The strategy specification and the prediction family set change; these are contract changes and
-  go through the migration mechanism (`V2-P0B-004`), batched into one window (hard rule 3).
+- The strategy specification and the prediction family set change -- **corrected 2026-10-13
+  (T4):** they do *not* need the migration mechanism (`V2-P0B-004`). `StrategySpec` and
+  `ScoreSource` are not stored rows (no `schema_version`, no `ContractVersions` entry) and
+  `AlphaModelDeclaration.family` is a free string, so the Step 0 form is a new module with a new
+  contract and a new family value, and an agent family is another value. Changing a configuration
+  changes its `config_id`, which means one re-registration. What still needs a migration is a change
+  to the fields of an already-stored row (hard rule 3).
 - Anything that changes `src/` or `scripts/daily_selection.py` invalidates the current registration's
   code binding. P7 therefore re-registers once, after the code changes land (`V2-P7-006`), and the
   daily registration is paused until then.
