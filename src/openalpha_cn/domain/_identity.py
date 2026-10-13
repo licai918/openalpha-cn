@@ -23,9 +23,10 @@ to say "twenty-five prefixes are in use" and to claim the shape belonged to `sta
 alone. Both were wrong, and measured so by `V2-P4-016`: of the twenty-five, **six were not
 addresses at all** -- `panel_doctor.FactorPlaneSeal`'s dataset-name prefixes, swept up by a text
 search for `prefix=` -- while three that are (`feat`, `set`, `xs`) were missing. The live census
-is **24 distinct prefixes over 27 call sites**, none containing an underscore, read off the
-source tree by `tests/unit/domain/test_manifest_component_provenance.py::live_prefixes` rather
-than written down here, because a hand-written list checked against its own length is a
+is **24 distinct prefixes over 27 call sites** as `V2-P4-016` measured it, none containing an
+underscore, read off the source tree by
+`tests/unit/domain/test_manifest_component_provenance.py::live_prefixes` rather than written
+down here, because a hand-written list checked against its own length is a
 tautology -- which is how `V2-P4-012`'s `feat` went unrecorded for four issues.
 
 Then this sentence said **three** builders, and that was the same mistake one size smaller: it

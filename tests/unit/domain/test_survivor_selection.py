@@ -54,7 +54,7 @@ def test_the_seed_changes_the_order() -> None:
 
 
 def test_the_order_is_pinned_for_a_small_fixed_input() -> None:
-    """A change of canonical form (separator, encoding, algorithm) moves this and only this."""
+    """A change of canonical form (separator, encoding, algorithm) moves this, among others."""
     codes = ["000001.SZ", "000002.SZ", "600000.SH", "600519.SH", "300750.SZ"]
 
     assert SeededHashRule().order(codes, seed=42) == (
@@ -91,8 +91,9 @@ def test_the_order_is_the_same_in_processes_with_different_hash_seeds() -> None:
             env={**os.environ, "PYTHONHASHSEED": hash_seed},
             capture_output=True,
             text=True,
-            check=True,
+            check=False,
         )
+        assert completed.returncode == 0, completed.stderr
         answers.add(completed.stdout.strip())
 
     assert answers == {json.dumps(list(SeededHashRule().order(CODES, seed=7)))}

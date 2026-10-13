@@ -6,13 +6,16 @@ the share of a list a fraction covers and the lots a budget buys, round the way 
 """
 
 from decimal import Decimal
+from typing import get_args, get_type_hints
 
 import pytest
 from pydantic import ValidationError
 
+from openalpha_cn.backtest.execution import security_board
 from openalpha_cn.domain.survivor_book import (
     DEFAULT_COMPOSITE_FACTORS,
     ELIGIBILITY_REASON_ORDER,
+    Board,
     EligibilityVerdict,
     RankedName,
     SecurityFacts,
@@ -56,6 +59,8 @@ def test_the_defaults_are_the_values_the_design_names() -> None:
 def test_the_seed_has_no_default_so_a_registration_has_to_name_it() -> None:
     with pytest.raises(ValidationError, match="seed"):
         SurvivorBookConfig()  # type: ignore[call-arg]
+    with pytest.raises(ValidationError, match="seed"):
+        SurvivorBookConfig(seed=-1)
 
 
 def test_the_configuration_is_frozen_and_refuses_unknown_fields() -> None:
@@ -71,7 +76,11 @@ def test_the_configuration_is_frozen_and_refuses_unknown_fields() -> None:
     ("overrides", "message"),
     [
         ({"holding_count": 0}, "holding_count"),
+        ({"holding_count": 51}, "holding_count"),
         ({"capital": Decimal("0")}, "capital"),
+        ({"capital": Decimal("-1")}, "capital"),
+        ({"min_listing_sessions": -1}, "min_listing_sessions"),
+        ({"near_exit_fraction": Decimal("1")}, "near_exit_fraction"),
         ({"liquidity_drop_fraction": Decimal("1")}, "liquidity_drop_fraction"),
         ({"loser_decile_count": 10}, "loser_decile_count"),
         ({"entry_floor_fraction": Decimal("-0.1")}, "entry_floor_fraction"),
@@ -224,3 +233,49 @@ def test_a_ranked_name_starts_at_rank_one_and_has_a_positive_close() -> None:
         RankedName(ts_code="600000.SH", composite=0.5, rank=0, close=Decimal("10"))
     with pytest.raises(ValidationError):
         RankedName(ts_code="600000.SH", composite=0.5, rank=1, close=Decimal("0"))
+
+
+def test_a_retyped_decimal_is_a_different_identity_so_a_registration_is_read_back_verbatim() -> (
+    None
+):
+    # Numerically the same, but the stored form differs ("0.3" against the default "0.30").
+    assert config(liquidity_drop_fraction=Decimal("0.3")).config_id != config().config_id
+    assert config(boards=("growth", "main")).config_id != config().config_id
+
+
+def test_the_board_vocabulary_is_the_one_the_execution_policy_answers_in() -> None:
+    answered = get_args(get_type_hints(security_board)["return"])
+
+    assert set(get_args(Board)) == set(answered)
+
+
+@pytest.mark.parametrize(
+    ("reasons", "composite"),
+    [
+        (("suspended", "board_not_allowed"), None),
+        (("suspended", "suspended"), None),
+        ((), None),
+    ],
+)
+def test_a_verdict_must_list_unique_reasons_in_order_and_an_eligible_one_must_be_scored(
+    reasons: tuple[str, ...], composite: float | None
+) -> None:
+    with pytest.raises(ValidationError):
+        EligibilityVerdict(ts_code="600000.SH", reasons=reasons, composite=composite)  # type: ignore[arg-type]
+
+
+def test_the_helpers_refuse_inputs_that_would_give_a_negative_or_nonsense_count() -> None:
+    with pytest.raises(ValueError, match="budget must not be negative"):
+        lot_quantity(Decimal("-2000"), Decimal("10"), 100)
+    with pytest.raises(ValueError, match="price must be positive"):
+        lot_quantity(Decimal("1000"), Decimal("NaN"), 100)
+    with pytest.raises(ValueError, match="lot_size must be at least 1"):
+        lot_quantity(Decimal("1000"), Decimal("10"), 0)
+    with pytest.raises(ValueError, match="fraction must lie between 0 and 1"):
+        floor_share(10, Decimal("1.5"))
+    with pytest.raises(ValueError, match="fraction must lie between 0 and 1"):
+        floor_share(10, Decimal("-0.35"))
+    with pytest.raises(ValueError, match="count must not be negative"):
+        floor_share(-1, Decimal("0.3"))
+    with pytest.raises(ValueError, match="equity must be positive"):
+        config().sizing_budget(Decimal("-100000"))

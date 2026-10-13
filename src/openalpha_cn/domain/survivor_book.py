@@ -51,7 +51,15 @@ DEFAULT_COMPOSITE_FACTORS: Final[tuple[str, ...]] = (
 
 
 class SurvivorBookConfig(BaseModel):
-    """Every parameter of the survivor book. Frozen, versioned and content-addressed."""
+    """Every parameter of the survivor book. Frozen, versioned and content-addressed.
+
+    `config_id` addresses the **stored form**: `Decimal("0.3")` and `Decimal("0.30")` are the same
+    number and two different identities, and so are two orderings of `boards`. A registration is
+    matched by that id, so one that is re-typed rather than read back verbatim will not match --
+    which fails safe, and is why a registration stores this model's own JSON and reads it back.
+    `composite_factors` keeps its order for a different reason: it pairs by position with
+    `SecurityFacts.oriented_values`.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -93,6 +101,8 @@ class SurvivorBookConfig(BaseModel):
         equity, so a book that has grown or shrunk is still sized to what it is worth.
         """
         basis = self.capital if equity is None else equity
+        if not basis.is_finite() or basis <= 0:
+            raise ValueError("equity must be positive")
         return basis / self.holding_count * (1 - self.cost_reserve_fraction)
 
     @computed_field(return_type=str)  # type: ignore[prop-decorator]
@@ -103,13 +113,21 @@ class SurvivorBookConfig(BaseModel):
 
 def floor_share(count: int, fraction: Decimal) -> int:
     """How many of `count` names a `fraction` of them covers, rounded down."""
+    if count < 0:
+        raise ValueError("count must not be negative")
+    if not fraction.is_finite() or not 0 <= fraction <= 1:
+        raise ValueError("fraction must lie between 0 and 1")
     return int(Decimal(count) * fraction)
 
 
 def lot_quantity(budget: Decimal, price: Decimal, lot_size: int) -> int:
     """Whole lots of `lot_size` that `budget` buys at `price`, as a share count; 0 if none."""
-    if price <= 0:
+    if not price.is_finite() or price <= 0:
         raise ValueError("price must be positive")
+    if not budget.is_finite() or budget < 0:
+        raise ValueError("budget must not be negative")
+    if lot_size < 1:
+        raise ValueError("lot_size must be at least 1")
     return int(budget / price / lot_size) * lot_size
 
 
@@ -140,6 +158,15 @@ class EligibilityVerdict(BaseModel):
     ts_code: str
     reasons: tuple[EligibilityReason, ...] = ()
     composite: FiniteFloat | None = None
+
+    @model_validator(mode="after")
+    def _reasons_are_ordered_and_an_eligible_name_is_scored(self) -> Self:
+        positions = [ELIGIBILITY_REASON_ORDER.index(reason) for reason in self.reasons]
+        if positions != sorted(set(positions)):
+            raise ValueError("reasons must be unique and in ELIGIBILITY_REASON_ORDER")
+        if not self.reasons and self.composite is None:
+            raise ValueError("an eligible verdict must carry its composite")
+        return self
 
     @property
     def eligible(self) -> bool:
