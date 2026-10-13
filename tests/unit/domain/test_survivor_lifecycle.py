@@ -115,3 +115,17 @@ def test_selling_a_name_again_restarts_its_cooldown() -> None:
     )
 
     assert result == (Cooldown(ts_code="A", since_session=100),)
+
+
+def test_a_buy_on_its_last_session_is_expired_even_if_its_name_is_no_longer_a_survivor() -> None:
+    buy = order("A", "buy", expires=103)
+
+    last_day = advance_orders([buy], session=103, filled_order_ids=set(), survivors=set())
+    day_before = advance_orders([buy], session=102, filled_order_ids=set(), survivors=set())
+
+    # Expiry starts a cool-down; a cancellation does not. Which one it is decides what happens
+    # next, so the order of the two checks is pinned here.
+    assert last_day.expired == (buy,)
+    assert last_day.cancelled == ()
+    assert day_before.cancelled == (buy,)
+    assert day_before.expired == ()

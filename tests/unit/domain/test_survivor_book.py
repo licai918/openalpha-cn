@@ -328,3 +328,17 @@ def test_verdicts_must_be_unique_and_ordered_by_code() -> None:
         ScreenResult(verdicts=(scored("B", 1.0), scored("A", 2.0)), survivors=())
     with pytest.raises(ValidationError, match="ordered by ts_code"):
         ScreenResult(verdicts=(scored("A", 1.0), scored("A", 1.0)), survivors=())
+
+
+def test_a_screen_result_with_a_security_twice_among_the_survivors_is_refused() -> None:
+    with pytest.raises(ValidationError, match="more than once among the survivors"):
+        ScreenResult(
+            verdicts=(scored("A", 3.0),),
+            survivors=(ranked("A", 1, 3.0), ranked("A", 2, 3.0)),
+        )
+
+
+def test_whole_lots_are_counted_exactly_however_large_the_budget() -> None:
+    budget = Decimal(10) ** 25 + Decimal(7)
+
+    assert lot_quantity(budget, Decimal(3), 100) == int(budget // 300) * 100

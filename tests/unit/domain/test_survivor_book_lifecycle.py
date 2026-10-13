@@ -10,10 +10,16 @@ a name twice, leaves a suspended holding alone, and never buys what is cooling. 
 checks recorded in the plan are run against these tests.
 """
 
+import hashlib
+import json
+import os
 import random
+import subprocess
+import sys
 from collections import Counter
 from decimal import Decimal
 from itertools import pairwise
+from pathlib import Path
 
 from openalpha_cn.domain.survivor_book import SecurityFacts, SurvivorBookConfig
 from openalpha_cn.domain.survivor_lifecycle import advance_orders, update_cooldowns
@@ -87,7 +93,7 @@ def run(market_seed: int, config: SurvivorBookConfig) -> list[dict[str, object]]
         #    cannot trade, so its order does not fill and stays live; a buy needs the cash.
         filled: set[str] = set()
         sold: set[str] = set()
-        for order in sorted(live, key=lambda o: (o.side, o.ts_code)):
+        for order in sorted(live, key=lambda o: (o.side != "sell", o.ts_code)):
             value = order.reference_price * order.quantity
             if order.ts_code in halted or (order.side == "buy" and value > cash):
                 EXERCISED["unfilled"] += 1
@@ -140,6 +146,19 @@ def run(market_seed: int, config: SurvivorBookConfig) -> list[dict[str, object]]
             cash=cash,
             carried=tuple(live),
         )
+        # The plan itself must fit in the cash: what today's buys cost plus what buys already live
+        # will cost cannot exceed the cash plus the proceeds of today's sells. (Live buys alone may
+        # exceed it -- then nothing new is planned.)
+        planned_buys = sum(
+            (o.reference_price * o.quantity for o in plan.orders if o.side == "buy"), Decimal(0)
+        )
+        live_buys = sum(
+            (o.reference_price * o.quantity for o in live if o.side == "buy"), Decimal(0)
+        )
+        planned_sells = sum(
+            (o.reference_price * o.quantity for o in plan.orders if o.side == "sell"), Decimal(0)
+        )
+        assert planned_buys == 0 or planned_buys + live_buys <= cash + planned_sells
         EXERCISED["frozen"] += len(decision.frozen)
         EXERCISED["pending_sells"] += len(pending_sells)
 
@@ -225,3 +244,35 @@ def test_the_whole_run_is_reproducible() -> None:
 
 def test_a_smaller_book_with_a_longer_cooldown_keeps_the_same_promises() -> None:
     run(1, config(holding_count=5, cooldown_sessions=40, max_replacements_per_session=1))
+
+
+def test_the_whole_chain_gives_the_same_bytes_in_processes_with_different_hash_seeds() -> None:
+    """Not only the selection rule: screen, policy, orders and lifecycle together, end to end."""
+    here = Path(__file__).resolve()
+    program = (
+        "import hashlib, importlib.util, json, sys;"
+        "spec = importlib.util.spec_from_file_location('sim', sys.argv[1]);"
+        "sim = importlib.util.module_from_spec(spec);"
+        "spec.loader.exec_module(sim);"
+        "log = sim.run(2, sim.config());"
+        "print(hashlib.sha256(json.dumps(log, sort_keys=True).encode()).hexdigest())"
+    )
+    source_root = str(here.parents[3] / "src")
+    reference = hashlib.sha256(json.dumps(run(2, config()), sort_keys=True).encode()).hexdigest()
+
+    for hash_seed in ("0", "1", "424242"):
+        completed = subprocess.run(
+            [sys.executable, "-c", program, str(here)],
+            env={
+                **os.environ,
+                "PYTHONHASHSEED": hash_seed,
+                "PYTHONPATH": os.pathsep.join(
+                    part for part in (source_root, os.environ.get("PYTHONPATH")) if part
+                ),
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert completed.stdout.strip() == reference

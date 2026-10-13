@@ -127,7 +127,7 @@ def lot_quantity(budget: Decimal, price: Decimal, lot_size: int) -> int:
         raise ValueError("budget must not be negative")
     if lot_size < 1:
         raise ValueError("lot_size must be at least 1")
-    return int(budget / price / lot_size) * lot_size
+    return int(budget // (price * lot_size)) * lot_size
 
 
 class SecurityFacts(BaseModel):
@@ -199,6 +199,8 @@ class ScreenResult(BaseModel):
         codes = [verdict.ts_code for verdict in self.verdicts]
         if codes != sorted(set(codes)):
             raise ValueError("verdicts must be unique and ordered by ts_code")
+        if len({name.ts_code for name in self.survivors}) != len(self.survivors):
+            raise ValueError("a security appears more than once among the survivors")
         if [name.rank for name in self.survivors] != list(range(1, len(self.survivors) + 1)):
             raise ValueError("survivors must be ranked 1..n in the order given")
         composites = [name.composite for name in self.survivors]

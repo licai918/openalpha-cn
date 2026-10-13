@@ -35,12 +35,19 @@ def config(**overrides: object) -> SurvivorBookConfig:
     return SurvivorBookConfig(**settings)  # type: ignore[arg-type]
 
 
-def book(*holdings: tuple[str, int], equity: str = "40000") -> BookState:
+def book(
+    *holdings: tuple[str, int],
+    equity: str = "40000",
+    pending_buys: tuple[str, ...] = (),
+    pending_sells: tuple[str, ...] = (),
+) -> BookState:
     return BookState(
         session=SESSION,
         initialized=True,
         equity=Decimal(equity),
         holdings=tuple(Holding(ts_code=code, quantity=quantity) for code, quantity in holdings),
+        pending_buys=pending_buys,
+        pending_sells=pending_sells,
     )
 
 
@@ -160,8 +167,9 @@ def test_the_proceeds_of_a_sell_count_towards_what_a_buy_may_spend() -> None:
 
 
 def test_each_buy_spends_from_what_the_one_before_left() -> None:
-    # An equal share would buy 700 shares of B, but 5,000 of cash buys at most 5,000 / 12.5 = 400:
-    # B takes all of it, nothing is left for C at 40 (a lot costs 4,000), and C is not placed.
+    # An equal share would buy 700 shares of B, but the cash is 5,000 less the 0.5% cost reserve,
+    # 4,975, which buys at most 398 shares at 12.5 -- 300 in whole lots. 1,250 is then left, which
+    # is not a lot of C at 40 (4,000), so C is not placed.
     plan = build_trade_list(
         config=config(),
         state=book(),
@@ -170,7 +178,7 @@ def test_each_buy_spends_from_what_the_one_before_left() -> None:
         cash=Decimal("5000"),
     )
 
-    assert [(o.ts_code, o.quantity) for o in plan.orders] == [("B", 400)]
+    assert [(o.ts_code, o.quantity) for o in plan.orders] == [("B", 300)]
 
 
 def test_a_buy_that_cannot_afford_one_lot_is_not_placed() -> None:
@@ -271,11 +279,24 @@ def test_the_identities_are_content_addresses_that_move_with_the_content() -> No
     assert smaller.orders[1].order_id != first.orders[1].order_id
 
 
+def live_buy(code: str = "B", quantity: int = 300, price: str = "12.5") -> TradeOrder:
+    return TradeOrder(
+        signal_session=99,
+        execute_session=100,
+        expires_session=102,
+        side="buy",
+        ts_code=code,
+        quantity=quantity,
+        reference_price=Decimal(price),
+        reason="ENTRY_REPLACEMENT",
+    )
+
+
 def test_a_carried_order_is_listed_without_being_planned_again() -> None:
-    earlier = planned().orders[1]
+    earlier = live_buy()
     plan = build_trade_list(
         config=config(),
-        state=book(),
+        state=book(pending_buys=("B",)),
         decision=decision(),
         reference_prices=PRICES,
         cash=Decimal("0"),
@@ -315,23 +336,15 @@ def test_an_order_with_a_nonsense_field_is_refused(overrides: dict[str, object])
 
 
 def test_a_buy_still_live_from_an_earlier_session_is_paid_for_before_todays_buys() -> None:
-    live = TradeOrder(
-        signal_session=99,
-        execute_session=100,
-        expires_session=102,
-        side="buy",
-        ts_code="B",
-        quantity=300,
-        reference_price=Decimal("12.5"),
-        reason="ENTRY_REPLACEMENT",
-    )
+    live = live_buy()
 
-    # Cash 5,000 less the 3,750 the live buy will spend leaves 1,250: 100 shares of A at 10. With
-    # nothing reserved the same decision would order 500 (cash / price), and the two buys together
-    # would ask for more than the book has.
+    # Cash 5,000 less the 3,750 the live buy will spend leaves 1,250, and 0.5% of that is kept back
+    # for costs: 1,243.75 buys 124 shares of A at 10, 100 in whole lots. With nothing reserved the
+    # same decision would order 400 (4,975 / 10), and the two buys together would ask for more
+    # than the book has.
     with_live = build_trade_list(
         config=config(),
-        state=book(),
+        state=book(pending_buys=("B",)),
         decision=decision(entries=(("A", "ENTRY_REPLACEMENT"),)),
         reference_prices=PRICES,
         cash=Decimal("5000"),
@@ -346,31 +359,112 @@ def test_a_buy_still_live_from_an_earlier_session_is_paid_for_before_todays_buys
     )
 
     assert [o.quantity for o in with_live.orders] == [100]
-    assert [o.quantity for o in without.orders] == [500]
+    assert [o.quantity for o in without.orders] == [400]
 
 
 def test_a_live_buy_that_uses_up_the_cash_leaves_nothing_for_a_new_one() -> None:
-    live = TradeOrder(
-        signal_session=99,
-        execute_session=100,
-        expires_session=102,
-        side="buy",
-        ts_code="B",
-        quantity=800,
-        reference_price=Decimal("12.5"),
-        reason="ENTRY_REPLACEMENT",
-    )
-
     plan = build_trade_list(
         config=config(),
-        state=book(),
+        state=book(pending_buys=("B",)),
         decision=decision(entries=(("A", "ENTRY_REPLACEMENT"),)),
         reference_prices=PRICES,
         cash=Decimal("5000"),
-        carried=(live,),
+        carried=(live_buy(quantity=800),),
     )
 
     assert plan.orders == ()
+
+
+def test_a_buy_limited_by_cash_still_leaves_the_cost_reserve() -> None:
+    plan = build_trade_list(
+        config=config(),
+        state=book(),
+        decision=decision(entries=(("B", "ENTRY_REPLACEMENT"),)),
+        reference_prices=PRICES,
+        cash=Decimal("5000"),
+    )
+
+    (order,) = plan.orders
+    spent = order.reference_price * order.quantity
+    assert spent <= Decimal("5000") * (1 - config().cost_reserve_fraction)
+
+
+def test_the_carried_orders_must_be_the_ones_the_state_says_are_live() -> None:
+    kwargs = {
+        "config": config(),
+        "decision": decision(),
+        "reference_prices": PRICES,
+        "cash": Decimal("0"),
+    }
+
+    with pytest.raises(ValueError, match="carried orders disagree with the state"):
+        build_trade_list(state=book(), carried=(live_buy(),), **kwargs)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="carried orders disagree with the state"):
+        build_trade_list(state=book(pending_buys=("B",)), carried=(), **kwargs)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="planned on an earlier session"):
+        stale = live_buy().model_copy(update={"signal_session": 100, "execute_session": 101})
+        build_trade_list(
+            state=book(pending_buys=("B",)),
+            carried=(stale,),
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+
+def test_a_decision_for_another_session_is_refused() -> None:
+    other = decision().model_copy(update={"session": SESSION + 1})
+
+    with pytest.raises(ValueError, match="the decision is for session"):
+        build_trade_list(
+            config=config(),
+            state=book(),
+            decision=other,
+            reference_prices=PRICES,
+            cash=Decimal("0"),
+        )
+
+
+def test_the_carried_orders_are_listed_in_one_canonical_order() -> None:
+    first, second = live_buy("B"), live_buy("C", price="40", quantity=100)
+    kwargs = {
+        "config": config(),
+        "state": book(pending_buys=("B", "C")),
+        "decision": decision(),
+        "reference_prices": PRICES,
+        "cash": Decimal("100000"),
+    }
+
+    one = build_trade_list(carried=(first, second), **kwargs)  # type: ignore[arg-type]
+    other = build_trade_list(carried=(second, first), **kwargs)  # type: ignore[arg-type]
+
+    assert one == other
+    assert one.trade_list_id == other.trade_list_id
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"execute_session": 1, "signal_session": 1},
+        {"expires_session": None},  # a buy that never expires
+        {"expires_session": 1},  # a buy that expires before it executes
+        {"reason": "EXIT_SURVIVOR_LOST"},  # a buy with an exit reason
+        {"side": "sell"},  # a sell that carries an expiry and an entry reason
+        {"side": "sell", "expires_session": None},  # a sell with an entry reason
+    ],
+)
+def test_an_order_a_book_could_not_have_planned_is_refused(overrides: dict[str, object]) -> None:
+    base: dict[str, object] = {
+        "signal_session": 1,
+        "execute_session": 2,
+        "expires_session": 4,
+        "side": "buy",
+        "ts_code": "A",
+        "quantity": 100,
+        "reference_price": Decimal("10"),
+        "reason": "ENTRY_REPLACEMENT",
+    }
+    base.update(overrides)
+    with pytest.raises(ValidationError):
+        TradeOrder(**base)  # type: ignore[arg-type]
 
 
 def test_selling_a_security_that_is_not_held_is_a_named_failure() -> None:

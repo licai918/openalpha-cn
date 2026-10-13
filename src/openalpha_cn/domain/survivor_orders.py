@@ -9,15 +9,17 @@ Sizing: a buy is `lot_quantity` of the equal share (less the cost reserve) at th
 reference price, and is further limited by the cash that will be there -- today's cash plus the
 estimated proceeds of today's sells, less what buys still live from earlier sessions will spend --
 so a book that is nearly fully invested cannot over-order.
-A buy that cannot be afforded even one lot with what is left is **not placed**; the name stays on
-the watch list and is drawn again tomorrow.
+A buy that cannot be afforded even one lot with what is left is **not placed**; the name was
+drawn today and is simply not bought -- it is eligible to be drawn again in a later session.
+The cash cap carries the same cost reserve as the equal share, so a buy that is limited by cash
+still leaves room for the fees and slippage that will come out of it.
 """
 
 from collections.abc import Mapping
 from decimal import Decimal
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 from openalpha_cn.domain._identity import stable_model_id
 from openalpha_cn.domain.survivor_book import SurvivorBookConfig, lot_quantity
@@ -48,6 +50,22 @@ class TradeOrder(BaseModel):
     reference_price: Decimal = Field(gt=0)
     reason: OrderReason
 
+    @model_validator(mode="after")
+    def _the_order_is_one_a_book_could_have_planned(self) -> Self:
+        if self.execute_session <= self.signal_session:
+            raise ValueError("an order executes after the session that planned it")
+        if self.side == "sell":
+            if self.expires_session is not None:
+                raise ValueError("a sell never expires")
+            if not self.reason.startswith("EXIT_"):
+                raise ValueError("a sell carries an exit reason")
+        else:
+            if self.expires_session is None or self.expires_session < self.execute_session:
+                raise ValueError("a buy expires on or after the session it executes")
+            if self.reason.startswith("EXIT_"):
+                raise ValueError("a buy carries an entry reason")
+        return self
+
     @computed_field(return_type=str)  # type: ignore[prop-decorator]
     @property
     def order_id(self) -> str:
@@ -55,7 +73,8 @@ class TradeOrder(BaseModel):
 
 
 class TradeList(BaseModel):
-    """The orders planned from one signal session, sells before buys, each by `ts_code`."""
+    """The orders planned from one signal session: sells first (by `ts_code`), then buys in the
+    order the selection rule drew them."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -90,6 +109,20 @@ def build_trade_list(
     """Turn `decision` into orders for the session after `state.session`."""
     if cash < 0:
         raise ValueError("cash must not be negative")
+    if decision.session != state.session:
+        raise ValueError(
+            f"the decision is for session {decision.session}, the state for {state.session}"
+        )
+    live_buys = {order.ts_code for order in carried if order.side == "buy"}
+    live_sells = {order.ts_code for order in carried if order.side == "sell"}
+    if live_buys != set(state.pending_buys) or live_sells != set(state.pending_sells):
+        raise ValueError(
+            "the carried orders disagree with the state: buys "
+            f"{sorted(live_buys)} against pending_buys {sorted(state.pending_buys)}, sells "
+            f"{sorted(live_sells)} against pending_sells {sorted(state.pending_sells)}"
+        )
+    if any(order.signal_session >= state.session for order in carried):
+        raise ValueError("a carried order was planned on an earlier session than the state's")
     execute = state.session + 1
     held = {holding.ts_code: holding.quantity for holding in state.holdings}
 
@@ -126,7 +159,7 @@ def build_trade_list(
         price = _price_of(entry.ts_code, reference_prices)
         quantity = min(
             lot_quantity(unit_budget, price, config.lot_size),
-            lot_quantity(available, price, config.lot_size),
+            lot_quantity(available * (1 - config.cost_reserve_fraction), price, config.lot_size),
         )
         if quantity == 0:
             continue
@@ -147,5 +180,7 @@ def build_trade_list(
     return TradeList(
         signal_session=state.session,
         orders=tuple(sorted(sells, key=lambda o: o.ts_code)) + tuple(buys),
-        carried=carried,
+        carried=tuple(
+            sorted(carried, key=lambda order: (order.side, order.ts_code, order.order_id))
+        ),
     )

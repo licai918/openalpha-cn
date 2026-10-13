@@ -1,8 +1,8 @@
 """The selection layer's default rule (`V2-P7-005`).
 
 `seeded_hash/v1` claims no skill; what it owes is determinism. The order must be a function of the
-candidate *set* and the seed, so every property below is a way of saying "and of nothing else":
-not the order the candidates arrived in, not duplicates, not the day, and -- the one a first
+candidate *set*, the seed and the session, so every property below is a way of saying "and of
+nothing else": not the order the candidates arrived in, not duplicates, and -- the one a first
 prototype got wrong -- not `PYTHONHASHSEED`.
 """
 

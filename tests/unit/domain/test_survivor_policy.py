@@ -49,6 +49,7 @@ def screen_of(
     dropped: tuple[tuple[int, float], ...] = (),
     ineligible: tuple[int, ...] = (),
     halted: tuple[int, ...] = (),
+    halted_and_thin: tuple[int, ...] = (),
     sick_and_halted: tuple[int, ...] = (),
     close: dict[int, str] | None = None,
 ) -> ScreenResult:
@@ -77,6 +78,12 @@ def screen_of(
         EligibilityVerdict(ts_code=name(p), reasons=("special_treatment",)) for p in ineligible
     ]
     verdicts += [EligibilityVerdict(ts_code=name(p), reasons=("suspended",)) for p in halted]
+    verdicts += [
+        EligibilityVerdict(
+            ts_code=name(p), reasons=("suspended", "missing_factor_value", "illiquid")
+        )
+        for p in halted_and_thin
+    ]
     verdicts += [
         EligibilityVerdict(ts_code=name(p), reasons=("special_treatment", "suspended"))
         for p in sick_and_halted
@@ -476,3 +483,27 @@ def test_the_watch_list_is_no_longer_than_the_book() -> None:
 
     assert len(decision.entries) == 4
     assert len(decision.watch_list) == 4
+
+
+def test_a_long_suspension_does_not_unfreeze_a_holding_by_dragging_its_own_numbers_down() -> None:
+    # A name halted for weeks has no turnover (`illiquid`) and too few observations for its rolling
+    # factors (`missing_factor_value`): both follow from the halt, so it stays frozen.
+    decision = decide_book(
+        config=config(),
+        screen=screen_of([0, 1, 2], halted_and_thin=(3,)),
+        state=state(held=(0, 1, 2, 3)),
+    )
+
+    assert decision.exits == ()
+    assert decision.frozen == (name(3),)
+
+
+def test_a_holding_that_is_halted_and_has_a_real_problem_is_not_frozen() -> None:
+    decision = decide_book(
+        config=config(),
+        screen=screen_of([0, 1, 2], sick_and_halted=(3,)),
+        state=state(held=(0, 1, 2, 3)),
+    )
+
+    assert [e.ts_code for e in decision.exits] == [name(3)]
+    assert decision.frozen == ()

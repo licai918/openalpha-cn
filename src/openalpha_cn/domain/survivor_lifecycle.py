@@ -34,7 +34,9 @@ def advance_orders(
     """Settle `orders` after `session` has been observed.
 
     `survivors` is today's survivor set: a buy for a name outside it is cancelled rather than
-    carried -- it was chosen yesterday and nothing today still recommends it.
+    carried -- it was chosen yesterday and nothing today still recommends it. A buy on its last
+    session that did not fill is **expired**, whether or not its name is still a survivor, and
+    expiry starts a cool-down (`update_cooldowns`); one cancelled earlier does not.
     """
     live: list[TradeOrder] = []
     filled: list[TradeOrder] = []

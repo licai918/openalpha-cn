@@ -4,23 +4,25 @@ A holding is sold only when it **stops being eligible** (forced, never deferred)
 the survivors** (discretionary, at most `max_replacements_per_session` a day, the worst composite
 first; the rest wait for tomorrow). Two kinds of holding are left alone: one **already being
 sold** (`pending_sells` -- a sell order that has not filled yet; selling it again would double the
-order, and its slot is already free), and one whose **only** problem is a suspension (`frozen` --
-it cannot trade until it resumes, and a halt is not evidence about the name; it is judged like any
-other holding the first session it trades again). A vacancy is filled from the **entrants** --
-survivors above the entry floor that are not already held, not already on order and not in
-cool-down -- in the order the selection rule gives, skipping any name a lot of which the current
-equity cannot buy (an affordability limit on *buying*; it never makes a holding ineligible).
+order, and its slot is already free), and one whose problems all **follow from a suspension**
+(`frozen`, see `FREEZE_COMPATIBLE_REASONS` -- it cannot trade until it resumes, and a halt is not
+evidence about the name; it is judged like any other holding the first session it trades again).
+A vacancy is filled from the **entrants** -- survivors above the entry floor that are not already
+held, not already on order and not in cool-down -- in the order the selection rule gives, skipping
+any name a lot of which the current equity cannot buy (an affordability limit on *buying*; it
+never makes a holding ineligible).
 The first build fills every vacancy at once; after that at most `max_replacements_per_session`
 buys a day.
 
-This is the half of the design the evidence rests on: staying put is what keeps the loser tail out
-and the cost low (`docs/superpowers/specs/2026-10-13-p7-step0-survivor-book-design.md` section 3).
+Staying put is the half of the design that the *exploratory* findings point to (they are not
+evidence): it keeps the loser tail out and the cost low
+(`docs/superpowers/specs/2026-10-13-p7-step0-survivor-book-design.md` section 3).
 The function is pure -- state and screen in, decision out -- so the whole policy is testable with
 hand-written fixtures and no panel.
 """
 
 from decimal import Decimal
-from typing import Literal, Self, cast
+from typing import Final, Literal, Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -33,6 +35,15 @@ from openalpha_cn.domain.survivor_book import (
 from openalpha_cn.domain.survivor_selection import selection_rule
 
 ExitReason = Literal["EXIT_ELIGIBILITY_LOST", "EXIT_SURVIVOR_LOST"]
+FREEZE_COMPATIBLE_REASONS: Final[frozenset[str]] = frozenset(
+    {"suspended", "illiquid", "missing_factor_value"}
+)
+"""What may be wrong with a holding that is still *frozen* rather than sold. A halt is not evidence
+about the name, and a long one drags its own trailing turnover (`illiquid`) and its rolling factor
+windows (`missing_factor_value`) down with it; those follow from the suspension. Anything else
+(special treatment, a board, a listing age) is a real problem and a forced exit. The adapter must
+still hand the screen a fact row for a suspended holding (its last close, `suspended=True`): a name
+the screen never saw is sold as unassessed."""
 EntryReason = Literal["INITIAL_BUILD", "ENTRY_REPLACEMENT"]
 
 
@@ -113,14 +124,16 @@ class BookDecision(BaseModel):
     near_exit: tuple[str, ...]
     """Holdings still in the survivors but in their worst `near_exit_fraction`, ordered by code."""
     frozen: tuple[str, ...] = ()
-    """Holdings left alone today because their only problem is a suspension."""
+    """Holdings left alone today because the only things wrong with them follow from a suspension
+    (`FREEZE_COMPATIBLE_REASONS`)."""
     watch_list: tuple[str, ...]
     """The next names the rule would draw today, after today's entries -- not a promise about
     tomorrow, because the draw is salted with the session."""
     unaffordable: tuple[str, ...]
     """Entrants skipped because current equity cannot buy a lot of them."""
     target_holdings: tuple[str, ...]
-    """Holdings after today's exits and entries, sorted; pending buys are not included."""
+    """Holdings after today's exits and entries, sorted. Names already being sold and buys still
+    live are not included: this is what today's orders add, not the whole book."""
 
 
 def decide_book(
@@ -143,7 +156,11 @@ def decide_book(
         return cast(float, verdicts[code].composite)
 
     frozen = [
-        code for code in active if code in verdicts and verdicts[code].reasons == ("suspended",)
+        code
+        for code in active
+        if code in verdicts
+        and "suspended" in verdicts[code].reasons
+        and set(verdicts[code].reasons) <= FREEZE_COMPATIBLE_REASONS
     ]
     forced = [
         code

@@ -827,8 +827,9 @@ DECLARED_PLAIN_DIGESTS: Final[dict[str, str]] = {
         "equality and never an address (V2-P6-011 round 11)"
     ),
     "domain/survivor_selection.py::_selection_digest": (
-        "the whole 64 hex of `seed|ts_code`, used only to order candidates; never an address, "
-        "never stored, and never compared to anything but another such digest (V2-P7-005)"
+        "the whole 64 hex of `seed|session|ts_code`, used only to order candidates; never an "
+        "address, never stored, and never compared to anything but another such digest "
+        "(V2-P7-005)"
     ),
     "strategy_registration.py::InputProvenance.digest": (
         "the whole 64 hex of one input provenance document, the name of its write-once file"
