@@ -18,6 +18,14 @@ and a revision log. `ADR-0005` fixes the direction: chain two is the single engi
 joins as a registered prediction family, evaluated forward only. The roadmap gains P7 with 13 issues.
 **Daily registration is paused** from 2026-10-08 until a new configuration is pre-registered.
 
+On 2026-10-13 the order became Step 0, then plan C, and Step 0 got its design
+(`docs/superpowers/specs/2026-10-13-p7-step0-survivor-book-design.md`): for a ~350,000 yuan account
+holding at most 10 names, an inert base -- a loser-tail filter, sticky holdings and a placeholder
+selection layer -- with a daily trade list and a paper ledger. The supporting checks (labelled as
+exploratory) show that re-picking every day gives the whole edge to costs, that stickiness is about half
+of the in-sample gross excess, and that a ten-name book carries a tracking error of about 12-13% a
+year, so a one-year result is mostly luck. The roadmap grows to 15 P7 issues (243 in total).
+
 ### P6 — selection ready (`V2-P6-001` … `V2-P6-035`)
 
 The project now runs end to end from a multi-year whole-market panel to a registered daily

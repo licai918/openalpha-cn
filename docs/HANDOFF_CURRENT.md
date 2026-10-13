@@ -15,8 +15,11 @@ P6 的工程闸门成立，但**唯一一次预登记的保留期检验没有通
 **当前工作是 P7：决策链整合与超额收益研究**（2026-10-08 立）。事实、探索性发现、预估、决策记录、闸门和
 修订记录在 [`specs/v2/openalpha-cn-v2-p7-decision-chain.md`](specs/v2/openalpha-cn-v2-p7-decision-chain.md)，
 方向决定见 [`architecture/ADR-0005-single-decision-engine.md`](architecture/ADR-0005-single-decision-engine.md)，
-issue 清单（`V2-P7-001` …）在路线图 §P7。顺序：**Step 0（持仓形态改造）与方案 C（智能体前向登记）并行 →
-方案 A（否决层）→ 方案 B（证据变特征）**，每一步之前有闸门；改动顺序或闸门必须先在规格 §9 记一行。
+issue 清单（`V2-P7-001` …）在路线图 §P7。顺序（2026-10-13 起）：**Step 0（惰性底座：幸存者持仓 + 每日交易清单 +
+纸面账本）→ 方案 C（智能体前向登记）→ 方案 A（否决层）→ 方案 B（证据变特征）**，每一步之前有闸门；改动顺序或闸门
+必须先在规格 §9 记一行。Step 0 的详细设计在
+[`superpowers/specs/2026-10-13-p7-step0-survivor-book-design.md`](superpowers/specs/2026-10-13-p7-step0-survivor-book-design.md)
+（资金约 35 万元、持股 ≤ 10 只；用 sub-agent 驱动开发 + 测试先行执行，设计与实施计划都先经用户审阅）。
 
 **每日登记自 2026-10-08 起暂停**，等 `V2-P7-006` 的新配置预登记提交后恢复。launchd 从未安装；现有登记
 （`docs/research/p6-registration.json`）在新登记提交后作废，保留为历史。此前计划的 P6
