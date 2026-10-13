@@ -8,8 +8,19 @@
 
 ## 当前状态
 
-v2 已交付 P0.A 至 P5（路线图里 P5 只剩 `V2-P5-038` 一行未完成），当前工作是 **P6 选股就绪**，
-计划见 [`superpowers/plans/2026-09-26-selection-ready.md`](superpowers/plans/2026-09-26-selection-ready.md)。
+v2 已交付 P0.A 至 P5（路线图里 P5 只剩 `V2-P5-038` 一行未完成）和 **P6 选股就绪**（2026-10-07 合并，PR #2）。
+P6 的工程闸门成立，但**唯一一次预登记的保留期检验没有通过**：每日榜单只是候选，没有超额收益的证据，
+不应作为投资依据（见 [`research/p6-results.md`](research/p6-results.md)）。
+
+**当前工作是 P7：决策链整合与超额收益研究**（2026-10-08 立）。事实、探索性发现、预估、决策记录、闸门和
+修订记录在 [`specs/v2/openalpha-cn-v2-p7-decision-chain.md`](specs/v2/openalpha-cn-v2-p7-decision-chain.md)，
+方向决定见 [`architecture/ADR-0005-single-decision-engine.md`](architecture/ADR-0005-single-decision-engine.md)，
+issue 清单（`V2-P7-001` …）在路线图 §P7。顺序：**Step 0（持仓形态改造）与方案 C（智能体前向登记）并行 →
+方案 A（否决层）→ 方案 B（证据变特征）**，每一步之前有闸门；改动顺序或闸门必须先在规格 §9 记一行。
+
+**每日登记自 2026-10-08 起暂停**，等 `V2-P7-006` 的新配置预登记提交后恢复。launchd 从未安装；现有登记
+（`docs/research/p6-registration.json`）在新登记提交后作废，保留为历史。此前计划的 P6
+（[`superpowers/plans/2026-09-26-selection-ready.md`](superpowers/plans/2026-09-26-selection-ready.md)）已完成。
 P3 交付了因子契约、面板因子引擎、五个因子族、四项研究（IC / 分位组合 / 冗余 / 可交易性）、
 密封的三档实验产物，以及因子层的三个公开面；下面两节说的是因子层和模型层怎么用。
 
