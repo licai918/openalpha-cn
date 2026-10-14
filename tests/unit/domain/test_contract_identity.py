@@ -863,6 +863,11 @@ DECLARED_PLAIN_DIGESTS: Final[dict[str, str]] = {
         "compared for equality to tell a restatement from an append; catalog-only, never an "
         "id (V2-P7-008)"
     ),
+    "strategy_survivor_check.py::SurvivorCacheKey.digest": (
+        "the whole 64 hex of one verdict cache key (which stored state a verdict was reached "
+        "on), the middle of a write-once verdict file's name; compared for equality, never an "
+        "id (V2-P7-018)"
+    ),
     "strategy_view.py::_catalog_digest": (
         "the whole 64 hex of a store's catalog stamps, one field of a walk-forward fit's cache "
         "key: compared for equality inside one process, never stored and never an id "
