@@ -70,7 +70,10 @@ then after it), and refuses the report otherwise -- the calendar has to be built
 What one mature record gives, every number gross and over the **labelled** scope only (an
 unlabelled name is left out of every number, and counted per decile and per refusal code --
 `domain/labels`' codes, a name with two counted under both, and `no_adjustment_history` for a name
-the reader has no factor series for):
+the reader has no factor series for). Leaving names out is not neutral, and every layer says so
+(`UNLABELLED_WORDING`): a delisting in the window is typically a large loss that is then missing,
+so the worst decile's mean is likely biased upward -- understating `ew_minus_worst_decile` and
+`top_minus_bottom` rather than inflating them:
 
 - `rank_ic`: the tie-aware Spearman correlation of score and label -- `factor_ic.average_ranks`
   on both, then `statistics.correlation` -- absent with a code when a side is degenerate
@@ -158,8 +161,9 @@ does on its own:
   return's windows are the headline's sampled periods at the primary horizon
   (`sampled_benchmarks`); a period whose equal weight or CSI 500 is missing is named as left out.
 - **What cannot be evaluated yet** (design section 6): each item is listed while it holds -- no
-  survivor record yet, no outcome matured, the window not satisfied -- and the standing ones on
-  every report.
+  survivor record filed under the registration yet, no outcome matured, the window not satisfied
+  -- and the standing ones on every report, among them the bias of the names left unlabelled; a
+  section like every other, `{"wording", "items"}`.
 - **The late-record check's results**: counts by verdict and by scope, every UNVERIFIABLE record
   with its changes and every refused one with its reason, and the UNVERIFIABLE and refused shares
   over every checked record and over the primary window's positions. How many verdicts a run
@@ -168,7 +172,9 @@ does on its own:
 
 Every section carries `SURVIVOR_WORDING`; the prediction layer adds `PREDICTION_LAYER_WORDING`;
 the document ends with them and `NO_VERDICT_WORDING`, then the caller's integrity statement
-(P6's `daily_selection.INTEGRITY`). No verdict word is printed, before the window or after it.
+(P6's `daily_selection.INTEGRITY`). No verdict word is printed, before the window or after it:
+the secondary family's step-up decision at `q` is printed as `below_q` -- "q-value <= q" -- the
+procedure's arithmetic, not a finding.
 """
 
 from __future__ import annotations
@@ -234,6 +240,7 @@ __all__ = [
     "SURVIVOR_FORWARD_PROTOCOL_KEY",
     "SURVIVOR_FORWARD_PROTOCOL_SCHEMA",
     "SURVIVOR_FORWARD_REPORT_KIND",
+    "UNLABELLED_WORDING",
     "CheckedVerdict",
     "DescribedQuantity",
     "DescriptiveMean",
@@ -275,6 +282,14 @@ PREDICTION_LAYER_WORDING: Final = (
     "candidate forecast of a registered research configuration; not a performance claim"
 )
 DESCRIPTIVE_WORDING: Final = "descriptive, not a test"
+UNLABELLED_WORDING: Final = (
+    "names without a label (delisted_in_window, halted_session, locked_at_limit, "
+    "no_adjustment_history, ...) are left out of the rank IC and of every mean, and counted by "
+    "code and by decile; a delisting is typically a large loss that is then missing, so the worst "
+    "decile's mean is likely biased upward, which would understate ew_minus_worst_decile and "
+    "top_minus_bottom"
+)
+"""Which way leaving the unlabelled names out (design decision 7) likely biases the layer."""
 
 ForwardMetric = Literal[
     "rank_ic", "survivors_minus_ew", "ew_minus_worst_decile", "top_minus_bottom"
@@ -1011,6 +1026,8 @@ class LayerReading:
     descriptive: tuple[DescriptiveMean, ...]
     """Every described quantity over every included mature daily record (overlapping)."""
     non_overlapping: NonOverlappingSample
+    unlabelled_wording: str
+    """`UNLABELLED_WORDING`: which way the names left unlabelled likely bias the numbers."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -1025,6 +1042,8 @@ class PredictionLayer:
     immature: int
     excluded: tuple[tuple[str, int], ...]
     """Witnessed records left out of every reading, by reason (`refused`, `unchecked`)."""
+    unverifiable: int
+    """Witnessed records the check found UNVERIFIABLE: in the headline, out of the sensitivity."""
     headline: LayerReading
     """Verified and UNVERIFIABLE records (P6's convention)."""
     excluding_unverifiable: LayerReading
@@ -1103,6 +1122,7 @@ def prediction_layer(
         mature=sum(1 for outcome in by_session.values() if outcome.mature),
         immature=sum(1 for outcome in by_session.values() if not outcome.mature),
         excluded=tuple(sorted(excluded.items())),
+        unverifiable=sum(1 for state in standing.values() if state == "unverifiable"),
         headline=reading(frozenset({"refused", "unchecked"})),
         excluding_unverifiable=reading(frozenset({"refused", "unchecked", "unverifiable"})),
         wording=PREDICTION_LAYER_WORDING,
@@ -1155,6 +1175,7 @@ def _reading(
             metrics=metrics,
             label_as_of=label_as_of,
         ),
+        unlabelled_wording=UNLABELLED_WORDING,
     )
 
 
@@ -1619,6 +1640,7 @@ def _layer_section(layer: PredictionLayer, *, analysis: NonOverlappingSample) ->
             "refused": excluded.get("refused", 0),
             "unchecked": excluded.get("unchecked", 0),
         },
+        "unverifiable": layer.unverifiable,
         **_reading_section(layer.headline, analysis=analysis),
         "excluding_unverifiable": _reading_section(layer.excluding_unverifiable, analysis=analysis),
     }
@@ -1654,6 +1676,7 @@ def _reading_section(reading: LayerReading, *, analysis: NonOverlappingSample) -
         "scope_by_decile": list(reading.scope_by_decile),
         "unlabelled_by_decile": list(reading.unlabelled_by_decile),
         "unlabelled_by_code": dict(reading.unlabelled_by_code),
+        "unlabelled_wording": reading.unlabelled_wording,
         "descriptive": _means(reading.descriptive),
         "non_overlapping": {
             "anchor_ordinal": sample.anchor_ordinal,
@@ -1760,7 +1783,7 @@ def _secondary_family(
                         "hypothesis_id": name,
                         "one_sided_p_value": p_values[name],
                         "q_value": verdict.q_value,
-                        "rejected": verdict.rejected,
+                        "below_q": verdict.rejected,
                     }
                 )
         withheld = len(members) - len(p_values)
@@ -1800,7 +1823,7 @@ def _relative_section(relative: Mapping[str, Any], primary: PredictionLayer) -> 
 
 def _cannot_be_evaluated_yet(
     sessions: Sequence[date], *, primary: PredictionLayer, protocol: SurvivorForwardProtocol
-) -> list[dict[str, str]]:
+) -> dict[str, Any]:
     horizon = protocol.primary_horizon
     analysis = primary.headline.non_overlapping
     items: list[tuple[str, str]] = []
@@ -1808,9 +1831,7 @@ def _cannot_be_evaluated_yet(
         items.append(
             (
                 "no_survivor_record_yet",
-                "no survivor record exists yet: daily registration has been paused since "
-                "2026-10-08, and the configuration is registered once at V2-P7-006, after "
-                "Parts D and E",
+                "no survivor record has been filed under this registration yet",
             )
         )
     if primary.mature == 0:
@@ -1854,8 +1875,12 @@ def _cannot_be_evaluated_yet(
         )
         for secondary in protocol.secondary_horizons
     ]
+    items.append(("unlabelled_names_left_out", UNLABELLED_WORDING))
     items.append(("no_null_signal_control", "there is no null-signal control yet (V2-P7-002)"))
-    return [{"code": code, "statement": statement} for code, statement in items]
+    return {
+        "wording": SURVIVOR_WORDING,
+        "items": [{"code": code, "statement": statement} for code, statement in items],
+    }
 
 
 # --- the report's lines ---------------------------------------------------------------------------
@@ -1888,7 +1913,7 @@ def survivor_forward_lines(document: Mapping[str, Any]) -> list[str]:
     lines += _ledger_lines(document["paper_ledger"])
     lines += _relative_lines(document["relative"])
     lines.append("cannot be evaluated yet:")
-    lines += [f"  - {item['statement']}" for item in document["cannot_be_evaluated_yet"]]
+    lines += [f"  - {item['statement']}" for item in document["cannot_be_evaluated_yet"]["items"]]
     lines += [f"wording: {text}" for text in document["wording"]]
     lines.append(document["integrity"])
     return lines
@@ -1937,7 +1962,8 @@ def _layer_lines(layer: Mapping[str, Any]) -> list[str]:
     lines = [
         f"  h{layer['horizon']} ({layer['role']}): witnessed {layer['witnessed']}, mature "
         f"{layer['mature']}, immature {layer['immature']}; labels as of {layer['label_as_of']}; "
-        f"excluded refused {excluded['refused']}, unchecked {excluded['unchecked']}"
+        f"excluded refused {excluded['refused']}, unchecked {excluded['unchecked']}; "
+        f"UNVERIFIABLE {layer['unverifiable']}, in the headline and excluded in the sensitivity"
     ]
     lines += _reading_lines(layer, indent="    ")
     lines.append("    sensitivity, UNVERIFIABLE records excluded:")
@@ -1963,6 +1989,7 @@ def _reading_lines(reading: Mapping[str, Any], *, indent: str) -> list[str]:
         f"mature daily records: {_means_text(described)}",
         f"{indent}unlabelled by code: "
         + (", ".join(f"{code} {count}" for code, count in sorted(codes.items())) or "none"),
+        f"{indent}unlabelled names: {reading['unlabelled_wording']}",
         f"{indent}non-overlapping sample (anchor ordinal {sample['anchor_ordinal']}, every "
         f"{sample['horizon']} sessions): {len(sample['sampled'])} sampled, "
         f"{len(sample['gaps'])} gaps, {len(sample['pending'])} pending; the pre-registered "
@@ -2001,7 +2028,7 @@ def _reading_lines(reading: Mapping[str, Any], *, indent: str) -> list[str]:
 def _corrected_lines(tests: Sequence[Mapping[str, Any]]) -> list[str]:
     return [
         f"    {item['hypothesis_id']}: one-sided p {_number(item['one_sided_p_value'])}, "
-        f"q {_number(item['q_value'])}, rejected {item['rejected']}"
+        f"q-value {_number(item['q_value'])}, q-value <= q: {item['below_q']}"
         for item in tests
     ]
 

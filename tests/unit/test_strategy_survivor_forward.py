@@ -1690,6 +1690,30 @@ def test_the_one_sided_p_of_every_metric_is_small_for_a_positive_mean_and_large_
     assert test.one_sided_p_value == (0.125 if sign > 0 else 0.875)
 
 
+def test_the_layer_counts_its_unverifiable_records_and_says_which_way_left_out_names_bias_it() -> (
+    None
+):
+    """The layer carries how many of its records the check found UNVERIFIABLE -- in the headline,
+    out of the sensitivity; a refused one is excluded from both and is not among them -- and,
+    beside every unlabelled count, which way leaving those names out biases the numbers: a
+    delisting is a large loss that is then missing, so the worst decile likely reads high."""
+    outcomes = every_session(41)
+    verdicts = verified(outcomes, prd_0021=UNVERIFIABLE, prd_0030=UNVERIFIABLE, prd_0031=REFUSED)
+
+    built = layer(outcomes, verdicts, through=41)
+
+    assert built.unverifiable == 2
+    assert built.excluded == (("refused", 1),)
+    wording = forward_module.UNLABELLED_WORDING
+    assert (built.headline.unlabelled_wording, built.excluding_unverifiable.unlabelled_wording) == (
+        wording,
+        wording,
+    )
+    for said in ("delisted_in_window", "left out", "biased upward", "ew_minus_worst_decile"):
+        assert said in wording, said
+    assert not any(word in wording.lower() for word in FORBIDDEN_WORDS)
+
+
 def test_the_layer_carries_its_wording_and_no_verdict_word() -> None:
     outcomes = every_session(61)
 
@@ -1802,6 +1826,7 @@ ALWAYS: Final[tuple[str, ...]] = (
     "t8_expected_numbers_are_optimistic",
     "ic_2021",
     "h5_ic_dispersion_unmeasured",
+    "unlabelled_names_left_out",
     "no_null_signal_control",
 )
 
@@ -1863,7 +1888,7 @@ def reported(
 
 
 def codes_of(document: Mapping[str, Any]) -> list[str]:
-    return [item["code"] for item in document["cannot_be_evaluated_yet"]]
+    return [item["code"] for item in document["cannot_be_evaluated_yet"]["items"]]
 
 
 def verdict_words(document: Mapping[str, Any]) -> list[str]:
@@ -1918,7 +1943,14 @@ def test_before_the_primary_window_the_document_counts_describes_and_tests_nothi
     assert not any("one-sided p" in line for line in survivor_forward_lines(document))
     assert verdict_words(document) == []
     assert codes_of(document) == ["window_not_satisfied", *ALWAYS]
-    for name in ("protocol", "records", "prediction_layer", "paper_ledger", "relative"):
+    for name in (
+        "protocol",
+        "records",
+        "prediction_layer",
+        "paper_ledger",
+        "relative",
+        "cannot_be_evaluated_yet",
+    ):
         assert document[name]["wording"] == SURVIVOR_WORDING, name
     for name in ("h20", "h5"):
         assert document["prediction_layer"][name]["wording"] == SURVIVOR_WORDING
@@ -2017,9 +2049,55 @@ def test_at_the_primary_window_the_secondary_family_is_corrected_by_benjamini_ye
     assert expected["h2.ew_minus_worst_decile"] == 1.0
     for name, q_value in expected.items():
         assert corrected[name]["q_value"] == pytest.approx(q_value)
-    assert [corrected[name]["rejected"] for name in family["family"]] == [True, False, True]
+    assert [corrected[name]["below_q"] for name in family["family"]] == [True, False, True]
+    assert all(
+        set(item) == {"hypothesis_id", "one_sided_p_value", "q_value", "below_q"}
+        for item in family["headline"]["tests"]
+    )
     assert family["headline"]["status"] == "applied over 3 of 3 secondary hypotheses"
+    lines = survivor_forward_lines(document)
+    assert any(
+        line.startswith("    h2.ew_minus_worst_decile: one-sided p ")
+        and line.endswith(", q-value 1.000000, q-value <= q: False")
+        for line in lines
+    )
+    assert not any("rejected" in line for line in lines)
     assert "window_not_satisfied" not in codes_of(document)
+
+
+def test_a_secondary_without_a_p_value_still_counts_in_the_declared_family_size() -> None:
+    """Two secondaries are declared -- the survivors over the equal weight at h=2 and the rank IC
+    at h=3 -- and the h=3 one has no p-value: no rank IC was measured there. The one p-value
+    there is is still corrected as one of two: its q-value is H_2 * 2 * p = 3p, never p."""
+    outcomes = {
+        2: tuple(made(o, horizon=2) for o in range(1, 35)),
+        3: tuple(made(o, horizon=3, rank_ic=None) for o in range(1, 35)),
+    }
+
+    document = reported(
+        outcomes,
+        checked_by(outcomes[2]),
+        through=34,
+        primary_horizon=2,
+        secondary_horizons=[3],
+        secondary_metrics=["survivors_minus_ew"],
+        window_periods=12,
+    )
+
+    family = document["prediction_layer"]["secondary_family"]
+    assert (family["family"], family["family_size"]) == (["h2.survivors_minus_ew", "h3.rank_ic"], 2)
+    [absent] = document["prediction_layer"]["h3"]["non_overlapping"]["test"]
+    assert (absent["metric"], absent["one_sided_p_value"]) == ("rank_ic", None)
+    [corrected] = family["headline"]["tests"]
+    assert corrected["hypothesis_id"] == "h2.survivors_minus_ew"
+    assert corrected["one_sided_p_value"] == pytest.approx(1 / 4096)
+    assert corrected["q_value"] == pytest.approx(3 / 4096)
+    assert corrected["q_value"] == pytest.approx(
+        by_by_hand({"h2.survivors_minus_ew": 1 / 4096}, family_size=2)["h2.survivors_minus_ew"]
+    )
+    assert family["headline"]["status"] == (
+        "applied over 1 of 2 secondary hypotheses; 1 without a p-value count in the family"
+    )
 
 
 def test_a_refused_record_inside_the_tested_sample_compromises_it_and_one_after_does_not() -> None:
@@ -2110,6 +2188,31 @@ def test_the_lines_list_the_refusals_first_then_the_layers_ledger_relative_wordi
         assert document[section] == {"wording": SURVIVOR_WORDING, "refused": NO_BOOK}
 
 
+def test_each_layer_states_its_unverifiable_count_and_the_unlabelled_bias_in_both_readings() -> (
+    None
+):
+    outcomes = {20: every_session(25), 5: ()}
+    verdicts = checked_by(
+        outcomes[20], prd_0004=("unverifiable", "recompute_differs", ("daily 2026: census moved",))
+    )
+
+    document = reported(outcomes, verdicts, through=25)
+
+    twenty = document["prediction_layer"]["h20"]
+    wording = forward_module.UNLABELLED_WORDING
+    assert twenty["unverifiable"] == 1
+    assert twenty["unlabelled_wording"] == wording
+    assert twenty["excluding_unverifiable"]["unlabelled_wording"] == wording
+    lines = survivor_forward_lines(document)
+    assert any(
+        line.startswith("  h20 (primary)")
+        and line.endswith("UNVERIFIABLE 1, in the headline and excluded in the sensitivity")
+        for line in lines
+    )
+    assert f"    unlabelled names: {wording}" in lines
+    assert f"  - {wording}" in lines
+
+
 def test_what_cannot_be_evaluated_yet_is_said_only_while_it_holds() -> None:
     """No record at all: no record exists, no outcome has matured, the window is not satisfied,
     and the standing items. Records none of which has matured: the first item goes."""
@@ -2124,7 +2227,14 @@ def test_what_cannot_be_evaluated_yet_is_said_only_while_it_holds() -> None:
         *ALWAYS,
     ]
     assert codes_of(young) == ["first_outcome_not_matured", "window_not_satisfied", *ALWAYS]
-    statements = {item["code"]: item["statement"] for item in empty["cannot_be_evaluated_yet"]}
+    assert empty["cannot_be_evaluated_yet"]["wording"] == SURVIVOR_WORDING
+    statements = {
+        item["code"]: item["statement"] for item in empty["cannot_be_evaluated_yet"]["items"]
+    }
+    assert statements["no_survivor_record_yet"] == (
+        "no survivor record has been filed under this registration yet"
+    )
+    assert statements["unlabelled_names_left_out"] == forward_module.UNLABELLED_WORDING
     assert statements["first_outcome_not_matured"].startswith(
         "the first h=20 outcome matures about 21 sessions after the first evening"
     )

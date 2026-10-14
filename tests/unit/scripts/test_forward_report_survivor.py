@@ -248,7 +248,14 @@ def _sections(document: Mapping[str, Any]) -> Iterator[tuple[str, Mapping[str, A
 
 def _assert_the_wording_is_in_every_section(document: Mapping[str, Any]) -> None:
     sections = dict(_sections(document))
-    assert {"protocol", "records", "prediction_layer", "paper_ledger", "relative"} <= set(sections)
+    assert {
+        "protocol",
+        "records",
+        "prediction_layer",
+        "paper_ledger",
+        "relative",
+        "cannot_be_evaluated_yet",
+    } <= set(sections)
     for name, section in sections.items():
         assert section.get("wording") == SURVIVOR_WORDING, name
     for name, section in sections.items():
@@ -264,7 +271,7 @@ def _no_verdict_word(*texts: str) -> None:
 
 
 def _codes(document: Mapping[str, Any]) -> list[str]:
-    return [item["code"] for item in document["cannot_be_evaluated_yet"]]
+    return [item["code"] for item in document["cannot_be_evaluated_yet"]["items"]]
 
 
 ALWAYS: Final[tuple[str, ...]] = (
@@ -274,6 +281,7 @@ ALWAYS: Final[tuple[str, ...]] = (
     "t8_expected_numbers_are_optimistic",
     "ic_2021",
     "h5_ic_dispersion_unmeasured",
+    "unlabelled_names_left_out",
     "no_null_signal_control",
 )
 """What the report states it cannot evaluate whatever its records say (design section 6)."""
@@ -586,6 +594,67 @@ def test_a_journal_naming_a_record_the_store_does_not_witness_refuses_the_report
     assert not (world.runtime / "reports" / report_name(REPORT_AS_OF)).exists()
 
 
+# --- a week on: the relative return reads the primary layer -----------------------------------
+
+WEEK_BUILD: Final[datetime] = datetime(2026, 4, 15, 9, 0, tzinfo=SHANGHAI)
+"""A panel build after the three evenings: 14 April has published, 15 April has not."""
+WEEK_AS_OF: Final[datetime] = datetime(2026, 4, 15, 10, 0, tzinfo=SHANGHAI)
+"""After 14 April's cutoff: 6 April's h=5 window, 7 April's close to 14 April's, has matured, and
+no h=20 one has."""
+
+
+@pytest.fixture(scope="module")
+def week(tmp_path_factory: pytest.TempPathFactory, evenings: tds.World) -> tds.World:
+    """The three evenings' runtime directory with its panel built on through 14 April by one
+    real `panel build` -- no evening ran after 8 April, so the paper book and the records stop
+    there -- on a market of its own (the scripted market is the same on every instance)."""
+    runtime = tmp_path_factory.mktemp("survivor-week") / "runtime"
+    shutil.copytree(evenings.runtime, runtime)
+    market = survivor_day.SurvivorMarket(open_days=tds.OPEN_2026)
+    market.today = WEEK_BUILD.date()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("TUSHARE_TOKEN", tds.SECRET_TOKEN)
+        patch.setattr(cli, "_panel_transport", lambda: market)
+        patch.setattr(cli, "_panel_clock", lambda: tds.WALL_CLOCK)
+        arguments = ["panel", "build", "--runtime-dir", str(runtime), "--year", "2026"]
+        arguments += ["--as-of", WEEK_BUILD.isoformat(), "--exchange", "SSE", "--json"]
+        for target in survivor_day.SEED_TARGETS:
+            arguments += ["--dataset", target]
+        built = daily.invoke(arguments)
+    assert built.exit_code == 0, built.reason()
+    return dataclasses.replace(evenings, runtime=runtime, market=market)
+
+
+def test_the_relative_return_reads_the_primary_layers_sampled_periods_never_a_secondarys(
+    week: tds.World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The three evenings reported on 15 April, the panel built on through the 14th: the h=5
+    outcome of 6 April has matured -- its window runs from 7 April's close to 14 April's -- and
+    no h=20 one has. The relative return's windows are the primary layer's sampled periods (none
+    yet), never the h=5 layer's (one): the paper record, the real book of the three evenings, is
+    given none."""
+    runtime = tmp_path / "runtime"
+    shutil.copytree(week.runtime, runtime)
+    tds._bind(monkeypatch, week.repo, week.market)
+    world = dataclasses.replace(week, runtime=runtime)
+
+    code, _out, err = _report(world, capsys, as_of=WEEK_AS_OF)
+
+    assert code == 0, err
+    document = _document(world, WEEK_AS_OF)
+    layers = document["prediction_layer"]
+    assert _period_sessions(layers["h5"]["non_overlapping"]) == ["2026-04-06"]
+    assert layers["h20"]["non_overlapping"]["values"] == []
+    assert "refused" not in document["paper_ledger"]
+    assert document["records"]["by_verdict"]["refused"] == 0
+    assert document["paper_ledger"]["coverage"]["evenings"] == 3
+    assert "refused" not in document["relative"]
+    assert document["relative"]["windows_given"] == 0
+
+
 def _file(world: tds.World, batch: PredictionBatch) -> str:
     """`batch` filed on time: the store's custody clock a minute after its `predicted_at`."""
     store = PanelStore(world.runtime / "panel")
@@ -888,7 +957,7 @@ def test_matured_records_put_the_labels_the_sample_its_gaps_and_the_test_on_the_
     for name, q_value in _by_by_hand(p_values, q=0.1).items():
         assert corrected[name]["one_sided_p_value"] == p_values[name]
         assert corrected[name]["q_value"] == pytest.approx(q_value)
-        assert corrected[name]["rejected"] is (q_value <= 0.1)
+        assert corrected[name]["below_q"] is (q_value <= 0.1)
     assert document["protocol"]["periods_matured"] == 2
     assert document["protocol"]["window_satisfied"] is True
     assert set(_codes(document)) == set(ALWAYS)
