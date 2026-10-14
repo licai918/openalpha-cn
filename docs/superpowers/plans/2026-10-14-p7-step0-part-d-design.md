@@ -140,3 +140,12 @@ P6 modules and tests unchanged; no checked-in binary fixtures; research honesty 
 1. `survivor_batch` raises when nothing is eligible, whereas P6's `signal_day_batch` returns `None`: D5 treats an empty eligible set as a NAMED refusal at the facts step (an empty record is not a valid registration; the coverage guard already refuses an empty universe), not as a day with an empty batch.
 2. Part E's late-record check must (a) check `survivor_record_is_bound(record, book, registered)` BEFORE recomputing; (b) read provenance through `read_survivor_provenance` (digest-vs-stem and registration checks); (c) treat only the exported "cannot be recomputed" exception tuple as a refusal — never a broad `except`; (d) cache verdicts keyed by CONTENT HASH, not by census (a census-keyed cache would keep a verdict across an in-place correction).
 3. The protocol (V2-P7-006) reports the share of UNVERIFIABLE records beside the 20d readout and a sensitivity excluding them.
+
+## Rules from the D4 review (2026-10-14) — bind D5
+
+1. **Import `strategy_survivor_summary` lazily**, only inside the survivor branch: it imports `backtest.paper_evening` and so `backtest.paper`, which installs a process-wide audit hook; a P6 run must not load it.
+2. **Never file `result` on a refused day.** P6 treats any `result` in the journal as a complete journal and reprints it with 0 requests; a `paper: null` document filed for a day refused before the paper step would make a same-evening rerun after a data fix never run the evening, and the next day's catch-up would settle the session undecided — exactly what the design forbids. A day refused before the paper step is PRINTED (survivor summary with `paper_skipped`) and the journal keeps its stages but no `result`. Filing `result` is right only for a settle-only day after 09:15.
+3. **A settle-only run still reads today's facts day** (at `min_coverage=0.0`, then `screen()`): `evening_document` requires `facts` and `screen`, and the held statuses (`delisted`) are needed for the write-off anyway.
+4. The summary has no line for the panel and factor `caught_up` blocks the design lists: D5 adds them from the journal (P6 prints a "factor catch-up" line; imitate it).
+5. The prediction block is filed inside `result` (as P6 does); `this_run` is D5's merge too.
+6. Order wording the user acts on: BUY lines carry "reference: real close c (not a limit price; the paper book fills at the open)"; SELL lines are "SELL ENTIRE POSITION"; no ledger price anywhere.
