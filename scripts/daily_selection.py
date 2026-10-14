@@ -2116,14 +2116,17 @@ def _panel_build_command(
     through: date,
     exchange: str,
     targets: Sequence[str],
+    incremental: bool = True,
 ) -> list[str]:
-    """The `panel build --incremental` a refusal prints: the session-scoped targets together (so
-    their horizons move as one, `cli._refuse_split_horizon`), for `year`, pinned at `through`'s
-    publication instant."""
+    """The `panel build` a refusal prints: the session-scoped targets together (so their horizons
+    move as one, `cli._refuse_split_horizon`), for `year`, pinned at `through`'s publication
+    instant; `--incremental` unless `incremental` is false (the full rebuild of those targets)."""
     arguments = ["openalpha", "panel", "build", "--runtime-dir", str(runtime_dir)]
     arguments += ["--year", str(year)]
     arguments += ["--as-of", session_publication_instant(through).astimezone(UTC).isoformat()]
-    arguments += ["--exchange", exchange, "--incremental"]
+    arguments += ["--exchange", exchange]
+    if incremental:
+        arguments.append("--incremental")
     for target in _session_scoped_targets(targets):
         arguments += ["--dataset", target]
     return arguments
@@ -2170,26 +2173,64 @@ def _panel_catch_up_refusal(
     missed: Sequence[date],
     bound: int,
     session: date,
+    as_of: datetime,
     exchange: str,
     targets: Sequence[str],
 ) -> str:
     """Why step 2 fetched nothing, and the `panel build` that fetches the oldest batch: the
     session-scoped targets together (so their horizons move as one, `cli._refuse_split_horizon`),
-    pinned at the last batch session's publication instant."""
+    pinned at the last batch session's publication instant.
+
+    Incremental, unless a stored horizon already lies past that session -- the session-scoped
+    partitions disagree, as a run that died at `stk_limit` leaves them, and one of them reaches
+    further than the batch. `cli._incremental_start` refuses an incremental build that would
+    shorten a stored year, so the full rebuild of those targets is printed then: it fetches every
+    session of the year through the batch, and is said to."""
     scoped = _session_scoped_targets(targets)
     per_session = sum(len(cli.PANEL_BUILD_TARGETS[target]) for target in scoped)
     batch = list(missed[: max(bound, 1)])
+    store = panel_store(runtime_dir)
+    ahead = {
+        dataset: horizon
+        for dataset in _session_scoped_census(targets)
+        if (horizon := cli._stored_horizon(store, dataset, session.year)) is not None
+        and horizon > batch[-1]
+    }
     arguments = _panel_build_command(
-        runtime_dir, year=session.year, through=batch[-1], exchange=exchange, targets=targets
+        runtime_dir,
+        year=session.year,
+        through=batch[-1],
+        exchange=exchange,
+        targets=targets,
+        incremental=not ahead,
     )
+    if ahead:
+        calendar = _stored_calendar(store, exchange, (session.year,), as_of)
+        whole = (
+            0
+            if calendar is None
+            else sum(
+                1 for day in calendar.trading_days if day.year == session.year and day <= batch[-1]
+            )
+        )
+        sessions = f"all {whole}" if whole else "every one of the"
+        fetch = (
+            f"The stored {', '.join(sorted(ahead))} already reach "
+            f"{max(ahead.values()).isoformat()}, past {batch[-1].isoformat()}, and an incremental "
+            "build cannot shorten a stored year (`cli._incremental_start`), so the oldest "
+            f"{len(batch)} are fetched by the full rebuild of the session-scoped targets: "
+            f"{sessions} session(s) of {session.year} through {batch[-1].isoformat()}, at "
+            f"{per_session} requests a session. Run:"
+        )
+    else:
+        fetch = f"Fetch the oldest {len(batch)} with:"
     return "\n".join(
         [
             f"{len(missed)} missed session(s), {missed[0].isoformat()} to "
             f"{missed[-1].isoformat()}, lie between the stored panel and {session.isoformat()}: "
             f"more than the {bound} this step fetches in one run ({PANEL_CATCH_UP_KEY}); nothing "
             f"was fetched. Each costs {per_session} requests (more once stk_limit pages), so this "
-            f"run would have spent {per_session * len(missed)} more than an ordinary day. Fetch "
-            f"the oldest {len(batch)} with:",
+            f"run would have spent {per_session * len(missed)} more than an ordinary day. {fetch}",
             "  " + shlex.join(arguments),
             "then rerun this command: it refuses again, naming the next batch, while more than "
             f"{bound} remain, and fetches the rest itself",
@@ -2260,6 +2301,7 @@ def update_panel(
                     missed=caught_up,
                     bound=survivor.max_catch_up_sessions,
                     session=session,
+                    as_of=as_of,
                     exchange=exchange,
                     targets=targets,
                 ),

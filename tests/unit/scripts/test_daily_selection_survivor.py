@@ -21,6 +21,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
+from functools import partial
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any, Final
@@ -904,3 +905,165 @@ def test_a_first_run_after_january_still_builds_the_year_befores_names_again(
         store.panel, years=(2026, 2027), as_of=_evening(FIRST_FEBRUARY), max_staleness=None
     )
     assert names[LATE_ST].name_on(FIRST_FEBRUARY) == "*ST乙"
+
+
+# --- stored horizons that disagree: a run that died at stk_limit --------------------------------
+
+
+@dataclass
+class FailingBands(NamesAcrossNewYear):
+    """The New Year market, whose `stk_limit` connection is reset on every attempt for a session
+    in `failing`. `panel build` writes its targets in order, so a run that dies there has
+    written `adj_factor` and `price` through the day and left `stk_limit` where it was: the
+    stored session-scoped horizons disagree."""
+
+    failing: frozenset[date] = frozenset()
+
+    def post(self, payload: dict[str, Any]) -> dict[str, Any]:
+        params = payload["params"]
+        if payload["api_name"] == PRICE_LIMIT_DATASET and self.failing:
+            day = datetime.strptime(str(params["trade_date"]), "%Y%m%d").date()
+            if day in self.failing:
+                self.requests.append((PRICE_LIMIT_DATASET, dict(params)))
+                raise ConnectionError("the stk_limit connection was reset")
+        return super().post(payload)
+
+
+def _died_at_stk_limit(
+    store: Store, monkeypatch: pytest.MonkeyPatch, day: date, targets: Sequence[str]
+) -> None:
+    """Step 2 on `day`, dying at `stk_limit` (the provider's backoff not waited out)."""
+    market = store.market
+    assert isinstance(market, FailingBands)
+    monkeypatch.setattr(cli, "TushareProvider", partial(cli.TushareProvider, sleep=lambda _s: None))
+    market.failing = frozenset({day})
+    with pytest.raises(daily.StepFailedError, match="panel build"):
+        _update(store, day, targets=targets, survivor=_survivor())
+    market.failing = frozenset()
+
+
+def _bounded(sessions: int) -> Any:
+    return _survivor({"adapter": {"max_panel_catch_up_sessions": sessions}})
+
+
+@pytest.mark.parametrize(
+    ("died", "day", "bound", "missed", "incremental"),
+    [
+        pytest.param(
+            date(2026, 2, 4),
+            date(2026, 2, 9),
+            3,
+            weekdays(date(2026, 2, 3), date(2026, 2, 6)),
+            True,
+            id="every horizon within the batch",
+        ),
+        pytest.param(
+            date(2026, 2, 5),
+            date(2026, 2, 6),
+            2,
+            weekdays(date(2026, 2, 3), date(2026, 2, 5)),
+            False,
+            id="a horizon past the batch",
+        ),
+    ],
+)
+def test_disagreeing_horizons_are_counted_from_the_earliest_and_the_printed_build_is_accepted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    died: date,
+    day: date,
+    bound: int,
+    missed: tuple[date, ...],
+    incremental: bool,
+) -> None:
+    """A run on `died` wrote `adj_factor` and `price` through it and died at `stk_limit`, which
+    stays at 2 February. The next run counts from the **earliest** horizon -- `stk_limit`'s
+    slice starts there -- so `missed` lies between the store and `day`, more than the bound.
+
+    The batch it prints is pinned at its last session. Where every stored horizon is at or before
+    that session, it is the incremental build. Where one is past it -- `adj_factor` and `price`
+    already reach `died` -- the incremental build is refused (`cli._incremental_start`: it cannot
+    shorten a stored year), so the full rebuild of the session-scoped targets is printed instead;
+    both are run here, and the printed one is accepted. Then the step fetches the rest itself."""
+    targets = daily.targets_for_survivor(SURVIVOR_BUILDS)
+    market = FailingBands(open_days=OPEN_2026)
+    store = _seeded(tmp_path, monkeypatch, market, as_of=SEEDED, year=2026)
+    _died_at_stk_limit(store, monkeypatch, died, targets)
+    for dataset in (ADJ_FACTOR_DATASET, DAILY_DATASET, DAILY_BASIC_DATASET):
+        assert _horizon(store, dataset, 2026) == died, dataset
+    assert _horizon(store, PRICE_LIMIT_DATASET, 2026) == date(2026, 2, 2)
+    before = _files(store.runtime)
+
+    with pytest.raises(daily.StepFailedError) as refused:
+        _update(store, day, targets=targets, survivor=_bounded(bound))
+
+    message = str(refused.value)
+    assert (
+        f"{len(missed)} missed session(s), {missed[0].isoformat()} to {missed[-1].isoformat()}"
+        in message
+    )
+    assert store.market.payloads == []
+    assert _files(store.runtime) == before
+    arguments = _printed_command(message)
+    batch = missed[:bound]
+    assert arguments[arguments.index("--as-of") + 1] == (
+        session_publication_instant(batch[-1]).astimezone(UTC).isoformat()
+    )
+    assert _datasets(arguments) == [ADJ_FACTOR_DATASET, "price", PRICE_LIMIT_DATASET]
+    assert ("--incremental" in arguments) is incremental
+    if not incremental:
+        assert f"already reach {died.isoformat()}, past {batch[-1].isoformat()}" in message
+        shortened = daily.invoke([*arguments[1:], "--incremental"])
+        assert shortened.exit_code != 0
+        assert "cannot shorten" in shortened.reason()
+        assert _files(store.runtime) == before
+    built = daily.invoke(arguments[1:])
+    assert built.exit_code == 0, built.reason()
+    for dataset in cli.SESSION_SCOPED_DATASETS:
+        assert _horizon(store, dataset, 2026) == batch[-1], dataset
+
+    panel, _counts = _update(store, day, targets=targets, survivor=_bounded(bound))
+
+    assert panel["caught_up"] == [one.isoformat() for one in missed[len(batch) :]]
+    for dataset in cli.SESSION_SCOPED_DATASETS:
+        assert _horizon(store, dataset, 2026) == day, dataset
+
+
+def test_a_year_whose_first_build_died_at_stk_limit_is_counted_from_its_first_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2027's first build died at `stk_limit`: `adj_factor` and `price` hold 4 January, and
+    `stk_limit` holds no 2027 partition, so its next build fetches the whole year. A target the
+    year does not hold counts every session of the year -- not the sessions after the horizons
+    the others hold -- so on 6 January, under a bound of one, two lie between the store and the
+    day, and the step is refused with the batch that completes 4 January."""
+    targets = daily.targets_for_survivor(SURVIVOR_BUILDS)
+    market = FailingBands(open_days=NEW_YEAR, delisted=((DELISTED, FIRST_2027),))
+    store = _seeded(tmp_path, monkeypatch, market, as_of="2026-12-24T12:00:00+08:00", year=2026)
+    _update(store, LAST_2026, targets=targets, survivor=_survivor(), next_year=True)
+    _died_at_stk_limit(store, monkeypatch, FIRST_2027, targets)
+    assert _horizon(store, DAILY_DATASET, 2027) == FIRST_2027
+    assert 2027 not in store.panel.registered_years(PRICE_LIMIT_DATASET)
+    sixth = date(2027, 1, 6)
+
+    with pytest.raises(daily.StepFailedError) as refused:
+        _update(store, sixth, targets=targets, survivor=_bounded(1))
+
+    message = str(refused.value)
+    assert "2 missed session(s), 2027-01-04 to 2027-01-05" in message
+    assert store.market.payloads == []
+    arguments = _printed_command(message)
+    assert arguments[arguments.index("--year") + 1] == "2027"
+    assert arguments[arguments.index("--as-of") + 1] == (
+        session_publication_instant(FIRST_2027).astimezone(UTC).isoformat()
+    )
+    assert "--incremental" in arguments
+    built = daily.invoke(arguments[1:])
+    assert built.exit_code == 0, built.reason()
+    for dataset in cli.SESSION_SCOPED_DATASETS:
+        assert _horizon(store, dataset, 2027) == FIRST_2027, dataset
+
+    panel, _counts = _update(store, sixth, targets=targets, survivor=_bounded(1))
+
+    assert panel["caught_up"] == ["2027-01-05"]
+    assert _horizon(store, PRICE_LIMIT_DATASET, 2027) == sixth
