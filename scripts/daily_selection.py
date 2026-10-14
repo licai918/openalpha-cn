@@ -70,6 +70,13 @@ have given it -- none is read. `--full-update` fetches `FULL_UPDATE_TARGETS` ins
 current year. The runbook carries the per-kind counts, measured from the code's own `BUDGET`
 lines.
 
+The survivor form (`V2-P7-016`; dispatched by the registration's `kind` in `V2-P7-008`) fetches
+`targets_for_survivor`: the same rule plus `namechange`, the name corpus its eligibility facts
+read -- 16 requests on an ordinary day against the P6 day's 15. Its step 2 takes a
+`SurvivorPanelUpdate`: a store more than `panel_catch_up_bound` sessions behind is refused before
+any request, with the `panel build` that fetches the oldest batch, and in January the year
+before's name corpus is built again.
+
 ## Idempotent per trading day
 
 The journal is `RT/daily_selection/<config_id[:16]>/<session>.json`. The day's `--as-of` is
@@ -138,6 +145,7 @@ from openalpha_cn.domain.index_membership import (  # noqa: E402
     INDEX_WEIGHT_INDEX_CODES,
 )
 from openalpha_cn.domain.index_prices import INDEX_DAILY_DATASET  # noqa: E402
+from openalpha_cn.domain.name_history import NAMECHANGE_DATASET  # noqa: E402
 from openalpha_cn.domain.prediction_record import (  # noqa: E402
     PredictionRecord,
     outcome_known_at_for,
@@ -241,6 +249,11 @@ FULL_UPDATE_TARGETS: Final[tuple[str, ...]] = (
 """`--full-update`: every year-scoped target plus `fina_indicator`, whatever the configuration
 reads -- the whole current year kept fresh for other readers of the same store."""
 
+SURVIVOR_EXTRA_TARGETS: Final[tuple[str, ...]] = (NAMECHANGE_DATASET,)
+"""What the survivor form's day fetches beyond the P6 rule (`targets_for_survivor`, `V2-P7-016`):
+the name corpus, which `survivor_facts.build_facts_day` reads for every listed security's ST
+status and which no P6 factor reads (T3 section 7 item 7; T6-T7 2.1)."""
+
 INDUSTRY_MEMBERSHIP_TARGET: Final[str] = "index_member_all"
 INDUSTRY_TARGETS: Final[tuple[str, ...]] = ("index_classify", INDUSTRY_MEMBERSHIP_TARGET)
 UNCHECKED_BY_YEAR: Final[frozenset[str]] = frozenset({"stock_basic", *INDUSTRY_TARGETS})
@@ -265,6 +278,18 @@ weeks of missed runs. By the `V2-P6-006` measurement (about 1.2 s per factor and
 three tiers) a 21-factor configuration spends roughly 25 s a session, so the bound keeps a
 catch-up near eight minutes. A longer gap is refused with the command that builds it in batches,
 rather than spent inside one scheduled run."""
+
+DEFAULT_MAX_PANEL_CATCH_UP_SESSIONS: Final[int] = 10
+"""The most sessions the survivor form's step 2 fetches in one run beyond an ordinary day's two
+(the stored last session again, and the day), unless the registration's `adapter` block names
+another (`panel_catch_up_bound`, `V2-P7-016`). Each such session costs one request per
+session-scoped API -- five, seven once `stk_limit` pages -- so ten keeps the day at 16 + 50 = 66
+requests at most (90 paged), under the design's 100 (T6-T7 2.4). Three different bounds, kept
+apart: `MAX_CATCH_UP_SESSIONS` is the factor tiers' catch-up (step 4), and `survivor_facts`'
+`max_carry_sessions` is how far back a halted security's last bar is looked for."""
+PANEL_CATCH_UP_KEY: Final[str] = "max_panel_catch_up_sessions"
+ADAPTER_BLOCK: Final[str] = "adapter"
+"""The survivor registration's block of adapter parameters; `V2-P7-006` writes it."""
 
 SHANGHAI: Final[ZoneInfo] = ZoneInfo(DEFAULT_DATE_TIMEZONE)
 _WEIGHT_QUANTUM: Final[Decimal] = Decimal("0.0000000001")
@@ -963,6 +988,38 @@ def targets_for(builds: Sequence[TierBuild]) -> tuple[str, ...]:
     }
     wanted = set(BASE_TARGETS) | (read - set(INDUSTRY_TARGETS))
     return tuple(target for target in cli.PANEL_BUILD_TARGETS if target in wanted)
+
+
+def targets_for_survivor(builds: Sequence[TierBuild]) -> tuple[str, ...]:
+    """The survivor form's day (`V2-P7-016`): `targets_for` -- unchanged, and with it the P6
+    day -- plus `SURVIVOR_EXTRA_TARGETS`, in `PANEL_BUILD_TARGETS`' order. For the four composite
+    factors that is `BASE_TARGETS` and `namechange`."""
+    wanted = set(targets_for(builds)) | set(SURVIVOR_EXTRA_TARGETS)
+    return tuple(target for target in cli.PANEL_BUILD_TARGETS if target in wanted)
+
+
+def panel_catch_up_bound(config: Mapping[str, Any]) -> int:
+    """The survivor form's panel catch-up bound: `max_panel_catch_up_sessions` in the registered
+    configuration's `adapter` block, or `DEFAULT_MAX_PANEL_CATCH_UP_SESSIONS` when it names
+    none. Read only; writing it is the registration's (`V2-P7-006`). Anything but a whole number
+    of sessions, 0 or more, is an unreadable registration."""
+    block = config.get(ADAPTER_BLOCK, {})
+    if not isinstance(block, Mapping):
+        raise StepFailedError(
+            "registration",
+            f"the registered configuration's {ADAPTER_BLOCK!r} block is {block!r}, not a "
+            f"mapping, so its {PANEL_CATCH_UP_KEY} cannot be read",
+            exit_code=DailyExit.no_registration,
+        )
+    bound = block.get(PANEL_CATCH_UP_KEY, DEFAULT_MAX_PANEL_CATCH_UP_SESSIONS)
+    if type(bound) is not int or bound < 0:
+        raise StepFailedError(
+            "registration",
+            f"the registered {PANEL_CATCH_UP_KEY} is {bound!r}; it must be a whole number of "
+            "sessions, 0 or more",
+            exit_code=DailyExit.no_registration,
+        )
+    return bound
 
 
 def outcome_horizon(request: StrategyRequest) -> int:
@@ -1899,6 +1956,111 @@ def next_year_calendar_needed(calendar: TradingCalendar, *, session: date, horiz
     return len(later) < horizon + 1
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SurvivorPanelUpdate:
+    """What the survivor form's step 2 adds to the P6 one (`V2-P7-016`); `update_panel` without
+    it is the P6 step, unchanged.
+
+    `max_catch_up_sessions` (from `panel_catch_up_bound`): before any request, a store more
+    sessions behind the day than this is refused, with the `panel build` that fetches the oldest
+    batch, instead of spending five to seven requests a session inside one scheduled run. And in
+    January the year before's name corpus is built again (`update_panel`).
+    """
+
+    max_catch_up_sessions: int
+
+    def __post_init__(self) -> None:
+        bound = self.max_catch_up_sessions
+        if type(bound) is not int or bound < 0:
+            raise ValueError(
+                f"max_catch_up_sessions must be a whole number of sessions, 0 or more, not "
+                f"{bound!r}"
+            )
+
+
+def panel_sessions_to_catch_up(
+    runtime_dir: Path,
+    *,
+    session: date,
+    as_of: datetime,
+    exchange: str,
+    targets: Sequence[str],
+) -> tuple[date, ...]:
+    """The sessions step 2 would fetch for `targets` beyond an ordinary day's two, oldest first.
+
+    `panel build --incremental` fetches each session-scoped target (`cli.INCREMENTAL_CENSUS`)
+    from its stored horizon in the session's year -- the stored last session, again -- through
+    the session, and the whole year up to it when that year holds no partition yet
+    (`cli._incremental_start`). So the sessions beyond the overlap and the day are the open ones
+    of the session's year after the earliest of those horizons and before the session, counted
+    on the stored calendar of that year. Only that year: the step builds no other year's sessions.
+    """
+    census = [
+        dataset
+        for target in cli.PANEL_BUILD_TARGETS
+        if target in targets
+        for dataset in cli.INCREMENTAL_CENSUS.get(target, ())
+    ]
+    if not census:
+        return ()
+    store = panel_store(runtime_dir)
+    calendar = _stored_calendar(store, exchange, (session.year,), as_of)
+    if calendar is None:
+        raise StepFailedError(
+            "panel update",
+            f"the {exchange} calendar of {session.year}, on which the sessions this update would "
+            "fetch are counted, is not stored or cannot be read",
+        )
+    horizons = [cli._stored_horizon(store, dataset, session.year) for dataset in census]
+    stored = [horizon for horizon in horizons if horizon is not None]
+    start = min(stored) if len(stored) == len(horizons) else None
+    return tuple(
+        day
+        for day in calendar.trading_days
+        if day.year == session.year and day < session and (start is None or day > start)
+    )
+
+
+def _panel_catch_up_refusal(
+    runtime_dir: Path,
+    *,
+    missed: Sequence[date],
+    bound: int,
+    session: date,
+    exchange: str,
+    targets: Sequence[str],
+) -> str:
+    """Why step 2 fetched nothing, and the `panel build` that fetches the oldest batch: the
+    session-scoped targets together (so their horizons move as one, `cli._refuse_split_horizon`),
+    pinned at the last batch session's publication instant."""
+    scoped = [
+        target
+        for target in cli.PANEL_BUILD_TARGETS
+        if target in targets and target in cli.INCREMENTAL_CENSUS
+    ]
+    per_session = sum(len(cli.PANEL_BUILD_TARGETS[target]) for target in scoped)
+    batch = list(missed[: max(bound, 1)])
+    arguments = ["openalpha", "panel", "build", "--runtime-dir", str(runtime_dir)]
+    arguments += ["--year", str(session.year)]
+    arguments += ["--as-of", session_publication_instant(batch[-1]).astimezone(UTC).isoformat()]
+    arguments += ["--exchange", exchange, "--incremental"]
+    for target in scoped:
+        arguments += ["--dataset", target]
+    return "\n".join(
+        [
+            f"{len(missed)} missed session(s), {missed[0].isoformat()} to "
+            f"{missed[-1].isoformat()}, lie between the stored panel and {session.isoformat()}: "
+            f"more than the {bound} this step fetches in one run ({PANEL_CATCH_UP_KEY}); nothing "
+            f"was fetched. Each costs {per_session} requests (more once stk_limit pages), so this "
+            f"run would have spent {per_session * len(missed)} more than an ordinary day. Fetch "
+            f"the oldest {len(batch)} with:",
+            "  " + shlex.join(arguments),
+            "then rerun this command: it refuses again, naming the next batch, while more than "
+            f"{bound} remain, and fetches the rest itself",
+        ]
+    )
+
+
 def update_panel(
     runtime_dir: Path,
     *,
@@ -1907,10 +2069,33 @@ def update_panel(
     exchange: str,
     targets: Sequence[str],
     next_year: bool,
+    survivor: SurvivorPanelUpdate | None = None,
 ) -> dict[str, Any]:
     """Step 2: the incremental build of every target, and what it wrote; `fina_indicator` in an
     invocation of its own over `financial_indicator_years`; then next year's calendar when the
-    session's outcome window reaches into it."""
+    session's outcome window reaches into it.
+
+    `survivor` is the survivor form's (`SurvivorPanelUpdate`, `V2-P7-016`): a store more sessions
+    behind than its bound is refused before any request, the sessions fetched beyond an ordinary
+    day are reported as `caught_up`, and in January the year before's `namechange` is built
+    again (one request). Left out, this is the P6 step, unchanged."""
+    caught_up: tuple[date, ...] = ()
+    if survivor is not None:
+        caught_up = panel_sessions_to_catch_up(
+            runtime_dir, session=session, as_of=as_of, exchange=exchange, targets=targets
+        )
+        if len(caught_up) > survivor.max_catch_up_sessions:
+            raise StepFailedError(
+                "panel update",
+                _panel_catch_up_refusal(
+                    runtime_dir,
+                    missed=caught_up,
+                    bound=survivor.max_catch_up_sessions,
+                    session=session,
+                    exchange=exchange,
+                    targets=targets,
+                ),
+            )
     yearly = tuple(target for target in targets if target != FINANCIAL_INDICATOR_TARGET)
     built = _panel_build(
         runtime_dir, year=session.year, as_of=as_of, exchange=exchange, targets=yearly
@@ -1958,6 +2143,27 @@ def update_panel(
                 f"exited {closing.exit_code}: {closing.reason()}",
             )
         budget += _budget(closing)
+    if survivor is not None and NAMECHANGE_DATASET in targets and session.month == 1:
+        # `V2-P7-016`: the name corpus is filed by announcement year and this step builds the
+        # session's year only, so a rename announced in the year before after its last run --
+        # an ST name announced on the evening of 31 December, in force on the first session
+        # (T3 2.4(iv): half are announced the evening before) -- would never be read. January
+        # builds the year before's again, keyed on the session's month as `V2-P6-018` is.
+        names = _panel_build(
+            runtime_dir,
+            year=session.year - 1,
+            as_of=as_of,
+            exchange=exchange,
+            targets=(NAMECHANGE_DATASET,),
+        )
+        if names.exit_code != 0:
+            raise StepFailedError(
+                "panel update",
+                f"`panel build --year {session.year - 1} --dataset {NAMECHANGE_DATASET}`, the "
+                f"year before's name corpus built again in January, exited {names.exit_code}: "
+                f"{names.reason()}",
+            )
+        budget += _budget(names)
     if next_year:
         ahead = _panel_build(
             runtime_dir,
@@ -1980,6 +2186,7 @@ def update_panel(
         "industry_sweep": industry_sweep(budget),
         "sessions": report.get("sessions"),
         "partitions": report.get("partitions", []),
+        **({} if survivor is None else {"caught_up": [day.isoformat() for day in caught_up]}),
     }
 
 
