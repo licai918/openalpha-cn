@@ -37,6 +37,15 @@ prints.
 - **`paper: null`** is the session that ran no evening -- settled only, or refused before the paper
   step. The reason the caller gives, and the sessions it did settle, are `paper_skipped`.
 
+**What the daily command adds (`V2-P7-008`, D5b).** It journals each session a catch-up settles as
+that session commits, in this module's own form of a catch-up (`catch_up_entry`), so a run again
+after a stop passes the ones an earlier run of the day settled as `filed_catch_ups`: they come
+before this run's, and the two are checked as one list. When the catch-up changed the holdings the
+facts day was read with, the paper book reads the day again (`strategy_survivor_book.evening`); the
+caller passes that second read as `read_again`, the paper section is computed on it and carries its
+facts section as `facts_read_again`, and `facts` and `screen` stay what the prediction used (D3
+review, rule 8). A halt's start comes from the documents of the sessions before (`carried_since`).
+
 **The book's figures are the settlement's.** `Settlement.book` is the book after the close and
 after the write-offs; `Settlement.runner_record` is the runner's trace from before both, and its
 `equity` overstates a write-off day by the whole of what was written off. The document reads
@@ -67,7 +76,9 @@ here is a recommendation, and the ledger's equity is never evidence of anything.
 
 `prediction` and `this_run` are blocks the caller merges into the mapping it passes to
 `summary_lines`; this module's document does not carry them, and whether the journal's `result`
-also holds them is the caller's decision. The summary renders what is there.
+also holds them is the caller's decision. The summary renders what is there. So are `panel` and
+`factors`, the daily command's panel and factor steps: the sessions each caught up are printed
+after the prediction, as the P6 day prints its factor catch-up, and nothing when there were none.
 
 Real closes in the ORDERS block are references, not limit prices: the paper book fills at the
 open, and the block's header says so once. Its header also carries the trade list's id and whether
@@ -79,7 +90,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import fields
 from datetime import date, datetime
 from decimal import Decimal
@@ -109,6 +120,8 @@ __all__ = [
     "BAND_WITNESS_ENDS",
     "SURVIVOR_DOCUMENT_KIND",
     "SURVIVOR_WORDING",
+    "carried_since",
+    "catch_up_entry",
     "evening_document",
     "illiquid_rank",
     "summary_lines",
@@ -227,6 +240,8 @@ def evening_document(
     book: SurvivorBookConfig,
     paper_skipped: str | None = None,
     carried_since: Mapping[str, date] | None = None,
+    filed_catch_ups: Sequence[Mapping[str, Any]] = (),
+    read_again: tuple[FactsDay, ScreenResult] | None = None,
 ) -> dict[str, Any]:
     """The `result` document of the survivor evening of `session` (ordinal `session_index`), read
     at `as_of`; see the module docstring.
@@ -234,24 +249,34 @@ def evening_document(
     `evening` is the paper book's answer, or `None` for a session that ran no evening, in which
     case `paper_skipped` is the reason the caller gives, and is required. `catch_ups` are the
     sessions settled before it -- or, with no evening, the sessions settled instead of it -- oldest
-    first.
+    first; `filed_catch_ups` are more of them as an earlier run of the day filed them
+    (`catch_up_entry`'s form), which come first, and the two are checked as one list.
     `ordinals` turns the orders' sessions into dates, and `book` is the configuration whose
     liquidity cut an illiquid exit is reported against. `carried_since` is the first session each
     carried holding had no bar, from the journal's history: an entry for a name that is not
     carried tonight is ignored, and no entry is a halt of unknown length, never of length 1.
+    `read_again` is the facts day and screen the evening ran on when it read the day again: the
+    paper section is theirs and carries the facts section as `facts_read_again`, while `facts`
+    and `screen` are what the prediction used.
 
     A facts day or an evening that is not of `session`, a `paper_skipped` given beside an evening
-    or missing without one, and catch-ups out of order or not before the evening are refused by
-    name: the document would describe another day than the one it is filed under.
+    or missing without one, catch-ups out of order or not before the evening, a filed catch-up
+    that is not `catch_up_entry`'s form, and a day read again without an evening or of another
+    session are refused by name: the document would describe another day than the one it is filed
+    under.
     """
+    filed = [_filed_catch_up(entry) for entry in filed_catch_ups]
     _check(
         session=session,
         session_index=session_index,
         facts=facts,
         evening=evening,
-        catch_ups=catch_ups,
+        indices=[entry["session_index"] for entry in filed]
+        + [item.settlement.session_index for item in catch_ups],
         paper_skipped=paper_skipped,
+        read_again=read_again,
     )
+    entries = [*filed, *(catch_up_entry(item) for item in catch_ups)]
     document: dict[str, Any] = {
         "kind": SURVIVOR_DOCUMENT_KIND,
         "session": session.isoformat(),
@@ -262,23 +287,38 @@ def evening_document(
     }
     if evening is None:
         document["paper"] = None
-        document["paper_skipped"] = {
-            "reason": paper_skipped,
-            "catch_ups": [_catch_up(item) for item in catch_ups],
-        }
+        document["paper_skipped"] = {"reason": paper_skipped, "catch_ups": entries}
     else:
+        paper_facts, paper_screen = (facts, screen) if read_again is None else read_again
         document["paper"] = _paper_section(
             session_index=session_index,
-            facts=facts,
-            screen=screen,
+            facts=paper_facts,
+            screen=paper_screen,
             evening=evening,
-            catch_ups=catch_ups,
+            catch_ups=entries,
             ordinals=ordinals,
             book=book,
             carried_since=carried_since or {},
         )
+        if read_again is not None:
+            document["paper"]["facts_read_again"] = _facts_section(paper_facts, session)
     document["wording"] = SURVIVOR_WORDING
     return document
+
+
+def _filed_catch_up(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """A catch-up as the journal filed it, checked to be `catch_up_entry`'s form as far as the
+    document's checks read it: a mapping with its session and its integer ordinal."""
+    if (
+        not isinstance(entry, Mapping)
+        or not isinstance(entry.get("session"), str)
+        or type(entry.get("session_index")) is not int
+    ):
+        raise ValueError(
+            f"a filed catch-up must be a catch_up_entry -- a mapping naming its session and its "
+            f"integer session_index -- not {entry!r}"
+        )
+    return dict(entry)
 
 
 def _check(
@@ -287,8 +327,9 @@ def _check(
     session_index: int,
     facts: FactsDay,
     evening: EveningResult | None,
-    catch_ups: Sequence[CatchUpResult],
+    indices: Sequence[int],
     paper_skipped: str | None,
+    read_again: tuple[FactsDay, ScreenResult] | None,
 ) -> None:
     """Refuse, by name, a document whose parts are not of the day it is filed under."""
     if facts.session != session:
@@ -296,6 +337,17 @@ def _check(
             f"the facts day is of session {facts.session.isoformat()}, not "
             f"{session.isoformat()}: the document would describe another day"
         )
+    if read_again is not None:
+        if evening is None:
+            raise ValueError(
+                "a facts day read again was given with no evening: only the paper book's evening "
+                "reads the day again, with the holdings its catch-up left"
+            )
+        if read_again[0].session != session:
+            raise ValueError(
+                f"the facts day read again is of session {read_again[0].session.isoformat()}, "
+                f"not {session.isoformat()}: the document would describe another day"
+            )
     if evening is None and not paper_skipped:
         raise ValueError(
             "no evening was given and no paper_skipped reason: a day that ran no evening says "
@@ -317,9 +369,10 @@ def _check(
             raise ValueError(
                 f"the evening is of session index {held.session_index}, not {session_index}"
             )
-    indices = [item.settlement.session_index for item in catch_ups]
-    if indices != sorted(set(indices)):
-        raise ValueError(f"catch-ups must be given oldest first, each session once, not {indices}")
+    if list(indices) != sorted(set(indices)):
+        raise ValueError(
+            f"catch-ups must be given oldest first, each session once, not {list(indices)}"
+        )
     for index in indices:
         if index > session_index:
             raise ValueError(
@@ -382,7 +435,7 @@ def _paper_section(
     facts: FactsDay,
     screen: ScreenResult,
     evening: EveningResult,
-    catch_ups: Sequence[CatchUpResult],
+    catch_ups: Sequence[Mapping[str, Any]],
     ordinals: SessionOrdinals,
     book: SurvivorBookConfig,
     carried_since: Mapping[str, date],
@@ -399,7 +452,7 @@ def _paper_section(
         "snapshot_id": evening.snapshot.snapshot_id,
         "settled": _settled(settlement),
         "book": _book(settlement, evening, rows, carried_since),
-        "catch_ups": [_catch_up(item) for item in catch_ups],
+        "catch_ups": list(catch_ups),
         "outcome": evening.outcome,
         "open_session": {"index": opens, "date": _day(ordinals, opens)},
         "open_orders": [
@@ -531,7 +584,11 @@ def _settled(settlement: Settlement) -> dict[str, Any]:
     }
 
 
-def _catch_up(item: CatchUpResult) -> dict[str, Any]:
+def catch_up_entry(item: CatchUpResult) -> dict[str, Any]:
+    """One session a catch-up settled, as a document lists it: its session and ordinal, whether
+    it was committed now or found settled, its snapshot, what it settled, and the settlement's
+    equity and cash (never the runner's record's). Plain JSON, so the daily command files it in
+    its journal as the session commits and hands it back as a filed catch-up."""
     settlement = item.settlement
     return {
         "session": settlement.session.isoformat(),
@@ -630,12 +687,80 @@ def _plain(value: Any) -> Any:
     return list(value) if isinstance(value, tuple) else value
 
 
+# --- a halt's start, from the journal's history ---------------------------------------------------
+
+
+def carried_since(
+    carried: Collection[str],
+    *,
+    session: date,
+    earlier: Iterable[tuple[date, Mapping[str, Any] | None]],
+) -> dict[str, date]:
+    """The first session of each carried holding's halt, read off the documents filed for the
+    sessions before `session` -- the `carried_since` an evening's document is given.
+
+    `carried` are the codes tonight's settlement carries (no bar tonight). `earlier` are the
+    sessions before `session`, **newest first**, each with the `result` its journal filed, or
+    `None` when there is none to read (missing, unreadable or incomplete). Walking back, a code's
+    halt began on the session after the newest one whose document holds it with a bar, or holds
+    nothing at all (the epoch's opening). A session whose document says nothing of its holdings
+    -- `None`, no evening (`paper` null: settled only, or refused), or not this module's shape --
+    leaves the start of every halt still open there unknown, and so does a history that ends
+    before the halt does: such a code is left out, never dated by a guess (and never "1
+    session"). `earlier` is read only as far back as some halt still reaches.
+    """
+    since = {code: session for code in carried}
+    walking = set(since)
+    if not walking:
+        return {}
+    for day, result in earlier:
+        held = _carried_in(result)
+        if held is None:
+            for code in walking:
+                del since[code]
+            return dict(sorted(since.items()))
+        for code in sorted(walking):
+            if code in held:
+                since[code] = day
+            else:
+                walking.discard(code)
+        if not walking:
+            return dict(sorted(since.items()))
+    for code in walking:
+        del since[code]
+    return dict(sorted(since.items()))
+
+
+def _carried_in(result: Mapping[str, Any] | None) -> frozenset[str] | None:
+    """The codes `result`'s evening carried, an empty set for the epoch's opening (it holds
+    nothing), or `None` when the document says nothing of what was held."""
+    if not isinstance(result, Mapping):
+        return None
+    if "opening" in result:
+        return frozenset()
+    paper = result.get("paper")
+    book = paper.get("book") if isinstance(paper, Mapping) else None
+    holdings = book.get("holdings") if isinstance(book, Mapping) else None
+    if not isinstance(holdings, list):
+        return None
+    carried: set[str] = set()
+    for holding in holdings:
+        code = holding.get("ts_code") if isinstance(holding, Mapping) else None
+        flags = holding.get("flags") if isinstance(holding, Mapping) else None
+        if not isinstance(code, str) or not isinstance(flags, list):
+            return None
+        if "carried" in flags:
+            carried.add(code)
+    return frozenset(carried)
+
+
 # --- the summary --------------------------------------------------------------------------------
 
 
 def summary_lines(result: Mapping[str, Any]) -> list[str]:
     """The lines the daily command prints for `result`, an `evening_document` (read back from the
-    journal or not), with the caller's `prediction` and `this_run` blocks merged in if it has them.
+    journal or not), with the caller's `prediction` and `this_run` blocks merged in if it has them,
+    and its `panel` and `factors` blocks, whose catch-ups are printed after the prediction.
 
     Nothing is read but `result`: a document that went through JSON prints as the one that did
     not. See the module docstring for the sections and what each says.
@@ -662,6 +787,7 @@ def summary_lines(result: Mapping[str, Any]) -> list[str]:
     days = (paper["catch_ups"] if paper is not None else skipped.get("catch_ups")) or []
     lines += _catch_up_lines(days)
     lines.append(_row("prediction", _prediction_text(result.get("prediction"))))
+    lines += _built_lines(result)
     lines.append(_row("tushare requests", _requests_text(result.get("this_run"))))
     lines.append(_row("units", _UNITS))
     lines.append(_row("wording", result["wording"]))
@@ -670,6 +796,18 @@ def summary_lines(result: Mapping[str, Any]) -> list[str]:
 
 def _row(label: str, text: str) -> str:
     return f"{label:<{_LABEL_WIDTH}} {text}"
+
+
+def _built_lines(result: Mapping[str, Any]) -> list[str]:
+    """The sessions the caller's panel and factor steps caught up, when it merged them and there
+    were any -- the P6 day's "factor catch-up" line, and the panel's beside it."""
+    lines = []
+    for label, key in (("panel catch-up", "panel"), ("factor catch-up", "factors")):
+        block = result.get(key)
+        caught = block.get("caught_up") if isinstance(block, Mapping) else None
+        if caught:
+            lines.append(_row(label, ", ".join(str(day) for day in caught)))
+    return lines
 
 
 def _plural(count: int, noun: str) -> str:
