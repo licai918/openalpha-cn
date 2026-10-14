@@ -624,6 +624,17 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "strategy_survivor_facts._SECURITY_CODE",
         }
     ),
+    "openalpha_cn.strategy_survivor_paper_report": frozenset(
+        {
+            # V2-P7-018. The paper book's record layer of the forward report. It reads no panel
+            # and no store: the snapshots, the ledger's rows and the journals are arguments, and
+            # all it takes across the seam is the survivor summary's two constants -- the wording
+            # every block of the record carries and the kind of document it reads a journal's
+            # result by -- both plain strings.
+            "strategy_survivor_summary.SURVIVOR_DOCUMENT_KIND",
+            "strategy_survivor_summary.SURVIVOR_WORDING",
+        }
+    ),
     "openalpha_cn.strategy_survivor_registration": frozenset(
         {
             # V2-P7-008. The survivor day's forward record: the facts day it scores and the
@@ -1022,6 +1033,13 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
         # factors (`adj_factor`) and the benchmark's close (`index_daily`).
         named=frozenset(),
         reached=frozenset({"adj_factor", "daily", "index_daily", "stk_limit", "suspend_d"}),
+    ),
+    "openalpha_cn.strategy_survivor_paper_report": DatasetReach(
+        # V2-P7-018. It names no dataset and reaches none: the snapshots, the paper ledger's rows
+        # and the journals are handed to it, and the benchmark returns of the registered windows
+        # arrive as numbers its caller read.
+        named=frozenset(),
+        reached=frozenset(),
     ),
     "openalpha_cn.strategy_survivor_registration": DatasetReach(
         # V2-P7-008. It names the six datasets whose partitions a survivor day reads, so its
