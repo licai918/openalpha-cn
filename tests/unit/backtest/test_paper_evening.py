@@ -15,6 +15,7 @@ from __future__ import annotations
 import dataclasses
 import importlib.util
 import random
+import socket
 import sqlite3
 from collections import Counter, defaultdict
 from collections.abc import Callable, Collection, Mapping, Sequence
@@ -30,7 +31,7 @@ import pytest
 
 from openalpha_cn.backtest.execution import MarketBar, security_board
 from openalpha_cn.backtest.multi_day import PortfolioLedger
-from openalpha_cn.backtest.paper import PaperPortfolio
+from openalpha_cn.backtest.paper import PaperPortfolio, PaperPortfolioReachedOutward
 from openalpha_cn.backtest.paper_evening import (
     CatchUpResult,
     DryRunLedger,
@@ -1180,6 +1181,68 @@ def test_a_portfolio_that_does_not_record_into_the_dry_run_is_refused_before_it_
 
     with pytest.raises(ValueError, match="the dry run's ledger"):
         tonight(book, factory=on_the_real_ledger)
+    assert (ledger_files(book), documents(book.store)) == before
+
+
+def test_a_portfolio_whose_runner_records_elsewhere_is_refused_before_the_commit(
+    tmp_path: Path,
+) -> None:
+    """The identity check sees the ledger a `PaperPortfolio` names, not the one its runner was
+    built with. A book whose runner records somewhere else -- its `ledger` set to the dry run's
+    after it was built -- gives the dry run only the write-off, never the runner's rows; the
+    evening compares what the dry run received with the settlement's transitions and refuses,
+    by name, before anything real is touched."""
+    book = through_s2(tmp_path)
+    before = (ledger_files(book), documents(book.store))
+
+    def recording_elsewhere(dry: PortfolioLedger) -> PaperPortfolio:
+        portfolio = make_portfolio(DryRunLedger())
+        portfolio.ledger = dry
+        return portfolio
+
+    with pytest.raises(ValueError, match="did not receive the settlement's transitions"):
+        tonight(book, factory=recording_elsewhere)
+    assert (ledger_files(book), documents(book.store)) == before
+
+
+class ReachingOutward:
+    """The paper ledger, opening a socket as it is read or appended to: a broker client handed
+    in as a ledger. A local (`AF_UNIX`) socket, which the test suite's own offline guard leaves
+    alone, so only the paper book's refusal can stop it."""
+
+    def __init__(self, inner: SQLitePortfolioLedger, *, when: str) -> None:
+        self.inner, self.when, self.reached = inner, when, 0
+
+    def _reach(self, what: str) -> None:
+        if what == self.when:
+            self.reached += 1
+            socket.socket(socket.AF_UNIX, socket.SOCK_STREAM).close()
+
+    def append(self, transition: PortfolioTransition) -> None:
+        self._reach("append")
+        self.inner.append(transition)
+
+    def list(self) -> tuple[PortfolioTransition, ...]:
+        self._reach("list")
+        return self.inner.list()
+
+
+@pytest.mark.parametrize("when", ["list", "append"])
+def test_the_real_ledger_is_read_and_appended_to_only_inside_the_refusal_of_outward_calls(
+    tmp_path: Path, when: str
+) -> None:
+    """The evening touches the real ledger -- the one object here a caller hands in that could
+    be anything -- only inside `refusing_outward_calls()`, as `PaperPortfolio.advance` does: a
+    ledger that opens a socket as it is read or appended to is refused at once, by the paper
+    book's own error, and nothing is written."""
+    book = through_s2(tmp_path)
+    reaching = ReachingOutward(book.ledger, when=when)
+    before = (ledger_files(book), documents(book.store))
+
+    with pytest.raises(PaperPortfolioReachedOutward, match=r"socket\.__new__"):
+        tonight(book, ledger=reaching)
+
+    assert reaching.reached == 1
     assert (ledger_files(book), documents(book.store)) == before
 
 
