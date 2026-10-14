@@ -27,7 +27,9 @@ to settle in which order, what to read off the panel for each, and every refusal
    `open_book` is called again with the registration's epoch, capital and digest (C3 review
    rule 2): the same opening writes nothing, and is the nightly check that the book held is the
    one registered. The head is the newest snapshot, `held` its position codes, which the caller
-   pins in its journal; a run on the epoch itself only opens the book.
+   pins in its journal; a run on the epoch itself only opens the book. The caller reads the
+   head it pins with `require_bound` -- the same binding checks, reading only, before its first
+   request -- so a day never pins the holdings of another registration's book.
 2. **The facts day** (`facts_day`) is the caller's step 6: `build_facts_day` with the
    registration's parameters and the pinned `held`. Its held statuses are **not** applied
    there -- the prediction must not be lost to them -- but by the paper book
@@ -186,6 +188,7 @@ __all__ = [
     "held_codes",
     "paper_book_lock",
     "paper_head",
+    "require_bound",
     "settle_only",
     "settlement_names",
 ]
@@ -449,6 +452,40 @@ def _unwritable_marker(marker: Path, error: OSError) -> SurvivorDayError:
         "because the marker is linked into place so that it is whole or absent. Move the runtime "
         "directory to such a filesystem and run again; no book was opened",
     )
+
+
+def require_bound(
+    *,
+    state_store: PaperStateDocumentStore,
+    paper_directory: Path,
+    registration: SurvivorRegistration,
+    config_id: str,
+    lock: PaperBookLock,
+) -> PaperBookSnapshot | None:
+    """The paper book's head, read only once its binding to this registration is checked: what
+    the daily command reads to pin the day's holdings, before any request (`V2-P7-008`).
+
+    Reads and writes nothing else. A held book needs its marker present and equal to this
+    registration's binding (`config_id`, the book's digest, the epoch); a marker that exists and
+    differs is refused even when no book is held under it -- it is another registration's
+    paper directory either way; no book and no marker is a book `paper_head` has yet to open,
+    and `None` is returned. Every refusal is a `SurvivorDayError`, step `paper head`, with
+    nothing written: the same checks `paper_head` makes before it opens or writes anything, so
+    a day refused here would have been refused there, after its requests."""
+    _require_lock(lock, "paper head", directory=paper_directory)
+    binding = _binding(
+        config_id=config_id,
+        config_digest=registration.digest,
+        epoch=registration.adapter.epoch_session,
+    )
+    with _refusals("paper head", "the paper book's head, read to pin the day's holdings"):
+        head = held_head(state_store)
+    marker = paper_directory / PAPER_BOOK_MARKER
+    if head is not None:
+        _require_binding(marker, binding)
+    elif marker.exists():
+        _refuse_another_binding(marker, binding)
+    return head
 
 
 def _require_binding(marker: Path, binding: dict[str, str]) -> None:

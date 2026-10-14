@@ -43,7 +43,7 @@ from typing import Any, Final
 
 import pytest
 import test_daily_selection as tds
-from daily_market import Market, compact
+from daily_market import Market, compact, weekdays
 from test_daily_selection_dispatch import SEED, SURVIVOR_CONFIG
 from test_daily_selection_survivor import STEADY_SURVIVOR
 
@@ -68,10 +68,13 @@ from openalpha_cn.domain.survivor_screen import screen
 from openalpha_cn.domain.trading_calendar import TRADING_CALENDAR_DATASET
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import FACTOR_TRANSFORMS
+from openalpha_cn.panel_ingest import load_trading_calendar, session_publication_instant
 from openalpha_cn.storage.paper_state import FilePaperStateStore
 from openalpha_cn.storage.portfolio import SQLitePortfolioLedger
 from openalpha_cn.storage.predictions import FilePredictionStore
+from openalpha_cn.strategy_registration import batch_digest
 from openalpha_cn.strategy_survivor_facts import HeldStatus
+from openalpha_cn.strategy_survivor_market import SessionOrdinals
 
 daily = tds.daily
 
@@ -106,6 +109,17 @@ SEED_TARGETS: Final[tuple[str, ...]] = (
 BOOK: Final[SurvivorBookConfig] = SurvivorBookConfig(seed=SEED, min_listing_sessions=60)
 """The design's book, but for the listing age: the stored calendar starts on 5 January, so it can
 age a listing only as far as the day's 66 sessions (`listing_age_sessions`)."""
+
+SURVIVOR_TARGETS: Final[tuple[str, ...]] = (
+    TRADING_CALENDAR_DATASET,
+    STOCK_BASIC_DATASET,
+    ADJ_FACTOR_DATASET,
+    "price",
+    PRICE_LIMIT_DATASET,
+    "namechange",
+    INDEX_DAILY_DATASET,
+)
+"""`targets_for_survivor` of the four composite factors (`test_daily_selection_survivor.py`)."""
 
 NEXT: Final[date] = date(2026, 4, 7)
 THIRD: Final[date] = date(2026, 4, 8)
@@ -508,6 +522,7 @@ def test_a_survivor_day_runs_end_to_end_and_plans_the_initial_build(
     assert declaration.feature_version == _config_id(world)
     assert {item.ts_code: item.score for item in record.batch.predictions} == eligible
     assert record.standing == "forward"
+    assert record.batch.predicted_at == RUN_CLOCK  # the run's clock, not its pinned as_of
     prediction = journal["prediction"]
     assert prediction["registered"] is True
     assert prediction["record_id"] == record_id
@@ -515,6 +530,8 @@ def test_a_survivor_day_runs_end_to_end_and_plans_the_initial_build(
     assert prediction["horizon"] == "20d"
     assert prediction["scored"] == len(eligible)
     assert prediction["outcome"] == "created"
+    # The filed record's own batch: what Part E finds the record's provenance by.
+    assert prediction["batch_digest"] == batch_digest(record.batch)
     # Its provenance was filed before it, under its digest.
     filed = world.runtime / "daily_survivor_provenance" / f"{prediction['provenance']}.json"
     provenance = strategy_survivor_registration.read_survivor_provenance(
@@ -523,6 +540,8 @@ def test_a_survivor_day_runs_end_to_end_and_plans_the_initial_build(
     )
     assert provenance.held == ()
     assert provenance.session == DAY
+    assert provenance.recorded_at == RUN_CLOCK
+    assert provenance.batch_digest == prediction["batch_digest"]
 
 
 @dataclass
@@ -663,10 +682,14 @@ def test_a_day_run_after_the_next_sessions_call_auction_settles_only_and_files_n
     says no order was planned tonight, and why."""
     late = datetime.fromisoformat("2026-04-07T10:00:00+08:00")
     world = _world(tmp_path, monkeypatch, seeded)
+    read = _calls(monkeypatch, strategy_survivor_book, "facts_day")
 
     code, out, err = _run(world, capsys, as_of=late, clock=late)
 
     assert code == 0, err
+    # It decides nothing and files nothing: its facts are read with no coverage floor (D4
+    # review, rule 3).
+    assert [call["min_coverage"] for call in read] == [0.0]
     prediction = _journal(world)["prediction"]
     assert prediction["registered"] is False
     assert prediction["settle_only"] is True
@@ -1111,11 +1134,10 @@ def test_a_held_evening_run_again_after_the_next_panel_update_reads_where_the_ma
     the panel and stops at its facts. Run again at its pinned clock, the second evening's market
     can no longer be read there (its year's factors and index levels hold a later row), so the
     paper book reads it at the newest instant the panel can be read at: the evening derives the
-    session it settled, unchanged, writing nothing, and the journal says where it read.
-
-    **Open (reported, V2-P7-008 D5b):** through `main` today the run again never reaches the paper
-    book: step 3's doctor, run at the same pinned clock, blocks the year's `adj_factor` first. The
-    test pins that refusal, then passes step 3 to show what step 8 does once it is reached."""
+    session it settled, unchanged, writing nothing, and the journal says where it read. Through
+    `main`, straight: a committed day's completion runs no doctor and no factor build (D3 review,
+    rule 5; they read at the pinned clock, and gate a decision already made) and reads its facts
+    at that newest instant too."""
     world = _world(tmp_path, monkeypatch, seeded)
     _completed(world, capsys, DAY)
     with pytest.MonkeyPatch.context() as patch:
@@ -1128,16 +1150,7 @@ def test_a_held_evening_run_again_after_the_next_panel_update_reads_where_the_ma
     assert err[0].startswith("step 6 (facts) failed:")
     paper = _files(world.runtime / "paper")
 
-    code, _out, err = _day(world, capsys, NEXT, clock=after_the_auction(THIRD))
-
-    assert code == 1
-    assert err[0].startswith("step 3 (panel doctor) failed: `panel doctor` is not clean")
-    assert "adj_factor" in err[0]
-    assert _files(world.runtime / "paper") == paper
-
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(daily, "check_panel", lambda *_arguments, **_keywords: None)
-        second = _completed(world, capsys, NEXT, clock=after_the_auction(THIRD))
+    second = _completed(world, capsys, NEXT, clock=after_the_auction(THIRD))
 
     assert second["paper"]["outcome"] == "unchanged"
     assert _files(world.runtime / "paper") == paper
@@ -1207,6 +1220,406 @@ def test_a_second_run_while_the_first_is_in_its_paper_book_is_refused_at_step_on
     assert json.loads(out)["paper"]["outcome"] == "created"
 
 
+def test_the_provenance_is_filed_before_the_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """Written once, before the record it describes: a record is never on file without the
+    fingerprint of what its day read."""
+    world = _world(tmp_path, monkeypatch, seeded)
+    seen: list[list[str]] = []
+    register = daily.register_prediction
+
+    def spied(*arguments: Any, **keywords: Any) -> Any:
+        filed = world.runtime / "daily_survivor_provenance"
+        seen.append(sorted(path.name for path in filed.glob("*.json")))
+        return register(*arguments, **keywords)
+
+    monkeypatch.setattr(daily, "register_prediction", spied)
+
+    code, _out, err = _run(world, capsys)
+
+    assert code == 0, err
+    assert len(_records(world)) == 1
+    assert seen == [[f"{_journal(world)['prediction']['provenance']}.json"]]
+
+
+def test_a_day_is_routed_by_its_pinned_clock_and_one_too_late_to_register_files_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """A day pinned at 18:30 is an evening day, whatever the clock of a rerun says (D3 review,
+    rule 4): run again after the next session's call auction, it is not turned into a
+    settle-only day -- and since its record can no longer be filed before its outcome, step 7
+    refuses it by name before anything is written, with no stray provenance."""
+    world = _world(tmp_path, monkeypatch, seeded)
+    check_panel = daily.check_panel
+    monkeypatch.setattr(daily, "check_panel", _injected)
+    _code, _out, err = _run(world, capsys)
+    assert err[0].startswith("step 3 (panel doctor) failed:")
+    monkeypatch.setattr(daily, "check_panel", check_panel)
+    late = datetime.fromisoformat("2026-04-07T10:00:00+08:00")
+
+    code, _out, err = _run(world, capsys, clock=late)
+
+    assert code == 1
+    assert err[0].startswith("step 7 (prediction) failed:")
+    assert "can no longer be registered or decided" in err[0]
+    assert "the next session's run settles it without a decision" in err[0]
+    assert err[1] == NO_REQUEST
+    journal = _journal(world)
+    assert journal["as_of"] == DAY_AS_OF.isoformat()
+    assert "prediction" not in journal
+    assert _records(world) == ()
+    assert list((world.runtime / "daily_survivor_provenance").glob("*.json")) == []
+
+
+# --- a day completed after its evening was committed, and one that can no longer be ---------
+
+NEXT_AS_OF: Final[datetime] = datetime.fromisoformat("2026-04-07T18:30:00+08:00")
+NEXT_CLOCK: Final[datetime] = datetime.fromisoformat("2026-04-07T18:35:00+08:00")
+
+
+def _calls(monkeypatch: pytest.MonkeyPatch, owner: Any, name: str) -> list[dict[str, Any]]:
+    """Every call of `owner.name` from here on, by its keywords; the call goes through."""
+    calls: list[dict[str, Any]] = []
+    original = getattr(owner, name)
+
+    def recorded(*arguments: Any, **keywords: Any) -> Any:
+        calls.append(keywords)
+        return original(*arguments, **keywords)
+
+    monkeypatch.setattr(owner, name, recorded)
+    return calls
+
+
+def test_a_day_whose_evening_was_committed_is_completed_after_the_next_sessions_update(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """Probe C, committed: the second evening (7 April) committed and its `result` was lost; the
+    third session's run (8 April) has since stored 8 April and stopped at its facts. The rerun of
+    7 April is a committed day's completion: no request, no doctor and no factor build (they gate
+    a decision already made, and read at the pinned instant, which the newer panel no longer
+    answers), the facts read at the newest readable instant -- 8 April's publication -- which C1
+    and C3 hold to the bytes the evening read, and the factor builds taken from the journal."""
+    world = _world(tmp_path, monkeypatch, seeded)
+    _completed(world, capsys, DAY)
+    with pytest.MonkeyPatch.context() as patch:
+        _cut_at_the_result(patch)
+        _day(world, capsys, NEXT)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(daily, "build_factors", _no_factor_build)
+        _code, _out, err = _day(world, capsys, THIRD)
+    assert err[0].startswith("step 6 (facts) failed:"), err
+    doctor = _calls(monkeypatch, daily, "check_panel")
+    built = _calls(monkeypatch, daily, "build_factors")
+    read = _calls(monkeypatch, strategy_survivor_book, "facts_day")
+    records = _records(world)
+
+    result = _completed(world, capsys, NEXT, clock=after_the_auction(THIRD))
+
+    assert result["this_run"]["request_count"] == 0
+    assert doctor == []
+    assert built == []
+    assert [(call["session"], call["as_of"]) for call in read] == [
+        (NEXT, session_publication_instant(THIRD))
+    ]
+    assert _records(world) == records
+    assert result["paper"]["outcome"] == "unchanged"
+    assert result["factors"] == _journal(world, NEXT)["factors"]
+    assert result["factors"]["built"] == sorted(
+        f"{factor}@processed" for factor in BOOK.composite_factors
+    )
+
+
+def test_a_day_whose_evening_was_not_committed_is_refused_once_the_next_update_has_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """Probe C, not committed: 7 April's paper book refused, so its evening never committed; 8
+    April's run has since stored 8 April and stopped at its facts. The panel can no longer be read
+    as it stood at 7 April's pinned instant, and deciding on a later read could differ from the
+    one the filed record used: refused by name before any request, no result filed -- the next
+    run settles the session without a decision."""
+    world = _world(tmp_path, monkeypatch, seeded)
+    _completed(world, capsys, DAY)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(strategy_survivor_book, "evening", _refused_evening)
+        _code, _out, err = _day(world, capsys, NEXT)
+    assert err[0] == INJECTED, err
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(daily, "build_factors", _no_factor_build)
+        _code, _out, err = _day(world, capsys, THIRD)
+    assert err[0].startswith("step 6 (facts) failed:"), err
+
+    code, _out, err = _day(world, capsys, NEXT, clock=after_the_auction(THIRD))
+
+    assert code == 1
+    assert err[0].startswith("step 3 (panel doctor) failed:")
+    assert "2026-04-08" in err[0]
+    assert "this evening can no longer be completed" in err[0]
+    assert "the next run settles it without a decision" in err[0]
+    assert err[-1] == NO_REQUEST
+    assert "result" not in _journal(world, NEXT)
+
+
+def test_the_factor_builds_are_journalled_and_a_rerun_keeps_the_sessions_it_caught_up(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """The `factors` stage holds step 4's builds, the missed sessions it caught up included (D4
+    review, rule 4, prints them): 8 April after a missed 7 April catches it up; its paper book
+    refuses; the rerun -- whose step 4 builds nothing -- keeps what the first run caught up, and
+    its result prints it."""
+    world = _world(tmp_path, monkeypatch, seeded)
+    _completed(world, capsys, DAY)
+    assert _journal(world)["factors"]["built"] == sorted(
+        f"{factor}@processed" for factor in BOOK.composite_factors
+    )
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(strategy_survivor_book, "evening", _refused_evening)
+        _code, _out, err = _day(world, capsys, THIRD)
+    assert err[0] == INJECTED, err
+    first = _journal(world, THIRD)["factors"]
+    assert first["caught_up"] == [NEXT.isoformat()]
+
+    result = _completed(world, capsys, THIRD)
+
+    assert result["factors"]["caught_up"] == [NEXT.isoformat()]
+    assert _journal(world, THIRD)["factors"] == first
+
+
+def test_a_settle_only_day_with_nothing_eligible_goes_on_to_the_paper_book(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """The empty-eligible refusal guards a record: a settle-only day files none, so a screen that
+    passes nobody does not stop it -- the paper book still settles the session."""
+    late = datetime.fromisoformat("2026-04-07T10:00:00+08:00")
+    world = _world(tmp_path, monkeypatch, seeded, market=SpecialTreatment(open_days=tds.OPEN_2026))
+
+    code, _out, err = _run(world, capsys, as_of=late, clock=late)
+
+    assert code == 0, err
+    assert _journal(world)["prediction"]["settle_only"] is True
+    assert _records(world) == ()
+
+
+def _edited_journal(world: tds.World, **changes: Any) -> None:
+    path = _journal_path(world)
+    journal = json.loads(path.read_text(encoding="utf-8"))
+    journal.update(changes)
+    for stage in ("prediction", "catch_ups", "paper", "result"):
+        journal.pop(stage, None)
+    path.write_text(json.dumps(journal), encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("pinned_from", "named"),
+    [
+        pytest.param(
+            {"session": DAY.isoformat(), "session_index": 1, "snapshot_id": "pbs_later"},
+            "older than the snapshot this day pinned its holdings from (pbs_later, index 1)",
+            id="pinned from a later snapshot",
+        ),
+        pytest.param(
+            {"session": EPOCH.isoformat(), "session_index": 0, "snapshot_id": "pbs_replaced"},
+            "holds [] as pbs_",
+            id="the pinned index holding another snapshot",
+        ),
+    ],
+)
+def test_a_book_that_moved_back_or_was_replaced_under_the_journal_is_refused_by_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+    pinned_from: dict[str, Any],
+    named: str,
+) -> None:
+    """The journal pinned its holdings from a snapshot the book no longer has: one later than the
+    head on disk (the book was restored to an older state), or another snapshot at the same
+    index with the same holdings (the book was replaced). Each refused before any request."""
+    world = _world(tmp_path, monkeypatch, seeded)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(strategy_survivor_book, "evening", _refused_evening)
+        _code, _out, err = _run(world, capsys)
+    assert err[0] == INJECTED, err
+    _edited_journal(world, held=[], held_from=pinned_from)
+
+    code, _out, err = _run(world, capsys)
+
+    assert code == 1
+    assert err[0].startswith("step 5 (paper head) failed:")
+    assert named in err[0]
+    assert "move this day's journal" in err[0]
+    assert err[1] == NO_REQUEST
+
+
+def test_a_book_a_later_sessions_run_has_settled_is_refused_for_an_earlier_day(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """6 April's evening is committed; a run for 3 April (the epoch) finds the book past its
+    session: a past evening is not run again. Refused by name before any request."""
+    world = _world(tmp_path, monkeypatch, seeded)
+    _completed(world, capsys, DAY)
+    on_the_epoch = datetime.fromisoformat("2026-04-03T18:30:00+08:00")
+
+    code, _out, err = _run(world, capsys, as_of=on_the_epoch, clock=on_the_epoch)
+
+    assert code == 1
+    assert err[0].startswith("step 5 (paper head) failed: the paper book is settled through")
+    assert "a later session's run changed the book" in err[0]
+    assert err[1] == NO_REQUEST
+
+
+def test_the_facts_and_the_provenance_are_the_pinned_holdings_not_the_books_newer_ones(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """The facts are read with the holdings the journal pinned, even when the book has moved on
+    since within the session (here its evening was committed): the provenance records exactly
+    those, and the record -- whose scores do not depend on them -- is the one already filed."""
+    world = _world(tmp_path, monkeypatch, seeded)
+    with pytest.MonkeyPatch.context() as patch:
+        _cut_at_the_result(patch)
+        _run(world, capsys)
+    (record,) = _records(world)
+    opening = _snapshot(world, EPOCH)
+    pinned = [SECURITIES[0]]
+    _edited_journal(
+        world,
+        held=pinned,
+        held_from={
+            "session": EPOCH.isoformat(),
+            "session_index": 0,
+            "snapshot_id": opening.snapshot_id,
+        },
+    )
+
+    code, _out, err = _run(world, capsys)
+
+    assert code == 0, err
+    prediction = _journal(world)["prediction"]
+    assert prediction["outcome"] == "unchanged"
+    assert prediction["record_id"] == record
+    filed = world.runtime / "daily_survivor_provenance" / f"{prediction['provenance']}.json"
+    provenance = strategy_survivor_registration.read_survivor_provenance(
+        filed, registration_sha256=_journal(world)["registration"]["sha256"]
+    )
+    assert provenance.held == tuple(pinned)
+
+
+def test_the_panel_steps_bound_is_the_one_the_registration_names(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """A registration naming 3 on a store 4 sessions behind: step 2 refuses before any request
+    (the design's 10 would have fetched them)."""
+    config = survivor_config(epoch=date(2026, 4, 9), max_panel_catch_up_sessions=3)
+    world = _world(tmp_path, monkeypatch, seeded, config=config)
+    later = datetime.fromisoformat("2026-04-10T18:30:00+08:00")
+
+    code, _out, err = _run(world, capsys, as_of=later, clock=later)
+
+    assert code == 1
+    assert err[0].startswith("step 2 (panel update) failed: 4 missed session(s)")
+    assert "more than the 3 this step fetches in one run" in err[0]
+    assert err[-1] == NO_REQUEST
+
+
+NEW_YEAR_DAYS: Final[tuple[date, ...]] = weekdays(
+    date(2026, 9, 28), date(2027, 2, 26), closed=(date(2027, 1, 1),)
+)
+"""From 28 September 2026, so that 4 January 2027 has the 60 sessions of history the composite
+factors and the listing age need, to 26 February 2027, so that its 20-session outcome window can
+be placed; 1 January 2027 is a holiday."""
+FIRST_2027: Final[date] = date(2027, 1, 4)
+
+
+@dataclass
+class NewYearMarket(SurvivorMarket):
+    """The survivor market across New Year, with what a real new year has from its first session:
+    a rename announced (2027's first, so its name partition is not empty) and a registry event
+    (a delisting, so the registry has a 2027 lifecycle year -- every factor build reads the
+    registry through the session's year, and refuses `partition_missing` without one)."""
+
+    delisted: tuple[tuple[str, date], ...] = ((SECURITIES[-2], date(2027, 1, 4)),)
+
+    def _names(self, params: Mapping[str, Any]) -> list[list[Any]]:
+        if str(params["start_date"])[:4] == "2027":
+            return [[SECURITIES[5], "新名称", "20270104", None, "20270104", "改名"]]
+        return super()._names(params)
+
+
+@pytest.fixture(scope="module")
+def new_year(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The market's panel through 31 December 2026, and 2027's calendar, as the last run of
+    2026 leaves a store (it stores the next year's calendar once the outcome window reaches it)."""
+    runtime = tmp_path_factory.mktemp("survivor-new-year") / "runtime"
+    market = NewYearMarket(open_days=NEW_YEAR_DAYS)
+    market.today = date(2026, 12, 31)
+    seeded_as_of = "2027-01-04T12:00:00+08:00"
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("TUSHARE_TOKEN", tds.SECRET_TOKEN)
+        patch.setattr(cli, "_panel_transport", lambda: market)
+        patch.setattr(cli, "_panel_clock", lambda: tds.WALL_CLOCK)
+        for year, targets in ((2026, (*SEED_TARGETS, "namechange")), (2027, ("trade_cal",))):
+            arguments = ["panel", "build", "--runtime-dir", str(runtime), "--year", str(year)]
+            arguments += ["--as-of", seeded_as_of, "--exchange", "SSE", "--json"]
+            for target in targets:
+                arguments += ["--dataset", target]
+            built = daily.invoke(arguments)
+            assert built.exit_code == 0, built.reason()
+    return runtime
+
+
+def test_the_first_session_of_a_year_runs_to_its_record_asked_about_both_years(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    new_year: Path,
+) -> None:
+    """The design's open item: a first-of-year session, the name corpus among the doctor's
+    datasets. 4 January 2027 is asked about with the year before (`first_of_year`), the doctor
+    and the gate clear -- `namechange` included -- and the day runs to its record and its
+    first evening."""
+    config = survivor_config(epoch=date(2026, 12, 31))
+    market = NewYearMarket(open_days=NEW_YEAR_DAYS)
+    world = _world(tmp_path, monkeypatch, new_year, config=config, market=market)
+    doctor = _calls(monkeypatch, daily, "check_panel")
+    evening = datetime.fromisoformat("2027-01-04T18:30:00+08:00")
+
+    code, _out, err = _run(world, capsys, as_of=evening, clock=evening)
+
+    assert [(call["session"], call["first_of_year"]) for call in doctor] == [(FIRST_2027, True)]
+    assert "namechange" in doctor[0]["datasets"]
+    assert code == 0, err
+    prediction = _journal(world, FIRST_2027)["prediction"]
+    assert prediction["registered"] is True
+    assert prediction["scored"] > 0
+
+
 # --- the paper book's lock and binding -------------------------------------------------------
 
 
@@ -1252,6 +1665,8 @@ def test_a_paper_book_bound_to_another_registration_is_refused_at_the_paper_head
     assert code == 1
     assert err[0].startswith("step 5 (paper head) failed:")
     assert "differ in ['config_id']" in err[0]
+    assert err[1] == NO_REQUEST
+    assert not (world.runtime / "daily_survivor").exists()
     assert _records(world) == ()
     assert held_head(FilePaperStateStore(world.runtime / "paper" / "snapshots")) is None
 
@@ -1277,7 +1692,122 @@ def test_a_held_paper_book_without_its_marker_is_refused_at_the_paper_head(
     assert code == 1
     assert err[0].startswith("step 5 (paper head) failed:")
     assert "no binding marker" in err[0]
+    assert err[1] == NO_REQUEST
+    assert not (world.runtime / "daily_survivor").exists()
     assert _records(world) == ()
+    assert not (world.runtime / "paper" / "registration.json").exists()
+
+
+def _open_book(world: tds.World, *, config_id: str) -> None:
+    """A paper book opened on the epoch and bound to `config_id`, as a run of that registration
+    opens one."""
+    survivor = _survivor()
+    panel = PanelStore(world.runtime / "panel")
+    calendar = load_trading_calendar(panel, exchange="SSE", years=(2026,), as_of=DAY_AS_OF)
+    with strategy_survivor_book.paper_book_lock(world.runtime / "paper") as lock:
+        strategy_survivor_book.paper_head(
+            state_store=FilePaperStateStore(world.runtime / "paper" / "snapshots"),
+            registration=survivor,
+            ordinals=SessionOrdinals(calendar, survivor.adapter.epoch_session),
+            session=EPOCH,
+            paper_directory=world.runtime / "paper",
+            config_id=config_id,
+            lock=lock,
+        )
+
+
+def test_a_book_of_another_registration_is_refused_before_the_day_pins_or_asks_anything(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """The holdings are pinned only from this registration's book: a paper directory holding
+    another registration's book is refused before the pin and before any request -- so once it
+    is moved aside the day runs as a first day, and again as a complete one. (Pinned from the
+    foreign book, the session could never run again: the fresh book opened after the move is
+    not the one the journal pinned.)"""
+    world = _world(tmp_path, monkeypatch, seeded)
+    _open_book(world, config_id="another registration")
+
+    code, _out, err = _run(world, capsys)
+
+    assert code == 1
+    assert err[0].startswith("step 5 (paper head) failed:")
+    assert "'another registration'" in err[0]
+    assert err[1] == NO_REQUEST
+    assert not (world.runtime / "daily_survivor").exists()
+
+    (world.runtime / "paper").rename(world.runtime / "paper.another")
+    code, out, err = _run(world, capsys)
+
+    assert code == 0, err
+    assert json.loads(out)["this_run"]["requests"] == STEADY_SURVIVOR
+    assert _journal(world)["held_from"] is None
+
+    code, out, err = _run(world, capsys)
+
+    assert code == 0, err
+    assert json.loads(out)["this_run"] == {"requests": {}, "request_count": 0, "wrote": False}
+
+
+def _rerun_pinned_from_a_held_book(
+    world: tds.World, capsys: pytest.CaptureFixture[str]
+) -> dict[str, Any]:
+    """The day run once (it opens the book and commits its first evening), its journal lost, and
+    the day run again, cut before its result: the second pin is taken from a held book and the
+    journal is left unfinished. Returns that journal."""
+    _completed(world, capsys, DAY)
+    _journal_path(world).unlink()
+    with pytest.MonkeyPatch.context() as patch:
+        _cut_at_the_result(patch)
+        _code, _out, err = _run(world, capsys)
+    assert err[0].startswith("step 9 (summary) failed:"), err
+    return _journal(world)
+
+
+def test_a_day_pinned_from_a_held_book_names_the_snapshot_it_pinned_from(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    world = _world(tmp_path, monkeypatch, seeded)
+
+    journal = _rerun_pinned_from_a_held_book(world, capsys)
+
+    head = held_head(FilePaperStateStore(world.runtime / "paper" / "snapshots"))
+    assert head is not None
+    assert (head.session, head.session_index) == (DAY, 1)
+    assert journal["held"] == list(strategy_survivor_book.held_codes(head))
+    assert journal["held_from"] == {
+        "session": DAY.isoformat(),
+        "session_index": 1,
+        "snapshot_id": head.snapshot_id,
+    }
+
+
+def test_a_day_whose_pinned_book_is_gone_is_refused_before_any_request_and_opens_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """The journal pinned holdings from a held book and the runtime directory holds no book now
+    (its paper directory was moved): refused by name before any request, and no fresh book is
+    opened under the journal that pinned another."""
+    world = _world(tmp_path, monkeypatch, seeded)
+    _rerun_pinned_from_a_held_book(world, capsys)
+    (world.runtime / "paper").rename(world.runtime / "paper.moved")
+
+    code, _out, err = _run(world, capsys)
+
+    assert code == 1
+    assert err[0].startswith("step 5 (paper head) failed:")
+    assert "holds no paper book now" in err[0]
+    assert "move this day's journal" in err[0]
+    assert err[1] == NO_REQUEST
+    assert held_head(FilePaperStateStore(world.runtime / "paper" / "snapshots")) is None
     assert not (world.runtime / "paper" / "registration.json").exists()
 
 
@@ -1319,25 +1849,40 @@ def test_a_book_that_is_not_the_one_the_journal_pinned_is_refused_at_the_paper_h
     assert "prediction" not in _journal(world)
 
 
-def test_an_epoch_further_back_than_the_panel_step_catches_up_is_refused_when_the_book_opens(
+@pytest.mark.parametrize(
+    ("epoch", "bound", "refused"),
+    [
+        pytest.param(date(2026, 3, 2), 10, 25, id="25 sessions back, bound 1 + 10"),
+        pytest.param(date(2026, 3, 30), 3, 5, id="5 sessions back, bound 1 + 3"),
+    ],
+)
+def test_an_epoch_further_back_than_the_panel_step_catches_up_is_refused_as_a_registration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     seeded: Path,
+    epoch: date,
+    bound: int,
+    refused: int,
 ) -> None:
     """Decision 3: the epoch is the session before the first scheduled run, and one more than
-    `1 + max_panel_catch_up_sessions` sessions before it is refused -- by `paper_head`, which
-    opens the book, so at step 5, with nothing of the book written and nothing filed."""
-    world = _world(tmp_path, monkeypatch, seeded, config=survivor_config(epoch=date(2026, 3, 2)))
+    `1 + max_panel_catch_up_sessions` sessions before the session is refused while no book is
+    held -- as a registration the day cannot run (exit 2), before any request, the pin or the
+    book: `paper_head`'s own check would refuse the same at step 5, after the day's requests,
+    every night."""
+    config = survivor_config(epoch=epoch, max_panel_catch_up_sessions=bound)
+    world = _world(tmp_path, monkeypatch, seeded, config=config)
 
     code, _out, err = _run(world, capsys)
 
-    assert code == 1
+    assert code == 2 == daily.DailyExit.no_registration
     assert err[0].startswith(
-        "step 5 (paper head) failed: the paper book opens on its epoch 2026-03-02, 25 sessions "
-        "before this run's 2026-04-06, and an epoch may be at most 11 sessions before the first run"
+        f"step 1 (registration) failed: the paper book opens on its epoch {epoch.isoformat()}, "
+        f"{refused} sessions before this run's 2026-04-06, and an epoch may be at most "
+        f"{1 + bound} sessions before the first run"
     )
-    assert _requests(err[1]) == STEADY_SURVIVOR
+    assert err[1] == NO_REQUEST
+    assert not (world.runtime / "daily_survivor").exists()
     assert _records(world) == ()
     assert held_head(FilePaperStateStore(world.runtime / "paper" / "snapshots")) is None
     assert not (world.runtime / "paper" / "registration.json").exists()
@@ -1351,6 +1896,21 @@ def test_an_epoch_further_back_than_the_panel_step_catches_up_is_refused_when_th
     [
         pytest.param(["--full-update"], "--full-update", id="full update"),
         pytest.param(["--top", "3"], "--top", id="top"),
+        pytest.param(["--dataset", "trade_cal"], "--dataset", id="dataset narrower"),
+        pytest.param(
+            [
+                "--dataset",
+                "index_weight",
+                *(
+                    argument
+                    for target in SURVIVOR_TARGETS
+                    if target != "namechange"
+                    for argument in ("--dataset", target)
+                ),
+            ],
+            "--dataset",
+            id="dataset without the name corpus",
+        ),
     ],
 )
 def test_an_option_of_the_p6_day_is_refused_before_anything_is_made(
@@ -1360,8 +1920,10 @@ def test_an_option_of_the_p6_day_is_refused_before_anything_is_made(
     option: list[str],
     named: str,
 ) -> None:
-    """`--full-update` and `--top` mean nothing to a survivor day: refused as a registration the
-    day cannot run, before any request and before the runtime directory exists."""
+    """`--full-update` and `--top` mean nothing to a survivor day, and a `--dataset` that leaves
+    out a target the day reads would let it file a forward record from a panel it did not update:
+    each is refused as a registration the day cannot run, before any request and before the
+    runtime directory exists."""
     world = _world(tmp_path, monkeypatch, None)
 
     code, _out, err = _run(world, capsys, extra=option)
@@ -1371,6 +1933,35 @@ def test_an_option_of_the_p6_day_is_refused_before_anything_is_made(
     assert err[1:] == [NO_REQUEST]
     assert world.market.payloads == []
     assert not world.runtime.exists()
+
+
+def test_a_dataset_that_adds_targets_is_the_days_and_the_staleness_bound_the_factor_builds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """`--dataset` may widen the day's targets -- here `index_weight` beside every survivor
+    target -- and the day then updates and checks them all; `--max-staleness-days` is the factor
+    build's bound, as on the P6 day."""
+    world = _world(tmp_path, monkeypatch, seeded)
+    built: list[int] = []
+    build_factors = daily.build_factors
+
+    def recorded(*arguments: Any, **keywords: Any) -> Any:
+        built.append(keywords["max_staleness_days"])
+        return build_factors(*arguments, **keywords)
+
+    monkeypatch.setattr(daily, "build_factors", recorded)
+    targets = (*SURVIVOR_TARGETS, "index_weight")
+    extra = [argument for target in targets for argument in ("--dataset", target)]
+
+    code, out, err = _run(world, capsys, extra=[*extra, "--max-staleness-days", "45"])
+
+    assert code == 0, err
+    assert _journal(world)["panel"]["targets"] == list(targets)
+    assert json.loads(out)["this_run"]["requests"]["index_weight"] >= 1
+    assert built == [45]
 
 
 @pytest.mark.parametrize(
@@ -1505,6 +2096,7 @@ def _injected(*_arguments: Any, **_keywords: Any) -> Any:
         pytest.param(strategy_survivor_book, "paper_head", "paper head", 16, id="5"),
         pytest.param(strategy_survivor_book, "facts_day", "facts", 16, id="6"),
         pytest.param(strategy_survivor_registration, "survivor_batch", "prediction", 16, id="7"),
+        pytest.param(daily, "registration_cutoff", "panel update", 16, id="2, the cutoff"),
         pytest.param(strategy_survivor_book, "evening", "paper book", 16, id="8"),
         pytest.param(strategy_survivor_summary, "evening_document", "summary", 16, id="9"),
     ],
