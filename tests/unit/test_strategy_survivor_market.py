@@ -52,11 +52,12 @@ from scratch_package import copy_package, lint_copy
 from strategy_fixtures import INDEX_LEVELS, write_strategy_corpus_published_daily
 from strategy_fixtures import _index_batch as index_batch
 
-from openalpha_cn import strategy_survivor_market
+from openalpha_cn import strategy_survivor_market, strategy_view
 from openalpha_cn.backtest.execution import at_the_open
 from openalpha_cn.backtest.paper import PaperPortfolio
 from openalpha_cn.backtest.paper_step import NO_BAR_REASON, attempt_id, build_paper_step
 from openalpha_cn.backtest.portfolio import PortfolioLimits, PortfolioState
+from openalpha_cn.domain.adjustment import FactorObservation, build_adjustment_history
 from openalpha_cn.domain.panel_batch import PanelColumn, TimelineColumns
 from openalpha_cn.domain.portfolio import PortfolioPosition, PositionLot, PositionMark
 from openalpha_cn.domain.price_limits import SUSPENSION_DATASET
@@ -71,6 +72,7 @@ from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_ingest import session_publication_instant, write_index_prices
 from openalpha_cn.storage.portfolio import SQLitePortfolioLedger
 from openalpha_cn.strategy_survivor_market import (
+    PROTOCOL_BENCHMARK,
     MalformedNameError,
     MissingBenchmarkError,
     SessionMarket,
@@ -486,6 +488,48 @@ def test_only_the_names_asked_for_are_built_and_a_name_the_panel_never_heard_of_
     )
     assert (dict(empty.bars), dict(empty.adj_factor)) == ({}, {})
     assert empty.benchmark_close == D("6090.0")
+
+
+def test_the_default_benchmark_is_the_one_the_p6_book_reports_first() -> None:
+    """Two spellings of one protocol choice, held equal rather than trusted to stay so."""
+    assert PROTOCOL_BENCHMARK == strategy_view.PROTOCOL_BENCHMARKS[0] == "000905.SH"
+
+
+def test_the_market_is_read_only_and_the_close_keeps_the_stored_digits(
+    corpus: PanelStore,
+) -> None:
+    """The maps cannot be edited by a caller, and the close is `Decimal(str(close))`: 6090.0,
+    not the 6090 `Decimal(float)` would write into a log or a snapshot."""
+    market = read(corpus, TIMED_ON, ORDINARY)
+
+    assert str(market.benchmark_close) == "6090.0"
+    assert str(market.adj_factor[ORDINARY]) == "1.0"
+    with pytest.raises(TypeError):
+        market.bars[ORDINARY] = market.bars[ORDINARY]  # type: ignore[index]
+    with pytest.raises(TypeError):
+        market.adj_factor[ORDINARY] = D(1)  # type: ignore[index]
+
+
+def test_a_name_whose_factor_row_on_the_session_is_missing_is_left_out_tonight_and_carried_later(
+    corpus: PanelStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The factor horizon is per security (`AdjustmentHistory.covered_through`). With no row on
+    the session and none after it yet, the evening read leaves the name out; once a later row is
+    stored, `bisect` answers the session with the value in force before it -- the one exception,
+    besides an upstream restatement, to "a later read gives the evening's bytes"."""
+    loaded = strategy_survivor_market.load_adjustment_histories
+    rows = [FactorObservation(ts_code=ORDINARY, observed_on=date(2026, 1, 6), factor=2.0)]
+
+    def with_ordinarys_rows(*args: Any, **kwargs: Any) -> Mapping[str, Any]:
+        return {**loaded(*args, **kwargs), ORDINARY: build_adjustment_history(ORDINARY, rows)}
+
+    monkeypatch.setattr(strategy_survivor_market, "load_adjustment_histories", with_ordinarys_rows)
+    tonight = read(corpus, TIMED_ON, ORDINARY, "600519.SH")
+    rows.append(FactorObservation(ts_code=ORDINARY, observed_on=date(2026, 1, 8), factor=3.0))
+    later = read(corpus, TIMED_ON, ORDINARY, "600519.SH")
+
+    assert list(tonight.adj_factor) == ["600519.SH"]
+    assert later.adj_factor[ORDINARY] == D("2.0")
 
 
 def test_a_benchmark_the_store_does_not_hold_is_refused_by_name(corpus: PanelStore) -> None:
