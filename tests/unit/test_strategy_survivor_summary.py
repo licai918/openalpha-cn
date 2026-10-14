@@ -392,6 +392,16 @@ def settle_only(tmp_path_factory: pytest.TempPathFactory) -> SettleOnly:
     )
 
 
+@pytest.fixture(scope="module")
+def written_off_catch_up(tmp_path_factory: pytest.TempPathFactory) -> SettleOnly:
+    """S3 caught up instead of run -- `test_paper_evening`'s own write-off catch-up: 600010.SH's
+    sale and 600030.SH's buy fill, 600050.SH's buy is refused at the limit-up open, and 600040.SH,
+    delisted while held, is written off. A settle-only day for the session itself."""
+    book = evenings.through_s2(tmp_path_factory.mktemp("s3catchup"))
+    caught = evenings.catch_up(book, S3, evenings.MARKET_S3, delisted={DL})
+    return SettleOnly(caught, s3_facts(), evenings.SCREEN_S3, S3, 3, AS_OF_S3)
+
+
 @dataclasses.dataclass(frozen=True)
 class CaughtUp:
     """S5's evening after S2, S3 and S4 were missed and settled without a decision."""
@@ -822,6 +832,36 @@ def test_an_order_with_no_bar_is_recorded_as_not_attempted_with_the_steps_reason
         (G, "buy", "not_attempted", NO_BAR_REASON),
     ]
     assert settled["filled"] == [] and settled["cancelled"] == [] and settled["expired"] == []
+
+
+def test_a_catch_ups_equity_is_the_settlements_never_the_runners_record(
+    written_off_catch_up: SettleOnly,
+) -> None:
+    settlement = written_off_catch_up.caught.settlement
+    record = settlement.runner_record
+    # On a write-off day the runner's record is from before the write-off and still holds 600040.SH
+    # at its mark of 10.00 (900 shares): its equity overstates the session by the whole of it.
+    assert record.equity == D("99970.05")
+    assert settlement.equity == D("91060.05")
+    document = settle_only_document(written_off_catch_up)
+
+    (day,) = document["paper_skipped"]["catch_ups"]
+
+    assert (day["session"], day["session_index"]) == ("2021-03-04", 3)
+    assert day["equity"] == "91060.05"
+    assert day["equity"] != str(record.equity)
+    assert day["cash"] == "72770.05"
+    assert day["settled"]["written_off"][0]["cost_basis"] == "9005.09"
+
+
+def test_a_printed_catch_up_line_carries_the_settlements_equity(
+    written_off_catch_up: SettleOnly,
+) -> None:
+    lines = summary_lines(settle_only_document(written_off_catch_up))
+
+    line = next(line for line in lines if line.startswith("  2021-03-04 (index 3):"))
+    assert line.endswith("written off 1; equity 91060.05")
+    assert "99970.05" not in "\n".join(lines)
 
 
 def test_the_book_comes_from_the_settlement_never_from_the_runners_record(
