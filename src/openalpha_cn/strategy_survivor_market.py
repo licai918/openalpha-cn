@@ -20,14 +20,18 @@ refusals reach the caller unchanged.
   `stk_limit` band, and absent from it only when the session has no `daily` row for it -- a
   whole-day halt, or a name the panel does not price -- which the caller reads as exactly that:
   `build_paper_step` records the name's order as not attempted, and the settlement may write
-  off a delisted holding at its last mark. A name with a `daily` row and **no** band is refused
-  by name (`UnbandedBarError`) rather than left out: left out, a priced name would read as
-  unpriced, and the write-off cannot be taken back. It is a data failure, not a shape of the
-  market the book trades: `daily` is a subset of `stk_limit` on every session sampled from
-  2023-01-03 on (`domain/price_limits.py`), and the earlier exceptions are `.BJ` codes and
-  `001914.SZ`. The bar is `execution.stored_market_bar`'s -- the one assembly the P6 faces use
-  too; T5 7.1 refused a fourth copy. Its `suspended` is `execution.suspended_at_the_open`, the P6
-  book's collapse for an order filled at the open: a halt through the close, or any timed
+  off a delisted holding (D13: nothing recovered, a realised loss of its whole cost basis). A
+  name with a `daily` row and **no** band is refused by name (`UnbandedBarError`) rather than
+  left out: left out, a priced name would read as unpriced, and the write-off cannot be taken
+  back. On the book's own window it is a data failure, not a shape of the market: `daily` is a
+  subset of `stk_limit` on every session sampled from 2023-01-03 on (`domain/price_limits.py`).
+  **Before that it is a shape**, and this reader must not be reused for a 2017-2021 replay
+  without handling it: `stk_limit` reached the Beijing board late and `001914.SZ` has no band on
+  any session sampled from 2013-01-04 to 2022-04-01, so `UnbandedBarError` would stop every
+  night on which such a name is held or ordered. The bar is `execution.stored_market_bar`'s --
+  the one assembly the P6 faces use too; T5 7.1 refused a fourth copy. Its `suspended` is
+  `execution.suspended_at_the_open`, the P6 book's collapse for an order filled at the open: a
+  halt through the close, or any timed
   interruption whatever its window (fail-closed, as `strategy_backtest` records). So a name
   halted part of the session has a bar marked `suspended`, `execution.at_the_open` keeps the mark
   and the book refuses its order whole. `is_st` is `False` and is never read: every bar here
@@ -44,6 +48,12 @@ refusals reach the caller unchanged.
   `suspend_d` `S` row and no `daily` row -- had a factor row on that very session, which is
   `domain/adjustment.py`'s `suspension_is_invisible` measured at scale. So a halted holding with
   a sale due has its ratio, and the sale is not attempted rather than stopping the night.
+  **Only the session's year is read**, where the P6 book's quotes (`strategy_view._PanelDays.
+  adjustments`) read the year before it too, "for a name with no factor row yet this year": on
+  a year's first sessions, a holding whose series for the year starts after the session is left
+  out here -- and refused by the settlement -- where the P6 book would carry the previous year's
+  value. That fails closed, and the year-head measurement above found 0 such holdings among the
+  halted names (every one had its row on the year's first session).
 - **The benchmark's close** on the session itself, from `index_daily` (`000905.SH` by default,
   the protocol's 中证500). A benchmark with no close on the session is refused by name
   (`MissingBenchmarkError`); the previous close is never used.
@@ -60,8 +70,18 @@ point-in-time doors, so a later session's rows are invisible at `as_of`. `adj_fa
 `as_of` earlier than the newest row its year holds (`PartitionNotYetKnowableError`) rather than
 answering from it. So a store that already holds a later session cannot be read at this
 session's evening at all, and one read after the later session has published answers with the
-evening's bytes (a factor or a close the upstream restated in between excepted): a session that
-missed its evening is settled from a later read.
+evening's bytes -- a session that missed its evening is settled from a later read -- with two
+exceptions. A factor or a close the upstream restated in between is read as restated. And the
+factor horizon is per security (`AdjustmentHistory.covered_through`): a name with a `daily` row
+on the session but no factor row on it is left out of `adj_factor` on the evening read, while
+a later read, once a later row of its series is stored, answers it with the value in force
+before the gap (`bisect`).
+
+**A precondition this reader cannot check: `suspend_d` completeness.** It fails open -- the
+reads use `max_staleness=None`, and `suspension_requirement` waives `required_dates` -- so a
+session whose `suspend_d` rows were never ingested reads as one on which nobody was halted, and
+a halted name's bar is not marked `suspended`. The evening gate (Task C3 / Part D) must require,
+from the ingest's own record, that every dataset this reader reads was ingested for the session.
 
 ## Session ordinals (`SessionOrdinals`)
 
@@ -234,6 +254,16 @@ def settlement_market(
     as a security code (`MalformedNameError`, the facts adapter's spelling), a name asked for
     with a `daily` row and no published band (`UnbandedBarError`), and a benchmark with no close
     on the session (`MissingBenchmarkError`); the loaders' own refusals are raised unchanged.
+
+    **Precondition, unchecked here:** `suspend_d` completeness is a precondition this reader
+    cannot check, and it fails open (the reads use `max_staleness=None` and
+    `suspension_requirement` waives `required_dates`): a session whose `suspend_d` rows were
+    never ingested reads as nobody halted. The evening gate (Task C3 / Part D) must require every
+    dataset this reader reads to have been ingested for the session, from the ingest's own
+    record. And before 2023 a name with a `daily` row and no published band was a recurring
+    shape (`001914.SZ`, the Beijing board; `domain/price_limits.py`), on which
+    `UnbandedBarError` stops every night the name is held or ordered: do not reuse this reader
+    for a 2017-2021 replay without handling that.
     """
     if isinstance(names, str):
         raise SettlementMarketError(
