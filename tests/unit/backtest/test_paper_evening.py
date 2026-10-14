@@ -1747,7 +1747,10 @@ def test_over_25_evenings_the_paper_book_holds_and_cools_down_what_plan_ones_sim
         assert sorted(p.subject for p in result.snapshot.book.positions) == log[n - 1]["held"], n
         assert result.snapshot.cooldowns == simulation.COOLED[n - 1], n
     assert_the_ledger_replays_to_every_snapshot(book, config.capital, results)
-    assert any(result.decision.frozen for result in results)  # halts are in it, and held alike
+    # Not a quiet book: halts frozen alike, holdings sold, and a cool-down trajectory compared.
+    assert any(result.decision.frozen for result in results)
+    assert any(result.decision.exits for result in results)
+    assert sum(len(cooled) for cooled in simulation.COOLED[: len(results)]) > 0
 
 
 ROUGH_CODES = tuple(f"{600200 + n:06d}.SH" for n in range(40))
