@@ -55,9 +55,10 @@ Sections, in this order: session, book, facts, screen, settled, positions, the O
 OF D+1 (call auction 09:15) and the carried orders, what the draw left out (unfunded,
 unaffordable, deferred exits, near exit, frozen, watch list), illiquid exits, catch-up, prediction,
 Tushare requests, units, wording. A list with nothing in it prints as `none`, so a missing line
-never reads as "nothing to do". A day with no evening prints `NONE PLANNED -- no evening was run`
-and the reason, never an empty plan. The wording is "candidates"; nothing here is a
-recommendation, and the ledger's equity is never evidence of anything.
+never reads as "nothing to do". A day with no evening prints `NONE PLANNED tonight -- no evening
+was run`, the reason, and that the orders still live in the book from earlier evenings are not
+listed here (a sale never expires), never an empty plan. The wording is "candidates"; nothing
+here is a recommendation, and the ledger's equity is never evidence of anything.
 
 `prediction` and `this_run` are blocks the caller merges into the mapping it passes to
 `summary_lines` (they are not part of the journal's `result`: the prediction is filed before the
@@ -253,6 +254,11 @@ def _check(
         raise ValueError(
             f"the facts day is of session {facts.session.isoformat()}, not "
             f"{session.isoformat()}: the document would describe another day"
+        )
+    if evening is None and not paper_skipped:
+        raise ValueError(
+            "no evening was given and no paper_skipped reason: a day that ran no evening says "
+            "why, or the journal holds a day it cannot explain"
         )
     if evening is not None:
         if paper_skipped is not None:
@@ -630,8 +636,7 @@ def _plural(count: int, noun: str) -> str:
 
 def _book_text(paper: Mapping[str, Any] | None, skipped: Mapping[str, Any]) -> str:
     if paper is None:
-        reason = skipped.get("reason") or "no reason was given"
-        return f"no evening was run: {reason}"
+        return f"no evening was run: {skipped['reason']}"
     book = paper["book"]
     return (
         f"equity {book['equity']}, cash {book['cash']}, gross exposure "
@@ -799,8 +804,14 @@ def _carried_line(item: Mapping[str, Any]) -> str:
 
 def _orders_lines(paper: Mapping[str, Any] | None, skipped: Mapping[str, Any]) -> list[str]:
     if paper is None:
-        reason = skipped.get("reason") or "no reason was given"
-        return [f"{_ORDERS_HEADER}: NONE PLANNED -- no evening was run ({reason})"]
+        # "None planned tonight" is not "nothing is live": orders from earlier evenings -- a
+        # carried sale above all, which never expires -- stay in the book and are retried at the
+        # next open once the session is settled. This module is not told which are live.
+        return [
+            f"{_ORDERS_HEADER}: NONE PLANNED tonight -- no evening was run ({skipped['reason']}); "
+            "orders still live in the paper book from earlier evenings are not settled tonight "
+            "and are not listed here (a sale never expires)"
+        ]
     opens = paper["open_session"]
     when = opens["date"] if opens["date"] is not None else f"session {opens['index']}"
     planned = [item for item in paper["open_orders"] if not item["carried"]]
