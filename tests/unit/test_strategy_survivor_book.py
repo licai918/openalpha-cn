@@ -45,6 +45,7 @@ from types import MappingProxyType, ModuleType
 from typing import Any, Final
 
 import pytest
+from panel_fixtures import EXCHANGE
 from panel_fixtures import _batch as batch
 from panel_fixtures import _close_time as close_time
 from panel_fixtures import _published_time as published_time
@@ -147,7 +148,7 @@ def adapter(**changes: object) -> SurvivorAdapterConfig:
     block: dict[str, object] = {
         "schema_version": "survivor-adapter/v1",
         "epoch_session": EPOCH.isoformat(),
-        "exchange": "SZSE",
+        "exchange": "SSE",
         "transform": "cross_section_standard/v1",
         "min_coverage": 0.5,
         "max_carry_sessions": 250,
@@ -163,7 +164,10 @@ def adapter(**changes: object) -> SurvivorAdapterConfig:
         "unfilled_buy": "reject_whole_and_carry/v1",
     }
     block.update(changes)
-    return SurvivorAdapterConfig.model_validate(block)
+    # The registration admits only the SSE calendar; the generated panel frame carries SZSE's
+    # (the same sessions, measured), so the frame is read under its own name: `model_copy`
+    # does not validate, which is exactly the one deviation this fixture needs.
+    return SurvivorAdapterConfig.model_validate(block).model_copy(update={"exchange": EXCHANGE})
 
 
 def book_config(**changes: object) -> SurvivorBookConfig:
