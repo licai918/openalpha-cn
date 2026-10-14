@@ -68,7 +68,7 @@ FIRST_OF_2027: Final[date] = sd.FIRST_2027
 """4 January 2027: the first session after the new year, the next one after 31 December."""
 
 
-# --- the markets -----------------------------------------------------------------------------------
+# --- the markets ----------------------------------------------------------------------------------
 
 
 @dataclass
@@ -119,7 +119,7 @@ class PricedBeforeListing(sd.SurvivorMarket):
         return answer
 
 
-# --- the evenings, once per module -------------------------------------------------------------------
+# --- the evenings, once per module ----------------------------------------------------------------
 
 
 def _seed(runtime: Path, market: Market, builds: Sequence[tuple[int, Sequence[str], str]]) -> None:
@@ -258,7 +258,7 @@ def _world(
     )
 
 
-# --- running the morning -----------------------------------------------------------------------------
+# --- running the morning --------------------------------------------------------------------------
 
 
 def morning_of(day: date, at: time = time(8, 30)) -> datetime:
@@ -470,7 +470,7 @@ def test_a_name_outside_the_plan_that_turned_special_treatment_moves_only_the_co
     assert kinds <= {"counts_changed", "watch_list_changed"}
 
 
-# --- the one benign class ---------------------------------------------------------------------------
+# --- the one benign class -------------------------------------------------------------------------
 
 
 def _without_row(facts: FactsDay, code: str) -> FactsDay:
@@ -525,7 +525,7 @@ def test_a_code_priced_before_its_listing_row_is_tolerated_never_advice(
     assert document["tolerated"] == [late] and document["differences"] == []
 
 
-# --- the file, the fetch and what is written --------------------------------------------------------
+# --- the file, the fetch and what is written ------------------------------------------------------
 
 
 def test_the_morning_writes_its_file_and_the_name_partition_and_nothing_else(
@@ -549,8 +549,9 @@ def test_the_morning_writes_its_file_and_the_name_partition_and_nothing_else(
     changed = _changed(before, after)
     assert morning in changed
     partition = [path for path in changed if path != morning]
-    assert partition, "the namechange partition was not written"
-    assert all(path.startswith("panel/") and "namechange" in path for path in partition), changed
+    assert "panel/namechange/2026/data.parquet" in partition
+    # The panel's own catalog records the write; no other dataset's partition is touched.
+    assert set(partition) <= {"panel/catalog.duckdb", "panel/namechange/2026/data.parquet"}, changed
     assert [path for path in after if path not in before] == [morning]
     for directory in ("predictions", "paper", "daily_survivor_provenance"):
         assert _under(after, directory) == _under(before, directory)
@@ -699,7 +700,7 @@ def test_a_store_that_no_longer_gives_the_evenings_facts_is_refused_before_the_f
     assert sd._files(world.runtime) == before
 
 
-# --- New Year -----------------------------------------------------------------------------------------
+# --- New Year -------------------------------------------------------------------------------------
 
 
 def test_a_morning_in_the_new_year_asks_the_name_corpus_of_both_years(
@@ -751,7 +752,7 @@ def test_an_empty_new_year_name_corpus_is_refused_by_name(
     assert "differences" not in _filed(world, LAST_OF_2026)
 
 
-# --- the preconditions --------------------------------------------------------------------------------
+# --- the preconditions ----------------------------------------------------------------------------
 
 
 def test_a_morning_at_or_after_the_next_call_auction_is_refused_having_asked_nothing(
@@ -854,6 +855,7 @@ def test_a_day_that_only_settled_has_nothing_to_re_check(
     _evening(world, DAY, at=datetime.combine(NEXT, time(10, 0), tzinfo=daily.SHANGHAI))
     assert _plan(world, DAY)["paper"] is None
     before = sd._files(world.runtime)
+    world.market.clear()
 
     code, _out, err = _morning(world, capsys, DAY)
 
@@ -932,7 +934,7 @@ def test_a_second_run_while_the_paper_book_is_held_is_refused_having_asked_nothi
     assert sd._files(world.runtime) == before
 
 
-# --- the registration's kind and the P6 day's options ------------------------------------------------
+# --- the registration's kind and the P6 day's options ---------------------------------------------
 
 
 def test_a_p6_registration_with_the_flag_exits_two_with_no_request_and_no_file(
@@ -986,7 +988,8 @@ def test_an_option_of_the_p6_day_is_refused_before_anything_is_made(
 
 
 @pytest.mark.parametrize(
-    "other", [("--factor-gaps", "2026-04-01"), ("--pin-worktree", "pinned"), ("--launchd-plist", "logs")]
+    "other",
+    [("--factor-gaps", "2026-04-01"), ("--pin-worktree", "pinned"), ("--launchd-plist", "logs")],
 )
 def test_the_flag_does_not_combine_with_the_commands_that_run_no_day(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], other: tuple[str, ...]
@@ -1000,7 +1003,7 @@ def test_the_flag_does_not_combine_with_the_commands_that_run_no_day(
     assert f"--morning-recheck cannot be combined with {other[0]}" in capsys.readouterr().err
 
 
-# --- a P6 day never loads what the survivor day does -------------------------------------------------
+# --- a P6 day never loads what the survivor day does ----------------------------------------------
 
 _IN_A_FRESH_INTERPRETER: Final[str] = (
     "import contextlib, io, json, sys\n"
