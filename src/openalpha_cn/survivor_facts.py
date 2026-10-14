@@ -28,6 +28,17 @@ listing is "never heard of" (a row aged 0) to a read before that day and "known,
 row, counted) to a read after it: two reads of one signal day differ by that row and those two
 counts.
 
+**The registry's year.** `stock_basic` is filed by lifecycle year, and a fetch holds a partition
+for a year only once something listed or died in it by the fetch's `as_of`; so on a year's first
+sessions, until its first listing or delisting, the session's year has **no** registry partition
+although nothing is missing. The registry is read through the newest lifecycle year the store
+holds at or before the session's (the loader reads every stored year beneath it), which is the
+session's own year whenever that is stored. A fall-back to an earlier year is accepted only from
+a registry fetched at or after the session's 16:30 publication -- what step 2 of the daily
+command writes for the session -- and refused by name (`StaleRegistryError`) otherwise; a store
+with no lifecycle year at or before the session's has no registry and is refused too
+(`_registry_year`).
+
 **A main board the adapter recognises.** `backtest.execution.security_board` files every prefix
 it does not recognise under the main board, which fails open for a main-board-only book: a new
 ChiNext prefix would be bought as main board, as `302*` once was. So a code counts as main board
@@ -161,6 +172,7 @@ from openalpha_cn.domain.name_history import (
     RiskWarning,
 )
 from openalpha_cn.domain.price_limits import PriceLimit
+from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET
 from openalpha_cn.domain.survivor_book import Board, SecurityFacts, SurvivorBookConfig
 from openalpha_cn.domain.trading_calendar import TRADING_CALENDAR_DATASET, TradingCalendar
 from openalpha_cn.panel.store import PanelStore
@@ -240,6 +252,11 @@ class MissingFactorBuildError(SurvivorFactsError):
 
 class MalformedHeldCodeError(SurvivorFactsError):
     """A held code is not spelled as a security code, so it could match no security."""
+
+
+class StaleRegistryError(SurvivorFactsError):
+    """The session's year has no registry partition and the newest stored one was fetched before
+    the session published, so no fetch since then says nothing listed or died in between."""
 
 
 HeldStatusValue = Literal[
@@ -713,8 +730,10 @@ def build_facts_day(
     first session -- which is counted in `FactsNotes.no_bar_within_carry`. `FactsDay.held_status`
     says what became of every held code; **the caller refuses by name a day on which a held
     code is `no_bar_in_reach` or `not_in_registry`**, and lets the kernel sell one that is
-    `not_listed`. See the module docstring for each rule; it raises the loaders' own refusals
-    unchanged.
+    `not_listed`. A session whose year has no registry partition yet is read through the newest
+    stored lifecycle year, when the registry was fetched at or after the session's publication,
+    and refused by name (`StaleRegistryError`) when it was not. See the module docstring for each
+    rule; it raises the loaders' own refusals unchanged.
     """
     if tuple(factor_ids) != config.composite_factors:
         raise SurvivorFactsError(
@@ -792,8 +811,14 @@ def _read_facts_day(
     )
     if not calendar.is_trading_day(session):
         raise SurvivorFactsError(f"{session.isoformat()} is not an open {exchange} session")
-    # The session's lifecycle year; the loader reads every stored year beneath it by itself.
-    registry = load_stock_universe(store, years=(session.year,), as_of=as_of, max_staleness=None)
+    # The newest stored lifecycle year at or before the session's, which need not be the
+    # session's own (`_registry_year`); the loader reads every stored year beneath it by itself.
+    registry = load_stock_universe(
+        store,
+        years=(_registry_year(store, session=session, published=published),),
+        as_of=as_of,
+        max_staleness=None,
+    )
     histories = load_name_histories(
         store,
         years=_years_through(store, NAMECHANGE_DATASET, session.year),
@@ -945,6 +970,65 @@ def _years_through(store: PanelStore, dataset: str, year: int) -> tuple[int, ...
     if not held:
         raise SurvivorFactsError(f"the panel holds no {dataset} partition at or before {year}")
     return tuple(range(held[0], year + 1))
+
+
+def _registry_year(store: PanelStore, *, session: date, published: datetime) -> int:
+    """The lifecycle year the registry is read through: the newest one the store holds at or
+    before `session`'s, so `session.year` itself whenever it is stored -- and then the read is the
+    one it always was, its fetch instant not judged.
+
+    `stock_basic` is filed by lifecycle year (`panel_ingest.write_stock_universe`), and a fetch
+    holds a partition for a year only once something listed or died in it by the fetch's
+    `as_of`. On a year's first sessions, until its first listing or delisting, the store step 2
+    leaves has no partition for `session.year`, and naming that year would be refused as
+    `partition_missing` although nothing is missing. Naming the newest stored year instead reads
+    what a `session.year` partition would have added nothing to: the loader reads every stored
+    year beneath the one named, and a fetch made at or after `published` (below) that holds no
+    `session.year` row has none dated on or before the session.
+
+    What the missing year used to refuse along with that -- a store no fetch has written since
+    the session -- is judged on the newest year's fetch instant instead, its coverage `as_of`.
+    A fetch of the whole registry writes every lifecycle year it holds, and records its `as_of`
+    on each one even when the rows are unchanged (`PanelStore.write_partitions`); the newest
+    stored year is always among them, since a lifecycle year's rows only grow. Step 2 of the
+    daily command fetches at the day's `as_of`, an instant at which the session is the newest
+    one published, so at or after `published`. A newest year fetched before `published` was
+    therefore last written by a fetch made before the session existed, which cannot say that
+    nothing listed or died since: `StaleRegistryError`. The bound is `published` and not the
+    read's `as_of`, so that a later re-read of the day passes as the evening's did.
+
+    A store with no lifecycle year at or before `session.year` has no registry that reaches the
+    session, and no security could be listed on it: refused by name.
+    """
+    stored = [year for year in store.registered_years(STOCK_BASIC_DATASET) if year <= session.year]
+    if not stored:
+        raise SurvivorFactsError(
+            f"the panel holds no {STOCK_BASIC_DATASET} partition at or before {session.year}: "
+            "there is no security registry to list a security on "
+            f"{session.isoformat()}; build it with `openalpha panel build --dataset "
+            f"{STOCK_BASIC_DATASET} --year {session.year}`"
+        )
+    newest = max(stored)
+    if newest == session.year:
+        return newest
+    coverage = store.read_coverage(STOCK_BASIC_DATASET, newest)
+    fetched = None if coverage is None else coverage.as_of
+    if fetched is None or fetched < published:
+        when = (
+            "has no coverage record to say when it was fetched"
+            if fetched is None
+            else f"was fetched at {fetched.astimezone(published.tzinfo).isoformat()}"
+        )
+        raise StaleRegistryError(
+            f"the security registry ({STOCK_BASIC_DATASET}) holds no lifecycle year "
+            f"{session.year}, and its newest, {newest}, {when}, before {session.isoformat()} "
+            f"published at {published.isoformat()}: no fetch since then says that nothing listed "
+            "or died in between. Fetch the registry for the session -- step 2 of the daily "
+            f"command, or `openalpha panel build --dataset {STOCK_BASIC_DATASET} --year "
+            f"{session.year} --as-of <an instant at or after {published.isoformat()}>` -- and "
+            "read the day again"
+        )
+    return newest
 
 
 def _oriented_column(

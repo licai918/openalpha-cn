@@ -55,7 +55,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import Final
 
 import pytest
@@ -71,12 +71,14 @@ from panel_fixtures import _close_time as close_time
 from panel_fixtures import _midnight_shanghai as midnight_shanghai
 from panel_fixtures import _published_time as published_time
 
+from openalpha_cn import survivor_facts
 from openalpha_cn.backtest.factor_ic import TIER_ADMITTED_CODES
 from openalpha_cn.domain.daily_prices import (
     DAILY_BASIC_DATASET,
     DAILY_DATASET,
     PRICE_DATE_COLUMN,
 )
+from openalpha_cn.domain.factor import FactorDefinition
 from openalpha_cn.domain.factor_transform import (
     FactorTransformSpec,
     MissingValuePolicy,
@@ -119,6 +121,7 @@ from openalpha_cn.panel_ingest import (
     split_panel_batch_by_year,
     write_name_history,
     write_panel_batch,
+    write_stock_universe,
 )
 from openalpha_cn.survivor_facts import (
     FactsCoverageError,
@@ -126,6 +129,7 @@ from openalpha_cn.survivor_facts import (
     FactsNotes,
     MalformedHeldCodeError,
     MissingFactorBuildError,
+    StaleRegistryError,
     SurvivorFactsError,
     build_facts_day,
     require_coverage,
@@ -323,6 +327,13 @@ class Variant:
     """`(factor, session)` pairs of `builds` that are not stored: one factor's build missing."""
     extra: tuple[str, ...] = ()
     """Securities of `EXTRA` stored besides `FRAME`'s."""
+    registry: bool = True
+    """Whether the panel holds a security registry at all."""
+    registry_fetched: datetime | None = None
+    """When the registry was fetched, if not at its newest row's own instant (`None`). The batch
+    then holds only the lifecycle rows dated by that instant -- `TushareProvider` drops a later
+    one -- and every lifecycle partition's coverage carries the instant as its `as_of`, as the
+    fetch of step 2 of the daily command stamps it."""
 
 
 FULL: Final[Variant] = Variant()
@@ -581,7 +592,12 @@ def build_panel(variant: Variant) -> GeneratedPanel:
         available_time=halt_available,
         fetched_at=_fetched(halt_available),
     )
-    lifecycle = lifecycle_rows(variant)
+    fetched = variant.registry_fetched
+    lifecycle = [
+        row
+        for row in lifecycle_rows(variant)
+        if fetched is None or midnight_shanghai(row[2]) <= fetched
+    ]
     listed_at = [midnight_shanghai(day) for _, _, day in lifecycle]
     registry = batch(
         STOCK_BASIC_DATASET,
@@ -599,7 +615,7 @@ def build_panel(variant: Variant) -> GeneratedPanel:
         ],
         event_time=listed_at,
         available_time=listed_at,
-        fetched_at=_fetched(listed_at),
+        fetched_at=_fetched(listed_at) if fetched is None else fetched,
     )
     names = name_records(variant)
     # `panel_fixtures._namechange_batch`'s projection, fetched when its newest row was knowable:
@@ -686,12 +702,13 @@ def write_panel(root: Path, variant: Variant) -> PanelStore:
     store = PanelStore(root / "panel")
     panel = build_panel(variant)
     prices = () if variant.outage else (DAILY_DATASET, DAILY_BASIC_DATASET)
+    registry = (STOCK_BASIC_DATASET,) if variant.registry else ()
     write_generated_panel(
         store,
         panel,
         datasets=(
             TRADING_CALENDAR_DATASET,
-            STOCK_BASIC_DATASET,
+            *registry,
             SUSPENSION_DATASET,
             *prices,
             PRICE_LIMIT_DATASET,
@@ -711,6 +728,8 @@ def write_panel(root: Path, variant: Variant) -> PanelStore:
         for factor in range(len(FACTORS))
         if (factor, index) not in variant.unbuilt
     ]
+    if not raw:
+        return store
     write_factor_panels(store, raw)
     write_processed_factor_panels(
         store,
@@ -783,6 +802,47 @@ NOTHING_ADMITTED: Final[Variant] = Variant(
 @pytest.fixture(scope="module")
 def nothing_admitted_store(tmp_path_factory: pytest.TempPathFactory) -> PanelStore:
     return write_panel(tmp_path_factory.mktemp("nothing-admitted"), NOTHING_ADMITTED)
+
+
+NEW_YEAR_INDEX: Final[int] = 0
+"""Monday 2026-01-05, the year's first session (the fixture calendar is shut on 1-2 January)."""
+LAST_EVENING_OF_2025: Final[datetime] = published_time(date(2025, 12, 31)) + timedelta(hours=2)
+"""18:30 Asia/Shanghai on Wednesday 2025-12-31, the evening of the year before's last session."""
+
+NEW_YEAR: Final[Variant] = Variant(builds=(), registry_fetched=instant(NEW_YEAR_INDEX))
+"""The registry as step 2 of 5 January writes it, fetched at the earliest instant that step can
+fetch at, the session's own 16:30. Every lifecycle row dated by then is a 2025-01-02 listing --
+nothing has listed or died in 2026 yet -- so the store holds lifecycle year 2025 and no 2026.
+No factor build: the engine cannot build one on a year's first session of a calendar that starts
+that year (`factor_stand_in`)."""
+NEW_YEAR_WITH_LATER_EVENTS: Final[Variant] = Variant(builds=())
+"""The same panel with `FULL`'s registry: lifecycle year 2026 is stored, and every event in it is
+dated after 5 January (sessions 50, 60, 65 and 72), so none of them concerns any code that day."""
+STALE_REGISTRY: Final[Variant] = Variant(builds=(), registry_fetched=LAST_EVENING_OF_2025)
+"""The registry as 31 December's step 2 left it, and nothing has fetched it since: its rows are
+`NEW_YEAR`'s, its fetch five days older."""
+NO_REGISTRY: Final[Variant] = Variant(builds=(), registry=False)
+"""A panel that has never held a security registry."""
+
+
+@pytest.fixture(scope="module")
+def new_year_store(tmp_path_factory: pytest.TempPathFactory) -> PanelStore:
+    return write_panel(tmp_path_factory.mktemp("new-year"), NEW_YEAR)
+
+
+@pytest.fixture(scope="module")
+def new_year_with_later_events_store(tmp_path_factory: pytest.TempPathFactory) -> PanelStore:
+    return write_panel(tmp_path_factory.mktemp("new-year-later-events"), NEW_YEAR_WITH_LATER_EVENTS)
+
+
+@pytest.fixture(scope="module")
+def stale_registry_store(tmp_path_factory: pytest.TempPathFactory) -> PanelStore:
+    return write_panel(tmp_path_factory.mktemp("stale-registry"), STALE_REGISTRY)
+
+
+@pytest.fixture(scope="module")
+def no_registry_store(tmp_path_factory: pytest.TempPathFactory) -> PanelStore:
+    return write_panel(tmp_path_factory.mktemp("no-registry"), NO_REGISTRY)
 
 
 # --- the narrow read: one build by its instant (`panel_factors`) ----------------------------------
@@ -1152,6 +1212,150 @@ def test_a_read_long_after_the_day_gives_the_evening_reads_bytes(full_store: Pan
     # `FULL` stores is visible -- three more sessions, the 2026-04-13 rename and build, the
     # 2026-04-15 listing -- and none of it may reach the day's facts.
     assert fingerprint(read_day(full_store, as_of=LATER)) == fingerprint(read_day(full_store))
+
+
+# --- the registry on a year's first session (A3 review Important 2) ------------------------------
+
+NEW_YEAR_CONFIG: Final[SurvivorBookConfig] = SurvivorBookConfig(
+    seed=7, composite_factors=FACTORS, min_listing_sessions=1
+)
+"""A listing minimum the year's first session can age: the calendar starts 2026-01-01, so a 2025
+listing counts one session on 5 January (`listing_age_sessions` refuses a truncated count below
+the minimum)."""
+
+
+@pytest.fixture
+def factor_stand_in(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, datetime | None]]:
+    """The factor tier, the one read the year's first session replaces; every other read is real.
+
+    The engine refuses to build a factor on a calendar's first session -- the visible panel has
+    one session and the shortest window here needs two (`FactorEngineError`) -- and this panel's
+    calendar starts in 2026. The stand-in answers one row that carries no value, about a code no
+    panel here holds: a build exists at the instant, so the day is not refused for a missing
+    build, and no security is scored. It records what it was asked: each factor, at which
+    instant."""
+    asked: list[tuple[str, datetime | None]] = []
+
+    def stand_in(
+        _store: PanelStore,
+        definition: FactorDefinition,
+        _transform: FactorTransformSpec,
+        *,
+        years: Sequence[int],
+        as_of: datetime,
+        at: datetime | None = None,
+    ) -> tuple[object, ...]:
+        asked.append((definition.qualified_key, at))
+        return (SimpleNamespace(subject="000000.SZ", value=None, coverage="not_in_universe"),)
+
+    monkeypatch.setattr(survivor_facts, "load_processed_factor_observations", stand_in)
+    return asked
+
+
+def read_new_year(store: PanelStore, **overrides: object) -> FactsDay:
+    """5 January at its evening, under `factor_stand_in`: nothing is scored, so the coverage floor
+    is 0."""
+    arguments: dict[str, object] = {"config": NEW_YEAR_CONFIG, "min_coverage": 0.0}
+    arguments.update(overrides)
+    return read_day(store, NEW_YEAR_INDEX, **arguments)
+
+
+def test_a_year_with_no_registry_event_yet_is_read_through_the_newest_stored_lifecycle_year(
+    new_year_store: PanelStore,
+    new_year_with_later_events_store: PanelStore,
+    factor_stand_in: list[tuple[str, datetime | None]],
+) -> None:
+    # `stock_basic` is filed by lifecycle year, and step 2's fetch has a 2026 row only once
+    # something has listed or died in 2026 by its `as_of`. On 5 January nothing has, so the store
+    # step 2 leaves holds 2025 alone, and a read that demanded a 2026 partition refused the
+    # year's first sessions until the first IPO or delisting landed. Read through the newest
+    # stored year, the day is the one a store holding 2026 gives when nothing in it is about
+    # 5 January -- byte for byte, the held statuses included.
+    held = (DELISTED_WITH_BARS, NEW_LISTING, UNREGISTERED)
+    day = read_new_year(new_year_store, held=held)
+
+    assert new_year_store.registered_years(STOCK_BASIC_DATASET) == (2025,)
+    assert new_year_with_later_events_store.registered_years(STOCK_BASIC_DATASET) == (2025, 2026)
+    assert fingerprint(day) == fingerprint(
+        read_new_year(new_year_with_later_events_store, held=held)
+    )
+    # And they are 5 January's rows: every security with a 2025 listing -- DELISTED_WITH_BARS
+    # and DELISTED too, whose delistings are 2026's (sessions 60 and 65) -- each one session
+    # old, and UNREGISTERED through its bar, aged 0. NEW_LISTING and NEVER_TRADED list in 2026
+    # and have no bar yet: no row, and a held NEW_LISTING is a code the registry has not heard of.
+    assert [fact.ts_code for fact in day.facts] == [
+        code for code in SECURITIES if code not in (NEW_LISTING, NEVER_TRADED)
+    ]
+    assert {fact.ts_code: fact.listed_sessions for fact in day.facts} == {
+        fact.ts_code: 0 if fact.ts_code == UNREGISTERED else 1 for fact in day.facts
+    }
+    assert (day.notes.no_listing_row, day.notes.not_listed_with_bar) == (1, 0)
+    assert {status.ts_code: status.status for status in day.held_status} == {
+        DELISTED_WITH_BARS: "row",
+        NEW_LISTING: "not_in_registry",
+        UNREGISTERED: "not_in_registry",
+    }
+    # Each read asked the factor tier for every factor at the session's own 16:30 build.
+    assert factor_stand_in == [(factor, instant(NEW_YEAR_INDEX)) for factor in FACTORS] * 2
+
+
+def test_a_registry_not_fetched_since_before_the_session_published_is_refused_by_name(
+    stale_registry_store: PanelStore, factor_stand_in: list[tuple[str, datetime | None]]
+) -> None:
+    # The registry 31 December's step 2 left, read on 5 January. Its rows are `NEW_YEAR`'s, so
+    # nothing in the partitions says it is stale; only its fetch instant does. Step 2 of
+    # 5 January fetches the whole registry at or after that session's 16:30 and records that
+    # instant on every lifecycle year the fetch holds, so a newest stored year fetched before it
+    # is a registry no fetch has written since -- one that would miss a listing or a delisting
+    # of the days between, and with no 2026 partition to say so.
+    with pytest.raises(StaleRegistryError) as refused:
+        read_new_year(stale_registry_store)
+
+    message = str(refused.value)
+    assert STOCK_BASIC_DATASET in message
+    assert "2025" in message  # the newest lifecycle year the store holds
+    assert "2025-12-31T18:30:00+08:00" in message  # when it was fetched
+    assert "2026-01-05T16:30:00+08:00" in message  # when the session published
+    assert factor_stand_in == []  # refused before any factor is read
+
+
+def test_the_fetch_step_2_makes_for_the_session_is_what_lets_that_registry_be_read(
+    tmp_path: Path,
+    new_year_store: PanelStore,
+    factor_stand_in: list[tuple[str, datetime | None]],
+) -> None:
+    store = write_panel(tmp_path, STALE_REGISTRY)
+    with pytest.raises(StaleRegistryError):
+        read_new_year(store)
+    before = store.read_coverage(STOCK_BASIC_DATASET, 2025)
+
+    # Step 2 of 5 January: the whole registry fetched again, at that session's 16:30. Nothing
+    # has listed or died since, so the 2025 partition keeps its rows and only its coverage is
+    # recorded again -- with the new fetch's instant, which is what the read is judged on.
+    write_stock_universe(store, build_panel(NEW_YEAR).batch(STOCK_BASIC_DATASET))
+    after = store.read_coverage(STOCK_BASIC_DATASET, 2025)
+
+    assert store.registered_years(STOCK_BASIC_DATASET) == (2025,)
+    assert before is not None
+    assert after is not None
+    assert after.partition_content_hash == before.partition_content_hash
+    assert (before.as_of, after.as_of) == (LAST_EVENING_OF_2025, instant(NEW_YEAR_INDEX))
+    assert fingerprint(read_new_year(store)) == fingerprint(read_new_year(new_year_store))
+
+
+def test_a_panel_that_never_held_a_registry_is_refused_by_name(
+    no_registry_store: PanelStore, factor_stand_in: list[tuple[str, datetime | None]]
+) -> None:
+    # Nothing to fall back to: with no lifecycle year at or before the session's, the store has
+    # never held a registry, and a universe read from it would list no security at all.
+    assert no_registry_store.registered_years(STOCK_BASIC_DATASET) == ()
+    with pytest.raises(SurvivorFactsError, match="no stock_basic partition at or before 2026"):
+        read_new_year(no_registry_store)
+    assert factor_stand_in == []
+
+
+def test_the_stale_registry_error_is_a_named_facts_error() -> None:
+    assert issubclass(StaleRegistryError, SurvivorFactsError)
 
 
 @pytest.mark.parametrize(
