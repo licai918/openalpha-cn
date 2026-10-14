@@ -922,6 +922,8 @@ def test_the_holdings_are_the_settled_book_with_the_real_close_of_the_facts(
             "ts_code": B,
             "ledger_quantity": 800,
             "real_close": "11.50",
+            "ledger_mark": "11.50",
+            "ledger_ratio": None,
             "halted": False,
             "flags": [],
             "carried_since": None,
@@ -930,11 +932,32 @@ def test_the_holdings_are_the_settled_book_with_the_real_close_of_the_facts(
             "ts_code": C,
             "ledger_quantity": 900,
             "real_close": "10.10",
+            "ledger_mark": "10.10",
+            "ledger_ratio": None,
             "halted": False,
             "flags": [],
             "carried_since": None,
         },
     ]
+
+
+def test_a_holding_through_an_adjustment_keeps_its_real_close_and_says_the_ratio_to_its_mark(
+    s3_adjusted: Day,
+) -> None:
+    holdings = document_of(s3_adjusted)["paper"]["book"]["holdings"]
+
+    adjusted, plain = holdings
+    assert adjusted["ts_code"] == B
+    assert adjusted["ledger_quantity"] == 800
+    assert adjusted["real_close"] == "5.75"  # the facts day's, not the ledger's mark
+    assert adjusted["ledger_mark"] == "11.50"  # 5.75 x the ratio of 2: the ledger's units
+    assert adjusted["ledger_ratio"] == "2.0000"
+    assert plain["ts_code"] == C
+    assert (plain["real_close"], plain["ledger_mark"], plain["ledger_ratio"]) == (
+        "10.10",
+        "10.10",
+        None,
+    )
 
 
 def test_a_holding_the_decision_froze_or_calls_near_exit_says_so(s3: WrittenOff) -> None:
@@ -1475,6 +1498,20 @@ def test_the_positions_print_the_ledger_quantity_beside_the_real_close(s3: Writt
     assert "2 holdings" in line_with(lines, "positions")
     assert f"  {B}  ledger qty 800  real close 11.50" in lines
     assert f"  {C}  ledger qty 900  real close 10.10" in lines
+
+
+def test_a_position_after_an_adjustment_prints_the_real_close_and_the_ratio_to_reconcile(
+    s3_adjusted: Day,
+) -> None:
+    lines = summary_lines(document_of(s3_adjusted))
+
+    adjusted = next(line for line in lines if line.startswith(f"  {B}  ledger qty"))
+    plain = next(line for line in lines if line.startswith(f"  {C}  ledger qty"))
+    assert adjusted == f"  {B}  ledger qty 800  real close 5.75  ledger/real ratio 2.0000"
+    # The ledger's mark of 11.50 is not a price on any screen; the line never says it.
+    assert "11.50" not in adjusted
+    assert plain == f"  {C}  ledger qty 900  real close 10.10"
+    assert "account shares = ledger qty x ratio" in line_with(lines, "positions")
 
 
 def test_a_holding_says_whether_it_is_frozen_near_exit_or_carried(s3: WrittenOff) -> None:
