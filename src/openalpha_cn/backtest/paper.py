@@ -80,6 +80,7 @@ from typing import Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from openalpha_cn.backtest.execution import AShareExecutionPolicy, CostSchedule
 from openalpha_cn.backtest.multi_day import (
     CarriedMark,
     PortfolioBacktestRunner,
@@ -101,6 +102,7 @@ __all__ = [
     "PaperPortfolioReachedOutward",
     "PaperSessionResult",
     "refusing_outward_calls",
+    "slippage_folded_execution",
 ]
 
 _SIX = Decimal("0.000001")
@@ -305,6 +307,44 @@ KNOWN_PAPER_LIMITATIONS: Final[tuple[PaperLimitation, ...]] = (
 )
 
 
+def slippage_folded_execution(
+    costs: CostSchedule,
+    *,
+    slippage_rate: Decimal,
+) -> AShareExecutionPolicy:
+    """`costs` with `slippage_rate` charged in the transfer-fee slot, so a paper book pays what
+    the P6 strategy book pays for the same fill, to the fen (`V2-P7-017`).
+
+    The P6 book charges slippage beside its `CostSchedule`: `StrategySpec.slippage_rate` of each
+    fill's notional, rounded to the fen on its own (`strategy_backtest._record_fill`).
+    `PortfolioSimulator` has no slippage term, and `CostSchedule` may not grow one -- it is
+    embedded in the registered `StrategySpec`, so a new field would change a registered
+    configuration's serialisation (hard rule 3). The research protocol charges no transfer fee, so
+    the slippage rides in that slot (T5 section 6): `AShareExecutionPolicy` rounds each cost
+    component to the fen separately, and the two books then pay the same sum of the same rounded
+    terms on every fill, for every notional.
+
+    **That holds only into an empty slot, so a schedule that already charges a transfer fee is
+    refused.** Folded together, the two rates would be rounded once where the P6 book rounds them
+    apart, and the totals would part by a fen --
+    `tests/unit/backtest/test_paper_costs.py::
+    test_the_fold_refuses_a_schedule_that_already_charges_a_transfer_fee` measures one.
+
+    **Disclosed cost:** every `transfer_fee` a book built on this records -- on its transitions
+    and in its ledger -- is slippage, not a fee anybody levied, and wherever that book's
+    configuration or log is written it has to say so.
+    """
+    if costs.transfer_fee_rate != 0:
+        raise ValueError(
+            "cannot fold slippage into a schedule that already charges a transfer fee "
+            f"({costs.transfer_fee_rate}): one rate rounds once where the P6 book rounds the two "
+            "apart, so the fees would part by a fen"
+        )
+    return AShareExecutionPolicy(
+        CostSchedule.model_validate(costs.model_dump() | {"transfer_fee_rate": slippage_rate})
+    )
+
+
 class PaperSessionResult(BaseModel):
     """What one forward session did to a paper book, and the venue it did not use."""
 
@@ -338,6 +378,18 @@ class PaperPortfolio:
     2. **A session must move the book strictly forward and must already have been observed.**
        The runner lets its first step land *on* the opening state's date; re-advancing a paper
        book through a session it has lived would double every fill on it.
+
+    **`execution` is the costs the book pays** (`V2-P7-017`). Left out, it is the runner's
+    default policy under `CostSchedule()` -- commission 3bp with a 5.00 floor, transfer fee
+    0.1bp, stamp duty 0.5 per mille on sells, no slippage -- bit for bit what this class charged
+    before the argument existed. That default is far below the research protocol: T5 measured a
+    30,000-yuan buy paying 9.30 here against 37.50 in the P6 book
+    (`docs/research/p7-step0-validation/T5-paper-step-builder.md`). A paper book meant to be
+    compared with that book passes `slippage_folded_execution(PROTOCOL_COSTS, slippage_rate=
+    PROTOCOL_SLIPPAGE_RATE)`. Only the costs change: `AShareExecutionPolicy`'s lot, T+1,
+    price-limit and suspension rules read no cost schedule, and the simulator's cash check reads
+    the injected fees. The policy runs inside `refusing_outward_calls()` like everything else
+    `advance` calls, so a caller-supplied policy that reaches outward is refused as a ledger is.
     """
 
     def __init__(
@@ -345,9 +397,10 @@ class PaperPortfolio:
         *,
         ledger: PortfolioLedger,
         limits: PortfolioLimits | None = None,
+        execution: AShareExecutionPolicy | None = None,
     ) -> None:
         self.ledger = ledger
-        self._runner = PortfolioBacktestRunner(limits=limits, ledger=ledger)
+        self._runner = PortfolioBacktestRunner(limits=limits, ledger=ledger, execution=execution)
 
     def advance(
         self,

@@ -56,7 +56,7 @@ from typing import Protocol, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from openalpha_cn.backtest.execution import MarketBar
+from openalpha_cn.backtest.execution import AShareExecutionPolicy, MarketBar
 from openalpha_cn.backtest.portfolio import (
     PortfolioLimits,
     PortfolioOrder,
@@ -194,15 +194,22 @@ class PortfolioBacktestReport(BaseModel):
 
 
 class PortfolioBacktestRunner:
-    """Execute ordered daily sessions through the production portfolio core."""
+    """Execute ordered daily sessions through the production portfolio core.
+
+    `execution` (`V2-P7-017`) is handed to `PortfolioSimulator` as it stands, so leaving it out
+    is the simulator's own default -- `AShareExecutionPolicy()` under `CostSchedule()` -- exactly
+    as before the argument existed. It is how a book charges costs other than the default: the
+    paper book passes the research protocol's (`backtest/paper.py`).
+    """
 
     def __init__(
         self,
         *,
         limits: PortfolioLimits | None = None,
         ledger: PortfolioLedger | None = None,
+        execution: AShareExecutionPolicy | None = None,
     ) -> None:
-        self.simulator = PortfolioSimulator(limits=limits)
+        self.simulator = PortfolioSimulator(execution=execution, limits=limits)
         self.ledger = ledger
 
     def run(
