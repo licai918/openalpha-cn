@@ -473,3 +473,57 @@ def test_the_listing_row_is_a_row_of_the_frame_the_adapter_says_it_is(evening: D
     fact: SecurityFacts = {row.ts_code: row for row in evening.facts.facts}[BSE_BEFORE_LISTING]
     assert (fact.board, fact.listed_sessions) == ("bse", 0)
     assert evening.facts.session == SIGNAL
+
+
+SHA: Final[str] = "a" * 64
+
+
+def _filed_pin(**changes: Any) -> dict[str, Any]:
+    """A pin as the command files it before the fetch: the pin's keys, the registration it was
+    written under and the evening's facts read."""
+    return {**_pin(), "registration": {"sha256": SHA}, "evening_read": {}, **changes}
+
+
+def _check(document: Any) -> None:
+    morning.check_morning_file(
+        document, session=SIGNAL, evening_snapshot_id=SNAPSHOT, registration_sha256=SHA
+    )
+
+
+def test_a_pin_the_command_filed_is_this_evenings_and_a_finished_file_is_complete(
+    evening: Day,
+) -> None:
+    pin = _filed_pin()
+
+    _check(pin)
+
+    assert not morning.morning_complete(pin)
+    advice = _compare(evening, _evening_document(evening), evening)
+    assert morning.morning_complete(morning.morning_document(pin, advice))
+
+
+@pytest.mark.parametrize(
+    ("changes", "named"),
+    [
+        ({"schema": "openalpha-daily-survivor-morning/v0"}, "is not a"),
+        ({"session": "2026-04-09"}, "2026-04-09"),
+        ({"evening_snapshot_id": "snapshot_of_another_evening"}, "snapshot_of_another_evening"),
+        ({"registration": {"sha256": "b" * 64}}, "another registration"),
+        ({"registration": None}, "another registration"),
+        ({"as_of": "2026-04-13T08:30:00"}, "pinned `as_of`"),
+        ({"as_of": "tomorrow morning"}, "pinned `as_of`"),
+        ({"as_of": None}, "pinned `as_of`"),
+        ({"held": "none"}, "`held`"),
+        ({"evening_read": None}, "evening read"),
+    ],
+)
+def test_a_morning_file_that_is_not_this_evenings_is_refused_by_what_is_wrong_with_it(
+    changes: dict[str, Any], named: str
+) -> None:
+    with pytest.raises(morning.MorningCheckError, match=named):
+        _check(_filed_pin(**changes))
+
+
+def test_a_morning_file_that_is_not_a_mapping_is_refused() -> None:
+    with pytest.raises(morning.MorningCheckError, match="is not a"):
+        _check(["not", "a", "mapping"])
