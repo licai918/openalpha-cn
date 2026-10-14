@@ -172,6 +172,8 @@ from pathlib import Path
 from typing import Final, Literal, cast
 from zoneinfo import ZoneInfo
 
+from pydantic import ValidationError
+
 from openalpha_cn.domain import survivor_screen
 from openalpha_cn.domain.alpha_model import (
     AlphaModelArtifact,
@@ -179,18 +181,29 @@ from openalpha_cn.domain.alpha_model import (
     Prediction,
     PredictionBatch,
 )
-from openalpha_cn.domain.daily_prices import DAILY_DATASET
+from openalpha_cn.domain.daily_prices import DAILY_DATASET, PriceDataError
 from openalpha_cn.domain.factor_transform import FactorTransformSpec
-from openalpha_cn.domain.name_history import NAMECHANGE_DATASET
+from openalpha_cn.domain.labels import LabelError
+from openalpha_cn.domain.name_history import NAMECHANGE_DATASET, NameHistoryError
+from openalpha_cn.domain.panel_batch import PanelBatchError
 from openalpha_cn.domain.prediction_record import PredictionRecord
-from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET, SUSPENSION_DATASET
-from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET
+from openalpha_cn.domain.price_limits import (
+    PRICE_LIMIT_DATASET,
+    SUSPENSION_DATASET,
+    SuspensionError,
+)
+from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET, StockUniverseError
 from openalpha_cn.domain.survivor_book import ScreenResult, SurvivorBookConfig
-from openalpha_cn.domain.trading_calendar import TRADING_CALENDAR_DATASET
-from openalpha_cn.panel.catalog import DEFAULT_DATE_TIMEZONE, PartitionNotYetKnowableError
+from openalpha_cn.domain.trading_calendar import TRADING_CALENDAR_DATASET, TradingCalendarError
+from openalpha_cn.panel.catalog import (
+    DEFAULT_DATE_TIMEZONE,
+    PanelStorageError,
+    PartitionNotYetKnowableError,
+)
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import (
     FACTOR_DEFINITIONS,
+    FactorEngineError,
     factor_transform_manifest_dataset,
     load_factor_transform_manifests,
     processed_factor_dataset,
@@ -206,6 +219,7 @@ from openalpha_cn.strategy_registration import (
 from openalpha_cn.strategy_survivor_facts import (
     AMOUNT_WINDOW_SESSIONS,
     FactsDay,
+    SurvivorFactsError,
     build_facts_day,
 )
 
@@ -216,6 +230,7 @@ __all__ = [
     "SURVIVOR_HORIZON",
     "SURVIVOR_PROVENANCE_DIRECTORY",
     "SURVIVOR_PROVENANCE_SCHEMA",
+    "SURVIVOR_RECOMPUTE_REFUSALS",
     "SURVIVOR_TIER",
     "ChangeScope",
     "SurvivorCheckArgumentError",
@@ -301,6 +316,35 @@ class SurvivorCheckArgumentError(ValueError):
 
     A caller's error, never a change in the store: it is raised, and is not one of the refusals a
     check may treat as "this record cannot be recomputed", so it can never become an excuse."""
+
+
+SURVIVOR_RECOMPUTE_REFUSALS: Final[tuple[type[Exception], ...]] = (
+    SurvivorFactsError,
+    SurvivorRegistrationError,
+    PanelStorageError,
+    FactorEngineError,
+    PanelBatchError,
+    TradingCalendarError,
+    StockUniverseError,
+    NameHistoryError,
+    PriceDataError,
+    SuspensionError,
+    LabelError,
+    ValidationError,
+)
+"""The refusals that mean a record's day **cannot be recomputed** -- the late-record check's
+`recompute_failed` -- and nothing else (P6's `_READ_REFUSALS`, for this reader).
+
+Each is a named refusal of the data or the record vocabulary: the facts adapter's
+(`SurvivorFactsError` -- coverage, a missing 16:30 build, a stale registry), a record that cannot
+be put (`SurvivorRegistrationError`), the catalog's (`PanelStorageError`, the not-yet-knowable
+read included), a factor tier's (`FactorEngineError`), and the domain builders' refusals of what
+the loaders hand them, down to a model's own validation. **A check must catch these and nothing
+else.** A broad `except` would turn a programming error -- a `TypeError`, an `AttributeError`, a
+caller's `SurvivorCheckArgumentError` -- into a record that "could not be recomputed", and that,
+named against a moved partition, into an `UNVERIFIABLE` admission. A busy catalog
+(`PanelCatalogBusyError`) is not here either: it says nothing about the record, so it propagates
+and the check is run again."""
 
 
 # --- the record ----------------------------------------------------------------------------------
@@ -875,7 +919,7 @@ def recompute_survivor_batch(
 
     try:
         return scored_at(filed)
-    except (RuntimeError, ValueError) as error:
+    except SURVIVOR_RECOMPUTE_REFUSALS as error:
         if not _not_yet_knowable(error):
             raise
         readable = _readable_instant(

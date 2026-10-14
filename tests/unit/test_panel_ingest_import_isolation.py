@@ -635,6 +635,10 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             # calendar.
             "strategy_survivor_facts.AMOUNT_WINDOW_SESSIONS",
             "panel_ingest.load_trading_calendar",
+            # Review Minor 4: the refusals that mean a record's day cannot be recomputed, the
+            # facts adapter's and a factor tier's among them; types, not reads.
+            "strategy_survivor_facts.SurvivorFactsError",
+            "panel_factors.FactorEngineError",
             # ... P6's record vocabulary, reused rather than restated: the composite's name, the
             # registration a record declares, its refusal, a filing's digest and its custody
             # instant ...
