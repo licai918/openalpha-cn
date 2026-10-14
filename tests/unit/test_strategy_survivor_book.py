@@ -399,6 +399,7 @@ def catch_up_through(
     *,
     registration: SurvivorRegistration = REGISTRATION,
     factory: Callable[[PortfolioLedger], PaperPortfolio] = make_portfolio,
+    ordinals: SessionOrdinals = ORDINALS,
 ) -> tuple[CatchUpResult, ...]:
     """Catch the book up through the session of frame index `through`."""
     return catch_up(
@@ -406,7 +407,7 @@ def catch_up_through(
         state_store=paper.store,
         ledger=paper.ledger,
         registration=registration,
-        ordinals=ORDINALS,
+        ordinals=ordinals,
         calendar=CALENDAR,
         through_index=ORDINALS.index_of(SESSIONS[through]),
         as_of=AS_OF,
@@ -426,13 +427,14 @@ def evening_of(
     registration: SurvivorRegistration = REGISTRATION,
     factory: Callable[[PortfolioLedger], PaperPortfolio] = make_portfolio,
     as_of: datetime = AS_OF,
+    ordinals: SessionOrdinals = ORDINALS,
 ) -> SurvivorEvening:
     return evening(
         panel=panel,
         state_store=paper.store,
         ledger=paper.ledger,
         registration=registration,
-        ordinals=ORDINALS,
+        ordinals=ordinals,
         calendar=CALENDAR,
         session=SESSIONS[index],
         as_of=as_of,
@@ -723,14 +725,28 @@ def test_a_run_whose_opening_differs_from_the_book_held_is_refused_naming_it(
 
 
 def test_ordinals_counted_from_another_epoch_than_the_registered_one_are_refused(
-    paper: Paper,
+    panel: PanelStore, paper: Paper
 ) -> None:
-    with pytest.raises(SurvivorDayError) as refused:
-        head_of(paper, 61, REGISTRATION, SessionOrdinals(CALENDAR, SESSIONS[59]))
+    other = SessionOrdinals(CALENDAR, SESSIONS[59])
 
-    assert refused.value.step == "paper head"
-    assert EPOCH.isoformat() in str(refused.value)
+    with pytest.raises(SurvivorDayError) as at_head:
+        head_of(paper, 61, REGISTRATION, other)
+
+    assert at_head.value.step == "paper head"
+    assert EPOCH.isoformat() in str(at_head.value)
     assert paper.store.sessions() == ()
+    run_day(panel, paper, 61)
+    before = files(paper)
+    with pytest.raises(SurvivorDayError) as at_catch_up:
+        catch_up_through(panel, paper, 62, ordinals=other)
+    facts = read_facts(panel, 62, ())
+    with pytest.raises(SurvivorDayError) as at_evening:
+        evening_of(
+            panel, paper, 62, facts=facts, screen=real_screen(facts), held=(), ordinals=other
+        )
+    assert at_catch_up.value.step == at_evening.value.step == "paper book"
+    assert EPOCH.isoformat() in str(at_catch_up.value)
+    assert files(paper) == before
 
 
 def test_an_epoch_further_back_than_the_panel_can_catch_up_is_refused_when_the_book_opens(
