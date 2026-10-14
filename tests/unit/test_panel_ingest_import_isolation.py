@@ -572,6 +572,22 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "strategy_view.PROTOCOL_SLIPPAGE_RATE",
         }
     ),
+    "openalpha_cn.strategy_survivor_book": frozenset(
+        {
+            # V2-P7-008. The survivor day's paper book: the registration it runs under and the
+            # transform its facts were built under (`FACTOR_TRANSFORMS`, a declaration) ...
+            "panel_factors.FACTOR_TRANSFORMS",
+            "strategy_survivor.SurvivorRegistration",
+            # ... the facts day of every session it catches up holding something, and of
+            # tonight's when the catch-up changed the holdings ...
+            "strategy_survivor_facts.FactsDay",
+            "strategy_survivor_facts.build_facts_day",
+            # ... and each session's market, counted in the book's ordinals. It reads nothing
+            # itself: every read is one of these two adapters'.
+            "strategy_survivor_market.SessionOrdinals",
+            "strategy_survivor_market.settlement_market",
+        }
+    ),
     "openalpha_cn.strategy_survivor_facts": frozenset(
         {
             # V2-P7-016. The survivor book's eligibility facts: one row per listed security,
@@ -935,6 +951,32 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
                 "fina_indicator",
                 "income",
                 "index_daily",
+            }
+        ),
+    ),
+    "openalpha_cn.strategy_survivor_book": DatasetReach(
+        # V2-P7-008. It names no dataset: every one it reaches arrives through the two adapters
+        # it takes across the seam -- the facts day (`build_facts_day`: the calendar, the
+        # registry, the name corpus, the halts, the bands, the bars and, through the processed
+        # factor tier, the inputs of the four factors) and the session's market
+        # (`settlement_market`: the bars and bands again, the adjustment factors and the
+        # benchmark's close).
+        named=frozenset(),
+        reached=frozenset(
+            {
+                "adj_factor",
+                "balancesheet",
+                "cashflow",
+                "daily",
+                "daily_basic",
+                "fina_indicator",
+                "income",
+                "index_daily",
+                "namechange",
+                "stk_limit",
+                "stock_basic",
+                "suspend_d",
+                "trade_cal",
             }
         ),
     ),
