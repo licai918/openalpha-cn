@@ -16,7 +16,11 @@ to settle in which order, what to read off the panel for each, and every refusal
    `config_id`, the book's `survivor_config_digest` and the epoch. The digest alone is the
    book's identity in every snapshot; the marker adds the `config_id`, which covers the adapter
    block too, so a changed adapter over an unchanged book -- which `open_book` accepts -- is
-   refused instead of continuing the same book under another registration.
+   refused instead of continuing the same book under another registration. Written before the
+   book is opened, so a run that stops between the two leaves a marker and no book, which the
+   same registration completes and another one is refused by; the marker guards against a
+   changed registration, not against its own deletion -- one removed by hand is written again
+   by the next run.
 2. **The head** (`paper_head`): `open_book` on **every** run, with the registration's epoch,
    capital and digest (C3 review rule 2): the same opening again writes nothing, and is the
    nightly check that the book held is the one registered; any other opening is refused by
@@ -29,7 +33,9 @@ to settle in which order, what to read off the panel for each, and every refusal
    there -- the prediction must not be lost to them -- but here, by the paper book
    (`delisted_or_refuse`): `row` passes, `delisted` is handed to the settlement (a delisted
    holding with no bar is written off, D13), and every other status refuses the day by name with
-   its remedy.
+   its remedy. Every function that reads a facts day takes `transform`, the processed tier the
+   factors were built under: the registration's (`FACTOR_TRANSFORMS.get(adapter.transform)`)
+   unless it is given, as it is for a store built under another one.
 4. **The catch-up** (`catch_up`), before the evening: every session `missing_sessions` names
    through the session before tonight's, oldest first. For a book holding something the session's
    facts are read at the run's `as_of` with **`min_coverage=0.0`** -- a catch-up makes no
@@ -55,7 +61,7 @@ screens it again (the caller's facts and screen are used as given otherwise). Th
 returns carries the facts and screen it ran on.
 
 **A session already settled is run as an evening, whatever the clock** (rule 1): `evening` always
-calls `run_evening`, whose answer for a held session is `unchanged`, written nothing, with the
+calls `run_evening`, whose answer for a held session is `unchanged`, writing nothing, with the
 evening's settlement, decision and trade list derived again -- from the pinned inputs, which is
 what makes a rerun reproduce. The book it settles from is then read with `load_snapshot` (the
 session before, held), because the head is the session itself.
