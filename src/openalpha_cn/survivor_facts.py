@@ -50,13 +50,16 @@ a bar: the kernel sells such a holding rather than freezing it.
   holding needs no composite and a halted name cannot be an entrant.
 - **The 5% band** is offered to `name_status` only for a main-board security with a bar and a
   published bounded band (controller decision 1); elsewhere it is `None`.
-- **The coverage guard.** A row is *scored* when the security has a bar on the day and every
-  factor value. A day on which fewer than `min_coverage` of the rows are scored is refused with
-  `FactsCoverageError`, as is an empty day: a screen that cannot see most of the market would
-  make the kernel sell every holding it cannot see. A carried row never counts, because the
-  engine values a halted security off its own last sessions -- a market-wide halt would
-  otherwise pass with every value present -- so a day with no build and a day on which the bars
-  are missing both land here.
+- **The coverage guard.** It counts only the rows on the boards the book may trade
+  (`config.boards`): `FactsDay.universe_size` is their number and `scored_size` those whose
+  security has a bar on the day and every factor value. A day on which fewer than
+  `min_coverage` of them are scored is refused with `FactsCoverageError`, as is a day with none:
+  a screen that cannot see most of the market would make the kernel sell every holding it
+  cannot see -- a trading holding with a missing value is sold, not frozen -- and rows the book
+  cannot trade must not dilute that. A carried row never counts, because the engine values a
+  halted security off its own last sessions -- a market-wide halt would otherwise pass with
+  every value present -- so a day with no build and a day on which the bars are missing both
+  land here.
 
 ## The three-state name
 
@@ -105,6 +108,7 @@ from dataclasses import dataclass, fields
 from datetime import date, datetime
 from decimal import Decimal
 from fractions import Fraction
+from itertools import pairwise
 from types import MappingProxyType
 from typing import Final, Literal, get_args
 
@@ -215,6 +219,9 @@ class FactsNotes:
     Counts only: they land in the daily log so an unusual day shows up as a number, not as a
     silent change in who was eligible. `st` and `name_unknown_assumed_ordinary` are totals, and
     each is refused unless its parts add up to it; build the name counts with `tally`.
+
+    The notes count rows on **every** board; `FactsDay.universe_size` and `scored_size`, which
+    the coverage guard compares, count only the rows on the boards the book may trade.
     """
 
     name_unknown_assumed_ordinary: int
@@ -438,8 +445,9 @@ def assemble_fact(
 def require_coverage(*, scored_size: int, universe_size: int, min_coverage: float) -> None:
     """Refuse a day on which fewer than `min_coverage` of the rows are scored.
 
-    A row is scored when its security has a bar on the day and every factor value; see the
-    module docstring for why a carried row never counts.
+    `universe_size` is the day's rows on the boards the book may trade, and `scored_size` those
+    of them whose security has a bar on the day and every factor value; see the module docstring
+    for why a carried row never counts and why other boards do not.
 
     Exact: the comparison is on `Fraction`s, so a coverage exactly at the threshold passes. An
     empty day is refused whatever the threshold -- a screen of nothing would sell everything.
@@ -447,9 +455,10 @@ def require_coverage(*, scored_size: int, universe_size: int, min_coverage: floa
     _require_coverage_threshold(min_coverage)
     if universe_size <= 0 or Fraction(scored_size) < Fraction(min_coverage) * universe_size:
         raise FactsCoverageError(
-            f"{scored_size} of {universe_size} listed securities have a bar and every factor "
-            f"value, below min_coverage {min_coverage}; a screen that cannot see most of the "
-            "market would sell every holding it cannot see, so the day is refused instead"
+            f"{scored_size} of {universe_size} securities on the boards the book trades have a "
+            f"bar and every factor value, below min_coverage {min_coverage}; a screen that "
+            "cannot see most of the market would sell every holding it cannot see, so the day "
+            "is refused instead"
         )
 
 
@@ -460,16 +469,50 @@ def _require_coverage_threshold(min_coverage: float) -> None:
 
 @dataclass(frozen=True, slots=True)
 class FactsDay:
-    """One signal day's facts, ready for `domain.survivor_screen.screen`."""
+    """One signal day's facts, ready for `domain.survivor_screen.screen`.
+
+    It checks its own counts on construction and refuses with `SurvivorFactsError` a day whose
+    rows are not strictly ascending by `ts_code` (so each code once), whose `universe_size` is
+    not the number of rows on `boards`, or whose `scored_size` is negative or more than the rows
+    on `boards` carrying every factor value (so never more than `universe_size`).
+    """
 
     session: date
     facts: tuple[SecurityFacts, ...]
-    """One row per listed security (halted ones included), ascending by `ts_code`."""
+    """One row per listed security on every board (halted ones included), ascending by
+    `ts_code`; see `build_facts_day` for the securities that have none."""
     notes: FactsNotes
+    boards: tuple[Board, ...]
+    """The boards the book may trade (`SurvivorBookConfig.boards`): the two sizes count only the
+    rows on them."""
     universe_size: int
-    """`len(facts)`."""
+    """The rows whose `board` is in `boards` -- the coverage guard's denominator."""
     scored_size: int
-    """The rows whose security has a bar on the day and every factor value."""
+    """Of those, the rows whose security has a bar on the day and every factor value -- the
+    coverage guard's numerator. A carried row (no bar) is never scored."""
+
+    def __post_init__(self) -> None:
+        codes = [fact.ts_code for fact in self.facts]
+        out_of_order = [(earlier, later) for earlier, later in pairwise(codes) if later <= earlier]
+        if out_of_order:
+            earlier, later = out_of_order[0]
+            raise SurvivorFactsError(
+                f"facts must be strictly ascending by ts_code, one row per code; {later} follows "
+                f"{earlier}"
+            )
+        allowed = [fact for fact in self.facts if fact.board in self.boards]
+        if self.universe_size != len(allowed):
+            raise SurvivorFactsError(
+                f"universe_size is {self.universe_size} but {len(allowed)} of the {len(codes)} "
+                f"rows are on the boards {self.boards}"
+            )
+        complete = sum(1 for fact in allowed if None not in fact.oriented_values)
+        if not 0 <= self.scored_size <= complete:
+            raise SurvivorFactsError(
+                f"scored_size is {self.scored_size}, outside 0..{complete}: only {complete} of "
+                f"the {self.universe_size} rows on the boards {self.boards} carry every factor "
+                "value"
+            )
 
 
 def build_facts_day(
@@ -597,7 +640,7 @@ def _read_facts_day(
 
     facts: list[SecurityFacts] = []
     reasons: list[NameStatusReason] = []
-    carried = no_bar = no_listing_row = scored = 0
+    carried = no_bar = no_listing_row = universe = scored = 0
     for code in bars.codes:
         bar = bars.today.get(code)
         last = bar if bar is not None else bars.last_bar.get(code)
@@ -642,10 +685,12 @@ def _read_facts_day(
                 oriented_values=oriented,
             )
         )
-        if bar is not None and all(value is not None for value in oriented):
-            scored += 1
+        if board in config.boards:
+            universe += 1
+            if bar is not None and all(value is not None for value in oriented):
+                scored += 1
 
-    require_coverage(scored_size=scored, universe_size=len(facts), min_coverage=min_coverage)
+    require_coverage(scored_size=scored, universe_size=universe, min_coverage=min_coverage)
     return FactsDay(
         session=session,
         facts=tuple(facts),
@@ -655,7 +700,8 @@ def _read_facts_day(
             no_listing_row=no_listing_row,
             no_bar_within_carry=no_bar,
         ),
-        universe_size=len(facts),
+        boards=config.boards,
+        universe_size=universe,
         scored_size=scored,
     )
 

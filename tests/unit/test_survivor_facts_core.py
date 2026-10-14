@@ -29,6 +29,7 @@ from openalpha_cn.domain.trading_calendar import (
     build_trading_calendar,
 )
 from openalpha_cn.survivor_facts import (
+    FactsDay,
     FactsNotes,
     ListingAgeHorizonError,
     SurvivorFactsError,
@@ -759,3 +760,84 @@ def test_the_tally_refuses_a_reason_it_does_not_know() -> None:
             no_listing_row=0,
             no_bar_within_carry=0,
         )
+
+
+# --- FactsDay ----------------------------------------------------------------------------
+
+EMPTY_NOTES = FactsNotes.tally(
+    reasons=[], suspended_without_bar=0, no_listing_row=0, no_bar_within_carry=0
+)
+
+
+def day_of(*facts: SecurityFacts, **overrides: object) -> FactsDay:
+    """A day over `facts` whose counts are right unless overridden: the main board only, and
+    every main-board row with all its values scored."""
+    allowed = [fact for fact in facts if fact.board == "main"]
+    arguments: dict[str, object] = {
+        "session": DAY,
+        "facts": facts,
+        "notes": EMPTY_NOTES,
+        "boards": ("main",),
+        "universe_size": len(allowed),
+        "scored_size": sum(1 for fact in allowed if None not in fact.oriented_values),
+    }
+    arguments.update(overrides)
+    return FactsDay(**arguments)  # type: ignore[arg-type]
+
+
+# Two main-board rows (one missing a value), one ChiNext row and one STAR row, by code.
+MAIN_A = assemble(ts_code="600001.SH")
+MAIN_B = assemble(ts_code="600002.SH", oriented_values=(0.5, None, 0.0, 2.0))
+GROWTH = assemble(ts_code="300001.SZ", board="growth")
+STAR_ROW = assemble(ts_code="688001.SH", board="star")
+FOUR = (GROWTH, MAIN_A, MAIN_B, STAR_ROW)
+
+
+def test_a_consistent_day_is_accepted_and_counts_only_the_allowed_boards() -> None:
+    # 4 rows; 2 on the main board, 1 of which has every value.
+    day = day_of(*FOUR)
+
+    assert (day.universe_size, day.scored_size) == (2, 1)
+    assert day.boards == ("main",)
+
+
+def test_a_day_counted_over_more_boards_counts_their_rows() -> None:
+    day = day_of(*FOUR, boards=("main", "growth"), universe_size=3, scored_size=2)
+
+    assert (day.universe_size, day.scored_size) == (3, 2)
+
+
+@pytest.mark.parametrize(
+    ("facts", "match"),
+    [
+        ((MAIN_A, GROWTH), "ascending"),  # out of order
+        ((MAIN_A, MAIN_A), "ascending"),  # the same code twice
+    ],
+    ids=["unsorted", "repeated"],
+)
+def test_facts_out_of_order_or_repeated_are_refused(
+    facts: tuple[SecurityFacts, ...], match: str
+) -> None:
+    with pytest.raises(SurvivorFactsError, match=match):
+        day_of(*facts, universe_size=sum(1 for fact in facts if fact.board == "main"))
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        # Every row counted, though two are on boards the book cannot trade.
+        ({"universe_size": 4}, "universe_size"),
+        ({"universe_size": 1}, "universe_size"),
+        # More scored than the universe holds.
+        ({"universe_size": 2, "scored_size": 3}, "scored_size"),
+        # MAIN_B lacks a value, so at most one main-board row can be scored.
+        ({"scored_size": 2}, "scored_size"),
+        ({"scored_size": -1}, "scored_size"),
+    ],
+    ids=["all-boards", "short", "scored-over-universe", "scored-without-values", "negative"],
+)
+def test_counts_that_do_not_match_the_rows_are_refused(
+    overrides: dict[str, int], match: str
+) -> None:
+    with pytest.raises(SurvivorFactsError, match=match):
+        day_of(*FOUR, **overrides)

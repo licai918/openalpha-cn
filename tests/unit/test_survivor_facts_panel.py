@@ -688,10 +688,11 @@ COVERAGE: Final[Variant] = Variant(
     last=SIGNAL_INDEX,
     builds=(68, SIGNAL_INDEX),
     undefined=MappingProxyType(
-        {68: frozenset(ORDINARY[:18]), SIGNAL_INDEX: frozenset(ORDINARY[:19])}
+        {68: frozenset(ORDINARY[:17]), SIGNAL_INDEX: frozenset(ORDINARY[:18])}
     ),
 )
-"""`reversal_1d` answers `None` for 18 more securities on session 68 and 19 more on 69."""
+"""`reversal_1d` answers `None` for 17 more main-board securities on session 68 and 18 more on
+69."""
 
 
 @pytest.fixture(scope="module")
@@ -837,6 +838,7 @@ def fingerprint(day: FactsDay) -> str:
             "session": day.session.isoformat(),
             "facts": [fact.model_dump(mode="json") for fact in day.facts],
             "notes": dataclasses.asdict(day.notes),
+            "boards": list(day.boards),
             "universe_size": day.universe_size,
             "scored_size": day.scored_size,
         },
@@ -900,7 +902,28 @@ def test_every_listed_security_gets_exactly_one_hand_derived_fact(full_store: Pa
     assert day.session == SIGNAL
     assert [fact.ts_code for fact in day.facts] == list(ROWS)  # ascending, one each
     assert day.facts == tuple(expected_fact(code) for code in ROWS)
-    # 40 rows; 38 scored -- HALTED has no bar today and NEW_LISTING lacks two values.
+    # 40 rows, 38 on the main board (CHINEXT and STAR are not); of those 36 are scored --
+    # HALTED has no bar today and NEW_LISTING lacks two values.
+    assert len(day.facts) == 40
+    assert day.boards == CONFIG.boards
+    assert (day.universe_size, day.scored_size) == (38, 36)
+
+
+def test_the_coverage_counts_only_rows_on_the_boards_the_book_trades(
+    full_store: PanelStore,
+) -> None:
+    # Review Minor 4: a trading holding with a missing value IS sold, so a guard over every board
+    # would let a main-board outage hide behind ChiNext and STAR rows. With all three boards
+    # allowed, CHINEXT and STAR (both trading, both with every value) count again.
+    wider = SurvivorBookConfig(
+        seed=7,
+        composite_factors=FACTORS,
+        min_listing_sessions=60,
+        boards=("main", "growth", "star"),
+    )
+    day = read_day(full_store, config=wider)
+
+    assert len(day.facts) == 40
     assert (day.universe_size, day.scored_size) == (40, 38)
 
 
@@ -1051,7 +1074,7 @@ def test_a_listed_security_with_no_bar_within_the_carry_bound_has_no_row_and_is_
 
     assert HALTED in {fact.ts_code for fact in within.facts}
     assert HALTED not in {fact.ts_code for fact in beyond.facts}
-    assert (beyond.universe_size, beyond.scored_size) == (39, 38)
+    assert (beyond.universe_size, beyond.scored_size) == (37, 36)  # main board only
     assert beyond.notes.no_bar_within_carry == 2  # HALTED and NEVER_TRADED
     assert beyond.notes.suspended_without_bar == 0
 
@@ -1114,18 +1137,18 @@ def test_held_codes_given_as_one_string_are_refused(full_store: PanelStore) -> N
 
 
 def test_a_coverage_exactly_at_the_threshold_is_accepted(coverage_store: PanelStore) -> None:
-    # Session 68: 38 rows are scored (HALTED has no bar, NEW_LISTING lacks two values), and 18
-    # more lose `reversal_1d`: 20 of 40 is exactly the default 0.5.
+    # Session 68, main board only: 38 rows, 36 scored (HALTED has no bar, NEW_LISTING lacks two
+    # values), and 17 more lose `reversal_1d`: 19 of 38 is exactly the default 0.5.
     day = read_day(coverage_store, 68)
 
-    assert (day.universe_size, day.scored_size) == (40, 20)
+    assert (day.universe_size, day.scored_size) == (38, 19)
 
 
 def test_a_coverage_below_the_threshold_is_refused_with_both_counts(
     coverage_store: PanelStore,
 ) -> None:
-    # Session 69: 19 more lose `reversal_1d`, so 19 of 40 -- one short of half.
-    with pytest.raises(FactsCoverageError, match=r"19 of 40.*0\.5"):
+    # Session 69: 18 more lose `reversal_1d`, so 18 of 38 -- one short of half.
+    with pytest.raises(FactsCoverageError, match=r"18 of 38.*0\.5"):
         read_day(coverage_store, SIGNAL_INDEX)
 
 
@@ -1135,20 +1158,21 @@ def test_a_wholesale_outage_is_refused_rather_than_handed_to_the_kernel(
     # Every security but 600001.SH is halted all day on the signal day. Each still gets its row,
     # carried on the 68th session's close, and the engine even values each one off its own last
     # sessions -- so counting rows with values alone would pass this day. A carried row is not
-    # scored: 1 of 40 is far below 0.5. (A session with no bar at all cannot be stored --
-    # `write_daily_panel` refuses a year missing an open session -- and the bar read refuses a
-    # session it cannot see; those are the other ways an outage stops the day.)
+    # scored: 1 of 37 main-board rows is far below 0.5. (A session with no bar at all cannot be
+    # stored -- `write_daily_panel` refuses a year missing an open session -- and the bar read
+    # refuses a session it cannot see; those are the other ways an outage stops the day.)
     #
     # 39 rows, not 40: UNREGISTERED is in the universe only through a bar on the day (it has no
     # listing row), and today it has none. It could never have been held -- it is always
-    # `listing_too_recent` -- so it has no holding to protect.
-    with pytest.raises(FactsCoverageError, match=r"1 of 39"):
+    # `listing_too_recent` -- so it has no holding to protect. 37 of the 39 are main board.
+    with pytest.raises(FactsCoverageError, match=r"1 of 37"):
         read_day(outage_store)
 
     # What the guard saw, with the guard switched off: 38 carried rows, 38 rows carrying every
     # value (NEW_LISTING still lacks its two long windows), yet only 600001.SH traded.
     seen = read_day(outage_store, min_coverage=0.0)
-    assert (seen.universe_size, seen.scored_size) == (39, 1)
+    assert len(seen.facts) == 39
+    assert (seen.universe_size, seen.scored_size) == (37, 1)
     assert UNREGISTERED not in {fact.ts_code for fact in seen.facts}
     assert seen.notes.suspended_without_bar == 38
     assert sum(1 for fact in seen.facts if None not in fact.oriented_values) == 38
@@ -1158,7 +1182,7 @@ def test_a_day_with_no_factor_build_is_refused_by_the_coverage_guard(
     full_store: PanelStore,
 ) -> None:
     # `FULL` builds on sessions 68, 69 and 70 and not on 67: every value is `None`.
-    with pytest.raises(FactsCoverageError, match=r"0 of 40"):
+    with pytest.raises(FactsCoverageError, match=r"0 of 38"):
         read_day(full_store, 67)
 
 
