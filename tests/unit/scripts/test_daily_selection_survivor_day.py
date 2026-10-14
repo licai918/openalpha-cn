@@ -56,7 +56,8 @@ from openalpha_cn.domain.survivor_screen import screen
 from openalpha_cn.domain.trading_calendar import TRADING_CALENDAR_DATASET
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import FACTOR_TRANSFORMS
-from openalpha_cn.panel_ingest import load_trading_calendar
+from openalpha_cn.panel_ingest import load_trading_calendar, session_publication_instant
+from openalpha_cn.runtime.composition import build_storage
 from openalpha_cn.storage.paper_state import FilePaperStateStore
 from openalpha_cn.storage.predictions import FilePredictionStore
 from openalpha_cn.strategy_registration import batch_digest
@@ -528,6 +529,121 @@ def test_a_day_is_routed_by_its_pinned_clock_and_one_too_late_to_register_files_
     assert "prediction" not in journal
     assert _records(world) == ()
     assert list((world.runtime / "daily_survivor_provenance").glob("*.json")) == []
+
+
+# --- a day completed after its evening was committed, and one that can no longer be ---------
+
+NEXT: Final[date] = date(2026, 4, 7)
+NEXT_AS_OF: Final[datetime] = datetime.fromisoformat("2026-04-07T18:30:00+08:00")
+NEXT_CLOCK: Final[datetime] = datetime.fromisoformat("2026-04-07T18:35:00+08:00")
+
+
+def _commit_evening(world: tds.World, session: date, as_of: datetime) -> None:
+    """The paper book's evening of `session` committed as D5b's step 8 commits it -- through
+    `strategy_survivor_book.evening`, on the day's facts and screen read at `as_of` with the
+    holdings the book has -- and nothing journalled: the run that committed it stopped there."""
+    survivor = _survivor()
+    storage = build_storage(runtime_dir=world.runtime, clock=lambda: RUN_CLOCK)
+    panel = PanelStore(world.runtime / "panel")
+    calendar = load_trading_calendar(panel, exchange="SSE", years=(2026,), as_of=as_of)
+    with strategy_survivor_book.paper_book_lock(world.runtime / "paper") as lock:
+        head = held_head(storage.paper_state_store)
+        assert head is not None
+        held = strategy_survivor_book.held_codes(head)
+        facts = strategy_survivor_book.facts_day(
+            panel=panel, registration=survivor, session=session, as_of=as_of, held=held
+        )
+        strategy_survivor_book.evening(
+            panel=panel,
+            state_store=storage.paper_state_store,
+            ledger=storage.paper_ledger,
+            registration=survivor,
+            ordinals=SessionOrdinals(calendar, survivor.adapter.epoch_session),
+            calendar=calendar,
+            session=session,
+            as_of=as_of,
+            facts=facts,
+            screen=screen(facts.facts, survivor.book),
+            held=held,
+            make_portfolio=lambda ledger: strategy_survivor.make_paper_portfolio(
+                ledger, survivor.adapter.paper_limits
+            ),
+            lock=lock,
+        )
+
+
+def _calls(monkeypatch: pytest.MonkeyPatch, owner: Any, name: str) -> list[dict[str, Any]]:
+    """Every call of `owner.name` from here on, by its keywords; the call goes through."""
+    calls: list[dict[str, Any]] = []
+    original = getattr(owner, name)
+
+    def recorded(*arguments: Any, **keywords: Any) -> Any:
+        calls.append(keywords)
+        return original(*arguments, **keywords)
+
+    monkeypatch.setattr(owner, name, recorded)
+    return calls
+
+
+def test_a_day_whose_evening_was_committed_is_completed_after_the_next_sessions_update(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """Probe C, committed: the evening of 6 April was committed and its run stopped before the
+    journal was finished; 7 April's run has since stored 7 April. The rerun of 6 April is a
+    committed day's completion: no request, no doctor and no factor build (they gate a decision
+    already made, and read at the pinned instant, which the newer panel no longer answers), and
+    the facts read at the newest readable instant -- 7 April's publication -- which C1 and C3
+    hold to the bytes the evening read. It reaches the paper book's step."""
+    world = _world(tmp_path, monkeypatch, seeded)
+    _run(world, capsys)
+    _commit_evening(world, DAY, DAY_AS_OF)
+    code, _out, err = _run(world, capsys, as_of=NEXT_AS_OF, clock=NEXT_CLOCK)
+    assert err[0] == STUB, err
+    doctor = _calls(monkeypatch, daily, "check_panel")
+    built = _calls(monkeypatch, daily, "build_factors")
+    read = _calls(monkeypatch, strategy_survivor_book, "facts_day")
+    records = _records(world)
+
+    code, _out, err = _run(world, capsys, clock=NEXT_CLOCK)
+
+    assert code == 1
+    assert err == [STUB, NO_REQUEST]
+    assert doctor == []
+    assert built == []
+    assert [(call["session"], call["as_of"]) for call in read] == [
+        (DAY, session_publication_instant(NEXT))
+    ]
+    assert _records(world) == records
+    assert "result" not in _journal(world)
+
+
+def test_a_day_whose_evening_was_not_committed_is_refused_once_the_next_update_has_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """Probe C, not committed: 6 April stopped before its evening and 7 April's run has stored 7
+    April. The panel can no longer be read as it stood at 6 April's pinned instant, and deciding
+    on a later read could differ from the one the filed record used: refused by name before any
+    request, no result filed -- the next run settles the session without a decision."""
+    world = _world(tmp_path, monkeypatch, seeded)
+    _run(world, capsys)
+    code, _out, err = _run(world, capsys, as_of=NEXT_AS_OF, clock=NEXT_CLOCK)
+    assert err[0] == STUB, err
+
+    code, _out, err = _run(world, capsys, clock=NEXT_CLOCK)
+
+    assert code == 1
+    assert err[0].startswith("step 3 (panel doctor) failed:")
+    assert "2026-04-07" in err[0]
+    assert "this evening can no longer be completed" in err[0]
+    assert "the next run settles it without a decision" in err[0]
+    assert err[1] == NO_REQUEST
+    assert "result" not in _journal(world)
 
 
 # --- the paper book's lock and binding -------------------------------------------------------

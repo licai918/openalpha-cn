@@ -115,11 +115,11 @@ survivor day, `SURVIVOR_STEPS` (`_run_survivor_day`): registration, panel update
 factor build, paper head, facts, prediction, paper book, summary -- the paper book's writer lock
 taken first, the day's clock and the book's holdings pinned in its own journal
 (`RT/daily_survivor/`) before any request, and the forward record filed before the paper book.
-Steps 1 to 7 run; step 8 refuses by name, after the record is filed, until `V2-P7-008` D5b wires
-the paper book and the summary. Any other `kind`, or a survivor registration that cannot be read,
-exits 2 at step 1 before any request; a survivor book whose seed is not the registration's exits
-3. The survivor modules are imported only then: they load `backtest/paper.py`, whose audit hook a
-P6 day does not install.
+Steps 1 to 7 run -- an evening day files its record at step 7, a settle-only day files none --
+and step 8 refuses by name until `V2-P7-008` D5b wires the paper book and the summary. Any other
+`kind`, or a survivor registration that cannot be read, exits 2 at step 1 before any request; a
+survivor book whose seed is not the registration's exits 3. The survivor modules are imported
+only then: they load `backtest/paper.py`, whose audit hook a P6 day does not install.
 
 ## Idempotent per trading day
 
@@ -3459,6 +3459,15 @@ class SurvivorDay:
     settle_only: bool
     """The pinned `as_of` is at or after 09:15 of the next session: no record was filed, and no
     decision may be made (decision 2)."""
+    committed: bool
+    """The session's snapshot is held: an earlier run of the day committed its evening (or its
+    settlement alone) and stopped before its journal was finished. This run completes it; steps
+    3 and 4 did not run (D3 review, rule 5)."""
+    read_as_of: datetime
+    """What the facts were read at, and what the paper book reads the panel at: `as_of`, or --
+    on a committed day after the next session's update -- the newest stored session's
+    publication instant, the earliest the panel's whole-partition doors answer then. `as_of`
+    stays the day's clock: its date is every settlement's `observed_on`."""
 
 
 def survivor_builds(survivor: SurvivorRegistration) -> tuple[TierBuild, ...]:
@@ -3805,6 +3814,30 @@ def _held_codes(snapshot: PaperBookSnapshot) -> tuple[str, ...]:
     return held_codes(snapshot)
 
 
+def _newest_stored_session(store: PanelStore, targets: Sequence[str], year: int) -> date | None:
+    """The newest session the stored session-scoped partitions of `targets` reach, in `year` or
+    later (`cli._stored_horizon`); `None` when none is stored."""
+    horizons = [
+        horizon
+        for dataset in _session_scoped_census(targets)
+        for stored in store.registered_years(dataset)
+        if stored >= year and (horizon := cli._stored_horizon(store, dataset, stored)) is not None
+    ]
+    return max(horizons, default=None)
+
+
+def _no_longer_completed(session: date, as_of: datetime, newest: date) -> str:
+    return (
+        f"the panel holds sessions after {session.isoformat()}, through {newest.isoformat()}: the "
+        "next session's update has run since this day pinned its clock, so the panel can no "
+        f"longer be read as it stood at {as_of.isoformat()} -- the instant the doctor, the "
+        "factor build and the facts of this day read at -- and its evening was not committed. "
+        "Decided on a later read, the evening could differ from the one the filed record (if "
+        "any) was scored on, so this evening can no longer be completed: the next run settles "
+        "it without a decision. Nothing was fetched or written; there is nothing to do"
+    )
+
+
 def _nothing_eligible(session: date, screened: ScreenResult) -> str:
     reasons = Counter(reason for verdict in screened.verdicts for reason in verdict.reasons)
     counted = ", ".join(f"{reason} {count}" for reason, count in sorted(reasons.items()))
@@ -3990,20 +4023,29 @@ def _run_survivor_day(
     1. **Pinned before any request.** The day's journal, `RT/daily_survivor/<config_id[:16]>/
        <session>.json` (`openalpha-daily-survivor/v1`, its own reader), is written first with the
        day's `as_of` (as P6 pins it) and the book's holdings as found under the lock (`held`, and
-       `held_from`, the snapshot they are read from): every later step of this run and of any
-       rerun uses them. A journal with `result` is printed again with no request and no write. An
-       epoch after the session (P6's `session < anchor`) or not an open session of the stored
-       calendar exits 2 here, before the journal.
+       `held_from`, the snapshot they are read from), read only once the book is checked to be
+       this registration's (`_held_now`): every later step of this run and of any rerun uses
+       them, and every run checks the book against them (`_require_pinned_head`) before any
+       request. A journal with `result` is printed again with no request and no write. An epoch
+       after the session (P6's `session < anchor`), not an open session of the stored calendar,
+       or -- with no book held -- further back than the panel step catches up exits 2 here.
     2. **Panel update** as P6's, with `SurvivorPanelUpdate` from the registration's adapter
-       (`survivor_panel_update`); journalled, and resumed after on a rerun. 3. **Doctor** and 4.
-       **factor build** as P6's: the composite factors at the processed tier (`survivor_builds`).
-    5. **Paper head** (`paper_head`, which binds the marker and opens the book on every run),
-       checked against the pin (`_require_pinned_head`). A day on the epoch only opens the book,
-       files its result and ends (exit 0).
-    6. **Facts** with the pinned `held`, and the screen; nothing eligible is refused by name.
+       (`survivor_panel_update`); journalled, and resumed after on a rerun. The day's route is
+       read here, by the pinned clock: settle-only at or after 09:15 of the next session, and
+       a committed day's completion when the session's snapshot is held already. 3. **Doctor**
+       and 4. **factor build** as P6's (the composite factors at the processed tier,
+       `survivor_builds`), at the pinned `as_of`; a committed day runs neither, and a day not
+       committed whose panel the next session's update has moved past is refused by name at
+       step 3 -- the next run settles it without a decision.
+    5. **Paper head** (`paper_head`, which binds the marker and opens the book on every run). A
+       day on the epoch only opens the book, files its result and ends (exit 0).
+    6. **Facts** with the pinned `held` -- at the pinned `as_of`, or on a committed day at the
+       newest readable instant -- and the screen; nothing eligible is refused by name.
     7. **Prediction**, before the paper step so that a fault of the paper book never costs the
        record; journalled, and reused on a rerun. A day whose pinned `as_of` is at or after 09:15
-       of the next session registers nothing and is no error: it settles only (decision 2).
+       of the next session registers nothing and is no error: it settles only (decision 2), and
+       reaches step 8 with no record filed. One pinned before it, run when the clock is past it,
+       is refused here before anything is written.
     8.-9. The paper book and the summary: `_survivor_paper_and_summary` (D5b).
 
     **The P6 day's options here.** `--full-update` and `--top` have no survivor meaning and are
@@ -4130,27 +4172,49 @@ def _survivor_day(
         # review, rule 4) -- and step 7 refuses a record the clock has made too late.
         cutoff = registration_cutoff(_outcome_calendar(store, exchange, session, as_of), session)
         settle_only = as_of >= cutoff
+        # The session's snapshot is held: its evening (or its settlement alone) was committed by
+        # an earlier run of this day that stopped before its journal was finished. This run only
+        # completes it (D3 review, rule 5).
+        committed = book is not None and book.session_index == ordinals.index_of(session)
+        newest = _newest_stored_session(store, journal["panel"]["targets"], session.year)
+        later = newest if newest is not None and newest > session else None
+        # What steps 6 and 8 read the panel at: the pinned clock, or -- for a committed day once
+        # the next session's update has stored later rows, which the panel's whole-partition doors
+        # refuse to read past -- the newest stored session's publication, which the evening's
+        # reads answer alike (C1) and whose every difference C3's equality check refuses.
+        read_as_of = as_of if later is None else max(as_of, session_publication_instant(later))
 
-    with _step("panel doctor", steps=SURVIVOR_STEPS):
-        check_panel(
-            runtime_dir,
-            datasets=doctor_datasets(journal["panel"]["targets"]),
-            session=session,
-            as_of=as_of,
-            exchange=exchange,
-            first_of_year=session
-            == min(day for day in calendar.trading_days if day.year == session.year),
-        )
-    with _step("factor build", steps=SURVIVOR_STEPS):
-        factors = build_factors(
-            store,
-            builds,
-            session=session,
-            as_of=as_of,
-            exchange=exchange,
-            max_staleness_days=options.max_staleness_days,
-            runtime_dir=runtime_dir,
-        )
+    if committed:
+        # The doctor and the factor build gate a decision already made, and read at the pinned
+        # instant: a committed day's completion runs neither.
+        factors: Mapping[str, Any] = {}
+    else:
+        with _step("panel doctor", steps=SURVIVOR_STEPS):
+            if later is not None:
+                raise StepFailedError(
+                    "panel doctor",
+                    _no_longer_completed(session, as_of, later),
+                    steps=SURVIVOR_STEPS,
+                )
+            check_panel(
+                runtime_dir,
+                datasets=doctor_datasets(journal["panel"]["targets"]),
+                session=session,
+                as_of=as_of,
+                exchange=exchange,
+                first_of_year=session
+                == min(day for day in calendar.trading_days if day.year == session.year),
+            )
+        with _step("factor build", steps=SURVIVOR_STEPS):
+            factors = build_factors(
+                store,
+                builds,
+                session=session,
+                as_of=as_of,
+                exchange=exchange,
+                max_staleness_days=options.max_staleness_days,
+                runtime_dir=runtime_dir,
+            )
     with _step("paper head", steps=SURVIVOR_STEPS):
         try:
             head = paper_book.paper_head(
@@ -4178,7 +4242,7 @@ def _survivor_day(
                 panel=store,
                 registration=survivor,
                 session=session,
-                as_of=as_of,
+                as_of=read_as_of,
                 held=held,
                 min_coverage=SETTLE_ONLY_COVERAGE if settle_only else None,
                 transform=transform,
@@ -4233,6 +4297,8 @@ def _survivor_day(
         factors=factors,
         prediction=prediction,
         settle_only=settle_only,
+        committed=committed,
+        read_as_of=read_as_of,
     )
     return _survivor_paper_and_summary(day, clock=clock, counts=counts)
 
