@@ -66,8 +66,10 @@ A settlement asks for its book with `latest_snapshot(store, settling_session=...
 ...)`, which answers only with the snapshot of the session just before the one being settled:
 an empty store, a session already settled, a snapshot dated after it, and a missing session in
 between are each refused by name. The history therefore only grows at its head, and
-`save_snapshot` holds the writing side of that: a snapshot dated before the latest one held is
-refused (the same snapshot again for a held session still writes nothing).
+`save_snapshot` holds the writing side of that: an empty store takes only an opening snapshot,
+and a store holding a history takes only the session after its head -- an opening snapshot on
+top of it, one dated before the head, and one whose `session_index` is not the head's plus one
+are each refused by name (the same snapshot again for a held session still writes nothing).
 
 The bytes are kept by a store this module does not import: `backtest-studies-touch-no-store`
 keeps every module here away from `openalpha_cn.storage`, so `PaperStateDocumentStore` is the
@@ -379,13 +381,24 @@ def save_snapshot(
     A different snapshot for a session already held is refused, naming both addresses, and a held
     copy that no longer reads back is refused rather than papered over by an intact newcomer.
 
-    **The history grows only at its head.** A snapshot dated before the latest one held is
-    refused, by design rather than by accident: every snapshot after the opening one is settled
-    from the one before it, and `latest_snapshot` refuses to answer while a later-dated snapshot
-    is held, so a write behind the head can only come from a writer that skipped that read, and
-    the snapshot it slips in is not the book the later ones were built from. Accepting it would
-    make a missing session look repaired after the fact. A gap is mended by settling forward from
-    the last good snapshot, never by back-filling.
+    **The history grows only at its head, one session at a time.** For a session not held yet:
+
+    - **an empty store takes an opening snapshot and nothing else.** A settled snapshot with
+      nothing before it is a history that starts in the middle: the sessions it says it settled
+      from are nowhere.
+    - **a store that holds a history takes the session after its head and nothing else.** The
+      head is read back first (so a damaged head is refused here, not built upon), then an
+      opening snapshot is refused -- a book restarted from nothing over an existing history,
+      whose ledger still holds the old book's fills -- and so is a snapshot dated before the
+      head or whose `session_index` is not the head's plus one. The last is the write side of
+      `latest_snapshot`'s gap rule: a snapshot saved past a missing session would make the gap
+      invisible, because the next settlement would find it the session before its own.
+
+    Each is refused by design rather than by accident: every snapshot after the opening one is
+    settled from the one before it, so a write anywhere but the head's next session can only
+    come from a writer that skipped that read, and what it would slip in is not the book the
+    later ones were built from. A gap is mended by settling forward from the last good snapshot,
+    never by back-filling or jumping over it.
     """
     held = store.get(snapshot.session)
     if held is not None:
@@ -399,12 +412,38 @@ def save_snapshot(
         open_snapshot(held_payload, snapshot_id=held_id, session=snapshot.session)
         return "unchanged"
     sessions = store.sessions()
-    if sessions and sessions[-1] > snapshot.session:
-        raise PaperStateError(
-            f"{snapshot.session.isoformat()} is dated before the latest snapshot held, "
-            f"{sessions[-1].isoformat()}; the book's history grows only at its head, so a "
-            "snapshot written behind it is refused rather than back-filled"
-        )
+    named = f"{snapshot.session.isoformat()} (session index {snapshot.session_index})"
+    if not sessions:
+        if snapshot.last_settled_session is not None:
+            raise PaperStateError(
+                f"no paper book snapshot is held, so the first one saved opens the book: "
+                f"{named} is settled, and a settled snapshot with nothing before it is a history "
+                "that starts in the middle. A paper book is opened by saving an opening snapshot "
+                "(last_settled_session=None)"
+            )
+    else:
+        head = load_snapshot(store, sessions[-1])
+        through = f"{head.session.isoformat()} (session index {head.session_index})"
+        if snapshot.last_settled_session is None:
+            raise PaperStateError(
+                f"{snapshot.session.isoformat()} is an opening snapshot and this store already "
+                f"holds the book's history through {through}; a paper book is opened once per "
+                "runtime directory, and restarting it from nothing over an existing history is "
+                "refused"
+            )
+        if head.session > snapshot.session:
+            raise PaperStateError(
+                f"{snapshot.session.isoformat()} is dated before the latest snapshot held, "
+                f"{head.session.isoformat()}; the book's history grows only at its head, so a "
+                "snapshot written behind it is refused rather than back-filled"
+            )
+        if snapshot.session_index != head.session_index + 1:
+            raise PaperStateError(
+                f"the book's history grows one session at a time: expected session index "
+                f"{head.session_index + 1} after {through}, given {snapshot.session_index} "
+                f"({snapshot.session.isoformat()}); a missing session is settled, not jumped "
+                "over"
+            )
     return store.put(
         session=snapshot.session,
         snapshot_id=snapshot.snapshot_id,

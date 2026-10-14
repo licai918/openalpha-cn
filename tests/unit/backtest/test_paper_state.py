@@ -436,8 +436,36 @@ def _document(store: FilePaperStateStore, session: date) -> Path:
     return path
 
 
+def _entries(store: FilePaperStateStore, session: date) -> list[str]:
+    """Every name in the store's directory that belongs to `session`, `.partial` included."""
+    return sorted(
+        entry.name
+        for entry in store.path.iterdir()
+        if entry.name.startswith(f"{session.isoformat()}.")
+    )
+
+
+def _store_through(path: Path, stop: int) -> FilePaperStateStore:
+    """A store holding the opening book and the books of `DAYS[:stop]`, saved in order -- the
+    only way `save_snapshot` lets a history come to be. Through 2 its head is `held_snapshot()`
+    (`test_the_held_fixture_is_the_book_the_replay_settles_on_s2`); through 1, `held_snapshot()`
+    is the next session it takes."""
+    store = FilePaperStateStore(path)
+    for book in _settled_through(stop):
+        save_snapshot(store, book)
+    return store
+
+
+def test_the_held_fixture_is_the_book_the_replay_settles_on_s2() -> None:
+    """So a store built by `_store_through(..., 2)` holds `held_snapshot()` as S2, byte for byte."""
+    s2 = _settled_through(2)[-1]
+
+    assert s2 == held_snapshot()
+    assert snapshot_payload(s2) == snapshot_payload(held_snapshot())
+
+
 def test_a_saved_snapshot_reads_back_byte_for_byte(tmp_path: Path) -> None:
-    store = FilePaperStateStore(tmp_path / "snapshots")
+    store = _store_through(tmp_path / "snapshots", 1)
     snapshot = held_snapshot()
 
     assert save_snapshot(store, snapshot) == "created"
@@ -456,24 +484,24 @@ def test_a_saved_snapshot_reads_back_byte_for_byte(tmp_path: Path) -> None:
 
 
 def test_saving_a_session_again_leaves_its_file_untouched(tmp_path: Path) -> None:
-    store = FilePaperStateStore(tmp_path / "snapshots")
-    save_snapshot(store, held_snapshot())
+    store = _store_through(tmp_path / "snapshots", 2)
     document = _document(store, S2)
     before = (document.stat().st_ino, document.stat().st_mtime_ns, document.read_bytes())
+    listed = sorted(entry.name for entry in store.path.iterdir())
 
     assert save_snapshot(store, held_snapshot()) == "unchanged"
 
     assert (document.stat().st_ino, document.stat().st_mtime_ns, document.read_bytes()) == before
-    assert sorted(entry.name for entry in store.path.iterdir()) == [document.name]
+    assert sorted(entry.name for entry in store.path.iterdir()) == listed
+    assert _entries(store, S2) == [document.name]
 
 
 def test_a_second_different_snapshot_for_a_settled_session_is_refused_by_name(
     tmp_path: Path,
 ) -> None:
-    store = FilePaperStateStore(tmp_path / "snapshots")
+    store = _store_through(tmp_path / "snapshots", 2)
     first = held_snapshot()
     other = held_snapshot(book=first.book.model_copy(update={"cash": D("49190.01")}))
-    save_snapshot(store, first)
     before = _document(store, S2).read_bytes()
 
     with pytest.raises(
@@ -487,30 +515,120 @@ def test_a_second_different_snapshot_for_a_settled_session_is_refused_by_name(
         store.put(session=S2, snapshot_id=other.snapshot_id, payload=snapshot_payload(other))
 
     assert _document(store, S2).read_bytes() == before
-    assert len(list(store.path.iterdir())) == 1
+    assert _entries(store, S2) == [_document(store, S2).name]
 
 
-def test_a_snapshot_dated_before_the_latest_held_is_refused_and_the_history_grows_at_its_head(
+def test_a_snapshot_dated_before_the_head_is_refused_even_when_its_index_follows_the_head(
     tmp_path: Path,
 ) -> None:
-    """Every snapshot after the opening one is settled from the one before it, and
-    `latest_snapshot` refuses whenever a later-dated snapshot is held, so a write behind the
-    head can only come from a writer that skipped that read -- and a snapshot slipped in behind
-    the head is not the book the later ones were built from. Refused, naming the head. The same
-    snapshot again for a session already held is still `unchanged` and writes nothing."""
-    store = FilePaperStateStore(tmp_path / "snapshots")
-    s0, s1 = _settled_through(1)
-    save_snapshot(store, s0)
-    save_snapshot(store, held_snapshot())  # S2: the head
+    """Every snapshot after the opening one is settled from the one before it, so a write behind
+    the head can only come from a writer that skipped that read -- and a snapshot slipped in
+    behind the head is not the book the later ones were built from. The index alone does not
+    catch it: this one is the index the head expects (103) on a date before the head, a writer
+    whose calendar disagrees with the book's. Refused, naming the head. The same snapshot again
+    for a session already held is still `unchanged` and writes nothing."""
+    store = _store_through(tmp_path / "snapshots", 2)
+    early = date(2021, 2, 26)
+    behind = PaperBookSnapshot(
+        session_index=103,
+        session=early,
+        book=PortfolioState(as_of=early, cash=D("49190.00")),
+        last_settled_session=103,
+    )
 
     with pytest.raises(
         PaperStateError,
-        match=r"2021-03-02 is dated before the latest snapshot held, 2021-03-03",
+        match=r"2021-02-26 is dated before the latest snapshot held, 2021-03-03",
     ):
-        save_snapshot(store, s1)
-    assert store.sessions() == (S0, S2)
-    assert save_snapshot(store, s0) == "unchanged"
-    assert store.sessions() == (S0, S2)
+        save_snapshot(store, behind)
+    assert store.sessions() == (S0, S1, S2)
+    assert save_snapshot(store, opening_snapshot()) == "unchanged"
+    assert store.sessions() == (S0, S1, S2)
+
+
+def test_a_snapshot_that_skips_a_session_is_refused_naming_the_index_expected(
+    tmp_path: Path,
+) -> None:
+    """The review's probe: S0 and S1 held, S2's evening never wrote its snapshot, and S3's is
+    saved on top. Accepted, it would make the gap invisible -- the settlement of S4 would find
+    S3 the session before it and continue. Refused, naming the index the head expects."""
+    store = FilePaperStateStore(tmp_path / "snapshots")
+    s0, s1, _, s3 = _settled_through(3)
+    save_snapshot(store, s0)
+    save_snapshot(store, s1)
+
+    with pytest.raises(
+        PaperStateError,
+        match=r"expected session index 102 after 2021-03-02 \(session index 101\), "
+        r"given 103 \(2021-03-04\)",
+    ):
+        save_snapshot(store, s3)
+    assert store.sessions() == (S0, S1)
+    with pytest.raises(PaperStateError, match=r"snapshot for session index 103 is missing"):
+        latest_snapshot(store, settling_session=S4, settling_index=104)
+
+
+def test_an_opening_snapshot_saved_over_a_settled_history_is_refused(tmp_path: Path) -> None:
+    """A book restarted from nothing over an existing ledger: `latest_snapshot` would hand the
+    next settlement an empty book while the paper ledger still holds the old one's fills."""
+    store = FilePaperStateStore(tmp_path / "snapshots")
+    s0, s1 = _settled_through(1)
+    save_snapshot(store, s0)
+    save_snapshot(store, s1)
+    reopened = PaperBookSnapshot(
+        session_index=102,
+        session=S2,
+        book=PortfolioState(as_of=S2, cash=D("100000.00")),
+        last_settled_session=None,
+    )
+
+    with pytest.raises(
+        PaperStateError,
+        match=r"2021-03-03 is an opening snapshot and this store already holds the book's "
+        r"history through 2021-03-02 \(session index 101\)",
+    ):
+        save_snapshot(store, reopened)
+    assert store.sessions() == (S0, S1)
+
+
+def test_the_first_snapshot_a_store_holds_opens_the_book(tmp_path: Path) -> None:
+    """A settled snapshot with nothing before it is a history that starts in the middle: the
+    sessions it claims to have settled from are nowhere. An empty store takes an opening book
+    and nothing else."""
+    store = FilePaperStateStore(tmp_path / "snapshots")
+    s0, s1 = _settled_through(1)
+
+    for settled in (s1, held_snapshot()):
+        with pytest.raises(
+            PaperStateError,
+            match=rf"no paper book snapshot is held, so the first one saved opens the book: "
+            rf"{settled.session.isoformat()} \(session index {settled.session_index}\) is "
+            r"settled",
+        ):
+            save_snapshot(store, settled)
+    assert store.sessions() == ()
+    assert save_snapshot(store, s0) == "created"
+
+
+def test_the_history_grows_one_session_at_a_time_and_a_held_session_is_still_a_no_op(
+    tmp_path: Path,
+) -> None:
+    """The happy chain: the opening book, then each settled session's, one index after the
+    other. Saving any of them again -- the head or one behind it -- still writes nothing, and a
+    different snapshot for a held session is still refused as a second answer for it."""
+    store = FilePaperStateStore(tmp_path / "snapshots")
+    s0, s1, s2 = _settled_through(2)
+
+    assert [save_snapshot(store, book) for book in (s0, s1, s2)] == ["created"] * 3
+    assert store.sessions() == (S0, S1, S2)
+    before = {path.name: path.read_bytes() for path in store.path.iterdir()}
+    assert [save_snapshot(store, book) for book in (s0, s1, s2)] == ["unchanged"] * 3
+    assert {path.name: path.read_bytes() for path in store.path.iterdir()} == before
+    with pytest.raises(PaperStateError, match=r"2021-03-02 is already settled as"):
+        save_snapshot(
+            store, s1.model_copy(update={"book": s1.book.model_copy(update={"cash": D("1")})})
+        )
+    assert latest_snapshot(store, settling_session=S3, settling_index=103) == s2
 
 
 def test_two_documents_held_for_one_session_are_refused_rather_than_one_picked(
@@ -519,10 +637,9 @@ def test_two_documents_held_for_one_session_are_refused_rather_than_one_picked(
     """`put` never writes a second document for a session, so two found there were put there by
     something else; answering with whichever sorts first would make the book depend on a
     filename. Every reader of that session refuses, naming both addresses."""
-    store = FilePaperStateStore(tmp_path / "snapshots")
+    store = _store_through(tmp_path / "snapshots", 2)
     first = held_snapshot()
     other = held_snapshot(book=first.book.model_copy(update={"cash": D("49190.01")}))
-    save_snapshot(store, first)
     _document(store, S2).with_name(f"2021-03-03.{other.snapshot_id}.json").write_text(
         snapshot_payload(other), encoding="utf-8"
     )
@@ -530,7 +647,7 @@ def test_two_documents_held_for_one_session_are_refused_rather_than_one_picked(
         rf"2021-03-03 is held under 2 snapshots \(\[.*{min(first.snapshot_id, other.snapshot_id)}"
     )
 
-    assert store.sessions() == (S2,)
+    assert store.sessions() == (S0, S1, S2)
     with pytest.raises(PaperStateStoreError, match=named):
         store.get(S2)
     with pytest.raises(PaperStateStoreError, match=named):
@@ -544,7 +661,7 @@ def test_an_interrupted_write_leaves_no_snapshot_behind(
 ) -> None:
     """The bytes go to a temporary file and reach the document's name in one `os.replace`; a
     write that dies before the rename leaves nothing a reader can mistake for a snapshot."""
-    store = FilePaperStateStore(tmp_path / "snapshots")
+    store = _store_through(tmp_path / "snapshots", 1)
     snapshot = held_snapshot()
 
     def interrupted(src: object, dst: object) -> None:
@@ -555,17 +672,15 @@ def test_an_interrupted_write_leaves_no_snapshot_behind(
         save_snapshot(store, snapshot)
     monkeypatch.undo()
 
-    assert store.sessions() == ()
+    assert store.sessions() == (S0, S1)
     assert store.get(S2) is None
-    assert [entry.name for entry in store.path.iterdir()] == [
-        f"2021-03-03.{snapshot.snapshot_id}.json.partial"
-    ]
+    assert _entries(store, S2) == [f"2021-03-03.{snapshot.snapshot_id}.json.partial"]
     with pytest.raises(PaperStateError, match="no paper book snapshot is held for 2021-03-03"):
         load_snapshot(store, S2)
 
     assert save_snapshot(store, snapshot) == "created"
     assert load_snapshot(store, S2) == snapshot
-    assert [entry.name for entry in store.path.iterdir()] == [_document(store, S2).name]
+    assert _entries(store, S2) == [_document(store, S2).name]
 
 
 def _record_the_write(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, ...]]:
@@ -595,8 +710,7 @@ def test_the_rename_is_made_durable_by_syncing_the_directory_after_it(
     """The file's bytes are synced before the rename and the directory after it: without the
     second, a power loss can lose the rename while the paper ledger keeps that session's rows,
     and the next settlement would find the session missing."""
-    store = FilePaperStateStore(tmp_path / "snapshots")
-    store.path.mkdir()
+    store = _store_through(tmp_path / "snapshots", 1)
     events = _record_the_write(monkeypatch)
 
     save_snapshot(store, held_snapshot())
@@ -619,7 +733,7 @@ def test_where_a_directory_cannot_be_synced_the_rename_is_left_to_the_filesystem
     """The Windows branch, exercised on every platform: no directory is opened, and the write
     is otherwise the same -- file synced, then renamed."""
     monkeypatch.setattr("openalpha_cn.storage.paper_state._SYNC_DIRECTORIES", False)
-    store = FilePaperStateStore(tmp_path / "snapshots")
+    store = _store_through(tmp_path / "snapshots", 1)
     events = _record_the_write(monkeypatch)
 
     assert save_snapshot(store, held_snapshot()) == "created"
@@ -634,8 +748,7 @@ def test_a_snapshot_document_that_is_not_text_is_refused_as_a_store_error_not_a_
     -- the exception `PaperStateError` is a `RuntimeError` to keep out of a caller's
     `except ValueError`. The store names the document instead (`V2-P4-096`'s lesson: a fault in
     the stored bytes is the store's to name, not an escape)."""
-    store = FilePaperStateStore(tmp_path / "snapshots")
-    save_snapshot(store, held_snapshot())
+    store = _store_through(tmp_path / "snapshots", 2)
     document = _document(store, S2)
     document.write_bytes(b"\xff\xfe")
     named = rf"the snapshot document {re.escape(document.name)} held for 2021-03-03 is not UTF-8"
@@ -659,7 +772,7 @@ def test_a_missing_snapshot_is_refused_by_name_and_never_read_as_an_empty_book(
 
     with pytest.raises(PaperStateError, match="no paper book snapshot is held at all"):
         latest_snapshot(store, settling_session=S3, settling_index=103)
-    save_snapshot(store, held_snapshot())
+    store = _store_through(tmp_path / "snapshots", 2)
     with pytest.raises(PaperStateError, match="no paper book snapshot is held for 2021-03-04"):
         load_snapshot(store, S3)
 
@@ -704,17 +817,17 @@ def test_a_snapshot_dated_after_the_session_being_settled_is_refused_by_name(
     tmp_path: Path,
 ) -> None:
     """The book is never continued from a snapshot that knows a later session: that is the
-    look-ahead rule, held at the one reader that hands a settlement its book."""
-    store = FilePaperStateStore(tmp_path / "snapshots")
-    save_snapshot(store, opening_snapshot())
-    save_snapshot(store, held_snapshot())  # S2
+    look-ahead rule, held at the one reader that hands a settlement its book. `save_snapshot`
+    writes only at the head, so the history has no hole a settlement could fall into; what is
+    left is a settlement asked for a date before the history -- here, before the book opened."""
+    store = _store_through(tmp_path / "snapshots", 1)
 
     with pytest.raises(
         PaperStateError,
-        match=r"snapshots dated after 2021-03-02, the session being settled, are held: "
-        r"\['2021-03-03'\]",
+        match=r"snapshots dated after 2021-02-26, the session being settled, are held: "
+        r"\['2021-03-01', '2021-03-02'\]",
     ):
-        latest_snapshot(store, settling_session=S1, settling_index=101)
+        latest_snapshot(store, settling_session=date(2021, 2, 26), settling_index=99)
 
 
 def test_a_session_whose_snapshot_is_held_is_reported_as_already_settled(tmp_path: Path) -> None:
@@ -759,8 +872,7 @@ def test_a_session_whose_snapshot_is_held_is_reported_as_already_settled(tmp_pat
 def test_a_damaged_snapshot_is_refused_by_name_and_never_read_as_an_empty_book(
     tmp_path: Path, damage: Callable[[str], str], refusal: str
 ) -> None:
-    store = FilePaperStateStore(tmp_path / "snapshots")
-    save_snapshot(store, held_snapshot())
+    store = _store_through(tmp_path / "snapshots", 2)
     document = _document(store, S2)
     document.write_text(damage(document.read_text(encoding="utf-8")), encoding="utf-8")
 
@@ -777,9 +889,7 @@ def test_a_held_name_whose_entry_factor_is_missing_on_disk_is_refused_by_name(
 ) -> None:
     """The requirement read back rather than built: a stored snapshot that lost a holding's entry
     factor names the holding, so the next session's adjustment ratio is never taken as 1."""
-    store = FilePaperStateStore(tmp_path / "snapshots")
-    snapshot = held_snapshot()
-    save_snapshot(store, snapshot)
+    store = _store_through(tmp_path / "snapshots", 2)
     document = _document(store, S2)
     body = json.loads(document.read_text(encoding="utf-8"))
     body["entry_factors"] = [item for item in body["entry_factors"] if item["ts_code"] != B]
@@ -794,8 +904,7 @@ def test_a_held_name_whose_entry_factor_is_missing_on_disk_is_refused_by_name(
 def test_an_attempt_count_edited_on_disk_is_refused_by_name(tmp_path: Path) -> None:
     """The one byte that changes is the count of C's buy (planned tonight, so tried on none),
     and the refusal names the order and the count rather than an address mismatch."""
-    store = FilePaperStateStore(tmp_path / "snapshots")
-    save_snapshot(store, held_snapshot())
+    store = _store_through(tmp_path / "snapshots", 2)
     document = _document(store, S2)
     text = document.read_text(encoding="utf-8")
     assert text.count('"attempts":0') == 2
@@ -1130,7 +1239,8 @@ def test_the_composition_root_wires_the_paper_snapshot_store(
 
     assert isinstance(storage.paper_state_store, FilePaperStateStore)
     assert storage.paper_state_store.path == runtime_dir / "paper" / "snapshots"
-    save_snapshot(storage.paper_state_store, held_snapshot())
+    for book in _settled_through(2):
+        save_snapshot(storage.paper_state_store, book)
     reopened = build_storage(runtime_dir=runtime_dir, clock=migration_clock)
     assert (
         latest_snapshot(reopened.paper_state_store, settling_session=S3, settling_index=103)
