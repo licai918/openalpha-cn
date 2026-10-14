@@ -28,14 +28,21 @@ exist nowhere else. A `PaperBookSnapshot` is all of it, for one session:
 ## What is refused, by name
 
 A snapshot is a book some sequence of settled sessions could have produced, so the shapes no
-such sequence produces are refused rather than carried: a holding with no entry factor and a
-factor for a name not held; `BookState`'s own invariants on the live orders (one buy per name, no
-buy for a held name, a sell only for a held name, and no more shares than are held); an order
-planned after the snapshot's session (the look-ahead guard for orders); a buy still live past its
-last session once that session has settled (`advance_orders` would have expired it); an order
-tried on more sessions than have settled since it was due; a cool-down starting after the
-snapshot's session. The parts are sorted on the way in, so a snapshot's address does not depend
-on the order a caller assembled them in.
+such sequence produces are refused rather than carried: a holding in more than one lot (the
+survivor book never adds to a held name) and a lot opened after the snapshot's session (the
+look-ahead guard for the book); a holding with no entry factor and a factor for a name not held;
+`BookState`'s own invariants on the live orders (one buy per name, no buy for a held name, a sell
+only for a held name, and no more shares than are held); an order planned after the snapshot's
+session (the look-ahead guard for orders); in an opening book, an order due on or before its own
+session, which the book never settles; a buy still live past its last session once that session
+has settled (`advance_orders` would have expired it); an attempt count other than the number of
+sessions settled since the order was due (every due order is handed to the step on every settled
+session, a session with no bar included, so the count is exact, not a bound); a cool-down
+starting after the snapshot's session, and one for a name held (a cool-down starts when a sale
+fills or a buy expires, and is dropped before the policy may buy the name again). A pending buy
+for a name still cooling down is **not** refused: with `cooldown_sessions=0` the policy may plan
+it on the evening the cool-down started. The parts are sorted on the way in, so a snapshot's
+address does not depend on the order a caller assembled them in.
 
 ## Identity, bytes, and reading back
 
@@ -47,6 +54,20 @@ and refuses one that does not match the name it was filed under, and refuses byt
 the canonical ones. So a snapshot reads back byte for byte or not at all, and a missing, damaged
 or edited snapshot is refused by name -- **never taken for an empty book**. A book is opened by
 saving an opening snapshot (`last_settled_session=None`) on purpose; no reader starts one.
+
+Those two refusals cannot tell an edit from a change of contract: `model_dump_json` writes the
+fields in declaration order, so a field added to `PortfolioState`, `PositionLot`, `TradeOrder` or
+`Cooldown` (even with a default), or two of their fields swapped, makes every stored snapshot
+unreadable or non-canonical. The messages say both causes, and
+`tests/unit/backtest/test_paper_state.py` pins the digest of `PaperBookSnapshot`'s JSON schema so
+such a change goes red in CI as "needs a migration of stored snapshots" first.
+
+A settlement asks for its book with `latest_snapshot(store, settling_session=..., settling_index=
+...)`, which answers only with the snapshot of the session just before the one being settled:
+an empty store, a session already settled, a snapshot dated after it, and a missing session in
+between are each refused by name. The history therefore only grows at its head, and
+`save_snapshot` holds the writing side of that: a snapshot dated before the latest one held is
+refused (the same snapshot again for a held session still writes nothing).
 
 The bytes are kept by a store this module does not import: `backtest-studies-touch-no-store`
 keeps every module here away from `openalpha_cn.storage`, so `PaperStateDocumentStore` is the
@@ -131,7 +152,10 @@ class PendingOrder(BaseModel):
 
     A try is one session on which the order was due and handed to the step builder, whether it
     was submitted to the paper book or not attempted for want of a bar; each try is recorded in
-    the ledger, if at all, under its own `paper_step.attempt_id`.
+    the ledger, if at all, under its own `paper_step.attempt_id`. The count is therefore exactly
+    the number of settled sessions since the order was due, and `PaperBookSnapshot` refuses any
+    other: stored rather than derived so the document says it without the rule, and so that
+    loosening the rule later would be a change of check, not a change of shape.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -191,6 +215,7 @@ class PaperBookSnapshot(BaseModel):
                 f"session {self.session_index}; a snapshot is written once its session has "
                 "settled, or opens a book that has settled nothing"
             )
+        self._check_positions()
         self._check_entry_factors()
         self._check_pending_orders()
         self._check_cooldowns()
@@ -230,7 +255,12 @@ class PaperBookSnapshot(BaseModel):
             (o.ts_code for o in sells if o.ts_code in held and o.quantity > held[o.ts_code]),
         )
         settled = self.last_settled_session
-        if settled is not None:
+        if settled is None:
+            _refuse(
+                "orders an opening book has not settled the due session of",
+                (_named(order) for order in orders if order.execute_session <= self.session_index),
+            )
+        else:
             _refuse(
                 f"buys still pending after their last session {settled}",
                 (
@@ -240,22 +270,39 @@ class PaperBookSnapshot(BaseModel):
                 ),
             )
         _refuse(
-            "orders tried on more sessions than were settled",
+            "orders not tried on every session settled since they were due",
             (
-                f"{_named(item.order)} tried {item.attempts}, at most {_tries(item.order, settled)}"
+                f"{_named(item.order)} tried {item.attempts}, due on "
+                f"{_sessions(_tries(item.order, settled))}"
                 for item in self.pending_orders
-                if item.attempts > _tries(item.order, settled)
+                if item.attempts != _tries(item.order, settled)
+            ),
+        )
+
+    def _check_positions(self) -> None:
+        positions = self.book.positions
+        _refuse(
+            "held names not in exactly one lot",
+            (position.subject for position in positions if len(position.lots) != 1),
+        )
+        _refuse(
+            f"lots opened after session {self.session.isoformat()}",
+            (
+                position.subject
+                for position in positions
+                if any(lot.open_date > self.session for lot in position.lots)
             ),
         )
 
     def _check_cooldowns(self) -> None:
-        _refuse(
-            "cool-downs given more than once", _repeated(item.ts_code for item in self.cooldowns)
-        )
+        codes = [item.ts_code for item in self.cooldowns]
+        _refuse("cool-downs given more than once", _repeated(codes))
         _refuse(
             f"cool-downs starting after session {self.session_index}",
             (item.ts_code for item in self.cooldowns if item.since_session > self.session_index),
         )
+        held = {position.subject for position in self.book.positions}
+        _refuse("cool-downs for names held", set(codes) & held)
 
     @computed_field(return_type=str)  # type: ignore[prop-decorator]
     @property
@@ -311,12 +358,15 @@ def open_snapshot(payload: str, *, snapshot_id: str, session: date) -> PaperBook
     if snapshot.snapshot_id != snapshot_id:
         raise PaperStateError(
             f"the paper book's snapshot for {session.isoformat()} is filed as {snapshot_id} and "
-            f"its content is {snapshot.snapshot_id}: it changed after it was written"
+            f"its content is {snapshot.snapshot_id}: it was edited, or written by a build whose "
+            "contracts differ from this one's (a change to an embedded contract needs a "
+            "migration of stored snapshots)"
         )
     if snapshot_payload(snapshot) != payload:
         raise PaperStateError(
             f"the paper book's snapshot for {session.isoformat()} ({snapshot_id}) is not in its "
-            "canonical bytes: it was rewritten after it was saved"
+            "canonical bytes: it was edited, or written by a build whose contracts differ from "
+            "this one's (a change to an embedded contract needs a migration of stored snapshots)"
         )
     return snapshot
 
@@ -328,6 +378,14 @@ def save_snapshot(
 
     A different snapshot for a session already held is refused, naming both addresses, and a held
     copy that no longer reads back is refused rather than papered over by an intact newcomer.
+
+    **The history grows only at its head.** A snapshot dated before the latest one held is
+    refused, by design rather than by accident: every snapshot after the opening one is settled
+    from the one before it, and `latest_snapshot` refuses to answer while a later-dated snapshot
+    is held, so a write behind the head can only come from a writer that skipped that read, and
+    the snapshot it slips in is not the book the later ones were built from. Accepting it would
+    make a missing session look repaired after the fact. A gap is mended by settling forward from
+    the last good snapshot, never by back-filling.
     """
     held = store.get(snapshot.session)
     if held is not None:
@@ -340,6 +398,13 @@ def save_snapshot(
             )
         open_snapshot(held_payload, snapshot_id=held_id, session=snapshot.session)
         return "unchanged"
+    sessions = store.sessions()
+    if sessions and sessions[-1] > snapshot.session:
+        raise PaperStateError(
+            f"{snapshot.session.isoformat()} is dated before the latest snapshot held, "
+            f"{sessions[-1].isoformat()}; the book's history grows only at its head, so a "
+            "snapshot written behind it is refused rather than back-filled"
+        )
     return store.put(
         session=snapshot.session,
         snapshot_id=snapshot.snapshot_id,
@@ -359,11 +424,26 @@ def load_snapshot(store: PaperStateDocumentStore, session: date) -> PaperBookSna
     return open_snapshot(payload, snapshot_id=held_id, session=session)
 
 
-def latest_snapshot(store: PaperStateDocumentStore) -> PaperBookSnapshot:
-    """The snapshot of the most recent session held, refused by name when none is.
+def latest_snapshot(
+    store: PaperStateDocumentStore, *, settling_session: date, settling_index: int
+) -> PaperBookSnapshot:
+    """The book `settling_session` settles from: the snapshot of the session just before it.
 
-    An empty store is refused, not answered with a fresh book: a paper book is opened by saving
-    an opening snapshot on purpose, never started from zero by whoever reads it next.
+    `settling_session` is the session about to be settled and `settling_index` its ordinal in
+    the trading calendar. The answer is the latest snapshot dated before `settling_session`,
+    and it must be the snapshot of ordinal `settling_index - 1`; everything else is refused by
+    name, because each wrong answer settles the book from a state it was not in:
+
+    - **an empty store** -- a paper book is opened by saving an opening snapshot on purpose,
+      never started from zero by whoever reads it next;
+    - **a snapshot dated on or after `settling_session`** -- one equal to it means the session
+      is already settled (a second settlement would write its fills twice), and one after it
+      knows a later session, which is the look-ahead rule broken at the book's own state;
+    - **a missing session in between** -- if the evening run of N-1 stopped after its ledger
+      rows and before its snapshot, settling N from N-2's book would hand the orders due on
+      N-1 to N's step under new attempt ids, and the ledger would hold two fills of the same
+      orders. The latest earlier snapshot must be ordinal `settling_index - 1`, so a gap is
+      named, never skipped.
     """
     sessions = store.sessions()
     if not sessions:
@@ -371,14 +451,43 @@ def latest_snapshot(store: PaperStateDocumentStore) -> PaperBookSnapshot:
             "no paper book snapshot is held at all: a paper book is opened by saving an opening "
             "snapshot, never started from zero by a reader"
         )
-    return load_snapshot(store, sessions[-1])
+    settling = settling_session.isoformat()
+    if settling_session in sessions:
+        raise PaperStateError(
+            f"{settling} is already settled: its snapshot is held, and a session settles once"
+        )
+    later = [held.isoformat() for held in sessions if held > settling_session]
+    if later:
+        raise PaperStateError(
+            f"snapshots dated after {settling}, the session being settled, are held: {later}; "
+            "a book is never settled from a state that knows a later session"
+        )
+    snapshot = load_snapshot(store, sessions[-1])
+    if snapshot.session_index != settling_index - 1:
+        raise PaperStateError(
+            f"the snapshot for session index {settling_index - 1} is missing: the latest is "
+            f"{snapshot.session_index} ({snapshot.session.isoformat()}), and settling "
+            f"{settling} (session index {settling_index}) from it would skip the sessions "
+            "between them rather than settle them"
+        )
+    return snapshot
 
 
 def _tries(order: TradeOrder, settled: int | None) -> int:
-    """How many settled sessions an order can have been tried on: those from its execution on."""
+    """How many sessions a live order has been tried on: every settled one from its execution on.
+
+    Exact rather than a bound, because nothing a book does lets a due order miss a settled
+    session: every due order is handed to the step, a session with no bar for it is still a try
+    (`paper_step`'s `not_attempted`), `latest_snapshot` refuses to settle across a missing
+    session, and an opening book holds no order due on or before its own session.
+    """
     if settled is None:
         return 0
     return max(0, settled - order.execute_session + 1)
+
+
+def _sessions(count: int) -> str:
+    return f"{count} settled session" if count == 1 else f"{count} settled sessions"
 
 
 def _named(order: TradeOrder) -> str:

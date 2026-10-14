@@ -13,6 +13,7 @@ never having stopped.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -175,7 +176,7 @@ def test_the_snapshot_is_addressed_by_the_one_hash_function_under_its_own_prefix
             )
         },
     ],
-    ids=["an entry factor", "a cool-down", "an attempt count"],
+    ids=["an entry factor", "a cool-down", "a carried order"],
 )
 def test_every_part_of_the_state_moves_the_address(overrides: dict[str, Any]) -> None:
     assert held_snapshot(**overrides).snapshot_id != held_snapshot().snapshot_id
@@ -299,19 +300,61 @@ def test_a_buy_left_pending_past_its_last_session_is_refused() -> None:
         held_snapshot(pending_orders=(stale,))
 
 
-def test_an_order_cannot_have_been_tried_on_more_sessions_than_were_settled() -> None:
-    """Planned on 101, due on 102, settled through 102: tried on one session at most. An order
-    not due yet (planned on 102, due on 103) has been tried on none."""
+def test_an_order_has_been_tried_on_exactly_the_sessions_settled_since_it_was_due() -> None:
+    """Every due order is handed to the step on every settled session, and a session with no
+    bar still counts as a try, so the count is fixed by the order and the book: planned on 101,
+    due on 102, settled through 102 -- tried once, no more and no fewer. An order not due yet
+    (planned on 102, due on 103) has been tried on none."""
     due_once = PendingOrder(order=buy(C, 500, signal=101, expires=106, price="12.00"), attempts=1)
-    held_snapshot(pending_orders=(due_once,))  # one try is possible
+    held_snapshot(pending_orders=(due_once,))  # the one count that is possible
+
+    for attempts in (0, 2):
+        with pytest.raises(
+            ValueError,
+            match=rf"orders not tried on every session settled since they were due: "
+            rf"\['tor_[0-9a-f]{{24}} \(buy 000001\.SZ\) tried {attempts}, due on 1 settled "
+            r"session'\]",
+        ):
+            held_snapshot(pending_orders=(due_once.model_copy(update={"attempts": attempts}),))
+    not_due = PendingOrder(order=buy(C, 500, signal=102, expires=106, price="12.00"), attempts=1)
+    with pytest.raises(
+        ValueError, match=r"orders not tried on every session settled since they were due"
+    ):
+        held_snapshot(pending_orders=(not_due,))
+
+
+def test_an_opening_book_holds_no_order_due_on_a_session_it_will_never_settle() -> None:
+    """An opening book has settled nothing and its first settlement is the session after it, so
+    an order due on or before the opening session would be tried late -- and its count could no
+    longer equal the sessions settled since it was due. Refused at the opening, by name."""
+    overdue = PendingOrder(order=buy(A, 1_000, signal=99, expires=103, price="10.00"), attempts=0)
 
     with pytest.raises(
-        ValueError, match=r"orders tried on more sessions than were settled: \['tor_"
+        ValueError,
+        match=r"orders an opening book has not settled the due session of: \['tor_",
     ):
-        held_snapshot(pending_orders=(due_once.model_copy(update={"attempts": 2}),))
-    not_due = PendingOrder(order=buy(C, 500, signal=102, expires=106, price="12.00"), attempts=1)
-    with pytest.raises(ValueError, match=r"orders tried on more sessions than were settled"):
-        held_snapshot(pending_orders=(not_due,))
+        PaperBookSnapshot(
+            session_index=100,
+            session=S0,
+            book=PortfolioState(as_of=S0, cash=D("100000.00")),
+            pending_orders=(overdue,),
+            last_settled_session=None,
+        )
+
+
+def test_the_address_commits_to_the_attempt_count_alone() -> None:
+    """Two snapshots the contract accepts cannot differ in an attempt count alone (the count is
+    fixed by the order and the book), so the isolated case is a copy that skips validation: the
+    address still moves. The same edit made on disk is refused by name
+    (`test_an_attempt_count_edited_on_disk_is_refused_by_name`)."""
+    snapshot = held_snapshot()
+    (buy_c, sell_a) = snapshot.pending_orders
+    recounted = snapshot.model_copy(
+        update={"pending_orders": (buy_c.model_copy(update={"attempts": 1}), sell_a)}
+    )
+
+    assert recounted.pending_orders[0].order == snapshot.pending_orders[0].order
+    assert recounted.snapshot_id != snapshot.snapshot_id
 
 
 def test_a_cool_down_from_after_the_snapshot_or_given_twice_is_refused() -> None:
@@ -324,6 +367,50 @@ def test_a_cool_down_from_after_the_snapshot_or_given_twice_is_refused() -> None
             cooldowns=(
                 Cooldown(ts_code=X, since_session=101),
                 Cooldown(ts_code=X, since_session=100),
+            )
+        )
+
+
+def test_a_cool_down_for_a_name_held_is_refused_by_name() -> None:
+    """`update_cooldowns` starts a cool-down when a sale fills or a buy expires -- the name is
+    not held either way -- and the policy plans no buy for a name until its cool-down has run
+    out, which is the session `update_cooldowns` drops it on. So no settled book holds a name
+    that is cooling down."""
+    with pytest.raises(ValueError, match=r"cool-downs for names held: \['600000\.SH'\]"):
+        held_snapshot(cooldowns=(Cooldown(ts_code=A, since_session=101),))
+
+
+def test_a_pending_buy_for_a_name_cooling_down_is_carried_not_refused() -> None:
+    """With `cooldown_sessions=0`, which `SurvivorBookConfig` allows, a name whose sale filled on
+    S2 is free again that evening (`session - since_session < 0` never holds), so the policy can
+    plan its buy while the cool-down `update_cooldowns` started on S2 is still listed. A shape
+    the kernel produces is carried."""
+    again = PendingOrder(order=buy(X, 300, signal=102, expires=105, price="30.00"), attempts=0)
+    cooling = (Cooldown(ts_code=X, since_session=102),)
+
+    snapshot = held_snapshot(pending_orders=(again,), cooldowns=cooling)
+
+    assert [p.order.ts_code for p in snapshot.pending_orders] == [X]
+    assert snapshot.cooldowns == cooling
+
+
+def test_a_holding_is_one_lot_opened_on_or_before_the_snapshot_session() -> None:
+    """The survivor book never adds to a held name, so a holding is the one lot its buy opened;
+    and a lot opened after the snapshot's session is the look-ahead guard for the book itself."""
+    two_lots = PortfolioPosition(
+        subject=A,
+        lots=(
+            PositionLot(open_date=S1, quantity=500, cost_basis=D("5002.50")),
+            PositionLot(open_date=S2, quantity=500, cost_basis=D("5002.50")),
+        ),
+    )
+    book = held_snapshot().book
+    with pytest.raises(ValueError, match=r"held names not in exactly one lot: \['600000\.SH'\]"):
+        held_snapshot(book=book.model_copy(update={"positions": (two_lots, book.positions[1])}))
+    with pytest.raises(ValueError, match=r"lots opened after session 2021-03-03: \['600036\.SH'\]"):
+        held_snapshot(
+            book=book.model_copy(
+                update={"positions": (book.positions[0], lot(B, 2_000, "40805.00", bought=S3))}
             )
         )
 
@@ -401,6 +488,55 @@ def test_a_second_different_snapshot_for_a_settled_session_is_refused_by_name(
     assert len(list(store.path.iterdir())) == 1
 
 
+def test_a_snapshot_dated_before_the_latest_held_is_refused_and_the_history_grows_at_its_head(
+    tmp_path: Path,
+) -> None:
+    """Every snapshot after the opening one is settled from the one before it, and
+    `latest_snapshot` refuses whenever a later-dated snapshot is held, so a write behind the
+    head can only come from a writer that skipped that read -- and a snapshot slipped in behind
+    the head is not the book the later ones were built from. Refused, naming the head. The same
+    snapshot again for a session already held is still `unchanged` and writes nothing."""
+    store = FilePaperStateStore(tmp_path / "snapshots")
+    s0, s1 = _settled_through(1)
+    save_snapshot(store, s0)
+    save_snapshot(store, held_snapshot())  # S2: the head
+
+    with pytest.raises(
+        PaperStateError,
+        match=r"2021-03-02 is dated before the latest snapshot held, 2021-03-03",
+    ):
+        save_snapshot(store, s1)
+    assert store.sessions() == (S0, S2)
+    assert save_snapshot(store, s0) == "unchanged"
+    assert store.sessions() == (S0, S2)
+
+
+def test_two_documents_held_for_one_session_are_refused_rather_than_one_picked(
+    tmp_path: Path,
+) -> None:
+    """`put` never writes a second document for a session, so two found there were put there by
+    something else; answering with whichever sorts first would make the book depend on a
+    filename. Every reader of that session refuses, naming both addresses."""
+    store = FilePaperStateStore(tmp_path / "snapshots")
+    first = held_snapshot()
+    other = held_snapshot(book=first.book.model_copy(update={"cash": D("49190.01")}))
+    save_snapshot(store, first)
+    _document(store, S2).with_name(f"2021-03-03.{other.snapshot_id}.json").write_text(
+        snapshot_payload(other), encoding="utf-8"
+    )
+    named = (
+        rf"2021-03-03 is held under 2 snapshots \(\[.*{min(first.snapshot_id, other.snapshot_id)}"
+    )
+
+    assert store.sessions() == (S2,)
+    with pytest.raises(PaperStateStoreError, match=named):
+        store.get(S2)
+    with pytest.raises(PaperStateStoreError, match=named):
+        load_snapshot(store, S2)
+    with pytest.raises(PaperStateStoreError, match=named):
+        store.put(session=S2, snapshot_id=first.snapshot_id, payload=snapshot_payload(first))
+
+
 def test_an_interrupted_write_leaves_no_snapshot_behind(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -436,19 +572,74 @@ def test_a_missing_snapshot_is_refused_by_name_and_never_read_as_an_empty_book(
     store = FilePaperStateStore(tmp_path / "snapshots")
 
     with pytest.raises(PaperStateError, match="no paper book snapshot is held at all"):
-        latest_snapshot(store)
+        latest_snapshot(store, settling_session=S3, settling_index=103)
     save_snapshot(store, held_snapshot())
     with pytest.raises(PaperStateError, match="no paper book snapshot is held for 2021-03-04"):
         load_snapshot(store, S3)
 
 
-def test_the_latest_snapshot_is_the_most_recent_session_held(tmp_path: Path) -> None:
-    store = FilePaperStateStore(tmp_path / "snapshots")
-    save_snapshot(store, held_snapshot())
-    save_snapshot(store, opening_snapshot())
+def _settled_through(stop: int) -> tuple[PaperBookSnapshot, ...]:
+    """The opening book and the books of `DAYS[:stop]`, settled one after the other."""
+    books = [opening_snapshot()]
+    for day in DAYS[:stop]:
+        books.append(_settle(books[-1], day))
+    return tuple(books)
 
-    assert store.sessions() == (S0, S2)
-    assert latest_snapshot(store) == held_snapshot()
+
+def test_the_book_a_session_settles_from_is_the_snapshot_of_the_session_before_it(
+    tmp_path: Path,
+) -> None:
+    store = FilePaperStateStore(tmp_path / "snapshots")
+    s0, s1 = _settled_through(1)
+    save_snapshot(store, s0)
+    save_snapshot(store, s1)
+
+    assert latest_snapshot(store, settling_session=S2, settling_index=102) == s1
+    assert latest_snapshot(store, settling_session=S2, settling_index=102).session == S1
+
+
+def test_a_missing_snapshot_in_the_middle_is_refused_by_name_not_skipped(tmp_path: Path) -> None:
+    """S0 and S1 settled and S2's evening crashed after its ledger rows but before its snapshot:
+    settling S3 from S1's book would hand S2's due orders to S3 under new attempt ids, so the
+    ledger would hold two fills of the same orders. Refused, naming the missing ordinal."""
+    store = FilePaperStateStore(tmp_path / "snapshots")
+    s0, s1 = _settled_through(1)
+    save_snapshot(store, s0)
+    save_snapshot(store, s1)
+
+    with pytest.raises(
+        PaperStateError,
+        match=r"snapshot for session index 102 is missing: the latest is 101 \(2021-03-02\)",
+    ):
+        latest_snapshot(store, settling_session=S3, settling_index=103)
+
+
+def test_a_snapshot_dated_after_the_session_being_settled_is_refused_by_name(
+    tmp_path: Path,
+) -> None:
+    """The book is never continued from a snapshot that knows a later session: that is the
+    look-ahead rule, held at the one reader that hands a settlement its book."""
+    store = FilePaperStateStore(tmp_path / "snapshots")
+    save_snapshot(store, opening_snapshot())
+    save_snapshot(store, held_snapshot())  # S2
+
+    with pytest.raises(
+        PaperStateError,
+        match=r"snapshots dated after 2021-03-02, the session being settled, are held: "
+        r"\['2021-03-03'\]",
+    ):
+        latest_snapshot(store, settling_session=S1, settling_index=101)
+
+
+def test_a_session_whose_snapshot_is_held_is_reported_as_already_settled(tmp_path: Path) -> None:
+    store = FilePaperStateStore(tmp_path / "snapshots")
+    for book in _settled_through(2):
+        save_snapshot(store, book)
+
+    with pytest.raises(PaperStateError, match=r"2021-03-02 is already settled"):
+        latest_snapshot(store, settling_session=S1, settling_index=101)
+    with pytest.raises(PaperStateError, match=r"2021-03-03 is already settled"):
+        latest_snapshot(store, settling_session=S2, settling_index=102)
 
 
 @pytest.mark.parametrize(
@@ -462,11 +653,13 @@ def test_the_latest_snapshot_is_the_most_recent_session_held(tmp_path: Path) -> 
         (
             lambda text: text.replace('"49190.00"', '"59190.00"'),
             r"snapshot for 2021-03-03 is filed as pbs_[0-9a-f]{24} "
-            r"and its content is pbs_[0-9a-f]{24}",
+            r"and its content is pbs_[0-9a-f]{24}: it was edited, or written by a build whose "
+            r"contracts differ",
         ),
         (
             lambda text: json.dumps(json.loads(text), indent=2),
-            r"snapshot for 2021-03-03 \(pbs_[0-9a-f]{24}\) is not in its canonical bytes",
+            r"snapshot for 2021-03-03 \(pbs_[0-9a-f]{24}\) is not in its canonical bytes: it "
+            r"was edited, or written by a build whose contracts differ",
         ),
         (
             lambda text: text.replace('"session":"2021-03-03"', '"session":"2021-03-02"').replace(
@@ -488,7 +681,7 @@ def test_a_damaged_snapshot_is_refused_by_name_and_never_read_as_an_empty_book(
     with pytest.raises(PaperStateError, match=refusal):
         load_snapshot(store, S2)
     with pytest.raises(PaperStateError, match=refusal):
-        latest_snapshot(store)
+        latest_snapshot(store, settling_session=S3, settling_index=103)
     with pytest.raises(PaperStateError, match=refusal):
         save_snapshot(store, held_snapshot())  # an intact copy does not paper over the damage
 
@@ -508,6 +701,24 @@ def test_a_held_name_whose_entry_factor_is_missing_on_disk_is_refused_by_name(
 
     with pytest.raises(
         PaperStateError, match=r"held names with no entry adjustment factor: \['600036\.SH'\]"
+    ):
+        load_snapshot(store, S2)
+
+
+def test_an_attempt_count_edited_on_disk_is_refused_by_name(tmp_path: Path) -> None:
+    """The one byte that changes is the count of C's buy (planned tonight, so tried on none),
+    and the refusal names the order and the count rather than an address mismatch."""
+    store = FilePaperStateStore(tmp_path / "snapshots")
+    save_snapshot(store, held_snapshot())
+    document = _document(store, S2)
+    text = document.read_text(encoding="utf-8")
+    assert text.count('"attempts":0') == 2
+    document.write_text(text.replace('"attempts":0', '"attempts":1', 1), encoding="utf-8")
+
+    with pytest.raises(
+        PaperStateError,
+        match=r"orders not tried on every session settled since they were due: "
+        r"\['tor_[0-9a-f]{24} \(buy 000001\.SZ\) tried 1, due on 0 settled sessions'\]",
     ):
         load_snapshot(store, S2)
 
@@ -533,6 +744,51 @@ def test_open_snapshot_is_the_one_reader(tmp_path: Path) -> None:
     assert open_snapshot(payload, snapshot_id=snapshot.snapshot_id, session=S2) == snapshot
     with pytest.raises(PaperStateError, match=r"is filed as pbs_0{24} and its content is"):
         open_snapshot(payload, snapshot_id="pbs_" + "0" * 24, session=S2)
+
+
+def _without_descriptions(schema: object) -> object:
+    """The schema minus its prose: a docstring is not a change to the stored bytes."""
+    if isinstance(schema, dict):
+        return {
+            key: _without_descriptions(value)
+            for key, value in schema.items()
+            if key != "description"
+        }
+    if isinstance(schema, list):
+        return [_without_descriptions(item) for item in schema]
+    return schema
+
+
+PAPER_BOOK_SNAPSHOT_SCHEMA_DIGEST = (
+    "b3759468e158958772b056a486e72cfd2eb8f3f5aa6325caedb23ae2072ec389"
+)
+"""sha256 of `PaperBookSnapshot.model_json_schema()` without its descriptions, keys in the order
+pydantic gives them -- which is the fields' declaration order, the order `model_dump_json`
+writes and `open_snapshot`'s canonical-bytes check compares."""
+
+
+def test_the_stored_shape_of_a_snapshot_is_pinned_so_a_contract_change_needs_a_migration() -> None:
+    """A snapshot embeds `PortfolioState`, `PortfolioPosition`, `PositionLot`, `PositionMark`,
+    `TradeOrder` and `Cooldown`. A field added to any of them -- even with a default -- or two
+    fields swapped makes every stored snapshot unreadable: `extra="forbid"` refuses the old bytes
+    or `open_snapshot` finds them no longer canonical. So the shape is pinned here, and a change
+    goes red in CI with what it means rather than in a settlement run against stored books.
+
+    Keys are *not* sorted before hashing, on purpose: the order is part of the canonical bytes.
+    Descriptions are dropped, so a docstring edit does not trip it. A pydantic upgrade that only
+    re-renders the schema will trip it too; that is the one case where re-pinning is the answer,
+    after checking that a stored snapshot still reads back."""
+    schema = _without_descriptions(PaperBookSnapshot.model_json_schema())
+    rendered = json.dumps(schema, separators=(",", ":"), ensure_ascii=False)
+    digest = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+
+    assert digest == PAPER_BOOK_SNAPSHOT_SCHEMA_DIGEST, (
+        f"the stored shape of a paper-book snapshot changed (schema digest {digest}): a field of "
+        "`PaperBookSnapshot` or of a contract it embeds was added, removed, retyped or reordered. "
+        "Every snapshot already stored would stop reading -- refused as unreadable or as not "
+        "canonical -- so this change needs a migration of stored snapshots (a new "
+        "`paper-book-snapshot/v2` and an upgrade of the v1 documents), not a new digest here"
+    )
 
 
 # --- replay -------------------------------------------------------------------------------
@@ -689,7 +945,11 @@ def test_an_old_snapshot_and_the_sessions_after_it_replay_to_the_snapshot_reache
     for day in DAYS[:stop]:
         book = _settle(book, day)
         save_snapshot(store, book)
-    resumed = latest_snapshot(FilePaperStateStore(tmp_path / "snapshots"))
+    resumed = latest_snapshot(
+        FilePaperStateStore(tmp_path / "snapshots"),
+        settling_session=DAYS[stop].on,
+        settling_index=INDEX[DAYS[stop].on],
+    )
     assert resumed.session == ([S0, *[day.on for day in DAYS]])[stop]
     for day in DAYS[stop:]:
         resumed = _settle(resumed, day)
@@ -746,5 +1006,8 @@ def test_the_composition_root_wires_the_paper_snapshot_store(
     assert storage.paper_state_store.path == runtime_dir / "paper" / "snapshots"
     save_snapshot(storage.paper_state_store, held_snapshot())
     reopened = build_storage(runtime_dir=runtime_dir, clock=migration_clock)
-    assert latest_snapshot(reopened.paper_state_store) == held_snapshot()
+    assert (
+        latest_snapshot(reopened.paper_state_store, settling_session=S3, settling_index=103)
+        == held_snapshot()
+    )
     assert os.path.isfile(_document(reopened.paper_state_store, S2))
