@@ -4,11 +4,13 @@ What the survivor book's day fetches, how far behind a stored panel it catches u
 and whether what it fetched is what `strategy_survivor_facts.build_facts_day` reads -- New Year
 included.
 
-The survivor form is dispatched by the registration's `kind` in `V2-P7-008`, so `main` cannot
-reach it yet. These tests drive the seam that dispatcher calls -- `targets_for_survivor`,
-`panel_catch_up_bound` and `update_panel(..., survivor=...)` -- through what the P6 tests use:
-the scripted market (`daily_market.Market`), the real `openalpha panel build` in process, and
-the command's own request counter (`counted_transport`). Nothing reaches the network; every
+The survivor form is dispatched by the registration's `kind` (`V2-P7-008`), and its whole day
+is run through `main` in `test_daily_selection_survivor_day.py`. These tests drive the panel
+step's seam that day calls -- `targets_for_survivor`, `SurvivorPanelUpdate` (whose bound the day
+reads from the registration's `adapter.max_panel_catch_up_sessions`, `survivor_panel_update`) and
+`update_panel(..., survivor=...)` -- through what the P6 tests use: the scripted market
+(`daily_market.Market`), the real `openalpha panel build` in process, and the command's own
+request counter (`counted_transport`). Nothing reaches the network; every
 panel is generated at test time. The P6 step is measured beside each survivor number, on the
 same market, so the two forms cannot drift apart unnoticed.
 """
@@ -187,9 +189,11 @@ def _update(
     return panel, counts
 
 
-def _survivor(config: Mapping[str, Any] | None = None) -> Any:
-    """The survivor form's step-2 rules, its bound read from a registered configuration."""
-    return daily.SurvivorPanelUpdate(max_catch_up_sessions=daily.panel_catch_up_bound(config or {}))
+def _survivor(bound: int = daily.DEFAULT_MAX_PANEL_CATCH_UP_SESSIONS) -> Any:
+    """The survivor form's step-2 rules for a catch-up bound: the design's registration names 10
+    (`adapter.max_panel_catch_up_sessions`, which `survivor_panel_update` reads). The step itself
+    takes any count, so a test may drive it past what a registration can name (0..16)."""
+    return daily.SurvivorPanelUpdate(max_catch_up_sessions=bound)
 
 
 def _horizon(store: Store, dataset: str, year: int) -> date | None:
@@ -375,34 +379,76 @@ def test_once_stk_limit_pages_a_session_is_three_stk_limit_requests_and_the_day_
 # --- the catch-up bound -------------------------------------------------------------------------
 
 
-def test_the_catch_up_bound_is_ten_unless_the_registrations_adapter_block_names_another() -> None:
+def _registered(adapter: object) -> Any:
+    """What the daily command reads a survivor registration with `adapter` as its adapter block
+    as (`survivor_registration`, the step-1 reader), for the design's book and seed."""
+    from test_daily_selection_dispatch import SEED, SURVIVOR_CONFIG
+
+    config = {**SURVIVOR_CONFIG, "adapter": adapter}
+    return daily.survivor_registration(
+        daily.Registration(
+            path=Path("p6-registration.json"),
+            sha256="0" * 64,
+            commit="0" * 40,
+            code_commit="0" * 40,
+            config=config,
+            config_id=_script("grid", ROOT / "scripts" / "research").config_id(config),
+            seed=SEED,
+            settings={"random_seed": SEED},
+        )
+    )
+
+
+def test_the_catch_up_bound_is_the_registered_adapters_and_the_design_registers_ten() -> None:
+    """One reader of `max_panel_catch_up_sessions` (`V2-P7-008`): the registration's adapter
+    block, which names it -- 10 in the design's registration -- and `survivor_panel_update` hands
+    it to the step. `daily_selection.panel_catch_up_bound`, a second reader that defaulted a
+    missing key to 10 and had no upper bound, is gone."""
+    from test_daily_selection_dispatch import SURVIVOR_CONFIG
+
+    adapter = SURVIVOR_CONFIG["adapter"]
     assert daily.DEFAULT_MAX_PANEL_CATCH_UP_SESSIONS == 10
-    assert daily.panel_catch_up_bound({}) == 10
-    assert daily.panel_catch_up_bound({"adapter": {}}) == 10
-    assert daily.panel_catch_up_bound({"adapter": {"max_panel_catch_up_sessions": 3}}) == 3
-    assert daily.panel_catch_up_bound({"adapter": {"max_panel_catch_up_sessions": 0}}) == 0
+    assert adapter["max_panel_catch_up_sessions"] == daily.DEFAULT_MAX_PANEL_CATCH_UP_SESSIONS
+    for bound in (10, 3, 0, 16):
+        registered = _registered({**adapter, "max_panel_catch_up_sessions": bound})
+        assert daily.survivor_panel_update(registered) == _survivor(bound)
+    assert not hasattr(daily, "panel_catch_up_bound")
 
 
 @pytest.mark.parametrize(
-    "config",
+    "adapter",
     [
-        pytest.param({"adapter": {"max_panel_catch_up_sessions": -1}}, id="negative"),
-        pytest.param({"adapter": {"max_panel_catch_up_sessions": True}}, id="bool"),
-        pytest.param({"adapter": {"max_panel_catch_up_sessions": 2.5}}, id="float"),
-        pytest.param({"adapter": {"max_panel_catch_up_sessions": "10"}}, id="text"),
-        pytest.param({"adapter": {"max_panel_catch_up_sessions": None}}, id="null"),
-        pytest.param({"adapter": [10]}, id="block not a mapping"),
+        pytest.param({"max_panel_catch_up_sessions": -1}, id="negative"),
+        pytest.param({"max_panel_catch_up_sessions": True}, id="bool"),
+        pytest.param({"max_panel_catch_up_sessions": 2.5}, id="float"),
+        pytest.param({"max_panel_catch_up_sessions": "10"}, id="text"),
+        pytest.param({"max_panel_catch_up_sessions": None}, id="null"),
+        pytest.param({"max_panel_catch_up_sessions": 17}, id="past sixteen"),
+        pytest.param({"max_panel_catch_up_sessions": ...}, id="not named"),
+        pytest.param([10], id="block not a mapping"),
     ],
 )
 def test_a_catch_up_bound_that_is_not_a_count_of_sessions_is_refused_as_a_registration(
-    config: Mapping[str, Any],
+    adapter: object,
 ) -> None:
+    """A bound that is not a whole number of sessions from 0 to 16 -- or none at all: a
+    registration names every adapter field -- is a registration the command cannot read: step 1,
+    exit 2, naming the key."""
+    from test_daily_selection_dispatch import SURVIVOR_CONFIG
+
+    named = "the adapter block is list"
+    if isinstance(adapter, dict):
+        named = "adapter.max_panel_catch_up_sessions"
+        adapter = {**SURVIVOR_CONFIG["adapter"], **adapter}
+        if adapter["max_panel_catch_up_sessions"] is ...:
+            del adapter["max_panel_catch_up_sessions"]
+
     with pytest.raises(daily.StepFailedError) as refused:
-        daily.panel_catch_up_bound(config)
+        _registered(adapter)
 
     assert refused.value.step == "registration"
     assert refused.value.exit_code == daily.DailyExit.no_registration
-    assert "max_panel_catch_up_sessions" in str(refused.value)
+    assert named in str(refused.value)
 
 
 def test_the_survivor_rules_cannot_be_made_without_a_count_of_sessions() -> None:
@@ -485,14 +531,12 @@ def test_a_registered_bound_is_the_one_the_step_holds_to(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = _seeded(tmp_path, monkeypatch, Market(open_days=OPEN_2026), as_of=SEEDED, year=2026)
-    registered = {"adapter": {"max_panel_catch_up_sessions": 1}}
-
     with pytest.raises(daily.StepFailedError, match="2 missed session"):
         _update(
             store,
             date(2026, 2, 5),
             targets=daily.targets_for_survivor(SURVIVOR_BUILDS),
-            survivor=_survivor(registered),
+            survivor=_survivor(1),
         )
     assert store.market.payloads == []
 
@@ -1016,7 +1060,7 @@ def test_a_first_run_after_january_still_builds_the_year_befores_names_again(
     _update(store, LAST_2026, targets=targets, survivor=_survivor(), next_year=True)
     assert _names_built_at(store, 2026) == _evening(LAST_2026)
     january = weekdays(FIRST_2027, date(2027, 1, 29))
-    wide = _survivor({"adapter": {"max_panel_catch_up_sessions": len(january)}})
+    wide = _survivor(len(january))
 
     panel, counts = _update(store, FIRST_FEBRUARY, targets=targets, survivor=wide)
 
@@ -1066,7 +1110,7 @@ def _died_at_stk_limit(
 
 
 def _bounded(sessions: int) -> Any:
-    return _survivor({"adapter": {"max_panel_catch_up_sessions": sessions}})
+    return _survivor(sessions)
 
 
 @pytest.mark.parametrize(
