@@ -270,6 +270,7 @@
 1. 每个任务合入特性分支后做**任务评审**（规格符合性 + 代码质量），Critical/Important 派修复子代理，Minor 记进进度账本。
 2. Part A、B 合入后：整分支评审（最强模型）+ **完整闸门串行**（`tests/unit tests/integration tests/replay tests/contract` + `ruff` + `format` + `mypy src scripts` + `lint-imports` + `build_feature_coverage --check` + `verify_publication`）。
 3. 之后按 `superpowers:finishing-a-development-branch` 处理，**把合并方式交给用户**；不自行 push。
+3a. **`V2-P7-006` 之前的前置研究（T9 的发现）**：T8 的期望数字偏乐观约 0.9pp/年（T8 的模拟用了前视：要求 d1、d2 都有 K 线并无价移出停牌持仓），必须用无前视口径重测，并在预登记里对每次退市核销附"按最后收盘回收"的敏感性（D16）。
 4. **`V2-P7-006`（协议与预登记）是研究决策检查点**：在 `002`、`003`、`004`、`008`、`016`、`018` 完成后，由用户确认假设、窗口、判据、家族、分数映射与冻结的参数，**才**重新预登记并恢复每日登记。期望数字取 T8 的一组（+6.1–6.3%、TE 11.7%、单年跑输 27%）。
 
 ## 修订记录
