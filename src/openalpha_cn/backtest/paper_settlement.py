@@ -8,12 +8,13 @@ survivors, and before the decision because the decision needs the book the sessi
 `settle_session` takes the snapshot of the session before (`paper_state.latest_snapshot`) and the
 session's market, and does, in this order:
 
-1. **Write-offs (D13, the user's decision).** A held name the facts day reports `not_listed` that
+1. **Write-offs (D13, the user's decision).** A held name the facts day reports `delisted` that
    has no bar on the session is gone from the market: no price will come again, and a sell for it
    can never fill. It is written off -- see *The write-off* below. Its live orders (only a sell
    can exist) are withdrawn, not handed to the step, so the kernel is never asked to sell a
-   holding that has no price. A name reported `not_listed` that still has a bar is priced and
-   traded like any holding (`FactsNotes.not_listed_with_bar` counts those).
+   holding that has no price. A name reported `delisted` that still has a bar is priced and
+   traded like any holding. Only `delisted` is written off -- never a code the registry merely
+   does not list yet: a write-off is an append to an append-only ledger.
 2. **The due orders** -- every pending order with `execute_session <= session_index`, carried ones
    included -- all go to `paper_step.build_paper_step`, which takes out and records as
    `not_attempted` the ones whose name has no bar. An order not due yet stays pending, untried.
@@ -48,30 +49,32 @@ which has a bar is refused by `build_paper_step` as a data failure.
 ## The write-off
 
 The paper ledger stores `PortfolioTransition`s, whose `status` is `filled` or `rejected` and
-nothing else; a third status would be a change to a stored contract (hard rule 3). So a write-off
-is the ledger's one accepted shape, **labelled** so that no reader can take it for a trade:
+nothing else; a third status would be a change to a stored contract (hard rule 3). A `filled`
+transition need not carry an execution, though, and a write-off is stored as exactly that -- a
+**price-less** filled transition, **labelled** so that no reader can take it for a trade:
 
-- `status="filled"`, `reason="delisting_write_off"` on the transition **and** on its
-  `ExecutionResult`, order id `write_off_id(code, session)` (`delisting_write_off:<code>@<date>`,
-  outside the `tor_...@<date>` attempt-id space);
-- the whole holding at the **convention price `WRITE_OFF_PRICE` = 0.01**, the smallest positive
-  price the ledger can represent, standing for "nothing recovered" -- **a convention, not a price
-  anybody traded at**; the holding's ledger shares x 0.01 reach cash, and the realised loss is that
-  less the cost basis;
-- **no fees**, and no cool-down (the name cannot be bought again anyway);
+- `status="filled"`, `execution=None` -- no price, no notional, no fee: nothing was traded --
+  and `reason="delisting_write_off"`; order id `write_off_id(code, session)`
+  (`delisting_write_off:<code>@<date>`, outside the `tor_...@<date>` attempt-id space);
+- the whole holding is removed and, **by convention, exactly zero is recovered**: cash is
+  unchanged and the realised loss is the holding's whole cost basis (`realized_pnl_delta =
+  -cost_basis`), so equity falls by exactly what the holding was marked at;
+- no cool-down (the name cannot be bought again anyway);
 - `before` and `after` are both as of the session, after the close.
 
 **What a reader of the paper ledger must do:** treat a transition with `reason ==
-"delisting_write_off"` as a write-off -- not turnover, not a fill price. The notional (shares x
-0.01) is not zero, so it adds a few yuan to cash and to any sum of filled notionals.
+"delisting_write_off"` as a write-off, not a sale. Having no execution, it is outside every
+reading that goes through one -- the runner counts turnover only for a filled transition with an
+execution -- but a reader that assumes every `filled` transition has an `execution` must check.
 
-**The rule is conservative, and it is wrong for one kind of delisting:** a delisting by merger
-(absorption with a share swap) pays holders in the acquirer's shares, and this rule books it as a
-total loss. By reasoning, not measured: a merger target is halted before it is delisted, and the
-kernel leaves a halted holding alone (`FREEZE_COMPATIBLE_REASONS`), so that is the likelier way
-a held name reaches "delisted while held"; a delisting through the delisting period reaches it
-only if the forced exit (a delisting-period name is special treatment) fails on every session
-of that period.
+**The rule is conservative, and it is wrong whenever a delisting pays holders something:** a
+delisting by merger (absorption with a share swap) pays them in the acquirer's shares, a cash
+tender offer and a voluntary delisting with a cash-exit option pay them cash, and this rule books
+each as a total loss. By reasoning, not measured: such a target is usually halted before it is
+delisted, and the kernel leaves a halted holding alone (`FREEZE_COMPATIBLE_REASONS`), so that is
+the likelier way a held name reaches "delisted while held"; a delisting through the delisting
+period reaches it only if the forced exit (a delisting-period name is special treatment) fails on
+every session of that period.
 
 ## Units carried over from `paper_step`
 
@@ -96,7 +99,6 @@ from openalpha_cn.backtest.multi_day import CarriedMark
 from openalpha_cn.backtest.paper import PaperPortfolio, PaperSessionResult, refusing_outward_calls
 from openalpha_cn.backtest.paper_state import EntryFactor, PaperBookSnapshot, PendingOrder
 from openalpha_cn.backtest.paper_step import AttemptedOrder, build_paper_step, remark_at_close
-from openalpha_cn.domain.execution import ExecutionResult
 from openalpha_cn.domain.portfolio import (
     PortfolioOrder,
     PortfolioState,
@@ -109,7 +111,6 @@ from openalpha_cn.domain.survivor_orders import TradeList, TradeOrder
 from openalpha_cn.domain.survivor_policy import BookState, Cooldown, Holding
 
 __all__ = [
-    "WRITE_OFF_PRICE",
     "WRITE_OFF_REASON",
     "SessionMarketLike",
     "Settlement",
@@ -121,10 +122,6 @@ __all__ = [
 
 WRITE_OFF_REASON: Final = "delisting_write_off"
 """The label on a write-off's transition and execution; see the module docstring."""
-
-WRITE_OFF_PRICE: Final = Decimal("0.01")
-"""The convention price of a write-off: the smallest positive price, standing for nothing
-recovered. Not a price anybody traded at."""
 
 _ONE: Final = Decimal(1)
 _CENT: Final = Decimal("0.01")
@@ -236,7 +233,7 @@ def settle_session(
     session_index: int,
     market: SessionMarketLike,
     survivors: Collection[str],
-    not_listed: Collection[str],
+    delisted: Collection[str],
     portfolio: PaperPortfolio,
     config: SurvivorBookConfig,
     observed_on: date,
@@ -244,8 +241,8 @@ def settle_session(
     """Settle `session` from `previous`, the snapshot of the session before it.
 
     `session_index` is `session`'s ordinal, `previous.session_index + 1`. `survivors` is the
-    session's survivor set (a live buy for a name outside it is cancelled). `not_listed` is every
-    held code the session's facts day reports `not_listed` (`FactsDay.held_status`); one with no
+    session's survivor set (a live buy for a name outside it is cancelled). `delisted` is every
+    held code the session's facts day reports `delisted` (`FactsDay.held_status`); one with no
     bar is written off. `portfolio` is the paper book, built by the caller with the paper ledger,
     `PortfolioLimits(1, 1, 0)` and the protocol's costs (D15); `config` is the configuration the
     book is settled under. `observed_on` is the date the session's market was observed.
@@ -260,11 +257,11 @@ def settle_session(
     )
     held = {position.subject for position in previous.book.positions}
     _refuse(
-        "codes reported not listed that the book does not hold (the facts day's held_status "
+        "codes reported delisted that the book does not hold (the facts day's held_status "
         "describes the book's holdings)",
-        set(not_listed) - held,
+        set(delisted) - held,
     )
-    written = sorted(code for code in set(not_listed) if code not in market.bars)
+    written = sorted(code for code in set(delisted) if code not in market.bars)
     pending = previous.pending_orders
     due = tuple(
         item.order
@@ -516,13 +513,13 @@ def _advance_without_a_step(
 
 
 def _write_off(state: PortfolioState, *, ts_code: str, session: date) -> PortfolioTransition:
-    """The labelled transition that removes `ts_code` from `state` at the convention price."""
+    """The labelled, price-less transition that removes `ts_code` from `state`, recovering
+    nothing: cash unchanged, the whole cost basis realised as a loss."""
     position = state.position(ts_code)
-    notional = _money(WRITE_OFF_PRICE * position.quantity)
-    realized = _money(notional - position.cost_basis)
+    realized = _money(-position.cost_basis)
     after = PortfolioState(
         as_of=session,
-        cash=_money(state.cash + notional),
+        cash=state.cash,
         positions=tuple(item for item in state.positions if item.subject != ts_code),
         marks=tuple(mark for mark in state.marks if mark.subject != ts_code),
         realized_pnl=_money(state.realized_pnl + realized),
@@ -538,14 +535,7 @@ def _write_off(state: PortfolioState, *, ts_code: str, session: date) -> Portfol
         ),
         before=state,
         after=after,
-        execution=ExecutionResult(
-            status="filled",
-            side="sell",
-            quantity=position.quantity,
-            reason=WRITE_OFF_REASON,
-            filled_price=WRITE_OFF_PRICE,
-            notional=notional,
-        ),
+        execution=None,
         reason=WRITE_OFF_REASON,
         realized_pnl_delta=realized,
     )

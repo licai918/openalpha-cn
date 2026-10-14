@@ -29,7 +29,6 @@ from openalpha_cn.backtest.execution import MarketBar, security_board
 from openalpha_cn.backtest.multi_day import PortfolioBacktestStep
 from openalpha_cn.backtest.paper import PaperPortfolio
 from openalpha_cn.backtest.paper_settlement import (
-    WRITE_OFF_PRICE,
     WRITE_OFF_REASON,
     Settlement,
     WriteOff,
@@ -214,7 +213,7 @@ def settle(
     portfolio: PaperPortfolio,
     *,
     survivors: Collection[str] = (),
-    not_listed: Collection[str] = (),
+    delisted: Collection[str] = (),
     config: SurvivorBookConfig = CONFIG,
     observed_on: date | None = None,
 ) -> Settlement:
@@ -224,7 +223,7 @@ def settle(
         session_index=INDEX[day],
         market=quotes,
         survivors=survivors,
-        not_listed=not_listed,
+        delisted=delisted,
         portfolio=portfolio,
         config=config,
         observed_on=day if observed_on is None else observed_on,
@@ -889,7 +888,7 @@ def test_a_settlement_that_does_not_follow_its_snapshot_is_refused(
         "session_index": 101,
         "market": quotes,
         "survivors": {C, E},
-        "not_listed": (),
+        "delisted": (),
         "portfolio": portfolio,
         "config": CONFIG,
         "observed_on": S1,
@@ -917,25 +916,25 @@ def _delisted_book(*orders: TradeOrder) -> PaperBookSnapshot:
 def test_a_holding_delisted_with_no_bar_is_written_off_before_the_book_is_decided(
     tmp_path: Path,
 ) -> None:
-    """600010.SH is not listed on S1 and has no bar (and no factor). It is written off: removed,
-    at the convention price 0.01 -- 1,000 x 0.01 = 10.00 back, no fees -- for a realised loss of
-    10.00 - 10,005.00 = -9,995.00. The labelled transition is the only ledger row: its live sell
-    is withdrawn, never handed to the step. Before: 5,000.00 + 6,000.00 + 11,600.00 = 22,600.00;
-    after: cash 5,010.00 and 600020.SH at its 11.60 close, 16,610.00."""
+    """600010.SH is delisted on S1 and has no bar (and no factor). It is written off: removed
+    with no price and nothing recovered -- cash unchanged at 5,000.00, no fees -- for a realised
+    loss of its whole cost, -10,005.00. The labelled transition is the only ledger row: its live
+    sell is withdrawn, never handed to the step. Before: 5,000.00 + 6,000.00 + 11,600.00 =
+    22,600.00; after: 5,000.00 + 600020.SH at its 11.60 close = 16,600.00, a fall of exactly the
+    6,000.00 the holding was marked at."""
     out = sell(A, 1000, reason="EXIT_ELIGIBILITY_LOST")
     ledger, portfolio = ledger_at(tmp_path / "paper.sqlite3")
     quotes = market(
         bar(B, S1, "11.50", "11.50", "11.70", "11.40", "11.60", "12.65", "10.35"), adj={B: "1.000"}
     )
 
-    settled = settle(_delisted_book(out), S1, quotes, portfolio, not_listed={A})
+    settled = settle(_delisted_book(out), S1, quotes, portfolio, delisted={A})
 
     (written,) = settled.written_off
     assert isinstance(written, WriteOff)
     assert (written.ts_code, written.withdrawn) == (A, (out,))
     transition = written.transition
     assert WRITE_OFF_REASON == "delisting_write_off"
-    assert str(WRITE_OFF_PRICE) == "0.01"
     assert write_off_id(A, S1) == "delisting_write_off:600010.SH@2021-03-02"
     assert (transition.status, transition.reason) == ("filled", "delisting_write_off")
     assert (transition.order.order_id, transition.order.side, transition.order.quantity) == (
@@ -943,29 +942,22 @@ def test_a_holding_delisted_with_no_bar_is_written_off_before_the_book_is_decide
         "sell",
         1000,
     )
-    execution = transition.execution
-    assert execution is not None
-    assert (execution.reason, execution.filled_price, execution.notional) == (
-        "delisting_write_off",
-        D("0.01"),
-        D("10.00"),
-    )
-    assert (execution.commission, execution.transfer_fee, execution.stamp_duty) == (
-        D("0.00"),
-        D("0.00"),
-        D("0.00"),
-    )
-    assert execution.total_cost == D("0.00")
-    assert transition.realized_pnl_delta == D("-9995.00")
+    assert transition.execution is None  # no price, no notional, no fee: nothing traded
+    assert transition.realized_pnl_delta == D("-10005.00")
     assert transition.before.equity == D("22600.00")
+    assert transition.after.cash == transition.before.cash == D("5000.00")
+    assert transition.after.fees_paid == transition.before.fees_paid
+    assert transition.before.equity - transition.after.equity == D("6000.00")
     assert transition.before.as_of == transition.after.as_of == S1
     assert rows(ledger) == [(write_off_id(A, S1), "filled", "delisting_write_off")]
     assert settled.attempts == ()
-    assert settled.book.cash == D("5010.00")
+    assert settled.book.cash == D("5000.00")
     assert [p.subject for p in settled.book.positions] == [B]
     assert marks(settled.book) == {B: D("11.60")}
-    assert settled.book.equity == D("16610.00")
-    assert (settled.book.realized_pnl, settled.book.fees_paid) == (D("-9995.00"), D("0.00"))
+    assert settled.book.equity == D("16600.00")
+    assert (settled.book.realized_pnl, settled.book.fees_paid) == (D("-10005.00"), D("0.00"))
+    (stored,) = ledger.list()
+    assert stored == transition  # a price-less filled transition reads back as written
     assert (settled.live, settled.filled, settled.expired, settled.cancelled) == ((), (), (), ())
     assert settled.cooldowns == ()
     assert factors(settled) == {B: D("1.000")}
@@ -980,7 +972,7 @@ def test_a_holding_delisted_with_no_bar_is_written_off_before_the_book_is_decide
     assert rows(control_ledger) == []
 
 
-def test_a_holding_reported_not_listed_that_still_has_a_bar_is_traded_not_written_off(
+def test_a_holding_reported_delisted_that_still_has_a_bar_is_traded_not_written_off(
     tmp_path: Path,
 ) -> None:
     """With a bar the name has a price: its sell is submitted (here refused at a one-price
@@ -997,7 +989,7 @@ def test_a_holding_reported_not_listed_that_still_has_a_bar_is_traded_not_writte
             adj={A: "1.000", B: "1.000"},
         ),
         portfolio,
-        not_listed={A},
+        delisted={A},
     )
 
     assert settled.written_off == ()
@@ -1008,7 +1000,7 @@ def test_a_holding_reported_not_listed_that_still_has_a_bar_is_traded_not_writte
     assert marks(settled.book)[A] == D("5.40")
 
 
-def test_a_code_reported_not_listed_that_the_book_does_not_hold_is_refused_by_name(
+def test_a_code_reported_delisted_that_the_book_does_not_hold_is_refused_by_name(
     tmp_path: Path,
 ) -> None:
     ledger, portfolio = ledger_at(tmp_path / "paper.sqlite3")
@@ -1018,7 +1010,7 @@ def test_a_code_reported_not_listed_that_the_book_does_not_hold_is_refused_by_na
             S1,
             market(QUIET_B[S1], adj={A: "1.000", B: "1.000"}),
             portfolio,
-            not_listed={"600099.SH"},
+            delisted={"600099.SH"},
         )
     assert rows(ledger) == []
 
@@ -1034,7 +1026,7 @@ def test_a_write_off_with_nothing_else_to_settle_records_what_the_runner_would_h
     ledger, portfolio = ledger_at(tmp_path / "paper.sqlite3")
     nothing = Market(bars={}, adj_factor={})
 
-    settled = settle(book, S1, nothing, portfolio, not_listed={A})
+    settled = settle(book, S1, nothing, portfolio, delisted={A})
 
     unrelated = bar("600099.SH", S1, "5.00", "5.00", "5.00", "5.00", "5.00", "5.50", "4.50")
     runner = ledger_at(tmp_path / "runner.sqlite3")[1].advance(
@@ -1046,7 +1038,7 @@ def test_a_write_off_with_nothing_else_to_settle_records_what_the_runner_would_h
     assert [(m.subject, m.price, m.sessions_carried) for m in settled.result.carried_marks] == [
         (A, D("6.00"), 1)
     ]
-    assert settled.book == PortfolioState(as_of=S1, cash=D("5010.00"), realized_pnl=D("-9995.00"))
+    assert settled.book == PortfolioState(as_of=S1, cash=D("5000.00"), realized_pnl=D("-10005.00"))
     assert rows(ledger) == [(write_off_id(A, S1), "filled", "delisting_write_off")]
-    assert settle(book, S1, nothing, portfolio, not_listed={A}) == settled
+    assert settle(book, S1, nothing, portfolio, delisted={A}) == settled
     assert len(ledger.list()) == 1
