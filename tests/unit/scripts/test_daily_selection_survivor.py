@@ -140,8 +140,10 @@ def _seeded(
     *,
     as_of: str,
     year: int,
+    targets: Sequence[str] = SEED_TARGETS,
 ) -> Store:
-    """Every survivor target built through the real `panel build` against `market`, at `as_of`."""
+    """Every survivor target (or just `targets`) built through the real `panel build` against
+    `market`, at `as_of`."""
     monkeypatch.setenv("TUSHARE_TOKEN", "sk-survivor-panel-step-token")
     monkeypatch.setattr(cli, "_panel_transport", lambda: market)
     monkeypatch.setattr(cli, "_panel_clock", lambda: WALL_CLOCK)
@@ -149,7 +151,7 @@ def _seeded(
     runtime = tmp_path / "runtime"
     arguments = ["panel", "build", "--runtime-dir", str(runtime), "--year", str(year)]
     arguments += ["--as-of", as_of, "--exchange", EXCHANGE, "--json"]
-    for target in SEED_TARGETS:
+    for target in targets:
         arguments += ["--dataset", target]
     seeded = daily.invoke(arguments)
     assert seeded.exit_code == 0, seeded.reason()
@@ -680,12 +682,15 @@ def _december(
     *,
     targets: Sequence[str],
     survivor: Any,
+    seed: Sequence[str] = SEED_TARGETS,
 ) -> Store:
-    """The New Year market, seeded through 21 December and last run on `last_run` -- with next
-    year's calendar, which any run in December's last twenty-odd sessions stores
+    """The New Year market, seeded through 21 December (with `seed`) and last run on `last_run` --
+    with next year's calendar, which any run in December's last twenty-odd sessions stores
     (`next_year_calendar_needed`)."""
     market = NamesAcrossNewYear(open_days=NEW_YEAR, delisted=((DELISTED, FIRST_2027),))
-    store = _seeded(tmp_path, monkeypatch, market, as_of="2026-12-22T12:00:00+08:00", year=2026)
+    store = _seeded(
+        tmp_path, monkeypatch, market, as_of="2026-12-22T12:00:00+08:00", year=2026, targets=seed
+    )
     _update(store, last_run, targets=targets, survivor=survivor, next_year=True)
     return store
 
@@ -789,6 +794,66 @@ def test_a_store_that_holds_nothing_of_the_year_before_is_not_refused_for_it(
     assert dict(counts) == STEADY_SURVIVOR
     assert _years_asked(store, NAMECHANGE_DATASET) == ["2027"]
     assert _horizon(store, DAILY_DATASET, 2027) == date(2027, 1, 5)
+
+
+@pytest.mark.parametrize("absent", [PRICE_LIMIT_DATASET, ADJ_FACTOR_DATASET, "price"])
+def test_a_year_before_holding_only_some_session_scoped_partitions_is_refused_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, absent: str
+) -> None:
+    """The rule is "some session-scoped partition of the year before is stored", not "every one
+    is": a 2026 that holds `adj_factor`, `daily` and `daily_basic` through 31 December and no
+    `stk_limit` at all (or any other one target missing) has a tail to complete, and the target
+    that holds nothing is a target `panel build --incremental` fetches whole, from the year's
+    first session (`cli._incremental_start`). So the refusal names every open session of 2026
+    -- the partitions "are not all stored", no stored horizon to quote -- and prints the build
+    of all the targets together, which run, completes 2026 and leaves 2027's first session the
+    ordinary one. Only a 2026 that holds none of them is not refused (the test above)."""
+    targets = daily.targets_for_survivor(SURVIVOR_BUILDS)
+    kept = [target for target in targets if target != absent]
+    store = _december(
+        tmp_path,
+        monkeypatch,
+        LAST_2026,
+        targets=kept,
+        survivor=_survivor(),
+        seed=[target for target in SEED_TARGETS if target != absent],
+    )
+    for dataset in _written([absent]):
+        assert 2026 not in store.panel.registered_years(dataset), dataset
+    assert 2026 in store.panel.registered_years(TRADING_CALENDAR_DATASET)
+    before = _files(store.runtime)
+    whole_year = weekdays(date(2026, 12, 14), LAST_2026)
+
+    with pytest.raises(daily.StepFailedError) as refused:
+        _update(store, FIRST_2027, targets=targets, survivor=_survivor())
+
+    message = str(refused.value)
+    assert refused.value.step == "panel update"
+    assert "the stored session-scoped partitions of 2026 are not all stored: " in message
+    assert (
+        f"{len(whole_year)} open session(s) of 2026, {whole_year[0].isoformat()} to "
+        f"{LAST_2026.isoformat()}, are missing" in message
+    )
+    assert "nothing was fetched" in message
+    assert store.market.payloads == []
+    assert _files(store.runtime) == before
+
+    arguments = _printed_command(message)
+    assert arguments[arguments.index("--year") + 1] == "2026"
+    assert arguments[arguments.index("--as-of") + 1] == (
+        session_publication_instant(LAST_2026).astimezone(UTC).isoformat()
+    )
+    assert "--incremental" in arguments
+    assert _datasets(arguments) == [ADJ_FACTOR_DATASET, "price", PRICE_LIMIT_DATASET]
+    built = daily.invoke(arguments[1:])
+    assert built.exit_code == 0, built.reason()
+    for dataset in cli.SESSION_SCOPED_DATASETS:
+        assert _horizon(store, dataset, 2026) == LAST_2026, dataset
+
+    panel, _counts = _update(store, FIRST_2027, targets=targets, survivor=_survivor())
+
+    assert panel["caught_up"] == []
+    assert _horizon(store, DAILY_DATASET, 2027) == FIRST_2027
 
 
 P6_YEAR_BOUNDARY_DISPUTES: Final[int] = 9
