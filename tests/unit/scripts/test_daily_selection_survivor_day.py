@@ -59,6 +59,7 @@ from openalpha_cn.panel_factors import FACTOR_TRANSFORMS
 from openalpha_cn.panel_ingest import load_trading_calendar
 from openalpha_cn.storage.paper_state import FilePaperStateStore
 from openalpha_cn.storage.predictions import FilePredictionStore
+from openalpha_cn.strategy_registration import batch_digest
 from openalpha_cn.strategy_survivor_market import SessionOrdinals
 
 daily = tds.daily
@@ -309,6 +310,7 @@ def test_a_survivor_day_runs_steps_one_to_seven_and_stops_at_the_paper_book_by_n
     assert declaration.feature_version == _config_id(world)
     assert {item.ts_code: item.score for item in record.batch.predictions} == eligible
     assert record.standing == "forward"
+    assert record.batch.predicted_at == RUN_CLOCK  # the run's clock, not its pinned as_of
     prediction = journal["prediction"]
     assert prediction["registered"] is True
     assert prediction["record_id"] == record_id
@@ -316,6 +318,8 @@ def test_a_survivor_day_runs_steps_one_to_seven_and_stops_at_the_paper_book_by_n
     assert prediction["horizon"] == "20d"
     assert prediction["scored"] == len(eligible)
     assert prediction["outcome"] == "created"
+    # The filed record's own batch: what Part E finds the record's provenance by.
+    assert prediction["batch_digest"] == batch_digest(record.batch)
     # Its provenance was filed before it, under its digest.
     filed = world.runtime / "daily_survivor_provenance" / f"{prediction['provenance']}.json"
     provenance = strategy_survivor_registration.read_survivor_provenance(
@@ -324,6 +328,8 @@ def test_a_survivor_day_runs_steps_one_to_seven_and_stops_at_the_paper_book_by_n
     )
     assert provenance.held == ()
     assert provenance.session == DAY
+    assert provenance.recorded_at == RUN_CLOCK
+    assert provenance.batch_digest == prediction["batch_digest"]
 
 
 @dataclass
@@ -464,6 +470,64 @@ def test_a_day_run_after_the_next_sessions_call_auction_settles_only_and_files_n
     assert prediction["settle_only"] is True
     assert "call auction" in prediction["reason"]
     assert _records(world) == ()
+
+
+def test_the_provenance_is_filed_before_the_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """Written once, before the record it describes: a record is never on file without the
+    fingerprint of what its day read."""
+    world = _world(tmp_path, monkeypatch, seeded)
+    seen: list[list[str]] = []
+    register = daily.register_prediction
+
+    def spied(*arguments: Any, **keywords: Any) -> Any:
+        filed = world.runtime / "daily_survivor_provenance"
+        seen.append(sorted(path.name for path in filed.glob("*.json")))
+        return register(*arguments, **keywords)
+
+    monkeypatch.setattr(daily, "register_prediction", spied)
+
+    _code, _out, err = _run(world, capsys)
+
+    assert err[0] == STUB
+    assert len(_records(world)) == 1
+    assert seen == [[f"{_journal(world)['prediction']['provenance']}.json"]]
+
+
+def test_a_day_is_routed_by_its_pinned_clock_and_one_too_late_to_register_files_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """A day pinned at 18:30 is an evening day, whatever the clock of a rerun says (D3 review,
+    rule 4): run again after the next session's call auction, it is not turned into a
+    settle-only day -- and since its record can no longer be filed before its outcome, step 7
+    refuses it by name before anything is written, with no stray provenance."""
+    world = _world(tmp_path, monkeypatch, seeded)
+    check_panel = daily.check_panel
+    monkeypatch.setattr(daily, "check_panel", _injected)
+    _code, _out, err = _run(world, capsys)
+    assert err[0].startswith("step 3 (panel doctor) failed:")
+    monkeypatch.setattr(daily, "check_panel", check_panel)
+    late = datetime.fromisoformat("2026-04-07T10:00:00+08:00")
+
+    code, _out, err = _run(world, capsys, clock=late)
+
+    assert code == 1
+    assert err[0].startswith("step 7 (prediction) failed:")
+    assert "can no longer be registered or decided" in err[0]
+    assert "the next session's run settles it without a decision" in err[0]
+    assert err[1] == NO_REQUEST
+    journal = _journal(world)
+    assert journal["as_of"] == DAY_AS_OF.isoformat()
+    assert "prediction" not in journal
+    assert _records(world) == ()
+    assert list((world.runtime / "daily_survivor_provenance").glob("*.json")) == []
 
 
 # --- the paper book's lock and binding -------------------------------------------------------
@@ -937,6 +1001,7 @@ def _injected(*_arguments: Any, **_keywords: Any) -> Any:
         pytest.param(strategy_survivor_book, "paper_head", "paper head", 16, id="5"),
         pytest.param(strategy_survivor_book, "facts_day", "facts", 16, id="6"),
         pytest.param(strategy_survivor_registration, "survivor_batch", "prediction", 16, id="7"),
+        pytest.param(daily, "registration_cutoff", "panel update", 16, id="2, the cutoff"),
     ],
 )
 def test_a_fault_no_survivor_step_anticipated_is_that_steps_refusal_with_its_requests(

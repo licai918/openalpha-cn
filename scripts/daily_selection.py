@@ -3841,14 +3841,33 @@ def _survivor_prediction(
     transform: FactorTransformSpec,
     session: date,
     as_of: datetime,
+    cutoff: datetime,
     clock: Callable[[], datetime],
 ) -> dict[str, Any]:
     """Step 7: the day's eligible composites as the forward record `survivor_book_composite/v1`
     (`strategy_survivor_registration`), its input provenance filed first and written once, then
     the record through P6's own `register_prediction` -- reused for a day already filed under
-    the same declaration, refused for a different answer or once the next call auction began."""
+    the same declaration, refused for a different answer.
+
+    Refused first, before anything is computed or written, once this run's clock has reached
+    `cutoff` -- the next session's call auction -- on a day whose pinned clock had not (a rerun
+    the next morning of an evening day that stopped before step 7): the record would no longer
+    precede its outcome. `register_prediction` refuses it too, but after the provenance, each
+    rerun leaving a stray one behind. The journal keeps the filed record's own batch digest, the
+    key Part E finds its provenance by."""
     from openalpha_cn import strategy_survivor_registration as forward
 
+    now = clock()
+    if now >= cutoff:
+        raise StepFailedError(
+            "prediction",
+            f"the scores of {session.isoformat()} are traded at the next session's open, whose "
+            f"call auction starts {cutoff.isoformat()}, and it is {now.isoformat()}: this session "
+            "can no longer be registered or decided -- its record would not precede its outcome "
+            "-- and the next session's run settles it without a decision. Nothing was filed; "
+            "there is nothing to do",
+            steps=SURVIVOR_STEPS,
+        )
     declared = registration.declared
     exchange = survivor.adapter.exchange
     try:
@@ -3890,6 +3909,7 @@ def _survivor_prediction(
         "recorded_at": record.recorded_at.isoformat(),
         "scored": len(record.batch.scored),
         "abstained": len(record.batch.abstained),
+        "batch_digest": batch_digest(record.batch),
         "provenance": provenance.digest,
     }
 
@@ -4104,6 +4124,12 @@ def _survivor_day(
             )
             journal = {**journal, "panel": {**panel, "requests": dict(sorted(counts.items()))}}
             write_journal(path, journal)
+        # The session's registration cutoff, 09:15 of the next session, on the calendar this step
+        # stores the next year of when the outcome window needs it: read once, here. By the
+        # pinned clock, never this run's, it routes the day -- a rerun is the day it was (D3
+        # review, rule 4) -- and step 7 refuses a record the clock has made too late.
+        cutoff = registration_cutoff(_outcome_calendar(store, exchange, session, as_of), session)
+        settle_only = as_of >= cutoff
 
     with _step("panel doctor", steps=SURVIVOR_STEPS):
         check_panel(
@@ -4138,9 +4164,6 @@ def _survivor_day(
             )
         except paper_book.SurvivorDayError as error:
             raise StepFailedError(error.step, str(error), steps=SURVIVOR_STEPS) from error
-        # By the pinned clock, never this run's: a rerun is the day it was (D3 review, rule 4).
-        cutoff = registration_cutoff(_outcome_calendar(store, exchange, session, as_of), session)
-        settle_only = as_of >= cutoff
     if head.opened_only:
         with _step("summary", steps=SURVIVOR_STEPS):
             result = _opening_result(
@@ -4183,6 +4206,7 @@ def _survivor_day(
                     transform=transform,
                     session=session,
                     as_of=as_of,
+                    cutoff=cutoff,
                     clock=clock,
                 )
             )
