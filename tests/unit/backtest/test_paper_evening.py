@@ -461,55 +461,57 @@ def test_opening_a_book_saves_an_opening_snapshot_of_cash_alone(tmp_path: Path) 
     assert (store.path / name).read_text(encoding="utf-8") == snapshot_payload(opening)
 
 
-def test_opening_the_same_book_again_writes_nothing(tmp_path: Path) -> None:
-    store = opened(tmp_path)
+@pytest.mark.parametrize("cash", ["100000.00", "100000", "100000.0"])
+def test_opening_the_same_book_again_writes_nothing_however_its_cash_is_spelled(
+    tmp_path: Path, cash: str
+) -> None:
+    """The daily entry opens the book on every run, with the registration's epoch, capital and
+    digest: the same opening again is a no-op. The cash is held to the fen, so 100000,
+    100000.0 and 100000.00 open one and the same book."""
+    store = opened(tmp_path, cash="100000")
     before = documents(store)
 
-    again = open_book(
-        store=store, session=E0, session_index=0, cash=D("100000.00"), config_digest=DIGEST
-    )
+    again = open_book(store=store, session=E0, session_index=0, cash=D(cash), config_digest=DIGEST)
 
     assert again == load_snapshot(store, E0)
+    assert '"cash":"100000.00"' in snapshot_payload(again)
     assert documents(store) == before
 
 
+OPENED = (
+    rf"a paper book is already open in this runtime directory -- opened on 2021-03-01 with "
+    rf"cash 100000\.00 under configuration digest {DIGEST} as pbs_[0-9a-f]{{24}} -- and this "
+    r"opening differs in "
+)
+
+
 @pytest.mark.parametrize(
-    ("session", "cash", "digest", "refusal"),
+    ("session", "cash", "digest", "differs"),
     [
-        (E0, "100000.01", DIGEST, r"2021-03-01 is already settled as pbs_"),
-        (E0, "100000.00", OTHER_DIGEST, r"2021-03-01 is already settled as pbs_"),
+        (E0, "100000.01", DIGEST, r"its cash \(100000\.01\)"),
+        (E0, "100000.00", OTHER_DIGEST, rf"its configuration digest \({OTHER_DIGEST}\)"),
+        (S1, "100000.00", DIGEST, r"its epoch \(2021-03-02\)"),
         (
             S1,
-            "100000.00",
-            DIGEST,
-            r"2021-03-02 is an opening snapshot and this store already holds the book's "
-            r"history through 2021-03-01 \(session index 0\)",
-        ),
-        (
-            S1,
-            "100000.00",
+            "1.00",
             OTHER_DIGEST,
-            r"2021-03-02 is an opening snapshot and this store already holds",
+            rf"its epoch \(2021-03-02\), its cash \(1\.00\), its configuration digest "
+            rf"\({OTHER_DIGEST}\)",
         ),
     ],
-    ids=["other cash", "other configuration", "a later opening", "a second book"],
+    ids=["other cash", "other configuration", "another epoch", "a second book"],
 )
 def test_an_opening_never_replaces_or_restarts_a_book_already_held(
-    tmp_path: Path, session: date, cash: str, digest: str, refusal: str
+    tmp_path: Path, session: date, cash: str, digest: str, differs: str
 ) -> None:
-    """One paper book per runtime directory, opened once: another opening on the same day, or a
-    restart on a later one, is refused by name and the store keeps its bytes."""
+    """One paper book per runtime directory, opened once: an opening that is not the book's own
+    is refused, naming the book that is open and every way the opening differs from it, and the
+    store keeps its bytes."""
     store = opened(tmp_path)
     before = documents(store)
 
-    with pytest.raises(PaperStateError, match=refusal):
-        open_book(
-            store=store,
-            session=session,
-            session_index=INDEX[session],
-            cash=D(cash),
-            config_digest=digest,
-        )
+    with pytest.raises(PaperStateError, match=OPENED + differs + ": one paper book"):
+        open_book(store=store, session=session, session_index=0, cash=D(cash), config_digest=digest)
     assert documents(store) == before
 
 
@@ -519,16 +521,26 @@ def test_an_opening_never_replaces_or_restarts_a_book_already_held(
         ("0.00", 0, r"opening cash must be a positive amount: 0\.00"),
         ("-1.00", 0, r"opening cash must be a positive amount: -1\.00"),
         ("NaN", 0, r"opening cash must be a positive amount: NaN"),
-        ("100000.00", -1, r"session_index"),
+        ("100000.005", 0, r"opening cash must be a whole number of fen: 100000\.005"),
+        ("100000.00", -1, r"opens on its epoch, ordinal 0 by definition: given ordinal -1"),
+        ("100000.00", 3, r"opens on its epoch, ordinal 0 by definition: given ordinal 3"),
     ],
-    ids=["no cash", "negative cash", "not a number", "before the calendar's first ordinal"],
+    ids=[
+        "no cash",
+        "negative cash",
+        "not a number",
+        "part of a fen",
+        "before the epoch",
+        "not the epoch",
+    ],
 )
 def test_an_opening_the_book_could_never_trade_from_is_refused_before_anything_is_written(
     tmp_path: Path, cash: str, index: int, refusal: str
 ) -> None:
     """A book is opened once per runtime directory, so an opening nothing could be decided from
-    -- the kernel sizes from a positive equity -- would be a directory spoiled for good. An
-    ordinal below 0 is a date before the epoch the calendar counts from."""
+    -- the kernel sizes from a positive equity -- would be a directory spoiled for good, and so
+    would an amount the ledger cannot hold to the fen. The epoch is ordinal 0 by definition: a
+    book opened on any other ordinal numbers its sessions from somewhere else."""
     store = FilePaperStateStore(tmp_path / "snapshots")
 
     with pytest.raises(ValueError, match=refusal):
@@ -548,13 +560,9 @@ def test_once_evenings_are_settled_the_same_opening_is_still_a_no_op_and_another
     )
 
     assert again == load_snapshot(book.store, E0)
-    with pytest.raises(
-        PaperStateError,
-        match=r"2021-03-04 is an opening snapshot and this store already holds the book's "
-        r"history through 2021-03-03 \(session index 2\)",
-    ):
+    with pytest.raises(PaperStateError, match=OPENED + r"its epoch \(2021-03-04\), its cash"):
         open_book(
-            store=book.store, session=S3, session_index=3, cash=D("1.00"), config_digest=DIGEST
+            store=book.store, session=S3, session_index=0, cash=D("1.00"), config_digest=DIGEST
         )
     assert documents(book.store) == before
 

@@ -3,14 +3,18 @@
 
 ## The opening
 
-A paper book is opened once per runtime directory, on the epoch session (the ordinal the
-calendar counts from), by saving an **opening snapshot**: the cash it is given, nothing held,
-nothing settled (`last_settled_session=None`) and nothing decided (`first_decision_session=None`),
-so the first evening after it is the kernel's initial build. `open_book` writes it through
-`paper_state.save_snapshot`, which holds the chain rules: the same opening again writes nothing,
-and any other opening over a held book -- another amount or configuration on the same day, or a
-restart on a later one -- is refused by name. Nothing reads a book that was never opened: every
-reader refuses an empty store.
+A paper book is opened once per runtime directory, on the epoch session -- ordinal 0, by
+definition the one the calendar counts from -- by saving an **opening snapshot**: the cash it is
+given, to the fen, nothing held, nothing settled (`last_settled_session=None`) and nothing
+decided (`first_decision_session=None`), so the first evening after it is the kernel's initial
+build. **The intended use is to open on every run**: the daily entry calls `open_book` with the
+registration's epoch, capital and digest each time, the same opening again writes nothing
+(however its cash is spelled: 100000 and 100000.00 open one book), and any other opening over a
+held book -- another epoch, amount or configuration -- is refused by name, naming the book that
+is open and every way the opening differs from it. `open_book` returns the opening snapshot and
+no created/unchanged outcome; a caller that must know whether this run opened the book (a
+write-once marker) asks `paper_state.held_head(store) is None` before calling it. Nothing reads
+a book that was never opened: every reader refuses an empty store.
 
 ## One evening
 
@@ -105,10 +109,13 @@ refused by `latest_snapshot`, naming the gap.
 
 ## What the caller owns
 
-- **Only these four entry points.** The daily entry (`V2-P7-008`) calls `open_book`,
-  `missing_sessions`, `run_catch_up` and `run_evening`, and never `settle_session`,
-  `save_snapshot` or `book_state` directly: the transaction, the gap rule and the reproduction
-  check live here, and a caller that settles or saves around them has none of the three.
+- **Only these four entry points, and one read.** The daily entry (`V2-P7-008`) calls
+  `open_book`, `missing_sessions`, `run_catch_up` and `run_evening`, and never
+  `settle_session`, `save_snapshot` or `book_state` directly: the transaction, the gap rule,
+  the ledger read and the reproduction check live here, and a caller that settles or saves
+  around them has none of them. The one read it makes of the book itself is
+  `paper_state.held_head` -- the newest snapshot, verified -- from which it pins `held` (the
+  position codes) and the pending orders' names in its journal before any fetch.
 - **The paper book's construction (D15).** `make_portfolio` builds a `PaperPortfolio` on the
   ledger it is given, closing over `PortfolioLimits(1, 1, 0)` and the protocol's costs; this
   module never builds one with real limits or costs (it may not import `strategy_view`, where
@@ -132,7 +139,7 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
-from typing import Literal, Protocol
+from typing import Final, Literal, Protocol
 
 from openalpha_cn.backtest.multi_day import PortfolioLedger
 from openalpha_cn.backtest.paper import PaperPortfolio, refusing_outward_calls
@@ -175,6 +182,9 @@ __all__ = [
 ]
 
 Outcome = Literal["created", "unchanged"]
+
+_CENT: Final = Decimal("0.01")
+"""The money quantum: the ledger keeps cash to the fen."""
 
 _REMEDY = (
     "Re-run with the journal-pinned as_of, held and delisted set, so that the run reads what the "
@@ -278,30 +288,71 @@ def open_book(
     cash: Decimal,
     config_digest: str,
 ) -> PaperBookSnapshot:
-    """Open the paper book on `session` (ordinal `session_index`) with `cash`, under the
+    """Open the paper book on its epoch `session` (`session_index` 0) with `cash`, under the
     configuration whose `survivor_config_digest` is `config_digest`; return the opening snapshot.
 
-    The same opening again writes nothing and returns it -- also once evenings have been settled
-    on top of it, since it changes nothing. Any other opening over a store that holds a book is
-    refused by name (`save_snapshot`). An amount that is not positive is refused before anything
-    is written: the kernel sizes every buy from a positive equity, so a book opened without one
-    could never decide, and the directory it was opened in would be spoiled for good.
+    Meant to be called on every run (see the module docstring). The same opening again writes
+    nothing and returns it -- also once evenings have been settled on top of it -- with the
+    cash compared to the fen. Any other opening over a store that holds a book is refused by
+    name, naming the book that is open and every way this opening differs from it (epoch, cash,
+    configuration). Refused before anything is written: an ordinal other than 0 (the epoch is
+    ordinal 0 by definition), and an amount that is not positive or not a whole number of fen
+    -- the kernel sizes every buy from a positive equity, and a book opened wrongly would spoil
+    its runtime directory for good. No created/unchanged outcome is returned: a caller that must
+    know whether this call opened the book asks `paper_state.held_head(store) is None` first.
     """
+    if session_index != 0:
+        raise ValueError(
+            f"a paper book opens on its epoch, ordinal 0 by definition: given ordinal "
+            f"{session_index} for {session.isoformat()}"
+        )
     if not cash.is_finite() or cash <= 0:
         raise ValueError(
             f"opening cash must be a positive amount: {cash}; the kernel sizes every buy from "
             "the book's equity, and a book is opened once per runtime directory"
         )
+    amount = cash.quantize(_CENT)
+    if amount != cash:
+        raise ValueError(
+            f"opening cash must be a whole number of fen: {cash}; the ledger keeps money to the "
+            "fen, and a book is opened once per runtime directory"
+        )
     snapshot = PaperBookSnapshot(
         config_digest=config_digest,
-        session_index=session_index,
+        session_index=0,
         session=session,
-        book=PortfolioState(as_of=session, cash=cash),
+        book=PortfolioState(as_of=session, cash=amount),
         last_settled_session=None,
         first_decision_session=None,
     )
+    sessions = store.sessions()
+    opening = load_snapshot(store, sessions[0]) if sessions else None
+    if opening is not None and opening.last_settled_session is None:
+        if opening.snapshot_id == snapshot.snapshot_id:
+            return opening
+        _refuse_another_opening(opening, snapshot)
     save_snapshot(store, snapshot)
     return snapshot
+
+
+def _refuse_another_opening(opening: PaperBookSnapshot, other: PaperBookSnapshot) -> None:
+    """Refuse `other`, naming the book `opening` opened and every way `other` differs from it."""
+    differs = [
+        f"its {what} ({theirs})"
+        for what, ours, theirs in (
+            ("epoch", opening.session.isoformat(), other.session.isoformat()),
+            ("cash", opening.book.cash, other.book.cash),
+            ("configuration digest", opening.config_digest, other.config_digest),
+        )
+        if ours != theirs
+    ]
+    raise PaperStateError(
+        f"a paper book is already open in this runtime directory -- opened on "
+        f"{opening.session.isoformat()} with cash {opening.book.cash} under configuration digest "
+        f"{opening.config_digest} as {opening.snapshot_id} -- and this opening differs in "
+        f"{', '.join(differs)}: one paper book per runtime directory, opened once; another book "
+        "needs a runtime directory of its own"
+    )
 
 
 def run_evening(
