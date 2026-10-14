@@ -88,6 +88,12 @@ build --incremental` that completes that year through its last session; it has t
 the new year's first build. The P6 step has the same latent fault and is left as it is (it
 must stay bit-identical).
 
+That remedy builds no `trade_cal`, and the step counts the sessions it would catch up on, before
+it builds anything, on the session's year's stored calendar. A store last run before a run stored
+next year's calendar therefore meets a second refusal on the year's first session, once the year
+before is complete: the year has no calendar to count on. It prints the `panel build --dataset
+trade_cal` that stores it (`_calendar_refusal`).
+
 Two consequences of fetching `namechange` for the session's year, which this step does not
 remove (A3 review, Q1). Until the year's first rename announcement, Tushare serves no row for
 the year, the panel refuses to write an empty partition, and step 2 fails on that target. A
@@ -2009,8 +2015,10 @@ class SurvivorPanelUpdate:
     batch, instead of spending five to seven requests a session inside one scheduled run. Before
     that, whatever the bound, a year before whose session-scoped partitions stop short of its
     last session is refused with the `panel build` that completes it
-    (`previous_year_sessions_missing`). And the year before's name corpus is built again while
-    its stored build is from before that year ended (`names_built_before_year_end`).
+    (`previous_year_sessions_missing`), and a session's year with no stored calendar, on which
+    the sessions are counted, with the `panel build` that stores it (`_calendar_refusal`). And
+    the year before's name corpus is built again while its stored build is from before that year
+    ended (`names_built_before_year_end`).
     """
 
     max_catch_up_sessions: int
@@ -2045,6 +2053,10 @@ def panel_sessions_to_catch_up(
     fetches beyond two (the refusal states what is fetched). Only that year: the step builds no
     other year's sessions, and a year before that stops short of its last session is refused on
     its own (`previous_year_sessions_missing`).
+
+    The count is made on that year's stored calendar, so a year whose calendar is not stored is
+    refused with the `panel build` that stores it (`_calendar_refusal`) -- a January restart
+    after `previous_year_sessions_missing`'s remedy, which builds no `trade_cal`, is there.
     """
     census = _session_scoped_census(targets)
     if not census:
@@ -2052,10 +2064,14 @@ def panel_sessions_to_catch_up(
     store = panel_store(runtime_dir)
     calendar = _stored_calendar(store, exchange, (session.year,), as_of)
     if calendar is None:
+        if session.year not in store.registered_years(TRADING_CALENDAR_DATASET):
+            raise StepFailedError(
+                "panel update", _calendar_refusal(runtime_dir, session=session, exchange=exchange)
+            )
         raise StepFailedError(
             "panel update",
             f"the {exchange} calendar of {session.year}, on which the sessions this update would "
-            "fetch are counted, is not stored or cannot be read",
+            "fetch are counted, is stored but cannot be read",
         )
     start = _earliest_stored_horizon(store, census, session.year)
     return tuple(
@@ -2141,19 +2157,57 @@ def _panel_build_command(
     exchange: str,
     targets: Sequence[str],
     incremental: bool = True,
+    session_scoped: bool = True,
 ) -> list[str]:
     """The `panel build` a refusal prints: the session-scoped targets together (so their horizons
     move as one, `cli._refuse_split_horizon`), for `year`, pinned at `through`'s publication
-    instant; `--incremental` unless `incremental` is false (the full rebuild of those targets)."""
+    instant; `--incremental` unless `incremental` is false (the full rebuild of those targets).
+
+    `session_scoped` false names `targets` as they are given instead of the session-scoped ones
+    among them: the calendar's remedy, `trade_cal` being none of those (`_calendar_refusal`)."""
     arguments = ["openalpha", "panel", "build", "--runtime-dir", str(runtime_dir)]
     arguments += ["--year", str(year)]
     arguments += ["--as-of", session_publication_instant(through).astimezone(UTC).isoformat()]
     arguments += ["--exchange", exchange]
     if incremental:
         arguments.append("--incremental")
-    for target in _session_scoped_targets(targets):
+    for target in _session_scoped_targets(targets) if session_scoped else targets:
         arguments += ["--dataset", target]
     return arguments
+
+
+def _calendar_refusal(runtime_dir: Path, *, session: date, exchange: str) -> str:
+    """Why step 2 fetched nothing when the session's year has no stored calendar, and the `panel
+    build` that stores it: `trade_cal` alone, for the session's year, pinned at the session's own
+    publication instant (readable at the day's `as_of`, which is no earlier), and not incremental
+    -- a calendar is one request a year, written whole.
+
+    The step counts the sessions it would catch up on, on that calendar, before it builds
+    anything, so it cannot store the calendar itself. A store last run before a run stored the
+    next year's (`next_year_calendar_needed`) lacks it on the year's first session, and
+    `previous_year_sessions_missing`'s remedy -- the session-scoped targets of the year before --
+    fetches no `trade_cal`."""
+    year = session.year
+    arguments = _panel_build_command(
+        runtime_dir,
+        year=year,
+        through=session,
+        exchange=exchange,
+        targets=(TRADING_CALENDAR_DATASET,),
+        incremental=False,
+        session_scoped=False,
+    )
+    return "\n".join(
+        [
+            f"the {exchange} calendar of {year}, on which the sessions this update would fetch "
+            "are counted, is not stored, and this step counts them before it builds anything; "
+            "nothing was fetched. No earlier run stored it: a run stores next year's calendar "
+            "only once its outcome window reaches into that year. Store it, pinned at "
+            f"{session.isoformat()}'s publication, with:",
+            "  " + shlex.join(arguments),
+            "then rerun this command",
+        ]
+    )
 
 
 def _previous_year_refusal(

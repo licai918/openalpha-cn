@@ -856,6 +856,60 @@ def test_a_year_before_holding_only_some_session_scoped_partitions_is_refused_wh
     assert _horizon(store, DAILY_DATASET, 2027) == FIRST_2027
 
 
+def test_a_january_restart_whose_calendar_is_not_stored_is_refused_with_the_build_that_stores_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A store last run on 15 December, before any run stored 2027's calendar
+    (`next_year_calendar_needed`), restarted on 4 January: the year before's remedy comes first
+    and, being a build of session-scoped targets, fetches no `trade_cal`. Rerun, the step cannot
+    count the sessions it would catch up on -- it counts them on the session's year's stored
+    calendar, and 2027 has none -- so it refuses, before any request, and says what stores it: a
+    `panel build` of 2027's calendar, pinned at the session's own publication (nothing here is
+    incremental: a calendar is one request a year). Run, it lets the step through as an ordinary
+    first session."""
+    market = NamesAcrossNewYear(open_days=NEW_YEAR, delisted=((DELISTED, FIRST_2027),))
+    store = _seeded(tmp_path, monkeypatch, market, as_of="2026-12-16T12:00:00+08:00", year=2026)
+    targets = daily.targets_for_survivor(SURVIVOR_BUILDS)
+    assert store.panel.registered_years(TRADING_CALENDAR_DATASET) == (2026,)
+
+    with pytest.raises(daily.StepFailedError) as refused:
+        _update(store, FIRST_2027, targets=targets, survivor=_survivor())
+    assert "the stored session-scoped partitions of 2026 stop at 2026-12-15" in str(refused.value)
+    year_before = daily.invoke(_printed_command(str(refused.value))[1:])
+    assert year_before.exit_code == 0, year_before.reason()
+    assert store.panel.registered_years(TRADING_CALENDAR_DATASET) == (2026,)
+    before = _files(store.runtime)
+
+    with pytest.raises(daily.StepFailedError) as refused:
+        _update(store, FIRST_2027, targets=targets, survivor=_survivor())
+
+    message = str(refused.value)
+    assert refused.value.step == "panel update"
+    assert "the SSE calendar of 2027" in message
+    assert "is not stored" in message
+    assert "\n  openalpha panel build " in message, "the refusal prints no command that fixes it"
+    assert "nothing was fetched" in message
+    assert store.market.payloads == []
+    assert _files(store.runtime) == before
+
+    arguments = _printed_command(message)
+    assert arguments[arguments.index("--year") + 1] == "2027"
+    assert arguments[arguments.index("--as-of") + 1] == (
+        session_publication_instant(FIRST_2027).astimezone(UTC).isoformat()
+    )
+    assert arguments[arguments.index("--exchange") + 1] == EXCHANGE
+    assert "--incremental" not in arguments
+    assert _datasets(arguments) == [TRADING_CALENDAR_DATASET]
+    built = daily.invoke(arguments[1:])
+    assert built.exit_code == 0, built.reason()
+    assert store.panel.registered_years(TRADING_CALENDAR_DATASET) == (2026, 2027)
+
+    panel, _counts = _update(store, FIRST_2027, targets=targets, survivor=_survivor())
+
+    assert panel["caught_up"] == []
+    assert _horizon(store, DAILY_DATASET, 2027) == FIRST_2027
+
+
 P6_YEAR_BOUNDARY_DISPUTES: Final[int] = 9
 """Measured on this market, as the A3 review measured it: the securities trading on 4 January
 whose first 2027 pair -- 4 January's `pre_close`, which is the 31 December close, against the
