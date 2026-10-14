@@ -19,12 +19,13 @@ every security on every session but `EX_RIGHTS` (`600005.SH`), whose factor doub
 and 000300.SH and 000905.SH levels on every session.
 
 The paper book opens on session 60 (2026-03-30, ordinal 0), so a session's ordinal is its frame
-index less 60. Every read is at `AS_OF`, the frame's `LATER` -- noon Saturday 2026-04-18, after
-every stored session -- because the adjustment factors and index levels are read a year at a
-time and a year holding a later session refuses an earlier instant: each run here settles its
-sessions from a later read, as a run that missed its evenings does. `observed_on` is that
-instant's Shanghai date. The facts are read under the frame's identity transform (the shipped
-one needs 100 names; the frame has 44), which is what the functions' `transform` argument is for.
+index less 60. Every read is at `AS_OF` -- 02:00 Saturday 2026-04-18 in Shanghai, after every
+stored session's publication -- because the adjustment factors and index levels are read a year
+at a time and a year holding a later session refuses an earlier instant: each run here settles
+its sessions from a later read, as a run that missed its evenings does. In UTC that instant is
+still Friday, so a settlement's `observed_on` shows which date it was taken from: the Shanghai
+one. The facts are read under the frame's identity transform (the shipped one needs 100 names;
+the frame has 44), which is what the functions' `transform` argument is for.
 """
 
 from __future__ import annotations
@@ -129,9 +130,12 @@ EX_RIGHTS: Final[str] = "600005.SH"
 EX_RIGHTS_FROM: Final[int] = 64
 """`EX_RIGHTS`'s adjustment factor is 1 before session 64 and 2 from it on."""
 COVERAGE_REFUSED: Final[int] = 67
-AS_OF: Final[datetime] = LATER
+AS_OF: Final[datetime] = datetime(2026, 4, 17, 18, 0, tzinfo=UTC)
+"""02:00 Saturday 2026-04-18 in Shanghai: after session 74's publication, and before the frame's
+`LATER` -- so nothing it reads was published after it."""
 OBSERVED_ON: Final[date] = date(2026, 4, 18)
-"""`AS_OF`'s Shanghai date: the `observed_on` every settlement here is recorded with."""
+"""`AS_OF`'s Shanghai date: the `observed_on` every settlement here is recorded with. Its UTC
+date is the day before."""
 CALENDAR: Final[TradingCalendar] = build_panel(BOOK).calendar()
 ORDINALS: Final[SessionOrdinals] = SessionOrdinals(CALENDAR, EPOCH)
 CONFIG_ID: Final[str] = "rcf_5b1d0c9e8a7f6e5d4c3b2a19"
@@ -979,6 +983,21 @@ def test_a_name_sold_tonight_is_priced_from_the_facts_when_it_is_bought_again_to
     assert [entry.ts_code for entry in result.decision.entries] == [sold]
     (buy,) = (order for order in result.trade_list.orders if order.side == "buy")
     assert (buy.ts_code, buy.reference_price) == (sold, close_in(day.facts, sold))
+
+
+def test_every_settlement_of_the_run_is_observed_on_the_as_ofs_date_in_shanghai(
+    panel: PanelStore, paper: Paper
+) -> None:
+    run_day(panel, paper, 61)
+
+    day = run_day(panel, paper, 63)
+
+    assert AS_OF.astimezone(UTC).date() < OBSERVED_ON  # a day later in Shanghai than in UTC
+    assert AS_OF < LATER
+    records = [item.settlement.runner_record for item in day.caught_up]
+    records.append(day.evening.result.settlement.runner_record)
+    assert len(records) == 2
+    assert {record.observed_on for record in records} == {OBSERVED_ON.isoformat()}
 
 
 def test_an_evening_run_again_on_its_pinned_inputs_writes_nothing_and_gives_its_plan_back(
