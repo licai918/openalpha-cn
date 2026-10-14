@@ -576,6 +576,24 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_ingest.session_publication_instant",
         }
     ),
+    "openalpha_cn.strategy_survivor_market": frozenset(
+        {
+            # V2-P7-009. The paper book's settlement inputs for one session: the bars and the
+            # published bands of the names it asks about, the halt corpus their `suspended` is
+            # read from, their adjustment factors and the benchmark's close -- each through the
+            # loader the plane already owns. The 16:30 rule is `session_publication_instant`'s.
+            "panel_ingest.load_adjustment_histories",
+            "panel_ingest.load_daily_bars",
+            "panel_ingest.load_index_prices",
+            "panel_ingest.load_price_limits",
+            "panel_ingest.load_suspensions",
+            "panel_ingest.session_publication_instant",
+            # The facts adapter's spelling of a security code, shared so a name the book holds
+            # or orders is refused for the same typos the facts day refuses. A pattern: it
+            # reaches no dataset.
+            "strategy_survivor_facts._SECURITY_CODE",
+        }
+    ),
     "openalpha_cn.strategy_view": frozenset(
         {
             "factor_view.FactorRequestError",
@@ -878,6 +896,14 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
                 "trade_cal",
             }
         ),
+    ),
+    "openalpha_cn.strategy_survivor_market": DatasetReach(
+        # V2-P7-009. It names no dataset: it asks the catalog nothing before reading, and every
+        # dataset arrives through a loader it takes across the seam -- the session's bars
+        # (`daily`) and bands (`stk_limit`), the halt corpus (`suspend_d`), the adjustment
+        # factors (`adj_factor`) and the benchmark's close (`index_daily`).
+        named=frozenset(),
+        reached=frozenset({"adj_factor", "daily", "index_daily", "stk_limit", "suspend_d"}),
     ),
     "openalpha_cn.strategy_view": DatasetReach(
         # V2-P6-007. It named `index_member_all` only to ask the store which membership years

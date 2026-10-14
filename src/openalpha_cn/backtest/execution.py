@@ -58,6 +58,7 @@ from typing import Final, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from openalpha_cn.domain.daily_prices import DailyBar
 from openalpha_cn.domain.execution import ExecutionResult
 from openalpha_cn.domain.price_limits import PriceLimit, TradingState, halt_spans_the_close
 
@@ -72,7 +73,9 @@ __all__ = [
     "at_the_open",
     "published_limit_fields",
     "security_board",
+    "stored_market_bar",
     "suspended_at_the_close",
+    "suspended_at_the_open",
 ]
 
 _CENT = Decimal("0.01")
@@ -180,6 +183,24 @@ def suspended_at_the_close(state: TradingState | None, timing: str | None) -> bo
     if state is TradingState.halted:
         return True
     return timing is None or halt_spans_the_close(timing)
+
+
+def suspended_at_the_open(state: TradingState | None, timing: str | None) -> bool:
+    """Whether `MarketBar.suspended` must be `True` for an order placed at the session's open.
+
+    `suspended_at_the_close`, and also every timed interruption (`TradingState.interrupted`)
+    whatever its window: a stored timing string is not parsed for its left endpoint, so a halt
+    whose window does not cover the open still makes the whole session untradeable at it. That
+    refuses some orders that could have filled -- the fail-closed direction, and
+    `strategy_backtest.KNOWN_STRATEGY_BACKTEST_LIMITATIONS`'
+    `an_intraday_halt_makes_the_whole_session_untradeable_at_the_open` says so to its readers.
+
+    One copy for every book that fills at the open (`V2-P7-009`), for `at_the_open`'s reason: the
+    P6 strategy book's quotes (`strategy_view`) and the paper book's session market
+    (`strategy_survivor_market`) both build their bars' `suspended` with it, so the two books
+    cannot come to disagree about which sessions an opening order meets a halt on.
+    """
+    return suspended_at_the_close(state, timing) or state is TradingState.interrupted
 
 
 def security_board(ts_code: str) -> Literal["main", "star", "growth", "bse"]:
@@ -453,3 +474,50 @@ def published_limit_fields(limit: PriceLimit) -> dict[str, Decimal]:
         "up_limit": Decimal(str(limit.up_limit)),
         "down_limit": Decimal(str(limit.down_limit)),
     }
+
+
+def stored_market_bar(
+    bar: DailyBar, limit: PriceLimit, *, suspended: bool, is_st: bool
+) -> MarketBar:
+    """A stored `daily` bar and its published `stk_limit` band as the policy's `MarketBar`.
+
+    The one assembly (`V2-P7-009`). The P6 faces each built this by hand -- `shortlist_view`'s
+    session bars, `factor_view`'s `_PanelInputs.market_bar` and `strategy_view`'s
+    `_PanelDays.quote` -- and T5 (`docs/research/p7-step0-validation/T5-paper-step-builder.md`
+    7.1) refused the paper book a fourth copy, so the conversion lives here, beside
+    `published_limit_fields` and `security_board`, which every face already imports:
+
+    - every price crosses from the panel's `float` through `Decimal(str(...))`, so `10.1` is
+      `Decimal("10.1")` and never the binary double's expansion;
+    - the band is the exchange's own, through `published_limit_fields` -- a caller with no
+      published band for a security builds no bar for it, which is each face's rule and stays
+      the caller's;
+    - the board comes from the code (`security_board`), because it decides the lot rule;
+    - subject and session are the stored bar's own, and the band must be published for the same
+      security on the same session -- one for another code or day is refused by name
+      (`ValueError`) rather than judged as this bar's limits.
+
+    What differs between the books stays with the caller and is passed in: `suspended` (a book
+    that fills at the close collapses the halt corpus with `suspended_at_the_close`, one that
+    fills at the open with `suspended_at_the_open`) and `is_st` (read off the name corpus, or
+    `False` where a published band means the policy never reads it).
+    """
+    if (limit.ts_code, limit.trade_date) != (bar.ts_code, bar.trade_date):
+        raise ValueError(
+            f"the band published for {limit.ts_code} on {limit.trade_date.isoformat()} is not "
+            f"the band of {bar.ts_code} on {bar.trade_date.isoformat()}; a bar judged against "
+            "another security's or another session's limits is a verdict about the wrong one"
+        )
+    return MarketBar(
+        subject=bar.ts_code,
+        trade_date=bar.trade_date,
+        board=security_board(bar.ts_code),
+        previous_close=Decimal(str(bar.pre_close)),
+        open=Decimal(str(bar.open)),
+        high=Decimal(str(bar.high)),
+        low=Decimal(str(bar.low)),
+        close=Decimal(str(bar.close)),
+        suspended=suspended,
+        is_st=is_st,
+        **published_limit_fields(limit),
+    )
