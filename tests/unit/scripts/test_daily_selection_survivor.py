@@ -41,7 +41,7 @@ from openalpha_cn.factor_view import resolve_factor
 from openalpha_cn.panel.catalog import PanelStorageError
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import FACTOR_TRANSFORMS
-from openalpha_cn.panel_ingest import session_publication_instant
+from openalpha_cn.panel_ingest import load_name_histories, session_publication_instant
 from openalpha_cn.providers.tushare import TUSHARE_STK_LIMIT_ROW_CAP
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[3]
@@ -659,3 +659,95 @@ def test_across_new_year_the_p6_day_leaves_build_facts_day_without_the_years_nam
         _facts(store, FIRST_2027, monkeypatch)
     assert "2027" in str(refused.value)
     assert "partition_missing" in str(refused.value)
+
+
+# --- the year before's name corpus: built again until a build after its year end is stored ------
+
+
+def _names_built_at(store: Store, year: int) -> datetime:
+    """The `as_of` the stored `namechange` partition of `year` was built at."""
+    coverage = store.panel.read_coverage(NAMECHANGE_DATASET, year)
+    assert coverage is not None
+    return coverage.as_of
+
+
+def _names_stored(store: Store, year: int) -> int:
+    """How many rows the stored `namechange` partition of `year` holds."""
+    coverage = store.panel.read_coverage(NAMECHANGE_DATASET, year)
+    assert coverage is not None
+    return coverage.row_count
+
+
+class SettledNames(NamesAcrossNewYear):
+    """`NamesAcrossNewYear` with no rename announced after 31 December's run: built again in
+    January, the year before's name corpus holds the rows already stored."""
+
+    def _names(self, params: Mapping[str, Any]) -> list[list[Any]]:
+        if str(params["start_date"])[:4] == "2026":
+            return Market._names(self, params)
+        return super()._names(params)
+
+
+def test_the_year_befores_names_are_built_again_once_then_not_after_a_build_past_its_year_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """31 December's run stores 2026's name corpus as of that evening, before 2026 ended. The
+    first session of 2027 builds it again, at the instant `panel build` asks a past year's names
+    at (`cli._year_end_as_of`: the year's last instant). No rename was added, and the build's
+    instant is stored all the same. From then on the stored 2026 build is past its year end, and
+    the next session -- still January -- does not ask for it: an ordinary day."""
+    market = SettledNames(open_days=NEW_YEAR, delisted=((DELISTED, FIRST_2027),))
+    store = _seeded(tmp_path, monkeypatch, market, as_of="2026-12-24T12:00:00+08:00", year=2026)
+    targets = daily.targets_for_survivor(SURVIVOR_BUILDS)
+    _update(store, LAST_2026, targets=targets, survivor=_survivor(), next_year=True)
+    assert _names_built_at(store, 2026) == _evening(LAST_2026)
+    renames = _names_stored(store, 2026)
+
+    _panel, first = _update(store, FIRST_2027, targets=targets, survivor=_survivor())
+
+    assert _years_asked(store, NAMECHANGE_DATASET) == ["2027", "2026"]
+    assert first[NAMECHANGE_DATASET] == 2
+    year_end = cli._year_end_as_of(2026, _evening(FIRST_2027))
+    assert year_end == datetime(2026, 12, 31, 23, 59, 59, tzinfo=daily.SHANGHAI)
+    assert _names_built_at(store, 2026) == year_end
+    assert _names_stored(store, 2026) == renames
+
+    _panel, second = _update(store, date(2027, 1, 5), targets=targets, survivor=_survivor())
+
+    assert _years_asked(store, NAMECHANGE_DATASET) == ["2027"]
+    assert dict(second) == STEADY_SURVIVOR
+    assert _names_built_at(store, 2026) == year_end
+
+
+PAST_JANUARY: Final[tuple[date, ...]] = weekdays(
+    date(2026, 12, 14), date(2027, 2, 5), closed=(date(2027, 1, 1),)
+)
+FIRST_FEBRUARY: Final[date] = date(2027, 2, 1)
+
+
+def test_a_first_run_after_january_still_builds_the_year_befores_names_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every January run missed -- refused by the catch-up bound, filled by hand, or simply not
+    run -- and the first run is on 1 February. The rule is the stored 2026 build's instant, not
+    the session's month: that build is 31 December's evening, before 2026 ended, so the step
+    builds 2026's names again and the `*ST` rename announced on 31 December after that run is
+    read. Keyed on January, it would have been lost for good."""
+    market = NamesAcrossNewYear(open_days=PAST_JANUARY, delisted=((DELISTED, FIRST_2027),))
+    store = _seeded(tmp_path, monkeypatch, market, as_of="2026-12-24T12:00:00+08:00", year=2026)
+    targets = daily.targets_for_survivor(SURVIVOR_BUILDS)
+    _update(store, LAST_2026, targets=targets, survivor=_survivor(), next_year=True)
+    assert _names_built_at(store, 2026) == _evening(LAST_2026)
+    january = weekdays(FIRST_2027, date(2027, 1, 29))
+    wide = _survivor({"adapter": {"max_panel_catch_up_sessions": len(january)}})
+
+    panel, counts = _update(store, FIRST_FEBRUARY, targets=targets, survivor=wide)
+
+    assert panel["caught_up"] == [day.isoformat() for day in january]
+    assert _years_asked(store, NAMECHANGE_DATASET) == ["2027", "2026"]
+    assert counts[NAMECHANGE_DATASET] == 2
+    assert _names_built_at(store, 2026) == cli._year_end_as_of(2026, _evening(FIRST_FEBRUARY))
+    names = load_name_histories(
+        store.panel, years=(2026, 2027), as_of=_evening(FIRST_FEBRUARY), max_staleness=None
+    )
+    assert names[LATE_ST].name_on(FIRST_FEBRUARY) == "*ST乙"

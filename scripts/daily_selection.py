@@ -74,8 +74,9 @@ The survivor form (`V2-P7-016`; dispatched by the registration's `kind` in `V2-P
 `targets_for_survivor`: the same rule plus `namechange`, the name corpus its eligibility facts
 read -- 16 requests on an ordinary day against the P6 day's 15. Its step 2 takes a
 `SurvivorPanelUpdate`: a store more than `panel_catch_up_bound` sessions behind is refused before
-any request, with the `panel build` that fetches the oldest batch, and in January the year
-before's name corpus is built again.
+any request, with the `panel build` that fetches the oldest batch, and the year before's name
+corpus is built again while its stored build is from before that year ended -- on the first
+run of a year, whether that is in January or after a January of missed runs, and not again.
 
 ## Idempotent per trading day
 
@@ -1963,8 +1964,9 @@ class SurvivorPanelUpdate:
 
     `max_catch_up_sessions` (from `panel_catch_up_bound`): before any request, a store more
     sessions behind the day than this is refused, with the `panel build` that fetches the oldest
-    batch, instead of spending five to seven requests a session inside one scheduled run. And in
-    January the year before's name corpus is built again (`update_panel`).
+    batch, instead of spending five to seven requests a session inside one scheduled run. And the
+    year before's name corpus is built again while its stored build is from before that year
+    ended (`names_built_before_year_end`).
     """
 
     max_catch_up_sessions: int
@@ -2061,6 +2063,22 @@ def _panel_catch_up_refusal(
     )
 
 
+def names_built_before_year_end(runtime_dir: Path, *, year: int, as_of: datetime) -> bool:
+    """Whether the stored `namechange` partition of `year` was built before `year` ended, so a
+    rename announced after that build and before the year's end is not in it (`V2-P7-016`).
+
+    Its build's `as_of` against the instant `panel build` asks a past year's names at
+    (`cli._year_end_as_of`: the year's last instant, never later than `as_of`). A partition with
+    no coverage record cannot say, and counts as built before. `False` when the store holds no
+    such partition: there is nothing to build again, and seeding a year the store never held is
+    the bootstrap's, not a day's."""
+    store = panel_store(runtime_dir)
+    if year not in store.registered_years(NAMECHANGE_DATASET):
+        return False
+    coverage = store.read_coverage(NAMECHANGE_DATASET, year)
+    return coverage is None or coverage.as_of < cli._year_end_as_of(year, as_of)
+
+
 def update_panel(
     runtime_dir: Path,
     *,
@@ -2077,8 +2095,9 @@ def update_panel(
 
     `survivor` is the survivor form's (`SurvivorPanelUpdate`, `V2-P7-016`): a store more sessions
     behind than its bound is refused before any request, the sessions fetched beyond an ordinary
-    day are reported as `caught_up`, and in January the year before's `namechange` is built
-    again (one request). Left out, this is the P6 step, unchanged."""
+    day are reported as `caught_up`, and the year before's `namechange` is built again (one
+    request) while its stored build is from before that year ended
+    (`names_built_before_year_end`). Left out, this is the P6 step, unchanged."""
     caught_up: tuple[date, ...] = ()
     if survivor is not None:
         caught_up = panel_sessions_to_catch_up(
@@ -2143,12 +2162,20 @@ def update_panel(
                 f"exited {closing.exit_code}: {closing.reason()}",
             )
         budget += _budget(closing)
-    if survivor is not None and NAMECHANGE_DATASET in targets and session.month == 1:
+    if (
+        survivor is not None
+        and NAMECHANGE_DATASET in targets
+        and names_built_before_year_end(runtime_dir, year=session.year - 1, as_of=as_of)
+    ):
         # `V2-P7-016`: the name corpus is filed by announcement year and this step builds the
         # session's year only, so a rename announced in the year before after its last run --
         # an ST name announced on the evening of 31 December, in force on the first session
-        # (T3 2.4(iv): half are announced the evening before) -- would never be read. January
-        # builds the year before's again, keyed on the session's month as `V2-P6-018` is.
+        # (T3 2.4(iv): half are announced the evening before) -- would never be read. So the
+        # year before's is built again while its stored build is from before that year ended:
+        # keyed on the stored state, not on January, because a first run in February (every
+        # January run missed) needs it as much, and once one build at the year's end is stored
+        # the next day asks nothing more. The session's year, not the clock's: on New Year's Day
+        # the session is still 31 December, whose year is the one this step builds.
         names = _panel_build(
             runtime_dir,
             year=session.year - 1,
@@ -2160,8 +2187,8 @@ def update_panel(
             raise StepFailedError(
                 "panel update",
                 f"`panel build --year {session.year - 1} --dataset {NAMECHANGE_DATASET}`, the "
-                f"year before's name corpus built again in January, exited {names.exit_code}: "
-                f"{names.reason()}",
+                f"year before's name corpus built again past its year end, exited "
+                f"{names.exit_code}: {names.reason()}",
             )
         budget += _budget(names)
     if next_year:
