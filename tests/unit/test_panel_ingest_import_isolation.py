@@ -630,6 +630,16 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_ingest.session_publication_instant",
         }
     ),
+    "openalpha_cn.strategy_survivor_summary": frozenset(
+        {
+            # V2-P7-008. The survivor evening's record and its printed summary. It reads nothing
+            # from the panel and names two types only, for its signatures: the facts day it
+            # documents and the session count that dates an order. Both sit under
+            # `TYPE_CHECKING`, so neither loads a module at run time.
+            "strategy_survivor_facts.FactsDay",
+            "strategy_survivor_market.SessionOrdinals",
+        }
+    ),
     "openalpha_cn.strategy_view": frozenset(
         {
             "factor_view.FactorRequestError",
@@ -974,6 +984,13 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
                 "trade_cal",
             }
         ),
+    ),
+    "openalpha_cn.strategy_survivor_summary": DatasetReach(
+        # V2-P7-008. It names no dataset and reads none: the document and the lines are built from
+        # what the paper book, the facts day and the screen hand it, and the two types it takes
+        # across the seam are for its signatures only.
+        named=frozenset(),
+        reached=frozenset(),
     ),
     "openalpha_cn.strategy_view": DatasetReach(
         # V2-P6-007. It named `index_member_all` only to ask the store which membership years
