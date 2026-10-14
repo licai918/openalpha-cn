@@ -3618,6 +3618,42 @@ def _admit_epoch(
         )
 
 
+def _admit_epoch_reach(
+    store: PanelStore,
+    *,
+    survivor: SurvivorRegistration,
+    session: date,
+    as_of: datetime,
+    book_held: bool,
+) -> None:
+    """Refuse, as a registration the day cannot run (exit 2) and before any request, an epoch
+    more than `1 + max_panel_catch_up_sessions` sessions before the session while no book is held
+    (decision 3): `paper_head` refuses the same when it opens the book, at step 5 -- after the
+    day's requests and factor builds, every night. A book once opened is past this question."""
+    from openalpha_cn.strategy_survivor_market import SessionOrdinals
+
+    if book_held:
+        return
+    adapter = survivor.adapter
+    epoch = adapter.epoch_session
+    calendar = _survivor_calendar(
+        store, adapter.exchange, epoch=epoch, session=session, as_of=as_of
+    )
+    index = SessionOrdinals(calendar, epoch).index_of(session)
+    bound = 1 + adapter.max_panel_catch_up_sessions
+    if index > bound:
+        raise StepFailedError(
+            "registration",
+            f"the paper book opens on its epoch {epoch.isoformat()}, {index} sessions before "
+            f"this run's {session.isoformat()}, and an epoch may be at most {bound} sessions "
+            "before the first run (1 + max_panel_catch_up_sessions): the sessions between were "
+            "never caught up by the panel step. Register the epoch as the session before the "
+            "first scheduled run. Nothing was fetched or written",
+            exit_code=DailyExit.no_registration,
+            steps=SURVIVOR_STEPS,
+        )
+
+
 def _survivor_calendar(
     store: PanelStore, exchange: str, *, epoch: date, session: date, as_of: datetime
 ) -> TradingCalendar:
@@ -4003,6 +4039,9 @@ def _survivor_day(
         storage = build_storage(runtime_dir=runtime_dir, clock=clock)
         book, held_now, held_from_now = _held_now(
             storage, registration=registration, survivor=survivor, lock=lock
+        )
+        _admit_epoch_reach(
+            store, survivor=survivor, session=session, as_of=first_as_of, book_held=book is not None
         )
         if journal is None:
             # The day's clock and the book's holdings, pinned before anything is fetched: a retry
