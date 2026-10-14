@@ -153,10 +153,13 @@ from openalpha_cn.backtest.cross_section import (
 from openalpha_cn.backtest.execution import (
     AShareExecutionPolicy,
     MarketBar,
-    published_limit_fields,
+    stored_market_bar,
     suspended_at_the_close,
 )
-from openalpha_cn.backtest.execution import security_board as _board
+
+# `V2-P6-031`: this face's board classifier is the one shared function, and that is pinned on the
+# module attribute (`test_shortlist_view.py`); its bars take the board from `stored_market_bar`.
+from openalpha_cn.backtest.execution import security_board as _board  # noqa: F401
 from openalpha_cn.backtest.factor_ic import (
     FACTOR_TIER_ORDER,
     TIER_ADMITTED_CODES,
@@ -1755,6 +1758,10 @@ def _bars_on(
       filed under the main board would be sized under a 100-share multiple the exchange does not
       apply to it.
 
+    The bar itself is `execution.stored_market_bar`'s, the one assembly every face shares
+    (`V2-P7-009`); what this face decides is which bars exist, the halt collapse (at the close)
+    and `is_st`.
+
     `universe` narrows which bars are **built**, and that is a cost decision rather than a rule --
     unlike the registry filter `_component_cross_section` deliberately does not have.
     `CrossSectionScreen._filter` looks bars up by scored subject, so an extra key changes no
@@ -1801,22 +1808,15 @@ def _bars_on(
         if subject not in listed or limit is None:
             continue
         history = names.get(subject)
-        priced[subject] = MarketBar(
-            subject=subject,
-            trade_date=session,
-            board=_board(subject),
-            previous_close=Decimal(str(bar.pre_close)),
-            open=Decimal(str(bar.open)),
-            high=Decimal(str(bar.high)),
-            low=Decimal(str(bar.low)),
-            close=Decimal(str(bar.close)),
+        priced[subject] = stored_market_bar(
+            bar,
+            limit,
             suspended=suspended_at_the_close(
                 halts.state_on(session, subject), halts.timing_on(session, subject)
             ),
             is_st=_risk_warned_on(
                 history, subject=subject, session=session, store=store, years=request.years
             ),
-            **published_limit_fields(limit),
         )
     return priced
 

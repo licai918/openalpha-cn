@@ -113,11 +113,13 @@ from zoneinfo import ZoneInfo
 
 from openalpha_cn.backtest.execution import (
     CostSchedule,
-    MarketBar,
-    published_limit_fields,
-    suspended_at_the_close,
+    stored_market_bar,
+    suspended_at_the_open,
 )
-from openalpha_cn.backtest.execution import security_board as _board
+
+# `V2-P6-031`: this face's board classifier is the one shared function, and that is pinned on the
+# module attribute (`test_shortlist_view.py`); its quotes take the board from `stored_market_bar`.
+from openalpha_cn.backtest.execution import security_board as _board  # noqa: F401
 from openalpha_cn.backtest.factor_ic import (
     IC_METHODS,
     MINIMUM_IC_AS_OFS,
@@ -204,7 +206,6 @@ from openalpha_cn.domain.price_limits import (
     PRICE_LIMIT_DATASET,
     SUSPENSION_DATASET,
     PriceLimit,
-    TradingState,
 )
 from openalpha_cn.domain.trading_calendar import (
     TRADING_CALENDAR_DATASET,
@@ -2006,22 +2007,12 @@ class _PanelDays:
         return SessionQuote(
             recorded_path=path,
             path_ratio=ratio,
-            bar=MarketBar(
-                subject=subject,
-                trade_date=day,
-                board=_board(subject),
-                previous_close=Decimal(str(bar.pre_close)),
-                open=Decimal(str(bar.open)),
-                high=Decimal(str(bar.high)),
-                low=Decimal(str(bar.low)),
-                close=Decimal(str(bar.close)),
-                suspended=(
-                    suspended_at_the_close(state, self.halts.timing_on(day, subject))
-                    or state is TradingState.interrupted
-                ),
+            bar=stored_market_bar(
+                bar,
+                limit,
+                suspended=suspended_at_the_open(state, self.halts.timing_on(day, subject)),
                 # Never read: with a published band `_price_band` uses the exchange's numbers.
                 is_st=False,
-                **published_limit_fields(limit),
             ),
             turnover_yuan=Decimal(str(bar.amount)) * CNY_PER_TURNOVER_UNIT,
             adj_factor=adj_factor,

@@ -182,10 +182,13 @@ from zoneinfo import ZoneInfo
 from openalpha_cn.backtest.execution import (
     AShareExecutionPolicy,
     MarketBar,
-    published_limit_fields,
+    stored_market_bar,
     suspended_at_the_close,
 )
-from openalpha_cn.backtest.execution import security_board as _board
+
+# `V2-P6-031`: this face's board classifier is the one shared function, and that is pinned on the
+# module attribute (`test_shortlist_view.py`); its bars take the board from `stored_market_bar`.
+from openalpha_cn.backtest.execution import security_board as _board  # noqa: F401
 from openalpha_cn.backtest.factor_experiment import (
     ATTRIBUTION_CELL_ORDER,
     ATTRIBUTION_VERDICT_ORDER,
@@ -1577,7 +1580,9 @@ class _PanelInputs:
 
         `None` when the session has no bar or no published band for this security, which is the
         `unbarred` outcome one plane up rather than a refusal -- `QuantilePortfolioStudy.measure`
-        counts a missing key and does not object to it.
+        counts a missing key and does not object to it. The bar itself is
+        `execution.stored_market_bar`'s, the one assembly every face shares (`V2-P7-009`); this
+        face decides the halt collapse (at the close) and `is_st`.
 
         **The band is always the exchange's own.** A bar built without one falls back to
         `_price_band`'s derived rule, which `KNOWN_EXECUTION_LIMITATIONS` records is measurably
@@ -1591,7 +1596,8 @@ class _PanelInputs:
         **The ST collapse is `warning is not RiskWarning.none`, and it is made here on purpose.**
         `RiskWarning.__bool__` raises for every member including `none`, deliberately, so that
         `if warning:` cannot merge `delisting_process` with `st` behind a reader's back --
-        `_board`'s sibling landmine. `MarketBar.is_st` is a bool, so somebody has to decide, and
+        `security_board`'s sibling landmine. `MarketBar.is_st` is a bool, so somebody has to
+        decide, and
         the decision is that every one of the four warning states is "not an ordinary name" for
         band purposes. That is the merge `RiskWarning.star_st`'s own docstring says an ST filter
         wants; it is written out here rather than hidden in a truth test, and it reaches nothing
@@ -1602,15 +1608,9 @@ class _PanelInputs:
         if bar is None or limit is None:
             return None
         history = self.names.get(ts_code)
-        return MarketBar(
-            subject=ts_code,
-            trade_date=day,
-            board=_board(ts_code),
-            previous_close=Decimal(str(bar.pre_close)),
-            open=Decimal(str(bar.open)),
-            high=Decimal(str(bar.high)),
-            low=Decimal(str(bar.low)),
-            close=Decimal(str(bar.close)),
+        return stored_market_bar(
+            bar,
+            limit,
             suspended=suspended_at_the_close(
                 self.halts.state_on(day, ts_code), self.halts.timing_on(day, ts_code)
             ),
@@ -1621,7 +1621,6 @@ class _PanelInputs:
                 store=self._store,
                 years=self._request.years,
             ),
-            **published_limit_fields(limit),
         )
 
     def label(self, ts_code: str, window: LabelWindow) -> OutcomeLabel | None:
