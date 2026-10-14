@@ -26,6 +26,13 @@ exploratory) show that re-picking every day gives the whole edge to costs, that 
 of the in-sample gross excess, and that a ten-name book carries a tracking error of about 12-13% a
 year, so a one-year result is mostly luck. The roadmap grows to 15 P7 issues (243 in total).
 
+The rest of Step 0 was re-cut after the six validations (`docs/research/p7-step0-validation/`):
+`V2-P7-016` (the panel-to-eligibility-facts adapter and the daily fetch), `V2-P7-017` (a paper ledger that
+fills at the open, scales bars by the adjustment ratio and takes the protocol costs) and `V2-P7-018`
+(the weekly report) are new, `V2-P7-009` and `V2-P7-008` were narrowed and re-pointed, and the account
+trades the Shanghai/Shenzhen main boards only (decision D12). The roadmap now has 18 P7 issues (246 in
+total).
+
 The pure-Python domain core of that book landed on `feat/v2-p7-005-survivor-book-core`
 (`V2-P7-005`, with the order and cool-down parts of `V2-P7-008`): six modules,
 `domain/survivor_{book,screen,selection,policy,orders,lifecycle}.py`, that screen a day's securities
