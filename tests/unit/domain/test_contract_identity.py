@@ -844,6 +844,25 @@ DECLARED_PLAIN_DIGESTS: Final[dict[str, str]] = {
         "the whole 64 hex of one prediction batch, naming which filing a provenance belongs to; "
         "compared for equality, never an id"
     ),
+    "strategy_survivor_registration.py::": (
+        "the module constant `_NO_DATES`: the whole 64 hex of `[]`, the census digest of a "
+        "partition with no row inside its window, compared for equality, never an id "
+        "(V2-P7-008)"
+    ),
+    "strategy_survivor_registration.py::SurvivorInputProvenance.digest": (
+        "the whole 64 hex of one survivor input provenance document, the name of its "
+        "write-once file and the key a record's provenance is found by, never an address of "
+        "anything else (V2-P7-008)"
+    ),
+    "strategy_survivor_registration.py::_facts_digest": (
+        "the whole 64 hex of one day's facts as recorded in a provenance, a diagnostic that "
+        "is compared for equality and never decides anything (V2-P7-008)"
+    ),
+    "strategy_survivor_registration.py::_partition": (
+        "the whole 64 hex of the per-date row census of one partition through its window, "
+        "compared for equality to tell a restatement from an append; catalog-only, never an "
+        "id (V2-P7-008)"
+    ),
     "strategy_view.py::_catalog_digest": (
         "the whole 64 hex of a store's catalog stamps, one field of a walk-forward fit's cache "
         "key: compared for equality inside one process, never stored and never an id "
