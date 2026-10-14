@@ -104,6 +104,13 @@ depends on why the record was not verified (`scope`), because the evidence it ne
   so beside the above it names a partition the day read that is gone, whatever its window held,
   and a `lookback` year gone or rewritten since the filing.
 
+**A caller's error is never an excuse.** The check binds a record before recomputing it
+(`survivor_record_is_bound`, the declaration compared whole). The provenance records the
+transform the day read (`transform_key`, `transform_id`); handed another, this function and the
+recompute raise `SurvivorCheckArgumentError` -- under another transform the 16:30 build is another
+tier's or none, which would otherwise be named as a vanished build. The recompute holds the same
+for holdings, batch and registration when handed the record's provenance.
+
 **A moved content hash alone is never a change**, and that is the point of the census. A
 partition's `content_hash` moves on every rewrite: an append of later sessions, a later factor
 build, and every refetch, which re-stamps `ingested_time` (`providers/tushare.py`) -- the registry
@@ -219,6 +226,7 @@ __all__ = [
     "survivor_feature_ids",
     "survivor_input_provenance",
     "survivor_provenance_changes",
+    "survivor_record_is_bound",
     "write_survivor_provenance",
 ]
 
@@ -411,6 +419,11 @@ class SurvivorInputProvenance:
     held: tuple[str, ...]
     facts_digest: str
     """The facts' canonical bytes: a diagnostic, never the comparison (module docstring)."""
+    transform_key: str
+    """The processed tier's transform (`qualified_key`), so a check handed another one refuses
+    instead of reading another tier's absence as a change."""
+    transform_id: str
+    """The same transform's content address: two specs under one key differ here."""
     amount_window_from: date
     """The first of the `AMOUNT_WINDOW_SESSIONS` sessions ending on the session: where the `daily`
     window opens."""
@@ -433,6 +446,8 @@ class SurvivorInputProvenance:
             "recorded_at": self.recorded_at.isoformat(),
             "held": list(self.held),
             "facts_digest": self.facts_digest,
+            "transform_key": self.transform_key,
+            "transform_id": self.transform_id,
             "amount_window_from": self.amount_window_from.isoformat(),
             "builds": [[factor, build] for factor, build in self.builds],
             "inputs": [
@@ -466,6 +481,8 @@ class SurvivorInputProvenance:
                 recorded_at=datetime.fromisoformat(str(body["recorded_at"])),
                 held=tuple(str(code) for code in cast(Sequence[object], body["held"])),
                 facts_digest=str(body["facts_digest"]),
+                transform_key=str(body["transform_key"]),
+                transform_id=str(body["transform_id"]),
                 amount_window_from=date.fromisoformat(str(body["amount_window_from"])),
                 builds=tuple((str(item[0]), str(item[1])) for item in builds),
                 inputs=tuple(
@@ -566,6 +583,8 @@ def survivor_input_provenance(
         recorded_at=recorded_at,
         held=facts.held,
         facts_digest=_facts_digest(facts),
+        transform_key=transform.qualified_key,
+        transform_id=transform.transform_id,
         amount_window_from=windows.amount_from,
         builds=tuple((factor, cast(str, builds[factor])) for factor in sorted(builds)),
         inputs=inputs,
@@ -617,6 +636,7 @@ def survivor_provenance_changes(
         raise SurvivorCheckArgumentError(
             f"scope {scope!r} is neither {RECOMPUTE_DIFFERS!r} nor {RECOMPUTE_FAILED!r}"
         )
+    _require_the_records_transform(provenance, transform)
     session = provenance.session
     published = session_publication_instant(session)
     factors = tuple(factor for factor, _build in provenance.builds)
@@ -673,6 +693,15 @@ def survivor_provenance_changes(
 # --- the recompute -------------------------------------------------------------------------------
 
 
+def survivor_record_is_bound(
+    record: PredictionRecord, book: SurvivorBookConfig, registered: RegisteredConfiguration
+) -> bool:
+    """Whether `record` is this registered survivor configuration's: its declaration is the one
+    `survivor_declaration` gives (P6's `record_is_bound`, for this family). The late-record check
+    asks it before recomputing; a record that is not bound is refused, never recomputed."""
+    return record.batch.artifact.declaration == survivor_declaration(book, registered)
+
+
 def recompute_survivor_batch(
     store: PanelStore,
     record: PredictionRecord,
@@ -684,6 +713,7 @@ def recompute_survivor_batch(
     max_carry_sessions: int,
     held: Collection[str],
     registered: RegisteredConfiguration,
+    provenance: SurvivorInputProvenance | None = None,
 ) -> PredictionBatch:
     """`record`'s day scored again from the store, under the registered configuration.
 
@@ -692,7 +722,35 @@ def recompute_survivor_batch(
     `(as_of, artifact, predictions)`. At the newest instant the day's partitions became knowable
     only when the filing instant cannot read one of them because a row in it is clocked later
     (module docstring); any other refusal propagates.
+
+    `provenance`, the record's own (the late-record check always has it), is held against the
+    other arguments first: another transform, other holdings, another batch or another
+    registration is the caller's error and raises `SurvivorCheckArgumentError`, before any read.
+    Bind the record first (`survivor_record_is_bound`): a record declared otherwise is not this
+    configuration's to recompute.
     """
+    if provenance is not None:
+        _require_the_records_transform(provenance, transform)
+        if tuple(sorted(set(held))) != provenance.held:
+            raise SurvivorCheckArgumentError(
+                f"the recompute is asked to read with held {sorted(set(held))} and the record's "
+                f"provenance read with {list(provenance.held)}; a held code changes the day's "
+                "reads, so it is read with the codes the evening had"
+            )
+        if batch_digest(record.batch) != provenance.batch_digest:
+            raise SurvivorCheckArgumentError(
+                f"the provenance names the batch {provenance.batch_digest} and the record holds "
+                f"{batch_digest(record.batch)}; it is another record's provenance"
+            )
+        if (provenance.registration_sha256, provenance.config_id) != (
+            registered.registration_sha256,
+            registered.config_id,
+        ):
+            raise SurvivorCheckArgumentError(
+                f"the provenance was written under the registration {provenance.config_id} "
+                f"({provenance.registration_sha256}), not {registered.config_id} "
+                f"({registered.registration_sha256})"
+            )
     session = record.batch.as_of.astimezone(SHANGHAI).date()
     filed = registered_at(record)
 
@@ -731,6 +789,22 @@ def recompute_survivor_batch(
 
 
 # --- helpers -------------------------------------------------------------------------------------
+
+
+def _require_the_records_transform(
+    provenance: SurvivorInputProvenance, transform: FactorTransformSpec
+) -> None:
+    """Refuse a transform other than the one the record's day read: under it the 16:30 build
+    is another tier's or none, which is the caller's error and never a change."""
+    if (transform.qualified_key, transform.transform_id) != (
+        provenance.transform_key,
+        provenance.transform_id,
+    ):
+        raise SurvivorCheckArgumentError(
+            f"the check is handed the transform {transform.qualified_key} "
+            f"({transform.transform_id}) and the record's day read {provenance.transform_key} "
+            f"({provenance.transform_id})"
+        )
 
 
 def _factors_of(feature_ids: Sequence[str]) -> tuple[str, ...]:
