@@ -645,6 +645,7 @@ def notes(**overrides: int) -> FactsNotes:
         "st_by_band": 2,
         "name_unknown_no_record": 2,
         "name_unknown_before_first": 1,
+        "no_bar_within_carry": 4,
     }
     counts.update(overrides)
     return FactsNotes(**counts)
@@ -664,7 +665,8 @@ def test_the_notes_are_a_frozen_set_of_counts() -> None:
         held.st_by_band,
         held.name_unknown_no_record,
         held.name_unknown_before_first,
-    ) == (3, 47, 2, 1, 123, 120, 1, 2, 2, 1)
+        held.no_bar_within_carry,
+    ) == (3, 47, 2, 1, 123, 120, 1, 2, 2, 1, 4)
     with pytest.raises(FrozenInstanceError):
         held.st = 0  # type: ignore[misc]
     assert held == notes()
@@ -684,7 +686,9 @@ def test_the_tally_counts_each_reason_once_and_adds_the_parts_up() -> None:
     ]
     random.Random(20261013).shuffle(reasons)
 
-    tallied = FactsNotes.tally(reasons=reasons, suspended_without_bar=7, no_listing_row=1)
+    tallied = FactsNotes.tally(
+        reasons=reasons, suspended_without_bar=7, no_listing_row=1, no_bar_within_carry=2
+    )
 
     assert tallied == FactsNotes(
         name_unknown_assumed_ordinary=6,
@@ -697,11 +701,14 @@ def test_the_tally_counts_each_reason_once_and_adds_the_parts_up() -> None:
         st_by_band=2,
         name_unknown_no_record=4,
         name_unknown_before_first=2,
+        no_bar_within_carry=2,
     )
 
 
 def test_an_empty_day_tallies_to_zero_everywhere() -> None:
-    assert FactsNotes.tally(reasons=[], suspended_without_bar=0, no_listing_row=0) == notes(
+    assert FactsNotes.tally(
+        reasons=[], suspended_without_bar=0, no_listing_row=0, no_bar_within_carry=0
+    ) == notes(
         name_unknown_assumed_ordinary=0,
         suspended_without_bar=0,
         no_listing_row=0,
@@ -712,6 +719,7 @@ def test_an_empty_day_tallies_to_zero_everywhere() -> None:
         st_by_band=0,
         name_unknown_no_record=0,
         name_unknown_before_first=0,
+        no_bar_within_carry=0,
     )
 
 
@@ -725,6 +733,7 @@ def test_an_empty_day_tallies_to_zero_everywhere() -> None:
         {"suspended_without_bar": -1},
         {"no_listing_row": -1},
         {"delisting": -1},
+        {"no_bar_within_carry": -1},
     ],
     ids=[
         "st-total",
@@ -734,6 +743,7 @@ def test_an_empty_day_tallies_to_zero_everywhere() -> None:
         "negative-suspended",
         "negative-no-listing",
         "negative-delisting",
+        "negative-no-bar-within-carry",
     ],
 )
 def test_counts_that_do_not_add_up_are_refused(bad: dict[str, int]) -> None:
@@ -747,4 +757,5 @@ def test_the_tally_refuses_a_reason_it_does_not_know() -> None:
             reasons=["ordinary", "bogus"],  # type: ignore[list-item]
             suspended_without_bar=0,
             no_listing_row=0,
+            no_bar_within_carry=0,
         )

@@ -39,8 +39,14 @@ check. `TRIMMED` is the same panel cut at the signal day.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import json
+import os
+import subprocess
+import sys
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from types import MappingProxyType
 from typing import Final
@@ -48,6 +54,7 @@ from typing import Final
 import pytest
 from panel_fixtures import (
     DAILY_BASIC_EXTRA_COLUMNS,
+    EXCHANGE,
     GeneratedPanel,
     generate_panel,
     write_generated_panel,
@@ -80,6 +87,7 @@ from openalpha_cn.domain.name_history import (
 from openalpha_cn.domain.panel_batch import PanelColumn
 from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET, SUSPENSION_DATASET
 from openalpha_cn.domain.stock_universe import LISTING_EVENT, STOCK_BASIC_DATASET
+from openalpha_cn.domain.survivor_book import SecurityFacts, SurvivorBookConfig
 from openalpha_cn.domain.trading_calendar import TRADING_CALENDAR_DATASET
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import (
@@ -98,6 +106,15 @@ from openalpha_cn.panel_ingest import (
     session_publication_instant,
     split_panel_batch_by_year,
     write_name_history,
+    write_panel_batch,
+)
+from openalpha_cn.survivor_facts import (
+    FactsCoverageError,
+    FactsDay,
+    FactsNotes,
+    SurvivorFactsError,
+    build_facts_day,
+    require_coverage,
 )
 
 # --- the frame ---------------------------------------------------------------------------------
@@ -557,6 +574,7 @@ def factor_build(
 def write_panel(root: Path, variant: Variant) -> PanelStore:
     store = PanelStore(root / "panel")
     panel = build_panel(variant)
+    prices = () if variant.outage else (DAILY_DATASET, DAILY_BASIC_DATASET)
     write_generated_panel(
         store,
         panel,
@@ -564,11 +582,15 @@ def write_panel(root: Path, variant: Variant) -> PanelStore:
             TRADING_CALENDAR_DATASET,
             STOCK_BASIC_DATASET,
             SUSPENSION_DATASET,
-            DAILY_DATASET,
-            DAILY_BASIC_DATASET,
+            *prices,
             PRICE_LIMIT_DATASET,
         ),
     )
+    if variant.outage:
+        # `write_daily_panel` refuses a session with under half the median cross section
+        # (`_refuse_thin_price_sessions`) -- the first defence against this day, and the reason
+        # the outage store is written past it, with the partition writer, to reach the second.
+        write_panel_batch(store, panel.batch(DAILY_DATASET), year=2026)
     # One announcement year per partition (`write_name_history`): 2025 and 2026 here.
     for _year, part in split_panel_batch_by_year(panel.batch(NAMECHANGE_DATASET)):
         write_name_history(store, part)
@@ -591,6 +613,34 @@ def write_panel(root: Path, variant: Variant) -> PanelStore:
 @pytest.fixture(scope="module")
 def full_store(tmp_path_factory: pytest.TempPathFactory) -> PanelStore:
     return write_panel(tmp_path_factory.mktemp("full"), FULL)
+
+
+@pytest.fixture(scope="module")
+def trimmed_store(tmp_path_factory: pytest.TempPathFactory) -> PanelStore:
+    return write_panel(tmp_path_factory.mktemp("trimmed"), TRIMMED)
+
+
+COVERAGE: Final[Variant] = Variant(
+    last=SIGNAL_INDEX,
+    builds=(68, SIGNAL_INDEX),
+    undefined=MappingProxyType(
+        {68: frozenset(ORDINARY[:18]), SIGNAL_INDEX: frozenset(ORDINARY[:19])}
+    ),
+)
+"""`reversal_1d` answers `None` for 18 more securities on session 68 and 19 more on 69."""
+
+
+@pytest.fixture(scope="module")
+def coverage_store(tmp_path_factory: pytest.TempPathFactory) -> PanelStore:
+    return write_panel(tmp_path_factory.mktemp("coverage"), COVERAGE)
+
+
+OUTAGE: Final[Variant] = Variant(last=SIGNAL_INDEX, outage=True, builds=(SIGNAL_INDEX,))
+
+
+@pytest.fixture(scope="module")
+def outage_store(tmp_path_factory: pytest.TempPathFactory) -> PanelStore:
+    return write_panel(tmp_path_factory.mktemp("outage"), OUTAGE)
 
 
 # --- the narrow read: one build by its instant (`panel_factors`) ----------------------------------
@@ -685,3 +735,347 @@ def test_the_signal_days_build_is_visible_at_the_read(full_store: PanelStore) ->
     # amihud_60 (60 own sessions within 80): every security but NEW_LISTING (10 sessions).
     assert sorted(admitted) == sorted(set(SECURITIES) - {NEW_LISTING})
     assert admitted[HALTED] == raw_value(3, HALTED, SIGNAL_INDEX)
+
+
+# --- one day's facts ------------------------------------------------------------------------------
+
+CONFIG: Final[SurvivorBookConfig] = SurvivorBookConfig(
+    seed=7, composite_factors=FACTORS, min_listing_sessions=60
+)
+"""The default boards (`("main",)`), and a listing minimum of 60 so a 70-session calendar can
+age the securities listed before it (`listing_age_sessions` refuses a truncated count below it)."""
+
+
+def evening(index: int) -> datetime:
+    """18:30 Asia/Shanghai on session `index`: after its publication, before the next one's."""
+    return instant(index) + timedelta(hours=2)
+
+
+def read_day(store: PanelStore, index: int = SIGNAL_INDEX, **overrides: object) -> FactsDay:
+    arguments: dict[str, object] = {
+        "store": store,
+        "session": SESSIONS[index],
+        "as_of": evening(index),
+        "config": CONFIG,
+        "factor_ids": FACTORS,
+        "transform": IDENTITY,
+        "exchange": EXCHANGE,
+    }
+    arguments.update(overrides)
+    return build_facts_day(**arguments)  # type: ignore[arg-type]
+
+
+def fingerprint(day: FactsDay) -> str:
+    """Every byte the day carries, as one canonical JSON string."""
+    return json.dumps(
+        {
+            "session": day.session.isoformat(),
+            "facts": [fact.model_dump(mode="json") for fact in day.facts],
+            "notes": dataclasses.asdict(day.notes),
+            "universe_size": day.universe_size,
+            "scored_size": day.scored_size,
+        },
+        sort_keys=True,
+    )
+
+
+def read_signal_day(store_root: str) -> str:
+    """The subprocess half of the hash-seed test: the signal day off an existing store."""
+    return fingerprint(read_day(PanelStore(Path(store_root))))
+
+
+def mean(values: Sequence[float]) -> Decimal:
+    return sum((Decimal(str(value)) for value in values), Decimal(0)) / len(values)
+
+
+def expected_fact(code: str) -> SecurityFacts:
+    """The hand-derived row for `code` on the signal day (session 69), from the frame's rules.
+
+    - board: `600*`/`000*` main, `300*` growth, `688*` star;
+    - listed sessions: listed 2025-01-02, before the calendar's 2026-01-01, so counted from it:
+      2026-01-05 .. 2026-04-10 is 70 sessions (>= the 60 minimum); `NEW_LISTING` from session
+      60, 10 sessions; `UNREGISTERED` has no listing row, so 0;
+    - special treatment: ST by name, by a pending ST name, by the 5% band, or a delisting name;
+    - suspended: no bar today (`HALTED`) or halted through the close (`HALT_THROUGH_CLOSE`);
+    - close: today's, or `HALTED`'s last, 20 + 0.25 * 66 = 36.5;
+    - average amount: over the security's bars in sessions 50..69, or `HALTED`'s last 20 bars
+      (sessions 47..66);
+    - oriented values: the signal-day build's processed value, negated for the two
+      lower-is-better factors; `None` where the engine had no complete window -- `NEW_LISTING`
+      in the 25- and 60-session ones. `HALTED` has all four: the engine's window is the
+      security's own sessions, and its last two (65, 66) and last five (62..66) are unbroken,
+      so the build values it as of its last trading session, and the adapter takes that.
+    """
+    if code == HALTED:
+        close, bars = close_of(HALTED, 66), range(47, 67)
+    else:
+        close = close_of(code, SIGNAL_INDEX)
+        bars = range(50, 70)
+    amounts = [amount_of(code, index) for index in bars if trades(code, index, FULL)]
+    oriented: list[float | None] = []
+    for factor in range(len(FACTORS)):
+        missing = code == NEW_LISTING and factor in (2, 3)
+        sign = -1.0 if factor in (0, 1) else 1.0
+        oriented.append(None if missing else sign * raw_value(factor, code, SIGNAL_INDEX))
+    return SecurityFacts(
+        ts_code=code,
+        board="growth" if code == CHINEXT else "star" if code == STAR else "main",
+        listed_sessions=0 if code == UNREGISTERED else 10 if code == NEW_LISTING else 70,
+        special_treatment=code in (ST_BY_NAME, ST_BY_BAND, ST_PENDING, DELISTING),
+        suspended=code in (HALTED, HALT_THROUGH_CLOSE),
+        close=Decimal(str(close)),
+        avg_amount=mean(amounts),
+        oriented_values=tuple(oriented),
+    )
+
+
+def test_every_listed_security_gets_exactly_one_hand_derived_fact(full_store: PanelStore) -> None:
+    day = read_day(full_store)
+
+    assert day.session == SIGNAL
+    assert [fact.ts_code for fact in day.facts] == list(SECURITIES)  # ascending, one each
+    assert day.facts == tuple(expected_fact(code) for code in SECURITIES)
+    # 40 rows; 38 scored -- HALTED has no bar today and NEW_LISTING lacks two values.
+    assert (day.universe_size, day.scored_size) == (40, 38)
+
+
+@pytest.mark.parametrize(
+    ("code", "close", "avg_amount", "oriented"),
+    [
+        # HALTED, j = 34: last bar session 66, close 20 + 0.25 * 66 = 36.5; its last 20 bars
+        # are sessions 47..66, mean t = 56.5, so 1000 * 35 + 10 * 56.5 = 35565.
+        # Values off its own last sessions (k + 1) + 0.35 + 0.0069: the two reversals are
+        # lower-is-better, so -1.3569 and -2.3569; momentum 3.3569 and amihud 4.3569 as stored.
+        (HALTED, "36.5", "35565", (-1.3569, -2.3569, 3.3569, 4.3569)),
+        # GAPPED, j = 35: no bar on 62 and 63, so 18 bars in 50..69; the sum of t is
+        # 1190 - 125 = 1065, so the mean is 1000 * 36 + 10 * 1065 / 18 = 36591.666...
+        (GAPPED, "45.0", str(Decimal(658650) / 18), (-1.3669, -2.3669, 3.3669, 4.3669)),
+        # NEW_LISTING, j = 38: bars from session 60, so 10 bars, mean t = 64.5:
+        # 1000 * 39 + 645 = 39645. Too young for the 25- and 60-session windows.
+        (NEW_LISTING, "48.0", "39645", (-1.3969, -2.3969, None, None)),
+        # 000001.SZ, j = 0: the plain case, 1000 * 1 + 10 * 59.5 = 1595.
+        ("000001.SZ", "10.0", "1595", (-1.0169, -2.0169, 3.0169, 4.0169)),
+    ],
+    ids=["halted", "gapped", "new-listing", "plain"],
+)
+def test_the_arithmetic_of_four_rows_by_hand(
+    full_store: PanelStore,
+    code: str,
+    close: str,
+    avg_amount: str,
+    oriented: tuple[float | None, ...],
+) -> None:
+    fact = {fact.ts_code: fact for fact in read_day(full_store).facts}[code]
+
+    assert fact.close == Decimal(close)
+    assert fact.avg_amount == Decimal(avg_amount)
+    assert fact.oriented_values == pytest.approx(oriented)
+
+
+def test_a_halted_security_with_no_bar_still_has_a_row_carried_on_its_last_close(
+    full_store: PanelStore,
+) -> None:
+    # Review Focus 1: without this row the kernel would sell the holding as unassessed.
+    fact = {fact.ts_code: fact for fact in read_day(full_store).facts}[HALTED]
+
+    assert fact.suspended is True
+    assert fact.close == Decimal("36.5")  # not 36.75 (session 67), which never traded
+
+
+def test_a_halt_through_the_close_is_suspended_and_a_morning_halt_is_not(
+    full_store: PanelStore,
+) -> None:
+    facts = {fact.ts_code: fact for fact in read_day(full_store).facts}
+
+    assert facts[HALT_THROUGH_CLOSE].suspended is True  # 14:00-15:00 spans the 14:57 auction
+    assert facts[HALT_IN_MORNING].suspended is False  # 09:30-10:30 resumed before the close
+    assert facts[GAPPED].suspended is False  # halted on 62 and 63, trading today
+
+
+def test_boards_the_account_cannot_trade_still_get_their_row(full_store: PanelStore) -> None:
+    # The kernel gives them `board_not_allowed`; the adapter does not drop them.
+    facts = {fact.ts_code: fact for fact in read_day(full_store).facts}
+
+    assert CONFIG.boards == ("main",)
+    assert (facts[CHINEXT].board, facts[STAR].board) == ("growth", "star")
+
+
+def test_the_notes_count_every_assumption_of_the_day(full_store: PanelStore) -> None:
+    # Names: 14 ordinary baselines; ST by name (*ST甲), pending (ST乙 announced on the day) and
+    # by band (600602, 5% with no history) one each; one delisting name (丙退); 13 ordinary codes
+    # plus the eight others with no rename on file are "never renamed" (21), and 000014.SZ's only
+    # rename takes effect after the day (before_first, 1). The rename of 600001.SH announced on
+    # 2026-04-13 is not visible on the 10th, so it is still an ordinary baseline.
+    assert read_day(full_store).notes == FactsNotes(
+        name_unknown_assumed_ordinary=22,
+        suspended_without_bar=1,
+        no_listing_row=1,
+        delisting=1,
+        st=3,
+        st_by_name=1,
+        st_pending=1,
+        st_by_band=1,
+        name_unknown_no_record=21,
+        name_unknown_before_first=1,
+        no_bar_within_carry=0,
+    )
+
+
+def test_data_after_the_signal_day_changes_no_fact(
+    full_store: PanelStore, trimmed_store: PanelStore
+) -> None:
+    # `FULL` holds three more sessions of bars, bands and halts (HALTED trades again, ST_PENDING's
+    # band turns 5%), an ST rename of 600001.SH announced 2026-04-13, a listing on 2026-04-15 and
+    # a factor build on 2026-04-13. None of it was knowable at 18:30 on 2026-04-10.
+    assert fingerprint(read_day(full_store)) == fingerprint(read_day(trimmed_store))
+
+
+def test_a_listed_security_with_no_bar_within_the_carry_bound_has_no_row_and_is_counted(
+    full_store: PanelStore,
+) -> None:
+    # HALTED's last bar is session 66, three sessions before the signal day.
+    within = read_day(full_store, max_carry_sessions=3)
+    beyond = read_day(full_store, max_carry_sessions=2)
+
+    assert HALTED in {fact.ts_code for fact in within.facts}
+    assert HALTED not in {fact.ts_code for fact in beyond.facts}
+    assert (beyond.universe_size, beyond.scored_size) == (39, 38)
+    assert beyond.notes.no_bar_within_carry == 1
+    assert beyond.notes.suspended_without_bar == 0
+
+
+def test_a_coverage_exactly_at_the_threshold_is_accepted(coverage_store: PanelStore) -> None:
+    # Session 68: 38 rows are scored (HALTED has no bar, NEW_LISTING lacks two values), and 18
+    # more lose `reversal_1d`: 20 of 40 is exactly the default 0.5.
+    day = read_day(coverage_store, 68)
+
+    assert (day.universe_size, day.scored_size) == (40, 20)
+
+
+def test_a_coverage_below_the_threshold_is_refused_with_both_counts(
+    coverage_store: PanelStore,
+) -> None:
+    # Session 69: 19 more lose `reversal_1d`, so 19 of 40 -- one short of half.
+    with pytest.raises(FactsCoverageError, match=r"19 of 40.*0\.5"):
+        read_day(coverage_store, SIGNAL_INDEX)
+
+
+def test_a_wholesale_outage_is_refused_rather_than_handed_to_the_kernel(
+    outage_store: PanelStore,
+) -> None:
+    # Every security but 600001.SH is halted all day on the signal day. Each still gets its row,
+    # carried on the 68th session's close, and the engine even values each one off its own last
+    # sessions -- so counting rows with values alone would pass this day. A carried row is not
+    # scored: 1 of 40 is far below 0.5. (A session with no bar at all cannot be stored --
+    # `write_daily_panel` refuses a year missing an open session -- and the bar read refuses a
+    # session it cannot see; those are the other ways an outage stops the day.)
+    #
+    # 39 rows, not 40: UNREGISTERED is in the universe only through a bar on the day (it has no
+    # listing row), and today it has none. It could never have been held -- it is always
+    # `listing_too_recent` -- so it has no holding to protect.
+    with pytest.raises(FactsCoverageError, match=r"1 of 39"):
+        read_day(outage_store)
+
+    # What the guard saw, with the guard switched off: 38 carried rows, 38 rows carrying every
+    # value (NEW_LISTING still lacks its two long windows), yet only 600001.SH traded.
+    seen = read_day(outage_store, min_coverage=0.0)
+    assert (seen.universe_size, seen.scored_size) == (39, 1)
+    assert UNREGISTERED not in {fact.ts_code for fact in seen.facts}
+    assert seen.notes.suspended_without_bar == 38
+    assert sum(1 for fact in seen.facts if None not in fact.oriented_values) == 38
+
+
+def test_a_day_with_no_factor_build_is_refused_by_the_coverage_guard(
+    full_store: PanelStore,
+) -> None:
+    # `FULL` builds on sessions 68, 69 and 70 and not on 67: every value is `None`.
+    with pytest.raises(FactsCoverageError, match=r"0 of 40"):
+        read_day(full_store, 67)
+
+
+@pytest.mark.parametrize(
+    ("scored", "universe", "threshold", "refused"),
+    [
+        (20, 40, 0.5, False),  # exactly half
+        (19, 40, 0.5, True),
+        (3, 4, 0.75, False),
+        (2, 4, 0.75, True),
+        (0, 4, 0.0, False),  # a threshold of 0 accepts any non-empty day
+        (0, 0, 0.0, True),  # an empty universe is refused whatever the threshold
+        (0, 0, 0.5, True),
+    ],
+)
+def test_the_coverage_rule(scored: int, universe: int, threshold: float, refused: bool) -> None:
+    if refused:
+        with pytest.raises(FactsCoverageError, match=rf"{scored} of {universe}"):
+            require_coverage(scored_size=scored, universe_size=universe, min_coverage=threshold)
+    else:
+        require_coverage(scored_size=scored, universe_size=universe, min_coverage=threshold)
+
+
+@pytest.mark.parametrize("threshold", [-0.1, 1.5, float("nan"), float("inf")])
+def test_a_threshold_that_is_not_a_fraction_is_refused(threshold: float) -> None:
+    with pytest.raises(SurvivorFactsError, match="min_coverage"):
+        require_coverage(scored_size=1, universe_size=1, min_coverage=threshold)
+
+
+def test_the_coverage_error_is_a_named_facts_error() -> None:
+    assert issubclass(FactsCoverageError, SurvivorFactsError)
+
+
+def test_a_read_before_the_session_published_is_refused(full_store: PanelStore) -> None:
+    # 16:00 Asia/Shanghai on the signal day: the session publishes at 16:30.
+    with pytest.raises(SurvivorFactsError, match="16:30"):
+        read_day(full_store, as_of=instant(SIGNAL_INDEX) - timedelta(minutes=30))
+
+
+def test_factor_ids_that_are_not_the_configured_composite_are_refused(
+    full_store: PanelStore,
+) -> None:
+    with pytest.raises(SurvivorFactsError, match="composite_factors"):
+        read_day(full_store, factor_ids=FACTORS[::-1])
+
+
+def test_a_carry_bound_below_one_session_is_refused(full_store: PanelStore) -> None:
+    with pytest.raises(SurvivorFactsError, match="max_carry_sessions"):
+        read_day(full_store, max_carry_sessions=0)
+
+
+def test_a_day_the_exchange_was_shut_is_refused(full_store: PanelStore) -> None:
+    saturday = date(2026, 4, 11)
+    with pytest.raises(SurvivorFactsError, match="2026-04-11"):
+        read_day(full_store, session=saturday, as_of=evening(SIGNAL_INDEX) + timedelta(days=1))
+
+
+def test_the_same_input_gives_the_same_bytes(full_store: PanelStore) -> None:
+    assert fingerprint(read_day(full_store)) == fingerprint(read_day(full_store))
+
+
+def test_processes_with_different_hash_seeds_read_the_same_bytes(full_store: PanelStore) -> None:
+    here = Path(__file__).resolve()
+    program = (
+        "import hashlib, importlib.util, sys;"
+        "spec = importlib.util.spec_from_file_location('facts_panel', sys.argv[1]);"
+        "module = importlib.util.module_from_spec(spec);"
+        "sys.modules['facts_panel'] = module;"
+        "spec.loader.exec_module(module);"
+        "print(hashlib.sha256(module.read_signal_day(sys.argv[2]).encode()).hexdigest())"
+    )
+    tree = here.parents[2]
+    path = os.pathsep.join(
+        part
+        for part in (str(tree / "src"), str(tree / "tests"), os.environ.get("PYTHONPATH"))
+        if part
+    )
+    reference = hashlib.sha256(fingerprint(read_day(full_store)).encode()).hexdigest()
+
+    for hash_seed in ("0", "1", "424242"):
+        completed = subprocess.run(
+            [sys.executable, "-c", program, str(here), str(full_store.root)],
+            env={**os.environ, "PYTHONHASHSEED": hash_seed, "PYTHONPATH": path},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert completed.stdout.strip() == reference
