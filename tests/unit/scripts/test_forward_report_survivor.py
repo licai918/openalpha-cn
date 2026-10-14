@@ -79,6 +79,11 @@ from openalpha_cn.strategy_survivor_forward import (
     record_outcome,
 )
 from openalpha_cn.strategy_survivor_market import PROTOCOL_BENCHMARK, SessionOrdinals
+from openalpha_cn.strategy_survivor_morning import (
+    MORNING_FILE_SUFFIX,
+    MORNING_SCHEMA,
+    MORNING_WORDING,
+)
 from openalpha_cn.strategy_survivor_registration import (
     SURVIVOR_FAMILY,
     SURVIVOR_PROVENANCE_DIRECTORY,
@@ -378,6 +383,45 @@ def test_a_rerun_with_the_same_as_of_writes_the_same_bytes_and_json_prints_the_d
     printed = json.loads(out)
     assert printed.pop("this_run") == {"checked": 3, "served_from_cache": 3}
     assert printed == json.loads(first)
+
+
+def test_a_morning_file_beside_the_journals_is_not_read_and_the_report_is_the_same(
+    world: tds.World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`daily_selection.py --morning-recheck` files `<session>.morning.json` in the evening
+    journals' own directory (`V2-P7-008`, D6 review Minor 6). The report reads the journals by
+    their ISO names alone, so a morning file beside each of the three changes nothing: the report
+    is produced, with the same bytes."""
+    code, _out, err = _report(world, capsys)
+    assert code == 0, err
+    path = world.runtime / "reports" / report_name(REPORT_AS_OF)
+    first = path.read_bytes()
+    path.unlink()
+    for day in EVENINGS:
+        journal, body = _journal(world, day)
+        morning = journal.with_name(f"{day.isoformat()}{MORNING_FILE_SUFFIX}")
+        document = {
+            "schema": MORNING_SCHEMA,
+            "session": day.isoformat(),
+            "as_of": (survivor_day.evening_of(day) + timedelta(hours=14)).isoformat(),
+            "held": body["held"],
+            "evening_snapshot_id": body["result"]["paper"]["snapshot_id"],
+            "registration": body["registration"],
+            "evening_read": {"summary": {}, "aged_zero": [], "verdicts": {}},
+            "requests": {"namechange": 1},
+            "differences": [],
+            "tolerated": [],
+            "notices": [],
+            "holdings_compared": [],
+            "wording": MORNING_WORDING,
+        }
+        morning.write_text(json.dumps(document, sort_keys=True) + "\n", encoding="utf-8")
+
+    code, _out, err = _report(world, capsys)
+
+    assert code == 0, err
+    assert path.read_bytes() == first
+    assert _document(world)["records"]["witnessed"] == 3
 
 
 def test_a_record_with_no_provenance_is_refused_listed_and_the_report_still_produced(

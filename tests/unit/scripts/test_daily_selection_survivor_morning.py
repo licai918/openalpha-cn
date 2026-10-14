@@ -10,13 +10,14 @@ committed to the book. It writes that file and the `namechange` partition, nothi
 The evenings it re-checks are run for real, once per module, through `main` on the survivor day's
 own scripted market (`test_daily_selection_survivor_day.py`: 120 main-board securities over every
 weekday of 2026, the panel seeded through the real `panel build`) -- the first evening (6 April,
-ten planned buys, no holding) and the second (7 April, ten holdings, ten watch-list names) -- and
-each test works on a copy of the runtime directory, so the evenings are paid for once. The
-overnight announcement is the market's: `Overnight` serves a rename that was announced on the
-evening and published only the next morning, so the evening's read does not have it and the
-morning's does -- and one announced on the morning itself, dated after the session, which the
-morning's fetch brings and its facts read never screens (a notice). Nothing reaches the network;
-every request is the scripted market's, counted.
+ten planned buys, no holding), the second (7 April, ten holdings, ten watch-list names, its pinned
+`held` still empty) and the third (8 April, its pinned `held` the ten names, one of them halted
+that session) -- and each test works on a copy of the runtime directory, so the evenings are paid
+for once. The overnight announcement is the market's: `Overnight` serves a rename that was
+announced on the evening and published only the next morning, so the evening's read does not have
+it and the morning's does -- and one announced on the morning itself, dated after the session,
+which the morning's fetch brings and its facts read never screens (a notice). Nothing reaches the
+network; every request is the scripted market's, counted.
 
 **The listing-row class cannot be made by the morning's own fetch.** A code priced before its
 registry listing row has a row aged 0 at an evening read and none at a later one -- but the morning
@@ -62,6 +63,8 @@ DAY: Final[date] = sd.DAY
 """6 April 2026, the first evening after the epoch: ten buys planned, nothing held."""
 NEXT: Final[date] = sd.NEXT
 """7 April: the first evening's buys filled at its open; ten holdings, a watch list of ten."""
+THIRD: Final[date] = sd.THIRD
+"""8 April: the evening that pins the ten holdings the book came into it with."""
 SUFFIX: Final[str] = ".morning.json"
 NO_REQUEST: Final[str] = "tushare requests   0 this run {}"
 UNSCOPED: Final[str] = "no overnight change"
@@ -188,10 +191,13 @@ def _evening(world: tds.World, day: date, *, at: datetime | None = None) -> None
 
 
 class Evenings(NamedTuple):
-    """The runtime directory after each of the first two evenings of one registration."""
+    """The runtime directory after each of the first three evenings of one registration, and the
+    holding halted on the third."""
 
     first: Source
     second: Source
+    third: Source
+    halted: str
 
 
 @pytest.fixture(scope="module")
@@ -199,7 +205,7 @@ def evenings(seeded: Path, tmp_path_factory: pytest.TempPathFactory) -> Evenings
     base = tmp_path_factory.mktemp("morning-evenings")
     with pytest.MonkeyPatch.context() as patch:
         repo, registration = tds._repository(base, sd.CONFIG)
-        market = sd.SurvivorMarket(open_days=tds.OPEN_2026)
+        market = sd.Halting(open_days=tds.OPEN_2026)
         tds._bind(patch, repo, market)
         runtime = base / "runtime"
         shutil.copytree(seeded, runtime)
@@ -208,7 +214,17 @@ def evenings(seeded: Path, tmp_path_factory: pytest.TempPathFactory) -> Evenings
         first = base / "after-first"
         shutil.copytree(runtime, first)
         _evening(world, NEXT)
-    return Evenings(Source(repo, registration, first), Source(repo, registration, runtime))
+        second = base / "after-second"
+        shutil.copytree(runtime, second)
+        halted = sd._journal(world, NEXT)["result"]["paper"]["book"]["holdings"][0]["ts_code"]
+        market.halted = {THIRD: (halted,)}
+        _evening(world, THIRD)
+    return Evenings(
+        Source(repo, registration, first),
+        Source(repo, registration, second),
+        Source(repo, registration, runtime),
+        halted,
+    )
 
 
 class Listing(NamedTuple):
@@ -700,6 +716,7 @@ def test_the_mornings_clock_is_pinned_in_its_file_before_the_fetch_and_a_rerun_k
     assert "differences" not in pinned
 
     tds._bind(monkeypatch, world.repo, Overnight(open_days=tds.OPEN_2026))
+    built = _builds(monkeypatch)
     code, out, err = _morning(
         world, capsys, DAY, as_of=morning_of(DAY, time(8, 50)), clock=morning_of(DAY, time(8, 55))
     )
@@ -709,6 +726,22 @@ def test_the_mornings_clock_is_pinned_in_its_file_before_the_fetch_and_a_rerun_k
     assert document["as_of"] == morning_of(DAY).isoformat() == pinned["as_of"]
     assert document["evening_read"] == pinned["evening_read"]
     assert document["requests"] == {"namechange": 1}
+    # The resumed fetch is made at the pinned instant too, never at this run's `--as-of`.
+    assert built == [(DAY.year, morning_of(DAY))]
+
+
+def _builds(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, datetime]]:
+    """Every `panel build` the command runs from here on, by its year and its `--as-of`; the
+    build goes through."""
+    original = daily._panel_build
+    calls: list[tuple[Any, datetime]] = []
+
+    def recorded(runtime_dir: Path, **keywords: Any) -> Any:
+        calls.append((keywords["year"], keywords["as_of"]))
+        return original(runtime_dir, **keywords)
+
+    monkeypatch.setattr(daily, "_panel_build", recorded)
+    return calls
 
 
 def test_the_evening_is_read_again_before_the_fetch_with_its_pinned_clock_and_holdings(
@@ -737,6 +770,38 @@ def test_the_evening_is_read_again_before_the_fetch_with_its_pinned_clock_and_ho
     assert [call["requests_so_far"] for call in reads] == [0, 1]
     assert [tuple(call["held"]) for call in reads] == [()] * 2 == [tuple(pinned["held"])] * 2
     assert json.loads(out)["held"] == pinned["held"]
+
+
+def test_an_evening_that_pinned_holdings_is_read_with_them_and_its_halted_holding_keeps_its_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    evenings: Evenings,
+) -> None:
+    """The third evening (8 April) pinned the ten names the book came into it with, one of them
+    halted that whole session: the evening's facts gave the halted holding its carried row
+    (suspended, its last close) and froze it. Both of the morning's reads are made with that pin,
+    the file's `held` is it, the evening's read holds the halted holding's verdict, and a holding
+    frozen at both reads is no difference."""
+    world = _world(tmp_path, monkeypatch, evenings.third)
+    reads = _reads(monkeypatch, world)
+    pinned = sd._journal(world, THIRD)
+    halted = evenings.halted
+    assert len(pinned["held"]) == 10 and halted in pinned["held"]
+
+    code, out, err = _morning(world, capsys, THIRD, json_output=False)
+
+    assert code == 0, err
+    assert [(call["session"], tuple(call["held"])) for call in reads] == [
+        (THIRD, tuple(pinned["held"]))
+    ] * 2
+    document = _filed(world, THIRD)
+    assert document["held"] == pinned["held"]
+    assert "suspended" in document["evening_read"]["verdicts"][halted]["reasons"]
+    assert not any(halted in item["ts_codes"] for item in document["differences"])
+    assert document["holdings_compared"] == sorted(_holdings(world, THIRD))
+    (line,) = (line for line in out.splitlines() if line.startswith("holdings compared"))
+    assert ", ".join(sorted(_holdings(world, THIRD))) in line
 
 
 def test_a_store_that_no_longer_gives_the_evenings_facts_is_refused_before_the_fetch(
@@ -988,7 +1053,8 @@ def test_a_morning_at_or_after_the_next_call_auction_is_refused_having_asked_not
     evenings: Evenings,
 ) -> None:
     """09:15 is when the auction that fixes tomorrow's open begins: a check pinned at or after it,
-    or run when the clock is, is no advice before it. Exit 1, nothing fetched, nothing written."""
+    or run when the clock is, is no advice before it -- either one, whatever the other says. Exit
+    1, nothing fetched, nothing written."""
     world = _world(tmp_path, monkeypatch, evenings.first)
     before = sd._files(world.runtime)
 
@@ -996,6 +1062,7 @@ def test_a_morning_at_or_after_the_next_call_auction_is_refused_having_asked_not
         (morning_of(DAY, time(9, 15)), morning_of(DAY, time(9, 15))),
         (morning_of(DAY, time(9, 20)), morning_of(DAY, time(9, 20))),
         (morning_of(DAY, time(8, 30)), morning_of(DAY, time(9, 20))),
+        (morning_of(DAY, time(9, 20)), morning_of(DAY, time(9, 0))),
     ):
         code, out, err = _morning(world, capsys, DAY, as_of=at, clock=now)
 

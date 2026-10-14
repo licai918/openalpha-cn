@@ -312,6 +312,53 @@ def test_a_holding_the_evening_already_sells_is_not_told_it_left_the_survivors(
     assert [item for item in advice.differences if item.ts_codes == (held,)] == []
 
 
+def test_a_holding_frozen_at_the_evening_and_still_frozen_this_morning_is_no_difference(
+    evening: Day,
+) -> None:
+    """A difference is a change: a holding the evening found suspended -- and froze -- that is
+    suspended this morning too has nothing new to say."""
+    held = _survivors(evening)[0]
+    halted = _turn(evening, held, suspended=True)
+    document = _evening_document(halted, holdings=[held])
+
+    advice = _compare(halted, document, halted)
+
+    assert [item for item in advice.differences if item.ts_codes == (held,)] == []
+
+
+def test_a_frozen_holding_that_turned_special_treatment_is_told_only_what_is_new(
+    evening: Day,
+) -> None:
+    held = _survivors(evening)[0]
+    halted = _turn(evening, held, suspended=True)
+    document = _evening_document(halted, holdings=[held])
+
+    advice = _compare(halted, document, _turn(halted, held, special_treatment=True))
+
+    (item,) = (item for item in advice.differences if item.kind == "holding_turned")
+    assert item.reasons == ("special_treatment",)
+    assert item.text == (
+        f"holding {held} turned special_treatment: the paper book sells it at the next evening"
+    )
+
+
+def test_a_holding_suspended_and_turned_special_treatment_overnight_is_sold_not_frozen(
+    evening: Day,
+) -> None:
+    """The freeze is the policy's: every reason must follow from the suspension
+    (`FREEZE_COMPATIBLE_REASONS`). Special treatment does not, so a halted ST holding is sold."""
+    held = _survivors(evening)[0]
+    document = _evening_document(evening, holdings=[held])
+    turned = _turn(evening, held, suspended=True, special_treatment=True)
+
+    advice = _compare(evening, document, turned)
+
+    (item,) = (item for item in advice.differences if item.kind == "holding_turned")
+    assert {"suspended", "special_treatment"} <= set(item.reasons)
+    assert item.text.endswith(": the paper book sells it at the next evening")
+    assert "freezes" not in item.text
+
+
 def test_a_holding_that_left_the_facts_is_told_as_not_assessed(evening: Day) -> None:
     held = _survivors(evening)[0]
     document = _evening_document(evening, holdings=[held])
