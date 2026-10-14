@@ -160,6 +160,7 @@ from openalpha_cn.backtest.paper_state import (
     save_snapshot,
     snapshot_payload,
 )
+from openalpha_cn.backtest.paper_step import AttemptedOrder
 from openalpha_cn.domain.portfolio import PortfolioState, PortfolioTransition
 from openalpha_cn.domain.survivor_book import (
     ScreenResult,
@@ -170,11 +171,13 @@ from openalpha_cn.domain.survivor_orders import TradeList, build_trade_list
 from openalpha_cn.domain.survivor_policy import BookDecision, decide_book
 
 __all__ = [
+    "AttemptOutcome",
     "CatchUpResult",
     "DryRunLedger",
     "EveningResult",
     "PaperLedgerConflictError",
     "ReadableLedger",
+    "attempt_outcomes",
     "missing_sessions",
     "open_book",
     "run_catch_up",
@@ -278,6 +281,48 @@ class CatchUpResult:
     outcome: Outcome
     snapshot: PaperBookSnapshot
     settlement: Settlement
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AttemptOutcome:
+    """One due order's try on a session and what came of it.
+
+    `status` is the paper book's verdict on a submitted attempt -- its transition's `filled` or
+    `rejected` -- or `not_attempted` for an order with no bar; `reason` is the book's refusal
+    (`None` for a fill) or the step builder's `NO_BAR_REASON`.
+    """
+
+    attempt: AttemptedOrder
+    status: Literal["filled", "rejected", "not_attempted"]
+    reason: str | None
+
+
+def attempt_outcomes(settlement: Settlement) -> tuple[AttemptOutcome, ...]:
+    """Every attempt of `settlement`, in execution order, joined on its attempt id to the
+    transition the runner recorded for it -- the per-attempt line of the daily journal.
+
+    Write-offs are not attempts (`Settlement.written_off` carries them). A submitted attempt
+    with no transition, or a transition no attempt was submitted under, is a settlement that
+    does not hold together, and is refused by name.
+    """
+    verdicts = {item.order.order_id: item for item in settlement.runner_record.transitions}
+    submitted = {item.attempt_id for item in settlement.attempts if item.outcome == "submitted"}
+    unjoined = sorted(submitted - verdicts.keys())
+    if unjoined:
+        raise ValueError(f"submitted attempts with no transition: {unjoined}")
+    stray = sorted(verdicts.keys() - submitted)
+    if stray:
+        raise ValueError(f"transitions no attempt was submitted under: {stray}")
+    return tuple(
+        AttemptOutcome(attempt=item, status="not_attempted", reason=item.reason)
+        if item.outcome == "not_attempted"
+        else AttemptOutcome(
+            attempt=item,
+            status=verdicts[item.attempt_id].status,
+            reason=verdicts[item.attempt_id].reason,
+        )
+        for item in settlement.attempts
+    )
 
 
 def open_book(

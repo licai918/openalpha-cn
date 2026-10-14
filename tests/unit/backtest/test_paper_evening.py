@@ -33,10 +33,12 @@ from openalpha_cn.backtest.execution import MarketBar, security_board
 from openalpha_cn.backtest.multi_day import PortfolioLedger
 from openalpha_cn.backtest.paper import PaperPortfolio, PaperPortfolioReachedOutward
 from openalpha_cn.backtest.paper_evening import (
+    AttemptOutcome,
     CatchUpResult,
     DryRunLedger,
     EveningResult,
     PaperLedgerConflictError,
+    attempt_outcomes,
     missing_sessions,
     open_book,
     run_catch_up,
@@ -50,7 +52,7 @@ from openalpha_cn.backtest.paper_state import (
     load_snapshot,
     snapshot_payload,
 )
-from openalpha_cn.backtest.paper_step import attempt_id
+from openalpha_cn.backtest.paper_step import NO_BAR_REASON, attempt_id
 from openalpha_cn.backtest.portfolio import PortfolioLimits
 from openalpha_cn.domain.portfolio import (
     PortfolioOrder,
@@ -1272,6 +1274,76 @@ def test_a_store_holding_two_snapshots_for_a_session_refuses_the_evening_as_the_
     with pytest.raises(PaperStateStoreError, match="2021-03-03 is held under 2 snapshots"):
         tonight(book)
     assert ledger_files(book) == before
+
+
+# ---- what each attempt came to -----------------------------------------------------------------
+
+
+def test_each_attempt_is_joined_to_its_verdict_filled_rejected_or_not_attempted(
+    tmp_path: Path,
+) -> None:
+    """The journal's per-attempt line: every due order's try on the session, in execution order,
+    with what came of it -- the paper book's verdict on a submitted attempt (its transition,
+    joined on the attempt id) or the step builder's on one with no bar. S3's evening fills the
+    sale of 600010.SH and the buy of 600030.SH and refuses 600050.SH's at its limit-up open; the
+    catch-up of S4 finds no bar for any of the three buys still live."""
+    book = through_s2(tmp_path)
+    sell_a, buy_c, buy_e = (
+        due_order(book, "sell", A),
+        due_order(book, "buy", C),
+        due_order(book, "buy", E),
+    )
+    s3 = tonight(book).settlement
+    s4 = catch_up(book, S4, market(quiet(B, S4, "11.50"), quiet(C, S4, "10.10"))).settlement
+
+    assert attempt_outcomes(s3) == tuple(
+        AttemptOutcome(attempt=attempt, status=status, reason=reason)
+        for attempt, (status, reason) in zip(
+            s3.attempts,
+            [
+                ("filled", None),
+                ("filled", None),
+                ("rejected", "buy cannot fill on a one-price limit-up bar"),
+            ],
+            strict=True,
+        )
+    )
+    assert [item.attempt.order for item in attempt_outcomes(s3)] == [sell_a, buy_c, buy_e]
+    assert [
+        (item.attempt.order.ts_code, item.status, item.reason) for item in attempt_outcomes(s4)
+    ] == [
+        (E, "not_attempted", NO_BAR_REASON),
+        (F, "not_attempted", NO_BAR_REASON),
+        (G, "not_attempted", NO_BAR_REASON),
+    ]
+
+
+def test_a_settlement_whose_record_and_attempts_disagree_is_refused_by_name(
+    tmp_path: Path,
+) -> None:
+    """A submitted attempt with no transition in the runner's record, or a transition no attempt
+    was submitted under, is a settlement that does not hold together; the join names it rather
+    than reporting an attempt without its verdict."""
+    book = through_s2(tmp_path)
+    s3 = tonight(book).settlement
+    record = s3.runner_record
+    sale = record.transitions[0].order.order_id
+
+    without_the_sale = dataclasses.replace(
+        s3, runner_record=record.model_copy(update={"transitions": record.transitions[1:]})
+    )
+    with pytest.raises(ValueError, match=rf"submitted attempts with no transition: \['{sale}'\]"):
+        attempt_outcomes(without_the_sale)
+    stray = record.transitions[0].model_copy(
+        update={"order": record.transitions[0].order.model_copy(update={"order_id": "stray"})}
+    )
+    with_a_stray = dataclasses.replace(
+        s3, runner_record=record.model_copy(update={"transitions": (*record.transitions, stray)})
+    )
+    with pytest.raises(
+        ValueError, match=r"transitions no attempt was submitted under: \['stray'\]"
+    ):
+        attempt_outcomes(with_a_stray)
 
 
 # ---- the ledgers' behaviour --------------------------------------------------------------------
