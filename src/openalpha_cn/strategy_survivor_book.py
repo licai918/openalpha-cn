@@ -187,6 +187,7 @@ __all__ = [
     "bind_paper_book",
     "catch_up",
     "catch_up_again",
+    "decided_by_an_evening",
     "delisted_or_refuse",
     "evening",
     "facts_day",
@@ -920,7 +921,7 @@ def catch_up_again(
                         "with no snapshot is the catch-up's to settle, never derived again",
                     )
                 held = load_snapshot(state_store, day)
-                if _decided_by_an_evening(held):
+                if decided_by_an_evening(held):
                     continue
                 before = load_snapshot(state_store, ordinals.day_of(index - 1))
             result = _settle_without_a_decision(
@@ -947,10 +948,12 @@ def catch_up_again(
     return tuple(results)
 
 
-def _decided_by_an_evening(snapshot: PaperBookSnapshot) -> bool:
+def decided_by_an_evening(snapshot: PaperBookSnapshot) -> bool:
     """Whether `snapshot`'s session was decided by an evening: an order planned on it is pending
     (a session's plan executes at the open after it, so all of it is pending at its close), or
-    the book's first decision is the session's own."""
+    the book's first decision is the session's own. Where it is, C3 refuses to settle the session
+    again as a catch-up -- `catch_up_again` passes it over, and the daily command refuses a day
+    that would re-pin it settle-only (D5 joint review, Minor 5)."""
     index = snapshot.session_index
     return snapshot.first_decision_session == index or any(
         item.order.signal_session == index for item in snapshot.pending_orders

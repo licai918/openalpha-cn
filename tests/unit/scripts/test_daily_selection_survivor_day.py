@@ -1483,17 +1483,22 @@ def test_a_book_a_later_sessions_run_has_settled_is_refused_for_an_earlier_day(
     seeded: Path,
 ) -> None:
     """6 April's evening is committed; a run for 3 April (the epoch) finds the book past its
-    session: a past evening is not run again. Refused by name before any request."""
+    session: a past evening is not run again. Refused by name before any request -- and before
+    the day's pin, so that "Nothing was fetched or written" is true (D5 joint review, Minor 3)."""
     world = _world(tmp_path, monkeypatch, seeded)
     _completed(world, capsys, DAY)
     on_the_epoch = datetime.fromisoformat("2026-04-03T18:30:00+08:00")
+    before = _files(world.runtime)
 
     code, _out, err = _run(world, capsys, as_of=on_the_epoch, clock=on_the_epoch)
 
     assert code == 1
     assert err[0].startswith("step 5 (paper head) failed: the paper book is settled through")
     assert "a later session's run changed the book" in err[0]
+    assert "Nothing was fetched or written" in err[0]
     assert err[1] == NO_REQUEST
+    assert not _journal_path(world, EPOCH).exists()
+    assert _files(world.runtime) == before
 
 
 def test_the_facts_are_the_pinned_holdings_and_a_reused_record_keeps_its_own_provenance(
@@ -2570,3 +2575,115 @@ def test_an_evening_not_committed_is_never_decided_on_a_later_read_of_the_market
     )
     assert DAY not in _snapshots(world).sessions()
     assert "result" not in _journal(world)
+
+
+# --- refused before the day pins anything (the D5 joint review, Minor 4 and 5) ----------------
+
+
+def test_a_first_run_older_than_the_panels_newest_session_is_refused_before_any_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """Minor 4: 7 April's run updates the panel through 7 April and stops at its facts (the book
+    opened on its epoch, nothing settled). A first run for 6 April -- `--as-of` its evening --
+    would fetch and rewrite the store's partitions at that older instant before `panel build`
+    refused it: a day not committed whose panel has moved past its session is refused at step 2
+    before any request and before its pin, and nothing is written."""
+    world = _world(tmp_path, monkeypatch, seeded)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(daily, "build_factors", _no_factor_build)
+        code, _out, err = _day(world, capsys, NEXT)
+    assert (code, err[0].startswith("step 6 (facts) failed:")) == (1, True), err
+    panel, paper = _files(world.runtime / "panel"), _files(world.runtime / "paper")
+    assert panel and paper
+    world.market.clear()
+
+    code, _out, err = _run(world, capsys)
+
+    assert code == 1
+    assert err[0].startswith(
+        "step 2 (panel update) failed: the panel holds sessions after 2026-04-06, through "
+        "2026-04-07"
+    )
+    assert "no evening of it was committed" in err[0]
+    assert "the next session's run settles it without a decision" in err[0]
+    assert "Nothing was fetched or written" in err[0]
+    assert err[1:] == [NO_REQUEST]
+    assert world.market.payloads == []
+    assert _files(world.runtime / "panel") == panel
+    assert _files(world.runtime / "paper") == paper
+    assert not _journal_path(world).exists()
+
+
+def test_a_committed_evening_whose_journal_is_gone_is_refused_after_the_auction_with_its_remedy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """Minor 5: 6 April's evening is committed and its journal deleted by hand. Run again after
+    the next call auction, the day would be pinned settle-only, and a session an evening decided
+    is never settled again without its decision: it could never complete. Refused by name at the
+    paper head -- the cause, and the remedy -- before any request and before its pin. The remedy
+    works: `--as-of` the session's evening makes the day an evening again, which derives the
+    committed session again, writing nothing, and prints that the call auction has passed."""
+    world = _world(tmp_path, monkeypatch, seeded)
+    first = _completed(world, capsys, DAY)
+    _journal_path(world).unlink()
+    late = after_the_auction(DAY)
+    before = _files(world.runtime)
+
+    code, _out, err = _run(world, capsys, as_of=late, clock=late)
+
+    assert code == 1
+    assert err[0].startswith(
+        f"step 5 (paper head) failed: the paper book holds the evening of 2026-04-06, committed "
+        f"as {first['paper']['snapshot_id']}"
+    )
+    assert f"its journal {_journal_path(world)} is missing" in err[0]
+    assert "run the day again with --as-of 2026-04-06T18:30:00+08:00" in err[0]
+    assert "Nothing was fetched or written" in err[0]
+    assert err[1:] == [NO_REQUEST]
+    assert _files(world.runtime) == before
+    paper = _files(world.runtime / "paper")
+
+    code, out, err = _run(world, capsys, clock=late, json_output=False)
+
+    assert code == 0, err
+    assert _files(world.runtime / "paper") == paper
+    lines = out.splitlines()
+    assert any(
+        line.endswith("evening unchanged (settled earlier; derived again, nothing written)")
+        for line in lines
+    )
+    assert _passed(NEXT) in lines
+    assert _journal(world)["paper"]["snapshot_id"] == first["paper"]["snapshot_id"]
+
+
+def test_a_settle_only_day_whose_journal_is_gone_is_completed_again_after_the_auction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """The refusal of Minor 5 is only for an evening: a session settled without a decision,
+    re-pinned settle-only once its journal is gone, is derived again by `settle_only` (C3:
+    `unchanged`), writing nothing, and the day completes."""
+    late = after_the_auction(DAY)
+    world = _world(tmp_path, monkeypatch, seeded)
+    code, _out, err = _run(world, capsys, as_of=late, clock=late)
+    assert code == 0, err
+    _journal_path(world).unlink()
+    paper = _files(world.runtime / "paper")
+
+    code, out, err = _run(world, capsys, as_of=late, clock=late)
+
+    assert code == 0, err
+    result = json.loads(out)
+    assert result["paper"] is None
+    assert [(day["session"], day["outcome"]) for day in result["paper_skipped"]["catch_ups"]] == [
+        (DAY.isoformat(), "unchanged")
+    ]
+    assert _files(world.runtime / "paper") == paper

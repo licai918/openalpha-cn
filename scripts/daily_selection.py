@@ -3893,6 +3893,58 @@ def _no_longer_completed(session: date, as_of: datetime, newest: date) -> str:
     )
 
 
+def _older_than_the_panel(session: date, as_of: datetime, newest: date) -> str:
+    """Why a day not committed, whose panel stage has not run, is refused before step 2's first
+    request when the panel holds a later session (D5 joint review, Minor 4)."""
+    return (
+        f"the panel holds sessions after {session.isoformat()}, through {newest.isoformat()}, "
+        "and no evening of it was committed: the panel can no longer be read as it stood at "
+        f"{as_of.isoformat()} -- the instant this day's doctor, factor build and facts read at -- "
+        "and an update pinned there would fetch and rewrite the store's partitions at an older "
+        "instant than the one they hold. A day is run on its own session's evening, before the "
+        "next session's update; the next session's run settles it without a decision. Nothing was "
+        "fetched or written; there is nothing to do"
+    )
+
+
+def _refuse_a_lost_journal(
+    store: PanelStore,
+    book: PaperBookSnapshot,
+    *,
+    exchange: str,
+    as_of: datetime,
+    journal: Path,
+) -> None:
+    """Refuse, before any request and before the day's pin, a day whose session the paper book
+    holds as an evening's (`strategy_survivor_book.decided_by_an_evening`), whose journal is
+    gone, and which a pin at `as_of` would make settle-only (D5 joint review, Minor 5): settling
+    only, `run_catch_up` refuses a session an evening decided on every rerun -- the day could never
+    complete. The remedy is named: the journal restored, or the day pinned at its evening again
+    (`--as-of`), which the evening's unchanged path completes, writing nothing. A day pinned before
+    the call auction, or a session settled without a decision, needs neither."""
+    from openalpha_cn.strategy_survivor_book import decided_by_an_evening
+
+    session = book.session
+    cutoff = registration_cutoff(_outcome_calendar(store, exchange, session, as_of), session)
+    if as_of < cutoff or not decided_by_an_evening(book):
+        return
+    evening = session_publication_instant(session) + timedelta(hours=2)
+    raise StepFailedError(
+        "paper head",
+        f"the paper book holds the evening of {session.isoformat()}, committed as "
+        f"{book.snapshot_id} with its plan for the next open, and its journal {journal} is "
+        "missing -- moved or deleted since the run that committed it. Pinned again now, at "
+        f"{as_of.isoformat()}, at or after {cutoff.isoformat()} (the next session's call "
+        "auction), the day would settle only, and a session an evening decided is never settled "
+        "again without its decision: the day could never complete. Restore that journal from the "
+        f"backup the paper directory was taken with, or run the day again with --as-of "
+        f"{evening.isoformat()} -- its evening, before that call auction: it is an evening again "
+        "then, which finds the session committed and derives it again, writing nothing. Nothing "
+        "was fetched or written",
+        steps=SURVIVOR_STEPS,
+    )
+
+
 def _journalled_factors(
     previous: Mapping[str, Any] | None, built: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -4536,9 +4588,13 @@ def _run_survivor_day(
        `held_from`, the snapshot they are read from), read only once the book is checked to be
        this registration's (`_held_now`): every later step of this run and of any rerun uses
        them, and every run checks the book against them (`_require_pinned_head`) before any
-       request. A journal with `result` is printed again with no request and no write. An epoch
-       after the session (P6's `session < anchor`), not an open session of the stored calendar,
-       or -- with no book held -- further back than the panel step catches up exits 2 here.
+       request. A new pin is written only once the checks that read alone have passed -- the
+       book against it; a committed evening whose journal is gone, re-pinned settle-only
+       (`_refuse_a_lost_journal`); a day not committed whose panel has moved past its session
+       -- so a day they refuse leaves no pin. A journal with `result` is printed again with no
+       request and no write. An epoch after the session (P6's `session < anchor`), not an open
+       session of the stored calendar, or -- with no book held -- further back than the panel
+       step catches up exits 2 here.
     2. **Panel update** as P6's, with `SurvivorPanelUpdate` from the registration's adapter
        (`survivor_panel_update`); journalled, and resumed after on a rerun. The day's route is
        read here, by the pinned clock: settle-only at or after 09:15 of the next session, and
@@ -4649,9 +4705,12 @@ def _survivor_day(
         _admit_epoch_reach(
             store, survivor=survivor, session=session, as_of=first_as_of, book_held=book is not None
         )
+        pinning = journal is None
         if journal is None:
             # The day's clock and the book's holdings, pinned before anything is fetched: a retry
-            # asks the same questions of the same book (P6's pin, and the paper book's).
+            # asks the same questions of the same book (P6's pin, and the paper book's). Written
+            # once the checks below, which read only, have passed: a day they refuse leaves no pin
+            # (D5 joint review, Minor 3).
             journal = {
                 "schema": SURVIVOR_JOURNAL_SCHEMA,
                 "session": session.isoformat(),
@@ -4665,7 +4724,6 @@ def _survivor_day(
                     "config_id": registration.config_id,
                 },
             }
-            write_journal(path, journal)
         as_of = datetime.fromisoformat(journal["as_of"])
         held = tuple(journal["held"])
         held_from = journal["held_from"]
@@ -4679,6 +4737,24 @@ def _survivor_day(
             index=ordinals.index_of(session),
             journal=path,
         )
+        # The session's snapshot is held: its evening (or its settlement alone) was committed by
+        # an earlier run of this day that stopped before its journal was finished. This run only
+        # completes it (D3 review, rule 5).
+        committed = book is not None and book.session_index == ordinals.index_of(session)
+        if pinning and committed and book is not None:
+            _refuse_a_lost_journal(store, book, exchange=exchange, as_of=as_of, journal=path)
+        if "panel" not in journal and not committed:
+            # Before step 2's first request (D5 joint review, Minor 4): an update pinned at a
+            # clock the panel has moved past would rewrite its partitions at that older instant.
+            newest = _newest_stored_session(store, targets, session.year)
+            if newest is not None and newest > session:
+                raise StepFailedError(
+                    "panel update",
+                    _older_than_the_panel(session, as_of, newest),
+                    steps=SURVIVOR_STEPS,
+                )
+        if pinning:
+            write_journal(path, journal)
         if "panel" not in journal:
             panel = update_panel(
                 runtime_dir,
@@ -4699,10 +4775,6 @@ def _survivor_day(
         # review, rule 4) -- and step 7 refuses a record the clock has made too late.
         cutoff = registration_cutoff(_outcome_calendar(store, exchange, session, as_of), session)
         settle_only = as_of >= cutoff
-        # The session's snapshot is held: its evening (or its settlement alone) was committed by
-        # an earlier run of this day that stopped before its journal was finished. This run only
-        # completes it (D3 review, rule 5).
-        committed = book is not None and book.session_index == ordinals.index_of(session)
         newest = _newest_stored_session(store, journal["panel"]["targets"], session.year)
         later = newest if newest is not None and newest > session else None
         # What steps 6 and 8 read the panel at: the pinned clock, or -- for a committed day once
