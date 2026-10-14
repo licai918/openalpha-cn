@@ -9561,10 +9561,13 @@ def load_processed_factor_observations(
     store at 25.5 s for four factors' day, and 0.13 s for the same values through a `store.query`
     equality filter on the instant -- which it labels an illustration, not an existing path: that
     filter skips this function's visibility gate and manifest check. This path itself was timed
-    on a synthetic store (`V2-P7-016`; one factor, one transform, 180 daily builds of 5,000
+    once, on a synthetic store (`V2-P7-016`; one factor, one transform, 180 daily builds of 5,000
     names, 900,000 rows, written through the real writers; best of five warm reads, one
     machine): the whole-year read 7.65 s, the narrow read of the last build 0.058 s (about 130x),
-    with identical answers value bit for value bit. Four factors are four such reads.
+    with identical answers value bit for value bit. **That timing is a one-off measurement: the
+    script that took it is not committed to this repository, so nothing here reproduces those
+    two figures** -- what the tests do pin is the identical answer, on a small panel. Four
+    factors are four such reads.
 
     Through `read_visible_at` rather than `read_if_ready` for `load_factor_observations`' reason:
     a processed row's `available_time` is the `as_of` it was computed at, so a year partition

@@ -37,9 +37,10 @@ calls main with any other prefix gets no row, and is counted and named
 by the first rule that excludes it: not listed (or not in the universe at all), then the board,
 then no bar in reach.
 
-- **A halted security with no bar still gets its row** (T6/T7 0(d)): `suspended=True`, its last
-  close, and the mean amount of its last 20 bars. Without the row the kernel would sell a halted
-  holding as unassessed instead of freezing it.
+- **A halted security with a bar in reach still gets its row** (T6/T7 0(d)): `suspended=True`,
+  its last close, and the mean amount of its last bars within that reach -- up to 20, fewer for
+  a security not held whose reach is bounded (next bullet). Without the row the kernel would
+  sell a halted holding as unassessed instead of freezing it.
 - **How far back a halted security is looked for.** For a code in `held` (the book's holdings)
   the last bar and the 20 bars are looked for as far back as the panel goes -- to the listing
   day, or to the first session the bar panel holds: a holding halted for a year must still be
@@ -49,6 +50,18 @@ then no bar in reach.
   counted as `FactsNotes.no_bar_within_carry`. Nothing is lost by that: such a security is not
   held, and a row could only have said `suspended`, which keeps it out of every population the
   screen ranks.
+- **What the held look-back costs.** It reads the bar panel one session at a time, newest
+  first, and stops for a held code once it has the last bar and 20 bars. A holding halted for
+  250 sessions is about 250 more reads than an unheld day (the estimate in
+  `docs/superpowers/plans/2026-10-14-p7-step0-adapters-and-ledger.md` is some 10 s for that;
+  not measured here). That is the cost of a held code that has bars, not the bound. The worst
+  case is a held code the registry lists and that has **no bar anywhere** in the panel: nothing
+  stops the walk before its listing day or the first session of the earliest daily-bar
+  partition year (or the calendar's first day, if later), so on a store whose bars go back
+  twenty years that is about 5,000 reads -- minutes at that rate -- on a day the caller then
+  refuses anyway (`no_bar_in_reach`). That stop is already the one the panel's partitions give
+  for free; stopping earlier without changing any output would need to know, without reading
+  them, which sessions a code has bars on.
 - **Every held code is told what became of it** (`FactsDay.held_status`), because the caller
   acts on each one: `row` -- it has a fact row; `no_bar_in_reach` -- listed, and never a bar
   since its listing or the panel's first session, so no close to carry and no row (the kernel
@@ -691,7 +704,8 @@ def build_facts_day(
     calendar's; the three, `min_coverage` and `max_carry_sessions` come from the registration.
     `held` is the book's current holdings, each spelled as a security code (six ASCII digits, a
     dot, `SH`, `SZ` or `BJ`; `MalformedHeldCodeError` otherwise): a held security halted for
-    longer than `max_carry_sessions` keeps its carried row, because its look-back is not bounded.
+    longer than `max_carry_sessions` keeps its carried row, because its look-back is not bounded
+    (the module docstring states what that costs, the worst case included).
 
     Every listed security gets a row except one on a board the adapter does not recognise
     (`MAIN_BOARD_PREFIXES`) and one with no bar in reach -- for a code not in `held` none within
