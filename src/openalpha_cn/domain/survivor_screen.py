@@ -7,11 +7,13 @@ Pure functions over `SecurityFacts`. Three steps:
    them: it depends on the book's equity, and a holding that has risen past one lot's price must
    not be sold for it. The policy skips an entrant it cannot afford, and the survivor set stays
    a function of the market alone.)
-2. **Liquidity** -- the bottom `liquidity_drop_fraction` by trailing traded amount among *every
-   security on an allowed board*, whatever else is wrong with it. It is the one reason that
-   depends on the other securities. Names that fail a static reason still count in that
-   population (a suspended name's zero turnover is one of the thinnest, which is the literal
-   reading of the design's "within the tradable boards"); that is a choice, pinned by a test.
+2. **Liquidity** -- the bottom `liquidity_drop_fraction` by trailing traded amount among the
+   securities that pass **every static reason**. It is the one reason that depends on the other
+   securities, so the population it is taken over matters: using only names that could be held
+   means its boundary moves with the investable pool and not when some other name is halted,
+   resumes, is special-treated or lists (a halted name's zero turnover would otherwise be one of
+   the thinnest). Pinned by a test; a choice made after the review of the first version, which
+   counted every security on an allowed board.
 3. **Survivors** -- of the securities with *no* reason, drop the worst `loser_decile_count` tenths
    by composite, so the cut is taken over the liquidity-and-eligibility survivors and nothing
    else. Ties break on `ts_code`, so no cut depends on input order.
@@ -75,11 +77,14 @@ def screen(facts: Sequence[SecurityFacts], config: SurvivorBookConfig) -> Screen
         if composites[fact.ts_code] is None:
             found.add("missing_factor_value")
 
-    allowed = sorted(
-        (fact for fact in facts if fact.board in config.boards),
+    # The liquidity cut is taken over the names that pass every static reason, so its boundary
+    # moves only when the investable pool itself changes -- not when some other name is halted,
+    # resumes, is special-treated or lists.
+    candidates = sorted(
+        (fact for fact in facts if not reasons[fact.ts_code]),
         key=lambda fact: (fact.avg_amount, fact.ts_code),
     )
-    for fact in allowed[: floor_share(len(allowed), config.liquidity_drop_fraction)]:
+    for fact in candidates[: floor_share(len(candidates), config.liquidity_drop_fraction)]:
         reasons[fact.ts_code].add("illiquid")
 
     verdicts = tuple(

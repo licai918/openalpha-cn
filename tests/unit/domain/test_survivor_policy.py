@@ -79,9 +79,7 @@ def screen_of(
     ]
     verdicts += [EligibilityVerdict(ts_code=name(p), reasons=("suspended",)) for p in halted]
     verdicts += [
-        EligibilityVerdict(
-            ts_code=name(p), reasons=("suspended", "missing_factor_value", "illiquid")
-        )
+        EligibilityVerdict(ts_code=name(p), reasons=("suspended", "missing_factor_value"))
         for p in halted_and_thin
     ]
     verdicts += [
@@ -485,9 +483,9 @@ def test_the_watch_list_is_no_longer_than_the_book() -> None:
     assert len(decision.watch_list) == 4
 
 
-def test_a_long_suspension_does_not_unfreeze_a_holding_by_dragging_its_own_numbers_down() -> None:
-    # A name halted for weeks has no turnover (`illiquid`) and too few observations for its rolling
-    # factors (`missing_factor_value`): both follow from the halt, so it stays frozen.
+def test_a_long_suspension_does_not_unfreeze_a_holding_by_dragging_its_factors_down() -> None:
+    # A name halted for weeks has too few observations for its rolling factors
+    # (`missing_factor_value`): that follows from the halt, so it stays frozen.
     decision = decide_book(
         config=config(),
         screen=screen_of([0, 1, 2], halted_and_thin=(3,)),

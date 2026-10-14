@@ -35,12 +35,11 @@ from openalpha_cn.domain.survivor_book import (
 from openalpha_cn.domain.survivor_selection import selection_rule
 
 ExitReason = Literal["EXIT_ELIGIBILITY_LOST", "EXIT_SURVIVOR_LOST"]
-FREEZE_COMPATIBLE_REASONS: Final[frozenset[str]] = frozenset(
-    {"suspended", "illiquid", "missing_factor_value"}
-)
+FREEZE_COMPATIBLE_REASONS: Final[frozenset[str]] = frozenset({"suspended", "missing_factor_value"})
 """What may be wrong with a holding that is still *frozen* rather than sold. A halt is not evidence
-about the name, and a long one drags its own trailing turnover (`illiquid`) and its rolling factor
-windows (`missing_factor_value`) down with it; those follow from the suspension. Anything else
+about the name, and a long one drags its rolling factor windows (`missing_factor_value`) down with
+it; that follows from the suspension. (A halted name is not in the liquidity population, so it
+never carries `illiquid`.) Anything else
 (special treatment, a board, a listing age) is a real problem and a forced exit. The adapter must
 still hand the screen a fact row for a suspended holding (its last close, `suspended=True`): a name
 the screen never saw is sold as unassessed."""

@@ -36,7 +36,7 @@ def test_the_defaults_are_the_values_the_design_names() -> None:
     assert held.schema_version == "survivor-book-config/v1"
     assert held.holding_count == 10
     assert held.capital == Decimal("350000")
-    assert held.boards == ("main", "growth")
+    assert held.boards == ("main",)  # ChiNext is not tradable from the account (D12)
     assert held.liquidity_drop_fraction == Decimal("0.30")
     assert held.min_listing_sessions == 250
     assert held.loser_decile_count == 2
@@ -114,7 +114,7 @@ def test_the_identity_is_a_content_address_that_moves_with_every_parameter() -> 
     for changed in (
         config(holding_count=9),
         config(capital=Decimal("350001")),
-        config(boards=("main",)),
+        config(boards=("main", "growth")),
         config(cooldown_sessions=21),
         SurvivorBookConfig(seed=8),
     ):

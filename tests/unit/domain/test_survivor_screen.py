@@ -71,17 +71,30 @@ def test_each_reason_is_reported_on_its_own(overrides: dict[str, object], reason
     assert result.survivors == ()
 
 
-@pytest.mark.parametrize(
-    "overrides",
-    [
-        {"board": "growth"},
-        {"listed": 250},
-    ],
-)
-def test_the_boundary_value_of_each_reason_is_still_eligible(overrides: dict[str, object]) -> None:
-    result = screen([fact(code(1), **overrides)], isolated())  # type: ignore[arg-type]
+def test_the_listing_age_boundary_is_still_eligible() -> None:
+    result = screen([fact(code(1), listed=250)], isolated())
 
     assert result.verdicts[0].reasons == ()
+    assert result.verdicts[0].eligible
+
+
+def test_by_default_only_the_main_board_is_tradable() -> None:
+    boards = ("main", "growth", "star", "bse")
+    result = screen(
+        [fact(code(position), board=board) for position, board in enumerate(boards)], isolated()
+    )
+
+    assert [(v.ts_code, v.reasons) for v in result.verdicts] == [
+        (code(0), ()),
+        (code(1), ("board_not_allowed",)),
+        (code(2), ("board_not_allowed",)),
+        (code(3), ("board_not_allowed",)),
+    ]
+
+
+def test_a_board_the_configuration_allows_is_eligible() -> None:
+    result = screen([fact(code(1), board="growth")], isolated(boards=("main", "growth")))
+
     assert result.verdicts[0].eligible
 
 
@@ -259,12 +272,12 @@ def test_the_liquidity_cut_comes_first_and_the_loser_cut_is_taken_over_what_is_l
     assert next(v for v in result.verdicts if v.ts_code == code(12)).eligible
 
 
-def test_a_name_that_fails_a_static_reason_still_counts_in_the_liquidity_population() -> None:
-    """The design's literal reading, pinned: it moves where the 30% is cut, so it is a choice.
+def test_a_name_that_fails_a_static_reason_is_not_in_the_liquidity_population() -> None:
+    """Pinned: the 30% is cut over the names that could be held, and over nothing else.
 
-    Ten liquid-enough main-board names plus one suspended name with no turnover: eleven securities
-    are on an allowed board, floor(11 * 0.3) = 3 are cut, and the suspended one is among the
-    thinnest -- so n3, who would be cut if only the ten counted, is not.
+    Ten main-board names, thinnest first, plus a halted name with no turnover. If the halted name
+    counted, eleven names would lose floor(11 * 0.3) = 3 and the halted one would be the thinnest;
+    as it does not, ten names lose floor(10 * 0.3) = 3 and they are the three thinnest of the ten.
     """
     names = [fact(code(n), amount=str(n)) for n in range(1, 11)]
     names.append(fact(code(50), amount="0", suspended=True))
@@ -272,7 +285,28 @@ def test_a_name_that_fails_a_static_reason_still_counts_in_the_liquidity_populat
     result = screen(names, isolated(liquidity_drop_fraction=Decimal("0.30")))
 
     illiquid = {v.ts_code for v in result.verdicts if "illiquid" in v.reasons}
-    assert illiquid == {code(50), code(1), code(2)}
+    assert illiquid == {code(1), code(2), code(3)}
+    assert next(v for v in result.verdicts if v.ts_code == code(50)).reasons == ("suspended",)
+
+
+def test_the_liquidity_boundary_does_not_move_when_other_names_halt_or_are_special_treated() -> (
+    None
+):
+    base = [fact(code(n), amount=str(n)) for n in range(1, 11)]
+    crowded = [
+        *base,
+        fact(code(50), amount="0", suspended=True),
+        fact(code(51), amount="0.5", special=True),
+        fact(code(52), amount="1000", listed=3),
+        fact(code(53), amount="2", board="growth"),
+    ]
+    config = isolated(liquidity_drop_fraction=Decimal("0.30"))
+
+    thin = lambda facts: {  # noqa: E731
+        v.ts_code for v in screen(facts, config).verdicts if "illiquid" in v.reasons
+    }
+
+    assert thin(crowded) == thin(base) == {code(1), code(2), code(3)}
 
 
 def test_the_securities_listed_twice_are_named_in_the_refusal() -> None:

@@ -65,7 +65,8 @@ class SurvivorBookConfig(BaseModel):
     schema_version: Literal["survivor-book-config/v1"] = "survivor-book-config/v1"
     holding_count: int = Field(default=10, ge=1, le=50)
     capital: Decimal = Field(default=Decimal("350000"), gt=0)
-    boards: tuple[Board, ...] = ("main", "growth")
+    boards: tuple[Board, ...] = ("main",)
+    """Shanghai and Shenzhen main boards only: the account cannot trade ChiNext (decision D12)."""
     liquidity_drop_fraction: Decimal = Field(default=Decimal("0.30"), ge=0, lt=1)
     min_listing_sessions: int = Field(default=250, ge=0)
     loser_decile_count: int = Field(default=2, ge=0, le=9)
