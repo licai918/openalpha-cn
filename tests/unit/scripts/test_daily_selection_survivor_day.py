@@ -2157,3 +2157,108 @@ def test_the_survivor_day_resolves_the_registered_transform_and_its_four_builds(
         ("processed", "cross_section_standard/v1", None)
     }
     assert FACTOR_TRANSFORMS.get(survivor.adapter.transform).qualified_key == builds[0].transform
+
+
+# --- an evening and the call auction it plans for (the D5 joint review, Important 1) ---------
+
+
+def _passed(day: date) -> str:
+    """The line the ORDERS block prints under its header when the run that printed the plan was
+    made after the call auction of `day`, the session the orders are for."""
+    return (
+        f"  the call auction of {day.isoformat()} has passed (it began {day.isoformat()}"
+        "T09:15:00+08:00): these orders were for it, and this run was made after it -- the paper "
+        "book fills them at that open whether or not they were placed"
+    )
+
+
+def test_an_evening_not_committed_by_the_next_call_auction_is_refused_and_settled_next_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """The review's probe: 6 April pinned at 18:30, its record filed at step 7 and its paper book
+    refused. Run again on 7 April at 10:00 -- past the call auction its orders were for, before the
+    next panel update -- the evening is not decided: step 8 refuses by name before anything is
+    written, the day files no `result`, and 7 April's run settles 6 April without a decision
+    before its own evening."""
+    world = _world(tmp_path, monkeypatch, seeded)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(strategy_survivor_book, "evening", _refused_evening)
+        _code, _out, err = _run(world, capsys)
+    assert err[0] == INJECTED, err
+    paper = _files(world.runtime / "paper")
+    records = _records(world)
+
+    code, out, err = _run(world, capsys, clock=after_the_auction(DAY))
+
+    assert code == 1
+    assert err[0].startswith("step 8 (paper book) failed: ")
+    assert "2026-04-07T09:15:00+08:00" in err[0]
+    assert "the call auction of the next session has passed" in err[0]
+    assert "nothing was decided or written" in err[0]
+    assert "the next session's run settles 2026-04-06 without a decision" in err[0]
+    assert err[1:] == [NO_REQUEST]
+    journal = _journal(world)
+    assert "result" not in journal and "paper" not in journal
+    assert DAY not in _snapshots(world).sessions()
+    assert _files(world.runtime / "paper") == paper
+    assert _records(world) == records
+    shown = json.loads(out)
+    assert (shown["paper"], shown["paper_skipped"]["reason"]) == (None, err[0])
+
+    nxt = _completed(world, capsys, NEXT)
+
+    assert [(day["session"], day["outcome"]) for day in nxt["paper"]["catch_ups"]] == [
+        (DAY.isoformat(), "created")
+    ]
+    assert nxt["paper"]["outcome"] == "created"
+    assert _snapshot(world, DAY).pending_orders == ()
+
+
+def test_an_evening_completed_or_printed_after_the_call_auction_it_planned_for_says_so(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """A committed evening completed the next morning -- its `result` lost to a power cut -- and
+    the same plan printed again later: the ORDERS block says under its header that the call
+    auction of 7 April, the session the orders were for, has passed. A plan printed before it
+    says nothing of the kind; the line is the printing run's, never filed."""
+    world = _world(tmp_path, monkeypatch, seeded)
+    with pytest.MonkeyPatch.context() as patch:
+        _cut_at_the_result(patch)
+        code, _out, _err = _run(world, capsys)
+    assert code == 1
+    late = after_the_auction(DAY)
+
+    code, out, err = _run(world, capsys, clock=late, json_output=False)
+
+    assert code == 0, err
+    lines = out.splitlines()
+    (header,) = [line for line in lines if line.startswith("ORDERS FOR THE OPEN OF D+1")]
+    assert ", 2026-04-07 -- trade list " in header
+    assert lines[lines.index(header) + 1] == _passed(NEXT)
+    assert lines[lines.index(header) + 2] == REFERENCE_NOTE
+    assert "after_the_call_auction" not in json.dumps(_journal(world))
+
+    code, out, _err = _run(world, capsys, clock=late + timedelta(days=2), json_output=False)
+
+    assert code == 0
+    assert REPRINTED in out.splitlines()
+    assert _passed(NEXT) in out.splitlines()
+    code, shown, _err = _run(world, capsys, clock=late)
+    assert json.loads(shown)["this_run"] == {
+        "requests": {},
+        "request_count": 0,
+        "wrote": False,
+        "after_the_call_auction": {
+            "session": NEXT.isoformat(),
+            "call_auction": "2026-04-07T09:15:00+08:00",
+        },
+    }
+    code, out, _err = _run(world, capsys, clock=RUN_CLOCK, json_output=False)
+    assert code == 0
+    assert not any("has passed" in line for line in out.splitlines())

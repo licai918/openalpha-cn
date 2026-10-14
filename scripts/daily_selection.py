@@ -3509,6 +3509,10 @@ class SurvivorDay:
     settle_only: bool
     """The pinned `as_of` is at or after 09:15 of the next session: no record was filed, and no
     decision may be made (decision 2)."""
+    cutoff: datetime
+    """09:15 of the next session (`registration_cutoff`), the call auction tonight's orders are
+    for: once this run's clock has reached it, step 8 decides no evening it has not committed
+    already, and a plan printed after it says so."""
     committed: bool
     """The session's snapshot is held: an earlier run of the day committed its evening (or its
     settlement alone) and stopped before its journal was finished. This run completes it; steps
@@ -4070,7 +4074,11 @@ def _survivor_paper_and_summary(
     **8. Paper book** (`_run_paper_book`). Every session the book is missing before the day's is
     caught up without a decision, then the day's evening is run -- or, when the journal-pinned
     `as_of` is at or after 09:15 of the next session, the session is settled alone (decision 2;
-    no record was filed at step 7). Each catch-up session is journalled as it commits
+    no record was filed at step 7). An evening not committed yet is not decided once THIS run's
+    clock has reached that call auction -- the one its orders are for: refused by name before
+    anything is written, and the next session's run settles the session without a decision (D5
+    joint review, Important 1); a committed one is completed whatever the clock, writing nothing
+    (C3 review, rule 1). Each catch-up session is journalled as it commits
     (`catch_ups`, in `strategy_survivor_summary.catch_up_entry`'s form), so a run that stops
     later keeps what it settled. The paper book's refusals are mapped by class, never by message
     -- `SurvivorDayError` (a stalled catch-up journals the sessions it settled first),
@@ -4087,7 +4095,9 @@ def _survivor_paper_and_summary(
     halt start from the earlier sessions' journals -- with the registration, panel, factor and
     prediction blocks merged in, filed as the journal's `result` beside the `paper` stage only
     now, for a completed evening or a completed settle-only day. `this_run` is merged into what is
-    returned, not filed: a complete journal is printed again with no request and no write.
+    returned, not filed: a complete journal is printed again with no request and no write. A plan
+    completed or printed again at or after the call auction it is for carries
+    `after_the_call_auction` in `this_run`, and its ORDERS block says so.
     """
     from openalpha_cn import strategy_survivor_book as paper_book
     from openalpha_cn import strategy_survivor_summary as summary
@@ -4113,6 +4123,9 @@ def _survivor_paper_and_summary(
         return refusal
 
     with _step("paper book", steps=SURVIVOR_STEPS):
+        now = clock()
+        if not day.committed and not day.settle_only and now >= day.cutoff:
+            raise refused(_too_late_to_decide(day, now))
         try:
             ran = _run_paper_book(day, on_settled=lambda result: file_catch_ups((result,)))
         except paper_book.SurvivorDayError as error:
@@ -4152,7 +4165,8 @@ def _survivor_paper_and_summary(
             else evening.result.snapshot.snapshot_id,
         }
         write_journal(day.journal_path, {**journal, "paper": paper, "result": result})
-    return {**result, "this_run": _this_run(counts, wrote=True)}
+    after = None if evening is None else _after_the_call_auction(day.cutoff, clock())
+    return {**result, "this_run": _this_run(counts, wrote=True, after=after)}
 
 
 def _run_paper_book(
@@ -4271,6 +4285,33 @@ def _filed_catch_ups(
     return [by_index[index] for index in sorted(by_index)]
 
 
+def _too_late_to_decide(day: SurvivorDay, now: datetime) -> str:
+    """Why step 8 decides no evening it has not committed once this run's clock has reached the
+    call auction the evening's orders are for (D5 joint review, Important 1): orders decided now
+    could not be placed at that open, and the paper book would fill them there all the same."""
+    session = day.session.isoformat()
+    return (
+        f"the evening of {session} plans orders for the open of "
+        f"{day.cutoff.astimezone(SHANGHAI).date().isoformat()}, whose call auction began "
+        f"{day.cutoff.isoformat()}, and it is {now.isoformat()}: the call auction of the next "
+        "session has passed, and nothing was decided or written -- orders decided now could not "
+        "be placed at the open they are for, and the record filed at step 7 stands; the next "
+        f"session's run settles {session} without a decision"
+    )
+
+
+def _after_the_call_auction(cutoff: datetime, now: datetime) -> dict[str, str] | None:
+    """`this_run`'s note that the run printing a plan was made at or after `cutoff`, the call
+    auction of the session the plan's orders are for -- `None` before it. The printing run's fact,
+    never filed: `strategy_survivor_summary` prints it under the ORDERS header."""
+    if now < cutoff:
+        return None
+    return {
+        "session": cutoff.astimezone(SHANGHAI).date().isoformat(),
+        "call_auction": cutoff.isoformat(),
+    }
+
+
 def _settled_only(day: SurvivorDay) -> str:
     return (
         f"the day's pinned clock {day.as_of.isoformat()} is at or after 09:15 of the next "
@@ -4345,12 +4386,17 @@ def _filed_result(path: Path) -> Mapping[str, Any] | None:
     return result if isinstance(result, dict) else None
 
 
-def _this_run(counts: Counter[str], *, wrote: bool) -> dict[str, Any]:
-    return {
+def _this_run(
+    counts: Counter[str], *, wrote: bool, after: Mapping[str, str] | None = None
+) -> dict[str, Any]:
+    run: dict[str, Any] = {
         "requests": dict(sorted(counts.items())) if wrote else {},
         "request_count": sum(counts.values()) if wrote else 0,
         "wrote": wrote,
     }
+    if after is not None:
+        run["after_the_call_auction"] = dict(after)
+    return run
 
 
 def _run_survivor_day(
@@ -4399,10 +4445,11 @@ def _run_survivor_day(
        reaches step 8 with no record filed. One pinned before it, run when the clock is past it,
        is refused here before anything is written.
     8.-9. **The paper book and the summary** (`_survivor_paper_and_summary`): the missed sessions
-       caught up and journalled one by one, the evening (or the settlement alone), and the
-       document filed as the journal's `result` -- only for a day that completed. No refused day
-       files a `result`; one refused at step 8 is printed as far as it got, any other prints its
-       refusal and its requests only.
+       caught up and journalled one by one, the evening (or the settlement alone) -- an evening not
+       committed is refused once this run's clock has reached the next session's call auction --
+       and the document filed as the journal's `result` -- only for a day that completed. No
+       refused day files a `result`; one refused at step 8 is printed as far as it got, any other
+       prints its refusal and its requests only.
 
     **The P6 day's options here.** `--full-update` and `--top` have no survivor meaning and are
     refused before anything is made (exit 2). `--dataset` replaces the targets as on the P6 day
@@ -4472,7 +4519,15 @@ def _survivor_day(
                 steps=SURVIVOR_STEPS,
             )
         if journal is not None and survivor_journal_complete(journal):
-            return {**journal["result"], "this_run": _this_run(counts, wrote=False)}
+            filed = journal["result"]
+            after = None
+            if filed.get("paper") is not None:
+                # A plan printed again after the call auction it is for says so (D5 joint review,
+                # Important 1): the stored calendar is read, nothing is fetched or written.
+                pinned = datetime.fromisoformat(journal["as_of"])
+                outcomes = _outcome_calendar(store, exchange, session, pinned)
+                after = _after_the_call_auction(registration_cutoff(outcomes, session), clock())
+            return {**filed, "this_run": _this_run(counts, wrote=False, after=after)}
         storage = build_storage(runtime_dir=runtime_dir, clock=clock)
         book, held_now, held_from_now = _held_now(
             storage, registration=registration, survivor=survivor, lock=lock
@@ -4660,6 +4715,7 @@ def _survivor_day(
         factors=factors,
         prediction=prediction,
         settle_only=settle_only,
+        cutoff=cutoff,
         committed=committed,
         read_as_of=read_as_of,
     )

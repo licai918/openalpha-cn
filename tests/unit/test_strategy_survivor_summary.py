@@ -1740,6 +1740,34 @@ def test_the_open_the_orders_are_for_is_an_ordinal_when_the_calendar_has_not_rea
     assert orders_header(s2, "session 3") in lines
 
 
+def test_orders_printed_after_the_call_auction_they_were_for_say_so_under_the_header(
+    s2: Day, frame: Frame
+) -> None:
+    """The daily command says, in `this_run`, when the run that prints a plan was made at or after
+    the call auction the plan is for (D5 joint review, Important 1): the header is then followed
+    by the line that says so, with the session's date -- the clock's fact, never the document's,
+    so nothing filed carries it. A day with no evening has no plan to say it of."""
+    passed = {"session": "2021-03-04", "call_auction": "2021-03-04T09:15:00+08:00"}
+    run = {"requests": {}, "request_count": 0, "wrote": False, "after_the_call_auction": passed}
+    document = document_of(s2)
+
+    lines = summary_lines({**document, "this_run": run})
+
+    header = lines.index(orders_header(s2, "2021-03-04"))
+    assert lines[header + 1] == (
+        "  the call auction of 2021-03-04 has passed (it began 2021-03-04T09:15:00+08:00): these "
+        "orders were for it, and this run was made after it -- the paper book fills them at that "
+        "open whether or not they were placed"
+    )
+    assert lines[header + 2] == REFERENCE_NOTE
+    before = summary_lines({**document, "this_run": {**run, "after_the_call_auction": None}})
+    assert not any("has passed" in line for line in before)
+    assert not any("has passed" in line for line in summary_lines(document))
+    assert not any(
+        "has passed" in line for line in summary_lines({**frame_document(frame), "this_run": run})
+    )
+
+
 def test_a_sale_is_the_whole_position_with_the_ledger_quantity_beside_the_real_close(
     s2: Day,
 ) -> None:

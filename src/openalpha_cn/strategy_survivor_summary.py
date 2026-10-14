@@ -83,7 +83,12 @@ after the prediction, as the P6 day prints its factor catch-up, and nothing when
 Real closes in the ORDERS block are references, not limit prices: the paper book fills at the
 open, and the block's header says so once. Its header also carries the trade list's id and whether
 the run committed the evening (`created`) or found it settled and derived it again
-(`unchanged`), so a printed plan can be tied to its journal entry.
+(`unchanged`), so a printed plan can be tied to its journal entry. When the caller's `this_run`
+says the run printing the plan was made at or after the call auction of the session the orders
+are for (`after_the_call_auction`: that session's date and the auction's instant -- a committed
+evening completed, or a plan printed again, the next morning), the header is followed by a line
+that says so: the paper book fills those orders at that open whether or not they were placed. It
+is the printing run's fact, so the document never carries it.
 """
 
 from __future__ import annotations
@@ -780,7 +785,9 @@ def summary_lines(result: Mapping[str, Any]) -> list[str]:
     if paper is not None:
         lines += _settled_lines(paper["settled"])
         lines += _position_lines(paper["book"]["holdings"])
-    lines += _orders_lines(paper, skipped)
+    lines += _orders_lines(
+        paper, skipped, passed=(result.get("this_run") or {}).get("after_the_call_auction")
+    )
     if paper is not None:
         lines += _carried_lines(paper)
         lines += _draw_lines(paper)
@@ -989,7 +996,15 @@ def _carried_line(item: Mapping[str, Any]) -> str:
     )
 
 
-def _orders_lines(paper: Mapping[str, Any] | None, skipped: Mapping[str, Any]) -> list[str]:
+def _orders_lines(
+    paper: Mapping[str, Any] | None,
+    skipped: Mapping[str, Any],
+    *,
+    passed: Mapping[str, Any] | None,
+) -> list[str]:
+    """The ORDERS block. `passed` is the caller's note that the run printing the plan was made at
+    or after the call auction of the session the orders are for (`this_run`'s
+    `after_the_call_auction`): the header is then followed by the line that says so."""
     if paper is None:
         # "None planned tonight" is not "nothing is live": orders from earlier evenings -- a
         # carried sale above all, which never expires -- stay in the book and are retried at the
@@ -1007,8 +1022,18 @@ def _orders_lines(paper: Mapping[str, Any] | None, skipped: Mapping[str, Any]) -
         f"; {_plural(carried, 'carried order')} below" if carried else ""
     )
     state = _EVENING_STATES[paper["outcome"]]
+    late = (
+        []
+        if not passed
+        else [
+            f"  the call auction of {passed['session']} has passed (it began "
+            f"{passed['call_auction']}): these orders were for it, and this run was made after it "
+            "-- the paper book fills them at that open whether or not they were placed"
+        ]
+    )
     return [
         f"{_ORDERS_HEADER}, {when} -- trade list {paper['trade_list']['trade_list_id']}, {state}",
+        *late,
         _REFERENCE_NOTE,
         *(_order_line(item) for item in planned),
         *([nothing] if not planned else []),
