@@ -633,7 +633,10 @@ def test_across_new_year_the_survivor_day_serves_every_read_of_build_facts_day(
 
     assert january["caught_up"] == []
     assert read_in_december == read_in_january == READ_BY_BUILD_FACTS_DAY
-    for dataset in read_in_january:
+    # The registry is the one dataset that needs no 2027 partition: a lifecycle year exists only
+    # once a listing or delisting falls in it, and `build_facts_day` reads the newest stored one
+    # (`survivor_facts._registry_year`); this fixture happens to plant a 4 January delisting.
+    for dataset in read_in_january - {STOCK_BASIC_DATASET}:
         assert 2027 in store.panel.registered_years(dataset), dataset
     assert _years_asked(store, NAMECHANGE_DATASET) == ["2027", "2026"]
     # T6-T7's first session of a year (2.2, C1) is 11; January asks the year before's names too.
