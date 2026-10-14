@@ -31,6 +31,7 @@ import hashlib
 import importlib
 import itertools
 import json
+import shlex
 import shutil
 import sys
 import tempfile
@@ -2048,6 +2049,9 @@ def test_a_journal_that_is_not_the_survivor_days_is_refused_by_name_before_any_r
     assert code == 1
     assert err[0].startswith("step 9 (summary) failed:")
     assert named in err[0]
+    # What to do with it, not only that it is left as it is (D5 joint review, Minor 8).
+    assert "It is left as it is: move it aside" in err[0]
+    assert "run the day again" in err[0]
     assert err[1:] == [NO_REQUEST]
 
 
@@ -2067,6 +2071,8 @@ def test_a_journal_that_is_not_json_is_refused_by_name(
     assert code == 1
     assert err[0].startswith("step 9 (summary) failed:")
     assert "openalpha-daily-survivor/v1" in err[0]
+    assert "It is left as it is: move it aside" in err[0]
+    assert "it may be this day's own journal, damaged" in err[0]
     assert err[1:] == [NO_REQUEST]
 
 
@@ -2687,3 +2693,35 @@ def test_a_settle_only_day_whose_journal_is_gone_is_completed_again_after_the_au
         (DAY.isoformat(), "unchanged")
     ]
     assert _files(world.runtime / "paper") == paper
+
+
+def test_an_epoch_whose_years_calendar_is_not_stored_is_refused_with_the_build_that_stores_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """Minor 8: a first run in early January whose epoch is the December session before it finds
+    the epoch's year without a stored calendar. The refusal prints the `panel build` that stores
+    it -- `trade_cal` alone, for the epoch's year, pinned at the epoch's publication -- as step 2's
+    own calendar refusal does, having fetched nothing."""
+    world = _world(tmp_path, monkeypatch, seeded, config=survivor_config(epoch=date(2025, 12, 31)))
+
+    code, _out, err = _run(world, capsys)
+
+    assert code == 1
+    assert err[0].startswith(
+        "step 2 (panel update) failed: the SSE calendar of 2025, on which the registered epoch "
+        "2025-12-31 is checked to be an open session, is not stored"
+    )
+    assert err[1] == "  " + " ".join(
+        [
+            "openalpha panel build --runtime-dir",
+            shlex.quote(str(world.runtime)),
+            "--year 2025 --as-of 2025-12-31T08:30:00+00:00 --exchange SSE --dataset trade_cal",
+        ]
+    )
+    assert err[2] == "then rerun this command"
+    assert err[3:] == [NO_REQUEST]
+    assert world.market.payloads == []
+    assert not (world.runtime / "daily_survivor").exists()

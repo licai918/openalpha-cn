@@ -3555,7 +3555,7 @@ def read_survivor_journal(path: Path) -> dict[str, Any] | None:
     Its own reader, not P6's `read_journal`, which names P6's summary step (step 8 there, 9 here)
     and would read a P6 journal as the day's. A file that is not UTF-8 JSON, does not hold a
     mapping, is a P6 journal or is of another schema is refused by name -- step `summary`,
-    numbered in `SURVIVOR_STEPS` -- and left as it is."""
+    numbered in `SURVIVOR_STEPS` -- and left as it is, with what to do (`_JOURNAL_LEFT`)."""
     if not path.is_file():
         return None
     try:
@@ -3564,14 +3564,14 @@ def read_survivor_journal(path: Path) -> dict[str, Any] | None:
         raise StepFailedError(
             "summary",
             f"{path} is not a {SURVIVOR_JOURNAL_SCHEMA} journal: it is not UTF-8 JSON "
-            f"({type(error).__name__}: {error}). It is left as it is",
+            f"({type(error).__name__}: {error}). {_JOURNAL_LEFT}",
             steps=SURVIVOR_STEPS,
         ) from error
     if not isinstance(body, dict):
         raise StepFailedError(
             "summary",
             f"{path} is not a {SURVIVOR_JOURNAL_SCHEMA} journal: it holds a "
-            f"{type(body).__name__}, not a mapping. It is left as it is",
+            f"{type(body).__name__}, not a mapping. {_JOURNAL_LEFT}",
             steps=SURVIVOR_STEPS,
         )
     schema = body.get("schema")
@@ -3581,17 +3581,29 @@ def read_survivor_journal(path: Path) -> dict[str, Any] | None:
             f"{path} is a P6 journal ({DAILY_SELECTION_SCHEMA}), not the survivor day's "
             f"{SURVIVOR_JOURNAL_SCHEMA}: the two days keep their journals apart "
             f"({JOURNAL_DIRECTORY} and {SURVIVOR_JOURNAL_DIRECTORY}), so it was put there by hand. "
-            "It is left as it is",
+            f"{_JOURNAL_LEFT}",
             steps=SURVIVOR_STEPS,
         )
     if schema != SURVIVOR_JOURNAL_SCHEMA:
         raise StepFailedError(
             "summary",
-            f"{path} is not a {SURVIVOR_JOURNAL_SCHEMA} journal: its schema is {schema!r}. It is "
-            "left as it is",
+            f"{path} is not a {SURVIVOR_JOURNAL_SCHEMA} journal: its schema is {schema!r}. "
+            f"{_JOURNAL_LEFT}",
             steps=SURVIVOR_STEPS,
         )
     return body
+
+
+_JOURNAL_LEFT: Final[str] = (
+    "It is left as it is: move it aside -- keep it, it may be this day's own journal, damaged -- "
+    "and run the day again, which then pins a journal of its own (should the paper book hold "
+    "this day's evening already and the next session's call auction have passed, step 5 names "
+    "the --as-of to run it with)"
+)
+"""What a survivor journal refused by `read_survivor_journal` says to do (D5 joint review, Minor
+8): never rewritten or removed by the day, and set aside by the user, after which the day pins
+anew -- or, over a committed evening past its call auction, is told how
+(`_refuse_a_lost_journal`)."""
 
 
 def survivor_journal_complete(journal: Mapping[str, Any] | None) -> bool:
@@ -3664,11 +3676,20 @@ def _survivor_session(runtime_dir: Path, store: PanelStore, exchange: str, as_of
 
 
 def _admit_epoch(
-    store: PanelStore, *, epoch: date, session: date, exchange: str, as_of: datetime
+    store: PanelStore,
+    *,
+    epoch: date,
+    session: date,
+    exchange: str,
+    as_of: datetime,
+    runtime_dir: Path,
 ) -> None:
     """Refuse, as a registration the day cannot run (exit 2), an epoch after the session -- P6's
     `session < anchor` -- and one the stored calendar does not open: the adapter reader admits
-    any date, a Saturday included, and the paper book counts its sessions from its epoch."""
+    any date, a Saturday included, and the paper book counts its sessions from its epoch. An
+    epoch whose year's calendar is not stored -- a first run in early January, its epoch the
+    December session before -- is refused with the `panel build` that stores it (D5 joint
+    review, Minor 8), as step 2's own calendar refusal is (`_calendar_refusal`)."""
     if session < epoch:
         raise StepFailedError(
             "registration",
@@ -3679,11 +3700,27 @@ def _admit_epoch(
         )
     calendar = _stored_calendar(store, exchange, (epoch.year,), as_of)
     if calendar is None:
+        build = _panel_build_command(
+            runtime_dir,
+            year=epoch.year,
+            through=epoch,
+            exchange=exchange,
+            targets=(TRADING_CALENDAR_DATASET,),
+            incremental=False,
+            session_scoped=False,
+        )
         raise StepFailedError(
             "panel update",
-            f"the {exchange} calendar of {epoch.year}, on which the registered epoch "
-            f"{epoch.isoformat()} is checked to be an open session, is not stored or cannot be "
-            "read",
+            "\n".join(
+                [
+                    f"the {exchange} calendar of {epoch.year}, on which the registered epoch "
+                    f"{epoch.isoformat()} is checked to be an open session, is not stored or "
+                    "cannot be read; nothing was fetched. Store it, pinned at the epoch's "
+                    "publication, with:",
+                    "  " + shlex.join(build),
+                    "then rerun this command",
+                ]
+            ),
             steps=SURVIVOR_STEPS,
         )
     if epoch not in calendar.trading_days:
@@ -4676,7 +4713,14 @@ def _survivor_day(
 
     with _step("panel update", steps=SURVIVOR_STEPS), counted_transport(counts):
         session = _survivor_session(runtime_dir, store, exchange, first_as_of)
-        _admit_epoch(store, epoch=epoch, session=session, exchange=exchange, as_of=first_as_of)
+        _admit_epoch(
+            store,
+            epoch=epoch,
+            session=session,
+            exchange=exchange,
+            as_of=first_as_of,
+            runtime_dir=runtime_dir,
+        )
         path = survivor_journal_directory(runtime_dir, registration) / f"{session.isoformat()}.json"
         journal = read_survivor_journal(path)
         if journal is not None and journal.get("registration", {}).get("sha256") not in (
