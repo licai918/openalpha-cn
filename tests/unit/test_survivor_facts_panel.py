@@ -36,6 +36,10 @@ higher-is-better, so the orientation is visible in both directions.
 halts, a rename announced on 2026-04-13, a listing on 2026-04-15 and a factor build on
 2026-04-13 -- and every expectation below is read off it, so each one is also a look-ahead
 check. `TRIMMED` is the same panel cut at the signal day.
+
+`EXTENDED` is `FULL` with the securities of `EXTRA` added -- shapes the frame's own rows must not
+change under, each built by the same rules, with `j` counted on after `FRAME`'s -- so that the
+tests that need them leave every count above as it is.
 """
 
 from __future__ import annotations
@@ -230,6 +234,13 @@ GAPPED_SESSIONS: Final[frozenset[int]] = frozenset({62, 63})
 DELISTED_ON: Final[Mapping[str, int]] = MappingProxyType({DELISTED_WITH_BARS: 60, DELISTED: 65})
 """The session each delisted security's registry delisting row is dated (exclusive)."""
 
+GROWTH_FIVE_PERCENT: Final[str] = "300602.SZ"
+"""`EXTENDED` only: ChiNext, with a 5% band on every session. ChiNext has not published that
+band since its 2020 reform; it is synthetic, there so that "the band is read on the main board
+alone" has a 5% band off the main board to ignore."""
+EXTRA: Final[tuple[str, ...]] = (GROWTH_FIVE_PERCENT,)
+"""The securities only `EXTENDED` holds, in the order they were added: `j` = 44, 45, ..."""
+
 FACTORS: Final[tuple[str, ...]] = (
     "reversal_1d/v1",
     "reversal_5_sessions/v1",
@@ -258,7 +269,7 @@ COMMIT: Final[str] = "abcdef1"
 
 
 def position(code: str) -> int:
-    return FRAME.index(code)
+    return (*FRAME, *EXTRA).index(code)
 
 
 def instant(index: int) -> datetime:
@@ -300,10 +311,18 @@ class Variant:
     """Per build session, the securities whose `reversal_1d` evaluator answers `None`."""
     unbuilt: frozenset[tuple[int, int]] = frozenset()
     """`(factor, session)` pairs of `builds` that are not stored: one factor's build missing."""
+    extra: tuple[str, ...] = ()
+    """Securities of `EXTRA` stored besides `FRAME`'s."""
 
 
 FULL: Final[Variant] = Variant()
 TRIMMED: Final[Variant] = Variant(last=SIGNAL_INDEX, builds=(68, SIGNAL_INDEX))
+EXTENDED: Final[Variant] = Variant(extra=EXTRA)
+
+
+def stored_securities(variant: Variant) -> tuple[str, ...]:
+    """Every security the variant's panel holds, ascending by code."""
+    return tuple(sorted((*SECURITIES, *variant.extra)))
 
 
 def scheduled(code: str, index: int) -> bool:
@@ -346,7 +365,7 @@ def halt_rows(variant: Variant) -> dict[tuple[str, int], str | None]:
         rows.update(
             {
                 (code, SIGNAL_INDEX): None
-                for code in SECURITIES
+                for code in stored_securities(variant)
                 if code != ONLY_TRADER and scheduled(code, SIGNAL_INDEX)
             }
         )
@@ -357,7 +376,7 @@ def halt_rows(variant: Variant) -> dict[tuple[str, int], str | None]:
 
 
 def band_ratio(code: str, index: int) -> float:
-    if code == ST_BY_BAND or (code == ST_BY_NAME and index >= 20):
+    if code in (ST_BY_BAND, GROWTH_FIVE_PERCENT) or (code == ST_BY_NAME and index >= 20):
         return 0.05
     if code == ST_PENDING and index >= 70:
         return 0.05
@@ -382,7 +401,11 @@ def listing_day(code: str) -> date:
 
 def lifecycle_rows(variant: Variant) -> list[tuple[str, str, date]]:
     """`(code, lifecycle event, day)` for every registry row the variant stores."""
-    rows = [(code, LISTING_EVENT, listing_day(code)) for code in SECURITIES if code != UNREGISTERED]
+    rows = [
+        (code, LISTING_EVENT, listing_day(code))
+        for code in stored_securities(variant)
+        if code != UNREGISTERED
+    ]
     rows.extend(
         (code, DELISTING_EVENT, SESSIONS[index])
         for code, index in sorted(DELISTED_ON.items())
@@ -438,10 +461,11 @@ def build_panel(variant: Variant) -> GeneratedPanel:
     base = generate_panel(window=(SESSIONS[0], SESSIONS[-1]))
     assert base.sessions == SESSIONS, "the 2026 fixture calendar is open on every weekday here"
     sessions = SESSIONS[: variant.last + 1]
+    securities = stored_securities(variant)
     priced = [
         (index, code)
         for index in range(len(sessions))
-        for code in SECURITIES
+        for code in securities
         if trades(code, index, variant)
     ]
     available = [published_time(SESSIONS[index]) for index, _ in priced]
@@ -489,7 +513,7 @@ def build_panel(variant: Variant) -> GeneratedPanel:
     banded = [
         (index, code)
         for index in range(len(sessions))
-        for code in SECURITIES
+        for code in securities
         if banded_on(code, index)
     ]
     band_available = [published_time(SESSIONS[index]) for index, _ in banded]
@@ -596,7 +620,7 @@ def build_panel(variant: Variant) -> GeneratedPanel:
     )
     return dataclasses.replace(
         base,
-        securities=SECURITIES,
+        securities=securities,
         sessions=sessions,
         batches=MappingProxyType(
             {
@@ -626,12 +650,13 @@ def factor_build(
             return None
         return raw_value(factor, window.subject, index)
 
+    securities = stored_securities(variant)
     return compute_factor(
         store,
         definition,
         as_of=at,
-        subjects=SECURITIES,
-        universe=frozenset(SECURITIES),
+        subjects=securities,
+        universe=frozenset(securities),
         requirements={
             DAILY_DATASET: daily_requirement(
                 panel.calendar(), years=(2026,), as_of=at, max_staleness=timedelta(days=5)
@@ -726,6 +751,24 @@ OUTAGE: Final[Variant] = Variant(last=SIGNAL_INDEX, outage=True, builds=(SIGNAL_
 @pytest.fixture(scope="module")
 def outage_store(tmp_path_factory: pytest.TempPathFactory) -> PanelStore:
     return write_panel(tmp_path_factory.mktemp("outage"), OUTAGE)
+
+
+@pytest.fixture(scope="module")
+def extended_store(tmp_path_factory: pytest.TempPathFactory) -> PanelStore:
+    return write_panel(tmp_path_factory.mktemp("extended"), EXTENDED)
+
+
+NOTHING_ADMITTED: Final[Variant] = Variant(
+    last=SIGNAL_INDEX,
+    builds=(68, SIGNAL_INDEX),
+    undefined=MappingProxyType({SIGNAL_INDEX: frozenset(SECURITIES)}),
+)
+"""`reversal_1d` is built at the signal day's instant and answers `None` for every security."""
+
+
+@pytest.fixture(scope="module")
+def nothing_admitted_store(tmp_path_factory: pytest.TempPathFactory) -> PanelStore:
+    return write_panel(tmp_path_factory.mktemp("nothing-admitted"), NOTHING_ADMITTED)
 
 
 # --- the narrow read: one build by its instant (`panel_factors`) ----------------------------------
@@ -953,7 +996,9 @@ def test_a_302_code_is_chinext_so_a_main_board_book_refuses_its_board(
     # Review Important 2. `302132.SZ` is ChiNext (`domain/price_limits.py`'s measurement, T3 7
     # item 8). Filed under the main board, a main-board-only book would have no reason to refuse
     # it and could buy it. As ChiNext it is refused for its board alone (old enough, trading,
-    # every value), and the 5% band union -- a main-board rule -- does not look at its band.
+    # every value). Its band is ChiNext's 20%, so `special_treatment is False` would hold on
+    # either board and says nothing about the band rule; that the 5% band is read on the main
+    # board alone is the next test's, on a ChiNext security whose band is 5%.
     day = read_day(full_store)
     fact = {fact.ts_code: fact for fact in day.facts}[CHINEXT_302]
     verdict = {verdict.ts_code: verdict for verdict in screen(day.facts, CONFIG).verdicts}[
@@ -964,6 +1009,33 @@ def test_a_302_code_is_chinext_so_a_main_board_book_refuses_its_board(
     assert fact.board == "growth"
     assert fact.special_treatment is False
     assert verdict.reasons == ("board_not_allowed",)
+
+
+def test_a_five_percent_band_off_the_main_board_does_not_make_a_security_st(
+    extended_store: PanelStore,
+) -> None:
+    # Re-review Minor 4. GROWTH_FIVE_PERCENT is ChiNext with a 5% band on every session and no
+    # rename on file; ST_BY_BAND is main board with the same band and no rename either. Only the
+    # main-board one is ST: off the main board the band is no independent witness (T3 2.2), so
+    # the adapter does not offer it to `name_status` at all.
+    day = read_day(extended_store)
+    facts = {fact.ts_code: fact for fact in day.facts}
+
+    assert facts[GROWTH_FIVE_PERCENT].board == "growth"
+    assert facts[GROWTH_FIVE_PERCENT].special_treatment is False
+    assert facts[ST_BY_BAND].special_treatment is True
+    assert day.notes.st_by_band == 1  # ST_BY_BAND alone
+
+
+def test_the_extended_panels_extra_securities_change_no_row_of_the_frame(
+    full_store: PanelStore, extended_store: PanelStore
+) -> None:
+    # What the `EXTENDED` tests say about the frame's own securities holds for `FULL`'s rows:
+    # read evening or later, every row of a `FRAME` security is the same in both panels.
+    for as_of in (evening(SIGNAL_INDEX), LATER):
+        full = read_day(full_store, as_of=as_of).facts
+        extended = read_day(extended_store, as_of=as_of).facts
+        assert tuple(fact for fact in extended if fact.ts_code in FRAME) == full
 
 
 def test_a_registry_code_not_listed_on_the_day_has_no_row_even_with_a_bar(
@@ -1156,6 +1228,36 @@ def test_a_held_code_that_never_had_a_bar_has_no_row_and_is_counted(
     assert day.notes.no_bar_within_carry == 1
 
 
+def test_holding_a_code_the_registry_does_not_list_on_the_day_gives_it_no_row(
+    full_store: PanelStore,
+) -> None:
+    # Re-review Minor 1. Holding a code unbounds its look-back; it does not bring a code the
+    # registry does not list on the day into the universe. DELISTED's last bar (session 64) is
+    # in reach and DELISTED_WITH_BARS has one today, yet held, neither gets a row -- a row would
+    # freeze a delisted holding instead of selling it -- and the day is the unheld day's.
+    unheld = read_day(full_store)
+    day = read_day(full_store, held=(DELISTED, DELISTED_WITH_BARS))
+
+    assert {DELISTED, DELISTED_WITH_BARS}.isdisjoint(fact.ts_code for fact in day.facts)
+    assert day.facts == unheld.facts
+    assert day.notes == unheld.notes
+
+
+def test_holding_one_code_leaves_every_other_codes_carry_bound_in_place(
+    full_store: PanelStore,
+) -> None:
+    # Re-review Minor 2. NEVER_TRADED is held, HALTED is not. With a bound of 2 sessions
+    # HALTED's last bar (three sessions back) is out of reach whether or not something else is
+    # held: holding a code unbounds that code's look-back and no other's.
+    unheld = read_day(full_store, max_carry_sessions=2)
+    day = read_day(full_store, max_carry_sessions=2, held=(NEVER_TRADED,))
+
+    assert HALTED not in {fact.ts_code for fact in day.facts}
+    assert day.notes.no_bar_within_carry == 2  # HALTED and NEVER_TRADED
+    assert day.facts == unheld.facts
+    assert day.notes == unheld.notes
+
+
 def test_a_halted_names_amount_window_stays_within_the_carry_bound(
     full_store: PanelStore,
 ) -> None:
@@ -1245,6 +1347,16 @@ def test_one_factor_with_no_build_on_the_day_is_refused_by_its_own_name(
     )
     with pytest.raises(MissingFactorBuildError, match=missing):
         read_day(one_unbuilt_store)
+
+
+def test_a_build_that_admits_no_value_is_a_coverage_refusal_not_a_missing_build(
+    nothing_admitted_store: PanelStore,
+) -> None:
+    # Re-review Minor 5. `reversal_1d` was built at the signal day's instant and answered
+    # `None` for every security: the build exists and admits no value. That is the coverage
+    # guard's "0 of 38" -- the missing-build refusal is for an instant with no build at all.
+    with pytest.raises(FactsCoverageError, match=r"\b0 of 38\b"):
+        read_day(nothing_admitted_store)
 
 
 def test_the_missing_build_error_is_a_named_facts_error() -> None:
