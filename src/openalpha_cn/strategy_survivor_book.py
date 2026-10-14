@@ -77,7 +77,11 @@ session with no snapshot when the run's pinned `as_of` is at or after 09:15 of t
 settle-only run that committed and stopped before its journal is finished that way, writing
 nothing, while a session an evening settled with orders is refused by C3 by name. **Which of the
 two a rerun is is the caller's, by the journal-pinned `as_of`, never by the clock**: an evening
-iff that `as_of` is before 09:15 of the session after.
+iff that `as_of` is before 09:15 of the session after. A session `catch_up` committed whose run
+stopped before the caller journalled it is no longer missing, so no catch-up settles it again:
+`catch_up_again` derives such sessions again with `run_catch_up` (`unchanged`, nothing written)
+and reports them through `on_settled`, so their fills and write-offs reach a document; the caller
+names which (D5 joint review, Important 3).
 
 **`observed_on`** is the Shanghai date of the run's journal-pinned `as_of` on every call (rule
 6); an `as_of` without a time zone is a programming error (`TypeError`). A rerun on another day
@@ -110,14 +114,14 @@ description, so it holds the lock with its parent until both have let go.
 
 Every refusal is a `SurvivorDayError` naming its step and its remedy: `paper head` for the head,
 `facts` for the caller's own step-6 read (`facts_day`), and **`paper book` for everything raised
-inside `catch_up`, `settle_only` and `evening`** -- they run in step 8, after step 7 filed the
-prediction, whatever they were reading when they stopped. The paper book's three error classes
-are mapped by class, never by message: `PaperStateError` (`PaperLedgerConflictError` included),
-the store's `storage.paper_state.PaperStateStoreError` (which `backtest/` cannot import, so C3
-cannot make it a `PaperStateError`), and `ValueError` -- the contract refusals of the facts
-adapter, the session market, the ordinals and the kernel. Anything else reaches the caller as
-itself: a `TypeError` or an `AssertionError` is a programming error, and the panel's own
-`RuntimeError`s (a busy or damaged catalog, a partition not yet knowable) are the panel's to
+inside `catch_up`, `catch_up_again`, `settle_only` and `evening`** -- they run in step 8, after
+step 7 filed the prediction, whatever they were reading when they stopped. The paper book's three
+error classes are mapped by class, never by message: `PaperStateError` (`PaperLedgerConflictError`
+included), the store's `storage.paper_state.PaperStateStoreError` (which `backtest/` cannot
+import, so C3 cannot make it a `PaperStateError`), and `ValueError` -- the contract refusals of
+the facts adapter, the session market, the ordinals and the kernel. Anything else reaches the
+caller as itself: a `TypeError` or an `AssertionError` is a programming error, and the panel's
+own `RuntimeError`s (a busy or damaged catalog, a partition not yet knowable) are the panel's to
 name.
 """
 
@@ -182,6 +186,7 @@ __all__ = [
     "SurvivorEvening",
     "bind_paper_book",
     "catch_up",
+    "catch_up_again",
     "delisted_or_refuse",
     "evening",
     "facts_day",
@@ -853,6 +858,103 @@ def settle_only(
     if on_settled is not None:
         on_settled(result)
     return (result,)
+
+
+def catch_up_again(
+    *,
+    panel: PanelStore,
+    state_store: PaperStateDocumentStore,
+    ledger: ReadableLedger,
+    registration: SurvivorRegistration,
+    ordinals: SessionOrdinals,
+    calendar: TradingCalendar,
+    indices: Sequence[int],
+    as_of: datetime,
+    make_portfolio: Callable[[PortfolioLedger], PaperPortfolio],
+    lock: PaperBookLock,
+    on_settled: Callable[[CatchUpResult], None] | None = None,
+    transform: FactorTransformSpec | None = None,
+) -> tuple[CatchUpResult, ...]:
+    """Derive again, oldest first, the sessions of ordinals `indices` a catch-up settled, and
+    report each through `on_settled` like a session just settled -- C3's `run_catch_up` on a held
+    session answers `unchanged`, writing nothing, with its settlement derived again from the book
+    of the session before and the session's market, at `as_of`, as `catch_up` settled it.
+
+    The caller's remedy for a catch-up committed and never journalled (D5 joint review, Important
+    3): its run stopped between a session's commit and its journal entry, and the run after it
+    finds the session held -- not missing, so `catch_up` never settles it again -- and its fills
+    and write-offs in no document. `settle_only` does the same for its own session.
+
+    A session of `indices` an evening decided -- an order planned on it is pending in its
+    snapshot, or its first decision is its own -- is passed over: it is its own day's to document,
+    and C3 refuses it as a catch-up wherever the two differ (an evening that planned nothing over
+    an earlier first decision is the same snapshot either way, and is derived again). A session
+    with no snapshot is refused: it is `catch_up`'s to settle, never a derivation's. Every
+    refusal is step `paper book`, a `CatchUpStalledError` carrying the sessions derived before it.
+    `lock` and `transform` as `catch_up`'s.
+    """
+    observed_on = _observed_on(as_of)
+    _require_lock(lock, "paper book")
+    _require_registered_epoch(ordinals, registration, step="paper book")
+    results: list[CatchUpResult] = []
+    try:
+        with _refusals("paper book", "the paper book's catch-up derived again"):
+            head = held_head(state_store)
+    except SurvivorDayError as error:
+        raise _stalled(error, at="its start", caught_up=()) from _root(error)
+    for index in sorted(set(indices)):
+        try:
+            with _refusals("paper book", f"deriving session index {index} again"):
+                day = ordinals.day_of(index)
+                if index == 0:
+                    raise SurvivorDayError(
+                        "paper book",
+                        f"{day.isoformat()} is the paper book's epoch, which it is opened on and "
+                        "no catch-up settles",
+                    )
+                # The history grows only at its head: every session up to it is held.
+                if head is None or index > head.session_index:
+                    raise SurvivorDayError(
+                        "paper book",
+                        f"{day.isoformat()} (session index {index}) is not settled: a session "
+                        "with no snapshot is the catch-up's to settle, never derived again",
+                    )
+                held = load_snapshot(state_store, day)
+                if _decided_by_an_evening(held):
+                    continue
+                before = load_snapshot(state_store, ordinals.day_of(index - 1))
+            result = _settle_without_a_decision(
+                panel=panel,
+                state_store=state_store,
+                ledger=ledger,
+                registration=registration,
+                calendar=calendar,
+                before=before,
+                session=day,
+                session_index=index,
+                as_of=as_of,
+                observed_on=observed_on,
+                make_portfolio=make_portfolio,
+                transform=transform,
+            )
+        except SurvivorDayError as error:
+            raise _stalled(error, at=f"session index {index}", caught_up=tuple(results)) from _root(
+                error
+            )
+        results.append(result)
+        if on_settled is not None:
+            on_settled(result)
+    return tuple(results)
+
+
+def _decided_by_an_evening(snapshot: PaperBookSnapshot) -> bool:
+    """Whether `snapshot`'s session was decided by an evening: an order planned on it is pending
+    (a session's plan executes at the open after it, so all of it is pending at its close), or
+    the book's first decision is the session's own."""
+    index = snapshot.session_index
+    return snapshot.first_decision_session == index or any(
+        item.order.signal_session == index for item in snapshot.pending_orders
+    )
 
 
 def _settle_without_a_decision(

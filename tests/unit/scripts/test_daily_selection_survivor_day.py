@@ -2262,3 +2262,90 @@ def test_an_evening_completed_or_printed_after_the_call_auction_it_planned_for_s
     code, out, _err = _run(world, capsys, clock=RUN_CLOCK, json_output=False)
     assert code == 0
     assert not any("has passed" in line for line in out.splitlines())
+
+
+# --- a catch-up committed and not journalled (the D5 joint review, Important 3) --------------
+
+
+@pytest.mark.parametrize(
+    "cut",
+    [
+        pytest.param(NEXT, id="the first missed session's entry"),
+        pytest.param(THIRD, id="the second missed session's entry"),
+    ],
+)
+def test_a_catch_up_committed_and_not_journalled_is_derived_again_and_documented_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+    cut: date,
+) -> None:
+    """6 April completes; 7 and 8 April are missed, and a name bought on 6 April is delisted on 8
+    April with no bar. 9 April's run catches up 7 April -- the ten buys fill at its open -- and 8
+    April -- the delisted holding is written off -- and the power is cut as `cut`'s catch-up is
+    journalled, after its commit. The rerun derives that session again (C3: `unchanged`, nothing
+    written) and files it: the ten fills and the write-off are in the rerun's document exactly
+    once, the summary names the session re-derived, and the ledger's rows of the sessions the
+    first run settled are byte for byte what it wrote."""
+    world = _world(tmp_path, monkeypatch, seeded)
+    first = _completed(world, capsys, DAY)
+    bought = sorted(_orders(first))
+    gone = sorted(order["ts_code"] for order in first["paper"]["trade_list"]["orders"])[0]
+    world.market.delisted = ((gone, THIRD),)
+    written = daily.write_journal
+
+    def cut_as_journalled(path: Path, body: Mapping[str, Any]) -> None:
+        filed = [entry["session"] for entry in body.get("catch_ups", ())]
+        if filed and filed[-1] == cut.isoformat():
+            raise OSError("the power was cut as a committed catch-up was journalled")
+        written(path, body)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(daily, "write_journal", cut_as_journalled)
+        code, _out, err = _day(world, capsys, FOURTH)
+
+    assert code == 1
+    assert err[0] == (
+        "step 8 (paper book) failed: an unexpected fault: OSError: the power was cut as a "
+        "committed catch-up was journalled"
+    )
+    assert cut in _snapshots(world).sessions()
+    assert FOURTH not in _snapshots(world).sessions()
+    filed = [day["session"] for day in _journal(world, FOURTH).get("catch_ups", ())]
+    assert filed == ([] if cut == NEXT else [NEXT.isoformat()])
+
+    def rows_through_the_cut() -> list[str]:
+        rows = _ledger_rows(world, tmp_path)
+        return [row.model_dump_json() for row in rows if row.after.as_of <= cut]
+
+    rows = rows_through_the_cut()
+
+    fourth = _completed(world, capsys, FOURTH)
+
+    days = fourth["paper"]["catch_ups"]
+    assert [(day["session"], day["rederived"]) for day in days] == [
+        (NEXT.isoformat(), cut == NEXT),
+        (THIRD.isoformat(), cut == THIRD),
+    ]
+    assert [day["outcome"] for day in days if day["rederived"]] == ["unchanged"]
+    assert sorted(days[0]["settled"]["filled"]) == bought
+    filled = [order for day in days for order in day["settled"]["filled"]]
+    filled += fourth["paper"]["settled"]["filled"]
+    assert sorted(order for order in filled if order in bought) == bought
+    written_off = [item for day in days for item in day["settled"]["written_off"]]
+    written_off += fourth["paper"]["settled"]["written_off"]
+    assert [item["ts_code"] for item in written_off] == [gone]
+    assert days[1]["settled"]["written_off"] == written_off
+    assert rows_through_the_cut() == rows
+    assert _journal(world, FOURTH)["catch_ups"] == days
+    _replays(world, tmp_path, first, fourth)
+
+    _code, out, _err = _day(world, capsys, FOURTH, json_output=False)
+
+    (line,) = [line for line in out.splitlines() if line.startswith("catch-up ")]
+    assert line.endswith(
+        f"oldest first; re-derived after an interrupted journal: {cut.isoformat()} (committed by "
+        "an earlier run of the day, which stopped before journalling them; derived again now, "
+        "nothing written)"
+    )

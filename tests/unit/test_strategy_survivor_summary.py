@@ -2093,6 +2093,38 @@ def test_a_catch_up_entry_is_the_documents_own_form_of_a_catch_up(caught_up: Cau
     assert json.loads(json.dumps(catch_up_entry(caught_up.caught[0]))) == catch_up_entry(
         caught_up.caught[0]
     )
+    assert [entry["rederived"] for entry in document["paper"]["catch_ups"]] == [False] * 3
+
+
+def test_a_catch_up_re_derived_after_an_interrupted_journal_is_named_in_the_summary(
+    caught_up: CaughtUp,
+) -> None:
+    """D5 joint review, Important 3: a session an earlier run of the day committed, and stopped
+    before journalling, is derived again by the next run (`unchanged`, nothing written) and filed
+    then. Its entry says so, and the catch-up line names it: its fills and write-offs are listed
+    once, under it, and nowhere else."""
+    first, second, third = caught_up.caught
+    filed = [
+        catch_up_entry(first),
+        catch_up_entry(second, rederived=True),
+        catch_up_entry(third, rederived=True),
+    ]
+
+    document = document_of(caught_up.evening, filed_catch_ups=filed)
+    lines = summary_lines(document)
+
+    days = document["paper"]["catch_ups"]
+    assert [day["rederived"] for day in days] == [False, True, True]
+    assert {**days[1], "rederived": False} == catch_up_entry(second)
+    assert line_with(lines, "catch-up") == row(
+        "catch-up",
+        "3 sessions settled without a decision, oldest first; re-derived after an interrupted "
+        "journal: 2021-03-04, 2021-03-05 (committed by an earlier run of the day, which stopped "
+        "before journalling them; derived again now, nothing written)",
+    )
+    assert line_with(
+        summary_lines(document_of(caught_up.evening, catch_ups=caught_up.caught)), "catch-up"
+    ) == row("catch-up", "3 sessions settled without a decision, oldest first")
 
 
 def test_the_catch_ups_an_earlier_run_filed_come_first_and_are_checked_with_tonights(

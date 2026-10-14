@@ -4080,7 +4080,10 @@ def _survivor_paper_and_summary(
     joint review, Important 1); a committed one is completed whatever the clock, writing nothing
     (C3 review, rule 1). Each catch-up session is journalled as it commits
     (`catch_ups`, in `strategy_survivor_summary.catch_up_entry`'s form), so a run that stops
-    later keeps what it settled. The paper book's refusals are mapped by class, never by message
+    later keeps what it settled; a session committed and not journalled -- the run stopped
+    between the two -- is derived again by the next run first (`_lost_catch_ups`,
+    `strategy_survivor_book.catch_up_again`: nothing written) and filed, named re-derived (D5
+    joint review, Important 3). The paper book's refusals are mapped by class, never by message
     -- `SurvivorDayError` (a stalled catch-up journals the sessions it settled first),
     `PaperStateError`, the store's `PaperStateStoreError` and `ValueError` -- to step 8's refusal,
     exit 1; anything else (`TypeError`, `AssertionError`, the panel's own faults) is not taken
@@ -4106,10 +4109,11 @@ def _survivor_paper_and_summary(
 
     journal: dict[str, Any] = dict(day.journal)
 
-    def file_catch_ups(settled: Sequence[CatchUpResult]) -> None:
+    def file_catch_ups(settled: Sequence[CatchUpResult], *, rederived: bool = False) -> None:
         nonlocal journal
         filed = _filed_catch_ups(
-            journal.get("catch_ups", ()), [summary.catch_up_entry(item) for item in settled]
+            journal.get("catch_ups", ()),
+            [summary.catch_up_entry(item, rederived=rederived) for item in settled],
         )
         if filed != journal.get("catch_ups"):
             journal = {**journal, "catch_ups": filed}
@@ -4127,7 +4131,11 @@ def _survivor_paper_and_summary(
         if not day.committed and not day.settle_only and now >= day.cutoff:
             raise refused(_too_late_to_decide(day, now))
         try:
-            ran = _run_paper_book(day, on_settled=lambda result: file_catch_ups((result,)))
+            ran = _run_paper_book(
+                day,
+                on_settled=lambda result: file_catch_ups((result,)),
+                on_settled_again=lambda result: file_catch_ups((result,), rederived=True),
+            )
         except paper_book.SurvivorDayError as error:
             if isinstance(error, paper_book.CatchUpStalledError):
                 file_catch_ups(error.caught_up)
@@ -4170,7 +4178,10 @@ def _survivor_paper_and_summary(
 
 
 def _run_paper_book(
-    day: SurvivorDay, *, on_settled: Callable[[CatchUpResult], None]
+    day: SurvivorDay,
+    *,
+    on_settled: Callable[[CatchUpResult], None],
+    on_settled_again: Callable[[CatchUpResult], None],
 ) -> SurvivorPaperRun:
     """Step 8 itself, at the journal-pinned `as_of` -- and once more, at the newest instant the
     panel can be read at, when the market cannot be read at it any more (`_readable_after`: a
@@ -4191,6 +4202,22 @@ def _run_paper_book(
         return make_paper_portfolio(ledger, limits)
 
     def run_at(read_at: datetime) -> SurvivorEvening | None:
+        lost = _lost_catch_ups(day)
+        if lost:
+            paper_book.catch_up_again(
+                panel=day.store,
+                state_store=day.storage.paper_state_store,
+                ledger=day.storage.paper_ledger,
+                registration=day.survivor,
+                ordinals=day.ordinals,
+                calendar=day.calendar,
+                indices=lost,
+                as_of=read_at,
+                make_portfolio=make_portfolio,
+                lock=day.lock,
+                on_settled=on_settled_again,
+                transform=day.transform,
+            )
         if day.settle_only:
             paper_book.settle_only(
                 panel=day.store,
@@ -4271,6 +4298,21 @@ def _readable_after(store: PanelStore, error: BaseException, *, at: datetime) ->
             if coverage is not None and (newest is None or coverage.max_available_time > newest):
                 newest = coverage.max_available_time
     return newest if newest is not None and newest > at else None
+
+
+def _lost_catch_ups(day: SurvivorDay) -> tuple[int, ...]:
+    """The sessions a catch-up of this day may have committed without journalling them (D5 joint
+    review, Important 3): every ordinal after the one the day's journal pinned its holdings from
+    (`held_from`; the epoch's 0 when it pinned no book) through the paper book's head, short of
+    the day's own session, that the journal's `catch_ups` do not list. Held, they are not
+    missing, so no catch-up settles them again; `strategy_survivor_book.catch_up_again` derives
+    them again (`unchanged`, nothing written) and the day files them, named re-derived. Those an
+    evening decided are left to their own day's document by `catch_up_again` itself."""
+    held_from = day.journal.get("held_from")
+    pinned = 0 if held_from is None else int(held_from["session_index"])
+    filed = {int(entry["session_index"]) for entry in day.journal.get("catch_ups", ())}
+    through = min(day.head.snapshot.session_index, day.head.session_index - 1)
+    return tuple(index for index in range(pinned + 1, through + 1) if index not in filed)
 
 
 def _filed_catch_ups(

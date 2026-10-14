@@ -40,7 +40,10 @@ prints.
 **What the daily command adds (`V2-P7-008`, D5b).** It journals each session a catch-up settles as
 that session commits, in this module's own form of a catch-up (`catch_up_entry`), so a run again
 after a stop passes the ones an earlier run of the day settled as `filed_catch_ups`: they come
-before this run's, and the two are checked as one list. When the catch-up changed the holdings the
+before this run's, and the two are checked as one list. A session an earlier run committed and
+stopped before journalling is derived again by the run after it and filed then, `rederived`
+true; the catch-up line names every such session, so its fills and write-offs are printed once,
+under it. When the catch-up changed the holdings the
 facts day was read with, the paper book reads the day again (`strategy_survivor_book.evening`); the
 caller passes that second read as `read_again`, the paper section is computed on it and carries its
 facts section as `facts_read_again`, and `facts` and `screen` stay what the prediction used (D3
@@ -607,11 +610,14 @@ def _settled(settlement: Settlement) -> dict[str, Any]:
     }
 
 
-def catch_up_entry(item: CatchUpResult) -> dict[str, Any]:
+def catch_up_entry(item: CatchUpResult, *, rederived: bool = False) -> dict[str, Any]:
     """One session a catch-up settled, as a document lists it: its session and ordinal, whether
-    it was committed now or found settled, its snapshot, what it settled, and the settlement's
-    equity and cash (never the runner's record's). Plain JSON, so the daily command files it in
-    its journal as the session commits and hands it back as a filed catch-up."""
+    it was committed now or found settled, its snapshot, what it settled, the settlement's equity
+    and cash (never the runner's record's), and whether it was `rederived` -- committed by an
+    earlier run of the day, which stopped before journalling it, and derived again by this one
+    (`strategy_survivor_book.catch_up_again`: `unchanged`, nothing written; D5 joint review,
+    Important 3). Plain JSON, so the daily command files it in its journal as the session commits
+    and hands it back as a filed catch-up."""
     settlement = item.settlement
     return {
         "session": settlement.session.isoformat(),
@@ -621,6 +627,7 @@ def catch_up_entry(item: CatchUpResult) -> dict[str, Any]:
         "settled": _settled(settlement),
         "equity": _text(settlement.equity),
         "cash": _text(settlement.book.cash),
+        "rederived": rederived,
     }
 
 
@@ -1101,10 +1108,19 @@ def _draw_lines(paper: Mapping[str, Any]) -> list[str]:
 def _catch_up_lines(days: Sequence[Mapping[str, Any]]) -> list[str]:
     if not days:
         return [_row("catch-up", "none")]
+    # A journal filed before the D5 fix wave has no `rederived`: none of its entries was.
+    again = [str(day["session"]) for day in days if day.get("rederived")]
+    named = (
+        f"; re-derived after an interrupted journal: {', '.join(again)} (committed by an earlier "
+        "run of the day, which stopped before journalling them; derived again now, nothing "
+        "written)"
+        if again
+        else ""
+    )
     lines = [
         _row(
             "catch-up",
-            f"{_plural(len(days), 'session')} settled without a decision, oldest first",
+            f"{_plural(len(days), 'session')} settled without a decision, oldest first{named}",
         )
     ]
     for day in days:

@@ -1474,6 +1474,94 @@ def test_settle_only_never_settles_again_a_session_its_evening_settled_with_orde
     assert files(paper) == before
 
 
+def catch_up_again_at(
+    panel: PanelStore,
+    paper: Paper,
+    indices: Sequence[int],
+    *,
+    on_settled: Callable[[CatchUpResult], None] | None = None,
+) -> tuple[CatchUpResult, ...]:
+    """Derive again the sessions of ordinals `indices` a catch-up settled."""
+    return strategy_survivor_book.catch_up_again(
+        panel=panel,
+        state_store=paper.store,
+        ledger=paper.ledger,
+        registration=REGISTRATION,
+        ordinals=ORDINALS,
+        calendar=CALENDAR,
+        indices=indices,
+        as_of=AS_OF,
+        make_portfolio=make_portfolio,
+        lock=paper.lock,
+        on_settled=on_settled,
+        transform=IDENTITY,
+    )
+
+
+def test_caught_up_sessions_whose_journal_was_lost_are_derived_again_writing_nothing(
+    panel: PanelStore, paper: Paper
+) -> None:
+    """D5 joint review, Important 3: a catch-up committed sessions 62 and 63 and its run stopped
+    before the daily journal said so. Derived again, each is what it settled -- C3 answers
+    `unchanged` and writes nothing -- and is reported through `on_settled`, oldest first, as a
+    session just settled is."""
+    run_day(panel, paper, 61)
+    settled = catch_up_through(panel, paper, 63)
+    before = files(paper)
+    reported: list[CatchUpResult] = []
+
+    again = catch_up_again_at(panel, paper, (2, 3), on_settled=reported.append)
+
+    assert [(item.snapshot.session, item.outcome) for item in again] == [
+        (SESSIONS[62], "unchanged"),
+        (SESSIONS[63], "unchanged"),
+    ]
+    assert [item.snapshot for item in again] == [item.snapshot for item in settled]
+    assert [item.settlement.book for item in again] == [item.settlement.book for item in settled]
+    assert [item.settlement.filled for item in again] == [
+        item.settlement.filled for item in settled
+    ]
+    assert reported == list(again)
+    assert files(paper) == before
+
+
+def test_a_session_an_evening_decided_is_not_derived_again_as_a_catch_up(
+    panel: PanelStore, paper: Paper
+) -> None:
+    """Session 61's evening planned ten buys: it is its own day's to document, and C3 would refuse
+    it as a catch-up. Asked for, it is passed over -- nothing derived, nothing reported, nothing
+    written -- and a caught-up session after it is still derived again."""
+    run_day(panel, paper, 61)
+    catch_up_through(panel, paper, 62)
+    before = files(paper)
+    reported: list[CatchUpResult] = []
+
+    again = catch_up_again_at(panel, paper, (1, 2), on_settled=reported.append)
+
+    assert [(item.snapshot.session, item.outcome) for item in again] == [
+        (SESSIONS[62], "unchanged")
+    ]
+    assert reported == list(again)
+    assert files(paper) == before
+
+
+def test_a_session_with_no_snapshot_is_not_derived_again_but_refused(
+    panel: PanelStore, paper: Paper
+) -> None:
+    """A session the book has not settled is the catch-up's to settle, never a derivation's: the
+    derivation refuses it by name, as a stall of the paper book, and settles nothing."""
+    run_day(panel, paper, 61)
+    before = files(paper)
+
+    with pytest.raises(CatchUpStalledError) as refused:
+        catch_up_again_at(panel, paper, (2,))
+
+    assert refused.value.step == "paper book"
+    assert refused.value.caught_up == ()
+    assert "not settled" in str(refused.value)
+    assert files(paper) == before
+
+
 def test_another_configuration_is_refused_at_every_step_before_anything_is_written(
     panel: PanelStore, paper: Paper
 ) -> None:
