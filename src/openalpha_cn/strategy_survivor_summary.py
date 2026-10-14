@@ -5,7 +5,9 @@ of it, the paper book's evening and the sessions it caught up -- into the JSON d
 journal files as its `result`; `summary_lines` turns that document, and nothing else, into the
 lines the daily command prints. Both are pure: every input is an argument, nothing is read,
 written, fetched or timed, and the same inputs give the same bytes (no set is iterated unsorted,
-every mapping is built in sorted order, no clock is asked).
+every mapping this module builds from something other than a fixed list of field names is built
+in sorted order, the pydantic dumps keep their models' field order, which is fixed, and no clock
+is asked).
 
 ## The document
 
@@ -47,7 +49,10 @@ history's, which the caller passes as `carried_since`).
 units (the real price times the adjustment ratio since the buy filled); after a bonus issue or a
 cash dividend the ledger's share count is not the account's. So a sale is always "SELL ENTIRE
 POSITION", its ledger quantity printed beside the REAL close of the facts day and never as a
-number of shares to sell. A buy is at its real close with ratio 1, so its quantity is real.
+number of shares to sell. A buy is sized at its real close with ratio 1, so its quantity is real.
+A holding whose ledger mark is not its real close also carries `ledger_ratio` (mark over close, to
+four places), and the positions line prints it: the account's shares are the ledger quantity
+times it.
 
 ## The summary
 
@@ -61,8 +66,13 @@ listed here (a sale never expires), never an empty plan. The wording is "candida
 here is a recommendation, and the ledger's equity is never evidence of anything.
 
 `prediction` and `this_run` are blocks the caller merges into the mapping it passes to
-`summary_lines` (they are not part of the journal's `result`: the prediction is filed before the
-paper step, and the requests are the run's own); the summary renders what is there.
+`summary_lines`; this module's document does not carry them, and whether the journal's `result`
+also holds them is the caller's decision. The summary renders what is there.
+
+Real closes in the ORDERS block are references, not limit prices: the paper book fills at the
+open, and the block's header says so once. Its header also carries the trade list's id and whether
+the run committed the evening (`created`) or found it settled and derived it again
+(`unchanged`), so a printed plan can be tied to its journal entry.
 """
 
 from __future__ import annotations
@@ -222,16 +232,17 @@ def evening_document(
     at `as_of`; see the module docstring.
 
     `evening` is the paper book's answer, or `None` for a session that ran no evening, in which
-    case `paper_skipped` is the reason the caller gives. `catch_ups` are the sessions settled
-    before it -- or, with no evening, the sessions settled instead of it -- oldest first.
+    case `paper_skipped` is the reason the caller gives, and is required. `catch_ups` are the
+    sessions settled before it -- or, with no evening, the sessions settled instead of it -- oldest
+    first.
     `ordinals` turns the orders' sessions into dates, and `book` is the configuration whose
     liquidity cut an illiquid exit is reported against. `carried_since` is the first session each
     carried holding had no bar, from the journal's history: an entry for a name that is not
     carried tonight is ignored, and no entry is a halt of unknown length, never of length 1.
 
-    A facts day or an evening that is not of `session`, a `paper_skipped` given beside an evening,
-    and catch-ups out of order or not before the evening are refused by name: the document would
-    describe another day than the one it is filed under.
+    A facts day or an evening that is not of `session`, a `paper_skipped` given beside an evening
+    or missing without one, and catch-ups out of order or not before the evening are refused by
+    name: the document would describe another day than the one it is filed under.
     """
     _check(
         session=session,
