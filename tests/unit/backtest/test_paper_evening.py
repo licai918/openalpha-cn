@@ -13,12 +13,16 @@ and the kernel is the real one: `decide_book` and `build_trade_list` run inside 
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Callable, Collection, Mapping
+import importlib.util
+import random
+from collections import Counter, defaultdict
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
-from typing import Literal
+from types import ModuleType
+from typing import Any, Literal
 
 import pytest
 
@@ -54,11 +58,13 @@ from openalpha_cn.domain.survivor_book import (
     EligibilityVerdict,
     RankedName,
     ScreenResult,
+    SecurityFacts,
     SurvivorBookConfig,
     survivor_config_digest,
 )
-from openalpha_cn.domain.survivor_orders import TradeOrder
+from openalpha_cn.domain.survivor_orders import TradeList, TradeOrder
 from openalpha_cn.domain.survivor_policy import Cooldown
+from openalpha_cn.domain.survivor_screen import screen as run_screen
 from openalpha_cn.storage.paper_state import FilePaperStateStore, PaperStateStoreError
 from openalpha_cn.storage.portfolio import SQLitePortfolioLedger
 
@@ -195,7 +201,7 @@ def evening(
     day: date,
     quotes: Market,
     screen: ScreenResult,
-    prices: Mapping[str, str],
+    prices: Mapping[str, str | Decimal],
     *,
     delisted: Collection[str] = (),
     config: SurvivorBookConfig = CONFIG,
@@ -1231,3 +1237,411 @@ def test_missing_sessions_are_the_ordinals_after_the_head_through_the_one_asked_
         rf"sessions asked about are of {OTHER_DIGEST}",
     ):
         missing_sessions(book.store, config_digest=OTHER_DIGEST, through_index=5)
+
+
+# ---- many evenings: the ledger replays to every snapshot -----------------------------------------
+
+LONG = tuple(date(2021, 4, 1) + timedelta(days=n) for n in range(26))
+"""The opening (ordinal 0) and 25 evenings after it: the book needs ascending dates, not
+weekdays."""
+
+
+def run_book(
+    root: Path,
+    config: SurvivorBookConfig,
+    inputs: Callable[
+        [int, PaperBookSnapshot, TradeList | None],
+        tuple[Sequence[SecurityFacts], Market, Mapping[str, Decimal], Collection[str]],
+    ],
+) -> tuple[Book, list[EveningResult]]:
+    """Open a book with `config.capital` on `LONG[0]` and run the 25 evenings after it, each on
+    `inputs(ordinal, the book's head, the last evening's trade list)` -> (facts, market, entrant
+    prices, delisted), screened by the real `screen`."""
+    store = FilePaperStateStore(root / "snapshots")
+    open_book(
+        store=store,
+        session=LONG[0],
+        session_index=0,
+        cash=config.capital,
+        config_digest=survivor_config_digest(config),
+    )
+    book = Book(root=root, store=store, ledger=SQLitePortfolioLedger(root / "ledger.sqlite3"))
+    results: list[EveningResult] = []
+    for n in range(1, len(LONG)):
+        head = load_snapshot(store, store.sessions()[-1])
+        facts, quotes, prices, delisted = inputs(
+            n, head, results[-1].trade_list if results else None
+        )
+        results.append(
+            evening(
+                book,
+                LONG[n],
+                quotes,
+                run_screen(facts, config),
+                prices,
+                delisted=delisted,
+                config=config,
+                index=n,
+            )
+        )
+    return book, results
+
+
+def assert_the_ledger_replays_to_every_snapshot(
+    book: Book, opening_cash: Decimal, results: Sequence[EveningResult]
+) -> None:
+    """Replay the ledger from the opening book with nothing but its rows' own figures -- a
+    filled buy takes its notional and costs from cash and opens a lot at that cost, a filled
+    sell (always of the whole holding) returns its notional less costs and realises the
+    difference from the lot's cost, a write-off removes the holding and realises its cost as a
+    loss, a refusal changes nothing -- and land, at the close of every session, on that session's
+    snapshot as stored: cash, every lot (open date, shares, cost), realised profit and fees. Each
+    snapshot is read back, so its checks hold on every one; and no planned order fills twice."""
+    sessions = book.store.sessions()
+    assert len(sessions) == len(results) + 1
+    rows = book.ledger.list()
+    assert len({row.order.order_id for row in rows}) == len(rows)
+    by_session: dict[date, list[PortfolioTransition]] = defaultdict(list)
+    for row in rows:
+        by_session[row.after.as_of].append(row)
+    cash, realized, fees = opening_cash, D("0.00"), D("0.00")
+    lots: dict[str, tuple[date, int, Decimal]] = {}
+    for day in sessions:
+        snapshot = load_snapshot(book.store, day)
+        for row in by_session.pop(day, []):
+            code = row.order.subject
+            if row.reason == WRITE_OFF_REASON:
+                assert (row.status, row.execution) == ("filled", None)
+                realized -= lots.pop(code)[2]
+            elif row.status == "filled":
+                execution = row.execution
+                assert execution is not None
+                fees += execution.total_cost
+                if row.order.side == "buy":
+                    cash -= execution.notional + execution.total_cost
+                    lots[code] = (
+                        day,
+                        row.order.quantity,
+                        execution.notional + execution.total_cost,
+                    )
+                else:
+                    _, shares, basis = lots.pop(code)
+                    assert row.order.quantity == shares
+                    cash += execution.notional - execution.total_cost
+                    realized += execution.notional - execution.total_cost - basis
+        assert snapshot.book.cash == cash, day
+        assert snapshot.book.realized_pnl == realized, day
+        assert snapshot.book.fees_paid == fees, day
+        assert {
+            position.subject: (lot.open_date, lot.quantity, lot.cost_basis)
+            for position in snapshot.book.positions
+            for lot in position.lots
+        } == lots, day
+    assert not by_session  # every row belongs to a settled session
+    planned = {
+        attempt.attempt_id: attempt.order.order_id
+        for result in results
+        for attempt in result.settlement.attempts
+    }
+    fills = Counter(
+        planned[row.order.order_id]
+        for row in rows
+        if row.status == "filled" and row.reason != WRITE_OFF_REASON
+    )
+    assert fills and max(fills.values()) == 1
+
+
+def _plan_one() -> ModuleType:
+    """Plan 1's simulation, `tests/unit/domain/test_survivor_book_lifecycle.py`, loaded from its
+    file (as that file's own subprocess test loads it), with its ordinals counted from 1.
+
+    The paper book's ordinal 0 is its opening and its first decision is ordinal 1; plan 1's first
+    decision is ordinal 0. The selection rule's draw is salted with the ordinal, so the two
+    decide the same facts differently unless they count alike: every ordinal plan 1 hands the
+    kernel -- the state's session, the session orders are settled on and cool-downs start on --
+    is moved on by one. Nothing else of the simulation is touched.
+    """
+    path = Path(__file__).resolve().parents[1] / "domain" / "test_survivor_book_lifecycle.py"
+    spec = importlib.util.spec_from_file_location("plan_one_simulation", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    state, advance, cool = module.BookState, module.advance_orders, module.update_cooldowns
+    module.BookState = lambda **kw: state(**{**kw, "session": kw["session"] + 1})
+    module.advance_orders = lambda orders, **kw: advance(
+        orders, **{**kw, "session": kw["session"] + 1}
+    )
+    cooled: list[tuple[Cooldown, ...]] = []
+
+    def cooling(cooldowns: Any, **kw: Any) -> tuple[Cooldown, ...]:
+        started = cool(cooldowns, **{**kw, "session": kw["session"] + 1})
+        cooled.append(started)
+        return started
+
+    module.update_cooldowns = cooling
+    module.COOLED = cooled
+    return module
+
+
+def _band(previous: Decimal) -> tuple[Decimal, Decimal]:
+    return (
+        (previous * D("1.1")).quantize(CENT, rounding=ROUND_HALF_UP),
+        (previous * D("0.9")).quantize(CENT, rounding=ROUND_HALF_UP),
+    )
+
+
+@pytest.mark.parametrize("market_seed", range(6))
+def test_over_25_evenings_the_paper_book_holds_and_cools_down_what_plan_ones_simulation_does(
+    tmp_path: Path, market_seed: int
+) -> None:
+    """The real kernel, end to end, against plan 1's simulation of it, on plan 1's own markets.
+
+    Each evening n is fed plan 1's facts of its session n - 1; the session's bars open at the
+    previous close -- plan 1 fills an order at the reference price it was planned at, the
+    previous close -- and a name suspended in the facts has no bar, which plan 1 reads as
+    "cannot fill" and the paper book as "not attempted" (plan 1's halts are kept: every one of
+    these markets freezes a halted holding). With no limit move, no adjustment event and the
+    cash to spare, the two books then hold the same names and the same cool-downs on every one
+    of the 25 sessions, though the paper book pays costs and plan 1 does not.
+
+    The equality is not general, and is not claimed to be: the paper book's equity is lower by
+    its costs, so a buy is now and then a lot smaller and the cash it leaves differs, and once a
+    vacancy is decided on cash that tight the two books part -- measured on plan 1's market 1 at
+    ordinal 85, where plan 1 holds 2,981.00 and leaves 600029.SH unfunded and the paper book holds
+    6,294.62 and buys 100. What holds on every market and every session is the replay invariant,
+    asserted here too and on a harsher market below."""
+    simulation = _plan_one()
+    config = simulation.config()
+    log = simulation.run(market_seed, config)
+    days = simulation.walk(market_seed)
+
+    def inputs(
+        n: int, head: PaperBookSnapshot, _: TradeList | None
+    ) -> tuple[Sequence[SecurityFacts], Market, Mapping[str, Decimal], Collection[str]]:
+        facts = days[n - 1]
+        previous = {fact.ts_code: fact.close for fact in days[max(n - 2, 0)]}
+        bars = {}
+        for fact in facts:
+            if fact.suspended:
+                continue
+            opened = previous[fact.ts_code]
+            up, down = _band(opened)
+            close = min(max(fact.close, down), up)
+            bars[fact.ts_code] = MarketBar(
+                subject=fact.ts_code,
+                trade_date=LONG[n],
+                board=security_board(fact.ts_code),
+                previous_close=opened,
+                open=opened,
+                high=max(opened, close),
+                low=min(opened, close),
+                close=close,
+                suspended=False,
+                is_st=False,
+                up_limit=up,
+                down_limit=down,
+            )
+        held = {position.subject for position in head.book.positions}
+        return (
+            facts,
+            Market(bars=bars, adj_factor={fact.ts_code: D("1.000") for fact in facts}),
+            {fact.ts_code: fact.close for fact in facts if fact.ts_code not in held},
+            (),
+        )
+
+    book, results = run_book(tmp_path, config, inputs)
+
+    for n, result in enumerate(results, start=1):
+        assert sorted(p.subject for p in result.snapshot.book.positions) == log[n - 1]["held"], n
+        assert result.snapshot.cooldowns == simulation.COOLED[n - 1], n
+    assert_the_ledger_replays_to_every_snapshot(book, config.capital, results)
+    assert any(result.decision.frozen for result in results)  # halts are in it, and held alike
+
+
+ROUGH_CODES = tuple(f"{600200 + n:06d}.SH" for n in range(40))
+
+
+class RoughMarket:
+    """Forty main-board names over 25 sessions -- AR(1) scores, 2% daily price noise -- and the
+    events a paper book has to come through, each placed on the book as it stands that evening
+    (`events` names the code each landed on):
+
+    - session 2, the initial build's fill: every name opens 7% above its last close, so the
+      build, sized at that close, runs out of cash and its last buys are refused for it and
+      carried (to fill, or expire, as the cash allows);
+    - the first buy planned on evening 5 or later: its name opens locked limit-up for three
+      sessions -- refused three times, expired, cooling down;
+    - the first sell planned on evening 7 or later: its name opens locked limit-down -- refused,
+      carried, sold the session after;
+    - session 12: the first free holding goes ex-rights 1 for 1 -- its factor doubles and its
+      raw prices halve, and the book carries it in the ledger's units;
+    - sessions 15 and 16: the next free holding is halted -- no bar, suspended in the facts;
+    - session 18: the next free holding is delisted -- no bar and no facts from then on, written
+      off that evening.
+    """
+
+    def __init__(self, seed: int) -> None:
+        self.rng = random.Random(seed)
+        self.score = {code: self.rng.gauss(0, 1) for code in ROUGH_CODES}
+        self.close = {code: D(f"{self.rng.uniform(5, 40):.2f}") for code in ROUGH_CODES}
+        self.amount = {code: D(f"{self.rng.uniform(1, 100):.2f}") for code in ROUGH_CODES}
+        self.factor = dict.fromkeys(ROUGH_CODES, D("1.000"))
+        self.locked_up: dict[str, int] = {}
+        self.locked_down: set[str] = set()
+        self.halted: dict[str, int] = {}
+        self.gone: set[str] = set()
+        self.events: dict[str, str] = {}
+
+    def _place(self, n: int, head: PaperBookSnapshot, planned: TradeList | None) -> str | None:
+        """Place tonight's events on the book as it stands; the ex-rights code, if tonight's."""
+        if planned is not None and n >= 6 and "locked up" not in self.events:
+            buys = [order.ts_code for order in planned.orders if order.side == "buy"]
+            if buys:
+                self.locked_up[buys[0]] = 3
+                self.events["locked up"] = buys[0]
+        if planned is not None and n >= 8 and "locked down" not in self.events:
+            sells = [order.ts_code for order in planned.orders if order.side == "sell"]
+            if sells:
+                self.locked_down.add(sells[0])
+                self.events["locked down"] = sells[0]
+        selling = {item.order.ts_code for item in head.pending_orders if item.order.side == "sell"}
+        placed = set(self.events.values())
+        free = sorted(p.subject for p in head.book.positions if p.subject not in placed | selling)
+        if not free or n not in (12, 15, 18):
+            return None
+        if n == 15:
+            self.halted[free[0]] = 2
+            self.events["halted"] = free[0]
+        elif n == 18:
+            self.gone.add(free[0])
+            self.events["delisted"] = free[0]
+        else:
+            self.factor[free[0]] *= 2
+            self.events["ex-rights"] = free[0]
+            return free[0]
+        return None
+
+    def __call__(
+        self, n: int, head: PaperBookSnapshot, planned: TradeList | None
+    ) -> tuple[Sequence[SecurityFacts], Market, Mapping[str, Decimal], Collection[str]]:
+        ex_rights = self._place(n, head, planned)
+        facts: list[SecurityFacts] = []
+        bars: dict[str, MarketBar] = {}
+        for code in ROUGH_CODES:
+            if code in self.gone:
+                continue
+            self.score[code] = 0.9 * self.score[code] + self.rng.gauss(0, 0.5)
+            noise = (D(f"{self.rng.gauss(0, 0.005):.6f}"), D(f"{self.rng.gauss(0, 0.02):.6f}"))
+            halted = self.halted.get(code, 0) > 0
+            if halted:
+                self.halted[code] -= 1
+            else:
+                bars[code] = self._bar(code, n, ex_rights == code, noise)
+            facts.append(
+                SecurityFacts(
+                    ts_code=code,
+                    board="main",
+                    listed_sessions=400,
+                    special_treatment=False,
+                    suspended=halted,
+                    close=self.close[code],
+                    avg_amount=self.amount[code],
+                    oriented_values=(self.score[code],) * 4,
+                )
+            )
+        held = {position.subject for position in head.book.positions}
+        delisted = {code for code in held if code in self.gone}
+        return (
+            facts,
+            Market(
+                bars=bars,
+                adj_factor={
+                    code: self.factor[code] for code in ROUGH_CODES if code not in self.gone
+                },
+            ),
+            {fact.ts_code: fact.close for fact in facts if fact.ts_code not in held},
+            delisted,
+        )
+
+    def _bar(self, code: str, n: int, ex_rights: bool, noise: tuple[Decimal, Decimal]) -> MarketBar:
+        previous = self.close[code]
+        if ex_rights:
+            previous = (previous / 2).quantize(CENT, rounding=ROUND_HALF_UP)
+        up, down = _band(previous)
+        if self.locked_up.get(code, 0) > 0:
+            self.locked_up[code] -= 1
+            opened = high = low = close = up
+        elif code in self.locked_down:
+            self.locked_down.discard(code)
+            opened = high = low = close = down
+        else:
+            gap = D("0.07") if n == 2 else noise[0]
+            opened = min(
+                max((previous * (1 + gap)).quantize(CENT, rounding=ROUND_HALF_UP), down + CENT),
+                up - CENT,
+            )
+            close = min(
+                max((previous * (1 + noise[1])).quantize(CENT, rounding=ROUND_HALF_UP), down), up
+            )
+            high, low = max(opened, close), min(opened, close)
+        self.close[code] = close
+        return MarketBar(
+            subject=code,
+            trade_date=LONG[n],
+            board="main",
+            previous_close=previous,
+            open=opened,
+            high=high,
+            low=low,
+            close=close,
+            suspended=False,
+            is_st=False,
+            up_limit=up,
+            down_limit=down,
+        )
+
+
+ROUGH_CONFIG = SurvivorBookConfig(seed=11)
+
+
+def test_over_25_rough_evenings_the_ledger_replays_to_every_snapshot(tmp_path: Path) -> None:
+    """The replay invariant on a market that makes the book do everything it can: refusals for
+    cash, at a limit-up and at a limit-down, an expiry into a cool-down, an ex-rights holding
+    carried in the ledger's units, a halted holding left alone, and a delisting written off.
+    Each event is asserted to have happened, so the invariant is not checked on a quiet book."""
+    rough = RoughMarket(seed=5)
+
+    book, results = run_book(tmp_path, ROUGH_CONFIG, rough)
+
+    assert_the_ledger_replays_to_every_snapshot(book, ROUGH_CONFIG.capital, results)
+    assert set(rough.events) == {
+        "locked up",
+        "locked down",
+        "ex-rights",
+        "halted",
+        "delisted",
+    }, rough.events
+    refused = Counter(
+        (row.order.subject, row.reason) for row in book.ledger.list() if row.status == "rejected"
+    )
+    assert any(reason == "insufficient cash" for _, reason in refused)
+    assert refused[(rough.events["locked up"], "buy cannot fill on a one-price limit-up bar")] == 3
+    assert (
+        refused[(rough.events["locked down"], "sell cannot fill on a one-price limit-down bar")]
+        == 1
+    )
+    expired = {order.ts_code for result in results for order in result.settlement.expired}
+    assert rough.events["locked up"] in expired
+    sold = {
+        row.order.subject
+        for row in book.ledger.list()
+        if row.status == "filled" and row.order.side == "sell" and row.reason is None
+    }
+    assert rough.events["locked down"] in sold
+    s12 = results[11].snapshot
+    ex_rights = rough.events["ex-rights"]
+    assert s12.entry_factors_by_code()[ex_rights] == D("1.000")
+    assert rough.factor[ex_rights] == D("2.000")
+    assert any(rough.events["halted"] in result.decision.frozen for result in results[14:16])
+    (written,) = results[17].settlement.written_off
+    assert written.ts_code == rough.events["delisted"]
