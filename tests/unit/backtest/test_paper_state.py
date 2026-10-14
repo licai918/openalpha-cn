@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
 
 from openalpha_cn.backtest.paper_state import (
     PAPER_BOOK_SNAPSHOT_PREFIX,
@@ -841,6 +842,31 @@ def test_a_snapshot_document_that_is_not_text_is_refused_as_a_store_error_not_a_
     assert document.read_bytes() == b"\xff\xfe"  # refused, not overwritten
 
 
+def test_latest_snapshot_passes_the_stores_own_faults_through_as_the_stores_error(
+    tmp_path: Path,
+) -> None:
+    """What `latest_snapshot`'s docstring tells a caller to catch besides `PaperStateError`: two
+    documents held for one session, and bytes that are not UTF-8, arrive as the store's
+    `PaperStateStoreError` -- a class unrelated to `PaperStateError` (`backtest/` may not import
+    `storage/`), both of them `RuntimeError`s."""
+    two = _store_through(tmp_path / "two", 2)
+    other = held_snapshot(book=held_snapshot().book.model_copy(update={"cash": D("49190.01")}))
+    _document(two, S2).with_name(f"2021-03-03.{other.snapshot_id}.json").write_text(
+        snapshot_payload(other), encoding="utf-8"
+    )
+    damaged = _store_through(tmp_path / "damaged", 2)
+    _document(damaged, S2).write_bytes(b"\xff\xfe")
+
+    for store, refusal in (
+        (two, r"2021-03-03 is held under 2 snapshots"),
+        (damaged, r"held for 2021-03-03 is not UTF-8 text"),
+    ):
+        with pytest.raises(PaperStateStoreError, match=refusal) as raised:
+            latest_snapshot(store, settling_session=S3, settling_index=103, config_digest=DIGEST)
+        assert not isinstance(raised.value, PaperStateError)
+        assert isinstance(raised.value, RuntimeError)
+
+
 def test_a_missing_snapshot_is_refused_by_name_and_never_read_as_an_empty_book(
     tmp_path: Path,
 ) -> None:
@@ -1026,17 +1052,85 @@ def test_open_snapshot_is_the_one_reader(tmp_path: Path) -> None:
         open_snapshot(payload, snapshot_id="pbs_" + "0" * 24, session=S2)
 
 
+_NAMING_KEYWORDS = frozenset({"properties", "patternProperties", "$defs", "definitions"})
+"""The JSON-schema keywords whose value maps **names** to schemas: a field's name under
+`properties`, an embedded contract's under `$defs`. Their keys are never annotations."""
+
+
 def _without_descriptions(schema: object) -> object:
-    """The schema minus its prose: a docstring is not a change to the stored bytes."""
+    """The schema minus its prose: a docstring is not a change to the stored bytes.
+
+    Only the annotation keyword `description` of a schema is dropped. The keys of a naming
+    mapping (`_NAMING_KEYWORDS`) are names, so a field or a contract that is *called*
+    `description` stays -- each of its values is a schema and loses only its own prose."""
     if isinstance(schema, dict):
         return {
-            key: _without_descriptions(value)
+            key: (
+                {name: _without_descriptions(value) for name, value in value.items()}
+                if key in _NAMING_KEYWORDS and isinstance(value, dict)
+                else _without_descriptions(value)
+            )
             for key, value in schema.items()
             if key != "description"
         }
     if isinstance(schema, list):
         return [_without_descriptions(item) for item in schema]
     return schema
+
+
+def _schema_digest(contract: type[BaseModel]) -> str:
+    """sha256 of `contract`'s JSON schema without its prose, keys in the order pydantic gives."""
+    schema = _without_descriptions(contract.model_json_schema())
+    rendered = json.dumps(schema, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+
+
+def _embedding(*, with_a_description_field: bool) -> type[BaseModel]:
+    """A contract that embeds one other, which has -- or has not -- a field named `description`.
+
+    Both embedded classes share a name and their required fields, and differ in their prose too,
+    so the only thing that can tell the two schemas apart is the field itself."""
+    if with_a_description_field:
+
+        class Embedded(BaseModel):
+            """One wording of the prose."""
+
+            name: str
+            description: str = ""
+
+    else:
+
+        class Embedded(BaseModel):  # type: ignore[no-redef]
+            """Another wording of the prose."""
+
+            name: str
+
+    class Outer(BaseModel):
+        embedded: Embedded
+
+    return Outer
+
+
+def test_the_schema_digest_drops_prose_but_not_a_field_named_description() -> None:
+    """`description` is two things in a JSON schema: the annotation keyword a docstring becomes,
+    and -- as a key of `properties` -- the name of a field. Only the first is prose; a field added
+    to an embedded contract under that name changes the stored bytes like any other, so it must
+    move the digest the pin compares."""
+    assert _schema_digest(_embedding(with_a_description_field=True)) != _schema_digest(
+        _embedding(with_a_description_field=False)
+    )
+    annotated = {
+        "description": "prose",
+        "properties": {
+            "description": {"type": "string", "description": "a field's own prose"},
+            "name": {"type": "string", "description": "more prose"},
+        },
+        "$defs": {"description": {"description": "a contract named description"}},
+    }
+    assert _without_descriptions(annotated) == {
+        "properties": {"description": {"type": "string"}, "name": {"type": "string"}},
+        "$defs": {"description": {}},
+    }
 
 
 PAPER_BOOK_SNAPSHOT_SCHEMA_DIGEST = (
@@ -1061,9 +1155,7 @@ def test_the_stored_shape_of_a_snapshot_is_pinned_so_a_contract_change_needs_a_m
     Descriptions are dropped, so a docstring edit does not trip it. A pydantic upgrade that only
     re-renders the schema will trip it too; that is the one case where re-pinning is the answer,
     after checking that a stored snapshot still reads back."""
-    schema = _without_descriptions(PaperBookSnapshot.model_json_schema())
-    rendered = json.dumps(schema, separators=(",", ":"), ensure_ascii=False)
-    digest = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+    digest = _schema_digest(PaperBookSnapshot)
 
     assert digest == PAPER_BOOK_SNAPSHOT_SCHEMA_DIGEST, (
         f"the stored shape of a paper-book snapshot changed (schema digest {digest}): a field of "

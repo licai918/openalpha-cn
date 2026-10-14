@@ -513,6 +513,16 @@ def latest_snapshot(
       N-1 to N's step under new attempt ids, and the ledger would hold two fills of the same
       orders. The latest earlier snapshot must be ordinal `settling_index - 1`, so a gap is
       named, never skipped.
+
+    **What a caller catches: two unrelated classes.** Every refusal above, and a snapshot that
+    is missing, unreadable or not what its address says, is a `PaperStateError`. A fault the
+    store finds in its own documents arrives as the store's error instead:
+    `storage/paper_state.FilePaperStateStore` raises `PaperStateStoreError` for **two documents
+    held for one session** and for **a document whose bytes are not UTF-8 text**. That class is
+    not a `PaperStateError` and cannot be made one -- `backtest/` may not import `storage/`
+    (`backtest-studies-touch-no-store`) and the store may not import this module -- so a caller
+    that must not settle from a broken book catches **both** by name. Both are `RuntimeError`s,
+    so neither is swallowed by an `except ValueError` written around a contract.
     """
     sessions = store.sessions()
     if not sessions:
