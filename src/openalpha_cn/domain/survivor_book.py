@@ -14,11 +14,13 @@ default below is a **pre-registration candidate** there, frozen only by `V2-P7-0
 """
 
 from decimal import Decimal
+from hashlib import sha256
 from typing import Annotated, Final, Literal, Self, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 from openalpha_cn.domain._identity import stable_model_id
+from openalpha_cn.domain.json_value import canonical_json_bytes
 
 Board = Literal["main", "growth", "star", "bse"]
 """The vocabulary `backtest.execution.security_board` already answers in (`growth` is ChiNext).
@@ -109,6 +111,20 @@ class SurvivorBookConfig(BaseModel):
     @property
     def config_id(self) -> str:
         return stable_model_id(prefix="sbc", model=self)
+
+
+def survivor_config_digest(config: SurvivorBookConfig) -> str:
+    """The whole SHA-256, 64 lowercase hex digits, of `config`'s canonical JSON (`V2-P7-017`).
+
+    The bytes are the ones `config_id` addresses -- the stored form without computed fields,
+    serialised by `json_value.canonical_json_bytes`, whose keywords are `stable_model_id`'s and
+    which `runtime/provenance.compute_config_digest` hashes with too -- so `config_id` is `sbc_`
+    and this digest's first 24 digits, never a second canonicalisation. It is kept whole for the
+    use it has: a paper-book snapshot quotes it as which configuration its book is settled under
+    (the width of `RunManifest.config_digest`) and compares it for equality; it is not an address.
+    """
+    payload = config.model_dump(mode="json", exclude_computed_fields=True)
+    return sha256(canonical_json_bytes(payload)).hexdigest()
 
 
 def floor_share(count: int, fraction: Decimal) -> int:

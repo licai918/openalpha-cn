@@ -832,6 +832,11 @@ DECLARED_PLAIN_DIGESTS: Final[dict[str, str]] = {
         "address, never stored, and never compared to anything but another such digest "
         "(V2-P7-005)"
     ),
+    "domain/survivor_book.py::survivor_config_digest": (
+        "the whole 64 hex of a survivor book's configuration over the bytes its `config_id` "
+        "addresses, quoted by a paper-book snapshot as which book it is a state of and "
+        "compared for equality, never an address (V2-P7-017)"
+    ),
     "strategy_registration.py::InputProvenance.digest": (
         "the whole 64 hex of one input provenance document, the name of its write-once file"
     ),

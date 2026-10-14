@@ -7,6 +7,9 @@ marks can be rebuilt from the ledger; and the two things the next session needs 
 row carries at all -- each holding's **entry adjustment factor** and the **orders still live** --
 exist nowhere else. A `PaperBookSnapshot` is all of it, for one session:
 
+- `config_digest`: which book this is a state of -- the whole SHA-256 of the
+  `SurvivorBookConfig` the book is settled under (`survivor_book.survivor_config_digest`, the
+  bytes its `config_id` addresses);
 - `session_index` and `session`: the session in the trading calendar's ordinals (the ones
   `TradeOrder` counts in) and its date;
 - `book`: the `PortfolioState` `PaperPortfolio.advance` continues from -- cash, every holding's
@@ -63,13 +66,16 @@ unreadable or non-canonical. The messages say both causes, and
 such a change goes red in CI as "needs a migration of stored snapshots" first.
 
 A settlement asks for its book with `latest_snapshot(store, settling_session=..., settling_index=
-...)`, which answers only with the snapshot of the session just before the one being settled:
-an empty store, a session already settled, a snapshot dated after it, and a missing session in
-between are each refused by name. The history therefore only grows at its head, and
-`save_snapshot` holds the writing side of that: an empty store takes only an opening snapshot,
-and a store holding a history takes only the session after its head -- an opening snapshot on
-top of it, one dated before the head, and one whose `session_index` is not the head's plus one
-are each refused by name (the same snapshot again for a held session still writes nothing).
+..., config_digest=...)`, which answers only with the snapshot of the session just before the
+one being settled, of the configuration the settlement runs under: an empty store, a book of
+another configuration, a session already settled, a snapshot dated after it, and a missing
+session in between are each refused by name. **One paper book per runtime directory**: another
+configuration is another book, and it needs a runtime directory of its own. The history
+therefore only grows at its head, and `save_snapshot` holds the writing side of that: an empty
+store takes only an opening snapshot, and a store holding a history takes only the session after
+its head -- an opening snapshot on top of it, one settled under another configuration, one dated
+before the head, and one whose `session_index` is not the head's plus one are each refused by
+name (the same snapshot again for a held session still writes nothing).
 
 The bytes are kept by a store this module does not import: `backtest-studies-touch-no-store`
 keeps every module here away from `openalpha_cn.storage`, so `PaperStateDocumentStore` is the
@@ -172,6 +178,10 @@ class PaperBookSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: Literal["paper-book-snapshot/v1"] = "paper-book-snapshot/v1"
+    config_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    """Which book this is a state of: `survivor_book.survivor_config_digest` of the
+    `SurvivorBookConfig` it is settled under. No default, for the reason the config's `seed` has
+    none: a book has to name what it was opened with."""
     session_index: int = Field(ge=0)
     session: date
     book: PortfolioState
@@ -389,10 +399,12 @@ def save_snapshot(
     - **a store that holds a history takes the session after its head and nothing else.** The
       head is read back first (so a damaged head is refused here, not built upon), then an
       opening snapshot is refused -- a book restarted from nothing over an existing history,
-      whose ledger still holds the old book's fills -- and so is a snapshot dated before the
-      head or whose `session_index` is not the head's plus one. The last is the write side of
-      `latest_snapshot`'s gap rule: a snapshot saved past a missing session would make the gap
-      invisible, because the next settlement would find it the session before its own.
+      whose ledger still holds the old book's fills -- and so is a snapshot settled under a
+      `config_digest` other than the head's (another book's state, whatever its session), one
+      dated before the head, and one whose `session_index` is not the head's plus one. The last
+      is the write side of `latest_snapshot`'s gap rule: a snapshot saved past a missing
+      session would make the gap invisible, because the next settlement would find it the
+      session before its own.
 
     Each is refused by design rather than by accident: every snapshot after the opening one is
     settled from the one before it, so a write anywhere but the head's next session can only
@@ -431,6 +443,13 @@ def save_snapshot(
                 "runtime directory, and restarting it from nothing over an existing history is "
                 "refused"
             )
+        if snapshot.config_digest != head.config_digest:
+            raise PaperStateError(
+                f"{snapshot.session.isoformat()} is settled under configuration digest "
+                f"{snapshot.config_digest} and the book's history through {through} under "
+                f"{head.config_digest}; a paper book is continued only under the configuration it "
+                "was opened with (one paper book per runtime directory)"
+            )
         if head.session > snapshot.session:
             raise PaperStateError(
                 f"{snapshot.session.isoformat()} is dated before the latest snapshot held, "
@@ -464,17 +483,28 @@ def load_snapshot(store: PaperStateDocumentStore, session: date) -> PaperBookSna
 
 
 def latest_snapshot(
-    store: PaperStateDocumentStore, *, settling_session: date, settling_index: int
+    store: PaperStateDocumentStore,
+    *,
+    settling_session: date,
+    settling_index: int,
+    config_digest: str,
 ) -> PaperBookSnapshot:
     """The book `settling_session` settles from: the snapshot of the session just before it.
 
-    `settling_session` is the session about to be settled and `settling_index` its ordinal in
-    the trading calendar. The answer is the latest snapshot dated before `settling_session`,
-    and it must be the snapshot of ordinal `settling_index - 1`; everything else is refused by
-    name, because each wrong answer settles the book from a state it was not in:
+    `settling_session` is the session about to be settled, `settling_index` its ordinal in the
+    trading calendar, and `config_digest` the `survivor_config_digest` of the configuration the
+    settlement runs under. The answer is the latest snapshot dated before `settling_session`,
+    and it must be the snapshot of ordinal `settling_index - 1`, of the same configuration;
+    everything else is refused by name, because each wrong answer settles the book from a state
+    it was not in:
 
     - **an empty store** -- a paper book is opened by saving an opening snapshot on purpose,
       never started from zero by whoever reads it next;
+    - **a book of another configuration** -- **one paper book per runtime directory.** The
+      latest snapshot held names the configuration the book is settled under, and a settlement
+      under any other -- the same book continued with changed parameters, or a second book
+      pointed at the same runtime directory -- is refused rather than handed this book's state.
+      Another configuration is another book, and it needs a runtime directory of its own;
     - **a snapshot dated on or after `settling_session`** -- one equal to it means the session
       is already settled (a second settlement would write its fills twice), and one after it
       knows a later session, which is the look-ahead rule broken at the book's own state;
@@ -490,6 +520,16 @@ def latest_snapshot(
             "no paper book snapshot is held at all: a paper book is opened by saving an opening "
             "snapshot, never started from zero by a reader"
         )
+    snapshot = load_snapshot(store, sessions[-1])
+    if snapshot.config_digest != config_digest:
+        raise PaperStateError(
+            f"the paper book held in this store is settled under configuration digest "
+            f"{snapshot.config_digest} through {snapshot.session.isoformat()}, and this "
+            f"settlement runs under {config_digest}: a book is continued only under the "
+            "configuration it was opened with, and there is one paper book per runtime "
+            "directory -- another configuration is another book, with a runtime directory of "
+            "its own"
+        )
     settling = settling_session.isoformat()
     if settling_session in sessions:
         raise PaperStateError(
@@ -501,7 +541,6 @@ def latest_snapshot(
             f"snapshots dated after {settling}, the session being settled, are held: {later}; "
             "a book is never settled from a state that knows a later session"
         )
-    snapshot = load_snapshot(store, sessions[-1])
     if snapshot.session_index != settling_index - 1:
         raise PaperStateError(
             f"the snapshot for session index {settling_index - 1} is missing: the latest is "

@@ -49,6 +49,7 @@ from openalpha_cn.domain.portfolio import (
     PositionLot,
     PositionMark,
 )
+from openalpha_cn.domain.survivor_book import SurvivorBookConfig, survivor_config_digest
 from openalpha_cn.domain.survivor_orders import TradeOrder
 from openalpha_cn.domain.survivor_policy import Cooldown
 from openalpha_cn.runtime.composition import build_storage
@@ -67,6 +68,11 @@ S0, S1, S2, S3, S4, S5 = (
     date(2021, 3, 8),
 )
 INDEX = {S0: 100, S1: 101, S2: 102, S3: 103, S4: 104, S5: 105}
+BOOK_CONFIG = SurvivorBookConfig(seed=7)
+DIGEST = survivor_config_digest(BOOK_CONFIG)
+"""The configuration every fixture book here is settled under."""
+OTHER_DIGEST = survivor_config_digest(SurvivorBookConfig(seed=7, holding_count=9))
+"""A configuration one field away: another book."""
 
 
 def buy(code: str, quantity: int, *, signal: int, expires: int, price: str) -> TradeOrder:
@@ -105,6 +111,7 @@ def held_snapshot(**overrides: Any) -> PaperBookSnapshot:
     """S2, settled: A (1,000 at 10,005.00, entry 2.000) and B (2,000 at 40,805.00, entry 1.000)
     held; a sell of A and a buy of C live; X cooling down since S1."""
     fields: dict[str, Any] = {
+        "config_digest": DIGEST,
         "session_index": 102,
         "session": S2,
         "book": PortfolioState(
@@ -137,6 +144,7 @@ def opening_snapshot() -> PaperBookSnapshot:
     X's buy expires on S1, the session it executes, so if it does not fill there it is gone.
     """
     return PaperBookSnapshot(
+        config_digest=DIGEST,
         session_index=100,
         session=S0,
         book=PortfolioState(as_of=S0, cash=D("100000.00")),
@@ -177,8 +185,9 @@ def test_the_snapshot_is_addressed_by_the_one_hash_function_under_its_own_prefix
                 PendingOrder(order=buy(C, 500, signal=101, expires=106, price="12.00"), attempts=1),
             )
         },
+        {"config_digest": OTHER_DIGEST},
     ],
-    ids=["an entry factor", "a cool-down", "a carried order"],
+    ids=["an entry factor", "a cool-down", "a carried order", "the configuration"],
 )
 def test_every_part_of_the_state_moves_the_address(overrides: dict[str, Any]) -> None:
     assert held_snapshot(**overrides).snapshot_id != held_snapshot().snapshot_id
@@ -202,6 +211,19 @@ def test_the_parts_are_held_in_one_canonical_order_whatever_order_they_arrive_in
     assert shuffled == reordered
     assert shuffled.snapshot_id == reordered.snapshot_id
     assert snapshot_payload(shuffled) == snapshot_payload(reordered)
+
+
+def test_the_snapshot_names_the_configuration_its_book_is_settled_under() -> None:
+    """`config_digest` is the whole sha256 of the book's `SurvivorBookConfig`
+    (`survivor_config_digest`, the bytes `config_id` addresses), so a snapshot says which book it
+    is a state of. Anything that is not 64 lowercase hex digits -- the 24-digit `config_id`
+    included -- is refused."""
+    assert held_snapshot().config_digest == DIGEST == survivor_config_digest(BOOK_CONFIG)
+    assert DIGEST != OTHER_DIGEST
+
+    for wrong in (BOOK_CONFIG.config_id, DIGEST.upper(), DIGEST[:-1], ""):
+        with pytest.raises(ValueError, match="config_digest"):
+            held_snapshot(config_digest=wrong)
 
 
 def test_the_entry_factors_are_the_held_names_and_nothing_else() -> None:
@@ -336,6 +358,7 @@ def test_an_opening_book_holds_no_order_due_on_a_session_it_will_never_settle() 
         match=r"orders an opening book has not settled the due session of: \['tor_",
     ):
         PaperBookSnapshot(
+            config_digest=DIGEST,
             session_index=100,
             session=S0,
             book=PortfolioState(as_of=S0, cash=D("100000.00")),
@@ -530,6 +553,7 @@ def test_a_snapshot_dated_before_the_head_is_refused_even_when_its_index_follows
     store = _store_through(tmp_path / "snapshots", 2)
     early = date(2021, 2, 26)
     behind = PaperBookSnapshot(
+        config_digest=DIGEST,
         session_index=103,
         session=early,
         book=PortfolioState(as_of=early, cash=D("49190.00")),
@@ -565,7 +589,7 @@ def test_a_snapshot_that_skips_a_session_is_refused_naming_the_index_expected(
         save_snapshot(store, s3)
     assert store.sessions() == (S0, S1)
     with pytest.raises(PaperStateError, match=r"snapshot for session index 103 is missing"):
-        latest_snapshot(store, settling_session=S4, settling_index=104)
+        latest_snapshot(store, settling_session=S4, settling_index=104, config_digest=DIGEST)
 
 
 def test_an_opening_snapshot_saved_over_a_settled_history_is_refused(tmp_path: Path) -> None:
@@ -576,6 +600,7 @@ def test_an_opening_snapshot_saved_over_a_settled_history_is_refused(tmp_path: P
     save_snapshot(store, s0)
     save_snapshot(store, s1)
     reopened = PaperBookSnapshot(
+        config_digest=DIGEST,
         session_index=102,
         session=S2,
         book=PortfolioState(as_of=S2, cash=D("100000.00")),
@@ -628,7 +653,58 @@ def test_the_history_grows_one_session_at_a_time_and_a_held_session_is_still_a_n
         save_snapshot(
             store, s1.model_copy(update={"book": s1.book.model_copy(update={"cash": D("1")})})
         )
-    assert latest_snapshot(store, settling_session=S3, settling_index=103) == s2
+    assert (
+        latest_snapshot(store, settling_session=S3, settling_index=103, config_digest=DIGEST) == s2
+    )
+
+
+def test_a_snapshot_settled_under_another_configuration_is_not_saved_onto_this_book(
+    tmp_path: Path,
+) -> None:
+    """The history through S1 was settled under one configuration; a snapshot of S2 settled
+    under a configuration one field away is another book's state, whatever its session. Refused,
+    naming both digests, and nothing is written."""
+    store = _store_through(tmp_path / "snapshots", 1)
+
+    with pytest.raises(
+        PaperStateError,
+        match=rf"2021-03-03 is settled under configuration digest {OTHER_DIGEST} and the book's "
+        rf"history through 2021-03-02 \(session index 101\) under {DIGEST}",
+    ):
+        save_snapshot(store, held_snapshot(config_digest=OTHER_DIGEST))
+    assert store.sessions() == (S0, S1)
+    assert save_snapshot(store, held_snapshot()) == "created"
+
+
+def test_a_book_is_continued_only_under_the_configuration_it_was_opened_with(
+    tmp_path: Path,
+) -> None:
+    """One paper book per runtime directory. A settlement under another configuration -- this
+    book continued with changed parameters, or a second book pointed at the same directory -- is
+    refused by name rather than handed this book's state; and that second book cannot open over
+    this one's history either. Under the book's own configuration the answer is unchanged."""
+    store = _store_through(tmp_path / "snapshots", 2)
+
+    with pytest.raises(
+        PaperStateError,
+        match=rf"settled under configuration digest {DIGEST} through 2021-03-03, and this "
+        rf"settlement runs under {OTHER_DIGEST}: .*one paper book per runtime directory",
+    ):
+        latest_snapshot(store, settling_session=S3, settling_index=103, config_digest=OTHER_DIGEST)
+    second_book = PaperBookSnapshot(
+        config_digest=OTHER_DIGEST,
+        session_index=103,
+        session=S3,
+        book=PortfolioState(as_of=S3, cash=D("100000.00")),
+        last_settled_session=None,
+    )
+    with pytest.raises(PaperStateError, match=r"2021-03-04 is an opening snapshot"):
+        save_snapshot(store, second_book)
+    assert store.sessions() == (S0, S1, S2)
+    assert (
+        latest_snapshot(store, settling_session=S3, settling_index=103, config_digest=DIGEST)
+        == held_snapshot()
+    )
 
 
 def test_two_documents_held_for_one_session_are_refused_rather_than_one_picked(
@@ -771,7 +847,7 @@ def test_a_missing_snapshot_is_refused_by_name_and_never_read_as_an_empty_book(
     store = FilePaperStateStore(tmp_path / "snapshots")
 
     with pytest.raises(PaperStateError, match="no paper book snapshot is held at all"):
-        latest_snapshot(store, settling_session=S3, settling_index=103)
+        latest_snapshot(store, settling_session=S3, settling_index=103, config_digest=DIGEST)
     store = _store_through(tmp_path / "snapshots", 2)
     with pytest.raises(PaperStateError, match="no paper book snapshot is held for 2021-03-04"):
         load_snapshot(store, S3)
@@ -793,8 +869,15 @@ def test_the_book_a_session_settles_from_is_the_snapshot_of_the_session_before_i
     save_snapshot(store, s0)
     save_snapshot(store, s1)
 
-    assert latest_snapshot(store, settling_session=S2, settling_index=102) == s1
-    assert latest_snapshot(store, settling_session=S2, settling_index=102).session == S1
+    assert (
+        latest_snapshot(store, settling_session=S2, settling_index=102, config_digest=DIGEST) == s1
+    )
+    assert (
+        latest_snapshot(
+            store, settling_session=S2, settling_index=102, config_digest=DIGEST
+        ).session
+        == S1
+    )
 
 
 def test_a_missing_snapshot_in_the_middle_is_refused_by_name_not_skipped(tmp_path: Path) -> None:
@@ -810,7 +893,7 @@ def test_a_missing_snapshot_in_the_middle_is_refused_by_name_not_skipped(tmp_pat
         PaperStateError,
         match=r"snapshot for session index 102 is missing: the latest is 101 \(2021-03-02\)",
     ):
-        latest_snapshot(store, settling_session=S3, settling_index=103)
+        latest_snapshot(store, settling_session=S3, settling_index=103, config_digest=DIGEST)
 
 
 def test_a_snapshot_dated_after_the_session_being_settled_is_refused_by_name(
@@ -827,7 +910,9 @@ def test_a_snapshot_dated_after_the_session_being_settled_is_refused_by_name(
         match=r"snapshots dated after 2021-02-26, the session being settled, are held: "
         r"\['2021-03-01', '2021-03-02'\]",
     ):
-        latest_snapshot(store, settling_session=date(2021, 2, 26), settling_index=99)
+        latest_snapshot(
+            store, settling_session=date(2021, 2, 26), settling_index=99, config_digest=DIGEST
+        )
 
 
 def test_a_session_whose_snapshot_is_held_is_reported_as_already_settled(tmp_path: Path) -> None:
@@ -836,9 +921,9 @@ def test_a_session_whose_snapshot_is_held_is_reported_as_already_settled(tmp_pat
         save_snapshot(store, book)
 
     with pytest.raises(PaperStateError, match=r"2021-03-02 is already settled"):
-        latest_snapshot(store, settling_session=S1, settling_index=101)
+        latest_snapshot(store, settling_session=S1, settling_index=101, config_digest=DIGEST)
     with pytest.raises(PaperStateError, match=r"2021-03-03 is already settled"):
-        latest_snapshot(store, settling_session=S2, settling_index=102)
+        latest_snapshot(store, settling_session=S2, settling_index=102, config_digest=DIGEST)
 
 
 @pytest.mark.parametrize(
@@ -879,7 +964,7 @@ def test_a_damaged_snapshot_is_refused_by_name_and_never_read_as_an_empty_book(
     with pytest.raises(PaperStateError, match=refusal):
         load_snapshot(store, S2)
     with pytest.raises(PaperStateError, match=refusal):
-        latest_snapshot(store, settling_session=S3, settling_index=103)
+        latest_snapshot(store, settling_session=S3, settling_index=103, config_digest=DIGEST)
     with pytest.raises(PaperStateError, match=refusal):
         save_snapshot(store, held_snapshot())  # an intact copy does not paper over the damage
 
@@ -955,11 +1040,14 @@ def _without_descriptions(schema: object) -> object:
 
 
 PAPER_BOOK_SNAPSHOT_SCHEMA_DIGEST = (
-    "b3759468e158958772b056a486e72cfd2eb8f3f5aa6325caedb23ae2072ec389"
+    "0b660bee2f9fc642185fefe22e1d7e5fad8536724f5ac1912a451234b1bade14"
 )
 """sha256 of `PaperBookSnapshot.model_json_schema()` without its descriptions, keys in the order
 pydantic gives them -- which is the fields' declaration order, the order `model_dump_json`
-writes and `open_snapshot`'s canonical-bytes check compares."""
+writes and `open_snapshot`'s canonical-bytes check compares.
+
+Re-pinned once, for `config_digest` (`V2-P7-017`), before any snapshot had been stored: a new
+digest here was the whole of that change only because there was nothing on disk to migrate."""
 
 
 def test_the_stored_shape_of_a_snapshot_is_pinned_so_a_contract_change_needs_a_migration() -> None:
@@ -1046,6 +1134,7 @@ def _settle(snapshot: PaperBookSnapshot, day: Day) -> PaperBookSnapshot:
         else:
             pending.append(PendingOrder(order=order, attempts=item.attempts + 1))
     return PaperBookSnapshot(
+        config_digest=snapshot.config_digest,
         session_index=session,
         session=day.on,
         book=PortfolioState(
@@ -1144,6 +1233,7 @@ def test_an_old_snapshot_and_the_sessions_after_it_replay_to_the_snapshot_reache
         FilePaperStateStore(tmp_path / "snapshots"),
         settling_session=DAYS[stop].on,
         settling_index=INDEX[DAYS[stop].on],
+        config_digest=DIGEST,
     )
     assert resumed.session == ([S0, *[day.on for day in DAYS]])[stop]
     for day in DAYS[stop:]:
@@ -1243,7 +1333,12 @@ def test_the_composition_root_wires_the_paper_snapshot_store(
         save_snapshot(storage.paper_state_store, book)
     reopened = build_storage(runtime_dir=runtime_dir, clock=migration_clock)
     assert (
-        latest_snapshot(reopened.paper_state_store, settling_session=S3, settling_index=103)
+        latest_snapshot(
+            reopened.paper_state_store,
+            settling_session=S3,
+            settling_index=103,
+            config_digest=DIGEST,
+        )
         == held_snapshot()
     )
     assert os.path.isfile(_document(reopened.paper_state_store, S2))

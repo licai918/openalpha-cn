@@ -1,11 +1,17 @@
-"""The survivor book's vocabulary and configuration (`V2-P7-005`).
+"""The survivor book's vocabulary and configuration (`V2-P7-005`, `V2-P7-017`).
 
 What is pinned here is that the configuration is a *contract* -- frozen, versioned, content-
 addressed, with no default for the seed -- and that the two quantities every later layer leans on,
 the share of a list a fraction covers and the lots a budget buys, round the way the design says.
+`V2-P7-017` adds the configuration's whole digest, which a paper-book snapshot carries.
 """
 
+import os
+import re
+import subprocess
+import sys
 from decimal import Decimal
+from pathlib import Path
 from typing import get_args, get_type_hints
 
 import pytest
@@ -23,6 +29,7 @@ from openalpha_cn.domain.survivor_book import (
     SurvivorBookConfig,
     floor_share,
     lot_quantity,
+    survivor_config_digest,
 )
 
 
@@ -342,3 +349,58 @@ def test_whole_lots_are_counted_exactly_however_large_the_budget() -> None:
     budget = Decimal(10) ** 25 + Decimal(7)
 
     assert lot_quantity(budget, Decimal(3), 100) == int(budget // 300) * 100
+
+
+SOURCE_ROOT = str(Path(__file__).resolve().parents[3] / "src")
+"""The tree under test, handed to a child process so it imports this copy (an isolated worktree,
+say) rather than whichever one the interpreter's own path finds first."""
+
+
+def test_the_config_digest_is_the_whole_sha256_of_the_bytes_the_config_id_addresses() -> None:
+    """One canonicalisation read at two widths: `config_id` is `sbc_` and the first 24 hex
+    digits of it, and the digest a paper-book snapshot quotes is all 64."""
+    base = config()
+    digest = survivor_config_digest(base)
+
+    assert re.fullmatch(r"[0-9a-f]{64}", digest)
+    assert base.config_id == f"sbc_{digest[:24]}"
+    assert survivor_config_digest(config()) == digest
+
+
+def test_the_config_digest_moves_with_any_one_field() -> None:
+    base = survivor_config_digest(config())
+
+    for changed in (
+        config(holding_count=9),
+        config(capital=Decimal("350001")),
+        config(boards=("main", "growth")),
+        config(cost_reserve_fraction=Decimal("0.006")),
+        SurvivorBookConfig(seed=8),
+    ):
+        assert survivor_config_digest(changed) != base
+
+
+def test_the_config_digest_is_the_same_in_processes_with_different_hash_seeds() -> None:
+    program = (
+        "from openalpha_cn.domain.survivor_book import SurvivorBookConfig, survivor_config_digest;"
+        "print(survivor_config_digest(SurvivorBookConfig(seed=7, boards=('main', 'growth'))))"
+    )
+    answers = set()
+    for hash_seed in ("0", "1"):
+        completed = subprocess.run(
+            [sys.executable, "-c", program],
+            env={
+                **os.environ,
+                "PYTHONHASHSEED": hash_seed,
+                "PYTHONPATH": os.pathsep.join(
+                    part for part in (SOURCE_ROOT, os.environ.get("PYTHONPATH")) if part
+                ),
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr
+        answers.add(completed.stdout.strip())
+
+    assert answers == {survivor_config_digest(config(boards=("main", "growth")))}
