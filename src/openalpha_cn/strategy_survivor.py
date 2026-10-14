@@ -167,9 +167,9 @@ class SurvivorAdapterConfig(BaseModel):
     scheduled run); `exchange` the calendar's; `transform` the processed tier the composite
     factors are built and read under; `min_coverage` and `max_carry_sessions` the facts
     adapter's coverage floor and carry bound; `max_panel_catch_up_sessions` step 2's catch-up
-    bound; `benchmark` the index whose close settles the book's days. The four tags state rules
-    the code follows and cannot be chosen otherwise: the 20-session prediction horizon, the
-    protocol's costs, and whole-order rejection with the buy carried.
+    bound; `benchmark` the index whose close settles the book's days. Beside `schema_version`,
+    three tags state rules the code follows and that cannot be chosen otherwise: the 20-session
+    prediction horizon, the protocol's costs, and whole-order rejection with the buy carried.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
