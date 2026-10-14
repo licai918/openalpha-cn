@@ -185,10 +185,60 @@
 
 ---
 
-## Part C — `V2-P7-009` 纸面账本的每日推进（待补全）
+## Part C — `V2-P7-009` 纸面账本的每日推进
+
+依赖 A、B。三个任务：C1（面板读取：会话序号、当日 bar、复权因子、基准收盘）与 C2（纯结算核心）互不依赖、文件不相交，可并行；C3（一晚的事务、开账、`BookState`）依赖 C2。**每晚的顺序**（计划 1 的模拟已钉住"先结算后决定"）：事实 → `screen` → **结算当日**（用上一日快照 + 当日 bar；`advance_orders` 要用当日的幸存者集合，所以结算排在 `screen` 之后）→ `decide_book`（用结算后的 `BookState`）→ `build_trade_list` → 写快照（含今晚新计划的订单）。
+
+**会话序号。** `TradeOrder` 数的是整数会话序号。序号 = 登记配置里 `adapter.epoch_session`（一个已收盘的开市日，序号 0）之后到该日的开市日个数；它只由日历和配置决定，与面板里日历最早存到哪一年无关（回填更早的年份不会让已落盘的快照错位）。开账 = 在 `epoch_session` 当晚存一份"什么都没结算过"的开账快照（`last_settled_session=None`，现金 = 配置里的本金，无持仓）；**第一次真正的晚间运行是 `epoch_session` 的下一个开市日**，那一晚上一份快照是开账快照，`initialized=False`，`decide_book` 出 `INITIAL_BUILD`。之后 `initialized` = 上一份快照的 `last_settled_session is not None`。
+
+### Task C1：结算输入的面板读取与会话序号
+
+**Issue:** `V2-P7-009`。**依据:** T5 §0、§2（复权）、§7.1（不许第四处 bar 组装）。
+
+**Files:** Create `src/openalpha_cn/survivor_market.py`、`unit/test_survivor_market.py`。
+
+**先读：** `shortlist_view._bars_on`（约 1730–1830 行，一个会话的 `MarketBar` 与交易所公布的涨跌停价；`_risk_warned_on` 的拒绝语义）、`factor_view._PanelInputs.market_bar`、`strategy_view._PanelDays.quote`——**这是已有的第三处 bar 组装，T5 不许有第四处**：本任务把其中一处提成共享的公共函数并让原调用方改用它（P6 的行为与测试期望逐位不变），或者直接调用已有的公共入口；做哪一种先在报告里写明理由。`domain/adjustment.py`（`ADJ_FACTOR_DATASET`、读取函数）、`domain/index_prices.py`、`survivor_facts.py` 里的 `A2` 读取方式（`_read`/`PanelStorageError` 的处理、`as_of` 前视守卫）。
+
+**Interfaces（拟，实现者核对）：**
+- `SessionOrdinals(calendar: TradingCalendar, epoch: date)`：`index_of(day: date) -> int`（`day` 必须是开市日且不早于 `epoch`，否则按名拒绝）、`day_of(index: int) -> date`；`epoch` 不是开市日按名拒绝。
+- `settlement_market(store: PanelStore, *, session: date, as_of: datetime, names: Collection[str], calendar: TradingCalendar, benchmark: str = "000905.SH") -> SessionMarket`，其中 `SessionMarket` = 冻结数据类 `(bars: Mapping[str, MarketBar], adj_factor: Mapping[str, Decimal], benchmark_close: Decimal)`。`bars` 只含 `names` 里**当日有日线且有交易所公布涨跌停价**的名字（没有的不进字典，由 `build_paper_step` 记为 `not_attempted`；停牌名字有日线行但标 `suspended`）；`adj_factor` 含 `names` 里当日有复权因子的名字；`benchmark_close` 是基准指数当日收盘（缺失按名拒绝，不用前值）。
+
+**要钉住的行为（面板夹具在测试里生成，不入库）：** 序号的边界（epoch 当日 = 0、跨周末与节假日、跨年、非开市日与早于 epoch 被拒、回填更早年份的日历不改序号——用两份日历对照）；`as_of` 前视守卫（当晚 16:30 之后才可见的数据读不到，读更晚的 `as_of` 得到逐位相同的字节）；没有公布涨跌停价的名字不进 `bars`；停牌名字的 bar 标 `suspended` 且开盘价折叠后仍被账本整单拒绝（与 `build_paper_step` 联测）；一只名字当日没有复权因子 → 不进 `adj_factor`（调用方负责拒绝持仓名缺比值）；基准缺失被拒；`names` 之外的证券一概不读不建（只构建被问到的名字）；P6 的 `test_shortlist_view`/`test_factor_view`/`test_strategy_view` 期望不变。
+
+**Steps / 提交:** `refactor(V2-P7-009): one bar assembly for the three faces`（如要提取）与 `feat(V2-P7-009): a session's bars, adjustment factors and benchmark close for the paper book, and the session ordinals`。
+
+### Task C2：结算核心（纯函数 + 账簿推进）
+
+**Issue:** `V2-P7-009`。**依据:** 计划 1 的 `advance_orders`/`update_cooldowns`，B1 的 `build_paper_step`/`remark_at_close`，B3 的 `PaperBookSnapshot`，T5 §4–§6。
+
+**Files:** Create `src/openalpha_cn/backtest/paper_settlement.py`、`unit/backtest/test_paper_settlement.py`；pyproject 的 import-linter 合约清单里加这个模块（照 B1/B3 的做法）。
+
+**Interfaces（拟）：**
+- `settle_session(*, previous: PaperBookSnapshot, session: date, session_index: int, market: SessionMarket, survivors: Collection[str], portfolio: PaperPortfolio, config: SurvivorBookConfig, observed_on: date) -> Settlement`。`market` 的类型由 C1 定义——**为并行起见，C2 在自己的文件里声明一个结构相同的 `Protocol`/数据类 `SessionMarketLike`（三个属性：`bars`、`adj_factor`、`benchmark_close`），C1 的 `SessionMarket` 结构上满足它，双方都不 import 对方**。
+- `Settlement`（冻结数据类）：`book: PortfolioState`（已用真实收盘重估，`as_of == session`）、`entry_factors`、`live: tuple[PendingOrder, ...]`（`attempts` 已加一）、`cooldowns`、`filled/expired/cancelled: tuple[TradeOrder, ...]`、`attempts: tuple[AttemptedOrder, ...]`、`result: PaperSessionResult`；`with_plan(trade_list: TradeList) -> PaperBookSnapshot`：把今晚新计划的订单作为 `attempts=0` 的待办并入、`last_settled_session=session_index`，得到当晚要存的快照（`TradeList.carried` 必须与 `live` 一致，否则按名拒绝）。
+- `book_state(settlement_or_snapshot, *, config, equity?) -> BookState`：持仓数量 = 各持仓唯一一手的 `quantity`，`pending_buys/sells` 来自待办订单，`equity` = 现金 + 持仓按收盘价的市值，`initialized` 的推导见本 Part 开头。
+
+**行为：** (1) 到期订单 = 上一份快照里 `execute_session <= session_index` 的全部待办（含上次没成交的顺延单）；全部交给 `build_paper_step`（含 `session_index`），没有 bar 的由它记为 `not_attempted`；(2) 比值表 = 每个持仓名与每个到期卖单名的 `adj_factor[session] / entry_adj`：**持仓名当日没有复权因子 → 按名拒绝当日**（不用 1、不沿用前值），不动的名字显式给 1；(3) `PaperPortfolio.advance(state=previous.book, session=plan.step, observed_on)`，再用 `remark_at_close` 以真实收盘重估；(4) 成交的订单 = 账本转移里 `status == "filled"` 的尝试 id 对回原订单 id；`advance_orders(..., filled_order_ids, survivors)` 得 live/expired/cancelled；(5) 买单成交的名字：`entry_adj` = 成交会话的 `adj_factor`；卖单成交的名字：去掉；(6) `update_cooldowns(..., session=session_index, sold=成交的卖出名, expired_buys=过期买单的名, config)`；(7) 每个到期且仍在 live 的订单 `attempts += 1`（`PaperBookSnapshot` 会校验这条恒等式）；(8) 不改上一份快照、不写任何存储（存储与账本之外的副作用只有 `portfolio.advance` 对**注入的**账本的追加，这一点由 C3 管）。
+
+**要钉住的行为（手算 3–5 日夹具，每条一个测试）：** 开盘成交 + 收盘重估；先卖后买与现金约束；涨停买不进（`submitted` 但被账本整单拒绝）后顺延、第二次尝试 id 不同、`attempts` 为 1 → 2；买单到期（3 个会话）→ `expired` + 冷却；买单对应的名字不再是幸存者 → `cancelled`、无冷却；卖单从不过期、停牌的卖单留在 live；一次 10 送 10 之后：权益无虚假回撤、持仓的 `reference_price` 口径与比值（`entry_adj` 在买入成交日取）、被卖出的卖单名义额按比值正确；持仓名缺复权因子被拒；二次结算同一输入同一结果（含字节）；冷却起始会话 = 结算会话（不是信号会话）；一个名字在同一晚既卖出成交又被计划买回（`cooldown_sessions=0`）；`PaperBookSnapshot` 的校验在结算结果上全部通过（用 `with_plan` 构出快照）。
+
+**Steps / 提交:** `feat(V2-P7-009): settle one session of the paper book -- fills, order lifecycle, cool-downs, entry factors`。
+
+### Task C3：一晚的事务（崩溃安全）、开账与会话间的衔接
+
+**Issue:** `V2-P7-009`。**依据:** B3（`latest_snapshot`/`save_snapshot`）、T5 §6、P7 §9。
+
+**Files:** Create `src/openalpha_cn/backtest/paper_evening.py`、`unit/backtest/test_paper_evening.py`；必要时改 `runtime/composition.py`（只加装配，不改既有装配）。
+
+**Interfaces（拟）：** `open_book(*, store, ledger_path?, session: date, session_index: int, cash: Decimal) -> PaperBookSnapshot`（写开账快照；已存在同一份则零写入，存在不同的则拒绝）；`evening_settlement(*, store, portfolio, ...) -> Settlement` 做"读上一份快照（只走 `latest_snapshot(settling_session=, settling_index=)`）→ `settle_session`"；`commit_evening(*, store, settlement, trade_list) -> PaperBookSnapshot` 存当晚快照（`save_snapshot`）。
+
+**要钉住的行为：** **崩溃安全**——账本追加发生在 `advance` 里、快照在其后才存，所以"账本写了、快照没写"是真实会出现的状态：用会在 `save_snapshot` 处抛错的存储做故障注入，重跑同一晚必须收敛到同一份快照字节、账本里每条转移恰好一次（先读账本里本会话各尝试 id 的转移；若实现者发现 `SQLitePortfolioLedger.append` 对内容相同的重复转移是幂等的，就用它并用测试钉住，否则要在 `advance` 之前检测并复用——先在报告里写明账本的实测行为）；"快照写了、什么都没动"的二次运行零写入；快照缺一天被 `latest_snapshot` 按名拒绝而不是从上一份悄悄接着走（含：前一晚的运行崩溃在账本写入之前）；开账不能覆盖已有的账；`epoch_session` 之前的日期被拒；整晚的顺序（`screen` 之后结算、结算之后 `decide_book`）由一个"晚间"测试驱动真实的 `decide_book`/`build_trade_list`，连跑 25 个会话的合成夹具，最终账簿与计划 1 的模拟（`test_survivor_book_lifecycle.py`）在同一组输入上给出一致的持仓与冷却轨迹。
+
+**Steps / 提交:** `feat(V2-P7-009): one evening of the paper book as a crash-safe transaction`。
+
+**A、B 阶段在合入前留下的要求（Part C 必须全部落实，2026-10-14）：**
 
 依赖 B。目标：`settle_session(...)`——读取状态快照 → 取上一日的订单 → 用 B1 构建步骤 → `PaperPortfolio.advance`（B2 的成本）→ 用计划 1 的 `advance_orders` / `update_cooldowns` 结算订单生命周期 → 得到今天的持仓、在途买单 / 卖单、冷却 → 写快照。要钉住：先结算后决定的顺序；停牌的名字的单保持在途；3 日后买单过期且触发冷却；二次运行零写入；跨年；缺数据按名拒绝。**B 阶段评审留下的、本任务必须落实的要求（2026-10-14）：** (1) 调用 `build_paper_step` 时传入 `session_index`，且只传当日到期的订单；(2) 每个持仓都要有一个**买单成交日**的复权因子（`entry_adj`，B3 的快照里存），`adjustment_ratio` 必须覆盖每个持仓名（没动过的显式给 1）；(3) 交给 `build_trade_list` 的参考价，对**持仓名**要换成账本口径（真实收盘 × 比值）——否则 10 送 10 之后估算的卖出所得只有一半、买单定量偏小；(4) 复权事件之后手续费是按缩放后的名义额收的，而 P6 账簿按原始名义额收（只有比值为 1 时两者才逐分相等），日志里要写明；(5) 账本里经过复权的持仓，`filled_price` 是账本口径、不是任何人成交过的价格，读它的报告要换算；(6) 在成本注入的折算下，账本的 `transfer_fee` 实际是滑点，配置与日志里要这样写。**A、B 阶段在合入前又留下的要求（2026-10-14）：** (7) 快照的读写只走 `latest_snapshot(store, *, settling_session, settling_index)`（它拒绝日期不早于结算日的快照、拒绝缺了中间一天），而"写入早于已持有的最新会话的会话"在存储层被拒；缺失日的检测只在读取时，所以**写快照之前必须先读过上一日的快照**，不得越过缺口直接存；`attempts` 要等于已结算的会话数；(8) 每晚调用 `build_facts_day(..., held=<持仓名>)`：持仓名不受 `max_carry_sessions` 约束（长期停牌的持仓每天约多读 10 s，250 个会话时）；**一只持仓名在事实日里没有行有两种情形**——在册但从未有日线（必须拒绝当日，具名）与已退市（按设计卖出），`FactsDay` 区分不了，所以本任务要读登记簿区分（或让适配器给出一张"已退市持仓"清单），**不能只按"持仓没有行"就拒绝**，否则一只退市的持仓会让之后每天都被拒；(9) 注册簿认识、当日不在册却有日线的代码被排除、不进任何 notes 计数——汇总时要把这个数量显示出来；(10) `FilePredictionStore.get` 对非法字节可能让 `UnicodeDecodeError` 逃逸（既有缺陷，未测），写预测登记之前先看一眼；
-**在 A、B 合入后补全接口与测试细节，再派发。**
 
 ## Part D — `V2-P7-008` 每日入口 `strategy_survivor`（待补全）
 
@@ -214,3 +264,4 @@
 |---|---|---|
 | 2026-10-14 | 立项：Part A、B 写到可派发；C、D、E 待补全 | 滚动计划：C、D、E 依赖 A、B 的实际接口 |
 | 2026-10-14 | A、B 合入前的更正与要求：B1 的接口段改为实现后的签名；Part C 加要求 (7)–(10)（快照写入须经读取、持仓名无事实行的两种情形、被排除的代码计数、预测登记的非法字节）；Part D 加 A 阶段要求 (1)–(6)（`update_panel(survivor=…)`、新年无更名公告的已知局限、doctor 核对、覆盖率校准） | A2 评审与修订、A3 的 Q1/Q2、B3 评审 |
+| 2026-10-14 | Part C 补全：三个任务（C1 面板读取与会话序号、C2 结算核心、C3 一晚的事务与开账）；会话序号由 `adapter.epoch_session` 与日历决定；每晚的顺序 = 事实 → `screen` → 结算 → `decide_book` → 计划 → 存快照 | A、B 合入前的接口与评审结论已齐 |
