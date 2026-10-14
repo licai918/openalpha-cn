@@ -558,6 +558,18 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_view.without_store_path",
         }
     ),
+    "openalpha_cn.strategy_survivor": frozenset(
+        {
+            # V2-P7-008. The survivor registration and its paper book: the adapter block's
+            # transform is checked against the transforms this build declares, and the paper
+            # book is built at the protocol's costs and slippage -- the P6 book's own constants,
+            # so the two books charge alike rather than by a third copy of the schedule. Three
+            # declarations; none reads a dataset.
+            "panel_factors.FACTOR_TRANSFORMS",
+            "strategy_view.PROTOCOL_COSTS",
+            "strategy_view.PROTOCOL_SLIPPAGE_RATE",
+        }
+    ),
     "openalpha_cn.strategy_survivor_facts": frozenset(
         {
             # V2-P7-016. The survivor book's eligibility facts: one row per listed security,
@@ -894,6 +906,13 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
                 "trade_cal",
             }
         ),
+    ),
+    "openalpha_cn.strategy_survivor": DatasetReach(
+        # V2-P7-008. It names no dataset and reaches none: it reads a registration, not the
+        # panel, and the three names it takes across the seam are declarations -- the
+        # transforms this build declares and the protocol's costs and slippage rate.
+        named=frozenset(),
+        reached=frozenset(),
     ),
     "openalpha_cn.strategy_survivor_facts": DatasetReach(
         # V2-P7-016. It names the four datasets whose partitions it asks the catalog about
