@@ -11,44 +11,46 @@ to settle in which order, what to read off the panel for each, and every refusal
 
 ## A survivor day's paper book, in order
 
-1. **The binding** (`bind_paper_book`), before the head: one paper book per runtime directory,
-   bound by a write-once marker `<paper directory>/registration.json` to the registration's
-   `config_id`, the book's `survivor_config_digest` and the epoch. The digest alone is the
-   book's identity in every snapshot; the marker adds the `config_id`, which covers the adapter
-   block too, so a changed adapter over an unchanged book -- which `open_book` accepts -- is
-   refused instead of continuing the same book under another registration. Written before the
-   book is opened, so a run that stops between the two leaves a marker and no book, which the
-   same registration completes and another one is refused by; the marker guards against a
-   changed registration, not against its own deletion -- one removed by hand is written again
-   by the next run.
-2. **The head** (`paper_head`): `open_book` on **every** run, with the registration's epoch,
-   capital and digest (C3 review rule 2): the same opening again writes nothing, and is the
-   nightly check that the book held is the one registered; any other opening is refused by
-   name. When this run opens the book, an epoch more than `1 + max_panel_catch_up_sessions`
-   sessions before the session is refused first (the memo's decision 3: the panel step could not
-   have caught those sessions up). The head is the newest snapshot, `held` its position codes,
-   which the caller pins in its journal; a run on the epoch itself only opens the book.
-3. **The facts day** (`facts_day`) is the caller's step 6: `build_facts_day` with the
+0. **One writer** (`paper_book_lock`): the caller takes the paper book's writer lock before step
+   2 and holds it through step 8; every function here that touches the book takes the lock's
+   token (`lock=`) and refuses to run unless it is still held (see *One writer* below).
+1. **The head** (`paper_head`), step 5. When the store holds no book this run opens it: an
+   epoch more than `1 + max_panel_catch_up_sessions` sessions before the session is refused
+   first (the memo's decision 3: the panel step could not have caught those sessions up), then
+   the paper directory's write-once marker `registration.json` is written -- or found equal --
+   binding the book to the registration's `config_id`, the book's `survivor_config_digest` and
+   the epoch, then `open_book` saves the opening. When the store holds a book the marker must be
+   there and be equal -- one that is missing or differs is refused by name and nothing is
+   written, because the marker is what tells this book's registration from another's (the
+   digest alone is the book block's; the `config_id` covers the adapter block too, so a changed
+   adapter over an unchanged book, which `open_book` accepts, is refused here) -- and then
+   `open_book` is called again with the registration's epoch, capital and digest (C3 review
+   rule 2): the same opening writes nothing, and is the nightly check that the book held is the
+   one registered. The head is the newest snapshot, `held` its position codes, which the caller
+   pins in its journal; a run on the epoch itself only opens the book.
+2. **The facts day** (`facts_day`) is the caller's step 6: `build_facts_day` with the
    registration's parameters and the pinned `held`. Its held statuses are **not** applied
-   there -- the prediction must not be lost to them -- but here, by the paper book
+   there -- the prediction must not be lost to them -- but by the paper book
    (`delisted_or_refuse`): `row` passes, `delisted` is handed to the settlement (a delisted
    holding with no bar is written off, D13), and every other status refuses the day by name with
-   its remedy. Every function that reads a facts day takes `transform`, the processed tier the
-   factors were built under: the registration's (`FACTOR_TRANSFORMS.get(adapter.transform)`)
-   unless it is given, as it is for a store built under another one.
-4. **The catch-up** (`catch_up`), before the evening: every session `missing_sessions` names
-   through the session before tonight's, oldest first. For a book holding something the session's
-   facts are read at the run's `as_of` with **`min_coverage=0.0`** -- a catch-up makes no
-   decision, so a session whose facts the registered coverage refused (its evening stopped at
-   step 6) still settles; a universe of nothing is still refused by the adapter -- and the held
-   statuses applied; for a book holding nothing no facts are read at all and nothing is
-   delisted. The market is `settlement_market` for the head's held names and the names of its
-   live orders. `settle_only` is the same catch-up for the session itself: the caller's choice
-   for a run after 09:15 of the next session on a session with **no** snapshot (decision 2); a
-   session already held is refused there, never routed to a catch-up (C3 review rule 1).
-5. **The evening** (`evening`): `run_evening` with tonight's screen, the market of the book before
-   the session (its held names and live orders' names, with the pinned `held`), **every** close
-   of the facts day as the entrants' prices -- C3 prices held names from the ledger, in its units,
+   its remedy. **`transform`** is the processed tier the factors were built under: the daily
+   command resolves `FACTOR_TRANSFORMS.get(adapter.transform)` once and passes that one object
+   to `facts_day`, `catch_up`, `evening` and `strategy_survivor_registration`'s
+   `survivor_input_provenance`; `None` resolves the same object here. Another object is a test's
+   injection, for a store built under another transform.
+3. **The catch-up** (`catch_up`), step 8, before the evening: every session `missing_sessions`
+   names through the session before tonight's, oldest first, each settled from the book the one
+   before it left. For a book holding something the session's facts are read at the run's
+   `as_of` with **`min_coverage=0.0`** -- a catch-up makes no decision, so a session whose facts
+   the registered coverage refused (its evening stopped at step 6) still settles; a universe of
+   nothing is still refused by the adapter -- and the held statuses applied; for a book holding
+   nothing no facts are read at all and nothing is delisted. The market is `settlement_market`
+   for the book's held names and the names of its live orders. Each session is its own
+   transaction: `on_settled` is called with it as soon as it commits, and a refusal at a later
+   session raises `CatchUpStalledError`, which carries the sessions settled before it.
+4. **The evening** (`evening`), step 8: `run_evening` with tonight's screen, the market of the book
+   the session settles from (its held names and its live orders' names), **every** close of the
+   facts day as the entrants' prices -- C3 prices held names from the ledger, in its units,
    whatever they say, and a name sold at tonight's open must keep its real close in case the
    decision buys it again (rule 3) -- and the delisted set of the facts day.
 
@@ -56,41 +58,65 @@ to settle in which order, what to read off the panel for each, and every refusal
 facts with the `held` it pinned before the catch-up; the eligible and survivor sets do not
 depend on `held`, but the rows of long-halted holdings and the held statuses do. So `evening`
 compares the pinned `held` with the holdings of the book its session settles from and, when they
-differ, reads the facts day again itself, with those holdings, at the registered coverage, and
-screens it again (the caller's facts and screen are used as given otherwise). The evening it
-returns carries the facts and screen it ran on.
+differ, reads the facts day again itself, with those holdings and **no coverage floor** -- the
+day's coverage was judged at step 6, and the prediction filed at step 7 stands on it -- and
+screens it again. The second screen must agree with the caller's on the eligible set and on the
+survivors, ranked; one that does not is refused by name, because the design's one assumption
+about `held` would be wrong. The evening it returns carries the facts and screen it ran on.
 
-**A session already settled is run as an evening, whatever the clock** (rule 1): `evening` always
-calls `run_evening`, whose answer for a held session is `unchanged`, writing nothing, with the
-evening's settlement, decision and trade list derived again -- from the pinned inputs, which is
-what makes a rerun reproduce. The book it settles from is then read with `load_snapshot` (the
-session before, held), because the head is the session itself.
+**Reruns.** A session already settled is run as an evening by `evening`, whatever the clock
+(rule 1): it always calls `run_evening`, whose answer for a held session is `unchanged`, writing
+nothing, with the evening's settlement, decision and trade list derived again -- from the
+journal-pinned inputs, which is what makes a rerun reproduce; the book it settles from is then
+read with `load_snapshot` (the session before, held), because the head is the session itself.
+`evening` never routes a held session to a catch-up. `settle_only` -- the caller's choice for a
+session with no snapshot when the run's pinned `as_of` is at or after 09:15 of the next session
+(decision 2) -- derives its **own** session again with `run_catch_up` when it is held already: a
+settle-only run that committed and stopped before its journal is finished that way, writing
+nothing, while a session an evening settled with orders is refused by C3 by name. **Which of the
+two a rerun is is the caller's, by the journal-pinned `as_of`, never by the clock**: an evening
+iff that `as_of` is before 09:15 of the session after.
 
 **`observed_on`** is the Shanghai date of the run's journal-pinned `as_of` on every call (rule
-6), so a rerun on another day derives what the first run did; an `as_of` without a time zone is a
-programming error (`TypeError`).
+6); an `as_of` without a time zone is a programming error (`TypeError`). A rerun on another day
+reads at that pinned `as_of` and derives what the first run did -- **until the next session's
+panel update**: `adj_factor` and `index_daily` are read a year at a time through the panel's
+whole-partition door, which refuses an `as_of` older than the newest row its year holds
+(`PartitionNotYetKnowableError`, a `PanelStorageError`, deliberately not mapped here: it is the
+panel's to name). A rerun after that reads at the newest instant the panel can be read at:
+`settlement_market` gives a later read the evening's bytes (C1 pins it), and C3's equality check
+refuses any session whose derivation differs from what it settled.
 
 ## One writer
 
 C3 assumes one writer per book (rule 4). `paper_book_lock` is the paper book's own lock -- an
 exclusive advisory lock on `<paper directory>/writer.lock`, taken without waiting, released when
 its holder lets go or dies (the kernel drops it with the process) -- and the panel's catalog lock
-is no substitute: it is held per catalog operation, not across a day. The caller takes it before
-it reads the head whose `held` it pins and holds it until the paper book's step is done, so that
-`held`, the catch-up and the evening all see one book; a second run meanwhile is refused by name
-(`SurvivorDayError`, step `paper head`) having read and written nothing of the book. This module
-does not take it itself: D5 wraps steps 5 through 8 in it.
+is no substitute: it is held per catalog operation, not across a day. It yields a
+`PaperBookLock`, the token every function that writes or pins the book (`paper_head`,
+`catch_up`, `settle_only`, `evening`) requires and checks to be still held -- still locked by
+this run, on the file the paper directory holds under that name -- so the single writer is a
+fact of the calls, not a convention: a probe through a second descriptor could not tell this
+run's lock from another run's. A second run is refused at once (`PaperBookBusyError`), having
+read and written nothing of the book; the caller takes the lock before its step 2 and names that
+refusal under its own step. Advisory locks hold on a **local filesystem** only, as
+`panel.store`'s catalog lock does (over NFS or SMB they are as good as the server's lock
+manager); and a child started by `fork` while the lock is held inherits the open file
+description, so it holds the lock with its parent until both have let go.
 
 ## Refusals
 
-Every refusal is a `SurvivorDayError` naming its step -- `paper head`, `facts` or `paper book`,
-the daily command's own step names -- and its remedy. The paper book's three error classes are
-mapped by class, never by message: `PaperStateError` (`PaperLedgerConflictError` included), the
-store's `storage.paper_state.PaperStateStoreError` (which `backtest/` cannot import, so C3 cannot
-make it a `PaperStateError`), and `ValueError` -- the contract refusals of the facts adapter, the
-session market, the ordinals and the kernel. Anything else reaches the caller as itself: a
-`TypeError` or an `AssertionError` is a programming error, and the panel's own `RuntimeError`s
-(a busy or damaged catalog) are the panel's to name.
+Every refusal is a `SurvivorDayError` naming its step and its remedy: `paper head` for the head,
+`facts` for the caller's own step-6 read (`facts_day`), and **`paper book` for everything raised
+inside `catch_up`, `settle_only` and `evening`** -- they run in step 8, after step 7 filed the
+prediction, whatever they were reading when they stopped. The paper book's three error classes
+are mapped by class, never by message: `PaperStateError` (`PaperLedgerConflictError` included),
+the store's `storage.paper_state.PaperStateStoreError` (which `backtest/` cannot import, so C3
+cannot make it a `PaperStateError`), and `ValueError` -- the contract refusals of the facts
+adapter, the session market, the ordinals and the kernel. Anything else reaches the caller as
+itself: a `TypeError` or an `AssertionError` is a programming error, and the panel's own
+`RuntimeError`s (a busy or damaged catalog, a partition not yet knowable) are the panel's to
+name.
 """
 
 from __future__ import annotations
@@ -146,6 +172,9 @@ __all__ = [
     "PAPER_BOOK_LOCK",
     "PAPER_BOOK_MARKER",
     "SURVIVOR_BOOK_STEPS",
+    "CatchUpStalledError",
+    "PaperBookBusyError",
+    "PaperBookLock",
     "PaperHead",
     "SurvivorDayError",
     "SurvivorEvening",
@@ -176,8 +205,13 @@ PAPER_BINDING_SCHEMA: Final[str] = "survivor-paper-binding/v1"
 _SHANGHAI: Final[ZoneInfo] = ZoneInfo("Asia/Shanghai")
 """The exchange's zone: a run's `observed_on` is its `as_of`'s date there."""
 
-_CATCH_UP_COVERAGE: Final[float] = 0.0
-"""A catch-up makes no decision, so it reads a session's facts with no coverage floor."""
+_NO_COVERAGE_FLOOR: Final[float] = 0.0
+"""A catch-up decides nothing, and the evening's second read decides nothing the first did not:
+both read a facts day with no coverage floor."""
+
+_SYNC_DIRECTORIES: Final[bool] = os.name != "nt"
+"""Whether the marker's directory is synced after its link: everywhere but Windows, which cannot
+open a directory as a file (`storage/paper_state.py`'s policy)."""
 
 _REFUSED_STATUS_REMEDIES: Final[dict[str, str]] = {
     "no_bar_in_reach": (
@@ -198,7 +232,7 @@ _REFUSED_STATUS_REMEDIES: Final[dict[str, str]] = {
     "board_unrecognised": (
         "its prefix, with its exchange, is not a main-board pair the adapter recognises "
         "(`MAIN_BOARD_PREFIXES`): the prefix is a decision to take in the adapter's code before "
-        "the book can settle it"
+        "the book can settle it, and a code change binds a new registration (V2-P7-006)"
     ),
 }
 """Every held status that refuses the day, with its remedy. `row` passes, `delisted` is handed on,
@@ -218,6 +252,51 @@ class SurvivorDayError(RuntimeError):
             raise ValueError(f"{step!r} is not one of the survivor day's steps here")
         super().__init__(message)
         self.step = step
+
+
+class PaperBookBusyError(SurvivorDayError):
+    """Another run holds the paper book's writer lock. Its `step` is `paper head`; the daily
+    command, which takes the lock before its step 2, names it under its own step."""
+
+
+class CatchUpStalledError(SurvivorDayError):
+    """A catch-up stopped at a session, by name; `caught_up` is every session it settled before
+    that one -- committed, each its own transaction, and kept."""
+
+    def __init__(self, step: str, message: str, *, caught_up: tuple[CatchUpResult, ...]) -> None:
+        super().__init__(step, message)
+        self.caught_up = caught_up
+
+
+class PaperBookLock:
+    """The paper book's writer lock as this run holds it: the token `paper_head`, `catch_up`,
+    `settle_only` and `evening` require. Made only by `paper_book_lock`.
+
+    `held` is whether this run still holds it: the lock is not let go, and the file under its
+    name in the paper directory is still the one this run locked -- a lock file removed and made
+    again could be locked by another run while this one's descriptor locks nothing anybody sees.
+    """
+
+    __slots__ = ("_descriptor", "directory", "path")
+
+    def __init__(self, directory: Path, path: Path, descriptor: int) -> None:
+        self.directory = directory
+        self.path = path
+        self._descriptor: int | None = descriptor
+
+    @property
+    def held(self) -> bool:
+        if self._descriptor is None:
+            return False
+        try:
+            on_disk = os.stat(self.path)
+        except FileNotFoundError:
+            return False
+        locked = os.fstat(self._descriptor)
+        return (locked.st_dev, locked.st_ino) == (on_disk.st_dev, on_disk.st_ino)
+
+    def _let_go(self) -> None:
+        self._descriptor = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -263,13 +342,14 @@ def settlement_names(snapshot: PaperBookSnapshot) -> tuple[str, ...]:
     )
 
 
-def delisted_or_refuse(facts: FactsDay) -> frozenset[str]:
+def delisted_or_refuse(facts: FactsDay, *, step: str = "paper book") -> frozenset[str]:
     """The held codes `facts` reports `delisted` -- handed to the settlement, which writes off one
     with no bar -- or a refusal naming every held code the book cannot settle and its remedy.
 
     `row` passes; `no_bar_in_reach`, `not_in_registry`, `not_yet_listed` and
-    `board_unrecognised` refuse the day (`SurvivorDayError`, step `facts`), as does any status
-    this module does not know.
+    `board_unrecognised` refuse the day (`SurvivorDayError` under `step`, the paper book's by
+    default: the held statuses are the paper book's to apply), as does any status this module
+    does not know.
     """
     refused = [
         f"{status.ts_code} is {status.status}: "
@@ -281,7 +361,7 @@ def delisted_or_refuse(facts: FactsDay) -> frozenset[str]:
     ]
     if refused:
         raise SurvivorDayError(
-            "facts",
+            step,
             f"the facts day of {facts.session.isoformat()} reports holdings the paper book cannot "
             f"settle -- {'; '.join(refused)}. The book stops until the data is fixed; nothing of "
             "the session was settled",
@@ -292,31 +372,35 @@ def delisted_or_refuse(facts: FactsDay) -> frozenset[str]:
 def bind_paper_book(
     directory: Path, *, config_id: str, config_digest: str, epoch_session: date
 ) -> None:
-    """Bind the runtime directory's paper book to its registration, once.
+    """Write the paper book's marker `<directory>/registration.json` -- the registration's
+    `config_id`, the book's `survivor_config_digest` and the epoch -- or find it equal.
 
-    Writes `<directory>/registration.json` -- the registration's `config_id`, the book's
-    `survivor_config_digest` and the epoch -- when it is not there; the same binding again
-    writes nothing; another one, or a marker that cannot be read, is refused by name
-    (`SurvivorDayError`, step `paper head`) and the marker is left as it is. One paper book per
-    runtime directory: a changed registration is another book, whose block of the adapter alone
-    would otherwise continue this one. The marker reaches its name whole or not at all (written
-    beside it, then linked to it, which fails rather than overwrites when another run got there
-    first).
+    `paper_head` calls it when it opens a book, after the epoch check and before `open_book`;
+    the daily command does not call it. The same binding again writes nothing; another one, or a
+    marker that cannot be read, is refused by name (`SurvivorDayError`, step `paper head`) and
+    left as it is. The marker reaches its name whole or not at all: written to a file of this
+    call's own beside it, synced, then hard-linked to its name, which fails rather than
+    overwrites when another run got there first; the directory is synced after the link. A
+    filesystem that cannot do that (no hard links: FAT, exFAT, many network shares; or a
+    directory this account cannot write) is refused by name.
     """
     if not config_id:
         raise ValueError("config_id names the registration and cannot be empty")
-    binding = {
+    binding = _binding(config_id=config_id, config_digest=config_digest, epoch=epoch_session)
+    marker = directory / PAPER_BOOK_MARKER
+    text = json.dumps(binding, indent=2, sort_keys=True) + "\n"
+    if not marker.exists() and _link_once(marker, text):
+        return
+    _refuse_another_binding(marker, binding)
+
+
+def _binding(*, config_id: str, config_digest: str, epoch: date) -> dict[str, str]:
+    return {
         "schema_version": PAPER_BINDING_SCHEMA,
         "config_id": config_id,
         "config_digest": config_digest,
-        "epoch_session": epoch_session.isoformat(),
+        "epoch_session": epoch.isoformat(),
     }
-    marker = directory / PAPER_BOOK_MARKER
-    if not marker.exists():
-        directory.mkdir(parents=True, exist_ok=True)
-        if _link_once(marker, json.dumps(binding, indent=2, sort_keys=True) + "\n"):
-            return
-    _refuse_another_binding(marker, binding)
 
 
 def _link_once(marker: Path, text: str) -> bool:
@@ -326,9 +410,13 @@ def _link_once(marker: Path, text: str) -> bool:
     The file beside it is this call's own (`mkstemp`), never a name another writer could open
     too: a shared one, truncated by a second writer after the first had linked it, would empty
     the marker through its other name."""
-    descriptor, name = tempfile.mkstemp(
-        dir=marker.parent, prefix=f"{marker.name}.", suffix=".partial"
-    )
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, name = tempfile.mkstemp(
+            dir=marker.parent, prefix=f"{marker.name}.", suffix=".partial"
+        )
+    except OSError as error:
+        raise _unwritable_marker(marker, error) from error
     partial = Path(name)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
@@ -339,9 +427,41 @@ def _link_once(marker: Path, text: str) -> bool:
             os.link(partial, marker)
         except FileExistsError:
             return False
+        if _SYNC_DIRECTORIES:
+            synced = os.open(marker.parent, os.O_RDONLY)
+            try:
+                os.fsync(synced)
+            finally:
+                os.close(synced)
         return True
+    except OSError as error:
+        raise _unwritable_marker(marker, error) from error
     finally:
         partial.unlink(missing_ok=True)
+
+
+def _unwritable_marker(marker: Path, error: OSError) -> SurvivorDayError:
+    return SurvivorDayError(
+        "paper head",
+        f"the paper book's marker {marker} cannot be written ({error.strerror or error}; errno "
+        f"{error.errno}): the paper directory must be writable by this account, on a local "
+        "filesystem that supports hard links -- not FAT or exFAT, and not a network share -- "
+        "because the marker is linked into place so that it is whole or absent. Move the runtime "
+        "directory to such a filesystem and run again; no book was opened",
+    )
+
+
+def _require_binding(marker: Path, binding: dict[str, str]) -> None:
+    """Refuse a held book whose marker is missing, cannot be read, or is not `binding`."""
+    if not marker.exists():
+        raise SurvivorDayError(
+            "paper head",
+            f"a paper book is held in this runtime directory with no binding marker: {marker} is "
+            "missing. The marker is what tells this book's registration from another's, so a run "
+            "never writes it over a held book: restore it from the backup the book's snapshots "
+            "and ledger come from. Nothing was written",
+        )
+    _refuse_another_binding(marker, binding)
 
 
 def _refuse_another_binding(marker: Path, binding: dict[str, str]) -> None:
@@ -372,14 +492,15 @@ def _refuse_another_binding(marker: Path, binding: dict[str, str]) -> None:
 
 
 @contextmanager
-def paper_book_lock(directory: Path) -> Iterator[Path]:
-    """Hold the paper book's writer lock for the body, or refuse at once.
+def paper_book_lock(directory: Path) -> Iterator[PaperBookLock]:
+    """Hold the paper book's writer lock for the body, as the token the book's functions require;
+    or refuse at once.
 
     `<directory>/writer.lock`, exclusive and advisory, taken without waiting: a second holder --
-    another run, in this process or another -- is refused by name (`SurvivorDayError`, step
-    `paper head`) before anything of the book is read or written. The kernel drops the lock with
-    its holder however the holder ends, so a crashed run never wedges the book. See the module
-    docstring for what it must cover.
+    another run, in this process or another -- is refused (`PaperBookBusyError`) before anything
+    of the book is read or written. The kernel drops the lock with its holder however the holder
+    ends, so a crashed run never wedges the book. See the module docstring for what it must
+    cover, and for the local-filesystem and `fork` caveats.
     """
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / PAPER_BOOK_LOCK
@@ -393,15 +514,17 @@ def paper_book_lock(directory: Path) -> Iterator[Path]:
         ) from error
     try:
         if not _try_lock(descriptor, exclusive=True):
-            raise SurvivorDayError(
+            raise PaperBookBusyError(
                 "paper head",
                 f"another run holds the paper book's writer lock {path}: one writer per paper "
                 "book. Let it finish -- a holder that crashed has released it already -- and run "
                 "again. Nothing of the book was read or written",
             )
+        token = PaperBookLock(directory, path, descriptor)
         try:
-            yield path
+            yield token
         finally:
+            token._let_go()
             _unlock(descriptor)
     finally:
         os.close(descriptor)
@@ -413,23 +536,33 @@ def paper_head(
     registration: SurvivorRegistration,
     ordinals: SessionOrdinals,
     session: date,
+    paper_directory: Path,
+    config_id: str,
+    lock: PaperBookLock,
 ) -> PaperHead:
-    """Open the paper book -- on every run -- and return its head as `session`'s run finds it.
+    """Bind and open the paper book -- on every run -- and return its head as `session`'s run
+    finds it.
 
-    `ordinals` must count from the registration's epoch. `open_book` is called with the epoch,
-    the book's capital and its digest whatever the store holds: the same opening writes nothing,
-    another is refused by name (`SurvivorDayError`, step `paper head`). When the store holds no
-    book, an epoch more than `1 + max_panel_catch_up_sessions` sessions before `session` is
-    refused before the book is opened.
+    `paper_directory` is the runtime directory's paper directory (its marker's and its lock's),
+    `config_id` the registration's (`grid.config_id` of the whole registered configuration), and
+    `lock` this run's token for that directory's writer lock. `ordinals` must count from the
+    registration's epoch. A store with no book: the epoch bound, then the marker written or found
+    equal, then `open_book`. A store holding a book: the marker must be there and equal, then
+    `open_book` with the epoch, the book's capital and its digest -- the same opening writes
+    nothing, another is refused by name. Every refusal is `SurvivorDayError`, step `paper head`,
+    with nothing written.
     """
+    _require_lock(lock, "paper head", directory=paper_directory)
     adapter = registration.adapter
     epoch = adapter.epoch_session
     _require_registered_epoch(ordinals, registration, step="paper head")
+    binding = _binding(config_id=config_id, config_digest=registration.digest, epoch=epoch)
     with _refusals("paper head", f"the paper book's head for {session.isoformat()}"):
         index = ordinals.index_of(session)
         opening = held_head(state_store) is None
+    if opening:
         bound = 1 + adapter.max_panel_catch_up_sessions
-        if opening and index > bound:
+        if index > bound:
             raise SurvivorDayError(
                 "paper head",
                 f"the paper book opens on its epoch {epoch.isoformat()}, {index} sessions before "
@@ -438,6 +571,15 @@ def paper_head(
                 "were never caught up by the panel step. Register the epoch as the session "
                 "before the first scheduled run. Nothing was written",
             )
+        bind_paper_book(
+            paper_directory,
+            config_id=config_id,
+            config_digest=registration.digest,
+            epoch_session=epoch,
+        )
+    else:
+        _require_binding(paper_directory / PAPER_BOOK_MARKER, binding)
+    with _refusals("paper head", f"the paper book's head for {session.isoformat()}"):
         open_book(
             store=state_store,
             session=epoch,
@@ -473,14 +615,37 @@ def facts_day(
 ) -> FactsDay:
     """`session`'s facts day read off `panel` at `as_of` with `held`, under the registration:
     its composite factors, its exchange, its carry bound, and `min_coverage` unless another is
-    given (a catch-up's is 0).
+    given -- the caller's step 6.
 
-    `transform` is the processed tier the factors were built under; `None` is the registration's
-    (`FACTOR_TRANSFORMS.get(adapter.transform)`). A refusal of the adapter is a
-    `SurvivorDayError`, step `facts`; the held statuses are not applied (`delisted_or_refuse`).
+    `transform`: see the module docstring (the daily command passes the one object it resolved;
+    `None` resolves the same). A refusal of the adapter is a `SurvivorDayError`, step `facts`;
+    the held statuses are not applied here (`delisted_or_refuse`).
     """
+    return _read_facts(
+        panel=panel,
+        registration=registration,
+        session=session,
+        as_of=as_of,
+        held=held,
+        min_coverage=min_coverage,
+        transform=transform,
+        step="facts",
+    )
+
+
+def _read_facts(
+    *,
+    panel: PanelStore,
+    registration: SurvivorRegistration,
+    session: date,
+    as_of: datetime,
+    held: Collection[str],
+    min_coverage: float | None,
+    transform: FactorTransformSpec | None,
+    step: str,
+) -> FactsDay:
     adapter = registration.adapter
-    with _refusals("facts", f"the facts day of {session.isoformat()}"):
+    with _refusals(step, f"the facts day of {session.isoformat()}"):
         return build_facts_day(
             store=panel,
             session=session,
@@ -506,71 +671,66 @@ def catch_up(
     through_index: int,
     as_of: datetime,
     make_portfolio: Callable[[PortfolioLedger], PaperPortfolio],
+    lock: PaperBookLock,
+    on_settled: Callable[[CatchUpResult], None] | None = None,
     transform: FactorTransformSpec | None = None,
 ) -> tuple[CatchUpResult, ...]:
     """Settle, oldest first and without a decision, every session the book is missing through
     ordinal `through_index` -- `missing_sessions`' answer -- and return what each did.
 
-    For each: the facts day at `as_of` with the book's holdings and no coverage floor, and its
-    delisted set (`delisted_or_refuse`), when the book holds something, and neither when it
-    holds nothing; the session's market for the held names and the live orders' names; then
-    `run_catch_up`, observed on `as_of`'s Shanghai date. A refusal stops the catch-up at that
-    session with the sessions before it settled (each is its own transaction). `transform` as
-    `facts_day`'s. A session already held is not missing, so it is never caught up.
+    Each is settled from the book the one before it left: the facts day at `as_of` with that
+    book's holdings and no coverage floor, and its delisted set (`delisted_or_refuse`), when the
+    book holds something, and neither when it holds nothing; the session's market for the held
+    names and the live orders' names; then `run_catch_up`, observed on `as_of`'s Shanghai date.
+    Each session is its own transaction, and `on_settled` is called with it as soon as it has
+    committed -- a fault of `on_settled` reaches the caller as itself and undoes nothing. A
+    refusal stops the catch-up at a session: `CatchUpStalledError`, step `paper book`, carrying
+    the sessions settled before it. A session already held is not missing, so it is never caught
+    up. `lock` is this run's writer-lock token; `transform` as `facts_day`'s.
     """
     observed_on = _observed_on(as_of)
+    _require_lock(lock, "paper book")
     _require_registered_epoch(ordinals, registration, step="paper book")
-    with _refusals("paper book", "the paper book's catch-up"):
-        missing = missing_sessions(
-            state_store, config_digest=registration.digest, through_index=through_index
-        )
-        head = held_head(state_store)
-    if head is None:
-        raise SurvivorDayError(
-            "paper book",
-            "no paper book is open in this runtime directory: the paper head opens it first",
-        )
     results: list[CatchUpResult] = []
+    try:
+        with _refusals("paper book", "the paper book's catch-up"):
+            missing = missing_sessions(
+                state_store, config_digest=registration.digest, through_index=through_index
+            )
+            head = held_head(state_store)
+        if head is None:
+            raise SurvivorDayError(
+                "paper book",
+                "no paper book is open in this runtime directory: the paper head opens it first",
+            )
+    except SurvivorDayError as error:
+        raise _stalled(error, at="its start", caught_up=()) from _root(error)
     for index in missing:
-        with _refusals("paper book", f"the catch-up of session index {index}"):
-            day = ordinals.day_of(index)
-        held = held_codes(head)
-        delisted: frozenset[str] = frozenset()
-        if held:
-            delisted = delisted_or_refuse(
-                facts_day(
-                    panel=panel,
-                    registration=registration,
-                    session=day,
-                    as_of=as_of,
-                    held=held,
-                    min_coverage=_CATCH_UP_COVERAGE,
-                    transform=transform,
-                )
-            )
-        named = f"the catch-up of {day.isoformat()} (session index {index})"
-        with _refusals("paper book", named):
-            market = settlement_market(
-                panel,
-                session=day,
-                as_of=as_of,
-                names=settlement_names(head),
-                calendar=calendar,
-                benchmark=registration.adapter.benchmark,
-            )
-            result = run_catch_up(
-                store=state_store,
+        try:
+            with _refusals("paper book", f"the catch-up of session index {index}"):
+                day = ordinals.day_of(index)
+            result = _settle_without_a_decision(
+                panel=panel,
+                state_store=state_store,
                 ledger=ledger,
-                make_portfolio=make_portfolio,
-                config=registration.book,
+                registration=registration,
+                calendar=calendar,
+                before=head,
                 session=day,
                 session_index=index,
-                market=market,
-                delisted=delisted,
+                as_of=as_of,
                 observed_on=observed_on,
+                make_portfolio=make_portfolio,
+                transform=transform,
+            )
+        except SurvivorDayError as error:
+            raise _stalled(error, at=f"session index {index}", caught_up=tuple(results)) from _root(
+                error
             )
         results.append(result)
         head = result.snapshot
+        if on_settled is not None:
+            on_settled(result)
     return tuple(results)
 
 
@@ -585,17 +745,25 @@ def settle_only(
     session: date,
     as_of: datetime,
     make_portfolio: Callable[[PortfolioLedger], PaperPortfolio],
+    lock: PaperBookLock,
+    on_settled: Callable[[CatchUpResult], None] | None = None,
     transform: FactorTransformSpec | None = None,
 ) -> tuple[CatchUpResult, ...]:
-    """`catch_up` through `session` itself: the sessions missed before it, then `session`,
-    settled without a decision.
+    """`session` settled without a decision: `catch_up` through `session` itself when it has no
+    snapshot yet, and -- when it is held already -- `session` derived again with `run_catch_up`.
 
-    The caller's choice for a run at or after 09:15 of the session after `session`, when no
-    decision may be made any more (decision 2), and only for a session with **no** snapshot: a
-    session already held -- an evening that saved its snapshot and stopped before its journal --
-    is refused by name, because it is re-run by `evening` with the journal-pinned inputs (C3
-    review rule 1), and the epoch is refused because no evening settles it.
+    The caller's choice for a session whose run's journal-pinned `as_of` is at or after 09:15 of
+    the session after it (decision 2): no decision may be made any more. Run again on a session it
+    settled itself -- the run committed and stopped before its journal -- it derives the session
+    again from the book before it and its market, which C3 answers `unchanged`, writing nothing,
+    and reports through `on_settled` like a session just settled. A session an evening settled
+    with orders is refused by C3 by name (it was settled by an evening): it is finished by
+    `evening` with its pinned inputs, and the caller chooses between the two by the journal's
+    `as_of`, never by the clock. The epoch is refused: no evening or catch-up settles it. Every
+    refusal is step `paper book`, and one of the settlement itself is a `CatchUpStalledError`.
     """
+    observed_on = _observed_on(as_of)
+    _require_lock(lock, "paper book")
     _require_registered_epoch(ordinals, registration, step="paper book")
     with _refusals("paper book", f"settling {session.isoformat()} only"):
         index = ordinals.index_of(session)
@@ -611,26 +779,97 @@ def settle_only(
             f"{session.isoformat()} is the paper book's epoch, which it is opened on and no "
             "evening or catch-up settles; the first session settled is the one after it",
         )
-    if head.session_index >= index:
-        raise SurvivorDayError(
-            "paper book",
-            f"{session.isoformat()} (session index {index}) already has its snapshot -- the book "
-            f"is settled through {head.session.isoformat()} -- so it is never settled again, and "
-            "never caught up: a held session is run again by its evening, with the inputs its "
-            "journal pinned, whose unchanged path writes nothing whatever the clock says",
+    if head.session_index < index:
+        return catch_up(
+            panel=panel,
+            state_store=state_store,
+            ledger=ledger,
+            registration=registration,
+            ordinals=ordinals,
+            calendar=calendar,
+            through_index=index,
+            as_of=as_of,
+            make_portfolio=make_portfolio,
+            lock=lock,
+            on_settled=on_settled,
+            transform=transform,
         )
-    return catch_up(
-        panel=panel,
-        state_store=state_store,
-        ledger=ledger,
-        registration=registration,
-        ordinals=ordinals,
-        calendar=calendar,
-        through_index=index,
-        as_of=as_of,
-        make_portfolio=make_portfolio,
-        transform=transform,
-    )
+    try:
+        with _refusals("paper book", f"settling {session.isoformat()} only, settled already"):
+            before = load_snapshot(state_store, ordinals.day_of(index - 1))
+        result = _settle_without_a_decision(
+            panel=panel,
+            state_store=state_store,
+            ledger=ledger,
+            registration=registration,
+            calendar=calendar,
+            before=before,
+            session=session,
+            session_index=index,
+            as_of=as_of,
+            observed_on=observed_on,
+            make_portfolio=make_portfolio,
+            transform=transform,
+        )
+    except SurvivorDayError as error:
+        raise _stalled(error, at=f"session index {index}", caught_up=()) from _root(error)
+    if on_settled is not None:
+        on_settled(result)
+    return (result,)
+
+
+def _settle_without_a_decision(
+    *,
+    panel: PanelStore,
+    state_store: PaperStateDocumentStore,
+    ledger: ReadableLedger,
+    registration: SurvivorRegistration,
+    calendar: TradingCalendar,
+    before: PaperBookSnapshot,
+    session: date,
+    session_index: int,
+    as_of: datetime,
+    observed_on: date,
+    make_portfolio: Callable[[PortfolioLedger], PaperPortfolio],
+    transform: FactorTransformSpec | None,
+) -> CatchUpResult:
+    """`session` settled from `before`, the book of the session before it, with no decision."""
+    held = held_codes(before)
+    delisted: frozenset[str] = frozenset()
+    if held:
+        delisted = delisted_or_refuse(
+            _read_facts(
+                panel=panel,
+                registration=registration,
+                session=session,
+                as_of=as_of,
+                held=held,
+                min_coverage=_NO_COVERAGE_FLOOR,
+                transform=transform,
+                step="paper book",
+            )
+        )
+    named = f"the catch-up of {session.isoformat()} (session index {session_index})"
+    with _refusals("paper book", named):
+        market = settlement_market(
+            panel,
+            session=session,
+            as_of=as_of,
+            names=settlement_names(before),
+            calendar=calendar,
+            benchmark=registration.adapter.benchmark,
+        )
+        return run_catch_up(
+            store=state_store,
+            ledger=ledger,
+            make_portfolio=make_portfolio,
+            config=registration.book,
+            session=session,
+            session_index=session_index,
+            market=market,
+            delisted=delisted,
+            observed_on=observed_on,
+        )
 
 
 def evening(
@@ -647,24 +886,27 @@ def evening(
     screen: ScreenResult,
     held: Sequence[str],
     make_portfolio: Callable[[PortfolioLedger], PaperPortfolio],
+    lock: PaperBookLock,
     transform: FactorTransformSpec | None = None,
 ) -> SurvivorEvening:
     """Run `session`'s evening on the paper book: `run_evening`, always (see the module
-    docstring).
+    docstring); every refusal is step `paper book`.
 
     `facts` and `screen` are the caller's step 6, read with `held` -- the holdings it pinned
     before the catch-up -- at `as_of`. The sessions before `session` must be settled (`catch_up`
     first). When the book the session settles from holds other codes than `held`, the facts day
-    is read again with them and screened again. Then: the held statuses (`delisted_or_refuse`),
-    the session's market for the names of that book and `held`, every close of the facts day as
-    the entrants' prices, and `run_evening` observed on `as_of`'s Shanghai date. `transform` as
-    `facts_day`'s.
+    is read again with them, with no coverage floor, and screened again, and the second screen
+    must agree with `screen` on the eligible set and the ranked survivors. Then: the held statuses
+    (`delisted_or_refuse`), the session's market for the names of that book, every close of the
+    facts day as the entrants' prices, and `run_evening` observed on `as_of`'s Shanghai date.
+    `lock` is this run's writer-lock token; `transform` as `facts_day`'s.
     """
     observed_on = _observed_on(as_of)
     pinned = _pinned(held)
+    _require_lock(lock, "paper book")
     if facts.session != session or facts.held != pinned:
         raise SurvivorDayError(
-            "facts",
+            "paper book",
             f"the evening of {session.isoformat()} was given the facts day of "
             f"{facts.session.isoformat()} read with held {list(facts.held)}, and its pinned "
             f"held is {list(pinned)}: the facts are read for the session with the held the "
@@ -698,23 +940,27 @@ def evening(
             before = load_snapshot(state_store, ordinals.day_of(index - 1))
     holdings = held_codes(before)
     if holdings != pinned:
-        facts = facts_day(
+        again = _read_facts(
             panel=panel,
             registration=registration,
             session=session,
             as_of=as_of,
             held=holdings,
+            min_coverage=_NO_COVERAGE_FLOOR,
             transform=transform,
+            step="paper book",
         )
-        with _refusals("facts", f"the screen of {session.isoformat()}"):
-            screen = survivor_screen(facts.facts, registration.book)
+        with _refusals("paper book", f"the screen of {session.isoformat()} read again"):
+            screened = survivor_screen(again.facts, registration.book)
+        _refuse_another_screen(screen, screened, session=session)
+        facts, screen = again, screened
     delisted = delisted_or_refuse(facts)
     with _refusals("paper book", f"the evening of {session.isoformat()}"):
         market = settlement_market(
             panel,
             session=session,
             as_of=as_of,
-            names=sorted({*settlement_names(before), *pinned}),
+            names=settlement_names(before),
             calendar=calendar,
             benchmark=registration.adapter.benchmark,
         )
@@ -734,6 +980,69 @@ def evening(
     return SurvivorEvening(
         result=result, held_after=held_codes(result.snapshot), facts=facts, screen=screen
     )
+
+
+def _refuse_another_screen(given: ScreenResult, again: ScreenResult, *, session: date) -> None:
+    """Refuse a second screen that disagrees with the caller's on the eligible set or on the
+    ranked survivors: neither depends on `held`, and the prediction filed at step 7 stands on
+    the first."""
+    differs = []
+    eligible = {verdict.ts_code for verdict in given.verdicts if verdict.eligible}
+    eligible_again = {verdict.ts_code for verdict in again.verdicts if verdict.eligible}
+    if eligible != eligible_again:
+        differs.append(
+            f"the eligible set (only in the caller's: {sorted(eligible - eligible_again)}; only "
+            f"in the second read's: {sorted(eligible_again - eligible)})"
+        )
+    survivors = [name.ts_code for name in given.survivors]
+    survivors_again = [name.ts_code for name in again.survivors]
+    if survivors != survivors_again:
+        differs.append(f"the survivors ({survivors} against {survivors_again})")
+    if differs:
+        raise SurvivorDayError(
+            "paper book",
+            f"the facts day of {session.isoformat()} read again with the holdings the catch-up "
+            f"left screens otherwise than the caller's: {'; '.join(differs)}. Neither depends on "
+            "the holdings, so the caller's screen is not the one of its own facts day; the "
+            "evening is not run on either. Nothing was written",
+        )
+
+
+def _require_lock(lock: object, step: str, *, directory: Path | None = None) -> None:
+    """Refuse a run that does not hold the paper book's writer lock, or holds another one's."""
+    if not isinstance(lock, PaperBookLock) or not lock.held:
+        raise SurvivorDayError(
+            step,
+            "this run does not hold the paper book's writer lock (given "
+            f"{lock.path if isinstance(lock, PaperBookLock) else lock!r}, not held): take it with "
+            "paper_book_lock(<paper directory>) before step 2 and hold it through the paper book. "
+            "Nothing was read or written",
+        )
+    if directory is not None and lock.directory.resolve() != directory.resolve():
+        raise SurvivorDayError(
+            step,
+            f"the writer lock held is {lock.path}, another paper directory's than {directory}: "
+            "a run holds the lock of the book it runs. Nothing was read or written",
+        )
+
+
+def _stalled(
+    error: SurvivorDayError, *, at: str, caught_up: tuple[CatchUpResult, ...]
+) -> CatchUpStalledError:
+    settled = [item.snapshot.session.isoformat() for item in caught_up]
+    kept = (
+        f"the {len(settled)} session(s) settled before it are kept: {settled}"
+        if settled
+        else "no session was settled by it"
+    )
+    return CatchUpStalledError(
+        "paper book", f"the catch-up stopped at {at}; {kept}. {error}", caught_up=caught_up
+    )
+
+
+def _root(error: SurvivorDayError) -> BaseException:
+    """The fault a refusal names, for the stall to be raised from: its cause, or itself."""
+    return error.__cause__ if error.__cause__ is not None else error
 
 
 def _require_registered_epoch(
@@ -785,8 +1094,10 @@ def _refusals(step: str, what: str) -> Iterator[None]:
         raise SurvivorDayError(
             step,
             f"{what} was refused: the paper book's snapshot store is damaged "
-            f"(PaperStateStoreError: {error}). A damaged snapshot is never read as an empty book; "
-            "restore the runtime directory's paper/snapshots from a backup",
+            f"(PaperStateStoreError: {error}). A damaged snapshot is never read as an empty book. "
+            "Restore the paper directory's snapshots and its ledger together, from one backup: "
+            "snapshots restored alone disagree with the ledger's rows, and every session after "
+            "them is refused (PaperLedgerConflictError)",
         ) from error
     except (PaperStateError, ValueError) as error:
         raise SurvivorDayError(
