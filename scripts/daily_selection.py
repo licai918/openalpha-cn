@@ -2003,8 +2003,9 @@ class DailyOptions:
     max_staleness_days: int = DEFAULT_MAX_STALENESS_DAYS
     json_output: bool = False
     top: int | None = None
-    """`--top`: how many candidates the P6 summary prints (`main` reads it there); a survivor day
-    refuses it (`_refuse_p6_only_options`)."""
+    """`--top`, carried here only so that a survivor day can refuse it
+    (`_refuse_p6_only_options`): how many candidates the P6 summary prints is read by `main` from
+    its own `arguments.top`, never from here."""
 
 
 def _stored_calendar(
@@ -3520,9 +3521,13 @@ class SurvivorDay:
     read_as_of: datetime
     """What step 6 read the facts at: `as_of`, or -- on a committed day after the next session's
     update -- the newest stored session's publication instant, the earliest the panel's
-    whole-partition doors answer then. Step 8 reads the market at `as_of` first and, refused
-    there, where the market can be read again (`_readable_after`), which is the same instant.
-    `as_of` stays the day's clock: its date is every settlement's `observed_on`."""
+    whole-partition doors answer then. Step 8 reads the market at `as_of` first and -- on a
+    committed day only, refused there -- once more where the market's own partitions can be read
+    (`_readable_after`: their newest `max_available_time`, not necessarily this instant). It
+    hands the paper book that instant as its `as_of`, so after that fallback every settlement's
+    `observed_on` is the later instant's date, not `as_of`'s: harmless, since a committed day's
+    derivation writes nothing and the date is not persisted. `as_of` stays the day's clock in its
+    journal and its document."""
 
 
 def survivor_builds(survivor: SurvivorRegistration) -> tuple[TierBuild, ...]:
@@ -3842,11 +3847,14 @@ def _require_pinned_head(
     before any request; `index` is the session's ordinal.
 
     Accepted: no book when the journal pinned none (step 5 opens it); the pinned snapshot itself,
-    holding `held`; and **any** later head up to the session's own -- which only this session's
-    own paper step can have written since its pin (a rerun after an earlier run of the day
-    committed some of it). Its holdings are not compared: D3's evening reads the facts again with
-    the holdings it finds when they differ from the pinned ones, and a committed session is
-    completed from its own snapshot. Refused by name, with nothing fetched or written: a head
+    holding `held`; and **any** later head up to the session's own -- written since the pin by
+    this session's own paper step (a rerun after an earlier run of the day committed some of it),
+    or by a run of an earlier session made meanwhile (an `--as-of` run, whose evening or catch-up
+    settled sessions up to its own; `strategy_survivor_book.catch_up_again` leaves a session an
+    evening decided to that day's document). Its holdings are not compared: D3's evening reads
+    the facts again with the holdings it finds when they differ from the pinned ones, and a
+    committed session is completed from its own snapshot. Refused by name before any request --
+    and, for a day pinning now, before its pin is written, so nothing is fetched or written: a head
     past the session (a later session's run changed the book); a head older than the pinned
     snapshot, or the pinned index holding another snapshot or other names, or no book where the
     journal pinned one (the paper directory was replaced, moved or restored since)."""
@@ -4046,10 +4054,10 @@ def _survivor_prediction(
 
     **A record held for the session is reused before anything is written** -- a run that filed
     it and stopped before its journal said so, or a journal moved aside: its own provenance, the
-    one written before it under its batch's digest, is what the journal names, and nothing is
-    written, whatever the clock. A second provenance would be filed otherwise, on a clock that has
-    moved since (its `recorded_at`), naming a batch that was never filed (D5 joint review, Minor
-    2); a record whose provenance cannot be found is refused by name.
+    one written before it naming its session and its batch's digest, is what the journal names,
+    and nothing is written, whatever the clock. A second provenance would be filed otherwise, on
+    a clock that has moved since (its `recorded_at`), naming a batch that was never filed (D5
+    joint review, Minor 2); a record whose provenance cannot be found is refused by name.
 
     **With no record held**, refused before anything is written once this run's clock has
     reached `cutoff` -- the next session's call auction -- on a day whose pinned clock had not (a
