@@ -802,11 +802,24 @@ def test_the_tally_refuses_a_reason_it_does_not_know() -> None:
         )
 
 
-def test_the_main_board_prefixes_are_the_eight_t8_measured() -> None:
-    # T8's board table: SH 600/601/603/605 and SZ 000/001/002/003. Growing the set is a
+def test_the_main_board_prefixes_are_the_eight_t8_measured_each_on_its_own_exchange() -> None:
+    # T8's board table: SH 600/601/603/605 and SZ 000/001/002/003 -- a prefix with the exchange
+    # it is on, so `600*.SZ` and `000*.SH` are not main-board codes. Growing the set is a
     # decision (`MAIN_BOARD_PREFIXES`' docstring), so it changes this test with it.
-    assert frozenset({"600", "601", "603", "605", "000", "001", "002", "003"}) == (
-        MAIN_BOARD_PREFIXES
+    assert (
+        frozenset(
+            {
+                ("600", "SH"),
+                ("601", "SH"),
+                ("603", "SH"),
+                ("605", "SH"),
+                ("000", "SZ"),
+                ("001", "SZ"),
+                ("002", "SZ"),
+                ("003", "SZ"),
+            }
+        )
+        == MAIN_BOARD_PREFIXES
     )
 
 

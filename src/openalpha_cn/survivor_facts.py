@@ -42,8 +42,9 @@ with no lifecycle year at or before the session's has no registry and is refused
 **A main board the adapter recognises.** `backtest.execution.security_board` files every prefix
 it does not recognise under the main board, which fails open for a main-board-only book: a new
 ChiNext prefix would be bought as main board, as `302*` once was. So a code counts as main board
-here only when `security_board` says so **and** its prefix is in `MAIN_BOARD_PREFIXES`; one it
-calls main with any other prefix gets no row, and is counted and named
+here only when `security_board` says so **and** its prefix, with its exchange, is a pair in
+`MAIN_BOARD_PREFIXES` (`600` on SH, not on SZ); one it calls main with any other prefix, or a
+main-board prefix on the other exchange, gets no row, and is counted and named
 (`FactsNotes.unrecognised_board`, `unrecognised_board_codes`). An excluded code is counted once,
 by the first rule that excludes it: not listed (or not in the universe at all), then the board,
 then no bar in reach.
@@ -282,8 +283,8 @@ class HeldStatus(BaseModel):
       keeps the row such a code always gets (aged 0, `listing_too_recent`); without one it has
       none. Either way the caller refuses the day by name: a holding the registry has never heard
       of is a typo or a restated code, not a security to sell.
-    - `board_unrecognised`: `security_board` calls it main board and its prefix is not in
-      `MAIN_BOARD_PREFIXES` -- no row.
+    - `board_unrecognised`: `security_board` calls it main board and its prefix, with its
+      exchange, is not a pair in `MAIN_BOARD_PREFIXES` -- no row.
 
     The statuses are tried in that order after `not_in_registry`, which comes first: a code the
     registry has no row for is `not_in_registry` whatever else is true of it.
@@ -309,19 +310,31 @@ FIVE_PERCENT_BAND: Final[float] = 0.05
 BAND_TOLERANCE: Final[float] = 0.0051
 """A main-board band within this of 5% is the exchange's own special-treatment band (T3 7)."""
 
-MAIN_BOARD_PREFIXES: Final[frozenset[str]] = frozenset(
-    {"600", "601", "603", "605", "000", "001", "002", "003"}
+MAIN_BOARD_PREFIXES: Final[frozenset[tuple[str, str]]] = frozenset(
+    {
+        ("600", "SH"),
+        ("601", "SH"),
+        ("603", "SH"),
+        ("605", "SH"),
+        ("000", "SZ"),
+        ("001", "SZ"),
+        ("002", "SZ"),
+        ("003", "SZ"),
+    }
 )
-"""The code prefixes of the main board, as T8 measured it
+"""The code prefixes of the main board, each with the exchange it is on, as T8 measured them
 (`docs/research/p7-step0-validation/T8-main-board-remeasure.md`, its board table: SH
 `600/601/603/605`, SZ `000/001/002/003`).
 
 A code counts as main board here only when `security_board` says "main" **and** its first three
-digits are one of these. `security_board` answers "main" for any prefix it does not recognise, so
-without this a main-board-only book would buy a new board's codes as main board, as it once
-would have bought `302*`. Growing this set is a decision, not a fix: a prefix joins it once the
-exchange's own classification of it has been checked, and the test that pins the set changes
-with it."""
+digits and its exchange suffix are one of these pairs. `security_board` answers "main" for any
+prefix it does not recognise, so without this a main-board-only book would buy a new board's
+codes as main board, as it once would have bought `302*`. The exchange is part of the pair
+because a prefix alone is not the board: no `600*.SZ` stock exists, `000*.SH` is how Shanghai's
+index codes are spelled (`000300.SH`), and a code paired otherwise than T8 measured is a typo, a
+restated code or something new -- not a main-board security, so it gets the unrecognised-prefix
+treatment. Growing this set is a decision, not a fix: a pair joins it once the exchange's own
+classification of it has been checked, and the test that pins the set changes with it."""
 
 _SECURITY_CODE: Final[re.Pattern[str]] = re.compile(r"[0-9]{6}\.(?:SH|SZ|BJ)")
 """How a held code must be spelled, matched whole (`fullmatch`): six ASCII digits, a dot and the
@@ -372,8 +385,8 @@ class FactsNotes:
     delisted, or priced before their listing date -- and which therefore have no fact row. A
     count, not a row: no fact changes with it."""
     unrecognised_board: int
-    """Securities `security_board` calls main board whose prefix is not in
-    `MAIN_BOARD_PREFIXES`, which therefore have no fact row; `unrecognised_board_codes` names
+    """Securities `security_board` calls main board whose prefix, with its exchange, is not a pair
+    in `MAIN_BOARD_PREFIXES`, which therefore have no fact row; `unrecognised_board_codes` names
     them."""
     unrecognised_board_codes: tuple[str, ...]
     """The codes `unrecognised_board` counts, ascending: a new prefix is a decision to take, so
@@ -1065,8 +1078,10 @@ def _oriented_column(
 
 
 def _board_recognised(code: str) -> bool:
-    """False for a code `security_board` calls main board whose prefix is not a main-board one."""
-    return security_board(code) != "main" or code[:3] in MAIN_BOARD_PREFIXES
+    """False for a code `security_board` calls main board whose prefix and exchange are not a
+    main-board pair (`MAIN_BOARD_PREFIXES`)."""
+    _digits, _dot, exchange = code.rpartition(".")
+    return security_board(code) != "main" or (code[:3], exchange) in MAIN_BOARD_PREFIXES
 
 
 def _band_is_five_percent(

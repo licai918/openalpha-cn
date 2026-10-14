@@ -252,7 +252,17 @@ UNRECOGNISED_PREFIX: Final[str] = "303001.SZ"
 """`EXTENDED` only: a prefix no board has yet, shaped as a future ChiNext one (ChiNext's 20% band,
 listed before the calendar, trading every session). `security_board` files a prefix it does not
 know under the main board."""
-EXTRA: Final[tuple[str, ...]] = (GROWTH_FIVE_PERCENT, BSE_BEFORE_LISTING, UNRECOGNISED_PREFIX)
+MISPAIRED_EXCHANGE: Final[str] = "600001.SZ"
+"""`EXTENDED` only: a Shanghai main-board prefix on the Shenzhen exchange -- no such code exists,
+T8 pairs `600` with SH alone -- and otherwise an ordinary security (the 10% band, listed before
+the calendar, trading every session, never renamed). `security_board` calls it main board, and a
+prefix without its exchange would pass it as one."""
+EXTRA: Final[tuple[str, ...]] = (
+    GROWTH_FIVE_PERCENT,
+    BSE_BEFORE_LISTING,
+    UNRECOGNISED_PREFIX,
+    MISPAIRED_EXCHANGE,
+)
 """The securities only `EXTENDED` holds, in the order they were added: `j` = 44, 45, ..."""
 
 FACTORS: Final[tuple[str, ...]] = (
@@ -1109,28 +1119,33 @@ def test_a_code_filed_under_the_main_board_by_default_gets_no_row_and_is_named(
     # Brief item 8. `security_board` files `303001.SZ` under the main board because it does not
     # know the prefix -- the shape of the `302*` defect, again. A main-board-only book would
     # have every reason to buy it (old enough, trading, every value, a 20% band that is not ST).
-    # Only the eight prefixes T8 measured count as main board here: it has no row, is not in
-    # the coverage guard's 38, and is counted and named. With no row it is never screened, so it
-    # can never be bought.
+    # Only the eight prefixes T8 measured count as main board here, each on its own exchange: it
+    # has no row, is not in the coverage guard's 38, and is counted and named. With no row it is
+    # never screened, so it can never be bought. `600001.SZ` (A2-fix2 concern 3) has a
+    # Shanghai main-board prefix on the Shenzhen exchange, where no such code exists, and an
+    # ordinary security's every other fact: the same treatment.
     day = read_day(extended_store)
+    screened = {verdict.ts_code for verdict in screen(day.facts, CONFIG).verdicts}
 
-    assert UNRECOGNISED_PREFIX not in {fact.ts_code for fact in day.facts}
-    assert UNRECOGNISED_PREFIX not in {
-        verdict.ts_code for verdict in screen(day.facts, CONFIG).verdicts
-    }
+    for code in (UNRECOGNISED_PREFIX, MISPAIRED_EXCHANGE):
+        assert code not in {fact.ts_code for fact in day.facts}
+        assert code not in screened
     assert (day.universe_size, day.scored_size) == (38, 36)
-    assert day.notes.unrecognised_board == 1
-    assert day.notes.unrecognised_board_codes == (UNRECOGNISED_PREFIX,)
+    assert day.notes.unrecognised_board == 2
+    assert day.notes.unrecognised_board_codes == (UNRECOGNISED_PREFIX, MISPAIRED_EXCHANGE)
 
 
 def test_a_held_code_on_an_unrecognised_board_is_told_so(extended_store: PanelStore) -> None:
-    day = read_day(extended_store, held=(UNRECOGNISED_PREFIX, GROWTH_FIVE_PERCENT))
+    day = read_day(
+        extended_store, held=(UNRECOGNISED_PREFIX, MISPAIRED_EXCHANGE, GROWTH_FIVE_PERCENT)
+    )
 
     assert {status.ts_code: status.status for status in day.held_status} == {
         UNRECOGNISED_PREFIX: "board_unrecognised",
+        MISPAIRED_EXCHANGE: "board_unrecognised",
         GROWTH_FIVE_PERCENT: "row",
     }
-    assert UNRECOGNISED_PREFIX not in {fact.ts_code for fact in day.facts}
+    assert {UNRECOGNISED_PREFIX, MISPAIRED_EXCHANGE}.isdisjoint(fact.ts_code for fact in day.facts)
 
 
 def test_the_extended_panels_extra_securities_change_no_row_of_the_frame(
