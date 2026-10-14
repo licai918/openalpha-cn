@@ -42,6 +42,7 @@ from openalpha_cn.panel.catalog import PanelStorageError
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import FACTOR_TRANSFORMS
 from openalpha_cn.panel_ingest import session_publication_instant
+from openalpha_cn.providers.tushare import TUSHARE_STK_LIMIT_ROW_CAP
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[3]
 
@@ -283,16 +284,16 @@ def test_an_ordinary_survivor_day_is_sixteen_requests_and_the_p6_day_still_fifte
     assert _horizon(store, DAILY_DATASET, 2026) == DAY
 
 
-CAP: Final[int] = 7800
-"""`providers.tushare.TUSHARE_STK_LIMIT_ROW_CAP`: a one-shot `stk_limit` answer that reaches it is
-refused as truncated, and the request is made again as pages of 4,000."""
+CAP: Final[int] = TUSHARE_STK_LIMIT_ROW_CAP
+"""The provider's own cap, imported rather than copied: a one-shot `stk_limit` answer that
+reaches it is refused as truncated, and the request is made again as pages of 4,000."""
 
 
 @dataclass
 class CappedBands(Market):
-    """`Market`, with a band cross section past the endpoint's cap from `capped_from` on: 7,800
+    """`Market`, with a band cross section past the endpoint's cap from `capped_from` on: `CAP`
     fund bands beside the market's own. A one-shot request is answered as the live endpoint
-    answers it past the cap -- its first 7,800 rows and `has_more=True` -- and a `limit`/`offset`
+    answers it past the cap -- its first `CAP` rows and `has_more=True` -- and a `limit`/`offset`
     request as a page."""
 
     capped_from: date | None = None
