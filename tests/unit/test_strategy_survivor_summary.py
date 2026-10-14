@@ -86,6 +86,8 @@ from openalpha_cn.strategy_survivor_facts import FactsDay, FactsNotes, HeldStatu
 from openalpha_cn.strategy_survivor_market import SessionOrdinals
 from openalpha_cn.strategy_survivor_summary import (
     SURVIVOR_WORDING,
+    carried_since,
+    catch_up_entry,
     evening_document,
     illiquid_rank,
     summary_lines,
@@ -1999,3 +2001,195 @@ def test_the_lines_come_from_the_document_alone(s3: WrittenOff) -> None:
 
     # A journal read back from disk: nothing of the run's objects survives, and nothing is needed.
     assert summary_lines(json.loads(json.dumps(document))) == summary_lines(document)
+
+
+# --- what the daily command adds to a document (`V2-P7-008`, D5b) ------------------------------
+#
+# The daily command journals each session a catch-up settles as it commits (D3 review, rule 6),
+# so a run again after a stop holds some of the day's catch-ups only as the journal filed them; it
+# reads the facts day again when the catch-up changed the holdings the facts were read with (rule
+# 8); it reads a halt's start off the documents of the sessions before; and it merges its panel
+# and factor blocks into the document it prints.
+
+
+def test_a_catch_up_entry_is_the_documents_own_form_of_a_catch_up(caught_up: CaughtUp) -> None:
+    document = document_of(caught_up.evening, catch_ups=caught_up.caught)
+
+    assert [catch_up_entry(item) for item in caught_up.caught] == document["paper"]["catch_ups"]
+    assert json.loads(json.dumps(catch_up_entry(caught_up.caught[0]))) == catch_up_entry(
+        caught_up.caught[0]
+    )
+
+
+def test_the_catch_ups_an_earlier_run_filed_come_first_and_are_checked_with_tonights(
+    caught_up: CaughtUp,
+) -> None:
+    first, second, third = caught_up.caught
+    filed = [json.loads(json.dumps(catch_up_entry(first)))]  # as the journal reads it back
+
+    document = document_of(caught_up.evening, catch_ups=(second, third), filed_catch_ups=filed)
+
+    assert document == document_of(caught_up.evening, catch_ups=caught_up.caught)
+    assert document_of(
+        caught_up.evening, filed_catch_ups=[catch_up_entry(item) for item in caught_up.caught]
+    ) == document_of(caught_up.evening, catch_ups=caught_up.caught)
+    with pytest.raises(ValueError, match="oldest first"):
+        document_of(caught_up.evening, catch_ups=(first,), filed_catch_ups=filed)
+    with pytest.raises(ValueError, match="oldest first"):
+        document_of(caught_up.evening, catch_ups=(first,), filed_catch_ups=[catch_up_entry(third)])
+    with pytest.raises(ValueError, match="filed catch-up"):
+        document_of(caught_up.evening, filed_catch_ups=[{"session": "2021-03-03"}])
+
+
+def test_a_day_with_no_evening_lists_the_catch_ups_an_earlier_run_filed(
+    settle_only: SettleOnly,
+) -> None:
+    filed = [catch_up_entry(settle_only.caught)]
+
+    document = settle_only_document(settle_only, catch_ups=(), filed_catch_ups=filed)
+
+    assert document == settle_only_document(settle_only)
+    assert document["paper_skipped"]["catch_ups"] == filed
+
+
+def test_an_evening_on_a_day_read_again_documents_its_paper_on_the_facts_it_ran_on(
+    s3: WrittenOff,
+) -> None:
+    """The prediction's facts were read with the holdings pinned before the catch-up -- none,
+    here, and with no row for 600020.SH, which tonight's book holds -- and the paper book read the
+    day again with the holdings it found: the facts and screen sections stay the prediction's,
+    and the paper section is the second read's, which it carries whole."""
+    pinned = facts_of(S3, {code: close for code, close in S3_CLOSES.items() if code != B})
+    plain = document_of(s3)
+
+    document = document_of(s3, facts=pinned, read_again=(s3.facts, s3.screen))
+
+    assert document["facts"] == document_of(s3, facts=pinned)["facts"]
+    assert document["facts"]["held"] == []
+    assert document["screen"] == plain["screen"]
+    paper = document["paper"]
+    assert list(paper)[-1] == "facts_read_again"
+    assert paper["facts_read_again"] == plain["facts"]
+    assert paper["facts_read_again"]["held"] == [A, B, DL]
+    assert {key: value for key, value in paper.items() if key != "facts_read_again"} == plain[
+        "paper"
+    ]
+    assert paper["book"]["holdings"][0]["ts_code"] == B
+    assert paper["book"]["holdings"][0]["real_close"] == "11.50"
+    assert document_of(s3, facts=pinned)["paper"]["book"]["holdings"][0]["real_close"] is None
+    assert summary_lines(json.loads(json.dumps(document))) == summary_lines(document)
+
+
+def test_only_an_evening_of_the_session_reads_its_facts_day_again(
+    s3: WrittenOff, frame: Frame
+) -> None:
+    with pytest.raises(ValueError, match="read again"):
+        frame_document(frame, read_again=(frame.facts, frame.screen))
+    with pytest.raises(ValueError, match="read again"):
+        document_of(s3, read_again=(facts_of(S2, S2_CLOSES), s3.screen))
+
+
+def halted_on(*days: tuple[date, Sequence[str], Sequence[str]]) -> list[tuple[date, Any]]:
+    """Earlier documents, newest first, as far as `carried_since` reads them: each session's
+    holdings, and which of them were carried (no bar) that evening."""
+    return [
+        (
+            day,
+            {
+                "paper": {
+                    "book": {
+                        "holdings": [
+                            {"ts_code": code, "flags": ["carried"] if code in carried else []}
+                            for code in held
+                        ]
+                    }
+                }
+            },
+        )
+        for day, held, carried in days
+    ]
+
+
+def test_a_halt_began_on_the_session_after_the_last_evening_that_had_a_bar() -> None:
+    earlier = halted_on(
+        (date(2021, 3, 3), (B, C), (B,)),
+        (date(2021, 3, 2), (B, C), (B,)),
+        (date(2021, 3, 1), (B, C), ()),
+        (date(2021, 2, 26), (B, C), (B,)),  # an earlier halt, ended before: not this one
+    )
+
+    since = carried_since({B, C}, session=S3, earlier=earlier)
+
+    # 600020.SH is carried tonight and was on the two evenings before, not on the one before
+    # those; 600030.SH, carried tonight, had its bar yesterday: its halt begins tonight.
+    assert since == {B: date(2021, 3, 2), C: S3}
+    assert carried_since((), session=S3, earlier=earlier) == {}
+
+
+def test_a_halt_from_the_first_session_after_the_opening_began_on_that_session() -> None:
+    opening: list[tuple[date, Any]] = [(E0, {"session_index": 0, "opening": {"cash": "1"}})]
+
+    assert carried_since({B}, session=S3, earlier=halted_on((S2, (B,), (B,)), (S1, (B,), ()))) == {
+        B: S2
+    }
+    assert carried_since({B}, session=S2, earlier=[*halted_on((S1, (B,), (B,))), *opening]) == {
+        B: S1
+    }
+
+
+@pytest.mark.parametrize(
+    "unknown",
+    [
+        pytest.param(None, id="no journal or an unreadable one"),
+        pytest.param({"paper": None, "paper_skipped": {"reason": "settled only"}}, id="no evening"),
+        pytest.param({"paper": {"book": {}}}, id="no holdings"),
+        pytest.param({"paper": {"book": {"holdings": [{"ts_code": B}]}}}, id="no flags"),
+        pytest.param("not a document", id="not a mapping"),
+    ],
+)
+def test_a_halt_whose_start_no_document_says_is_left_out_never_guessed(unknown: Any) -> None:
+    earlier = [*halted_on((S2, (B, C), (B,))), (S1, unknown)]
+
+    since = carried_since({B, C}, session=S3, earlier=earlier)
+
+    # 600030.SH had its bar on S2, so its halt begins tonight whatever came before; the start of
+    # 600020.SH's is in the session nobody can read, so it has no date -- never "1 session".
+    assert since == {C: S3}
+
+
+def test_a_history_that_ends_before_the_halt_does_leaves_the_halt_undated() -> None:
+    earlier = halted_on((S2, (B,), (B,)), (S1, (B,), (B,)))
+
+    assert carried_since({B}, session=S3, earlier=earlier) == {}
+
+
+def test_the_history_is_read_only_as_far_back_as_a_halt_reaches() -> None:
+    def history() -> Iterator[tuple[date, Any]]:
+        yield from halted_on((S2, (B,), ()))
+        raise AssertionError("read past the session that ended every halt")
+
+    assert carried_since({B}, session=S3, earlier=history()) == {B: S3}
+
+
+def test_the_panel_and_factor_catch_ups_the_caller_merged_are_printed_before_the_requests(
+    s3: WrittenOff,
+) -> None:
+    document = {
+        **document_of(s3),
+        "panel": {"caught_up": ["2021-03-02", "2021-03-03"]},
+        "factors": {"caught_up": ["2021-03-03"]},
+        "this_run": {"requests": {}, "request_count": 0, "wrote": True},
+    }
+
+    lines = summary_lines(document)
+
+    assert line_with(lines, "panel catch-up") == row("panel catch-up", "2021-03-02, 2021-03-03")
+    assert line_with(lines, "factor catch-up") == row("factor catch-up", "2021-03-03")
+    order = [
+        next(i for i, line in enumerate(lines) if line.startswith(label))
+        for label in ("prediction", "panel catch-up", "factor catch-up", "tushare requests")
+    ]
+    assert order == sorted(order)
+    for nothing in ({}, {"panel": {"caught_up": []}, "factors": {"caught_up": []}}):
+        quiet = summary_lines({**document_of(s3), **nothing})
+        assert not any(line.startswith(("panel catch-up", "factor catch-up")) for line in quiet)
