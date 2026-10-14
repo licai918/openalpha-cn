@@ -991,6 +991,7 @@ def test_the_orders_for_the_open_carry_the_real_close_and_the_last_session_as_a_
     assert (buy_c["real_close"], buy_e["real_close"]) == ("10.00", "20.00")
     assert (buy_c["expires_session"], buy_c["expires_on"]) == (5, "2021-03-08")
     assert [o["carried"] for o in orders] == [False, False, False]
+    assert [o["suspended"] for o in orders] == [False, False, False]
     assert [o["order_id"] for o in orders] == [o.order_id for o in s2.result.trade_list.orders]
 
 
@@ -1051,6 +1052,32 @@ def test_a_sale_names_the_reasons_the_screen_gave_for_the_loss(s3: WrittenOff) -
     assert (
         f"  SELL ENTIRE POSITION {B} (ledger qty 800; real close 11.50) EXIT_ELIGIBILITY_LOST "
         "(special_treatment, suspended)"
+    ) in summary_lines(document)
+
+
+def test_a_sale_of_a_suspended_name_says_its_close_may_be_an_earlier_sessions(
+    s3_halted: Day,
+) -> None:
+    """The facts day carries a halted name on the last close it had, so its line says so as the
+    holdings line does."""
+    sale = s3_halted.result.trade_list.orders[0].model_copy(
+        update={
+            "side": "sell",
+            "ts_code": B,
+            "quantity": 800,
+            "reason": "EXIT_SURVIVOR_LOST",
+            "expires_session": None,
+        }
+    )
+    plan = s3_halted.result.trade_list.model_copy(update={"orders": (sale,)})
+    result = dataclasses.replace(s3_halted.result, trade_list=plan)
+
+    document = document_of(s3_halted, evening=result)
+
+    assert document["paper"]["open_orders"][0]["suspended"] is True
+    assert (
+        f"  SELL ENTIRE POSITION {B} (ledger qty 800; real close 11.50) {SUSPENDED_CLOSE} "
+        "EXIT_SURVIVOR_LOST"
     ) in summary_lines(document)
 
 
@@ -1535,10 +1562,47 @@ def test_a_carried_holding_says_since_when_only_if_the_caller_supplied_it(s3_hal
     assert f"{halted}  carried since 2021-02-25" in said
 
 
-def test_the_orders_for_the_open_name_the_day_and_the_call_auction(s2: Day) -> None:
+def orders_header(day: Day, when: str, outcome: str = "created") -> str:
+    """The ORDERS line: the open the orders are for, the trade list they are from and whether this
+    run committed the evening or derived one that was already settled."""
+    states = {
+        "created": "evening created",
+        "unchanged": "evening unchanged (settled earlier; derived again, nothing written)",
+    }
+    return (
+        f"ORDERS FOR THE OPEN OF D+1 (call auction 09:15), {when} -- trade list "
+        f"{day.result.trade_list.trade_list_id}, {states[outcome]}"
+    )
+
+
+REFERENCE_NOTE: Final[str] = (
+    "  real closes are references, not limit prices; the paper book fills at the open"
+)
+
+
+def test_the_orders_for_the_open_name_the_day_the_call_auction_and_the_trade_list(
+    s2: Day,
+) -> None:
     lines = summary_lines(document_of(s2))
 
-    assert "ORDERS FOR THE OPEN OF D+1 (call auction 09:15), 2021-03-04" in lines
+    assert orders_header(s2, "2021-03-04") in lines
+    # Said once, under the header, and not as a price to place an order at.
+    assert lines[lines.index(orders_header(s2, "2021-03-04")) + 1] == REFERENCE_NOTE
+
+
+def test_a_rerun_of_a_settled_evening_prints_a_header_that_says_it_was_not_committed_again(
+    s3_twice: tuple[Day, Day],
+) -> None:
+    first, again = s3_twice
+
+    created = summary_lines(document_of(first))
+    unchanged = summary_lines(document_of(again))
+
+    assert orders_header(first, "2021-03-05") in created
+    assert orders_header(again, "2021-03-05", "unchanged") in unchanged
+    # The same plan, so the same id: what tells the two runs apart is the header's last words.
+    assert first.result.trade_list.trade_list_id == again.result.trade_list.trade_list_id
+    assert orders_header(first, "2021-03-05") not in unchanged
 
 
 def test_the_open_the_orders_are_for_is_an_ordinal_when_the_calendar_has_not_reached_it(
@@ -1546,7 +1610,7 @@ def test_the_open_the_orders_are_for_is_an_ordinal_when_the_calendar_has_not_rea
 ) -> None:
     lines = summary_lines(document_of(s2, ordinals=ENDS_ON_S2))
 
-    assert "ORDERS FOR THE OPEN OF D+1 (call auction 09:15), session 3" in lines
+    assert orders_header(s2, "session 3") in lines
 
 
 def test_a_sale_is_the_whole_position_with_the_ledger_quantity_beside_the_real_close(
@@ -1578,18 +1642,26 @@ def test_a_sale_through_an_adjustment_prints_the_real_close_and_no_share_count_t
     assert not any(re.search(r"SELL .*@", line) for line in lines)
 
 
-def test_a_buy_names_the_quantity_the_real_close_and_the_date_it_is_live_through(s2: Day) -> None:
+def test_a_buy_names_the_quantity_the_reference_and_the_date_it_is_live_through(s2: Day) -> None:
     lines = summary_lines(document_of(s2))
 
-    assert f"  BUY {C} 900 @ real close 10.00 ENTRY_REPLACEMENT, live through 2021-03-08" in lines
-    assert f"  BUY {E} 400 @ real close 20.00 ENTRY_REPLACEMENT, live through 2021-03-08" in lines
+    assert (
+        f"  BUY {C} 900 reference: real close 10.00 ENTRY_REPLACEMENT, live through 2021-03-08"
+    ) in lines
+    assert (
+        f"  BUY {E} 400 reference: real close 20.00 ENTRY_REPLACEMENT, live through 2021-03-08"
+    ) in lines
+    # A close is not a limit price: no line puts one after an "@", the way a limit order would.
+    assert not any("@" in line for line in lines if line.strip().startswith(("BUY", "SELL")))
 
 
 def test_a_buy_whose_last_session_is_past_the_calendar_says_the_ordinal(s2: Day) -> None:
     lines = summary_lines(document_of(s2, ordinals=SHORT_ORDINALS))
 
-    assert f"  BUY {C} 900 @ real close 10.00 ENTRY_REPLACEMENT, live through session 5" in lines
-    assert "ORDERS FOR THE OPEN OF D+1 (call auction 09:15), 2021-03-04" in lines
+    assert (
+        f"  BUY {C} 900 reference: real close 10.00 ENTRY_REPLACEMENT, live through session 5"
+    ) in lines
+    assert orders_header(s2, "2021-03-04") in lines
 
 
 def test_a_carried_order_is_listed_with_the_attempt_it_is_on(s3: WrittenOff) -> None:
@@ -1598,22 +1670,38 @@ def test_a_carried_order_is_listed_with_the_attempt_it_is_on(s3: WrittenOff) -> 
     assert "1 live order from earlier sessions" in line_with(lines, "carried orders")
     assert (
         f"  BUY {E} 400 (planned on session 2 at 20.00; real close today 22.00) "
-        "ENTRY_REPLACEMENT, live through 2021-03-08, attempt 2 of 3"
+        "ENTRY_REPLACEMENT, live through 2021-03-08, attempt 2 of 3 "
+        "(one per session; a session with no bar counts)"
     ) in lines
     # A carried order is not one of tonight's: tonight's two buys are listed above it.
     tonight = next(i for i, line in enumerate(lines) if f"BUY {F} 900" in line)
     assert tonight < lines.index(line_with(lines, "carried orders"))
 
 
-def test_an_evening_that_plans_nothing_says_so_under_the_header(s3_halted: Day) -> None:
-    quiet = dataclasses.replace(
-        s3_halted.result, trade_list=s3_halted.result.trade_list.model_copy(update={"orders": ()})
+def test_an_evening_that_plans_nothing_says_so_and_points_at_the_orders_carried_below(
+    s3_halted: Day,
+) -> None:
+    plan = s3_halted.result.trade_list
+    quiet = dataclasses.replace(s3_halted.result, trade_list=plan.model_copy(update={"orders": ()}))
+    live = s3_halted.result.settlement.live
+    emptied = dataclasses.replace(
+        s3_halted.result,
+        trade_list=plan.model_copy(update={"orders": (), "carried": ()}),
+        settlement=dataclasses.replace(s3_halted.result.settlement, live=()),
     )
 
-    lines = summary_lines(document_of(s3_halted, evening=quiet))
+    carrying = summary_lines(document_of(s3_halted, evening=quiet))
+    nothing = summary_lines(document_of(s3_halted, evening=emptied))
 
-    header = lines.index("ORDERS FOR THE OPEN OF D+1 (call auction 09:15), 2021-03-05")
-    assert lines[header + 1] == "  no new order planned tonight"
+    assert len(live) == 1  # 600050.SH's buy, refused at the open, still live
+    header = next(i for i, line in enumerate(carrying) if line.startswith("ORDERS FOR THE OPEN"))
+    assert carrying[header + 1] == REFERENCE_NOTE
+    # An empty plan above a live order must not read as "nothing is live".
+    assert carrying[header + 2] == "  no new order planned tonight; 1 carried order below"
+    assert "1 live order from earlier sessions" in line_with(carrying, "carried orders")
+    header = next(i for i, line in enumerate(nothing) if line.startswith("ORDERS FOR THE OPEN"))
+    assert nothing[header + 2] == "  no new order planned tonight"
+    assert line_with(nothing, "carried orders") == row("carried orders", "none")
 
 
 def test_the_names_the_draw_left_out_are_listed_with_the_draws_caveat(s3: WrittenOff) -> None:
