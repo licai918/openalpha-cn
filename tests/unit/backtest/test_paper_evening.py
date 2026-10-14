@@ -718,6 +718,101 @@ def test_a_buy_whose_name_left_tonights_survivors_is_cancelled_by_tonights_settl
     assert result.snapshot.cooldowns == (Cooldown(ts_code=A, since_session=3),)
 
 
+TRIO = SurvivorBookConfig(seed=7, holding_count=3)
+"""Three holdings: a book whose equal share is a third of it, so one fill moves its cash a lot."""
+
+
+def trio_through_s2(root: Path) -> Book:
+    """Opened with 30,000.00 under `TRIO`. S1 builds 600010.SH, 600020.SH and 600040.SH: the
+    equal share 30,000.00 / 3 x 0.995 = 9,950.00 buys 900 of each at 10.00. On S2 600010.SH and
+    600040.SH fill at their 10.00 opens (9,000.00 + 5.00 + 0.09 = 9,005.09 each, cash
+    11,989.82) and 600020.SH opens locked at its 11.00 limit-up: refused, carried. Two held and
+    one buy live fill the three places, so S2 plans nothing."""
+    store = FilePaperStateStore(root / "snapshots")
+    open_book(
+        store=store,
+        session=E0,
+        session_index=0,
+        cash=D("30000.00"),
+        config_digest=survivor_config_digest(TRIO),
+    )
+    book = Book(root=root, store=store, ledger=SQLitePortfolioLedger(root / "ledger.sqlite3"))
+    trio = screened((A, "10.00"), (B, "10.00"), (DL, "10.00"))
+    evening(book, S1, NOTHING, trio, {A: "10.00", B: "10.00", DL: "10.00"}, config=TRIO)
+    s2 = market(quiet(A, S2, "10.00"), limit_up(B, S2, "10.00"), quiet(DL, S2, "10.00"))
+    planned = evening(
+        book,
+        S2,
+        s2,
+        screened((A, "10.00"), (B, "11.00"), (DL, "10.00")),
+        {B: "11.00"},
+        config=TRIO,
+    )
+    assert planned.trade_list.orders == ()
+    assert planned.snapshot.book.cash == D("11989.82")
+    return book
+
+
+B_FILLS_S3 = bar(B, S3, "11.00", "10.00", "10.00", "10.00", "10.00", "12.10", "9.90")
+"""600020.SH opens at 10.00 on S3, off the limit: its carried buy of 900 fills for 9,005.09."""
+
+
+def test_tonights_buys_are_sized_from_the_cash_tonights_fills_left(tmp_path: Path) -> None:
+    """The book held 11,989.82 last night. Tonight 600020.SH's carried buy fills for 9,005.09,
+    leaving 2,984.73, and 600040.SH -- delisted, no bar -- is written off, freeing a place that
+    600060.SH is drawn for. The equal share, 20,984.73 / 3 x 0.995 = 6,960.94, would buy 600;
+    the cash, 2,984.73 x 0.995 = 2,969.81, buys 200. Planned from last night's cash the book
+    would order 600 it cannot pay for."""
+    book = trio_through_s2(tmp_path)
+
+    result = evening(
+        book,
+        S3,
+        market(quiet(A, S3, "10.00"), B_FILLS_S3),
+        screened((A, "10.00"), (B, "10.00"), (F, "10.00")),
+        {F: "10.00"},
+        delisted={DL},
+        config=TRIO,
+    )
+
+    assert result.settlement.book.cash == D("2984.73")
+    assert result.settlement.equity == D("20984.73")
+    assert [
+        (o.side, o.ts_code, o.quantity, o.reference_price) for o in result.trade_list.orders
+    ] == [("buy", F, 200, D("10.00"))]
+    assert result.trade_list.unfunded == ()
+
+
+def test_a_held_name_is_sold_at_its_ledger_mark_whatever_the_entrants_prices_say(
+    tmp_path: Path,
+) -> None:
+    """600010.SH goes ex-rights 1 for 1 on S3: its factor doubles to 2.000 and its real prices
+    halve -- it closes at 5.05, so the ledger, which keeps the 900 shares it bought at a factor
+    of 1.000, marks it at 5.05 x 2 = 10.10. It has lost its place among the survivors, so it is
+    sold, and the sale is estimated at that mark: 900 x 10.10 = 9,090.00, the holding's value.
+    The real close, 5.05, is in the entrants' prices too (a caller passing every close); a held
+    name's price comes from the ledger, whatever they say -- at 5.05 the sale would be estimated
+    at half of what it will raise."""
+    book = trio_through_s2(tmp_path)
+    ex_rights = bar(A, S3, "5.00", "5.00", "5.10", "4.95", "5.05", "5.50", "4.50")
+
+    result = evening(
+        book,
+        S3,
+        Market(
+            bars={A: ex_rights, B: B_FILLS_S3, DL: quiet(DL, S3, "10.00")},
+            adj_factor={A: D("2.000"), B: D("1.000"), DL: D("1.000")},
+        ),
+        screened((B, "10.00"), (DL, "10.00"), (F, "10.00"), dropped=(A,)),
+        {A: "5.05", F: "10.00"},
+        config=TRIO,
+    )
+
+    (sale,) = [order for order in result.trade_list.orders if order.side == "sell"]
+    assert (sale.ts_code, sale.quantity, sale.reason) == (A, 900, "EXIT_SURVIVOR_LOST")
+    assert sale.reference_price == D("10.10") == result.settlement.book.mark(A)
+
+
 # ---- the crash matrix --------------------------------------------------------------------------
 
 
