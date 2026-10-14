@@ -527,6 +527,65 @@ def test_a_held_paper_book_without_its_marker_is_refused_at_the_paper_head(
     assert not (world.runtime / "paper" / "registration.json").exists()
 
 
+def test_a_book_that_is_not_the_one_the_journal_pinned_is_refused_at_the_paper_head(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """The head the paper head finds is checked against the holdings the day pinned: the same
+    snapshot holding other names means another run changed the book under the journal, and the
+    day is refused at step 5 by name, before its facts -- with nothing written."""
+    world = _world(tmp_path, monkeypatch, seeded)
+    _run(world, capsys)
+    head = held_head(FilePaperStateStore(world.runtime / "paper" / "snapshots"))
+    assert head is not None
+    path = _journal_path(world)
+    journal = json.loads(path.read_text(encoding="utf-8"))
+    pinned_from = {
+        "session": EPOCH.isoformat(),
+        "session_index": 0,
+        "snapshot_id": head.snapshot_id,
+    }
+    journal.update(held=[SECURITIES[0]], held_from=pinned_from)
+    del journal["prediction"]
+    path.write_text(json.dumps(journal), encoding="utf-8")
+    records = _records(world)
+
+    code, _out, err = _run(world, capsys)
+
+    assert code == 1
+    assert err[0].startswith("step 5 (paper head) failed: the paper book's head at session index 0")
+    assert "another run changed the book under the journal" in err[0]
+    assert err[1] == NO_REQUEST
+    assert _records(world) == records
+    assert "prediction" not in _journal(world)
+
+
+def test_an_epoch_further_back_than_the_panel_step_catches_up_is_refused_when_the_book_opens(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """Decision 3: the epoch is the session before the first scheduled run, and one more than
+    `1 + max_panel_catch_up_sessions` sessions before it is refused -- by `paper_head`, which
+    opens the book, so at step 5, with nothing of the book written and nothing filed."""
+    world = _world(tmp_path, monkeypatch, seeded, config=survivor_config(epoch=date(2026, 3, 2)))
+
+    code, _out, err = _run(world, capsys)
+
+    assert code == 1
+    assert err[0].startswith(
+        "step 5 (paper head) failed: the paper book opens on its epoch 2026-03-02, 25 sessions "
+        "before this run's 2026-04-06, and an epoch may be at most 11 sessions before the first run"
+    )
+    assert _requests(err[1]) == STEADY_SURVIVOR
+    assert _records(world) == ()
+    assert held_head(FilePaperStateStore(world.runtime / "paper" / "snapshots")) is None
+    assert not (world.runtime / "paper" / "registration.json").exists()
+
+
 # --- what the survivor day refuses before it starts -------------------------------------------
 
 
