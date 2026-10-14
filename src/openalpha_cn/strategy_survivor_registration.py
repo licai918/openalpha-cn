@@ -46,8 +46,10 @@ P6's provenance digests every row of every partition a day reads (`stored_rows_d
 to four processed tiers that is about 50 s a day (T6-T7 3.4). The survivor provenance reads the
 **catalog** only:
 
-- `builds`: the `transform_manifest_id` of each composite factor's processed build stamped at the
-  session's 16:30 -- the one build `build_facts_day` reads (`at=`), for the declared transform;
+- `builds`: the `transform_manifest_id` and the `processed_observation_digest` of each composite
+  factor's processed build stamped at the session's 16:30 -- the one build `build_facts_day` reads
+  (`at=`), for the declared transform. The check compares the digest, the build's output: the id
+  also moves when a value-identical build is re-run under another code commit;
 - `inputs`: every partition **the batch can depend on**, each with its `content_hash` and a digest
   of its **date census within that dataset's window** (the catalog's count of rows per event
   date, for the dates the window holds). The windows are what can move an eligible verdict, and
@@ -93,8 +95,9 @@ counted -- **only** when this function names a change, and is refused otherwise.
 depends on why the record was not verified (`scope`), because the evidence it needs differs:
 
 - **`recompute_differs`** -- the day was scored again and the scores differ. Only what can move
-  the batch may excuse that: **a build that changed** (the processed build at the session's 16:30
-  is now another, or none), and **a partition restated within its window** -- its windowed census
+  the batch may excuse that: **a build whose output changed** (the processed build at the
+  session's 16:30 now holds other values, or none), and **a partition restated within its
+  window** -- its windowed census
   differs, or it is gone while its window held rows, or one the windows reach is stored since
   with rows inside its window. Nothing outside the windows is ever named here: an older `daily`
   year rebuilt, an intraday halt months before the session, a whole-year `stk_limit` rebuild that
@@ -427,9 +430,12 @@ class SurvivorInputProvenance:
     amount_window_from: date
     """The first of the `AMOUNT_WINDOW_SESSIONS` sessions ending on the session: where the `daily`
     window opens."""
-    builds: tuple[tuple[str, str], ...]
-    """`(factor, transform_manifest_id)` of each composite factor's processed build at the
-    session's 16:30, ascending by factor."""
+    builds: tuple[tuple[str, str, str], ...]
+    """`(factor, transform_manifest_id, processed_observation_digest)` of each composite factor's
+    processed build at the session's 16:30, ascending by factor. The id names the build; the
+    digest -- over each security's `(subject, coverage, value)`, what the facts read -- is what
+    the check compares, since the id also moves on a value-identical re-run under another code
+    commit."""
     inputs: tuple[SurvivorInputPartition, ...]
     """Every partition the batch can depend on, ascending by `(dataset, year)`."""
     lookback: tuple[SurvivorLookbackPartition, ...]
@@ -449,7 +455,7 @@ class SurvivorInputProvenance:
             "transform_key": self.transform_key,
             "transform_id": self.transform_id,
             "amount_window_from": self.amount_window_from.isoformat(),
-            "builds": [[factor, build] for factor, build in self.builds],
+            "builds": [[factor, build, output] for factor, build, output in self.builds],
             "inputs": [
                 [item.dataset, item.year, item.content_hash, item.dates_digest]
                 for item in self.inputs
@@ -484,7 +490,7 @@ class SurvivorInputProvenance:
                 transform_key=str(body["transform_key"]),
                 transform_id=str(body["transform_id"]),
                 amount_window_from=date.fromisoformat(str(body["amount_window_from"])),
-                builds=tuple((str(item[0]), str(item[1])) for item in builds),
+                builds=tuple((str(item[0]), str(item[1]), str(item[2])) for item in builds),
                 inputs=tuple(
                     SurvivorInputPartition(
                         dataset=str(item[0]),
@@ -586,7 +592,7 @@ def survivor_input_provenance(
         transform_key=transform.qualified_key,
         transform_id=transform.transform_id,
         amount_window_from=windows.amount_from,
-        builds=tuple((factor, cast(str, builds[factor])) for factor in sorted(builds)),
+        builds=tuple((factor, *cast(tuple[str, str], builds[factor])) for factor in sorted(builds)),
         inputs=inputs,
         lookback=lookback,
     )
@@ -639,7 +645,7 @@ def survivor_provenance_changes(
     _require_the_records_transform(provenance, transform)
     session = provenance.session
     published = session_publication_instant(session)
-    factors = tuple(factor for factor, _build in provenance.builds)
+    factors = tuple(factor for factor, _build, _output in provenance.builds)
     windows = _Windows(
         session=session,
         amount_from=provenance.amount_window_from,
@@ -649,11 +655,19 @@ def survivor_provenance_changes(
     changes: list[str] = []
     with store.reading():
         now = _builds_at(store, session=session, factors=factors, transform=transform)
-        for factor, build in provenance.builds:
-            if now[factor] != build:
+        for factor, _build, output in provenance.builds:
+            stands = now[factor]
+            # The output, not the id: a value-identical re-run under another code commit or
+            # `built_at` moves the id and changes no value the facts read.
+            if stands is None:
                 changes.append(
                     f"{factor}: the {transform.qualified_key} build at {published.isoformat()} "
-                    f"is {now[factor] or 'not stored'}, not {build}"
+                    f"is no longer stored (it held {output})"
+                )
+            elif stands[1] != output:
+                changes.append(
+                    f"{factor}: the {transform.qualified_key} build at {published.isoformat()} "
+                    f"now holds {stands[1]}, not {output}"
                 )
         for dataset, year in sorted(set(recorded) | set(_window_partitions(store, windows))):
             if dataset in windows.tiers:
@@ -940,11 +954,11 @@ def _partition(
 
 def _builds_at(
     store: PanelStore, *, session: date, factors: Sequence[str], transform: FactorTransformSpec
-) -> dict[str, str | None]:
-    """Each factor's processed build under `transform` stamped at `session`'s 16:30, by its
-    `transform_manifest_id`, or `None` when there is none."""
+) -> dict[str, tuple[str, str] | None]:
+    """Each factor's processed build under `transform` stamped at `session`'s 16:30, as its
+    `(transform_manifest_id, processed_observation_digest)`, or `None` when there is none."""
     published = session_publication_instant(session)
-    found: dict[str, str | None] = {}
+    found: dict[str, tuple[str, str] | None] = {}
     for factor in factors:
         definition = FACTOR_DEFINITIONS.get(factor)
         if (
@@ -957,7 +971,7 @@ def _builds_at(
             continue
         builds = sorted(
             {
-                manifest.transform_manifest_id
+                (manifest.transform_manifest_id, manifest.processed_observation_digest)
                 for manifest in load_factor_transform_manifests(
                     store, definition, years=(session.year,), as_of=published
                 )
