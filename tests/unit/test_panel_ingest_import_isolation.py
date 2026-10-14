@@ -662,6 +662,10 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "strategy_survivor_market.SessionOrdinalError",
             "strategy_survivor_market.SessionOrdinals",
             "strategy_survivor_registration.survivor_record_is_bound",
+            # Task E4: the report's document names the records' family and carries the survivor
+            # wording in every section -- two plain strings, no reader.
+            "strategy_survivor_registration.SURVIVOR_FAMILY",
+            "strategy_survivor_summary.SURVIVOR_WORDING",
         }
     ),
     "openalpha_cn.strategy_survivor_market": frozenset(

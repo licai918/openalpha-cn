@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import json
 import os
 import re
 import statistics
@@ -91,22 +92,31 @@ from openalpha_cn.strategy_registration import (
     StrategyRegistrationError,
     registration_cutoff,
 )
+from openalpha_cn.strategy_survivor_check import SurvivorRecordVerdict
 from openalpha_cn.strategy_survivor_forward import (
     DESCRIPTIVE_WORDING,
+    NO_VERDICT_WORDING,
     PREDICTION_LAYER_WORDING,
     SURVIVOR_FORWARD_PROTOCOL_KEY,
     SURVIVOR_FORWARD_PROTOCOL_SCHEMA,
+    SURVIVOR_FORWARD_REPORT_KIND,
     PredictionLayer,
     RecordOutcome,
     SampledSessions,
     SurvivorForwardError,
     SurvivorForwardProtocol,
     WitnessedRecord,
+    check_journals_against_the_store,
+    paper_refusal,
     prediction_layer,
     read_forward_protocol,
     record_outcome,
     record_scope,
+    report_through,
+    sampled_benchmarks,
     sampled_sessions,
+    survivor_forward_document,
+    survivor_forward_lines,
     witnessed_survivor_records,
 )
 from openalpha_cn.strategy_survivor_market import PROTOCOL_BENCHMARK, SessionOrdinals
@@ -115,6 +125,7 @@ from openalpha_cn.strategy_survivor_registration import (
     survivor_declaration,
     survivor_feature_ids,
 )
+from openalpha_cn.strategy_survivor_summary import SURVIVOR_WORDING
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 SHANGHAI: Final[ZoneInfo] = ZoneInfo("Asia/Shanghai")
@@ -622,6 +633,41 @@ def test_a_record_after_through_is_not_witnessed(tmp_path: Path) -> None:
         SESSIONS[1],
         SESSIONS[2],
     ]
+
+
+def _filed_stage(item: WitnessedRecord) -> dict[str, Any]:
+    """A survivor journal whose evening filed `item`'s record (`daily_selection`'s stage)."""
+    return {"prediction": {"registered": True, "record_id": item.record_id}}
+
+
+def test_every_journal_that_names_a_record_names_the_one_the_store_witnesses() -> None:
+    """Task E4: the store is the witness (design 2(a)). A journal that says its evening filed a
+    record must name the record the store witnesses for the session; one that says it filed none
+    must have none. A journal with no prediction stage claims nothing, a witnessed session with
+    no journal is the store's word alone, and a journal after `through` is not read."""
+    first = witnessed_on(SESSIONS[1], ONE_SCORE)
+    second = witnessed_on(SESSIONS[2], {**ONE_SCORE, "600000.SH": 0.75})
+    agreeing = {
+        SESSIONS[1]: _filed_stage(first),
+        SESSIONS[2]: _filed_stage(second),
+        SESSIONS[3]: {"as_of": "pinned, nothing filed yet"},
+    }
+
+    check_journals_against_the_store((first, second), agreeing, through=SESSIONS[-1])
+    check_journals_against_the_store((first, second), {}, through=SESSIONS[-1])
+    check_journals_against_the_store((first,), agreeing, through=SESSIONS[1])
+    with pytest.raises(SurvivorForwardError, match=r"2026-01-07 .* the store is the witness"):
+        check_journals_against_the_store((first,), agreeing, through=SESSIONS[-1])
+    with pytest.raises(SurvivorForwardError, match=r"2026-01-06 .* the store is the witness"):
+        check_journals_against_the_store(
+            (first,),
+            {SESSIONS[1]: {"prediction": {"registered": False, "settle_only": True}}},
+            through=SESSIONS[-1],
+        )
+    with pytest.raises(SurvivorForwardError, match="2026-01-06"):
+        check_journals_against_the_store(
+            (first,), {SESSIONS[1]: _filed_stage(second)}, through=SESSIONS[-1]
+        )
 
 
 # --- the sampled sessions --------------------------------------------------------------------
@@ -1483,3 +1529,458 @@ def test_the_seeded_sign_flip_is_deterministic_and_byte_identical_under_two_hash
         )
         assert completed.returncode == 0, completed.stderr
         assert completed.stdout.strip() == seeded_layer_digest()
+
+
+# --- the report's document and its lines (task E4) -----------------------------------------------
+#
+# `survivor_forward_document` puts the layers, the late-record check's verdicts and the paper
+# record into one `survivor_forward_report/v1` document; `survivor_forward_lines` prints it. The
+# layers here are E2's own, driven by `made` outcomes; the verdicts are E1's
+# `SurvivorRecordVerdict`; the paper record is refused unless a test hands one in.
+
+INTEGRITY: Final[str] = "integrity: the caller's threat model, handed in"
+NO_BOOK: Final[str] = "the paper book holds no snapshot"
+ALWAYS: Final[tuple[str, ...]] = (
+    "g0_needs_research_and_validation_conclusions",
+    "spent_window_2024_01_02_to_2026_09_24",
+    "paper_equity_is_not_evidence",
+    "t8_expected_numbers_are_optimistic",
+    "ic_2021",
+    "h5_ic_dispersion_unmeasured",
+    "no_null_signal_control",
+)
+
+
+def checked_by(
+    outcomes: tuple[RecordOutcome, ...], **overrides: tuple[str, str | None, tuple[str, ...]]
+) -> dict[str, SurvivorRecordVerdict]:
+    """E1's verdict of each record of `outcomes`: verified, unless `overrides` names it with its
+    `(verdict, scope, changes)`."""
+    verdicts: dict[str, SurvivorRecordVerdict] = {}
+    for outcome in outcomes:
+        verdict, scope, changes = overrides.get(outcome.record_id, ("verified", None, ()))
+        verdicts[outcome.record_id] = SurvivorRecordVerdict(
+            record_id=outcome.record_id,
+            session=outcome.session,
+            verdict=verdict,  # type: ignore[arg-type]
+            scope=scope,  # type: ignore[arg-type]
+            changes=changes,
+            reason=None if verdict == "verified" else f"by hand: {verdict}",
+        )
+    return verdicts
+
+
+def reported(
+    outcomes: Mapping[int, tuple[RecordOutcome, ...]],
+    verdicts: Mapping[str, SurvivorRecordVerdict],
+    *,
+    through: int,
+    paper: Mapping[str, Any] | None = None,
+    **changes: object,
+) -> dict[str, Any]:
+    """The document of `outcomes` (by horizon) under the test protocol with `changes`, the
+    sample drawn through the session of ordinal `through` at every horizon."""
+    read = protocol(**changes)
+    layers = tuple(
+        prediction_layer(
+            outcomes.get(horizon, ()),
+            verdicts,
+            protocol=read,
+            sampled=sampled_sessions(
+                ORDINALS, anchor_ordinal=read.anchor_ordinal, through=day(through), horizon=horizon
+            ),
+        )
+        for horizon in (read.primary_horizon, *read.secondary_horizons)
+    )
+    return survivor_forward_document(
+        as_of=LAYER_AS_OF,
+        config_id=REGISTERED.config_id,
+        registration_sha256=REGISTERED.registration_sha256,
+        protocol=read,
+        ordinals=ORDINALS,
+        through=day(through),
+        witnessed=tuple(sorted({item.session for group in outcomes.values() for item in group})),
+        verdicts=verdicts,
+        layers=layers,
+        paper=paper_refusal(NO_BOOK) if paper is None else paper,
+        integrity=INTEGRITY,
+    )
+
+
+def codes_of(document: Mapping[str, Any]) -> list[str]:
+    return [item["code"] for item in document["cannot_be_evaluated_yet"]]
+
+
+def verdict_words(document: Mapping[str, Any]) -> list[str]:
+    """Every `FORBIDDEN_WORDS` word the document's JSON or its printed lines say, as a word: the
+    check's own scope names (`recompute_failed`, `no_provenance`) are vocabulary, not verdicts."""
+    text = json.dumps(document, sort_keys=True) + "\n".join(survivor_forward_lines(document))
+    return re.findall(rf"\b({'|'.join(FORBIDDEN_WORDS)})\b", text, flags=re.IGNORECASE)
+
+
+def test_before_the_primary_window_the_document_counts_describes_and_tests_nothing() -> None:
+    """Twenty-five mature daily records and a window of three: at h=20 two sampled periods have
+    matured (1 and 21), so nothing is tested -- "not tested: 2 of 3". At h=5 five have, but a
+    secondary is tested only in the one analysis at the primary window: no test there either,
+    no correction of the secondary family, no p-value anywhere and no verdict word."""
+    outcomes = {20: every_session(25), 5: tuple(made(o, horizon=5) for o in range(1, 26))}
+
+    document = reported(outcomes, checked_by(outcomes[20]), through=25)
+
+    assert document["kind"] == SURVIVOR_FORWARD_REPORT_KIND
+    assert (document["protocol"]["periods_matured"], document["protocol"]["window_satisfied"]) == (
+        2,
+        False,
+    )
+    twenty = document["prediction_layer"]["h20"]["non_overlapping"]
+    assert (twenty["test"], twenty["status"]) == (
+        None,
+        "not tested: 2 of 3 pre-registered periods matured",
+    )
+    five = document["prediction_layer"]["h5"]["non_overlapping"]
+    assert (five["matured"], five["window_satisfied"], five["test"]) == (5, True, None)
+    assert five["status"] == (
+        "not tested: a secondary is tested in the one analysis at the primary window "
+        "(2 of 3 primary periods matured)"
+    )
+    family = document["prediction_layer"]["secondary_family"]
+    assert family["headline"] == {
+        "status": "not applied: before the pre-registered window there is no p-value to "
+        "correct (2 of 3 primary periods matured)",
+        "tests": [],
+    }
+    assert "p_value" not in json.dumps(document)
+    assert not any("one-sided p" in line for line in survivor_forward_lines(document))
+    assert verdict_words(document) == []
+    assert codes_of(document) == ["window_not_satisfied", *ALWAYS]
+    for name in ("protocol", "records", "prediction_layer", "paper_ledger", "relative"):
+        assert document[name]["wording"] == SURVIVOR_WORDING, name
+    for name in ("h20", "h5"):
+        assert document["prediction_layer"][name]["wording"] == SURVIVOR_WORDING
+        assert document["prediction_layer"][name]["forecast_wording"] == PREDICTION_LAYER_WORDING
+    assert document["wording"] == [SURVIVOR_WORDING, PREDICTION_LAYER_WORDING, NO_VERDICT_WORDING]
+    assert NO_VERDICT_WORDING == "no verdict before the pre-registered window"
+
+
+def by_by_hand(p_values: Mapping[str, float], *, family_size: int) -> dict[str, float]:
+    """Benjamini-Yekutieli's adjusted p-values written out: ascending by `(p, id)`, the running
+    minimum of `H_m * m * p_(j) / j` from the largest rank down, capped at one."""
+    harmonic = sum(1 / index for index in range(1, family_size + 1))
+    ranked = sorted(p_values.items(), key=lambda item: (item[1], item[0]))
+    adjusted: dict[str, float] = {}
+    running = float("inf")
+    for rank in range(len(ranked), 0, -1):
+        name, p_value = ranked[rank - 1]
+        running = min(running, harmonic * family_size * p_value / rank)
+        adjusted[name] = min(1.0, running)
+    return adjusted
+
+
+def test_at_the_primary_window_the_secondary_family_is_corrected_by_benjamini_yekutieli() -> None:
+    """A window of twelve two-session periods, primary h=2 and a secondary h=3: every metric is
+    tested once over its first twelve periods, exactly. A constant positive excess has the
+    smallest one-sided p twelve sign flips allow, 1/4096; a constant negative one the largest.
+    The secondary family -- the two secondary metrics at h=2 and the rank IC at h=3 -- is then
+    corrected under arbitrary dependence, by hand: the two small p-values clear q, the large one
+    does not."""
+    outcomes = {
+        2: tuple(made(o, horizon=2, rank_ic=0.01 * (o % 7) - 0.02) for o in range(1, 35)),
+        3: tuple(made(o, horizon=3, rank_ic=0.004 + 0.001 * (o % 3)) for o in range(1, 35)),
+    }
+
+    document = reported(
+        outcomes,
+        checked_by(outcomes[2]),
+        through=34,
+        primary_horizon=2,
+        secondary_horizons=[3],
+        window_periods=12,
+    )
+
+    assert document["protocol"]["window_satisfied"] is True
+    two = document["prediction_layer"]["h2"]["non_overlapping"]
+    assert two["status"] == "tested once, over the first 12 of 17 matured periods"
+    tests = {test["metric"]: test for test in two["test"]}
+    assert (tests["survivors_minus_ew"]["exact"], tests["survivors_minus_ew"]["sign_patterns"]) == (
+        True,
+        4096,
+    )
+    assert tests["survivors_minus_ew"]["one_sided_p_value"] == pytest.approx(1 / 4096)
+    assert tests["worst_decile_excess"]["one_sided_p_value"] == pytest.approx(1 - 1 / 4096)
+    three = document["prediction_layer"]["h3"]["non_overlapping"]
+    assert three["test"][0]["one_sided_p_value"] == pytest.approx(1 / 4096)
+    family = document["prediction_layer"]["secondary_family"]
+    assert family["family"] == ["h2.survivors_minus_ew", "h2.worst_decile_excess", "h3.rank_ic"]
+    assert (family["dependence"], family["q"], family["family_size"]) == ("arbitrary", 0.2, 3)
+    corrected = {item["hypothesis_id"]: item for item in family["headline"]["tests"]}
+    expected = by_by_hand(
+        {name: item["one_sided_p_value"] for name, item in corrected.items()}, family_size=3
+    )
+    assert expected["h2.survivors_minus_ew"] == pytest.approx(5.5 / 4096 / 2)
+    assert expected["h2.worst_decile_excess"] == 1.0
+    for name, q_value in expected.items():
+        assert corrected[name]["q_value"] == pytest.approx(q_value)
+    assert [corrected[name]["rejected"] for name in family["family"]] == [True, False, True]
+    assert family["headline"]["status"] == "applied over 3 of 3 secondary hypotheses"
+    assert "window_not_satisfied" not in codes_of(document)
+
+
+def test_a_refused_record_inside_the_tested_sample_compromises_it_and_one_after_does_not() -> None:
+    """Decision 9: a refused record whose session falls in the sample the test is made over --
+    up to the K-th matured period -- prints the test "compromised (n refused)". One refused
+    after that period is a gap of the sample and leaves the test as it is."""
+    outcomes = {20: every_session(81), 5: ()}
+
+    inside = reported(
+        outcomes,
+        checked_by(outcomes[20], prd_0021=("refused", "recompute_differs", ())),
+        through=81,
+    )
+    after = reported(
+        outcomes,
+        checked_by(outcomes[20], prd_0081=("refused", "recompute_differs", ())),
+        through=81,
+    )
+
+    sample = inside["prediction_layer"]["h20"]["non_overlapping"]
+    assert sample["refused_in_sample"] == 1
+    assert sample["status"] == (
+        "compromised (1 refused): tested once, over the first 3 of 4 matured periods"
+    )
+    assert sample["test"] is not None
+    later = after["prediction_layer"]["h20"]["non_overlapping"]
+    assert later["refused_in_sample"] == 0
+    assert later["status"] == "tested once, over the first 3 of 4 matured periods"
+    assert {"session": day(81).isoformat(), "reason": "refused"} in later["gaps"]
+
+
+def test_the_lines_list_the_refusals_first_then_the_layers_ledger_relative_wording_integrity() -> (
+    None
+):
+    """The records' refusals and UNVERIFIABLE records are printed before the prediction layer,
+    the paper ledger after it (here refused, in its own line), then the relative return, what
+    cannot be evaluated yet, the wording and the integrity statement last. A document read back
+    from its sorted JSON prints the same lines."""
+    outcomes = {20: every_session(25), 5: ()}
+    verdicts = checked_by(
+        outcomes[20],
+        prd_0003=("refused", "no_provenance", ()),
+        prd_0004=("unverifiable", "recompute_differs", ("daily 2026: census moved",)),
+    )
+
+    document = reported(outcomes, verdicts, through=25)
+    lines = survivor_forward_lines(document)
+
+    def first(prefix: str) -> int:
+        return next(index for index, line in enumerate(lines) if line.startswith(prefix))
+
+    assert (
+        first("records:")
+        < first("  REFUSED prd_0003")
+        < first("  UNVERIFIABLE prd_0004")
+        < first("prediction layer")
+        < first("paper ledger")
+        < first("relative return")
+        < first("cannot be evaluated yet:")
+        < first("wording:")
+    )
+    assert "daily 2026: census moved" in lines[first("  UNVERIFIABLE prd_0004")]
+    assert lines[first("paper ledger")] == (
+        f"paper ledger -- refused: {NO_BOOK}; the prediction layer above stands"
+    )
+    assert lines[-4:] == [
+        f"wording: {SURVIVOR_WORDING}",
+        f"wording: {PREDICTION_LAYER_WORDING}",
+        f"wording: {NO_VERDICT_WORDING}",
+        INTEGRITY,
+    ]
+    assert survivor_forward_lines(json.loads(json.dumps(document, sort_keys=True))) == lines
+    records = document["records"]
+    assert records["by_verdict"] == {
+        "verified": 23,
+        "unverifiable": 1,
+        "refused": 1,
+        "unchecked": 0,
+    }
+    assert records["by_scope"]["no_provenance"] == 1
+    assert [item["record_id"] for item in records["refused"]] == ["prd_0003"]
+    assert records["unverifiable"][0]["changes"] == ["daily 2026: census moved"]
+    for section in ("paper_ledger", "relative"):
+        assert document[section] == {"wording": SURVIVOR_WORDING, "refused": NO_BOOK}
+
+
+def test_what_cannot_be_evaluated_yet_is_said_only_while_it_holds() -> None:
+    """No record at all: no record exists, no outcome has matured, the window is not satisfied,
+    and the standing items. Records none of which has matured: the first item goes."""
+    empty = reported({20: (), 5: ()}, {}, through=0)
+    pending = every_session(5, immature=frozenset(range(1, 6)))
+    young = reported({20: pending, 5: ()}, checked_by(pending), through=5)
+
+    assert codes_of(empty) == [
+        "no_survivor_record_yet",
+        "first_outcome_not_matured",
+        "window_not_satisfied",
+        *ALWAYS,
+    ]
+    assert codes_of(young) == ["first_outcome_not_matured", "window_not_satisfied", *ALWAYS]
+    statements = {item["code"]: item["statement"] for item in empty["cannot_be_evaluated_yet"]}
+    assert statements["first_outcome_not_matured"].startswith(
+        "the first h=20 outcome matures about 21 sessions after the first evening"
+    )
+    assert "+0.037" in statements["ic_2021"]
+    assert "2024-01-02..2026-09-24" in statements["spent_window_2024_01_02_to_2026_09_24"]
+    assert "V2-P7-002" in statements["no_null_signal_control"]
+    assert (empty["records"]["witnessed"], empty["records"]["first_session"]) == (0, None)
+    assert empty["records"]["missing_sessions"] == []
+    assert young["records"]["missing_sessions"] == []
+
+
+def test_the_missing_sessions_are_the_closed_sessions_after_the_epoch_without_a_record() -> None:
+    outcomes = every_session(8, skip=frozenset({3, 6}))
+
+    document = reported({20: outcomes, 5: ()}, checked_by(outcomes), through=9)
+
+    assert document["records"]["missing_sessions"] == [
+        day(3).isoformat(),
+        day(6).isoformat(),
+        day(9).isoformat(),
+    ]
+    assert (document["records"]["first_session"], document["records"]["newest_session"]) == (
+        day(1).isoformat(),
+        day(8).isoformat(),
+    )
+
+
+def test_the_report_runs_through_the_newest_session_whose_cutoff_has_passed() -> None:
+    """A session is a gap or missing only once its record can no longer be filed -- 09:15 of the
+    next session has come -- or when a record of it is already held."""
+    thursday, friday = date(2026, 1, 15), date(2026, 1, 16)
+    saturday = datetime(2026, 1, 17, 12, 0, tzinfo=SHANGHAI)
+
+    assert report_through(CALENDAR, ORDINALS, as_of=saturday, witnessed=()) == thursday
+    assert report_through(CALENDAR, ORDINALS, as_of=saturday, witnessed=(friday,)) == friday
+    monday_auction = datetime(2026, 1, 19, 9, 15, tzinfo=SHANGHAI)
+    assert report_through(CALENDAR, ORDINALS, as_of=monday_auction, witnessed=()) == friday
+    early = datetime(2026, 1, 6, 9, 0, tzinfo=SHANGHAI)
+    assert report_through(CALENDAR, ORDINALS, as_of=early, witnessed=()) == EPOCH
+
+
+def test_the_relative_return_reads_the_sampled_periods_and_names_the_ones_left_out() -> None:
+    """The relative return's windows are the headline's sampled periods at the primary horizon,
+    each from its record's entry close to its exit close with its equal weight and CSI 500; a
+    period with a benchmark missing is left out and named in the document."""
+    outcomes = tuple(
+        dataclasses.replace(
+            made(o, csi500=None if o == 21 else 0.005),
+            entry_day=day(o + 1),
+            exit_day=day(o + 21),
+        )
+        for o in range(1, 62)
+    )
+    built = layer(outcomes, verified(outcomes), through=61)
+
+    picked = sampled_benchmarks(built, outcomes)
+
+    assert [(item.record_id, item.entry, item.exit) for item in picked] == [
+        ("prd_0001", day(2), day(22)),
+        ("prd_0041", day(42), day(62)),
+        ("prd_0061", day(62), day(82)),
+    ]
+    assert {(item.investable_ew, item.csi500) for item in picked} == {(0.01, 0.005)}
+    paper = {
+        "paper_ledger": {"wording": SURVIVOR_WORDING},
+        "relative": {"wording": SURVIVOR_WORDING, "windows_given": 3},
+    }
+    document = reported({20: outcomes, 5: ()}, checked_by(outcomes), through=61, paper=paper)
+    assert document["relative"]["windows_left_out"] == [
+        {"record_id": "prd_0021", "session": day(21).isoformat(), "missing": ["csi500"]}
+    ]
+
+
+def test_a_document_needs_one_layer_per_registered_horizon() -> None:
+    read = protocol()
+    only = prediction_layer(
+        (),
+        {},
+        protocol=read,
+        sampled=sampled_sessions(ORDINALS, anchor_ordinal=1, through=day(3), horizon=20),
+    )
+    with pytest.raises(SurvivorForwardError, match="horizon"):
+        survivor_forward_document(
+            as_of=LAYER_AS_OF,
+            config_id=REGISTERED.config_id,
+            registration_sha256=REGISTERED.registration_sha256,
+            protocol=read,
+            ordinals=ORDINALS,
+            through=day(3),
+            witnessed=(),
+            verdicts={},
+            layers=(only,),
+            paper=paper_refusal(NO_BOOK),
+            integrity=INTEGRITY,
+        )
+
+
+def seeded_document() -> dict[str, Any]:
+    """A document with every kind of entry: refused, UNVERIFIABLE and verified records, gaps,
+    a compromised test and a corrected secondary family."""
+    outcomes = {
+        2: tuple(made(o, horizon=2, rank_ic=0.01 * (o % 7) - 0.02) for o in range(1, 35)),
+        3: tuple(made(o, horizon=3, rank_ic=0.004 + 0.001 * (o % 3)) for o in range(1, 35)),
+    }
+    verdicts = checked_by(
+        outcomes[2],
+        prd_0003=("refused", "no_provenance", ()),
+        prd_0007=("unverifiable", "recompute_failed", ("daily 2026: partition gone", "a b")),
+        prd_0011=("refused", "recompute_differs", ()),
+    )
+    return reported(
+        outcomes,
+        verdicts,
+        through=34,
+        primary_horizon=2,
+        secondary_horizons=[3],
+        window_periods=12,
+    )
+
+
+def seeded_document_digest() -> str:
+    return hashlib.sha256(json.dumps(seeded_document(), sort_keys=True).encode()).hexdigest()
+
+
+def test_the_document_is_byte_identical_under_two_hash_seeds() -> None:
+    document = seeded_document()
+    assert document["prediction_layer"]["h2"]["non_overlapping"]["status"].startswith(
+        "compromised (2 refused): tested once"
+    )
+    here = Path(__file__).resolve()
+    program = (
+        "import importlib.util, sys;"
+        "spec = importlib.util.spec_from_file_location('survivor_forward_test', sys.argv[1]);"
+        "module = importlib.util.module_from_spec(spec);"
+        "sys.modules['survivor_forward_test'] = module;"
+        "spec.loader.exec_module(module);"
+        "print(module.seeded_document_digest())"
+    )
+    path = os.pathsep.join(
+        part
+        for part in (
+            str(ROOT / "src"),
+            str(ROOT / "tests"),
+            os.fspath(here.parent),
+            os.environ.get("PYTHONPATH"),
+        )
+        if part
+    )
+    digests = set()
+    for hash_seed in ("0", "1"):
+        completed = subprocess.run(
+            [sys.executable, "-c", program, str(here)],
+            env={**os.environ, "PYTHONHASHSEED": hash_seed, "PYTHONPATH": path},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr
+        digests.add(completed.stdout.strip())
+    assert digests == {seeded_document_digest()}
