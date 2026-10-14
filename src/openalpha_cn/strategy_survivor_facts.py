@@ -76,13 +76,19 @@ then no bar in reach.
 - **Every held code is told what became of it** (`FactsDay.held_status`), because the caller
   acts on each one: `row` -- it has a fact row; `no_bar_in_reach` -- listed, and never a bar
   since its listing or the panel's first session, so no close to carry and no row (the kernel
-  would sell it as unassessed: the caller refuses the day by name); `not_listed` -- the registry
-  knows it and does not list it on the day (delisted), no row on purpose, so the kernel sells
-  it; `not_in_registry` -- the registry has no listing row for it at all, whether or not a bar
-  on the day gave it a row aged 0 (the caller refuses the day by name: a typo or a restated
-  code); `board_unrecognised` -- see above, no row. `held` itself is part of the day, spelled
-  exactly (`MalformedHeldCodeError` otherwise): a misspelled holding would match nothing and
-  pass as unheld.
+  would sell it as unassessed: the caller refuses the day by name); `delisted` -- the registry
+  knows it and dates its delisting on or before the day, no row on purpose, so the kernel sells
+  it; `not_yet_listed` -- the registry knows it and dates its listing **after** the day (a re-read
+  of a past day, made after the listing row was published, or a `.BJ` code priced before its
+  listing date), no row: for a name already held that is a registry inconsistency, not a
+  delisting, and a write-off of the holding is never to be taken from it; `not_in_registry` --
+  the registry has no listing row for it at all, whether or not a bar on the day gave it a row
+  aged 0 (the caller refuses the day by name: a typo or a restated code); `board_unrecognised`
+  -- see above, no row. A registry row that ends before it begins (a delisting on or before the
+  day and a listing after it; `build_stock_universe` refuses one, a hand-built `StockUniverse`
+  does not) is neither of the pair, and a held code with one refuses the day by name instead of
+  getting a status. `held` itself is part of the day, spelled exactly (`MalformedHeldCodeError`
+  otherwise): a misspelled holding would match nothing and pass as unheld.
 - **A trading security's `avg_amount`** is the mean of its bars over the 20 sessions ending on
   the signal day (T8's `a20`). **`suspended`** is "no bar", or a halt through the close
   (`backtest.execution.suspended_at_the_close`).
@@ -187,7 +193,7 @@ from openalpha_cn.domain.name_history import (
     RiskWarning,
 )
 from openalpha_cn.domain.price_limits import PriceLimit
-from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET
+from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET, SecurityLifecycle
 from openalpha_cn.domain.survivor_book import Board, SecurityFacts, SurvivorBookConfig
 from openalpha_cn.domain.trading_calendar import TRADING_CALENDAR_DATASET, TradingCalendar
 from openalpha_cn.panel.store import PanelStore
@@ -276,13 +282,20 @@ class StaleRegistryError(SurvivorFactsError):
 
 
 HeldStatusValue = Literal[
-    "row", "no_bar_in_reach", "not_listed", "not_in_registry", "board_unrecognised"
+    "row",
+    "no_bar_in_reach",
+    "delisted",
+    "not_yet_listed",
+    "not_in_registry",
+    "board_unrecognised",
 ]
 """What became of one held code on the signal day; see `HeldStatus`."""
 
 _HELD_STATUSES_WITH_A_ROW: Final[frozenset[str]] = frozenset({"row", "not_in_registry"})
 """The statuses a held code with a fact row can have: `not_in_registry` is about the registry,
-not the row, and a code it has never heard of has one when it has a bar on the day."""
+not the row, and a code it has never heard of has one when it has a bar on the day. `delisted` and
+`not_yet_listed` say the registry knows the code and does not list it on the day, which is why it
+has none."""
 
 
 class HeldStatus(BaseModel):
@@ -292,8 +305,12 @@ class HeldStatus(BaseModel):
     - `no_bar_in_reach`: the registry lists it on the day and there is no bar of it back to its
       listing day or the panel's first session -- no close to carry, so no row. The kernel would
       sell it as unassessed; the caller refuses the day by name.
-    - `not_listed`: the registry knows it and does not list it on the day (delisted, or not yet
-      listed) -- no row on purpose; the kernel sells it.
+    - `delisted`: the registry knows it, it had listed by the day, and its delisting is dated on
+      or before the day (the date is exclusive: the first day it is gone) -- no row on purpose;
+      the kernel sells it. The one status a write-off of a holding may be taken from.
+    - `not_yet_listed`: the registry knows it and dates its listing after the day, and no
+      delisting on or before it -- no row, with a bar on the day or without. The registry says the
+      code had not listed yet, so it is not a delisting and a holding is never written off as one.
     - `not_in_registry`: the registry has no listing row for it at all. With a bar on the day it
       keeps the row such a code always gets (aged 0, `listing_too_recent`); without one it has
       none. Either way the caller refuses the day by name: a holding the registry has never heard
@@ -303,8 +320,15 @@ class HeldStatus(BaseModel):
 
     The tests are made in this order (`_held_status`): `not_in_registry` first -- a code the
     registry has no row for is `not_in_registry` whatever else is true of it -- then `row`, then
-    `not_listed`, then `board_unrecognised`, and `no_bar_in_reach` for what is left. That is not
-    the order the statuses are listed in above.
+    the pair `delisted` / `not_yet_listed`, then `board_unrecognised`, and `no_bar_in_reach` for
+    what is left. That is not the order the statuses are listed in above.
+
+    A known code is never both of the pair and never `delisted` on a hunch. A row whose dates say
+    it ended on or before the day **and** had not begun by it -- which `build_stock_universe`
+    refuses, and a hand-built `StockUniverse` does not -- has no true status, so it has none:
+    `build_facts_day` refuses a day holding one by name (`SurvivorFactsError`). A status for it
+    would be a value no registry the loaders return can produce, for a caller to handle or to
+    miss.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -768,7 +792,9 @@ def build_facts_day(
     first session -- which is counted in `FactsNotes.no_bar_within_carry`. `FactsDay.held_status`
     says what became of every held code; **the caller refuses by name a day on which a held
     code is `no_bar_in_reach` or `not_in_registry`**, and lets the kernel sell one that is
-    `not_listed`. A session whose year has no registry partition yet is read through the newest
+    `delisted`; a `not_yet_listed` one is not a delisting. A held code whose registry row ends
+    before it begins refuses the day (`SurvivorFactsError`, naming it). A session whose year has
+    no registry partition yet is read through the newest
     stored lifecycle year, when the registry was fetched at or after the session's publication,
     and refused by name (`StaleRegistryError`) when it was not. See the module docstring for each
     rule; it raises the loaders' own refusals unchanged.
@@ -880,7 +906,8 @@ def _read_facts_day(
         date(_years_through(store, DAILY_DATASET, session.year)[0], 1, 1),
     )
     history = calendar.trading_days_between(first, session)
-    listed_on = {entry.ts_code: entry.listed_on for entry in registry.securities}
+    lifecycle = {entry.ts_code: entry for entry in registry.securities}
+    listed_on = {code: entry.listed_on for code, entry in lifecycle.items()}
     listed = frozenset(registry.listed_on(session))
     bars = _Walk(
         store=store,
@@ -968,8 +995,8 @@ def _read_facts_day(
                 status=_held_status(
                     code,
                     rows=rows,
-                    registered=listed_on.keys(),
-                    listed=listed,
+                    lifecycle=lifecycle,
+                    session=session,
                     unrecognised_board=bars.unrecognised_board,
                 ),
             )
@@ -982,17 +1009,38 @@ def _held_status(
     code: str,
     *,
     rows: Collection[str],
-    registered: Collection[str],
-    listed: Collection[str],
+    lifecycle: Mapping[str, SecurityLifecycle],
+    session: date,
     unrecognised_board: Collection[str],
 ) -> HeldStatusValue:
-    """What became of one held code; the order of the tests is `HeldStatus`'s."""
-    if code not in registered:
+    """What became of one held code; the order of the tests is `HeldStatus`'s.
+
+    A known code is judged by its own two dates against `session`, the same interval
+    `StockUniverse.listed_on` tests (`listed_on <= session < delisted_on`): it **began** when
+    `listed_on <= session` and **ended** when `delisted_on <= session`. Began and not ended is
+    listed; began and ended is `delisted`; neither is `not_yet_listed`. Ended without having begun
+    is none of them -- `build_stock_universe` refuses `delisted_on <= listed_on`, so no loader
+    returns it, but `StockUniverse`'s constructor validates nothing -- and it is refused by name
+    rather than called `delisted`, which would hand a write-off a code that never listed.
+    """
+    entry = lifecycle.get(code)
+    if entry is None:
         return "not_in_registry"
     if code in rows:
         return "row"
-    if code not in listed:
-        return "not_listed"
+    began = entry.listed_on <= session
+    delisted_on = entry.delisted_on
+    if delisted_on is not None and delisted_on <= session:
+        if not began:
+            raise SurvivorFactsError(
+                f"held code {code}'s registry row ends before it begins: listed on "
+                f"{entry.listed_on.isoformat()} and delisted on {delisted_on.isoformat()}, read "
+                f"on {session.isoformat()}; it is neither delisted nor not yet listed, and a "
+                "write-off of the holding must not be taken from it"
+            )
+        return "delisted"
+    if not began:
+        return "not_yet_listed"
     if code in unrecognised_board:
         return "board_unrecognised"
     return "no_bar_in_reach"
