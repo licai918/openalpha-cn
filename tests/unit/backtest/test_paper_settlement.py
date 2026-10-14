@@ -171,8 +171,10 @@ def previous(
     orders: tuple[TradeOrder, ...] = (),
     config: SurvivorBookConfig = CONFIG,
     settled: bool = True,
+    first_decision: int | None = 100,
 ) -> PaperBookSnapshot:
-    """The book at the close of S0: `holdings`, and `orders` planned on S0 (tried 0 times)."""
+    """The book at the close of S0: `holdings`, and `orders` planned on S0 (tried 0 times); its
+    first decision was S0's unless `first_decision` says otherwise."""
     return PaperBookSnapshot(
         config_digest=survivor_config_digest(config),
         session_index=100,
@@ -198,6 +200,7 @@ def previous(
         ),
         pending_orders=tuple(PendingOrder(order=order, attempts=0) for order in orders),
         last_settled_session=100 if settled else None,
+        first_decision_session=first_decision,
     )
 
 
@@ -822,7 +825,7 @@ def test_the_first_evening_after_the_opening_settles_nothing_and_moves_the_book_
     """An opening book holds nothing and has no order, so there is no name to ask the market
     about: the session is settled without a step -- cash unchanged, the date moved -- and the
     kernel is told the book is not initialised, so its first decision is the initial build."""
-    opening = previous("350000.00", settled=False)
+    opening = previous("350000.00", settled=False, first_decision=None)
     ledger, portfolio = ledger_at(tmp_path / "paper.sqlite3")
 
     settled = settle(opening, S1, Market(bars={}, adj_factor={}), portfolio)
@@ -839,6 +842,7 @@ def test_the_first_evening_after_the_opening_settles_nothing_and_moves_the_book_
         session=101, initialized=False, equity=D("350000.00")
     )
     snapshot = tonight(settled, buy(C, 1000, signal=101))
+    assert snapshot.first_decision_session == 101
     assert book_state(snapshot, config=CONFIG).initialized is True
     assert book_state(opening, config=CONFIG).initialized is False
 
@@ -1189,3 +1193,54 @@ def test_a_due_sell_of_a_halted_holding_is_not_attempted_and_stays_live_with_its
     assert (live(first), live(second)) == ([("sell", A, 1)], [("sell", A, 2)])
     assert [item.attempts for item in tonight(second).pending_orders] == [2]
     assert rows(ledger) == []
+
+
+# ---- the book's first decision -----------------------------------------------------------------
+
+
+def test_a_book_only_caught_up_since_its_opening_is_still_uninitialised(tmp_path: Path) -> None:
+    """P5: the evening of S1 fails, so S1 is settled later without a decision (`without_plan`).
+    Having settled a session is not having decided one: on S2 the kernel is still told the book
+    is not initialised, so its first decision is the initial build -- not two replacements a day.
+    The plan of S2 is the first, and sets the book's first decision; S3 is initialised."""
+    _, portfolio = ledger_at(tmp_path / "paper.sqlite3")
+    nothing = Market(bars={}, adj_factor={})
+    opening = previous("350000.00", settled=False, first_decision=None)
+
+    caught_up = settle(opening, S1, nothing, portfolio).without_plan()
+
+    assert (caught_up.last_settled_session, caught_up.first_decision_session) == (101, None)
+    assert caught_up.pending_orders == ()
+    second = settle(caught_up, S2, nothing, portfolio)
+    assert second.initialized is False
+    assert book_state(second, config=CONFIG).initialized is False
+    planned = tonight(second, buy(C, 1000, signal=102))
+    assert planned.first_decision_session == 102
+    third = settle(
+        planned,
+        S3,
+        market(
+            bar(C, S3, "10.00", "10.00", "10.10", "9.90", "10.00", "11.00", "9.00"), adj={C: "1"}
+        ),
+        portfolio,
+        survivors={C},
+    )
+    assert third.initialized is True
+    assert book_state(third, config=CONFIG).initialized is True
+
+
+def test_later_plans_and_settle_only_snapshots_keep_the_first_decision(tmp_path: Path) -> None:
+    """A book first decided on S0 keeps 100 through a planned evening and a settle-only one. A
+    settle-only snapshot carries the live orders and adds none."""
+    book, quotes = _sells_and_buys()
+    settled = settle(book, S1, quotes, ledger_at(tmp_path / "p.sqlite3")[1], survivors={C, E})
+    assert settled.initialized is True
+
+    planned = tonight(settled, buy(B, 100, signal=101))
+    settle_only = settled.without_plan()
+
+    assert planned.first_decision_session == settle_only.first_decision_session == 100
+    assert settle_only.pending_orders == settled.live
+    assert (settle_only.session, settle_only.last_settled_session) == (S1, 101)
+    assert (settle_only.book, settle_only.cooldowns) == (settled.book, settled.cooldowns)
+    assert settle_only.entry_factors == settled.entry_factors

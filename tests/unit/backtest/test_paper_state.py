@@ -135,6 +135,7 @@ def held_snapshot(**overrides: Any) -> PaperBookSnapshot:
         ),
         "cooldowns": (Cooldown(ts_code=X, since_session=101),),
         "last_settled_session": 102,
+        "first_decision_session": 100,
     }
     return PaperBookSnapshot(**{**fields, **overrides})
 
@@ -155,6 +156,7 @@ def opening_snapshot() -> PaperBookSnapshot:
             PendingOrder(order=buy(X, 300, signal=100, expires=101, price="30.00"), attempts=0),
         ),
         last_settled_session=None,
+        first_decision_session=100,
     )
 
 
@@ -187,8 +189,15 @@ def test_the_snapshot_is_addressed_by_the_one_hash_function_under_its_own_prefix
             )
         },
         {"config_digest": OTHER_DIGEST},
+        {"first_decision_session": 101},
     ],
-    ids=["an entry factor", "a cool-down", "a carried order", "the configuration"],
+    ids=[
+        "an entry factor",
+        "a cool-down",
+        "a carried order",
+        "the configuration",
+        "first decision",
+    ],
 )
 def test_every_part_of_the_state_moves_the_address(overrides: dict[str, Any]) -> None:
     assert held_snapshot(**overrides).snapshot_id != held_snapshot().snapshot_id
@@ -365,6 +374,7 @@ def test_an_opening_book_holds_no_order_due_on_a_session_it_will_never_settle() 
             book=PortfolioState(as_of=S0, cash=D("100000.00")),
             pending_orders=(overdue,),
             last_settled_session=None,
+            first_decision_session=99,
         )
 
 
@@ -450,6 +460,38 @@ def test_the_book_is_as_of_the_snapshot_session_and_settled_through_it_or_not_at
         held_snapshot(last_settled_session=101)
     opening = opening_snapshot()
     assert opening.last_settled_session is None
+
+
+def test_the_first_decision_is_on_or_before_the_snapshot_session() -> None:
+    """`first_decision_session` is the session whose evening first planned the book (the
+    kernel's initial build); a snapshot cannot know a decision made after its own session."""
+    assert held_snapshot(first_decision_session=102).first_decision_session == 102
+    with pytest.raises(
+        ValueError, match=r"first decision was made on session 103, after the snapshot's 102"
+    ):
+        held_snapshot(first_decision_session=103)
+
+
+def test_a_book_no_decision_has_been_made_for_holds_nothing_and_has_no_order_or_cool_down() -> None:
+    """Before its first decision a book has never planned an order, so it can hold no position,
+    no pending order and no cool-down. Each is refused by name; a book of cash alone -- an opening
+    book, or one only caught up since -- is accepted."""
+    fields: dict[str, Any] = {
+        "config_digest": DIGEST,
+        "session_index": 102,
+        "session": S2,
+        "book": PortfolioState(as_of=S2, cash=D("100000.00")),
+        "last_settled_session": 102,
+        "first_decision_session": None,
+    }
+    assert PaperBookSnapshot(**fields).first_decision_session is None
+    with pytest.raises(ValueError, match=r"no decision.*held names.*600000\.SH"):
+        held_snapshot(first_decision_session=None)
+    pending = PendingOrder(order=buy(C, 500, signal=102, expires=106, price="12.00"), attempts=0)
+    with pytest.raises(ValueError, match=r"no decision.*pending orders.*000001\.SZ"):
+        PaperBookSnapshot(**fields, pending_orders=(pending,))
+    with pytest.raises(ValueError, match=r"no decision.*cool-downs.*600519\.SH"):
+        PaperBookSnapshot(**fields, cooldowns=(Cooldown(ts_code=X, since_session=101),))
 
 
 # --- on disk ------------------------------------------------------------------------------
@@ -559,6 +601,7 @@ def test_a_snapshot_dated_before_the_head_is_refused_even_when_its_index_follows
         session=early,
         book=PortfolioState(as_of=early, cash=D("49190.00")),
         last_settled_session=103,
+        first_decision_session=None,
     )
 
     with pytest.raises(
@@ -606,6 +649,7 @@ def test_an_opening_snapshot_saved_over_a_settled_history_is_refused(tmp_path: P
         session=S2,
         book=PortfolioState(as_of=S2, cash=D("100000.00")),
         last_settled_session=None,
+        first_decision_session=None,
     )
 
     with pytest.raises(
@@ -698,6 +742,7 @@ def test_a_book_is_continued_only_under_the_configuration_it_was_opened_with(
         session=S3,
         book=PortfolioState(as_of=S3, cash=D("100000.00")),
         last_settled_session=None,
+        first_decision_session=None,
     )
     with pytest.raises(PaperStateError, match=r"2021-03-04 is an opening snapshot"):
         save_snapshot(store, second_book)
@@ -1134,14 +1179,15 @@ def test_the_schema_digest_drops_prose_but_not_a_field_named_description() -> No
 
 
 PAPER_BOOK_SNAPSHOT_SCHEMA_DIGEST = (
-    "0b660bee2f9fc642185fefe22e1d7e5fad8536724f5ac1912a451234b1bade14"
+    "31f4e733b2f2c68ed1d629c44515725d99859b7c15b63d1aac599835d42ac79f"
 )
 """sha256 of `PaperBookSnapshot.model_json_schema()` without its descriptions, keys in the order
 pydantic gives them -- which is the fields' declaration order, the order `model_dump_json`
 writes and `open_snapshot`'s canonical-bytes check compares.
 
-Re-pinned once, for `config_digest` (`V2-P7-017`), before any snapshot had been stored: a new
-digest here was the whole of that change only because there was nothing on disk to migrate."""
+Re-pinned twice, each time before any snapshot had been stored: for `config_digest`
+(`V2-P7-017`), and for `first_decision_session` (`V2-P7-009`). A new digest here was the whole of
+each change only because there was nothing on disk to migrate."""
 
 
 def test_the_stored_shape_of_a_snapshot_is_pinned_so_a_contract_change_needs_a_migration() -> None:
@@ -1249,6 +1295,11 @@ def _settle(snapshot: PaperBookSnapshot, day: Day) -> PaperBookSnapshot:
         ),
         cooldowns=tuple(cooldowns.values()),
         last_settled_session=session,
+        first_decision_session=(
+            session
+            if snapshot.first_decision_session is None and day.planned
+            else snapshot.first_decision_session
+        ),
     )
 
 

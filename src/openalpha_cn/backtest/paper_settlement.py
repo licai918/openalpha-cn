@@ -181,8 +181,10 @@ class Settlement:
     session's own, the ones a daily log reports**. `live` is every order still pending, each with
     its tries; `filled`, `expired` and `cancelled` are what `advance_orders` made of the due
     orders. `attempts` is every due order's try on the session, in execution order.
-    `initialized` is whether the snapshot settled from had settled a session -- i.e. whether the
-    book's first build has been decided, which is what `BookState.initialized` asks.
+    `first_decision_session` is the snapshot settled from's: the session whose evening first
+    planned the book, or `None` while no plan has been made (an opening book, or one only caught
+    up since). `initialized` -- what `BookState.initialized` asks: has the first build been
+    decided? -- is whether it is set. Having settled a session is not having decided one.
 
     `runner_record` is `PaperPortfolio.advance`'s record of the session, **before the close
     re-mark and before the write-offs**: a name bought on the session is still at the open it was
@@ -195,7 +197,7 @@ class Settlement:
     config_digest: str
     session: date
     session_index: int
-    initialized: bool
+    first_decision_session: int | None
     book: PortfolioState
     entry_factors: tuple[EntryFactor, ...]
     live: tuple[PendingOrder, ...]
@@ -206,6 +208,11 @@ class Settlement:
     written_off: tuple[WriteOff, ...]
     attempts: tuple[AttemptedOrder, ...]
     runner_record: PaperSessionResult
+
+    @property
+    def initialized(self) -> bool:
+        """Whether the book's first build had been decided before this session."""
+        return self.first_decision_session is not None
 
     @property
     def equity(self) -> Decimal:
@@ -241,6 +248,8 @@ class Settlement:
         `trade_list` must be the plan of this session, and its `carried` orders must be exactly the
         orders this settlement left live; a disagreement is refused by name either way, because a
         plan built from another book would put orders in the snapshot that this book never held.
+        A plan is a decision, so the book's first decision is this session when it had none (even a
+        plan that places no order), and is carried unchanged when it had one.
         """
         if trade_list.signal_session != self.session_index:
             raise ValueError(
@@ -269,6 +278,27 @@ class Settlement:
             ),
             cooldowns=self.cooldowns,
             last_settled_session=self.session_index,
+            first_decision_session=(
+                self.session_index
+                if self.first_decision_session is None
+                else self.first_decision_session
+            ),
+        )
+
+    def without_plan(self) -> PaperBookSnapshot:
+        """The snapshot of a session settled without a decision -- a missed evening caught up:
+        the live orders carried, no new one, and the book's first decision carried as it was
+        (`None` stays `None`, so the next decision is still the initial build)."""
+        return PaperBookSnapshot(
+            config_digest=self.config_digest,
+            session_index=self.session_index,
+            session=self.session,
+            book=self.book,
+            entry_factors=self.entry_factors,
+            pending_orders=self.live,
+            cooldowns=self.cooldowns,
+            last_settled_session=self.session_index,
+            first_decision_session=self.first_decision_session,
         )
 
 
@@ -412,7 +442,7 @@ def settle_session(
         config_digest=previous.config_digest,
         session=session,
         session_index=session_index,
-        initialized=previous.last_settled_session is not None,
+        first_decision_session=previous.first_decision_session,
         book=book,
         entry_factors=tuple(
             EntryFactor(
@@ -451,9 +481,9 @@ def book_state(
     Holdings are each held name's share count (one lot each, in the ledger's units, the units a
     sell is placed in); `pending_buys` and `pending_sells` are the names of the live orders;
     `equity` is cash plus every holding at its mark -- the session's close in the ledger's units,
-    or the carried mark of a name with no bar -- unless the caller gives another. `initialized`:
-    for a settlement, whether the snapshot it settled from had settled a session; for a snapshot,
-    whether it has settled one (its evening's decision is in it).
+    or the carried mark of a name with no bar -- unless the caller gives another. `initialized`
+    is whether the book's first decision has been made: for a settlement, before its session;
+    for a snapshot, by its evening (`first_decision_session is not None`).
     """
     digest = survivor_config_digest(config)
     if source.config_digest != digest:
@@ -465,7 +495,7 @@ def book_state(
         initialized = source.initialized
         orders = [item.order for item in source.live]
     else:
-        initialized = source.last_settled_session is not None
+        initialized = source.first_decision_session is not None
         orders = [item.order for item in source.pending_orders]
     return BookState(
         session=source.session_index,
