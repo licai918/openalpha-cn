@@ -1110,3 +1110,82 @@ def test_the_sessions_transitions_are_the_runners_then_the_write_offs_in_ledger_
     assert settled.runner_record.equity == D("22494.99")
     assert settled.equity == D("16534.99")
     assert tonight(settled).book == settled.book
+
+
+# ---- a session on which nothing has a bar ------------------------------------------------------
+
+
+def _two_holdings(*orders: TradeOrder) -> PaperBookSnapshot:
+    """S0: cash 1,000.00; 600010.SH 1,000 (cost 10,000.00, marked 10.00) and 600020.SH 1,000
+    (cost 11,500.00, marked 11.50): 22,500.00."""
+    return previous(
+        "1000.00",
+        (A, 1000, "10000.00", "10.00", "1.000"),
+        (B, 1000, "11500.00", "11.50", "1.000"),
+        orders=orders,
+    )
+
+
+def test_a_book_whose_every_holding_is_halted_settles_without_a_step(tmp_path: Path) -> None:
+    """P2a: both holdings halted all day (no daily row) and nothing due. There is no bar to build
+    a step from; the session still settles -- the book moved to S1, both holdings carried."""
+    ledger, portfolio = ledger_at(tmp_path / "paper.sqlite3")
+
+    settled = settle(_two_holdings(), S1, Market(bars={}, adj_factor={A: D(1), B: D(1)}), portfolio)
+
+    assert settled.book.as_of == S1
+    assert (settled.book.cash, settled.equity) == (D("1000.00"), D("22500.00"))
+    assert marks(settled.book) == {A: D("10.00"), B: D("11.50")}
+    assert [(m.subject, m.price) for m in settled.carried_marks] == [
+        (A, D("10.00")),
+        (B, D("11.50")),
+    ]
+    assert (settled.attempts, settled.transitions) == ((), ())
+    assert rows(ledger) == []
+    assert tonight(settled).session == S1
+
+
+def test_a_delisted_holding_beside_a_halted_one_is_still_written_off(tmp_path: Path) -> None:
+    """P2b: 600010.SH is delisted and 600020.SH halted; neither has a bar. The write-off is
+    reached: 600010.SH goes for nothing (cash 5,000.00, realised -10,005.00) and 600020.SH is
+    carried at 11.50 -- 16,500.00."""
+    ledger, portfolio = ledger_at(tmp_path / "paper.sqlite3")
+
+    settled = settle(
+        _delisted_book(),
+        S1,
+        Market(bars={}, adj_factor={B: D(1)}),
+        portfolio,
+        delisted={A},
+    )
+
+    assert [item.ts_code for item in settled.written_off] == [A]
+    assert rows(ledger) == [(write_off_id(A, S1), "filled", "delisting_write_off")]
+    assert [(m.subject, m.price) for m in settled.carried_marks] == [(B, D("11.50"))]
+    assert settled.equity == D("16500.00")
+    assert settled.book.realized_pnl == D("-10005.00")
+    assert tonight(settled).entry_factors == (EntryFactor(ts_code=B, entry_adj=D("1.000")),)
+
+
+def test_a_due_sell_of_a_halted_holding_is_not_attempted_and_stays_live_with_its_tries(
+    tmp_path: Path,
+) -> None:
+    """P2c: the only due order is a sell of 600010.SH, halted with the rest of the book. It is
+    recorded as not attempted, under its attempt id, with the step builder's reason; it stays live
+    with one more try on each such session; the ledger never sees it."""
+    out = sell(A, 1000)
+    ledger, portfolio = ledger_at(tmp_path / "paper.sqlite3")
+    nothing = Market(bars={}, adj_factor={A: D(1), B: D(1)})
+
+    first = settle(_two_holdings(out), S1, nothing, portfolio)
+    second = settle(tonight(first), S2, nothing, portfolio)
+
+    assert first.attempts == (
+        AttemptedOrder(
+            order=out, attempt_id=attempt_id(out, S1), outcome="not_attempted", reason=NO_BAR_REASON
+        ),
+    )
+    assert [item.attempt_id for item in second.attempts] == [attempt_id(out, S2)]
+    assert (live(first), live(second)) == ([("sell", A, 1)], [("sell", A, 2)])
+    assert [item.attempts for item in tonight(second).pending_orders] == [2]
+    assert rows(ledger) == []

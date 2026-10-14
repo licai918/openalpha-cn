@@ -41,13 +41,19 @@ write-offs); `Settlement.runner_record` is the runner's trace from before both, 
 folds the evening's new orders in as untried pending orders and returns the snapshot to save;
 `book_state` is what the kernel is told about the book.
 
-**An opening book settles without a step.** A book that holds nothing and has no due order has no
-name to ask the market about, and a `PortfolioBacktestStep` needs at least one bar. Such a session
-is settled by moving the book to the session -- cash, positions and marks unchanged -- and its
-`runner_record` is the one the runner gives for a session with no order and no bar for any held
-name (`test_a_write_off_with_nothing_else_to_settle_records_what_the_runner_would_have`
-compares the two). Any other session goes through the runner, so a book that holds names none of
-which has a bar is refused by `build_paper_step` as a data failure.
+**A session on which nothing has a bar settles without a step.** A name absent from
+`market.bars` has **no daily row** on the session -- a whole-day halt, or a name gone from the
+market; the session's market refuses by name a held or ordered name that has a daily row and no
+published band, so absence never stands for a band-less row. When no holding the session keeps
+and no due order has a bar -- an opening book that holds nothing and has no order, a book whose
+every holding is halted, a book whose only holding is written off -- there is no bar to build a
+`PortfolioBacktestStep` from (it needs one) and nothing it could trade. Such a session is settled
+by moving the book to the session -- cash, positions and marks unchanged, every holding carried --
+and each due order is recorded as `not_attempted` under its attempt id with `NO_BAR_REASON`,
+exactly as `build_paper_step` records an order with no bar; its `runner_record` is the one the
+runner gives for a session with no order and no bar for any held name
+(`test_a_write_off_with_nothing_else_to_settle_records_what_the_runner_would_have` compares the
+two). Write-offs still follow. Every other session goes through the runner.
 
 ## The write-off
 
@@ -101,7 +107,13 @@ from openalpha_cn.backtest.execution import MarketBar
 from openalpha_cn.backtest.multi_day import CarriedMark
 from openalpha_cn.backtest.paper import PaperPortfolio, PaperSessionResult, refusing_outward_calls
 from openalpha_cn.backtest.paper_state import EntryFactor, PaperBookSnapshot, PendingOrder
-from openalpha_cn.backtest.paper_step import AttemptedOrder, build_paper_step, remark_at_close
+from openalpha_cn.backtest.paper_step import (
+    NO_BAR_REASON,
+    AttemptedOrder,
+    attempt_id,
+    build_paper_step,
+    remark_at_close,
+)
 from openalpha_cn.domain.portfolio import (
     PortfolioOrder,
     PortfolioState,
@@ -320,9 +332,17 @@ def settle_session(
     entry = previous.entry_factors_by_code()
     ratios = {code: market.adj_factor[code] / entry[code] for code in kept}
 
-    if not kept and not due:
+    if not any(code in market.bars for code in (*kept, *(order.ts_code for order in due))):
         result = _advance_without_a_step(previous.book, session=session, observed_on=observed_on)
-        attempts: tuple[AttemptedOrder, ...] = ()
+        attempts: tuple[AttemptedOrder, ...] = tuple(
+            AttemptedOrder(
+                order=order,
+                attempt_id=attempt_id(order, session),
+                outcome="not_attempted",
+                reason=NO_BAR_REASON,
+            )
+            for order in _in_execution_order(due)
+        )
         closed = result.after
     else:
         plan = build_paper_step(
@@ -548,6 +568,15 @@ def _advance_without_a_step(
         equity=moved.equity,
         gross_exposure=_gross_exposure(moved),
     )
+
+
+def _in_execution_order(orders: Iterable[TradeOrder]) -> tuple[TradeOrder, ...]:
+    """`paper_step.build_paper_step`'s order: sells by code then order id, then buys by signal
+    session, keeping the order given within one."""
+    listed = list(orders)
+    sells = sorted((o for o in listed if o.side == "sell"), key=lambda o: (o.ts_code, o.order_id))
+    buys = sorted((o for o in listed if o.side == "buy"), key=lambda o: o.signal_session)
+    return (*sells, *buys)
 
 
 def _gross_exposure(state: PortfolioState) -> Decimal:
