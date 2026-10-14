@@ -88,6 +88,17 @@ BOOK: Final[SurvivorBookConfig] = SurvivorBookConfig(seed=SEED, min_listing_sess
 """The design's book, but for the listing age: the stored calendar starts on 5 January, so it can
 age a listing only as far as the day's 66 sessions (`listing_age_sessions`)."""
 
+SURVIVOR_TARGETS: Final[tuple[str, ...]] = (
+    TRADING_CALENDAR_DATASET,
+    STOCK_BASIC_DATASET,
+    ADJ_FACTOR_DATASET,
+    "price",
+    PRICE_LIMIT_DATASET,
+    "namechange",
+    INDEX_DAILY_DATASET,
+)
+"""`targets_for_survivor` of the four composite factors (`test_daily_selection_survivor.py`)."""
+
 STUB: Final[str] = "step 8 (paper book) failed: not wired yet (V2-P7-008 D5b)"
 NO_REQUEST: Final[str] = "tushare requests   0 this run {}"
 
@@ -725,6 +736,21 @@ def test_an_epoch_further_back_than_the_panel_step_catches_up_is_refused_as_a_re
     [
         pytest.param(["--full-update"], "--full-update", id="full update"),
         pytest.param(["--top", "3"], "--top", id="top"),
+        pytest.param(["--dataset", "trade_cal"], "--dataset", id="dataset narrower"),
+        pytest.param(
+            [
+                "--dataset",
+                "index_weight",
+                *(
+                    argument
+                    for target in SURVIVOR_TARGETS
+                    if target != "namechange"
+                    for argument in ("--dataset", target)
+                ),
+            ],
+            "--dataset",
+            id="dataset without the name corpus",
+        ),
     ],
 )
 def test_an_option_of_the_p6_day_is_refused_before_anything_is_made(
@@ -734,8 +760,10 @@ def test_an_option_of_the_p6_day_is_refused_before_anything_is_made(
     option: list[str],
     named: str,
 ) -> None:
-    """`--full-update` and `--top` mean nothing to a survivor day: refused as a registration the
-    day cannot run, before any request and before the runtime directory exists."""
+    """`--full-update` and `--top` mean nothing to a survivor day, and a `--dataset` that leaves
+    out a target the day reads would let it file a forward record from a panel it did not update:
+    each is refused as a registration the day cannot run, before any request and before the
+    runtime directory exists."""
     world = _world(tmp_path, monkeypatch, None)
 
     code, _out, err = _run(world, capsys, extra=option)
@@ -745,6 +773,36 @@ def test_an_option_of_the_p6_day_is_refused_before_anything_is_made(
     assert err[1:] == [NO_REQUEST]
     assert world.market.payloads == []
     assert not world.runtime.exists()
+
+
+def test_a_dataset_that_adds_targets_is_the_days_and_the_staleness_bound_the_factor_builds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """`--dataset` may widen the day's targets -- here `index_weight` beside every survivor
+    target -- and the day then updates and checks them all; `--max-staleness-days` is the factor
+    build's bound, as on the P6 day."""
+    world = _world(tmp_path, monkeypatch, seeded)
+    built: list[int] = []
+    build_factors = daily.build_factors
+
+    def recorded(*arguments: Any, **keywords: Any) -> Any:
+        built.append(keywords["max_staleness_days"])
+        return build_factors(*arguments, **keywords)
+
+    monkeypatch.setattr(daily, "build_factors", recorded)
+    targets = (*SURVIVOR_TARGETS, "index_weight")
+    extra = [argument for target in targets for argument in ("--dataset", target)]
+
+    code, _out, err = _run(world, capsys, extra=[*extra, "--max-staleness-days", "45"])
+
+    assert code == 1
+    assert err[0] == STUB
+    assert _journal(world)["panel"]["targets"] == list(targets)
+    assert _requests(err[1])["index_weight"] >= 1
+    assert built == [45]
 
 
 @pytest.mark.parametrize(

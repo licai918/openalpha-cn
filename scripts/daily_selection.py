@@ -3537,9 +3537,10 @@ def survivor_journal_complete(journal: Mapping[str, Any] | None) -> bool:
     return journal is not None and "result" in journal
 
 
-def _refuse_p6_only_options(options: DailyOptions) -> None:
-    """Refuse the P6 day's options that mean nothing on a survivor day, before anything is made
-    (exit 2, no request, no directory); `_run_survivor_day` says what the others mean there."""
+def _refuse_p6_only_options(options: DailyOptions, survivor: SurvivorRegistration) -> None:
+    """Refuse the P6 day's options that mean nothing on a survivor day, and a `--dataset` that
+    leaves out a target the day reads, before anything is made (exit 2, no request, no
+    directory); `_run_survivor_day` says what the others mean there."""
     if options.full_update:
         raise StepFailedError(
             "registration",
@@ -3558,6 +3559,20 @@ def _refuse_p6_only_options(options: DailyOptions) -> None:
             exit_code=DailyExit.no_registration,
             steps=SURVIVOR_STEPS,
         )
+    if options.targets is not None:
+        required = targets_for_survivor(survivor_builds(survivor))
+        missing = [target for target in required if target not in options.targets]
+        if missing:
+            raise StepFailedError(
+                "registration",
+                f"--dataset names {list(options.targets)}, which leaves out {missing}: a survivor "
+                f"day updates at least targets_for_survivor ({list(required)}), the panel its "
+                "facts, factor builds and forward record read, so a --dataset may add targets and "
+                "never narrow them -- a record filed from a panel the day did not update would "
+                "not be the day's. Nothing was run",
+                exit_code=DailyExit.no_registration,
+                steps=SURVIVOR_STEPS,
+            )
 
 
 def _survivor_session(runtime_dir: Path, store: PanelStore, exchange: str, as_of: datetime) -> date:
@@ -3973,12 +3988,14 @@ def _run_survivor_day(
 
     **The P6 day's options here.** `--full-update` and `--top` have no survivor meaning and are
     refused before anything is made (exit 2). `--dataset` replaces the targets as on the P6 day
-    (`options.targets or targets_for_survivor(builds)`); `--max-staleness-days` is the factor
+    (`options.targets or targets_for_survivor(builds)`), but only by a superset of
+    `targets_for_survivor`, and anything narrower is refused the same way (a record must not be
+    filed from a panel the day did not update); `--max-staleness-days` is the factor
     build's bound, as on the P6 day; `--as-of` pins the first run's clock; `--json` prints the
     day's result document; `--pin-worktree` is unchanged (it never reaches a day).
     """
     with _step("registration", steps=SURVIVOR_STEPS):
-        _refuse_p6_only_options(options)
+        _refuse_p6_only_options(options, survivor)
         # Imported here, never for a P6 day: it loads `backtest/paper.py` and its audit hook.
         from openalpha_cn import strategy_survivor_book as paper_book
     with contextlib.ExitStack() as held:
