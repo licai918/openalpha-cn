@@ -956,6 +956,31 @@ def test_a_morning_in_the_new_year_asks_the_sessions_year_alone(
 # --- the preconditions ----------------------------------------------------------------------------
 
 
+def test_a_morning_read_at_or_before_the_evenings_own_clock_is_refused_having_asked_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    evenings: Evenings,
+) -> None:
+    """`--as-of` 17:00 of the session, while the evening was pinned at 18:30: the morning would
+    rewrite the name partition under an instant earlier than the evening's own knowledge and read
+    the morning's facts at it (review Minor 1). Refused, and so is the evening's instant itself:
+    the morning is read after the evening, or not at all."""
+    world = _world(tmp_path, monkeypatch, evenings.first)
+    before = sd._files(world.runtime)
+    evening = datetime.fromisoformat(sd._journal(world, DAY)["as_of"])
+
+    for at in (datetime.combine(DAY, time(17, 0), tzinfo=daily.SHANGHAI), evening):
+        code, out, err = _morning(world, capsys, DAY, as_of=at)
+
+        assert code == 1 and out == ""
+        assert err[0].startswith("step 2 (preconditions) failed:")
+        assert at.isoformat() in err[0] and evening.isoformat() in err[0]
+        assert err[-1] == NO_REQUEST
+        assert world.market.payloads == []
+        assert sd._files(world.runtime) == before
+
+
 def test_a_morning_at_or_after_the_next_call_auction_is_refused_having_asked_nothing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

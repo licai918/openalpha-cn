@@ -133,14 +133,14 @@ and prints what differs from the evening's plan as **advice**. The paper book fo
 evening's plan (decision, user-adopted): a divergence is recorded and printed, never committed to
 it. Its steps are `MORNING_STEPS`: the registration (a P6 registration has no morning plan and
 exits 2, with no request and no file), the preconditions (the newest published session's evening
-journal complete and a plan, the clock and `--as-of` before 09:15), the paper book's writer lock,
-the evening's facts day read again **before** the fetch and the morning's `as_of` pinned with it in
-`RT/daily_survivor/<cfg>/<session>.morning.json`, the one fetch (`namechange` for the session's
-year: one request, at New Year too -- the facts adapter reads no later year), and the morning's
-facts day compared, the renames of the plan's names announced after the session listed as notices
-(`strategy_survivor_morning`). It writes that file and the `namechange` partition, nothing else; a
-finished file is printed again with no request and no write, a pin is resumed from with the same
-`as_of`.
+journal complete and a plan, the clock and `--as-of` before 09:15, `--as-of` after the evening's
+own pinned clock), the paper book's writer lock, the evening's facts day read again **before** the
+fetch and the morning's `as_of` pinned with it in `RT/daily_survivor/<cfg>/<session>.morning.json`,
+the one fetch (`namechange` for the session's year: one request, at New Year too -- the facts
+adapter reads no later year), and the morning's facts day compared, the renames of the plan's
+names announced after the session listed as notices (`strategy_survivor_morning`). It writes that
+file and the `namechange` partition, nothing else; a finished file is printed again with no
+request and no write, a pin is resumed from with the same `as_of`.
 
 ## Idempotent per trading day
 
@@ -5114,11 +5114,12 @@ def _run_morning_recheck(
        module); the P6 day's options are refused.
     2. **Preconditions**, all read-only: the newest session published at the morning's `as_of`
        (`--as-of`, else the clock) has an evening journal that is complete and planned an evening
-       (not the epoch's opening, not a settle-only day), and neither this run's clock nor the
-       pinned `as_of` has reached `registration_cutoff` -- 09:15 of the next session, the call
-       auction. Refused, exit 1, whatever else a morning file says: the cutoff is checked
-       **before** a finished morning file is printed again, which therefore happens only before
-       the auction.
+       (not the epoch's opening, not a settle-only day); neither this run's clock nor the pinned
+       `as_of` has reached `registration_cutoff` -- 09:15 of the next session, the call auction --
+       and the `as_of` is after the evening's own pinned one (a morning read earlier would
+       rewrite the name partition under an instant the evening already knew more than). Refused,
+       exit 1, whatever else a morning file says: the cutoff is checked **before** a finished
+       morning file is printed again, which therefore happens only before the auction.
     3. **Panel update**: the paper book's writer lock (one writer; the morning writes no book, but
        two mornings must not race on the file), then the evening's facts day read again -- with
        the evening's own pinned `as_of` and `held`, **before** the fetch, checked against the
@@ -5203,6 +5204,16 @@ def _run_morning_recheck(
                     f"read at {as_of.isoformat()} with the clock at {now.isoformat()}: advice "
                     "after it is no advice. Nothing was fetched or written",
                 )
+            evening_as_of = datetime.fromisoformat(journal["as_of"])
+            if as_of <= evening_as_of:
+                raise _morning_refusal(
+                    "preconditions",
+                    f"this check would be read at {as_of.isoformat()}, which is not after the "
+                    f"evening's own pinned clock {evening_as_of.isoformat()}: the name corpus "
+                    "would be stored again under an instant the evening already knew more than, "
+                    "and the morning's facts read at it. Run it after the evening, before the next "
+                    "session's call auction. Nothing was fetched or written",
+                )
             if pin is not None and morning.morning_complete(pin):
                 return MorningRecheck(document=pin, requests={}, wrote=False)
             held = tuple(journal["held"])
@@ -5226,7 +5237,7 @@ def _run_morning_recheck(
             # The evening's facts day, read again BEFORE the fetch: the fetch's new row is
             # announced on the evening's own date, so after it the evening's clock reads it too.
             with _step("facts", steps=MORNING_STEPS):
-                facts, screened = read(datetime.fromisoformat(journal["as_of"]))
+                facts, screened = read(evening_as_of)
                 evening_read = morning.read_facts(facts, screened, plan.watched())
                 try:
                     morning.check_evening_read(evening_read, result)
