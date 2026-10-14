@@ -69,6 +69,7 @@ __all__ = [
     "ExecutionRequest",
     "ExecutionResult",
     "MarketBar",
+    "at_the_open",
     "published_limit_fields",
     "security_board",
     "suspended_at_the_close",
@@ -266,6 +267,22 @@ class MarketBar(BaseModel):
         """Whether this bar carries the exchange's own band rather than only the inputs to
         derive one."""
         return self.up_limit is not None and self.down_limit is not None
+
+
+def at_the_open(bar: MarketBar) -> MarketBar:
+    """The session's bar collapsed to its open print, for an order placed at the open.
+
+    `AShareExecutionPolicy` fills at a bar's close, so an order meant for the open is judged
+    against `open = high = low = close = open` with the same previous close, published band,
+    suspension flag and board. On that bar the policy's own rules are exactly the open-auction
+    rules: a buy is refused when the open is at or above the limit-up price, a sell when it is at
+    or below the limit-down price -- however the session trades afterwards.
+
+    One copy for every book that fills at the open (`V2-P7-017`): the P6 strategy book
+    (`strategy_backtest.py`) and the paper step builder (`paper_step.py`) both call this, because
+    the auction semantics it carries must not drift between the two.
+    """
+    return bar.model_copy(update={"high": bar.open, "low": bar.open, "close": bar.open})
 
 
 class ExecutionRequest(BaseModel):
