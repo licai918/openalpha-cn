@@ -199,6 +199,8 @@
 
 **Files:** Create `src/openalpha_cn/strategy_survivor_market.py`、`unit/test_strategy_survivor_market.py`。
 
+**这是读面板的顶层模块**：它属于 `strategy_` 家族，守卫 `unit/test_panel_ingest_import_isolation.py` 要求它在 `RESEARCH_PLANE_SEAM_IMPORTS` 与 `RESEARCH_PLANE_DATASETS` 各有一行（照 `strategy_survivor_facts` 的两行写，用测试的失败输出推出它跨接缝导入了哪些名字、读了哪些数据集），并加进 pyproject 的导入契约清单。
+
 **先读：** `shortlist_view._bars_on`（约 1730–1830 行，一个会话的 `MarketBar` 与交易所公布的涨跌停价；`_risk_warned_on` 的拒绝语义）、`factor_view._PanelInputs.market_bar`、`strategy_view._PanelDays.quote`——**这是已有的第三处 bar 组装，T5 不许有第四处**：本任务把其中一处提成共享的公共函数并让原调用方改用它（P6 的行为与测试期望逐位不变），或者直接调用已有的公共入口；做哪一种先在报告里写明理由。`domain/adjustment.py`（`ADJ_FACTOR_DATASET`、读取函数）、`domain/index_prices.py`、`strategy_survivor_facts.py` 里的 `A2` 读取方式（`_read`/`PanelStorageError` 的处理、`as_of` 前视守卫）。
 
 **Interfaces（拟，实现者核对）：**
