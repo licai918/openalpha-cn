@@ -391,7 +391,7 @@ class CaughtUp:
 def caught_up(tmp_path_factory: pytest.TempPathFactory) -> CaughtUp:
     """`test_paper_evening`'s three missed sessions: 600030.SH's buy fills on S2, 600050.SH's is
     refused at its limit-up open on S2, S3 and S4 and expires on S4 (its last session)."""
-    book = evenings.book_at(tmp_path_factory.mktemp("caught"), cash="350000.00")
+    book = evenings.book_at(tmp_path_factory.mktemp("caught"))
     evenings.evening(book, S1, evenings.NOTHING, evenings.SCREEN_C_E, {C: "10.00", E: "20.00"})
     buy_c, buy_e = evenings.due_order(book, "buy", C), evenings.due_order(book, "buy", E)
     caught = tuple(evenings.catch_up(book, day, evenings.MISSED[day]) for day in (S2, S3, S4))
@@ -944,6 +944,7 @@ def test_a_sale_names_the_reasons_the_screen_gave_for_the_loss(s3: WrittenOff) -
         update={
             "side": "sell",
             "ts_code": B,
+            "quantity": 800,
             "reason": "EXIT_ELIGIBILITY_LOST",
             "expires_session": None,
         }
@@ -1055,11 +1056,13 @@ def illiquid(frame: Frame, caught_up: CaughtUp) -> Illiquid:
     thin = next(v.ts_code for v in frame.screen.verdicts if v.reasons == ("illiquid",))
     exits = (ExitDecision(ts_code=thin, reason="EXIT_ELIGIBILITY_LOST"),)
     day = caught_up.evening
+    # The frame's rows and amounts, filed under S5: a facts day is of the session it is filed under.
+    facts = dataclasses.replace(frame.facts, session=day.session)
     document = evening_document(
         session=day.session,
         session_index=day.index,
         as_of=day.as_of,
-        facts=frame.facts,
+        facts=facts,
         screen=frame.screen,
         evening=with_decision(day.result, exits=exits),
         catch_ups=(),
@@ -1160,8 +1163,13 @@ def test_the_sessions_a_document_describes_are_the_ones_its_arguments_name(
         document_of(s3, paper_skipped="not needed")
     with pytest.raises(ValueError, match="oldest first"):
         document_of(caught_up.evening, catch_ups=tuple(reversed(caught_up.caught)))
+    with pytest.raises(ValueError, match="the facts day is of session"):
+        document_of(s3, facts=facts_of(S2, S2_CLOSES))
+    # Settled sessions 2 .. 4 of an evening on 3: 4 is after it, and 3 is the evening's own.
     with pytest.raises(ValueError, match="after the session"):
-        document_of(s3, catch_ups=caught_up.caught)  # settled sessions 2 .. 4 of an evening on 3
+        document_of(s3, catch_ups=(caught_up.caught[2],))
+    with pytest.raises(ValueError, match="the evening settles"):
+        document_of(s3, catch_ups=caught_up.caught[:2])
 
 
 # --- the document is JSON, and the same for the same inputs -----------------------------------
