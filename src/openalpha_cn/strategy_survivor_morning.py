@@ -19,6 +19,10 @@ twice, and the book's record is the evening's. So nothing here changes it -- a d
 - `holding <code> turned <reason>: the paper book sells it at the next evening` -- a holding the
   evening kept that has a reason it had not (a suspension alone is *frozen*, not sold: the policy's
   `FREEZE_COMPATIBLE_REASONS`); a holding the evening already sells is not told about again;
+- `holding <code> left the survivors (still eligible): the paper book sells it at the next evening,
+  unless that evening's replacement cap defers it` -- a holding the evening kept as a survivor
+  that is one no more (the policy's `EXIT_SURVIVOR_LOST`, at most `max_replacements_per_session`
+  a day, the worst composite first);
 - `watch list changed: ...` -- names of the evening's watch list that are no longer survivors;
 - `counts changed: ...` -- the eligible and survivor counts, and the name corpus' ST and delisting
   counts, when they moved (a name outside the plan turning ST moves only these);
@@ -354,7 +358,11 @@ def read_facts(facts: FactsDay, screened: ScreenResult, names: Collection[str]) 
 
 def check_evening_read(read: FactsRead, evening: Mapping[str, Any]) -> None:
     """Refuse an evening read that is not the evening's own: its summary must equal the one the
-    evening's document holds. Every field that differs is named."""
+    evening's document holds, and every planned buy, carried buy and watch-list name of the
+    evening's plan must be a survivor of it -- the policy draws them from the survivors, and the
+    settlement cancels a live buy outside them, so a read in which one is not is another day's
+    screen, however its counts agree (a swap that keeps them all). Every field and every name that
+    differs is named."""
     expected = _summary_of_document(evening)
     found = dict(read.summary)
     differing = sorted(
@@ -366,6 +374,13 @@ def check_evening_read(read: FactsRead, evening: Mapping[str, Any]) -> None:
         for name in {*notes_there, *notes_here}
         if notes_there.get(name) != notes_here.get(name)
     )
+    names = plan_names(evening)
+    drawn = sorted({*names.planned_buys, *names.carried_buys, *names.watch_list})
+    if lost := [code for code in drawn if not read.survivor(code)]:
+        differing.append(
+            f"the survivors (the plan's {', '.join(lost)} are not among them, and every buy and "
+            "watch-list name of the plan was)"
+        )
     if differing:
         raise EveningReadDriftError(
             "the panel read at the evening's own clock no longer gives the evening's facts: "
@@ -501,6 +516,19 @@ def _holdings(names: PlanNames, before: FactsRead, now: FactsRead) -> list[Diffe
         had, has = before.reasons_of(code), now.reasons_of(code)
         added = _ordered(reason for reason in has if reason not in had)
         if not added:
+            if before.survivor(code) and now.eligible(code) and not now.survivor(code):
+                found.append(
+                    Difference(
+                        kind="holding_left_survivors",
+                        ts_codes=(code,),
+                        reasons=(_NO_LONGER_A_SURVIVOR,),
+                        text=(
+                            f"holding {code} left the survivors (still eligible): the paper book "
+                            "sells it at the next evening, unless that evening's replacement cap "
+                            "defers it"
+                        ),
+                    )
+                )
             continue
         frozen = "suspended" in has and set(has) <= FREEZE_COMPATIBLE_REASONS
         effect = (

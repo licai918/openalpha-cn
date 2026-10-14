@@ -281,6 +281,37 @@ def test_a_holding_the_evening_already_sells_is_not_advised_about(evening: Day) 
     assert [item for item in advice.differences if item.kind == "holding_turned"] == []
 
 
+def test_a_holding_that_stays_eligible_and_leaves_the_survivors_is_sold_at_the_next_evening(
+    evening: Day,
+) -> None:
+    """The policy sells a holding that drops out of the survivors (`EXIT_SURVIVOR_LOST`) -- the
+    worst composite first, at most `max_replacements_per_session` a day -- so the morning says so,
+    the same change a planned buy is told "no longer a survivor" for (review Minor 4)."""
+    held = _survivors(evening)[0]
+    document = _evening_document(evening, holdings=[held])
+
+    advice = _compare(evening, document, _sink(evening, held))
+
+    (item,) = (item for item in advice.differences if item.ts_codes == (held,))
+    assert item.kind == "holding_left_survivors"
+    assert item.reasons == ("no longer a survivor",)
+    assert item.text == (
+        f"holding {held} left the survivors (still eligible): the paper book sells it at the next "
+        "evening, unless that evening's replacement cap defers it"
+    )
+
+
+def test_a_holding_the_evening_already_sells_is_not_told_it_left_the_survivors(
+    evening: Day,
+) -> None:
+    held = _survivors(evening)[0]
+    document = _evening_document(evening, holdings=[held], sells=[held])
+
+    advice = _compare(evening, document, _sink(evening, held))
+
+    assert [item for item in advice.differences if item.ts_codes == (held,)] == []
+
+
 def test_a_holding_that_left_the_facts_is_told_as_not_assessed(evening: Day) -> None:
     held = _survivors(evening)[0]
     document = _evening_document(evening, holdings=[held])
@@ -406,6 +437,38 @@ def test_the_evening_read_is_checked_against_the_evenings_own_document(evening: 
             morning.read_facts(drifted.facts, drifted.screen, names), document
         )
     assert "notes.st" in str(caught.value)
+
+
+def test_a_read_whose_planned_names_are_not_survivors_is_drift_though_every_count_agrees(
+    evening: Day,
+) -> None:
+    """The counts cannot see a swap that keeps them all: a planned buy sunk out of the survivors
+    and the next name moved in. Every planned buy, carried buy and watch-list name of the evening
+    was a survivor of its screen -- the policy draws them from the survivors, and settlement
+    cancels a live buy outside them -- so a read in which one is not is not the evening's
+    (review Minor 11)."""
+    top = _survivors(evening)
+    swapped = _sink(evening, top[3])
+    unplanned = _evening_document(evening, holdings=top[:2])
+    names = morning.plan_names(unplanned).watched()
+    # The counts agree: the aggregate check alone takes the swapped read for the evening's.
+    morning.check_evening_read(morning.read_facts(swapped.facts, swapped.screen, names), unplanned)
+
+    for planned in (
+        _evening_document(evening, buys=[top[3], top[4]]),
+        _evening_document(evening, carried=[top[3]]),
+        _evening_document(evening, watch=[top[3], top[4]]),
+    ):
+        names = morning.plan_names(planned).watched()
+        morning.check_evening_read(
+            morning.read_facts(evening.facts, evening.screen, names), planned
+        )
+        with pytest.raises(morning.EveningReadDriftError) as caught:
+            morning.check_evening_read(
+                morning.read_facts(swapped.facts, swapped.screen, names), planned
+            )
+        assert top[3] in str(caught.value)
+        assert top[4] not in str(caught.value)
 
 
 def test_a_document_with_no_evening_has_no_plan_to_check() -> None:
