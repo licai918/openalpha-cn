@@ -11,6 +11,8 @@ estimated proceeds of today's sells, less what buys still live from earlier sess
 so a book that is nearly fully invested cannot over-order.
 A buy that cannot be afforded even one lot with what is left is **not placed**; the name was
 drawn today and is simply not bought -- it is eligible to be drawn again in a later session.
+It is not dropped silently either: the trade list names it in `unfunded`, so the evening's list
+says which decided entrants it could not buy.
 The cash cap carries the same cost reserve as the equal share, so a buy that is limited by cash
 still leaves room for the fees and slippage that will come out of it.
 """
@@ -83,6 +85,16 @@ class TradeList(BaseModel):
     orders: tuple[TradeOrder, ...]
     carried: tuple[TradeOrder, ...] = ()
     """Orders planned on an earlier session that are still live; listed, not re-planned."""
+    unfunded: tuple[str, ...] = ()
+    """The `ts_code`s of the decision's entries that produced no order, in the order the
+    selection rule drew them (`V2-P7-017`): each was decided, and not one lot of it could be
+    bought with what the sizing left -- the cash after today's sells' proceeds, the buys placed
+    before it and the buys carried from earlier sessions, or the equal share itself where the
+    reference price is above the one the decision sized with. Part of `trade_list_id`.
+
+    Not `BookDecision.unaffordable`: those are skipped at **decision** time, because the equal
+    share of equity cannot buy a lot of them, and never become entries. An unfunded name was an
+    entry, and is not bought today; it may be drawn again in a later session."""
 
     @computed_field(return_type=str)  # type: ignore[prop-decorator]
     @property
@@ -155,6 +167,7 @@ def build_trade_list(
     )
     available = max(cash + proceeds - reserved, Decimal(0))
     buys: list[TradeOrder] = []
+    unfunded: list[str] = []
     for entry in decision.entries:
         price = _price_of(entry.ts_code, reference_prices)
         quantity = min(
@@ -162,6 +175,7 @@ def build_trade_list(
             lot_quantity(available * (1 - config.cost_reserve_fraction), price, config.lot_size),
         )
         if quantity == 0:
+            unfunded.append(entry.ts_code)
             continue
         available -= price * quantity
         buys.append(
@@ -183,4 +197,5 @@ def build_trade_list(
         carried=tuple(
             sorted(carried, key=lambda order: (order.side, order.ts_code, order.order_id))
         ),
+        unfunded=tuple(unfunded),
     )

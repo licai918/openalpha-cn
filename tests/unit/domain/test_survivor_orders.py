@@ -467,6 +467,99 @@ def test_an_order_a_book_could_not_have_planned_is_refused(overrides: dict[str, 
         TradeOrder(**base)  # type: ignore[arg-type]
 
 
+def test_an_entrant_the_cash_left_cannot_fund_is_recorded_as_unfunded() -> None:
+    # As in `test_each_buy_spends_from_what_the_one_before_left`: 5,000 buys 300 of B and leaves
+    # 1,250, which is not a lot of C at 40 (4,000). C was decided and not ordered.
+    plan = build_trade_list(
+        config=config(),
+        state=book(),
+        decision=decision(entries=(("B", "ENTRY_REPLACEMENT"), ("C", "ENTRY_REPLACEMENT"))),
+        reference_prices=PRICES,
+        cash=Decimal("5000"),
+    )
+
+    assert [(o.ts_code, o.quantity) for o in plan.orders] == [("B", 300)]
+    assert plan.unfunded == ("C",)
+
+
+def test_an_entrant_whose_lot_costs_more_than_the_equal_share_is_recorded_as_unfunded() -> None:
+    # The equal share is 40,000 / 4 less 0.5% = 9,950, and one lot of D at 100 is 10,000: the
+    # 100,000 of cash would buy it, the sizing budget does not. A at 10 still gets its 900.
+    plan = build_trade_list(
+        config=config(),
+        state=book(),
+        decision=decision(entries=(("D", "ENTRY_REPLACEMENT"), ("A", "ENTRY_REPLACEMENT"))),
+        reference_prices={**PRICES, "D": Decimal("100")},
+        cash=Decimal("100000"),
+    )
+
+    assert [(o.ts_code, o.quantity) for o in plan.orders] == [("A", 900)]
+    assert plan.unfunded == ("D",)
+
+
+def test_an_entrant_the_carried_buys_leave_no_cash_for_is_recorded_as_unfunded() -> None:
+    # The live buy reserves 800 x 12.5 = 10,000 of the 5,000: nothing is left for A.
+    plan = build_trade_list(
+        config=config(),
+        state=book(pending_buys=("B",)),
+        decision=decision(entries=(("A", "ENTRY_REPLACEMENT"),)),
+        reference_prices=PRICES,
+        cash=Decimal("5000"),
+        carried=(live_buy(quantity=800),),
+    )
+
+    assert plan.orders == ()
+    assert plan.unfunded == ("A",)
+
+
+def test_unfunded_names_keep_the_order_the_selection_rule_drew_them_in() -> None:
+    # Drawn D, B, C with 5,000: D's lot (10,000) is over the 9,950 share, B takes 300 (3,750,
+    # leaving 1,250) and C's lot (4,000) is over the 1,243.75 left. D then C -- not sorted.
+    plan = build_trade_list(
+        config=config(),
+        state=book(),
+        decision=decision(
+            entries=(
+                ("D", "ENTRY_REPLACEMENT"),
+                ("B", "ENTRY_REPLACEMENT"),
+                ("C", "ENTRY_REPLACEMENT"),
+            )
+        ),
+        reference_prices={**PRICES, "D": Decimal("100")},
+        cash=Decimal("5000"),
+    )
+
+    assert [(o.ts_code, o.quantity) for o in plan.orders] == [("B", 300)]
+    assert plan.unfunded == ("D", "C")
+
+
+def test_a_trade_list_that_funds_every_entrant_has_nothing_unfunded() -> None:
+    first_build = build_trade_list(
+        config=config(),
+        state=BookState(session=SESSION, initialized=False, equity=Decimal("40000")),
+        decision=decision(
+            entries=(("A", "INITIAL_BUILD"), ("B", "INITIAL_BUILD"), ("C", "INITIAL_BUILD"))
+        ),
+        reference_prices=PRICES,
+        cash=Decimal("40000"),
+    )
+
+    assert planned().unfunded == ()
+    assert len(first_build.orders) == 3
+    assert first_build.unfunded == ()
+
+
+def test_the_unfunded_names_are_part_of_the_trade_lists_content_address() -> None:
+    funded = TradeList(signal_session=SESSION, orders=())
+    short = TradeList(signal_session=SESSION, orders=(), unfunded=("C",))
+
+    assert funded.unfunded == ()
+    assert short.trade_list_id != funded.trade_list_id
+    assert TradeList.model_validate_json(short.model_dump_json(exclude_computed_fields=True)) == (
+        short
+    )
+
+
 def test_selling_a_security_that_is_not_held_is_a_named_failure() -> None:
     with pytest.raises(ValueError, match="cannot sell Z: it is not held"):
         build_trade_list(
