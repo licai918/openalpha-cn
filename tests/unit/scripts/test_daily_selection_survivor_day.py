@@ -726,6 +726,7 @@ def test_the_panel_steps_catch_up_bound_is_the_registered_adapters() -> None:
         assert daily.survivor_panel_update(survivor) == daily.SurvivorPanelUpdate(
             max_catch_up_sessions=bound
         )
+    assert not hasattr(daily, "panel_catch_up_bound")
     assert SURVIVOR_CONFIG["adapter"]["max_panel_catch_up_sessions"] == (
         daily.DEFAULT_MAX_PANEL_CATCH_UP_SESSIONS
     )

@@ -73,8 +73,9 @@ lines.
 The survivor form (`V2-P7-016`; dispatched by the registration's `kind` in `V2-P7-008`) fetches
 `targets_for_survivor`: the same rule plus `namechange`, the name corpus its eligibility facts
 read -- 16 requests on an ordinary day against the P6 day's 15. Its step 2 takes a
-`SurvivorPanelUpdate`: a store more than `panel_catch_up_bound` sessions behind is refused before
-any request, with the `panel build` that fetches the oldest batch, and the year before's name
+`SurvivorPanelUpdate`: a store more sessions behind than the registration's
+`adapter.max_panel_catch_up_sessions` (0..16, `survivor_panel_update`) is refused before any
+request, with the `panel build` that fetches the oldest batch, and the year before's name
 corpus is built again while its stored build is from before that year ended -- on the first
 run of a year, whether that is in January or after a January of missed runs, and not again.
 
@@ -334,9 +335,12 @@ catch-up near eight minutes. A longer gap is refused with the command that build
 rather than spent inside one scheduled run."""
 
 DEFAULT_MAX_PANEL_CATCH_UP_SESSIONS: Final[int] = 10
-"""The most sessions the survivor form's step 2 fetches in one run beyond an ordinary day's two
-(the stored last session again, and the day), unless the registration's `adapter` block names
-another (`panel_catch_up_bound`, `V2-P7-016`).
+"""The bound the design's survivor registration names for its step 2 (`V2-P7-016`): the most
+sessions the step fetches in one run beyond an ordinary day's two (the stored last session again,
+and the day). Not a default any registration falls back to: the registration names the bound in
+its `adapter` block, whose reader (`strategy_survivor.SurvivorAdapterConfig`) requires the key and
+bounds it to 0..16 (`strategy_survivor.MAX_PANEL_CATCH_UP_SESSIONS`), and the survivor day reads it
+from there (`survivor_panel_update`, the one reader of the key).
 
 A bound on **sessions**, not on requests. Each session it admits costs one request per
 session-scoped API -- five, seven once `stk_limit` pages -- so ten admit 50 requests (70 paged)
@@ -363,8 +367,7 @@ side. Three different bounds, kept apart: `MAX_CATCH_UP_SESSIONS` is the factor 
 (step 4), and `strategy_survivor_facts`' `max_carry_sessions` is how far back a halted
 security's last bar is looked for."""
 PANEL_CATCH_UP_KEY: Final[str] = "max_panel_catch_up_sessions"
-ADAPTER_BLOCK: Final[str] = "adapter"
-"""The survivor registration's block of adapter parameters; `V2-P7-006` writes it."""
+"""The key of the registration's `adapter` block the bound is read from, as a refusal names it."""
 
 SHANGHAI: Final[ZoneInfo] = ZoneInfo(DEFAULT_DATE_TIMEZONE)
 _WEIGHT_QUANTUM: Final[Decimal] = Decimal("0.0000000001")
@@ -1141,30 +1144,6 @@ def targets_for_survivor(builds: Sequence[TierBuild]) -> tuple[str, ...]:
     factors that is `BASE_TARGETS` and `namechange`."""
     wanted = set(targets_for(builds)) | set(SURVIVOR_EXTRA_TARGETS)
     return tuple(target for target in cli.PANEL_BUILD_TARGETS if target in wanted)
-
-
-def panel_catch_up_bound(config: Mapping[str, Any]) -> int:
-    """The survivor form's panel catch-up bound: `max_panel_catch_up_sessions` in the registered
-    configuration's `adapter` block, or `DEFAULT_MAX_PANEL_CATCH_UP_SESSIONS` when it names
-    none. Read only; writing it is the registration's (`V2-P7-006`). Anything but a whole number
-    of sessions, 0 or more, is an unreadable registration."""
-    block = config.get(ADAPTER_BLOCK, {})
-    if not isinstance(block, Mapping):
-        raise StepFailedError(
-            "registration",
-            f"the registered configuration's {ADAPTER_BLOCK!r} block is {block!r}, not a "
-            f"mapping, so its {PANEL_CATCH_UP_KEY} cannot be read",
-            exit_code=DailyExit.no_registration,
-        )
-    bound = block.get(PANEL_CATCH_UP_KEY, DEFAULT_MAX_PANEL_CATCH_UP_SESSIONS)
-    if type(bound) is not int or bound < 0:
-        raise StepFailedError(
-            "registration",
-            f"the registered {PANEL_CATCH_UP_KEY} is {bound!r}; it must be a whole number of "
-            "sessions, 0 or more",
-            exit_code=DailyExit.no_registration,
-        )
-    return bound
 
 
 def outcome_horizon(request: StrategyRequest) -> int:
@@ -2109,12 +2088,12 @@ class SurvivorPanelUpdate:
     """What the survivor form's step 2 adds to the P6 one (`V2-P7-016`); `update_panel` without
     it is the P6 step, unchanged.
 
-    `max_catch_up_sessions` (from `panel_catch_up_bound`): before any request, a store more
-    sessions behind the day than this is refused, with the `panel build` that fetches the oldest
-    batch, instead of spending five to seven requests a session inside one scheduled run. Before
-    that, whatever the bound, a year before whose session-scoped partitions stop short of its
-    last session is refused with the `panel build` that completes it
-    (`previous_year_sessions_missing`), and a session's year with no stored calendar, on which
+    `max_catch_up_sessions` (the registration's, `survivor_panel_update`): before any request,
+    a store more sessions behind the day than this is refused, with the `panel build` that
+    fetches the oldest batch, instead of spending five to seven requests a session inside one
+    scheduled run. Before that, whatever the bound, a year before whose session-scoped
+    partitions stop short of its last session is refused with the `panel build` that completes
+    it (`previous_year_sessions_missing`), and a session's year with no stored calendar, on which
     the sessions are counted, with the `panel build` that stores it (`_calendar_refusal`). And
     the year before's name corpus is built again while its stored build is from before that year
     ended (`names_built_before_year_end`).
