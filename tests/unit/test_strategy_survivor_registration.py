@@ -595,7 +595,10 @@ def test_the_existing_validators_accept_the_batch(
     day = the_evening(evening_store)
 
     validate_feature_ids(day.batch.artifact.feature_ids, role="a survivor record")
-    assert PredictionBatch.model_validate_json(day.batch.model_dump_json()) == day.batch
+    assert (
+        PredictionBatch.model_validate_json(day.batch.model_dump_json(exclude_computed_fields=True))
+        == day.batch
+    )
     record = filed(evening_store, day.batch, tmp_path / "predictions")
     held = FilePredictionStore(tmp_path / "predictions", clock=lambda: FILED).get(record.record_id)
     assert held == record
@@ -642,19 +645,23 @@ def test_the_next_years_calendar_is_needed_exactly_when_the_records_window_leave
     }
     enough = max(session for session, count in left.items() if count == 21)
     short = min(session for session, count in left.items() if count == 20)
-    store = FilePredictionStore(tmp_path / "predictions", clock=lambda: FILED)
 
-    def on(session: date) -> PredictionBatch:
+    def put(session: date) -> PredictionRecord:
+        """The evening's scores moved to `session`'s evening and filed then."""
         published = session_publication_instant(session)
-        return day.batch.model_copy(
+        moved = day.batch.model_copy(
             update={"as_of": published, "predicted_at": published + timedelta(hours=2)}
         )
+        store = FilePredictionStore(
+            tmp_path / "predictions", clock=lambda: published + timedelta(hours=2, minutes=1)
+        )
+        return store.put(batch=moved, calendar=calendar, zone=SHANGHAI).record
 
     assert not daily.next_year_calendar_needed(calendar, session=enough, horizon=20)
     assert daily.next_year_calendar_needed(calendar, session=short, horizon=20)
-    store.put(batch=on(enough), calendar=calendar, zone=SHANGHAI)
+    assert put(enough).outcome_known_at.date() == date(2026, 12, 31)
     with pytest.raises(CalendarHorizonError):
-        store.put(batch=on(short), calendar=calendar, zone=SHANGHAI)
+        put(short)
 
 
 def test_session_record_reuses_the_held_record_and_refuses_another_answer(
@@ -833,6 +840,37 @@ def test_the_provenance_is_the_same_document_however_often_it_is_taken(
     assert with_held.batch_digest == first.batch_digest
 
 
+def test_a_provenance_is_taken_only_for_the_survivor_record_of_its_facts_day(
+    evening_store: PanelStore,
+) -> None:
+    day = the_evening(evening_store)
+    declaration = day.batch.artifact.declaration
+    p6_shaped = day.batch.model_copy(
+        update={
+            "artifact": day.batch.artifact.model_copy(
+                update={"declaration": declaration.model_copy(update={"family": "strategy_static"})}
+            )
+        }
+    )
+    other_registration = dataclasses.replace(REGISTERED, config_id="rcf_another")
+    later = day.batch.model_copy(update={"as_of": day.batch.as_of + timedelta(days=3)})
+
+    for batch_, registered in (
+        (p6_shaped, REGISTERED),
+        (day.batch, other_registration),
+        (later, REGISTERED),
+    ):
+        with pytest.raises(SurvivorRegistrationError):
+            survivor_input_provenance(
+                evening_store,
+                facts=day.facts,
+                batch=batch_,
+                registered=registered,
+                transform=IDENTITY,
+                recorded_at=FILED,
+            )
+
+
 def test_a_document_of_another_schema_is_refused() -> None:
     with pytest.raises(SurvivorRegistrationError, match="daily-survivor-input-provenance/v1"):
         SurvivorInputProvenance.from_document({"schema": "daily-selection-input-provenance/v2"})
@@ -945,8 +983,19 @@ def test_a_row_dated_on_the_session_and_stored_after_filing_is_a_restatement(
 
     again = recompute(late_st_store, record)
 
+    def renames_on_the_signal_day(store: PanelStore) -> int:
+        coverage = store.read_coverage(NAMECHANGE_DATASET, 2026)
+        assert coverage is not None
+        return {entry.event_date: entry.row_count for entry in coverage.dates}[SIGNAL]
+
     assert LATE_ST in day.batch.subjects
     assert LATE_ST not in again.subjects
+    # The row arrived after filing under a clock the filing instant reads (midnight of the
+    # announcement), so only the census says it is new: one rename on 2026-04-10, then two.
+    assert (renames_on_the_signal_day(evening_store), renames_on_the_signal_day(late_st_store)) == (
+        1,
+        2,
+    )
     assert survivor_provenance_changes(late_st_store, provenance, transform=IDENTITY) == (
         f"{NAMECHANGE_DATASET}:2026 (its rows through {SIGNAL.isoformat()} were restated)",
     )
