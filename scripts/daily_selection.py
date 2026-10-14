@@ -262,6 +262,7 @@ from openalpha_cn.strategy_view import (  # noqa: E402
 if TYPE_CHECKING:
     # Imported for their types only: at run time the survivor day imports these modules, and only
     # for a registration that names a `kind` (they load `backtest/paper.py`).
+    from openalpha_cn.backtest.paper_state import PaperBookSnapshot
     from openalpha_cn.domain.factor_transform import FactorTransformSpec
     from openalpha_cn.domain.survivor_book import ScreenResult
     from openalpha_cn.runtime.composition import StorageContainer
@@ -3637,78 +3638,120 @@ def _survivor_calendar(
     return calendar
 
 
-def _held_now(storage: StorageContainer) -> tuple[tuple[str, ...], dict[str, Any] | None]:
-    """The paper book's holdings as this run finds it under its lock, and the snapshot they are
-    read from (`None` when no book is open yet): what the day pins before any request."""
-    from openalpha_cn.backtest.paper_state import PaperStateError, held_head
-    from openalpha_cn.storage.paper_state import PaperStateStoreError
-    from openalpha_cn.strategy_survivor_book import held_codes
+def _held_now(
+    storage: StorageContainer,
+    *,
+    registration: Registration,
+    survivor: SurvivorRegistration,
+    lock: PaperBookLock,
+) -> tuple[PaperBookSnapshot | None, tuple[str, ...], dict[str, Any] | None]:
+    """The paper book as this run finds it under its lock -- its head, the head's holdings and
+    the snapshot they are read from (`None` when no book is open yet) -- read only once the book
+    is checked to be this registration's (`strategy_survivor_book.require_bound`): what the day
+    pins, and checks a pin against, before any request.
+
+    A held book whose marker is missing or is another registration's, and a marker of another
+    registration over no book, are refused here -- step `paper head`, nothing fetched or
+    written -- and not at step 5 after the day's requests: pinned from another registration's
+    book, the day's journal would hold holdings no later run of this registration could match."""
+    from openalpha_cn import strategy_survivor_book as paper_book
 
     try:
-        head = held_head(storage.paper_state_store)
-    except (PaperStateError, PaperStateStoreError) as error:
-        raise StepFailedError(
-            "paper head",
-            f"the paper book's head, whose holdings the day pins before any request, cannot be "
-            f"read ({type(error).__name__}: {error}). Nothing was fetched or written",
-            steps=SURVIVOR_STEPS,
-        ) from error
+        head = paper_book.require_bound(
+            state_store=storage.paper_state_store,
+            paper_directory=storage.paper_state_store.path.parent,
+            registration=survivor,
+            config_id=registration.config_id,
+            lock=lock,
+        )
+    except paper_book.SurvivorDayError as error:
+        raise StepFailedError(error.step, str(error), steps=SURVIVOR_STEPS) from error
     if head is None:
-        return (), None
+        return None, (), None
     pinned_from = {
         "session": head.session.isoformat(),
         "session_index": head.session_index,
         "snapshot_id": head.snapshot_id,
     }
-    return held_codes(head), pinned_from
+    return head, paper_book.held_codes(head), pinned_from
 
 
 def _require_pinned_head(
-    head: PaperHead,
+    head: PaperBookSnapshot | None,
     *,
     held: Sequence[str],
     held_from: Mapping[str, Any] | None,
     session: date,
+    index: int,
+    journal: Path,
 ) -> None:
-    """Step 5's check of the book against what the day pinned: `held`, read from the snapshot
-    `held_from` names (or from no book at all, which the head then opens).
+    """The book this run found (`head`, through `_held_now`) against what the day's journal
+    pinned -- `held`, read from the snapshot `held_from` names, or from no book at all -- checked
+    before any request; `index` is the session's ordinal.
 
-    The head found now must be that snapshot, holding `held` -- a difference means another run
-    changed the book -- or a later one of this session's own (a rerun after an earlier run's
-    paper step committed sessions through this one: the evening reads the facts again with the
-    holdings it finds, D3). A head past the session, or older than the pinned snapshot, is
-    another run's book; each is refused by name, with nothing written."""
-    snapshot = head.snapshot
+    Accepted: no book when the journal pinned none (step 5 opens it); the pinned snapshot itself,
+    holding `held`; and **any** later head up to the session's own -- which only this session's
+    own paper step can have written since its pin (a rerun after an earlier run of the day
+    committed some of it). Its holdings are not compared: D3's evening reads the facts again with
+    the holdings it finds when they differ from the pinned ones, and a committed session is
+    completed from its own snapshot. Refused by name, with nothing fetched or written: a head
+    past the session (a later session's run changed the book); a head older than the pinned
+    snapshot, or the pinned index holding another snapshot or other names, or no book where the
+    journal pinned one (the paper directory was replaced, moved or restored since)."""
     pinned = 0 if held_from is None else int(held_from["session_index"])
-    if snapshot.session_index > head.session_index:
+    remedy = (
+        "Restore the paper directory this day pinned from (its snapshots and its ledger "
+        f"together, from one backup), or -- to go on with the book as it is -- move this day's "
+        f"journal {journal} aside, and run again: the day then pins the book it finds. Nothing "
+        "was fetched or written"
+    )
+    if head is None:
+        if held_from is not None:
+            raise StepFailedError(
+                "paper head",
+                f"this day's journal pinned its holdings {list(held)} from the paper book's "
+                f"snapshot {held_from['snapshot_id']} ({held_from['session']}, session index "
+                f"{pinned}), and the runtime directory holds no paper book now: its paper "
+                f"directory was moved or removed since, and a fresh book would not be the one the "
+                f"journal pinned. {remedy}",
+                steps=SURVIVOR_STEPS,
+            )
+        return
+    if head.session_index > index:
         raise StepFailedError(
             "paper head",
-            f"the paper book is settled through {snapshot.session.isoformat()} (session index "
-            f"{snapshot.session_index}), after this day's {session.isoformat()} (index "
-            f"{head.session_index}): a later session's run changed the book since this day pinned "
-            "its holdings, and a past evening is not run again. Nothing was written",
+            f"the paper book is settled through {head.session.isoformat()} (session index "
+            f"{head.session_index}), after this day's {session.isoformat()} (index {index}): a "
+            "later session's run changed the book since this day pinned its holdings, and a past "
+            "evening is not run again. Nothing was fetched or written",
             steps=SURVIVOR_STEPS,
         )
-    if snapshot.session_index < pinned:
+    if head.session_index < pinned:
         raise StepFailedError(
             "paper head",
-            f"the paper book's head is session index {snapshot.session_index}, older than the "
-            f"snapshot this day pinned its holdings from (index {pinned}): the book was replaced "
-            "since -- restore its snapshots and its ledger together, from one backup. Nothing was "
-            "written",
+            f"the paper book's head is session index {head.session_index}, older than the "
+            f"snapshot this day pinned its holdings from ({held_from and held_from['snapshot_id']}"
+            f", index {pinned}): the paper book was replaced or restored since. {remedy}",
             steps=SURVIVOR_STEPS,
         )
-    replaced = held_from is not None and held_from.get("snapshot_id") != snapshot.snapshot_id
-    if snapshot.session_index == pinned and (replaced or head.held != tuple(held)):
+    holds = _held_codes(head)
+    replaced = held_from is not None and held_from.get("snapshot_id") != head.snapshot_id
+    if head.session_index == pinned and (replaced or holds != tuple(held)):
         raise StepFailedError(
             "paper head",
-            f"the paper book's head at session index {pinned} holds {list(head.held)}"
-            + (f" as {snapshot.snapshot_id}" if replaced else "")
+            f"the paper book's head at session index {pinned} holds {list(holds)}"
+            + (f" as {head.snapshot_id}" if replaced else "")
             + f", and this day's journal pinned {list(held)} from "
             + (f"{held_from['snapshot_id']}" if held_from is not None else "no book")
-            + ": another run changed the book under the journal. Nothing was written",
+            + f": another run changed the book under the journal. {remedy}",
             steps=SURVIVOR_STEPS,
         )
+
+
+def _held_codes(snapshot: PaperBookSnapshot) -> tuple[str, ...]:
+    from openalpha_cn.strategy_survivor_book import held_codes
+
+    return held_codes(snapshot)
 
 
 def _nothing_eligible(session: date, screened: ScreenResult) -> str:
@@ -3958,16 +4001,18 @@ def _survivor_day(
         if journal is not None and survivor_journal_complete(journal):
             return {**journal["result"], "this_run": _this_run(counts, wrote=False)}
         storage = build_storage(runtime_dir=runtime_dir, clock=clock)
+        book, held_now, held_from_now = _held_now(
+            storage, registration=registration, survivor=survivor, lock=lock
+        )
         if journal is None:
             # The day's clock and the book's holdings, pinned before anything is fetched: a retry
             # asks the same questions of the same book (P6's pin, and the paper book's).
-            held, held_from = _held_now(storage)
             journal = {
                 "schema": SURVIVOR_JOURNAL_SCHEMA,
                 "session": session.isoformat(),
                 "as_of": first_as_of.isoformat(),
-                "held": list(held),
-                "held_from": held_from,
+                "held": list(held_now),
+                "held_from": held_from_now,
                 "registration": {
                     "path": registration.path.name,
                     "sha256": registration.sha256,
@@ -3980,6 +4025,15 @@ def _survivor_day(
         held = tuple(journal["held"])
         held_from = journal["held_from"]
         calendar = _survivor_calendar(store, exchange, epoch=epoch, session=session, as_of=as_of)
+        ordinals = SessionOrdinals(calendar, epoch)
+        _require_pinned_head(
+            book,
+            held=held,
+            held_from=held_from,
+            session=session,
+            index=ordinals.index_of(session),
+            journal=path,
+        )
         if "panel" not in journal:
             panel = update_panel(
                 runtime_dir,
@@ -4016,20 +4070,18 @@ def _survivor_day(
             runtime_dir=runtime_dir,
         )
     with _step("paper head", steps=SURVIVOR_STEPS):
-        ordinals = SessionOrdinals(calendar, epoch)
         try:
             head = paper_book.paper_head(
                 state_store=storage.paper_state_store,
                 registration=survivor,
                 ordinals=ordinals,
                 session=session,
-                paper_directory=runtime_dir / PAPER_DIRECTORY,
+                paper_directory=storage.paper_state_store.path.parent,
                 config_id=registration.config_id,
                 lock=lock,
             )
         except paper_book.SurvivorDayError as error:
             raise StepFailedError(error.step, str(error), steps=SURVIVOR_STEPS) from error
-        _require_pinned_head(head, held=held, held_from=held_from, session=session)
         # By the pinned clock, never this run's: a rerun is the day it was (D3 review, rule 4).
         cutoff = registration_cutoff(_outcome_calendar(store, exchange, session, as_of), session)
         settle_only = as_of >= cutoff

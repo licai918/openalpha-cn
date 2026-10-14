@@ -56,8 +56,10 @@ from openalpha_cn.domain.survivor_screen import screen
 from openalpha_cn.domain.trading_calendar import TRADING_CALENDAR_DATASET
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import FACTOR_TRANSFORMS
+from openalpha_cn.panel_ingest import load_trading_calendar
 from openalpha_cn.storage.paper_state import FilePaperStateStore
 from openalpha_cn.storage.predictions import FilePredictionStore
+from openalpha_cn.strategy_survivor_market import SessionOrdinals
 
 daily = tds.daily
 
@@ -498,6 +500,8 @@ def test_a_paper_book_bound_to_another_registration_is_refused_at_the_paper_head
     assert code == 1
     assert err[0].startswith("step 5 (paper head) failed:")
     assert "differ in ['config_id']" in err[0]
+    assert err[1] == NO_REQUEST
+    assert not (world.runtime / "daily_survivor").exists()
     assert _records(world) == ()
     assert held_head(FilePaperStateStore(world.runtime / "paper" / "snapshots")) is None
 
@@ -523,7 +527,119 @@ def test_a_held_paper_book_without_its_marker_is_refused_at_the_paper_head(
     assert code == 1
     assert err[0].startswith("step 5 (paper head) failed:")
     assert "no binding marker" in err[0]
+    assert err[1] == NO_REQUEST
+    assert not (world.runtime / "daily_survivor").exists()
     assert _records(world) == ()
+    assert not (world.runtime / "paper" / "registration.json").exists()
+
+
+def _open_book(world: tds.World, *, config_id: str) -> None:
+    """A paper book opened on the epoch and bound to `config_id`, as a run of that registration
+    opens one."""
+    survivor = _survivor()
+    panel = PanelStore(world.runtime / "panel")
+    calendar = load_trading_calendar(panel, exchange="SSE", years=(2026,), as_of=DAY_AS_OF)
+    with strategy_survivor_book.paper_book_lock(world.runtime / "paper") as lock:
+        strategy_survivor_book.paper_head(
+            state_store=FilePaperStateStore(world.runtime / "paper" / "snapshots"),
+            registration=survivor,
+            ordinals=SessionOrdinals(calendar, survivor.adapter.epoch_session),
+            session=EPOCH,
+            paper_directory=world.runtime / "paper",
+            config_id=config_id,
+            lock=lock,
+        )
+
+
+def test_a_book_of_another_registration_is_refused_before_the_day_pins_or_asks_anything(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """The holdings are pinned only from this registration's book: a paper directory holding
+    another registration's book is refused before the pin and before any request -- so once it
+    is moved aside the day runs as a first day, and a rerun of it as a rerun. (Pinned from the
+    foreign book, the session could never run again: the fresh book opened after the move is
+    not the one the journal pinned.)"""
+    world = _world(tmp_path, monkeypatch, seeded)
+    _open_book(world, config_id="another registration")
+
+    code, _out, err = _run(world, capsys)
+
+    assert code == 1
+    assert err[0].startswith("step 5 (paper head) failed:")
+    assert "'another registration'" in err[0]
+    assert err[1] == NO_REQUEST
+    assert not (world.runtime / "daily_survivor").exists()
+
+    (world.runtime / "paper").rename(world.runtime / "paper.another")
+    code, _out, err = _run(world, capsys)
+
+    assert code == 1
+    assert err[0] == STUB
+    assert _requests(err[1]) == STEADY_SURVIVOR
+    assert _journal(world)["held_from"] is None
+
+    code, _out, err = _run(world, capsys)
+
+    assert code == 1
+    assert err == [STUB, NO_REQUEST]
+
+
+def _rerun_pinned_from_a_held_book(
+    world: tds.World, capsys: pytest.CaptureFixture[str]
+) -> dict[str, Any]:
+    """The day run once (it opens the book), its journal lost, and the day run again: the second
+    pin is taken from a held book. Returns that journal."""
+    _run(world, capsys)
+    _journal_path(world).unlink()
+    _code, _out, err = _run(world, capsys)
+    assert err[0] == STUB, err
+    return _journal(world)
+
+
+def test_a_day_pinned_from_a_held_book_names_the_snapshot_it_pinned_from(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    world = _world(tmp_path, monkeypatch, seeded)
+
+    journal = _rerun_pinned_from_a_held_book(world, capsys)
+
+    head = held_head(FilePaperStateStore(world.runtime / "paper" / "snapshots"))
+    assert head is not None
+    assert journal["held"] == []
+    assert journal["held_from"] == {
+        "session": EPOCH.isoformat(),
+        "session_index": 0,
+        "snapshot_id": head.snapshot_id,
+    }
+
+
+def test_a_day_whose_pinned_book_is_gone_is_refused_before_any_request_and_opens_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """The journal pinned holdings from a held book and the runtime directory holds no book now
+    (its paper directory was moved): refused by name before any request, and no fresh book is
+    opened under the journal that pinned another."""
+    world = _world(tmp_path, monkeypatch, seeded)
+    _rerun_pinned_from_a_held_book(world, capsys)
+    (world.runtime / "paper").rename(world.runtime / "paper.moved")
+
+    code, _out, err = _run(world, capsys)
+
+    assert code == 1
+    assert err[0].startswith("step 5 (paper head) failed:")
+    assert "holds no paper book now" in err[0]
+    assert "move this day's journal" in err[0]
+    assert err[1] == NO_REQUEST
+    assert held_head(FilePaperStateStore(world.runtime / "paper" / "snapshots")) is None
     assert not (world.runtime / "paper" / "registration.json").exists()
 
 

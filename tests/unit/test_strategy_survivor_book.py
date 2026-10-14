@@ -894,6 +894,83 @@ def test_a_held_book_whose_marker_is_lost_is_refused_and_never_bound_again(
     assert files(paper) == before
 
 
+def _bound_head(paper: Paper, *, config_id: str = CONFIG_ID, lock: object = None) -> Any:
+    return strategy_survivor_book.require_bound(
+        state_store=paper.store,
+        paper_directory=paper.root,
+        registration=REGISTRATION,
+        config_id=config_id,
+        lock=paper.lock if lock is None else lock,
+    )
+
+
+def test_a_directory_with_no_book_and_no_marker_is_bound_by_nobody_and_left_as_it_is(
+    paper: Paper,
+) -> None:
+    """`require_bound` is what the daily command reads before it pins the book's holdings -- before
+    any request: no book and no marker is a book yet to be opened, and nothing is written."""
+    before = tree(paper.root)
+
+    assert _bound_head(paper) is None
+    assert tree(paper.root) == before
+    assert not (paper.root / PAPER_BOOK_MARKER).exists()
+
+
+def test_a_held_book_bound_to_this_registration_is_handed_back_as_its_head(paper: Paper) -> None:
+    head_of(paper, 61)
+    before = files(paper)
+
+    head = _bound_head(paper)
+
+    assert head == paper_head_snapshot(paper)
+    assert files(paper) == before
+
+
+def paper_head_snapshot(paper: Paper) -> Any:
+    from openalpha_cn.backtest.paper_state import held_head
+
+    return held_head(paper.store)
+
+
+@pytest.mark.parametrize("held", [True, False], ids=["a held book", "no book"])
+def test_a_marker_of_another_registration_is_refused_reading_only_with_or_without_a_book(
+    paper: Paper, held: bool
+) -> None:
+    """A marker that differs is another registration's paper directory whether or not a book is
+    held under it: refused by name, before the day pins anything, and left as it is."""
+    if held:
+        head_of(paper, 61, config_id="rcf_another_registration_xx")
+    else:
+        bind(paper.root, config_id="rcf_another_registration_xx")
+    before = tree(paper.root)
+
+    with pytest.raises(SurvivorDayError) as refused:
+        _bound_head(paper)
+
+    assert refused.value.step == "paper head"
+    assert "config_id" in str(refused.value)
+    assert "rcf_another_registration_xx" in str(refused.value)
+    assert tree(paper.root) == before
+
+
+def test_a_held_book_without_its_marker_is_refused_reading_only(paper: Paper) -> None:
+    head_of(paper, 61)
+    (paper.root / PAPER_BOOK_MARKER).unlink()
+    before = files(paper)
+
+    with pytest.raises(SurvivorDayError) as refused:
+        _bound_head(paper)
+
+    assert refused.value.step == "paper head"
+    assert "no binding marker" in str(refused.value)
+    assert files(paper) == before
+
+
+def test_the_binding_is_read_only_under_this_runs_writer_lock(paper: Paper) -> None:
+    with pytest.raises(SurvivorDayError, match="does not hold the paper book's writer lock"):
+        _bound_head(paper, lock=object())
+
+
 def test_ordinals_counted_from_another_epoch_than_the_registered_one_are_refused(
     panel: PanelStore, paper: Paper
 ) -> None:
