@@ -188,18 +188,23 @@ def security_board(ts_code: str) -> Literal["main", "star", "growth", "bse"]:
     consequences here: the lot rule (STAR buys at least 200 shares in 1-share steps, every other
     board in multiples of 100) and `_board_limit`'s fallback ratio when no `stk_limit` band is
     supplied (20% on STAR and ChiNext, 10% on the main board). STAR is `688*` and `689*` (CDRs);
-    ChiNext is `300*` and `301*`; the Beijing board is matched on its `.BJ` suffix.
+    ChiNext is `300*`, `301*` and `302*`; the Beijing board is matched on its `.BJ` suffix.
 
     `V2-P6-031`: this lived as three private copies, in `factor_view`, `shortlist_view` and
     `strategy_view`, and the first two tested only `688`/`300` -- filing `689*` and `301*` under
     the main board. It sits here, beside `MarketBar`, because all three faces already import this
     module and it imports no numeric or infrastructure library.
+
+    `V2-P7-016`: `302*` was filed under the main board too. `domain/price_limits.py` measured it
+    as ChiNext -- reading `302132.SZ` (`300114.SZ` under a new number, T3 3.3) as main board is
+    one more disagreement with its published 20% band -- and a main-board-only book would
+    otherwise neither refuse its board nor read that band as special treatment.
     """
     if ts_code.endswith(".BJ"):
         return "bse"
     if ts_code.startswith(("688", "689")):
         return "star"
-    if ts_code.startswith(("300", "301")):
+    if ts_code.startswith(("300", "301", "302")):
         return "growth"
     return "main"
 

@@ -712,11 +712,13 @@ BOARD_CODES: Final[tuple[str, ...]] = (
     "000001.SZ",  # main
     "689009.SH",  # 68 but not 688 -- the boundary a prefix test can get wrong
     "301029.SZ",  # 30 but not 300, the same boundary on the other side
+    "302132.SZ",  # ChiNext's third prefix: 300114.SZ's new code (V2-P7-016)
 )
 """Codes that reach all four boards and both prefix boundaries.
 
 `689*` and `301*` are the ones that matter: a copy that drifted to a two-character prefix would
-answer `star`/`growth` for them and no code in a happy-path fixture would notice.
+answer `star`/`growth` for them and no code in a happy-path fixture would notice. `302*` is the
+third ChiNext prefix, which the shared classifier itself missed until `V2-P7-016`.
 """
 
 
@@ -765,8 +767,9 @@ EXPECTED_BOARDS: Final[dict[str, str]] = {
     "000001.SZ": "main",
     "689009.SH": "star",
     "301029.SZ": "growth",
+    "302132.SZ": "growth",
 }
-"""`BOARD_CODES`' answers, written out: `689*` is STAR (CDRs) and `301*` is ChiNext."""
+"""`BOARD_CODES`' answers, written out: `689*` is STAR (CDRs); `301*` and `302*` are ChiNext."""
 
 
 def test_every_face_files_301_and_689_on_their_own_boards() -> None:
@@ -792,6 +795,30 @@ def test_every_face_classifies_a_board_with_one_function() -> None:
     assert factor_view._board is execution.security_board
     assert shortlist_view._board is execution.security_board
     assert strategy_view._board is execution.security_board
+
+
+@pytest.mark.parametrize(
+    ("code", "board"),
+    [
+        ("302132.SZ", "growth"),  # 300114.SZ's new code, list_date 2010-08-27 (T3 3.3)
+        ("302001.SZ", "growth"),  # any 302*, not the one code the research store holds
+        ("300114.SZ", "growth"),  # its old code, for contrast
+    ],
+)
+def test_a_302_code_is_chinext_and_not_the_main_board(code: str, board: str) -> None:
+    """`V2-P7-016`. `302*` is ChiNext: the repository's own measurement says so.
+
+    `domain/price_limits.py` reconstructs the published `stk_limit` band of 2024-06-28 with the
+    board taken from the code prefix, `300`/`301`/`302` all on ChiNext; reading `302132.SZ`
+    as main board gives one more disagreement with its published 20% band (162 instead of 159).
+    T3 (`docs/research/p7-step0-validation/T3-st-and-new-listings.md` 3.3, 7 item 8) found the
+    same code to be `300114.SZ` under a new number. Filed under the main board, a main-board-only
+    survivor book would neither refuse its board nor read its 20% band as anything but ordinary,
+    so it could be bought.
+    """
+    from openalpha_cn.backtest.execution import security_board
+
+    assert security_board(code) == board
 
 
 @pytest.mark.parametrize(

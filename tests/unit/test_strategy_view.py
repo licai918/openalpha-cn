@@ -1066,7 +1066,7 @@ def _reference_board(code: str) -> Literal["main", "star", "growth", "bse"]:
         return "bse"
     if code.startswith(("688", "689")):
         return "star"
-    return "growth" if code.startswith(("300", "301")) else "main"
+    return "growth" if code.startswith(("300", "301", "302")) else "main"
 
 
 def _reference_quotes(
