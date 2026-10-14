@@ -133,6 +133,7 @@ _REASON_UNKNOWN: Final[str] = "not_assessed"
 and the kernel sells what it never assessed."""
 
 _RATIO_PLACES: Final[Decimal] = Decimal("0.000001")
+_RATIO_STEP: Final[Decimal] = Decimal("0.0001")
 _LABEL_WIDTH: Final[int] = 18
 _ORDERS_HEADER: Final[str] = "ORDERS FOR THE OPEN OF D+1 (call auction 09:15)"
 
@@ -399,11 +400,14 @@ def _book(
             if on
         )
         since = carried_since.get(code) if code in carried_codes else None
+        mark = settlement.book.mark(code)
         holdings.append(
             {
                 "ts_code": code,
                 "ledger_quantity": position.quantity,
                 "real_close": None if row is None else _text(row.close),
+                "ledger_mark": None if mark is None else _text(mark),
+                "ledger_ratio": _ratio(mark, row),
                 "halted": row is not None and row.suspended,
                 "flags": flags,
                 "carried_since": None if since is None else since.isoformat(),
@@ -419,6 +423,19 @@ def _book(
         ],
         "holdings": holdings,
     }
+
+
+def _ratio(mark: Decimal | None, row: SecurityFacts | None) -> str | None:
+    """The ledger's mark over the facts day's real close, to four places, when they differ.
+
+    The ledger keeps a holding's shares and mark in its own units, the real price times the
+    adjustment ratio since the buy filled, so a mark that is not the real close says the ratio
+    the account's shares are the ledger's quantity times. `None` when they agree -- no event, or
+    one that has not moved this holding -- and when either is missing.
+    """
+    if mark is None or row is None or mark == row.close:
+        return None
+    return _text((mark / row.close).quantize(_RATIO_STEP))
 
 
 def _settled(settlement: Settlement) -> dict[str, Any]:
@@ -718,12 +735,14 @@ def _position_lines(holdings: Sequence[Mapping[str, Any]]) -> list[str]:
         _row(
             "positions",
             f"{_plural(len(holdings), 'holding')} (ledger quantity in ledger units; real close "
-            "from the facts)",
+            "from the facts; where a ratio is shown, account shares = ledger qty x ratio)",
         )
     ]
     for item in holdings:
         close = item["real_close"] if item["real_close"] is not None else "n/a"
         text = f"  {item['ts_code']}  ledger qty {item['ledger_quantity']}  real close {close}"
+        if item["ledger_ratio"] is not None:
+            text += f"  ledger/real ratio {item['ledger_ratio']}"
         if item["halted"]:
             text += " (suspended: the close may be an earlier session's)"
         status = []
