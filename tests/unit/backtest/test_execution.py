@@ -2,6 +2,7 @@ import ast
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
+from typing import Final
 
 from openalpha_cn.backtest.execution import (
     AShareExecutionPolicy,
@@ -206,22 +207,113 @@ def test_an_order_at_the_open_meets_a_suspended_bar_on_any_halt_row_but_a_resump
     assert suspended_at_the_close(TradingState.interrupted, "09:30-10:30") is False
 
 
-def test_no_module_but_the_execution_policy_assembles_a_market_bar_by_hand() -> None:
-    """T5 7.1's rule as a check: one `MarketBar` assembly, not one per face (`V2-P7-009`).
+REBUILT_FROM_A_BAR: Final[frozenset[str]] = frozenset({"backtest/paper_step.py::_scaled"})
+"""Where a `MarketBar` may be validated from another bar's own fields rather than assembled:
+`paper_step._scaled` multiplies every price of a stored bar by an adjustment ratio. Not an
+assembly -- nothing is read off the panel there -- and the one such site today; a second is a
+reviewed change to this set."""
 
-    Every `MarketBar(...)` call in `src/` outside `backtest/execution.py` is another copy of the
-    conversion `stored_market_bar` owns, and the P6 faces each held one until this issue moved
-    them onto it. A copy of an existing bar (`model_copy`, `model_validate`) is not an assembly
-    and is not counted.
-    """
-    assemblies = sorted(
-        f"{path.relative_to(SOURCE_ROOT)}:{node.lineno}"
-        for path in SOURCE_ROOT.rglob("*.py")
-        if path != SOURCE_ROOT / "backtest" / "execution.py"
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "MarketBar"
+FACES_ON_THE_ONE_ASSEMBLY: Final[frozenset[str]] = frozenset(
+    {"shortlist_view.py", "factor_view.py", "strategy_view.py", "strategy_survivor_market.py"}
+)
+"""The modules that build a bar off the panel, each through `stored_market_bar`."""
+
+
+def _names_market_bar(node: ast.expr, aliases: frozenset[str]) -> bool:
+    return (isinstance(node, ast.Name) and node.id in aliases) or (
+        isinstance(node, ast.Attribute) and node.attr == "MarketBar"
     )
 
-    assert assemblies == []
+
+def _aliases_of(tree: ast.Module, name: str) -> frozenset[str]:
+    """`name` and every name a module binds to it: `import ... as`, or `alias = name`."""
+    found = {name}
+    found.update(
+        alias.asname
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+        if alias.name == name and alias.asname
+    )
+    found.update(
+        target.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == name
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    )
+    return frozenset(found)
+
+
+def _visit(
+    node: ast.AST,
+    owner: str,
+    *,
+    relative: str,
+    bars: frozenset[str],
+    shared: frozenset[str],
+    uses: dict[str, list[str]],
+) -> None:
+    site = f"{relative}::{owner}"
+    if isinstance(node, ast.ClassDef) and any(_names_market_bar(base, bars) for base in node.bases):
+        uses["subclass"].append(f"{relative}::{node.name}")
+    if isinstance(node, ast.Call):
+        callee = node.func
+        if _names_market_bar(callee, bars):
+            uses["assembly"].append(site)
+        elif (
+            isinstance(callee, ast.Attribute)
+            and callee.attr.startswith(("model_validate", "model_construct"))
+            and _names_market_bar(callee.value, bars)
+        ):
+            uses["rebuild"].append(site)
+        elif (isinstance(callee, ast.Name) and callee.id in shared) or (
+            isinstance(callee, ast.Attribute) and callee.attr == "stored_market_bar"
+        ):
+            uses["shared"].append(site)
+    inner = owner
+    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+        inner = f"{owner}.{node.name}".lstrip(".")
+    for child in ast.iter_child_nodes(node):
+        _visit(child, inner, relative=relative, bars=bars, shared=shared, uses=uses)
+
+
+def _market_bar_uses(root: Path) -> dict[str, list[str]]:
+    """Every site in `root` that assembles, subclasses or rebuilds a `MarketBar`, or calls the
+    one assembly, as `"<path>::<enclosing def or class>"` by kind."""
+    uses: dict[str, list[str]] = {"assembly": [], "subclass": [], "rebuild": [], "shared": []}
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        _visit(
+            tree,
+            "",
+            relative=path.relative_to(root).as_posix(),
+            bars=_aliases_of(tree, "MarketBar"),
+            shared=_aliases_of(tree, "stored_market_bar"),
+            uses=uses,
+        )
+    return uses
+
+
+def test_the_execution_module_holds_the_one_market_bar_assembly_and_nothing_bypasses_it() -> None:
+    """T5 7.1's rule as a check: one `MarketBar` assembly, not one per face (`V2-P7-009`).
+
+    The P6 faces each built a bar by hand until this issue moved them onto `stored_market_bar`.
+    A second assembly is refused however it is spelled -- `MarketBar(...)`, an alias imported or
+    assigned, `execution.MarketBar(...)`, a subclass, or `model_validate`/`model_construct`
+    outside `REBUILT_FROM_A_BAR`. The walk must also find what it is meant to find: the source
+    tree, the assembly inside `stored_market_bar`, and every face calling it -- so a test file
+    moved where `SOURCE_ROOT` reaches nothing fails rather than passing on an empty walk.
+    """
+    assert SOURCE_ROOT.is_dir(), SOURCE_ROOT
+
+    uses = _market_bar_uses(SOURCE_ROOT)
+
+    assert uses["assembly"] == ["backtest/execution.py::stored_market_bar"]
+    assert uses["subclass"] == []
+    assert sorted(uses["rebuild"]) == sorted(REBUILT_FROM_A_BAR)
+    callers = {site.partition("::")[0] for site in uses["shared"]}
+    assert callers >= FACES_ON_THE_ONE_ASSEMBLY, sorted(callers)
+    assert len(uses["shared"]) >= len(FACES_ON_THE_ONE_ASSEMBLY)
