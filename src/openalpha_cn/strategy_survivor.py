@@ -164,24 +164,30 @@ class SurvivorAdapterConfig(BaseModel):
     """What the survivor day's adapters read, beside the book: every field named, none defaulted.
 
     `epoch_session` is the session the paper book opens on (the session before the first
-    scheduled run); `exchange` the calendar's; `transform` the processed tier the composite
-    factors are built and read under; `min_coverage` and `max_carry_sessions` the facts
-    adapter's coverage floor and carry bound; `max_panel_catch_up_sessions` step 2's catch-up
-    bound; `benchmark` the index whose close settles the book's days. Beside `schema_version`,
-    three tags state rules the code follows and that cannot be chosen otherwise: the 20-session
-    prediction horizon, the protocol's costs, and whole-order rejection with the buy carried.
+    scheduled run); `transform` the processed tier the composite factors are built and read
+    under; `min_coverage` and `max_carry_sessions` the facts adapter's coverage floor and carry
+    bound; `max_panel_catch_up_sessions` step 2's catch-up bound. Beside `schema_version`, five
+    tags state what the code does and cannot be chosen otherwise in `survivor-adapter/v1`:
+    `exchange`, the name of the calendar every panel build and the P6 day read (`SSE`; the facts
+    adapter takes each code's exchange from its suffix, so this is the calendar's name only);
+    `benchmark`, the protocol's CSI 500 (`000905.SH`, `strategy_view.PROTOCOL_BENCHMARKS[0]`),
+    whose close settles the book's days and which the pre-registered evaluation is measured
+    against -- the panel's `index_daily` stores only three indices, and a free string would admit
+    a typo that fails every night and an evaluation nobody registered; the 20-session prediction
+    horizon; the protocol's costs; and whole-order rejection with the buy carried. Widening any
+    of them is a new schema version.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: Literal["survivor-adapter/v1"]
     epoch_session: Annotated[date, BeforeValidator(_iso_date)]
-    exchange: StrictStr = Field(min_length=1)
+    exchange: Literal["SSE"]
     transform: StrictStr
     min_coverage: float = Field(gt=0, le=1, strict=True, allow_inf_nan=False)
     max_carry_sessions: int = Field(ge=1, strict=True)
     max_panel_catch_up_sessions: int = Field(ge=0, le=MAX_PANEL_CATCH_UP_SESSIONS, strict=True)
-    benchmark: StrictStr = Field(min_length=1)
+    benchmark: Literal["000905.SH"]
     prediction_horizon: Literal["20d"]
     cost_policy: Literal["protocol/v1"]
     paper_limits: PaperLimitsConfig
