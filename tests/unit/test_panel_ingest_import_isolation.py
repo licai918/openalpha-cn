@@ -588,6 +588,43 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "strategy_survivor_market.settlement_market",
         }
     ),
+    "openalpha_cn.strategy_survivor_check": frozenset(
+        {
+            # V2-P7-018. The late-record check of a survivor record: D2's recompute, provenance
+            # reader, change finder and "cannot be recomputed" refusals, used as they are ...
+            "strategy_survivor_registration.ChangeScope",
+            "strategy_survivor_registration.RECOMPUTE_DIFFERS",
+            "strategy_survivor_registration.RECOMPUTE_FAILED",
+            "strategy_survivor_registration.SHANGHAI",
+            "strategy_survivor_registration.SURVIVOR_PROVENANCE_DIRECTORY",
+            "strategy_survivor_registration.SURVIVOR_RECOMPUTE_REFUSALS",
+            "strategy_survivor_registration.SurvivorInputProvenance",
+            "strategy_survivor_registration.SurvivorRegistrationError",
+            "strategy_survivor_registration.read_survivor_provenance",
+            "strategy_survivor_registration.recompute_survivor_batch",
+            "strategy_survivor_registration.survivor_provenance_changes",
+            "strategy_survivor_registration.survivor_record_is_bound",
+            # ... and, for the verdict cache's key, the windows and the 16:30 build lookup the
+            # provenance itself is taken with, so the key and the provenance read one definition
+            # of what a day reads (private names, shared deliberately rather than restated) ...
+            "strategy_survivor_registration._THROUGH_SESSION_DATASETS",
+            "strategy_survivor_registration._Windows",
+            "strategy_survivor_registration._builds_at",
+            "strategy_survivor_registration._factor_datasets",
+            "strategy_survivor_registration._require_the_records_transform",
+            "strategy_survivor_registration._window_partitions",
+            # ... the windowed value digest of the three small through-session datasets (P6's
+            # form: a hash, never a read answered with) at the session's 16:30 ...
+            "panel_ingest.RowDigestCache",
+            "panel_ingest.session_publication_instant",
+            "panel_ingest.stored_rows_digest",
+            # ... and P6's record vocabulary: the registration a record declares, its refusal
+            # and a filing's digest.
+            "strategy_registration.RegisteredConfiguration",
+            "strategy_registration.StrategyRegistrationError",
+            "strategy_registration.batch_digest",
+        }
+    ),
     "openalpha_cn.strategy_survivor_facts": frozenset(
         {
             # V2-P7-016. The survivor book's eligibility facts: one row per listed security,
@@ -1006,6 +1043,30 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
         reached=frozenset(
             {
                 "adj_factor",
+                "balancesheet",
+                "cashflow",
+                "daily",
+                "daily_basic",
+                "fina_indicator",
+                "income",
+                "index_daily",
+                "namechange",
+                "stk_limit",
+                "stock_basic",
+                "suspend_d",
+                "trade_cal",
+            }
+        ),
+    ),
+    "openalpha_cn.strategy_survivor_check": DatasetReach(
+        # V2-P7-018. It names no dataset -- the three it keys by value come as D2's own tuple --
+        # and everything it reaches arrives through `strategy_survivor_registration` (the
+        # recompute's `build_facts_day` and the catalog questions the provenance asks) and
+        # through `stored_rows_digest`, a fingerprint of the registry, the names and the
+        # calendar, never a read answered with.
+        named=frozenset(),
+        reached=frozenset(
+            {
                 "balancesheet",
                 "cashflow",
                 "daily",
