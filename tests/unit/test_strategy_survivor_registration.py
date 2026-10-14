@@ -1510,6 +1510,51 @@ def test_probes_a_and_b_together_are_refused_the_unrelated_halt_excuses_nothing(
     assert changes(probe_ab_store, provenance, DIFFERS) == ()
 
 
+def test_a_bar_restated_before_the_amount_window_names_nothing(
+    evening_store: PanelStore, tmp_path: Path
+) -> None:
+    # The session's own bar year, rewritten with one bar of 2026-01-06 gone: the count of a date
+    # before the window moved, and no amount the batch reads did.
+    day = the_evening(evening_store)
+    record = filed(evening_store, day.batch, tmp_path / "predictions")
+    provenance = provenance_of(evening_store, day)
+    store = _copy(evening_store, tmp_path / "early-bar")
+    bars = build_panel(TRIMMED).batch(DAILY_DATASET)
+    write_panel_batch(
+        store,
+        _rebatched(
+            bars,
+            [
+                row
+                for row in _rows(bars)
+                if (row["subject"], row[PRICE_DATE_COLUMN]) != (RESTATED, SESSIONS[1].isoformat())
+            ],
+        ),
+        year=2026,
+    )
+
+    assert recompute(store, record) == record.batch
+    for scope in SCOPES:
+        assert changes(store, provenance, scope) == ()
+
+
+def test_a_build_gone_from_the_signal_instant_is_named(
+    evening_store: PanelStore, tmp_path: Path
+) -> None:
+    provenance = provenance_of(evening_store, the_evening(evening_store))
+    output = {factor: output for factor, _build, output in provenance.builds}["reversal_1d/v1"]
+    store = _copy(evening_store, tmp_path / "no-build")
+    assert store.remove_partition(
+        factor_transform_manifest_dataset(FACTOR_DEFINITIONS.get(FACTORS[0])), 2026
+    )
+
+    for scope in SCOPES:
+        assert changes(store, provenance, scope) == (
+            f"reversal_1d/v1: the {IDENTITY.qualified_key} build at "
+            f"{instant(SIGNAL_INDEX).isoformat()} is no longer stored (it held {output})",
+        )
+
+
 def test_an_older_bar_year_rebuilt_or_gone_never_excuses_a_mismatch(
     older_year_store: PanelStore, tmp_path: Path
 ) -> None:
