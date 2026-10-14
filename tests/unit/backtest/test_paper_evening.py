@@ -15,8 +15,10 @@ from __future__ import annotations
 import dataclasses
 import importlib.util
 import random
+import sqlite3
 from collections import Counter, defaultdict
 from collections.abc import Callable, Collection, Mapping, Sequence
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
@@ -33,6 +35,7 @@ from openalpha_cn.backtest.paper_evening import (
     CatchUpResult,
     DryRunLedger,
     EveningResult,
+    PaperLedgerConflictError,
     missing_sessions,
     open_book,
     run_catch_up,
@@ -315,12 +318,36 @@ class Watched:
         self.appends += 1
         self.book.ledger.append(transition)
 
+    def list(self) -> tuple[PortfolioTransition, ...]:
+        return self.book.ledger.list()
+
+
+class Interloper:
+    """The paper ledger, with another writer appending `row` just before the evening's first
+    append -- after the evening has read the ledger and found nothing in its way."""
+
+    def __init__(self, inner: SQLitePortfolioLedger, row: PortfolioTransition) -> None:
+        self.inner, self.row = inner, row
+        self.interfered = False
+
+    def append(self, transition: PortfolioTransition) -> None:
+        if not self.interfered:
+            self.interfered = True
+            self.inner.append(self.row)
+        self.inner.append(transition)
+
+    def list(self) -> tuple[PortfolioTransition, ...]:
+        return self.inner.list()
+
 
 class CutAtRow:
     """The paper ledger, with the power cut as the evening's `at`-th row is appended."""
 
     def __init__(self, inner: SQLitePortfolioLedger, at: int) -> None:
         self.inner, self.at, self.appended = inner, at, 0
+
+    def list(self) -> tuple[PortfolioTransition, ...]:
+        return self.inner.list()
 
     def append(self, transition: PortfolioTransition) -> None:
         self.appended += 1
@@ -861,32 +888,131 @@ def test_a_rerun_after_the_snapshot_was_saved_on_other_inputs_is_refused_writing
     assert (ledger_files(book), documents(book.store)) == before
 
 
-def test_a_rerun_with_other_inputs_after_a_partial_commit_is_refused_by_the_ledger(
-    tmp_path: Path,
-) -> None:
-    """The power is cut after the sale and the buy are in. Run again on a market read
-    differently -- 600010.SH now opening at 10.05 -- the sale is another transition under the
-    same attempt id, and the ledger refuses it: nothing more is appended and no snapshot is
-    saved. (The daily entry pins the inputs -- the facts' and the market's `as_of`, the delisted
-    set -- in its journal, so a run again reads what the first read.)"""
-    book = through_s2(tmp_path)
-    sell_a = due_order(book, "sell", A)
+def _partially_committed(root: Path) -> Book:
+    """The book through S2, with S3's evening cut after its first two rows (the sale of
+    600010.SH and the buy of 600030.SH) are in the ledger and before anything else."""
+    book = through_s2(root)
     with pytest.raises(OSError, match="row 3 of the evening"):
         tonight(book, ledger=CutAtRow(book.ledger, 3))
-    partial = rows(book.ledger)
+    assert len(book.ledger.list()) == 3 + 2
+    return book
+
+
+def test_a_rerun_with_other_inputs_after_a_partial_commit_is_refused_before_any_append(
+    tmp_path: Path,
+) -> None:
+    """Run again on a market read differently -- 600010.SH now opening at 10.05 -- the sale is
+    another transition under an attempt id the ledger already holds for S3, and so is the buy
+    after it (the cash it starts from differs). The evening reads the session's rows before it
+    appends one and refuses, naming the class Part D maps to exit 1, the session, both ids and
+    the remedy: nothing is appended, no snapshot is saved."""
+    book = _partially_committed(tmp_path)
+    sell_a = attempt_id(due_order(book, "sell", A), S3)
+    buy_c = attempt_id(due_order(book, "buy", C), S3)
+    both = ", ".join(f"'{order_id}'" for order_id in sorted([sell_a, buy_c]))
     moved = market(
         bar(A, S3, "10.00", "10.05", "10.20", "9.90", "10.10", "11.00", "9.00"),
         quiet(B, S3, "11.50"),
         bar(C, S3, "10.00", "10.00", "10.20", "9.95", "10.10", "11.00", "9.00"),
         limit_up(E, S3, "20.00"),
     )
+    before = (ledger_files(book), documents(book.store))
 
-    conflict = rf"portfolio order_id conflicts: {attempt_id(sell_a, S3)}"
-    with pytest.raises(ValueError, match=conflict):
+    with pytest.raises(
+        PaperLedgerConflictError,
+        match=rf"2021-03-04.*rows this run would write otherwise: \[{both}\].*journal-pinned",
+    ):
         tonight(book, quotes=moved)
 
-    assert rows(book.ledger) == partial
+    assert (ledger_files(book), documents(book.store)) == before
     assert book.store.sessions() == (E0, S1, S2)
+
+
+def test_a_rerun_that_would_leave_a_row_of_the_first_run_behind_is_refused_before_any_append(
+    tmp_path: Path,
+) -> None:
+    """The review's probe. The first run is cut after the sale of 600010.SH and the buy of
+    600030.SH; run again on a market in which 600030.SH has no bar, the buy is not attempted --
+    the run would write no row under that attempt id, and the fill the first run wrote would
+    stay in the ledger beside a snapshot that keeps the buy pending, to fill a second time the
+    next session. The row the run does not produce is named and nothing is written."""
+    book = _partially_committed(tmp_path)
+    buy_c = attempt_id(due_order(book, "buy", C), S3)
+    without_c = market(
+        bar(A, S3, "10.00", "10.00", "10.20", "9.90", "10.10", "11.00", "9.00"),
+        quiet(B, S3, "11.50"),
+        limit_up(E, S3, "20.00"),
+    )
+    before = (ledger_files(book), documents(book.store))
+
+    with pytest.raises(
+        PaperLedgerConflictError,
+        match=rf"2021-03-04.*rows this run would not write: \['{buy_c}'\].*journal-pinned",
+    ):
+        tonight(book, quotes=without_c)
+
+    assert (ledger_files(book), documents(book.store)) == before
+
+
+def test_a_catch_up_of_a_half_committed_evening_writes_the_rest_of_the_same_rows(
+    tmp_path: Path,
+) -> None:
+    """A half-committed evening's session settles the same whether it is run again as an
+    evening or caught up (settling does not depend on the decision): the rows already in are
+    the catch-up's own, and it appends the rest."""
+    clean = through_s2(tmp_path / "clean")
+    tonight(clean)
+    book = _partially_committed(tmp_path / "half")
+
+    mended = catch_up(book, S3, MARKET_S3, delisted={DL})
+
+    assert mended.outcome == "created"
+    assert rows(book.ledger) == rows(clean.ledger)
+
+
+def test_a_writer_between_the_evenings_check_and_its_commit_is_refused_by_name(
+    tmp_path: Path,
+) -> None:
+    """What the read before the first append cannot see: another writer appending, between the
+    read and the append, a different row under one of the evening's ids. The ledger refuses the
+    evening's row, and the evening reports it as the named class -- the session, the id, how
+    many of its rows were in, the remedy -- never as the ledger's bare `ValueError`."""
+    clean = through_s2(tmp_path / "clean")
+    first = tonight(clean).settlement.transitions[0]
+    book = through_s2(tmp_path / "book")
+    other = first.model_copy(update={"realized_pnl_delta": D("0.01")})
+
+    with pytest.raises(
+        PaperLedgerConflictError,
+        match=rf"2021-03-04.*{first.order.order_id}.*0 of the session's 4 rows.*journal-pinned",
+    ) as refused:
+        tonight(book, ledger=Interloper(book.ledger, other))
+
+    assert isinstance(refused.value, PaperStateError)
+    assert isinstance(refused.value.__cause__, ValueError)
+    assert book.store.sessions() == (E0, S1, S2)
+
+
+def test_a_settled_session_whose_rows_the_ledger_no_longer_holds_is_refused_on_a_rerun(
+    tmp_path: Path,
+) -> None:
+    """A run after the snapshot is saved derives the session again, and the ledger must hold
+    exactly the rows it derives -- the same ids and payloads, none missing, none extra. A row
+    deleted from the ledger's database behind the book's back is named; nothing is written."""
+    book = through_s2(tmp_path)
+    buy_c = attempt_id(due_order(book, "buy", C), S3)
+    tonight(book)
+    with closing(sqlite3.connect(book.root / "ledger.sqlite3")) as connection, connection:
+        connection.execute("DELETE FROM portfolio_transitions WHERE order_id = ?", (buy_c,))
+    before = (ledger_files(book), documents(book.store))
+
+    with pytest.raises(
+        PaperLedgerConflictError,
+        match=rf"2021-03-04.*rows the session wrote that the ledger does not hold: \['{buy_c}'\]",
+    ):
+        tonight(book)
+
+    assert (ledger_files(book), documents(book.store)) == before
 
 
 # ---- what an evening refuses before anything is written ----------------------------------------

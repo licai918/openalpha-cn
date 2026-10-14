@@ -28,12 +28,23 @@ in three stages:
    there.
 2. **Decide.** `book_state` -> `decide_book` -> `build_trade_list` (held names priced in the
    ledger's units, `ledger_reference_prices`; entrants at their real closes) -> `with_plan`.
-   **Every refusal the evening can meet after reading its book happens in these two stages**,
-   so a refused evening leaves the real ledger and the store byte for byte as they were.
-3. **Commit.** The settlement's transitions (`Settlement.transitions`: the runner's, then the
-   write-offs) are appended to the real ledger in order, **and only then** the snapshot is
-   saved. The snapshot is the commit: a session is settled when, and only when, its snapshot is
-   held.
+3. **Commit.** First the real ledger is **read**: its rows for the session (selected by
+   `after.as_of`, which a runner row carries as the step's date and a write-off as the
+   session's -- never by parsing an id) must all be rows this run writes, with the same
+   payloads; a row it would not write, or would write otherwise, refuses the run by name
+   (`PaperLedgerConflictError`). Then the settlement's transitions (`Settlement.transitions`:
+   the runner's, then the write-offs) are appended in order, **and only then** the snapshot is
+   saved. The snapshot is the commit: a session is settled when, and only when, its snapshot
+   is held.
+
+**Every refusal a run on the same inputs can meet happens before its first append** -- in the
+dry run, the decision or the ledger read -- so a refused run leaves the real ledger and the
+store byte for byte as they were. What can still stop a run after it has appended is not a
+refusal of its inputs: a crash, a fault of the store as the snapshot is saved (the session is
+then unsettled, and a run again converges, below), and another writer appending to the ledger
+between this run's read and its append, which the ledger refuses and the run reports as
+`PaperLedgerConflictError` naming the session, the row and how many of the session's rows were
+in.
 
 ### Why that order makes it crash-safe
 
@@ -55,22 +66,27 @@ attempt ids carry the session's date, the write-off ids the code and the date), 
   snapshot was settled under this configuration and ordinal, the same dry run and the same
   decision are made from the snapshot of the session before it (read with `load_snapshot`:
   `latest_snapshot` refuses a settled session), and the snapshot they give must be the held one,
-  address and bytes. One that is not is refused by name: the inputs differ from the ones the
-  session was settled with, or the session was settled the other way (by a catch-up where this
-  is an evening, or by an evening where this is a catch-up) -- with the inputs pinned by the
-  daily entry's journal, a fault, never a normal case.
+  address and bytes, and the ledger's rows for the session must be exactly the transitions they
+  give -- the same ids and payloads, none missing and none extra. Either failing is refused by
+  name, and with the inputs pinned by the daily entry's journal it is a fault, never a normal
+  case: the inputs differ from the ones the session was settled with, the ledger was altered,
+  or the session was settled the other way -- by a catch-up where this is an evening, or by an
+  evening where this is a catch-up. **That last is refused only where the two differ**: a
+  session whose evening planned no order, and whose book had been decided before (a first
+  decision held), is the same snapshot either way, byte for byte, so an evening run over its
+  catch-up answers `unchanged` with a decision that no evening made (one that plans nothing),
+  and a catch-up run over its evening answers `unchanged` too.
 - **The other order would not be safe**: a snapshot saved before its rows makes a crash between
   them a settled session whose rows are missing for good -- the run again answers `unchanged`.
 
-**What the transaction relies on the caller for: the same inputs on a run again.** A run with
-other inputs after a partial commit is refused only where it produces another transition under
-an id already held (a different fill price, say); a transition the first run appended and the
-second does not produce at all -- an order with a bar on one reading of the market and none on
-the other, a write-off on one delisted set and not the other -- stays in the ledger beside a
-snapshot that does not know it, and nothing here can see it (`PortfolioLedger` is `append`
-only). The daily entry (`V2-P7-008`) therefore pins every input of an evening in its journal --
-the facts' `as_of`, the market's `as_of`, the delisted set -- so that a run again reads what the
-first run read.
+**A run on other inputs after a partial commit is refused before it appends anything**: a row
+the ledger holds for the session that this run would not write -- an order with a bar on one
+reading of the market and none on the other, a write-off on one delisted set and not the other
+-- or would write with another payload -- a different fill price -- is named. What the read
+cannot tell is which reading of the inputs was the right one: that is the journal's. The daily
+entry (`V2-P7-008`) pins every input of an evening -- the facts' `as_of`, the market's `as_of`,
+`held` and the delisted set -- so that a run again reads what the first run read; a ledger row
+is never deleted or rewritten to make a run fit.
 
 ## A missed evening, caught up
 
@@ -105,17 +121,18 @@ refused by `latest_snapshot`, naming the gap.
   (a missing reference price, a book that cannot be decided) are `ValueError`s.
 
 This module lives under `backtest/` and reaches no store: the snapshot store arrives as
-`PaperStateDocumentStore` and the ledger as `PortfolioLedger`, the `Protocol`s beside their
-consumers.
+`PaperStateDocumentStore` and the ledger as `ReadableLedger` (`append` and `list`), the
+`Protocol`s beside their consumers; `SQLitePortfolioLedger` satisfies the latter. The read is the
+whole ledger, filtered to the session: a few rows a session, so years of them are cheap.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
-from typing import Literal
+from typing import Literal, Protocol
 
 from openalpha_cn.backtest.multi_day import PortfolioLedger
 from openalpha_cn.backtest.paper import PaperPortfolio, refusing_outward_calls
@@ -149,6 +166,8 @@ __all__ = [
     "CatchUpResult",
     "DryRunLedger",
     "EveningResult",
+    "PaperLedgerConflictError",
+    "ReadableLedger",
     "missing_sessions",
     "open_book",
     "run_catch_up",
@@ -156,6 +175,37 @@ __all__ = [
 ]
 
 Outcome = Literal["created", "unchanged"]
+
+_REMEDY = (
+    "Re-run with the journal-pinned as_of, held and delisted set, so that the run reads what the "
+    "first run read; a ledger row is never deleted or rewritten to make a run fit"
+)
+
+
+class PaperLedgerConflictError(PaperStateError):
+    """The paper ledger's rows for the session being run are not the run's own.
+
+    Raised before any append for a row this run would not write, or would write with another
+    payload, and -- for a session already settled -- for a row the session wrote that the
+    ledger no longer holds; raised at the append when another writer put a different row under
+    one of the run's ids after the run read the ledger. Each message names the session, the
+    rows and the remedy. A `PaperStateError`, so the daily entry maps it to exit 1 with the
+    book's other state faults, without reading the message.
+    """
+
+
+class ReadableLedger(Protocol):
+    """The paper ledger as an evening needs it: appended to, and read back.
+
+    `SQLitePortfolioLedger` satisfies it. The read is what lets a run see the rows a cut run of
+    the same session left, before it appends one of its own.
+    """
+
+    def append(self, transition: PortfolioTransition) -> None:
+        """Append idempotently or reject conflicting reuse of an order ID."""
+
+    def list(self) -> Sequence[PortfolioTransition]:
+        """Every transition held, in the order appended."""
 
 
 class DryRunLedger:
@@ -174,10 +224,14 @@ class DryRunLedger:
         """Every transition appended, once each, in the order appended."""
         return tuple(self._transitions)
 
+    def list(self) -> tuple[PortfolioTransition, ...]:
+        """`transitions`, read as `ReadableLedger` reads a ledger."""
+        return self.transitions
+
     def append(self, transition: PortfolioTransition) -> None:
         """Keep `transition`; refuse another payload under an order id already held."""
         order_id = transition.order.order_id
-        payload = transition.model_dump_json(exclude_computed_fields=True)
+        payload = _payload(transition)
         held = self._payloads.get(order_id)
         if held is not None:
             if held != payload:
@@ -253,7 +307,7 @@ def open_book(
 def run_evening(
     *,
     store: PaperStateDocumentStore,
-    ledger: PortfolioLedger,
+    ledger: ReadableLedger,
     make_portfolio: Callable[[PortfolioLedger], PaperPortfolio],
     config: SurvivorBookConfig,
     session: date,
@@ -278,7 +332,10 @@ def run_evening(
 
     A session already settled is answered `unchanged`, writing nothing, with the settlement,
     decision and trade list derived again from the snapshot before it; a derivation that does
-    not reproduce the held snapshot is refused by name.
+    not reproduce the held snapshot, or whose transitions are not exactly the ledger's rows for
+    the session, is refused by name. A session not settled is refused before any append when the
+    ledger holds a row for it that this run would not write, or would write otherwise
+    (`PaperLedgerConflictError`).
     """
     digest = survivor_config_digest(config)
     held = _settled_already(store, session=session, session_index=session_index, digest=digest)
@@ -309,6 +366,7 @@ def run_evening(
     snapshot = settlement.with_plan(trade_list)
     if held is not None:
         _refuse_unless_reproduced(held, snapshot, run="evening", other="a catch-up")
+        _refuse_rows_not_the_runs(ledger, settlement, settled=True)
         return EveningResult(
             outcome="unchanged",
             snapshot=held,
@@ -328,7 +386,7 @@ def run_evening(
 def run_catch_up(
     *,
     store: PaperStateDocumentStore,
-    ledger: PortfolioLedger,
+    ledger: ReadableLedger,
     make_portfolio: Callable[[PortfolioLedger], PaperPortfolio],
     config: SurvivorBookConfig,
     session: date,
@@ -343,9 +401,10 @@ def run_catch_up(
     The arguments are `run_evening`'s less the screen and the entrants' prices: the session's
     survivors are the names of the book's pending buys, so no buy is cancelled, and nothing is
     planned. The transaction is the evening's -- dry run, then the ledger rows, then the
-    snapshot -- and so is every refusal, made before anything is written, and so is the answer
-    for a session already settled: `unchanged`, nothing written, the settlement derived again
-    and refused by name unless it reproduces the held snapshot.
+    snapshot -- and so is every refusal, made before anything is written (the ledger read
+    included), and so is the answer for a session already settled: `unchanged`, nothing
+    written, the settlement derived again and refused by name unless it reproduces the held
+    snapshot and the ledger's rows for the session.
     """
     digest = survivor_config_digest(config)
     held = _settled_already(store, session=session, session_index=session_index, digest=digest)
@@ -368,6 +427,7 @@ def run_catch_up(
     snapshot = settlement.without_plan()
     if held is not None:
         _refuse_unless_reproduced(held, snapshot, run="catch-up", other="an evening")
+        _refuse_rows_not_the_runs(ledger, settlement, settled=True)
         return CatchUpResult(outcome="unchanged", snapshot=held, settlement=settlement)
     return CatchUpResult(
         outcome=_commit(store=store, ledger=ledger, settlement=settlement, snapshot=snapshot),
@@ -512,15 +572,67 @@ def _settle_dry(
     return settlement
 
 
+def _refuse_rows_not_the_runs(
+    ledger: ReadableLedger, settlement: Settlement, *, settled: bool
+) -> None:
+    """Refuse, by name, a ledger whose rows for the session are not the settlement's own.
+
+    The session's rows are those whose `after.as_of` is the session: a runner row carries the
+    step's date, a write-off the session's. A row the settlement does not hold, or holds with
+    another payload, is refused; when the session is `settled`, so is a settlement row the
+    ledger does not hold -- the rows must be exactly the settlement's.
+    """
+    session = settlement.session
+    with refusing_outward_calls():
+        held = {row.order.order_id: row for row in ledger.list() if row.after.as_of == session}
+    ours = {transition.order.order_id: transition for transition in settlement.transitions}
+    found = []
+    foreign = sorted(set(held) - set(ours))
+    if foreign:
+        found.append(f"rows this run would not write: {foreign}")
+    changed = sorted(
+        order_id
+        for order_id in set(held) & set(ours)
+        if _payload(held[order_id]) != _payload(ours[order_id])
+    )
+    if changed:
+        found.append(f"rows this run would write otherwise: {changed}")
+    missing = sorted(set(ours) - set(held)) if settled else []
+    if missing:
+        found.append(f"rows the session wrote that the ledger does not hold: {missing}")
+    if found:
+        raise PaperLedgerConflictError(
+            f"{session.isoformat()}: the paper ledger's rows for this session are not this "
+            f"run's -- {'; '.join(found)}. Nothing was written. {_REMEDY}"
+        )
+
+
 def _commit(
     *,
     store: PaperStateDocumentStore,
-    ledger: PortfolioLedger,
+    ledger: ReadableLedger,
     settlement: Settlement,
     snapshot: PaperBookSnapshot,
 ) -> Outcome:
-    """Append the session's transitions to the real ledger, in order, then save the snapshot."""
+    """Read the session's rows, append the session's transitions to the real ledger in order,
+    then save the snapshot."""
+    _refuse_rows_not_the_runs(ledger, settlement, settled=False)
+    rows = settlement.transitions
     with refusing_outward_calls():
-        for transition in settlement.transitions:
-            ledger.append(transition)
+        for count, transition in enumerate(rows):
+            try:
+                ledger.append(transition)
+            except ValueError as error:
+                raise PaperLedgerConflictError(
+                    f"{settlement.session.isoformat()}: the paper ledger refused "
+                    f"{transition.order.order_id}, with {count} of the session's {len(rows)} "
+                    f"rows in ({error}): another payload under that id was appended after this "
+                    "run read the ledger, so another writer is running this book. No snapshot "
+                    f"was saved; stop the other writer. {_REMEDY}"
+                ) from error
     return save_snapshot(store, snapshot)
+
+
+def _payload(transition: PortfolioTransition) -> str:
+    """The bytes a ledger compares two transitions by (`SQLitePortfolioLedger.append`'s)."""
+    return transition.model_dump_json(exclude_computed_fields=True)
