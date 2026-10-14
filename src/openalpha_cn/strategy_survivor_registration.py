@@ -223,6 +223,7 @@ __all__ = [
     "SurvivorInputProvenance",
     "SurvivorLookbackPartition",
     "SurvivorRegistrationError",
+    "read_survivor_provenance",
     "recompute_survivor_batch",
     "survivor_batch",
     "survivor_declaration",
@@ -257,6 +258,25 @@ _THROUGH_SESSION_DATASETS: Final[tuple[str, ...]] = (
 the names from their first stored year (`_years_through`), the registry beneath its newest year."""
 _ON_SESSION_DATASETS: Final[tuple[str, ...]] = (SUSPENSION_DATASET, PRICE_LIMIT_DATASET)
 """Windowed on the session alone, in its year: the halt corpus and the published bands."""
+_DOCUMENT_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "schema",
+        "registration_sha256",
+        "config_id",
+        "session",
+        "batch_digest",
+        "recorded_at",
+        "held",
+        "facts_digest",
+        "transform_key",
+        "transform_id",
+        "amount_window_from",
+        "builds",
+        "inputs",
+        "lookback",
+    }
+)
+"""The keys of a `daily-survivor-input-provenance/v1` document, exactly."""
 _NO_DATES: Final[str] = hashlib.sha256(b"[]").hexdigest()
 """The census digest of a partition with no row inside its window, or none at all."""
 
@@ -471,48 +491,80 @@ class SurvivorInputProvenance:
 
     @classmethod
     def from_document(cls, body: Mapping[str, object]) -> SurvivorInputProvenance:
+        """The provenance `body` states, read only in its exact shape.
+
+        Exactly `_DOCUMENT_KEYS`, every value of its exact JSON type -- a string is not split into
+        codes, a `"2026"` or a `true` is not a year, a naive instant is not a filing time -- and
+        the document must be the one the provenance writes back, byte for byte as a value, so a
+        non-canonical spelling is refused rather than silently given another digest. Anything
+        else is `SurvivorRegistrationError`.
+        """
         schema = body.get("schema")
         if schema != SURVIVOR_PROVENANCE_SCHEMA:
             raise SurvivorRegistrationError(
-                f"not a {SURVIVOR_PROVENANCE_SCHEMA} document (its schema is {schema!r})"
+                f"not a {SURVIVOR_PROVENANCE_SCHEMA} document: its schema is {schema!r}"
+            )
+        keys = set(body)
+        if keys != _DOCUMENT_KEYS:
+            raise SurvivorRegistrationError(
+                f"not a {SURVIVOR_PROVENANCE_SCHEMA} document: it lacks "
+                f"{sorted(_DOCUMENT_KEYS - keys)} and carries {sorted(keys - _DOCUMENT_KEYS)} "
+                "it has no field for"
             )
         try:
-            builds = cast(Sequence[Sequence[object]], body["builds"])
-            inputs = cast(Sequence[Sequence[object]], body["inputs"])
-            return cls(
-                registration_sha256=str(body["registration_sha256"]),
-                config_id=str(body["config_id"]),
-                session=date.fromisoformat(str(body["session"])),
-                batch_digest=str(body["batch_digest"]),
-                recorded_at=datetime.fromisoformat(str(body["recorded_at"])),
-                held=tuple(str(code) for code in cast(Sequence[object], body["held"])),
-                facts_digest=str(body["facts_digest"]),
-                transform_key=str(body["transform_key"]),
-                transform_id=str(body["transform_id"]),
-                amount_window_from=date.fromisoformat(str(body["amount_window_from"])),
-                builds=tuple((str(item[0]), str(item[1]), str(item[2])) for item in builds),
+            recorded_at = datetime.fromisoformat(_text(body, "recorded_at"))
+            if recorded_at.tzinfo is None:
+                raise ValueError(f"recorded_at {recorded_at.isoformat()} carries no time zone")
+            builds = [_row(item, "a build", (str, str, str)) for item in _listed(body, "builds")]
+            inputs = [
+                _row(item, "an input", (str, int, str, str)) for item in _listed(body, "inputs")
+            ]
+            lookback = [
+                _row(item, "a look-back year", (str, int, str))
+                for item in _listed(body, "lookback")
+            ]
+            held = _listed(body, "held")
+            _row(held, "held", (str,) * len(held))
+            provenance = cls(
+                registration_sha256=_text(body, "registration_sha256"),
+                config_id=_text(body, "config_id"),
+                session=date.fromisoformat(_text(body, "session")),
+                batch_digest=_text(body, "batch_digest"),
+                recorded_at=recorded_at,
+                held=tuple(cast(list[str], held)),
+                facts_digest=_text(body, "facts_digest"),
+                transform_key=_text(body, "transform_key"),
+                transform_id=_text(body, "transform_id"),
+                amount_window_from=date.fromisoformat(_text(body, "amount_window_from")),
+                builds=tuple(cast(tuple[str, str, str], tuple(item)) for item in builds),
                 inputs=tuple(
                     SurvivorInputPartition(
-                        dataset=str(item[0]),
-                        year=int(cast(int, item[1])),
-                        content_hash=str(item[2]),
-                        dates_digest=str(item[3]),
+                        dataset=cast(str, item[0]),
+                        year=cast(int, item[1]),
+                        content_hash=cast(str, item[2]),
+                        dates_digest=cast(str, item[3]),
                     )
                     for item in inputs
                 ),
                 lookback=tuple(
                     SurvivorLookbackPartition(
-                        dataset=str(item[0]),
-                        year=int(cast(int, item[1])),
-                        content_hash=str(item[2]),
+                        dataset=cast(str, item[0]),
+                        year=cast(int, item[1]),
+                        content_hash=cast(str, item[2]),
                     )
-                    for item in cast(Sequence[Sequence[object]], body["lookback"])
+                    for item in lookback
                 ),
             )
-        except (KeyError, IndexError, TypeError, ValueError) as error:
+        except ValueError as error:
             raise SurvivorRegistrationError(
-                f"not a {SURVIVOR_PROVENANCE_SCHEMA} document this module can read ({error!r})"
+                f"not a {SURVIVOR_PROVENANCE_SCHEMA} document this module can read ({error})"
             ) from error
+        if provenance.document() != dict(body):
+            raise SurvivorRegistrationError(
+                f"not a {SURVIVOR_PROVENANCE_SCHEMA} document in its own spelling: read back, it "
+                "writes another document, so it would be filed under another digest"
+            )
+        return provenance
 
 
 def survivor_input_provenance(
@@ -620,6 +672,38 @@ def write_survivor_provenance(runtime_dir: Path, provenance: SurvivorInputProven
     temporary.write_text(text, encoding="utf-8")
     temporary.replace(path)
     return path
+
+
+def read_survivor_provenance(path: Path, *, registration_sha256: str) -> SurvivorInputProvenance:
+    """The provenance filed at `path`, read back only when it is what its name says and this
+    registration's (P6's `provenance_lookup` checks, one file at a time).
+
+    Refused with `SurvivorRegistrationError`: a file that is not UTF-8 JSON, a document not in
+    its exact shape (`SurvivorInputProvenance.from_document`), one whose digest is not the file's
+    stem -- edited, or filed under another name -- and one written under another registration.
+    """
+    try:
+        body = json.loads(path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise SurvivorRegistrationError(
+            f"{path} is not a {SURVIVOR_PROVENANCE_SCHEMA} document: it is not UTF-8 JSON ({error})"
+        ) from error
+    if type(body) is not dict:
+        raise SurvivorRegistrationError(
+            f"{path} is not a {SURVIVOR_PROVENANCE_SCHEMA} document: it holds a "
+            f"{type(body).__name__}, not an object"
+        )
+    provenance = SurvivorInputProvenance.from_document(body)
+    if provenance.digest != path.stem:
+        raise SurvivorRegistrationError(
+            f"{path} is not what its name says it is: its document's digest is {provenance.digest}"
+        )
+    if provenance.registration_sha256 != registration_sha256:
+        raise SurvivorRegistrationError(
+            f"{path} was written under the registration {provenance.registration_sha256}, not "
+            f"{registration_sha256}"
+        )
+    return provenance
 
 
 def survivor_provenance_changes(
@@ -803,6 +887,33 @@ def recompute_survivor_batch(
 
 
 # --- helpers -------------------------------------------------------------------------------------
+
+
+def _text(body: Mapping[str, object], key: str) -> str:
+    value = body[key]
+    if type(value) is not str:
+        raise ValueError(f"{key} is {value!r}, not a string")
+    return value
+
+
+def _listed(body: Mapping[str, object], key: str) -> list[object]:
+    value = body[key]
+    if type(value) is not list:
+        raise ValueError(f"{key} is {value!r}, not a list")
+    return value
+
+
+def _row(value: object, what: str, kinds: tuple[type, ...]) -> list[object]:
+    """`value` as a list of exactly `kinds`, each by its exact type (a `bool` is no `int`)."""
+    if (
+        type(value) is not list
+        or len(value) != len(kinds)
+        or any(type(cell) is not kind for cell, kind in zip(value, kinds, strict=True))
+    ):
+        raise ValueError(
+            f"{what} {value!r} is not {len(kinds)} values of {[kind.__name__ for kind in kinds]}"
+        )
+    return value
 
 
 def _require_the_records_transform(
