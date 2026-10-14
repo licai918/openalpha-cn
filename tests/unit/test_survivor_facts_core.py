@@ -29,7 +29,6 @@ from openalpha_cn.domain.trading_calendar import (
     build_trading_calendar,
 )
 from openalpha_cn.survivor_facts import (
-    MIN_CALENDAR_LOOKBACK_SESSIONS,
     FactsNotes,
     ListingAgeHorizonError,
     SurvivorFactsError,
@@ -388,17 +387,23 @@ def never_called(first: date, last: date) -> int:
     raise AssertionError(f"sessions_between({first}, {last}) should not have been called")
 
 
+MIN_LISTING_SESSIONS = 250
+"""`SurvivorBookConfig.min_listing_sessions`'s default, which the adapter passes through."""
+
+
 def age(
     listed_on: date | None,
     day: date,
     *,
     between: Callable[[date, date], int] = sessions_between,
+    lookback: int = MIN_LISTING_SESSIONS,
 ) -> int | None:
     return listing_age_sessions(
         listed_on=listed_on,
         calendar_first=CALENDAR.horizon.first_date,
         day=day,
         sessions_between=between,
+        required_lookback=lookback,
     )
 
 
@@ -438,8 +443,35 @@ def test_a_listing_before_the_calendar_starts_is_counted_from_the_calendar_start
 def test_a_truncated_count_exactly_at_the_threshold_is_accepted() -> None:
     # 250 weekdays from Wed 2020-01-01 end on Tue 2020-12-15 (day 350 of the leap year; Dec 1
     # is day 336 = 48 weeks = 240 weekdays, +Dec 2-4 = 243, +Dec 7-11 = 248, +Dec 14-15 = 250).
-    assert MIN_CALENDAR_LOOKBACK_SESSIONS == 250
-    assert age(date(2010, 1, 4), date(2020, 12, 15)) == 250
+    assert age(date(2010, 1, 4), date(2020, 12, 15), lookback=250) == 250
+
+
+def test_the_lookback_a_truncated_count_needs_is_the_callers_minimum_listing_age() -> None:
+    # Controller decision 3: the bound is `config.min_listing_sessions`, passed in, not a module
+    # constant. 100 weekdays from Wed 2020-01-01 is exactly 20 weeks, ending Tue 2020-05-19
+    # (2020-01-01 + 140 days = day 141 of a leap year = Wed 2020-05-20, so the 20th week's last
+    # weekday is the Tuesday before it).
+    listed_2010 = date(2010, 1, 4)
+    assert age(listed_2010, date(2020, 5, 19), lookback=100) == 100
+    with pytest.raises(ListingAgeHorizonError, match=r"only 100 sessions.*101"):
+        age(listed_2010, date(2020, 5, 19), lookback=101)
+    # The same day under the default minimum is refused: 100 sessions cannot show 250.
+    with pytest.raises(ListingAgeHorizonError, match=r"only 100 sessions.*250"):
+        age(listed_2010, date(2020, 5, 19))
+    # And 273 sessions (2021-01-15, see above) no longer suffice once the minimum is 274.
+    with pytest.raises(ListingAgeHorizonError, match=r"only 273 sessions.*274"):
+        age(listed_2010, date(2021, 1, 15), lookback=274)
+    assert age(listed_2010, date(2021, 1, 15), lookback=273) == 273
+
+
+def test_the_lookback_has_no_default_so_a_caller_cannot_forget_its_minimum() -> None:
+    with pytest.raises(TypeError, match="required_lookback"):
+        listing_age_sessions(  # type: ignore[call-arg]
+            listed_on=date(2010, 1, 4),
+            calendar_first=CALENDAR.horizon.first_date,
+            day=date(2021, 1, 15),
+            sessions_between=sessions_between,
+        )
 
 
 def test_a_truncated_count_below_the_threshold_is_refused_rather_than_understated() -> None:

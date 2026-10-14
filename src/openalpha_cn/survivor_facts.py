@@ -92,15 +92,6 @@ NameStatusReason = Literal[
   pending -- a genuine gap at the corpus's left edge (T3 2.4(ii)'s `before_first`).
 """
 
-MIN_CALENDAR_LOOKBACK_SESSIONS: Final[int] = 250
-"""How many sessions the calendar must show before a listing older than it may be counted.
-
-Equal to `SurvivorBookConfig.min_listing_sessions`'s default. `listing_age_sessions` has no
-configuration to read, so a registration that raises the minimum above this number would be
-under-protected by a truncated count; the caller that holds the configuration asserts
-`min_listing_sessions <= MIN_CALENDAR_LOOKBACK_SESSIONS`.
-"""
-
 _ST_WARNINGS: Final[frozenset[RiskWarning]] = frozenset(
     {RiskWarning.st, RiskWarning.star_st, RiskWarning.pt}
 )
@@ -276,18 +267,22 @@ def listing_age_sessions(
     calendar_first: date,
     day: date,
     sessions_between: Callable[[date, date], int],
+    required_lookback: int,
 ) -> int | None:
     """Open sessions from the listing day through `day`, both inclusive.
 
     `sessions_between(first, last)` counts the open sessions in the closed interval; with a
     `TradingCalendar` it is `len(calendar.trading_days_between(first, last))`.
+    `required_lookback` is the minimum listing age the screen will apply -- the adapter passes
+    `SurvivorBookConfig.min_listing_sessions` -- and has no default, so the bound a truncated
+    count is held to always follows the registration rather than a constant beside it.
 
     - `listed_on is None` (the registry has no listing row) gives `None`.
     - A listing after `day` has had no session yet and gives `0`.
     - A listing before `calendar_first` is counted from `calendar_first`: a lower bound on the
-      true age. It is returned only when it is at least `MIN_CALENDAR_LOOKBACK_SESSIONS`,
-      where the verdict "old enough" is exact; a shorter one raises `ListingAgeHorizonError`
-      rather than present a calendar artefact as a young security.
+      true age. It is returned only when it is at least `required_lookback`, where the verdict
+      "old enough" is exact; a shorter one raises `ListingAgeHorizonError` rather than present
+      a calendar artefact as a young security.
     """
     if listed_on is None:
         return None
@@ -301,11 +296,11 @@ def listing_age_sessions(
             f"{day.isoformat()}; a listing from {listed_on.isoformat()} cannot be aged from it"
         )
     available = sessions_between(calendar_first, day)
-    if available < MIN_CALENDAR_LOOKBACK_SESSIONS:
+    if available < required_lookback:
         raise ListingAgeHorizonError(
             f"the calendar shows only {available} sessions "
             f"({calendar_first.isoformat()}..{day.isoformat()}), fewer than the "
-            f"{MIN_CALENDAR_LOOKBACK_SESSIONS} needed to age a listing from "
+            f"{required_lookback} needed to age a listing from "
             f"{listed_on.isoformat()} that predates it; counting from its start would report "
             "an old security as a young one"
         )
