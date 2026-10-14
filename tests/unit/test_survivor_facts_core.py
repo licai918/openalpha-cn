@@ -29,8 +29,10 @@ from openalpha_cn.domain.trading_calendar import (
     build_trading_calendar,
 )
 from openalpha_cn.survivor_facts import (
+    MAIN_BOARD_PREFIXES,
     FactsDay,
     FactsNotes,
+    HeldStatus,
     ListingAgeHorizonError,
     SurvivorFactsError,
     assemble_fact,
@@ -633,9 +635,10 @@ def test_the_order_facts_are_assembled_in_does_not_change_the_set() -> None:
 # --- FactsNotes --------------------------------------------------------------------------
 
 
-def notes(**overrides: int) -> FactsNotes:
-    """A consistent set of counts: st 123 = 120 + 1 + 2, unknown 3 = 2 + 1."""
-    counts = {
+def notes(**overrides: object) -> FactsNotes:
+    """A consistent set of counts: st 123 = 120 + 1 + 2, unknown 3 = 2 + 1, and one code left
+    out for its board."""
+    counts: dict[str, object] = {
         "name_unknown_assumed_ordinary": 3,
         "suspended_without_bar": 47,
         "no_listing_row": 2,
@@ -648,9 +651,11 @@ def notes(**overrides: int) -> FactsNotes:
         "name_unknown_before_first": 1,
         "no_bar_within_carry": 4,
         "not_listed_with_bar": 5,
+        "unrecognised_board": 1,
+        "unrecognised_board_codes": ("303001.SZ",),
     }
     counts.update(overrides)
-    return FactsNotes(**counts)
+    return FactsNotes(**counts)  # type: ignore[arg-type]
 
 
 def test_the_notes_are_a_frozen_set_of_counts() -> None:
@@ -669,7 +674,9 @@ def test_the_notes_are_a_frozen_set_of_counts() -> None:
         held.name_unknown_before_first,
         held.no_bar_within_carry,
         held.not_listed_with_bar,
-    ) == (3, 47, 2, 1, 123, 120, 1, 2, 2, 1, 4, 5)
+        held.unrecognised_board,
+        held.unrecognised_board_codes,
+    ) == (3, 47, 2, 1, 123, 120, 1, 2, 2, 1, 4, 5, 1, ("303001.SZ",))
     with pytest.raises(FrozenInstanceError):
         held.st = 0  # type: ignore[misc]
     assert held == notes()
@@ -689,12 +696,14 @@ def test_the_tally_counts_each_reason_once_and_adds_the_parts_up() -> None:
     ]
     random.Random(20261013).shuffle(reasons)
 
+    # The codes left out for their board are named, ascending, and counted.
     tallied = FactsNotes.tally(
         reasons=reasons,
         suspended_without_bar=7,
         no_listing_row=1,
         no_bar_within_carry=2,
         not_listed_with_bar=3,
+        unrecognised_board_codes=["303002.SZ", "303001.SZ"],
     )
 
     assert tallied == FactsNotes(
@@ -710,6 +719,8 @@ def test_the_tally_counts_each_reason_once_and_adds_the_parts_up() -> None:
         name_unknown_before_first=2,
         no_bar_within_carry=2,
         not_listed_with_bar=3,
+        unrecognised_board=2,
+        unrecognised_board_codes=("303001.SZ", "303002.SZ"),
     )
 
 
@@ -720,6 +731,7 @@ def test_an_empty_day_tallies_to_zero_everywhere() -> None:
         no_listing_row=0,
         no_bar_within_carry=0,
         not_listed_with_bar=0,
+        unrecognised_board_codes=(),
     ) == notes(
         name_unknown_assumed_ordinary=0,
         suspended_without_bar=0,
@@ -733,6 +745,8 @@ def test_an_empty_day_tallies_to_zero_everywhere() -> None:
         name_unknown_before_first=0,
         no_bar_within_carry=0,
         not_listed_with_bar=0,
+        unrecognised_board=0,
+        unrecognised_board_codes=(),
     )
 
 
@@ -748,6 +762,11 @@ def test_an_empty_day_tallies_to_zero_everywhere() -> None:
         {"delisting": -1},
         {"no_bar_within_carry": -1},
         {"not_listed_with_bar": -1},
+        {"unrecognised_board": -1},
+        {"unrecognised_board": 2},  # one code named, two counted
+        {"unrecognised_board": 0},  # one code named, none counted
+        {"unrecognised_board": 2, "unrecognised_board_codes": ("303002.SZ", "303001.SZ")},
+        {"unrecognised_board": 2, "unrecognised_board_codes": ("303001.SZ", "303001.SZ")},
     ],
     ids=[
         "st-total",
@@ -759,9 +778,14 @@ def test_an_empty_day_tallies_to_zero_everywhere() -> None:
         "negative-delisting",
         "negative-no-bar-within-carry",
         "negative-not-listed-with-bar",
+        "negative-unrecognised-board",
+        "board-count-over-codes",
+        "board-count-under-codes",
+        "board-codes-unsorted",
+        "board-codes-repeated",
     ],
 )
-def test_counts_that_do_not_add_up_are_refused(bad: dict[str, int]) -> None:
+def test_counts_that_do_not_add_up_are_refused(bad: dict[str, object]) -> None:
     with pytest.raises(SurvivorFactsError):
         notes(**bad)
 
@@ -774,7 +798,16 @@ def test_the_tally_refuses_a_reason_it_does_not_know() -> None:
             no_listing_row=0,
             no_bar_within_carry=0,
             not_listed_with_bar=0,
+            unrecognised_board_codes=(),
         )
+
+
+def test_the_main_board_prefixes_are_the_eight_t8_measured() -> None:
+    # T8's board table: SH 600/601/603/605 and SZ 000/001/002/003. Growing the set is a
+    # decision (`MAIN_BOARD_PREFIXES`' docstring), so it changes this test with it.
+    assert frozenset({"600", "601", "603", "605", "000", "001", "002", "003"}) == (
+        MAIN_BOARD_PREFIXES
+    )
 
 
 # --- FactsDay ----------------------------------------------------------------------------
@@ -785,12 +818,13 @@ EMPTY_NOTES = FactsNotes.tally(
     no_listing_row=0,
     no_bar_within_carry=0,
     not_listed_with_bar=0,
+    unrecognised_board_codes=(),
 )
 
 
 def day_of(*facts: SecurityFacts, **overrides: object) -> FactsDay:
-    """A day over `facts` whose counts are right unless overridden: the main board only, and
-    every main-board row with all its values scored."""
+    """A day over `facts` whose counts are right unless overridden: the main board only, every
+    main-board row with all its values scored, and nothing held."""
     allowed = [fact for fact in facts if fact.board == "main"]
     arguments: dict[str, object] = {
         "session": DAY,
@@ -799,6 +833,8 @@ def day_of(*facts: SecurityFacts, **overrides: object) -> FactsDay:
         "boards": ("main",),
         "universe_size": len(allowed),
         "scored_size": sum(1 for fact in allowed if None not in fact.oriented_values),
+        "held": (),
+        "held_status": (),
     }
     arguments.update(overrides)
     return FactsDay(**arguments)  # type: ignore[arg-type]
@@ -860,3 +896,100 @@ def test_counts_that_do_not_match_the_rows_are_refused(
 ) -> None:
     with pytest.raises(SurvivorFactsError, match=match):
         day_of(*FOUR, **overrides)
+
+
+# --- FactsDay: what became of every held code ------------------------------------------------
+
+
+def held_day(*statuses: tuple[str, str], **overrides: object) -> FactsDay:
+    """`FOUR`'s day holding the codes of `statuses`, each with its status, in the order given."""
+    arguments: dict[str, object] = {
+        "held": tuple(code for code, _ in statuses),
+        "held_status": tuple(
+            HeldStatus(ts_code=code, status=status)  # type: ignore[arg-type]
+            for code, status in statuses
+        ),
+    }
+    arguments.update(overrides)
+    return day_of(*FOUR, **arguments)
+
+
+def test_a_day_names_every_held_code_and_what_became_of_it() -> None:
+    # MAIN_A (600001.SH) has a row; 600009.SH, 600010.SH, 600011.SH and 600012.SH have none.
+    # A code the registry has no listing row for may have one (a bar on the day: aged 0) or not.
+    day = held_day(
+        ("600001.SH", "row"),
+        ("600009.SH", "no_bar_in_reach"),
+        ("600010.SH", "not_listed"),
+        ("600011.SH", "not_in_registry"),
+        ("600012.SH", "board_unrecognised"),
+    )
+
+    assert day.held == ("600001.SH", "600009.SH", "600010.SH", "600011.SH", "600012.SH")
+    assert [status.status for status in day.held_status] == [
+        "row",
+        "no_bar_in_reach",
+        "not_listed",
+        "not_in_registry",
+        "board_unrecognised",
+    ]
+    assert held_day(("600002.SH", "not_in_registry")).held_status[0].status == "not_in_registry"
+
+
+def test_a_day_holding_nothing_has_no_held_status() -> None:
+    day = day_of(*FOUR)
+
+    assert (day.held, day.held_status) == ((), ())
+
+
+@pytest.mark.parametrize(
+    ("statuses", "overrides", "match"),
+    [
+        # `held` must be ascending, each code once.
+        ((("600002.SH", "row"), ("600001.SH", "row")), {}, "held"),
+        ((("600001.SH", "row"), ("600001.SH", "row")), {}, "held"),
+        # `held_status` must cover exactly `held`, in its order.
+        ((("600001.SH", "row"),), {"held": ("600001.SH", "600002.SH")}, "held_status"),
+        ((("600001.SH", "row"), ("600002.SH", "row")), {"held": ("600001.SH",)}, "held_status"),
+        (
+            (("600001.SH", "row"), ("600002.SH", "row")),
+            {
+                "held_status": (
+                    HeldStatus(ts_code="600002.SH", status="row"),
+                    HeldStatus(ts_code="600001.SH", status="row"),
+                )
+            },
+            "held_status",
+        ),
+        # "row" exactly when the code has one; only a code not in the registry may have a row
+        # and another status.
+        ((("600009.SH", "row"),), {}, "600009.SH"),
+        ((("600001.SH", "no_bar_in_reach"),), {}, "600001.SH"),
+        ((("600001.SH", "not_listed"),), {}, "600001.SH"),
+        ((("600001.SH", "board_unrecognised"),), {}, "600001.SH"),
+    ],
+    ids=[
+        "held-unsorted",
+        "held-repeated",
+        "status-missing",
+        "status-extra",
+        "status-out-of-order",
+        "row-without-a-row",
+        "no-bar-with-a-row",
+        "not-listed-with-a-row",
+        "board-with-a-row",
+    ],
+)
+def test_held_codes_and_their_statuses_that_do_not_match_the_rows_are_refused(
+    statuses: tuple[tuple[str, str], ...], overrides: dict[str, object], match: str
+) -> None:
+    with pytest.raises(SurvivorFactsError, match=match):
+        held_day(*statuses, **overrides)
+
+
+def test_a_held_status_outside_the_vocabulary_is_refused_and_a_status_is_frozen() -> None:
+    with pytest.raises(ValidationError):
+        HeldStatus(ts_code="600001.SH", status="sold")  # type: ignore[arg-type]
+    status = HeldStatus(ts_code="600001.SH", status="row")
+    with pytest.raises(ValidationError):
+        status.status = "not_listed"

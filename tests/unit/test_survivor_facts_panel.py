@@ -124,6 +124,7 @@ from openalpha_cn.survivor_facts import (
     FactsCoverageError,
     FactsDay,
     FactsNotes,
+    MalformedHeldCodeError,
     MissingFactorBuildError,
     SurvivorFactsError,
     build_facts_day,
@@ -243,7 +244,11 @@ BSE_BEFORE_LISTING: Final[str] = "920001.BJ"
 2026-04-15 -- T3 3.2's `.BJ` shape, a bar before the registered listing date. Its listing row is
 published at that day's midnight, so a read before it has never heard of the code."""
 BSE_LISTING_INDEX: Final[int] = 72
-EXTRA: Final[tuple[str, ...]] = (GROWTH_FIVE_PERCENT, BSE_BEFORE_LISTING)
+UNRECOGNISED_PREFIX: Final[str] = "303001.SZ"
+"""`EXTENDED` only: a prefix no board has yet, shaped as a future ChiNext one (ChiNext's 20% band,
+listed before the calendar, trading every session). `security_board` files a prefix it does not
+know under the main board."""
+EXTRA: Final[tuple[str, ...]] = (GROWTH_FIVE_PERCENT, BSE_BEFORE_LISTING, UNRECOGNISED_PREFIX)
 """The securities only `EXTENDED` holds, in the order they were added: `j` = 44, 45, ..."""
 
 FACTORS: Final[tuple[str, ...]] = (
@@ -385,7 +390,7 @@ def band_ratio(code: str, index: int) -> float:
         return 0.05
     if code == ST_PENDING and index >= 70:
         return 0.05
-    if code in (CHINEXT, CHINEXT_302, STAR):
+    if code in (CHINEXT, CHINEXT_302, STAR, UNRECOGNISED_PREFIX):
         return 0.20
     if code == BSE_BEFORE_LISTING:
         return 0.30
@@ -913,6 +918,8 @@ def fingerprint(day: FactsDay) -> str:
             "boards": list(day.boards),
             "universe_size": day.universe_size,
             "scored_size": day.scored_size,
+            "held": list(day.held),
+            "held_status": [status.model_dump(mode="json") for status in day.held_status],
         },
         sort_keys=True,
     )
@@ -1034,6 +1041,36 @@ def test_a_five_percent_band_off_the_main_board_does_not_make_a_security_st(
     assert facts[GROWTH_FIVE_PERCENT].special_treatment is False
     assert facts[ST_BY_BAND].special_treatment is True
     assert day.notes.st_by_band == 1  # ST_BY_BAND alone
+
+
+def test_a_code_filed_under_the_main_board_by_default_gets_no_row_and_is_named(
+    extended_store: PanelStore,
+) -> None:
+    # Brief item 8. `security_board` files `303001.SZ` under the main board because it does not
+    # know the prefix -- the shape of the `302*` defect, again. A main-board-only book would
+    # have every reason to buy it (old enough, trading, every value, a 20% band that is not ST).
+    # Only the eight prefixes T8 measured count as main board here: it has no row, is not in
+    # the coverage guard's 38, and is counted and named. With no row it is never screened, so it
+    # can never be bought.
+    day = read_day(extended_store)
+
+    assert UNRECOGNISED_PREFIX not in {fact.ts_code for fact in day.facts}
+    assert UNRECOGNISED_PREFIX not in {
+        verdict.ts_code for verdict in screen(day.facts, CONFIG).verdicts
+    }
+    assert (day.universe_size, day.scored_size) == (38, 36)
+    assert day.notes.unrecognised_board == 1
+    assert day.notes.unrecognised_board_codes == (UNRECOGNISED_PREFIX,)
+
+
+def test_a_held_code_on_an_unrecognised_board_is_told_so(extended_store: PanelStore) -> None:
+    day = read_day(extended_store, held=(UNRECOGNISED_PREFIX, GROWTH_FIVE_PERCENT))
+
+    assert {status.ts_code: status.status for status in day.held_status} == {
+        UNRECOGNISED_PREFIX: "board_unrecognised",
+        GROWTH_FIVE_PERCENT: "row",
+    }
+    assert UNRECOGNISED_PREFIX not in {fact.ts_code for fact in day.facts}
 
 
 def test_the_extended_panels_extra_securities_change_no_row_of_the_frame(
@@ -1204,6 +1241,8 @@ def test_the_notes_count_every_assumption_of_the_day(full_store: PanelStore) -> 
         name_unknown_before_first=1,
         no_bar_within_carry=1,
         not_listed_with_bar=1,
+        unrecognised_board=0,
+        unrecognised_board_codes=(),
     )
 
 
@@ -1315,6 +1354,111 @@ def test_held_codes_given_as_one_string_are_refused(full_store: PanelStore) -> N
     # `"600605.SH"` is a collection of ten one-character codes, none of which is held.
     with pytest.raises(SurvivorFactsError, match="held"):
         read_day(full_store, held=HALTED)
+
+
+NOT_IN_REGISTRY: Final[str] = "600999.SH"
+"""A well-spelled code no panel here has heard of: no listing row, no bar."""
+
+
+def test_every_held_code_is_told_what_became_of_it(full_store: PanelStore) -> None:
+    # Re-review G and brief item 6: the caller decides per held code, so the day says, for each
+    # one, why it has a row or why not. Passed unsorted and with a repeat; given back sorted,
+    # once each. UNREGISTERED keeps its row (a bar today, aged 0) and is `not_in_registry` all
+    # the same: the caller refuses a day holding a code the registry has no row for.
+    unheld = read_day(full_store)
+    day = read_day(
+        full_store,
+        held=[
+            NOT_IN_REGISTRY,
+            HALTED,
+            NEVER_TRADED,
+            DELISTED,
+            ORDINARY[0],
+            DELISTED_WITH_BARS,
+            UNREGISTERED,
+            HALTED,
+        ],
+    )
+
+    assert day.held == tuple(
+        sorted(
+            {
+                NOT_IN_REGISTRY,
+                HALTED,
+                NEVER_TRADED,
+                DELISTED,
+                ORDINARY[0],
+                DELISTED_WITH_BARS,
+                UNREGISTERED,
+            }
+        )
+    )
+    assert {status.ts_code: status.status for status in day.held_status} == {
+        ORDINARY[0]: "row",
+        HALTED: "row",
+        NEVER_TRADED: "no_bar_in_reach",
+        DELISTED: "not_listed",
+        DELISTED_WITH_BARS: "not_listed",
+        UNREGISTERED: "not_in_registry",
+        NOT_IN_REGISTRY: "not_in_registry",
+    }
+    assert [status.ts_code for status in day.held_status] == list(day.held)
+    assert {fact.ts_code: fact for fact in day.facts}[UNREGISTERED].listed_sessions == 0
+    assert (day.facts, day.notes) == (unheld.facts, unheld.notes)
+    assert (unheld.held, unheld.held_status) == ((), ())
+
+
+def test_the_held_codes_are_part_of_the_days_bytes(full_store: PanelStore) -> None:
+    # Holding HALTED changes no fact here (its last bar is inside the bound either way), and
+    # the day still differs: `held` is an input the caller records with the day and passes
+    # unchanged to any re-read.
+    held = read_day(full_store, held=(HALTED,))
+    unheld = read_day(full_store)
+
+    assert held.facts == unheld.facts
+    assert fingerprint(held) != fingerprint(unheld)
+    assert fingerprint(read_day(full_store, held=(HALTED,), as_of=LATER)) == fingerprint(held)
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "600605.sh",  # lower case
+        " 600605.SH",  # padded
+        "600605.SH ",
+        "600605.SH\n",  # a trailing newline (`$` would let it through)
+        "600605",  # the bare six digits
+        "60605.SH",
+        "600605.SS",  # another vendor's suffix
+        "\uff16\uff10\uff10\uff16\uff10\uff15.SH",  # full-width digits (`\d` would admit them)
+        "",
+    ],
+    ids=[
+        "lower-case",
+        "leading-space",
+        "trailing-space",
+        "trailing-newline",
+        "bare-digits",
+        "five-digits",
+        "other-suffix",
+        "full-width",
+        "empty",
+    ],
+)
+def test_a_held_code_spelled_wrongly_is_refused_by_name(full_store: PanelStore, code: str) -> None:
+    # Re-review Minor 8. A misspelled holding matches no security, so it would be read as not
+    # held: its look-back bounded, and nothing in the day would say that it is a holding.
+    with pytest.raises(MalformedHeldCodeError, match=re.escape(repr(code))):
+        read_day(full_store, held=(HALTED, code))
+
+
+def test_a_held_code_that_is_not_a_string_is_refused_by_name(full_store: PanelStore) -> None:
+    with pytest.raises(MalformedHeldCodeError, match="600605"):
+        read_day(full_store, held=(600605,))
+
+
+def test_the_malformed_held_code_error_is_a_named_facts_error() -> None:
+    assert issubclass(MalformedHeldCodeError, SurvivorFactsError)
 
 
 def test_a_coverage_exactly_at_the_threshold_is_accepted(coverage_store: PanelStore) -> None:

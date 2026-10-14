@@ -28,6 +28,15 @@ listing is "never heard of" (a row aged 0) to a read before that day and "known,
 row, counted) to a read after it: two reads of one signal day differ by that row and those two
 counts.
 
+**A main board the adapter recognises.** `backtest.execution.security_board` files every prefix
+it does not recognise under the main board, which fails open for a main-board-only book: a new
+ChiNext prefix would be bought as main board, as `302*` once was. So a code counts as main board
+here only when `security_board` says so **and** its prefix is in `MAIN_BOARD_PREFIXES`; one it
+calls main with any other prefix gets no row, and is counted and named
+(`FactsNotes.unrecognised_board`, `unrecognised_board_codes`). An excluded code is counted once,
+by the first rule that excludes it: not listed (or not in the universe at all), then the board,
+then no bar in reach.
+
 - **A halted security with no bar still gets its row** (T6/T7 0(d)): `suspended=True`, its last
   close, and the mean amount of its last 20 bars. Without the row the kernel would sell a halted
   holding as unassessed instead of freezing it.
@@ -40,11 +49,16 @@ counts.
   counted as `FactsNotes.no_bar_within_carry`. Nothing is lost by that: such a security is not
   held, and a row could only have said `suspended`, which keeps it out of every population the
   screen ranks.
-- **A held code with no row is the caller's to refuse.** A held code that is listed on the day
-  and has never had a bar in the panel's reach has no close to carry, gets no row and is counted
-  in `no_bar_within_carry`; the kernel would sell it as unassessed. The caller (the daily task)
-  must refuse such a day by name. A held code that is *not* listed on the day (delisted) has no
-  row on purpose: the kernel sells it.
+- **Every held code is told what became of it** (`FactsDay.held_status`), because the caller
+  acts on each one: `row` -- it has a fact row; `no_bar_in_reach` -- listed, and never a bar
+  since its listing or the panel's first session, so no close to carry and no row (the kernel
+  would sell it as unassessed: the caller refuses the day by name); `not_listed` -- the registry
+  knows it and does not list it on the day (delisted), no row on purpose, so the kernel sells
+  it; `not_in_registry` -- the registry has no listing row for it at all, whether or not a bar
+  on the day gave it a row aged 0 (the caller refuses the day by name: a typo or a restated
+  code); `board_unrecognised` -- see above, no row. `held` itself is part of the day, spelled
+  exactly (`MalformedHeldCodeError` otherwise): a misspelled holding would match nothing and
+  pass as unheld.
 - **A trading security's `avg_amount`** is the mean of its bars over the 20 sessions ending on
   the signal day (T8's `a20`). **`suspended`** is "no bar", or a halt through the close
   (`backtest.execution.suspended_at_the_close`).
@@ -109,6 +123,7 @@ with a named error instead of being reported as a young security.
 """
 
 import math
+import re
 from collections import Counter
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields
@@ -118,6 +133,8 @@ from fractions import Fraction
 from itertools import pairwise
 from types import MappingProxyType
 from typing import Final, Literal, get_args
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from openalpha_cn.backtest.execution import security_board, suspended_at_the_close
 from openalpha_cn.backtest.factor_ic import TIER_ADMITTED_CODES
@@ -208,6 +225,46 @@ class MissingFactorBuildError(SurvivorFactsError):
     """A composite factor has no processed build at the signal day's instant at all."""
 
 
+class MalformedHeldCodeError(SurvivorFactsError):
+    """A held code is not spelled as a security code, so it could match no security."""
+
+
+HeldStatusValue = Literal[
+    "row", "no_bar_in_reach", "not_listed", "not_in_registry", "board_unrecognised"
+]
+"""What became of one held code on the signal day; see `HeldStatus`."""
+
+_HELD_STATUSES_WITH_A_ROW: Final[frozenset[str]] = frozenset({"row", "not_in_registry"})
+"""The statuses a held code with a fact row can have: `not_in_registry` is about the registry,
+not the row, and a code it has never heard of has one when it has a bar on the day."""
+
+
+class HeldStatus(BaseModel):
+    """What became of one held code on the signal day; `FactsDay.held_status` has one each.
+
+    - `row`: the code has a fact row, whatever the screen will say of it.
+    - `no_bar_in_reach`: the registry lists it on the day and there is no bar of it back to its
+      listing day or the panel's first session -- no close to carry, so no row. The kernel would
+      sell it as unassessed; the caller refuses the day by name.
+    - `not_listed`: the registry knows it and does not list it on the day (delisted, or not yet
+      listed) -- no row on purpose; the kernel sells it.
+    - `not_in_registry`: the registry has no listing row for it at all. With a bar on the day it
+      keeps the row such a code always gets (aged 0, `listing_too_recent`); without one it has
+      none. Either way the caller refuses the day by name: a holding the registry has never heard
+      of is a typo or a restated code, not a security to sell.
+    - `board_unrecognised`: `security_board` calls it main board and its prefix is not in
+      `MAIN_BOARD_PREFIXES` -- no row.
+
+    The statuses are tried in that order after `not_in_registry`, which comes first: a code the
+    registry has no row for is `not_in_registry` whatever else is true of it.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    ts_code: str = Field(min_length=1)
+    status: HeldStatusValue
+
+
 AMOUNT_WINDOW_SESSIONS: Final[int] = 20
 """The sessions a trailing average amount is taken over (design section 6; T8's `a20`)."""
 
@@ -222,14 +279,35 @@ FIVE_PERCENT_BAND: Final[float] = 0.05
 BAND_TOLERANCE: Final[float] = 0.0051
 """A main-board band within this of 5% is the exchange's own special-treatment band (T3 7)."""
 
+MAIN_BOARD_PREFIXES: Final[frozenset[str]] = frozenset(
+    {"600", "601", "603", "605", "000", "001", "002", "003"}
+)
+"""The code prefixes of the main board, as T8 measured it
+(`docs/research/p7-step0-validation/T8-main-board-remeasure.md`, its board table: SH
+`600/601/603/605`, SZ `000/001/002/003`).
+
+A code counts as main board here only when `security_board` says "main" **and** its first three
+digits are one of these. `security_board` answers "main" for any prefix it does not recognise, so
+without this a main-board-only book would buy a new board's codes as main board, as it once
+would have bought `302*`. Growing this set is a decision, not a fix: a prefix joins it once the
+exchange's own classification of it has been checked, and the test that pins the set changes
+with it."""
+
+_SECURITY_CODE: Final[re.Pattern[str]] = re.compile(r"[0-9]{6}\.(?:SH|SZ|BJ)")
+"""How a held code must be spelled, matched whole (`fullmatch`): six ASCII digits, a dot and the
+exchange. `[0-9]` and `fullmatch` rather than `\\d` and `$`, which would admit non-ASCII digits
+and a trailing newline."""
+
 
 @dataclass(frozen=True, slots=True)
 class FactsNotes:
     """What the adapter assumed or noticed while it built one day's facts.
 
-    Counts only: they land in the daily log so an unusual day shows up as a number, not as a
-    silent change in who was eligible. `st` and `name_unknown_assumed_ordinary` are totals, and
-    each is refused unless its parts add up to it; build the name counts with `tally`.
+    Counts, and the codes behind one of them: they land in the daily log so an unusual day shows
+    up as a number, not as a silent change in who was eligible. `st` and
+    `name_unknown_assumed_ordinary` are totals, and each is refused unless its parts add up to
+    it; `unrecognised_board` is refused unless it counts `unrecognised_board_codes`, which must be
+    ascending, each code once. Build the notes with `tally`.
 
     The notes count rows on **every** board; `FactsDay.universe_size` and `scored_size`, which
     the coverage guard compares, count only the rows on the boards the book may trade.
@@ -263,11 +341,30 @@ class FactsNotes:
     """Securities with a daily bar on the day that the registry knows and does not list on it --
     delisted, or priced before their listing date -- and which therefore have no fact row. A
     count, not a row: no fact changes with it."""
+    unrecognised_board: int
+    """Securities `security_board` calls main board whose prefix is not in
+    `MAIN_BOARD_PREFIXES`, which therefore have no fact row; `unrecognised_board_codes` names
+    them."""
+    unrecognised_board_codes: tuple[str, ...]
+    """The codes `unrecognised_board` counts, ascending: a new prefix is a decision to take, so
+    the log names it."""
 
     def __post_init__(self) -> None:
         for item in fields(self):
-            if getattr(self, item.name) < 0:
+            value = getattr(self, item.name)
+            if isinstance(value, int) and value < 0:
                 raise SurvivorFactsError(f"{item.name} is a count and cannot be negative")
+        codes = self.unrecognised_board_codes
+        if not isinstance(codes, tuple) or list(codes) != sorted(set(codes)):
+            raise SurvivorFactsError(
+                f"unrecognised_board_codes must be a tuple ascending by code, each code once, "
+                f"not {codes!r}"
+            )
+        if self.unrecognised_board != len(codes):
+            raise SurvivorFactsError(
+                f"unrecognised_board is {self.unrecognised_board} but {len(codes)} code(s) are "
+                f"named: {codes}"
+            )
         st_parts = self.st_by_name + self.st_pending + self.st_by_band
         if st_parts != self.st:
             raise SurvivorFactsError(
@@ -291,8 +388,11 @@ class FactsNotes:
         no_listing_row: int,
         no_bar_within_carry: int,
         not_listed_with_bar: int,
+        unrecognised_board_codes: Iterable[str],
     ) -> "FactsNotes":
-        """One day's notes from every fact's name-status reason and the four other counts."""
+        """One day's notes from every fact's name-status reason, the four other counts and the
+        codes left out for their board (named ascending, and counted)."""
+        board_codes = tuple(sorted(unrecognised_board_codes))
         counted = Counter(reasons)
         unrecognised = sorted(set(counted) - set(_NAME_STATUS_REASONS))
         if unrecognised:
@@ -315,6 +415,8 @@ class FactsNotes:
             name_unknown_before_first=counted["unknown_before_first"],
             no_bar_within_carry=no_bar_within_carry,
             not_listed_with_bar=not_listed_with_bar,
+            unrecognised_board=len(board_codes),
+            unrecognised_board_codes=board_codes,
         )
 
 
@@ -491,7 +593,10 @@ class FactsDay:
     It checks its own counts on construction and refuses with `SurvivorFactsError` a day whose
     rows are not strictly ascending by `ts_code` (so each code once), whose `universe_size` is
     not the number of rows on `boards`, or whose `scored_size` is negative or more than the rows
-    on `boards` carrying every factor value (so never more than `universe_size`).
+    on `boards` carrying every factor value (so never more than `universe_size`). It refuses a
+    `held` that is not strictly ascending, a `held_status` that is not one entry per code of
+    `held` in its order, a `row` status for a code with no row, and any status but `row` or
+    `not_in_registry` for a code with one.
     """
 
     session: date
@@ -507,8 +612,18 @@ class FactsDay:
     scored_size: int
     """Of those, the rows whose security has a bar on the day and every factor value -- the
     coverage guard's numerator. A carried row (no bar) is never scored."""
+    held: tuple[str, ...]
+    """The codes the caller passed as `held`, ascending, each once. They change the day (a held
+    code's look-back is not bounded), so they are part of its bytes: the caller records them with
+    the day's inputs and passes the same codes to any re-read of the day."""
+    held_status: tuple[HeldStatus, ...]
+    """What became of each code of `held`, one entry each in `held`'s order; see `HeldStatus`."""
 
     def __post_init__(self) -> None:
+        self._check_rows()
+        self._check_held()
+
+    def _check_rows(self) -> None:
         codes = [fact.ts_code for fact in self.facts]
         out_of_order = [(earlier, later) for earlier, later in pairwise(codes) if later <= earlier]
         if out_of_order:
@@ -531,6 +646,30 @@ class FactsDay:
                 "value"
             )
 
+    def _check_held(self) -> None:
+        if list(self.held) != sorted(set(self.held)):
+            raise SurvivorFactsError(
+                f"held must be strictly ascending, each code once, not {self.held}"
+            )
+        described = tuple(status.ts_code for status in self.held_status)
+        if described != self.held:
+            raise SurvivorFactsError(
+                f"held_status must give one status per held code, in held's order: held is "
+                f"{self.held}, held_status describes {described}"
+            )
+        rows = {fact.ts_code for fact in self.facts}
+        for status in self.held_status:
+            has_row = status.ts_code in rows
+            if status.status == "row" and not has_row:
+                raise SurvivorFactsError(
+                    f"held code {status.ts_code} has the status 'row' and no fact row"
+                )
+            if has_row and status.status not in _HELD_STATUSES_WITH_A_ROW:
+                raise SurvivorFactsError(
+                    f"held code {status.ts_code} has a fact row and the status "
+                    f"{status.status!r}, which says it has none"
+                )
+
 
 def build_facts_day(
     *,
@@ -550,16 +689,18 @@ def build_facts_day(
     Read-only. `factor_ids` must be `config.composite_factors` (the kernel pairs the values with
     them by position), `transform` the processed tier they were built under and `exchange` the
     calendar's; the three, `min_coverage` and `max_carry_sessions` come from the registration.
-    `held` is the book's current holdings: a held security halted for longer than
-    `max_carry_sessions` keeps its carried row, because its look-back is not bounded.
+    `held` is the book's current holdings, each spelled as a security code (six ASCII digits, a
+    dot, `SH`, `SZ` or `BJ`; `MalformedHeldCodeError` otherwise): a held security halted for
+    longer than `max_carry_sessions` keeps its carried row, because its look-back is not bounded.
 
-    Every listed security gets a row except one with no bar in reach -- for a code not in `held`
-    none within `max_carry_sessions` sessions, for a held code none at all since its listing or
-    the panel's first session -- which is counted in `FactsNotes.no_bar_within_carry`. **A held
-    code that is listed on the day and has no row must be refused by the caller, by name**: the
-    kernel would sell it as unassessed. (A held code that is not listed on the day -- delisted --
-    has no row on purpose, and is sold.) See the module docstring for each rule; it raises the
-    loaders' own refusals unchanged.
+    Every listed security gets a row except one on a board the adapter does not recognise
+    (`MAIN_BOARD_PREFIXES`) and one with no bar in reach -- for a code not in `held` none within
+    `max_carry_sessions` sessions, for a held code none at all since its listing or the panel's
+    first session -- which is counted in `FactsNotes.no_bar_within_carry`. `FactsDay.held_status`
+    says what became of every held code; **the caller refuses by name a day on which a held
+    code is `no_bar_in_reach` or `not_in_registry`**, and lets the kernel sell one that is
+    `not_listed`. See the module docstring for each rule; it raises the loaders' own refusals
+    unchanged.
     """
     if tuple(factor_ids) != config.composite_factors:
         raise SurvivorFactsError(
@@ -569,11 +710,7 @@ def build_facts_day(
     _require_coverage_threshold(min_coverage)
     if max_carry_sessions < 1:
         raise SurvivorFactsError(f"max_carry_sessions must be at least 1, not {max_carry_sessions}")
-    if isinstance(held, str):
-        raise SurvivorFactsError(
-            f"held must be a collection of codes, not the one string {held!r}, whose characters "
-            "would each be read as a code"
-        )
+    held_codes = _held_codes(held)
     published = session_publication_instant(session)
     if as_of < published:
         raise SurvivorFactsError(
@@ -591,9 +728,32 @@ def build_facts_day(
             exchange=exchange,
             min_coverage=min_coverage,
             max_carry_sessions=max_carry_sessions,
-            held=frozenset(held),
+            held=held_codes,
             published=published,
         )
+
+
+def _held_codes(held: Collection[str]) -> tuple[str, ...]:
+    """`held` ascending and each code once, or a refusal naming every misspelled code."""
+    if isinstance(held, str):
+        raise SurvivorFactsError(
+            f"held must be a collection of codes, not the one string {held!r}, whose characters "
+            "would each be read as a code"
+        )
+    malformed = sorted(
+        {
+            repr(code)
+            for code in held
+            if not isinstance(code, str) or _SECURITY_CODE.fullmatch(code) is None
+        }
+    )
+    if malformed:
+        raise MalformedHeldCodeError(
+            f"held code(s) {', '.join(malformed)} are not spelled as a security code -- six "
+            "digits, a dot and SH, SZ or BJ -- so each would match no security and the holding "
+            "would pass as not held"
+        )
+    return tuple(sorted(set(held)))
 
 
 def _read_facts_day(
@@ -607,7 +767,7 @@ def _read_facts_day(
     exchange: str,
     min_coverage: float,
     max_carry_sessions: int,
-    held: frozenset[str],
+    held: tuple[str, ...],
     published: datetime,
 ) -> FactsDay:
     calendar = load_trading_calendar(
@@ -644,14 +804,15 @@ def _read_facts_day(
     )
     history = calendar.trading_days_between(first, session)
     listed_on = {entry.ts_code: entry.listed_on for entry in registry.securities}
+    listed = frozenset(registry.listed_on(session))
     bars = _Walk(
         store=store,
         calendar=calendar,
         as_of=as_of,
         history=history,
-        listed=frozenset(registry.listed_on(session)),
+        listed=listed,
         listed_on=listed_on,
-        held=held,
+        held=frozenset(held),
         max_carry_sessions=max_carry_sessions,
     )
 
@@ -708,6 +869,7 @@ def _read_facts_day(
                 scored += 1
 
     require_coverage(scored_size=scored, universe_size=universe, min_coverage=min_coverage)
+    rows = frozenset(fact.ts_code for fact in facts)
     return FactsDay(
         session=session,
         facts=tuple(facts),
@@ -717,11 +879,46 @@ def _read_facts_day(
             no_listing_row=no_listing_row,
             no_bar_within_carry=no_bar,
             not_listed_with_bar=bars.not_listed_with_bar,
+            unrecognised_board_codes=bars.unrecognised_board,
         ),
         boards=config.boards,
         universe_size=universe,
         scored_size=scored,
+        held=held,
+        held_status=tuple(
+            HeldStatus(
+                ts_code=code,
+                status=_held_status(
+                    code,
+                    rows=rows,
+                    registered=listed_on.keys(),
+                    listed=listed,
+                    unrecognised_board=bars.unrecognised_board,
+                ),
+            )
+            for code in held
+        ),
     )
+
+
+def _held_status(
+    code: str,
+    *,
+    rows: Collection[str],
+    registered: Collection[str],
+    listed: Collection[str],
+    unrecognised_board: Collection[str],
+) -> HeldStatusValue:
+    """What became of one held code; the order of the tests is `HeldStatus`'s."""
+    if code not in registered:
+        return "not_in_registry"
+    if code in rows:
+        return "row"
+    if code not in listed:
+        return "not_listed"
+    if code in unrecognised_board:
+        return "board_unrecognised"
+    return "no_bar_in_reach"
 
 
 def _years_through(store: PanelStore, dataset: str, year: int) -> tuple[int, ...]:
@@ -767,6 +964,11 @@ def _oriented_column(
         for row in rows
         if row.coverage in admitted and row.value is not None
     }
+
+
+def _board_recognised(code: str) -> bool:
+    """False for a code `security_board` calls main board whose prefix is not a main-board one."""
+    return security_board(code) != "main" or code[:3] in MAIN_BOARD_PREFIXES
 
 
 def _band_is_five_percent(
@@ -817,7 +1019,13 @@ class _Walk:
         self.not_listed_with_bar = sum(
             1 for code in self.today if code in listed_on and code not in listed
         )
-        self.codes = tuple(sorted(listed | unregistered))
+        # A code `security_board` calls main board by default stays out too, named: it is not
+        # looked for, and gets no row.
+        universe = listed | unregistered
+        self.unrecognised_board = tuple(
+            sorted(code for code in universe if not _board_recognised(code))
+        )
+        self.codes = tuple(sorted(universe.difference(self.unrecognised_board)))
         trading = [code for code in self.codes if code in self.today]
         halted = [code for code in self.codes if code not in self.today]
         self.last_bar: dict[str, DailyBar] = {}
