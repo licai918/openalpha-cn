@@ -606,6 +606,27 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_ingest.session_publication_instant",
         }
     ),
+    "openalpha_cn.strategy_survivor_forward": frozenset(
+        {
+            # V2-P7-018. The survivor forward report's prediction layer. It reads nothing
+            # itself: the label reader, the prediction store and the index levels are handed in.
+            # It names the record vocabulary it witnesses records with -- P6's custody instant,
+            # its registration cutoff and its record lookup, and D2's binding of a record to the
+            # survivor configuration -- the book's session count its sample is drawn on, the
+            # protocol's benchmark, and the 16:30 rule a record matures by.
+            "panel_ingest.session_publication_instant",
+            "strategy_registration.SHANGHAI",
+            "strategy_registration.HeldRecordLookup",
+            "strategy_registration.RegisteredConfiguration",
+            "strategy_registration.StrategyRegistrationError",
+            "strategy_registration.registered_at",
+            "strategy_registration.registration_cutoff",
+            "strategy_survivor_market.PROTOCOL_BENCHMARK",
+            "strategy_survivor_market.SessionOrdinalError",
+            "strategy_survivor_market.SessionOrdinals",
+            "strategy_survivor_registration.survivor_record_is_bound",
+        }
+    ),
     "openalpha_cn.strategy_survivor_market": frozenset(
         {
             # V2-P7-009. The paper book's settlement inputs for one session: the bars and the
@@ -1025,6 +1046,13 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
                 "trade_cal",
             }
         ),
+    ),
+    "openalpha_cn.strategy_survivor_forward": DatasetReach(
+        # V2-P7-018. It names no dataset and reads none: the labels, the records and the
+        # benchmark's levels are the caller's reads, handed in, and nothing it takes across the
+        # seam is a loader -- the record vocabulary, the session count and the 16:30 rule.
+        named=frozenset(),
+        reached=frozenset(),
     ),
     "openalpha_cn.strategy_survivor_market": DatasetReach(
         # V2-P7-009. It names no dataset: it asks the catalog nothing before reading, and every
