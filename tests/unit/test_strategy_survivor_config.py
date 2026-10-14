@@ -37,6 +37,7 @@ from openalpha_cn.backtest.strategy_backtest import (
 )
 from openalpha_cn.domain.survivor_book import SurvivorBookConfig, survivor_config_digest
 from openalpha_cn.strategy_survivor import (
+    MAX_CARRY_SESSIONS,
     MAX_PANEL_CATCH_UP_SESSIONS,
     SURVIVOR_KIND,
     PaperLimitsConfig,
@@ -282,6 +283,15 @@ def test_a_carry_of_one_session_is_accepted_and_none_is_refused() -> None:
     assert "adapter.max_carry_sessions" in unreadable(registered(max_carry_sessions=0))
 
 
+def test_a_carry_of_a_thousand_sessions_is_accepted_and_more_is_refused() -> None:
+    """About four years of sessions: the design's 250 four times over. A carry longer than that
+    is a typo, not a choice, and is refused by name before it reaches the facts adapter."""
+    assert MAX_CARRY_SESSIONS == 1000
+    adapter = read_survivor_registration(registered(max_carry_sessions=1000), seed=SEED).adapter
+    assert adapter.max_carry_sessions == 1000
+    assert "adapter.max_carry_sessions" in unreadable(registered(max_carry_sessions=1001))
+
+
 def test_a_transform_this_build_does_not_declare_is_refused() -> None:
     message = unreadable(registered(transform="cross_section_rank/v1"))
     assert "adapter.transform" in message
@@ -365,6 +375,25 @@ def test_a_book_seed_that_is_not_the_registrations_own_contradicts_the_registrat
     assert issubclass(SurvivorRegistrationContradictionError, SurvivorRegistrationError)
     assert not issubclass(SurvivorRegistrationError, SurvivorRegistrationContradictionError)
     assert read_survivor_registration(registered(book=stored(other)), seed=SEED + 1).book == other
+
+
+# --- the composite factors ---------------------------------------------------------------------
+
+
+def test_a_composite_factor_this_build_does_not_declare_is_refused_at_registration() -> None:
+    """Otherwise the first evening's factor build is where it fails, every night, on a
+    registration frozen with it."""
+    unknown = SurvivorBookConfig(
+        seed=SEED,
+        composite_factors=("residual_vol_60/v1", "residual_vol_60/v2", "turnover_60"),
+    )
+
+    message = unreadable(registered(book=stored(unknown)))
+
+    assert "survivor_book.composite_factors" in message
+    assert "'residual_vol_60/v2'" in message
+    assert "'turnover_60'" in message
+    assert "'residual_vol_60/v1'" not in message
 
 
 # --- the paper book (decision D15) -------------------------------------------------------------

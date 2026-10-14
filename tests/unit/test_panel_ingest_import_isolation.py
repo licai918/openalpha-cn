@@ -560,11 +560,13 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
     ),
     "openalpha_cn.strategy_survivor": frozenset(
         {
-            # V2-P7-008. The survivor registration and its paper book: the adapter block's
-            # transform is checked against the transforms this build declares, and the paper
-            # book is built at the protocol's costs and slippage -- the P6 book's own constants,
-            # so the two books charge alike rather than by a third copy of the schedule. Three
-            # declarations; none reads a dataset.
+            # V2-P7-008. The survivor registration and its paper book: the book block's
+            # composite factors are checked against the factors this build declares and the
+            # adapter block's transform against its transforms, and the paper book is built at
+            # the protocol's costs and slippage -- the P6 book's own constants, so the two books
+            # charge alike rather than by a third copy of the schedule. Four declarations; none
+            # is a read.
+            "panel_factors.FACTOR_DEFINITIONS",
             "panel_factors.FACTOR_TRANSFORMS",
             "strategy_view.PROTOCOL_COSTS",
             "strategy_view.PROTOCOL_SLIPPAGE_RATE",
@@ -918,11 +920,23 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
         ),
     ),
     "openalpha_cn.strategy_survivor": DatasetReach(
-        # V2-P7-008. It names no dataset and reaches none: it reads a registration, not the
-        # panel, and the three names it takes across the seam are declarations -- the
-        # transforms this build declares and the protocol's costs and slippage rate.
+        # V2-P7-008. It names no dataset: it reads a registration, not the panel. What it
+        # reaches it reaches through `FACTOR_DEFINITIONS`, whose factors declare the datasets
+        # they are built from (`index_daily` for `residual_vol_60`'s market index); it asks the
+        # registry only which factor ids exist. The other three names it takes are the
+        # transforms and the protocol's costs and slippage rate, which reach none.
         named=frozenset(),
-        reached=frozenset(),
+        reached=frozenset(
+            {
+                "balancesheet",
+                "cashflow",
+                "daily",
+                "daily_basic",
+                "fina_indicator",
+                "income",
+                "index_daily",
+            }
+        ),
     ),
     "openalpha_cn.strategy_survivor_facts": DatasetReach(
         # V2-P7-016. It names the four datasets whose partitions it asks the catalog about

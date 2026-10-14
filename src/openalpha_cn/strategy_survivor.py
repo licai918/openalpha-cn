@@ -37,6 +37,9 @@ configuration with an identity nobody registered, so it is refused, naming the f
 back otherwise. A block written as that dump reads back to the `config_id` and the digest of the
 configuration it was dumped from.
 
+`composite_factors` is checked against the factors this build declares (`FACTOR_DEFINITIONS`), so
+a factor the build does not know is refused at step 1 instead of at step 4 of every evening.
+
 ## Why the daily command imports this module lazily
 
 `make_paper_portfolio` needs `backtest/paper.py`, and importing that module installs an audit
@@ -79,13 +82,14 @@ from openalpha_cn.backtest.multi_day import PortfolioLedger
 from openalpha_cn.backtest.paper import PaperPortfolio, slippage_folded_execution
 from openalpha_cn.backtest.portfolio import PortfolioLimits
 from openalpha_cn.domain.survivor_book import SurvivorBookConfig, survivor_config_digest
-from openalpha_cn.panel_factors import FACTOR_TRANSFORMS
+from openalpha_cn.panel_factors import FACTOR_DEFINITIONS, FACTOR_TRANSFORMS
 from openalpha_cn.strategy_view import PROTOCOL_COSTS, PROTOCOL_SLIPPAGE_RATE
 
 __all__ = [
     "ADAPTER_BLOCK",
     "BOOK_BLOCK",
     "KIND_KEY",
+    "MAX_CARRY_SESSIONS",
     "MAX_PANEL_CATCH_UP_SESSIONS",
     "REGISTRATION_KEYS",
     "SURVIVOR_KIND",
@@ -113,6 +117,10 @@ MAX_PANEL_CATCH_UP_SESSIONS: Final = 16
 (`daily_selection.DEFAULT_MAX_PANEL_CATCH_UP_SESSIONS` states the arithmetic), so an ordinary
 day's 16 plus 16 sessions is 96, the last such sum under the 100 the design sized a day against;
 17 would be 101. It bounds the part of a day that grows with missed sessions, nothing else."""
+
+MAX_CARRY_SESSIONS: Final = 1000
+"""The longest carry the adapter may register: about four years of sessions, four times the
+design's 250. A longer one is a typo rather than a choice, and is refused by name."""
 
 
 class SurvivorRegistrationError(ValueError):
@@ -185,7 +193,7 @@ class SurvivorAdapterConfig(BaseModel):
     exchange: Literal["SSE"]
     transform: StrictStr
     min_coverage: float = Field(gt=0, le=1, strict=True, allow_inf_nan=False)
-    max_carry_sessions: int = Field(ge=1, strict=True)
+    max_carry_sessions: int = Field(ge=1, le=MAX_CARRY_SESSIONS, strict=True)
     max_panel_catch_up_sessions: int = Field(ge=0, le=MAX_PANEL_CATCH_UP_SESSIONS, strict=True)
     benchmark: Literal["000905.SH"]
     prediction_horizon: Literal["20d"]
@@ -265,9 +273,10 @@ def read_survivor_registration(config: Mapping[str, Any], *, seed: int) -> Survi
     """The survivor registration `config` is, checked against the registration's own `seed`.
 
     Refuses (`SurvivorRegistrationError`) a kind other than `SURVIVOR_KIND`, a top-level key
-    missing or beside the three, a book or adapter block that does not validate, and a book block
-    that is not its own stored form; refuses (`SurvivorRegistrationContradictionError`) a book
-    `seed` other than `seed`. See the module docstring for each rule.
+    missing or beside the three, a book or adapter block that does not validate, a book block
+    that is not its own stored form and a composite factor this build does not declare; refuses
+    (`SurvivorRegistrationContradictionError`) a book `seed` other than `seed`. See the module
+    docstring for each rule.
     """
     kind = registration_kind(config)
     if kind != SURVIVOR_KIND:
@@ -300,6 +309,16 @@ def read_survivor_registration(config: Mapping[str, Any], *, seed: int) -> Survi
             "SurvivorBookConfig.model_dump(mode='json', exclude_computed_fields=True) verbatim: "
             "config_id addresses that form, and a re-typed spelling of the same values is not "
             "the form it addresses"
+        )
+    unknown = [
+        factor
+        for factor in book.composite_factors
+        if factor not in FACTOR_DEFINITIONS.qualified_keys
+    ]
+    if unknown:
+        raise SurvivorRegistrationError(
+            f"{BOOK_BLOCK}.composite_factors: {unknown} are not factors this build declares; "
+            "the survivor day builds each of them at step 4, and would refuse every evening"
         )
     adapter = _validated(SurvivorAdapterConfig, config[ADAPTER_BLOCK], ADAPTER_BLOCK)
     if book.seed != seed:
