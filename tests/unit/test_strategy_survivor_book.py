@@ -30,13 +30,16 @@ the frame has 44), which is what the functions' `transform` argument is for.
 
 from __future__ import annotations
 
+import dataclasses
+import errno
 import importlib
 import json
 import os
 import subprocess
 import sys
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -53,6 +56,7 @@ from test_survivor_facts_panel import (
     CONFIG,
     DELISTED,
     EXTENDED,
+    HALTED,
     IDENTITY,
     LATER,
     LISTED_LATER,
@@ -69,6 +73,7 @@ from test_survivor_facts_panel import (
     write_panel,
 )
 
+from openalpha_cn import strategy_survivor_book
 from openalpha_cn.backtest.multi_day import PortfolioLedger
 from openalpha_cn.backtest.paper import PaperPortfolio
 from openalpha_cn.backtest.paper_evening import CatchUpResult, PaperLedgerConflictError
@@ -99,6 +104,9 @@ from openalpha_cn.strategy_survivor_book import (
     PAPER_BOOK_LOCK,
     PAPER_BOOK_MARKER,
     SURVIVOR_BOOK_STEPS,
+    CatchUpStalledError,
+    PaperBookBusyError,
+    PaperBookLock,
     PaperHead,
     SurvivorDayError,
     SurvivorEvening,
@@ -113,7 +121,7 @@ from openalpha_cn.strategy_survivor_book import (
     settle_only,
     settlement_names,
 )
-from openalpha_cn.strategy_survivor_facts import FactsCoverageError, FactsDay
+from openalpha_cn.strategy_survivor_facts import FactsCoverageError, FactsDay, HeldStatus
 from openalpha_cn.strategy_survivor_market import SessionOrdinals
 
 D = Decimal
@@ -292,30 +300,45 @@ FACTS_ONLY_READS: Final[frozenset[str]] = frozenset({"stock_basic", "namechange"
 
 @dataclass(frozen=True)
 class Paper:
-    """One runtime directory's paper book: its snapshot store and its own ledger."""
+    """One runtime directory's paper book: its snapshot store, its own ledger, and the writer lock
+    this run holds on it."""
 
     root: Path
     store: FilePaperStateStore
     ledger: SQLitePortfolioLedger
+    lock: PaperBookLock
+
+
+@contextmanager
+def opened_paper(root: Path) -> Iterator[Paper]:
+    """The paper book at `root`, under its writer lock for the body -- as D5 holds it."""
+    with paper_book_lock(root) as lock:
+        yield Paper(
+            root=root,
+            store=FilePaperStateStore(root / "snapshots"),
+            ledger=open_paper_ledger(root / "ledger.sqlite3"),
+            lock=lock,
+        )
 
 
 @pytest.fixture
-def paper(tmp_path: Path) -> Paper:
-    root = tmp_path / "paper"
-    return Paper(
-        root=root,
-        store=FilePaperStateStore(root / "snapshots"),
-        ledger=open_paper_ledger(root / "ledger.sqlite3"),
-    )
+def paper(tmp_path: Path) -> Iterator[Paper]:
+    with opened_paper(tmp_path / "paper") as held:
+        yield held
+
+
+def tree(root: Path) -> dict[str, bytes]:
+    """The bytes of every file under `root`."""
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
 
 
 def files(paper: Paper) -> dict[str, bytes]:
-    """The bytes of every file under the paper directory -- snapshots, ledger, marker."""
-    found = {
-        path.relative_to(paper.root).as_posix(): path.read_bytes()
-        for path in sorted(paper.root.rglob("*"))
-        if path.is_file()
-    }
+    """The bytes of every file under the paper directory -- snapshots, ledger, marker, lock."""
+    found = tree(paper.root)
     assert "ledger.sqlite3" in found  # never a comparison of two empty listings
     return found
 
@@ -375,12 +398,17 @@ def head_of(
     index: int,
     registration: SurvivorRegistration = REGISTRATION,
     ordinals: SessionOrdinals = ORDINALS,
+    *,
+    config_id: str = CONFIG_ID,
 ) -> PaperHead:
     return paper_head(
         state_store=paper.store,
         registration=registration,
         ordinals=ordinals,
         session=SESSIONS[index],
+        paper_directory=paper.root,
+        config_id=config_id,
+        lock=paper.lock,
     )
 
 
@@ -408,6 +436,7 @@ def catch_up_through(
     registration: SurvivorRegistration = REGISTRATION,
     factory: Callable[[PortfolioLedger], PaperPortfolio] = make_portfolio,
     ordinals: SessionOrdinals = ORDINALS,
+    on_settled: Callable[[CatchUpResult], None] | None = None,
 ) -> tuple[CatchUpResult, ...]:
     """Catch the book up through the session of frame index `through`."""
     return catch_up(
@@ -420,6 +449,32 @@ def catch_up_through(
         through_index=ORDINALS.index_of(SESSIONS[through]),
         as_of=AS_OF,
         make_portfolio=factory,
+        lock=paper.lock,
+        on_settled=on_settled,
+        transform=IDENTITY,
+    )
+
+
+def settle_only_at(
+    panel: PanelStore,
+    paper: Paper,
+    index: int,
+    *,
+    on_settled: Callable[[CatchUpResult], None] | None = None,
+) -> tuple[CatchUpResult, ...]:
+    """Settle the session of frame index `index` -- and the ones missed before it -- only."""
+    return settle_only(
+        panel=panel,
+        state_store=paper.store,
+        ledger=paper.ledger,
+        registration=REGISTRATION,
+        ordinals=ORDINALS,
+        calendar=CALENDAR,
+        session=SESSIONS[index],
+        as_of=AS_OF,
+        make_portfolio=make_portfolio,
+        lock=paper.lock,
+        on_settled=on_settled,
         transform=IDENTITY,
     )
 
@@ -450,6 +505,7 @@ def evening_of(
         screen=screen,
         held=held,
         make_portfolio=factory,
+        lock=paper.lock,
         transform=IDENTITY,
     )
 
@@ -504,6 +560,9 @@ def test_the_book_refuses_under_the_names_the_survivor_day_numbers_its_steps_by(
     assert isinstance(refusal, RuntimeError) and not isinstance(refusal, ValueError)
     with pytest.raises(ValueError, match="paper boook"):
         SurvivorDayError("paper boook", "a misspelled step")
+    assert issubclass(PaperBookBusyError, SurvivorDayError)
+    stalled = CatchUpStalledError("paper book", "stalled", caught_up=())
+    assert isinstance(stalled, SurvivorDayError) and stalled.caught_up == ()
 
 
 # --- the head's holdings -------------------------------------------------------------------------
@@ -558,9 +617,12 @@ def test_a_holding_the_paper_book_cannot_settle_refuses_the_day_by_name_with_its
 
     with pytest.raises(SurvivorDayError) as refused:
         delisted_or_refuse(facts)
+    with pytest.raises(SurvivorDayError) as at_step_six:
+        delisted_or_refuse(facts, step="facts")
 
     message = str(refused.value)
-    assert refused.value.step == "facts"
+    assert refused.value.step == "paper book"  # the paper book's refusal, after the prediction
+    assert at_step_six.value.step == "facts"
     assert code in message and status in message and remedy in message
     assert SESSIONS[69].isoformat() in message
     assert ORDINARY[0] not in message
@@ -575,10 +637,11 @@ def test_a_holding_on_a_board_the_adapter_does_not_recognise_refuses_the_day(
     with pytest.raises(SurvivorDayError) as refused:
         delisted_or_refuse(facts)
 
-    assert refused.value.step == "facts"
+    assert refused.value.step == "paper book"
     assert UNRECOGNISED_PREFIX in str(refused.value)
     assert "board_unrecognised" in str(refused.value)
     assert "MAIN_BOARD_PREFIXES" in str(refused.value)
+    assert "V2-P7-006" in str(refused.value)  # a code change re-binds the registration
 
 
 def test_every_holding_refused_is_named_at_once_and_a_delisted_one_is_not(
@@ -592,6 +655,20 @@ def test_every_holding_refused_is_named_at_once_and_a_delisted_one_is_not(
     message = str(refused.value)
     assert NEVER_TRADED in message and UNREGISTERED in message
     assert DELISTED not in message
+
+
+def test_a_held_status_this_build_does_not_know_refuses_the_day(panel: PanelStore) -> None:
+    facts = read_day(panel, held=(NEVER_TRADED,), as_of=AS_OF)
+    unknown = dataclasses.replace(
+        facts,
+        held_status=(HeldStatus.model_construct(ts_code=NEVER_TRADED, status="merged_away"),),
+    )
+
+    with pytest.raises(SurvivorDayError) as refused:
+        delisted_or_refuse(unknown)
+
+    assert NEVER_TRADED in str(refused.value) and "merged_away" in str(refused.value)
+    assert "does not know" in str(refused.value)
 
 
 # --- the marker: one paper book per runtime directory --------------------------------------------
@@ -668,6 +745,28 @@ def test_a_marker_that_cannot_be_read_is_refused_and_left_as_it_is(tmp_path: Pat
     assert marker.read_bytes() == b"{not json"
 
 
+@pytest.mark.parametrize("failing", ["link", "mkstemp"])
+def test_a_marker_the_filesystem_cannot_write_is_refused_by_name_and_leaves_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing: str
+) -> None:
+    def refuse(*args: object, **kwargs: object) -> object:
+        raise OSError(errno.EPERM, "Operation not permitted")
+
+    if failing == "link":
+        monkeypatch.setattr(strategy_survivor_book.os, "link", refuse)
+    else:
+        monkeypatch.setattr(strategy_survivor_book.tempfile, "mkstemp", refuse)
+    directory = tmp_path / "paper"
+
+    with pytest.raises(SurvivorDayError) as refused:
+        bind(directory)
+
+    assert refused.value.step == "paper head"
+    assert PAPER_BOOK_MARKER in str(refused.value) and "hard links" in str(refused.value)
+    assert isinstance(refused.value.__cause__, OSError)
+    assert list(directory.iterdir()) == []
+
+
 # --- the paper head ------------------------------------------------------------------------------
 
 
@@ -683,6 +782,12 @@ def test_the_first_run_opens_the_book_on_the_registered_epoch_with_the_registere
     assert head.snapshot.last_settled_session is None
     assert (head.session_index, head.held, head.opened_only, head.settled) == (1, (), False, False)
     assert paper.store.sessions() == (EPOCH,)
+    assert json.loads((paper.root / PAPER_BOOK_MARKER).read_text(encoding="utf-8")) == {
+        "schema_version": "survivor-paper-binding/v1",
+        "config_id": CONFIG_ID,
+        "config_digest": REGISTRATION.digest,
+        "epoch_session": EPOCH.isoformat(),
+    }
 
 
 def test_a_run_on_the_epoch_only_opens_the_book(paper: Paper) -> None:
@@ -706,22 +811,48 @@ def test_every_run_opens_the_book_again_and_the_same_opening_writes_nothing(
     assert head.settled is False
 
 
-@pytest.mark.parametrize("change", ["capital", "epoch"])
-def test_a_run_whose_opening_differs_from_the_book_held_is_refused_naming_it(
-    panel: PanelStore, paper: Paper, change: str
+def changed(change: str) -> tuple[SurvivorRegistration, SessionOrdinals]:
+    """The registration with its capital or its epoch changed, and the ordinals it counts by."""
+    if change == "capital":
+        return (
+            SurvivorRegistration(book=book_config(capital="300000"), adapter=REGISTRATION.adapter),
+            ORDINALS,
+        )
+    return (
+        SurvivorRegistration(book=CONFIG, adapter=adapter(epoch_session=SESSIONS[59].isoformat())),
+        SessionOrdinals(CALENDAR, SESSIONS[59]),
+    )
+
+
+@pytest.mark.parametrize(("change", "field"), [("capital", "config_digest"), ("epoch", "epoch")])
+def test_a_run_whose_registration_differs_from_the_book_held_is_refused_by_its_marker(
+    panel: PanelStore, paper: Paper, change: str, field: str
 ) -> None:
     run_day(panel, paper, 61)
     before = files(paper)
-    if change == "capital":
-        registration = SurvivorRegistration(
-            book=book_config(capital="300000"), adapter=REGISTRATION.adapter
-        )
-        ordinals, named = ORDINALS, "cash"
-    else:
-        registration = SurvivorRegistration(
-            book=CONFIG, adapter=adapter(epoch_session=SESSIONS[59].isoformat())
-        )
-        ordinals, named = SessionOrdinals(CALENDAR, SESSIONS[59]), "epoch"
+    registration, ordinals = changed(change)
+
+    with pytest.raises(SurvivorDayError) as refused:
+        head_of(paper, 62, registration, ordinals)
+
+    assert refused.value.step == "paper head"
+    assert field in str(refused.value)
+    assert files(paper) == before
+
+
+@pytest.mark.parametrize(("change", "named"), [("capital", "cash"), ("epoch", "epoch")])
+def test_every_run_opens_the_book_and_refuses_an_opening_its_marker_does_not_catch(
+    panel: PanelStore, paper: Paper, change: str, named: str
+) -> None:
+    run_day(panel, paper, 61)
+    registration, ordinals = changed(change)
+    (paper.root / PAPER_BOOK_MARKER).unlink()
+    bind(  # a marker that agrees with the run and not with the book: restored from elsewhere
+        paper.root,
+        config_digest=registration.digest,
+        epoch_session=registration.adapter.epoch_session,
+    )
+    before = files(paper)
 
     with pytest.raises(SurvivorDayError) as refused:
         head_of(paper, 62, registration, ordinals)
@@ -729,6 +860,37 @@ def test_a_run_whose_opening_differs_from_the_book_held_is_refused_naming_it(
     assert refused.value.step == "paper head"
     assert isinstance(refused.value.__cause__, PaperStateError)
     assert named in str(refused.value)
+    assert files(paper) == before
+
+
+def test_a_changed_registration_over_the_same_book_is_refused_by_the_marker(
+    panel: PanelStore, paper: Paper
+) -> None:
+    run_day(panel, paper, 61)
+    before = files(paper)
+
+    with pytest.raises(SurvivorDayError) as refused:
+        head_of(paper, 62, config_id="rcf_another_registration_xx")
+
+    assert refused.value.step == "paper head"
+    assert "config_id" in str(refused.value)
+    assert "rcf_another_registration_xx" in str(refused.value)
+    assert files(paper) == before
+
+
+def test_a_held_book_whose_marker_is_lost_is_refused_and_never_bound_again(
+    panel: PanelStore, paper: Paper
+) -> None:
+    run_day(panel, paper, 61)
+    (paper.root / PAPER_BOOK_MARKER).unlink()
+    before = files(paper)
+
+    for config_id in (CONFIG_ID, "rcf_another_registration_xx"):
+        with pytest.raises(SurvivorDayError) as refused:
+            head_of(paper, 62, config_id=config_id)
+        assert refused.value.step == "paper head"
+        assert "no binding marker" in str(refused.value) and "restore" in str(refused.value)
+
     assert files(paper) == before
 
 
@@ -743,6 +905,7 @@ def test_ordinals_counted_from_another_epoch_than_the_registered_one_are_refused
     assert at_head.value.step == "paper head"
     assert EPOCH.isoformat() in str(at_head.value)
     assert paper.store.sessions() == ()
+    assert not (paper.root / PAPER_BOOK_MARKER).exists()
     run_day(panel, paper, 61)
     before = files(paper)
     with pytest.raises(SurvivorDayError) as at_catch_up:
@@ -768,8 +931,34 @@ def test_an_epoch_further_back_than_the_panel_can_catch_up_is_refused_when_the_b
     assert refused.value.step == "paper head"
     assert "max_panel_catch_up_sessions" in str(refused.value)
     assert paper.store.sessions() == ()
+    assert not (paper.root / PAPER_BOOK_MARKER).exists()
     assert head_of(paper, 61, tight).session_index == 1
     assert head_of(paper, 64, tight).session_index == 4  # an open book catches up what it missed
+
+
+def test_after_an_epoch_refusal_the_corrected_registration_opens_the_book(paper: Paper) -> None:
+    tight = SurvivorRegistration(book=CONFIG, adapter=adapter(max_panel_catch_up_sessions=0))
+    with pytest.raises(SurvivorDayError):
+        head_of(paper, 62, tight)
+    corrected = SurvivorRegistration(
+        book=CONFIG,
+        adapter=adapter(epoch_session=SESSIONS[61].isoformat(), max_panel_catch_up_sessions=0),
+    )
+
+    head = head_of(
+        paper,
+        62,
+        corrected,
+        SessionOrdinals(CALENDAR, SESSIONS[61]),
+        config_id="rcf_corrected_registration_x",
+    )
+
+    assert (head.snapshot.session, head.session_index) == (SESSIONS[61], 1)
+    binding = json.loads((paper.root / PAPER_BOOK_MARKER).read_text(encoding="utf-8"))
+    assert (binding["config_id"], binding["epoch_session"]) == (
+        "rcf_corrected_registration_x",
+        SESSIONS[61].isoformat(),
+    )
 
 
 # --- the evening ---------------------------------------------------------------------------------
@@ -1026,43 +1215,185 @@ def test_an_evening_run_again_on_its_pinned_inputs_writes_nothing_and_gives_its_
     assert files(paper) == before
 
 
-def test_settle_only_settles_a_session_with_no_snapshot_and_refuses_one_already_held(
+def test_every_session_of_one_catch_up_is_settled_from_the_book_the_one_before_left(
+    panel: PanelStore, paper: Paper
+) -> None:
+    run_day(
+        panel,
+        paper,
+        61,
+        screen_of=lambda facts: ranked(facts, (DELISTED, "600002.SH", "600003.SH", "600004.SH")),
+    )
+
+    day = run_day(panel, paper, 66)  # 62..65 caught up in one call; DELISTED has no bar at 65
+
+    assert [item.snapshot.session for item in day.caught_up] == list(SESSIONS[62:66])
+    delisted_on = day.caught_up[-1]
+    assert [item.ts_code for item in delisted_on.settlement.written_off] == [DELISTED]
+    assert DELISTED not in held_codes(delisted_on.snapshot)
+
+
+def test_an_evening_run_again_reads_the_book_its_session_settled_from_not_the_head(
     panel: PanelStore, paper: Paper
 ) -> None:
     run_day(panel, paper, 61)
+    first = run_day(panel, paper, 62)  # the ten buys filled at 62's open: the head holds them
+    before = files(paper)
 
-    settled = settle_only(
-        panel=panel,
-        state_store=paper.store,
-        ledger=paper.ledger,
-        registration=REGISTRATION,
-        ordinals=ORDINALS,
-        calendar=CALENDAR,
-        session=SESSIONS[62],
-        as_of=AS_OF,
-        make_portfolio=make_portfolio,
-        transform=IDENTITY,
+    again = evening_of(
+        panel, paper, 62, facts=first.facts, screen=first.screen, held=first.head.held
     )
 
-    assert [item.snapshot.session for item in settled] == [SESSIONS[62]]
-    assert settled[0].snapshot.first_decision_session == 1
+    assert again.result.outcome == "unchanged"
+    assert again.facts.held == first.evening.facts.held == ()
+    assert again.facts is first.facts
+    assert files(paper) == before
+
+
+def test_the_evenings_second_read_has_no_coverage_floor(panel: PanelStore, paper: Paper) -> None:
+    carry = {"max_carry_sessions": 1}
+    probe = SurvivorRegistration(book=CONFIG, adapter=adapter(**carry, min_coverage=0.01))
+    alone, halted = (read_facts(panel, 69, held, probe) for held in ((), (HALTED,)))
+    assert halted.universe_size == alone.universe_size + 1  # a held halt keeps its carried row
+    assert halted.scored_size == alone.scored_size
+    floor = (
+        alone.scored_size / alone.universe_size + halted.scored_size / halted.universe_size
+    ) / 2
+    tight = SurvivorRegistration(book=CONFIG, adapter=adapter(**carry, min_coverage=floor))
+    with pytest.raises(SurvivorDayError):
+        read_facts(panel, 69, (HALTED,), tight)  # the registered floor would refuse it
+    run_day(
+        panel,
+        paper,
+        61,
+        registration=tight,
+        screen_of=lambda facts: ranked(
+            facts, (HALTED, "600002.SH", "600003.SH", "600004.SH"), eligible=(HALTED,)
+        ),
+    )
+
+    day = run_day(panel, paper, 69, registration=tight)  # HALTED, halted from 67, is held
+
+    assert HALTED in day.evening.facts.held
+    assert day.evening.result.outcome == "created"
+    assert HALTED in day.evening.result.decision.frozen
+    assert HALTED in day.evening.held_after
+
+
+def test_a_second_read_whose_screen_disagrees_with_the_callers_is_refused_writing_nothing(
+    panel: PanelStore, paper: Paper
+) -> None:
+    run_day(panel, paper, 61)
+    head = head_of(paper, 63)
+    facts = read_facts(panel, 63, head.held)
+    dropped = real_screen(facts).survivors[0].ts_code
+    catch_up_through(panel, paper, 62)
     before = files(paper)
-    for index in (61, 62):
+
+    with pytest.raises(SurvivorDayError) as refused:
+        evening_of(panel, paper, 63, facts=facts, screen=without(dropped)(facts), held=head.held)
+
+    assert refused.value.step == "paper book"
+    assert dropped in str(refused.value) and "survivors" in str(refused.value)
+    assert files(paper) == before
+
+
+def test_the_evenings_market_is_read_for_the_book_its_session_settles_from(
+    panel: PanelStore, paper: Paper, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sold = "600002.SH"
+    run_day(panel, paper, 61)
+    run_day(panel, paper, 62)
+    run_day(panel, paper, 63, screen_of=without(sold))  # sold at 64's open
+    asked: dict[date, tuple[str, ...]] = {}
+    read = strategy_survivor_book.settlement_market
+
+    def recording(store: PanelStore, **arguments: Any) -> Any:
+        asked[arguments["session"]] = tuple(arguments["names"])
+        return read(store, **arguments)
+
+    monkeypatch.setattr(strategy_survivor_book, "settlement_market", recording)
+
+    day = run_day(panel, paper, 65)
+
+    settled_from = day.caught_up[-1].snapshot
+    assert sold in day.head.held and sold not in held_codes(settled_from)
+    assert asked[SESSIONS[65]] == settlement_names(settled_from)
+
+
+def test_an_evening_given_facts_of_other_holdings_or_another_day_is_refused(
+    panel: PanelStore, paper: Paper
+) -> None:
+    run_day(panel, paper, 61)
+    run_day(panel, paper, 62)
+    head = head_of(paper, 63)
+    assert head.held
+    before = files(paper)
+
+    for facts in (read_facts(panel, 63, ()), read_facts(panel, 62, head.held)):
         with pytest.raises(SurvivorDayError) as refused:
-            settle_only(
-                panel=panel,
-                state_store=paper.store,
-                ledger=paper.ledger,
-                registration=REGISTRATION,
-                ordinals=ORDINALS,
-                calendar=CALENDAR,
-                session=SESSIONS[index],
-                as_of=AS_OF,
-                make_portfolio=make_portfolio,
-                transform=IDENTITY,
-            )
+            evening_of(panel, paper, 63, facts=facts, screen=real_screen(facts), held=head.held)
         assert refused.value.step == "paper book"
-        assert "evening" in str(refused.value)
+        assert "pinned" in str(refused.value)
+
+    assert files(paper) == before
+
+
+def test_an_evening_with_sessions_missing_before_it_is_refused_until_they_are_caught_up(
+    panel: PanelStore, paper: Paper
+) -> None:
+    run_day(panel, paper, 61)
+    facts = read_facts(panel, 63, ())
+    before = files(paper)
+
+    with pytest.raises(SurvivorDayError) as refused:
+        evening_of(panel, paper, 63, facts=facts, screen=real_screen(facts), held=())
+
+    assert refused.value.step == "paper book"
+    assert "caught up first" in str(refused.value)
+    assert files(paper) == before
+
+
+def test_settle_only_settles_a_session_and_a_run_that_stopped_after_it_finishes_writing_nothing(
+    panel: PanelStore, paper: Paper
+) -> None:
+    run_day(panel, paper, 61)
+    run_day(panel, paper, 62)  # ten held from here: settling 63 reads its facts
+
+    settled = settle_only_at(panel, paper, 63)
+
+    assert [(item.snapshot.session, item.outcome) for item in settled] == [
+        (SESSIONS[63], "created")
+    ]
+    assert settled[0].snapshot.first_decision_session == 1
+    assert all(item.order.signal_session < 3 for item in settled[0].snapshot.pending_orders)
+    before = files(paper)  # the run stopped here, before its journal: it is run again
+    reported: list[CatchUpResult] = []
+
+    again = settle_only_at(panel, paper, 63, on_settled=reported.append)
+
+    assert [item.outcome for item in again] == ["unchanged"]
+    assert again[0].snapshot == settled[0].snapshot
+    assert again[0].settlement.book == settled[0].settlement.book
+    assert reported == list(again)
+    assert files(paper) == before
+
+
+def test_settle_only_never_settles_again_a_session_its_evening_settled_with_orders(
+    panel: PanelStore, paper: Paper
+) -> None:
+    run_day(panel, paper, 61)  # its evening planned ten buys
+    before = files(paper)
+
+    with pytest.raises(SurvivorDayError) as refused:
+        settle_only_at(panel, paper, 61)
+    with pytest.raises(SurvivorDayError) as epoch:
+        settle_only_at(panel, paper, 60)
+
+    assert refused.value.step == "paper book"
+    assert isinstance(refused.value.__cause__, PaperStateError)
+    assert "an evening" in str(refused.value)
+    assert "epoch" in str(epoch.value)
     assert files(paper) == before
 
 
@@ -1089,8 +1420,9 @@ def test_another_configuration_is_refused_at_every_step_before_anything_is_writt
         )
 
     assert at_head.value.step == "paper head"
+    assert "config_digest" in str(at_head.value)  # the marker refuses it before the opening
     assert at_catch_up.value.step == at_evening.value.step == "paper book"
-    for refused in (at_head, at_catch_up, at_evening):
+    for refused in (at_catch_up, at_evening):
         assert isinstance(refused.value.__cause__, PaperStateError)
     assert files(paper) == before
 
@@ -1106,15 +1438,39 @@ def test_a_holding_the_book_cannot_settle_stalls_the_catch_up_by_name(
             facts, (UNREGISTERED, "600002.SH", "600003.SH", "600004.SH"), eligible=(UNREGISTERED,)
         ),
     )
-    catch_up_through(panel, paper, 62)  # bought at 62's open; nothing held while it settled
-    before = files(paper)
+    reported: list[CatchUpResult] = []
 
-    with pytest.raises(SurvivorDayError) as refused:
-        catch_up_through(panel, paper, 63)
+    with pytest.raises(CatchUpStalledError) as refused:
+        catch_up_through(panel, paper, 64, on_settled=reported.append)
 
-    assert refused.value.step == "facts"
-    assert UNREGISTERED in str(refused.value) and "not_in_registry" in str(refused.value)
-    assert files(paper) == before
+    stalled = refused.value
+    assert stalled.step == "paper book"
+    assert UNREGISTERED in str(stalled) and "not_in_registry" in str(stalled)
+    assert SESSIONS[63].isoformat() in str(stalled)
+    # 62 settled (bought at its open; nothing held while it settled) and is kept, and said so
+    assert [item.snapshot.session for item in stalled.caught_up] == [SESSIONS[62]]
+    assert stalled.caught_up == tuple(reported)
+    assert paper.store.sessions() == SESSIONS[60:63]
+
+
+def test_each_caught_up_session_is_reported_as_it_commits_and_a_reporting_fault_undoes_nothing(
+    panel: PanelStore, paper: Paper
+) -> None:
+    run_day(panel, paper, 61)
+    reported: list[CatchUpResult] = []
+
+    def report(result: CatchUpResult) -> None:
+        reported.append(result)
+        if len(reported) == 2:
+            raise TypeError("the journal could not be written")
+
+    with pytest.raises(TypeError, match="the journal could not be written"):
+        catch_up_through(panel, paper, 64, on_settled=report)
+
+    assert [item.snapshot.session for item in reported] == [SESSIONS[62], SESSIONS[63]]
+    assert paper.store.sessions() == SESSIONS[60:64]  # 63 was committed before its report
+    rest = catch_up_through(panel, paper, 64)
+    assert [item.snapshot.session for item in rest] == [SESSIONS[64]]
 
 
 def test_the_ledger_conflict_and_the_stores_faults_are_named_refusals(
@@ -1148,6 +1504,7 @@ def test_the_ledger_conflict_and_the_stores_faults_are_named_refusals(
         head_of(paper, 62)
     assert damaged.value.step == "paper head"
     assert isinstance(damaged.value.__cause__, PaperStateStoreError)
+    assert "ledger" in str(damaged.value) and "one backup" in str(damaged.value)
 
 
 def test_a_programming_error_reaches_the_caller_as_itself(panel: PanelStore, paper: Paper) -> None:
@@ -1191,19 +1548,21 @@ def test_a_programming_error_reaches_the_caller_as_itself(panel: PanelStore, pap
 
 
 def test_a_second_run_is_refused_while_the_first_holds_the_paper_book(
-    panel: PanelStore, paper: Paper
+    panel: PanelStore, tmp_path: Path
 ) -> None:
-    run_day(panel, paper, 61)
+    root = tmp_path / "paper"
+    with opened_paper(root) as paper:
+        run_day(panel, paper, 61)
     holding, release = threading.Event(), threading.Event()
     first: list[Day] = []
     faults: list[BaseException] = []
 
     def first_run() -> None:
         try:
-            with paper_book_lock(paper.root):
+            with opened_paper(root) as theirs:
                 holding.set()
                 release.wait(timeout=60)
-                first.append(run_day(panel, paper, 62))
+                first.append(run_day(panel, theirs, 62))
         except BaseException as error:  # reported below, never swallowed
             faults.append(error)
             holding.set()
@@ -1212,20 +1571,58 @@ def test_a_second_run_is_refused_while_the_first_holds_the_paper_book(
     thread.start()
     try:
         assert holding.wait(timeout=60)
-        before = files(paper)
-        with pytest.raises(SurvivorDayError) as refused, paper_book_lock(paper.root):
-            run_day(panel, paper, 62)
-        assert files(paper) == before
+        before = tree(root)
+        with pytest.raises(PaperBookBusyError) as refused, opened_paper(root) as ours:
+            run_day(panel, ours, 62)
+        assert tree(root) == before
     finally:
         release.set()
         thread.join(timeout=120)
 
     assert faults == []
-    assert refused.value.step == "paper head"
+    assert isinstance(refused.value, SurvivorDayError)
     assert PAPER_BOOK_LOCK in str(refused.value)
     assert [day.evening.result.outcome for day in first] == ["created"]
-    with paper_book_lock(paper.root):  # released with its holder
-        assert head_of(paper, 62).settled is True
+    with opened_paper(root) as again:  # released with its holder
+        assert head_of(again, 62).settled is True
+
+
+def test_the_paper_book_is_run_only_under_the_writer_lock_this_run_still_holds(
+    panel: PanelStore, tmp_path: Path
+) -> None:
+    root = tmp_path / "paper"
+    with opened_paper(root) as paper:
+        run_day(panel, paper, 61)
+    released = paper  # its lock was let go with the block
+    facts = read_facts(panel, 62, ())
+    before = tree(root)
+    calls: dict[str, Callable[[Paper], object]] = {
+        "paper head": lambda held: head_of(held, 62),
+        "catch-up": lambda held: catch_up_through(panel, held, 62),
+        "settle-only": lambda held: settle_only_at(panel, held, 62),
+        "evening": lambda held: evening_of(
+            panel, held, 62, facts=facts, screen=real_screen(facts), held=()
+        ),
+    }
+
+    for name, call in calls.items():
+        with pytest.raises(SurvivorDayError) as refused:
+            call(released)
+        assert "writer lock" in str(refused.value), name
+        with pytest.raises(SurvivorDayError):
+            call(dataclasses.replace(released, lock=None))
+    with opened_paper(root) as paper:
+        (root / PAPER_BOOK_LOCK).unlink()  # another run may now lock a new file of that name
+        (root / PAPER_BOOK_LOCK).touch()
+        assert paper.lock.held is False
+        with pytest.raises(SurvivorDayError) as replaced:
+            head_of(paper, 62)
+        assert "writer lock" in str(replaced.value)
+    with opened_paper(tmp_path / "elsewhere") as elsewhere:
+        with pytest.raises(SurvivorDayError) as foreign:
+            head_of(dataclasses.replace(released, lock=elsewhere.lock), 62)
+        assert "elsewhere" in str(foreign.value)
+    assert {name: content for name, content in tree(root).items()} == before
 
 
 def test_the_lock_is_held_across_processes_and_released_with_its_holder(tmp_path: Path) -> None:
@@ -1250,9 +1647,8 @@ def test_the_lock_is_held_across_processes_and_released_with_its_holder(tmp_path
     )
     try:
         assert holder.stdout is not None and holder.stdout.readline().strip() == "held"
-        with pytest.raises(SurvivorDayError) as refused, paper_book_lock(directory):
+        with pytest.raises(PaperBookBusyError), paper_book_lock(directory):
             pass
-        assert refused.value.step == "paper head"
     finally:
         assert holder.stdin is not None
         holder.stdin.close()
