@@ -1667,7 +1667,53 @@ def test_a_position_after_an_adjustment_prints_the_real_close_and_the_ratio_to_r
     # The ledger's mark of 11.50 is not a price on any screen; the line never says it.
     assert "11.50" not in adjusted
     assert plain == f"  {C}  ledger qty 900  real close 10.10"
-    assert "account shares = ledger qty x ratio" in line_with(lines, "positions")
+    # The ratio reconciles the ledger's units with the real close; it is no share count (D5 joint
+    # review, Important 2: a cash dividend moves it too).
+    assert "account shares" not in line_with(lines, "positions")
+
+
+POSITIONS_HEADER: Final[str] = (
+    "(ledger quantity in ledger units; real close from the facts; a ledger/real ratio is the "
+    "adjustment since the buy, cash dividends included, and no share count: the account's share "
+    "count differs from the ledger's only after a share event -- a bonus issue or a split -- and "
+    "every sale is SELL ENTIRE POSITION)"
+)
+
+
+def test_a_ratio_moved_by_a_cash_dividend_derives_no_share_count(s3: WrittenOff) -> None:
+    """A cash dividend moves Tushare's `adj_factor` as a bonus issue does, so a holding's ledger
+    mark over its real close moves too -- and the account still holds the shares it bought, plus
+    the cash. 600020.SH's 11.50 mark over a real close of 11.27 (0.23 paid out) is 1.0204; and the
+    review's case, 1000 shares bought at 25.00 with 0.50 paid out (real close 24.50), is 1.0204 as
+    well, where "ledger qty x ratio" would say 1020.4 shares. No line derives a count from it."""
+    paid = document_of(s3, facts=s3_facts({**S3_CLOSES, B: "11.27"}))
+    (holding,) = [item for item in paid["paper"]["book"]["holdings"] if item["ts_code"] == B]
+    assert (holding["ledger_quantity"], holding["ledger_mark"], holding["real_close"]) == (
+        800,
+        "11.50",
+        "11.27",
+    )
+    assert holding["ledger_ratio"] == "1.0204"
+    assert (D("25.00") / D("24.50")).quantize(D("0.0001")) == D("1.0204")
+    review = json.loads(json.dumps(paid))
+    review["paper"]["book"]["holdings"] = [
+        {**holding, "ledger_quantity": 1000, "ledger_mark": "25.00", "real_close": "24.50"}
+        if item["ts_code"] == B
+        else item
+        for item in review["paper"]["book"]["holdings"]
+    ]
+
+    for document, quantity, close, derived in (
+        (paid, 800, "11.27", "816"),
+        (review, 1000, "24.50", "1020"),
+    ):
+        lines = summary_lines(document)
+
+        assert line_with(lines, "positions") == row("positions", f"2 holdings {POSITIONS_HEADER}")
+        position = f"  {B}  ledger qty {quantity}  real close {close}  ledger/real ratio 1.0204"
+        assert position in lines
+        assert not any(derived in line for line in lines)
+        assert not any("account shares" in line for line in lines)
 
 
 def test_a_holding_says_whether_it_is_frozen_near_exit_or_carried(s3: WrittenOff) -> None:

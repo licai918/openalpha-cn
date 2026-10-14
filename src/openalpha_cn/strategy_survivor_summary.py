@@ -55,13 +55,18 @@ one-session run -- so the document does not carry it: the length of a halt is th
 history's, which the caller passes as `carried_since`).
 
 **Units.** A holding's quantity and a sale's `reference_price` are the ledger's, in the ledger's
-units (the real price times the adjustment ratio since the buy filled); after a bonus issue or a
-cash dividend the ledger's share count is not the account's. So a sale is always "SELL ENTIRE
+units (the real price times the adjustment ratio since the buy filled): after a share event (a
+bonus issue, a split) the ledger's share count is not the account's, and after any adjustment --
+a cash dividend too -- its prices are not the real ones. So a sale is always "SELL ENTIRE
 POSITION", its ledger quantity printed beside the REAL close of the facts day and never as a
 number of shares to sell. A buy is sized at its real close with ratio 1, so its quantity is real.
 A holding whose ledger mark is not its real close also carries `ledger_ratio` (mark over close, to
-four places), and the positions line prints it: the account's shares are the ledger quantity
-times it.
+four places), and the positions line prints it: the adjustment since the buy, **cash dividends
+included** -- Tushare's `adj_factor` moves on a cash dividend as on a bonus issue -- and so no
+share count. After a cash dividend the account holds the shares it bought and the cash (1000
+shares, 0.50 paid out of a 25.00 close: ratio 1.0204, and still 1000 shares, never 1020.4); its
+count differs from the ledger's only after a share event. No line derives a share count from the
+ratio.
 
 ## The summary
 
@@ -175,6 +180,15 @@ _EVENING_STATES: Final[Mapping[str, str]] = {
 """What the ORDERS header says of the run: it committed the evening, or found it settled and
 derived it again, writing nothing -- so a printed plan can be told from the run that made it."""
 _SUSPENDED: Final[str] = "(suspended: the close may be an earlier session's)"
+_POSITIONS_NOTE: Final[str] = (
+    "(ledger quantity in ledger units; real close from the facts; a ledger/real ratio is the "
+    "adjustment since the buy, cash dividends included, and no share count: the account's share "
+    "count differs from the ledger's only after a share event -- a bonus issue or a split -- and "
+    "every sale is SELL ENTIRE POSITION)"
+)
+"""What the positions header says of the figures under it (D5 joint review, Important 2): Tushare's
+`adj_factor` moves on a cash dividend as on a bonus issue, so no share count is derived from the
+ratio -- after a cash dividend the account holds the shares it bought, plus the cash."""
 _PRINTED_NOTES: Final[frozenset[str]] = frozenset(
     {
         "delisting",
@@ -533,9 +547,13 @@ def _ratio(mark: Decimal | None, row: SecurityFacts | None) -> str | None:
     """The ledger's mark over the facts day's real close, to four places, when they differ.
 
     The ledger keeps a holding's shares and mark in its own units, the real price times the
-    adjustment ratio since the buy filled, so a mark that is not the real close says the ratio
-    the account's shares are the ledger's quantity times. `None` when they agree -- no event, or
-    one that has not moved this holding -- and when either is missing.
+    adjustment ratio since the buy filled, so a mark that is not the real close says that ratio:
+    the adjustment since the buy, cash dividends included -- Tushare's `adj_factor` moves on a
+    cash dividend as on a bonus issue. It is no share count: after a cash dividend the account
+    still holds the shares it bought (1000 shares bought at 25.00, 0.50 paid out, a real close of
+    24.50: the ratio is 1.0204, and the account holds 1000 shares and the cash, never 1020.4), and
+    its count differs from the ledger's only after a share event. `None` when they agree -- no
+    event, or one that has not moved this holding -- and when either is missing.
     """
     if mark is None or row is None or mark == row.close:
         return None
@@ -931,8 +949,7 @@ def _position_lines(holdings: Sequence[Mapping[str, Any]]) -> list[str]:
     lines = [
         _row(
             "positions",
-            f"{_plural(len(holdings), 'holding')} (ledger quantity in ledger units; real close "
-            "from the facts; where a ratio is shown, account shares = ledger qty x ratio)",
+            f"{_plural(len(holdings), 'holding')} {_POSITIONS_NOTE}",
         )
     ]
     for item in holdings:
