@@ -134,3 +134,9 @@ P6 modules and tests unchanged; no checked-in binary fixtures; research honesty 
 5. Checks that need the calendar belong to D5: `epoch_session` must be an open session (a Saturday is admitted by the config reader today); the refusal "epoch more than 1 + `max_panel_catch_up_sessions` sessions before the first run".
 6. Feed `SurvivorPanelUpdate` from `survivor.adapter.max_panel_catch_up_sessions` (bounded 0..16); delete `daily_selection.panel_catch_up_bound` (default 10, no upper bound) or make it delegate; `DEFAULT_MAX_PANEL_CATCH_UP_SESSIONS`'s docstring describes a registration the new reader refuses.
 7. D7 documents that `forward_report.py` and `--factor-gaps` refuse survivor registrations (fail closed; their messages do not say "survivor").
+
+## Rules from the D2 review (2026-10-14) — bind D5 and Part E
+
+1. `survivor_batch` raises when nothing is eligible, whereas P6's `signal_day_batch` returns `None`: D5 treats an empty eligible set as a NAMED refusal at the facts step (an empty record is not a valid registration; the coverage guard already refuses an empty universe), not as a day with an empty batch.
+2. Part E's late-record check must (a) check `survivor_record_is_bound(record, book, registered)` BEFORE recomputing; (b) read provenance through `read_survivor_provenance` (digest-vs-stem and registration checks); (c) treat only the exported "cannot be recomputed" exception tuple as a refusal — never a broad `except`; (d) cache verdicts keyed by CONTENT HASH, not by census (a census-keyed cache would keep a verdict across an in-place correction).
+3. The protocol (V2-P7-006) reports the share of UNVERIFIABLE records beside the 20d readout and a sensitivity excluding them.
