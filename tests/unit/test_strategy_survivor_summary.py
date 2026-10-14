@@ -563,16 +563,31 @@ def test_the_wording_is_the_registered_disclosure_and_names_candidates() -> None
     assert SURVIVOR_WORDING == WORDING
 
 
-def test_no_string_of_a_document_or_a_summary_recommends_anything(
-    s3: WrittenOff, frame: Frame
+FORBIDDEN_PHRASES: Final[tuple[str, ...]] = (
+    "recommend",
+    "signal to buy",
+    "buy signal",
+    "forecast",
+    "expected return",
+)
+"""What a candidate of a registered configuration is never called: nothing here is advice, a
+signal, a forecast or an expectation of a return."""
+
+
+def test_no_string_of_a_document_or_a_summary_recommends_or_forecasts_anything(
+    s3: WrittenOff, frame: Frame, settle_only: SettleOnly, s2: Day
 ) -> None:
-    documents = [document_of(s3), frame_document(frame)]
+    documents = [
+        document_of(s3),
+        document_of(s2),
+        frame_document(frame),
+        settle_only_document(settle_only),
+    ]
     printed = [line for document in documents for line in summary_lines(document)]
     for text in (*(item for document in documents for item in strings(document)), *printed):
         lowered = text.lower()
-        assert "recommend" not in lowered
-        assert "signal to buy" not in lowered
-        assert "buy signal" not in lowered
+        for phrase in FORBIDDEN_PHRASES:
+            assert phrase not in lowered, f"{phrase!r} in {text!r}"
 
 
 # --- the document -------------------------------------------------------------------------------
@@ -1061,6 +1076,46 @@ def test_a_sale_names_the_reasons_the_screen_gave_for_the_loss(s3: WrittenOff) -
         f"  SELL ENTIRE POSITION {B} (ledger qty 800; real close 11.50) EXIT_ELIGIBILITY_LOST "
         "(special_treatment, suspended)"
     ) in summary_lines(document)
+
+
+def test_a_sale_of_a_held_name_the_screen_never_assessed_says_so(s3: WrittenOff) -> None:
+    """The kernel sells a holding it holds no verdict for -- `decide_book` forces an exit for a
+    code that is not in the screen -- and the sale says that is why."""
+    kept = evenings.screened((F, "10.00"), (G, "15.00"), (C, "10.10"), (E, "22.00"), (H, "8.00"))
+    assert B not in {verdict.ts_code for verdict in kept.verdicts}
+    sale = s3.result.trade_list.orders[0].model_copy(
+        update={
+            "side": "sell",
+            "ts_code": B,
+            "quantity": 800,
+            "reason": "EXIT_ELIGIBILITY_LOST",
+            "expires_session": None,
+        }
+    )
+    plan = s3.result.trade_list.model_copy(update={"orders": (sale,)})
+    result = dataclasses.replace(s3.result, trade_list=plan)
+
+    document = document_of(s3, evening=result, screen=kept)
+
+    assert document["paper"]["open_orders"][0]["reasons"] == ["not_assessed"]
+    assert (
+        f"  SELL ENTIRE POSITION {B} (ledger qty 800; real close 11.50) EXIT_ELIGIBILITY_LOST "
+        "(not_assessed)"
+    ) in summary_lines(document)
+
+
+def test_a_trade_list_carrying_an_order_the_settlement_does_not_hold_live_is_refused(
+    s3: WrittenOff,
+) -> None:
+    """The plan and the settlement are one evening's: an order the plan carries and the book does
+    not hold live is another evening's, and its attempt count is not known."""
+    plan = s3.result.trade_list.model_copy(
+        update={"carried": (*s3.result.trade_list.carried, s3.sell_a)}
+    )
+    result = dataclasses.replace(s3.result, trade_list=plan)
+
+    with pytest.raises(ValueError, match="does not hold it live"):
+        document_of(s3, evening=result)
 
 
 def test_a_sale_of_a_suspended_name_says_its_close_may_be_an_earlier_sessions(
