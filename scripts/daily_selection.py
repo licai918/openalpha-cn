@@ -105,6 +105,16 @@ after the first session on 4 January (the A-phase notes of the P7 step-0 plan). 
 new: P6's `--full-update` fetches `namechange` (`FULL_UPDATE_TARGETS`) and fails the same way
 in early January.
 
+## The registration's kind (`V2-P7-008`)
+
+A registered configuration that names no `kind` is the P6 book, and every step above is its day,
+exactly as before. One that names `kind: "survivor_book/v1"` is read after step 1 by
+`strategy_survivor` -- its `survivor_book` and `adapter` blocks, nothing else -- and runs the
+survivor day, `SURVIVOR_STEPS`, which is a step-1 refusal (exit 1) until `V2-P7-008` D5 wires it.
+Any other `kind`, or a survivor registration that cannot be read, exits 2 at step 1 before any
+request; a survivor book whose seed is not the registration's exits 3. The survivor module is
+imported only then: it loads `backtest/paper.py`, whose audit hook a P6 day does not install.
+
 ## Idempotent per trading day
 
 The journal is `RT/daily_selection/<config_id[:16]>/<session>.json`. The day's `--as-of` is
@@ -149,7 +159,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from enum import IntEnum
 from pathlib import Path
-from typing import Any, Final, cast
+from typing import TYPE_CHECKING, Any, Final, cast
 from zoneinfo import ZoneInfo
 
 REPOSITORY: Final[Path] = Path(__file__).resolve().parents[1]
@@ -242,6 +252,11 @@ from openalpha_cn.strategy_view import (  # noqa: E402
     score_day,
     strategy_request,
 )
+
+if TYPE_CHECKING:
+    # Imported for its type only: at run time `survivor_registration` imports the module, and
+    # only for a registration that names a `kind` (it loads `backtest/paper.py`).
+    from openalpha_cn.strategy_survivor import SurvivorRegistration
 
 DAILY_SELECTION_SCHEMA: Final[str] = "openalpha-daily-selection/v1"
 DEFAULT_REGISTRATION: Final[Path] = REPOSITORY / "docs" / "research" / "p6-registration.json"
@@ -388,13 +403,36 @@ STEPS: Final[tuple[str, ...]] = (
     "prediction",
     "summary",
 )
+SURVIVOR_STEPS: Final[tuple[str, ...]] = (
+    "registration",
+    "panel update",
+    "panel doctor",
+    "factor build",
+    "paper head",
+    "facts",
+    "prediction",
+    "paper book",
+    "summary",
+)
+"""The survivor book's day (`V2-P7-008`), in its order. The steps it shares with the P6 day's
+helpers -- the first four and `prediction` -- keep the P6 day's numbers, so a refusal those
+helpers raise reads the same in either day; `summary` is ninth here and eighth there, which is
+why `StepFailedError` and `_step` take the sequence a step is numbered in."""
 
 
 class StepFailedError(RuntimeError):
-    """A step refused; the run stops there and says which step it was."""
+    """A step refused; the run stops there and says which step it was, numbered in `steps` --
+    `STEPS` unless the survivor day says `SURVIVOR_STEPS`."""
 
-    def __init__(self, step: str, message: str, *, exit_code: DailyExit = DailyExit.step_failed):
-        super().__init__(f"step {STEPS.index(step) + 1} ({step}) failed: {message}")
+    def __init__(
+        self,
+        step: str,
+        message: str,
+        *,
+        exit_code: DailyExit = DailyExit.step_failed,
+        steps: tuple[str, ...] = STEPS,
+    ):
+        super().__init__(f"step {steps.index(step) + 1} ({step}) failed: {message}")
         self.step = step
         self.exit_code = exit_code
         self.requests: dict[str, int] = {}
@@ -403,8 +441,9 @@ class StepFailedError(RuntimeError):
 
 
 @contextlib.contextmanager
-def _step(name: str) -> Iterator[None]:
-    """Report any fault the step did not anticipate as that step's refusal, by name.
+def _step(name: str, *, steps: tuple[str, ...] = STEPS) -> Iterator[None]:
+    """Report any fault the step did not anticipate as that step's refusal, by name, numbered in
+    `steps`.
 
     A `StepFailedError` passes through; anything else becomes one naming the step and the
     fault's type -- and its message, except for a provider failure, whose message can carry the
@@ -420,7 +459,7 @@ def _step(name: str) -> Iterator[None]:
             if isinstance(error, ProviderFailure)
             else f"{type(error).__name__}: {error}"
         )
-        raise StepFailedError(name, f"an unexpected fault: {detail}") from error
+        raise StepFailedError(name, f"an unexpected fault: {detail}", steps=steps) from error
 
 
 # --- the configuration ---------------------------------------------------------------------------
@@ -515,6 +554,48 @@ def admit_registration(path: Path, repo: Path, *, also_bound: Sequence[str] = ()
         seed=seed if isinstance(seed, int) and not isinstance(seed, bool) else 0,
         settings=settings,
     )
+
+
+REGISTRATION_KIND_KEY: Final[str] = "kind"
+"""The key of a registered configuration that names its kind (`strategy_survivor.KIND_KEY`),
+spelled here because reading it from that module would load the module for every P6 day."""
+
+
+def survivor_registration(registration: Registration) -> SurvivorRegistration | None:
+    """The survivor book's registration, or `None` for a configuration that names no `kind`: the
+    P6 book, whose day runs as it always has (`V2-P7-008`).
+
+    `openalpha_cn.strategy_survivor` is imported here and only for a configuration that names a
+    `kind`: it imports `backtest/paper.py`, whose import installs an audit hook for the life of
+    the process, and a P6 day keeps no paper book (`test_daily_selection_dispatch.py` runs one in
+    a fresh interpreter and finds neither module loaded). A survivor registration the command
+    cannot read -- an unknown `kind`, a missing or extra top-level key, a block that does not
+    validate or a book block that is not its own stored form -- exits 2, as a missing one does;
+    one whose book `seed` is not the registration's own exits 3, the class of a `config_id` that
+    does not match its own config: there is a registration, and it contradicts itself.
+    """
+    if REGISTRATION_KIND_KEY not in registration.config:
+        return None
+    from openalpha_cn import strategy_survivor
+
+    try:
+        return strategy_survivor.read_survivor_registration(
+            registration.config, seed=registration.seed
+        )
+    except strategy_survivor.SurvivorRegistrationContradictionError as error:
+        raise StepFailedError(
+            "registration",
+            str(error),
+            exit_code=DailyExit.code_not_registered,
+            steps=SURVIVOR_STEPS,
+        ) from error
+    except strategy_survivor.SurvivorRegistrationError as error:
+        raise StepFailedError(
+            "registration",
+            str(error),
+            exit_code=DailyExit.no_registration,
+            steps=SURVIVOR_STEPS,
+        ) from error
 
 
 LOCKFILE: Final[str] = "uv.lock"
@@ -3107,6 +3188,12 @@ def _run_daily_selection(
     runtime_dir = options.runtime_dir
     with _step("registration"):
         registration = admit_registration(options.registration, options.repo)
+        survivor = survivor_registration(registration)
+    if survivor is not None:
+        # The registration's `kind` decides the day (`V2-P7-008`); the survivor day numbers and
+        # reports its own steps, so it runs outside this step's fault handler.
+        return _run_survivor_day(options, registration, survivor, clock=clock, counts=counts)
+    with _step("registration"):
         store = panel_store(runtime_dir)
         directory = journal_directory(runtime_dir, registration)
         first_as_of = options.as_of or clock()
@@ -3314,6 +3401,24 @@ def _run_daily_selection(
             "wrote": True,
         },
     }
+
+
+def _run_survivor_day(
+    options: DailyOptions,
+    registration: Registration,
+    survivor: SurvivorRegistration,
+    *,
+    clock: Callable[[], datetime],
+    counts: Counter[str],
+) -> dict[str, Any]:
+    """The survivor book's day, `SURVIVOR_STEPS`: not wired yet, so a step-1 refusal (exit 1)
+    that `V2-P7-008` D5 replaces with the day. Refusing keeps an admitted survivor registration
+    off the P6 day, which cannot read its configuration."""
+    raise StepFailedError(
+        "registration",
+        "the survivor daily day is not wired yet (V2-P7-008 D5)",
+        steps=SURVIVOR_STEPS,
+    )
 
 
 # --- the face ----------------------------------------------------------------------------------
