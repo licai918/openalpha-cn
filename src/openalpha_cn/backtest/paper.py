@@ -322,7 +322,11 @@ def slippage_folded_execution(
     configuration's serialisation (hard rule 3). The research protocol charges no transfer fee, so
     the slippage rides in that slot (T5 section 6): `AShareExecutionPolicy` rounds each cost
     component to the fen separately, and the two books then pay the same sum of the same rounded
-    terms on every fill, for every notional.
+    terms on every fill, for every notional *they share*. After an adjustment event they do not
+    share one: `paper_step` scales a held name's bar by the ratio r, so a sale's fees are charged
+    on q(qty x open x r) where the P6 book charges on q(qty x open) -- a gap of about
+    (r - 1) x (commission + stamp + slippage rates) x notional on that sale, with identical
+    proceeds (V2-P7-009 pins one such sale by hand arithmetic).
 
     **That holds only into an empty slot, so a schedule that already charges a transfer fee is
     refused.** Folded together, the two rates would be rounded once where the P6 book rounds them
