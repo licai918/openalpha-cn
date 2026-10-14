@@ -41,8 +41,8 @@ eligibility or lost survivor status, daily caps on discretionary exits and on re
 cool-down, live sells and halted holdings held in place, an unaffordable lot skipped only at buy time),
 draw entrants with a seeded, per-session-salted hash, and turn the decision into a content-addressed
 trade list with order expiry. It imports no numerical or infrastructure library. Seven test files
-(182 tests) cover it, including a 120-session walk through six made-up markets that checks the book's
-promises on every session, and 52 hand-applied mutations of the six modules were all killed
+(185 tests) cover it, including a 120-session walk through six made-up markets that checks the book's
+promises on every session, and 53 hand-applied mutations of the six modules were all killed
 (`docs/research/p7-step0-validation/V2-P7-005-mutation-checks.md`). **This is engineering, not
 evidence**: nothing here reads the panel, registers a configuration or says anything about returns;
 the adapter, the daily entry point, the paper-ledger step builder and the pre-registration remain

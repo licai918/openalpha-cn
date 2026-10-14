@@ -50,6 +50,7 @@ def screen_of(
     ineligible: tuple[int, ...] = (),
     halted: tuple[int, ...] = (),
     halted_and_thin: tuple[int, ...] = (),
+    halted_and_illiquid: tuple[int, ...] = (),
     sick_and_halted: tuple[int, ...] = (),
     close: dict[int, str] | None = None,
 ) -> ScreenResult:
@@ -81,6 +82,10 @@ def screen_of(
     verdicts += [
         EligibilityVerdict(ts_code=name(p), reasons=("suspended", "missing_factor_value"))
         for p in halted_and_thin
+    ]
+    verdicts += [
+        EligibilityVerdict(ts_code=name(p), reasons=("suspended", "illiquid"))
+        for p in halted_and_illiquid
     ]
     verdicts += [
         EligibilityVerdict(ts_code=name(p), reasons=("special_treatment", "suspended"))
@@ -504,4 +509,17 @@ def test_a_holding_that_is_halted_and_has_a_real_problem_is_not_frozen() -> None
     )
 
     assert [e.ts_code for e in decision.exits] == [name(3)]
+    assert decision.frozen == ()
+
+
+def test_a_halted_holding_the_screen_also_calls_illiquid_is_not_frozen() -> None:
+    # A halted name is not in the liquidity population, so a screen never gives it `illiquid` for
+    # being halted. If one says so anyway, that is a real problem and not a consequence of the halt.
+    decision = decide_book(
+        config=config(),
+        screen=screen_of([0, 1, 2], halted_and_illiquid=(3,)),
+        state=state(held=(0, 1, 2, 3)),
+    )
+
+    assert [(e.ts_code, e.reason) for e in decision.exits] == [(name(3), "EXIT_ELIGIBILITY_LOST")]
     assert decision.frozen == ()

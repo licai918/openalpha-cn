@@ -3,7 +3,7 @@
 这是对 `domain/survivor_*.py` 的手工变异检查；脚本不入库；每个变异逐个应用、跑
 `tests/unit/domain/test_survivor_*.py`、还原。
 
-**结果：`killed 52 / 52`，`SURVIVED: []`，`PATTERN NOT UNIQUE: []`。** 没有存活的变异，因此没有需要判定是否等价的变异，
+**结果：`killed 53 / 53`，`SURVIVED: []`，`PATTERN NOT UNIQUE: []`。** 没有存活的变异，因此没有需要判定是否等价的变异，
 也没有为杀死变异而追加的测试。被测代码是 `domain/survivor_book.py`、`survivor_screen.py`、`survivor_selection.py`、
 `survivor_policy.py`、`survivor_orders.py`、`survivor_lifecycle.py` 六个模块；测试是 `tests/unit/domain/test_survivor_*.py`
 七个文件（含逐日仿真 `test_survivor_book_lifecycle.py`）。
@@ -13,9 +13,9 @@
 每个变异是对一个源文件的一处**唯一**文本替换（出现次数不是恰好 1 的模式会被记入 `PATTERN NOT UNIQUE`，不会被应用）。
 应用后用 `pytest -x` 跑上述七个测试文件；进程退出码非 0 即"被杀死"，为 0 即"存活"；无论结果都在 `finally` 里把
 源文件还原为原文。子进程的 `PYTHONPATH` 指向被测检出的 `src`，并设 `PYTHONDONTWRITEBYTECODE=1`，避免同尺寸变异读到
-陈旧的 `.pyc`。变异按模块分布：`survivor_book.py` 3; `survivor_lifecycle.py` 5; `survivor_orders.py` 12; `survivor_policy.py` 22; `survivor_screen.py` 7; `survivor_selection.py` 3。
+陈旧的 `.pyc`。变异按模块分布：`survivor_book.py` 3; `survivor_lifecycle.py` 5; `survivor_orders.py` 12; `survivor_policy.py` 23; `survivor_screen.py` 7; `survivor_selection.py` 3。
 
-## 52 个变异
+## 53 个变异
 
 | # | 变异（标签） | 文件 | 结果 |
 |---|---|---|---|
@@ -41,7 +41,7 @@
 | 20 | keeps the thin names out of the cut | `survivor_screen.py` | killed |
 | 21 | inexact sum | `survivor_screen.py` | killed |
 | 22 | partial composite | `survivor_screen.py` | killed |
-| 23 | liquidity over all boards | `survivor_screen.py` | killed |
+| 23 | liquidity over every name, halted ones included | `survivor_screen.py` | killed |
 | 24 | duplicates not collapsed | `survivor_selection.py` | killed |
 | 25 | seed ignored | `survivor_selection.py` | killed |
 | 26 | sells one lot | `survivor_orders.py` | killed |
@@ -71,3 +71,4 @@
 | 50 | an order that executes before it is planned | `survivor_orders.py` | killed |
 | 51 | a survivor listed twice | `survivor_book.py` | killed |
 | 52 | cancel is checked before expiry | `survivor_lifecycle.py` | killed |
+| 53 | illiquid counts as following from a halt | `survivor_policy.py` | killed |
