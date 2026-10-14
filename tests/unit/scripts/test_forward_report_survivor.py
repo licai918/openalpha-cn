@@ -315,7 +315,7 @@ def test_three_evenings_report_counts_their_records_and_tests_nothing(
     assert records["by_verdict"] == {"verified": 3, "unverifiable": 0, "refused": 0, "unchecked": 0}
     assert (records["unverifiable"], records["refused"]) == ([], [])
 
-    for name, horizon in (("h20", 20), ("h5", 5)):
+    for name, horizon, positions in (("h20", 20, 2), ("h5", 5, 8)):
         layer = document["prediction_layer"][name]
         assert (layer["horizon"], layer["witnessed"], layer["mature"], layer["immature"]) == (
             horizon,
@@ -329,13 +329,13 @@ def test_three_evenings_report_counts_their_records_and_tests_nothing(
         sample = layer["non_overlapping"]
         assert sample["sampled"] == ["2026-04-06"]
         assert (sample["pending"], sample["gaps"], sample["values"]) == (["2026-04-06"], [], [])
-        assert (sample["matured"], sample["window_periods"], sample["window_satisfied"]) == (
+        assert (sample["matured"], sample["window_positions"], sample["window_satisfied"]) == (
             0,
-            2,
+            positions,
             False,
         )
         assert sample["test"] is None
-        assert sample["status"] == "not tested: 0 of 2 pre-registered periods matured"
+        assert sample["status"] == (f"not tested: 0 of {positions} pre-registered periods matured")
     family = document["prediction_layer"]["secondary_family"]
     assert family["headline"]["tests"] == []
     assert family["headline"]["status"].startswith("not applied")
@@ -797,8 +797,10 @@ def test_matured_records_put_the_labels_the_sample_its_gaps_and_the_test_on_the_
 ) -> None:
     """Twenty-five records on 3 June: at h=20 the records of ordinals 1 to 21 have matured
     (their exits, ordinal 22 to 42, published by the 2nd), the sample is ordinals 1, 21 and 41
-    -- 41 a gap, no record -- and with a window of two periods the test is made once, over 1 and
-    21, each number of a period the shared reader's at the report's `as_of`. The secondary
+    -- 41 a gap, no record, after the window -- and with a window of two periods the test is made
+    once, over its two positions 1 and 21, each number of a period the shared reader's at the
+    report's `as_of`. At h=5 the window is the eight positions over the same 40 sessions, three
+    of them without a record: tested on five. The secondary
     family is corrected once the window is satisfied (Benjamini-Yekutieli, arbitrary
     dependence); the check was built as the registration says and asked of every record, mature
     or not; the paper book holds nothing, so its record is refused by name and the prediction
@@ -838,7 +840,10 @@ def test_matured_records_put_the_labels_the_sample_its_gaps_and_the_test_on_the_
     assert sample["gaps"] == [{"session": day(41).isoformat(), "reason": "no_record"}]
     assert _period_sessions(sample) == [day(1).isoformat(), day(21).isoformat()]
     assert (sample["matured"], sample["window_satisfied"]) == (2, True)
-    assert sample["status"] == "tested once, over the first 2 of 2 matured periods"
+    assert sample["status"] == (
+        "tested on 2 of 2 positions (0 no record, 0 refused, 0 unverifiable excluded in the "
+        "sensitivity)"
+    )
     expected = _independent_outcome(world, matured, ordinal=1, horizon=20)
     first = sample["values"][0]
     assert first["record_id"] == matured.records[1]
@@ -863,8 +868,12 @@ def test_matured_records_put_the_labels_the_sample_its_gaps_and_the_test_on_the_
     five = document["prediction_layer"]["h5"]["non_overlapping"]
     assert five["sampled"] == [day(o).isoformat() for o in range(1, 42, 5)]
     assert _period_sessions(five) == [day(o).isoformat() for o in (1, 6, 11, 16, 21)]
-    assert [test["metric"] for test in five["test"]] == ["rank_ic"]
-    assert five["status"] == "tested once, over the first 2 of 5 matured periods"
+    assert [(test["metric"], test["values"]) for test in five["test"]] == [("rank_ic", 5)]
+    assert five["window_sessions"] == [day(o).isoformat() for o in range(1, 37, 5)]
+    assert five["status"] == (
+        "tested on 5 of 8 positions (3 no record, 0 refused, 0 unverifiable excluded in the "
+        "sensitivity)"
+    )
 
     family = document["prediction_layer"]["secondary_family"]
     assert family["family"] == ["h20.survivors_minus_ew", "h20.ew_minus_worst_decile", "h5.rank_ic"]
@@ -938,11 +947,12 @@ def test_a_refused_record_in_the_sample_at_k_compromises_the_test_and_an_unverif
     matured_panel: Path,
     scripted: ScriptedCheck,
 ) -> None:
-    """Ordinal 6 refused and ordinal 11 UNVERIFIABLE. At h=5 the refused record is a gap inside
-    the sample the test is made over (1, 6, 11): the test is printed "compromised (1 refused)".
-    The UNVERIFIABLE record stays in the headline and is listed with its changes; the
-    sensitivity turns its session into a gap and tests 1 and 16. The refused record is in no
-    reading: the h=20 headline includes 20 of its 21 mature records, the sensitivity 19."""
+    """Ordinal 6 refused and ordinal 11 UNVERIFIABLE. At h=5 the refused record is a gap among
+    the window's eight positions (1, 6, .., 36), the sample the test is made over: the test is
+    printed "compromised (1 refused)". The UNVERIFIABLE record stays in the headline and is
+    listed with its changes; the sensitivity turns its session into a gap and tests the same
+    window less it. The refused record is in no reading: the h=20 headline includes 20 of its 21
+    mature records, the sensitivity 19."""
     day = SessionOrdinals(calendar_of(matured_panel), EPOCH).day_of
     scripted.table = {
         day(6): ("refused", "recompute_differs", ()),
@@ -982,12 +992,16 @@ def test_a_refused_record_in_the_sample_at_k_compromises_the_test_and_an_unverif
     assert _period_sessions(headline)[:2] == [day(1).isoformat(), day(11).isoformat()]
     assert headline["refused_in_sample"] == 1
     assert headline["status"] == (
-        "compromised (1 refused): tested once, over the first 2 of 4 matured periods"
+        "compromised (1 refused): tested on 4 of 8 positions (3 no record, 1 refused, 1 "
+        "unverifiable excluded in the sensitivity)"
     )
     sensitivity = five["excluding_unverifiable"]["non_overlapping"]
     assert {"session": day(11).isoformat(), "reason": "unverifiable"} in sensitivity["gaps"]
     assert _period_sessions(sensitivity)[:2] == [day(1).isoformat(), day(16).isoformat()]
-    assert sensitivity["status"].startswith("compromised (1 refused): tested once")
+    assert sensitivity["status"] == (
+        "compromised (1 refused): tested on 3 of 8 positions (3 no record, 1 refused, 1 "
+        "unverifiable excluded in the sensitivity)"
+    )
 
     twenty = document["prediction_layer"]["h20"]
     assert twenty["excluded"] == {"refused": 1, "unchecked": 0}
@@ -995,7 +1009,8 @@ def test_a_refused_record_in_the_sample_at_k_compromises_the_test_and_an_unverif
     assert twenty["descriptive"]["means"]["rank_ic"]["n"] <= 20
     assert twenty["non_overlapping"]["refused_in_sample"] == 0
     assert twenty["non_overlapping"]["status"] == (
-        "tested once, over the first 2 of 2 matured periods"
+        "tested on 2 of 2 positions (0 no record, 0 refused, 0 unverifiable excluded in the "
+        "sensitivity)"
     )
     lines = out.splitlines()
     refused_line = lines.index(next(line for line in lines if line.startswith("  REFUSED")))
@@ -1015,9 +1030,10 @@ def test_no_secondary_test_is_shown_before_the_primary_window(
     matured_panel: Path,
     scripted: ScriptedCheck,
 ) -> None:
-    """A window of three periods: h=20 has matured two (1 and 21; 41 has no record), so the one
-    analysis is not made. h=5's own sample has five -- but a secondary is tested only in the
-    one analysis, at the primary window: no test, no p-value, no correction anywhere."""
+    """A window of three periods: h=20 has matured two of its positions (1 and 21; 41, with no
+    record, exits at ordinal 62), so the one analysis is not made. h=5's window is the twelve
+    positions over the same 60 sessions, eight of them matured: no test, no p-value, no
+    correction anywhere."""
     matured = _matured(
         tmp_path, monkeypatch, matured_panel, settings=settings_with(window_periods=3)
     )
@@ -1030,10 +1046,10 @@ def test_no_secondary_test_is_shown_before_the_primary_window(
     assert (twenty["matured"], twenty["window_satisfied"], twenty["test"]) == (2, False, None)
     assert twenty["status"] == "not tested: 2 of 3 pre-registered periods matured"
     five = document["prediction_layer"]["h5"]["non_overlapping"]
-    assert (five["matured"], five["window_satisfied"], five["test"]) == (5, True, None)
-    assert five["status"] == (
-        "not tested: a secondary is tested in the one analysis at the primary window "
-        "(2 of 3 primary periods matured)"
+    assert (five["matured"], five["window_positions"], five["window_satisfied"]) == (8, 12, False)
+    assert (five["test"], five["status"]) == (
+        None,
+        "not tested: 8 of 12 pre-registered periods matured",
     )
     family = document["prediction_layer"]["secondary_family"]
     assert family["headline"]["tests"] == []

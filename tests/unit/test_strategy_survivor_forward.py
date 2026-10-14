@@ -36,7 +36,7 @@ import re
 import statistics
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final
@@ -103,6 +103,7 @@ from openalpha_cn.strategy_survivor_forward import (
     SURVIVOR_FORWARD_REPORT_KIND,
     PredictionLayer,
     RecordOutcome,
+    SampledPeriod,
     SampledSessions,
     SurvivorForwardError,
     SurvivorForwardProtocol,
@@ -689,8 +690,33 @@ def test_the_sample_is_the_anchor_and_every_horizon_th_calendar_session_after_it
     sampled = sampled_sessions(ORDINALS, anchor_ordinal=anchor, through=through, horizon=horizon)
 
     assert sampled == SampledSessions(
-        anchor_ordinal=anchor, horizon=horizon, through=through, sessions=expected
+        anchor_ordinal=anchor,
+        horizon=horizon,
+        through=through,
+        sessions=expected,
+        exits=tuple(ORDINALS.day_of(ORDINALS.index_of(day) + 1 + horizon) for day in expected),
     )
+
+
+def test_each_sampled_session_carries_its_label_exit_on_the_calendar_or_none_past_it() -> None:
+    """The exit of the label window of a sampled session -- the close `h` sessions after the
+    session after it, `build_label_window`'s rule -- is the calendar's, so a position with no
+    record has one too; past the stored calendar's last session it is unknown."""
+    last = ORDINALS.index_of(CALENDAR.horizon.last_date)
+
+    sampled = sampled_sessions(
+        ORDINALS, anchor_ordinal=last - 25, through=ORDINALS.day_of(last), horizon=20
+    )
+
+    assert sampled.sessions == (ORDINALS.day_of(last - 25), ORDINALS.day_of(last - 5))
+    assert sampled.exits == (ORDINALS.day_of(last - 4), None)
+    window = build_label_window(
+        as_of=session_publication_instant(sampled.sessions[0]),
+        zone=SHANGHAI,
+        horizon=ResearchHorizon(count=20, unit=HorizonUnit.trading_days),
+        calendar=CALENDAR,
+    )
+    assert window.exit_day == sampled.exits[0]
 
 
 def test_the_sample_counts_calendar_sessions_not_days() -> None:
@@ -1321,7 +1347,8 @@ def test_before_the_window_there_are_counts_and_descriptive_means_and_no_test(
     assert sample.sampled == (day(1), day(21), day(41))
     assert [period.session for period in sample.periods] == [day(1), day(21)]
     assert sample.pending == (day(41),)
-    assert (sample.matured, sample.window_periods, sample.window_satisfied) == (2, 3, False)
+    assert (sample.matured, sample.window_positions, sample.window_satisfied) == (2, 3, False)
+    assert (sample.window_span_sessions, sample.window_sessions) == (60, sample.sampled)
     assert sample.tests == ()
     assert sample.status == "not tested: 2 of 3 pre-registered periods matured"
     assert all(mean.wording == DESCRIPTIVE_WORDING for mean in sample.means)
@@ -1330,20 +1357,45 @@ def test_before_the_window_there_are_counts_and_descriptive_means_and_no_test(
     assert (built.witnessed, built.mature, built.immature) == (41, 40, 1)
 
 
-def test_at_the_window_each_metric_of_the_horizon_is_tested_once_over_the_first_k_periods() -> None:
+def rank_ics(*ordinals: int) -> tuple[float, ...]:
+    """`every_session`'s rank IC of the record of each of `ordinals`."""
+    return tuple(0.01 * (ordinal % 7) - 0.02 for ordinal in ordinals)
+
+
+def sessions_of(periods: Sequence[SampledPeriod]) -> list[date]:
+    return [period.session for period in periods]
+
+
+NO_GAP: Final[str] = "0 no record, 0 refused, 0 unverifiable excluded in the sensitivity"
+
+
+def test_at_the_window_each_metric_is_tested_once_over_the_k_calendar_positions() -> None:
+    """The analysis set is the calendar's: the K positions `anchor + h k`, k = 0 .. K - 1, from
+    the anchor. Once the K-th has matured each metric is tested once over them; a sampled period
+    after the window is described, never tested."""
     outcomes = every_session(61)
 
     built = layer(outcomes, verified(outcomes), through=61)
 
     sample = built.headline.non_overlapping
-    assert [period.session for period in sample.periods] == [day(1), day(21), day(41), day(61)]
-    assert (sample.matured, sample.window_satisfied) == (4, True)
+    assert sessions_of(sample.periods) == [day(1), day(21), day(41), day(61)]
+    assert sample.window_sessions == (day(1), day(21), day(41))
+    assert sessions_of(sample.tested_periods) == [day(1), day(21), day(41)]
+    assert (sample.matured, sample.window_satisfied) == (3, True)
+    assert dict(sample.in_window) == {
+        "periods": 3,
+        "pending": 0,
+        "no_record": 0,
+        "refused": 0,
+        "unchecked": 0,
+        "unverifiable": 0,
+    }
     assert [(test.metric, test.role, test.values) for test in sample.tests] == [
         ("rank_ic", "primary", 3),
         ("survivors_minus_ew", "secondary", 3),
         ("ew_minus_worst_decile", "secondary", 3),
     ]
-    first_three = tuple(0.01 * (ordinal % 7) - 0.02 for ordinal in (1, 21, 41))
+    first_three = rank_ics(1, 21, 41)
     primary = sample.tests[0]
     assert primary.test == sign_flip_test(first_three, bootstrap_samples=1000, random_seed=11)
     assert primary.mean == pytest.approx(statistics.fmean(first_three))
@@ -1354,24 +1406,36 @@ def test_at_the_window_each_metric_of_the_horizon_is_tested_once_over_the_first_
         else 1 - primary.test.p_value / 2
     )
     assert primary.one_sided_p_value == pytest.approx(expected_one_sided)
-    assert sample.status == "tested once, over the first 3 of 4 matured periods"
+    assert sample.status == f"tested on 3 of 3 positions ({NO_GAP})"
     assert not any(word in repr(built).lower() for word in FORBIDDEN_WORDS)
 
 
-def test_a_sampled_session_with_no_record_is_a_gap_and_does_not_shift_later_picks() -> None:
+def test_a_position_with_no_record_is_a_gap_that_reduces_n_and_never_moves_the_window() -> None:
+    """Position 2 (ordinal 21) has no record: the test is over positions 1 and 3, n = 2 of
+    K = 3, and the period after the window (ordinal 61) does not take its place."""
     outcomes = every_session(61, skip=frozenset({21}))
 
     built = layer(outcomes, verified(outcomes), through=61)
 
     sample = built.headline.non_overlapping
     assert sample.gaps == ((day(21), "no_record"),)
-    assert [period.session for period in sample.periods] == [day(1), day(41), day(61)]
-    assert day(22) not in {period.session for period in sample.periods}
-    values = tuple(0.01 * (ordinal % 7) - 0.02 for ordinal in (1, 41, 61))
-    assert sample.tests[0].test == sign_flip_test(values, bootstrap_samples=1000, random_seed=11)
+    assert sessions_of(sample.periods) == [day(1), day(41), day(61)]
+    assert day(22) not in set(sessions_of(sample.periods))
+    assert sessions_of(sample.tested_periods) == [day(1), day(41)]
+    assert (sample.matured, sample.window_satisfied) == (3, True)
+    assert sample.tests[0].test == sign_flip_test(
+        rank_ics(1, 41), bootstrap_samples=1000, random_seed=11
+    )
+    assert sample.status == (
+        "tested on 2 of 3 positions (1 no record, 0 refused, 0 unverifiable excluded in the "
+        "sensitivity)"
+    )
 
 
 def test_a_refused_or_an_unchecked_record_is_a_gap_and_is_counted() -> None:
+    """Position 2 refused and position 3 unchecked: both are gaps of the window, which is still
+    satisfied -- its third position has matured -- so each metric is tested on what is left, one
+    period, which no sign-flip test can be made over."""
     outcomes = every_session(61)
     verdicts = verified(outcomes, prd_0021=REFUSED)
     del verdicts["prd_0041"]
@@ -1380,20 +1444,49 @@ def test_a_refused_or_an_unchecked_record_is_a_gap_and_is_counted() -> None:
 
     sample = built.headline.non_overlapping
     assert sample.gaps == ((day(21), "refused"), (day(41), "unchecked"))
-    assert [period.session for period in sample.periods] == [day(1), day(61)]
+    assert sessions_of(sample.periods) == [day(1), day(61)]
+    assert sessions_of(sample.tested_periods) == [day(1)]
     assert built.excluded == (("refused", 1), ("unchecked", 1))
-    assert sample.tests == ()
+    assert sample.window_satisfied
+    assert [(test.values, test.test, test.one_sided_p_value) for test in sample.tests] == [
+        (1, None, None)
+    ] * 3
+    assert sample.status == (
+        "tested on 1 of 3 positions (0 no record, 1 refused, 1 unchecked, 0 unverifiable "
+        "excluded in the sensitivity)"
+    )
     assert built.headline.included == 59
 
 
-def test_excluding_unverifiable_turns_its_sampled_session_into_a_gap() -> None:
-    outcomes = every_session(41)
+def test_a_verdict_that_turns_refused_leaves_the_tested_positions_where_they_were() -> None:
+    """One report verifies every record; a later one finds position 2's refused. The window does
+    not move out to ordinal 61: the later test is over positions 1 and 3, a subset of the first
+    one's, and its status says what it lost."""
+    outcomes = every_session(61)
 
-    built = layer(outcomes, verified(outcomes, prd_0021=UNVERIFIABLE), through=41)
+    first = layer(outcomes, verified(outcomes), through=61).headline.non_overlapping
+    later = layer(
+        outcomes, verified(outcomes, prd_0021=REFUSED), through=61
+    ).headline.non_overlapping
+
+    assert sessions_of(first.tested_periods) == [day(1), day(21), day(41)]
+    assert sessions_of(later.tested_periods) == [day(1), day(41)]
+    assert later.window_sessions == first.window_sessions
+    assert later.status.startswith("tested on 2 of 3 positions (0 no record, 1 refused")
+
+
+def test_the_headline_and_the_sensitivity_are_tested_on_the_same_positions() -> None:
+    """Position 2's record is UNVERIFIABLE: the headline is tested on positions 1, 2 and 3, the
+    sensitivity -- which turns that session into a gap -- on 1 and 3: the same window less that
+    record, never 1, 3 and the period after the window, so the two answers are over the same
+    calendar periods."""
+    outcomes = every_session(61)
+
+    built = layer(outcomes, verified(outcomes, prd_0021=UNVERIFIABLE), through=61)
 
     headline = built.headline.non_overlapping
     sensitivity = built.excluding_unverifiable.non_overlapping
-    assert [period.session for period in headline.periods] == [day(1), day(21), day(41)]
+    assert sessions_of(headline.tested_periods) == [day(1), day(21), day(41)]
     assert headline.gaps == ()
     assert [test.metric for test in headline.tests] == [
         "rank_ic",
@@ -1401,10 +1494,140 @@ def test_excluding_unverifiable_turns_its_sampled_session_into_a_gap() -> None:
         "ew_minus_worst_decile",
     ]
     assert sensitivity.gaps == ((day(21), "unverifiable"),)
-    assert [period.session for period in sensitivity.periods] == [day(1), day(41)]
-    assert sensitivity.tests == ()
-    assert sensitivity.status == "not tested: 2 of 3 pre-registered periods matured"
-    assert (built.headline.included, built.excluding_unverifiable.included) == (41, 40)
+    assert sensitivity.window_sessions == headline.window_sessions
+    assert sessions_of(sensitivity.tested_periods) == [day(1), day(41)]
+    assert sensitivity.tests[0].test == sign_flip_test(
+        rank_ics(1, 41), bootstrap_samples=1000, random_seed=11
+    )
+    counted = "0 no record, 0 refused, 1 unverifiable excluded in the sensitivity"
+    assert headline.status == f"tested on 3 of 3 positions ({counted})"
+    assert sensitivity.status == f"tested on 2 of 3 positions ({counted})"
+    assert (
+        dict(headline.in_window)["unverifiable"],
+        dict(sensitivity.in_window)["unverifiable"],
+    ) == (
+        0,
+        1,
+    )
+    assert (built.headline.included, built.excluding_unverifiable.included) == (61, 60)
+
+
+def labelled_at(
+    instant: datetime, ordinals: Iterable[int], *, horizon: int = 20
+) -> tuple[RecordOutcome, ...]:
+    """Records of `ordinals` read at `instant`: each mature exactly when its exit's 16:30 has
+    come, its entry and exit the calendar's."""
+    outcomes: list[RecordOutcome] = []
+    for ordinal in ordinals:
+        exit_day = day(ordinal + 1 + horizon)
+        mature = instant >= session_publication_instant(exit_day)
+        outcomes.append(
+            dataclasses.replace(
+                made(ordinal, horizon=horizon, mature=mature, rank_ic=rank_ics(ordinal)[0]),
+                label_as_of=instant,
+                entry_day=day(ordinal + 1),
+                exit_day=exit_day,
+            )
+        )
+    return tuple(outcomes)
+
+
+@pytest.mark.parametrize(("minutes", "satisfied"), [(-1, False), (0, True)])
+def test_the_window_is_satisfied_when_its_last_position_matures_even_one_with_no_record(
+    minutes: int, satisfied: bool
+) -> None:
+    """Position 3 (ordinal 41) has no record. Whether it has matured is the calendar's: its
+    label window would exit at ordinal 62's close, published at 16:30 that day. From that
+    instant the window is satisfied and tested on positions 1 and 2; a minute before, it is not,
+    and nothing is tested."""
+    instant = session_publication_instant(day(62)) + timedelta(minutes=minutes)
+    outcomes = labelled_at(instant, (o for o in range(1, 62) if o != 41))
+
+    built = layer(outcomes, verified(outcomes), through=61)
+
+    sample = built.headline.non_overlapping
+    assert (sample.matured, sample.window_satisfied) == (3 if satisfied else 2, satisfied)
+    assert sample.gaps == ((day(41), "no_record"),)
+    if satisfied:
+        assert sessions_of(sample.tested_periods) == [day(1), day(21)]
+        assert sample.status == (
+            "tested on 2 of 3 positions (1 no record, 0 refused, 0 unverifiable excluded in "
+            "the sensitivity)"
+        )
+    else:
+        assert sample.tests == ()
+        assert sample.status == "not tested: 2 of 3 pre-registered periods matured"
+
+
+def test_with_no_record_at_all_a_position_has_matured_once_its_exit_is_on_or_before_through() -> (
+    None
+):
+    """No outcome handed in, so the layer has no `as_of`: a position counts as matured when its
+    exit is on or before `through`, whose 09:15 cutoff the report has passed -- so the exit's
+    16:30 has too. Through ordinal 61 the third position (exit 62) has not; through 62 it has,
+    and the window is satisfied with nothing in it to test: n = 0 of 3."""
+    short = layer((), {}, through=61).headline.non_overlapping
+    full = layer((), {}, through=62).headline.non_overlapping
+
+    assert (short.matured, short.window_satisfied, short.tests) == (2, False, ())
+    assert (full.matured, full.window_satisfied) == (3, True)
+    assert [(test.values, test.test) for test in full.tests] == [(0, None)] * 3
+    assert full.status == (
+        "tested on 0 of 3 positions (3 no record, 0 refused, 0 unverifiable excluded in the "
+        "sensitivity)"
+    )
+
+
+def test_an_outcome_whose_exit_is_not_its_positions_exit_on_the_calendar_is_refused() -> None:
+    """A position's maturity is read off the sample's calendar when it has no record and off
+    its record's outcome when it has one, so the two must agree on its exit."""
+    outcomes = tuple(
+        dataclasses.replace(outcome, exit_day=day(51)) if outcome.ordinal == 21 else outcome
+        for outcome in labelled_at(LAYER_AS_OF, range(1, 42))
+    )
+
+    with pytest.raises(SurvivorForwardError, match=day(21).isoformat()):
+        layer(outcomes, verified(outcomes), through=41)
+
+
+def test_a_secondary_horizon_is_drawn_over_the_primary_windows_calendar_span() -> None:
+    """K = 3 periods of 20 sessions span 60 sessions from the anchor. At h=5 the window is the
+    floor(3 * 20 / 5) = 12 positions over the same span -- ordinals 1, 6, .., 56, whose last
+    exits at ordinal 62, as the primary's last does -- and its one test, of the primary metric
+    as a secondary, is over all twelve: never over the first three five-session periods."""
+    outcomes = tuple(made(o, horizon=5, rank_ic=rank_ics(o)[0]) for o in range(1, 62))
+
+    built = layer(outcomes, verified(outcomes), through=61, horizon=5)
+
+    assert (built.horizon, built.role) == (5, "secondary")
+    sample = built.headline.non_overlapping
+    positions = tuple(range(1, 57, 5))
+    assert (sample.window_positions, sample.window_span_sessions) == (12, 60)
+    assert sample.sampled == tuple(day(o) for o in range(1, 62, 5))
+    assert sample.window_sessions == tuple(day(o) for o in positions)
+    assert sessions_of(sample.tested_periods) == [day(o) for o in positions]
+    [test] = sample.tests
+    assert (test.metric, test.role, test.values) == ("rank_ic", "secondary", 12)
+    assert test.test == sign_flip_test(rank_ics(*positions), bootstrap_samples=1000, random_seed=11)
+    assert sample.status == f"tested on 12 of 12 positions ({NO_GAP})"
+
+
+@pytest.mark.parametrize(("horizon", "positions"), [(20, 3), (5, 12), (7, 8), (40, 1), (60, 1)])
+def test_every_horizon_gets_the_whole_positions_that_fit_the_primary_windows_span(
+    horizon: int, positions: int
+) -> None:
+    """floor(K * h_primary / h): K = 3 and h_primary = 20 span 60 sessions."""
+    read = protocol(secondary_horizons=[] if horizon == 20 else [horizon])
+
+    assert read.window_positions(horizon) == positions
+
+
+def test_a_secondary_horizon_longer_than_the_primary_windows_span_is_refused_by_name() -> None:
+    """It would have no position in the window: there is nothing to pre-register."""
+    with pytest.raises(SurvivorForwardError, match="span"):
+        protocol(secondary_horizons=[61])
+    with pytest.raises(SurvivorForwardError, match="horizon 9"):
+        protocol().window_positions(9)
 
 
 def test_the_descriptive_means_are_over_every_included_mature_daily_record() -> None:
@@ -1465,22 +1688,6 @@ def test_the_one_sided_p_of_every_metric_is_small_for_a_positive_mean_and_large_
     assert test.test is not None
     assert (test.test.p_value, test.test.exact) == (0.25, True)
     assert test.one_sided_p_value == (0.125 if sign > 0 else 0.875)
-
-
-def test_a_secondary_horizon_tests_only_the_primary_metric_and_as_a_secondary() -> None:
-    outcomes = tuple(made(ordinal, horizon=5) for ordinal in range(1, 12))
-
-    built = layer(outcomes, verified(outcomes), through=11, horizon=5)
-
-    assert (built.horizon, built.role) == (5, "secondary")
-    assert [period.session for period in built.headline.non_overlapping.periods] == [
-        day(1),
-        day(6),
-        day(11),
-    ]
-    assert [(test.metric, test.role) for test in built.headline.non_overlapping.tests] == [
-        ("rank_ic", "secondary")
-    ]
 
 
 def test_the_layer_carries_its_wording_and_no_verdict_word() -> None:
@@ -1667,10 +1874,10 @@ def verdict_words(document: Mapping[str, Any]) -> list[str]:
 
 
 def test_before_the_primary_window_the_document_counts_describes_and_tests_nothing() -> None:
-    """Twenty-five mature daily records and a window of three: at h=20 two sampled periods have
-    matured (1 and 21), so nothing is tested -- "not tested: 2 of 3". At h=5 five have, but a
-    secondary is tested only in the one analysis at the primary window: no test there either,
-    no correction of the secondary family, no p-value anywhere and no verdict word."""
+    """Twenty-five mature daily records and a window of three: at h=20 two of the window's
+    positions have matured (1 and 21), so nothing is tested -- "not tested: 2 of 3". At h=5 the
+    window is twelve positions over the same 60 sessions and five have matured: no test there
+    either, no correction of the secondary family, no p-value anywhere and no verdict word."""
     outcomes = {20: every_session(25), 5: tuple(made(o, horizon=5) for o in range(1, 26))}
 
     document = reported(outcomes, checked_by(outcomes[20]), through=25)
@@ -1685,11 +1892,21 @@ def test_before_the_primary_window_the_document_counts_describes_and_tests_nothi
         None,
         "not tested: 2 of 3 pre-registered periods matured",
     )
+    assert (twenty["window_positions"], twenty["window_span_sessions"]) == (3, 60)
+    assert twenty["window_sessions"] == [day(1).isoformat(), day(21).isoformat()]
+    assert twenty["in_window"] == {
+        "periods": 2,
+        "pending": 0,
+        "no_record": 0,
+        "refused": 0,
+        "unchecked": 0,
+        "unverifiable": 0,
+    }
     five = document["prediction_layer"]["h5"]["non_overlapping"]
-    assert (five["matured"], five["window_satisfied"], five["test"]) == (5, True, None)
-    assert five["status"] == (
-        "not tested: a secondary is tested in the one analysis at the primary window "
-        "(2 of 3 primary periods matured)"
+    assert (five["matured"], five["window_positions"], five["window_satisfied"]) == (5, 12, False)
+    assert (five["test"], five["status"]) == (
+        None,
+        "not tested: 5 of 12 pre-registered periods matured",
     )
     family = document["prediction_layer"]["secondary_family"]
     assert family["headline"] == {
@@ -1724,10 +1941,37 @@ def by_by_hand(p_values: Mapping[str, float], *, family_size: int) -> dict[str, 
     return adjusted
 
 
+def test_a_secondary_whose_window_matures_first_still_waits_for_the_primary_window() -> None:
+    """h=7 against h=20 with K = 3: the secondary's window is floor(60 / 7) = 8 positions, the
+    last (ordinal 50) exiting at ordinal 58, four sessions before the primary's. Here its eight
+    have matured and the primary's third has not: the secondary is tested only in the one
+    analysis, at the primary window -- no test and no p-value yet."""
+    outcomes = {
+        20: every_session(41, immature=frozenset({41})),
+        7: tuple(made(o, horizon=7) for o in range(1, 51)),
+    }
+
+    document = reported(outcomes, checked_by(outcomes[20]), through=50, secondary_horizons=[7])
+
+    seven = document["prediction_layer"]["h7"]["non_overlapping"]
+    assert (seven["matured"], seven["window_positions"], seven["window_satisfied"]) == (
+        8,
+        8,
+        True,
+    )
+    assert seven["test"] is None
+    assert seven["status"] == (
+        "not tested: a secondary is tested in the one analysis at the primary window "
+        "(2 of 3 primary periods matured)"
+    )
+    assert "p_value" not in json.dumps(document)
+
+
 def test_at_the_primary_window_the_secondary_family_is_corrected_by_benjamini_yekutieli() -> None:
     """A window of twelve two-session periods, primary h=2 and a secondary h=3: every metric is
-    tested once over its first twelve periods, exactly. A constant positive excess has the
-    smallest one-sided p twelve sign flips allow, 1/4096; a constant negative one -- a worst
+    tested once, exactly -- at h=2 over the window's twelve positions, at h=3 over the eight
+    that fit the same 24 sessions. A constant positive excess has the smallest one-sided p
+    twelve sign flips allow, 1/4096 (eight allow 1/256); a constant negative one -- a worst
     decile ahead of the equal weight -- the largest.
     The secondary family -- the two secondary metrics at h=2 and the rank IC at h=3 -- is then
     corrected under arbitrary dependence, by hand: the two small p-values clear q, the large one
@@ -1751,7 +1995,7 @@ def test_at_the_primary_window_the_secondary_family_is_corrected_by_benjamini_ye
 
     assert document["protocol"]["window_satisfied"] is True
     two = document["prediction_layer"]["h2"]["non_overlapping"]
-    assert two["status"] == "tested once, over the first 12 of 17 matured periods"
+    assert two["status"] == f"tested on 12 of 12 positions ({NO_GAP})"
     tests = {test["metric"]: test for test in two["test"]}
     assert (tests["survivors_minus_ew"]["exact"], tests["survivors_minus_ew"]["sign_patterns"]) == (
         True,
@@ -1760,7 +2004,8 @@ def test_at_the_primary_window_the_secondary_family_is_corrected_by_benjamini_ye
     assert tests["survivors_minus_ew"]["one_sided_p_value"] == pytest.approx(1 / 4096)
     assert tests["ew_minus_worst_decile"]["one_sided_p_value"] == pytest.approx(1 - 1 / 4096)
     three = document["prediction_layer"]["h3"]["non_overlapping"]
-    assert three["test"][0]["one_sided_p_value"] == pytest.approx(1 / 4096)
+    assert (three["window_positions"], three["test"][0]["values"]) == (8, 8)
+    assert three["test"][0]["one_sided_p_value"] == pytest.approx(1 / 256)
     family = document["prediction_layer"]["secondary_family"]
     assert family["family"] == ["h2.survivors_minus_ew", "h2.ew_minus_worst_decile", "h3.rank_ic"]
     assert (family["dependence"], family["q"], family["family_size"]) == ("arbitrary", 0.2, 3)
@@ -1768,7 +2013,7 @@ def test_at_the_primary_window_the_secondary_family_is_corrected_by_benjamini_ye
     expected = by_by_hand(
         {name: item["one_sided_p_value"] for name, item in corrected.items()}, family_size=3
     )
-    assert expected["h2.survivors_minus_ew"] == pytest.approx(5.5 / 4096 / 2)
+    assert expected["h2.survivors_minus_ew"] == pytest.approx(5.5 / 4096)
     assert expected["h2.ew_minus_worst_decile"] == 1.0
     for name, q_value in expected.items():
         assert corrected[name]["q_value"] == pytest.approx(q_value)
@@ -1778,9 +2023,9 @@ def test_at_the_primary_window_the_secondary_family_is_corrected_by_benjamini_ye
 
 
 def test_a_refused_record_inside_the_tested_sample_compromises_it_and_one_after_does_not() -> None:
-    """Decision 9: a refused record whose session falls in the sample the test is made over --
-    up to the K-th matured period -- prints the test "compromised (n refused)". One refused
-    after that period is a gap of the sample and leaves the test as it is."""
+    """Decision 9: a refused record whose session is one of the window's positions -- the
+    sample the test is made over -- prints the test "compromised (n refused)". One refused after
+    the window is a gap of the sample and leaves the test as it is."""
     outcomes = {20: every_session(81), 5: ()}
 
     inside = reported(
@@ -1797,13 +2042,17 @@ def test_a_refused_record_inside_the_tested_sample_compromises_it_and_one_after_
     sample = inside["prediction_layer"]["h20"]["non_overlapping"]
     assert sample["refused_in_sample"] == 1
     assert sample["status"] == (
-        "compromised (1 refused): tested once, over the first 3 of 4 matured periods"
+        "compromised (1 refused): tested on 2 of 3 positions (0 no record, 1 refused, 0 "
+        "unverifiable excluded in the sensitivity)"
     )
     assert sample["test"] is not None
     later = after["prediction_layer"]["h20"]["non_overlapping"]
     assert later["refused_in_sample"] == 0
-    assert later["status"] == "tested once, over the first 3 of 4 matured periods"
+    assert later["status"] == f"tested on 3 of 3 positions ({NO_GAP})"
     assert {"session": day(81).isoformat(), "reason": "refused"} in later["gaps"]
+    in_window = after["records"]["shares"]["in_sample"]
+    assert (in_window["checked"], in_window["refused"]) == (3, 0)
+    assert after["records"]["shares"]["overall"]["refused"] == 1
 
 
 def test_the_lines_list_the_refusals_first_then_the_layers_ledger_relative_wording_integrity() -> (
@@ -2003,7 +2252,7 @@ def seeded_document_digest() -> str:
 def test_the_document_is_byte_identical_under_two_hash_seeds() -> None:
     document = seeded_document()
     assert document["prediction_layer"]["h2"]["non_overlapping"]["status"].startswith(
-        "compromised (2 refused): tested once"
+        "compromised (2 refused): tested on 10 of 12 positions"
     )
     here = Path(__file__).resolve()
     program = (

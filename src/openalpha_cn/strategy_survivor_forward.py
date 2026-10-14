@@ -32,8 +32,10 @@ read:
   tested at the primary horizon, and at each secondary horizon only `primary_metric` is tested.
   Those two, together, are the secondary family -- `q` is its false-discovery rate, which the
   report's document applies across the horizons (this module tests one horizon at a time);
-- `window_periods` (K) is the pre-registered number of non-overlapping periods; the test is made
-  once, over the first K that matured, and never before K have;
+- `window_periods` (K) is the pre-registered number of non-overlapping periods of the primary
+  horizon: the window is K positions of the calendar, `K * primary_horizon` sessions from the
+  anchor, and the test is made once, when its last position has matured, never before (see
+  "The sample and the test");
 - `bootstrap_samples` and `random_seed` are `outcome_statistics.sign_flip_test`'s.
 
 ## The witnessed records (`witnessed_survivor_records`)
@@ -90,9 +92,35 @@ of which days produced a record. A sampled record not yet mature is pending, nei
 nor a gap. Every included mature daily record also enters a descriptive mean, printed as a point
 estimate with no standard error.
 
+**The analysis set is fixed by the calendar, before any record exists.** The window is the
+first `K_h` positions of the sample, `anchor + h k` for `k = 0 .. K_h - 1`, and every horizon's
+window spans the **primary** window's sessions: `K * primary_horizon` from the anchor, so
+`K_h = floor(K * primary_horizon / h)` -- K at the primary horizon, 4K at h=5 against h=20 -- and
+each horizon's last position exits no later than the primary's. A position is a gap when its
+session has no record, a refused or an unchecked one, or (the sensitivity only) an UNVERIFIABLE
+one: a gap reduces the number of periods tested, `n`, and never moves the window -- a verdict
+that later turns refused takes its period out of the test and brings no later period in. The
+window is **satisfied** when every one of its positions has matured: a position with a record
+when its record has (`RecordOutcome.mature`), one without when the 16:30 of the exit its label
+window would have (the close `h` sessions after the session after it, on the sample's calendar,
+`SampledSessions.exits`) is at or before the report's `as_of` -- the outcomes' `label_as_of`;
+with no outcome at all, when that exit is on or before `through`, whose cutoff has passed. Only
+then is each metric tested, once, over the window's `n` periods, and the status says what the
+window lost: "tested on n of K_h positions (g no record, r refused, u unverifiable excluded in
+the sensitivity)". A sampled period after the window is described, never tested. A metric with
+fewer than two values in the window is not tested and says why (`MINIMUM_INTERVAL_SAMPLE_SIZE`).
+
 The headline includes the records the check verified and the ones it found UNVERIFIABLE (P6's
-convention); `excluding_unverifiable` is the same layer with every UNVERIFIABLE record's session
-turned into a gap.
+convention); `excluding_unverifiable` is the same layer, over the same window, with every
+UNVERIFIABLE record's session turned into a gap, so the two answers are about the same calendar
+periods.
+
+**Left open for the `V2-P7-006` checkpoint** (engineering defaults here, not decisions): whether
+a test needs a minimum `n` beyond the sign-flip's two values (none is required: the test runs on
+the periods there are, and its status names every gap); how K applies at a secondary horizon
+(here the span rule above); and what a gap means for the pre-registered claim -- whether a
+window that lost positions to missing, refused or UNVERIFIABLE records still carries the claim,
+or how many it may lose.
 
 ## The report's document (`survivor_forward_document`, `survivor_forward_lines`; task E4)
 
@@ -110,13 +138,14 @@ does on its own:
   it may still get its record, so it is neither missing nor a gap yet; every session from ordinal
   1 through it with no witnessed record is listed as missing.
 - **One analysis, at the primary window.** The window is the primary horizon's headline sample:
-  until it has K matured periods, no layer's test is printed -- a secondary horizon whose own
-  sample matures faster (h=5 against h=20) is told "a secondary is tested in the one analysis at
-  the primary window" -- and the secondary family is not corrected. Before the window: counts and
-  descriptive means only, each labelled `DESCRIPTIVE_WORDING`, and no p-value anywhere.
-- **Compromised** (design decision 9): a record the late-record check refused whose session falls
-  in the sample a test is made over -- the sampled sessions up to the K-th matured period -- prints
-  that test "compromised (n refused)". The test is still shown; nothing about it is hidden.
+  until its K positions have matured, no layer's test is printed -- a secondary horizon whose own
+  window matures a little sooner (its last position exits up to `h - 1` sessions before the
+  primary's when `h` does not divide the span) is told "a secondary is tested in the one analysis
+  at the primary window" -- and the secondary family is not corrected. Before the window: counts
+  and descriptive means only, each labelled `DESCRIPTIVE_WORDING`, and no p-value anywhere.
+- **Compromised** (design decision 9): a record the late-record check refused whose session is
+  one of the window's positions -- the sample a test is made over -- prints that test
+  "compromised (n refused)". The test is still shown; nothing about it is hidden.
 - **The secondary family** -- the protocol's secondary metrics at the primary horizon and its
   primary metric at each secondary horizon -- is corrected once the window is satisfied, over the
   one-sided p-values that exist, by Benjamini-Yekutieli under arbitrary dependence at the
@@ -133,9 +162,9 @@ does on its own:
   every report.
 - **The late-record check's results**: counts by verdict and by scope, every UNVERIFIABLE record
   with its changes and every refused one with its reason, and the UNVERIFIABLE and refused shares
-  over every checked record and over the primary sample's. How many verdicts a run served from
-  the verdict cache is the run's, not the report's, and is not in the document: a rerun at the
-  same `as_of` serves them all and writes the same bytes.
+  over every checked record and over the primary window's positions. How many verdicts a run
+  served from the verdict cache is the run's, not the report's, and is not in the document: a
+  rerun at the same `as_of` serves them all and writes the same bytes.
 
 Every section carries `SURVIVOR_WORDING`; the prediction layer adds `PREDICTION_LAYER_WORDING`;
 the document ends with them and `NO_VERDICT_WORDING`, then the caller's integrity statement
@@ -327,7 +356,27 @@ class SurvivorForwardProtocol(BaseModel):
         metrics = self.secondary_metrics
         if len(set(metrics)) != len(metrics) or self.primary_metric in metrics:
             raise ValueError("secondary_metrics must not repeat a metric or the primary_metric")
+        span = self.window_periods * self.primary_horizon
+        longer = sorted(horizon for horizon in horizons if horizon > span)
+        if longer:
+            raise ValueError(
+                f"secondary_horizons {longer} are longer than the primary window's span "
+                f"({self.window_periods} periods of {self.primary_horizon} sessions, {span} "
+                "sessions), so they have no position in it"
+            )
         return self
+
+    @property
+    def window_span_sessions(self) -> int:
+        """The primary window's span: K periods of the primary horizon, in sessions."""
+        return self.window_periods * self.primary_horizon
+
+    def window_positions(self, horizon: int) -> int:
+        """`K_h`: the whole `horizon`-session positions that fit the primary window's span,
+        `floor(K * primary_horizon / horizon)` (module docstring); a horizon not in the protocol
+        refuses."""
+        self.tested_metrics(horizon)
+        return self.window_span_sessions // horizon
 
     def tested_metrics(self, horizon: int) -> tuple[tuple[ForwardMetric, Role], ...]:
         """What is tested at `horizon`, and in which role; a horizon not in the protocol refuses."""
@@ -487,6 +536,10 @@ class SampledSessions:
     horizon: int
     through: date
     sessions: tuple[date, ...]
+    exits: tuple[date | None, ...]
+    """Each session's label exit at `horizon`: the close `horizon` sessions after the session
+    after it (`build_label_window`'s rule), on the calendar the sample is drawn on; `None` past
+    that calendar's end. A sampled session with no record matures when this exit does."""
 
 
 def sampled_sessions(
@@ -495,7 +548,8 @@ def sampled_sessions(
     """The sessions with ordinal `anchor_ordinal + horizon * k` on or before `through`.
 
     Counted on the calendar's sessions (`ordinals`), never on the sessions that carry a record:
-    a session with no record is a gap in the sample, not a reason to move the next pick.
+    a session with no record is a gap in the sample, not a reason to move the next pick. Each
+    carries its label exit (`SampledSessions.exits`).
     """
     if type(anchor_ordinal) is not int or anchor_ordinal < 1:
         raise SurvivorForwardError(
@@ -509,14 +563,21 @@ def sampled_sessions(
         raise SurvivorForwardError(
             f"the sample cannot be drawn through {through.isoformat()}: {error}"
         ) from error
+    drawn = range(anchor_ordinal, last + 1, horizon)
     return SampledSessions(
         anchor_ordinal=anchor_ordinal,
         horizon=horizon,
         through=through,
-        sessions=tuple(
-            ordinals.day_of(ordinal) for ordinal in range(anchor_ordinal, last + 1, horizon)
-        ),
+        sessions=tuple(ordinals.day_of(ordinal) for ordinal in drawn),
+        exits=tuple(_exit_of(ordinals, ordinal, horizon=horizon) for ordinal in drawn),
     )
+
+
+def _exit_of(ordinals: SessionOrdinals, ordinal: int, *, horizon: int) -> date | None:
+    try:
+        return ordinals.day_of(ordinal + 1 + horizon)
+    except SessionOrdinalError:
+        return None
 
 
 def _require_horizon(horizon: int) -> None:
@@ -883,7 +944,7 @@ class SampledPeriod:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class MetricTest:
-    """The one test of one metric over the first `window_periods` matured periods.
+    """The one test of one metric over the window's periods (module docstring).
 
     `test` is `outcome_statistics.sign_flip_test`'s two-sided answer for "mean == 0";
     `one_sided_p_value` is the protocol's one-sided p for "mean > 0" from it -- half of it when
@@ -903,24 +964,38 @@ class MetricTest:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class NonOverlappingSample:
-    """The sample at one horizon, its gaps and pending sessions, and the test once K matured."""
+    """The sample at one horizon, its gaps and pending sessions, its window of `K_h` calendar
+    positions, and the test once every one of them has matured (module docstring)."""
 
     anchor_ordinal: int
     horizon: int
     sampled: tuple[date, ...]
     gaps: tuple[tuple[date, GapReason], ...]
+    """Every sampled session that is a gap, in the window or after it."""
     pending: tuple[date, ...]
     """Sampled sessions whose included record has not matured: neither a period nor a gap."""
     periods: tuple[SampledPeriod, ...]
+    """Every sampled period whose included record matured, in the window or after it."""
+    window_positions: int
+    """`K_h`, this horizon's positions (`SurvivorForwardProtocol.window_positions`)."""
+    window_span_sessions: int
+    """The primary window's span, `K * primary_horizon` sessions from the anchor."""
+    window_sessions: tuple[date, ...]
+    """The window's positions sampled so far: the first `K_h` of `sampled`."""
+    in_window: tuple[tuple[str, int], ...]
+    """The window's sampled positions by what they are in this reading: `periods`, `pending`,
+    and the gaps `no_record`, `refused`, `unchecked`, `unverifiable` (the sensitivity's only)."""
+    tested_periods: tuple[SampledPeriod, ...]
+    """The periods among the window's positions: the sample a test is made over."""
     matured: int
-    """k: the sampled periods whose included record matured."""
-    window_periods: int
-    """K, the pre-registered window."""
+    """k: the window's positions that have matured, with a record or without one."""
     window_satisfied: bool
+    """All `K_h` positions have matured."""
     means: tuple[DescriptiveMean, ...]
     """Every described quantity over all `periods`, descriptive."""
     tests: tuple[MetricTest, ...]
-    """Empty until `window_satisfied`; then one per tested metric of the horizon."""
+    """Empty until `window_satisfied`; then one per tested metric of the horizon, each over
+    `tested_periods`."""
     status: str
 
 
@@ -967,8 +1042,8 @@ def prediction_layer(
     """The prediction layer of `outcomes` -- one horizon's, `sampled.horizon` -- under `protocol`.
 
     `verdicts` are the late-record check's, by record id; a record without one is unchecked and
-    left out. The sign-flip test is made only once K (`window_periods`) sampled periods have
-    matured, over the first K of them. See the module docstring.
+    left out. The sign-flip test is made only once every one of the window's `K_h` calendar
+    positions has matured, over the periods among them. See the module docstring.
     """
     horizon = sampled.horizon
     metrics = protocol.tested_metrics(horizon)
@@ -997,6 +1072,15 @@ def prediction_layer(
             f"the outcomes were labelled at {len(instants)} instants; a report reads every label "
             "at its one as_of"
         )
+    label_as_of = next(iter(instants), None)
+    for session, exit_day in zip(sampled.sessions, sampled.exits, strict=True):
+        held = by_session[session].exit_day if session in by_session else None
+        if held is not None and exit_day is not None and held != exit_day:
+            raise SurvivorForwardError(
+                f"{session.isoformat()}'s record exits at {held.isoformat()} and its position's "
+                f"label window exits at {exit_day.isoformat()} on the sample's calendar; a "
+                "position matures on one calendar"
+            )
     standing = {session: _standing(outcome, verdicts) for session, outcome in by_session.items()}
     excluded = Counter(state for state in standing.values() if state in ("refused", "unchecked"))
 
@@ -1008,12 +1092,13 @@ def prediction_layer(
             sampled=sampled,
             protocol=protocol,
             metrics=metrics,
+            label_as_of=label_as_of,
         )
 
     return PredictionLayer(
         horizon=horizon,
         role=metrics[0][1],
-        label_as_of=next(iter(instants), None),
+        label_as_of=label_as_of,
         witnessed=len(by_session),
         mature=sum(1 for outcome in by_session.values() if outcome.mature),
         immature=sum(1 for outcome in by_session.values() if not outcome.mature),
@@ -1045,6 +1130,7 @@ def _reading(
     sampled: SampledSessions,
     protocol: SurvivorForwardProtocol,
     metrics: tuple[tuple[ForwardMetric, Role], ...],
+    label_as_of: datetime | None,
 ) -> LayerReading:
     included = [
         outcome
@@ -1067,8 +1153,20 @@ def _reading(
             sampled=sampled,
             protocol=protocol,
             metrics=metrics,
+            label_as_of=label_as_of,
         ),
     )
+
+
+_WINDOW_KINDS: Final[tuple[str, ...]] = (
+    "periods",
+    "pending",
+    "no_record",
+    "refused",
+    "unchecked",
+    "unverifiable",
+)
+"""What a window position is in one reading (`NonOverlappingSample.in_window`), in order."""
 
 
 def _sample(
@@ -1079,41 +1177,61 @@ def _sample(
     sampled: SampledSessions,
     protocol: SurvivorForwardProtocol,
     metrics: tuple[tuple[ForwardMetric, Role], ...],
+    label_as_of: datetime | None,
 ) -> NonOverlappingSample:
+    size = protocol.window_positions(sampled.horizon)
     gaps: list[tuple[date, GapReason]] = []
     pending: list[date] = []
     periods: list[SampledPeriod] = []
-    for session in sampled.sessions:
+    tested: list[SampledPeriod] = []
+    in_window: Counter[str] = Counter()
+    matured = 0
+    unverifiable = 0
+    for position, (session, exit_day) in enumerate(
+        zip(sampled.sessions, sampled.exits, strict=True)
+    ):
         outcome = by_session.get(session)
+        period: SampledPeriod | None = None
+        kind: str
         if outcome is None:
+            kind = "no_record"
             gaps.append((session, "no_record"))
+            ripe = _exit_published(exit_day, label_as_of=label_as_of, through=sampled.through)
+        else:
+            ripe = outcome.mature
+            state = standing[session]
+            if state in left_out:
+                kind = _GAP_REASONS[state]
+                gaps.append((session, _GAP_REASONS[state]))
+            elif not outcome.mature:
+                kind = "pending"
+                pending.append(session)
+            else:
+                kind = "periods"
+                period = SampledPeriod(
+                    session=session,
+                    record_id=outcome.record_id,
+                    values=tuple(
+                        (quantity, outcome.value(quantity)) for quantity in DESCRIBED_QUANTITIES
+                    ),
+                )
+                periods.append(period)
+        if position >= size:
             continue
-        state = standing[session]
-        if state in left_out:
-            gaps.append((session, _GAP_REASONS[state]))
-            continue
-        if not outcome.mature:
-            pending.append(session)
-            continue
-        periods.append(
-            SampledPeriod(
-                session=session,
-                record_id=outcome.record_id,
-                values=tuple(
-                    (quantity, outcome.value(quantity)) for quantity in DESCRIBED_QUANTITIES
-                ),
-            )
-        )
-    matured = len(periods)
-    window = protocol.window_periods
-    satisfied = matured >= window
+        in_window[kind] += 1
+        if ripe:
+            matured += 1
+        if period is not None:
+            tested.append(period)
+        if outcome is not None and standing[session] == "unverifiable":
+            unverifiable += 1
+    satisfied = matured == size
     tests: tuple[MetricTest, ...] = ()
     if satisfied:
-        tested = periods[:window]
         tests = tuple(_tested(metric, role, tested, protocol) for metric, role in metrics)
-        status = f"tested once, over the first {window} of {matured} matured periods"
+        status = _tested_status(in_window, size=size, unverifiable=unverifiable)
     else:
-        status = f"not tested: {matured} of {window} pre-registered periods matured"
+        status = f"not tested: {matured} of {size} pre-registered periods matured"
     return NonOverlappingSample(
         anchor_ordinal=sampled.anchor_ordinal,
         horizon=sampled.horizon,
@@ -1121,12 +1239,38 @@ def _sample(
         gaps=tuple(gaps),
         pending=tuple(pending),
         periods=tuple(periods),
+        window_positions=size,
+        window_span_sessions=protocol.window_span_sessions,
+        window_sessions=sampled.sessions[:size],
+        in_window=tuple((kind, in_window[kind]) for kind in _WINDOW_KINDS),
+        tested_periods=tuple(tested),
         matured=matured,
-        window_periods=window,
         window_satisfied=satisfied,
         means=_described(lambda quantity: [period.value(quantity) for period in periods]),
         tests=tests,
         status=status,
+    )
+
+
+def _exit_published(exit_day: date | None, *, label_as_of: datetime | None, through: date) -> bool:
+    """Whether a position with no record has matured (module docstring): its exit's 16:30 at
+    or before the outcomes' `label_as_of`; with no outcome, its exit on or before `through`."""
+    if exit_day is None:
+        return False
+    if label_as_of is None:
+        return exit_day <= through
+    return label_as_of >= session_publication_instant(exit_day)
+
+
+def _tested_status(counts: Mapping[str, int], *, size: int, unverifiable: int) -> str:
+    """The status of a tested window -- what it lost, said alike in both readings: `n` periods of
+    `K_h` positions, the gaps by reason, and the UNVERIFIABLE records the sensitivity excludes."""
+    unchecked = counts["unchecked"]
+    return (
+        f"tested on {counts['periods']} of {size} positions ({counts['no_record']} no record, "
+        f"{counts['refused']} refused, "
+        + (f"{unchecked} unchecked, " if unchecked else "")
+        + f"{unverifiable} unverifiable excluded in the sensitivity)"
     )
 
 
@@ -1406,7 +1550,7 @@ def _records_section(
     checked = sorted(verdicts.values(), key=lambda item: (item.session, item.record_id))
     counts = Counter(item.verdict for item in checked)
     scopes = Counter(item.scope for item in checked if item.scope is not None)
-    sampled = set(primary.headline.non_overlapping.sampled)
+    sampled = set(primary.headline.non_overlapping.window_sessions)
     held = set(sessions)
     try:
         last = ordinals.index_of(through)
@@ -1440,7 +1584,7 @@ def _records_section(
             "overall": _shares(checked),
             "in_sample": _shares([item for item in checked if item.session in sampled]),
             "sample": (
-                f"the h={primary.horizon} non-overlapping sample's sessions that carry a record"
+                f"the h={primary.horizon} pre-registered window's positions that carry a record"
             ),
         },
         "headline_basis": _HEADLINE_BASIS,
@@ -1490,7 +1634,8 @@ def _means(means: Sequence[DescriptiveMean]) -> dict[str, Any]:
 
 def _reading_section(reading: LayerReading, *, analysis: NonOverlappingSample) -> dict[str, Any]:
     sample = reading.non_overlapping
-    refused = _refused_in_sample(sample)
+    in_window = dict(sample.in_window)
+    refused = in_window["refused"]
     test: list[dict[str, Any]] | None = None
     if sample.window_satisfied and analysis.window_satisfied:
         test = [_test(item) for item in sample.tests]
@@ -1500,7 +1645,7 @@ def _reading_section(reading: LayerReading, *, analysis: NonOverlappingSample) -
     elif sample.window_satisfied:
         status = (
             "not tested: a secondary is tested in the one analysis at the primary window "
-            f"({analysis.matured} of {analysis.window_periods} primary periods matured)"
+            f"({analysis.matured} of {analysis.window_positions} primary periods matured)"
         )
     else:
         status = sample.status
@@ -1527,8 +1672,11 @@ def _reading_section(reading: LayerReading, *, analysis: NonOverlappingSample) -
                 }
                 for period in sample.periods
             ],
+            "window_positions": sample.window_positions,
+            "window_span_sessions": sample.window_span_sessions,
+            "window_sessions": [session.isoformat() for session in sample.window_sessions],
+            "in_window": in_window,
             "matured": sample.matured,
-            "window_periods": sample.window_periods,
             "window_satisfied": sample.window_satisfied,
             "descriptive": _means(sample.means),
             "refused_in_sample": refused,
@@ -1536,17 +1684,6 @@ def _reading_section(reading: LayerReading, *, analysis: NonOverlappingSample) -
             "status": status,
         },
     }
-
-
-def _refused_in_sample(sample: NonOverlappingSample) -> int:
-    """Refused records among the sampled sessions a test is made over: up to the K-th matured
-    period once the window is satisfied, every one sampled so far before it."""
-    last = sample.periods[sample.window_periods - 1].session if sample.window_satisfied else None
-    return sum(
-        1
-        for session, reason in sample.gaps
-        if reason == "refused" and (last is None or session <= last)
-    )
 
 
 def _test(test: MetricTest) -> dict[str, Any]:
@@ -1591,7 +1728,7 @@ def _secondary_family(
         if not analysis.window_satisfied:
             return {
                 "status": "not applied: before the pre-registered window there is no p-value to "
-                f"correct ({analysis.matured} of {analysis.window_periods} primary periods "
+                f"correct ({analysis.matured} of {analysis.window_positions} primary periods "
                 "matured)",
                 "tests": [],
             }
@@ -1688,8 +1825,8 @@ def _cannot_be_evaluated_yet(
         items.append(
             (
                 "window_not_satisfied",
-                f"the pre-registered window needs {analysis.window_periods} non-overlapping "
-                f"{horizon}-session periods: {analysis.matured} of {analysis.window_periods} "
+                f"the pre-registered window needs {analysis.window_positions} non-overlapping "
+                f"{horizon}-session periods: {analysis.matured} of {analysis.window_positions} "
                 "have matured",
             )
         )
@@ -1827,8 +1964,10 @@ def _reading_lines(reading: Mapping[str, Any], *, indent: str) -> list[str]:
         f"{indent}unlabelled by code: "
         + (", ".join(f"{code} {count}" for code, count in sorted(codes.items())) or "none"),
         f"{indent}non-overlapping sample (anchor ordinal {sample['anchor_ordinal']}, every "
-        f"{sample['horizon']} sessions): {len(sample['sampled'])} sampled, {sample['matured']} "
-        f"matured, {len(sample['gaps'])} gaps, {len(sample['pending'])} pending",
+        f"{sample['horizon']} sessions): {len(sample['sampled'])} sampled, "
+        f"{len(sample['gaps'])} gaps, {len(sample['pending'])} pending; the pre-registered "
+        f"window is its first {sample['window_positions']} positions "
+        f"({sample['window_span_sessions']} sessions), {sample['matured']} of them matured",
     ]
     if sample["gaps"]:
         lines.append(
