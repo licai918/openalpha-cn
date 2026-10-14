@@ -26,7 +26,12 @@ exist nowhere else. A `PaperBookSnapshot` is all of it, for one session:
   been tried on, held in `advance_orders`' own order `(side, ts_code, order_id)`;
 - `cooldowns`: the `Cooldown`s by code;
 - `last_settled_session`: the session whose fills and order lifecycle are in this book --
-  `session_index` itself, or `None` for an opening book that has settled nothing.
+  `session_index` itself, or `None` for an opening book that has settled nothing;
+- `first_decision_session`: the session whose evening first planned the book -- the kernel's
+  initial build -- or `None` while no plan has been made: an opening book, and a book that has
+  only been settled since (a missed evening caught up makes no decision). It is what
+  `BookState.initialized` is read from, and it is stored rather than derived because having
+  settled a session is not having decided one.
 
 ## What is refused, by name
 
@@ -42,7 +47,9 @@ has settled (`advance_orders` would have expired it); an attempt count other tha
 sessions settled since the order was due (every due order is handed to the step on every settled
 session, a session with no bar included, so the count is exact, not a bound); a cool-down
 starting after the snapshot's session, and one for a name held (a cool-down starts when a sale
-fills or a buy expires, and is dropped before the policy may buy the name again). A pending buy
+fills or a buy expires, and is dropped before the policy may buy the name again); a first
+decision after the snapshot's session, and -- before the first decision -- a position, a pending
+order or a cool-down (each comes only from a plan). A pending buy
 for a name still cooling down is **not** refused: with `cooldown_sessions=0` the policy may plan
 it on the evening the cool-down started. The parts are sorted on the way in, so a snapshot's
 address does not depend on the order a caller assembled them in.
@@ -87,8 +94,8 @@ and the paper book's own ledger.
 
 - **When in the evening a snapshot is written**, and so whether its `pending_orders` include the
   orders planned that evening, is the daily settlement's (`V2-P7-009`); the contract holds
-  either. `BookState.initialized` is not stored: it is derivable from whether the book has
-  settled a session, and that derivation belongs with the write timing.
+  either. `BookState.initialized` is `first_decision_session is not None`, and the settlement
+  sets that field when it attaches the first plan.
 - **The orders' identity.** A snapshot embeds `TradeOrder` (`trade-order/v1`), whose identity is
   still an open item (P7 section 9, the prerequisites of plan 2, item 4). Nothing in this module
   writes a snapshot on a schedule, so nothing is on disk yet; the first real snapshot must follow
@@ -191,6 +198,10 @@ class PaperBookSnapshot(BaseModel):
     last_settled_session: int | None = Field(ge=0)
     """`session_index` once the session's fills and order lifecycle are in the book; `None` for
     an opening book that has settled nothing."""
+    first_decision_session: int | None = Field(ge=0)
+    """The session whose evening first planned this book (its initial build); `None` while no plan
+    has been made -- an opening book, or a book only caught up since. No default: having settled a
+    session is not having decided one, so a writer has to say which this book is."""
 
     @field_validator("entry_factors")
     @classmethod
@@ -231,7 +242,22 @@ class PaperBookSnapshot(BaseModel):
         self._check_entry_factors()
         self._check_pending_orders()
         self._check_cooldowns()
+        self._check_first_decision()
         return self
+
+    def _check_first_decision(self) -> None:
+        first = self.first_decision_session
+        if first is not None:
+            if first > self.session_index:
+                raise ValueError(
+                    f"the first decision was made on session {first}, after the snapshot's "
+                    f"{self.session_index}"
+                )
+            return
+        none = "no decision has been made for this book, and each of these comes only from a plan"
+        _refuse(f"{none}; held names", (position.subject for position in self.book.positions))
+        _refuse(f"{none}; pending orders", (_named(item.order) for item in self.pending_orders))
+        _refuse(f"{none}; cool-downs", (item.ts_code for item in self.cooldowns))
 
     def _check_entry_factors(self) -> None:
         codes = [item.ts_code for item in self.entry_factors]

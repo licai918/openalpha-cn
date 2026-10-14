@@ -22,6 +22,7 @@ from openalpha_cn.domain.name_history import (
     NameRecord,
     build_name_history,
 )
+from openalpha_cn.domain.stock_universe import SecurityLifecycle
 from openalpha_cn.domain.survivor_book import SecurityFacts
 from openalpha_cn.domain.trading_calendar import (
     CalendarDay,
@@ -35,6 +36,7 @@ from openalpha_cn.strategy_survivor_facts import (
     HeldStatus,
     ListingAgeHorizonError,
     SurvivorFactsError,
+    _held_status,
     assemble_fact,
     listing_age_sessions,
     name_status,
@@ -928,21 +930,32 @@ def held_day(*statuses: tuple[str, str], **overrides: object) -> FactsDay:
 
 
 def test_a_day_names_every_held_code_and_what_became_of_it() -> None:
-    # MAIN_A (600001.SH) has a row; 600009.SH, 600010.SH, 600011.SH and 600012.SH have none.
-    # A code the registry has no listing row for may have one (a bar on the day: aged 0) or not.
+    # MAIN_A (600001.SH) has a row; 600009.SH .. 600013.SH have none. A code the registry has no
+    # listing row for may have one (a bar on the day: aged 0) or not. `delisted` and
+    # `not_yet_listed` are the two ways the registry knows a code and does not list it on the
+    # day; the caller writes off the first and refuses the second.
     day = held_day(
         ("600001.SH", "row"),
         ("600009.SH", "no_bar_in_reach"),
-        ("600010.SH", "not_listed"),
-        ("600011.SH", "not_in_registry"),
-        ("600012.SH", "board_unrecognised"),
+        ("600010.SH", "delisted"),
+        ("600011.SH", "not_yet_listed"),
+        ("600012.SH", "not_in_registry"),
+        ("600013.SH", "board_unrecognised"),
     )
 
-    assert day.held == ("600001.SH", "600009.SH", "600010.SH", "600011.SH", "600012.SH")
+    assert day.held == (
+        "600001.SH",
+        "600009.SH",
+        "600010.SH",
+        "600011.SH",
+        "600012.SH",
+        "600013.SH",
+    )
     assert [status.status for status in day.held_status] == [
         "row",
         "no_bar_in_reach",
-        "not_listed",
+        "delisted",
+        "not_yet_listed",
         "not_in_registry",
         "board_unrecognised",
     ]
@@ -978,7 +991,8 @@ def test_a_day_holding_nothing_has_no_held_status() -> None:
         # and another status.
         ((("600009.SH", "row"),), {}, "600009.SH"),
         ((("600001.SH", "no_bar_in_reach"),), {}, "600001.SH"),
-        ((("600001.SH", "not_listed"),), {}, "600001.SH"),
+        ((("600001.SH", "delisted"),), {}, "600001.SH"),
+        ((("600001.SH", "not_yet_listed"),), {}, "600001.SH"),
         ((("600001.SH", "board_unrecognised"),), {}, "600001.SH"),
     ],
     ids=[
@@ -989,7 +1003,8 @@ def test_a_day_holding_nothing_has_no_held_status() -> None:
         "status-out-of-order",
         "row-without-a-row",
         "no-bar-with-a-row",
-        "not-listed-with-a-row",
+        "delisted-with-a-row",
+        "not-yet-listed-with-a-row",
         "board-with-a-row",
     ],
 )
@@ -1005,4 +1020,114 @@ def test_a_held_status_outside_the_vocabulary_is_refused_and_a_status_is_frozen(
         HeldStatus(ts_code="600001.SH", status="sold")  # type: ignore[arg-type]
     status = HeldStatus(ts_code="600001.SH", status="row")
     with pytest.raises(ValidationError):
-        status.status = "not_listed"
+        status.status = "delisted"
+
+
+def test_the_one_word_for_a_code_the_registry_does_not_list_is_gone() -> None:
+    # `not_listed` said "delisted, or not yet listed" in one word, and the paper book's write-off
+    # (irreversible) is meant for the first alone. The vocabulary now has the two apart, and the
+    # old word is refused rather than kept as an alias a caller could still branch on.
+    for status in ("delisted", "not_yet_listed"):
+        assert HeldStatus(ts_code="600001.SH", status=status).status == status  # type: ignore[arg-type]
+    with pytest.raises(ValidationError):
+        HeldStatus(ts_code="600001.SH", status="not_listed")  # type: ignore[arg-type]
+
+
+# --- _held_status: the order of the tests ------------------------------------------------------
+
+SESSION = date(2026, 4, 10)
+HELD = "600701.SH"
+
+
+def lifecycle_of(
+    listed_on: date, delisted_on: date | None = None, *, code: str = HELD
+) -> dict[str, SecurityLifecycle]:
+    """A registry of one security, built without `build_stock_universe` (which would refuse the
+    contradictory rows below)."""
+    entry = SecurityLifecycle(
+        ts_code=code, exchange="SSE", listed_on=listed_on, delisted_on=delisted_on
+    )
+    return {code: entry}
+
+
+def status_of(
+    lifecycle: dict[str, SecurityLifecycle],
+    *,
+    rows: frozenset[str] = frozenset(),
+    unrecognised: frozenset[str] = frozenset(),
+    code: str = HELD,
+) -> str:
+    return _held_status(
+        code, rows=rows, lifecycle=lifecycle, session=SESSION, unrecognised_board=unrecognised
+    )
+
+
+@pytest.mark.parametrize(
+    ("listed_on", "delisted_on", "expected"),
+    [
+        # Listed before the day and not gone: listed, so it is the later tests that speak.
+        (date(2025, 1, 2), None, "no_bar_in_reach"),
+        # `delisted_on` is exclusive: gone on the day it names, still listed the day before.
+        (date(2025, 1, 2), date(2026, 4, 11), "no_bar_in_reach"),
+        (date(2025, 1, 2), date(2026, 4, 10), "delisted"),
+        (date(2025, 1, 2), date(2026, 3, 1), "delisted"),
+        # `listed_on` is inclusive: listed on the day it names, not yet the day before.
+        (date(2026, 4, 10), None, "no_bar_in_reach"),
+        (date(2026, 4, 11), None, "not_yet_listed"),
+        (date(2026, 4, 15), date(2026, 5, 1), "not_yet_listed"),
+    ],
+    ids=[
+        "listed",
+        "delisting-after-the-day",
+        "delisted-on-the-day",
+        "delisted-before-the-day",
+        "listed-on-the-day",
+        "listing-after-the-day",
+        "listing-and-delisting-after-the-day",
+    ],
+)
+def test_a_known_code_is_delisted_or_not_yet_listed_by_the_registrys_own_dates(
+    listed_on: date, delisted_on: date | None, expected: str
+) -> None:
+    assert status_of(lifecycle_of(listed_on, delisted_on)) == expected
+
+
+@pytest.mark.parametrize(
+    ("listed_on", "delisted_on"),
+    [
+        # A delisting on or before the day and a listing after it: the row ends before it begins.
+        (date(2026, 4, 15), date(2026, 3, 1)),
+        (date(2026, 4, 15), date(2026, 4, 10)),
+    ],
+    ids=["delisting-long-before-the-listing", "delisting-on-the-day-listing-after-it"],
+)
+def test_a_registry_row_that_ends_before_it_begins_is_refused_not_called_delisted(
+    listed_on: date, delisted_on: date
+) -> None:
+    # `build_stock_universe` refuses `delisted_on <= listed_on`, but `StockUniverse`'s constructor
+    # validates nothing. Such a row has a delisting date on or before the day *and* a listing date
+    # after it: calling it `delisted` would hand the paper book's write-off a code that has not
+    # begun, and `not_yet_listed` would hide that it also ended. It is neither, and the day is
+    # refused by name instead.
+    with pytest.raises(SurvivorFactsError, match=HELD):
+        status_of(lifecycle_of(listed_on, delisted_on))
+
+
+def test_the_tests_for_a_held_code_are_made_in_the_documented_order() -> None:
+    gone = lifecycle_of(date(2025, 1, 2), date(2026, 3, 1))
+    unborn = lifecycle_of(date(2026, 5, 1))
+    listed = lifecycle_of(date(2025, 1, 2))
+    both = frozenset({HELD})
+
+    # `not_in_registry` first, whatever else is true of the code: with a row, on a board the
+    # adapter does not recognise.
+    assert status_of({}, rows=both, unrecognised=both) == "not_in_registry"
+    # then `row`, over the board and over every listing state of a known code.
+    assert status_of(listed, rows=both, unrecognised=both) == "row"
+    # then the pair, over `board_unrecognised` and `no_bar_in_reach`.
+    assert status_of(gone, unrecognised=both) == "delisted"
+    assert status_of(unborn, unrecognised=both) == "not_yet_listed"
+    # then `board_unrecognised`, over `no_bar_in_reach`.
+    assert status_of(listed, unrecognised=both) == "board_unrecognised"
+    # and `no_bar_in_reach` for what is left.
+    assert status_of(listed) == "no_bar_in_reach"

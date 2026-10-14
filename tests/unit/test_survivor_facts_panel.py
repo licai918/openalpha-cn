@@ -1583,7 +1583,9 @@ def test_every_held_code_is_told_what_became_of_it(full_store: PanelStore) -> No
     # Re-review G and brief item 6: the caller decides per held code, so the day says, for each
     # one, why it has a row or why not. Passed unsorted and with a repeat; given back sorted,
     # once each. UNREGISTERED keeps its row (a bar today, aged 0) and is `not_in_registry` all
-    # the same: the caller refuses a day holding a code the registry has no row for.
+    # the same: the caller refuses a day holding a code the registry has no row for. DELISTED
+    # (no bar today) and DELISTED_WITH_BARS (a bar today) are both `delisted`: the registry
+    # dates their delisting on or before the day.
     unheld = read_day(full_store)
     day = read_day(
         full_store,
@@ -1616,8 +1618,8 @@ def test_every_held_code_is_told_what_became_of_it(full_store: PanelStore) -> No
         ORDINARY[0]: "row",
         HALTED: "row",
         NEVER_TRADED: "no_bar_in_reach",
-        DELISTED: "not_listed",
-        DELISTED_WITH_BARS: "not_listed",
+        DELISTED: "delisted",
+        DELISTED_WITH_BARS: "delisted",
         UNREGISTERED: "not_in_registry",
         NOT_IN_REGISTRY: "not_in_registry",
     }
@@ -1625,6 +1627,115 @@ def test_every_held_code_is_told_what_became_of_it(full_store: PanelStore) -> No
     assert {fact.ts_code: fact for fact in day.facts}[UNREGISTERED].listed_sessions == 0
     assert (day.facts, day.notes) == (unheld.facts, unheld.notes)
     assert (unheld.held, unheld.held_status) == ((), ())
+
+
+def test_a_held_code_the_registry_lists_only_after_the_day_is_not_yet_listed_not_delisted(
+    full_store: PanelStore,
+) -> None:
+    # The paper book's write-off (irreversible) is for a delisted name: not listed on the day and
+    # no bar to freeze it on. LISTED_LATER has no bar anywhere and is not listed on the signal
+    # day either -- but because the registry dates its listing 2026-04-15, after the day, and it
+    # has not delisted. A read of the 10th made after the 15th knows the row; it must not say
+    # `delisted`. (The evening of the 10th has not heard of it: `not_in_registry`.)
+    evening_day = read_day(full_store, held=(LISTED_LATER,))
+    later_day = read_day(full_store, as_of=LATER, held=(LISTED_LATER,))
+
+    assert [(s.ts_code, s.status) for s in evening_day.held_status] == [
+        (LISTED_LATER, "not_in_registry")
+    ]
+    assert [(s.ts_code, s.status) for s in later_day.held_status] == [
+        (LISTED_LATER, "not_yet_listed")
+    ]
+    assert LISTED_LATER not in {fact.ts_code for fact in later_day.facts}
+    assert later_day.facts == read_day(full_store, as_of=LATER).facts
+
+
+def test_a_held_code_priced_before_its_listing_is_not_yet_listed_and_has_no_row(
+    extended_store: PanelStore,
+) -> None:
+    # BSE_BEFORE_LISTING has a bar on the signal day and a registry listing dated 2026-04-15
+    # (T3 3.2's `.BJ` shape). Held: at 18:30 on the 10th the registry has never heard of it, so it
+    # is `not_in_registry` and keeps its row aged 0; read after the 15th the registry knows it and
+    # does not list it yet -- `not_yet_listed`, no row although a bar is there, counted once in
+    # `not_listed_with_bar` as it is unheld.
+    evening_day = read_day(extended_store, held=(BSE_BEFORE_LISTING,))
+    later_day = read_day(extended_store, as_of=LATER, held=(BSE_BEFORE_LISTING,))
+    unheld = read_day(extended_store, as_of=LATER)
+
+    assert {s.ts_code: s.status for s in evening_day.held_status} == {
+        BSE_BEFORE_LISTING: "not_in_registry"
+    }
+    assert BSE_BEFORE_LISTING in {fact.ts_code for fact in evening_day.facts}
+    assert {s.ts_code: s.status for s in later_day.held_status} == {
+        BSE_BEFORE_LISTING: "not_yet_listed"
+    }
+    assert BSE_BEFORE_LISTING not in {fact.ts_code for fact in later_day.facts}
+    assert (later_day.facts, later_day.notes) == (unheld.facts, unheld.notes)
+    assert later_day.notes.not_listed_with_bar == 2  # DELISTED_WITH_BARS and BSE_BEFORE_LISTING
+
+
+def test_the_registry_says_which_way_a_held_code_is_not_listed(extended_store: PanelStore) -> None:
+    # Four held codes the registry knows and does not list on the 10th, read after the 15th: two
+    # whose delisting is dated on or before the day (DELISTED_WITH_BARS on session 60, DELISTED on
+    # 65) and two whose listing is dated after it (LISTED_LATER and BSE_BEFORE_LISTING, session
+    # 72). Two have a bar on the day and two have none, in each pair, so the status is not a
+    # function of the bar.
+    day = read_day(
+        extended_store,
+        as_of=LATER,
+        held=(LISTED_LATER, BSE_BEFORE_LISTING, DELISTED, DELISTED_WITH_BARS),
+    )
+
+    assert {s.ts_code: s.status for s in day.held_status} == {
+        DELISTED_WITH_BARS: "delisted",
+        DELISTED: "delisted",
+        LISTED_LATER: "not_yet_listed",
+        BSE_BEFORE_LISTING: "not_yet_listed",
+    }
+    assert {DELISTED, DELISTED_WITH_BARS, LISTED_LATER, BSE_BEFORE_LISTING}.isdisjoint(
+        fact.ts_code for fact in day.facts
+    )
+
+
+@pytest.fixture
+def listed_later_ends_before_it_begins(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The registry the loader returns, with LISTED_LATER's row made to contradict itself: a
+    delisting dated session 65 against a listing dated session 72. `build_stock_universe` refuses
+    such a row, and `StockUniverse`'s constructor does not, so it is built past the validator."""
+    load = strategy_survivor_facts.load_stock_universe
+
+    def contradictory(*args: object, **kwargs: object) -> object:
+        universe = load(*args, **kwargs)  # type: ignore[arg-type]
+        return dataclasses.replace(
+            universe,
+            securities=tuple(
+                dataclasses.replace(entry, delisted_on=SESSIONS[65])
+                if entry.ts_code == LISTED_LATER
+                else entry
+                for entry in universe.securities
+            ),
+        )
+
+    monkeypatch.setattr(strategy_survivor_facts, "load_stock_universe", contradictory)
+
+
+def test_a_held_code_whose_registry_row_ends_before_it_begins_refuses_the_day_by_name(
+    full_store: PanelStore, listed_later_ends_before_it_begins: None
+) -> None:
+    # LISTED_LATER is not listed on the day and has no bar, and the row has a delisting date on
+    # or before the day -- so is it `delisted`? Its listing date is after the day too, so it has
+    # not begun: the write-off must not fire on it, and `not_yet_listed` would hide that it also
+    # ended. No status is true of it; the day is refused, naming the code.
+    with pytest.raises(SurvivorFactsError, match=LISTED_LATER):
+        read_day(full_store, as_of=LATER, held=(LISTED_LATER,))
+
+
+def test_a_registry_row_that_contradicts_itself_costs_a_day_that_does_not_hold_it_nothing(
+    full_store: PanelStore, listed_later_ends_before_it_begins: None
+) -> None:
+    # The refusal is about the holding. The same row of a code nobody holds is not listed on the
+    # day, has no bar and gets no row, whatever its dates say: the day is the one it always was.
+    assert fingerprint(read_day(full_store, as_of=LATER)) == fingerprint(read_day(full_store))
 
 
 def test_the_held_codes_are_part_of_the_days_bytes(full_store: PanelStore) -> None:
