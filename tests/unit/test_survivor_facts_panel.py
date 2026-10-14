@@ -44,6 +44,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
@@ -119,6 +120,7 @@ from openalpha_cn.survivor_facts import (
     FactsCoverageError,
     FactsDay,
     FactsNotes,
+    MissingFactorBuildError,
     SurvivorFactsError,
     build_facts_day,
     require_coverage,
@@ -296,6 +298,8 @@ class Variant:
         default_factory=lambda: MappingProxyType({})
     )
     """Per build session, the securities whose `reversal_1d` evaluator answers `None`."""
+    unbuilt: frozenset[tuple[int, int]] = frozenset()
+    """`(factor, session)` pairs of `builds` that are not stored: one factor's build missing."""
 
 
 FULL: Final[Variant] = Variant()
@@ -666,6 +670,7 @@ def write_panel(root: Path, variant: Variant) -> PanelStore:
         factor_build(store, panel, factor, index, variant)
         for index in variant.builds
         for factor in range(len(FACTORS))
+        if (factor, index) not in variant.unbuilt
     ]
     write_factor_panels(store, raw)
     write_processed_factor_panels(
@@ -702,6 +707,17 @@ COVERAGE: Final[Variant] = Variant(
 @pytest.fixture(scope="module")
 def coverage_store(tmp_path_factory: pytest.TempPathFactory) -> PanelStore:
     return write_panel(tmp_path_factory.mktemp("coverage"), COVERAGE)
+
+
+ONE_UNBUILT: Final[Variant] = Variant(
+    last=SIGNAL_INDEX, builds=(68, SIGNAL_INDEX), unbuilt=frozenset({(3, SIGNAL_INDEX)})
+)
+"""`amihud_60` is built on session 68 and not on the signal day; the other three on both."""
+
+
+@pytest.fixture(scope="module")
+def one_unbuilt_store(tmp_path_factory: pytest.TempPathFactory) -> PanelStore:
+    return write_panel(tmp_path_factory.mktemp("one-unbuilt"), ONE_UNBUILT)
 
 
 OUTAGE: Final[Variant] = Variant(last=SIGNAL_INDEX, outage=True, builds=(SIGNAL_INDEX,))
@@ -773,8 +789,8 @@ def test_a_later_build_is_not_part_of_an_earlier_instants_answer(full_store: Pan
 def test_an_instant_with_no_build_answers_with_no_rows(full_store: PanelStore) -> None:
     # Session 67 has no build. Empty, not an error, by choice: the narrow read must be the
     # whole-year read cut to one instant, and that cut is empty too; whether a day without a
-    # build is acceptable is the caller's question (`build_facts_day` refuses it through its
-    # coverage guard, with the counts). A partition that was never written still refuses.
+    # build is acceptable is the caller's question (`build_facts_day` refuses it by name, with the
+    # factor and the instant). A partition that was never written still refuses.
     narrow = stored_rows(full_store, 0, as_of=LATER, at=instant(67))
     whole = stored_rows(full_store, 0, as_of=LATER)
 
@@ -1206,12 +1222,33 @@ def test_a_wholesale_outage_is_refused_rather_than_handed_to_the_kernel(
     assert sum(1 for fact in seen.facts if None not in fact.oriented_values) == 39
 
 
-def test_a_day_with_no_factor_build_is_refused_by_the_coverage_guard(
-    full_store: PanelStore,
-) -> None:
-    # `FULL` builds on sessions 68, 69 and 70 and not on 67: every value is `None`.
-    with pytest.raises(FactsCoverageError, match=r"0 of 38"):
+def test_a_day_with_no_factor_build_is_refused_by_name(full_store: PanelStore) -> None:
+    # Review Minor 7. `FULL` builds on sessions 68, 69 and 70 and not on 67, so the narrow read
+    # at 67's instant answers nothing. That used to surface only as "0 of 38 ... have a bar and
+    # every factor value"; it is refused by name -- the factor and the instant -- before the
+    # coverage guard, whatever its threshold.
+    missing = re.escape(
+        f"reversal_1d/v1 has no probe_identity/v1 build at {instant(67).isoformat()}"
+    )
+    with pytest.raises(MissingFactorBuildError, match=missing):
         read_day(full_store, 67)
+    with pytest.raises(MissingFactorBuildError, match=missing):
+        read_day(full_store, 67, min_coverage=0.0)
+
+
+def test_one_factor_with_no_build_on_the_day_is_refused_by_its_own_name(
+    one_unbuilt_store: PanelStore,
+) -> None:
+    # The other three factors were built at the signal day's instant; amihud_60 was not.
+    missing = re.escape(
+        f"amihud_60/v1 has no probe_identity/v1 build at {instant(SIGNAL_INDEX).isoformat()}"
+    )
+    with pytest.raises(MissingFactorBuildError, match=missing):
+        read_day(one_unbuilt_store)
+
+
+def test_the_missing_build_error_is_a_named_facts_error() -> None:
+    assert issubclass(MissingFactorBuildError, SurvivorFactsError)
 
 
 @pytest.mark.parametrize(

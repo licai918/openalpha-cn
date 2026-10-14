@@ -47,7 +47,9 @@ a bar: the kernel sells such a holding rather than freezing it.
   tier admits count, each negated for a `lower_is_better` definition. A halted security takes
   what that build says about it -- the engine values it off its own last sessions while they
   fit the factor's window -- or `None`: nothing is carried from older builds, because a frozen
-  holding needs no composite and a halted name cannot be an entrant.
+  holding needs no composite and a halted name cannot be an entrant. A factor with **no build at
+  all** at that instant is refused by name, the factor and the instant
+  (`MissingFactorBuildError`), before any row is built.
 - **The 5% band** is offered to `name_status` only for a main-board security with a bar and a
   published bounded band (controller decision 1); elsewhere it is `None`.
 - **The coverage guard.** It counts only the rows on the boards the book may trade
@@ -58,8 +60,7 @@ a bar: the kernel sells such a holding rather than freezing it.
   cannot see -- a trading holding with a missing value is sold, not frozen -- and rows the book
   cannot trade must not dilute that. A carried row never counts, because the engine values a
   halted security off its own last sessions -- a market-wide halt would otherwise pass with
-  every value present -- so a day with no build and a day on which the bars are missing both
-  land here.
+  every value present -- so a day on which the bars are missing lands here too.
 
 ## The three-state name
 
@@ -195,6 +196,10 @@ class ListingAgeHorizonError(SurvivorFactsError):
 
 class FactsCoverageError(SurvivorFactsError):
     """Too few of the day's rows carry every factor value for the screen to be trusted."""
+
+
+class MissingFactorBuildError(SurvivorFactsError):
+    """A composite factor has no processed build at the signal day's instant at all."""
 
 
 AMOUNT_WINDOW_SESSIONS: Final[int] = 20
@@ -727,15 +732,26 @@ def _oriented_column(
     as_of: datetime,
     at: datetime,
 ) -> dict[str, float]:
-    """One factor's admitted processed values in the build stamped at `at`, higher-is-better."""
+    """One factor's admitted processed values in the build stamped at `at`, higher-is-better.
+
+    No row at all means no build at `at`, which is refused by name: the daily build did not run
+    for this factor, and the coverage guard's "0 of N" would hide which one and when.
+    """
     definition = FACTOR_DEFINITIONS.get(factor_id)
     sign = -1.0 if definition.direction == "lower_is_better" else 1.0
     admitted = TIER_ADMITTED_CODES["processed"]
+    rows = load_processed_factor_observations(
+        store, definition, transform, years=(year,), as_of=as_of, at=at
+    )
+    if not rows:
+        raise MissingFactorBuildError(
+            f"{factor_id} has no {transform.qualified_key} build at {at.isoformat()}, the signal "
+            "day's 16:30 instant the daily command builds at; the day cannot be screened "
+            "without it"
+        )
     return {
         row.subject: sign * row.value
-        for row in load_processed_factor_observations(
-            store, definition, transform, years=(year,), as_of=as_of, at=at
-        )
+        for row in rows
         if row.coverage in admitted and row.value is not None
     }
 
