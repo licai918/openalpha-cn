@@ -302,10 +302,13 @@ def test_an_order_fills_at_the_open_and_the_book_ends_the_session_at_the_close(
     )
 
     assert rows(ledger) == [(attempt_id(order, S1), "filled", None)]
-    (fill,) = settled.result.transitions
+    (fill,) = settled.runner_record.transitions
     assert fill.execution is not None
     assert (fill.execution.filled_price, fill.execution.total_cost) == (D("10.10"), D("5.10"))
-    assert settled.result.equity == D("31594.90")
+    assert settled.runner_record.equity == D("31594.90")  # 600030.SH still at its open
+    assert settled.equity == settled.book.equity == D("31994.90")  # the session's equity
+    # gross exposure at the close: 22,100.00 / 31,994.90 = 0.6907350...
+    assert settled.gross_exposure == D("0.690735")
     assert settled.book.as_of == S1
     assert settled.book.cash == D("9894.90")
     assert marks(settled.book) == {B: D("11.60"), C: D("10.50")}
@@ -633,7 +636,7 @@ def test_after_a_ten_for_ten_bonus_issue_the_book_shows_no_false_drawdown_and_se
     )
     assert marks(ex_date.book) == {C: D("20.20")}
     assert ex_date.book.equity == D("30193.80")
-    assert ex_date.result.equity == D("30193.80")  # the runner saw the scaled bar too
+    assert ex_date.runner_record.equity == D("30193.80")  # the runner saw the scaled bar too
     assert factors(ex_date) == {C: D("1.000")}  # still the fill session's
     assert book_state(ex_date, config=CONFIG).holdings == (Holding(ts_code=C, quantity=1000),)
 
@@ -648,7 +651,7 @@ def test_after_a_ten_for_ten_bonus_issue_the_book_shows_no_false_drawdown_and_se
         portfolio,
     )
 
-    (fill,) = sold.result.transitions
+    (fill,) = sold.runner_record.transitions
     assert fill.execution is not None
     assert (fill.execution.filled_price, fill.execution.notional) == (D("20.40"), D("20400.00"))
     assert fill.execution.total_cost == D("16.52")
@@ -825,10 +828,10 @@ def test_the_first_evening_after_the_opening_settles_nothing_and_moves_the_book_
     settled = settle(opening, S1, Market(bars={}, adj_factor={}), portfolio)
 
     assert settled.book == PortfolioState(as_of=S1, cash=D("350000.00"))
-    assert settled.result.before == opening.book
-    assert settled.result.after == settled.book
-    assert (settled.result.transitions, settled.result.carried_marks) == ((), ())
-    assert settled.result.equity == D("350000.00")
+    assert settled.runner_record.before == opening.book
+    assert settled.runner_record.after == settled.book
+    assert (settled.runner_record.transitions, settled.runner_record.carried_marks) == ((), ())
+    assert settled.runner_record.equity == D("350000.00")
     assert settled.attempts == ()
     assert rows(ledger) == []
     assert settled.initialized is False
@@ -1034,11 +1037,76 @@ def test_a_write_off_with_nothing_else_to_settle_records_what_the_runner_would_h
         session=PortfolioBacktestStep(trade_date=S1, bars=(unrelated,), benchmark_close=BENCHMARK),
         observed_on=S1,
     )
-    assert settled.result == runner
-    assert [(m.subject, m.price, m.sessions_carried) for m in settled.result.carried_marks] == [
-        (A, D("6.00"), 1)
-    ]
+    assert settled.runner_record == runner
+    assert [
+        (m.subject, m.price, m.sessions_carried) for m in settled.runner_record.carried_marks
+    ] == [(A, D("6.00"), 1)]
     assert settled.book == PortfolioState(as_of=S1, cash=D("5000.00"), realized_pnl=D("-10005.00"))
     assert rows(ledger) == [(write_off_id(A, S1), "filled", "delisting_write_off")]
     assert settle(book, S1, nothing, portfolio, delisted={A}) == settled
     assert len(ledger.list()) == 1
+
+
+# ---- the session's record ------------------------------------------------------------------------
+
+
+def test_the_sessions_equity_is_after_the_close_and_after_the_write_offs_the_runner_record_before(
+    tmp_path: Path,
+) -> None:
+    """600010.SH is delisted with no bar and 600020.SH closes at 11.50. The runner's record is
+    taken before the write-off: it still holds 600010.SH, carried at 6.00, and reads 5,000.00 +
+    6,000.00 + 11,500.00 = 22,500.00, gross exposure 17,500 / 22,500 = 0.777778. The session's
+    own figures come after it: 5,000.00 + 11,500.00 = 16,500.00, exposure 11,500 / 16,500 =
+    0.696970, and no carried mark for a name the book no longer holds. A daily log reading the
+    runner's record would show the loss a session late."""
+    _, portfolio = ledger_at(tmp_path / "paper.sqlite3")
+
+    settled = settle(
+        _delisted_book(), S1, market(QUIET_B[S1], adj={B: "1.000"}), portfolio, delisted={A}
+    )
+
+    record = settled.runner_record
+    assert record.equity == D("22500.00")
+    assert record.gross_exposure == D("0.777778")
+    assert [p.subject for p in record.after.positions] == [A, B]
+    assert [(m.subject, m.price, m.sessions_carried) for m in record.carried_marks] == [
+        (A, D("6.00"), 1)
+    ]
+    assert settled.equity == settled.book.equity == D("16500.00")
+    assert settled.gross_exposure == D("0.696970")
+    assert settled.carried_marks == ()
+    assert settled.transitions == (settled.written_off[0].transition,)
+
+
+def test_the_sessions_transitions_are_the_runners_then_the_write_offs_in_ledger_order(
+    tmp_path: Path,
+) -> None:
+    """A buy fills and a holding is written off on the same session. The runner's rows reach the
+    ledger first (in `advance`), the write-off after the close; `Settlement.transitions` is that
+    order, which is the order a caller appends the evening in. 600030.SH 100 at 10.10: 1,010.00 +
+    5.00 + 0.01 -> cash 3,984.99. Runner: 3,984.99 + 6,000.00 + 11,500.00 + 1,010.00 =
+    22,494.99; the session: 3,984.99 + 11,500.00 + 100 x 10.50 = 16,534.99."""
+    order = buy(C, 100)
+    ledger, portfolio = ledger_at(tmp_path / "paper.sqlite3")
+
+    settled = settle(
+        _delisted_book(order),
+        S1,
+        market(QUIET_B[S1], OPEN_C_S1, adj={B: "1.000", C: "1.000"}),
+        portfolio,
+        survivors={C},
+        delisted={A},
+    )
+
+    assert [t.order.order_id for t in settled.transitions] == [
+        attempt_id(order, S1),
+        write_off_id(A, S1),
+    ]
+    assert settled.transitions == (
+        *settled.runner_record.transitions,
+        settled.written_off[0].transition,
+    )
+    assert list(ledger.list()) == list(settled.transitions)
+    assert settled.runner_record.equity == D("22494.99")
+    assert settled.equity == D("16534.99")
+    assert tonight(settled).book == settled.book

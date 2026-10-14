@@ -34,15 +34,18 @@ session's market, and does, in this order:
 7. **Cool-downs** start on the **settlement session** -- the session a sale filled or a buy
    expired on -- not the signal session that planned the order (`update_cooldowns`).
 
-Nothing is stored and the snapshot settled from is not changed. `Settlement.with_plan` folds the
-evening's new orders in as untried pending orders and returns the snapshot to save; `book_state`
-is what the kernel is told about the book.
+Nothing is stored and the snapshot settled from is not changed. The session's own figures are
+`Settlement.book`, `equity`, `gross_exposure` and `carried_marks` (after the close and the
+write-offs); `Settlement.runner_record` is the runner's trace from before both, and
+`Settlement.transitions` everything appended to the ledger, in order. `Settlement.with_plan`
+folds the evening's new orders in as untried pending orders and returns the snapshot to save;
+`book_state` is what the kernel is told about the book.
 
 **An opening book settles without a step.** A book that holds nothing and has no due order has no
 name to ask the market about, and a `PortfolioBacktestStep` needs at least one bar. Such a session
-is settled by moving the book to the session -- cash, positions and marks unchanged -- and the
-session's `PaperSessionResult` is the one the runner gives for a session with no order and no bar
-for any held name (`test_a_write_off_with_nothing_else_to_settle_records_what_the_runner_would_have`
+is settled by moving the book to the session -- cash, positions and marks unchanged -- and its
+`runner_record` is the one the runner gives for a session with no order and no bar for any held
+name (`test_a_write_off_with_nothing_else_to_settle_records_what_the_runner_would_have`
 compares the two). Any other session goes through the runner, so a book that holds names none of
 which has a bar is refused by `build_paper_step` as a data failure.
 
@@ -161,12 +164,20 @@ class WriteOff:
 class Settlement:
     """One settled session of the paper book; see the module docstring.
 
-    `book` is as of `session` and marked at the close. `live` is every order still pending, each
-    with its tries; `filled`, `expired` and `cancelled` are what `advance_orders` made of the due
-    orders. `attempts` is every due order's try on the session, in execution order, and `result`
-    the paper book's record of the session (before any write-off). `initialized` is whether the
-    snapshot settled from had settled a session -- i.e. whether the book's first build has been
-    decided, which is what `BookState.initialized` asks.
+    `book` is as of `session`, marked at the close and after the write-offs: the book the
+    session ends with, and `equity`, `gross_exposure` and `carried_marks` are its figures -- **the
+    session's own, the ones a daily log reports**. `live` is every order still pending, each with
+    its tries; `filled`, `expired` and `cancelled` are what `advance_orders` made of the due
+    orders. `attempts` is every due order's try on the session, in execution order.
+    `initialized` is whether the snapshot settled from had settled a session -- i.e. whether the
+    book's first build has been decided, which is what `BookState.initialized` asks.
+
+    `runner_record` is `PaperPortfolio.advance`'s record of the session, **before the close
+    re-mark and before the write-offs**: a name bought on the session is still at the open it was
+    bought at, and a name written off is still held, carried at its last mark. It is the trace of
+    what the runner did, not the session's result; reading its `equity` overstates a write-off
+    day and shows the loss a session late. `transitions` is everything the session appends to
+    the ledger, in the order it is appended: the runner's, then the write-offs.
     """
 
     config_digest: str
@@ -182,7 +193,35 @@ class Settlement:
     cancelled: tuple[TradeOrder, ...]
     written_off: tuple[WriteOff, ...]
     attempts: tuple[AttemptedOrder, ...]
-    result: PaperSessionResult
+    runner_record: PaperSessionResult
+
+    @property
+    def equity(self) -> Decimal:
+        """Cash plus every holding at its mark, after the close and the write-offs."""
+        return self.book.equity
+
+    @property
+    def gross_exposure(self) -> Decimal:
+        """Market value over equity after the close and the write-offs, to six places -- the
+        runner's measure, taken on the session's final book."""
+        return _gross_exposure(self.book)
+
+    @property
+    def carried_marks(self) -> tuple[CarriedMark, ...]:
+        """The holdings the session left at their earlier mark for want of a bar -- the runner's
+        carried marks less the names written off. `sessions_carried` is always 1 here: each
+        `PaperPortfolio.advance` is a one-session run, so the length of a halt is not in it."""
+        gone = {item.ts_code for item in self.written_off}
+        return tuple(mark for mark in self.runner_record.carried_marks if mark.subject not in gone)
+
+    @property
+    def transitions(self) -> tuple[PortfolioTransition, ...]:
+        """Every transition the session appends to the ledger, in the order appended: the
+        runner's (in `PaperPortfolio.advance`), then the write-offs (after the close)."""
+        return (
+            *self.runner_record.transitions,
+            *(item.transition for item in self.written_off),
+        )
 
     def with_plan(self, trade_list: TradeList) -> PaperBookSnapshot:
         """The evening's snapshot: this settlement, with `trade_list`'s new orders pending, untried.
@@ -377,7 +416,7 @@ def settle_session(
         cancelled=lifecycle.cancelled,
         written_off=tuple(write_offs),
         attempts=attempts,
-        result=result,
+        runner_record=result,
     )
 
 
@@ -491,7 +530,6 @@ def _advance_without_a_step(
         realized_pnl=state.realized_pnl,
         fees_paid=state.fees_paid,
     )
-    exposure = Decimal(0) if moved.equity == 0 else moved.market_value / moved.equity
     return PaperSessionResult(
         trade_date=session.isoformat(),
         observed_on=observed_on.isoformat(),
@@ -508,8 +546,14 @@ def _advance_without_a_step(
             for position in state.positions
         ),
         equity=moved.equity,
-        gross_exposure=exposure.quantize(_SIX).quantize(_SIX),
+        gross_exposure=_gross_exposure(moved),
     )
+
+
+def _gross_exposure(state: PortfolioState) -> Decimal:
+    """`multi_day`'s measure and rounding, as `PaperSessionResult.gross_exposure` carries it."""
+    exposure = Decimal(0) if state.equity == 0 else state.market_value / state.equity
+    return exposure.quantize(_SIX).quantize(_SIX)
 
 
 def _write_off(state: PortfolioState, *, ts_code: str, session: date) -> PortfolioTransition:
