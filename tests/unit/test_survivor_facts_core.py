@@ -199,6 +199,93 @@ def test_an_st_name_stays_st_whatever_the_band_says() -> None:
         assert name_status(history=named("*ST康美"), band_is_five_percent=band, day=DAY) == "st"
 
 
+def test_an_st_that_has_ended_reads_ordinary_once_the_lifting_is_in_force() -> None:
+    # 摘帽. 康美药业 (2013) -> *ST康美 (effective 2019-03-01, announced 2019-02-28) -> 康美药业
+    # (effective 2021-05-06, announced 2021-05-05). On 2021-06-15 the record in force is the
+    # 2021-05-06 one, an ordinary name, and nothing is pending: the security WAS special-treated
+    # and is not any more. A rule that read "ever ST" would answer `st` here.
+    lifted = history(
+        ("康美药业", date(2013, 1, 4), date(2013, 1, 4)),
+        ("*ST康美", date(2019, 3, 1), date(2019, 2, 28)),
+        ("康美药业", date(2021, 5, 6), date(2021, 5, 5)),
+    )
+    for band in (False, None):
+        assert name_status(history=lifted, band_is_five_percent=band, day=DAY) == "ordinary"
+    # While the *ST name was in force it was `st`: 2020-06-15 lies in 2019-03-01..2021-05-05.
+    assert name_status(history=lifted, band_is_five_percent=None, day=date(2020, 6, 15)) == "st"
+
+
+def test_an_announced_lifting_does_not_end_the_st_before_it_takes_effect() -> None:
+    # The pending twin. The lifting is announced Tue 2021-06-15 and effective Wed 2021-06-16. On
+    # the 15th *ST康美 is still in force and the pending record is an ordinary name, which counts
+    # for nothing early, so the answer is `st`; on the 16th the lifting is in force: `ordinary`.
+    lifting = history(
+        ("康美药业", date(2013, 1, 4), date(2013, 1, 4)),
+        ("*ST康美", date(2019, 3, 1), date(2019, 2, 28)),
+        ("康美药业", date(2021, 6, 16), date(2021, 6, 15)),
+    )
+    for band in (False, None):
+        assert name_status(history=lifting, band_is_five_percent=band, day=DAY) == "st"
+        assert (
+            name_status(history=lifting, band_is_five_percent=band, day=date(2021, 6, 16))
+            == "ordinary"
+        )
+
+
+def test_a_pending_delisting_period_rename_stays_ordinary_until_it_takes_effect() -> None:
+    # A deliberate choice, pinned here so changing it is a decision and not an accident. Only an
+    # ST name counts while pending, because T3 2.4(iv) measured that 99.2% of ST names are
+    # announced a session or more ahead. A delisting-period name has no such measurement behind
+    # it, so it is read on the effective clock alone: announced Tue 2021-06-15 and effective
+    # Wed 2021-06-16, the 15th is still `ordinary` and the 16th is `delisting`.
+    pending = history(
+        ("国华网安", date(2013, 1, 4), date(2013, 1, 4)),
+        ("国华退", date(2021, 6, 16), date(2021, 6, 15)),
+    )
+    for band in (False, None):
+        assert name_status(history=pending, band_is_five_percent=band, day=DAY) == "ordinary"
+    assert (
+        name_status(history=pending, band_is_five_percent=False, day=date(2021, 6, 16))
+        == "delisting"
+    )
+
+
+def test_a_history_served_newest_first_reads_the_same_as_one_served_oldest_first() -> None:
+    # The vendor serves `namechange` newest first. Five records whose order matters -- two ST
+    # spells, a lifting between them and a rename pending on the signal day -- read on seven
+    # days, each answer worked out by hand from the records:
+    #
+    #   2013-01-03  nothing announced yet (first announcement 2013-01-04)  -> unknown
+    #   2018-06-01  康美药业 in force                                     -> ordinary
+    #   2019-06-01  ST康美 in force (from 2019-03-01)                     -> st
+    #   2020-06-01  *ST康美 in force (from 2020-04-01)                    -> st
+    #   2021-05-31  康美药业 in force again (from 2021-05-06)             -> ordinary
+    #   2021-06-15  康美药业 in force, ST康美 announced that day, pending -> st
+    #   2021-06-16  ST康美 in force                                       -> st
+    rows = (
+        ("康美药业", date(2013, 1, 4), date(2013, 1, 4)),
+        ("ST康美", date(2019, 3, 1), date(2019, 2, 28)),
+        ("*ST康美", date(2020, 4, 1), date(2020, 3, 31)),
+        ("康美药业", date(2021, 5, 6), date(2021, 5, 5)),
+        ("ST康美", date(2021, 6, 16), date(2021, 6, 15)),
+    )
+    oldest_first = history(*rows)
+    newest_first = history(*reversed(rows))
+    expected = {
+        date(2013, 1, 3): "unknown",
+        date(2018, 6, 1): "ordinary",
+        date(2019, 6, 1): "st",
+        date(2020, 6, 1): "st",
+        date(2021, 5, 31): "ordinary",
+        date(2021, 6, 15): "st",
+        date(2021, 6, 16): "st",
+    }
+
+    for day, answer in expected.items():
+        assert name_status(history=oldest_first, band_is_five_percent=False, day=day) == answer
+        assert name_status(history=newest_first, band_is_five_percent=False, day=day) == answer
+
+
 def test_a_malformed_call_is_still_an_error_and_not_an_unknown() -> None:
     # Only the two "the corpus does not reach that day" horizon errors become a verdict. A
     # `datetime` is a bug in the caller (it never equals a date), and swallowing it as
