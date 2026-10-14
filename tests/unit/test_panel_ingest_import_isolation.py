@@ -693,6 +693,14 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "strategy_survivor_summary.SURVIVOR_WORDING",
         }
     ),
+    "openalpha_cn.strategy_survivor_morning": frozenset(
+        {
+            # V2-P7-008, task D6. The morning re-check's comparison. It reads nothing from the
+            # panel and names one type only, for its signatures: the facts day it reads, under
+            # `TYPE_CHECKING`, so no module loads at run time.
+            "strategy_survivor_facts.FactsDay",
+        }
+    ),
     "openalpha_cn.strategy_survivor_registration": frozenset(
         {
             # V2-P7-008. The survivor day's forward record: the facts day it scores and the
@@ -1127,6 +1135,14 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
         # V2-P7-018. It names no dataset and reaches none: the snapshots, the paper ledger's rows
         # and the journals are handed to it, and the benchmark returns of the registered windows
         # arrive as numbers its caller read.
+        named=frozenset(),
+        reached=frozenset(),
+    ),
+    "openalpha_cn.strategy_survivor_morning": DatasetReach(
+        # V2-P7-008, task D6. It names no dataset and reads none: the morning's name fetch is the
+        # daily command's (`namechange`, through `panel build`) and the facts days it compares
+        # arrive as the facts adapter's output; the one type it takes across the seam is for its
+        # signatures only.
         named=frozenset(),
         reached=frozenset(),
     ),

@@ -146,7 +146,6 @@ def _compare(
         before=morning.read_facts(evening_day.facts, evening_day.screen, names.watched()),
         facts=morning_day.facts,
         screen=morning_day.screen,
-        book=CONFIG,
     )
 
 
@@ -318,7 +317,9 @@ def test_a_name_outside_the_plan_that_turned_special_treatment_moves_only_the_co
 
     assert [item.kind for item in advice.differences] == ["counts_changed"]
     (item,) = advice.differences
-    assert "eligible" in item.text and "ST" in item.text
+    # The name turned ineligible, and the liquidity cut over the names that pass every static
+    # reason moved with it, so the eligible count itself may or may not have changed; the ST count
+    # of the name corpus certainly did.
     before, after = evening.facts.notes.st, evening.facts.notes.st + 1
     assert f"ST {before} -> {after}" in item.text
 
@@ -391,8 +392,10 @@ def test_the_evening_read_is_checked_against_the_evenings_own_document(evening: 
 
     drifted = _turn(evening, top[4], special_treatment=True)
     with pytest.raises(morning.EveningReadDriftError) as caught:
-        morning.check_evening_read(morning.read_facts(drifted.facts, drifted.screen, names), document)
-    assert "eligible" in str(caught.value)
+        morning.check_evening_read(
+            morning.read_facts(drifted.facts, drifted.screen, names), document
+        )
+    assert "notes.st" in str(caught.value)
 
 
 def test_a_document_with_no_evening_has_no_plan_to_check() -> None:

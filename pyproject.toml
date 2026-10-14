@@ -290,6 +290,7 @@ forbidden_modules = [
   "openalpha_cn.strategy_survivor_facts",
   "openalpha_cn.strategy_survivor_forward",
   "openalpha_cn.strategy_survivor_market",
+  "openalpha_cn.strategy_survivor_morning",
   "openalpha_cn.strategy_survivor_registration",
 ]
 # Whole-package source, no exemptions: nothing under backtest/ reaches any of these today, on
