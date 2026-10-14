@@ -24,8 +24,9 @@ as the configuration its book is settled under.
 missing or extra top-level key, a block that does not validate, a book block that is not its own
 stored form -- and the script exits 2 on it, as on a missing registration.
 `SurvivorRegistrationContradictionError`, its subclass, is a registration read whole that
-contradicts itself: today, a book `seed` that is not the registration's own `settings.random_seed`.
-The script exits 3 on it, the class of a `config_id` that does not match its own config.
+contradicts itself: today, a book `seed` that is not the registration's own `settings.random_seed`
+(one that names none, or names one that is not a whole number, reads as 0, `Registration.seed`'s
+rule). The script exits 3 on it, the class of a `config_id` that does not match its own config.
 
 ## Why the book block must be its own stored form
 
@@ -269,14 +270,18 @@ def _json_text(value: object) -> str:
     return json.dumps(value, sort_keys=True, ensure_ascii=False)
 
 
-def read_survivor_registration(config: Mapping[str, Any], *, seed: int) -> SurvivorRegistration:
-    """The survivor registration `config` is, checked against the registration's own `seed`.
+def read_survivor_registration(
+    config: Mapping[str, Any], *, seed: int | None
+) -> SurvivorRegistration:
+    """The survivor registration `config` is, checked against the registration's own `seed`:
+    its `settings.random_seed`, or `None` when it names none that is a whole number -- which
+    reads as 0, `Registration.seed`'s rule, and is said so when it refuses.
 
     Refuses (`SurvivorRegistrationError`) a kind other than `SURVIVOR_KIND`, a top-level key
     missing or beside the three, a book or adapter block that does not validate, a book block
     that is not its own stored form and a composite factor this build does not declare; refuses
-    (`SurvivorRegistrationContradictionError`) a book `seed` other than `seed`. See the module
-    docstring for each rule.
+    (`SurvivorRegistrationContradictionError`) a book `seed` other than the registration's. See
+    the module docstring for each rule.
     """
     kind = registration_kind(config)
     if kind != SURVIVOR_KIND:
@@ -321,11 +326,16 @@ def read_survivor_registration(config: Mapping[str, Any], *, seed: int) -> Survi
             "the survivor day builds each of them at step 4, and would refuse every evening"
         )
     adapter = _validated(SurvivorAdapterConfig, config[ADAPTER_BLOCK], ADAPTER_BLOCK)
-    if book.seed != seed:
+    if book.seed != (0 if seed is None else seed):
+        own = (
+            "the registration names no random_seed in its settings that is a whole number, "
+            "which reads as 0"
+            if seed is None
+            else f"the registration's own seed (settings.random_seed) is {seed}"
+        )
         raise SurvivorRegistrationContradictionError(
-            f"{BOOK_BLOCK}.seed is {book.seed} and the registration's own seed "
-            f"(settings.random_seed) is {seed}; a registration that names two seeds contradicts "
-            "itself"
+            f"{BOOK_BLOCK}.seed is {book.seed} and {own}; a registration that names two seeds "
+            "contradicts itself"
         )
     return SurvivorRegistration(book=book, adapter=adapter)
 

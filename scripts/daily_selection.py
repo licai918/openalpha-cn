@@ -578,9 +578,13 @@ def survivor_registration(registration: Registration) -> SurvivorRegistration | 
         return None
     from openalpha_cn import strategy_survivor
 
+    named = registration.settings.get("random_seed")
     try:
         return strategy_survivor.read_survivor_registration(
-            registration.config, seed=registration.seed
+            registration.config,
+            # `Registration.seed` reads a missing or non-integer seed as 0; the reader keeps that
+            # rule, and is told which case this is so that a refusal says so.
+            seed=registration.seed if type(named) is int else None,
         )
     except strategy_survivor.SurvivorRegistrationContradictionError as error:
         raise StepFailedError(

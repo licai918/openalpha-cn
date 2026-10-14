@@ -255,6 +255,36 @@ def test_a_book_seed_that_is_not_the_registrations_exits_3(
     assert str(SEED + 1) in err
 
 
+@pytest.mark.parametrize(
+    "settings",
+    [{}, {"random_seed": True}, {"random_seed": "20260926"}],
+    ids=["none", "bool", "text"],
+)
+def test_a_registration_that_names_no_seed_is_refused_saying_so(
+    tmp_path: Path, settings: dict[str, object]
+) -> None:
+    """`Registration.seed` reads a missing or non-integer `settings.random_seed` as 0; the survivor
+    reader keeps that rule and, refusing a book seed other than 0, says the registration named
+    none rather than that it named 0."""
+    registration = daily.Registration(
+        path=tmp_path / "p6-registration.json",
+        sha256="0" * 64,
+        commit="0" * 40,
+        code_commit="0" * 40,
+        config=SURVIVOR_CONFIG,
+        config_id=tds.grid.config_id(SURVIVOR_CONFIG),
+        seed=0,
+        settings=settings,
+    )
+
+    with pytest.raises(daily.StepFailedError) as refused:
+        daily.survivor_registration(registration)
+
+    assert refused.value.exit_code == daily.DailyExit.code_not_registered
+    assert "names no random_seed" in str(refused.value)
+    assert "random_seed) is 0" not in str(refused.value)
+
+
 # --- what a P6 day loads -----------------------------------------------------------------------
 
 _IN_A_FRESH_INTERPRETER: Final[str] = (

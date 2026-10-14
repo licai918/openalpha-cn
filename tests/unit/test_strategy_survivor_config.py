@@ -377,6 +377,22 @@ def test_a_book_seed_that_is_not_the_registrations_own_contradicts_the_registrat
     assert read_survivor_registration(registered(book=stored(other)), seed=SEED + 1).book == other
 
 
+def test_a_registration_that_names_no_seed_reads_as_0_and_says_it_names_none() -> None:
+    """`seed=None` is a registration whose settings name no `random_seed`: read as 0, the rule
+    every other reader of the registration follows, and a book seed other than 0 is refused
+    with a message that says the registration named none -- not that it named 0."""
+    zero = SurvivorBookConfig(seed=0)
+    assert read_survivor_registration(registered(book=stored(zero)), seed=None).book == zero
+
+    with pytest.raises(SurvivorRegistrationContradictionError) as refused:
+        read_survivor_registration(registered(), seed=None)
+
+    message = str(refused.value)
+    assert "names no random_seed" in message
+    assert f"survivor_book.seed is {SEED}" in message
+    assert "random_seed) is 0" not in message
+
+
 # --- the composite factors ---------------------------------------------------------------------
 
 
