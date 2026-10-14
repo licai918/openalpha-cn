@@ -630,6 +630,11 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             # reader that scores a filed record's day again (`build_facts_day`), ...
             "strategy_survivor_facts.FactsDay",
             "strategy_survivor_facts.build_facts_day",
+            # Review Important 1: the `daily` census is cut to the sessions whose bars are an
+            # eligible name's amount -- the facts adapter's own window, counted on the stored
+            # calendar.
+            "strategy_survivor_facts.AMOUNT_WINDOW_SESSIONS",
+            "panel_ingest.load_trading_calendar",
             # ... P6's record vocabulary, reused rather than restated: the composite's name, the
             # registration a record declares, its refusal, a filing's digest and its custody
             # instant ...

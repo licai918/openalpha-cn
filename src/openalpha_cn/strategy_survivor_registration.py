@@ -48,12 +48,28 @@ to four processed tiers that is about 50 s a day (T6-T7 3.4). The survivor prove
 
 - `builds`: the `transform_manifest_id` of each composite factor's processed build stamped at the
   session's 16:30 -- the one build `build_facts_day` reads (`at=`), for the declared transform;
-- `inputs`: for every partition the day reads -- the calendar, the registry and the names in every
-  stored year through the session's, the bars in every stored year through it (the held look-back
-  can reach back to the panel's first session; the bound is not on the provenance's arguments),
-  the session year's halts and bands, and each factor's processed tier and its manifests -- its
-  `content_hash`, and a digest of its **date census through the session** (the catalog's count
-  of rows per event date, for every date on or before it);
+- `inputs`: every partition **the batch can depend on**, each with its `content_hash` and a digest
+  of its **date census within that dataset's window** (the catalog's count of rows per event
+  date, for the dates the window holds). The windows are what can move an eligible verdict, and
+  no wider (`V2-P7-008` review, Important 1):
+
+  - `suspend_d`, `stk_limit`: **the session alone**, in its year -- `HaltCorpus.state_on` reads
+    only the day's row, and the bands are read with `load_price_limits(day=session)`;
+  - `daily`: **the `AMOUNT_WINDOW_SESSIONS` sessions ending on the session** (from
+    `amount_window_from`, taken from the stored calendar), in their year or two -- an eligible
+    name trades on the session and its amount is the mean of these bars; the walk reads further
+    back only for a halted name, which is `suspended`, never eligible and never in the
+    population the liquidity cut is taken over;
+  - `namechange`, `stock_basic`, `trade_cal`: **every date through the session**, in every stored
+    year through the session's -- a late rename dated before the session, a late listing or
+    termination row and a listing age are all legitimate causes;
+  - each factor's processed tier and its manifests: the session's year, recorded and **never
+    judged by rows** -- judged by the build at 16:30 (`builds`).
+
+- `lookback`: the older `daily` years -- outside the window -- that a **held** security's
+  look-back may have read (recorded only when a held security's row is `suspended`: the walk
+  reads back as far as the panel goes for it), with their `content_hash` alone. They cannot move
+  the batch; a recompute that could not be made at all may name them;
 - `held`, as the facts were read with it (the recompute passes the same codes), and
   `facts_digest`, the facts' canonical bytes, kept **as a diagnostic only**: a code priced before
   its listing row is published reads differently in the evening and later, without moving any
@@ -72,34 +88,45 @@ four manifest ids.
 ## When a mismatch may be called `UNVERIFIABLE` (`survivor_provenance_changes`)
 
 The late-record check scores a record again (`recompute_survivor_batch`); equal, it is verified.
-When it differs, the record may be admitted as `strategy_registration.UNVERIFIABLE` -- flagged,
-counted -- **only** when this function names a change, and is refused otherwise. It names:
+Otherwise the record may be admitted as `strategy_registration.UNVERIFIABLE` -- flagged,
+counted -- **only** when this function names a change, and is refused otherwise. What it may name
+depends on why the record was not verified (`scope`), because the evidence it needs differs:
 
-- **a build that changed**: the processed build a composite factor's value was read from, at the
-  session's 16:30, is now another `transform_manifest_id`, or none;
-- **a partition that was restated**: one the day read whose rows **dated on or before the
-  session** are not what they were -- its date census through the session differs, or it is no
-  longer stored, or one the day would read now holds such rows and was not stored then.
+- **`recompute_differs`** -- the day was scored again and the scores differ. Only what can move
+  the batch may excuse that: **a build that changed** (the processed build at the session's 16:30
+  is now another, or none), and **a partition restated within its window** -- its windowed census
+  differs, or it is gone while its window held rows, or one the windows reach is stored since
+  with rows inside its window. Nothing outside the windows is ever named here: an older `daily`
+  year rebuilt, an intraday halt months before the session, a whole-year `stk_limit` rebuild that
+  moved an earlier date's count -- none can move this batch, so none may excuse its mismatch.
+- **`recompute_failed`** -- the day could not be scored again at all (a refusal of the store,
+  `build_facts_day` or the record vocabulary). Then any partition the day read may be the cause,
+  so beside the above it names a partition the day read that is gone, whatever its window held,
+  and a `lookback` year gone or rewritten since the filing.
 
-**A moved content hash alone is not a change**, and that is the point of the census. A partition's
-`content_hash` moves on every rewrite: an append of later sessions, a later factor build, and
-every refetch, which re-stamps `ingested_time` (`providers/tushare.py`) -- the registry rewrites
-every lifecycle year it holds on each fetch. So the hash is only the cheap half: unchanged, the
-partition is byte-identical and nothing else is consulted; moved, its census through the session
-says whether rows the day could read appeared, vanished or moved date. An append adds rows dated
-after the session and leaves that census as it was. A factor tier's own partitions are never
-judged by rows -- every build moves them, a rerun later on the session's own date included -- only
-by the build at 16:30. Measured on the frame: appending four sessions, a rename, a listing and a
-build moves 13 of the 16 content hashes the day read and names no change, and the recompute
-equals the record; an ST rename announced on the signal day and stored the next morning (under
-the provider's own clock, midnight of the announcement, which the filing instant can read)
-moves the names' census on that date from 1 to 2 rows and is named; superseding a 16:30 build is
-named by its manifest id.
+**A moved content hash alone is never a change**, and that is the point of the census. A
+partition's `content_hash` moves on every rewrite: an append of later sessions, a later factor
+build, and every refetch, which re-stamps `ingested_time` (`providers/tushare.py`) -- the registry
+rewrites every lifecycle year it holds on each fetch. So the hash is only the cheap half:
+unchanged, the partition is byte-identical and nothing else is consulted; moved, its windowed
+census says whether rows the batch could depend on appeared, vanished or moved date. An append
+adds rows dated after the session and leaves every window as it was. Measured on the frame:
+appending four sessions, a rename, a listing and a build moves 13 of the 16 content hashes the
+day read and names nothing in either scope, and the recompute equals the record; an ST rename
+announced on the signal day (or three sessions before it) and stored the next morning, under the
+provider's own clock which the filing instant can read, moves the names' census on that date and
+is named; superseding a 16:30 build is named.
 
-**What it cannot see**, the price of no per-row digest: a rewrite that changes the values of rows
-dated on or before the session without adding, removing or re-dating any -- a full `panel build`
-that corrects a bar in place under the session's own clocks -- keeps the census. A record whose
-recompute differs for that reason is **refused**, not admitted: the check fails closed, by name.
+**The census is blind twice over, and both blindnesses are stated rather than hidden:**
+
+- **subject-blind**: it counts rows per date, not per security, so a change for one security
+  inside a window (a late rename of one name) excuses a mismatch in another's score. The windows
+  bound how far that reaches; they do not remove it.
+- **value-blind**: a rewrite that changes the values of rows inside a window without adding,
+  removing or re-dating any -- a full `panel build` correcting a bar in place under the session's
+  own clocks, the review's probe A, an eligible name's amount cut across its window -- keeps every
+  census. A record whose recompute differs for that reason is **refused**, never admitted: the
+  check fails closed, by name.
 
 ## The recompute (`recompute_survivor_batch`)
 
@@ -112,6 +139,15 @@ partition the day reads became knowable, and only then; any other refusal is the
 do not take that path: since `V2-P4-076` every door these loaders take is row-filtered, and a
 row dated after the session is not counted against the filing instant -- measured, the grown
 frame reads at the filing instant directly.
+
+**Reading at the filing instant and reading at the newest instant answer alike**, which is why
+the order above is safe rather than a choice that moves results. Every loader the day reads is
+census-reconciled (`panel_ingest._read_visible_event_dated_rows`, the price session reads) and
+asks about rows dated on or before the session, each visible from its own clock: a later instant
+sees only rows dated after the session, which no window holds, or rows dated within it whose
+clock is later -- exactly the rows the filing instant refuses to read past
+(`PartitionNotYetKnowableError`) rather than answering short. So the later read differs from the
+filing-time read only where the filing-time read could not be made.
 """
 
 from __future__ import annotations
@@ -123,7 +159,7 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import Final, cast
+from typing import Final, Literal, cast
 from zoneinfo import ZoneInfo
 
 from openalpha_cn.domain import survivor_screen
@@ -149,7 +185,7 @@ from openalpha_cn.panel_factors import (
     load_factor_transform_manifests,
     processed_factor_dataset,
 )
-from openalpha_cn.panel_ingest import session_publication_instant
+from openalpha_cn.panel_ingest import load_trading_calendar, session_publication_instant
 from openalpha_cn.strategy_registration import (
     COMPOSITE_MODEL_NAME,
     RegisteredConfiguration,
@@ -157,16 +193,25 @@ from openalpha_cn.strategy_registration import (
     batch_digest,
     registered_at,
 )
-from openalpha_cn.strategy_survivor_facts import FactsDay, build_facts_day
+from openalpha_cn.strategy_survivor_facts import (
+    AMOUNT_WINDOW_SESSIONS,
+    FactsDay,
+    build_facts_day,
+)
 
 __all__ = [
+    "RECOMPUTE_DIFFERS",
+    "RECOMPUTE_FAILED",
     "SURVIVOR_FAMILY",
     "SURVIVOR_HORIZON",
     "SURVIVOR_PROVENANCE_DIRECTORY",
     "SURVIVOR_PROVENANCE_SCHEMA",
     "SURVIVOR_TIER",
+    "ChangeScope",
+    "SurvivorCheckArgumentError",
     "SurvivorInputPartition",
     "SurvivorInputProvenance",
+    "SurvivorLookbackPartition",
     "SurvivorRegistrationError",
     "recompute_survivor_batch",
     "survivor_batch",
@@ -192,25 +237,39 @@ SURVIVOR_PROVENANCE_DIRECTORY: Final = "daily_survivor_provenance"
 """Under the runtime directory: each survivor record's input provenance, `<digest>.json`,
 written once (`write_survivor_provenance`)."""
 
-_HISTORY_DATASETS: Final[tuple[str, ...]] = (
+_THROUGH_SESSION_DATASETS: Final[tuple[str, ...]] = (
     TRADING_CALENDAR_DATASET,
     STOCK_BASIC_DATASET,
     NAMECHANGE_DATASET,
-    DAILY_DATASET,
 )
-"""Read in every stored year through the session's: the calendar and the names from their first
-stored year (`_years_through`), the registry beneath its newest year, and the bars as far back as
-a held halted security's last bar."""
-_SESSION_DATASETS: Final[tuple[str, ...]] = (SUSPENSION_DATASET, PRICE_LIMIT_DATASET)
-"""Read in the session's year only: the halt corpus and the published bands."""
+"""Windowed through the session, in every stored year through the session's: the calendar and
+the names from their first stored year (`_years_through`), the registry beneath its newest year."""
+_ON_SESSION_DATASETS: Final[tuple[str, ...]] = (SUSPENSION_DATASET, PRICE_LIMIT_DATASET)
+"""Windowed on the session alone, in its year: the halt corpus and the published bands."""
 _NO_DATES: Final[str] = hashlib.sha256(b"[]").hexdigest()
-"""The census digest of a partition with no row through the session, or none at all."""
+"""The census digest of a partition with no row inside its window, or none at all."""
+
+ChangeScope = Literal["recompute_differs", "recompute_failed"]
+"""Why a record was not verified, which decides what may excuse it (module docstring)."""
+RECOMPUTE_DIFFERS: Final[ChangeScope] = "recompute_differs"
+"""The day was scored again and the scores differ: only what can move the batch may excuse it."""
+RECOMPUTE_FAILED: Final[ChangeScope] = "recompute_failed"
+"""The day could not be scored again: any partition the day read may be the cause."""
+_SCOPES: Final[frozenset[str]] = frozenset({RECOMPUTE_DIFFERS, RECOMPUTE_FAILED})
 
 
 class SurvivorRegistrationError(StrategyRegistrationError):
     """A survivor day cannot be put as a record, or its provenance cannot be taken or read.
 
     A `StrategyRegistrationError`, so a caller holding P6's refusal holds this one too."""
+
+
+class SurvivorCheckArgumentError(ValueError):
+    """The late-record check was handed inputs that do not belong together -- another scope,
+    another transform, another record's provenance or holdings.
+
+    A caller's error, never a change in the store: it is raised, and is not one of the refusals a
+    check may treat as "this record cannot be recomputed", so it can never become an excuse."""
 
 
 # --- the record ----------------------------------------------------------------------------------
@@ -320,8 +379,18 @@ class SurvivorInputPartition:
     year: int
     content_hash: str
     dates_digest: str
-    """SHA-256 of the catalog's date census through the session: `[[event date, row count], ...]`
-    for every event date on or before it, ascending. No row is read."""
+    """SHA-256 of the catalog's date census within the dataset's window: `[[event date, row
+    count], ...]` for every event date the window holds, ascending. No row is read."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SurvivorLookbackPartition:
+    """An older `daily` year a held security's look-back may have read: outside every window,
+    so it cannot move the batch, and recorded by its content hash alone."""
+
+    dataset: str
+    year: int
+    content_hash: str
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -342,11 +411,16 @@ class SurvivorInputProvenance:
     held: tuple[str, ...]
     facts_digest: str
     """The facts' canonical bytes: a diagnostic, never the comparison (module docstring)."""
+    amount_window_from: date
+    """The first of the `AMOUNT_WINDOW_SESSIONS` sessions ending on the session: where the `daily`
+    window opens."""
     builds: tuple[tuple[str, str], ...]
     """`(factor, transform_manifest_id)` of each composite factor's processed build at the
     session's 16:30, ascending by factor."""
     inputs: tuple[SurvivorInputPartition, ...]
-    """Every partition the day read, ascending by `(dataset, year)`."""
+    """Every partition the batch can depend on, ascending by `(dataset, year)`."""
+    lookback: tuple[SurvivorLookbackPartition, ...]
+    """The older `daily` years a held security's look-back may have read, ascending by year."""
     schema: str = SURVIVOR_PROVENANCE_SCHEMA
 
     def document(self) -> dict[str, object]:
@@ -359,11 +433,13 @@ class SurvivorInputProvenance:
             "recorded_at": self.recorded_at.isoformat(),
             "held": list(self.held),
             "facts_digest": self.facts_digest,
+            "amount_window_from": self.amount_window_from.isoformat(),
             "builds": [[factor, build] for factor, build in self.builds],
             "inputs": [
                 [item.dataset, item.year, item.content_hash, item.dates_digest]
                 for item in self.inputs
             ],
+            "lookback": [[item.dataset, item.year, item.content_hash] for item in self.lookback],
         }
 
     @property
@@ -390,6 +466,7 @@ class SurvivorInputProvenance:
                 recorded_at=datetime.fromisoformat(str(body["recorded_at"])),
                 held=tuple(str(code) for code in cast(Sequence[object], body["held"])),
                 facts_digest=str(body["facts_digest"]),
+                amount_window_from=date.fromisoformat(str(body["amount_window_from"])),
                 builds=tuple((str(item[0]), str(item[1])) for item in builds),
                 inputs=tuple(
                     SurvivorInputPartition(
@@ -399,6 +476,14 @@ class SurvivorInputProvenance:
                         dates_digest=str(item[3]),
                     )
                     for item in inputs
+                ),
+                lookback=tuple(
+                    SurvivorLookbackPartition(
+                        dataset=str(item[0]),
+                        year=int(cast(int, item[1])),
+                        content_hash=str(item[2]),
+                    )
+                    for item in cast(Sequence[Sequence[object]], body["lookback"])
                 ),
             )
         except (KeyError, IndexError, TypeError, ValueError) as error:
@@ -414,12 +499,14 @@ def survivor_input_provenance(
     batch: PredictionBatch,
     registered: RegisteredConfiguration,
     transform: FactorTransformSpec,
+    exchange: str,
     recorded_at: datetime,
 ) -> SurvivorInputProvenance:
     """Fingerprint what `facts`' day read, from the catalog alone, for the record of `batch`.
 
     `batch` must be the survivor batch of `facts`' session under `registered`; its feature ids
-    name the factors whose 16:30 builds are fingerprinted, under `transform`.
+    name the factors whose 16:30 builds are fingerprinted, under `transform`. `exchange` names the
+    stored calendar the `daily` window is counted on (the facts' own).
     """
     session = facts.session
     declaration = batch.artifact.declaration
@@ -437,6 +524,11 @@ def survivor_input_provenance(
             f"{session.isoformat()}; a provenance names the day its record scores"
         )
     factors = _factors_of(batch.artifact.feature_ids)
+    held = frozenset(facts.held)
+    # The walk reads past the window only for a security with no bar today; held, it reads as
+    # far back as the panel goes. Such a row is `suspended` (a held name halted through the close
+    # with a bar is too, which only records more than was read).
+    looked_back = any(fact.suspended for fact in facts.facts if fact.ts_code in held)
     with store.reading():
         builds = _builds_at(store, session=session, factors=factors, transform=transform)
         missing = sorted(factor for factor, build in builds.items() if build is None)
@@ -446,10 +538,25 @@ def survivor_input_provenance(
                 f"{session_publication_instant(session).isoformat()}; the facts of "
                 f"{session.isoformat()} were read from one, so the store changed under the run"
             )
+        windows = _Windows(
+            session=session,
+            amount_from=_amount_window_from(store, session=session, exchange=exchange),
+            tiers=frozenset(_factor_datasets(factors)),
+        )
         inputs = tuple(
             partition
-            for dataset, year in _read_partitions(store, session=session, factors=factors)
-            if (partition := _partition(store, dataset, year, session=session)) is not None
+            for dataset, year in _window_partitions(store, windows)
+            if (partition := _partition(store, dataset, year, windows)) is not None
+        )
+        lookback = (
+            tuple(
+                SurvivorLookbackPartition(dataset=DAILY_DATASET, year=year, content_hash=content)
+                for year in store.registered_years(DAILY_DATASET)
+                if year < windows.amount_from.year
+                and (content := store.partition_content_hash(DAILY_DATASET, year)) is not None
+            )
+            if looked_back
+            else ()
         )
     return SurvivorInputProvenance(
         registration_sha256=registered.registration_sha256,
@@ -459,8 +566,10 @@ def survivor_input_provenance(
         recorded_at=recorded_at,
         held=facts.held,
         facts_digest=_facts_digest(facts),
+        amount_window_from=windows.amount_from,
         builds=tuple((factor, cast(str, builds[factor])) for factor in sorted(builds)),
         inputs=inputs,
+        lookback=lookback,
     )
 
 
@@ -489,18 +598,33 @@ def write_survivor_provenance(runtime_dir: Path, provenance: SurvivorInputProven
 
 
 def survivor_provenance_changes(
-    store: PanelStore, provenance: SurvivorInputProvenance, *, transform: FactorTransformSpec
+    store: PanelStore,
+    provenance: SurvivorInputProvenance,
+    *,
+    transform: FactorTransformSpec,
+    scope: ChangeScope,
 ) -> tuple[str, ...]:
     """What the store no longer holds as the record's day read it, by name; `()` when nothing.
 
-    The late-record check may call a record whose recompute differs `UNVERIFIABLE` only when
-    this names something, and refuses it otherwise (module docstring: a changed 16:30 build, or a
-    partition restated through the session -- never a content hash that merely moved).
+    The late-record check may call a record it could not verify `UNVERIFIABLE` only when this
+    names something, and refuses it otherwise. `scope` is why it was not verified --
+    `RECOMPUTE_DIFFERS` or `RECOMPUTE_FAILED` -- and decides what may be named (module docstring:
+    a changed 16:30 build and a partition restated within its window; and, only for a recompute
+    that failed, a partition the day read that is gone and a look-back year gone or rewritten --
+    never a content hash that merely moved).
     """
+    if scope not in _SCOPES:
+        raise SurvivorCheckArgumentError(
+            f"scope {scope!r} is neither {RECOMPUTE_DIFFERS!r} nor {RECOMPUTE_FAILED!r}"
+        )
     session = provenance.session
     published = session_publication_instant(session)
     factors = tuple(factor for factor, _build in provenance.builds)
-    tiers = frozenset(_factor_datasets(factors))
+    windows = _Windows(
+        session=session,
+        amount_from=provenance.amount_window_from,
+        tiers=frozenset(_factor_datasets(factors)),
+    )
     recorded = {(item.dataset, item.year): item for item in provenance.inputs}
     changes: list[str] = []
     with store.reading():
@@ -511,27 +635,38 @@ def survivor_provenance_changes(
                     f"{factor}: the {transform.qualified_key} build at {published.isoformat()} "
                     f"is {now[factor] or 'not stored'}, not {build}"
                 )
-        keys = set(recorded) | set(_read_partitions(store, session=session, factors=factors))
-        for dataset, year in sorted(keys):
-            if dataset in tiers:
+        for dataset, year in sorted(set(recorded) | set(_window_partitions(store, windows))):
+            if dataset in windows.tiers:
                 continue
             before = recorded.get((dataset, year))
             content = store.partition_content_hash(dataset, year)
             if before is not None and content == before.content_hash:
                 continue
+            current = None if content is None else _partition(store, dataset, year, windows)
+            dates = _NO_DATES if current is None else current.dates_digest
+            held_rows = _NO_DATES if before is None else before.dates_digest
             if content is None:
-                if before is not None:
+                if before is not None and (dates != held_rows or scope == RECOMPUTE_FAILED):
                     changes.append(f"{dataset}:{year} (no longer stored)")
                 continue
-            current = _partition(store, dataset, year, session=session)
-            dates = _NO_DATES if current is None else current.dates_digest
-            if dates == (_NO_DATES if before is None else before.dates_digest):
+            if dates == held_rows:
                 continue
+            reach = windows.describe(dataset)
             changes.append(
-                f"{dataset}:{year} (stored since, with rows through {session.isoformat()})"
+                f"{dataset}:{year} (stored since, with rows {reach})"
                 if before is None
-                else f"{dataset}:{year} (its rows through {session.isoformat()} were restated)"
+                else f"{dataset}:{year} (its rows {reach} were restated)"
             )
+        if scope == RECOMPUTE_FAILED:
+            for item in provenance.lookback:
+                content = store.partition_content_hash(item.dataset, item.year)
+                if content is None:
+                    changes.append(f"{item.dataset}:{item.year} (no longer stored)")
+                elif content != item.content_hash:
+                    changes.append(
+                        f"{item.dataset}:{item.year} (rewritten since the filing; a held "
+                        "security's look-back read it)"
+                    )
     return tuple(changes)
 
 
@@ -622,38 +757,101 @@ def _factor_datasets(factors: Sequence[str]) -> tuple[str, ...]:
     return tuple(found)
 
 
-def _read_partitions(
-    store: PanelStore, *, session: date, factors: Sequence[str]
-) -> tuple[tuple[str, int], ...]:
-    """Every `(dataset, year)` the day reads: the history datasets in every stored year through
-    the session's, and the rest in the session's year."""
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Windows:
+    """The event dates of each dataset that can move the batch (module docstring)."""
+
+    session: date
+    amount_from: date
+    tiers: frozenset[str]
+    """Each factor's processed tier and its manifests: windowed on the session, never judged."""
+
+    def bounds(self, dataset: str) -> tuple[date | None, date]:
+        """The first (`None`: no bound) and last event date of `dataset`'s window."""
+        if dataset in _ON_SESSION_DATASETS or dataset in self.tiers:
+            return self.session, self.session
+        if dataset == DAILY_DATASET:
+            return self.amount_from, self.session
+        return None, self.session
+
+    def describe(self, dataset: str) -> str:
+        first, last = self.bounds(dataset)
+        if first is None:
+            return f"through {last.isoformat()}"
+        if first == last:
+            return f"on {last.isoformat()}"
+        return f"from {first.isoformat()} through {last.isoformat()}"
+
+
+def _window_partitions(store: PanelStore, windows: _Windows) -> tuple[tuple[str, int], ...]:
+    """Every `(dataset, year)` a window reaches: the through-session datasets in every stored
+    year through the session's, the bars in the amount window's year or two, and the rest in the
+    session's year."""
+    session = windows.session
     keys = {
         (dataset, year)
-        for dataset in _HISTORY_DATASETS
+        for dataset in _THROUGH_SESSION_DATASETS
         for year in store.registered_years(dataset)
         if year <= session.year
     }
+    keys.update((DAILY_DATASET, year) for year in range(windows.amount_from.year, session.year + 1))
     keys.update(
-        (dataset, session.year) for dataset in (*_SESSION_DATASETS, *_factor_datasets(factors))
+        (dataset, session.year) for dataset in (*_ON_SESSION_DATASETS, *sorted(windows.tiers))
     )
     return tuple(sorted(keys))
 
 
+def _every_partition_read(
+    store: PanelStore, *, session: date, factors: Sequence[str]
+) -> tuple[tuple[str, int], ...]:
+    """Every `(dataset, year)` the facts day may read, windows or not -- a held security's
+    look-back reaches every stored bar year: what `_readable_instant` must cover."""
+    keys = {
+        (dataset, year)
+        for dataset in (*_THROUGH_SESSION_DATASETS, DAILY_DATASET)
+        for year in store.registered_years(dataset)
+        if year <= session.year
+    }
+    keys.update(
+        (dataset, session.year) for dataset in (*_ON_SESSION_DATASETS, *_factor_datasets(factors))
+    )
+    return tuple(sorted(keys))
+
+
+def _amount_window_from(store: PanelStore, *, session: date, exchange: str) -> date:
+    """The first of the `AMOUNT_WINDOW_SESSIONS` sessions ending on `session`, on the stored
+    calendar of the session's year and, when stored, the year before."""
+    stored = set(store.registered_years(TRADING_CALENDAR_DATASET))
+    if session.year not in stored:
+        raise SurvivorRegistrationError(
+            f"the panel holds no {TRADING_CALENDAR_DATASET} {session.year}; the facts of "
+            f"{session.isoformat()} were counted on it, so the store changed under the run"
+        )
+    years = tuple(year for year in (session.year - 1, session.year) if year in stored)
+    calendar = load_trading_calendar(
+        store, exchange=exchange, years=years, as_of=session_publication_instant(session)
+    )
+    sessions = calendar.trading_days_between(calendar.horizon.first_date, session)
+    return sessions[-AMOUNT_WINDOW_SESSIONS:][0]
+
+
 def _partition(
-    store: PanelStore, dataset: str, year: int, *, session: date
+    store: PanelStore, dataset: str, year: int, windows: _Windows
 ) -> SurvivorInputPartition | None:
-    """One partition as the catalog holds it now, or `None` when it is not stored."""
+    """One partition as the catalog holds it now, its census cut to the dataset's window, or
+    `None` when it is not stored."""
     content = store.partition_content_hash(dataset, year)
     if content is None:
         return None
     coverage = store.read_coverage(dataset, year)
+    first, last = windows.bounds(dataset)
     census = (
         []
         if coverage is None
         else [
             [entry.event_date.isoformat(), entry.row_count]
             for entry in sorted(coverage.dates, key=lambda entry: entry.event_date)
-            if entry.event_date <= session
+            if (first is None or first <= entry.event_date) and entry.event_date <= last
         ]
     )
     return SurvivorInputPartition(
@@ -723,7 +921,7 @@ def _readable_instant(
     """The newest instant any partition the day reads became knowable, or `None` when none is
     stored: at or after it every one of them can be read (`strategy_registration`'s rule)."""
     newest: datetime | None = None
-    for dataset, year in _read_partitions(store, session=session, factors=factors):
+    for dataset, year in _every_partition_read(store, session=session, factors=factors):
         coverage = store.read_coverage(dataset, year)
         if coverage is not None and (newest is None or coverage.max_available_time > newest):
             newest = coverage.max_available_time
