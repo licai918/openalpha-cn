@@ -64,16 +64,15 @@ then no bar in reach.
   screen ranks.
 - **What the held look-back costs.** It reads the bar panel one session at a time, newest
   first, and stops for a held code once it has the last bar and 20 bars. A holding halted for
-  250 sessions is about 250 more reads than an unheld day (the estimate in
-  `docs/superpowers/plans/2026-10-14-p7-step0-adapters-and-ledger.md` is some 10 s for that;
-  not measured here). That is the cost of a held code that has bars, not the bound. The worst
-  case is a held code the registry lists and that has **no bar anywhere** in the panel: nothing
-  stops the walk before its listing day or the first session of the earliest daily-bar
-  partition year (or the calendar's first day, if later), so on a store whose bars go back
-  twenty years that is about 5,000 reads -- minutes at that rate -- on a day the caller then
-  refuses anyway (`no_bar_in_reach`). That stop is already the one the panel's partitions give
-  for free; stopping earlier without changing any output would need to know, without reading
-  them, which sessions a code has bars on.
+  250 sessions is about 250 more reads than an unheld day (some 10 s, the A2 implementer's own
+  estimate, not a measurement and not in the plan). That is the cost of a held code that has
+  bars, not the bound. The worst case is a held code the registry lists and that has **no bar
+  anywhere** in the panel: nothing stops the walk before its listing day or the first session
+  of the earliest daily-bar partition year (or the calendar's first day, if later), so on a
+  store whose bars go back twenty years that is about 5,000 reads -- minutes at that rate --
+  on a day the caller then refuses anyway (`no_bar_in_reach`). That stop is already the one the
+  panel's partitions give for free; stopping earlier without changing any output would need to
+  know, without reading them, which sessions a code has bars on.
 - **Every held code is told what became of it** (`FactsDay.held_status`), because the caller
   acts on each one: `row` -- it has a fact row; `no_bar_in_reach` -- listed, and never a bar
   since its listing or the panel's first session, so no close to carry and no row (the kernel
@@ -96,7 +95,9 @@ then no bar in reach.
   all** at that instant is refused by name, the factor and the instant
   (`MissingFactorBuildError`), before any row is built.
 - **The 5% band** is offered to `name_status` only for a main-board security with a bar and a
-  published bounded band (controller decision 1); elsewhere it is `None`.
+  published bounded band (controller decision 1); elsewhere it is `None`. It is a witness only
+  for sessions before 2025-07-07 (next section), and answers `False` for every main-board
+  security after it.
 - **The coverage guard.** It counts only the rows on the boards the book may trade
   (`config.boards`): `FactsDay.universe_size` is their number and `scored_size` those whose
   security has a bar on the day and every factor value. A day on which fewer than
@@ -119,14 +120,27 @@ it answers `st`, `delisting`, `ordinary` or `unknown`, and `unknown` is a value,
   already announced as ST but not yet in force counts as `st` too (T3 2.4(iv): 99.2% of ST
   names were announced a trading day or more ahead, and `pending_at` carries no calendar, so
   any announced-not-yet-effective ST-like name qualifies).
-- **By the exchange band, as a union.** A main-board 5% band is the exchange's own statement
-  that a security is under special treatment, independent of the name corpus (T3 2.2: 6,674 of
-  6,675 name-ST rows had it, and the 50 rows the names missed were all one security whose
-  first name row arrived in 2021). `band_is_five_percent=True` therefore makes a security
-  `st` unless its name already says `delisting`. The caller passes `True` only for the main
-  board: on the other boards the band is no independent witness (T3 2.2).
+- **By the exchange band, as a union -- before 2025-07-07 only.** Until then a main-board 5%
+  band was the exchange's own statement that a security is under special treatment,
+  independent of the name corpus (T3 2.2: 6,674 of 6,675 name-ST rows had it, and the 50 rows
+  the names missed were all one security whose first name row arrived in 2021; the T3 script
+  header dates the witness "before 2025-07"). `band_is_five_percent=True` therefore makes a
+  security `st` unless its name already says `delisting`. The caller passes `True` only for
+  the main board: on the other boards the band is no independent witness (T3 2.2).
+
+  **After 2025-07-07 the band is not a witness.** From that session the main board's
+  risk-warning securities trade under a 10% band, the same as every other main-board security,
+  so `_band_is_five_percent` can only answer `False` for a main-board security (and `None` for
+  every other board) and the union adds nothing to the name. The forward window the paper book
+  runs in lies wholly after that date: there the name corpus alone says `st`, and
+  `FactsNotes.st_by_band` is structurally 0 -- a 0 there is not the band agreeing with the
+  names, it is the band no longer saying anything. T3
+  measured the band as a witness over 2017-01-03..2021-10-14 only; nothing here measures it on
+  or after 2025-07-07, so the name is the only evidence of "is it ST" for the book's own days
+  (the name's own gaps are the `unknown` verdicts counted below).
 - **`unknown`** is returned only when neither can say: no history, nothing announced yet, or no
-  record in force yet and no pending ST name, and no band that says otherwise. The adapter
+  record in force yet and no pending ST name, and no band that says otherwise (from 2025-07-07
+  on, no band ever does). The adapter
   treats it as ordinary and counts it (`FactsNotes.name_unknown_assumed_ordinary`), because
   the alternative -- refusing every security the corpus has never renamed -- would refuse most
   of the market.
@@ -205,7 +219,8 @@ NameStatusReason = Literal[
 - `st_pending`: no warning is in force, and an ST-like rename announced by the day takes effect
   after it.
 - `st_by_band`: the name does not say ST (ordinary, or the corpus cannot say) and the main-board
-  band is 5%.
+  band is 5%. The panel path reaches it only for sessions before 2025-07-07: from then on
+  main-board risk-warning securities trade under a 10% band, so the band it reads is never 5%.
 - `delisting`: a delisting-period name is in force.
 - `ordinary`: an ordinary name is in force and no band says otherwise.
 - `unknown_no_record`: the corpus holds no rename of the security announced by the day -- it has
@@ -286,8 +301,10 @@ class HeldStatus(BaseModel):
     - `board_unrecognised`: `security_board` calls it main board and its prefix, with its
       exchange, is not a pair in `MAIN_BOARD_PREFIXES` -- no row.
 
-    The statuses are tried in that order after `not_in_registry`, which comes first: a code the
-    registry has no row for is `not_in_registry` whatever else is true of it.
+    The tests are made in this order (`_held_status`): `not_in_registry` first -- a code the
+    registry has no row for is `not_in_registry` whatever else is true of it -- then `row`, then
+    `not_listed`, then `board_unrecognised`, and `no_bar_in_reach` for what is left. That is not
+    the order the statuses are listed in above.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -308,7 +325,8 @@ registration says; a held security's are not bounded."""
 
 FIVE_PERCENT_BAND: Final[float] = 0.05
 BAND_TOLERANCE: Final[float] = 0.0051
-"""A main-board band within this of 5% is the exchange's own special-treatment band (T3 7)."""
+"""A main-board band within this of 5% is the exchange's own special-treatment band (T3 7) --
+before 2025-07-07; the main board's risk-warning band is 10% from that session."""
 
 MAIN_BOARD_PREFIXES: Final[frozenset[tuple[str, str]]] = frozenset(
     {
@@ -365,13 +383,17 @@ class FactsNotes:
     delisting: int
     """Securities in the delisting-period name state."""
     st: int
-    """Securities that are ST by name, by pending name or by the 5% band."""
+    """Securities that are ST by name, by pending name or (before 2025-07-07 only) by the 5%
+    band."""
     st_by_name: int
     """Of `st`: an ST name is in force."""
     st_pending: int
     """Of `st`: only because an announced ST rename is still pending (decided early)."""
     st_by_band: int
-    """Of `st`: only because the main-board band is 5%."""
+    """Of `st`: only because the main-board band is 5%. Structurally 0 for every session on or
+    after 2025-07-07, when the main board's risk-warning securities moved to a 10% band: read
+    there, 0 is **not** the band agreeing with the names, it is the band no longer answering. Only
+    for earlier sessions does a 0 here say the names missed nothing the band saw."""
     name_unknown_no_record: int
     """Of `name_unknown_assumed_ordinary`: never renamed since the corpus began."""
     name_unknown_before_first: int
@@ -490,7 +512,10 @@ def name_status_reason(
     """Which rule decides `name_status` for the same arguments; see `NameStatusReason`.
 
     The name is asked first and the band second, so a security that is ST by name and has a 5%
-    band is `st_by_name`, and the band never overrides `delisting`.
+    band is `st_by_name`, and the band never overrides `delisting`. The panel path
+    (`build_facts_day`) cannot pass `True` for a session on or after 2025-07-07, when the band is
+    10% for the whole main board (module docstring); this function, which reads no band itself,
+    would still say `st_by_band` for a caller who did.
     """
     by_name = _reason_by_name(history, day)
     if by_name in ("st_by_name", "st_pending", "delisting"):
@@ -1087,7 +1112,11 @@ def _board_recognised(code: str) -> bool:
 def _band_is_five_percent(
     board: Board, bar: DailyBar | None, limit: PriceLimit | None
 ) -> bool | None:
-    """Whether today's published band is 5%: main board, a bar and a bounded band only."""
+    """Whether today's published band is 5%: main board, a bar and a bounded band only.
+
+    On or after 2025-07-07 the main board's risk-warning band is 10%, so this answers `False` for
+    every main-board security there; the band is a witness of special treatment only before that.
+    """
     if board != "main" or bar is None or limit is None or not limit.is_bounded(bar.pre_close):
         return None
     return abs(limit.implied_ratio(bar.pre_close) - FIVE_PERCENT_BAND) <= BAND_TOLERANCE
