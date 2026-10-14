@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import stat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -1079,6 +1080,46 @@ def test_the_paper_book_keeps_a_ledger_the_backtest_ledger_cannot_see(
     reopened = build_storage(runtime_dir=runtime_dir, clock=migration_clock)
     assert reopened.paper_ledger.list() == (paper_row,)
     assert reopened.portfolio_ledger.list() == (backtest_row,)
+
+
+def _ledger_schema(path: Path) -> dict[str, Any]:
+    """`portfolio_transitions` as SQLite holds it: the table, its columns and its indexes."""
+    connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    try:
+        objects = connection.execute(
+            "SELECT type, name, sql FROM sqlite_master WHERE tbl_name = 'portfolio_transitions' "
+            "ORDER BY type, name"
+        ).fetchall()
+        indexes = [name for kind, name, _ in objects if kind == "index"]
+        return {
+            "objects": objects,
+            "columns": connection.execute("PRAGMA table_xinfo(portfolio_transitions)").fetchall(),
+            "index_columns": {
+                name: connection.execute(f"PRAGMA index_xinfo({name})").fetchall()
+                for name in indexes
+            },
+        }
+    finally:
+        connection.close()
+
+
+def test_the_paper_ledger_file_has_the_schema_the_migrations_give_the_backtest_ledger(
+    tmp_path: Path, migration_clock: Callable[[], datetime]
+) -> None:
+    """`run_migrations` reaches `state.sqlite3` only, so a migration of `portfolio_transitions`
+    never reaches `paper/ledger.sqlite3` on its own. Built twice, because on a fresh directory
+    `create_query_path_indexes` defers until the stores have made its tables, and lands on the
+    next `build_storage` -- which is every daily run after the first. A future migration that
+    changes one file's table and not the other's goes red here."""
+    runtime_dir = tmp_path / "runtime"
+    build_storage(runtime_dir=runtime_dir, clock=migration_clock)
+    build_storage(runtime_dir=runtime_dir, clock=migration_clock)
+
+    backtest = _ledger_schema(runtime_dir / "state.sqlite3")
+    paper = _ledger_schema(runtime_dir / "paper" / "ledger.sqlite3")
+
+    assert "portfolio_transitions_subject_idx" in backtest["index_columns"]  # not vacuous
+    assert paper == backtest
 
 
 def test_the_composition_root_wires_the_paper_snapshot_store(

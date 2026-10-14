@@ -58,7 +58,7 @@ from openalpha_cn.storage.migrations import MigrationRunResult, run_migrations
 from openalpha_cn.storage.models import SQLiteModelUsageStore
 from openalpha_cn.storage.paper_state import FilePaperStateStore
 from openalpha_cn.storage.parquet import ParquetEvidenceStore
-from openalpha_cn.storage.portfolio import SQLitePortfolioLedger
+from openalpha_cn.storage.portfolio import SQLitePortfolioLedger, open_paper_ledger
 from openalpha_cn.storage.predictions import FilePredictionStore
 from openalpha_cn.storage.product import SQLiteReportStore, SQLiteWatchlistStore
 from openalpha_cn.storage.recovery import SQLiteRecoveryStore
@@ -219,8 +219,15 @@ class StorageContainer:
     paper transition written there would be listed among backtest ones, and an attempt id a
     backtest happened to reuse would be refused as a conflict of the other's payload. T5 (section
     6) measured that and asked for this instance. The file is the paper book's alone, so it shares
-    neither `state.sqlite3`'s migrations nor its tables; `SQLitePortfolioLedger` creates its one
-    table with `CREATE TABLE IF NOT EXISTS`, which is all a fresh file needs.
+    none of `state.sqlite3`'s rows -- and none of its migrations either: `run_migrations` opens
+    `state.sqlite3` only, so `SQLitePortfolioLedger`'s `CREATE TABLE IF NOT EXISTS` gives this
+    file the table as first created and nothing a migration added since (migration 4's
+    `portfolio_transitions_subject_idx` was already one such). `storage.portfolio.
+    open_paper_ledger` repeats those additions (`PAPER_LEDGER_MIGRATED_SCHEMA`), and
+    `tests/unit/backtest/test_paper_state.py::
+    test_the_paper_ledger_file_has_the_schema_the_migrations_give_the_backtest_ledger` compares
+    the two files' `portfolio_transitions` after `build_storage`, so a future migration of that
+    table that does not reach this file goes red.
 
     Concrete for `portfolio_ledger`'s reason: whoever reads the paper book's record back calls
     `list()`, which `PortfolioLedger` deliberately does not declare. Nothing appends to it yet --
@@ -280,7 +287,7 @@ def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> Storag
     job_store = SQLiteJobStore(runtime_dir / "state.sqlite3")
     model_usage_store = SQLiteModelUsageStore(runtime_dir / "state.sqlite3")
     prediction_store = FilePredictionStore(runtime_dir / "predictions", clock=clock)
-    paper_ledger = SQLitePortfolioLedger(runtime_dir / "paper" / "ledger.sqlite3")
+    paper_ledger = open_paper_ledger(runtime_dir / "paper" / "ledger.sqlite3")
     paper_state_store = FilePaperStateStore(runtime_dir / "paper" / "snapshots")
     batch_store.recover_interrupted(now=clock())
     logger.info(
