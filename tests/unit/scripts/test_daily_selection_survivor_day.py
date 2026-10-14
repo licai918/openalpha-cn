@@ -646,6 +646,35 @@ def test_a_day_whose_evening_was_not_committed_is_refused_once_the_next_update_h
     assert "result" not in _journal(world)
 
 
+def test_the_factor_builds_are_journalled_and_a_rerun_keeps_the_sessions_it_caught_up(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """The `factors` stage holds step 4's builds, the missed sessions it caught up included (D4
+    review, rule 4, wants them printed): a day after a missed one catches it up, and its rerun --
+    which builds nothing -- keeps what the first run caught up instead of losing it."""
+    world = _world(tmp_path, monkeypatch, seeded)
+    _run(world, capsys)
+    assert _journal(world)["factors"]["built"] == sorted(
+        f"{factor}@processed" for factor in BOOK.composite_factors
+    )
+    after_a_miss = datetime.fromisoformat("2026-04-08T18:30:00+08:00")
+    clock = datetime.fromisoformat("2026-04-08T18:35:00+08:00")
+
+    _code, _out, err = _run(world, capsys, as_of=after_a_miss, clock=clock)
+
+    assert err[0] == STUB, err
+    first = _journal(world, date(2026, 4, 8))["factors"]
+    assert first["caught_up"] == ["2026-04-07"]
+
+    _code, _out, err = _run(world, capsys, as_of=after_a_miss, clock=clock)
+
+    assert err == [STUB, NO_REQUEST]
+    assert _journal(world, date(2026, 4, 8))["factors"] == first
+
+
 # --- the paper book's lock and binding -------------------------------------------------------
 
 

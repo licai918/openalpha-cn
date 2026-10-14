@@ -3440,7 +3440,8 @@ class SurvivorDay:
     store: PanelStore
     journal_path: Path
     journal: Mapping[str, Any]
-    """As step 7 left it: the pin (`as_of`, `held`, `held_from`), `panel` and `prediction`."""
+    """As step 7 left it: the pin (`as_of`, `held`, `held_from`), `panel`, `factors` and
+    `prediction`."""
     session: date
     as_of: datetime
     """The journal-pinned clock: every read of the day and of its reruns is made at it, and it,
@@ -3838,6 +3839,24 @@ def _no_longer_completed(session: date, as_of: datetime, newest: date) -> str:
     )
 
 
+def _journalled_factors(
+    previous: Mapping[str, Any] | None, built: Mapping[str, Any]
+) -> dict[str, Any]:
+    """The journal's `factors` stage: this run's `build_factors` answer, keeping what an earlier
+    run of the day built -- the tiers, the partitions and the missed sessions it caught up, which
+    a rerun builds again as nothing (D4 review, rule 4, prints the catch-up). Every list sorted,
+    so a rerun that builds nothing new journals the same stage, and the journal is not rewritten."""
+    earlier = previous or {}
+    tiers = sorted({*earlier.get("built", ()), *built["built"]})
+    return {
+        **built,
+        "built": tiers,
+        "already_built": sorted(tier for tier in built["already_built"] if tier not in tiers),
+        "caught_up": sorted({*earlier.get("caught_up", ()), *built["caught_up"]}),
+        "partitions": sorted({*earlier.get("partitions", ()), *built["partitions"]}),
+    }
+
+
 def _nothing_eligible(session: date, screened: ScreenResult) -> str:
     reasons = Counter(reason for verdict in screened.verdicts for reason in verdict.reasons)
     counted = ", ".join(f"{reason} {count}" for reason, count in sorted(reasons.items()))
@@ -4187,7 +4206,7 @@ def _survivor_day(
     if committed:
         # The doctor and the factor build gate a decision already made, and read at the pinned
         # instant: a committed day's completion runs neither.
-        factors: Mapping[str, Any] = {}
+        factors: Mapping[str, Any] = journal.get("factors") or {}
     else:
         with _step("panel doctor", steps=SURVIVOR_STEPS):
             if later is not None:
@@ -4206,15 +4225,20 @@ def _survivor_day(
                 == min(day for day in calendar.trading_days if day.year == session.year),
             )
         with _step("factor build", steps=SURVIVOR_STEPS):
-            factors = build_factors(
-                store,
-                builds,
-                session=session,
-                as_of=as_of,
-                exchange=exchange,
-                max_staleness_days=options.max_staleness_days,
-                runtime_dir=runtime_dir,
+            factors = _journalled_factors(
+                journal.get("factors"),
+                build_factors(
+                    store,
+                    builds,
+                    session=session,
+                    as_of=as_of,
+                    exchange=exchange,
+                    max_staleness_days=options.max_staleness_days,
+                    runtime_dir=runtime_dir,
+                ),
             )
+            journal = {**journal, "factors": factors}
+            write_journal(path, journal)
     with _step("paper head", steps=SURVIVOR_STEPS):
         try:
             head = paper_book.paper_head(
