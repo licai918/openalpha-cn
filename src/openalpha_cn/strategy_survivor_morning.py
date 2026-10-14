@@ -25,6 +25,16 @@ twice, and the book's record is the evening's. So nothing here changes it -- a d
 
 A difference is a **change**: a name the evening already found ineligible and still is, is not news.
 
+## What it can see
+
+The morning's facts day is the **evening's session's**, read at the morning's clock, and the facts
+adapter cuts the name corpus to what had been announced by the signal day (`announced_by`): a
+rename announced after the session -- published at 07:00 of the morning itself, or over a weekend --
+is invisible to the re-read whatever it is told. What the check catches is the announcement dated
+the evening's own session but published after the evening's read (T3: about half of the ST names are
+announced the evening before). It is a partial guard, not the last word on tomorrow's open, and an
+empty advice is not "no ST announcement exists".
+
 ## Two reads, one before the fetch
 
 The comparison needs what the evening saw per code -- which a journal's counts cannot say -- so the
@@ -100,7 +110,8 @@ NO_OVERNIGHT_CHANGE: Final[str] = "no overnight change to tonight's plan"
 MORNING_WORDING: Final[str] = (
     "advice only: candidates of a registered research configuration; no order was placed and the "
     "paper book was not changed -- it follows the evening's plan, and a difference is recorded "
-    "here, never committed to it"
+    "here, never committed to it; the check sees announcements dated up to the evening's session "
+    "only, so no advice is not proof that no ST announcement exists"
 )
 
 _SHANGHAI: Final[ZoneInfo] = ZoneInfo("Asia/Shanghai")
@@ -544,6 +555,17 @@ def morning_complete(document: Mapping[str, Any]) -> bool:
     return "differences" in document
 
 
+def _instant(value: Any) -> datetime | None:
+    """`value` as an instant carrying its UTC offset, or `None` when it is not one."""
+    if not isinstance(value, str):
+        return None
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return moment if moment.tzinfo is not None else None
+
+
 def check_morning_file(
     document: Any, *, session: date, evening_snapshot_id: str, registration_sha256: str
 ) -> None:
@@ -562,8 +584,10 @@ def check_morning_file(
     registration = document.get("registration")
     if not isinstance(registration, dict) or registration.get("sha256") != registration_sha256:
         problems.append("it was written under another registration")
-    if not isinstance(document.get("as_of"), str) or not isinstance(document.get("held"), list):
-        problems.append("it holds no pinned `as_of` and `held`")
+    if _instant(document.get("as_of")) is None or not isinstance(document.get("held"), list):
+        problems.append("it holds no pinned `as_of` (an instant with its offset) and `held`")
+    if not isinstance(document.get("evening_read"), dict):
+        problems.append("it holds no filed evening read")
     if problems:
         raise MorningCheckError("; ".join(problems))
 
