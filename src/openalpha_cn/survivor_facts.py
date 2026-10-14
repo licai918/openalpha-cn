@@ -28,12 +28,17 @@ it answers `st`, `delisting`, `ordinary` or `unknown`, and `unknown` is a value,
   6,675 name-ST rows had it, and the 50 rows the names missed were all one security whose
   first name row arrived in 2021). `band_is_five_percent=True` therefore makes a security
   `st` unless its name already says `delisting`. The caller passes `True` only for the main
-  board: ChiNext has no independent witness and a 5% band there means something else.
+  board: on the other boards the band is no independent witness (T3 2.2).
 - **`unknown`** is returned only when neither can say: no history, nothing announced yet, or no
   record in force yet and no pending ST name, and no band that says otherwise. The adapter
   treats it as ordinary and counts it (`FactsNotes.name_unknown_assumed_ordinary`), because
   the alternative -- refusing every security the corpus has never renamed -- would refuse most
   of the market.
+
+`name_status_reason` says which of these rules reached the answer, and `FactsNotes.tally` counts
+them apart: an ST by name, an ST only because the rename is still pending, an ST only by the
+band; and of the `unknown`s, the securities never renamed since the corpus began (T3's
+`no_record`, 1,516-1,790 a day) apart from the genuine gaps (`before_first`, 0-11 a day).
 
 Only the two "the corpus does not reach that day" `NameHistoryHorizonError` cases become a
 verdict. Any other `NameHistoryError` is a malformed call and still raises.
@@ -46,10 +51,12 @@ lower bound is safe only when it already reaches the threshold, so a shorter one
 with a named error instead of being reported as a young security.
 """
 
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections import Counter
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, fields
 from datetime import date
 from decimal import Decimal
+from types import MappingProxyType
 from typing import Final, Literal, get_args
 
 from openalpha_cn.domain.name_history import (
@@ -60,6 +67,30 @@ from openalpha_cn.domain.name_history import (
 from openalpha_cn.domain.survivor_book import Board, SecurityFacts
 
 NameStatus = Literal["st", "delisting", "ordinary", "unknown"]
+
+NameStatusReason = Literal[
+    "st_by_name",
+    "st_pending",
+    "st_by_band",
+    "delisting",
+    "ordinary",
+    "unknown_no_record",
+    "unknown_before_first",
+]
+"""Which rule reached a `NameStatus`; `name_status_reason` answers it.
+
+- `st_by_name`: an ST, *ST or PT name is in force on the day.
+- `st_pending`: no warning is in force, and an ST-like rename announced by the day takes effect
+  after it.
+- `st_by_band`: the name does not say ST (ordinary, or the corpus cannot say) and the main-board
+  band is 5%.
+- `delisting`: a delisting-period name is in force.
+- `ordinary`: an ordinary name is in force and no band says otherwise.
+- `unknown_no_record`: the corpus holds no rename of the security announced by the day -- it has
+  not been renamed since the corpus began (T3 2.3's `no_record`).
+- `unknown_before_first`: renames are on file and none of them is in force yet, with no ST
+  pending -- a genuine gap at the corpus's left edge (T3 2.4(ii)'s `before_first`).
+"""
 
 MIN_CALENDAR_LOOKBACK_SESSIONS: Final[int] = 250
 """How many sessions the calendar must show before a listing older than it may be counted.
@@ -76,6 +107,18 @@ _ST_WARNINGS: Final[frozenset[RiskWarning]] = frozenset(
 """The warnings that are special treatment. `delisting_process` is deliberately not here."""
 
 _NAME_STATUSES: Final[tuple[str, ...]] = get_args(NameStatus)
+_NAME_STATUS_REASONS: Final[tuple[str, ...]] = get_args(NameStatusReason)
+_STATUS_OF_REASON: Final[Mapping[NameStatusReason, NameStatus]] = MappingProxyType(
+    {
+        "st_by_name": "st",
+        "st_pending": "st",
+        "st_by_band": "st",
+        "delisting": "delisting",
+        "ordinary": "ordinary",
+        "unknown_no_record": "unknown",
+        "unknown_before_first": "unknown",
+    }
+)
 _SPECIAL_TREATMENT_STATUSES: Final[frozenset[str]] = frozenset({"st", "delisting"})
 
 
@@ -92,7 +135,8 @@ class FactsNotes:
     """What the adapter assumed or noticed while it built one day's facts.
 
     Counts only: they land in the daily log so an unusual day shows up as a number, not as a
-    silent change in who was eligible.
+    silent change in who was eligible. `st` and `name_unknown_assumed_ordinary` are totals, and
+    each is refused unless its parts add up to it; build the name counts with `tally`.
     """
 
     name_unknown_assumed_ordinary: int
@@ -105,6 +149,65 @@ class FactsNotes:
     """Securities in the delisting-period name state."""
     st: int
     """Securities that are ST by name, by pending name or by the 5% band."""
+    st_by_name: int
+    """Of `st`: an ST name is in force."""
+    st_pending: int
+    """Of `st`: only because an announced ST rename is still pending (decided early)."""
+    st_by_band: int
+    """Of `st`: only because the main-board band is 5%."""
+    name_unknown_no_record: int
+    """Of `name_unknown_assumed_ordinary`: never renamed since the corpus began."""
+    name_unknown_before_first: int
+    """Of `name_unknown_assumed_ordinary`: a genuine gap at the corpus's left edge."""
+
+    def __post_init__(self) -> None:
+        for item in fields(self):
+            if getattr(self, item.name) < 0:
+                raise SurvivorFactsError(f"{item.name} is a count and cannot be negative")
+        st_parts = self.st_by_name + self.st_pending + self.st_by_band
+        if st_parts != self.st:
+            raise SurvivorFactsError(
+                f"st is {self.st} but its parts add up to {st_parts} ({self.st_by_name} by "
+                f"name + {self.st_pending} pending + {self.st_by_band} by band)"
+            )
+        unknown_parts = self.name_unknown_no_record + self.name_unknown_before_first
+        if unknown_parts != self.name_unknown_assumed_ordinary:
+            raise SurvivorFactsError(
+                f"name_unknown_assumed_ordinary is {self.name_unknown_assumed_ordinary} but its "
+                f"parts add up to {unknown_parts} ({self.name_unknown_no_record} never renamed "
+                f"+ {self.name_unknown_before_first} before the first record)"
+            )
+
+    @classmethod
+    def tally(
+        cls,
+        *,
+        reasons: Iterable[NameStatusReason],
+        suspended_without_bar: int,
+        no_listing_row: int,
+    ) -> "FactsNotes":
+        """One day's notes from every fact's name-status reason and the two other counts."""
+        counted = Counter(reasons)
+        unrecognised = sorted(set(counted) - set(_NAME_STATUS_REASONS))
+        if unrecognised:
+            raise SurvivorFactsError(
+                f"unrecognised name-status reason(s) {unrecognised}; expected one of "
+                f"{_NAME_STATUS_REASONS}"
+            )
+        return cls(
+            name_unknown_assumed_ordinary=(
+                counted["unknown_no_record"] + counted["unknown_before_first"]
+            ),
+            suspended_without_bar=suspended_without_bar,
+            no_listing_row=no_listing_row,
+            delisting=counted["delisting"],
+            st=counted["st_by_name"] + counted["st_pending"] + counted["st_by_band"],
+            st_by_name=counted["st_by_name"],
+            st_pending=counted["st_pending"],
+            st_by_band=counted["st_by_band"],
+            name_unknown_no_record=counted["unknown_no_record"],
+            name_unknown_before_first=counted["unknown_before_first"],
+        )
 
 
 def name_status(
@@ -120,24 +223,38 @@ def name_status(
     `False` when it is another band, and `None` when no band is known; pass `True` only for a
     main-board security. See the module docstring for the rules and their evidence.
     """
-    by_name = _status_by_name(history, day)
-    if by_name == "delisting" or by_name == "st":
+    return _STATUS_OF_REASON[
+        name_status_reason(history=history, band_is_five_percent=band_is_five_percent, day=day)
+    ]
+
+
+def name_status_reason(
+    *,
+    history: NameHistory | None,
+    band_is_five_percent: bool | None,
+    day: date,
+) -> NameStatusReason:
+    """Which rule decides `name_status` for the same arguments; see `NameStatusReason`.
+
+    The name is asked first and the band second, so a security that is ST by name and has a 5%
+    band is `st_by_name`, and the band never overrides `delisting`.
+    """
+    by_name = _reason_by_name(history, day)
+    if by_name in ("st_by_name", "st_pending", "delisting"):
         return by_name
     if band_is_five_percent:
-        return "st"
-    return "unknown" if by_name is None else "ordinary"
+        return "st_by_band"
+    return by_name
 
 
-def _status_by_name(
-    history: NameHistory | None, day: date
-) -> Literal["st", "delisting", "ordinary"] | None:
-    """What the name alone says, or `None` when the history cannot judge `day`."""
+def _reason_by_name(history: NameHistory | None, day: date) -> NameStatusReason:
+    """What the name alone says, and how; `unknown_*` when the history cannot judge `day`."""
     if history is None:
-        return None
+        return "unknown_no_record"
     try:
         visible = history.announced_by(day)
     except NameHistoryHorizonError:
-        return None
+        return "unknown_no_record"
     try:
         warning: RiskWarning | None = visible.risk_warning_on(day)
     except NameHistoryHorizonError:
@@ -145,12 +262,12 @@ def _status_by_name(
     if warning is RiskWarning.delisting_process:
         return "delisting"
     if warning in _ST_WARNINGS:
-        return "st"
+        return "st_by_name"
     # Nothing in force warns (or nothing is in force yet): a rename already announced as ST
     # still counts, since it is public information on the signal day.
     if any(record.risk_warning in _ST_WARNINGS for record in visible.pending_at(day)):
-        return "st"
-    return None if warning is None else "ordinary"
+        return "st_pending"
+    return "unknown_before_first" if warning is None else "ordinary"
 
 
 def listing_age_sessions(

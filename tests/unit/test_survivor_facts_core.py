@@ -36,6 +36,7 @@ from openalpha_cn.survivor_facts import (
     assemble_fact,
     listing_age_sessions,
     name_status,
+    name_status_reason,
 )
 
 # --- name_status -------------------------------------------------------------------------
@@ -284,6 +285,68 @@ def test_a_history_served_newest_first_reads_the_same_as_one_served_oldest_first
     for day, answer in expected.items():
         assert name_status(history=oldest_first, band_is_five_percent=False, day=day) == answer
         assert name_status(history=newest_first, band_is_five_percent=False, day=day) == answer
+
+
+PENDING_ST = history(
+    ("康美药业", date(2013, 1, 4), date(2013, 1, 4)),
+    ("ST康美", date(2021, 6, 15), date(2021, 6, 14)),
+)
+"""Announced Mon 2021-06-14 after the close, in force Tue 2021-06-15."""
+
+BEFORE_FIRST = history(("中兵红箭", date(2017, 1, 10), date(2016, 12, 16)))
+"""T3 2.4(ii)'s shape: the only record is announced before 2017-01-03 and in force after it."""
+
+NOTHING_ANNOUNCED_YET = history(("中兵红箭", date(2021, 7, 2), date(2021, 7, 1)))
+"""The only record is announced after `DAY`: as of `DAY` the corpus holds no rename of it."""
+
+
+@pytest.mark.parametrize(
+    ("given", "band", "day", "reason", "status"),
+    [
+        # The name decides first, so an ST name is `st_by_name` whatever the band says.
+        (named("*ST康美"), False, DAY, "st_by_name", "st"),
+        (named("*ST康美"), True, DAY, "st_by_name", "st"),
+        # Announced the day before it takes effect: ST only because the rename is pending.
+        (PENDING_ST, False, date(2021, 6, 14), "st_pending", "st"),
+        (PENDING_ST, True, date(2021, 6, 14), "st_pending", "st"),
+        # The name says ordinary, or nothing, and the main-board band says 5%.
+        (named("康美药业"), True, DAY, "st_by_band", "st"),
+        (None, True, DAY, "st_by_band", "st"),
+        (BEFORE_FIRST, True, date(2017, 1, 3), "st_by_band", "st"),
+        (named("国华退"), True, DAY, "delisting", "delisting"),
+        (named("康美药业"), False, DAY, "ordinary", "ordinary"),
+        (named("康美药业"), None, DAY, "ordinary", "ordinary"),
+        # Never renamed since the corpus began: no entry at all, or none announced by the day.
+        (None, None, DAY, "unknown_no_record", "unknown"),
+        (None, False, DAY, "unknown_no_record", "unknown"),
+        (NOTHING_ANNOUNCED_YET, None, DAY, "unknown_no_record", "unknown"),
+        # A genuine gap: renames are on file, none of them is in force yet on the day.
+        (BEFORE_FIRST, False, date(2017, 1, 3), "unknown_before_first", "unknown"),
+        (BEFORE_FIRST, None, date(2017, 1, 3), "unknown_before_first", "unknown"),
+    ],
+    ids=[
+        "st-name",
+        "st-name-and-band",
+        "st-pending",
+        "st-pending-and-band",
+        "band-over-ordinary",
+        "band-over-no-history",
+        "band-over-a-gap",
+        "delisting-over-band",
+        "ordinary",
+        "ordinary-no-band",
+        "no-history",
+        "no-history-ten-percent",
+        "nothing-announced-yet",
+        "before-first",
+        "before-first-no-band",
+    ],
+)
+def test_every_status_comes_with_the_one_reason_it_was_reached_by(
+    given: NameHistory | None, band: bool | None, day: date, reason: str, status: str
+) -> None:
+    assert name_status_reason(history=given, band_is_five_percent=band, day=day) == reason
+    assert name_status(history=given, band_is_five_percent=band, day=day) == status
 
 
 def test_a_malformed_call_is_still_an_error_and_not_an_unknown() -> None:
@@ -537,28 +600,119 @@ def test_the_order_facts_are_assembled_in_does_not_change_the_set() -> None:
 # --- FactsNotes --------------------------------------------------------------------------
 
 
+def notes(**overrides: int) -> FactsNotes:
+    """A consistent set of counts: st 123 = 120 + 1 + 2, unknown 3 = 2 + 1."""
+    counts = {
+        "name_unknown_assumed_ordinary": 3,
+        "suspended_without_bar": 47,
+        "no_listing_row": 2,
+        "delisting": 1,
+        "st": 123,
+        "st_by_name": 120,
+        "st_pending": 1,
+        "st_by_band": 2,
+        "name_unknown_no_record": 2,
+        "name_unknown_before_first": 1,
+    }
+    counts.update(overrides)
+    return FactsNotes(**counts)
+
+
 def test_the_notes_are_a_frozen_set_of_counts() -> None:
-    notes = FactsNotes(
-        name_unknown_assumed_ordinary=3,
-        suspended_without_bar=47,
-        no_listing_row=2,
-        delisting=1,
-        st=123,
-    )
+    held = notes()
 
     assert (
-        notes.name_unknown_assumed_ordinary,
-        notes.suspended_without_bar,
-        notes.no_listing_row,
-        notes.delisting,
-        notes.st,
-    ) == (3, 47, 2, 1, 123)
+        held.name_unknown_assumed_ordinary,
+        held.suspended_without_bar,
+        held.no_listing_row,
+        held.delisting,
+        held.st,
+        held.st_by_name,
+        held.st_pending,
+        held.st_by_band,
+        held.name_unknown_no_record,
+        held.name_unknown_before_first,
+    ) == (3, 47, 2, 1, 123, 120, 1, 2, 2, 1)
     with pytest.raises(FrozenInstanceError):
-        notes.st = 0  # type: ignore[misc]
-    assert notes == FactsNotes(
-        name_unknown_assumed_ordinary=3,
-        suspended_without_bar=47,
-        no_listing_row=2,
+        held.st = 0  # type: ignore[misc]
+    assert held == notes()
+
+
+def test_the_tally_counts_each_reason_once_and_adds_the_parts_up() -> None:
+    # 3 + 1 + 2 = 6 ST, of which 1 only because the rename is pending and 2 only by the band;
+    # 4 + 2 = 6 unknown, of which only the 2 before-first are a genuine gap in the corpus.
+    reasons = [
+        *["st_by_name"] * 3,
+        "st_pending",
+        *["st_by_band"] * 2,
+        "delisting",
+        *["ordinary"] * 5,
+        *["unknown_no_record"] * 4,
+        *["unknown_before_first"] * 2,
+    ]
+    random.Random(20261013).shuffle(reasons)
+
+    tallied = FactsNotes.tally(reasons=reasons, suspended_without_bar=7, no_listing_row=1)
+
+    assert tallied == FactsNotes(
+        name_unknown_assumed_ordinary=6,
+        suspended_without_bar=7,
+        no_listing_row=1,
         delisting=1,
-        st=123,
+        st=6,
+        st_by_name=3,
+        st_pending=1,
+        st_by_band=2,
+        name_unknown_no_record=4,
+        name_unknown_before_first=2,
     )
+
+
+def test_an_empty_day_tallies_to_zero_everywhere() -> None:
+    assert FactsNotes.tally(reasons=[], suspended_without_bar=0, no_listing_row=0) == notes(
+        name_unknown_assumed_ordinary=0,
+        suspended_without_bar=0,
+        no_listing_row=0,
+        delisting=0,
+        st=0,
+        st_by_name=0,
+        st_pending=0,
+        st_by_band=0,
+        name_unknown_no_record=0,
+        name_unknown_before_first=0,
+    )
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"st": 124},  # 120 + 1 + 2 = 123, not 124
+        {"st_by_band": 3},  # makes the parts 124 against a total of 123
+        {"name_unknown_assumed_ordinary": 4},  # 2 + 1 = 3, not 4
+        {"name_unknown_before_first": 0},  # makes the parts 2 against a total of 3
+        {"suspended_without_bar": -1},
+        {"no_listing_row": -1},
+        {"delisting": -1},
+    ],
+    ids=[
+        "st-total",
+        "st-part",
+        "unknown-total",
+        "unknown-part",
+        "negative-suspended",
+        "negative-no-listing",
+        "negative-delisting",
+    ],
+)
+def test_counts_that_do_not_add_up_are_refused(bad: dict[str, int]) -> None:
+    with pytest.raises(SurvivorFactsError):
+        notes(**bad)
+
+
+def test_the_tally_refuses_a_reason_it_does_not_know() -> None:
+    with pytest.raises(SurvivorFactsError, match="bogus"):
+        FactsNotes.tally(
+            reasons=["ordinary", "bogus"],  # type: ignore[list-item]
+            suspended_without_bar=0,
+            no_listing_row=0,
+        )
