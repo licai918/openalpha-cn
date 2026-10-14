@@ -238,7 +238,12 @@ GROWTH_FIVE_PERCENT: Final[str] = "300602.SZ"
 """`EXTENDED` only: ChiNext, with a 5% band on every session. ChiNext has not published that
 band since its 2020 reform; it is synthetic, there so that "the band is read on the main board
 alone" has a 5% band off the main board to ignore."""
-EXTRA: Final[tuple[str, ...]] = (GROWTH_FIVE_PERCENT,)
+BSE_BEFORE_LISTING: Final[str] = "920001.BJ"
+"""`EXTENDED` only: priced on every session with a registry listing dated session 72,
+2026-04-15 -- T3 3.2's `.BJ` shape, a bar before the registered listing date. Its listing row is
+published at that day's midnight, so a read before it has never heard of the code."""
+BSE_LISTING_INDEX: Final[int] = 72
+EXTRA: Final[tuple[str, ...]] = (GROWTH_FIVE_PERCENT, BSE_BEFORE_LISTING)
 """The securities only `EXTENDED` holds, in the order they were added: `j` = 44, 45, ..."""
 
 FACTORS: Final[tuple[str, ...]] = (
@@ -382,6 +387,8 @@ def band_ratio(code: str, index: int) -> float:
         return 0.05
     if code in (CHINEXT, CHINEXT_302, STAR):
         return 0.20
+    if code == BSE_BEFORE_LISTING:
+        return 0.30
     return 0.10
 
 
@@ -396,6 +403,8 @@ def previous_close(code: str, index: int, variant: Variant) -> float:
 def listing_day(code: str) -> date:
     if code == NEVER_TRADED:
         return SESSIONS[NEVER_TRADED_INDEX]
+    if code == BSE_BEFORE_LISTING:
+        return SESSIONS[BSE_LISTING_INDEX]
     return SESSIONS[NEW_LISTING_INDEX] if code == NEW_LISTING else LISTED_BEFORE_THE_CALENDAR
 
 
@@ -404,7 +413,7 @@ def lifecycle_rows(variant: Variant) -> list[tuple[str, str, date]]:
     rows = [
         (code, LISTING_EVENT, listing_day(code))
         for code in stored_securities(variant)
-        if code != UNREGISTERED
+        if code != UNREGISTERED and listing_day(code) <= SESSIONS[variant.last]
     ]
     rows.extend(
         (code, DELISTING_EVENT, SESSIONS[index])
@@ -1045,10 +1054,34 @@ def test_a_registry_code_not_listed_on_the_day_has_no_row_even_with_a_bar(
     # same (a `.BJ` code priced before its listing date, T3 3.2, is the same case the other way
     # round). The registry knows it and does not list it that day, so its bar does not bring it
     # in: only a code the registry has no listing row for at all is added through its bar.
+    # Re-review Minor 3: the exclusion is counted, so it is not silent.
     day = read_day(full_store)
 
     assert DELISTED_WITH_BARS not in {fact.ts_code for fact in day.facts}
     assert day.notes.no_listing_row == 1  # UNREGISTERED alone
+    assert day.notes.not_listed_with_bar == 1  # DELISTED_WITH_BARS alone
+
+
+def test_a_code_priced_before_its_listing_is_counted_once_the_registry_knows_it(
+    extended_store: PanelStore,
+) -> None:
+    # BSE_BEFORE_LISTING has a bar on the signal day and a listing dated 2026-04-15. At 18:30 on
+    # the 10th that listing is not yet published: the registry has never heard of the code, so
+    # its bar brings it in aged 0, `listing_too_recent`, like UNREGISTERED. Read after the 15th
+    # the registry knows it and lists it from the 15th, not on the 10th: no row, and counted.
+    # The count is not a row: every other row of the day is unchanged. So the two reads of this
+    # day differ, by that one row and those two counts.
+    evening_day = read_day(extended_store)
+    later_day = read_day(extended_store, as_of=LATER)
+    fact = {fact.ts_code: fact for fact in evening_day.facts}[BSE_BEFORE_LISTING]
+
+    assert (fact.board, fact.listed_sessions) == ("bse", 0)
+    assert (evening_day.notes.no_listing_row, evening_day.notes.not_listed_with_bar) == (2, 1)
+    assert BSE_BEFORE_LISTING not in {fact.ts_code for fact in later_day.facts}
+    assert (later_day.notes.no_listing_row, later_day.notes.not_listed_with_bar) == (1, 2)
+    assert later_day.facts == tuple(
+        fact for fact in evening_day.facts if fact.ts_code != BSE_BEFORE_LISTING
+    )
 
 
 def test_a_code_the_registry_has_never_listed_gets_a_row_aged_zero_and_is_counted(
@@ -1156,7 +1189,8 @@ def test_the_notes_count_every_assumption_of_the_day(full_store: PanelStore) -> 
     # (22), and 000014.SZ's only rename takes effect after the day (before_first, 1). The rename
     # of 600001.SH announced on 2026-04-13 is not visible on the 10th, so it is still an ordinary
     # baseline. NEVER_TRADED is listed and has never had a bar: no row, and the one
-    # `no_bar_within_carry`.
+    # `no_bar_within_carry`. DELISTED_WITH_BARS is known, not listed, and has a bar: the one
+    # `not_listed_with_bar` (DELISTED, with no bar today, is not counted anywhere).
     assert read_day(full_store).notes == FactsNotes(
         name_unknown_assumed_ordinary=23,
         suspended_without_bar=1,
@@ -1169,6 +1203,7 @@ def test_the_notes_count_every_assumption_of_the_day(full_store: PanelStore) -> 
         name_unknown_no_record=22,
         name_unknown_before_first=1,
         no_bar_within_carry=1,
+        not_listed_with_bar=1,
     )
 
 

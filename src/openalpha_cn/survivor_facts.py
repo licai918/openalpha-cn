@@ -20,7 +20,13 @@ publication. The universe is every security the registry lists on the day, on **
 that the registry has no listing row for at all (aged 0, so `listing_too_recent`, T3 3.3;
 counted as `FactsNotes.no_listing_row`). A code the registry *does* know and does not list that
 day -- delisted, or priced before its listing date (T3 3.2's `.BJ` rows) -- has no row even with
-a bar: the kernel sells such a holding rather than freezing it.
+a bar: the kernel sells such a holding rather than freezing it. One with a bar on the day is
+counted as `FactsNotes.not_listed_with_bar`, so the exclusion is a number in the daily log.
+
+A registry listing row is published at its own day's midnight, so a code priced before its
+listing is "never heard of" (a row aged 0) to a read before that day and "known, not listed" (no
+row, counted) to a read after it: two reads of one signal day differ by that row and those two
+counts.
 
 - **A halted security with no bar still gets its row** (T6/T7 0(d)): `suspended=True`, its last
   close, and the mean amount of its last 20 bars. Without the row the kernel would sell a halted
@@ -253,6 +259,10 @@ class FactsNotes:
     """Listed securities with no daily bar in reach, which therefore have no fact row at all:
     for a code not held, none within `max_carry_sessions` sessions; for a held code, none since
     its listing or the panel's first session -- a day the caller must refuse by name."""
+    not_listed_with_bar: int
+    """Securities with a daily bar on the day that the registry knows and does not list on it --
+    delisted, or priced before their listing date -- and which therefore have no fact row. A
+    count, not a row: no fact changes with it."""
 
     def __post_init__(self) -> None:
         for item in fields(self):
@@ -280,8 +290,9 @@ class FactsNotes:
         suspended_without_bar: int,
         no_listing_row: int,
         no_bar_within_carry: int,
+        not_listed_with_bar: int,
     ) -> "FactsNotes":
-        """One day's notes from every fact's name-status reason and the three other counts."""
+        """One day's notes from every fact's name-status reason and the four other counts."""
         counted = Counter(reasons)
         unrecognised = sorted(set(counted) - set(_NAME_STATUS_REASONS))
         if unrecognised:
@@ -303,6 +314,7 @@ class FactsNotes:
             name_unknown_no_record=counted["unknown_no_record"],
             name_unknown_before_first=counted["unknown_before_first"],
             no_bar_within_carry=no_bar_within_carry,
+            not_listed_with_bar=not_listed_with_bar,
         )
 
 
@@ -704,6 +716,7 @@ def _read_facts_day(
             suspended_without_bar=carried,
             no_listing_row=no_listing_row,
             no_bar_within_carry=no_bar,
+            not_listed_with_bar=bars.not_listed_with_bar,
         ),
         boards=config.boards,
         universe_size=universe,
@@ -798,8 +811,12 @@ class _Walk:
 
         self.today = read(history[-1])
         # A bar brings a security in only when the registry has never heard of it: a code it
-        # knows and does not list that day (delisted, or priced before its listing) stays out.
+        # knows and does not list that day (delisted, or priced before its listing) stays out,
+        # and is counted.
         unregistered = {code for code in self.today if code not in listed_on}
+        self.not_listed_with_bar = sum(
+            1 for code in self.today if code in listed_on and code not in listed
+        )
         self.codes = tuple(sorted(listed | unregistered))
         trading = [code for code in self.codes if code in self.today]
         halted = [code for code in self.codes if code not in self.today]
