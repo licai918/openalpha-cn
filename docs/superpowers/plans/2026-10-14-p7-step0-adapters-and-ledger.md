@@ -68,7 +68,7 @@
 
 **Files:**
 - Create: `src/openalpha_cn/survivor_facts.py`（本任务只放纯函数与数据类，不读面板）
-- Create: `tests/unit/test_survivor_facts_core.py`
+- Create: `unit/test_survivor_facts_core.py`
 
 **先读（动手前，把你的理解写进报告第一节，不要先写代码）：**
 - `docs/research/p7-step0-validation/T3-st-and-new-listings.md` §1（来源盘点）、§7（决定与 8 条约束）；
@@ -91,9 +91,9 @@
 
 **Steps:**
 - [ ] **Step 1:** 读上面的材料，在报告第一节写出：每个接口依赖的现有 API（`file:line`）、你对"全函数三态"的理解、任何与上面 Interfaces 冲突之处。**有冲突先停下来报告（NEEDS_CONTEXT），不要自己改接口。**
-- [ ] **Step 2:** 写失败的测试 `tests/unit/test_survivor_facts_core.py`（先 `name_status`，再 `listing_age_sessions`，再 `assemble_fact`；构造 `NameHistory` 用仓库已有的构造器或测试夹具，**不要**手写绕过校验的假对象）。运行，确认因 `survivor_facts` 不存在而失败。
+- [ ] **Step 2:** 写失败的测试 `unit/test_survivor_facts_core.py`（先 `name_status`，再 `listing_age_sessions`，再 `assemble_fact`；构造 `NameHistory` 用仓库已有的构造器或测试夹具，**不要**手写绕过校验的假对象）。运行，确认因 `survivor_facts` 不存在而失败。
 - [ ] **Step 3:** 写最小实现，逐个测试变绿。
-- [ ] **Step 4:** `ruff check`、`ruff format --check`、`mypy src/openalpha_cn/survivor_facts.py`、`lint-imports`，以及 `tests/unit/test_survivor_facts_core.py`。
+- [ ] **Step 4:** `ruff check`、`ruff format --check`、`mypy src/openalpha_cn/survivor_facts.py`、`lint-imports`，以及 `unit/test_survivor_facts_core.py`。
 - [ ] **Step 5:** 提交（显式列路径）：`feat(V2-P7-016): ST three-state, listing age and the fact row, as pure functions`。
 
 ### Task A2：面板读取——每只上市证券一行事实，含停牌无日线者；覆盖率守卫；前视守卫
@@ -102,7 +102,7 @@
 
 **Files:**
 - Modify: `src/openalpha_cn/survivor_facts.py`
-- Create: `tests/unit/test_survivor_facts_panel.py`（面板夹具在测试时生成）
+- Create: `unit/test_survivor_facts_panel.py`（面板夹具在测试时生成）
 
 **先读：** T3 §1–§3、§7；T6-T7 §3（窄读 0.13 s 对整年读 25 s）；`src/openalpha_cn/panel_ingest.py` 的 `load_name_histories`（约 1584）、`load_stock_universe`（约 1113）、`load_trading_calendar`（约 940）、`load_daily_bars`（约 3358）、`load_price_limits`（约 3792）、`load_suspensions`（约 3635）；`src/openalpha_cn/panel_factors.py::load_processed_factor_observations`（约 9541）及其窄读的做法（T6/T7 说"窄读同样的值只要 0.13 s"——**找到那条窄读路径并复用，不要再写一条**）；`src/openalpha_cn/strategy_view.py` 里怎么按信号日取因子值与方向（`_PanelDays`、`lower_is_better` 之类）；仓库里已有的合成面板测试夹具（`git grep` 找）。
 
@@ -149,7 +149,7 @@
 
 **Files:**
 - Create: `src/openalpha_cn/backtest/paper_step.py`
-- Create: `tests/unit/backtest/test_paper_step.py`
+- Create: `unit/backtest/test_paper_step.py`
 
 **先读：** `docs/research/p7-step0-validation/T5-paper-step-builder.md` 全文；`src/openalpha_cn/backtest/paper.py`（`PaperPortfolio.advance`）、`multi_day.py`（`PortfolioBacktestStep`，约 88）、`portfolio.py`（`PortfolioOrder`、`PortfolioState`、`PortfolioLimits`）、`execution.py`（`AShareExecutionPolicy`、`security_board`）、`strategy_view.py` 里组装 `MarketBar` 的函数（`_PanelDays.quote` 一带）；计划 1 的 `domain/survivor_orders.py::TradeOrder`。
 
@@ -166,7 +166,7 @@
 
 **Issue:** `V2-P7-017`。**依据:** T5 §0（默认成本远低于协议口径，一笔 3 万元的买单 9.30 对 37.50）、协议 `p6-protocol.md` §3。
 
-**Files:** Modify `src/openalpha_cn/backtest/paper.py`（及必要处的 `execution.py`）；Create/Modify `tests/unit/backtest/test_paper_costs.py`。
+**Files:** Modify `src/openalpha_cn/backtest/paper.py`（及必要处的 `execution.py`）；Create/Modify `unit/backtest/test_paper_costs.py`。
 
 **要钉住的行为：** `PaperPortfolio(..., execution=None)`：缺省时**行为与改动前逐位相同**（对现有的 `paper` 测试全部通过、不改它们的期望）；传入协议成本（佣金万 2.5 最低 5 元、卖出印花税千 0.5、滑点单边 10bp 折入 `transfer_fee_rate`，按 T5 的做法）时，一笔 3 万元买单与一笔卖单的费用**逐分**等于 P6 的账簿（对照 `strategy_backtest` 的同一口径）；整手与现金约束照旧；运行期仍禁止联网（`refusing_outward_calls`）。
 
@@ -176,7 +176,7 @@
 
 **Issue:** `V2-P7-017`。**依据:** T5 §0、P7 §9。
 
-**Files:** Create `src/openalpha_cn/backtest/paper_state.py`、`tests/unit/backtest/test_paper_state.py`；在组装根里给纸面账簿**单独建一个账本实例**（不与回测账本共用；找到 `runtime/composition` 里账本的装配处，沿用）。
+**Files:** Create `src/openalpha_cn/backtest/paper_state.py`、`unit/backtest/test_paper_state.py`；在组装根里给纸面账簿**单独建一个账本实例**（不与回测账本共用；找到 `runtime/composition` 里账本的装配处，沿用）。
 
 **要钉住的行为：** 每日状态快照（持仓、现金、在途订单、冷却、已结算到的交易日）以内容寻址的 JSON 落盘，原子写、写后可读回逐字节相同；同一交易日重复保存不改文件（幂等）；读回一个旧快照 + 重放后续各日 = 直接得到的新快照；损坏或缺失的快照按名拒绝，不静默从零开始；账本实例与回测账本互不可见。
 
@@ -186,7 +186,7 @@
 
 ## Part C — `V2-P7-009` 纸面账本的每日推进（待补全）
 
-依赖 B。目标：`settle_session(...)`——读取状态快照 → 取上一日的订单 → 用 B1 构建步骤 → `PaperPortfolio.advance`（B2 的成本）→ 用计划 1 的 `advance_orders` / `update_cooldowns` 结算订单生命周期 → 得到今天的持仓、在途买单 / 卖单、冷却 → 写快照。要钉住：先结算后决定的顺序；停牌的名字的单保持在途；3 日后买单过期且触发冷却；二次运行零写入；跨年；缺数据按名拒绝。**在 A、B 合入后补全接口与测试细节，再派发。**
+依赖 B。目标：`settle_session(...)`——读取状态快照 → 取上一日的订单 → 用 B1 构建步骤 → `PaperPortfolio.advance`（B2 的成本）→ 用计划 1 的 `advance_orders` / `update_cooldowns` 结算订单生命周期 → 得到今天的持仓、在途买单 / 卖单、冷却 → 写快照。要钉住：先结算后决定的顺序；停牌的名字的单保持在途；3 日后买单过期且触发冷却；二次运行零写入；跨年；缺数据按名拒绝。**B 阶段评审留下的、本任务必须落实的要求（2026-10-14）：** (1) 调用 `build_paper_step` 时传入 `session_index`，且只传当日到期的订单；(2) 每个持仓都要有一个**买单成交日**的复权因子（`entry_adj`，B3 的快照里存），`adjustment_ratio` 必须覆盖每个持仓名（没动过的显式给 1）；(3) 交给 `build_trade_list` 的参考价，对**持仓名**要换成账本口径（真实收盘 × 比值）——否则 10 送 10 之后估算的卖出所得只有一半、买单定量偏小；(4) 复权事件之后手续费是按缩放后的名义额收的，而 P6 账簿按原始名义额收（只有比值为 1 时两者才逐分相等），日志里要写明；(5) 账本里经过复权的持仓，`filled_price` 是账本口径、不是任何人成交过的价格，读它的报告要换算；(6) 在成本注入的折算下，账本的 `transfer_fee` 实际是滑点，配置与日志里要这样写。**在 A、B 合入后补全接口与测试细节，再派发。**
 
 ## Part D — `V2-P7-008` 每日入口 `strategy_survivor`（待补全）
 
