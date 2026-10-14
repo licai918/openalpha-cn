@@ -428,6 +428,7 @@ def test_a_limit_up_buy_is_refused_carried_and_retried_under_a_new_id_with_its_t
     assert third.filled == (order,)
     assert third.live == ()
     assert (third.book.cash, third.book.equity) == (D("37994.88"), D("50244.88"))
+    assert tonight(third).entry_factors == (EntryFactor(ts_code=E, entry_adj=D("1.000")),)
 
 
 def test_a_buy_unfilled_through_its_last_session_expires_and_cools_down_from_that_session(
@@ -516,6 +517,7 @@ def test_a_sell_never_expires_and_a_sell_of_a_name_with_no_bar_stays_live(tmp_pa
     assert settled.book.cash == D("10490.15")
     assert cooling(settled) == [(A, 105)]
     assert factors(settled) == {B: D("1.000")}
+    assert tonight(settled).pending_orders == ()
 
 
 def test_a_cool_down_starts_on_the_session_the_sale_filled_not_the_one_that_planned_it(
@@ -560,6 +562,7 @@ def test_a_cool_down_starts_on_the_session_the_sale_filled_not_the_one_that_plan
     ]
     assert second.book.cash == D("10090.36")
     assert cooling(second) == [(A, 102)]
+    assert tonight(second).cooldowns == (Cooldown(ts_code=A, since_session=102),)
 
 
 def test_an_order_not_due_yet_is_kept_untried_and_handed_to_the_step_once_it_is(
@@ -601,6 +604,7 @@ def test_an_order_not_due_yet_is_kept_untried_and_handed_to_the_step_once_it_is(
 
     assert [item.order for item in second.attempts] == [later]
     assert second.filled == (later,)
+    assert [p.subject for p in tonight(second).book.positions] == [C]
 
 
 # ---- adjustment events ---------------------------------------------------------------------------
@@ -693,6 +697,7 @@ def test_after_a_ten_for_ten_bonus_issue_the_book_shows_no_false_drawdown_and_se
     assert sold.entry_factors == ()
     assert cooling(sold) == [(C, 103)]
     assert [row[1] for row in rows(ledger)] == ["filled", "filled"]
+    assert tonight(sold).book.positions == ()
 
 
 def test_a_held_name_with_no_adjustment_factor_refuses_the_session_before_the_ledger_is_touched(
@@ -756,11 +761,12 @@ def test_settling_the_same_session_twice_gives_the_same_settlement_and_the_same_
     assert [row.model_dump_json() for row in one_ledger.list()] == [
         row.model_dump_json() for row in two_ledger.list()
     ]
-    # Settled again into the same ledger: the same transitions, each held once.
+    # Settled again into the same ledger: the same transitions, each held once, byte for byte.
+    stored = [row.model_dump_json() for row in one_ledger.list()]
     again = settle(book, S1, quotes, one, survivors={C, E})
     assert again == first
-    assert len(one_ledger.list()) == 3
-    assert book == _sells_and_buys()[0]  # the snapshot settled from is not changed
+    assert [row.model_dump_json() for row in one_ledger.list()] == stored
+    assert len(stored) == 3
 
 
 def test_the_evening_snapshot_takes_tonights_orders_and_refuses_a_plan_that_disagrees(
@@ -1060,6 +1066,7 @@ def test_a_holding_reported_delisted_that_still_has_a_bar_is_traded_not_written_
     ]
     assert live(settled) == [("sell", A, 1)]
     assert marks(settled.book)[A] == D("5.40")
+    assert [item.attempts for item in tonight(settled).pending_orders] == [1]
 
 
 def test_a_code_reported_delisted_that_the_book_does_not_hold_is_refused_by_name(
@@ -1104,6 +1111,7 @@ def test_a_write_off_with_nothing_else_to_settle_records_what_the_runner_would_h
     assert rows(ledger) == [(write_off_id(A, S1), "filled", "delisting_write_off")]
     assert settle(book, S1, nothing, portfolio, delisted={A}) == settled
     assert len(ledger.list()) == 1
+    assert tonight(settled).book.positions == ()
 
 
 # ---- the session's record ------------------------------------------------------------------------
@@ -1299,3 +1307,63 @@ def test_later_plans_and_settle_only_snapshots_keep_the_first_decision(tmp_path:
     assert (settle_only.session, settle_only.last_settled_session) == (S1, 101)
     assert (settle_only.book, settle_only.cooldowns) == (settled.book, settled.cooldowns)
     assert settle_only.entry_factors == settled.entry_factors
+
+
+# ---- more of the lifecycle ---------------------------------------------------------------------
+
+
+def test_a_buy_whose_name_has_no_bar_is_tried_carried_and_expires_into_a_cool_down(
+    tmp_path: Path,
+) -> None:
+    """600040.SH is halted all day S1 ... S3 (no row) while 600020.SH trades. Its buy is not
+    attempted -- the ledger never sees it -- but tried: 1, then 2; on its last session (103) it
+    expires, and the cool-down starts on 103."""
+    order = buy(E, 500, price="20.00")
+    ledger, portfolio = ledger_at(tmp_path / "paper.sqlite3")
+    book = previous("1000.00", (B, 1000, "11500.00", "11.50", "1.000"), orders=(order,))
+    tries = []
+    for day in (S1, S2, S3):
+        settled = settle(
+            book, day, market(QUIET_B[day], adj={B: "1.000"}), portfolio, survivors={E}
+        )
+        assert [(item.outcome, item.reason) for item in settled.attempts] == [
+            ("not_attempted", NO_BAR_REASON)
+        ]
+        tries.append(live(settled))
+        book = tonight(settled)
+
+    assert tries == [[("buy", E, 1)], [("buy", E, 2)], []]
+    assert settled.expired == (order,)
+    assert cooling(settled) == [(E, 103)]
+    assert rows(ledger) == []
+    assert book.cooldowns == (Cooldown(ts_code=E, since_session=103),)
+
+
+def test_a_name_bought_on_one_session_and_delisted_the_next_is_written_off_at_its_cost(
+    tmp_path: Path,
+) -> None:
+    """600030.SH is bought on S1 (10,105.10 with fees, factor 3.000) and delisted on S2 with no
+    bar: written off for its whole cost, -10,105.10, its entry factor gone; cash stays 9,894.90."""
+    order = buy(C, 1000)
+    ledger, portfolio = ledger_at(tmp_path / "paper.sqlite3")
+    bought = settle(
+        previous("20000.00", (B, 1000, "11500.00", "11.50", "1.000"), orders=(order,)),
+        S1,
+        market(QUIET_B[S1], OPEN_C_S1, adj={B: "1.000", C: "3.000"}),
+        portfolio,
+        survivors={C},
+    )
+    assert factors(bought) == {B: D("1.000"), C: D("3.000")}
+
+    gone = settle(
+        tonight(bought), S2, market(QUIET_B[S2], adj={B: "1.000"}), portfolio, delisted={C}
+    )
+
+    (written,) = gone.written_off
+    assert (written.ts_code, written.withdrawn) == (C, ())
+    assert written.transition.realized_pnl_delta == D("-10105.10")
+    assert gone.book.cash == D("9894.90")
+    assert gone.equity == D("21394.90")  # 9,894.90 + 11,500.00
+    assert factors(gone) == {B: D("1.000")}
+    assert [row[0] for row in rows(ledger)] == [attempt_id(order, S1), write_off_id(C, S2)]
+    assert tonight(gone).entry_factors == (EntryFactor(ts_code=B, entry_adj=D("1.000")),)
