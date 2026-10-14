@@ -545,11 +545,21 @@ def test_one_string_is_refused_as_the_names_rather_than_read_as_its_characters(
         )
 
 
-def test_no_backtest_module_may_import_this_reader(tmp_path: Path) -> None:
-    """It reads the panel, so `backtest/` -- `paper_step` and the settlement core included --
-    takes its `SessionMarket` as a plain input and never imports it. The contract names it as a
-    forbidden target of its own, so a probe is refused for importing this module and not only for
-    what this module reaches; a copy of the package is linted, the real one is never written."""
+@pytest.mark.parametrize(
+    ("module", "name"),
+    [
+        ("strategy_survivor_market", "settlement_market"),
+        ("strategy_survivor_facts", "build_facts_day"),
+    ],
+)
+def test_no_backtest_module_may_import_the_survivor_books_panel_readers(
+    tmp_path: Path, module: str, name: str
+) -> None:
+    """Both read the panel, so `backtest/` -- `paper_step` and the settlement core included --
+    takes a `SessionMarket` or a `FactsDay` as a plain input and never imports either. The
+    contract names each as a forbidden target of its own, so a probe is refused for importing the
+    module and not only for what the module reaches; a copy of the package is linted, the real
+    one is never written."""
     assert (
         contained_lint_imports(
             config_filename=str(ROOT / "pyproject.toml"),
@@ -559,19 +569,19 @@ def test_no_backtest_module_may_import_this_reader(tmp_path: Path) -> None:
         == 0
     )
     package = copy_package(tmp_path)
-    (package / "backtest" / "_session_market_probe.py").write_text(
+    (package / "backtest" / "_panel_reader_probe.py").write_text(
         '"""Temporary probe module for a layering test."""\n\n'
-        "from openalpha_cn.strategy_survivor_market import settlement_market\n\n"
-        '__all__ = ["settlement_market"]\n',
+        f"from openalpha_cn.{module} import {name}\n\n"
+        f'__all__ = ["{name}"]\n',
         encoding="utf-8",
     )
 
     broken = lint_copy(package, "backtest-no-numeric-stack-or-panel-plane")
 
     assert broken.exit_code == 1, broken.report
-    assert (
-        "openalpha_cn.backtest is not allowed to import openalpha_cn.strategy_survivor_market"
-    ) in " ".join(broken.report.split()), broken.report
+    assert (f"openalpha_cn.backtest is not allowed to import openalpha_cn.{module}:") in " ".join(
+        broken.report.split()
+    ), broken.report
 
 
 # --- the look-ahead guard -----------------------------------------------------------------------

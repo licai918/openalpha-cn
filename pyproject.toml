@@ -284,6 +284,7 @@ forbidden_modules = [
   "openalpha_cn.shortlist_view",
   "openalpha_cn.model_view",
   "openalpha_cn.strategy_view",
+  "openalpha_cn.strategy_survivor_facts",
   "openalpha_cn.strategy_survivor_market",
 ]
 # Whole-package source, no exemptions: nothing under backtest/ reaches any of these today, on
