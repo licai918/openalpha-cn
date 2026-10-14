@@ -9553,10 +9553,18 @@ def load_processed_factor_observations(
     `read_visible_at` call takes an equality filter on `event_time` -- `_read_visible_price_session`
     filters one session the same way -- and the manifest check holds only the builds stamped at
     `at`. A build is wholly visible or wholly withheld (every row carries its build's `as_of` on
-    all four clocks), so the answer is exactly the whole-year read's rows at `at`, read in about
-    a two-hundredth of the time (T6/T7 measured 0.13 s against 25 s for four factors' day).
+    all four clocks), so the answer is exactly the whole-year read's rows at `at`.
     An `at` no build was stamped at answers `()`, as the whole-year read has no rows there either;
     an `at` after `as_of` is refused, because it asks about a build that had not happened.
+
+    What it costs, stated for what was measured. T6/T7 timed the whole-year read on the research
+    store at 25.5 s for four factors' day, and 0.13 s for the same values through a `store.query`
+    equality filter on the instant -- which it labels an illustration, not an existing path: that
+    filter skips this function's visibility gate and manifest check. This path itself was timed
+    on a synthetic store (`V2-P7-016`; one factor, one transform, 180 daily builds of 5,000
+    names, 900,000 rows, written through the real writers; best of five warm reads, one
+    machine): the whole-year read 7.65 s, the narrow read of the last build 0.058 s (about 130x),
+    with identical answers value bit for value bit. Four factors are four such reads.
 
     Through `read_visible_at` rather than `read_if_ready` for `load_factor_observations`' reason:
     a processed row's `available_time` is the `as_of` it was computed at, so a year partition
