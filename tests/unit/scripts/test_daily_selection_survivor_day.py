@@ -27,6 +27,7 @@ import shutil
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final
 
@@ -406,7 +407,11 @@ def test_a_day_whose_journal_is_complete_is_printed_again_with_no_request_and_no
     assert result["session"] == DAY.isoformat()
     assert result["session_index"] == 0
     assert result["opening"]["epoch_session"] == DAY.isoformat()
-    assert result["opening"]["cash"] == f"{BOOK.capital}"
+    head = held_head(FilePaperStateStore(world.runtime / "paper" / "snapshots"))
+    assert head is not None
+    assert result["opening"]["snapshot_id"] == head.snapshot_id
+    assert result["opening"]["cash"] == f"{head.book.cash}"
+    assert Decimal(result["opening"]["cash"]) == BOOK.capital
     assert result["prediction"]["registered"] is False
     assert result["this_run"]["request_count"] == sum(STEADY_SURVIVOR.values())
     assert result["this_run"]["wrote"] is True

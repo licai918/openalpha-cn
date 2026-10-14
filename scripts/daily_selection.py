@@ -110,10 +110,15 @@ in early January.
 A registered configuration that names no `kind` is the P6 book, and every step above is its day,
 exactly as before. One that names `kind: "survivor_book/v1"` is read after step 1 by
 `strategy_survivor` -- its `survivor_book` and `adapter` blocks, nothing else -- and runs the
-survivor day, `SURVIVOR_STEPS`, which is a step-1 refusal (exit 1) until `V2-P7-008` D5 wires it.
-Any other `kind`, or a survivor registration that cannot be read, exits 2 at step 1 before any
-request; a survivor book whose seed is not the registration's exits 3. The survivor module is
-imported only then: it loads `backtest/paper.py`, whose audit hook a P6 day does not install.
+survivor day, `SURVIVOR_STEPS` (`_run_survivor_day`): registration, panel update, panel doctor,
+factor build, paper head, facts, prediction, paper book, summary -- the paper book's writer lock
+taken first, the day's clock and the book's holdings pinned in its own journal
+(`RT/daily_survivor/`) before any request, and the forward record filed before the paper book.
+Steps 1 to 7 run; step 8 refuses by name, after the record is filed, until `V2-P7-008` D5b wires
+the paper book and the summary. Any other `kind`, or a survivor registration that cannot be read,
+exits 2 at step 1 before any request; a survivor book whose seed is not the registration's exits
+3. The survivor modules are imported only then: they load `backtest/paper.py`, whose audit hook a
+P6 day does not install.
 
 ## Idempotent per trading day
 
@@ -254,9 +259,15 @@ from openalpha_cn.strategy_view import (  # noqa: E402
 )
 
 if TYPE_CHECKING:
-    # Imported for its type only: at run time `survivor_registration` imports the module, and
-    # only for a registration that names a `kind` (it loads `backtest/paper.py`).
+    # Imported for their types only: at run time the survivor day imports these modules, and only
+    # for a registration that names a `kind` (they load `backtest/paper.py`).
+    from openalpha_cn.domain.factor_transform import FactorTransformSpec
+    from openalpha_cn.domain.survivor_book import ScreenResult
+    from openalpha_cn.runtime.composition import StorageContainer
     from openalpha_cn.strategy_survivor import SurvivorRegistration
+    from openalpha_cn.strategy_survivor_book import PaperBookLock, PaperHead
+    from openalpha_cn.strategy_survivor_facts import FactsDay
+    from openalpha_cn.strategy_survivor_market import SessionOrdinals
 
 DAILY_SELECTION_SCHEMA: Final[str] = "openalpha-daily-selection/v1"
 DEFAULT_REGISTRATION: Final[Path] = REPOSITORY / "docs" / "research" / "p6-registration.json"
@@ -1973,6 +1984,9 @@ class DailyOptions:
     full_update: bool = False
     max_staleness_days: int = DEFAULT_MAX_STALENESS_DAYS
     json_output: bool = False
+    top: int | None = None
+    """`--top`: how many candidates the P6 summary prints (`main` reads it there); a survivor day
+    refuses it (`_refuse_p6_only_options`)."""
 
 
 def _stored_calendar(
@@ -3407,6 +3421,460 @@ def _run_daily_selection(
     }
 
 
+# --- the survivor book's day (`V2-P7-008`) -------------------------------------------------------
+
+
+SURVIVOR_JOURNAL_SCHEMA: Final[str] = "openalpha-daily-survivor/v1"
+SURVIVOR_JOURNAL_DIRECTORY: Final[str] = "daily_survivor"
+"""Under the runtime directory: the survivor day's journal, `<config_id[:16]>/<session>.json` --
+beside the P6 day's `daily_selection`, never inside it, so neither day's reader meets the other's
+journals."""
+PAPER_DIRECTORY: Final[str] = "paper"
+"""Under the runtime directory: the paper book -- its snapshots and its ledger (`build_storage`),
+its marker and its writer lock (`strategy_survivor_book`)."""
+SURVIVOR_RESULT_KIND: Final[str] = "survivor_book/v1"
+"""A survivor result's `kind` (`strategy_survivor_summary.SURVIVOR_DOCUMENT_KIND`), spelled here
+because reading it from that module would load the paper book for every P6 day: `main` tells a
+survivor result from a P6 one by it."""
+SURVIVOR_OUTCOME_SESSIONS: Final[int] = 20
+"""The record's horizon in sessions (`strategy_survivor_registration.SURVIVOR_HORIZON`, `20d`):
+how far past the session step 2 makes sure the stored calendar reaches, as P6's
+`outcome_horizon` does for its record."""
+SETTLE_ONLY_COVERAGE: Final[float] = 0.0
+"""The coverage floor a settle-only day reads its facts at: it decides nothing and files nothing,
+so the registered floor, which guards a decision and a record, has nothing to guard (D4 review,
+rule 3); the facts are still read, for the held statuses and the document."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SurvivorDay:
+    """A survivor day as steps 1 to 7 leave it for steps 8 and 9 -- the paper book and the
+    summary, `V2-P7-008` D5b's: what the day read, pinned and filed, and the lock it holds."""
+
+    options: DailyOptions
+    registration: Registration
+    survivor: SurvivorRegistration
+    lock: PaperBookLock
+    """The paper book's writer lock, held from before step 2 to the end of the day."""
+    storage: StorageContainer
+    store: PanelStore
+    journal_path: Path
+    journal: Mapping[str, Any]
+    """As step 7 left it: the pin (`as_of`, `held`, `held_from`), `panel` and `prediction`."""
+    session: date
+    as_of: datetime
+    """The journal-pinned clock: every read of the day and of its reruns is made at it, and it,
+    never the clock, says whether the day is an evening or settles only (D3 review, rule 4)."""
+    held: tuple[str, ...]
+    """The journal-pinned holdings the facts were read with."""
+    calendar: TradingCalendar
+    ordinals: SessionOrdinals
+    transform: FactorTransformSpec
+    """The registered transform, resolved once (D3 review, rule 7)."""
+    head: PaperHead
+    facts: FactsDay
+    screen: ScreenResult
+    factors: Mapping[str, Any]
+    prediction: Mapping[str, Any]
+    settle_only: bool
+    """The pinned `as_of` is at or after 09:15 of the next session: no record was filed, and no
+    decision may be made (decision 2)."""
+
+
+def survivor_builds(survivor: SurvivorRegistration) -> tuple[TierBuild, ...]:
+    """Step 4's tiers for a survivor registration: every composite factor at the processed tier
+    under the registered transform, not neutralized -- the one build `build_facts_day` reads for
+    each, at the session's 16:30."""
+    from openalpha_cn.strategy_survivor_registration import SURVIVOR_TIER
+
+    transform = survivor.adapter.transform
+    return tuple(
+        TierBuild(factor=factor, tier=SURVIVOR_TIER, transform=transform, neutralization=None)
+        for factor in survivor.book.composite_factors
+    )
+
+
+def survivor_panel_update(survivor: SurvivorRegistration) -> SurvivorPanelUpdate:
+    """Step 2's survivor rules, the catch-up bound read where a registration holds it: its
+    `adapter.max_panel_catch_up_sessions`, which the adapter reader requires and bounds to
+    0..16 (`strategy_survivor.MAX_PANEL_CATCH_UP_SESSIONS`). The one reader of that key."""
+    return SurvivorPanelUpdate(max_catch_up_sessions=survivor.adapter.max_panel_catch_up_sessions)
+
+
+def survivor_journal_directory(runtime_dir: Path, registration: Registration) -> Path:
+    return runtime_dir / SURVIVOR_JOURNAL_DIRECTORY / registration.config_id[:16]
+
+
+def read_survivor_journal(path: Path) -> dict[str, Any] | None:
+    """The survivor day's journal at `path`, or `None` when there is none.
+
+    Its own reader, not P6's `read_journal`, which names P6's summary step (step 8 there, 9 here)
+    and would read a P6 journal as the day's. A file that is not UTF-8 JSON, does not hold a
+    mapping, is a P6 journal or is of another schema is refused by name -- step `summary`,
+    numbered in `SURVIVOR_STEPS` -- and left as it is."""
+    if not path.is_file():
+        return None
+    try:
+        body = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as error:  # `UnicodeDecodeError` and `JSONDecodeError` both are
+        raise StepFailedError(
+            "summary",
+            f"{path} is not a {SURVIVOR_JOURNAL_SCHEMA} journal: it is not UTF-8 JSON "
+            f"({type(error).__name__}: {error}). It is left as it is",
+            steps=SURVIVOR_STEPS,
+        ) from error
+    if not isinstance(body, dict):
+        raise StepFailedError(
+            "summary",
+            f"{path} is not a {SURVIVOR_JOURNAL_SCHEMA} journal: it holds a "
+            f"{type(body).__name__}, not a mapping. It is left as it is",
+            steps=SURVIVOR_STEPS,
+        )
+    schema = body.get("schema")
+    if schema == DAILY_SELECTION_SCHEMA:
+        raise StepFailedError(
+            "summary",
+            f"{path} is a P6 journal ({DAILY_SELECTION_SCHEMA}), not the survivor day's "
+            f"{SURVIVOR_JOURNAL_SCHEMA}: the two days keep their journals apart "
+            f"({JOURNAL_DIRECTORY} and {SURVIVOR_JOURNAL_DIRECTORY}), so it was put there by hand. "
+            "It is left as it is",
+            steps=SURVIVOR_STEPS,
+        )
+    if schema != SURVIVOR_JOURNAL_SCHEMA:
+        raise StepFailedError(
+            "summary",
+            f"{path} is not a {SURVIVOR_JOURNAL_SCHEMA} journal: its schema is {schema!r}. It is "
+            "left as it is",
+            steps=SURVIVOR_STEPS,
+        )
+    return body
+
+
+def survivor_journal_complete(journal: Mapping[str, Any] | None) -> bool:
+    """Whether a survivor journal is a finished day's, which a rerun prints again with no request
+    and no write: it has filed its `result`. A day refused before its paper step files none and
+    keeps its stages (D4 review, rule 2), so a rerun after a fix runs its evening."""
+    return journal is not None and "result" in journal
+
+
+def _refuse_p6_only_options(options: DailyOptions) -> None:
+    """Refuse the P6 day's options that mean nothing on a survivor day, before anything is made
+    (exit 2, no request, no directory); `_run_survivor_day` says what the others mean there."""
+    if options.full_update:
+        raise StepFailedError(
+            "registration",
+            "--full-update fetches FULL_UPDATE_TARGETS, the whole current year of every target "
+            "the P6 day might read; a survivor day fetches what its own day reads "
+            "(targets_for_survivor, or the --dataset given), and a store's full refresh is "
+            "`openalpha panel build`'s, not a day's. Nothing was run",
+            exit_code=DailyExit.no_registration,
+            steps=SURVIVOR_STEPS,
+        )
+    if options.top is not None:
+        raise StepFailedError(
+            "registration",
+            "--top cuts the P6 day's printed candidate list; a survivor day prints no candidate "
+            "list to cut -- the paper book's plan is printed whole. Nothing was run",
+            exit_code=DailyExit.no_registration,
+            steps=SURVIVOR_STEPS,
+        )
+
+
+def _survivor_session(runtime_dir: Path, store: PanelStore, exchange: str, as_of: datetime) -> date:
+    """The day's session as the P6 day finds it: the newest published at `as_of` by the stored
+    calendar, which is built first (one request) when the store holds none to read it from."""
+    session = _stored_session(store, exchange, as_of)
+    if session is not None:
+        return session
+    year = as_of.astimezone(SHANGHAI).year
+    built = _panel_build(
+        runtime_dir, year=year, as_of=as_of, exchange=exchange, targets=(TRADING_CALENDAR_DATASET,)
+    )
+    if built.exit_code != 0:
+        raise StepFailedError(
+            "panel update",
+            f"the {year} calendar could not be built: {built.reason()}",
+            steps=SURVIVOR_STEPS,
+        )
+    session = _stored_session(store, exchange, as_of)
+    if session is None:
+        raise StepFailedError(
+            "panel update", f"no session had published at {as_of.isoformat()}", steps=SURVIVOR_STEPS
+        )
+    return session
+
+
+def _admit_epoch(
+    store: PanelStore, *, epoch: date, session: date, exchange: str, as_of: datetime
+) -> None:
+    """Refuse, as a registration the day cannot run (exit 2), an epoch after the session -- P6's
+    `session < anchor` -- and one the stored calendar does not open: the adapter reader admits
+    any date, a Saturday included, and the paper book counts its sessions from its epoch."""
+    if session < epoch:
+        raise StepFailedError(
+            "registration",
+            f"the registered paper book opens on its epoch {epoch.isoformat()}, after the newest "
+            f"closed session {session.isoformat()}",
+            exit_code=DailyExit.no_registration,
+            steps=SURVIVOR_STEPS,
+        )
+    calendar = _stored_calendar(store, exchange, (epoch.year,), as_of)
+    if calendar is None:
+        raise StepFailedError(
+            "panel update",
+            f"the {exchange} calendar of {epoch.year}, on which the registered epoch "
+            f"{epoch.isoformat()} is checked to be an open session, is not stored or cannot be "
+            "read",
+            steps=SURVIVOR_STEPS,
+        )
+    if epoch not in calendar.trading_days:
+        raise StepFailedError(
+            "registration",
+            f"the registered epoch {epoch.isoformat()} is not an open {exchange} session: the "
+            "paper book opens on its epoch and counts every session from it (ordinal 0), so the "
+            "epoch is the session before the first scheduled run",
+            exit_code=DailyExit.no_registration,
+            steps=SURVIVOR_STEPS,
+        )
+
+
+def _survivor_calendar(
+    store: PanelStore, exchange: str, *, epoch: date, session: date, as_of: datetime
+) -> TradingCalendar:
+    """The stored calendar from the epoch's year through the session's, every year of it: the
+    paper book counts its sessions on it (`SessionOrdinals`), and a year missing would skip its
+    sessions rather than refuse."""
+    years = tuple(range(epoch.year, session.year + 1))
+    unstored = sorted(set(years) - set(store.registered_years(TRADING_CALENDAR_DATASET)))
+    calendar = None if unstored else _stored_calendar(store, exchange, years, as_of)
+    if calendar is None:
+        raise StepFailedError(
+            "panel update",
+            f"the {exchange} calendar of {', '.join(map(str, unstored or years))}, on which the "
+            f"paper book counts its sessions from its epoch {epoch.isoformat()}, is not stored or "
+            "cannot be read",
+            steps=SURVIVOR_STEPS,
+        )
+    return calendar
+
+
+def _held_now(storage: StorageContainer) -> tuple[tuple[str, ...], dict[str, Any] | None]:
+    """The paper book's holdings as this run finds it under its lock, and the snapshot they are
+    read from (`None` when no book is open yet): what the day pins before any request."""
+    from openalpha_cn.backtest.paper_state import PaperStateError, held_head
+    from openalpha_cn.storage.paper_state import PaperStateStoreError
+    from openalpha_cn.strategy_survivor_book import held_codes
+
+    try:
+        head = held_head(storage.paper_state_store)
+    except (PaperStateError, PaperStateStoreError) as error:
+        raise StepFailedError(
+            "paper head",
+            f"the paper book's head, whose holdings the day pins before any request, cannot be "
+            f"read ({type(error).__name__}: {error}). Nothing was fetched or written",
+            steps=SURVIVOR_STEPS,
+        ) from error
+    if head is None:
+        return (), None
+    pinned_from = {
+        "session": head.session.isoformat(),
+        "session_index": head.session_index,
+        "snapshot_id": head.snapshot_id,
+    }
+    return held_codes(head), pinned_from
+
+
+def _require_pinned_head(
+    head: PaperHead,
+    *,
+    held: Sequence[str],
+    held_from: Mapping[str, Any] | None,
+    session: date,
+) -> None:
+    """Step 5's check of the book against what the day pinned: `held`, read from the snapshot
+    `held_from` names (or from no book at all, which the head then opens).
+
+    The head found now must be that snapshot, holding `held` -- a difference means another run
+    changed the book -- or a later one of this session's own (a rerun after an earlier run's
+    paper step committed sessions through this one: the evening reads the facts again with the
+    holdings it finds, D3). A head past the session, or older than the pinned snapshot, is
+    another run's book; each is refused by name, with nothing written."""
+    snapshot = head.snapshot
+    pinned = 0 if held_from is None else int(held_from["session_index"])
+    if snapshot.session_index > head.session_index:
+        raise StepFailedError(
+            "paper head",
+            f"the paper book is settled through {snapshot.session.isoformat()} (session index "
+            f"{snapshot.session_index}), after this day's {session.isoformat()} (index "
+            f"{head.session_index}): a later session's run changed the book since this day pinned "
+            "its holdings, and a past evening is not run again. Nothing was written",
+            steps=SURVIVOR_STEPS,
+        )
+    if snapshot.session_index < pinned:
+        raise StepFailedError(
+            "paper head",
+            f"the paper book's head is session index {snapshot.session_index}, older than the "
+            f"snapshot this day pinned its holdings from (index {pinned}): the book was replaced "
+            "since -- restore its snapshots and its ledger together, from one backup. Nothing was "
+            "written",
+            steps=SURVIVOR_STEPS,
+        )
+    replaced = held_from is not None and held_from.get("snapshot_id") != snapshot.snapshot_id
+    if snapshot.session_index == pinned and (replaced or head.held != tuple(held)):
+        raise StepFailedError(
+            "paper head",
+            f"the paper book's head at session index {pinned} holds {list(head.held)}"
+            + (f" as {snapshot.snapshot_id}" if replaced else "")
+            + f", and this day's journal pinned {list(held)} from "
+            + (f"{held_from['snapshot_id']}" if held_from is not None else "no book")
+            + ": another run changed the book under the journal. Nothing was written",
+            steps=SURVIVOR_STEPS,
+        )
+
+
+def _nothing_eligible(session: date, screened: ScreenResult) -> str:
+    reasons = Counter(reason for verdict in screened.verdicts for reason in verdict.reasons)
+    counted = ", ".join(f"{reason} {count}" for reason, count in sorted(reasons.items()))
+    return (
+        f"no security is eligible on {session.isoformat()}: of the {len(screened.verdicts)} "
+        f"assessed, the screen's reasons count {counted or 'nothing'}. An empty record is no "
+        "registration (survivor_batch refuses one), so the day stops here, before its prediction "
+        "and its paper book: nothing was filed or settled, and a rerun once the data is fixed "
+        "runs the day"
+    )
+
+
+def _settle_only_prediction(as_of: datetime, cutoff: datetime) -> dict[str, Any]:
+    return {
+        "registered": False,
+        "settle_only": True,
+        "reason": (
+            f"the day's pinned clock {as_of.isoformat()} is at or after {cutoff.isoformat()}, the "
+            "next session's call auction: its scores would not be a prediction made before their "
+            "outcome, so nothing is registered and no decision is made -- the day settles only "
+            "(decision 2)"
+        ),
+    }
+
+
+def _survivor_prediction(
+    runtime_dir: Path,
+    store: PanelStore,
+    *,
+    registration: Registration,
+    survivor: SurvivorRegistration,
+    facts: FactsDay,
+    screened: ScreenResult,
+    transform: FactorTransformSpec,
+    session: date,
+    as_of: datetime,
+    clock: Callable[[], datetime],
+) -> dict[str, Any]:
+    """Step 7: the day's eligible composites as the forward record `survivor_book_composite/v1`
+    (`strategy_survivor_registration`), its input provenance filed first and written once, then
+    the record through P6's own `register_prediction` -- reused for a day already filed under
+    the same declaration, refused for a different answer or once the next call auction began."""
+    from openalpha_cn import strategy_survivor_registration as forward
+
+    declared = registration.declared
+    exchange = survivor.adapter.exchange
+    try:
+        batch = forward.survivor_batch(
+            facts=facts,
+            screen=screened,
+            book=survivor.book,
+            registered=declared,
+            predicted_at=clock(),
+        )
+        provenance = forward.survivor_input_provenance(
+            store,
+            facts=facts,
+            batch=batch,
+            registered=declared,
+            transform=transform,
+            exchange=exchange,
+            recorded_at=clock(),
+        )
+        forward.write_survivor_provenance(runtime_dir, provenance)
+    except forward.SurvivorRegistrationError as error:
+        raise StepFailedError("prediction", str(error), steps=SURVIVOR_STEPS) from error
+    record, outcome = register_prediction(
+        runtime_dir,
+        batch,
+        calendar=_outcome_calendar(store, exchange, session, as_of),
+        clock=clock,
+    )
+    declaration = record.batch.artifact.declaration
+    return {
+        "registered": True,
+        "record_id": record.record_id,
+        "family": declaration.family,
+        "horizon": declaration.horizon,
+        "outcome": outcome,
+        "standing": record.standing,
+        "as_of": record.batch.as_of.isoformat(),
+        "outcome_known_at": record.outcome_known_at.isoformat(),
+        "recorded_at": record.recorded_at.isoformat(),
+        "scored": len(record.batch.scored),
+        "abstained": len(record.batch.abstained),
+        "provenance": provenance.digest,
+    }
+
+
+def _opening_result(
+    *,
+    journal: Mapping[str, Any],
+    session: date,
+    as_of: datetime,
+    head: PaperHead,
+    factors: Mapping[str, Any],
+) -> dict[str, Any]:
+    """The result of a day on the epoch, which only opens the paper book."""
+    from openalpha_cn.strategy_survivor_summary import SURVIVOR_WORDING
+
+    snapshot = head.snapshot
+    return {
+        "kind": SURVIVOR_RESULT_KIND,
+        "session": session.isoformat(),
+        "session_index": head.session_index,
+        "as_of": as_of.isoformat(),
+        "registration": journal["registration"],
+        "panel": journal["panel"],
+        "factors": dict(factors),
+        "opening": {
+            "epoch_session": snapshot.session.isoformat(),
+            "snapshot_id": snapshot.snapshot_id,
+            "cash": f"{snapshot.book.cash}",
+            "config_digest": snapshot.config_digest,
+        },
+        "prediction": {
+            "registered": False,
+            "reason": "the epoch session only opens the paper book: no facts are read and "
+            "nothing is registered; the first evening, and the first record, are the next "
+            "session's",
+        },
+        "wording": SURVIVOR_WORDING,
+    }
+
+
+def _survivor_paper_and_summary(
+    day: SurvivorDay, *, clock: Callable[[], datetime], counts: Counter[str]
+) -> dict[str, Any]:
+    """Steps 8 and 9 of the survivor day: the paper book -- the catch-up, then the evening, or on
+    a settle-only day the settlement alone -- and the summary, `V2-P7-008` D5b's. Until they are
+    wired the day stops here by name, after its record was filed: exit 1 with the requests spent,
+    and no `result` in the journal, so a rerun runs the paper book once it exists."""
+    raise StepFailedError("paper book", "not wired yet (V2-P7-008 D5b)", steps=SURVIVOR_STEPS)
+
+
+def _this_run(counts: Counter[str], *, wrote: bool) -> dict[str, Any]:
+    return {
+        "requests": dict(sorted(counts.items())) if wrote else {},
+        "request_count": sum(counts.values()) if wrote else 0,
+        "wrote": wrote,
+    }
+
+
 def _run_survivor_day(
     options: DailyOptions,
     registration: Registration,
@@ -3415,14 +3883,247 @@ def _run_survivor_day(
     clock: Callable[[], datetime],
     counts: Counter[str],
 ) -> dict[str, Any]:
-    """The survivor book's day, `SURVIVOR_STEPS`: not wired yet, so a step-1 refusal (exit 1)
-    that `V2-P7-008` D5 replaces with the day. Refusing keeps an admitted survivor registration
-    off the P6 day, which cannot read its configuration."""
-    raise StepFailedError(
-        "registration",
-        "the survivor daily day is not wired yet (V2-P7-008 D5)",
-        steps=SURVIVOR_STEPS,
+    """The survivor book's day, `SURVIVOR_STEPS`, every step inside `_step(..., steps=
+    SURVIVOR_STEPS)` so that an unexpected fault is that step's refusal, numbered in the survivor
+    order and printed with the requests spent. Glue only: what each step does is
+    `strategy_survivor_book` (the paper book), `strategy_survivor_facts` (the facts day),
+    `domain.survivor_screen` (the screen) and `strategy_survivor_registration` (the record).
+
+    0. **The lock first.** Right after the registration is admitted, the paper book's writer
+       lock (`paper_book_lock`) is taken and held to the end of the day; the token is what the
+       paper book's functions require. Another run holding it is refused here, named under step
+       1 (`registration`) -- the lock is taken before step 2 -- having fetched and written
+       nothing.
+    1. **Pinned before any request.** The day's journal, `RT/daily_survivor/<config_id[:16]>/
+       <session>.json` (`openalpha-daily-survivor/v1`, its own reader), is written first with the
+       day's `as_of` (as P6 pins it) and the book's holdings as found under the lock (`held`, and
+       `held_from`, the snapshot they are read from): every later step of this run and of any
+       rerun uses them. A journal with `result` is printed again with no request and no write. An
+       epoch after the session (P6's `session < anchor`) or not an open session of the stored
+       calendar exits 2 here, before the journal.
+    2. **Panel update** as P6's, with `SurvivorPanelUpdate` from the registration's adapter
+       (`survivor_panel_update`); journalled, and resumed after on a rerun. 3. **Doctor** and 4.
+       **factor build** as P6's: the composite factors at the processed tier (`survivor_builds`).
+    5. **Paper head** (`paper_head`, which binds the marker and opens the book on every run),
+       checked against the pin (`_require_pinned_head`). A day on the epoch only opens the book,
+       files its result and ends (exit 0).
+    6. **Facts** with the pinned `held`, and the screen; nothing eligible is refused by name.
+    7. **Prediction**, before the paper step so that a fault of the paper book never costs the
+       record; journalled, and reused on a rerun. A day whose pinned `as_of` is at or after 09:15
+       of the next session registers nothing and is no error: it settles only (decision 2).
+    8.-9. The paper book and the summary: `_survivor_paper_and_summary` (D5b).
+
+    **The P6 day's options here.** `--full-update` and `--top` have no survivor meaning and are
+    refused before anything is made (exit 2). `--dataset` replaces the targets as on the P6 day
+    (`options.targets or targets_for_survivor(builds)`); `--max-staleness-days` is the factor
+    build's bound, as on the P6 day; `--as-of` pins the first run's clock; `--json` prints the
+    day's result document; `--pin-worktree` is unchanged (it never reaches a day).
+    """
+    with _step("registration", steps=SURVIVOR_STEPS):
+        _refuse_p6_only_options(options)
+        # Imported here, never for a P6 day: it loads `backtest/paper.py` and its audit hook.
+        from openalpha_cn import strategy_survivor_book as paper_book
+    with contextlib.ExitStack() as held:
+        with _step("registration", steps=SURVIVOR_STEPS):
+            try:
+                lock = held.enter_context(
+                    paper_book.paper_book_lock(options.runtime_dir / PAPER_DIRECTORY)
+                )
+            except paper_book.SurvivorDayError as error:
+                # `PaperBookBusyError` above all: the lock is taken before step 2, so its refusal
+                # is step 1's, whatever step the paper book module names.
+                raise StepFailedError("registration", str(error), steps=SURVIVOR_STEPS) from error
+        return _survivor_day(options, registration, survivor, lock=lock, clock=clock, counts=counts)
+
+
+def _survivor_day(
+    options: DailyOptions,
+    registration: Registration,
+    survivor: SurvivorRegistration,
+    *,
+    lock: PaperBookLock,
+    clock: Callable[[], datetime],
+    counts: Counter[str],
+) -> dict[str, Any]:
+    """Steps 1 to 7 of the survivor day under the paper book's lock (`_run_survivor_day`)."""
+    from openalpha_cn import strategy_survivor_book as paper_book
+    from openalpha_cn.domain import survivor_screen
+    from openalpha_cn.strategy_survivor_market import SessionOrdinals
+
+    runtime_dir = options.runtime_dir
+    adapter = survivor.adapter
+    exchange, epoch = adapter.exchange, adapter.epoch_session
+    with _step("registration", steps=SURVIVOR_STEPS):
+        store = panel_store(runtime_dir)
+        first_as_of = options.as_of or clock()
+        builds = survivor_builds(survivor)
+        targets = options.targets or targets_for_survivor(builds)
+        # Resolved once, and the one object every reader of the processed tier is handed (D3
+        # review, rule 7).
+        transform = FACTOR_TRANSFORMS.get(adapter.transform)
+
+    with _step("panel update", steps=SURVIVOR_STEPS), counted_transport(counts):
+        session = _survivor_session(runtime_dir, store, exchange, first_as_of)
+        _admit_epoch(store, epoch=epoch, session=session, exchange=exchange, as_of=first_as_of)
+        path = survivor_journal_directory(runtime_dir, registration) / f"{session.isoformat()}.json"
+        journal = read_survivor_journal(path)
+        if journal is not None and journal.get("registration", {}).get("sha256") not in (
+            None,
+            registration.sha256,
+        ):
+            raise StepFailedError(
+                "summary",
+                f"{path} was written under another registration of this configuration",
+                steps=SURVIVOR_STEPS,
+            )
+        if journal is not None and survivor_journal_complete(journal):
+            return {**journal["result"], "this_run": _this_run(counts, wrote=False)}
+        storage = build_storage(runtime_dir=runtime_dir, clock=clock)
+        if journal is None:
+            # The day's clock and the book's holdings, pinned before anything is fetched: a retry
+            # asks the same questions of the same book (P6's pin, and the paper book's).
+            held, held_from = _held_now(storage)
+            journal = {
+                "schema": SURVIVOR_JOURNAL_SCHEMA,
+                "session": session.isoformat(),
+                "as_of": first_as_of.isoformat(),
+                "held": list(held),
+                "held_from": held_from,
+                "registration": {
+                    "path": registration.path.name,
+                    "sha256": registration.sha256,
+                    "commit": registration.commit,
+                    "config_id": registration.config_id,
+                },
+            }
+            write_journal(path, journal)
+        as_of = datetime.fromisoformat(journal["as_of"])
+        held = tuple(journal["held"])
+        held_from = journal["held_from"]
+        calendar = _survivor_calendar(store, exchange, epoch=epoch, session=session, as_of=as_of)
+        if "panel" not in journal:
+            panel = update_panel(
+                runtime_dir,
+                session=session,
+                as_of=as_of,
+                exchange=exchange,
+                targets=targets,
+                next_year=next_year_calendar_needed(
+                    calendar, session=session, horizon=SURVIVOR_OUTCOME_SESSIONS
+                ),
+                survivor=survivor_panel_update(survivor),
+            )
+            journal = {**journal, "panel": {**panel, "requests": dict(sorted(counts.items()))}}
+            write_journal(path, journal)
+
+    with _step("panel doctor", steps=SURVIVOR_STEPS):
+        check_panel(
+            runtime_dir,
+            datasets=doctor_datasets(journal["panel"]["targets"]),
+            session=session,
+            as_of=as_of,
+            exchange=exchange,
+            first_of_year=session
+            == min(day for day in calendar.trading_days if day.year == session.year),
+        )
+    with _step("factor build", steps=SURVIVOR_STEPS):
+        factors = build_factors(
+            store,
+            builds,
+            session=session,
+            as_of=as_of,
+            exchange=exchange,
+            max_staleness_days=options.max_staleness_days,
+            runtime_dir=runtime_dir,
+        )
+    with _step("paper head", steps=SURVIVOR_STEPS):
+        ordinals = SessionOrdinals(calendar, epoch)
+        try:
+            head = paper_book.paper_head(
+                state_store=storage.paper_state_store,
+                registration=survivor,
+                ordinals=ordinals,
+                session=session,
+                paper_directory=runtime_dir / PAPER_DIRECTORY,
+                config_id=registration.config_id,
+                lock=lock,
+            )
+        except paper_book.SurvivorDayError as error:
+            raise StepFailedError(error.step, str(error), steps=SURVIVOR_STEPS) from error
+        _require_pinned_head(head, held=held, held_from=held_from, session=session)
+        # By the pinned clock, never this run's: a rerun is the day it was (D3 review, rule 4).
+        cutoff = registration_cutoff(_outcome_calendar(store, exchange, session, as_of), session)
+        settle_only = as_of >= cutoff
+    if head.opened_only:
+        with _step("summary", steps=SURVIVOR_STEPS):
+            result = _opening_result(
+                journal=journal, session=session, as_of=as_of, head=head, factors=factors
+            )
+            write_journal(path, {**journal, "result": result})
+        return {**result, "this_run": _this_run(counts, wrote=True)}
+
+    with _step("facts", steps=SURVIVOR_STEPS):
+        try:
+            facts = paper_book.facts_day(
+                panel=store,
+                registration=survivor,
+                session=session,
+                as_of=as_of,
+                held=held,
+                min_coverage=SETTLE_ONLY_COVERAGE if settle_only else None,
+                transform=transform,
+            )
+        except paper_book.SurvivorDayError as error:
+            raise StepFailedError(error.step, str(error), steps=SURVIVOR_STEPS) from error
+        screened = survivor_screen.screen(facts.facts, survivor.book)
+        if not settle_only and not any(verdict.eligible for verdict in screened.verdicts):
+            raise StepFailedError(
+                "facts", _nothing_eligible(session, screened), steps=SURVIVOR_STEPS
+            )
+    with _step("prediction", steps=SURVIVOR_STEPS):
+        prediction = journal.get("prediction")
+        if prediction is None:
+            prediction = (
+                _settle_only_prediction(as_of, cutoff)
+                if settle_only
+                else _survivor_prediction(
+                    runtime_dir,
+                    store,
+                    registration=registration,
+                    survivor=survivor,
+                    facts=facts,
+                    screened=screened,
+                    transform=transform,
+                    session=session,
+                    as_of=as_of,
+                    clock=clock,
+                )
+            )
+            journal = {**journal, "prediction": prediction}
+            write_journal(path, journal)
+    day = SurvivorDay(
+        options=options,
+        registration=registration,
+        survivor=survivor,
+        lock=lock,
+        storage=storage,
+        store=store,
+        journal_path=path,
+        journal=journal,
+        session=session,
+        as_of=as_of,
+        held=held,
+        calendar=calendar,
+        ordinals=ordinals,
+        transform=transform,
+        head=head,
+        facts=facts,
+        screen=screened,
+        factors=factors,
+        prediction=prediction,
+        settle_only=settle_only,
     )
+    return _survivor_paper_and_summary(day, clock=clock, counts=counts)
 
 
 # --- the face ----------------------------------------------------------------------------------
@@ -3468,6 +4169,39 @@ def summary_lines(result: Mapping[str, Any], *, top: int) -> list[str]:
     if sweep:
         lines.append(f"industry sweep     {sweep}")
     lines.append(f"wording            {result['wording']}")
+    return lines
+
+
+def survivor_summary_lines(result: Mapping[str, Any]) -> list[str]:
+    """What a survivor day prints without `--json` (`V2-P7-008`): the opening of a day on the
+    epoch here; an evening's document through `strategy_survivor_summary.summary_lines`, which
+    D5b fills. Never the P6 summary, whose keys a survivor result does not have."""
+    if "opening" not in result:
+        from openalpha_cn.strategy_survivor_summary import summary_lines as evening_lines
+
+        return evening_lines(result)
+    opening = result["opening"]
+    run = result["this_run"]
+    lines = [
+        f"{'session':<18} {result['session']} (index {result['session_index']}, the paper "
+        f"book's epoch; as of {result['as_of']})",
+        f"{'book':<18} opened on its epoch with cash {opening['cash']} "
+        f"({opening['snapshot_id']}); no evening is run on the epoch -- the first is the next "
+        "session's; ledger equity is not evidence",
+        f"{'prediction':<18} none: {result['prediction']['reason']}",
+    ]
+    caught_up = result.get("panel", {}).get("caught_up")
+    if caught_up:
+        lines.append(f"{'panel catch-up':<18} {', '.join(caught_up)}")
+    built = result.get("factors", {}).get("caught_up")
+    if built:
+        lines.append(f"{'factor catch-up':<18} {', '.join(built)}")
+    lines.append(
+        f"{'tushare requests':<18} {run['request_count']} this run "
+        f"{json.dumps(run['requests'], sort_keys=True)}"
+        + ("" if run["wrote"] else " -- the day was already complete; nothing was run")
+    )
+    lines.append(f"{'wording':<18} {result['wording']}")
     return lines
 
 
@@ -3917,6 +4651,7 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
         full_update=arguments.full_update,
         max_staleness_days=arguments.max_staleness_days,
         json_output=arguments.json,
+        top=arguments.top,
     )
     try:
         result = run_daily_selection(options, clock=clock)
@@ -3930,6 +4665,8 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
         return int(error.exit_code)
     if arguments.json:
         print(json.dumps(result, sort_keys=True, ensure_ascii=False))
+    elif result.get("kind") == SURVIVOR_RESULT_KIND:
+        print("\n".join(survivor_summary_lines(result)))
     else:
         top = arguments.top if arguments.top is not None else result["targets"]["holding_count"]
         print("\n".join(summary_lines(result, top=int(top))))
