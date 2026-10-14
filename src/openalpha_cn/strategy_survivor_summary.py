@@ -147,6 +147,26 @@ _EVENING_STATES: Final[Mapping[str, str]] = {
 """What the ORDERS header says of the run: it committed the evening, or found it settled and
 derived it again, writing nothing -- so a printed plan can be told from the run that made it."""
 _SUSPENDED: Final[str] = "(suspended: the close may be an earlier session's)"
+_PRINTED_NOTES: Final[frozenset[str]] = frozenset(
+    {
+        "delisting",
+        "name_unknown_assumed_ordinary",
+        "name_unknown_before_first",
+        "name_unknown_no_record",
+        "no_bar_within_carry",
+        "no_listing_row",
+        "not_listed_with_bar",
+        "st",
+        "st_by_band",
+        "st_by_name",
+        "st_pending",
+        "suspended_without_bar",
+        "unrecognised_board",
+        "unrecognised_board_codes",
+    }
+)
+"""The notes the facts lines have a place for: the adapter's `FactsNotes` fields, one for one
+(`tests/unit/test_strategy_survivor_summary.py` holds the two equal)."""
 
 
 # --- the liquidity rank -------------------------------------------------------------------------
@@ -687,6 +707,11 @@ def _facts_lines(facts: Mapping[str, Any], session: date) -> list[str]:
         f"{notes['name_unknown_no_record']}, before first record "
         f"{notes['name_unknown_before_first']})"
     )
+    # The document carries every field of the adapter's notes; a later adapter may add one this
+    # summary has no line for, and its number is printed rather than left out.
+    other = sorted(name for name in notes if name not in _PRINTED_NOTES)
+    if other:
+        lines.append("  other notes " + ", ".join(f"{name} {notes[name]}" for name in other))
     told = [item for item in facts["held_status"] if item["status"] != "row"]
     if told:
         lines.append(
