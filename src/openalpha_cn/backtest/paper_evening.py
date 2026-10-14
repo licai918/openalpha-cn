@@ -120,17 +120,21 @@ refused by `latest_snapshot`, naming the gap.
   ledger it is given, closing over `PortfolioLimits(1, 1, 0)` and the protocol's costs; this
   module never builds one with real limits or costs (it may not import `strategy_view`, where
   the costs live). A factory that builds the book on any other ledger is refused before the
-  session settles: the dry run would not be dry.
+  session settles, and one whose runner records somewhere other than the ledger it names is
+  refused before the commit: the dry run would not be dry.
 - **The two error classes of a broken store.** Every refusal about the book's state is a
-  `PaperStateError`; a fault the store finds in its own documents arrives as the store's
-  `PaperStateStoreError`, which `backtest/` cannot import. The daily entry catches **both**, by
-  name (both are `RuntimeError`s, so neither hides in an `except ValueError`). Contract refusals
-  (a missing reference price, a book that cannot be decided) are `ValueError`s.
+  `PaperStateError` -- `PaperLedgerConflictError` included; a fault the store finds in its own
+  documents arrives as the store's `PaperStateStoreError`, which `backtest/` cannot import. The
+  daily entry catches **both**, by name (both are `RuntimeError`s, so neither hides in an
+  `except ValueError`). Contract refusals (a missing reference price, a book that cannot be
+  decided) are `ValueError`s.
 
 This module lives under `backtest/` and reaches no store: the snapshot store arrives as
 `PaperStateDocumentStore` and the ledger as `ReadableLedger` (`append` and `list`), the
-`Protocol`s beside their consumers; `SQLitePortfolioLedger` satisfies the latter. The read is the
-whole ledger, filtered to the session: a few rows a session, so years of them are cheap.
+`Protocol`s beside their consumers; `SQLitePortfolioLedger` satisfies the latter. The real
+ledger is read and appended to only inside `paper.refusing_outward_calls()`. The read is the
+whole ledger, filtered to the session (not measured at scale: a session writes one row per due
+order tried with a bar, plus its write-offs, so a few dozen at most).
 """
 
 from __future__ import annotations
