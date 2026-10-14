@@ -153,10 +153,11 @@
 
 **先读：** `docs/research/p7-step0-validation/T5-paper-step-builder.md` 全文；`src/openalpha_cn/backtest/paper.py`（`PaperPortfolio.advance`）、`multi_day.py`（`PortfolioBacktestStep`，约 88）、`portfolio.py`（`PortfolioOrder`、`PortfolioState`、`PortfolioLimits`）、`execution.py`（`AShareExecutionPolicy`、`security_board`）、`strategy_view.py` 里组装 `MarketBar` 的函数（`_PanelDays.quote` 一带）；计划 1 的 `domain/survivor_orders.py::TradeOrder`。
 
-**Interfaces（拟，实现者在 Step 1 核对并如有冲突先报告）：**
-- `AttemptedOrder`（冻结数据类）：`order: TradeOrder`、`attempt_id: str`（= `f"{order.order_id}@{session.isoformat()}"`）、`outcome: Literal["submitted", "not_attempted"]`、`reason: str | None`。
-- `build_paper_step(*, session: date, orders: Sequence[TradeOrder], bars: Mapping[str, PaperBar], adjustment_ratio: Mapping[str, Decimal], benchmark_close: Decimal) -> PaperStepPlan`，其中 `PaperBar` 含开盘、收盘、涨停价、跌停价、停牌标记；`PaperStepPlan` = `(step: PortfolioBacktestStep, attempts: tuple[AttemptedOrder, ...])`。
-- 行为：订单在 `session` 的开盘价成交（开盘折叠：把 `MarketBar` 的 close 位放开盘价，收盘重估由状态推进完成，见 B3）；**卖单排在买单前**；没有 bar 的订单（整日停牌）不进步骤，记为 `not_attempted`（`reason="no bar"`）；每次尝试用新 id；`adjustment_ratio` 把前一日持仓成本与数量折算成当日口径（拆股送转按比例增加数量、除息按比例调整成本）——具体口径写进报告并钉住测试；`benchmark_close` 原样进步骤（取中证 500 当日收盘，由调用方提供）。
+**Interfaces（实现后更正，2026-10-14；以 `backtest/paper_step.py` 为准）：**
+- `AttemptedOrder`（冻结数据类）：`order: TradeOrder`、`attempt_id: str`（= `f"{order.order_id}@{session.isoformat()}"`，`attempt_id(order, session)`）、`outcome: Literal["submitted", "not_attempted"]`、`reason: str | None`。
+- `build_paper_step(*, session: date, session_index: int, orders: Sequence[TradeOrder], bars: Mapping[str, MarketBar], adjustment_ratio: Mapping[str, Decimal], benchmark_close: Decimal) -> PaperStepPlan`。`bars` 直接用已有的 `MarketBar`（要带交易所公布的涨跌停价，没有就拒绝）；`session_index` 是会话序号，用来拒绝未到期的单（`execute_session > s`）与已过期的买单；`adjustment_ratio` 必须覆盖每个卖出的持仓名（没动过的显式给 1，缺了就按名拒绝）。`PaperStepPlan` = `(step: PortfolioBacktestStep, attempts: tuple[AttemptedOrder, ...])`。
+- `remark_at_close(state, *, bars, adjustment_ratio) -> PortfolioState`：每个有 bar 的持仓名必须在比值表里；收盘重估由它完成。
+- 行为：订单在 `session` 的开盘价成交（`execution.at_the_open` 把 bar 的高低收折成开盘价）；**卖单排在买单前，买单按信号会话先后**；没有 bar 的订单不进步骤、记为 `not_attempted`（`reason="no bar"`）；每次尝试用新 id；复权口径：把每个持仓名的整根 bar 按 `adj_t / adj_entry` 缩放，股数保持买入时的口径（拆股送转精确；现金分红按"再投资"处理、不扣红利税，手续费按含股息的名义额收——写进报告，已钉住）；`benchmark_close` 原样进步骤。
 
 **要钉住的行为（手算 3–4 日夹具）：** 开盘成交价；涨停买不进 / 跌停卖不出 / 停牌 → `submitted` 但被账本整单拒绝并记录（或按 T5 的结论在构建器里提前判为 `not_attempted`——**以 T5 §4–§5 的实测行为为准**，在报告里写明，测试钉住）；一次 1.15 的复权事件**不产生虚假回撤**（对照：不缩放时权益出现 15% 的假跌，缩放后不出现）；顺延单第二次尝试 id 与第一次不同、账本不报冲突；卖前买后的顺序；二次构建同一输入得到同一计划。
 
@@ -186,11 +187,13 @@
 
 ## Part C — `V2-P7-009` 纸面账本的每日推进（待补全）
 
-依赖 B。目标：`settle_session(...)`——读取状态快照 → 取上一日的订单 → 用 B1 构建步骤 → `PaperPortfolio.advance`（B2 的成本）→ 用计划 1 的 `advance_orders` / `update_cooldowns` 结算订单生命周期 → 得到今天的持仓、在途买单 / 卖单、冷却 → 写快照。要钉住：先结算后决定的顺序；停牌的名字的单保持在途；3 日后买单过期且触发冷却；二次运行零写入；跨年；缺数据按名拒绝。**B 阶段评审留下的、本任务必须落实的要求（2026-10-14）：** (1) 调用 `build_paper_step` 时传入 `session_index`，且只传当日到期的订单；(2) 每个持仓都要有一个**买单成交日**的复权因子（`entry_adj`，B3 的快照里存），`adjustment_ratio` 必须覆盖每个持仓名（没动过的显式给 1）；(3) 交给 `build_trade_list` 的参考价，对**持仓名**要换成账本口径（真实收盘 × 比值）——否则 10 送 10 之后估算的卖出所得只有一半、买单定量偏小；(4) 复权事件之后手续费是按缩放后的名义额收的，而 P6 账簿按原始名义额收（只有比值为 1 时两者才逐分相等），日志里要写明；(5) 账本里经过复权的持仓，`filled_price` 是账本口径、不是任何人成交过的价格，读它的报告要换算；(6) 在成本注入的折算下，账本的 `transfer_fee` 实际是滑点，配置与日志里要这样写。**在 A、B 合入后补全接口与测试细节，再派发。**
+依赖 B。目标：`settle_session(...)`——读取状态快照 → 取上一日的订单 → 用 B1 构建步骤 → `PaperPortfolio.advance`（B2 的成本）→ 用计划 1 的 `advance_orders` / `update_cooldowns` 结算订单生命周期 → 得到今天的持仓、在途买单 / 卖单、冷却 → 写快照。要钉住：先结算后决定的顺序；停牌的名字的单保持在途；3 日后买单过期且触发冷却；二次运行零写入；跨年；缺数据按名拒绝。**B 阶段评审留下的、本任务必须落实的要求（2026-10-14）：** (1) 调用 `build_paper_step` 时传入 `session_index`，且只传当日到期的订单；(2) 每个持仓都要有一个**买单成交日**的复权因子（`entry_adj`，B3 的快照里存），`adjustment_ratio` 必须覆盖每个持仓名（没动过的显式给 1）；(3) 交给 `build_trade_list` 的参考价，对**持仓名**要换成账本口径（真实收盘 × 比值）——否则 10 送 10 之后估算的卖出所得只有一半、买单定量偏小；(4) 复权事件之后手续费是按缩放后的名义额收的，而 P6 账簿按原始名义额收（只有比值为 1 时两者才逐分相等），日志里要写明；(5) 账本里经过复权的持仓，`filled_price` 是账本口径、不是任何人成交过的价格，读它的报告要换算；(6) 在成本注入的折算下，账本的 `transfer_fee` 实际是滑点，配置与日志里要这样写。**A、B 阶段在合入前又留下的要求（2026-10-14）：** (7) 快照的读写只走 `latest_snapshot(store, *, settling_session, settling_index)`（它拒绝日期不早于结算日的快照、拒绝缺了中间一天），而"写入早于已持有的最新会话的会话"在存储层被拒；缺失日的检测只在读取时，所以**写快照之前必须先读过上一日的快照**，不得越过缺口直接存；`attempts` 要等于已结算的会话数；(8) 每晚调用 `build_facts_day(..., held=<持仓名>)`：持仓名不受 `max_carry_sessions` 约束（长期停牌的持仓每天约多读 10 s，250 个会话时）；**一只持仓名在事实日里没有行有两种情形**——在册但从未有日线（必须拒绝当日，具名）与已退市（按设计卖出），`FactsDay` 区分不了，所以本任务要读登记簿区分（或让适配器给出一张"已退市持仓"清单），**不能只按"持仓没有行"就拒绝**，否则一只退市的持仓会让之后每天都被拒；(9) 注册簿认识、当日不在册却有日线的代码被排除、不进任何 notes 计数——汇总时要把这个数量显示出来；(10) `FilePredictionStore.get` 对非法字节可能让 `UnicodeDecodeError` 逃逸（既有缺陷，未测），写预测登记之前先看一眼；
+**在 A、B 合入后补全接口与测试细节，再派发。**
 
 ## Part D — `V2-P7-008` 每日入口 `strategy_survivor`（待补全）
 
-依赖 A、C。目标：登记配置按顶层键 `kind` 分派（P6 配置零影响）；每日流程 = 更新面板 → 构建四个因子的 `processed` 档 → `build_facts_day` → `settle_session` → `screen` → `decide_book` → `build_trade_list` → 清单与订单落盘（契约身份先定：要不要含账簿身份、`TradeList` 里是否记录"已入选但因现金不足没下单"的名字——**落盘前由用户在 P7 §9 的待定项里选**）→ 摘要与日志（持仓、候补、临近退出、冻结、清单、账本权益）→ 预测登记 `survivor_book_composite/v1`（horizon `20d`，范围与账本权益无关，先于次日 09:15）；清晨复核模式；幸存者版的迟到记录核查与输入溯源（只增量）。**在 A、C 合入后补全。**
+依赖 A、C。目标：登记配置按顶层键 `kind` 分派（P6 配置零影响）；每日流程 = 更新面板 → 构建四个因子的 `processed` 档 → `build_facts_day` → `settle_session` → `screen` → `decide_book` → `build_trade_list` → 清单与订单落盘（契约身份先定：要不要含账簿身份、`TradeList` 里是否记录"已入选但因现金不足没下单"的名字——**落盘前由用户在 P7 §9 的待定项里选**）→ 摘要与日志（持仓、候补、临近退出、冻结、清单、账本权益）→ 预测登记 `survivor_book_composite/v1`（horizon `20d`，范围与账本权益无关，先于次日 09:15）；清晨复核模式；幸存者版的迟到记录核查与输入溯源（只增量）。**A 阶段留下的要求（2026-10-14）：** (1) 更新面板一步用 `update_panel(..., survivor=SurvivorPanelUpdate(max_catch_up_sessions=panel_catch_up_bound(config)))` 与 `targets_for_survivor`（含 `namechange`，一月多建上一年的 `namechange`），登记配置里的键是 `adapter.max_panel_catch_up_sessions`（缺省 10；**写入登记配置属于 `V2-P7-006`**）；(2) **已知局限（待决，A3 Q1）**：新年第一个会话如果当年还没有任何 `namechange` 公告，第 2 步被拒（provider 返回 `no_data`，面板层拒写空分区；同一次调用里排在 `namechange` 后面的 `index_daily` 也不会写入），`build_facts_day` 也读不到当年的名称史分区。2012 年第一条公告是 01-05、晚于第一个交易日 01-04，所以这不是理论问题。处理：先按已知局限写进幸存者形态的运行手册（与 P6 局限 6 并列，每年开头可能有一两天没有决定），并在 `V2-P7-008` 上线前另立面板层任务——允许空的 `namechange` 公告年（照 `V2-P6-018` 的 `write_empty_announcement_year`，要改 `panel/store.py` 的空分区白名单、`catalog` 的就绪规则、`panel_ingest`、`cli`，加一条新鲜度规则）；(3) 第 3 步的 doctor 会收到 `namechange`（`doctor_datasets()`），会话年的 `namechange` 能否通过 doctor/data-check 未验证，本任务要验证；(4) 用实测的覆盖率校准 `min_coverage`（覆盖率现按允许板块的行数算）；(5) 登记簿首日的 `load_suspensions`、登记簿读取也要求信号年有分区——一月初同类问题，运行手册一并写明；(6) 面板补建上限超过时第 2 步按名拒绝并给出补救命令，每日入口的摘要里要显示 `caught_up`。
+**在 A、C 合入后补全。**
 
 ## Part E — `V2-P7-018` 周报扩展（待补全）
 
@@ -210,3 +213,4 @@
 | 日期 | 改了什么 | 为什么 |
 |---|---|---|
 | 2026-10-14 | 立项：Part A、B 写到可派发；C、D、E 待补全 | 滚动计划：C、D、E 依赖 A、B 的实际接口 |
+| 2026-10-14 | A、B 合入前的更正与要求：B1 的接口段改为实现后的签名；Part C 加要求 (7)–(10)（快照写入须经读取、持仓名无事实行的两种情形、被排除的代码计数、预测登记的非法字节）；Part D 加 A 阶段要求 (1)–(6)（`update_panel(survivor=…)`、新年无更名公告的已知局限、doctor 核对、覆盖率校准） | A2 评审与修订、A3 的 Q1/Q2、B3 评审 |
