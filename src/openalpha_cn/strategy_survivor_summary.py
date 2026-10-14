@@ -137,6 +137,16 @@ _RATIO_PLACES: Final[Decimal] = Decimal("0.000001")
 _RATIO_STEP: Final[Decimal] = Decimal("0.0001")
 _LABEL_WIDTH: Final[int] = 18
 _ORDERS_HEADER: Final[str] = "ORDERS FOR THE OPEN OF D+1 (call auction 09:15)"
+_REFERENCE_NOTE: Final[str] = (
+    "  real closes are references, not limit prices; the paper book fills at the open"
+)
+_EVENING_STATES: Final[Mapping[str, str]] = {
+    "created": "evening created",
+    "unchanged": "evening unchanged (settled earlier; derived again, nothing written)",
+}
+"""What the ORDERS header says of the run: it committed the evening, or found it settled and
+derived it again, writing nothing -- so a printed plan can be told from the run that made it."""
+_SUSPENDED: Final[str] = "(suspended: the close may be an earlier session's)"
 
 
 # --- the liquidity rank -------------------------------------------------------------------------
@@ -348,7 +358,6 @@ def _paper_section(
 ) -> dict[str, Any]:
     settlement = evening.settlement
     rows = {item.ts_code: item for item in facts.facts}
-    closes = {code: item.close for code, item in rows.items()}
     verdicts = {verdict.ts_code: verdict for verdict in screen.verdicts}
     tries = {item.order.order_id: item.attempts for item in settlement.live}
     plan = evening.trade_list
@@ -363,9 +372,9 @@ def _paper_section(
         "outcome": evening.outcome,
         "open_session": {"index": opens, "date": _day(ordinals, opens)},
         "open_orders": [
-            *(_open_order(order, closes, verdicts, ordinals, tries=None) for order in plan.orders),
+            *(_open_order(order, rows, verdicts, ordinals, tries=None) for order in plan.orders),
             *(
-                _open_order(order, closes, verdicts, ordinals, tries=_tries_of(order, tries))
+                _open_order(order, rows, verdicts, ordinals, tries=_tries_of(order, tries))
                 for order in plan.carried
             ),
         ],
@@ -506,7 +515,7 @@ def _catch_up(item: CatchUpResult) -> dict[str, Any]:
 
 def _open_order(
     order: TradeOrder,
-    closes: Mapping[str, Decimal],
+    rows: Mapping[str, SecurityFacts],
     verdicts: Mapping[str, EligibilityVerdict],
     ordinals: SessionOrdinals,
     *,
@@ -518,13 +527,15 @@ def _open_order(
     if order.side == "sell":
         verdict = verdicts.get(order.ts_code)
         reasons = [_REASON_UNKNOWN] if verdict is None else list(verdict.reasons)
+    row = rows.get(order.ts_code)
     return {
         "order_id": order.order_id,
         "side": order.side,
         "ts_code": order.ts_code,
         "quantity": order.quantity,
         "reference_price": _text(order.reference_price),
-        "real_close": _text(closes[order.ts_code]) if order.ts_code in closes else None,
+        "real_close": None if row is None else _text(row.close),
+        "suspended": row is not None and row.suspended,
         "reason": order.reason,
         "reasons": reasons,
         "signal_session": order.signal_session,
@@ -749,7 +760,7 @@ def _position_lines(holdings: Sequence[Mapping[str, Any]]) -> list[str]:
         if item["ledger_ratio"] is not None:
             text += f"  ledger/real ratio {item['ledger_ratio']}"
         if item["halted"]:
-            text += " (suspended: the close may be an earlier session's)"
+            text += f" {_SUSPENDED}"
         status = []
         if "frozen" in item["flags"]:
             status.append("frozen")
@@ -771,17 +782,19 @@ def _live_through(item: Mapping[str, Any]) -> str:
 
 
 def _order_line(item: Mapping[str, Any]) -> str:
-    """One order planned tonight, as it is to be placed at the open."""
+    """One order planned tonight. The real close is a reference, said once under the header: the
+    paper book fills at the open, and a close is no limit price."""
     close = item["real_close"] if item["real_close"] is not None else "n/a"
     if item["side"] == "sell":
         why = f" ({', '.join(item['reasons'])})" if item["reasons"] else ""
+        suspended = f" {_SUSPENDED}" if item["suspended"] else ""
         return (
             f"  SELL ENTIRE POSITION {item['ts_code']} (ledger qty {item['quantity']}; real "
-            f"close {close}) {item['reason']}{why}"
+            f"close {close}){suspended} {item['reason']}{why}"
         )
     return (
-        f"  BUY {item['ts_code']} {item['quantity']} @ real close {close} {item['reason']}, "
-        f"live through {_live_through(item)}"
+        f"  BUY {item['ts_code']} {item['quantity']} reference: real close {close} "
+        f"{item['reason']}, live through {_live_through(item)}"
     )
 
 
@@ -798,7 +811,7 @@ def _carried_line(item: Mapping[str, Any]) -> str:
         f"  BUY {item['ts_code']} {item['quantity']} (planned on session "
         f"{item['signal_session']} at {item['reference_price']}; real close today {close}) "
         f"{item['reason']}, live through {_live_through(item)}, attempt {item['attempt']} of "
-        f"{item['attempts_allowed']}"
+        f"{item['attempts_allowed']} (one per session; a session with no bar counts)"
     )
 
 
@@ -815,10 +828,16 @@ def _orders_lines(paper: Mapping[str, Any] | None, skipped: Mapping[str, Any]) -
     opens = paper["open_session"]
     when = opens["date"] if opens["date"] is not None else f"session {opens['index']}"
     planned = [item for item in paper["open_orders"] if not item["carried"]]
+    carried = len(paper["open_orders"]) - len(planned)
+    nothing = "  no new order planned tonight" + (
+        f"; {_plural(carried, 'carried order')} below" if carried else ""
+    )
+    state = _EVENING_STATES[paper["outcome"]]
     return [
-        f"{_ORDERS_HEADER}, {when}",
+        f"{_ORDERS_HEADER}, {when} -- trade list {paper['trade_list']['trade_list_id']}, {state}",
+        _REFERENCE_NOTE,
         *(_order_line(item) for item in planned),
-        *(["  no new order planned tonight"] if not planned else []),
+        *([nothing] if not planned else []),
     ]
 
 
