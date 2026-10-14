@@ -3952,18 +3952,49 @@ def _survivor_prediction(
 ) -> dict[str, Any]:
     """Step 7: the day's eligible composites as the forward record `survivor_book_composite/v1`
     (`strategy_survivor_registration`), its input provenance filed first and written once, then
-    the record through P6's own `register_prediction` -- reused for a day already filed under
-    the same declaration, refused for a different answer.
+    the record through P6's own `register_prediction`; refused for a different answer than the
+    one filed under the same declaration (`session_record`).
 
-    Refused first, before anything is computed or written, once this run's clock has reached
-    `cutoff` -- the next session's call auction -- on a day whose pinned clock had not (a rerun
-    the next morning of an evening day that stopped before step 7): the record would no longer
-    precede its outcome. `register_prediction` refuses it too, but after the provenance, each
-    rerun leaving a stray one behind. The journal keeps the filed record's own batch digest, the
-    key Part E finds its provenance by."""
+    **A record held for the session is reused before anything is written** -- a run that filed
+    it and stopped before its journal said so, or a journal moved aside: its own provenance, the
+    one written before it under its batch's digest, is what the journal names, and nothing is
+    written, whatever the clock. A second provenance would be filed otherwise, on a clock that has
+    moved since (its `recorded_at`), naming a batch that was never filed (D5 joint review, Minor
+    2); a record whose provenance cannot be found is refused by name.
+
+    **With no record held**, refused before anything is written once this run's clock has
+    reached `cutoff` -- the next session's call auction -- on a day whose pinned clock had not (a
+    rerun the next morning of an evening day that stopped before step 7): the record would no
+    longer precede its outcome. `register_prediction` refuses it too, but after the provenance,
+    each rerun leaving a stray one behind. The journal keeps the filed record's own batch digest,
+    the key Part E finds its provenance by."""
     from openalpha_cn import strategy_survivor_registration as forward
 
+    declared = registration.declared
+    exchange = survivor.adapter.exchange
     now = clock()
+    try:
+        batch = forward.survivor_batch(
+            facts=facts,
+            screen=screened,
+            book=survivor.book,
+            registered=declared,
+            predicted_at=now,
+        )
+    except forward.SurvivorRegistrationError as error:
+        raise StepFailedError("prediction", str(error), steps=SURVIVOR_STEPS) from error
+    try:
+        held = session_record(
+            build_storage(runtime_dir=runtime_dir, clock=clock).prediction_store, batch
+        )
+    except StrategyRegistrationError as error:
+        raise StepFailedError("prediction", str(error), steps=SURVIVOR_STEPS) from error
+    if held is not None:
+        return _prediction_block(
+            held,
+            "unchanged",
+            provenance=_held_provenance(runtime_dir, registration, held, session=session),
+        )
     if now >= cutoff:
         raise StepFailedError(
             "prediction",
@@ -3974,16 +4005,7 @@ def _survivor_prediction(
             "there is nothing to do",
             steps=SURVIVOR_STEPS,
         )
-    declared = registration.declared
-    exchange = survivor.adapter.exchange
     try:
-        batch = forward.survivor_batch(
-            facts=facts,
-            screen=screened,
-            book=survivor.book,
-            registered=declared,
-            predicted_at=clock(),
-        )
         provenance = forward.survivor_input_provenance(
             store,
             facts=facts,
@@ -4002,6 +4024,12 @@ def _survivor_prediction(
         calendar=_outcome_calendar(store, exchange, session, as_of),
         clock=clock,
     )
+    return _prediction_block(record, outcome, provenance=provenance.digest)
+
+
+def _prediction_block(record: PredictionRecord, outcome: str, *, provenance: str) -> dict[str, Any]:
+    """The journal's `prediction` stage for `record`: what it is, how this run came by it
+    (`created`, or `unchanged` for a record held already), and its provenance's digest."""
     declaration = record.batch.artifact.declaration
     return {
         "registered": True,
@@ -4016,8 +4044,47 @@ def _survivor_prediction(
         "scored": len(record.batch.scored),
         "abstained": len(record.batch.abstained),
         "batch_digest": batch_digest(record.batch),
-        "provenance": provenance.digest,
+        "provenance": provenance,
     }
+
+
+def _held_provenance(
+    runtime_dir: Path, registration: Registration, record: PredictionRecord, *, session: date
+) -> str:
+    """The digest of the provenance filed for `record` -- the one of this registration naming its
+    session and its batch's digest (`batch_digest`, `predicted_at` included), as Part E's index
+    finds it -- or a refusal by name: none (removed, or no longer readable), or two (neither can
+    be told to be the one its run wrote). Files of another registration, and files that cannot be
+    read as one of this registration's, name no record of it and are passed over."""
+    from openalpha_cn import strategy_survivor_registration as forward
+
+    digest = batch_digest(record.batch)
+    directory = runtime_dir / forward.SURVIVOR_PROVENANCE_DIRECTORY
+    found = []
+    for path in sorted(directory.glob("*.json")) if directory.is_dir() else ():
+        try:
+            provenance = forward.read_survivor_provenance(
+                path, registration_sha256=registration.sha256
+            )
+        except forward.SurvivorRegistrationError:
+            continue
+        if (provenance.session, provenance.batch_digest) == (session, digest):
+            found.append(provenance.digest)
+    if len(found) == 1:
+        return found[0]
+    held = f"{record.record_id} is filed for {session.isoformat()}, and " + (
+        f"no provenance of this registration in {directory} names its batch {digest}"
+        if not found
+        else f"{len(found)} provenance files name its batch {digest}: {found}"
+    )
+    raise StepFailedError(
+        "prediction",
+        f"{held}. A provenance is written once, before its record, and never after it, so none is "
+        "written now: restore the provenance directory from the backup the prediction store was "
+        "taken with. The record stands; the late-record check refuses a record whose provenance "
+        "it cannot tell",
+        steps=SURVIVOR_STEPS,
+    )
 
 
 def _opening_result(
@@ -4183,9 +4250,12 @@ def _run_paper_book(
     on_settled: Callable[[CatchUpResult], None],
     on_settled_again: Callable[[CatchUpResult], None],
 ) -> SurvivorPaperRun:
-    """Step 8 itself, at the journal-pinned `as_of` -- and once more, at the newest instant the
-    panel can be read at, when the market cannot be read at it any more (`_readable_after`: a
-    held evening run again after the next session's panel update, D3 review rule 5).
+    """Step 8 itself, at the journal-pinned `as_of` -- and, for a committed day only, once more,
+    at the newest instant the panel can be read at, when the market cannot be read at it any more
+    (`_readable_after`: a held evening run again after the next session's panel update, D3 review
+    rule 5). A day not committed whose market cannot be read at its pinned clock is refused with
+    that fault: an evening is never decided on a later read than its record's (D5 joint review,
+    Minor 1).
 
     The day's mode is the journal-pinned clock's (`SurvivorDay.settle_only`), never this run's: an
     evening is always `evening`, also for a session whose snapshot is held already (its
@@ -4268,7 +4338,7 @@ def _run_paper_book(
     try:
         return SurvivorPaperRun(evening=run_at(day.as_of), read_at=day.as_of)
     except (paper_book.SurvivorDayError, PanelStorageError) as error:
-        later = _readable_after(day.store, error, at=day.as_of)
+        later = _readable_after(day.store, error, at=day.as_of) if day.committed else None
         if later is None:
             raise
     return SurvivorPaperRun(evening=run_at(later), read_at=later)
@@ -4482,10 +4552,12 @@ def _run_survivor_day(
     6. **Facts** with the pinned `held` -- at the pinned `as_of`, or on a committed day at the
        newest readable instant -- and the screen; nothing eligible is refused by name.
     7. **Prediction**, before the paper step so that a fault of the paper book never costs the
-       record; journalled, and reused on a rerun. A day whose pinned `as_of` is at or after 09:15
-       of the next session registers nothing and is no error: it settles only (decision 2), and
-       reaches step 8 with no record filed. One pinned before it, run when the clock is past it,
-       is refused here before anything is written.
+       record; journalled, and reused on a rerun -- a record held for the session is reused
+       before anything is written, its own provenance named, whatever the clock. A day whose
+       pinned `as_of` is at or after 09:15 of the next session registers nothing and is no error:
+       it settles only (decision 2), and reaches step 8 with no record filed. One pinned before
+       it, holding no record and run when the clock is past it, is refused here before anything
+       is written.
     8.-9. **The paper book and the summary** (`_survivor_paper_and_summary`): the missed sessions
        caught up and journalled one by one, the evening (or the settlement alone) -- an evening not
        committed is refused once this run's clock has reached the next session's call auction --

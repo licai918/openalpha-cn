@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import itertools
 import json
 import shutil
 import sys
@@ -66,6 +67,7 @@ from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET
 from openalpha_cn.domain.survivor_book import SurvivorBookConfig
 from openalpha_cn.domain.survivor_screen import screen
 from openalpha_cn.domain.trading_calendar import TRADING_CALENDAR_DATASET
+from openalpha_cn.panel.catalog import PartitionNotYetKnowableError
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import FACTOR_TRANSFORMS
 from openalpha_cn.panel_ingest import load_trading_calendar, session_publication_instant
@@ -248,18 +250,23 @@ def _run(
     capsys: pytest.CaptureFixture[str],
     *,
     as_of: datetime = DAY_AS_OF,
-    clock: datetime = RUN_CLOCK,
+    clock: datetime | Callable[[], datetime] = RUN_CLOCK,
     extra: Sequence[str] = (),
     json_output: bool = True,
 ) -> tuple[int, str, list[str]]:
     """The day through `main`, as the scheduler runs it: no `--dataset`, so the day fetches its
-    own targets. Returns the exit code, stdout and stderr's lines."""
+    own targets. Returns the exit code, stdout and stderr's lines. `clock` is a fixed instant,
+    or a clock of its own (`_ticking`)."""
     world.market.today = as_of.astimezone(daily.SHANGHAI).date()
     arguments = ["--runtime-dir", str(world.runtime), "--registration", str(world.registration)]
     arguments += ["--repo", str(world.repo), "--as-of", as_of.isoformat(), *extra]
     if json_output:
         arguments.append("--json")
-    code = daily.main(arguments, clock=lambda: clock)
+
+    def read() -> datetime:
+        return clock() if callable(clock) else clock
+
+    code = daily.main(arguments, clock=read)
     out, err = capsys.readouterr()
     assert tds.SECRET_TOKEN not in out + err
     return code, out, err.splitlines()
@@ -1489,20 +1496,23 @@ def test_a_book_a_later_sessions_run_has_settled_is_refused_for_an_earlier_day(
     assert err[1] == NO_REQUEST
 
 
-def test_the_facts_and_the_provenance_are_the_pinned_holdings_not_the_books_newer_ones(
+def test_the_facts_are_the_pinned_holdings_and_a_reused_record_keeps_its_own_provenance(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     seeded: Path,
 ) -> None:
     """The facts are read with the holdings the journal pinned, even when the book has moved on
-    since within the session (here its evening was committed): the provenance records exactly
-    those, and the record -- whose scores do not depend on them -- is the one already filed."""
+    since within the session (here its evening was committed). The record -- whose scores do not
+    depend on them -- is the one already filed, and the provenance the journal names is the one
+    written before it, with the holdings its run read: no second provenance is filed for one
+    record (D5 joint review, Minor 2 -- Part E's index refuses two naming one filing)."""
     world = _world(tmp_path, monkeypatch, seeded)
     with pytest.MonkeyPatch.context() as patch:
         _cut_at_the_result(patch)
         _run(world, capsys)
     (record,) = _records(world)
+    (written,) = (world.runtime / "daily_survivor_provenance").glob("*.json")
     opening = _snapshot(world, EPOCH)
     pinned = [SECURITIES[0]]
     _edited_journal(
@@ -1515,17 +1525,20 @@ def test_the_facts_and_the_provenance_are_the_pinned_holdings_not_the_books_newe
         },
     )
 
-    code, _out, err = _run(world, capsys)
+    code, out, err = _run(world, capsys)
 
     assert code == 0, err
+    assert json.loads(out)["facts"]["held"] == pinned
     prediction = _journal(world)["prediction"]
     assert prediction["outcome"] == "unchanged"
     assert prediction["record_id"] == record
-    filed = world.runtime / "daily_survivor_provenance" / f"{prediction['provenance']}.json"
+    assert list((world.runtime / "daily_survivor_provenance").glob("*.json")) == [written]
+    assert prediction["provenance"] == written.stem
     provenance = strategy_survivor_registration.read_survivor_provenance(
-        filed, registration_sha256=_journal(world)["registration"]["sha256"]
+        written, registration_sha256=_journal(world)["registration"]["sha256"]
     )
-    assert provenance.held == tuple(pinned)
+    assert provenance.held == ()
+    assert provenance.batch_digest == prediction["batch_digest"]
 
 
 def test_the_panel_steps_bound_is_the_one_the_registration_names(
@@ -2349,3 +2362,211 @@ def test_a_catch_up_committed_and_not_journalled_is_derived_again_and_documented
         "an earlier run of the day, which stopped before journalling them; derived again now, "
         "nothing written)"
     )
+
+
+# --- a rerun's clock and the step 7/8 crash windows (the D5 joint review, Minor 1 and 2) ------
+
+
+def _ticking(start: datetime) -> Callable[[], datetime]:
+    """A clock that has moved one second on each time it is read, from `start`: a rerun's clock
+    is never the first run's, and every read of it differs from the last."""
+    ticks = itertools.count()
+    return lambda: start + timedelta(seconds=next(ticks))
+
+
+def _cut_at_the_prediction(patch: pytest.MonkeyPatch) -> None:
+    """The power cut as the journal's `prediction` stage is written: step 7 has filed the record
+    (and its provenance before it), and the journal never says so."""
+    written = daily.write_journal
+
+    def cut(path: Path, body: Mapping[str, Any]) -> None:
+        if "prediction" in body:
+            raise OSError("the power was cut as the prediction was journalled")
+        written(path, body)
+
+    patch.setattr(daily, "write_journal", cut)
+
+
+CUT_AT_THE_PREDICTION: Final[str] = (
+    "step 7 (prediction) failed: an unexpected fault: OSError: the power was cut as the "
+    "prediction was journalled"
+)
+
+
+def _provenance(world: tds.World) -> list[Path]:
+    return sorted((world.runtime / "daily_survivor_provenance").glob("*.json"))
+
+
+def test_a_record_filed_and_not_journalled_is_reused_with_its_own_provenance_on_a_moving_clock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """Minor 2: step 7 files the provenance, then the record, and the power is cut before the
+    journal's `prediction` stage. A rerun on a clock of its own -- every read later than the
+    first run's -- finds the record held for the session and reuses it: no second provenance is
+    written (a moving `recorded_at` would give it another digest), and the journal names the held
+    record's own provenance, whose batch digest is the record's."""
+    world = _world(tmp_path, monkeypatch, seeded)
+    with pytest.MonkeyPatch.context() as patch:
+        _cut_at_the_prediction(patch)
+        code, _out, err = _run(world, capsys, clock=_ticking(RUN_CLOCK))
+    assert (code, err[0]) == (1, CUT_AT_THE_PREDICTION)
+    (record,) = _records(world)
+    (written,) = _provenance(world)
+
+    code, _out, err = _run(world, capsys, clock=_ticking(RUN_CLOCK + timedelta(minutes=10)))
+
+    assert code == 0, err
+    assert _records(world) == (record,)
+    assert _provenance(world) == [written]
+    prediction = _journal(world)["prediction"]
+    assert (prediction["record_id"], prediction["outcome"]) == (record, "unchanged")
+    assert prediction["provenance"] == written.stem
+    held = FilePredictionStore(world.runtime / "predictions", clock=lambda: RUN_CLOCK).get(record)
+    assert held is not None
+    provenance = strategy_survivor_registration.read_survivor_provenance(
+        written, registration_sha256=_journal(world)["registration"]["sha256"]
+    )
+    assert provenance.batch_digest == prediction["batch_digest"] == batch_digest(held.batch)
+
+
+def test_a_record_filed_and_not_journalled_run_again_after_the_call_auction_is_journalled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """Minor 2, after the cutoff: the same crash window, run again on 7 April at 10:00. Step 7 no
+    longer says "Nothing was filed" of a record that is filed: it journals the held record with
+    its own provenance, writing nothing else, and step 8 refuses the evening by name -- the call
+    auction it was for has passed (Important 1)."""
+    world = _world(tmp_path, monkeypatch, seeded)
+    with pytest.MonkeyPatch.context() as patch:
+        _cut_at_the_prediction(patch)
+        code, _out, err = _run(world, capsys, clock=_ticking(RUN_CLOCK))
+    assert (code, err[0]) == (1, CUT_AT_THE_PREDICTION)
+    (record,) = _records(world)
+    (written,) = _provenance(world)
+
+    code, _out, err = _run(world, capsys, clock=_ticking(after_the_auction(DAY)))
+
+    assert code == 1
+    assert err[0].startswith("step 8 (paper book) failed: ")
+    assert "the call auction of the next session has passed" in err[0]
+    assert err[1:] == [NO_REQUEST]
+    journal = _journal(world)
+    assert (journal["prediction"]["record_id"], journal["prediction"]["provenance"]) == (
+        record,
+        written.stem,
+    )
+    assert "result" not in journal
+    assert _records(world) == (record,)
+    assert _provenance(world) == [written]
+    assert DAY not in _snapshots(world).sessions()
+
+
+def test_a_held_record_whose_provenance_is_gone_is_refused_and_none_is_written_after_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """A provenance is written once, before its record, and never after it: a rerun that finds the
+    record held and its provenance removed refuses by name at step 7, writing none."""
+    world = _world(tmp_path, monkeypatch, seeded)
+    with pytest.MonkeyPatch.context() as patch:
+        _cut_at_the_prediction(patch)
+        _run(world, capsys)
+    (record,) = _records(world)
+    (written,) = _provenance(world)
+    written.unlink()
+
+    code, _out, err = _run(world, capsys)
+
+    assert code == 1
+    assert err[0].startswith(f"step 7 (prediction) failed: {record} is filed for 2026-04-06, and ")
+    assert "no provenance of this registration" in err[0]
+    assert "never after it, so none is written now" in err[0]
+    assert err[1:] == [NO_REQUEST]
+    assert _provenance(world) == []
+    assert "prediction" not in _journal(world)
+
+
+def test_a_settle_only_day_cut_at_its_result_is_finished_by_a_rerun_that_writes_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """The review's untested path: a day pinned after the next call auction settles 6 April
+    alone, commits it, and the power is cut as its `result` is written. Run again through `main`,
+    on a clock of its own, the journal's pinned clock makes it settle-only again: `settle_only`
+    derives its own held session again (C3: `unchanged`), nothing is written to the paper book,
+    the session's catch-up is listed once -- as its commit filed it -- and the `result` is filed."""
+    late = after_the_auction(DAY)
+    world = _world(tmp_path, monkeypatch, seeded)
+    with pytest.MonkeyPatch.context() as patch:
+        _cut_at_the_result(patch)
+        code, _out, err = _run(world, capsys, as_of=late, clock=late)
+    assert code == 1
+    assert err[0] == (
+        "step 9 (summary) failed: an unexpected fault: OSError: the power was cut as the "
+        "journal's result was written"
+    )
+    journal = _journal(world)
+    assert "result" not in journal and "paper" not in journal
+    (filed,) = journal["catch_ups"]
+    assert (filed["session"], filed["outcome"]) == (DAY.isoformat(), "created")
+    assert filed["snapshot_id"] == _snapshot(world, DAY).snapshot_id
+    paper = _files(world.runtime / "paper")
+
+    code, out, err = _run(world, capsys, as_of=late, clock=_ticking(late + timedelta(hours=1)))
+
+    assert code == 0, err
+    result = json.loads(out)
+    assert result["paper"] is None
+    assert "settles only" in result["paper_skipped"]["reason"]
+    assert result["paper_skipped"]["catch_ups"] == [filed]
+    assert _files(world.runtime / "paper") == paper
+    assert _records(world) == ()
+    stage = _journal(world)["paper"]
+    assert (stage["mode"], stage["snapshot_id"]) == ("settle_only", filed["snapshot_id"])
+    assert _journal(world)["result"] == {key: result[key] for key in result if key != "this_run"}
+    assert result["this_run"]["request_count"] == 0
+
+
+def test_an_evening_not_committed_is_never_decided_on_a_later_read_of_the_market(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """Minor 1: the read at the newest readable instant is a committed day's completion only (D3
+    review, rule 5). An evening not committed whose market cannot be read at its pinned clock
+    -- a whole partition holding a row knowable after it -- is refused at step 8 with that fault,
+    and is not decided on a later read, even where the panel could be read later."""
+    world = _world(tmp_path, monkeypatch, seeded)
+    monkeypatch.setattr(daily, "_readable_after", lambda _store, _error, *, at: at + timedelta(1))
+    run_evening = strategy_survivor_book.evening
+    read_at: list[datetime] = []
+
+    def unreadable_at_the_pin(**keywords: Any) -> Any:
+        read_at.append(keywords["as_of"])
+        if keywords["as_of"] == DAY_AS_OF:
+            raise PartitionNotYetKnowableError("index_daily 2026 holds a row knowable later")
+        return run_evening(**keywords)
+
+    monkeypatch.setattr(strategy_survivor_book, "evening", unreadable_at_the_pin)
+
+    code, _out, err = _run(world, capsys)
+
+    assert code == 1
+    assert read_at == [DAY_AS_OF]
+    assert err[0] == (
+        "step 8 (paper book) failed: an unexpected fault: PartitionNotYetKnowableError: "
+        "index_daily 2026 holds a row knowable later"
+    )
+    assert DAY not in _snapshots(world).sessions()
+    assert "result" not in _journal(world)
