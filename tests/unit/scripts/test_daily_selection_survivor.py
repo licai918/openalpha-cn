@@ -1067,3 +1067,58 @@ def test_a_year_whose_first_build_died_at_stk_limit_is_counted_from_its_first_se
 
     assert panel["caught_up"] == ["2027-01-05"]
     assert _horizon(store, PRICE_LIMIT_DATASET, 2027) == sixth
+
+
+# --- what a refusal says the run would have fetched ---------------------------------------------
+
+
+SESSION_SCOPED_APIS: Final[tuple[str, ...]] = (
+    ADJ_FACTOR_DATASET,
+    SUSPENSION_DATASET,
+    DAILY_DATASET,
+    DAILY_BASIC_DATASET,
+    PRICE_LIMIT_DATASET,
+)
+"""The five APIs the session-scoped targets ask once a session each (unpaged)."""
+
+
+@pytest.mark.parametrize(
+    ("year_holds", "fetched"),
+    [
+        pytest.param("2 February", 13, id="the stored last session fetched again"),
+        pytest.param("nothing", 4, id="the year holds nothing yet"),
+    ],
+)
+def test_a_refusal_states_the_sessions_the_run_would_have_fetched_and_the_run_fetches_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, year_holds: str, fetched: int
+) -> None:
+    """The refusal names what the run would have fetched, counted as the run counts it: the
+    missed sessions and the day, and the stored last session again when the year holds one. A
+    year that holds nothing yet has no stored session to fetch again -- its build fetches the
+    year from its first session -- so 2027's first run on 7 January fetches 4 sessions, 2 more
+    than an ordinary day, not 3. Then the same run under a bound that admits it fetches exactly
+    that many sessions of every session-scoped API."""
+    targets = daily.targets_for_survivor(SURVIVOR_BUILDS)
+    if year_holds == "nothing":
+        store = _december(tmp_path, monkeypatch, LAST_2026, targets=targets, survivor=_survivor())
+        day, missed = date(2027, 1, 7), 3
+    else:
+        store = _seeded(tmp_path, monkeypatch, Market(open_days=OPEN_2026), as_of=SEEDED, year=2026)
+        day, missed = AFTER_ELEVEN, 11
+
+    with pytest.raises(daily.StepFailedError) as refused:
+        _update(store, day, targets=targets, survivor=_bounded(missed - 1))
+
+    message = str(refused.value)
+    assert f"{missed} missed session(s)" in message
+    assert (
+        f"this run would have fetched {fetched} session(s) of the session-scoped targets furthest "
+        f"behind" in message
+    )
+    assert f"{fetched - 2} more than an ordinary day's two" in message
+
+    _panel, counts = _update(store, day, targets=targets, survivor=_bounded(missed))
+
+    assert {api: counts[api] for api in SESSION_SCOPED_APIS} == dict.fromkeys(
+        SESSION_SCOPED_APIS, fetched
+    )

@@ -304,11 +304,32 @@ rather than spent inside one scheduled run."""
 DEFAULT_MAX_PANEL_CATCH_UP_SESSIONS: Final[int] = 10
 """The most sessions the survivor form's step 2 fetches in one run beyond an ordinary day's two
 (the stored last session again, and the day), unless the registration's `adapter` block names
-another (`panel_catch_up_bound`, `V2-P7-016`). Each such session costs one request per
-session-scoped API -- five, seven once `stk_limit` pages -- so ten keeps the day at 16 + 50 = 66
-requests at most (90 paged), under the design's 100 (T6-T7 2.4). Three different bounds, kept
-apart: `MAX_CATCH_UP_SESSIONS` is the factor tiers' catch-up (step 4), and `survivor_facts`'
-`max_carry_sessions` is how far back a halted security's last bar is looked for."""
+another (`panel_catch_up_bound`, `V2-P7-016`).
+
+A bound on **sessions**, not on requests. Each session it admits costs one request per
+session-scoped API -- five, seven once `stk_limit` pages -- so ten admit 50 requests (70 paged)
+beside the ordinary day's 16 (20 paged): the 66 (90) the design's 100 was sized against (T6-T7
+2.4). That sum is not the day's ceiling. It leaves out, each data-dependent and stated on its
+own `BUDGET` or `REFETCH` line where `panel build` spends it:
+
+- the year before's name corpus built again on a year's first run (+1,
+  `names_built_before_year_end`), and next year's calendar once the outcome window reaches into
+  it (+1);
+- the withdrawal re-checks: up to `cli.WITHDRAWAL_RECHECK_LIMIT` (20) `(dataset, session)`
+  pairs, one request each, three when `stk_limit` pages;
+- a slice that starts before the stored horizon for an older unconfirmed defect
+  (`cli._incremental_start`): those sessions are fetched again and not counted here;
+- the return-path reproductions, four requests per disputed pair and uncapped
+  (`cli._judge_return_paths`), the year-boundary pairs included -- a year before that stops
+  short of its last session is refused for that reason (`previous_year_sessions_missing`);
+- the statement sweeps and industry targets of a configuration that reads them.
+
+So the worst case passes 100: the bound holds the part that grows with missed sessions, and
+nothing else. When the session's year holds nothing yet, the count is one more than the sessions
+fetched beyond two (`panel_sessions_to_catch_up`), so there the bound errs by one on the safe
+side. Three different bounds, kept apart: `MAX_CATCH_UP_SESSIONS` is the factor tiers' catch-up
+(step 4), and `survivor_facts`' `max_carry_sessions` is how far back a halted security's last
+bar is looked for."""
 PANEL_CATCH_UP_KEY: Final[str] = "max_panel_catch_up_sessions"
 ADAPTER_BLOCK: Final[str] = "adapter"
 """The survivor registration's block of adapter parameters; `V2-P7-006` writes it."""
@@ -2018,9 +2039,12 @@ def panel_sessions_to_catch_up(
     the session, and the whole year up to it when that year holds no partition yet
     (`cli._incremental_start`). So the sessions beyond the overlap and the day are the open ones
     of the session's year after the earliest of those horizons and before the session, counted
-    on the stored calendar of that year. Only that year: the step builds no other year's sessions,
-    and a year before that stops short of its last session is refused on its own
-    (`previous_year_sessions_missing`).
+    on the stored calendar of that year. When one of them holds nothing of the year yet, every
+    session of the year before the session is counted: that target fetches them and the day,
+    with no stored session to fetch again, so the count is then one more than the sessions it
+    fetches beyond two (the refusal states what is fetched). Only that year: the step builds no
+    other year's sessions, and a year before that stops short of its last session is refused on
+    its own (`previous_year_sessions_missing`).
     """
     census = _session_scoped_census(targets)
     if not census:
@@ -2185,11 +2209,20 @@ def _panel_catch_up_refusal(
     partitions disagree, as a run that died at `stk_limit` leaves them, and one of them reaches
     further than the batch. `cli._incremental_start` refuses an incremental build that would
     shorten a stored year, so the full rebuild of those targets is printed then: it fetches every
-    session of the year through the batch, and is said to."""
+    session of the year through the batch, and is said to.
+
+    What the run would have fetched is counted as the run counts it: the targets furthest behind
+    fetch the missed sessions and the day, and the stored last session again when the year holds
+    one -- a year that holds nothing yet is fetched from its first session, and has no such
+    session to fetch again. Sessions, not requests: a target nearer the day fetches fewer, and
+    `stk_limit` pages."""
     scoped = _session_scoped_targets(targets)
     per_session = sum(len(cli.PANEL_BUILD_TARGETS[target]) for target in scoped)
     batch = list(missed[: max(bound, 1)])
     store = panel_store(runtime_dir)
+    overlap = _earliest_stored_horizon(store, _session_scoped_census(targets), session.year)
+    fetched = len(missed) + (1 if overlap is None else 2)
+    again = "" if overlap is None else f", {overlap.isoformat()} again"
     ahead = {
         dataset: horizon
         for dataset in _session_scoped_census(targets)
@@ -2229,8 +2262,10 @@ def _panel_catch_up_refusal(
             f"{len(missed)} missed session(s), {missed[0].isoformat()} to "
             f"{missed[-1].isoformat()}, lie between the stored panel and {session.isoformat()}: "
             f"more than the {bound} this step fetches in one run ({PANEL_CATCH_UP_KEY}); nothing "
-            f"was fetched. Each costs {per_session} requests (more once stk_limit pages), so this "
-            f"run would have spent {per_session * len(missed)} more than an ordinary day. {fetch}",
+            f"was fetched, where this run would have fetched {fetched} session(s) of the "
+            "session-scoped targets furthest behind -- the missed ones"
+            f"{again} and the day -- {fetched - 2} more than an ordinary day's two, at up to "
+            f"{per_session} requests a session (more once stk_limit pages). {fetch}",
             "  " + shlex.join(arguments),
             "then rerun this command: it refuses again, naming the next batch, while more than "
             f"{bound} remain, and fetches the rest itself",
