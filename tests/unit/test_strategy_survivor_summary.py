@@ -67,6 +67,7 @@ from test_survivor_facts_panel import (
 
 from openalpha_cn import strategy_survivor_summary
 from openalpha_cn.backtest.paper_evening import CatchUpResult, EveningResult
+from openalpha_cn.backtest.paper_state import PendingOrder
 from openalpha_cn.backtest.paper_step import NO_BAR_REASON
 from openalpha_cn.domain.survivor_book import (
     EligibilityVerdict,
@@ -125,6 +126,7 @@ BOOK: Final[SurvivorBookConfig] = evenings.CONFIG
 LIMIT_UP_REFUSAL: Final[str] = "buy cannot fill on a one-price limit-up bar"
 BAND_WITNESS_ENDED: Final[str] = "band = 0: no band witness since 2025-07-07"
 CAVEAT: Final[str] = "today's draw, not a promise for tomorrow"
+SUSPENDED_CLOSE: Final[str] = "(suspended: the close may be an earlier session's)"
 WORDING: Final[str] = (
     "candidates of a registered research configuration; no order was placed; ledger equity is "
     "not evidence; with N=10, single-year results are mostly luck"
@@ -343,6 +345,19 @@ def s3_cancelled(tmp_path_factory: pytest.TempPathFactory) -> WrittenOff:
     result = evenings.tonight(book, screen=cut)
     closes = {code: close for code, close in S3_CLOSES.items() if code != E}
     return WrittenOff(result, s3_facts(closes), cut, S3, 3, AS_OF_S3, sell_a, buy_c, buy_e)
+
+
+@pytest.fixture(scope="module")
+def s3_twice(tmp_path_factory: pytest.TempPathFactory) -> tuple[Day, Day]:
+    """S3's evening run, and run again on the same inputs after it was committed: the second
+    writes nothing and gives the evening back, derived again, as `unchanged`."""
+    book = evenings.through_s2(tmp_path_factory.mktemp("s3twice"))
+    first = evenings.tonight(book)
+    again = evenings.tonight(book)
+    return (
+        Day(first, s3_facts(), evenings.SCREEN_S3, S3, 3, AS_OF_S3),
+        Day(again, s3_facts(), evenings.SCREEN_S3, S3, 3, AS_OF_S3),
+    )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -712,6 +727,20 @@ def test_the_unfunded_names_are_the_trade_lists_own(s3: WrittenOff) -> None:
     assert plan.trade_list_id != s3.result.trade_list.trade_list_id
 
 
+def test_a_rerun_of_a_settled_evening_is_the_same_document_marked_unchanged(
+    s3_twice: tuple[Day, Day],
+) -> None:
+    first, again = s3_twice
+    assert (first.result.outcome, again.result.outcome) == ("created", "unchanged")
+
+    created, unchanged = document_of(first), document_of(again)
+
+    assert created["paper"]["outcome"] == "created"
+    assert unchanged["paper"]["outcome"] == "unchanged"
+    # Nothing else of the document moves: the evening derived again is the evening committed.
+    assert {**unchanged, "paper": {**unchanged["paper"], "outcome": "created"}} == created
+
+
 def test_the_settled_section_names_what_filled_expired_cancelled_and_every_attempt(
     s3: WrittenOff,
 ) -> None:
@@ -983,6 +1012,29 @@ def test_a_carried_order_says_which_attempt_tomorrows_open_will_be(s3: WrittenOf
     assert [o["attempts_allowed"] for o in orders[:2]] == [3, 3]
 
 
+def test_a_sale_carried_from_an_earlier_session_is_still_the_whole_position(
+    s3: WrittenOff,
+) -> None:
+    """A sale refused at its limit-down open stays live: carried, not re-planned, never expiring."""
+    result = s3.result
+    live = (*result.settlement.live, PendingOrder(order=s3.sell_a, attempts=1))
+    kept = dataclasses.replace(result.settlement, live=live)
+    plan = result.trade_list.model_copy(update={"carried": (*result.trade_list.carried, s3.sell_a)})
+    carried = dataclasses.replace(result, settlement=kept, trade_list=plan)
+
+    document = document_of(s3, evening=carried)
+    lines = summary_lines(document)
+
+    sale = next(o for o in document["paper"]["open_orders"] if o["side"] == "sell")
+    assert (sale["carried"], sale["attempt"], sale["attempts_allowed"]) == (True, 2, None)
+    assert (sale["expires_session"], sale["expires_on"]) == (None, None)
+    assert "2 live orders from earlier sessions" in line_with(lines, "carried orders")
+    assert (
+        f"  SELL ENTIRE POSITION {A} (ledger qty 900; real close 10.10) EXIT_SURVIVOR_LOST, "
+        "planned on session 2, attempt 2, a sale never expires"
+    ) in lines
+
+
 # --- the illiquid rank --------------------------------------------------------------------------
 
 
@@ -1226,7 +1278,7 @@ def test_processes_with_different_hash_seeds_build_the_same_document_and_lines(
         for part in (
             str(ROOT / "src"),
             str(ROOT / "tests"),
-            str(here.parent),
+            os.fspath(here.parent),
             os.environ.get("PYTHONPATH"),
         )
         if part
@@ -1397,7 +1449,7 @@ def test_a_holding_says_whether_it_is_frozen_near_exit_or_carried(s3: WrittenOff
 def test_a_carried_holding_says_since_when_only_if_the_caller_supplied_it(s3_halted: Day) -> None:
     unsaid = summary_lines(document_of(s3_halted))
     said = summary_lines(document_of(s3_halted, carried_since={B: date(2021, 2, 25)}))
-    halted = f"  {B}  ledger qty 800  real close 11.50 (halted: its last close)"
+    halted = f"  {B}  ledger qty 800  real close 11.50 {SUSPENDED_CLOSE}"
 
     assert f"{halted}  no bar tonight" in unsaid
     assert "carried since" not in "\n".join(unsaid)

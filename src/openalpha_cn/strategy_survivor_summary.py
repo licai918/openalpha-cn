@@ -725,7 +725,7 @@ def _position_lines(holdings: Sequence[Mapping[str, Any]]) -> list[str]:
         close = item["real_close"] if item["real_close"] is not None else "n/a"
         text = f"  {item['ts_code']}  ledger qty {item['ledger_quantity']}  real close {close}"
         if item["halted"]:
-            text += " (halted: its last close)"
+            text += " (suspended: the close may be an earlier session's)"
         status = []
         if "frozen" in item["flags"]:
             status.append("frozen")
