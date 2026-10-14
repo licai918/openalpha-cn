@@ -103,7 +103,7 @@ PROTOCOL: Final[dict[str, Any]] = {
     "primary_horizon": 20,
     "secondary_horizons": [5],
     "primary_metric": "rank_ic",
-    "secondary_metrics": ["survivors_minus_ew", "worst_decile_excess"],
+    "secondary_metrics": ["survivors_minus_ew", "ew_minus_worst_decile"],
     "window_periods": 2,
     "bootstrap_samples": 1000,
     "random_seed": 11,
@@ -848,7 +848,7 @@ def test_matured_records_put_the_labels_the_sample_its_gaps_and_the_test_on_the_
     assert [(test["metric"], test["role"]) for test in sample["test"]] == [
         ("rank_ic", "primary"),
         ("survivors_minus_ew", "secondary"),
-        ("worst_decile_excess", "secondary"),
+        ("ew_minus_worst_decile", "secondary"),
     ]
     for metric, test in tests.items():
         values = [period[metric] for period in sample["values"]]
@@ -867,11 +867,11 @@ def test_matured_records_put_the_labels_the_sample_its_gaps_and_the_test_on_the_
     assert five["status"] == "tested once, over the first 2 of 5 matured periods"
 
     family = document["prediction_layer"]["secondary_family"]
-    assert family["family"] == ["h20.survivors_minus_ew", "h20.worst_decile_excess", "h5.rank_ic"]
+    assert family["family"] == ["h20.survivors_minus_ew", "h20.ew_minus_worst_decile", "h5.rank_ic"]
     assert (family["dependence"], family["q"], family["family_size"]) == ("arbitrary", 0.1, 3)
     p_values = {
         "h20.survivors_minus_ew": tests["survivors_minus_ew"]["one_sided_p_value"],
-        "h20.worst_decile_excess": tests["worst_decile_excess"]["one_sided_p_value"],
+        "h20.ew_minus_worst_decile": tests["ew_minus_worst_decile"]["one_sided_p_value"],
         "h5.rank_ic": five["test"][0]["one_sided_p_value"],
     }
     corrected = {item["hypothesis_id"]: item for item in family["headline"]["tests"]}

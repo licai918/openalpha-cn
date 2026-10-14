@@ -95,6 +95,7 @@ from openalpha_cn.strategy_registration import (
 from openalpha_cn.strategy_survivor_check import SurvivorRecordVerdict
 from openalpha_cn.strategy_survivor_forward import (
     DESCRIPTIVE_WORDING,
+    FORWARD_METRICS,
     NO_VERDICT_WORDING,
     PREDICTION_LAYER_WORDING,
     SURVIVOR_FORWARD_PROTOCOL_KEY,
@@ -175,7 +176,7 @@ PROTOCOL_BLOCK: Final[Mapping[str, Any]] = {
     "primary_horizon": 20,
     "secondary_horizons": [5],
     "primary_metric": "rank_ic",
-    "secondary_metrics": ["survivors_minus_ew", "worst_decile_excess"],
+    "secondary_metrics": ["survivors_minus_ew", "ew_minus_worst_decile"],
     "window_periods": 3,
     "bootstrap_samples": 1000,
     "random_seed": 11,
@@ -453,7 +454,7 @@ def test_the_protocol_is_read_from_the_registrations_settings_block() -> None:
     assert (read.anchor_ordinal, read.primary_horizon, read.secondary_horizons) == (1, 20, (5,))
     assert (read.primary_metric, read.secondary_metrics) == (
         "rank_ic",
-        ("survivors_minus_ew", "worst_decile_excess"),
+        ("survivors_minus_ew", "ew_minus_worst_decile"),
     )
     assert (read.window_periods, read.bootstrap_samples, read.random_seed, read.q) == (
         3,
@@ -819,8 +820,8 @@ def test_the_rank_ic_is_a_tie_aware_spearman_computed_by_hand() -> None:
 
 def test_the_equal_weight_and_the_three_excesses_are_means_over_the_labelled_scope() -> None:
     """Label `p / 32` at worst-first position `p`: EW 9.5/32; the survivors (positions 4..19)
-    11.5/32, so 2/32 over EW; decile 0 (0, 1) 0.5/32, so -9/32; decile 9 (18, 19) 18.5/32, so
-    18/32 over decile 0."""
+    11.5/32, so 2/32 over EW; decile 0 (0, 1) 0.5/32, so EW leads it by 9/32; decile 9 (18, 19)
+    18.5/32, so 18/32 over decile 0."""
     outcome = hand_outcome(TWENTY_SCORES, by_position(lambda p: p / 32))
 
     assert outcome.mature
@@ -832,7 +833,7 @@ def test_the_equal_weight_and_the_three_excesses_are_means_over_the_labelled_sco
     )
     assert outcome.investable_ew == 9.5 / 32
     assert outcome.survivors_minus_ew == 2 / 32
-    assert outcome.worst_decile_excess == -9 / 32
+    assert outcome.ew_minus_worst_decile == 9 / 32
     assert outcome.top_minus_bottom == 18 / 32
     assert outcome.rank_ic == pytest.approx(
         statistics.correlation(
@@ -842,6 +843,29 @@ def test_the_equal_weight_and_the_three_excesses_are_means_over_the_labelled_sco
     )
     assert outcome.scope_by_decile == (2,) * 10
     assert outcome.absent == (("csi500", "benchmark_close_missing"),)
+
+
+@pytest.mark.parametrize("sign", [1, -1], ids=["scores-order-the-labels", "reversed"])
+def test_every_metric_is_above_zero_when_the_scores_order_the_labels_and_below_when_reversed(
+    sign: int,
+) -> None:
+    """Every metric the protocol may test shares one direction: greater than zero supports the
+    screen. Labels rising with the score -- the worst-scored names do worst -- put each one above
+    zero: the rank IC, the survivors over the equal weight, the equal weight over the worst
+    decile (EW 9.5/32 less decile 0's 0.5/32, +9/32) and the top decile over the worst. Labels
+    falling with the score put each one below."""
+    outcome = hand_outcome(TWENTY_SCORES, by_position(lambda p: sign * p / 32))
+
+    values = {metric: outcome.value(metric) for metric in FORWARD_METRICS}
+
+    assert set(values) == {
+        "rank_ic",
+        "survivors_minus_ew",
+        "ew_minus_worst_decile",
+        "top_minus_bottom",
+    }
+    assert values["ew_minus_worst_decile"] == sign * 9 / 32
+    assert all(value is not None and sign * value > 0 for value in values.values()), values
 
 
 def test_unlabelled_names_are_counted_per_decile_and_per_code_and_left_out_of_every_number() -> (
@@ -867,7 +891,7 @@ def test_unlabelled_names_are_counted_per_decile_and_per_code_and_left_out_of_ev
     assert outcome.survivors_minus_ew == pytest.approx(
         statistics.fmean(p / 32 for p in range(4, 19)) - statistics.fmean(labelled)
     )
-    assert outcome.worst_decile_excess == pytest.approx(1 / 32 - statistics.fmean(labelled))
+    assert outcome.ew_minus_worst_decile == pytest.approx(statistics.fmean(labelled) - 1 / 32)
     assert outcome.top_minus_bottom == pytest.approx(18 / 32 - 1 / 32)
 
 
@@ -1206,7 +1230,7 @@ def made(
     numbers: dict[str, float | None] = {
         "investable_ew": 0.01,
         "survivors_minus_ew": 0.002,
-        "worst_decile_excess": -0.003,
+        "ew_minus_worst_decile": 0.003,
         "top_minus_bottom": 0.004,
         "csi500": 0.005,
         **values,
@@ -1233,7 +1257,7 @@ def made(
         rank_ic=rank_ic,
         investable_ew=numbers["investable_ew"],
         survivors_minus_ew=numbers["survivors_minus_ew"],
-        worst_decile_excess=numbers["worst_decile_excess"],
+        ew_minus_worst_decile=numbers["ew_minus_worst_decile"],
         top_minus_bottom=numbers["top_minus_bottom"],
         csi500=numbers["csi500"],
         absent=(),
@@ -1317,7 +1341,7 @@ def test_at_the_window_each_metric_of_the_horizon_is_tested_once_over_the_first_
     assert [(test.metric, test.role, test.values) for test in sample.tests] == [
         ("rank_ic", "primary", 3),
         ("survivors_minus_ew", "secondary", 3),
-        ("worst_decile_excess", "secondary", 3),
+        ("ew_minus_worst_decile", "secondary", 3),
     ]
     first_three = tuple(0.01 * (ordinal % 7) - 0.02 for ordinal in (1, 21, 41))
     primary = sample.tests[0]
@@ -1374,7 +1398,7 @@ def test_excluding_unverifiable_turns_its_sampled_session_into_a_gap() -> None:
     assert [test.metric for test in headline.tests] == [
         "rank_ic",
         "survivors_minus_ew",
-        "worst_decile_excess",
+        "ew_minus_worst_decile",
     ]
     assert sensitivity.gaps == ((day(21), "unverifiable"),)
     assert [period.session for period in sensitivity.periods] == [day(1), day(41)]
@@ -1401,7 +1425,7 @@ def test_the_descriptive_means_are_over_every_included_mature_daily_record() -> 
         "rank_ic",
         "investable_ew",
         "survivors_minus_ew",
-        "worst_decile_excess",
+        "ew_minus_worst_decile",
         "top_minus_bottom",
         "csi500",
     ]
@@ -1417,6 +1441,30 @@ def test_the_descriptive_means_are_over_every_included_mature_daily_record() -> 
     assert built.headline.unlabelled_by_code == (("halted_session", 4),)
     assert built.headline.unlabelled_by_decile == (4, *(0,) * 9)
     assert built.headline.scope_by_decile == (4,) * 10
+
+
+@pytest.mark.parametrize(
+    "metric", ["rank_ic", "survivors_minus_ew", "ew_minus_worst_decile", "top_minus_bottom"]
+)
+@pytest.mark.parametrize("sign", [1, -1], ids=["positive-mean", "negative-mean"])
+def test_the_one_sided_p_of_every_metric_is_small_for_a_positive_mean_and_large_for_a_negative(
+    metric: str, sign: int
+) -> None:
+    """The one-sided p is for "mean > 0", which supports the screen whichever metric is tested.
+    Three periods of one sign: of the eight sign patterns only the observed one and its negation
+    reach the sum's size, so the two-sided p is 1/4 exactly; the one-sided p is 1/8 for a
+    positive mean and 7/8 for a negative one -- never half the two-sided p whatever the sign."""
+    outcomes = tuple(made(ordinal, **{metric: sign * 0.004}) for ordinal in (1, 21, 41))
+
+    built = layer(
+        outcomes, verified(outcomes), through=41, primary_metric=metric, secondary_metrics=[]
+    )
+
+    [test] = built.headline.non_overlapping.tests
+    assert (test.metric, test.values, test.mean) == (metric, 3, pytest.approx(sign * 0.004))
+    assert test.test is not None
+    assert (test.test.p_value, test.test.exact) == (0.25, True)
+    assert test.one_sided_p_value == (0.125 if sign > 0 else 0.875)
 
 
 def test_a_secondary_horizon_tests_only_the_primary_metric_and_as_a_secondary() -> None:
@@ -1679,12 +1727,16 @@ def by_by_hand(p_values: Mapping[str, float], *, family_size: int) -> dict[str, 
 def test_at_the_primary_window_the_secondary_family_is_corrected_by_benjamini_yekutieli() -> None:
     """A window of twelve two-session periods, primary h=2 and a secondary h=3: every metric is
     tested once over its first twelve periods, exactly. A constant positive excess has the
-    smallest one-sided p twelve sign flips allow, 1/4096; a constant negative one the largest.
+    smallest one-sided p twelve sign flips allow, 1/4096; a constant negative one -- a worst
+    decile ahead of the equal weight -- the largest.
     The secondary family -- the two secondary metrics at h=2 and the rank IC at h=3 -- is then
     corrected under arbitrary dependence, by hand: the two small p-values clear q, the large one
     does not."""
     outcomes = {
-        2: tuple(made(o, horizon=2, rank_ic=0.01 * (o % 7) - 0.02) for o in range(1, 35)),
+        2: tuple(
+            made(o, horizon=2, rank_ic=0.01 * (o % 7) - 0.02, ew_minus_worst_decile=-0.003)
+            for o in range(1, 35)
+        ),
         3: tuple(made(o, horizon=3, rank_ic=0.004 + 0.001 * (o % 3)) for o in range(1, 35)),
     }
 
@@ -1706,18 +1758,18 @@ def test_at_the_primary_window_the_secondary_family_is_corrected_by_benjamini_ye
         4096,
     )
     assert tests["survivors_minus_ew"]["one_sided_p_value"] == pytest.approx(1 / 4096)
-    assert tests["worst_decile_excess"]["one_sided_p_value"] == pytest.approx(1 - 1 / 4096)
+    assert tests["ew_minus_worst_decile"]["one_sided_p_value"] == pytest.approx(1 - 1 / 4096)
     three = document["prediction_layer"]["h3"]["non_overlapping"]
     assert three["test"][0]["one_sided_p_value"] == pytest.approx(1 / 4096)
     family = document["prediction_layer"]["secondary_family"]
-    assert family["family"] == ["h2.survivors_minus_ew", "h2.worst_decile_excess", "h3.rank_ic"]
+    assert family["family"] == ["h2.survivors_minus_ew", "h2.ew_minus_worst_decile", "h3.rank_ic"]
     assert (family["dependence"], family["q"], family["family_size"]) == ("arbitrary", 0.2, 3)
     corrected = {item["hypothesis_id"]: item for item in family["headline"]["tests"]}
     expected = by_by_hand(
         {name: item["one_sided_p_value"] for name, item in corrected.items()}, family_size=3
     )
     assert expected["h2.survivors_minus_ew"] == pytest.approx(5.5 / 4096 / 2)
-    assert expected["h2.worst_decile_excess"] == 1.0
+    assert expected["h2.ew_minus_worst_decile"] == 1.0
     for name, q_value in expected.items():
         assert corrected[name]["q_value"] == pytest.approx(q_value)
     assert [corrected[name]["rejected"] for name in family["family"]] == [True, False, True]

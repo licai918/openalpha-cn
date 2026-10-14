@@ -74,8 +74,8 @@ the reader has no factor series for):
   on both, then `statistics.correlation` -- absent with a code when a side is degenerate
   (`fewer_than_two_labelled`, `scores_tied`, `labels_tied`);
 - `investable_ew`: the mean label, an equal-weight buy-and-hold of the investable scope;
-- `survivors_minus_ew`, `worst_decile_excess` (decile 0 less the equal weight) and
-  `top_minus_bottom` (decile 9 less decile 0);
+- `survivors_minus_ew` (the survivors less the equal weight), `ew_minus_worst_decile` (the
+  equal weight less decile 0) and `top_minus_bottom` (decile 9 less decile 0);
 - `csi500`: `close(exit) / close(entry) - 1` of the protocol's benchmark (`000905.SH`), over the
   same two closes; context only, and absent with a code when either close is missing.
 
@@ -247,14 +247,21 @@ PREDICTION_LAYER_WORDING: Final = (
 )
 DESCRIPTIVE_WORDING: Final = "descriptive, not a test"
 
-ForwardMetric = Literal["rank_ic", "survivors_minus_ew", "worst_decile_excess", "top_minus_bottom"]
-"""A quantity the protocol may test: each is centred on zero under the null of no forecast."""
+ForwardMetric = Literal[
+    "rank_ic", "survivors_minus_ew", "ew_minus_worst_decile", "top_minus_bottom"
+]
+"""A quantity the protocol may test: each is centred on zero under the null of no forecast, and
+each is oriented the same way -- **greater than zero supports the screen** (the scores order the
+labels, the survivors beat the equal weight, the worst decile falls behind it, the top decile
+beats the worst). That is why one one-sided p, for "mean > 0", serves every one of them: the
+equal weight's lead over the worst decile is tested, never the worst decile's excess over the
+equal weight, whose support for the screen would be a mean below zero."""
 FORWARD_METRICS: Final[tuple[ForwardMetric, ...]] = get_args(ForwardMetric)
 DescribedQuantity = Literal[
     "rank_ic",
     "investable_ew",
     "survivors_minus_ew",
-    "worst_decile_excess",
+    "ew_minus_worst_decile",
     "top_minus_bottom",
     "csi500",
 ]
@@ -614,7 +621,7 @@ class RecordOutcome:
     rank_ic: float | None
     investable_ew: float | None
     survivors_minus_ew: float | None
-    worst_decile_excess: float | None
+    ew_minus_worst_decile: float | None
     top_minus_bottom: float | None
     csi500: float | None
     absent: tuple[tuple[str, str], ...]
@@ -626,7 +633,7 @@ class RecordOutcome:
             "rank_ic": self.rank_ic,
             "investable_ew": self.investable_ew,
             "survivors_minus_ew": self.survivors_minus_ew,
-            "worst_decile_excess": self.worst_decile_excess,
+            "ew_minus_worst_decile": self.ew_minus_worst_decile,
             "top_minus_bottom": self.top_minus_bottom,
             "csi500": self.csi500,
         }
@@ -681,7 +688,7 @@ def record_outcome(
         rank_ic=None,
         investable_ew=None,
         survivors_minus_ew=None,
-        worst_decile_excess=None,
+        ew_minus_worst_decile=None,
         top_minus_bottom=None,
         csi500=None,
         absent=(),
@@ -721,9 +728,9 @@ def record_outcome(
             _less(survivor_mean, equal_weight),
             "no_labelled_survivor",
         ),
-        worst_decile_excess=measured(
-            "worst_decile_excess",
-            _less(worst, equal_weight),
+        ew_minus_worst_decile=measured(
+            "ew_minus_worst_decile",
+            _less(equal_weight, worst),
             "no_labelled_name_in_the_worst_decile",
         ),
         top_minus_bottom=measured(
@@ -881,7 +888,9 @@ class MetricTest:
     `test` is `outcome_statistics.sign_flip_test`'s two-sided answer for "mean == 0";
     `one_sided_p_value` is the protocol's one-sided p for "mean > 0" from it -- half of it when
     the mean is positive, one less half of it otherwise (`scripts/research/grid.py`'s
-    `one_sided_p_value` rule). Neither is a verdict: no threshold is applied here."""
+    `one_sided_p_value` rule). "Mean > 0" is the direction that supports the screen for every
+    `ForwardMetric`, so the rule holds whichever metric is tested. Neither is a verdict: no
+    threshold is applied here."""
 
     metric: ForwardMetric
     role: Role
