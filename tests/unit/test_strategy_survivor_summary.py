@@ -1158,7 +1158,8 @@ def test_a_carried_order_says_which_attempt_tomorrows_open_will_be(s3: WrittenOf
     carried = orders[-1]
     assert live[s3.buy_e.order_id].attempts == 1  # tried once, tonight, and refused
     assert carried["order_id"] == s3.buy_e.order_id
-    assert carried["signal_session"] == 2
+    # Planned on S2's evening, printed by its date (D5 joint review, Minor 7).
+    assert (carried["signal_session"], carried["signal_on"]) == (2, "2021-03-03")
     assert (carried["attempt"], carried["attempts_allowed"]) == (2, 3)
     assert (carried["expires_session"], carried["expires_on"]) == (5, "2021-03-08")
     assert carried["reference_price"] == "20.00"  # what the order was sized at, on S2
@@ -1186,7 +1187,7 @@ def test_a_sale_carried_from_an_earlier_session_is_still_the_whole_position(
     assert "2 live orders from earlier sessions" in line_with(lines, "carried orders")
     assert (
         f"  SELL ENTIRE POSITION {A} (ledger qty 900; real close 10.10) EXIT_SURVIVOR_LOST, "
-        "planned on session 2, attempt 2, a sale never expires"
+        "planned on 2021-03-03, attempt 2, a sale never expires"
     ) in lines
 
 
@@ -1870,7 +1871,7 @@ def test_a_carried_order_is_listed_with_the_attempt_it_is_on(s3: WrittenOff) -> 
 
     assert "1 live order from earlier sessions" in line_with(lines, "carried orders")
     assert (
-        f"  BUY {E} 400 (planned on session 2 at 20.00; real close today 22.00) "
+        f"  BUY {E} 400 (planned on 2021-03-03 at 20.00; real close today 22.00) "
         "ENTRY_REPLACEMENT, live through 2021-03-08, attempt 2 of 3 "
         "(one per session; a session with no bar counts)"
     ) in lines
@@ -2004,6 +2005,13 @@ def test_a_settle_only_day_lists_what_it_settled(settle_only: SettleOnly) -> Non
     plan = line_with(lines, "ORDERS FOR THE OPEN OF D+1")
     assert "NONE PLANNED tonight -- no evening was run" in plan
     assert "are not listed here (a sale never expires)" in plan
+    # It did settle tonight's session (D5 joint review, Minor 6): never "not settled tonight".
+    assert plan == (
+        "ORDERS FOR THE OPEN OF D+1 (call auction 09:15): NONE PLANNED tonight -- no evening was "
+        f"run ({SKIPPED}); the session was settled tonight without a decision (catch-up below), "
+        "and the orders from earlier evenings it left live are retried at the next open and are "
+        "not listed here (a sale never expires)"
+    )
 
 
 def test_the_prediction_block_is_rendered_as_the_caller_filled_it(s3: WrittenOff) -> None:

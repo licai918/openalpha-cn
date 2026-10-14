@@ -78,8 +78,10 @@ OF D+1 (call auction 09:15) and the carried orders, what the draw left out (unfu
 unaffordable, deferred exits, near exit, frozen, watch list), illiquid exits, catch-up, prediction,
 Tushare requests, units, wording. A list with nothing in it prints as `none`, so a missing line
 never reads as "nothing to do". A day with no evening prints `NONE PLANNED tonight -- no evening
-was run`, the reason, and that the orders still live in the book from earlier evenings are not
-listed here (a sale never expires), never an empty plan. The wording is "candidates"; nothing
+was run`, the reason, whether tonight's session was settled (a settle-only day lists it among its
+catch-ups; a day refused before its paper book settled nothing), and that the orders still live in
+the book from earlier evenings are not listed here (a sale never expires), never an empty plan. A
+carried order says the date it was planned on (`signal_on`). The wording is "candidates"; nothing
 here is a recommendation, and the ledger's equity is never evidence of anything.
 
 `prediction` and `this_run` are blocks the caller merges into the mapping it passes to
@@ -657,6 +659,7 @@ def _open_order(
         "reason": order.reason,
         "reasons": reasons,
         "signal_session": order.signal_session,
+        "signal_on": _day(ordinals, order.signal_session),
         "execute_session": order.execute_session,
         "execute_on": _day(ordinals, order.execute_session),
         "expires_session": order.expires_session,
@@ -811,7 +814,10 @@ def summary_lines(result: Mapping[str, Any]) -> list[str]:
         lines += _settled_lines(paper["settled"])
         lines += _position_lines(paper["book"]["holdings"])
     lines += _orders_lines(
-        paper, skipped, passed=(result.get("this_run") or {}).get("after_the_call_auction")
+        paper,
+        skipped,
+        passed=(result.get("this_run") or {}).get("after_the_call_auction"),
+        session_index=result["session_index"],
     )
     if paper is not None:
         lines += _carried_lines(paper)
@@ -1003,18 +1009,25 @@ def _order_line(item: Mapping[str, Any]) -> str:
     )
 
 
+def _planned_on(item: Mapping[str, Any]) -> str:
+    """The session an order was planned on, by its date -- or its ordinal, for a document filed
+    before the date was (D5 joint review, Minor 7)."""
+    day = item.get("signal_on")
+    return str(day) if day is not None else f"session {item['signal_session']}"
+
+
 def _carried_line(item: Mapping[str, Any]) -> str:
     """One order planned on an earlier session and still live."""
     close = item["real_close"] if item["real_close"] is not None else "n/a"
     if item["side"] == "sell":
         return (
             f"  SELL ENTIRE POSITION {item['ts_code']} (ledger qty {item['quantity']}; real "
-            f"close {close}) {item['reason']}, planned on session {item['signal_session']}, "
+            f"close {close}) {item['reason']}, planned on {_planned_on(item)}, "
             f"attempt {item['attempt']}, a sale never expires"
         )
     return (
-        f"  BUY {item['ts_code']} {item['quantity']} (planned on session "
-        f"{item['signal_session']} at {item['reference_price']}; real close today {close}) "
+        f"  BUY {item['ts_code']} {item['quantity']} (planned on "
+        f"{_planned_on(item)} at {item['reference_price']}; real close today {close}) "
         f"{item['reason']}, live through {_live_through(item)}, attempt {item['attempt']} of "
         f"{item['attempts_allowed']} (one per session; a session with no bar counts)"
     )
@@ -1025,6 +1038,7 @@ def _orders_lines(
     skipped: Mapping[str, Any],
     *,
     passed: Mapping[str, Any] | None,
+    session_index: int,
 ) -> list[str]:
     """The ORDERS block. `passed` is the caller's note that the run printing the plan was made at
     or after the call auction of the session the orders are for (`this_run`'s
@@ -1032,11 +1046,23 @@ def _orders_lines(
     if paper is None:
         # "None planned tonight" is not "nothing is live": orders from earlier evenings -- a
         # carried sale above all, which never expires -- stay in the book and are retried at the
-        # next open once the session is settled. This module is not told which are live.
+        # next open once the session is settled. This module is not told which are live. A day
+        # that settled its own session alone (settle-only: it is among its catch-ups) did settle
+        # tonight; a day refused before its paper book settled nothing (D5 joint review, Minor 6).
+        settled = any(
+            entry.get("session_index") == session_index for entry in skipped.get("catch_ups", ())
+        )
+        tonight = (
+            "the session was settled tonight without a decision (catch-up below), and the orders "
+            "from earlier evenings it left live are retried at the next open and are not listed "
+            "here (a sale never expires)"
+            if settled
+            else "orders still live in the paper book from earlier evenings are not settled "
+            "tonight and are not listed here (a sale never expires)"
+        )
         return [
             f"{_ORDERS_HEADER}: NONE PLANNED tonight -- no evening was run ({skipped['reason']}); "
-            "orders still live in the paper book from earlier evenings are not settled tonight "
-            "and are not listed here (a sale never expires)"
+            + tonight
         ]
     opens = paper["open_session"]
     when = opens["date"] if opens["date"] is not None else f"session {opens['index']}"
