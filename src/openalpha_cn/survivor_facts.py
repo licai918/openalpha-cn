@@ -16,8 +16,11 @@ reads one signal day through the panel's own point-in-time loaders and feeds the
 Every read is at `as_of`, through the loader that owns the dataset, so the panel's visibility
 rules are the only time filter here; `as_of` must be at or after the session's 16:30
 publication. The universe is every security the registry lists on the day, on **every** board
-(the screen, not the adapter, says `board_not_allowed`), plus any security with a bar the
-registry has no listing row for (aged 0, so `listing_too_recent`, T3 3.3).
+(the screen, not the adapter, says `board_not_allowed`), plus any security with a bar on the day
+that the registry has no listing row for at all (aged 0, so `listing_too_recent`, T3 3.3;
+counted as `FactsNotes.no_listing_row`). A code the registry *does* know and does not list that
+day -- delisted, or priced before its listing date (T3 3.2's `.BJ` rows) -- has no row even with
+a bar: the kernel sells such a holding rather than freezing it.
 
 - **A halted security with no bar still gets its row** (T6/T7 0(d)): `suspended=True`, its last
   close, and the mean amount of its last 20 bars. Without the row the kernel would sell a halted
@@ -698,7 +701,11 @@ class _Walk:
             )
 
         self.today = read(history[-1])
-        self.codes = tuple(sorted(listed | set(self.today)))
+        # A bar brings a security in only when the registry has never heard of it: a code it
+        # knows and does not list that day (delisted, or priced before its listing) stays out.
+        unregistered = {code for code in self.today if code not in listed_on}
+        self.codes = tuple(sorted(listed | unregistered))
+        trading = [code for code in self.codes if code in self.today]
         halted = [code for code in self.codes if code not in self.today]
         self.last_bar: dict[str, DailyBar] = {}
         self.amounts: dict[str, list[Decimal]] = {code: [] for code in self.codes}
@@ -716,7 +723,7 @@ class _Walk:
             if not window and not missing:
                 break
             bars = self.today if depth == 0 else read(day)
-            for code in (*(sorted(self.today) if window else ()), *missing):
+            for code in (*(trading if window else ()), *missing):
                 bar = bars.get(code)
                 if bar is not None:
                     self.last_bar.setdefault(code, bar)

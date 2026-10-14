@@ -7,10 +7,12 @@ name. Everything here runs against a panel generated at test time and written th
 
 ## The frame
 
-40 securities over the 75 weekday sessions 2026-01-05 .. 2026-04-17 of `panel_fixtures`' 2026
-calendar (closed only on 1-2 January). The signal day is `SESSIONS[69]`, Friday 2026-04-10, read
-at 18:30 Asia/Shanghai -- after that session's 16:30 publication. Every security is built from
-two numbers, its position `j` in `SECURITIES` and the session index `t`:
+The securities of `FRAME` over the 75 weekday sessions 2026-01-05 .. 2026-04-17 of
+`panel_fixtures`' 2026 calendar (closed only on 1-2 January). The signal day is `SESSIONS[69]`,
+Friday 2026-04-10, read at 18:30 Asia/Shanghai -- after that session's 16:30 publication. Every
+security is built from two numbers, its position `j` in `FRAME` and the session index `t`.
+`FRAME` is the first 40 securities in code order followed by the ones added after review, in the
+order they were added, so a new security never moves an existing one's numbers:
 
 - close `10 + j`, constant, except `HALTED`'s `20 + 0.25 t`, so its carried close is a number
   no other session has;
@@ -86,7 +88,11 @@ from openalpha_cn.domain.name_history import (
 )
 from openalpha_cn.domain.panel_batch import PanelColumn
 from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET, SUSPENSION_DATASET
-from openalpha_cn.domain.stock_universe import LISTING_EVENT, STOCK_BASIC_DATASET
+from openalpha_cn.domain.stock_universe import (
+    DELISTING_EVENT,
+    LISTING_EVENT,
+    STOCK_BASIC_DATASET,
+)
 from openalpha_cn.domain.survivor_book import SecurityFacts, SurvivorBookConfig
 from openalpha_cn.domain.trading_calendar import TRADING_CALENDAR_DATASET
 from openalpha_cn.panel.store import PanelStore
@@ -172,9 +178,12 @@ LISTED_LATER: Final[str] = "600611.SH"
 """`FULL` only: a registry listing dated 2026-04-15."""
 ONLY_TRADER: Final[str] = "600001.SH"
 """The one security that trades on the outage day."""
+DELISTED_WITH_BARS: Final[str] = "000998.SZ"
+"""Delisted on session 60 by the registry (its exclusive day) and priced every session all the
+same: a code the registry knows and does not list on the signal day, with a bar on it."""
 
-SECURITIES: Final[tuple[str, ...]] = tuple(
-    sorted(
+FRAME: Final[tuple[str, ...]] = (
+    *sorted(
         (
             *ORDINARY,
             ST_BY_NAME,
@@ -190,12 +199,22 @@ SECURITIES: Final[tuple[str, ...]] = tuple(
             STAR,
             UNREGISTERED,
         )
-    )
+    ),
+    # Added after review, in the order they were added, so `j` = 40, 41, ...
+    DELISTED_WITH_BARS,
 )
+"""Every security of the frame, in the order that gives each its position `j`."""
+SECURITIES: Final[tuple[str, ...]] = tuple(sorted(FRAME))
+NO_ROW: Final[frozenset[str]] = frozenset({DELISTED_WITH_BARS})
+"""The securities of the frame that have no fact row on the signal day."""
+ROWS: Final[tuple[str, ...]] = tuple(code for code in SECURITIES if code not in NO_ROW)
+"""The signal day's fact rows, ascending by code."""
 LISTED_BEFORE_THE_CALENDAR: Final[date] = date(2025, 1, 2)
 NEW_LISTING_INDEX: Final[int] = 60
 HALTED_SESSIONS: Final[frozenset[int]] = frozenset({67, 68, 69})
 GAPPED_SESSIONS: Final[frozenset[int]] = frozenset({62, 63})
+DELISTED_ON: Final[Mapping[str, int]] = MappingProxyType({DELISTED_WITH_BARS: 60})
+"""The session each delisted security's registry delisting row is dated (exclusive)."""
 
 FACTORS: Final[tuple[str, ...]] = (
     "reversal_1d/v1",
@@ -225,7 +244,7 @@ COMMIT: Final[str] = "abcdef1"
 
 
 def position(code: str) -> int:
-    return SECURITIES.index(code)
+    return FRAME.index(code)
 
 
 def instant(index: int) -> datetime:
@@ -271,14 +290,24 @@ FULL: Final[Variant] = Variant()
 TRIMMED: Final[Variant] = Variant(last=SIGNAL_INDEX, builds=(68, SIGNAL_INDEX))
 
 
-def trades(code: str, index: int, variant: Variant) -> bool:
+def scheduled(code: str, index: int) -> bool:
+    """Whether `code` has a bar on session `index` when nothing market-wide goes wrong."""
     if code == NEW_LISTING and index < NEW_LISTING_INDEX:
         return False
     if code == HALTED and index in HALTED_SESSIONS:
         return False
-    if code == GAPPED and index in GAPPED_SESSIONS:
+    return not (code == GAPPED and index in GAPPED_SESSIONS)
+
+
+def trades(code: str, index: int, variant: Variant) -> bool:
+    if not scheduled(code, index):
         return False
     return not (variant.outage and index == SIGNAL_INDEX and code != ONLY_TRADER)
+
+
+def banded_on(code: str, index: int) -> bool:
+    """Whether a band is published for `code` on session `index`: from its first session on."""
+    return code != NEW_LISTING or index >= NEW_LISTING_INDEX
 
 
 def halt_rows(variant: Variant) -> dict[tuple[str, int], str | None]:
@@ -287,7 +316,13 @@ def halt_rows(variant: Variant) -> dict[tuple[str, int], str | None]:
     rows.update({(HALTED, index): None for index in HALTED_SESSIONS})
     rows.update({(GAPPED, index): None for index in GAPPED_SESSIONS})
     if variant.outage:
-        rows.update({(code, SIGNAL_INDEX): None for code in SECURITIES if code != ONLY_TRADER})
+        rows.update(
+            {
+                (code, SIGNAL_INDEX): None
+                for code in SECURITIES
+                if code != ONLY_TRADER and scheduled(code, SIGNAL_INDEX)
+            }
+        )
     else:
         rows[(HALT_THROUGH_CLOSE, SIGNAL_INDEX)] = "14:00-15:00"
         rows[(HALT_IN_MORNING, SIGNAL_INDEX)] = "09:30-10:30"
@@ -312,14 +347,20 @@ def previous_close(code: str, index: int, variant: Variant) -> float:
     return close_of(code, index) - (0.25 if code == HALTED else 0.0)
 
 
-def listing_rows(variant: Variant) -> list[tuple[str, date]]:
-    rows = [
-        (code, SESSIONS[NEW_LISTING_INDEX] if code == NEW_LISTING else LISTED_BEFORE_THE_CALENDAR)
-        for code in SECURITIES
-        if code != UNREGISTERED
-    ]
+def listing_day(code: str) -> date:
+    return SESSIONS[NEW_LISTING_INDEX] if code == NEW_LISTING else LISTED_BEFORE_THE_CALENDAR
+
+
+def lifecycle_rows(variant: Variant) -> list[tuple[str, str, date]]:
+    """`(code, lifecycle event, day)` for every registry row the variant stores."""
+    rows = [(code, LISTING_EVENT, listing_day(code)) for code in SECURITIES if code != UNREGISTERED]
+    rows.extend(
+        (code, DELISTING_EVENT, SESSIONS[index])
+        for code, index in sorted(DELISTED_ON.items())
+        if index <= variant.last
+    )
     if variant.last >= 72:
-        rows.append((LISTED_LATER, SESSIONS[72]))
+        rows.append((LISTED_LATER, LISTING_EVENT, SESSIONS[72]))
     return rows
 
 
@@ -420,7 +461,7 @@ def build_panel(variant: Variant) -> GeneratedPanel:
         (index, code)
         for index in range(len(sessions))
         for code in SECURITIES
-        if (code != NEW_LISTING or index >= NEW_LISTING_INDEX)
+        if banded_on(code, index)
     ]
     band_available = [published_time(SESSIONS[index]) for index, _ in banded]
     # A band is published on the previous close; for a halted session that is the last close.
@@ -473,18 +514,20 @@ def build_panel(variant: Variant) -> GeneratedPanel:
         available_time=halt_available,
         fetched_at=_fetched(halt_available),
     )
-    listings = listing_rows(variant)
-    listed_at = [midnight_shanghai(day) for _, day in listings]
+    lifecycle = lifecycle_rows(variant)
+    listed_at = [midnight_shanghai(day) for _, _, day in lifecycle]
     registry = batch(
         STOCK_BASIC_DATASET,
-        subjects=[code for code, _ in listings],
+        subjects=[code for code, _, _ in lifecycle],
         columns=[
-            PanelColumn("lifecycle_event", "string", tuple(LISTING_EVENT for _ in listings)),
-            PanelColumn("lifecycle_date", "string", tuple(day.isoformat() for _, day in listings)),
+            PanelColumn("lifecycle_event", "string", tuple(event for _, event, _ in lifecycle)),
+            PanelColumn(
+                "lifecycle_date", "string", tuple(day.isoformat() for _, _, day in lifecycle)
+            ),
             PanelColumn(
                 "exchange",
                 "string",
-                tuple("SSE" if code.endswith(".SH") else "SZSE" for code, _ in listings),
+                tuple("SSE" if code.endswith(".SH") else "SZSE" for code, _, _ in lifecycle),
             ),
         ],
         event_time=listed_at,
@@ -833,10 +876,35 @@ def test_every_listed_security_gets_exactly_one_hand_derived_fact(full_store: Pa
     day = read_day(full_store)
 
     assert day.session == SIGNAL
-    assert [fact.ts_code for fact in day.facts] == list(SECURITIES)  # ascending, one each
-    assert day.facts == tuple(expected_fact(code) for code in SECURITIES)
+    assert [fact.ts_code for fact in day.facts] == list(ROWS)  # ascending, one each
+    assert day.facts == tuple(expected_fact(code) for code in ROWS)
     # 40 rows; 38 scored -- HALTED has no bar today and NEW_LISTING lacks two values.
     assert (day.universe_size, day.scored_size) == (40, 38)
+
+
+def test_a_registry_code_not_listed_on_the_day_has_no_row_even_with_a_bar(
+    full_store: PanelStore,
+) -> None:
+    # DELISTED_WITH_BARS left the registry on session 60 and is priced on the signal day all the
+    # same (a `.BJ` code priced before its listing date, T3 3.2, is the same case the other way
+    # round). The registry knows it and does not list it that day, so its bar does not bring it
+    # in: only a code the registry has no listing row for at all is added through its bar.
+    day = read_day(full_store)
+
+    assert DELISTED_WITH_BARS not in {fact.ts_code for fact in day.facts}
+    assert day.notes.no_listing_row == 1  # UNREGISTERED alone
+
+
+def test_a_code_the_registry_has_never_listed_gets_a_row_aged_zero_and_is_counted(
+    full_store: PanelStore,
+) -> None:
+    # UNREGISTERED has a bar on the day and no listing row at all (T3 3.3's migrated-code
+    # shape): it is in the universe, aged 0 so the screen says `listing_too_recent`.
+    day = read_day(full_store)
+    fact = {fact.ts_code: fact for fact in day.facts}[UNREGISTERED]
+
+    assert fact.listed_sessions == 0
+    assert day.notes.no_listing_row == 1
 
 
 @pytest.mark.parametrize(
