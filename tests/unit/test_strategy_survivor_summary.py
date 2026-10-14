@@ -1219,11 +1219,13 @@ def test_a_day_with_no_evening_has_a_null_paper_section_and_the_reason(frame: Fr
     assert document["screen"]["survivors"] == 17
 
 
-def test_a_day_with_no_evening_and_no_reason_says_so(frame: Frame) -> None:
-    document = frame_document(frame, paper_skipped=None)
-
-    assert document["paper"] is None
-    assert document["paper_skipped"] == {"reason": None, "catch_ups": []}
+def test_a_day_with_no_evening_and_no_reason_is_refused_by_name(frame: Frame) -> None:
+    # A caller that forgot why the evening did not run would otherwise file a document that says
+    # "no reason was given" for a day the journal cannot explain.
+    with pytest.raises(ValueError, match="no evening was given and no paper_skipped"):
+        frame_document(frame, paper_skipped=None)
+    with pytest.raises(ValueError, match="no evening was given and no paper_skipped"):
+        frame_document(frame, paper_skipped="")
 
 
 def test_a_settle_only_day_keeps_the_sessions_it_settled(settle_only: SettleOnly) -> None:
@@ -1684,9 +1686,13 @@ def test_a_day_with_no_evening_prints_that_no_order_was_planned_and_why(frame: F
     lines = summary_lines(frame_document(frame))
 
     assert line_with(lines, "book") == row("book", f"no evening was run: {SKIPPED}")
+    # "None planned tonight" is not "nothing is live": an earlier evening's orders -- a carried
+    # sale above all, which never expires -- are still in the book and are retried at the next
+    # open once the session is settled. The module cannot list them, so it says it does not.
     assert (
-        f"ORDERS FOR THE OPEN OF D+1 (call auction 09:15): NONE PLANNED -- no evening was run "
-        f"({SKIPPED})"
+        "ORDERS FOR THE OPEN OF D+1 (call auction 09:15): NONE PLANNED tonight -- no evening was "
+        f"run ({SKIPPED}); orders still live in the paper book from earlier evenings are not "
+        "settled tonight and are not listed here (a sale never expires)"
     ) in lines
     assert not any(line.strip().startswith(("SELL", "BUY")) for line in lines)
     assert "rows 43, universe on main 38" in line_with(lines, "facts")
@@ -1705,6 +1711,10 @@ def test_a_settle_only_day_lists_what_it_settled(settle_only: SettleOnly) -> Non
     )
     assert any(line.startswith("  2021-03-05 (index 4)") for line in lines)
     assert line_with(lines, "book") == row("book", f"no evening was run: {SKIPPED}")
+    # The orders it settled were an earlier evening's, and are still live: nothing is "planned".
+    plan = line_with(lines, "ORDERS FOR THE OPEN OF D+1")
+    assert "NONE PLANNED tonight -- no evening was run" in plan
+    assert "are not listed here (a sale never expires)" in plan
 
 
 def test_the_prediction_block_is_rendered_as_the_caller_filled_it(s3: WrittenOff) -> None:
