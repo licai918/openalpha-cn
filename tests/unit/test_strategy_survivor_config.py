@@ -187,7 +187,7 @@ def test_a_re_typed_book_block_is_refused_with_the_fields_that_read_back_otherwi
     field: str, value: object
 ) -> None:
     block = {**stored(), field: value}
-    SurvivorBookConfig.model_validate(block)  # it is a valid configuration -- of another identity
+    SurvivorBookConfig.model_validate(block)  # valid: refused for its text, whatever its id
 
     message = unreadable(registered(book=block))
 
@@ -309,6 +309,8 @@ def test_a_transform_this_build_does_not_declare_is_refused() -> None:
         pytest.param("epoch_session", "2026-1-16", id="a date not in ISO form"),
         pytest.param("epoch_session", "2026-01-16T00:00:00", id="an instant for a date"),
         pytest.param("epoch_session", 20260116, id="a number for a date"),
+        pytest.param("epoch_session", "20260116", id="a basic-form date"),
+        pytest.param("epoch_session", "2026-W03-5", id="a week date"),
         pytest.param("exchange", "", id="no exchange"),
         pytest.param("exchange", "SZSE", id="another exchange's calendar"),
         pytest.param("exchange", " SSE ", id="the calendar's name padded"),

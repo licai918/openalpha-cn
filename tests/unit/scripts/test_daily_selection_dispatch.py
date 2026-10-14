@@ -199,6 +199,24 @@ def test_an_unknown_kind_exits_2_before_any_request(
     assert "'survivor_book/v2'" in err
 
 
+@pytest.mark.parametrize("kind", [None, 1, ""], ids=["null", "a number", "empty"])
+def test_a_kind_key_that_names_no_known_kind_exits_2_and_is_not_the_p6_day(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    kind: object,
+) -> None:
+    """The key's presence is what says "not the P6 book": a `kind` of null, a number or the
+    empty name is refused by the survivor reader, and never falls through to the P6 day -- which
+    would make the runtime directory before refusing for want of a `start`."""
+    code, err = _refused(tmp_path, monkeypatch, capsys, {**SURVIVOR_CONFIG, "kind": kind})
+
+    assert code == 2 == daily.DailyExit.no_registration
+    assert "step 1 (registration) failed" in err
+    assert "kind" in err
+    assert "start date" not in err
+
+
 def test_a_key_beside_the_three_blocks_exits_2_naming_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
