@@ -181,6 +181,9 @@ ONLY_TRADER: Final[str] = "600001.SH"
 DELISTED_WITH_BARS: Final[str] = "000998.SZ"
 """Delisted on session 60 by the registry (its exclusive day) and priced every session all the
 same: a code the registry knows and does not list on the signal day, with a bar on it."""
+DELISTED: Final[str] = "600610.SH"
+"""Priced through session 64 and delisted on session 65, four sessions before the signal day --
+well within the carry bound, so only "listed on the day" keeps a carried row away from it."""
 
 FRAME: Final[tuple[str, ...]] = (
     *sorted(
@@ -202,10 +205,11 @@ FRAME: Final[tuple[str, ...]] = (
     ),
     # Added after review, in the order they were added, so `j` = 40, 41, ...
     DELISTED_WITH_BARS,
+    DELISTED,
 )
 """Every security of the frame, in the order that gives each its position `j`."""
 SECURITIES: Final[tuple[str, ...]] = tuple(sorted(FRAME))
-NO_ROW: Final[frozenset[str]] = frozenset({DELISTED_WITH_BARS})
+NO_ROW: Final[frozenset[str]] = frozenset({DELISTED_WITH_BARS, DELISTED})
 """The securities of the frame that have no fact row on the signal day."""
 ROWS: Final[tuple[str, ...]] = tuple(code for code in SECURITIES if code not in NO_ROW)
 """The signal day's fact rows, ascending by code."""
@@ -213,7 +217,7 @@ LISTED_BEFORE_THE_CALENDAR: Final[date] = date(2025, 1, 2)
 NEW_LISTING_INDEX: Final[int] = 60
 HALTED_SESSIONS: Final[frozenset[int]] = frozenset({67, 68, 69})
 GAPPED_SESSIONS: Final[frozenset[int]] = frozenset({62, 63})
-DELISTED_ON: Final[Mapping[str, int]] = MappingProxyType({DELISTED_WITH_BARS: 60})
+DELISTED_ON: Final[Mapping[str, int]] = MappingProxyType({DELISTED_WITH_BARS: 60, DELISTED: 65})
 """The session each delisted security's registry delisting row is dated (exclusive)."""
 
 FACTORS: Final[tuple[str, ...]] = (
@@ -296,6 +300,8 @@ def scheduled(code: str, index: int) -> bool:
         return False
     if code == HALTED and index in HALTED_SESSIONS:
         return False
+    if code == DELISTED and index >= DELISTED_ON[DELISTED]:
+        return False
     return not (code == GAPPED and index in GAPPED_SESSIONS)
 
 
@@ -306,7 +312,10 @@ def trades(code: str, index: int, variant: Variant) -> bool:
 
 
 def banded_on(code: str, index: int) -> bool:
-    """Whether a band is published for `code` on session `index`: from its first session on."""
+    """Whether a band is published for `code` on session `index`: from its first session on,
+    halted sessions included, until it is delisted."""
+    if code == DELISTED:
+        return index < DELISTED_ON[DELISTED]
     return code != NEW_LISTING or index >= NEW_LISTING_INDEX
 
 
@@ -905,6 +914,27 @@ def test_a_code_the_registry_has_never_listed_gets_a_row_aged_zero_and_is_counte
 
     assert fact.listed_sessions == 0
     assert day.notes.no_listing_row == 1
+
+
+def test_a_security_delisted_before_the_day_has_no_row_although_its_last_bar_is_in_reach(
+    full_store: PanelStore,
+) -> None:
+    # DELISTED traded through session 64 and left the registry on 65; its last bar is five
+    # sessions back, inside the carry bound. Only "listed on the signal day" keeps it out --
+    # read every registry code instead and it would get a carried `suspended=True` row, and a
+    # delisted holding would be frozen instead of sold. Nothing counts it: it is not listed.
+    day = read_day(full_store)
+
+    assert DELISTED not in {fact.ts_code for fact in day.facts}
+    assert day.notes.suspended_without_bar == 1  # HALTED alone
+    assert day.notes.no_bar_within_carry == 0
+
+
+def test_a_read_long_after_the_day_gives_the_evening_reads_bytes(full_store: PanelStore) -> None:
+    # A later task re-reads the signal day the next morning, after it. At `LATER` everything
+    # `FULL` stores is visible -- three more sessions, the 2026-04-13 rename and build, the
+    # 2026-04-15 listing -- and none of it may reach the day's facts.
+    assert fingerprint(read_day(full_store, as_of=LATER)) == fingerprint(read_day(full_store))
 
 
 @pytest.mark.parametrize(
