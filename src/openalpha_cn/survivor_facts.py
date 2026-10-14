@@ -24,9 +24,21 @@ a bar: the kernel sells such a holding rather than freezing it.
 
 - **A halted security with no bar still gets its row** (T6/T7 0(d)): `suspended=True`, its last
   close, and the mean amount of its last 20 bars. Without the row the kernel would sell a halted
-  holding as unassessed instead of freezing it. The last bar is looked for at most
-  `max_carry_sessions` sessions back; a listed security with none in that reach has no close to
-  carry, cannot be held, and gets no row -- counted as `FactsNotes.no_bar_within_carry`.
+  holding as unassessed instead of freezing it.
+- **How far back a halted security is looked for.** For a code in `held` (the book's holdings)
+  the last bar and the 20 bars are looked for as far back as the panel goes -- to the listing
+  day, or to the first session the bar panel holds: a holding halted for a year must still be
+  frozen, not sold. For every other security both are looked for at most `max_carry_sessions`
+  sessions back. Its `avg_amount` is then the mean of the bars within that reach, which may be
+  fewer than 20 (at least the last one); and one with no bar at all in reach gets no row,
+  counted as `FactsNotes.no_bar_within_carry`. Nothing is lost by that: such a security is not
+  held, and a row could only have said `suspended`, which keeps it out of every population the
+  screen ranks.
+- **A held code with no row is the caller's to refuse.** A held code that is listed on the day
+  and has never had a bar in the panel's reach has no close to carry, gets no row and is counted
+  in `no_bar_within_carry`; the kernel would sell it as unassessed. The caller (the daily task)
+  must refuse such a day by name. A held code that is *not* listed on the day (delisted) has no
+  row on purpose: the kernel sells it.
 - **A trading security's `avg_amount`** is the mean of its bars over the 20 sessions ending on
   the signal day (T8's `a20`). **`suspended`** is "no bar", or a halt through the close
   (`backtest.execution.suspended_at_the_close`).
@@ -88,7 +100,7 @@ with a named error instead of being reported as a young security.
 
 import math
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields
 from datetime import date, datetime
 from decimal import Decimal
@@ -188,7 +200,8 @@ DEFAULT_MIN_COVERAGE: Final[float] = 0.5
 """`build_facts_day`'s coverage threshold unless the registration states another."""
 
 DEFAULT_MAX_CARRY_SESSIONS: Final[int] = 250
-"""How far back a halted security's last bar is looked for, unless the registration says."""
+"""How far back a halted security's last bar and its 20 bars are looked for, unless the
+registration says; a held security's are not bounded."""
 
 FIVE_PERCENT_BAND: Final[float] = 0.05
 BAND_TOLERANCE: Final[float] = 0.0051
@@ -225,8 +238,9 @@ class FactsNotes:
     name_unknown_before_first: int
     """Of `name_unknown_assumed_ordinary`: a genuine gap at the corpus's left edge."""
     no_bar_within_carry: int
-    """Listed securities with no daily bar within the carry bound, which therefore have no fact
-    row at all (they cannot be held, and there is no close to carry)."""
+    """Listed securities with no daily bar in reach, which therefore have no fact row at all:
+    for a code not held, none within `max_carry_sessions` sessions; for a held code, none since
+    its listing or the panel's first session -- a day the caller must refuse by name."""
 
     def __post_init__(self) -> None:
         for item in fields(self):
@@ -469,13 +483,23 @@ def build_facts_day(
     exchange: str,
     min_coverage: float = DEFAULT_MIN_COVERAGE,
     max_carry_sessions: int = DEFAULT_MAX_CARRY_SESSIONS,
+    held: Collection[str] = (),
 ) -> FactsDay:
     """Read `session` off the panel at `as_of` as one `SecurityFacts` row per listed security.
 
     Read-only. `factor_ids` must be `config.composite_factors` (the kernel pairs the values with
     them by position), `transform` the processed tier they were built under and `exchange` the
     calendar's; the three, `min_coverage` and `max_carry_sessions` come from the registration.
-    See the module docstring for each rule; it raises the loaders' own refusals unchanged.
+    `held` is the book's current holdings: a held security halted for longer than
+    `max_carry_sessions` keeps its carried row, because its look-back is not bounded.
+
+    Every listed security gets a row except one with no bar in reach -- for a code not in `held`
+    none within `max_carry_sessions` sessions, for a held code none at all since its listing or
+    the panel's first session -- which is counted in `FactsNotes.no_bar_within_carry`. **A held
+    code that is listed on the day and has no row must be refused by the caller, by name**: the
+    kernel would sell it as unassessed. (A held code that is not listed on the day -- delisted --
+    has no row on purpose, and is sold.) See the module docstring for each rule; it raises the
+    loaders' own refusals unchanged.
     """
     if tuple(factor_ids) != config.composite_factors:
         raise SurvivorFactsError(
@@ -485,6 +509,11 @@ def build_facts_day(
     _require_coverage_threshold(min_coverage)
     if max_carry_sessions < 1:
         raise SurvivorFactsError(f"max_carry_sessions must be at least 1, not {max_carry_sessions}")
+    if isinstance(held, str):
+        raise SurvivorFactsError(
+            f"held must be a collection of codes, not the one string {held!r}, whose characters "
+            "would each be read as a code"
+        )
     published = session_publication_instant(session)
     if as_of < published:
         raise SurvivorFactsError(
@@ -502,6 +531,7 @@ def build_facts_day(
             exchange=exchange,
             min_coverage=min_coverage,
             max_carry_sessions=max_carry_sessions,
+            held=frozenset(held),
             published=published,
         )
 
@@ -517,6 +547,7 @@ def _read_facts_day(
     exchange: str,
     min_coverage: float,
     max_carry_sessions: int,
+    held: frozenset[str],
     published: datetime,
 ) -> FactsDay:
     calendar = load_trading_calendar(
@@ -560,6 +591,7 @@ def _read_facts_day(
         history=history,
         listed=frozenset(registry.listed_on(session)),
         listed_on=listed_on,
+        held=held,
         max_carry_sessions=max_carry_sessions,
     )
 
@@ -676,8 +708,9 @@ class _Walk:
 
     One read per session, newest first, and no session is kept after it is used: the 20-session
     amount window of every security trading today, and for each security with no bar today its
-    last bar (within `max_carry_sessions`) and its last 20 bars. The walk stops as soon as
-    nothing is missing, and never asks about a session before a security listed.
+    last bar and up to 20 bars back from it. Both are looked for within `max_carry_sessions`
+    sessions of the signal day, or for a code in `held` as far back as `history` goes. The walk
+    stops as soon as nothing is missing, and never asks about a session before a security listed.
     """
 
     def __init__(
@@ -689,6 +722,7 @@ class _Walk:
         history: Sequence[date],
         listed: frozenset[str],
         listed_on: Mapping[str, date],
+        held: frozenset[str],
         max_carry_sessions: int,
     ) -> None:
         def read(day: date) -> dict[str, DailyBar]:
@@ -713,9 +747,11 @@ class _Walk:
         def wanted(code: str, depth: int, day: date) -> bool:
             if day < listed_on[code]:
                 return False
-            if code not in self.last_bar:
-                return depth <= max_carry_sessions
-            return len(self.amounts[code]) < AMOUNT_WINDOW_SESSIONS
+            # The last bar and the 20-bar window share one reach: the carry bound, or for a held
+            # code the whole history.
+            if depth > max_carry_sessions and code not in held:
+                return False
+            return code not in self.last_bar or len(self.amounts[code]) < AMOUNT_WINDOW_SESSIONS
 
         for depth, day in enumerate(reversed(history)):
             window = depth < AMOUNT_WINDOW_SESSIONS

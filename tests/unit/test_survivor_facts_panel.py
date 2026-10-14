@@ -184,6 +184,9 @@ same: a code the registry knows and does not list on the signal day, with a bar 
 DELISTED: Final[str] = "600610.SH"
 """Priced through session 64 and delisted on session 65, four sessions before the signal day --
 well within the carry bound, so only "listed on the day" keeps a carried row away from it."""
+NEVER_TRADED: Final[str] = "600612.SH"
+"""Listed on session 50 and whole-day halted on every session since: listed, and never a bar."""
+NEVER_TRADED_INDEX: Final[int] = 50
 
 FRAME: Final[tuple[str, ...]] = (
     *sorted(
@@ -206,10 +209,11 @@ FRAME: Final[tuple[str, ...]] = (
     # Added after review, in the order they were added, so `j` = 40, 41, ...
     DELISTED_WITH_BARS,
     DELISTED,
+    NEVER_TRADED,
 )
 """Every security of the frame, in the order that gives each its position `j`."""
 SECURITIES: Final[tuple[str, ...]] = tuple(sorted(FRAME))
-NO_ROW: Final[frozenset[str]] = frozenset({DELISTED_WITH_BARS, DELISTED})
+NO_ROW: Final[frozenset[str]] = frozenset({DELISTED_WITH_BARS, DELISTED, NEVER_TRADED})
 """The securities of the frame that have no fact row on the signal day."""
 ROWS: Final[tuple[str, ...]] = tuple(code for code in SECURITIES if code not in NO_ROW)
 """The signal day's fact rows, ascending by code."""
@@ -302,6 +306,8 @@ def scheduled(code: str, index: int) -> bool:
         return False
     if code == DELISTED and index >= DELISTED_ON[DELISTED]:
         return False
+    if code == NEVER_TRADED:
+        return False
     return not (code == GAPPED and index in GAPPED_SESSIONS)
 
 
@@ -313,9 +319,12 @@ def trades(code: str, index: int, variant: Variant) -> bool:
 
 def banded_on(code: str, index: int) -> bool:
     """Whether a band is published for `code` on session `index`: from its first session on,
-    halted sessions included, until it is delisted."""
+    halted sessions included, until it is delisted. One that never traded has no previous close
+    to publish a band on."""
     if code == DELISTED:
         return index < DELISTED_ON[DELISTED]
+    if code == NEVER_TRADED:
+        return False
     return code != NEW_LISTING or index >= NEW_LISTING_INDEX
 
 
@@ -324,6 +333,7 @@ def halt_rows(variant: Variant) -> dict[tuple[str, int], str | None]:
     rows: dict[tuple[str, int], str | None] = {}
     rows.update({(HALTED, index): None for index in HALTED_SESSIONS})
     rows.update({(GAPPED, index): None for index in GAPPED_SESSIONS})
+    rows.update({(NEVER_TRADED, index): None for index in range(NEVER_TRADED_INDEX, SESSION_COUNT)})
     if variant.outage:
         rows.update(
             {
@@ -357,6 +367,8 @@ def previous_close(code: str, index: int, variant: Variant) -> float:
 
 
 def listing_day(code: str) -> date:
+    if code == NEVER_TRADED:
+        return SESSIONS[NEVER_TRADED_INDEX]
     return SESSIONS[NEW_LISTING_INDEX] if code == NEW_LISTING else LISTED_BEFORE_THE_CALENDAR
 
 
@@ -784,8 +796,9 @@ def test_the_signal_days_build_is_visible_at_the_read(full_store: PanelStore) ->
         for row in rows
         if row.coverage in TIER_ADMITTED_CODES["processed"] and row.value is not None
     }
-    # amihud_60 (60 own sessions within 80): every security but NEW_LISTING (10 sessions).
-    assert sorted(admitted) == sorted(set(SECURITIES) - {NEW_LISTING})
+    # amihud_60 (60 own sessions within 80): every security but NEW_LISTING (10 sessions) and
+    # NEVER_TRADED (none).
+    assert sorted(admitted) == sorted(set(SECURITIES) - {NEW_LISTING, NEVER_TRADED})
     assert admitted[HALTED] == raw_value(3, HALTED, SIGNAL_INDEX)
 
 
@@ -927,7 +940,7 @@ def test_a_security_delisted_before_the_day_has_no_row_although_its_last_bar_is_
 
     assert DELISTED not in {fact.ts_code for fact in day.facts}
     assert day.notes.suspended_without_bar == 1  # HALTED alone
-    assert day.notes.no_bar_within_carry == 0
+    assert day.notes.no_bar_within_carry == 1  # NEVER_TRADED alone
 
 
 def test_a_read_long_after_the_day_gives_the_evening_reads_bytes(full_store: PanelStore) -> None:
@@ -1003,7 +1016,8 @@ def test_the_notes_count_every_assumption_of_the_day(full_store: PanelStore) -> 
     # by band (600602, 5% with no history) one each; one delisting name (丙退); 13 ordinary codes
     # plus the eight others with no rename on file are "never renamed" (21), and 000014.SZ's only
     # rename takes effect after the day (before_first, 1). The rename of 600001.SH announced on
-    # 2026-04-13 is not visible on the 10th, so it is still an ordinary baseline.
+    # 2026-04-13 is not visible on the 10th, so it is still an ordinary baseline. NEVER_TRADED
+    # is listed and has never had a bar: no row, and the one `no_bar_within_carry`.
     assert read_day(full_store).notes == FactsNotes(
         name_unknown_assumed_ordinary=22,
         suspended_without_bar=1,
@@ -1015,7 +1029,7 @@ def test_the_notes_count_every_assumption_of_the_day(full_store: PanelStore) -> 
         st_by_band=1,
         name_unknown_no_record=21,
         name_unknown_before_first=1,
-        no_bar_within_carry=0,
+        no_bar_within_carry=1,
     )
 
 
@@ -1038,8 +1052,65 @@ def test_a_listed_security_with_no_bar_within_the_carry_bound_has_no_row_and_is_
     assert HALTED in {fact.ts_code for fact in within.facts}
     assert HALTED not in {fact.ts_code for fact in beyond.facts}
     assert (beyond.universe_size, beyond.scored_size) == (39, 38)
-    assert beyond.notes.no_bar_within_carry == 1
+    assert beyond.notes.no_bar_within_carry == 2  # HALTED and NEVER_TRADED
     assert beyond.notes.suspended_without_bar == 0
+
+
+def test_a_held_name_halted_beyond_the_carry_bound_keeps_its_row_on_its_last_close(
+    full_store: PanelStore,
+) -> None:
+    # Review Important 1. Bounded, a holding halted for longer than `max_carry_sessions` would
+    # lose its row, be sold as unassessed (`EXIT_ELIGIBILITY_LOST`) on a sell that cannot fill,
+    # and have its slot refilled. Held, both look-backs run as far as the panel goes: HALTED's
+    # last bar is three sessions back and the bound is two, yet it is carried on that close,
+    # with the mean of its last 20 bars (47..66, also past the bound).
+    not_held = read_day(full_store, max_carry_sessions=2)
+    held = read_day(full_store, max_carry_sessions=2, held=(HALTED,))
+
+    assert HALTED not in {fact.ts_code for fact in not_held.facts}
+    assert not_held.notes.no_bar_within_carry == 2
+    fact = {fact.ts_code: fact for fact in held.facts}[HALTED]
+    assert fact.suspended is True
+    assert fact.close == Decimal("36.5")
+    assert fact.avg_amount == Decimal("35565")
+    assert held.notes.no_bar_within_carry == 1  # NEVER_TRADED alone
+    assert held.notes.suspended_without_bar == 1
+
+
+def test_a_held_code_that_never_had_a_bar_has_no_row_and_is_counted(
+    full_store: PanelStore,
+) -> None:
+    # NEVER_TRADED is listed (session 50) and has never traded: even unbounded there is no close
+    # to carry, so it gets no row and is counted. The caller must refuse such a day by name --
+    # the kernel would otherwise sell the holding as unassessed.
+    day = read_day(full_store, held=(NEVER_TRADED,))
+
+    assert NEVER_TRADED not in {fact.ts_code for fact in day.facts}
+    assert day.notes.no_bar_within_carry == 1
+
+
+def test_a_halted_names_amount_window_stays_within_the_carry_bound(
+    full_store: PanelStore,
+) -> None:
+    # Review Minor 2. With a bound of 10, HALTED's bars within reach are sessions 59..66 (three
+    # to ten sessions back): eight bars, mean t = 62.5, so 1000 * 35 + 10 * 62.5 = 35625 -- the
+    # mean of the bars within the bound, not a walk on until 20 are found. Held, the window is
+    # its last 20 bars again (47..66: 35565).
+    bounded = {fact.ts_code: fact for fact in read_day(full_store, max_carry_sessions=10).facts}
+    held = {
+        fact.ts_code: fact
+        for fact in read_day(full_store, max_carry_sessions=10, held=(HALTED,)).facts
+    }
+
+    assert bounded[HALTED].avg_amount == mean([amount_of(HALTED, t) for t in range(59, 67)])
+    assert bounded[HALTED].avg_amount == Decimal("35625")
+    assert held[HALTED].avg_amount == Decimal("35565")
+
+
+def test_held_codes_given_as_one_string_are_refused(full_store: PanelStore) -> None:
+    # `"600605.SH"` is a collection of ten one-character codes, none of which is held.
+    with pytest.raises(SurvivorFactsError, match="held"):
+        read_day(full_store, held=HALTED)
 
 
 def test_a_coverage_exactly_at_the_threshold_is_accepted(coverage_store: PanelStore) -> None:
