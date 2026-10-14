@@ -3,8 +3,10 @@
 A registered configuration without a `kind` is the P6 book and runs the P6 day exactly as it did
 -- `test_daily_selection.py` runs unmodified and is the measurement of that. One whose `kind` is
 `survivor_book/v1` is read by `strategy_survivor` after step 1's admission and dispatched to the
-survivor day, which is a step-1 refusal until D5 wires it. Every other `kind`, and every survivor
-registration that cannot be read, is refused at step 1 before any request.
+survivor day (`test_daily_selection_survivor_day.py` runs it). Every other `kind`, and every
+survivor registration that cannot be read, is refused at step 1 before any request. The dispatch
+itself is seen here through the one refusal only a survivor day makes before anything: `--top`,
+which cuts the P6 day's candidate list and means nothing to it.
 
 The registrations here are committed into a throwaway repository and admitted through the real
 `admit_registration`, with `test_daily_selection.py`'s own repository and binding helpers; the
@@ -66,9 +68,10 @@ SURVIVOR_CONFIG: Final[dict[str, Any]] = {
 }
 """A survivor registration's configuration, as the design memo writes one (Part D)."""
 WATCHED: Final[tuple[str, ...]] = ("openalpha_cn.backtest.paper", "openalpha_cn.strategy_survivor")
-NOT_WIRED: Final[str] = (
-    "step 1 (registration) failed: the survivor daily day is not wired yet (V2-P7-008 D5)"
-)
+SURVIVOR_ONLY: Final[tuple[str, ...]] = ("--top", "1")
+"""An option only the survivor day refuses -- at step 1, exit 2, before any request or directory:
+what a dispatch to it looks like from outside, whatever the panel holds."""
+SURVIVOR_REFUSED: Final[str] = "step 1 (registration) failed: --top cuts the P6 day's"
 NO_REQUEST: Final[str] = "tushare requests   0 this run {}"
 
 
@@ -95,9 +98,9 @@ def _refused(
 
 
 def _stopped_at_registration(
-    world: tds.World, capsys: pytest.CaptureFixture[str]
+    world: tds.World, capsys: pytest.CaptureFixture[str], *, extra: tuple[str, ...] = ()
 ) -> tuple[int, str]:
-    code, _body, err = tds._run(world, capsys)
+    code, _body, err = tds._run(world, capsys, extra=extra)
     assert world.market.payloads == []
     assert not world.runtime.exists()
     assert NO_REQUEST in err
@@ -171,8 +174,8 @@ def test_a_survivor_registration_is_admitted_and_dispatched_to_the_survivor_day(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Admitted end to end -- committed, bound to its code, its `config_id` re-derived -- read
-    back as the book it registered, and handed to the survivor day, which refuses until D5 with
-    exit 1 and the requests spent, as every refusal prints them."""
+    back as the book it registered, and handed to the survivor day, which refuses `--top` (a P6
+    option) before anything, with the requests spent, as every refusal prints them."""
     world = _survivor_world(tmp_path, monkeypatch, SURVIVOR_CONFIG)
 
     survivor = daily.survivor_registration(daily.admit_registration(world.registration, world.repo))
@@ -181,10 +184,12 @@ def test_a_survivor_registration_is_admitted_and_dispatched_to_the_survivor_day(
     assert survivor.book.config_id == BOOK.config_id
     assert survivor.adapter.max_panel_catch_up_sessions == 10
 
-    code, err = _stopped_at_registration(world, capsys)
+    code, err = _stopped_at_registration(world, capsys, extra=SURVIVOR_ONLY)
 
-    assert code == 1 == daily.DailyExit.step_failed
-    assert err.splitlines() == [NOT_WIRED, NO_REQUEST]
+    assert code == 2 == daily.DailyExit.no_registration
+    first, *rest = err.splitlines()
+    assert first.startswith(SURVIVOR_REFUSED)
+    assert rest == [NO_REQUEST]
 
 
 def test_an_unknown_kind_exits_2_before_any_request(
@@ -314,8 +319,9 @@ _IN_A_FRESH_INTERPRETER: Final[str] = (
 
 def modules_a_day_loads(form: str, root: str) -> dict[str, Any]:
     """Run one day of `form` -- `"p6"` end to end on `test_daily_selection`'s January world, or
-    `"survivor"` up to its dispatch -- under `root`, and say which of `WATCHED` the process held
-    before it and after. Meant for a fresh interpreter: in the test process both are loaded."""
+    `"survivor"` up to its dispatch (and its refusal of `--top`) -- under `root`, and say which of
+    `WATCHED` the process held before it and after. Meant for a fresh interpreter: in the test
+    process both are loaded."""
     before = [name for name in WATCHED if name in sys.modules]
     monkeypatch = pytest.MonkeyPatch()
     out, err = io.StringIO(), io.StringIO()
@@ -336,6 +342,8 @@ def modules_a_day_loads(form: str, root: str) -> dict[str, Any]:
             arguments += ["--as-of", tds.DAY_AS_OF.isoformat(), "--json"]
             for target in tds.TARGETS:
                 arguments += ["--dataset", target]
+            if form != "p6":
+                arguments += SURVIVOR_ONLY
             code = daily.main(arguments, clock=lambda: tds.RUN_CLOCK)
     finally:
         monkeypatch.undo()
@@ -390,7 +398,7 @@ def test_a_survivor_dispatch_loads_both_which_is_what_the_p6_probe_would_see(
     measurement and not a probe that cannot see."""
     report = _in_a_fresh_interpreter("survivor", tmp_path / "survivor")
 
-    assert report["exit"] == 1, report["stderr"]
-    assert report["stderr"].splitlines()[0] == NOT_WIRED
+    assert report["exit"] == 2, report["stderr"]
+    assert report["stderr"].splitlines()[0].startswith(SURVIVOR_REFUSED)
     assert report["before"] == []
     assert report["after"] == list(WATCHED)

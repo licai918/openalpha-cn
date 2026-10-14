@@ -5,13 +5,14 @@ Beside `research_repo.py` for its reason: the daily command's test modules share
 each would let two of them test against two different markets. Everything is generated at test
 time; nothing is checked in and nothing reaches the network.
 
-The market is `SECURITIES` (plus one security delisted before the frame, so the registry holds a
-partition in the frame's year, as a real one does) over `open_days`: closes follow a deterministic
-walk of at most 2% a session, so a one-session reversal ranks the market differently every day.
-The transport answers every target the daily command asks for -- the price targets per session,
-the calendar per year, the registry, the three index series, the index weights, the name
-history, the four statement sweeps (`*_vip`) and the SW2021 industry tree and memberships -- and
-records each request's `api_name` and parameters. What it publishes can be moved on:
+The market is `SECURITIES` -- or the `securities` a test gives it -- (plus one security delisted
+before the frame, so the registry holds a partition in the frame's year, as a real one does) over
+`open_days`: closes follow a deterministic walk of at most 2% a session, so a one-session
+reversal ranks the market differently every day. The transport answers every target the daily
+command asks for -- the price targets per session, the calendar per year, the registry, the three
+index series, the index weights, the name history, the four statement sweeps (`*_vip`) and the
+SW2021 industry tree and memberships -- and records each request's `api_name` and parameters.
+What it publishes can be moved on:
 
 - `disputed`: `DISPUTED_CODE`'s adjustment factor steps on that session while its published
   `pre_close` does not, and the band published for it that session lies wholly above its close
@@ -267,11 +268,15 @@ class Market:
     `(l1_code, is_new)` slice stays right: `"lost"` drops the first current row (a page gap),
     `"doubled"` serves it twice; `"raises"` and `"overlap"` (`PAGED_FAULTS`) make the current
     answer page past the cap and fail on its second page -- see `_paged_fault`."""
+    securities: tuple[str, ...] = SECURITIES
+    """The listed securities the market trades, each from 10 yuan plus its position: `SECURITIES`
+    unless a test needs a wider cross section (the registered transform refuses one under 100,
+    `CROSS_SECTION_STANDARD.min_cross_section`). `DISPUTED_CODE` stays `SECURITIES[0]`."""
     requests: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         closes: dict[str, list[float]] = {}
-        for index, code in enumerate(SECURITIES):
+        for index, code in enumerate(self.securities):
             path, previous = [], 10.0 + index
             for position in range(len(self.open_days)):
                 step = ((index * 37 + position * 101) % 17 - 8) / 400
@@ -300,7 +305,7 @@ class Market:
 
     def _pre_close(self, code: str, day: date) -> float:
         position = self.open_days.index(day)
-        return self._closes[code][position - 1] if position else 10.0 + SECURITIES.index(code)
+        return self._closes[code][position - 1] if position else 10.0 + self.securities.index(code)
 
     def _factor(self, code: str, day: date) -> float:
         return 1.1 if code == DISPUTED_CODE and self.disputed and day >= self.disputed else 1.0
@@ -308,7 +313,7 @@ class Market:
     def _trading(self, day: date) -> tuple[str, ...]:
         return tuple(
             code
-            for code in SECURITIES
+            for code in self.securities
             if not any(code == gone and day >= on for gone, on in self.delisted)
         )
 
@@ -331,7 +336,7 @@ class Market:
             # A resumption on each year's first session: a year of `suspend_d` with no row at all
             # is not a partition, and a real market has none.
             if day == next(open_day for open_day in self.open_days if open_day.year == day.year):
-                rows = [[SECURITIES[-1], compact(day), "R", None]]
+                rows = [[self.securities[-1], compact(day), "R", None]]
             return HALT_FIELDS, rows
         if api_name == PRICE_LIMIT_DATASET:
             rows = [
@@ -403,15 +408,17 @@ class Market:
             return []
         day = compact(month[-1])
         return [
-            [params["index_code"], SECURITIES[0], day, 60.0],
-            [params["index_code"], SECURITIES[1], day, 40.0],
+            [params["index_code"], self.securities[0], day, 60.0],
+            [params["index_code"], self.securities[1], day, 40.0],
         ]
 
     def _names(self, params: Mapping[str, Any]) -> list[list[Any]]:
         start = self.open_days[0]
         if str(params["start_date"])[:4] != str(start.year):
             return []
-        return [[code, code, compact(start), None, compact(start), "改名"] for code in SECURITIES]
+        return [
+            [code, code, compact(start), None, compact(start), "改名"] for code in self.securities
+        ]
 
     def _filings(self, dataset: str) -> list[tuple[str, str, str, list[float]]]:
         """Each registered security's filings: the annual report of two years back, announced
@@ -422,7 +429,7 @@ class Market:
         year = self.open_days[-1].year
         width = len(STATEMENT_DATA_COLUMNS[dataset])
         filings = []
-        for index, code in enumerate(SECURITIES):
+        for index, code in enumerate(self.securities):
             values = [1.0e8 * (index + 1) + column for column in range(width)]
             filings.append((code, f"{year - 2}1231", f"{year - 1}0420", values))
             for period, announced in (("0331", "0428"), ("0630", "0828"), ("0930", "1028")):
@@ -489,7 +496,7 @@ class Market:
         changes = {code: (day, new) for code, day, new in self.reclassified if day <= today}
         unassigned = {code for code, day in self.first_assigned if day > today}
         rows: list[list[Any]] = []
-        for index, code in enumerate(SECURITIES):
+        for index, code in enumerate(self.securities):
             if code in unassigned:
                 continue
             first_day = next((day for c, day in self.first_assigned if c == code), None)
@@ -531,7 +538,7 @@ class Market:
                 [code, code, "SSE", "主板", "D", "20100104", compact(gone[code])]
                 if code in gone
                 else [code, code, "SSE", "主板", "L", "20100104", None]
-                for code in SECURITIES
+                for code in self.securities
             ]
             retired = [list(row) for row in RETIRED_ROWS]
             return response(REGISTRY_FIELDS, [*listed, *retired, list(DELISTED_ROW)])
