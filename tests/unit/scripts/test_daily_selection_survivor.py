@@ -22,7 +22,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any, Final
 
 import pytest
@@ -525,8 +525,10 @@ def _facts(store: Store, day: date, monkeypatch: pytest.MonkeyPatch) -> Any:
     The factor tiers are the one read replaced: they are step 4's, built at the session's 16:30
     from datasets the first test here shows the survivor day fetches, and the registered
     transform needs a cross section of 100 the scripted market does not have. The stand-in
-    answers no value and records what it was asked -- the session's year, at its 16:30 -- and
-    the coverage floor is 0, so every other read of the day has to pass for the call to."""
+    answers one row that carries no value -- a build exists at the instant, so the day is not
+    refused for a missing build, and no security is scored -- and records what it was asked:
+    the session's year, at its 16:30. The coverage floor is 0, so every other read of the day
+    has to pass for the call to."""
     asked: list[tuple[tuple[int, ...], datetime | None]] = []
 
     def no_build(
@@ -537,9 +539,9 @@ def _facts(store: Store, day: date, monkeypatch: pytest.MonkeyPatch) -> Any:
         years: Sequence[int],
         as_of: datetime,
         at: datetime | None = None,
-    ) -> tuple[()]:
+    ) -> tuple[Any, ...]:
         asked.append((tuple(years), at))
-        return ()
+        return (SimpleNamespace(subject="000000.SZ", value=None, coverage="not_in_universe"),)
 
     monkeypatch.setattr(survivor_facts, "load_processed_factor_observations", no_build)
     config = SurvivorBookConfig(seed=0, min_listing_sessions=0)
