@@ -194,7 +194,8 @@ THINNED: Final[str] = "600608.SH"
 THICKENED: Final[str] = "000009.SZ"
 """The name the liquidity cut lets in when `THINNED` drops below it."""
 AMOUNT_WINDOW_FIRST: Final[date] = SESSIONS[SIGNAL_INDEX - AMOUNT_WINDOW_SESSIONS + 1]
-"""2026-03-13: the first of the 20 sessions whose bars are the eligible names' amounts."""
+"""Monday 2026-03-16, session 50: the first of the 20 sessions whose bars are the eligible names'
+amounts."""
 DIFFERS: Final = "recompute_differs"
 FAILED: Final = "recompute_failed"
 SCOPES: Final[tuple[str, ...]] = (DIFFERS, FAILED)
@@ -1080,7 +1081,7 @@ def test_the_provenance_names_the_builds_the_windows_and_every_partition_they_to
         IDENTITY.qualified_key,
         IDENTITY.transform_id,
     )
-    assert provenance.amount_window_from == AMOUNT_WINDOW_FIRST == date(2026, 3, 13)
+    assert provenance.amount_window_from == AMOUNT_WINDOW_FIRST == date(2026, 3, 16)
     assert {factor: (build, output) for factor, build, output in provenance.builds} == (
         builds_at_the_signal_instant(evening_store)
     )
