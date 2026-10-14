@@ -30,9 +30,27 @@ one `os.replace` -- a rename, atomic on one filesystem. A write that dies before
 only the `.partial`, which no listing and no `get` reads, so a reader finds either the whole
 snapshot or none. A later write of the same session truncates the leftover and replaces it.
 
+**The fsync policy.** The file is synced before the rename, and the directory holding it is
+synced after, because the rename is a change to the directory: without the second sync a power
+loss can lose the rename while the paper ledger (SQLite, which syncs its own commits) keeps that
+session's rows, and the next settlement would find the session missing --
+`backtest/paper_state.latest_snapshot` then refuses it by name rather than skipping it. What
+the policy does not cover, stated rather than hidden:
+
+- **macOS**: `os.fsync` is `fsync(2)`, which hands the bytes to the drive but does not make the
+  drive flush its own cache; `fcntl(F_FULLFSYNC)` would, and this store does not issue it. On
+  macOS a power loss can still lose a write `put` returned from.
+- **Windows**: a directory cannot be opened to sync it, so the directory sync is skipped
+  (`_SYNC_DIRECTORIES`) and the rename's durability is NTFS's metadata journal's.
+- **The first write** creates the directory itself; that creation is not synced into its parent.
+  A lost first write is a store with no snapshot, which every reader refuses as such.
+
 What this store does **not** do is notice a document edited in place or damaged after the fact:
 it hashes nothing and parses nothing. `backtest/paper_state.open_snapshot` is where that is
-caught -- it re-derives the address from the content and refuses a mismatch by name.
+caught -- it re-derives the address from the content and refuses a mismatch by name. The one
+fault this store does name is bytes that are not UTF-8 text, because decoding them is its own
+step: that arrives as `PaperStateStoreError` naming the document, never as the
+`UnicodeDecodeError` (a `ValueError`) `read_text` raises.
 
 Both filename components are checked rather than escaped: the date is a `date` rendered by
 `isoformat`, and the id must be exactly `stable_model_id(prefix="pbs", ...)`'s shape, so nothing a
@@ -56,6 +74,10 @@ __all__ = [
 
 SNAPSHOT_DOCUMENT_SUFFIX: Final[str] = ".json"
 
+_SYNC_DIRECTORIES: Final[bool] = os.name != "nt"
+"""Whether a write syncs the directory after its rename: everywhere but Windows, which cannot
+open a directory as a file (see the module docstring's fsync policy)."""
+
 SNAPSHOT_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"pbs_[0-9a-f]{24}")
 """Exactly what `stable_model_id(prefix="pbs", ...)` produces, and nothing else.
 
@@ -66,7 +88,8 @@ final newline, and this token becomes a filename component.
 
 
 class PaperStateStoreError(RuntimeError):
-    """Raised for an unusable snapshot key, or for a second snapshot under a settled session.
+    """Raised for an unusable snapshot key, a second snapshot under a settled session, two
+    documents found for one session, or a document whose bytes are not UTF-8 text.
 
     A `RuntimeError` for `ExperimentStoreError`'s reason: this layer may not import the backtest
     module's own error, and a `ValueError` would put a store refusal inside every
@@ -113,14 +136,29 @@ class FilePaperStateStore:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, document)
+        _sync_directory(self.path)
         return "created"
 
     def get(self, session: date) -> tuple[str, str] | None:
-        """`(snapshot_id, payload)` held for `session`, or `None` when nothing is."""
+        """`(snapshot_id, payload)` held for `session`, or `None` when nothing is.
+
+        Bytes that are not UTF-8 text are refused as `PaperStateStoreError`, naming the
+        document: `read_text`'s `UnicodeDecodeError` is a `ValueError`, and would otherwise
+        reach a caller as one.
+        """
         held = self._held(session)
         if held is None:
             return None
-        return held.name.split(".")[1], held.read_text(encoding="utf-8")
+        try:
+            payload = held.read_text(encoding="utf-8")
+        except UnicodeDecodeError as error:
+            raise PaperStateStoreError(
+                f"the snapshot document {held.name} held for {session.isoformat()} is not UTF-8 "
+                f"text ({error}): its bytes were damaged, or written by something other than "
+                "this store. Nothing here repairs or overwrites it, and a snapshot that cannot "
+                "be read is refused rather than taken for an empty book"
+            ) from error
+        return held.name.split(".")[1], payload
 
     def sessions(self) -> tuple[date, ...]:
         """Every session a snapshot is held for, ascending.
@@ -152,6 +190,17 @@ class FilePaperStateStore:
 
     def _document(self, session: date, snapshot_id: str) -> Path:
         return self.path / f"{session.isoformat()}.{snapshot_id}{SNAPSHOT_DOCUMENT_SUFFIX}"
+
+
+def _sync_directory(path: Path) -> None:
+    """Make a rename in `path` durable by syncing the directory itself (not on Windows)."""
+    if not _SYNC_DIRECTORIES:
+        return
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _session_of(document: Path) -> date:

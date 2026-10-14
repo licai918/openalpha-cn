@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -564,6 +565,90 @@ def test_an_interrupted_write_leaves_no_snapshot_behind(
     assert save_snapshot(store, snapshot) == "created"
     assert load_snapshot(store, S2) == snapshot
     assert [entry.name for entry in store.path.iterdir()] == [_document(store, S2).name]
+
+
+def _record_the_write(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, ...]]:
+    """Every `os.fsync` (of a file or of a directory, by inode) and `os.replace`, in order."""
+    events: list[tuple[str, ...]] = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def fsync(descriptor: int) -> None:
+        status = os.fstat(descriptor)
+        kind = "directory" if stat.S_ISDIR(status.st_mode) else "file"
+        events.append(("fsync", kind, str(status.st_ino)))
+        real_fsync(descriptor)
+
+    def replace(source: Any, target: Any) -> None:
+        events.append(("replace",))
+        real_replace(source, target)
+
+    monkeypatch.setattr("openalpha_cn.storage.paper_state.os.fsync", fsync)
+    monkeypatch.setattr("openalpha_cn.storage.paper_state.os.replace", replace)
+    return events
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows cannot open a directory to fsync it")
+def test_the_rename_is_made_durable_by_syncing_the_directory_after_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The file's bytes are synced before the rename and the directory after it: without the
+    second, a power loss can lose the rename while the paper ledger keeps that session's rows,
+    and the next settlement would find the session missing."""
+    store = FilePaperStateStore(tmp_path / "snapshots")
+    store.path.mkdir()
+    events = _record_the_write(monkeypatch)
+
+    save_snapshot(store, held_snapshot())
+
+    directory = str(store.path.stat().st_ino)
+    assert [event[:2] for event in events] == [
+        ("fsync", "file"),
+        ("replace",),
+        ("fsync", "directory"),
+    ]
+    assert events[-1] == ("fsync", "directory", directory)
+    events.clear()
+    assert save_snapshot(store, held_snapshot()) == "unchanged"
+    assert events == []  # the same snapshot again writes, and so syncs, nothing
+
+
+def test_where_a_directory_cannot_be_synced_the_rename_is_left_to_the_filesystem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Windows branch, exercised on every platform: no directory is opened, and the write
+    is otherwise the same -- file synced, then renamed."""
+    monkeypatch.setattr("openalpha_cn.storage.paper_state._SYNC_DIRECTORIES", False)
+    store = FilePaperStateStore(tmp_path / "snapshots")
+    events = _record_the_write(monkeypatch)
+
+    assert save_snapshot(store, held_snapshot()) == "created"
+
+    assert [event[:2] for event in events] == [("fsync", "file"), ("replace",)]
+
+
+def test_a_snapshot_document_that_is_not_text_is_refused_as_a_store_error_not_a_value_error(
+    tmp_path: Path,
+) -> None:
+    """Two bytes that are not UTF-8 make `read_text` raise `UnicodeDecodeError`, a `ValueError`
+    -- the exception `PaperStateError` is a `RuntimeError` to keep out of a caller's
+    `except ValueError`. The store names the document instead (`V2-P4-096`'s lesson: a fault in
+    the stored bytes is the store's to name, not an escape)."""
+    store = FilePaperStateStore(tmp_path / "snapshots")
+    save_snapshot(store, held_snapshot())
+    document = _document(store, S2)
+    document.write_bytes(b"\xff\xfe")
+    named = rf"the snapshot document {re.escape(document.name)} held for 2021-03-03 is not UTF-8"
+
+    for read in (
+        lambda: store.get(S2),
+        lambda: load_snapshot(store, S2),
+        lambda: save_snapshot(store, held_snapshot()),
+    ):
+        with pytest.raises(PaperStateStoreError, match=named) as refused:
+            read()
+        assert not isinstance(refused.value, ValueError)
+        assert isinstance(refused.value.__cause__, UnicodeDecodeError)
+    assert document.read_bytes() == b"\xff\xfe"  # refused, not overwritten
 
 
 def test_a_missing_snapshot_is_refused_by_name_and_never_read_as_an_empty_book(
