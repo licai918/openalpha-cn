@@ -79,8 +79,9 @@ to four processed tiers that is about 50 s a day (T6-T7 3.4). The survivor prove
 
 **What it costs, measured once on one machine** (the synthetic frame of
 `tests/unit/test_survivor_facts_panel.py`: 16 partitions, best of seven warm runs; the script is
-not committed): 0.32 s, two catalog lookups per partition (about 9 ms each, one DuckDB
-connection apiece) and four manifest reads, and no partition read. Its cost grows with the
+not committed; re-measured after the windows): 0.31 s, two catalog lookups per partition (about
+9 ms each, one DuckDB connection apiece), four manifest reads and one calendar read, and no read
+of a data partition. Its cost grows with the
 number of partitions and not with their rows. The frame is too small to show the saving -- the
 P6 per-row form over the same 16 partitions took 0.31 s there -- which is the point of the
 measurement that motivated this form: on the research store the P6 form hashed every row of the
