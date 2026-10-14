@@ -594,6 +594,30 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "strategy_survivor_facts._SECURITY_CODE",
         }
     ),
+    "openalpha_cn.strategy_survivor_registration": frozenset(
+        {
+            # V2-P7-008. The survivor day's forward record: the facts day it scores and the
+            # reader that scores a filed record's day again (`build_facts_day`), ...
+            "strategy_survivor_facts.FactsDay",
+            "strategy_survivor_facts.build_facts_day",
+            # ... P6's record vocabulary, reused rather than restated: the composite's name, the
+            # registration a record declares, its refusal, a filing's digest and its custody
+            # instant ...
+            "strategy_registration.COMPOSITE_MODEL_NAME",
+            "strategy_registration.RegisteredConfiguration",
+            "strategy_registration.StrategyRegistrationError",
+            "strategy_registration.batch_digest",
+            "strategy_registration.registered_at",
+            # ... and the input provenance, read off the catalog: which processed build of each
+            # factor stands at the session's 16:30, and the datasets of the factor tiers it
+            # reads. The 16:30 rule is `session_publication_instant`'s.
+            "panel_factors.FACTOR_DEFINITIONS",
+            "panel_factors.factor_transform_manifest_dataset",
+            "panel_factors.load_factor_transform_manifests",
+            "panel_factors.processed_factor_dataset",
+            "panel_ingest.session_publication_instant",
+        }
+    ),
     "openalpha_cn.strategy_view": frozenset(
         {
             "factor_view.FactorRequestError",
@@ -904,6 +928,33 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
         # factors (`adj_factor`) and the benchmark's close (`index_daily`).
         named=frozenset(),
         reached=frozenset({"adj_factor", "daily", "index_daily", "stk_limit", "suspend_d"}),
+    ),
+    "openalpha_cn.strategy_survivor_registration": DatasetReach(
+        # V2-P7-008. It names the six datasets whose partitions a survivor day reads, so its
+        # input provenance can ask the catalog about each -- `trade_cal`, `stock_basic`,
+        # `namechange` and `daily` in every stored year through the session's, `suspend_d` and
+        # `stk_limit` in the session's -- a fingerprint of the catalog, never a read answered
+        # with. Everything it reads arrives through `build_facts_day`, which it takes across the
+        # seam to score a filed record's day again.
+        named=frozenset(
+            {"daily", "namechange", "stk_limit", "stock_basic", "suspend_d", "trade_cal"}
+        ),
+        reached=frozenset(
+            {
+                "balancesheet",
+                "cashflow",
+                "daily",
+                "daily_basic",
+                "fina_indicator",
+                "income",
+                "index_daily",
+                "namechange",
+                "stk_limit",
+                "stock_basic",
+                "suspend_d",
+                "trade_cal",
+            }
+        ),
     ),
     "openalpha_cn.strategy_view": DatasetReach(
         # V2-P6-007. It named `index_member_all` only to ask the store which membership years
