@@ -588,6 +588,10 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_ingest.load_price_limits",
             "panel_ingest.load_suspensions",
             "panel_ingest.session_publication_instant",
+            # The facts adapter's spelling of a security code, shared so a name the book holds
+            # or orders is refused for the same typos the facts day refuses. A pattern: it
+            # reaches no dataset.
+            "strategy_survivor_facts._SECURITY_CODE",
         }
     ),
     "openalpha_cn.strategy_view": frozenset(

@@ -101,8 +101,13 @@ from openalpha_cn.panel_ingest import (
     session_publication_instant,
 )
 
+# The facts adapter's spelling of a security code, shared rather than restated a second time: a
+# name the book holds or orders is a code the facts day spelled, and both refuse the same typos.
+from openalpha_cn.strategy_survivor_facts import _SECURITY_CODE
+
 __all__ = [
     "PROTOCOL_BENCHMARK",
+    "MalformedNameError",
     "MissingBenchmarkError",
     "SessionMarket",
     "SessionOrdinalError",
@@ -122,6 +127,11 @@ class SessionOrdinalError(ValueError):
 
 class SettlementMarketError(ValueError):
     """A session market that cannot be read as asked."""
+
+
+class MalformedNameError(SettlementMarketError):
+    """A name asked for is not spelled as a security code, so it could match no daily row and
+    an order for it would read as not attempted on every session."""
 
 
 class MissingBenchmarkError(SettlementMarketError):
@@ -220,14 +230,28 @@ def settlement_market(
 
     Read-only. `calendar` is the exchange's, reaching the session; `as_of` at or after the
     session's 16:30 publication. Refuses by name a read before the publication, a session that
-    is not an open one of `calendar`, `names` given as one string, a name asked for with a
-    `daily` row and no published band (`UnbandedBarError`), and a benchmark with no close on the
-    session (`MissingBenchmarkError`); the loaders' own refusals are raised unchanged.
+    is not an open one of `calendar`, `names` given as one string or holding a name not spelled
+    as a security code (`MalformedNameError`, the facts adapter's spelling), a name asked for
+    with a `daily` row and no published band (`UnbandedBarError`), and a benchmark with no close
+    on the session (`MissingBenchmarkError`); the loaders' own refusals are raised unchanged.
     """
     if isinstance(names, str):
         raise SettlementMarketError(
             f"names must be a collection of codes, not the one string {names!r}, whose "
             "characters would each be read as a code"
+        )
+    malformed = sorted(
+        {
+            repr(code)
+            for code in names
+            if not isinstance(code, str) or _SECURITY_CODE.fullmatch(code) is None
+        }
+    )
+    if malformed:
+        raise MalformedNameError(
+            f"name(s) {', '.join(malformed)} are not spelled as a security code -- six digits, a "
+            "dot and SH, SZ or BJ -- so each would match no daily row, and an order for one would "
+            "read as not attempted on every session (a sale never expires)"
         )
     asked = tuple(sorted(set(names)))
     published = session_publication_instant(session)

@@ -71,6 +71,7 @@ from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_ingest import session_publication_instant, write_index_prices
 from openalpha_cn.storage.portfolio import SQLitePortfolioLedger
 from openalpha_cn.strategy_survivor_market import (
+    MalformedNameError,
     MissingBenchmarkError,
     SessionMarket,
     SessionOrdinalError,
@@ -543,6 +544,23 @@ def test_one_string_is_refused_as_the_names_rather_than_read_as_its_characters(
         settlement_market(
             corpus, session=TIMED_ON, as_of=PANEL.as_of, names=ORDINARY, calendar=CALENDAR
         )
+
+
+def test_a_name_not_spelled_as_a_security_code_is_refused_by_name_before_anything_is_read(
+    corpus: PanelStore,
+) -> None:
+    """A misspelled code matches no daily row, so an order for it would be not attempted on
+    every session -- and a sale never expires. The facts adapter's spelling, matched whole."""
+    misspelled = ("600000.sh", "60000.SH", "000002.SZ\n", "000002.XSHE")
+
+    with pytest.raises(MalformedNameError) as refused:
+        read(corpus, TIMED_ON, ORDINARY, *misspelled)
+    with pytest.raises(MalformedNameError, match=re.escape("600000")):
+        read(corpus, TIMED_ON, ORDINARY, 600000)  # type: ignore[arg-type]
+
+    assert all(repr(code) in str(refused.value) for code in misspelled)
+    assert repr(ORDINARY) not in str(refused.value)
+    assert issubclass(MalformedNameError, SettlementMarketError)
 
 
 @pytest.mark.parametrize(
