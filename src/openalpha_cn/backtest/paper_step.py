@@ -29,21 +29,63 @@ of those four:
    the P6 book's: every price of a held name's bar -- previous close, open, high, low, close and
    the published band -- is multiplied by `adjustment_ratio[code] = adj_factor(session) /
    adj_factor(entry session)`, so the ledger keeps the shares and costs it bought with and the
-   prices meet it in those units. Unscaled, a 1.15 event marks the holding down by
-   1 - 1 / 1.15 = 13% on a session nobody lost anything. **Disclosed cost:** the ledger's share
-   count is the count at purchase, not what an account holds after a bonus issue; the notional,
-   fees and cash agree with the account, and anything that shows shares to a person converts.
+   prices meet it in those units. The *entry session* is the session on which the BUY FILLED,
+   not the one that planned it: an ex-rights date between the signal and the fill would make the
+   signal-day factor wrong. Unscaled, a 1.15 event marks the holding down by
+   1 - 1 / 1.15 = 13% on a session nobody lost anything.
 
-Order of execution: **sells first** (by code), so a sale's cash is there for the session's buys;
-then **buys, the earliest-planned first** (by `signal_session`, the caller's order within one
-session -- the draw order). `build_trade_list` sized today's buys after reserving cash for the
-buys still live from earlier sessions, so those are the ones the cash was kept for.
-`advance_orders` lists live buys before live sells; the order it hands back does not matter here.
+   **What the convention does not cover** (disclosed, not fixed):
 
-What the caller owes, because a pure function cannot check it: `orders` are the orders due on
-`session` (the caller maps `execute_session` ordinals to dates); `bars` is every bar of the
-session it has (the runner ignores names it neither holds nor trades); and `adjustment_ratio`
-names every held name whose factor has moved since it was bought.
+   - The ledger's share count is the count at purchase, not what an account holds after a bonus
+     issue or a split. For those two the notional, fees and cash agree with the account to the
+     fen (1,000 ledger shares sold at 20.00 on the ex-date of a 10-for-10 issue are 2,000 real
+     shares at 10.00), and anything that shows shares to a person converts.
+   - A **cash dividend** does not agree with the account. The convention reinvests the dividend
+     into the name: it reaches cash only when the name is sold, no dividend tax is charged
+     (the A-share tax is 20% / 10% / 0% by holding period), and commission and stamp duty on
+     the sale are charged on the dividend-inclusive notional, where an account sells at the
+     ex-dividend price and has received the dividend separately.
+   - Across an adjustment event the ledger's prices are in the ledger's own basis. A name held
+     through one is sold at `open x ratio` and marked at `close x ratio`: a `filled_price` or a
+     mark that nobody traded at, often a 28-significant-digit `Decimal`
+     (`10.11707317073170731707317073`). The notional is quantised to the cent, so cash is exact;
+     a report that reads a `filled_price` or a mark of such a name must convert it (divide by
+     the ratio) or say that it is in ledger units.
+
+Order of execution: **sells first** (by code, then order id), so a sale's cash is there for the
+session's buys; then **buys, the earliest-planned first** (by `signal_session`; within one
+signal session, in the order the caller hands them in). `build_trade_list` sized today's buys
+after reserving cash for the buys still live from earlier sessions, so those are the ones the
+cash was kept for. The caller's order within one signal session is the selection rule's draw
+order on a buy's *first* attempt only: from the second attempt on, `advance_orders` has
+re-sorted the live orders by `(side, ts_code, order_id)`, so the buys of one signal day come
+back in code order and the draw order is lost. The effect is small, because the cash for every
+carried buy was reserved in full when it was planned, but it is not nil: when cash covers only
+some of them, which of the same-day buys fills follows that order.
+
+What the caller owes, and what the builder refuses by name:
+
+- `orders` are the orders due on `session` or carried to it from an earlier one. `session_index`
+  is `session`'s ordinal in the trading calendar, the ordinal `TradeOrder` counts
+  `signal_session`, `execute_session` and `expires_session` in. An order that executes after
+  it (planned after today's close, executing tomorrow) is *not due yet* and a buy whose last
+  session is before it has *expired*: both are refused, because handed to today's step the
+  first would fill at the open of the session that produced it. An order carried from an
+  earlier session (`execute_session <= session_index`) is accepted.
+- `bars` is every bar of the session it has (the runner ignores names it neither holds nor
+  trades), each dated `session` and carrying the exchange's published band.
+- `adjustment_ratio` names **every held name that matters for the session, with an explicit 1
+  for a name whose factor has not moved.** In `build_paper_step` that is every name with a SELL
+  order, whether or not it has a bar, since a sell is for a held name; in `remark_at_close` it
+  is every held name that has a bar that session, including a name bought on that session
+  (held now; its entry factor is today's, so its ratio is 1). An entry that is missing is
+  refused by name and never read as 1: 1 says "the factor has not moved", and a forgotten entry
+  would sell the ledger's shares at the unscaled price and write the wrong cash into an
+  append-only ledger (1,000 shares bought at 20.00 and sold on the ex-date of a 10-for-10 bonus
+  issue realise -10,010.10 with no entry, not -16.20). A BUY of a name not held needs no entry
+  (it is at ratio 1 on the session it fills; an entry other than 1 is refused), and a held name
+  with no bar is carried unchanged and needs none. `build_paper_step` does not see the book, so
+  a held name that is neither sold nor bought is checked only by `remark_at_close`.
 
 `remark_at_close` finishes the session: the runner leaves an ordered name marked at the open it
 was judged at, and the day ends at the close.
@@ -120,6 +162,7 @@ def attempt_id(order: TradeOrder, session: date) -> str:
 def build_paper_step(
     *,
     session: date,
+    session_index: int,
     orders: Sequence[TradeOrder],
     bars: Mapping[str, MarketBar],
     adjustment_ratio: Mapping[str, Decimal],
@@ -127,12 +170,23 @@ def build_paper_step(
 ) -> PaperStepPlan:
     """The step for `session` and the attempt of every order in `orders`; see the module doc.
 
-    `bars` must all be dated `session` and carry the exchange's published band;
-    `benchmark_close` goes into the step unchanged (the paper book does not keep it).
+    `session_index` is `session`'s ordinal in the trading calendar: an order that executes after
+    it is refused as not due yet, and a buy whose last session is before it as expired.
+    `bars` must all be dated `session` and carry the exchange's published band.
+    `adjustment_ratio` must name the code of every SELL order, with an explicit 1 where its
+    factor has not moved; a missing entry is refused by name, not read as 1. A buy of a name not
+    held needs no entry. `benchmark_close` goes into the step unchanged (the paper book does not
+    keep it).
     """
     _check_bars(session, bars)
     ratios = _checked_ratios(adjustment_ratio)
     planned = _in_execution_order(orders)
+    _check_due(session_index, planned)
+    _refuse(
+        "sells for names with no adjustment ratio (a sell is for a held name, so the table "
+        "names it, with an explicit 1 where its factor has not moved)",
+        {order.ts_code for order in planned if order.side == "sell"} - ratios.keys(),
+    )
     rebased = sorted(
         {order.ts_code for order in planned if order.side == "buy"}
         & {code for code, ratio in ratios.items() if ratio != _ONE}
@@ -189,16 +243,25 @@ def remark_at_close(
 ) -> PortfolioState:
     """`state` with every held name that has a bar marked at its close, in the ledger's units.
 
-    Pass the `bars` and `adjustment_ratio` the session's step was built from. A held name with
-    no bar keeps its mark; cash, positions, fees and realized profit are untouched.
+    Pass the `bars` the session's step was built from, and an `adjustment_ratio` naming every
+    held name that has a bar that session -- an explicit 1 where its factor has not moved, and
+    for a name bought on this session; a missing entry is refused by name, not read as 1. A held
+    name with no bar keeps its mark and needs no entry; cash, positions, fees and realized
+    profit are untouched.
     """
     _check_bars(state.as_of, bars)
     ratios = _checked_ratios(adjustment_ratio)
+    _refuse(
+        "held names with a bar and no adjustment ratio (the table names every held name that "
+        "has a bar, with an explicit 1 where its factor has not moved)",
+        {position.subject for position in state.positions if position.subject in bars}
+        - ratios.keys(),
+    )
     marks = {mark.subject: mark.price for mark in state.marks}
     for position in state.positions:
         bar = bars.get(position.subject)
         if bar is not None:
-            marks[position.subject] = bar.close * ratios.get(position.subject, _ONE)
+            marks[position.subject] = bar.close * ratios[position.subject]
     return PortfolioState(
         as_of=state.as_of,
         cash=state.cash,
@@ -218,6 +281,31 @@ def _in_execution_order(orders: Sequence[TradeOrder]) -> tuple[TradeOrder, ...]:
     sells = sorted((o for o in orders if o.side == "sell"), key=lambda o: (o.ts_code, o.order_id))
     buys = sorted((o for o in orders if o.side == "buy"), key=lambda o: o.signal_session)
     return (*sells, *buys)
+
+
+def _check_due(session_index: int, orders: Iterable[TradeOrder]) -> None:
+    """Refuse, by name, an order that is not for this session: the look-ahead guard for orders.
+
+    An order planned after today's close executes at tomorrow's open; handed to today's step it
+    would fill at the open of the session that produced it. A buy past its last session has
+    expired. An order carried from an earlier session (`execute_session <= session_index`) is due.
+    """
+    _refuse(
+        f"orders not due yet on session {session_index}",
+        (
+            f"{order.order_id} ({order.ts_code}) executes on session {order.execute_session}"
+            for order in orders
+            if order.execute_session > session_index
+        ),
+    )
+    _refuse(
+        f"buys expired before session {session_index}",
+        (
+            f"{order.order_id} ({order.ts_code}) expired after session {order.expires_session}"
+            for order in orders
+            if order.expires_session is not None and order.expires_session < session_index
+        ),
+    )
 
 
 def _check_bars(session: date, bars: Mapping[str, MarketBar]) -> None:

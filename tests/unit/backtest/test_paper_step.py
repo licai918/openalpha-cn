@@ -47,6 +47,7 @@ from openalpha_cn.storage.portfolio import SQLitePortfolioLedger
 
 D = Decimal
 S0, S1, S2, S3 = date(2021, 3, 1), date(2021, 3, 2), date(2021, 3, 3), date(2021, 3, 4)
+ORDINAL = {S0: 100, S1: 101, S2: 102, S3: 103}  # each session's index in the trading calendar
 BOUGHT_BEFORE = date(2021, 2, 25)
 FULL = PortfolioLimits(max_position_weight=D(1), max_total_exposure=D(1), min_cash_weight=D(0))
 BENCHMARK = D("6000.00")
@@ -142,9 +143,12 @@ def build(
     orders: tuple[TradeOrder, ...],
     quotes: dict[str, MarketBar],
     ratio: dict[str, Decimal] | None = None,
+    *,
+    session_index: int | None = None,
 ) -> PaperStepPlan:
     return build_paper_step(
         session=session,
+        session_index=ORDINAL[session] if session_index is None else session_index,
         orders=orders,
         bars=quotes,
         adjustment_ratio=ratio or {},
@@ -222,7 +226,12 @@ def test_limit_up_limit_down_and_a_halt_with_a_row_are_submitted_and_refused_by_
     open collapse exists to prevent.
     """
     orders = (sell("600010.SH", 1000), buy("600040.SH", 500), buy("000060.SZ", 1000))
-    plan = build(S1, orders, bars(LOCKED_DOWN_S1, LOCKED_UP_S1, HALTED_WITH_A_ROW_S1))
+    plan = build(
+        S1,
+        orders,
+        bars(LOCKED_DOWN_S1, LOCKED_UP_S1, HALTED_WITH_A_ROW_S1),
+        {"600010.SH": D(1)},
+    )
     ledger = SQLitePortfolioLedger(tmp_path / "paper.sqlite3")
     opening = book("50000.00", ("600010.SH", 1000, "10.00"))
 
@@ -252,7 +261,7 @@ def test_an_order_with_no_bar_is_not_attempted_and_neither_the_step_nor_the_ledg
     no bar keeps its mark, and the runner names the carry.
     """
     orders = (buy("600050.SH", 1000), sell("600010.SH", 1000), buy("600030.SH", 1000))
-    plan = build(S1, orders, bars(OPEN_S1))
+    plan = build(S1, orders, bars(OPEN_S1), {"600010.SH": D(1)})
     ledger = SQLitePortfolioLedger(tmp_path / "paper.sqlite3")
 
     assert [(item.order, item.outcome, item.reason) for item in plan.attempts] == [
@@ -281,7 +290,7 @@ def test_a_carried_order_is_attempted_under_a_new_id_so_the_ledger_raises_no_con
     book_ = PaperPortfolio(ledger=ledger, limits=FULL)
     first = book_.advance(
         state=book("1000.00", ("600010.SH", 1000, "10.00")),
-        session=build(S1, (order,), bars(LOCKED_DOWN_S1)).step,
+        session=build(S1, (order,), bars(LOCKED_DOWN_S1), {"600010.SH": D(1)}).step,
         observed_on=S1,
     )
     assert first.transitions[0].status == "rejected"
@@ -301,7 +310,11 @@ def test_a_carried_order_is_attempted_under_a_new_id_so_the_ledger_raises_no_con
     with pytest.raises(ValueError, match="portfolio order_id conflicts"):
         book_.advance(state=first.after, session=reused, observed_on=S2)
 
-    second = book_.advance(state=first.after, session=build(S2, (order,), s2).step, observed_on=S2)
+    second = book_.advance(
+        state=first.after,
+        session=build(S2, (order,), s2, {"600010.SH": D(1)}).step,
+        observed_on=S2,
+    )
     assert second.transitions[0].status == "filled"
     assert [t.order.order_id for t in ledger.list()] == [
         f"{order.order_id}@2021-03-02",
@@ -315,7 +328,7 @@ def test_sells_go_before_buys_so_a_sale_funds_a_buy_on_the_same_session(tmp_path
     """`advance_orders` lists live buys before live sells; the builder puts the sells first."""
     holding_bar = bar("600010.SH", S1, "10.00", "10.00", "10.20", "9.90", "10.10", "11.00", "9.00")
     as_advance_orders_lists_them = (buy("600030.SH", 1000), sell("600010.SH", 1000))
-    plan = build(S1, as_advance_orders_lists_them, bars(holding_bar, OPEN_S1))
+    plan = build(S1, as_advance_orders_lists_them, bars(holding_bar, OPEN_S1), {"600010.SH": D(1)})
     opening = book("1000.00", ("600010.SH", 1000, "10.00"))
 
     assert [order.side for order in plan.step.orders] == ["sell", "buy"]
@@ -404,7 +417,9 @@ def test_a_holding_sold_on_its_ex_date_raises_what_the_real_shares_would_have(
     """The ledger sells 1,000 shares at the scaled open 11.50; the account sells 1,150 at 10.00.
 
     Both are a notional of 11,500.00, so the cash is the same; what differs is only the units the
-    ledger records the trade in (disclosed in the module docstring).
+    ledger records the trade in (disclosed in the module docstring). That holds for a bonus issue
+    or a split, which is what a ratio of 1.15 is read as here; for a cash dividend the account and
+    the ledger differ, as the module docstring says.
     """
     order = sell("600020.SH", 1000)
     plan = build(S1, (order,), bars(EX_DATE_S1), {"600020.SH": D("1.15")})
@@ -425,7 +440,9 @@ def test_remark_at_close_values_what_traded_today_at_its_close(tmp_path: Path) -
     """The runner marks an ordered name at its collapsed bar, i.e. the open; the day ends at the
     close. Re-marked: the name bought at 10.10 closes 10.50, the name whose sale was refused at
     9.00 closes 9.40, and the ex-date name stays 10.00 x 1.15 = 11.50. Nothing else moves."""
-    ratio = {"600020.SH": D("1.15")}
+    # An entry for every held name that matters: the sold name, the moved one, and the name
+    # bought today, which has a bar at the close and so needs its explicit 1.
+    ratio = {"600010.SH": D(1), "600020.SH": D("1.15"), "600030.SH": D(1)}
     quotes = bars(LOCKED_DOWN_S1, EX_DATE_S1, OPEN_S1)
     orders = (sell("600010.SH", 1000), buy("600030.SH", 1000))
     opening = book("20000.00", ("600010.SH", 1000, "10.00"), ("600020.SH", 1000, "11.50"))
@@ -483,7 +500,8 @@ def test_three_sessions_through_the_paper_book_with_the_order_lifecycle(tmp_path
         OPEN_S1,
         LOCKED_UP_S1,
     )
-    plan = build(S1, planned, s1)
+    held_s1 = {"600010.SH": D(1), "600020.SH": D(1), "600030.SH": D(1)}
+    plan = build(S1, planned, s1, held_s1)
     result = book_.advance(state=state, session=plan.step, observed_on=S1)
     assert [(i.order.ts_code, i.outcome) for i in plan.attempts] == [
         ("600010.SH", "submitted"),
@@ -493,7 +511,7 @@ def test_three_sessions_through_the_paper_book_with_the_order_lifecycle(tmp_path
     ]
     assert [t.status for t in result.transitions] == ["rejected", "filled", "rejected"]
     assert result.equity == D("50494.90")
-    state = remark_at_close(result.after, bars=s1, adjustment_ratio={})
+    state = remark_at_close(result.after, bars=s1, adjustment_ratio=held_s1)
     assert (state.cash, state.equity) == (D("19894.90"), D("51294.90"))
     settled = advance_orders(
         planned,
@@ -514,7 +532,7 @@ def test_three_sessions_through_the_paper_book_with_the_order_lifecycle(tmp_path
     # limit-up all day; 600050 has a row but is halted. Marks: 600020 10.10 x 1.15 = 11.615,
     # 600030 10.60 -> 29,385.05 + 11,615.00 + 10,600.00 = 51,600.05. Unscaled, 600020 would
     # mark 10.10 and the book would show 50,085.05.
-    ratio = {"600020.SH": D("1.15")}
+    ratio = {"600010.SH": D(1), "600020.SH": D("1.15"), "600030.SH": D(1)}
     halted_with_a_row = bar(
         "600050.SH",
         S2,
@@ -560,6 +578,7 @@ def test_three_sessions_through_the_paper_book_with_the_order_lifecycle(tmp_path
         bar("600040.SH", S3, "23.65", "26.02", "26.02", "26.02", "26.02", "26.02", "21.29"),
         bar("600050.SH", S3, "10.00", "10.05", "10.30", "10.00", "10.20", "11.00", "9.00"),
     )
+    ratio = {"600020.SH": D("1.15"), "600030.SH": D(1), "600050.SH": D(1)}
     plan = build(S3, settled.live, s3, ratio)
     result = book_.advance(state=state, session=plan.step, observed_on=S3)
     assert result.equity == D("51809.95")
@@ -584,11 +603,157 @@ def test_three_sessions_through_the_paper_book_with_the_order_lifecycle(tmp_path
     ]
 
 
+def test_a_sell_with_no_adjustment_ratio_is_refused_by_name(tmp_path: Path) -> None:
+    """A 10-for-10 bonus issue: the ledger holds 1,000 shares bought at 20.00; on the ex-date the
+    real open is 10.00 and the true ratio is 2.
+
+    With the ratio the sell is 1,000 shares at the scaled open 20.00: notional 20,000.00, fees
+    6.00 + 0.20 + 10.00 = 16.20, realized -16.20. With the name missing from the table the
+    builder used to read "no entry" as 1 and sell the ledger's 1,000 shares at 10.00: notional
+    10,000.00, fees 10.10, realized -10,010.10, written into an append-only ledger with no error.
+    The contract is now an entry for every sold name, with an explicit 1 where nothing moved.
+    """
+    order = sell("600020.SH", 1000)
+    opening = book("1000.00", ("600020.SH", 1000, "20.00"))
+    quotes = bars(EX_DATE_S1)
+
+    right = paper(tmp_path / "right.sqlite3").advance(
+        state=opening,
+        session=build(S1, (order,), quotes, {"600020.SH": D(2)}).step,
+        observed_on=S1,
+    )
+    (fill,) = right.transitions
+    assert fill.execution is not None
+    assert (fill.execution.filled_price, fill.execution.notional) == (D("20.00"), D("20000.00"))
+    assert right.after.realized_pnl == D("-16.20")
+
+    with pytest.raises(ValueError, match=r"600020\.SH"):
+        build(S1, (order,), quotes)
+    # Control: an explicit 1 is what the missing entry used to mean, and what it wrote.
+    wrong = paper(tmp_path / "wrong.sqlite3").advance(
+        state=opening,
+        session=build(S1, (order,), quotes, {"600020.SH": D(1)}).step,
+        observed_on=S1,
+    )
+    assert wrong.after.realized_pnl == D("-10010.10")
+
+
+def test_every_sold_name_missing_from_the_ratio_table_is_named() -> None:
+    orders = (sell("600010.SH", 1000), sell("600020.SH", 1000), sell("600030.SH", 1000))
+    with pytest.raises(ValueError, match="adjustment ratio") as refused:
+        build(S1, orders, bars(LOCKED_DOWN_S1), {"600020.SH": D(1)})
+
+    assert "600010.SH" in str(refused.value)
+    assert "600030.SH" in str(refused.value)
+    assert "600020.SH" not in str(refused.value)  # it has its entry
+
+
+def test_a_sell_with_no_bar_still_needs_its_ratio_entry() -> None:
+    """A sell is for a held name, so its entry is required even when the name is not attempted
+    for want of a bar: one rule for every sell, nothing to remember."""
+    with pytest.raises(ValueError, match=r"600010\.SH"):
+        build(S1, (sell("600010.SH", 1000),), bars(OPEN_S1))
+
+
+@pytest.mark.parametrize("one", ["1", "1.00"])
+def test_an_explicit_one_for_a_sold_name_is_accepted_and_changes_nothing(one: str) -> None:
+    """The same step the builder made before the table had to name every sold name."""
+    holding = bar("600010.SH", S1, "10.00", "10.00", "10.20", "9.90", "10.10", "11.00", "9.00")
+    order = sell("600010.SH", 1000)
+
+    plan = build(S1, (order,), bars(holding), {"600010.SH": D(one)})
+
+    assert plan.step == PortfolioBacktestStep(
+        trade_date=S1,
+        bars=(at_the_open(holding),),
+        orders=(
+            PortfolioOrder(
+                order_id=attempt_id(order, S1), subject="600010.SH", side="sell", quantity=1000
+            ),
+        ),
+        benchmark_close=BENCHMARK,
+    )
+
+
+def test_a_held_name_with_a_bar_and_no_adjustment_ratio_is_refused_at_the_close() -> None:
+    """The mark is what the book is valued at; a missing entry would mark a moved name unscaled.
+
+    Only a held name that has a bar that session needs its entry: a name halted all day keeps its
+    mark, and a name not held (here 600030.SH) is none of the table's business.
+    """
+    held = book("1000.00", ("600010.SH", 1000, "10.00"), ("600020.SH", 1000, "20.00"))
+    state = held.model_copy(update={"as_of": S1})
+    quotes = bars(LOCKED_DOWN_S1, EX_DATE_S1, OPEN_S1)
+
+    with pytest.raises(ValueError, match="adjustment ratio") as refused:
+        remark_at_close(state, bars=quotes, adjustment_ratio={"600020.SH": D(2)})
+    assert "600010.SH" in str(refused.value)
+    assert "600020.SH" not in str(refused.value)
+    assert "600030.SH" not in str(refused.value)
+
+    halted = remark_at_close(state, bars=bars(EX_DATE_S1), adjustment_ratio={"600020.SH": D(2)})
+    assert marks(halted) == {"600010.SH": D("10.00"), "600020.SH": D("20.00")}  # 10.00 x 2
+
+    explicit = remark_at_close(
+        state, bars=quotes, adjustment_ratio={"600010.SH": D(1), "600020.SH": D(2)}
+    )
+    assert marks(explicit) == {"600010.SH": D("9.40"), "600020.SH": D("20.00")}
+
+
+def test_sells_go_by_code_then_order_id_whatever_order_the_caller_gives_them(
+    tmp_path: Path,
+) -> None:
+    """The order the rows reach the ledger in is the builder's, not the caller's."""
+    higher = sell("600020.SH", 1000)
+    lower = sell("600010.SH", 1000)
+    quotes = bars(
+        bar("600010.SH", S1, "10.00", "10.00", "10.20", "9.90", "10.10", "11.00", "9.00"),
+        bar("600020.SH", S1, "11.50", "11.50", "11.70", "11.40", "11.60", "12.65", "10.35"),
+    )
+    unmoved = {"600010.SH": D(1), "600020.SH": D(1)}
+
+    plan = build(S1, (higher, lower), quotes, unmoved)  # the later code first
+
+    assert [item.order for item in plan.attempts] == [lower, higher]
+    assert [order.subject for order in plan.step.orders] == ["600010.SH", "600020.SH"]
+    ledger = SQLitePortfolioLedger(tmp_path / "paper.sqlite3")
+    PaperPortfolio(ledger=ledger, limits=FULL).advance(
+        state=book("1000.00", ("600010.SH", 1000, "10.00"), ("600020.SH", 1000, "11.50")),
+        session=plan.step,
+        observed_on=S1,
+    )
+    assert [row.order.order_id for row in ledger.list()] == [
+        attempt_id(lower, S1),
+        attempt_id(higher, S1),
+    ]
+
+    # Two sells of one name are told apart by order id.
+    first, second = sorted(
+        (sell("600010.SH", 400), sell("600010.SH", 600)), key=lambda o: o.order_id
+    )
+    same_name = build(S1, (second, first), quotes, unmoved)
+    assert [item.order for item in same_name.attempts] == [first, second]
+
+
+def test_the_benchmark_close_goes_into_the_step_unchanged() -> None:
+    assert build(S1, (), bars(OPEN_S1)).step.benchmark_close == BENCHMARK
+    other = D("3999.50")
+    plan = build_paper_step(
+        session=S1,
+        session_index=ORDINAL[S1],
+        orders=(),
+        bars=bars(OPEN_S1),
+        adjustment_ratio={},
+        benchmark_close=other,
+    )
+    assert plan.step.benchmark_close == other
+
+
 def test_the_same_inputs_build_the_same_plan() -> None:
     orders = (buy("600050.SH", 1000), sell("600010.SH", 1000), buy("600030.SH", 1000))
     quotes = bars(LOCKED_DOWN_S1, EX_DATE_S1, OPEN_S1)
     reordered = dict(reversed(list(quotes.items())))
-    ratio = {"600020.SH": D("1.15")}
+    ratio = {"600010.SH": D(1), "600020.SH": D("1.15")}
 
     first = build(S1, orders, quotes, ratio)
 
@@ -607,7 +772,7 @@ def test_a_bar_dated_after_the_session_is_refused_rather_than_read() -> None:
         build(S1, (buy("600030.SH", 1000),), bars(tomorrow))
     state = book("1000.00", ("600030.SH", 1000, "10.50")).model_copy(update={"as_of": S1})
     with pytest.raises(ValueError, match=r"600030\.SH.*2021-03-03.*2021-03-02"):
-        remark_at_close(state, bars=bars(tomorrow), adjustment_ratio={})
+        remark_at_close(state, bars=bars(tomorrow), adjustment_ratio={"600030.SH": D(1)})
 
 
 def test_a_bar_without_the_published_band_is_refused_by_name() -> None:
@@ -659,6 +824,64 @@ def test_a_buy_into_a_name_whose_adjustment_ratio_is_not_one_is_refused() -> Non
     """One entry factor per holding: a buy is at ratio 1 on the session it fills."""
     with pytest.raises(ValueError, match=r"600020\.SH"):
         build(S1, (buy("600020.SH", 1000),), bars(EX_DATE_S1), {"600020.SH": D("1.15")})
+
+
+def test_an_order_not_due_yet_is_refused_by_name() -> None:
+    """Look-ahead guard: today's trade list is planned after today's close (signal session 101,
+    executing at 102). Handed to the step of session 101 it would fill at the open of the session
+    that produced it, so the builder refuses it, buy or sell, whatever the bars show."""
+    todays_list = buy("600030.SH", 1000, signal=101)
+    assert todays_list.execute_session == 102
+    with pytest.raises(ValueError, match=rf"not due yet on session 101.*{todays_list.order_id}"):
+        build(S1, (todays_list,), bars(OPEN_S1))
+
+    later_sell = sell("600010.SH", 1000, signal=105)
+    with pytest.raises(ValueError, match=rf"not due yet on session 101.*{later_sell.order_id}"):
+        build(S1, (later_sell,), bars(LOCKED_DOWN_S1), {"600010.SH": D(1)})
+
+
+def test_an_order_is_due_on_its_execute_session_and_not_the_session_before() -> None:
+    """The boundary: `execute_session == session_index` is accepted, one session earlier is not."""
+    order = buy("600030.SH", 1000, signal=100)
+    assert order.execute_session == 101
+
+    on_the_day = build(S1, (order,), bars(OPEN_S1), session_index=101)
+    assert [(item.order, item.outcome) for item in on_the_day.attempts] == [(order, "submitted")]
+    with pytest.raises(ValueError, match="not due yet on session 100"):
+        build(S1, (order,), bars(OPEN_S1), session_index=100)
+
+
+def test_an_order_carried_from_an_earlier_session_is_accepted_on_a_later_one() -> None:
+    """A buy still live on its last session, and a sell, which never expires, however late."""
+    carried_buy = buy("600030.SH", 1000, signal=100)  # executes at 101, last session 103
+    carried_sell = sell("600010.SH", 1000, signal=100)
+    quotes = bars(
+        bar("600030.SH", S3, "10.60", "10.60", "10.80", "10.50", "10.70", "11.66", "9.54"),
+        bar("600010.SH", S3, "9.60", "9.60", "9.80", "9.50", "9.70", "10.56", "8.64"),
+    )
+
+    last_day = build(S3, (carried_buy, carried_sell), quotes, {"600010.SH": D(1)})
+    much_later = build(S3, (carried_sell,), quotes, {"600010.SH": D(1)}, session_index=140)
+
+    assert [(item.order, item.outcome) for item in last_day.attempts] == [
+        (carried_sell, "submitted"),
+        (carried_buy, "submitted"),
+    ]
+    assert [item.order for item in much_later.attempts] == [carried_sell]
+
+
+def test_a_buy_past_its_last_session_is_refused_by_name() -> None:
+    """The boundary again: on its last session (`expires_session == session_index`) a buy is
+    still attempted; the session after, it has expired and is not."""
+    last_chance = buy("600030.SH", 1000, signal=100)
+    assert last_chance.expires_session == 103
+    quotes = bars(
+        bar("600030.SH", S3, "10.60", "10.60", "10.80", "10.50", "10.70", "11.66", "9.54")
+    )
+
+    assert [item.outcome for item in build(S3, (last_chance,), quotes).attempts] == ["submitted"]
+    with pytest.raises(ValueError, match=rf"expired before session 104.*{last_chance.order_id}"):
+        build(S3, (last_chance,), quotes, session_index=104)
 
 
 def test_an_order_not_attempted_says_why_and_a_submitted_one_does_not() -> None:
