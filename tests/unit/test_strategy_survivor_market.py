@@ -612,6 +612,8 @@ def test_a_name_not_spelled_as_a_security_code_is_refused_by_name_before_anythin
     [
         ("strategy_survivor_market", "settlement_market"),
         ("strategy_survivor_facts", "build_facts_day"),
+        ("strategy_survivor", "read_survivor_registration"),
+        ("strategy_survivor_registration", "survivor_batch"),
     ],
 )
 def test_no_backtest_module_may_import_the_survivor_books_panel_readers(
