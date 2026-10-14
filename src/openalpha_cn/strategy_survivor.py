@@ -30,13 +30,17 @@ rule). The script exits 3 on it, the class of a `config_id` that does not match 
 
 ## Why the book block must be its own stored form
 
-`SurvivorBookConfig.config_id` addresses the stored form: `"0.30"` and `"0.3"` are one number and
-two identities (`survivor_book.py`). A block that validates without being exactly
-`model_dump(mode="json", exclude_computed_fields=True)` of what it validates into -- a decimal
-written as a float or an integer, a count written as a float, a default left out -- reads as a
-configuration with an identity nobody registered, so it is refused, naming the fields that read
-back otherwise. A block written as that dump reads back to the `config_id` and the digest of the
-configuration it was dumped from.
+The check is a fixed point: the block, validated and dumped again with `model_dump(mode="json",
+exclude_computed_fields=True)`, must be the block, compared as JSON text. What that buys is that
+the registration's TEXT -- and so `grid.config_id`, the registration's identity -- is a function
+of the book: one book has one registered spelling. It does not protect the book's own identity,
+which `SurvivorBookConfig.config_id` computes from the validated model either way:
+`"holding_count": 10.0`, `"capital": 350000` and a block naming only `seed` all validate to the
+canonical dump's `config_id`, and are refused for their text alone, naming the fields that read
+back otherwise. Nor does it say which book was meant: `"0.3"` is a canonical spelling too and is
+accepted, with another `config_id` than `"0.30"` (`survivor_book.py`). Checking that the
+registered block is the INTENDED configuration -- its `config_id` against the one the research
+froze -- belongs to `V2-P7-006`'s registration test.
 
 `composite_factors` is checked against the factors this build declares (`FACTOR_DEFINITIONS`), so
 a factor the build does not know is refused at step 1 instead of at step 4 of every evening.
@@ -114,10 +118,12 @@ REGISTRATION_KEYS: Final[frozenset[str]] = frozenset({KIND_KEY, BOOK_BLOCK, ADAP
 """Every top-level key of a survivor configuration, and no other."""
 
 MAX_PANEL_CATCH_UP_SESSIONS: Final = 16
-"""The most sessions the adapter may let step 2 catch up in one run. Each costs five requests
-(`daily_selection.DEFAULT_MAX_PANEL_CATCH_UP_SESSIONS` states the arithmetic), so an ordinary
-day's 16 plus 16 sessions is 96, the last such sum under the 100 the design sized a day against;
-17 would be 101. It bounds the part of a day that grows with missed sessions, nothing else."""
+"""The most sessions the adapter may let step 2 catch up in one run. Each costs one request per
+session-scoped API -- five, seven once `stk_limit` pages (`daily_selection.
+DEFAULT_MAX_PANEL_CATCH_UP_SESSIONS` states the arithmetic). Unpaged, an ordinary day's 16 plus
+5 x 16 is 96, the last such sum under the 100 the design sized a day against (17 sessions would
+be 101); paged, the same 16 sessions cost 20 + 7 x 16 = 132, over it. It bounds the part of a day
+that grows with missed sessions, nothing else, and neither sum is the day's ceiling."""
 
 MAX_CARRY_SESSIONS: Final = 1000
 """The longest carry the adapter may register: about four years of sessions, four times the
@@ -311,9 +317,8 @@ def read_survivor_registration(
         raise SurvivorRegistrationError(
             f"the {BOOK_BLOCK} block is not the stored form of the configuration it reads as "
             f"({book.config_id}): {differing} read back otherwise. A registration stores "
-            "SurvivorBookConfig.model_dump(mode='json', exclude_computed_fields=True) verbatim: "
-            "config_id addresses that form, and a re-typed spelling of the same values is not "
-            "the form it addresses"
+            "SurvivorBookConfig.model_dump(mode='json', exclude_computed_fields=True) verbatim, "
+            "so that its text -- and the registration's config_id -- is a function of the book"
         )
     unknown = [
         factor
