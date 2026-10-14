@@ -661,6 +661,159 @@ def test_across_new_year_the_p6_day_leaves_build_facts_day_without_the_years_nam
     assert "partition_missing" in str(refused.value)
 
 
+# --- the year before's last sessions: completed before the new year's first build ---------------
+
+
+FIRST_SESSION_OF_A_YEAR: Final[int] = 11 + 1
+"""The survivor step on a year's first session after a complete December: T6-T7's 11 (2.2, C1)
+and the year before's name corpus built again (one request)."""
+
+
+def _december(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    last_run: date,
+    *,
+    targets: Sequence[str],
+    survivor: Any,
+) -> Store:
+    """The New Year market, seeded through 21 December and last run on `last_run` -- with next
+    year's calendar, which any run in December's last twenty-odd sessions stores
+    (`next_year_calendar_needed`)."""
+    market = NamesAcrossNewYear(open_days=NEW_YEAR, delisted=((DELISTED, FIRST_2027),))
+    store = _seeded(tmp_path, monkeypatch, market, as_of="2026-12-22T12:00:00+08:00", year=2026)
+    _update(store, last_run, targets=targets, survivor=survivor, next_year=True)
+    return store
+
+
+def _printed_command(message: str) -> list[str]:
+    """The `openalpha panel build` a refusal prints, as arguments."""
+    command = next(
+        line.strip()
+        for line in message.splitlines()
+        if line.strip().startswith("openalpha panel build")
+    )
+    return shlex.split(command)
+
+
+def _datasets(arguments: Sequence[str]) -> list[str]:
+    return [arguments[index + 1] for index, flag in enumerate(arguments) if flag == "--dataset"]
+
+
+@pytest.mark.parametrize(
+    ("last_run", "missed"),
+    [
+        pytest.param(LAST_2026, (), id="complete"),
+        pytest.param(date(2026, 12, 30), (LAST_2026,), id="31 December missed"),
+        pytest.param(
+            date(2026, 12, 23), weekdays(date(2026, 12, 24), LAST_2026), id="24-31 December missed"
+        ),
+    ],
+)
+def test_the_year_befores_missed_last_sessions_are_refused_before_the_new_years_first_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, last_run: date, missed: tuple[date, ...]
+) -> None:
+    """The step builds the session's year only, so a session of 2026 missed after the last run
+    is never fetched by it -- and 2027's first `stk_limit` build judges each security's first
+    pair against the last stored close of 2026, which is then not the session before it: every
+    disputed pair fetched again one security at a time, four requests each and no cap
+    (`cli._judge_return_paths`), and 2026 left with the gap. So a 2026 that stops short of its
+    last session is refused before any request, whatever the bound, with the `panel build` that
+    completes it; run, it does, and 2027's first session is then the ordinary one. A complete
+    2026 is not refused at all."""
+    targets = daily.targets_for_survivor(SURVIVOR_BUILDS)
+    store = _december(tmp_path, monkeypatch, last_run, targets=targets, survivor=_survivor())
+    if missed:
+        before = _files(store.runtime)
+
+        with pytest.raises(daily.StepFailedError) as refused:
+            _update(store, FIRST_2027, targets=targets, survivor=_survivor())
+
+        message = str(refused.value)
+        assert refused.value.step == "panel update"
+        assert "the stored session-scoped partitions of 2026 stop at " in message
+        assert f"stop at {last_run.isoformat()}" in message
+        assert (
+            f"{len(missed)} open session(s) of 2026, {missed[0].isoformat()} to "
+            f"{LAST_2026.isoformat()}, are missing" in message
+        )
+        assert "nothing was fetched" in message
+        assert store.market.payloads == []
+        assert _files(store.runtime) == before
+
+        arguments = _printed_command(message)
+        assert arguments[arguments.index("--year") + 1] == "2026"
+        assert arguments[arguments.index("--as-of") + 1] == (
+            session_publication_instant(LAST_2026).astimezone(UTC).isoformat()
+        )
+        assert "--incremental" in arguments
+        assert _datasets(arguments) == [ADJ_FACTOR_DATASET, "price", PRICE_LIMIT_DATASET]
+        built = daily.invoke(arguments[1:])
+        assert built.exit_code == 0, built.reason()
+    for dataset in cli.SESSION_SCOPED_DATASETS:
+        assert _horizon(store, dataset, 2026) == LAST_2026, dataset
+
+    panel, counts = _update(store, FIRST_2027, targets=targets, survivor=_survivor())
+
+    assert panel["caught_up"] == []
+    assert sum(counts.values()) == FIRST_SESSION_OF_A_YEAR
+    assert not [line for line in panel["budget"] if "return-path-reproduction" in line]
+    assert _horizon(store, DAILY_DATASET, 2027) == FIRST_2027
+
+
+def test_a_store_that_holds_nothing_of_the_year_before_is_not_refused_for_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A store first built in 2027 holds no session-scoped partition of 2026, so there is no
+    tail to complete and the rule does not apply. The step does what it did before: the day's
+    year from its stored horizon, an ordinary day; no year-boundary pair is judged, because
+    `cli._judge_return_paths` reads the year before only when it is stored; and no 2026 name
+    corpus is built, because none is stored (`names_built_before_year_end`)."""
+    market = NamesAcrossNewYear(open_days=NEW_YEAR, delisted=((DELISTED, FIRST_2027),))
+    store = _seeded(tmp_path, monkeypatch, market, as_of="2027-01-05T12:00:00+08:00", year=2027)
+    for dataset in (*cli.SESSION_SCOPED_DATASETS, TRADING_CALENDAR_DATASET, NAMECHANGE_DATASET):
+        assert 2026 not in store.panel.registered_years(dataset), dataset
+
+    panel, counts = _update(
+        store,
+        date(2027, 1, 5),
+        targets=daily.targets_for_survivor(SURVIVOR_BUILDS),
+        survivor=_survivor(),
+    )
+
+    assert panel["caught_up"] == []
+    assert dict(counts) == STEADY_SURVIVOR
+    assert _years_asked(store, NAMECHANGE_DATASET) == ["2027"]
+    assert _horizon(store, DAILY_DATASET, 2027) == date(2027, 1, 5)
+
+
+P6_YEAR_BOUNDARY_DISPUTES: Final[int] = 9
+"""Measured on this market, as the A3 review measured it: the securities trading on 4 January
+whose first 2027 pair -- 4 January's `pre_close`, which is the 31 December close, against the
+stored last close of 30 December -- is disputed and fetched again."""
+
+
+def test_the_p6_step_still_builds_the_new_year_over_the_year_befores_missed_last_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`survivor` left out is the P6 step, unchanged -- and with it the fault the survivor form
+    refuses, pinned here as it stands rather than fixed (the P6 step must stay bit-identical): 31
+    December missed, 2027's first run is not refused, its `stk_limit` build fetches every
+    disputed year-boundary pair again at four requests each, and 2026 stays at 30 December."""
+    p6 = daily.targets_for(SURVIVOR_BUILDS)
+    store = _december(tmp_path, monkeypatch, date(2026, 12, 30), targets=p6, survivor=None)
+
+    panel, counts = _update(store, FIRST_2027, targets=p6)
+
+    (reproduction,) = [line for line in panel["budget"] if "return-path-reproduction" in line]
+    pairs = P6_YEAR_BOUNDARY_DISPUTES
+    assert reproduction.startswith(f"BUDGET return-path-reproduction {4 * pairs} requests ")
+    assert f"({pairs} disputed pre_close/adj_factor pair(s) of 2027" in reproduction
+    assert sum(counts.values()) == FIRST_SESSION_OF_A_YEAR - 2 + 4 * pairs
+    assert "caught_up" not in panel
+    assert _horizon(store, DAILY_DATASET, 2026) == date(2026, 12, 30)
+
+
 # --- the year before's name corpus: built again until a build after its year end is stored ------
 
 

@@ -78,6 +78,27 @@ any request, with the `panel build` that fetches the oldest batch, and the year 
 corpus is built again while its stored build is from before that year ended -- on the first
 run of a year, whether that is in January or after a January of missed runs, and not again.
 
+A year before whose stored session-scoped partitions stop short of its last session is refused
+too, before any request and whatever the bound (`previous_year_sessions_missing`): the step
+builds the session's year only, so it would never fill that tail, and the new year's first
+`stk_limit` build would judge every security's year-boundary pair against the gap -- each
+disputed pair fetched again at four requests, uncapped (about 20,000 requests at live scale,
+A3 review) -- and leave a `date_gap` the doctor then blocks on. The refusal prints the `panel
+build --incremental` that completes that year through its last session; it has to run before
+the new year's first build. The P6 step has the same latent fault and is left as it is (it
+must stay bit-identical).
+
+Two consequences of fetching `namechange` for the session's year, which this step does not
+remove (A3 review, Q1). Until the year's first rename announcement, Tushare serves no row for
+the year, the panel refuses to write an empty partition, and step 2 fails on that target. A
+session before the first announcement can never complete: the journal pins the day's `--as-of`,
+and `namechange` is fetched at `min(year end, as_of)` (`cli._year_end_as_of`), so every retry of
+that session asks the same empty window and spends a handful of requests doing so. The session
+is lost, not delayed -- not a theoretical case: 2012's first announcement is dated 5 January,
+after the first session on 4 January (the A-phase notes of the P7 step-0 plan). And it is not
+new: P6's `--full-update` fetches `namechange` (`FULL_UPDATE_TARGETS`) and fails the same way
+in early January.
+
 ## Idempotent per trading day
 
 The journal is `RT/daily_selection/<config_id[:16]>/<session>.json`. The day's `--as-of` is
@@ -1964,9 +1985,11 @@ class SurvivorPanelUpdate:
 
     `max_catch_up_sessions` (from `panel_catch_up_bound`): before any request, a store more
     sessions behind the day than this is refused, with the `panel build` that fetches the oldest
-    batch, instead of spending five to seven requests a session inside one scheduled run. And the
-    year before's name corpus is built again while its stored build is from before that year
-    ended (`names_built_before_year_end`).
+    batch, instead of spending five to seven requests a session inside one scheduled run. Before
+    that, whatever the bound, a year before whose session-scoped partitions stop short of its
+    last session is refused with the `panel build` that completes it
+    (`previous_year_sessions_missing`). And the year before's name corpus is built again while
+    its stored build is from before that year ended (`names_built_before_year_end`).
     """
 
     max_catch_up_sessions: int
@@ -1995,14 +2018,11 @@ def panel_sessions_to_catch_up(
     the session, and the whole year up to it when that year holds no partition yet
     (`cli._incremental_start`). So the sessions beyond the overlap and the day are the open ones
     of the session's year after the earliest of those horizons and before the session, counted
-    on the stored calendar of that year. Only that year: the step builds no other year's sessions.
+    on the stored calendar of that year. Only that year: the step builds no other year's sessions,
+    and a year before that stops short of its last session is refused on its own
+    (`previous_year_sessions_missing`).
     """
-    census = [
-        dataset
-        for target in cli.PANEL_BUILD_TARGETS
-        if target in targets
-        for dataset in cli.INCREMENTAL_CENSUS.get(target, ())
-    ]
+    census = _session_scoped_census(targets)
     if not census:
         return ()
     store = panel_store(runtime_dir)
@@ -2013,13 +2033,134 @@ def panel_sessions_to_catch_up(
             f"the {exchange} calendar of {session.year}, on which the sessions this update would "
             "fetch are counted, is not stored or cannot be read",
         )
-    horizons = [cli._stored_horizon(store, dataset, session.year) for dataset in census]
-    stored = [horizon for horizon in horizons if horizon is not None]
-    start = min(stored) if len(stored) == len(horizons) else None
+    start = _earliest_stored_horizon(store, census, session.year)
     return tuple(
         day
         for day in calendar.trading_days
         if day.year == session.year and day < session and (start is None or day > start)
+    )
+
+
+def previous_year_sessions_missing(
+    runtime_dir: Path,
+    *,
+    session: date,
+    as_of: datetime,
+    exchange: str,
+    targets: Sequence[str],
+) -> tuple[date, ...]:
+    """The open sessions of the year before the session's that its stored session-scoped
+    partitions do not reach, oldest first: those after the earliest of their horizons through
+    that year's last session, on that year's stored calendar (`V2-P7-016`).
+
+    Step 2 builds the session's year only, so a session of the year before that a missed run left
+    unfetched is never fetched by it. And the session's year's `stk_limit` build judges each
+    security's first pair of the year against the last stored close of the year before
+    (`cli._judge_return_paths`), which is then not the session before it: every disputed pair is
+    fetched again one security at a time, four requests each and no cap, and the doctor's
+    first-of-year check then blocks on the gap. Empty when the year before holds none of these
+    partitions -- a store first built in the session's year has no tail to complete, and that
+    judgement reads the year before only when it is stored."""
+    census = _session_scoped_census(targets)
+    year = session.year - 1
+    if not census:
+        return ()
+    store = panel_store(runtime_dir)
+    if not any(year in store.registered_years(dataset) for dataset in census):
+        return ()
+    calendar = _stored_calendar(store, exchange, (year,), as_of)
+    if calendar is None:
+        raise StepFailedError(
+            "panel update",
+            f"the {exchange} calendar of {year}, on which that year's stored session-scoped "
+            "partitions are checked to reach its last session, is not stored or cannot be read",
+        )
+    start = _earliest_stored_horizon(store, census, year)
+    return tuple(
+        day for day in calendar.trading_days if day.year == year and (start is None or day > start)
+    )
+
+
+def _session_scoped_targets(targets: Sequence[str]) -> list[str]:
+    """The targets among `targets` that `panel build --incremental` slices by session
+    (`cli.INCREMENTAL_CENSUS`), in `cli.PANEL_BUILD_TARGETS`' order."""
+    return [
+        target
+        for target in cli.PANEL_BUILD_TARGETS
+        if target in targets and target in cli.INCREMENTAL_CENSUS
+    ]
+
+
+def _session_scoped_census(targets: Sequence[str]) -> list[str]:
+    """The stored datasets whose horizons say where those targets' slices start."""
+    return [
+        dataset
+        for target in _session_scoped_targets(targets)
+        for dataset in cli.INCREMENTAL_CENSUS[target]
+    ]
+
+
+def _earliest_stored_horizon(store: PanelStore, census: Sequence[str], year: int) -> date | None:
+    """The earliest last session the `census` partitions of `year` cover, or `None` when one of
+    them is not stored or cannot say -- a target `panel build --incremental` then fetches whole,
+    from the year's first session (`cli._incremental_start`)."""
+    horizons = [cli._stored_horizon(store, dataset, year) for dataset in census]
+    stored = [horizon for horizon in horizons if horizon is not None]
+    return min(stored) if len(stored) == len(horizons) else None
+
+
+def _panel_build_command(
+    runtime_dir: Path,
+    *,
+    year: int,
+    through: date,
+    exchange: str,
+    targets: Sequence[str],
+) -> list[str]:
+    """The `panel build --incremental` a refusal prints: the session-scoped targets together (so
+    their horizons move as one, `cli._refuse_split_horizon`), for `year`, pinned at `through`'s
+    publication instant."""
+    arguments = ["openalpha", "panel", "build", "--runtime-dir", str(runtime_dir)]
+    arguments += ["--year", str(year)]
+    arguments += ["--as-of", session_publication_instant(through).astimezone(UTC).isoformat()]
+    arguments += ["--exchange", exchange, "--incremental"]
+    for target in _session_scoped_targets(targets):
+        arguments += ["--dataset", target]
+    return arguments
+
+
+def _previous_year_refusal(
+    runtime_dir: Path,
+    *,
+    missing: Sequence[date],
+    session: date,
+    exchange: str,
+    targets: Sequence[str],
+) -> str:
+    """Why step 2 fetched nothing, and the `panel build` that completes the year before: through
+    its last session, before the session's year is built at all -- the session's year's own
+    build would otherwise judge its year-boundary pairs against the gap."""
+    year = session.year - 1
+    stored = _earliest_stored_horizon(
+        panel_store(runtime_dir), _session_scoped_census(targets), year
+    )
+    reach = f"stop at {stored.isoformat()}" if stored is not None else "are not all stored"
+    arguments = _panel_build_command(
+        runtime_dir, year=year, through=missing[-1], exchange=exchange, targets=targets
+    )
+    return "\n".join(
+        [
+            f"the stored session-scoped partitions of {year} {reach}: {len(missing)} open "
+            f"session(s) of {year}, {missing[0].isoformat()} to {missing[-1].isoformat()}, are "
+            f"missing from them, and this step builds {session.year} only; nothing was fetched. "
+            f"Built over that gap, {session.year}'s first stk_limit build would judge each "
+            "security's first pair of the year against a close that is not the session before "
+            "it, fetch every disputed pair again at 4 requests each with no cap, and leave "
+            f"{year} short of its last session for the doctor's first-of-year check. Complete "
+            f"{year} first -- whatever the catch-up bound -- with:",
+            "  " + shlex.join(arguments),
+            "then rerun this command",
+        ]
     )
 
 
@@ -2035,19 +2176,12 @@ def _panel_catch_up_refusal(
     """Why step 2 fetched nothing, and the `panel build` that fetches the oldest batch: the
     session-scoped targets together (so their horizons move as one, `cli._refuse_split_horizon`),
     pinned at the last batch session's publication instant."""
-    scoped = [
-        target
-        for target in cli.PANEL_BUILD_TARGETS
-        if target in targets and target in cli.INCREMENTAL_CENSUS
-    ]
+    scoped = _session_scoped_targets(targets)
     per_session = sum(len(cli.PANEL_BUILD_TARGETS[target]) for target in scoped)
     batch = list(missed[: max(bound, 1)])
-    arguments = ["openalpha", "panel", "build", "--runtime-dir", str(runtime_dir)]
-    arguments += ["--year", str(session.year)]
-    arguments += ["--as-of", session_publication_instant(batch[-1]).astimezone(UTC).isoformat()]
-    arguments += ["--exchange", exchange, "--incremental"]
-    for target in scoped:
-        arguments += ["--dataset", target]
+    arguments = _panel_build_command(
+        runtime_dir, year=session.year, through=batch[-1], exchange=exchange, targets=targets
+    )
     return "\n".join(
         [
             f"{len(missed)} missed session(s), {missed[0].isoformat()} to "
@@ -2093,13 +2227,28 @@ def update_panel(
     invocation of its own over `financial_indicator_years`; then next year's calendar when the
     session's outcome window reaches into it.
 
-    `survivor` is the survivor form's (`SurvivorPanelUpdate`, `V2-P7-016`): a store more sessions
-    behind than its bound is refused before any request, the sessions fetched beyond an ordinary
-    day are reported as `caught_up`, and the year before's `namechange` is built again (one
-    request) while its stored build is from before that year ended
-    (`names_built_before_year_end`). Left out, this is the P6 step, unchanged."""
+    `survivor` is the survivor form's (`SurvivorPanelUpdate`, `V2-P7-016`): a year before that
+    stops short of its last session, and a store more sessions behind than the bound, are refused
+    before any request; the sessions fetched beyond an ordinary day are reported as `caught_up`;
+    and the year before's `namechange` is built again (one request) while its stored build is
+    from before that year ended (`names_built_before_year_end`). Left out, this is the P6 step,
+    unchanged."""
     caught_up: tuple[date, ...] = ()
     if survivor is not None:
+        missing = previous_year_sessions_missing(
+            runtime_dir, session=session, as_of=as_of, exchange=exchange, targets=targets
+        )
+        if missing:
+            raise StepFailedError(
+                "panel update",
+                _previous_year_refusal(
+                    runtime_dir,
+                    missing=missing,
+                    session=session,
+                    exchange=exchange,
+                    targets=targets,
+                ),
+            )
         caught_up = panel_sessions_to_catch_up(
             runtime_dir, session=session, as_of=as_of, exchange=exchange, targets=targets
         )
