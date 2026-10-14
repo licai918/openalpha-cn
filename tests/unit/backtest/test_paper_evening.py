@@ -25,9 +25,12 @@ from openalpha_cn.backtest.execution import MarketBar, security_board
 from openalpha_cn.backtest.multi_day import PortfolioLedger
 from openalpha_cn.backtest.paper import PaperPortfolio
 from openalpha_cn.backtest.paper_evening import (
+    CatchUpResult,
     DryRunLedger,
     EveningResult,
+    missing_sessions,
     open_book,
+    run_catch_up,
     run_evening,
 )
 from openalpha_cn.backtest.paper_settlement import WRITE_OFF_REASON, write_off_id
@@ -213,6 +216,29 @@ def evening(
         entrant_prices={code: D(price) for code, price in prices.items()},
         delisted=delisted,
         observed_on=day if observed_on is None else observed_on,
+    )
+
+
+def catch_up(
+    book: Book,
+    day: date,
+    quotes: Market,
+    *,
+    delisted: Collection[str] = (),
+    config: SurvivorBookConfig = CONFIG,
+    observed_on: date | None = None,
+) -> CatchUpResult:
+    """Settle the missed session `day` -- observed later, by default the day after S6."""
+    return run_catch_up(
+        store=book.store,
+        ledger=book.ledger,
+        make_portfolio=make_portfolio,
+        config=config,
+        session=day,
+        session_index=INDEX[day],
+        market=quotes,
+        delisted=delisted,
+        observed_on=date(2021, 3, 10) if observed_on is None else observed_on,
     )
 
 
@@ -915,3 +941,203 @@ def test_both_ledgers_take_the_same_row_again_as_a_no_op_and_refuse_another_unde
 
     assert real.list() == (same,)
     assert dry.transitions == (same,)
+
+
+# ---- a missed evening, caught up ---------------------------------------------------------------
+
+
+SIXTEEN = [f"6001{n:02d}.SH" for n in range(16)]
+SCREEN_SIXTEEN = screened(*((name, "10.00") for name in SIXTEEN))
+
+
+def test_a_catch_up_from_the_opening_leaves_the_next_evening_the_initial_build(
+    tmp_path: Path,
+) -> None:
+    """S1's evening never ran. Caught up, S1 is settled without a decision: the book is moved to
+    the session and nothing is planned, so the book has still decided nothing -- and the evening
+    of S2 is the initial build, ten entries, not the two a day of an initialised book."""
+    book = book_at(tmp_path, cash="350000.00")
+
+    caught = catch_up(book, S1, NOTHING)
+
+    assert caught.outcome == "created"
+    assert caught.snapshot == PaperBookSnapshot(
+        config_digest=DIGEST,
+        session_index=1,
+        session=S1,
+        book=PortfolioState(as_of=S1, cash=D("350000.00")),
+        last_settled_session=1,
+        first_decision_session=None,
+    )
+    assert load_snapshot(book.store, S1) == caught.snapshot
+    result = evening(book, S2, NOTHING, SCREEN_SIXTEEN, dict.fromkeys(SIXTEEN, "10.00"))
+    assert result.decision is not None and result.trade_list is not None
+    assert [entry.reason for entry in result.decision.entries] == ["INITIAL_BUILD"] * 10
+    assert [(o.signal_session, o.quantity) for o in result.trade_list.orders] == [(2, 3400)] * 10
+    assert result.snapshot.first_decision_session == 2
+
+
+# S1's evening plans 600030.SH 900 at 10.00 and 600050.SH 400 at 20.00 (the equal share 9,950.00
+# of 100,000.00; both entrants are drawn), each due on S2 and live through S4. The evenings of S2,
+# S3 and S4 do not run. 600030.SH trades quietly at 10.00; 600050.SH opens locked limit-up on all
+# three sessions.
+SCREEN_C_E = screened((C, "10.00"), (E, "20.00"))
+MISSED = {
+    S2: market(quiet(C, S2, "10.00"), limit_up(E, S2, "20.00")),
+    S3: market(quiet(C, S3, "10.00"), limit_up(E, S3, "22.00")),
+    S4: market(quiet(C, S4, "10.00"), limit_up(E, S4, "24.20")),
+}
+
+
+def test_three_missed_sessions_caught_up_in_order_walk_the_orders_through_without_a_screen(
+    tmp_path: Path,
+) -> None:
+    """Nobody screened S2, S3 or S4, so nothing is cancelled for want of a survivor: the
+    catch-up takes the book's pending buys as the session's survivors. The orders still live
+    their lives -- 600030.SH's buy fills on S2 (9,000.00 + 5.00 + 0.09 = 9,005.09, cash
+    90,994.91); 600050.SH's is refused on S2 and S3, tried once and twice, and on S4, its last
+    session, it expires and cools down from 4. No session plans anything, and the book's first
+    decision stays S1's. The evening of S5 then decides an initialised book: 600050.SH cooling,
+    600030.SH held, so of the pool (the top 4 - floor(4 x 0.25) = 3) only 600060.SH is free --
+    one replacement entry, sized from 90,994.91 + 9,000.00 = 99,994.91: 9,949.49 buys 900."""
+    book = book_at(tmp_path)
+    first = evening(book, S1, NOTHING, SCREEN_C_E, {C: "10.00", E: "20.00"})
+    assert first.trade_list is not None
+    buy_c, buy_e = due_order(book, "buy", C), due_order(book, "buy", E)
+    assert {(o.ts_code, o.quantity) for o in first.trade_list.orders} == {(C, 900), (E, 400)}
+
+    assert missing_sessions(book.store, config_digest=DIGEST, through_index=4) == (2, 3, 4)
+    caught = [catch_up(book, day, MISSED[day]) for day in (S2, S3, S4)]
+
+    assert [result.outcome for result in caught] == ["created"] * 3
+    assert [
+        [(p.order.ts_code, p.attempts) for p in result.snapshot.pending_orders] for result in caught
+    ] == [[(E, 1)], [(E, 2)], []]
+    s2, s3, s4 = (result.settlement for result in caught)
+    assert s2 is not None and s3 is not None and s4 is not None
+    assert (s2.filled, s2.cancelled, s3.cancelled, s4.expired) == ((buy_c,), (), (), (buy_e,))
+    assert caught[-1].snapshot.cooldowns == (Cooldown(ts_code=E, since_session=4),)
+    assert [result.snapshot.first_decision_session for result in caught] == [1, 1, 1]
+    assert caught[-1].snapshot.book.cash == D("90994.91")
+    assert outcomes(book.ledger) == [
+        (attempt_id(buy_c, S2), "filled", None),
+        (attempt_id(buy_e, S2), "rejected", "buy cannot fill on a one-price limit-up bar"),
+        (attempt_id(buy_e, S3), "rejected", "buy cannot fill on a one-price limit-up bar"),
+        (attempt_id(buy_e, S4), "rejected", "buy cannot fill on a one-price limit-up bar"),
+    ]
+    assert missing_sessions(book.store, config_digest=DIGEST, through_index=4) == ()
+
+    tonight_s5 = evening(
+        book,
+        S5,
+        market(quiet(C, S5, "10.00")),
+        screened((C, "10.00"), (E, "26.62"), (F, "10.00"), (G, "15.00")),
+        {E: "26.62", F: "10.00", G: "15.00"},
+    )
+    assert tonight_s5.decision is not None and tonight_s5.trade_list is not None
+    assert [(e.ts_code, e.reason) for e in tonight_s5.decision.entries] == [
+        (F, "ENTRY_REPLACEMENT")
+    ]
+    assert [(o.ts_code, o.quantity) for o in tonight_s5.trade_list.orders] == [(F, 900)]
+
+
+def test_a_catch_up_out_of_order_is_refused_naming_the_missing_session(tmp_path: Path) -> None:
+    book = book_at(tmp_path)
+    evening(book, S1, NOTHING, SCREEN_C_E, {C: "10.00", E: "20.00"})
+    before = (ledger_files(book), documents(book.store))
+
+    with pytest.raises(
+        PaperStateError,
+        match=r"the snapshot for session index 2 is missing: the latest is 1 \(2021-03-02\)",
+    ):
+        catch_up(book, S3, MISSED[S3])
+    assert (ledger_files(book), documents(book.store)) == before
+
+
+def test_an_evening_that_stopped_before_its_ledger_rows_is_mended_by_a_catch_up(
+    tmp_path: Path,
+) -> None:
+    """S3's evening stops in its decision (a drawn entrant has no price), so nothing of it is
+    written. The book is stuck -- S4's evening is refused, naming S3 -- until S3 is caught up.
+    The catch-up appends exactly what the evening would have (its sale, buy, refused buy and
+    write-off: settling does not depend on the decision) and plans nothing; S4's evening then
+    runs. There 600050.SH's live buy fills at 22.00 -- 8,800.00 + 5.00 + 0.09 = 8,805.09, cash
+    72,770.05 - 8,805.09 = 63,964.96 -- and the kernel draws 600060.SH and 600070.SH."""
+    clean = through_s2(tmp_path / "clean")
+    tonight(clean)
+    book = through_s2(tmp_path / "stopped")
+    with pytest.raises(ValueError, match=r"no reference price for 600070\.SH"):
+        tonight(book, prices={E: "22.00", F: "10.00", H: "8.00"})
+    market_s4 = market(quiet(B, S4, "11.50"), quiet(C, S4, "10.10"), quiet(E, S4, "22.00"))
+    prices_s4 = {F: "10.00", G: "15.00", H: "8.00"}
+    with pytest.raises(PaperStateError, match=r"the snapshot for session index 3 is missing"):
+        evening(book, S4, market_s4, SCREEN_S3, prices_s4)
+
+    mended = catch_up(book, S3, MARKET_S3, delisted={DL})
+
+    assert rows(book.ledger) == rows(clean.ledger)
+    assert mended.settlement is not None
+    assert [item.ts_code for item in mended.settlement.written_off] == [DL]
+    assert [(p.order.ts_code, p.attempts) for p in mended.snapshot.pending_orders] == [(E, 1)]
+    assert mended.snapshot.book == load_snapshot(clean.store, S3).book
+    s4 = evening(book, S4, market_s4, SCREEN_S3, prices_s4)
+    assert s4.outcome == "created" and s4.decision is not None and s4.settlement is not None
+    assert s4.settlement.book.cash == D("63964.96")
+    assert sorted(entry.ts_code for entry in s4.decision.entries) == [F, G]
+
+
+def test_a_catch_up_of_a_settled_session_writes_nothing_and_another_configuration_is_refused(
+    tmp_path: Path,
+) -> None:
+    """A session is settled once, by its evening or by its catch-up: either run again answers
+    `unchanged` with the snapshot held and writes nothing. A catch-up under another
+    configuration is refused by name before anything is written, as an evening is."""
+    book = through_s2(tmp_path)
+    before = (ledger_files(book), documents(book.store))
+
+    with pytest.raises(PaperStateError, match=rf"and this settlement runs under {OTHER_DIGEST}"):
+        catch_up(book, S3, MARKET_S3, delisted={DL}, config=OTHER_CONFIG)
+    assert (ledger_files(book), documents(book.store)) == before
+
+    settled = tonight(book)
+    after = (ledger_files(book), documents(book.store))
+    again = catch_up(book, S3, MARKET_S3, delisted={DL})
+    assert (again.outcome, again.snapshot, again.settlement) == (
+        "unchanged",
+        settled.snapshot,
+        None,
+    )
+    assert (ledger_files(book), documents(book.store)) == after
+
+    quiet_s4 = market(quiet(B, S4, "11.50"), quiet(C, S4, "10.10"))
+    mended = catch_up(book, S4, quiet_s4)
+    after = (ledger_files(book), documents(book.store))
+    for rerun in (catch_up(book, S4, quiet_s4), evening(book, S4, quiet_s4, SCREEN_S3, PRICES_S3)):
+        assert (rerun.outcome, rerun.snapshot) == ("unchanged", mended.snapshot)
+    assert (ledger_files(book), documents(book.store)) == after
+
+
+def test_missing_sessions_are_the_ordinals_after_the_head_through_the_one_asked_about(
+    tmp_path: Path,
+) -> None:
+    """The history grows only at its head, so every session after it up to the one asked about
+    is missing, and none before it is. A store never opened is refused by name -- there is no
+    book to be missing sessions of -- and so is a book of another configuration."""
+    never = FilePaperStateStore(tmp_path / "never")
+    with pytest.raises(PaperStateError, match="no paper book snapshot is held: the book was never"):
+        missing_sessions(never, config_digest=DIGEST, through_index=3)
+
+    book = book_at(tmp_path / "book")
+    assert missing_sessions(book.store, config_digest=DIGEST, through_index=0) == ()
+    assert missing_sessions(book.store, config_digest=DIGEST, through_index=3) == (1, 2, 3)
+    evening(book, S1, NOTHING, SCREEN_S1, PRICES_S1)
+    evening(book, S2, MARKET_S2, SCREEN_S2, PRICES_S2)
+    assert missing_sessions(book.store, config_digest=DIGEST, through_index=5) == (3, 4, 5)
+    assert missing_sessions(book.store, config_digest=DIGEST, through_index=2) == ()
+    assert missing_sessions(book.store, config_digest=DIGEST, through_index=1) == ()
+    with pytest.raises(
+        PaperStateError,
+        match=rf"settled under configuration digest {DIGEST} through 2021-03-03, and the "
+        rf"sessions asked about are of {OTHER_DIGEST}",
+    ):
+        missing_sessions(book.store, config_digest=OTHER_DIGEST, through_index=5)

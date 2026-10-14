@@ -65,6 +65,21 @@ only). The daily entry (`V2-P7-008`) therefore pins every input of an evening in
 the facts' `as_of`, the market's `as_of`, the delisted set -- so that a run again reads what the
 first run read.
 
+## A missed evening, caught up
+
+An evening that does not complete -- the facts refused, the panel not updated, the machine off
+-- leaves its session without a snapshot, and from then on every evening is refused by name
+(`latest_snapshot` never settles across a gap): the book stops until the session is settled.
+`run_catch_up` settles it **without a decision**: the same dry run and the same commit, but no
+screen -- nobody screened the session -- so the session's survivors are taken to be the names of
+the book's pending buys, and **no buy is cancelled** by a session nobody screened; the orders
+still fill, are refused, carried, expire and cool down as the market makes them. Nothing new is
+planned (`Settlement.without_plan`), and the book's first decision is carried as it was, so a
+book only caught up since its opening is still built by its next evening's initial build. The
+market is the session's own, read later; the caller settles the missed sessions oldest first --
+`missing_sessions` names them -- and then runs tonight's evening. A catch-up out of order is
+refused by `latest_snapshot`, naming the gap.
+
 ## What the caller owns
 
 - **The paper book's construction (D15).** `make_portfolio` builds a `PaperPortfolio` on the
@@ -104,6 +119,7 @@ from openalpha_cn.backtest.paper_state import (
     PaperBookSnapshot,
     PaperStateDocumentStore,
     PaperStateError,
+    held_head,
     latest_snapshot,
     load_snapshot,
     save_snapshot,
@@ -118,9 +134,12 @@ from openalpha_cn.domain.survivor_orders import TradeList, build_trade_list
 from openalpha_cn.domain.survivor_policy import BookDecision, decide_book
 
 __all__ = [
+    "CatchUpResult",
     "DryRunLedger",
     "EveningResult",
+    "missing_sessions",
     "open_book",
+    "run_catch_up",
     "run_evening",
 ]
 
@@ -179,6 +198,22 @@ class EveningResult:
             raise ValueError(
                 "a created evening carries its trade list, decision and settlement, and an "
                 "unchanged one carries none of them"
+            )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CatchUpResult:
+    """What one catch-up did: `created` with the snapshot saved and the session's settlement,
+    or `unchanged` with the snapshot already held and no settlement (nothing was written)."""
+
+    outcome: Outcome
+    snapshot: PaperBookSnapshot
+    settlement: Settlement | None
+
+    def __post_init__(self) -> None:
+        if (self.outcome == "created") != (self.settlement is not None):
+            raise ValueError(
+                "a created catch-up carries its settlement, and an unchanged one carries none"
             )
 
 
@@ -281,6 +316,78 @@ def run_evening(
         decision=decision,
         settlement=settlement,
     )
+
+
+def run_catch_up(
+    *,
+    store: PaperStateDocumentStore,
+    ledger: PortfolioLedger,
+    make_portfolio: Callable[[PortfolioLedger], PaperPortfolio],
+    config: SurvivorBookConfig,
+    session: date,
+    session_index: int,
+    market: SessionMarketLike,
+    delisted: Collection[str],
+    observed_on: date,
+) -> CatchUpResult:
+    """Settle the missed session `session` (ordinal `session_index`) without a decision; see the
+    module docstring.
+
+    The arguments are `run_evening`'s less the screen and the entrants' prices: the session's
+    survivors are the names of the book's pending buys, so no buy is cancelled, and nothing is
+    planned. The transaction is the evening's -- dry run, then the ledger rows, then the
+    snapshot -- and so is every refusal, made before anything is written.
+    """
+    digest = survivor_config_digest(config)
+    held = _settled_already(store, session=session, session_index=session_index, digest=digest)
+    if held is not None:
+        return CatchUpResult(outcome="unchanged", snapshot=held, settlement=None)
+    previous = latest_snapshot(
+        store, settling_session=session, settling_index=session_index, config_digest=digest
+    )
+    settlement = _settle_dry(
+        previous=previous,
+        make_portfolio=make_portfolio,
+        session=session,
+        session_index=session_index,
+        market=market,
+        survivors={
+            item.order.ts_code for item in previous.pending_orders if item.order.side == "buy"
+        },
+        delisted=delisted,
+        config=config,
+        observed_on=observed_on,
+    )
+    snapshot = settlement.without_plan()
+    outcome = _commit(store=store, ledger=ledger, settlement=settlement, snapshot=snapshot)
+    return CatchUpResult(outcome=outcome, snapshot=snapshot, settlement=settlement)
+
+
+def missing_sessions(
+    store: PaperStateDocumentStore, *, config_digest: str, through_index: int
+) -> tuple[int, ...]:
+    """The ordinals after the book's latest settled session, through `through_index`, that have
+    no snapshot -- the sessions to catch up, oldest first, before the evening after them.
+
+    The history grows only at its head, so these are every ordinal after the head up to
+    `through_index`, and none when the head is at or past it. A store with no snapshot is
+    refused by name (the book was never opened, so no session of it can be missing), and so is
+    a book settled under a configuration whose digest is not `config_digest`.
+    """
+    head = held_head(store)
+    if head is None:
+        raise PaperStateError(
+            "no paper book snapshot is held: the book was never opened, so it is missing no "
+            "session; a paper book is opened by saving an opening snapshot (open_book)"
+        )
+    if head.config_digest != config_digest:
+        raise PaperStateError(
+            f"the paper book held in this store is settled under configuration digest "
+            f"{head.config_digest} through {head.session.isoformat()}, and the sessions asked "
+            f"about are of {config_digest}: another configuration is another book, with a "
+            "runtime directory of its own"
+        )
+    return tuple(range(head.session_index + 1, through_index + 1))
 
 
 def _settled_already(

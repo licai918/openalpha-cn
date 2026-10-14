@@ -35,6 +35,7 @@ from openalpha_cn.backtest.paper_state import (
     PaperBookSnapshot,
     PaperStateError,
     PendingOrder,
+    held_head,
     latest_snapshot,
     load_snapshot,
     open_snapshot,
@@ -910,6 +911,25 @@ def test_latest_snapshot_passes_the_stores_own_faults_through_as_the_stores_erro
             latest_snapshot(store, settling_session=S3, settling_index=103, config_digest=DIGEST)
         assert not isinstance(raised.value, PaperStateError)
         assert isinstance(raised.value, RuntimeError)
+
+
+def test_the_head_is_the_latest_snapshot_held_read_back_or_none_for_a_store_never_opened(
+    tmp_path: Path,
+) -> None:
+    """`held_head` answers where the book's history ends -- the latest snapshot, verified as
+    every read is -- and `None` for a store that holds none, which is the one question about an
+    empty store that has an answer (whoever asks it decides what a book never opened means)."""
+    assert held_head(FilePaperStateStore(tmp_path / "empty")) is None
+    store = _store_through(tmp_path / "snapshots", 2)
+
+    assert held_head(store) == held_snapshot()
+    assert held_head(store) == latest_snapshot(
+        store, settling_session=S3, settling_index=103, config_digest=DIGEST
+    )
+    document = _document(store, S2)
+    document.write_text(document.read_text(encoding="utf-8")[:-1], encoding="utf-8")
+    with pytest.raises(PaperStateError, match=r"snapshot for 2021-03-03 \(pbs_[0-9a-f]{24}\)"):
+        held_head(store)
 
 
 def test_a_missing_snapshot_is_refused_by_name_and_never_read_as_an_empty_book(

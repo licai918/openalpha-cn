@@ -132,6 +132,7 @@ __all__ = [
     "PaperStateDocumentStore",
     "PaperStateError",
     "PendingOrder",
+    "held_head",
     "latest_snapshot",
     "load_snapshot",
     "open_snapshot",
@@ -506,6 +507,18 @@ def load_snapshot(store: PaperStateDocumentStore, session: date) -> PaperBookSna
         )
     held_id, payload = held
     return open_snapshot(payload, snapshot_id=held_id, session=session)
+
+
+def held_head(store: PaperStateDocumentStore) -> PaperBookSnapshot | None:
+    """The head of the book's history -- the latest snapshot held, read back and verified as
+    every read is -- or `None` for a store that holds no snapshot at all.
+
+    Where the history ends, and nothing more: it is not the book a settlement starts from
+    (`latest_snapshot` is, with its checks against the session being settled), and `None` is
+    not an empty book -- what a store never opened means is the asker's to say.
+    """
+    sessions = store.sessions()
+    return load_snapshot(store, sessions[-1]) if sessions else None
 
 
 def latest_snapshot(
