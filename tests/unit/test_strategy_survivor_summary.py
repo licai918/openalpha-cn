@@ -654,8 +654,16 @@ def test_the_facts_section_says_the_five_percent_band_is_no_witness_after_2025_0
 
     assert witness["st_by_band"] == frame.facts.notes.st_by_band == 1
     assert witness["inert_from"] == "2025-07-07"
+    assert witness["inert"] is True  # 2026-04-10 is on or after the date
     assert "no witness of special treatment" in witness["note"]
     assert "2025-07-07" in witness["note"]
+
+
+def test_the_band_is_a_witness_on_a_session_before_2025_07_07(s3: WrittenOff) -> None:
+    witness = document_of(s3)["facts"]["band_witness"]  # S3 is 2021-03-04
+
+    assert witness["inert"] is False
+    assert witness["inert_from"] == "2025-07-07"
 
 
 def test_a_day_with_no_row_on_the_traded_boards_has_no_coverage_to_state(frame: Frame) -> None:
@@ -1472,6 +1480,68 @@ def test_a_zero_band_count_after_2025_07_07_says_the_band_no_longer_witnesses(
     inert = [line for line in lines if line.strip().startswith(BAND_WITNESS_ENDED)]
     assert len(inert) == 1
     assert "ST 2 (by name 1, pending 1, by band 0)" in "\n".join(lines)
+
+
+COUNTED: Final[FactsNotes] = FactsNotes.tally(
+    reasons=(
+        *["st_by_name"] * 2,
+        *["st_pending"] * 3,
+        *["st_by_band"] * 4,
+        *["delisting"] * 17,
+        *["unknown_no_record"] * 5,
+        *["unknown_before_first"] * 6,
+    ),
+    suspended_without_bar=13,
+    no_listing_row=12,
+    no_bar_within_carry=14,
+    not_listed_with_bar=15,
+    unrecognised_board_codes=("303002.SZ", "303001.SZ"),
+)
+"""Every count of the notes a number of its own, so a line that shows the wrong one -- or none --
+is a wrong number in this table."""
+PRINTED_AS: Final[Mapping[str, str]] = {
+    "delisting": "delisting 17",
+    "name_unknown_assumed_ordinary": "name unknown -> ordinary 11",
+    "name_unknown_before_first": "before first record 6",
+    "name_unknown_no_record": "never renamed 5",
+    "no_bar_within_carry": "no_bar_within_carry 14",
+    "no_listing_row": "no_listing_row 12",
+    "not_listed_with_bar": "not_listed_with_bar 15",
+    "st": "ST 9 ",
+    "st_by_band": "by band 4",
+    "st_by_name": "by name 2",
+    "st_pending": "pending 3",
+    "suspended_without_bar": "suspended_without_bar 13",
+    "unrecognised_board": "unrecognised_board 2 ",
+    "unrecognised_board_codes": "[303001.SZ, 303002.SZ]",
+}
+"""Where each field of `FactsNotes` is printed: the fragment of the facts lines that carries its
+number. The keys are the adapter's own fields, so a field added to the notes is red here until the
+summary prints it and this table says where."""
+
+
+def test_every_count_the_adapter_noted_is_printed_with_its_own_number(s3: WrittenOff) -> None:
+    day = s3_facts(notes=COUNTED)
+
+    lines = summary_lines(document_of(s3, facts=day))
+
+    assert set(PRINTED_AS) == {field.name for field in dataclasses.fields(FactsNotes)}
+    text = "\n".join(lines)
+    for name, fragment in PRINTED_AS.items():
+        assert fragment in text, f"{name} is not printed as {fragment!r}"
+    assert "other notes" not in text  # nothing the summary does not know
+
+
+def test_a_count_the_summary_does_not_know_is_printed_not_dropped(s3: WrittenOff) -> None:
+    """A document from a newer adapter has a count this summary has no line for: its journal is
+    the same, and the summary says so instead of leaving the number out."""
+    document = document_of(s3)
+    document["facts"]["notes"]["a_count_added_later"] = 7
+    document["facts"]["notes"]["another"] = 3
+
+    lines = summary_lines(document)
+
+    assert "  other notes a_count_added_later 7, another 3" in lines  # sorted by name
 
 
 def test_a_zero_band_count_before_2025_07_07_is_just_a_count(s3: WrittenOff) -> None:
