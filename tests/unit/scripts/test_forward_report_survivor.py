@@ -1248,3 +1248,684 @@ def test_a_survivor_dispatch_loads_them_which_is_what_the_p6_probe_would_see(
     assert report["before"] == []
     assert "openalpha_cn.backtest.paper" in report["after"]
     assert "openalpha_cn.strategy_survivor" in report["after"]
+
+
+# --- E-FIX-B: the reads, the report's instant, the paper book's bound --------------------------
+#
+# Appended to E4's tests (the review of E4, `V2-P7-018`). Two more worlds, and what the worlds
+# above leave out:
+#
+# - **Four short evenings.** The three evenings' market and seed, and four survivor evenings -- 6
+#   to 9 April -- under a protocol whose primary horizon is one session and whose secondary is
+#   two (test values, as above): a record matures inside the four evenings, so the paper book's
+#   relative return has windows to compute on the snapshots the evenings wrote -- the 6 April
+#   record's window runs from the 7 April close to the 8 April close, the 7 April record's from
+#   the 8th to the 9th.
+# - **New Year.** The same market from 14 December 2026, under a configuration whose epoch is that
+#   day, built through 31 December with 2027's calendar beside it (as the daily command builds it
+#   for a window that crosses New Year), and one record, on the year's last session.
+# - **What the matured world does not exercise** (E4 review, minor 8). Its twenty-five records are
+#   hand-built `PredictionBatch`es filed through `FilePredictionStore.put` -- shaped as
+#   `survivor_batch` shapes a record and filed on time as the daily command files one, but made by
+#   neither `survivor_batch` nor `daily_selection.register_prediction` -- and its late-record check
+#   is `ScriptedCheck`. The records the real check scores again from the store are the evenings'
+#   own, in the three- and four-evening worlds.
+#
+# The order the report reads in is the evening's write order reversed. An evening files its
+# record, then its journal's `prediction` stage, then its ledger rows and its snapshot, then its
+# journal's `paper` and `result`; the report lists the snapshots first (which fixes the paper
+# book's head), then reads the journals, then scans the prediction store. The two probes below
+# write an evening's later steps into the runtime directory while the report runs.
+
+
+def _snapshot_path(world: tds.World, day: date) -> Path:
+    [path] = sorted((world.runtime / "paper" / "snapshots").glob(f"{day.isoformat()}.pbs_*.json"))
+    return path
+
+
+def _ledger_ids(world: tds.World, day: date) -> list[str]:
+    """The paper ledger's rows of `day`, by order id."""
+    from openalpha_cn.storage.portfolio import SQLitePortfolioLedger
+
+    ledger = SQLitePortfolioLedger(world.runtime / "paper" / "ledger.sqlite3")
+    return [row.order.order_id for row in ledger.list() if row.after.as_of == day]
+
+
+def _ledger_sql(world: tds.World, statement: str, *rows: Sequence[Any]) -> None:
+    """`statement` run on the paper ledger's file, once per row of parameters (once with none)."""
+    import sqlite3
+    from contextlib import closing
+
+    path = world.runtime / "paper" / "ledger.sqlite3"
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.executemany(statement, rows or [()])
+
+
+def _evening_back_to(world: tds.World, day: date, *, filed: bool) -> Any:
+    """`day`'s evening taken back on disk to just after its record was filed and its journal's
+    `prediction` stage written (`filed`), or to before either, and what writes the rest of it.
+
+    Taken back: the ledger rows and the snapshot of `day` gone, the journal without `paper` and
+    `result` (and, not `filed`, without `prediction`, the record gone from the store). The
+    returned call writes them back as the evening writes them: the record and the prediction
+    stage, the ledger rows and the snapshot, then the journal's last two stages."""
+    paper = world.runtime / "paper"
+    whole = world.runtime.parent / f"paper-of-{day.isoformat()}"
+    shutil.copytree(paper, whole)
+    journal_path, journal = _journal(world, day)
+    complete = journal_path.read_bytes()
+    record = world.runtime / "predictions" / f"{journal['prediction']['record_id']}.json"
+    record_bytes = record.read_bytes()
+    rows = [(order_id,) for order_id in _ledger_ids(world, day)]
+    if rows:
+        _ledger_sql(world, "DELETE FROM portfolio_transitions WHERE order_id = ?", *rows)
+    _snapshot_path(world, day).unlink()
+    dropped = {"paper", "result"} if filed else {"prediction", "paper", "result"}
+    kept = {name: value for name, value in journal.items() if name not in dropped}
+    journal_path.write_text(json.dumps(kept, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    if not filed:
+        record.unlink()
+
+    def the_rest() -> None:
+        record.write_bytes(record_bytes)
+        shutil.rmtree(paper)
+        shutil.copytree(whole, paper)
+        journal_path.write_bytes(complete)
+
+    return the_rest
+
+
+def _during_the_check(monkeypatch: pytest.MonkeyPatch, then: Any) -> list[str]:
+    """`then` called once, right after the late-record check's first verdict: the real check,
+    wrapped. Returns the record ids it was asked of."""
+    real = strategy_survivor_check.SurvivorRecordCheck
+    asked: list[str] = []
+
+    def built(store: PanelStore, **keywords: Any) -> Any:
+        check = real(store, **keywords)
+
+        def verdict_of(record: PredictionRecord) -> SurvivorRecordVerdict:
+            verdict = check(record)
+            asked.append(record.record_id)
+            if len(asked) == 1:
+                then()
+            return verdict
+
+        return verdict_of
+
+    monkeypatch.setattr(strategy_survivor_check, "SurvivorRecordCheck", built)
+    return asked
+
+
+def _after_the_store_scan(monkeypatch: pytest.MonkeyPatch, then: Any) -> None:
+    """`then` called right after the report has scanned the prediction store for its witnessed
+    records (`strategy_survivor_forward.witnessed_survivor_records`, wrapped)."""
+    from openalpha_cn import strategy_survivor_forward
+
+    real = strategy_survivor_forward.witnessed_survivor_records
+
+    def scanned(*arguments: Any, **keywords: Any) -> Any:
+        witnessed = real(*arguments, **keywords)
+        then()
+        return witnessed
+
+    monkeypatch.setattr(strategy_survivor_forward, "witnessed_survivor_records", scanned)
+
+
+def test_an_evening_that_commits_its_paper_book_during_the_check_is_left_out_of_the_record_whole(
+    world: tds.World, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """E4 review, important 1 (a). When the report starts, 8 April's evening has filed its record
+    and its journal's prediction stage; it commits its ledger rows, its snapshot and its journal's
+    last two stages while the report checks the records. The snapshots were listed first, so the
+    paper book's head is 7 April and 8 April is left out of the paper record whole -- no refused
+    day, no ledger row of a session the history does not hold -- while the prediction layer
+    witnesses its record. Read the other way round (the journals first, the snapshots after the
+    check) the head would be 8 April with a journal that has no result: a day refused that was
+    not."""
+    asked = _during_the_check(monkeypatch, _evening_back_to(world, EVENINGS[2], filed=True))
+
+    code, _out, err = _report(world, capsys)
+
+    assert code == 0, err
+    assert len(asked) == 3
+    assert _snapshot_path(world, EVENINGS[2]).is_file()  # the evening committed, during the report
+    document = _document(world)
+    assert document["records"]["witnessed"] == 3
+    ledger = document["paper_ledger"]
+    assert "refused" not in ledger, ledger.get("refused")
+    coverage = ledger["coverage"]
+    assert (coverage["evenings"], coverage["last_settled"]) == (2, "2026-04-07")
+    assert coverage["refused_days"] == []
+    assert coverage["settled_sessions_without_document"] == []
+    assert ledger["reconciliation"]["rows_of_unsettled_sessions"] == []
+
+
+def test_a_record_filed_between_the_reads_cannot_make_a_journal_contradict_the_store(
+    world: tds.World, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """E4 review, important 1 (b). When the report starts, 8 April's evening has filed nothing;
+    right after the report scans the prediction store, it files its record, its journal's
+    prediction stage and all the rest. The journals were read before the store: none names 8
+    April's record, which the store did not hold, and the report is produced -- 8 April missing,
+    the paper book's head 7 April. Read the other way round (the store first, then the journals)
+    the journal would name a record the scan never saw, and the report would be refused."""
+    _after_the_store_scan(monkeypatch, _evening_back_to(world, EVENINGS[2], filed=False))
+
+    code, _out, err = _report(world, capsys)
+
+    assert code == 0, err
+    document = _document(world)
+    records = document["records"]
+    assert (records["witnessed"], records["newest_session"]) == (2, "2026-04-07")
+    assert records["missing_sessions"] == ["2026-04-08"]
+    coverage = document["paper_ledger"]["coverage"]
+    assert (coverage["evenings"], coverage["last_settled"]) == (2, "2026-04-07")
+    assert coverage["refused_days"] == []
+
+
+@pytest.mark.parametrize("instant", ["17:00", "18:30"], ids=["before-the-evening", "at-its-pin"])
+def test_a_report_as_of_an_instant_reads_what_existed_at_that_instant(
+    world: tds.World, capsys: pytest.CaptureFixture[str], scripted: ScriptedCheck, instant: str
+) -> None:
+    """E4 review, minor 1 (and M2). Run after the three evenings, a report as of 17:00 on 8 April
+    -- after its 16:30 publication, before its evening -- or as of 18:30, that evening's pinned
+    instant, before its record was filed (at 18:35): the record, registered after the report's
+    instant, is not witnessed; the journal is read as it stood then (pinned after 17:00; at
+    18:30, without its prediction stage and the two after it, which were written after the
+    record); and the paper book's head is 7 April although 8 April's snapshot is in the store --
+    two records, through 7 April, two evenings, as a run at that instant would have said."""
+    as_of = datetime.fromisoformat(f"{EVENINGS[2].isoformat()}T{instant}:00+08:00")
+
+    code, _out, err = _report(world, capsys, as_of=as_of)
+
+    assert code == 0, err
+    document = _document(world, as_of)
+    records = document["records"]
+    assert (records["witnessed"], records["newest_session"], records["through"]) == (
+        2,
+        "2026-04-07",
+        "2026-04-07",
+    )
+    assert records["checked"] == len(scripted.asked) == 2
+    ledger = document["paper_ledger"]
+    assert "refused" not in ledger, ledger.get("refused")
+    coverage = ledger["coverage"]
+    assert (coverage["evenings"], coverage["last_settled"], coverage["refused_days"]) == (
+        2,
+        "2026-04-07",
+        [],
+    )
+
+
+def test_a_journal_pinned_after_the_reports_instant_is_not_read_at_all(
+    world: tds.World, capsys: pytest.CaptureFixture[str], scripted: ScriptedCheck
+) -> None:
+    """E4 review, minor 1. A journal whose evening pinned its instant after the report's was not
+    there at that instant, whatever it says now: as of 17:00 on 8 April, 8 April's journal -- here
+    naming a record the store no longer holds, which a journal that is read would refuse the
+    report for -- is not read, and the report is the two evenings' own. (It is this rule alone
+    that keeps a later settle-only day, which files a result and no record, out of the paper
+    book's head.)"""
+    _path, journal = _journal(world, EVENINGS[2])
+    (world.runtime / "predictions" / f"{journal['prediction']['record_id']}.json").unlink()
+    as_of = datetime(2026, 4, 8, 17, 0, tzinfo=SHANGHAI)
+
+    code, _out, err = _report(world, capsys, as_of=as_of)
+
+    assert code == 0, err
+    document = _document(world, as_of)
+    assert (document["records"]["witnessed"], document["records"]["through"]) == (
+        2,
+        "2026-04-07",
+    )
+    coverage = document["paper_ledger"]["coverage"]
+    assert (coverage["documents"], coverage["evenings"], coverage["last_settled"]) == (
+        2,
+        2,
+        "2026-04-07",
+    )
+
+
+def test_a_report_as_of_an_instant_before_the_panels_newest_publication_is_refused(
+    world: tds.World, capsys: pytest.CaptureFixture[str], scripted: ScriptedCheck
+) -> None:
+    """What `--as-of` cannot do, pinned (E4 review, minor 1). As of 17:00 on 7 April, run after
+    8 April's evening stored 8 April's adjustment factors (knowable at its 16:30): the panel's
+    readers judge a partition whole, so the labels cannot be read at that instant and the report
+    is refused by name -- exit 1, nothing written -- rather than produced from a panel it could
+    not have read then."""
+    as_of = datetime(2026, 4, 7, 17, 0, tzinfo=SHANGHAI)
+
+    code, out, err = _report(world, capsys, as_of=as_of)
+
+    assert code == 1
+    assert out == ""
+    assert "the survivor forward report is refused" in err
+    assert "not_yet_knowable" in err
+    assert not (world.runtime / "reports" / report_name(as_of)).exists()
+
+
+def test_files_beside_the_journals_that_are_no_sessions_journal_are_not_read(
+    world: tds.World, capsys: pytest.CaptureFixture[str], scripted: ScriptedCheck
+) -> None:
+    """E4 review, minor 7 (M8). The morning re-check's advice, `<session>.morning.json`, and the
+    `<session>.json.partial` a crashed journal write leaves sit beside the journals: neither is a
+    session's journal, neither is read, and the report is the three evenings' own."""
+    path, _body = _journal(world, EVENINGS[1])
+    morning = {"schema": "openalpha-daily-survivor-morning/v1", "session": "2026-04-07"}
+    path.with_name("2026-04-07.morning.json").write_text(json.dumps(morning), encoding="utf-8")
+    path.with_name("2026-04-08.json.partial").write_text("{", encoding="utf-8")
+
+    code, _out, err = _report(world, capsys)
+
+    assert code == 0, err
+    document = _document(world)
+    assert document["records"]["witnessed"] == 3
+    coverage = document["paper_ledger"]["coverage"]
+    assert (coverage["documents"], coverage["evenings"], coverage["refused_days"]) == (3, 3, [])
+
+
+def test_a_journal_written_under_another_registration_refuses_the_report(
+    world: tds.World, capsys: pytest.CaptureFixture[str], scripted: ScriptedCheck
+) -> None:
+    """E4 review, minor 7 (M9). 7 April's journal says another registration of the configuration
+    wrote it: the journals are what the store is held against, so the report is refused, naming
+    the file -- exit 1, nothing written."""
+    path, body = _journal(world, EVENINGS[1])
+    body["registration"]["sha256"] = "ef" * 32
+    path.write_text(json.dumps(body), encoding="utf-8")
+
+    code, out, err = _report(world, capsys)
+
+    assert code == 1
+    assert out == ""
+    assert "2026-04-07.json was written under another registration" in err
+    assert not (world.runtime / "reports" / report_name(REPORT_AS_OF)).exists()
+
+
+def _damage(world: tds.World, fault: str) -> None:
+    """The paper book's store damaged in one way (`PAPER_FAULTS`)."""
+    if fault.startswith("snapshot"):
+        path = _snapshot_path(world, EVENINGS[1])
+        if fault == "snapshot-not-a-snapshot":
+            path.write_text("{}", encoding="utf-8")
+        else:
+            path.write_bytes(b"\xff\xfe not text")
+        return
+    if fault == "ledger-table-damaged":
+        _ledger_sql(world, "ALTER TABLE portfolio_transitions RENAME COLUMN payload TO body")
+        return
+    [order_id, *_] = _ledger_ids(world, EVENINGS[1])
+    from openalpha_cn.storage.portfolio import SQLitePortfolioLedger
+
+    held = SQLitePortfolioLedger(world.runtime / "paper" / "ledger.sqlite3").get(order_id)
+    assert held is not None
+    payload = json.loads(held.model_dump_json(exclude_computed_fields=True))
+    if fault == "ledger-unknown-schema":
+        text = json.dumps({**payload, "schema_version": "portfolio-transition/v99"})
+    elif fault == "ledger-invalid-row":
+        text = json.dumps({key: value for key, value in payload.items() if key != "order"})
+    else:
+        text = "not a transition"
+    _ledger_sql(
+        world, "UPDATE portfolio_transitions SET payload = ? WHERE order_id = ?", (text, order_id)
+    )
+
+
+PAPER_FAULTS: Final[dict[str, str]] = {
+    "snapshot-not-a-snapshot": "cannot be read",
+    "snapshot-not-utf8": "is not UTF-8 text",
+    "ledger-unknown-schema": "portfolio-transition/v99",
+    "ledger-invalid-row": "order",
+    "ledger-not-json": "",
+    "ledger-table-damaged": "payload",
+}
+"""How the paper book's store is damaged, and a word of the refusal each gives (E4 review, minor
+3 and M12): a snapshot that does not parse or is not UTF-8 text, a ledger row of an unknown
+schema version, one its model refuses, one that is not JSON, and a ledger table that cannot be
+read."""
+
+
+@pytest.mark.parametrize("fault", sorted(PAPER_FAULTS))
+def test_a_paper_book_store_that_does_not_read_back_is_the_paper_sections_refusal(
+    world: tds.World, capsys: pytest.CaptureFixture[str], scripted: ScriptedCheck, fault: str
+) -> None:
+    """E4 review, minor 3 (M12). Whatever of the paper book's store fails to read back -- a
+    snapshot, a ledger row, the ledger's table -- the paper record is refused in its own two
+    sections and the report, its prediction layer whole, is still produced: exit 0, never a
+    traceback."""
+    _damage(world, fault)
+
+    code, _out, err = _report(world, capsys)
+
+    assert code == 0, err
+    document = _document(world)
+    for section in ("paper_ledger", "relative"):
+        assert document[section]["wording"] == SURVIVOR_WORDING
+        assert PAPER_FAULTS[fault] in document[section]["refused"], document[section]["refused"]
+    assert document["records"]["witnessed"] == 3
+    assert document["prediction_layer"]["h20"]["witnessed"] == 3
+
+
+@pytest.mark.parametrize("fault", ["IndexPriceError", "PanelBatchError"])
+def test_benchmark_levels_that_do_not_read_refuse_the_report_by_name(
+    world: tds.World,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    scripted: ScriptedCheck,
+    fault: str,
+) -> None:
+    """E4 review, minor 3. The CSI 500's levels refused by their reader -- a stored level row that
+    does not read (`IndexPriceError`), a read the panel's batch rules refuse (`PanelBatchError`)
+    -- refuse the report by name: exit 1, nothing written, never a traceback."""
+    from openalpha_cn.domain.index_prices import IndexPriceError
+    from openalpha_cn.domain.panel_batch import PanelBatchError
+
+    error = {"IndexPriceError": IndexPriceError, "PanelBatchError": PanelBatchError}[fault]
+
+    def refused(*_arguments: Any, **_keywords: Any) -> Any:
+        raise error("level row 3 does not read")
+
+    monkeypatch.setattr(forward_report, "load_index_prices", refused)
+
+    code, out, err = _report(world, capsys)
+
+    assert code == 1
+    assert out == ""
+    assert f"the {PROTOCOL_BENCHMARK} levels of [2026] cannot be read" in err
+    assert "level row 3 does not read" in err
+    assert not (world.runtime / "reports" / report_name(REPORT_AS_OF)).exists()
+
+
+def test_labels_that_cannot_be_read_refuse_the_report_by_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    matured_panel: Path,
+    scripted: ScriptedCheck,
+) -> None:
+    """E4 review, important 2 (M13). The adjustment factors the shared label reader reads are not
+    stored: the reader's `ModelPanelUnreadableError` refuses the report by name, exit 1."""
+    from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
+
+    matured = _matured(tmp_path, monkeypatch, matured_panel)
+    PanelStore(matured.world.runtime / "panel").remove_partition(ADJ_FACTOR_DATASET, 2026)
+
+    code, out, err = _report(matured.world, capsys, as_of=MATURED_AS_OF)
+
+    assert code == 1
+    assert out == ""
+    assert "the survivor forward report is refused" in err
+    assert "adjustment factors" in err
+    assert not (matured.world.runtime / "reports" / report_name(MATURED_AS_OF)).exists()
+
+
+def _file_at(world: tds.World, batch: PredictionBatch, *, at: datetime) -> str:
+    """`batch` filed with the store's custody clock at `at`."""
+    store = PanelStore(world.runtime / "panel")
+    day = batch.as_of.astimezone(SHANGHAI).date()
+    calendar = daily._outcome_calendar(store, "SSE", day, batch.predicted_at)
+    filed = FilePredictionStore(world.runtime / "predictions", clock=lambda: at).put(
+        batch=batch, calendar=calendar, zone=SHANGHAI
+    )
+    return filed.record.record_id
+
+
+def test_a_record_registered_at_0914_is_on_time_and_one_registered_at_0915_is_not(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    matured_panel: Path,
+    scripted: ScriptedCheck,
+) -> None:
+    """E4 review, minor 7 (M11). The registration cutoff is 09:15 of the next session, an instant
+    and not a date: ordinal 26's record registered at 09:14 of ordinal 27's day is witnessed;
+    ordinal 27's registered at 09:15 of ordinal 28's day is a late record, not a registration --
+    never witnessed, never checked, its session missing."""
+    matured = _matured(tmp_path, monkeypatch, matured_panel)
+    world, day = matured.world, matured.ordinals.day_of
+
+    def morning(ordinal: int, minute: int) -> datetime:
+        return datetime.fromisoformat(f"{day(ordinal).isoformat()}T09:{minute:02d}:00+08:00")
+
+    on_time = _file_at(world, batch_of(day(26), 26, matured.registered), at=morning(27, 14))
+    late = _file_at(world, batch_of(day(27), 27, matured.registered), at=morning(28, 15))
+
+    code, _out, err = _report(world, capsys, as_of=MATURED_AS_OF)
+
+    assert code == 0, err
+    records = _document(world, MATURED_AS_OF)["records"]
+    assert (records["witnessed"], records["newest_session"]) == (26, day(26).isoformat())
+    assert day(26).isoformat() not in records["missing_sessions"]
+    assert day(27).isoformat() in records["missing_sessions"]
+    assert on_time in scripted.asked
+    assert late not in scripted.asked
+
+
+NEW_YEAR_EPOCH: Final[date] = date(2026, 12, 14)
+NEW_YEAR_DAYS: Final[tuple[date, ...]] = tds.weekdays(
+    NEW_YEAR_EPOCH, date(2027, 3, 31), closed=(date(2027, 1, 1),)
+)
+"""The New Year market's sessions: from the epoch, 14 December 2026; 1 January 2027 a holiday."""
+NEW_YEAR_BUILD: Final[datetime] = datetime(2026, 12, 31, 18, 0, tzinfo=SHANGHAI)
+"""The build: 31 December has published, and 2027's calendar is fetched beside it -- before the
+record (18:30), which is placed on it."""
+NEW_YEAR_AS_OF: Final[datetime] = datetime(2026, 12, 31, 19, 30, tzinfo=SHANGHAI)
+"""The report: after the year's last session's record was filed (18:31), still in 2026."""
+
+
+@pytest.fixture(scope="module")
+def new_year_panel(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The New Year market through 31 December 2026, and 2027's calendar, by `panel build`."""
+    runtime = tmp_path_factory.mktemp("survivor-new-year") / "runtime"
+    market = survivor_day.SurvivorMarket(open_days=NEW_YEAR_DAYS)
+    market.today = NEW_YEAR_BUILD.date()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("TUSHARE_TOKEN", tds.SECRET_TOKEN)
+        patch.setattr(cli, "_panel_transport", lambda: market)
+        patch.setattr(cli, "_panel_clock", lambda: tds.WALL_CLOCK)
+        for year, targets in ((2026, survivor_day.SEED_TARGETS), (2027, ("trade_cal",))):
+            arguments = ["panel", "build", "--runtime-dir", str(runtime), "--year", str(year)]
+            arguments += ["--as-of", NEW_YEAR_BUILD.isoformat(), "--exchange", "SSE", "--json"]
+            for target in targets:
+                arguments += ["--dataset", target]
+            built = daily.invoke(arguments)
+            assert built.exit_code == 0, built.reason()
+    return runtime
+
+
+def test_a_record_on_the_years_last_session_is_witnessed_on_next_years_calendar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    new_year_panel: Path,
+    scripted: ScriptedCheck,
+) -> None:
+    """E4 review, minor 2 (M4). A record on 31 December, reported on the evening it was filed:
+    its registration cutoff is 09:15 of 4 January 2027, a session of next year's calendar, which
+    the panel holds -- the report reads it beside the report's own year, and the record is
+    witnessed and checked. Without it the cutoff could not be placed and the report would be
+    refused."""
+    config = survivor_day.survivor_config(epoch=NEW_YEAR_EPOCH)
+    repo, registration = _repository(tmp_path, config, settings=settings_with())
+    market = survivor_day.SurvivorMarket(open_days=NEW_YEAR_DAYS)
+    tds._bind(monkeypatch, repo, market)
+    runtime = tmp_path / "runtime"
+    shutil.copytree(new_year_panel, runtime)
+    world = tds.World(repo=repo, registration=registration, runtime=runtime, market=market)
+    registered = daily.admit_registration(registration, repo).declared
+    last = date(2026, 12, 31)
+    record_id = _file(world, batch_of(last, NEW_YEAR_DAYS.index(last), registered))
+
+    code, _out, err = _report(world, capsys, as_of=NEW_YEAR_AS_OF)
+
+    assert code == 0, err
+    records = _document(world, NEW_YEAR_AS_OF)["records"]
+    assert (records["witnessed"], records["newest_session"], records["through"]) == (
+        1,
+        "2026-12-31",
+        "2026-12-31",
+    )
+    assert scripted.asked == [record_id]
+
+
+SHORT: Final[dict[str, Any]] = {"primary_horizon": 1, "secondary_horizons": [2]}
+"""The four short evenings' protocol changes: test values (the block above)."""
+SHORT_EVENINGS: Final[tuple[date, ...]] = (*EVENINGS, survivor_day.FOURTH)
+"""6, 7, 8 and 9 April: ordinals 1 to 4."""
+SHORT_AS_OF: Final[datetime] = datetime(2026, 4, 10, 10, 0, tzinfo=SHANGHAI)
+"""After 9 April's registration cutoff: the four evenings' sessions closed, two records mature."""
+
+
+@pytest.fixture(scope="module")
+def short_evenings(tmp_path_factory: pytest.TempPathFactory, seeded: Path) -> tds.World:  # noqa: F811
+    """The four short evenings, run once (the block above). The first name the book holds after
+    7 April is delisted on 9 April, with no bar that day: the 9 April evening writes it off, so
+    that session has a ledger row (the book trades nothing on 8 April)."""
+    root = tmp_path_factory.mktemp("survivor-short-evenings")
+    repo, registration = _repository(root, CONFIG, settings=settings_with(**SHORT))
+    market = survivor_day.SurvivorMarket(open_days=tds.OPEN_2026)
+    runtime = root / "runtime"
+    shutil.copytree(seeded, runtime)
+    world = tds.World(repo=repo, registration=registration, runtime=runtime, market=market)
+    with pytest.MonkeyPatch.context() as patch:
+        tds._bind(patch, repo, market)
+        for day in SHORT_EVENINGS:
+            if day == survivor_day.FOURTH:
+                market.delisted = ((_held_after(world, EVENINGS[1])[0], day),)
+            code, _out, err = _daily(world, day)
+            assert code == 0, err
+    return world
+
+
+def _held_after(world: tds.World, day: date) -> list[str]:
+    """The names the paper book held after `day`, from its snapshot."""
+    from openalpha_cn.backtest.paper_state import load_snapshot
+    from openalpha_cn.storage.paper_state import FilePaperStateStore
+
+    store = FilePaperStateStore(world.runtime / "paper" / "snapshots")
+    return sorted(position.subject for position in load_snapshot(store, day).book.positions)
+
+
+@pytest.fixture
+def short_world(
+    short_evenings: tds.World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tds.World:
+    """A copy of the four short evenings' runtime directory, under their registration."""
+    runtime = tmp_path / "runtime"
+    shutil.copytree(short_evenings.runtime, runtime)
+    tds._bind(monkeypatch, short_evenings.repo, short_evenings.market)
+    return dataclasses.replace(short_evenings, runtime=runtime)
+
+
+def _six(value: Any) -> str:
+    """`value` to six places, half away from zero: the record's own rounding, written out."""
+    from fractions import Fraction
+
+    exact = Fraction(value)
+    scaled = abs(exact) * 10**6
+    whole = scaled.numerator // scaled.denominator
+    if scaled - whole >= Fraction(1, 2):
+        whole += 1
+    sign = "-" if exact < 0 and whole else ""
+    return f"{sign}{whole // 10**6}.{whole % 10**6:06d}"
+
+
+def _equity(world: tds.World, day: date) -> Any:
+    """The paper book's equity on `day`, from its snapshot, read here and not by the report."""
+    from fractions import Fraction
+
+    from openalpha_cn.backtest.paper_state import load_snapshot
+    from openalpha_cn.storage.paper_state import FilePaperStateStore
+
+    store = FilePaperStateStore(world.runtime / "paper" / "snapshots")
+    return Fraction(load_snapshot(store, day).book.equity)
+
+
+def _short_outcome(world: tds.World, record_id: str, *, as_of: datetime) -> Any:
+    """`record_id`'s outcome at the primary horizon, labelled by a reader built here."""
+    store = PanelStore(world.runtime / "panel")
+    labels = OutcomeLabels(store, LabelReach(as_of=as_of, years=(2026,), exchange="SSE"))
+    levels = load_index_prices(
+        store, labels.calendar, years=(2026,), as_of=as_of, max_staleness=None
+    )[PROTOCOL_BENCHMARK]
+    record = FilePredictionStore(world.runtime / "predictions", clock=lambda: as_of).get(record_id)
+    assert record is not None
+    session = record.batch.as_of.astimezone(SHANGHAI).date()
+    ordinals = SessionOrdinals(calendar_of(world.runtime), EPOCH)
+    witnessed = WitnessedRecord(
+        session=session, ordinal=ordinals.index_of(session), record_id=record_id, record=record
+    )
+    return record_outcome(labels, witnessed, horizon=1, book=BOOK, csi500=levels, as_of=as_of)
+
+
+def test_the_relative_return_is_the_paper_books_equity_over_the_primary_samples_windows(
+    short_world: tds.World, capsys: pytest.CaptureFixture[str], scripted: ScriptedCheck
+) -> None:
+    """E4 review, important 2: the relative return wired end to end. Four evenings, a primary
+    horizon of one session: the windows are the primary sample's matured periods -- one session
+    each, entry and exit the record's D+1 and D+2 closes -- and each window's book return is the
+    paper book's equity at the exit over its equity at the entry, from the evenings' own
+    snapshots; its investable equal weight and CSI 500 are the record's own at that horizon; and
+    windows that meet are compounded into one chain, whose book return telescopes to the last
+    exit's equity over the first entry's."""
+    from decimal import Decimal
+
+    code, _out, err = _report(short_world, capsys, as_of=SHORT_AS_OF)
+
+    assert code == 0, err
+    document = _document(short_world, SHORT_AS_OF)
+    assert document["paper_ledger"]["coverage"]["evenings"] == 4
+    assert document["paper_ledger"]["write_offs"]["count"] == 1
+    relative = document["relative"]
+    assert "refused" not in relative, relative.get("refused")
+    windows = relative["windows"]
+    assert windows and relative["windows_computed"] == len(windows) == relative["windows_given"]
+    ordinals = SessionOrdinals(calendar_of(short_world.runtime), EPOCH)
+    for window in windows:
+        entry, exit_day = date.fromisoformat(window["entry"]), date.fromisoformat(window["exit"])
+        assert ordinals.index_of(exit_day) - ordinals.index_of(entry) == 1, window
+        expected = _equity(short_world, exit_day) / _equity(short_world, entry) - 1
+        assert window["book_return"] == _six(expected), window
+        outcome = _short_outcome(short_world, window["record_id"], as_of=SHORT_AS_OF)
+        assert (outcome.entry_day, outcome.exit_day) == (entry, exit_day)
+        assert window["investable_ew"] == _six(Decimal(repr(outcome.investable_ew)))
+        assert window["csi500"] == _six(Decimal(repr(outcome.csi500)))
+    [chain] = relative["chains"]
+    first, last = date.fromisoformat(chain["entry"]), date.fromisoformat(chain["exit"])
+    assert chain["windows"] == len(windows)
+    assert chain["book"] == _six(_equity(short_world, last) / _equity(short_world, first) - 1)
+
+
+def test_a_report_as_of_an_instant_bounds_the_paper_book_and_its_windows_to_that_instant(
+    short_world: tds.World, capsys: pytest.CaptureFixture[str], scripted: ScriptedCheck
+) -> None:
+    """E4 review, important 2 (M1, M2, M3) and minor 1. Run after the four evenings, a report as
+    of 17:00 on 9 April -- after its 16:30 publication, before its evening. The 7 April record's
+    window (the 8 April close to the 9 April close) has matured, and the 9 April snapshot it
+    exits on is in the store; but the paper book's head is 8 April (9 April's journal was pinned
+    after the report's instant), so the snapshots, the ledger rows and the journals read are 8
+    April's and before: that window has no snapshot to exit on, 9 April's write-off is no ledger
+    row of the record, and no journal of 9 April is held against a history that ends the day
+    before."""
+    as_of = datetime(2026, 4, 9, 17, 0, tzinfo=SHANGHAI)
+    seventh = _journal(short_world, EVENINGS[1])[1]["prediction"]["record_id"]
+    assert _snapshot_path(short_world, survivor_day.FOURTH).is_file()
+    assert _ledger_ids(short_world, survivor_day.FOURTH)
+
+    code, _out, err = _report(short_world, capsys, as_of=as_of)
+
+    assert code == 0, err
+    document = _document(short_world, as_of)
+    assert (document["records"]["witnessed"], document["records"]["through"]) == (3, "2026-04-08")
+    ledger = document["paper_ledger"]
+    assert "refused" not in ledger, ledger.get("refused")
+    coverage = ledger["coverage"]
+    assert (coverage["evenings"], coverage["last_settled"]) == (3, "2026-04-08")
+    assert ledger["reconciliation"]["rows_of_unsettled_sessions"] == []
+    windows = {window["record_id"]: window for window in document["relative"]["windows"]}
+    assert (windows[seventh]["entry"], windows[seventh]["exit"]) == ("2026-04-08", "2026-04-09")
+    assert windows[seventh]["status"] == "unavailable"
+    assert windows[seventh]["book_return"] is None
+    assert "no snapshot for 2026-04-09" in windows[seventh]["reason"]

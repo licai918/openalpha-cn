@@ -72,6 +72,31 @@ read without the paper book's lock and bounded to one head, and the document
 module is imported inside that branch: they load `backtest/paper.py`, whose audit hook a P6
 report never installs. Its refusals are `SurvivorReportError`, a `ForwardReportError`, so the
 command's exits are P6's: 0 written, 1 refused.
+
+### The order it reads in, and the instant it reads at
+
+No lock is taken, so a daily evening may be writing beside the report. An evening writes its
+record into the prediction store, then its journal's `prediction` stage, then the paper ledger's
+rows and its snapshot, then its journal's `paper` and `result` stages. The report reads in the
+reverse order -- the paper book's snapshots are listed first, then the journals are read, then
+the prediction store is scanned -- so that a later read never sees less than an earlier one
+decided on: every snapshot listed has its journal's prediction stage, and every record a journal
+names is in the store when it is scanned. The paper book's head is fixed by that first listing
+(`_paper_section`), and every paper read is bounded to it.
+
+`--as-of` pins what the report reads to that instant: a record registered after it is not
+witnessed (`strategy_registration.registered_at`), a journal pinned after it is not read, and a
+journal whose record was registered after it is read without the stages written after the record
+(`_journals_at`) -- so the paper book's head is an evening that had filed by then. The panel is
+the limit: its readers judge a partition whole, so a report pinned before the newest stored
+session's 16:30 cannot read its labels or the benchmark at that instant and is refused by name.
+
+One window remains whatever the order, and it is the design's head rule ("a snapshot and a
+journal that filed its prediction or its result"): between an evening's snapshot and its
+journal's `result`, the head is that evening while its journal has filed only its prediction, so
+the paper record shows the session as a refused day. It lasts as long as the evening takes from
+its snapshot to its summary; a day refused after its snapshot looks the same on disk, so the two
+cannot be told apart, and a report run after the evening has finished reads the day whole.
 """
 
 from __future__ import annotations
@@ -106,6 +131,7 @@ from openalpha_cn.storage.predictions import FilePredictionStore, PredictionStor
 from openalpha_cn.strategy_registration import (
     StrategyRegistrationError,
     book_period_end,
+    registered_at,
     schedule_of,
 )
 from openalpha_cn.strategy_view import SHANGHAI, StrategyViewError, backtest_strategy
@@ -115,7 +141,9 @@ if TYPE_CHECKING:
     # For their types only: at run time the survivor report imports these, and only for a
     # registration that names a `kind` (they load `backtest/paper.py`).
     from openalpha_cn.domain.index_prices import IndexBar
+    from openalpha_cn.domain.prediction_record import PredictionRecord
     from openalpha_cn.domain.survivor_book import SurvivorBookConfig
+    from openalpha_cn.runtime.composition import StorageContainer
     from openalpha_cn.strategy_survivor import SurvivorRegistration
     from openalpha_cn.strategy_survivor_forward import (
         PredictionLayer,
@@ -411,15 +439,18 @@ def _survivor_forward_report(
 
     In order: the protocol from the registration's settings, refused by name before anything is
     read when it is absent or does not read; the stored calendar from the epoch's year through
-    the report's, counted from the epoch; the records the prediction store witnesses through the
-    report's date, and the daily journals held against them (a journal naming a record the store
-    does not witness for its session refuses the report); the late-record check over every
+    the report's (and the next when stored), counted from the epoch; then, in the reverse of an
+    evening's write order and each as it stood at `as_of` (module docstring), the paper book's
+    snapshots listed, the daily journals read, and the records the prediction store witnesses
+    through the report's date, the journals held against them (a journal naming a record the
+    store does not witness for its session refuses the report); the late-record check over every
     witnessed record, mature or not; each pre-registered horizon's outcomes and its layer on the
-    non-overlapping sample; the paper book's record (`_paper_section`), whose refusal is that
-    section's and never the report's; and the document. The prediction layer's refusals -- the
-    protocol, the witness (two records for one session, a journal that contradicts the store, a
-    record the store cannot read back), the check's provenance index and arguments, the label
-    reader -- are `SurvivorReportError`; a `TypeError` or an `AssertionError` is a fault, and
+    non-overlapping sample; the paper book's record (`_paper_section`), bounded to the head the
+    listing fixed, whose refusal is that section's and never the report's; and the document. The
+    prediction layer's refusals -- the protocol, the witness (two records for one session, a
+    journal that contradicts the store or carries no pinned instant, a record the store cannot
+    read back), the check's provenance index and arguments, the label reader, the benchmark's
+    levels -- are `SurvivorReportError`; a `TypeError` or an `AssertionError` is a fault, and
     propagates.
     """
     # Imported here, never for a P6 report: they load `backtest/paper.py` and its audit hook.
@@ -471,22 +502,26 @@ def _survivor_report(
     calendar = _survivor_calendar(store, exchange=exchange, epoch=epoch, as_of=as_of)
     ordinals = SessionOrdinals(calendar, epoch)
     registered = admitted.declared
+    reported = as_of.astimezone(SHANGHAI).date()
+    # The evening's writes, read in reverse (module docstring): the snapshots, the journals, the
+    # prediction store -- each as it stood at `as_of`.
+    listing = _paper_listing(runtime_dir, as_of=as_of)
+    try:
+        journals = _journals_at(
+            _survivor_journals(runtime_dir, admitted), prediction_store, as_of=as_of
+        )
+    except daily_selection.StepFailedError as error:
+        raise SurvivorReportError(f"a survivor journal cannot be read: {error}") from error
     witnessed = forward.witnessed_survivor_records(
-        prediction_store,
+        _FiledBy(prediction_store, as_of=as_of),
         book=book,
         registered=registered,
         calendar=calendar,
         ordinals=ordinals,
-        through=as_of.astimezone(SHANGHAI).date(),
+        through=reported,
     )
     sessions = tuple(item.session for item in witnessed)
-    try:
-        journals = _survivor_journals(runtime_dir, admitted)
-    except daily_selection.StepFailedError as error:
-        raise SurvivorReportError(f"a survivor journal cannot be read: {error}") from error
-    forward.check_journals_against_the_store(
-        witnessed, journals, through=as_of.astimezone(SHANGHAI).date()
-    )
+    forward.check_journals_against_the_store(witnessed, journals, through=reported)
     through = forward.report_through(calendar, ordinals, as_of=as_of, witnessed=sessions)
 
     # Every witnessed record is checked, mature or not: an unchecked record is not evidence, and
@@ -522,12 +557,11 @@ def _survivor_report(
         for horizon in horizons
     )
     paper = _paper_section(
-        runtime_dir,
+        listing,
         journals,
         book=book,
         layer=layers[0],
         outcomes=outcomes[protocol.primary_horizon],
-        as_of=as_of,
     )
     document = forward.survivor_forward_document(
         as_of=as_of,
@@ -616,7 +650,11 @@ def _benchmark_levels(
 ) -> tuple[IndexBar, ...]:
     """The protocol benchmark's levels (`000905.SH`) over the stored years of `years`: the paper
     book persists no benchmark close, so the report reads the index at report time. A year not
-    stored contributes nothing, and its closes are absent from every window that needs them."""
+    stored contributes nothing, and its closes are absent from every window that needs them. A
+    read the panel blocks, a stored level row that does not read (`IndexPriceError`) and a read
+    the batch rules refuse (`PanelBatchError`) refuse the report by name."""
+    from openalpha_cn.domain.index_prices import IndexPriceError
+    from openalpha_cn.domain.panel_batch import PanelBatchError
     from openalpha_cn.strategy_survivor_market import PROTOCOL_BENCHMARK
 
     stored = set(store.registered_years(INDEX_DAILY_DATASET))
@@ -625,7 +663,7 @@ def _benchmark_levels(
         return ()
     try:
         levels = load_index_prices(store, calendar, years=read, as_of=as_of, max_staleness=None)
-    except PanelStorageError as error:
+    except (PanelStorageError, IndexPriceError, PanelBatchError) as error:
         raise SurvivorReportError(
             f"the {PROTOCOL_BENCHMARK} levels of {list(read)} cannot be read at "
             f"{as_of.isoformat()}: {error}"
@@ -633,37 +671,59 @@ def _benchmark_levels(
     return tuple(levels.get(PROTOCOL_BENCHMARK, ()))
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _PaperListing:
+    """The paper book as the report found it first, before any journal or record is read: its
+    stores, and the sessions its snapshots are held for (`_paper_section` takes its head from
+    these, and nothing listed later)."""
+
+    storage: StorageContainer
+    sessions: tuple[date, ...]
+
+
+def _paper_listing(runtime_dir: Path, *, as_of: datetime) -> _PaperListing:
+    """The paper book's stores (`build_storage`, the one composition root) and its snapshots'
+    sessions, listed now: the first of the report's reads (module docstring)."""
+    storage = build_storage(runtime_dir=runtime_dir, clock=lambda: as_of)
+    return _PaperListing(storage=storage, sessions=storage.paper_state_store.sessions())
+
+
 def _paper_section(
-    runtime_dir: Path,
+    listing: _PaperListing,
     journals: Mapping[date, Mapping[str, Any]],
     *,
     book: SurvivorBookConfig,
     layer: PredictionLayer,
     outcomes: Sequence[RecordOutcome],
-    as_of: datetime,
 ) -> dict[str, Any]:
     """The paper book's record (`paper_record`'s two blocks), or its refusal in both
-    (`paper_refusal`): every refusal of the record -- the record's own, or a snapshot or a store
-    that does not read back -- is this section's, so that a fault of the paper book never costs
-    the prediction layer. `journals` are this registration's survivor journals, already read.
+    (`paper_refusal`): every refusal of the record -- the record's own, a snapshot that does not
+    read back, a ledger row or a ledger table that does not -- is this section's, so that a fault
+    of the paper book never costs the prediction layer. `journals` are this registration's
+    survivor journals as they stood at the report's instant (`_journals_at`), read after the
+    snapshots were listed.
 
-    No lock is taken. Every read is bounded to the head found first: the newest session holding
-    both a snapshot and a journal that filed its `prediction` or its `result` -- snapshots,
-    ledger rows and journals of later sessions, which a daily run may be writing beside the
-    report, are left out. The relative return's windows are the primary layer's sampled periods
-    (`sampled_benchmarks`)."""
+    No lock is taken. Every read is bounded to one head: the newest session `listing` holds a
+    snapshot for whose journal filed its `prediction` or its `result` -- snapshots stored since
+    the listing, and the ledger rows and journals of sessions after the head, which an evening
+    may be writing beside the report, are left out. Since a journal is read only as it stood at
+    the report's instant, the head is an evening that had filed by then. The relative return's
+    windows are the primary layer's sampled periods (`sampled_benchmarks`)."""
+    import sqlite3
+
+    from pydantic import ValidationError
+
     from openalpha_cn import strategy_survivor_forward as forward
     from openalpha_cn import strategy_survivor_paper_report as paper
     from openalpha_cn.backtest.paper_state import PaperStateError, load_snapshot
+    from openalpha_cn.domain.versioning import UnknownSchemaVersionError
     from openalpha_cn.storage.paper_state import PaperStateStoreError
 
-    storage = build_storage(runtime_dir=runtime_dir, clock=lambda: as_of)
-    state = storage.paper_state_store
+    state = listing.storage.paper_state_store
     try:
-        held = state.sessions()
         filed = [
             session
-            for session in held
+            for session in listing.sessions
             if session in journals and {"prediction", "result"} & set(journals[session])
         ]
         if not filed:
@@ -683,14 +743,85 @@ def _paper_section(
             for item in forward.sampled_benchmarks(layer, outcomes)
         ]
         return paper.paper_record(
-            [load_snapshot(state, session) for session in held if session <= head],
-            [row for row in storage.paper_ledger.list() if row.after.as_of <= head],
+            [load_snapshot(state, session) for session in listing.sessions if session <= head],
+            [row for row in listing.storage.paper_ledger.list() if row.after.as_of <= head],
             [journals[session] for session in sorted(journals) if session <= head],
             windows=windows,
             holding_count=book.holding_count,
         )
-    except (paper.PaperRecordError, PaperStateError, PaperStateStoreError) as error:
+    except (
+        paper.PaperRecordError,
+        PaperStateError,
+        PaperStateStoreError,
+        # A ledger row that does not read back: an unknown schema version, a row its model
+        # refuses, a payload that is not JSON; and a ledger table that cannot be read.
+        UnknownSchemaVersionError,
+        ValidationError,
+        json.JSONDecodeError,
+        sqlite3.DatabaseError,
+    ) as error:
         return forward.paper_refusal(str(error))
+
+
+@dataclass(frozen=True, slots=True)
+class _FiledBy:
+    """The prediction store as it stood at `as_of` (a `HeldRecordLookup`): a record registered
+    after it -- `strategy_registration.registered_at`, the later of its batch's and the store's
+    stamps -- is not shown, so a report pinned to an instant witnesses the records that existed
+    then."""
+
+    records: FilePredictionStore
+    as_of: datetime
+
+    def list_ids(self) -> tuple[str, ...]:
+        return self.records.list_ids()
+
+    def get(self, record_id: str) -> PredictionRecord | None:
+        record = self.records.get(record_id)
+        return None if record is None or registered_at(record) > self.as_of else record
+
+
+_FILED_WITH_THE_RECORD: Final[tuple[str, ...]] = ("prediction", "paper", "result")
+"""A survivor journal's stages an evening writes once its record is filed, in that order."""
+
+
+def _journals_at(
+    journals: Mapping[date, Mapping[str, Any]],
+    records: FilePredictionStore,
+    *,
+    as_of: datetime,
+) -> dict[date, Mapping[str, Any]]:
+    """`journals` as they stood at `as_of`: one pinned after it is left out -- its evening had not
+    begun -- and one whose prediction stage names a record registered after it is read without
+    that stage and the two written after it (`_FILED_WITH_THE_RECORD`). A journal's `as_of` is the
+    instant its evening pinned before any fetch; one that carries none, or one with no offset,
+    refuses the report."""
+    kept: dict[date, Mapping[str, Any]] = {}
+    for session, body in sorted(journals.items()):
+        pinned = body.get("as_of")
+        try:
+            begun = datetime.fromisoformat(pinned) if isinstance(pinned, str) else None
+        except ValueError:
+            begun = None
+        if begun is None or begun.utcoffset() is None:
+            raise SurvivorReportError(
+                f"the journal of {session.isoformat()} pins no instant with its offset "
+                f"({pinned!r}); the report reads a journal as it stood at its own as_of, and "
+                "cannot tell whether this one had begun"
+            )
+        if begun > as_of:
+            continue
+        stage = body.get("prediction")
+        if isinstance(stage, Mapping) and stage.get("registered") is True:
+            record = records.get(str(stage.get("record_id")))
+            if record is not None and registered_at(record) > as_of:
+                body = {
+                    name: value
+                    for name, value in body.items()
+                    if name not in _FILED_WITH_THE_RECORD
+                }
+        kept[session] = body
+    return kept
 
 
 def _survivor_journals(
