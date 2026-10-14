@@ -23,7 +23,7 @@ from __future__ import annotations
 import dataclasses
 import json
 from collections.abc import Mapping, Sequence
-from datetime import date, datetime
+from datetime import date, timedelta
 from typing import Any, Final
 
 import pytest
@@ -39,6 +39,7 @@ from test_survivor_facts_panel import (
 
 from openalpha_cn import strategy_survivor_morning as morning
 from openalpha_cn import strategy_survivor_summary
+from openalpha_cn.domain.name_history import NameHistory, NameRecord, build_name_history
 from openalpha_cn.domain.survivor_book import ScreenResult, SecurityFacts
 from openalpha_cn.domain.survivor_screen import screen
 from openalpha_cn.panel.store import PanelStore
@@ -47,7 +48,16 @@ from openalpha_cn.strategy_survivor_facts import FactsDay
 FACTS_SECTION: Final = getattr(strategy_survivor_summary, "_facts_section")  # noqa: B009
 SCREEN_SECTION: Final = getattr(strategy_survivor_summary, "_screen_section")  # noqa: B009
 SNAPSHOT: Final[str] = "snapshot_0000000000000001"
-NO_CHANGE: Final[str] = "no overnight change to tonight's plan"
+NO_CHANGE: Final[str] = (
+    f"no change to tonight's plan among announcements dated through {SIGNAL.isoformat()}"
+)
+"""The advice line of a morning with no difference: its scope is in the line itself (review
+Important 2) -- what the facts adapter screens is the name corpus as announced by the session."""
+UNSCOPED: Final[str] = "no overnight change"
+"""The old advice line, which a pre-open announcement dated after the session made false."""
+ADVICE: Final[str] = f"{'advice':<18} "
+NOTICES: Final[str] = f"{'notices':<18} "
+RUN: Final[dict[str, Any]] = {"requests": {"namechange": 1}, "request_count": 1, "wrote": True}
 
 
 @pytest.fixture(scope="module")
@@ -164,10 +174,10 @@ def test_a_plan_the_overnight_names_did_not_touch_has_no_difference(evening: Day
     assert advice.differences == ()
     assert advice.tolerated == ()
     lines = morning.morning_lines(
-        morning.morning_document(_pin(), advice),
-        this_run={"requests": {"namechange": 1}, "request_count": 1, "wrote": True},
+        morning.morning_document(_pin(), advice, notices=()), this_run=RUN
     )
-    assert any(NO_CHANGE in line for line in lines)
+    assert f"{ADVICE}{NO_CHANGE}" in lines
+    assert not any(UNSCOPED in line for line in lines)
 
 
 def _pin() -> dict[str, Any]:
@@ -421,32 +431,12 @@ def test_the_plan_is_read_off_the_evenings_orders_book_and_decision(evening: Day
     assert names.watched() == tuple(sorted(top[:8]))
 
 
-@pytest.mark.parametrize(
-    ("session", "as_of", "years"),
-    [
-        (date(2026, 4, 6), "2026-04-07T08:30:00+08:00", (2026,)),
-        (date(2026, 12, 30), "2026-12-31T08:30:00+08:00", (2026,)),
-        (date(2026, 12, 31), "2026-12-31T23:30:00+08:00", (2026,)),
-        (date(2026, 12, 31), "2027-01-02T08:30:00+08:00", (2026, 2027)),
-        (date(2026, 12, 31), "2027-01-01T00:10:00+08:00", (2026, 2027)),
-        (date(2026, 12, 31), "2026-12-31T16:00:00+00:00", (2026, 2027)),
-    ],
-)
-def test_the_morning_asks_the_sessions_year_and_the_mornings_when_it_differs(
-    session: date, as_of: str, years: tuple[int, ...]
-) -> None:
-    """The name corpus is filed by announcement year: a morning in the new year asks the old
-    year's too (an announcement of the evening) -- and the year is the Shanghai calendar's, which a
-    16:00 UTC instant of 31 December is already past."""
-    assert morning.fetch_years(session, datetime.fromisoformat(as_of)) == years
-
-
 def test_the_document_carries_the_pin_the_advice_and_the_wording(evening: Day) -> None:
     top = _survivors(evening)
     document = _evening_document(evening, buys=top[:2])
     advice = _compare(evening, document, _turn(evening, top[0], special_treatment=True))
 
-    filed = morning.morning_document(_pin(), advice)
+    filed = morning.morning_document(_pin(), advice, notices=())
 
     assert filed["schema"] == "openalpha-daily-survivor-morning/v1"
     assert {
@@ -456,17 +446,151 @@ def test_the_document_carries_the_pin_the_advice_and_the_wording(evening: Day) -
         "evening_snapshot_id",
         "differences",
         "tolerated",
+        "notices",
+        "holdings_compared",
         "requests",
     } <= set(filed)
     assert [item["text"] for item in filed["differences"]] == _texts(advice)
     assert "candidate" in filed["wording"] and "no order was placed" in filed["wording"]
     assert json.loads(json.dumps(filed)) == filed
-    lines = morning.morning_lines(
-        filed, this_run={"requests": {"namechange": 1}, "request_count": 1, "wrote": True}
-    )
+    lines = morning.morning_lines(filed, this_run=RUN)
     assert any(f"do not place BUY {top[0]}" in line for line in lines)
-    assert not any(NO_CHANGE in line for line in lines)
+    assert (
+        f"{ADVICE}{len(advice.differences)} difference(s) from tonight's plan among announcements "
+        f"dated through {SIGNAL.isoformat()}"
+    ) in lines
+    assert not any(NO_CHANGE in line or UNSCOPED in line for line in lines)
     assert any("tushare requests" in line and '"namechange": 1' in line for line in lines)
+
+
+def test_the_holdings_compared_are_the_book_after_the_evening_not_the_files_held(
+    evening: Day,
+) -> None:
+    """The file's `held` is the evening's pin, made before its settlement (`[]` for the first
+    evening, which then holds what its buys fill); the holdings the morning compares are the book
+    after it, and the file and the lines say which is which (review Minor 7)."""
+    top = _survivors(evening)
+    document = _evening_document(evening, holdings=top[:3], buys=top[3:5])
+
+    filed = morning.morning_document(_pin(), _compare(evening, document, evening), notices=())
+
+    assert filed["held"] == []
+    assert filed["holdings_compared"] == sorted(top[:3])
+    lines = morning.morning_lines(filed, this_run=RUN)
+    (line,) = (line for line in lines if line.startswith("holdings compared"))
+    assert ", ".join(sorted(top[:3])) in line
+    assert "after the evening's settlement" in line and "`held`" in line
+
+
+def _history(code: str, *records: tuple[str, date, date, str]) -> NameHistory:
+    """`code`'s names, each `(name, effective from, announced on, change reason)`."""
+    return build_name_history(
+        code,
+        [
+            NameRecord(
+                ts_code=code,
+                name=name,
+                effective_from=effective,
+                announced_on=announced,
+                change_reason=reason,
+            )
+            for name, effective, announced, reason in records
+        ],
+    )
+
+
+def test_a_plan_names_announcement_dated_after_the_session_is_a_notice_never_advice(
+    evening: Day,
+) -> None:
+    """The facts adapter screens the name corpus as announced by the session, so a rename the
+    morning's fetch brought that is dated after it -- published before the open, or over a weekend
+    -- changes no verdict. It is listed, for each name of the plan, as a notice: the code, the
+    name, the announcement date and the change, and nothing that reads as an order (review
+    Important 2). A name outside the plan, and an announcement dated on the session itself, are
+    not notices."""
+    top = _survivors(evening)
+    held, bought, carried, watched, outsider = top[0], top[3], top[5], top[6], top[9]
+    document = _evening_document(
+        evening, holdings=[held], buys=[bought], carried=[carried], watch=[watched]
+    )
+    first, day = date(2020, 1, 2), SIGNAL
+
+    def after(days: int) -> date:
+        return day + timedelta(days=days)
+
+    histories = {
+        held: _history(held, ("甲", first, first, "新增"), ("乙", after(2), day, "改名")),
+        bought: _history(
+            bought, ("丙", first, first, "新增"), ("*ST丙", after(3), after(1), "*ST")
+        ),
+        carried: _history(carried, ("丁", first, first, "新增")),
+        watched: _history(
+            watched,
+            ("戊", first, first, "新增"),
+            ("ST戊", after(5), after(2), "ST"),
+            ("己", after(9), after(3), "改名"),
+        ),
+        outsider: _history(
+            outsider, ("庚", first, first, "新增"), ("ST庚", after(3), after(1), "ST")
+        ),
+    }
+
+    notices = morning.overnight_notices(
+        histories, names=morning.plan_names(document).watched(), session=day
+    )
+
+    expected = sorted(
+        [
+            (bought, "*ST丙", after(1), "*ST"),
+            (watched, "ST戊", after(2), "ST"),
+            (watched, "己", after(3), "改名"),
+        ]
+    )
+    assert [notice.text for notice in notices] == [
+        f"{code} {name} {announced.isoformat()} {change}"
+        for code, name, announced, change in expected
+    ]
+    filed = morning.morning_document(_pin(), _compare(evening, document, evening), notices=notices)
+    assert filed["differences"] == []
+    assert filed["notices"] == [
+        {
+            "ts_code": code,
+            "name": name,
+            "ann_date": announced.isoformat(),
+            "change_reason": change,
+            "text": f"{code} {name} {announced.isoformat()} {change}",
+        }
+        for code, name, announced, change in expected
+    ]
+    assert json.loads(json.dumps(filed, ensure_ascii=False)) == filed
+    lines = morning.morning_lines(filed, this_run=RUN)
+    assert f"{ADVICE}{NO_CHANGE}" in lines
+    start = next(index for index, line in enumerate(lines) if line.startswith(NOTICES))
+    header, block = lines[start], lines[start + 1 : start + 1 + len(notices)]
+    assert f"announced after {day.isoformat()}" in header
+    assert "not screened" in header and "not advice" in header
+    assert block == [f"  {notice.text}" for notice in notices]
+    for line in (header, *block):
+        assert not any(word in line for word in ("BUY", "SELL", "place", "order")), line
+
+
+def test_a_morning_with_no_announcement_after_the_session_says_it_has_no_notice(
+    evening: Day,
+) -> None:
+    top = _survivors(evening)
+    document = _evening_document(evening, holdings=top[:2], buys=top[2:4])
+    first = date(2020, 1, 2)
+    histories = {code: _history(code, ("甲", first, first, "新增")) for code in top[:4]}
+
+    notices = morning.overnight_notices(
+        histories, names=morning.plan_names(document).watched(), session=SIGNAL
+    )
+
+    assert notices == ()
+    filed = morning.morning_document(_pin(), _compare(evening, document, evening), notices=())
+    lines = morning.morning_lines(filed, this_run=RUN)
+    (header,) = (line for line in lines if line.startswith(NOTICES))
+    assert "none" in header and f"announced after {SIGNAL.isoformat()}" in header
 
 
 def test_the_listing_row_is_a_row_of_the_frame_the_adapter_says_it_is(evening: Day) -> None:
@@ -499,7 +623,70 @@ def test_a_pin_the_command_filed_is_this_evenings_and_a_finished_file_is_complet
 
     assert not morning.morning_complete(pin)
     advice = _compare(evening, _evening_document(evening), evening)
-    assert morning.morning_complete(morning.morning_document(pin, advice))
+    finished = morning.morning_document(pin, advice, notices=())
+    _check(finished)
+    assert morning.morning_complete(finished)
+
+
+def _finished(evening: Day) -> dict[str, Any]:
+    """A finished file with one difference and one notice, as the command files it."""
+    top = _survivors(evening)
+    document = _evening_document(evening, buys=top[:2])
+    first = date(2020, 1, 2)
+    notices = morning.overnight_notices(
+        {top[1]: _history(top[1], ("甲", first, first, "新增"), ("ST甲", SIGNAL, SIGNAL, "ST"))},
+        names=(top[1],),
+        session=SIGNAL - timedelta(days=1),
+    )
+    advice = _compare(evening, document, _turn(evening, top[0], special_treatment=True))
+    filed = morning.morning_document(_filed_pin(), advice, notices=notices)
+    assert filed["differences"] and filed["notices"]
+    body: dict[str, Any] = json.loads(json.dumps(filed))
+    return body
+
+
+def _edited(document: Mapping[str, Any], edit: str) -> dict[str, Any]:
+    """`document` with `edit` made: `key` removed, `key.0.text` removed from its first item, or
+    `key.<json>` set to that value."""
+    edited: dict[str, Any] = json.loads(json.dumps(document))
+    key, _, value = edit.partition(".")
+    if not value:
+        del edited[key]
+    elif value == "0.text":
+        del edited[key][0]["text"]
+    else:
+        edited[key] = json.loads(value)
+    return edited
+
+
+@pytest.mark.parametrize(
+    ("edit", "named"),
+    [
+        ("tolerated", "tolerated"),
+        ("wording", "wording"),
+        ("notices", "notices"),
+        ("holdings_compared", "holdings_compared"),
+        ("requests", "requests"),
+        ("differences.0.text", "differences"),
+        ("notices.0.text", "notices"),
+        ('differences."none"', "differences"),
+        ("tolerated.[1]", "tolerated"),
+        ("wording.3", "wording"),
+        ('requests.{"namechange": "one"}', "requests"),
+    ],
+)
+def test_a_finished_morning_file_not_of_the_finished_shape_is_refused_not_printed(
+    evening: Day, edit: str, named: str
+) -> None:
+    """A finished file is printed again from its own keys, so one edited by hand -- a key gone,
+    a difference with no line -- is refused by what is wrong with it instead of breaking the
+    printing (review Minor 3); a pin, which holds none of the finished keys, is not finished."""
+    edited = _edited(_finished(evening), edit)
+
+    with pytest.raises(morning.MorningCheckError, match=named):
+        morning.morning_complete(edited)
+    with pytest.raises(morning.MorningCheckError, match=named):
+        _check(edited)
 
 
 @pytest.mark.parametrize(

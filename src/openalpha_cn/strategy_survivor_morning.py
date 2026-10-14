@@ -3,9 +3,10 @@
 `python scripts/daily_selection.py --runtime-dir RT --morning-recheck` reads again, before the next
 call auction, the one thing that can change overnight and matters for tomorrow's open: the name
 corpus -- a new ST or delisting-risk announcement published after the evening's read. The script
-fetches it (`namechange`, nothing else), reads the evening's facts day again and the morning's, and
-hands the two to `compare_morning`; this module is that comparison and the document and the lines
-built from it. It is pure: every input is an argument, nothing is read, written, fetched or timed.
+fetches it (`namechange` of the session's year: one request, nothing else), reads the evening's
+facts day again and the morning's, and hands the two to `compare_morning`; this module is that
+comparison, the notices (`overnight_notices`), and the document and the lines built from them. It
+is pure: every input is an argument, nothing is read, written, fetched or timed.
 
 ## Advice only
 
@@ -21,19 +22,41 @@ twice, and the book's record is the evening's. So nothing here changes it -- a d
 - `watch list changed: ...` -- names of the evening's watch list that are no longer survivors;
 - `counts changed: ...` -- the eligible and survivor counts, and the name corpus' ST and delisting
   counts, when they moved (a name outside the plan turning ST moves only these);
-- nothing at all is `no overnight change to tonight's plan`.
+- nothing at all is `no change to tonight's plan among announcements dated through <session>`: the
+  advice line carries its own scope, and never says "no overnight change" alone.
 
 A difference is a **change**: a name the evening already found ineligible and still is, is not news.
 
-## What it can see
+## What it can see, and the notices
 
 The morning's facts day is the **evening's session's**, read at the morning's clock, and the facts
-adapter cuts the name corpus to what had been announced by the signal day (`announced_by`): a
-rename announced after the session -- published at 07:00 of the morning itself, or over a weekend --
-is invisible to the re-read whatever it is told. What the check catches is the announcement dated
-the evening's own session but published after the evening's read (T3: about half of the ST names are
-announced the evening before). It is a partial guard, not the last word on tomorrow's open, and an
-empty advice is not "no ST announcement exists".
+adapter reads the name corpus through the session's year and cuts it to what had been announced by
+the signal day (`announced_by`): a rename announced after the session -- published at 07:00 of the
+morning itself, or over a weekend -- is invisible to the re-read whatever it is told. What the
+check screens is the announcement dated the evening's own session but published after the
+evening's read (T3: about half of the ST names are announced the evening before). It is a partial
+guard, not the last word on tomorrow's open, and an empty advice is not "no ST announcement
+exists".
+
+What the one request brings that is dated **after** the session is not thrown away: every rename of
+a name of the plan (a holding, a planned or carried buy, the watch list) whose announcement date is
+after the session, in the stored corpus as the morning reads it, is listed as a **notice** --
+"announced after the session, not screened": `<code> <name> <ann_date> <change>`. A notice is not
+advice and says nothing the user is to do; the next evening screens it. At New Year the morning
+still asks the session's year alone (the facts adapter reads no later year), so an announcement
+dated in the new year is neither screened nor a notice.
+
+## The file
+
+`<session>.morning.json` beside the evening's journal: the pin (`schema`, `session`, `as_of`,
+`held`, `evening_snapshot_id`, `registration`, the filed evening read), then `requests`, then the
+advice, the notices and the wording. Its `held` is the evening's **pinned** holdings -- the head's,
+before the evening's own fills and settlement (`[]` for the first evening, which then holds what
+its buys fill) -- with which both facts days are read; the holdings the comparison speaks of are
+the book **after** the evening's settlement, filed as `holdings_compared` and printed as such. A
+finished file is printed again with no request and no write, but only before the next call
+auction: the script checks the cutoff first, and a finished file after it is refused like any
+other morning (the brief's order).
 
 ## Two reads, one before the fetch
 
@@ -72,32 +95,33 @@ from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, fields
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Any, Final
-from zoneinfo import ZoneInfo
 
 from openalpha_cn.domain.survivor_book import ELIGIBILITY_REASON_ORDER, ScreenResult
 from openalpha_cn.domain.survivor_policy import FREEZE_COMPATIBLE_REASONS
 
 if TYPE_CHECKING:
+    from openalpha_cn.domain.name_history import NameHistory
     from openalpha_cn.strategy_survivor_facts import FactsDay
 
 __all__ = [
     "MORNING_FILE_SUFFIX",
     "MORNING_SCHEMA",
     "MORNING_WORDING",
-    "NO_OVERNIGHT_CHANGE",
+    "NO_CHANGE",
     "Difference",
     "EveningReadDriftError",
     "FactsRead",
     "MorningAdvice",
     "MorningCheckError",
+    "Notice",
     "PlanNames",
     "check_evening_read",
     "check_morning_file",
     "compare_morning",
-    "fetch_years",
     "morning_complete",
     "morning_document",
     "morning_lines",
+    "overnight_notices",
     "plan_names",
     "read_facts",
 ]
@@ -106,15 +130,17 @@ MORNING_SCHEMA: Final[str] = "openalpha-daily-survivor-morning/v1"
 MORNING_FILE_SUFFIX: Final[str] = ".morning.json"
 """The morning file is `<session><suffix>` beside the evening's journal `<session>.json`: a name
 no reader of the journals' `????-??-??.json` finds."""
-NO_OVERNIGHT_CHANGE: Final[str] = "no overnight change to tonight's plan"
+NO_CHANGE: Final[str] = "no change to tonight's plan among announcements dated through"
+"""The advice line of a morning with no difference, followed by the session: the scope of what was
+screened is in the line itself, never "no overnight change" alone."""
 MORNING_WORDING: Final[str] = (
     "advice only: candidates of a registered research configuration; no order was placed and the "
     "paper book was not changed -- it follows the evening's plan, and a difference is recorded "
-    "here, never committed to it; the check sees announcements dated up to the evening's session "
-    "only, so no advice is not proof that no ST announcement exists"
+    "here, never committed to it; the check screens announcements dated through the evening's "
+    "session only -- one dated after it is a notice, not screened -- so no advice is not proof "
+    "that no ST announcement exists"
 )
 
-_SHANGHAI: Final[ZoneInfo] = ZoneInfo("Asia/Shanghai")
 _NOT_ASSESSED: Final[str] = "not_assessed"
 """The reason of a code the screen holds no verdict for -- it has no facts row -- as the evening's
 summary names it: the kernel sells what it never assessed."""
@@ -373,16 +399,43 @@ class Difference:
 
 @dataclass(frozen=True, slots=True)
 class MorningAdvice:
-    """What the comparison found: the differences, in the order they are printed, and the codes
-    tolerated as the listing-row class (never advice)."""
+    """What the comparison found: the differences, in the order they are printed, the codes
+    tolerated as the listing-row class (never advice), and the holdings it compared -- the book
+    after the evening's settlement, which is not the file's `held` (module docstring)."""
 
     differences: tuple[Difference, ...]
     tolerated: tuple[str, ...]
+    holdings_compared: tuple[str, ...] = ()
 
     def to_json(self) -> dict[str, Any]:
         return {
             "differences": [item.to_json() for item in self.differences],
             "tolerated": list(self.tolerated),
+            "holdings_compared": list(self.holdings_compared),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class Notice:
+    """One rename of a name of the plan announced after the session: in the stored corpus, never
+    screened -- the facts adapter reads what was announced by the session -- and not advice."""
+
+    ts_code: str
+    name: str
+    ann_date: date
+    change_reason: str
+
+    @property
+    def text(self) -> str:
+        return f"{self.ts_code} {self.name} {self.ann_date.isoformat()} {self.change_reason}"
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "ts_code": self.ts_code,
+            "name": self.name,
+            "ann_date": self.ann_date.isoformat(),
+            "change_reason": self.change_reason,
+            "text": self.text,
         }
 
 
@@ -415,6 +468,7 @@ def compare_morning(
             *_counts(before, now),
         ),
         tolerated=tolerated,
+        holdings_compared=names.holdings,
     )
 
 
@@ -537,22 +591,89 @@ def _counts(before: FactsRead, now: FactsRead) -> list[Difference]:
     ]
 
 
-# --- the fetch, the file and what is printed ------------------------------------------------------
+# --- the notices, the file and what is printed ----------------------------------------------------
 
 
-def fetch_years(session: date, as_of: datetime) -> tuple[int, ...]:
-    """The announcement years the morning asks the name corpus for: the evening's session's, and
-    the morning's own when it is another (the corpus is filed by announcement year, and an
-    announcement of the evening is in the old year while the morning is already in the new one --
-    one more request, at New Year). The year is the Shanghai calendar's."""
-    morning_year = as_of.astimezone(_SHANGHAI).year
-    return (session.year,) if morning_year == session.year else (session.year, morning_year)
+def overnight_notices(
+    histories: Mapping[str, NameHistory], *, names: Collection[str], session: date
+) -> tuple[Notice, ...]:
+    """Every rename of a name in `names` -- the plan's (`PlanNames.watched`) -- whose announcement
+    is dated after `session`, in `histories` (the stored name corpus as the morning reads it): what
+    the morning's fetch brought that its facts read cannot screen. By code, then announcement."""
+    found = [
+        Notice(
+            ts_code=code,
+            name=record.name,
+            ann_date=record.announced_on,
+            change_reason=record.change_reason,
+        )
+        for code in set(names)
+        if (history := histories.get(code)) is not None
+        for record in history.records
+        if record.announced_on > session
+    ]
+    return tuple(sorted(found, key=lambda item: (item.ts_code, item.ann_date, item.name)))
+
+
+_FINISHED: Final[tuple[str, ...]] = (
+    "differences",
+    "tolerated",
+    "notices",
+    "holdings_compared",
+    "wording",
+)
+"""The keys the advice stage files, all at once: a file holding none is a pin, one holding all is a
+finished check, and one holding some is neither."""
+
+
+def _texts_of(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def _items_with_text(value: Any) -> bool:
+    return isinstance(value, list) and all(
+        isinstance(item, dict) and isinstance(item.get("text"), str) for item in value
+    )
 
 
 def morning_complete(document: Mapping[str, Any]) -> bool:
-    """Whether a morning file is a finished check's (it holds its `differences`), which a rerun
-    prints again with no request and no write; otherwise it is a pin a rerun resumes from."""
-    return "differences" in document
+    """Whether a morning file is a finished check's, which a rerun prints again with no request and
+    no write (`True`), or a pin a rerun resumes from (`False`: it holds none of the advice stage's
+    keys). A file holding some of them, or any of them not of the shape the printing reads, is
+    neither and is refused by name (`MorningCheckError`): it was edited, and printing it would
+    break half way."""
+    present = [key for key in _FINISHED if key in document]
+    if not present:
+        return False
+    problems = [f"no `{key}`" for key in _FINISHED if key not in document]
+    shapes = (
+        ("differences", _items_with_text, "a list of differences, each with its `text`"),
+        ("tolerated", _texts_of, "a list of codes"),
+        ("notices", _items_with_text, "a list of notices, each with its `text`"),
+        ("holdings_compared", _texts_of, "a list of codes"),
+        ("wording", lambda value: isinstance(value, str), "a string"),
+    )
+    problems += [
+        f"its `{key}` is not {what}"
+        for key, holds, what in shapes
+        if key in document and not holds(document[key])
+    ]
+    requests = document.get("requests")
+    if not (
+        isinstance(requests, dict)
+        and all(
+            isinstance(api, str) and isinstance(count, int) and not isinstance(count, bool)
+            for api, count in requests.items()
+        )
+    ):
+        problems.append("its `requests` is not the count of requests made by `api_name`")
+    if problems:
+        raise MorningCheckError(
+            "it holds the finished check's "
+            f"{', '.join(f'`{key}`' for key in present)} but is not a finished check: "
+            f"{'; '.join(problems)}"
+        )
+    return True
 
 
 def _instant(value: Any) -> datetime | None:
@@ -570,7 +691,8 @@ def check_morning_file(
     document: Any, *, session: date, evening_snapshot_id: str, registration_sha256: str
 ) -> None:
     """Refuse, by name, a morning file that is not this evening's: not a mapping of this schema,
-    of another session, another evening's snapshot or another registration."""
+    of another session, another evening's snapshot or another registration, or holding some of a
+    finished check's keys and not the rest, or not of their shape (`morning_complete`)."""
     if not isinstance(document, dict) or document.get("schema") != MORNING_SCHEMA:
         raise MorningCheckError(f"it is not a {MORNING_SCHEMA} document")
     problems = []
@@ -588,15 +710,26 @@ def check_morning_file(
         problems.append("it holds no pinned `as_of` (an instant with its offset) and `held`")
     if not isinstance(document.get("evening_read"), dict):
         problems.append("it holds no filed evening read")
+    try:
+        morning_complete(document)
+    except MorningCheckError as error:
+        problems.append(str(error))
     if problems:
         raise MorningCheckError("; ".join(problems))
 
 
-def morning_document(pin: Mapping[str, Any], advice: MorningAdvice) -> dict[str, Any]:
+def morning_document(
+    pin: Mapping[str, Any], advice: MorningAdvice, *, notices: Iterable[Notice]
+) -> dict[str, Any]:
     """The finished morning file: the pin (`schema`, `session`, `as_of`, `held`,
-    `evening_snapshot_id`, `registration`, the filed evening read and `requests`) with the advice
-    and the wording."""
-    return {**pin, **advice.to_json(), "wording": MORNING_WORDING}
+    `evening_snapshot_id`, `registration`, the filed evening read and `requests`) with the advice,
+    the notices and the wording."""
+    return {
+        **pin,
+        **advice.to_json(),
+        "notices": [item.to_json() for item in notices],
+        "wording": MORNING_WORDING,
+    }
 
 
 def _row(label: str, text: str) -> str:
@@ -604,22 +737,34 @@ def _row(label: str, text: str) -> str:
 
 
 def morning_lines(document: Mapping[str, Any], *, this_run: Mapping[str, Any]) -> list[str]:
-    """What the command prints for a finished morning file: the advice block, the requests this run
-    made (`this_run`: `requests`, `request_count`, `wrote`) and the wording."""
+    """What the command prints for a finished morning file: the holdings compared, the advice
+    block (its scope in its own line), the tolerated codes, the notices, the requests this run made
+    (`this_run`: `requests`, `request_count`, `wrote`) and the wording."""
+    session = document["session"]
     differences = list(document["differences"])
+    holdings = list(document["holdings_compared"])
+    scope = f"among announcements dated through {session}"
     lines = [
         _row(
             "morning re-check",
-            f"the plan of {document['session']}, read again as of {document['as_of']}, before the "
-            "next session's call auction -- advice only: the paper book follows the evening's "
-            "plan and was not changed",
-        )
+            f"the plan of {session}, read again as of {document['as_of']}, before the next "
+            "session's call auction -- advice only: the paper book follows the evening's plan "
+            "and was not changed",
+        ),
+        _row(
+            "holdings compared",
+            f"{', '.join(holdings) if holdings else 'none'} (the book after the evening's "
+            "settlement, which its plan acts on; the file's `held` is the evening's pinned "
+            "holdings before it, with which both days are read)",
+        ),
     ]
     if differences:
-        lines.append(_row("advice", f"{len(differences)} difference(s) from tonight's plan"))
+        lines.append(
+            _row("advice", f"{len(differences)} difference(s) from tonight's plan {scope}")
+        )
         lines += [f"  {item['text']}" for item in differences]
     else:
-        lines.append(_row("advice", NO_OVERNIGHT_CHANGE))
+        lines.append(_row("advice", f"{NO_CHANGE} {session}"))
     tolerated = list(document["tolerated"])
     if tolerated:
         lines.append(
@@ -629,6 +774,19 @@ def morning_lines(document: Mapping[str, Any], *, this_run: Mapping[str, Any]) -
                 "tonight, none this morning, the counts account for it -- not advice)",
             )
         )
+    notices = list(document["notices"])
+    lines.append(
+        _row(
+            "notices",
+            f"announced after {session}, not screened -- a notice, not advice: "
+            + (
+                f"{len(notices)} rename(s) of the plan's names in the stored name corpus"
+                if notices
+                else "none for the plan's names in the stored name corpus"
+            ),
+        )
+    )
+    lines += [f"  {item['text']}" for item in notices]
     run = this_run
     lines.append(
         _row(

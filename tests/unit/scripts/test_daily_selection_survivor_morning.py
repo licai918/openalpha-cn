@@ -14,7 +14,9 @@ ten planned buys, no holding) and the second (7 April, ten holdings, ten watch-l
 each test works on a copy of the runtime directory, so the evenings are paid for once. The
 overnight announcement is the market's: `Overnight` serves a rename that was announced on the
 evening and published only the next morning, so the evening's read does not have it and the
-morning's does. Nothing reaches the network; every request is the scripted market's, counted.
+morning's does -- and one announced on the morning itself, dated after the session, which the
+morning's fetch brings and its facts read never screens (a notice). Nothing reaches the network;
+every request is the scripted market's, counted.
 
 **The listing-row class cannot be made by the morning's own fetch.** A code priced before its
 registry listing row has a row aged 0 at an evening read and none at a later one -- but the morning
@@ -47,7 +49,7 @@ import test_daily_selection as tds
 import test_daily_selection_survivor_day as sd
 from daily_market import Market, compact
 
-from openalpha_cn import cli, strategy_survivor_book
+from openalpha_cn import cli, strategy_survivor_book, strategy_survivor_morning
 from openalpha_cn.backtest.paper_state import held_head
 from openalpha_cn.domain.survivor_book import SecurityFacts
 from openalpha_cn.storage.paper_state import FilePaperStateStore
@@ -61,11 +63,22 @@ DAY: Final[date] = sd.DAY
 NEXT: Final[date] = sd.NEXT
 """7 April: the first evening's buys filled at its open; ten holdings, a watch list of ten."""
 SUFFIX: Final[str] = ".morning.json"
-NO_CHANGE: Final[str] = "no overnight change to tonight's plan"
 NO_REQUEST: Final[str] = "tushare requests   0 this run {}"
+UNSCOPED: Final[str] = "no overnight change"
+"""The advice line before review Important 2, which an announcement dated after the session made
+false: it must never be printed again."""
 LAST_OF_2026: Final[date] = date(2026, 12, 31)
 FIRST_OF_2027: Final[date] = sd.FIRST_2027
 """4 January 2027: the first session after the new year, the next one after 31 December."""
+
+
+def no_change(day: date) -> str:
+    """The advice line of a morning that found no difference from `day`'s plan: its scope is in
+    the line itself (review Important 2)."""
+    return (
+        f"{'advice':<18} no change to tonight's plan among announcements dated through "
+        f"{day.isoformat()}"
+    )
 
 
 # --- the markets ----------------------------------------------------------------------------------
@@ -79,18 +92,23 @@ class Overnight(sd.SurvivorMarket):
     announced on `announced` -- but the corpus carries the rename only once `today` is past
     `announced`, as an upstream that publishes late does. The evening's fetch (today = the
     announcement day) has the code's one standing name; the morning's has it closed on the
-    announcement day and the ST name opened on `effective`."""
+    announcement day and the ST name opened on `effective`. `early` are the same, published on
+    the announcement day itself (once `today` is that day): a rename announced before the open of
+    the morning, which is dated after the evening's session."""
 
     renames: tuple[tuple[str, date, date], ...] = ()
+    early: tuple[tuple[str, date, date], ...] = ()
 
     def _names(self, params: Mapping[str, Any]) -> list[list[Any]]:
         today = self.today or self.open_days[-1]
+        published = (
+            *(item for item in self.renames if today > item[1]),
+            *(item for item in self.early if today >= item[1]),
+        )
         found: list[list[Any]] = []
         for row in super()._names(params):
             code = row[0]
-            rename = next(
-                (item for item in self.renames if item[0] == code and today > item[1]), None
-            )
+            rename = next((item for item in published if item[0] == code), None)
             if rename is None:
                 found.append(row)
                 continue
@@ -380,11 +398,15 @@ def test_a_planned_buy_that_turned_special_treatment_overnight_is_not_to_be_plac
     lines = out.splitlines()
     assert f"  do not place BUY {named}: special_treatment" in lines
     assert not any(line.startswith("  do not place BUY") and kept in line for line in lines)
-    assert not any(NO_CHANGE in line for line in lines)
+    document = _filed(world, DAY)
+    assert (
+        f"{'advice':<18} {len(document['differences'])} difference(s) from tonight's plan among "
+        f"announcements dated through {DAY.isoformat()}"
+    ) in lines
+    assert not any(UNSCOPED in line for line in lines)
     assert any(line.startswith("tushare requests   1 this run") for line in lines)
     wording = next(line for line in lines if line.startswith("wording"))
     assert "candidate" in wording and "no order was placed" in wording
-    document = _filed(world, DAY)
     assert document["schema"] == "openalpha-daily-survivor-morning/v1"
     assert document["session"] == DAY.isoformat()
     assert document["as_of"] == morning_of(DAY).isoformat()
@@ -392,6 +414,8 @@ def test_a_planned_buy_that_turned_special_treatment_overnight_is_not_to_be_plac
     assert document["evening_snapshot_id"] == snapshot
     assert document["requests"] == {"namechange": 1}
     assert document["tolerated"] == []
+    # The rename is dated on the session itself: screened, so advice -- never also a notice.
+    assert document["notices"] == []
     assert f"do not place BUY {named}: special_treatment" in _texts(document)
 
 
@@ -424,30 +448,80 @@ def test_a_holding_that_turned_special_treatment_overnight_is_sold_at_the_next_e
     assert [
         item["ts_codes"] for item in document["differences"] if item["kind"] == "holding_turned"
     ] == [[turned]]
+    # The file's `held` is the evening's pin, before its settlement; the holdings compared are the
+    # book after it (review Minor 7).
+    assert document["held"] == journal["held"] == []
+    assert document["holdings_compared"] == sorted(_holdings(world)) and turned in _holdings(world)
     assert _under(sd._files(world.runtime), "paper") == paper
     after = held_head(FilePaperStateStore(world.runtime / "paper" / "snapshots"))
     assert after is not None and after.snapshot_id == head.snapshot_id
     assert sd._journal(world, NEXT) == journal
 
 
-def test_nothing_announced_overnight_is_no_overnight_change(
+def test_nothing_announced_overnight_is_no_change_among_the_announcements_screened(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     evenings: Evenings,
 ) -> None:
     """Nothing renamed: the morning's fetch brings the corpus the evening read, and the advice says
-    so plainly."""
+    so plainly -- with its scope, the announcements dated through the session, in the line."""
     world = _world(tmp_path, monkeypatch, evenings.first)
 
     code, out, err = _morning(world, capsys, DAY, json_output=False)
 
     assert code == 0, err
-    assert any(NO_CHANGE in line for line in out.splitlines())
+    lines = out.splitlines()
+    assert no_change(DAY) in lines
+    assert not any(UNSCOPED in line for line in lines)
     document = _filed(world, DAY)
     assert document["differences"] == [] and document["tolerated"] == []
+    assert document["notices"] == []
     assert document["requests"] == {"namechange": 1}
     assert world.market.payloads == ["namechange"]
+
+
+def test_an_st_rename_announced_after_the_session_is_a_notice_and_changes_no_advice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    evenings: Evenings,
+) -> None:
+    """The reviewer's probe (review Important 2): an ST rename of a planned buy announced on the
+    morning after the evening -- dated after the session, published before the open. The morning's
+    one request brings it into the stored corpus, and the facts adapter, which screens what was
+    announced by the session, does not see it: the advice is the same as with no rename, its line
+    says how far it reaches, and the rename is listed under "announced after the session, not
+    screened" -- a notice, never advice, never an order."""
+    world = _world(tmp_path, monkeypatch, evenings.first)
+    named = _bought(world)[0]
+    world.market.early = ((named, NEXT, NEXT + timedelta(days=1)),)
+
+    code, out, err = _morning(world, capsys, DAY, json_output=False)
+
+    assert code == 0, err
+    assert world.market.payloads == ["namechange"]
+    lines = out.splitlines()
+    assert no_change(DAY) in lines
+    assert not any(UNSCOPED in line or "do not place" in line for line in lines)
+    start = next(index for index, line in enumerate(lines) if line.startswith("notices"))
+    assert f"announced after {DAY.isoformat()}" in lines[start]
+    assert "not screened" in lines[start] and "not advice" in lines[start]
+    notice = f"{named} *ST{named} {NEXT.isoformat()} ST"
+    assert lines[start + 1] == f"  {notice}"
+    for line in lines[start : start + 2]:
+        assert not any(word in line for word in ("BUY", "SELL", "place", "order")), line
+    document = _filed(world, DAY)
+    assert document["differences"] == [] and document["tolerated"] == []
+    assert document["notices"] == [
+        {
+            "ts_code": named,
+            "name": f"*ST{named}",
+            "ann_date": NEXT.isoformat(),
+            "change_reason": "ST",
+            "text": notice,
+        }
+    ]
 
 
 def test_a_name_outside_the_plan_that_turned_special_treatment_moves_only_the_counts(
@@ -501,7 +575,7 @@ def test_a_code_priced_before_its_listing_row_is_tolerated_never_advice(
     """The evening gave the code a row aged 0; a morning read after the registry's row is published
     has none, and counts it in `not_listed_with_bar` instead -- the facts adapter's own account of
     the class. The code is listed under `tolerated`, with the counts that account for it; the
-    advice is `no overnight change`. (The module docstring says why the answer is wrapped.)"""
+    advice is "no change". (The module docstring says why the answer is wrapped.)"""
     world = _world(tmp_path, monkeypatch, listing_evening.source)
     late = listing_evening.late
     evening = sd._journal(world, DAY)["result"]["facts"]["notes"]
@@ -519,7 +593,7 @@ def test_a_code_priced_before_its_listing_row_is_tolerated_never_advice(
 
     assert code == 0, err
     lines = out.splitlines()
-    assert any(NO_CHANGE in line for line in lines)
+    assert no_change(DAY) in lines
     assert any(line.startswith("tolerated") and late in line for line in lines)
     document = _filed(world, DAY)
     assert document["tolerated"] == [late] and document["differences"] == []
@@ -700,56 +774,183 @@ def test_a_store_that_no_longer_gives_the_evenings_facts_is_refused_before_the_f
     assert sd._files(world.runtime) == before
 
 
+def test_a_fault_writing_the_pin_is_its_steps_refusal_having_asked_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    evenings: Evenings,
+) -> None:
+    """The pin is written before the fetch. A fault writing it -- a full disk, a permission -- is
+    the refusal of the step that writes it, printed with the requests line, never a traceback
+    (review Minor 3; D1 review rule 2): nothing was fetched and no morning file is left."""
+    world = _world(tmp_path, monkeypatch, evenings.first)
+    write = daily.write_journal
+
+    def failing(path: Path, body: Mapping[str, Any]) -> None:
+        if path.name.endswith(SUFFIX):
+            raise OSError(28, "No space left on device")
+        write(path, body)
+
+    monkeypatch.setattr(daily, "write_journal", failing)
+    before = sd._files(world.runtime)
+
+    code, out, err = _morning(world, capsys, DAY)
+
+    assert code == 1 and out == ""
+    assert err[0].startswith("step 3 (panel update) failed: an unexpected fault: OSError")
+    assert err[-1] == NO_REQUEST
+    assert world.market.payloads == []
+    assert sd._files(world.runtime) == before
+
+
+def test_a_store_that_cannot_be_opened_is_its_steps_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    evenings: Evenings,
+) -> None:
+    world = _world(tmp_path, monkeypatch, evenings.first)
+
+    def unopenable(_runtime: Path) -> Any:
+        raise OSError("the panel's catalog cannot be opened")
+
+    monkeypatch.setattr(daily, "panel_store", unopenable)
+
+    code, out, err = _morning(world, capsys, DAY)
+
+    assert code == 1 and out == ""
+    assert err[0].startswith("step 2 (preconditions) failed: an unexpected fault: OSError")
+    assert err[-1] == NO_REQUEST
+    assert world.market.payloads == []
+
+
+def test_an_evening_journal_whose_pinned_holdings_are_not_a_list_is_its_steps_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    evenings: Evenings,
+) -> None:
+    world = _world(tmp_path, monkeypatch, evenings.first)
+    path = sd._journal_path(world, DAY)
+    journal = json.loads(path.read_text(encoding="utf-8"))
+    journal["held"] = 10
+    path.write_text(json.dumps(journal, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    before = sd._files(world.runtime)
+
+    code, out, err = _morning(world, capsys, DAY)
+
+    assert code == 1 and out == ""
+    assert err[0].startswith("step 2 (preconditions) failed: an unexpected fault: TypeError")
+    assert err[-1] == NO_REQUEST
+    assert world.market.payloads == []
+    assert sd._files(world.runtime) == before
+
+
+def test_a_fault_printing_the_advice_is_the_summary_steps_refusal_with_the_requests_spent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    evenings: Evenings,
+) -> None:
+    world = _world(tmp_path, monkeypatch, evenings.first)
+
+    def broken(*_arguments: Any, **_keywords: Any) -> list[str]:
+        raise KeyError("text")
+
+    monkeypatch.setattr(strategy_survivor_morning, "morning_lines", broken)
+
+    code, out, err = _morning(world, capsys, DAY, json_output=False)
+
+    assert code == 1 and out == ""
+    assert err[0].startswith("step 5 (summary) failed: an unexpected fault: KeyError")
+    assert sd._requests(err[-1]) == {"namechange": 1}
+
+
+@pytest.mark.parametrize("edit", ["tolerated", "a difference's text"])
+def test_a_finished_morning_file_edited_by_hand_is_refused_by_name_and_left_as_it_is(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    evenings: Evenings,
+    edit: str,
+) -> None:
+    """A finished file is printed again from its own keys. One edited by hand -- a key gone, a
+    difference with no line -- is not of the finished shape: refused by name, before any request,
+    and left as it is (review Minor 3), never printed half and never resumed over."""
+    world = _world(tmp_path, monkeypatch, evenings.first)
+    world.market.renames = ((_bought(world)[0], DAY, NEXT),)
+    _morning(world, capsys, DAY)
+    path = _morning_path(world, DAY)
+    document = json.loads(path.read_text(encoding="utf-8"))
+    if edit == "tolerated":
+        del document["tolerated"]
+    else:
+        del document["differences"][0]["text"]
+    path.write_text(json.dumps(document, sort_keys=True) + "\n", encoding="utf-8")
+    before = sd._files(world.runtime)
+    world.market.clear()
+
+    code, out, err = _morning(world, capsys, DAY, json_output=False)
+
+    assert code == 1 and out == ""
+    assert err[0].startswith("step 2 (preconditions) failed:")
+    assert "is not this evening's morning file" in err[0]
+    assert ("tolerated" if edit == "tolerated" else "differences") in err[0]
+    assert err[-1] == NO_REQUEST
+    assert world.market.payloads == []
+    assert sd._files(world.runtime) == before
+
+
 # --- New Year -------------------------------------------------------------------------------------
 
 
-def test_a_morning_in_the_new_year_asks_the_name_corpus_of_both_years(
+@dataclass
+class NewYearRename(sd.NewYearMarket):
+    """The New Year market, its 2027 name corpus holding an ST rename of `renamed` announced on 2
+    January 2027 -- the reviewer's probe of the second request the morning made at New Year
+    (review Important 1)."""
+
+    renamed: str = ""
+
+    def _names(self, params: Mapping[str, Any]) -> list[list[Any]]:
+        rows = super()._names(params)
+        if str(params["start_date"])[:4] != "2027" or not self.renamed:
+            return rows
+        return [*rows, [self.renamed, f"*ST{self.renamed}", "20270105", None, "20270102", "ST"]]
+
+
+@pytest.mark.parametrize("day", [date(2027, 1, 2), FIRST_OF_2027], ids=lambda day: day.isoformat())
+def test_a_morning_in_the_new_year_asks_the_sessions_year_alone(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     new_year_evening: Source,
+    day: date,
 ) -> None:
-    """The evening of 31 December is in 2026 and the morning of 4 January 2027 (before the 09:15
-    call auction of the first session) is in 2027: an announcement of the evening is filed under
-    2026 and the corpus of 2027 holds the new year's own, so the morning asks both -- two
-    requests, the one more."""
-    market = sd.NewYearMarket(open_days=sd.NEW_YEAR_DAYS)
+    """The evening of 31 December is in 2026 and its morning in 2027 -- on 2 January, when no
+    announcement of 2027 exists yet, or at 08:30 of 4 January, before the call auction of the first
+    session. The facts adapter reads the name corpus through the session's year, as announced by
+    the session, so the new year's corpus can change no advice: the morning asks the session's
+    year alone -- one request, as every morning -- and an empty new year refuses nothing (review
+    Important 1). An ST rename of a planned buy announced on 2 January 2027 is therefore neither
+    screened nor a notice: the new year's corpus is not fetched, and the advice line says how far
+    it reaches."""
+    market = NewYearRename(open_days=sd.NEW_YEAR_DAYS)
     world = _world(tmp_path, monkeypatch, new_year_evening, market)
-    at = datetime.combine(FIRST_OF_2027, time(8, 30), tzinfo=daily.SHANGHAI)
+    market.renamed = _bought(world, LAST_OF_2026)[0]
+    at = datetime.combine(day, time(8, 30), tzinfo=daily.SHANGHAI)
 
-    code, out, err = _morning(world, capsys, LAST_OF_2026, as_of=at)
+    code, out, err = _morning(world, capsys, LAST_OF_2026, as_of=at, json_output=False)
 
     assert code == 0, err
-    assert world.market.payloads == ["namechange", "namechange"]
-    asked = [params["start_date"][:4] for params in world.market.asked("namechange")]
-    assert asked == ["2026", "2027"]
-    document = json.loads(out)
-    assert document["requests"] == {"namechange": 2}
+    assert world.market.payloads == ["namechange"]
+    assert [params["start_date"][:4] for params in world.market.asked("namechange")] == ["2026"]
+    assert no_change(LAST_OF_2026) in out.splitlines()
+    assert not any("known limitation" in line for line in [*out.splitlines(), *err])
+    document = _filed(world, LAST_OF_2026)
+    assert document["requests"] == {"namechange": 1}
     assert document["session"] == LAST_OF_2026.isoformat()
-    assert document["differences"] == []
-
-
-def test_an_empty_new_year_name_corpus_is_refused_by_name(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    new_year_evening: Source,
-) -> None:
-    """On 2 January no announcement of 2027 exists yet: the panel refuses an empty partition and so
-    does the morning, naming the year -- the known limitation, a hard gate of the first live New
-    Year -- having spent what it spent and filed no advice."""
-    market = sd.NewYearMarket(open_days=sd.NEW_YEAR_DAYS)
-    world = _world(tmp_path, monkeypatch, new_year_evening, market)
-    at = datetime.combine(date(2027, 1, 2), time(8, 30), tzinfo=daily.SHANGHAI)
-
-    code, out, err = _morning(world, capsys, LAST_OF_2026, as_of=at)
-
-    assert code == 1
-    assert out == ""
-    assert err[0].startswith("step 3 (panel update) failed:")
-    assert "2027" in err[0] and "namechange" in err[0] and "known limitation" in err[0]
-    assert sum(sd._requests(err[-1]).values()) >= 2
-    assert "differences" not in _filed(world, LAST_OF_2026)
+    assert document["differences"] == [] and document["notices"] == []
 
 
 # --- the preconditions ----------------------------------------------------------------------------

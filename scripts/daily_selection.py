@@ -136,10 +136,11 @@ exits 2, with no request and no file), the preconditions (the newest published s
 journal complete and a plan, the clock and `--as-of` before 09:15), the paper book's writer lock,
 the evening's facts day read again **before** the fetch and the morning's `as_of` pinned with it in
 `RT/daily_survivor/<cfg>/<session>.morning.json`, the one fetch (`namechange` for the session's
-year, and the morning's when it is another: two requests at New Year, an empty new year refused by
-name), and the morning's facts day compared (`strategy_survivor_morning`). It writes that file and
-the `namechange` partition, nothing else; a finished file is printed again with no request and no
-write, a pin is resumed from with the same `as_of`.
+year: one request, at New Year too -- the facts adapter reads no later year), and the morning's
+facts day compared, the renames of the plan's names announced after the session listed as notices
+(`strategy_survivor_morning`). It writes that file and the `namechange` partition, nothing else; a
+finished file is printed again with no request and no write, a pin is resumed from with the same
+`as_of`.
 
 ## Idempotent per trading day
 
@@ -5083,29 +5084,23 @@ def _read_morning_file(
     return cast(dict[str, Any], body)
 
 
-def _fetch_names(
-    runtime_dir: Path, *, session: date, as_of: datetime, exchange: str, years: Sequence[int]
-) -> None:
-    """The morning's one targeted fetch: `namechange` for each of `years`, one `panel build` and
-    so one request each, at the morning's pinned `as_of`. A year that fails is a refusal of step 3,
-    naming it; the new year's, when the evening is in the old one, is the known limitation."""
-    for year in years:
-        built = _panel_build(
-            runtime_dir, year=year, as_of=as_of, exchange=exchange, targets=(NAMECHANGE_DATASET,)
-        )
-        if built.exit_code == 0:
-            continue
-        limitation = (
-            f". The {year} name corpus holds no announcement yet at {as_of.isoformat()} and the "
-            "panel refuses an empty partition: the known limitation of a new year's first days (a "
-            "hard gate of the first live New Year, a panel-layer task). No advice was made"
-            if year != session.year
-            else ""
-        )
+def _fetch_names(runtime_dir: Path, *, session: date, as_of: datetime, exchange: str) -> None:
+    """The morning's one targeted fetch: `namechange` for the session's year, one `panel build`
+    and so one request, at the morning's pinned `as_of` -- at New Year too: the facts adapter reads
+    the name corpus through the session's year only, so a later year's could change no advice
+    (D6 review Important 1). A failed build is a refusal of step 3, with its own reason."""
+    built = _panel_build(
+        runtime_dir,
+        year=session.year,
+        as_of=as_of,
+        exchange=exchange,
+        targets=(NAMECHANGE_DATASET,),
+    )
+    if built.exit_code != 0:
         raise _morning_refusal(
             "panel update",
-            f"`panel build --year {year} --dataset {NAMECHANGE_DATASET}` exited "
-            f"{built.exit_code}: {built.reason()}{limitation}",
+            f"`panel build --year {session.year} --dataset {NAMECHANGE_DATASET}` exited "
+            f"{built.exit_code}: {built.reason()}",
         )
 
 
@@ -5121,18 +5116,21 @@ def _run_morning_recheck(
        (`--as-of`, else the clock) has an evening journal that is complete and planned an evening
        (not the epoch's opening, not a settle-only day), and neither this run's clock nor the
        pinned `as_of` has reached `registration_cutoff` -- 09:15 of the next session, the call
-       auction. Refused, exit 1, whatever else a morning file says: a finished morning file is
-       printed again only before then.
+       auction. Refused, exit 1, whatever else a morning file says: the cutoff is checked
+       **before** a finished morning file is printed again, which therefore happens only before
+       the auction.
     3. **Panel update**: the paper book's writer lock (one writer; the morning writes no book, but
        two mornings must not race on the file), then the evening's facts day read again -- with
        the evening's own pinned `as_of` and `held`, **before** the fetch, checked against the
        evening's document -- and the pin written: the morning's `as_of`, the evening's `held` and
        snapshot, and that read (`<session>.morning.json`, a stage the rerun resumes from, with the
-       same `as_of`). Then the fetch, `namechange` for the session's year and the morning's when it
-       is another (`fetch_years`), counted and filed with the pin.
+       same `as_of`). Then the fetch, `namechange` for the session's year (one request, at New
+       Year too), counted and filed with the pin.
     4. **Facts**: the morning's facts day at the pinned `as_of` with the journal's pinned `held`,
-       screened, and compared with the evening's read (`compare_morning`).
-    5. **Summary**: the advice filed, whole, in the morning file.
+       screened, and compared with the evening's read (`compare_morning`); the renames of the
+       plan's names announced after the session, in the stored corpus at the pinned `as_of`, as
+       notices (`overnight_notices`).
+    5. **Summary**: the advice and the notices filed, whole, in the morning file.
 
     Writes the morning file and the `namechange` partition, nothing else: the prediction store,
     the ledger, the snapshots, the evening's journal and the provenance files are not touched
@@ -5154,11 +5152,12 @@ def _run_morning_recheck(
         from openalpha_cn import strategy_survivor_book as paper_book
         from openalpha_cn import strategy_survivor_morning as morning
         from openalpha_cn.domain import survivor_screen
+        from openalpha_cn.panel_ingest import load_name_histories
 
     adapter = survivor.adapter
-    store = panel_store(runtime_dir)
-    first_as_of = options.as_of or clock()
     with _step("preconditions", steps=MORNING_STEPS):
+        store = panel_store(runtime_dir)
+        first_as_of = options.as_of or clock()
         session = _stored_session(store, adapter.exchange, first_as_of)
         if session is None:
             raise _morning_refusal(
@@ -5206,8 +5205,8 @@ def _run_morning_recheck(
                 )
             if pin is not None and morning.morning_complete(pin):
                 return MorningRecheck(document=pin, requests={}, wrote=False)
-        held = tuple(journal["held"])
-        transform = FACTOR_TRANSFORMS.get(adapter.transform)
+            held = tuple(journal["held"])
+            transform = FACTOR_TRANSFORMS.get(adapter.transform)
 
         def read(at: datetime) -> tuple[FactsDay, ScreenResult]:
             try:
@@ -5233,25 +5232,20 @@ def _run_morning_recheck(
                     morning.check_evening_read(evening_read, result)
                 except morning.EveningReadDriftError as error:
                     raise _morning_refusal("facts", str(error)) from error
-            pin = {
-                "schema": morning.MORNING_SCHEMA,
-                "session": session.isoformat(),
-                "as_of": as_of.isoformat(),
-                "held": list(held),
-                "evening_snapshot_id": snapshot_id,
-                "registration": journal["registration"],
-                "evening_read": evening_read.to_json(),
-            }
-            write_journal(path, pin)
+            with _step("panel update", steps=MORNING_STEPS):
+                pin = {
+                    "schema": morning.MORNING_SCHEMA,
+                    "session": session.isoformat(),
+                    "as_of": as_of.isoformat(),
+                    "held": list(held),
+                    "evening_snapshot_id": snapshot_id,
+                    "registration": journal["registration"],
+                    "evening_read": evening_read.to_json(),
+                }
+                write_journal(path, pin)
         if "requests" not in pin:
             with _step("panel update", steps=MORNING_STEPS), counted_transport(counts):
-                _fetch_names(
-                    runtime_dir,
-                    session=session,
-                    as_of=as_of,
-                    exchange=adapter.exchange,
-                    years=morning.fetch_years(session, as_of),
-                )
+                _fetch_names(runtime_dir, session=session, as_of=as_of, exchange=adapter.exchange)
                 pin = {**pin, "requests": dict(sorted(counts.items()))}
                 write_journal(path, pin)
         with _step("facts", steps=MORNING_STEPS):
@@ -5265,32 +5259,49 @@ def _run_morning_recheck(
                 )
             except morning.MorningCheckError as error:
                 raise _morning_refusal("facts", str(error)) from error
+            # What the fetch brought dated after the session, which no facts read screens.
+            notices = morning.overnight_notices(
+                load_name_histories(store, years=(session.year,), as_of=as_of, max_staleness=None),
+                names=plan.watched(),
+                session=session,
+            )
         with _step("summary", steps=MORNING_STEPS):
-            document = morning.morning_document(pin, advice)
+            document = morning.morning_document(pin, advice, notices=notices)
             write_journal(path, document)
     return MorningRecheck(document=document, requests=dict(counts), wrote=True)
 
 
 def _main_morning(options: DailyOptions, *, as_json: bool, clock: Callable[[], datetime]) -> int:
     """`main`'s morning re-check: the advice printed -- the file's own document with `--json`, the
-    advice block otherwise -- or the refusal and the requests it spent."""
+    advice block otherwise -- or the refusal and the requests it spent; a fault making the text is
+    the summary step's refusal, never a traceback."""
     try:
         run = run_morning_recheck(options, clock=clock)
     except StepFailedError as error:
-        print(str(error), file=sys.stderr)
-        print(
-            f"tushare requests   {sum(error.requests.values())} this run "
-            f"{json.dumps(error.requests, sort_keys=True)}",
-            file=sys.stderr,
-        )
-        return int(error.exit_code)
-    if as_json:
-        print(json.dumps(run.document, sort_keys=True, ensure_ascii=False))
-    else:
-        from openalpha_cn.strategy_survivor_morning import morning_lines
+        return _morning_refused(error, error.requests)
+    try:
+        with _step("summary", steps=MORNING_STEPS):
+            if as_json:
+                text = json.dumps(run.document, sort_keys=True, ensure_ascii=False)
+            else:
+                from openalpha_cn.strategy_survivor_morning import morning_lines
 
-        print("\n".join(morning_lines(run.document, this_run=run.this_run())))
+                text = "\n".join(morning_lines(run.document, this_run=run.this_run()))
+    except StepFailedError as error:
+        return _morning_refused(error, run.this_run()["requests"])
+    print(text)
     return int(DailyExit.done)
+
+
+def _morning_refused(error: StepFailedError, requests: Mapping[str, int]) -> int:
+    """A morning's refusal printed, with the requests the run had spent when it stopped."""
+    print(str(error), file=sys.stderr)
+    print(
+        f"tushare requests   {sum(requests.values())} this run "
+        f"{json.dumps(requests, sort_keys=True)}",
+        file=sys.stderr,
+    )
+    return int(error.exit_code)
 
 
 # --- the face ----------------------------------------------------------------------------------
@@ -5757,8 +5768,9 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
         "--morning-recheck",
         action="store_true",
         help="The survivor book's morning re-check: before the next session's 09:15 call auction, "
-        "read the name corpus again (one request; two at New Year), compare it with the evening's "
-        "plan and print the differences as advice -- the paper book follows the evening's plan "
+        "read the name corpus of the session's year again (one request), compare it with the "
+        "evening's plan and print the differences as advice, and the renames of the plan's names "
+        "announced after the session as notices -- the paper book follows the evening's plan "
         "and is not changed. Writes <session>.morning.json and the namechange partition only. "
         "A P6 registration exits 2.",
     )
