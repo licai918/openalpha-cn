@@ -49,9 +49,16 @@ attempt ids carry the session's date, the write-off ids the code and the date), 
   reproduces the same transitions, the k already held are appended as no-ops, the rest are
   appended, and the snapshot saved is byte for byte the one an uninterrupted run saves. Every
   row is in the ledger exactly once.
-- **A run after the snapshot is saved** finds it held and answers `unchanged`, writing nothing
-  (after checking it was settled under this configuration and ordinal). It has no plan to give
-  back: the evening's trade list is the caller's to keep when the evening is first `created`.
+- **A run after the snapshot is saved** -- the daily entry crashed between the save and its own
+  journal write, say -- finds the session settled and answers `unchanged`, **writing nothing**,
+  with the evening's settlement, decision and trade list derived again: after checking the held
+  snapshot was settled under this configuration and ordinal, the same dry run and the same
+  decision are made from the snapshot of the session before it (read with `load_snapshot`:
+  `latest_snapshot` refuses a settled session), and the snapshot they give must be the held one,
+  address and bytes. One that is not is refused by name: the inputs differ from the ones the
+  session was settled with, or the session was settled the other way (by a catch-up where this
+  is an evening, or by an evening where this is a catch-up) -- with the inputs pinned by the
+  daily entry's journal, a fault, never a normal case.
 - **The other order would not be safe**: a snapshot saved before its rows makes a crash between
   them a settled session whose rows are missing for good -- the run again answers `unchanged`.
 
@@ -82,6 +89,10 @@ refused by `latest_snapshot`, naming the gap.
 
 ## What the caller owns
 
+- **Only these four entry points.** The daily entry (`V2-P7-008`) calls `open_book`,
+  `missing_sessions`, `run_catch_up` and `run_evening`, and never `settle_session`,
+  `save_snapshot` or `book_state` directly: the transaction, the gap rule and the reproduction
+  check live here, and a caller that settles or saves around them has none of the three.
 - **The paper book's construction (D15).** `make_portfolio` builds a `PaperPortfolio` on the
   ledger it is given, closing over `PortfolioLimits(1, 1, 0)` and the protocol's costs; this
   module never builds one with real limits or costs (it may not import `strategy_view`, where
@@ -89,9 +100,9 @@ refused by `latest_snapshot`, naming the gap.
   session settles: the dry run would not be dry.
 - **The two error classes of a broken store.** Every refusal about the book's state is a
   `PaperStateError`; a fault the store finds in its own documents arrives as the store's
-  `PaperStateStoreError`, which `backtest/` cannot import. A caller that must not run on a broken
-  book catches both. Contract refusals (a missing reference price, a book that cannot be
-  decided) are `ValueError`s.
+  `PaperStateStoreError`, which `backtest/` cannot import. The daily entry catches **both**, by
+  name (both are `RuntimeError`s, so neither hides in an `except ValueError`). Contract refusals
+  (a missing reference price, a book that cannot be decided) are `ValueError`s.
 
 This module lives under `backtest/` and reaches no store: the snapshot store arrives as
 `PaperStateDocumentStore` and the ledger as `PortfolioLedger`, the `Protocol`s beside their
@@ -123,6 +134,7 @@ from openalpha_cn.backtest.paper_state import (
     latest_snapshot,
     load_snapshot,
     save_snapshot,
+    snapshot_payload,
 )
 from openalpha_cn.domain.portfolio import PortfolioState, PortfolioTransition
 from openalpha_cn.domain.survivor_book import (
@@ -177,44 +189,31 @@ class DryRunLedger:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class EveningResult:
-    """What one evening did.
+    """What one evening did, with the evening's settlement, decision and trade list.
 
-    `created`: the session was settled, decided and committed tonight; `snapshot` is the one
-    saved, and `trade_list`, `decision` and `settlement` are tonight's. `unchanged`: the session
-    was already settled (by an evening or a catch-up) and nothing was written; `snapshot` is the
-    one held, and the other three are `None` -- a settled session is not decided again.
+    `created`: the session was settled, decided and committed tonight, and `snapshot` is the one
+    saved. `unchanged`: the session was already settled and nothing was written; `snapshot` is
+    the one held, and the settlement, decision and trade list are derived again from the
+    snapshot before it and the inputs given -- which reproduced the held snapshot exactly, or
+    the evening would have been refused.
     """
 
     outcome: Outcome
     snapshot: PaperBookSnapshot
-    trade_list: TradeList | None
-    decision: BookDecision | None
-    settlement: Settlement | None
-
-    def __post_init__(self) -> None:
-        created = self.outcome == "created"
-        tonight = (self.trade_list, self.decision, self.settlement)
-        if any((part is not None) != created for part in tonight):
-            raise ValueError(
-                "a created evening carries its trade list, decision and settlement, and an "
-                "unchanged one carries none of them"
-            )
+    trade_list: TradeList
+    decision: BookDecision
+    settlement: Settlement
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class CatchUpResult:
-    """What one catch-up did: `created` with the snapshot saved and the session's settlement,
-    or `unchanged` with the snapshot already held and no settlement (nothing was written)."""
+    """What one catch-up did: `created` with the snapshot saved, or `unchanged` with the
+    snapshot already held and nothing written -- in both, the session's settlement (derived
+    again, and reproducing the held snapshot, when `unchanged`)."""
 
     outcome: Outcome
     snapshot: PaperBookSnapshot
-    settlement: Settlement | None
-
-    def __post_init__(self) -> None:
-        if (self.outcome == "created") != (self.settlement is not None):
-            raise ValueError(
-                "a created catch-up carries its settlement, and an unchanged one carries none"
-            )
+    settlement: Settlement
 
 
 def open_book(
@@ -276,15 +275,15 @@ def run_evening(
     `entrant_prices` are the facts day's real closes of names the book does not hold (a held name
     is priced from the ledger, in its units, whatever this says); `delisted` is every held code
     the facts day reports `delisted`; `observed_on` is the date the inputs were read.
+
+    A session already settled is answered `unchanged`, writing nothing, with the settlement,
+    decision and trade list derived again from the snapshot before it; a derivation that does
+    not reproduce the held snapshot is refused by name.
     """
     digest = survivor_config_digest(config)
     held = _settled_already(store, session=session, session_index=session_index, digest=digest)
-    if held is not None:
-        return EveningResult(
-            outcome="unchanged", snapshot=held, trade_list=None, decision=None, settlement=None
-        )
-    previous = latest_snapshot(
-        store, settling_session=session, settling_index=session_index, config_digest=digest
+    previous = _settled_from(
+        store, held=held, session=session, session_index=session_index, digest=digest
     )
     settlement = _settle_dry(
         previous=previous,
@@ -308,9 +307,17 @@ def run_evening(
         carried=tuple(item.order for item in settlement.live),
     )
     snapshot = settlement.with_plan(trade_list)
-    outcome = _commit(store=store, ledger=ledger, settlement=settlement, snapshot=snapshot)
+    if held is not None:
+        _refuse_unless_reproduced(held, snapshot, run="evening", other="a catch-up")
+        return EveningResult(
+            outcome="unchanged",
+            snapshot=held,
+            trade_list=trade_list,
+            decision=decision,
+            settlement=settlement,
+        )
     return EveningResult(
-        outcome=outcome,
+        outcome=_commit(store=store, ledger=ledger, settlement=settlement, snapshot=snapshot),
         snapshot=snapshot,
         trade_list=trade_list,
         decision=decision,
@@ -336,14 +343,14 @@ def run_catch_up(
     The arguments are `run_evening`'s less the screen and the entrants' prices: the session's
     survivors are the names of the book's pending buys, so no buy is cancelled, and nothing is
     planned. The transaction is the evening's -- dry run, then the ledger rows, then the
-    snapshot -- and so is every refusal, made before anything is written.
+    snapshot -- and so is every refusal, made before anything is written, and so is the answer
+    for a session already settled: `unchanged`, nothing written, the settlement derived again
+    and refused by name unless it reproduces the held snapshot.
     """
     digest = survivor_config_digest(config)
     held = _settled_already(store, session=session, session_index=session_index, digest=digest)
-    if held is not None:
-        return CatchUpResult(outcome="unchanged", snapshot=held, settlement=None)
-    previous = latest_snapshot(
-        store, settling_session=session, settling_index=session_index, config_digest=digest
+    previous = _settled_from(
+        store, held=held, session=session, session_index=session_index, digest=digest
     )
     settlement = _settle_dry(
         previous=previous,
@@ -359,8 +366,14 @@ def run_catch_up(
         observed_on=observed_on,
     )
     snapshot = settlement.without_plan()
-    outcome = _commit(store=store, ledger=ledger, settlement=settlement, snapshot=snapshot)
-    return CatchUpResult(outcome=outcome, snapshot=snapshot, settlement=settlement)
+    if held is not None:
+        _refuse_unless_reproduced(held, snapshot, run="catch-up", other="an evening")
+        return CatchUpResult(outcome="unchanged", snapshot=held, settlement=settlement)
+    return CatchUpResult(
+        outcome=_commit(store=store, ledger=ledger, settlement=settlement, snapshot=snapshot),
+        snapshot=snapshot,
+        settlement=settlement,
+    )
 
 
 def missing_sessions(
@@ -415,6 +428,49 @@ def _settled_already(
             "the calendar that numbers this evening disagrees with the book's"
         )
     return held
+
+
+def _settled_from(
+    store: PaperStateDocumentStore,
+    *,
+    held: PaperBookSnapshot | None,
+    session: date,
+    session_index: int,
+    digest: str,
+) -> PaperBookSnapshot:
+    """The book `session` settles from: `latest_snapshot`'s answer while the session is not
+    settled, and -- when it is (`held`) -- the snapshot it was settled from, the one held for
+    the session before it, read with `load_snapshot` because `latest_snapshot` refuses a
+    settled session."""
+    if held is None:
+        return latest_snapshot(
+            store, settling_session=session, settling_index=session_index, config_digest=digest
+        )
+    earlier = [day for day in store.sessions() if day < session]
+    previous = load_snapshot(store, earlier[-1]) if earlier else None
+    if previous is None or previous.session_index != session_index - 1:
+        raise PaperStateError(
+            f"{session.isoformat()} is settled, and the snapshot of session index "
+            f"{session_index - 1} it was settled from is not the one held before it: the "
+            "history was altered, and the session cannot be derived again"
+        )
+    return previous
+
+
+def _refuse_unless_reproduced(
+    held: PaperBookSnapshot, derived: PaperBookSnapshot, *, run: str, other: str
+) -> None:
+    """Refuse, by name, a settled session that this run does not reproduce byte for byte."""
+    if derived.snapshot_id != held.snapshot_id or snapshot_payload(derived) != snapshot_payload(
+        held
+    ):
+        raise PaperStateError(
+            f"{held.session.isoformat()} is settled as {held.snapshot_id}, and this {run} "
+            f"derives {derived.snapshot_id} from the snapshot before it: its inputs differ from "
+            f"the ones the session was settled with, or the session was settled by {other}. "
+            "A settled session is not settled again; the inputs of the run that settled it are "
+            "the ones to run with"
+        )
 
 
 def _settle_dry(

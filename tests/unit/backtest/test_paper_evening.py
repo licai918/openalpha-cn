@@ -12,6 +12,7 @@ and the kernel is the real one: `decide_book` and `build_trade_list` run inside 
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import date
@@ -33,7 +34,7 @@ from openalpha_cn.backtest.paper_evening import (
     run_catch_up,
     run_evening,
 )
-from openalpha_cn.backtest.paper_settlement import WRITE_OFF_REASON, write_off_id
+from openalpha_cn.backtest.paper_settlement import WRITE_OFF_REASON, Settlement, write_off_id
 from openalpha_cn.backtest.paper_state import (
     EntryFactor,
     PaperBookSnapshot,
@@ -242,6 +243,14 @@ def catch_up(
     )
 
 
+def read_on(settlement: Settlement | None, day: date) -> Settlement:
+    """`settlement` as a run that read its inputs on `day` records it: the runner's record
+    notes the observation date, and nothing else in a settlement depends on it."""
+    assert settlement is not None
+    record = settlement.runner_record.model_copy(update={"observed_on": day.isoformat()})
+    return dataclasses.replace(settlement, runner_record=record)
+
+
 def rows(ledger: SQLitePortfolioLedger) -> list[str]:
     """The ledger's rows as stored, in the order appended."""
     return [row.model_dump_json() for row in ledger.list()]
@@ -276,6 +285,29 @@ class CutAsTheSnapshotIsWritten:
 
     def sessions(self) -> tuple[date, ...]:
         return self.inner.sessions()
+
+
+class Watched:
+    """The book's snapshot store and ledger, counting every write either is asked to make."""
+
+    def __init__(self, book: Book) -> None:
+        self.book, self.puts, self.appends = book, 0, 0
+
+    def put(
+        self, *, session: date, snapshot_id: str, payload: str
+    ) -> Literal["created", "unchanged"]:
+        self.puts += 1
+        return self.book.store.put(session=session, snapshot_id=snapshot_id, payload=payload)
+
+    def get(self, session: date) -> tuple[str, str] | None:
+        return self.book.store.get(session)
+
+    def sessions(self) -> tuple[date, ...]:
+        return self.book.store.sessions()
+
+    def append(self, transition: PortfolioTransition) -> None:
+        self.appends += 1
+        self.book.ledger.append(transition)
 
 
 class CutAtRow:
@@ -768,24 +800,58 @@ def test_a_refusal_in_the_decision_leaves_the_ledger_and_the_store_byte_identica
     assert book.store.sessions()[-1] == S2
 
 
-def test_a_rerun_of_a_completed_evening_writes_nothing_and_answers_with_the_held_snapshot(
+def test_a_rerun_after_the_snapshot_was_saved_writes_nothing_and_gives_the_evening_back(
     tmp_path: Path,
 ) -> None:
-    """Once the snapshot is saved the session is settled: running the evening again -- the next
-    morning, or with inputs read again -- touches neither the ledger nor the store and answers
-    with what was settled. It has no plan to give: the evening's list is the caller's to keep
-    when the evening is first `created`."""
+    """The daily entry crashed after the snapshot was saved and before its journal was written.
+    The evening run again -- the next morning, on the inputs the journal pinned -- finds the
+    session settled: it writes nothing (no row appended, no snapshot put, every byte as it was)
+    and derives the evening again from the snapshot of S2, giving the journal the same
+    settlement, decision and trade list as the first run."""
     book = through_s2(tmp_path)
     first = tonight(book)
     before = (ledger_files(book), documents(book.store))
+    watched = Watched(book)
 
-    again = tonight(book, observed_on=S4)
-    otherwise = tonight(book, prices={E: "22.00", F: "10.50", G: "15.00", H: "8.00"})
+    again = tonight(book, observed_on=S5, store=watched, ledger=watched)
 
-    for rerun in (again, otherwise):
-        assert rerun.outcome == "unchanged"
-        assert rerun.snapshot == first.snapshot
-        assert (rerun.trade_list, rerun.decision, rerun.settlement) == (None, None, None)
+    assert again.outcome == "unchanged"
+    assert again.snapshot == first.snapshot == load_snapshot(book.store, S3)
+    assert (again.trade_list, again.decision) == (first.trade_list, first.decision)
+    assert again.trade_list.trade_list_id == first.trade_list.trade_list_id
+    # The same settlement, but for the date its inputs were read on, which the runner notes.
+    assert again.settlement == read_on(first.settlement, S5)
+    assert (watched.puts, watched.appends) == (0, 0)
+    assert (ledger_files(book), documents(book.store)) == before
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"screen": screened((G, "15.00"), (F, "10.00"), (B, "11.50"), (C, "10.10"), (H, "8.00"))},
+        {"prices": {E: "22.00", F: "10.50", G: "15.00", H: "8.00"}},
+    ],
+    ids=["another screen", "another entrant price"],
+)
+def test_a_rerun_after_the_snapshot_was_saved_on_other_inputs_is_refused_writing_nothing(
+    tmp_path: Path, change: dict[str, object]
+) -> None:
+    """Derived again on inputs other than the ones the session was settled with, the evening is
+    not the held one -- here the screen drops 600050.SH, so its live buy is cancelled, or
+    600060.SH is priced at 10.50 and 800 are planned, not 900. With the inputs pinned by the
+    daily entry's journal that is a fault, and it is refused by name; nothing is written."""
+    book = through_s2(tmp_path)
+    first = tonight(book)
+    before = (ledger_files(book), documents(book.store))
+    watched = Watched(book)
+
+    with pytest.raises(
+        PaperStateError,
+        match=rf"2021-03-04 is settled as {first.snapshot.snapshot_id}, and this evening derives "
+        r"pbs_[0-9a-f]{24} from the snapshot before it: its inputs differ",
+    ):
+        tonight(book, store=watched, ledger=watched, **change)
+    assert (watched.puts, watched.appends) == (0, 0)
     assert (ledger_files(book), documents(book.store)) == before
 
 
@@ -1086,12 +1152,15 @@ def test_an_evening_that_stopped_before_its_ledger_rows_is_mended_by_a_catch_up(
     assert sorted(entry.ts_code for entry in s4.decision.entries) == [F, G]
 
 
-def test_a_catch_up_of_a_settled_session_writes_nothing_and_another_configuration_is_refused(
+def test_a_settled_session_is_caught_up_again_as_a_no_op_and_never_settled_the_other_way(
     tmp_path: Path,
 ) -> None:
-    """A session is settled once, by its evening or by its catch-up: either run again answers
-    `unchanged` with the snapshot held and writes nothing. A catch-up under another
-    configuration is refused by name before anything is written, as an evening is."""
+    """A catch-up under another configuration is refused by name before anything is written,
+    as an evening is. A session is settled once: a catch-up run again answers `unchanged`,
+    writing nothing, with its settlement derived again. A session settled by its evening (which
+    planned 600060.SH and 600070.SH) is not caught up -- the catch-up derives a book without
+    tonight's plan -- and a session caught up is not given an evening that would plan
+    something (600080.SH, drawn first here): each is refused by name, writing nothing."""
     book = through_s2(tmp_path)
     before = (ledger_files(book), documents(book.store))
 
@@ -1099,22 +1168,43 @@ def test_a_catch_up_of_a_settled_session_writes_nothing_and_another_configuratio
         catch_up(book, S3, MARKET_S3, delisted={DL}, config=OTHER_CONFIG)
     assert (ledger_files(book), documents(book.store)) == before
 
-    settled = tonight(book)
-    after = (ledger_files(book), documents(book.store))
-    again = catch_up(book, S3, MARKET_S3, delisted={DL})
-    assert (again.outcome, again.snapshot, again.settlement) == (
-        "unchanged",
-        settled.snapshot,
-        None,
-    )
-    assert (ledger_files(book), documents(book.store)) == after
+    tonight(book)
+    settled = (ledger_files(book), documents(book.store))
+    with pytest.raises(
+        PaperStateError, match=r"this catch-up derives .* or the session was settled by an evening"
+    ):
+        catch_up(book, S3, MARKET_S3, delisted={DL})
+    assert (ledger_files(book), documents(book.store)) == settled
 
     quiet_s4 = market(quiet(B, S4, "11.50"), quiet(C, S4, "10.10"))
     mended = catch_up(book, S4, quiet_s4)
-    after = (ledger_files(book), documents(book.store))
-    for rerun in (catch_up(book, S4, quiet_s4), evening(book, S4, quiet_s4, SCREEN_S3, PRICES_S3)):
-        assert (rerun.outcome, rerun.snapshot) == ("unchanged", mended.snapshot)
-    assert (ledger_files(book), documents(book.store)) == after
+    caught = (ledger_files(book), documents(book.store))
+    watched = Watched(book)
+    rerun = run_catch_up(
+        store=watched,
+        ledger=watched,
+        make_portfolio=make_portfolio,
+        config=CONFIG,
+        session=S4,
+        session_index=4,
+        market=quiet_s4,
+        delisted=(),
+        observed_on=date(2021, 3, 11),
+    )
+    assert (rerun.outcome, rerun.snapshot, rerun.settlement) == (
+        "unchanged",
+        mended.snapshot,
+        read_on(mended.settlement, date(2021, 3, 11)),
+    )
+    assert (watched.puts, watched.appends) == (0, 0)
+    h_first = screened(
+        (H, "8.00"), (F, "10.00"), (G, "15.00"), (B, "11.50"), (C, "10.10"), (E, "22.00")
+    )
+    with pytest.raises(
+        PaperStateError, match=r"this evening derives .* or the session was settled by a catch-up"
+    ):
+        evening(book, S4, quiet_s4, h_first, PRICES_S3)
+    assert (ledger_files(book), documents(book.store)) == caught
 
 
 def test_missing_sessions_are_the_ordinals_after_the_head_through_the_one_asked_about(
