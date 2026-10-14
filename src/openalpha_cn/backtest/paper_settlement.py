@@ -131,6 +131,7 @@ __all__ = [
     "Settlement",
     "WriteOff",
     "book_state",
+    "ledger_reference_prices",
     "settle_session",
     "write_off_id",
 ]
@@ -470,44 +471,65 @@ def settle_session(
     )
 
 
+def ledger_reference_prices(settlement: Settlement) -> dict[str, Decimal]:
+    """Every holding the session ends with, at its mark in the ledger's units -- the reference
+    prices `build_trade_list` needs for the held names.
+
+    The ledger keeps the shares a buy filled with and meets later prices in those units
+    (`paper_step`), so a held name's reference price is its close times its adjustment ratio --
+    which is its mark after the close re-mark -- or, for a name with no bar on the session, the
+    mark it carried. A real close would misprice a held name across an adjustment event: after a
+    10-for-10 bonus issue the ledger's shares at the real close are worth half the holding, the
+    evening's sell is estimated to raise half of what it will, and the buys it funds are sized
+    short. Entrants (names not held) take their real close from the facts, at ratio 1.
+    """
+    held = {position.subject for position in settlement.book.positions}
+    return {mark.subject: mark.price for mark in settlement.book.marks if mark.subject in held}
+
+
 def book_state(
-    source: Settlement | PaperBookSnapshot,
+    settlement: Settlement,
     *,
     config: SurvivorBookConfig,
     equity: Decimal | None = None,
 ) -> BookState:
-    """What the kernel is told about the book of `source`, settled under `config`.
+    """What the kernel is told about the book `settlement` leaves, settled under `config`.
 
     Holdings are each held name's share count (one lot each, in the ledger's units, the units a
     sell is placed in); `pending_buys` and `pending_sells` are the names of the live orders;
     `equity` is cash plus every holding at its mark -- the session's close in the ledger's units,
-    or the carried mark of a name with no bar -- unless the caller gives another. `initialized`
-    is whether the book's first decision has been made: for a settlement, before its session;
-    for a snapshot, by its evening (`first_decision_session is not None`).
+    or the carried mark of a name with no bar -- unless the caller gives another; `initialized`
+    is whether the book's first decision had been made before the session.
+
+    **Read from a settlement only.** An evening's snapshot holds that evening's new orders as
+    pending, so a state read from it is one no decision ever saw, and reproducing a decision
+    from it would count tonight's buys twice; a snapshot is refused by name. An opening book is
+    no exception: its first evening settles it (without a step) and the kernel is told about that
+    settlement.
     """
+    if not isinstance(settlement, Settlement):
+        raise TypeError(
+            f"book_state reads a settlement, not a {type(settlement).__name__}: a snapshot holds "
+            "its evening's new orders as pending, so a decision is never reproduced from one"
+        )
     digest = survivor_config_digest(config)
-    if source.config_digest != digest:
+    if settlement.config_digest != digest:
         raise ValueError(
-            f"the book is settled under configuration digest {source.config_digest} and the "
+            f"the book is settled under configuration digest {settlement.config_digest} and the "
             f"kernel runs under {digest}: another configuration is another book"
         )
-    if isinstance(source, Settlement):
-        initialized = source.initialized
-        orders = [item.order for item in source.live]
-    else:
-        initialized = source.first_decision_session is not None
-        orders = [item.order for item in source.pending_orders]
+    orders = [item.order for item in settlement.live]
     return BookState(
-        session=source.session_index,
-        initialized=initialized,
-        equity=source.book.equity if equity is None else equity,
+        session=settlement.session_index,
+        initialized=settlement.initialized,
+        equity=settlement.book.equity if equity is None else equity,
         holdings=tuple(
             Holding(ts_code=position.subject, quantity=position.quantity)
-            for position in source.book.positions
+            for position in settlement.book.positions
         ),
         pending_buys=tuple(sorted(order.ts_code for order in orders if order.side == "buy")),
         pending_sells=tuple(sorted(order.ts_code for order in orders if order.side == "sell")),
-        cooldowns=source.cooldowns,
+        cooldowns=settlement.cooldowns,
     )
 
 

@@ -33,6 +33,7 @@ from openalpha_cn.backtest.paper_settlement import (
     Settlement,
     WriteOff,
     book_state,
+    ledger_reference_prices,
     settle_session,
     write_off_id,
 )
@@ -58,7 +59,14 @@ from openalpha_cn.domain.survivor_book import (
     survivor_config_digest,
 )
 from openalpha_cn.domain.survivor_orders import TradeList, TradeOrder, build_trade_list
-from openalpha_cn.domain.survivor_policy import BookState, Cooldown, Holding, decide_book
+from openalpha_cn.domain.survivor_policy import (
+    BookDecision,
+    BookState,
+    Cooldown,
+    ExitDecision,
+    Holding,
+    decide_book,
+)
 from openalpha_cn.storage.portfolio import SQLitePortfolioLedger
 
 D = Decimal
@@ -607,7 +615,9 @@ def test_after_a_ten_for_ten_bonus_issue_the_book_shows_no_false_drawdown_and_se
     S2 is the ex-date of a 10-for-10 bonus issue: the real close is 10.10 and the factor 2.000.
     The ratio is 2.000 / 1.000 (the entry factor of the FILL session), so the book marks the
     ledger's 1,000 shares at 20.20 -- equity 30,193.80, not the 20,093.80 an unscaled mark gives.
-    That 20.20 is also the reference price of the holding in the ledger's units.
+    That 20.20 is the holding's reference price in the ledger's units (`ledger_reference_prices`),
+    so the evening's sell of the ledger's 1,000 shares is estimated to raise 20,200.00 -- the
+    holding's value. At the real close it would be 1,000 x 10.10 = 10,100.00: half.
 
     Sold on S3 at the real open 10.20: the ledger sells its 1,000 shares at 20.40, a notional of
     20,400.00 = the 2,000 real shares x 10.20; fees 6.12 + 0.20 + 10.20 = 16.52; cash 9,993.80 +
@@ -643,9 +653,29 @@ def test_after_a_ten_for_ten_bonus_issue_the_book_shows_no_false_drawdown_and_se
     assert factors(ex_date) == {C: D("1.000")}  # still the fill session's
     assert book_state(ex_date, config=CONFIG).holdings == (Holding(ts_code=C, quantity=1000),)
 
-    out = sell(C, 1000, signal=102, price="20.20")
+    prices = ledger_reference_prices(ex_date)
+    assert prices == {C: D("20.20")}
+    plan = build_trade_list(
+        config=CONFIG,
+        state=book_state(ex_date, config=CONFIG),
+        decision=BookDecision(
+            session=102,
+            exits=(ExitDecision(ts_code=C, reason="EXIT_SURVIVOR_LOST"),),
+            entries=(),
+            deferred_exits=(),
+            near_exit=(),
+            watch_list=(),
+            unaffordable=(),
+            target_holdings=(),
+        ),
+        reference_prices=prices,
+        cash=ex_date.book.cash,
+    )
+    (out,) = plan.orders
+    assert (out.side, out.quantity, out.reference_price) == ("sell", 1000, D("20.20"))
+    assert out.reference_price * out.quantity == ex_date.book.market_value == D("20200.00")
     sold = settle(
-        tonight(ex_date, out),
+        ex_date.with_plan(plan),
         S3,
         market(
             bar(C, S3, "10.10", "10.20", "10.40", "10.10", "10.30", "11.11", "9.09"),
@@ -843,8 +873,7 @@ def test_the_first_evening_after_the_opening_settles_nothing_and_moves_the_book_
     )
     snapshot = tonight(settled, buy(C, 1000, signal=101))
     assert snapshot.first_decision_session == 101
-    assert book_state(snapshot, config=CONFIG).initialized is True
-    assert book_state(opening, config=CONFIG).initialized is False
+    assert opening.first_decision_session is None
 
 
 def test_book_state_reads_holdings_live_orders_cool_downs_and_the_equity_at_the_close(
@@ -861,14 +890,40 @@ def test_book_state_reads_holdings_live_orders_cool_downs_and_the_equity_at_the_
         pending_buys=(E,),
         cooldowns=(Cooldown(ts_code=A, since_session=101),),
     )
-    planned = tonight(settled, buy(B, 100, signal=101), sell(C, 1000, signal=101))
-    from_snapshot = book_state(planned, config=CONFIG)
-    assert (from_snapshot.pending_buys, from_snapshot.pending_sells) == ((B, E), (C,))
     assert book_state(settled, config=CONFIG, equity=D("12000")).equity == D("12000")
-    other = SurvivorBookConfig(seed=7, holding_count=9)
-    for source in (settled, planned):
-        with pytest.raises(ValueError, match="configuration"):
-            book_state(source, config=other)
+    with pytest.raises(ValueError, match="configuration"):
+        book_state(settled, config=SurvivorBookConfig(seed=7, holding_count=9))
+
+
+def test_book_state_is_read_from_a_settlement_and_refuses_a_snapshot(tmp_path: Path) -> None:
+    """An evening's snapshot holds that evening's new orders as pending, so a state read from it
+    is one no decision ever saw; reproducing a decision from it would count tonight's buys
+    twice. The kernel is told about a settlement, and a snapshot is refused by name."""
+    book, quotes = _sells_and_buys()
+    settled = settle(book, S1, quotes, ledger_at(tmp_path / "p.sqlite3")[1], survivors={C, E})
+    planned = tonight(settled, buy(B, 100, signal=101))
+
+    with pytest.raises(TypeError, match="settlement"):
+        book_state(planned, config=CONFIG)  # type: ignore[arg-type]
+
+
+def test_ledger_reference_prices_are_the_holdings_marks_in_the_ledgers_units(
+    tmp_path: Path,
+) -> None:
+    """Every holding the session ends with, at its mark: the close in the ledger's units for a
+    name with a bar, the carried mark for one without. A name sold or written off has none."""
+    book, quotes = _sells_and_buys()
+    settled = settle(book, S1, quotes, ledger_at(tmp_path / "p.sqlite3")[1], survivors={C, E})
+    halted = settle(
+        _delisted_book(),
+        S1,
+        Market(bars={}, adj_factor={B: D(1)}),
+        ledger_at(tmp_path / "q.sqlite3")[1],
+        delisted={A},
+    )
+
+    assert ledger_reference_prices(settled) == {C: D("10.50")}
+    assert ledger_reference_prices(halted) == {B: D("11.50")}
 
 
 # ---- what a settlement refuses -------------------------------------------------------------------
