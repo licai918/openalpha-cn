@@ -94,6 +94,7 @@ from openalpha_cn.domain.stock_universe import (
     STOCK_BASIC_DATASET,
 )
 from openalpha_cn.domain.survivor_book import SecurityFacts, SurvivorBookConfig
+from openalpha_cn.domain.survivor_screen import screen
 from openalpha_cn.domain.trading_calendar import TRADING_CALENDAR_DATASET
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import (
@@ -187,6 +188,8 @@ well within the carry bound, so only "listed on the day" keeps a carried row awa
 NEVER_TRADED: Final[str] = "600612.SH"
 """Listed on session 50 and whole-day halted on every session since: listed, and never a bar."""
 NEVER_TRADED_INDEX: Final[int] = 50
+CHINEXT_302: Final[str] = "302132.SZ"
+"""ChiNext under its third prefix (`300114.SZ`'s new code, T3 3.3), with ChiNext's 20% band."""
 
 FRAME: Final[tuple[str, ...]] = (
     *sorted(
@@ -210,6 +213,7 @@ FRAME: Final[tuple[str, ...]] = (
     DELISTED_WITH_BARS,
     DELISTED,
     NEVER_TRADED,
+    CHINEXT_302,
 )
 """Every security of the frame, in the order that gives each its position `j`."""
 SECURITIES: Final[tuple[str, ...]] = tuple(sorted(FRAME))
@@ -353,7 +357,7 @@ def band_ratio(code: str, index: int) -> float:
         return 0.05
     if code == ST_PENDING and index >= 70:
         return 0.05
-    if code in (CHINEXT, STAR):
+    if code in (CHINEXT, CHINEXT_302, STAR):
         return 0.20
     return 0.10
 
@@ -858,7 +862,7 @@ def mean(values: Sequence[float]) -> Decimal:
 def expected_fact(code: str) -> SecurityFacts:
     """The hand-derived row for `code` on the signal day (session 69), from the frame's rules.
 
-    - board: `600*`/`000*` main, `300*` growth, `688*` star;
+    - board: `600*`/`000*` main, `300*`/`302*` growth, `688*` star;
     - listed sessions: listed 2025-01-02, before the calendar's 2026-01-01, so counted from it:
       2026-01-05 .. 2026-04-10 is 70 sessions (>= the 60 minimum); `NEW_LISTING` from session
       60, 10 sessions; `UNREGISTERED` has no listing row, so 0;
@@ -886,7 +890,7 @@ def expected_fact(code: str) -> SecurityFacts:
         oriented.append(None if missing else sign * raw_value(factor, code, SIGNAL_INDEX))
     return SecurityFacts(
         ts_code=code,
-        board="growth" if code == CHINEXT else "star" if code == STAR else "main",
+        board="growth" if code in (CHINEXT, CHINEXT_302) else "star" if code == STAR else "main",
         listed_sessions=0 if code == UNREGISTERED else 10 if code == NEW_LISTING else 70,
         special_treatment=code in (ST_BY_NAME, ST_BY_BAND, ST_PENDING, DELISTING),
         suspended=code in (HALTED, HALT_THROUGH_CLOSE),
@@ -902,9 +906,9 @@ def test_every_listed_security_gets_exactly_one_hand_derived_fact(full_store: Pa
     assert day.session == SIGNAL
     assert [fact.ts_code for fact in day.facts] == list(ROWS)  # ascending, one each
     assert day.facts == tuple(expected_fact(code) for code in ROWS)
-    # 40 rows, 38 on the main board (CHINEXT and STAR are not); of those 36 are scored --
-    # HALTED has no bar today and NEW_LISTING lacks two values.
-    assert len(day.facts) == 40
+    # 41 rows, 38 on the main board (CHINEXT, CHINEXT_302 and STAR are not); of those 36 are
+    # scored -- HALTED has no bar today and NEW_LISTING lacks two values.
+    assert len(day.facts) == 41
     assert day.boards == CONFIG.boards
     assert (day.universe_size, day.scored_size) == (38, 36)
 
@@ -914,7 +918,7 @@ def test_the_coverage_counts_only_rows_on_the_boards_the_book_trades(
 ) -> None:
     # Review Minor 4: a trading holding with a missing value IS sold, so a guard over every board
     # would let a main-board outage hide behind ChiNext and STAR rows. With all three boards
-    # allowed, CHINEXT and STAR (both trading, both with every value) count again.
+    # allowed, CHINEXT, CHINEXT_302 and STAR (all trading, all with every value) count again.
     wider = SurvivorBookConfig(
         seed=7,
         composite_factors=FACTORS,
@@ -923,8 +927,27 @@ def test_the_coverage_counts_only_rows_on_the_boards_the_book_trades(
     )
     day = read_day(full_store, config=wider)
 
-    assert len(day.facts) == 40
-    assert (day.universe_size, day.scored_size) == (40, 38)
+    assert len(day.facts) == 41
+    assert (day.universe_size, day.scored_size) == (41, 39)
+
+
+def test_a_302_code_is_chinext_so_a_main_board_book_refuses_its_board(
+    full_store: PanelStore,
+) -> None:
+    # Review Important 2. `302132.SZ` is ChiNext (`domain/price_limits.py`'s measurement, T3 7
+    # item 8). Filed under the main board, a main-board-only book would have no reason to refuse
+    # it and could buy it. As ChiNext it is refused for its board alone (old enough, trading,
+    # every value), and the 5% band union -- a main-board rule -- does not look at its band.
+    day = read_day(full_store)
+    fact = {fact.ts_code: fact for fact in day.facts}[CHINEXT_302]
+    verdict = {verdict.ts_code: verdict for verdict in screen(day.facts, CONFIG).verdicts}[
+        CHINEXT_302
+    ]
+
+    assert CONFIG.boards == ("main",)
+    assert fact.board == "growth"
+    assert fact.special_treatment is False
+    assert verdict.reasons == ("board_not_allowed",)
 
 
 def test_a_registry_code_not_listed_on_the_day_has_no_row_even_with_a_bar(
@@ -1031,18 +1054,23 @@ def test_boards_the_account_cannot_trade_still_get_their_row(full_store: PanelSt
     facts = {fact.ts_code: fact for fact in read_day(full_store).facts}
 
     assert CONFIG.boards == ("main",)
-    assert (facts[CHINEXT].board, facts[STAR].board) == ("growth", "star")
+    assert (facts[CHINEXT].board, facts[CHINEXT_302].board, facts[STAR].board) == (
+        "growth",
+        "growth",
+        "star",
+    )
 
 
 def test_the_notes_count_every_assumption_of_the_day(full_store: PanelStore) -> None:
     # Names: 14 ordinary baselines; ST by name (*ST甲), pending (ST乙 announced on the day) and
     # by band (600602, 5% with no history) one each; one delisting name (丙退); 13 ordinary codes
-    # plus the eight others with no rename on file are "never renamed" (21), and 000014.SZ's only
-    # rename takes effect after the day (before_first, 1). The rename of 600001.SH announced on
-    # 2026-04-13 is not visible on the 10th, so it is still an ordinary baseline. NEVER_TRADED
-    # is listed and has never had a bar: no row, and the one `no_bar_within_carry`.
+    # plus the nine others with no rename on file (CHINEXT_302 among them) are "never renamed"
+    # (22), and 000014.SZ's only rename takes effect after the day (before_first, 1). The rename
+    # of 600001.SH announced on 2026-04-13 is not visible on the 10th, so it is still an ordinary
+    # baseline. NEVER_TRADED is listed and has never had a bar: no row, and the one
+    # `no_bar_within_carry`.
     assert read_day(full_store).notes == FactsNotes(
-        name_unknown_assumed_ordinary=22,
+        name_unknown_assumed_ordinary=23,
         suspended_without_bar=1,
         no_listing_row=1,
         delisting=1,
@@ -1050,7 +1078,7 @@ def test_the_notes_count_every_assumption_of_the_day(full_store: PanelStore) -> 
         st_by_name=1,
         st_pending=1,
         st_by_band=1,
-        name_unknown_no_record=21,
+        name_unknown_no_record=22,
         name_unknown_before_first=1,
         no_bar_within_carry=1,
     )
@@ -1162,20 +1190,20 @@ def test_a_wholesale_outage_is_refused_rather_than_handed_to_the_kernel(
     # stored -- `write_daily_panel` refuses a year missing an open session -- and the bar read
     # refuses a session it cannot see; those are the other ways an outage stops the day.)
     #
-    # 39 rows, not 40: UNREGISTERED is in the universe only through a bar on the day (it has no
+    # 40 rows, not 41: UNREGISTERED is in the universe only through a bar on the day (it has no
     # listing row), and today it has none. It could never have been held -- it is always
-    # `listing_too_recent` -- so it has no holding to protect. 37 of the 39 are main board.
+    # `listing_too_recent` -- so it has no holding to protect. 37 of the 40 are main board.
     with pytest.raises(FactsCoverageError, match=r"1 of 37"):
         read_day(outage_store)
 
-    # What the guard saw, with the guard switched off: 38 carried rows, 38 rows carrying every
+    # What the guard saw, with the guard switched off: 39 carried rows, 39 rows carrying every
     # value (NEW_LISTING still lacks its two long windows), yet only 600001.SH traded.
     seen = read_day(outage_store, min_coverage=0.0)
-    assert len(seen.facts) == 39
+    assert len(seen.facts) == 40
     assert (seen.universe_size, seen.scored_size) == (37, 1)
     assert UNREGISTERED not in {fact.ts_code for fact in seen.facts}
-    assert seen.notes.suspended_without_bar == 38
-    assert sum(1 for fact in seen.facts if None not in fact.oriented_values) == 38
+    assert seen.notes.suspended_without_bar == 39
+    assert sum(1 for fact in seen.facts if None not in fact.oriented_values) == 39
 
 
 def test_a_day_with_no_factor_build_is_refused_by_the_coverage_guard(
