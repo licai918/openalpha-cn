@@ -92,7 +92,29 @@ READ_BY_BUILD_FACTS_DAY: Final[frozenset[str]] = frozenset(
 )
 """The panel datasets `survivor_facts._read_facts_day` reads besides the factor tiers: the
 calendar, the registry, the name corpus, the halts, the session's bands and the bars it walks
-back through. The factor tiers are step 4's, built from the datasets each factor declares."""
+back through. The factor tiers are step 4's, built from the datasets each factor declares.
+
+Not taken on trust: the New Year test records what `build_facts_day` reads through a
+`ReadRecordingStore` and asserts it is exactly this set, so a read added there later turns that
+test red until it is named here -- and then the first test asks the survivor day to fetch it."""
+
+
+class ReadRecordingStore(PanelStore):
+    """`PanelStore`, recording the dataset of every gated read made through it.
+
+    `assess_readiness` is the door every gated read passes: `assessed()` calls it, and
+    `read_if_ready()` and `read_visible_at()` both go through `assessed()`. The one ungated read,
+    `query()`, has a single caller in `src/`, which puts stored rows back rather than answering
+    with them (its docstring); a catalog lookup (`registered_years`, `read_coverage`) reads no
+    row and is not recorded."""
+
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        self.read: set[str] = set()
+
+    def assess_readiness(self, requirement: Any) -> Any:
+        self.read.add(requirement.dataset)
+        return super().assess_readiness(requirement)
 
 
 def _evening(day: date) -> datetime:
@@ -520,7 +542,9 @@ def _new_year(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Store:
     return _seeded(tmp_path, monkeypatch, market, as_of="2026-12-24T12:00:00+08:00", year=2026)
 
 
-def _facts(store: Store, day: date, monkeypatch: pytest.MonkeyPatch) -> Any:
+def _facts(
+    store: Store, day: date, monkeypatch: pytest.MonkeyPatch, *, read: set[str] | None = None
+) -> Any:
     """`build_facts_day` on `day` at its evening, over the step's store, every panel read real.
 
     The factor tiers are the one read replaced: they are step 4's, built at the session's 16:30
@@ -529,8 +553,9 @@ def _facts(store: Store, day: date, monkeypatch: pytest.MonkeyPatch) -> Any:
     answers one row that carries no value -- a build exists at the instant, so the day is not
     refused for a missing build, and no security is scored -- and records what it was asked:
     the session's year, at its 16:30. The coverage floor is 0, so every other read of the day
-    has to pass for the call to."""
+    has to pass for the call to. Every other dataset the call reads is added to `read`."""
     asked: list[tuple[tuple[int, ...], datetime | None]] = []
+    recording = ReadRecordingStore(store.runtime / "panel")
 
     def no_build(
         _store: PanelStore,
@@ -546,16 +571,20 @@ def _facts(store: Store, day: date, monkeypatch: pytest.MonkeyPatch) -> Any:
 
     monkeypatch.setattr(survivor_facts, "load_processed_factor_observations", no_build)
     config = SurvivorBookConfig(seed=0, min_listing_sessions=0)
-    facts = survivor_facts.build_facts_day(
-        store=store.panel,
-        session=day,
-        as_of=_evening(day),
-        config=config,
-        factor_ids=config.composite_factors,
-        transform=FACTOR_TRANSFORMS.get(TRANSFORM),
-        exchange=EXCHANGE,
-        min_coverage=0.0,
-    )
+    try:
+        facts = survivor_facts.build_facts_day(
+            store=recording,
+            session=day,
+            as_of=_evening(day),
+            config=config,
+            factor_ids=config.composite_factors,
+            transform=FACTOR_TRANSFORMS.get(TRANSFORM),
+            exchange=EXCHANGE,
+            min_coverage=0.0,
+        )
+    finally:
+        if read is not None:
+            read |= recording.read
     assert asked == [((day.year,), session_publication_instant(day))] * len(
         config.composite_factors
     )
@@ -588,13 +617,22 @@ def test_across_new_year_the_survivor_day_serves_every_read_of_build_facts_day(
         "2026-12-30",
     ]
     assert _years_asked(store, NAMECHANGE_DATASET) == ["2026"]
-    before = {fact.ts_code: fact for fact in _facts(store, LAST_2026, monkeypatch).facts}
+    read_in_december: set[str] = set()
+    before = {
+        fact.ts_code: fact
+        for fact in _facts(store, LAST_2026, monkeypatch, read=read_in_december).facts
+    }
 
     january, counts = _update(store, FIRST_2027, targets=targets, survivor=_survivor())
-    after = {fact.ts_code: fact for fact in _facts(store, FIRST_2027, monkeypatch).facts}
+    read_in_january: set[str] = set()
+    after = {
+        fact.ts_code: fact
+        for fact in _facts(store, FIRST_2027, monkeypatch, read=read_in_january).facts
+    }
 
     assert january["caught_up"] == []
-    for dataset in READ_BY_BUILD_FACTS_DAY:
+    assert read_in_december == read_in_january == READ_BY_BUILD_FACTS_DAY
+    for dataset in read_in_january:
         assert 2027 in store.panel.registered_years(dataset), dataset
     assert _years_asked(store, NAMECHANGE_DATASET) == ["2027", "2026"]
     # T6-T7's first session of a year (2.2, C1) is 11; January asks the year before's names too.
