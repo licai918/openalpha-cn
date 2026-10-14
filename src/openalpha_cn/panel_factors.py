@@ -9545,8 +9545,18 @@ def load_processed_factor_observations(
     *,
     years: Sequence[int],
     as_of: datetime,
+    at: datetime | None = None,
 ) -> tuple[ProcessedFactorObservation, ...]:
     """One transform's stored processed rows, filtered to what was knowable at `as_of`.
+
+    **`at` narrows the read to the one build stamped at that instant** (`V2-P7-016`). The same
+    `read_visible_at` call takes an equality filter on `event_time` -- `_read_visible_price_session`
+    filters one session the same way -- and the manifest check holds only the builds stamped at
+    `at`. A build is wholly visible or wholly withheld (every row carries its build's `as_of` on
+    all four clocks), so the answer is exactly the whole-year read's rows at `at`, read in about
+    a two-hundredth of the time (T6/T7 measured 0.13 s against 25 s for four factors' day).
+    An `at` no build was stamped at answers `()`, as the whole-year read has no rows there either;
+    an `at` after `as_of` is refused, because it asks about a build that had not happened.
 
     Through `read_visible_at` rather than `read_if_ready` for `load_factor_observations`' reason:
     a processed row's `available_time` is the `as_of` it was computed at, so a year partition
@@ -9592,12 +9602,19 @@ def load_processed_factor_observations(
         # JSON, recomputed on every access -- 915k JSON encodings and SHA-256s for one year of one
         # factor, a third of this read, for a value the frozen spec cannot change.
         wanted = spec.transform_id
+        if at is not None and at > as_of:
+            raise FactorEngineError(
+                f"{dataset} cannot answer for the build at {at.isoformat()}: that instant is "
+                f"after the read's as_of {as_of.isoformat()}, so the build had not happened, and "
+                "an empty answer would read as 'no build at that instant'"
+            )
         found: list[ProcessedFactorObservation] = []
         for year in sorted(set(years)):
             outcome = store.read_visible_at(
                 requirement,
                 year=year,
                 columns=(EVENT_TIME_COLUMN, *PROCESSED_OBSERVATION_PANEL_COLUMNS),
+                filters=None if at is None else {EVENT_TIME_COLUMN: at},
             )
             if outcome.is_blocked:
                 raise FactorEngineError(
@@ -9622,6 +9639,7 @@ def load_processed_factor_observations(
                     store, definition, years=years, as_of=as_of
                 )
                 if manifest.transform_id == spec.transform_id
+                and (at is None or manifest.as_of == at)
             },
             digest_of=processed_observation_digest,
         )
