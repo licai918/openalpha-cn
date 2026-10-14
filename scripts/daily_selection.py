@@ -115,8 +115,12 @@ survivor day, `SURVIVOR_STEPS` (`_run_survivor_day`): registration, panel update
 factor build, paper head, facts, prediction, paper book, summary -- the paper book's writer lock
 taken first, the day's clock and the book's holdings pinned in its own journal
 (`RT/daily_survivor/`) before any request, and the forward record filed before the paper book.
-Steps 1 to 7 run; step 8 refuses by name, after the record is filed, until `V2-P7-008` D5b wires
-the paper book and the summary. Any other `kind`, or a survivor registration that cannot be read,
+The paper book then settles every session it is missing without a decision, each journalled as it
+commits, and runs the day's evening -- or, when the pinned clock is at or after 09:15 of the next
+session, settles the day alone -- and the summary files the day's `result` only for a day that
+completed: a day the paper book refused is printed as far as it got, and every refused day is run
+again after a fix. Any other
+`kind`, or a survivor registration that cannot be read,
 exits 2 at step 1 before any request; a survivor book whose seed is not the registration's exits
 3. The survivor modules are imported only then: they load `backtest/paper.py`, whose audit hook a
 P6 day does not install.
@@ -183,7 +187,9 @@ from openalpha_cn.backtest.strategy_backtest import (  # noqa: E402
     StrategyBacktestError,
     target_holdings,
 )
+from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET  # noqa: E402
 from openalpha_cn.domain.alpha_model import PredictionBatch  # noqa: E402
+from openalpha_cn.domain.daily_prices import DAILY_DATASET  # noqa: E402
 from openalpha_cn.domain.index_membership import (  # noqa: E402
     INDEX_WEIGHT_DATASET,
     INDEX_WEIGHT_INDEX_CODES,
@@ -194,6 +200,7 @@ from openalpha_cn.domain.prediction_record import (  # noqa: E402
     PredictionRecord,
     outcome_known_at_for,
 )
+from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET, SUSPENSION_DATASET  # noqa: E402
 from openalpha_cn.domain.trading_calendar import (  # noqa: E402
     TRADING_CALENDAR_DATASET,
     TradingCalendar,
@@ -206,7 +213,11 @@ from openalpha_cn.factor_view import (  # noqa: E402
     factor_build_years,
     resolve_factor,
 )
-from openalpha_cn.panel.catalog import DEFAULT_DATE_TIMEZONE, PanelStorageError  # noqa: E402
+from openalpha_cn.panel.catalog import (  # noqa: E402
+    DEFAULT_DATE_TIMEZONE,
+    PanelStorageError,
+    PartitionNotYetKnowableError,
+)
 from openalpha_cn.panel.store import PanelStore  # noqa: E402
 from openalpha_cn.panel_factors import (  # noqa: E402
     FACTOR_TRANSFORMS,
@@ -262,11 +273,14 @@ from openalpha_cn.strategy_view import (  # noqa: E402
 if TYPE_CHECKING:
     # Imported for their types only: at run time the survivor day imports these modules, and only
     # for a registration that names a `kind` (they load `backtest/paper.py`).
+    from openalpha_cn.backtest.multi_day import PortfolioLedger
+    from openalpha_cn.backtest.paper import PaperPortfolio
+    from openalpha_cn.backtest.paper_evening import CatchUpResult
     from openalpha_cn.domain.factor_transform import FactorTransformSpec
     from openalpha_cn.domain.survivor_book import ScreenResult
     from openalpha_cn.runtime.composition import StorageContainer
     from openalpha_cn.strategy_survivor import SurvivorRegistration
-    from openalpha_cn.strategy_survivor_book import PaperBookLock, PaperHead
+    from openalpha_cn.strategy_survivor_book import PaperBookLock, PaperHead, SurvivorEvening
     from openalpha_cn.strategy_survivor_facts import FactsDay
     from openalpha_cn.strategy_survivor_market import SessionOrdinals
 
@@ -452,6 +466,11 @@ class StepFailedError(RuntimeError):
         self.requests: dict[str, int] = {}
         """The Tushare requests the run had made when it stopped, by `api_name`: a refused run
         spends requests too, and the budget is counted either way."""
+        self.document: dict[str, Any] | None = None
+        """A survivor day refused by its paper book (step 8): the day's document as far as it got
+        -- no evening, the refusal as the reason -- which `main` prints beside the refusal. Never
+        filed as the journal's `result`. `None` for every other refusal, which prints the refusal
+        and its requests only, and for every refusal of the P6 day."""
 
 
 @contextlib.contextmanager
@@ -3423,12 +3442,23 @@ SETTLE_ONLY_COVERAGE: Final[float] = 0.0
 """The coverage floor a settle-only day reads its facts at: it decides nothing and files nothing,
 so the registered floor, which guards a decision and a record, has nothing to guard (D4 review,
 rule 3); the facts are still read, for the held statuses and the document."""
+PAPER_MARKET_DATASETS: Final[tuple[str, ...]] = (
+    DAILY_DATASET,
+    PRICE_LIMIT_DATASET,
+    SUSPENSION_DATASET,
+    ADJ_FACTOR_DATASET,
+    INDEX_DAILY_DATASET,
+)
+"""What the paper book's session market reads (`strategy_survivor_market.settlement_market`): the
+datasets whose newest stored row says where a market the pinned clock can no longer read can be
+read (`_readable_after`)."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SurvivorDay:
     """A survivor day as steps 1 to 7 leave it for steps 8 and 9 -- the paper book and the
-    summary, `V2-P7-008` D5b's: what the day read, pinned and filed, and the lock it holds."""
+    summary (`_survivor_paper_and_summary`): what the day read, pinned and filed, and the lock it
+    holds."""
 
     options: DailyOptions
     registration: Registration
@@ -3836,14 +3866,297 @@ def _opening_result(
     }
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SurvivorPaperRun:
+    """What step 8 left: the evening (`None` on a settle-only day) and the instant the paper book
+    read the panel at -- the pinned `as_of`, or where the market can be read again
+    (`_readable_after`)."""
+
+    evening: SurvivorEvening | None
+    read_at: datetime
+
+
 def _survivor_paper_and_summary(
     day: SurvivorDay, *, clock: Callable[[], datetime], counts: Counter[str]
 ) -> dict[str, Any]:
-    """Steps 8 and 9 of the survivor day: the paper book -- the catch-up, then the evening, or on
-    a settle-only day the settlement alone -- and the summary, `V2-P7-008` D5b's. Until they are
-    wired the day stops here by name, after its record was filed: exit 1 with the requests spent,
-    and no `result` in the journal, so a rerun runs the paper book once it exists."""
-    raise StepFailedError("paper book", "not wired yet (V2-P7-008 D5b)", steps=SURVIVOR_STEPS)
+    """Steps 8 and 9 of the survivor day: the paper book and the summary.
+
+    **8. Paper book** (`_run_paper_book`). Every session the book is missing before the day's is
+    caught up without a decision, then the day's evening is run -- or, when the journal-pinned
+    `as_of` is at or after 09:15 of the next session, the session is settled alone (decision 2;
+    no record was filed at step 7). Each catch-up session is journalled as it commits
+    (`catch_ups`, in `strategy_survivor_summary.catch_up_entry`'s form), so a run that stops
+    later keeps what it settled. The paper book's refusals are mapped by class, never by message
+    -- `SurvivorDayError` (a stalled catch-up journals the sessions it settled first),
+    `PaperStateError`, the store's `PaperStateStoreError` and `ValueError` -- to step 8's refusal,
+    exit 1; anything else (`TypeError`, `AssertionError`, the panel's own faults) is not taken
+    for a refusal of the book and reaches `_step`, which reports it as the step's unexpected
+    fault. A refused day files no `result`, so a run again after a fix runs its evening (D4
+    review, rule 2): it is printed as far as it got (`StepFailedError.document`), with the refusal
+    as the reason no evening was run.
+
+    **9. Summary.** `strategy_survivor_summary.evening_document` -- the facts and screen of step 6
+    (what the prediction used), the paper book's evening on the facts it ran on (read again when
+    the catch-up changed the holdings), the day's journalled catch-ups and each carried holding's
+    halt start from the earlier sessions' journals -- with the registration, panel, factor and
+    prediction blocks merged in, filed as the journal's `result` beside the `paper` stage only
+    now, for a completed evening or a completed settle-only day. `this_run` is merged into what is
+    returned, not filed: a complete journal is printed again with no request and no write.
+    """
+    from openalpha_cn import strategy_survivor_book as paper_book
+    from openalpha_cn import strategy_survivor_summary as summary
+    from openalpha_cn.backtest.paper_state import PaperStateError
+    from openalpha_cn.storage.paper_state import PaperStateStoreError
+
+    journal: dict[str, Any] = dict(day.journal)
+
+    def file_catch_ups(settled: Sequence[CatchUpResult]) -> None:
+        nonlocal journal
+        filed = _filed_catch_ups(
+            journal.get("catch_ups", ()), [summary.catch_up_entry(item) for item in settled]
+        )
+        if filed != journal.get("catch_ups"):
+            journal = {**journal, "catch_ups": filed}
+            write_journal(day.journal_path, journal)
+
+    def refused(message: str) -> StepFailedError:
+        refusal = StepFailedError("paper book", message, steps=SURVIVOR_STEPS)
+        refusal.document = _survivor_result(
+            day, journal=journal, evening=None, paper_skipped=str(refusal)
+        )
+        return refusal
+
+    with _step("paper book", steps=SURVIVOR_STEPS):
+        try:
+            ran = _run_paper_book(day, on_settled=lambda result: file_catch_ups((result,)))
+        except paper_book.SurvivorDayError as error:
+            if isinstance(error, paper_book.CatchUpStalledError):
+                file_catch_ups(error.caught_up)
+            raise refused(str(error)) from error
+        except (PaperStateError, PaperStateStoreError, ValueError) as error:
+            raise refused(f"the paper book refused ({type(error).__name__}): {error}") from error
+    with _step("summary", steps=SURVIVOR_STEPS):
+        evening = ran.evening
+        result = _survivor_result(
+            day,
+            journal=journal,
+            evening=evening,
+            paper_skipped=None if evening is not None else _settled_only(day),
+            carried_since=None
+            if evening is None
+            else summary.carried_since(
+                {mark.subject for mark in evening.result.settlement.carried_marks},
+                session=day.session,
+                earlier=_earlier_results(
+                    day.journal_path.parent, day.ordinals, day.head.session_index
+                ),
+            ),
+        )
+        own = [
+            entry["snapshot_id"]
+            for entry in journal.get("catch_ups", ())
+            if entry["session_index"] == day.head.session_index
+        ]
+        paper = {
+            "mode": "settle_only" if day.settle_only else "evening",
+            "read_at": ran.read_at.isoformat(),
+            "outcome": None if evening is None else evening.result.outcome,
+            "snapshot_id": (own or [None])[-1]
+            if evening is None
+            else evening.result.snapshot.snapshot_id,
+        }
+        write_journal(day.journal_path, {**journal, "paper": paper, "result": result})
+    return {**result, "this_run": _this_run(counts, wrote=True)}
+
+
+def _run_paper_book(
+    day: SurvivorDay, *, on_settled: Callable[[CatchUpResult], None]
+) -> SurvivorPaperRun:
+    """Step 8 itself, at the journal-pinned `as_of` -- and once more, at the newest instant the
+    panel can be read at, when the market cannot be read at it any more (`_readable_after`: a
+    held evening run again after the next session's panel update, D3 review rule 5).
+
+    The day's mode is the journal-pinned clock's (`SurvivorDay.settle_only`), never this run's: an
+    evening is always `evening`, also for a session whose snapshot is held already (its
+    unchanged path derives the evening again and writes nothing), with the journal-pinned `held`
+    and step 6's facts and screen; a settle-only day is `settle_only`. Every call gets the one
+    resolved transform, the lock's token and the paper book's portfolio of the registered limits
+    at the protocol's costs (`strategy_survivor.make_paper_portfolio`, D15)."""
+    from openalpha_cn import strategy_survivor_book as paper_book
+    from openalpha_cn.strategy_survivor import make_paper_portfolio
+
+    limits = day.survivor.adapter.paper_limits
+
+    def make_portfolio(ledger: PortfolioLedger) -> PaperPortfolio:
+        return make_paper_portfolio(ledger, limits)
+
+    def run_at(read_at: datetime) -> SurvivorEvening | None:
+        if day.settle_only:
+            paper_book.settle_only(
+                panel=day.store,
+                state_store=day.storage.paper_state_store,
+                ledger=day.storage.paper_ledger,
+                registration=day.survivor,
+                ordinals=day.ordinals,
+                calendar=day.calendar,
+                session=day.session,
+                as_of=read_at,
+                make_portfolio=make_portfolio,
+                lock=day.lock,
+                on_settled=on_settled,
+                transform=day.transform,
+            )
+            return None
+        paper_book.catch_up(
+            panel=day.store,
+            state_store=day.storage.paper_state_store,
+            ledger=day.storage.paper_ledger,
+            registration=day.survivor,
+            ordinals=day.ordinals,
+            calendar=day.calendar,
+            through_index=day.head.session_index - 1,
+            as_of=read_at,
+            make_portfolio=make_portfolio,
+            lock=day.lock,
+            on_settled=on_settled,
+            transform=day.transform,
+        )
+        return paper_book.evening(
+            panel=day.store,
+            state_store=day.storage.paper_state_store,
+            ledger=day.storage.paper_ledger,
+            registration=day.survivor,
+            ordinals=day.ordinals,
+            calendar=day.calendar,
+            session=day.session,
+            as_of=read_at,
+            facts=day.facts,
+            screen=day.screen,
+            held=day.held,
+            make_portfolio=make_portfolio,
+            lock=day.lock,
+            transform=day.transform,
+        )
+
+    try:
+        return SurvivorPaperRun(evening=run_at(day.as_of), read_at=day.as_of)
+    except (paper_book.SurvivorDayError, PanelStorageError) as error:
+        later = _readable_after(day.store, error, at=day.as_of)
+        if later is None:
+            raise
+    return SurvivorPaperRun(evening=run_at(later), read_at=later)
+
+
+def _readable_after(store: PanelStore, error: BaseException, *, at: datetime) -> datetime | None:
+    """Where a paper book refused at `at` can read the panel, or `None` when it cannot be helped.
+
+    Only a read refused because a partition read whole holds a row knowable after `at`
+    (`PartitionNotYetKnowableError` at the root of `error`, found by class along its causes) has
+    such an instant: `adj_factor` and `index_daily` are read a year at a time, so once the next
+    session is stored a held evening's pinned clock no longer reads them. It is the newest stored
+    session's publication instant -- the newest `max_available_time` of the partitions the
+    session market reads (`PAPER_MARKET_DATASETS`), at or after which each of them can be read --
+    when that is later than `at`. A later read gives the evening's bytes (C1), and the paper book
+    refuses any session whose derivation differs from what it settled (C3), so the second read
+    reproduces the evening or is refused by name; it is made once, never retried."""
+    seen: BaseException | None = error
+    while seen is not None and not isinstance(seen, PartitionNotYetKnowableError):
+        seen = seen.__cause__
+    if seen is None:
+        return None
+    newest: datetime | None = None
+    for dataset in PAPER_MARKET_DATASETS:
+        for year in store.registered_years(dataset):
+            coverage = store.read_coverage(dataset, year)
+            if coverage is not None and (newest is None or coverage.max_available_time > newest):
+                newest = coverage.max_available_time
+    return newest if newest is not None and newest > at else None
+
+
+def _filed_catch_ups(
+    filed: Sequence[Mapping[str, Any]], settled: Sequence[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    """The day's catch-ups as its journal files them, oldest first, each session once: the entry
+    filed first is kept -- what the session's commit did -- and a session settled again (a
+    settle-only day finishing its own session, which writes nothing) adds nothing."""
+    by_index: dict[int, dict[str, Any]] = {}
+    for entry in (*filed, *settled):
+        by_index.setdefault(int(entry["session_index"]), dict(entry))
+    return [by_index[index] for index in sorted(by_index)]
+
+
+def _settled_only(day: SurvivorDay) -> str:
+    return (
+        f"the day's pinned clock {day.as_of.isoformat()} is at or after 09:15 of the next "
+        "session, its call auction, so the day settles only: the session was settled without a "
+        "decision and nothing was registered (decision 2)"
+    )
+
+
+def _survivor_result(
+    day: SurvivorDay,
+    *,
+    journal: Mapping[str, Any],
+    evening: SurvivorEvening | None,
+    paper_skipped: str | None,
+    carried_since: Mapping[str, date] | None = None,
+) -> dict[str, Any]:
+    """The day's `result`: `strategy_survivor_summary.evening_document` -- step 6's facts and
+    screen, the journal's catch-ups and, when the evening read the facts day again, that second
+    read (D3 review, rule 8) -- with the registration, panel, factor and prediction blocks merged
+    in (`this_run` is the caller's)."""
+    from openalpha_cn import strategy_survivor_summary as summary
+
+    read_again = (
+        None
+        if evening is None or evening.facts.held == day.facts.held
+        else (evening.facts, evening.screen)
+    )
+    document = summary.evening_document(
+        session=day.session,
+        session_index=day.head.session_index,
+        as_of=day.as_of,
+        facts=day.facts,
+        screen=day.screen,
+        evening=None if evening is None else evening.result,
+        catch_ups=(),
+        ordinals=day.ordinals,
+        book=day.survivor.book,
+        paper_skipped=paper_skipped,
+        carried_since=carried_since,
+        filed_catch_ups=journal.get("catch_ups", ()),
+        read_again=read_again,
+    )
+    return {
+        **document,
+        "registration": journal["registration"],
+        "panel": journal["panel"],
+        "factors": dict(day.factors),
+        "prediction": dict(day.prediction),
+    }
+
+
+def _earlier_results(
+    directory: Path, ordinals: SessionOrdinals, index: int
+) -> Iterator[tuple[date, Mapping[str, Any] | None]]:
+    """The results the journals in `directory` filed for the sessions before ordinal `index`,
+    newest first, read only as far as the caller asks (`strategy_survivor_summary.carried_since`).
+    A session with no journal, one that is not UTF-8 JSON, not a survivor journal or holds no
+    `result` gives `None` -- tolerated, never refused: a halt's start is then unknown."""
+    for earlier in range(index - 1, -1, -1):
+        session = ordinals.day_of(earlier)
+        yield session, _filed_result(directory / f"{session.isoformat()}.json")
+
+
+def _filed_result(path: Path) -> Mapping[str, Any] | None:
+    try:
+        body = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):  # missing; `UnicodeDecodeError` and `JSONDecodeError`
+        return None
+    if not isinstance(body, dict) or body.get("schema") != SURVIVOR_JOURNAL_SCHEMA:
+        return None
+    result = body.get("result")
+    return result if isinstance(result, dict) else None
 
 
 def _this_run(counts: Counter[str], *, wrote: bool) -> dict[str, Any]:
@@ -3890,13 +4203,19 @@ def _run_survivor_day(
     7. **Prediction**, before the paper step so that a fault of the paper book never costs the
        record; journalled, and reused on a rerun. A day whose pinned `as_of` is at or after 09:15
        of the next session registers nothing and is no error: it settles only (decision 2).
-    8.-9. The paper book and the summary: `_survivor_paper_and_summary` (D5b).
+    8.-9. **The paper book and the summary** (`_survivor_paper_and_summary`): the missed sessions
+       caught up and journalled one by one, the evening (or the settlement alone), and the
+       document filed as the journal's `result` -- only for a day that completed. No refused day
+       files a `result`; one refused at step 8 is printed as far as it got, any other prints its
+       refusal and its requests only.
 
     **The P6 day's options here.** `--full-update` and `--top` have no survivor meaning and are
     refused before anything is made (exit 2). `--dataset` replaces the targets as on the P6 day
     (`options.targets or targets_for_survivor(builds)`); `--max-staleness-days` is the factor
     build's bound, as on the P6 day; `--as-of` pins the first run's clock; `--json` prints the
-    day's result document; `--pin-worktree` is unchanged (it never reaches a day).
+    day's result document (and, for a day its paper book refused, the document as far as it
+    got); `--pin-worktree` is
+    unchanged (it never reaches a day).
     """
     with _step("registration", steps=SURVIVOR_STEPS):
         _refuse_p6_only_options(options)
@@ -4153,8 +4472,9 @@ def summary_lines(result: Mapping[str, Any], *, top: int) -> list[str]:
 
 def survivor_summary_lines(result: Mapping[str, Any]) -> list[str]:
     """What a survivor day prints without `--json` (`V2-P7-008`): the opening of a day on the
-    epoch here; an evening's document through `strategy_survivor_summary.summary_lines`, which
-    D5b fills. Never the P6 summary, whose keys a survivor result does not have."""
+    epoch here; every other day's document -- an evening, a settle-only day, a day its paper book
+    refused -- through `strategy_survivor_summary.summary_lines`, imported only here. Never
+    the P6 summary, whose keys a survivor result does not have."""
     if "opening" not in result:
         from openalpha_cn.strategy_survivor_summary import summary_lines as evening_lines
 
@@ -4635,6 +4955,22 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
     try:
         result = run_daily_selection(options, clock=clock)
     except StepFailedError as error:
+        if error.document is not None:
+            # A survivor day its paper book refused (step 8) is printed as far as it got, with
+            # its refusal as the reason no evening was run; its journal holds no `result`, so a
+            # run again after a fix runs the evening.
+            shown = {
+                **error.document,
+                "this_run": {
+                    "requests": error.requests,
+                    "request_count": sum(error.requests.values()),
+                    "wrote": True,
+                },
+            }
+            if arguments.json:
+                print(json.dumps(shown, sort_keys=True, ensure_ascii=False))
+            else:
+                print("\n".join(survivor_summary_lines(shown)))
         print(str(error), file=sys.stderr)
         print(
             f"tushare requests   {sum(error.requests.values())} this run "
