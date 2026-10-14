@@ -97,6 +97,7 @@ from openalpha_cn.backtest.execution import (
     ExecutionRequest,
     ExecutionResult,
     MarketBar,
+    at_the_open,
 )
 from openalpha_cn.backtest.factor_ic import MINIMUM_IC_SECURITIES, average_ranks
 from openalpha_cn.backtest.factor_portfolio import (
@@ -2200,7 +2201,7 @@ def _mark_at_the_open(
     members: _Members, quotes: Mapping[date, Mapping[str, SessionQuote]], day: date
 ) -> list[str]:
     """Value every member at `day`'s open, where the notional book sells it: its quote with the
-    bar collapsed to the open print (`_at_the_open`), through `_Holding.remark` -- so the session
+    bar collapsed to the open print (`at_the_open`), through `_Holding.remark` -- so the session
     is observed exactly as a holding kept through it observes it. A member with no quote there
     keeps its last mark. Returns the crossings met."""
     crossed: list[str] = []
@@ -2209,7 +2210,7 @@ def _mark_at_the_open(
         quote = day_quotes.get(subject)
         if quote is None:
             continue
-        opened = replace(quote, bar=_at_the_open(quote.bar))
+        opened = replace(quote, bar=at_the_open(quote.bar))
         if holding.remark(opened) is not None:
             crossed.append(f"{subject}@{day.isoformat()}")
     return crossed
@@ -2324,10 +2325,10 @@ def held_equal_weight_period(
 
 def _buyable_at_the_open(policy: AShareExecutionPolicy, quote: SessionQuote) -> bool:
     """Whether the book's open-auction judgement admits a buy of this security: the policy
-    against the session's bar collapsed to its open print (`_at_the_open`), as `_buy` asks it,
+    against the session's bar collapsed to its open print (`at_the_open`), as `_buy` asks it,
     for the board's smallest legal order -- so only the security's state can refuse it (halted,
     a one-price limit-up at the open), never the lot or the STAR floor."""
-    bar = _at_the_open(quote.bar)
+    bar = at_the_open(quote.bar)
     order = ExecutionRequest(side="buy", quantity=BOARD_MINIMUM_QUANTITY[bar.board])
     return policy.execute(order, bar).status == "filled"
 
@@ -2388,11 +2389,6 @@ def target_holdings(
             counts[industry] = counts.get(industry, 0) + 1
         buy.append(subject)
     return frozenset(keep), tuple(buy)
-
-
-def _at_the_open(bar: MarketBar) -> MarketBar:
-    """The session's bar collapsed to its open print, for an order placed at the open."""
-    return bar.model_copy(update={"high": bar.open, "low": bar.open, "close": bar.open})
 
 
 def _slippage(spec: StrategySpec, notional: Decimal) -> Decimal:
@@ -2475,7 +2471,7 @@ def _sell(
     if limit is None:
         ledger.reject(day, subject, "sell", "no signal-session turnover for the participation cap")
         return
-    bar = _at_the_open(quote.bar)
+    bar = at_the_open(quote.bar)
     quantity = _legal_sale(holding.shares, limit=limit, bar=bar)
     if quantity <= 0:
         ledger.reject(
@@ -2556,7 +2552,7 @@ def _buy(
     if limit is None:
         ledger.reject(day, subject, "buy", "no signal-session turnover for the participation cap")
         return
-    bar = _at_the_open(quote.bar)
+    bar = at_the_open(quote.bar)
     budget = min(spec.position_capital, book.cash)
     sized = _sized_buy(policy, spec, bar, capital=min(budget, limit), budget=budget)
     if isinstance(sized, str):

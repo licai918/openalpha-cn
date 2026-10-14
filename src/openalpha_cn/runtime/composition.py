@@ -13,7 +13,7 @@ composition root, each one would need wiring twice, by hand, forever.
 deliberately left out: nothing could fill it until a face above the model and storage planes
 existed, and `model daily-run` is that face. See `StorageContainer.prediction_store`.
 
-Field types mirror the storage-Protocol layer Task 9 (V2-P0B-003) built: six of fourteen
+Field types mirror the storage-Protocol layer Task 9 (V2-P0B-003) built: six of sixteen
 fields are typed against the narrowest Protocol their consumers need (`ResearchMemory`,
 `RecoveryStore`, `EvidenceStore`, `WatchlistStore`, `ReportStore`,
 `ValidationStore`) -- because `sdk.py`/`api/app.py` only ever call the methods those
@@ -56,8 +56,9 @@ from openalpha_cn.storage.jobs import SQLiteJobStore
 from openalpha_cn.storage.memory import SQLiteResearchMemory
 from openalpha_cn.storage.migrations import MigrationRunResult, run_migrations
 from openalpha_cn.storage.models import SQLiteModelUsageStore
+from openalpha_cn.storage.paper_state import FilePaperStateStore
 from openalpha_cn.storage.parquet import ParquetEvidenceStore
-from openalpha_cn.storage.portfolio import SQLitePortfolioLedger
+from openalpha_cn.storage.portfolio import SQLitePortfolioLedger, open_paper_ledger
 from openalpha_cn.storage.predictions import FilePredictionStore
 from openalpha_cn.storage.product import SQLiteReportStore, SQLiteWatchlistStore
 from openalpha_cn.storage.recovery import SQLiteRecoveryStore
@@ -70,7 +71,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class StorageContainer:
-    """All fourteen storage components assembled for one shared `runtime_dir`.
+    """All sixteen storage components assembled for one shared `runtime_dir`.
 
     `migration_result` is the outcome of the `run_migrations()` call this function makes
     before constructing any store below -- exposed so a caller that needs to report on
@@ -209,18 +210,51 @@ class StorageContainer:
     the store into this container and giving it a "face" are two different rows, and only the
     first has been asked for so far.
     """
+    paper_ledger: SQLitePortfolioLedger
+    """`V2-P7-017`'s ledger of the paper book's own, at `runtime_dir / "paper" / "ledger.sqlite3"`.
+
+    **A second instance of `portfolio_ledger`'s class, at a second file, and never the same
+    table.** `portfolio_ledger` is where `sdk.py`'s `run_portfolio_backtest` and the order routes
+    of `api/app.py` append, and its `portfolio_transitions` table has no column naming a book: a
+    paper transition written there would be listed among backtest ones, and an attempt id a
+    backtest happened to reuse would be refused as a conflict of the other's payload. T5 (section
+    6) measured that and asked for this instance. The file is the paper book's alone, so it shares
+    none of `state.sqlite3`'s rows -- and none of its migrations either: `run_migrations` opens
+    `state.sqlite3` only, so `SQLitePortfolioLedger`'s `CREATE TABLE IF NOT EXISTS` gives this
+    file the table as first created and nothing a migration added since (migration 4's
+    `portfolio_transitions_subject_idx` was already one such). `storage.portfolio.
+    open_paper_ledger` repeats those additions (`PAPER_LEDGER_MIGRATED_SCHEMA`), and
+    `tests/unit/backtest/test_paper_state.py::
+    test_the_paper_ledger_file_has_the_schema_the_migrations_give_the_backtest_ledger` compares
+    the two files' `portfolio_transitions` after `build_storage`, so a future migration of that
+    table that does not reach this file goes red.
+
+    Concrete for `portfolio_ledger`'s reason: whoever reads the paper book's record back calls
+    `list()`, which `PortfolioLedger` deliberately does not declare. Nothing appends to it yet --
+    the daily settlement (`V2-P7-009`) is its writer and has not landed.
+    """
+    paper_state_store: FilePaperStateStore
+    """`V2-P7-017`'s daily paper-book snapshots, under `runtime_dir / "paper" / "snapshots"`.
+
+    One write-once document per settled session; `backtest/paper_state.py` renders, reads and
+    verifies them, and this store keeps the bytes. Concrete for `experiment_store`'s reason: the
+    Protocol its consumer declares (`backtest.paper_state.PaperStateDocumentStore`) lives above
+    `openalpha_cn.storage`. Nothing writes to it yet, for `paper_ledger`'s reason.
+    """
     migration_result: MigrationRunResult
 
 
 def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> StorageContainer:
     """Run pending schema migrations, then assemble every storage component once.
 
-    All fourteen stores share one `runtime_dir`: ten at its root-level `state.sqlite3`
+    All sixteen stores share one `runtime_dir`: ten at its root-level `state.sqlite3`
     (matching the pre-existing per-store convention), plus the Parquet evidence store
     under `runtime_dir / "evidence"`, the sealed experiment documents under
     `runtime_dir / "experiments"`, `V2-P4-062`'s shortlist answers under
-    `runtime_dir / "shortlists"` and `V2-P4-017`'s registered predictions under
-    `runtime_dir / "predictions"`. Interrupted-batch recovery runs here, using the
+    `runtime_dir / "shortlists"`, `V2-P4-017`'s registered predictions under
+    `runtime_dir / "predictions"`, and `V2-P7-017`'s paper book -- its own ledger at
+    `runtime_dir / "paper" / "ledger.sqlite3"` and its snapshots under
+    `runtime_dir / "paper" / "snapshots"`. Interrupted-batch recovery runs here, using the
     caller-supplied `clock`, instead of being duplicated (and, in `api/app.py`'s case,
     hardcoded) at each call site.
 
@@ -253,6 +287,8 @@ def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> Storag
     job_store = SQLiteJobStore(runtime_dir / "state.sqlite3")
     model_usage_store = SQLiteModelUsageStore(runtime_dir / "state.sqlite3")
     prediction_store = FilePredictionStore(runtime_dir / "predictions", clock=clock)
+    paper_ledger = open_paper_ledger(runtime_dir / "paper" / "ledger.sqlite3")
+    paper_state_store = FilePaperStateStore(runtime_dir / "paper" / "snapshots")
     batch_store.recover_interrupted(now=clock())
     logger.info(
         "storage_initialized",
@@ -276,5 +312,7 @@ def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> Storag
         prediction_store=prediction_store,
         job_store=job_store,
         model_usage_store=model_usage_store,
+        paper_ledger=paper_ledger,
+        paper_state_store=paper_state_store,
         migration_result=migration_result,
     )
