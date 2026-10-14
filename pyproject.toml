@@ -286,6 +286,7 @@ forbidden_modules = [
   "openalpha_cn.strategy_view",
   "openalpha_cn.strategy_survivor",
   "openalpha_cn.strategy_survivor_book",
+  "openalpha_cn.strategy_survivor_check",
   "openalpha_cn.strategy_survivor_facts",
   "openalpha_cn.strategy_survivor_forward",
   "openalpha_cn.strategy_survivor_market",
