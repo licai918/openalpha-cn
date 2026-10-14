@@ -28,7 +28,7 @@ from openalpha_cn.domain.trading_calendar import (
     TradingCalendar,
     build_trading_calendar,
 )
-from openalpha_cn.survivor_facts import (
+from openalpha_cn.strategy_survivor_facts import (
     MAIN_BOARD_PREFIXES,
     FactsDay,
     FactsNotes,

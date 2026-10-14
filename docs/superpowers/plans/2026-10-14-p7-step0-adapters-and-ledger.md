@@ -4,7 +4,7 @@
 
 **Goal:** 把计划 1 做完的纯 Python 内核接到真实面板上：每个信号日产出一行行"资格事实"、纸面账本按开盘价真实成交并处理除权除息、先结算后决定、产出并落盘每日交易清单、登记预测、周报扩展——也就是 Step 0 的 `V2-P7-016`、`017`、`009`、`008`、`018`。
 
-**Architecture:** 内核（`domain/survivor_*.py`）保持纯净不动；面板侧适配器放在 `src/openalpha_cn/survivor_facts.py`（面板 → `SecurityFacts`，可用数值库）；纸面成交的步骤构建器放在 `src/openalpha_cn/backtest/paper_step.py`（`paper.py` 邻近）；每日编排放在 `src/openalpha_cn/strategy_survivor.py`（T4 的推荐位置），由 `scripts/daily_selection.py` 按登记配置顶层键 `kind` 分派，P6 路径不变。每日顺序（T5）：**先结算上一日的订单与订单生命周期，再做持仓决定与交易清单。**
+**Architecture:** 内核（`domain/survivor_*.py`）保持纯净不动；面板侧适配器放在 `src/openalpha_cn/strategy_survivor_facts.py`（面板 → `SecurityFacts`，可用数值库）；纸面成交的步骤构建器放在 `src/openalpha_cn/backtest/paper_step.py`（`paper.py` 邻近）；每日编排放在 `src/openalpha_cn/strategy_survivor.py`（T4 的推荐位置），由 `scripts/daily_selection.py` 按登记配置顶层键 `kind` 分派，P6 路径不变。每日顺序（T5）：**先结算上一日的订单与订单生命周期，再做持仓决定与交易清单。**
 
 **Tech Stack:** Python 3.12+、pydantic v2、DuckDB / pyarrow（只在面板侧）、pytest；门禁 `ruff`、`mypy src scripts`、`lint-imports`。
 
@@ -50,7 +50,7 @@
 
 | 文件 | 职责 | 任务 |
 |---|---|---|
-| `src/openalpha_cn/survivor_facts.py` | 面板 → `SecurityFacts`：ST 三态、上市年龄、因子窄读、每只上市证券一行事实、覆盖率守卫 | A1–A3 |
+| `src/openalpha_cn/strategy_survivor_facts.py` | 面板 → `SecurityFacts`：ST 三态、上市年龄、因子窄读、每只上市证券一行事实、覆盖率守卫 | A1–A3 |
 | `src/openalpha_cn/backtest/paper_step.py` | 纯函数步骤构建器：开盘折叠、复权比缩放、卖前买后、无 bar 的订单记为"未尝试"、每次尝试一个 id、收盘重估 | B1 |
 | `src/openalpha_cn/backtest/paper.py`（改） | `PaperPortfolio` 增加非破坏性的 `execution` 参数（成本与滑点注入） | B2 |
 | `src/openalpha_cn/backtest/paper_state.py` | 每日状态快照与纸面账簿单独的账本实例 | B3 |
@@ -62,14 +62,14 @@
 
 ## Part A — `V2-P7-016` 面板 → 资格事实适配器与每日抓取
 
-**实现后的接口（2026-10-14，A1–A3 与三轮修订之后；以代码为准，下面各任务里的 Interfaces 是立项时的草稿）：** `build_facts_day(*, store, session, as_of, config, factor_ids, transform, exchange, min_coverage=0.5, max_carry_sessions=250, held=()) -> FactsDay`。`transform` 与 `exchange` 必填；`held` 是持仓名（不设结转上界，拼写必须是 `NNNNNN.SH|SZ|BJ`，否则 `MalformedHeldCodeError`）。`FactsDay` 带 `facts`（每只上市证券一行，按代码排序）、按允许板块算的 `universe_size`/`scored_size`、`FactsNotes`（含 `no_bar_within_carry`、`no_listing_row`、`not_listed_with_bar`、`unrecognised_board`/`unrecognised_board_codes`、`st_by_band` 等分项计数）、`held` 与 `held_status`（`row`/`no_bar_in_reach`/`not_listed`/`not_in_registry`/`board_unrecognised`）。错误都是 `SurvivorFactsError` 的子类：`FactsCoverageError`、`MissingFactorBuildError`、`StaleRegistryError`、`MalformedHeldCodeError`。登记簿读不晚于信号年的最新已存生命周期年（信号年没有上市/退市事件时不拒绝；回退年份的取数必须不早于该会话的 16:30 发布时刻，否则 `StaleRegistryError`）；因子值只取信号日 16:30 那一次构建的被采纳值；`MAIN_BOARD_PREFIXES` 是前缀与交易所配对的白名单。每日抓取侧：`targets_for_survivor`、`SurvivorPanelUpdate`、`update_panel(..., survivor=...)`、`panel_catch_up_bound`；上一年尾部没补齐按名拒绝、补建上限按会话数计。**这一模块在 Part C 之前要改名为 `strategy_survivor_facts`**（`strategy_` 家族，守卫 `test_every_top_level_module_is_a_declared_leaf_or_a_member_of_a_discovered_family` 要求读面板的顶层模块加入某个研究平面家族并有 `RESEARCH_PLANE_SEAM_IMPORTS`/`RESEARCH_PLANE_DATASETS` 两行）；Part C 的 `survivor_market` 相应用 `strategy_survivor_market` 的名字。
+**实现后的接口（2026-10-14，A1–A3 与三轮修订之后；以代码为准，下面各任务里的 Interfaces 是立项时的草稿）：** `build_facts_day(*, store, session, as_of, config, factor_ids, transform, exchange, min_coverage=0.5, max_carry_sessions=250, held=()) -> FactsDay`。`transform` 与 `exchange` 必填；`held` 是持仓名（不设结转上界，拼写必须是 `NNNNNN.SH|SZ|BJ`，否则 `MalformedHeldCodeError`）。`FactsDay` 带 `facts`（每只上市证券一行，按代码排序）、按允许板块算的 `universe_size`/`scored_size`、`FactsNotes`（含 `no_bar_within_carry`、`no_listing_row`、`not_listed_with_bar`、`unrecognised_board`/`unrecognised_board_codes`、`st_by_band` 等分项计数）、`held` 与 `held_status`（`row`/`no_bar_in_reach`/`not_listed`/`not_in_registry`/`board_unrecognised`）。错误都是 `SurvivorFactsError` 的子类：`FactsCoverageError`、`MissingFactorBuildError`、`StaleRegistryError`、`MalformedHeldCodeError`。登记簿读不晚于信号年的最新已存生命周期年（信号年没有上市/退市事件时不拒绝；回退年份的取数必须不早于该会话的 16:30 发布时刻，否则 `StaleRegistryError`）；因子值只取信号日 16:30 那一次构建的被采纳值；`MAIN_BOARD_PREFIXES` 是前缀与交易所配对的白名单。每日抓取侧：`targets_for_survivor`、`SurvivorPanelUpdate`、`update_panel(..., survivor=...)`、`panel_catch_up_bound`；上一年尾部没补齐按名拒绝、补建上限按会话数计。**这一模块在 Part C 之前要改名为 `strategy_survivor_facts`**（`strategy_` 家族，守卫 `test_every_top_level_module_is_a_declared_leaf_or_a_member_of_a_discovered_family` 要求读面板的顶层模块加入某个研究平面家族并有 `RESEARCH_PLANE_SEAM_IMPORTS`/`RESEARCH_PLANE_DATASETS` 两行）；Part C 的 `strategy_survivor_market` 相应用 `strategy_survivor_market` 的名字。
 
 ### Task A1：纯函数核心——ST 三态、上市年龄、事实行的装配
 
 **Issue:** `V2-P7-016`。**依据:** T3 §7（读取接口与 8 条约束）、设计 §4.2。
 
 **Files:**
-- Create: `src/openalpha_cn/survivor_facts.py`（本任务只放纯函数与数据类，不读面板）
+- Create: `src/openalpha_cn/strategy_survivor_facts.py`（本任务只放纯函数与数据类，不读面板）
 - Create: `unit/test_survivor_facts_core.py`
 
 **先读（动手前，把你的理解写进报告第一节，不要先写代码）：**
@@ -93,9 +93,9 @@
 
 **Steps:**
 - [ ] **Step 1:** 读上面的材料，在报告第一节写出：每个接口依赖的现有 API（`file:line`）、你对"全函数三态"的理解、任何与上面 Interfaces 冲突之处。**有冲突先停下来报告（NEEDS_CONTEXT），不要自己改接口。**
-- [ ] **Step 2:** 写失败的测试 `unit/test_survivor_facts_core.py`（先 `name_status`，再 `listing_age_sessions`，再 `assemble_fact`；构造 `NameHistory` 用仓库已有的构造器或测试夹具，**不要**手写绕过校验的假对象）。运行，确认因 `survivor_facts` 不存在而失败。
+- [ ] **Step 2:** 写失败的测试 `unit/test_survivor_facts_core.py`（先 `name_status`，再 `listing_age_sessions`，再 `assemble_fact`；构造 `NameHistory` 用仓库已有的构造器或测试夹具，**不要**手写绕过校验的假对象）。运行，确认因 `strategy_survivor_facts` 不存在而失败。
 - [ ] **Step 3:** 写最小实现，逐个测试变绿。
-- [ ] **Step 4:** `ruff check`、`ruff format --check`、`mypy src/openalpha_cn/survivor_facts.py`、`lint-imports`，以及 `unit/test_survivor_facts_core.py`。
+- [ ] **Step 4:** `ruff check`、`ruff format --check`、`mypy src/openalpha_cn/strategy_survivor_facts.py`、`lint-imports`，以及 `unit/test_survivor_facts_core.py`。
 - [ ] **Step 5:** 提交（显式列路径）：`feat(V2-P7-016): ST three-state, listing age and the fact row, as pure functions`。
 
 ### Task A2：面板读取——每只上市证券一行事实，含停牌无日线者；覆盖率守卫；前视守卫
@@ -103,7 +103,7 @@
 **Issue:** `V2-P7-016`。**依据:** T3 §7、T6/T7 §0（窄读、整年读的代价）、P7 文档 §9"计划 2 的前置条件"(1)(3)。
 
 **Files:**
-- Modify: `src/openalpha_cn/survivor_facts.py`
+- Modify: `src/openalpha_cn/strategy_survivor_facts.py`
 - Create: `unit/test_survivor_facts_panel.py`（面板夹具在测试时生成）
 
 **先读：** T3 §1–§3、§7；T6-T7 §3（窄读 0.13 s 对整年读 25 s）；`src/openalpha_cn/panel_ingest.py` 的 `load_name_histories`（约 1584）、`load_stock_universe`（约 1113）、`load_trading_calendar`（约 940）、`load_daily_bars`（约 3358）、`load_price_limits`（约 3792）、`load_suspensions`（约 3635）；`src/openalpha_cn/panel_factors.py::load_processed_factor_observations`（约 9541）及其窄读的做法（T6/T7 说"窄读同样的值只要 0.13 s"——**找到那条窄读路径并复用，不要再写一条**）；`src/openalpha_cn/strategy_view.py` 里怎么按信号日取因子值与方向（`_PanelDays`、`lower_is_better` 之类）；仓库里已有的合成面板测试夹具（`git grep` 找）。
@@ -197,9 +197,9 @@
 
 **Issue:** `V2-P7-009`。**依据:** T5 §0、§2（复权）、§7.1（不许第四处 bar 组装）。
 
-**Files:** Create `src/openalpha_cn/survivor_market.py`、`unit/test_survivor_market.py`。
+**Files:** Create `src/openalpha_cn/strategy_survivor_market.py`、`unit/test_strategy_survivor_market.py`。
 
-**先读：** `shortlist_view._bars_on`（约 1730–1830 行，一个会话的 `MarketBar` 与交易所公布的涨跌停价；`_risk_warned_on` 的拒绝语义）、`factor_view._PanelInputs.market_bar`、`strategy_view._PanelDays.quote`——**这是已有的第三处 bar 组装，T5 不许有第四处**：本任务把其中一处提成共享的公共函数并让原调用方改用它（P6 的行为与测试期望逐位不变），或者直接调用已有的公共入口；做哪一种先在报告里写明理由。`domain/adjustment.py`（`ADJ_FACTOR_DATASET`、读取函数）、`domain/index_prices.py`、`survivor_facts.py` 里的 `A2` 读取方式（`_read`/`PanelStorageError` 的处理、`as_of` 前视守卫）。
+**先读：** `shortlist_view._bars_on`（约 1730–1830 行，一个会话的 `MarketBar` 与交易所公布的涨跌停价；`_risk_warned_on` 的拒绝语义）、`factor_view._PanelInputs.market_bar`、`strategy_view._PanelDays.quote`——**这是已有的第三处 bar 组装，T5 不许有第四处**：本任务把其中一处提成共享的公共函数并让原调用方改用它（P6 的行为与测试期望逐位不变），或者直接调用已有的公共入口；做哪一种先在报告里写明理由。`domain/adjustment.py`（`ADJ_FACTOR_DATASET`、读取函数）、`domain/index_prices.py`、`strategy_survivor_facts.py` 里的 `A2` 读取方式（`_read`/`PanelStorageError` 的处理、`as_of` 前视守卫）。
 
 **Interfaces（拟，实现者核对）：**
 - `SessionOrdinals(calendar: TradingCalendar, epoch: date)`：`index_of(day: date) -> int`（`day` 必须是开市日且不早于 `epoch`，否则按名拒绝）、`day_of(index: int) -> date`；`epoch` 不是开市日按名拒绝。

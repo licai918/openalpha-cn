@@ -71,7 +71,7 @@ from panel_fixtures import _close_time as close_time
 from panel_fixtures import _midnight_shanghai as midnight_shanghai
 from panel_fixtures import _published_time as published_time
 
-from openalpha_cn import survivor_facts
+from openalpha_cn import strategy_survivor_facts
 from openalpha_cn.backtest.factor_ic import TIER_ADMITTED_CODES
 from openalpha_cn.domain.daily_prices import (
     DAILY_BASIC_DATASET,
@@ -123,7 +123,7 @@ from openalpha_cn.panel_ingest import (
     write_panel_batch,
     write_stock_universe,
 )
-from openalpha_cn.survivor_facts import (
+from openalpha_cn.strategy_survivor_facts import (
     FactsCoverageError,
     FactsDay,
     FactsNotes,
@@ -1263,7 +1263,7 @@ def factor_stand_in(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, datetime
         asked.append((definition.qualified_key, at))
         return (SimpleNamespace(subject="000000.SZ", value=None, coverage="not_in_universe"),)
 
-    monkeypatch.setattr(survivor_facts, "load_processed_factor_observations", stand_in)
+    monkeypatch.setattr(strategy_survivor_facts, "load_processed_factor_observations", stand_in)
     return asked
 
 

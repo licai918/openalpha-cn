@@ -1,7 +1,8 @@
 """`scripts/daily_selection.py`, the survivor form's panel step (`V2-P7-016`).
 
 What the survivor book's day fetches, how far behind a stored panel it catches up in one run,
-and whether what it fetched is what `survivor_facts.build_facts_day` reads -- New Year included.
+and whether what it fetched is what `strategy_survivor_facts.build_facts_day` reads -- New Year
+included.
 
 The survivor form is dispatched by the registration's `kind` in `V2-P7-008`, so `main` cannot
 reach it yet. These tests drive the seam that dispatcher calls -- `targets_for_survivor`,
@@ -29,7 +30,7 @@ from typing import Any, Final
 import pytest
 from daily_market import SECURITIES, Market, compact, response, weekdays
 
-from openalpha_cn import cli, survivor_facts
+from openalpha_cn import cli, strategy_survivor_facts
 from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
 from openalpha_cn.domain.daily_prices import DAILY_BASIC_DATASET, DAILY_DATASET
 from openalpha_cn.domain.index_prices import INDEX_DAILY_DATASET
@@ -91,7 +92,7 @@ READ_BY_BUILD_FACTS_DAY: Final[frozenset[str]] = frozenset(
         DAILY_DATASET,
     }
 )
-"""The panel datasets `survivor_facts._read_facts_day` reads besides the factor tiers: the
+"""The panel datasets `strategy_survivor_facts._read_facts_day` reads besides the factor tiers: the
 calendar, the registry, the name corpus, the halts, the session's bands and the bars it walks
 back through. The factor tiers are step 4's, built from the datasets each factor declares.
 
@@ -572,10 +573,10 @@ def _facts(
         asked.append((tuple(years), at))
         return (SimpleNamespace(subject="000000.SZ", value=None, coverage="not_in_universe"),)
 
-    monkeypatch.setattr(survivor_facts, "load_processed_factor_observations", no_build)
+    monkeypatch.setattr(strategy_survivor_facts, "load_processed_factor_observations", no_build)
     config = SurvivorBookConfig(seed=0, min_listing_sessions=0)
     try:
-        facts = survivor_facts.build_facts_day(
+        facts = strategy_survivor_facts.build_facts_day(
             store=recording,
             session=day,
             as_of=_evening(day),
@@ -637,7 +638,7 @@ def test_across_new_year_the_survivor_day_serves_every_read_of_build_facts_day(
     assert read_in_december == read_in_january == READ_BY_BUILD_FACTS_DAY
     # The registry is the one dataset that needs no 2027 partition: a lifecycle year exists only
     # once a listing or delisting falls in it, and `build_facts_day` reads the newest stored one
-    # (`survivor_facts._registry_year`); this fixture happens to plant a 4 January delisting.
+    # (`strategy_survivor_facts._registry_year`); this fixture plants a 4 January delisting.
     for dataset in read_in_january - {STOCK_BASIC_DATASET}:
         assert 2027 in store.panel.registered_years(dataset), dataset
     assert _years_asked(store, NAMECHANGE_DATASET) == ["2027", "2026"]

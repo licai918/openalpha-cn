@@ -558,6 +558,24 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_view.without_store_path",
         }
     ),
+    "openalpha_cn.strategy_survivor_facts": frozenset(
+        {
+            # V2-P7-016. The survivor book's eligibility facts: one row per listed security,
+            # read from the panel through the loaders the plane already owns -- the registry,
+            # the name corpus, the calendar, the day's bars, the published bands and the halt
+            # corpus -- and the stored processed factor tier at the signal day's 16:30 build.
+            # It restates none of them: the 16:30 rule is `session_publication_instant`'s.
+            "panel_factors.FACTOR_DEFINITIONS",
+            "panel_factors.load_processed_factor_observations",
+            "panel_ingest.load_daily_bars",
+            "panel_ingest.load_name_histories",
+            "panel_ingest.load_price_limits",
+            "panel_ingest.load_stock_universe",
+            "panel_ingest.load_suspensions",
+            "panel_ingest.load_trading_calendar",
+            "panel_ingest.session_publication_instant",
+        }
+    ),
     "openalpha_cn.strategy_view": frozenset(
         {
             "factor_view.FactorRequestError",
@@ -828,6 +846,32 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
                 "fina_indicator",
                 "income",
                 "index_daily",
+                "stk_limit",
+                "stock_basic",
+                "suspend_d",
+                "trade_cal",
+            }
+        ),
+    ),
+    "openalpha_cn.strategy_survivor_facts": DatasetReach(
+        # V2-P7-016. It names the four datasets whose partitions it asks the catalog about
+        # before reading -- `stock_basic` (the registry's newest stored lifecycle year, which
+        # may be older than the session's year), `namechange` (the name corpus, contiguous from
+        # its first stored year), `trade_cal` (how far back a listing age may be counted) and
+        # `daily` (where the held look-back starts). Everything else arrives through the loaders
+        # it takes across the seam: the bands (`stk_limit`), the halt corpus (`suspend_d`) and,
+        # through the stored processed factor tier, the inputs the four factors are built from.
+        named=frozenset({"daily", "namechange", "stock_basic", "trade_cal"}),
+        reached=frozenset(
+            {
+                "balancesheet",
+                "cashflow",
+                "daily",
+                "daily_basic",
+                "fina_indicator",
+                "income",
+                "index_daily",
+                "namechange",
                 "stk_limit",
                 "stock_basic",
                 "suspend_d",

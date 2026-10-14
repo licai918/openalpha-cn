@@ -279,8 +279,8 @@ reads -- the whole current year kept fresh for other readers of the same store."
 
 SURVIVOR_EXTRA_TARGETS: Final[tuple[str, ...]] = (NAMECHANGE_DATASET,)
 """What the survivor form's day fetches beyond the P6 rule (`targets_for_survivor`, `V2-P7-016`):
-the name corpus, which `survivor_facts.build_facts_day` reads for every listed security's ST
-status and which no P6 factor reads (T3 section 7 item 7; T6-T7 2.1)."""
+the name corpus, which `strategy_survivor_facts.build_facts_day` reads for every listed
+security's ST status and which no P6 factor reads (T3 section 7 item 7; T6-T7 2.1)."""
 
 INDUSTRY_MEMBERSHIP_TARGET: Final[str] = "index_member_all"
 INDUSTRY_TARGETS: Final[tuple[str, ...]] = ("index_classify", INDUSTRY_MEMBERSHIP_TARGET)
@@ -334,8 +334,8 @@ So the worst case passes 100: the bound holds the part that grows with missed se
 nothing else. When the session's year holds nothing yet, the count is one more than the sessions
 fetched beyond two (`panel_sessions_to_catch_up`), so there the bound errs by one on the safe
 side. Three different bounds, kept apart: `MAX_CATCH_UP_SESSIONS` is the factor tiers' catch-up
-(step 4), and `survivor_facts`' `max_carry_sessions` is how far back a halted security's last
-bar is looked for."""
+(step 4), and `strategy_survivor_facts`' `max_carry_sessions` is how far back a halted
+security's last bar is looked for."""
 PANEL_CATCH_UP_KEY: Final[str] = "max_panel_catch_up_sessions"
 ADAPTER_BLOCK: Final[str] = "adapter"
 """The survivor registration's block of adapter parameters; `V2-P7-006` writes it."""
