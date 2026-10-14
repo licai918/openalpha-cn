@@ -1552,9 +1552,14 @@ def test_another_transform_is_a_caller_error_not_a_change(
         recompute(evening_store, record, transform=SECOND_TRANSFORM, provenance=provenance)
     with pytest.raises(SurvivorCheckArgumentError, match="held"):
         recompute(evening_store, record, held=(HALTED,), provenance=provenance)
-    other = provenance_of(evening_store, the_evening(evening_store, held=(HALTED,)))
+    # A provenance taken with other holdings still names this batch (holdings never move it), so
+    # another record's provenance is one naming another batch.
+    another_records = dataclasses.replace(provenance, batch_digest="0" * 64)
     with pytest.raises(SurvivorCheckArgumentError, match="batch"):
-        recompute(evening_store, record, held=(HALTED,), provenance=other)
+        recompute(evening_store, record, provenance=another_records)
+    another_registrations = dataclasses.replace(provenance, registration_sha256="0" * 64)
+    with pytest.raises(SurvivorCheckArgumentError, match="registration"):
+        recompute(evening_store, record, provenance=another_registrations)
     with pytest.raises(SurvivorCheckArgumentError, match="scope"):
         survivor_provenance_changes(
             evening_store,
