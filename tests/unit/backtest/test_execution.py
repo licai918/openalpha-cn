@@ -4,6 +4,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Final
 
+import pytest
+
 from openalpha_cn.backtest.execution import (
     AShareExecutionPolicy,
     ExecutionRequest,
@@ -176,6 +178,34 @@ def test_a_stored_bar_and_its_published_band_make_one_market_bar_at_their_exact_
     unlimited = stored_market_bar(stored, sentinel, suspended=False, is_st=False)
     assert (unlimited.up_limit, unlimited.down_limit) == (Decimal("99999.999"), Decimal("0.01"))
     assert (unlimited.suspended, unlimited.is_st) == (False, False)
+
+
+def test_a_band_published_for_another_security_or_session_is_refused_by_name() -> None:
+    """Pairing a bar with a band is the caller's lookup, and a wrong key would price one
+    security's bar against another's limits -- a verdict about the wrong security."""
+    stored = DailyBar(
+        ts_code="600000.SH",
+        trade_date=date(2026, 1, 7),
+        open=10.0,
+        high=10.0,
+        low=10.0,
+        close=10.0,
+        pre_close=10.0,
+        pct_chg=0.0,
+        vol=100.0,
+        amount=1000.0,
+    )
+    other_code = PriceLimit(
+        ts_code="600519.SH", trade_date=date(2026, 1, 7), up_limit=11.0, down_limit=9.0
+    )
+    other_day = PriceLimit(
+        ts_code="600000.SH", trade_date=date(2026, 1, 6), up_limit=11.0, down_limit=9.0
+    )
+
+    with pytest.raises(ValueError, match=r"600519\.SH on 2026-01-07 .* 600000\.SH on 2026-01-07"):
+        stored_market_bar(stored, other_code, suspended=False, is_st=False)
+    with pytest.raises(ValueError, match=r"600000\.SH on 2026-01-06 .* 600000\.SH on 2026-01-07"):
+        stored_market_bar(stored, other_day, suspended=False, is_st=False)
 
 
 def test_an_order_at_the_open_meets_a_suspended_bar_on_any_halt_row_but_a_resumption() -> None:

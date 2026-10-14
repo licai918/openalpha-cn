@@ -493,13 +493,21 @@ def stored_market_bar(
       published band for a security builds no bar for it, which is each face's rule and stays
       the caller's;
     - the board comes from the code (`security_board`), because it decides the lot rule;
-    - subject and session are the stored bar's own.
+    - subject and session are the stored bar's own, and the band must be published for the same
+      security on the same session -- one for another code or day is refused by name
+      (`ValueError`) rather than judged as this bar's limits.
 
     What differs between the books stays with the caller and is passed in: `suspended` (a book
     that fills at the close collapses the halt corpus with `suspended_at_the_close`, one that
     fills at the open with `suspended_at_the_open`) and `is_st` (read off the name corpus, or
     `False` where a published band means the policy never reads it).
     """
+    if (limit.ts_code, limit.trade_date) != (bar.ts_code, bar.trade_date):
+        raise ValueError(
+            f"the band published for {limit.ts_code} on {limit.trade_date.isoformat()} is not "
+            f"the band of {bar.ts_code} on {bar.trade_date.isoformat()}; a bar judged against "
+            "another security's or another session's limits is a verdict about the wrong one"
+        )
     return MarketBar(
         subject=bar.ts_code,
         trade_date=bar.trade_date,
