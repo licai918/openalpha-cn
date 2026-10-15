@@ -166,6 +166,8 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import os
+import tempfile
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -699,24 +701,74 @@ def write_survivor_provenance(runtime_dir: Path, provenance: SurvivorInputProven
     """File a survivor record's provenance before the record, under its own digest.
 
     Written once and never rewritten: a file already there is left as it is when it says the
-    same, and refused when it says something else (or is not UTF-8 text at all)."""
+    same, and refused when it says something else (or is not UTF-8 text at all) -- including one
+    another run filed between this one's look and its write.
+
+    The file reaches its name whole or not at all (seams review 2): one torn or empty file under a
+    provenance's name refuses the whole provenance index, and so every forward report after it,
+    and every rerun of the evening's step 7. So the bytes go to a temporary file of this call's
+    own beside it (`mkstemp`, never a name another writer could open too), are flushed and synced,
+    and take the provenance's name by a hard link, which fails rather than replaces when the name
+    is taken; the directory is synced after the link (not on Windows, which cannot open a
+    directory to sync it), and the temporary file is removed either way -- `FileSurvivorVerdicts`'
+    and the paper book's marker's rule. A directory this account cannot write, or a filesystem
+    without hard links (FAT, exFAT, many network shares), is refused by name."""
     path = runtime_dir / SURVIVOR_PROVENANCE_DIRECTORY / f"{provenance.digest}.json"
     text = json.dumps(provenance.document(), sort_keys=True, indent=2, ensure_ascii=False) + "\n"
-    if path.is_file():
-        try:
-            held = path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            held = None
-        if held != text:
-            raise SurvivorRegistrationError(
-                f"{path} is held and says something else; a provenance is written once"
-            )
+    if not path.is_file() and _link_once(path, text):
         return path
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f"{path.name}.partial")
-    temporary.write_text(text, encoding="utf-8")
-    temporary.replace(path)
+    try:
+        held = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        held = None
+    if held != text:
+        raise SurvivorRegistrationError(
+            f"{path} is held and says something else; a provenance is written once"
+        )
     return path
+
+
+def _link_once(path: Path, text: str) -> bool:
+    """`text` at `path` by a link of a synced file of this call's own: `True` when this call wrote
+    it, `False` when the name was taken by then (`write_survivor_provenance`)."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, name = tempfile.mkstemp(
+            dir=path.parent, prefix=f"{path.name}.", suffix=".partial"
+        )
+    except OSError as error:
+        raise _unwritable(path, error) from error
+    partial = Path(name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(partial, path)
+        except FileExistsError:
+            return False
+        if os.name != "nt":
+            synced = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(synced)
+            finally:
+                os.close(synced)
+        return True
+    except OSError as error:
+        raise _unwritable(path, error) from error
+    finally:
+        partial.unlink(missing_ok=True)
+
+
+def _unwritable(path: Path, error: OSError) -> SurvivorRegistrationError:
+    return SurvivorRegistrationError(
+        f"the provenance {path} cannot be written ({error.strerror or error}; errno "
+        f"{error.errno}): the runtime directory must be writable by this account, on a local "
+        "filesystem that supports hard links -- not FAT or exFAT, and not a network share -- "
+        "because a provenance is linked into place so that it is whole or absent; no record was "
+        "filed"
+    )
 
 
 def read_survivor_provenance(path: Path, *, registration_sha256: str) -> SurvivorInputProvenance:

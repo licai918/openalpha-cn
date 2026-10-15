@@ -1261,6 +1261,199 @@ def test_the_provenance_is_written_once_under_its_digest(
         write_survivor_provenance(tmp_path, provenance)
 
 
+def _recording_the_disk(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, ...]]:
+    """Every `os.fsync` (of a file or a directory), `os.link` and `os.replace` from now on, in
+    order, each still done."""
+    import stat
+
+    events: list[tuple[str, ...]] = []
+    real_fsync, real_link, real_replace = os.fsync, os.link, os.replace
+
+    def fsync(descriptor: int) -> None:
+        kind = "directory" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file"
+        events.append(("fsync", kind))
+        real_fsync(descriptor)
+
+    def link(source: object, target: object) -> None:
+        events.append(("link", Path(str(target)).name))
+        real_link(source, target)  # type: ignore[arg-type]
+
+    def replace(source: object, target: object) -> None:
+        events.append(("replace", Path(str(target)).name))
+        real_replace(source, target)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "link", link)
+    monkeypatch.setattr(os, "replace", replace)
+    return events
+
+
+def test_a_provenance_is_synced_before_it_takes_its_name_and_the_directory_after(
+    evening_store: PanelStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Seams review 2. A power cut in the dirty-page window after the evening's step 7 must not
+    leave an empty or torn file under the provenance's own name: the index refuses the whole
+    forward report for one file it cannot read, and every rerun of step 7 refuses it too. So the
+    bytes are synced under a temporary name of this writer's own, take the provenance's name in
+    one step -- a hard link, which fails rather than replaces -- and the directory is synced after
+    (not on Windows, which cannot open a directory to sync it); nothing else is left beside it."""
+    provenance = provenance_of(evening_store, the_evening(evening_store))
+    name = f"{provenance.digest}.json"
+    events = _recording_the_disk(monkeypatch)
+
+    path = write_survivor_provenance(tmp_path, provenance)
+
+    expected: list[tuple[str, ...]] = [("fsync", "file"), ("link", name)]
+    if os.name != "nt":
+        expected.append(("fsync", "directory"))
+    assert events == expected
+    assert path.name == name
+    assert sorted(item.name for item in path.parent.iterdir()) == [name]
+    assert SurvivorInputProvenance.from_document(json.loads(path.read_bytes())) == provenance
+
+
+@pytest.mark.parametrize("theirs", ["the same provenance", "something else"])
+def test_a_provenance_another_run_filed_meanwhile_is_kept_and_compared_never_replaced(
+    evening_store: PanelStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, theirs: str
+) -> None:
+    """Two runs of one evening file the same provenance at once: the one that finds the name taken
+    after it looked loses its link, and the file there stands as it was written -- the same bytes
+    are this provenance, filed once; any other bytes are refused by name, and left as they are."""
+    provenance = provenance_of(evening_store, the_evening(evening_store))
+    text = json.dumps(provenance.document(), sort_keys=True, indent=2, ensure_ascii=False) + "\n"
+    held = (text if theirs == "the same provenance" else text.replace("held", "hold")).encode()
+    real_link = os.link
+
+    def meanwhile(source: object, target: object) -> None:
+        # The other run's file lands after this one looked and before it linked.
+        Path(str(target)).write_bytes(held)
+        real_link(source, target)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "link", meanwhile)
+    path = tmp_path / SURVIVOR_PROVENANCE_DIRECTORY / f"{provenance.digest}.json"
+
+    if theirs == "the same provenance":
+        assert write_survivor_provenance(tmp_path, provenance) == path
+    else:
+        with pytest.raises(SurvivorRegistrationError, match="says something else"):
+            write_survivor_provenance(tmp_path, provenance)
+
+    assert path.read_bytes() == held
+    assert sorted(item.name for item in path.parent.iterdir()) == [path.name]
+
+
+def test_a_provenance_that_cannot_be_linked_into_place_is_refused_by_name_leaving_nothing(
+    evening_store: PanelStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A filesystem with no hard links (FAT, exFAT, many network shares) or a directory this
+    account cannot write: the provenance is refused by name -- the daily command's step 7 refusal
+    -- and neither a file under its name nor a temporary one is left."""
+    provenance = provenance_of(evening_store, the_evening(evening_store))
+
+    def no_links(source: object, target: object) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(os, "link", no_links)
+
+    with pytest.raises(SurvivorRegistrationError, match="hard links"):
+        write_survivor_provenance(tmp_path, provenance)
+
+    assert list((tmp_path / SURVIVOR_PROVENANCE_DIRECTORY).iterdir()) == []
+
+
+SURVIVOR_PROVENANCE_DOCUMENT_KEYS: Final[tuple[str, ...]] = (
+    "amount_window_from",
+    "batch_digest",
+    "builds",
+    "config_id",
+    "facts_digest",
+    "held",
+    "inputs",
+    "lookback",
+    "recorded_at",
+    "registration_sha256",
+    "schema",
+    "session",
+    "transform_id",
+    "transform_key",
+)
+SURVIVOR_PROVENANCE_SHAPE: Final[dict[str, object]] = {
+    "amount_window_from": "str",
+    "batch_digest": "str",
+    "builds": [["str", "str", "str"]],
+    "config_id": "str",
+    "facts_digest": "str",
+    "held": ["str"],
+    "inputs": [["str", "int", "str", "str"]],
+    "lookback": [["str", "int", "str"]],
+    "recorded_at": "str",
+    "registration_sha256": "str",
+    "schema": "str",
+    "session": "str",
+    "transform_id": "str",
+    "transform_key": "str",
+}
+"""`_provenance_shape` of a provenance's document with one row of each list: each key's JSON
+type, and the arity and element types of its rows (`builds`, `inputs`, `lookback`, `held`)."""
+
+
+def _provenance_shape(document: object) -> object:
+    """`document` with every value replaced by its JSON type name, a row by its element types."""
+    if isinstance(document, dict):
+        return {key: _provenance_shape(value) for key, value in sorted(document.items())}
+    if isinstance(document, list):
+        return [_provenance_shape(item) for item in document]
+    return type(document).__name__
+
+
+def test_the_stored_shape_of_a_provenance_is_pinned_so_a_change_needs_a_migration() -> None:
+    """Seams review 7. A provenance is read back only in its exact shape (`from_document`:
+    exactly `_DOCUMENT_KEYS`, every value of its exact JSON type), and one file the provenance
+    index cannot read refuses the whole forward report. So one key added under `/v1` after real
+    days exist -- even with a default -- makes every provenance already filed unreadable, and
+    every report after it refused. The key set and the shape are pinned here, so such a change
+    goes red in CI with what it means rather than on a disk of real records."""
+    provenance = SurvivorInputProvenance(
+        registration_sha256="9f" * 32,
+        config_id="rcf_5b1d0c9e8a7f6e5d4c3b2a19",
+        session=date(2026, 4, 10),
+        batch_digest="ab" * 32,
+        recorded_at=datetime(2026, 4, 10, 18, 35, tzinfo=SHANGHAI),
+        held=("600010.SH",),
+        facts_digest="cd" * 32,
+        transform_key="processed/v1",
+        transform_id="ftr_0123456789abcdef01234567",
+        amount_window_from=date(2026, 3, 16),
+        builds=(("reversal_1d/v1", "ftm_0123456789abcdef01234567", "ef" * 32),),
+        inputs=(
+            registration_module.SurvivorInputPartition(
+                dataset="daily", year=2026, content_hash="01" * 32, dates_digest="23" * 32
+            ),
+        ),
+        lookback=(
+            registration_module.SurvivorLookbackPartition(
+                dataset="daily", year=2025, content_hash="45" * 32
+            ),
+        ),
+    )
+    document = provenance.document()
+    shape = _provenance_shape(json.loads(json.dumps(document)))
+    migration = (
+        "a change here makes stored documents unreadable: a migration is needed -- every "
+        f"{SURVIVOR_PROVENANCE_SCHEMA} file already filed would stop reading, and the provenance "
+        "index refuses the whole forward report for one file it cannot read -- so ship a new "
+        "schema version and an upgrade of the v1 files, not a new pin here"
+    )
+
+    assert SURVIVOR_PROVENANCE_SCHEMA == "daily-survivor-input-provenance/v1", migration
+    assert tuple(sorted(registration_module._DOCUMENT_KEYS)) == (
+        SURVIVOR_PROVENANCE_DOCUMENT_KEYS
+    ), migration
+    assert tuple(sorted(document)) == SURVIVOR_PROVENANCE_DOCUMENT_KEYS, migration
+    assert shape == SURVIVOR_PROVENANCE_SHAPE, f"the shape is now {shape}: {migration}"
+    assert SurvivorInputProvenance.from_document(json.loads(json.dumps(document))) == provenance
+
+
 def test_a_provenance_file_is_read_back_only_when_it_is_what_its_name_says_and_this_registrations(
     evening_store: PanelStore, tmp_path: Path
 ) -> None:
