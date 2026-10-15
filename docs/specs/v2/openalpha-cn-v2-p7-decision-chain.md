@@ -3,7 +3,7 @@
 Status: Active — 2026-10-08 立项
 Baseline: `main` @ `1d7b4a3`（P6 已合并，PR #2）
 Step 0 详细设计: `docs/superpowers/specs/2026-10-13-p7-step0-survivor-book-design.md`（2026-10-13）
-当前状态（2026-10-15）: Step 0 代码完成，在集成分支 `feat/v2-p7-step0-adapters` @ `b199398`（含 2026-10-15 的最终修复波；运行手册已按它同步），尚未并入 main；`V2-P7-009`、`018` 各有未满足的验收项（路线图 §P7）；协议与预登记 `V2-P7-006` 之前按 §9 记录的顺序还有 `V2-P7-004`、`002`、`003`；`V2-P7-006` 停下等用户明确确认；每日登记继续暂停（§9 最后两行）
+当前状态（2026-10-15）: Step 0 代码完成，已于 2026-10-15 本地快进并入 `main`（`a292c4d`，含最终修复波与第三次全量闸门；运行手册已按它同步；尚未推送，集成分支已删）；`V2-P7-009`、`018` 各有未满足的验收项（路线图 §P7）；协议与预登记 `V2-P7-006` 之前按 §9 记录的顺序还有 `V2-P7-004`、`002`、`003`；`V2-P7-006` 停下等用户明确确认；每日登记继续暂停（§9 最后两行）
 配套: `openalpha-cn-v2-roadmap.md` §P7（issue 清单）· `docs/architecture/ADR-0005-single-decision-engine.md`（方向决定）· `docs/research/p6-results.md`（P6 结论）· `docs/research/p6-protocol.md`（P6 协议，P7 的预登记沿用它的纪律）
 Issue ID: `V2-P7-<序号>`
 

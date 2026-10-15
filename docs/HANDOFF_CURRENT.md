@@ -21,7 +21,7 @@ issue 清单（`V2-P7-001` …）在路线图 §P7。顺序（2026-10-13 起）�
 [`superpowers/specs/2026-10-13-p7-step0-survivor-book-design.md`](superpowers/specs/2026-10-13-p7-step0-survivor-book-design.md)
 （资金约 35 万元、持股 ≤ 10 只；用 sub-agent 驱动开发 + 测试先行执行，设计与实施计划都先经用户审阅）。
 
-**Step 0 的代码已完成（2026-10-14；2026-10-15 的最终修复波之后在集成分支 `feat/v2-p7-step0-adapters` 的 `b199398` 上），尚未并入 main**
+**Step 0 的代码已完成（2026-10-14；2026-10-15 的最终修复波与第三次全量闸门之后，已于 2026-10-15 本地快进并入 `main`，`a292c4d`，尚未推送；集成分支已删）**
 （本地 main 停在 `d9722d6`，含领域内核与适配器、纸面成交的主体，未推送）：领域内核 `domain/survivor_*.py`、
 面板 → 资格事实适配器 `strategy_survivor_facts.py`、纸面账本（`backtest/paper_step.py`、`paper_state.py`、
 `paper_settlement.py`、`paper_evening.py`：开盘成交、每日快照、结算、退市核销、干跑再提交的一晚与补结算）、
