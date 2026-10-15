@@ -1677,6 +1677,7 @@ def test_a_paper_book_bound_to_another_registration_is_refused_at_the_paper_head
         config_id="another registration",
         config_digest=survivor.digest,
         epoch_session=EPOCH,
+        registration_sha256=_registration_sha256(world),
     )
 
     code, _out, err = _run(world, capsys)
@@ -1717,6 +1718,11 @@ def test_a_held_paper_book_without_its_marker_is_refused_at_the_paper_head(
     assert not (world.runtime / "paper" / "registration.json").exists()
 
 
+def _registration_sha256(world: tds.World) -> str:
+    """The sha256 of the world's registration file, as the day admits it and the marker binds it."""
+    return hashlib.sha256(world.registration.read_bytes()).hexdigest()
+
+
 def _open_book(world: tds.World, *, config_id: str) -> None:
     """A paper book opened on the epoch and bound to `config_id`, as a run of that registration
     opens one."""
@@ -1731,6 +1737,7 @@ def _open_book(world: tds.World, *, config_id: str) -> None:
             session=EPOCH,
             paper_directory=world.runtime / "paper",
             config_id=config_id,
+            registration_sha256=_registration_sha256(world),
             lock=lock,
         )
 

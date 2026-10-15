@@ -18,12 +18,16 @@ to settle in which order, what to read off the panel for each, and every refusal
    epoch more than `1 + max_panel_catch_up_sessions` sessions before the session is refused
    first (the memo's decision 3: the panel step could not have caught those sessions up), then
    the paper directory's write-once marker `registration.json` is written -- or found equal --
-   binding the book to the registration's `config_id`, the book's `survivor_config_digest` and
-   the epoch, then `open_book` saves the opening. When the store holds a book the marker must be
-   there and be equal -- one that is missing or differs is refused by name and nothing is
-   written, because the marker is what tells this book's registration from another's (the
-   digest alone is the book block's; the `config_id` covers the adapter block too, so a changed
-   adapter over an unchanged book, which `open_book` accepts, is refused here) -- and then
+   binding the book to the registration's `config_id`, the book's `survivor_config_digest`, the
+   epoch and the registration file's `registration_sha256`, then `open_book` saves the opening.
+   When the store holds a book the marker must be there and be equal -- one that is missing or
+   differs is refused by name and nothing is written, because the marker is what tells this
+   book's registration from another's (the digest alone is the book block's; the `config_id`
+   covers the adapter block too, so a changed adapter over an unchanged book, which `open_book`
+   accepts, is refused here; and the sha256 covers the rest of the registration -- its
+   `code_commit` and its `settings` -- so the same configuration registered again, after a code
+   fix under a bound path or with a changed `settings`, is another book, with a runtime
+   directory and an epoch of its own: whole-branch seams review, finding 1) -- and then
    `open_book` is called again with the registration's epoch, capital and digest (C3 review
    rule 2): the same opening writes nothing, and is the nightly check that the book held is the
    one registered. The head is the newest snapshot, `held` its position codes, which the caller
@@ -379,10 +383,16 @@ def delisted_or_refuse(facts: FactsDay, *, step: str = "paper book") -> frozense
 
 
 def bind_paper_book(
-    directory: Path, *, config_id: str, config_digest: str, epoch_session: date
+    directory: Path,
+    *,
+    config_id: str,
+    config_digest: str,
+    epoch_session: date,
+    registration_sha256: str,
 ) -> None:
     """Write the paper book's marker `<directory>/registration.json` -- the registration's
-    `config_id`, the book's `survivor_config_digest` and the epoch -- or find it equal.
+    `config_id`, the book's `survivor_config_digest`, the epoch and the registration file's
+    `registration_sha256` -- or find it equal.
 
     `paper_head` calls it when it opens a book, after the epoch check and before `open_book`;
     the daily command does not call it. The same binding again writes nothing; another one, or a
@@ -395,7 +405,14 @@ def bind_paper_book(
     """
     if not config_id:
         raise ValueError("config_id names the registration and cannot be empty")
-    binding = _binding(config_id=config_id, config_digest=config_digest, epoch=epoch_session)
+    if not registration_sha256:
+        raise ValueError("registration_sha256 names the registration file and cannot be empty")
+    binding = _binding(
+        config_id=config_id,
+        config_digest=config_digest,
+        epoch=epoch_session,
+        registration_sha256=registration_sha256,
+    )
     marker = directory / PAPER_BOOK_MARKER
     text = json.dumps(binding, indent=2, sort_keys=True) + "\n"
     if not marker.exists() and _link_once(marker, text):
@@ -403,12 +420,15 @@ def bind_paper_book(
     _refuse_another_binding(marker, binding)
 
 
-def _binding(*, config_id: str, config_digest: str, epoch: date) -> dict[str, str]:
+def _binding(
+    *, config_id: str, config_digest: str, epoch: date, registration_sha256: str
+) -> dict[str, str]:
     return {
         "schema_version": PAPER_BINDING_SCHEMA,
         "config_id": config_id,
         "config_digest": config_digest,
         "epoch_session": epoch.isoformat(),
+        "registration_sha256": registration_sha256,
     }
 
 
@@ -466,23 +486,26 @@ def require_bound(
     paper_directory: Path,
     registration: SurvivorRegistration,
     config_id: str,
+    registration_sha256: str,
     lock: PaperBookLock,
 ) -> PaperBookSnapshot | None:
     """The paper book's head, read only once its binding to this registration is checked: what
     the daily command reads to pin the day's holdings, before any request (`V2-P7-008`).
 
     Reads and writes nothing else. A held book needs its marker present and equal to this
-    registration's binding (`config_id`, the book's digest, the epoch); a marker that exists and
-    differs is refused even when no book is held under it -- it is another registration's
-    paper directory either way; no book and no marker is a book `paper_head` has yet to open,
-    and `None` is returned. Every refusal is a `SurvivorDayError`, step `paper head`, with
-    nothing written: the same checks `paper_head` makes before it opens or writes anything, so
-    a day refused here would have been refused there, after its requests."""
+    registration's binding (`config_id`, the book's digest, the epoch, the registration file's
+    sha256); a marker that exists and differs is refused even when no book is held under it --
+    it is another registration's paper directory either way; no book and no marker is a book
+    `paper_head` has yet to open, and `None` is returned. Every refusal is a `SurvivorDayError`,
+    step `paper head`, with nothing written: the same checks `paper_head` makes before it opens
+    or writes anything, so a day refused here would have been refused there, after its
+    requests."""
     _require_lock(lock, "paper head", directory=paper_directory)
     binding = _binding(
         config_id=config_id,
         config_digest=registration.digest,
         epoch=registration.adapter.epoch_session,
+        registration_sha256=registration_sha256,
     )
     with _refusals("paper head", "the paper book's head, read to pin the day's holdings"):
         head = held_head(state_store)
@@ -525,6 +548,31 @@ def _refuse_another_binding(marker: Path, binding: dict[str, str]) -> None:
         for field in set(binding) | (set(held) if isinstance(held, dict) else set())
         if not isinstance(held, dict) or held.get(field) != binding.get(field)
     )
+    if isinstance(held, dict) and "registration_sha256" not in held:
+        raise SurvivorDayError(
+            "paper head",
+            f"the paper book's marker {marker} binds no `registration_sha256` ({held!r}): it is "
+            "of an earlier build, which bound a book to its configuration alone, and it does not "
+            "say which registration's book this is. A run never rewrites a marker, and no "
+            "marker of that build was ever written on a real disk: run this registration's book "
+            "in a runtime directory of its own, with an epoch of its own (the session before "
+            "its first scheduled run). Nothing was written",
+        )
+    if isinstance(held, dict) and held["registration_sha256"] != binding["registration_sha256"]:
+        others = [field for field in differing if field != "registration_sha256"]
+        raise SurvivorDayError(
+            "paper head",
+            f"this runtime directory's paper book is bound by {marker} to the registration "
+            f"{held['registration_sha256']}, and this run's registration is "
+            f"{binding['registration_sha256']}: they differ in their `registration_sha256`"
+            + (f" and in {others}" if others else ", the configuration being the same")
+            + ". A changed registration -- a code fix under a bound path, a changed `settings` "
+            "-- is another book, even where its configuration and its book block are unchanged: "
+            "run it in a runtime directory of its own, with an epoch of its own (the session "
+            "before its first scheduled run); the book here stays its own registration's. "
+            "Whether a fix may instead carry a book across registrations is V2-P7-006's to "
+            "decide, and nothing carries one today. Nothing was written",
+        )
     raise SurvivorDayError(
         "paper head",
         f"this runtime directory's paper book is bound by {marker} to {held!r}, and this run is "
@@ -581,14 +629,16 @@ def paper_head(
     session: date,
     paper_directory: Path,
     config_id: str,
+    registration_sha256: str,
     lock: PaperBookLock,
 ) -> PaperHead:
     """Bind and open the paper book -- on every run -- and return its head as `session`'s run
     finds it.
 
     `paper_directory` is the runtime directory's paper directory (its marker's and its lock's),
-    `config_id` the registration's (`grid.config_id` of the whole registered configuration), and
-    `lock` this run's token for that directory's writer lock. `ordinals` must count from the
+    `config_id` the registration's (`grid.config_id` of the whole registered configuration),
+    `registration_sha256` the registration file's, and `lock` this run's token for that
+    directory's writer lock. `ordinals` must count from the
     registration's epoch. A store with no book: the epoch bound, then the marker written or found
     equal, then `open_book`. A store holding a book: the marker must be there and equal, then
     `open_book` with the epoch, the book's capital and its digest -- the same opening writes
@@ -599,7 +649,12 @@ def paper_head(
     adapter = registration.adapter
     epoch = adapter.epoch_session
     _require_registered_epoch(ordinals, registration, step="paper head")
-    binding = _binding(config_id=config_id, config_digest=registration.digest, epoch=epoch)
+    binding = _binding(
+        config_id=config_id,
+        config_digest=registration.digest,
+        epoch=epoch,
+        registration_sha256=registration_sha256,
+    )
     with _refusals("paper head", f"the paper book's head for {session.isoformat()}"):
         index = ordinals.index_of(session)
         opening = held_head(state_store) is None
@@ -619,6 +674,7 @@ def paper_head(
             config_id=config_id,
             config_digest=registration.digest,
             epoch_session=epoch,
+            registration_sha256=registration_sha256,
         )
     else:
         _require_binding(paper_directory / PAPER_BOOK_MARKER, binding)

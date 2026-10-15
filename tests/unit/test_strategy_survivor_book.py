@@ -149,6 +149,11 @@ CALENDAR: Final[TradingCalendar] = build_panel(BOOK).calendar()
 ORDINALS: Final[SessionOrdinals] = SessionOrdinals(CALENDAR, EPOCH)
 CONFIG_ID: Final[str] = "rcf_5b1d0c9e8a7f6e5d4c3b2a19"
 """A registration's `config_id`, as the paper book's write-once marker records it."""
+REGISTRATION_SHA256: Final[str] = "5a" * 32
+"""The registration file's sha256, as the marker binds it (whole-branch seams review, finding 1)."""
+REREGISTERED_SHA256: Final[str] = "c3" * 32
+"""The same configuration registered again -- a code fix under a bound path, a changed `settings`:
+another registration file, another sha256, the same `config_id`."""
 
 
 def adapter(**changes: object) -> SurvivorAdapterConfig:
@@ -400,6 +405,7 @@ def head_of(
     ordinals: SessionOrdinals = ORDINALS,
     *,
     config_id: str = CONFIG_ID,
+    registration_sha256: str = REGISTRATION_SHA256,
 ) -> PaperHead:
     return paper_head(
         state_store=paper.store,
@@ -408,6 +414,7 @@ def head_of(
         session=SESSIONS[index],
         paper_directory=paper.root,
         config_id=config_id,
+        registration_sha256=registration_sha256,
         lock=paper.lock,
     )
 
@@ -679,9 +686,20 @@ def bind(directory: Path, **changes: object) -> None:
         "config_id": CONFIG_ID,
         "config_digest": REGISTRATION.digest,
         "epoch_session": EPOCH,
+        "registration_sha256": REGISTRATION_SHA256,
     }
     arguments.update(changes)
     bind_paper_book(directory, **arguments)
+
+
+BINDING: Final[dict[str, str]] = {
+    "schema_version": "survivor-paper-binding/v1",
+    "config_id": CONFIG_ID,
+    "config_digest": REGISTRATION.digest,
+    "epoch_session": EPOCH.isoformat(),
+    "registration_sha256": REGISTRATION_SHA256,
+}
+"""The marker `bind` writes."""
 
 
 def test_the_paper_book_is_bound_to_its_registration_once_and_the_same_binding_writes_nothing(
@@ -690,12 +708,7 @@ def test_the_paper_book_is_bound_to_its_registration_once_and_the_same_binding_w
     directory = tmp_path / "paper"
     bind(directory)
     marker = directory / PAPER_BOOK_MARKER
-    assert json.loads(marker.read_text(encoding="utf-8")) == {
-        "schema_version": "survivor-paper-binding/v1",
-        "config_id": CONFIG_ID,
-        "config_digest": REGISTRATION.digest,
-        "epoch_session": EPOCH.isoformat(),
-    }
+    assert json.loads(marker.read_text(encoding="utf-8")) == BINDING
     written, stat = marker.read_bytes(), marker.stat()
 
     bind(directory)
@@ -711,6 +724,7 @@ def test_the_paper_book_is_bound_to_its_registration_once_and_the_same_binding_w
         ("config_id", "rcf_0000000000000000000000ff"),
         ("config_digest", "ab" * 32),
         ("epoch_session", SESSIONS[59]),
+        ("registration_sha256", REREGISTERED_SHA256),
     ],
 )
 def test_another_registration_is_refused_by_the_marker_naming_what_differs(
@@ -782,12 +796,7 @@ def test_the_first_run_opens_the_book_on_the_registered_epoch_with_the_registere
     assert head.snapshot.last_settled_session is None
     assert (head.session_index, head.held, head.opened_only, head.settled) == (1, (), False, False)
     assert paper.store.sessions() == (EPOCH,)
-    assert json.loads((paper.root / PAPER_BOOK_MARKER).read_text(encoding="utf-8")) == {
-        "schema_version": "survivor-paper-binding/v1",
-        "config_id": CONFIG_ID,
-        "config_digest": REGISTRATION.digest,
-        "epoch_session": EPOCH.isoformat(),
-    }
+    assert json.loads((paper.root / PAPER_BOOK_MARKER).read_text(encoding="utf-8")) == BINDING
 
 
 def test_a_run_on_the_epoch_only_opens_the_book(paper: Paper) -> None:
@@ -894,14 +903,98 @@ def test_a_held_book_whose_marker_is_lost_is_refused_and_never_bound_again(
     assert files(paper) == before
 
 
-def _bound_head(paper: Paper, *, config_id: str = CONFIG_ID, lock: object = None) -> Any:
+def _bound_head(
+    paper: Paper,
+    *,
+    config_id: str = CONFIG_ID,
+    registration_sha256: str = REGISTRATION_SHA256,
+    lock: object = None,
+) -> Any:
     return strategy_survivor_book.require_bound(
         state_store=paper.store,
         paper_directory=paper.root,
         registration=REGISTRATION,
         config_id=config_id,
+        registration_sha256=registration_sha256,
         lock=paper.lock if lock is None else lock,
     )
+
+
+def test_the_same_configuration_registered_again_is_another_book_refused_naming_both(
+    panel: PanelStore, paper: Paper
+) -> None:
+    """Whole-branch seams review, finding 1: a re-registration of the same configuration -- a code
+    fix under a bound path, a changed `settings` -- keeps the `config_id`, the book's digest and
+    the epoch, and has another registration file. The marker binds that file's sha256, so the
+    book is refused to it by both callers -- `require_bound`, reading only, before the day's
+    first request, and `paper_head` -- naming the book's registration and this run's, and saying
+    that the new one is another book with a runtime directory and an epoch of its own."""
+    run_day(panel, paper, 61)
+    before = files(paper)
+
+    with pytest.raises(SurvivorDayError) as reading:
+        _bound_head(paper, registration_sha256=REREGISTERED_SHA256)
+    with pytest.raises(SurvivorDayError) as opening:
+        head_of(paper, 62, registration_sha256=REREGISTERED_SHA256)
+
+    for refused in (reading.value, opening.value):
+        message = str(refused)
+        assert refused.step == "paper head"
+        assert REGISTRATION_SHA256 in message and REREGISTERED_SHA256 in message
+        assert message.index(REGISTRATION_SHA256) < message.index(REREGISTERED_SHA256)
+        assert "another book" in message and "runtime directory of its own" in message
+        assert "epoch of its own" in message
+        assert "V2-P7-006" in message
+    assert files(paper) == before
+
+
+def test_a_marker_that_binds_no_registration_sha256_is_refused_clearly(
+    panel: PanelStore, paper: Paper
+) -> None:
+    """A marker in the shape an earlier build wrote -- `config_id`, digest and epoch, no
+    `registration_sha256` -- is not taken for this registration's: it is refused by name, before
+    and at the paper head, and left as it is. (None was ever written on a real disk.)"""
+    run_day(panel, paper, 61)
+    marker = paper.root / PAPER_BOOK_MARKER
+    earlier = {key: value for key, value in BINDING.items() if key != "registration_sha256"}
+    marker.write_text(json.dumps(earlier, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    before = files(paper)
+
+    with pytest.raises(SurvivorDayError) as reading:
+        _bound_head(paper)
+    with pytest.raises(SurvivorDayError) as opening:
+        head_of(paper, 62)
+
+    for refused in (reading.value, opening.value):
+        message = str(refused)
+        assert refused.step == "paper head"
+        assert "binds no `registration_sha256`" in message
+        assert "earlier build" in message and "runtime directory of its own" in message
+    assert files(paper) == before
+
+
+PAPER_BINDING_KEYS: Final[frozenset[str]] = frozenset(
+    {"schema_version", "config_id", "config_digest", "epoch_session", "registration_sha256"}
+)
+"""`survivor-paper-binding/v1`, exactly: the marker is compared whole (`_refuse_another_binding`),
+so a key added, removed or renamed makes every marker on disk another registration's. Re-pinned
+once, for `registration_sha256` (whole-branch seams review, finding 1), before any marker had been
+written on a real disk -- which is why that change needed no migration."""
+
+
+def test_the_markers_shape_is_pinned_so_that_a_change_needs_a_migration(tmp_path: Path) -> None:
+    directory = tmp_path / "paper"
+    bind(directory)
+
+    written = json.loads((directory / PAPER_BOOK_MARKER).read_text(encoding="utf-8"))
+
+    assert set(written) == PAPER_BINDING_KEYS, (
+        f"the marker holds {sorted(written)}, pinned {sorted(PAPER_BINDING_KEYS)}: a change here "
+        "makes stored documents unreadable: a migration is needed"
+    )
+    assert written["schema_version"] == strategy_survivor_book.PAPER_BINDING_SCHEMA
+    assert strategy_survivor_book.PAPER_BINDING_SCHEMA == "survivor-paper-binding/v1"
+    assert all(isinstance(value, str) for value in written.values())
 
 
 def test_a_directory_with_no_book_and_no_marker_is_bound_by_nobody_and_left_as_it_is(

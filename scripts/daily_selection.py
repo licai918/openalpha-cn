@@ -3813,7 +3813,10 @@ def _held_now(
     A held book whose marker is missing or is another registration's, and a marker of another
     registration over no book, are refused here -- step `paper head`, nothing fetched or
     written -- and not at step 5 after the day's requests: pinned from another registration's
-    book, the day's journal would hold holdings no later run of this registration could match."""
+    book, the day's journal would hold holdings no later run of this registration could match.
+    The marker binds the registration file's sha256 too (seams review, finding 1), so the same
+    configuration registered again -- a code fix, a changed `settings` -- is refused here as
+    another book, naming both registrations, before it writes a journal beside the earlier one's."""
     from openalpha_cn import strategy_survivor_book as paper_book
 
     try:
@@ -3822,6 +3825,7 @@ def _held_now(
             paper_directory=storage.paper_state_store.path.parent,
             registration=survivor,
             config_id=registration.config_id,
+            registration_sha256=registration.sha256,
             lock=lock,
         )
     except paper_book.SurvivorDayError as error:
@@ -4883,6 +4887,7 @@ def _survivor_day(
                 session=session,
                 paper_directory=storage.paper_state_store.path.parent,
                 config_id=registration.config_id,
+                registration_sha256=registration.sha256,
                 lock=lock,
             )
         except paper_book.SurvivorDayError as error:
