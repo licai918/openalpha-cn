@@ -475,7 +475,7 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 
 ### 九步与退出码
 
-每一步失败都在标准错误里写 `step N (名称) failed: …`（N 按下表编号），下一行是 `tushare requests   N this run {…}`，之后的步骤不执行。退出码只有 0、1、2、3。
+每一步失败都在标准错误里写 `step N (名称) failed: …`（N 按下表编号），下一行是 `tushare requests   N this run {…}`，之后的步骤不执行。退出码只有 0、1、2、3。第 2–8 步退出 1 时，请求数那一行之后还有一段，说这次拒绝对账户意味着什么（见表后「被拒的一天对账户意味着什么」）。
 
 | 步 | 做什么 | 拒绝（退出码） |
 |---|---|---|
@@ -490,6 +490,14 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 | 9 summary | 写日志的 `paper` 与 `result`，打印摘要 | 1：日志不是幸存者日志（不是 UTF-8 JSON、是 P6 日志、schema 不对）或是另一登记写的，原样保留——这几种在第 2 步读日志时就查 |
 
 面板被占用（`PanelCatalogBusyError`、`PanelWriteConflictError`）时与 P6 一样退出 1，见「与其他进程共用面板时」。
+
+**拒绝信息里的补救命令照抄即可。** 第 1–8 步的拒绝打印的命令（存日历、补齐上一年、补最老一批面板、分批补建因子、`rerun <D> first`）都是本手册「手动运行」的形式，在钉住的 worktree 里运行：`UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv/bin/openalpha" panel build …` 或 `… "$PWD/.venv/bin/python" scripts/daily_selection.py …`，其中每个 `--as-of` 都是上海时间，面板与因子构建的是那个交易日的发布时刻 `<交易日>T16:30:00+08:00`。登记文件不存在（第 1 步，退出 2）时，最后多一行 `next: --registration must name a registration committed in the checkout --repo names (…)`，说明登记要先用 `scripts/research/registry.py` 的 `register()` 写出并提交（P6 形态也一样）。
+
+**被拒的一天对账户意味着什么（第 2–8 步，退出 1）。** 第一行与请求数那一行不变；之后在标准错误里依次是（纸面账簿在这一天的写锁下只读，什么都不写；第 1 步的选项、写锁、纪元，以及第 9 步的日志拒绝，没有这一段）：
+
+1. `no new orders were produced tonight`。若纸面账簿在这次拒绝之前已经提交了这一天的晚间，改为 `the paper book committed the evening of <交易日> before this refusal (<快照 id>): its plan for the open of <开盘日> stands, and the paper book fills it at that open whether or not it is placed:`，下面列的就是那份计划。
+2. 纸面账簿为下一个开盘仍持有的有效单（在那个开盘之前就到期的买单不列）：一行标题，例如 `orders the paper book holds live from its last settled session, <日期> (it settles the open of <交易日> with them first): place again for the open of <开盘日> each one your account did not fill:`，下面每张一行——`SELL ENTIRE POSITION <代码> (ledger qty <账本数量>) <原因>, planned on <日期>; a sale never expires`，`BUY <代码> <股数> shares <原因>, planned on <日期> at <计划价>, live through <日期>`。没有有效单写 `the paper book holds no order live for the open of <开盘日>`；还没有账簿写 `the paper book holds no live order: it has settled no session yet`；读不出账簿写 `the paper book's live orders could not be read (<原因>); they are the orders the last evening printed, less any your account filled`。
+3. 期限。下一交易日 09:15 之前：`rerun before <09:15 的时刻，+08:00>, the call auction of <开盘日>, with:`，下一行是重跑这一天的完整命令（「手动运行」的形式；这次运行给了的 `--as-of`（换成上海时间）、`--dataset`、`--json`，以及不是缺省值的 `--repo`、`--max-staleness-days` 都照抄），再一行 `after that, the next run settles <交易日> without a decision`。已到 09:15：`the call auction of <开盘日> began <时刻>: a rerun can no longer decide <交易日>, and the next run settles it without a decision`。晚间已提交的那种：09:15 之前是 `rerun before …, the call auction of <开盘日>, to complete this day's journal and print the plan, with:` 加命令；之后是 `the call auction of <开盘日> began <时刻>: the paper book fills that plan there whether or not it was placed; the refusal above says how this day's journal is completed`。
 
 ### 运行目录里的文件
 
@@ -519,14 +527,21 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 
 ### 订单怎么读
 
-摘要依次是 session、book、facts、screen、settled、positions、ORDERS、carried orders、unfunded、unaffordable、deferred exits、near exit、frozen、watch list、illiquid exits、catch-up、prediction、（补建了的话）panel catch-up 与 factor catch-up、tushare requests、units、wording。空的一栏打印 `none`，不会因为没有一行而被读成「没事可做」。
+摘要先给要照着做的，再给这次运行怎么读的数据。依次是：session、ORDERS、carried orders、unfunded、unaffordable、deferred exits、near exit、frozen、watch list、illiquid exits、positions、book、settled、catch-up；然后是一行标题 `diagnostics        how the run read its data -- nothing below is an order`，其下是 ids、facts、screen、prediction、（补建了的话）panel catch-up 与 factor catch-up、tushare requests、units；最后是 wording。空的一栏打印 `none`，不会因为没有一行而被读成「没事可做」。摘要里的每个时刻都按上海时间打印，不管它是怎样存的。
 
-- 标题：`ORDERS FOR THE OPEN OF D+1 (call auction 09:15), <开盘日> -- trade list <id>, evening created`（重新推导时是 `evening unchanged …`），下面一行 `real closes are references, not limit prices; the paper book fills at the open`。
-- 买：`BUY <代码> <数量> reference: real close <收盘价> <原因>, live through <日期>`。收盘价只是参考，不是限价；纸面账簿按开盘价成交。买单按真实收盘价定量，数量就是真实股数。
-- 卖：`SELL ENTIRE POSITION <代码> (ledger qty <账本数量>; real close <收盘价>) <原因>`，停牌的加 `(suspended: the close may be an earlier session's)`。**一律卖出全部持仓**；账本数量是账本单位，不是要卖的股数。
-- 顺延的单（carried orders）：买单写计划日、计划价与 `attempt a of n (one per session; a session with no bar counts)`；卖单写 `a sale never expires`。
-- positions 一栏的 `ledger/real ratio` 是买入以来的复权比，**包括现金分红**，不是股数乘数。现金分红之后账户里是买入的股数加上现金：1000 股、25.00 的收盘派 0.50，比值 1.0204，仍是 1000 股，不是 1020.4 股。只有送股、拆分之后，账户的股数才与账本数量不同。所以卖出永远用 SELL ENTIRE POSITION。
-- watch list、unfunded、unaffordable 后面的 `today's draw, not a promise for tomorrow`：今天的抽签，不是明天的承诺。
+- **session**：`<交易日> (as of <钉住的时刻，+08:00>)`。不带 `--as-of` 运行、而今天不是这个交易日时，下一行说为什么是它：`today, <日期>, is not a trading day: <交易日> is the last trading day`（周末、假日），或 `today, <日期>, is a trading day whose data is published at 16:30: <交易日> is the last complete session`（交易日 16:30 之前）。这一行只打印、不存进日志。
+- **ORDERS 标题**：`ORDERS FOR THE OPEN OF D+1 (call auction 09:15), <开盘日> -- evening created`（重新推导时是 `evening unchanged (settled earlier; derived again, nothing written)`）。交易清单的 id 不在标题里，在 diagnostics 的 `ids` 一行（`session index <序号>; trade list <id>; paper snapshot <id>`）；`--json` 里每个 id 都在。
+- 标题下（晚跑时先有「集合竞价已过」那一行，见上一节）是两行说明。一行是 `real closes are references, not limit prices; the paper book fills at the open`。另一行是限价说明：`at the 09:15 call auction an order carries a limit price: this system assumes that a buy placed at its limit-up price and a sell placed at its limit-down price take the single opening price -- confirm with your broker. Each limit below is computed from the real close (main board 10%; ST 5% before 2025-07-07, 10% from it); the exchange's published limit governs`。这是**本系统的假设**，不是哪家券商的规则：集合竞价收的是限价单，买单挂下一交易日的涨停价、卖单挂跌停价，就以唯一的开盘价成交。**下单之前向你的券商确认。** 每张单后面的涨停价、跌停价，用的是纸面账簿成交时用的同一个函数（`backtest.execution.derived_price_band`），从今晚的真实收盘价算出，四舍五入到分：主板 10%；ST 在 2025-07-07 之前 5%，从那天起 10%（代码里的 `BAND_WITNESS_ENDS`，按单子要成交的那个开盘日判断）；以交易所公布的涨跌停价为准。算不出时写 `no limit computed: <原因>`（今晚没有真实收盘价；或者卖单的名字筛选里没有结论，不知道它是不是 ST）。
+- **顺序**：先是今晚的卖单，再是从更早交易日顺延、纸面账簿里仍有效的卖单与买单（`REPEAT`），最后是今晚的买单。内核给买单分钱也是这个顺序：先顺延的，后今晚的。
+- **卖**：`SELL ENTIRE POSITION <代码> (ledger qty <账本数量>; real close <收盘价>) <原因> (<筛选原因>); limit-down <跌停价>`，停牌的在收盘价那个括号后加 `(suspended: the close may be an earlier session's)`。**一律卖出全部持仓**；账本数量是账本单位，不是要卖的股数。
+- **买**：`BUY <代码> <股数> shares, about <金额> yuan -- reference: real close <收盘价> <原因>, live through <日期>; limit-up <涨停价>, <金额> yuan at it`。买单按真实收盘价定量，股数就是真实股数；`about … yuan` 是按收盘价算的整数元，`… yuan at it` 是按涨停价算到分的金额（挂涨停价的单，券商冻结的资金按它算）。收盘价只是参考；纸面账簿按开盘价成交。
+- **REPEAT**：更早的晚间计划、纸面账簿还没成交的单，下一个开盘再试一次。券商的单只当天有效，所以每晚都要重新下，除非你的账户已经成交。买单：`REPEAT BUY <代码> <股数> shares, about <金额> yuan (planned on <日期> at <计划价>; real close today <收盘价>) <原因>, live through <日期>, attempt a of n (one per session; a session with no bar counts) -- not filled in the paper book: re-place it for the open of <开盘日> unless your account filled it; limit-up …`。卖单：`REPEAT SELL ENTIRE POSITION <代码> (ledger qty …; real close …) <原因>, planned on <日期>, attempt a, a sale never expires -- not filled in the paper book: re-place it for the open of <开盘日> unless your account sold it; limit-down …`。下面的 carried orders 一栏只写个数：`N live orders from earlier sessions, repeated in ORDERS above`。
+- **资金**：有买单时，单子后面一行 `cash before the sells <X> yuan; buys total <Y> yuan at their reference prices (<Y'> yuan at their limit-up prices); sells expected to release about <Z> yuan at the closes`（有一张买单算不出涨停价时，括号里那个总额不打印，免得把缺一张的数当成全部）。内核给今晚的买单定量用的是现金**加上今晚卖单按收盘价估计的回款**，而 09:15 时账户里只有现金。所以买单按内核分钱的顺序（先顺延的，再今晚的）按参考价累加：累计超过现金的那张买单下面标 `needs the sells above to fill first: place it after they have filled (the paper book assumes it fills at the open price)`，累计超过现金加回款的标 `is not covered by the cash even after the sells above fill`。回款只算今晚的卖单（顺延的卖单什么时候成交不知道，内核不算它）。
+- **账户与纸面账簿的分叉**：有单时最后一行是 `the paper book assumes every order above is placed and fills at the open; your account follows the book only if you did exactly that`；有卖单时再加一行 `a SELL above of a name your account does not hold (you did not buy it -- for example, you followed this morning's re-check): ignore that SELL`。今晚没有新单时写 `no new order planned tonight`（有顺延单时接着写 `; N carried orders repeated above`）。settled 与 catch-up 里，被拒或过期的买单后面写 `if your real order did fill, the paper book does not hold it and will never print a SELL for it`；核销写 `<代码> written off (ledger qty <数量>): whole cost basis <金额>, no price -- the paper book wrote it off; your account may still hold the shares, and no SELL will be printed for them again`。这些都记下来：账户与纸面账簿从那天起不同（见「已知局限」）。
+- **deferred exits、near exit、frozen** 各带一句它对账户的意思。deferred exits：`left the survivors; kept tonight because tonight's sales reached the cap: no order -- do not sell it; the paper book sells it at a later evening`。near exit：`held and still a survivor, near the survivor cut: information only, no order`。frozen：`held and halted: left alone until it trades again, no order`。watch list、unfunded、unaffordable 后面的 `today's draw, not a promise for tomorrow`：今天的抽签，不是明天的承诺。
+- **positions**：每只一行 `<代码>  ledger qty <账本数量>  real close <收盘价>  ledger/real ratio <比>`，停牌的加 `(suspended: …)`，后面是状态 `frozen`、`near exit`、`no bar since <日期> (marked at its last price)`（以前写作 `carried since`，现在说的是它从哪天起没有日线、按最后价格估值）。`ledger/real ratio` 是买入以来的复权比，**包括现金分红**，不是股数乘数。现金分红之后账户里是买入的股数加上现金：1000 股、25.00 的收盘派 0.50，比值 1.0204，仍是 1000 股，不是 1020.4 股。只有送股、拆分之后，账户的股数才与账本数量不同。所以卖出永远用 SELL ENTIRE POSITION。
+- **book**：`equity …, cash …, gross exposure …, N holdings; ledger equity is not evidence`。
+- **diagnostics** 下的 facts 一行末尾 `book holdings before tonight's fills N`（以前写作 `held N`）是日志钉住的持仓只数：当晚成交与结算之前的账簿，第一晚是 0。账簿现在持有什么，看 positions。
 
 ### 清晨复核（`--morning-recheck`）
 
@@ -559,7 +574,7 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 
 每日登记自 2026-10-08 暂停，面板停在那时。**这条命令从不自己补一大段缺口**，重启要先手工补面板：
 
-1. 第 2 步在发任何请求之前，数当年已存日历上面板落后当天多少个交易日：多于登记的 `max_panel_catch_up_sessions`（0 到 16），就拒绝，退出 1，一个请求都不发，打印补最老一批（至多上限那么多个交易日）的命令，形如 `openalpha panel build --runtime-dir RT --year <年> --as-of <这一批最后一个交易日>T08:30:00+00:00 --exchange SSE --incremental --dataset adj_factor --dataset price --dataset stk_limit`（`--as-of` 是那天上海 16:30 的发布时刻）（会话级分区彼此不齐、其中一个已越过这一批时，打印的是不带 `--incremental` 的整年重建，并写明要取多少个交易日）。照样运行，再跑本命令：还多于上限就再拒绝一次、给出下一批；不多于上限，它自己补完。每个交易日约 5 次请求（`stk_limit` 分页时 7 次）。
+1. 第 2 步在发任何请求之前，数当年已存日历上面板落后当天多少个交易日：多于登记的 `max_panel_catch_up_sessions`（0 到 16），就拒绝，退出 1，一个请求都不发，打印补最老一批（至多上限那么多个交易日）的命令，形如 `UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv/bin/openalpha" panel build --runtime-dir RT --year <年> --as-of <这一批最后一个交易日>T16:30:00+08:00 --exchange SSE --incremental --dataset adj_factor --dataset price --dataset stk_limit`（「手动运行」的形式，在钉住的 worktree 里照抄；`--as-of` 是那天上海 16:30 的发布时刻）（会话级分区彼此不齐、其中一个已越过这一批时，打印的是不带 `--incremental` 的整年重建，并写明要取多少个交易日）。照样运行，再跑本命令：还多于上限就再拒绝一次、给出下一批；不多于上限，它自己补完。每个交易日约 5 次请求（`stk_limit` 分页时 7 次）。
 2. 跨年时，上一年的会话级分区没到上一年最后一个交易日，第 2 步不论上限先拒绝，打印补齐上一年的 `panel build --incremental`（必须在新一年的第一次构建之前跑）；它不建 `trade_cal`，所以补完之后若当年日历还没存，会再拒绝一次，打印 `openalpha panel build … --dataset trade_cal`。
 3. 因子档位错过的交易日超过 20 个时，第 4 步拒绝并给出分批的 `openalpha factor build` 命令（同 P6 的「错过的交易日」）。
 4. 还没有纸面账簿时，纪元离第一次运行最多 `1 + max_panel_catch_up_sessions` 个交易日（否则第 1 步退出 2）：纪元登记为第一次计划运行的前一个交易日。
