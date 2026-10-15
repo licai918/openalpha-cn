@@ -64,7 +64,11 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 
 任何一步失败——包括步骤里没有预料到的异常——标准错误输出里都写明「step N (名称) failed」和原因，并给出本次运行到停下时已发出的 Tushare 请求数（失败也花请求），之后的步骤不执行。
 
-**与其他进程共用面板时（V2-P6-028）。** 面板目录可以同时被多个进程读写（例如本命令与研究重建、另一次 `factor build` 并行），由目录里 `catalog.duckdb.lock`、`catalog.duckdb.gate` 两个锁文件协调。两种情况下第 2 步或第 4 步会以**退出码 6** 停下，二者都不是数据问题，处理办法都是等对方结束后**原样重跑**：一是面板被其他进程占用超过等待上限（默认 600 秒），什么都没读也没写；二是本次写入读取用于合并的分区之后，另一个进程先提交了同一分区（例如两次增量建库、或同一因子的两次构建同时进行），本次写入整体放弃、一行不写，重跑会在对方写入的结果上重新合并。另外，第 4 步的一次因子构建现在是**整体写入**：raw、processed、neutralized 三档要么一起写成，要么一档也不写——以前较高一档被拒时，较低档位已经写入；现在较高一档被拒，较低档位同样没有写入，需要时用 `--tier raw` 或 `--tier processed` 单独重建较低档位。
+**与其他进程共用面板时（V2-P6-028）。** 面板目录可以同时被多个进程读写（例如本命令与研究重建、另一次 `factor build` 并行），由目录里 `catalog.duckdb.lock`、`catalog.duckdb.gate` 两个锁文件协调。两种情况下第 2 步或第 4 步会停下，**本命令的退出码是 1**，二者都不是数据问题，处理办法都是等对方结束后**原样重跑**：一是面板被其他进程占用超过等待上限（默认 600 秒），什么都没读也没写；二是本次写入读取用于合并的分区之后，另一个进程先提交了同一分区（例如两次增量建库、或同一因子的两次构建同时进行），本次写入整体放弃、一行不写，重跑会在对方写入的结果上重新合并。
+
+（2026-10-14 更正，`V2-P7-008`：此前这里写的是「以退出码 6 停下」，不对。退出码 6（`catalog_busy`）是单独运行 `openalpha panel build`、`openalpha factor build`、`openalpha panel doctor` 时它们自己的退出码；本命令在进程内调用它们，把这两种情况转述为该步的拒绝，`DailyExit` 只有 0、1、2、3。标准错误里的样子：第 2 步是 `` step 2 (panel update) failed: `panel build` exited 6: … ``，第 3 步是 `` step 3 (panel doctor) failed: `panel doctor` is not clean (exit 6): … ``，第 4 步是 `step 4 (factor build) failed: an unexpected fault: PanelCatalogBusyError: …` 或 `… PanelWriteConflictError: …`。所以定时任务若想只对这两种情况自动重试，要看标准错误里的 `exited 6`、`(exit 6)`、`PanelCatalogBusyError`、`PanelWriteConflictError`，不能看退出码。幸存者形态同样如此，见「幸存者形态」。）
+
+另外，第 4 步的一次因子构建现在是**整体写入**：raw、processed、neutralized 三档要么一起写成，要么一档也不写——以前较高一档被拒时，较低档位已经写入；现在较高一档被拒，较低档位同样没有写入，需要时用 `--tier raw` 或 `--tier processed` 单独重建较低档位。
 
 当天的 `as_of` 在第 2 步开始前就写进日志：第 2 步中途失败后重跑，问的是同一个问题，已写成的分区按字节相同，`PanelStore` 不会重写。
 
@@ -237,7 +241,7 @@ launchd 漏触发（关机、睡眠）、或节假日后第一次运行时，「
   --exchange SSE --max-staleness-days 30 --as-of <YYYY-MM-DD>T08:30:00+00:00
 ```
 
-`factor build` 不发 Tushare 请求，不需要 `.env`。不要和每日命令同时运行：两者写同一分区时，后提交的一方以退出码 6 放弃（见「与其他进程共用面板时」），原样重跑即可。
+`factor build` 不发 Tushare 请求，不需要 `.env`。不要和每日命令同时运行：两者写同一分区时，后提交的一方整体放弃、一行不写——是这条 `factor build` 就以退出码 6 退出，是每日命令就以退出码 1 退出（`step 4 (factor build) failed: an unexpected fault: PanelWriteConflictError: …`；2026-10-14 更正，此前写的是两者都以 6 退出，见「与其他进程共用面板时」），原样重跑即可。
 
 **怎样判断有没有缺口（只读）**：每日命令新增 `--factor-gaps SINCE`。对配置读到的每个档位，它列出从 `SINCE` 到最新已收盘交易日之间、库里没有构建的每个开市日：拿各档位构建清单（`factor_manifest_*` 及其上面两档的清单）里的信号时点，与 `trade_cal` 的开市日逐日对比。较高一档只在同一时点有较低档位的清单时才算已构建。有缺口时退出 1，没有时退出 0；加 `--json` 输出 JSON。它不准入代码，只从登记文件读配置（并核对文件里的 `config_id`），不发请求，不写任何文件。所以可以在主检出里运行，例如：
 
