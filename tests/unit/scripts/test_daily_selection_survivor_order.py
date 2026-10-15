@@ -46,8 +46,11 @@ NO_REQUEST: Final[str] = sd.NO_REQUEST
 
 
 def _printed_command(lines: Sequence[str]) -> list[str]:
-    """The daily command a refusal prints on a line of its own, as the arguments `main` takes."""
-    (line,) = (line for line in lines if "scripts/daily_selection.py" in line)
+    """The daily command a refusal prints on a line of its own, as the arguments `main` takes:
+    the first one -- the refusal's own, "rerun <D> first" -- since the block that follows the
+    requests line (what the refusal means for the user) prints a rerun command of the current
+    day too."""
+    line = next(line for line in lines if "scripts/daily_selection.py" in line)
     words = shlex.split(line)
     return words[words.index("scripts/daily_selection.py") + 1 :]
 
