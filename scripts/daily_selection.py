@@ -3524,8 +3524,14 @@ class SurvivorDay:
     read_as_of: datetime
     """What step 6 read the facts at: `as_of`, or -- on a committed day after the next session's
     update -- the newest stored session's publication instant, the earliest the panel's
-    whole-partition doors answer then. Step 8 reads the market at `as_of` first and -- on a
-    committed day only, refused there -- once more where the market's own partitions can be read
+    whole-partition doors answer then. That later read is not the evening's in every row (seams
+    review, finding 8): a `namechange` row is clocked at its announcement date, so a rename
+    dated on or before the session but fetched after the evening -- by the morning re-check or
+    the next session's update -- is visible to it and was not to the evening; the facts can then
+    screen otherwise, the paper book's equality check refuses the derivation (it fails closed),
+    and step 8's refusal says so (`_later_read_cause`). Step 8 reads the market at `as_of` first
+    and -- on a committed day only, refused there -- once more where the market's own partitions
+    can be read
     (`_readable_after`: their newest `max_available_time`, not necessarily this instant). It
     hands the paper book that instant as its `as_of`, so after that fallback every settlement's
     `observed_on` is the later instant's date, not `as_of`'s: harmless, since a committed day's
@@ -3997,6 +4003,105 @@ def _refuse_a_lost_journal(
     )
 
 
+RUNBOOK_RUN_PREFIX: Final[str] = (
+    'UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv/bin/python"'
+)
+"""How the runbook writes a manual run of this script, from the root of the checkout the
+registration names (`docs/runbooks/daily-selection.zh-CN.md`): the checkout's own environment,
+`uv run` only to read `--env-file`."""
+
+
+def _survivor_rerun_command(options: DailyOptions, *, as_of: datetime) -> str:
+    """The command that runs the survivor day again at `as_of` (in Shanghai time), with this
+    run's runtime directory, registration and repository, as the runbook writes a manual run."""
+    arguments = ["scripts/daily_selection.py", "--runtime-dir", str(options.runtime_dir)]
+    arguments += ["--registration", str(options.registration), "--repo", str(options.repo)]
+    arguments += ["--as-of", as_of.astimezone(SHANGHAI).isoformat()]
+    return f"{RUNBOOK_RUN_PREFIX} {shlex.join(arguments)}"
+
+
+def _refuse_an_undocumented_evening(
+    options: DailyOptions,
+    book: PaperBookSnapshot,
+    *,
+    directory: Path,
+    registration: Registration,
+    ordinals: SessionOrdinals,
+    index: int,
+) -> None:
+    """Refuse, before any request and before the day's pin, a day whose paper book's head is an
+    earlier session's evening, committed, whose journal files no `result` (whole-branch seams
+    review, finding 3): the run that committed it stopped before its summary, in the window
+    between the snapshot and the journal. A rerun of that session completes it, writing nothing,
+    only until a later session's run moves the book past it -- `_require_pinned_head` refuses it
+    then -- after which its plan, its orders and its decision are documented nowhere. The remedy
+    is named: that session first, at its pinned `as_of`, then this run again; `index` is this
+    day's session's ordinal.
+
+    The head session's journal must be there, this registration's, pinned as an evening (its
+    `prediction` stage filed, not settle-only) and without a `result`. Its snapshot is an
+    evening's when an order planned on it is pending or its first decision is its own
+    (`strategy_survivor_book.decided_by_an_evening`); one that planned nothing over an earlier
+    first decision is the same snapshot a catch-up of the session would leave, so it is taken
+    for the evening's only when no journal of a session between it and this day says a later
+    run reached the book -- the case where a later run's catch-up, not the evening, settled it,
+    and the rerun its journal names is the remedy. A journal that is missing or cannot be read is
+    not this check's: `_refuse_a_lost_journal` and the journal's own reader name those when that
+    session is run."""
+    from openalpha_cn.strategy_survivor_book import decided_by_an_evening
+
+    path = directory / f"{book.session.isoformat()}.json"
+    try:
+        journal = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if (
+        not isinstance(journal, dict)
+        or journal.get("schema") != SURVIVOR_JOURNAL_SCHEMA
+        or "result" in journal
+    ):
+        return
+    stated, prediction = journal.get("registration"), journal.get("prediction")
+    if (stated.get("sha256") if isinstance(stated, dict) else None) not in (
+        None,
+        registration.sha256,
+    ):
+        return
+    if not isinstance(prediction, dict) or prediction.get("settle_only") is True:
+        return
+    later_run = any(
+        (directory / f"{ordinals.day_of(between).isoformat()}.json").exists()
+        for between in range(book.session_index + 1, index)
+    )
+    if later_run and not decided_by_an_evening(book):
+        return
+    try:
+        pinned = datetime.fromisoformat(str(journal.get("as_of")))
+    except ValueError:
+        return
+    if pinned.utcoffset() is None:
+        return
+    session = book.session.isoformat()
+    raise StepFailedError(
+        "paper head",
+        "\n".join(
+            [
+                f"rerun {session} first: its evening is committed but its journal is incomplete "
+                f"-- the paper book holds the evening of {session}, committed as "
+                f"{book.snapshot_id} with its plan for the next open, and its journal {path} "
+                "files no result: the run that committed it stopped before its summary. Once "
+                "this run moves the paper book past it, that evening can never be completed, and "
+                "its plan, its orders and its decision are documented nowhere. Nothing was "
+                f"fetched or written. Run {session} again at its pinned clock, which completes "
+                "it and writes nothing to the paper book:",
+                "  " + _survivor_rerun_command(options, as_of=pinned),
+                "then rerun this command",
+            ]
+        ),
+        steps=SURVIVOR_STEPS,
+    )
+
+
 def _journalled_factors(
     previous: Mapping[str, Any] | None, built: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -4291,7 +4396,9 @@ def _survivor_paper_and_summary(
             write_journal(day.journal_path, journal)
 
     def refused(message: str) -> StepFailedError:
-        refusal = StepFailedError("paper book", message, steps=SURVIVOR_STEPS)
+        refusal = StepFailedError(
+            "paper book", message + _later_read_cause(day), steps=SURVIVOR_STEPS
+        )
         refusal.document = _survivor_result(
             day, journal=journal, evening=None, paper_skipped=str(refusal)
         )
@@ -4516,6 +4623,25 @@ def _too_late_to_decide(day: SurvivorDay, now: datetime) -> str:
     )
 
 
+def _later_read_cause(day: SurvivorDay) -> str:
+    """What step 8's refusal of a committed day read later than its pinned clock adds -- nothing
+    for any other day (seams review, finding 8; `SurvivorDay.read_as_of`)."""
+    if not day.committed or day.read_as_of == day.as_of:
+        return ""
+    session = day.session.isoformat()
+    return (
+        f" -- this committed evening was derived again from facts read at "
+        f"{day.read_as_of.astimezone(SHANGHAI).isoformat()}, not at its pinned "
+        f"{day.as_of.astimezone(SHANGHAI).isoformat()}: the next session's update has stored "
+        "later rows, which the panel's whole-partition reads refuse to read past. That read can "
+        f"screen otherwise than the evening did: a name change dated on or before {session} and "
+        "fetched after the evening (by the morning re-check or the next session's update) is "
+        "visible from midnight of its date, so the later read sees it and the evening's did "
+        "not, and the paper book refuses a derivation that differs from what it committed. The "
+        "evening stays as it was committed; a later read cannot complete its journal"
+    )
+
+
 def _after_the_call_auction(cutoff: datetime, now: datetime) -> dict[str, str] | None:
     """`this_run`'s note that the run printing a plan was made at or after `cutoff`, the call
     auction of the session the plan's orders are for -- `None` before it. The printing run's fact,
@@ -4641,12 +4767,15 @@ def _run_survivor_day(
        this registration's (`_held_now`): every later step of this run and of any rerun uses
        them, and every run checks the book against them (`_require_pinned_head`) before any
        request. A new pin is written only once the checks that read alone have passed -- the
-       book against it; a committed evening whose journal is gone, re-pinned settle-only
-       (`_refuse_a_lost_journal`); a day not committed whose panel has moved past its session
-       -- so a day they refuse leaves no pin. A journal with `result` is printed again with no
-       request and no write. An epoch after the session (P6's `session < anchor`), not an open
-       session of the stored calendar, or -- with no book held -- further back than the panel
-       step catches up exits 2 here.
+       book against it, and the book bound to this registration file (its sha256 in the marker:
+       a changed registration is another book); a committed evening whose journal is gone,
+       re-pinned settle-only (`_refuse_a_lost_journal`); an earlier session's evening committed
+       whose journal files no `result`, which is completed first
+       (`_refuse_an_undocumented_evening`); a day not committed whose panel has moved past its
+       session -- so a day they refuse leaves no pin. A journal with `result` is printed again
+       with no request and no write. An epoch after the session (P6's `session < anchor`), not
+       an open session of the stored calendar, or -- with no book held -- further back than the
+       panel step catches up exits 2 here.
     2. **Panel update** as P6's, with `SurvivorPanelUpdate` from the registration's adapter
        (`survivor_panel_update`); journalled, and resumed after on a rerun. The day's route is
        read here, by the pinned clock: settle-only at or after 09:15 of the next session, and
@@ -4802,6 +4931,17 @@ def _survivor_day(
         committed = book is not None and book.session_index == ordinals.index_of(session)
         if pinning and committed and book is not None:
             _refuse_a_lost_journal(store, book, exchange=exchange, as_of=as_of, journal=path)
+        if pinning and not committed and book is not None:
+            # An earlier evening committed with no `result` is completed first: once this day
+            # moves the book past it, it never can be (seams review, finding 3).
+            _refuse_an_undocumented_evening(
+                options,
+                book,
+                directory=path.parent,
+                registration=registration,
+                ordinals=ordinals,
+                index=ordinals.index_of(session),
+            )
         if "panel" not in journal and not committed:
             # Before step 2's first request (D5 joint review, Minor 4): an update pinned at a
             # clock the panel has moved past would rewrite its partitions at that older instant.
@@ -4838,8 +4978,11 @@ def _survivor_day(
         later = newest if newest is not None and newest > session else None
         # What steps 6 and 8 read the panel at: the pinned clock, or -- for a committed day once
         # the next session's update has stored later rows, which the panel's whole-partition doors
-        # refuse to read past -- the newest stored session's publication, which the evening's
-        # reads answer alike (C1) and whose every difference C3's equality check refuses.
+        # refuse to read past -- the newest stored session's publication. Not every read answers
+        # there as at the evening (seams review, finding 8): the market's do (C1), but a rename
+        # dated on or before the session and fetched after the evening is visible from midnight
+        # of its date, so the facts can screen otherwise, and C3's equality check then refuses
+        # the completion -- fails closed, and step 8's refusal names this cause.
         read_as_of = as_of if later is None else max(as_of, session_publication_instant(later))
 
     if committed:

@@ -414,6 +414,22 @@ def _cut_at_the_result(patch: pytest.MonkeyPatch) -> None:
     patch.setattr(daily, "write_journal", cut)
 
 
+def _panel_updated_for(world: tds.World, day: date) -> None:
+    """`day`'s panel update run on its own, as `day`'s step 2 stores it, at its 18:30 -- without
+    `day`'s run, which an earlier evening committed with no `result` refuses before any request
+    (whole-branch seams review, finding 3): the other way a panel moves past a committed day."""
+    world.market.today = day
+    daily.update_panel(
+        world.runtime,
+        session=day,
+        as_of=evening_of(day),
+        exchange="SSE",
+        targets=SURVIVOR_TARGETS,
+        next_year=False,
+        survivor=daily.survivor_panel_update(_survivor()),
+    )
+
+
 def _no_factor_build(*_arguments: Any, session: date, **_keywords: Any) -> dict[str, Any]:
     """Step 4 building nothing: the session's composite factors have no build at its 16:30."""
     return {
@@ -1138,24 +1154,21 @@ def test_a_held_evening_run_again_after_the_next_panel_update_reads_where_the_ma
     capsys: pytest.CaptureFixture[str],
     seeded: Path,
 ) -> None:
-    """The second evening commits and its `result` is lost; the third session's day then updates
-    the panel and stops at its facts. Run again at its pinned clock, the second evening's market
-    can no longer be read there (its year's factors and index levels hold a later row), so the
-    paper book reads it at the newest instant the panel can be read at: the evening derives the
-    session it settled, unchanged, writing nothing, and the journal says where it read. Through
-    `main`, straight: a committed day's completion runs no doctor and no factor build (D3 review,
-    rule 5; they read at the pinned clock, and gate a decision already made) and reads its facts
-    at that newest instant too."""
+    """The second evening commits and its `result` is lost; the third session's panel is then
+    updated (`_panel_updated_for`: the third session's own day refuses before any request while
+    the second's journal is incomplete). Run again at its pinned clock, the second evening's
+    market can no longer be read there (its year's factors and index levels hold a later row), so
+    the paper book reads it at the newest instant the panel can be read at: the evening derives
+    the session it settled, unchanged, writing nothing, and the journal says where it read.
+    Through `main`, straight: a committed day's completion runs no doctor and no factor build (D3
+    review, rule 5; they read at the pinned clock, and gate a decision already made) and reads
+    its facts at that newest instant too."""
     world = _world(tmp_path, monkeypatch, seeded)
     _completed(world, capsys, DAY)
     with pytest.MonkeyPatch.context() as patch:
         _cut_at_the_result(patch)
         _day(world, capsys, NEXT)
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(daily, "build_factors", _no_factor_build)
-        code, _out, err = _day(world, capsys, THIRD)
-    assert code == 1
-    assert err[0].startswith("step 6 (facts) failed:")
+    _panel_updated_for(world, THIRD)
     paper = _files(world.runtime / "paper")
 
     second = _completed(world, capsys, NEXT, clock=after_the_auction(THIRD))
@@ -1311,21 +1324,19 @@ def test_a_day_whose_evening_was_committed_is_completed_after_the_next_sessions_
     capsys: pytest.CaptureFixture[str],
     seeded: Path,
 ) -> None:
-    """Probe C, committed: the second evening (7 April) committed and its `result` was lost; the
-    third session's run (8 April) has since stored 8 April and stopped at its facts. The rerun of
-    7 April is a committed day's completion: no request, no doctor and no factor build (they gate
-    a decision already made, and read at the pinned instant, which the newer panel no longer
-    answers), the facts read at the newest readable instant -- 8 April's publication -- which C1
-    and C3 hold to the bytes the evening read, and the factor builds taken from the journal."""
+    """Probe C, committed: the second evening (7 April) committed and its `result` was lost; 8
+    April has since been stored by its panel update (`_panel_updated_for`: 8 April's own day
+    refuses before any request while 7 April's journal is incomplete). The rerun of 7 April is a
+    committed day's completion: no request, no doctor and no factor build (they gate a decision
+    already made, and read at the pinned instant, which the newer panel no longer answers), the
+    facts read at the newest readable instant -- 8 April's publication -- which C1 and C3 hold to
+    the bytes the evening read, and the factor builds taken from the journal."""
     world = _world(tmp_path, monkeypatch, seeded)
     _completed(world, capsys, DAY)
     with pytest.MonkeyPatch.context() as patch:
         _cut_at_the_result(patch)
         _day(world, capsys, NEXT)
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(daily, "build_factors", _no_factor_build)
-        _code, _out, err = _day(world, capsys, THIRD)
-    assert err[0].startswith("step 6 (facts) failed:"), err
+    _panel_updated_for(world, THIRD)
     doctor = _calls(monkeypatch, daily, "check_panel")
     built = _calls(monkeypatch, daily, "build_factors")
     read = _calls(monkeypatch, strategy_survivor_book, "facts_day")
