@@ -1661,6 +1661,140 @@ def test_labels_that_cannot_be_read_refuse_the_report_by_name(
     assert not (matured.world.runtime / "reports" / report_name(MATURED_AS_OF)).exists()
 
 
+def _refusing(error: type[Exception], message: str) -> Any:
+    def refused(*_arguments: Any, **_keywords: Any) -> Any:
+        raise error(message)
+
+    return refused
+
+
+DATA_REFUSALS: Final[tuple[str, ...]] = (
+    "SurvivorRegistrationError",
+    "FactorEngineError",
+    "PanelStorageError",
+)
+"""What the late-record check's cache key and its change census can raise outside the recompute's
+refusal set (seams review 6): a 16:30 tier holding two builds, a blocked manifest read, a catalog
+that refuses the read."""
+
+
+def _data_refusal(name: str) -> type[Exception]:
+    from openalpha_cn.panel.catalog import PanelStorageError
+    from openalpha_cn.panel_factors import FactorEngineError
+    from openalpha_cn.strategy_survivor_registration import SurvivorRegistrationError
+
+    refusals: dict[str, type[Exception]] = {
+        "SurvivorRegistrationError": SurvivorRegistrationError,
+        "FactorEngineError": FactorEngineError,
+        "PanelStorageError": PanelStorageError,
+    }
+    return refusals[name]
+
+
+@pytest.mark.parametrize("where", ["survivor_cache_key", "survivor_provenance_changes"])
+@pytest.mark.parametrize("refusal", DATA_REFUSALS)
+def test_a_data_refusal_of_the_cache_key_or_the_change_census_refuses_the_report_by_name(
+    world: tds.World,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    where: str,
+    refusal: str,
+) -> None:
+    """Seams review 6. The late-record check's cache key (`survivor_cache_key`) and its change
+    census (`survivor_provenance_changes`) run outside the recompute's refusal set, so what they
+    raise about the data -- a tier holding two builds at 16:30, a blocked manifest read, a
+    catalog that refuses the read -- refuses the report by name, `SurvivorReportError`: exit 1,
+    nothing written, never a traceback. The census is asked only when the day could not be
+    scored again equal, so there the recompute refuses first."""
+    from openalpha_cn.strategy_survivor_facts import SurvivorFactsError
+
+    message = f"{refusal} raised by {where} for the test"
+    monkeypatch.setattr(strategy_survivor_check, where, _refusing(_data_refusal(refusal), message))
+    if where == "survivor_provenance_changes":
+        monkeypatch.setattr(
+            strategy_survivor_check,
+            "recompute_survivor_batch",
+            _refusing(SurvivorFactsError, "the day cannot be read again"),
+        )
+
+    code, out, err = _report(world, capsys)
+
+    assert code == 1
+    assert out == ""
+    assert err.startswith("SurvivorReportError: the survivor forward report is refused: "), err
+    assert message in err
+    assert "Traceback" not in err
+    assert not (world.runtime / "reports" / report_name(REPORT_AS_OF)).exists()
+
+
+def test_a_busy_catalog_under_the_check_stops_the_report_loudly_and_is_never_a_refusal(
+    world: tds.World, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A busy catalog says nothing about the data (`PanelCatalogBusyError` is no
+    `PanelStorageError`, by design): it is not mapped to a refusal, and stops the command with
+    the error itself, so the report is run again rather than filed as refused."""
+    from openalpha_cn.panel.store import PanelCatalogBusyError
+
+    def busy(*_arguments: Any, **_keywords: Any) -> Any:
+        raise PanelCatalogBusyError("the catalog is held", side="shared", timeout=1.0)
+
+    monkeypatch.setattr(strategy_survivor_check, "survivor_cache_key", busy)
+
+    with pytest.raises(PanelCatalogBusyError, match="the catalog is held"):
+        _report(world, capsys)
+
+    assert not (world.runtime / "reports" / report_name(REPORT_AS_OF)).exists()
+
+
+def test_the_survivor_report_file_takes_its_name_whole_by_a_replace_of_a_synced_file(
+    world: tds.World, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Seams review 10. A rerun of the report rewrites `forward-survivor-<date>.json`; written in
+    place, a crash in the middle would leave a torn report under its name. So the survivor branch
+    writes the bytes to a temporary file of its own beside it, syncs them, and replaces the name
+    in one step -- the earlier report stands whole until then, and nothing else is left beside
+    it. (P6's `forward-<date>.json` is written as it always was.)"""
+    import stat
+
+    code, _out, err = _report(world, capsys)
+    assert code == 0, err
+    path = world.runtime / "reports" / report_name(REPORT_AS_OF)
+    first = path.read_bytes()
+    events: list[tuple[str, str]] = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def fsync(descriptor: int) -> None:
+        kind = "directory" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file"
+        events.append(("fsync", kind))
+        real_fsync(descriptor)
+
+    def replace(source: Any, target: Any) -> None:
+        source, target = Path(source), Path(target)
+        if target == path:
+            events.append(("replace", source.parent == target.parent and source != target))
+        real_replace(source, target)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "replace", replace)
+
+    code, _out, err = _report(world, capsys)
+
+    assert code == 0, err
+    assert path.read_bytes() == first
+    assert events[-2:] == [("fsync", "file"), ("replace", True)]
+    assert sorted(item.name for item in path.parent.iterdir() if item.is_file()) == [path.name]
+
+    def torn(source: Any, target: Any) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(os, "replace", torn)
+    with pytest.raises(OSError, match="No space left"):
+        _report(world, capsys)
+
+    assert path.read_bytes() == first
+    assert sorted(item.name for item in path.parent.iterdir() if item.is_file()) == [path.name]
+
+
 def _file_at(world: tds.World, batch: PredictionBatch, *, at: datetime) -> str:
     """`batch` filed with the store's custody clock at `at`."""
     store = PanelStore(world.runtime / "panel")

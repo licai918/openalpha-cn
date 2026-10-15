@@ -68,10 +68,12 @@ labels of the shared reader (`model_view.OutcomeLabels`) and the CSI 500's level
 pre-registered horizon, the paper book's record (`strategy_survivor_paper_report.paper_record`)
 read without the paper book's lock and bounded to one head, and the document
 (`strategy_survivor_forward.survivor_forward_document`), written to
-`RT/reports/forward-survivor-<date>.json` beside P6's `forward-<date>.json`. Every survivor
-module is imported inside that branch: they load `backtest/paper.py`, whose audit hook a P6
-report never installs. Its refusals are `SurvivorReportError`, a `ForwardReportError`, so the
-command's exits are P6's: 0 written, 1 refused.
+`RT/reports/forward-survivor-<date>.json` beside P6's `forward-<date>.json` -- whole, by one
+replace of a synced file of its own (`_replace_whole`), so a rerun that stops in the middle leaves
+the earlier report standing, never a torn one. Every survivor module is imported inside that
+branch: they load `backtest/paper.py`, whose audit hook a P6 report never installs. Its refusals
+are `SurvivorReportError`, a `ForwardReportError`, so the command's exits are P6's: 0 written, 1
+refused; a busy panel catalog is no refusal and stops the command as it is.
 
 ### The order it reads in, and the instant it reads at
 
@@ -103,7 +105,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -188,8 +192,8 @@ class ForwardReportError(ValueError):
 class SurvivorReportError(ForwardReportError):
     """A survivor registration's forward report cannot be produced as asked (`V2-P7-018`): no
     forward protocol, two records for one session, a calendar, a label or the provenance index
-    that cannot be read, a check asked a question it cannot answer. A `ForwardReportError`, so
-    the command's refusals are P6's: exit 1."""
+    that cannot be read, a check asked a question it cannot answer, a cache key or a change census
+    the stored data refuses. A `ForwardReportError`, so the command's refusals are P6's: exit 1."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -449,16 +453,21 @@ def _survivor_forward_report(
     listing fixed, whose refusal is that section's and never the report's; and the document. The
     prediction layer's refusals -- the protocol, the witness (two records for one session, a
     journal that contradicts the store or carries no pinned instant, a record the store cannot
-    read back), the check's provenance index and arguments, the label reader, the benchmark's
-    levels -- are `SurvivorReportError`; a `TypeError` or an `AssertionError` is a fault, and
-    propagates.
+    read back), the check's provenance index and arguments, its cache key and change census (a
+    registration, factor or panel-storage refusal of the data), the label reader, the benchmark's
+    levels -- are `SurvivorReportError`; a `TypeError`, an `AssertionError` or a busy catalog is
+    not a refusal, and propagates.
     """
     # Imported here, never for a P6 report: they load `backtest/paper.py` and its audit hook.
     from openalpha_cn import strategy_survivor_check as check
     from openalpha_cn import strategy_survivor_forward as forward
     from openalpha_cn.model_view import ModelPanelUnreadableError, ModelRunBlockedError
+    from openalpha_cn.panel_factors import FactorEngineError
     from openalpha_cn.strategy_survivor_market import SessionOrdinalError
-    from openalpha_cn.strategy_survivor_registration import SurvivorCheckArgumentError
+    from openalpha_cn.strategy_survivor_registration import (
+        SurvivorCheckArgumentError,
+        SurvivorRegistrationError,
+    )
 
     try:
         return _survivor_report(
@@ -477,6 +486,13 @@ def _survivor_forward_report(
         ModelPanelUnreadableError,
         SessionOrdinalError,
         PredictionStoreError,
+        # The late-record check's cache key and change census run outside the recompute's
+        # refusal set (seams review 6): a 16:30 tier holding two builds, a blocked manifest
+        # read, a catalog that refuses the read. A busy catalog (`PanelCatalogBusyError`, no
+        # `PanelStorageError`) says nothing about the data and stops the command as it is.
+        SurvivorRegistrationError,
+        FactorEngineError,
+        PanelStorageError,
     ) as error:
         raise SurvivorReportError(f"the survivor forward report is refused: {error}") from error
 
@@ -889,6 +905,24 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def _replace_whole(path: Path, text: str) -> None:
+    """`text` at `path`, which takes it whole or keeps what it held (seams review 10): written to
+    a temporary file of this call's own beside it, flushed and synced, then put in place by one
+    `os.replace`; the temporary file is removed when anything fails. A rerun's report replaces
+    the earlier one, so a crash in the middle leaves the earlier report standing, never a torn
+    one. The survivor report's file only: P6's is written as it always was."""
+    descriptor, name = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".partial")
+    partial = Path(name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(partial, path)
+    finally:
+        partial.unlink(missing_ok=True)
+
+
 def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _utc_now) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
     parser.add_argument("--runtime-dir", type=Path, required=True)
@@ -930,9 +964,12 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
     survivor = isinstance(report, SurvivorForwardReport)
     # A survivor report's file never takes the P6 report's name (`V2-P7-018`).
     out = reports_dir / (f"forward-survivor-{day}.json" if survivor else f"forward-{day}.json")
-    out.write_text(
-        json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False), encoding="utf-8"
-    )
+    if survivor:
+        _replace_whole(out, json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False))
+    else:
+        out.write_text(
+            json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False), encoding="utf-8"
+        )
     if arguments.json:
         printed = (
             {**payload, "this_run": dict(report.this_run)}
