@@ -27,7 +27,10 @@ read:
   (`SessionOrdinals`; ordinal 0 is the registered epoch, which carries no record, so it is at
   least 1);
 - `primary_horizon` and `secondary_horizons` are session counts. The record is the same record at
-  every horizon: a secondary horizon reads it with a shorter (or longer) label window;
+  every horizon: a secondary horizon reads it with a shorter (or longer) label window. The primary
+  horizon must be the one every survivor record declares (`SURVIVOR_HORIZON`, `20d`), which is
+  also what the daily command sizes its next-year calendar fetch for: a protocol that names
+  another is refused by name (`read_forward_protocol`'s `record_horizon`);
 - `primary_metric` is tested at the primary horizon; `secondary_metrics` are the other metrics
   tested at the primary horizon, and at each secondary horizon only `primary_metric` is tested.
   Those two, together, are the secondary family -- `q` is its false-discovery rate, which the
@@ -201,7 +204,12 @@ from openalpha_cn.backtest.outcome_statistics import (
     sign_flip_test,
 )
 from openalpha_cn.domain.alpha_model import PredictionBatch
-from openalpha_cn.domain.horizon import MAX_HORIZON_COUNT, HorizonUnit, ResearchHorizon
+from openalpha_cn.domain.horizon import (
+    MAX_HORIZON_COUNT,
+    HorizonUnit,
+    ResearchHorizon,
+    parse_horizon,
+)
 from openalpha_cn.domain.index_prices import IndexBar
 from openalpha_cn.domain.labels import LabelWindow, OutcomeLabel
 from openalpha_cn.domain.prediction_record import PredictionRecord
@@ -227,6 +235,7 @@ from openalpha_cn.strategy_survivor_market import (
 )
 from openalpha_cn.strategy_survivor_registration import (
     SURVIVOR_FAMILY,
+    SURVIVOR_HORIZON,
     survivor_record_is_bound,
 )
 from openalpha_cn.strategy_survivor_summary import SURVIVOR_WORDING
@@ -409,8 +418,35 @@ class SurvivorForwardProtocol(BaseModel):
         )
 
 
-def read_forward_protocol(settings: Mapping[str, object]) -> SurvivorForwardProtocol:
-    """The protocol in a registration's `settings`, or `SurvivorForwardError` naming why not."""
+def read_forward_protocol(
+    settings: Mapping[str, object], *, record_horizon: str = SURVIVOR_HORIZON
+) -> SurvivorForwardProtocol:
+    """The protocol in a registration's `settings`, or `SurvivorForwardError` naming why not.
+
+    `record_horizon` is the horizon the records it is read for declare -- every survivor record's
+    `SURVIVOR_HORIZON` by default -- and the protocol's `primary_horizon` must be it, in sessions
+    (seams review 5): the primary test is made at the horizon the records declare, which is also
+    the one the daily command sizes its next-year calendar fetch for. A secondary horizon reads
+    the same record over another window and is not pinned."""
+    protocol = _read_protocol_block(settings)
+    try:
+        declared = parse_horizon(record_horizon).sessions
+    except ValueError as error:
+        raise SurvivorForwardError(
+            f"record_horizon {record_horizon!r} is not a horizon in sessions: {error}"
+        ) from error
+    if protocol.primary_horizon != declared:
+        raise SurvivorForwardError(
+            f"the registration's {SURVIVOR_FORWARD_PROTOCOL_KEY} names the primary_horizon "
+            f"{protocol.primary_horizon}, and every survivor record declares the horizon "
+            f"{record_horizon} ({declared} sessions): the primary test is made at the horizon the "
+            "records declare -- the one the daily command sizes its calendar fetch for -- and a "
+            "protocol that tests another is not this record's protocol"
+        )
+    return protocol
+
+
+def _read_protocol_block(settings: Mapping[str, object]) -> SurvivorForwardProtocol:
     if not isinstance(settings, Mapping):
         raise SurvivorForwardError(
             f"the registration's settings are {type(settings).__name__}, not an object, so they "

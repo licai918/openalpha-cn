@@ -198,7 +198,14 @@ FORBIDDEN_WORDS: Final[tuple[str, ...]] = (
 
 
 def protocol(**changes: object) -> SurvivorForwardProtocol:
-    return read_forward_protocol({SURVIVOR_FORWARD_PROTOCOL_KEY: {**PROTOCOL_BLOCK, **changes}})
+    """The test protocol with `changes`, read for records that declare its primary horizon: the
+    layer's tests read short windows (h=2, h=3) off synthetic records, and the reader's pin of the
+    primary horizon to the records' declared one is tested on its own
+    (`test_a_protocol_whose_primary_horizon_is_not_the_records_declared_one_is_refused`)."""
+    block = {**PROTOCOL_BLOCK, **changes}
+    return read_forward_protocol(
+        {SURVIVOR_FORWARD_PROTOCOL_KEY: block}, record_horizon=f"{block['primary_horizon']}d"
+    )
 
 
 # --- records ---------------------------------------------------------------------------------
@@ -532,6 +539,40 @@ def test_an_invalid_protocol_block_is_refused_by_name(
         read_forward_protocol({SURVIVOR_FORWARD_PROTOCOL_KEY: {**PROTOCOL_BLOCK, **changes}})
 
     assert isinstance(refused.value, StrategyRegistrationError)
+
+
+def test_a_protocol_whose_primary_horizon_is_not_the_records_declared_one_is_refused() -> None:
+    """Seams review 5. Every survivor record declares its horizon (`SURVIVOR_HORIZON`, `20d`),
+    and the daily command sizes the next year's calendar fetch for it; a protocol whose primary
+    horizon is another would test a horizon no record declares. The reader refuses it by name,
+    naming both -- by default against the records' own declared horizon, and against the one a
+    caller names for records that declare another. A secondary horizon is read off the same
+    record with another window, and is not pinned."""
+    from openalpha_cn.domain.horizon import parse_horizon
+    from openalpha_cn.strategy_survivor_registration import SURVIVOR_HORIZON
+
+    assert parse_horizon(SURVIVOR_HORIZON).sessions == PROTOCOL_BLOCK["primary_horizon"] == 20
+    assert read_forward_protocol({SURVIVOR_FORWARD_PROTOCOL_KEY: dict(PROTOCOL_BLOCK)}) == (
+        read_forward_protocol(
+            {SURVIVOR_FORWARD_PROTOCOL_KEY: dict(PROTOCOL_BLOCK)}, record_horizon="20d"
+        )
+    )
+    ten = {**PROTOCOL_BLOCK, "primary_horizon": 10, "secondary_horizons": [5]}
+
+    with pytest.raises(SurvivorForwardError, match=r"primary_horizon 10.*20d.*20 sessions") as no:
+        read_forward_protocol({SURVIVOR_FORWARD_PROTOCOL_KEY: ten})
+
+    assert isinstance(no.value, StrategyRegistrationError)
+    with pytest.raises(SurvivorForwardError, match=r"primary_horizon 20.*10d"):
+        read_forward_protocol(
+            {SURVIVOR_FORWARD_PROTOCOL_KEY: dict(PROTOCOL_BLOCK)}, record_horizon="10d"
+        )
+    read = read_forward_protocol({SURVIVOR_FORWARD_PROTOCOL_KEY: ten}, record_horizon="10d")
+    assert read.primary_horizon == 10
+    with pytest.raises(SurvivorForwardError, match="record_horizon"):
+        read_forward_protocol(
+            {SURVIVOR_FORWARD_PROTOCOL_KEY: dict(PROTOCOL_BLOCK)}, record_horizon="20"
+        )
 
 
 # --- the witnessed records -------------------------------------------------------------------

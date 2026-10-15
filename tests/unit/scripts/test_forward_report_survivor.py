@@ -678,8 +678,12 @@ def _file(world: tds.World, batch: PredictionBatch) -> str:
             {**tds.grid.protocol_settings(), "survivor_forward_protocol": {**PROTOCOL, "k": 3}},
             "k: Extra inputs are not permitted",
         ),
+        (
+            settings_with(primary_horizon=10),
+            "primary_horizon 10, and every survivor record declares the horizon 20d",
+        ),
     ],
-    ids=["missing", "invalid", "extra-key"],
+    ids=["missing", "invalid", "extra-key", "another-primary-horizon"],
 )
 def test_a_registration_without_a_valid_forward_protocol_is_refused_by_name(
     tmp_path: Path,
@@ -706,6 +710,23 @@ def test_a_registration_without_a_valid_forward_protocol_is_refused_by_name(
     assert named in err
     assert "start date" not in err
     assert not (runtime / "reports").exists()
+
+
+def test_the_daily_commands_outcome_sessions_are_the_records_declared_horizon() -> None:
+    """Seams review 5 and 9. The daily command sizes the next year's calendar fetch for a record's
+    outcome window with `SURVIVOR_OUTCOME_SESSIONS` (`scripts/daily_selection.py`), re-typed
+    beside the horizon every survivor record declares (`SURVIVOR_HORIZON`); the forward report's
+    protocol reader pins its primary horizon to the same. Nothing else holds the two equal: a
+    record declared at another horizon with the fetch still sized for 20 sessions would leave a
+    January window's calendar unfetched."""
+    from openalpha_cn.domain.horizon import parse_horizon
+    from openalpha_cn.strategy_survivor_registration import SURVIVOR_HORIZON
+
+    declared = parse_horizon(SURVIVOR_HORIZON).sessions
+    assert declared == daily.SURVIVOR_OUTCOME_SESSIONS, (
+        f"daily_selection.SURVIVOR_OUTCOME_SESSIONS is {daily.SURVIVOR_OUTCOME_SESSIONS} and "
+        f"every survivor record declares {SURVIVOR_HORIZON}: change them together"
+    )
 
 
 # --- matured records ---------------------------------------------------------------------------
@@ -1946,7 +1967,23 @@ def _held_after(world: tds.World, day: date) -> list[str]:
 def short_world(
     short_evenings: tds.World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> tds.World:
-    """A copy of the four short evenings' runtime directory, under their registration."""
+    """A copy of the four short evenings' runtime directory, under their registration.
+
+    Their protocol's primary horizon (1 session) is not the horizon the records declare (`20d`),
+    which the report's protocol reader refuses (seams review 5;
+    `test_a_registration_without_a_valid_forward_protocol_is_refused_by_name`). These tests are
+    about the relative return's wiring on windows short enough for four evenings, so the reader
+    is told here that the records declare `1d`; nothing else of the report changes."""
+    from openalpha_cn import strategy_survivor_forward
+
+    real = strategy_survivor_forward.read_forward_protocol
+
+    def read_for_one_session_records(settings: Mapping[str, object], **_keywords: Any) -> Any:
+        return real(settings, record_horizon=f"{SHORT['primary_horizon']}d")
+
+    monkeypatch.setattr(
+        strategy_survivor_forward, "read_forward_protocol", read_for_one_session_records
+    )
     runtime = tmp_path / "runtime"
     shutil.copytree(short_evenings.runtime, runtime)
     tds._bind(monkeypatch, short_evenings.repo, short_evenings.market)
