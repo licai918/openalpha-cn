@@ -449,7 +449,7 @@ launchd 不会替你创建日志目录，加载前需要先建好它。把输出
 1. 同 P6 前提 1–3、5，登记文件用 `--registration` 指向幸存者登记（默认仍是 `docs/research/p6-registration.json`）。
 2. 面板里 `namechange` 与 `trade_cal` 从各自第一个已存年起逐年连续；面板落后最新已收盘交易日不超过 `max_panel_catch_up_sessions` 个交易日，否则第 2 步拒绝（见「重启」）。
 3. `adapter.epoch_session` 是第一次计划运行的**前一个**交易日，必须是已存日历里的开市日；还没有纸面账簿时，纪元到当天最多相隔 `1 + max_panel_catch_up_sessions` 个交易日。
-4. 纸面账簿目录 `RT/paper/` 在本地文件系统上（写锁是建议锁，NFS、SMB 上只和服务器的锁管理一样可靠），当前账户可写，支持硬链接（标记文件按「写临时文件、同步、硬链接到名字」写入，FAT、exFAT 和很多网络盘做不到，按名拒绝）。
+4. 运行目录在本地文件系统上（纸面账簿的写锁是建议锁，NFS、SMB 上只和服务器的锁管理一样可靠），当前账户可写，支持硬链接：纸面账簿的标记 `RT/paper/registration.json` 与每条记录的输入溯源 `RT/daily_survivor_provenance/<摘要>.json` 都按「写本次运行自己的临时文件、同步、硬链接到名字、再同步目录」写入，所以要么整份在、要么不在；FAT、exFAT 和很多网络盘做不到，按名拒绝（标记在第 5 步，溯源在第 7 步，见下表）。
 
 ### 手动运行
 
@@ -483,10 +483,10 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 | 2 panel update | 按 `as_of` 找当天交易日（库里没有日历时先建当年 `trade_cal`，1 次请求）；读当日日志；**在任何请求之前**把 `as_of`、`held`（锁下读到的账簿持仓）与 `held_from`（它们出自哪份快照）钉进日志；然后同 P6 的 `update_panel`，加上幸存者规则：上一年尾部、补建上限、上一年 `namechange` 的重建 | 1：纪元所在年的日历没存（打印存它的 `openalpha panel build … --dataset trade_cal`）；上一年的会话级分区没到上一年最后一个交易日（打印补齐上一年的 `panel build --incremental`，不论上限）；当年日历没存（打印 `panel build --dataset trade_cal`）；落后超过 `max_panel_catch_up_sessions`（打印补最老一批的 `panel build`）；面板已有当天之后的交易日、而这一天的晚间没有提交（一次比面板旧的 `--as-of`）；`panel build` 本身失败。除最后一种外，都在第 2 步取数之前拒绝（库里没有日历时为找当天交易日而建的那 1 次请求除外） |
 | 3 panel doctor | 同 P6（`namechange` 在内），在钉住的 `as_of` 上 | 1：不 clean；面板已被下一交易日的更新越过、这一天的晚间又没提交（下一次运行把它补结算掉，没有要做的） |
 | 4 factor build | 四个组合因子的 processed 档，在当天 16:30 及错过的交易日（至多 20 个）上构建，同 P6 第 4 步 | 1；超过 20 个时一行不写，给出分批的 `openalpha factor build` 命令 |
-| 5 paper head | 写入或核对只写一次的标记 `RT/paper/registration.json`，每次运行都 `open_book` 一次（同样的开账不写东西，等于每晚核对账簿就是登记的那本）；纪元当天只开账 | 1：标记缺失或属于另一登记、账簿不是日志钉住的那本、账簿已被更晚交易日的运行结算过、已提交的晚间丢了日志且已过集合竞价（见「重跑与补救」）——这几种在第 2 步发请求之前就查，0 次请求。纪元当天：开账、写结果，退出 0 |
+| 5 paper head | 写入或核对只写一次的标记 `RT/paper/registration.json`（`config_id`、账簿配置摘要、纪元、登记文件的 `registration_sha256`），每次运行都 `open_book` 一次（同样的开账不写东西，等于每晚核对账簿就是登记的那本）；纪元当天只开账 | 1，0 次请求：下面几种都在第 2 步发请求之前、这一天钉住之前就查（被拒的一天不留下钉住）。标记缺失、读不出，或属于另一登记——**标记绑定登记文件的 `registration_sha256`**：同一配置重新登记（改了受绑定路径下的代码，或改了 `settings`）就是**另一本账**，拒绝信息点名两份登记的 sha256，要换一个新的运行目录、用新的纪元；没有 `registration_sha256` 的标记（更早的构建写的）同样拒绝。账簿不是日志钉住的那本；账簿已被更晚交易日的运行结算过；已提交的晚间丢了日志且已过集合竞价；**账簿最近结算的交易日 D 是一个已提交的晚间、它的日志却没有 `result`**（那次运行在快照与摘要之间停下）：信息第一行 `rerun <D> first: its evening is committed but its journal is incomplete …`，接着是用 D 钉住的 `--as-of`（上海时间）重跑 D 的完整命令，最后一行 `then rerun this command`（见「重跑与补救」）；标记写不进去（目录不可写或不支持硬链接）。纪元当天：开账、写结果，退出 0 |
 | 6 facts | 用钉住的 `held` 读当天的事实（`build_facts_day`）并 `screen` | 1：覆盖率不够、缺 16:30 的因子构建、登记簿陈旧等，按名拒绝；晚间日一只可入选的证券都没有（只结算日不拒绝） |
-| 7 prediction | 先写输入溯源 `RT/daily_survivor_provenance/<摘要>.json`（只写一次），再把当天可入选证券的组合分登记为 `survivor_book_composite/v1`、20d；这一天已登记的记录在写任何东西之前原样复用 | 1：没有已登记的记录，而这次运行的时钟已到下一交易日 09:15；已登记的记录找不到它的溯源（从与预测库一起做的备份恢复溯源目录）；同一声明下的分数不同。钉住的 `as_of` 在 09:15 或之后（只结算日）：不登记，不是错误 |
-| 8 paper book | 先把账簿缺的交易日逐个补结算（不做决定，每结算一个立即提交并记进日志的 `catch_ups`），再跑当天的晚间，或者只结算当天 | 1，并打印到停下为止的文档，日志不写 `result`（修好后重跑就会跑它的晚间）：晚间还没提交、而这次运行的时钟已过下一交易日 09:15；补结算在某个交易日卡住（之前结算的照样记进日志）；持仓状态 `no_bar_in_reach`、`not_in_registry`、`not_yet_listed`、`board_unrecognised`（各带补救；`delisted` 不拒绝，按 D13 核销）；`PaperStateError`、`PaperStateStoreError`、`ValueError`（包括输入不同的重跑与账本冲突） |
+| 7 prediction | 先写输入溯源 `RT/daily_survivor_provenance/<摘要>.json`（只写一次，整份链接到名字：写临时文件、同步、硬链接、同步目录），再把当天可入选证券的组合分登记为 `survivor_book_composite/v1`、20d；这一天已登记的记录在写任何东西之前原样复用 | 1：没有已登记的记录，而这次运行的时钟已到下一交易日 09:15；已登记的记录找不到它的溯源（从与预测库一起做的备份恢复溯源目录）；同一声明下的分数不同；溯源写不进去——目录不可写，或文件系统不支持硬链接（`the provenance … cannot be written (…): … a local filesystem that supports hard links …`），临时文件删掉，记录不登记，什么都不留下；名字下已有一份内容不同的溯源。钉住的 `as_of` 在 09:15 或之后（只结算日）：不登记，不是错误 |
+| 8 paper book | 先把账簿缺的交易日逐个补结算（不做决定，每结算一个立即提交并记进日志的 `catch_ups`），再跑当天的晚间，或者只结算当天 | 1，并打印到停下为止的文档，日志不写 `result`（修好后重跑就会跑它的晚间）：晚间还没提交、而这次运行的时钟已过下一交易日 09:15；补结算在某个交易日卡住（之前结算的照样记进日志）；持仓状态 `no_bar_in_reach`、`not_in_registry`、`not_yet_listed`、`board_unrecognised`（各带补救；`delisted` 不拒绝，按 D13 核销）；`PaperStateError`、`PaperStateStoreError`、`ValueError`（包括输入不同的重跑与账本冲突）；已提交的一天在下一交易日的面板更新之后才来补完，事实只能在更晚的时刻读，读出的与提交的不同：信息末尾写明原因——更名按公告日期计时，晚间之后才取到（清晨复核或下一交易日的更新）、日期不晚于当天的更名在更晚的读取里看得见，而晚间看不见——晚间保持提交时的样子，这样的读取补不完它的日志 |
 | 9 summary | 写日志的 `paper` 与 `result`，打印摘要 | 1：日志不是幸存者日志（不是 UTF-8 JSON、是 P6 日志、schema 不对）或是另一登记写的，原样保留——这几种在第 2 步读日志时就查 |
 
 面板被占用（`PanelCatalogBusyError`、`PanelWriteConflictError`）时与 P6 一样退出 1，见「与其他进程共用面板时」。
@@ -502,9 +502,9 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 ### 运行目录里的文件
 
 - `RT/daily_survivor/<config_id 前 16 位>/<交易日>.json`：当日日志（`openalpha-daily-survivor/v1`），与 P6 的 `RT/daily_selection/` 分开。写入顺序：`as_of`、`held`、`held_from`、`registration`（任何请求之前）→ `panel` → `factors` → `prediction` → `catch_ups`（每补结算一个交易日写一次）→ `paper` 与 `result`（只在这一天完成时写）。
-- `RT/daily_survivor/<config_id 前 16 位>/<交易日>.morning.json`：清晨复核的文件，放在晚间日志旁边。读这个目录的程序只能读 `YYYY-MM-DD.json` 这样的名字（前向周报就是这样读的），**不要按 `*.json` 通配**。
-- `RT/daily_survivor_provenance/<摘要>.json`：每条记录的输入溯源（`daily-survivor-input-provenance/v1`），按内容寻址、只写一次，在记录之前写；晚到记录核查按（交易日，批次摘要）找它。
-- `RT/paper/`：纸面账簿。`registration.json` 是只写一次的标记（`config_id`、账簿配置摘要、纪元），把这个运行目录的账簿绑定到登记；`writer.lock` 是单写者锁，持有者退出（包括崩溃）时内核即释放；`snapshots/<交易日>.<snapshot_id>.json` 每个已结算交易日一份，只写一次；`ledger.sqlite3` 是纸面账簿自己的账本。
+- `RT/daily_survivor/<config_id 前 16 位>/<交易日>.morning.json` 与 `<交易日>.morning.<YYYY-MM-DD>.json`：清晨复核的文件，放在晚间日志旁边——第一次复核是前者，之后每个更晚的上海日历日各一份后者（见「清晨复核」）。读这个目录的程序只能读 `YYYY-MM-DD.json` 这样的名字（前向周报就是这样读的），**不要按 `*.json` 通配**。
+- `RT/daily_survivor_provenance/<摘要>.json`：每条记录的输入溯源（`daily-survivor-input-provenance/v1`），按内容寻址、只写一次，在记录之前写，整份链接到名字（见「前提」4）；晚到记录核查按（交易日，批次摘要）找它。
+- `RT/paper/`：纸面账簿。`registration.json` 是只写一次的标记（`config_id`、账簿配置摘要、纪元、登记文件的 `registration_sha256`），把这个运行目录的账簿绑定到**这一份登记文件**：同一配置的另一次登记就是另一本账，要另一个运行目录；`writer.lock` 是单写者锁，持有者退出（包括崩溃）时内核即释放；`snapshots/<交易日>.<snapshot_id>.json` 每个已结算交易日一份，只写一次；`ledger.sqlite3` 是纸面账簿自己的账本。
 - `RT/predictions/`：预测库，与 P6 共用；`RT/reports/`：前向周报与它的核查缓存。
 - 备份时 `RT/paper/`、`RT/daily_survivor/`、`RT/daily_survivor_provenance/` 与 `RT/predictions/` **一起**做：下面的补救都假定它们出自同一份备份。
 
@@ -545,19 +545,22 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 
 ### 清晨复核（`--morning-recheck`）
 
-在晚间之后、下一交易日 09:15 之前运行**一次**（例如 08:30），同样在钉住的 worktree 里：
+在晚间之后、下一交易日 09:15 之前运行（例如 08:30），同样在钉住的 worktree 里：
 
 ```bash
 UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv/bin/python" scripts/daily_selection.py --runtime-dir ~/openalpha-research --registration <幸存者登记文件> --morning-recheck
 ```
 
-加 `--json` 打印清晨文件本身。它总是发**一次** Tushare 请求：当晚交易日所在年份的 `namechange`（新年也只问这一年，因为事实适配器不读之后的年份）。取数之前，它用当晚自己钉住的时钟和持仓把当晚的事实再读一遍并与当晚的文档核对；取数之后，在清晨的时钟上再读一遍，把与当晚计划不同的地方打印为**建议**。纸面账簿从不改变（决定：账簿按晚间的计划走，分歧只记录、只打印）。它只写 `RT/daily_survivor/<cfg>/<交易日>.morning.json`、`namechange` 分区和面板的 catalog（分区登记）；预测库、账本、快照、晚间日志与溯源文件都不碰；措辞是「已登记研究配置的候选；没有下单；纸面账簿没有改动」。
+它复核的是这次运行的时钟（或 `--as-of`）那一刻已发布的最新交易日那一晚的计划。加 `--json` 打印这次运行的清晨文件本身（最新的一代）。它总是发**一次** Tushare 请求：那个交易日所在年份的 `namechange`（新年也只问这一年，因为事实适配器不读之后的年份）。取数之后，它在清晨的时钟上把那个交易日的事实再读一遍，与晚间读到的比较，把与那一晚计划不同的地方打印为**建议**。晚间读到的是什么：第一次复核在取数**之前**用当晚自己钉住的时钟和持仓把当晚的事实再读一遍，并与当晚的文档核对；之后的复核沿用前一次存下的那份（见下）。纸面账簿从不改变（决定：账簿按晚间的计划走，分歧只记录、只打印）。它只写清晨文件、`namechange` 分区和面板的 catalog（分区登记）；预测库、账本、快照、晚间日志与溯源文件都不碰；措辞是「已登记研究配置的候选；没有下单；纸面账簿没有改动」。
 
-- **看得见的**：公告日期不晚于当晚交易日的更名，主要是公告日期就是当天、却在晚间读取之后才发布的 ST 或退市风险更名。建议一栏是 `no change to tonight's plan among announcements dated through <交易日>` 或 `<n> difference(s) from tonight's plan among announcements dated through <交易日>`，之后逐条：`do not place BUY <代码>: <原因>`；`holding <代码> turned <原因>: the paper book sells it at the next evening`（只是停牌时写 `freezes it`，不卖）；`holding <代码> left the survivors (still eligible): the paper book sells it at the next evening, unless that evening's replacement cap defers it`；`watch list changed: …`；`counts changed: …`。在登记簿上市行之前就有日线的代码列在 `tolerated` 下，不算建议。
-- **看不见的**：公告日期晚于当晚交易日的更名（开盘前、周末或假期里发布的）。这次取数带来的、计划里的名字的这类更名列在 `notices: announced after <交易日>, not screened -- a notice, not advice` 下，格式 `<代码> <名称> <公告日> <变化>`：通知不要求做任何事，下一晚会筛它。新年时清晨只问当晚交易日那一年，所以公告日期在新一年的更名既不筛、也不通知。**「no change」从不证明没有 ST 公告。**
+- **一个上海日历日一次复核。** 一次复核属于它的 `as_of` 落在的上海日历日。第一次写 `RT/daily_survivor/<cfg>/<交易日>.morning.json`。在**更晚的日历日**再跑（仍在下一交易日 09:15 之前，例如周五晚间、周六做过一次、周一 08:30 再做），会重新复核：新的钉住、一次请求、一个新文件 `<交易日>.morning.<YYYY-MM-DD>.json`（日期是这次复核的上海日期），之前的文件原样保留，从不拿来顶替这一次——周六的「没有变化」看不见周日才发布、日期是周五的 ST 公告，周一的复核看得见。**同一个日历日**再跑：已完成的文件重印，0 请求、0 写入；钉住之后中断的，用钉住的 `as_of` 和文件里存的晚间读取继续。在比已有复核**更早的日历日**复核（例如 `--as-of` 拨回去）：第 2 步拒绝，`a check is never filed under an earlier date than one already made`，什么都不取、不写。
+- **后来的复核不在当晚的时钟上重读库。** 第一次复核取数之后，当年的 `namechange` 分区已被重述，在当晚的时钟上读库已经读不出当晚看到的样子。所以更晚日历日的复核沿用前一次复核在**它自己取数之前**存下的晚间读取，文件键 `carried_from` 写明出自哪个文件、哪个时刻（第一次是 `null`）；这份读取照样与当晚的文档核对，不符就点名它出自的文件拒绝。代价是：「库被清晨取数以外的东西改过」这道防线只有第一次复核有。
+- **打印的样子**：第一行 `morning re-check   the plan of <交易日>, read again on <日期> (<上海时刻>), before the next session's call auction -- advice only: …`；后来的复核多一行 `earlier check      read on <日期> (<时刻>), <文件名>, kept as it is: …`；然后是 `holdings compared`、`advice`、（变了的话）`counts`、（有的话）`tolerated`、`notices`、`tushare requests`、`wording`。计划按交易日称呼（`the plan of <交易日>`）：早上 08:30 时，「今晚的计划」已不是哪一晚的计划。
+- **看得见的**：公告日期不晚于那个交易日的更名，主要是公告日期就是当天、却在晚间读取之后才发布的 ST 或退市风险更名。建议一栏是 `no change to the plan of <交易日> among announcements dated through <交易日>` 或 `<n> difference(s) from the plan of <交易日> among announcements dated through <交易日>`，之后逐条：`do not place BUY <代码>: <原因>`（顺延的买单后面加 `(a buy carried from an earlier session)`）；`holding <代码> turned <原因>: the paper book sells it at the next evening`（只是停牌时是 `the paper book freezes it at the next evening (it cannot trade while suspended; it is not sold)`）；`holding <代码> left the survivors (still eligible): the paper book sells it at the next evening, unless that evening's replacement cap defers it`；`watch list changed: …`。合格数、幸存者数、名称语料的 ST 与退市计数变了的，单独一行 `counts`（`<计数> <晚间> -> <清晨>`，后面说明 `information, not advice`），**不算一条差异**：计划之外的一个名字变成 ST，只动这些计数，不要求你做任何事。在登记簿上市行之前就有日线的代码列在 `tolerated` 下，不算建议。
+- **看不见的**：公告日期晚于那个交易日的更名（开盘前、周末或假期里发布的）。库里（取数之后）计划里的名字的这类更名列在 `notices` 一行（`announced after <交易日>, not screened -- a notice, not advice: …`）下，每条 `<代码> <名称> <公告日> <变化>`：通知不要求做任何事，下一晚会筛它。新年时清晨只问那个交易日所在的一年，所以公告日期在新一年的更名既不筛、也不通知。**「no change」从不证明没有 ST 公告。**
 - 文件里的 `held` 是当晚钉住的持仓（当晚成交与结算之前的账簿；第一晚是 `[]`，虽然那晚的买单成交后就有持仓）；建议所说的持仓是结算之后的账簿，文件键 `holdings_compared`，打印为 `holdings compared`。
-- **重跑**：已完成的清晨文件只在 09:15 之前重印，0 请求、0 写入（先查截止时刻）；钉住之后中断的，用钉住的 `as_of` 和文件里存的晚间读取继续。
-- **退出 1**（每条都写明是第几步，并打印已花的请求；步骤是 registration、preconditions、panel update、facts、summary）：时钟或（钉住的）`--as-of` 已到 09:15；`--as-of` 不晚于当晚自己钉住的时钟；当晚没有完整的日志；那天是纪元日或只结算日（没有计划）；清晨文件是另一晚或另一登记的，或是手改过的已完成文件（原样保留）；纸面账簿的写锁被占用；漂移——库里已经给不出当晚的事实，或某个计划买入、顺延买入、观察名单上的名字在重读里不再是幸存者（这种情况什么都不取）。
+- **重跑**：同一个日历日的已完成文件只在 09:15 之前重印，0 请求、0 写入（截止时刻在重印之前就查）；钉住之后中断的，用钉住的 `as_of` 和文件里存的晚间读取继续。
+- **退出 1**（每条都写明是第几步，并打印已花的请求；步骤是 registration、preconditions、panel update、facts、summary）：时钟或（钉住的）`--as-of` 已到 09:15；`--as-of` 不晚于当晚自己钉住的时钟；比已有的复核更早的日历日；那个交易日没有晚间日志（信息说先跑晚间：`Run the evening first -- the same command without --morning-recheck -- before 09:15 of the next session, to plan its open`）或日志没写完；那天是纪元日或只结算日（没有计划）；清晨文件是另一晚或另一登记的，或是手改过的已完成文件，或名字里的日期与它的 `as_of` 不符（原样保留）；纸面账簿的写锁被占用；漂移——库里（或沿用的那份晚间读取里）已经给不出当晚的事实，或某个计划买入、顺延买入、观察名单上的名字在重读里不再是幸存者（这种情况什么都不取）。
 - **退出 2，0 次请求**：P6 登记（P6 没有清晨计划）；`--full-update`、`--top`、`--dataset`。与 `--factor-gaps`、`--pin-worktree`、`--launchd-plist` 同用是 argparse 的退出 2。
 - 给 `V2-P7-006`：清晨取数之后，当年的 `namechange` 分区被重述，一条当天发布晚了的 ST 行在当晚自己的时钟上也看得见了，晚到记录核查于是把那一晚如实登记的记录判为 `unverifiable / recompute_differs / namechange:<年> (its rows through <交易日> were restated)`。不跑清晨复核，下一晚自己的面板更新给出同样的结论。所以每一条当天发布晚了的 ST 公告都会让那一天的记录变成 UNVERIFIABLE，协议要报告它们的占比。
 
@@ -567,7 +570,9 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 - 日志没写完：按钉住的 `as_of` 与 `held` 从停下的地方继续——`panel` 已记录就跳过第 2 步，第 4 步跳过已建的时点，记录复用；每次运行在发请求之前都核对账簿仍是钉住的那本。
 - 被拒的一天不写 `result`：修好之后重跑，就会跑它的晚间（如果还在 09:15 之前）。
 - **永远不要删除已提交那一天的日志。** 丢了的话，从与纸面账簿目录一起做的备份恢复。没有备份：在下一交易日 09:15 之前照常再跑这一天，它重新推导已提交的晚间，纸面账簿一字不写；09:15 或之后再跑，会在第 5 步（paper head）被拒，信息里点名丢失的日志并给出 `--as-of <交易日>T18:30:00+08:00`：用这个 `--as-of` 重跑，这一天又是晚间，它找到已提交的交易日、重新推导、不写账簿，并打印集合竞价已过。这个补救要在下一交易日的晚间运行之前做。
-- 第 9 步拒绝的日志（读不出、P6 日志、schema 不对）：照信息做——`move it aside (keep it, it may be this day's own journal, damaged) and run the day again`：挪开但保留，重跑会重新钉一份。
+- **前一晚已提交、日志没写完**（那次运行在快照与摘要之间停下）：下一个交易日的运行在钉住之前、任何请求之前，在第 5 步拒绝：`rerun <D> first: its evening is committed but its journal is incomplete …`，下一行是重跑 D 的完整命令——`UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv/bin/python" scripts/daily_selection.py --runtime-dir <RT> --registration <登记> --repo <检出> --as-of <D 钉住的时刻，上海时间>`——再一行 `then rerun this command`。照做：D 的重跑按它自己钉住的时钟仍是晚间，找到已提交的交易日，重新推导、纸面账簿一字不写，把日志补完（过了集合竞价，计划下面会多那一行）；然后再跑原来的命令。之所以拒绝而不是越过：一旦更晚的交易日把账簿推过 D，D 的计划、订单和决定就再也写不进任何文档。（D 的快照若既没有留下任何单、首次决定又在更早的交易日——这与补结算留下的快照分不开——只有 D 与这一天之间没有别的交易日日志时才这样拒绝。）这次拒绝也打印上面「被拒的一天对账户意味着什么」那一段。
+- **登记换了，就是另一本账。** 纸面账簿的标记绑定登记文件的 `registration_sha256`。上线之后改了受绑定路径下的代码（要重新登记）或改了登记的 `settings`，登记文件的 sha256 就变了：第 5 步在任何请求之前拒绝，信息点名两份登记的 sha256。新登记要在**新的运行目录**里、用**新的纪元**（新登记第一次计划运行的前一个交易日）开一本新账；旧目录的账簿仍属于旧登记，不要把新登记指向它。一次修复能不能让账簿跨登记延续，由 `V2-P7-006` 决定；今天没有任何东西能做到。
+- 第 9 步拒绝的日志（读不出、P6 日志、schema 不对）：照信息做——`move it aside -- keep it, it may be this day's own journal, damaged -- and run the day again`：挪开但保留，重跑会重新钉一份。
 - 账簿与日志钉住的不符（纸面账簿目录被换过、移动过或恢复过）：第 5 步拒绝并给出补救——从同一份备份同时恢复快照与账本，或者把这一天的日志挪开后重跑，让这一天钉住现在的账簿。
 
 ### 重启：长时间停跑之后的第一次运行
@@ -594,7 +599,7 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 
 - `--pin-worktree` 不变：`--registration` 指向已提交的幸存者登记。
 - `--launchd-plist` 生成的任务**固定**传 `--registration <worktree>/docs/research/p6-registration.json`，没有改它的选项：幸存者登记若不在这个路径，按它装上的定时任务跑的是 P6 登记。登记文件放在哪里由 `V2-P7-006` 决定；那之前不要安装（本来也暂停）。
-- 清晨复核没有定时任务，要手动在 09:15 之前跑。
+- 清晨复核没有定时任务（生成的配置只有工作日 18:30 的晚间），要手动在 09:15 之前跑，或者等 `V2-P7-006` 定下怎么定时。像定时任务那样从别处调用钉住的 worktree 时，用它自己的解释器和脚本，并把检出与登记都写成 worktree 里的绝对路径：`<worktree>/.venv/bin/python <worktree>/scripts/daily_selection.py --runtime-dir <RT> --repo <worktree> --registration <worktree>/<幸存者登记文件> --morning-recheck`，经 `uv run --no-sync --env-file .env` 读 `.env`、工作目录是 worktree（与 `--launchd-plist` 生成的晚间任务同一个形状）。
 
 ### 已知局限（幸存者形态）
 
