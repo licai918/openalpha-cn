@@ -666,6 +666,9 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             # wording in every section -- two plain strings, no reader.
             "strategy_survivor_registration.SURVIVOR_FAMILY",
             "strategy_survivor_summary.SURVIVOR_WORDING",
+            # Seams review 5: the protocol reader pins its primary horizon to the horizon every
+            # survivor record declares -- one plain string, no reader.
+            "strategy_survivor_registration.SURVIVOR_HORIZON",
         }
     ),
     "openalpha_cn.strategy_survivor_market": frozenset(
