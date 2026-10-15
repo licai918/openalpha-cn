@@ -56,7 +56,7 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from fractions import Fraction
 from pathlib import Path
 from typing import Any, Final
@@ -613,7 +613,8 @@ def test_turnover_is_one_sided_filled_notional_over_twice_mean_equity_at_244_ses
     (600060.SH), 9,000.00 (600070.SH), 8,000.00 (600080.SH) = 62,200.00; sells 9,000.00 (600010.SH)
     + 9,090.00 (600030.SH) = 18,090.00; 80,290.00 in all. The two write-offs have no execution and
     add nothing: counting them at their marks would add 9,000.00 and 9,200.00. One-sided turnover
-    is 80,290.00 / (2 x 89,417.46 mean equity) over the six sessions; annualised, times 244 / 6."""
+    is 80,290.00 / (2 x 89,417.46 mean equity) over the six sessions. Six sessions are too short
+    to annualise (I6: fewer than 60), so nothing is: the rule's own test is below."""
     turnover = ledger_of(story)["turnover"]
 
     assert SESSIONS_PER_YEAR == 244
@@ -627,7 +628,7 @@ def test_turnover_is_one_sided_filled_notional_over_twice_mean_equity_at_244_ses
     assert turnover["mean_equity"] == fixed(MEAN_EQUITY, 2)
     cumulative = Fraction(80290) / (2 * MEAN_EQUITY)
     assert turnover["one_sided_turnover"] == fixed(cumulative)
-    assert turnover["annualised"] == fixed(cumulative * 244 / SESSION_COUNT)
+    assert turnover["annualised"] is None
     assert turnover["filled_notional"]["total"] != "98490.00"
 
 
@@ -646,17 +647,157 @@ def test_costs_are_split_by_component_with_their_annualised_share_of_mean_equity
         "stamp_duty": "9.05",
     }
     assert costs["total"]["total"] == "54.85"
-    years = Fraction(SESSION_COUNT, 244)
-    for name, amount in (
-        ("commission", "45.00"),
-        ("slippage", "0.80"),
-        ("stamp_duty", "9.05"),
-        ("total", "54.85"),
-    ):
-        assert costs[name]["annualised_share_of_mean_equity"] == fixed(
-            Fraction(amount) / MEAN_EQUITY / years
-        ), name
+    for name in ("commission", "slippage", "stamp_duty", "total"):
+        # Six sessions are too short to annualise (I6); the rule's own test is below.
+        assert costs[name]["annualised_share_of_mean_equity"] is None, name
     assert "transfer_fee" in costs["slippage"]["ledger_field"]
+
+
+# The initial build (I6): the S1 evening was the book's first decision, so its three buys --
+# 600010.SH 900 x 10.00, 600020.SH 800 x 11.50, 600040.SH 900 x 10.00, filled at the S2 open, 5.00
+# commission and 0.09 slippage each -- are the one-off build; every other fill is steady state.
+INITIAL_NOTIONAL: Final[Fraction] = Fraction("27200.00")
+INITIAL_COSTS: Final[Mapping[str, str]] = {
+    "commission": "15.00",
+    "slippage": "0.27",
+    "stamp_duty": "0.00",
+    "total": "15.27",
+}
+ALL_COSTS: Final[Mapping[str, str]] = {
+    "commission": "45.00",
+    "slippage": "0.80",
+    "stamp_duty": "9.05",
+    "total": "54.85",
+}
+
+
+def test_the_initial_build_is_reported_on_its_own_and_nothing_is_annualised_under_60_sessions(
+    story: Story,
+) -> None:
+    """I6. The fills of the buys the book's first decision placed (`INITIAL_BUILD`, found by
+    each fill's ledger id among the orders the snapshot before its session held pending) are the
+    one-off build: 27,200.00 of the 80,290.00 filled, 15.27 of the 54.85 paid. They are reported
+    on their own, and the steady state is everything else. Six settled sessions are fewer than
+    60, so nothing is annualised: the record says it is too short to annualise, and why."""
+    ledger = ledger_of(story)
+    turnover, costs = ledger["turnover"], ledger["costs"]
+
+    assert strategy_survivor_paper_report.MINIMUM_ANNUALISED_SESSIONS == 60
+    assert turnover["initial_build"] == {
+        "fills": 3,
+        "filled_notional": "27200.00",
+        "one_sided_turnover": fixed(INITIAL_NOTIONAL / (2 * MEAN_EQUITY)),
+    }
+    assert turnover["steady_state"] == {
+        "fills": 6,
+        "filled_notional": "53090.00",
+        "one_sided_turnover": fixed((80290 - INITIAL_NOTIONAL) / (2 * MEAN_EQUITY)),
+    }
+    assert turnover["annualised"] is None
+    too_short = "too short to annualise: 6 settled sessions, fewer than 60"
+    assert turnover["annualisation"] == too_short
+    assert costs["annualisation"] == too_short
+    for name, paid in ALL_COSTS.items():
+        initial = INITIAL_COSTS[name]
+        assert (costs[name]["total"], costs[name]["initial_build"]) == (paid, initial), name
+        assert costs[name]["steady_state"] == fixed(Fraction(paid) - Fraction(initial), 2), name
+        assert costs[name]["annualised_share_of_mean_equity"] is None, name
+    rule = strategy_survivor_paper_report.ANNUALISATION_RULE
+    assert turnover["annualisation_rule"] == costs["annualisation_rule"] == rule
+    assert "INITIAL_BUILD" in rule and "244" in rule and "60" in rule
+    assert rule in " ".join((strategy_survivor_paper_report.__doc__ or "").split())
+
+
+def test_a_fill_of_no_order_the_snapshot_before_it_held_pending_is_refused(story: Story) -> None:
+    """A fill is an attempt of an order the book held pending the evening before; one whose ledger
+    id names no such order cannot be told to be the build's or not, and does not describe this
+    book."""
+    rows = list(story.transitions)
+    index = next(
+        n for n, row in enumerate(rows) if row.status == "filled" and row.execution is not None
+    )
+    stray = rows[index].order.model_copy(update={"order_id": "tor_stray@2021-03-03"})
+    rows[index] = rows[index].model_copy(update={"order": stray})
+
+    with pytest.raises(PaperRecordError, match=r"tor_stray@2021-03-03.*pending"):
+        record_of(story, transitions=rows)
+
+
+QUIET_SESSIONS: Final[int] = 54
+"""The sessions after S6 the long book settles with nothing to trade: six plus these are 60."""
+
+
+@pytest.fixture(scope="module")
+def long_story(tmp_path_factory: pytest.TempPathFactory) -> Story:
+    """The story, and then 54 weekdays from 2021-03-10 settled as missed sessions by the real
+    catch-up, every holding (600060.SH, 600070.SH, 600080.SH) quoted at its S6 close: nothing is
+    pending after S6, so nothing trades, and every one of them ends at S6's 81,835.15."""
+    from openalpha_cn.backtest.paper_evening import run_catch_up
+
+    built = build_story(tmp_path_factory.mktemp("long-story"))
+    book = built.results["book"]
+    day, index = S6, 6
+    for _ in range(QUIET_SESSIONS):
+        day += timedelta(days=3 if day.weekday() == 4 else 1)
+        index += 1
+        run_catch_up(
+            store=book.store,
+            ledger=book.ledger,
+            make_portfolio=evenings.make_portfolio,
+            config=BOOK,
+            session=day,
+            session_index=index,
+            market=evenings.market(
+                evenings.quiet(F, day, "10.00"),
+                evenings.quiet(G, day, "15.00"),
+                evenings.quiet(H, day, "8.00"),
+            ),
+            delisted=(),
+            observed_on=day,
+        )
+    snapshots = tuple(load_snapshot(book.store, session) for session in book.store.sessions())
+    return Story(snapshots, tuple(book.ledger.list()), built.journals, built.results)
+
+
+def test_at_60_settled_sessions_only_the_steady_state_flow_is_annualised_and_at_59_nothing(
+    long_story: Story,
+) -> None:
+    """I6, the rule (module docstring): with 60 settled sessions the steady-state flow -- every
+    fill but the initial build's -- is annualised, its total over the mean equity of the settled
+    sessions times 244 / 60; the initial build is never annualised. One session fewer, 59, is too
+    short, and nothing is."""
+    assert len(long_story.snapshots) == 1 + SESSION_COUNT + QUIET_SESSIONS == 61
+    assert long_story.transitions[-1].after.as_of <= S6
+    assert all(item.book.equity == D("81835.15") for item in long_story.snapshots[7:])
+    mean = (
+        sum((Fraction(v[0]) for v in BOOKED.values()), Fraction(0))
+        + QUIET_SESSIONS * Fraction("81835.15")
+    ) / 60
+
+    ledger = ledger_of(long_story)
+    turnover, costs = ledger["turnover"], ledger["costs"]
+
+    steady = (80290 - INITIAL_NOTIONAL) / (2 * mean)
+    assert turnover["sessions"] == 60
+    assert turnover["steady_state"]["one_sided_turnover"] == fixed(steady)
+    assert turnover["annualised"] == fixed(steady * 244 / 60)
+    assert turnover["annualised"] != fixed(Fraction(80290) / (2 * mean) * 244 / 60)
+    assert turnover["annualisation"] == (
+        "annualised over 60 settled sessions at 244 a year, the initial build left out"
+    )
+    for name, paid in ALL_COSTS.items():
+        steady_cost = Fraction(paid) - Fraction(INITIAL_COSTS[name])
+        assert costs[name]["annualised_share_of_mean_equity"] == fixed(
+            steady_cost / mean * 244 / 60
+        ), name
+
+    short = ledger_of(long_story, snapshots=long_story.snapshots[:60])
+    assert short["turnover"]["sessions"] == 59
+    assert short["turnover"]["annualised"] is None
+    assert short["turnover"]["annualisation"] == (
+        "too short to annualise: 59 settled sessions, fewer than 60"
+    )
+    assert short["costs"]["total"]["annualised_share_of_mean_equity"] is None
 
 
 def test_the_costs_by_component_equal_the_change_in_fees_paid(story: Story) -> None:
@@ -1298,6 +1439,118 @@ def test_the_window_chain_compounds_book_and_benchmarks_and_a_gap_breaks_it(
             "reason": w5["reason"],
         },
     ]
+
+
+def test_a_chain_says_how_much_of_its_book_return_the_write_offs_inside_it_took(
+    story: Story,
+) -> None:
+    """I7. A chain entering on S1 and exiting on S3 holds 600040.SH's write-off on S3, which
+    removed the 9,000.00 it was marked at: 9.00 points of the chain's -8.94% book return, over the
+    100,000.00 it entered with. One entering on S4 -- the session 600020.SH was written off on,
+    which its entry equity already holds -- and exiting on S6 holds none. One from S3 to S5 holds
+    600020.SH's, 9,200.00 of S3's 91,060.05."""
+    first, second = record_of(
+        story,
+        windows=[
+            window("prd_w1", S1, S2, "0.010", "0.020"),
+            window("prd_w2", S2, S3, "-0.020", "0.010"),
+            window("prd_w3", S4, S5, "0.030", "-0.010"),
+            window("prd_w4", S5, S6, "0.005", "0.015"),
+        ],
+    )["relative"]["chains"]
+    (across,) = record_of(story, windows=[window("prd_x", S3, S5, "0.0", "0.0")])["relative"][
+        "chains"
+    ]
+
+    assert first["write_offs"] == {
+        "count": 1,
+        "equity_removed": "9000.00",
+        "share_of_entry_equity": fixed(Fraction("9000.00") / Fraction("100000.00")),
+    }
+    assert second["write_offs"] == {
+        "count": 0,
+        "equity_removed": "0.00",
+        "share_of_entry_equity": "0.000000",
+    }
+    assert across["write_offs"] == {
+        "count": 1,
+        "equity_removed": "9200.00",
+        "share_of_entry_equity": fixed(Fraction("9200.00") / Fraction("91060.05")),
+    }
+    relative = record_of(story, windows=[window("prd_w1", S1, S2, "0.010", "0.020")])["relative"]
+    assert "entry equity" in relative["write_off_basis"]
+
+
+def test_the_report_prints_money_in_yuan_returns_in_percent_and_the_initial_build_apart(
+    story: Story, long_story: Story
+) -> None:
+    """I6 and I7, as the weekly report prints the record (`strategy_survivor_forward`'s lines of
+    the two sections, read from the record alone): equity in yuan with the ledger's caveat for a
+    holding after an adjustment; turnover and costs with the one-off initial build beside them
+    and the steady state annualised only from 60 settled sessions on; the write-offs' cost basis
+    beside their count; every chain's returns as percentages, and the points of its book return
+    the write-offs inside it took."""
+    from openalpha_cn.strategy_survivor_forward import _ledger_lines, _relative_lines
+
+    record = record_of(
+        story,
+        windows=[
+            window("prd_w1", S1, S2, "0.010", "0.020"),
+            window("prd_w2", S2, S3, "-0.020", "0.010"),
+            window("prd_w3", S4, S5, "0.030", "-0.010"),
+            window("prd_w4", S5, S6, "0.005", "0.015"),
+        ],
+    )
+
+    lines = _ledger_lines(record["paper_ledger"])
+
+    too_short = "too short to annualise: 6 settled sessions, fewer than 60"
+    assert (
+        f"  equity (yuan): opening 100000.00, final 81835.15, mean {fixed(MEAN_EQUITY, 2)}, "
+        "minimum 81835.15; a holding's share count and mark are the paper ledger's, which after "
+        "an adjustment (a bonus issue, a cash dividend) are not the account's"
+    ) in lines
+    assert (
+        f"  turnover: one-sided {fixed(Fraction(80290) / (2 * MEAN_EQUITY))} over 6 settled "
+        f"sessions, of which the one-off initial build "
+        f"{fixed(INITIAL_NOTIONAL / (2 * MEAN_EQUITY))} (3 fills); annualised, the initial "
+        f"build left out: {too_short}"
+    ) in lines
+    assert (
+        "  costs: 54.85 yuan, of which the one-off initial build 15.27 yuan; annualised share of "
+        f"mean equity, the initial build left out: {too_short}"
+    ) in lines
+    assert (
+        "  write-offs: 2, cost basis 18210.18 yuan in all (equity removed 18200.00 yuan, at "
+        "their last marks)"
+    ) in lines
+    assert not any("ledger units)" in line for line in lines)
+    assert _relative_lines(record["relative"])[2:4] == [
+        "  chain 2021-03-02..2021-03-04 (2 windows): book -8.94%, investable EW -1.02%, CSI 500 "
+        "3.02%; the write-offs inside it took 9.00 points of the book's return (1 written off, "
+        "9000.00 yuan removed)",
+        "  chain 2021-03-05..2021-03-09 (2 windows): book -0.02%, investable EW 3.52%, CSI 500 "
+        "0.49%",
+    ]
+
+    long = _ledger_lines(ledger_of(long_story))
+    mean = (
+        sum((Fraction(v[0]) for v in BOOKED.values()), Fraction(0))
+        + QUIET_SESSIONS * Fraction("81835.15")
+    ) / 60
+    steady = (80290 - INITIAL_NOTIONAL) / (2 * mean)
+    share = (Fraction("54.85") - Fraction("15.27")) / mean * 244 / 60
+    turnover = next(line for line in long if line.startswith("  turnover:"))
+    costs = next(line for line in long if line.startswith("  costs:"))
+    assert turnover.endswith(
+        f"annualised, the initial build left out: {fixed(steady * 244 / 60)} a year over 60 "
+        "settled sessions"
+    )
+    percent = Decimal(fixed(share)) * 100
+    assert costs.endswith(
+        "annualised share of mean equity, the initial build left out: "
+        f"{percent.quantize(CENT, rounding=ROUND_HALF_UP)}% a year over 60 settled sessions"
+    )
 
 
 def test_a_window_whose_entry_is_missing_is_named_and_breaks_the_chain(story: Story) -> None:

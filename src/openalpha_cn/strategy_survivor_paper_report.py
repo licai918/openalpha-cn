@@ -67,6 +67,24 @@ name that went ex-rights before it was delisted is a different number. **Real cl
 benchmarks the caller supplies, gross buy-and-hold over the same closes as the prediction record's
 labels, and nothing else. Every block says which it is in.
 
+## The initial build and what is annualised (I6)
+
+The book's first decision buys up to N names at once, and that one-off build is about one whole
+turn of the book: annualised inside the flow it would read as a turnover and a cost the book
+never runs at. So the record says, exactly:
+
+the one-off initial build -- every fill of a buy whose reason is INITIAL_BUILD, the buys the
+book's first decision placed -- is reported on its own and never annualised; the steady state is
+every other fill; only the steady state is annualised, its total over the mean equity of the
+settled sessions, times 244 over the number of settled sessions, and only when at least 60
+sessions are settled: under 60 nothing is annualised, and the record says it is too short to
+annualise.
+
+A fill is told to be the build's by its ledger id: it is an attempt (`paper_step.attempt_id`) of
+an order the snapshot before its session held pending, and that order carries its reason. A fill
+whose id names no order pending the evening before does not describe this book, and is refused.
+The turnover and cost totals over every fill stay as they are; only what is annualised changes.
+
 ## What it does not say
 
 The block statistics are descriptive: no test, no p-value, no verdict, no comparison with any
@@ -91,11 +109,14 @@ from typing import Any, Final, Literal
 
 from openalpha_cn.backtest.paper_settlement import WRITE_OFF_REASON
 from openalpha_cn.backtest.paper_state import PaperBookSnapshot
+from openalpha_cn.backtest.paper_step import attempt_id
 from openalpha_cn.domain.portfolio import PortfolioTransition
 from openalpha_cn.strategy_survivor_summary import SURVIVOR_DOCUMENT_KIND, SURVIVOR_WORDING
 
 __all__ = [
+    "ANNUALISATION_RULE",
     "JOURNAL_SCHEMA",
+    "MINIMUM_ANNUALISED_SESSIONS",
     "SESSIONS_PER_YEAR",
     "WINDOW_LABEL",
     "BenchmarkWindow",
@@ -110,6 +131,23 @@ holds the two spellings equal, because the script cannot be imported from here."
 
 SESSIONS_PER_YEAR: Final[int] = 244
 """The protocol's sessions in a year, the one every annualised figure of the record uses."""
+
+MINIMUM_ANNUALISED_SESSIONS: Final[int] = 60
+"""Fewer settled sessions than this and nothing is annualised (I6): too short to annualise."""
+
+INITIAL_BUILD_REASON: Final[str] = "INITIAL_BUILD"
+"""The reason of the buys the book's first decision places (`domain/survivor_policy`)."""
+
+ANNUALISATION_RULE: Final[str] = (
+    "the one-off initial build -- every fill of a buy whose reason is INITIAL_BUILD, the buys the "
+    "book's first decision placed -- is reported on its own and never annualised; the steady "
+    "state is every other fill; only the steady state is annualised, its total over the mean "
+    f"equity of the settled sessions, times {SESSIONS_PER_YEAR} over the number of settled "
+    f"sessions, and only when at least {MINIMUM_ANNUALISED_SESSIONS} sessions are settled: under "
+    f"{MINIMUM_ANNUALISED_SESSIONS} nothing is annualised, and the record says it is too short to "
+    "annualise"
+)
+"""The rule, word for word as the module docstring states it, carried by the blocks it governs."""
 
 WINDOW_LABEL: Final[str] = (
     "the book is net of the protocol's costs and cash; the benchmarks are gross buy-and-hold over "
@@ -145,6 +183,12 @@ _ATTEMPTS_BASIS: Final[str] = (
 _DECISIONS_BASIS: Final[str] = (
     "evenings only: a catch-up or a settle-only session settles without a decision, so every "
     "count here is over the evenings counted below, never over every settled session"
+)
+_CHAIN_WRITE_OFFS: Final[str] = (
+    "a chain's write_offs are the write-offs on the sessions after its entry and on or before its "
+    "exit: each removed from the book's equity what the holding was marked at, and their total "
+    "over the chain's entry equity is the part of the chain's book return they took on the "
+    "sessions they were written off (an additive share of the equity's change, in ledger units)"
 )
 _NO_WINDOW: Final[str] = (
     "no window runs from {start} to {end}: the chain is broken, and the returns on either side "
@@ -244,7 +288,7 @@ def paper_record(
             "illiquid_exits": _illiquid_exits(days),
             "reconciliation": _reconciliation(rows, days),
         },
-        "relative": _relative(book, windows),
+        "relative": _relative(book, windows, _removals(book, rows)),
     }
 
 
@@ -375,10 +419,29 @@ class _Curve:
             return None
         return sum((point.equity for point in self.points), _ZERO) / len(self.points)
 
+    @property
+    def annualisable(self) -> bool:
+        """Whether enough sessions are settled to annualise anything (`ANNUALISATION_RULE`)."""
+        return self.sessions >= MINIMUM_ANNUALISED_SESSIONS
+
+    @property
+    def annualisation(self) -> str:
+        """What the record says of its annualised figures (`ANNUALISATION_RULE`)."""
+        if not self.annualisable:
+            return (
+                f"too short to annualise: {self.sessions} settled sessions, fewer than "
+                f"{MINIMUM_ANNUALISED_SESSIONS}"
+            )
+        return (
+            f"annualised over {self.sessions} settled sessions at {SESSIONS_PER_YEAR} a year, the "
+            "initial build left out"
+        )
+
     def per_year(self, amount: Fraction) -> Fraction | None:
-        """`amount`, a total over the record's sessions, as a share of mean equity per year."""
+        """`amount`, a steady-state total over the record's sessions, as a share of mean equity
+        per year -- `None` when too few sessions are settled (`ANNUALISATION_RULE`)."""
         mean = self.mean_equity
-        if mean is None or mean <= 0:
+        if mean is None or mean <= 0 or not self.annualisable:
             return None
         return amount / mean * SESSIONS_PER_YEAR / len(self.points)
 
@@ -392,6 +455,8 @@ _Kind = Literal["fill", "rejection", "write_off"]
 class _Row:
     transition: PortfolioTransition
     kind: _Kind
+    initial_build: bool = False
+    """A fill of a buy the book's first decision placed (`ANNUALISATION_RULE`)."""
 
     @property
     def order_id(self) -> str:
@@ -429,12 +494,34 @@ class _Rows:
             index = index_of.get(transition.after.as_of)
             if index is None:
                 unsettled.append(transition.order.order_id)
-            else:
-                grouped[index].append(_Row(transition, _kind_of(transition)))
+                continue
+            kind = _kind_of(transition)
+            initial = kind == "fill" and _filled_reason(transition, book, index) == (
+                INITIAL_BUILD_REASON
+            )
+            grouped[index].append(_Row(transition, kind, initial))
         return cls(
             by_session={index: tuple(rows) for index, rows in sorted(grouped.items())},
             unsettled=tuple(sorted(unsettled)),
         )
+
+
+def _filled_reason(transition: PortfolioTransition, book: _Book, index: int) -> str:
+    """The reason of the order the fill `transition` of session `index` is an attempt of: one of
+    the orders the snapshot before the session held pending, by its attempt id there."""
+    session = book.by_index[index].session
+    pending = {
+        attempt_id(item.order, session): item.order.reason
+        for item in book.by_index[index - 1].pending_orders
+    }
+    order_id = transition.order.order_id
+    if order_id not in pending:
+        raise PaperRecordError(
+            f"ledger row {order_id} filled on {_day(session)} is the attempt of no order the "
+            f"snapshot of {_day(book.by_index[index - 1].session)} held pending: a fill is an "
+            "order the book held the evening before, so this is not the paper book's ledger"
+        )
+    return pending[order_id]
 
 
 def _kind_of(transition: PortfolioTransition) -> _Kind:
@@ -597,6 +684,7 @@ def _holdings(curve: _Curve, holding_count: int) -> dict[str, Any]:
 def _turnover(rows: _Rows, curve: _Curve) -> dict[str, Any]:
     bought = _ZERO
     sold = _ZERO
+    initial = _ZERO
     for row in rows.kind("fill"):
         execution = row.transition.execution
         assert execution is not None  # `_kind_of` made a fill of nothing else
@@ -604,14 +692,22 @@ def _turnover(rows: _Rows, curve: _Curve) -> dict[str, Any]:
             bought += Fraction(execution.notional)
         else:
             sold += Fraction(execution.notional)
+        if row.initial_build:
+            initial += Fraction(execution.notional)
     mean = curve.mean_equity
-    cumulative = None if mean is None or mean <= 0 else (bought + sold) / (2 * mean)
+
+    def one_sided(notional: Fraction) -> Fraction | None:
+        return None if mean is None or mean <= 0 else notional / (2 * mean)
+
+    steady = one_sided(bought + sold - initial)
+    built = sum(1 for row in rows.kind("fill") if row.initial_build)
     return _block(
         _LEDGER_UNITS,
         basis=(
             "one-sided: the filled notional of every buy and sell over twice the mean equity of "
-            "the settled sessions; a write-off has no execution and is not turnover; annualised "
-            f"at {SESSIONS_PER_YEAR} sessions a year"
+            "the settled sessions; a write-off has no execution and is not turnover; the one-off "
+            "initial build is reported on its own and only the steady state is annualised, at "
+            f"{SESSIONS_PER_YEAR} sessions a year"
         ),
         filled_notional={
             "buy": _money(bought),
@@ -621,33 +717,59 @@ def _turnover(rows: _Rows, curve: _Curve) -> dict[str, Any]:
         mean_equity=None if mean is None else _money(mean),
         sessions=curve.sessions,
         sessions_per_year=SESSIONS_PER_YEAR,
-        one_sided_turnover=_ratio(cumulative),
+        one_sided_turnover=_ratio(one_sided(bought + sold)),
+        initial_build={
+            "fills": built,
+            "filled_notional": _money(initial),
+            "one_sided_turnover": _ratio(one_sided(initial)),
+        },
+        steady_state={
+            "fills": len(rows.kind("fill")) - built,
+            "filled_notional": _money(bought + sold - initial),
+            "one_sided_turnover": _ratio(steady),
+        },
         annualised=_ratio(
-            None if cumulative is None else cumulative * SESSIONS_PER_YEAR / curve.sessions
+            None
+            if steady is None or not curve.annualisable
+            else steady * SESSIONS_PER_YEAR / curve.sessions
         ),
+        annualisation=curve.annualisation,
+        annualisation_rule=ANNUALISATION_RULE,
     )
 
 
 def _costs(book: _Book, rows: _Rows, curve: _Curve) -> dict[str, Any]:
     components = {"commission": _ZERO, "slippage": _ZERO, "stamp_duty": _ZERO}
+    initial = dict(components)
     total = _ZERO
+    initial_total = _ZERO
     inconsistent: list[str] = []
     for row in rows.kind("fill"):
         execution = row.transition.execution
         assert execution is not None
-        components["commission"] += Fraction(execution.commission)
-        components["slippage"] += Fraction(execution.transfer_fee)
-        components["stamp_duty"] += Fraction(execution.stamp_duty)
+        charged = {
+            "commission": Fraction(execution.commission),
+            "slippage": Fraction(execution.transfer_fee),
+            "stamp_duty": Fraction(execution.stamp_duty),
+        }
+        for name, amount in charged.items():
+            components[name] += amount
+            if row.initial_build:
+                initial[name] += amount
         total += Fraction(execution.total_cost)
+        if row.initial_build:
+            initial_total += Fraction(execution.total_cost)
         if execution.commission + execution.transfer_fee + execution.stamp_duty != (
             execution.total_cost
         ):
             inconsistent.append(row.order_id)
 
-    def share(amount: Fraction) -> dict[str, Any]:
+    def share(amount: Fraction, built: Fraction) -> dict[str, Any]:
         return {
             "total": _money(amount),
-            "annualised_share_of_mean_equity": _ratio(curve.per_year(amount)),
+            "initial_build": _money(built),
+            "steady_state": _money(amount - built),
+            "annualised_share_of_mean_equity": _ratio(curve.per_year(amount - built)),
         }
 
     mismatched = []
@@ -677,17 +799,20 @@ def _costs(book: _Book, rows: _Rows, curve: _Curve) -> dict[str, Any]:
         _LEDGER_UNITS,
         basis=(
             "by component over the filled rows of the settled sessions; slippage is the ledger's "
-            "transfer_fee field, in which the protocol's book charges its slippage; each total's "
+            "transfer_fee field, in which the protocol's book charges its slippage; the one-off "
+            "initial build's share is reported on its own, and each steady-state total's "
             "annualised share is over the mean equity of the settled sessions at "
             f"{SESSIONS_PER_YEAR} sessions a year"
         ),
-        commission=share(components["commission"]),
+        annualisation=curve.annualisation,
+        annualisation_rule=ANNUALISATION_RULE,
+        commission=share(components["commission"], initial["commission"]),
         slippage={
-            **share(components["slippage"]),
+            **share(components["slippage"], initial["slippage"]),
             "ledger_field": "transfer_fee (the protocol's slippage rides in this slot)",
         },
-        stamp_duty=share(components["stamp_duty"]),
-        total=share(total),
+        stamp_duty=share(components["stamp_duty"], initial["stamp_duty"]),
+        total=share(total, initial_total),
         cross_check={
             "ledger_total_cost": _money(total),
             "fees_paid_change": _money(paid_total),
@@ -704,6 +829,20 @@ def _costs(book: _Book, rows: _Rows, curve: _Curve) -> dict[str, Any]:
 
 
 # --- write-offs ---------------------------------------------------------------------------------
+
+
+def _removals(book: _Book, rows: _Rows) -> tuple[tuple[date, Fraction], ...]:
+    """Every write-off's session and the equity it removed -- what the holding was marked at --
+    in session order (the relative return's chains say how much of their return these took)."""
+    return tuple(
+        (
+            book.by_index[index].session,
+            Fraction(row.transition.before.equity) - Fraction(row.transition.after.equity),
+        )
+        for index in sorted(rows.by_session)
+        for row in rows.by_session[index]
+        if row.kind == "write_off"
+    )
 
 
 def _write_offs(book: _Book, rows: _Rows, curve: _Curve) -> dict[str, Any]:
@@ -1259,7 +1398,11 @@ class _Leg:
     csi500: Fraction
 
 
-def _relative(book: _Book, windows: Sequence[BenchmarkWindow]) -> dict[str, Any]:
+def _relative(
+    book: _Book,
+    windows: Sequence[BenchmarkWindow],
+    removals: Sequence[tuple[date, Fraction]],
+) -> dict[str, Any]:
     ordered = sorted(windows, key=lambda item: (item.entry, item.exit, item.record_id))
     counted = Counter(item.record_id for item in ordered)
     repeated = sorted(name for name, count in counted.items() if count > 1)
@@ -1280,7 +1423,7 @@ def _relative(book: _Book, windows: Sequence[BenchmarkWindow]) -> dict[str, Any]
 
     def close() -> None:
         if current:
-            chains.append(_chain(current))
+            chains.append(_chain(current, book, removals))
             current.clear()
 
     previous: BenchmarkWindow | None = None
@@ -1348,6 +1491,7 @@ def _relative(book: _Book, windows: Sequence[BenchmarkWindow]) -> dict[str, Any]
             "book": _LEDGER_UNITS,
             "benchmarks": _REAL_UNITS,
         },
+        "write_off_basis": _CHAIN_WRITE_OFFS,
         "windows_given": len(ordered),
         "windows_computed": sum(1 for row in rows if row["status"] == "computed"),
         "windows": rows,
@@ -1377,18 +1521,24 @@ def _window_row(
     }
 
 
-def _chain(legs: Sequence[_Leg]) -> dict[str, Any]:
+def _chain(
+    legs: Sequence[_Leg], history: _Book, removals: Sequence[tuple[date, Fraction]]
+) -> dict[str, Any]:
     """The windows `legs` -- contiguous, each entering where the one before exits -- compounded:
-    the product of 1 + r, less one, for the book and for each benchmark, all exact."""
+    the product of 1 + r, less one, for the book and for each benchmark, all exact; and the
+    write-offs inside the chain (`_CHAIN_WRITE_OFFS`)."""
     book = ew = csi = Fraction(1)
     for leg in legs:
         book *= 1 + leg.book
         ew *= 1 + leg.investable_ew
         csi *= 1 + leg.csi500
     book, ew, csi = book - 1, ew - 1, csi - 1
+    entry, exit_ = legs[0].window.entry, legs[-1].window.exit
+    inside = [removed for session, removed in removals if entry < session <= exit_]
+    removed = sum(inside, _ZERO)
     return {
-        "entry": _day(legs[0].window.entry),
-        "exit": _day(legs[-1].window.exit),
+        "entry": _day(entry),
+        "exit": _day(exit_),
         "windows": len(legs),
         "record_ids": [leg.window.record_id for leg in legs],
         "book": _ratio(book),
@@ -1396,4 +1546,10 @@ def _chain(legs: Sequence[_Leg]) -> dict[str, Any]:
         "csi500": _ratio(csi),
         "book_minus_ew": _ratio(book - ew),
         "book_minus_csi500": _ratio(book - csi),
+        "write_offs": {
+            "count": len(inside),
+            "equity_removed": _money(removed),
+            # The entry's equity is positive: a window entering on a non-positive one is a gap.
+            "share_of_entry_equity": _ratio(removed / Fraction(history.by_date[entry].book.equity)),
+        },
     }

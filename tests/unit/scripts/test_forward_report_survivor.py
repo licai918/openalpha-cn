@@ -2069,6 +2069,51 @@ def test_the_relative_return_is_the_paper_books_equity_over_the_primary_samples_
     assert chain["book"] == _six(_equity(short_world, last) / _equity(short_world, first) - 1)
 
 
+def test_the_weekly_report_prints_the_books_money_in_yuan_its_build_apart_its_chain_in_percent(
+    short_world: tds.World, capsys: pytest.CaptureFixture[str], scripted: ScriptedCheck
+) -> None:
+    """I6 and I7 end to end, on the four short evenings' real paper book: the equity line is in
+    yuan, the turnover and the costs say what the one-off initial build was and that four
+    sessions are too short to annualise, the write-off's cost basis stands beside its count, and
+    the chain's returns are percentages with the points of its book return the 9 April write-off
+    took."""
+    from decimal import ROUND_HALF_UP, Decimal
+
+    code, out, err = _report(short_world, capsys, as_of=SHORT_AS_OF)
+
+    assert code == 0, err
+    document = _document(short_world, SHORT_AS_OF)
+    ledger = document["paper_ledger"]
+    lines = out.splitlines()
+
+    def line(prefix: str) -> str:
+        return next(item for item in lines if item.startswith(prefix))
+
+    assert line("  equity (yuan): ").startswith(
+        f"  equity (yuan): opening {ledger['equity']['opening']['equity']}, "
+    )
+    built = ledger["turnover"]["initial_build"]
+    assert built["fills"] > 0
+    assert (
+        f"of which the one-off initial build {built['one_sided_turnover']} ({built['fills']} "
+        "fills); annualised, the initial build left out: too short to annualise: 4 settled "
+        "sessions, fewer than 60"
+    ) in line("  turnover: ")
+    assert (
+        f"of which the one-off initial build {ledger['costs']['total']['initial_build']} yuan"
+    ) in line("  costs: ")
+    assert line("  write-offs: ").startswith(
+        f"  write-offs: 1, cost basis {ledger['write_offs']['total_cost_basis']} yuan in all"
+    )
+    [chain] = document["relative"]["chains"]
+    assert chain["write_offs"]["count"] == 1
+    printed = line("  chain ")
+    percent = (Decimal(chain["book"]) * 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    assert f"book {percent}%" in printed
+    assert "the write-offs inside it took" in printed
+    assert "ledger units)" not in out
+
+
 def test_a_report_as_of_an_instant_bounds_the_paper_book_and_its_windows_to_that_instant(
     short_world: tds.World, capsys: pytest.CaptureFixture[str], scripted: ScriptedCheck
 ) -> None:

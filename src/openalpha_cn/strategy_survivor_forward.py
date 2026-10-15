@@ -163,6 +163,11 @@ does on its own:
   (`paper_refusal`): a fault of the paper book never costs the prediction layer. The relative
   return's windows are the headline's sampled periods at the primary horizon
   (`sampled_benchmarks`); a period whose equal weight or CSI 500 is missing is named as left out.
+  The lines print the ledger's money in yuan (a holding's count and mark after an adjustment are
+  the ledger's, said beside it), the one-off initial build beside the turnover and the costs and
+  only the steady state annualised, from 60 settled sessions on (`paper_record`'s rule), the
+  write-offs' cost basis beside their count, and each chain's returns as percentages with the
+  points of its book return the write-offs inside it took.
 - **What cannot be evaluated yet** (design section 6): each item is listed while it holds -- no
   survivor record filed under the registration yet, no outcome matured, the window not satisfied
   -- and the standing ones on every report, among them the bias of the names left unlabelled; a
@@ -188,6 +193,7 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Annotated, Any, Final, Literal, Protocol, Self, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -2080,29 +2086,98 @@ def _family_lines(family: Mapping[str, Any]) -> list[str]:
     ]
 
 
+_LEDGER_CAVEAT: Final = (
+    "a holding's share count and mark are the paper ledger's, which after an adjustment (a bonus "
+    "issue, a cash dividend) are not the account's"
+)
+"""What the equity line says beside the yuan (I7): the money is yuan; a holding's count and mark
+after an adjustment are the ledger's units, not the account's."""
+
+
+def _percent(value: object) -> str:
+    """A ratio the document holds as text (`"-0.110165"`) as a percentage to two places, half
+    away from zero (`"-11.02%"`); `n/a` when absent (I7)."""
+    if value is None:
+        return "n/a"
+    percent = (Decimal(str(value)) * 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return f"{abs(percent) if percent == 0 else percent}%"
+
+
+def _annualised(value: object, *, annualisation: str, sessions: object, percent: bool) -> str:
+    """An annualised figure as printed: its value a year and the sessions it is over, or, under
+    the minimum, the record's own `too short to annualise` (I6)."""
+    if annualisation.startswith("too short"):
+        return annualisation
+    if value is None:
+        return "n/a"
+    shown = _percent(value) if percent else str(value)
+    return f"{shown} a year over {sessions} settled sessions"
+
+
 def _ledger_lines(ledger: Mapping[str, Any]) -> list[str]:
     if "refused" in ledger:
         return [f"paper ledger -- refused: {ledger['refused']}; the prediction layer above stands"]
     coverage, equity = ledger["coverage"], ledger["equity"]
     holdings, turnover = ledger["holdings"], ledger["turnover"]
     costs, write_offs = ledger["costs"], ledger["write_offs"]
+    built = turnover["initial_build"]
+    written = (
+        f"  write-offs: {write_offs['count']}, cost basis {write_offs['total_cost_basis']} yuan "
+        f"in all (equity removed {write_offs['total_equity_removed']} yuan, at their last marks)"
+        if write_offs["count"]
+        else "  write-offs: none"
+    )
     return [
         "paper ledger -- a record, never tested; ledger equity is not evidence",
         f"  coverage: {coverage['settled_sessions']} settled sessions "
         f"({coverage['first_settled']}..{coverage['last_settled']}): evenings "
         f"{coverage['evenings']}, settle-only {coverage['settle_only_days']}, caught up "
         f"{coverage['caught_up_sessions']}, refused days {len(coverage['refused_days'])}",
-        f"  equity (ledger units): opening {equity['opening']['equity']}, final "
+        f"  equity (yuan): opening {equity['opening']['equity']}, final "
         f"{equity['final_equity']}, mean {equity['mean_equity']}, minimum "
-        f"{equity['minimum_equity']}",
+        f"{equity['minimum_equity']}; {_LEDGER_CAVEAT}",
         f"  holdings: mean held {holdings['mean_held']} of {holdings['holding_count']}, "
         f"sessions below N {holdings['sessions_below_n']}, mean cash share "
         f"{holdings['mean_cash_share']}",
-        f"  turnover: one-sided {turnover['one_sided_turnover']}, annualised "
-        f"{turnover['annualised']}; costs {costs['total']['total']} (annualised share "
-        f"{costs['total']['annualised_share_of_mean_equity']}); write-offs {write_offs['count']}",
+        f"  turnover: one-sided {turnover['one_sided_turnover']} over {turnover['sessions']} "
+        f"settled sessions, of which the one-off initial build {built['one_sided_turnover']} "
+        f"({built['fills']} fills); annualised, the initial build left out: "
+        + _annualised(
+            turnover["annualised"],
+            annualisation=turnover["annualisation"],
+            sessions=turnover["sessions"],
+            percent=False,
+        ),
+        f"  costs: {costs['total']['total']} yuan, of which the one-off initial build "
+        f"{costs['total']['initial_build']} yuan; annualised share of mean equity, the initial "
+        "build left out: "
+        + _annualised(
+            costs["total"]["annualised_share_of_mean_equity"],
+            annualisation=costs["annualisation"],
+            sessions=turnover["sessions"],
+            percent=True,
+        ),
+        written,
         f"  {ledger['status']}",
     ]
+
+
+def _chain_line(chain: Mapping[str, Any]) -> str:
+    """One chain, its returns in percent (I7), and the points of its book return the write-offs
+    inside it took, when there were any."""
+    line = (
+        f"  chain {chain['entry']}..{chain['exit']} ({chain['windows']} windows): book "
+        f"{_percent(chain['book'])}, investable EW {_percent(chain['investable_ew'])}, CSI 500 "
+        f"{_percent(chain['csi500'])}"
+    )
+    written = chain.get("write_offs") or {}
+    if not written.get("count"):
+        return line
+    points = _percent(written["share_of_entry_equity"]).removesuffix("%")
+    return (
+        f"{line}; the write-offs inside it took {points} points of the book's return "
+        f"({written['count']} written off, {written['equity_removed']} yuan removed)"
+    )
 
 
 def _relative_lines(relative: Mapping[str, Any]) -> list[str]:
@@ -2114,11 +2189,7 @@ def _relative_lines(relative: Mapping[str, Any]) -> list[str]:
         f"given, {len(relative['chains'])} chains, {len(relative['gaps'])} gaps; "
         f"{relative['status']}",
     ]
-    lines += [
-        f"  chain {chain['entry']}..{chain['exit']} ({chain['windows']} windows): book "
-        f"{chain['book']}, investable EW {chain['investable_ew']}, CSI 500 {chain['csi500']}"
-        for chain in relative["chains"]
-    ]
+    lines += [_chain_line(chain) for chain in relative["chains"]]
     lines += [f"  gap: {gap['reason']}" for gap in relative["gaps"]]
     lines += [
         f"  left out: {item['record_id']} ({item['session']}), no {', '.join(item['missing'])}"
