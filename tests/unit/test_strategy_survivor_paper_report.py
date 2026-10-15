@@ -21,7 +21,9 @@ goes ex-rights on S3:
 - **S1** the initial build: 600010.SH, 600020.SH and 600040.SH are drawn; nothing is held, so
   nothing settles.
 - **S2** the three buys fill (9,000.00, 9,200.00 and 9,000.00 at the opens; 5.09 each in costs)
-  and 600010.SH, no longer a survivor, is sold; 600030.SH and 600050.SH are bought.
+  and 600010.SH, no longer a survivor, is sold; 600030.SH and 600050.SH are bought. 600020.SH,
+  bought at its 11.50 open, closes at 11.40, so S2 marks its 800 shares at 11.40 -- not the 11.50
+  S3 marks them at, so D16's "previous snapshot" is told from the one before it.
 - **S3** 600010.SH's sale and 600030.SH's buy fill, 600050.SH's buy opens locked limit-up and is
   refused, **600040.SH is delisted with no bar and written off**, and 600060.SH and 600070.SH are
   bought. 600020.SH goes ex-rights 1 for 1 (its factor doubles, its real close is 5.75), so the
@@ -142,14 +144,14 @@ CENT: Final[Decimal] = D("0.01")
 #       = 55,835.15; held 600060.SH 9,000.00, 600070.SH 9,000.00, 600080.SH 8,000.00 -> 81,835.15
 BOOKED: Final[Mapping[date, tuple[str, str, str, int]]] = {
     S1: ("100000.00", "100000.00", "0.00", 0),
-    S2: ("99984.73", "72784.73", "15.27", 3),
+    S2: ("99904.73", "72784.73", "15.27", 3),
     S3: ("91060.05", "72770.05", "29.95", 2),
     S4: ("81854.96", "63764.96", "35.04", 2),
     S5: ("81849.87", "54759.87", "40.13", 3),
     S6: ("81835.15", "55835.15", "54.85", 3),
 }
 MEAN_EQUITY: Final[Fraction] = sum((Fraction(v[0]) for v in BOOKED.values()), Fraction(0)) / 6
-"""(100,000.00 + 99,984.73 + 91,060.05 + 81,854.96 + 81,849.87 + 81,835.15) / 6."""
+"""(100,000.00 + 99,904.73 + 91,060.05 + 81,854.96 + 81,849.87 + 81,835.15) / 6."""
 SESSION_COUNT: Final[int] = 6
 
 
@@ -286,7 +288,17 @@ def build_story(root: Path) -> Story:
     book = evenings.book_at(root)
     nothing = evenings.NOTHING
     r1 = evenings.evening(book, S1, nothing, evenings.SCREEN_S1, evenings.PRICES_S1)
-    r2 = evenings.evening(book, S2, evenings.MARKET_S2, evenings.SCREEN_S2, evenings.PRICES_S2)
+    # `test_paper_evening`'s S2, but for 600020.SH's close (the module docstring): it opens at
+    # 11.50, where its buy fills, and closes at 11.40.
+    market2 = evenings.market(
+        evenings.quiet(A, S2, "10.00"),
+        evenings.bar(B, S2, "11.50", "11.50", "11.60", "11.40", "11.40", "12.65", "10.35"),
+        evenings.quiet(DL, S2, "10.00"),
+    )
+    screen2 = evenings.screened(
+        (B, "11.40"), (C, "10.00"), (E, "20.00"), (DL, "10.00"), dropped=(A,)
+    )
+    r2 = evenings.evening(book, S2, market2, screen2, evenings.PRICES_S2)
     ex_rights = evenings.Market(
         bars={
             A: evenings.bar(A, S3, "10.00", "10.00", "10.20", "9.90", "10.10", "11.00", "9.00"),
@@ -380,9 +392,9 @@ def build_story(root: Path) -> Story:
         S2,
         2,
         facts=facts_of(
-            S2, {A: "10.00", B: "11.50", C: "10.00", E: "20.00", DL: "10.00"}, held=(A, B, DL)
+            S2, {A: "10.00", B: "11.40", C: "10.00", E: "20.00", DL: "10.00"}, held=(A, B, DL)
         ),
-        screen=evenings.SCREEN_S2,
+        screen=screen2,
         evening=r2,
     )
     d3 = document(
@@ -601,7 +613,7 @@ def test_turnover_is_one_sided_filled_notional_over_twice_mean_equity_at_244_ses
     (600060.SH), 9,000.00 (600070.SH), 8,000.00 (600080.SH) = 62,200.00; sells 9,000.00 (600010.SH)
     + 9,090.00 (600030.SH) = 18,090.00; 80,290.00 in all. The two write-offs have no execution and
     add nothing: counting them at their marks would add 9,000.00 and 9,200.00. One-sided turnover
-    is 80,290.00 / (2 x 89,430.79 mean equity) over the six sessions; annualised, times 244 / 6."""
+    is 80,290.00 / (2 x 89,417.46 mean equity) over the six sessions; annualised, times 244 / 6."""
     turnover = ledger_of(story)["turnover"]
 
     assert SESSIONS_PER_YEAR == 244
@@ -742,9 +754,10 @@ def test_the_d16_recovery_is_the_ledger_quantity_at_the_previous_snapshots_mark(
 ) -> None:
     """D16's "recovered at the last mark": 600020.SH was written off on S4 with 800 ledger shares,
     and the previous snapshot (S3) marks them at 11.50 -- the real close 5.75 times the ex-rights
-    ratio 2 -- so 9,200.00, **in the ledger's units**. The real last close is 5.75: 800 x 5.75 =
-    4,600.00 is not a number this record has any business printing, and nothing in the write-off
-    ledger row carries a price."""
+    ratio 2 -- so 9,200.00, **in the ledger's units**. The snapshot before that (S2) marks them at
+    11.40, so 9,120.00 would be the mark of the wrong snapshot. The real last close is 5.75: 800 x
+    5.75 = 4,600.00 is not a number this record has any business printing, and nothing in the
+    write-off ledger row carries a price."""
     block = ledger_of(story)["write_offs"]
 
     first, second = block["items"]
@@ -762,6 +775,8 @@ def test_the_d16_recovery_is_the_ledger_quantity_at_the_previous_snapshots_mark(
     }
     assert block["total_recovered_at_last_mark"] == "18200.00"
     assert "4600.00" not in strings(block)
+    assert story.snapshot(S2).book.mark(B) == D("11.40")
+    assert "9120.00" not in strings(block)
     assert "ledger" in block["sensitivity"] and "real close" in block["sensitivity"]
 
 
@@ -1215,8 +1230,8 @@ def test_the_window_chain_compounds_book_and_benchmarks_and_a_gap_breaks_it(
     2021-03-12, a session the book's history (it ends 2021-03-09) has no snapshot for, and cannot
     be computed.
 
-    The book's returns are the snapshots' equity ratios: w1 99,984.73 / 100,000.00 - 1, w2
-    91,060.05 / 99,984.73 - 1, w3 81,849.87 / 81,854.96 - 1, w4 81,835.15 / 81,849.87 - 1.
+    The book's returns are the snapshots' equity ratios: w1 99,904.73 / 100,000.00 - 1, w2
+    91,060.05 / 99,904.73 - 1, w3 81,849.87 / 81,854.96 - 1, w4 81,835.15 / 81,849.87 - 1.
     Compounded along w1-w2 the ratios telescope to 91,060.05 / 100,000.00 - 1 = -0.0893995; along
     w3-w4 to 81,835.15 / 81,854.96 - 1. The benchmarks compound as (1+r1)(1+r2) - 1: the
     investable equal weight 1.01 x 0.98 - 1 = -0.0102, CSI 500 1.02 x 1.01 - 1 = 0.0302."""
@@ -1234,12 +1249,12 @@ def test_the_window_chain_compounds_book_and_benchmarks_and_a_gap_breaks_it(
     assert list(rows) == ["prd_w1", "prd_w2", "prd_w3", "prd_w4", "prd_w5"]
     w1 = rows["prd_w1"]
     assert (w1["entry"], w1["exit"], w1["status"]) == ("2021-03-02", "2021-03-03", "computed")
-    assert w1["book_return"] == fixed(Fraction("99984.73") / Fraction("100000.00") - 1)
+    assert w1["book_return"] == fixed(Fraction("99904.73") / Fraction("100000.00") - 1)
     assert (w1["investable_ew"], w1["csi500"]) == ("0.010000", "0.020000")
     assert w1["book_minus_ew"] == fixed(
-        Fraction("99984.73") / Fraction("100000.00") - 1 - Fraction("0.010")
+        Fraction("99904.73") / Fraction("100000.00") - 1 - Fraction("0.010")
     )
-    assert rows["prd_w2"]["book_return"] == fixed(Fraction("91060.05") / Fraction("99984.73") - 1)
+    assert rows["prd_w2"]["book_return"] == fixed(Fraction("91060.05") / Fraction("99904.73") - 1)
     assert rows["prd_w3"]["book_return"] == fixed(Fraction("81849.87") / Fraction("81854.96") - 1)
     assert rows["prd_w4"]["book_return"] == fixed(Fraction("81835.15") / Fraction("81849.87") - 1)
     w5 = rows["prd_w5"]

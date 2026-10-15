@@ -28,6 +28,16 @@ keeps every ratio an exact `Fraction` until it is printed once (half away from z
 money, two). The same inputs give the same bytes under any `PYTHONHASHSEED`: no set is iterated
 unsorted, and every mapping this module builds is built in a fixed or a sorted order.
 
+Beside the design (Part E, section 4), two things. `paper_record` takes a fourth input the
+design does not list, `holding_count`: the book's N, which "sessions below N" is counted against
+-- the registration's, never defaulted here. And the module is a survivor-only import: it takes
+`SURVIVOR_WORDING` and `SURVIVOR_DOCUMENT_KIND` from `strategy_survivor_summary`, which loads
+`backtest.paper_evening` and so `backtest.paper`, whose import installs a process-wide audit hook.
+Moving the two strings elsewhere would not keep the hook out, since `WRITE_OFF_REASON` comes from
+`backtest.paper_settlement`, which imports `backtest.paper` itself; so the forward report imports
+this module only inside its survivor branch, and a fresh-interpreter test holds a P6 report to
+loading none of it (`tests/unit/scripts/test_forward_report_survivor.py`).
+
 ## What is refused, by name
 
 A record built on inputs that do not describe one book is worse than none, so `PaperRecordError`
