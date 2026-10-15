@@ -48,6 +48,29 @@ evidence**: nothing here reads the panel, registers a configuration or says anyt
 the adapter, the daily entry point, the paper-ledger step builder and the pre-registration remain
 (plan 2, `V2-P7-006`, `V2-P7-009`).
 
+The rest of Step 0's code landed on the integration branch `feat/v2-p7-step0-adapters` (`62bebf0`,
+2026-10-14; not merged into `main`), each piece test-first and reviewed: the panel-to-facts adapter that
+gives every listed security one row a signal day, a halted one on its last close, with a three-state ST
+read and a coverage guard (`V2-P7-016`); a paper book that fills at the open, scales held bars by the
+adjustment ratio, charges the protocol's costs, keeps one content-addressed snapshot per session in its
+own directory and ledger, settles a session's orders and their lifecycle, writes off a holding delisted
+while held at its whole cost with no price (decision D13), and runs each evening as a dry run then a
+commit that a rerun after a crash completes with each ledger row written once (`V2-P7-017`,
+`V2-P7-009`); the `survivor_book/v1`
+registration and its nine-step daily day in `scripts/daily_selection.py` -- dispatched by `kind`, so a
+P6 registration runs exactly as before -- with catch-up and settle-only modes chosen by the pinned clock,
+one writer per paper book, the day's eligible composites filed forward as `survivor_book_composite/v1`
+with their input provenance before them, the evening's orders printed with a real close as a reference
+and never a limit price, and a morning re-check (`--morning-recheck`) that only advises (`V2-P7-008`);
+and the weekly report's survivor branch, which checks every record against its provenance (VERIFIED,
+UNVERIFIABLE or REFUSED, with a write-once verdict cache), reads the forward records on a
+non-overlapping calendar sample with no p-value before the pre-registered window, and describes the
+paper book without testing it (`V2-P7-018`). The capability ledger gains 21 rows (211 to 232). Two
+issues stay open for named gaps: `V2-P7-009` has no paper-book test of T+1 or of a held book settled on a
+year's first session, and `V2-P7-018` reports sample counts but no power. **This is engineering, not
+evidence**: no survivor configuration is registered, the daily registration stays paused, and the
+protocol and pre-registration (`V2-P7-006`) wait for the user's explicit confirmation.
+
 ### P6 — selection ready (`V2-P6-001` … `V2-P6-035`)
 
 The project now runs end to end from a multi-year whole-market panel to a registered daily

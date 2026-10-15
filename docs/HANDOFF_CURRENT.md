@@ -21,6 +21,17 @@ issue 清单（`V2-P7-001` …）在路线图 §P7。顺序（2026-10-13 起）�
 [`superpowers/specs/2026-10-13-p7-step0-survivor-book-design.md`](superpowers/specs/2026-10-13-p7-step0-survivor-book-design.md)
 （资金约 35 万元、持股 ≤ 10 只；用 sub-agent 驱动开发 + 测试先行执行，设计与实施计划都先经用户审阅）。
 
+**Step 0 的代码已完成（2026-10-14），在集成分支 `feat/v2-p7-step0-adapters`（`62bebf0`）上，尚未并入 main**
+（本地 main 停在 `d9722d6`，含领域内核与适配器、纸面成交的主体，未推送）：领域内核 `domain/survivor_*.py`、
+面板 → 资格事实适配器 `strategy_survivor_facts.py`、纸面账本（`backtest/paper_step.py`、`paper_state.py`、
+`paper_settlement.py`、`paper_evening.py`：开盘成交、每日快照、结算、退市核销、干跑再提交的一晚与补结算）、
+`survivor_book/v1` 登记与每日一天（`scripts/daily_selection.py` 按 `kind` 分派，`--morning-recheck` 是清晨复核）、
+迟到记录核查与周报的幸存者分支（`scripts/forward_report.py`）。路线图 §P7：`V2-P7-005`、`008`、`016`、`017` 关闭，
+`009`、`018` 的代码已交付但验收各缺一两项（行内写明）；能力台账由 211 项增至 232 项。**这是工程完成，不是研究证据**：
+还没有任何幸存者配置被登记，也没有在真实面板上跑过一天。**下一步**按规格 §9 记录的顺序是 `V2-P7-004`、`002`、`003`，
+然后是 `V2-P7-006`（研究协议与预登记）——它是研究决策检查点，**停下等用户明确确认**才冻结参数、写登记；它的输入
+清单是规格 §9 的最后一行。
+
 **每日登记自 2026-10-08 起暂停**，等 `V2-P7-006` 的新配置预登记提交后恢复。launchd 从未安装；现有登记
 （`docs/research/p6-registration.json`）在新登记提交后作废，保留为历史。此前计划的 P6
 （[`superpowers/plans/2026-09-26-selection-ready.md`](superpowers/plans/2026-09-26-selection-ready.md)）已完成。
