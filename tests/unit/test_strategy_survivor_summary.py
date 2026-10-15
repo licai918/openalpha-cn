@@ -42,7 +42,7 @@ import sys
 from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import date, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any, Final
 from zoneinfo import ZoneInfo
@@ -66,6 +66,7 @@ from test_survivor_facts_panel import (
 )
 
 from openalpha_cn import strategy_survivor_summary
+from openalpha_cn.backtest import execution
 from openalpha_cn.backtest.paper_evening import CatchUpResult, EveningResult
 from openalpha_cn.backtest.paper_state import PendingOrder
 from openalpha_cn.backtest.paper_step import NO_BAR_REASON
@@ -82,6 +83,7 @@ from openalpha_cn.domain.trading_calendar import (
     TradingCalendar,
     build_trading_calendar,
 )
+from openalpha_cn.panel.catalog import DEFAULT_DATE_TIMEZONE
 from openalpha_cn.strategy_survivor_facts import FactsDay, FactsNotes, HeldStatus
 from openalpha_cn.strategy_survivor_market import SessionOrdinals
 from openalpha_cn.strategy_survivor_summary import (
@@ -535,11 +537,6 @@ def line_with(lines: Sequence[str], start: str) -> str:
 
 SECTIONS: Final[tuple[str, ...]] = (
     "session",
-    "book",
-    "facts",
-    "screen",
-    "settled",
-    "positions",
     "ORDERS FOR THE OPEN OF D+1 (call auction 09:15)",
     "carried orders",
     "unfunded",
@@ -549,13 +546,22 @@ SECTIONS: Final[tuple[str, ...]] = (
     "frozen",
     "watch list",
     "illiquid exits",
+    "positions",
+    "book",
+    "settled",
     "catch-up",
+    "diagnostics",
+    "ids",
+    "facts",
+    "screen",
     "prediction",
     "tushare requests",
     "units",
     "wording",
 )
-"""The summary's sections, in the order they are printed."""
+"""The summary's sections, in the order they are printed (V2-P7-008 final fix, M1): what the user
+acts on first -- the orders, what the draw left out, the book -- and the diagnostics of how the
+run read its data after a `diagnostics` header, the wording last."""
 
 
 # --- the wording --------------------------------------------------------------------------------
@@ -1074,9 +1080,10 @@ def test_a_sale_names_the_reasons_the_screen_gave_for_the_loss(s3: WrittenOff) -
 
     (order,) = document["paper"]["open_orders"][:1]
     assert order["reasons"] == ["special_treatment", "suspended"]
+    # ST on 2021-03-05, before 2025-07-07: the 5% band, 11.50 x 0.95 = 10.925, half up (I2).
     assert (
         f"  SELL ENTIRE POSITION {B} (ledger qty 800; real close 11.50) EXIT_ELIGIBILITY_LOST "
-        "(special_treatment, suspended)"
+        "(special_treatment, suspended); limit-down 10.93"
     ) in summary_lines(document)
 
 
@@ -1102,7 +1109,8 @@ def test_a_sale_of_a_held_name_the_screen_never_assessed_says_so(s3: WrittenOff)
     assert document["paper"]["open_orders"][0]["reasons"] == ["not_assessed"]
     assert (
         f"  SELL ENTIRE POSITION {B} (ledger qty 800; real close 11.50) EXIT_ELIGIBILITY_LOST "
-        "(not_assessed)"
+        "(not_assessed); no limit computed: the screen holds no verdict for it, so whether it is "
+        "ST is not known"
     ) in summary_lines(document)
 
 
@@ -1142,7 +1150,7 @@ def test_a_sale_of_a_suspended_name_says_its_close_may_be_an_earlier_sessions(
     assert document["paper"]["open_orders"][0]["suspended"] is True
     assert (
         f"  SELL ENTIRE POSITION {B} (ledger qty 800; real close 11.50) {SUSPENDED_CLOSE} "
-        "EXIT_SURVIVOR_LOST"
+        "EXIT_SURVIVOR_LOST; limit-down 10.35"
     ) in summary_lines(document)
 
 
@@ -1185,10 +1193,15 @@ def test_a_sale_carried_from_an_earlier_session_is_still_the_whole_position(
     assert (sale["carried"], sale["attempt"], sale["attempts_allowed"]) == (True, 2, None)
     assert (sale["expires_session"], sale["expires_on"]) == (None, None)
     assert "2 live orders from earlier sessions" in line_with(lines, "carried orders")
+    # I3: repeated in the ORDERS block for the next open, as the carried buy is. S3's screen holds
+    # no verdict for 600010.SH, so whether it is ST is not known and no limit is computed (I2).
     assert (
-        f"  SELL ENTIRE POSITION {A} (ledger qty 900; real close 10.10) EXIT_SURVIVOR_LOST, "
-        "planned on 2021-03-03, attempt 2, a sale never expires"
+        f"  REPEAT SELL ENTIRE POSITION {A} (ledger qty 900; real close 10.10) EXIT_SURVIVOR_LOST, "
+        "planned on 2021-03-03, attempt 2, a sale never expires -- not filled in the paper book: "
+        "re-place it for the open of 2021-03-05 unless your account sold it; no limit computed: "
+        "the screen holds no verdict for it, so whether it is ST is not known"
     ) in lines
+    assert SELL_NOTE in lines
 
 
 # --- the illiquid rank --------------------------------------------------------------------------
@@ -1497,9 +1510,11 @@ def test_every_section_of_the_summary_is_printed_in_its_place(s3: WrittenOff) ->
 def test_the_session_and_book_lines_say_what_the_ledger_is_not(s3: WrittenOff) -> None:
     lines = summary_lines(document_of(s3))
 
+    # The ordinal is a diagnostic (M1): it is on the `ids` line, not the session's.
     assert line_with(lines, "session") == row(
-        "session", "2021-03-04 (index 3; as of 2021-03-04T18:30:00+08:00)"
+        "session", "2021-03-04 (as of 2021-03-04T18:30:00+08:00)"
     )
+    assert line_with(lines, "ids").startswith(row("ids", "session index 3; trade list trl_"))
     book = line_with(lines, "book")
     assert "equity 91060.05" in book
     assert "cash 72770.05" in book
@@ -1516,7 +1531,10 @@ def test_the_facts_lines_state_every_count_and_name_the_unrecognised_codes(frame
     assert "rows 43, universe on main 38, scored 36 (coverage 0.947368)" in line_with(
         lines, "facts"
     )
-    assert "held 3" in line_with(lines, "facts")
+    # The pinned holdings the facts were read with, which are the book's before tonight's fills
+    # -- not the book's holdings after them (M1: "held 0" while the book held 9).
+    assert "book holdings before tonight's fills 3" in line_with(lines, "facts")
+    assert "held 3" not in line_with(lines, "facts")
     assert "no_bar_within_carry 1" in text
     assert "not_listed_with_bar 1" in text
     assert "unrecognised_board 2 [303001.SZ, 600001.SZ]" in text
@@ -1628,8 +1646,16 @@ def test_the_settled_lines_count_and_explain_each_outcome(s3: WrittenOff) -> Non
     text = "\n".join(lines)
     assert f"{A} sell (ledger qty 900): filled" in text
     assert f"{C} buy 900: filled" in text
-    assert f"{E} buy 400: rejected -- {LIMIT_UP_REFUSAL}" in text
-    assert f"{DL} written off (ledger qty 900): whole cost basis 9005.09, no price" in text
+    # I4: a buy the paper book rejected may have filled in the account, which then holds a name
+    # the book never sells.
+    assert f"  {E} buy 400: rejected -- {LIMIT_UP_REFUSAL}; {NOT_HELD}" in lines
+    assert f"{C} buy 900: filled;" not in text
+    # M8: the write-off is the paper book's; the account may still hold the shares.
+    assert (
+        f"  {DL} written off (ledger qty 900): whole cost basis 9005.09, no price -- the paper "
+        "book wrote it off; your account may still hold the shares, and no SELL will be printed "
+        "for them again"
+    ) in lines
 
 
 def test_an_order_with_no_bar_is_listed_as_not_attempted_with_the_reason(
@@ -1646,7 +1672,8 @@ def test_an_order_with_no_bar_is_listed_as_not_attempted_with_the_reason(
 def test_the_settled_lines_name_the_orders_that_expired(caught_up: CaughtUp) -> None:
     lines = summary_lines(document_of(caught_up.evening, catch_ups=caught_up.caught))
 
-    assert f"expired {E} buy 400" in "\n".join(lines)
+    # I4: an expired buy is one the paper book never filled, whatever the account did.
+    assert f"    expired {E} buy 400; {NOT_HELD}" in lines
 
 
 def test_the_positions_print_the_ledger_quantity_beside_the_real_close(s3: WrittenOff) -> None:
@@ -1674,11 +1701,12 @@ def test_a_position_after_an_adjustment_prints_the_real_close_and_the_ratio_to_r
 
 
 POSITIONS_HEADER: Final[str] = (
-    "(ledger quantity in ledger units; real close from the facts; a ledger/real ratio is the "
-    "adjustment since the buy, cash dividends included, and no share count: the account's share "
-    "count differs from the ledger's only after a share event -- a bonus issue or a split -- and "
-    "every sale is SELL ENTIRE POSITION)"
+    "(ledger qty is in the ledger's units and a ledger/real ratio is the adjustment since the "
+    "buy, cash dividends included -- neither is a share count; every sale is SELL ENTIRE "
+    "POSITION)"
 )
+"""The positions header, shortened from the 300-character note (M1) and keeping what the D5 joint
+review (Important 2) made it say: no share count is derived from the ratio."""
 
 
 def test_a_ratio_moved_by_a_cash_dividend_derives_no_share_count(s3: WrittenOff) -> None:
@@ -1731,27 +1759,55 @@ def test_a_carried_holding_says_since_when_only_if_the_caller_supplied_it(s3_hal
     said = summary_lines(document_of(s3_halted, carried_since={B: date(2021, 2, 25)}))
     halted = f"  {B}  ledger qty 800  real close 11.50 {SUSPENDED_CLOSE}"
 
-    assert f"{halted}  no bar tonight" in unsaid
-    assert "carried since" not in "\n".join(unsaid)
-    assert f"{halted}  carried since 2021-02-25" in said
+    # "carried since" collided with "carried orders" (M6): a halt says it has had no bar.
+    assert f"{halted}  no bar tonight (marked at its last price)" in unsaid
+    assert "since" not in "\n".join(line for line in unsaid if line.startswith(f"  {B}"))
+    assert f"{halted}  no bar since 2021-02-25 (marked at its last price)" in said
+    assert not any("carried since" in line for line in (*said, *unsaid))
 
 
 def orders_header(day: Day, when: str, outcome: str = "created") -> str:
-    """The ORDERS line: the open the orders are for, the trade list they are from and whether this
-    run committed the evening or derived one that was already settled."""
+    """The ORDERS line: the open the orders are for and whether this run committed the evening or
+    derived one that was already settled. The trade list's id is a diagnostic (M1): it is on the
+    `ids` line, which ties the printed plan to its journal entry."""
     states = {
         "created": "evening created",
         "unchanged": "evening unchanged (settled earlier; derived again, nothing written)",
     }
-    return (
-        f"ORDERS FOR THE OPEN OF D+1 (call auction 09:15), {when} -- trade list "
-        f"{day.result.trade_list.trade_list_id}, {states[outcome]}"
-    )
+    return f"ORDERS FOR THE OPEN OF D+1 (call auction 09:15), {when} -- {states[outcome]}"
 
 
 REFERENCE_NOTE: Final[str] = (
     "  real closes are references, not limit prices; the paper book fills at the open"
 )
+LIMIT_NOTE: Final[str] = (
+    "  at the 09:15 call auction an order carries a limit price: this system assumes that a buy "
+    "placed at its limit-up price and a sell placed at its limit-down price take the single "
+    "opening price -- confirm with your broker. Each limit below is computed from the real close "
+    "(main board 10%; ST 5% before 2025-07-07, 10% from it); the exchange's published limit "
+    "governs"
+)
+"""I2: the price an order is placed at, said once under the header as the system's assumption."""
+ASSUMED: Final[str] = (
+    "  the paper book assumes every order above is placed and fills at the open; your account "
+    "follows the book only if you did exactly that"
+)
+"""I4: printed every evening after the orders."""
+SELL_NOTE: Final[str] = (
+    "  a SELL above of a name your account does not hold (you did not buy it -- for example, you "
+    "followed this morning's re-check): ignore that SELL"
+)
+"""I4: printed after the orders of an evening that plans or repeats a sale."""
+NOT_HELD: Final[str] = (
+    "if your real order did fill, the paper book does not hold it and will never print a SELL "
+    "for it"
+)
+"""I4: what a buy the paper book rejected or let expire says of a real order that filled."""
+NEEDS_SELLS: Final[str] = (
+    "    needs the sells above to fill first: place it after they have filled (the paper book "
+    "assumes it fills at the open price)"
+)
+"""I1: the mark under a buy the cash before the sells does not cover."""
 
 
 def test_the_orders_for_the_open_name_the_day_the_call_auction_and_the_trade_list(
@@ -1759,9 +1815,14 @@ def test_the_orders_for_the_open_name_the_day_the_call_auction_and_the_trade_lis
 ) -> None:
     lines = summary_lines(document_of(s2))
 
-    assert orders_header(s2, "2021-03-04") in lines
-    # Said once, under the header, and not as a price to place an order at.
-    assert lines[lines.index(orders_header(s2, "2021-03-04")) + 1] == REFERENCE_NOTE
+    header = lines.index(orders_header(s2, "2021-03-04"))
+    # Said once, under the header, and not as a price to place an order at; then the limit price
+    # the order is placed at, as the system's assumption (I2).
+    assert lines[header + 1] == REFERENCE_NOTE
+    assert lines[header + 2] == LIMIT_NOTE
+    # The trade list is named on the ids line, the run's diagnostics (M1), not in the header.
+    assert s2.result.trade_list.trade_list_id not in lines[header]
+    assert s2.result.trade_list.trade_list_id in line_with(lines, "ids")
 
 
 def test_a_rerun_of_a_settled_evening_prints_a_header_that_says_it_was_not_committed_again(
@@ -1821,8 +1882,9 @@ def test_a_sale_is_the_whole_position_with_the_ledger_quantity_beside_the_real_c
     lines = summary_lines(document_of(s2))
 
     assert (
-        f"  SELL ENTIRE POSITION {A} (ledger qty 900; real close 10.00) EXIT_SURVIVOR_LOST" in lines
-    )
+        f"  SELL ENTIRE POSITION {A} (ledger qty 900; real close 10.00) EXIT_SURVIVOR_LOST; "
+        "limit-down 9.00"
+    ) in lines
 
 
 def test_a_sale_through_an_adjustment_prints_the_real_close_and_no_share_count_to_sell(
@@ -1831,8 +1893,10 @@ def test_a_sale_through_an_adjustment_prints_the_real_close_and_no_share_count_t
     lines = summary_lines(document_of(s3_adjusted))
 
     sales = [line for line in lines if line.strip().startswith("SELL")]
+    # The limit is the real close's (5.75 x 0.90 = 5.175, half up), never the ledger mark's.
     assert sales == [
-        f"  SELL ENTIRE POSITION {B} (ledger qty 800; real close 5.75) EXIT_SURVIVOR_LOST"
+        f"  SELL ENTIRE POSITION {B} (ledger qty 800; real close 5.75) EXIT_SURVIVOR_LOST; "
+        "limit-down 5.18"
     ]
     # The ledger's mark of 11.50 is no price anyone can place an order at, and 800 is not the
     # account's share count after the adjustment (it holds 800 x the ratio): neither is an
@@ -1847,11 +1911,15 @@ def test_a_sale_through_an_adjustment_prints_the_real_close_and_no_share_count_t
 def test_a_buy_names_the_quantity_the_reference_and_the_date_it_is_live_through(s2: Day) -> None:
     lines = summary_lines(document_of(s2))
 
+    # M2: shares, the amount at the reference price; I2: the limit-up price and what the buy
+    # needs at it -- 900 x 11.00 and 400 x 22.00.
     assert (
-        f"  BUY {C} 900 reference: real close 10.00 ENTRY_REPLACEMENT, live through 2021-03-08"
+        f"  BUY {C} 900 shares, about 9,000 yuan -- reference: real close 10.00 "
+        "ENTRY_REPLACEMENT, live through 2021-03-08; limit-up 11.00, 9,900.00 yuan at it"
     ) in lines
     assert (
-        f"  BUY {E} 400 reference: real close 20.00 ENTRY_REPLACEMENT, live through 2021-03-08"
+        f"  BUY {E} 400 shares, about 8,000 yuan -- reference: real close 20.00 "
+        "ENTRY_REPLACEMENT, live through 2021-03-08; limit-up 22.00, 8,800.00 yuan at it"
     ) in lines
     # A close is not a limit price: no line puts one after an "@", the way a limit order would.
     assert not any("@" in line for line in lines if line.strip().startswith(("BUY", "SELL")))
@@ -1861,23 +1929,36 @@ def test_a_buy_whose_last_session_is_past_the_calendar_says_the_ordinal(s2: Day)
     lines = summary_lines(document_of(s2, ordinals=SHORT_ORDINALS))
 
     assert (
-        f"  BUY {C} 900 reference: real close 10.00 ENTRY_REPLACEMENT, live through session 5"
+        f"  BUY {C} 900 shares, about 9,000 yuan -- reference: real close 10.00 "
+        "ENTRY_REPLACEMENT, live through session 5; limit-up 11.00, 9,900.00 yuan at it"
     ) in lines
     assert orders_header(s2, "2021-03-04") in lines
+
+
+REPEATED_BUY: Final[str] = (
+    f"  REPEAT BUY {E} 400 shares, about 8,000 yuan (planned on 2021-03-03 at 20.00; real close "
+    "today 22.00) ENTRY_REPLACEMENT, live through 2021-03-08, attempt 2 of 3 (one per session; a "
+    "session with no bar counts) -- not filled in the paper book: re-place it for the open of "
+    "2021-03-05 unless your account filled it; limit-up 24.20, 9,680.00 yuan at it"
+)
+"""I3: S3's carried buy, inside the ORDERS block -- a broker's order is a day order, and the paper
+book tries it again at the next open. Its limit is today's real close's (22.00 x 1.10)."""
 
 
 def test_a_carried_order_is_listed_with_the_attempt_it_is_on(s3: WrittenOff) -> None:
     lines = summary_lines(document_of(s3))
 
-    assert "1 live order from earlier sessions" in line_with(lines, "carried orders")
-    assert (
-        f"  BUY {E} 400 (planned on 2021-03-03 at 20.00; real close today 22.00) "
-        "ENTRY_REPLACEMENT, live through 2021-03-08, attempt 2 of 3 "
-        "(one per session; a session with no bar counts)"
-    ) in lines
-    # A carried order is not one of tonight's: tonight's two buys are listed above it.
-    tonight = next(i for i, line in enumerate(lines) if f"BUY {F} 900" in line)
-    assert tonight < lines.index(line_with(lines, "carried orders"))
+    assert line_with(lines, "carried orders") == row(
+        "carried orders", "1 live order from earlier sessions, repeated in ORDERS above"
+    )
+    assert REPEATED_BUY in lines
+    # Inside the ORDERS block, before tonight's buys: the kernel funds a carried buy first.
+    header = lines.index(line_with(lines, "ORDERS FOR THE OPEN OF D+1"))
+    repeated = lines.index(REPEATED_BUY)
+    tonight = next(i for i, line in enumerate(lines) if line.startswith(f"  BUY {F} 900 shares"))
+    assert header < repeated < tonight < lines.index(line_with(lines, "carried orders"))
+    # And nowhere else: the carried section says how many, and adds no second copy.
+    assert sum(f"{E} 400" in line for line in lines if "BUY" in line) == 1
 
 
 def test_an_evening_that_plans_nothing_says_so_and_points_at_the_orders_carried_below(
@@ -1897,13 +1978,20 @@ def test_an_evening_that_plans_nothing_says_so_and_points_at_the_orders_carried_
 
     assert len(live) == 1  # 600050.SH's buy, refused at the open, still live
     header = next(i for i, line in enumerate(carrying) if line.startswith("ORDERS FOR THE OPEN"))
-    assert carrying[header + 1] == REFERENCE_NOTE
-    # An empty plan above a live order must not read as "nothing is live".
-    assert carrying[header + 2] == "  no new order planned tonight; 1 carried order below"
+    assert carrying[header + 1 : header + 3] == [REFERENCE_NOTE, LIMIT_NOTE]
+    # An empty plan beside a live order must not read as "nothing is live": the carried buy is
+    # repeated in the block (I3), and the line says the plan of tonight adds nothing to it.
+    assert carrying[header + 3].startswith(f"  REPEAT BUY {E} 400 shares")
+    assert carrying[header + 4] == (
+        "  no new order planned tonight; 1 carried order repeated above"
+    )
     assert "1 live order from earlier sessions" in line_with(carrying, "carried orders")
     header = next(i for i, line in enumerate(nothing) if line.startswith("ORDERS FOR THE OPEN"))
-    assert nothing[header + 2] == "  no new order planned tonight"
+    assert nothing[header + 3] == "  no new order planned tonight"
     assert line_with(nothing, "carried orders") == row("carried orders", "none")
+    # With no order at all there is no cash to compare, nothing assumed placed, no SELL to ignore.
+    assert not any(line.startswith("  cash before the sells") for line in nothing)
+    assert ASSUMED not in nothing and SELL_NOTE not in nothing
 
 
 def test_the_names_the_draw_left_out_are_listed_with_the_draws_caveat(s3: WrittenOff) -> None:
@@ -1923,9 +2011,20 @@ def test_the_names_the_draw_left_out_are_listed_with_the_draws_caveat(s3: Writte
     assert line_with(lines, "unfunded") == row("unfunded", f"600099.SH ({CAVEAT})")
     assert line_with(lines, "unaffordable") == row("unaffordable", f"600088.SH ({CAVEAT})")
     assert line_with(lines, "watch list") == row("watch list", f"{H}, {G} ({CAVEAT})")
-    assert line_with(lines, "near exit") == row("near exit", C)
-    assert line_with(lines, "frozen") == row("frozen", B)
-    assert line_with(lines, "deferred exits") == row("deferred exits", "600077.SH")
+    # M6: each of the three says, in one clause, what it means for the account -- above all that
+    # a deferred exit is not a sale to make tonight.
+    assert line_with(lines, "near exit") == row(
+        "near exit",
+        f"{C} (held and still a survivor, near the survivor cut: information only, no order)",
+    )
+    assert line_with(lines, "frozen") == row(
+        "frozen", f"{B} (held and halted: left alone until it trades again, no order)"
+    )
+    assert line_with(lines, "deferred exits") == row(
+        "deferred exits",
+        "600077.SH (left the survivors; kept tonight because tonight's sales reached the cap: no "
+        "order -- do not sell it; the paper book sells it at a later evening)",
+    )
 
 
 def test_an_empty_list_prints_as_none_so_a_missing_line_never_means_nothing(s2: Day) -> None:
@@ -2083,6 +2182,434 @@ def test_the_lines_come_from_the_document_alone(s3: WrittenOff) -> None:
 
     # A journal read back from disk: nothing of the run's objects survives, and nothing is needed.
     assert summary_lines(json.loads(json.dumps(document))) == summary_lines(document)
+
+
+# --- what the user does with the lines (V2-P7-008 final fix, the user-view review) --------------
+
+
+def open_order(
+    side: str,
+    code: str,
+    quantity: int,
+    price: str,
+    *,
+    carried: bool = False,
+    reasons: Sequence[str] = (),
+) -> dict[str, Any]:
+    """One entry of a document's `open_orders`, as `evening_document` files it: planned on S3 for
+    the open of S4 (a carried one on S2), its real close its reference price."""
+    signal = 2 if carried else 3
+    return {
+        "order_id": f"tor_{side}_{code}",
+        "side": side,
+        "ts_code": code,
+        "quantity": quantity,
+        "reference_price": price,
+        "real_close": price,
+        "suspended": False,
+        "reason": "EXIT_SURVIVOR_LOST" if side == "sell" else "ENTRY_REPLACEMENT",
+        "reasons": list(reasons),
+        "signal_session": signal,
+        "signal_on": ORDINALS.day_of(signal).isoformat(),
+        "execute_session": signal + 1,
+        "execute_on": ORDINALS.day_of(signal + 1).isoformat(),
+        "expires_session": None if side == "sell" else signal + 3,
+        "expires_on": None if side == "sell" else ORDINALS.day_of(signal + 3).isoformat(),
+        "carried": carried,
+        "attempt": 2 if carried else None,
+        "attempts_allowed": None if side == "sell" else 3,
+    }
+
+
+def with_orders(
+    s3: WrittenOff, *, cash: str, orders: Sequence[Mapping[str, Any]]
+) -> dict[str, Any]:
+    """S3's document with the book's cash and the open orders replaced, as a journal could hold
+    them: `summary_lines` reads nothing but the document."""
+    document = json.loads(json.dumps(document_of(s3)))
+    document["paper"]["book"]["cash"] = cash
+    document["paper"]["open_orders"] = [dict(order) for order in orders]
+    return document
+
+
+def lines_after(lines: Sequence[str], start: str) -> list[str]:
+    """The lines after the one that begins with `start`."""
+    index = lines.index(line_with(lines, start))
+    return list(lines[index + 1 :])
+
+
+@pytest.mark.parametrize(
+    ("cash", "sells", "buys", "marked"),
+    [
+        pytest.param(
+            "42209.79",
+            [("601058.SH", 500, "66.16"), ("601113.SH", 200, "126.99")],
+            [("601051.SH", 500, "61.71"), ("601092.SH", 300, "97.70")],
+            ["601092.SH"],
+            id="4-13: 30,855 fits, 30,855 + 29,310 does not",
+        ),
+        pytest.param(
+            "15110.99",
+            [("601114.SH", 200, "117.01")],
+            [("601081.SH", 200, "138.34")],
+            ["601081.SH"],
+            id="4-15: 27,668 against 15,110.99",
+        ),
+        pytest.param(
+            "12245.88",
+            [("601046.SH", 600, "52.85")],
+            [("601097.SH", 400, "74.90")],
+            ["601097.SH"],
+            id="5-20: 29,960 against 12,245.88",
+        ),
+    ],
+)
+def test_a_buy_the_cash_before_the_sells_does_not_cover_says_to_place_it_after_they_fill(
+    s3: WrittenOff,
+    cash: str,
+    sells: Sequence[tuple[str, int, str]],
+    buys: Sequence[tuple[str, int, str]],
+    marked: Sequence[str],
+) -> None:
+    """I1, the reviewer's three cases: the kernel sizes tonight's buys on the cash plus the
+    proceeds of tonight's sales, and at 09:15 the account holds only the cash. Each buy whose
+    running total, in the order the kernel funds them, is past the cash says to wait for the
+    sales; the block says what the cash, the buys and the sales come to."""
+    orders = [*(open_order("sell", *sell) for sell in sells)]
+    orders += [open_order("buy", *buy) for buy in buys]
+
+    lines = summary_lines(with_orders(s3, cash=cash, orders=orders))
+
+    for code, _quantity, _price in buys:
+        line = next(line for line in lines if line.startswith(f"  BUY {code} "))
+        after = lines[lines.index(line) + 1]
+        assert (after == NEEDS_SELLS) is (code in marked), (code, after)
+    spent = sum(D(price) * quantity for _code, quantity, price in buys)
+    released = sum(D(price) * quantity for _code, quantity, price in sells)
+    at_limit = sum(
+        (D(price) * D("1.10")).quantize(D("0.01"), rounding=ROUND_HALF_UP) * quantity
+        for _code, quantity, price in buys
+    )
+    assert (
+        f"  cash before the sells {D(cash):,.2f} yuan; buys total {spent:,.2f} yuan at their "
+        f"reference prices ({at_limit:,.2f} yuan at their limit-up prices); sells expected to "
+        f"release about {released:,.2f} yuan at the closes"
+    ) in lines
+
+
+def test_the_running_total_funds_the_carried_buys_first_as_the_kernel_does(
+    s3: WrittenOff,
+) -> None:
+    """The kernel reserves the buys carried from earlier sessions before tonight's see any cash
+    (`domain.survivor_orders`): 8,000 of a REPEAT fits 10,000, and tonight's 5,000 after it does
+    not. A buy the sales cannot cover either says so."""
+    orders = [
+        open_order("buy", "600071.SH", 800, "10.00", carried=True),
+        open_order("buy", "600072.SH", 500, "10.00"),
+    ]
+    lines = summary_lines(with_orders(s3, cash="10000.00", orders=orders))
+
+    repeated = next(line for line in lines if line.startswith("  REPEAT BUY 600071.SH"))
+    tonight = next(line for line in lines if line.startswith("  BUY 600072.SH"))
+    assert lines.index(repeated) < lines.index(tonight)
+    assert lines[lines.index(repeated) + 1] != NEEDS_SELLS
+    # No sale tonight: nothing the cash can wait for.
+    assert lines[lines.index(tonight) + 1] == (
+        "    is not covered by the cash even after the sells above fill"
+    )
+
+
+def test_a_limit_is_the_paper_books_own_rule_on_the_real_close_to_the_cent(s2: Day) -> None:
+    """I2: the next session's limits are computed from the real close by the function the paper
+    book's execution derives a band with (`backtest.execution.derived_price_band`, which
+    `_price_band` calls): 10% on the main board, rounded half up to the cent."""
+    document = json.loads(json.dumps(document_of(s2)))
+    buy_e = next(o for o in document["paper"]["open_orders"] if o["ts_code"] == E)
+    buy_e["real_close"] = buy_e["reference_price"] = "87.82"
+
+    lines = summary_lines(document)
+
+    # 87.82 x 1.10 = 96.602: 96.60, and 400 x 96.60 at it.
+    assert next(line for line in lines if line.startswith(f"  BUY {E} ")).endswith(
+        "; limit-up 96.60, 38,640.00 yuan at it"
+    )
+    derived = execution.derived_price_band
+    assert derived(D("87.82"), board="main", is_st=False) == (D("96.60"), D("79.04"))
+    assert derived(D("10.10"), board="main", is_st=True) == (D("10.61"), D("9.60"))
+    for close, is_st in ((D("87.82"), False), (D("10.10"), True), (D("5.75"), False)):
+        bar = execution.MarketBar(
+            subject=E,
+            trade_date=S3,
+            board="main",
+            previous_close=close,
+            open=close,
+            high=close,
+            low=close,
+            close=close,
+            suspended=False,
+            is_st=is_st,
+        )
+        # The one derivation: the paper book's execution reaches the same band through it.
+        assert execution._price_band(bar) == derived(close, board="main", is_st=is_st)
+
+
+def test_a_special_treatment_sale_is_limited_at_five_percent_before_2025_07_07_and_ten_from_it(
+    s3: WrittenOff,
+) -> None:
+    """The 5% band of a main-board ST name ended on 2025-07-07 (`BAND_WITNESS_ENDS`): from that
+    session the exchange's band is 10% for it as for any main-board name, so the limit printed
+    for the open is 10% then -- the exchange's published limit governs, and the line says so."""
+    sale = open_order("sell", B, 800, "11.50", reasons=("special_treatment",))
+    before = with_orders(s3, cash="0.00", orders=[sale])
+    after = json.loads(json.dumps(before))
+    after["paper"]["open_session"]["date"] = "2026-04-14"
+
+    sale_line = f"  SELL ENTIRE POSITION {B} "
+    early = next(line for line in summary_lines(before) if line.startswith(sale_line))
+    late = next(line for line in summary_lines(after) if line.startswith(sale_line))
+
+    assert early.endswith("; limit-down 10.93")  # 11.50 x 0.95 = 10.925, half up
+    assert late.endswith("; limit-down 10.35")  # 11.50 x 0.90
+
+
+def test_an_order_whose_limit_cannot_be_computed_says_so_and_prints_no_number(s2: Day) -> None:
+    document = json.loads(json.dumps(document_of(s2)))
+    sale = next(o for o in document["paper"]["open_orders"] if o["side"] == "sell")
+    sale["real_close"] = None
+
+    line = next(line for line in summary_lines(document) if line.startswith("  SELL ENTIRE"))
+
+    assert line == (
+        f"  SELL ENTIRE POSITION {A} (ledger qty 900; real close n/a) EXIT_SURVIVOR_LOST; no "
+        "limit computed: no real close tonight"
+    )
+
+
+def test_every_evening_says_the_account_follows_the_book_only_if_it_placed_every_order(
+    s2: Day, s3: WrittenOff
+) -> None:
+    """I4: the paper book fills what it planned whether or not the account placed it. Said after
+    the orders every evening that has any; a SELL of a name the account does not hold is to be
+    ignored, said when there is a sale."""
+    with_a_sale = summary_lines(document_of(s2))
+    buys_only = summary_lines(document_of(s3))
+
+    for lines in (with_a_sale, buys_only):
+        orders = [
+            i for i, line in enumerate(lines) if line.lstrip().startswith(("BUY", "SELL", "REPEAT"))
+        ]
+        assert lines.index(ASSUMED) > max(orders)
+        assert lines.index(ASSUMED) < lines.index(line_with(lines, "carried orders"))
+    assert SELL_NOTE in with_a_sale
+    assert SELL_NOTE not in buys_only
+
+
+def test_the_diagnostics_come_after_what_the_user_acts_on(s2: Day, frame: Frame) -> None:
+    """M1: the run's diagnostics -- the ids, the facts and screen counters, the record, the
+    requests and the units -- follow a `diagnostics` header, after the orders and the book."""
+    lines = summary_lines(document_of(s2))
+    skipped = summary_lines(frame_document(frame))
+
+    assert line_with(lines, "diagnostics") == row(
+        "diagnostics", "how the run read its data -- nothing below is an order"
+    )
+    assert line_with(lines, "ids") == row(
+        "ids",
+        f"session index 2; trade list {s2.result.trade_list.trade_list_id}; paper snapshot "
+        f"{s2.result.snapshot.snapshot_id}",
+    )
+    assert line_with(skipped, "ids") == row("ids", f"session index {frame.index}")
+    after = lines_after(lines, "diagnostics")
+    for label in ("facts", "screen", "prediction", "tushare requests", "units"):
+        assert any(line.startswith(label) for line in after), label
+    assert not any(line.lstrip().startswith(("BUY", "SELL", "REPEAT")) for line in after)
+
+
+def test_every_instant_the_user_reads_is_a_shanghai_time(s3: WrittenOff) -> None:
+    """M3: a document whose instants were filed in UTC -- a clock, a record's outcome, the call
+    auction -- prints them in Asia/Shanghai."""
+    document = {
+        **document_of(s3),
+        "as_of": "2021-03-04T10:30:00+00:00",
+        "prediction": {
+            "registered": True,
+            "record_id": "prd_x",
+            "outcome_known_at": "2021-04-02T07:00:00+00:00",
+        },
+        "this_run": {
+            "requests": {},
+            "request_count": 0,
+            "wrote": False,
+            "after_the_call_auction": {
+                "session": "2021-03-05",
+                "call_auction": "2021-03-05T01:15:00+00:00",
+            },
+        },
+    }
+
+    lines = summary_lines(document)
+    text = "\n".join(lines)
+
+    assert line_with(lines, "session") == row(
+        "session", "2021-03-04 (as of 2021-03-04T18:30:00+08:00)"
+    )
+    assert "outcome knowable 2021-04-02T15:00:00+08:00" in line_with(lines, "prediction")
+    assert "it began 2021-03-05T09:15:00+08:00" in text
+    assert "+00:00" not in text
+    assert strategy_survivor_summary._SHANGHAI.key == DEFAULT_DATE_TIMEZONE
+
+
+def test_a_note_of_the_run_on_why_this_session_is_the_day_is_printed_under_it(
+    s3: WrittenOff,
+) -> None:
+    """M5: a weekend run, or one before the day's data is published at 16:30, prints the last
+    complete session's result; the run's note says why, under the session line."""
+    note = "today, 2021-03-06, is not a trading day: 2021-03-04 is the last trading day"
+    run = {"requests": {}, "request_count": 0, "wrote": False, "session_note": note}
+
+    lines = summary_lines({**document_of(s3), "this_run": run})
+
+    assert lines[lines.index(line_with(lines, "session")) + 1] == f"  {note}"
+    assert not any(note in line for line in summary_lines(document_of(s3)))
+
+
+# --- a refused day's block (I5) -------------------------------------------------------------------
+
+RERUN: Final[str] = "UV_PROJECT_ENVIRONMENT=... scripts/daily_selection.py --runtime-dir RT"
+"""The command a refusal block names; the daily command builds it (`daily_selection`)."""
+CUTOFF_S4: Final[datetime] = datetime(2021, 3, 5, 9, 15, tzinfo=SHANGHAI)
+"""09:15 of S4, the call auction the evening of S3 plans for."""
+
+
+def refusal_of(**changes: Any) -> list[str]:
+    arguments: dict[str, Any] = {
+        "session": S3,
+        "cutoff": CUTOFF_S4,
+        "now": datetime(2021, 3, 4, 19, 0, tzinfo=SHANGHAI),
+        "head": None,
+        "decided": False,
+        "unread": None,
+        "ordinals": ORDINALS,
+        "rerun": RERUN,
+    }
+    arguments.update(changes)
+    return strategy_survivor_summary.refusal_lines(**arguments)
+
+
+def test_a_refused_evening_lists_the_orders_still_live_and_the_rerun_before_the_call_auction(
+    s2: Day,
+) -> None:
+    """The evening of S3 refused before its paper book: the book's head is S2's evening, whose
+    plan was for S3's open. Nothing new is planned; the paper book settles S3's open with those
+    orders and keeps each one that does not fill live for S4's open; the run can be made again
+    until S4's call auction, and after it the next run settles S3 without a decision."""
+    lines = refusal_of(head=s2.result.snapshot)
+
+    assert lines == [
+        "no new orders were produced tonight",
+        "orders the paper book holds live from its last settled session, 2021-03-03 (it settles "
+        "the open of 2021-03-04 with them first): place again for the open of 2021-03-05 each one "
+        "your account did not fill:",
+        f"  SELL ENTIRE POSITION {A} (ledger qty 900) EXIT_SURVIVOR_LOST, planned on 2021-03-03; "
+        "a sale never expires",
+        f"  BUY {C} 900 shares ENTRY_REPLACEMENT, planned on 2021-03-03 at 10.00, live through "
+        "2021-03-08",
+        f"  BUY {E} 400 shares ENTRY_REPLACEMENT, planned on 2021-03-03 at 20.00, live through "
+        "2021-03-08",
+        "rerun before 2021-03-05T09:15:00+08:00, the call auction of 2021-03-05, with:",
+        f"  {RERUN}",
+        "after that, the next run settles 2021-03-04 without a decision",
+    ]
+
+
+def test_a_refusal_after_the_call_auction_names_no_rerun(s2: Day) -> None:
+    lines = refusal_of(head=s2.result.snapshot, now=datetime(2021, 3, 5, 10, 0, tzinfo=SHANGHAI))
+
+    assert lines[-1] == (
+        "the call auction of 2021-03-05 began 2021-03-05T09:15:00+08:00: a rerun can no longer "
+        "decide 2021-03-04, and the next run settles it without a decision"
+    )
+    assert not any(RERUN in line for line in lines)
+
+
+def test_a_buy_that_expires_before_the_next_open_is_not_listed_as_live(s2: Day) -> None:
+    """S2's buys are live through ordinal 5 (2021-03-08); refused on S5, the next open is ordinal
+    6, which only the sale reaches."""
+    lines = refusal_of(
+        head=s2.result.snapshot, session=S5, cutoff=datetime(2021, 3, 9, 9, 15, tzinfo=SHANGHAI)
+    )
+
+    assert lines[1] == (
+        "orders the paper book holds live from its last settled session, 2021-03-03 (it settles "
+        "the opens from 2021-03-04 through 2021-03-08 with them first): place again for the open "
+        "of 2021-03-09 each one your account did not fill:"
+    )
+    assert [line for line in lines if line.startswith("  ") and RERUN not in line] == [
+        f"  SELL ENTIRE POSITION {A} (ledger qty 900) EXIT_SURVIVOR_LOST, planned on 2021-03-03; "
+        "a sale never expires"
+    ]
+
+
+def test_an_evening_the_book_committed_before_the_refusal_stands_and_is_listed(
+    s3: WrittenOff,
+) -> None:
+    """The book holds the evening of S3 already -- a run committed it and this one was refused
+    finishing it: its plan for S4 is not "no new orders", and the paper book fills it at S4's
+    open whether or not it is placed."""
+    head = s3.result.snapshot
+
+    lines = refusal_of(head=head, decided=True)
+
+    assert lines[0] == (
+        f"the paper book committed the evening of 2021-03-04 before this refusal "
+        f"({head.snapshot_id}): its plan for the open of 2021-03-05 stands, and the paper book "
+        "fills it at that open whether or not it is placed:"
+    )
+    assert "no new orders were produced tonight" not in lines
+    planned = [item.order.ts_code for item in head.pending_orders if item.order.side == "buy"]
+    assert sorted(planned) == sorted([F, G, E])
+    assert [line.split()[1] for line in lines if line.startswith("  BUY ")] == planned
+
+
+def test_a_session_settled_tonight_without_a_decision_lists_what_it_left_live(
+    settle_only: SettleOnly,
+) -> None:
+    head = settle_only.caught.snapshot
+
+    lines = refusal_of(head=head, session=S4, cutoff=datetime(2021, 3, 8, 9, 15, tzinfo=SHANGHAI))
+
+    assert lines[1] == (
+        "orders the paper book holds live after settling 2021-03-05: place again for the open of "
+        "2021-03-08 each one your account did not fill:"
+    )
+    assert {line.split()[1] for line in lines if line.startswith("  BUY ")} == {E, F, G}
+
+
+def test_a_refusal_that_could_not_read_the_book_or_found_none_says_so(s2: Day) -> None:
+    unread = refusal_of(unread="PaperStateError: the snapshot of 2021-03-03 is damaged")
+    none = refusal_of()
+    unknown = refusal_of(session=None, cutoff=None, ordinals=None, head=s2.result.snapshot)
+
+    assert unread[1] == (
+        "the paper book's live orders could not be read (PaperStateError: the snapshot of "
+        "2021-03-03 is damaged); they are the orders the last evening printed, less any your "
+        "account filled"
+    )
+    assert none[1] == "the paper book holds no live order: it has settled no session yet"
+    # No session found (the calendar could not say): the orders by ordinal, a generic deadline.
+    assert unknown[1] == (
+        "orders the paper book holds live from its last settled session, 2021-03-03: place again "
+        "for the next open each one your account did not fill:"
+    )
+    assert (
+        f"  BUY {C} 900 shares ENTRY_REPLACEMENT, planned on session 2 at 10.00, live through "
+        "session 5"
+    ) in unknown
+    assert unknown[-3:] == [
+        "rerun before 09:15 of the next session, its call auction, with:",
+        f"  {RERUN}",
+        "after that, the next run settles the session without a decision",
+    ]
 
 
 # --- what the daily command adds to a document (`V2-P7-008`, D5b) ------------------------------

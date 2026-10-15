@@ -37,7 +37,7 @@ import sys
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -274,12 +274,41 @@ def _run(
 
 
 def _requests(line: str) -> dict[str, int]:
-    """The requests a refusal's last line reports."""
+    """The requests a refusal's requests line reports."""
     head, _, counted = line.partition(" this run ")
     assert head.startswith("tushare requests"), line
     requests: dict[str, int] = json.loads(counted)
     assert int(head.split()[-1]) == sum(requests.values())
     return requests
+
+
+NO_NEW_ORDERS: Final[str] = "no new orders were produced tonight"
+"""The first line of the block a survivor day's refusal of steps 2 to 8 prints after its requests
+line (V2-P7-008 final fix, I5)."""
+PINNED_RUN: Final[str] = 'UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env'
+"""The runbook's way of running a command in the pinned worktree (M9)."""
+
+
+def _requests_line(err: Sequence[str]) -> str:
+    """A refusal's requests line: after the refusal's own lines, before the block (I5)."""
+    return next(line for line in err if line.startswith("tushare requests"))
+
+
+def _aftermath(err: Sequence[str]) -> list[str]:
+    """What a refusal prints after its requests line: the block of steps 2 to 8 (I5), nothing for
+    steps 1 and 9."""
+    return list(err[list(err).index(_requests_line(err)) + 1 :])
+
+
+def _rerun(world: tds.World, *, as_of: datetime, json_output: bool = True) -> str:
+    """The command a refusal block names for `world`'s day run by `_run` at `as_of`: the same
+    invocation, in the runbook's form, its clock in Asia/Shanghai (M3, M9)."""
+    arguments = ["scripts/daily_selection.py", "--runtime-dir", str(world.runtime)]
+    arguments += ["--registration", str(world.registration), "--repo", str(world.repo)]
+    arguments += ["--as-of", as_of.astimezone(daily.SHANGHAI).isoformat()]
+    if json_output:
+        arguments.append("--json")
+    return f'{PINNED_RUN} "$PWD/.venv/bin/python" {shlex.join(arguments)}'
 
 
 def _config_id(world: tds.World) -> str:
@@ -611,7 +640,8 @@ def test_the_days_clock_and_holdings_are_pinned_on_disk_before_its_first_request
     assert market.seen["held_from"] is None
     assert "panel" not in market.seen
     assert "panel" not in _journal(world)
-    assert sum(_requests(err[-1]).values()) >= 1
+    assert sum(_requests(_requests_line(err)).values()) >= 1
+    assert _aftermath(err)[0] == NO_NEW_ORDERS
 
 
 def _without_backoff(provider: Callable[..., Any]) -> Callable[..., Any]:
@@ -641,7 +671,16 @@ def test_a_rerun_of_a_day_stopped_at_the_paper_book_asks_nothing_and_files_nothi
 
     assert first[0] == code == 1
     assert first[2][0] == INJECTED
-    assert err == [INJECTED, NO_REQUEST]
+    assert err[:2] == [INJECTED, NO_REQUEST]
+    # I5: what the refusal means for the account, read only -- the book holds its opening alone,
+    # and the day can be run again before 7 April's call auction.
+    assert _aftermath(err) == [
+        NO_NEW_ORDERS,
+        "the paper book holds no order live for the open of 2026-04-07",
+        "rerun before 2026-04-07T09:15:00+08:00, the call auction of 2026-04-07, with:",
+        f"  {_rerun(world, as_of=DAY_AS_OF)}",
+        "after that, the next run settles 2026-04-06 without a decision",
+    ]
     assert _records(world) == records
     assert _files(world.runtime) == before
     assert "result" not in _journal(world)
@@ -985,11 +1024,32 @@ def test_a_day_whose_facts_are_refused_files_nothing_and_a_rerun_after_the_fix_d
     assert code == 1
     assert err[0].startswith("step 6 (facts) failed:")
     assert "MissingFactorBuildError" in err[0]
+    assert err[1].startswith("tushare requests")
     assert out == ""
     journal = _journal(world, NEXT)
     assert "prediction" not in journal and "result" not in journal
     assert len(_records(world)) == 1
     assert NEXT not in _snapshots(world).sessions()
+    # I5: what the refusal means for the account -- no new orders; the initial build planned on 6
+    # April, which the paper book settles at 7 April's open and keeps live for 8 April's; the
+    # rerun, before 8 April's call auction, as the exact command.
+    head = _snapshot(world, DAY)
+    buys = [
+        f"  BUY {item.order.ts_code} {item.order.quantity} shares INITIAL_BUILD, planned on "
+        f"2026-04-06 at {item.order.reference_price}, live through 2026-04-09"
+        for item in head.pending_orders
+    ]
+    assert len(buys) == 10
+    assert _aftermath(err) == [
+        NO_NEW_ORDERS,
+        "orders the paper book holds live from its last settled session, 2026-04-06 (it settles "
+        "the open of 2026-04-07 with them first): place again for the open of 2026-04-08 each one "
+        "your account did not fill:",
+        *buys,
+        "rerun before 2026-04-08T09:15:00+08:00, the call auction of 2026-04-08, with:",
+        f"  {_rerun(world, as_of=evening_of(NEXT))}",
+        "after that, the next run settles 2026-04-07 without a decision",
+    ]
 
     second = _completed(world, capsys, NEXT)
 
@@ -1020,7 +1080,15 @@ def test_a_day_left_undecided_past_the_next_call_auction_is_settled_by_the_next_
 
     assert code == 1
     assert err[0].startswith("step 7 (prediction) failed: the scores of 2026-04-07 are traded")
-    assert len(err) == 2 and err[1].startswith("tushare requests")
+    assert err[1].startswith("tushare requests")
+    # I5: past the call auction a rerun cannot decide the day; the block says so, and names none.
+    aftermath = _aftermath(err)
+    assert aftermath[0] == NO_NEW_ORDERS
+    assert aftermath[-1] == (
+        "the call auction of 2026-04-08 began 2026-04-08T09:15:00+08:00: a rerun can no longer "
+        "decide 2026-04-07, and the next run settles it without a decision"
+    )
+    assert not any("scripts/daily_selection.py" in line for line in aftermath)
     assert out == ""  # only a day its paper book refused is printed as far as it got
     journal = _journal(world, NEXT)
     assert "prediction" not in journal and "result" not in journal
@@ -1083,9 +1151,11 @@ def test_a_holding_delisted_with_no_bar_is_written_off_at_its_whole_cost_basis_b
 
     _code, out, _err = _day(world, capsys, THIRD, json_output=False)
 
+    # M8: the write-off is the paper book's; the account may still hold the shares.
     assert (
         f"  {gone} written off (ledger qty {position.quantity}): whole cost basis "
-        f"{format(basis, 'f')}, no price"
+        f"{format(basis, 'f')}, no price -- the paper book wrote it off; your account may still "
+        "hold the shares, and no SELL will be printed for them again"
     ) in out.splitlines()
 
 
@@ -1387,7 +1457,11 @@ def test_a_day_whose_evening_was_not_committed_is_refused_once_the_next_update_h
     assert "2026-04-08" in err[0]
     assert "this evening can no longer be completed" in err[0]
     assert "the next run settles it without a decision" in err[0]
-    assert err[-1] == NO_REQUEST
+    assert _requests_line(err) == NO_REQUEST
+    assert _aftermath(err)[-1] == (
+        "the call auction of 2026-04-08 began 2026-04-08T09:15:00+08:00: a rerun can no longer "
+        "decide 2026-04-07, and the next run settles it without a decision"
+    )
     assert "result" not in _journal(world, NEXT)
 
 
@@ -1565,7 +1639,10 @@ def test_the_panel_steps_bound_is_the_one_the_registration_names(
     seeded: Path,
 ) -> None:
     """A registration naming 3 on a store 4 sessions behind: step 2 refuses before any request
-    (the design's 10 would have fetched them)."""
+    (the design's 10 would have fetched them). The remedy is printed as the runbook runs a
+    command in the pinned worktree, pinned at 8 April's publication in Asia/Shanghai (M3, M9);
+    and, as for every refusal of steps 2 to 8, what it means for the account (I5): no orders --
+    the book is not open yet -- and the rerun before 13 April's call auction."""
     config = survivor_config(epoch=date(2026, 4, 9), max_panel_catch_up_sessions=3)
     world = _world(tmp_path, monkeypatch, seeded, config=config)
     later = datetime.fromisoformat("2026-04-10T18:30:00+08:00")
@@ -1575,7 +1652,23 @@ def test_the_panel_steps_bound_is_the_one_the_registration_names(
     assert code == 1
     assert err[0].startswith("step 2 (panel update) failed: 4 missed session(s)")
     assert "more than the 3 this step fetches in one run" in err[0]
-    assert err[-1] == NO_REQUEST
+    assert err[1] == "  " + " ".join(
+        [
+            f'{PINNED_RUN} "$PWD/.venv/bin/openalpha" panel build --runtime-dir',
+            shlex.quote(str(world.runtime)),
+            "--year 2026 --as-of 2026-04-08T16:30:00+08:00 --exchange SSE --incremental "
+            "--dataset adj_factor --dataset price --dataset stk_limit",
+        ]
+    )
+    assert err[2].startswith("then rerun this command")
+    assert err[3] == NO_REQUEST
+    assert _aftermath(err) == [
+        NO_NEW_ORDERS,
+        "the paper book holds no live order: it has settled no session yet",
+        "rerun before 2026-04-13T09:15:00+08:00, the call auction of 2026-04-13, with:",
+        f"  {_rerun(world, as_of=later)}",
+        "after that, the next run settles 2026-04-10 without a decision",
+    ]
 
 
 NEW_YEAR_DAYS: Final[tuple[date, ...]] = weekdays(
@@ -2165,7 +2258,13 @@ def test_a_fault_no_survivor_step_anticipated_is_that_steps_refusal_with_its_req
     assert code == 1
     assert err[0] == f"step {number} ({step}) failed: an unexpected fault: RuntimeError: injected"
     assert sum(_requests(err[1]).values()) == spent
-    assert len(err) == 2
+    # I5: a refusal of steps 2 to 8 says what it means for the account -- its block is made
+    # whatever the fault, even one that breaks the cutoff it would name (case "2, the cutoff").
+    if step in daily.SURVIVOR_STEPS[1:8]:
+        assert err[2] == NO_NEW_ORDERS, err
+        assert any(line.endswith(" without a decision") for line in err[3:]), err
+    else:
+        assert len(err) == 2
 
 
 # --- the panel step's bound and the result's kind ------------------------------------------------
@@ -2233,15 +2332,26 @@ def test_an_evening_not_committed_by_the_next_call_auction_is_refused_and_settle
     paper = _files(world.runtime / "paper")
     records = _records(world)
 
-    code, out, err = _run(world, capsys, clock=after_the_auction(DAY))
+    # The scheduler's clock is UTC (`_utc_now`): every instant the refusal prints is a Shanghai
+    # one all the same (M3).
+    code, out, err = _run(world, capsys, clock=after_the_auction(DAY).astimezone(UTC))
 
     assert code == 1
     assert err[0].startswith("step 8 (paper book) failed: ")
     assert "2026-04-07T09:15:00+08:00" in err[0]
+    assert "and it is 2026-04-07T10:00:00+08:00" in err[0]
+    assert "+00:00" not in "\n".join(err)
     assert "the call auction of the next session has passed" in err[0]
     assert "nothing was decided or written" in err[0]
     assert "the next session's run settles 2026-04-06 without a decision" in err[0]
-    assert err[1:] == [NO_REQUEST]
+    assert err[1] == NO_REQUEST
+    # I5: the book holds only its opening, and past the call auction no rerun can decide the day.
+    assert _aftermath(err) == [
+        NO_NEW_ORDERS,
+        "the paper book holds no order live for the open of 2026-04-07",
+        "the call auction of 2026-04-07 began 2026-04-07T09:15:00+08:00: a rerun can no longer "
+        "decide 2026-04-06, and the next run settles it without a decision",
+    ]
     journal = _journal(world)
     assert "result" not in journal and "paper" not in journal
     assert DAY not in _snapshots(world).sessions()
@@ -2281,7 +2391,9 @@ def test_an_evening_completed_or_printed_after_the_call_auction_it_planned_for_s
     assert code == 0, err
     lines = out.splitlines()
     (header,) = [line for line in lines if line.startswith("ORDERS FOR THE OPEN OF D+1")]
-    assert ", 2026-04-07 -- trade list " in header
+    # The trade list's id is on the `ids` line now, among the diagnostics (M1).
+    assert ", 2026-04-07 -- evening " in header
+    assert any(line.startswith("ids ") and " trade list trl_" in line for line in lines)
     assert lines[lines.index(header) + 1] == _passed(NEXT)
     assert lines[lines.index(header) + 2] == REFERENCE_NOTE
     assert "after_the_call_auction" not in json.dumps(_journal(world))
@@ -2484,7 +2596,11 @@ def test_a_record_filed_and_not_journalled_run_again_after_the_call_auction_is_j
     assert code == 1
     assert err[0].startswith("step 8 (paper book) failed: ")
     assert "the call auction of the next session has passed" in err[0]
-    assert err[1:] == [NO_REQUEST]
+    assert err[1] == NO_REQUEST
+    assert _aftermath(err)[0] == NO_NEW_ORDERS
+    assert _aftermath(err)[-1].endswith(
+        "a rerun can no longer decide 2026-04-06, and the next run settles it without a decision"
+    )
     journal = _journal(world)
     assert (journal["prediction"]["record_id"], journal["prediction"]["provenance"]) == (
         record,
@@ -2518,7 +2634,8 @@ def test_a_held_record_whose_provenance_is_gone_is_refused_and_none_is_written_a
     assert err[0].startswith(f"step 7 (prediction) failed: {record} is filed for 2026-04-06, and ")
     assert "no provenance of this registration" in err[0]
     assert "never after it, so none is written now" in err[0]
-    assert err[1:] == [NO_REQUEST]
+    assert err[1] == NO_REQUEST
+    assert _aftermath(err)[0] == NO_NEW_ORDERS
     assert _provenance(world) == []
     assert "prediction" not in _journal(world)
 
@@ -2634,7 +2751,12 @@ def test_a_first_run_older_than_the_panels_newest_session_is_refused_before_any_
     assert "no evening of it was committed" in err[0]
     assert "the next session's run settles it without a decision" in err[0]
     assert "Nothing was fetched or written" in err[0]
-    assert err[1:] == [NO_REQUEST]
+    assert err[1] == NO_REQUEST
+    # I5, read only: the book holds its opening alone, and the block writes nothing either.
+    assert _aftermath(err)[:2] == [
+        NO_NEW_ORDERS,
+        "the paper book holds no order live for the open of 2026-04-07",
+    ]
     assert world.market.payloads == []
     assert _files(world.runtime / "panel") == panel
     assert _files(world.runtime / "paper") == paper
@@ -2669,7 +2791,21 @@ def test_a_committed_evening_whose_journal_is_gone_is_refused_after_the_auction_
     assert f"its journal {_journal_path(world)} is missing" in err[0]
     assert "run the day again with --as-of 2026-04-06T18:30:00+08:00" in err[0]
     assert "Nothing was fetched or written" in err[0]
-    assert err[1:] == [NO_REQUEST]
+    assert err[1] == NO_REQUEST
+    # I5: the evening is committed, so its plan stands and is listed; past the call auction the
+    # block names no rerun of this invocation -- the refusal above names the one that completes it.
+    aftermath = _aftermath(err)
+    assert aftermath[0] == (
+        f"the paper book committed the evening of 2026-04-06 before this refusal "
+        f"({first['paper']['snapshot_id']}): its plan for the open of 2026-04-07 stands, and the "
+        "paper book fills it at that open whether or not it is placed:"
+    )
+    assert len([line for line in aftermath if line.startswith("  BUY ")]) == 10
+    assert aftermath[-1] == (
+        "the call auction of 2026-04-07 began 2026-04-07T09:15:00+08:00: the paper book fills "
+        "that plan there whether or not it was placed; the refusal above says how this day's "
+        "journal is completed"
+    )
     assert _files(world.runtime) == before
     paper = _files(world.runtime / "paper")
 
@@ -2732,14 +2868,176 @@ def test_an_epoch_whose_years_calendar_is_not_stored_is_refused_with_the_build_t
         "step 2 (panel update) failed: the SSE calendar of 2025, on which the registered epoch "
         "2025-12-31 is checked to be an open session, is not stored"
     )
+    # The remedy as the runbook runs a command in the pinned worktree, its instant in Asia/Shanghai
+    # (M3, M9: it was `openalpha panel build ... --as-of 2025-12-31T08:30:00+00:00`).
     assert err[1] == "  " + " ".join(
         [
-            "openalpha panel build --runtime-dir",
+            f'{PINNED_RUN} "$PWD/.venv/bin/openalpha" panel build --runtime-dir',
             shlex.quote(str(world.runtime)),
-            "--year 2025 --as-of 2025-12-31T08:30:00+00:00 --exchange SSE --dataset trade_cal",
+            "--year 2025 --as-of 2025-12-31T16:30:00+08:00 --exchange SSE --dataset trade_cal",
         ]
     )
     assert err[2] == "then rerun this command"
-    assert err[3:] == [NO_REQUEST]
+    assert err[3] == NO_REQUEST
+    assert _aftermath(err)[0] == NO_NEW_ORDERS
+    assert _aftermath(err)[-2:] == [
+        f"  {_rerun(world, as_of=DAY_AS_OF)}",
+        "after that, the next run settles 2026-04-06 without a decision",
+    ]
     assert world.market.payloads == []
     assert not (world.runtime / "daily_survivor").exists()
+
+
+# --- what the user reads and does (V2-P7-008 final fix, the user-view review) ------------------
+
+
+def test_the_rerun_a_refusal_names_is_this_invocation_as_the_runbook_runs_it() -> None:
+    """I5 and M9: the exact command -- the runbook's environment in the pinned worktree, the day's
+    own options, its `--as-of` in Asia/Shanghai -- and nothing the day was not given."""
+    given = daily.DailyOptions(
+        runtime_dir=Path("/runs/open alpha"),
+        registration=Path("/repo/docs/research/survivor.json"),
+        repo=Path("/elsewhere"),
+        as_of=datetime(2026, 4, 7, 10, 30, tzinfo=UTC),
+        targets=("trade_cal", "namechange"),
+        max_staleness_days=7,
+        json_output=True,
+    )
+    plain = daily.DailyOptions(runtime_dir=Path("/rt"), registration=Path("/r.json"))
+
+    assert daily.rerun_command(given) == (
+        f'{PINNED_RUN} "$PWD/.venv/bin/python" scripts/daily_selection.py --runtime-dir '
+        "'/runs/open alpha' --registration /repo/docs/research/survivor.json --repo /elsewhere "
+        "--as-of 2026-04-07T18:30:00+08:00 --dataset trade_cal --dataset namechange "
+        "--max-staleness-days 7 --json"
+    )
+    assert daily.rerun_command(plain) == (
+        f'{PINNED_RUN} "$PWD/.venv/bin/python" scripts/daily_selection.py --runtime-dir /rt '
+        "--registration /r.json"
+    )
+    assert daily.pinned_command(["openalpha", "panel", "build", "--year", "2026"]) == (
+        f'{PINNED_RUN} "$PWD/.venv/bin/openalpha" panel build --year 2026'
+    )
+
+
+def test_a_run_before_the_days_publication_says_why_it_prints_the_day_before(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """M5: run at 16:00 on 7 April with no `--as-of`, the day is 6 April -- 7 April's data is
+    published at 16:30 -- and 6 April is complete: it is printed again, and the line under the
+    session says why. The day's own evening says nothing of the kind."""
+    world = _world(tmp_path, monkeypatch, seeded)
+    _code, evening, _err = _run(world, capsys, json_output=False)
+    early = datetime.fromisoformat("2026-04-07T16:00:00+08:00").astimezone(UTC)
+    arguments = ["--runtime-dir", str(world.runtime), "--registration", str(world.registration)]
+    arguments += ["--repo", str(world.repo)]
+
+    code = daily.main(arguments, clock=lambda: early)
+    out, err = capsys.readouterr()
+
+    assert code == 0, err
+    lines = out.splitlines()
+    note = (
+        "today, 2026-04-07, is a trading day whose data is published at 16:30: 2026-04-06 is the "
+        "last complete session"
+    )
+    assert lines[0] == "session            2026-04-06 (as of 2026-04-06T18:30:00+08:00)"
+    assert lines[1] == f"  {note}"
+    assert REPRINTED in lines
+    assert not any(note in line for line in evening.splitlines())
+    assert daily.main([*arguments, "--json"], clock=lambda: early) == 0
+    assert json.loads(capsys.readouterr().out)["this_run"]["session_note"] == note
+
+
+def test_a_weekend_clock_says_today_is_not_a_trading_day(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seeded: Path
+) -> None:
+    world = _world(tmp_path, monkeypatch, seeded)
+    store = daily.panel_store(world.runtime)
+    saturday = datetime.fromisoformat("2026-04-04T10:00:00+08:00")
+    friday = datetime.fromisoformat("2026-04-03T18:30:00+08:00")
+
+    assert daily.session_note(store, "SSE", session=EPOCH, now=saturday) == (
+        "today, 2026-04-04, is not a trading day: 2026-04-03 is the last trading day"
+    )
+    assert daily.session_note(store, "SSE", session=EPOCH, now=friday) is None
+
+
+def test_a_registration_that_is_not_there_says_what_to_do_next(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """M9: exit 2 for a registration file that does not exist, with the next step."""
+    code = daily.main(
+        [
+            "--runtime-dir",
+            str(tmp_path / "runtime"),
+            "--registration",
+            str(tmp_path / "survivor.json"),
+            "--repo",
+            str(tmp_path),
+        ]
+    )
+    _out, err = capsys.readouterr()
+    lines = err.splitlines()
+
+    assert code == 2
+    assert lines[0].startswith("step 1 (registration) failed: ")
+    assert lines[1] == NO_REQUEST
+    assert lines[2:] == [
+        "next: --registration must name a registration committed in the checkout --repo names "
+        f"({tmp_path}); a configuration is registered with scripts/research/registry.py's "
+        "register() and committed before a day can run it (the default, "
+        "docs/research/p6-registration.json, is the P6 book's)"
+    ]
+
+
+def test_a_morning_check_before_any_evening_says_to_run_the_evening_first(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """M9: the morning re-check with no evening to re-check says what plans the open."""
+    world = _world(tmp_path, monkeypatch, seeded)
+    morning = datetime.fromisoformat("2026-04-07T08:30:00+08:00")
+
+    code, _out, err = _run(
+        world, capsys, as_of=morning, clock=morning, extra=["--morning-recheck"], json_output=False
+    )
+
+    assert code == 1
+    assert err[0].startswith("step 2 (preconditions) failed: no evening journal of 2026-04-06")
+    assert (
+        "Run the evening first -- the same command without --morning-recheck -- before 09:15 of "
+        "the next session, to plan its open"
+    ) in err[0]
+
+
+def test_a_factor_gap_past_the_bound_prints_its_remedy_as_the_runbook_runs_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,
+) -> None:
+    """M3 and M9 for step 4's remedy: with a bound of one session, 7 and 8 April missed are
+    refused, and the `factor build` of the oldest batch is printed as the runbook runs a command
+    in the pinned worktree, its `--as-of` 7 April's 16:30 in Asia/Shanghai. It runs."""
+    world = _world(tmp_path, monkeypatch, seeded)
+    _completed(world, capsys, DAY)
+    monkeypatch.setattr(daily, "MAX_CATCH_UP_SESSIONS", 1)
+
+    code, _out, err = _day(world, capsys, FOURTH)
+
+    assert code == 1
+    assert err[0].startswith("step 4 (factor build) failed: ")
+    (command,) = [line.strip() for line in err if '.venv/bin/openalpha" factor build' in line]
+    assert command.startswith(f'{PINNED_RUN} "$PWD/.venv/bin/openalpha" factor build ')
+    arguments = shlex.split(command)
+    assert arguments[arguments.index("--as-of") + 1] == "2026-04-07T16:30:00+08:00"
+    assert arguments.count("--as-of") == 1
+    built = daily.invoke(arguments[arguments.index("factor") :])
+    assert built.exit_code == 0, built.reason()
+    assert _aftermath(err)[0] == NO_NEW_ORDERS

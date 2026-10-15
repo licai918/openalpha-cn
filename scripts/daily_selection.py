@@ -494,6 +494,12 @@ class StepFailedError(RuntimeError):
         -- no evening, the refusal as the reason -- which `main` prints beside the refusal. Never
         filed as the journal's `result`. `None` for every other refusal, which prints the refusal
         and its requests only, and for every refusal of the P6 day."""
+        self.aftermath: tuple[str, ...] = ()
+        """A survivor day refused at steps 2 to 8 (`V2-P7-008` final fix, I5): what the refusal
+        means for the account -- no new orders, the orders the paper book still holds live, and
+        until when the day can be run again with which command
+        (`strategy_survivor_summary.refusal_lines`) -- which `main` prints after the refusal and
+        its requests line. Empty for every other refusal and for every refusal of the P6 day."""
 
 
 @contextlib.contextmanager
@@ -2270,6 +2276,25 @@ def _earliest_stored_horizon(store: PanelStore, census: Sequence[str], year: int
     return min(stored) if len(stored) == len(horizons) else None
 
 
+def pinned_command(arguments: Sequence[str]) -> str:
+    """`arguments` -- an `openalpha ...` or `scripts/...py ...` command -- as the runbook runs it in
+    the pinned worktree (`docs/runbooks/daily-selection.zh-CN.md`, 手动运行): its own environment
+    (`UV_PROJECT_ENVIRONMENT`), `uv run --no-sync` only to read the `.env` the worktree links, and
+    the worktree's own interpreter or `openalpha`, never one found on `PATH` (`V2-P7-008` final
+    fix, M9). `$PWD` is left for the shell: the line is run from the worktree, as the day is."""
+    environment = f'"$PWD/{PINNED_ENVIRONMENT}/bin'
+    head, *rest = arguments
+    program = (
+        f'{environment}/openalpha"'
+        if head == "openalpha"
+        else f'{environment}/python" {shlex.quote(head)}'
+    )
+    return (
+        f'UV_PROJECT_ENVIRONMENT="$PWD/{PINNED_ENVIRONMENT}" uv run --no-sync --env-file '
+        f"{ENV_FILE} {program} {shlex.join(rest)}"
+    )
+
+
 def _panel_build_command(
     runtime_dir: Path,
     *,
@@ -2285,10 +2310,14 @@ def _panel_build_command(
     instant; `--incremental` unless `incremental` is false (the full rebuild of those targets).
 
     `session_scoped` false names `targets` as they are given instead of the session-scoped ones
-    among them: the calendar's remedy, `trade_cal` being none of those (`_calendar_refusal`)."""
+    among them: the calendar's remedy, `trade_cal` being none of those (`_calendar_refusal`).
+
+    Only the survivor day's refusals print it, through `pinned_command` -- the runbook's
+    environment, in the pinned worktree -- and its `--as-of` is the publication instant as the user
+    reads it, 16:30 Asia/Shanghai (`V2-P7-008` final fix, M3 and M9)."""
     arguments = ["openalpha", "panel", "build", "--runtime-dir", str(runtime_dir)]
     arguments += ["--year", str(year)]
-    arguments += ["--as-of", session_publication_instant(through).astimezone(UTC).isoformat()]
+    arguments += ["--as-of", session_publication_instant(through).astimezone(SHANGHAI).isoformat()]
     arguments += ["--exchange", exchange]
     if incremental:
         arguments.append("--incremental")
@@ -2325,7 +2354,7 @@ def _calendar_refusal(runtime_dir: Path, *, session: date, exchange: str) -> str
             "nothing was fetched. No earlier run stored it: a run stores next year's calendar "
             "only once its outcome window reaches into that year. Store it, pinned at "
             f"{session.isoformat()}'s publication, with:",
-            "  " + shlex.join(arguments),
+            "  " + pinned_command(arguments),
             "then rerun this command",
         ]
     )
@@ -2360,7 +2389,7 @@ def _previous_year_refusal(
             "it, fetch every disputed pair again at 4 requests each with no cap, and leave "
             f"{year} short of its last session for the doctor's first-of-year check. Complete "
             f"{year} first -- whatever the catch-up bound -- with:",
-            "  " + shlex.join(arguments),
+            "  " + pinned_command(arguments),
             "then rerun this command",
         ]
     )
@@ -2441,7 +2470,7 @@ def _panel_catch_up_refusal(
             "session-scoped targets furthest behind -- the missed ones"
             f"{again} and the day -- {fetched - 2} more than an ordinary day's two, at up to "
             f"{per_session} requests a session (more once stk_limit pages). {fetch}",
-            "  " + shlex.join(arguments),
+            "  " + pinned_command(arguments),
             "then rerun this command: it refuses again, naming the next batch, while more than "
             f"{bound} remain, and fetches the rest itself",
         ]
@@ -2866,13 +2895,15 @@ def build_factors(
     exchange: str,
     max_staleness_days: int,
     runtime_dir: Path,
+    pinned: bool = False,
 ) -> dict[str, Any]:
     """Step 4: every tier the configuration reads, at the session's signal instant and at every
     session a missed run left unbuilt since the tier's newest build (`sessions_to_build`).
 
     At most `MAX_CATCH_UP_SESSIONS` missed sessions a tier: a longer gap is refused before
     anything is built, naming the gap and the `openalpha factor build` that builds its oldest
-    batch. `caught_up` lists the missed sessions built, for the summary and the day's journal.
+    batch -- in the survivor day's form when `pinned` (`_catch_up_command`). `caught_up` lists the
+    missed sessions built, for the summary and the day's journal.
     """
     instant = session_publication_instant(session)
     plans = {
@@ -2903,6 +2934,7 @@ def build_factors(
                 exchange=exchange,
                 max_staleness_days=max_staleness_days,
                 runtime_dir=runtime_dir,
+                pinned=pinned,
             ),
         )
     code_commit = resolve_code_commit()
@@ -2952,8 +2984,14 @@ def _catch_up_command(
     exchange: str,
     max_staleness_days: int,
     runtime_dir: Path,
+    pinned: bool = False,
 ) -> str:
-    """The `openalpha factor build` step 4 would run for `factors` at `days` (one year's)."""
+    """The `openalpha factor build` step 4 would run for `factors` at `days` (one year's).
+
+    `pinned` is the survivor day's form (`V2-P7-008` final fix, M3 and M9): the command as the
+    runbook runs it in the pinned worktree (`pinned_command`), each `--as-of` in Asia/Shanghai.
+    Without it, the P6 day's command, unchanged."""
+    zone = SHANGHAI if pinned else UTC
     arguments = ["openalpha", "factor", "build", "--runtime-dir", str(runtime_dir)]
     for factor in factors:
         arguments += ["--factor", factor]
@@ -2966,8 +3004,8 @@ def _catch_up_command(
         arguments += ["--year", str(year)]
     arguments += ["--exchange", exchange, "--max-staleness-days", str(max_staleness_days)]
     for day in days:
-        arguments += ["--as-of", session_publication_instant(day).astimezone(UTC).isoformat()]
-    return shlex.join(arguments)
+        arguments += ["--as-of", session_publication_instant(day).astimezone(zone).isoformat()]
+    return pinned_command(arguments) if pinned else shlex.join(arguments)
 
 
 def _catch_up_refusal(
@@ -2978,8 +3016,10 @@ def _catch_up_refusal(
     exchange: str,
     max_staleness_days: int,
     runtime_dir: Path,
+    pinned: bool = False,
 ) -> str:
-    """Why step 4 built nothing, and the command that builds each refused gap's oldest batch."""
+    """Why step 4 built nothing, and the command that builds each refused gap's oldest batch --
+    in the survivor day's form when `pinned` (`_catch_up_command`)."""
     lines: list[str] = []
     for (tier, transform, neutralization, days), factors in groups:
         missed = [day for day in days if day != session]
@@ -3001,6 +3041,7 @@ def _catch_up_refusal(
                 exchange=exchange,
                 max_staleness_days=max_staleness_days,
                 runtime_dir=runtime_dir,
+                pinned=pinned,
             ),
         ]
     lines.append(
@@ -3684,9 +3725,17 @@ def _survivor_session(runtime_dir: Path, store: PanelStore, exchange: str, as_of
     session = _stored_session(store, exchange, as_of)
     if session is None:
         raise StepFailedError(
-            "panel update", f"no session had published at {as_of.isoformat()}", steps=SURVIVOR_STEPS
+            "panel update",
+            f"no session had published at {_shanghai(as_of)}",
+            steps=SURVIVOR_STEPS,
         )
     return session
+
+
+def _shanghai(instant: datetime) -> str:
+    """An instant as a survivor day's message prints it: in Asia/Shanghai, whatever zone the clock
+    or `--as-of` gave it (`V2-P7-008` final fix, M3)."""
+    return instant.astimezone(SHANGHAI).isoformat()
 
 
 def _admit_epoch(
@@ -3731,7 +3780,7 @@ def _admit_epoch(
                     f"{epoch.isoformat()} is checked to be an open session, is not stored or "
                     "cannot be read; nothing was fetched. Store it, pinned at the epoch's "
                     "publication, with:",
-                    "  " + shlex.join(build),
+                    "  " + pinned_command(build),
                     "then rerun this command",
                 ]
             ),
@@ -3943,7 +3992,7 @@ def _no_longer_completed(session: date, as_of: datetime, newest: date) -> str:
     return (
         f"the panel holds sessions after {session.isoformat()}, through {newest.isoformat()}: the "
         "next session's update has run since this day pinned its clock, so the panel can no "
-        f"longer be read as it stood at {as_of.isoformat()} -- the instant the doctor, the "
+        f"longer be read as it stood at {_shanghai(as_of)} -- the instant the doctor, the "
         "factor build and the facts of this day read at -- and its evening was not committed. "
         "Decided on a later read, the evening could differ from the one the filed record (if "
         "any) was scored on, so this evening can no longer be completed: the next run settles "
@@ -3957,7 +4006,7 @@ def _older_than_the_panel(session: date, as_of: datetime, newest: date) -> str:
     return (
         f"the panel holds sessions after {session.isoformat()}, through {newest.isoformat()}, "
         "and no evening of it was committed: the panel can no longer be read as it stood at "
-        f"{as_of.isoformat()} -- the instant this day's doctor, factor build and facts read at -- "
+        f"{_shanghai(as_of)} -- the instant this day's doctor, factor build and facts read at -- "
         "and an update pinned there would fetch and rewrite the store's partitions at an older "
         "instant than the one they hold. A day is run on its own session's evening, before the "
         "next session's update; the next session's run settles it without a decision. Nothing was "
@@ -4137,10 +4186,9 @@ def _settle_only_prediction(as_of: datetime, cutoff: datetime) -> dict[str, Any]
         "registered": False,
         "settle_only": True,
         "reason": (
-            f"the day's pinned clock {as_of.isoformat()} is at or after {cutoff.isoformat()}, the "
+            f"the day's pinned clock {_shanghai(as_of)} is at or after {_shanghai(cutoff)}, the "
             "next session's call auction: its scores would not be a prediction made before their "
-            "outcome, so nothing is registered and no decision is made -- the day settles only "
-            "(decision 2)"
+            "outcome, so nothing is registered and no decision is made -- the day settles only"
         ),
     }
 
@@ -4208,7 +4256,7 @@ def _survivor_prediction(
         raise StepFailedError(
             "prediction",
             f"the scores of {session.isoformat()} are traded at the next session's open, whose "
-            f"call auction starts {cutoff.isoformat()}, and it is {now.isoformat()}: this session "
+            f"call auction starts {_shanghai(cutoff)}, and it is {_shanghai(now)}: this session "
             "can no longer be registered or decided -- its record would not precede its outcome "
             "-- and the next session's run settles it without a decision. Nothing was filed; "
             "there is nothing to do",
@@ -4616,7 +4664,7 @@ def _too_late_to_decide(day: SurvivorDay, now: datetime) -> str:
     return (
         f"the evening of {session} plans orders for the open of "
         f"{day.cutoff.astimezone(SHANGHAI).date().isoformat()}, whose call auction began "
-        f"{day.cutoff.isoformat()}, and it is {now.isoformat()}: the call auction of the next "
+        f"{_shanghai(day.cutoff)}, and it is {_shanghai(now)}: the call auction of the next "
         "session has passed, and nothing was decided or written -- orders decided now could not "
         "be placed at the open they are for, and the record filed at step 7 stands; the next "
         f"session's run settles {session} without a decision"
@@ -4656,9 +4704,9 @@ def _after_the_call_auction(cutoff: datetime, now: datetime) -> dict[str, str] |
 
 def _settled_only(day: SurvivorDay) -> str:
     return (
-        f"the day's pinned clock {day.as_of.isoformat()} is at or after 09:15 of the next "
+        f"the day's pinned clock {_shanghai(day.as_of)} is at or after 09:15 of the next "
         "session, its call auction, so the day settles only: the session was settled without a "
-        "decision and nothing was registered (decision 2)"
+        "decision and nothing was registered"
     )
 
 
@@ -4741,6 +4789,135 @@ def _this_run(
     return run
 
 
+REFUSAL_BLOCK_STEPS: Final[tuple[str, ...]] = SURVIVOR_STEPS[1:8]
+"""The survivor steps whose refusals say what they mean for the account (`V2-P7-008` final fix,
+I5): the panel update through the paper book. A refusal of step 1 ran no day (its options, its
+lock, its epoch), and one of step 9 is the journal's, whose day's orders are not in question."""
+
+
+def rerun_command(options: DailyOptions) -> str:
+    """The exact command that runs `options`' day again, as the runbook runs it in the pinned
+    worktree (`pinned_command`): the day's own options -- `--repo` and `--max-staleness-days` only
+    where they are not the defaults -- with `--as-of` in Asia/Shanghai (`V2-P7-008` final fix,
+    I5, M3, M9)."""
+    arguments = [THIS_SCRIPT, "--runtime-dir", str(options.runtime_dir)]
+    arguments += ["--registration", str(options.registration)]
+    if options.repo != REPOSITORY:
+        arguments += ["--repo", str(options.repo)]
+    if options.as_of is not None:
+        arguments += ["--as-of", _shanghai(options.as_of)]
+    for target in options.targets or ():
+        arguments += ["--dataset", target]
+    if options.max_staleness_days != DEFAULT_MAX_STALENESS_DAYS:
+        arguments += ["--max-staleness-days", str(options.max_staleness_days)]
+    if options.json_output:
+        arguments.append("--json")
+    return pinned_command(arguments)
+
+
+def _refusal_aftermath(
+    options: DailyOptions,
+    registration: Registration,
+    survivor: SurvivorRegistration,
+    *,
+    lock: PaperBookLock,
+    clock: Callable[[], datetime],
+) -> tuple[str, ...]:
+    """The block a survivor day's refusal of steps 2 to 8 prints after its requests line (I5,
+    `strategy_survivor_summary.refusal_lines`), read here under the day's lock and read-only: the
+    session the day's clock finds, its registration cutoff, the paper book's head -- bound to this
+    registration (`require_bound`) -- and the book's count of sessions, which dates its orders.
+
+    Advice about a refusal must never replace it, so each read that fails is left out of the block
+    rather than raised -- a fault of any class, the panel's or the book's: the block then says what
+    it could not read. The paper book is read through `build_storage`, which every run of the day
+    opens before it reads the book, and only in a runtime directory whose stores have been opened
+    (`state.sqlite3` is there): one whose stores were never opened holds no paper book, and a
+    refusal before any of them is opened writes nothing."""
+    from openalpha_cn import strategy_survivor_book as paper_book
+    from openalpha_cn.strategy_survivor_market import SessionOrdinals
+    from openalpha_cn.strategy_survivor_summary import refusal_lines
+
+    adapter = survivor.adapter
+    now = clock()
+    rerun = rerun_command(options)
+    session: date | None = None
+    cutoff: datetime | None = None
+    ordinals: SessionOrdinals | None = None
+    head: PaperBookSnapshot | None = None
+    decided = False
+    unread: str | None = None
+    as_of = options.as_of or now
+    # Each read below is advice on a refusal already made: whatever it raises, the refusal above
+    # is the fact, and the block says what it could not read instead of replacing it.
+    try:
+        store = panel_store(options.runtime_dir)
+        session = _stored_session(store, adapter.exchange, as_of)
+        if session is not None:
+            cutoff = registration_cutoff(
+                _outcome_calendar(store, adapter.exchange, session, as_of), session
+            )
+    except Exception:
+        cutoff = None
+    if session is not None:
+        try:
+            calendar = _survivor_calendar(
+                store, adapter.exchange, epoch=adapter.epoch_session, session=session, as_of=as_of
+            )
+            ordinals = SessionOrdinals(calendar, adapter.epoch_session)
+        except Exception:
+            ordinals = None  # the orders are then dated by their ordinals
+    if (options.runtime_dir / "state.sqlite3").is_file():
+        try:
+            storage = build_storage(runtime_dir=options.runtime_dir, clock=clock)
+            head = paper_book.require_bound(
+                state_store=storage.paper_state_store,
+                paper_directory=storage.paper_state_store.path.parent,
+                registration=survivor,
+                config_id=registration.config_id,
+                lock=lock,
+            )
+            decided = head is not None and paper_book.decided_by_an_evening(head)
+        except Exception as error:
+            head, unread = None, f"{type(error).__name__}: {error}"
+    return tuple(
+        refusal_lines(
+            session=session,
+            cutoff=cutoff,
+            now=now,
+            head=head,
+            decided=decided,
+            unread=unread,
+            ordinals=ordinals,
+            rerun=rerun,
+        )
+    )
+
+
+def session_note(store: PanelStore, exchange: str, *, session: date, now: datetime) -> str | None:
+    """Why a run whose clock reads `now` prints `session`, the newest published then -- or `None`
+    when `now` is on the session's own date (`V2-P7-008` final fix, M5): a weekend or holiday run
+    prints the last trading day, and a run before a trading day's publication instant (16:30,
+    `session_publication_instant`) prints the day before it, each saying so. `None` too when the
+    stored calendar of `now`'s year cannot say."""
+    today = now.astimezone(SHANGHAI).date()
+    if today <= session:
+        return None
+    calendar = _stored_calendar(store, exchange, (today.year,), now)
+    if calendar is None:
+        return None
+    if today in calendar.trading_days:
+        published = session_publication_instant(today).strftime("%H:%M")
+        return (
+            f"today, {today.isoformat()}, is a trading day whose data is published at "
+            f"{published}: {session.isoformat()} is the last complete session"
+        )
+    return (
+        f"today, {today.isoformat()}, is not a trading day: {session.isoformat()} is the last "
+        "trading day"
+    )
+
+
 def _run_survivor_day(
     options: DailyOptions,
     registration: Registration,
@@ -4800,7 +4977,10 @@ def _run_survivor_day(
        committed is refused once this run's clock has reached the next session's call auction --
        and the document filed as the journal's `result` -- only for a day that completed. No
        refused day files a `result`; one refused at step 8 is printed as far as it got, any other
-       prints its refusal and its requests only.
+       prints its refusal and its requests only. A refusal of steps 2 to 8 also carries what it
+       means for the account (`_refusal_aftermath`, `V2-P7-008` final fix I5), which `main`
+       prints after its requests line; a day that completed carries the printing run's note on why
+       its session is the day (`_with_session_note`, M5).
 
     **The P6 day's options here.** `--full-update` and `--top` have no survivor meaning and are
     refused before anything is made (exit 2). `--dataset` replaces the targets as on the P6 day
@@ -4826,7 +5006,45 @@ def _run_survivor_day(
                 # `PaperBookBusyError` above all: the lock is taken before step 2, so its refusal
                 # is step 1's, whatever step the paper book module names.
                 raise StepFailedError("registration", str(error), steps=SURVIVOR_STEPS) from error
-        return _survivor_day(options, registration, survivor, lock=lock, clock=clock, counts=counts)
+        try:
+            result = _survivor_day(
+                options, registration, survivor, lock=lock, clock=clock, counts=counts
+            )
+        except StepFailedError as error:
+            # What the refusal means for the account (I5), read under the day's lock.
+            if error.step in REFUSAL_BLOCK_STEPS and error.exit_code == DailyExit.step_failed:
+                error.aftermath = _refusal_aftermath(
+                    options, registration, survivor, lock=lock, clock=clock
+                )
+            raise
+    return _with_session_note(result, options, survivor, clock=clock)
+
+
+def _with_session_note(
+    result: dict[str, Any],
+    options: DailyOptions,
+    survivor: SurvivorRegistration,
+    *,
+    clock: Callable[[], datetime],
+) -> dict[str, Any]:
+    """`result` with the printing run's `session_note` in its `this_run` (M5) when the day's
+    clock is the run's own -- no `--as-of`, which names the day itself -- and the day is not
+    today's. Never filed. A note the stored calendar cannot give is left out, never a refusal of a
+    day that completed."""
+    if options.as_of is not None:
+        return result
+    try:
+        note = session_note(
+            panel_store(options.runtime_dir),
+            survivor.adapter.exchange,
+            session=date.fromisoformat(result["session"]),
+            now=clock(),
+        )
+    except (PanelStorageError, TradingCalendarError, OSError, ValueError):
+        note = None
+    if note is None:
+        return result
+    return {**result, "this_run": {**result["this_run"], "session_note": note}}
 
 
 def _survivor_day(
@@ -5017,6 +5235,7 @@ def _survivor_day(
                     exchange=exchange,
                     max_staleness_days=options.max_staleness_days,
                     runtime_dir=runtime_dir,
+                    pinned=True,
                 ),
             )
             journal = {**journal, "factors": factors}
@@ -5192,7 +5411,9 @@ def _read_evening_journal(
         raise _morning_refusal(
             "preconditions",
             f"no evening journal of {session.isoformat()} ({path}): the evening has not run for "
-            "it, so there is no plan to re-check. Nothing was fetched or written",
+            "it, so there is no plan to re-check. Run the evening first -- the same command "
+            "without --morning-recheck -- before 09:15 of the next session, to plan its open. "
+            "Nothing was fetched or written",
         )
     if journal.get("registration", {}).get("sha256") not in (None, registration.sha256):
         raise _morning_refusal(
@@ -5627,9 +5848,11 @@ def survivor_summary_lines(result: Mapping[str, Any]) -> list[str]:
         return evening_lines(result)
     opening = result["opening"]
     run = result["this_run"]
+    as_of = _shanghai(datetime.fromisoformat(result["as_of"]))  # M3
     lines = [
         f"{'session':<18} {result['session']} (index {result['session_index']}, the paper "
-        f"book's epoch; as of {result['as_of']})",
+        f"book's epoch; as of {as_of})",
+        *([f"  {run['session_note']}"] if run.get("session_note") else []),  # M5
         f"{'book':<18} opened on its epoch with cash {opening['cash']} "
         f"({opening['snapshot_id']}); no evening is run on the epoch -- the first is the next "
         "session's; ledger equity is not evidence",
@@ -5971,6 +6194,17 @@ def launchd_plist(
     return plistlib.dumps(job, sort_keys=False).decode("utf-8")
 
 
+def _missing_registration_next(repo: Path) -> str:
+    """The next step after a registration file that does not exist (exit 2; `V2-P7-008` final
+    fix, M9): what `--registration` must name, and how a configuration comes to have one."""
+    return (
+        "next: --registration must name a registration committed in the checkout --repo names "
+        f"({repo}); a configuration is registered with scripts/research/registry.py's register() "
+        "and committed before a day can run it (the default, "
+        f"{REGISTRATION_IN_REPOSITORY}, is the P6 book's)"
+    )
+
+
 def _instant(value: str) -> datetime:
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
@@ -6144,6 +6378,15 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
             f"{json.dumps(error.requests, sort_keys=True)}",
             file=sys.stderr,
         )
+        # A survivor day's refusal of steps 2 to 8: what it means for the account (I5).
+        for line in error.aftermath:
+            print(line, file=sys.stderr)
+        if (
+            error.step == "registration"
+            and error.exit_code == DailyExit.no_registration
+            and not arguments.registration.is_file()
+        ):
+            print(_missing_registration_next(arguments.repo), file=sys.stderr)
         return int(error.exit_code)
     if arguments.json:
         print(json.dumps(result, sort_keys=True, ensure_ascii=False))

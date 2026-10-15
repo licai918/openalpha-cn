@@ -503,15 +503,12 @@ def test_a_gap_past_the_bound_is_refused_before_any_request_with_a_command_that_
     assert store.market.payloads == []
     assert _files(store.runtime) == before
 
-    command = next(
-        line.strip()
-        for line in message.splitlines()
-        if line.strip().startswith("openalpha panel build")
-    )
-    arguments = shlex.split(command)
+    arguments = _printed_command(message)
+    # The publication instant as the user reads it, 16:30 Asia/Shanghai (V2-P7-008 final fix, M3).
     assert arguments[arguments.index("--as-of") + 1] == (
-        session_publication_instant(date(2026, 2, 16)).astimezone(UTC).isoformat()
+        session_publication_instant(date(2026, 2, 16)).isoformat()
     )
+    assert arguments[arguments.index("--as-of") + 1].endswith("T16:30:00+08:00")
     flags = [arguments[index + 1] for index, flag in enumerate(arguments) if flag == "--dataset"]
     assert flags == [ADJ_FACTOR_DATASET, "price", PRICE_LIMIT_DATASET]
     assert "--incremental" in arguments
@@ -740,14 +737,23 @@ def _december(
     return store
 
 
+PINNED_OPENALPHA: Final[str] = (
+    'UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env '
+    '"$PWD/.venv/bin/openalpha"'
+)
+"""How a refusal prints a remedy (V2-P7-008 final fix, M9): as the runbook runs a command in the
+pinned worktree -- its own environment, the `.env` it links, its own `openalpha`."""
+
+
 def _printed_command(message: str) -> list[str]:
-    """The `openalpha panel build` a refusal prints, as arguments."""
+    """The `panel build` a refusal prints, as the arguments of `openalpha panel build ...`: the
+    line is the runbook's (`PINNED_OPENALPHA`), and what follows its prefix is the command."""
     command = next(
         line.strip()
         for line in message.splitlines()
-        if line.strip().startswith("openalpha panel build")
+        if line.strip().startswith(f"{PINNED_OPENALPHA} panel build ")
     )
-    return shlex.split(command)
+    return ["openalpha", *shlex.split(command.removeprefix(PINNED_OPENALPHA))]
 
 
 def _datasets(arguments: Sequence[str]) -> list[str]:
@@ -798,7 +804,7 @@ def test_the_year_befores_missed_last_sessions_are_refused_before_the_new_years_
         arguments = _printed_command(message)
         assert arguments[arguments.index("--year") + 1] == "2026"
         assert arguments[arguments.index("--as-of") + 1] == (
-            session_publication_instant(LAST_2026).astimezone(UTC).isoformat()
+            session_publication_instant(LAST_2026).isoformat()
         )
         assert "--incremental" in arguments
         assert _datasets(arguments) == [ADJ_FACTOR_DATASET, "price", PRICE_LIMIT_DATASET]
@@ -886,7 +892,7 @@ def test_a_year_before_holding_only_some_session_scoped_partitions_is_refused_wh
     arguments = _printed_command(message)
     assert arguments[arguments.index("--year") + 1] == "2026"
     assert arguments[arguments.index("--as-of") + 1] == (
-        session_publication_instant(LAST_2026).astimezone(UTC).isoformat()
+        session_publication_instant(LAST_2026).isoformat()
     )
     assert "--incremental" in arguments
     assert _datasets(arguments) == [ADJ_FACTOR_DATASET, "price", PRICE_LIMIT_DATASET]
@@ -932,7 +938,9 @@ def test_a_january_restart_whose_calendar_is_not_stored_is_refused_with_the_buil
     assert refused.value.step == "panel update"
     assert "the SSE calendar of 2027" in message
     assert "is not stored" in message
-    assert "\n  openalpha panel build " in message, "the refusal prints no command that fixes it"
+    assert f"\n  {PINNED_OPENALPHA} panel build " in message, (
+        "the refusal prints no command that fixes it"
+    )
     assert "nothing was fetched" in message
     assert store.market.payloads == []
     assert _files(store.runtime) == before
@@ -940,7 +948,7 @@ def test_a_january_restart_whose_calendar_is_not_stored_is_refused_with_the_buil
     arguments = _printed_command(message)
     assert arguments[arguments.index("--year") + 1] == "2027"
     assert arguments[arguments.index("--as-of") + 1] == (
-        session_publication_instant(FIRST_2027).astimezone(UTC).isoformat()
+        session_publication_instant(FIRST_2027).isoformat()
     )
     assert arguments[arguments.index("--exchange") + 1] == EXCHANGE
     assert "--incremental" not in arguments
@@ -1174,7 +1182,7 @@ def test_disagreeing_horizons_are_counted_from_the_earliest_and_the_printed_buil
     arguments = _printed_command(message)
     batch = missed[:bound]
     assert arguments[arguments.index("--as-of") + 1] == (
-        session_publication_instant(batch[-1]).astimezone(UTC).isoformat()
+        session_publication_instant(batch[-1]).isoformat()
     )
     assert _datasets(arguments) == [ADJ_FACTOR_DATASET, "price", PRICE_LIMIT_DATASET]
     assert ("--incremental" in arguments) is incremental
@@ -1222,7 +1230,7 @@ def test_a_year_whose_first_build_died_at_stk_limit_is_counted_from_its_first_se
     arguments = _printed_command(message)
     assert arguments[arguments.index("--year") + 1] == "2027"
     assert arguments[arguments.index("--as-of") + 1] == (
-        session_publication_instant(FIRST_2027).astimezone(UTC).isoformat()
+        session_publication_instant(FIRST_2027).isoformat()
     )
     assert "--incremental" in arguments
     built = daily.invoke(arguments[1:])

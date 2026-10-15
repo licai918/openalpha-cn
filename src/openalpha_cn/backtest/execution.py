@@ -71,6 +71,7 @@ __all__ = [
     "ExecutionResult",
     "MarketBar",
     "at_the_open",
+    "derived_price_band",
     "published_limit_fields",
     "security_board",
     "stored_market_bar",
@@ -422,12 +423,31 @@ def _price_band(market: MarketBar) -> tuple[Decimal, Decimal]:
     """
     if market.up_limit is not None and market.down_limit is not None:
         return market.up_limit, market.down_limit
-    ratio = Decimal("0.05") if market.is_st else _board_limit(market.board)
-    upper = (market.previous_close * (Decimal(1) + ratio)).quantize(
+    return derived_price_band(market.previous_close, board=market.board, is_st=market.is_st)
+
+
+def derived_price_band(
+    previous_close: Decimal,
+    *,
+    board: Literal["main", "star", "growth", "bse"],
+    is_st: bool,
+) -> tuple[Decimal, Decimal]:
+    """The `(upper, lower)` limit prices derived from `previous_close`: 5% for a special-treatment
+    name, else the board's nominal ratio (`_board_limit`), each rounded half up to the cent.
+
+    `_price_band`'s derivation, and the only copy of it: the survivor book's nightly summary
+    prints the next session's limits from tonight's real close through this function
+    (`strategy_survivor_summary`, `V2-P7-008`), so what it prints and what this policy would
+    derive cannot come apart. `is_st` is the caller's: the 5% applies to the main board's
+    risk-warning names only before 2025-07-07 (from that session they trade on the main board's
+    10%), which the summary passes as `False` on or after it.
+    """
+    ratio = Decimal("0.05") if is_st else _board_limit(board)
+    upper = (previous_close * (Decimal(1) + ratio)).quantize(
         _CENT,
         rounding=ROUND_HALF_UP,
     )
-    lower = (market.previous_close * (Decimal(1) - ratio)).quantize(
+    lower = (previous_close * (Decimal(1) - ratio)).quantize(
         _CENT,
         rounding=ROUND_HALF_UP,
     )
