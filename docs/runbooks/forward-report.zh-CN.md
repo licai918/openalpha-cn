@@ -70,7 +70,7 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv/bin/python" scripts/forward_report.py --runtime-dir ~/openalpha-research --registration <幸存者登记文件>
 ```
 
-准入与 P6 相同（`also_bound` 里加上 `scripts/forward_report.py`：之后改动这个文件，登记的报告就作废）；准入或读幸存者块失败时，报告以 `ForwardReportError: …` 退出 1（不是每日命令的 2 或 3）。
+准入与 P6 相同（`also_bound` 里加上 `scripts/forward_report.py`：登记之后再改这个文件，准入就拒绝，这份登记的周报从此出不来）；准入或读幸存者块失败时，报告以 `ForwardReportError: …` 退出 1（不是每日命令的 2 或 3）。
 
 **什么时候跑。** 每周一次，周末或开盘前最好。**不要在每日晚间命令运行期间跑**（约 18:30 起，到它打印完摘要为止）。报告不拿纸面账簿的锁；它按晚间命令写入的相反顺序读——先列出纸面账簿的快照（这一步定下账簿的「头」），再读每日日志，最后扫预测库——所以晚间命令中途写入的东西不会让报告自相矛盾，也不会让报告被误拒。仍剩一个窗口：某一晚的快照已经写入、它的日志还没写 `result` 的那几秒里，报告会把这一天列进 `paper_ledger.coverage.refused_days`（看起来像一天被拒；磁盘上，一个在快照之后被拒的日子看起来也一样，两者分不开）。晚间命令跑完之后用同一个 `--as-of` 重跑即可，不是故障。日志目录里只读 `YYYY-MM-DD.json` 这样名字的文件，清晨复核的 `<交易日>.morning.json` 不读。
 
