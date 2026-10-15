@@ -174,7 +174,11 @@ does on its own:
   section like every other, `{"wording", "items"}`.
 - **The late-record check's results**: counts by verdict and by scope, every UNVERIFIABLE record
   with its changes and every refused one with its reason, and the UNVERIFIABLE and refused shares
-  over every checked record and over the primary window's positions. How many verdicts a run
+  over every checked record and over the primary window's positions. What UNVERIFIABLE means is
+  said in the document (`UNVERIFIABLE_MEANING`, I8) and printed under the records that need it:
+  a normal late-published name change makes one, so it is no word for "contaminated". A tested
+  mean below zero says that its sign is against the registered direction (`OPPOSITE_SIGN_CLAUSE`,
+  M10). How many verdicts a run
   served from the verdict cache is the run's, not the report's, and is not in the document: a
   rerun at the same `as_of` serves them all and writes the same bytes.
 
@@ -251,11 +255,13 @@ __all__ = [
     "DESCRIPTIVE_WORDING",
     "FORWARD_METRICS",
     "NO_VERDICT_WORDING",
+    "OPPOSITE_SIGN_CLAUSE",
     "PREDICTION_LAYER_WORDING",
     "SURVIVOR_FORWARD_PROTOCOL_KEY",
     "SURVIVOR_FORWARD_PROTOCOL_SCHEMA",
     "SURVIVOR_FORWARD_REPORT_KIND",
     "UNLABELLED_WORDING",
+    "UNVERIFIABLE_MEANING",
     "CheckedVerdict",
     "DescribedQuantity",
     "DescriptiveMean",
@@ -1412,6 +1418,22 @@ _HEADLINE_BASIS: Final = (
     "excludes the UNVERIFIABLE ones, and refused records are in neither: they are excluded and "
     "listed"
 )
+UNVERIFIABLE_MEANING: Final = (
+    "the record was filed on time, at its evening's instant, and stands in the append-only "
+    "store; an input it read was restated after that instant -- typically a name-change "
+    "announcement dated on or before the session but published after the evening's read (T3: "
+    "201 of the 371 ST entries of 2017-2021 were announced the day before they took effect) -- "
+    "so it cannot be scored again equal and what it read can no longer be re-established; it is "
+    "counted in the headline and excluded from the sensitivity reading, not discarded, and it "
+    "says neither that the record carried what arrived after its instant nor that it did not"
+)
+"""What an UNVERIFIABLE record means (I8), in the document and under the records that need it."""
+OPPOSITE_SIGN_CLAUSE: Final = (
+    "the mean is below zero: its sign is opposite to the registered direction, in which greater "
+    "than zero supports the screen"
+)
+"""Said on a tested metric's line when its mean is below zero (M10): the one-sided p is for the
+registered direction, "mean > 0", which the sample's sign is against."""
 _FAMILY_BASIS: Final = (
     "the secondary metrics at the primary horizon and the primary metric at each secondary "
     "horizon; corrected once the pre-registered window is satisfied, over the one-sided p-values "
@@ -1642,6 +1664,7 @@ def _records_section(
         },
         "by_scope": {scope: scopes.get(scope, 0) for scope in sorted({*_SCOPES, *scopes})},
         "unverifiable": [item.document() for item in checked if item.verdict == "unverifiable"],
+        "unverifiable_meaning": UNVERIFIABLE_MEANING,
         "refused": [item.document() for item in checked if item.verdict == "refused"],
         "shares": {
             "overall": _shares(checked),
@@ -1984,9 +2007,12 @@ def _records_lines(records: Mapping[str, Any]) -> list[str]:
     ]
     lines += [
         f"  UNVERIFIABLE {item['record_id']} ({item['session']}, {item['scope']}): changes "
-        f"{'; '.join(item['changes'])} -- counted in the headline, excluded in the sensitivity"
+        f"{'; '.join(item['changes'])} -- counted in the headline, excluded from the sensitivity "
+        "reading, not discarded"
         for item in records["unverifiable"]
     ]
+    if records["unverifiable"]:
+        lines.append(f"  UNVERIFIABLE means: {records['unverifiable_meaning']}")
     if records["missing_sessions"]:
         lines.append(f"  missing sessions: {', '.join(records['missing_sessions'])}")
     overall, sampled = records["shares"]["overall"], records["shares"]["in_sample"]
@@ -2059,10 +2085,11 @@ def _reading_lines(reading: Mapping[str, Any], *, indent: str) -> list[str]:
             if test["exact"]
             else f"{test['sign_patterns']} sign patterns, seed {test['random_seed']}"
         )
+        opposite = test["mean"] is not None and test["mean"] < 0
         lines.append(
             f"{head}, mean {_number(test['mean'])}, one-sided p "
             f"{_number(test['one_sided_p_value'])} (two-sided {_number(test['two_sided_p_value'])}"
-            f", {drawn})"
+            f", {drawn})" + (f"; {OPPOSITE_SIGN_CLAUSE}" if opposite else "")
         )
     return lines
 

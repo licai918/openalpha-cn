@@ -2229,6 +2229,69 @@ def test_the_lines_list_the_refusals_first_then_the_layers_ledger_relative_wordi
         assert document[section] == {"wording": SURVIVOR_WORDING, "refused": NO_BOOK}
 
 
+def test_an_unverifiable_record_is_explained_where_it_is_listed_and_in_the_document() -> None:
+    """I8. A normal late-published name change (an ST announcement dated on or before the
+    session, published after the evening's read) makes that day's record UNVERIFIABLE; a reader
+    takes the word for "contaminated". So the document says what it means -- filed on time, an
+    input restated after the evening's instant, what it read no longer re-established, counted in
+    the headline, out of the sensitivity reading, not discarded, and no evidence either way of
+    what the record carried -- and the lines print it once under the records that need it, each of
+    which ends saying it is not discarded. A report without one prints no such line."""
+    outcomes = {20: every_session(25), 5: ()}
+    verdicts = checked_by(
+        outcomes[20],
+        prd_0004=(
+            "unverifiable",
+            "recompute_differs",
+            ("namechange:2026 (its rows through 2026-01-09 were restated)",),
+        ),
+    )
+
+    document = reported(outcomes, verdicts, through=25)
+    lines = survivor_forward_lines(document)
+    clean = survivor_forward_lines(reported(outcomes, checked_by(outcomes[20]), through=25))
+
+    meaning = forward_module.UNVERIFIABLE_MEANING
+    assert document["records"]["unverifiable_meaning"] == meaning
+    for words in (
+        "filed on time",
+        "evening's instant",
+        "a name-change announcement dated on or before the session",
+        "published after the evening's read",
+        "T3",
+        "can no longer be re-established",
+        "excluded from the sensitivity reading, not discarded",
+        "neither",
+    ):
+        assert words in meaning, words
+    [listed] = [line for line in lines if line.startswith("  UNVERIFIABLE prd_0004")]
+    assert listed.endswith(
+        "-- counted in the headline, excluded from the sensitivity reading, not discarded"
+    )
+    assert lines[lines.index(listed) + 1] == f"  UNVERIFIABLE means: {meaning}"
+    assert not any(line.startswith("  UNVERIFIABLE means:") for line in clean)
+
+
+def test_a_tested_mean_below_zero_says_it_is_opposite_to_the_registered_direction() -> None:
+    """M10. Every tested metric is oriented so that greater than zero supports the screen, and
+    the one-sided p is for that direction; a mean below zero -- an h5 rank IC of -0.379 with a
+    one-sided p of 0.996 -- is printed correctly but never said to have the opposite sign. The
+    test line now says so, and only for a mean below zero."""
+    outcomes = {
+        20: tuple(made(o, rank_ic=-0.03 - 0.001 * o) for o in range(1, 82)),
+        5: (),
+    }
+
+    lines = survivor_forward_lines(reported(outcomes, checked_by(outcomes[20]), through=81))
+
+    clause = forward_module.OPPOSITE_SIGN_CLAUSE
+    assert "opposite to the registered direction" in clause
+    [ranked] = [line for line in lines if line.startswith("    rank_ic (primary): 3 periods")]
+    assert ranked.endswith(f"; {clause}")
+    supported = [line for line in lines if line.startswith("    survivors_minus_ew (secondary):")]
+    assert supported and not any(clause in line for line in supported)
+
+
 def test_each_layer_states_its_unverifiable_count_and_the_unlabelled_bias_in_both_readings() -> (
     None
 ):

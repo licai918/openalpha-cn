@@ -51,11 +51,25 @@ what such a correction leaves alone. So the key is what the recompute's inputs h
   moves `ingested_time`, which the content hash covers and the value digest leaves out. Keyed by
   their content hash, the cache would never hit while the daily run continues (design decision
   13). The 16:30 bound leaves nothing out that the recompute reads, although the recompute
-  reads at the record's custody instant (or later, on its fallback): the provider makes a row of
+  reads at the record's custody instant (or later, on its fallback): the store stamps a row of
   these three visible at its own date's midnight (a calendar row at its year's start, or when it
-  was fetched if that is earlier), so a row dated on or before the session is visible by its
-  16:30. That is an assumption about the provider's clocks, and a test holds it
-  (`test_the_value_digests_16_30_bound_leaves_out_no_row_the_recompute_reads`);
+  was fetched if that is earlier), so a row dated on or before the session is *stamped* visible
+  by its 16:30, and a test holds that
+  (`test_the_value_digests_16_30_bound_leaves_out_no_row_the_recompute_reads`).
+  **Those stamps are the provider's dates, not the instants the rows were published or
+  fetched**, and for the names the difference is ordinary (T3,
+  `docs/research/p7-step0-validation/T3-st-and-new-listings.md`, section 2.4(iv) and section 9
+  item 3): 201 of the 371 ST entries of 2017-2021 were announced the calendar day before they
+  took effect, mostly after the close, and when an announcement reaches the store was not
+  measured. A `namechange` row dated on or before the session but published after the evening
+  read is therefore stamped visible at the session's 16:30 although no evening could have read
+  it: the key and the recompute both see it, the recompute differs from the record, the census
+  names the restated `namechange` partition, and the record is UNVERIFIABLE -- filed on time,
+  what it read no longer re-established, which says neither that it carried what arrived after
+  its instant nor that it did not. How large a share of records that makes on the real market
+  is not measured, and is an open item to measure before the `V2-P7-006` protocol is frozen; a
+  check that reads a row's ingestion time rather than its date is a design task there, not a
+  change of this check;
 - the **output digest** of each composite factor's processed build stamped at the session's
   16:30, under the record's transform -- the output and not the manifest id, which also moves on
   a value-identical re-run;
@@ -104,6 +118,8 @@ At 2026 scale the design memo estimates a recompute at about 2.1 s (one facts da
 The check says whether a record is what the registered configuration scored from what was
 knowable when it was filed. It says nothing about whether the scores predict anything: a verified
 record is a candidate forecast of a registered research configuration, not a performance claim.
+An UNVERIFIABLE one is not a contaminated one: the report prints what it means beside every list
+of them (`strategy_survivor_forward.UNVERIFIABLE_MEANING`).
 """
 
 from __future__ import annotations
@@ -185,9 +201,12 @@ SurvivorVerdict = Literal["verified", "unverifiable", "refused"]
 VERDICT_VERIFIED: Final[SurvivorVerdict] = "verified"
 """Scored again from the store, the record is what it says: counted."""
 VERDICT_UNVERIFIABLE: Final[SurvivorVerdict] = "unverifiable"
-"""Not scored again equal, and an input it read was corrected since: admitted -- it is an on-time
-record in the append-only store -- flagged, counted and listed with its changes, never silently
-(P6's `strategy_registration.UNVERIFIABLE`)."""
+"""Not scored again equal, and an input it read was corrected or completed since -- a
+late-published row dated on or before the session included, the ordinary case of a name change
+announced after the evening's read (module docstring): admitted -- it is an on-time record in the
+append-only store -- flagged, counted and listed with its changes, never silently (P6's
+`strategy_registration.UNVERIFIABLE`). It says neither that the record carried what arrived after
+its instant nor that it did not."""
 VERDICT_REFUSED: Final[SurvivorVerdict] = "refused"
 """Not this registration's, without a provenance, or not scored again equal with nothing to point
 to: excluded and listed with its reason."""
