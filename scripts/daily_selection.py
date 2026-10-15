@@ -139,8 +139,10 @@ fetch and the morning's `as_of` pinned with it in `RT/daily_survivor/<cfg>/<sess
 the one fetch (`namechange` for the session's year: one request, at New Year too -- the facts
 adapter reads no later year), and the morning's facts day compared, the renames of the plan's
 names announced after the session listed as notices (`strategy_survivor_morning`). It writes that
-file and the `namechange` partition, nothing else; a finished file is printed again with no
-request and no write, a pin is resumed from with the same `as_of`.
+file and the `namechange` partition, nothing else. A session has one check per Shanghai calendar
+date: on the date a check was read it is printed again with no request and no write (a pin is
+resumed from with the same `as_of`); on a later date -- Saturday's check, read again on Monday --
+the morning is read anew into `<session>.morning.<date>.json` beside it, which is kept.
 
 ## Idempotent per trading day
 
@@ -5060,10 +5062,16 @@ def _read_evening_journal(
 
 
 def _read_morning_file(
-    path: Path, *, session: date, snapshot_id: str, registration: Registration
+    path: Path,
+    *,
+    session: date,
+    snapshot_id: str,
+    registration: Registration,
+    read_on: date | None = None,
 ) -> dict[str, Any] | None:
     """The morning file at `path`, or `None` when there is none: a pin a rerun resumes from, or a
-    finished check it prints again. One that is not this evening's is refused by name and left."""
+    finished check it prints again -- `read_on` the date a later check's name gives it. One that
+    is not this evening's is refused by name and left."""
     from openalpha_cn import strategy_survivor_morning as morning
 
     if not path.is_file():
@@ -5075,6 +5083,7 @@ def _read_morning_file(
             session=session,
             evening_snapshot_id=snapshot_id,
             registration_sha256=registration.sha256,
+            read_on=read_on,
         )
     except (ValueError, morning.MorningCheckError) as error:  # `ValueError` is the JSON reader's
         raise _morning_refusal(
@@ -5082,6 +5091,72 @@ def _read_morning_file(
             f"{path} is not this evening's morning file: {error}. It is left as it is",
         ) from error
     return cast(dict[str, Any], body)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _MorningCheck:
+    """Which of a session's morning checks this run is (`_morning_check`): the file it reads or
+    writes, the check filed there already (`None` when there is none yet), and -- for a run on a
+    later calendar date than the newest check filed -- that check, whose evening read it carries."""
+
+    path: Path
+    filed: dict[str, Any] | None
+    earlier: tuple[Path, dict[str, Any]] | None
+
+
+def _morning_check(
+    directory: Path,
+    *,
+    session: date,
+    snapshot_id: str,
+    registration: Registration,
+    as_of: datetime,
+) -> _MorningCheck:
+    """The check of `session` a run reading at `as_of` makes (whole-branch review C1): one per
+    Shanghai calendar date (`strategy_survivor_morning.morning_date`). The newest check filed is
+    this run's when it was read on the same date -- a pin resumed, a finished one printed again;
+    on a later date the morning is read anew into a file of its own beside it, which is kept; and
+    a check filed on a later date than this run's refuses it, by name, before anything is fetched
+    or written. Every file read is checked to be this evening's (`_read_morning_file`)."""
+    from openalpha_cn import strategy_survivor_morning as morning
+
+    read_on = morning.morning_date(as_of)
+    names = [path.name for path in directory.iterdir()] if directory.is_dir() else []
+    generations = morning.morning_generations(names, session=session)
+    if not generations:
+        return _MorningCheck(
+            path=directory / morning.morning_file_name(session), filed=None, earlier=None
+        )
+    name, dated = generations[-1]
+    newest = directory / name
+    filed = _read_morning_file(
+        newest,
+        session=session,
+        snapshot_id=snapshot_id,
+        registration=registration,
+        read_on=dated,
+    )
+    if filed is None:  # listed a moment ago, and removed since by hand: nothing to go on
+        raise _morning_refusal(
+            "preconditions",
+            f"{newest} was removed while this run read it. Nothing was fetched or written",
+        )
+    filed_on = morning.morning_date(datetime.fromisoformat(filed["as_of"]))
+    if filed_on == read_on:
+        return _MorningCheck(path=newest, filed=filed, earlier=None)
+    if filed_on > read_on:
+        raise _morning_refusal(
+            "preconditions",
+            f"the morning check of {session.isoformat()} was read on {filed_on.isoformat()} "
+            f"already ({newest}), and this one would be read at {as_of.isoformat()}, on "
+            f"{read_on.isoformat()}: a check is never filed under an earlier date than one "
+            "already made. Nothing was fetched or written",
+        )
+    return _MorningCheck(
+        path=directory / morning.morning_file_name(session, read_on),
+        filed=None,
+        earlier=(newest, filed),
+    )
 
 
 def _fetch_names(runtime_dir: Path, *, session: date, as_of: datetime, exchange: str) -> None:
@@ -5119,21 +5194,29 @@ def _run_morning_recheck(
        and the `as_of` is after the evening's own pinned one (a morning read earlier would
        rewrite the name partition under an instant the evening already knew more than). Refused,
        exit 1, whatever else a morning file says: the cutoff is checked **before** a finished
-       morning file is printed again, which therefore happens only before the auction.
+       morning file is printed again, which therefore happens only before the auction. Which
+       check this run is, is read under the lock (`_morning_check`, whole-branch review C1): one
+       per Shanghai calendar date -- the newest filed is this run's when it was read on this
+       run's date (resumed, or printed again with no request); on a later date the morning is
+       read anew into `<session>.morning.<date>.json` beside it, which is kept untouched; one
+       filed on a later date than this run's refuses it.
     3. **Panel update**: the paper book's writer lock (one writer; the morning writes no book, but
        two mornings must not race on the file), then the evening's facts day read again -- with
        the evening's own pinned `as_of` and `held`, **before** the fetch, checked against the
        evening's document -- and the pin written: the morning's `as_of`, the evening's `held` and
        snapshot, and that read (`<session>.morning.json`, a stage the rerun resumes from, with the
-       same `as_of`). Then the fetch, `namechange` for the session's year (one request, at New
-       Year too), counted and filed with the pin.
+       same `as_of`). A later date's check reads no evening again: an earlier morning's fetch has
+       changed what the evening's clock reads, so it carries the evening read the newest check
+       filed before its own fetch, checked against the evening's document all the same, and
+       names that check (`carried_from`). Then the fetch, `namechange` for the session's year
+       (one request, at New Year too), counted and filed with the pin.
     4. **Facts**: the morning's facts day at the pinned `as_of` with the journal's pinned `held`,
        screened, and compared with the evening's read (`compare_morning`); the renames of the
        plan's names announced after the session, in the stored corpus at the pinned `as_of`, as
        notices (`overnight_notices`).
-    5. **Summary**: the advice and the notices filed, whole, in the morning file.
+    5. **Summary**: the advice, the counts and the notices filed, whole, in the morning file.
 
-    Writes the morning file and the `namechange` partition, nothing else: the prediction store,
+    Writes one morning file and the `namechange` partition, nothing else: the prediction store,
     the ledger, the snapshots, the evening's journal and the provenance files are not touched
     (advice only: the book follows the evening's plan)."""
     runtime_dir = options.runtime_dir
@@ -5189,11 +5272,15 @@ def _run_morning_recheck(
                 held_lock.enter_context(paper_book.paper_book_lock(runtime_dir / PAPER_DIRECTORY))
             except paper_book.SurvivorDayError as error:
                 raise _morning_refusal("panel update", str(error)) from error
-        path = directory / f"{session.isoformat()}{morning.MORNING_FILE_SUFFIX}"
         with _step("preconditions", steps=MORNING_STEPS):
-            pin = _read_morning_file(
-                path, session=session, snapshot_id=snapshot_id, registration=registration
+            check = _morning_check(
+                directory,
+                session=session,
+                snapshot_id=snapshot_id,
+                registration=registration,
+                as_of=first_as_of,
             )
+            path, pin = check.path, check.filed
             as_of = first_as_of if pin is None else datetime.fromisoformat(pin["as_of"])
             now = clock()
             if now >= cutoff or as_of >= cutoff:
@@ -5234,13 +5321,32 @@ def _run_morning_recheck(
             return facts, survivor_screen.screen(facts.facts, survivor.book)
 
         if pin is None:
-            # The evening's facts day, read again BEFORE the fetch: the fetch's new row is
-            # announced on the evening's own date, so after it the evening's clock reads it too.
+            carried_from: dict[str, Any] | None
+            filed_in: str | None
             with _step("facts", steps=MORNING_STEPS):
-                facts, screened = read(evening_as_of)
-                evening_read = morning.read_facts(facts, screened, plan.watched())
+                if check.earlier is None:
+                    # The evening's facts day, read again BEFORE the fetch: the fetch's new row is
+                    # announced on the evening's own date, so after it the evening's clock reads
+                    # it too.
+                    facts, screened = read(evening_as_of)
+                    evening_read = morning.read_facts(facts, screened, plan.watched())
+                    carried_from = None
+                    filed_in = None
+                else:
+                    # A later date's check: an earlier morning's fetch has changed what the
+                    # evening's clock reads, so the evening read is the earlier check's, filed
+                    # before its own fetch (C1).
+                    earlier_path, earlier = check.earlier
+                    try:
+                        evening_read = morning.FactsRead.from_json(earlier["evening_read"])
+                    except morning.MorningCheckError as error:
+                        raise _morning_refusal(
+                            "facts", f"{earlier_path}: {error}. It is left as it is"
+                        ) from error
+                    carried_from = {"file": earlier_path.name, "as_of": earlier["as_of"]}
+                    filed_in = earlier_path.name
                 try:
-                    morning.check_evening_read(evening_read, result)
+                    morning.check_evening_read(evening_read, result, filed_in=filed_in)
                 except morning.EveningReadDriftError as error:
                     raise _morning_refusal("facts", str(error)) from error
             with _step("panel update", steps=MORNING_STEPS):
@@ -5252,6 +5358,7 @@ def _run_morning_recheck(
                     "evening_snapshot_id": snapshot_id,
                     "registration": journal["registration"],
                     "evening_read": evening_read.to_json(),
+                    "carried_from": carried_from,
                 }
                 write_journal(path, pin)
         if "requests" not in pin:
@@ -5782,7 +5889,8 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
         "read the name corpus of the session's year again (one request), compare it with the "
         "evening's plan and print the differences as advice, and the renames of the plan's names "
         "announced after the session as notices -- the paper book follows the evening's plan "
-        "and is not changed. Writes <session>.morning.json and the namechange partition only. "
+        "and is not changed. Writes <session>.morning.json (on a later calendar date than the "
+        "first check, <session>.morning.<date>.json) and the namechange partition only. "
         "A P6 registration exits 2.",
     )
     parser.add_argument(

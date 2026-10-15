@@ -77,10 +77,11 @@ FIRST_OF_2027: Final[date] = sd.FIRST_2027
 
 def no_change(day: date) -> str:
     """The advice line of a morning that found no difference from `day`'s plan: its scope is in
-    the line itself (review Important 2)."""
+    the line itself (review Important 2), and the plan is named by its session -- at 08:30 it is
+    not "tonight's" (whole-branch review M4)."""
     return (
-        f"{'advice':<18} no change to tonight's plan among announcements dated through "
-        f"{day.isoformat()}"
+        f"{'advice':<18} no change to the plan of {day.isoformat()} among announcements dated "
+        f"through {day.isoformat()}"
     )
 
 
@@ -97,16 +98,21 @@ class Overnight(sd.SurvivorMarket):
     announcement day) has the code's one standing name; the morning's has it closed on the
     announcement day and the ST name opened on `effective`. `early` are the same, published on
     the announcement day itself (once `today` is that day): a rename announced before the open of
-    the morning, which is dated after the evening's session."""
+    the morning, which is dated after the evening's session. `late` are `(code, announced,
+    effective, published)`: announced on `announced` and published only once `today` reaches
+    `published` -- the whole-branch review's ST announcement dated on a Friday and published on
+    the Sunday (C1)."""
 
     renames: tuple[tuple[str, date, date], ...] = ()
     early: tuple[tuple[str, date, date], ...] = ()
+    late: tuple[tuple[str, date, date, date], ...] = ()
 
     def _names(self, params: Mapping[str, Any]) -> list[list[Any]]:
         today = self.today or self.open_days[-1]
         published = (
             *(item for item in self.renames if today > item[1]),
             *(item for item in self.early if today >= item[1]),
+            *((code, on, effective) for code, on, effective, out in self.late if today >= out),
         )
         found: list[list[Any]] = []
         for row in super()._names(params):
@@ -275,6 +281,30 @@ def new_year_evening(tmp_path_factory: pytest.TempPathFactory) -> Source:
     return Source(repo, registration, runtime)
 
 
+FRIDAY: Final[date] = date(2026, 4, 10)
+"""The evening of the whole-branch review's C1: its plan is for the open of Monday 13 April."""
+SATURDAY: Final[date] = date(2026, 4, 11)
+SUNDAY: Final[date] = date(2026, 4, 12)
+MONDAY: Final[date] = date(2026, 4, 13)
+
+
+@pytest.fixture(scope="module")
+def friday_evening(seeded: Path, tmp_path_factory: pytest.TempPathFactory) -> Source:
+    """The runtime directory after the evening of Friday 10 April, the first after an epoch of
+    Thursday 9 April: ten buys planned for Monday's open, nothing held. Its panel update fetches
+    the sessions since the seed (6 to 10 April) -- within the registered bound."""
+    base = tmp_path_factory.mktemp("morning-friday")
+    with pytest.MonkeyPatch.context() as patch:
+        repo, registration = tds._repository(base, sd.survivor_config(epoch=date(2026, 4, 9)))
+        market = sd.SurvivorMarket(open_days=tds.OPEN_2026)
+        tds._bind(patch, repo, market)
+        runtime = base / "runtime"
+        shutil.copytree(seeded, runtime)
+        world = tds.World(repo=repo, registration=registration, runtime=runtime, market=market)
+        _evening(world, FRIDAY)
+    return Source(repo, registration, runtime)
+
+
 def _world(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -329,7 +359,24 @@ def _morning(
 
 
 def _morning_path(world: tds.World, day: date) -> Path:
+    """`day`'s first morning check: `<session>.morning.json`."""
     return sd._journal_path(world, day).with_name(f"{day.isoformat()}{SUFFIX}")
+
+
+def _generation_path(world: tds.World, day: date, read_on: date) -> Path:
+    """`day`'s check read on a later calendar date than its first: `<session>.morning.<date>.json`
+    beside the first (whole-branch review C1)."""
+    return sd._journal_path(world, day).with_name(f"{day.isoformat()}.morning.{read_on}.json")
+
+
+def _shanghai(day: date, at: time) -> datetime:
+    return datetime.combine(day, at, tzinfo=daily.SHANGHAI)
+
+
+def _checks(world: tds.World, day: date) -> list[str]:
+    """The names of `day`'s morning files, ascending."""
+    directory = sd._journal_path(world, day).parent
+    return sorted(path.name for path in directory.glob(f"{day.isoformat()}.morning*"))
 
 
 def _filed(world: tds.World, day: date) -> dict[str, Any]:
@@ -416,8 +463,8 @@ def test_a_planned_buy_that_turned_special_treatment_overnight_is_not_to_be_plac
     assert not any(line.startswith("  do not place BUY") and kept in line for line in lines)
     document = _filed(world, DAY)
     assert (
-        f"{'advice':<18} {len(document['differences'])} difference(s) from tonight's plan among "
-        f"announcements dated through {DAY.isoformat()}"
+        f"{'advice':<18} {len(document['differences'])} difference(s) from the plan of "
+        f"{DAY.isoformat()} among announcements dated through {DAY.isoformat()}"
     ) in lines
     assert not any(UNSCOPED in line for line in lines)
     assert any(line.startswith("tushare requests   1 this run") for line in lines)
@@ -547,17 +594,23 @@ def test_a_name_outside_the_plan_that_turned_special_treatment_moves_only_the_co
     evenings: Evenings,
 ) -> None:
     """A security the evening's plan never named turns ST overnight: no buy is withdrawn and no
-    holding is told about -- the screen's counts moved, and the advice says that and no more."""
+    holding is told about -- the screen's counts moved, and that is information, printed on a line
+    of its own and never counted as a difference (whole-branch review M4)."""
     world = _world(tmp_path, monkeypatch, evenings.first)
     outsider = next(code for code in sd.SECURITIES if code not in _bought(world))
     world.market.renames = ((outsider, DAY, NEXT),)
 
-    code, out, err = _morning(world, capsys, DAY)
+    code, out, err = _morning(world, capsys, DAY, json_output=False)
 
     assert code == 0, err
-    kinds = {item["kind"] for item in json.loads(out)["differences"]}
-    assert "counts_changed" in kinds
-    assert kinds <= {"counts_changed", "watch_list_changed"}
+    document = _filed(world, DAY)
+    assert {item["kind"] for item in document["differences"]} <= {"watch_list_changed"}
+    assert any(item.startswith("ST ") for item in document["counts_changed"])
+    lines = out.splitlines()
+    (counts,) = (line for line in lines if line.startswith("counts "))
+    assert "information" in counts and "not advice" in counts
+    if not document["differences"]:
+        assert no_change(DAY) in lines
 
 
 # --- the one benign class -------------------------------------------------------------------------
@@ -964,6 +1017,211 @@ def test_a_finished_morning_file_edited_by_hand_is_refused_by_name_and_left_as_i
     assert err[-1] == NO_REQUEST
     assert world.market.payloads == []
     assert sd._files(world.runtime) == before
+
+
+# --- one check per calendar date (whole-branch review C1) -----------------------------------------
+
+
+def test_a_check_read_on_saturday_is_read_anew_on_monday_and_finds_what_sunday_published(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    friday_evening: Source,
+) -> None:
+    """The whole-branch review's C1, its own scenario. An ST rename of one of Friday's planned
+    buys is dated Friday and published on Sunday. A check read on Saturday at 08:35 finds no
+    change -- the announcement is not published yet -- and files the session's first check. On
+    Monday at 08:30, before the call auction the plan is for, a check filed on another calendar
+    date is not printed again: it is read anew -- a new pin, one request, a second file beside the
+    first, which is kept as it was -- and it advises not to place that buy. With `--json` the
+    newest check is the one printed."""
+    world = _world(tmp_path, monkeypatch, friday_evening)
+    named = _bought(world, FRIDAY)[0]
+    world.market.late = ((named, FRIDAY, MONDAY, SUNDAY),)
+    saturday = _shanghai(SATURDAY, time(8, 35))
+
+    code, out, err = _morning(world, capsys, FRIDAY, as_of=saturday, json_output=False)
+
+    assert code == 0, err
+    assert no_change(FRIDAY) in out.splitlines()
+    first = _morning_path(world, FRIDAY)
+    kept = first.read_bytes()
+    world.market.clear()
+    monday = _shanghai(MONDAY, time(8, 30))
+
+    code, out, err = _morning(world, capsys, FRIDAY, as_of=monday, json_output=False)
+
+    assert code == 0, err
+    assert world.market.payloads == ["namechange"]
+    lines = out.splitlines()
+    assert f"  do not place BUY {named}: special_treatment" in lines
+    assert not any(line.startswith(no_change(FRIDAY)) for line in lines)
+    (header,) = (line for line in lines if line.startswith("morning re-check"))
+    assert f"the plan of {FRIDAY.isoformat()}, read again on {MONDAY.isoformat()}" in header
+    (earlier,) = (line for line in lines if line.startswith("earlier check"))
+    assert first.name in earlier and SATURDAY.isoformat() in earlier
+    assert any(line.startswith("tushare requests   1 this run") for line in lines)
+    assert not any("already complete" in line for line in lines)
+    assert first.read_bytes() == kept
+    assert _checks(world, FRIDAY) == sorted(
+        [first.name, _generation_path(world, FRIDAY, MONDAY).name]
+    )
+    document = json.loads(_generation_path(world, FRIDAY, MONDAY).read_text(encoding="utf-8"))
+    assert document["as_of"] == monday.isoformat()
+    assert document["requests"] == {"namechange": 1}
+    assert document["carried_from"] == {"file": first.name, "as_of": saturday.isoformat()}
+    assert document["evening_read"] == json.loads(kept)["evening_read"]
+    assert f"do not place BUY {named}: special_treatment" in _texts(document)
+    world.market.clear()
+
+    code, shown, err = _morning(world, capsys, FRIDAY, as_of=monday + timedelta(minutes=10))
+
+    assert (code, err) == (0, [])
+    assert json.loads(shown) == document
+    assert world.market.payloads == []
+
+
+def test_a_check_read_again_on_the_same_calendar_date_is_printed_again_asking_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    friday_evening: Source,
+) -> None:
+    """Saturday 08:35, then Saturday 22:00 on another `--as-of`: one calendar date, one check --
+    printed again from its file with no request and no write, whatever the clock says."""
+    world = _world(tmp_path, monkeypatch, friday_evening)
+    world.market.late = ((_bought(world, FRIDAY)[0], FRIDAY, MONDAY, SUNDAY),)
+    _code, first, _err = _morning(
+        world, capsys, FRIDAY, as_of=_shanghai(SATURDAY, time(8, 35)), json_output=False
+    )
+    before = sd._files(world.runtime)
+    world.market.clear()
+
+    code, again, err = _morning(
+        world, capsys, FRIDAY, as_of=_shanghai(SATURDAY, time(22, 0)), json_output=False
+    )
+
+    assert (code, err) == (0, [])
+    assert world.market.payloads == []
+    assert sd._files(world.runtime) == before
+    assert _without_requests(again.splitlines()) == _without_requests(first.splitlines())
+    assert (
+        "tushare requests   0 this run {} -- the morning check was already complete; nothing "
+        "was run" in again.splitlines()
+    )
+    assert _checks(world, FRIDAY) == [_morning_path(world, FRIDAY).name]
+
+
+def test_a_check_read_twice_on_monday_is_one_check_printed_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    friday_evening: Source,
+) -> None:
+    """With no Saturday check, Monday's is the session's first: it finds Sunday's announcement,
+    and read again at 09:00 the same Monday it is printed from its file, asking nothing."""
+    world = _world(tmp_path, monkeypatch, friday_evening)
+    named = _bought(world, FRIDAY)[0]
+    world.market.late = ((named, FRIDAY, MONDAY, SUNDAY),)
+
+    code, _out, err = _morning(world, capsys, FRIDAY, as_of=_shanghai(MONDAY, time(8, 30)))
+
+    assert code == 0, err
+    document = _filed(world, FRIDAY)
+    assert f"do not place BUY {named}: special_treatment" in _texts(document)
+    assert document["carried_from"] is None
+    before = sd._files(world.runtime)
+    world.market.clear()
+
+    code, shown, err = _morning(world, capsys, FRIDAY, as_of=_shanghai(MONDAY, time(9, 0)))
+
+    assert (code, err) == (0, [])
+    assert json.loads(shown) == document
+    assert world.market.payloads == []
+    assert sd._files(world.runtime) == before
+    assert _checks(world, FRIDAY) == [_morning_path(world, FRIDAY).name]
+
+
+def test_monday_still_advises_what_saturday_found_and_compares_with_saturdays_evening_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    friday_evening: Source,
+) -> None:
+    """Friday's rename published on Saturday morning: Saturday's check finds it. Monday's is read
+    anew, and its fetch has nothing new to bring -- but the store it reads at Friday's own clock
+    now holds Saturday's row, which is dated Friday: read again there, it is not the evening's
+    facts. So Monday compares with the evening read Saturday's check filed before its own fetch
+    -- and advises what Saturday did, never refusing the store as changed under the evening."""
+    world = _world(tmp_path, monkeypatch, friday_evening)
+    named = _bought(world, FRIDAY)[0]
+    world.market.renames = ((named, FRIDAY, MONDAY),)
+    reads = _reads(monkeypatch, world)
+
+    code, _out, err = _morning(world, capsys, FRIDAY, as_of=_shanghai(SATURDAY, time(8, 35)))
+
+    assert code == 0, err
+    saturday = _filed(world, FRIDAY)
+    assert f"do not place BUY {named}: special_treatment" in _texts(saturday)
+    reads.clear()
+
+    code, out, err = _morning(world, capsys, FRIDAY, as_of=_shanghai(MONDAY, time(8, 30)))
+
+    assert code == 0, err
+    monday = json.loads(out)
+    assert f"do not place BUY {named}: special_treatment" in _texts(monday)
+    assert monday["evening_read"] == saturday["evening_read"]
+    assert monday["carried_from"]["file"] == _morning_path(world, FRIDAY).name
+    # One facts read only, the morning's: the evening's comes from Saturday's file.
+    assert [call["as_of"] for call in reads] == [_shanghai(MONDAY, time(8, 30))]
+
+
+def test_a_check_read_on_an_earlier_date_than_one_already_filed_is_refused_asking_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    friday_evening: Source,
+) -> None:
+    """Monday's check is filed; an `--as-of` on Saturday afterwards would file a check under an
+    earlier date than one already made: refused by name, nothing fetched or written."""
+    world = _world(tmp_path, monkeypatch, friday_evening)
+    monday = _shanghai(MONDAY, time(8, 30))
+    _morning(world, capsys, FRIDAY, as_of=monday)
+    before = sd._files(world.runtime)
+    world.market.clear()
+
+    code, out, err = _morning(
+        world, capsys, FRIDAY, as_of=_shanghai(SATURDAY, time(8, 35)), clock=monday
+    )
+
+    assert code == 1 and out == ""
+    assert err[0].startswith("step 2 (preconditions) failed:")
+    assert MONDAY.isoformat() in err[0] and SATURDAY.isoformat() in err[0]
+    assert err[-1] == NO_REQUEST
+    assert world.market.payloads == []
+    assert sd._files(world.runtime) == before
+
+
+def test_the_journal_readers_take_neither_check_for_a_sessions_journal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    friday_evening: Source,
+) -> None:
+    """Both checks lie beside the evening's journal: the journals' glob (`????-??-??.json`) and
+    the forward report's reader (a stem that is a session) find the evening's journal alone."""
+    world = _world(tmp_path, monkeypatch, friday_evening)
+    _morning(world, capsys, FRIDAY, as_of=_shanghai(SATURDAY, time(8, 35)))
+    _morning(world, capsys, FRIDAY, as_of=_shanghai(MONDAY, time(8, 30)))
+    assert len(_checks(world, FRIDAY)) == 2
+    directory = sd._journal_path(world, FRIDAY).parent
+
+    assert sorted(path.name for path in directory.glob("????-??-??.json")) == [
+        f"{FRIDAY.isoformat()}.json"
+    ]
+    report = tds._script("forward_report", ROOT / "scripts")
+    admitted = daily.admit_registration(world.registration, world.repo)
+    assert list(report._survivor_journals(world.runtime, admitted)) == [FRIDAY]
 
 
 # --- New Year -------------------------------------------------------------------------------------

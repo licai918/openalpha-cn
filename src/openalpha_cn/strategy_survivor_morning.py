@@ -14,7 +14,7 @@ The paper book follows the evening's plan (decision, user-adopted): a decision c
 twice, and the book's record is the evening's. So nothing here changes it -- a divergence is
 **recorded** in the morning file and **printed**, in the form the user acts on, and that is all:
 
-- `do not place BUY <code>: <reason today>` -- a buy of tonight's plan, or one carried from an
+- `do not place BUY <code>: <reason today>` -- a buy the evening planned, or one carried from an
   earlier session, whose name is no longer eligible, or no longer a survivor, this morning;
 - `holding <code> turned <reason>: the paper book sells it at the next evening` -- a holding the
   evening kept that has a reason it had not (a suspension alone is *frozen*, not sold: the policy's
@@ -24,12 +24,16 @@ twice, and the book's record is the evening's. So nothing here changes it -- a d
   that is one no more (the policy's `EXIT_SURVIVOR_LOST`, at most `max_replacements_per_session`
   a day, the worst composite first);
 - `watch list changed: ...` -- names of the evening's watch list that are no longer survivors;
-- `counts changed: ...` -- the eligible and survivor counts, and the name corpus' ST and delisting
-  counts, when they moved (a name outside the plan turning ST moves only these);
-- nothing at all is `no change to tonight's plan among announcements dated through <session>`: the
-  advice line carries its own scope, and never says "no overnight change" alone.
+- nothing at all is `no change to the plan of <session> among announcements dated through
+  <session>`: the advice line carries its own scope, and never says "no overnight change" alone.
+  The plan is named by its session: at 08:30 of the morning after, "tonight's" plan is no plan the
+  user has (whole-branch review M4).
 
 A difference is a **change**: a name the evening already found ineligible and still is, is not news.
+And the counts are **information, never a difference** (M4): the eligible and survivor counts, and
+the name corpus' ST and delisting counts, when they moved, are filed as `counts_changed` and printed
+on a line of their own -- a name outside the plan turning ST moves only these, and asks nothing of
+the user, so they are never counted among the differences.
 
 ## What it can see, and the notices
 
@@ -50,19 +54,29 @@ advice and says nothing the user is to do; the next evening screens it. At New Y
 still asks the session's year alone (the facts adapter reads no later year), so an announcement
 dated in the new year is neither screened nor a notice.
 
-## The file
+## The files: one check per calendar date
 
-`<session>.morning.json` beside the evening's journal: the pin (`schema`, `session`, `as_of`,
-`held`, `evening_snapshot_id`, `registration`, the filed evening read), then `requests`, then the
-advice, the notices and the wording. Its `held` is the evening's **pinned** holdings -- the head's,
-before the evening's own fills and settlement (`[]` for the first evening, which then holds what
-its buys fill) -- with which both facts days are read; the holdings the comparison speaks of are
-the book **after** the evening's settlement, filed as `holdings_compared` and printed as such. A
-finished file is printed again with no request and no write, but only before the next call
-auction: the script checks the cutoff first, and a finished file after it is refused like any
-other morning (the brief's order).
+A check belongs to the **Shanghai calendar date** its `as_of` falls on (`morning_date`), and a
+session has one check per date (whole-branch review C1): the first, `<session>.morning.json`, beside
+the evening's journal, and each later one `<session>.morning.<date>.json` beside it
+(`morning_file_name`, listed oldest first by `morning_generations`); no reader of the journals'
+`????-??-??.json` finds either. A check of the date this run reads on is its own: a pin is resumed
+with its `as_of`, a finished one printed again with no request and no write. A check filed on an
+**earlier** date is never printed in its place -- the reviewer's case: a check read on Saturday
+reprinted on Monday hid an ST announcement dated Friday and published on Sunday -- the morning is
+read anew, a new pin, one request, a new file, and the earlier one is kept untouched; one filed on a
+later date than this run's refuses it (`check_morning_file`'s `read_on` holds a later file to its
+date). Either way only before the next call auction: the script checks the cutoff first, and a
+finished file after it is refused like any other morning.
 
-## Two reads, one before the fetch
+A file holds the pin (`schema`, `session`, `as_of`, `held`, `evening_snapshot_id`, `registration`,
+the filed evening read and `carried_from`), then `requests`, then the advice, the counts, the
+notices and the wording. Its `held` is the evening's **pinned** holdings -- the head's, before the
+evening's own fills and settlement (`[]` for the first evening, which then holds what its buys
+fill) -- with which both facts days are read; the holdings the comparison speaks of are the book
+**after** the evening's settlement, filed as `holdings_compared` and printed as such.
+
+## Two reads, one before the first fetch
 
 The comparison needs what the evening saw per code -- which a journal's counts cannot say -- so the
 script reads the evening's facts day again **before** it fetches (`read_facts`), at the evening's
@@ -72,7 +86,12 @@ that no longer gives the evening's facts has been changed by something other tha
 fetch, and advice made over it would compare unlike days. Read after the fetch it could not be told
 from the morning's: the new row is announced on the evening's own date and so is visible at the
 evening's clock too -- which is why a rerun that stopped after the fetch must read the file's copy,
-never the store.
+never the store, and why a **later** check reads it from the check before it (`carried_from`
+names that file and its `as_of`; `null` for the first): after an earlier morning's fetch, the
+store read at the evening's clock is no longer the evening's. A carried read is held to the
+evening's document too, and refused naming the file it came from (`check_evening_read`'s
+`filed_in`). What a later check cannot do is the first one's guard against a store changed by
+something else since the evening: that guard is the first check's alone.
 
 ## The one benign difference class (tolerated)
 
@@ -94,14 +113,17 @@ recommendation or a forecast.
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, fields
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Any, Final
+from zoneinfo import ZoneInfo
 
 from openalpha_cn.domain.survivor_book import ELIGIBILITY_REASON_ORDER, ScreenResult
 from openalpha_cn.domain.survivor_policy import FREEZE_COMPATIBLE_REASONS
+from openalpha_cn.panel.catalog import DEFAULT_DATE_TIMEZONE
 
 if TYPE_CHECKING:
     from openalpha_cn.domain.name_history import NameHistory
@@ -123,7 +145,10 @@ __all__ = [
     "check_morning_file",
     "compare_morning",
     "morning_complete",
+    "morning_date",
     "morning_document",
+    "morning_file_name",
+    "morning_generations",
     "morning_lines",
     "overnight_notices",
     "plan_names",
@@ -132,17 +157,27 @@ __all__ = [
 
 MORNING_SCHEMA: Final[str] = "openalpha-daily-survivor-morning/v1"
 MORNING_FILE_SUFFIX: Final[str] = ".morning.json"
-"""The morning file is `<session><suffix>` beside the evening's journal `<session>.json`: a name
-no reader of the journals' `????-??-??.json` finds."""
-NO_CHANGE: Final[str] = "no change to tonight's plan among announcements dated through"
-"""The advice line of a morning with no difference, followed by the session: the scope of what was
-screened is in the line itself, never "no overnight change" alone."""
+"""A session's first morning check is `<session><suffix>` beside the evening's journal
+`<session>.json`, and a later one `<session>.morning.<date>.json` (`morning_file_name`): names no
+reader of the journals' `????-??-??.json` finds."""
+NO_CHANGE: Final[str] = (
+    "no change to the plan of {session} among announcements dated through {session}"
+)
+"""The advice line of a morning with no difference, formatted with the session: the scope of what
+was screened is in the line itself, never "no overnight change" alone, and the plan is named by its
+session (whole-branch review M4)."""
 MORNING_WORDING: Final[str] = (
     "advice only: candidates of a registered research configuration; no order was placed and the "
     "paper book was not changed -- it follows the evening's plan, and a difference is recorded "
     "here, never committed to it; the check screens announcements dated through the evening's "
     "session only -- one dated after it is a notice, not screened -- so no advice is not proof "
     "that no ST announcement exists"
+)
+
+_SHANGHAI: Final[ZoneInfo] = ZoneInfo(DEFAULT_DATE_TIMEZONE)
+"""The exchange's zone, whose calendar date a check belongs to (`morning_date`)."""
+_LATER_CHECK: Final[re.Pattern[str]] = re.compile(
+    r"(?P<session>\d{4}-\d{2}-\d{2})\.morning\.(?P<read_on>\d{4}-\d{2}-\d{2})\.json"
 )
 
 _NOT_ASSESSED: Final[str] = "not_assessed"
@@ -356,13 +391,19 @@ def read_facts(facts: FactsDay, screened: ScreenResult, names: Collection[str]) 
     )
 
 
-def check_evening_read(read: FactsRead, evening: Mapping[str, Any]) -> None:
+def check_evening_read(
+    read: FactsRead, evening: Mapping[str, Any], *, filed_in: str | None = None
+) -> None:
     """Refuse an evening read that is not the evening's own: its summary must equal the one the
     evening's document holds, and every planned buy, carried buy and watch-list name of the
     evening's plan must be a survivor of it -- the policy draws them from the survivors, and the
     settlement cancels a live buy outside them, so a read in which one is not is another day's
     screen, however its counts agree (a swap that keeps them all). Every field and every name that
-    differs is named."""
+    differs is named.
+
+    `filed_in` names the earlier check a later one carried the read from (module docstring): one
+    that differs was edited in that file, and the refusal says so -- the store is not what it
+    speaks of."""
     expected = _summary_of_document(evening)
     found = dict(read.summary)
     differing = sorted(
@@ -380,6 +421,13 @@ def check_evening_read(read: FactsRead, evening: Mapping[str, Any]) -> None:
         differing.append(
             f"the survivors (the plan's {', '.join(lost)} are not among them, and every buy and "
             "watch-list name of the plan was)"
+        )
+    if differing and filed_in is not None:
+        raise EveningReadDriftError(
+            f"the evening read filed in {filed_in}, which this check carries, is not the "
+            f"evening's facts: {', '.join(differing)} differ from the evening's document. The "
+            "file was changed since that check filed it, and advice made over it would compare "
+            "unlike days. Nothing was fetched"
         )
     if differing:
         raise EveningReadDriftError(
@@ -415,18 +463,21 @@ class Difference:
 @dataclass(frozen=True, slots=True)
 class MorningAdvice:
     """What the comparison found: the differences, in the order they are printed, the codes
-    tolerated as the listing-row class (never advice), and the holdings it compared -- the book
-    after the evening's settlement, which is not the file's `held` (module docstring)."""
+    tolerated as the listing-row class (never advice), the holdings it compared -- the book after
+    the evening's settlement, which is not the file's `held` (module docstring) -- and the counts
+    that moved, each `<label> <evening> -> <morning>`: information, never a difference (M4)."""
 
     differences: tuple[Difference, ...]
     tolerated: tuple[str, ...]
     holdings_compared: tuple[str, ...] = ()
+    counts: tuple[str, ...] = ()
 
     def to_json(self) -> dict[str, Any]:
         return {
             "differences": [item.to_json() for item in self.differences],
             "tolerated": list(self.tolerated),
             "holdings_compared": list(self.holdings_compared),
+            "counts_changed": list(self.counts),
         }
 
 
@@ -480,10 +531,10 @@ def compare_morning(
             *_holdings(names, before, now),
             *_watch_list(names, before, now),
             *gone,
-            *_counts(before, now),
         ),
         tolerated=tolerated,
         holdings_compared=names.holdings,
+        counts=_counts(before, now),
     )
 
 
@@ -587,36 +638,27 @@ def _vanished_rows(
             ts_codes=(code,),
             reasons=(),
             text=(
-                f"{code} had a facts row aged 0 tonight and has none this morning, and the counts "
-                f"do not say it is a code priced before its registry listing row (no_listing_row "
-                f"-{fall}, not_listed_with_bar +{rise}, {len(vanished)} such code(s)): not "
-                "tolerated"
+                f"{code} had a facts row aged 0 at the evening and has none this morning, and the "
+                "counts do not say it is a code priced before its registry listing row "
+                f"(no_listing_row -{fall}, not_listed_with_bar +{rise}, {len(vanished)} such "
+                "code(s)): not tolerated"
             ),
         )
         for code in vanished
     ], ()
 
 
-def _counts(before: FactsRead, now: FactsRead) -> list[Difference]:
-    moved = [
+def _counts(before: FactsRead, now: FactsRead) -> tuple[str, ...]:
+    """The counts that moved, `<label> <evening> -> <morning>`: information, never a difference."""
+    return tuple(
         f"{label} {before.summary[key]} -> {now.summary[key]}"
         for key, label in _COUNTED
         if before.summary[key] != now.summary[key]
-    ] + [
+    ) + tuple(
         f"{label} {before.summary['notes'][key]} -> {now.summary['notes'][key]}"
         for key, label in _COUNTED_NOTES
         if before.summary["notes"][key] != now.summary["notes"][key]
-    ]
-    if not moved:
-        return []
-    return [
-        Difference(
-            kind="counts_changed",
-            ts_codes=(),
-            reasons=(),
-            text=f"counts changed: {', '.join(moved)}",
-        )
-    ]
+    )
 
 
 # --- the notices, the file and what is printed ----------------------------------------------------
@@ -648,6 +690,7 @@ _FINISHED: Final[tuple[str, ...]] = (
     "tolerated",
     "notices",
     "holdings_compared",
+    "counts_changed",
     "wording",
 )
 """The keys the advice stage files, all at once: a file holding none is a pin, one holding all is a
@@ -665,11 +708,11 @@ def _items_with_text(value: Any) -> bool:
 
 
 def morning_complete(document: Mapping[str, Any]) -> bool:
-    """Whether a morning file is a finished check's, which a rerun prints again with no request and
-    no write (`True`), or a pin a rerun resumes from (`False`: it holds none of the advice stage's
-    keys). A file holding some of them, or any of them not of the shape the printing reads, is
-    neither and is refused by name (`MorningCheckError`): it was edited, and printing it would
-    break half way."""
+    """Whether a morning file is a finished check's, which a rerun on the date it was read prints
+    again with no request and no write (`True`), or a pin a rerun of that date resumes from
+    (`False`: it holds none of the advice stage's keys). A file holding some of them, or any of
+    them not of the shape the printing reads, is neither and is refused by name
+    (`MorningCheckError`): it was edited, and printing it would break half way."""
     present = [key for key in _FINISHED if key in document]
     if not present:
         return False
@@ -679,6 +722,7 @@ def morning_complete(document: Mapping[str, Any]) -> bool:
         ("tolerated", _texts_of, "a list of codes"),
         ("notices", _items_with_text, "a list of notices, each with its `text`"),
         ("holdings_compared", _texts_of, "a list of codes"),
+        ("counts_changed", _texts_of, "a list of the counts that moved"),
         ("wording", lambda value: isinstance(value, str), "a string"),
     )
     problems += [
@@ -715,12 +759,85 @@ def _instant(value: Any) -> datetime | None:
     return moment if moment.tzinfo is not None else None
 
 
+def morning_date(as_of: datetime) -> date:
+    """The Shanghai calendar date `as_of` falls on: the date a check read at it belongs to (module
+    docstring). An instant without its offset is a programming error (`TypeError`)."""
+    if as_of.utcoffset() is None:
+        raise TypeError(f"{as_of!r} carries no UTC offset: a check's instant must")
+    return as_of.astimezone(_SHANGHAI).date()
+
+
+def morning_file_name(session: date, read_on: date | None = None) -> str:
+    """The name of `session`'s morning check: `<session>.morning.json` for the first (`read_on`
+    `None`), `<session>.morning.<read_on>.json` for one read on a later calendar date."""
+    if read_on is None:
+        return f"{session.isoformat()}{MORNING_FILE_SUFFIX}"
+    return f"{session.isoformat()}.morning.{read_on.isoformat()}.json"
+
+
+def morning_generations(
+    names: Iterable[str], *, session: date
+) -> tuple[tuple[str, date | None], ...]:
+    """`session`'s morning checks among the file `names` of its journal directory, oldest first:
+    `(name, None)` for the first, then `(name, date)` for each later one by its date. Every other
+    name -- a journal, another session's check, a `.partial`, a date that is no date -- is not
+    one."""
+    first = morning_file_name(session)
+    later: list[tuple[str, date]] = []
+    found: list[tuple[str, date | None]] = []
+    for name in names:
+        if name == first:
+            found.append((first, None))
+            continue
+        matched = _LATER_CHECK.fullmatch(name)
+        if matched is None or matched["session"] != session.isoformat():
+            continue
+        try:
+            read_on = date.fromisoformat(matched["read_on"])
+        except ValueError:
+            continue
+        later.append((name, read_on))
+    ordered: list[tuple[str, date]] = sorted(later, key=lambda item: item[1])
+    found.extend(ordered)
+    return tuple(found)
+
+
+def _carried_problem(carried: Any, *, read_on: date | None) -> str | None:
+    """What is wrong with a file's `carried_from`, or `None`: the first check carries `null`, a
+    later one the earlier check's file name and `as_of` (module docstring)."""
+    if read_on is None:
+        if carried is None:
+            return None
+        return "it is the first check of its session and its `carried_from` is not null"
+    if (
+        isinstance(carried, dict)
+        and set(carried) == {"file", "as_of"}
+        and isinstance(carried["file"], str)
+        and _instant(carried["as_of"]) is not None
+    ):
+        return None
+    return (
+        f"it is the check read on {read_on.isoformat()}, and its `carried_from` does not name the "
+        "earlier check whose evening read it carries (`file` and `as_of`, an instant with its "
+        "offset)"
+    )
+
+
 def check_morning_file(
-    document: Any, *, session: date, evening_snapshot_id: str, registration_sha256: str
+    document: Any,
+    *,
+    session: date,
+    evening_snapshot_id: str,
+    registration_sha256: str,
+    read_on: date | None = None,
 ) -> None:
     """Refuse, by name, a morning file that is not this evening's: not a mapping of this schema,
     of another session, another evening's snapshot or another registration, or holding some of a
-    finished check's keys and not the rest, or not of their shape (`morning_complete`)."""
+    finished check's keys and not the rest, or not of their shape (`morning_complete`).
+
+    `read_on` is the date a later check's name gives it (`morning_file_name`): its `as_of` must
+    fall on that date in Shanghai, and its `carried_from` name the earlier check it carries the
+    evening read of; the first check (`None`) carries none."""
     if not isinstance(document, dict) or document.get("schema") != MORNING_SCHEMA:
         raise MorningCheckError(f"it is not a {MORNING_SCHEMA} document")
     problems = []
@@ -734,10 +851,20 @@ def check_morning_file(
     registration = document.get("registration")
     if not isinstance(registration, dict) or registration.get("sha256") != registration_sha256:
         problems.append("it was written under another registration")
-    if _instant(document.get("as_of")) is None or not isinstance(document.get("held"), list):
+    pinned = _instant(document.get("as_of"))
+    if pinned is None or not isinstance(document.get("held"), list):
         problems.append("it holds no pinned `as_of` (an instant with its offset) and `held`")
+    elif read_on is not None and morning_date(pinned) != read_on:
+        problems.append(
+            f"it is named as the check read on {read_on.isoformat()}, and its `as_of` "
+            f"{document['as_of']} falls on {morning_date(pinned).isoformat()} in Shanghai"
+        )
     if not isinstance(document.get("evening_read"), dict):
         problems.append("it holds no filed evening read")
+    if "carried_from" not in document:
+        problems.append("it holds no `carried_from`")
+    elif (problem := _carried_problem(document["carried_from"], read_on=read_on)) is not None:
+        problems.append(problem)
     try:
         morning_complete(document)
     except MorningCheckError as error:
@@ -750,8 +877,8 @@ def morning_document(
     pin: Mapping[str, Any], advice: MorningAdvice, *, notices: Iterable[Notice]
 ) -> dict[str, Any]:
     """The finished morning file: the pin (`schema`, `session`, `as_of`, `held`,
-    `evening_snapshot_id`, `registration`, the filed evening read and `requests`) with the advice,
-    the notices and the wording."""
+    `evening_snapshot_id`, `registration`, the filed evening read, `carried_from` and `requests`)
+    with the advice, the counts that moved, the notices and the wording."""
     return {
         **pin,
         **advice.to_json(),
@@ -764,42 +891,74 @@ def _row(label: str, text: str) -> str:
     return f"{label:<{_LABEL_WIDTH}} {text}"
 
 
+def _shanghai_read(value: str) -> tuple[str, str]:
+    """A filed instant as the user reads it: its Shanghai date, and itself in Shanghai time."""
+    moment = datetime.fromisoformat(value)
+    return morning_date(moment).isoformat(), moment.astimezone(_SHANGHAI).isoformat()
+
+
 def morning_lines(document: Mapping[str, Any], *, this_run: Mapping[str, Any]) -> list[str]:
-    """What the command prints for a finished morning file: the holdings compared, the advice
-    block (its scope in its own line), the tolerated codes, the notices, the requests this run made
-    (`this_run`: `requests`, `request_count`, `wrote`) and the wording."""
+    """What the command prints for a finished morning file: the plan by its session and the date
+    the check was read on, the earlier check a later one carries the evening read of, the holdings
+    compared, the advice block (its scope in its own line), the counts that moved (information),
+    the tolerated codes, the notices, the requests this run made (`this_run`: `requests`,
+    `request_count`, `wrote`) and the wording."""
     session = document["session"]
     differences = list(document["differences"])
     holdings = list(document["holdings_compared"])
     scope = f"among announcements dated through {session}"
+    read_on, read_at = _shanghai_read(document["as_of"])
     lines = [
         _row(
             "morning re-check",
-            f"the plan of {session}, read again as of {document['as_of']}, before the next "
+            f"the plan of {session}, read again on {read_on} ({read_at}), before the next "
             "session's call auction -- advice only: the paper book follows the evening's plan "
             "and was not changed",
         ),
+    ]
+    carried = document.get("carried_from")
+    if isinstance(carried, Mapping):
+        earlier_on, earlier_at = _shanghai_read(carried["as_of"])
+        lines.append(
+            _row(
+                "earlier check",
+                f"read on {earlier_on} ({earlier_at}), {carried['file']}, kept as it is: a check "
+                "read on an earlier date is never printed again on a later one, and this one "
+                "compares with the evening read that check filed before its own fetch",
+            )
+        )
+    lines.append(
         _row(
             "holdings compared",
             f"{', '.join(holdings) if holdings else 'none'} (the book after the evening's "
             "settlement, which its plan acts on; the file's `held` is the evening's pinned "
             "holdings before it, with which both days are read)",
-        ),
-    ]
+        )
+    )
     if differences:
         lines.append(
-            _row("advice", f"{len(differences)} difference(s) from tonight's plan {scope}")
+            _row("advice", f"{len(differences)} difference(s) from the plan of {session} {scope}")
         )
         lines += [f"  {item['text']}" for item in differences]
     else:
-        lines.append(_row("advice", f"{NO_CHANGE} {session}"))
+        lines.append(_row("advice", NO_CHANGE.format(session=session)))
+    counts = list(document["counts_changed"])
+    if counts:
+        lines.append(
+            _row(
+                "counts",
+                f"{', '.join(counts)} (the evening's -> this morning's) -- information, not "
+                "advice: a name outside the plan that turned ST moves these counts and nothing "
+                "the user is to do",
+            )
+        )
     tolerated = list(document["tolerated"])
     if tolerated:
         lines.append(
             _row(
                 "tolerated",
                 f"{', '.join(tolerated)} (priced before its registry listing row: a row aged 0 "
-                "tonight, none this morning, the counts account for it -- not advice)",
+                "at the evening, none this morning, the counts account for it -- not advice)",
             )
         )
     notices = list(document["notices"])

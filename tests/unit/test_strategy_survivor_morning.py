@@ -21,9 +21,10 @@ real section functions give); the end-to-end file holds the real document to it.
 from __future__ import annotations
 
 import dataclasses
+import fnmatch
 import json
 from collections.abc import Mapping, Sequence
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Final
 
 import pytest
@@ -49,14 +50,21 @@ FACTS_SECTION: Final = getattr(strategy_survivor_summary, "_facts_section")  # n
 SCREEN_SECTION: Final = getattr(strategy_survivor_summary, "_screen_section")  # noqa: B009
 SNAPSHOT: Final[str] = "snapshot_0000000000000001"
 NO_CHANGE: Final[str] = (
-    f"no change to tonight's plan among announcements dated through {SIGNAL.isoformat()}"
+    f"no change to the plan of {SIGNAL.isoformat()} among announcements dated through "
+    f"{SIGNAL.isoformat()}"
 )
 """The advice line of a morning with no difference: its scope is in the line itself (review
-Important 2) -- what the facts adapter screens is the name corpus as announced by the session."""
+Important 2) -- what the facts adapter screens is the name corpus as announced by the session --
+and the plan is named by its session, never "tonight's" at 08:30 (whole-branch review M4)."""
 UNSCOPED: Final[str] = "no overnight change"
 """The old advice line, which a pre-open announcement dated after the session made false."""
+TONIGHT: Final[str] = "tonight's plan"
+"""The old name of the plan, false at 08:30 of the morning after (whole-branch review M4)."""
 ADVICE: Final[str] = f"{'advice':<18} "
 NOTICES: Final[str] = f"{'notices':<18} "
+COUNTS: Final[str] = f"{'counts':<18} "
+HEADER: Final[str] = f"{'morning re-check':<18} "
+EARLIER: Final[str] = f"{'earlier check':<18} "
 RUN: Final[dict[str, Any]] = {"requests": {"namechange": 1}, "request_count": 1, "wrote": True}
 
 
@@ -177,17 +185,20 @@ def test_a_plan_the_overnight_names_did_not_touch_has_no_difference(evening: Day
         morning.morning_document(_pin(), advice, notices=()), this_run=RUN
     )
     assert f"{ADVICE}{NO_CHANGE}" in lines
-    assert not any(UNSCOPED in line for line in lines)
+    assert not any(UNSCOPED in line or TONIGHT in line for line in lines)
+    assert not any(line.startswith(COUNTS) for line in lines)
 
 
-def _pin() -> dict[str, Any]:
+def _pin(**changes: Any) -> dict[str, Any]:
     return {
         "schema": morning.MORNING_SCHEMA,
         "session": SIGNAL.isoformat(),
         "as_of": "2026-04-13T08:30:00+08:00",
         "held": [],
         "evening_snapshot_id": SNAPSHOT,
+        "carried_from": None,
         "requests": {"namechange": 1},
+        **changes,
     }
 
 
@@ -397,19 +408,29 @@ def test_a_watch_list_name_that_turned_special_treatment_changes_the_watch_list(
 def test_a_name_outside_the_plan_that_turned_special_treatment_moves_only_the_counts(
     evening: Day,
 ) -> None:
+    """The counts are information, not a difference (whole-branch review M4): a name outside the
+    plan turned ST changes nothing the user is to do, so the advice is "no change" and the counts
+    are a line of their own, never counted among the differences."""
     top = _survivors(evening)
     outsider = top[9]
     document = _evening_document(evening, holdings=top[:3], buys=top[3:5])
 
     advice = _compare(evening, document, _turn(evening, outsider, special_treatment=True))
 
-    assert [item.kind for item in advice.differences] == ["counts_changed"]
-    (item,) = advice.differences
+    assert advice.differences == ()
     # The name turned ineligible, and the liquidity cut over the names that pass every static
     # reason moved with it, so the eligible count itself may or may not have changed; the ST count
     # of the name corpus certainly did.
     before, after = evening.facts.notes.st, evening.facts.notes.st + 1
-    assert f"ST {before} -> {after}" in item.text
+    assert f"ST {before} -> {after}" in advice.counts
+    filed = morning.morning_document(_pin(), advice, notices=())
+    assert filed["differences"] == [] and filed["counts_changed"] == list(advice.counts)
+    lines = morning.morning_lines(filed, this_run=RUN)
+    assert f"{ADVICE}{NO_CHANGE}" in lines
+    (counts,) = (line for line in lines if line.startswith(COUNTS))
+    assert f"ST {before} -> {after}" in counts
+    assert "information" in counts and "not advice" in counts
+    assert not any("difference(s)" in line for line in lines)
 
 
 def test_a_code_priced_before_its_listing_row_is_tolerated_and_named(
@@ -554,10 +575,12 @@ def test_the_document_carries_the_pin_the_advice_and_the_wording(evening: Day) -
         "session",
         "held",
         "evening_snapshot_id",
+        "carried_from",
         "differences",
         "tolerated",
         "notices",
         "holdings_compared",
+        "counts_changed",
         "requests",
     } <= set(filed)
     assert [item["text"] for item in filed["differences"]] == _texts(advice)
@@ -566,11 +589,112 @@ def test_the_document_carries_the_pin_the_advice_and_the_wording(evening: Day) -
     lines = morning.morning_lines(filed, this_run=RUN)
     assert any(f"do not place BUY {top[0]}" in line for line in lines)
     assert (
-        f"{ADVICE}{len(advice.differences)} difference(s) from tonight's plan among announcements "
-        f"dated through {SIGNAL.isoformat()}"
+        f"{ADVICE}{len(advice.differences)} difference(s) from the plan of {SIGNAL.isoformat()} "
+        f"among announcements dated through {SIGNAL.isoformat()}"
     ) in lines
-    assert not any(NO_CHANGE in line or UNSCOPED in line for line in lines)
+    assert not any(NO_CHANGE in line or UNSCOPED in line or TONIGHT in line for line in lines)
     assert any("tushare requests" in line and '"namechange": 1' in line for line in lines)
+
+
+def test_the_header_names_the_plan_by_its_session_and_the_shanghai_date_the_check_was_read(
+    evening: Day,
+) -> None:
+    """At 08:30 the plan is the evening of its session, named so; and since a check is one of its
+    session's generations by the Shanghai calendar date it was read on (whole-branch review C1),
+    the header says that date -- and the instant, in Shanghai time, however it was pinned."""
+    document = _evening_document(evening)
+    advice = _compare(evening, document, evening)
+    pinned = morning.morning_document(_pin(as_of="2026-04-12T23:30:00+00:00"), advice, notices=())
+
+    (header,) = (
+        line for line in morning.morning_lines(pinned, this_run=RUN) if line.startswith(HEADER)
+    )
+
+    assert header.startswith(
+        f"{HEADER}the plan of {SIGNAL.isoformat()}, read again on 2026-04-13 "
+        "(2026-04-13T07:30:00+08:00), before the next session's call auction"
+    )
+    assert TONIGHT not in header
+    assert not any(line.startswith(EARLIER) for line in morning.morning_lines(pinned, this_run=RUN))
+
+
+def test_a_later_generation_names_the_earlier_check_whose_evening_read_it_compared_with(
+    evening: Day,
+) -> None:
+    """A later generation is not read against the store at the evening's clock -- an earlier
+    morning's fetch has changed what that clock reads -- but against the evening read the earlier
+    check filed before its own fetch: its line names that file and when it was read."""
+    document = _evening_document(evening)
+    advice = _compare(evening, document, evening)
+    earlier = {
+        "file": f"{SIGNAL.isoformat()}.morning.json",
+        "as_of": "2026-04-11T08:35:00+08:00",
+    }
+    filed = morning.morning_document(_pin(carried_from=earlier), advice, notices=())
+
+    lines = morning.morning_lines(filed, this_run=RUN)
+
+    (line,) = (line for line in lines if line.startswith(EARLIER))
+    assert line.startswith(f"{EARLIER}read on 2026-04-11 (2026-04-11T08:35:00+08:00)")
+    assert f"{SIGNAL.isoformat()}.morning.json" in line and "kept as it is" in line
+    assert "evening read" in line and "before its own fetch" in line
+    assert lines.index(line) == 1
+
+
+def test_the_first_generation_is_named_by_its_session_and_a_later_one_by_its_date_too() -> None:
+    """One check per Shanghai calendar date (whole-branch review C1): the first is
+    `<session>.morning.json`, each later one `<session>.morning.<date>.json` beside it -- and
+    neither is a name the journals' readers take for a session's journal (`????-??-??.json`,
+    `date.fromisoformat(stem)`)."""
+    first = morning.morning_file_name(SIGNAL)
+    later = morning.morning_file_name(SIGNAL, date(2026, 4, 13))
+
+    assert first == f"{SIGNAL.isoformat()}{morning.MORNING_FILE_SUFFIX}"
+    assert first == f"{SIGNAL.isoformat()}.morning.json"
+    assert later == f"{SIGNAL.isoformat()}.morning.2026-04-13.json"
+    for name in (first, later):
+        assert not fnmatch.fnmatchcase(name, "????-??-??.json")
+        with pytest.raises(ValueError):
+            date.fromisoformat(name.removesuffix(".json"))
+
+
+def test_the_generations_of_a_session_are_listed_oldest_first_and_nothing_else_is() -> None:
+    session = SIGNAL.isoformat()
+    names = [
+        f"{session}.json",
+        f"{session}.morning.2026-04-14.json",
+        f"{session}.morning.json",
+        f"{session}.morning.2026-04-13.json",
+        f"{session}.morning.json.partial",
+        f"{session}.morning.2026-04-13.json.partial",
+        f"{session}.morning.tomorrow.json",
+        f"{session}.morning.2026-02-30.json",
+        "2026-04-09.morning.json",
+        "2026-04-09.morning.2026-04-13.json",
+    ]
+
+    generations = morning.morning_generations(names, session=SIGNAL)
+
+    assert generations == (
+        (f"{session}.morning.json", None),
+        (f"{session}.morning.2026-04-13.json", date(2026, 4, 13)),
+        (f"{session}.morning.2026-04-14.json", date(2026, 4, 14)),
+    )
+    assert morning.morning_generations([f"{session}.json"], session=SIGNAL) == ()
+
+
+def test_a_check_belongs_to_the_shanghai_calendar_date_of_its_instant() -> None:
+    assert morning.morning_date(datetime.fromisoformat("2026-04-12T23:30:00+00:00")) == date(
+        2026, 4, 13
+    )
+    assert morning.morning_date(datetime.fromisoformat("2026-04-13T08:30:00+08:00")) == date(
+        2026, 4, 13
+    )
+    assert morning.morning_date(datetime.fromisoformat("2026-04-13T16:30:00+00:00")) == date(
+        2026, 4, 14
+    )
+    with pytest.raises(TypeError):
+        morning.morning_date(datetime(2026, 4, 13, 8, 30))
 
 
 def test_the_holdings_compared_are_the_book_after_the_evening_not_the_files_held(
@@ -718,10 +842,81 @@ def _filed_pin(**changes: Any) -> dict[str, Any]:
     return {**_pin(), "registration": {"sha256": SHA}, "evening_read": {}, **changes}
 
 
-def _check(document: Any) -> None:
+def _check(document: Any, *, read_on: date | None = None) -> None:
     morning.check_morning_file(
-        document, session=SIGNAL, evening_snapshot_id=SNAPSHOT, registration_sha256=SHA
+        document,
+        session=SIGNAL,
+        evening_snapshot_id=SNAPSHOT,
+        registration_sha256=SHA,
+        read_on=read_on,
     )
+
+
+LATER_ON: Final[date] = date(2026, 4, 13)
+"""The date `_pin()`'s instant falls on in Shanghai: a later generation's name."""
+CARRIED: Final[dict[str, str]] = {
+    "file": f"{SIGNAL.isoformat()}.morning.json",
+    "as_of": "2026-04-11T08:35:00+08:00",
+}
+
+
+def test_a_later_generation_is_its_dates_and_carries_the_earlier_checks_read() -> None:
+    """A later generation's file is named by its date: its instant must fall on it, and it names
+    the earlier check whose evening read it carries; the first generation carries none."""
+    _check(_filed_pin(carried_from=CARRIED), read_on=LATER_ON)
+
+    with pytest.raises(morning.MorningCheckError, match="2026-04-14"):
+        _check(_filed_pin(carried_from=CARRIED), read_on=date(2026, 4, 14))
+    with pytest.raises(morning.MorningCheckError, match="carried_from"):
+        _check(_filed_pin(), read_on=LATER_ON)
+    with pytest.raises(morning.MorningCheckError, match="carried_from"):
+        _check(_filed_pin(carried_from=CARRIED))
+
+
+@pytest.mark.parametrize(
+    "carried",
+    [
+        {"file": 7, "as_of": "2026-04-11T08:35:00+08:00"},
+        {"file": "2026-04-10.morning.json", "as_of": "2026-04-11T08:35:00"},
+        {"file": "2026-04-10.morning.json"},
+        "2026-04-10.morning.json",
+    ],
+    ids=["file not a name", "as_of without an offset", "no as_of", "not a mapping"],
+)
+def test_a_carried_from_that_is_not_an_earlier_check_is_refused(carried: Any) -> None:
+    with pytest.raises(morning.MorningCheckError, match="carried_from"):
+        _check(_filed_pin(carried_from=carried), read_on=LATER_ON)
+
+
+def test_a_morning_file_with_no_carried_from_is_refused() -> None:
+    pin = _filed_pin()
+    del pin["carried_from"]
+
+    with pytest.raises(morning.MorningCheckError, match="carried_from"):
+        _check(pin)
+
+
+def test_an_evening_read_carried_from_an_earlier_check_is_checked_and_named_by_its_file(
+    evening: Day,
+) -> None:
+    """The evening read a later generation carries is held to the evening's document as the
+    first generation's own read is; one that differs is refused naming the file it came from --
+    an edited file, never a store changed under the evening."""
+    top = _survivors(evening)
+    document = _evening_document(evening, holdings=top[:2])
+    names = morning.plan_names(document).watched()
+    drifted = _turn(evening, top[4], special_treatment=True)
+
+    with pytest.raises(morning.EveningReadDriftError) as caught:
+        morning.check_evening_read(
+            morning.read_facts(drifted.facts, drifted.screen, names),
+            document,
+            filed_in="2026-04-10.morning.json",
+        )
+
+    message = str(caught.value)
+    assert "2026-04-10.morning.json" in message and "notes.st" in message
+    assert "Something other than the morning's name fetch" not in message
 
 
 def test_a_pin_the_command_filed_is_this_evenings_and_a_finished_file_is_complete(
@@ -776,11 +971,13 @@ def _edited(document: Mapping[str, Any], edit: str) -> dict[str, Any]:
         ("wording", "wording"),
         ("notices", "notices"),
         ("holdings_compared", "holdings_compared"),
+        ("counts_changed", "counts_changed"),
         ("requests", "requests"),
         ("differences.0.text", "differences"),
         ("notices.0.text", "notices"),
         ('differences."none"', "differences"),
         ("tolerated.[1]", "tolerated"),
+        ("counts_changed.[1]", "counts_changed"),
         ("wording.3", "wording"),
         ('requests.{"namechange": "one"}', "requests"),
     ],
