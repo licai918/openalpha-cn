@@ -1609,3 +1609,247 @@ def test_a_p6_registration_with_the_flag_loads_neither_the_paper_book_nor_the_mo
     report = json.loads(completed.stdout.strip().splitlines()[-1])
     assert report["exit"] == 2, report["stderr"]
     assert report["before"] == [] and report["after"] == []
+
+
+# --- the stored shapes the readers depend on (whole-branch seams review, finding 7) --------------
+
+MIGRATION_NEEDED: Final[str] = (
+    "a change here makes stored documents unreadable: a migration is needed"
+)
+
+
+def _json_type(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "bool"
+    for kind, name in (
+        (int, "int"),
+        (float, "float"),
+        (str, "str"),
+        (list, "list"),
+        (dict, "dict"),
+    ):
+        if isinstance(value, kind):
+            return name
+    raise AssertionError(f"{value!r} is not a JSON value")
+
+
+def _at(document: Any, path: str) -> list[Any]:
+    """Every value at `path` in `document`: `.`-separated keys, `[]` each item of a list, `*` each
+    value of a mapping. A key a mapping does not hold, or a step into a value of another type,
+    reaches nothing there."""
+    values = [document]
+    for step in path.split("."):
+        found: list[Any] = []
+        for value in values:
+            key, each = (step[:-2], True) if step.endswith("[]") else (step, False)
+            if key == "*":
+                children = list(value.values()) if isinstance(value, dict) else []
+            elif isinstance(value, dict) and key in value:
+                children = [value[key]]
+            else:
+                children = []
+            for child in children:
+                if each:
+                    found += child if isinstance(child, list) else []
+                else:
+                    found.append(child)
+        values = found
+    return values
+
+
+def _types_at(documents: Sequence[Any], path: str) -> set[str]:
+    return {_json_type(value) for document in documents for value in _at(document, path)}
+
+
+MORNING_FILE_SHAPE: Final[dict[str, frozenset[str]]] = {
+    "": frozenset(
+        {
+            "schema",
+            "session",
+            "as_of",
+            "held",
+            "evening_snapshot_id",
+            "registration",
+            "evening_read",
+            "carried_from",
+            "requests",
+            "differences",
+            "tolerated",
+            "notices",
+            "holdings_compared",
+            "counts_changed",
+            "wording",
+        }
+    ),
+    "registration": frozenset({"path", "sha256", "commit", "config_id"}),
+    "evening_read": frozenset({"summary", "aged_zero", "verdicts"}),
+    "evening_read.summary": frozenset(
+        {
+            "rows",
+            "universe_size",
+            "scored_size",
+            "assessed",
+            "eligible",
+            "survivors",
+            "reasons",
+            "notes",
+        }
+    ),
+    "evening_read.verdicts.*": frozenset({"reasons", "survivor"}),
+    "carried_from": frozenset({"file", "as_of"}),
+    "differences[]": frozenset({"kind", "ts_codes", "reasons", "text"}),
+    "notices[]": frozenset({"ts_code", "name", "ann_date", "change_reason", "text"}),
+}
+"""`openalpha-daily-survivor-morning/v1`: every mapping of a finished morning file and its keys,
+exactly. `morning_complete` refuses a finished file missing any of the advice stage's keys, and
+`check_morning_file`, `FactsRead.from_json` and `morning_lines` read the rest by name, so a key
+added or renamed under `/v1` once real mornings are filed makes every earlier file unreadable."""
+MORNING_NOTES_READ: Final[frozenset[str]] = frozenset(
+    {"no_listing_row", "not_listed_with_bar", "st", "delisting"}
+)
+"""The notes of the filed evening read the comparison reads by name (`_vanished_rows`,
+`_counts`); the others are compared as a whole (`check_evening_read`)."""
+
+
+def test_the_morning_files_shape_is_pinned_so_that_a_change_needs_a_migration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    evenings: Evenings,
+) -> None:
+    """Two real checks of the first evening -- the first at 22:00 that evening, the second the
+    next morning, with a rename to advise on and one to notice -- hold every mapping of the file
+    with exactly its pinned keys."""
+    world = _world(tmp_path, monkeypatch, evenings.first)
+    bought = _bought(world)
+    world.market.renames = ((bought[0], DAY, NEXT),)
+    world.market.early = ((bought[1], NEXT, NEXT + timedelta(days=1)),)
+    _morning(world, capsys, DAY, as_of=_shanghai(DAY, time(22, 0)))
+    _morning(world, capsys, DAY, as_of=morning_of(DAY))
+    documents = [
+        json.loads(_morning_path(world, DAY).read_text(encoding="utf-8")),
+        json.loads(_generation_path(world, DAY, NEXT).read_text(encoding="utf-8")),
+    ]
+
+    for path, keys in MORNING_FILE_SHAPE.items():
+        found = [item for document in documents for item in _at(document, path)] if path else []
+        mappings = [item for item in (found if path else documents) if isinstance(item, dict)]
+        assert mappings, f"no morning file here holds {path!r}: the pin is not witnessed"
+        for item in mappings:
+            assert set(item) == keys, (
+                f"the morning file's {path or 'top level'} holds {sorted(item)}, pinned "
+                f"{sorted(keys)}: {MIGRATION_NEEDED}"
+            )
+    for document in documents:
+        assert set(document["evening_read"]["summary"]["notes"]) >= MORNING_NOTES_READ, (
+            MIGRATION_NEEDED
+        )
+        assert document["schema"] == "openalpha-daily-survivor-morning/v1"
+
+
+SURVIVOR_JOURNAL_STAGES: Final[frozenset[str]] = frozenset(
+    {
+        "schema",
+        "session",
+        "as_of",
+        "held",
+        "held_from",
+        "registration",
+        "panel",
+        "factors",
+        "prediction",
+        "paper",
+        "result",
+    }
+)
+"""The stages of a completed evening's `openalpha-daily-survivor/v1` journal, exactly (a day that
+caught a session up files `catch_ups` too)."""
+SURVIVOR_JOURNAL_READ: Final[dict[str, frozenset[str]]] = {
+    # The day itself, its rerun and the morning re-check: the pin.
+    "schema": frozenset({"str"}),
+    "session": frozenset({"str"}),
+    "as_of": frozenset({"str"}),
+    "held": frozenset({"list"}),
+    "held_from": frozenset({"dict", "null"}),
+    "held_from.session": frozenset({"str"}),
+    "held_from.session_index": frozenset({"int"}),
+    "held_from.snapshot_id": frozenset({"str"}),
+    "registration.path": frozenset({"str"}),
+    "registration.sha256": frozenset({"str"}),
+    "registration.commit": frozenset({"str"}),
+    "registration.config_id": frozenset({"str"}),
+    # The day's resumed stages.
+    "panel.targets": frozenset({"list"}),
+    "panel.requests": frozenset({"dict"}),
+    "factors": frozenset({"dict"}),
+    # The forward report (`_journals_at`, `check_journals_against_the_store`).
+    "prediction.registered": frozenset({"bool"}),
+    "prediction.record_id": frozenset({"str"}),
+    # The paper record (`strategy_survivor_paper_report`): the paper stage and the result.
+    "paper.snapshot_id": frozenset({"str", "null"}),
+    "result.kind": frozenset({"str"}),
+    "result.session": frozenset({"str"}),
+    "result.session_index": frozenset({"int"}),
+    "result.paper.snapshot_id": frozenset({"str"}),
+    "result.paper.catch_ups": frozenset({"list"}),
+    "result.paper.illiquid_exits": frozenset({"list"}),
+    "result.paper.trade_list.unfunded": frozenset({"list"}),
+    "result.paper.decision.exits": frozenset({"list"}),
+    "result.paper.decision.unaffordable": frozenset({"list"}),
+    "result.paper.decision.frozen": frozenset({"list"}),
+    "result.paper.decision.near_exit": frozenset({"list"}),
+    "result.paper.decision.deferred_exits": frozenset({"list"}),
+    "result.paper.settled.attempts[].status": frozenset({"str"}),
+    "result.paper.settled.attempts[].attempt_id": frozenset({"str"}),
+    "result.paper.settled.expired": frozenset({"list"}),
+    "result.paper.settled.cancelled": frozenset({"list"}),
+    "result.paper.settled.written_off": frozenset({"list"}),
+    # The morning re-check (`plan_names`, `check_evening_read`) and the halt's start
+    # (`strategy_survivor_summary.carried_since`).
+    "result.paper.book.holdings[].ts_code": frozenset({"str"}),
+    "result.paper.book.holdings[].flags": frozenset({"list"}),
+    "result.paper.open_orders[].side": frozenset({"str"}),
+    "result.paper.open_orders[].ts_code": frozenset({"str"}),
+    "result.paper.open_orders[].carried": frozenset({"bool"}),
+    "result.paper.decision.watch_list": frozenset({"list"}),
+    "result.facts.rows": frozenset({"int"}),
+    "result.facts.universe_size": frozenset({"int"}),
+    "result.facts.scored_size": frozenset({"int"}),
+    "result.facts.notes": frozenset({"dict"}),
+    "result.screen.assessed": frozenset({"int"}),
+    "result.screen.eligible": frozenset({"int"}),
+    "result.screen.survivors": frozenset({"int"}),
+    "result.screen.reasons": frozenset({"dict"}),
+}
+"""Every key path of a completed evening's journal a reader depends on, with its JSON type: the
+day's own pin and stages, the forward report's prediction stage, the paper record's paper stage
+and result, the morning's plan and the halt's start. The readers read by name and tolerate a key
+added; a key renamed, removed or retyped under `/v1` once real days are journalled makes every
+earlier journal unreadable to the reader that needs it. Not witnessed by these three evenings,
+and so not pinned here: a journal's own `catch_ups` entries, an epoch day's `opening`, a
+settle-only day's `paper_skipped`."""
+
+
+def test_the_survivor_journals_read_shape_is_pinned_so_that_a_change_needs_a_migration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, evenings: Evenings
+) -> None:
+    """The three real evenings' journals -- ten buys planned; ten holdings and the fills; a halted
+    holding -- hold every pinned stage and every key path a reader depends on, of its type."""
+    world = _world(tmp_path, monkeypatch, evenings.third)
+    journals = [sd._journal(world, day) for day in (DAY, NEXT, THIRD)]
+
+    for journal in journals:
+        assert set(journal) == SURVIVOR_JOURNAL_STAGES, (
+            f"a completed evening's journal holds the stages {sorted(journal)}, pinned "
+            f"{sorted(SURVIVOR_JOURNAL_STAGES)}: {MIGRATION_NEEDED}"
+        )
+        assert journal["schema"] == "openalpha-daily-survivor/v1"
+        assert journal["result"]["kind"] == "survivor_book/v1"
+    for path, types in SURVIVOR_JOURNAL_READ.items():
+        found = _types_at(journals, path)
+        assert found, f"no journal here holds {path!r}: the pin is not witnessed"
+        assert found <= types, (
+            f"the journals' {path} is {sorted(found)}, pinned {sorted(types)}: {MIGRATION_NEEDED}"
+        )

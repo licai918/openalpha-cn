@@ -572,6 +572,62 @@ def test_the_book_refuses_under_the_names_the_survivor_day_numbers_its_steps_by(
     assert isinstance(stalled, SurvivorDayError) and stalled.caught_up == ()
 
 
+# --- one value spelled in two places (whole-branch seams review, finding 9) ----------------------
+
+
+def test_the_floor_a_settle_only_day_reads_its_facts_at_is_the_books_no_floor() -> None:
+    """The daily command's `SETTLE_ONLY_COVERAGE` (a settle-only day decides nothing) and this
+    module's `_NO_COVERAGE_FLOOR` (a catch-up, and the evening's second read, decide nothing the
+    first read did not) are one rule, spelled twice: pinned equal."""
+    daily = _script("daily_selection", ROOT / "scripts")
+    no_floor = getattr(strategy_survivor_book, "_NO_COVERAGE_FLOOR")  # noqa: B009
+
+    assert daily.SETTLE_ONLY_COVERAGE == no_floor == 0.0
+
+
+def test_the_key_the_daily_command_tells_a_survivor_registration_by_is_the_registrations() -> None:
+    """`daily_selection.REGISTRATION_KIND_KEY` is spelled there so that a P6 day loads no survivor
+    module; it is `strategy_survivor.KIND_KEY`, pinned equal."""
+    from openalpha_cn import strategy_survivor
+
+    daily = _script("daily_selection", ROOT / "scripts")
+
+    assert daily.REGISTRATION_KIND_KEY == strategy_survivor.KIND_KEY == "kind"
+
+
+@pytest.mark.parametrize("bound", [0, 2])
+def test_the_epoch_bound_is_one_where_the_daily_command_and_the_paper_head_check_it(
+    panel: PanelStore, tmp_path: Path, bound: int
+) -> None:
+    """`1 + max_panel_catch_up_sessions` is checked twice: by the daily command before any request
+    (`_admit_epoch_reach`) and by `paper_head` when it opens the book. The two admit the same
+    sessions -- the last one `1 + bound` sessions after the epoch -- and refuse the next one, each
+    naming the same bound."""
+    daily = _script("daily_selection", ROOT / "scripts")
+    registration = SurvivorRegistration(
+        book=CONFIG, adapter=adapter(max_panel_catch_up_sessions=bound)
+    )
+    named = f"may be at most {1 + bound} sessions before the first run"
+    for index, admitted in ((61 + bound, True), (62 + bound, False)):
+        try:
+            daily._admit_epoch_reach(
+                panel, survivor=registration, session=SESSIONS[index], as_of=AS_OF, book_held=False
+            )
+            by_the_daily = True
+        except daily.StepFailedError as refused:
+            assert named in str(refused)
+            by_the_daily = False
+        with opened_paper(tmp_path / f"paper-{index}") as paper:
+            try:
+                head_of(paper, index, registration)
+                by_the_head = True
+            except SurvivorDayError as refused:
+                assert named in str(refused)
+                by_the_head = False
+
+        assert (by_the_daily, by_the_head) == (admitted, admitted), SESSIONS[index]
+
+
 # --- the head's holdings -------------------------------------------------------------------------
 
 
