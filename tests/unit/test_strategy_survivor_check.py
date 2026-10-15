@@ -33,7 +33,7 @@ import json
 import logging
 import shutil
 from collections.abc import Callable, Sequence
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Final
 
@@ -84,6 +84,7 @@ from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET
 from openalpha_cn.domain.trading_calendar import TRADING_CALENDAR_DATASET
 from openalpha_cn.panel.store import PanelCatalogBusyError, PanelStore
 from openalpha_cn.panel_ingest import (
+    session_publication_instant,
     split_panel_batch_by_year,
     stored_rows_digest,
     write_name_history,
@@ -91,7 +92,11 @@ from openalpha_cn.panel_ingest import (
     write_stock_universe,
     write_trading_calendar,
 )
-from openalpha_cn.strategy_registration import StrategyRegistrationError, batch_digest
+from openalpha_cn.strategy_registration import (
+    StrategyRegistrationError,
+    batch_digest,
+    registered_at,
+)
 from openalpha_cn.strategy_survivor_check import (
     NO_PROVENANCE,
     NOT_BOUND,
@@ -250,6 +255,7 @@ def check_of(
     verdicts: SurvivorVerdictCache | None = None,
     transform: FactorTransformSpec = IDENTITY,
     max_carry_sessions: int = MAX_CARRY_SESSIONS,
+    min_coverage: float = MIN_COVERAGE,
     registration_sha256: str = REGISTERED.registration_sha256,
 ) -> SurvivorRecordCheck:
     return SurvivorRecordCheck(
@@ -257,11 +263,32 @@ def check_of(
         book=BOOK,
         transform=transform,
         exchange=EXCHANGE,
-        min_coverage=MIN_COVERAGE,
+        min_coverage=min_coverage,
         max_carry_sessions=max_carry_sessions,
         registered=REGISTERED,
         provenance=survivor_provenance_index(runtime, registration_sha256=registration_sha256),
         verdicts=verdicts,
+    )
+
+
+def key_of(
+    store: PanelStore,
+    provenance: SurvivorInputProvenance,
+    *,
+    transform: FactorTransformSpec = IDENTITY,
+    **settings: object,
+) -> SurvivorCacheKey:
+    """`survivor_cache_key` under the frame's check settings, `settings` changing any of them."""
+    return survivor_cache_key(
+        store,
+        provenance,
+        transform=transform,
+        **{  # type: ignore[arg-type]
+            "exchange": EXCHANGE,
+            "min_coverage": MIN_COVERAGE,
+            "max_carry_sessions": MAX_CARRY_SESSIONS,
+            **settings,
+        },
     )
 
 
@@ -656,7 +683,7 @@ def test_the_key_names_the_content_of_every_partition_and_the_rows_of_the_three_
     held = filing(evening_store, tmp_path)
     published = instant(SIGNAL_INDEX)
 
-    key = survivor_cache_key(evening_store, held.provenance, transform=IDENTITY)
+    key = key_of(evening_store, held.provenance)
 
     states = {(dataset, year): state for dataset, year, state in key.partitions}
     assert set(states) == {(item.dataset, item.year) for item in held.provenance.inputs}
@@ -672,12 +699,10 @@ def test_the_key_names_the_content_of_every_partition_and_the_rows_of_the_three_
         (factor, output) for factor, _build, output in held.provenance.builds
     )
     assert isinstance(key, SurvivorCacheKey)
-    assert (
-        key.digest == survivor_cache_key(evening_store, held.provenance, transform=IDENTITY).digest
-    )
-    assert key != survivor_cache_key(renamed_store, held.provenance, transform=IDENTITY)
+    assert key.digest == key_of(evening_store, held.provenance).digest
+    assert key != key_of(renamed_store, held.provenance)
     with pytest.raises(SurvivorCheckArgumentError, match="transform"):
-        survivor_cache_key(evening_store, held.provenance, transform=SECOND_TRANSFORM)
+        key_of(evening_store, held.provenance, transform=SECOND_TRANSFORM)
 
 
 def test_the_key_names_a_partition_the_windows_reach_that_is_stored_since(
@@ -695,7 +720,7 @@ def test_the_key_names_a_partition_the_windows_reach_that_is_stored_since(
         ),
     )
 
-    key = survivor_cache_key(evening_store, without, transform=IDENTITY)
+    key = key_of(evening_store, without)
 
     assert (STOCK_BASIC_DATASET, 2026) in {(dataset, year) for dataset, year, _ in key.partitions}
 
@@ -741,8 +766,8 @@ def test_a_verdict_is_written_once_and_a_different_one_never_overwrites_it(
     evening_store: PanelStore, grown_store: PanelStore, tmp_path: Path
 ) -> None:
     held = filing(evening_store, tmp_path)
-    key = survivor_cache_key(evening_store, held.provenance, transform=IDENTITY)
-    grown = survivor_cache_key(grown_store, held.provenance, transform=IDENTITY)
+    key = key_of(evening_store, held.provenance)
+    grown = key_of(grown_store, held.provenance)
     assert key != grown
     verdicts = verdicts_of(held.runtime)
 
@@ -799,6 +824,160 @@ def test_no_panel_write_lands_while_a_record_is_checked(
         (item.dataset, item.year): store.partition_content_hash(item.dataset, item.year)
         for item in held.provenance.inputs
     } == before
+
+
+# --- the check's own settings in the key, the 16:30 bound, the write-once file (E1 review) ------
+
+
+@pytest.mark.parametrize(
+    ("setting", "other"),
+    [
+        ("exchange", "SSE" if EXCHANGE != "SSE" else "SZSE"),
+        ("min_coverage", MIN_COVERAGE / 2),
+        ("max_carry_sessions", SHORT_CARRY),
+    ],
+)
+def test_the_key_names_the_checks_own_settings(
+    evening_store: PanelStore, tmp_path: Path, setting: str, other: object
+) -> None:
+    # The recompute reads the day with the registered exchange, coverage floor and carry bound: a
+    # verdict kept under one set of them is a verdict about that set, never served to another.
+    held = filing(evening_store, tmp_path)
+
+    key = key_of(evening_store, held.provenance)
+
+    assert key.check == (
+        ("exchange", EXCHANGE),
+        ("max_carry_sessions", str(MAX_CARRY_SESSIONS)),
+        ("min_coverage", repr(MIN_COVERAGE)),
+    )
+    assert key.document()["check"] == [list(item) for item in key.check]
+    moved = key_of(evening_store, held.provenance, **{setting: other})
+    assert (moved.partitions, moved.builds) == (key.partitions, key.builds)
+    assert moved.digest != key.digest
+
+
+def test_a_verdict_kept_under_one_coverage_floor_is_not_served_under_another(
+    evening_store: PanelStore, tmp_path: Path, recomputes: list[str]
+) -> None:
+    held = filing(evening_store, tmp_path)
+    check_of(evening_store, held.runtime, verdicts=verdicts_of(held.runtime))(held.record)
+
+    verdict = check_of(
+        evening_store,
+        held.runtime,
+        verdicts=verdicts_of(held.runtime),
+        min_coverage=MIN_COVERAGE / 2,
+    )(held.record)
+
+    assert (verdict.verdict, verdict.cached) == (VERDICT_VERIFIED, False)
+    assert recomputes == [held.record.record_id] * 2
+    assert len(kept_files(held.runtime)) == 2
+
+
+def test_the_value_digests_16_30_bound_leaves_out_no_row_the_recompute_reads(
+    evening_store: PanelStore, tmp_path: Path
+) -> None:
+    # The key digests `stock_basic`, `namechange` and `trade_cal` through the session at its
+    # 16:30, while the recompute reads at the record's custody instant (later): sound only while
+    # every row of the three dated on or before the session is visible by that 16:30. The
+    # provider's clocks are what make it so -- a registry or a name row is visible at its own
+    # date's midnight, a calendar row at the start of its year at the latest -- and the frame's
+    # stores hold them so: read later, the three digest the same.
+    from openalpha_cn.providers.tushare import _CLOCK_BUILDERS, TUSHARE_DATASETS
+
+    descriptors = {item.dataset: item for item in TUSHARE_DATASETS}
+    for dataset in (STOCK_BASIC_DATASET, NAMECHANGE_DATASET, TRADING_CALENDAR_DATASET):
+        descriptor = descriptors[dataset]
+        build = _CLOCK_BUILDERS[descriptor.clock]
+        for day in (date(2026, 1, 1), SIGNAL, date(2026, 12, 31)):
+            row = {descriptor.date_field: day.strftime("%Y%m%d")}
+            for fetched in (instant(SIGNAL_INDEX) - timedelta(days=400), REFETCHED_AT):
+                timeline = build(row, descriptor.date_field, fetched)
+                assert timeline.available_time <= session_publication_instant(day), (
+                    dataset,
+                    day,
+                    fetched,
+                )
+
+    held = filing(evening_store, tmp_path)
+    published = instant(SIGNAL_INDEX)
+    custody = registered_at(held.record)
+    assert custody > published
+    for item in held.provenance.inputs:
+        if item.dataset not in (STOCK_BASIC_DATASET, NAMECHANGE_DATASET, TRADING_CALENDAR_DATASET):
+            continue
+        digests = {
+            stored_rows_digest(
+                evening_store, item.dataset, year=item.year, through=SIGNAL, visible_at=at
+            )
+            for at in (published, custody, REFETCHED_AT)
+        }
+        assert len(digests) == 1, (item.dataset, item.year)
+
+
+def test_a_verdict_written_meanwhile_by_another_report_is_never_replaced(
+    evening_store: PanelStore, tmp_path: Path
+) -> None:
+    # Two reports keeping the same verdict at once: the one that finds the name taken loses, and
+    # the file the other wrote stands as it was written -- no check-then-replace window.
+    held = filing(evening_store, tmp_path)
+    key = key_of(evening_store, held.provenance)
+    name = f"{held.record.record_id}.{held.provenance.digest}.{key.digest}.json"
+    directory = held.runtime / SURVIVOR_VERDICT_DIRECTORY
+    theirs = b'{"written": "by the other report"}\n'
+
+    def meanwhile() -> datetime:
+        # The other report's write lands after this one looked and before it wrote.
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / name).write_bytes(theirs)
+        return REPORT_AS_OF
+
+    FileSurvivorVerdicts(held.runtime, clock=meanwhile).keep(
+        held.record.record_id, held.provenance.digest, key
+    )
+
+    assert (directory / name).read_bytes() == theirs
+    assert sorted(path.name for path in directory.iterdir()) == [name]
+
+
+def test_a_kept_verdict_is_synced_before_it_takes_its_name_and_the_name_after(
+    evening_store: PanelStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A crash must not leave an empty or half-written file under a verdict's name, which would
+    # be a miss on every later report: the bytes are synced under a temporary name, take the
+    # verdict's name in one step, and the directory is synced after (not on Windows, which
+    # cannot open a directory to sync it).
+    import os
+    import stat
+
+    held = filing(evening_store, tmp_path)
+    key = key_of(evening_store, held.provenance)
+    events: list[tuple[str, ...]] = []
+    real_fsync, real_link = os.fsync, os.link
+
+    def fsync(descriptor: int) -> None:
+        kind = "directory" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file"
+        events.append(("fsync", kind))
+        real_fsync(descriptor)
+
+    def link(source: object, target: object) -> None:
+        events.append(("link",))
+        real_link(source, target)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "link", link)
+
+    verdicts_of(held.runtime).keep(held.record.record_id, held.provenance.digest, key)
+
+    expected = [("fsync", "file"), ("link",)]
+    if os.name != "nt":
+        expected.append(("fsync", "directory"))
+    assert events == expected
+    assert [path.name for path in kept_files(held.runtime)] == [
+        f"{held.record.record_id}.{held.provenance.digest}.{key.digest}.json"
+    ]
+    assert not list((held.runtime / SURVIVOR_VERDICT_DIRECTORY).glob("*.partial"))
 
 
 # --- the verdict ---------------------------------------------------------------------------------

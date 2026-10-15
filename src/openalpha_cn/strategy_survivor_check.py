@@ -16,7 +16,10 @@ sampling: an unchecked record is not evidence.
    skips another registration's file *before* reading it (`read_survivor_provenance` refuses
    one, so reading every file would refuse the report for a file that is not its business), and
    refuses two files naming one filing -- neither can be told to be the one its run wrote. A
-   record with no provenance is refused: there is nothing to say what its day read.
+   record with no provenance is refused: there is nothing to say what its day read. One file of
+   this registration's -- or one that does not say whose it is -- that does not read back refuses
+   the whole index, and so the whole report, not one record: it could be any record's filing,
+   and no record can be told not to need it (fail closed; the design is silent here).
 3. **The verdict cache**: a verified verdict kept under the key the store gives now
    (`survivor_cache_key`) is served, `cached=True`. Nothing else is ever kept.
 4. **The recompute** (`recompute_survivor_batch`, with the provenance): the day scored again from
@@ -28,7 +31,10 @@ sampling: an unchecked record is not evidence.
 6. **Otherwise** `survivor_provenance_changes` under the scope: something named -- UNVERIFIABLE,
    admitted and listed with its changes and scope; nothing named -- **refused**. A value-blind
    in-place correction (a bar's amount cut across its window, every row count unchanged) ends
-   here by design: the census cannot see it, and the check fails closed, by name.
+   here by design: the census cannot see it, and the check fails closed, by name. So does a
+   factor tier's partition gone while its 16:30 build still stands: the provenance names the
+   factor tiers by their build alone (D2), so a day that cannot be scored again for that reason
+   names no change and is refused, not UNVERIFIABLE -- D2's rule, kept, failing closed.
 
 ## The verdict cache is keyed by content state, never by census (`survivor_cache_key`)
 
@@ -44,12 +50,19 @@ what such a correction leaves alone. So the key is what the recompute's inputs h
   every fetch: the registry rewrites every lifecycle year it holds on each fetch, and a refetch
   moves `ingested_time`, which the content hash covers and the value digest leaves out. Keyed by
   their content hash, the cache would never hit while the daily run continues (design decision
-  13). The 16:30 bound leaves nothing out that the recompute reads: the provider makes a row of
-  these three visible at its own date's midnight (a calendar row at its year's start), so a row
-  dated on or before the session is visible at its 16:30;
+  13). The 16:30 bound leaves nothing out that the recompute reads, although the recompute
+  reads at the record's custody instant (or later, on its fallback): the provider makes a row of
+  these three visible at its own date's midnight (a calendar row at its year's start, or when it
+  was fetched if that is earlier), so a row dated on or before the session is visible by its
+  16:30. That is an assumption about the provider's clocks, and a test holds it
+  (`test_the_value_digests_16_30_bound_leaves_out_no_row_the_recompute_reads`);
 - the **output digest** of each composite factor's processed build stamped at the session's
   16:30, under the record's transform -- the output and not the manifest id, which also moves on
-  a value-identical re-run.
+  a value-identical re-run;
+- the **check's own settings** the recompute reads the day with -- `exchange`, `min_coverage`,
+  `max_carry_sessions` -- which the provenance does not record: the registered configuration's,
+  so the same for every record of one registration, and in the key so that a verdict kept under
+  one set of them is never served to a check run with another.
 
 So a kept verdict is served for every record whose year has closed -- after it, only those three
 datasets are written in that year, and only their stamps move -- and never after any in-place
@@ -67,8 +80,13 @@ on. A writer waits for at most one record's check.
 record again whose inputs have not moved; it is not evidence. Verdict files are local and
 write-once, `RT/reports/survivor_record_verdicts/<record>.<provenance>.<key digest>.json`, apart
 from P6's; one that does not read back as the verified verdict its name promises is a miss with a
-warning, never rewritten. Someone who controls this disk can write a verdict as easily as a
-record, and nothing local defends against that.
+warning, never rewritten. A verdict is written under a temporary name of its own writer's, synced,
+and linked to its name, which fails when the name is taken -- of two reports keeping one verdict
+at once, the second loses and the first's file stands -- and the directory is synced after (not
+on Windows, which cannot open a directory to sync it): a crash leaves at most a `.partial`, never
+an empty file under a verdict's name, which would be a miss on every later report. Someone who
+controls this disk can write a verdict as easily as a record, and nothing local defends against
+that.
 
 ## What a check costs, measured once on one machine
 
@@ -93,6 +111,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
+import secrets
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -301,15 +321,19 @@ class SurvivorCacheKey:
     `partitions`: `(dataset, year, state)` ascending, `state` being `content:<hash>`,
     `rows:<windowed value digest>` for the three small through-session datasets, or `absent`.
     `builds`: `(factor, output digest)` of each composite factor's 16:30 build, or `absent`.
+    `check`: the check's own settings the recompute reads the day with, `(name, text)` by name
+    -- `exchange`, `max_carry_sessions`, `min_coverage` (its `repr`).
     """
 
     partitions: tuple[tuple[str, int, str], ...]
     builds: tuple[tuple[str, str], ...]
+    check: tuple[tuple[str, str], ...]
 
     def document(self) -> dict[str, object]:
         return {
             "partitions": [[dataset, year, state] for dataset, year, state in self.partitions],
             "builds": [[factor, output] for factor, output in self.builds],
+            "check": [[name, value] for name, value in self.check],
         }
 
     @property
@@ -324,12 +348,18 @@ def survivor_cache_key(
     provenance: SurvivorInputProvenance,
     *,
     transform: FactorTransformSpec,
+    exchange: str,
+    min_coverage: float,
+    max_carry_sessions: int,
     cache: RowDigestCache | None = None,
 ) -> SurvivorCacheKey:
     """The key a verified verdict of the record `provenance` was written for is kept under.
 
     `transform` must be the one the record's day read (`SurvivorCheckArgumentError` otherwise).
-    `cache` shares the row hashes of a partition state between records (`stored_rows_digest`).
+    `exchange`, `min_coverage` and `max_carry_sessions` are the settings the check recomputes the
+    day with, which the provenance does not record: a verdict is about them too (module
+    docstring). `cache` shares the row hashes of a partition state between records
+    (`stored_rows_digest`).
     """
     _require_the_records_transform(provenance, transform)
     session = provenance.session
@@ -356,6 +386,11 @@ def survivor_cache_key(
         builds=tuple(
             (factor, _ABSENT if build is None else build[1])
             for factor, build in sorted(builds.items())
+        ),
+        check=(
+            ("exchange", exchange),
+            ("max_carry_sessions", str(max_carry_sessions)),
+            ("min_coverage", repr(min_coverage)),
         ),
     )
 
@@ -397,7 +432,8 @@ class FileSurvivorVerdicts:
 
     A file that does not read back as the verified verdict its name promises -- not UTF-8 JSON,
     another record, provenance or key, another verdict -- is a miss and is named in a warning; it
-    is never rewritten, and a file already at a name is never replaced."""
+    is never rewritten, and a file already at a name is never replaced -- not even one another
+    report wrote between this one's look and its write (`_write_once`'s exclusive link)."""
 
     def __init__(self, runtime_dir: Path, *, clock: Callable[[], datetime]) -> None:
         self._directory = runtime_dir / SURVIVOR_VERDICT_DIRECTORY
@@ -447,11 +483,34 @@ class FileSurvivorVerdicts:
             "verified_at": self._clock().isoformat(),
         }
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(f"{path.name}.partial")
-        temporary.write_text(
-            json.dumps(body, sort_keys=True, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-        )
-        temporary.replace(path)
+        _write_once(path, json.dumps(body, sort_keys=True, indent=2, ensure_ascii=False) + "\n")
+
+
+def _write_once(path: Path, text: str) -> None:
+    """`text` at `path` unless a file is there by then, never replacing one (module docstring).
+
+    The bytes go to a temporary file of this writer's own, are flushed and synced, and take the
+    name by a hard link, which fails when the name is taken: of two writers the second loses, and
+    the first's file stands as it was written. The directory is synced after the link (not on
+    Windows, which cannot open a directory). The temporary file is removed either way."""
+    temporary = path.with_name(f"{path.name}.{secrets.token_hex(8)}.partial")
+    try:
+        with temporary.open("x", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            return
+        if os.name != "nt":
+            descriptor = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 # --- the check -----------------------------------------------------------------------------------
@@ -534,7 +593,13 @@ class SurvivorRecordCheck:
             None
             if verdicts is None
             else survivor_cache_key(
-                self._store, provenance, transform=self._transform, cache=self._digests
+                self._store,
+                provenance,
+                transform=self._transform,
+                exchange=self._exchange,
+                min_coverage=self._min_coverage,
+                max_carry_sessions=self._max_carry_sessions,
+                cache=self._digests,
             )
         )
         if (
