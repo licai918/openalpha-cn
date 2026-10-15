@@ -2,10 +2,32 @@
 
 > **2026-10-08 起每日登记暂停（`V2-P7`，决策 D4）。** 现有登记配置（walk-forward 打分、持仓 50）没有证据：
 > 保留期三条判据全部不满足（`docs/research/p6-results.md`），继续登记只是在积累一个会被替换的基线。
-> 新配置经 `V2-P7-006` 预登记并提交后恢复；那之前**不要运行本命令**，也不要安装 launchd 配置。
+> 新配置（幸存者形态，见「幸存者形态」一节）经 `V2-P7-006` 预登记、**由用户明确确认那次登记**并提交后才恢复；
+> 那之前**不要运行本命令**（任何登记、晚间与清晨复核都不要），**不要安装 launchd 配置**，也不要为恢复手工补面板。
 > 空窗期是有意的，新配置的前向窗口从它自己的预登记提交起算。最后两条已登记的预测：2026-09-30
 > （`prd_7963ada370081d1ab509fbd8`）与 2026-10-08（`prd_1d5776987e0a58b0851df1c1`），保留为历史。
 > 下文仍然准确地描述这条命令**做什么**，恢复运行时沿用。
+
+## 两种登记形态：每一节适用于哪一种
+
+登记文件的 `config` 里没有 `kind` 键，是 **P6 形态**（`V2-P6-011` 的组合配置，下文从「前提」到「已知局限」各节）；写明 `kind: "survivor_book/v1"` 的，是 **幸存者形态**（`V2-P7-008`），第 1 步准入之后分派到它自己的九步，见文末「幸存者形态」。两者是同一条命令、同一处准入（`admit_registration`）、同一套钉住的 worktree 与 `.env` 链接；P6 形态走的仍是原来的八步，不加载任何幸存者模块（它们会装上 `backtest/paper.py` 的审计钩子，`tests/unit/scripts/test_daily_selection_dispatch.py` 在一个新解释器里核对）。
+
+| 本手册的节 | P6 形态 | 幸存者形态 |
+|---|---|---|
+| 前提 1–3、5（登记已提交、代码与环境绑定、钉住的 worktree、`.env`） | 适用 | 适用；登记文件用 `--registration` 指定 |
+| 前提 4（面板回填、因子历史） | 适用 | 不适用，见「幸存者形态」的「前提」 |
+| 手动运行 | 适用 | 适用，另加 `--registration` |
+| 常用选项 | 适用 | 部分选项被拒或含义不同，见「幸存者形态」的「选项」 |
+| 八步与失败时的行为 | 适用 | 不适用：幸存者形态是九步 |
+| 与其他进程共用面板时 | 适用 | 适用（同样退出 1） |
+| 输出怎么读、`fina_indicator`、为什么不是 `shortlist run`、登记的预测是什么（及其各小节） | 适用 | 不适用 |
+| 错过的交易日 | 适用 | 第 4 步的补建规则（至多 20 个交易日、超过则给出分批命令）适用；`--factor-gaps` 不适用 |
+| 幂等 | 适用 | 不适用：幸存者形态有自己的日志与重跑规则 |
+| 每天取什么 | 适用 | 同一规则再加 `namechange`，见「幸存者形态」 |
+| 定时 | 适用 | `--pin-worktree` 适用；`--launchd-plist` 见「幸存者形态」的「定时」 |
+| 已知局限 | 适用 | 另列，见「幸存者形态」的「已知局限」 |
+
+以下到「已知局限」为止，说的都是 P6 形态。
 
 每个交易日收盘后运行一次。它按**已登记的研究配置**（保留期跑过的同一个登记文件）做八件事：更新面板、体检、构建当日因子截面、出当日候选榜、出目标权重、把当日打分登记为预测、打印摘要、写当日日志。
 
@@ -407,3 +429,166 @@ launchd 不会替你创建日志目录，加载前需要先建好它。把输出
      3. 按打印的顺序逐条运行这些命令，然后再跑一次第 2 步，直到它回答 `none`。
      **检测不到的一种情况。** 重建 `daily` 或 `adj_factor` 之后两种说法变得一致，重新裁决就不再为该会话记录任何裁决；此前因“不可知”而存为 `undefined_value` 的因子值于是窗口里没有裁决，检测命令看不到它——库里不保留被替换的裁决，裁决也不是 manifest 的输入。重新裁决（`--return-paths-from-store` 或 `stk_limit` 目标）会在 stderr 上为每个这样的裁决打印一行 `RETIRED-RETURN-PATH <证券> <会话> was <kind>`，这是唯一知道它的时刻：看到这一行，就对窗口包含该会话的价格收益类因子（动量、反转、波动率、Amihud、残差波动率）重建对应年份，带上 `factor stale-return-paths` 同样格式的 `--supersedes-*`（用 `load_factor_manifests` 读出要取代的 manifest）。
      这不是 doctor 的检查项：doctor 只能依赖 `panel_ingest`（分层规则），而判断一个因子值是否变了必须调用因子引擎。
+11. **年界上的潜在缺陷（P6 形态，未修）。** 第 2 步只建当天所在的年份：上一年漏跑了最后几天、而新一年的第一次构建照常进行时，新一年第一次 `stk_limit` 构建会拿每只证券年初的第一对会话去对一个不是前一交易日的收盘价，有分歧的每一对都按 4 次请求重新拉取、不设上限（实盘规模约 2 万次请求），之后 doctor 的年初检查卡在这个缺口上。幸存者形态的第 2 步在发请求之前按名拒绝这种情形（见下）；P6 形态要保持逐字节不变，没有改，P6 的每日恢复之前要另立任务处理。
+
+## 幸存者形态（`kind: "survivor_book/v1"`，`V2-P7-008`）
+
+> **状态：未启用。** 幸存者配置还没有登记，它在 `V2-P7-006`（协议与预登记）由用户确认之后登记一次。在用户明确确认那次登记之前：不要运行晚间，也不要运行清晨复核；不要安装 launchd；不要为恢复手工补面板（要数百次 Tushare 请求，须经用户同意）。本节描述的是代码现在实际做什么，供恢复时照做。它不是研究结论：记录是一个已登记研究配置的「候选」预测，没有下过任何单，纸面账簿的权益不是证据。
+
+### 分派与登记的形状
+
+第 1 步准入与 P6 相同（登记已提交、代码与环境绑定、`config_id` 按 `config` 重算一致）。之后，`config` 写明 `kind` 的登记交给 `strategy_survivor` 读取，跑下面的九步；没有 `kind` 的仍是上文的 P6 八步。
+
+- 顶层键只能是 `kind`、`survivor_book`、`adapter` 三个。`adapter` 块（`survivor-adapter/v1`，多一个键就拒绝）：`schema_version`、`epoch_session`、`exchange`（只能 `SSE`）、`transform`、`min_coverage`（大于 0、不超过 1）、`max_carry_sessions`、`max_panel_catch_up_sessions`（0 到 16 的整数，必须写，没有缺省值）、`benchmark`（只能 `000905.SH`）、`prediction_horizon`（`20d`）、`cost_policy`（`protocol/v1`）、`paper_limits`、`unfilled_buy`（`reject_whole_and_carry/v1`）。
+- 未知的 `kind`、多出或缺少的顶层键、读不通的块：第 1 步，退出 2，0 次请求。
+- `survivor_book.seed` 与登记 `settings.random_seed` 不一致：第 1 步，退出 3——登记在，但自相矛盾，与 `config_id` 对不上同一类（settings 没有整数的 `random_seed` 时按 0 比较，拒绝信息里说登记没有给 `random_seed`）。
+- 前向周报还要读登记 settings 里的 `survivor_forward_protocol` 块（`V2-P7-006` 冻结）；每日命令不读它。
+
+### 前提
+
+1. 同 P6 前提 1–3、5，登记文件用 `--registration` 指向幸存者登记（默认仍是 `docs/research/p6-registration.json`）。
+2. 面板里 `namechange` 与 `trade_cal` 从各自第一个已存年起逐年连续；面板落后最新已收盘交易日不超过 `max_panel_catch_up_sessions` 个交易日，否则第 2 步拒绝（见「重启」）。
+3. `adapter.epoch_session` 是第一次计划运行的**前一个**交易日，必须是已存日历里的开市日；还没有纸面账簿时，纪元到当天最多相隔 `1 + max_panel_catch_up_sessions` 个交易日。
+4. 纸面账簿目录 `RT/paper/` 在本地文件系统上（写锁是建议锁，NFS、SMB 上只和服务器的锁管理一样可靠），当前账户可写，支持硬链接（标记文件按「写临时文件、同步、硬链接到名字」写入，FAT、exFAT 和很多网络盘做不到，按名拒绝）。
+
+### 手动运行
+
+在钉住的 worktree 里，同 P6 的「手动运行」，加上幸存者登记：
+
+```bash
+UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv/bin/python" scripts/daily_selection.py --runtime-dir ~/openalpha-research --registration <幸存者登记文件>
+```
+
+### 选项
+
+| 选项 | 幸存者形态 |
+|---|---|
+| `--full-update` | 拒绝：第 1 步，退出 2，什么都不做（整年全量刷新是 `openalpha panel build` 的事，不是一天的事） |
+| `--top` | 拒绝，同上（幸存者形态不打印候选榜，纸面账簿的计划整份打印） |
+| `--dataset T` | 只能是当天目标 `targets_for_survivor` 的**超集**——四个组合因子时是 `trade_cal`、`stock_basic`、`adj_factor`、`price`、`stk_limit`、`namechange`、`index_daily`：可以多加，不能少；少一个就拒绝（第 1 步，退出 2），因为记录不能从当天没有更新过的面板上登记 |
+| `--max-staleness-days N` | 第 4 步因子构建的新鲜度上限，同 P6 |
+| `--as-of ISO` | 钉住**第一次运行**的时钟；这一天之后的每次重跑都用日志里钉住的时刻，不用 `--as-of`、也不用当时的时钟 |
+| `--json` | 打印当天的结果文档；被第 8 步拒绝的一天，打印到停下为止的文档 |
+| `--morning-recheck` | 清晨复核，见下 |
+| `--factor-gaps SINCE` | 不适用：幸存者登记没有 `start`，输出 `factor gaps: the registered configuration cannot be read: 'start'`，退出 1（只读，不写任何文件）；幸存者形态的因子缺口由第 4 步自己补——只补各档位最晚构建之后的，至多 20 个交易日 |
+| `--pin-worktree`、`--launchd-plist` | 不进入任何一天，与 P6 相同；`--launchd-plist` 见「定时」 |
+
+### 九步与退出码
+
+每一步失败都在标准错误里写 `step N (名称) failed: …`（N 按下表编号），下一行是 `tushare requests   N this run {…}`，之后的步骤不执行。退出码只有 0、1、2、3。
+
+| 步 | 做什么 | 拒绝（退出码） |
+|---|---|---|
+| 1 registration | 准入；读幸存者块；拒绝 P6 专用选项；**随即拿纸面账簿的写锁** `RT/paper/writer.lock`（独占、不等待），一直持有到这一天结束；纪元检查 | 见「分派」（2 或 3）；`--full-update`、`--top`、不够的 `--dataset`：2；写锁被另一次运行持有：1，什么都没读写；纪元晚于当天、不是开市日，或（还没有账簿时）离当天超过 `1 + max_panel_catch_up_sessions` 个交易日：2，0 次请求 |
+| 2 panel update | 按 `as_of` 找当天交易日（库里没有日历时先建当年 `trade_cal`，1 次请求）；读当日日志；**在任何请求之前**把 `as_of`、`held`（锁下读到的账簿持仓）与 `held_from`（它们出自哪份快照）钉进日志；然后同 P6 的 `update_panel`，加上幸存者规则：上一年尾部、补建上限、上一年 `namechange` 的重建 | 1：纪元所在年的日历没存（打印存它的 `openalpha panel build … --dataset trade_cal`）；上一年的会话级分区没到上一年最后一个交易日（打印补齐上一年的 `panel build --incremental`，不论上限）；当年日历没存（打印 `panel build --dataset trade_cal`）；落后超过 `max_panel_catch_up_sessions`（打印补最老一批的 `panel build`）；面板已有当天之后的交易日、而这一天的晚间没有提交（一次比面板旧的 `--as-of`）；`panel build` 本身失败。除最后一种外，都在第 2 步取数之前拒绝（库里没有日历时为找当天交易日而建的那 1 次请求除外） |
+| 3 panel doctor | 同 P6（`namechange` 在内），在钉住的 `as_of` 上 | 1：不 clean；面板已被下一交易日的更新越过、这一天的晚间又没提交（下一次运行把它补结算掉，没有要做的） |
+| 4 factor build | 四个组合因子的 processed 档，在当天 16:30 及错过的交易日（至多 20 个）上构建，同 P6 第 4 步 | 1；超过 20 个时一行不写，给出分批的 `openalpha factor build` 命令 |
+| 5 paper head | 写入或核对只写一次的标记 `RT/paper/registration.json`，每次运行都 `open_book` 一次（同样的开账不写东西，等于每晚核对账簿就是登记的那本）；纪元当天只开账 | 1：标记缺失或属于另一登记、账簿不是日志钉住的那本、账簿已被更晚交易日的运行结算过、已提交的晚间丢了日志且已过集合竞价（见「重跑与补救」）——这几种在第 2 步发请求之前就查，0 次请求。纪元当天：开账、写结果，退出 0 |
+| 6 facts | 用钉住的 `held` 读当天的事实（`build_facts_day`）并 `screen` | 1：覆盖率不够、缺 16:30 的因子构建、登记簿陈旧等，按名拒绝；晚间日一只可入选的证券都没有（只结算日不拒绝） |
+| 7 prediction | 先写输入溯源 `RT/daily_survivor_provenance/<摘要>.json`（只写一次），再把当天可入选证券的组合分登记为 `survivor_book_composite/v1`、20d；这一天已登记的记录在写任何东西之前原样复用 | 1：没有已登记的记录，而这次运行的时钟已到下一交易日 09:15；已登记的记录找不到它的溯源（从与预测库一起做的备份恢复溯源目录）；同一声明下的分数不同。钉住的 `as_of` 在 09:15 或之后（只结算日）：不登记，不是错误 |
+| 8 paper book | 先把账簿缺的交易日逐个补结算（不做决定，每结算一个立即提交并记进日志的 `catch_ups`），再跑当天的晚间，或者只结算当天 | 1，并打印到停下为止的文档，日志不写 `result`（修好后重跑就会跑它的晚间）：晚间还没提交、而这次运行的时钟已过下一交易日 09:15；补结算在某个交易日卡住（之前结算的照样记进日志）；持仓状态 `no_bar_in_reach`、`not_in_registry`、`not_yet_listed`、`board_unrecognised`（各带补救；`delisted` 不拒绝，按 D13 核销）；`PaperStateError`、`PaperStateStoreError`、`ValueError`（包括输入不同的重跑与账本冲突） |
+| 9 summary | 写日志的 `paper` 与 `result`，打印摘要 | 1：日志不是幸存者日志（不是 UTF-8 JSON、是 P6 日志、schema 不对）或是另一登记写的，原样保留——这几种在第 2 步读日志时就查 |
+
+面板被占用（`PanelCatalogBusyError`、`PanelWriteConflictError`）时与 P6 一样退出 1，见「与其他进程共用面板时」。
+
+### 运行目录里的文件
+
+- `RT/daily_survivor/<config_id 前 16 位>/<交易日>.json`：当日日志（`openalpha-daily-survivor/v1`），与 P6 的 `RT/daily_selection/` 分开。写入顺序：`as_of`、`held`、`held_from`、`registration`（任何请求之前）→ `panel` → `factors` → `prediction` → `catch_ups`（每补结算一个交易日写一次）→ `paper` 与 `result`（只在这一天完成时写）。
+- `RT/daily_survivor/<config_id 前 16 位>/<交易日>.morning.json`：清晨复核的文件，放在晚间日志旁边。读这个目录的程序只能读 `YYYY-MM-DD.json` 这样的名字（前向周报就是这样读的），**不要按 `*.json` 通配**。
+- `RT/daily_survivor_provenance/<摘要>.json`：每条记录的输入溯源（`daily-survivor-input-provenance/v1`），按内容寻址、只写一次，在记录之前写；晚到记录核查按（交易日，批次摘要）找它。
+- `RT/paper/`：纸面账簿。`registration.json` 是只写一次的标记（`config_id`、账簿配置摘要、纪元），把这个运行目录的账簿绑定到登记；`writer.lock` 是单写者锁，持有者退出（包括崩溃）时内核即释放；`snapshots/<交易日>.<snapshot_id>.json` 每个已结算交易日一份，只写一次；`ledger.sqlite3` 是纸面账簿自己的账本。
+- `RT/predictions/`：预测库，与 P6 共用；`RT/reports/`：前向周报与它的核查缓存。
+- 备份时 `RT/paper/`、`RT/daily_survivor/`、`RT/daily_survivor_provenance/` 与 `RT/predictions/` **一起**做：下面的补救都假定它们出自同一份备份。
+
+### 一天是哪一种：晚间、只结算、补结算
+
+一天走哪条路，由**日志里钉住的 `as_of`** 决定，从不看这次运行的时钟：钉住的时刻早于下一交易日 09:15（集合竞价开始，`registration_cutoff`）就是晚间，等于或晚于它就是只结算。第一次运行钉住的是 `--as-of` 或当时的时钟；同一交易日之后的每次重跑都用它，所以重跑永远是同一种日子。
+
+- **晚间**：第 7 步登记记录；第 8 步先补结算，再结算当天、做决定、为下一交易日的开盘计划订单。
+- **只结算**：第 6 步照样读事实（覆盖率下限为 0，没有可入选证券也不拒绝，持仓状态照样要用），第 7 步不登记，第 8 步补结算并只结算当天、不做决定。摘要的 ORDERS 一栏写 `NONE PLANNED tonight -- no evening was run`，并说当天已在今晚结算、没有决定。
+- **补结算**（两种日子都会有）：账簿缺的每个交易日（某一晚没跑、被拒、或只结算）在当天之前按顺序结算，不做决定、不登记；每个交易日单独提交，提交后马上记进日志。中途停下，已结算的保留；一个已提交却没来得及记进日志的交易日，下一次运行先重新推导它（不写任何东西）再记入，摘要的 catch-up 一行写 `re-derived after an interrupted journal`。
+- **纪元当天**：只开账（第一份快照和标记），不读事实、不登记，退出 0；第一晚是下一个交易日。
+- **已提交、日志没写完**（上次运行在快照与日志之间停下）：这次运行不跑第 3、4 步，用日志钉住的输入重新推导这一晚，纸面账簿一字不写，然后把日志补完；ORDERS 标题写 `evening unchanged (settled earlier; derived again, nothing written)`。
+
+### 在下一交易日 09:15 之前跑完
+
+- 每个交易日收盘后（约 18:30）运行一次，在下一交易日 09:15 之前跑完。
+- 晚间日到 09:15 还没提交：还没登记记录的，第 7 步拒绝；已登记的，第 8 步拒绝，信息里写 `the call auction of the next session has passed, and nothing was decided or written`。退出 1，什么都不决定、不写。**不要重跑**：下一交易日的那次运行会把这一天补结算掉，不做决定；已登记的记录照样有效。
+- 第一次运行就在 09:15 或之后（例如第二天上午补跑）：这一天是只结算日，不登记、不决定，摘要写 `NONE PLANNED tonight`，并说这个交易日今晚已结算、没有决定。
+- 已提交的晚间在 09:15 或之后补完或重印时，ORDERS 标题下多一行 `the call auction of <日期> has passed (it began …): these orders were for it, and this run was made after it -- the paper book fills them at that open whether or not they were placed`。纸面账簿在那个开盘按计划成交，不管你下没下单；你没下的话，账户与纸面账簿从那天起分叉——记下来。
+
+### 订单怎么读
+
+摘要依次是 session、book、facts、screen、settled、positions、ORDERS、carried orders、unfunded、unaffordable、deferred exits、near exit、frozen、watch list、illiquid exits、catch-up、prediction、（补建了的话）panel catch-up 与 factor catch-up、tushare requests、units、wording。空的一栏打印 `none`，不会因为没有一行而被读成「没事可做」。
+
+- 标题：`ORDERS FOR THE OPEN OF D+1 (call auction 09:15), <开盘日> -- trade list <id>, evening created`（重新推导时是 `evening unchanged …`），下面一行 `real closes are references, not limit prices; the paper book fills at the open`。
+- 买：`BUY <代码> <数量> reference: real close <收盘价> <原因>, live through <日期>`。收盘价只是参考，不是限价；纸面账簿按开盘价成交。买单按真实收盘价定量，数量就是真实股数。
+- 卖：`SELL ENTIRE POSITION <代码> (ledger qty <账本数量>; real close <收盘价>) <原因>`，停牌的加 `(suspended: the close may be an earlier session's)`。**一律卖出全部持仓**；账本数量是账本单位，不是要卖的股数。
+- 顺延的单（carried orders）：买单写计划日、计划价与 `attempt a of n (one per session; a session with no bar counts)`；卖单写 `a sale never expires`。
+- positions 一栏的 `ledger/real ratio` 是买入以来的复权比，**包括现金分红**，不是股数乘数。现金分红之后账户里是买入的股数加上现金：1000 股、25.00 的收盘派 0.50，比值 1.0204，仍是 1000 股，不是 1020.4 股。只有送股、拆分之后，账户的股数才与账本数量不同。所以卖出永远用 SELL ENTIRE POSITION。
+- watch list、unfunded、unaffordable 后面的 `today's draw, not a promise for tomorrow`：今天的抽签，不是明天的承诺。
+
+### 清晨复核（`--morning-recheck`）
+
+在晚间之后、下一交易日 09:15 之前运行**一次**（例如 08:30），同样在钉住的 worktree 里：
+
+```bash
+UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv/bin/python" scripts/daily_selection.py --runtime-dir ~/openalpha-research --registration <幸存者登记文件> --morning-recheck
+```
+
+加 `--json` 打印清晨文件本身。它总是发**一次** Tushare 请求：当晚交易日所在年份的 `namechange`（新年也只问这一年，因为事实适配器不读之后的年份）。取数之前，它用当晚自己钉住的时钟和持仓把当晚的事实再读一遍并与当晚的文档核对；取数之后，在清晨的时钟上再读一遍，把与当晚计划不同的地方打印为**建议**。纸面账簿从不改变（决定：账簿按晚间的计划走，分歧只记录、只打印）。它只写 `RT/daily_survivor/<cfg>/<交易日>.morning.json`、`namechange` 分区和面板目录；措辞是「已登记研究配置的候选；没有下单；纸面账簿没有改动」。
+
+- **看得见的**：公告日期不晚于当晚交易日的更名，主要是公告日期就是当天、却在晚间读取之后才发布的 ST 或退市风险更名。建议一栏是 `no change to tonight's plan among announcements dated through <交易日>` 或 `<n> difference(s) from tonight's plan among announcements dated through <交易日>`，之后逐条：`do not place BUY <代码>: <原因>`；`holding <代码> turned <原因>: the paper book sells it at the next evening`（只是停牌时写 `freezes it`，不卖）；`holding <代码> left the survivors (still eligible): the paper book sells it at the next evening, unless that evening's replacement cap defers it`；`watch list changed: …`；`counts changed: …`。在登记簿上市行之前就有日线的代码列在 `tolerated` 下，不算建议。
+- **看不见的**：公告日期晚于当晚交易日的更名（开盘前、周末或假期里发布的）。这次取数带来的、计划里的名字的这类更名列在 `notices: announced after <交易日>, not screened -- a notice, not advice` 下，格式 `<代码> <名称> <公告日> <变化>`：通知不要求做任何事，下一晚会筛它。新年时清晨只问当晚交易日那一年，所以公告日期在新一年的更名既不筛、也不通知。**「no change」从不证明没有 ST 公告。**
+- 文件里的 `held` 是当晚钉住的持仓（当晚成交与结算之前的账簿；第一晚是 `[]`，虽然那晚的买单成交后就有持仓）；建议所说的持仓是结算之后的账簿，文件键 `holdings_compared`，打印为 `holdings compared`。
+- **重跑**：已完成的清晨文件只在 09:15 之前重印，0 请求、0 写入（先查截止时刻）；钉住之后中断的，用钉住的 `as_of` 和文件里存的晚间读取继续。
+- **退出 1**（每条都写明是第几步，并打印已花的请求；步骤是 registration、preconditions、panel update、facts、summary）：时钟或（钉住的）`--as-of` 已到 09:15；`--as-of` 不晚于当晚自己钉住的时钟；当晚没有完整的日志；那天是纪元日或只结算日（没有计划）；清晨文件是另一晚或另一登记的，或是手改过的已完成文件（原样保留）；纸面账簿的写锁被占用；漂移——库里已经给不出当晚的事实，或某个计划买入、顺延买入、观察名单上的名字在重读里不再是幸存者（这种情况什么都不取）。
+- **退出 2，0 次请求**：P6 登记（P6 没有清晨计划）；`--full-update`、`--top`、`--dataset`。与 `--factor-gaps`、`--pin-worktree`、`--launchd-plist` 同用是 argparse 的退出 2。
+- 给 `V2-P7-006`：清晨取数之后，当年的 `namechange` 分区被重述，一条当天发布晚了的 ST 行在当晚自己的时钟上也看得见了，晚到记录核查于是把那一晚如实登记的记录判为 `unverifiable / recompute_differs / namechange:<年> (its rows through <交易日> were restated)`。不跑清晨复核，下一晚自己的面板更新给出同样的结论。所以每一条当天发布晚了的 ST 公告都会让那一天的记录变成 UNVERIFIABLE，协议要报告它们的占比。
+
+### 重跑与补救
+
+- 日志已有 `result`：再打印一次，0 请求、0 写入（已过集合竞价的计划在 ORDERS 下加那一行）。
+- 日志没写完：按钉住的 `as_of` 与 `held` 从停下的地方继续——`panel` 已记录就跳过第 2 步，第 4 步跳过已建的时点，记录复用；每次运行在发请求之前都核对账簿仍是钉住的那本。
+- 被拒的一天不写 `result`：修好之后重跑，就会跑它的晚间（如果还在 09:15 之前）。
+- **永远不要删除已提交那一天的日志。** 丢了的话，从与纸面账簿目录一起做的备份恢复。没有备份：在下一交易日 09:15 之前照常再跑这一天，它重新推导已提交的晚间，纸面账簿一字不写；09:15 或之后再跑，会在第 5 步（paper head）被拒，信息里点名丢失的日志并给出 `--as-of <交易日>T18:30:00+08:00`：用这个 `--as-of` 重跑，这一天又是晚间，它找到已提交的交易日、重新推导、不写账簿，并打印集合竞价已过。这个补救要在下一交易日的晚间运行之前做。
+- 第 9 步拒绝的日志（读不出、P6 日志、schema 不对）：照信息做——`move it aside (keep it, it may be this day's own journal, damaged) and run the day again`：挪开但保留，重跑会重新钉一份。
+- 账簿与日志钉住的不符（纸面账簿目录被换过、移动过或恢复过）：第 5 步拒绝并给出补救——从同一份备份同时恢复快照与账本，或者把这一天的日志挪开后重跑，让这一天钉住现在的账簿。
+
+### 重启：长时间停跑之后的第一次运行
+
+每日登记自 2026-10-08 暂停，面板停在那时。**这条命令从不自己补一大段缺口**，重启要先手工补面板：
+
+1. 第 2 步在发任何请求之前，数当年已存日历上面板落后当天多少个交易日：多于登记的 `max_panel_catch_up_sessions`（0 到 16），就拒绝，退出 1，一个请求都不发，打印补最老一批（至多上限那么多个交易日）的命令，形如 `openalpha panel build --runtime-dir RT --year <年> --as-of <这一批最后一个交易日>T08:30:00+00:00 --exchange SSE --incremental --dataset adj_factor --dataset price --dataset stk_limit`（`--as-of` 是那天上海 16:30 的发布时刻）（会话级分区彼此不齐、其中一个已越过这一批时，打印的是不带 `--incremental` 的整年重建，并写明要取多少个交易日）。照样运行，再跑本命令：还多于上限就再拒绝一次、给出下一批；不多于上限，它自己补完。每个交易日约 5 次请求（`stk_limit` 分页时 7 次）。
+2. 跨年时，上一年的会话级分区没到上一年最后一个交易日，第 2 步不论上限先拒绝，打印补齐上一年的 `panel build --incremental`（必须在新一年的第一次构建之前跑）；它不建 `trade_cal`，所以补完之后若当年日历还没存，会再拒绝一次，打印 `openalpha panel build … --dataset trade_cal`。
+3. 因子档位错过的交易日超过 20 个时，第 4 步拒绝并给出分批的 `openalpha factor build` 命令（同 P6 的「错过的交易日」）。
+4. 还没有纸面账簿时，纪元离第一次运行最多 `1 + max_panel_catch_up_sessions` 个交易日（否则第 1 步退出 2）：纪元登记为第一次计划运行的前一个交易日。
+
+所以顺序是：用户确认 `V2-P7-006` 的登记；经用户同意，按上面的命令形状手工把面板补到最新已收盘交易日（数百次请求）；必要时补建因子档位；然后在纪元的下一个交易日收盘后、再下一个交易日 09:15 之前跑第一次。注意：第 2 步拒绝的那次运行已经把这一天的 `as_of` 钉进了日志（钉在任何请求之前），同一交易日的重跑沿用它。
+
+### 前向周报与 `--factor-gaps`
+
+- `scripts/forward_report.py` 对幸存者登记有自己的分支：准入之后分派到幸存者周报，写 `RT/reports/forward-survivor-<日期>.json`，与 P6 的 `forward-<日期>.json` 不冲突。见 `forward-report.zh-CN.md` 的「幸存者登记的周报」。（Part D 设计里「前向报告与 `--factor-gaps` 都拒绝幸存者登记」的说法已过时：前向报告现在有分支。）
+- `--factor-gaps` 拒绝幸存者登记，退出 1（见「选项」）；它的信息里不说「survivor」，只说读不出 `start`。
+
+### 每天取什么
+
+`targets_for_survivor`：P6 的规则（四个组合因子只读价量，不读财报、不读行业），再加 `namechange`——平常一天 16 次请求（P6 的 15 次加 1）。另外按数据而定、各自写在 `panel build` 的 `BUDGET` 或 `REFETCH` 行里：一年的第一次运行重建上一年的 `namechange`（+1，只要它已存的构建早于那一年年末）；结果窗口（20 个交易日）伸进下一年时建下一年的 `trade_cal`（+1）；补的每个交易日约 5 次（分页时 7 次）；撤回复核（至多 20 对）；收益路径复现（每对有分歧的会话 4 次，不设上限）。所以最坏的一天会超过 100 次：上限只管随漏跑天数增长的那一部分。
+
+### 定时
+
+- `--pin-worktree` 不变：`--registration` 指向已提交的幸存者登记。
+- `--launchd-plist` 生成的任务**固定**传 `--registration <worktree>/docs/research/p6-registration.json`，没有改它的选项：幸存者登记若不在这个路径，按它装上的定时任务跑的是 P6 登记。登记文件放在哪里由 `V2-P7-006` 决定；那之前不要安装（本来也暂停）。
+- 清晨复核没有定时任务，要手动在 09:15 之前跑。
+
+### 已知局限（幸存者形态）
+
+1. **新年第一个交易日之前没有更名公告时，那一天永远补不成。** 当年第一条更名公告之前，Tushare 对当年的 `namechange` 一行也不给，面板拒写空分区，第 2 步在这个目标上失败；日志钉住了这一天的 `as_of`，`namechange` 按 `min(年末, as_of)` 取，所以每次重跑问的都是同一个空窗口，还每次花几次请求。这一天丢了，不是推迟了。不是理论情形：2012 年第一条公告是 1 月 5 日，晚于第一个交易日 1 月 4 日。P6 的 `--full-update` 在一月初同样会失败。允许空的 `namechange` 公告年是一个独立的面板层任务，是**第一个实盘新年之前的硬闸门**。
+2. **一月要有新一年的日历。** 当天会话年份的日历没存，第 2 步拒绝并给出 `panel build --dataset trade_cal`；平常是十二月的运行在结果窗口伸进下一年时就把下一年的日历建好，只有在那之前就停跑的库才会碰到。前向周报在新一年里同样要求这一年的日历（见周报手册）。
+3. **会话序号日历只读纪元年到当天所在年**：年底的晚间，落在下一年（一月）的日期——开盘日、`live through`——按会话序号打印（`session N`）；集合竞价那一行取的是结果日历，总是实际日期。
+4. 补结算的重新推导只覆盖这一天自己的重跑：第 D 天的补结算提交了某个交易日、写日志失败、而 D 再也没有重跑，下一天从新的账簿头钉住，那个交易日不在任何文档里。
+5. 手动用 `--as-of` 跑更早的交易日、在 D 钉住之后以**空计划**结算了一晚的，可能被当成补结算重新推导（C3 按名拒绝，或周报看到「settled twice」）。
+6. 「Nothing was fetched or written」对 `state.sqlite3` 不是逐字节为真：在任何请求之前就被拒的运行，`build_storage` 也可能执行一次延后的迁移，并留下备份 `backups/state.sqlite3.v<版本>.<时间>.bak`。
+7. P6 的面板构建补救「在旧的 `--as-of` 上整年重建」本身有风险，是 P6 既有的问题，不在这里处理。
+8. 清晨复核的通知只读当晚交易日那一年（1 月 2 日这类情形对建议和通知都不可见）；清晨文件新增了 `notices` 与 `holdings_compared` 两个键，之前写成的已完成文件会被当作「不是已完成的形状」拒绝；通知读取失败时是第 4 步的意外错误，没有具名的拒绝。
+9. 每一条当天发布晚了的 ST 公告都会让那天的记录成为 UNVERIFIABLE（见「清晨复核」），协议要报告这个占比。
