@@ -4875,6 +4875,7 @@ def _refusal_aftermath(
                 paper_directory=storage.paper_state_store.path.parent,
                 registration=survivor,
                 config_id=registration.config_id,
+                registration_sha256=registration.sha256,
                 lock=lock,
             )
             decided = head is not None and paper_book.decided_by_an_evening(head)
