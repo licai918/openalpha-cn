@@ -4052,21 +4052,14 @@ def _refuse_a_lost_journal(
     )
 
 
-RUNBOOK_RUN_PREFIX: Final[str] = (
-    'UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv/bin/python"'
-)
-"""How the runbook writes a manual run of this script, from the root of the checkout the
-registration names (`docs/runbooks/daily-selection.zh-CN.md`): the checkout's own environment,
-`uv run` only to read `--env-file`."""
-
-
 def _survivor_rerun_command(options: DailyOptions, *, as_of: datetime) -> str:
     """The command that runs the survivor day again at `as_of` (in Shanghai time), with this
-    run's runtime directory, registration and repository, as the runbook writes a manual run."""
+    run's runtime directory, registration and repository, written by `pinned_command` as the
+    runbook writes a manual run (one builder, so the two forms cannot drift)."""
     arguments = ["scripts/daily_selection.py", "--runtime-dir", str(options.runtime_dir)]
     arguments += ["--registration", str(options.registration), "--repo", str(options.repo)]
     arguments += ["--as-of", as_of.astimezone(SHANGHAI).isoformat()]
-    return f"{RUNBOOK_RUN_PREFIX} {shlex.join(arguments)}"
+    return pinned_command(arguments)
 
 
 def _refuse_an_undocumented_evening(
