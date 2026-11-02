@@ -22,7 +22,9 @@ import contextlib
 import dataclasses
 import io
 import json
+import os
 import shutil
+import threading
 from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -32,6 +34,7 @@ import pytest
 import test_daily_selection as tds
 import test_daily_selection_survivor_day as survivor_day
 import test_forward_report_survivor as survivor_report
+from research_repo import commit_file, git
 from test_daily_selection_survivor_day import seeded  # noqa: F401  (a module fixture, reused)
 
 from openalpha_cn import strategy_survivor_book
@@ -174,6 +177,65 @@ def test_the_marker_lives_in_the_settings_so_the_configuration_identity_is_uncha
     bodies = [json.loads(path.read_text(encoding="utf-8")) for path in (plain, smoke)]
     assert bodies[0]["config_id"] == bodies[1]["config_id"]
     assert plain.read_bytes() != smoke.read_bytes()
+
+
+# --- what reading the marker never does ----------------------------------------------------------
+
+NESTED: Final[bytes] = b"[" * 100_000
+"""A registration body nested past the interpreter's recursion limit: `json.loads` raises
+`RecursionError` on it, which is not a `ValueError`."""
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="a FIFO is a POSIX file type")
+def test_a_registration_that_is_not_a_regular_file_is_never_opened(tmp_path: Path) -> None:
+    """A FIFO with no writer blocks a read for ever, and `/dev/zero` never ends one. The marker is
+    read from a regular file only -- admission's own first test -- so such a `--registration` is
+    refused by admission at once (exit 2), as it was before the banner."""
+    fifo = tmp_path / "registration.json"
+    os.mkfifo(fifo)
+    found: list[str | None] = []
+    reader = threading.Thread(target=lambda: found.append(daily.smoke_banner(fifo)), daemon=True)
+
+    reader.start()
+    reader.join(timeout=5)
+    blocked = reader.is_alive()
+    if blocked:  # a writer that opens and closes gives the blocked reader its end of file
+        with contextlib.suppress(OSError):
+            os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+        reader.join(timeout=5)
+
+    assert not blocked, "smoke_banner blocked on a FIFO with no writer"
+    assert found == [None]
+
+
+def test_a_registration_nested_past_the_recursion_limit_carries_no_banner(tmp_path: Path) -> None:
+    nested = tmp_path / "registration.json"
+    nested.write_bytes(NESTED)
+
+    assert daily.smoke_banner(nested) is None
+
+
+def test_a_committed_registration_nested_past_the_recursion_limit_is_step_1_s_refusal(
+    tmp_path: Path,
+) -> None:
+    """Through `main`, as before the banner: admission's own parse fails, and step 1 reports the
+    fault as its refusal (exit 1) -- never a traceback from the marker's read, and no banner."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q", "--template=")
+    registration = repo / "registration.json"
+    registration.write_bytes(NESTED)
+    commit_file(repo, registration, "register", at=tds.COMMITTED)
+    arguments = ["--runtime-dir", str(tmp_path / "runtime"), "--registration", str(registration)]
+
+    code, out, err = _invoke(
+        daily.main, [*arguments, "--repo", str(repo)], clock=lambda: survivor_day.RUN_CLOCK
+    )
+
+    assert code == int(daily.DailyExit.step_failed)
+    assert out == ""
+    assert err[0].startswith("step 1 (registration) failed: an unexpected fault: RecursionError")
+    assert daily.SMOKE_BANNER not in err
 
 
 # --- the evening ---------------------------------------------------------------------------------

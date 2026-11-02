@@ -6220,12 +6220,17 @@ def smoke_banner(registration: Path) -> str | None:
     its `settings` hold `SMOKE_SETTINGS_KEY`, whatever the value -- else `None` (`V2-P7-019`).
 
     Read at the print boundary, before the day admits the file, and only to decide what is
-    printed: a file that cannot be read or is not JSON gives `None`, and the day's own admission
-    refuses it, printing no order. A malformed marker still marks the file: the banner fails on,
-    never off."""
+    printed: a path that is not a regular file is never opened (admission's own first test; a
+    FIFO would block the read and a device never end it), and a path that cannot be examined,
+    read or parsed -- whatever the fault, a `RecursionError` too -- gives `None`. Admission
+    refuses every such path in its own way, with the same `is_file` and the same `json.loads`,
+    and prints no order. A malformed marker still marks the file: the banner fails on, never
+    off."""
     try:
+        if not registration.is_file():
+            return None
         body = json.loads(registration.read_bytes())
-    except (OSError, ValueError):
+    except Exception:
         return None
     settings = body.get("settings") if isinstance(body, dict) else None
     if isinstance(settings, dict) and SMOKE_SETTINGS_KEY in settings:
