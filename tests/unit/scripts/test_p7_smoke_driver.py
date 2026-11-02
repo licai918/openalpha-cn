@@ -1283,6 +1283,36 @@ def test_an_end_on_a_fault_or_the_cap_is_held_to_its_discarded_line(tmp_path: Pa
     assert driver.ledger_problem(ledger("evening", clean, discarded=False), logs=logs) is None
 
 
+@pytest.mark.parametrize("own", [4, 5, 6])
+def test_a_build_that_fails_with_one_of_the_driver_s_own_codes_exits_7(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,  # noqa: F811
+    own: int,
+) -> None:
+    """I3: `panel build` exits 4 on a provider failure, 5 on an internal error and 6 on a busy
+    catalog -- the driver's `CAP_EXIT`, `REFUSED_EXIT` and the code after them. A remedy that
+    fails so exits `COMMAND_FAILED_EXIT`, and the closing line names the command's own code."""
+    smoke = _smoke(tmp_path, monkeypatch, seeded, epoch=survivor_day.EPOCH)
+    sink = _sink(monkeypatch)
+
+    def body() -> Any:
+        _send(2)
+        return _failed(own)
+
+    _invoking(monkeypatch, body)
+    line = _line(smoke, *_BATCH)
+
+    code, _out, err = _drive(smoke, capsys, "remedy", line, at=survivor_day.RUN_CLOCK)
+
+    assert code == driver.COMMAND_FAILED_EXIT == 7
+    assert any(f"exited 7 (the command's own {own})" in line for line in err)
+    assert not any("REQUEST CAP REACHED" in line for line in err)
+    assert len(sink.payloads) == 2
+    assert _spent(smoke).discarded is None
+
+
 @pytest.mark.parametrize(
     ("build", "named"),
     [

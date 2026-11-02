@@ -56,10 +56,13 @@ together with its logs, an edited count, and a hand-inserted `phase` line.
 **Ends.** The exit is the wrapped command's own; `CAP_EXIT` (4) when the cap stopped a request --
 read from the ledger's `end` event when the call then ended on another exception, which
 `run_capped` records and raises; `REFUSED_EXIT` (5) for a refusal of the driver, the ledger or the
-manifest; 3 for a checkout that is not the pinned worktree's (`ForeignPackageError`); 130 for an
-interruption. SIGTERM and SIGHUP are turned into `KeyboardInterrupt` while the driver runs, so a
-closed terminal ends an evening as Ctrl-C does (the ledger records its end, and an invocation that
-writes the panel discards the root), and are put back after.
+manifest; `COMMAND_FAILED_EXIT` (7) for a `panel build` or `factor build` that failed with a code
+of its own the driver's would hide -- 4 (`PanelExit.provider_failure`), 5 (`internal_error`) or 6
+(`catalog_busy`): the closing line names the command's own; 3 for a checkout that is not the
+pinned worktree's (`ForeignPackageError`); 130 for an interruption. SIGTERM and SIGHUP are turned
+into `KeyboardInterrupt` while the driver runs, so a closed terminal ends an evening as Ctrl-C
+does (the ledger records its end, and an invocation that writes the panel discards the root), and
+are put back after.
 
 **The cap's module.** The cap is put on `cli._panel_transport` by `p7_smoke_requests`'s own
 `daily_selection`; it binds the day only if that is this driver's `daily_selection`, imported from
@@ -110,6 +113,18 @@ REPOSITORY: Final[Path] = _SCRIPTS.parent
 `p7_smoke_env.py` -- this checkout's, beside this file -- which is no bound path, so the code that
 writes it must be the code the clone holds."""
 REFUSED_EXIT: Final[int] = 5
+COMMAND_FAILED_EXIT: Final[int] = 7
+"""A `panel build` or `factor build` that failed with a code of its own the driver's would hide
+(`SHADOWED_EXITS`); its own code is printed in the closing line."""
+SHADOWED_EXITS: Final[frozenset[int]] = frozenset(
+    {
+        int(cli.PanelExit.provider_failure),
+        int(cli.PanelExit.internal_error),
+        int(cli.PanelExit.catalog_busy),
+    }
+)
+"""4, 5 and 6: `panel build`'s own exits that read as `CAP_EXIT`, `REFUSED_EXIT` and the code
+next to them."""
 INTERRUPTED_EXIT: Final[int] = 130
 ORDINARY_EVENING_REQUESTS: Final[int] = 22
 """An ordinary evening's 16 requests, 20 once `stk_limit` pages (T6-T7 section 0), and 2 for a
@@ -672,13 +687,16 @@ def run(
                 print(line, file=sys.stderr)
             return budget.CAP_EXIT
         after = ledger.spent()
+        code = done.exit_code
+        if kind in OPENALPHA_KINDS and done.reached is None and code in SHADOWED_EXITS:
+            code = COMMAND_FAILED_EXIT
         own = (
             ""
-            if done.wrapped_exit_code == done.exit_code
+            if done.wrapped_exit_code == code
             else f" (the command's own {done.wrapped_exit_code})"
         )
         print(
-            f"smoke {kind}: invocation {done.invocation} exited {done.exit_code}{own}; "
+            f"smoke {kind}: invocation {done.invocation} exited {code}{own}; "
             f"{sum(done.sent.values())} request(s) sent "
             f"{json.dumps(dict(done.sent), sort_keys=True)}; phase {after.phase}: "
             f"{_remain(cap, after)}",
@@ -689,7 +707,7 @@ def run(
             start, end = capped
             for line in _cap_lines(current, kind=kind, start=start, end=end, spent=after):
                 print(line, file=sys.stderr)
-        return done.exit_code
+        return code
 
 
 # --- status and phase ----------------------------------------------------------------------------

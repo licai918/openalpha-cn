@@ -60,7 +60,10 @@ import daily_selection  # noqa: E402
 
 LEDGER_SCHEMA: Final[str] = "openalpha-p7-smoke-ledger/v1"
 CAP_EXIT: Final[int] = 4
-"""What an invocation the cap stopped exits with: none of the daily command's exits (0 to 3)."""
+"""What an invocation the cap stopped exits with: none of the daily command's exits (0 to 3) nor
+the weekly report's. `panel build` and `factor build` exit 4 of their own on a provider failure
+(`PanelExit.provider_failure`); the driver reports a remedy that does so -- or exits 5 or 6 of its
+own -- as `p7_smoke.COMMAND_FAILED_EXIT` (7), so a 4 from the driver is the cap's alone."""
 
 
 class RequestCapReached(RuntimeError):
