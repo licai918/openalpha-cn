@@ -37,6 +37,11 @@ def _script(name: str) -> Any:
 caps = _script("p7_smoke_requests")
 daily = tss.daily
 T0: Final[datetime] = datetime(2026, 11, 2, 10, 30, tzinfo=UTC)
+LS: Final[str] = chr(0x2028)
+PS: Final[str] = chr(0x2029)
+NEL: Final[str] = chr(0x85)
+"""The three characters `json.dumps(ensure_ascii=False)` leaves as they are and `str.splitlines()`
+splits a line at: line separator, paragraph separator, next line."""
 
 
 class Recording:
@@ -243,8 +248,57 @@ def test_an_interrupted_invocation_that_writes_the_panel_discards_the_root(
         _run(ledger, interrupted)
 
     events = _events(tmp_path / "requests.jsonl")
-    assert [event["event"] for event in events] == ["start", "end", "discarded"]
-    assert (events[1]["fault"], events[1]["count"]) == ("KeyboardInterrupt", 1)
+    assert [event["event"] for event in events] == ["start", "discarded", "end"]
+    assert (events[2]["fault"], events[2]["count"]) == ("KeyboardInterrupt", 1)
+
+
+class _InterruptedAtItsEnd(caps.RequestLedger):
+    """A ledger whose `end` append is interrupted, as a second Ctrl-C or a SIGTERM turned into a
+    `KeyboardInterrupt` would interrupt it: every other event is written as usual."""
+
+    def append(self, event: Any) -> None:
+        if event["event"] == "end":
+            raise KeyboardInterrupt
+        super().append(event)
+
+
+def _stopped_by_the_cap() -> int:
+    for _ in range(11):
+        try:
+            cli._panel_transport().post({"api_name": "daily", "params": {}})
+        except caps.RequestCapReached:
+            continue
+    return 0
+
+
+def _interrupted() -> int:
+    cli._panel_transport().post({"api_name": "daily", "params": {}})
+    raise KeyboardInterrupt
+
+
+@pytest.mark.parametrize("call", [_stopped_by_the_cap, _interrupted])
+def test_an_interruption_between_the_discarded_and_the_end_write_still_leaves_the_root_refused(
+    tmp_path: Path, transport: Recording, call: Callable[[], int]
+) -> None:
+    """Whichever of the two appends the interruption lands between, the next evening must not run
+    on a half-written panel: with `discarded` written first the root is refused as discarded, and
+    were it written second the root would have a `start` and an `end` and nothing to refuse it."""
+    ledger = _InterruptedAtItsEnd(tmp_path / "requests.jsonl")
+    spent_before = len(transport.posted)
+
+    with pytest.raises(KeyboardInterrupt):
+        _run(ledger, call)
+
+    events = _events(tmp_path / "requests.jsonl")
+    assert [event["event"] for event in events] == ["start", "discarded"]
+    spent = ledger.spent()
+    assert spent.discarded is not None
+    assert spent.unclosed == (1,)
+    posted = len(transport.posted)
+    assert posted > spent_before
+    with pytest.raises(caps.SmokeBudgetError, match="discarded"):
+        _run(caps.RequestLedger(tmp_path / "requests.jsonl"), _spend("daily"))
+    assert len(transport.posted) == posted
 
 
 def test_an_invocation_that_never_recorded_its_end_refuses_every_later_one(
@@ -347,3 +401,131 @@ def test_a_non_zero_return_passes_through_and_the_cap_still_wins_over_a_zero_exi
     run = _run(ledger, swallowed)
     assert (run.exit_code, run.wrapped_exit_code, run.reached) == (caps.CAP_EXIT, 0, "daily")
     assert ledger.spent().discarded is not None
+
+
+# --- what the ledger refuses to be told, and what it refuses to read ------------------------------
+
+
+@pytest.mark.parametrize(
+    ("rule", "name"),
+    [
+        ({"ceiling": -1}, "ceiling"),
+        ({"ceiling": 1.5}, "ceiling"),
+        ({"ceiling": 10.5}, "ceiling"),  # above what remains: the counter would never see it
+        ({"ceiling": True}, "ceiling"),
+        ({"cap": 10.5}, "cap"),
+        ({"cap": True}, "cap"),
+        ({"headroom": 1.5}, "headroom"),
+        ({"headroom": -1}, "headroom"),
+    ],
+)
+def test_a_budget_that_is_not_whole_requests_is_refused_before_a_start_is_written(
+    tmp_path: Path, transport: Recording, rule: dict[str, Any], name: str
+) -> None:
+    """A `start` on disk with no `end` refuses the root for good, with a message that says the
+    process was killed. A bad argument must not be able to write one."""
+    ledger = caps.RequestLedger(tmp_path / "requests.jsonl")
+
+    with pytest.raises(caps.SmokeBudgetError, match=name):
+        _run(ledger, _spend("daily"), **rule)
+
+    assert not (tmp_path / "requests.jsonl").exists()
+    assert transport.posted == []
+    assert _run(ledger, _spend("daily")).invocation == 1
+
+
+def test_a_string_with_a_unicode_line_separator_in_an_event_reads_back_whole(
+    tmp_path: Path, transport: Recording
+) -> None:
+    """`json.dumps(ensure_ascii=False)` leaves U+2028, U+2029 and U+0085 as they are, and
+    `str.splitlines()` would split a line at each of them."""
+    ledger = caps.RequestLedger(tmp_path / "requests.jsonl")
+    reason = f"the user{LS}said{PS}go{NEL}now"
+    arguments = ["--note", f"a{LS}b", f"c{NEL}d", f"e{PS}f"]
+    ledger.append({"event": "phase", "phase": 2, "reason": reason, "at": T0.isoformat()})
+
+    _run(ledger, _spend("daily"), arguments=arguments)
+
+    events = ledger.events()
+    assert [event["event"] for event in events] == ["phase", "start", "end"]
+    assert events[0]["reason"] == reason
+    assert events[1]["arguments"] == arguments
+    assert ledger.spent().phase == 2
+
+
+def test_a_valid_line_and_then_a_cut_off_one_is_refused_at_the_second(tmp_path: Path) -> None:
+    ledger = caps.RequestLedger(tmp_path / "requests.jsonl")
+    ledger.append({"event": "phase", "phase": 2, "reason": "go", "at": T0.isoformat()})
+    with ledger.path.open("a", encoding="utf-8") as handle:
+        handle.write('{"event": "start", "id": 1, "kind": "eve')
+
+    with pytest.raises(caps.SmokeBudgetError, match=r"requests\.jsonl, line 2, is not JSON"):
+        ledger.events()
+
+
+def test_a_cut_off_discarded_line_does_not_revive_the_root(
+    tmp_path: Path, transport: Recording
+) -> None:
+    """The write that marks the root discarded may be the one that is cut off: a ledger that
+    skipped a line it could not parse would read that root as clean and run on its panel."""
+    ledger = caps.RequestLedger(tmp_path / "requests.jsonl")
+    _run(ledger, _spend("daily"))
+    with ledger.path.open("a", encoding="utf-8") as handle:
+        handle.write('{"event": "discarded", "reason": "invocation 1 (eve')
+    posted = len(transport.posted)
+
+    with pytest.raises(caps.SmokeBudgetError, match=r"line 3"):
+        ledger.spent()
+    with pytest.raises(caps.SmokeBudgetError, match=r"line 3"):
+        _run(ledger, _spend("daily"))
+    assert len(transport.posted) == posted
+
+
+def _start(identifier: int) -> dict[str, Any]:
+    return {
+        "event": "start",
+        "id": identifier,
+        "kind": "evening",
+        "arguments": [],
+        "phase": 1,
+        "cap": 10,
+        "allowance": 10,
+        "spent_before": 0,
+        "at": T0.isoformat(),
+    }
+
+
+def _end(identifier: int, count: int) -> dict[str, Any]:
+    return {
+        "event": "end",
+        "id": identifier,
+        "exit_code": 0,
+        "fault": None,
+        "requests": {},
+        "count": count,
+        "reached": None,
+        "seconds": 0.0,
+        "at": T0.isoformat(),
+    }
+
+
+@pytest.mark.parametrize("repeated", ["start", "end"])
+def test_an_invocation_number_that_two_writers_both_took_refuses_the_root(
+    tmp_path: Path, transport: Recording, repeated: str
+) -> None:
+    """The ledger has one writer at a time (the driver's lock). Two that read the same count both
+    write `start` with the same number, and folding `end` by number would count one of them."""
+    ledger = caps.RequestLedger(tmp_path / "requests.jsonl")
+    ledger.append(_start(1))
+    if repeated == "start":
+        ledger.append(_start(1))
+        ledger.append(_end(1, 2))
+    else:
+        ledger.append(_end(1, 2))
+        ledger.append(_end(1, 3))
+
+    with pytest.raises(caps.SmokeBudgetError, match=f"invocation 1.*{repeated}"):
+        ledger.spent()
+    with pytest.raises(caps.SmokeBudgetError, match="invocation 1"):
+        _run(ledger, _spend("daily"))
+    assert transport.posted == []

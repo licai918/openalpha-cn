@@ -21,6 +21,20 @@ withheld, so a capped day refuses at step 2 with `` `panel build` exited ... Req
 counts. An invocation that started and recorded no end was killed: what it sent is unknown and
 the panel copy may be half-written, so nothing more runs in the root. An invocation that writes
 the panel and stops on the cap, or on any fault or interruption, discards the root.
+
+**`discarded` is written before `end`.** They are two appends, and a second interruption (a
+second Ctrl-C, or a SIGTERM turned into `KeyboardInterrupt`) can land between them. In this order
+it leaves a root that is discarded and has no end -- refused twice over; in the other it would
+leave a `start` and an `end` and nothing to refuse the next evening on a half-written panel.
+
+**One writer at a time, and nothing skipped.** The driver holds `<root>/driver.lock` (task 4)
+from reading `spent()` to writing `end`, so the ledger has a single writer. Two that read the same
+count would both write `start` with the same number: `spent()` refuses a number that appears
+twice among the `start` events, or twice among the `end` events, instead of folding it into one.
+A line is split at a newline alone -- `str.splitlines()` would also split at U+2028, U+2029 and
+U+0085, which a string field may hold and `ensure_ascii=False` leaves as it is -- and a line that
+cannot be read (a cut-off last write included) refuses the ledger, never gets skipped: it may be
+the `discarded` line.
 """
 
 from __future__ import annotations
@@ -119,8 +133,10 @@ class RequestLedger:
         if not self.path.is_file():
             return []
         found: list[dict[str, Any]] = []
-        text = self.path.read_text(encoding="utf-8")
-        for number, line in enumerate(text.splitlines(), start=1):
+        lines = self.path.read_text(encoding="utf-8").split("\n")
+        if lines[-1] == "":
+            lines.pop()  # what follows the last newline
+        for number, line in enumerate(lines, start=1):
             try:
                 event = json.loads(line)
             except ValueError as error:
@@ -150,6 +166,17 @@ class RequestLedger:
 
     def spent(self) -> Spent:
         events = self.events()
+        numbered: set[tuple[str, int]] = set()
+        for event in events:
+            if event["event"] in ("start", "end"):
+                key = (str(event["event"]), int(event["id"]))
+                if key in numbered:
+                    raise SmokeBudgetError(
+                        f"{self.path.name} has two events for invocation {key[1]}, both "
+                        f"`{key[0]}`: two writers took the same number, so what was spent cannot "
+                        "be told. The ledger is left as it is"
+                    )
+                numbered.add(key)
         ended = {event["id"]: event for event in events if event["event"] == "end"}
         starts = [event for event in events if event["event"] == "start"]
         phases = [int(event["phase"]) for event in events if event["event"] == "phase"]
@@ -173,6 +200,16 @@ class CappedRun:
     seconds: float
 
 
+def _requests(name: str, value: object) -> int:
+    """`value` as a count of requests: a whole number, 0 or more. A `bool` is not one."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise SmokeBudgetError(
+            f"`{name}` is a whole number of requests, 0 or more, not {value!r}; nothing was "
+            "written to the ledger"
+        )
+    return value
+
+
 def run_capped(
     ledger: RequestLedger,
     *,
@@ -186,7 +223,15 @@ def run_capped(
     clock: Callable[[], datetime],
     monotonic: Callable[[], float] = time.monotonic,
 ) -> CappedRun:
-    """`call` under the cap, recorded in `ledger`; see the module docstring for every refusal."""
+    """`call` under the cap, recorded in `ledger`; see the module docstring for every refusal.
+
+    Everything that can refuse happens before `start` is written: a `start` with no `end` refuses
+    the root for good, as a killed process would.
+    """
+    _requests("cap", cap)
+    _requests("headroom", headroom)
+    if ceiling is not None:
+        _requests("ceiling", ceiling)
     spent = ledger.spent()
     if spent.discarded is not None:
         raise SmokeBudgetError(
@@ -206,6 +251,7 @@ def run_capped(
             f"needs {headroom} to start; ask the user before the cap is raised"
         )
     allowance = remaining if ceiling is None else min(remaining, ceiling)
+    counter = CappedCounter(allowance)
     invocation = spent.invocations + 1
     ledger.append(
         {
@@ -221,7 +267,6 @@ def run_capped(
         }
     )
     started = monotonic()
-    counter = CappedCounter(allowance)
     wrapped: int | None = None
     fault: str | None = None
     try:
@@ -237,19 +282,8 @@ def run_capped(
         raise
     finally:
         seconds = round(monotonic() - started, 3)
-        ledger.append(
-            {
-                "event": "end",
-                "id": invocation,
-                "exit_code": wrapped,
-                "fault": fault,
-                "requests": dict(sorted(counter.items())),
-                "count": counter.sent,
-                "reached": counter.reached,
-                "seconds": seconds,
-                "at": clock().isoformat(),
-            }
-        )
+        # `discarded` first, then `end`: an interruption between the two appends must leave a root
+        # that is discarded (and without an end), never one with an end and nothing to refuse it.
         if discard_on_cap and (counter.reached is not None or fault is not None):
             cause = (
                 f"the cap stopped its {counter.reached} request"
@@ -263,6 +297,19 @@ def run_capped(
                     "at": clock().isoformat(),
                 }
             )
+        ledger.append(
+            {
+                "event": "end",
+                "id": invocation,
+                "exit_code": wrapped,
+                "fault": fault,
+                "requests": dict(sorted(counter.items())),
+                "count": counter.sent,
+                "reached": counter.reached,
+                "seconds": seconds,
+                "at": clock().isoformat(),
+            }
+        )
     return CappedRun(
         invocation=invocation,
         exit_code=CAP_EXIT if counter.reached is not None else int(wrapped or 0),
