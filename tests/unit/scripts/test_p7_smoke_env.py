@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Final
@@ -569,3 +570,103 @@ def test_a_refusal_after_the_root_is_made_names_it_and_deletes_nothing(
     assert (root / env.REPO_NAME).is_dir()
     assert not (root / env.MANIFEST_NAME).exists()
     assert not (root / env.LEDGER_NAME).exists()
+
+
+# --- the git calls: hermetic, whatever the caller's environment holds ---------------------------
+
+AIMING: Final[tuple[str, ...]] = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")
+"""The inherited variables that aim git at another repository: a hook's `GIT_DIR` once let a test
+set `core.bare=true` on the shared repository."""
+HERMETIC: Final[dict[str, str]] = {
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_OPTIONAL_LOCKS": "0",
+    "GIT_TERMINAL_PROMPT": "0",
+}
+
+
+def _subcommand(command: Sequence[str]) -> str:
+    """The git subcommand of `command`, past its `-c name=value` pairs."""
+    words = iter(command[1:])
+    for word in words:
+        if word == "-c":
+            next(words)
+        elif not word.startswith("-"):
+            return word
+    return ""
+
+
+@dataclass
+class _GitCall:
+    caller: str
+    command: list[str]
+    environment: dict[str, str]
+    keywords: dict[str, Any]
+
+
+def _recording_git(monkeypatch: pytest.MonkeyPatch) -> list[_GitCall]:
+    """Every `subprocess.run` of git from here on -- the real call, with the module that made it,
+    its environment as the child receives it and its keywords -- and then the real run."""
+    calls: list[_GitCall] = []
+    real = subprocess.run
+
+    def recording(*args: Any, **keywords: Any) -> Any:
+        command = [str(word) for word in (args[0] if args else keywords["args"])]
+        if command and Path(command[0]).name == "git":
+            calls.append(
+                _GitCall(
+                    caller=Path(sys._getframe(1).f_code.co_filename).name,
+                    command=command,
+                    environment=dict(keywords.get("env") or os.environ),
+                    keywords={key: value for key, value in keywords.items() if key != "env"},
+                )
+            )
+        return real(*args, **keywords)
+
+    monkeypatch.setattr(subprocess, "run", recording)
+    return calls
+
+
+def test_an_inherited_git_dir_aims_no_git_call_of_the_prepare_at_another_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, panel = _source_repository(tmp_path), _panel(tmp_path)
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    git(decoy, "init", "-q", "--template=", "-b", "main")
+    (decoy / "decoy.txt").write_text("decoy\n", encoding="utf-8")
+    git(decoy, "add", "decoy.txt")
+    git(decoy, "commit", "-q", "-m", "decoy", at=tds.COMMITTED)
+
+    def decoy_state() -> tuple[bytes, bytes, bytes, str, str]:
+        dot = decoy / ".git"
+        return (
+            (dot / "config").read_bytes(),
+            (dot / "HEAD").read_bytes(),
+            (dot / "index").read_bytes(),
+            git(decoy, "config", "--local", "--list"),
+            git(decoy, "for-each-ref"),
+        )
+
+    before, commit = decoy_state(), head(source)
+    calls = _recording_git(monkeypatch)
+    monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(decoy))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(decoy / ".git" / "index"))
+
+    manifest = _prepare(tmp_path, monkeypatch, source, panel, commit=commit)
+
+    for name in AIMING:
+        monkeypatch.delenv(name)
+    assert decoy_state() == before
+    assert head(manifest.pinned) == manifest.registration_commit
+    assert git(manifest.repo, "remote").strip() == ""
+    for call in calls:
+        assert not set(AIMING) & set(call.environment), (call.caller, call.command)
+    own = [call for call in calls if call.caller == "p7_smoke_env.py"]
+    assert {_subcommand(call.command) for call in own} >= {
+        "rev-parse", "cat-file", "merge-base", "status", "clone", "checkout", "remote", "add",
+        "commit",
+    }  # fmt: skip
+    for call in own:
+        assert {name: call.environment.get(name) for name in HERMETIC} == HERMETIC, call.command
