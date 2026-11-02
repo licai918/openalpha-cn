@@ -36,8 +36,11 @@ refused, and so is an abbreviation of one (the daily command's parser takes `--r
 `--runtime-dir`, and its last occurrence) and a `--flag=value` spelling. A remedy is judged by the
 options its command parses (click's own parse of `openalpha panel build` / `factor build`), not by
 its words: `--as-of --incremental` gives `--as-of` the value `--incremental`, the last
-`--runtime-dir` is the one taken, and `~` is not expanded. `--smoke-root` may be left out where the
-script is `<root>/pinned/scripts/p7_smoke.py` and `<root>/smoke.json` exists.
+`--runtime-dir` is the one taken, and `~` is not expanded. One the command would refuse as a usage
+error is refused before anything is written: typer runs a click of its own, whose exceptions
+`daily_selection.invoke` does not catch, so in the build it would be a fault that discards the
+root. `--smoke-root` may be left out where the script is `<root>/pinned/scripts/p7_smoke.py` and
+`<root>/smoke.json` exists.
 
 **One invocation at a time, and its state not lost.** `run` takes `<root>/driver.lock`
 (`openalpha_cn.panel.store._try_lock`) and holds it from reading the manifest again -- the caller's
@@ -283,11 +286,13 @@ _OPENALPHA_COMMANDS: Final[Mapping[tuple[str, str], str]] = MappingProxyType(
 )
 
 
-def _parsed(arguments: Sequence[str]) -> tuple[str, Mapping[str, Any]]:
+def _parse(arguments: Sequence[str], *, resilient: bool) -> tuple[str, Mapping[str, Any]]:
     """`arguments` (`panel build ...` or `factor build ...`) as the command itself parses them:
-    its kind and its parameters -- click's own parse of the real command, without running it
-    (`resilient_parsing`: no callback, no prompt, and no fault of a usage that the command would
-    refuse before it sent anything)."""
+    its kind and its parameters -- click's own parse of the real command, without running it.
+    `resilient`: no callback, no prompt and no usage error, for the parameters to be judged by;
+    otherwise strictly, as the command will, so that a usage error it would raise refuses the
+    remedy here -- `daily_selection.invoke` catches the other click's `ClickException`, and a usage
+    error of this one would escape the build as a fault, after `start`, discarding the root."""
     head = tuple(arguments[:2])
     kind = _OPENALPHA_COMMANDS.get((head[0], head[1])) if len(head) == 2 else None
     if kind is None:
@@ -302,21 +307,19 @@ def _parsed(arguments: Sequence[str]) -> tuple[str, Mapping[str, Any]]:
     command: Any = getattr(group, "commands", {}).get(head[1])
     if command is None:
         raise RemedyError(f"this build has no `openalpha {' '.join(head)}`")
+    name = f"openalpha {' '.join(head)}"
     try:
-        context = command.make_context(
-            f"openalpha {' '.join(head)}", list(arguments[2:]), resilient_parsing=True
-        )
+        context = command.make_context(name, list(arguments[2:]), resilient_parsing=resilient)
     except Exception as error:  # that click's own `ClickException`, or worse: refused either way
         shown = error.format_message() if hasattr(error, "format_message") else str(error)
-        raise RemedyError(
-            f"`openalpha {' '.join(head)}` cannot read this remedy: {shown}"
-        ) from error
+        raise RemedyError(f"`{name}` refuses this remedy: {shown}") from error
     return kind, dict(context.params)
 
 
 def _openalpha_remedy(arguments: Sequence[str], *, runtime: Path) -> Remedy:
-    """The remedy, judged by the parameters the command will see (the module docstring)."""
-    kind, parameters = _parsed(arguments)
+    """The remedy, judged by the parameters the command will see (the module docstring), then
+    parsed strictly: one the command would refuse as a usage error is refused here."""
+    kind, parameters = _parse(arguments, resilient=True)
     given = parameters.get("runtime_dir")
     if not _same(given, runtime):
         raise RemedyError(
@@ -332,6 +335,7 @@ def _openalpha_remedy(arguments: Sequence[str], *, runtime: Path) -> Remedy:
             "panel copy is in a state only a discard repairs. Stop, ask the user, and prepare "
             "a new root from the original panel"
         )
+    _parse(arguments, resilient=False)
     return Remedy(kind=kind, arguments=tuple(arguments))
 
 

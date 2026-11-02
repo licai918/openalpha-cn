@@ -1622,6 +1622,29 @@ def test_an_interrupt_inside_a_real_panel_build_discards_the_root(
     assert _spent(smoke).discarded is not None
 
 
+def test_a_remedy_its_command_would_refuse_as_a_usage_error_is_refused_before_anything_is_written(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,  # noqa: F811
+) -> None:
+    """N2 (found in this round): typer runs a click of its own, and `daily_selection.invoke`
+    catches the other click's `ClickException` -- so an unknown option escaped the build as
+    typer's `NoSuchOption`, which `run_capped` recorded as a fault: the root was discarded and
+    the driver ended on a traceback, with no request sent. The driver parses a remedy as the
+    command does, strictly too, and refuses one it would refuse."""
+    smoke = _smoke(tmp_path, monkeypatch, seeded, epoch=survivor_day.EPOCH)
+    line = _line(smoke, *_BATCH, "--no-such-option")
+
+    code, _out, err = _drive(smoke, capsys, "remedy", line, at=survivor_day.RUN_CLOCK)
+
+    assert code == driver.REFUSED_EXIT
+    assert any("--no-such-option" in entry for entry in err)
+    assert smoke.market.payloads == []
+    events = caps.RequestLedger(smoke.root / env.LEDGER_NAME).events()
+    assert [event["event"] for event in events] == ["prepared"]
+
+
 @pytest.mark.skipif(not hasattr(signal, "SIGHUP"), reason="POSIX signals")
 def test_an_interrupt_the_command_turned_into_another_fault_is_an_interrupt_and_is_forgotten(
     tmp_path: Path,
