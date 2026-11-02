@@ -2360,7 +2360,7 @@ def test_the_report_reads_the_power_plan_from_the_registrations_settings(
 
 - 新能力行（`artifacts/openalpha-v1-feature-coverage/features.csv`、`summary.json`、`docs/release/openalpha-v1-feature-ledger.md` 同一提交，硬规则 7、9）：`OA-BT-0xx` 十分位读出（`tests/unit/backtest/test_decile_readout.py::test_a_loser_tail_is_read_as_hand_computed`、`tests/unit/test_decile_readout_agreement.py::test_the_readout_is_the_forward_reports_arithmetic`）；`OA-BT-0xx` 功效计算（`tests/unit/backtest/test_power_analysis.py::test_the_normal_power_is_the_routes_arithmetic`）；`OA-RES-0xx` P7 诊断与窗口护栏（`tests/unit/scripts/test_p7_windows.py::test_a_capped_store_refuses_every_door_past_its_ceiling`、`tests/unit/test_p7_diagnostics.py::test_every_exploratory_document_and_line_carries_the_exploratory_wording`）；`OA-RES-0xx` 读一次路径（`tests/unit/scripts/test_p7_reading.py::test_a_read_that_crashed_after_its_claim_is_the_one_read`）。
 - 更新 `OA-OPS-046`…`049`（周报）中预测层那一行的验收，加 `tests/unit/test_strategy_survivor_forward.py::test_the_power_section_states_the_planned_power_at_k_as_hand_computed`。
-- 路线图 `V2-P7-004` 关闭、`V2-P7-018` 关闭（若 `009` 之外没有别的未满足项）；运行手册 `docs/runbooks/forward-report.zh-CN.md` 加 `power` 节；规格 §9 加一行（`018` 只依赖 `004` 的功效计算器，见矛盾第 9 条；若用户采纳 U3 的 t 口径，更正 §4.5 与 §9 2026-11-01 第 4 行的"K≈56"）。
+- 路线图 `V2-P7-004` 关闭、`V2-P7-018` 关闭（若 `009` 之外没有别的未满足项）；运行手册 `docs/runbooks/forward-report.zh-CN.md` 加 `power` 节；规格 §9 加一行（`018` 只依赖 `004` 的功效计算器，见矛盾第 9 条；若用户采纳 U3 的 t 口径，更正 §4.5 与 §9 2026-11-01 第 4 行的"K≈56"）。（**corrected 2026-11-02: 这一条没有照做。**路线图 `V2-P7-004` 与 `V2-P7-018` 两行都**没有关闭**，仍然打开（004 等 Task 7 与台账行；018 等 `006a` 校验功效块、运行手册的 `power` 一节与台账行）；`docs/runbooks/forward-report.zh-CN.md` 还没有 `power` 一节；规格 §9 加了一行（2026-11-02 的功效块一行），但 t 口径只是工具默认、用户没有采纳，所以 §4.5 与 §9 里的"K≈56"没有更正。）
 
 ## 用户决定（推荐，不由本计划决定）
 

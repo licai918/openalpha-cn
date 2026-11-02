@@ -540,12 +540,12 @@ def name_year_may_be_empty(year: int, day: date) -> bool:
 
 `src/openalpha_cn/panel_ingest.py`：把 `name_year_empty_admissible_through`、`name_year_may_be_empty` 加进 `openalpha_cn.domain.name_history` 的导入；`name_history_requirement` 的 `ReadinessRequirement(...)` 里加：
 
-```python
-# `V2-P7-021`: a rename year recorded empty is readable only through its window -- the
-# writer's own rule (`write_empty_name_year`).
-empty_admissible_through = (
-    {year: name_year_empty_admissible_through(year) for year in sorted(set(years))},
-)
+```text
+        # `V2-P7-021`: a rename year recorded empty is readable only through its window -- the
+        # writer's own rule (`write_empty_name_year`).
+        empty_admissible_through={
+            year: name_year_empty_admissible_through(year) for year in sorted(set(years))
+        },
 ```
 
 把 `write_empty_announcement_year` 7406-7450 行（`template = max(...)` 之后的 `reason`、`marker`、`store.write_partition(...)`）收进共用的私有函数，本函数改为 `return _write_empty_partition(store, dataset=dataset, year=year, observed_at=observed_at, template=template, reason=reason, date_timezone=date_timezone)`——`reason` 文本、`marker`、覆盖记录**逐字节不变**：
@@ -1304,7 +1304,7 @@ def test_a_record_filed_on_the_first_session_before_any_rename_is_checked_like_a
 
 ## 7. 收尾：后续文档任务要改的行（本计划不改）
 
-- **路线图 §P7**：`V2-P7-009`（第 487 行）关闭，写两个 node id：`tests/unit/backtest/test_paper_settlement.py::test_a_name_bought_at_an_open_is_never_sold_in_that_session_on_the_paper_path`、`tests/unit/scripts/test_daily_selection_survivor_day.py::test_a_book_held_into_the_first_session_of_a_year_settles_it_across_an_ex_rights_date`，并写明"两条在已交付代码上通过，无修复"与 C7 的 T+1 结论；`V2-P7-021`（第 499 行）关闭，写 U1 的取值与 B4/B5/B6 的 node id；若 U3 被采纳，加 `V2-P7-025` 一行，总数 252 → 253，P7 24 → 25（**corrected 2026-11-02: 已做**）。
+- **路线图 §P7**：`V2-P7-009`（第 487 行）关闭，写两个 node id：`tests/unit/backtest/test_paper_settlement.py::test_a_name_bought_at_an_open_is_never_sold_in_that_session_on_the_paper_path`、`tests/unit/scripts/test_daily_selection_survivor_day.py::test_a_book_held_into_the_first_session_of_a_year_settles_it_across_an_ex_rights_date`，并写明"两条在已交付代码上通过，无修复"与 C7 的 T+1 结论；`V2-P7-021`（第 499 行）关闭，写 U1 的取值与 B4/B5/B6 的 node id；若 U3 被采纳，加 `V2-P7-025` 一行，总数 252 → 253，P7 24 → 25。（**corrected 2026-11-02: 只有最后一句做了——加了 `V2-P7-025` 一行，总数 253，P7 25。**`V2-P7-009` 与 `V2-P7-021` 两行**都没有关闭**，仍然打开：009 的两条测试已补，要等台账 `OA-BT-021`、`OA-BT-023` 的说明补上；021 的 U1 / U2 还是暂定、要等用户确认，台账行也还没加。两行的状态文字已按此写在路线图里。）
 - **规格 §9**：一行记 021 的完成（"经核实为空"的语义、窗口取值、"缺失 / 失败"仍拒绝、需要改的只有一写一读）；一行记 009 关闭；一行记登记簿的新年缺口（C1/U3）。§6 若 U1/U2 是用户决定，按 D 编号记入。
 - **运行手册 `docs/runbooks/daily-selection.zh-CN.md`**：「已知局限（幸存者形态）」第 1 条改写为：当年第一条更名之前，第 2 步把当年记为空分区（`EMPTY namechange year=…` 一行在 `panel build` 的输出里），读者在窗口内按"尚无更名"读；失败、截断、窗口之后、已有行之上的空回答仍按名拒绝；**登记簿的同类缺口仍在**（C1/U3）。「清晨复核」的新年一条补"年初首晚之后的清晨也只问会话年，空年照样写空、不拒绝"。P6 一节的局限（`--full-update` 一月初失败）改为已修。
 - **能力台账**（`docs/release/openalpha-v1-feature-ledger.md` + `artifacts/openalpha-v1-feature-coverage/features.csv` + `summary.json`，同一提交、用 `build_feature_coverage` 重生成）：新增一行（建议 `OA-PANEL-043`，"一个尚无更名的名称公告年记为空分区并在窗口内读作尚无更名"，`local_source_evidence` = `src/openalpha_cn/panel_ingest.py#write_empty_name_year;src/openalpha_cn/panel_ingest.py#name_history_requirement;src/openalpha_cn/domain/name_history.py#name_year_may_be_empty;src/openalpha_cn/cli.py#_write_name_year`，`acceptance_test` 用不带参数化的 B5 `tests/unit/scripts/test_daily_selection_survivor_day.py::test_the_first_session_of_a_year_before_its_first_rename_runs_to_its_record_and_evening`——参数化 id 里有空格，绑定 node id 时容易出错）；`OA-OPS-039`、`OA-OPS-043`、`OA-OPS-045`、`OA-OPS-046` 的 notes 提一句 021；`OA-BT-021`（T+1 的 node id）与 `OA-BT-023`（跨新年的 node id）的 notes 补 009 的验收。没有新增或移动测试文件，`test_evidence` 列不变。

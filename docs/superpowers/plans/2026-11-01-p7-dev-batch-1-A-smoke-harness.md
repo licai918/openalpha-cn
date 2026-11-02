@@ -530,13 +530,17 @@ def _main_day(
 
 （原来的注释原样搬进 `_main_day`；`options.registration`、`options.repo` 就是原来的 `arguments.registration`、`arguments.repo`。）`_main_morning` 加关键字参数 `banner: str | None = None`（**corrected 2026-11-02: 没有默认值**——`banner: str | None` 是必须交给它的关键字参数，忘了传的调用会在调用处出错，而不是悄悄印出一份没有横幅的晨查；评审 Minor 4），两处打印改为：
 
-```python
-if as_json:
-    text = json.dumps(with_smoke(run.document, banner), sort_keys=True, ensure_ascii=False)
-else:
-    from openalpha_cn.strategy_survivor_morning import morning_lines
+```text
+            if as_json:
+                text = json.dumps(
+                    with_smoke(run.document, banner), sort_keys=True, ensure_ascii=False
+                )
+            else:
+                from openalpha_cn.strategy_survivor_morning import morning_lines
 
-    text = "\n".join(bannered(morning_lines(run.document, this_run=run.this_run()), banner))
+                text = "\n".join(
+                    bannered(morning_lines(run.document, this_run=run.this_run()), banner)
+                )
 ```
 
 `scripts/forward_report.py` 的 `main`：在 `arguments = parser.parse_args(argv)` 之后加
@@ -554,20 +558,22 @@ else:
 
 并把原来从 `as_of = …` 到 `return 0` 的部分原样移进 `_main_report(arguments: argparse.Namespace, *, clock: Callable[[], datetime], banner: str | None) -> int`，只改最后的打印：
 
-```python
-if arguments.json:
-    printed = (
-        {**payload, "this_run": dict(report.this_run)}
-        if isinstance(report, SurvivorForwardReport)
-        else payload
-    )
-    print(
-        json.dumps(daily_selection.with_smoke(printed, banner), sort_keys=True, ensure_ascii=False)
-    )
-else:
-    lines = [*summary_lines(report), f"written to {out}"]
-    print("\n".join(daily_selection.bannered(lines, banner)))
-return 0
+```text
+    if arguments.json:
+        printed = (
+            {**payload, "this_run": dict(report.this_run)}
+            if isinstance(report, SurvivorForwardReport)
+            else payload
+        )
+        print(
+            json.dumps(
+                daily_selection.with_smoke(printed, banner), sort_keys=True, ensure_ascii=False
+            )
+        )
+    else:
+        lines = [*summary_lines(report), f"written to {out}"]
+        print("\n".join(daily_selection.bannered(lines, banner)))
+    return 0
 ```
 
 写出的文件（`_replace_whole(out, json.dumps(payload, …))`、P6 的 `out.write_text(...)`）**不改**。
