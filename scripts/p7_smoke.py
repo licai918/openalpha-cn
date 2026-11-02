@@ -33,8 +33,11 @@ written, unless that many requests of the phase's cap remain.
 **Paths.** `--runtime-dir`, `--registration`, `--repo`, `--morning-recheck`, `--pin-worktree`,
 `--launchd-plist` and `--factor-gaps` are the driver's to set: an extra argument naming one is
 refused, and so is an abbreviation of one (the daily command's parser takes `--runtime` for
-`--runtime-dir`, and its last occurrence) and a `--flag=value` spelling. `--smoke-root` may be left
-out where the script is `<root>/pinned/scripts/p7_smoke.py` and `<root>/smoke.json` exists.
+`--runtime-dir`, and its last occurrence) and a `--flag=value` spelling. A remedy is judged by the
+options its command parses (click's own parse of `openalpha panel build` / `factor build`), not by
+its words: `--as-of --incremental` gives `--as-of` the value `--incremental`, the last
+`--runtime-dir` is the one taken, and `~` is not expanded. `--smoke-root` may be left out where the
+script is `<root>/pinned/scripts/p7_smoke.py` and `<root>/smoke.json` exists.
 
 **One invocation at a time, and its state not lost.** `run` takes `<root>/driver.lock`
 (`openalpha_cn.panel.store._try_lock`) and holds it from reading the manifest again -- the caller's
@@ -97,6 +100,7 @@ import forward_report  # noqa: E402
 import p7_smoke_env as env  # noqa: E402
 import p7_smoke_requests as budget  # noqa: E402
 import registry  # noqa: E402
+from typer.main import get_command  # noqa: E402
 
 from openalpha_cn import cli  # noqa: E402
 from openalpha_cn.panel.store import _try_lock, _unlock  # noqa: E402
@@ -196,12 +200,10 @@ class _Tee(io.TextIOBase):
 # --- remedies ------------------------------------------------------------------------------------
 
 
-def _values(arguments: Sequence[str], flag: str) -> list[str]:
-    return [arguments[index + 1] for index, word in enumerate(arguments[:-1]) if word == flag]
-
-
-def _same(given: str, expected: Path) -> bool:
-    return Path(given).expanduser().resolve() == expected.resolve()
+def _same(given: object, expected: Path) -> bool:
+    """Whether `given` is `expected` as the command takes it: resolved, `~` not expanded --
+    neither click nor argparse expands it, so `~/x` is a directory named `~`."""
+    return given is not None and Path(str(given)).resolve() == expected.resolve()
 
 
 def _refuse_joined(arguments: Sequence[str]) -> None:
@@ -240,28 +242,54 @@ def parse_remedy(line: str, *, runtime: Path, registration: Path, pinned: Path) 
     )
 
 
-def _openalpha_remedy(arguments: Sequence[str], *, runtime: Path) -> Remedy:
-    head = list(arguments[:2])
-    if head == ["panel", "build"]:
-        kind = "panel-build"
-    elif head == ["factor", "build"]:
-        kind = "factor-build"
-    else:
+_OPENALPHA_COMMANDS: Final[Mapping[tuple[str, str], str]] = MappingProxyType(
+    {("panel", "build"): "panel-build", ("factor", "build"): "factor-build"}
+)
+
+
+def _parsed(arguments: Sequence[str]) -> tuple[str, Mapping[str, Any]]:
+    """`arguments` (`panel build ...` or `factor build ...`) as the command itself parses them:
+    its kind and its parameters -- click's own parse of the real command, without running it
+    (`resilient_parsing`: no callback, no prompt, and no fault of a usage that the command would
+    refuse before it sent anything)."""
+    head = tuple(arguments[:2])
+    kind = _OPENALPHA_COMMANDS.get((head[0], head[1])) if len(head) == 2 else None
+    if kind is None:
         raise RemedyError(
             f"`openalpha {' '.join(head)}` is not a remedy this driver runs: only `panel build` "
             "and `factor build`"
         )
-    given = _values(arguments, "--runtime-dir")
-    if len(given) != 1 or not _same(given[0], runtime):
-        raise RemedyError(
-            f"this remedy's --runtime-dir is {given}, not this smoke's runtime {runtime}; "
-            "the smoke never builds another runtime directory, least of all ~/openalpha-research"
+    # Typer runs a click of its own (`typer._click`), so the tree is walked by what it holds, not
+    # by click's classes.
+    tree: Any = get_command(cli.app)
+    group: Any = getattr(tree, "commands", {}).get(head[0])
+    command: Any = getattr(group, "commands", {}).get(head[1])
+    if command is None:
+        raise RemedyError(f"this build has no `openalpha {' '.join(head)}`")
+    try:
+        context = command.make_context(
+            f"openalpha {' '.join(head)}", list(arguments[2:]), resilient_parsing=True
         )
-    if (
-        kind == "panel-build"
-        and "--incremental" not in arguments
-        and set(_values(arguments, "--dataset")) != {"trade_cal"}
-    ):
+    except Exception as error:  # that click's own `ClickException`, or worse: refused either way
+        shown = error.format_message() if hasattr(error, "format_message") else str(error)
+        raise RemedyError(
+            f"`openalpha {' '.join(head)}` cannot read this remedy: {shown}"
+        ) from error
+    return kind, dict(context.params)
+
+
+def _openalpha_remedy(arguments: Sequence[str], *, runtime: Path) -> Remedy:
+    """The remedy, judged by the parameters the command will see (the module docstring)."""
+    kind, parameters = _parsed(arguments)
+    given = parameters.get("runtime_dir")
+    if not _same(given, runtime):
+        raise RemedyError(
+            f"this remedy's --runtime-dir, as the command reads it, is {given}, not this smoke's "
+            f"runtime {runtime}; the smoke never builds another runtime directory, least of all "
+            "~/openalpha-research"
+        )
+    datasets = {str(dataset) for dataset in parameters.get("dataset") or ()}
+    if kind == "panel-build" and not parameters.get("incremental") and datasets != {"trade_cal"}:
         raise RemedyError(
             "this is the full rebuild of the session-scoped targets -- the whole-year rebuild "
             "remedy, about 1,200 requests at live scale -- which the smoke never runs: the "

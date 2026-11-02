@@ -1284,6 +1284,45 @@ def test_an_end_on_a_fault_or_the_cap_is_held_to_its_discarded_line(tmp_path: Pa
 
 
 @pytest.mark.parametrize(
+    ("build", "named"),
+    [
+        (("--year", "2026", "--as-of", "--incremental", "--exchange", "SSE", "--dataset", "price"),
+         "whole-year rebuild"),
+        (("--year", "2026", "--incremental", "--dataset", "price", "--runtime-dir", "elsewhere"),
+         "runtime"),
+    ],
+)  # fmt: skip
+def test_a_remedy_is_judged_by_the_options_the_command_parses(
+    tmp_path: Path, build: tuple[str, ...], named: str
+) -> None:
+    """M2: `--as-of --incremental` gives `--as-of` the value `--incremental` and leaves the build
+    a whole rebuild; a second `--runtime-dir` is the one the command takes."""
+    paths = _paths(tmp_path)
+    line = daily.pinned_command(
+        ["openalpha", "panel", "build", "--runtime-dir", str(paths["runtime"]), *build]
+    )
+
+    with pytest.raises(driver.RemedyError, match=named):
+        driver.parse_remedy(line, **paths)
+
+
+def test_a_remedy_s_runtime_spelt_with_a_tilde_is_not_this_smoke_s(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M2: the command takes `~/...` as it is written -- a directory named `~` -- so a remedy
+    that spells this smoke's runtime that way is another runtime."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    paths = _paths(tmp_path)
+    tilde = "~/" + paths["runtime"].relative_to(tmp_path).as_posix()
+    assert Path(tilde).expanduser() == paths["runtime"]
+    line = daily.pinned_command(["openalpha", "panel", "build", "--runtime-dir", tilde, *_BATCH])
+
+    with pytest.raises(driver.RemedyError, match="runtime"):
+        driver.parse_remedy(line, **paths)
+
+
+@pytest.mark.parametrize(
     "event",
     [
         {"event": "phase", "phase": 3, "reason": "a hand-written line"},
