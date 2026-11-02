@@ -18,8 +18,9 @@ reading is called, the claim must be committed and kept in this repository's ref
 and a grafts file are refused). The reading itself is `V2-P7-024`; reading the research window with the
 tools waits for the user's go. `V2-P7-018`: the weekly report states the pre-registered power beside its
 sample counts (a `survivor_forward_power` block beside the protocol; the plan's power, never an observed
-one), prints no one-sided p-value wording before the primary window, and its G-0 item states the
-rewritten gate; `006a` must validate the block before the registration is committed. `V2-P7-009`: the
+one), does not print the reading rule for a one-sided p-value before the primary window (the definition
+of power is printed, and the JSON still carries the rule), and its G-0 item states the rewritten gate;
+`006a` must validate the block before the registration is committed. `V2-P7-009`: the
 two missing acceptance tests (the paper path's own T+1; a book held across a year's first session and an
 ex-dividend date), no defect found. `V2-P7-021`: `panel build` records a rename year with nothing
 announced yet as an empty partition, readable as "no rename announced yet" through 31 January, so the
@@ -28,8 +29,12 @@ verified empty; the rule applies to every `panel build`) are provisional until t
 Found on the way and cut as `V2-P7-025` (25 P7 issues, 253 in total): the registry (`stock_basic`) has the
 same gap for a year in which nothing lists or delists before its first session, which stops the survivor
 day at step 4 and the weekly report's label read -- a hard gate before 2027-01-04 whose offline
-measurement on the real registry is still to be made. Bound files changed (`src/`, `scripts/research/`,
-`pyproject.toml`, `scripts/daily_selection.py`, `scripts/forward_report.py`); no registration is in use.
+measurement on the real registry is still to be made (listing it among `006a`'s items and `006`'s
+dependencies is the controller's recommendation, awaiting the user). Bound files changed (`src/`,
+`scripts/research/`, `pyproject.toml`, `scripts/daily_selection.py`, `scripts/forward_report.py`); no
+registration is in use, so no binding is voided. The code was frozen at `22d65ae` for the serial full
+gate; after it only docstring, comment and guard-string edits and the gate's own fixes were made (the
+closeout record lists them).
 The batch's record, its deferred items, the decisions that are still the user's and the prerequisites of
 the real reads are in `docs/superpowers/plans/2026-11-02-p7-dev-batch-1-closeout.md`. **This is
 engineering, not evidence.**
