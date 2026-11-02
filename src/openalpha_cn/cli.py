@@ -111,7 +111,10 @@ from openalpha_cn.domain.industry_classification import (
     IndustryAssignment,
     IndustryClassificationError,
 )
-from openalpha_cn.domain.name_history import NAMECHANGE_DATASET
+from openalpha_cn.domain.name_history import (
+    NAMECHANGE_DATASET,
+    name_year_empty_admissible_through,
+)
 from openalpha_cn.domain.panel_batch import (
     SUBJECT_COLUMN_NAME,
     ColumnarPanelBatch,
@@ -261,6 +264,7 @@ from openalpha_cn.panel_ingest import (
     write_adjustment_factors,
     write_daily_panel,
     write_empty_announcement_year,
+    write_empty_name_year,
     write_financial_statements,
     write_index_prices,
     write_index_weights,
@@ -5347,6 +5351,28 @@ def _write_statement_year(
     return [write_empty_announcement_year(store, dataset=dataset, year=year, observed_at=now)]
 
 
+def _write_name_year(
+    store: PanelStore, batch: ColumnarPanelBatch, *, year: int, now: datetime
+) -> PartitionRef:
+    """Write one announcement year of the rename corpus -- or, when the endpoint answered it with
+    no row knowable at `now`, record it empty (`panel_ingest.write_empty_name_year`, `V2-P7-021`).
+
+    Both of `fetch_panel`'s no-data answers are answers -- "served nothing for the year" and
+    "served rows none of which was knowable yet" -- while a refused or truncated fetch never
+    reaches here: `_fetch_panel` raises it as `provider_failure`. The writer refuses by name a
+    year that may not be empty: not `now`'s own, past its window, already holding renames."""
+    if batch.status == "success":
+        return write_name_history(store, batch)
+    ref = write_empty_name_year(store, year=year, observed_at=now)
+    typer.echo(
+        f"EMPTY {NAMECHANGE_DATASET} year={year}: no rename announced yet at {now.isoformat()} "
+        f"({batch.no_data_reason}); the year may be read empty through "
+        f"{name_year_empty_admissible_through(year).isoformat()}; recorded as an empty partition",
+        err=True,
+    )
+    return ref
+
+
 def _build_index_weights(
     store: PanelStore,
     provider: TushareProvider,
@@ -6385,9 +6411,11 @@ def _build_panel(
         )
     if NAMECHANGE_DATASET in targets:
         written.setdefault(NAMECHANGE_DATASET, []).append(
-            write_name_history(
+            _write_name_year(
                 store,
                 _fetch_panel(provider, NAMECHANGE_DATASET, as_of=_year_end_as_of(year, now)),
+                year=year,
+                now=now,
             )
         )
     if INDEX_WEIGHT_DATASET in targets:

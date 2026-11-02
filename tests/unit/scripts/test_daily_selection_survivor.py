@@ -23,20 +23,20 @@ import sys
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from functools import partial
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any, Final
 
 import pytest
-from daily_market import SECURITIES, Market, compact, response, weekdays
+from daily_market import NAMECHANGE_FIELDS, SECURITIES, Market, compact, response, weekdays
 
 from openalpha_cn import cli, strategy_survivor_facts
 from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
 from openalpha_cn.domain.daily_prices import DAILY_BASIC_DATASET, DAILY_DATASET
 from openalpha_cn.domain.index_prices import INDEX_DAILY_DATASET
-from openalpha_cn.domain.name_history import NAMECHANGE_DATASET
+from openalpha_cn.domain.name_history import NAMECHANGE_DATASET, name_year_empty_admissible_through
 from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET, SUSPENSION_DATASET
 from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET
 from openalpha_cn.domain.survivor_book import DEFAULT_COMPOSITE_FACTORS, SurvivorBookConfig
@@ -707,6 +707,207 @@ def test_across_new_year_the_p6_day_leaves_build_facts_day_without_the_years_nam
         _facts(store, FIRST_2027, monkeypatch)
     assert "2027" in str(refused.value)
     assert "partition_missing" in str(refused.value)
+
+
+# --- V2-P7-021: the first session of a year before the year's first rename ---------------------
+
+
+@dataclass
+class NoRenameYet(NamesAcrossNewYear):
+    """`NamesAcrossNewYear` before 2027's first rename: the endpoint serves no 2027 row -- or, with
+    `pending`, one announced on 5 January, served but not knowable on the 4th. `silent` years
+    answer nothing at all; `fault` makes every 2027 request fail -- `"failing"`, its connection
+    reset on every attempt, or `"truncated"`, an answer at the endpoint's 10,000-row cap."""
+
+    pending: bool = False
+    silent: frozenset[str] = frozenset()
+    fault: str = ""
+
+    def _names(self, params: Mapping[str, Any]) -> list[list[Any]]:
+        year = str(params["start_date"])[:4]
+        if year in self.silent:
+            return []
+        if year != "2027":
+            return super()._names(params)
+        if self.pending:
+            return [[RENAMED_2027, "新名称", "20270105", None, "20270105", "改名"]]
+        return []
+
+    def post(self, payload: dict[str, Any]) -> dict[str, Any]:
+        params = payload["params"]
+        if (
+            payload["api_name"] == NAMECHANGE_DATASET
+            and self.fault
+            and str(params["start_date"])[:4] == "2027"
+        ):
+            self.requests.append((NAMECHANGE_DATASET, dict(params)))
+            if self.fault == "failing":
+                raise ConnectionError("the namechange connection was reset")
+            capped = [
+                [f"{600000 + index:06d}.SH", "名称", "20270104", None, "20270104", "改名"]
+                for index in range(10_000)
+            ]
+            return response(NAMECHANGE_FIELDS, capped)
+        return super().post(payload)
+
+
+def _december_no_rename_yet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **market: Any
+) -> Store:
+    """`_new_year`'s store on `NoRenameYet`, with 31 December's step run.
+
+    (The plan's `_december`, renamed: the section below already defines a `_december` of its
+    own, which a second definition here would shadow.)"""
+    shop = NoRenameYet(open_days=NEW_YEAR, delisted=((DELISTED, FIRST_2027),), **market)
+    store = _seeded(tmp_path, monkeypatch, shop, as_of="2026-12-24T12:00:00+08:00", year=2026)
+    _update(
+        store,
+        LAST_2026,
+        targets=daily.targets_for_survivor(SURVIVOR_BUILDS),
+        survivor=_survivor(),
+        next_year=True,
+    )
+    return store
+
+
+def _names_build(store: Store, *, year: int, as_of: datetime) -> Any:
+    """`openalpha panel build --dataset namechange --year <year>` at `as_of`, in process: the one
+    build the morning re-check makes (`daily_selection._fetch_names`)."""
+    store.market.clear()
+    store.market.today = as_of.astimezone(daily.SHANGHAI).date()
+    arguments = ["panel", "build", "--runtime-dir", str(store.runtime), "--year", str(year)]
+    arguments += ["--as-of", as_of.isoformat(), "--exchange", EXCHANGE, "--incremental", "--json"]
+    arguments += ["--dataset", NAMECHANGE_DATASET]
+    return daily.invoke(arguments)
+
+
+def _morning(day: date) -> datetime:
+    return datetime.combine(day, time(8, 30), tzinfo=daily.SHANGHAI)
+
+
+@pytest.mark.parametrize("pending", [False, True], ids=["nothing served", "served, not knowable"])
+def test_on_a_years_first_session_before_its_first_rename_step_two_records_the_year_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pending: bool
+) -> None:
+    """`V2-P7-021`. 4 January 2027, and the endpoint has no 2027 rename to give: nothing at all,
+    or one announced on the 5th. Both are the provider's answer, so the year is recorded empty --
+    no rows, observed at the day's clock -- and the step goes on: `index_daily` is built, the year
+    before's names are built again (the ST rename announced on 31 December and published late is
+    read on the day it takes effect), and every read of `build_facts_day` is served. Before this
+    `panel build` refused the year ("cannot write a 'no_data' batch"), stopped short of
+    `index_daily` and of the year before's names, and the session was lost."""
+    store = _december_no_rename_yet(tmp_path, monkeypatch, pending=pending)
+    targets = daily.targets_for_survivor(SURVIVOR_BUILDS)
+
+    january, counts = _update(store, FIRST_2027, targets=targets, survivor=_survivor())
+
+    assert january["caught_up"] == []
+    assert sum(counts.values()) == FIRST_SESSION_OF_A_YEAR
+    assert _years_asked(store, NAMECHANGE_DATASET) == ["2027", "2026"]
+    coverage = store.panel.read_coverage(NAMECHANGE_DATASET, 2027)
+    assert coverage is not None and coverage.row_count == 0
+    assert coverage.as_of == _evening(FIRST_2027)
+    assert 2027 in store.panel.registered_years(INDEX_DAILY_DATASET)
+    after = {fact.ts_code: fact for fact in _facts(store, FIRST_2027, monkeypatch).facts}
+    assert after[LATE_ST].special_treatment is True
+    assert after[RENAMED_2027].special_treatment is False
+    assert set(after) == set(SECURITIES) - {DELISTED}
+
+
+@pytest.mark.parametrize("fault", ["failing", "truncated"])
+def test_a_failed_or_truncated_name_fetch_of_the_new_year_is_still_refused_by_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    """Only the provider's answer is "verified empty". A 2027 request whose connection is reset
+    on every attempt, or whose answer reaches the measured 10,000-row cap (a truncated answer
+    cannot be told from a complete one), is a failed fetch: `panel build` exits 4
+    (`provider_failure`), step 2 is refused naming the dataset, and no 2027 partition of the
+    corpus is written."""
+    store = _december_no_rename_yet(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli, "TushareProvider", partial(cli.TushareProvider, sleep=lambda _s: None))
+    store.market.fault = fault
+
+    with pytest.raises(daily.StepFailedError, match="refused dataset namechange") as refused:
+        _update(
+            store,
+            FIRST_2027,
+            targets=daily.targets_for_survivor(SURVIVOR_BUILDS),
+            survivor=_survivor(),
+        )
+
+    assert "exited 4" in str(refused.value)
+    assert 2027 not in store.panel.registered_years(NAMECHANGE_DATASET)
+
+
+def test_the_build_that_records_an_empty_rename_year_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The morning's build on 5 January, the year still empty: one request, exit 0, an `EMPTY`
+    line naming the year and how long it may be read empty, and the partition recorded."""
+    store = _december_no_rename_yet(tmp_path, monkeypatch)
+    through = name_year_empty_admissible_through(2027)
+
+    built = _names_build(store, year=2027, as_of=_morning(date(2027, 1, 5)))
+
+    assert built.exit_code == 0, built.reason()
+    assert f"EMPTY {NAMECHANGE_DATASET} year=2027: no rename announced yet at " in built.stderr
+    assert f"read empty through {through.isoformat()}" in built.stderr
+    assert store.market.payloads == [NAMECHANGE_DATASET]
+    coverage = store.panel.read_coverage(NAMECHANGE_DATASET, 2027)
+    assert coverage is not None and coverage.row_count == 0
+
+
+def test_an_empty_answer_for_a_year_that_holds_renames_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2027 holds a rename (written on the 6th); on the 7th the endpoint answers nothing for the
+    year: a lost fetch, refused by the panel, and the stored rename stays."""
+    store = _december_no_rename_yet(tmp_path, monkeypatch, pending=True)
+    first = _names_build(store, year=2027, as_of=_morning(date(2027, 1, 6)))
+    assert first.exit_code == 0, first.reason()
+    store.market.pending = False
+
+    again = _names_build(store, year=2027, as_of=_morning(date(2027, 1, 7)))
+
+    assert again.exit_code == 1
+    assert "already holds 1 rename row(s)" in again.reason()
+    assert "EMPTY" not in again.stderr
+    coverage = store.panel.read_coverage(NAMECHANGE_DATASET, 2027)
+    assert coverage is not None and coverage.row_count == 1
+
+
+def test_an_empty_answer_past_the_years_window_is_a_failed_fetch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The day after the window's end, 2027 still answers nothing: a failed fetch, not a
+    timetable. Refused by the panel, nothing written, and no `EMPTY` line."""
+    through = name_year_empty_admissible_through(2027)
+
+    store = _december_no_rename_yet(tmp_path, monkeypatch)
+    late = _names_build(store, year=2027, as_of=_morning(through + timedelta(days=1)))
+
+    assert late.exit_code == 1
+    assert f"only through {through.isoformat()}" in late.reason()
+    assert "EMPTY" not in late.stderr
+    assert 2027 not in store.panel.registered_years(NAMECHANGE_DATASET)
+
+
+def test_an_empty_answer_for_the_year_before_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The year before's names built again in January, and the endpoint answers nothing for it:
+    a year that has ended with no rename is a failed fetch; its stored partition is untouched.
+    (`silent` is turned on after 31 December's step, which asks 2026 itself.)"""
+    store = _december_no_rename_yet(tmp_path, monkeypatch)
+    store.market.silent = frozenset({"2026"})
+    before = store.panel.read_coverage(NAMECHANGE_DATASET, 2026)
+
+    past = _names_build(store, year=2026, as_of=_morning(date(2027, 1, 5)))
+
+    assert past.exit_code == 1
+    assert "announcement year 2026 served no rename" in past.reason()
+    assert "EMPTY" not in past.stderr
+    assert store.panel.read_coverage(NAMECHANGE_DATASET, 2026) == before
 
 
 # --- the year before's last sessions: completed before the new year's first build ---------------
