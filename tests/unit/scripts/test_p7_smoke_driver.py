@@ -16,6 +16,7 @@ import contextlib
 import importlib
 import io
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -35,6 +36,7 @@ import test_p7_smoke_env as env_tests
 from research_repo import git, head
 from test_daily_selection_survivor import STEADY_SURVIVOR
 from test_daily_selection_survivor_day import seeded  # noqa: F401  (a module fixture, reused)
+from typer.main import get_command
 
 from openalpha_cn import cli
 from openalpha_cn.panel.store import _try_lock, _unlock
@@ -1751,6 +1753,17 @@ def test_the_signal_handler_takes_no_lock_the_interrupted_code_may_hold() -> Non
     assert finished.stdout.splitlines() == ["interrupted"]
 
 
+def _the_build_commands_help_option() -> str:
+    """The name click gives `openalpha panel build`'s help option (`Context.help_option_names`),
+    read from the command itself. `test_cli_help.py` holds the help flag's literal to one module,
+    and this test renders no help -- it hands the flag to the driver to be refused -- so the name
+    comes from the command, as the driver's own refusal reads it, rather than a second spelling."""
+    tree: Any = get_command(cli.app)
+    build: Any = tree.commands["panel"].commands["build"]
+    context = build.make_context("openalpha panel build", [], resilient_parsing=True)
+    return str(context.help_option_names[0])
+
+
 def test_a_remedy_asking_for_help_is_refused_by_name_and_prints_nothing(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1758,9 +1771,10 @@ def test_a_remedy_asking_for_help_is_refused_by_name_and_prints_nothing(
     with the help option's exit code, `0`, for a reason."""
     paths = _paths(tmp_path)
     build = ["openalpha", "panel", "build", "--runtime-dir", str(paths["runtime"]), *_BATCH]
-    line = daily.pinned_command([*build, "--help"])
+    flag = _the_build_commands_help_option()
+    line = daily.pinned_command([*build, flag])
 
-    with pytest.raises(driver.RemedyError, match="--help"):
+    with pytest.raises(driver.RemedyError, match=re.escape(flag)):
         driver.parse_remedy(line, **paths)
 
     out, err = capsys.readouterr()
