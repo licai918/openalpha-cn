@@ -246,7 +246,7 @@ def test_a_claim_once_committed_cannot_be_deleted_back_into_a_read(repo: Path) -
     with pytest.raises(RuntimeError):
         run(registration, repo, measure)
     commit_file(repo, measure.claim, "the claim", at=COMMITTED + timedelta(hours=1))  # type: ignore[arg-type]
-    git(repo, "rm", "-q", str(measure.claim.relative_to(repo)))  # type: ignore[union-attr]
+    git(repo, "rm", "-q", measure.claim.relative_to(repo).as_posix())  # type: ignore[union-attr]
     git(repo, "commit", "-q", "-m", "drop the claim", at=COMMITTED + timedelta(hours=2))
 
     with pytest.raises(p7_reading.ReadingAlreadyClaimedError, match="committed"):
@@ -427,7 +427,7 @@ def test_a_result_once_committed_without_its_claim_cannot_be_deleted_back_into_a
     run(registration, repo, Measure())
     result = registration.with_name("v2-p7-024-validation.result.json")
     commit_file(repo, result, "the result alone", at=COMMITTED + timedelta(hours=1))
-    git(repo, "rm", "-q", str(result.relative_to(repo)))
+    git(repo, "rm", "-q", result.relative_to(repo).as_posix())
     git(repo, "commit", "-q", "-m", "drop the result", at=COMMITTED + timedelta(hours=2))
     claim_of(registration).unlink()
     window_claim_of(repo).unlink(missing_ok=True)
@@ -499,7 +499,7 @@ def test_a_second_reading_of_a_window_whose_first_claims_were_committed_and_dele
     for path in written:
         commit_file(repo, path, f"commit {path.name}", at=COMMITTED + timedelta(hours=2))
     for path in written:
-        git(repo, "rm", "-q", str(path.relative_to(repo)))
+        git(repo, "rm", "-q", path.relative_to(repo).as_posix())
     git(repo, "commit", "-q", "-m", "drop every trace", at=COMMITTED + timedelta(hours=3))
     second = registered(repo, reading="v2-p7-024-validation-again")
     measure = Measure()

@@ -5,6 +5,7 @@ frame for the scores, the forward tests' label panel for the labels). No researc
 
 from __future__ import annotations
 
+import argparse
 import dataclasses
 import hashlib
 import importlib
@@ -1187,12 +1188,19 @@ def test_the_power_subcommand_prints_the_calculators_lines(
     ]
 
 
-def test_only_the_cli_names_the_research_window(capsys: pytest.CaptureFixture[str]) -> None:
-    with pytest.raises(SystemExit) as raised:
-        p7.main(["explore", "--help"])
+def explore_help() -> str:
+    """The `explore` subcommand's help, formatted by argparse itself (the text its help flag
+    prints) -- `test_cli_help.py` holds the flag's literal to one module, and this is a plain
+    argparse parser, not the Rich-rendered CLI that helper exists for."""
+    parser = p7._parser()
+    (commands,) = (
+        action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+    )
+    return str(commands.choices["explore"].format_help())
 
-    assert raised.value.code == 0
-    help_text = capsys.readouterr().out
+
+def test_only_the_cli_names_the_research_window() -> None:
+    help_text = explore_help()
     assert "--first" in help_text
     assert "--window" not in help_text
     research = p7_windows.RESEARCH
@@ -1200,14 +1208,12 @@ def test_only_the_cli_names_the_research_window(capsys: pytest.CaptureFixture[st
 
 
 def test_the_help_reads_the_research_windows_dates_from_the_window_table(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The dates are the table's, not a copy typed into the help: a moved window moves them."""
     moved = p7_windows.DiagnosticWindow(
         name="research", first=date(2015, 2, 2), last=date(2021, 6, 30), ceiling_year=2021
     )
     monkeypatch.setattr(p7, "WINDOWS", {"research": moved})
-    with pytest.raises(SystemExit):
-        p7.main(["explore", "--help"])
 
-    assert "2015-02-02..2021-06-30" in capsys.readouterr().out
+    assert "2015-02-02..2021-06-30" in explore_help()
