@@ -45,10 +45,14 @@ a failure after the claim spends the window:
    window**, whatever reading names it: every claim file in `READING_DIRECTORY` -- a reading's
    `<reading>.claim.json` or a `<window>.window-claim.json` -- records its window, and each one
    that names this window refuses, whether it is on disk now or any version of it was ever
-   committed there on any ref; a claim file that cannot be read, and any git error, refuses
-   too. `registry._holdout_allowed` refuses any holdout row the same way, whatever registration
-   wrote it. The rule holds for every window a reading opens, `validation` and `second_use`
-   alike.
+   committed there on any ref; a claim file that cannot be read -- one naming no window in
+   `WINDOWS`, a near miss such as "Validation" or "validation\\n" included -- and any git error
+   refuse too. `registry._holdout_allowed` refuses any holdout row the same way, whatever
+   registration wrote it. The rule holds for every window a reading opens, `validation` and
+   `second_use` alike. Before any of it, a **shallow** repository is refused: its history stops
+   at the cut, so a claim committed before it is invisible. The remedy is `git fetch
+   --unshallow`, and it is an operational prerequisite of the real read: this repository's main
+   checkout was shallow when this was written (2026-11-02).
 5. `ReadingPreflightError` -- the panel catalogue lacks a year the read opens of a dataset
    (`preflight_problems`; it asks `registered_years` and reads no partition): the window's years
    for every dataset, and the year before as well for those that read it
@@ -94,7 +98,8 @@ What this does not establish:
   untracked-files parent): `_LOG_EVERYTHING`. It is **not** found once no ref reaches such a
   commit -- a reset, a rebase, an amend or a filter that drops it, a dropped stash, a deleted
   branch that was never merged: `git log --all` walks refs, not reflogs -- and not at all once
-  unreachable objects expire.
+  unreachable objects expire. A shallow repository hides everything before its cut, which is
+  why it is refused rather than read.
 * It binds a procedure, not access to the data. Code that builds a `WindowCappedStore` for the
   validation window itself, calls `read_once` with a `measure` of its own, calls the default
   measure directly (`_panel_measure(runtime_dir)(body, VALIDATION, binding)` -- the tests do, on
@@ -1073,7 +1078,17 @@ def _refuse_a_second_read(
     results: Sequence[Path],
 ) -> None:
     """Refuse when the reading's claim, the window's claim or a result is on disk, or was ever
-    committed on any ref. Every path is under `root` (built from the filed registration)."""
+    committed on any ref. Every path is under `root` (built from the filed registration). A
+    shallow repository is refused first: its history stops at the cut, and a claim committed
+    before it would be invisible to every check below."""
+    shallow = registry._git(root, "rev-parse", "--is-shallow-repository")
+    if shallow.returncode != 0 or shallow.stdout.strip() != b"false":
+        said = (shallow.stdout or shallow.stderr).decode(errors="replace").strip()
+        raise ReadingAlreadyClaimedError(
+            f"{root} is a shallow repository, or git cannot say that it is not ({said!r}): its "
+            "history stops at the cut, so a claim committed before it cannot be seen and the "
+            "window cannot be shown unread; run `git fetch --unshallow` first"
+        )
     whose = f"the {window.name} window"
     files = (
         (claim, "a claim", reading),
@@ -1221,6 +1236,14 @@ def _window_named(content: bytes, *, where: str) -> str:
         raise ReadingAlreadyClaimedError(
             f"{where} cannot be read as a claim: it names no window; a claim that cannot be read "
             "might name this window, so the read is refused"
+        )
+    if window not in WINDOWS:
+        # "Validation", " validation", "validation\n" are not another window: a near miss of
+        # this one's name is read as unreadable, never as some other window's claim.
+        raise ReadingAlreadyClaimedError(
+            f"{where} cannot be read as a claim: it names {window!r}, which is not a window "
+            f"({sorted(WINDOWS)}); a claim that cannot be read might name this window, so the "
+            "read is refused"
         )
     return window
 

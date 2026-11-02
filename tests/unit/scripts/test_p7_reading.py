@@ -795,6 +795,37 @@ def test_a_claim_with_a_non_ascii_name_committed_and_deleted_still_refuses(repo:
     refused(registered(repo), repo, hours=1, said="a claim naming the validation window")
 
 
+def test_a_shallow_repository_refuses_the_read_and_names_the_remedy(repo: Path) -> None:
+    """The re-reviewer's E4: a shallow clone's history stops at its cut, so a claim committed
+    before it cannot be seen; the read is refused until `git fetch --unshallow`."""
+    registration = registered(repo)
+    (repo / ".git" / "shallow").write_text(head(repo) + "\n", encoding="utf-8")
+
+    refused(registration, repo, hours=1, said="git fetch --unshallow")
+    assert not claim_of(registration).exists() and not window_claim_of(repo).exists()
+
+
+@pytest.mark.parametrize("named", ["Validation", " validation", "validation\n", "VALIDATION"])
+def test_a_claim_naming_no_known_window_is_unreadable_and_refuses(repo: Path, named: str) -> None:
+    """The re-reviewer's E6: a near-miss of a window's name is not another window."""
+    stray = repo / "docs" / "research" / "p7-readings" / "hand.claim.json"
+    stray.parent.mkdir(parents=True, exist_ok=True)
+    stray.write_text(json.dumps({"window": named, "reading": "hand"}) + "\n", encoding="utf-8")
+
+    refused(registered(repo), repo, hours=1, said="cannot be read as a claim")
+
+
+def test_a_committed_claim_naming_no_known_window_refuses_too(repo: Path) -> None:
+    stray = repo / "docs" / "research" / "p7-readings" / "hand.claim.json"
+    stray.parent.mkdir(parents=True, exist_ok=True)
+    stray.write_text(json.dumps({"window": "Validation", "reading": "hand"}) + "\n", "utf-8")
+    commit_file(repo, stray, "a near-miss claim", at=COMMITTED - timedelta(hours=1))
+    git(repo, "rm", "-q", stray.relative_to(repo).as_posix())
+    git(repo, "commit", "-q", "-m", "drop it", at=COMMITTED - timedelta(minutes=30))
+
+    refused(registered(repo), repo, hours=1, said="cannot be read as a claim")
+
+
 # --- the claim follows the filed registration, not the path handed in (ruling 2) ----------------
 
 
