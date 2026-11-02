@@ -1743,6 +1743,97 @@ def test_the_first_session_of_a_year_runs_to_its_record_asked_about_both_years(
     assert prediction["scored"] > 0
 
 
+# --- V2-P7-009: a book held into the first session of a year, across an ex-rights date ---------
+# (plan B, Task B2: tests only; the block ends at the next section rule)
+
+YEAR_END_EPOCH: Final[date] = date(2026, 12, 29)
+"""The year-end world's epoch: the first evening is 30 December, whose buys fill at the open of
+31 December, so the book holds them into 2027's first session."""
+EX_RIGHTS: Final[date] = FIRST_2027
+
+
+@dataclass
+class ExRightsNewYear(NewYearMarket):
+    """The New Year market with every security ex 10-for-10 on 2027's first session: the real
+    closes halve from it, that session's published previous close is the adjusted one (half of
+    31 December's), and the adjustment factor doubles. Nothing changes before it, so a panel
+    seeded from `NewYearMarket` serves this market too."""
+
+    def _close(self, code: str, day: date) -> float:
+        close = super()._close(code, day)
+        return round(close / 2, 2) if day >= EX_RIGHTS else close
+
+    def _pre_close(self, code: str, day: date) -> float:
+        before = super()._pre_close(code, day)
+        return round(before / 2, 2) if day >= EX_RIGHTS else before
+
+    def _factor(self, code: str, day: date) -> float:
+        return 2.0 if day >= EX_RIGHTS else 1.0
+
+
+@pytest.fixture(scope="module")
+def year_end(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The New Year market's panel through 29 December 2026 -- the build at noon on the 30th --
+    name corpus included: the store the evening of 30 December starts from."""
+    runtime = tmp_path_factory.mktemp("survivor-year-end") / "runtime"
+    market = NewYearMarket(open_days=NEW_YEAR_DAYS)
+    market.today = date(2026, 12, 29)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("TUSHARE_TOKEN", tds.SECRET_TOKEN)
+        patch.setattr(cli, "_panel_transport", lambda: market)
+        patch.setattr(cli, "_panel_clock", lambda: tds.WALL_CLOCK)
+        arguments = ["panel", "build", "--runtime-dir", str(runtime), "--year", "2026"]
+        arguments += ["--as-of", "2026-12-30T12:00:00+08:00", "--exchange", "SSE", "--json"]
+        for target in (*SEED_TARGETS, "namechange"):
+            arguments += ["--dataset", target]
+        built = daily.invoke(arguments)
+    assert built.exit_code == 0, built.reason()
+    return runtime
+
+
+def test_a_book_held_into_the_first_session_of_a_year_settles_it_across_an_ex_rights_date(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    year_end: Path,
+) -> None:
+    """`V2-P7-009` acceptance: the first session of a year settled for a book that holds
+    positions, across an adjustment event, on a calendar that spans the new year. Epoch 29
+    December: the evening of the 30th plans the initial build, its buys fill at the open of the
+    31st, and the evening of the 31st counts its sessions on 2026's calendar alone (the runbook's
+    year-end gap). 4 January 2027 is ordinal 3 on the calendar of 2026 and 2027, and every holding
+    goes ex 10-for-10 on it. Settled, each keeps its ledger quantity and its entry factor, is
+    marked at twice its real close (the ledger's units, ratio 2), and the book's equity moves by
+    what the market moved -- not by half."""
+    world = _world(
+        tmp_path,
+        monkeypatch,
+        year_end,
+        config=survivor_config(epoch=YEAR_END_EPOCH),
+        market=ExRightsNewYear(open_days=NEW_YEAR_DAYS),
+    )
+    last = date(2026, 12, 31)
+    for day in (date(2026, 12, 30), last, FIRST_2027):
+        _completed(world, capsys, day)
+
+    december, january = _snapshot(world, last), _snapshot(world, FIRST_2027)
+    assert (december.session_index, january.session_index) == (2, 3)
+    assert december.pending_orders == ()
+    held = [(position.subject, position.quantity) for position in december.book.positions]
+    assert len(held) == 10
+    assert [(position.subject, position.quantity) for position in january.book.positions] == held
+    assert {entry.ts_code: entry.entry_adj for entry in january.entry_factors} == {
+        code: Decimal(1) for code, _quantity in held
+    }
+    holdings = _journal(world, FIRST_2027)["result"]["paper"]["book"]["holdings"]
+    assert {item["ts_code"] for item in holdings} == {code for code, _quantity in held}
+    for item in holdings:
+        assert item["ledger_ratio"] == "2.0000"
+        assert Decimal(item["ledger_mark"]) == Decimal(item["real_close"]) * 2
+    # Measured: -0.69% on the ex-date. Unscaled, the marks would have halved.
+    assert abs(january.book.equity / december.book.equity - 1) < Decimal("0.02")
+
+
 # --- the paper book's lock and binding -------------------------------------------------------
 
 
