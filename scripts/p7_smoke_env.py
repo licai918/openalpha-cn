@@ -15,7 +15,8 @@ root exists, holds only what this prepare made, and a refusal names it for the u
    once, by an APFS clone, and writes nothing there. Nor is it inside the source checkout or the
    source panel it is made from. Each place is compared by spelling and, where it exists, by
    identity (`_within`: APFS ignores case, and `resolve()` keeps the case it is given). It must
-   not exist, and its parent must.
+   not exist, and its parent must. The source panel is not inside the main checkout either: the
+   repository's own `runtime/panel` is another, smaller panel than P6's.
 2. **The sources.** The main checkout holds a `.env` (`is_file()` only: it is never opened); the
    source panel holds a `catalog.duckdb`; the two request caps are whole numbers, phase 2's (the
    whole smoke's) no smaller than phase 1's.
@@ -32,9 +33,10 @@ root exists, holds only what this prepare made, and a refusal names it for the u
    cannot clone (HFS+, exFAT) `cp -c` copies too (`apfs_clone`).
 5. **The configuration reads**: `strategy_survivor.read_survivor_registration` of
    `smoke_configuration` with the registered seed, so the evening's step 1 cannot refuse it.
-6. **The clone**: `git clone --local --no-checkout` of the source into `<root>/repo`, the branch
-   `v2-p7-019-smoke` at the commit, and its `origin` removed -- a clone keeps a remote pointing
-   back at the main checkout, and one stray `git push` would deliver the smoke registration there.
+6. **The clone**: `git clone --local --no-checkout` of the source into `<root>/repo`, its `origin`
+   removed at once -- a clone keeps a remote pointing back at the main checkout, one stray `git
+   push` would deliver the smoke registration there, and a later step that fails must not leave
+   one -- and then the branch `v2-p7-019-smoke` at the commit.
 7. **The registration**: `registry.register` of the smoke configuration, `SMOKE_CRITERIA` and
    `smoke_settings()` at `REGISTRATION_PATH` in the clone, committed there alone under a fixed
    identity (`SMOKE_IDENTITY`, no hook, no signature); `registry.registered_checkout` then names
@@ -655,6 +657,12 @@ def prepare_smoke(
                 f"the smoke root {target} is inside {name} {base}; the smoke writes nothing into "
                 "what it is made from"
             )
+    if _within(panel, policy.main_checkout):
+        raise SmokeEnvironmentError(
+            f"the source panel {panel} is inside the main checkout {policy.main_checkout}: the "
+            "repository's own runtime/panel is not P6's panel (~/openalpha-research/panel); clone "
+            "that one, or an earlier smoke root's runtime/panel. Nothing was made"
+        )
     if root.is_symlink() or root.exists() or target.exists():
         raise SmokeEnvironmentError(
             f"the smoke root {target} exists; a smoke root is made new by its prepare, and "
@@ -735,8 +743,9 @@ def _make(
     # 6. the clone, on its own branch, with no remote
     repo = target / REPO_NAME
     _git(target, "clone", "--quiet", "--local", "--no-checkout", str(source), str(repo))
-    _git(repo, "checkout", "--quiet", "-b", SMOKE_BRANCH, commit)
+    # `origin` first: a step that fails after the clone must not leave a remote pointing back.
     _git(repo, "remote", "remove", "origin")
+    _git(repo, "checkout", "--quiet", "-b", SMOKE_BRANCH, commit)
     # 7. the registration, committed in the clone only
     registration = repo / REGISTRATION_PATH
     digest = registry.register(

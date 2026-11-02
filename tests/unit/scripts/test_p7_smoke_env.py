@@ -705,6 +705,39 @@ def test_a_git_that_times_out_or_cannot_run_is_a_refusal_that_makes_nothing(
     assert not (tmp_path / "smoke").exists()
 
 
+def test_a_checkout_that_fails_after_the_clone_leaves_no_remote_pointing_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`origin` goes first: whatever fails after the clone, the root it leaves holds no remote to
+    the main checkout -- here the checkout, the source standing on a branch of the smoke's name."""
+    source, panel = _source_repository(tmp_path), _panel(tmp_path)
+    git(source, "checkout", "-q", "-b", env.SMOKE_BRANCH)
+
+    with pytest.raises(env.SmokeEnvironmentError, match="already exists") as refused:
+        _prepare(tmp_path, monkeypatch, source, panel)
+
+    repo = (tmp_path / "smoke").resolve() / env.REPO_NAME
+    assert "was made by this prepare" in str(refused.value)
+    assert repo.is_dir()
+    assert git(repo, "remote").strip() == ""
+
+
+def test_prepare_refuses_a_source_panel_inside_the_main_checkout_before_it_makes_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The repository's own `runtime/panel` is another, smaller panel than P6's (route
+    adjustment, V1): the smoke clones `~/openalpha-research/panel` or an earlier root's."""
+    source = _source_repository(tmp_path)
+    panel = source / "runtime" / "panel"
+    panel.mkdir(parents=True)
+    (panel / "catalog.duckdb").write_bytes(b"catalog")
+
+    with pytest.raises(env.SmokeEnvironmentError, match=r"source panel .* the main checkout"):
+        _prepare(tmp_path, monkeypatch, source, panel)
+
+    assert not (tmp_path / "smoke").exists()
+
+
 macos_only = pytest.mark.skipif(sys.platform != "darwin", reason="cp -c is macOS's")
 
 
