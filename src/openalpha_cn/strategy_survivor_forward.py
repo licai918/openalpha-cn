@@ -2356,8 +2356,10 @@ def _cannot_be_evaluated_yet(
         )
     items += [
         (
-            "g0_needs_research_and_validation_conclusions",
-            "G-0 needs conclusions on the research and validation windows first",
+            "g0_is_one_preregistered_read_of_2022_2023",
+            "G-0 rests on one pre-registered, read-once reading of 2022-01-04..2023-12-29 "
+            "against a stop rule written before it (V2-P7-024): a first out-of-sample reading, "
+            "never confirmatory evidence",
         ),
         (
             "spent_window_2024_01_02_to_2026_09_24",

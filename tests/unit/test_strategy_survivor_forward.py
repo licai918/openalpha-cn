@@ -1874,7 +1874,7 @@ def test_the_seeded_sign_flip_is_deterministic_and_byte_identical_under_two_hash
 INTEGRITY: Final[str] = "integrity: the caller's threat model, handed in"
 NO_BOOK: Final[str] = "the paper book holds no snapshot"
 ALWAYS: Final[tuple[str, ...]] = (
-    "g0_needs_research_and_validation_conclusions",
+    "g0_is_one_preregistered_read_of_2022_2023",
     "spent_window_2024_01_02_to_2026_09_24",
     "paper_equity_is_not_evidence",
     "t8_expected_numbers_are_optimistic",
@@ -2960,3 +2960,22 @@ def test_a_secondary_window_that_matured_first_is_not_counted_as_tested_in_the_p
     assert window["n"] == window["usable_at_most"] == 8 - window["gaps"]
     assert window["observed"]["sd"] is None
     assert document["prediction_layer"]["h7"]["non_overlapping"]["test"] is None
+
+
+def test_the_g0_item_states_the_gate_the_2026_11_01_route_adopted() -> None:
+    """G-0 (spec 5.2, rewritten 2026-11-01) is one pre-registered, read-once reading of
+    2022-01-04..2023-12-29 against a stop rule written before it: a first out-of-sample reading,
+    never confirmatory evidence. The item every report prints no longer says it waits for
+    "conclusions on the research and validation windows"."""
+    document = reported({20: (), 5: ()}, {}, through=0)
+    items = document["cannot_be_evaluated_yet"]["items"]
+    statements = {item["code"]: item["statement"] for item in items}
+
+    statement = statements["g0_is_one_preregistered_read_of_2022_2023"]
+    assert "2022-01-04..2023-12-29" in statement
+    assert "V2-P7-024" in statement
+    assert "never confirmatory evidence" in statement
+    assert "g0_needs_research_and_validation_conclusions" not in statements
+    assert not any("research and validation windows" in text for text in statements.values())
+    assert f"  - {statement}" in survivor_forward_lines(document)
+    assert verdict_words(document) == []

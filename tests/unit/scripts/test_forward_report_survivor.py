@@ -276,7 +276,7 @@ def _codes(document: Mapping[str, Any]) -> list[str]:
 
 
 ALWAYS: Final[tuple[str, ...]] = (
-    "g0_needs_research_and_validation_conclusions",
+    "g0_is_one_preregistered_read_of_2022_2023",
     "spent_window_2024_01_02_to_2026_09_24",
     "paper_equity_is_not_evidence",
     "t8_expected_numbers_are_optimistic",
