@@ -978,14 +978,17 @@ class ReadinessRequirement:
     """The last calendar day, per year, on which a **zero-row** partition may be read
     (`V2-P6-018`), or `None`: no empty partition is admissible.
 
-    A zero-row partition says "nothing here yet as of its observation"
-    (`panel_ingest.write_empty_announcement_year`), and that claim has an expiry the writer
-    knows and a reader must apply too: a statement announcement year may be empty only until its
-    first statutory disclosure deadline. Read after it, the empty partition is refused as `stale`
-    whatever `max_staleness` says -- `None` included -- because no observation made before the
-    deadline can say nothing was filed by it. The default is the strict one, for the four checks'
-    reason: a requirement that did not say an empty partition is admissible gets `stale` for it.
-    Days are calendar days in each partition's own `date_timezone`.
+    A zero-row partition says "nothing here yet as of its observation", and that claim has an
+    expiry the writer knows and a reader must apply too. Each writer of one states its own: a
+    statement announcement year may be empty only until its first statutory disclosure deadline
+    (`panel_ingest.write_empty_announcement_year`, `V2-P6-018`), and a rename announcement year
+    only through `domain.name_history.name_year_empty_admissible_through` of its year
+    (`panel_ingest.write_empty_name_year`, `V2-P7-021`); the requirement for each dataset carries
+    the same table. Read after that day, the empty partition is refused as `stale` whatever
+    `max_staleness` says -- `None` included -- because no observation made before it can say
+    nothing was published by it. The default is the strict one, for the four checks' reason: a
+    requirement that did not say an empty partition is admissible gets `stale` for it. Days are
+    calendar days in each partition's own `date_timezone`.
     """
 
 
@@ -1732,7 +1735,7 @@ def evaluate_readiness(
                             if admissible is None
                             else f"only through {admissible.isoformat()}"
                         )
-                        + f'; at {requirement.as_of.isoformat()} its "nothing filed yet" '
+                        + f"; at {requirement.as_of.isoformat()} its empty answer "
                         "is stale by rule, whatever the staleness bound"
                     ),
                 )

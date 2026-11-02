@@ -360,7 +360,8 @@ relies on.
   before-or-after states while two pairs still straddled two holds, and a review measured
   about 70% of readiness verdicts `blocked` in a process reading beside a batch rewrite. Both
   pairs are now one hold:
-  - *A batch write.* `panel_ingest.write_panel_batch` and `write_empty_announcement_year` --
+  - *A batch write.* `panel_ingest.write_panel_batch` and `panel_ingest._write_empty_partition`
+    (the zero-row write `write_empty_announcement_year` and `write_empty_name_year` share) --
     every writer of a partition and its coverage, which is every ingest and every factor build
     -- pass the record to `write_partition(..., coverage=...)`: catalog row, rename, coverage,
     in one exclusive hold. As two holds, a reader between them judged the new partition by the

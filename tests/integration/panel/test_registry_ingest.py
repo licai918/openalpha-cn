@@ -709,8 +709,10 @@ def test_an_empty_rename_year_is_unreadable_after_its_window_even_without_a_stal
     if readable:
         assert set(read()) == {"000005.SZ"}
     else:
-        with pytest.raises(PanelStorageError, match="stale by rule"):
+        with pytest.raises(PanelStorageError, match="stale by rule") as refused:
             read()
+        # The catalog's rule serves every dataset's empty year, so it names no statement filing.
+        assert "filed" not in str(refused.value)
 
 
 @pytest.mark.parametrize(

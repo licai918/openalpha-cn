@@ -595,9 +595,11 @@ def write_panel_batch(
     writing it would either raise deep inside the store ("cannot write an empty partition
     batch") or, worse, be mistaken for a successful empty partition. Explicit no-data is a
     result to record somewhere, not a partition to create -- the same distinction
-    `ProviderBatch` draws between `status="no_data"` and an empty success. The one empty
-    partition this module writes is a statement announcement year with nothing filed in it yet,
-    through its own door (`write_empty_announcement_year`, `V2-P6-018`).
+    `ProviderBatch` draws between `status="no_data"` and an empty success. The empty partitions
+    this module writes go through doors of their own, each with its own expiry: a statement
+    announcement year with nothing filed in it yet (`write_empty_announcement_year`,
+    `V2-P6-018`) and a rename announcement year with nothing announced in it yet
+    (`write_empty_name_year`, `V2-P7-021`), both written by `_write_empty_partition`.
     """
     if batch.status != "success":
         raise PanelBatchError(
@@ -7359,15 +7361,8 @@ def write_empty_announcement_year(
 
     ## What the coverage record says, and why it cannot answer stale data
 
-    `row_count` 0 and no subjects, dates or revisions: empty. `as_of`, `fetched_at` and
-    `last_event_time` are the observation instant, so the partition is as fresh as the
-    observation and no fresher -- a reader with a staleness bound is refused once the observation
-    is older than it, exactly as it would be for a partition whose newest row is that old; and
-    the first write of a real row replaces the partition whole. `max_available_time` is the first
-    instant of the year: nothing in the partition becomes knowable later, so no reader at or after
-    the year's start is held back by it. The fields are the dataset's own shape, read from its
-    newest stored year, so the empty partition reads back with the same columns as a full one.
-    `batch_digest` is the digest of the `no_data` batch naming the reason.
+    `_write_empty_partition`'s, which says both; this function passes it the dataset's newest
+    stored year with rows as the template and the reason naming the year's first deadline.
 
     ## Refused when it could hide something
 
@@ -7439,7 +7434,22 @@ def _write_empty_partition(
 ) -> PartitionRef:
     """One zero-row partition of `dataset` for `year`, in `template`'s columns, observed at
     `observed_at`: the write `write_empty_announcement_year` (`V2-P6-018`) and
-    `write_empty_name_year` (`V2-P7-021`) share. Every check is the caller's; this only writes."""
+    `write_empty_name_year` (`V2-P7-021`) share. Every check is the caller's; this only writes.
+
+    ## What the coverage record says, and why it cannot answer stale data
+
+    `row_count` 0 and no subjects, dates or revisions: empty. `as_of`, `fetched_at` and
+    `last_event_time` are the observation instant, so the partition is as fresh as the
+    observation and no fresher -- a reader with a staleness bound is refused once the observation
+    is older than it, exactly as it would be for a partition whose newest row is that old; and
+    the first write of a real row replaces the partition whole. `max_available_time` is the first
+    instant of the year: nothing in the partition becomes knowable later, so no reader at or after
+    the year's start is held back by it. The fields are `template`'s -- each caller passes the
+    dataset's newest stored year with rows -- so the empty partition reads back with the same
+    columns as a full one. `batch_digest` is the digest of the `no_data` batch naming `reason`.
+    The caller's expiry for the empty answer is applied again by every reader, through its
+    requirement's `empty_admissible_through`: after it, the partition is `stale` by rule.
+    """
     zone = _resolve_timezone(date_timezone)
     marker = ColumnarPanelBatch(
         provider_id=template.provider_id,
@@ -7497,13 +7507,14 @@ def write_empty_name_year(
     the morning re-check read the corpus through the session's year -- so a year's first sessions
     could not run (the survivor runbook's limitation 1). "No rename announced yet" is a true
     answer on those days, given honestly by a partition that says so and says when it was
-    observed; the first write of a real row replaces it whole. The coverage record is
-    `_write_empty_partition`'s.
+    observed; the first write of a real row replaces it whole. What its coverage record says,
+    and why it cannot answer stale data, is `_write_empty_partition`'s; the template is the
+    corpus's newest stored year with rows.
 
     Refused (`PanelBatchError`) when it could hide something: a year other than `observed_at`'s
     own, a day after the year's window (`name_year_may_be_empty`), a stored partition that holds
-    rows (an empty answer over announced renames is a lost fetch), a store with no year whose
-    columns it can take.
+    rows (an empty answer over announced renames is a lost fetch; a stored empty year is simply
+    recorded again, at the later observation), a store with no year whose columns it can take.
     """
     zone = _resolve_timezone(date_timezone)
     day = observed_at.astimezone(zone).date()
