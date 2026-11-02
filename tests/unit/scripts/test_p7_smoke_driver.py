@@ -1620,3 +1620,42 @@ def test_an_interrupt_inside_a_real_panel_build_discards_the_root(
     (end,) = _ends(smoke)
     assert end["fault"] == "KeyboardInterrupt", (end, err)
     assert _spent(smoke).discarded is not None
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGHUP"), reason="POSIX signals")
+def test_an_interrupt_the_command_turned_into_another_fault_is_an_interrupt_and_is_forgotten(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,  # noqa: F811
+) -> None:
+    """N1: a command that catches the `KeyboardInterrupt` and raises something else in its place
+    was interrupted all the same -- and the next invocation, not interrupted, is not taken for
+    one. A morning, which keeps its root, so there is a next one."""
+    smoke = _smoke(tmp_path, monkeypatch, seeded, epoch=survivor_day.EPOCH)
+    reached: list[str] = []
+    previous = signal.signal(signal.SIGTERM, lambda *_: reached.append("the test's own handler"))
+    calls: list[int] = []
+
+    def body() -> int:
+        calls.append(1)
+        if len(calls) == 1:
+            try:
+                os.kill(os.getpid(), signal.SIGTERM)
+                time.sleep(5)
+            except KeyboardInterrupt as error:
+                raise RuntimeError("the command's own fault, in the interrupt's place") from error
+        return 0
+
+    _standing_in(monkeypatch, body)
+    try:
+        first = _drive(smoke, capsys, "morning", at=survivor_day.RUN_CLOCK)
+        second = _drive(smoke, capsys, "morning", at=survivor_day.RUN_CLOCK)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+    assert reached == []
+    assert first[0] == driver.INTERRUPTED_EXIT, first[2]
+    assert second[0] == 0, second[2]
+    assert [end["fault"] for end in _ends(smoke)] == ["KeyboardInterrupt", None]
+    assert _spent(smoke).discarded is None
