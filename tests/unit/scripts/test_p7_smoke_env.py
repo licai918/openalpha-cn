@@ -430,7 +430,9 @@ def test_the_smoke_protocol_is_one_the_weekly_report_reads() -> None:
     assert protocol.random_seed == tds.grid.PROTOCOL_RANDOM_SEED
 
 
-@pytest.mark.parametrize("ledger", ["removed", "emptied", "not prepared first", "another root's"])
+@pytest.mark.parametrize(
+    "ledger", ["removed", "emptied", "not prepared first", "another root's", "prepared twice"]
+)
 def test_a_root_whose_ledger_does_not_open_with_its_own_prepared_event_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ledger: str
 ) -> None:
@@ -450,6 +452,8 @@ def test_a_root_whose_ledger_does_not_open_with_its_own_prepared_event_is_refuse
     if ledger == "another root's":
         event = {**json.loads(lines[0]), "registration_sha256": "0" * 64}
         path.write_text(json.dumps(event) + "\n", encoding="utf-8")
+    if ledger == "prepared twice":
+        path.write_text(lines[0] + lines[0], encoding="utf-8")
 
     with pytest.raises(env.SmokeEnvironmentError, match=env.LEDGER_NAME):
         env.SmokeManifest.read(manifest.root)
@@ -736,6 +740,98 @@ def test_prepare_refuses_a_source_panel_inside_the_main_checkout_before_it_makes
         _prepare(tmp_path, monkeypatch, source, panel)
 
     assert not (tmp_path / "smoke").exists()
+
+
+# --- the defensive checks, each pinned -----------------------------------------------------------
+
+
+def test_the_placeholder_protocol_and_the_criteria_are_decision_5_s_values() -> None:
+    """The plan's values (decision 5), written out here rather than read back from the module:
+    a placeholder the weekly report needs, marked as no `V2-P7-006` proposal."""
+    settings = env.smoke_settings()
+
+    assert settings["survivor_forward_protocol"] == {
+        "schema_version": "survivor-forward-protocol/v1",
+        "anchor_ordinal": 1,
+        "primary_horizon": 20,
+        "secondary_horizons": [5],
+        "primary_metric": "rank_ic",
+        "secondary_metrics": ["survivors_minus_ew", "ew_minus_worst_decile"],
+        "window_periods": 2,
+        "bootstrap_samples": 1000,
+        "random_seed": tds.grid.PROTOCOL_RANDOM_SEED,
+        "q": 0.1,
+    }
+    assert env.SMOKE_CRITERIA == {
+        "smoke": "V2-P7-019: no criterion; nothing this registration produces is evidence"
+    }
+
+
+def test_prepare_refuses_an_untracked_file_under_the_bound_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The registration is written by this checkout's code: an untracked module under `src/` is
+    code the clone would not hold."""
+    source, panel = _source_repository(tmp_path), _panel(tmp_path)
+    (source / "src" / "openalpha_cn" / "untracked.py").write_text("RULES = 3\n", encoding="utf-8")
+
+    with pytest.raises(env.SmokeEnvironmentError, match="uncommitted changes"):
+        _prepare(tmp_path, monkeypatch, source, panel)
+
+    assert not (tmp_path / "smoke").exists()
+
+
+@pytest.mark.parametrize("history", ["a commit under it", "the registry names another commit"])
+def test_prepare_refuses_a_registration_commit_that_is_not_the_one_commit_on_the_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, history: str
+) -> None:
+    """The clone's registration commit must be `HEAD`, the one the registry names, and sit
+    directly on the code commit."""
+    source, panel = _source_repository(tmp_path), _panel(tmp_path)
+    real = env.registry.registered_checkout
+    rewritten: list[str] = []
+
+    def rewriting(registration: Path, repo: Path, **keywords: Any) -> tuple[Path, str, str]:
+        if rewritten:
+            return real(registration, repo, **keywords)
+        rewritten.append(history)
+        if history == "a commit under it":
+            content = registration.read_bytes()
+            git(repo, "reset", "-q", "--hard", "HEAD^")
+            git(repo, "commit", "-q", "--allow-empty", "-m", "under", at=tds.COMMITTED)
+            registration.parent.mkdir(parents=True, exist_ok=True)
+            registration.write_bytes(content)
+            git(repo, "add", env.REGISTRATION_PATH)
+            git(repo, "commit", "-q", "-m", "registration", at=tds.COMMITTED)
+            return real(registration, repo, **keywords)
+        root, _commit, code = real(registration, repo, **keywords)
+        return root, "f" * 40, code
+
+    monkeypatch.setattr(env.registry, "registered_checkout", rewriting)
+
+    with pytest.raises(env.SmokeEnvironmentError, match="is not the one commit on"):
+        _prepare(tmp_path, monkeypatch, source, panel)
+
+    assert rewritten == [history]
+
+
+def test_prepare_refuses_a_pinned_worktree_that_stands_elsewhere(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, panel = _source_repository(tmp_path), _panel(tmp_path)
+    real = daily.pin_worktree
+
+    def elsewhere(registration: Path, repo: Path, directory: Path) -> str:
+        real(registration, repo, directory)
+        git(directory, "checkout", "-q", "--detach", "HEAD^")
+        return head(directory)
+
+    monkeypatch.setattr(daily, "pin_worktree", elsewhere)
+
+    with pytest.raises(env.SmokeEnvironmentError, match="stands at"):
+        _prepare(tmp_path, monkeypatch, source, panel)
+
+    assert not ((tmp_path / "smoke") / env.MANIFEST_NAME).exists()
 
 
 macos_only = pytest.mark.skipif(sys.platform != "darwin", reason="cp -c is macOS's")
