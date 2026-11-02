@@ -718,18 +718,71 @@ def test_an_empty_rename_year_is_unreadable_after_its_window_even_without_a_stal
     [
         (2027, name_year_empty_admissible_through(2027) + timedelta(days=1)),
         (2026, date(2027, 1, 4)),
+        (2027, date(2026, 12, 31)),
     ],
-    ids=["past the window", "another year than the observation's"],
+    ids=["past the window", "a year that has ended", "a year not yet begun"],
 )
 def test_an_empty_rename_year_is_refused_past_its_window_or_for_another_year(
     tmp_path: Path, year: int, day: date
 ) -> None:
     """A whole market that has announced no rename by the window's end -- or in a year that has
-    ended -- is a failed fetch, not a timetable: refused by name, nothing written."""
+    ended -- is a failed fetch, not a timetable: refused by name, nothing written. A year not yet
+    begun is refused too, although its window has not passed: an observation from the year before
+    says nothing about this one (only the year rule, not the window, refuses that case)."""
     store = _seed_namechange(tmp_path)
     with pytest.raises(PanelBatchError, match=f"announcement year {year} served no rename"):
         write_empty_name_year(store, year=year, observed_at=_evening(day))
     assert year not in store.registered_years(NAMECHANGE_DATASET)
+
+
+@pytest.mark.parametrize(
+    ("observed_at", "admitted"),
+    [
+        (datetime(2026, 12, 31, 15, 30, tzinfo=UTC), False),
+        (datetime(2026, 12, 31, 16, 30, tzinfo=UTC), True),
+        (datetime(2027, 1, 31, 15, 59, tzinfo=UTC), True),
+        (datetime(2027, 1, 31, 16, 0, tzinfo=UTC), False),
+    ],
+    ids=[
+        "23:30 on 31 December in Shanghai",
+        "00:30 on 1 January in Shanghai",
+        "23:59 on the window's last day in Shanghai",
+        "00:00 the day after the window in Shanghai",
+    ],
+)
+def test_an_empty_rename_year_is_judged_on_the_shanghai_day_of_its_observation(
+    tmp_path: Path, observed_at: datetime, admitted: bool
+) -> None:
+    """Both rules read the observation's calendar day in Asia/Shanghai, the zone every `ann_date`
+    is in -- not the day the instant's own offset (here UTC) would name, eight hours behind."""
+    store = _seed_namechange(tmp_path)
+    if admitted:
+        write_empty_name_year(store, year=2027, observed_at=observed_at)
+        assert 2027 in store.registered_years(NAMECHANGE_DATASET)
+    else:
+        with pytest.raises(PanelBatchError, match="announcement year 2027 served no rename"):
+            write_empty_name_year(store, year=2027, observed_at=observed_at)
+        assert 2027 not in store.registered_years(NAMECHANGE_DATASET)
+
+
+def test_an_empty_rename_year_is_recorded_again_inside_its_window_at_the_later_observation(
+    tmp_path: Path,
+) -> None:
+    """An empty year already stored is no announced rename to protect: a later build inside the
+    window -- the next session's evening -- records it again, and the partition then says it was
+    observed then, not at the first evening."""
+    store = _seed_namechange(tmp_path)
+    write_empty_name_year(store, year=2027, observed_at=FIRST_EVENING_2027)
+    second = _evening(date(2027, 1, 5))
+
+    ref = write_empty_name_year(store, year=2027, observed_at=second)
+
+    coverage = store.read_coverage(NAMECHANGE_DATASET, 2027)
+    assert ref.row_count == 0
+    assert coverage is not None and coverage.row_count == 0
+    assert coverage.as_of == coverage.fetched_at == coverage.last_event_time == second
+    histories = load_name_histories(store, years=(2021, 2027), as_of=second, max_staleness=None)
+    assert set(histories) == {"000005.SZ"}
 
 
 def test_an_empty_rename_year_is_never_written_over_announced_renames(tmp_path: Path) -> None:
