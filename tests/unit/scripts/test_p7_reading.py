@@ -1048,3 +1048,10 @@ def test_the_default_measure_reads_and_hashes_inside_one_hold(
         len(document["plan"]["sessions"])
     ] * 2
     assert evaluated["outcome"] in ("triggered", "not triggered") and evaluated["reason"] is None
+    # The reviewer's probe (fix round 1, ruling 5): the one reading of the validation window is not
+    # in-sample, in the result's JSON or in its text.
+    result = {**document, "stop_rule": evaluated}
+    text = "\n".join(p7_reading.reading_lines(result, body))
+    assert document["summary"]["composite"]["h20"]["power_if_planning_sd_were_this"] is not None
+    assert p7_diagnostics.READ_ONCE_POWER_WORDING in text
+    assert "in-sample" not in text and "in-sample" not in json.dumps(result)

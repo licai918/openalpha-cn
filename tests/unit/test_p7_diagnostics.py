@@ -875,6 +875,43 @@ def test_a_binding_makes_the_read_once_kind_and_wording() -> None:
     )
 
 
+def test_a_read_once_document_never_says_in_sample_and_the_exploratory_one_is_unchanged() -> None:
+    """`V2-P7-004` fix round 1, ruling 5: the rank IC's power block of the one reading of a window
+    is a value of that reading, not an in-sample one; the exploratory wording stays as it was."""
+    binding = {
+        "reading": "probe",
+        "registration_sha256": "0" * 64,
+        "registration_commit": "0" * 40,
+        "claim_sha256": "1" * 64,
+    }
+    read_once = fixed_document(binding=binding)
+    text = json.dumps(read_once, sort_keys=True, ensure_ascii=False)
+    text += "\n" + "\n".join(p7.diagnostic_lines(read_once))
+    power = read_once["summary"][p7.COMPOSITE]["h20"]["power_if_planning_sd_were_this"]
+
+    assert p7.READ_ONCE_POWER_WORDING == (
+        "if the planning sd were this value measured in the one reading of this window: an "
+        "observed value of that reading, never a planning value by itself"
+    )
+    assert power["wording"] == p7.READ_ONCE_POWER_WORDING
+    assert f"  rank_ic power {p7.READ_ONCE_POWER_WORDING}: sd " in text
+    assert "in-sample" not in text
+    assert "exploratory" not in text
+
+    exploratory = fixed_document()
+    lines = "\n".join(p7.diagnostic_lines(exploratory))
+    assert p7.EXPLORATORY_POWER_WORDING == (
+        "if the planning sd were this exploratory value (in-sample, measured after the factors "
+        "were chosen): never a planning value by itself"
+    )
+    assert (
+        exploratory["summary"][p7.COMPOSITE]["h20"]["power_if_planning_sd_were_this"]["wording"]
+        == p7.EXPLORATORY_POWER_WORDING
+    )
+    assert f"  rank_ic power {p7.EXPLORATORY_POWER_WORDING}: sd " in lines
+    assert p7.READ_ONCE_POWER_WORDING not in lines
+
+
 def test_two_runs_write_the_same_bytes_under_two_hash_seeds() -> None:
     here = _document_bytes()
     assert here == _document_bytes()

@@ -52,7 +52,9 @@ the plan from the first, `m = ceil(horizon / stride)`, so two sampled labels nev
 session. A gap does not move the sample: it reduces `n`. The gaps and the unlabelled counts
 listed are the sampled days'. The rank IC's standard deviation, when there is one, is fed to
 `backtest.power_analysis` as a *what if*: the power the design would have if the planning sd
-were this in-sample value (`EXPLORATORY_POWER_WORDING`) -- never a planning value by itself.
+were this in-sample value (`EXPLORATORY_POWER_WORDING`) -- never a planning value by itself. In a
+read-once document the value is the one reading's, not an in-sample one, and the block says so
+(`READ_ONCE_POWER_WORDING`).
 
 The document is deterministic: no random component (`"random_component": "none"`), no set
 iteration in what is written, and `config_digest` is the SHA-256 of `grid.canonical_json` of the
@@ -152,6 +154,11 @@ EXPLORATORY_POWER_WORDING: Final = (
     "if the planning sd were this exploratory value (in-sample, measured after the factors were "
     "chosen): never a planning value by itself"
 )
+READ_ONCE_POWER_WORDING: Final = (
+    "if the planning sd were this value measured in the one reading of this window: an observed "
+    "value of that reading, never a planning value by itself"
+)
+"""The power block's wording in a read-once document: the sd is the reading's own value."""
 COMPOSITE: Final = "composite"
 METRICS: Final = ("rank_ic", "ew_minus_worst_decile", "survivors_minus_ew", "top_minus_bottom")
 
@@ -559,8 +566,14 @@ def _gap_reason(error: Exception) -> str:
 # --- the summary ---------------------------------------------------------------------------------
 
 
-def summarize(request: DiagnosticRequest, readings: Sequence[DayReading]) -> dict[str, Any]:
-    """`summary[score][f"h{h}"]`: the non-overlapping sample's series; see the module docstring."""
+def summarize(
+    request: DiagnosticRequest,
+    readings: Sequence[DayReading],
+    *,
+    power_wording: str = EXPLORATORY_POWER_WORDING,
+) -> dict[str, Any]:
+    """`summary[score][f"h{h}"]`: the non-overlapping sample's series; see the module docstring.
+    `power_wording` is the power block's (`READ_ONCE_POWER_WORDING` in a read-once document)."""
     plan = request.plan
     found = {(item.session, item.score, item.horizon): item for item in readings}
     summary: dict[str, Any] = {}
@@ -623,7 +636,9 @@ def summarize(request: DiagnosticRequest, readings: Sequence[DayReading]) -> dic
                 for k in request.tails
             ]
             block["unlabelled_by_code"] = dict(sorted(unlabelled.items()))
-            block["power_if_planning_sd_were_this"] = _power_block(request, rank_ic.sd)
+            block["power_if_planning_sd_were_this"] = _power_block(
+                request, rank_ic.sd, power_wording
+            )
             blocks[f"h{horizon}"] = block
         summary[score] = blocks
     return summary
@@ -647,13 +662,16 @@ def _series_form(summary: SeriesSummary) -> dict[str, Any]:
     }
 
 
-def _power_block(request: DiagnosticRequest, sd: float | None) -> dict[str, Any] | None:
-    """The calculator at `sd`, as a *what if*; `None` when the series has no spread."""
+def _power_block(
+    request: DiagnosticRequest, sd: float | None, wording: str
+) -> dict[str, Any] | None:
+    """The calculator at `sd`, as a *what if* worded by the document's kind; `None` when the
+    series has no spread."""
     if sd is None or not sd > 0:
         return None
     level, target = request.power_test_level, request.power_target
     block: dict[str, Any] = {
-        "wording": EXPLORATORY_POWER_WORDING,
+        "wording": wording,
         "sd": sd,
         "test_level": level,
         "target_power": target,
@@ -738,7 +756,13 @@ def diagnostic_document(
         },
         "binding": None if binding is None else grid.to_json_value(dict(binding)),
         "days": [_day_form(item) for item in readings],
-        "summary": summarize(request, readings),
+        "summary": summarize(
+            request,
+            readings,
+            power_wording=(
+                EXPLORATORY_POWER_WORDING if binding is None else READ_ONCE_POWER_WORDING
+            ),
+        ),
     }
 
 
@@ -837,8 +861,10 @@ def _block_lines(score: str, block: Mapping[str, Any]) -> list[str]:
     lines.extend(f"  gap {gap['session']}: {gap['reason']}" for gap in block["gaps"])
     power = block["power_if_planning_sd_were_this"]
     if power is not None:
+        # The block's own wording, chosen by the document's kind (`diagnostic_document`), so the
+        # text says what the JSON says.
         lines.append(
-            f"  rank_ic power {EXPLORATORY_POWER_WORDING}: sd {_number(power['sd'])}, one-sided "
+            f"  rank_ic power {power['wording']}: sd {_number(power['sd'])}, one-sided "
             f"test level {power['test_level']:g}"
         )
         for kind in ("normal", "t"):
