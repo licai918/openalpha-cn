@@ -317,8 +317,27 @@ def _parse(arguments: Sequence[str], *, resilient: bool) -> tuple[str, Mapping[s
     if command is None:
         raise RemedyError(f"this build has no `openalpha {' '.join(head)}`")
     name = f"openalpha {' '.join(head)}"
+    options = tuple(arguments[2:])
     try:
-        context = command.make_context(name, list(arguments[2:]), resilient_parsing=resilient)
+        # A list of its own to each parse: click consumes the one it is given.
+        context = command.make_context(name, list(options), resilient_parsing=True)
+        if not resilient:
+            # The help option prints the command's help and exits (0) when parsed strictly; it
+            # builds nothing, and is named, not printed.
+            asked = [word for word in options if word in context.help_option_names]
+            if asked:
+                raise RemedyError(
+                    f"`{name} {asked[0]}` prints the command's help and builds nothing: it is "
+                    "not a remedy"
+                )
+            # Whatever else the strict parse would print is not for the terminal.
+            with (
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                context = command.make_context(name, list(options))
+    except RemedyError:
+        raise
     except Exception as error:  # that click's own `ClickException`, or worse: refused either way
         shown = error.format_message() if hasattr(error, "format_message") else str(error)
         raise RemedyError(f"`{name}` refuses this remedy: {shown}") from error

@@ -1749,3 +1749,19 @@ def test_the_signal_handler_takes_no_lock_the_interrupted_code_may_hold() -> Non
 
     assert finished.returncode == 0, finished.stderr
     assert finished.stdout.splitlines() == ["interrupted"]
+
+
+def test_a_remedy_asking_for_help_is_refused_by_name_and_prints_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """R4: `--help` builds nothing; the strict parse printed some 42 KB of help and was refused
+    with the help option's exit code, `0`, for a reason."""
+    paths = _paths(tmp_path)
+    build = ["openalpha", "panel", "build", "--runtime-dir", str(paths["runtime"]), *_BATCH]
+    line = daily.pinned_command([*build, "--help"])
+
+    with pytest.raises(driver.RemedyError, match="--help"):
+        driver.parse_remedy(line, **paths)
+
+    out, err = capsys.readouterr()
+    assert (out, err) == ("", "")
