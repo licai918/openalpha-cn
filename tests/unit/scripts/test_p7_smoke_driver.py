@@ -639,10 +639,10 @@ def test_a_ledger_cut_back_is_refused_though_the_manifest_still_reads(
     assert _drive(smoke, capsys, *evening, at=survivor_day.RUN_CLOCK)[0] == 0
     assert _drive(smoke, capsys, *evening, at=survivor_day.RUN_CLOCK)[0] == 0
     ledger = smoke.root / env.LEDGER_NAME
-    lines = ledger.read_text(encoding="utf-8").split("\n")
+    lines = ledger.read_bytes().split(b"\n")
     # prepared, start 1, end 1, start 2, end 2, and the empty string after the last newline
     kept = lines[:1] if cut == "to its prepared line" else [lines[0], *lines[3:5]]
-    ledger.write_text("\n".join(kept) + "\n", encoding="utf-8")
+    ledger.write_bytes(b"\n".join(kept) + b"\n")  # bytes: no CRLF on Windows
     env.SmokeManifest.read(smoke.root)  # the manifest's own check passes either way
     sent = len(smoke.market.payloads)
 
@@ -651,7 +651,7 @@ def test_a_ledger_cut_back_is_refused_though_the_manifest_still_reads(
     assert code == driver.REFUSED_EXIT
     assert any("smoke: refused:" in line and "ledger" in line for line in err)
     assert len(smoke.market.payloads) == sent
-    assert ledger.read_text(encoding="utf-8") == "\n".join(kept) + "\n"
+    assert ledger.read_bytes() == b"\n".join(kept) + b"\n"
     code, out, _err = _drive(smoke, capsys, "status", at=survivor_day.RUN_CLOCK)
     assert code == 0
     assert any(line.startswith("ledger") and "refused" in line for line in out.splitlines())
@@ -861,6 +861,47 @@ def test_a_panel_build_that_fails_short_of_the_cap_exits_as_it_did_and_keeps_the
     assert len(sink.payloads) == 2
     spent = _spent(smoke)
     assert (spent.total, spent.discarded) == (2, None)
+
+
+def test_the_weekly_report_is_forward_report_s_and_the_morning_the_day_s_with_its_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,  # noqa: F811
+) -> None:
+    """Which command each kind runs, and with what. `test_a_morning_spends_one_request_and_a_
+    weekly_report_none` cannot tell a weekly report from the daily command given its arguments:
+    at 10:00 of the next day the daily command reprints the complete evening -- no request,
+    exit 0 -- and the ledger still names the invocation `weekly`."""
+    smoke = _smoke(tmp_path, monkeypatch, seeded, epoch=survivor_day.EPOCH)
+    reported: list[list[str]] = []
+
+    def report(argv: Sequence[str], *, clock: Callable[[], datetime]) -> int:
+        del clock
+        reported.append(list(argv))
+        print("a stand-in weekly report")
+        return 0
+
+    monkeypatch.setattr(driver.forward_report, "main", report)
+    days = _standing_in(monkeypatch, lambda: 0)
+    paths = ["--runtime-dir", str(smoke.manifest.runtime)]
+    paths += [
+        "--registration",
+        str(smoke.manifest.registration),
+        "--repo",
+        str(smoke.manifest.pinned),
+    ]
+    as_of = ["--as-of", "2026-04-07T10:00:00+08:00"]
+
+    assert _drive(smoke, capsys, "weekly", "--", *as_of, at=NOW)[0] == 0
+    assert _drive(smoke, capsys, "morning", "--", *as_of, at=NOW)[0] == 0
+    assert _drive(smoke, capsys, "evening", "--", *as_of, at=NOW)[0] == 0
+
+    assert reported == [[*paths, *as_of]]
+    assert days == [[*paths, *as_of, "--morning-recheck"], [*paths, *as_of]]
+    assert "a stand-in weekly report" in (smoke.root / env.LOGS_NAME / "0001-weekly.out").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_the_driver_and_the_cap_share_one_daily_selection_and_one_cli() -> None:
