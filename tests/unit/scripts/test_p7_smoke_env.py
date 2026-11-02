@@ -834,6 +834,40 @@ def test_prepare_refuses_a_pinned_worktree_that_stands_elsewhere(
     assert not ((tmp_path / "smoke") / env.MANIFEST_NAME).exists()
 
 
+def test_the_manifest_s_caps_are_read_only_and_the_manifest_is_hashable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, panel = _source_repository(tmp_path), _panel(tmp_path)
+    caps = dict(CAPS)
+
+    manifest = _prepare(tmp_path, monkeypatch, source, panel, caps=caps)
+
+    caps[1] = 0
+    assert manifest.caps == CAPS
+    with pytest.raises(TypeError):
+        manifest.caps[1] = 0
+    read = env.SmokeManifest.read(manifest.root)
+    assert read == manifest
+    assert hash(read) == hash(manifest)
+    stored = json.loads((manifest.root / env.MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert stored["caps"] == {"1": 190, "2": 460}
+
+
+@pytest.mark.parametrize("fault", [ValueError, KeyError])
+def test_a_value_or_key_error_after_the_clone_names_the_root_it_made(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: type[Exception]
+) -> None:
+    source, panel = _source_repository(tmp_path), _panel(tmp_path)
+
+    def failing(from_: Path, to: Path) -> None:
+        raise fault("the copy refused")
+
+    with pytest.raises(env.SmokeEnvironmentError, match="was made by this prepare"):
+        _prepare(tmp_path, monkeypatch, source, panel, copy_tree=failing)
+
+    assert ((tmp_path / "smoke") / env.REPO_NAME).is_dir()
+
+
 macos_only = pytest.mark.skipif(sys.platform != "darwin", reason="cp -c is macOS's")
 
 

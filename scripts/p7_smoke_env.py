@@ -72,9 +72,10 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Final
 
 _SCRIPTS: Final[Path] = Path(__file__).resolve().parent
@@ -464,8 +465,13 @@ class SmokeManifest:
     source_panel: Path
     source_catalog_sha256: str
     panel_files: int
-    caps: Mapping[int, int]
+    caps: Mapping[int, int] = field(hash=False)
+    """Read-only (a `MappingProxyType` of a copy): a frozen manifest is not changed in place.
+    Left out of the hash, which a mapping has none of, and kept in the equality."""
     created_at: datetime
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "caps", MappingProxyType(dict(self.caps)))
 
     @property
     def repo(self) -> Path:
@@ -619,15 +625,16 @@ def _made(root: Path) -> str:
 
 
 _LATE_FAILURES: Final[tuple[type[BaseException], ...]] = (
-    SmokeEnvironmentError,
+    ValueError,
+    KeyError,
     daily_selection.StepFailedError,
-    registry.RegistrationError,
     registry.HoldoutRefusedError,
     OSError,
     subprocess.SubprocessError,
 )
-"""What a step from 6 on refuses with: each is reported as a `SmokeEnvironmentError` naming the
-root it made."""
+"""What a step from 6 on refuses with -- `ValueError` holds `SmokeEnvironmentError`,
+`registry.RegistrationError` and a JSON or validation fault; `KeyError` a missing field: each is
+reported as a `SmokeEnvironmentError` naming the root it made."""
 
 
 def prepare_smoke(
@@ -817,7 +824,7 @@ def _make(
         source_panel=panel,
         source_catalog_sha256=catalog_sha256,
         panel_files=len(before),
-        caps=dict(caps),
+        caps=caps,
         created_at=clock(),
     )
     manifest.write()
