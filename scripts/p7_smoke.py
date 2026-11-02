@@ -60,9 +60,12 @@ together with its logs, an edited count, and a hand-inserted `phase` line.
 read from the ledger's `end` event when the call then ended on another exception, which
 `run_capped` records and raises; `REFUSED_EXIT` (5) for a refusal of the driver, the ledger or the
 manifest; `COMMAND_FAILED_EXIT` (7) for a `panel build` or `factor build` that failed with a code
-of its own the driver's would hide -- 4 (`PanelExit.provider_failure`), 5 (`internal_error`) or 6
-(`catalog_busy`): the closing line names the command's own; 3 for a checkout that is not the
-pinned worktree's (`ForeignPackageError`); 130 for an interruption.
+of its own the driver's would hide -- 3 (`PanelExit.bad_request`, which can come after the calendar
+was fetched), 4 (`provider_failure`), 5 (`internal_error`) or 6 (`catalog_busy`): the closing line
+names the command's own; 3 for a checkout that is not the pinned worktree's
+(`ForeignPackageError`): nothing ran -- as the day's own 3 says, which only its registration
+step's admission gives, before the paper book, the journal and any request, so it passes through;
+130 for an interruption.
 
 **Interruptions.** SIGINT, SIGTERM and SIGHUP raise `KeyboardInterrupt` while the driver runs, so
 Ctrl-C, a SIGTERM and a closed terminal end an invocation alike -- its end is recorded and an
@@ -128,13 +131,14 @@ COMMAND_FAILED_EXIT: Final[int] = 7
 (`SHADOWED_EXITS`); its own code is printed in the closing line."""
 SHADOWED_EXITS: Final[frozenset[int]] = frozenset(
     {
+        int(cli.PanelExit.bad_request),
         int(cli.PanelExit.provider_failure),
         int(cli.PanelExit.internal_error),
         int(cli.PanelExit.catalog_busy),
     }
 )
-"""4, 5 and 6: `panel build`'s own exits that read as `CAP_EXIT`, `REFUSED_EXIT` and the code
-next to them."""
+"""3, 4, 5 and 6: `panel build`'s own exits that read as the driver's 3 (nothing ran),
+`CAP_EXIT`, `REFUSED_EXIT` and the code next to them."""
 INTERRUPTED_EXIT: Final[int] = 130
 ORDINARY_EVENING_REQUESTS: Final[int] = 22
 """An ordinary evening's 16 requests, 20 once `stk_limit` pages (T6-T7 section 0), and 2 for a

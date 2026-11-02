@@ -1376,7 +1376,7 @@ def test_an_invocation_short_of_its_headroom_is_refused_before_anything_is_writt
     assert [event["event"] for event in events] == ["prepared"]
 
 
-@pytest.mark.parametrize("own", [4, 5, 6])
+@pytest.mark.parametrize("own", [3, 4, 5, 6])
 def test_a_build_that_fails_with_one_of_the_driver_s_own_codes_exits_7(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1384,9 +1384,11 @@ def test_a_build_that_fails_with_one_of_the_driver_s_own_codes_exits_7(
     seeded: Path,  # noqa: F811
     own: int,
 ) -> None:
-    """I3: `panel build` exits 4 on a provider failure, 5 on an internal error and 6 on a busy
-    catalog -- the driver's `CAP_EXIT`, `REFUSED_EXIT` and the code after them. A remedy that
-    fails so exits `COMMAND_FAILED_EXIT`, and the closing line names the command's own code."""
+    """I3 and R2: `panel build` exits 3 on a bad request (which `_build_sessions` can refuse after
+    the calendar was fetched), 4 on a provider failure, 5 on an internal error and 6 on a busy
+    catalog -- the driver's 3 (nothing ran), `CAP_EXIT`, `REFUSED_EXIT` and the code after them.
+    A remedy that fails so exits `COMMAND_FAILED_EXIT`, and the closing line names the command's
+    own code."""
     smoke = _smoke(tmp_path, monkeypatch, seeded, epoch=survivor_day.EPOCH)
     sink = _sink(monkeypatch)
 
@@ -1686,6 +1688,23 @@ def test_an_interrupt_the_command_turned_into_another_fault_is_an_interrupt_and_
 
 
 # --- the re-review of b0fd0b9 (fix round 2) ------------------------------------------------------
+
+
+def test_the_day_s_own_3_passes_through_as_the_driver_s_3_means_the_same(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,  # noqa: F811
+) -> None:
+    """R2: the day exits 3 (`DailyExit.code_not_registered`) only from its registration step's
+    admission -- before the paper book, the journal and any request -- which is what the driver's
+    own 3 (`ForeignPackageError`) says: nothing ran. Only a build's 3 is mapped to 7."""
+    smoke = _smoke(tmp_path, monkeypatch, seeded, epoch=survivor_day.EPOCH)
+    _standing_in(monkeypatch, lambda: int(daily.DailyExit.code_not_registered))
+
+    code, _out, _err = _drive(smoke, capsys, "evening", at=survivor_day.RUN_CLOCK)
+
+    assert code == 3
 
 
 _HANDLER_UNDER_A_HELD_LOCK: Final[str] = """
