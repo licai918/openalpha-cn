@@ -170,7 +170,8 @@ library only):
   printed block ends with it once the primary window is satisfied. Before the window the report
   states no one-sided p-value and no reading of one, so the block ends instead with one neutral
   line saying the rule waits for the window (the `basis` line defines power as a property of the
-  design and names no result).
+  design and names no result). A plan the reader accepted is held to the document's protocol
+  again: a plan read under another protocol is refused by name.
 
 ## The report's document (`survivor_forward_document`, `survivor_forward_lines`; task E4)
 
@@ -1997,6 +1998,13 @@ def _test(test: MetricTest) -> dict[str, Any]:
     }
 
 
+def _secondary_family_size(protocol: SurvivorForwardProtocol) -> int:
+    """`m`, the secondary family's declared size: the secondary metrics at the primary horizon
+    and the primary metric at each secondary horizon. The family's correction and the power of a
+    secondary row both take it from here, so they cannot disagree about it."""
+    return len(protocol.secondary_metrics) + len(protocol.secondary_horizons)
+
+
 def _secondary_family(
     by_horizon: Mapping[int, PredictionLayer],
     *,
@@ -2039,7 +2047,7 @@ def _secondary_family(
                     HypothesisTest(hypothesis_id=name, p_value=p_value, test=_SIGN_FLIP)
                     for name, p_value in p_values.items()
                 ),
-                family_size=len(members),
+                family_size=_secondary_family_size(protocol),
                 false_discovery_rate=protocol.q,
                 dependence=_DEPENDENCE,
             )
@@ -2069,7 +2077,7 @@ def _secondary_family(
         "dependence": _DEPENDENCE,
         "q": protocol.q,
         "family": [name for name, _horizon, _metric in members],
-        "family_size": len(members),
+        "family_size": _secondary_family_size(protocol),
         "basis": _FAMILY_BASIS,
         "headline": corrected(lambda layer: layer.headline),
         "excluding_unverifiable": corrected(lambda layer: layer.excluding_unverifiable),
@@ -2118,6 +2126,8 @@ def _power_section(
     }
     if power is None:
         return section
+    # A plan read under another protocol is not this document's: the reader's checks again.
+    _hold_the_plan_to_the_protocol(power, protocol)
     section["status"] = f"pre-registered ({SURVIVOR_FORWARD_POWER_SCHEMA})"
     section["plan"] = power.model_dump(mode="json")
     section["rows"] = [
@@ -2137,19 +2147,14 @@ def _power_row(
     layer: PredictionLayer,
     analysis: NonOverlappingSample,
 ) -> dict[str, Any]:
-    role = dict(protocol.tested_metrics(item.horizon)).get(item.metric)
-    if role is None:
-        raise SurvivorForwardError(
-            f"the power plan states {item.metric} at horizon {item.horizon}, which is not tested "
-            "there by the protocol"
-        )
+    role = dict(protocol.tested_metrics(item.horizon))[item.metric]
     absences: list[str] = []
     periods = protocol.window_positions(item.horizon)
     kind, sd, target = plan.critical_value, item.planning_sd, plan.target_power
     level: float | None = plan.test_level
     level_basis = "the plan's test level"
     if role == "secondary":
-        size = len(protocol.secondary_metrics) + len(protocol.secondary_horizons)
+        size = _secondary_family_size(protocol)
         level = _attempt(
             absences,
             "the secondary test level",

@@ -61,12 +61,7 @@ from test_survivor_facts_panel import CONFIG, SIGNAL_INDEX, TRIMMED, evening, re
 
 from openalpha_cn import strategy_survivor_forward as forward_module
 from openalpha_cn.backtest.outcome_statistics import EXACT_SIGN_FLIP_LIMIT, sign_flip_test
-from openalpha_cn.backtest.power_analysis import (
-    NOT_DETECTABLE_WORDING,
-    POWER_BASIS,
-    by_first_step_level,
-    power_of_mean_test,
-)
+from openalpha_cn.backtest.power_analysis import NOT_DETECTABLE_WORDING, POWER_BASIS
 from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
 from openalpha_cn.domain.alpha_model import AlphaModelArtifact, Prediction, PredictionBatch
 from openalpha_cn.domain.daily_prices import DAILY_BASIC_DATASET, DAILY_DATASET
@@ -2698,17 +2693,22 @@ def test_the_t_convention_is_computed_as_registered() -> None:
 
 
 def test_a_secondary_row_is_powered_at_the_first_benjamini_yekutieli_step() -> None:
-    """Family {h20 survivors_minus_ew, h20 ew_minus_worst_decile, h5 rank_ic}: m = 3, q = 0.2."""
+    """Family {h20 survivors_minus_ew, h20 ew_minus_worst_decile, h5 rank_ic}: m = 3, q = 0.2, so
+    the level is 0.2 / (3 * (1 + 1/2 + 1/3)) = 0.2 / 5.5 = 0.036364 (z = 1.79454). At K = 3, sd
+    0.03, a true mean of 0.01: power Phi(sqrt(3) / 3 - 1.79454) = 0.111766; the mean reaching 0.8
+    is (1.79454 + 0.84162) * 0.03 / sqrt(3) = 0.0456596; 0.8 needs ceil((2.63616 * 3) ** 2) = 63
+    periods. At the plan's own 0.05 the last two would be 0.0430670 and 56 -- each figure of the
+    row is at the family's level, not only the first."""
     document = reported({20: (), 5: ()}, {}, through=1, power=power_plan())
 
     secondary = document["power"]["rows"][1]
-    level = by_first_step_level(q=0.2, family_size=3)
     assert secondary["role"] == "secondary"
-    assert secondary["test_level"] == level == pytest.approx(0.2 / 5.5, abs=1e-15)
+    assert document["prediction_layer"]["secondary_family"]["family_size"] == 3
+    assert secondary["test_level"] == pytest.approx(0.2 / 5.5, abs=1e-15)
     assert "lower bound under Benjamini-Yekutieli" in secondary["test_level_basis"]
-    assert secondary["planned"][0]["power"] == power_of_mean_test(
-        mean=0.01, sd=0.03, periods=3, test_level=level, kind="normal"
-    )
+    assert secondary["planned"][0]["power"] == pytest.approx(0.111766, abs=1e-6)
+    assert secondary["periods_for_target"] == [{"mean": 0.01, "periods": 63}]
+    assert secondary["smallest_mean_at_target"] == pytest.approx(0.0456596245, abs=1e-9)
 
 
 def test_a_gap_reduces_the_usable_periods_and_the_power_and_is_held_to_the_minimum() -> None:
@@ -2724,10 +2724,10 @@ def test_a_gap_reduces_the_usable_periods_and_the_power_and_is_held_to_the_minim
     window = document["power"]["rows"][0]["headline"]
     assert (window["positions"], window["gaps"], window["usable_at_most"]) == (3, 1, 2)
     assert (window["tested"], window["n"], window["n_basis"]) == (2, 2, "tested")
-    assert [row["power"] for row in window["at_n"]] == [
-        power_of_mean_test(mean=mean, sd=0.15, periods=2, test_level=0.05, kind="normal")
-        for mean in (0.037, 0.05, 0.1)
-    ]
+    # Phi(sqrt(2) * mean / 0.15 - 1.644854) at the three planned means, by hand
+    assert [row["power"] for row in window["at_n"]] == pytest.approx(
+        [0.097485, 0.120308, 0.241326], abs=1e-6
+    )
     assert (window["minimum_periods"], window["below_minimum"]) == (3, True)
 
 
@@ -2905,6 +2905,36 @@ def test_a_plan_read_against_another_protocol_is_refused_by_the_document_too() -
         reported(
             {20: (), 5: ()}, {}, through=1, power=plan, secondary_metrics=["survivors_minus_ew"]
         )
+
+
+def test_a_plan_for_a_horizon_the_protocol_does_not_read_is_refused_not_a_key_error() -> None:
+    """The plan was read under a protocol with a secondary horizon of 7 and plans it; the document
+    is built under the default protocol, whose secondary horizon is 5: a refusal by name, not the
+    bare `KeyError: 7` of a layer the document does not hold."""
+    planned = [POWER_BLOCK["planned"][0], {**POWER_BLOCK["planned"][0], "horizon": 7}]
+    plan = power_plan(protocol(secondary_horizons=[7]), planned=planned)
+
+    with pytest.raises(SurvivorForwardError, match="horizon 7"):
+        reported({20: (), 5: ()}, {}, through=1, power=plan)
+
+
+def test_the_document_holds_a_plan_to_its_own_protocol_primary_and_minimum_too() -> None:
+    """A plan read under one protocol and handed to a document of another is checked again: the
+    document's primary test must be planned, and the minimum cannot exceed its primary window."""
+    unplanned = power_plan()
+    with pytest.raises(SurvivorForwardError, match="primary"):
+        reported(
+            {20: (), 5: ()},
+            {},
+            through=1,
+            power=unplanned,
+            primary_metric="survivors_minus_ew",
+            secondary_metrics=["rank_ic", "ew_minus_worst_decile"],
+        )
+
+    demanding = power_plan(protocol(window_periods=36), minimum_periods=30)
+    with pytest.raises(SurvivorForwardError, match="minimum_periods"):
+        reported({20: (), 5: ()}, {}, through=1, power=demanding)
 
 
 def test_the_power_lines_carry_the_reading_rule_and_no_verdict_word() -> None:
