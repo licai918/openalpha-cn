@@ -35,6 +35,7 @@ import shlex
 import shutil
 import sys
 import tempfile
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time, timedelta
@@ -1741,6 +1742,133 @@ def test_the_first_session_of_a_year_runs_to_its_record_asked_about_both_years(
     prediction = _journal(world, FIRST_2027)["prediction"]
     assert prediction["registered"] is True
     assert prediction["scored"] > 0
+
+
+@dataclass
+class EmptyNewYear(NewYearMarket):
+    """The New Year market before 2027's first rename (`V2-P7-021`): the endpoint serves no 2027
+    row until a rename in `renames` is published. `renames` are `(code, name, announced,
+    effective, published)`. The registry's 4 January delisting stays, so 2027 has a lifecycle
+    partition -- the registry's own New Year gap is another issue (plan U3)."""
+
+    renames: tuple[tuple[str, str, date, date, date], ...] = ()
+
+    def _names(self, params: Mapping[str, Any]) -> list[list[Any]]:
+        if str(params["start_date"])[:4] != "2027":
+            return super()._names(params)
+        today = self.today or self.open_days[-1]
+        return [
+            [code, name, compact(effective), None, compact(announced), "ST"]
+            for code, name, announced, effective, published in self.renames
+            if today >= published
+        ]
+
+
+@dataclass
+class NamesRefusedNewYear(EmptyNewYear):
+    """`EmptyNewYear`, its 2027 `namechange` connection reset on every attempt."""
+
+    def post(self, payload: dict[str, Any]) -> dict[str, Any]:
+        params = payload["params"]
+        if payload["api_name"] == "namechange" and str(params["start_date"])[:4] == "2027":
+            self.requests.append(("namechange", dict(params)))
+            raise ConnectionError("the namechange connection was reset")
+        return super().post(payload)
+
+
+def test_the_first_session_of_a_year_before_its_first_rename_runs_to_its_record_and_evening(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    new_year: Path,
+) -> None:
+    """`V2-P7-021`: 4 January 2027 with no rename announced in 2027. Step 2 records the year
+    empty and builds the rest -- `index_daily` included -- in 11 requests; the doctor and the gate
+    clear, asked about both years; the record is filed and the evening run. Run again, the day is
+    printed from its journal with no request. The next evening, the year's first rename replaces
+    the empty partition whole."""
+    market = EmptyNewYear(open_days=NEW_YEAR_DAYS)
+    world = _world(
+        tmp_path,
+        monkeypatch,
+        new_year,
+        config=survivor_config(epoch=date(2026, 12, 31)),
+        market=market,
+    )
+    doctor = _calls(monkeypatch, daily, "check_panel")
+    evening = evening_of(FIRST_2027)
+
+    code, _out, err = _run(world, capsys, as_of=evening, clock=evening)
+
+    assert code == 0, err
+    assert Counter(world.market.payloads) == Counter(
+        {
+            TRADING_CALENDAR_DATASET: 1,
+            STOCK_BASIC_DATASET: 1,
+            ADJ_FACTOR_DATASET: 1,
+            SUSPENSION_DATASET: 1,
+            DAILY_DATASET: 1,
+            DAILY_BASIC_DATASET: 1,
+            PRICE_LIMIT_DATASET: 1,
+            "namechange": 1,
+            INDEX_DAILY_DATASET: 3,
+        }
+    )
+    assert [(call["session"], call["first_of_year"]) for call in doctor] == [(FIRST_2027, True)]
+    assert "namechange" in doctor[0]["datasets"]
+    panel = PanelStore(world.runtime / "panel")
+    coverage = panel.read_coverage("namechange", 2027)
+    assert coverage is not None and coverage.row_count == 0 and coverage.as_of == evening
+    assert 2027 in panel.registered_years(INDEX_DAILY_DATASET)
+    journal = _journal(world, FIRST_2027)
+    assert journal["prediction"]["registered"] is True
+    assert journal["prediction"]["scored"] > 0
+    assert "result" in journal
+
+    world.market.clear()
+    code, out, _err = _run(
+        world, capsys, as_of=evening, clock=evening + timedelta(minutes=10), json_output=False
+    )
+    assert code == 0
+    assert REPRINTED in out.splitlines()
+    assert world.market.payloads == []
+
+    second = date(2027, 1, 5)
+    market.renames = (
+        (SECURITIES[5], f"*ST{SECURITIES[5][:6]}", second, second + timedelta(days=1), second),
+    )
+    _completed(world, capsys, second)
+    coverage = panel.read_coverage("namechange", 2027)
+    assert coverage is not None and coverage.row_count == 1
+
+
+def test_a_refused_name_fetch_on_the_first_session_of_a_year_stops_the_day_at_step_two(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    new_year: Path,
+) -> None:
+    """A failed fetch is not "verified empty": the day stops at step 2 naming the dataset, the
+    journal keeps its pin and no panel stage, no 2027 name partition is written, and the account
+    block says no orders were produced."""
+    world = _world(
+        tmp_path,
+        monkeypatch,
+        new_year,
+        config=survivor_config(epoch=date(2026, 12, 31)),
+        market=NamesRefusedNewYear(open_days=NEW_YEAR_DAYS),
+    )
+    monkeypatch.setattr(cli, "TushareProvider", _without_backoff(cli.TushareProvider))
+    evening = evening_of(FIRST_2027)
+
+    code, _out, err = _run(world, capsys, as_of=evening, clock=evening)
+
+    assert code == 1
+    assert err[0].startswith("step 2 (panel update) failed: `panel build` exited 4:")
+    assert "refused dataset namechange" in err[0]
+    assert "panel" not in _journal(world, FIRST_2027)
+    assert 2027 not in PanelStore(world.runtime / "panel").registered_years("namechange")
+    assert _aftermath(err)[0] == NO_NEW_ORDERS
 
 
 # --- V2-P7-009: a book held into the first session of a year, across an ex-rights date ---------

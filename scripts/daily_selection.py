@@ -95,16 +95,17 @@ next year's calendar therefore meets a second refusal on the year's first sessio
 before is complete: the year has no calendar to count on. It prints the `panel build --dataset
 trade_cal` that stores it (`_calendar_refusal`).
 
-Two consequences of fetching `namechange` for the session's year, which this step does not
-remove (A3 review, Q1). Until the year's first rename announcement, Tushare serves no row for
-the year, the panel refuses to write an empty partition, and step 2 fails on that target. A
-session before the first announcement can never complete: the journal pins the day's `--as-of`,
-and `namechange` is fetched at `min(year end, as_of)` (`cli._year_end_as_of`), so every retry of
-that session asks the same empty window and spends a handful of requests doing so. The session
-is lost, not delayed -- not a theoretical case: 2012's first announcement is dated 5 January,
-after the first session on 4 January (the A-phase notes of the P7 step-0 plan). And it is not
-new: P6's `--full-update` fetches `namechange` (`FULL_UPDATE_TARGETS`) and fails the same way
-in early January.
+Until a year's first rename announcement Tushare serves no `namechange` row for the year (2012's
+first is dated 5 January, after the first session on 4 January). `panel build` records such a
+year empty -- a partition of no rows observed at the build's clock -- and every reader takes it as
+"no rename announced yet" only through the year's window (`domain.name_history.
+name_year_may_be_empty`, `V2-P7-021`), so a year's first sessions run like any other and the year
+before's names are still built again after it. A refused or truncated fetch is still a refusal of
+step 2, and so is an empty answer for a year past its window, for a year that already holds
+renames, or for any year but the build clock's own. Before `V2-P7-021` such a session was lost:
+the journal pins the day's `--as-of`, so every retry asked the same empty window. P6's
+`--full-update` (`FULL_UPDATE_TARGETS`) takes the same `panel build` and is no longer refused in
+early January.
 
 ## The registration's kind (`V2-P7-008`)
 

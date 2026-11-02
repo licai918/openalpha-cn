@@ -49,10 +49,12 @@ import pytest
 import test_daily_selection as tds
 import test_daily_selection_survivor_day as sd
 from daily_market import Market, compact
+from test_daily_selection_survivor_day import new_year  # noqa: F401  (a module fixture, reused)
 
 from openalpha_cn import cli, strategy_survivor_book, strategy_survivor_morning
 from openalpha_cn.backtest.paper_state import held_head
 from openalpha_cn.domain.survivor_book import SecurityFacts
+from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.storage.paper_state import FilePaperStateStore
 from openalpha_cn.strategy_survivor_facts import FactsDay
 
@@ -1274,6 +1276,78 @@ def test_a_morning_in_the_new_year_asks_the_sessions_year_alone(
     assert document["requests"] == {"namechange": 1}
     assert document["session"] == LAST_OF_2026.isoformat()
     assert document["differences"] == [] and document["notices"] == []
+
+
+@pytest.fixture(scope="module")
+def empty_new_year_evening(
+    tmp_path_factory: pytest.TempPathFactory,
+    new_year: Path,  # noqa: F811
+) -> Source:
+    """The runtime directory after the evening of 4 January 2027 -- the first session of the
+    year, run before 2027's first rename (`V2-P7-021`): the year's name corpus recorded empty, ten
+    buys planned for the open of the 5th."""
+    base = tmp_path_factory.mktemp("morning-empty-new-year")
+    market = sd.EmptyNewYear(open_days=sd.NEW_YEAR_DAYS)
+    runtime = base / "runtime"
+    shutil.copytree(new_year, runtime)
+    with pytest.MonkeyPatch.context() as patch:
+        repo, registration = tds._repository(base, sd.survivor_config(epoch=LAST_OF_2026))
+        tds._bind(patch, repo, market)
+        world = tds.World(repo=repo, registration=registration, runtime=runtime, market=market)
+        _evening(world, FIRST_OF_2027)
+    return Source(repo, registration, runtime)
+
+
+def test_the_morning_after_a_first_session_before_any_rename_advises_within_its_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    empty_new_year_evening: Source,
+) -> None:
+    """08:30 on 5 January, 2027 still without a rename: one request for the session's year, the
+    year recorded empty again at the morning's pin, and the advice line with its scope -- never a
+    refusal, and never more than "no change among announcements dated through the session"."""
+    world = _world(
+        tmp_path, monkeypatch, empty_new_year_evening, sd.EmptyNewYear(open_days=sd.NEW_YEAR_DAYS)
+    )
+
+    code, out, err = _morning(world, capsys, FIRST_OF_2027, json_output=False)
+
+    assert code == 0, err
+    assert world.market.payloads == ["namechange"]
+    assert [params["start_date"][:4] for params in world.market.asked("namechange")] == ["2027"]
+    assert no_change(FIRST_OF_2027) in out.splitlines()
+    document = _filed(world, FIRST_OF_2027)
+    assert document["requests"] == {"namechange": 1}
+    assert document["differences"] == [] and document["notices"] == []
+    coverage = PanelStore(world.runtime / "panel").read_coverage("namechange", 2027)
+    assert coverage is not None and coverage.row_count == 0
+    assert coverage.as_of == morning_of(FIRST_OF_2027)
+
+
+def test_the_morning_after_a_first_session_sees_the_years_first_rename_published_overnight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    empty_new_year_evening: Source,
+) -> None:
+    """2027's first rename: an ST name for one of the evening's planned buys, announced on the
+    session (4 January), effective the 5th, published overnight. The morning screens it -- dated
+    through the session, so advice, not a notice -- and the empty partition gives way to it."""
+    market = sd.EmptyNewYear(open_days=sd.NEW_YEAR_DAYS)
+    world = _world(tmp_path, monkeypatch, empty_new_year_evening, market)
+    named = _bought(world, FIRST_OF_2027)[0]
+    second = FIRST_OF_2027 + timedelta(days=1)
+    market.renames = ((named, f"*ST{named[:6]}", FIRST_OF_2027, second, second),)
+
+    code, out, err = _morning(world, capsys, FIRST_OF_2027, json_output=False)
+
+    assert code == 0, err
+    assert f"  do not place BUY {named}: special_treatment" in out.splitlines()
+    document = _filed(world, FIRST_OF_2027)
+    assert document["notices"] == []
+    coverage = PanelStore(world.runtime / "panel").read_coverage("namechange", 2027)
+    assert coverage is not None and coverage.row_count == 1
 
 
 # --- the preconditions ----------------------------------------------------------------------------
