@@ -43,7 +43,12 @@ from openalpha_cn.backtest.paper_state import (
     PendingOrder,
     snapshot_payload,
 )
-from openalpha_cn.backtest.paper_step import NO_BAR_REASON, AttemptedOrder, attempt_id
+from openalpha_cn.backtest.paper_step import (
+    NO_BAR_REASON,
+    AttemptedOrder,
+    attempt_id,
+    build_paper_step,
+)
 from openalpha_cn.backtest.portfolio import PortfolioLimits
 from openalpha_cn.domain.portfolio import (
     PortfolioPosition,
@@ -1367,3 +1372,106 @@ def test_a_name_bought_on_one_session_and_delisted_the_next_is_written_off_at_it
     assert factors(gone) == {B: D("1.000")}
     assert [row[0] for row in rows(ledger)] == [attempt_id(order, S1), write_off_id(C, S2)]
     assert tonight(gone).entry_factors == (EntryFactor(ts_code=B, entry_adj=D("1.000")),)
+
+
+# ---- T+1 on the paper path (V2-P7-009 acceptance) -----------------------------------------------
+
+
+def test_a_name_bought_at_an_open_is_never_sold_in_that_session_on_the_paper_path(
+    tmp_path: Path,
+) -> None:
+    """A-share T+1 held by the paper path itself, not by the execution policy alone (`V2-P7-009`
+    acceptance; the policy's own test is `tests/unit/backtest/test_execution.py::
+    test_t_plus_one_and_locked_price_limits_are_enforced`). 600030.SH is bought at the 10.10 open
+    of S1, a lot opened on S1.
+
+    1. The evening of S1 can plan its sale only for S2: a `TradeOrder` executes after the session
+       that planned it, and handed to S1's own step the sale is refused as not due.
+    2. The paper book never lives S1 a second time, so no step dated S1 can follow the purchase.
+    3. The one remaining same-session shape -- a sale and a purchase of one name due together --
+       is refused by the snapshot (a pending sell is of a held name); built below the snapshot, the
+       step runs sells first, so the sale meets no position and the ledger refuses it under T+1
+       while the purchase fills.
+    4. On S2 the sale fills at the open: 1,000 x 10.40 = 10,400.00, commission max(3.12, 5.00) =
+       5.00, transfer 0.104 -> 0.10, stamp duty 5.20, so 10,389.70 back; cash 9,894.90 (S1's
+       20,000.00 less the purchase's 10,105.10) + 10,389.70 = 20,284.60.
+    """
+    order = buy(C, 1000)
+    ledger, portfolio = ledger_at(tmp_path / "paper.sqlite3")
+    s1 = settle(
+        previous("20000.00", orders=(order,)),
+        S1,
+        market(OPEN_C_S1, adj={C: "1.000"}),
+        portfolio,
+        survivors={C},
+    )
+    assert [(lot.open_date, lot.quantity) for p in s1.book.positions for lot in p.lots] == [
+        (S1, 1000)
+    ]
+
+    # 1. Planned on the evening of S1 (ordinal 101), the sale executes on S2 (102).
+    exit_c = sell(C, 1000, signal=101)
+    assert exit_c.execute_session == 102
+    evening = tonight(s1, exit_c)
+    with pytest.raises(ValueError, match="orders not due yet on session 101"):
+        build_paper_step(
+            session=S1,
+            session_index=101,
+            orders=(exit_c,),
+            bars={C: OPEN_C_S1},
+            adjustment_ratio={C: D(1)},
+            benchmark_close=BENCHMARK,
+        )
+
+    # 2. No second step dated S1: the book does not live a session twice.
+    same_day = build_paper_step(
+        session=S1,
+        session_index=101,
+        orders=(sell(C, 1000),),
+        bars={C: OPEN_C_S1},
+        adjustment_ratio={C: D(1)},
+        benchmark_close=BENCHMARK,
+    )
+    with pytest.raises(ValueError, match="must move the book forward"):
+        portfolio.advance(state=s1.book, session=same_day.step, observed_on=S1)
+    assert rows(ledger) == [(attempt_id(order, S1), "filled", None)]
+
+    # 3. A sale and a purchase of one name due on one session.
+    with pytest.raises(ValueError, match="pending sells for names not held"):
+        previous("20000.00", orders=(order, sell(C, 1000)))
+    fresh_ledger, fresh = ledger_at(tmp_path / "below-the-snapshot.sqlite3")
+    both = build_paper_step(
+        session=S1,
+        session_index=101,
+        orders=(order, sell(C, 1000)),
+        bars={C: OPEN_C_S1},
+        adjustment_ratio={C: D(1)},
+        benchmark_close=BENCHMARK,
+    )
+    lived = fresh.advance(state=previous("20000.00").book, session=both.step, observed_on=S1)
+    assert [(t.order.side, t.status, t.reason) for t in lived.transitions] == [
+        ("sell", "rejected", "insufficient T+1 available quantity"),
+        ("buy", "filled", None),
+    ]
+    assert [row[1:] for row in rows(fresh_ledger)] == [
+        ("rejected", "insufficient T+1 available quantity"),
+        ("filled", None),
+    ]
+
+    # 4. On S2 the sale fills at the open.
+    s2 = settle(
+        evening,
+        S2,
+        market(
+            bar(C, S2, "10.50", "10.40", "10.60", "10.30", "10.45", "11.55", "9.45"),
+            adj={C: "1.000"},
+        ),
+        portfolio,
+    )
+    assert rows(ledger) == [
+        (attempt_id(order, S1), "filled", None),
+        (attempt_id(exit_c, S2), "filled", None),
+    ]
+    assert s2.filled == (exit_c,)
+    assert s2.book.positions == ()
+    assert s2.book.cash == D("20284.60")
