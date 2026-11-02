@@ -1352,6 +1352,101 @@ def test_a_remedy_s_runtime_spelt_with_a_tilde_is_not_this_smoke_s(
         driver.parse_remedy(line, **paths)
 
 
+@pytest.mark.skipif(not hasattr(signal, "SIGHUP"), reason="POSIX signals")
+def test_a_signal_the_caller_ignores_stays_ignored(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,  # noqa: F811
+) -> None:
+    """M3: under `nohup` SIGHUP is ignored; closing the terminal must not end the evening."""
+    smoke = _smoke(tmp_path, monkeypatch, seeded, epoch=survivor_day.EPOCH)
+    previous = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    during: list[Any] = []
+
+    def body() -> int:
+        during.append(signal.getsignal(signal.SIGHUP))
+        os.kill(os.getpid(), signal.SIGHUP)
+        return 0
+
+    _standing_in(monkeypatch, body)
+    try:
+        code, _out, err = _drive(smoke, capsys, "evening", at=survivor_day.RUN_CLOCK)
+        after = signal.getsignal(signal.SIGHUP)
+    finally:
+        signal.signal(signal.SIGHUP, previous)
+
+    assert code == 0, err
+    assert during == [signal.SIG_IGN] and after == signal.SIG_IGN
+    assert _spent(smoke).discarded is None
+
+
+class _Closed(io.TextIOBase):
+    """A terminal whose reader went away: `| head` that has had its lines."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.attempts = 0
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, text: str) -> int:
+        self.attempts += 1
+        raise BrokenPipeError(32, "Broken pipe")
+
+
+def test_a_terminal_that_went_away_ends_nothing_and_the_log_keeps_every_line(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,  # noqa: F811
+) -> None:
+    """M4: the log is written first, and a terminal that cannot be written to is written to no
+    more -- the evening goes on, its root kept, every line in its log."""
+    smoke = _smoke(tmp_path, monkeypatch, seeded, epoch=survivor_day.EPOCH)
+
+    def body() -> int:
+        print("the first chunk")
+        print("the second chunk")
+        return 0
+
+    _standing_in(monkeypatch, body)
+    closed = _Closed()
+    monkeypatch.setattr(sys, "stdout", closed)
+
+    code = driver.main(["evening", "--smoke-root", str(smoke.root)], clock=lambda: NOW)
+
+    assert code == 0, capsys.readouterr().err
+    assert closed.attempts == 1
+    log = (smoke.root / env.LOGS_NAME / "0001-evening.out").read_text(encoding="utf-8")
+    assert log == "the first chunk\nthe second chunk\n"
+    assert _spent(smoke).discarded is None
+
+
+def test_an_interrupt_says_only_what_the_ledger_can_hold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,  # noqa: F811
+) -> None:
+    """M5: an interruption between `start` and the call, or between `discarded` and `end`, leaves
+    the invocation without an end: the message does not claim one was recorded."""
+    smoke = _smoke(tmp_path, monkeypatch, seeded, epoch=survivor_day.EPOCH)
+
+    def body() -> int:
+        raise KeyboardInterrupt
+
+    _standing_in(monkeypatch, body)
+
+    code, _out, err = _drive(smoke, capsys, "evening", at=survivor_day.RUN_CLOCK)
+
+    assert code == driver.INTERRUPTED_EXIT
+    (message,) = [line for line in err if line.startswith("smoke: interrupted")]
+    assert "recorded its end in the ledger, and" not in message
+    assert "`status`" in message and "no end" in message
+
+
 @pytest.mark.parametrize(
     "event",
     [
@@ -1377,3 +1472,59 @@ def test_a_ledger_event_the_driver_cannot_read_refuses_the_root_by_name(
         assert code == driver.REFUSED_EXIT, command
         assert any(line.startswith("smoke: refused:") for line in err), command
     assert days == []
+
+
+class _Interrupting:
+    """The market, with the signal `number` raised at the `at`-th request -- inside `panel
+    build`, where `cli._panel_command` lets a `KeyboardInterrupt` through and click turns it into
+    `Abort`, which the day's step 2 reports as one of its refusals."""
+
+    def __init__(self, market: Any, number: int, *, at: int) -> None:
+        self.market, self.number, self.at, self.seen = market, number, at, 0
+
+    def post(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.seen += 1
+        if self.seen == self.at:
+            os.kill(os.getpid(), self.number)
+        result: dict[str, Any] = self.market.post(payload)
+        return result
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGHUP"), reason="POSIX signals")
+@pytest.mark.parametrize("name", ["SIGINT", "SIGTERM"])
+@pytest.mark.parametrize("kind", ["evening", "remedy"])
+def test_an_interrupt_inside_a_real_panel_build_discards_the_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,  # noqa: F811
+    name: str,
+    kind: str,
+) -> None:
+    """N1 (found in this round): Ctrl-C or a SIGTERM while the real `panel build` fetches. The
+    evening caught it as step 2's refusal and exited 1, and the root was kept on a panel copy the
+    build had been writing; a remedy let click's `Abort` out of the driver. Both are an
+    interruption: exit 130, and the root discarded. A recording handler of the test's own stands
+    behind the driver's, so a driver that installed none kills nothing."""
+    smoke = _smoke(tmp_path, monkeypatch, seeded, epoch=survivor_day.EPOCH)
+    smoke.market.today = survivor_day.DAY
+    number = getattr(signal, name)
+    transport = _Interrupting(smoke.market, number, at=3)
+    monkeypatch.setattr(cli, "_panel_transport", lambda: transport)
+    reached: list[str] = []
+    previous = signal.signal(number, lambda *_: reached.append("the test's own handler"))
+    command = (
+        ["evening", "--", "--as-of", survivor_day.DAY_AS_OF.isoformat()]
+        if kind == "evening"
+        else ["remedy", _line(smoke, *_BATCH)]
+    )
+    try:
+        code, _out, err = _drive(smoke, capsys, *command, at=survivor_day.RUN_CLOCK)
+    finally:
+        signal.signal(number, previous)
+
+    assert reached == []
+    assert code == driver.INTERRUPTED_EXIT, err
+    (end,) = _ends(smoke)
+    assert end["fault"] == "KeyboardInterrupt", (end, err)
+    assert _spent(smoke).discarded is not None

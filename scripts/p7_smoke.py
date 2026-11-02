@@ -59,10 +59,17 @@ read from the ledger's `end` event when the call then ended on another exception
 manifest; `COMMAND_FAILED_EXIT` (7) for a `panel build` or `factor build` that failed with a code
 of its own the driver's would hide -- 4 (`PanelExit.provider_failure`), 5 (`internal_error`) or 6
 (`catalog_busy`): the closing line names the command's own; 3 for a checkout that is not the
-pinned worktree's (`ForeignPackageError`); 130 for an interruption. SIGTERM and SIGHUP are turned
-into `KeyboardInterrupt` while the driver runs, so a closed terminal ends an evening as Ctrl-C
-does (the ledger records its end, and an invocation that writes the panel discards the root), and
-are put back after.
+pinned worktree's (`ForeignPackageError`); 130 for an interruption.
+
+**Interruptions.** SIGINT, SIGTERM and SIGHUP raise `KeyboardInterrupt` while the driver runs, so
+Ctrl-C, a SIGTERM and a closed terminal end an invocation alike -- its end is recorded and an
+invocation that writes the panel discards the root -- and are put back after. A signal the caller
+ignores (`nohup`, a background job) is left ignored. The handler also marks the interruption: the
+daily command reports a `KeyboardInterrupt` inside its `panel build` as a refusal of step 2 (click
+turns it into `Abort`), and `panel build` run alone exits 130 of its own, so an invocation that
+returns after an interruption is ended as interrupted all the same. The log is written before the
+terminal, and a terminal that can no longer be written to (`| head` that has had its lines) is
+written to no more, the invocation going on.
 
 **The cap's module.** The cap is put on `cli._panel_transport` by `p7_smoke_requests`'s own
 `daily_selection`; it binds the day only if that is this driver's `daily_selection`, imported from
@@ -152,6 +159,9 @@ SMOKE_SCRIPTS: Final[tuple[str, ...]] = (
 which one of them is not what `HEAD` holds, since the clone holds `HEAD`'s."""
 _LOG: Final[re.Pattern[str]] = re.compile(r"(\d+)-[a-z-]+\.(?:out|err)")
 _REFUSED_LEDGER: Final[str] = "ledger        refused: "
+_INTERRUPTED: Final[threading.Event] = threading.Event()
+"""Set by the driver's signal handler: an interruption reached the invocation, whatever the
+command it runs made of the `KeyboardInterrupt` (`_call`)."""
 
 
 class SmokeDriverError(ValueError):
@@ -193,23 +203,34 @@ def _utc_now() -> datetime:
 
 
 class _Tee(io.TextIOBase):
-    """Writes to every stream it is given: the terminal, and the invocation's log."""
+    """Writes the invocation's log, then the terminal while it can be written to: a terminal that
+    went away (`| head` that has had its lines, a closed window) is written to no more, and stops
+    nothing -- the log keeps every line."""
 
-    def __init__(self, *streams: TextIO) -> None:
+    def __init__(self, log: TextIO, terminal: TextIO) -> None:
         super().__init__()
-        self._streams = streams
+        self._log = log
+        self._terminal: TextIO | None = terminal
 
     def writable(self) -> bool:
         return True
 
     def write(self, text: str) -> int:
-        for stream in self._streams:
-            stream.write(text)
+        self._log.write(text)
+        if self._terminal is not None:
+            try:
+                self._terminal.write(text)
+            except (OSError, ValueError):  # a broken pipe; a closed stream
+                self._terminal = None
         return len(text)
 
     def flush(self) -> None:
-        for stream in self._streams:
-            stream.flush()
+        self._log.flush()
+        if self._terminal is not None:
+            try:
+                self._terminal.flush()
+            except (OSError, ValueError):
+                self._terminal = None
 
 
 # --- remedies ------------------------------------------------------------------------------------
@@ -407,20 +428,24 @@ def _driver_lock(root: Path) -> Iterator[None]:
 
 @contextlib.contextmanager
 def _signals_as_exit() -> Iterator[None]:
-    """SIGTERM and SIGHUP raise `KeyboardInterrupt` for the body, in the main thread only; the
-    handlers that were there are put back after."""
+    """SIGINT, SIGTERM and SIGHUP mark the interruption (`_INTERRUPTED`) and raise
+    `KeyboardInterrupt` for the body, in the main thread only; a signal the caller ignores
+    (`nohup`, a background job) is left ignored, and the handlers that were there are put back
+    after."""
     if threading.current_thread() is not threading.main_thread():
         yield
         return
 
     def interrupt(number: int, _frame: FrameType | None) -> None:
+        _INTERRUPTED.set()
         raise KeyboardInterrupt(f"{signal.Signals(number).name} received")
 
     previous: dict[int, Any] = {}
-    for name in ("SIGTERM", "SIGHUP"):
+    for name in ("SIGINT", "SIGTERM", "SIGHUP"):
         number = getattr(signal, name, None)
-        if number is not None:
+        if number is not None and signal.getsignal(number) != signal.SIG_IGN:
             previous[number] = signal.signal(number, interrupt)
+    _INTERRUPTED.clear()
     try:
         yield
     finally:
@@ -536,6 +561,17 @@ def _call(
     base = ["--runtime-dir", str(manifest.runtime), "--registration", str(manifest.registration)]
     base += ["--repo", str(manifest.pinned)]
 
+    def wrapped() -> int:
+        if kind in OPENALPHA_KINDS:
+            done = daily.invoke(list(arguments))
+            sys.stdout.write(done.stdout)
+            sys.stderr.write(done.stderr)
+            return done.exit_code
+        if kind == "weekly":
+            return forward_report.main([*base, *arguments], clock=clock)
+        flags = ["--morning-recheck"] if kind == "morning" else []
+        return daily.main([*base, *arguments, *flags], clock=clock)
+
     def call() -> int:
         manifest.logs.mkdir(exist_ok=True)
         stem = manifest.logs / f"{number:04d}-{kind}"
@@ -544,18 +580,29 @@ def _call(
             stem.with_suffix(".out").open("x", encoding="utf-8") as out,
             stem.with_suffix(".err").open("x", encoding="utf-8") as err,
             # `redirect_*` is typed for an `IO[str]`; a `TextIOBase` is not one to mypy.
-            contextlib.redirect_stdout(cast(TextIO, _Tee(sys.stdout, out))),
-            contextlib.redirect_stderr(cast(TextIO, _Tee(sys.stderr, err))),
+            contextlib.redirect_stdout(cast(TextIO, _Tee(out, sys.stdout))),
+            contextlib.redirect_stderr(cast(TextIO, _Tee(err, sys.stderr))),
         ):
-            if kind in OPENALPHA_KINDS:
-                done = daily.invoke(list(arguments))
-                sys.stdout.write(done.stdout)
-                sys.stderr.write(done.stderr)
-                return done.exit_code
-            if kind == "weekly":
-                return forward_report.main([*base, *arguments], clock=clock)
-            flags = ["--morning-recheck"] if kind == "morning" else []
-            return daily.main([*base, *arguments, *flags], clock=clock)
+            _INTERRUPTED.clear()
+            try:
+                code = wrapped()
+            except KeyboardInterrupt:
+                raise
+            except BaseException as error:
+                # click turns a `KeyboardInterrupt` inside a command into `Abort`.
+                if _INTERRUPTED.is_set():
+                    raise KeyboardInterrupt(
+                        f"an interruption reached the command, which ended on "
+                        f"{type(error).__name__}"
+                    ) from error
+                raise
+            if _INTERRUPTED.is_set():
+                # The day reports an interrupted `panel build` as step 2's refusal, and `panel
+                # build` alone exits 130 of its own: either is an interruption here.
+                raise KeyboardInterrupt(
+                    f"an interruption reached the command, which exited {code} of its own"
+                )
+            return code
 
     return call
 
@@ -1003,9 +1050,11 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
             )
         else:
             print(
-                "smoke: interrupted; an invocation that had started recorded its end in the "
-                "ledger, and one that writes the panel discarded the root -- run `status` before "
-                "anything else",
+                "smoke: interrupted; run `status` before anything else. An invocation that had "
+                "started has its end in the ledger -- and one that writes the panel discarded "
+                "the root -- unless the interruption fell between its `start` and its call, or "
+                "between its `discarded` and its `end`: then it has no end, which refuses the "
+                "root as a killed one's would",
                 file=sys.stderr,
             )
         return INTERRUPTED_EXIT
