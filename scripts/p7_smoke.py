@@ -54,7 +54,9 @@ line `run_capped` writes just before that `end` (`Spent.discarded` only says suc
 or that records fewer invocations than `<root>/logs` holds logs of -- every invocation's output is
 written there as `<number>-<kind>.out|.err`, opened exclusively, never overwritten. A ledger event
 the driver cannot read refuses the root by name. Not caught -- forgeries, not faults: a ledger cut
-together with its logs, an edited count, and a hand-inserted `phase` line.
+together with its logs, an edited event (an `end`'s count, `fault` or `reached` among them: with
+its `discarded` line taken out and its `fault` set to null, a discarded root runs again), and a
+hand-inserted `phase` line.
 
 **Ends.** The exit is the wrapped command's own; `CAP_EXIT` (4) when the cap stopped a request --
 read from the ledger's `end` event when the call then ended on another exception, which
