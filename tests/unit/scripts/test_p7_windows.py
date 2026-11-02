@@ -481,3 +481,17 @@ def test_a_label_that_exits_on_the_windows_last_day_is_kept_and_one_session_late
 
     assert (planned(5).sessions, planned(5).embargoed) == ((day,), ())
     assert (planned(6).sessions, planned(6).embargoed) == ((), (day,))
+
+
+def test_a_labels_exit_is_the_planners_rule_and_none_past_the_calendar() -> None:
+    """`label_exit_day` is the rule `plan_signal_days` embargoes by: entered at the next close, left
+    `horizon` sessions later. On a calendar that stops on 2021-12-31 (the research window's last
+    day, as a reader capped at 2021 sees it), the 5-session label of 2021-12-23 exits that day and
+    a 6-session one cannot be placed at all: `None`, never a guess."""
+    calendar = weekday_calendar(date(2021, 11, 1), date(2021, 12, 31))
+    day = date(2021, 12, 23)
+
+    assert p7_windows.label_exit_day(calendar, day, 5) == date(2021, 12, 31)
+    assert p7_windows.label_exit_day(calendar, day, 1) == date(2021, 12, 27)
+    assert p7_windows.label_exit_day(calendar, day, 6) is None
+    assert p7_windows.label_exit_day(calendar, date(2021, 12, 31), 1) is None

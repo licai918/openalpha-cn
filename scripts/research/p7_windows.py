@@ -41,8 +41,12 @@ What the code that uses this module must do (none of it is enforced here):
 
 * The command line (`p7_diagnostics`) resolves a window by name from `WINDOWS`, defaults to
   `RESEARCH`, and refuses `VALIDATION` and `SECOND_USE` outside `p7_reading.read_once`.
-* A diagnostic reads rows through `read_visible_at` with an `as_of` no later than the window's
-  last day; `query` ignores the availability and revision clocks and hands back every row.
+* A diagnostic's `as_of` is its **knowledge clock** -- what the panel knew when the diagnostic
+  ran, revisions included -- and may be long after the window; the year cap is what enforces the
+  **economic date**, since no door serves a year past the ceiling whatever the `as_of`. A
+  diagnostic records its `as_of` in its `config`, so it enters the config digest. Rows are read
+  through `read_visible_at`; `query` ignores the availability and revision clocks and hands back
+  every row.
 * `partitions_read()` asks the catalogue for each hash when it is called, not when the partition
   was read: a read-once log must take the hashes inside `PanelStore.reading()`, with the reads.
 * A `SignalPlan` is a plain record and can be built by hand; whoever consumes one must have it
@@ -373,14 +377,23 @@ class SignalPlan:
     embargoed: tuple[date, ...]
 
 
-def _exits_by(calendar: TradingCalendar, day: date, horizon: int, limit: date) -> bool:
-    """Whether the label of `day` -- entered at the next close, left `horizon` sessions later --
-    ends on or before `limit`. A calendar that stops before the exit answers no."""
+def label_exit_day(calendar: TradingCalendar, day: date, horizon: int) -> date | None:
+    """The session the label of `day` exits on -- entered at the next close, left `horizon`
+    sessions later (`build_label_window`'s rule) -- or `None` when `calendar` stops before it.
+
+    The planner embargoes by it, and the diagnostics engine checks a hand-built plan with it
+    before it asks a label reader for a window: `None` counts as past the window."""
     try:
-        exit_day = calendar.shift(calendar.next_trading_day(day), horizon)
+        return calendar.shift(calendar.next_trading_day(day), horizon)
     except CalendarHorizonError:
-        return False
-    return exit_day <= limit
+        return None
+
+
+def _exits_by(calendar: TradingCalendar, day: date, horizon: int, limit: date) -> bool:
+    """Whether the label of `day` ends on or before `limit`. A calendar that stops before the
+    exit answers no."""
+    exit_day = label_exit_day(calendar, day, horizon)
+    return exit_day is not None and exit_day <= limit
 
 
 def plan_signal_days(
