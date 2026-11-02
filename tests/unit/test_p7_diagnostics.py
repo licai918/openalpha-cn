@@ -866,13 +866,54 @@ def test_a_binding_makes_the_read_once_kind_and_wording() -> None:
 
     second = fixed_document(binding=binding, window=p7_windows.SECOND_USE)
     assert second["wording"] == [
-        p7.READ_ONCE_WORDING,
+        p7.SECOND_USE_READ_ONCE_WORDING,
         p7.CANDIDATE_WORDING,
         p7.SECOND_USE_WORDING,
     ]
-    assert p7.diagnostic_lines(second)[0].startswith(
+    assert p7.diagnostic_lines(second)[0] == (
+        "PRE-REGISTERED READ-ONCE probe -- A SECONDARY, NON-CONFIRMATORY READING OF A SPENT "
+        "HOLDOUT: second_use window 2024-01-02..2026-09-24"
+    )
+
+
+def test_the_spent_holdout_is_never_called_a_first_out_of_sample_reading() -> None:
+    """The second-use window was P6's one-time holdout, already used, and P7 was designed after
+    seeing it: its one reading is secondary and non-confirmatory, and neither its JSON nor its
+    text may call it a first out-of-sample reading."""
+    binding = {
+        "reading": "probe",
+        "registration_sha256": "0" * 64,
+        "registration_commit": "0" * 40,
+        "claim_sha256": "1" * 64,
+    }
+    second = fixed_document(binding=binding, window=p7_windows.SECOND_USE)
+    text = json.dumps(second, sort_keys=True, ensure_ascii=False)
+    text += "\n" + "\n".join(p7.diagnostic_lines(second))
+
+    assert "first out-of-sample" not in text.lower()
+    assert p7.SECOND_USE_READ_ONCE_WORDING == (
+        "the one pre-registered read of this window, which was P6's one-time holdout and has "
+        "been used: a secondary, non-confirmatory reading of a spent holdout, not out-of-sample "
+        "evidence; confirmatory evidence comes only from forward records registered under "
+        "V2-P7-006"
+    )
+    assert verdict_words(second) == []
+
+
+def test_the_validation_windows_read_once_text_is_unchanged_byte_for_byte() -> None:
+    """Only the spent holdout's wording moved: the validation window's (and any other read-once
+    window's) is the text it always was."""
+    assert p7.READ_ONCE_WORDING == (
+        "the one pre-registered read of this window: a first out-of-sample reading, not "
+        "confirmatory evidence; confirmatory evidence comes only from forward records registered "
+        "under V2-P7-006"
+    )
+    assert p7.read_once_wording("validation") == p7.READ_ONCE_WORDING
+    assert p7.read_once_banner(
+        "probe", "validation", "validation window 2022-01-04..2023-12-29"
+    ) == (
         "PRE-REGISTERED READ-ONCE probe -- A FIRST OUT-OF-SAMPLE READING, NOT CONFIRMATORY "
-        "EVIDENCE: second_use window 2024-01-02..2026-09-24"
+        "EVIDENCE: validation window 2022-01-04..2023-12-29"
     )
 
 

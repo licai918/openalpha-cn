@@ -145,10 +145,19 @@ READ_ONCE_WORDING: Final = (
     "the one pre-registered read of this window: a first out-of-sample reading, not confirmatory "
     "evidence; confirmatory evidence comes only from forward records registered under V2-P7-006"
 )
+SECOND_USE_READ_ONCE_WORDING: Final = (
+    "the one pre-registered read of this window, which was P6's one-time holdout and has been "
+    "used: a secondary, non-confirmatory reading of a spent holdout, not out-of-sample evidence; "
+    "confirmatory evidence comes only from forward records registered under V2-P7-006"
+)
+"""`READ_ONCE_WORDING` for the second-use window: it was P6's one-time holdout, spent, and P7 was
+designed after seeing it, so its one reading is never a first out-of-sample one."""
 SECOND_USE_WORDING: Final = (
     "2024-01-02..2026-09-24 was P6's one-time holdout and has been used: a secondary, "
     "non-confirmatory reading"
 )
+READ_ONCE_HEADLINE: Final = "A FIRST OUT-OF-SAMPLE READING, NOT CONFIRMATORY EVIDENCE"
+SECOND_USE_HEADLINE: Final = "A SECONDARY, NON-CONFIRMATORY READING OF A SPENT HOLDOUT"
 CANDIDATE_WORDING: Final = "every score is a candidate research signal (候选), never a verdict"
 EXPLORATORY_POWER_WORDING: Final = (
     "if the planning sd were this exploratory value (in-sample, measured after the factors were "
@@ -728,7 +737,7 @@ def diagnostic_document(
         wording = [EXPLORATORY_WORDING, IN_SAMPLE_WORDING, CANDIDATE_WORDING]
     else:
         kind = READ_ONCE_KIND
-        wording = [READ_ONCE_WORDING, CANDIDATE_WORDING]
+        wording = [read_once_wording(window.name), CANDIDATE_WORDING]
         if window.name == SECOND_USE.name:
             wording.append(SECOND_USE_WORDING)
     return {
@@ -805,6 +814,20 @@ def _day_form(reading: DayReading) -> dict[str, Any]:
     }
 
 
+def read_once_wording(window_name: str) -> str:
+    """A read-once document's first wording, by window: the second-use window's one reading is a
+    secondary reading of a spent holdout (`SECOND_USE_READ_ONCE_WORDING`); any other window's is
+    a first out-of-sample reading (`READ_ONCE_WORDING`)."""
+    return SECOND_USE_READ_ONCE_WORDING if window_name == SECOND_USE.name else READ_ONCE_WORDING
+
+
+def read_once_banner(reading: str, window_name: str, span: str) -> str:
+    """The first line of a read-once document's text, by window (`p7_reading` opens its result
+    text with the same line)."""
+    headline = SECOND_USE_HEADLINE if window_name == SECOND_USE.name else READ_ONCE_HEADLINE
+    return f"PRE-REGISTERED READ-ONCE {reading} -- {headline}: {span}"
+
+
 def diagnostic_lines(document: Mapping[str, Any]) -> list[str]:
     """The document as text: the banner first, then the wording, the plan and every summary."""
     window = document["window"]
@@ -812,10 +835,7 @@ def diagnostic_lines(document: Mapping[str, Any]) -> list[str]:
     if document["kind"] == EXPLORATORY_KIND:
         banner = f"EXPLORATORY, UNREGISTERED -- NOT EVIDENCE: {span}"
     else:
-        banner = (
-            f"PRE-REGISTERED READ-ONCE {document['binding']['reading']} -- A FIRST OUT-OF-SAMPLE "
-            f"READING, NOT CONFIRMATORY EVIDENCE: {span}"
-        )
+        banner = read_once_banner(document["binding"]["reading"], window["name"], span)
     plan, provenance = document["plan"], document["provenance"]
     lines = [banner, *(f"  {wording}" for wording in document["wording"])]
     lines.append(

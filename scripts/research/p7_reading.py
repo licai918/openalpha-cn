@@ -127,8 +127,12 @@ What this does not establish:
 * The second-use store serves 2026 whole, rows after 2026-09-24 included; keeping them out is the
   plan's label rule and the readers' (`p7_windows`), not the store's.
 
-A reading is a first out-of-sample reading, not confirmatory evidence (`READ_ONCE_WORDING`); a
-stop rule that is not triggered permits `V2-P7-006` to proceed and is not evidence either.
+A reading of the validation window is a first out-of-sample reading, not confirmatory evidence
+(`p7_diagnostics.READ_ONCE_WORDING`). A reading of the second-use window is not even that: the
+window was P6's one-time holdout, already spent, and P7 was designed after seeing it, so its
+reading is a secondary, non-confirmatory reading of a spent holdout
+(`p7_diagnostics.SECOND_USE_READ_ONCE_WORDING`, and the result's first line says so). A stop rule
+that is not triggered permits `V2-P7-006` to proceed and is not evidence either.
 """
 
 from __future__ import annotations
@@ -168,6 +172,7 @@ from p7_diagnostics import (
     diagnostic_lines,
     label_years,
     panel_label_source,
+    read_once_banner,
     run_diagnostics,
 )
 from p7_windows import (
@@ -1332,9 +1337,11 @@ def reading_lines(result: Mapping[str, Any], body: Mapping[str, Any]) -> list[st
     own banner."""
     window = WINDOWS[body["window"]]
     lines = [
-        f"PRE-REGISTERED READ-ONCE {body['reading']} -- A FIRST OUT-OF-SAMPLE READING, NOT "
-        f"CONFIRMATORY EVIDENCE: {window.name} window {window.first.isoformat()}.."
-        f"{window.last.isoformat()}",
+        read_once_banner(
+            body["reading"],
+            window.name,
+            f"{window.name} window {window.first.isoformat()}..{window.last.isoformat()}",
+        ),
         f"  the {body['role']} reading registered for {body['issue']}",
         f"  this window's one read is witnessed by every claim file naming it in "
         f"{READING_DIRECTORY.as_posix()}: commit {body['reading']}.claim.json and "

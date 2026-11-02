@@ -1042,10 +1042,12 @@ def test_a_secondary_reading_of_the_spent_holdout_has_no_stop_rule_and_says_so(r
     assert measure.calls == [("second_use", True)]
     assert "stop_rule" not in result
     text = path.with_name("v2-p7-024-second-use.result.txt").read_text(encoding="utf-8")
+    written = path.with_name("v2-p7-024-second-use.result.json").read_text(encoding="utf-8")
     assert text.startswith(
-        "PRE-REGISTERED READ-ONCE v2-p7-024-second-use -- A FIRST OUT-OF-SAMPLE READING, NOT "
-        "CONFIRMATORY EVIDENCE: second_use window 2024-01-02..2026-09-24"
+        "PRE-REGISTERED READ-ONCE v2-p7-024-second-use -- A SECONDARY, NON-CONFIRMATORY READING "
+        "OF A SPENT HOLDOUT: second_use window 2024-01-02..2026-09-24\n"
     )
+    assert "first out-of-sample" not in (text + written).lower()
     assert "no stop rule" in text
 
 
@@ -1473,7 +1475,7 @@ class HeldLabels:
 
     def label(self, ts_code: str, window: LabelWindow) -> OutcomeLabel:
         self.depths.append(self.store.depth)
-        turn = VALIDATION_CALENDAR.trading_days.index(window.entry_day) % 3 + 2
+        turn = self.calendar.trading_days.index(window.entry_day) % 3 + 2
         value = (CODES.index(ts_code) * turn % 20) / 1000 - 0.005
         return OutcomeLabel(
             ts_code=ts_code,
@@ -1550,3 +1552,64 @@ def test_the_default_measure_reads_and_hashes_inside_one_hold(
     assert document["summary"]["composite"]["h20"]["power_if_planning_sd_were_this"] is not None
     assert p7_diagnostics.READ_ONCE_POWER_WORDING in text
     assert "in-sample" not in text and "in-sample" not in json.dumps(result)
+
+
+# --- the spent holdout is a secondary reading, never a first out-of-sample one (final review) ---
+
+SECOND_USE_CALENDAR: Final[TradingCalendar] = weekday_calendar(date(2023, 1, 2), date(2026, 9, 30))
+
+
+class SecondUseLabels(HeldLabels):
+    calendar = SECOND_USE_CALENDAR
+
+
+def test_a_validation_reading_keeps_its_first_out_of_sample_banner_byte_for_byte(
+    repo: Path,
+) -> None:
+    registration = registered(repo)
+    run(registration, repo, Measure())
+    text = registration.with_name("v2-p7-024-validation.result.txt").read_text(encoding="utf-8")
+    assert text.splitlines()[0] == (
+        "PRE-REGISTERED READ-ONCE v2-p7-024-validation -- A FIRST OUT-OF-SAMPLE READING, NOT "
+        "CONFIRMATORY EVIDENCE: validation window 2022-01-04..2023-12-29"
+    )
+
+
+def test_the_spent_holdouts_measured_document_and_text_never_say_first_out_of_sample(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default measure on the second-use window (stand-in store, calendar and sources; the
+    real plan, engine and document): what `.result.json` and `.result.txt` would hold."""
+    path = tmp_path / "v2-p7-024-second-use.registration.json"
+    register(
+        path,
+        reading="v2-p7-024-second-use",
+        role="secondary",
+        window="second_use",
+        request=SECOND_USE_REQUEST,
+        stop_rule=None,
+    )
+    body = json.loads(path.read_text(encoding="utf-8"))
+    store = HoldingStore()
+    monkeypatch.setattr(p7_reading, "capped_panel_store", lambda runtime_dir, window: store)
+    monkeypatch.setattr(p7_reading, "load_trading_calendar", lambda *a, **k: SECOND_USE_CALENDAR)
+    monkeypatch.setattr(p7_reading, "PanelScoreSource", lambda **kwargs: HeldScores(store))
+    monkeypatch.setattr(p7_reading, "panel_label_source", lambda *a, **k: SecondUseLabels(store))
+    binding = {
+        "reading": "v2-p7-024-second-use",
+        "registration_sha256": "a" * 64,
+        "registration_commit": "b" * 40,
+        "claim_sha256": "c" * 64,
+    }
+
+    document = p7_reading._panel_measure(tmp_path / "runtime")(body, p7_windows.SECOND_USE, binding)
+    text = "\n".join(p7_reading.reading_lines(document, body))
+
+    assert document["wording"][0] == p7_diagnostics.SECOND_USE_READ_ONCE_WORDING
+    assert document["summary"]["composite"]["h20"]["read"] > 0
+    assert text.splitlines()[0] == (
+        "PRE-REGISTERED READ-ONCE v2-p7-024-second-use -- A SECONDARY, NON-CONFIRMATORY READING "
+        "OF A SPENT HOLDOUT: second_use window 2024-01-02..2026-09-24"
+    )
+    assert p7_diagnostics.SECOND_USE_READ_ONCE_WORDING in text
+    assert "first out-of-sample" not in (text + json.dumps(document)).lower()
