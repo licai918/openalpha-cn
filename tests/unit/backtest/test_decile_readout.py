@@ -6,7 +6,7 @@ from __future__ import annotations
 import math
 import random
 import statistics
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -89,6 +89,54 @@ def test_an_unlabelled_name_keeps_its_decile_and_leaves_every_number() -> None:
     assert read.equal_weight == pytest.approx((-0.03 - 0.02 + 15 * 0.01) / 18, abs=1e-15)
     assert read.decile_means[0] == pytest.approx(-0.03, abs=1e-15)
     assert read.decile_means[9] == pytest.approx(0.01, abs=1e-15)
+    equal_weight = 0.10 / 18
+    assert read.tail_excess[0][1] == pytest.approx(0.13 / 17 - equal_weight, abs=1e-15)
+    assert read.tail_excess[1][1] == pytest.approx(0.01 - equal_weight, abs=1e-15)
+    assert read.tail_excess[2][1] == pytest.approx(0.01 - equal_weight, abs=1e-15)
+    assert read.survivors_minus_ew == pytest.approx(0.01 - equal_weight, abs=1e-15)
+
+
+def test_a_tail_is_cut_over_the_whole_scope_not_among_the_names_that_earned_a_label() -> None:
+    """Position 10 loses its label and is a survivor. EW = (2(-0.03) + 2(-0.01) + 15(0.01)) / 19 =
+    0.07 / 19. Dropping the worst 20 * k // 10 names of the *scope* leaves, for k=1, positions 2-19
+    less 10 (17 names: -0.02 + 0.15) and for k=2, positions 4-19 less 10 (15 names of 0.01). A cut
+    among the 19 labelled names would drop 19 * 1 // 10 = 1 name for k=1 and 19 * 2 // 10 = 3 for
+    k=2, and keep a name the report's survivors have already shed."""
+    labels = tail_labels()
+    del labels[CODES[10]]
+    equal_weight = 0.07 / 19
+
+    read = read_cross_section(SCORED, labels, loser_decile_count=2, tails=(1, 2, 3))
+
+    assert (read.scope, read.labelled, read.unlabelled) == (20, 19, 1)
+    assert read.labelled_by_decile == (2, 2, 2, 2, 2, 1, 2, 2, 2, 2)
+    assert read.equal_weight == pytest.approx(equal_weight, abs=1e-15)
+    assert read.tail_excess[0][1] == pytest.approx(0.13 / 17 - equal_weight, abs=1e-15)
+    assert read.tail_excess[1][1] == pytest.approx(0.01 - equal_weight, abs=1e-15)
+    assert read.tail_excess[2][1] == pytest.approx(0.01 - equal_weight, abs=1e-15)
+    assert read.survivors_minus_ew == pytest.approx(0.01 - equal_weight, abs=1e-15)
+
+
+def test_the_survivors_are_the_tail_the_book_drops_not_the_first_tail_asked_for() -> None:
+    """A book that drops one decile has the k=1 tail as its survivors, whatever else is asked."""
+    labels = tail_labels()
+    del labels[CODES[10]]
+
+    read = read_cross_section(SCORED, labels, loser_decile_count=1, tails=(2,))
+
+    assert read.survivors_minus_ew == pytest.approx(0.13 / 17 - 0.07 / 19, abs=1e-15)
+    assert read.tail_excess == ((2, pytest.approx(0.01 - 0.07 / 19, abs=1e-15)),)
+
+
+def test_the_widest_tail_and_a_book_that_drops_no_loser_can_be_read() -> None:
+    """k=9 drops 18 of 20 and keeps the two best (0.01 each, against an equal weight of 0.004); a
+    book that drops nobody keeps every labelled name, so its survivors are the equal weight."""
+    widest = read_cross_section(SCORED, tail_labels(), loser_decile_count=9, tails=(9,))
+    nobody = read_cross_section(SCORED, tail_labels(), loser_decile_count=0)
+
+    assert widest.tail_excess == ((9, pytest.approx(0.006, abs=1e-15)),)
+    assert widest.survivors_minus_ew == pytest.approx(0.006, abs=1e-15)
+    assert nobody.survivors_minus_ew == 0.0
 
 
 def test_the_cut_is_by_score_then_code_and_does_not_depend_on_input_order() -> None:
@@ -127,7 +175,13 @@ def test_a_tail_drops_n_k_tenths_rounded_down() -> None:
             "scores_tied",
         ),
         (SCORED[:3], {code: 0.01 for code in CODES[:3]}, "labels_tied"),
+        (
+            tuple((code, 1.0) for code in CODES[:3]),
+            {code: 0.01 for code in CODES[:3]},
+            "scores_tied",
+        ),
     ],
+    ids=["one_name", "scores_tied", "labels_tied", "both_tied_says_scores_first"],
 )
 def test_a_degenerate_rank_ic_is_absent_with_a_code(
     scored: tuple[tuple[str, float], ...], labels: dict[str, float], code: str
@@ -144,8 +198,11 @@ def test_a_degenerate_rank_ic_is_absent_with_a_code(
         ((("600000.SH", math.nan),), {}, {}, "finite"),
         (SCORED[:2], {"000001.SZ": 0.01}, {}, "not scored"),
         ((), {}, {}, "empty"),
+        (SCORED[:2], {CODES[0]: math.nan}, {}, "finite"),
         (SCORED, {}, {"loser_decile_count": 10}, "loser_decile_count"),
+        (SCORED, {}, {"loser_decile_count": -1}, "loser_decile_count"),
         (SCORED, {}, {"tails": (0,)}, "tail"),
+        (SCORED, {}, {"tails": (10,)}, "tail"),
         (SCORED, {}, {"tails": (1, 1)}, "tail"),
     ],
 )
@@ -225,3 +282,38 @@ def test_a_degenerate_series_says_what_it_lacks() -> None:
         summarize_series([(date(2021, 2, 1), 0.1), (date(2021, 1, 4), 0.2)])
     with pytest.raises(DecileReadoutError, match="finite"):
         summarize_series([(date(2021, 1, 4), math.inf)])
+
+
+def dated(*values: float) -> list[tuple[date, float]]:
+    """One value per consecutive day from 2021-01-04."""
+    return [(date(2021, 1, 4) + timedelta(days=index), value) for index, value in enumerate(values)]
+
+
+def test_a_zero_is_not_a_positive_value() -> None:
+    """[0, 0.1, -0.1, 0.2]: two of the four are above zero."""
+    summary = summarize_series(dated(0.0, 0.1, -0.1, 0.2))
+
+    assert summary.share_positive == 0.5
+
+
+def test_lag_one_needs_three_values() -> None:
+    """Two values with dispersion have an sd, a t and no autocorrelation; [1, 2, 4] is the
+    smallest series that has one: centred -4/3, -1/3, 5/3, so (4/9 - 5/9) / (42/9) = -1/42."""
+    two = summarize_series(dated(0.1, 0.3))
+    three = summarize_series(dated(1.0, 2.0, 4.0))
+
+    assert two.sd == pytest.approx(math.sqrt(0.02), abs=1e-15)
+    assert two.se == pytest.approx(0.1, abs=1e-15)
+    assert two.t == pytest.approx(2.0, abs=1e-12)
+    assert (two.lag1_autocorrelation, two.absence) == (None, None)
+    assert three.lag1_autocorrelation == pytest.approx(-1 / 42, abs=1e-12)
+
+
+def test_a_constant_series_of_three_has_no_dispersion_and_so_no_autocorrelation() -> None:
+    """The float mean of [0.1] * 3 is not exactly 0.1, so centring leaves rounding noise whose
+    ratio to itself would read as a perfect autocorrelation; the exact sd of 0 is what rules it
+    out."""
+    constant = summarize_series(dated(0.1, 0.1, 0.1))
+
+    assert (constant.sd, constant.se, constant.t) == (0.0, 0.0, None)
+    assert (constant.lag1_autocorrelation, constant.absence) == (None, "no_dispersion")
