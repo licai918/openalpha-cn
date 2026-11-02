@@ -2202,6 +2202,9 @@ def test_the_report_reads_the_power_plan_from_the_registrations_settings(
     row = document["power"]["rows"][0]
     assert (row["horizon"], row["metric"], row["planned_periods"]) == (20, "rank_ic", 2)
     assert any(line.startswith("power (survivor-forward-power/v1") for line in out.splitlines())
+    # nothing has matured on 9 April: with a plan as without one, no p-value wording is printed
+    assert not any("one-sided p" in line for line in out.splitlines())
+    assert "  reading rule: printed once the primary window is satisfied" in out.splitlines()
     _no_verdict_word(out, json.dumps(document))
     _assert_the_wording_is_in_every_section(document)
 
@@ -2265,4 +2268,5 @@ def test_a_registered_power_block_is_stated_in_the_report_as_registered(
     assert power["status"] == "pre-registered (survivor-forward-power/v1)"
     assert power["plan"] == POWER
     assert forward.POWER_NOT_PRE_REGISTERED not in out
+    assert not any("one-sided p" in line for line in out.splitlines())
     _no_verdict_word(out)

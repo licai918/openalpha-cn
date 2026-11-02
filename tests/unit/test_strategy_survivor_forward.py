@@ -2917,6 +2917,9 @@ def test_the_power_lines_carry_the_reading_rule_and_no_verdict_word() -> None:
     assert verdict_words(document) == []
 
 
+READING_RULE_PENDING: Final[str] = "  reading rule: printed once the primary window is satisfied"
+
+
 def test_the_power_lines_sit_after_the_secondary_family_and_before_the_paper_ledger() -> None:
     outcomes = every_session(25)
     document = reported({20: outcomes, 5: ()}, checked_by(outcomes), through=25, power=power_plan())
@@ -2926,10 +2929,49 @@ def test_the_power_lines_sit_after_the_secondary_family_and_before_the_paper_led
         return next(index for index, line in enumerate(lines) if line.startswith(prefix))
 
     assert first("  secondary family") < first("power (") < first("paper ledger")
-    assert lines[first("paper ledger") - 1].strip() == NOT_DETECTABLE_WORDING
+    assert lines[first("paper ledger") - 1] == READING_RULE_PENDING
     assert survivor_forward_lines(json.loads(json.dumps(document, sort_keys=True))) == lines
     text = "\n".join(lines[first("power (") : first("paper ledger")])
     assert "test level" in text and "minimum periods" in text
+
+
+def test_a_plan_prints_no_p_value_wording_before_the_window_and_the_reading_rule_after_it() -> None:
+    """The reading rule says what a one-sided p-value above the test level means. Before the
+    pre-registered window no one-sided p is printed anywhere -- the guard every other pre-window
+    report keeps, with a plan as without one -- so the rule waits, and a short neutral line says
+    that it does. Once the primary window is satisfied the block ends with the rule."""
+    before_outcomes = every_session(25)
+    before = reported(
+        {20: before_outcomes, 5: ()},
+        checked_by(before_outcomes),
+        through=25,
+        power=power_plan(),
+    )
+    before_lines = survivor_forward_lines(before)
+
+    assert before["protocol"]["window_satisfied"] is False
+    assert not any("one-sided p" in line for line in before_lines)
+    assert not any(NOT_DETECTABLE_WORDING in line for line in before_lines)
+    assert READING_RULE_PENDING in before_lines
+    for word in ("p-value", "one-sided p", "significan", "detect"):
+        assert word not in READING_RULE_PENDING
+    assert "p_value" not in json.dumps(before)
+    assert verdict_words(before) == []
+
+    after_outcomes = every_session(61)
+    after = reported(
+        {20: after_outcomes, 5: ()},
+        checked_by(after_outcomes),
+        through=61,
+        power=power_plan(),
+    )
+    after_lines = survivor_forward_lines(after)
+
+    assert after["protocol"]["window_satisfied"] is True
+    assert READING_RULE_PENDING not in after_lines
+    end = next(index for index, line in enumerate(after_lines) if line.startswith("paper ledger"))
+    assert after_lines[end - 1] == f"  {NOT_DETECTABLE_WORDING}"
+    assert verdict_words(after) == []
 
 
 def test_a_secondary_window_that_matured_first_is_not_counted_as_tested_in_the_power_section() -> (

@@ -142,8 +142,9 @@ each planned `(horizon, metric)` a **planning** sd, the true means to ask about 
 comes from. Each planned metric must be one the protocol tests at that horizon, the primary test
 must be planned, and the minimum cannot exceed the primary window's positions. A registration
 without the block still gets its report: its `power` section says that no power is stated
-(`POWER_NOT_PRE_REGISTERED`) and states nothing else. What the section holds, every sum made by
-`backtest.power_analysis` (standard library only):
+(`POWER_NOT_PRE_REGISTERED`), carries the `basis` and the `reading_rule` and no row, and prints
+that one statement. What the section holds, every sum made by `backtest.power_analysis` (standard
+library only):
 
 - The power is always the **plan's**: the planning sd, the planned periods `K_h` and the test
   level. A window's own sd and lag-1 autocorrelation are described after the window's test
@@ -164,8 +165,12 @@ without the block still gets its report: its `power` section says that no power 
 - A question the design has no answer to (fewer than two periods, a mean needing more than
   100,000, fewer than two independent periods) is an absence the row names (`absences`), never a
   traceback; the other figures of the row stand.
-- Every power block ends with the reading rule (`NOT_DETECTABLE_WORDING`): a p-value above the
-  test level reads "not detectable at this design", a category of the design.
+- The document's section always carries the reading rule (`NOT_DETECTABLE_WORDING`): a p-value
+  above the test level reads "not detectable at this design", a category of the design. The
+  printed block ends with it once the primary window is satisfied. Before the window the report
+  states no one-sided p-value and no reading of one, so the block ends instead with one neutral
+  line saying the rule waits for the window (the `basis` line defines power as a property of the
+  design and names no result).
 
 ## The report's document (`survivor_forward_document`, `survivor_forward_lines`; task E4)
 
@@ -2415,7 +2420,7 @@ def survivor_forward_lines(document: Mapping[str, Any]) -> list[str]:
     for horizon in horizons:
         lines += _layer_lines(layer[f"h{horizon}"])
     lines += _family_lines(layer["secondary_family"])
-    lines += _power_lines(document["power"])
+    lines += _power_lines(document["power"], window_satisfied=protocol["window_satisfied"])
     lines += _ledger_lines(document["paper_ledger"])
     lines += _relative_lines(document["relative"])
     lines.append("cannot be evaluated yet:")
@@ -2570,9 +2575,15 @@ def _by_mean(
     return ", ".join(f"{entry['mean']:g} -> {show(entry[key])}" for entry in entries)
 
 
-def _power_lines(power: Mapping[str, Any]) -> list[str]:
-    """The `power` section as lines: the plan, then each planned row with its windows, and the
-    reading rule last; or the statement that no power was registered."""
+_READING_RULE_PENDING: Final = "reading rule: printed once the primary window is satisfied"
+"""What the power block ends with before the pre-registered window: the reading rule speaks of a
+one-sided p-value, and none is printed before the window."""
+
+
+def _power_lines(power: Mapping[str, Any], *, window_satisfied: bool) -> list[str]:
+    """The `power` section as lines: the plan, then each planned row with its windows, and last
+    the reading rule once the primary window is satisfied (before it, the neutral line that says
+    the rule waits); or the statement that no power was registered."""
     plan = power["plan"]
     if plan is None:
         return [f"power -- {power['status']}"]
@@ -2586,7 +2597,7 @@ def _power_lines(power: Mapping[str, Any]) -> list[str]:
     ]
     for row in power["rows"]:
         lines += _power_row_lines(row)
-    lines.append(f"  {power['reading_rule']}")
+    lines.append(f"  {power['reading_rule'] if window_satisfied else _READING_RULE_PENDING}")
     return lines
 
 
