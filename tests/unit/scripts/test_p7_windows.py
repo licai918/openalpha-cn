@@ -13,14 +13,18 @@ from types import ModuleType
 from typing import Any, Final
 
 import pytest
+from panel_fixtures import AS_OF as PANEL_AS_OF
+from panel_fixtures import YEAR, generate_panel, write_generated_panel
 
+from openalpha_cn.domain.daily_prices import DAILY_DATASET
 from openalpha_cn.domain.trading_calendar import (
     CalendarDay,
     TradingCalendar,
     build_trading_calendar,
 )
 from openalpha_cn.panel.catalog import ReadinessRequirement
-from openalpha_cn.panel.store import ColumnSpec, PanelStore
+from openalpha_cn.panel.store import ColumnSpec, PanelStorageError, PanelStore
+from openalpha_cn.panel_ingest import daily_requirement
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[3]
 RESEARCH: Final[Path] = ROOT / "scripts" / "research"
@@ -95,7 +99,7 @@ def test_a_capped_store_serves_years_up_to_its_ceiling_and_records_them(three_ye
     assert store.query(PROBE, year=2021, columns=("subject",)) == [("2021",)]
     assert store.served == ((PROBE, 2021),)
     assert store.registered_years(PROBE) == (2021,)
-    assert all(stamp[1] <= 2021 for stamp in store.partition_stamps())
+    assert [stamp[:2] for stamp in store.partition_stamps()] == [(PROBE, 2021)]
 
 
 @pytest.mark.parametrize(
@@ -132,6 +136,8 @@ def test_a_capped_store_writes_nothing(three_years: Path) -> None:
         lambda: store.write_partitions(()),
         lambda: store.remove_partition(PROBE, 2021),
         lambda: store.merge_base(PROBE, 2021),
+        lambda: store.record_coverage(object()),  # type: ignore[arg-type]
+        lambda: store.discard_merge_bases(),
     ):
         with pytest.raises(p7_windows.DiagnosticWindowError, match="read-only"):
             write()
@@ -239,13 +245,146 @@ def test_a_read_is_refused_for_every_year_its_requirement_or_its_call_names(
     assert store.served == ()
 
 
-def test_a_ready_read_inside_the_ceiling_is_served_and_recorded(three_years: Path) -> None:
+@pytest.fixture
+def generated(tmp_path: Path) -> tuple[Path, ReadinessRequirement]:
+    """The generated panel's `daily` partition (ten sessions of 2026) and the requirement that
+    makes it ready at the fixtures' `AS_OF`."""
+    panel = generate_panel()
+    write_generated_panel(PanelStore(tmp_path / "panel"), panel)
+    ready = daily_requirement(
+        panel.calendar(), years=(YEAR,), as_of=PANEL_AS_OF, max_staleness=None
+    )
+    return tmp_path / "panel", ready
+
+
+def test_a_ready_read_inside_the_ceiling_hands_back_the_rows_and_records_the_partition(
+    generated: tuple[Path, ReadinessRequirement],
+) -> None:
+    root, ready = generated
+    window = p7_windows.DiagnosticWindow(
+        name="fixture", first=date(2026, 1, 5), last=date(2026, 12, 31), ceiling_year=2026
+    )
+    store = p7_windows.WindowCappedStore(root, window=window)
+
+    outcome = store.read_if_ready(ready, year=YEAR, columns=("subject", "close"))
+    visible = store.read_visible_at(ready, year=YEAR, columns=("subject", "close"))
+
+    assert outcome.readiness.state == "ready"
+    assert outcome.rows_or_none is not None and len(outcome.rows_or_none) > 0
+    assert visible.rows_or_none == outcome.rows_or_none
+    assert store.served == ((DAILY_DATASET, YEAR),)
+
+
+def test_the_research_window_refuses_the_same_requirement_before_it_reads_anything(
+    generated: tuple[Path, ReadinessRequirement],
+) -> None:
+    root, ready = generated
+    store = p7_windows.WindowCappedStore(root, window=p7_windows.RESEARCH)
+
+    with pytest.raises(p7_windows.DiagnosticWindowError, match="read_once"):
+        store.read_if_ready(ready, year=YEAR, columns=("subject", "close"))
+    assert store.served == ()
+
+
+@pytest.mark.parametrize(
+    "door",
+    [
+        lambda s: s.read_if_ready(requirement(2021), year=2020, columns=("subject",)),
+        lambda s: s.read_visible_at(requirement(2021), year=2020, columns=("subject",)),
+        lambda s: s.query("not/a/dataset", year=2021, columns=("subject",)),
+    ],
+    ids=["ready-year-not-in-requirement", "visible-year-not-in-requirement", "malformed-dataset"],
+)
+def test_a_read_the_base_class_refuses_is_not_recorded_as_served(
+    three_years: Path, door: object
+) -> None:
+    """The year asked for is inside the ceiling, so the window admits it; the base class then
+    raises. Provenance must not list a partition that was never read."""
     store = p7_windows.WindowCappedStore(three_years, window=p7_windows.RESEARCH)
 
-    outcome = store.read_if_ready(requirement(2021), year=2021, columns=("subject",))
+    with pytest.raises(PanelStorageError):
+        door(store)  # type: ignore[operator]
+    assert store.served == ()
 
+
+STUB_ANSWER: Final[object] = object()
+
+# Each door: a call the window must refuse, and a call it must pass on to the base class.
+DOORS: Final[dict[str, tuple[Any, Any]]] = {
+    "query": (
+        lambda s: s.query(PROBE, year=2022, columns=("subject",)),
+        lambda s: s.query(PROBE, year=2021, columns=("subject",)),
+    ),
+    "profile_query": (
+        lambda s: s.profile_query(PROBE, year=2022, columns=("subject",)),
+        lambda s: s.profile_query(PROBE, year=2021, columns=("subject",)),
+    ),
+    "read_coverage": (
+        lambda s: s.read_coverage(PROBE, 2022),
+        lambda s: s.read_coverage(PROBE, 2021),
+    ),
+    "partition_content_hash": (
+        lambda s: s.partition_content_hash(PROBE, 2024),
+        lambda s: s.partition_content_hash(PROBE, 2021),
+    ),
+    "assess_readiness": (
+        lambda s: s.assess_readiness(requirement(2021, 2022)),
+        lambda s: s.assess_readiness(requirement(2021)),
+    ),
+    "assessed": (
+        lambda s: s.assessed(requirement(2021, 2024)),
+        lambda s: s.assessed(requirement(2021)),
+    ),
+    "read_if_ready": (
+        lambda s: s.read_if_ready(requirement(2021, 2022), year=2021, columns=("subject",)),
+        lambda s: s.read_if_ready(requirement(2021), year=2021, columns=("subject",)),
+    ),
+    "read_visible_at": (
+        lambda s: s.read_visible_at(requirement(2021, 2022), year=2021, columns=("subject",)),
+        lambda s: s.read_visible_at(requirement(2021), year=2021, columns=("subject",)),
+    ),
+}
+
+
+@pytest.fixture
+def base_class_doors_stubbed(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """`PanelStore`'s own doors replaced by stubs that answer a marker and record the call, so
+    what a capped door does is its own and not the base class's (several of the base class's doors
+    call one another, and each refusal would otherwise be made twice)."""
+    called: list[str] = []
+
+    def stub(name: str) -> Any:
+        def door(self: object, *args: object, **kwargs: object) -> object:
+            called.append(name)
+            return STUB_ANSWER
+
+        return door
+
+    for name in DOORS:
+        monkeypatch.setattr(PanelStore, name, stub(name))
+    return called
+
+
+@pytest.mark.parametrize("name", list(DOORS))
+def test_each_door_refuses_on_its_own_and_does_not_reach_the_base_class(
+    three_years: Path, base_class_doors_stubbed: list[str], name: str
+) -> None:
+    store = p7_windows.WindowCappedStore(three_years, window=p7_windows.RESEARCH)
+
+    with pytest.raises(p7_windows.DiagnosticWindowError, match="read_once"):
+        DOORS[name][0](store)
+    assert base_class_doors_stubbed == [] and store.served == ()
+
+
+@pytest.mark.parametrize("name", list(DOORS))
+def test_each_door_inside_the_ceiling_is_the_base_classs_answer_and_is_recorded(
+    three_years: Path, base_class_doors_stubbed: list[str], name: str
+) -> None:
+    store = p7_windows.WindowCappedStore(three_years, window=p7_windows.RESEARCH)
+
+    assert DOORS[name][1](store) is STUB_ANSWER
+    assert base_class_doors_stubbed == [name]
     assert store.served == ((PROBE, 2021),)
-    assert outcome.readiness is not None
 
 
 def test_what_was_read_is_listed_with_its_hash_and_listing_it_is_not_a_read(

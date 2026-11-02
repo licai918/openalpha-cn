@@ -10,8 +10,10 @@ at one of them by default:
 * **second use** 2024-01-02..2026-09-24 (`holdout`'s first day to the day P6's one-shot holdout
   ended), last year 2026 -- the same ceremony, and a secondary, non-confirmatory reading.
 
-Nothing after 2026-09-24 is read by any path of this tool: confirmatory evidence comes only from the
-forward record registered before its outcomes, which is the weekly report's business.
+No P7 diagnostic is to use anything dated after 2026-09-24: confirmatory evidence comes only from
+the forward record registered before its outcomes, which is the weekly report's business. That is
+a rule for the readers and the planner below, not something the store enforces (see "What the
+guard is, and is not").
 
 `WindowCappedStore` is the guard. It is a `PanelStore` whose every read door first checks that the
 year asked for is at most the window's last year, whose catalogue listings show only such years, and
@@ -26,19 +28,32 @@ What the guard is, and is not:
 * It is a guard **by year**. The research/validation and validation/second-use borders fall exactly
   on year borders (2021-12-31 | 2022-01-04 and 2023-12-29 | 2024-01-02: the exchange is shut on
   the days between), so a year cap is the window there. The second-use stretch is the exception:
-  its last year, 2026, holds rows after 2026-09-25, and only the label rule below keeps them out.
+  its last year, 2026, holds rows after 2026-09-24, the store serves that partition whole, and
+  only the label rule below (and the reader, which must cut by date) keeps them out.
 * It does not replace `plan_signal_days`. A signal day whose label would exit after the window's
   last day must never be asked for, and the planner **names** it (`SignalPlan.embargoed`) instead
   of dropping it. Both checks are needed: the store knows no dates, the planner reads no data.
 * It guards the doors of `PanelStore`, not the files. Code that builds its own `PanelStore` on
   `store.root`, or opens the Parquet files, is outside it. The diagnostics open stores only through
   `capped_panel_store`.
+
+What the code that uses this module must do (none of it is enforced here):
+
+* The command line (`p7_diagnostics`) resolves a window by name from `WINDOWS`, defaults to
+  `RESEARCH`, and refuses `VALIDATION` and `SECOND_USE` outside `p7_reading.read_once`.
+* A diagnostic reads rows through `read_visible_at` with an `as_of` no later than the window's
+  last day; `query` ignores the availability and revision clocks and hands back every row.
+* `partitions_read()` asks the catalogue for each hash when it is called, not when the partition
+  was read: a read-once log must take the hashes inside `PanelStore.reading()`, with the reads.
+* A `SignalPlan` is a plain record and can be built by hand; whoever consumes one must have it
+  from `plan_signal_days` itself (or re-check its sessions against the window) before asking labels.
 """
 
 from __future__ import annotations
 
 import threading
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -67,9 +82,12 @@ CATALOG_FILE: Final[str] = "catalog.duckdb"
 
 READ_ONCE_NOTE: Final[str] = (
     "the validation window and the holdout are read only through p7_reading.read_once; "
-    f"nothing after {SECOND_USE_LAST} is read by any path"
+    f"the second-use store admits the whole of {SECOND_USE_LAST.year}, rows after "
+    f"{SECOND_USE_LAST} included, so cutting rows by date is the reader's duty (the read-once "
+    "path), not the store's"
 )
-"""What every refusal for reaching past a window says about the way past it."""
+"""What every refusal for reaching past a window says about the way past it, and about what a
+year cap does not do."""
 
 
 class DiagnosticWindowError(ValueError):
@@ -141,9 +159,11 @@ class WindowCappedStore(PanelStore):
     """A read-only `PanelStore` that serves no year past its window's `ceiling_year`.
 
     Every read door checks the year (for a `ReadinessRequirement`, every year it names) **before**
-    it delegates, so a refused read opens nothing, and records what it admitted in `served`.
-    `registered_years` and `partition_stamps` list only years at or below the ceiling. Every write
-    door raises. Construction refuses a root with no catalogue instead of creating one.
+    it delegates, so a refused read opens nothing, and records what it served in `served` once the
+    base class has answered. `registered_years` and `partition_stamps` list only years at or below
+    the ceiling. Every write door raises, and so does `discard_merge_bases`, which would otherwise
+    clear the merge bases a writable store on the same root recorded on this thread. Construction
+    refuses a root with no catalogue instead of creating one.
     """
 
     def __init__(self, root: Path, *, window: DiagnosticWindow) -> None:
@@ -156,6 +176,7 @@ class WindowCappedStore(PanelStore):
         self._window = window
         self._served: set[tuple[str, int]] = set()
         self._served_lock = threading.Lock()
+        self._calls = threading.local()
         super().__init__(root)
 
     @property
@@ -164,7 +185,12 @@ class WindowCappedStore(PanelStore):
 
     @property
     def served(self) -> tuple[tuple[str, int], ...]:
-        """Every `(dataset, year)` a read door admitted, ascending."""
+        """Every `(dataset, year)` a read door answered for, ascending.
+
+        A door that raised -- the window's refusal or the base class's -- adds nothing. A door that
+        answered adds every year its requirement names, a blocked outcome included: the verdict
+        was taken over those partitions' catalogue rows.
+        """
         with self._served_lock:
             return tuple(sorted(self._served))
 
@@ -178,7 +204,18 @@ class WindowCappedStore(PanelStore):
             found.append((dataset, year, super().partition_content_hash(dataset, year)))
         return tuple(found)
 
-    def _admit(self, dataset: str, years: Iterable[int]) -> None:
+    @contextmanager
+    def _door(self, dataset: str, years: Iterable[int]) -> Iterator[None]:
+        """What every read door runs around the base class's answer.
+
+        Before it: refuse any year past the ceiling, so a refused read opens nothing. After it:
+        record what the door admitted, but only once the base class has answered -- a call that
+        raises (a year the requirement does not name, a malformed dataset) leaves `served`
+        as it was, because no partition was read. The base class reaches its own doors through one
+        another (`read_if_ready` -> `assessed` -> `assess_readiness`); those nested doors check
+        again, which costs nothing and keeps each door safe without the others, but only the
+        outermost one records.
+        """
         asked = tuple(years)
         late = sorted({year for year in asked if year > self._window.ceiling_year})
         if late:
@@ -187,14 +224,21 @@ class WindowCappedStore(PanelStore):
                 f"{self._window.ceiling_year} ({self._window.first}..{self._window.last}); "
                 f"{READ_ONCE_NOTE}"
             )
-        with self._served_lock:
-            self._served.update((dataset, year) for year in asked)
+        depth: int = getattr(self._calls, "depth", 0)
+        self._calls.depth = depth + 1
+        try:
+            yield
+        finally:
+            self._calls.depth = depth
+        if depth == 0:
+            with self._served_lock:
+                self._served.update((dataset, year) for year in asked)
 
     # --- the read doors ----------------------------------------------------------------------
 
     def partition_content_hash(self, dataset: str, year: int) -> str | None:
-        self._admit(dataset, (year,))
-        return super().partition_content_hash(dataset, year)
+        with self._door(dataset, (year,)):
+            return super().partition_content_hash(dataset, year)
 
     def query(
         self,
@@ -204,8 +248,8 @@ class WindowCappedStore(PanelStore):
         columns: Sequence[str],
         filters: Mapping[str, object] | None = None,
     ) -> list[tuple[object, ...]]:
-        self._admit(dataset, (year,))
-        return super().query(dataset, year=year, columns=columns, filters=filters)
+        with self._door(dataset, (year,)):
+            return super().query(dataset, year=year, columns=columns, filters=filters)
 
     def profile_query(
         self,
@@ -215,20 +259,20 @@ class WindowCappedStore(PanelStore):
         columns: Sequence[str],
         filters: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
-        self._admit(dataset, (year,))
-        return super().profile_query(dataset, year=year, columns=columns, filters=filters)
+        with self._door(dataset, (year,)):
+            return super().profile_query(dataset, year=year, columns=columns, filters=filters)
 
     def read_coverage(self, dataset: str, year: int) -> PartitionCoverage | None:
-        self._admit(dataset, (year,))
-        return super().read_coverage(dataset, year)
+        with self._door(dataset, (year,)):
+            return super().read_coverage(dataset, year)
 
     def assess_readiness(self, requirement: ReadinessRequirement) -> DatasetReadiness:
-        self._admit(requirement.dataset, requirement.years)
-        return super().assess_readiness(requirement)
+        with self._door(requirement.dataset, requirement.years):
+            return super().assess_readiness(requirement)
 
     def assessed(self, requirement: ReadinessRequirement) -> AssessedPanelRead:
-        self._admit(requirement.dataset, requirement.years)
-        return super().assessed(requirement)
+        with self._door(requirement.dataset, requirement.years):
+            return super().assessed(requirement)
 
     def read_if_ready(
         self,
@@ -238,8 +282,8 @@ class WindowCappedStore(PanelStore):
         columns: Sequence[str],
         filters: Mapping[str, object] | None = None,
     ) -> PanelReadOutcome:
-        self._admit(requirement.dataset, (*requirement.years, year))
-        return super().read_if_ready(requirement, year=year, columns=columns, filters=filters)
+        with self._door(requirement.dataset, (*requirement.years, year)):
+            return super().read_if_ready(requirement, year=year, columns=columns, filters=filters)
 
     def read_visible_at(
         self,
@@ -251,15 +295,15 @@ class WindowCappedStore(PanelStore):
         event_time_as_naive_utc: bool = False,
         newly_visible_since: datetime | None = None,
     ) -> PanelVisibleReadOutcome:
-        self._admit(requirement.dataset, (*requirement.years, year))
-        return super().read_visible_at(
-            requirement,
-            year=year,
-            columns=columns,
-            filters=filters,
-            event_time_as_naive_utc=event_time_as_naive_utc,
-            newly_visible_since=newly_visible_since,
-        )
+        with self._door(requirement.dataset, (*requirement.years, year)):
+            return super().read_visible_at(
+                requirement,
+                year=year,
+                columns=columns,
+                filters=filters,
+                event_time_as_naive_utc=event_time_as_naive_utc,
+                newly_visible_since=newly_visible_since,
+            )
 
     # --- the listings: only years the window may see -----------------------------------------
 
@@ -299,6 +343,9 @@ class WindowCappedStore(PanelStore):
 
     def remove_partition(self, *args: Any, **kwargs: Any) -> NoReturn:
         self._refuse_a_write("remove_partition")
+
+    def discard_merge_bases(self, *args: Any, **kwargs: Any) -> NoReturn:
+        self._refuse_a_write("discard_merge_bases")
 
 
 def capped_panel_store(runtime_dir: Path, window: DiagnosticWindow) -> WindowCappedStore:
