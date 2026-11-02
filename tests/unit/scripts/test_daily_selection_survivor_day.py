@@ -1866,7 +1866,9 @@ def test_a_refused_name_fetch_on_the_first_session_of_a_year_stops_the_day_at_st
     assert code == 1
     assert err[0].startswith("step 2 (panel update) failed: `panel build` exited 4:")
     assert "refused dataset namechange" in err[0]
-    assert "panel" not in _journal(world, FIRST_2027)
+    journal = _journal(world, FIRST_2027)
+    assert journal["as_of"] == evening.isoformat()
+    assert "panel" not in journal
     assert 2027 not in PanelStore(world.runtime / "panel").registered_years("namechange")
     assert _aftermath(err)[0] == NO_NEW_ORDERS
 
