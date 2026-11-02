@@ -18,6 +18,7 @@ import io
 import os
 import shutil
 import signal
+import subprocess
 import sys
 import time
 import types
@@ -1682,3 +1683,50 @@ def test_an_interrupt_the_command_turned_into_another_fault_is_an_interrupt_and_
     assert second[0] == 0, second[2]
     assert [end["fault"] for end in _ends(smoke)] == ["KeyboardInterrupt", None]
     assert _spent(smoke).discarded is None
+
+
+# --- the re-review of b0fd0b9 (fix round 2) ------------------------------------------------------
+
+
+_HANDLER_UNDER_A_HELD_LOCK: Final[str] = """
+import os, signal, sys
+sys.path.insert(0, sys.argv[1])
+import p7_smoke as driver
+
+flag = driver._INTERRUPTED
+held = [value for value in getattr(flag, "__dict__", {}).values() if hasattr(value, "acquire")]
+with driver._signals_as_exit():
+    try:
+        for lock in held:  # what the main thread holds while it clears or reads the flag
+            lock.acquire()
+        os.kill(os.getpid(), signal.SIGTERM)
+        for _ in range(10_000_000):
+            pass
+    except KeyboardInterrupt:
+        print("interrupted", flush=True)
+"""
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGHUP"), reason="POSIX signals")
+def test_the_signal_handler_takes_no_lock_the_interrupted_code_may_hold() -> None:
+    """R1: a `threading.Event` flag takes its own non-reentrant lock in `set()`, so a signal
+    handled while the main thread was inside `clear()` hung the driver for good. The flag is
+    written and read without a lock: the handler runs while every lock the flag holds is held."""
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    environment |= {"PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": str(ROOT / "src")}
+    try:
+        finished = subprocess.run(
+            [sys.executable, "-c", _HANDLER_UNDER_A_HELD_LOCK, str(ROOT / "scripts")],
+            cwd=ROOT,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("the driver's signal handler hung on a lock its flag holds")
+
+    assert finished.returncode == 0, finished.stderr
+    assert finished.stdout.splitlines() == ["interrupted"]

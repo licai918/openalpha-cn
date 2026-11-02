@@ -162,9 +162,12 @@ SMOKE_SCRIPTS: Final[tuple[str, ...]] = (
 which one of them is not what `HEAD` holds, since the clone holds `HEAD`'s."""
 _LOG: Final[re.Pattern[str]] = re.compile(r"(\d+)-[a-z-]+\.(?:out|err)")
 _REFUSED_LEDGER: Final[str] = "ledger        refused: "
-_INTERRUPTED: Final[threading.Event] = threading.Event()
+_INTERRUPTED: Final[list[bool]] = [False]
 """Set by the driver's signal handler: an interruption reached the invocation, whatever the
-command it runs made of the `KeyboardInterrupt` (`_call`)."""
+command it runs made of the `KeyboardInterrupt` (`_call`). A one-element cell, written and read
+by single assignments and indexings, never under a lock: a `threading.Event` takes its own
+non-reentrant lock in `set()`, so a signal handled while the main thread was inside `clear()`
+would hang the driver for good."""
 
 
 class SmokeDriverError(ValueError):
@@ -441,7 +444,7 @@ def _signals_as_exit() -> Iterator[None]:
         return
 
     def interrupt(number: int, _frame: FrameType | None) -> None:
-        _INTERRUPTED.set()
+        _INTERRUPTED[0] = True  # one assignment: no lock is taken in a signal handler
         raise KeyboardInterrupt(f"{signal.Signals(number).name} received")
 
     previous: dict[int, Any] = {}
@@ -449,7 +452,7 @@ def _signals_as_exit() -> Iterator[None]:
         number = getattr(signal, name, None)
         if number is not None and signal.getsignal(number) != signal.SIG_IGN:
             previous[number] = signal.signal(number, interrupt)
-    _INTERRUPTED.clear()
+    _INTERRUPTED[0] = False
     try:
         yield
     finally:
@@ -587,20 +590,20 @@ def _call(
             contextlib.redirect_stdout(cast(TextIO, _Tee(out, sys.stdout))),
             contextlib.redirect_stderr(cast(TextIO, _Tee(err, sys.stderr))),
         ):
-            _INTERRUPTED.clear()
+            _INTERRUPTED[0] = False
             try:
                 code = wrapped()
             except KeyboardInterrupt:
                 raise
             except BaseException as error:
                 # click turns a `KeyboardInterrupt` inside a command into `Abort`.
-                if _INTERRUPTED.is_set():
+                if _INTERRUPTED[0]:
                     raise KeyboardInterrupt(
                         f"an interruption reached the command, which ended on "
                         f"{type(error).__name__}"
                     ) from error
                 raise
-            if _INTERRUPTED.is_set():
+            if _INTERRUPTED[0]:
                 # The day reports an interrupted `panel build` as step 2's refusal, and `panel
                 # build` alone exits 130 of its own: either is an interruption here.
                 raise KeyboardInterrupt(
