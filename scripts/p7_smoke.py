@@ -748,10 +748,10 @@ def _prepare(arguments: argparse.Namespace, *, clock: Callable[[], datetime]) ->
     panel = arguments.source_panel or Path.home() / "openalpha-research" / env.PANEL_NAME
     uv = (arguments.uv or Path(shutil.which("uv") or "uv")).resolve()
     manifest = env.prepare_smoke(
-        root=arguments.smoke_root,
+        root=arguments.smoke_root.expanduser(),
         source_repo=source,
         commit=commit,
-        source_panel=panel,
+        source_panel=panel.expanduser(),
         epoch=arguments.epoch,
         caps={1: arguments.phase1_cap, 2: arguments.phase2_cap},
         policy=env.PathPolicy.default(daily.REPOSITORY),
