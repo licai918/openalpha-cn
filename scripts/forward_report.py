@@ -442,7 +442,8 @@ def _survivor_forward_report(
     """A survivor registration's weekly report (module docstring); glue only.
 
     In order: the protocol from the registration's settings, refused by name before anything is
-    read when it is absent or does not read; the stored calendar from the epoch's year through
+    read when it is absent or does not read, and the power plan beside it, its absence said in
+    the document; the stored calendar from the epoch's year through
     the report's (and the next when stored), counted from the epoch; then, in the reverse of an
     evening's write order and each as it stood at `as_of` (module docstring), the paper book's
     snapshots listed, the daily journals read, and the records the prediction store witnesses
@@ -513,6 +514,7 @@ def _survivor_report(
     from openalpha_cn.strategy_survivor_market import SessionOrdinals
 
     protocol = forward.read_forward_protocol(admitted.settings)
+    power = forward.read_forward_power(admitted.settings, protocol=protocol)
     adapter, book = survivor.adapter, survivor.book
     exchange, epoch = adapter.exchange, adapter.epoch_session
     calendar = _survivor_calendar(store, exchange=exchange, epoch=epoch, as_of=as_of)
@@ -590,6 +592,7 @@ def _survivor_report(
         verdicts=verdicts,
         layers=layers,
         paper=paper,
+        power=power,
         integrity=daily_selection.INTEGRITY,
     )
     return SurvivorForwardReport(

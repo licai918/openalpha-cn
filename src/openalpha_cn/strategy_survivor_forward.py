@@ -128,6 +128,45 @@ the periods there are, and its status names every gap); how K applies at a secon
 window that lost positions to missing, refused or UNVERIFIABLE records still carries the claim,
 or how many it may lose.
 
+## Power (`survivor_forward_power`)
+
+The protocol says when the test is made; whether the design can see an effect at all is a second,
+pre-registered question, and the report states it beside the sample counts so that a one-sided
+p-value above the test level is never read as "no effect". It is read from the registration's
+`settings["survivor_forward_power"]` -- a block **beside** the protocol, not inside it, so the
+registrations already written under `survivor-forward-protocol/v1` stay readable -- as a
+`survivor-forward-power/v1` block (`read_forward_power`), `extra="forbid"` and with no default for
+any field: the test level, the target power, the critical value (`normal`, or `t` on n - 1
+degrees of freedom), the assumed lag-1 autocorrelation, the minimum number of periods, and for
+each planned `(horizon, metric)` a **planning** sd, the true means to ask about and where the sd
+comes from. Each planned metric must be one the protocol tests at that horizon, the primary test
+must be planned, and the minimum cannot exceed the primary window's positions. A registration
+without the block still gets its report: its `power` section says that no power is stated
+(`POWER_NOT_PRE_REGISTERED`) and states nothing else. What the section holds, every sum made by
+`backtest.power_analysis` (standard library only):
+
+- The power is always the **plan's**: the planning sd, the planned periods `K_h` and the test
+  level. A window's own sd and lag-1 autocorrelation are described after the window's test
+  (`OBSERVED_WORDING`) and are never an input: observed power says nothing the p-value did not.
+  The assumed autocorrelation sets the independent-period equivalent `K (1 - r) / (1 + r)`; a
+  negative one would credit more independent periods than there are, so it is held at 0 and the
+  row says so.
+- A primary row is powered at the plan's test level; a secondary row at the first step of the
+  Benjamini-Yekutieli family, `q / (m * H_m)` with `m` the declared family size -- a lower bound of
+  the level it will face, said so in the row.
+- A window is stated on two bases, in both readings (the headline and the sensitivity):
+  `usable_at_most`, the window's positions less its gaps (`no_record`, `refused`, `unchecked`,
+  and `unverifiable` in the sensitivity only), and, once the window is tested, `tested`, the
+  periods that carry the metric. `n` is the second when there is one and the first otherwise,
+  `n_basis` says which, `at_n` is the power at `n` (stated from 2 periods), and `below_minimum`
+  holds `n` to the plan's minimum periods. The minimum labels the result; it does not stop the
+  test, which still runs on the periods there are.
+- A question the design has no answer to (fewer than two periods, a mean needing more than
+  100,000, fewer than two independent periods) is an absence the row names (`absences`), never a
+  traceback; the other figures of the row stand.
+- Every power block ends with the reading rule (`NOT_DETECTABLE_WORDING`): a p-value above the
+  test level reads "not detectable at this design", a category of the design.
+
 ## The report's document (`survivor_forward_document`, `survivor_forward_lines`; task E4)
 
 The weekly report script (`scripts/forward_report.py`) reads everything and hands it in; this
@@ -192,15 +231,24 @@ procedure's arithmetic, not a finding.
 from __future__ import annotations
 
 import dataclasses
+import math
 import statistics
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Annotated, Any, Final, Literal, Protocol, Self, get_args
+from itertools import pairwise
+from typing import Annotated, Any, Final, Literal, Protocol, Self, TypeVar, get_args
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from openalpha_cn.backtest.factor_ic import average_ranks
 from openalpha_cn.backtest.multiple_testing import (
@@ -212,6 +260,17 @@ from openalpha_cn.backtest.outcome_statistics import (
     MINIMUM_INTERVAL_SAMPLE_SIZE,
     RandomizationTest,
     sign_flip_test,
+)
+from openalpha_cn.backtest.power_analysis import (
+    NOT_DETECTABLE_WORDING,
+    POWER_BASIS,
+    CriticalValue,
+    PowerError,
+    autocorrelation_equivalent_periods,
+    by_first_step_level,
+    periods_for_power,
+    power_of_mean_test,
+    smallest_mean_at_power,
 )
 from openalpha_cn.domain.alpha_model import PredictionBatch
 from openalpha_cn.domain.horizon import (
@@ -255,8 +314,12 @@ __all__ = [
     "DESCRIPTIVE_WORDING",
     "FORWARD_METRICS",
     "NO_VERDICT_WORDING",
+    "OBSERVED_WORDING",
     "OPPOSITE_SIGN_CLAUSE",
+    "POWER_NOT_PRE_REGISTERED",
     "PREDICTION_LAYER_WORDING",
+    "SURVIVOR_FORWARD_POWER_KEY",
+    "SURVIVOR_FORWARD_POWER_SCHEMA",
     "SURVIVOR_FORWARD_PROTOCOL_KEY",
     "SURVIVOR_FORWARD_PROTOCOL_SCHEMA",
     "SURVIVOR_FORWARD_REPORT_KIND",
@@ -270,6 +333,7 @@ __all__ = [
     "LayerReading",
     "MetricTest",
     "NonOverlappingSample",
+    "PlannedMetric",
     "PredictionLayer",
     "RecordOutcome",
     "RecordScope",
@@ -278,12 +342,14 @@ __all__ = [
     "SampledSessions",
     "ScopedName",
     "SurvivorForwardError",
+    "SurvivorForwardPowerPlan",
     "SurvivorForwardProtocol",
     "VerdictLike",
     "WitnessedRecord",
     "check_journals_against_the_store",
     "paper_refusal",
     "prediction_layer",
+    "read_forward_power",
     "read_forward_protocol",
     "record_outcome",
     "record_scope",
@@ -298,6 +364,15 @@ __all__ = [
 SURVIVOR_FORWARD_PROTOCOL_KEY: Final = "survivor_forward_protocol"
 """The key of the registration's `settings` that holds the forward protocol."""
 SURVIVOR_FORWARD_PROTOCOL_SCHEMA: Final = "survivor-forward-protocol/v1"
+SURVIVOR_FORWARD_POWER_KEY: Final = "survivor_forward_power"
+"""The key of the registration's `settings` that holds the power plan, beside the protocol's."""
+SURVIVOR_FORWARD_POWER_SCHEMA: Final = "survivor-forward-power/v1"
+
+POWER_NOT_PRE_REGISTERED: Final = (
+    "the registration carries no survivor_forward_power block: no power is stated, and a result "
+    "above the test level cannot be read against a pre-registered design"
+)
+OBSERVED_WORDING: Final = "descriptive, over the tested periods; never used for power"
 
 PREDICTION_LAYER_WORDING: Final = (
     "candidate forecast of a registered research configuration; not a performance claim"
@@ -487,6 +562,128 @@ def _read_protocol_block(settings: Mapping[str, object]) -> SurvivorForwardProto
             f"the registration's {SURVIVOR_FORWARD_PROTOCOL_KEY} is not a valid "
             f"{SURVIVOR_FORWARD_PROTOCOL_SCHEMA} block: {problems}"
         ) from error
+
+
+# --- the power plan ------------------------------------------------------------------------------
+
+_Positive = Annotated[float, Field(strict=True, gt=0, allow_inf_nan=False)]
+
+
+class PlannedMetric(BaseModel):
+    """One `(horizon, metric)` the plan states a power for; see the module docstring. A
+    planning value, not an observation: no field is read off a record."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    horizon: _Horizon
+    metric: ForwardMetric
+    planning_sd: _Positive
+    planning_means: Annotated[tuple[_Positive, ...], Field(min_length=1)]
+    """The true means the design is asked about: each is greater than zero, the direction that
+    supports the screen."""
+    sd_source: Annotated[str, Field(strict=True)]
+    """Where the planning sd comes from: a statement, not a default."""
+
+    @field_validator("sd_source")
+    @classmethod
+    def _the_sd_has_a_source(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("sd_source must say where the planning sd comes from")
+        return value
+
+
+class SurvivorForwardPowerPlan(BaseModel):
+    """The pre-registered power plan; see the module docstring. No field has a default."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["survivor-forward-power/v1"]
+    test_level: Annotated[float, Field(strict=True, gt=0, lt=0.5, allow_inf_nan=False)]
+    target_power: Annotated[float, Field(strict=True, gt=0, lt=1, allow_inf_nan=False)]
+    critical_value: CriticalValue
+    assumed_lag1_autocorrelation: Annotated[
+        float, Field(strict=True, gt=-1, lt=1, allow_inf_nan=False)
+    ]
+    minimum_periods: Annotated[int, Field(strict=True, ge=2)]
+    planned: Annotated[tuple[PlannedMetric, ...], Field(min_length=1)]
+
+    @model_validator(mode="after")
+    def _a_metric_is_planned_once(self) -> Self:
+        keys = [(item.horizon, item.metric) for item in self.planned]
+        repeated = sorted({key for key in keys if keys.count(key) > 1})
+        if repeated:
+            raise ValueError(f"planned must not repeat a (horizon, metric); repeated: {repeated}")
+        return self
+
+
+def read_forward_power(
+    settings: Mapping[str, object], *, protocol: SurvivorForwardProtocol
+) -> SurvivorForwardPowerPlan | None:
+    """The power plan in a registration's `settings`, `None` when it carries none, or
+    `SurvivorForwardError` naming why the block does not read.
+
+    The block is held to `protocol`: every planned `(horizon, metric)` is one the protocol tests,
+    the primary test is planned, and the minimum number of periods is no more than the primary
+    window's positions."""
+    if not isinstance(settings, Mapping):
+        raise SurvivorForwardError(
+            f"the registration's settings are {type(settings).__name__}, not an object, so they "
+            f"carry no {SURVIVOR_FORWARD_POWER_KEY} block"
+        )
+    if SURVIVOR_FORWARD_POWER_KEY not in settings:
+        return None
+    block = settings[SURVIVOR_FORWARD_POWER_KEY]
+    if not isinstance(block, Mapping):
+        raise SurvivorForwardError(
+            f"the registration's {SURVIVOR_FORWARD_POWER_KEY} is {type(block).__name__}, not a "
+            f"{SURVIVOR_FORWARD_POWER_SCHEMA} object"
+        )
+    try:
+        plan = SurvivorForwardPowerPlan.model_validate(dict(block))
+    except ValidationError as error:
+        problems = "; ".join(
+            f"{'.'.join(str(part) for part in item['loc']) or 'the block'}: {item['msg']}"
+            for item in error.errors()
+        )
+        raise SurvivorForwardError(
+            f"the registration's {SURVIVOR_FORWARD_POWER_KEY} is not a valid "
+            f"{SURVIVOR_FORWARD_POWER_SCHEMA} block: {problems}"
+        ) from error
+    _hold_the_plan_to_the_protocol(plan, protocol)
+    return plan
+
+
+def _hold_the_plan_to_the_protocol(
+    plan: SurvivorForwardPowerPlan, protocol: SurvivorForwardProtocol
+) -> None:
+    for item in plan.planned:
+        try:
+            tested = dict(protocol.tested_metrics(item.horizon))
+        except SurvivorForwardError as error:
+            raise SurvivorForwardError(
+                f"the registration's {SURVIVOR_FORWARD_POWER_KEY} plans horizon {item.horizon}: "
+                f"{error}"
+            ) from error
+        if item.metric not in tested:
+            raise SurvivorForwardError(
+                f"the registration's {SURVIVOR_FORWARD_POWER_KEY} plans {item.metric} at horizon "
+                f"{item.horizon}, which is not tested there by the protocol (it tests "
+                f"{sorted(tested)})"
+            )
+    primary = (protocol.primary_horizon, protocol.primary_metric)
+    if primary not in {(item.horizon, item.metric) for item in plan.planned}:
+        raise SurvivorForwardError(
+            f"the registration's {SURVIVOR_FORWARD_POWER_KEY} does not plan the protocol's "
+            f"primary test (horizon {primary[0]}, {primary[1]}): the design its result is read "
+            "against has to be stated"
+        )
+    positions = protocol.window_positions(protocol.primary_horizon)
+    if plan.minimum_periods > positions:
+        raise SurvivorForwardError(
+            f"the registration's {SURVIVOR_FORWARD_POWER_KEY} has minimum_periods "
+            f"{plan.minimum_periods}, more than the primary window's {positions} positions: a "
+            "window that cannot reach its own minimum is not a design"
+        )
 
 
 # --- the witnessed records -----------------------------------------------------------------------
@@ -1560,15 +1757,17 @@ def survivor_forward_document(
     verdicts: Mapping[str, CheckedVerdict],
     layers: Sequence[PredictionLayer],
     paper: Mapping[str, Any],
+    power: SurvivorForwardPowerPlan | None,
     integrity: str,
 ) -> dict[str, Any]:
     """The `survivor_forward_report/v1` document (module docstring).
 
     `witnessed` are the sessions of the witnessed records, `verdicts` the late-record check's by
     record id, `layers` one `prediction_layer` per horizon of the protocol (the primary and every
-    secondary), `paper` `paper_record`'s `{"paper_ledger", "relative"}` or `paper_refusal`'s, and
-    `integrity` the threat model every forward report states. JSON-safe, with no set iterated
-    unsorted: the same inputs give the same document."""
+    secondary), `paper` `paper_record`'s `{"paper_ledger", "relative"}` or `paper_refusal`'s,
+    `power` the registration's `read_forward_power` (`None`: it carries none, and the `power`
+    section says so), and `integrity` the threat model every forward report states. JSON-safe,
+    with no set iterated unsorted: the same inputs give the same document."""
     horizons = (protocol.primary_horizon, *protocol.secondary_horizons)
     by_horizon = {layer.horizon: layer for layer in layers}
     if len(by_horizon) != len(layers) or sorted(by_horizon) != sorted(horizons):
@@ -1609,6 +1808,7 @@ def survivor_forward_document(
             },
             "secondary_family": _secondary_family(by_horizon, protocol=protocol, analysis=analysis),
         },
+        "power": _power_section(power, protocol=protocol, by_horizon=by_horizon, analysis=analysis),
         "paper_ledger": dict(paper["paper_ledger"]),
         "relative": _relative_section(paper["relative"], primary),
         "cannot_be_evaluated_yet": _cannot_be_evaluated_yet(
@@ -1871,6 +2071,244 @@ def _secondary_family(
     }
 
 
+_GAP_KINDS: Final[tuple[str, ...]] = ("no_record", "refused", "unchecked", "unverifiable")
+"""The kinds of `NonOverlappingSample.in_window` that are gaps: neither a period nor pending."""
+_LAG1_NOT_CREDITED: Final = (
+    "a negative assumed lag-1 autocorrelation would credit more independent periods than there "
+    "are: it is not credited, and the independent-period equivalent is computed at 0"
+)
+_SECONDARY_LEVEL: Final = (
+    "a lower bound under Benjamini-Yekutieli: q / (m * H_m) at q {q:g} and a declared family of "
+    "{size}, the first step of the step-up"
+)
+_Answer = TypeVar("_Answer")
+
+
+def _attempt(absences: list[str], what: str, compute: Callable[[], _Answer]) -> _Answer | None:
+    """`compute()`, or `None` with `what` and the refusal named in `absences`: a question the
+    design has no answer to (`PowerError`) is an absence the section states, never a traceback."""
+    try:
+        return compute()
+    except PowerError as error:
+        absences.append(f"{what}: {error}")
+        return None
+
+
+def _power_section(
+    power: SurvivorForwardPowerPlan | None,
+    *,
+    protocol: SurvivorForwardProtocol,
+    by_horizon: Mapping[int, PredictionLayer],
+    analysis: NonOverlappingSample,
+) -> dict[str, Any]:
+    """The `power` section: the plan's power beside the sample counts, or the statement that none
+    was registered (module docstring)."""
+    section: dict[str, Any] = {
+        "wording": SURVIVOR_WORDING,
+        "status": POWER_NOT_PRE_REGISTERED,
+        "basis": POWER_BASIS,
+        "reading_rule": NOT_DETECTABLE_WORDING,
+        "plan": None,
+        "rows": [],
+    }
+    if power is None:
+        return section
+    section["status"] = f"pre-registered ({SURVIVOR_FORWARD_POWER_SCHEMA})"
+    section["plan"] = power.model_dump(mode="json")
+    section["rows"] = [
+        _power_row(
+            item, power, protocol=protocol, layer=by_horizon[item.horizon], analysis=analysis
+        )
+        for item in power.planned
+    ]
+    return section
+
+
+def _power_row(
+    item: PlannedMetric,
+    plan: SurvivorForwardPowerPlan,
+    *,
+    protocol: SurvivorForwardProtocol,
+    layer: PredictionLayer,
+    analysis: NonOverlappingSample,
+) -> dict[str, Any]:
+    role = dict(protocol.tested_metrics(item.horizon)).get(item.metric)
+    if role is None:
+        raise SurvivorForwardError(
+            f"the power plan states {item.metric} at horizon {item.horizon}, which is not tested "
+            "there by the protocol"
+        )
+    absences: list[str] = []
+    periods = protocol.window_positions(item.horizon)
+    kind, sd, target = plan.critical_value, item.planning_sd, plan.target_power
+    level: float | None = plan.test_level
+    level_basis = "the plan's test level"
+    if role == "secondary":
+        size = len(protocol.secondary_metrics) + len(protocol.secondary_horizons)
+        level = _attempt(
+            absences,
+            "the secondary test level",
+            lambda: by_first_step_level(q=protocol.q, family_size=size),
+        )
+        level_basis = _SECONDARY_LEVEL.format(q=protocol.q, size=size)
+
+    def power_at(mean: float, count: float) -> float | None:
+        stated = level
+        if stated is None:
+            return None
+        return _attempt(
+            absences,
+            f"power at a true mean of {mean:g} over {count:g} periods",
+            lambda: power_of_mean_test(
+                mean=mean, sd=sd, periods=count, test_level=stated, kind=kind
+            ),
+        )
+
+    def periods_to_reach(mean: float) -> int | None:
+        stated = level
+        if stated is None:
+            return None
+        return _attempt(
+            absences,
+            f"periods for a power of {target:g} at a true mean of {mean:g}",
+            lambda: periods_for_power(mean=mean, power=target, sd=sd, test_level=stated, kind=kind),
+        )
+
+    smallest: float | None = None
+    if level is not None:
+        stated = level
+        smallest = _attempt(
+            absences,
+            f"the smallest mean with a power of {target:g}",
+            lambda: smallest_mean_at_power(
+                power=target, sd=sd, periods=periods, test_level=stated, kind=kind
+            ),
+        )
+    assumed = plan.assumed_lag1_autocorrelation
+    used = max(0.0, assumed)
+    equivalent = _attempt(
+        absences,
+        "the independent-period equivalent",
+        lambda: autocorrelation_equivalent_periods(periods=periods, lag1=used),
+    )
+    tested = analysis.window_satisfied
+    return {
+        "horizon": item.horizon,
+        "metric": item.metric,
+        "role": role,
+        "test_level": level,
+        "test_level_basis": level_basis,
+        "critical_value": kind,
+        "planning_sd": sd,
+        "sd_source": item.sd_source,
+        "planned_periods": periods,
+        "planned": [
+            {"mean": mean, "power": power_at(mean, periods)} for mean in item.planning_means
+        ],
+        "smallest_mean_at_target": smallest,
+        "periods_for_target": [
+            {"mean": mean, "periods": periods_to_reach(mean)} for mean in item.planning_means
+        ],
+        "autocorrelation": {
+            "assumed_lag1": assumed,
+            "lag1_used": used,
+            "lag1_note": _LAG1_NOT_CREDITED if assumed < 0 else None,
+            "independent_period_equivalent": equivalent,
+            "power_at_equivalent": [
+                {
+                    "mean": mean,
+                    "power": None if equivalent is None else power_at(mean, equivalent),
+                }
+                for mean in item.planning_means
+            ],
+        },
+        "headline": _window_power(
+            layer.headline.non_overlapping,
+            item=item,
+            plan=plan,
+            tested=tested,
+            power_at=power_at,
+        ),
+        "excluding_unverifiable": _window_power(
+            layer.excluding_unverifiable.non_overlapping,
+            item=item,
+            plan=plan,
+            tested=tested,
+            power_at=power_at,
+        ),
+        "absences": absences,
+    }
+
+
+def _window_power(
+    sample: NonOverlappingSample,
+    *,
+    item: PlannedMetric,
+    plan: SurvivorForwardPowerPlan,
+    tested: bool,
+    power_at: Callable[[float, float], float | None],
+) -> dict[str, Any]:
+    """One reading's window for a planned metric: the sample counts, the plan's power at the
+    periods the window has, and the window's own sd and lag-1 autocorrelation as description.
+
+    `tested` is whether the primary window is satisfied, as for the tests the document prints:
+    only then is a metric's period count `MetricTest.values`; before, `n` is the most the window
+    can still have."""
+    in_window = dict(sample.in_window)
+    gaps = sum(in_window[kind] for kind in _GAP_KINDS)
+    usable = sample.window_positions - gaps
+    result = (
+        next((test for test in sample.tests if test.metric == item.metric), None)
+        if tested and sample.window_satisfied
+        else None
+    )
+    count = None if result is None else result.values
+    n = usable if count is None else count
+    values = (
+        []
+        if count is None
+        else [
+            value
+            for period in sample.tested_periods
+            if (value := period.value(item.metric)) is not None
+        ]
+    )
+    return {
+        "positions": sample.window_positions,
+        "matured": sample.matured,
+        "gaps": gaps,
+        "usable_at_most": usable,
+        "tested": count,
+        "n": n,
+        "n_basis": "usable_at_most" if count is None else "tested",
+        "at_n": (
+            [{"mean": mean, "power": power_at(mean, n)} for mean in item.planning_means]
+            if n >= 2
+            else None
+        ),
+        "minimum_periods": plan.minimum_periods,
+        "below_minimum": n < plan.minimum_periods,
+        "observed": {
+            "wording": OBSERVED_WORDING,
+            "sd": statistics.stdev(values) if len(values) >= 2 else None,
+            "lag1_autocorrelation": _lag1_autocorrelation(values),
+        },
+    }
+
+
+def _lag1_autocorrelation(values: Sequence[float]) -> float | None:
+    """The lag-1 autocorrelation of a series of at least three values: the sum of the products of
+    neighbouring deviations over the sum of squared deviations; absent for a constant series."""
+    if len(values) < 3:
+        return None
+    centre = statistics.fmean(values)
+    spread = math.fsum((value - centre) ** 2 for value in values)
+    if spread == 0:
+        return None
+    steps = math.fsum((earlier - centre) * (later - centre) for earlier, later in pairwise(values))
+    return steps / spread
+
+
 def _relative_section(relative: Mapping[str, Any], primary: PredictionLayer) -> dict[str, Any]:
     if "refused" in relative:
         return dict(relative)
@@ -1975,6 +2413,7 @@ def survivor_forward_lines(document: Mapping[str, Any]) -> list[str]:
     for horizon in horizons:
         lines += _layer_lines(layer[f"h{horizon}"])
     lines += _family_lines(layer["secondary_family"])
+    lines += _power_lines(document["power"])
     lines += _ledger_lines(document["paper_ledger"])
     lines += _relative_lines(document["relative"])
     lines.append("cannot be evaluated yet:")
@@ -2110,6 +2549,84 @@ def _family_lines(family: Mapping[str, Any]) -> list[str]:
         *_corrected_lines(headline["tests"]),
         f"    sensitivity, UNVERIFIABLE records excluded: {sensitivity['status']}",
         *_corrected_lines(sensitivity["tests"]),
+    ]
+
+
+def _stated(value: object) -> str:
+    """A figure of the power section as printed: six places, or `not stated` when the design
+    has no answer for it (the row's `absences` say why)."""
+    return "not stated" if value is None else f"{value:.6f}"
+
+
+def _periods_stated(value: object) -> str:
+    return "not stated" if value is None else str(value)
+
+
+def _by_mean(
+    entries: Sequence[Mapping[str, Any]], key: str, show: Callable[[object], str] = _stated
+) -> str:
+    return ", ".join(f"{entry['mean']:g} -> {show(entry[key])}" for entry in entries)
+
+
+def _power_lines(power: Mapping[str, Any]) -> list[str]:
+    """The `power` section as lines: the plan, then each planned row with its windows, and the
+    reading rule last; or the statement that no power was registered."""
+    plan = power["plan"]
+    if plan is None:
+        return [f"power -- {power['status']}"]
+    lines = [
+        f"power ({plan['schema_version']}): test level {plan['test_level']:g}, target power "
+        f"{plan['target_power']:g}, critical value {plan['critical_value']}"
+        + (" (t on n - 1 degrees of freedom)" if plan["critical_value"] == "t" else "")
+        + f", assumed lag-1 autocorrelation {plan['assumed_lag1_autocorrelation']:g}, minimum "
+        f"periods {plan['minimum_periods']}",
+        f"  {power['basis']}",
+    ]
+    for row in power["rows"]:
+        lines += _power_row_lines(row)
+    lines.append(f"  {power['reading_rule']}")
+    return lines
+
+
+def _power_row_lines(row: Mapping[str, Any]) -> list[str]:
+    serial = row["autocorrelation"]
+    level = row["test_level"]
+    lines = [
+        f"  h{row['horizon']} {row['metric']} ({row['role']}): test level "
+        f"{'not stated' if level is None else format(level, 'g')} ({row['test_level_basis']}); "
+        f"planning sd {row['planning_sd']:g} ({row['sd_source']}); {row['planned_periods']} "
+        "planned periods",
+        f"    power at the planned periods, by true mean: {_by_mean(row['planned'], 'power')}; "
+        f"smallest mean with the target power: {_stated(row['smallest_mean_at_target'])}",
+        "    periods for the target power, by true mean: "
+        + _by_mean(row["periods_for_target"], "periods", _periods_stated),
+        f"    serial correlation: assumed lag-1 {serial['assumed_lag1']:g}, used "
+        f"{serial['lag1_used']:g}; independent-period equivalent "
+        f"{_stated(serial['independent_period_equivalent'])}; power there, by true mean: "
+        + _by_mean(serial["power_at_equivalent"], "power"),
+    ]
+    if serial["lag1_note"] is not None:
+        lines.append(f"      {serial['lag1_note']}")
+    lines += _window_power_lines("headline", row["headline"])
+    lines += _window_power_lines(
+        "sensitivity, UNVERIFIABLE records excluded", row["excluding_unverifiable"]
+    )
+    lines += [f"    not stated: {absence}" for absence in row["absences"]]
+    return lines
+
+
+def _window_power_lines(label: str, window: Mapping[str, Any]) -> list[str]:
+    at_n = window["at_n"]
+    observed = window["observed"]
+    below = "below" if window["below_minimum"] else "not below"
+    return [
+        f"    {label}: {window['positions']} positions, {window['matured']} matured, "
+        f"gaps {window['gaps']}, at most {window['usable_at_most']} usable; n {window['n']} "
+        f"({window['n_basis']}), {below} the minimum periods {window['minimum_periods']}; power "
+        "at n, by true mean: "
+        + ("not stated (fewer than 2 periods)" if at_n is None else _by_mean(at_n, "power")),
+        f"      observed, {observed['wording']}: sd {_number(observed['sd'])}, lag-1 "
+        f"autocorrelation {_number(observed['lag1_autocorrelation'])}",
     ]
 
 

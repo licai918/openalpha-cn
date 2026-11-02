@@ -56,6 +56,7 @@ from research_repo import commit_file, git, head
 from test_daily_selection_survivor_day import seeded  # noqa: F401  (a module fixture, reused)
 
 from openalpha_cn import cli, strategy_survivor_check
+from openalpha_cn import strategy_survivor_forward as forward
 from openalpha_cn.backtest.outcome_statistics import sign_flip_test
 from openalpha_cn.domain.alpha_model import AlphaModelArtifact, Prediction, PredictionBatch
 from openalpha_cn.domain.prediction_record import PredictionRecord
@@ -2145,3 +2146,123 @@ def test_a_report_as_of_an_instant_bounds_the_paper_book_and_its_windows_to_that
     assert windows[seventh]["status"] == "unavailable"
     assert windows[seventh]["book_return"] is None
     assert "no snapshot for 2026-04-09" in windows[seventh]["reason"]
+
+
+# --- the power plan beside the protocol (`V2-P7-018`) ------------------------------------------
+
+POWER: Final[dict[str, Any]] = {
+    "schema_version": "survivor-forward-power/v1",
+    "test_level": 0.05,
+    "target_power": 0.8,
+    "critical_value": "normal",
+    "assumed_lag1_autocorrelation": 0.0,
+    "minimum_periods": 2,
+    "planned": [
+        {
+            "horizon": 20,
+            "metric": "rank_ic",
+            "planning_sd": 0.15,
+            "planning_means": [0.05],
+            "sd_source": "test value",
+        }
+    ],
+}
+"""Test values only (module docstring)."""
+
+
+def test_the_report_states_that_no_power_plan_was_registered(
+    world: tds.World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out, err = _report(world, capsys)
+
+    assert code == 0, err
+    assert _document(world)["power"]["status"] == forward.POWER_NOT_PRE_REGISTERED
+    assert forward.POWER_NOT_PRE_REGISTERED in out
+    _no_verdict_word(out)
+
+
+def test_the_report_reads_the_power_plan_from_the_registrations_settings(
+    world: tds.World, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = forward.read_forward_power
+    seen: list[tuple[dict[str, Any], forward.SurvivorForwardProtocol]] = []
+
+    def planned(settings: Mapping[str, Any], *, protocol: forward.SurvivorForwardProtocol) -> Any:
+        seen.append((dict(settings), protocol))
+        return real({**settings, forward.SURVIVOR_FORWARD_POWER_KEY: POWER}, protocol=protocol)
+
+    monkeypatch.setattr(forward, "read_forward_power", planned)
+    code, out, err = _report(world, capsys)
+
+    assert code == 0, err
+    ((settings, read),) = seen
+    assert settings == settings_with()
+    assert read.window_periods == PROTOCOL["window_periods"]
+    document = _document(world)
+    row = document["power"]["rows"][0]
+    assert (row["horizon"], row["metric"], row["planned_periods"]) == (20, "rank_ic", 2)
+    assert any(line.startswith("power (survivor-forward-power/v1") for line in out.splitlines())
+    _no_verdict_word(out, json.dumps(document))
+    _assert_the_wording_is_in_every_section(document)
+
+
+def _world_registered_with(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, panel: Path, settings: Mapping[str, Any]
+) -> tds.World:
+    """A survivor registration with `settings` over the seeded panel `panel`, no evening run."""
+    repo, registration = _repository(tmp_path, CONFIG, settings=settings)
+    market = survivor_day.SurvivorMarket(open_days=tds.OPEN_2026)
+    tds._bind(monkeypatch, repo, market)
+    runtime = tmp_path / "runtime"
+    shutil.copytree(panel, runtime)
+    return tds.World(repo=repo, registration=registration, runtime=runtime, market=market)
+
+
+@pytest.mark.parametrize(
+    ("changes", "named"),
+    [
+        ({"target_power": 1.5}, "survivor_forward_power is not a valid"),
+        ({"planned": []}, "planned"),
+        ({"minimum_periods": 3}, "minimum_periods"),
+    ],
+    ids=["out-of-range", "nothing-planned", "more-than-the-window"],
+)
+def test_a_power_block_that_does_not_read_refuses_the_report_by_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,  # noqa: F811
+    changes: Mapping[str, Any],
+    named: str,
+) -> None:
+    """The block rides in the registration's settings beside the protocol: one that does not
+    read -- or asks for more periods than the window has -- is refused by name, exit 1, before
+    anything is written."""
+    settings = {**settings_with(), "survivor_forward_power": {**POWER, **changes}}
+    world = _world_registered_with(tmp_path, monkeypatch, seeded, settings)
+
+    code, out, err = _report(world, capsys)
+
+    assert code == 1
+    assert out == ""
+    assert named in err
+    assert not (world.runtime / "reports").exists()
+
+
+def test_a_registered_power_block_is_stated_in_the_report_as_registered(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,  # noqa: F811
+) -> None:
+    settings = {**settings_with(), "survivor_forward_power": POWER}
+    world = _world_registered_with(tmp_path, monkeypatch, seeded, settings)
+
+    code, out, err = _report(world, capsys)
+
+    assert code == 0, err
+    power = _document(world)["power"]
+    assert power["status"] == "pre-registered (survivor-forward-power/v1)"
+    assert power["plan"] == POWER
+    assert forward.POWER_NOT_PRE_REGISTERED not in out
+    _no_verdict_word(out)

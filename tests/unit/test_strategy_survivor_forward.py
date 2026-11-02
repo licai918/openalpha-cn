@@ -61,6 +61,12 @@ from test_survivor_facts_panel import CONFIG, SIGNAL_INDEX, TRIMMED, evening, re
 
 from openalpha_cn import strategy_survivor_forward as forward_module
 from openalpha_cn.backtest.outcome_statistics import EXACT_SIGN_FLIP_LIMIT, sign_flip_test
+from openalpha_cn.backtest.power_analysis import (
+    NOT_DETECTABLE_WORDING,
+    POWER_BASIS,
+    by_first_step_level,
+    power_of_mean_test,
+)
 from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
 from openalpha_cn.domain.alpha_model import AlphaModelArtifact, Prediction, PredictionBatch
 from openalpha_cn.domain.daily_prices import DAILY_BASIC_DATASET, DAILY_DATASET
@@ -97,20 +103,27 @@ from openalpha_cn.strategy_survivor_forward import (
     DESCRIPTIVE_WORDING,
     FORWARD_METRICS,
     NO_VERDICT_WORDING,
+    OBSERVED_WORDING,
+    POWER_NOT_PRE_REGISTERED,
     PREDICTION_LAYER_WORDING,
+    SURVIVOR_FORWARD_POWER_KEY,
+    SURVIVOR_FORWARD_POWER_SCHEMA,
     SURVIVOR_FORWARD_PROTOCOL_KEY,
     SURVIVOR_FORWARD_PROTOCOL_SCHEMA,
     SURVIVOR_FORWARD_REPORT_KIND,
+    PlannedMetric,
     PredictionLayer,
     RecordOutcome,
     SampledPeriod,
     SampledSessions,
     SurvivorForwardError,
+    SurvivorForwardPowerPlan,
     SurvivorForwardProtocol,
     WitnessedRecord,
     check_journals_against_the_store,
     paper_refusal,
     prediction_layer,
+    read_forward_power,
     read_forward_protocol,
     record_outcome,
     record_scope,
@@ -1897,10 +1910,12 @@ def reported(
     *,
     through: int,
     paper: Mapping[str, Any] | None = None,
+    power: SurvivorForwardPowerPlan | None = None,
     **changes: object,
 ) -> dict[str, Any]:
     """The document of `outcomes` (by horizon) under the test protocol with `changes`, the
-    sample drawn through the session of ordinal `through` at every horizon."""
+    sample drawn through the session of ordinal `through` at every horizon, and the power plan
+    the registration carries (`None`: none)."""
     read = protocol(**changes)
     layers = tuple(
         prediction_layer(
@@ -1924,6 +1939,7 @@ def reported(
         verdicts=verdicts,
         layers=layers,
         paper=paper_refusal(NO_BOOK) if paper is None else paper,
+        power=power,
         integrity=INTEGRITY,
     )
 
@@ -2432,6 +2448,7 @@ def test_a_document_needs_one_layer_per_registered_horizon() -> None:
             verdicts={},
             layers=(only,),
             paper=paper_refusal(NO_BOOK),
+            power=None,
             integrity=INTEGRITY,
         )
 
@@ -2499,3 +2516,447 @@ def test_the_document_is_byte_identical_under_two_hash_seeds() -> None:
         assert completed.returncode == 0, completed.stderr
         digests.add(completed.stdout.strip())
     assert digests == {seeded_document_digest()}
+
+
+# --- the power section (`V2-P7-018`) -----------------------------------------------------------
+#
+# `survivor_forward_power` is a settings block beside the protocol: the pre-registered design the
+# power is stated for. The power is always the plan's -- a planning sd, a test level, a true mean
+# the planner chose to ask about -- and the sd a window shows is described after its test, never
+# fed back in. The numbers below are the route's hand arithmetic (sd 0.15, one-sided 0.05).
+
+POWER_BLOCK: Final[Mapping[str, Any]] = {
+    "schema_version": "survivor-forward-power/v1",
+    "test_level": 0.05,
+    "target_power": 0.8,
+    "critical_value": "normal",
+    "assumed_lag1_autocorrelation": 0.0,
+    "minimum_periods": 2,
+    "planned": [
+        {
+            "horizon": 20,
+            "metric": "rank_ic",
+            "planning_sd": 0.15,
+            "planning_means": [0.037, 0.05, 0.1],
+            "sd_source": "test value",
+        },
+        {
+            "horizon": 20,
+            "metric": "ew_minus_worst_decile",
+            "planning_sd": 0.03,
+            "planning_means": [0.01],
+            "sd_source": "test value",
+        },
+    ],
+}
+"""Test values only (module docstring): not the V2-P7-006 numbers."""
+
+
+def power_plan(
+    read: SurvivorForwardProtocol | None = None, **changes: object
+) -> SurvivorForwardPowerPlan:
+    plan = read_forward_power(
+        {SURVIVOR_FORWARD_POWER_KEY: {**POWER_BLOCK, **changes}},
+        protocol=protocol() if read is None else read,
+    )
+    assert plan is not None
+    return plan
+
+
+def test_a_registration_without_a_power_block_has_no_plan_and_one_with_a_bad_block_is_refused() -> (
+    None
+):
+    assert read_forward_power({}, protocol=protocol()) is None
+    for changes, said in (
+        ({"extra": 1}, "survivor_forward_power"),
+        ({"critical_value": "z"}, "critical_value"),
+        ({"minimum_periods": 4}, "minimum_periods"),
+        ({"planned": [POWER_BLOCK["planned"][1]]}, "primary"),
+        ({"planned": [*POWER_BLOCK["planned"], POWER_BLOCK["planned"][0]]}, "repeat"),
+        ({"planned": [{**POWER_BLOCK["planned"][0], "metric": "top_minus_bottom"}]}, "not tested"),
+        ({"planned": [{**POWER_BLOCK["planned"][0], "horizon": 7}]}, "horizon 7"),
+    ):
+        with pytest.raises(SurvivorForwardError, match=said):
+            power_plan(**changes)
+
+
+def test_the_power_plan_has_no_default_and_is_closed_and_frozen() -> None:
+    """The plan is frozen at the checkpoint like the protocol: a default here would be a design
+    chosen by code."""
+    for model in (SurvivorForwardPowerPlan, PlannedMetric):
+        assert all(field.is_required() for field in model.model_fields.values())
+        assert model.model_config.get("extra") == "forbid"
+        assert model.model_config.get("frozen") is True
+    assert set(SurvivorForwardPowerPlan.model_fields) == set(POWER_BLOCK)
+    assert SURVIVOR_FORWARD_POWER_KEY == "survivor_forward_power"
+    assert (
+        power_plan().schema_version == SURVIVOR_FORWARD_POWER_SCHEMA == "survivor-forward-power/v1"
+    )
+
+
+@pytest.mark.parametrize("key", sorted(POWER_BLOCK))
+def test_a_power_block_missing_any_key_is_refused_by_name(key: str) -> None:
+    block = {name: value for name, value in POWER_BLOCK.items() if name != key}
+
+    with pytest.raises(SurvivorForwardError, match=key):
+        read_forward_power({SURVIVOR_FORWARD_POWER_KEY: block}, protocol=protocol())
+
+
+@pytest.mark.parametrize("key", sorted(POWER_BLOCK["planned"][0]))
+def test_a_planned_metric_missing_any_key_is_refused_by_name(key: str) -> None:
+    item = {name: value for name, value in POWER_BLOCK["planned"][0].items() if name != key}
+
+    with pytest.raises(SurvivorForwardError, match=key):
+        power_plan(planned=[item, POWER_BLOCK["planned"][1]])
+
+
+@pytest.mark.parametrize(
+    ("changes", "said"),
+    [
+        ({"schema_version": "survivor-forward-power/v2"}, "schema_version"),
+        ({"test_level": 0.5}, "test_level"),
+        ({"test_level": 0.0}, "test_level"),
+        ({"target_power": 1.0}, "target_power"),
+        ({"target_power": 0.0}, "target_power"),
+        ({"assumed_lag1_autocorrelation": 1.0}, "assumed_lag1_autocorrelation"),
+        ({"assumed_lag1_autocorrelation": -1.0}, "assumed_lag1_autocorrelation"),
+        ({"assumed_lag1_autocorrelation": float("nan")}, "assumed_lag1_autocorrelation"),
+        ({"minimum_periods": 1}, "minimum_periods"),
+        ({"minimum_periods": True}, "minimum_periods"),
+        ({"planned": []}, "planned"),
+        ({"planned": [{**POWER_BLOCK["planned"][0], "planning_sd": 0.0}]}, "planning_sd"),
+        ({"planned": [{**POWER_BLOCK["planned"][0], "planning_sd": float("inf")}]}, "planning_sd"),
+        ({"planned": [{**POWER_BLOCK["planned"][0], "planning_means": []}]}, "planning_means"),
+        (
+            {"planned": [{**POWER_BLOCK["planned"][0], "planning_means": [0.05, 0.0]}]},
+            "planning_means",
+        ),
+        ({"planned": [{**POWER_BLOCK["planned"][0], "planning_means": [-0.05]}]}, "planning_means"),
+        ({"planned": [{**POWER_BLOCK["planned"][0], "sd_source": "  "}]}, "sd_source"),
+    ],
+)
+def test_a_power_block_with_a_value_out_of_range_is_refused_by_name(
+    changes: Mapping[str, object], said: str
+) -> None:
+    with pytest.raises(SurvivorForwardError, match=said):
+        power_plan(**changes)
+
+
+@pytest.mark.parametrize("block", [[1, 2], None, "plan"])
+def test_a_power_block_that_is_not_an_object_is_refused_by_name(block: object) -> None:
+    with pytest.raises(SurvivorForwardError, match="survivor_forward_power"):
+        read_forward_power({SURVIVOR_FORWARD_POWER_KEY: block}, protocol=protocol())
+
+
+def test_the_power_section_states_the_planned_power_at_k_as_hand_computed() -> None:
+    """K = 36 at sd 0.15, one-sided 0.05, normal: 0.435, 0.639, 0.991; the mean reaching 0.8 is
+    0.0622; 0.8 needs 102, 56 and 14 periods (the route's arithmetic)."""
+    read = protocol(window_periods=36)
+    document = reported(
+        {20: (), 5: ()},
+        {},
+        through=1,
+        power=power_plan(read, minimum_periods=30),
+        window_periods=36,
+    )
+
+    power = document["power"]
+    assert (power["wording"], power["status"]) == (
+        SURVIVOR_WORDING,
+        "pre-registered (survivor-forward-power/v1)",
+    )
+    assert (power["basis"], power["reading_rule"]) == (POWER_BASIS, NOT_DETECTABLE_WORDING)
+    primary = power["rows"][0]
+    assert (
+        primary["horizon"],
+        primary["metric"],
+        primary["role"],
+        primary["planned_periods"],
+    ) == (20, "rank_ic", "primary", 36)
+    assert [row["power"] for row in primary["planned"]] == pytest.approx(
+        [0.43452959661329793, 0.6387600313123356, 0.9907422946265046], abs=1e-12
+    )
+    assert primary["smallest_mean_at_target"] == pytest.approx(0.062161871513109646, abs=1e-12)
+    assert [row["periods"] for row in primary["periods_for_target"]] == [102, 56, 14]
+
+
+def test_the_t_convention_is_computed_as_registered() -> None:
+    read = protocol(window_periods=36)
+    document = reported(
+        {20: (), 5: ()},
+        {},
+        through=1,
+        power=power_plan(read, critical_value="t", minimum_periods=30),
+        window_periods=36,
+    )
+
+    primary = document["power"]["rows"][0]
+    assert [row["power"] for row in primary["planned"][:2]] == pytest.approx(
+        [0.417001, 0.621882], abs=1e-6
+    )
+    assert primary["periods_for_target"][1] == {"mean": 0.05, "periods": 57}
+
+
+def test_a_secondary_row_is_powered_at_the_first_benjamini_yekutieli_step() -> None:
+    """Family {h20 survivors_minus_ew, h20 ew_minus_worst_decile, h5 rank_ic}: m = 3, q = 0.2."""
+    document = reported({20: (), 5: ()}, {}, through=1, power=power_plan())
+
+    secondary = document["power"]["rows"][1]
+    level = by_first_step_level(q=0.2, family_size=3)
+    assert secondary["role"] == "secondary"
+    assert secondary["test_level"] == level == pytest.approx(0.2 / 5.5, abs=1e-15)
+    assert "lower bound under Benjamini-Yekutieli" in secondary["test_level_basis"]
+    assert secondary["planned"][0]["power"] == power_of_mean_test(
+        mean=0.01, sd=0.03, periods=3, test_level=level, kind="normal"
+    )
+
+
+def test_a_gap_reduces_the_usable_periods_and_the_power_and_is_held_to_the_minimum() -> None:
+    """Position 2 of 3 (ordinal 21) has no record: n = 2 of 3, below a minimum of 3."""
+    outcomes = every_session(61, skip=frozenset({21}))
+    document = reported(
+        {20: outcomes, 5: ()},
+        checked_by(outcomes),
+        through=61,
+        power=power_plan(minimum_periods=3),
+    )
+
+    window = document["power"]["rows"][0]["headline"]
+    assert (window["positions"], window["gaps"], window["usable_at_most"]) == (3, 1, 2)
+    assert (window["tested"], window["n"], window["n_basis"]) == (2, 2, "tested")
+    assert [row["power"] for row in window["at_n"]] == [
+        power_of_mean_test(mean=mean, sd=0.15, periods=2, test_level=0.05, kind="normal")
+        for mean in (0.037, 0.05, 0.1)
+    ]
+    assert (window["minimum_periods"], window["below_minimum"]) == (3, True)
+
+
+def test_an_unverifiable_record_is_a_gap_of_the_sensitivity_window_and_not_of_the_headline() -> (
+    None
+):
+    """Ordinal 41 is UNVERIFIABLE: the headline keeps its period (P6's convention) and the
+    sensitivity turns it into a gap, so the two windows are about the same positions and differ
+    by one usable period."""
+    outcomes = every_session(61)
+    verdicts = checked_by(outcomes, prd_0041=("unverifiable", "recompute_differs", ("x",)))
+    document = reported(
+        {20: outcomes, 5: ()}, verdicts, through=61, power=power_plan(minimum_periods=3)
+    )
+
+    row = document["power"]["rows"][0]
+    headline, sensitivity = row["headline"], row["excluding_unverifiable"]
+    assert (headline["positions"], headline["gaps"], headline["usable_at_most"]) == (3, 0, 3)
+    assert (headline["tested"], headline["n"], headline["below_minimum"]) == (3, 3, False)
+    assert (sensitivity["positions"], sensitivity["gaps"]) == (3, 1)
+    assert (sensitivity["usable_at_most"], sensitivity["tested"], sensitivity["n"]) == (2, 2, 2)
+    assert sensitivity["below_minimum"] is True
+
+
+def test_a_refused_and_an_unchecked_record_are_gaps_of_both_windows() -> None:
+    outcomes = every_session(61)
+    verdicts = checked_by(outcomes, prd_0021=("refused", "no_provenance", ()))
+    del verdicts["prd_0041"]
+    document = reported({20: outcomes, 5: ()}, verdicts, through=61, power=power_plan())
+
+    row = document["power"]["rows"][0]
+    for name in ("headline", "excluding_unverifiable"):
+        assert (row[name]["positions"], row[name]["gaps"], row[name]["usable_at_most"]) == (3, 2, 1)
+        assert (row[name]["tested"], row[name]["n"]) == (1, 1)
+        assert row[name]["at_n"] is None
+
+
+def test_the_observed_sd_is_described_and_never_used_for_power() -> None:
+    """After the window: the rank ICs of ordinals 1 and 41 are -0.01 and 0.04; before it, nothing
+    is observed. The planned and the window powers are the plan's whatever was observed."""
+    before = reported(
+        {20: every_session(25), 5: ()},
+        checked_by(every_session(25)),
+        through=25,
+        power=power_plan(),
+    )
+    observed_before = before["power"]["rows"][0]["headline"]["observed"]
+    assert (observed_before["sd"], before["power"]["rows"][0]["headline"]["n_basis"]) == (
+        None,
+        "usable_at_most",
+    )
+
+    outcomes = every_session(61, skip=frozenset({21}))
+    after = reported({20: outcomes, 5: ()}, checked_by(outcomes), through=61, power=power_plan())
+    observed = after["power"]["rows"][0]["headline"]["observed"]
+    assert observed["wording"] == OBSERVED_WORDING
+    assert observed["sd"] == pytest.approx(statistics.stdev([-0.01, 0.04]), abs=1e-15)
+    assert observed["lag1_autocorrelation"] is None
+    assert after["power"]["rows"][0]["planned"] == before["power"]["rows"][0]["planned"]
+
+
+def test_an_observed_lag1_autocorrelation_is_described_and_never_enters_the_plan() -> None:
+    """The rank ICs of ordinals 1, 21 and 41 are -0.01, -0.02 and 0.04: in hundredths -1, -2, 4,
+    mean 1/3, deviations -4/3, -7/3, 11/3; the lag-1 products sum to -49/9 over 186/9. The
+    negative observed correlation changes neither the plan's equivalent periods nor its powers."""
+    outcomes = every_session(61)
+    after = reported({20: outcomes, 5: ()}, checked_by(outcomes), through=61, power=power_plan())
+    before = reported({20: (), 5: ()}, {}, through=1, power=power_plan())
+
+    observed = after["power"]["rows"][0]["headline"]["observed"]
+    assert observed["lag1_autocorrelation"] == pytest.approx(-49 / 186, abs=1e-12)
+    assert observed["sd"] == pytest.approx(statistics.stdev([-0.01, -0.02, 0.04]), abs=1e-15)
+    for name in ("planned", "periods_for_target", "autocorrelation", "smallest_mean_at_target"):
+        assert after["power"]["rows"][0][name] == before["power"]["rows"][0][name], name
+
+
+def test_the_serial_correlation_is_the_plans_and_a_negative_one_is_not_credited() -> None:
+    """Assumed lag-1 0.5 leaves K (1 - 0.5) / (1 + 0.5) = 12 independent periods of 36: 0.312 at a
+    mean of 0.05 and 0.747 at 0.1 (the route's hand figures). A negative assumed correlation
+    would credit more independent periods than there are: it is held at 0, and the document says
+    so."""
+    read = protocol(window_periods=36)
+    positive = reported(
+        {20: (), 5: ()},
+        {},
+        through=1,
+        power=power_plan(read, assumed_lag1_autocorrelation=0.5, minimum_periods=30),
+        window_periods=36,
+    )
+
+    serial = positive["power"]["rows"][0]["autocorrelation"]
+    assert (serial["assumed_lag1"], serial["lag1_used"]) == (0.5, 0.5)
+    assert serial["independent_period_equivalent"] == pytest.approx(12.0, abs=1e-12)
+    assert serial["lag1_note"] is None
+    assert [item["power"] for item in serial["power_at_equivalent"][1:]] == pytest.approx(
+        [0.31201, 0.74683], abs=1e-5
+    )
+
+    negative = reported(
+        {20: (), 5: ()},
+        {},
+        through=1,
+        power=power_plan(read, assumed_lag1_autocorrelation=-0.5, minimum_periods=30),
+        window_periods=36,
+    )
+
+    held = negative["power"]["rows"][0]["autocorrelation"]
+    assert (held["assumed_lag1"], held["lag1_used"]) == (-0.5, 0.0)
+    assert held["independent_period_equivalent"] == 36
+    assert "not credited" in held["lag1_note"]
+    assert held["power_at_equivalent"] == negative["power"]["rows"][0]["planned"]
+
+
+def test_a_question_the_design_cannot_answer_is_a_named_absence_not_a_traceback() -> None:
+    """A mean needing more than 100,000 periods, and an assumed lag-1 that leaves fewer than two
+    independent periods: the module refuses both, the section says so and states the rest."""
+    document = reported(
+        {20: (), 5: ()},
+        {},
+        through=1,
+        power=power_plan(
+            assumed_lag1_autocorrelation=0.99,
+            planned=[{**POWER_BLOCK["planned"][0], "planning_means": [1e-9, 0.05]}],
+        ),
+    )
+
+    row = document["power"]["rows"][0]
+    assert [item["periods"] for item in row["periods_for_target"]] == [None, 56]
+    assert row["planned"][1]["power"] is not None
+    assert all(item["power"] is None for item in row["autocorrelation"]["power_at_equivalent"])
+    assert row["autocorrelation"]["independent_period_equivalent"] < 2
+    assert any("100000" in absence for absence in row["absences"])
+    assert any("at least 2" in absence for absence in row["absences"])
+    assert verdict_words(document) == []
+    assert any("not stated" in line for line in survivor_forward_lines(document))
+
+
+def test_a_secondary_horizon_with_one_position_cannot_be_powered_and_says_so() -> None:
+    """The primary window spans 60 sessions: a secondary horizon of 60 has one position, and a
+    t or normal test needs at least two periods."""
+    read = protocol(secondary_horizons=[60])
+    secondary = {**POWER_BLOCK["planned"][0], "horizon": 60, "planning_means": [0.05]}
+    plan = power_plan(read, planned=[POWER_BLOCK["planned"][0], secondary])
+    document = reported({20: (), 60: ()}, {}, through=1, power=plan, secondary_horizons=[60])
+
+    row = document["power"]["rows"][1]
+    assert (row["horizon"], row["role"], row["planned_periods"]) == (60, "secondary", 1)
+    assert row["planned"] == [{"mean": 0.05, "power": None}]
+    assert row["smallest_mean_at_target"] is None
+    assert row["headline"]["at_n"] is None
+    assert any("at least 2" in absence for absence in row["absences"])
+    assert survivor_forward_lines(document)
+
+
+def test_without_a_power_plan_the_section_says_power_cannot_be_stated() -> None:
+    document = reported({20: (), 5: ()}, {}, through=1)
+
+    assert document["power"] == {
+        "wording": SURVIVOR_WORDING,
+        "status": POWER_NOT_PRE_REGISTERED,
+        "basis": POWER_BASIS,
+        "reading_rule": NOT_DETECTABLE_WORDING,
+        "plan": None,
+        "rows": [],
+    }
+    assert any(POWER_NOT_PRE_REGISTERED in line for line in survivor_forward_lines(document))
+
+
+def test_a_plan_read_against_another_protocol_is_refused_by_the_document_too() -> None:
+    """The plan plans h20 `ew_minus_worst_decile`, a secondary of the default protocol; a
+    document under a protocol that does not test it is not this plan's."""
+    plan = power_plan()
+
+    with pytest.raises(SurvivorForwardError, match="ew_minus_worst_decile"):
+        reported(
+            {20: (), 5: ()}, {}, through=1, power=plan, secondary_metrics=["survivors_minus_ew"]
+        )
+
+
+def test_the_power_lines_carry_the_reading_rule_and_no_verdict_word() -> None:
+    outcomes = every_session(61)
+    document = reported({20: outcomes, 5: ()}, checked_by(outcomes), through=61, power=power_plan())
+
+    lines = survivor_forward_lines(document)
+    assert any(line.startswith("power (survivor-forward-power/v1") for line in lines)
+    assert any(NOT_DETECTABLE_WORDING in line for line in lines)
+    assert verdict_words(document) == []
+
+
+def test_the_power_lines_sit_after_the_secondary_family_and_before_the_paper_ledger() -> None:
+    outcomes = every_session(25)
+    document = reported({20: outcomes, 5: ()}, checked_by(outcomes), through=25, power=power_plan())
+    lines = survivor_forward_lines(document)
+
+    def first(prefix: str) -> int:
+        return next(index for index, line in enumerate(lines) if line.startswith(prefix))
+
+    assert first("  secondary family") < first("power (") < first("paper ledger")
+    assert lines[first("paper ledger") - 1].strip() == NOT_DETECTABLE_WORDING
+    assert survivor_forward_lines(json.loads(json.dumps(document, sort_keys=True))) == lines
+    text = "\n".join(lines[first("power (") : first("paper ledger")])
+    assert "test level" in text and "minimum periods" in text
+
+
+def test_a_secondary_window_that_matured_first_is_not_counted_as_tested_in_the_power_section() -> (
+    None
+):
+    """h=7 against h=20 with K = 3: the secondary's eight positions have matured and the
+    primary's third has not, so the document prints no test for it (one analysis, at the primary
+    window): its `n` is the most the window can still have, not a tested count, and nothing of it
+    is observed."""
+    read = protocol(secondary_horizons=[7])
+    planned = [POWER_BLOCK["planned"][0], {**POWER_BLOCK["planned"][0], "horizon": 7}]
+    outcomes = {
+        20: every_session(41, immature=frozenset({41})),
+        7: tuple(made(o, horizon=7) for o in range(1, 51)),
+    }
+
+    document = reported(
+        outcomes,
+        checked_by(outcomes[20]),
+        through=50,
+        secondary_horizons=[7],
+        power=power_plan(read, planned=planned),
+    )
+
+    window = document["power"]["rows"][1]["headline"]
+    assert (window["positions"], window["matured"]) == (8, 8)
+    assert (window["tested"], window["n_basis"]) == (None, "usable_at_most")
+    assert window["n"] == window["usable_at_most"] == 8 - window["gaps"]
+    assert window["observed"]["sd"] is None
+    assert document["prediction_layer"]["h7"]["non_overlapping"]["test"] is None
