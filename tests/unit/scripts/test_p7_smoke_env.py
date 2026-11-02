@@ -670,3 +670,78 @@ def test_an_inherited_git_dir_aims_no_git_call_of_the_prepare_at_another_reposit
     }  # fmt: skip
     for call in own:
         assert {name: call.environment.get(name) for name in HERMETIC} == HERMETIC, call.command
+
+
+def test_the_prepare_s_git_reads_no_stdin_and_cannot_hang_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, panel = _source_repository(tmp_path), _panel(tmp_path)
+    commit = head(source)
+    calls = _recording_git(monkeypatch)
+
+    _prepare(tmp_path, monkeypatch, source, panel, commit=commit)
+
+    own = [call for call in calls if call.caller == "p7_smoke_env.py"]
+    assert own
+    for call in own:
+        assert call.keywords.get("stdin") is subprocess.DEVNULL, call.command
+        assert call.keywords.get("timeout") == env.GIT_TIMEOUT_SECONDS == 60, call.command
+
+
+@pytest.mark.parametrize("fault", ["timed out", "no git"])
+def test_a_git_that_times_out_or_cannot_run_is_a_refusal_that_makes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    source, panel = _source_repository(tmp_path), _panel(tmp_path)
+    commit = head(source)
+    if fault == "timed out":
+        monkeypatch.setattr(env, "GIT_TIMEOUT_SECONDS", 1e-6)
+    else:
+        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+
+    with pytest.raises(env.SmokeEnvironmentError, match=r"did not finish|could not run"):
+        _prepare(tmp_path, monkeypatch, source, panel, commit=commit)
+
+    assert not (tmp_path / "smoke").exists()
+
+
+macos_only = pytest.mark.skipif(sys.platform != "darwin", reason="cp -c is macOS's")
+
+
+@macos_only
+@pytest.mark.parametrize("found", [None, "/opt/homebrew/opt/coreutils/libexec/gnubin/cp"])
+def test_the_panel_clone_refuses_a_cp_that_is_not_macos_s(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, found: str | None
+) -> None:
+    """GNU coreutils' `cp` reads `-c` as `--preserve=context`: a whole copy, not a clone."""
+    panel = _panel(tmp_path)
+    monkeypatch.setattr(env.shutil, "which", lambda name: found)
+
+    with pytest.raises(env.SmokeEnvironmentError, match="not macOS's /bin/cp"):
+        env.apfs_clone(panel, tmp_path / "copy")
+
+    assert not (tmp_path / "copy").exists()
+
+
+@macos_only
+def test_the_panel_clone_runs_macos_s_cp_once_looked_up_with_no_stdin_and_no_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    panel = _panel(tmp_path)
+    runs: list[tuple[list[str], dict[str, Any]]] = []
+    real = subprocess.run
+
+    def recording(*args: Any, **keywords: Any) -> Any:
+        runs.append(([str(word) for word in args[0]], dict(keywords)))
+        return real(*args, **keywords)
+
+    monkeypatch.setattr(subprocess, "run", recording)
+
+    env.apfs_clone(panel, tmp_path / "copy")
+
+    assert env.tree_manifest(tmp_path / "copy") == env.tree_manifest(panel)
+    [(command, keywords)] = runs
+    assert Path(command[0]) in env.MACOS_CP
+    assert command[1:] == ["-c", "-R", str(panel), str(tmp_path / "copy")]
+    assert keywords.get("stdin") is subprocess.DEVNULL
+    assert keywords.get("timeout") is None

@@ -24,10 +24,12 @@ root exists, holds only what this prepare made, and a refusal names it for the u
    (`registry.register`), which must be the code the clone holds -- whose bound code
    (`registry.REGISTERED_PATHS` and the two scripts) has no uncommitted change, and that is on
    `main`'s history. Every git call here drops the inherited `GIT_*` variables (an inherited
-   `GIT_DIR` would aim it at another repository), reads no global or system configuration, and
-   takes no optional lock, so `git status` never refreshes the main checkout's index.
+   `GIT_DIR` would aim it at another repository), reads no global or system configuration, takes
+   no optional lock, so `git status` never refreshes the main checkout's index, reads no stdin
+   and is given `GIT_TIMEOUT_SECONDS`.
 4. **One volume**: the source panel and the root's parent are on the same device, or `cp -c`
-   would not clone but copy (6 GB of P6's panel).
+   would not clone but copy (6 GB of P6's panel). Necessary, not sufficient: on one device that
+   cannot clone (HFS+, exFAT) `cp -c` copies too (`apfs_clone`).
 5. **The configuration reads**: `strategy_survivor.read_survivor_registration` of
    `smoke_configuration` with the registered seed, so the evening's step 1 cannot refuse it.
 6. **The clone**: `git clone --local --no-checkout` of the source into `<root>/repo`, the branch
@@ -37,11 +39,11 @@ root exists, holds only what this prepare made, and a refusal names it for the u
    `smoke_settings()` at `REGISTRATION_PATH` in the clone, committed there alone under a fixed
    identity (`SMOKE_IDENTITY`, no hook, no signature); `registry.registered_checkout` then names
    the registration's commit, the one the evening's admission holds the bytes to.
-8. **The panel**: `copy_tree` (`cp -c -R`, APFS `clonefile`; macOS only) of the source panel to
-   `<root>/runtime/panel`. The source's files, sizes and modification times are the same before
-   and after (else it changed while it was cloned), the copy holds every file of the source at
-   its size and the source's `catalog.duckdb` byte for byte (else it is not the panel), and that
-   catalog's SHA-256 is recorded.
+8. **The panel**: `copy_tree` (`apfs_clone`: macOS's `cp -c -R`, `clonefile(2)` on APFS) of the
+   source panel to `<root>/runtime/panel`. The source's files, sizes and modification times are
+   the same before and after (else it changed while it was cloned), the copy holds every file of
+   the source at its size and the source's `catalog.duckdb` byte for byte (else it is not the
+   panel), and that catalog's SHA-256 is recorded.
 9. **The pinned worktree**: the daily command's own `--pin-worktree` steps --
    `daily_selection.pin_worktree` at the registration's commit in `<root>/pinned`,
    `sync_pinned_environment` (offline) and `link_env_file` -- except that the `.env` link points
@@ -63,6 +65,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -119,6 +122,11 @@ COMMIT_MESSAGE: Final[str] = (
 )
 _FULL_COMMIT: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{40}")
 _PHASES: Final[tuple[int, int]] = (1, 2)
+GIT_TIMEOUT_SECONDS: Final[float] = 60
+"""Each git call's bound, as `registry._git`'s: the source repository is small (a local clone
+hardlinks its objects), so a call past it is stuck, not slow."""
+MACOS_CP: Final[frozenset[Path]] = frozenset({Path("/bin/cp"), Path("/usr/bin/cp")})
+"""The only `cp` the panel is cloned with: macOS's own (`apfs_clone`)."""
 
 DESIGN_ADAPTER: Final[dict[str, Any]] = {
     "schema_version": "survivor-adapter/v1",
@@ -256,9 +264,25 @@ def _git(repo: Path, *args: str) -> str:
         "GIT_OPTIONAL_LOCKS": "0",
         "GIT_TERMINAL_PROMPT": "0",
     }
-    finished = subprocess.run(
-        ["git", *args], cwd=repo, env=environment, capture_output=True, text=True, check=False
-    )
+    try:
+        finished = subprocess.run(
+            ["git", *args],
+            cwd=repo,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=GIT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise SmokeEnvironmentError(
+            f"git {' '.join(args)} in {repo} did not finish within {GIT_TIMEOUT_SECONDS} s"
+        ) from error
+    except OSError as error:
+        raise SmokeEnvironmentError(
+            f"git {' '.join(args)} in {repo} could not run: {error}"
+        ) from error
     if finished.returncode != 0:
         raise SmokeEnvironmentError(
             f"git {' '.join(args)} in {repo} failed: {finished.stderr.strip() or 'no message'}"
@@ -347,13 +371,33 @@ def clone_command(source: Path, target: Path) -> list[str]:
 
 
 def apfs_clone(source: Path, target: Path) -> None:
-    """`source` cloned to `target` with `cp -c -R` (APFS `clonefile`): no data block is copied."""
+    """`source` cloned to `target` with macOS's `cp -c -R`, which asks for `clonefile(2)`.
+
+    On an APFS volume no data block is copied. Where the file system cannot clone -- another
+    volume, or one device that is HFS+ or exFAT -- `cp -c` falls back to `copyfile(2)` and copies
+    every byte (`man cp`); step 4's same-device check rules out the first only. `cp` is looked up
+    on `PATH` once and must resolve to macOS's own (`MACOS_CP`): GNU coreutils' `cp` (Homebrew's
+    `gnubin` ahead on `PATH`) reads `-c` as `--preserve=context` and would copy the whole panel.
+    No stdin, and no timeout: a copy that fell back is slow, not stuck.
+    """
     if sys.platform != "darwin":
         raise SmokeEnvironmentError(
             "the panel is cloned with cp -c (APFS clonefile), which is macOS's; nothing was copied"
         )
+    found = shutil.which("cp")
+    cp = Path(found).resolve() if found is not None else None
+    if cp not in MACOS_CP:
+        raise SmokeEnvironmentError(
+            f"the cp on PATH is {found or 'nowhere'}, not macOS's /bin/cp: GNU coreutils' cp "
+            "reads -c as --preserve=context and would copy the whole panel; put /bin ahead of it "
+            "on PATH. Nothing was copied"
+        )
     finished = subprocess.run(
-        clone_command(source, target), capture_output=True, text=True, check=False
+        [str(cp), *clone_command(source, target)[1:]],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     if finished.returncode != 0:
         raise SmokeEnvironmentError(f"cp -c failed: {finished.stderr.strip()}")
