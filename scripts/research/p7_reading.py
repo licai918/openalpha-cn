@@ -88,8 +88,13 @@ What this does not establish:
   the read back, and so does another worktree or clone of the repository, which does not hold
   them. **The claims must be committed, and the commit kept in this repository's refs (and, for
   another clone, fetched there), for the rule to survive another clone or worktree.** A claim
-  committed once is found by step 4 after it is deleted -- but not after a history rewrite leaves
-  it on no ref (a reset, a rebase or a filter, then a garbage collection).
+  committed once is found by step 4 after it is deleted for as long as some ref reaches a commit
+  that added or changed it -- through any parent of any merge (`--full-history`; `-m` for a claim
+  added in a merge commit itself), in a root commit, and in a stash (`refs/stash` and its
+  untracked-files parent): `_LOG_EVERYTHING`. It is **not** found once no ref reaches such a
+  commit -- a reset, a rebase, an amend or a filter that drops it, a dropped stash, a deleted
+  branch that was never merged: `git log --all` walks refs, not reflogs -- and not at all once
+  unreachable objects expire.
 * It binds a procedure, not access to the data. Code that builds a `WindowCappedStore` for the
   validation window itself, calls `read_once` with a `measure` of its own, calls the default
   measure directly (`_panel_measure(runtime_dir)(body, VALIDATION, binding)` -- the tests do, on
@@ -1086,7 +1091,7 @@ def _refuse_a_second_read(
             )
     for path, what, spent in files:
         relative = path.relative_to(root).as_posix()
-        log = registry._git(root, "log", "--all", "--format=%H", "--", relative)
+        log = registry._git(root, *_LOG_EVERYTHING, "--format=%H", "--", relative)
         if log.returncode != 0:
             raise ReadingAlreadyClaimedError(
                 f"git log cannot tell whether {relative} was ever committed "
@@ -1100,6 +1105,23 @@ def _refuse_a_second_read(
                 f"give the read back -- {spent} had its one read"
             )
     _refuse_any_claim_of_the_window(root, window)
+
+
+_LOG_EVERYTHING: Final[tuple[str, ...]] = (
+    "-c",
+    "core.quotePath=false",
+    "-c",
+    "log.showRoot=true",
+    "log",
+    "--all",
+    "--full-history",
+)
+"""Every `git log` over the claims: every ref (`--all`: branches, tags, remote-tracking refs,
+`refs/stash`); every parent of every merge (`--full-history`: git's default history
+simplification follows a merge's TREESAME parent only, which hides claims added and removed on a
+merged branch, and a stash's untracked-files parent); root commits' files listed whatever the
+configuration says (`log.showRoot`; a stash's untracked files are a root commit); names unquoted
+(`core.quotePath`)."""
 
 
 def _is_claim_file(name: str) -> bool:
@@ -1137,8 +1159,12 @@ def _refuse_any_claim_of_the_window(root: Path, window: DiagnosticWindow) -> Non
             )
     log = registry._git(
         root,
-        "log",
-        "--all",
+        *_LOG_EVERYTHING,
+        # Every parent's diff of a merge (a claim added only in a merge commit), additions never
+        # paired into renames, and the names NUL-terminated and unquoted.
+        "-m",
+        "--no-renames",
+        "-z",
         "--format=%H",
         "--name-only",
         "--diff-filter=AM",
@@ -1152,7 +1178,10 @@ def _refuse_any_claim_of_the_window(root: Path, window: DiagnosticWindow) -> Non
             "the window's first is refused"
         )
     commit: str | None = None
-    for line in log.stdout.decode().splitlines():
+    for token in log.stdout.split(b"\0"):
+        # `-z` ends each commit's hash and each name with a NUL; the first name after a hash
+        # follows a newline.
+        line = token.removeprefix(b"\n").decode("utf-8", "surrogateescape")
         if registry._FULL_COMMIT.fullmatch(line):
             commit = line
             continue

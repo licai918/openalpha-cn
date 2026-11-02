@@ -656,6 +656,145 @@ def test_the_result_text_says_the_claims_must_be_committed(repo: Path) -> None:
     ) in text
 
 
+# --- history git hides by default: merges, stashes, root commits, shallow clones (fix round 3) ---
+
+
+def files_of(first: Path, repo: Path) -> list[Path]:
+    """The window claim, the first reading's claim and its two results."""
+    return [
+        window_claim_of(repo),
+        *(
+            first.with_name(f"v2-p7-024-validation.{name}")
+            for name in ("claim.json", "result.json", "result.txt")
+        ),
+    ]
+
+
+def refused(registration: Path, repo: Path, *, hours: int, said: str) -> None:
+    measure = Measure()
+    with pytest.raises(p7_reading.ReadingAlreadyClaimedError, match=said):
+        run(registration, repo, measure, hours=hours)
+    assert measure.calls == []
+
+
+def test_claims_added_and_deleted_on_a_merged_and_deleted_branch_still_refuse(
+    repo: Path,
+) -> None:
+    """The re-reviewer's E2: the first read on a branch, its claims committed and then removed
+    there, the branch merged with a merge commit and deleted. Every commit is reachable from the
+    main line, but git's default history simplification follows only the merge's TREESAME parent,
+    so the branch's commits were invisible: the same registration and another one read again."""
+    first = registered(repo)
+    git(repo, "checkout", "-q", "-b", "side")
+    run(first, repo, Measure())
+    written = files_of(first, repo)
+    for path in written:
+        commit_file(repo, path, f"commit {path.name}", at=COMMITTED + timedelta(hours=2))
+    for path in written:
+        git(repo, "rm", "-q", path.relative_to(repo).as_posix())
+    git(repo, "commit", "-q", "-m", "drop every trace", at=COMMITTED + timedelta(hours=3))
+    git(repo, "checkout", "-q", "-")
+    git(
+        repo,
+        "merge",
+        "-q",
+        "--no-ff",
+        "-m",
+        "merge side",
+        "side",
+        at=COMMITTED + timedelta(hours=3),
+    )
+    git(repo, "branch", "-q", "-D", "side")
+
+    # The per-file check finds the same registration's own claim; the window scan, another's.
+    refused(first, repo, hours=4, said="a claim was committed at")
+    refused(registered(repo, reading="v2-p7-024-validation-again"), repo, hours=5, said="window")
+
+
+def test_a_claim_added_only_in_a_merge_commit_and_then_deleted_still_refuses(repo: Path) -> None:
+    """The re-reviewer's E3: `git log` shows a merge commit's changes only with `-m`."""
+    first = registered(repo)
+    git(repo, "checkout", "-q", "-b", "side")
+    (repo / "side.txt").write_text("x\n", encoding="utf-8")
+    commit_file(repo, repo / "side.txt", "side", at=COMMITTED + timedelta(minutes=10))
+    git(repo, "checkout", "-q", "-")
+    git(repo, "merge", "-q", "--no-commit", "--no-ff", "side")
+    run(first, repo, Measure())
+    git(repo, "add", claim_of(first).relative_to(repo).as_posix())
+    git(repo, "commit", "-q", "-m", "merge side, with the claim", at=COMMITTED + timedelta(hours=2))
+    git(repo, "rm", "-q", claim_of(first).relative_to(repo).as_posix())
+    git(repo, "commit", "-q", "-m", "drop the claim", at=COMMITTED + timedelta(hours=3))
+    for path in files_of(first, repo):
+        path.unlink(missing_ok=True)
+
+    refused(
+        registered(repo, reading="v2-p7-024-validation-again"),
+        repo,
+        hours=4,
+        said="a claim naming the validation window was committed",
+    )
+
+
+def test_a_stash_of_the_first_reads_files_still_refuses(repo: Path) -> None:
+    """The re-reviewer's E7: `git stash -u` files untracked files in a root commit that only a
+    parent of `refs/stash` reaches."""
+    first = registered(repo)
+    run(first, repo, Measure())
+    git(repo, "stash", "-q", "-u")
+    assert not window_claim_of(repo).exists() and not claim_of(first).exists()
+
+    refused(registered(repo, reading="v2-p7-024-validation-again"), repo, hours=4, said="window")
+
+
+def test_a_claim_in_a_root_commit_still_refuses_whatever_the_configuration(repo: Path) -> None:
+    """A claim of another reading committed as the root of an unrelated history, in a repository
+    configured with `log.showRoot = false`, under which `git log` lists no root commit's files
+    (the reading pins it on the command line)."""
+    git(repo, "config", "log.showRoot", "false")
+    main = git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
+    git(repo, "checkout", "-q", "--orphan", "elsewhere")
+    git(repo, "rm", "-q", "-r", "--cached", ".")
+    stray = repo / "docs" / "research" / "p7-readings" / "v2-p7-024-elsewhere.claim.json"
+    stray.parent.mkdir(parents=True, exist_ok=True)
+    stray.write_text(json.dumps({"window": "validation", "reading": "elsewhere"}) + "\n", "utf-8")
+    commit_file(repo, stray, "a root commit holding a claim", at=COMMITTED - timedelta(hours=2))
+    git(repo, "checkout", "-q", "-f", main)
+    assert not stray.exists()
+
+    refused(registered(repo), repo, hours=1, said="a claim naming the validation window")
+
+
+def test_a_claim_renamed_and_edited_in_one_commit_still_refuses(repo: Path) -> None:
+    """A claim of another window renamed and edited into a claim of this one in a single commit,
+    then deleted: `git log` pairs the two names into a rename (`R`, not `A` or `M`) unless asked
+    not to, so the edited version would never be read."""
+    readings = repo / "docs" / "research" / "p7-readings"
+    readings.mkdir(parents=True, exist_ok=True)
+    before, after = readings / "x.claim.json", readings / "y.claim.json"
+    body = {"reading": "x", "registration_sha256": "0" * 64, "window": "second_use"}
+    before.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
+    commit_file(repo, before, "a claim of the second-use window", at=COMMITTED - timedelta(hours=3))
+    git(repo, "mv", before.relative_to(repo).as_posix(), after.relative_to(repo).as_posix())
+    after.write_text(json.dumps({**body, "window": "validation"}, indent=2) + "\n", "utf-8")
+    commit_file(repo, after, "renamed and edited", at=COMMITTED - timedelta(hours=2))
+    git(repo, "rm", "-q", after.relative_to(repo).as_posix())
+    git(repo, "commit", "-q", "-m", "drop it", at=COMMITTED - timedelta(hours=1))
+
+    refused(registered(repo), repo, hours=1, said="a claim naming the validation window")
+
+
+def test_a_claim_with_a_non_ascii_name_committed_and_deleted_still_refuses(repo: Path) -> None:
+    """The re-reviewer's E5: git quotes such a name under the default `core.quotePath`."""
+    stray = repo / "docs" / "research" / "p7-readings" / "读.claim.json"
+    stray.parent.mkdir(parents=True, exist_ok=True)
+    stray.write_text(json.dumps({"window": "validation", "reading": "x"}) + "\n", encoding="utf-8")
+    commit_file(repo, stray, "a claim", at=COMMITTED - timedelta(hours=1))
+    git(repo, "rm", "-q", stray.relative_to(repo).as_posix())
+    git(repo, "commit", "-q", "-m", "drop it", at=COMMITTED - timedelta(minutes=30))
+
+    refused(registered(repo), repo, hours=1, said="a claim naming the validation window")
+
+
 # --- the claim follows the filed registration, not the path handed in (ruling 2) ----------------
 
 
