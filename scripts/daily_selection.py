@@ -2030,8 +2030,8 @@ class DailyOptions:
     json_output: bool = False
     top: int | None = None
     """`--top`, carried here only so that a survivor day can refuse it
-    (`_refuse_p6_only_options`): how many candidates the P6 summary prints is read by `main` from
-    its own `arguments.top`, never from here."""
+    (`_refuse_p6_only_options`): how many candidates the P6 summary prints is read by `_main_day`
+    from its own `top`, which `main` passes from `arguments.top`, never from here."""
 
 
 def _stored_calendar(
@@ -5774,11 +5774,13 @@ def _main_morning(
     *,
     as_json: bool,
     clock: Callable[[], datetime],
-    banner: str | None = None,
+    banner: str | None,
 ) -> int:
     """`main`'s morning re-check: the advice printed -- the file's own document with `--json`, the
     advice block otherwise -- or the refusal and the requests it spent; a fault making the text is
-    the summary step's refusal, never a traceback."""
+    the summary step's refusal, never a traceback. Under a smoke registration's banner when there
+    is one (`V2-P7-019`): the document carries it under `SMOKE_DOCUMENT_KEY`, the block first and
+    last; the morning file never holds it."""
     try:
         run = run_morning_recheck(options, clock=clock)
     except StepFailedError as error:
