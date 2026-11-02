@@ -4,6 +4,31 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### P7 — the real-data smoke's tooling (`V2-P7-019`)
+
+The tools and the runbook for the one-off real-data smoke of the daily survivor day. **No request was
+made, and the nights wait for the user's go.** A smoke registration carries one marker in its
+`settings` (`smoke_run`); for such a registration the two bound scripts that print an order list
+(`scripts/daily_selection.py` for the evening and the morning re-check, `scripts/forward_report.py`
+for the weekly report) print the banner `smoke: do not place these orders` first and last, on standard
+output and standard error, and as a `smoke` key in a JSON document -- printed only, never stored: the
+journal, the morning file and the written weekly report are what they were, and a registration without
+the marker prints nothing new. Both scripts are bound code, so every earlier registration stops
+admitting this code; none is in use while the daily registration is paused. Three scripts that no
+registration binds carry the rest: `scripts/p7_smoke_requests.py` (a counter that refuses the request
+that would pass an invocation's allowance, put on the daily command's own `counted_transport` seam,
+and an append-only request ledger), `scripts/p7_smoke_env.py` (the one-off root: a local clone with no
+remote that holds the smoke registration, an APFS clone of the real panel, a pinned worktree with its
+own `.venv` and the main checkout's `.env` linked) and `scripts/p7_smoke.py` (the driver: `prepare`,
+`evening`, `morning`, `weekly`, `remedy`, `status` and `phase`, every spending call under the cap and
+recorded, a printed remedy run only through `remedy`, which refuses the whole-year rebuild, another
+runtime directory and another registration). `docs/runbooks/daily-selection.zh-CN.md` gains the section
+that says how to run it and the go / no-go for phase 1, and
+`docs/research/p7-step0-validation/T10-real-data-smoke.md` is the report skeleton; the two request caps
+and who runs the nights are still the user's to decide. **This is engineering, not evidence**: the
+smoke registration is not the `V2-P7-006` registration, nothing it prints is to be traded, and the
+report will record what the code does on real data, never a return.
+
 ### P7 — route adjustment after two independent reviews (`V2-P7-019`…`024`, 2026-11-01)
 
 Documentation only. The route for the rest of P7 was re-cut after a Codex review (`gpt-6.1-sol`) and an
