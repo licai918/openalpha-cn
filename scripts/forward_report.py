@@ -939,6 +939,21 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
     )
     parser.add_argument("--json", action="store_true", help="Print the report as JSON.")
     arguments = parser.parse_args(argv)
+    banner = daily_selection.smoke_banner(arguments.registration)
+    if banner is not None:
+        print(banner, file=sys.stderr)
+    try:
+        return _main_report(arguments, clock=clock, banner=banner)
+    finally:
+        if banner is not None:
+            print(banner, file=sys.stderr)
+
+
+def _main_report(
+    arguments: argparse.Namespace, *, clock: Callable[[], datetime], banner: str | None
+) -> int:
+    """`main`'s report: written, then printed -- under a smoke registration's banner when there is
+    one (`V2-P7-019`), which the written file never holds."""
     as_of = arguments.as_of if arguments.as_of is not None else clock()
     runtime_dir = arguments.runtime_dir.resolve()
     store = panel_store(runtime_dir)
@@ -979,10 +994,14 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
             if isinstance(report, SurvivorForwardReport)
             else payload
         )
-        print(json.dumps(printed, sort_keys=True, ensure_ascii=False))
+        print(
+            json.dumps(
+                daily_selection.with_smoke(printed, banner), sort_keys=True, ensure_ascii=False
+            )
+        )
     else:
-        print("\n".join(summary_lines(report)))
-        print(f"written to {out}")
+        lines = [*summary_lines(report), f"written to {out}"]
+        print("\n".join(daily_selection.bannered(lines, banner)))
     return 0
 
 

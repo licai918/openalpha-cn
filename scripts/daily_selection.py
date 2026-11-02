@@ -310,6 +310,23 @@ REGISTRATION_IN_REPOSITORY: Final[str] = "docs/research/p6-registration.json"
 JOURNAL_DIRECTORY: Final[str] = "daily_selection"
 THIS_SCRIPT: Final[str] = "scripts/daily_selection.py"
 
+SMOKE_SETTINGS_KEY: Final[str] = "smoke_run"
+"""The key of a registration's `settings` that marks it a real-data smoke registration
+(`V2-P7-019`): a one-off, committed only in a throwaway clone and never the `V2-P7-006`
+registration. Any value at all marks it. Never a key of the configuration, which is closed
+(`strategy_survivor.REGISTRATION_KEYS`) and whose `config_id` it would change; the settings are
+open, and the day reads only `random_seed` from them."""
+
+SMOKE_BANNER: Final[str] = (
+    "smoke: do not place these orders -- a V2-P7-019 smoke registration, not the V2-P7-006 "
+    "registration; nothing it prints is evidence"
+)
+"""What every output of a smoke registration says first and last (`smoke_banner`)."""
+
+SMOKE_DOCUMENT_KEY: Final[str] = "smoke"
+"""The key a printed JSON document of a smoke registration carries the banner under. Printed
+only: the journal, the morning file and the written weekly report never hold it."""
+
 BASE_TARGETS: Final[tuple[str, ...]] = (
     "trade_cal",
     "stock_basic",
@@ -5752,7 +5769,13 @@ def _run_morning_recheck(
     return MorningRecheck(document=document, requests=dict(counts), wrote=True)
 
 
-def _main_morning(options: DailyOptions, *, as_json: bool, clock: Callable[[], datetime]) -> int:
+def _main_morning(
+    options: DailyOptions,
+    *,
+    as_json: bool,
+    clock: Callable[[], datetime],
+    banner: str | None = None,
+) -> int:
     """`main`'s morning re-check: the advice printed -- the file's own document with `--json`, the
     advice block otherwise -- or the refusal and the requests it spent; a fault making the text is
     the summary step's refusal, never a traceback."""
@@ -5763,11 +5786,15 @@ def _main_morning(options: DailyOptions, *, as_json: bool, clock: Callable[[], d
     try:
         with _step("summary", steps=MORNING_STEPS):
             if as_json:
-                text = json.dumps(run.document, sort_keys=True, ensure_ascii=False)
+                text = json.dumps(
+                    with_smoke(run.document, banner), sort_keys=True, ensure_ascii=False
+                )
             else:
                 from openalpha_cn.strategy_survivor_morning import morning_lines
 
-                text = "\n".join(morning_lines(run.document, this_run=run.this_run()))
+                text = "\n".join(
+                    bannered(morning_lines(run.document, this_run=run.this_run()), banner)
+                )
     except StepFailedError as error:
         return _morning_refused(error, run.this_run()["requests"])
     print(text)
@@ -6188,6 +6215,34 @@ def launchd_plist(
     return plistlib.dumps(job, sort_keys=False).decode("utf-8")
 
 
+def smoke_banner(registration: Path) -> str | None:
+    """`SMOKE_BANNER` when the registration file at `registration` marks itself a smoke run --
+    its `settings` hold `SMOKE_SETTINGS_KEY`, whatever the value -- else `None` (`V2-P7-019`).
+
+    Read at the print boundary, before the day admits the file, and only to decide what is
+    printed: a file that cannot be read or is not JSON gives `None`, and the day's own admission
+    refuses it, printing no order. A malformed marker still marks the file: the banner fails on,
+    never off."""
+    try:
+        body = json.loads(registration.read_bytes())
+    except (OSError, ValueError):
+        return None
+    settings = body.get("settings") if isinstance(body, dict) else None
+    if isinstance(settings, dict) and SMOKE_SETTINGS_KEY in settings:
+        return SMOKE_BANNER
+    return None
+
+
+def bannered(lines: Sequence[str], banner: str | None) -> list[str]:
+    """`lines` with `banner` first and last, or as they are when there is none."""
+    return [*lines] if banner is None else [banner, *lines, banner]
+
+
+def with_smoke(document: Mapping[str, Any], banner: str | None) -> Mapping[str, Any]:
+    """A printed JSON `document` with the banner under `SMOKE_DOCUMENT_KEY`, or as it is."""
+    return document if banner is None else {**document, SMOKE_DOCUMENT_KEY: banner}
+
+
 def _missing_registration_next(repo: Path) -> str:
     """The next step after a registration file that does not exist (exit 2; `V2-P7-008` final
     fix, M9): what `--registration` must name, and how a configuration comes to have one."""
@@ -6345,8 +6400,30 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
         json_output=arguments.json,
         top=arguments.top,
     )
-    if arguments.morning_recheck:
-        return _main_morning(options, as_json=arguments.json, clock=clock)
+    banner = smoke_banner(arguments.registration)
+    if banner is not None:
+        print(banner, file=sys.stderr)
+    try:
+        if arguments.morning_recheck:
+            return _main_morning(options, as_json=arguments.json, clock=clock, banner=banner)
+        return _main_day(
+            options, as_json=arguments.json, top=arguments.top, clock=clock, banner=banner
+        )
+    finally:
+        if banner is not None:
+            print(banner, file=sys.stderr)
+
+
+def _main_day(
+    options: DailyOptions,
+    *,
+    as_json: bool,
+    top: int | None,
+    clock: Callable[[], datetime],
+    banner: str | None,
+) -> int:
+    """`main`'s day: the result printed, or the refusal with its requests and -- for a survivor
+    day -- its aftermath; under a smoke registration's banner when there is one (`V2-P7-019`)."""
     try:
         result = run_daily_selection(options, clock=clock)
     except StepFailedError as error:
@@ -6362,10 +6439,10 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
                     "wrote": True,
                 },
             }
-            if arguments.json:
-                print(json.dumps(shown, sort_keys=True, ensure_ascii=False))
+            if as_json:
+                print(json.dumps(with_smoke(shown, banner), sort_keys=True, ensure_ascii=False))
             else:
-                print("\n".join(survivor_summary_lines(shown)))
+                print("\n".join(bannered(survivor_summary_lines(shown), banner)))
         print(str(error), file=sys.stderr)
         print(
             f"tushare requests   {sum(error.requests.values())} this run "
@@ -6378,17 +6455,17 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
         if (
             error.step == "registration"
             and error.exit_code == DailyExit.no_registration
-            and not arguments.registration.is_file()
+            and not options.registration.is_file()
         ):
-            print(_missing_registration_next(arguments.repo), file=sys.stderr)
+            print(_missing_registration_next(options.repo), file=sys.stderr)
         return int(error.exit_code)
-    if arguments.json:
-        print(json.dumps(result, sort_keys=True, ensure_ascii=False))
+    if as_json:
+        print(json.dumps(with_smoke(result, banner), sort_keys=True, ensure_ascii=False))
     elif result.get("kind") == SURVIVOR_RESULT_KIND:
-        print("\n".join(survivor_summary_lines(result)))
+        print("\n".join(bannered(survivor_summary_lines(result), banner)))
     else:
-        top = arguments.top if arguments.top is not None else result["targets"]["holding_count"]
-        print("\n".join(summary_lines(result, top=int(top))))
+        shown_top = top if top is not None else result["targets"]["holding_count"]
+        print("\n".join(bannered(summary_lines(result, top=int(shown_top)), banner)))
     return int(DailyExit.done)
 
 
