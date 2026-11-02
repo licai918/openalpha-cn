@@ -653,7 +653,7 @@ def test_a_ledger_cut_back_is_refused_though_the_manifest_still_reads(
     assert len(smoke.market.payloads) == sent
     assert ledger.read_bytes() == b"\n".join(kept) + b"\n"
     code, out, _err = _drive(smoke, capsys, "status", at=survivor_day.RUN_CLOCK)
-    assert code == 0
+    assert code == driver.REFUSED_EXIT  # M7: the status of a refused root is a refusal
     assert any(line.startswith("ledger") and "refused" in line for line in out.splitlines())
 
 
@@ -1187,3 +1187,124 @@ def test_the_smoke_root_is_the_pinned_worktree_s_own_when_it_is_not_given(tmp_pa
     (root / env.MANIFEST_NAME).write_text("{}\n", encoding="utf-8")
     assert driver.default_smoke_root(script) == root
     assert driver.default_smoke_root(tmp_path / "main" / "scripts" / "p7_smoke.py") is None
+
+
+# --- the review of 8c49321 (fix round 1) ---------------------------------------------------------
+
+
+def _line(smoke: Smoke, *build: str) -> str:
+    """A printed `panel build` of this smoke's runtime, with `build` after `--runtime-dir`."""
+    runtime = str(smoke.manifest.runtime)
+    return daily.pinned_command(["openalpha", "panel", "build", "--runtime-dir", runtime, *build])
+
+
+_BATCH: Final[tuple[str, ...]] = (
+    "--year", "2026", "--as-of", "2026-04-06T16:30:00+08:00", "--exchange", "SSE",
+    "--incremental", "--dataset", "adj_factor", "--dataset", "price", "--dataset", "stk_limit",
+)  # fmt: skip
+"""The oldest batch's `panel build` after its `--runtime-dir`, as step 2 prints it."""
+
+
+def _invoking(monkeypatch: pytest.MonkeyPatch, body: Callable[[], Any]) -> list[Sequence[str]]:
+    """`daily_selection.invoke` -- what runs a `panel build` or `factor build` -- replaced by
+    `body`; the arguments the driver passed are kept."""
+    seen: list[Sequence[str]] = []
+
+    def invoke(arguments: Sequence[str]) -> Any:
+        seen.append(list(arguments))
+        return body()
+
+    monkeypatch.setattr(daily, "invoke", invoke)
+    return seen
+
+
+def _failed(code: int) -> Any:
+    return daily.Invocation(exit_code=code, stdout="", stderr="an injected failure\n")
+
+
+def test_a_discarded_root_whose_discarded_line_was_taken_out_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,  # noqa: F811
+) -> None:
+    """I1: `Spent.discarded` only says a `discarded` line exists. An evening that ended on a
+    fault (or on the cap) wrote one just before its `end`; without it, the `end` that records
+    the fault is held to it, and the root stays refused -- the evening, `phase` and `status`."""
+    smoke = _smoke(tmp_path, monkeypatch, seeded, epoch=survivor_day.EPOCH)
+    sink = _sink(monkeypatch)
+    calls: list[int] = []
+
+    def body() -> int:
+        calls.append(1)
+        _send(1)
+        if len(calls) == 1:
+            raise KeyboardInterrupt
+        return 0
+
+    _standing_in(monkeypatch, body)
+    assert _drive(smoke, capsys, "evening", at=survivor_day.RUN_CLOCK)[0] == driver.INTERRUPTED_EXIT
+    ledger = smoke.root / env.LEDGER_NAME
+    lines = ledger.read_bytes().split(b"\n")
+    kept = [line for line in lines if b'"event": "discarded"' not in line]
+    assert len(kept) == len(lines) - 1
+    ledger.write_bytes(b"\n".join(kept))
+    assert _spent(smoke).discarded is None  # the ledger's own reading cannot tell
+
+    for command in (["evening"], ["phase", "--to", "2", "--reason", "go"], ["status"]):
+        code, out, err = _drive(smoke, capsys, *command, at=survivor_day.RUN_CLOCK)
+        assert code == driver.REFUSED_EXIT, command
+        assert any("discarded" in line for line in [*err, *out.splitlines()]), command
+
+    assert (len(calls), len(sink.payloads)) == (1, 1)
+    assert ledger.read_bytes() == b"\n".join(kept)
+
+
+def test_an_end_on_a_fault_or_the_cap_is_held_to_its_discarded_line(tmp_path: Path) -> None:
+    """I1, the check alone: a panel writer's `end` with a fault or a stopped request needs the
+    `discarded` line `run_capped` writes just before it; another kind's does not."""
+    logs = tmp_path / "logs"
+
+    def ledger(kind: str, end: dict[str, Any], *, discarded: bool) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = [{"event": "prepared"}, {**_start(1, 0), "kind": kind}]
+        if discarded:
+            events.append({"event": "discarded", "reason": f"invocation 1 ({kind}) wrote ..."})
+        return [*events, {**_end(1, 1), **end}]
+
+    for kind in ("evening", "panel-build"):
+        for end in ({"fault": "KeyboardInterrupt", "reached": None}, {"reached": "daily"}):
+            assert driver.ledger_problem(ledger(kind, end, discarded=True), logs=logs) is None
+            problem = driver.ledger_problem(ledger(kind, end, discarded=False), logs=logs)
+            assert "discarded" in str(problem), (kind, end)
+    for kind in ("morning", "weekly", "factor-build"):
+        end = {"fault": "KeyboardInterrupt", "reached": "namechange"}
+        assert driver.ledger_problem(ledger(kind, end, discarded=False), logs=logs) is None
+    clean = {"fault": None, "reached": None}
+    assert driver.ledger_problem(ledger("evening", clean, discarded=False), logs=logs) is None
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        {"event": "phase", "phase": 3, "reason": "a hand-written line"},
+        {"event": "start", "id": 1, "kind": "evening", "arguments": [], "phase": 1},
+    ],
+)
+def test_a_ledger_event_the_driver_cannot_read_refuses_the_root_by_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,  # noqa: F811
+    event: dict[str, Any],
+) -> None:
+    """M6: a phase with no cap, or a `start` without its running total, is refused as a ledger
+    the driver cannot read (exit 5), not let out as a bare `KeyError`."""
+    smoke = _smoke(tmp_path, monkeypatch, seeded, epoch=survivor_day.EPOCH)
+    days = _standing_in(monkeypatch, lambda: 0)
+    caps.RequestLedger(smoke.root / env.LEDGER_NAME).append(event)
+
+    for command in (["evening"], ["status"], ["phase", "--to", "2", "--reason", "go"]):
+        code, _out, err = _drive(smoke, capsys, *command, at=survivor_day.RUN_CLOCK)
+        assert code == driver.REFUSED_EXIT, command
+        assert any(line.startswith("smoke: refused:") for line in err), command
+    assert days == []

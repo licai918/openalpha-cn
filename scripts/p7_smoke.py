@@ -43,9 +43,12 @@ than `SmokeManifest.read` holds it to: that read refuses a ledger that is gone, 
 root's, but a ledger cut back to its `prepared` line, or by an invocation, still opens with that
 line and reads as less spent. So the driver refuses a ledger whose invocations are not numbered 1
 to N, whose `start` events do not each record the running total of the `end` events before them,
+in which an invocation that writes the panel ended on a fault or the cap without the `discarded`
+line `run_capped` writes just before that `end` (`Spent.discarded` only says such a line exists),
 or that records fewer invocations than `<root>/logs` holds logs of -- every invocation's output is
-written there as `<number>-<kind>.out|.err`, opened exclusively, never overwritten. A cut that also
-deletes the logs, or an edited count, is not caught.
+written there as `<number>-<kind>.out|.err`, opened exclusively, never overwritten. A ledger event
+the driver cannot read refuses the root by name. Not caught -- forgeries, not faults: a ledger cut
+together with its logs, an edited count, and a hand-inserted `phase` line.
 
 **Ends.** The exit is the wrapped command's own; `CAP_EXIT` (4) when the cap stopped a request --
 read from the ledger's `end` event when the call then ended on another exception, which
@@ -129,6 +132,7 @@ SMOKE_SCRIPTS: Final[tuple[str, ...]] = (
 """The smoke's own scripts, no bound path of any registration: `prepare` refuses a checkout in
 which one of them is not what `HEAD` holds, since the clone holds `HEAD`'s."""
 _LOG: Final[re.Pattern[str]] = re.compile(r"(\d+)-[a-z-]+\.(?:out|err)")
+_REFUSED_LEDGER: Final[str] = "ledger        refused: "
 
 
 class SmokeDriverError(ValueError):
@@ -422,6 +426,24 @@ def ledger_problem(events: Sequence[Mapping[str, Any]], *, logs: Path) -> str | 
             )
         if number in ends:
             counted += int(ends[number]["count"])
+    kinds = {int(start["id"]): str(start["kind"]) for start in starts}
+    for index, end in enumerate(events):
+        if end["event"] != "end" or (end.get("reached") is None and end.get("fault") is None):
+            continue
+        number = int(end["id"])
+        rule = RULES.get(kinds.get(number, ""))
+        if rule is None or not rule.discard_on_cap:
+            continue
+        before = events[index - 1] if index else {}
+        if before.get("event") != "discarded" or not str(before.get("reason")).startswith(
+            f"invocation {number} ("
+        ):
+            cause = "the cap" if end.get("reached") is not None else f"a {end.get('fault')}"
+            return (
+                f"invocation {number} ({kinds[number]}) wrote the panel and ended on {cause}, and "
+                "the `discarded` line `run_capped` writes just before that end is not there: it "
+                "was taken out, and this root was discarded"
+            )
     logged = _logged(logs)
     if logged and logged[-1] > len(starts):
         return (
@@ -429,6 +451,23 @@ def ledger_problem(events: Sequence[Mapping[str, Any]], *, logs: Path) -> str | 
             f"{len(starts)}: it was cut back, and what it says was spent is too little"
         )
     return None
+
+
+@contextlib.contextmanager
+def _readable(path: Path) -> Iterator[None]:
+    """A ledger event the driver cannot read -- a field missing, a phase with no cap -- refuses
+    the root by name rather than escaping as a bare `KeyError`. The ledger is written by
+    `p7_smoke_requests` and this driver alone."""
+    try:
+        yield
+    except (budget.SmokeBudgetError, env.SmokeEnvironmentError, SmokeDriverError):
+        raise
+    except (KeyError, TypeError, ValueError) as error:
+        raise SmokeDriverError(
+            f"the request ledger {path} holds an event this driver cannot read "
+            f"({type(error).__name__}: {error}); it is written by the driver alone, so this root "
+            "is refused -- prepare a new one"
+        ) from error
 
 
 def _refuse_a_broken_ledger(manifest: env.SmokeManifest, ledger: budget.RequestLedger) -> None:
@@ -572,9 +611,10 @@ def run(
     with _driver_lock(manifest.root):
         current = _reread(manifest)
         ledger = budget.RequestLedger(current.ledger_path)
-        spent = ledger.spent()
-        _refuse_a_broken_ledger(current, ledger)
-        cap = current.caps[spent.phase]
+        with _readable(ledger.path):
+            spent = ledger.spent()
+            _refuse_a_broken_ledger(current, ledger)
+            cap = current.caps[spent.phase]
         if kind in OPENALPHA_KINDS:
             # The day, the morning and the weekly report admit their own code; `openalpha` here
             # runs whatever this process imported.
@@ -633,7 +673,13 @@ def _shanghai(at: object) -> str:
 
 def status_lines(manifest: env.SmokeManifest) -> list[str]:
     """The root's state, read from its ledger without the lock: an invocation that is running
-    shows as unclosed."""
+    shows as unclosed. A ledger that is not the whole record of the root shows a
+    `ledger        refused: ...` line, and `status` then exits `REFUSED_EXIT`."""
+    with _readable(manifest.ledger_path):
+        return _status_lines(manifest)
+
+
+def _status_lines(manifest: env.SmokeManifest) -> list[str]:
     ledger = budget.RequestLedger(manifest.ledger_path)
     events = ledger.events()
     spent = ledger.spent()
@@ -656,7 +702,7 @@ def status_lines(manifest: env.SmokeManifest) -> list[str]:
         )
     problem = ledger_problem(events, logs=manifest.logs)
     if problem is not None:
-        lines.append(f"ledger        refused: {problem}")
+        lines.append(f"{_REFUSED_LEDGER}{problem}")
     ends = {int(event["id"]): event for event in events if event["event"] == "end"}
     by_api: Counter[str] = Counter()
     for event in events:
@@ -688,8 +734,9 @@ def _phase(manifest: env.SmokeManifest, *, reason: str, clock: Callable[[], date
     with _driver_lock(manifest.root):
         current = _reread(manifest)
         ledger = budget.RequestLedger(current.ledger_path)
-        spent = ledger.spent()
-        _refuse_a_broken_ledger(current, ledger)
+        with _readable(ledger.path):
+            spent = ledger.spent()
+            _refuse_a_broken_ledger(current, ledger)
         if spent.phase != 1:
             raise SmokeDriverError(
                 f"this smoke is in phase {spent.phase} already: phase 1 to 2 is the one change, "
@@ -869,8 +916,10 @@ def _dispatch(arguments: argparse.Namespace, *, clock: Callable[[], datetime]) -
         return _prepare(arguments, clock=clock)
     manifest = env.SmokeManifest.read(_root_of(arguments.smoke_root))
     if arguments.command == "status":
-        print("\n".join(status_lines(manifest)))
-        return 0
+        lines = status_lines(manifest)
+        print("\n".join(lines))
+        refused = any(line.startswith(_REFUSED_LEDGER) for line in lines)
+        return REFUSED_EXIT if refused else 0
     if arguments.command == "phase":
         return _phase(manifest, reason=arguments.reason, clock=clock)
     if arguments.command == "remedy":
