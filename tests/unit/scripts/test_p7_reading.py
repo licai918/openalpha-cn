@@ -548,6 +548,114 @@ def test_the_second_use_window_is_claimed_once_too(repo: Path) -> None:
     assert measure.calls == [] and window_claim_of(repo, "second_use").exists()
 
 
+# --- every claim naming the window witnesses its one read (fix round 2, finding 1) ---------------
+
+
+def first_read_then_its_own_files_committed(repo: Path) -> Path:
+    """The first reading read, its claim and results committed (`v2-p7-024-validation.*`), and
+    the differently named window claim never committed and then gone -- a `git clean`, another
+    worktree, a fresh clone."""
+    first = registered(repo)
+    run(first, repo, Measure())
+    for name in ("claim.json", "result.json", "result.txt"):
+        commit_file(
+            repo,
+            first.with_name(f"v2-p7-024-validation.{name}"),
+            f"commit {name}",
+            at=COMMITTED + timedelta(hours=2),
+        )
+    window_claim_of(repo).unlink()
+    return first
+
+
+def test_a_committed_reading_claim_naming_the_window_refuses_another_reading(repo: Path) -> None:
+    """The re-reviewer's probe A: the window claim is gone, the first reading's claim -- which
+    names the window -- is in the tree; a second registration of the window measures nothing."""
+    first_read_then_its_own_files_committed(repo)
+    second = registered(repo, reading="v2-p7-024-validation-again")
+    measure = Measure()
+
+    with pytest.raises(p7_reading.ReadingAlreadyClaimedError, match="names the validation window"):
+        run(second, repo, measure, hours=4)
+    assert measure.calls == [] and not claim_of(second).exists()
+    assert not window_claim_of(repo).exists()
+
+
+def test_a_reading_claim_naming_the_window_committed_and_then_deleted_still_refuses(
+    repo: Path,
+) -> None:
+    first = first_read_then_its_own_files_committed(repo)
+    for name in ("claim.json", "result.json", "result.txt"):
+        git(
+            repo,
+            "rm",
+            "-q",
+            first.with_name(f"v2-p7-024-validation.{name}").relative_to(repo).as_posix(),
+        )
+    git(repo, "commit", "-q", "-m", "drop the first reading", at=COMMITTED + timedelta(hours=3))
+    second = registered(repo, reading="v2-p7-024-validation-again")
+    measure = Measure()
+
+    with pytest.raises(
+        p7_reading.ReadingAlreadyClaimedError,
+        match="a claim naming the validation window was committed",
+    ):
+        run(second, repo, measure, hours=4)
+    assert measure.calls == []
+
+
+@pytest.mark.parametrize("committed", [False, True])
+def test_a_claim_file_that_cannot_be_read_refuses_the_read(repo: Path, committed: bool) -> None:
+    """It might name this window: the window rule fails closed, on disk and in history."""
+    stray = repo / "docs" / "research" / "p7-readings" / "stray.claim.json"
+    stray.parent.mkdir(parents=True, exist_ok=True)
+    stray.write_text("not a claim\n", encoding="utf-8")
+    if committed:
+        commit_file(repo, stray, "a stray claim", at=COMMITTED - timedelta(hours=1))
+        git(repo, "rm", "-q", stray.relative_to(repo).as_posix())
+        git(repo, "commit", "-q", "-m", "drop it", at=COMMITTED - timedelta(minutes=30))
+    registration = registered(repo)
+    measure = Measure()
+
+    with pytest.raises(p7_reading.ReadingAlreadyClaimedError, match="cannot be read as a claim"):
+        run(registration, repo, measure)
+    assert measure.calls == [] and not claim_of(registration).exists()
+
+
+def test_a_claim_of_another_window_does_not_spend_this_one(repo: Path) -> None:
+    secondary = (
+        repo / "docs" / "research" / "p7-readings" / "v2-p7-024-second-use.registration.json"
+    )
+    register(
+        secondary,
+        reading="v2-p7-024-second-use",
+        role="secondary",
+        window="second_use",
+        request=SECOND_USE_REQUEST,
+        stop_rule=None,
+        code_commit=head(repo),
+    )
+    commit_file(repo, secondary, "register the secondary reading", at=COMMITTED)
+    run(secondary, repo, Measure())
+    for path in (claim_of(secondary), window_claim_of(repo, "second_use")):
+        commit_file(repo, path, f"commit {path.name}", at=COMMITTED + timedelta(minutes=30))
+    measure = Measure()
+
+    run(registered(repo), repo, measure, hours=2)
+
+    assert measure.calls == [("validation", True)]
+
+
+def test_the_result_text_says_the_claims_must_be_committed(repo: Path) -> None:
+    registration = registered(repo)
+    run(registration, repo, Measure())
+    text = registration.with_name("v2-p7-024-validation.result.txt").read_text(encoding="utf-8")
+    assert (
+        "commit v2-p7-024-validation.claim.json and validation.window-claim.json, and keep that "
+        "commit in this repository's refs"
+    ) in text
+
+
 # --- the claim follows the filed registration, not the path handed in (ruling 2) ----------------
 
 

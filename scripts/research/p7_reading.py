@@ -41,10 +41,14 @@ a failure after the claim spends the window:
 4. `ReadingAlreadyClaimedError` -- the reading's claim, the **window's** claim
    (`<window>.window-claim.json` in `READING_DIRECTORY`) or one of the reading's results is on
    disk, or was ever committed on any ref (`git log --all`): a read that was claimed is the one
-   read, whether it finished, crashed or had its files deleted afterwards. The window's claim is
-   what makes it one read **per window**, whatever reading names it -- `registry._holdout_allowed`
-   refuses any holdout row the same way, whatever registration wrote it. The rule holds for every
-   window a reading opens, `validation` and `second_use` alike.
+   read, whether it finished, crashed or had its files deleted afterwards. It is one read **per
+   window**, whatever reading names it: every claim file in `READING_DIRECTORY` -- a reading's
+   `<reading>.claim.json` or a `<window>.window-claim.json` -- records its window, and each one
+   that names this window refuses, whether it is on disk now or any version of it was ever
+   committed there on any ref; a claim file that cannot be read, and any git error, refuses
+   too. `registry._holdout_allowed` refuses any holdout row the same way, whatever registration
+   wrote it. The rule holds for every window a reading opens, `validation` and `second_use`
+   alike.
 5. `ReadingPreflightError` -- the panel catalogue lacks a year of the window, or the year before
    it (the calendar and the label reader read that one too), in a dataset the read opens
    (`preflight_problems`; it asks `registered_years` and reads no partition).
@@ -69,19 +73,21 @@ read is spent:
    read is closed;
 8. `<reading>.result.json` and `<reading>.result.txt` are written with `O_EXCL`.
 
-Committing the claim and the results is the caller's step, as committing the registration was.
+Committing the claims and the results is the caller's step, as committing the registration was,
+and the result's text says so.
 
 What this does not establish:
 
 * A commit time is what the committer's clock (or `GIT_COMMITTER_DATE`) said, and `claimed_at` is
   what this machine's clock said. Pushing the registration commit to a remote someone else holds,
   before the read, is what makes its time witnessed; this module pushes nothing.
-* The claims are not in git until the caller commits them. Deleting claims that were never
-  committed gives the read back, and so does another worktree or clone of the repository, which
-  does not hold them: until they are committed (and, for another clone, fetched), the checkout
-  that read is the only witness. A claim committed once is found by step 4 after it is deleted --
-  but not after a history rewrite leaves it on no ref (a reset, a rebase or a filter, then a
-  garbage collection).
+* The window rule is witnessed by the claim files naming the window and by nothing else. They
+  are not in git until the caller commits them: deleting claims that were never committed gives
+  the read back, and so does another worktree or clone of the repository, which does not hold
+  them. **The claims must be committed, and the commit kept in this repository's refs (and, for
+  another clone, fetched there), for the rule to survive another clone or worktree.** A claim
+  committed once is found by step 4 after it is deleted -- but not after a history rewrite leaves
+  it on no ref (a reset, a rebase or a filter, then a garbage collection).
 * It binds a procedure, not access to the data. Code that builds a `WindowCappedStore` for the
   validation window itself, calls `read_once` with a `measure` of its own, calls the default
   measure directly (`_panel_measure(runtime_dir)(body, VALIDATION, binding)` -- the tests do, on
@@ -348,9 +354,9 @@ def register_reading(
     request does not measure or whose `minimum_periods` the window cannot reach, a request that is
     not the whole window or whose loser count is not the book's, a request or a configuration the
     diagnostics cannot run, and a code commit that is not a full, clean commit id. Writing the
-    same registration again returns the
-    same digest; a different one at an existing path is refused. Committing it is the caller's
-    step. Pass `code_commit` resolved once, before writing (`registry.register`'s reason).
+    same registration again returns the same digest; a different one at an existing path is
+    refused. Committing it is the caller's step. Pass `code_commit` resolved once, before writing
+    (`registry.register`'s reason).
     """
     try:
         request_form = grid.to_json_value(dict(request))
@@ -1080,6 +1086,101 @@ def _refuse_a_second_read(
                 f"{what} was committed at {commits[-1]} ({relative}); deleting the file does not "
                 f"give the read back -- {spent} had its one read"
             )
+    _refuse_any_claim_of_the_window(root, window)
+
+
+def _is_claim_file(name: str) -> bool:
+    """A reading's claim (`<reading>.claim.json`) or a window's (`<window>.window-claim.json`)."""
+    return name.endswith(".claim.json") or name.endswith(WINDOW_CLAIM_SUFFIX)
+
+
+def _refuse_any_claim_of_the_window(root: Path, window: DiagnosticWindow) -> None:
+    """Refuse when any claim file in `READING_DIRECTORY` names `window` -- on disk now, or in any
+    version ever added to or changed in that directory on any ref -- whatever reading wrote it.
+
+    Every claim records its window, so each one witnesses the window's read; the window claim is
+    one witness among them, not the only one. A claim file that cannot be read, and any git
+    error, refuses: either might hide a claim of this window.
+    """
+    directory = root / READING_DIRECTORY
+    on_disk = (
+        sorted(path for path in directory.iterdir() if _is_claim_file(path.name))
+        if directory.is_dir()
+        else []
+    )
+    for path in on_disk:
+        relative = path.relative_to(root).as_posix()
+        try:
+            content = path.read_bytes()
+        except OSError as error:
+            raise ReadingAlreadyClaimedError(
+                f"{relative} cannot be read as a claim ({error}); a claim that cannot be read "
+                "might name this window, so the read is refused"
+            ) from error
+        if _window_named(content, where=relative) == window.name:
+            raise ReadingAlreadyClaimedError(
+                f"{relative} names the {window.name} window: a claim of it is on disk, so the "
+                "window had its one read, whatever reading names it"
+            )
+    log = registry._git(
+        root,
+        "log",
+        "--all",
+        "--format=%H",
+        "--name-only",
+        "--diff-filter=AM",
+        "--",
+        READING_DIRECTORY.as_posix(),
+    )
+    if log.returncode != 0:
+        raise ReadingAlreadyClaimedError(
+            f"git log cannot list the claims ever committed in {READING_DIRECTORY.as_posix()} "
+            f"({log.stderr.decode(errors='replace').strip()}); a read that cannot be shown to be "
+            "the window's first is refused"
+        )
+    commit: str | None = None
+    for line in log.stdout.decode().splitlines():
+        if registry._FULL_COMMIT.fullmatch(line):
+            commit = line
+            continue
+        if not line or not _is_claim_file(line.rpartition("/")[2]):
+            continue
+        if commit is None:
+            raise ReadingAlreadyClaimedError(
+                f"git log listed {line} under no commit; a claim that cannot be placed might name "
+                "this window, so the read is refused"
+            )
+        shown = registry._git(root, "show", f"{commit}:{line}")
+        if shown.returncode != 0:
+            raise ReadingAlreadyClaimedError(
+                f"git cannot show {line} as committed at {commit} "
+                f"({shown.stderr.decode(errors='replace').strip()}); a claim that cannot be read "
+                "might name this window, so the read is refused"
+            )
+        if _window_named(shown.stdout, where=f"{line} at {commit}") == window.name:
+            raise ReadingAlreadyClaimedError(
+                f"a claim naming the {window.name} window was committed at {commit} ({line}); "
+                "deleting it does not give the window's read back -- it had its one read"
+            )
+
+
+def _window_named(content: bytes, *, where: str) -> str:
+    """The window a claim file names, or `ReadingAlreadyClaimedError` when it cannot be read as a
+    claim (fail closed: an unreadable claim might name the window being asked for)."""
+    try:
+        claim = json.loads(content)
+    except ValueError as error:
+        raise ReadingAlreadyClaimedError(
+            f"{where} cannot be read as a claim ({error}); a claim that cannot be read might name "
+            "this window, so the read is refused"
+        ) from error
+    window = claim.get("window") if isinstance(claim, dict) else None
+    if not isinstance(window, str):
+        raise ReadingAlreadyClaimedError(
+            f"{where} cannot be read as a claim: it names no window; a claim that cannot be read "
+            "might name this window, so the read is refused"
+        )
+    return window
 
 
 def _claimed_by(window_claim: Path) -> str | None:
@@ -1132,6 +1233,10 @@ def reading_lines(result: Mapping[str, Any], body: Mapping[str, Any]) -> list[st
         f"CONFIRMATORY EVIDENCE: {window.name} window {window.first.isoformat()}.."
         f"{window.last.isoformat()}",
         f"  the {body['role']} reading registered for {body['issue']}",
+        f"  this window's one read is witnessed by every claim file naming it in "
+        f"{READING_DIRECTORY.as_posix()}: commit {body['reading']}.claim.json and "
+        f"{window.name}{WINDOW_CLAIM_SUFFIX}, and keep that commit in this repository's refs, or "
+        "another clone or worktree can read the window again",
     ]
     if "plan" not in result:
         binding = result["binding"]
