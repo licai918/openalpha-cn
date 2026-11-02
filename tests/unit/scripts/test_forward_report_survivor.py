@@ -615,8 +615,8 @@ def first_session_evening(
     The market keeps its 4 January delisting, so 2027 has a registry (`stock_basic`) lifecycle
     partition: step 4 of the evening and the report's label read both need one, and the
     registry's own New Year gap -- a year with no listing or delisting yet has no partition -- is
-    not closed by `V2-P7-021` (plan B, U3). Without the delisting this evening stops at step 4,
-    `partition_missing`."""
+    not closed by `V2-P7-021` (it is `V2-P7-025`). Without the delisting this evening stops at
+    step 4, `partition_missing`."""
     root = tmp_path_factory.mktemp("survivor-new-year-records")
     repo, registration = _repository(
         root, survivor_day.survivor_config(epoch=date(2026, 12, 31)), settings=settings_with()

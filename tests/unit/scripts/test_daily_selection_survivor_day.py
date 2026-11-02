@@ -1749,7 +1749,7 @@ class EmptyNewYear(NewYearMarket):
     """The New Year market before 2027's first rename (`V2-P7-021`): the endpoint serves no 2027
     row until a rename in `renames` is published. `renames` are `(code, name, announced,
     effective, published)`. The registry's 4 January delisting stays, so 2027 has a lifecycle
-    partition -- the registry's own New Year gap is another issue (plan U3)."""
+    partition -- the registry's own New Year gap is another issue (`V2-P7-025`)."""
 
     renames: tuple[tuple[str, str, date, date, date], ...] = ()
 

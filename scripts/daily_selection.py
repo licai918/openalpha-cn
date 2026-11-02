@@ -107,11 +107,11 @@ Before `V2-P7-021` such a session was lost: the journal pins the day's `--as-of`
 asked the same empty window. P6's `--full-update` (`FULL_UPDATE_TARGETS`) takes the same
 `panel build`; its `namechange` build is no longer refused in early January.
 
-The registry has the same gap for its own lifecycle year, which `V2-P7-021` does not close (U3 of
-`docs/superpowers/plans/2026-11-01-p7-dev-batch-1-B-new-year-and-009.md`; proposed `V2-P7-025`):
-a year with no listing or delisting yet has no `stock_basic` partition, step 4 refuses it
-(`partition_missing`), and a retry meets the same refusal. The year's first session completes
-only when the registry already holds an event of that year.
+The registry has the same gap for its own lifecycle year, which `V2-P7-021` does not close
+(`V2-P7-025`, a hard gate before 2027-01-04): a year with no listing or delisting yet has no
+`stock_basic` partition, step 4 refuses it (`partition_missing`), a retry meets the same refusal,
+and the weekly report's label read is refused as well. The year's first session completes only
+when the registry already holds an event of that year.
 
 ## The registration's kind (`V2-P7-008`)
 
