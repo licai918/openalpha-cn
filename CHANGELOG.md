@@ -18,7 +18,8 @@ admitting this code; none is in use while the daily registration is paused. Thre
 registration binds carry the rest: `scripts/p7_smoke_requests.py` (a counter that refuses the request
 that would pass an invocation's allowance, put on the daily command's own `counted_transport` seam,
 and an append-only request ledger), `scripts/p7_smoke_env.py` (the one-off root: a local clone with no
-remote that holds the smoke registration, an APFS clone of the real panel, a pinned worktree with its
+remote that holds the smoke registration, an APFS clone of the real panel -- P6's runtime directory is
+only read, cloned once with a stat and SHA-256 check, never written -- a pinned worktree with its
 own `.venv` and the main checkout's `.env` linked) and `scripts/p7_smoke.py` (the driver: `prepare`,
 `evening`, `morning`, `weekly`, `remedy`, `status` and `phase`, every spending call under the cap and
 recorded, a printed remedy run only through `remedy`, which refuses the whole-year rebuild, another
