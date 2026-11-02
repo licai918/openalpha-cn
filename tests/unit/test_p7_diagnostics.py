@@ -63,8 +63,8 @@ from openalpha_cn.domain.trading_calendar import (
     TradingCalendar,
     build_trading_calendar,
 )
-from openalpha_cn.model_view import ModelRunBlockedError
-from openalpha_cn.panel.store import PanelStorageError, PanelStore
+from openalpha_cn.model_view import ModelPanelUnreadableError, ModelRunBlockedError
+from openalpha_cn.panel.store import ColumnSpec, PanelStorageError, PanelStore
 from openalpha_cn.strategy_survivor_facts import SurvivorFactsError
 from openalpha_cn.strategy_survivor_forward import record_outcome
 
@@ -334,6 +334,134 @@ def test_a_label_refusal_is_a_gap_of_its_own_horizon_only() -> None:
     ] * len(read.plan.sessions)
 
 
+SECOND: Final = "second_score/v1"
+
+
+class TwoScores(FixedScores):
+    """`ranked()`'s composite, and a second score that is the same except on `on`, where it is
+    `second`."""
+
+    def __init__(self, second: tuple[tuple[str, float], ...], *, on: date) -> None:
+        super().__init__({code: float(p) for p, code in enumerate(CODES)})
+        self.second = second
+        self.on = on
+
+    def scores_on(self, session: date) -> Mapping[str, tuple[tuple[str, float], ...]]:
+        scored = super().scores_on(session)
+        return {**scored, SECOND: self.second if session == self.on else scored[p7.COMPOSITE]}
+
+
+NAN_FIRST: Final[tuple[tuple[str, float], ...]] = tuple(
+    (code, math.nan if p == 0 else float(p)) for p, code in enumerate(CODES)
+)
+
+
+def test_an_empty_scope_or_a_non_finite_score_is_a_named_gap_of_that_day() -> None:
+    """An empty scope, or a score that is not a number, does not abort the run: that score's
+    readings of that day are gaps, at every horizon, and everything else is read."""
+    read = request(last=date(2026, 3, 31), horizons=(5, 20))
+    sessions = read.plan.sessions
+
+    emptied = p7.run_diagnostics(
+        read, scores=FixedScores({}), labels_for=lambda year: TableLabels(tail_answer)
+    )
+    assert {item.refusal for item in emptied} == {"empty_scope: the score source scored no name"}
+    assert len(emptied) == 2 * len(sessions)
+
+    nan = p7.run_diagnostics(
+        read,
+        scores=FixedScores(dict(NAN_FIRST)),
+        labels_for=lambda year: TableLabels(tail_answer),
+    )
+    assert {item.refusal for item in nan} == {
+        "non_finite_score: the score of ['600000.SH'] is not finite"
+    }
+
+    both = dataclasses.replace(read, scores=(p7.COMPOSITE, SECOND))
+    for second, reason in (
+        ((), "empty_scope: the score source scored no name"),
+        (NAN_FIRST, "non_finite_score: the score of ['600000.SH'] is not finite"),
+    ):
+        readings = p7.run_diagnostics(
+            both,
+            scores=TwoScores(second, on=sessions[1]),
+            labels_for=lambda year: TableLabels(tail_answer),
+        )
+        refused = [(item.session, item.score, item.horizon) for item in readings if item.refusal]
+        assert refused == [(sessions[1], SECOND, 5), (sessions[1], SECOND, 20)]
+        assert {item.refusal for item in readings if item.refusal} == {reason}
+        assert all(item.readout is not None for item in readings if item.refusal is None)
+
+
+def test_the_gaps_and_unlabelled_counts_are_the_sampled_days_and_the_line_says_so() -> None:
+    """At stride 5 and h=20 every fourth signal day is sampled. A gap and an unlabelled name on a
+    day between two sampled ones are in `days` and never in the summary's counts."""
+    read = request(stride=5, horizons=(20,), last=date(2026, 4, 30))
+    sessions = read.plan.sessions
+    unsampled, sampled = sessions[2], sessions[8]
+    entries = {CALENDAR.next_trading_day(day): day for day in (unsampled, sampled)}
+
+    def answer(entry: date, code: str) -> float | None:
+        return None if entry in entries and code == CODES[5] else tail_answer(entry, code)
+
+    readings = p7.run_diagnostics(
+        read,
+        scores=FixedScores(
+            {code: float(p) for p, code in enumerate(CODES)},
+            refuse_on=frozenset({sessions[1], sessions[4]}),
+        ),
+        labels_for=lambda year: TableLabels(answer),
+    )
+    document = p7.diagnostic_document(
+        read, readings, config=FIXED_CONFIG, code_commit="0" * 40, partitions_read=()
+    )
+    block = document["summary"][p7.COMPOSITE]["h20"]
+
+    assert sessions[2] not in sessions[::4] and sessions[8] in sessions[::4]
+    assert block["gaps"] == [
+        {
+            "session": sessions[4].isoformat(),
+            "reason": f"SurvivorFactsError: no 16:30 build on {sessions[4].isoformat()}",
+        }
+    ]
+    assert block["unlabelled_by_code"] == {"no_adjustment_history": 1}
+    assert sum(1 for day in document["days"] if day["refusal"]) == 2
+    header = next(line for line in p7.diagnostic_lines(document) if line.startswith("composite"))
+    assert "gap and unlabelled counts cover the sampled days only" in header
+
+
+def test_a_gap_reason_names_no_local_store_path(tmp_path: Path) -> None:
+    """A label reader that cannot read its calendar refuses with the store's root in its message
+    and a `disclosable` form without it; the document carries the second, so its bytes do not
+    depend on where the panel was cloned."""
+    root = tmp_path / "clone-zqx7-elsewhere" / "panel"
+    PanelStore(root).write_partition("probe", 2026, (ColumnSpec("subject", "VARCHAR"),), [("x",)])
+    capped = p7_windows.WindowCappedStore(root, window=FIXTURE_WINDOW)
+
+    def labels_for(year: int) -> Any:
+        return p7.panel_label_source(
+            capped, years=(year,), exchange=EXCHANGE, as_of=AS_OF, cached_sessions=22
+        )
+
+    with pytest.raises(ModelPanelUnreadableError) as raised:
+        labels_for(2026)
+    assert "clone-zqx7-elsewhere" in str(raised.value)
+
+    read = request(last=date(2026, 3, 31))
+    document = p7.diagnostic_document(
+        read,
+        p7.run_diagnostics(read, scores=ranked(), labels_for=labels_for),
+        config=FIXED_CONFIG,
+        code_commit="0" * 40,
+        partitions_read=(),
+    )
+    reasons = {gap["reason"] for gap in document["summary"][p7.COMPOSITE]["h20"]["gaps"]}
+    assert reasons == {f"ModelPanelUnreadableError: {raised.value.disclosable}"}
+    text = json.dumps(document, ensure_ascii=False) + "\n".join(p7.diagnostic_lines(document))
+    assert "clone-zqx7-elsewhere" not in text
+    assert str(tmp_path) not in text
+
+
 def test_a_window_refusal_is_never_turned_into_a_gap() -> None:
     class Leaking(FixedScores):
         def scores_on(self, session: date) -> Mapping[str, tuple[tuple[str, float], ...]]:
@@ -346,22 +474,40 @@ def test_a_window_refusal_is_never_turned_into_a_gap() -> None:
     assert not issubclass(p7_windows.DiagnosticWindowError, p7.DAY_REFUSALS)
 
 
-def test_a_refusal_raised_from_a_window_refusal_is_never_turned_into_a_gap() -> None:
+BREACH: Final = "daily [2022] is past the research window"
+
+
+class Wrapping(FixedScores):
     """A loader that wraps whatever a door raised (`AssessedPanelRead._read_held` turns any
-    exception into `PanelStorageError`) must not launder a window refusal into a gap."""
+    exception into `PanelStorageError`): from the window refusal itself, or -- `unrelated` --
+    from some other error while the window refusal was being handled."""
 
-    class Wrapping(FixedScores):
-        def scores_on(self, session: date) -> Mapping[str, tuple[tuple[str, float], ...]]:
-            try:
-                raise p7_windows.DiagnosticWindowError("daily [2022] is past the research window")
-            except p7_windows.DiagnosticWindowError as error:
-                raise PanelStorageError("daily year=2022 could not be read") from error
+    def __init__(self, *, unrelated: bool) -> None:
+        super().__init__({})
+        self.unrelated = unrelated
+        self.breach = p7_windows.DiagnosticWindowError(BREACH)
 
-    with pytest.raises(PanelStorageError) as raised:
+    def scores_on(self, session: date) -> Mapping[str, tuple[tuple[str, float], ...]]:
+        try:
+            raise self.breach
+        except p7_windows.DiagnosticWindowError as error:
+            cause = KeyError("unrelated") if self.unrelated else error
+            raise PanelStorageError("daily year=2022 could not be read") from cause
+
+
+@pytest.mark.parametrize("unrelated", [False, True], ids=["from_it", "while_handling_it"])
+def test_a_refusal_raised_around_a_window_refusal_is_never_turned_into_a_gap(
+    unrelated: bool,
+) -> None:
+    """The window refusal itself propagates, not the wrapper: found through `__cause__` and
+    through `__context__` alike, so the walk fails closed."""
+    scores = Wrapping(unrelated=unrelated)
+
+    with pytest.raises(p7_windows.DiagnosticWindowError) as raised:
         p7.run_diagnostics(
-            request(), scores=Wrapping({}), labels_for=lambda year: TableLabels(tail_answer)
+            request(), scores=scores, labels_for=lambda year: TableLabels(tail_answer)
         )
-    assert isinstance(raised.value.__cause__, p7_windows.DiagnosticWindowError)
+    assert raised.value is scores.breach
 
 
 def test_a_label_window_past_the_window_is_refused_before_any_label_is_asked() -> None:
@@ -383,6 +529,73 @@ def test_a_label_window_past_the_window_is_refused_before_any_label_is_asked() -
     labels = TableLabels(tail_answer)
 
     with pytest.raises(p7_windows.DiagnosticWindowError, match="2026-02-27"):
+        p7.run_diagnostics(
+            dataclasses.replace(request(), plan=forged),
+            scores=ranked(),
+            labels_for=lambda year: labels,
+        )
+    assert labels.asked == []
+
+
+def test_a_label_past_a_calendar_that_ends_on_the_windows_last_day_is_refused_too() -> None:
+    """The real shape: a reader capped at the window's last year stops on the window's last day
+    (2021-12-31 for the research window, 2023-12-29 for validation), so a label exiting after it
+    cannot even be placed on the reader's calendar. That is a window refusal raised before any
+    label is asked -- never the calendar's `CalendarHorizonError` filed as a gap."""
+    last = CALENDAR.trading_days[-1]
+    ending = p7_windows.DiagnosticWindow(
+        name="fixture", first=date(2026, 1, 5), last=last, ceiling_year=last.year
+    )
+    day = CALENDAR.trading_days[-3]
+    forged = p7_windows.SignalPlan(
+        window=ending,
+        first=day,
+        last=day,
+        stride=1,
+        horizons=(20,),
+        sessions=(day,),
+        embargoed=(),
+    )
+    labels = TableLabels(tail_answer)
+
+    assert last == date(2026, 12, 31)
+    with pytest.raises(p7_windows.DiagnosticWindowError, match="2026-12-31"):
+        p7.run_diagnostics(
+            dataclasses.replace(request(), plan=forged),
+            scores=ranked(),
+            labels_for=lambda year: labels,
+        )
+    assert labels.asked == []
+
+
+def test_a_reader_whose_own_window_ends_past_the_window_is_refused_too() -> None:
+    """The reader's own window is checked as well as the calendar's rule: a reader whose window
+    runs one session longer than its calendar says (here, by construction) is refused before a
+    label is asked, though the calendar's exit is the window's last day itself."""
+
+    class LateLabels(TableLabels):
+        def window(self, instant: datetime, *, horizon: ResearchHorizon) -> LabelWindow:
+            longer = ResearchHorizon(count=horizon.count + 1, unit=horizon.unit)
+            return super().window(instant, horizon=longer)
+
+    day = date(2026, 1, 26)
+    last = p7_windows.label_exit_day(CALENDAR, day, 20)
+    assert last is not None
+    ending = p7_windows.DiagnosticWindow(
+        name="fixture", first=date(2026, 1, 5), last=last, ceiling_year=2026
+    )
+    forged = p7_windows.SignalPlan(
+        window=ending,
+        first=day,
+        last=day,
+        stride=1,
+        horizons=(20,),
+        sessions=(day,),
+        embargoed=(),
+    )
+    labels = LateLabels(tail_answer)
+
+    with pytest.raises(p7_windows.DiagnosticWindowError, match=f"last day {last.isoformat()}"):
         p7.run_diagnostics(
             dataclasses.replace(request(), plan=forged),
             scores=ranked(),
@@ -753,26 +966,30 @@ def weekday_calendar(first: date, last: date) -> TradingCalendar:
     )
 
 
-def test_explore_writes_once_and_a_rerun_is_a_no_op(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    calendar = weekday_calendar(date(2016, 12, 1), date(2017, 12, 29))
+STUB_CALENDAR: Final[TradingCalendar] = weekday_calendar(date(2016, 12, 1), date(2017, 12, 29))
+
+
+def stub_sources(monkeypatch: pytest.MonkeyPatch, scores: Any = None) -> list[Mapping[str, Any]]:
+    """`p7._open_sources` replaced by generated 2017 sources; returns the calls it was given."""
     opened: list[Mapping[str, Any]] = []
 
     def sources(*args: object, **kwargs: Any) -> tuple[Any, ...]:
         opened.append(kwargs)
         return (
-            calendar,
-            ranked(),
+            STUB_CALENDAR,
+            ranked() if scores is None else scores,
             lambda year: TableLabels(
-                lambda entry, code: TAIL.get(CODES.index(code), 0.01), calendar=calendar
+                lambda entry, code: TAIL.get(CODES.index(code), 0.01), calendar=STUB_CALENDAR
             ),
             SimpleNamespace(partitions_read=lambda: ()),
         )
 
     monkeypatch.setattr(p7, "_open_sources", sources)
-    out = tmp_path / "out"
-    argv = [
+    return opened
+
+
+def explore_2017(tmp_path: Path, *extra: str) -> list[str]:
+    return [
         *EXPLORE,
         "--runtime-dir",
         str(tmp_path),
@@ -781,11 +998,21 @@ def test_explore_writes_once_and_a_rerun_is_a_no_op(
         "--last",
         "2017-06-30",
         "--out",
-        str(out),
+        str(tmp_path / "out"),
+        *extra,
     ]
+
+
+def test_explore_writes_once_and_a_rerun_is_a_no_op(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    opened = stub_sources(monkeypatch)
+    out = tmp_path / "out"
+    argv = explore_2017(tmp_path)
 
     assert p7.main(argv) == 0
     assert opened[0]["window"] is p7_windows.RESEARCH
+    first_run = capsys.readouterr().out
     (json_path,) = out.glob("p7-diagnostic-research-*.json")
     document = json.loads(json_path.read_text(encoding="utf-8"))
     stem = f"p7-diagnostic-research-{document['provenance']['config_digest'][:16]}"
@@ -797,15 +1024,62 @@ def test_explore_writes_once_and_a_rerun_is_a_no_op(
     written = {
         path: (path.read_bytes(), path.stat().st_mtime_ns) for path in (json_path, text_path)
     }
+    assert f"written: {json_path}" in first_run.splitlines()
+    assert f"written: {text_path}" in first_run.splitlines()
 
     assert p7.main(argv) == 0
     assert {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in written} == written
-    capsys.readouterr()
+    second_run = capsys.readouterr().out.splitlines()
+    assert not any(line.startswith("written:") for line in second_run)
+    assert f"unchanged, nothing written: {json_path}" in second_run
+    assert f"unchanged, nothing written: {text_path}" in second_run
 
     json_path.write_bytes(json_path.read_bytes() + b" ")
     assert p7.main(argv) != 0
     assert "already holds a different document" in capsys.readouterr().err
     assert text_path.read_bytes() == written[text_path][0]
+
+
+def test_explore_refuses_a_repeated_score_before_opening_anything(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    opened = stub_sources(monkeypatch)
+
+    assert p7.main(explore_2017(tmp_path, "--scores", "composite,composite")) == 2
+    assert "composite" in capsys.readouterr().err
+    assert opened == []
+    assert not (tmp_path / "out").exists()
+
+
+def test_explore_refuses_a_request_its_sources_cannot_answer_with_exit_2(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The default book's first factor is a valid `--scores` name, and the stub scores only the
+    composite: the engine's `DiagnosticRequestError`, met after the store is opened, is exit 2 and
+    its message, not a traceback."""
+    stub_sources(monkeypatch)
+
+    code = p7.main(explore_2017(tmp_path, "--scores", "composite,residual_vol_60/v1"))
+
+    assert code == 2
+    assert "the score source has no ['residual_vol_60/v1']" in capsys.readouterr().err
+    assert not (tmp_path / "out").exists()
+
+
+def test_explore_files_a_day_with_an_empty_scope_as_a_gap(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stub_sources(monkeypatch, scores=FixedScores({}))
+
+    assert p7.main(explore_2017(tmp_path)) == 0
+    (json_path,) = (tmp_path / "out").glob("p7-diagnostic-research-*.json")
+    document = json.loads(json_path.read_text(encoding="utf-8"))
+    block = document["summary"][p7.COMPOSITE]["h20"]
+    assert block["sampled"] and block["read"] == 0
+    assert {gap["reason"] for gap in block["gaps"]} == {
+        "empty_scope: the score source scored no name"
+    }
+    assert len(block["gaps"]) == len(block["sampled"])
 
 
 def test_the_power_subcommand_prints_the_calculators_lines(
@@ -884,3 +1158,19 @@ def test_only_the_cli_names_the_research_window(capsys: pytest.CaptureFixture[st
     help_text = capsys.readouterr().out
     assert "--first" in help_text
     assert "--window" not in help_text
+    research = p7_windows.RESEARCH
+    assert f"{research.first}..{research.last}" in help_text
+
+
+def test_the_help_reads_the_research_windows_dates_from_the_window_table(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The dates are the table's, not a copy typed into the help: a moved window moves them."""
+    moved = p7_windows.DiagnosticWindow(
+        name="research", first=date(2015, 2, 2), last=date(2021, 6, 30), ceiling_year=2021
+    )
+    monkeypatch.setattr(p7, "WINDOWS", {"research": moved})
+    with pytest.raises(SystemExit):
+        p7.main(["explore", "--help"])
+
+    assert "2015-02-02..2021-06-30" in capsys.readouterr().out

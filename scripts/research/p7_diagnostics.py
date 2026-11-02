@@ -30,15 +30,20 @@ Rules the engine keeps:
 
 * every signal day of the plan must lie inside the plan's window, and every label window must end
   on or before the window's last day; a breach raises `DiagnosticWindowError` **before** a score
-  (or a label) is asked for. `plan_signal_days` already embargoes such days; this is the second
-  check, because a plan is a plain record and can be built by hand;
+  (or a label) is asked for. The exit is placed on the label reader's own calendar first
+  (`p7_windows.label_exit_day`), and a label that calendar cannot place counts as a breach: a
+  reader capped at the window's last year stops on the window's last day, so otherwise the
+  calendar's own refusal would be filed as a gap. `plan_signal_days` already embargoes such days;
+  this is the second check, because a plan is a plain record and can be built by hand;
 * a day the data refuses (`DAY_REFUSALS`: the late-record check's
   `SURVIVOR_RECOMPUTE_REFUSALS`, and the label reader's `ModelRunBlockedError` and
   `ModelPanelUnreadableError`) is a **named gap**, and the run goes on. A score refusal is a gap at
-  every horizon of the day; a label refusal at the horizon it was met at. **A
-  `DiagnosticWindowError` is never a gap**: it propagates unchanged, and so does a refusal raised
-  from one (a loader that wraps whatever a door raised must not launder a window breach into a
-  gap);
+  every horizon of the day; a label refusal at the horizon it was met at; a score whose scope is
+  empty or holds a number that is not finite is a gap of that score on that day. A gap is named
+  by the refusal's type and its `disclosable` message where it has one, so no local store path
+  enters a document. **A `DiagnosticWindowError` is never a gap**: it propagates unchanged, and a
+  refusal with one anywhere behind it (`__cause__` or `__context__`) raises that window refusal
+  itself (a loader that wraps whatever a door raised must not launder a breach into a gap);
 * a name without a label keeps its decile and is counted by refusal code (`None` from the reader
   is `no_adjustment_history`), exactly as the forward report counts it.
 
@@ -79,6 +84,7 @@ from p7_windows import (
     SignalPlan,
     WindowCappedStore,
     capped_panel_store,
+    label_exit_day,
     plan_signal_days,
 )
 
@@ -339,6 +345,7 @@ def run_diagnostics(
     readings: list[DayReading] = []
     reader: tuple[int, LabelSource] | None = None
     for day in plan.sessions:
+        breach: DiagnosticWindowError | None = None
         try:
             scored = scores.scores_on(day)
             if reader is None or reader[0] != day.year:
@@ -348,33 +355,101 @@ def run_diagnostics(
         except DiagnosticWindowError:
             raise
         except DAY_REFUSALS as error:
-            reason = _gap_reason(error)
-            readings.extend(
-                _refused(day, score, horizon, reason)
-                for horizon in plan.horizons
-                for score in request.scores
-            )
-            continue
+            breach = _window_refusal_in(error)
+            if breach is None:
+                reason = _gap_reason(error)
+                readings.extend(
+                    _refused(day, score, horizon, reason)
+                    for horizon in plan.horizons
+                    for score in request.scores
+                )
+                continue
+        if breach is not None:
+            # Raised here, after the handler, so the refusal it was found in does not become its
+            # context: the window refusal itself propagates, not the wrapper.
+            raise breach
         missing = [score for score in request.scores if score not in scored]
         if missing:
             raise DiagnosticRequestError(
                 f"the score source has no {missing} on {day.isoformat()}; it scores "
                 f"{sorted(scored)}"
             )
+        unreadable = {score: _scope_refusal(scored[score]) for score in request.scores}
         for horizon in plan.horizons:
-            try:
-                answers = _labels_of(labels, day, horizon, plan.window, request.scores, scored)
-            except DiagnosticWindowError:
-                raise
-            except DAY_REFUSALS as error:
-                reason = _gap_reason(error)
-                readings.extend(_refused(day, score, horizon, reason) for score in request.scores)
-                continue
-            readings.extend(
-                _reading(day, score, horizon, scored[score], answers, request)
-                for score in request.scores
-            )
+            readings.extend(_horizon_readings(request, day, horizon, labels, scored, unreadable))
     return tuple(readings)
+
+
+def _horizon_readings(
+    request: DiagnosticRequest,
+    day: date,
+    horizon: int,
+    labels: LabelSource,
+    scored: Mapping[str, tuple[tuple[str, float], ...]],
+    unreadable: Mapping[str, str | None],
+) -> list[DayReading]:
+    """One horizon of one day, every score: the exit checked on the reader's calendar before any
+    label is asked, then the readable scores' labels, or the gap that refused them."""
+    window = request.plan.window
+    _require_exit_inside(labels.calendar, day, horizon, window)
+    readable = [score for score in request.scores if unreadable[score] is None]
+    answers: dict[str, OutcomeLabel | None] = {}
+    breach: DiagnosticWindowError | None = None
+    if readable:
+        try:
+            answers = _labels_of(labels, day, horizon, window, readable, scored)
+        except DiagnosticWindowError:
+            raise
+        except DAY_REFUSALS as error:
+            breach = _window_refusal_in(error)
+            if breach is None:
+                reason = _gap_reason(error)
+                return [
+                    _refused(day, score, horizon, unreadable[score] or reason)
+                    for score in request.scores
+                ]
+        if breach is not None:
+            raise breach
+    readings: list[DayReading] = []
+    for score in request.scores:
+        refusal = unreadable[score]
+        if refusal is None:
+            readings.append(_reading(day, score, horizon, scored[score], answers, request))
+        else:
+            readings.append(_refused(day, score, horizon, refusal))
+    return readings
+
+
+def _scope_refusal(scored: tuple[tuple[str, float], ...]) -> str | None:
+    """Why one score's scope on one day cannot be read as a cross section, or `None`: a gap of
+    that day, never an abort of the run."""
+    if not scored:
+        return "empty_scope: the score source scored no name"
+    unfinite = sorted(code for code, score in scored if not math.isfinite(score))
+    if unfinite:
+        return f"non_finite_score: the score of {unfinite} is not finite"
+    return None
+
+
+def _require_exit_inside(
+    calendar: TradingCalendar, day: date, horizon: int, window: DiagnosticWindow
+) -> None:
+    """Refuse a label that exits after `window.last`, or that the reader's calendar cannot place
+    at all (`p7_windows.label_exit_day`; a reader capped at the window's last year stops on the
+    window's last day, so a label past it is not on its calendar) -- before any label is asked."""
+    exit_day = label_exit_day(calendar, day, horizon)
+    if exit_day is not None and exit_day <= window.last:
+        return
+    where = (
+        f"cannot be placed on the label reader's calendar, which stops at "
+        f"{calendar.horizon.last_date.isoformat()}"
+        if exit_day is None
+        else f"exits {exit_day.isoformat()}"
+    )
+    raise DiagnosticWindowError(
+        f"the {horizon}-session label of {day.isoformat()} {where}, past the {window.name} "
+        f"window's last day {window.last.isoformat()}; {READ_ONCE_NOTE}"
+    )
 
 
 def _require_inside(plan: SignalPlan) -> None:
@@ -453,17 +528,32 @@ def _refused(day: date, score: str, horizon: int, reason: str) -> DayReading:
     )
 
 
-def _gap_reason(error: Exception) -> str:
-    """The gap's name, or `error` itself, re-raised, when a window refusal is behind it: raised
-    from one (`__cause__`) or while one was being handled (`__context__`), which fails closed."""
+def _window_refusal_in(error: BaseException) -> DiagnosticWindowError | None:
+    """The window refusal anywhere behind `error`, or `None`.
+
+    Both links of every exception are followed -- `__cause__` (raised from it) and `__context__`
+    (raised while it was being handled) -- so a refusal raised from an unrelated error while a
+    window refusal was in hand still finds it: the walk fails closed."""
+    pending: list[BaseException] = [error]
     seen: set[int] = set()
-    cause: BaseException | None = error
-    while cause is not None and id(cause) not in seen:
-        if isinstance(cause, DiagnosticWindowError):
-            raise error
-        seen.add(id(cause))
-        cause = cause.__cause__ if cause.__cause__ is not None else cause.__context__
-    return f"{type(error).__name__}: {error}"
+    while pending:
+        current = pending.pop(0)
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, DiagnosticWindowError):
+            return current
+        pending.extend(
+            link for link in (current.__cause__, current.__context__) if link is not None
+        )
+    return None
+
+
+def _gap_reason(error: Exception) -> str:
+    """The gap's name: the refusal's type and its `disclosable` message where it has one (a
+    `ModelViewError`'s, which names no local store path), so a document does not depend on where
+    the panel lives."""
+    return f"{type(error).__name__}: {getattr(error, 'disclosable', str(error))}"
 
 
 # --- the summary ---------------------------------------------------------------------------------
@@ -726,7 +816,7 @@ def _block_lines(score: str, block: Mapping[str, Any]) -> list[str]:
     lines = [
         f"{score} at h={block['horizon']}: {len(block['sampled'])} non-overlapping signal days "
         f"(every {block['every_nth_signal']} of the plan's), {block['read']} read, "
-        f"{len(block['gaps'])} gap(s)"
+        f"{len(block['gaps'])} gap(s); gap and unlabelled counts cover the sampled days only"
     ]
     lines.extend(f"  {metric}: {_series_text(block[metric])}" for metric in METRICS)
     lines.append(
@@ -872,12 +962,13 @@ def _parser() -> argparse.ArgumentParser:
         description="Read-only P7 diagnostics: exploratory, unregistered, not evidence.",
     )
     commands = parser.add_subparsers(dest="command", required=True)
+    research = WINDOWS["research"]
     explore = commands.add_parser(
         "explore",
         help="read the research window's deciles, tails and rank IC",
         description=(
-            "Read the research window (2015-01-05..2021-12-31) and nothing else; the validation "
-            "window and the holdout are read only through p7_reading.read_once."
+            f"Read the research window ({research.first}..{research.last}) and nothing else; "
+            "the validation window and the holdout are read only through p7_reading.read_once."
         ),
     )
     explore.add_argument("--runtime-dir", type=Path, required=True)
@@ -946,9 +1037,13 @@ def _explore(arguments: argparse.Namespace) -> int:
             readings,
             config=settings.config(window),
             code_commit=resolve_code_commit(anchor=_ROOT),
+            # Taken after the run, outside `PanelStore.reading()`: fine for an exploratory
+            # listing, and not to be copied by the read-once path, which must hash with the reads.
             partitions_read=store.partitions_read(),
         )
     except DiagnosticWindowError as error:
+        return _refuse("explore", error, 2)
+    except DiagnosticRequestError as error:
         return _refuse("explore", error, 2)
     except DAY_REFUSALS as error:
         return _refuse("explore", f"{type(error).__name__}: {error}", 1)
@@ -963,12 +1058,12 @@ def _explore(arguments: argparse.Namespace) -> int:
         ),
         (arguments.out / f"{stem}.txt", ("\n".join(lines) + "\n").encode("utf-8")),
     )
-    conflict = _write_once(outputs)
+    conflict = _conflicting(outputs)
     if conflict is not None:
         return _refuse("explore", conflict, 1)
     print("\n".join(lines))
-    for path, _ in outputs:
-        print(f"written: {path}")
+    for path, fresh in _write_missing(outputs):
+        print(f"written: {path}" if fresh else f"unchanged, nothing written: {path}")
     return 0
 
 
@@ -996,6 +1091,9 @@ def _explore_settings(arguments: argparse.Namespace, window: DiagnosticWindow) -
     )
     FACTOR_TRANSFORMS.get(arguments.transform)
     scores = tuple(part.strip() for part in arguments.scores.split(","))
+    repeated = sorted({score for score in scores if scores.count(score) > 1})
+    if repeated:
+        raise DiagnosticRequestError(f"--scores names {repeated} more than once")
     known = (COMPOSITE, *book.composite_factors)
     unknown = [score for score in scores if score not in known]
     if unknown:
@@ -1014,20 +1112,28 @@ def _explore_settings(arguments: argparse.Namespace, window: DiagnosticWindow) -
     )
 
 
-def _write_once(outputs: Sequence[tuple[Path, bytes]]) -> str | None:
-    """`registry.register`'s rule for each file: the same bytes are not written again, different
-    bytes are refused. Every file is checked before any is written."""
+def _conflicting(outputs: Sequence[tuple[Path, bytes]]) -> str | None:
+    """`registry.register`'s rule, checked for every file before any is written: different bytes
+    already on disk are refused."""
     for path, content in outputs:
         if path.exists() and path.read_bytes() != content:
             return (
                 f"{path} already holds a different document; a diagnostic is written once "
                 "(the same configuration read again gave other bytes)"
             )
+    return None
+
+
+def _write_missing(outputs: Sequence[tuple[Path, bytes]]) -> tuple[tuple[Path, bool], ...]:
+    """Write each file not yet on disk; the same bytes are not written again. `(path, written)`."""
+    done: list[tuple[Path, bool]] = []
     for path, content in outputs:
-        if not path.exists():
+        fresh = not path.exists()
+        if fresh:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(content)
-    return None
+        done.append((path, fresh))
+    return tuple(done)
 
 
 def _power(arguments: argparse.Namespace) -> int:
