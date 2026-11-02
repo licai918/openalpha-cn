@@ -52,7 +52,9 @@ a failure after the claim spends the window:
    `second_use` alike. Before any of it, a **shallow** repository is refused: its history stops
    at the cut, so a claim committed before it is invisible. The remedy is `git fetch
    --unshallow`, and it is an operational prerequisite of the real read: this repository's main
-   checkout was shallow when this was written (2026-11-02).
+   checkout was shallow when this was written (2026-11-02). So is a repository holding a grafts
+   file (`info/grafts`), which changes the parents git reports while the repository still says it
+   is not shallow; replacement refs are not refused but ignored (`--no-replace-objects`).
 5. `ReadingPreflightError` -- the panel catalogue lacks a year the read opens of a dataset
    (`preflight_problems`; it asks `registered_years` and reads no partition): the window's years
    for every dataset, and the year before as well for those that read it
@@ -92,14 +94,17 @@ What this does not establish:
   the read back, and so does another worktree or clone of the repository, which does not hold
   them. **The claims must be committed, and the commit kept in this repository's refs (and, for
   another clone, fetched there), for the rule to survive another clone or worktree.** A claim
-  committed once is found by step 4 after it is deleted for as long as some ref reaches a commit
-  that added or changed it -- through any parent of any merge (`--full-history`; `-m` for a claim
-  added in a merge commit itself), in a root commit, and in a stash (`refs/stash` and its
-  untracked-files parent): `_LOG_EVERYTHING`. It is **not** found once no ref reaches such a
-  commit -- a reset, a rebase, an amend or a filter that drops it, a dropped stash, a deleted
-  branch that was never merged: `git log --all` walks refs, not reflogs -- and not at all once
-  unreachable objects expire. A shallow repository hides everything before its cut, which is
-  why it is refused rather than read.
+  committed once is found by step 4 after it is deleted for as long as git still holds a commit
+  that added or changed it and some ref **or reflog entry** reaches that commit
+  (`_LOG_EVERYTHING`): every ref (`--all`); every reflog entry until it expires (`--reflog`: a
+  reset, an amend, a rebase, a detached commit, and every stash still in `git stash list`,
+  `stash@{1}` and below included); every parent of every merge (`--full-history`; `-m` for a
+  claim added in a merge commit itself); root commits; replacement refs ignored
+  (`--no-replace-objects`), and a grafts file refused. What it does **not** see, plainly: a
+  claim that was never committed; a claim whose only commits are no longer reachable from any
+  ref or unexpired reflog entry (a dropped stash, an expired reflog) or have been pruned; and a
+  history rewritten and garbage-collected. A shallow repository hides everything before its cut,
+  which is why it is refused rather than read.
 * Failing closed is permanent and global. A claim file that cannot be read, once committed on
   any ref, refuses every reading of **every** window for as long as a ref reaches it -- it might
   name any of them. The only remedy today is a history rewrite that drops it (and, once nothing
@@ -1018,14 +1023,14 @@ def _committed_reading(registration: Path, repo: Path) -> tuple[Path, _Committed
             f"{registration} is outside the repository {root}; only a file git holds can be a "
             "committed registration"
         ) from error
-    log = registry._git(root, "log", "-1", "--format=%H", "HEAD", "--", relative)
+    log = registry._git(root, _NO_REPLACEMENTS, "log", "-1", "--format=%H", "HEAD", "--", relative)
     commit = log.stdout.decode().strip()
     if log.returncode != 0 or not commit:
         raise registry.RegistrationNotCommittedError(
             f"{relative} is not in the committed history of {root}'s HEAD; commit the "
             "registration before the reading"
         )
-    held = registry._git(root, "show", f"HEAD:{relative}")
+    held = registry._git(root, _NO_REPLACEMENTS, "show", f"HEAD:{relative}")
     if held.returncode != 0 or held.stdout != content:
         raise registry.RegistrationNotCommittedError(
             f"the bytes on disk at {relative} are not the ones HEAD holds; an edit after the "
@@ -1098,6 +1103,22 @@ def _refuse_a_second_read(
             "history stops at the cut, so a claim committed before it cannot be seen and the "
             "window cannot be shown unread; run `git fetch --unshallow` first"
         )
+    grafts = registry._git(root, "rev-parse", "--git-path", "info/grafts")
+    if grafts.returncode != 0:
+        raise ReadingAlreadyClaimedError(
+            f"git cannot say where {root}'s grafts file would be "
+            f"({grafts.stderr.decode(errors='replace').strip()}); a read that cannot be shown to "
+            "be the first is refused"
+        )
+    named = Path(grafts.stdout.decode().strip())
+    grafts_file = named if named.is_absolute() else root / named
+    if grafts_file.exists():
+        raise ReadingAlreadyClaimedError(
+            f"{grafts_file} is a grafts file: it changes the parents git reports for every "
+            "reader (and the repository still says it is not shallow), so a claim it hides "
+            "cannot be seen; remove it, or convert it with `git replace --convert-graft-file`, "
+            "whose replacement refs this module ignores"
+        )
     whose = f"the {window.name} window"
     files = (
         (claim, "a claim", reading),
@@ -1131,21 +1152,29 @@ def _refuse_a_second_read(
     _refuse_any_claim_of_the_window(root, window)
 
 
+_NO_REPLACEMENTS: Final = "--no-replace-objects"
+"""Every git call here that reads history passes this: a replacement ref (`git replace`,
+`git replace --graft`) would otherwise change what a commit, its parents or a blob are for every
+reader without rewriting any branch."""
+
 _LOG_EVERYTHING: Final[tuple[str, ...]] = (
+    _NO_REPLACEMENTS,
     "-c",
     "core.quotePath=false",
     "-c",
     "log.showRoot=true",
     "log",
     "--all",
+    "--reflog",
     "--full-history",
 )
 """Every `git log` over the claims: every ref (`--all`: branches, tags, remote-tracking refs,
-`refs/stash`); every parent of every merge (`--full-history`: git's default history
-simplification follows a merge's TREESAME parent only, which hides claims added and removed on a
-merged branch, and a stash's untracked-files parent); root commits' files listed whatever the
-configuration says (`log.showRoot`; a stash's untracked files are a root commit); names unquoted
-(`core.quotePath`)."""
+`refs/stash`); every reflog entry until it expires (`--reflog`: a reset, an amend, a rebase, a
+detached commit, a stash pushed down to `stash@{1}` and below); every parent of every merge
+(`--full-history`: git's default history simplification follows a merge's TREESAME parent only,
+which hides claims added and removed on a merged branch, and a stash's untracked-files parent);
+root commits' files listed whatever the configuration says (`log.showRoot`; a stash's untracked
+files are a root commit); names unquoted (`core.quotePath`); replacement refs ignored."""
 
 
 def _is_claim_file(name: str) -> bool:
@@ -1216,7 +1245,7 @@ def _refuse_any_claim_of_the_window(root: Path, window: DiagnosticWindow) -> Non
                 f"git log listed {line} under no commit; a claim that cannot be placed might name "
                 "this window, so the read is refused"
             )
-        shown = registry._git(root, "show", f"{commit}:{line}")
+        shown = registry._git(root, _NO_REPLACEMENTS, "show", f"{commit}:{line}")
         if shown.returncode != 0:
             raise ReadingAlreadyClaimedError(
                 f"git cannot show {line} as committed at {commit} "

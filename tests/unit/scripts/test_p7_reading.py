@@ -826,6 +826,132 @@ def test_a_committed_claim_naming_no_known_window_refuses_too(repo: Path) -> Non
     refused(registered(repo), repo, hours=1, said="cannot be read as a claim")
 
 
+# --- reflogs, replacement objects and grafts (fix round 4) ----------------------------------------
+
+
+def test_a_stash_pushed_down_by_a_later_one_still_refuses(repo: Path) -> None:
+    """The re-reviewer's R1: the first read's files stashed, then any other stash. `git stash
+    list` still shows the claims' stash as `stash@{1}`, but only the reflog of `refs/stash`
+    reaches it."""
+    first = registered(repo)
+    run(first, repo, Measure())
+    git(repo, "stash", "-q", "-u")
+    (repo / "scratch.txt").write_text("x\n", encoding="utf-8")
+    git(repo, "stash", "-q", "-u")
+    assert len(git(repo, "stash", "list").strip().splitlines()) == 2
+
+    refused(registered(repo, reading="v2-p7-024-validation-again"), repo, hours=4, said="window")
+
+
+def test_claims_committed_and_then_reset_away_still_refuse_while_the_reflog_holds_them(
+    repo: Path,
+) -> None:
+    """Committed, then `git reset --hard` past the commit: no ref reaches it, the reflog does."""
+    first = registered(repo)
+    run(first, repo, Measure())
+    for path in files_of(first, repo):
+        commit_file(repo, path, f"commit {path.name}", at=COMMITTED + timedelta(hours=2))
+    git(repo, "reset", "-q", "--hard", "HEAD~4")
+    assert not window_claim_of(repo).exists() and not claim_of(first).exists()
+
+    refused(first, repo, hours=4, said="a claim was committed at")
+    refused(registered(repo, reading="v2-p7-024-validation-again"), repo, hours=5, said="window")
+
+
+def first_read_on_a_merged_and_deleted_branch(repo: Path) -> Path:
+    """E2's history: the first read on `side`, its claims committed and removed there, `side`
+    merged with a merge commit and deleted."""
+    first = registered(repo)
+    git(repo, "checkout", "-q", "-b", "side")
+    run(first, repo, Measure())
+    written = files_of(first, repo)
+    for path in written:
+        commit_file(repo, path, f"commit {path.name}", at=COMMITTED + timedelta(hours=2))
+    for path in written:
+        git(repo, "rm", "-q", path.relative_to(repo).as_posix())
+    git(repo, "commit", "-q", "-m", "drop every trace", at=COMMITTED + timedelta(hours=3))
+    git(repo, "checkout", "-q", "-")
+    git(repo, "merge", "-q", "--no-ff", "-m", "merge", "side", at=COMMITTED + timedelta(hours=3))
+    git(repo, "branch", "-q", "-D", "side")
+    return first
+
+
+@pytest.mark.parametrize("reflogs", ["kept", "expired"])
+def test_a_replace_graft_that_hides_a_merged_branch_does_not_hide_its_claims(
+    repo: Path, reflogs: str
+) -> None:
+    """The re-reviewer's R5: `git replace --graft <merge> <first parent>` rewrites no branch, but
+    makes the merge look single-parent to every reader that honours replacement refs. With the
+    reflogs expired, only the merge's own (replaced) parents reach the branch's commits."""
+    first = first_read_on_a_merged_and_deleted_branch(repo)
+    git(repo, "replace", "--graft", "HEAD", "HEAD^1")
+    if reflogs == "expired":
+        git(repo, "reflog", "expire", "--expire=now", "--expire-unreachable=now", "--all")
+
+    refused(first, repo, hours=4, said="a claim was committed at")
+    refused(registered(repo, reading="v2-p7-024-validation-again"), repo, hours=5, said="window")
+
+
+def test_a_grafts_file_refuses_the_read(repo: Path) -> None:
+    """The deprecated `info/grafts` file hides history the same way, and a repository holding
+    one still says it is not shallow: it is refused by name."""
+    first = first_read_on_a_merged_and_deleted_branch(repo)
+    merge, parent = git(repo, "rev-parse", "HEAD", "HEAD^1").split()
+    grafts = repo / ".git" / "info" / "grafts"
+    grafts.parent.mkdir(parents=True, exist_ok=True)
+    grafts.write_text(f"{merge} {parent}\n", encoding="utf-8")
+
+    refused(first, repo, hours=4, said="grafts")
+
+
+def replaced_blob(repo: Path, tmp_path: Path, revision: str, content: str) -> None:
+    """`git replace` the blob at `revision` with one holding `content`: no ref is rewritten."""
+    replacement = tmp_path / "replacement"
+    replacement.write_text(content, encoding="utf-8")
+    original = git(repo, "rev-parse", revision).strip()
+    other = git(repo, "hash-object", "-w", str(replacement)).strip()
+    git(repo, "replace", original, other)
+
+
+def test_a_replaced_claim_blob_does_not_hide_the_window(repo: Path, tmp_path: Path) -> None:
+    """The first reading's committed claim replaced by one naming another window, then removed
+    from the tree: the scan reads the claim's own bytes, not the replacement's."""
+    first = first_read_then_its_own_files_committed(repo)
+    for name in ("claim.json", "result.json", "result.txt"):
+        git(
+            repo,
+            "rm",
+            "-q",
+            first.with_name(f"v2-p7-024-validation.{name}").relative_to(repo).as_posix(),
+        )
+    git(repo, "commit", "-q", "-m", "drop the first reading", at=COMMITTED + timedelta(hours=3))
+    claimed = claim_of(first).relative_to(repo).as_posix()
+    replaced_blob(repo, tmp_path, f"HEAD~1:{claimed}", json.dumps({"window": "second_use"}) + "\n")
+
+    refused(
+        registered(repo, reading="v2-p7-024-validation-again"),
+        repo,
+        hours=4,
+        said="a claim naming the validation window",
+    )
+
+
+def test_a_replaced_registration_blob_is_not_the_committed_registration(
+    repo: Path, tmp_path: Path
+) -> None:
+    """The registration's blob replaced by an edited one and the edit written to disk: the
+    bytes on disk are compared with what was committed, not with the replacement."""
+    registration = registered(repo)
+    edited = registration.read_text(encoding="utf-8").replace("0.02", "0.01")
+    replaced_blob(repo, tmp_path, f"HEAD:{registration.relative_to(repo).as_posix()}", edited)
+    registration.write_text(edited, encoding="utf-8")
+    measure = Measure()
+
+    with pytest.raises(registry.RegistrationNotCommittedError, match="bytes"):
+        run(registration, repo, measure)
+    assert measure.calls == []
+
+
 # --- the claim follows the filed registration, not the path handed in (ruling 2) ----------------
 
 
