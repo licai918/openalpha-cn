@@ -4,6 +4,20 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### P7 — route adjustment after two independent reviews (`V2-P7-019`…`024`, 2026-11-01)
+
+Documentation only. The route for the rest of P7 was re-cut after a Codex review (`gpt-6.1-sol`) and an
+adversarial Opus 5.5 review, each claim checked against the repository
+(`docs/superpowers/plans/2026-11-01-p7-route-adjustment.md`; spec section 9, 2026-11-01 rows): six new
+issues (a real-data smoke with run-in; a productised historical driver; the empty name-change year; the
+disposition of P6's year-boundary burst; carrying the confirmatory sample across registrations by
+recompute-equivalence; a pre-registered read-once 2022-2023 reading with a stop rule), `V2-P7-006` split
+into `006a`/`006b`, the G-0 gate rewritten, and a real-money gate (nothing is traded from the printed
+list before the protocol is registered, the account reconciliation and cash constraint ship, and the user
+says so). The roadmap now has 24 P7 issues (252 in total). Corrected on the way: the smoke plan (the real
+panel is `~/openalpha-research/panel`; an evening runs only in real time), the power of K=36 (about 64%
+at IC 0.05), and an over-read of T3 on the share of unverifiable records (inference, not measurement).
+
 ### P7 — decision-chain integration and excess-return research (`V2-P7-001`)
 
 P6 ended with the pipeline running and its one pre-registered holdout not passed. This entry lands

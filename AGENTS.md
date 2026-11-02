@@ -5,8 +5,8 @@
 The active direction is **v2**. The workspace is `docs/specs/v2/`:
 
 - `openalpha-cn-v2-prd.md` — scope, measured baseline, decisions. Read this to know what is in and out.
-- `openalpha-cn-v2-roadmap.md` — the work breakdown: 246 issues across P0.A–P7, each with dependencies, evidence, test seam and PRD mapping. **Take work from here.**
-- `openalpha-cn-v2-p7-decision-chain.md` — the **current phase (P7)**: measured facts about the two decision chains, the exploratory findings (labelled as not evidence), the decisions, the order of work and its gates, and the revision log. Read it before touching P7 work; change the order or a gate only by adding a row to its section 9.
+- `openalpha-cn-v2-roadmap.md` — the work breakdown: 252 issues across P0.A–P7, each with dependencies, evidence, test seam and PRD mapping. **Take work from here.**
+- `openalpha-cn-v2-p7-decision-chain.md` — the **current phase (P7)**: measured facts about the two decision chains, the exploratory findings (labelled as not evidence), the decisions, the order of work and its gates, and the revision log. Read it before touching P7 work; change the order or a gate only by adding a row to its section 9. The route as adjusted on 2026-11-01 (real-data smoke first, `006` split into `006a`/`006b`, G-0 rewritten, issues `V2-P7-019`…`024`) is `docs/superpowers/plans/2026-11-01-p7-route-adjustment.md`.
 - `openalpha-cn-v2-seam-audit.md` — 103 findings with `file:line` evidence, each mapped to a closing issue. Read the relevant section before touching a subsystem.
 
 `docs/specs/openalpha-cn-v1-spec.md` remains the **contract baseline** — the v1 domain contracts it describes are still authoritative. It is no longer the work pointer.
