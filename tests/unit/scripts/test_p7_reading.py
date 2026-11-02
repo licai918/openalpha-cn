@@ -430,10 +430,145 @@ def test_a_result_once_committed_without_its_claim_cannot_be_deleted_back_into_a
     git(repo, "rm", "-q", str(result.relative_to(repo)))
     git(repo, "commit", "-q", "-m", "drop the result", at=COMMITTED + timedelta(hours=2))
     claim_of(registration).unlink()
+    window_claim_of(repo).unlink(missing_ok=True)
     registration.with_name("v2-p7-024-validation.result.txt").unlink()
 
     with pytest.raises(p7_reading.ReadingAlreadyClaimedError, match="a result was committed"):
         run(registration, repo, Measure(), hours=3)
+
+
+# --- one read per window, whatever reading names it (fix round 1, ruling 1) ----------------------
+
+
+def window_claim_of(repo: Path, window: str = "validation") -> Path:
+    return repo / "docs" / "research" / "p7-readings" / f"{window}.window-claim.json"
+
+
+def test_the_window_is_claimed_beside_the_reading_and_before_the_read(repo: Path) -> None:
+    registration = registered(repo)
+    seen: list[bool] = []
+
+    class Watching(Measure):
+        def __call__(
+            self, body: Mapping[str, Any], window: Any, binding: Mapping[str, Any]
+        ) -> dict[str, Any]:
+            seen.append(window_claim_of(repo).exists())
+            return super().__call__(body, window, binding)
+
+    run(registration, repo, Watching())
+
+    assert seen == [True]
+    claimed = json.loads(window_claim_of(repo).read_text(encoding="utf-8"))
+    assert claimed["reading"] == "v2-p7-024-validation"
+    assert claimed["registration_sha256"] == hashlib.sha256(registration.read_bytes()).hexdigest()
+    assert claimed["claimed_at"] == (COMMITTED + timedelta(hours=1)).isoformat()
+
+
+def test_a_second_reading_of_a_window_whose_first_claim_is_on_disk_is_refused(repo: Path) -> None:
+    """The reviewer's probe: the first reading's claim and results committed, a second
+    registration of the same window under another name -- refused, and nothing measured."""
+    first = registered(repo)
+    run(first, repo, Measure())
+    for name in ("claim.json", "result.json", "result.txt"):
+        commit_file(
+            repo,
+            first.with_name(f"v2-p7-024-validation.{name}"),
+            f"commit {name}",
+            at=COMMITTED + timedelta(hours=2),
+        )
+    second = registered(repo, reading="v2-p7-024-validation-again")
+    measure = Measure()
+
+    with pytest.raises(p7_reading.ReadingAlreadyClaimedError, match="validation window"):
+        run(second, repo, measure, hours=4)
+    assert measure.calls == [] and not claim_of(second).exists()
+
+
+def test_a_second_reading_of_a_window_whose_first_claims_were_committed_and_deleted_is_refused(
+    repo: Path,
+) -> None:
+    first = registered(repo)
+    run(first, repo, Measure())
+    written = [
+        window_claim_of(repo),
+        *(
+            first.with_name(f"v2-p7-024-validation.{name}")
+            for name in ("claim.json", "result.json", "result.txt")
+        ),
+    ]
+    for path in written:
+        commit_file(repo, path, f"commit {path.name}", at=COMMITTED + timedelta(hours=2))
+    for path in written:
+        git(repo, "rm", "-q", str(path.relative_to(repo)))
+    git(repo, "commit", "-q", "-m", "drop every trace", at=COMMITTED + timedelta(hours=3))
+    second = registered(repo, reading="v2-p7-024-validation-again")
+    measure = Measure()
+
+    with pytest.raises(p7_reading.ReadingAlreadyClaimedError, match="window claim was committed"):
+        run(second, repo, measure, hours=4)
+    assert measure.calls == []
+
+
+def test_a_window_claim_left_by_a_crashed_first_attempt_refuses_the_second(repo: Path) -> None:
+    """A first attempt that claimed the window and died, its reading's claim then deleted (it was
+    never committed): the window's claim still holds, for this reading and for any other."""
+    first = registered(repo)
+    with pytest.raises(RuntimeError, match="died"):
+        run(first, repo, Measure(fail=True))
+    claim_of(first).unlink()
+    other = registered(repo, reading="v2-p7-024-validation-again")
+
+    for registration in (first, other):
+        measure = Measure()
+        with pytest.raises(p7_reading.ReadingAlreadyClaimedError, match="validation window"):
+            run(registration, repo, measure, hours=2)
+        assert measure.calls == []
+
+
+def test_the_second_use_window_is_claimed_once_too(repo: Path) -> None:
+    paths = []
+    for reading in ("v2-p7-024-second-use", "v2-p7-024-second-use-again"):
+        path = repo / "docs" / "research" / "p7-readings" / f"{reading}.registration.json"
+        register(
+            path,
+            reading=reading,
+            role="secondary",
+            window="second_use",
+            request=SECOND_USE_REQUEST,
+            stop_rule=None,
+            code_commit=head(repo),
+        )
+        commit_file(repo, path, f"register {reading}", at=COMMITTED)
+        paths.append(path)
+    run(paths[0], repo, Measure())
+    measure = Measure()
+
+    with pytest.raises(p7_reading.ReadingAlreadyClaimedError, match="second_use window"):
+        run(paths[1], repo, measure, hours=2)
+    assert measure.calls == [] and window_claim_of(repo, "second_use").exists()
+
+
+# --- the claim follows the filed registration, not the path handed in (ruling 2) ----------------
+
+
+@pytest.mark.parametrize("inside", [True, False])
+def test_a_symlink_to_the_registration_reads_nothing_twice(
+    repo: Path, tmp_path: Path, inside: bool
+) -> None:
+    """The reviewer's probe: a link to the filed registration from elsewhere -- inside the
+    repository or outside it -- finds the filed claim, and writes no claim beside itself."""
+    registration = registered(repo)
+    run(registration, repo, Measure())
+    elsewhere = (repo / "scratch") if inside else (tmp_path / "outside")
+    elsewhere.mkdir()
+    link = elsewhere / registration.name
+    link.symlink_to(registration)
+    measure = Measure()
+
+    with pytest.raises(p7_reading.ReadingAlreadyClaimedError, match="one read"):
+        run(link, repo, measure, hours=2)
+    assert measure.calls == []
+    assert not (elsewhere / "v2-p7-024-validation.claim.json").exists()
 
 
 def test_a_p7_script_imported_from_elsewhere_refuses_the_read_before_any_claim(
@@ -447,6 +582,7 @@ def test_a_p7_script_imported_from_elsewhere_refuses_the_read_before_any_claim(
     with pytest.raises(p7_reading.ForeignP7ScriptsError, match="p7_diagnostics"):
         run(registration, repo, measure)
     assert measure.calls == [] and not claim_of(registration).exists()
+    assert not window_claim_of(repo).exists()
 
 
 def test_the_p7_scripts_checked_are_the_three_this_process_imported() -> None:
@@ -629,6 +765,7 @@ def test_a_hand_written_registration_the_read_could_not_use_is_refused_before_an
     with pytest.raises(p7_reading.ReadingConfigurationError, match=said):
         run(registration, repo, measure)
     assert measure.calls == [] and not claim_of(registration).exists()
+    assert not window_claim_of(repo).exists()
 
 
 @pytest.mark.parametrize(
@@ -650,6 +787,7 @@ def test_a_registration_filed_anywhere_but_its_own_name_in_the_reading_directory
     with pytest.raises(p7_reading.ReadingConfigurationError, match=said):
         run(registration, repo, measure)
     assert measure.calls == [] and list(registration.parent.glob("*.claim.json")) == []
+    assert not window_claim_of(repo).exists()
 
 
 class Catalogue:
@@ -701,7 +839,7 @@ def test_the_default_preflight_refuses_a_runtime_with_no_panel_before_any_claim(
             measure=measure,
         )
     assert measure.calls == [] and not claim_of(registration).exists()
-    assert not (repo / "runtime").exists()
+    assert not window_claim_of(repo).exists() and not (repo / "runtime").exists()
 
 
 # --- the default measure: its reads and its partition hashes in one hold ------------------------

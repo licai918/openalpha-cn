@@ -27,15 +27,21 @@ held to the same ones.
    `validation` and `second_use`, a role and a stop rule that do not go together, a request or a
    configuration the diagnostics cannot run), or it is not filed as `<reading>.registration.json`
    in `READING_DIRECTORY`.
-4. `ReadingAlreadyClaimedError` -- the reading's claim or one of its results is on disk, or was
-   ever committed on any ref (`git log --all`): a read that was claimed is the one read, whether it
-   finished, crashed or had its files deleted afterwards.
+4. `ReadingAlreadyClaimedError` -- the reading's claim, the **window's** claim
+   (`<window>.window-claim.json` in `READING_DIRECTORY`) or one of the reading's results is on
+   disk, or was ever committed on any ref (`git log --all`): a read that was claimed is the one
+   read, whether it finished, crashed or had its files deleted afterwards. The window's claim is
+   what makes it one read **per window**, whatever reading names it -- `registry._holdout_allowed`
+   refuses any holdout row the same way, whatever registration wrote it. The rule holds for every
+   window a reading opens, `validation` and `second_use` alike.
 5. `ReadingPreflightError` -- the panel catalogue lacks a year of the window in a dataset the read
    opens (`preflight_problems`; it asks `registered_years` and reads no partition).
 
-It then writes the claim, `<reading>.claim.json`, with `O_CREAT | O_EXCL` -- a second read racing
-this one loses there (`ReadingAlreadyClaimedError`) -- and only then measures. From the claim on,
-the read is spent:
+It then writes the window's claim and then the reading's, `<reading>.claim.json`, each with
+`O_CREAT | O_EXCL` -- a second read racing this one loses there (`ReadingAlreadyClaimedError`) --
+and only then measures. Both are filed beside the registration as `HEAD` holds it, whatever path
+`read_once` was handed (a symbolic link elsewhere finds the same claims). From the claims on, the
+read is spent:
 
 6. the measure runs bound to `{reading, registration_sha256, registration_commit, claim_sha256}`.
    The default one is the diagnostics engine (`p7_diagnostics.run_diagnostics`) on
@@ -58,13 +64,12 @@ What this does not establish:
 * A commit time is what the committer's clock (or `GIT_COMMITTER_DATE`) said, and `claimed_at` is
   what this machine's clock said. Pushing the registration commit to a remote someone else holds,
   before the read, is what makes its time witnessed; this module pushes nothing.
-* The claim is not in git until the caller commits it. Deleting a claim that was never committed
-  gives the read back. A claim committed once is found by step 4 after it is deleted -- but not
-  after a history rewrite leaves it on no ref (a reset, a rebase or a filter, then a garbage
-  collection).
-* One read per registration, not per window: a second registration of the same window under
-  another reading name is another reading here. Only `READING_DIRECTORY`, where every reading's
-  registration, claim and results are filed, shows how many readings a window has had.
+* The claims are not in git until the caller commits them. Deleting claims that were never
+  committed gives the read back, and so does another worktree or clone of the repository, which
+  does not hold them: until they are committed (and, for another clone, fetched), the checkout
+  that read is the only witness. A claim committed once is found by step 4 after it is deleted --
+  but not after a history rewrite leaves it on no ref (a reset, a rebase or a filter, then a
+  garbage collection).
 * It binds a procedure, not access to the data. Code that builds a `WindowCappedStore` for the
   validation window itself, calls `read_once` with a `measure` of its own, builds a `PanelStore` on
   the panel root or opens the Parquet files reads the window with no claim. A claim says this path
@@ -155,7 +160,10 @@ from openalpha_cn.strategy_survivor_forward import LabelSource
 READING_SCHEMA: Final = "openalpha-p7-reading-registration/v1"
 STOP_RULE_SCHEMA: Final = "p7-stop-rule/v1"
 READING_DIRECTORY: Final = Path("docs/research/p7-readings")
-"""Where, under the repository, every reading's registration, claim and results are filed."""
+"""Where, under the repository, every reading's registration, claim and results are filed, and
+every window's claim."""
+WINDOW_CLAIM_SUFFIX: Final = ".window-claim.json"
+"""`<window><suffix>` in `READING_DIRECTORY`: the claim that a window was read, by any reading."""
 Role = Literal["primary", "secondary"]
 
 STOP_TRIGGERED_WORDING: Final[str] = (
@@ -828,11 +836,22 @@ def read_once(
             f"{committed.relative} cannot be read once: {error}"
         ) from error
     _require_filed(committed.relative, registered.reading)
-    claim = registration.with_name(f"{registered.reading}.claim.json")
-    result_json = registration.with_name(f"{registered.reading}.result.json")
-    result_txt = registration.with_name(f"{registered.reading}.result.txt")
-    _refuse_a_second_read(root, registered.reading, claim, (result_json, result_txt))
     window = registered.window
+    # Beside the registration as `HEAD` holds it, never beside the path handed in: a link to the
+    # registration from elsewhere must find the claims the filed one left.
+    filed = root / committed.relative
+    claim = filed.with_name(f"{registered.reading}.claim.json")
+    window_claim = filed.with_name(f"{window.name}{WINDOW_CLAIM_SUFFIX}")
+    result_json = filed.with_name(f"{registered.reading}.result.json")
+    result_txt = filed.with_name(f"{registered.reading}.result.txt")
+    _refuse_a_second_read(
+        root,
+        registered.reading,
+        window,
+        claim=claim,
+        window_claim=window_claim,
+        results=(result_json, result_txt),
+    )
     check = _panel_preflight(runtime_dir, window) if preflight is None else preflight
     problems = tuple(check(committed.body))
     if problems:
@@ -845,6 +864,17 @@ def read_once(
     if started.tzinfo is None or started.utcoffset() is None:
         raise ValueError(f"the clock gave {started!r}, which carries no timezone")
     registration_sha256 = hashlib.sha256(committed.content).hexdigest()
+    _write_new(
+        window_claim,
+        _json_bytes(
+            {
+                "reading": registered.reading,
+                "registration_sha256": registration_sha256,
+                "window": window.name,
+                "claimed_at": started.isoformat(),
+            }
+        ),
+    )
     claim_content = _json_bytes(
         {
             "reading": registered.reading,
@@ -956,17 +986,34 @@ def _refuse_foreign_p7_scripts(root: Path) -> None:
             ) from error
 
 
-def _refuse_a_second_read(root: Path, reading: str, claim: Path, results: Sequence[Path]) -> None:
-    """Refuse when the claim or a result is on disk, or was ever committed on any ref."""
-    files = ((claim, "a claim"), *((path, "a result") for path in results))
-    for path, _ in files:
+def _refuse_a_second_read(
+    root: Path,
+    reading: str,
+    window: DiagnosticWindow,
+    *,
+    claim: Path,
+    window_claim: Path,
+    results: Sequence[Path],
+) -> None:
+    """Refuse when the reading's claim, the window's claim or a result is on disk, or was ever
+    committed on any ref. Every path is under `root` (built from the filed registration)."""
+    whose = f"the {window.name} window"
+    files = (
+        (claim, "a claim", reading),
+        (window_claim, "a window claim", whose),
+        *((path, "a result", reading) for path in results),
+    )
+    for path, _, spent in files:
         if path.exists():
+            first = _claimed_by(path) if path == window_claim else None
             raise ReadingAlreadyClaimedError(
-                f"{path} exists: {reading} was claimed already, and a read that was claimed is "
-                "the one read, whether it finished or crashed"
+                f"{path} exists: {spent} was claimed already"
+                + ("" if first is None else f" (by {first})")
+                + ", and a read that was claimed is the one read, whether it finished or crashed"
+                + (" -- whatever reading names the window" if path == window_claim else "")
             )
-    for path, what in files:
-        relative = path.resolve().relative_to(root).as_posix()
+    for path, what, spent in files:
+        relative = path.relative_to(root).as_posix()
         log = registry._git(root, "log", "--all", "--format=%H", "--", relative)
         if log.returncode != 0:
             raise ReadingAlreadyClaimedError(
@@ -978,8 +1025,17 @@ def _refuse_a_second_read(root: Path, reading: str, claim: Path, results: Sequen
         if commits:
             raise ReadingAlreadyClaimedError(
                 f"{what} was committed at {commits[-1]} ({relative}); deleting the file does not "
-                f"give the read back -- {reading} had its one read"
+                f"give the read back -- {spent} had its one read"
             )
+
+
+def _claimed_by(window_claim: Path) -> str | None:
+    """The reading a window claim names, for the refusal's message; `None` if it names none."""
+    try:
+        reading = json.loads(window_claim.read_bytes()).get("reading")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return reading if isinstance(reading, str) else None
 
 
 def _measured(
