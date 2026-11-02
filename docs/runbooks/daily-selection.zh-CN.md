@@ -7,6 +7,8 @@
 > 空窗期是有意的，新配置的前向窗口从它自己的预登记提交起算。最后两条已登记的预测：2026-09-30
 > （`prd_7963ada370081d1ab509fbd8`）与 2026-10-08（`prd_1d5776987e0a58b0851df1c1`），保留为历史。
 > 下文仍然准确地描述这条命令**做什么**，恢复运行时沿用。
+>
+> **例外：`V2-P7-019` 的真实数据冒烟**——一份只在一次性克隆里提交的冒烟登记、自己的运行目录与钉住的 worktree，经用户逐步明确同意、只经 `scripts/p7_smoke.py` 运行，见文末「真实数据冒烟（`V2-P7-019`）」。它不使用、不修改 P6 的登记与运行目录，不恢复每日登记。
 
 ## 两种登记形态：每一节适用于哪一种
 
@@ -433,7 +435,7 @@ launchd 不会替你创建日志目录，加载前需要先建好它。把输出
 
 ## 幸存者形态（`kind: "survivor_book/v1"`，`V2-P7-008`）
 
-> **状态：未启用。** 幸存者配置还没有登记，它在 `V2-P7-006`（协议与预登记）由用户确认之后登记一次。在用户明确确认那次登记之前：不要运行晚间，也不要运行清晨复核；不要安装 launchd；不要为恢复手工补面板（要数百次 Tushare 请求，须经用户同意）。本节描述的是代码现在实际做什么，供恢复时照做。它不是研究结论：记录是一个已登记研究配置的「候选」预测，没有下过任何单，纸面账簿的权益不是证据。
+> **状态：未启用。** 幸存者配置还没有登记，它在 `V2-P7-006`（协议与预登记）由用户确认之后登记一次。在用户明确确认那次登记之前：不要运行晚间，也不要运行清晨复核；不要安装 launchd；不要为恢复手工补面板（要数百次 Tushare 请求，须经用户同意）。本节描述的是代码现在实际做什么，供恢复时照做。它不是研究结论：记录是一个已登记研究配置的「候选」预测，没有下过任何单，纸面账簿的权益不是证据。**例外：`V2-P7-019` 的真实数据冒烟**（一次性克隆里的冒烟登记、自己的运行目录，只经 `scripts/p7_smoke.py`、经用户逐步同意），见文末「真实数据冒烟（`V2-P7-019`）」。
 
 ### 分派与登记的形状
 
@@ -619,3 +621,209 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 14. **上线之后的代码修复或 `settings` 改动，就是另一本账**（见「重跑与补救」）：要新的运行目录与新的纪元，旧目录的账簿、日志与记录留给旧登记。能不能让账簿跨登记延续（要迁移标记、日志和周报认定记录的规则），由 `V2-P7-006` 决定。
 15. 送股、拆分之后，positions 只给 `ledger/real ratio`（例如 `2.0000`），不给账户的股数，也没有「这是送股」的标记：现金分红也会动这个比值，从比值推不出是哪一种，所以不猜。卖出用 SELL ENTIRE POSITION 不受影响；要知道账户里有多少股，看你的账户。
 16. 少数拒绝信息里的时刻仍按存的样子打印，可能是 UTC（`+00:00`，例如不带 `--as-of` 运行时钉住的时钟）：已提交的晚间丢了日志那一条（第 5 步）里的钉住时刻，以及清晨复核几条拒绝里的 `as_of` 与时钟。摘要、补救命令里的 `--as-of`、「被拒的一天对账户意味着什么」那一段都是上海时间。
+
+## 真实数据冒烟（`V2-P7-019`）
+
+> **性质**：一次性、隔离的工程冒烟，**不产生研究结论，不计入任何前向证据**。冒烟登记只在它自己的一次性克隆里提交、从不 push；它不是 `V2-P7-006` 的登记。`~/openalpha-research` 只被 `cp -c` 读一次，P6 的登记、预测、状态一概不碰；不装 launchd。每个花请求的步骤（补面板、每个真实晚上）在执行前都要用户明确同意，并说明范围与请求数。
+>
+> **这些单不要下。** 冒烟的每一份输出都以 `smoke: do not place these orders` 开头和结尾。真钱闸门：`006` 经用户确认并登记、账户成交对账与现金约束上线、用户明确说"开始"——三条全部成立之前，不用打印的清单交易。
+>
+> **状态与待定。** 本节写的是代码现在实际做什么（读自 `scripts/p7_smoke.py`、`scripts/p7_smoke_requests.py`、`scripts/p7_smoke_env.py`）；写本节时这套工具还没有对真实数据运行过，一次真实请求也没有发过，第一晚的情形由 `docs/research/p7-step0-validation/T10-real-data-smoke.md` 记录。下面写「待用户确认」的东西还没有定，本节不替用户定：阶段 1、阶段 2 的请求上限（路线图 `V2-P7-019` 行与 `docs/superpowers/plans/2026-11-01-p7-route-adjustment.md` 给的数字是估计，不是定下的上限；要按第一晚的日期由用户确认），以及谁来跑每一个晚上、阶段 2 手工跑还是另作安排。
+
+### 为什么一律走 `scripts/p7_smoke.py`
+
+1. **每日命令自己没有「到 100 就停」。** 最坏的一天会超过 100 次请求（见上文「每天取什么」）。驱动在已有的 `counted_transport`（`cli._panel_transport`，每日命令所有请求经过的那一个接缝）上挂一个到限即拒的计数器：越过上限的那一次请求不发出，也不会被重试。
+2. **拒绝信息打印的补救命令，直接粘贴运行不受任何计数，而其中一种是整年重建（实盘规模约 1,200 次请求）。** 补救命令一律交给 `remedy`：它按命令自己的解析判断，认得出并拒绝整年重建、别的运行目录、别的登记。
+3. **驱动固定运行目录、登记与钉住的 worktree。** 额外参数里出现这些路径选项（缩写和 `--选项=值` 的写法也算）一律拒绝，所以冒烟写不到 `~/openalpha-research`。它还拿一把根目录里的锁（一个根目录一次只有一个调用），给每个调用写账本记录和一份日志。
+
+### 时间（多伦多）
+
+多伦多自 2026-11-01 起是 EST（UTC−5），与北京差 13 小时；自 2027-03-14 起是 EDT，差 12 小时。
+
+| 什么 | 北京时间 | 多伦多（EST） |
+|---|---|---|
+| 晚间 | 交易日 18:30 之后，次一交易日 09:15 之前 | 当天 05:30 之后、**当天 20:15 之前** |
+| 第一晚 | 同上；预留 2 小时（因子补建，见下） | 05:30 开始 |
+| 晨查 | 次一交易日 08:30–09:00 | 当天 19:30–20:00（在当天晚间之后） |
+| 周五的晚间 | 截止周一 09:15 | 截止周日 20:15 |
+| 周报 | 任意时刻 | 周六 |
+
+- 运行时钟早于北京 16:30（多伦多 03:30）时，「当天」是上一个交易日。
+- 截止是**下一个交易日**的 09:15（`registration_cutoff`）：遇节假日，截止顺延到假期之后的第一个交易日。
+- 第一次运行就在截止之后，这一天是只结算日：不登记、不决定，摘要写 `NONE PLANNED tonight -- no evening was run`（见上文「一天是哪一种」）。这不是故障，但这一晚没有记录，不能算进 G1。
+- 晨查和周报不要与晚间同时跑；驱动的锁会拒绝第二个调用（`another smoke invocation holds …`）。
+
+### 准备（一次，0 次请求）
+
+在主检出里做，站在含冒烟横幅与冒烟三个脚本（`scripts/p7_smoke.py`、`scripts/p7_smoke_requests.py`、`scripts/p7_smoke_env.py`）的 `main` 提交上。`prepare` 要求被克隆的提交就是这个检出的 `HEAD`、是 `refs/heads/main` 的祖先，且受绑定路径与这三个脚本相对 `HEAD` 没有未提交的改动；主检出里要有 `.env`（`prepare` 只查它在不在，从不打开它）。
+
+**动手前先看这几件事，都不花请求：**
+
+1. **主检出是不是浅克隆**：`git rev-parse --is-shallow-repository`。本仓库的主检出 2026-11-02 打印的是 `true`。浅克隆上 `git clone --local` 退回传输克隆，「提交在 `main` 上」的检查读的是被截断的历史，可能判错；`prepare` 只为此打印一行警告（`smoke: warning: … is a shallow repository …`），然后照常继续，不会因此拒绝。所以这一条要在 `prepare` 之前由人看：打印 `true` 时先问用户怎么处理。
+2. **面板的卷**：源面板（`~/openalpha-research/panel`，约 6 GB）与根目录的父目录必须在同一个卷上，否则 `prepare` 拒绝；同卷还不够——只有 APFS 上 `cp -c` 才是克隆，同卷但不支持克隆的文件系统（HFS+、exFAT）上它退回真复制，整份面板都会被拷。先用 `diskutil info` 看 `File System Personality`。`cp` 在 `PATH` 上只查一次，必须解析到 `/bin/cp` 或 `/usr/bin/cp`；排在前面的 GNU `cp` 把 `-c` 读成 `--preserve=context`，会拷整份，`prepare` 拒绝——但这一条到第 8 步才查，那时根目录已经建了，要删掉再来，所以先看 `which -a cp`。
+3. **根目录的位置**：解析后的路径不含空白（uv 按空白拆 `--env-file`）；不在任何临时目录里（`/tmp`、`/private/tmp`、`/var/folders`、`tempfile.gettempdir()`；冒烟要跑几周，系统会清它们）；不在主检出里、不在 `~/openalpha-research` 里（不分大小写，按路径名和文件身份都比）、不在它所克隆的检出或面板里；它不能已经存在，它的父目录必须存在。根目录建好后不要挪动或改名：`smoke.json` 记着建时的路径，读到不符就拒绝（钉住的 worktree 与克隆靠建时的路径互相链接）。
+4. **「前」的快照**（G8 要拿它对照「后」）：
+
+```bash
+git rev-parse --is-shallow-repository
+git log -1 --format=%H
+git status --porcelain=v1 --untracked-files=all
+git status --porcelain -- src scripts pyproject.toml uv.lock
+ls -la ~/openalpha-research
+shasum -a 256 ~/openalpha-research/panel/catalog.duckdb docs/research/p6-registration.json
+ls ~/Library/LaunchAgents | grep -i openalpha
+pgrep -fl openalpha
+which -a cp
+```
+
+第四行（受绑定路径）必须没有输出；第七、八行也应没有输出（没有 launchd 配置、没有别的进程在写面板）；`which -a cp` 的第一行必须是 `/bin/cp` 或 `/usr/bin/cp`。`prepare` 之后它打印的 `catalog sha256` 应与第六行里 `catalog.duckdb` 的 SHA-256 一致。
+
+**然后**：
+
+```bash
+mkdir -p ~/openalpha-smoke
+uv run --no-sync python scripts/p7_smoke.py prepare --smoke-root ~/openalpha-smoke/r1 \
+  --epoch <第一晚的前一个交易日> --phase1-cap <待用户确认> --phase2-cap <待用户确认>
+```
+
+- `--epoch` 是第一晚的**前一个**交易日，必须是已存日历里的开市日。`prepare` 不查日历，纪元选错要到第一晚的第 1 步才被拒绝（退出 2）；它写进冒烟登记就不能挪：还没有账簿时，纪元到当天最多相隔 `1 + max_panel_catch_up_sessions`（设计值 10，即 11）个交易日，第一晚拖过这个距离也只能用新纪元 `prepare` 一个新根目录。越晚开始，补抓越贵。
+- 两个上限都是整数请求数，阶段 2 的（**整个冒烟的累计**，含阶段 1）不小于阶段 1 的。数值待用户确认；定的时候要留起步额度：当前阶段的上限减去已花，至少还剩 22 次才能起一个 `evening`，至少还剩 `7 ×（max_panel_catch_up_sessions + 1）`（设计值 77）次才能起一个 `panel build` 补救，不够就在调用前被拒绝（退出 5）。
+- `--commit` 缺省是这个检出的 `HEAD`（也只能是它）；`--source-panel` 缺省是 `~/openalpha-research/panel`，不是仓库自己的 `runtime/panel`（那是另一份、小得多的面板，`prepare` 拒绝）；`--uv` 缺省是 `PATH` 上的 `uv`。
+
+**它做的十步，按这个顺序。第 1–5 步的拒绝什么都不建；从第 6 步起根目录已经存在、只含这次 `prepare` 做的东西，拒绝信息点名它，由用户删除——`prepare` 从不删除任何东西。**
+
+1. 根目录：上面第 3 点的全部规则。
+2. 来源：主检出有 `.env`；源面板有 `catalog.duckdb`；两个上限合规。
+3. 提交：完整的 40 位 id，是 `HEAD`、在 `main` 的历史上，受绑定路径干净。
+4. 同一个卷（上面第 2 点）。
+5. 配置能被每日命令的第 1 步读通（带登记的随机种子）。
+6. `git clone --local --no-checkout` 到 `<根>/repo`，**随即删掉 `origin`**（克隆保留的 `origin` 指回主检出，一次手滑的 `git push` 会把冒烟登记送进去），再在提交上建分支 `v2-p7-019-smoke`。
+7. 在克隆里写冒烟登记（`docs/research/smoke/v2-p7-019-smoke-registration.json`；设计的书与 adapter、占位的 `survivor_forward_protocol`、`settings` 里的 `smoke_run` 标记），只在克隆里提交，用固定身份，无 hook、无签名。
+8. `cp -c -R` 克隆面板到 `<根>/runtime/panel`：克隆前后源面板的文件、大小、修改时间必须相同（否则它在被克隆时变了），副本的文件与大小与源一致，`catalog.duckdb` 逐字节一致；记下它的 SHA-256。
+9. 钉住的 worktree `<根>/pinned`（每日命令自己的 `--pin-worktree` 那几步：钉在登记的提交上、离线建 `.venv`），其中 `.env` 链到**主检出的** `.env`（对一次性克隆跑 `--pin-worktree --repo <克隆>` 会链到克隆里不存在的 `.env`，晚间就没有凭据）。uv 缓存缺包时离线建环境失败，信息给出一条联网补缓存的命令——那是联网（不是 Tushare），先问用户；补完后删掉这个半成的根目录再 `prepare`。
+10. `<根>/smoke.json`（只写一次）与请求账本 `<根>/requests.jsonl` 的第一条 `prepared`。
+
+**之后**，每次调用都在钉住的 worktree 里经驱动做。定义一个 shell 函数（`prepare` 也会把它按这个根目录打印出来，以它打印的为准）：
+
+```bash
+smoke() { ( cd ~/openalpha-smoke/r1/pinned && UV_PROJECT_ENVIRONMENT="$PWD/.venv" \
+  uv run --no-sync --env-file .env "$PWD/.venv/bin/python" scripts/p7_smoke.py "$@" ) }
+```
+
+**准备之后核对**：
+
+- `smoke status`：已花 0（`spent         0 of <阶段 1 上限> (…remain)`），`phase 1`，没有 `unclosed`、`discarded     no`。
+- `git -C ~/openalpha-smoke/r1/repo remote` 没有输出。
+- `ls -l ~/openalpha-smoke/r1/pinned/.env` 是指向主检出 `.env` 的符号链接。
+- `cat ~/openalpha-smoke/r1/pinned/.venv/pyvenv.cfg` 的版本是 3.11.x。
+
+### 驱动的子命令、退出码与输出
+
+| 子命令 | 在哪里跑 | 做什么 | 请求规则 |
+|---|---|---|---|
+| `prepare …` | 主检出 | 上面的十步 | 0 次请求 |
+| `evening [-- 选项]` | 钉住的 worktree | 每日命令 `scripts/daily_selection.py` | 起步要求还剩 22 次；没有单次上限（只受剩余额度限制）；撞上限丢弃根目录 |
+| `morning [-- 选项]` | 同上 | 同一命令加 `--morning-recheck` | 单次至多 3 次，起步要求还剩 1 次；撞上限不丢弃根目录 |
+| `weekly [-- 选项]` | 同上 | 前向周报 `scripts/forward_report.py`（不是每日命令） | 单次上限 0：任何请求都被拒绝；不丢弃根目录 |
+| `remedy 行`、`remedy -` | 同上 | 运行一次拒绝打印的那一行（`-` 从标准输入读） | 按补救的种类：`panel build` 起步要求还剩 `7 ×（max_panel_catch_up_sessions + 1）` 次，没有单次上限，撞上限丢弃根目录；`factor build` 上限 0，不丢弃；每日命令形式的补救（`rerun <D> first`）按 `evening` 或 `morning` |
+| `status` | 任何地方 | 阶段、两个上限、已花、是否丢弃、未关闭的调用、逐次调用、按接口的合计 | 无 |
+| `phase --to 2 --reason "…"` | 任何地方 | 阶段 1 进阶段 2，只能做一次 | 无 |
+
+`evening`、`morning`、`weekly` 的 `--` 之后是该命令自己的选项（例如 `smoke evening -- --json`；不写 `--` 的 `smoke evening --json` 是驱动的用法错误，退出 2）；`--runtime-dir`、`--registration`、`--repo`、`--morning-recheck`、`--pin-worktree`、`--launchd-plist`、`--factor-gaps` 是驱动的，不能给。
+
+**退出码。**
+
+| 码 | 意思 |
+|---|---|
+| 0 | 被包住的命令退出 0；`prepare`、`phase` 完成；`status` 的账本完整 |
+| 1 | 被包住的命令自己的 1，原样透传：每日命令的 `step N (名称) failed`、周报的拒绝、`panel build` 自己判定面板不健康（`unhealthy`） |
+| 2 | 用法：驱动自己的参数错误（argparse），或被包住的每日命令/周报自己的 2（例如第 1 步拒绝的 `--full-update`、`--top`、不够的 `--dataset`）。后一种调用已经开始，账本里有它 |
+| 3 | **没有任何东西运行**：每日命令自己的 3（第 1 步准入拒绝：代码或登记不对、登记自相矛盾，都在纸面账簿、日志和任何请求之前），或驱动发现 `openalpha` 不是钉住 worktree 的那一份（`ForeignPackageError`）。被包住的 `panel build`/`factor build` 自己的 3 一律改成 7，所以驱动给出的 3 永远表示什么都没运行 |
+| 4 | **请求上限，且只有上限**：越过上限的那一次请求没有发出。被包住的命令自己的 4/5/6 不会在这里出现，它们是 7 |
+| 5 | 驱动自己的拒绝：`smoke: refused: …`——账本或 `smoke.json` 读不通或不完整、额度不够起步、补救命令被拒、根目录已丢弃或有未关闭的调用、`prepare` 的各种拒绝；账本被拒时 `status` 也退出 5 |
+| 7 | 被包住的 `panel build` 或 `factor build` 以它自己的 3、4、5 或 6 失败（`PanelExit` 的 `bad_request`、`provider_failure`、`internal_error`、`catalog_busy`）。结尾那一行写出它自己的码：`exited 7 (the command's own N)` |
+| 130 | 中断（Ctrl-C、关闭终端、SIGTERM） |
+
+**驱动打印什么。** 调用开始：`smoke <种类>: phase P, X of CAP requests spent (R remain)`；结束：`smoke <种类>: invocation N exited C; K request(s) sent {"接口": 次数, …}; phase P: X of CAP requests spent (R remain)`（都在标准错误，只在终端，不进日志）。被包住命令自己的标准输出和标准错误**原样**写进 `<根>/logs/<序号>-<种类>.out` 与 `.err`（排他创建，从不覆盖；种类是 `evening`、`morning`、`weekly`、`panel-build`、`factor-build`），同时打印到终端。`<根>/requests.jsonl` 是只追加的请求账本（`prepared`、`phase`、`start`、`end`、`discarded`），已花请求数是各 `end` 的 `count` 之和；驱动数的是真正发出去的请求。
+
+### 第一晚
+
+每一步之前先对用户说明范围与预计请求数，得到明确同意。
+
+1. `smoke evening` → 预期第 2 步拒绝、0 次请求（面板停在 2026-10-08 附近，落后超过设计的 `max_panel_catch_up_sessions`；那一年的日历没存时，先花 1 次 `trade_cal`），打印最老一批的 `panel build`。
+2. 复制那一行，`pbpaste | smoke remedy -` → 约 `5 ×（批内会话数 + 1）` 次请求（每个会话 5 次，批里还会把库里最后一个会话再取一次；`stk_limit` 分页时每个会话 7 次），退出 0。打印别的补救（存日历、补齐上一年）也是同一个办法。
+3. 回到 1，直到第 2 步不再拒绝；晚间自己取剩下的会话。
+4. 第 4 步：若 P6 最后一次因子构建（10-08，这是从配置和 10-08 的日志**推断**的，没有读目录库）到当天超过 20 个会话，拒绝并打印 `openalpha factor build` 的分批命令——同样 `pbpaste | smoke remedy -`（0 次请求，本机 CPU；T6 在 2020 年的面板副本上测得年末一个会话的四个因子约 4 分钟，这里只是量级；20 个会话要一个多小时）。
+5. 第 5 步在纪元开账；第 6–9 步照常；摘要首尾是横幅；`smoke status` 记下累计。
+6. 立刻再跑一次 `smoke evening`：0 次请求、`the day was already complete`（幂等）。
+
+### 之后每晚
+
+`smoke evening`；在第 3 个晚上**故意不跑**（第 4 个晚上的摘要应有 catch-up 一行补结算它、不做决定）；第 2 个晚上之后的多伦多 19:30 跑一次 `smoke morning`；周六跑一次 `smoke weekly`（预期：尚无成熟记录、没有 p 值、0 次请求；周报是 `forward_report.py`，不是每日命令——第二天上午 10:00 再跑一次 `smoke evening` 只是把那一晚重印一遍，不是对周报的检验）。
+
+### 每晚要记什么（写进 T10 的表）
+
+列：北京交易日、多伦多开始/结束、子命令、退出码、拒绝的步骤与第一行、本次请求数/累计/上限、按接口、补抓的会话、因子补建的会话、ORDERS 的卖/买/顺延张数、unfunded/unaffordable、facts 的 universe/scored/coverage 与 `name_unknown_assumed_ordinary`、晨查的差异数、与脚本化市场的差异（`stk_limit` 分页、撤回复核 REFETCH、收益路径复现 BUDGET、停牌无日线、`namechange` 重述）、缺陷。**不抄任何收益数字、权益数字。**
+
+- 请求数、按接口：`smoke status`（驱动数的是发出去的）；每日命令自己的 `tushare requests` 行在撞上限时多算那一次没发出的请求。
+- 拒绝的步骤与第一行：标准错误里的 `step N (名称) failed: …`。
+- 补抓的会话、因子补建的会话：摘要 diagnostics 下的 `panel catch-up`、`factor catch-up`。
+- 与脚本化市场的差异：每日命令把 `panel build` 自己的输出留在内存里，成功的一晚不打印它；`BUDGET` 行存在当天日志（`RT/daily_survivor/<config_id 前 16 位>/<交易日>.json`）的 `panel` 块里，`REFETCH` 行不存，只能从按接口的请求数推断（推断就写明是推断）。经 `remedy` 跑的 `panel build` 会把全部输出（含 `BUDGET`、`REFETCH`）写进日志和终端。
+- `RT` 是 `~/openalpha-smoke/r1/runtime`。
+
+### 补救、上限与中断
+
+**`remedy` 接受什么、拒绝什么。** 只接受拒绝信息打印的那一整行（恰好一行，从剪贴板来最稳），命令是钉住 worktree 的 `openalpha panel build`、`openalpha factor build`，或钉住 worktree 的 `scripts/daily_selection.py`（`rerun <D> first`）。拒绝时打印 `smoke: refused: …`，退出 5，什么都不写：
+
+- 不是一行、读不成 shell 行、行里没有钉住 worktree 的 `openalpha` 或 `scripts/daily_selection.py`；
+- 选项和值用 `=` 连在一起（`--runtime-dir=DIR`；拒绝信息把每个选项和它的值打印成两个词）；
+- `openalpha` 的子命令不是 `panel build`、`factor build`，或请求了帮助（`--help`）；
+- 按命令自己的读法，`--runtime-dir` 不是这个冒烟的运行目录（取最后一个；`~` 不展开）——冒烟从不在别的运行目录上建，尤其不在 `~/openalpha-research` 上；每日命令形式的补救则要求它的 `--runtime-dir`、`--registration` 就是这个冒烟的，给了 `--repo` 的话也必须是钉住的 worktree；
+- **整年重建**：按命令自己的读法，`panel build` 既没有 `--incremental`，数据集又不是只有 `trade_cal`（`--as-of --incremental` 把 `--incremental` 读成 `--as-of` 的值，那就是没有 `--incremental`，同样被当作整年重建拒绝）。这样的补救会花约 1,200 次请求，而且面板副本此时处在只有丢弃才能修复的状态；
+- 命令自己会当作用法错误拒绝的写法（例如不存在的选项 `--bogus`、不是整数的 `--year`）。这在每日命令那边会成为一次故障、丢弃根目录，所以在写任何东西之前先拒绝；
+- 根目录已丢弃，或有未关闭的调用，或剩余额度不够这种补救起步（见上面的表）。
+
+**上限。** 起步额度不够时，调用在写任何东西之前被拒绝（退出 5，`ask the user before the cap is raised`）。调用之中碰到上限：那一次请求不发出，调用结束，退出 4，标准错误打印 `REQUEST CAP REACHED  invocation N stopped: …`。
+
+- `evening` 和 `panel build` 的补救会写面板，副本可能写了一半，所以**根目录被丢弃**（账本写 `discarded`）：之后这个根目录里的一切调用都被拒绝，永远如此。`morning`、`weekly`、`factor build` 的上限触发不丢弃，但仍要先问用户再做下一个调用。
+- **不要在副本上补救，尤其不要照整年重建。** 先问用户；经同意后，从**原面板**、用**新纪元** `prepare` 一个新根目录（上限触发时打印的最后一行就是这条命令，带着指回原面板的 `--source-panel`）。
+- 驱动没有改上限的选项：上限写在 `smoke.json` 里、只写一次，要换上限只能 `prepare` 新根目录。阶段 1 进阶段 2 用 `smoke phase --to 2 --reason "<用户的话与日期>"`，只做一次，已丢弃、有未关闭的调用、已在阶段 2 的根目录都拒绝。
+
+**中断。** Ctrl-C、关掉终端（SIGHUP）、SIGTERM 都按中断收尾：账本写这次调用的 `end`，退出 130，打印一行以 `smoke: interrupted;` 开头的话，要求先跑 `status`。中断的是 `evening` 或 `panel build` 的补救（写面板的调用），同样**丢弃根目录**；`morning`、`weekly`、`factor build` 被中断只记 `end`。写面板的调用以任何一个没被命令自己接住的异常结束也同样丢弃根目录（`status` 里那一次调用显示 `fault <异常类名>`）；命令自己的拒绝（退出 1）不是故障，不丢弃。调用方自己忽略的信号（`nohup`、后台作业）保持忽略。被 SIGKILL 杀掉、断电的调用有 `start` 没有 `end`：`status` 显示 `unclosed`，账本拒绝之后的一切调用（退出 5），这个根目录就此作废。窄窄的一个窗口——中断落在 `start` 与调用之间，或 `discarded` 与 `end` 之间——也是同样的结果。被中断的 `prepare`（也是退出 130）可能只建了一半根目录：由用户删掉它再 `prepare`。
+
+**账本被手工改过。** 驱动抓得到的：账本或 `smoke.json` 不见了、被清空、属于另一个根目录；账本被截到只剩 `prepared`，或被截掉最后几次调用而 `logs/` 里还有它们的日志；调用序号不是 1 到 N；某次 `start` 记的已花请求数与它之前各 `end` 之和不符；写面板的调用以上限或故障结束，却没有紧挨着 `end` 之前的那条 `discarded`；读不通的事件（按名拒绝这个根目录）。**抓不到的**（伪造，不是故障）：账本连同 `logs/` 一起被截；被改了字段的事件（例如最后一次调用的 `end` 的请求数；或者删掉 `discarded` 行再把那个 `end` 的 `fault` 改成空——一个已丢弃的根目录就能重新运行）；手工插入的 `phase` 行。账本防的是手滑和中断，不是有意篡改。
+
+**修了受绑定代码就是另一份登记**：新根目录、新纪元，阶段 1 重做（见上文「重跑与补救」）。可以把**未被丢弃**的旧根目录的 `runtime/panel` 作为新 `prepare` 的 `--source-panel`，省掉补抓的请求。
+
+### 阶段 1 的 go / no-go（约 5 个真实晚上；结束时交用户确认）
+
+go 需要全部满足：
+
+- G1 至少 4 个晚间在截止前跑完：退出 0、日志有 `result`、记录 `standing` 为 `forward`、登记早于下一交易日 09:15。
+- G2 故意漏跑的那一晚：下一晚的 catch-up 一行列出它、不做决定、它没有记录；周报把它列为缺失（`missing sessions`）。
+- G3 一次晨查在 09:15 前完成：恰好 1 次请求；`RT/paper/snapshots` 的文件列表与 `RT/paper/ledger.sqlite3` 的 sha256 前后不变。
+- G4 一次周报：退出 0、0 次请求、没有 p 值、写明尚无成熟记录（`not tested: k of K pre-registered periods matured`）。
+- G5 累计请求不超过阶段 1 上限；没有触发上限；没有未关闭的调用（`status` 没有 `unclosed`）。
+- G6 每一次拒绝都具名（`step N (名称) failed`），照它打印的补救（经 `remedy`）走得通；没有 traceback、没有 `internal_error`。
+- G7 已完成的晚间重跑：0 次请求、0 次写入（核对：该晚的日志文件与 `RT/paper/` 的文件列表、sha256 前后不变）。
+- G8 `~/openalpha-research` 的列表与 `panel/catalog.duckdb` 的 sha256、`docs/research/p6-registration.json`、主检出的 `git status` 前后一致（对照「准备」里的前检）；没有 launchd 配置。
+- G9 每一份打印订单的输出都带横幅：`logs/` 里每个 `evening`、`morning`、`weekly` 调用的 `.err` 首末两行是横幅，`.out` 不空时首末两行也是（`--json` 时是文档里的 `smoke` 键）。
+
+no-go：任一条不满足。每个缺陷单独开 issue（测试先行 + 评审）；修了受绑定代码 → 新根目录、新纪元重做阶段 1。
+
+### 阶段 2（延长到纪元之后至少 22 个会话）
+
+每晚照做；阶段 2 不计入任何前向证据。用 `smoke phase --to 2 --reason "<用户的话与日期>"` 进入。
+
+- 第 22 个会话之后的周报预期出现第一条成熟记录——描述性，不检验（待实测）。占位协议的窗口是 2 个各 20 个会话的非重叠期，所以阶段 2 里周报一直写 `not tested`；若拉长到约 40 个会话以上，窗口成熟，周报会打印 p 值，那是占位协议上的数，不是证据，不抄进 T10。
+- 记录周报里 UNVERIFIABLE 的条数与占比（粗测，不是协议读数）。
+- 累计逼近阶段 2 上限时先停下问；驱动在起步额度不够时也会拒绝。
+- **不跑 2027 年第一个交易日**，除非 `V2-P7-021` 已合入（上文「已知局限（幸存者形态）」第 1 条：新年第一个交易日之前没有更名公告时，那一天永远补不成）。
+
+### 已知局限（冒烟工具与受绑定代码的接缝）
+
+下面两条在受绑定代码里，没有修，也不在冒烟里修（修了就是另一份登记：新根目录、新纪元、阶段 1 重做）；是否单独开 issue 由用户定。`daily_selection._step` 把真实 `panel build` 里的中断报成第 2 步的拒绝（退出 1），驱动在信号处理器里做了标记，调用返回后仍按中断收尾（退出 130，写面板的调用丢弃根目录）；`daily_selection.invoke` 捕获的 click 错误类型与 typer 0.27 抛出的不是同一个，所以命令会当作用法错误拒绝的补救在构建里会成为一次故障、丢弃根目录，驱动在写任何东西之前先按命令自己的解析拒绝它。
+
+### 结束
+
+保留根目录，直到 T10 写完。克隆里的任何东西都不并入主仓库；不 push。结束后由用户决定是否删除根目录。
