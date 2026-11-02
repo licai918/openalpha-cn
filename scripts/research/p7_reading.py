@@ -100,6 +100,15 @@ What this does not establish:
   branch that was never merged: `git log --all` walks refs, not reflogs -- and not at all once
   unreachable objects expire. A shallow repository hides everything before its cut, which is
   why it is refused rather than read.
+* Failing closed is permanent and global. A claim file that cannot be read, once committed on
+  any ref, refuses every reading of **every** window for as long as a ref reaches it -- it might
+  name any of them. The only remedy today is a history rewrite that drops it (and, once nothing
+  reaches the old commits, the expiry of unreachable objects), which also destroys the real
+  claims witnessing the reads already taken. An escape hatch is proposed for a later issue and
+  is **not implemented**: when a claim's bytes cannot be read, take its window from the file
+  name (`<window>.window-claim.json`) or from the committed `<reading>.registration.json` of the
+  reading it is named for, refuse every window only when neither yields one, and for the rest
+  keep a reviewed, committed void list keyed by the exact blob SHA of each unreadable file.
 * It binds a procedure, not access to the data. Code that builds a `WindowCappedStore` for the
   validation window itself, calls `read_once` with a `measure` of its own, calls the default
   measure directly (`_panel_measure(runtime_dir)(body, VALIDATION, binding)` -- the tests do, on
