@@ -4,6 +4,36 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### P7 — development batch 1: diagnostics, the report's power, the empty name year (`V2-P7-004`, `009`, `018`, `021`, and the new `V2-P7-025`, 2026-11-02)
+
+The first batch after the route adjustment, on `feat/v2-p7-004-dev-batch-1`. **It is not pushed, and
+nothing in it has been run against real data or the real panel: no Tushare request was made.**
+`V2-P7-004` is tooling: one cross section's deciles, tails and rank IC read with the weekly report's own
+arithmetic (`backtest/decile_readout.py`), the power of a one-sided test of a mean with a futility look
+at K/2 (`backtest/power_analysis.py`), three named windows with a panel store that serves nothing past a
+window's last year (`scripts/research/p7_windows.py`), the `explore` and `power` commands
+(`scripts/research/p7_diagnostics.py`), and the one named, logged, single-use read of a protected window
+(`scripts/research/p7_reading.py`: it covers the whole window, a window is claimed once whatever the
+reading is called, the claim must be committed and kept in this repository's refs, a shallow repository
+and a grafts file are refused). The reading itself is `V2-P7-024`; reading the research window with the
+tools waits for the user's go. `V2-P7-018`: the weekly report states the pre-registered power beside its
+sample counts (a `survivor_forward_power` block beside the protocol; the plan's power, never an observed
+one), prints no one-sided p-value wording before the primary window, and its G-0 item states the
+rewritten gate; `006a` must validate the block before the registration is committed. `V2-P7-009`: the
+two missing acceptance tests (the paper path's own T+1; a book held across a year's first session and an
+ex-dividend date), no defect found. `V2-P7-021`: `panel build` records a rename year with nothing
+announced yet as an empty partition, readable as "no rename announced yet" through 31 January, so the
+name corpus no longer stops a year's first session; its two values (both `no_data` answers count as
+verified empty; the rule applies to every `panel build`) are provisional until the user confirms them.
+Found on the way and cut as `V2-P7-025` (25 P7 issues, 253 in total): the registry (`stock_basic`) has the
+same gap for a year in which nothing lists or delists before its first session, which stops the survivor
+day at step 4 and the weekly report's label read -- a hard gate before 2027-01-04 whose offline
+measurement on the real registry is still to be made. Bound files changed (`src/`, `scripts/research/`,
+`pyproject.toml`, `scripts/daily_selection.py`, `scripts/forward_report.py`); no registration is in use.
+The batch's record, its deferred items, the decisions that are still the user's and the prerequisites of
+the real reads are in `docs/superpowers/plans/2026-11-02-p7-dev-batch-1-closeout.md`. **This is
+engineering, not evidence.**
+
 ### P7 — the real-data smoke's tooling (`V2-P7-019`)
 
 The tools and the runbook for the one-off real-data smoke of the daily survivor day. **No request was
@@ -40,7 +70,7 @@ disposition of P6's year-boundary burst; carrying the confirmatory sample across
 recompute-equivalence; a pre-registered read-once 2022-2023 reading with a stop rule), `V2-P7-006` split
 into `006a`/`006b`, the G-0 gate rewritten, and a real-money gate (nothing is traded from the printed
 list before the protocol is registered, the account reconciliation and cash constraint ship, and the user
-says so). The roadmap now has 24 P7 issues (252 in total). Corrected on the way: the smoke plan (the real
+says so). The roadmap then had 24 P7 issues (252 in total; `V2-P7-025` made it 25 and 253 on 2026-11-02). Corrected on the way: the smoke plan (the real
 panel is `~/openalpha-research/panel`; an evening runs only in real time), the power of K=36 (about 64%
 at IC 0.05), and an over-read of T3 on the share of unverifiable records (inference, not measurement).
 

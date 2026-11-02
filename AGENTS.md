@@ -5,13 +5,13 @@
 The active direction is **v2**. The workspace is `docs/specs/v2/`:
 
 - `openalpha-cn-v2-prd.md` — scope, measured baseline, decisions. Read this to know what is in and out.
-- `openalpha-cn-v2-roadmap.md` — the work breakdown: 252 issues across P0.A–P7, each with dependencies, evidence, test seam and PRD mapping. **Take work from here.**
-- `openalpha-cn-v2-p7-decision-chain.md` — the **current phase (P7)**: measured facts about the two decision chains, the exploratory findings (labelled as not evidence), the decisions, the order of work and its gates, and the revision log. Read it before touching P7 work; change the order or a gate only by adding a row to its section 9. The route as adjusted on 2026-11-01 (real-data smoke first, `006` split into `006a`/`006b`, G-0 rewritten, issues `V2-P7-019`…`024`) is `docs/superpowers/plans/2026-11-01-p7-route-adjustment.md`.
+- `openalpha-cn-v2-roadmap.md` — the work breakdown: 253 issues across P0.A–P7, each with dependencies, evidence, test seam and PRD mapping. **Take work from here.**
+- `openalpha-cn-v2-p7-decision-chain.md` — the **current phase (P7)**: measured facts about the two decision chains, the exploratory findings (labelled as not evidence), the decisions, the order of work and its gates, and the revision log. Read it before touching P7 work; change the order or a gate only by adding a row to its section 9. The route as adjusted on 2026-11-01 (real-data smoke first, `006` split into `006a`/`006b`, G-0 rewritten, issues `V2-P7-019`…`024`) is `docs/superpowers/plans/2026-11-01-p7-route-adjustment.md`. As of 2026-11-02, development batch 1 (`V2-P7-004`, `009`, `018`, `019`, `021`, plus the new `V2-P7-025`, the registry's New Year gap, a hard gate before 2027-01-04) is on the integration branch, not pushed and not run against real data: its record, the decisions still the user's and the prerequisites of the real validation read and the real smoke are in `docs/superpowers/plans/2026-11-02-p7-dev-batch-1-closeout.md`.
 - `openalpha-cn-v2-seam-audit.md` — 103 findings with `file:line` evidence, each mapped to a closing issue. Read the relevant section before touching a subsystem.
 
 `docs/specs/openalpha-cn-v1-spec.md` remains the **contract baseline** — the v1 domain contracts it describes are still authoritative. It is no longer the work pointer.
 
-Every change must name its issue ID (`V2-P0A-001` … `V2-P7-018`) in the branch, commit and pull request.
+Every change must name its issue ID (`V2-P0A-001` … `V2-P7-025`) in the branch, commit and pull request.
 
 ## Working agreement
 
