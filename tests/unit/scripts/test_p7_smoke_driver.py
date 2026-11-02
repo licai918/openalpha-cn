@@ -1283,6 +1283,98 @@ def test_an_end_on_a_fault_or_the_cap_is_held_to_its_discarded_line(tmp_path: Pa
     assert driver.ledger_problem(ledger("evening", clean, discarded=False), logs=logs) is None
 
 
+@pytest.mark.parametrize(
+    ("kind", "sent", "forwarded", "discarded", "caps_"),
+    [
+        ("weekly", 1, 0, False, None),
+        ("factor-build", 1, 0, False, None),
+        ("morning", 4, 3, False, None),
+        ("panel-build", 81, 80, True, {1: 80, 2: 460}),
+    ],
+)
+def test_each_kind_s_ceiling_stops_it_and_only_a_panel_writer_discards_the_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,  # noqa: F811
+    kind: str,
+    sent: int,
+    forwarded: int,
+    discarded: bool,
+    caps_: dict[int, int] | None,
+) -> None:
+    """I2, `RULES`: a weekly report and a factor build send nothing (ceiling 0), a morning three
+    (ceiling 3); a panel build has no ceiling of its own and stops at the phase's cap -- and is
+    the one of these that discards the root."""
+    smoke = _smoke(tmp_path, monkeypatch, seeded, epoch=survivor_day.EPOCH, caps_=caps_)
+    sink = _sink(monkeypatch)
+
+    def body() -> int:
+        _send(sent)
+        return 0
+
+    if kind == "weekly":
+
+        def report(argv: Sequence[str], *, clock: Callable[[], datetime]) -> int:
+            return body()
+
+        monkeypatch.setattr(driver.forward_report, "main", report)
+        command = ["weekly"]
+    elif kind == "morning":
+        _standing_in(monkeypatch, body)
+        command = ["morning"]
+    else:
+        _invoking(monkeypatch, body)
+        factors = ["openalpha", "factor", "build", "--runtime-dir", str(smoke.manifest.runtime)]
+        factors += ["--factor", "return_vol_60/v1", "--tier", "processed", "--year", "2026"]
+        factors += ["--as-of", "2026-04-06T16:30:00+08:00", "--exchange", "SSE"]
+        line = _line(smoke, *_BATCH) if kind == "panel-build" else daily.pinned_command(factors)
+        command = ["remedy", line]
+
+    code, _out, err = _drive(smoke, capsys, *command, at=survivor_day.RUN_CLOCK)
+
+    assert code == caps.CAP_EXIT
+    assert len(sink.payloads) == forwarded
+    assert any(line.startswith("REQUEST CAP REACHED") for line in err)
+    assert (_spent(smoke).discarded is not None) is discarded
+    (end,) = _ends(smoke)
+    assert (end["kind"], end["count"], end["reached"]) == (kind, forwarded, "daily")
+
+
+@pytest.mark.parametrize(
+    ("kind", "caps_", "needs"),
+    [
+        ("evening", {1: 21, 2: 460}, 22),
+        ("panel-build", {1: 76, 2: 460}, 77),
+        ("morning", {1: 0, 2: 460}, 1),
+    ],
+)
+def test_an_invocation_short_of_its_headroom_is_refused_before_anything_is_written(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,  # noqa: F811
+    kind: str,
+    caps_: dict[int, int],
+    needs: int,
+) -> None:
+    """I2, `RULES`' headroom: an evening needs 22 of the cap to start, a panel build
+    7 x (catch_up_bound + 1) = 77, a morning 1."""
+    smoke = _smoke(tmp_path, monkeypatch, seeded, epoch=survivor_day.EPOCH, caps_=caps_)
+    sink = _sink(monkeypatch)
+    days = _standing_in(monkeypatch, lambda: 0)
+    builds = _invoking(monkeypatch, lambda: daily.Invocation(exit_code=0, stdout="", stderr=""))
+    command = ["remedy", _line(smoke, *_BATCH)] if kind == "panel-build" else [kind]
+
+    code, _out, err = _drive(smoke, capsys, *command, at=survivor_day.RUN_CLOCK)
+
+    assert code == driver.REFUSED_EXIT
+    assert any(f"needs {needs} to start" in line for line in err)
+    assert (days, builds, sink.payloads) == ([], [], [])
+    events = caps.RequestLedger(smoke.root / env.LEDGER_NAME).events()
+    assert [event["event"] for event in events] == ["prepared"]
+
+
 @pytest.mark.parametrize("own", [4, 5, 6])
 def test_a_build_that_fails_with_one_of_the_driver_s_own_codes_exits_7(
     tmp_path: Path,
