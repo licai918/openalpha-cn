@@ -351,3 +351,121 @@ def test_a_smoke_weekly_report_is_bannered_and_the_report_it_writes_is_not(
         lines = out.splitlines()
         assert lines[0] == lines[-1] == daily.SMOKE_BANNER
         assert lines[-2] == f"written to {written}"
+
+
+# --- every other print path ----------------------------------------------------------------------
+
+P6_SMOKE_SETTINGS: Final[dict[str, Any]] = {**tds.grid.protocol_settings(), "smoke_run": MARKER}
+"""A P6 registration's measurement settings with the marker: a smoke registration of the P6
+configuration, whose day prints the P6 summary (`daily_selection.summary_lines`)."""
+
+
+def _injected_fault(*_arguments: Any, **_keywords: Any) -> Any:
+    raise RuntimeError("an injected fault that no step anticipated")
+
+
+def _marked_file(root: Path) -> Path:
+    """A file that carries the marker and nothing else: enough for the banner, which is read
+    before anything is admitted."""
+    path = root / "registration.json"
+    path.write_text(json.dumps({"settings": {"smoke_run": MARKER}}), encoding="utf-8")
+    return path
+
+
+def test_a_refused_smoke_evening_in_json_carries_the_banner_under_its_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seeded: Path,  # noqa: F811
+) -> None:
+    """Step 8 refused with `--json`: the document as far as it got carries the banner, as the
+    refusal block does in text."""
+    smoke = _smoke_world(tmp_path, seeded)
+    tds._bind(monkeypatch, smoke.repo, smoke.market)
+    monkeypatch.setattr(strategy_survivor_book, "evening", survivor_day._refused_evening)
+    smoke.market.today = survivor_day.DAY
+
+    code, out, err = _invoke(
+        daily.main,
+        _day_arguments(smoke, survivor_day.DAY_AS_OF, "--json"),
+        clock=lambda: survivor_day.RUN_CLOCK,
+    )
+
+    assert code == 1
+    assert err[0] == err[-1] == daily.SMOKE_BANNER
+    assert err[1] == survivor_day.INJECTED
+    shown = json.loads(out)
+    assert shown["smoke"] == daily.SMOKE_BANNER
+    assert shown["paper_skipped"]["reason"] == survivor_day.INJECTED
+
+
+def test_a_smoke_registration_of_a_p6_configuration_banners_the_p6_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`test_daily_selection`'s January world -- its configuration, its seeded panel -- under a
+    smoke registration: the P6 day's text is bannered first and last, as a survivor day's is."""
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            tds,
+            "_repository",
+            lambda root, config: survivor_report._repository(
+                root, config, settings=P6_SMOKE_SETTINGS
+            ),
+        )
+        p6 = tds._world(tmp_path, monkeypatch, tds.Market(open_days=tds.OPEN_2026))
+    p6.market.today = tds.DAY
+    targets = [argument for target in tds.TARGETS for argument in ("--dataset", target)]
+
+    code, out, err = _invoke(
+        daily.main, _day_arguments(p6, tds.DAY_AS_OF, *targets), clock=lambda: tds.RUN_CLOCK
+    )
+
+    lines = out.splitlines()
+    assert code == 0, err
+    assert lines[0] == lines[-1] == daily.SMOKE_BANNER
+    assert lines[1].startswith("session            2026-01-19")
+    assert lines[-2].startswith("wording")
+    assert err[0] == err[-1] == daily.SMOKE_BANNER
+
+
+@pytest.mark.parametrize("morning", [False, True])
+def test_a_fault_no_step_anticipated_still_closes_the_daily_banner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, morning: bool
+) -> None:
+    """The closing banner is printed in a `finally`: a fault that escapes `main` still leaves
+    both banners on stderr (its traceback, printed by the interpreter, comes after them)."""
+    registration = _marked_file(tmp_path)
+    monkeypatch.setattr(daily, "run_daily_selection", _injected_fault)
+    monkeypatch.setattr(daily, "run_morning_recheck", _injected_fault)
+    arguments = ["--runtime-dir", str(tmp_path / "runtime"), "--registration", str(registration)]
+    arguments += ["--repo", str(tmp_path), *(["--morning-recheck"] if morning else [])]
+    out, err = io.StringIO(), io.StringIO()
+
+    with (
+        pytest.raises(RuntimeError, match="no step anticipated"),
+        contextlib.redirect_stdout(out),
+        contextlib.redirect_stderr(err),
+    ):
+        daily.main(arguments, clock=lambda: MORNING_AS_OF)
+
+    assert err.getvalue().splitlines() == [daily.SMOKE_BANNER, daily.SMOKE_BANNER]
+    assert out.getvalue() == ""
+
+
+def test_a_fault_no_refusal_anticipated_still_closes_the_weekly_banner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registration = _marked_file(tmp_path)
+    monkeypatch.setattr(forward_report, "forward_report", _injected_fault)
+    arguments = ["--runtime-dir", str(tmp_path / "runtime"), "--registration", str(registration)]
+    arguments += ["--repo", str(tmp_path), "--as-of", REPORT_AS_OF.isoformat()]
+    out, err = io.StringIO(), io.StringIO()
+
+    with (
+        pytest.raises(RuntimeError, match="no step anticipated"),
+        contextlib.redirect_stdout(out),
+        contextlib.redirect_stderr(err),
+    ):
+        forward_report.main(arguments, clock=lambda: REPORT_AS_OF)
+
+    assert err.getvalue().splitlines() == [daily.SMOKE_BANNER, daily.SMOKE_BANNER]
+    assert out.getvalue() == ""
