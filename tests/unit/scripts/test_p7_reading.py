@@ -694,6 +694,77 @@ def test_a_registration_the_read_could_not_use_is_refused_before_it_is_written(
     assert not path.exists()
 
 
+@pytest.mark.parametrize(
+    ("changes", "said"),
+    [
+        # The reviewer's probe: a Saturday first day, refused by the plan only after the claim.
+        ({"request": {**REQUEST, "first": "2022-01-08"}}, "after the validation window's first"),
+        ({"request": {**REQUEST, "first": "2022-03-01"}}, "whole window"),
+        ({"request": {**REQUEST, "last": "2023-06-30"}}, "before the validation window's last"),
+        (
+            {"window": "second_use", "role": "secondary", "stop_rule": None},
+            "second_use window's first",
+        ),
+        # The reviewer's probe: the book drops the worst two tenths, the request four.
+        ({"request": {**REQUEST, "loser_decile_count": 4}}, "loser_decile_count 4 is not the book"),
+        # The reviewer's probe: 519 weekdays at stride 20 and h20 hold at most 26 periods.
+        (
+            {
+                "stop_rule": p7_reading.StopRule(
+                    score="composite", horizon=20, minimum_periods=36, any_of=RULE.any_of
+                )
+            },
+            "at most 26",
+        ),
+        (
+            {
+                "stop_rule": p7_reading.StopRule(
+                    score="composite", horizon=20, minimum_periods=27, any_of=RULE.any_of
+                )
+            },
+            "minimum_periods 27 cannot be reached",
+        ),
+    ],
+)
+def test_a_registration_that_could_only_spend_the_window_badly_is_refused_before_any_claim(
+    tmp_path: Path, changes: dict[str, Any], said: str
+) -> None:
+    """Fix round 1, rulings 3a, 3c and 6: whatever needs no outcome data is checked before the
+    window is claimed -- a reading covers its whole window, its request reads the book's survivors,
+    and its stop rule's minimum can be reached."""
+    path = tmp_path / "v2-p7-024-validation.registration.json"
+    with pytest.raises(p7_reading.ReadingError, match=said):
+        register(path, **changes)
+    assert not path.exists()
+
+
+def test_a_minimum_the_plan_can_reach_is_registered(tmp_path: Path) -> None:
+    """The bound for this window: 519 weekdays, at most 26 non-overlapping periods at stride 20
+    and h20, at stride 5 and h20 (every fourth of 104 signals), and at stride 20 and h5."""
+    rule = p7_reading.StopRule(
+        score="composite", horizon=20, minimum_periods=26, any_of=RULE.any_of
+    )
+    register(tmp_path / "v2-p7-024-validation.registration.json", stop_rule=rule)
+    assert (
+        p7_reading._most_periods(
+            p7_windows.VALIDATION.first, p7_windows.VALIDATION.last, stride=20, horizon=20
+        )
+        == 26
+    )
+    assert (
+        p7_reading._most_periods(
+            p7_windows.VALIDATION.first, p7_windows.VALIDATION.last, stride=5, horizon=20
+        )
+        == 26
+    )
+    assert (
+        p7_reading._most_periods(
+            p7_windows.VALIDATION.first, p7_windows.VALIDATION.last, stride=20, horizon=5
+        )
+        == 26
+    )
+
+
 def test_a_registration_is_named_after_its_reading(tmp_path: Path) -> None:
     with pytest.raises(p7_reading.ReadingError, match=r"v2-p7-024-validation\.registration\.json"):
         register(tmp_path / "validation.json")
@@ -802,19 +873,26 @@ class Catalogue:
         return self.years.get(dataset, ())
 
 
-def test_the_preflight_names_each_window_year_a_dataset_lacks() -> None:
-    catalogue = Catalogue({"daily": (2021, 2022, 2023), "adj_factor": (2022,)})
+def test_the_preflight_names_each_year_a_dataset_lacks_the_year_before_the_window_included() -> (
+    None
+):
+    """The calendar and the label reader also read the year before the window (2021 here), so a
+    dataset that lacks only that year is a problem too (fix round 1, ruling 3b)."""
+    catalogue = Catalogue(
+        {"daily": (2021, 2022, 2023), "adj_factor": (2022,), "trade_cal": (2022, 2023)}
+    )
 
     problems = p7_reading.preflight_problems(
         catalogue,  # type: ignore[arg-type]
         window=p7_windows.VALIDATION,
-        datasets=("daily", "adj_factor", "suspend_d"),
+        datasets=("daily", "adj_factor", "suspend_d", "trade_cal"),
     )
 
-    assert catalogue.asked == ["daily", "adj_factor", "suspend_d"]
-    assert len(problems) == 2
-    assert problems[0].startswith("adj_factor lists no partition for [2023] ")
-    assert problems[1].startswith("suspend_d lists no partition for [2022, 2023] ")
+    assert catalogue.asked == ["daily", "adj_factor", "suspend_d", "trade_cal"]
+    assert len(problems) == 3
+    assert problems[0].startswith("adj_factor lists no partition for [2021, 2023] ")
+    assert problems[1].startswith("suspend_d lists no partition for [2021, 2022, 2023] ")
+    assert problems[2].startswith("trade_cal lists no partition for [2021] ")
 
 
 def test_the_default_preflight_asks_for_every_dataset_the_read_opens() -> None:

@@ -13,6 +13,17 @@ a default (they are the user's); a `secondary` one carries none. Every rule `reg
 applies is applied again by `read_once` before its claim, so a registration written by hand is
 held to the same ones.
 
+Whatever can be checked without outcome data is checked there, before anything is claimed, because
+a failure after the claim spends the window:
+
+* a reading covers its **whole** window, from the window's first session to its last (`first` and
+  `last` are the window's own days). The window is read once (step 4), so a reading of part of it
+  would spend all of it, and a first day that is not a session cannot be registered;
+* the request reads the book's survivors (its `loser_decile_count` is the book's, as in `explore`);
+* a stop rule's `minimum_periods` can be reached: it is at most the bound `_most_periods` reads off
+  the weekdays of the window, the stride and the rule's horizon, with no data -- a larger one
+  could only ever be "triggered: unreadable".
+
 `read_once` refuses, in this order, each refusal its own exception, none of them writing anything:
 
 1. `registry.RegistrationNotCommittedError` -- the registration is not in the committed history of
@@ -34,8 +45,9 @@ held to the same ones.
    what makes it one read **per window**, whatever reading names it -- `registry._holdout_allowed`
    refuses any holdout row the same way, whatever registration wrote it. The rule holds for every
    window a reading opens, `validation` and `second_use` alike.
-5. `ReadingPreflightError` -- the panel catalogue lacks a year of the window in a dataset the read
-   opens (`preflight_problems`; it asks `registered_years` and reads no partition).
+5. `ReadingPreflightError` -- the panel catalogue lacks a year of the window, or the year before
+   it (the calendar and the label reader read that one too), in a dataset the read opens
+   (`preflight_problems`; it asks `registered_years` and reads no partition).
 
 It then writes the window's claim and then the reading's, `<reading>.claim.json`, each with
 `O_CREAT | O_EXCL` -- a second read racing this one loses there (`ReadingAlreadyClaimedError`) --
@@ -71,15 +83,15 @@ What this does not establish:
   but not after a history rewrite leaves it on no ref (a reset, a rebase or a filter, then a
   garbage collection).
 * It binds a procedure, not access to the data. Code that builds a `WindowCappedStore` for the
-  validation window itself, calls `read_once` with a `measure` of its own, builds a `PanelStore` on
-  the panel root or opens the Parquet files reads the window with no claim. A claim says this path
-  was taken once; it cannot say no other path was.
+  validation window itself, calls `read_once` with a `measure` of its own, calls the default
+  measure directly (`_panel_measure(runtime_dir)(body, VALIDATION, binding)` -- the tests do, on
+  stand-in stores), builds a `PanelStore` on the panel root or opens the Parquet files reads the
+  window with no claim. A claim says this path was taken once; it cannot say no other path was.
 * `uv.lock` in the binding proves the lock file did not change, not that the running environment
   matches it (`registry`'s limit, unchanged).
 * The preflight sees which years the catalogue lists, nothing more: a partition that is listed but
-  incomplete, a signal day without a factor build, a registered first day that is not a session,
-  or a gap in a year before the window that the calendar and the label reader also read is met by
-  the measurement, after the claim -- and the read is spent on it.
+  incomplete, or a signal day without a factor build, is met by the measurement, after the claim --
+  and the read is spent on it.
 * The second-use store serves 2026 whole, rows after 2026-09-24 included; keeping them out is the
   plan's label rule and the readers' (`p7_windows`), not the store's.
 
@@ -333,8 +345,10 @@ def register_reading(
     `[a-z0-9][a-z0-9-]*`, a `path` not named `<reading>.registration.json`, a window other than
     `validation` or `second_use` (the research window is `p7_diagnostics explore`'s), a primary
     reading without a stop rule or a secondary one with one, a stop rule whose score or horizon the
-    request does not measure, a request or a configuration the diagnostics cannot run, and a code
-    commit that is not a full, clean commit id. Writing the same registration again returns the
+    request does not measure or whose `minimum_periods` the window cannot reach, a request that is
+    not the whole window or whose loser count is not the book's, a request or a configuration the
+    diagnostics cannot run, and a code commit that is not a full, clean commit id. Writing the
+    same registration again returns the
     same digest; a different one at an existing path is refused. Committing it is the caller's
     step. Pass `code_commit` resolved once, before writing (`registry.register`'s reason).
     """
@@ -422,7 +436,34 @@ def _registration_of(body: Mapping[str, Any]) -> _Registration:
                 f"the stop rule's horizon {rule.horizon} is not among the request's horizons "
                 f"{list(settings.explore.horizons)}"
             )
+        explore = settings.explore
+        most = _most_periods(
+            explore.first, explore.last, stride=explore.stride, horizon=rule.horizon
+        )
+        if rule.minimum_periods > most:
+            raise ReadingError(
+                f"the stop rule's minimum_periods {rule.minimum_periods} cannot be reached: "
+                f"{explore.first}..{explore.last} holds {_weekdays(explore.first, explore.last)} "
+                f"weekdays, so at most {most} non-overlapping signal days at stride "
+                f"{explore.stride} and h={rule.horizon}; such a rule could only ever read "
+                "'triggered: unreadable'"
+            )
     return _Registration(reading=reading, window=window, stop_rule=rule)
+
+
+def _weekdays(first: date, last: date) -> int:
+    """The weekdays from `first` to `last`, both counted: a bound on the sessions between them."""
+    weeks, rest = divmod((last - first).days + 1, 7)
+    return weeks * 5 + sum(1 for day in range(rest) if (first.weekday() + day) % 7 < 5)
+
+
+def _most_periods(first: date, last: date, *, stride: int, horizon: int) -> int:
+    """A bound, read from no data, on the non-overlapping periods a plan of `first..last` can
+    summarise: every `stride`-th session is a signal day (`plan_signal_days`), every
+    `ceil(horizon / stride)`-th signal day is sampled (`p7_diagnostics.summarize`), and there are
+    no more sessions than weekdays. Embargoed days and gaps only lower it."""
+    signals = math.ceil(_weekdays(first, last) / stride)
+    return math.ceil(signals / math.ceil(horizon / stride))
 
 
 def _settings_of(request: object, config: object, window: DiagnosticWindow) -> _Settings:
@@ -431,18 +472,22 @@ def _settings_of(request: object, config: object, window: DiagnosticWindow) -> _
     request = _require_keys("request", request, _REQUEST_KEYS)
     config = _require_keys("config", config, _CONFIG_KEYS)
     first, last = _day("first", request["first"]), _day("last", request["last"])
-    if first < window.first:
+    whole = (
+        "; a reading covers its whole window, from its first session to its last -- the window is "
+        "read once, so reading a part of it would spend all of it"
+    )
+    if first != window.first:
+        side = "before" if first < window.first else "after"
         raise ReadingError(
-            f"the request's first day {first} is before the {window.name} window's first day "
-            f"{window.first}"
+            f"the request's first day {first} is {side} the {window.name} window's first day "
+            f"{window.first}{whole}"
         )
-    if last > window.last:
+    if last != window.last:
+        side = "past" if last > window.last else "before"
         raise ReadingError(
-            f"the request's last day {last} is past the {window.name} window's last day "
-            f"{window.last}"
+            f"the request's last day {last} is {side} the {window.name} window's last day "
+            f"{window.last}{whole}"
         )
-    if last < first:
-        raise ReadingError(f"the request's last day {last} is before its first day {first}")
     stride = _whole("stride", request["stride"], least=1)
     horizons = _wholes("horizons", request["horizons"], least=1, most=MAX_HORIZON_COUNT)
     tails = _wholes("tails", request["tails"], least=1, most=DECILES - 1)
@@ -466,6 +511,12 @@ def _settings_of(request: object, config: object, window: DiagnosticWindow) -> _
         book = SurvivorBookConfig.model_validate(config["book"])
     except ValueError as error:
         raise ReadingError(f"the registered book is not a SurvivorBookConfig: {error}") from error
+    if loser_decile_count != book.loser_decile_count:
+        raise ReadingError(
+            f"the request's loser_decile_count {loser_decile_count} is not the book's "
+            f"{book.loser_decile_count}; the survivors read are the book's (explore takes the "
+            "book's count)"
+        )
     transform = config["transform"]
     try:
         FACTOR_TRANSFORMS.get(transform)
@@ -681,10 +732,12 @@ def evaluate_stop_rule(rule: StopRule, document: Mapping[str, Any]) -> dict[str,
 def preflight_problems(
     store: PanelStore, *, window: DiagnosticWindow, datasets: Sequence[str]
 ) -> tuple[str, ...]:
-    """Each dataset of `datasets` that lists no partition for a year of `window`, by name with the
-    years it lacks; `()` when every one lists them all. Only `registered_years` is asked: no
-    partition is opened, so a listed year may still be incomplete."""
-    years = tuple(range(window.first.year, window.ceiling_year + 1))
+    """Each dataset of `datasets` that lists no partition for a year the read opens, by name with
+    the years it lacks; `()` when every one lists them all. The years are the window's and the one
+    before it, which the calendar and the label reader also read (`label_years`). Only
+    `registered_years` is asked: no partition is opened, so a listed year may still be
+    incomplete."""
+    years = tuple(range(window.first.year - 1, window.ceiling_year + 1))
     problems: list[str] = []
     for dataset in datasets:
         held = set(store.registered_years(dataset))
