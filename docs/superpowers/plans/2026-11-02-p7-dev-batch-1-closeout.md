@@ -5,8 +5,8 @@
 ## 0. 先读这几句
 
 - 批次 1 是 2026-11-01 路线调整（`docs/superpowers/plans/2026-11-01-p7-route-adjustment.md`）之后的第一批开发：`V2-P7-004`、`009`、`018`、`019`、`021`，加上批次中新发现、只新增了 issue 而没有写代码的 `V2-P7-025`。三份计划是 `2026-11-01-p7-dev-batch-1-A-smoke-harness.md`（019）、`…-B-new-year-and-009.md`（021、009）、`…-D-diagnostics-and-power.md`（004、018）。
-- 代码在集成分支 `feat/v2-p7-004-dev-batch-1` 上（从 `main` 的 `cccf3c6` 分出）。**批次的代码在 `22d65ae` 冻结**，控制者的串行全量闸门（`tests/unit`）就跑在这一版上：3 个失败 / 6684 通过（控制者的报告），第三个失败是计划文档里那处未解析的测试引用，由本轮文档修掉。其后**只有** docstring、注释、一条守卫字符串和闸门修复，不改可执行行为，清单见下一条。**未推送；没有对真实数据或真实面板运行过，一次 Tushare 请求也没有发过**：所有测试都跑在脚本化行情和测试时生成的夹具上。
-- **`22d65ae` 之后动过字节的文件。**受登记绑定的两个：`scripts/daily_selection.py`（模块 docstring，`b6caf67`；去掉 docstring 之后的 AST 与改前相同）、`src/openalpha_cn/panel/store.py`（一处 docstring 的改写，由闸门发现，按闸门修复处理；提交在本轮文档之后，哈希以 `git log` 为准）。不受绑定的：`tests/unit/scripts/test_daily_selection_survivor_day.py`、`tests/unit/scripts/test_forward_report_survivor.py`（docstring，`b6caf67`）；`tests/integration/test_documented_counts_match_the_code.py`（一条守卫的 `reason` 字符串，`5a7ce43`，不是 docstring）；闸门发现的另一处是一个驱动测试为 help 审计重写，同样是闸门修复、以 `git log` 为准。**没有任何登记存在**（每日登记自 2026-10-08 暂停），所以没有绑定因此被作废。**在 `22d65ae` 上取的闸门数字不是这些文件最终字节上的数字。**
+- 代码在集成分支 `feat/v2-p7-004-dev-batch-1` 上（从 `main` 的 `cccf3c6` 分出）。**批次的代码在 `22d65ae` 冻结**，控制者的第一次串行全量闸门（`tests/unit`）就跑在这一版上：3 个失败 / 6684 通过（控制者的报告），第三个失败是计划文档里那处未解析的测试引用，由本轮文档修掉。其后是 docstring、注释、一条守卫字符串、两处闸门修复，以及终审要求的**一处行为改动**（`second_use` 读数的标题与措辞，提交 `cc7dc60`），清单见下一条。**第二次串行全量在 `6786aea` 上：6687 通过、0 失败（用时 1:05:42，控制者的报告）；`cc7dc60` 之后只对 `second_use` 措辞相关的文件跑了定向测试，没有再跑全量。****未推送；没有对真实数据或真实面板运行过，一次 Tushare 请求也没有发过**：所有测试都跑在脚本化行情和测试时生成的夹具上。
+- **`22d65ae` 之后动过字节的文件。**受登记绑定的两个：`scripts/daily_selection.py`（模块 docstring，`91758be`；去掉 docstring 之后的 AST 与改前相同）、`src/openalpha_cn/panel/store.py`（一处 docstring 的改写，由闸门发现，`6786aea`）。不受绑定的：`tests/unit/scripts/test_daily_selection_survivor_day.py`、`tests/unit/scripts/test_forward_report_survivor.py`（docstring，`91758be`）；`tests/integration/test_documented_counts_match_the_code.py`（一条守卫的 `reason` 字符串，`6762c35`，不是 docstring）；闸门发现的另一处是一个驱动测试为 help 审计重写（`df6afcb`）。**没有任何登记存在**（每日登记自 2026-10-08 暂停），所以没有绑定因此被作废。终审之后还有一处**行为改动**，同样受登记绑定：`scripts/research/p7_diagnostics.py` 与 `scripts/research/p7_reading.py`（`second_use` 读数的标题与措辞按窗口区分，验证窗口的文本逐字节不变；`cc7dc60`，连同两个测试文件）。冻结之前还有一处值得单列的受绑定措辞改动：`src/openalpha_cn/panel/catalog.py` 把 P6 报表空年过期那条拒绝里的 `its "nothing filed yet"` 改成 `its empty answer`——这是真实路径上的消息字节变化，不只是 docstring（B3 修复轮；没有测试或工具匹配旧文字）。**在 `22d65ae` 上取的闸门数字不是这些文件最终字节上的数字。**
 - 集成分支由多条轨道逐个挑拣而成，提交在历史里交错，所以下面**列出提交**而不写区间。哈希取自 `git log cccf3c6..22d65ae`；三份控制者账本（不在版本库内：主检出的 `.superpowers/sdd/`，被 `.superpowers/sdd/.gitignore` 忽略）里的哈希是挑拣之前的，不能直接用。
 - 各行的"通过"数字是实现者和评审者各自最后一次**定向**运行的数字，来自账本，这一轮文档没有重跑。整个 `tests/unit` 与发布门禁由控制者在集成分支上串行跑；在 `22d65ae` 上跑的那一次见本节第二条。
 - 账本与代码不一致的地方，以代码为准，见 §8。
@@ -45,7 +45,7 @@
 ### `V2-P7-021` 空的名称变更公告年
 
 - 提交（7 个代码与测试，另有计划文档 `eb8f9de`）：面板层 `be89396`、`5cefff4`、`4396298`；`panel build` 接线 `a408b77`；端到端 `37c97fc`、`590ed44`；周报与迟到记录核查跨年 `b3b02bb`。
-- 一年里第一条更名公告之前，`panel build` 把该年的 `namechange` 记成零行分区（`panel_ingest.write_empty_name_year`，`cli._write_name_year`），读者只在该年 1 月 31 日（上海日历日）之前把它读作"尚无更名"（`domain/name_history.name_year_may_be_empty`）。失败或截断的抓取、窗口之后的空回答、已有更名行的年、非当年的空回答仍按名拒绝；实际要改的只有一个写入口和一个读规则，事实读取与晨查一行没改。
+- 一年里第一条更名公告之前，`panel build` 把该年的 `namechange` 记成零行分区（`panel_ingest.write_empty_name_year`，`cli._write_name_year`），读者只在到该年 1 月 31 日（含，上海日历日）为止把它读作"尚无更名"（`domain/name_history.name_year_may_be_empty`）。失败或截断的抓取、窗口之后的空回答、已有更名行的年、非当年的空回答仍按名拒绝；实际要改的只有一个写入口和一个读规则，事实读取与晨查一行没改。
 - **两个取值是暂定的**（§5 U1/U2）。**这一行不等于新年首晚能走完**：登记簿自己的缺口是 `V2-P7-025`。
 - **未做**：台账行（建议 `OA-PANEL-043`）。
 
@@ -129,7 +129,7 @@
 
 **D5 读一次**：浅克隆的拒绝抛的是 `ReadingAlreadyClaimedError`（命名上的毛病）；"在第一次提交之前改名"（R3b）等于文档写明的"从未提交"缺口；四次逐文件的 `git log` 可以并进一次扫描，`git cat-file --batch`；`_write_new` 没 fsync 目录项；默认测量与 `p7_diagnostics._open_sources` 近似重复；目录库的锁在整个计算期间持有（`PanelStore.reading()` 的 docstring 说"锁只该跨读取、不该跨计算"，读一次的默认测量跨了整个计算；它的 docstring 说克隆过的面板承受得起，没有任何东西强制它是克隆）；两个结果文件之间崩溃后没有办法重生成 `.result.txt`；认领之后的 `_diagnostic_request` 今天到不了；验证块部分重复了 `_explore_settings`；`second_use` 的单独处理；`PREFLIGHT_DATASETS` 与真实目录库的对照要在运行时核（运营检查）；`registry._refuse_a_changed_source` 仍跟随替换 ref，替换 ref 可能让改过的受绑定代码看起来没变（在 `registry.py`，本模块之外）；永久、全局的失败即关闭（一个读不通的认领提交过，就挡住所有窗口，除非重写历史）。
 
-**D6 周报功效**：`document['power']` 无防护地读（普通 dict，没有找到读者）；`strategy_survivor_forward.py` 从 2209 行长到约 2750 行，约 430 行功效逻辑可以拆成自己的模块；`stated = level` 的重绑定写法；`sd_source` 逐字印出可能触发措辞守卫；观测的一阶自相关取自无缺口的序列（`OBSERVED_WORDING` 应说明）。另：`backtest/power_analysis.py` 的 `power_table_lines` 总是在末尾加上读数规则，**只有 `p7_diagnostics power` 调用它**，周报不用它；绝不能把它用到窗口之前的周报上。
+**D6 周报功效**：`document['power']` 无防护地读（普通 dict，没有找到读者）；`strategy_survivor_forward.py` 从 2225 行（`cccf3c6`）长到 2760 行（`22d65ae`），约 430 行功效逻辑可以拆成自己的模块；`stated = level` 的重绑定写法；`sd_source` 逐字印出可能触发措辞守卫；观测的一阶自相关取自无缺口的序列（`OBSERVED_WORDING` 应说明）。另：`backtest/power_analysis.py` 的 `power_table_lines` 总是在末尾加上读数规则，**只有 `p7_diagnostics power` 调用它**，周报不用它；绝不能把它用到窗口之前的周报上。
 
 **A1 横幅**：准入读与标记读之间的 TOCTOU（可选的加固：准入之后检查 `Registration.settings` 带标记就拒绝无横幅的路径）；`smoke_banner` 的 docstring 说"准入以各自的方式拒绝每一条这样的路径"，而 `forward_report` 对提交过的嵌套 JSON 和读不了的文件以 traceback 收尾（基线上就是）；未捕获异常时 traceback 印在收尾横幅之后。
 
@@ -154,6 +154,8 @@
 7. **产品选项**（都没建）：账户成交对账输入；只读的 `--show-book`；买单按现金定量（用户 09:15 实际能下的单）而不是"现金加当晚卖出回款"（改内核要在 `006a` 登记前冻结）。
 8. **是否为 N1、N2（`daily_selection._step`、`daily_selection.invoke`）另立 issue**：两处在受绑定代码里，都影响每日命令本身，改了要换登记。
 9. **读一次的两处是否放宽**：整窗口覆盖的规则（可由一行 §9 放宽）；永久、全局失败即关闭的逃生口（只提议了，没实现）。
+10. **`024` 之前要补的（终审的建议，保护唯一一次不可逆的读；都没做）**：① `minimum_periods` 的上界要把禁运算进去——验证窗口、步长 20、h20 时按周数的上界是 26，实际最多 24，设成 25 或 26 能通过登记，认领之后必然「不可读」，唯一的一次读白白用掉：认领之前从受限存储读 `trade_cal`（日历不是结果数据），按 `plan_signal_days` 与 `summarize` 算出精确上界再拒绝；② 诊断与读一次要拒绝把运行目录指向 `~/openalpha-research` 或主检出（复用冒烟 `PathPolicy` 的两条规则；今天「只用 `cp -c` 克隆」这个前提全靠人，连接只读，但会在 P6 面板根目录建 `catalog.duckdb.lock` / `.gate`，读一次还会在整个计算期间持锁）；③ 读一次不强制先读验证窗口再读 `second_use`——先读 `second_use` 会让 2024–2026 的结果影响之后才写的验证停止规则数值：把两份登记放在同一个提交里并先读验证窗口，或让 `second_use` 要求验证窗口的认领已提交；④ `as_of` 是知识时钟，`p7_reading.py` 只设了下界：窗口之后才公布的修订和迟到更名会进入窗口内会话的打分，所以 `024` 是「在 `as_of` 时的知识下重算」，不是按每个会话当时的发布时刻回放——登记时选定并说明理由，并在结果文本里写明。
+11. **终审的卫生项（都没做，都不挡合并）**：`prepare` 不拒绝源面板里的符号链接（2026-11-02 对真实 `~/openalpha-research/panel` 做了只读列举，符号链接 0 个，所以今天不成立）；驱动的退出码 1 不只是「被包住命令自己的 1」——任何其它未预期异常（日志 `open("x")` 的 `OSError`、逃出去的 typer UsageError、并发 `prepare` 时 `target.mkdir()` 的 `FileExistsError`）也会 traceback 并退出 1，仍然失败即关闭（下一次调用退出 5）；`_lag1_autocorrelation` 在 `decile_readout` 与 `strategy_survivor_forward` 各有一份（等价）；`write_empty_name_year` 在 coverage 为 None 时照写空分区（沿用 P6-018 的先例）。
 10. **Task 7 的明确"开始"**（研究期 2015–2021 的读数，零次请求，APFS 克隆约 6.1 GB 的元数据；写 `T11`）。
 11. **`git fetch --unshallow`**（需要联网访问 origin，不是 Tushare）：主检出是浅克隆；读一次的校验读和冒烟的 `prepare` 都要先处理它。
 
@@ -185,6 +187,6 @@
 - 账本把周报标签读取的拒绝写作 `partition_file_missing`；那是探针**删掉分区文件**（目录库仍登记着它）时的状态。一个目录库从未登记过该年时应是 `partition_missing`（读代码推得，未探针）。路线图 `V2-P7-025` 行如实写了两种。
 - 账本里的提交哈希是挑拣前的；本文只用 `git log` 上的哈希。
 - 账本曾记"文档引用里有 14 / 53 个未解析"；实测是 1 个（计划 A 里一处引用了 conftest 里一个并不存在的名字；实际守卫联网的钩子是 `tests/conftest.py` 里的 `pytest_runtest_protocol` 与 `pytest_collection`）。
-- 运行手册「已知局限（幸存者形态）」第 1 条和冒烟一节「不跑 2027 年第一个交易日」那条，在 `021` 的代码合入后已不真，B4 / B5 评审点出过但没人改；本轮改了（提交 `687c295`）。
+- 运行手册「已知局限（幸存者形态）」第 1 条和冒烟一节「不跑 2027 年第一个交易日」那条，在 `021` 的代码合入后已不真，B4 / B5 评审点出过但没人改；本轮改了（提交 `3a20689`）。
 - 代码的模块文档串里，`backtest/power_analysis.py` 仍写"每个平台上同一个浮点数"，libm 不保证（延后项）。
 - 受绑定代码清单（计划 B）漏了 `src/openalpha_cn/panel/catalog.py`（只改了文字，没有匹配器）；计划 B 已补。
