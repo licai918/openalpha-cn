@@ -1,0 +1,886 @@
+"""`scripts/research/p7_diagnostics.py` (`V2-P7-004`): the diagnostics engine over a score source
+and a label source, its document and its lines, held to hand-computed numbers on generated
+inputs; and the two real sources wired over panels generated at test time (the survivor facts
+frame for the scores, the forward tests' label panel for the labels). No research store is read."""
+
+from __future__ import annotations
+
+import dataclasses
+import hashlib
+import importlib
+import json
+import math
+import os
+import re
+import subprocess
+import sys
+from collections.abc import Callable, Mapping
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
+from typing import Any, Final
+from zoneinfo import ZoneInfo
+
+import pytest
+from panel_fixtures import AS_OF, EXCHANGE
+from test_strategy_survivor_forward import (
+    BOOK as FORWARD_BOOK,
+)
+from test_strategy_survivor_forward import (
+    CALENDAR,
+    PANEL_SCORES,
+    SESSIONS,
+    panel_store,  # noqa: F401  (module fixture)
+    reader_of,
+    witnessed_on,
+)
+from test_survivor_facts_panel import (
+    CONFIG as FRAME_BOOK,
+)
+from test_survivor_facts_panel import (
+    IDENTITY,
+    SIGNAL,
+    SIGNAL_INDEX,
+    evening,
+    full_store,  # noqa: F401  (module fixture)
+    read_day,
+)
+
+from openalpha_cn.backtest.decile_readout import summarize_series
+from openalpha_cn.backtest.power_analysis import (
+    by_first_step_level,
+    futility_stop_probability,
+    periods_for_power,
+    power_of_mean_test,
+    power_table_lines,
+    power_with_futility,
+)
+from openalpha_cn.domain.horizon import ResearchHorizon
+from openalpha_cn.domain.labels import LabelWindow, OutcomeLabel, WindowReturn, build_label_window
+from openalpha_cn.domain.survivor_screen import screen
+from openalpha_cn.domain.trading_calendar import (
+    CalendarDay,
+    TradingCalendar,
+    build_trading_calendar,
+)
+from openalpha_cn.model_view import ModelRunBlockedError
+from openalpha_cn.panel.store import PanelStorageError, PanelStore
+from openalpha_cn.strategy_survivor_facts import SurvivorFactsError
+from openalpha_cn.strategy_survivor_forward import record_outcome
+
+ROOT: Final[Path] = Path(__file__).resolve().parents[2]
+RESEARCH: Final[Path] = ROOT / "scripts" / "research"
+SHANGHAI: Final[ZoneInfo] = ZoneInfo("Asia/Shanghai")
+
+
+def _research_module(name: str) -> ModuleType:
+    if str(RESEARCH) not in sys.path:
+        sys.path.insert(0, str(RESEARCH))
+    return importlib.import_module(name)
+
+
+grid = _research_module("grid")
+p7_windows = _research_module("p7_windows")
+p7 = _research_module("p7_diagnostics")
+FIXTURE_WINDOW = p7_windows.DiagnosticWindow(
+    name="fixture", first=date(2026, 1, 5), last=date(2026, 12, 31), ceiling_year=2026
+)
+"""The generated panels are 2026's; the engine takes any window, the CLI only the research one."""
+CODES: Final[tuple[str, ...]] = tuple(f"6000{n:02d}.SH" for n in range(20))
+TAIL: Final[Mapping[int, float]] = {0: -0.03, 1: -0.03, 2: -0.01, 3: -0.01}
+FORBIDDEN: Final = re.compile(
+    r"\b(significant|effective|confirmed|alpha|outperform|passed|failed|proven)\b",
+    flags=re.IGNORECASE,
+)
+"""The forward report's verdict words, as words (`test_strategy_survivor_forward.verdict_words`):
+the document's own `provenance` key is vocabulary, not a verdict."""
+FORBIDDEN_PREFIXES: Final = re.compile(
+    r"\b(significant|confirmed|alpha|effective|outperform)", flags=re.IGNORECASE
+)
+"""`test_forward_report_survivor.FORBIDDEN`: no trailing boundary, so `effectively` counts too."""
+FIXED_CONFIG: Final[Mapping[str, Any]] = {
+    "as_of": datetime(2026, 10, 9, tzinfo=SHANGHAI),
+    "transform": "probe_identity/v1",
+}
+
+
+class TableLabels:
+    """A label source on a calendar (the generated 2026 one unless told) answering from
+    `answer(entry_day, code)`, counting every question."""
+
+    def __init__(
+        self, answer: Callable[[date, str], float | None], *, calendar: Any = CALENDAR
+    ) -> None:
+        self.calendar = calendar
+        self.answer = answer
+        self.asked: list[tuple[str, date]] = []
+
+    def window(self, instant: datetime, *, horizon: ResearchHorizon) -> LabelWindow:
+        return build_label_window(
+            as_of=instant, zone=SHANGHAI, horizon=horizon, calendar=self.calendar
+        )
+
+    def label(self, ts_code: str, window: LabelWindow) -> OutcomeLabel | None:
+        self.asked.append((ts_code, window.entry_day))
+        value = self.answer(window.entry_day, ts_code)
+        if value is None:
+            return None
+        return OutcomeLabel(
+            ts_code=ts_code,
+            window=window,
+            refusals=(),
+            entry_touch=None,
+            exit_touch=None,
+            window_return=WindowReturn(
+                ts_code=ts_code,
+                entry_day=window.entry_day,
+                exit_day=window.exit_day,
+                published=value,
+                adjusted=value,
+                unadjusted=value,
+                entry_adjusted_close=1.0,
+                exit_adjusted_close=1.0 + value,
+                per_session=(),
+            ),
+        )
+
+
+class FixedScores:
+    def __init__(
+        self, scored: Mapping[str, float], *, refuse_on: frozenset[date] = frozenset()
+    ) -> None:
+        self.scored = tuple(sorted(scored.items()))
+        self.refuse_on = refuse_on
+        self.asked: list[date] = []
+
+    def scores_on(self, session: date) -> Mapping[str, tuple[tuple[str, float], ...]]:
+        self.asked.append(session)
+        if session in self.refuse_on:
+            raise SurvivorFactsError(f"no 16:30 build on {session.isoformat()}")
+        return {p7.COMPOSITE: self.scored}
+
+
+def ranked() -> FixedScores:
+    """Code `p` of `CODES` scored `p`: worst first is `CODES`' own order."""
+    return FixedScores({code: float(p) for p, code in enumerate(CODES)})
+
+
+def request(
+    *,
+    first: date = SESSIONS[0],
+    last: date = date(2026, 6, 30),
+    stride: int = 20,
+    horizons: tuple[int, ...] = (20,),
+    window: Any = FIXTURE_WINDOW,
+) -> Any:
+    plan = p7_windows.plan_signal_days(
+        CALENDAR, window=window, first=first, last=last, stride=stride, horizons=horizons
+    )
+    return p7.DiagnosticRequest(
+        plan=plan,
+        scores=(p7.COMPOSITE,),
+        tails=(1, 2, 3),
+        loser_decile_count=2,
+        power_means=(0.037, 0.05, 0.1),
+        power_periods=(12, 36, 56),
+        power_target=0.8,
+        power_test_level=0.05,
+    )
+
+
+def tail_answer(entry: date, code: str) -> float:
+    """The loser tail of `test_decile_readout`, doubled on every second signal's entry."""
+    position = CODES.index(code)
+    scale = 2.0 if CALENDAR.trading_days.index(entry) % 40 == 21 else 1.0
+    return TAIL.get(position, 0.01) * scale
+
+
+def drifting(entry: date, code: str) -> float:
+    """A label whose order changes from one signal to the next, so the rank IC has a spread."""
+    multiplier = CALENDAR.trading_days.index(entry) % 3 + 2
+    return (CODES.index(code) * multiplier % 20) / 1000 - 0.005
+
+
+# --- the engine --------------------------------------------------------------------------------
+
+
+def test_the_engine_reads_each_signal_day_as_the_readout_does() -> None:
+    read = request(last=date(2026, 3, 31))
+    labels = TableLabels(tail_answer)
+    readings = p7.run_diagnostics(read, scores=ranked(), labels_for=lambda year: labels)
+
+    assert [item.session for item in readings] == list(read.plan.sessions)
+    first = readings[0].readout
+    assert first is not None
+    assert first.rank_ic == pytest.approx(math.sqrt(324 / 665), abs=1e-12)
+    assert first.ew_minus_worst_decile == pytest.approx(0.034, abs=1e-15)
+    assert readings[1].readout is not None
+    assert readings[1].readout.ew_minus_worst_decile == pytest.approx(0.068, abs=1e-15)
+    assert all(item.refusal is None and item.unlabelled_by_code == () for item in readings)
+
+
+def test_the_summary_is_the_series_summary_of_the_non_overlapping_readings() -> None:
+    read = request(stride=5, horizons=(5, 20), last=date(2026, 4, 30))
+    readings = p7.run_diagnostics(
+        read, scores=ranked(), labels_for=lambda year: TableLabels(tail_answer)
+    )
+    summary = p7.summarize(read, readings)
+
+    sessions = read.plan.sessions
+    assert summary[p7.COMPOSITE]["h5"]["sampled"] == [day.isoformat() for day in sessions]
+    assert summary[p7.COMPOSITE]["h20"]["sampled"] == [day.isoformat() for day in sessions[::4]]
+    h20 = [item for item in readings if item.horizon == 20 and item.session in sessions[::4]]
+    expected = summarize_series(
+        [(item.session, item.readout.ew_minus_worst_decile) for item in h20]
+    )
+    assert summary[p7.COMPOSITE]["h20"]["ew_minus_worst_decile"]["mean"] == expected.mean
+    assert summary[p7.COMPOSITE]["h20"]["ew_minus_worst_decile"]["n"] == expected.n
+    assert set(summary[p7.COMPOSITE]["h20"]["rank_ic"]) == {
+        "n",
+        "mean",
+        "sd",
+        "se",
+        "t",
+        "share_positive",
+        "lag1_autocorrelation",
+        "by_year",
+        "absence",
+    }
+
+    # ceil(20 / 3) = 7 signal days apart, not 20 // 3 = 6: six strides of three is 18 sessions,
+    # and two 20-session labels 18 sessions apart overlap.
+    every_third = request(stride=3, horizons=(20,), last=date(2026, 4, 30))
+    spaced = p7.summarize(
+        every_third,
+        p7.run_diagnostics(
+            every_third, scores=ranked(), labels_for=lambda year: TableLabels(tail_answer)
+        ),
+    )
+    assert spaced[p7.COMPOSITE]["h20"]["sampled"] == [
+        day.isoformat() for day in every_third.plan.sessions[::7]
+    ]
+
+
+def test_a_cyclic_no_signal_input_shows_no_structure() -> None:
+    """Ten names over ten consecutive sessions at h=1: mean IC 0, every decile's mean excess 0."""
+    codes = CODES[:10]
+    read = request(stride=1, horizons=(1,), last=SESSIONS[9])
+
+    def cyclic(entry: date, code: str) -> float:
+        t = CALENDAR.trading_days.index(entry) - 1
+        return ((codes.index(code) + t) % 10) / 100
+
+    summary = p7.summarize(
+        read,
+        p7.run_diagnostics(
+            read,
+            scores=FixedScores({code: float(r) for r, code in enumerate(codes)}),
+            labels_for=lambda year: TableLabels(cyclic),
+        ),
+    )
+
+    block = summary[p7.COMPOSITE]["h1"]
+    assert block["rank_ic"]["n"] == 10
+    assert block["rank_ic"]["mean"] == pytest.approx(0.0, abs=1e-12)
+    assert len(block["decile_excess"]) == 10
+    assert all(row["mean"] == pytest.approx(0.0, abs=1e-15) for row in block["decile_excess"])
+
+
+def test_a_refused_day_is_a_named_gap_that_never_moves_the_sample() -> None:
+    read = request(last=date(2026, 6, 30))
+    sessions = read.plan.sessions
+    readings = p7.run_diagnostics(
+        read,
+        scores=FixedScores(
+            {code: float(p) for p, code in enumerate(CODES)},
+            refuse_on=frozenset({sessions[1]}),
+        ),
+        labels_for=lambda year: TableLabels(tail_answer),
+    )
+    summary = p7.summarize(read, readings)
+
+    assert summary[p7.COMPOSITE]["h20"]["sampled"] == [day.isoformat() for day in sessions]
+    assert summary[p7.COMPOSITE]["h20"]["gaps"] == [
+        {
+            "session": sessions[1].isoformat(),
+            "reason": f"SurvivorFactsError: no 16:30 build on {sessions[1].isoformat()}",
+        }
+    ]
+    assert summary[p7.COMPOSITE]["h20"]["rank_ic"]["n"] == len(sessions) - 1
+    refused = [item for item in readings if item.session == sessions[1]]
+    assert [(item.readout, item.unlabelled_by_code) for item in refused] == [(None, ())]
+
+
+def test_a_label_refusal_is_a_gap_of_its_own_horizon_only() -> None:
+    """A label the reader refuses at h=20 leaves the same day's h=5 reading standing."""
+
+    class RefusingLongLabels(TableLabels):
+        def label(self, ts_code: str, window: LabelWindow) -> OutcomeLabel | None:
+            if window.horizon.count == 20:
+                raise ModelRunBlockedError(f"{ts_code} could not be labelled")
+            return super().label(ts_code, window)
+
+    read = request(stride=20, horizons=(5, 20), last=date(2026, 3, 31))
+    readings = p7.run_diagnostics(
+        read, scores=ranked(), labels_for=lambda year: RefusingLongLabels(tail_answer)
+    )
+
+    by_horizon = {
+        horizon: [item for item in readings if item.horizon == horizon] for horizon in (5, 20)
+    }
+    assert all(item.readout is not None and item.refusal is None for item in by_horizon[5])
+    assert [item.refusal for item in by_horizon[20]] == [
+        "ModelRunBlockedError: 600000.SH could not be labelled"
+    ] * len(read.plan.sessions)
+
+
+def test_a_window_refusal_is_never_turned_into_a_gap() -> None:
+    class Leaking(FixedScores):
+        def scores_on(self, session: date) -> Mapping[str, tuple[tuple[str, float], ...]]:
+            raise p7_windows.DiagnosticWindowError("daily [2022] is past the research window")
+
+    with pytest.raises(p7_windows.DiagnosticWindowError):
+        p7.run_diagnostics(
+            request(), scores=Leaking({}), labels_for=lambda year: TableLabels(tail_answer)
+        )
+    assert not issubclass(p7_windows.DiagnosticWindowError, p7.DAY_REFUSALS)
+
+
+def test_a_refusal_raised_from_a_window_refusal_is_never_turned_into_a_gap() -> None:
+    """A loader that wraps whatever a door raised (`AssessedPanelRead._read_held` turns any
+    exception into `PanelStorageError`) must not launder a window refusal into a gap."""
+
+    class Wrapping(FixedScores):
+        def scores_on(self, session: date) -> Mapping[str, tuple[tuple[str, float], ...]]:
+            try:
+                raise p7_windows.DiagnosticWindowError("daily [2022] is past the research window")
+            except p7_windows.DiagnosticWindowError as error:
+                raise PanelStorageError("daily year=2022 could not be read") from error
+
+    with pytest.raises(PanelStorageError) as raised:
+        p7.run_diagnostics(
+            request(), scores=Wrapping({}), labels_for=lambda year: TableLabels(tail_answer)
+        )
+    assert isinstance(raised.value.__cause__, p7_windows.DiagnosticWindowError)
+
+
+def test_a_label_window_past_the_window_is_refused_before_any_label_is_asked() -> None:
+    """A plan built by hand, skipping `plan_signal_days`' embargo (a caller's error): the 20-session
+    label of 2026-02-16 exits in March, past a window ending 2026-02-27. The engine refuses it
+    before it asks a single label."""
+    short = p7_windows.DiagnosticWindow(
+        name="fixture", first=date(2026, 1, 5), last=date(2026, 2, 27), ceiling_year=2026
+    )
+    forged = p7_windows.SignalPlan(
+        window=short,
+        first=date(2026, 2, 16),
+        last=date(2026, 2, 16),
+        stride=1,
+        horizons=(20,),
+        sessions=(date(2026, 2, 16),),
+        embargoed=(),
+    )
+    labels = TableLabels(tail_answer)
+
+    with pytest.raises(p7_windows.DiagnosticWindowError, match="2026-02-27"):
+        p7.run_diagnostics(
+            dataclasses.replace(request(), plan=forged),
+            scores=ranked(),
+            labels_for=lambda year: labels,
+        )
+    assert labels.asked == []
+
+
+def test_a_signal_day_outside_the_plans_window_is_refused_before_any_score_is_asked() -> None:
+    """A hand-built plan whose session lies past its own window is refused before it is read."""
+    short = p7_windows.DiagnosticWindow(
+        name="fixture", first=date(2026, 1, 5), last=date(2026, 2, 27), ceiling_year=2026
+    )
+    forged = p7_windows.SignalPlan(
+        window=short,
+        first=date(2026, 1, 5),
+        last=date(2026, 3, 2),
+        stride=1,
+        horizons=(1,),
+        sessions=(date(2026, 1, 5), date(2026, 3, 2)),
+        embargoed=(),
+    )
+    scores = ranked()
+
+    with pytest.raises(p7_windows.DiagnosticWindowError, match="2026-03-02"):
+        p7.run_diagnostics(
+            dataclasses.replace(request(), plan=forged),
+            scores=scores,
+            labels_for=lambda year: TableLabels(tail_answer),
+        )
+    assert scores.asked == []
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"scores": ()},
+        {"scores": (p7.COMPOSITE, p7.COMPOSITE)},
+        {"tails": (0,)},
+        {"tails": (2, 2)},
+        {"loser_decile_count": 10},
+        {"power_means": (0.0,)},
+        {"power_means": (math.inf,)},
+        {"power_periods": (1,)},
+        {"power_target": 1.0},
+        {"power_test_level": 0.5},
+    ],
+)
+def test_a_request_the_engine_cannot_read_is_refused_before_anything_is_read(
+    change: Mapping[str, Any],
+) -> None:
+    with pytest.raises(p7.DiagnosticRequestError):
+        dataclasses.replace(request(), **change)
+
+
+# --- the real sources --------------------------------------------------------------------------
+
+
+def test_the_panel_score_source_is_the_screens_eligible_composites(
+    full_store: PanelStore,  # noqa: F811
+) -> None:
+    source = p7.PanelScoreSource(
+        store=p7_windows.WindowCappedStore(full_store.root, window=FIXTURE_WINDOW),
+        book=FRAME_BOOK,
+        transform=IDENTITY,
+        exchange=EXCHANGE,
+        as_of=evening(SIGNAL_INDEX),
+        min_coverage=0.5,
+        max_carry_sessions=250,
+    )
+    scores = source.scores_on(SIGNAL)
+
+    facts = read_day(full_store).facts
+    eligible = {v.ts_code: v for v in screen(facts, FRAME_BOOK).verdicts if v.eligible}
+    assert eligible
+    assert scores[p7.COMPOSITE] == tuple(
+        sorted((code, v.composite) for code, v in eligible.items())
+    )
+    assert set(scores) == {p7.COMPOSITE, *FRAME_BOOK.composite_factors}
+    for index, factor in enumerate(FRAME_BOOK.composite_factors):
+        assert scores[factor] == tuple(
+            sorted(
+                (fact.ts_code, fact.oriented_values[index])
+                for fact in facts
+                if fact.ts_code in eligible
+            )
+        )
+
+
+def test_the_panel_label_source_is_the_forward_reports_reader(
+    panel_store: PanelStore,  # noqa: F811
+) -> None:
+    source = p7.panel_label_source(
+        p7_windows.WindowCappedStore(panel_store.root, window=FIXTURE_WINDOW),
+        years=(2026,),
+        exchange=EXCHANGE,
+        as_of=AS_OF,
+        cached_sessions=4,
+    )
+    read = dataclasses.replace(
+        request(first=SESSIONS[1], last=SESSIONS[1], stride=1, horizons=(2,)),
+        loser_decile_count=FORWARD_BOOK.loser_decile_count,
+    )
+    (reading,) = p7.run_diagnostics(
+        read, scores=FixedScores(PANEL_SCORES), labels_for=lambda year: source
+    )
+    outcome = record_outcome(
+        reader_of(panel_store),
+        witnessed_on(SESSIONS[1], PANEL_SCORES),
+        horizon=2,
+        book=FORWARD_BOOK,
+        csi500=(),
+        as_of=AS_OF,
+    )
+
+    readout = reading.readout
+    assert readout is not None
+    assert outcome.mature
+    assert outcome.rank_ic is not None
+    assert outcome.investable_ew is not None
+    assert outcome.unlabelled_by_code
+    assert readout.rank_ic == outcome.rank_ic
+    assert readout.equal_weight == outcome.investable_ew
+    assert readout.survivors_minus_ew == outcome.survivors_minus_ew
+    assert readout.ew_minus_worst_decile == outcome.ew_minus_worst_decile
+    assert readout.top_minus_bottom == outcome.top_minus_bottom
+    assert reading.unlabelled_by_code == outcome.unlabelled_by_code
+
+
+def test_the_label_reader_cannot_be_built_past_the_ceiling(
+    panel_store: PanelStore,  # noqa: F811
+) -> None:
+    capped = p7_windows.DiagnosticWindow(
+        name="capped", first=date(2025, 1, 2), last=date(2025, 12, 31), ceiling_year=2025
+    )
+    with pytest.raises(p7_windows.DiagnosticWindowError, match="2025"):
+        p7.panel_label_source(
+            p7_windows.WindowCappedStore(panel_store.root, window=capped),
+            years=(2026,),
+            exchange=EXCHANGE,
+            as_of=AS_OF,
+            cached_sessions=4,
+        )
+    # The years a signal year's reader spans: the year before through the year after, and never
+    # past the window's ceiling.
+    assert p7.label_years(2017, ceiling_year=2021) == (2016, 2017, 2018)
+    assert p7.label_years(2021, ceiling_year=2021) == (2020, 2021)
+
+
+# --- the document and its lines ----------------------------------------------------------------
+
+
+def fixed_document(
+    *,
+    binding: Mapping[str, Any] | None = None,
+    window: Any = FIXTURE_WINDOW,
+    stride: int = 20,
+    horizons: tuple[int, ...] = (20,),
+    config: Mapping[str, Any] = FIXED_CONFIG,
+) -> dict[str, Any]:
+    read = request(stride=stride, horizons=horizons, window=window)
+    readings = p7.run_diagnostics(
+        read, scores=ranked(), labels_for=lambda year: TableLabels(drifting)
+    )
+    return p7.diagnostic_document(  # type: ignore[no-any-return]
+        read, readings, config=config, code_commit="0" * 40, partitions_read=(), binding=binding
+    )
+
+
+def _document_bytes() -> bytes:
+    """One fixed document's JSON and lines, as the command writes them."""
+    document = fixed_document()
+    text = json.dumps(document, sort_keys=True, indent=2, ensure_ascii=False) + "\n"
+    return (text + "\n".join(p7.diagnostic_lines(document)) + "\n").encode("utf-8")
+
+
+def verdict_words(document: Mapping[str, Any]) -> list[str]:
+    text = json.dumps(document, sort_keys=True, ensure_ascii=False)
+    text += "\n".join(p7.diagnostic_lines(document))
+    return [*FORBIDDEN.findall(text), *FORBIDDEN_PREFIXES.findall(text)]
+
+
+def test_every_exploratory_document_and_line_carries_the_exploratory_wording() -> None:
+    document = fixed_document()
+    lines = p7.diagnostic_lines(document)
+
+    assert document["kind"] == p7.EXPLORATORY_KIND == "p7-diagnostic-exploratory/v1"
+    assert document["wording"] == [
+        p7.EXPLORATORY_WORDING,
+        p7.IN_SAMPLE_WORDING,
+        p7.CANDIDATE_WORDING,
+    ]
+    assert document["binding"] is None
+    assert document["provenance"]["random_component"] == "none"
+    assert document["provenance"]["code_commit"] == "0" * 40
+    assert document["provenance"]["partitions_read"] == []
+    assert (
+        lines[0]
+        == "EXPLORATORY, UNREGISTERED -- NOT EVIDENCE: fixture window 2026-01-05..2026-12-31"
+    )
+    assert all(wording in "\n".join(lines) for wording in document["wording"])
+    assert verdict_words(document) == []
+    power = document["summary"][p7.COMPOSITE]["h20"]["power_if_planning_sd_were_this"]
+    assert power["wording"] == p7.EXPLORATORY_POWER_WORDING
+    assert p7.EXPLORATORY_POWER_WORDING in "\n".join(lines)
+
+
+def test_the_power_block_is_the_calculator_at_the_series_sd() -> None:
+    document = fixed_document()
+    block = document["summary"][p7.COMPOSITE]["h20"]
+    sd = block["rank_ic"]["sd"]
+    power = block["power_if_planning_sd_were_this"]
+
+    assert sd is not None and sd > 0
+    assert power["sd"] == sd
+    for kind in ("normal", "t"):
+        assert power[kind]["power"] == [
+            {
+                "periods": periods,
+                "mean": mean,
+                "power": power_of_mean_test(
+                    mean=mean, sd=sd, periods=periods, test_level=0.05, kind=kind
+                ),
+            }
+            for periods in (12, 36, 56)
+            for mean in (0.037, 0.05, 0.1)
+        ]
+        assert power[kind]["periods_for_target"] == [
+            {
+                "mean": mean,
+                "periods": periods_for_power(
+                    mean=mean, power=0.8, sd=sd, test_level=0.05, kind=kind
+                ),
+            }
+            for mean in (0.037, 0.05, 0.1)
+        ]
+
+
+def test_a_series_with_no_spread_has_no_power_block() -> None:
+    """`tail_answer` scales the labels and keeps their order: every rank IC is the same."""
+    read = request(last=date(2026, 3, 31))
+    summary = p7.summarize(
+        read,
+        p7.run_diagnostics(read, scores=ranked(), labels_for=lambda y: TableLabels(tail_answer)),
+    )
+    assert summary[p7.COMPOSITE]["h20"]["rank_ic"]["absence"] == "no_dispersion"
+    assert summary[p7.COMPOSITE]["h20"]["power_if_planning_sd_were_this"] is None
+
+
+def test_a_binding_makes_the_read_once_kind_and_wording() -> None:
+    binding = {
+        "reading": "probe",
+        "registration_sha256": "0" * 64,
+        "registration_commit": "0" * 40,
+        "claim_sha256": "1" * 64,
+    }
+    document = fixed_document(binding=binding)
+
+    assert document["kind"] == p7.READ_ONCE_KIND == "p7-diagnostic-read-once/v1"
+    assert document["wording"] == [p7.READ_ONCE_WORDING, p7.CANDIDATE_WORDING]
+    assert document["binding"] == binding
+    assert p7.diagnostic_lines(document)[0] == (
+        "PRE-REGISTERED READ-ONCE probe -- A FIRST OUT-OF-SAMPLE READING, NOT CONFIRMATORY "
+        "EVIDENCE: fixture window 2026-01-05..2026-12-31"
+    )
+    assert verdict_words(document) == []
+
+    second = fixed_document(binding=binding, window=p7_windows.SECOND_USE)
+    assert second["wording"] == [
+        p7.READ_ONCE_WORDING,
+        p7.CANDIDATE_WORDING,
+        p7.SECOND_USE_WORDING,
+    ]
+    assert p7.diagnostic_lines(second)[0].startswith(
+        "PRE-REGISTERED READ-ONCE probe -- A FIRST OUT-OF-SAMPLE READING, NOT CONFIRMATORY "
+        "EVIDENCE: second_use window 2024-01-02..2026-09-24"
+    )
+
+
+def test_two_runs_write_the_same_bytes_under_two_hash_seeds() -> None:
+    here = _document_bytes()
+    assert here == _document_bytes()
+    command = (
+        "import sys; "
+        f"sys.path[:0] = [{str(ROOT / 'tests' / 'unit')!r}, {str(ROOT / 'tests')!r}]; "
+        "import test_p7_diagnostics as t; sys.stdout.buffer.write(t._document_bytes())"
+    )
+    for seed in ("0", "7"):
+        child = subprocess.run(
+            [sys.executable, "-c", command],
+            env={**os.environ, "PYTHONHASHSEED": seed, "PYTHONPATH": str(ROOT / "src")},
+            check=True,
+            capture_output=True,
+        )
+        assert child.stdout == here, seed
+
+
+def test_the_config_digest_moves_with_any_request_or_config_field() -> None:
+    later = {**FIXED_CONFIG, "as_of": FIXED_CONFIG["as_of"] + timedelta(days=1)}
+    other = {**FIXED_CONFIG, "transform": "cross_section_standard/v1"}
+    documents = [
+        fixed_document(),
+        fixed_document(stride=10),
+        fixed_document(horizons=(5, 20)),
+        fixed_document(config=later),
+        fixed_document(config=other),
+    ]
+    digests = [document["provenance"]["config_digest"] for document in documents]
+
+    assert len(set(digests)) == len(digests)
+    for document in documents:
+        recomputed = hashlib.sha256(
+            grid.canonical_json(
+                {"config": document["config"], "request": document["request"]}
+            ).encode("utf-8")
+        ).hexdigest()
+        assert document["provenance"]["config_digest"] == recomputed
+
+
+# --- the command line --------------------------------------------------------------------------
+
+
+EXPLORE: Final[tuple[str, ...]] = (
+    "explore",
+    "--as-of",
+    "2026-10-09T00:00:00+08:00",
+    "--stride",
+    "20",
+    "--horizons",
+    "20",
+    "--transform",
+    "cross_section_standard/v1",
+)
+
+
+def test_explore_refuses_a_date_past_the_research_window_before_opening_anything(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def opened(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a store was opened")
+
+    monkeypatch.setattr(p7, "_open_sources", opened)
+    code = p7.main(
+        [
+            *EXPLORE,
+            "--runtime-dir",
+            str(tmp_path),
+            "--first",
+            "2021-11-01",
+            "--last",
+            "2022-01-04",
+            "--out",
+            str(tmp_path / "out"),
+        ]
+    )
+
+    assert code == 2
+    error = capsys.readouterr().err
+    assert "validation" in error
+    assert "read_once" in error
+    assert not (tmp_path / "out").exists()
+
+
+def weekday_calendar(first: date, last: date) -> TradingCalendar:
+    days = [first + timedelta(days=offset) for offset in range((last - first).days + 1)]
+    return build_trading_calendar(
+        "SSE", [CalendarDay(calendar_date=day, is_trading=day.weekday() < 5) for day in days]
+    )
+
+
+def test_explore_writes_once_and_a_rerun_is_a_no_op(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calendar = weekday_calendar(date(2016, 12, 1), date(2017, 12, 29))
+    opened: list[Mapping[str, Any]] = []
+
+    def sources(*args: object, **kwargs: Any) -> tuple[Any, ...]:
+        opened.append(kwargs)
+        return (
+            calendar,
+            ranked(),
+            lambda year: TableLabels(
+                lambda entry, code: TAIL.get(CODES.index(code), 0.01), calendar=calendar
+            ),
+            SimpleNamespace(partitions_read=lambda: ()),
+        )
+
+    monkeypatch.setattr(p7, "_open_sources", sources)
+    out = tmp_path / "out"
+    argv = [
+        *EXPLORE,
+        "--runtime-dir",
+        str(tmp_path),
+        "--first",
+        "2017-01-03",
+        "--last",
+        "2017-06-30",
+        "--out",
+        str(out),
+    ]
+
+    assert p7.main(argv) == 0
+    assert opened[0]["window"] is p7_windows.RESEARCH
+    (json_path,) = out.glob("p7-diagnostic-research-*.json")
+    document = json.loads(json_path.read_text(encoding="utf-8"))
+    stem = f"p7-diagnostic-research-{document['provenance']['config_digest'][:16]}"
+    assert json_path.name == f"{stem}.json"
+    text_path = out / f"{stem}.txt"
+    assert document["kind"] == p7.EXPLORATORY_KIND
+    assert document["window"]["name"] == "research"
+    assert text_path.read_text(encoding="utf-8").splitlines() == p7.diagnostic_lines(document)
+    written = {
+        path: (path.read_bytes(), path.stat().st_mtime_ns) for path in (json_path, text_path)
+    }
+
+    assert p7.main(argv) == 0
+    assert {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in written} == written
+    capsys.readouterr()
+
+    json_path.write_bytes(json_path.read_bytes() + b" ")
+    assert p7.main(argv) != 0
+    assert "already holds a different document" in capsys.readouterr().err
+    assert text_path.read_bytes() == written[text_path][0]
+
+
+def test_the_power_subcommand_prints_the_calculators_lines(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    base = [
+        "power",
+        "--periods",
+        "36",
+        "--sd",
+        "0.15",
+        "--test-level",
+        "0.05",
+        "--means",
+        "0.037,0.05,0.1",
+        "--target-power",
+        "0.8",
+        "--critical-value",
+        "normal",
+    ]
+    table = list(
+        power_table_lines(
+            periods=36,
+            sd=0.15,
+            test_level=0.05,
+            means=(0.037, 0.05, 0.1),
+            target_power=0.8,
+            kind="normal",
+        )
+    )
+
+    assert p7.main(base) == 0
+    assert capsys.readouterr().out.splitlines() == table
+
+    assert p7.main([*base, "--interim", "18", "--futility-threshold", "0"]) == 0
+    printed = capsys.readouterr().out.splitlines()
+    interim: list[str] = []
+    for mean in (0.037, 0.05, 0.1):
+        stop = futility_stop_probability(mean=mean, sd=0.15, interim_periods=18, threshold=0.0)
+        power = power_with_futility(
+            mean=mean,
+            sd=0.15,
+            periods=36,
+            interim_periods=18,
+            threshold=0.0,
+            test_level=0.05,
+            kind="normal",
+        )
+        interim.append(
+            f"  interim look after 18 periods, stopping at a mean at or below 0: stop "
+            f"probability {stop:.3f} at mean {mean:g}"
+        )
+        interim.append(f"  power with the interim look: {power:.3f} at mean {mean:g}")
+    assert printed == [*table, *interim]
+    assert (
+        "  interim look after 18 periods, stopping at a mean at or below 0: stop probability "
+        "0.079 at mean 0.05"
+    ) in printed
+    assert "  power with the interim look: 0.631 at mean 0.05" in printed
+
+    assert p7.main([*base, "--family-size", "3", "--q", "0.1"]) == 0
+    printed = capsys.readouterr().out.splitlines()
+    assert by_first_step_level(q=0.1, family_size=3) == pytest.approx(0.1 / 5.5)
+    assert printed == [
+        *table,
+        "  a secondary under Benjamini-Yekutieli (family 3, q 0.1) is powered at the first-step "
+        "level 0.0182, a lower bound",
+    ]
+
+
+def test_only_the_cli_names_the_research_window(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as raised:
+        p7.main(["explore", "--help"])
+
+    assert raised.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "--first" in help_text
+    assert "--window" not in help_text
