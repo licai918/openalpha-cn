@@ -1005,11 +1005,102 @@ def test_the_preflight_names_each_year_a_dataset_lacks_the_year_before_the_windo
 
 def test_the_default_preflight_asks_for_every_dataset_the_read_opens() -> None:
     datasets = p7_reading._preflight_datasets(SurvivorBookConfig(seed=0))
-    assert {"trade_cal", "daily", "adj_factor", "suspend_d", "stk_limit", "namechange"} <= set(
-        datasets
-    )
+    assert {
+        "trade_cal",
+        "daily",
+        "adj_factor",
+        "suspend_d",
+        "stk_limit",
+        "namechange",
+        "stock_basic",
+    } <= set(datasets)
     assert len([name for name in datasets if name.startswith("factor_proc_")]) == 4
     assert len([name for name in datasets if name.startswith("factor_procmn_")]) == 4
+
+
+# --- the year before the window, asked only of what reads it (fix round 2, finding 2) -----------
+
+YEAR_BEFORE: Final[tuple[str, ...]] = (
+    "trade_cal",
+    "daily",
+    "adj_factor",
+    "suspend_d",
+    "namechange",
+    "stock_basic",
+)
+"""What the measure reads for the year before the window: the calendar, the label reader over
+`label_years` (calendar, registry, adjustment factors, halts, bars) and the facts day's history."""
+
+
+def research_store_shape(book: SurvivorBookConfig) -> dict[str, tuple[int, ...]]:
+    """The validation window's catalogue as the research store holds it: every year-before
+    dataset from 2021, `stk_limit` and the factor tiers from the window's own first year."""
+    return {
+        dataset: (2021, 2022, 2023) if dataset in YEAR_BEFORE else (2022, 2023)
+        for dataset in p7_reading._preflight_datasets(book)
+    }
+
+
+def test_the_preflight_accepts_factors_and_limits_that_begin_with_the_window() -> None:
+    """The re-reviewer's probe shape: factor builds start in the window's first year (the
+    measure reads them, and `stk_limit`, for signal days only), so nothing is missing."""
+    book = SurvivorBookConfig(seed=0)
+    catalogue = Catalogue(research_store_shape(book))
+
+    assert (
+        p7_reading.preflight_problems(
+            catalogue,  # type: ignore[arg-type]
+            window=p7_windows.VALIDATION,
+            datasets=p7_reading._preflight_datasets(book),
+        )
+        == ()
+    )
+
+
+@pytest.mark.parametrize("dataset", YEAR_BEFORE)
+def test_the_preflight_refuses_a_missing_year_before_of_each_dataset_that_reads_it(
+    dataset: str,
+) -> None:
+    book = SurvivorBookConfig(seed=0)
+    held = research_store_shape(book)
+    held[dataset] = (2022, 2023)
+
+    problems = p7_reading.preflight_problems(
+        Catalogue(held),  # type: ignore[arg-type]
+        window=p7_windows.VALIDATION,
+        datasets=p7_reading._preflight_datasets(book),
+    )
+
+    assert len(problems) == 1 and problems[0].startswith(
+        f"{dataset} lists no partition for [2021] "
+    )
+
+
+@pytest.mark.parametrize(
+    "dataset",
+    [
+        "stk_limit",
+        *(
+            name
+            for name in p7_reading._preflight_datasets(SurvivorBookConfig(seed=0))
+            if name.startswith("factor_proc")
+        ),
+    ],
+)
+def test_the_preflight_refuses_a_missing_window_year_of_a_signal_day_dataset(dataset: str) -> None:
+    book = SurvivorBookConfig(seed=0)
+    held = research_store_shape(book)
+    held[dataset] = (2022,)
+
+    problems = p7_reading.preflight_problems(
+        Catalogue(held),  # type: ignore[arg-type]
+        window=p7_windows.VALIDATION,
+        datasets=p7_reading._preflight_datasets(book),
+    )
+
+    assert len(problems) == 1 and problems[0].startswith(
+        f"{dataset} lists no partition for [2023] "
+    )
 
 
 def test_the_default_preflight_refuses_a_runtime_with_no_panel_before_any_claim(repo: Path) -> None:

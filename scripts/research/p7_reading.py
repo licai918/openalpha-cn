@@ -49,9 +49,11 @@ a failure after the claim spends the window:
    too. `registry._holdout_allowed` refuses any holdout row the same way, whatever registration
    wrote it. The rule holds for every window a reading opens, `validation` and `second_use`
    alike.
-5. `ReadingPreflightError` -- the panel catalogue lacks a year of the window, or the year before
-   it (the calendar and the label reader read that one too), in a dataset the read opens
-   (`preflight_problems`; it asks `registered_years` and reads no partition).
+5. `ReadingPreflightError` -- the panel catalogue lacks a year the read opens of a dataset
+   (`preflight_problems`; it asks `registered_years` and reads no partition): the window's years
+   for every dataset, and the year before as well for those that read it
+   (`YEAR_BEFORE_DATASETS`: the calendar, the label reader's and the facts day's) -- not for
+   `stk_limit` and the factor datasets, which are read for signal days only.
 
 It then writes the window's claim and then the reading's, `<reading>.claim.json`, each with
 `O_CREAT | O_EXCL` -- a second read racing this one loses there (`ReadingAlreadyClaimedError`) --
@@ -162,6 +164,7 @@ from openalpha_cn.domain.factor_transform import FactorTransformError
 from openalpha_cn.domain.horizon import MAX_HORIZON_COUNT
 from openalpha_cn.domain.name_history import NAMECHANGE_DATASET
 from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET, SUSPENSION_DATASET
+from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET
 from openalpha_cn.domain.survivor_book import SurvivorBookConfig
 from openalpha_cn.domain.trading_calendar import TRADING_CALENDAR_DATASET
 from openalpha_cn.panel.store import PanelStore
@@ -193,18 +196,25 @@ NOT_TRIGGERED_WORDING: Final[str] = (
     "and is not evidence"
 )
 
-PREFLIGHT_DATASETS: Final[tuple[str, ...]] = (
+YEAR_BEFORE_DATASETS: Final[tuple[str, ...]] = (
     TRADING_CALENDAR_DATASET,
     DAILY_DATASET,
     ADJ_FACTOR_DATASET,
     SUSPENSION_DATASET,
-    PRICE_LIMIT_DATASET,
     NAMECHANGE_DATASET,
+    STOCK_BASIC_DATASET,
 )
-"""The upstream datasets the read opens for every year of its window, besides each composite
-factor's processed observations and transform manifests (`_preflight_datasets`). `stock_basic` is
-read too and is not here: it is filed by lifecycle year, so a year with no partition is a year in
-which nothing listed or died, not a gap (`strategy_survivor_facts._registry_year`)."""
+"""The datasets the read opens for the year before the window as well as the window's own years:
+the calendar (from the year before), the label reader over `label_years` -- calendar, registry,
+adjustment factors and halts, `model_view._LabelInputs`, and the bars of each label -- and the
+facts day's history (`namechange` and `daily` from the first stored year through the signal
+day's). The label reader refuses a missing `stock_basic` year in its range, so it is asked for
+here although the facts day alone would read through the newest lifecycle year."""
+PREFLIGHT_DATASETS: Final[tuple[str, ...]] = (*YEAR_BEFORE_DATASETS, PRICE_LIMIT_DATASET)
+"""The upstream datasets the read opens, besides each composite factor's processed observations
+and transform manifests (`_preflight_datasets`). `stk_limit` and the factor datasets are read for
+signal days only, so for the window's own years only (`strategy_survivor_facts._read_facts_day`;
+`model_view`: the factor store need not hold the year before)."""
 
 _READING_NAME: Final = re.compile(r"[a-z0-9][a-z0-9-]*")
 _ISSUE: Final = re.compile(r"V2-P[0-9][A-Z]?-[0-9]{3}[a-z]?")
@@ -738,14 +748,17 @@ def evaluate_stop_rule(rule: StopRule, document: Mapping[str, Any]) -> dict[str,
 def preflight_problems(
     store: PanelStore, *, window: DiagnosticWindow, datasets: Sequence[str]
 ) -> tuple[str, ...]:
-    """Each dataset of `datasets` that lists no partition for a year the read opens, by name with
-    the years it lacks; `()` when every one lists them all. The years are the window's and the one
-    before it, which the calendar and the label reader also read (`label_years`). Only
-    `registered_years` is asked: no partition is opened, so a listed year may still be
-    incomplete."""
-    years = tuple(range(window.first.year - 1, window.ceiling_year + 1))
+    """Each dataset of `datasets` that lists no partition for a year the read opens of it, by name
+    with the years it lacks; `()` when every one lists them all. The years are the window's, and
+    for a dataset of `YEAR_BEFORE_DATASETS` the year before it as well (the calendar, the label
+    reader over `label_years` and the facts day's history read it); `stk_limit` and the factor
+    datasets are read for signal days only, so a store whose factor builds begin with the window
+    is not refused for the year before. Only `registered_years` is asked: no partition is opened,
+    so a listed year may still be incomplete."""
     problems: list[str] = []
     for dataset in datasets:
+        first = window.first.year - (1 if dataset in YEAR_BEFORE_DATASETS else 0)
+        years = range(first, window.ceiling_year + 1)
         held = set(store.registered_years(dataset))
         missing = [year for year in years if year not in held]
         if missing:

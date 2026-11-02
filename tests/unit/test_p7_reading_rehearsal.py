@@ -31,7 +31,13 @@ from panel_fixtures import EXCHANGE
 from panel_fixtures import _batch as batch
 from panel_fixtures import _midnight_shanghai as midnight_shanghai
 from panel_fixtures import _namechange_batch as namechange_batch
-from strategy_fixtures import PROBE_TRANSFORM, TWO_YEAR_LAST, write_two_year_corpus
+from strategy_fixtures import (
+    PROBE_TRANSFORM,
+    TWO_YEAR_BUILDS_FROM,
+    TWO_YEAR_FACTOR_YEAR_START,
+    TWO_YEAR_LAST,
+    write_two_year_corpus,
+)
 
 from openalpha_cn.domain.name_history import (
     NAME_ANNOUNCEMENT_COLUMN,
@@ -98,10 +104,21 @@ NAMED: Final[dict[str, Any]] = {
 window is not a named one, so the banner borrows a named window's span."""
 
 
-@pytest.fixture(scope="module")
-def corpus(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Any]:
+@pytest.fixture(
+    scope="module",
+    params=[TWO_YEAR_BUILDS_FROM, TWO_YEAR_FACTOR_YEAR_START],
+    ids=["factors-from-the-year-before", "factors-from-the-window"],
+)
+def corpus(
+    tmp_path_factory: pytest.TempPathFactory, request: pytest.FixtureRequest
+) -> tuple[Path, Any]:
+    """Two shapes: factor builds from December of the year before, and -- the research store's
+    shape (`strategy_fixtures.write_two_year_corpus`'s `builds_from`) -- from the window's own
+    first session, every other dataset still holding the year before (fix round 2, finding 2)."""
     root = tmp_path_factory.mktemp("rehearsal")
-    panel = write_two_year_corpus(root, processed={PROBE_TRANSFORM: TWO_YEAR_LAST})
+    panel = write_two_year_corpus(
+        root, builds_from=request.param, processed={PROBE_TRANSFORM: TWO_YEAR_LAST}
+    )
     store = PanelStore(root / "panel")
     # The generator's own records, fetched at its `AS_OF`, then the 2027 one, fetched when it was
     # announced: a batch may not hold a row announced after its fetch.
