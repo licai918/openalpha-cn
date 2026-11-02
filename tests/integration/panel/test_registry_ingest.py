@@ -13,9 +13,10 @@ in between. On the full market a live probe measured that difference at **227** 
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -23,6 +24,7 @@ from openalpha_cn.domain.name_history import (
     NAMECHANGE_DATASET,
     NameHistoryHorizonError,
     RiskWarning,
+    name_year_empty_admissible_through,
 )
 from openalpha_cn.domain.panel_batch import PanelBatchError
 from openalpha_cn.domain.stock_universe import (
@@ -38,6 +40,7 @@ from openalpha_cn.domain.trading_calendar import (
     CalendarDay,
     build_trading_calendar,
 )
+from openalpha_cn.panel.catalog import PanelStorageError
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_ingest import (
     load_name_histories,
@@ -46,6 +49,7 @@ from openalpha_cn.panel_ingest import (
     panel_partition_year,
     split_panel_batch_by_year,
     stock_universe_requirement,
+    write_empty_name_year,
     write_name_history,
     write_panel_batch,
     write_stock_universe,
@@ -636,6 +640,112 @@ def test_the_2026_namechange_window_stores_nothing_because_its_only_row_is_unann
     assert batch.status == "no_data"
     with pytest.raises(PanelBatchError, match="cannot write a 'no_data' batch"):
         write_name_history(store, batch)
+
+
+# --- V2-P7-021: a rename year with nothing announced in it yet --------------------------------
+
+SHANGHAI = ZoneInfo("Asia/Shanghai")
+
+
+def _evening(day: date) -> datetime:
+    """18:30 Asia/Shanghai on `day`: the survivor day's clock."""
+    return datetime.combine(day, time(18, 30), tzinfo=SHANGHAI)
+
+
+FIRST_EVENING_2027 = _evening(date(2027, 1, 4))
+"""The evening of 2027's first session, before any 2027 rename is announced. After every fetch of
+`_seed_namechange` (`FETCHED_AT`), so no stored partition is younger than the read."""
+
+
+def test_a_rename_year_with_nothing_announced_yet_is_recorded_empty_and_read_as_no_rename_yet(
+    tmp_path: Path,
+) -> None:
+    """Recorded at the evening's clock: no rows, the dataset's own columns (taken from the newest
+    stored year with rows), as fresh as the observation and knowable from the year's start. Read
+    with an earlier year it adds nothing to any history -- the 2021 ST rename is still the newest
+    record -- where the same read refuses a year that was never written."""
+    store = _seed_namechange(tmp_path)
+
+    ref = write_empty_name_year(store, year=2027, observed_at=FIRST_EVENING_2027)
+
+    assert (ref.dataset, ref.year, ref.row_count) == (NAMECHANGE_DATASET, 2027, 0)
+    coverage = store.read_coverage(NAMECHANGE_DATASET, 2027)
+    template = store.read_coverage(NAMECHANGE_DATASET, 2021)
+    assert coverage is not None and template is not None
+    assert coverage.row_count == 0
+    assert coverage.as_of == coverage.fetched_at == coverage.last_event_time == FIRST_EVENING_2027
+    assert coverage.max_available_time == datetime(2027, 1, 1, tzinfo=SHANGHAI)
+    assert coverage.fields == template.fields
+    histories = load_name_histories(
+        store, years=(2021, 2027), as_of=FIRST_EVENING_2027, max_staleness=None
+    )
+    assert set(histories) == {"000005.SZ"}
+    assert histories["000005.SZ"].name_on(date(2027, 1, 4)) == "ST星源"
+
+
+def test_a_rename_year_never_written_is_still_refused_as_missing(tmp_path: Path) -> None:
+    """Verified empty is a partition that says so; a year with no partition is still missing."""
+    store = _seed_namechange(tmp_path)
+    with pytest.raises(PanelStorageError, match="partition_missing"):
+        load_name_histories(store, years=(2021, 2027), as_of=FIRST_EVENING_2027, max_staleness=None)
+
+
+@pytest.mark.parametrize(("offset", "readable"), [(0, True), (1, False)])
+def test_an_empty_rename_year_is_unreadable_after_its_window_even_without_a_staleness_bound(
+    tmp_path: Path, offset: int, readable: bool
+) -> None:
+    """The writer's rule, applied at read time: recorded empty on 4 January, the year reads as "no
+    rename announced yet" through its window's last day and not a day later, with
+    `max_staleness=None` -- a store that never fetched the year again must not answer for it."""
+    store = _seed_namechange(tmp_path)
+    write_empty_name_year(store, year=2027, observed_at=FIRST_EVENING_2027)
+    day = name_year_empty_admissible_through(2027) + timedelta(days=offset)
+
+    def read() -> Any:
+        return load_name_histories(
+            store, years=(2021, 2027), as_of=_evening(day), max_staleness=None
+        )
+
+    if readable:
+        assert set(read()) == {"000005.SZ"}
+    else:
+        with pytest.raises(PanelStorageError, match="stale by rule"):
+            read()
+
+
+@pytest.mark.parametrize(
+    ("year", "day"),
+    [
+        (2027, name_year_empty_admissible_through(2027) + timedelta(days=1)),
+        (2026, date(2027, 1, 4)),
+    ],
+    ids=["past the window", "another year than the observation's"],
+)
+def test_an_empty_rename_year_is_refused_past_its_window_or_for_another_year(
+    tmp_path: Path, year: int, day: date
+) -> None:
+    """A whole market that has announced no rename by the window's end -- or in a year that has
+    ended -- is a failed fetch, not a timetable: refused by name, nothing written."""
+    store = _seed_namechange(tmp_path)
+    with pytest.raises(PanelBatchError, match=f"announcement year {year} served no rename"):
+        write_empty_name_year(store, year=year, observed_at=_evening(day))
+    assert year not in store.registered_years(NAMECHANGE_DATASET)
+
+
+def test_an_empty_rename_year_is_never_written_over_announced_renames(tmp_path: Path) -> None:
+    """An empty answer where renames are stored is a lost fetch, not a fact about the year."""
+    store = _seed_namechange(tmp_path)
+    with pytest.raises(PanelBatchError, match=r"year=2021 already holds 1 rename row\(s\)"):
+        write_empty_name_year(store, year=2021, observed_at=_evening(date(2021, 1, 5)))
+    coverage = store.read_coverage(NAMECHANGE_DATASET, 2021)
+    assert coverage is not None and coverage.row_count == 1
+
+
+def test_an_empty_rename_year_needs_a_stored_year_to_take_its_columns_from(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(PanelBatchError, match="build the year before 2027 first"):
+        write_empty_name_year(_store(tmp_path), year=2027, observed_at=FIRST_EVENING_2027)
 
 
 # --- the name history and ST ---------------------------------------------------------------

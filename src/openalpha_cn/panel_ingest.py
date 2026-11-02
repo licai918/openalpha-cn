@@ -401,6 +401,8 @@ from openalpha_cn.domain.name_history import (
     NAMECHANGE_DATASET,
     NameHistory,
     name_histories_from_panel_rows,
+    name_year_empty_admissible_through,
+    name_year_may_be_empty,
 )
 from openalpha_cn.domain.panel_batch import (
     CLOCK_COLUMN_NAMES,
@@ -1578,6 +1580,11 @@ def name_history_requirement(
         required_subjects=None,
         required_fields=NAME_HISTORY_PANEL_COLUMNS,
         max_staleness=max_staleness,
+        # `V2-P7-021`: a rename year recorded empty is readable only through its window -- the
+        # writer's own rule (`write_empty_name_year`).
+        empty_admissible_through={
+            year: name_year_empty_admissible_through(year) for year in sorted(set(years))
+        },
     )
 
 
@@ -7409,6 +7416,31 @@ def write_empty_announcement_year(
         f"{observed_at.isoformat()}; the year's first statutory disclosure deadline, "
         f"{deadline.isoformat()}, had not passed"
     )
+    return _write_empty_partition(
+        store,
+        dataset=dataset,
+        year=year,
+        observed_at=observed_at,
+        template=template,
+        reason=reason,
+        date_timezone=date_timezone,
+    )
+
+
+def _write_empty_partition(
+    store: PanelStore,
+    *,
+    dataset: str,
+    year: int,
+    observed_at: datetime,
+    template: PartitionCoverage,
+    reason: str,
+    date_timezone: str,
+) -> PartitionRef:
+    """One zero-row partition of `dataset` for `year`, in `template`'s columns, observed at
+    `observed_at`: the write `write_empty_announcement_year` (`V2-P6-018`) and
+    `write_empty_name_year` (`V2-P7-021`) share. Every check is the caller's; this only writes."""
+    zone = _resolve_timezone(date_timezone)
     marker = ColumnarPanelBatch(
         provider_id=template.provider_id,
         dataset=dataset,
@@ -7447,6 +7479,75 @@ def write_empty_announcement_year(
             dates=(),
             revisions=(),
         ),
+    )
+
+
+def write_empty_name_year(
+    store: PanelStore,
+    *,
+    year: int,
+    observed_at: datetime,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> PartitionRef:
+    """Record that no rename has been announced in announcement year `year` yet (`V2-P7-021`).
+
+    `write_empty_announcement_year`'s door, for the rename corpus and for its reason: until a
+    year's first rename the endpoint serves no row for the year, and a year with no partition is
+    `partition_missing` to every reader -- the facts adapter, the factor build, the doctor and
+    the morning re-check read the corpus through the session's year -- so a year's first sessions
+    could not run (the survivor runbook's limitation 1). "No rename announced yet" is a true
+    answer on those days, given honestly by a partition that says so and says when it was
+    observed; the first write of a real row replaces it whole. The coverage record is
+    `_write_empty_partition`'s.
+
+    Refused (`PanelBatchError`) when it could hide something: a year other than `observed_at`'s
+    own, a day after the year's window (`name_year_may_be_empty`), a stored partition that holds
+    rows (an empty answer over announced renames is a lost fetch), a store with no year whose
+    columns it can take.
+    """
+    zone = _resolve_timezone(date_timezone)
+    day = observed_at.astimezone(zone).date()
+    through = name_year_empty_admissible_through(year)
+    if day.year != year or not name_year_may_be_empty(year, day):
+        raise PanelBatchError(
+            f"{NAMECHANGE_DATASET} announcement year {year} served no rename knowable as of "
+            f"{observed_at.isoformat()}, and an empty year is admissible only within that year "
+            f"and only through {through.isoformat()}; after it, a whole market that has "
+            "announced no rename is a failed fetch"
+        )
+    stored = store.read_coverage(NAMECHANGE_DATASET, year)
+    if stored is not None and stored.row_count:
+        raise PanelBatchError(
+            f"{NAMECHANGE_DATASET} year={year} already holds {stored.row_count} rename row(s); "
+            "an empty answer now would replace them with nothing, which is a lost fetch and not "
+            "a fact about the year"
+        )
+    shaped = [
+        coverage
+        for coverage in (
+            store.read_coverage(NAMECHANGE_DATASET, other)
+            for other in store.registered_years(NAMECHANGE_DATASET)
+        )
+        if coverage is not None and coverage.row_count
+    ]
+    if not shaped:
+        raise PanelBatchError(
+            f"{NAMECHANGE_DATASET} has no stored year with rows to take the partition's columns "
+            f"from; build the year before {year} first"
+        )
+    template = max(shaped, key=lambda coverage: coverage.year)
+    reason = (
+        f"no {NAMECHANGE_DATASET} rename announced in {year} as of {observed_at.isoformat()}; "
+        f"the year may be read empty through {through.isoformat()}"
+    )
+    return _write_empty_partition(
+        store,
+        dataset=NAMECHANGE_DATASET,
+        year=year,
+        observed_at=observed_at,
+        template=template,
+        reason=reason,
+        date_timezone=date_timezone,
     )
 
 

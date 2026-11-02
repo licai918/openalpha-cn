@@ -1836,14 +1836,17 @@ class PanelStore:
         fail-closed states the module docstring describes. On the idempotent branch the coverage
         alone is re-recorded, in its own exclusive hold, and only while the catalog still names
         this content; if another writer has moved the partition since, this becomes a full
-        write. `panel_ingest.write_panel_batch` and `write_empty_announcement_year` -- every
-        writer of a partition with coverage -- pass it here.
+        write. `panel_ingest.write_panel_batch` and `panel_ingest._write_empty_partition` --
+        every writer of a partition with coverage -- pass it here.
 
         `allow_empty` (`V2-P6-018`) is how a zero-row partition gets written, and it is opt-in at
         the call so an empty batch can never reach it by accident: its only caller is
-        `panel_ingest.write_empty_announcement_year`, which writes a statement announcement year
-        in which nothing has been filed yet, and only while no statutory deadline in it has
-        passed. Every other caller still gets "cannot write an empty partition batch".
+        `panel_ingest._write_empty_partition`, reached through two doors, each with its own
+        rule -- `write_empty_announcement_year` (a statement announcement year in which nothing
+        has been filed yet, only while no statutory deadline in it has passed, `V2-P6-018`) and
+        `write_empty_name_year` (a rename announcement year in which nothing has been announced
+        yet, only through `domain.name_history.name_year_empty_admissible_through`,
+        `V2-P7-021`). Every other caller still gets "cannot write an empty partition batch".
 
         Raises `PanelStorageError` if `dataset` is not a single, plain path segment --
         see `_validate_dataset` and the module docstring's "Dataset name validation"

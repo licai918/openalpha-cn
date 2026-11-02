@@ -37,6 +37,8 @@ from openalpha_cn.domain.name_history import (
     RiskWarning,
     build_name_history,
     name_histories_from_panel_rows,
+    name_year_empty_admissible_through,
+    name_year_may_be_empty,
     risk_warning_of,
 )
 
@@ -499,3 +501,17 @@ def test_a_blank_ts_code_is_refused() -> None:
 def test_a_stored_effective_date_that_is_not_a_string_is_refused() -> None:
     with pytest.raises(NameHistoryError, match="effective_date must be an ISO date string"):
         name_histories_from_panel_rows((("000001.SZ", "平安银行", 20120802, "2012-01-20", "其他"),))
+
+
+# --- V2-P7-021: a rename year with nothing announced in it yet -----------------------------
+
+
+def test_a_rename_year_may_be_empty_through_its_window_and_not_a_day_after() -> None:
+    """`V2-P7-021`: the window always covers the year's first session (4 January 2027), and its
+    last day is the last day -- the value is the user's (plan U1), so the test reads the
+    function rather than the date."""
+    through = name_year_empty_admissible_through(2027)
+    assert through.year == 2027 and through >= date(2027, 1, 4)
+    assert name_year_may_be_empty(2027, date(2027, 1, 4))
+    assert name_year_may_be_empty(2027, through)
+    assert not name_year_may_be_empty(2027, through + timedelta(days=1))

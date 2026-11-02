@@ -120,6 +120,31 @@ from openalpha_cn.domain.panel_batch import SUBJECT_COLUMN_NAME
 NAMECHANGE_DATASET: Final[str] = "namechange"
 """The panel dataset (and partition directory) the rename corpus is stored under."""
 
+NAME_YEAR_EMPTY_THROUGH: Final[tuple[int, int]] = (1, 31)
+"""`(month, day)`: the last calendar day (Asia/Shanghai, the zone every `ann_date` is in) on
+which a rename year with nothing announced in it may be recorded and read empty (`V2-P7-021`).
+
+Until a year's first rename announcement the endpoint serves no row for the year -- 2012's first
+is dated 5 January, after its first session on 4 January -- and a year with no partition is
+`partition_missing` to every reader of the corpus. Recorded empty, it answers "no rename
+announced yet"; past this day a whole market that has announced no rename is a failed fetch, and
+an empty partition still stored is stale by rule. The value is the user's (decision U1 of
+`docs/superpowers/plans/2026-11-01-p7-dev-batch-1-B-new-year-and-009.md`)."""
+
+
+def name_year_empty_admissible_through(year: int) -> date:
+    """The last day on which rename year `year` may be read as "no rename announced yet"."""
+    month, day = NAME_YEAR_EMPTY_THROUGH
+    return date(year, month, day)
+
+
+def name_year_may_be_empty(year: int, day: date) -> bool:
+    """Whether a rename year with nothing announced in it is admissible on calendar `day` (an
+    Asia/Shanghai date): through `name_year_empty_admissible_through(year)` itself, not after.
+    Whether `day` is in `year` at all is the writer's question (`write_empty_name_year`)."""
+    return day <= name_year_empty_admissible_through(year)
+
+
 NAME_COLUMN: Final[str] = "name"
 NAME_EFFECTIVE_COLUMN: Final[str] = "effective_date"
 NAME_ANNOUNCEMENT_COLUMN: Final[str] = "announcement_date"
