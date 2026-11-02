@@ -53,7 +53,10 @@ import pytest
 import test_daily_selection as tds
 import test_daily_selection_survivor_day as survivor_day
 from research_repo import commit_file, git, head
-from test_daily_selection_survivor_day import seeded  # noqa: F401  (a module fixture, reused)
+from test_daily_selection_survivor_day import (  # noqa: F401  (module fixtures, reused)
+    new_year,
+    seeded,
+)
 
 from openalpha_cn import cli, strategy_survivor_check
 from openalpha_cn import strategy_survivor_forward as forward
@@ -593,6 +596,93 @@ def test_a_journal_naming_a_record_the_store_does_not_witness_refuses_the_report
     assert "2026-04-07" in err
     assert "the store is the witness" in err
     assert not (world.runtime / "reports" / report_name(REPORT_AS_OF)).exists()
+
+
+# --- the first session of a year, before its first rename (V2-P7-021) --------------------------
+
+NEW_YEAR_REPORT: Final[datetime] = datetime(2027, 1, 6, 10, 0, tzinfo=SHANGHAI)
+"""After 5 January's registration cutoff: the records of 4 and 5 January closed."""
+
+
+@pytest.fixture(scope="module")
+def first_session_evening(
+    tmp_path_factory: pytest.TempPathFactory,
+    new_year: Path,  # noqa: F811
+) -> tds.World:
+    """The evening of 4 January 2027 -- the first session of the year, before its first rename --
+    under a registration whose settings carry the test protocol (epoch 31 December 2026).
+
+    The market keeps its 4 January delisting, so 2027 has a registry (`stock_basic`) lifecycle
+    partition: step 4 of the evening and the report's label read both need one, and the
+    registry's own New Year gap -- a year with no listing or delisting yet has no partition -- is
+    not closed by `V2-P7-021` (plan B, U3). Without the delisting this evening stops at step 4,
+    `partition_missing`."""
+    root = tmp_path_factory.mktemp("survivor-new-year-records")
+    repo, registration = _repository(
+        root, survivor_day.survivor_config(epoch=date(2026, 12, 31)), settings=settings_with()
+    )
+    market = survivor_day.EmptyNewYear(open_days=survivor_day.NEW_YEAR_DAYS)
+    runtime = root / "runtime"
+    shutil.copytree(new_year, runtime)
+    world = tds.World(repo=repo, registration=registration, runtime=runtime, market=market)
+    with pytest.MonkeyPatch.context() as patch:
+        tds._bind(patch, repo, market)
+        code, _out, err = _daily(world, survivor_day.FIRST_2027)
+        assert code == 0, err
+    return world
+
+
+@pytest.mark.parametrize(
+    ("announced", "verdicts"),
+    [
+        (date(2027, 1, 5), {"verified": 2, "unverifiable": 0}),
+        (date(2027, 1, 4), {"verified": 1, "unverifiable": 1}),
+    ],
+    ids=["first rename after the session", "first rename dated the session, published late"],
+)
+def test_a_record_filed_on_the_first_session_before_any_rename_is_checked_like_any_other(
+    first_session_evening: tds.World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    announced: date,
+    verdicts: dict[str, int],
+) -> None:
+    """The record of 4 January was filed while 2027's corpus was recorded empty. The year's first
+    rename -- an ST name for one of that evening's eligible names, effective the 5th -- is
+    published on the 5th. Announced on the 5th, it is dated after the session: both records are
+    scored again equal and verified. Announced on the 4th, it is a row dated on the session that
+    no evening could read, and it moves the session's screen: UNVERIFIABLE, naming the restated
+    partition -- the ordinary late-ST case, not a new one. The report reads the calendar from the
+    epoch's year, 2026, through 2027."""
+    runtime = tmp_path / "runtime"
+    shutil.copytree(first_session_evening.runtime, runtime)
+    market = survivor_day.EmptyNewYear(open_days=survivor_day.NEW_YEAR_DAYS)
+    world = dataclasses.replace(first_session_evening, runtime=runtime, market=market)
+    tds._bind(monkeypatch, world.repo, market)
+    first, second = survivor_day.FIRST_2027, date(2027, 1, 5)
+    named = next(
+        order["ts_code"]
+        for order in survivor_day._journal(world, first)["result"]["paper"]["open_orders"]
+    )
+    market.renames = ((named, f"*ST{named[:6]}", announced, second, second),)
+    code, _out, err = _daily(world, second)
+    assert code == 0, err
+
+    code, _out, err = _report(world, capsys, as_of=NEW_YEAR_REPORT)
+
+    assert code == 0, err
+    records = _document(world, NEW_YEAR_REPORT)["records"]
+    assert (records["first_session"], records["newest_session"], records["witnessed"]) == (
+        "2027-01-04",
+        "2027-01-05",
+        2,
+    )
+    assert {key: records["by_verdict"][key] for key in ("verified", "unverifiable")} == verdicts
+    if verdicts["unverifiable"]:
+        (item,) = records["unverifiable"]
+        assert (item["session"], item["scope"]) == ("2027-01-04", "recompute_differs")
+        assert item["changes"] == ["namechange:2027 (its rows through 2027-01-04 were restated)"]
 
 
 # --- a week on: the relative return reads the primary layer -----------------------------------
