@@ -46,7 +46,7 @@
 - 契约：横幅**只打印**，日志 `openalpha-daily-survivor/v1`、清晨文件、`survivor_forward_report/v1` 写出的文件一字不变（硬规则 3）。新的 `openalpha-p7-smoke/v1`（`smoke.json`）与 `openalpha-p7-smoke-ledger/v1`（`requests.jsonl`）只存在于冒烟根目录，不入库。
 - `domain/` 不碰（硬规则 2）；单一组装根（硬规则 5）：驱动不自建存储，存储都由每日命令与周报自己经 `build_storage` 打开。
 - 面板夹具在测试时生成（硬规则 6）：测试只在 `tmp_path` 下写 `.parquet`/`.duckdb`，**不入库**任何此类文件。
-- 测试不联网（`tests/conftest.py::_refuse_outbound_connections`），一律用 `tests/unit/scripts/daily_market.Market`；**不读 `.env`**——测试里的 `.env` 写一个哨兵串，断言它不出现在任何输出与文件里。
+- 测试不联网（`tests/conftest.py::pytest_runtest_protocol`；corrected 2026-11-02: 这里原先引的 `_refuse_outbound_connections` 在 conftest 里不存在，守卫是这个钩子加 `pytest_collection`），一律用 `tests/unit/scripts/daily_market.Market`；**不读 `.env`**——测试里的 `.env` 写一个哨兵串，断言它不出现在任何输出与文件里。
 - 措辞：冒烟的一切输出是"候选"，**不是证据**；横幅原文 `smoke: do not place these orders`。T10 报告**不出现任何收益数字**（账本权益、相对收益、IC 都不抄）。
 - 真钱闸门（规格 §9 2026-11-01）：在 `006` 经用户确认并登记、账户成交对账与现金约束上线、用户明确说"开始"之前，不用打印的清单真钱交易。
 - 不装 launchd；不 push；冒烟克隆与运行目录不入主仓库；不使用也不修改 `docs/research/p6-registration.json`；`~/openalpha-research` 只被 `cp -c` 读一次。
@@ -458,6 +458,8 @@ def with_smoke(document: Mapping[str, Any], banner: str | None) -> Mapping[str, 
     return document if banner is None else {**document, SMOKE_DOCUMENT_KEY: banner}
 ```
 
+（**corrected 2026-11-02: 出货的 `smoke_banner` 与上面的草稿不同，评审之后**：它先问 `registration.is_file()`——不是普通文件的路径（FIFO 会让读阻塞，设备文件读不完）从不被打开——并捕获每一种 `Exception`，所以深层嵌套的 JSON 抛出的 `RecursionError` 也只是 `None`；准入读同一份字节、用同一个 `json.loads`，非冒烟路径的拒绝因此和基线逐字节相同。对应的修复轮测试：`test_a_registration_that_is_not_a_regular_file_is_never_opened`（FIFO 等）、`test_a_registration_nested_past_the_recursion_limit_carries_no_banner` 与 `test_a_committed_registration_nested_past_the_recursion_limit_is_step_1_s_refusal`（嵌套 JSON）；以及横幅的四条保证各被一个测试钉住——**A** 被拒绝的 `--json` 晚间的文档带 `smoke` 键（`test_a_refused_smoke_evening_in_json_carries_the_banner_under_its_key`）、**B** 冒烟登记里的 P6 配置的摘要带横幅（`test_a_smoke_registration_of_a_p6_configuration_banners_the_p6_summary`）、**C** 每日命令与 **D** 周报在没有任何步骤预料到的故障上仍然收尾横幅（`test_a_fault_no_step_anticipated_still_closes_the_daily_banner`、`test_a_fault_no_refusal_anticipated_still_closes_the_weekly_banner`）。评审用变异体证明：删掉 A–D 中任何一条，原来的 18 个测试仍全绿。）
+
 把 `main` 在 `options = DailyOptions(...)`（第 6337–6347 行）之后的部分换成：
 
 ```python
@@ -526,19 +528,15 @@ def _main_day(
     return int(DailyExit.done)
 ```
 
-（原来的注释原样搬进 `_main_day`；`options.registration`、`options.repo` 就是原来的 `arguments.registration`、`arguments.repo`。）`_main_morning` 加关键字参数 `banner: str | None = None`，两处打印改为：
+（原来的注释原样搬进 `_main_day`；`options.registration`、`options.repo` 就是原来的 `arguments.registration`、`arguments.repo`。）`_main_morning` 加关键字参数 `banner: str | None = None`（**corrected 2026-11-02: 没有默认值**——`banner: str | None` 是必须交给它的关键字参数，忘了传的调用会在调用处出错，而不是悄悄印出一份没有横幅的晨查；评审 Minor 4），两处打印改为：
 
 ```python
-            if as_json:
-                text = json.dumps(
-                    with_smoke(run.document, banner), sort_keys=True, ensure_ascii=False
-                )
-            else:
-                from openalpha_cn.strategy_survivor_morning import morning_lines
+if as_json:
+    text = json.dumps(with_smoke(run.document, banner), sort_keys=True, ensure_ascii=False)
+else:
+    from openalpha_cn.strategy_survivor_morning import morning_lines
 
-                text = "\n".join(
-                    bannered(morning_lines(run.document, this_run=run.this_run()), banner)
-                )
+    text = "\n".join(bannered(morning_lines(run.document, this_run=run.this_run()), banner))
 ```
 
 `scripts/forward_report.py` 的 `main`：在 `arguments = parser.parse_args(argv)` 之后加
@@ -557,21 +555,19 @@ def _main_day(
 并把原来从 `as_of = …` 到 `return 0` 的部分原样移进 `_main_report(arguments: argparse.Namespace, *, clock: Callable[[], datetime], banner: str | None) -> int`，只改最后的打印：
 
 ```python
-    if arguments.json:
-        printed = (
-            {**payload, "this_run": dict(report.this_run)}
-            if isinstance(report, SurvivorForwardReport)
-            else payload
-        )
-        print(
-            json.dumps(
-                daily_selection.with_smoke(printed, banner), sort_keys=True, ensure_ascii=False
-            )
-        )
-    else:
-        lines = [*summary_lines(report), f"written to {out}"]
-        print("\n".join(daily_selection.bannered(lines, banner)))
-    return 0
+if arguments.json:
+    printed = (
+        {**payload, "this_run": dict(report.this_run)}
+        if isinstance(report, SurvivorForwardReport)
+        else payload
+    )
+    print(
+        json.dumps(daily_selection.with_smoke(printed, banner), sort_keys=True, ensure_ascii=False)
+    )
+else:
+    lines = [*summary_lines(report), f"written to {out}"]
+    print("\n".join(daily_selection.bannered(lines, banner)))
+return 0
 ```
 
 写出的文件（`_replace_whole(out, json.dumps(payload, …))`、P6 的 `out.write_text(...)`）**不改**。
@@ -612,7 +608,7 @@ def _main_day(
 
 **账本的事件**（每行一个 JSON，`schema` 必有）：`prepared`（任务 3 写）、`phase`（`phase: 2`、`reason`）、`start`（`id`、`kind`、`arguments`、`phase`、`cap`、`allowance`、`spent_before`、`at`）、`end`（`id`、`exit_code`、`fault`、`requests`、`count`、`reached`、`seconds`、`at`）、`discarded`（`reason`、`at`）。已花 = 所有 `end.count` 之和；阶段 = 最后一个 `phase` 事件（缺省 1）。
 
-**`run_capped` 的规则：** 根目录已丢弃 → 拒绝；有 `start` 没有 `end`（进程被 SIGKILL、断电）→ 拒绝（发了多少请求不知道，面板可能半写：只能丢弃重来）；剩余（`cap − 已花`）小于 `headroom` → 拒绝、不写 `start`；额度 = 剩余与 `ceiling` 中较小者；写 `start` → 在 `capped_requests(额度)` 里调用 `call`（`SystemExit` 的码当作退出码；`RequestCapReached` 直接冒出来时退出码为空）→ `finally` 写 `end`；`discard_on_cap` 且（上限触发**或**调用以异常结束，含 `KeyboardInterrupt`）→ 写 `discarded`；异常照样抛出。上限触发时返回 `CAP_EXIT`。
+**`run_capped` 的规则：** 根目录已丢弃 → 拒绝；有 `start` 没有 `end`（进程被 SIGKILL、断电）→ 拒绝（发了多少请求不知道，面板可能半写：只能丢弃重来）；剩余（`cap − 已花`）小于 `headroom` → 拒绝、不写 `start`；额度 = 剩余与 `ceiling` 中较小者；写 `start` → 在 `capped_requests(额度)` 里调用 `call`（`SystemExit` 的码当作退出码；`RequestCapReached` 直接冒出来时退出码为空）→ `finally` 写 `end`；`discard_on_cap` 且（上限触发**或**调用以异常结束，含 `KeyboardInterrupt`）→ 写 `discarded`；异常照样抛出。上限触发时返回 `CAP_EXIT`。（**corrected 2026-11-02: 顺序是 `start` → `discarded` → `end`**——`discarded` 先写，`finally` 里的中断落在两次写入之间时，留下的是"已丢弃、没有 `end`"的根目录，而不是"有 `end`、没有东西拒绝这个根目录"的根目录；`cap`、`headroom`、`ceiling` 在写 `start` 之前校验；账本读回时按 `\n` 切行，不用 `splitlines`，被截断的最后一行有测试。代价：中断落在 `discarded` 与 `end` 之间时那次调用的计数丢失，已花是下界，`status` 在有未关闭的调用时写"至少"。）
 
 ### Steps
 
@@ -830,9 +826,7 @@ def test_a_ceiling_bounds_one_invocation_and_its_breach_need_not_discard(
     panel the root is not discarded."""
     ledger = caps.RequestLedger(tmp_path / "requests.jsonl")
 
-    run = _run(
-        ledger, _spend("daily"), kind="weekly", ceiling=0, headroom=0, discard_on_cap=False
-    )
+    run = _run(ledger, _spend("daily"), kind="weekly", ceiling=0, headroom=0, discard_on_cap=False)
 
     assert run.exit_code == caps.CAP_EXIT
     assert transport.posted == []
@@ -866,8 +860,10 @@ def test_an_interrupted_invocation_that_writes_the_panel_discards_the_root(
         _run(ledger, interrupted)
 
     events = _events(tmp_path / "requests.jsonl")
-    assert [event["event"] for event in events] == ["start", "end", "discarded"]
-    assert (events[1]["fault"], events[1]["count"]) == ("KeyboardInterrupt", 1)
+    # corrected 2026-11-02: `discarded` is appended before `end`, so a root is never left with an
+    # `end` and nothing to refuse it.
+    assert [event["event"] for event in events] == ["start", "discarded", "end"]
+    assert (events[2]["fault"], events[2]["count"]) == ("KeyboardInterrupt", 1)
 
 
 def test_an_invocation_that_never_recorded_its_end_refuses_every_later_one(
@@ -1170,19 +1166,9 @@ def run_capped(
         raise
     finally:
         seconds = round(monotonic() - started, 3)
-        ledger.append(
-            {
-                "event": "end",
-                "id": invocation,
-                "exit_code": wrapped,
-                "fault": fault,
-                "requests": dict(sorted(counter.items())),
-                "count": counter.sent,
-                "reached": counter.reached,
-                "seconds": seconds,
-                "at": clock().isoformat(),
-            }
-        )
+        # corrected 2026-11-02: `discarded` first, then `end` -- an interruption between the two
+        # appends must leave a root that is discarded (and without an end), never one with an end
+        # and nothing to refuse it.
         if discard_on_cap and (counter.reached is not None or fault is not None):
             cause = (
                 f"the cap stopped its {counter.reached} request"
@@ -1196,6 +1182,19 @@ def run_capped(
                     "at": clock().isoformat(),
                 }
             )
+        ledger.append(
+            {
+                "event": "end",
+                "id": invocation,
+                "exit_code": wrapped,
+                "fault": fault,
+                "requests": dict(sorted(counter.items())),
+                "count": counter.sent,
+                "reached": counter.reached,
+                "seconds": seconds,
+                "at": clock().isoformat(),
+            }
+        )
     return CappedRun(
         invocation=invocation,
         exit_code=CAP_EXIT if counter.reached is not None else int(wrapped or 0),
@@ -1792,6 +1791,12 @@ class SmokeEnvironmentError(ValueError):
 
 
 def _within(path: Path, root: Path) -> bool:
+    # corrected 2026-11-02: the shipped `_within` compares by identity too. This draft compares
+    # spellings only, and on case-insensitive APFS a root such as ~/OpenAlpha-Research/smoke passed
+    # the policy while the clone landed inside the research runtime (a failing test showed it).
+    # After the spelling test it `os.stat`s `root` and returns True when `os.path.samestat` says
+    # `path` or any of its existing ancestors is the same directory; an ancestor that does not
+    # exist is skipped, and a `root` that does not exist falls back to spelling alone.
     return any(path == base or base in path.parents for base in {root, root.resolve()})
 
 
@@ -1966,6 +1971,8 @@ def _device(path: Path) -> int:
 | `phase --to 2 --reason TEXT` | 任意 | 阶段 1 → 2（账本 `phase` 事件），只此一种 | — |
 
 额外参数里出现 `--runtime-dir`、`--registration`、`--repo`、`--morning-recheck`、`--pin-worktree`、`--launchd-plist`、`--factor-gaps` 一律拒绝（驱动设定它们）。`--smoke-root` 可省：脚本位于 `<root>/pinned/scripts/p7_smoke.py` 且 `<root>/smoke.json` 存在时就是 `<root>`。运行 `panel-build`/`factor-build` 之前先 `registry._refuse_a_foreign_package(manifest.pinned)`（从主检出跑驱动，跑的就不是登记的代码，退出 3）；日、清晨、周报由它们自己的准入把关。驱动锁 `<root>/driver.lock`（`openalpha_cn.panel.store._try_lock` / `_unlock`，F18）：同一根目录同时只有一个调用。每次调用的输出同时写进 `<root>/logs/<编号>-<种类>.out|.err`。SIGTERM、SIGHUP 在调用期间转成 `KeyboardInterrupt`（于是账本记下结束，写面板的调用丢弃根目录），调用结束后恢复原来的信号处理。退出码：被包住的命令自己的码；上限触发 `CAP_EXIT` = 4；驱动拒绝 `REFUSED_EXIT` = 5；中断 130。
+
+（**corrected 2026-11-02: 退出码，以及评审与修复轮加进驱动的八条行为。**退出码实际是：0、1、2 是被包住的命令自己的码，原样透传；**3 = 什么都没运行**（每日命令第 1 步准入拒绝的 3，在纸面账簿、日志和任何请求之前；或驱动发现 `openalpha` 不是钉住 worktree 的那一份，`ForeignPackageError`）；**4 = 请求上限，且只有上限**；5 = 驱动自己的拒绝；**7 = 被包住的 `panel build` / `factor build` 以它自己的 3、4、5 或 6 失败**（`PanelExit` 的 `bad_request`、`provider_failure`、`internal_error`、`catalog_busy`），收尾行写出它自己的码，所以驱动给出的 4 永远是上限、3 永远是什么都没运行；130 = 中断。原计划的"`registry.HoldoutRefusedError` → 退出 3"没变，实际由 `ForeignPackageError` 触发。八条行为，按提交：①被删掉 `discarded` 行的根目录仍被拒绝，读不通或被拒的账本按名拒绝，`status` 也退出 5（`6b414b0`）；②补救命令按命令自己解析出来的选项判断，不按词（`--as-of --incremental` 把 `--incremental` 读成 `--as-of` 的值，取最后一个 `--runtime-dir`，`~` 不展开）（`c3a947d`）；③`panel build` / `factor build` 以自己的 4、5、6 失败时退出 7（`595513e`）；④每一种中断都当作中断收尾——Ctrl-C、命令自己接住的信号，日志先于终端，调用方忽略的信号保持忽略（`86163e2`）；⑤命令会当作用法错误拒绝的补救，在写任何东西之前拒绝（`e6a6826`；typer 0.27 带自己的 click，`daily_selection.invoke` 接不住它的异常）；⑥中断标记是无锁的单元格（`e4ceb90`；信号落在 `threading.Event.set()` 的锁里会让进程挂住）；⑦构建自己的 3 也映成 7（`2a9c631`）；⑧请求帮助（`--help`）的补救按名拒绝、不印帮助（`581ad59`）。另有两条只加测试：`RULES` 表由每一种调用实际发出的、保留的、起步需要的东西钉住（`08c21ac`），命令把中断变成别的故障后仍按中断收尾（`99f840b`）。）
 
 **`parse_remedy(line, *, runtime, registration, pinned) -> Remedy`**（`Remedy` = 冻结 `(kind: str, arguments: tuple[str, ...])`）：`shlex.split`；找到以 `/.venv/bin/openalpha` 结尾的词（其后是 `panel build …` 或 `factor build …`，`arguments` = 从 `panel`/`factor` 起的全部），或以 `/.venv/bin/python` 结尾、下一个词是 `scripts/daily_selection.py` 的词（`arguments` = 去掉 `--runtime-dir`/`--registration`/`--repo` 之后的其余；含 `--morning-recheck` 则种类为 `morning` 并去掉它）。拒绝（`RemedyError`）：没有这两种程序；`openalpha` 的其他子命令；`--runtime-dir` 不是本冒烟的运行目录；日的 `--registration` 不是本冒烟登记、`--repo` 不是钉住的 worktree；`panel build` **不带** `--incremental` 且 `--dataset` 不只是 `trade_cal`——这是"整年重建"那条补救（F11），消息写明"约 1,200 次请求，冒烟从不跑它，停下、丢弃根目录、从原面板重新准备"。
 
@@ -2730,7 +2737,7 @@ def _cap_lines(
   2. `_openalpha_remedy` 删掉 `--runtime-dir` 的比较 → `[research runtime-runtime]` 变红。
   3. `RULES["evening"]` 的 `discard_on_cap` 改为 `False` → `test_the_cap_stops_an_evening_mid_fetch_and_the_root_is_discarded` 变红。
   4. `run` 里删掉 `registry._refuse_a_foreign_package(manifest.pinned)` → `test_a_remedy_from_a_checkout_that_is_not_the_pinned_worktree_is_refused` 变红。
-  5. `_call` 的 `kind == "weekly"` 分支改成走 `daily.main` → `test_a_morning_spends_one_request_and_a_weekly_report_none` 变红。
+  5. `_call` 的 `kind == "weekly"` 分支改成走 `daily.main` → `test_a_morning_spends_one_request_and_a_weekly_report_none` 变红。（**corrected 2026-11-02: 这条探针对那个测试不变红**——那个测试里周报在上一晚的次日 10:00 运行，每日命令在已完成的晚间上只重印整晚（0 次请求，退出 0），与周报的 0 次请求无从区分。杀死它的是修复轮里加的 `test_the_weekly_report_is_forward_report_s_and_the_morning_the_day_s_with_its_flag`：周报是 `forward_report.main` 的，晨查是每日命令加 `--morning-recheck`。运行手册相应写明：周报是 `forward_report.py`，重跑 `smoke evening` 不是对它的检验。）
 
 - [ ] **Step 6：提交**：`feat(V2-P7-019): the smoke driver -- evenings, mornings, weekly reports and printed remedies under the cap`。
 
@@ -2739,6 +2746,8 @@ def _cap_lines(
 ## Task 5：运行手册一节、T10 报告骨架、CHANGELOG
 
 **Issue:** `V2-P7-019`。**依据:** 路线调整 §2.3、§2.6、§3；本计划任务 1–4 的实际命令。
+
+（**corrected 2026-11-02: 下面的运行手册草稿被出货的一节取代**，以 `docs/runbooks/daily-selection.zh-CN.md` 文末「真实数据冒烟（`V2-P7-019`）」为准。主要区别：退出码表按驱动实际的 0 / 1 / 2 / 3 / 4 / 5 / 7 / 130 重写；"重跑一个已完成的晚间只重印"只在北京时间次日 16:30（多伦多次日 03:30）之前成立，多伦多次日 10:00 已是北京 23:00，次日若是交易日，`smoke evening` 开出的是新的一晚，要先问用户；复用旧根目录的面板作 `--source-panel` 的条件是该根目录未被丢弃**且** `status` 没有 `unclosed`；"每个输出都带横幅"按代码收窄为每个**打印订单的**输出（标准错误的首末行、文本摘要的首末行、`--json` 时文档里的 `smoke` 键），驱动自己的行、`status`、`prepare` 和用法错误不带；G6、G7、G9 收窄到可核对的东西；"待用户确认"的上限数值、谁来跑每一晚不由运行手册替用户定。）
 
 **Files:**
 - Modify: `docs/runbooks/daily-selection.zh-CN.md`（第 3–9 行的暂停说明、第 436 行幸存者形态的状态行各加一句例外；文末加一节）

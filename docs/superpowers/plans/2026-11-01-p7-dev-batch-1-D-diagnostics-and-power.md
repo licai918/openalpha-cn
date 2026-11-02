@@ -104,24 +104,29 @@ Task 2 ─> Task 6 (018 功效输出)        Task 6 与 Task 3/4/5 互不依赖
 DECILES: Final[int] = 10
 RankIcAbsence = Literal["fewer_than_two_labelled", "scores_tied", "labels_tied"]
 
+
 class DecileReadoutError(ValueError): ...
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class CrossSectionReadout:
-    scope: int                                   # 打过分的名字
+    scope: int  # 打过分的名字
     labelled: int
     unlabelled: int
-    scope_by_decile: tuple[int, ...]             # 10 个，最差在前，结果之前切
+    scope_by_decile: tuple[int, ...]  # 10 个，最差在前，结果之前切
     labelled_by_decile: tuple[int, ...]
     rank_ic: float | None
     rank_ic_absence: RankIcAbsence | None
-    equal_weight: float | None                   # 有标签名字的标签均值
-    decile_means: tuple[float | None, ...]       # 10 个，十分位 0 = 最差
-    decile_excess: tuple[float | None, ...]      # 十分位均值 − 等权
-    tail_excess: tuple[tuple[int, float | None], ...]  # (k, 剔除最差 n*k//10 后有标签名字的均值 − 等权)
-    survivors_minus_ew: float | None             # k = loser_decile_count 的那一项
+    equal_weight: float | None  # 有标签名字的标签均值
+    decile_means: tuple[float | None, ...]  # 10 个，十分位 0 = 最差
+    decile_excess: tuple[float | None, ...]  # 十分位均值 − 等权
+    tail_excess: tuple[
+        tuple[int, float | None], ...
+    ]  # (k, 剔除最差 n*k//10 后有标签名字的均值 − 等权)
+    survivors_minus_ew: float | None  # k = loser_decile_count 的那一项
     ew_minus_worst_decile: float | None
     top_minus_bottom: float | None
+
 
 def read_cross_section(
     scored: Sequence[tuple[str, float]],
@@ -131,19 +136,22 @@ def read_cross_section(
     tails: Sequence[int] = (1, 2, 3),
 ) -> CrossSectionReadout: ...
 
+
 SeriesAbsence = Literal["no_values", "fewer_than_two_values", "no_dispersion"]
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SeriesSummary:
     n: int
     mean: float | None
-    sd: float | None              # ddof = 1
-    se: float | None              # sd / sqrt(n)
-    t: float | None               # mean / se
+    sd: float | None  # ddof = 1
+    se: float | None  # sd / sqrt(n)
+    t: float | None  # mean / se
     share_positive: float | None
-    lag1_autocorrelation: float | None   # n >= 3
-    by_year: tuple[tuple[int, int, float], ...]   # (year, n, mean)
+    lag1_autocorrelation: float | None  # n >= 3
+    by_year: tuple[tuple[int, int, float], ...]  # (year, n, mean)
     absence: SeriesAbsence | None
+
 
 def summarize_series(values: Sequence[tuple[date, float]]) -> SeriesSummary: ...
 ```
@@ -419,7 +427,9 @@ def test_the_readout_is_the_forward_reports_arithmetic() -> None:
 - [ ] **Step 4：最小实现。** 要点（非显然处给代码）：
 
 ```python
-def _rank_ic(scores: Sequence[float], labels: Sequence[float]) -> tuple[float | None, RankIcAbsence | None]:
+def _rank_ic(
+    scores: Sequence[float], labels: Sequence[float]
+) -> tuple[float | None, RankIcAbsence | None]:
     """`strategy_survivor_forward._rank_ic`'s three checks and its two calls, in its order."""
     if len(scores) < 2:
         return None, "fewer_than_two_labelled"
@@ -461,18 +471,45 @@ POWER_BASIS: Final = (
     "result"
 )
 
+
 class PowerError(ValueError): ...
 
-def t_quantile(probability: float, df: float) -> float: ...           # 0.5 <= p < 1, df >= 1
+
+def t_quantile(probability: float, df: float) -> float: ...  # 0.5 <= p < 1, df >= 1
 def critical_value(*, test_level: float, periods: float, kind: CriticalValue) -> float: ...
-def power_of_mean_test(*, mean: float, sd: float, periods: float, test_level: float, kind: CriticalValue) -> float: ...
-def smallest_mean_at_power(*, power: float, sd: float, periods: float, test_level: float, kind: CriticalValue) -> float: ...
-def periods_for_power(*, mean: float, power: float, sd: float, test_level: float, kind: CriticalValue) -> int: ...
+def power_of_mean_test(
+    *, mean: float, sd: float, periods: float, test_level: float, kind: CriticalValue
+) -> float: ...
+def smallest_mean_at_power(
+    *, power: float, sd: float, periods: float, test_level: float, kind: CriticalValue
+) -> float: ...
+def periods_for_power(
+    *, mean: float, power: float, sd: float, test_level: float, kind: CriticalValue
+) -> int: ...
 def autocorrelation_equivalent_periods(*, periods: float, lag1: float) -> float: ...
 def by_first_step_level(*, q: float, family_size: int) -> float: ...
-def futility_stop_probability(*, mean: float, sd: float, interim_periods: int, threshold: float) -> float: ...
-def power_with_futility(*, mean: float, sd: float, periods: int, interim_periods: int, threshold: float, test_level: float, kind: CriticalValue) -> float: ...
-def power_table_lines(*, periods: int, sd: float, test_level: float, means: Sequence[float], target_power: float, kind: CriticalValue) -> tuple[str, ...]: ...
+def futility_stop_probability(
+    *, mean: float, sd: float, interim_periods: int, threshold: float
+) -> float: ...
+def power_with_futility(
+    *,
+    mean: float,
+    sd: float,
+    periods: int,
+    interim_periods: int,
+    threshold: float,
+    test_level: float,
+    kind: CriticalValue,
+) -> float: ...
+def power_table_lines(
+    *,
+    periods: int,
+    sd: float,
+    test_level: float,
+    means: Sequence[float],
+    target_power: float,
+    kind: CriticalValue,
+) -> tuple[str, ...]: ...
 ```
 
 规则：`test_level` 在 (0, 0.5)；`power` 在 (0, 1)；`sd > 0`；`periods >= 2`（t 的自由度 `periods - 1 >= 1`）；`-1 < lag1 < 1`；`1 <= interim_periods < periods`；`periods_for_power` 要 `mean > 0`；任何非有限值拒绝。`t` 口径 = 正态近似里把临界值换成 `t_{1-level, periods-1}`（"t 调整的正态近似"），模块文档串写明：登记的检验是符号翻转随机化检验，小样本行为更接近 t 检验，所以 t 口径在小 K 时更保守；两者都只是近似。
@@ -528,7 +565,9 @@ def power(mean: float, periods: float, kind: str = "normal", level: float = LEVE
         (12, 0.10, 0.746830004913777),
     ],
 )
-def test_the_normal_power_is_the_routes_arithmetic(periods: int, mean: float, expected: float) -> None:
+def test_the_normal_power_is_the_routes_arithmetic(
+    periods: int, mean: float, expected: float
+) -> None:
     """Phi(sqrt(K) * mean / sd - z_0.95): K=36 at 0.05 is Phi(2 - 1.6448536) = 0.639."""
     assert power(mean, periods) == pytest.approx(expected, abs=1e-12)
 
@@ -614,23 +653,42 @@ def test_an_interim_futility_look_costs_less_than_a_point_of_power_at_ic_005() -
     """One look at K/2 = 18 stopping when the mean is at or below 0: P(continue and the final
     test at K=36 has p <= 0.05). A seeded 200,000-draw simulation gave 0.6312 (not run here)."""
     with_look = power_with_futility(
-        mean=0.05, sd=SD, periods=36, interim_periods=18, threshold=0.0, test_level=LEVEL,
+        mean=0.05,
+        sd=SD,
+        periods=36,
+        interim_periods=18,
+        threshold=0.0,
+        test_level=LEVEL,
         kind="normal",
     )
     assert with_look == pytest.approx(0.6308415396468372, abs=1e-6)
     assert power_with_futility(
-        mean=0.0, sd=SD, periods=36, interim_periods=18, threshold=0.0, test_level=LEVEL,
+        mean=0.0,
+        sd=SD,
+        periods=36,
+        interim_periods=18,
+        threshold=0.0,
+        test_level=LEVEL,
         kind="normal",
     ) == pytest.approx(0.04875, abs=1e-6)
     assert power_with_futility(
-        mean=0.05, sd=SD, periods=36, interim_periods=18, threshold=-10.0, test_level=LEVEL,
+        mean=0.05,
+        sd=SD,
+        periods=36,
+        interim_periods=18,
+        threshold=-10.0,
+        test_level=LEVEL,
         kind="normal",
     ) == pytest.approx(power(0.05, 36), abs=1e-6)
 
 
 def test_the_power_lines_say_not_detectable_is_a_category_of_the_design() -> None:
     lines = power_table_lines(
-        periods=36, sd=SD, test_level=LEVEL, means=(0.037, 0.05, 0.1), target_power=0.8,
+        periods=36,
+        sd=SD,
+        test_level=LEVEL,
+        means=(0.037, 0.05, 0.1),
+        target_power=0.8,
         kind="normal",
     )
 
@@ -647,7 +705,7 @@ def test_the_power_lines_say_not_detectable_is_a_category_of_the_design() -> Non
         "  the smallest mean with probability 0.8: 0.0622",
         f"  {NOT_DETECTABLE_WORDING}",
     )
-    assert "never \"no effect\"" in NOT_DETECTABLE_WORDING
+    assert 'never "no effect"' in NOT_DETECTABLE_WORDING
     assert FORBIDDEN.search("\n".join(lines)) is None
 
 
@@ -655,14 +713,38 @@ def test_the_power_lines_say_not_detectable_is_a_category_of_the_design() -> Non
     ("call", "said"),
     [
         (lambda: power(0.05, 1), "periods"),
-        (lambda: power_of_mean_test(mean=0.05, sd=0.0, periods=36, test_level=LEVEL, kind="normal"), "sd"),
+        (
+            lambda: power_of_mean_test(
+                mean=0.05, sd=0.0, periods=36, test_level=LEVEL, kind="normal"
+            ),
+            "sd",
+        ),
         (lambda: power(0.05, 36, level=0.5), "test level"),
         (lambda: power(0.05, 36, kind="z"), "critical"),
         (lambda: power(math.nan, 36), "finite"),
-        (lambda: periods_for_power(mean=0.0, power=0.8, sd=SD, test_level=LEVEL, kind="normal"), "mean"),
-        (lambda: smallest_mean_at_power(power=1.0, sd=SD, periods=36, test_level=LEVEL, kind="normal"), "power"),
+        (
+            lambda: periods_for_power(mean=0.0, power=0.8, sd=SD, test_level=LEVEL, kind="normal"),
+            "mean",
+        ),
+        (
+            lambda: smallest_mean_at_power(
+                power=1.0, sd=SD, periods=36, test_level=LEVEL, kind="normal"
+            ),
+            "power",
+        ),
         (lambda: autocorrelation_equivalent_periods(periods=36, lag1=1.0), "lag"),
-        (lambda: power_with_futility(mean=0.05, sd=SD, periods=36, interim_periods=36, threshold=0.0, test_level=LEVEL, kind="normal"), "interim"),
+        (
+            lambda: power_with_futility(
+                mean=0.05,
+                sd=SD,
+                periods=36,
+                interim_periods=36,
+                threshold=0.0,
+                test_level=LEVEL,
+                kind="normal",
+            ),
+            "interim",
+        ),
         (lambda: t_quantile(0.4, 10), "probability"),
         (lambda: t_quantile(0.95, 0.5), "df"),
         (lambda: by_first_step_level(q=0.1, family_size=0), "family"),
@@ -679,7 +761,7 @@ def test_a_question_without_an_answer_is_refused_by_name(call: object, said: str
 
 ```python
 _STANDARD: Final = NormalDist()
-_T_PANELS: Final[int] = 4096          # Simpson panels on [0, |x|]
+_T_PANELS: Final[int] = 4096  # Simpson panels on [0, |x|]
 _T_BISECTIONS: Final[int] = 80
 _T_UPPER: Final[float] = 64.0
 _FUTILITY_PANELS: Final[int] = 4000
@@ -723,7 +805,10 @@ def power_with_futility(*, mean, sd, periods, interim_periods, threshold, test_l
     means bivariate normal with correlation sqrt(k / K): one fixed-grid Simpson integral."""
     r = math.sqrt(interim_periods / periods)
     c1 = (threshold - mean) / (sd / math.sqrt(interim_periods))
-    c2 = critical_value(test_level=test_level, periods=periods, kind=kind) - math.sqrt(periods) * mean / sd
+    c2 = (
+        critical_value(test_level=test_level, periods=periods, kind=kind)
+        - math.sqrt(periods) * mean / sd
+    )
     lower = max(c1, -_FUTILITY_SPAN / 2)
     width = _FUTILITY_SPAN / _FUTILITY_PANELS
     scale = math.sqrt(1 - r * r)
@@ -757,31 +842,40 @@ def power_with_futility(*, mean, sd, periods, interim_periods, threshold, test_l
 ```python
 import grid as _grid
 
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class DiagnosticWindow:
     name: str
     first: date
     last: date
-    ceiling_year: int        # 不读这一年之后的任何分区
+    ceiling_year: int  # 不读这一年之后的任何分区
+
 
 SECOND_USE_LAST: Final[date] = date(2026, 9, 24)
-RESEARCH: Final[DiagnosticWindow]     # discovery 阶段的首尾，ceiling 2021
-VALIDATION: Final[DiagnosticWindow]   # validation 阶段的首尾，ceiling 2023
-SECOND_USE: Final[DiagnosticWindow]   # holdout 阶段的首日 .. SECOND_USE_LAST，ceiling 2026
-WINDOWS: Final[Mapping[str, DiagnosticWindow]]   # {"research", "validation", "second_use"}
+RESEARCH: Final[DiagnosticWindow]  # discovery 阶段的首尾，ceiling 2021
+VALIDATION: Final[DiagnosticWindow]  # validation 阶段的首尾，ceiling 2023
+SECOND_USE: Final[DiagnosticWindow]  # holdout 阶段的首日 .. SECOND_USE_LAST，ceiling 2026
+WINDOWS: Final[Mapping[str, DiagnosticWindow]]  # {"research", "validation", "second_use"}
+
 
 class DiagnosticWindowError(ValueError): ...
+
 
 class WindowCappedStore(PanelStore):
     def __init__(self, root: Path, *, window: DiagnosticWindow) -> None: ...
     @property
     def window(self) -> DiagnosticWindow: ...
     @property
-    def served(self) -> tuple[tuple[str, int], ...]: ...   # 每个被读过的 (dataset, year)，排序
-    def partitions_read(self) -> tuple[tuple[str, int, str | None], ...]: ...  # 加 content hash（经 super()，不记为读）
+    def served(self) -> tuple[tuple[str, int], ...]: ...  # 每个被读过的 (dataset, year)，排序
+    def partitions_read(
+        self,
+    ) -> tuple[tuple[str, int, str | None], ...]: ...  # 加 content hash（经 super()，不记为读）
 
-def capped_panel_store(runtime_dir: Path, window: DiagnosticWindow) -> WindowCappedStore: ...
+
+def capped_panel_store(runtime_dir: Path, window: DiagnosticWindow) -> WindowCappedStore:
+    ...
     # runtime_dir / panel_view.PANEL_SUBDIRECTORY
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SignalPlan:
@@ -790,12 +884,18 @@ class SignalPlan:
     last: date
     stride: int
     horizons: tuple[int, ...]
-    sessions: tuple[date, ...]       # 留下的信号日
-    embargoed: tuple[date, ...]      # 最长期限的标签出场晚于 window.last 的信号日（具名，不静默丢）
+    sessions: tuple[date, ...]  # 留下的信号日
+    embargoed: tuple[date, ...]  # 最长期限的标签出场晚于 window.last 的信号日（具名，不静默丢）
+
 
 def plan_signal_days(
-    calendar: TradingCalendar, *, window: DiagnosticWindow, first: date, last: date,
-    stride: int, horizons: Sequence[int],
+    calendar: TradingCalendar,
+    *,
+    window: DiagnosticWindow,
+    first: date,
+    last: date,
+    stride: int,
+    horizons: Sequence[int],
 ) -> SignalPlan: ...
 ```
 
@@ -862,22 +962,35 @@ def three_years(tmp_path: Path) -> Path:
 
 def requirement(*years: int) -> ReadinessRequirement:
     return ReadinessRequirement(
-        dataset=PROBE, as_of=AS_OF, years=years, required_dates=None, required_subjects=None,
-        required_fields=None, max_staleness=None,
+        dataset=PROBE,
+        as_of=AS_OF,
+        years=years,
+        required_dates=None,
+        required_subjects=None,
+        required_fields=None,
+        max_staleness=None,
     )
 
 
 def test_the_three_windows_are_the_protocols_stages_and_the_spent_holdout() -> None:
     stages = grid.PROTOCOL_STAGE_WINDOWS
-    research, validation, second = (p7_windows.WINDOWS[name] for name in ("research", "validation", "second_use"))
+    research, validation, second = (
+        p7_windows.WINDOWS[name] for name in ("research", "validation", "second_use")
+    )
     assert (research.first, research.last, research.ceiling_year) == (
-        stages["discovery"].first, stages["discovery"].last, 2021,
+        stages["discovery"].first,
+        stages["discovery"].last,
+        2021,
     )
     assert (validation.first, validation.last, validation.ceiling_year) == (
-        stages["validation"].first, stages["validation"].last, 2023,
+        stages["validation"].first,
+        stages["validation"].last,
+        2023,
     )
     assert (second.first, second.last, second.ceiling_year) == (
-        stages["holdout"].first, date(2026, 9, 24), 2026,
+        stages["holdout"].first,
+        date(2026, 9, 24),
+        2026,
     )
     assert (research.last, validation.first) == (date(2021, 12, 31), date(2022, 1, 4))
 
@@ -905,7 +1018,9 @@ def test_a_capped_store_serves_years_up_to_its_ceiling_and_records_them(three_ye
     ],
     ids=["query", "profile", "coverage", "hash", "visible", "ready", "assessed", "readiness"],
 )
-def test_a_capped_store_refuses_every_door_past_its_ceiling(three_years: Path, door: object) -> None:
+def test_a_capped_store_refuses_every_door_past_its_ceiling(
+    three_years: Path, door: object
+) -> None:
     store = p7_windows.WindowCappedStore(three_years, window=p7_windows.RESEARCH)
 
     with pytest.raises(p7_windows.DiagnosticWindowError, match="read_once"):
@@ -948,8 +1063,12 @@ def test_a_research_plan_embargoes_a_label_that_would_end_in_2022() -> None:
         weekday_calendar(date(2021, 11, 1), date(2021, 12, 31)),
     ):
         plan = p7_windows.plan_signal_days(
-            calendar, window=p7_windows.RESEARCH, first=date(2021, 11, 1),
-            last=date(2021, 12, 31), stride=20, horizons=(20,),
+            calendar,
+            window=p7_windows.RESEARCH,
+            first=date(2021, 11, 1),
+            last=date(2021, 12, 31),
+            stride=20,
+            horizons=(20,),
         )
         assert plan.sessions == (date(2021, 11, 1), date(2021, 11, 29))
         assert plan.embargoed == (date(2021, 12, 27),)
@@ -959,8 +1078,12 @@ def test_the_longest_horizon_decides_the_embargo() -> None:
     calendar = weekday_calendar(date(2021, 11, 1), date(2022, 2, 28))
 
     plan = p7_windows.plan_signal_days(
-        calendar, window=p7_windows.RESEARCH, first=date(2021, 11, 1), last=date(2021, 12, 31),
-        stride=10, horizons=(5, 20),
+        calendar,
+        window=p7_windows.RESEARCH,
+        first=date(2021, 11, 1),
+        last=date(2021, 12, 31),
+        stride=10,
+        horizons=(5, 20),
     )
 
     assert all(
@@ -981,13 +1104,21 @@ def test_the_longest_horizon_decides_the_embargo() -> None:
         ({"horizons": (0,)}, "horizon"),
     ],
 )
-def test_a_plan_outside_its_window_is_refused_by_name(options: dict[str, object], said: str) -> None:
+def test_a_plan_outside_its_window_is_refused_by_name(
+    options: dict[str, object], said: str
+) -> None:
     arguments: dict[str, object] = {
-        "window": p7_windows.RESEARCH, "first": date(2021, 11, 1), "last": date(2021, 12, 31),
-        "stride": 20, "horizons": (20,), **options,
+        "window": p7_windows.RESEARCH,
+        "first": date(2021, 11, 1),
+        "last": date(2021, 12, 31),
+        "stride": 20,
+        "horizons": (20,),
+        **options,
     }
     with pytest.raises(p7_windows.DiagnosticWindowError, match=said):
-        p7_windows.plan_signal_days(weekday_calendar(date(2014, 12, 1), date(2022, 2, 28)), **arguments)  # type: ignore[arg-type]
+        p7_windows.plan_signal_days(
+            weekday_calendar(date(2014, 12, 1), date(2022, 2, 28)), **arguments
+        )  # type: ignore[arg-type]
 ```
 
 （`last=2022-01-04` 的拒绝消息必须点名验证期与读一次路径；`first` 早于 2015-01-05 的消息含 `before`。）
@@ -997,18 +1128,38 @@ def test_a_plan_outside_its_window_is_refused_by_name(options: dict[str, object]
 - [ ] **Step 3：实现。** 覆写的形状（每个读取门一样）：
 
 ```python
-def query(self, dataset: str, *, year: int, columns: Sequence[str],
-          filters: Mapping[str, object] | None = None) -> list[tuple[object, ...]]:
+def query(
+    self,
+    dataset: str,
+    *,
+    year: int,
+    columns: Sequence[str],
+    filters: Mapping[str, object] | None = None,
+) -> list[tuple[object, ...]]:
     self._admit(dataset, (year,))
     return super().query(dataset, year=year, columns=columns, filters=filters)
 
-def read_visible_at(self, requirement: ReadinessRequirement, *, year: int, columns: Sequence[str],
-                    filters: Mapping[str, object] | None = None, event_time_as_naive_utc: bool = False,
-                    newly_visible_since: datetime | None = None) -> PanelVisibleReadOutcome:
+
+def read_visible_at(
+    self,
+    requirement: ReadinessRequirement,
+    *,
+    year: int,
+    columns: Sequence[str],
+    filters: Mapping[str, object] | None = None,
+    event_time_as_naive_utc: bool = False,
+    newly_visible_since: datetime | None = None,
+) -> PanelVisibleReadOutcome:
     self._admit(requirement.dataset, (*requirement.years, year))
-    return super().read_visible_at(requirement, year=year, columns=columns, filters=filters,
-                                   event_time_as_naive_utc=event_time_as_naive_utc,
-                                   newly_visible_since=newly_visible_since)
+    return super().read_visible_at(
+        requirement,
+        year=year,
+        columns=columns,
+        filters=filters,
+        event_time_as_naive_utc=event_time_as_naive_utc,
+        newly_visible_since=newly_visible_since,
+    )
+
 
 def _admit(self, dataset: str, years: Iterable[int]) -> None:
     late = sorted({year for year in years if year > self._window.ceiling_year})
@@ -1066,18 +1217,30 @@ EXPLORATORY_POWER_WORDING: Final = (
 COMPOSITE: Final = "composite"
 METRICS: Final = ("rank_ic", "ew_minus_worst_decile", "survivors_minus_ew", "top_minus_bottom")
 
+
 class ScoreSource(Protocol):
     def scores_on(self, session: date) -> Mapping[str, tuple[tuple[str, float], ...]]: ...
+
     # 键：COMPOSITE 与合成分的各因子 id；值：合格范围内 (ts_code, 分数)，按代码排序
 
+
 @dataclass(frozen=True, slots=True, kw_only=True)
-class PanelScoreSource:          # 真实的：build_facts_day + screen
-    store: PanelStore; book: SurvivorBookConfig; transform: FactorTransformSpec
-    exchange: str; as_of: datetime; min_coverage: float; max_carry_sessions: int
+class PanelScoreSource:  # 真实的：build_facts_day + screen
+    store: PanelStore
+    book: SurvivorBookConfig
+    transform: FactorTransformSpec
+    exchange: str
+    as_of: datetime
+    min_coverage: float
+    max_carry_sessions: int
+
     def scores_on(self, session: date) -> Mapping[str, tuple[tuple[str, float], ...]]: ...
 
-def panel_label_source(store: PanelStore, *, years: Sequence[int], exchange: str,
-                       as_of: datetime, cached_sessions: int) -> OutcomeLabels: ...
+
+def panel_label_source(
+    store: PanelStore, *, years: Sequence[int], exchange: str, as_of: datetime, cached_sessions: int
+) -> OutcomeLabels: ...
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class DiagnosticRequest:
@@ -1090,6 +1253,7 @@ class DiagnosticRequest:
     power_target: float
     power_test_level: float
 
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class DayReading:
     session: date
@@ -1097,17 +1261,24 @@ class DayReading:
     horizon: int
     readout: CrossSectionReadout | None
     unlabelled_by_code: tuple[tuple[str, int], ...]
-    refusal: str | None              # 当日被数据拒绝时的具名原因（缺口）；窗口违规从不在这里
+    refusal: str | None  # 当日被数据拒绝时的具名原因（缺口）；窗口违规从不在这里
 
-def run_diagnostics(request: DiagnosticRequest, *, scores: ScoreSource,
-                    labels_for: Callable[[int], LabelSource]) -> tuple[DayReading, ...]: ...
+
+def run_diagnostics(
+    request: DiagnosticRequest, *, scores: ScoreSource, labels_for: Callable[[int], LabelSource]
+) -> tuple[DayReading, ...]: ...
 def summarize(request: DiagnosticRequest, readings: Sequence[DayReading]) -> dict[str, Any]: ...
-def diagnostic_document(request: DiagnosticRequest, readings: Sequence[DayReading], *,
-                        config: Mapping[str, Any], code_commit: str,
-                        partitions_read: Sequence[tuple[str, int, str | None]],
-                        binding: Mapping[str, Any] | None = None) -> dict[str, Any]: ...
+def diagnostic_document(
+    request: DiagnosticRequest,
+    readings: Sequence[DayReading],
+    *,
+    config: Mapping[str, Any],
+    code_commit: str,
+    partitions_read: Sequence[tuple[str, int, str | None]],
+    binding: Mapping[str, Any] | None = None,
+) -> dict[str, Any]: ...
 def diagnostic_lines(document: Mapping[str, Any]) -> list[str]: ...
-def main(argv: Sequence[str] | None = None) -> int: ...      # 子命令 explore、power
+def main(argv: Sequence[str] | None = None) -> int: ...  # 子命令 explore、power
 ```
 
 引擎规则：对计划里的每个信号日：`scores.scores_on(day)`；把当日的数据拒绝（`strategy_survivor_registration.SURVIVOR_RECOMPUTE_REFUSALS` 加 `model_view.ModelRunBlockedError`、`ModelPanelUnreadableError`）记成具名缺口、继续；**`DiagnosticWindowError` 永远不是缺口，原样抛出**。对每个期限：`labels.window(session_publication_instant(day), horizon=ResearchHorizon(count=h, unit=HorizonUnit.trading_days))`，出场晚于 `plan.window.last` 就在**问任何一个标签之前**抛 `DiagnosticWindowError`（纵深防御；正常情况下嵌入期已经排除）；对范围里每个名字问标签：`None` → 计 `no_adjustment_history`，有拒绝码 → 计各码，否则取 `realized_return`；`read_cross_section(...)`。`labels_for(year)` 每个信号年建一个读取器，年份 `y-1..min(y+1, ceiling)`（`strategy_view._measure_year` 的形状），`cached_sessions = max(horizons) + 2`。
@@ -1204,7 +1375,9 @@ class TableLabels:
         self.asked: list[tuple[str, date]] = []
 
     def window(self, instant: datetime, *, horizon: ResearchHorizon) -> LabelWindow:
-        return build_label_window(as_of=instant, zone=SHANGHAI, horizon=horizon, calendar=self.calendar)
+        return build_label_window(
+            as_of=instant, zone=SHANGHAI, horizon=horizon, calendar=self.calendar
+        )
 
     def label(self, ts_code: str, window: LabelWindow) -> OutcomeLabel | None:
         self.asked.append((ts_code, window.entry_day))
@@ -1212,17 +1385,29 @@ class TableLabels:
         if value is None:
             return None
         return OutcomeLabel(
-            ts_code=ts_code, window=window, refusals=(), entry_touch=None, exit_touch=None,
+            ts_code=ts_code,
+            window=window,
+            refusals=(),
+            entry_touch=None,
+            exit_touch=None,
             window_return=WindowReturn(
-                ts_code=ts_code, entry_day=window.entry_day, exit_day=window.exit_day,
-                published=value, adjusted=value, unadjusted=value,
-                entry_adjusted_close=1.0, exit_adjusted_close=1.0 + value, per_session=(),
+                ts_code=ts_code,
+                entry_day=window.entry_day,
+                exit_day=window.exit_day,
+                published=value,
+                adjusted=value,
+                unadjusted=value,
+                entry_adjusted_close=1.0,
+                exit_adjusted_close=1.0 + value,
+                per_session=(),
             ),
         )
 
 
 class FixedScores:
-    def __init__(self, scored: Mapping[str, float], *, refuse_on: frozenset[date] = frozenset()) -> None:
+    def __init__(
+        self, scored: Mapping[str, float], *, refuse_on: frozenset[date] = frozenset()
+    ) -> None:
         self.scored = tuple(sorted(scored.items()))
         self.refuse_on = refuse_on
         self.asked: list[date] = []
@@ -1235,15 +1420,23 @@ class FixedScores:
 
 
 def request(
-    *, first: date = SESSIONS[0], last: date = date(2026, 6, 30), stride: int = 20,
+    *,
+    first: date = SESSIONS[0],
+    last: date = date(2026, 6, 30),
+    stride: int = 20,
     horizons: tuple[int, ...] = (20,),
 ) -> Any:
     plan = p7_windows.plan_signal_days(
         CALENDAR, window=FIXTURE_WINDOW, first=first, last=last, stride=stride, horizons=horizons
     )
     return p7.DiagnosticRequest(
-        plan=plan, scores=(p7.COMPOSITE,), tails=(1, 2, 3), loser_decile_count=2,
-        power_means=(0.037, 0.05, 0.1), power_periods=(12, 36, 56), power_target=0.8,
+        plan=plan,
+        scores=(p7.COMPOSITE,),
+        tails=(1, 2, 3),
+        loser_decile_count=2,
+        power_means=(0.037, 0.05, 0.1),
+        power_periods=(12, 36, 56),
+        power_target=0.8,
         power_test_level=0.05,
     )
 
@@ -1259,7 +1452,8 @@ def test_the_engine_reads_each_signal_day_as_the_readout_does() -> None:
     read = request(last=date(2026, 3, 31))
     labels = TableLabels(tail_answer)
     readings = p7.run_diagnostics(
-        read, scores=FixedScores({code: float(p) for p, code in enumerate(CODES)}),  # type: ignore[arg-type]
+        read,
+        scores=FixedScores({code: float(p) for p, code in enumerate(CODES)}),  # type: ignore[arg-type]
         labels_for=lambda year: labels,
     )
 
@@ -1275,7 +1469,8 @@ def test_the_engine_reads_each_signal_day_as_the_readout_does() -> None:
 def test_the_summary_is_the_series_summary_of_the_non_overlapping_readings() -> None:
     read = request(stride=5, horizons=(5, 20), last=date(2026, 4, 30))
     readings = p7.run_diagnostics(
-        read, scores=FixedScores({code: float(p) for p, code in enumerate(CODES)}),  # type: ignore[arg-type]
+        read,
+        scores=FixedScores({code: float(p) for p, code in enumerate(CODES)}),  # type: ignore[arg-type]
         labels_for=lambda year: TableLabels(tail_answer),
     )
     summary = p7.summarize(read, readings)
@@ -1284,7 +1479,9 @@ def test_the_summary_is_the_series_summary_of_the_non_overlapping_readings() -> 
     assert summary[p7.COMPOSITE]["h5"]["sampled"] == [day.isoformat() for day in sessions]
     assert summary[p7.COMPOSITE]["h20"]["sampled"] == [day.isoformat() for day in sessions[::4]]
     h20 = [item for item in readings if item.horizon == 20 and item.session in sessions[::4]]
-    expected = summarize_series([(item.session, item.readout.ew_minus_worst_decile) for item in h20])  # type: ignore[union-attr]
+    expected = summarize_series(
+        [(item.session, item.readout.ew_minus_worst_decile) for item in h20]
+    )  # type: ignore[union-attr]
     assert summary[p7.COMPOSITE]["h20"]["ew_minus_worst_decile"]["mean"] == expected.mean
     assert summary[p7.COMPOSITE]["h20"]["ew_minus_worst_decile"]["n"] == expected.n
 
@@ -1298,10 +1495,14 @@ def test_a_cyclic_no_signal_input_shows_no_structure() -> None:
         t = CALENDAR.trading_days.index(entry) - 1
         return ((codes.index(code) + t) % 10) / 100
 
-    summary = p7.summarize(read, p7.run_diagnostics(
-        read, scores=FixedScores({code: float(r) for r, code in enumerate(codes)}),  # type: ignore[arg-type]
-        labels_for=lambda year: TableLabels(cyclic),
-    ))
+    summary = p7.summarize(
+        read,
+        p7.run_diagnostics(
+            read,
+            scores=FixedScores({code: float(r) for r, code in enumerate(codes)}),  # type: ignore[arg-type]
+            labels_for=lambda year: TableLabels(cyclic),
+        ),
+    )
 
     block = summary[p7.COMPOSITE]["h1"]
     assert block["rank_ic"]["n"] == 10
@@ -1314,14 +1515,19 @@ def test_a_refused_day_is_a_named_gap_that_never_moves_the_sample() -> None:
     sessions = read.plan.sessions  # type: ignore[attr-defined]
     readings = p7.run_diagnostics(
         read,
-        scores=FixedScores({code: float(p) for p, code in enumerate(CODES)}, refuse_on=frozenset({sessions[1]})),  # type: ignore[arg-type]
+        scores=FixedScores(
+            {code: float(p) for p, code in enumerate(CODES)}, refuse_on=frozenset({sessions[1]})
+        ),  # type: ignore[arg-type]
         labels_for=lambda year: TableLabels(tail_answer),
     )
     summary = p7.summarize(read, readings)
 
     assert summary[p7.COMPOSITE]["h20"]["sampled"] == [day.isoformat() for day in sessions]
     assert summary[p7.COMPOSITE]["h20"]["gaps"] == [
-        {"session": sessions[1].isoformat(), "reason": f"SurvivorFactsError: no 16:30 build on {sessions[1].isoformat()}"}
+        {
+            "session": sessions[1].isoformat(),
+            "reason": f"SurvivorFactsError: no 16:30 build on {sessions[1].isoformat()}",
+        }
     ]
     assert summary[p7.COMPOSITE]["h20"]["rank_ic"]["n"] == len(sessions) - 1
 
@@ -1332,7 +1538,9 @@ def test_a_window_refusal_is_never_turned_into_a_gap() -> None:
             raise p7_windows.DiagnosticWindowError("daily [2022] is past the research window")
 
     with pytest.raises(p7_windows.DiagnosticWindowError):
-        p7.run_diagnostics(request(), scores=Leaking({}), labels_for=lambda year: TableLabels(tail_answer))  # type: ignore[arg-type]
+        p7.run_diagnostics(
+            request(), scores=Leaking({}), labels_for=lambda year: TableLabels(tail_answer)
+        )  # type: ignore[arg-type]
 
 
 def test_a_label_window_past_the_window_is_refused_before_any_label_is_asked() -> None:
@@ -1343,8 +1551,13 @@ def test_a_label_window_past_the_window_is_refused_before_any_label_is_asked() -
         name="fixture", first=date(2026, 1, 5), last=date(2026, 2, 27), ceiling_year=2026
     )
     forged = p7_windows.SignalPlan(
-        window=short, first=date(2026, 2, 16), last=date(2026, 2, 16), stride=1,
-        horizons=(20,), sessions=(date(2026, 2, 16),), embargoed=(),
+        window=short,
+        first=date(2026, 2, 16),
+        last=date(2026, 2, 16),
+        stride=1,
+        horizons=(20,),
+        sessions=(date(2026, 2, 16),),
+        embargoed=(),
     )
     labels = TableLabels(tail_answer)
 
@@ -1387,7 +1600,9 @@ def test_a_label_window_past_the_window_is_refused_before_any_label_is_asked() -
 
 **Issue:** `V2-P7-004`（供 `V2-P7-024` 使用；`024` 的读数本身不在本计划里）。**依赖:** Task 3、4。**依据:** G-0（规格 §5.2）；路线调整 §2.1；`registry.run_holdout`（`registry.py:420-475`：先写认领再测量，崩溃后认领就是那一次）、`_committed_registration`（`:224-270`）、`_refuse_a_changed_source`（`:273-295`）、`_refuse_a_foreign_package`（`:303-312`）、`_refuse_foreign_scripts`（`:320-329`）、`REGISTERED_PATHS`（`:93`）、`registry.register` 的写一次规则（`:199-206`）；`registry` 文档串里写明的局限（提交时间是自报的、账本不在 git 里，`:49-54`）。
 
-**Files:** Create `scripts/research/p7_reading.py`、`tests/unit/scripts/test_p7_reading.py`。
+**Files:** Create `scripts/research/p7_reading.py`、`tests/unit/scripts/test_p7_reading.py`。（**corrected 2026-11-02: 另有 `tests/unit/test_p7_reading_rehearsal.py`**——在生成的两年面板、夹具窗口上演练默认的测量与预检。）
+
+（**corrected 2026-11-02: 下面这一任务经过四轮修复，出货的行为与本节的草稿在五处不同；以 `scripts/research/p7_reading.py` 的模块文档串为准。**①**整个窗口**：一个读数必须从窗口的第一个会话读到最后一个会话（`first`、`last` 就是窗口的第一天与最后一天），因为部分读数也会用掉整个窗口，而第一天若不是会话就不能登记；一个永远达不到的 `minimum_periods`（超过数据无关的上界 `_most_periods`）在登记时拒绝。②**窗口级认领**：原草稿"一份认领一个读数名"，换一个读数名就能再读一次；出货的版本在读数自己的认领之前先以 `O_EXCL` 写 `<window>.window-claim.json`，并且 `READING_DIRECTORY` 里任何一个点名该窗口的 `*.claim.json` / `*.window-claim.json`，在磁盘上或曾在任何 ref（`--all --full-history`、合并提交的每个父提交、`--reflog`、stash）里提交过，就拒绝；读不通的认领文件、点名不在 `WINDOWS` 里的窗口一律拒绝；**认领必须提交并留在本仓库的 refs 里**，浅克隆（`git rev-parse --is-shallow-repository` 必须恰好答 `false`）与 grafts 文件拒绝，替换 ref 被忽略。认领与结果的路径跟着 `HEAD` 所持的登记，符号链接找到同样的认领。③`READ_ONCE_POWER_WORDING`：读一次的文档的功效块不再说"样本内"（那个标准差是这一次读数自己的值），由 `p7_diagnostics` 按文档种类选措辞，探索性输出的字节不变。④**按数据集的年前预检**：预检对窗口各年的所有数据集，只对读年前一年的数据集（`YEAR_BEFORE_DATASETS`：日历、日线、复权因子、停牌、名称、登记簿）再要年前一年；`stk_limit` 与因子数据集只为信号日读，只要窗口各年。⑤`loser_decile_count` 必须等于书里的，读之前认领之前核对。运行前提见 `docs/superpowers/plans/2026-11-02-p7-dev-batch-1-closeout.md` §6。）
 
 **Interfaces（产出）:**
 
@@ -1397,16 +1612,29 @@ STOP_RULE_SCHEMA: Final = "p7-stop-rule/v1"
 READING_DIRECTORY: Final = Path("docs/research/p7-readings")
 Role = Literal["primary", "secondary"]
 
-class ReadingError(ValueError): ...                                   # 写不出这份登记
-class ReadingConfigurationError(registry.HoldoutRefusedError): ...     # 登记的内容不能读
-class ReadingAlreadyClaimedError(registry.HoldoutRefusedError): ...    # 已认领 / 已有结果 / 认领曾被提交
-class ReadingPreflightError(registry.HoldoutRefusedError): ...         # 认领前的目录检查不通过
+
+class ReadingError(ValueError): ...  # 写不出这份登记
+
+
+class ReadingConfigurationError(registry.HoldoutRefusedError): ...  # 登记的内容不能读
+
+
+class ReadingAlreadyClaimedError(
+    registry.HoldoutRefusedError
+): ...  # 已认领 / 已有结果 / 认领曾被提交
+
+
+class ReadingPreflightError(registry.HoldoutRefusedError): ...  # 认领前的目录检查不通过
+
+
 class ForeignP7ScriptsError(registry.HoldoutRefusedError): ...
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class StopClause:
     metric: Literal["rank_ic", "ew_minus_worst_decile", "survivors_minus_ew", "top_minus_bottom"]
     mean_at_or_below: float
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class StopRule:
@@ -1415,22 +1643,44 @@ class StopRule:
     minimum_periods: int
     any_of: tuple[StopClause, ...]
 
-STOP_TRIGGERED_WORDING: Final[str]       # 见下面的规则
+
+STOP_TRIGGERED_WORDING: Final[str]  # 见下面的规则
 NOT_TRIGGERED_WORDING: Final[str]
 
-def register_reading(*, path: Path, reading: str, issue: str, role: Role, window: str,
-                     request: Mapping[str, Any], config: Mapping[str, Any],
-                     stop_rule: StopRule | None, code_commit: str) -> str: ...   # 返回 sha256
+
+def register_reading(
+    *,
+    path: Path,
+    reading: str,
+    issue: str,
+    role: Role,
+    window: str,
+    request: Mapping[str, Any],
+    config: Mapping[str, Any],
+    stop_rule: StopRule | None,
+    code_commit: str,
+) -> str: ...  # 返回 sha256
 def evaluate_stop_rule(rule: StopRule, document: Mapping[str, Any]) -> dict[str, Any]: ...
 # -> {"outcome": "triggered" | "not triggered", "clauses": [{"metric", "n", "mean",
 #     "mean_at_or_below", "met"}], "reason": str | None, "wording": str}
 # read_once 的返回值 = 测量的文档 + {"stop_rule": evaluate_stop_rule(...)}（只在 primary）
-def preflight_problems(store: PanelStore, *, window: DiagnosticWindow,
-                       datasets: Sequence[str]) -> tuple[str, ...]: ...   # 只问目录：registered_years
+def preflight_problems(
+    store: PanelStore, *, window: DiagnosticWindow, datasets: Sequence[str]
+) -> tuple[str, ...]: ...  # 只问目录：registered_years
+
+
 Measure = Callable[[Mapping[str, Any], DiagnosticWindow, Mapping[str, Any]], dict[str, Any]]
-def read_once(registration: Path, *, repo: Path, runtime_dir: Path,
-              clock: Callable[[], datetime] | None = None, measure: Measure | None = None,
-              preflight: Callable[[Mapping[str, Any]], Sequence[str]] | None = None) -> dict[str, Any]: ...
+
+
+def read_once(
+    registration: Path,
+    *,
+    repo: Path,
+    runtime_dir: Path,
+    clock: Callable[[], datetime] | None = None,
+    measure: Measure | None = None,
+    preflight: Callable[[Mapping[str, Any]], Sequence[str]] | None = None,
+) -> dict[str, Any]: ...
 ```
 
 规则：
@@ -1482,15 +1732,26 @@ BOUND: Final[tuple[str, ...]] = (
     "uv.lock",
 )
 REQUEST: Final[dict[str, Any]] = {
-    "first": "2022-01-04", "last": "2023-12-29", "stride": 20, "horizons": [20],
-    "scores": ["composite"], "tails": [1, 2, 3], "loser_decile_count": 2,
+    "first": "2022-01-04",
+    "last": "2023-12-29",
+    "stride": 20,
+    "horizons": [20],
+    "scores": ["composite"],
+    "tails": [1, 2, 3],
+    "loser_decile_count": 2,
 }
 CONFIG: Final[dict[str, Any]] = {
-    "book": {"seed": 0}, "transform": "cross_section_standard/v1", "exchange": "SSE",
-    "min_coverage": 0.5, "max_carry_sessions": 250, "as_of": "2026-10-09T00:00:00+08:00",
+    "book": {"seed": 0},
+    "transform": "cross_section_standard/v1",
+    "exchange": "SSE",
+    "min_coverage": 0.5,
+    "max_carry_sessions": 250,
+    "as_of": "2026-10-09T00:00:00+08:00",
 }
 RULE = p7_reading.StopRule(
-    score="composite", horizon=20, minimum_periods=3,
+    score="composite",
+    horizon=20,
+    minimum_periods=3,
     any_of=(
         p7_reading.StopClause(metric="rank_ic", mean_at_or_below=0.02),
         p7_reading.StopClause(metric="ew_minus_worst_decile", mean_at_or_below=0.0),
@@ -1510,21 +1771,42 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         git(repo, "add", name)
     git(repo, "commit", "-q", "-m", "initial", at=COMMITTED - timedelta(days=1))
     research = repo / "scripts" / "research"
-    monkeypatch.setattr(registry, "_imported_package", lambda: repo / "src" / "openalpha_cn" / "__init__.py")
-    monkeypatch.setattr(registry, "_imported_scripts", lambda: (research / "grid.py", research / "registry.py"))
     monkeypatch.setattr(
-        p7_reading, "_imported_p7_scripts",
-        lambda: tuple(research / f"{name}.py" for name in ("p7_windows", "p7_diagnostics", "p7_reading")),
+        registry, "_imported_package", lambda: repo / "src" / "openalpha_cn" / "__init__.py"
+    )
+    monkeypatch.setattr(
+        registry, "_imported_scripts", lambda: (research / "grid.py", research / "registry.py")
+    )
+    monkeypatch.setattr(
+        p7_reading,
+        "_imported_p7_scripts",
+        lambda: tuple(
+            research / f"{name}.py" for name in ("p7_windows", "p7_diagnostics", "p7_reading")
+        ),
     )
     return repo
 
 
-def registered(repo: Path, *, commit: bool = True, role: str = "primary", rule: Any = RULE,
-               window: str = "validation", reading: str = "v2-p7-024-validation") -> Path:
+def registered(
+    repo: Path,
+    *,
+    commit: bool = True,
+    role: str = "primary",
+    rule: Any = RULE,
+    window: str = "validation",
+    reading: str = "v2-p7-024-validation",
+) -> Path:
     path = repo / "docs" / "research" / "p7-readings" / f"{reading}.registration.json"
     p7_reading.register_reading(
-        path=path, reading=reading, issue="V2-P7-024", role=role, window=window,  # type: ignore[arg-type]
-        request=REQUEST, config=CONFIG, stop_rule=rule, code_commit=head(repo),
+        path=path,
+        reading=reading,
+        issue="V2-P7-024",
+        role=role,
+        window=window,  # type: ignore[arg-type]
+        request=REQUEST,
+        config=CONFIG,
+        stop_rule=rule,
+        code_commit=head(repo),
     )
     if commit:
         commit_file(repo, path, "register the reading", at=COMMITTED)
@@ -1532,9 +1814,17 @@ def registered(repo: Path, *, commit: bool = True, role: str = "primary", rule: 
 
 
 def document(*, n: int = 24, ic: float = 0.05, spread: float = 0.01) -> dict[str, Any]:
-    return {"kind": "p7-diagnostic-read-once/v1", "summary": {"composite": {"h20": {
-        "rank_ic": {"n": n, "mean": ic}, "ew_minus_worst_decile": {"n": n, "mean": spread},
-    }}}}
+    return {
+        "kind": "p7-diagnostic-read-once/v1",
+        "summary": {
+            "composite": {
+                "h20": {
+                    "rank_ic": {"n": n, "mean": ic},
+                    "ew_minus_worst_decile": {"n": n, "mean": spread},
+                }
+            }
+        },
+    }
 
 
 class Measure:
@@ -1546,7 +1836,9 @@ class Measure:
         self.calls: list[tuple[str, bool]] = []
         self.claim: Path | None = None
 
-    def __call__(self, body: Mapping[str, Any], window: Any, binding: Mapping[str, Any]) -> dict[str, Any]:
+    def __call__(
+        self, body: Mapping[str, Any], window: Any, binding: Mapping[str, Any]
+    ) -> dict[str, Any]:
         self.calls.append((window.name, self.claim is not None and self.claim.exists()))
         if self.fail:
             raise RuntimeError("the process died mid-read")
@@ -1554,10 +1846,16 @@ class Measure:
 
 
 def run(registration: Path, repo: Path, measure: Measure, *, hours: int = 1) -> dict[str, Any]:
-    measure.claim = registration.with_name(registration.name.replace(".registration.json", ".claim.json"))
+    measure.claim = registration.with_name(
+        registration.name.replace(".registration.json", ".claim.json")
+    )
     return p7_reading.read_once(
-        registration, repo=repo, runtime_dir=repo / "runtime",
-        clock=lambda: COMMITTED + timedelta(hours=hours), measure=measure, preflight=lambda body: (),
+        registration,
+        repo=repo,
+        runtime_dir=repo / "runtime",
+        clock=lambda: COMMITTED + timedelta(hours=hours),
+        measure=measure,
+        preflight=lambda body: (),
     )
 
 
@@ -1565,12 +1863,22 @@ def test_a_registration_is_written_once_and_names_its_code_commit(repo: Path) ->
     path = registered(repo, commit=False)
     body = json.loads(path.read_text(encoding="utf-8"))
     assert body["schema"] == p7_reading.READING_SCHEMA
-    assert (body["window"], body["role"], body["code_commit"]) == ("validation", "primary", head(repo))
+    assert (body["window"], body["role"], body["code_commit"]) == (
+        "validation",
+        "primary",
+        head(repo),
+    )
     with pytest.raises(p7_reading.ReadingError, match="already"):
         p7_reading.register_reading(
-            path=path, reading="v2-p7-024-validation", issue="V2-P7-024", role="primary",
-            window="validation", request={**REQUEST, "stride": 10}, config=CONFIG,
-            stop_rule=RULE, code_commit=head(repo),
+            path=path,
+            reading="v2-p7-024-validation",
+            issue="V2-P7-024",
+            role="primary",
+            window="validation",
+            request={**REQUEST, "stride": 10},
+            config=CONFIG,
+            stop_rule=RULE,
+            code_commit=head(repo),
         )
 
 
@@ -1582,7 +1890,9 @@ def test_a_registration_is_written_once_and_names_its_code_commit(repo: Path) ->
         ({"rule": None}, "stop rule"),
     ],
 )
-def test_a_registration_that_could_not_be_read_once_is_refused(repo: Path, changes: dict[str, Any], said: str) -> None:
+def test_a_registration_that_could_not_be_read_once_is_refused(
+    repo: Path, changes: dict[str, Any], said: str
+) -> None:
     with pytest.raises(p7_reading.ReadingError, match=said):
         registered(repo, commit=False, **changes)
 
@@ -1596,7 +1906,9 @@ def test_the_claim_is_written_before_the_read_and_the_result_after(repo: Path) -
     assert measure.calls == [("validation", True)]
     claim = json.loads(measure.claim.read_text(encoding="utf-8"))  # type: ignore[union-attr]
     assert claim["registration_sha256"] == hashlib.sha256(registration.read_bytes()).hexdigest()
-    assert result["binding"]["claim_sha256"] == hashlib.sha256(measure.claim.read_bytes()).hexdigest()  # type: ignore[union-attr]
+    assert (
+        result["binding"]["claim_sha256"] == hashlib.sha256(measure.claim.read_bytes()).hexdigest()
+    )  # type: ignore[union-attr]
     assert result["stop_rule"]["outcome"] == "not triggered"
     assert registration.with_name("v2-p7-024-validation.result.json").exists()
 
@@ -1630,7 +1942,9 @@ def test_an_uncommitted_registration_refuses_the_read(repo: Path) -> None:
 
 def test_an_edit_after_the_commit_refuses_the_read(repo: Path) -> None:
     registration = registered(repo)
-    registration.write_text(registration.read_text(encoding="utf-8").replace("0.02", "0.01"), encoding="utf-8")
+    registration.write_text(
+        registration.read_text(encoding="utf-8").replace("0.02", "0.01"), encoding="utf-8"
+    )
     with pytest.raises(registry.RegistrationNotCommittedError, match="bytes"):
         run(registration, repo, Measure())
 
@@ -1649,8 +1963,12 @@ def test_a_preflight_problem_refuses_before_any_claim(repo: Path) -> None:
     measure.claim = registration.with_name("v2-p7-024-validation.claim.json")
     with pytest.raises(p7_reading.ReadingPreflightError, match="2023"):
         p7_reading.read_once(
-            registration, repo=repo, runtime_dir=repo / "runtime", clock=lambda: COMMITTED,
-            measure=measure, preflight=lambda body: ("daily has no 2023 partition",),
+            registration,
+            repo=repo,
+            runtime_dir=repo / "runtime",
+            clock=lambda: COMMITTED,
+            measure=measure,
+            preflight=lambda body: ("daily has no 2023 partition",),
         )
     assert not measure.claim.exists() and measure.calls == []
 
@@ -1664,7 +1982,9 @@ def test_a_preflight_problem_refuses_before_any_claim(repo: Path) -> None:
         (document(ic=0.021, spread=0.001), "not triggered", "not evidence"),
     ],
 )
-def test_the_stop_rule_is_applied_as_written(result: dict[str, Any], outcome: str, said: str) -> None:
+def test_the_stop_rule_is_applied_as_written(
+    result: dict[str, Any], outcome: str, said: str
+) -> None:
     evaluated = p7_reading.evaluate_stop_rule(RULE, result)
     assert evaluated["outcome"] == outcome
     assert said in json.dumps(evaluated)
@@ -1721,29 +2041,36 @@ POWER_NOT_PRE_REGISTERED: Final = (
 )
 OBSERVED_WORDING: Final = "descriptive, over the tested periods; never used for power"
 
-class PlannedMetric(BaseModel):            # extra="forbid", frozen
-    horizon: int; metric: ForwardMetric
-    planning_sd: float                     # strict, > 0, finite
-    planning_means: tuple[float, ...]      # 非空，每个 > 0
-    sd_source: str                         # 非空：规划值从哪来
 
-class SurvivorForwardPowerPlan(BaseModel): # extra="forbid", frozen
+class PlannedMetric(BaseModel):  # extra="forbid", frozen
+    horizon: int
+    metric: ForwardMetric
+    planning_sd: float  # strict, > 0, finite
+    planning_means: tuple[float, ...]  # 非空，每个 > 0
+    sd_source: str  # 非空：规划值从哪来
+
+
+class SurvivorForwardPowerPlan(BaseModel):  # extra="forbid", frozen
     schema_version: Literal["survivor-forward-power/v1"]
-    test_level: float                      # (0, 0.5)
-    target_power: float                    # (0, 1)
+    test_level: float  # (0, 0.5)
+    target_power: float  # (0, 1)
     critical_value: Literal["normal", "t"]
-    assumed_lag1_autocorrelation: float    # (-1, 1)
-    minimum_periods: int                   # >= 2
-    planned: tuple[PlannedMetric, ...]     # 非空，(horizon, metric) 不重复
+    assumed_lag1_autocorrelation: float  # (-1, 1)
+    minimum_periods: int  # >= 2
+    planned: tuple[PlannedMetric, ...]  # 非空，(horizon, metric) 不重复
 
-def read_forward_power(settings: Mapping[str, object], *,
-                       protocol: SurvivorForwardProtocol) -> SurvivorForwardPowerPlan | None: ...
+
+def read_forward_power(
+    settings: Mapping[str, object], *, protocol: SurvivorForwardProtocol
+) -> SurvivorForwardPowerPlan | None: ...
+
+
 # survivor_forward_document(..., power: SurvivorForwardPowerPlan | None)  -- 新的必填关键字
 ```
 
 `read_forward_power`：键不在 → `None`；在但不是对象或校验不过 → `SurvivorForwardError`（含 `survivor_forward_power`）；每个 `(horizon, metric)` 必须是协议在该期限检验的（`protocol.tested_metrics(h)`，期限不在协议里时它自己就拒绝）；主指标 `(primary_horizon, primary_metric)` 必须在 `planned` 里；`minimum_periods <= protocol.window_positions(primary_horizon)`。
 
-文档 `power` 节（顶层，带 `wording: SURVIVOR_WORDING`，满足 `test_forward_report_survivor.py:249-266` 的"每节都有措辞"）：`status`（`"pre-registered (survivor-forward-power/v1)"` 或 `POWER_NOT_PRE_REGISTERED`）、`basis: POWER_BASIS`、`reading_rule: NOT_DETECTABLE_WORDING`、`plan`（`model_dump(mode="json")` 或 `None`）、`rows`。每行：`horizon`、`metric`、`role`、`test_level`（主：计划的；次：`by_first_step_level(q=protocol.q, family_size=次要族大小)`，写明"a lower bound under Benjamini-Yekutieli"）、`critical_value`、`planning_sd`、`sd_source`、`planned_periods`（`window_positions(h)`）、`planned`（`[{"mean","power"}]`）、`smallest_mean_at_target`、`periods_for_target`（`[{"mean","periods"}]`）、`autocorrelation`（`assumed_lag1`、`independent_period_equivalent`、该等价期数下的功效）、`headline` 与 `excluding_unverifiable` 两个窗口块：`positions`、`matured`、`gaps`（窗口内 `no_record + refused + unchecked + unverifiable` 的个数）、`usable_at_most`（`positions - gaps`）、`tested`（窗口已检验时该指标 `MetricTest.values`，否则 `None`）、`n` 与 `n_basis`（`"tested"` 或 `"usable_at_most"`）、`at_n`（`n >= 2` 时每个规划均值的功效，否则 `None`）、`minimum_periods`、`below_minimum`（`n < minimum_periods`）、`observed`（`{"wording": OBSERVED_WORDING, "sd", "lag1_autocorrelation"}`：窗口检验之后，`sd` 需 ≥2 个值，自相关需 ≥3 个值，否则 `None`）。打印行插在次要族之后、纸面账簿之前，第一行以 `power (survivor-forward-power/v1` 开头（或打印 `POWER_NOT_PRE_REGISTERED`），每行用"test level"而不是"alpha"，用"minimum periods"而不是"effective"，最后一行是 `NOT_DETECTABLE_WORDING`。
+文档 `power` 节（顶层，带 `wording: SURVIVOR_WORDING`，满足 `test_forward_report_survivor.py:249-266` 的"每节都有措辞"）：`status`（`"pre-registered (survivor-forward-power/v1)"` 或 `POWER_NOT_PRE_REGISTERED`）、`basis: POWER_BASIS`、`reading_rule: NOT_DETECTABLE_WORDING`、`plan`（`model_dump(mode="json")` 或 `None`）、`rows`。每行：`horizon`、`metric`、`role`、`test_level`（主：计划的；次：`by_first_step_level(q=protocol.q, family_size=次要族大小)`，写明"a lower bound under Benjamini-Yekutieli"）、`critical_value`、`planning_sd`、`sd_source`、`planned_periods`（`window_positions(h)`）、`planned`（`[{"mean","power"}]`）、`smallest_mean_at_target`、`periods_for_target`（`[{"mean","periods"}]`）、`autocorrelation`（`assumed_lag1`、`independent_period_equivalent`、该等价期数下的功效）、`headline` 与 `excluding_unverifiable` 两个窗口块：`positions`、`matured`、`gaps`（窗口内 `no_record + refused + unchecked + unverifiable` 的个数）、`usable_at_most`（`positions - gaps`）、`tested`（窗口已检验时该指标 `MetricTest.values`，否则 `None`）、`n` 与 `n_basis`（`"tested"` 或 `"usable_at_most"`）、`at_n`（`n >= 2` 时每个规划均值的功效，否则 `None`）、`minimum_periods`、`below_minimum`（`n < minimum_periods`）、`observed`（`{"wording": OBSERVED_WORDING, "sd", "lag1_autocorrelation"}`：窗口检验之后，`sd` 需 ≥2 个值，自相关需 ≥3 个值，否则 `None`）。打印行插在次要族之后、纸面账簿之前，第一行以 `power (survivor-forward-power/v1` 开头（或打印 `POWER_NOT_PRE_REGISTERED`），每行用"test level"而不是"alpha"，用"minimum periods"而不是"effective"，最后一行是 `NOT_DETECTABLE_WORDING`。（**corrected 2026-11-02: 最后一行只在主窗口满足之后才是 `NOT_DETECTABLE_WORDING`；窗口之前是中性的一行 `reading rule: printed once the primary window is satisfied`。**原因：`NOT_DETECTABLE_WORDING` 写的是"a one-sided p at or below …"，有计划的报告在窗口之前不印任何单侧 p 值，已有的"one-sided p"守卫此前只覆盖没有计划的登记，评审（Task 6，I1）发现这一条；守卫没有放宽。JSON 的 `power.reading_rule` 在窗口之前仍带这条规则——它是登记即定、与数据无关的常量，每份报告都一样。`backtest/power_analysis.py` 的 `power_table_lines` 总在末尾加上这条规则，只有 `p7_diagnostics power` 调用它，**不能**拿去印窗口之前的周报。）
 
 - [ ] **Step 1：写失败的测试**——追加到 `tests/unit/test_strategy_survivor_forward.py`（`reported()` 先加一个关键字 `power: SurvivorForwardPowerPlan | None = None` 并传给 `survivor_forward_document(..., power=power)`；`:2424` 那处直接调用加 `power=None`）：
 
@@ -1770,16 +2097,28 @@ POWER_BLOCK: Final[Mapping[str, Any]] = {
     "assumed_lag1_autocorrelation": 0.0,
     "minimum_periods": 2,
     "planned": [
-        {"horizon": 20, "metric": "rank_ic", "planning_sd": 0.15,
-         "planning_means": [0.037, 0.05, 0.1], "sd_source": "test value"},
-        {"horizon": 20, "metric": "ew_minus_worst_decile", "planning_sd": 0.03,
-         "planning_means": [0.01], "sd_source": "test value"},
+        {
+            "horizon": 20,
+            "metric": "rank_ic",
+            "planning_sd": 0.15,
+            "planning_means": [0.037, 0.05, 0.1],
+            "sd_source": "test value",
+        },
+        {
+            "horizon": 20,
+            "metric": "ew_minus_worst_decile",
+            "planning_sd": 0.03,
+            "planning_means": [0.01],
+            "sd_source": "test value",
+        },
     ],
 }
 """Test values only (module docstring): not the V2-P7-006 numbers."""
 
 
-def power_plan(read: SurvivorForwardProtocol | None = None, **changes: object) -> SurvivorForwardPowerPlan:
+def power_plan(
+    read: SurvivorForwardProtocol | None = None, **changes: object
+) -> SurvivorForwardPowerPlan:
     plan = read_forward_power(
         {SURVIVOR_FORWARD_POWER_KEY: {**POWER_BLOCK, **changes}},
         protocol=protocol() if read is None else read,
@@ -1788,7 +2127,9 @@ def power_plan(read: SurvivorForwardProtocol | None = None, **changes: object) -
     return plan
 
 
-def test_a_registration_without_a_power_block_has_no_plan_and_one_with_a_bad_block_is_refused() -> None:
+def test_a_registration_without_a_power_block_has_no_plan_and_one_with_a_bad_block_is_refused() -> (
+    None
+):
     assert read_forward_power({}, protocol=protocol()) is None
     for changes, said in (
         ({"extra": 1}, "survivor_forward_power"),
@@ -1807,13 +2148,27 @@ def test_the_power_section_states_the_planned_power_at_k_as_hand_computed() -> N
     """K = 36 at sd 0.15, one-sided 0.05, normal: 0.435, 0.639, 0.991; the mean reaching 0.8 is
     0.0622; 0.8 needs 102, 56 and 14 periods (the route's arithmetic)."""
     read = protocol(window_periods=36)
-    document = reported({20: (), 5: ()}, {}, through=1, power=power_plan(read, minimum_periods=30), window_periods=36)
+    document = reported(
+        {20: (), 5: ()},
+        {},
+        through=1,
+        power=power_plan(read, minimum_periods=30),
+        window_periods=36,
+    )
 
     power = document["power"]
-    assert (power["wording"], power["status"]) == (SURVIVOR_WORDING, "pre-registered (survivor-forward-power/v1)")
+    assert (power["wording"], power["status"]) == (
+        SURVIVOR_WORDING,
+        "pre-registered (survivor-forward-power/v1)",
+    )
     assert (power["basis"], power["reading_rule"]) == (POWER_BASIS, NOT_DETECTABLE_WORDING)
     primary = power["rows"][0]
-    assert (primary["horizon"], primary["metric"], primary["role"], primary["planned_periods"]) == (20, "rank_ic", "primary", 36)
+    assert (primary["horizon"], primary["metric"], primary["role"], primary["planned_periods"]) == (
+        20,
+        "rank_ic",
+        "primary",
+        36,
+    )
     assert [row["power"] for row in primary["planned"]] == pytest.approx(
         [0.43452959661329793, 0.6387600313123356, 0.9907422946265046], abs=1e-12
     )
@@ -1823,11 +2178,18 @@ def test_the_power_section_states_the_planned_power_at_k_as_hand_computed() -> N
 
 def test_the_t_convention_is_computed_as_registered() -> None:
     read = protocol(window_periods=36)
-    document = reported({20: (), 5: ()}, {}, through=1,
-                        power=power_plan(read, critical_value="t", minimum_periods=30), window_periods=36)
+    document = reported(
+        {20: (), 5: ()},
+        {},
+        through=1,
+        power=power_plan(read, critical_value="t", minimum_periods=30),
+        window_periods=36,
+    )
 
     primary = document["power"]["rows"][0]
-    assert [row["power"] for row in primary["planned"][:2]] == pytest.approx([0.417001, 0.621882], abs=1e-6)
+    assert [row["power"] for row in primary["planned"][:2]] == pytest.approx(
+        [0.417001, 0.621882], abs=1e-6
+    )
     assert primary["periods_for_target"][1] == {"mean": 0.05, "periods": 57}
 
 
@@ -1847,7 +2209,9 @@ def test_a_secondary_row_is_powered_at_the_first_benjamini_yekutieli_step() -> N
 def test_a_gap_reduces_the_usable_periods_and_the_power_and_is_held_to_the_minimum() -> None:
     """Position 2 of 3 (ordinal 21) has no record: n = 2 of 3, below a minimum of 3."""
     outcomes = every_session(61, skip=frozenset({21}))
-    document = reported({20: outcomes, 5: ()}, checked_by(outcomes), through=61, power=power_plan(minimum_periods=3))
+    document = reported(
+        {20: outcomes, 5: ()}, checked_by(outcomes), through=61, power=power_plan(minimum_periods=3)
+    )
 
     window = document["power"]["rows"][0]["headline"]
     assert (window["positions"], window["gaps"], window["usable_at_most"]) == (3, 1, 2)
@@ -1862,9 +2226,17 @@ def test_a_gap_reduces_the_usable_periods_and_the_power_and_is_held_to_the_minim
 def test_the_observed_sd_is_described_and_never_used_for_power() -> None:
     """After the window: the rank ICs of ordinals 1 and 41 are -0.01 and 0.04; before it, nothing
     is observed. The planned and the window powers are the plan's whatever was observed."""
-    before = reported({20: every_session(25), 5: ()}, checked_by(every_session(25)), through=25, power=power_plan())
+    before = reported(
+        {20: every_session(25), 5: ()},
+        checked_by(every_session(25)),
+        through=25,
+        power=power_plan(),
+    )
     observed_before = before["power"]["rows"][0]["headline"]["observed"]
-    assert (observed_before["sd"], before["power"]["rows"][0]["headline"]["n_basis"]) == (None, "usable_at_most")
+    assert (observed_before["sd"], before["power"]["rows"][0]["headline"]["n_basis"]) == (
+        None,
+        "usable_at_most",
+    )
 
     outcomes = every_session(61, skip=frozenset({21}))
     after = reported({20: outcomes, 5: ()}, checked_by(outcomes), through=61, power=power_plan())
@@ -1879,8 +2251,12 @@ def test_without_a_power_plan_the_section_says_power_cannot_be_stated() -> None:
     document = reported({20: (), 5: ()}, {}, through=1)
 
     assert document["power"] == {
-        "wording": SURVIVOR_WORDING, "status": POWER_NOT_PRE_REGISTERED, "basis": POWER_BASIS,
-        "reading_rule": NOT_DETECTABLE_WORDING, "plan": None, "rows": [],
+        "wording": SURVIVOR_WORDING,
+        "status": POWER_NOT_PRE_REGISTERED,
+        "basis": POWER_BASIS,
+        "reading_rule": NOT_DETECTABLE_WORDING,
+        "plan": None,
+        "rows": [],
     }
     assert any(POWER_NOT_PRE_REGISTERED in line for line in survivor_forward_lines(document))
 
@@ -1901,15 +2277,28 @@ def test_the_power_lines_carry_the_reading_rule_and_no_verdict_word() -> None:
 from openalpha_cn import strategy_survivor_forward as forward
 
 POWER: Final[dict[str, Any]] = {
-    "schema_version": "survivor-forward-power/v1", "test_level": 0.05, "target_power": 0.8,
-    "critical_value": "normal", "assumed_lag1_autocorrelation": 0.0, "minimum_periods": 2,
-    "planned": [{"horizon": 20, "metric": "rank_ic", "planning_sd": 0.15,
-                 "planning_means": [0.05], "sd_source": "test value"}],
+    "schema_version": "survivor-forward-power/v1",
+    "test_level": 0.05,
+    "target_power": 0.8,
+    "critical_value": "normal",
+    "assumed_lag1_autocorrelation": 0.0,
+    "minimum_periods": 2,
+    "planned": [
+        {
+            "horizon": 20,
+            "metric": "rank_ic",
+            "planning_sd": 0.15,
+            "planning_means": [0.05],
+            "sd_source": "test value",
+        }
+    ],
 }
 """Test values only (module docstring)."""
 
 
-def test_the_report_states_that_no_power_plan_was_registered(world: tds.World, capsys: pytest.CaptureFixture[str]) -> None:
+def test_the_report_states_that_no_power_plan_was_registered(
+    world: tds.World, capsys: pytest.CaptureFixture[str]
+) -> None:
     code, out, err = _report(world, capsys)
 
     assert code == 0, err

@@ -76,7 +76,8 @@ B1、B2 的测试代码（下文原样）在 `499c51e` 上**直接通过**：纸
 |---|---|---|
 | `src/openalpha_cn/domain/name_history.py` | B3 | 新常量 `NAME_YEAR_EMPTY_THROUGH` 与两个纯函数 |
 | `src/openalpha_cn/panel_ingest.py` | B3 | `write_empty_name_year`、私有 `_write_empty_partition`（`write_empty_announcement_year` 改用它，输出逐字节不变）、`name_history_requirement` 加 `empty_admissible_through` |
-| `src/openalpha_cn/panel/store.py` | B3 | 只改 `write_partition` 的 docstring（1839-1846 行"`allow_empty` 的唯一调用者"） |
+| `src/openalpha_cn/panel/store.py` | B3 | 只改 `write_partition` 的 docstring（1839-1846 行"`allow_empty` 的唯一调用者"）；模块 docstring 里列写入者的那一句也改了（B3 评审的 Minor 4） |
+| `src/openalpha_cn/panel/catalog.py` | B3 | **corrected 2026-11-02: 漏了这一行。** 只改文字，没有匹配器：`empty_admissible_through` 的 docstring（977-989 行）改成各个写入者各说各的到期日，以及一条就绪消息里的片段 `its "nothing filed yet"` → `its empty answer`（"尚无登记"对名称年不对）；"stale by rule"保留 |
 | `src/openalpha_cn/cli.py` | B4 | `namechange` 分支（6386-6392 行）改调新的 `_write_name_year`；两处导入 |
 | `scripts/daily_selection.py` | B5 | 只改模块 docstring 第 98-107 行那一段（描述的局限已不存在） |
 
@@ -88,7 +89,7 @@ B1、B2、B6 只加测试。全部在 `006b` 登记之前，现行没有登记�
 |---|---|---|---|
 | **U1** | "经核实为空"的语义与有效期：(a) 两种 `no_data` 回答（served 0；served 但不可知）都算经核实为空；(b) 一个名称年可以为空**到哪一天**（之后同样的空回答按抓取失败拒绝，已写的空分区按 `stale` 拒读） | (a) 两种都算；(b) **到 1 月 31 日**（日历日，上海时区）。依据：仓库里唯一的实测是 2012 年第一条公告 1-05、第一个交易日 1-04；名称语料每年约 320–380 行；窗口太短的代价是丢交易日（被拒的那天补不成决定），太长的代价只在"上游成功回答却给空"这种罕见故障里出现。**定值之前建议先做一次 0 请求的离线测量**：在 `~/openalpha-research/panel` 的 APFS 克隆（`cp -c`）上，逐年读 `namechange` 分区覆盖记录里最早的 `event_date`（2013–2026），看每年第一条公告离第一个交易日有几天 | B3 的常量值（可先按推荐实现：测试只引用 `name_year_empty_admissible_through`，改值是一行） |
 | **U2** | 零行名称年是对**所有** `panel build` 生效，还是只在幸存者一天要求时生效 | 所有（与 `V2-P6-018` 对报表的先例一致；一条规则一个出口）。后果要明说：P6 的 `--full-update` 在一月初从"失败"变为"写空分区并继续"——方向是修复；P6 每日按 `V2-P7-022` 不恢复，风险可忽略 | B4 的形状（若选"只在幸存者"，要给 `panel build` 加一个显式开关并由 `update_panel(survivor=…)` 传入） |
-| **U3** | **登记簿的新年缺口（新发现，不在 021 范围）**：一年的第一个会话若当年还没有任何上市或退市，`stock_basic` 没有该年的生命周期分区，第 4 步因子构建（`factor_view._PanelInputs`，`factor_view.py:1517-1520` 读 `load_stock_universe(years=request.years)`）按 `partition_missing` 拒绝，这一天同样丢；前向周报的标签读取（`model_view.py:1701-1707`）在新的一年里同理（读代码推得，未探针）。事实适配器早已绕开（`strategy_survivor_facts._registry_year`，A2-fix3） | **另立一个 issue（建议 `V2-P7-025`），同样是 2027-01-04 之前的硬闸门**，先做 0 请求的离线测量（2014–2026 每年第一个交易日时该年 `stock_basic` 分区是否已存在），再定修法（因子构建/标签读取照 `_registry_year` 读"不晚于该年的最新已存生命周期年"，或照本计划写一个经核实为空的生命周期年） | 不阻塞本计划任何任务；阻塞"真实新年首晚能走完晚间"这一结论 |
+| **U3** | **登记簿的新年缺口（新发现，不在 021 范围）**：一年的第一个会话若当年还没有任何上市或退市，`stock_basic` 没有该年的生命周期分区，第 4 步因子构建（`factor_view._PanelInputs`，`factor_view.py:1517-1520` 读 `load_stock_universe(years=request.years)`）按 `partition_missing` 拒绝，这一天同样丢；前向周报的标签读取（`model_view.py:1701-1707`）在新的一年里同理（读代码推得，未探针）。事实适配器早已绕开（`strategy_survivor_facts._registry_year`，A2-fix3） | **另立一个 issue（建议 `V2-P7-025`），同样是 2027-01-04 之前的硬闸门**，先做 0 请求的离线测量（2014–2026 每年第一个交易日时该年 `stock_basic` 分区是否已存在），再定修法（因子构建/标签读取照 `_registry_year` 读"不晚于该年的最新已存生命周期年"，或照本计划写一个经核实为空的生命周期年） | 不阻塞本计划任何任务；阻塞"真实新年首晚能走完晚间"这一结论（**corrected 2026-11-02: 已立项为 `V2-P7-025`**，规格 §9 的 2026-11-02 行，总数 253；周报的标签读取被拒也已用夹具探到，B6 的评审复现了它） |
 
 ## 与代码不符之处（给控制者）
 
@@ -98,7 +99,7 @@ B1、B2、B6 只加测试。全部在 `006b` 登记之前，现行没有登记�
 - **C4**：今天的失败还连带两件运行手册只说了一半的事：`index_daily` 2027 不写（手册说了）、**上一年名称的重建不跑**（手册没说）——12-31 晚公告、晚到发布的 ST 在 1-04 读不到。
 - **C5**：手册「已知局限」第 1 条说重跑"每次花几次请求"——实测每次 8 次。
 - **C6**：周报跨年本身没有缺口（`forward_report._survivor_calendar` 读纪元年到报告年，12 月的运行已建好下一年日历）；021 与它的交集只在 `index_daily` 2027（基准水平）——今天 1-04 没写，修复后写。
-- **C7（`V2-P7-009`）**：路线图说缺两条测试——属实；两条在今天的代码上都通过（§0.3），无缺陷、无修复任务。B1 的诚实结论：在纸面路径上，T+1 由三件结构保证（订单只在计划日之后执行且 `build_paper_step` 拒绝未到期单；`PaperPortfolio.advance` 不允许同一会话再活一次；快照不允许卖出未持有的名字，步骤里卖单先于买单）；模拟器自己的 T+1 那一行（`backtest/portfolio.py:211`）在这条路径上**到不了**——它的变异体不会被 B1 杀死，只有在"卖先于买"被破坏时才起作用。
+- **C7（`V2-P7-009`）**：路线图说缺两条测试——属实；两条在今天的代码上都通过（§0.3），无缺陷、无修复任务。B1 的诚实结论：在纸面路径上，T+1 由三件结构保证（订单只在计划日之后执行且 `build_paper_step` 拒绝未到期单；`PaperPortfolio.advance` 不允许同一会话再活一次；快照不允许卖出未持有的名字，步骤里卖单先于买单）；模拟器自己的 T+1 那一行（`backtest/portfolio.py:211`）在这条路径上**到不了**——它的变异体不会被 B1 杀死，只有在"卖先于买"被破坏时才起作用。（**corrected 2026-11-02: 措辞按评审定为"`portfolio.py:211` 在纸面路径上到不了，除非先卖后买被破坏"**——B1 的 M4 变异体（让步骤先买后卖）单独就能让 211 行成为拒绝同日卖出的那一行；B1 测试的 docstring 第 3 点也不要写成"在 T+1 下被拒"：一个没持有的名字的卖单是被可卖数量检查拒的，原因串相同，同日批次的日期规则那一行是被接受的 M5 缺口。）
 
 ---
 
@@ -356,7 +357,7 @@ def test_a_book_held_into_the_first_session_of_a_year_settles_it_across_an_ex_ri
 - [ ] **Step 2：运行。** `… uv run pytest tests/unit/scripts/test_daily_selection_survivor_day.py -k across_an_ex_rights_date -q`（约 45 秒）。**预期：通过**（在 `499c51e` 上实跑通过；持有的 10 只里没有 2027-01-04 退市的 `SECURITIES[-2]`——若种子变化使它被持有，它会被核销，测试的 `held` 断言就会失败：那是夹具问题，换一个 `YEAR_END_EPOCH` 之前先报告）。
 - [ ] **Step 3：变异探针：**
   - M1 `src/openalpha_cn/backtest/paper_settlement.py:364` `ratios = {code: market.adj_factor[code] / entry[code] for code in kept}` → `ratios = {code: Decimal(1) for code in kept}`（`ledger_mark == real_close * 2` 与权益比失败）。
-  - M2 `scripts/daily_selection.py` `_survivor_calendar`：`years = tuple(range(epoch.year, session.year + 1))` → `range(epoch.year, session.year)`（1-04 晚被拒，`_completed` 失败）。
+  - M2 `scripts/daily_selection.py` `_survivor_calendar`：`years = tuple(range(epoch.year, session.year + 1))` → `range(epoch.year, session.year)`（1-04 晚被拒，`_completed` 失败）。（**corrected 2026-11-02: 这条改成 M2b**——`years = (epoch.year,)`。原来的 M2 在 `epoch.year == session.year` 时是空区间，会让每一个 2026 年的晚间失败，而不是只让 2027-01-04 失败，所以它不证明测试读到了跨年的日历；M2b 只丢掉会话年，2026 年的晚间不受影响。）
 - [ ] **Step 4：门禁**（同 B1，文件换成本文件，用 `-k` 跑 New Year 一节：`-k "first_session_of_a_year or ex_rights"`）。
 - [ ] **Step 5：提交：** `test(V2-P7-009): a book held into the first session of a year settles it across an ex-rights date`。
 
@@ -442,9 +443,7 @@ def test_a_rename_year_never_written_is_still_refused_as_missing(tmp_path: Path)
     """Verified empty is a partition that says so; a year with no partition is still missing."""
     store = _seed_namechange(tmp_path)
     with pytest.raises(PanelStorageError, match="partition_missing"):
-        load_name_histories(
-            store, years=(2021, 2027), as_of=FIRST_EVENING_2027, max_staleness=None
-        )
+        load_name_histories(store, years=(2021, 2027), as_of=FIRST_EVENING_2027, max_staleness=None)
 
 
 @pytest.mark.parametrize(("offset", "readable"), [(0, True), (1, False)])
@@ -475,8 +474,11 @@ def test_an_empty_rename_year_is_unreadable_after_its_window_even_without_a_stal
     [
         (2027, name_year_empty_admissible_through(2027) + timedelta(days=1)),
         (2026, date(2027, 1, 4)),
+        # corrected 2026-11-02: a third case, the other side of the year rule, and the ids below
+        # replace "another year than the observation's" (a name that named neither case).
+        (2027, date(2026, 12, 31)),
     ],
-    ids=["past the window", "another year than the observation's"],
+    ids=["past the window", "a year that has ended", "a year not yet begun"],
 )
 def test_an_empty_rename_year_is_refused_past_its_window_or_for_another_year(
     tmp_path: Path, year: int, day: date
@@ -539,11 +541,11 @@ def name_year_may_be_empty(year: int, day: date) -> bool:
 `src/openalpha_cn/panel_ingest.py`：把 `name_year_empty_admissible_through`、`name_year_may_be_empty` 加进 `openalpha_cn.domain.name_history` 的导入；`name_history_requirement` 的 `ReadinessRequirement(...)` 里加：
 
 ```python
-        # `V2-P7-021`: a rename year recorded empty is readable only through its window -- the
-        # writer's own rule (`write_empty_name_year`).
-        empty_admissible_through={
-            year: name_year_empty_admissible_through(year) for year in sorted(set(years))
-        },
+# `V2-P7-021`: a rename year recorded empty is readable only through its window -- the
+# writer's own rule (`write_empty_name_year`).
+empty_admissible_through = (
+    {year: name_year_empty_admissible_through(year) for year in sorted(set(years))},
+)
 ```
 
 把 `write_empty_announcement_year` 7406-7450 行（`template = max(...)` 之后的 `reason`、`marker`、`store.write_partition(...)`）收进共用的私有函数，本函数改为 `return _write_empty_partition(store, dataset=dataset, year=year, observed_at=observed_at, template=template, reason=reason, date_timezone=date_timezone)`——`reason` 文本、`marker`、覆盖记录**逐字节不变**：
@@ -678,12 +680,14 @@ def write_empty_name_year(
 - [ ] **Step 4：运行，确认通过。** 同 Step 2 的命令全绿；**先例的回归**——`uv run pytest tests/unit/test_cli_panel_build_statement_sweep.py tests/integration/panel/test_statement_reach_years.py tests/integration/panel/test_panel_catalog.py -q` 改动前后都跑一次，结果一致（证明 `write_empty_announcement_year` 的抽取逐字节不变）。
 - [ ] **Step 5：变异探针：**
   - M1 `name_year_may_be_empty`：`<=` → `<`（域测试与读窗口测试 `offset=0` 失败）。
-  - M2 `write_empty_name_year`：删掉 `day.year != year or`（`another year than the observation's` 失败）。
+  - M2 `write_empty_name_year`：删掉 `day.year != year or`（**corrected 2026-11-02:** 原文写"`another year than the observation's` 失败"，但那个用例〔2026 年、观测日 2027-01-04〕本来就被窗口规则拒绝，删掉这一条什么也不变红——变异体活到评审；改为 `a year not yet begun`〔2027 年、观测日 2026-12-31；窗口还没过，只有年份规则能拒绝它〕失败，`a year that has ended` 由窗口规则拒绝，不是它的证人）。
   - M3 `write_empty_name_year`：`if stored is not None and stored.row_count:` → `if False:`（`never_written_over_announced_renames` 失败）。
   - M4 `name_history_requirement`：删掉 `empty_admissible_through=…`（`recorded_empty_and_read_as_no_rename_yet` 与 `offset=0` 失败）。
   - M5 `name_history_requirement`：表里的日期 `+ timedelta(days=1)`（`offset=1` 失败）。
 - [ ] **Step 6：门禁。** `ruff check`、`ruff format --check`（三个源文件 + 两个测试文件）、`uv run mypy src scripts`、`uv run lint-imports`（`domain-purity` 必须绿）；提交前 `tests/unit` 与 `tests/integration/panel`。
 - [ ] **Step 7：提交：** `feat(V2-P7-021): a rename year with nothing announced yet is recorded empty and read as such through its window`。
+
+（**corrected 2026-11-02: 评审之后 B3 另有三处，计划原文没有。**①观测时刻按**上海日历日**判断，而不是 UTC 日或本地日：加了四个 UTC 边界用例（`test_an_empty_rename_year_is_judged_on_the_shanghai_day_of_its_observation`；Tokyo +9 与 Bangkok +7 的变异体也变红）；②窗口之内的第二次空写是允许的，按较晚的观测时刻重新记下（`test_an_empty_rename_year_is_recorded_again_inside_its_window_at_the_later_observation`）；③`catalog.py` 的文字改动（见上面"Bound code touched"表里补的一行）和 `write_panel_batch`、`store.py` 两个被这条规则弄错的 docstring，按评审的要求在本任务里改，不留给文档任务。B3 评审还证明了 P6 先例的抽取行为不变：`write_empty_announcement_year` 的 AST 切片在抽取前后比对，加先例测试集 104 条前后一致。）
 
 ---
 
@@ -744,8 +748,15 @@ class NoRenameYet(NamesAcrossNewYear):
         return super().post(payload)
 
 
-def _december(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **market: Any) -> Store:
-    """`_new_year`'s store on `NoRenameYet`, with 31 December's step run."""
+def _december_no_rename_yet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **market: Any
+) -> Store:
+    """`_new_year`'s store on `NoRenameYet`, with 31 December's step run.
+
+    (corrected 2026-11-02: this helper was drafted as `_december`; the test file already defines
+    a `_december` of its own, further down, with other parameters, which a second definition
+    here would have shadowed. The shipped name is `_december_no_rename_yet`, here and at every
+    call site below.)"""
     shop = NoRenameYet(open_days=NEW_YEAR, delisted=((DELISTED, FIRST_2027),), **market)
     store = _seeded(tmp_path, monkeypatch, shop, as_of="2026-12-24T12:00:00+08:00", year=2026)
     _update(
@@ -784,7 +795,7 @@ def test_on_a_years_first_session_before_its_first_rename_step_two_records_the_y
     read on the day it takes effect), and every read of `build_facts_day` is served. Before this
     `panel build` refused the year ("cannot write a 'no_data' batch"), stopped short of
     `index_daily` and of the year before's names, and the session was lost."""
-    store = _december(tmp_path, monkeypatch, pending=pending)
+    store = _december_no_rename_yet(tmp_path, monkeypatch, pending=pending)
     targets = daily.targets_for_survivor(SURVIVOR_BUILDS)
 
     january, counts = _update(store, FIRST_2027, targets=targets, survivor=_survivor())
@@ -811,7 +822,7 @@ def test_a_failed_or_truncated_name_fetch_of_the_new_year_is_still_refused_by_na
     cannot be told from a complete one), is a failed fetch: `panel build` exits 4
     (`provider_failure`), step 2 is refused naming the dataset, and no 2027 partition of the
     corpus is written."""
-    store = _december(tmp_path, monkeypatch)
+    store = _december_no_rename_yet(tmp_path, monkeypatch)
     monkeypatch.setattr(cli, "TushareProvider", partial(cli.TushareProvider, sleep=lambda _s: None))
     store.market.fault = fault
 
@@ -832,7 +843,7 @@ def test_the_build_that_records_an_empty_rename_year_says_so(
 ) -> None:
     """The morning's build on 5 January, the year still empty: one request, exit 0, an `EMPTY`
     line naming the year and how long it may be read empty, and the partition recorded."""
-    store = _december(tmp_path, monkeypatch)
+    store = _december_no_rename_yet(tmp_path, monkeypatch)
     through = name_year_empty_admissible_through(2027)
 
     built = _names_build(store, year=2027, as_of=_morning(date(2027, 1, 5)))
@@ -850,7 +861,7 @@ def test_an_empty_answer_for_a_year_that_holds_renames_is_refused(
 ) -> None:
     """2027 holds a rename (written on the 6th); on the 7th the endpoint answers nothing for the
     year: a lost fetch, refused by the panel, and the stored rename stays."""
-    store = _december(tmp_path, monkeypatch, pending=True)
+    store = _december_no_rename_yet(tmp_path, monkeypatch, pending=True)
     first = _names_build(store, year=2027, as_of=_morning(date(2027, 1, 6)))
     assert first.exit_code == 0, first.reason()
     store.market.pending = False
@@ -871,7 +882,7 @@ def test_an_empty_answer_past_the_years_window_is_a_failed_fetch(
     timetable. Refused by the panel, nothing written, and no `EMPTY` line."""
     through = name_year_empty_admissible_through(2027)
 
-    store = _december(tmp_path, monkeypatch)
+    store = _december_no_rename_yet(tmp_path, monkeypatch)
     late = _names_build(store, year=2027, as_of=_morning(through + timedelta(days=1)))
 
     assert late.exit_code == 1
@@ -886,7 +897,7 @@ def test_an_empty_answer_for_the_year_before_is_refused(
     """The year before's names built again in January, and the endpoint answers nothing for it:
     a year that has ended with no rename is a failed fetch; its stored partition is untouched.
     (`silent` is turned on after 31 December's step, which asks 2026 itself.)"""
-    store = _december(tmp_path, monkeypatch)
+    store = _december_no_rename_yet(tmp_path, monkeypatch)
     store.market.silent = frozenset({"2026"})
     before = store.panel.read_coverage(NAMECHANGE_DATASET, 2026)
 
@@ -898,7 +909,7 @@ def test_an_empty_answer_for_the_year_before_is_refused(
     assert store.panel.read_coverage(NAMECHANGE_DATASET, 2026) == before
 ```
 
-（`_december` 的返回类型是 `Store`，其 `market` 的静态类型是 `Market`；给 `fault`、`pending`、`silent` 赋值的几行若 mypy/ruff 有意见，就在 `_december` 里返回 `tuple[Store, NoRenameYet]`——测试本身不进 `mypy src scripts`，原型照上面原样跑通。）
+（`_december_no_rename_yet`〔corrected 2026-11-02: 草稿里叫 `_december`〕的返回类型是 `Store`，其 `market` 的静态类型是 `Market`；给 `fault`、`pending`、`silent` 赋值的几行若 mypy/ruff 有意见，就在 `_december_no_rename_yet` 里返回 `tuple[Store, NoRenameYet]`——测试本身不进 `mypy src scripts`，原型照上面原样跑通。）
 
 - [ ] **Step 2：运行，确认失败。** `… uv run pytest tests/unit/scripts/test_daily_selection_survivor.py -k "first_rename or rename_year or renames or truncated or year_before_is_refused or past_the_years_window" -q`。**预期：** `records_the_year_empty` 两例 `StepFailedError: … cannot write a 'no_data' batch to a partition …`；`says_so` 退出 1（同一句）；`holds_renames`、`past_the_years_window`、`year_before_is_refused` 的文字断言失败（今天的拒绝是 "cannot write a 'no_data' batch"）；`failed_or_truncated` 两例**今天就绿**——它们是回归钉，修复前后都必须绿。
 - [ ] **Step 3：最小实现**（`cli.py`）：
@@ -1162,17 +1173,25 @@ def test_the_morning_after_a_first_session_sees_the_years_first_rename_published
 
 ```text
 Until a year's first rename announcement Tushare serves no `namechange` row for the year (2012's
-first is dated 5 January, after the first session on 4 January). `panel build` records such a
-year empty -- a partition of no rows observed at the build's clock -- and every reader takes it as
-"no rename announced yet" only through the year's window (`domain.name_history.
-name_year_may_be_empty`, `V2-P7-021`), so a year's first sessions run like any other and the year
-before's names are still built again after it. A refused or truncated fetch is still a refusal of
-step 2, and so is an empty answer for a year past its window, for a year that already holds
-renames, or for any year but the build clock's own. Before `V2-P7-021` such a session was lost:
-the journal pins the day's `--as-of`, so every retry asked the same empty window. P6's
-`--full-update` (`FULL_UPDATE_TARGETS`) takes the same `panel build` and is no longer refused in
-early January.
+first is dated 5 January, after the first session on 4 January: the A-phase notes of the P7
+step-0 plan). `panel build` records such a year empty -- a partition of no rows observed at the
+build's clock -- and every reader takes it as "no rename announced yet" only through the year's
+window (`domain.name_history.name_year_may_be_empty`, `V2-P7-021`), so the name corpus no longer
+stops a year's first sessions, and the year before's names are still built again after it. A
+refused or truncated fetch is still a refusal of step 2, and so is an empty answer for a year
+past its window, for a year that already holds renames, or for any year but the build clock's own.
+Before `V2-P7-021` such a session was lost: the journal pins the day's `--as-of`, so every retry
+asked the same empty window. P6's `--full-update` (`FULL_UPDATE_TARGETS`) takes the same
+`panel build`; its `namechange` build is no longer refused in early January.
+
+The registry has the same gap for its own lifecycle year, which `V2-P7-021` does not close
+(`V2-P7-025`, a hard gate before 2027-01-04): a year with no listing or delisting yet has no
+`stock_basic` partition, step 4 refuses it (`partition_missing`), and a retry meets the same
+refusal. The year's first session completes only when the registry already holds an event of
+that year.
 ```
+
+（**corrected 2026-11-02: 出货的模块文档串与上面的草稿不同。**草稿写"所以一年的第一个会话照常运行"，对登记簿是假话——评审（B5）复现了：`EmptyNewYear` 去掉 2027-01-04 的退市后，晚间在同样 11 次请求之后停在第 4 步，`partition_missing … stock_basic year=2027`。出货的版本把那句收窄到**名称语料**（"名称语料不再拦一年的第一个会话"），补了 2012 年的出处，把 `--full-update` 那句限定在它的 `namechange` 构建上，并加上登记簿缺口那一段；那一段先指向本计划的 U3，`V2-P7-025` 立项之后改为指向 `V2-P7-025`。）
 
 - [ ] **Step 4：运行，确认通过**（两个文件的 `-k` 选择；再跑既有的 `-k "first_session_of_a_year or new_year"` 不变绿）。
 - [ ] **Step 5：变异探针：** B4 的 M1 在本任务的三条测试上也必须红（一天退出 1；清晨夹具失败）；M2（B3）删掉 `empty_admissible_through`：一天在第 3 步或第 4 步被拒（`stale`），记下是哪一步写进报告。
@@ -1285,7 +1304,7 @@ def test_a_record_filed_on_the_first_session_before_any_rename_is_checked_like_a
 
 ## 7. 收尾：后续文档任务要改的行（本计划不改）
 
-- **路线图 §P7**：`V2-P7-009`（第 487 行）关闭，写两个 node id：`tests/unit/backtest/test_paper_settlement.py::test_a_name_bought_at_an_open_is_never_sold_in_that_session_on_the_paper_path`、`tests/unit/scripts/test_daily_selection_survivor_day.py::test_a_book_held_into_the_first_session_of_a_year_settles_it_across_an_ex_rights_date`，并写明"两条在已交付代码上通过，无修复"与 C7 的 T+1 结论；`V2-P7-021`（第 499 行）关闭，写 U1 的取值与 B4/B5/B6 的 node id；若 U3 被采纳，加 `V2-P7-025` 一行，总数 252 → 253，P7 24 → 25。
+- **路线图 §P7**：`V2-P7-009`（第 487 行）关闭，写两个 node id：`tests/unit/backtest/test_paper_settlement.py::test_a_name_bought_at_an_open_is_never_sold_in_that_session_on_the_paper_path`、`tests/unit/scripts/test_daily_selection_survivor_day.py::test_a_book_held_into_the_first_session_of_a_year_settles_it_across_an_ex_rights_date`，并写明"两条在已交付代码上通过，无修复"与 C7 的 T+1 结论；`V2-P7-021`（第 499 行）关闭，写 U1 的取值与 B4/B5/B6 的 node id；若 U3 被采纳，加 `V2-P7-025` 一行，总数 252 → 253，P7 24 → 25（**corrected 2026-11-02: 已做**）。
 - **规格 §9**：一行记 021 的完成（"经核实为空"的语义、窗口取值、"缺失 / 失败"仍拒绝、需要改的只有一写一读）；一行记 009 关闭；一行记登记簿的新年缺口（C1/U3）。§6 若 U1/U2 是用户决定，按 D 编号记入。
 - **运行手册 `docs/runbooks/daily-selection.zh-CN.md`**：「已知局限（幸存者形态）」第 1 条改写为：当年第一条更名之前，第 2 步把当年记为空分区（`EMPTY namechange year=…` 一行在 `panel build` 的输出里），读者在窗口内按"尚无更名"读；失败、截断、窗口之后、已有行之上的空回答仍按名拒绝；**登记簿的同类缺口仍在**（C1/U3）。「清晨复核」的新年一条补"年初首晚之后的清晨也只问会话年，空年照样写空、不拒绝"。P6 一节的局限（`--full-update` 一月初失败）改为已修。
 - **能力台账**（`docs/release/openalpha-v1-feature-ledger.md` + `artifacts/openalpha-v1-feature-coverage/features.csv` + `summary.json`，同一提交、用 `build_feature_coverage` 重生成）：新增一行（建议 `OA-PANEL-043`，"一个尚无更名的名称公告年记为空分区并在窗口内读作尚无更名"，`local_source_evidence` = `src/openalpha_cn/panel_ingest.py#write_empty_name_year;src/openalpha_cn/panel_ingest.py#name_history_requirement;src/openalpha_cn/domain/name_history.py#name_year_may_be_empty;src/openalpha_cn/cli.py#_write_name_year`，`acceptance_test` 用不带参数化的 B5 `tests/unit/scripts/test_daily_selection_survivor_day.py::test_the_first_session_of_a_year_before_its_first_rename_runs_to_its_record_and_evening`——参数化 id 里有空格，绑定 node id 时容易出错）；`OA-OPS-039`、`OA-OPS-043`、`OA-OPS-045`、`OA-OPS-046` 的 notes 提一句 021；`OA-BT-021`（T+1 的 node id）与 `OA-BT-023`（跨新年的 node id）的 notes 补 009 的验收。没有新增或移动测试文件，`test_evidence` 列不变。
