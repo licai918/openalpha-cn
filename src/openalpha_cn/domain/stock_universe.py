@@ -158,11 +158,11 @@ def universe_year_empty_admissible_through(year: int) -> date:
 
 
 def universe_year_may_be_empty(year: int, day: date) -> bool:
-    """Whether a lifecycle year with no event in it yet is admissible on calendar `day` (a
-    `date_timezone` date): through `universe_year_empty_admissible_through(year)` itself, not
-    after. Whether `day` is in `year` at all is the writer's question
-    (`panel_ingest.record_empty_universe_year`)."""
-    return day <= universe_year_empty_admissible_through(year)
+    """Whether lifecycle year `year` with no event in it yet is admissible on calendar `day` (a
+    `date_timezone` date): from that year's 1 January through
+    `universe_year_empty_admissible_through(year)` itself, not before it and not after. A day in
+    another year is not an observation of this lifecycle year at all."""
+    return date(year, 1, 1) <= day <= universe_year_empty_admissible_through(year)
 
 
 LIFECYCLE_EVENT_COLUMN: Final[str] = "lifecycle_event"

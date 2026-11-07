@@ -7606,7 +7606,10 @@ def record_empty_universe_year(
     ordinary `panel build` outcome (the command names what it wrote) and not the hole in the
     lifecycle years that pass exists to prevent: the empty year is the newest, and an absent
     newest year is the state a store is in before its year's first event -- never a gap between
-    two years a read covers.
+    two years a read covers. The registry rows and the empty year are also **two writes, not
+    one**: a crash between them leaves the newest year missing until the next build records it.
+    That is fail-closed -- the evening has already failed, and the missing newest year is the
+    state before a year's first event, not a hole in what a later read covers.
 
     Refused (`PanelBatchError`) when it could hide something: a batch that is not a successful
     whole-registry fetch (a `no_data` answer carries no row at all -- an empty *market*, which

@@ -462,3 +462,7 @@ def test_a_lifecycle_year_may_be_empty_through_its_own_last_day_and_not_a_day_af
     assert universe_year_may_be_empty(2027, date(2027, 1, 4))
     assert universe_year_may_be_empty(2027, through)
     assert not universe_year_may_be_empty(2027, through + timedelta(days=1))
+    # The window is this year's, not "any day at or before this year's end": a day in another
+    # year is not an observation of this lifecycle year at all.
+    assert not universe_year_may_be_empty(2027, date(2026, 1, 1))
+    assert not universe_year_may_be_empty(2027, date(2026, 12, 31))
