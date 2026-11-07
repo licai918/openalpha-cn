@@ -579,8 +579,10 @@ def test_the_first_evening_after_the_opening_is_the_initial_build_of_up_to_ten_n
     without a step (no name to ask about, no ledger row) and the kernel builds the book at once:
     ten entries, not the two a day of an initialised book. Sixteen survivors at 10.00: the pool
     is the top 16 - floor(16 x 0.25) = 12, and ten are drawn. The equal share 350,000.00 / 10 x
-    0.995 = 34,825.00 buys 3,400 at 10.00 = 34,000.00; after nine buys 44,000.00 x 0.995 still
-    covers 4,300, so the tenth is funded too."""
+    0.995 = 34,825.00 buys 3,400 at 10.00 = 34,000.00. Each buy is placed at the limit-up 11.00,
+    so the broker freezes 37,400.00 for it: nine freeze 336,600.00, and the 13,400.00 left
+    freezes 1,200 shares of the tenth (13,200.00). All ten freeze 349,800.00, inside the
+    350,000.00 the account has, so nothing is unfunded."""
     book = book_at(tmp_path, cash="350000.00")
     names = [f"6001{n:02d}.SH" for n in range(16)]
 
@@ -601,7 +603,10 @@ def test_the_first_evening_after_the_opening_is_the_initial_build_of_up_to_ten_n
     assert [
         (o.side, o.quantity, o.reference_price, o.reason, o.execute_session, o.expires_session)
         for o in result.trade_list.orders
-    ] == [("buy", 3400, D("10.00"), "INITIAL_BUILD", 2, 4)] * 10
+    ] == [
+        *([("buy", 3400, D("10.00"), "INITIAL_BUILD", 2, 4)] * 9),
+        ("buy", 1200, D("10.00"), "INITIAL_BUILD", 2, 4),
+    ]
     assert result.trade_list.unfunded == ()
     snapshot = result.snapshot
     assert (snapshot.session, snapshot.last_settled_session, snapshot.first_decision_session) == (
@@ -887,20 +892,22 @@ ALL_IN = SurvivorBookConfig(seed=7, holding_count=1, cost_reserve_fraction=D("0"
 
 
 def _written_off_to_nothing(root: Path) -> Book:
-    """A one-name book that spent every fen: opened with 9,005.09 under `ALL_IN`, it buys 1,000
-    of 600090.SH at 9.00 on S2 for 9,000.00 + 5.00 + 0.09 = 9,005.09 and holds no cash."""
+    """A one-name book that spent every fen: opened with 55.00 under `ALL_IN`, it buys one lot
+    of 600090.SH at 0.50 on S2 for 50.00 + the 5.00 minimum commission = 55.00 and holds no
+    cash. The lot freezes 0.55 x 100 = 55.00, exactly what it has, so the buy is placed whole;
+    a dearer name could not empty the book, because the freeze holds about a tenth back."""
     store = FilePaperStateStore(root / "snapshots")
     open_book(
         store=store,
         session=E0,
         session_index=0,
-        cash=D("9005.09"),
+        cash=D("55.00"),
         config_digest=survivor_config_digest(ALL_IN),
     )
     book = Book(root=root, store=store, ledger=SQLitePortfolioLedger(root / "ledger.sqlite3"))
-    only = screened(("600090.SH", "9.00"))
-    evening(book, S1, NOTHING, only, {"600090.SH": "9.00"}, config=ALL_IN)
-    evening(book, S2, market(quiet("600090.SH", S2, "9.00")), only, {}, config=ALL_IN)
+    only = screened(("600090.SH", "0.50"))
+    evening(book, S1, NOTHING, only, {"600090.SH": "0.50"}, config=ALL_IN)
+    evening(book, S2, market(quiet("600090.SH", S2, "0.50")), only, {}, config=ALL_IN)
     assert load_snapshot(book.store, S2).book.cash == D("0.00")
     return book
 
@@ -1391,7 +1398,9 @@ def test_a_catch_up_from_the_opening_leaves_the_next_evening_the_initial_build(
 ) -> None:
     """S1's evening never ran. Caught up, S1 is settled without a decision: the book is moved to
     the session and nothing is planned, so the book has still decided nothing -- and the evening
-    of S2 is the initial build, ten entries, not the two a day of an initialised book."""
+    of S2 is the initial build, ten entries, not the two a day of an initialised book. As in
+    the first evening after the opening, the buys are placed at the 11.00 limit-up: nine freeze
+    37,400.00 of the 350,000.00 and the tenth takes the 13,400.00 left, 1,200 shares."""
     book = book_at(tmp_path, cash="350000.00")
 
     caught = catch_up(book, S1, NOTHING)
@@ -1409,7 +1418,10 @@ def test_a_catch_up_from_the_opening_leaves_the_next_evening_the_initial_build(
     result = evening(book, S2, NOTHING, SCREEN_SIXTEEN, dict.fromkeys(SIXTEEN, "10.00"))
     assert result.decision is not None and result.trade_list is not None
     assert [entry.reason for entry in result.decision.entries] == ["INITIAL_BUILD"] * 10
-    assert [(o.signal_session, o.quantity) for o in result.trade_list.orders] == [(2, 3400)] * 10
+    assert [(o.signal_session, o.quantity) for o in result.trade_list.orders] == [
+        *([(2, 3400)] * 9),
+        (2, 1200),
+    ]
     assert result.snapshot.first_decision_session == 2
 
 
@@ -1972,10 +1984,14 @@ ROUGH_CONFIG = SurvivorBookConfig(seed=11)
 
 
 def test_over_25_rough_evenings_the_ledger_replays_to_every_snapshot(tmp_path: Path) -> None:
-    """The replay invariant on a market that makes the book do everything it can: refusals for
-    cash, at a limit-up and at a limit-down, an expiry into a cool-down, an ex-rights holding
-    carried in the ledger's units, a halted holding left alone, and a delisting written off.
-    Each event is asserted to have happened, so the invariant is not checked on a quiet book."""
+    """The replay invariant on a market that makes the book do everything it can: refusals at a
+    limit-up and at a limit-down, an expiry into a cool-down, an ex-rights holding carried in
+    the ledger's units, a halted holding left alone, and a delisting written off. Each event is
+    asserted to have happened, so the invariant is not checked on a quiet book. There is no
+    refusal for cash, and that is the freeze working: every buy was planned against the
+    1.1x its limit-up holds back, so the ledger can pay for all of them -- the insufficient-cash
+    refusal itself is exercised in `test_paper_settlement`, `test_paper_step` and
+    `test_paper_costs`, whose orders are built by hand."""
     rough = RoughMarket(seed=5)
 
     book, results = run_book(tmp_path, ROUGH_CONFIG, rough)
@@ -1991,7 +2007,7 @@ def test_over_25_rough_evenings_the_ledger_replays_to_every_snapshot(tmp_path: P
     refused = Counter(
         (row.order.subject, row.reason) for row in book.ledger.list() if row.status == "rejected"
     )
-    assert any(reason == "insufficient cash" for _, reason in refused)
+    assert not any(reason == "insufficient cash" for _, reason in refused)
     assert refused[(rough.events["locked up"], "buy cannot fill on a one-price limit-up bar")] == 3
     assert (
         refused[(rough.events["locked down"], "sell cannot fill on a one-price limit-down bar")]

@@ -6,21 +6,25 @@ reference prices, and its identity is a content address, so two runs on the same
 byte-identical and a stored list can be compared to a recomputed one.
 
 Sizing: a buy is `lot_quantity` of the equal share (less the cost reserve) at the signal-day
-reference price, further limited by **the cash the account holds at 09:15** -- tonight's sales
-fill in the same auction, after the buys are frozen, so their proceeds are not this night's cash
--- less what buys still live from earlier sessions will spend, so a book that is nearly fully
-invested cannot over-order.
+reference price, further limited by **the cash its limit-up price freezes** at 09:15. A buy is
+placed at the next session's limit-up (`freeze_price`), not at the reference close, so the
+broker freezes about 1.10x its notional until the auction clears; the cap and the reservation
+for buys still live from earlier sessions are both computed at that price, so a book that is
+nearly fully invested cannot over-order. Tonight's sales fill in the same auction, after the
+buys are frozen, so their proceeds are not this night's cash.
 A buy that cannot be afforded even one lot with what is left is **not placed**; the name was
 drawn today and is simply not bought -- it is eligible to be drawn again in a later session.
-It is not dropped silently either: the trade list names it in `unfunded`, so the evening's list
-says which decided entrants it could not buy.
+A buy that can afford only part of its equal share takes what fits and keeps the name
+(`FREEZE_SHORTFALL_POLICY = "reduce_lots"`), or is not placed at all (`"drop_whole"`).
+It is not dropped silently either: the trade list names an unplaced entrant in `unfunded`, so
+the evening's list says which decided entrants it could not buy.
 The cash cap carries the same cost reserve as the equal share, so a buy that is limited by cash
 still leaves room for the fees and slippage that will come out of it.
 """
 
 from collections.abc import Mapping
-from decimal import Decimal
-from typing import Literal, Self
+from decimal import ROUND_HALF_UP, Decimal
+from typing import Final, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
@@ -35,6 +39,30 @@ OrderReason = Literal[
     "EXIT_SURVIVOR_LOST",
     "EXIT_ELIGIBILITY_LOST",
 ]
+
+FREEZE_RATIO: Final[Decimal] = Decimal("1.10")
+"""The multiple of its reference price a buy freezes when it is placed at the next session's
+limit-up: the Shanghai/Shenzhen main board's 10% band (``backtest.execution._board_limit``, and
+``domain/price_limits.py`` measured 3,068 of 3,174 main-board names matching ROUND_HALF_UP at 10%
+on 2024-06-28). ``freeze_price`` rounds to the fen exactly as ``derived_price_band`` does, so for
+a main-board non-ST name -- every buy: ST is an eligibility reason and a carried buy is cancelled
+when its name leaves the survivors -- the frozen price *is* the limit price printed in ORDERS.
+The system's assumption, to confirm with the broker (route adjustment 2026-11-01,
+section 2.8(4))."""
+
+FREEZE_SHORTFALL_POLICY: Final[str] = "reduce_lots"
+"""What a buy does when the cash freezes fewer lots than its equal share: ``reduce_lots`` takes
+what fits (the entry stays, smaller); ``drop_whole`` places no order and names the entry in
+``unfunded``. The user's decision (plan U2); one constant, two tested behaviours."""
+
+_CENT: Final[Decimal] = Decimal("0.01")
+
+
+def freeze_price(reference_price: Decimal) -> Decimal:
+    """The limit-up price a buy is placed at, from its reference (signal-day) close."""
+    if not reference_price.is_finite() or reference_price <= 0:
+        raise ValueError(f"the reference price must be positive: {reference_price}")
+    return (reference_price * FREEZE_RATIO).quantize(_CENT, rounding=ROUND_HALF_UP)
 
 
 class TradeOrder(BaseModel):
@@ -90,9 +118,9 @@ class TradeList(BaseModel):
     """The `ts_code`s of the decision's entries that produced no order, in the order the
     selection rule drew them (`V2-P7-017`): each was decided, and not one lot of it could be
     bought with what the sizing left -- the cash at 09:15 (tonight's sells' proceeds arrive after
-    the auction), the buys placed before it and the buys carried from earlier sessions, or the
-    equal share itself where the reference price is above the one the decision sized with. Part
-    of `trade_list_id`.
+    the auction), frozen at each buy's limit-up and less what the buys placed before it and the
+    buys carried from earlier sessions freeze, or the equal share itself where the reference
+    price is above the one the decision sized with. Part of `trade_list_id`.
 
     Not `BookDecision.unaffordable`: those are skipped at **decision** time, because the equal
     share of equity cannot buy a lot of them, and never become entries. An unfunded name was an
@@ -111,6 +139,25 @@ def _price_of(code: str, prices: Mapping[str, Decimal]) -> Decimal:
         raise ValueError(f"no reference price for {code}") from None
 
 
+def _freeze_prices(
+    config: SurvivorBookConfig,
+    buy_references: Mapping[str, Decimal],
+    given: Mapping[str, Decimal] | None,
+) -> dict[str, Decimal]:
+    """The limit-up price each buy freezes at: the caller's, or the main board's 10%."""
+    if given is not None:
+        missing = sorted(set(buy_references) - set(given))
+        if missing:
+            raise ValueError(f"no freeze price for {missing}")
+        return {code: given[code] for code in buy_references}
+    if tuple(config.boards) != ("main",):
+        raise ValueError(
+            f"the freeze price is the main board's 10% limit-up and this configuration trades "
+            f"{config.boards}: pass freeze_prices, one per buy"
+        )
+    return {code: freeze_price(price) for code, price in buy_references.items()}
+
+
 def build_trade_list(
     *,
     config: SurvivorBookConfig,
@@ -119,8 +166,14 @@ def build_trade_list(
     reference_prices: Mapping[str, Decimal],
     cash: Decimal,
     carried: tuple[TradeOrder, ...] = (),
+    freeze_prices: Mapping[str, Decimal] | None = None,
 ) -> TradeList:
-    """Turn `decision` into orders for the session after `state.session`."""
+    """Turn `decision` into orders for the session after `state.session`.
+
+    `freeze_prices` is the limit-up price each buy is placed at, one per name bought this session
+    or carried; `None` derives it with `freeze_price`, which is the main board's 10% band and so
+    is refused for a configuration that trades another board.
+    """
     if cash < 0:
         raise ValueError("cash must not be negative")
     if decision.session != state.session:
@@ -158,12 +211,25 @@ def build_trade_list(
             )
         )
 
+    buy_prices = {
+        entry.ts_code: _price_of(entry.ts_code, reference_prices) for entry in decision.entries
+    }
+    buy_prices.update(
+        {
+            order.ts_code: reference_prices.get(order.ts_code, order.reference_price)
+            for order in carried
+            if order.side == "buy"
+        }
+    )
+    freeze = _freeze_prices(config, buy_prices, freeze_prices)
+
     unit_budget = config.sizing_budget(state.equity)
-    # A buy still live from an earlier session will fill out of the same cash, so it is spent
-    # before today's buys see any. Tonight's sales are not counted: they fill in the same
-    # 09:15 auction the buys are placed in, after the broker has frozen the buys' cash.
+    # A buy still live from an earlier session will fill out of the same cash, so it is reserved
+    # -- at its own limit-up, which is what the broker freezes for it -- before today's buys see
+    # any. Tonight's sales are not counted: they fill in the same 09:15 auction the buys are
+    # placed in, after the broker has frozen the buys' cash.
     reserved = sum(
-        (order.reference_price * order.quantity for order in carried if order.side == "buy"),
+        (freeze[order.ts_code] * order.quantity for order in carried if order.side == "buy"),
         Decimal(0),
     )
     available = max(cash - reserved, Decimal(0))
@@ -171,14 +237,21 @@ def build_trade_list(
     unfunded: list[str] = []
     for entry in decision.entries:
         price = _price_of(entry.ts_code, reference_prices)
+        equal_share = lot_quantity(unit_budget, price, config.lot_size)
         quantity = min(
-            lot_quantity(unit_budget, price, config.lot_size),
-            lot_quantity(available * (1 - config.cost_reserve_fraction), price, config.lot_size),
+            equal_share,
+            lot_quantity(
+                available * (1 - config.cost_reserve_fraction),
+                freeze[entry.ts_code],
+                config.lot_size,
+            ),
         )
+        if FREEZE_SHORTFALL_POLICY == "drop_whole" and quantity < equal_share:
+            quantity = 0
         if quantity == 0:
             unfunded.append(entry.ts_code)
             continue
-        available -= price * quantity
+        available -= freeze[entry.ts_code] * quantity
         buys.append(
             TradeOrder(
                 signal_session=state.session,

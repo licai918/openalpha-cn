@@ -1,8 +1,9 @@
 """Orders and the daily trade list (`V2-P7-005`, `V2-P7-008`).
 
 Quantities are worked out in the comments from the sizing rule -- an equal share of equity less
-the 0.5% cost reserve, in whole lots of 100, further limited by the cash that will be there -- so
-the expectation is arithmetic, not a transcription of what the code returned.
+the 0.5% cost reserve, in whole lots of 100, further limited by the cash at 09:15 frozen at each
+buy's limit-up (1.10x its reference price, rounded half up to the fen) -- so the expectation is
+arithmetic, not a transcription of what the code returned.
 """
 
 import re
@@ -11,8 +12,16 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
+from openalpha_cn.backtest.execution import derived_price_band
 from openalpha_cn.domain.survivor_book import SurvivorBookConfig
-from openalpha_cn.domain.survivor_orders import TradeList, TradeOrder, build_trade_list
+from openalpha_cn.domain.survivor_orders import (
+    FREEZE_RATIO,
+    FREEZE_SHORTFALL_POLICY,
+    TradeList,
+    TradeOrder,
+    build_trade_list,
+    freeze_price,
+)
 from openalpha_cn.domain.survivor_policy import (
     BookDecision,
     BookState,
@@ -138,8 +147,8 @@ def test_sells_come_first_by_code_and_buys_follow_in_the_decisions_order() -> No
 
 
 def test_a_buy_is_limited_by_the_cash_that_will_be_there() -> None:
-    # Cash 3,000 and nothing sold: at 12.5 that is 240 shares, 200 in whole lots, which is less
-    # than the 700 an equal share would buy.
+    # Cash 3,000 and nothing sold: frozen at B's 13.75 limit-up less the 0.5% reserve, 2,985 is
+    # 217 shares, 200 in whole lots, which is less than the 700 an equal share would buy.
     plan = build_trade_list(
         config=config(),
         state=book(),
@@ -153,9 +162,9 @@ def test_a_buy_is_limited_by_the_cash_that_will_be_there() -> None:
 
 def test_the_proceeds_of_tonights_sells_are_not_cash_at_0915() -> None:
     # Cash 5,000; A sells 300 at 10.00, which releases 3,000.00 in the same call auction the
-    # buys are placed in, after the broker has frozen them. Sizing on the cash alone: 4,975.00
-    # buys 300 shares of B at 12.50 (4,975 // 1,250 = 3 lots). Counting the proceeds it would
-    # buy 600 (7,960 // 1,250 = 6).
+    # buys are placed in, after the broker has frozen them. Sizing on the cash alone, B bought at
+    # its 13.75 limit-up: 4,975.00 buys 300 shares (4,975 // 1,375 = 3 lots). Counting the
+    # proceeds it would buy 500 (7,960 // 1,375 = 5 lots) and freeze 6,875.00 of the 8,000.00.
     plan = build_trade_list(
         config=config(),
         state=book(("A", 300)),
@@ -188,8 +197,9 @@ def test_a_buy_only_tonights_sale_could_fund_is_unfunded_and_named() -> None:
 
 def test_each_buy_spends_from_what_the_one_before_left() -> None:
     # An equal share would buy 700 shares of B, but the cash is 5,000 less the 0.5% cost reserve,
-    # 4,975, which buys at most 398 shares at 12.5 -- 300 in whole lots. 1,250 is then left, which
-    # is not a lot of C at 40 (4,000), so C is not placed.
+    # 4,975, which freezes at most 361 shares at B's 13.75 limit-up -- 300 in whole lots. 4,125
+    # is then frozen and 875 is left, which is not a lot of C at its 44.00 limit-up (4,400), so
+    # C is not placed.
     plan = build_trade_list(
         config=config(),
         state=book(),
@@ -202,6 +212,8 @@ def test_each_buy_spends_from_what_the_one_before_left() -> None:
 
 
 def test_a_buy_that_cannot_afford_one_lot_is_not_placed() -> None:
+    # 3,999 less the 0.5% reserve is 3,979.01, short of the 4,400 a lot of C freezes at its
+    # 44.00 limit-up.
     plan = build_trade_list(
         config=config(),
         state=book(),
@@ -224,12 +236,122 @@ def test_the_first_build_is_sized_to_the_equity_not_to_the_cash_left_over() -> N
         cash=Decimal("40000"),
     )
 
-    # 9,950 buys 995 shares of A (900 in lots), 796 of B (700) and 248 of C (200).
+    # 9,950 buys 995 shares of A (900 in lots), 796 of B (700) and 248 of C (200); frozen at the
+    # 11.00 / 13.75 / 44.00 limit-ups those three orders take 9,900.00, 9,625.00 and 8,800.00 of
+    # the 40,000.00, so the cash cap never binds and the equal share is what sizes them.
     assert [(o.ts_code, o.quantity, o.reason) for o in plan.orders] == [
         ("A", 900, "INITIAL_BUILD"),
         ("B", 700, "INITIAL_BUILD"),
         ("C", 200, "INITIAL_BUILD"),
     ]
+
+
+def test_a_buy_is_limited_by_the_cash_its_limit_up_price_freezes() -> None:
+    # Ten equal shares of 350,000 at 10.00: 34,825.00 buys 3,400 shares each. A buy is placed at
+    # the next session's limit-up, 11.00, so the broker freezes 37,400.00 for it. Nine freeze
+    # 336,600.00; 13,400.00 is left, which freezes 1,200 shares of the tenth. Ten full ones
+    # would freeze 374,000.00, more than the 350,000.00 the account has.
+    names = tuple(f"6001{n:02d}.SH" for n in range(10))
+    plan = build_trade_list(
+        config=SurvivorBookConfig(seed=7),
+        state=BookState(session=SESSION, initialized=False, equity=Decimal("350000")),
+        decision=decision(entries=tuple((name, "INITIAL_BUILD") for name in names)),
+        reference_prices=dict.fromkeys(names, Decimal("10")),
+        cash=Decimal("350000"),
+    )
+
+    assert [(o.ts_code, o.quantity) for o in plan.orders] == [
+        *((name, 3400) for name in names[:9]),
+        (names[9], 1200),
+    ]
+    assert plan.unfunded == ()
+    assert sum(
+        (freeze_price(Decimal("10")) * o.quantity for o in plan.orders), Decimal("0")
+    ) == Decimal("349800.00")
+    assert sum(
+        (freeze_price(Decimal("10")) * o.quantity for o in plan.orders), Decimal("0")
+    ) <= Decimal("350000.00")
+
+
+@pytest.mark.parametrize("close", ["9.99", "10.00", "10.03", "10.05", "1234.56"])
+def test_the_freeze_price_is_the_main_boards_derived_limit_up(close: str) -> None:
+    band, _ = derived_price_band(Decimal(close), board="main", is_st=False)
+    assert freeze_price(Decimal(close)) == band
+
+
+def test_a_normal_night_is_unchanged_when_the_freeze_does_not_bind() -> None:
+    # Four equal shares of 40,000 at 12.50: the equal share buys 700 shares; the limit-up 13.75
+    # freezes 9,625.00 of the 20,000.00 cash, so the cash cap never binds and the list is the one
+    # the reference price alone gives.
+    plan = build_trade_list(
+        config=config(),
+        state=book(("A", 300)),
+        decision=decision(
+            exits=(("A", "EXIT_SURVIVOR_LOST"),), entries=(("B", "ENTRY_REPLACEMENT"),)
+        ),
+        reference_prices=PRICES,
+        cash=Decimal("20000"),
+    )
+
+    assert [o.quantity for o in plan.orders] == [300, 700]
+
+
+def test_a_carried_buy_is_reserved_at_tonights_limit_up_price() -> None:
+    # The live buy of 300 B is placed again tomorrow at B's limit-up, 13.75: 4,125.00 of the
+    # 5,000.00 is frozen before today's buy sees any. The 875.00 left is not a lot of A at its
+    # own 11.00 limit-up, so A is unfunded and named.
+    plan = build_trade_list(
+        config=config(),
+        state=book(pending_buys=("B",)),
+        decision=decision(entries=(("A", "ENTRY_REPLACEMENT"),)),
+        reference_prices=PRICES,
+        cash=Decimal("5000"),
+        carried=(live_buy(),),
+    )
+
+    assert plan.orders == ()
+    assert plan.unfunded == ("A",)
+
+
+def test_a_config_that_trades_another_board_must_pass_its_own_freeze_prices() -> None:
+    # The 10% is the main board's band; a config that also trades ChiNext must say what its
+    # limit-up prices are rather than have the main board's ratio applied to it.
+    with pytest.raises(ValueError, match="main board"):
+        build_trade_list(
+            config=config(boards=("main", "growth")),
+            state=book(),
+            decision=decision(entries=(("B", "ENTRY_REPLACEMENT"),)),
+            reference_prices=PRICES,
+            cash=Decimal("20000"),
+        )
+
+
+def test_the_drop_whole_policy_refuses_an_entry_it_cannot_freeze_in_full(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The decision this plan recommends against, implemented so the user's choice is one named
+    # constant: with `drop_whole` the tenth name is not bought at all, where `reduce_lots`
+    # buys it 1,200 shares.
+    from openalpha_cn.domain import survivor_orders
+
+    monkeypatch.setattr(survivor_orders, "FREEZE_SHORTFALL_POLICY", "drop_whole")
+    names = tuple(f"6001{n:02d}.SH" for n in range(10))
+    plan = build_trade_list(
+        config=SurvivorBookConfig(seed=7),
+        state=BookState(session=SESSION, initialized=False, equity=Decimal("350000")),
+        decision=decision(entries=tuple((name, "INITIAL_BUILD") for name in names)),
+        reference_prices=dict.fromkeys(names, Decimal("10")),
+        cash=Decimal("350000"),
+    )
+
+    assert [o.quantity for o in plan.orders] == [3400] * 9
+    assert plan.unfunded == (names[9],)
+
+
+def test_the_freeze_ratio_and_the_shortfall_policy_are_the_ones_the_plan_froze() -> None:
+    assert Decimal("1.10") == FREEZE_RATIO
+    assert FREEZE_SHORTFALL_POLICY == "reduce_lots"
+    assert freeze_price(Decimal("10.00")) == Decimal("11.00")
 
 
 def test_every_quantity_is_a_whole_number_of_lots() -> None:
@@ -358,10 +480,10 @@ def test_an_order_with_a_nonsense_field_is_refused(overrides: dict[str, object])
 def test_a_buy_still_live_from_an_earlier_session_is_paid_for_before_todays_buys() -> None:
     live = live_buy()
 
-    # Cash 5,000 less the 3,750 the live buy will spend leaves 1,250, and 0.5% of that is kept back
-    # for costs: 1,243.75 buys 124 shares of A at 10, 100 in whole lots. With nothing reserved the
-    # same decision would order 400 (4,975 / 10), and the two buys together would ask for more
-    # than the book has.
+    # Cash 5,000 less the 4,125 the live buy freezes -- 300 B at its 13.75 limit-up -- leaves 875,
+    # and 0.5% of that is kept back for costs: 870.625 is not one lot of A at its own 11.00
+    # limit-up (1,100), so A is not placed. With nothing reserved the same decision would order
+    # 400 (4,975 / 11), and the two buys together would freeze more than the book has.
     with_live = build_trade_list(
         config=config(),
         state=book(pending_buys=("B",)),
@@ -378,7 +500,7 @@ def test_a_buy_still_live_from_an_earlier_session_is_paid_for_before_todays_buys
         cash=Decimal("5000"),
     )
 
-    assert [o.quantity for o in with_live.orders] == [100]
+    assert [o.quantity for o in with_live.orders] == []
     assert [o.quantity for o in without.orders] == [400]
 
 
@@ -396,6 +518,8 @@ def test_a_live_buy_that_uses_up_the_cash_leaves_nothing_for_a_new_one() -> None
 
 
 def test_a_buy_limited_by_cash_still_leaves_the_cost_reserve() -> None:
+    # The cap is applied to the cash at the limit-up, and the order's notional is its reference
+    # price: 4,125.00 frozen is 3,750.00 at 12.50, under 5,000 x 0.995.
     plan = build_trade_list(
         config=config(),
         state=book(),
@@ -488,8 +612,9 @@ def test_an_order_a_book_could_not_have_planned_is_refused(overrides: dict[str, 
 
 
 def test_an_entrant_the_cash_left_cannot_fund_is_recorded_as_unfunded() -> None:
-    # As in `test_each_buy_spends_from_what_the_one_before_left`: 5,000 buys 300 of B and leaves
-    # 1,250, which is not a lot of C at 40 (4,000). C was decided and not ordered.
+    # As in `test_each_buy_spends_from_what_the_one_before_left`: 5,000 buys 300 of B, freezing
+    # 4,125 at the 13.75 limit-up, and the 875 left is not a lot of C at its 44.00 limit-up
+    # (4,400). C was decided and not ordered.
     plan = build_trade_list(
         config=config(),
         state=book(),
@@ -504,7 +629,8 @@ def test_an_entrant_the_cash_left_cannot_fund_is_recorded_as_unfunded() -> None:
 
 def test_an_entrant_whose_lot_costs_more_than_the_equal_share_is_recorded_as_unfunded() -> None:
     # The equal share is 40,000 / 4 less 0.5% = 9,950, and one lot of D at 100 is 10,000: the
-    # 100,000 of cash would buy it, the sizing budget does not. A at 10 still gets its 900.
+    # 100,000 of cash would freeze it at D's 110.00 limit-up (11,000), the sizing budget does not.
+    # A at 10 still gets its 900.
     plan = build_trade_list(
         config=config(),
         state=book(),
@@ -518,7 +644,8 @@ def test_an_entrant_whose_lot_costs_more_than_the_equal_share_is_recorded_as_unf
 
 
 def test_an_entrant_the_carried_buys_leave_no_cash_for_is_recorded_as_unfunded() -> None:
-    # The live buy reserves 800 x 12.5 = 10,000 of the 5,000: nothing is left for A.
+    # The live buy reserves 800 x 13.75 = 11,000.00 of the 5,000.00, more than all of it:
+    # nothing is left for A.
     plan = build_trade_list(
         config=config(),
         state=book(pending_buys=("B",)),
@@ -533,8 +660,9 @@ def test_an_entrant_the_carried_buys_leave_no_cash_for_is_recorded_as_unfunded()
 
 
 def test_unfunded_names_keep_the_order_the_selection_rule_drew_them_in() -> None:
-    # Drawn D, B, C with 5,000: D's lot (10,000) is over the 9,950 share, B takes 300 (3,750,
-    # leaving 1,250) and C's lot (4,000) is over the 1,243.75 left. D then C -- not sorted.
+    # Drawn D, B, C with 5,000: D's lot (10,000 at 100) is over the 9,950 share, B takes 300
+    # (freezing 4,125 of the 5,000, leaving 875) and C's limit-up lot (4,400) is over the
+    # 870.625 left. D then C -- not sorted.
     plan = build_trade_list(
         config=config(),
         state=book(),
