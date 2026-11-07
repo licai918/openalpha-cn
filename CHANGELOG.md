@@ -6,8 +6,13 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### P7 — development batch 2: the registry's New Year gap and the reading's four prerequisites (`V2-P7-025`, `V2-P7-024`, 2026-11-07)
 
-The second batch after the route adjustment, on `feat/v2-p7-025-batch-2` (from `587a158`; the code is
-frozen at `4b4ec94` for the controller's serial full gate, whose result is not stated here). **It is
+The second batch after the route adjustment, on `feat/v2-p7-025-batch-2` (from `587a158`; the code was
+frozen at `4b4ec94` for the first serial full gate, whose result is not stated here; after it came a
+documentation wave and then the final-review fix wave, which changed executable bytes --
+`scripts/research/p7_reading.py` (the preflight now names an unplannable calendar, the knowledge line
+marks the registrant's words) and `src/openalpha_cn/domain/stock_universe.py` (`universe_year_may_be_empty`
+bounds the day to its year) -- so the serial gate that counts is the one on the final tip, whose result
+is also not stated here). **It is
 not pushed, the delivered code has run no real build, factor or reading, and no Tushare request
 was made; the only thing that opened the real panel was the read-only, zero-request measurement
 over its parquet. No registration exists** (so no binding is voided). `V2-P7-025`: `panel build` records

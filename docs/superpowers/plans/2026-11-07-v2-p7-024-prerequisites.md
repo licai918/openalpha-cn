@@ -964,6 +964,9 @@ KNOWLEDGE_LINE: Final[str] = (  # corrected 2026-11-07: the delivered name is `_
     "so a revision or name published after a session enters that session's scores; this is a "
     "recomputation at that instant, not a replay at each session's publication instant"
 )
+# corrected 2026-11-07: the delivered `_KNOWLEDGE_LINE` (scripts/research/p7_reading.py:260-265) is
+# "read under the knowledge at {as_of} (-- the registrant's words: {reason}) -- ..."; the block above
+# lacks the "(-- the registrant's words: …)" marker.
 
 
 def register_reading(..., code_commit: str, as_of_reason: str,
