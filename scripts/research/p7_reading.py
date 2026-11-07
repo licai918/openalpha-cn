@@ -65,7 +65,12 @@ a failure after the claim spends the window:
    checkout was shallow when this was written (2026-11-02). So is a repository holding a grafts
    file (`info/grafts`), which changes the parents git reports while the repository still says it
    is not shallow; replacement refs are not refused but ignored (`--no-replace-objects`).
-5. `ReadingPreflightError` -- the panel catalogue lacks a year the read opens of a dataset
+5. `ValidationNotSpentError` -- a `second_use` reading requires the validation window's claim,
+   `<validation>.window-claim.json`, to be **committed** and reachable from some ref or unexpired
+   reflog entry (the same `_LOG_EVERYTHING` scan step 4 uses). A claim on disk but never committed
+   is not enough: it can be deleted, and the validation window read again after 2024-2026 was
+   seen. The other order needs no check: a validation read never looks at the second-use stretch.
+6. `ReadingPreflightError` -- the panel catalogue lacks a year the read opens of a dataset
    (`preflight_problems`: it asks each dataset's `registered_years`, and for the primary reading
    it also reads the window's years and the year before of `trade_cal` -- the calendar is not
    outcome data -- to check the stop rule's `minimum_periods`): the window's years for every
@@ -81,7 +86,7 @@ and only then measures. Both are filed beside the registration as `HEAD` holds i
 `read_once` was handed (a symbolic link elsewhere finds the same claims). From the claims on, the
 read is spent:
 
-6. the measure runs bound to `{reading, registration_sha256, registration_commit, claim_sha256}`.
+7. the measure runs bound to `{reading, registration_sha256, registration_commit, claim_sha256}`.
    The default one is the diagnostics engine (`p7_diagnostics.run_diagnostics`) on
    `p7_windows.capped_panel_store`, every read and the content hash of every partition served
    taken inside one `PanelStore.reading()` hold, so the hashes are those of what was read. A
@@ -90,10 +95,10 @@ read is spent:
    `__context__`) -- propagates unchanged, as does any other error, and the claim stays. A document
    that is not `p7_diagnostics.READ_ONCE_KIND`, or not bound to this claim, is refused
    (`ReadingConfigurationError`): the claim stays and no result is written;
-7. a `primary` reading's stop rule is applied as written (`evaluate_stop_rule`). A metric with
+8. a `primary` reading's stop rule is applied as written (`evaluate_stop_rule`). A metric with
    fewer than `minimum_periods` periods, or no summary at all, triggers it: a gate that cannot be
    read is closed;
-8. `<reading>.result.json` and `<reading>.result.txt` are written with `O_EXCL`.
+9. `<reading>.result.json` and `<reading>.result.txt` are written with `O_EXCL`.
 
 Committing the claims and the results is the caller's step, as committing the registration was,
 and the result's text says so.
@@ -133,6 +138,11 @@ What this does not establish:
   measure directly (`_panel_measure(runtime_dir)(body, VALIDATION, binding)` -- the tests do, on
   stand-in stores), builds a `PanelStore` on the panel root or opens the Parquet files reads the
   window with no claim. A claim says this path was taken once; it cannot say no other path was.
+  The second-use ordering guard is procedural in the same way: a hand-written, committed
+  validation window claim satisfies it -- and, as step 4 says, also marks the validation window
+  read, whatever reading names it, so forging one spends that window's read. It does not require
+  the validation window's **measurement** to have finished: a validation reading that claimed its
+  window and crashed satisfies it too, which is what "the window is spent" means.
 * `uv.lock` in the binding proves the lock file did not change, not that the running environment
   matches it (`registry`'s limit, unchanged).
 * The preflight sees which years the catalogue lists and, for a primary reading, the calendar's
@@ -306,6 +316,10 @@ class ReadingPreflightError(registry.HoldoutRefusedError):
 
 class ForeignP7ScriptsError(registry.HoldoutRefusedError):
     """The imported `p7_windows`, `p7_diagnostics` or this module are not the repository's own."""
+
+
+class ValidationNotSpentError(registry.HoldoutRefusedError):
+    """A second-use read before the validation window's claim is committed."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -1075,6 +1089,8 @@ def read_once(
         window_claim=window_claim,
         results=(result_json, result_txt),
     )
+    if window.name == WINDOWS["second_use"].name:
+        _require_the_validation_window_spent(root)
     check = _panel_preflight(runtime_dir, window) if preflight is None else preflight
     problems = tuple(check(committed.body))
     if problems:
@@ -1277,6 +1293,54 @@ def _refuse_a_second_read(
                 f"give the read back -- {spent} had its one read"
             )
     _refuse_any_claim_of_the_window(root, window)
+
+
+def _require_the_validation_window_spent(root: Path) -> None:
+    """Refuse unless the validation window's claim is committed and reachable from some ref.
+
+    The artifact is `<validation>.window-claim.json`, written unconditionally by the first
+    `read_once` of that window before its reading's claim, and named by window rather than by
+    reading. It must be committed: a claim only on disk can be deleted, and the validation window
+    read again after 2024-2026 was seen -- the order this check exists to prevent. The commit is
+    looked for exactly as `_refuse_a_second_read` looks for a spent claim (`_LOG_EVERYTHING`):
+    every ref, every unexpired reflog entry, every parent of every merge.
+    """
+    relative = (READING_DIRECTORY / f"{WINDOWS['validation'].name}{WINDOW_CLAIM_SUFFIX}").as_posix()
+    log = registry._git(root, *_LOG_EVERYTHING, "--format=%H", "--", relative)
+    if log.returncode != 0:
+        raise ValidationNotSpentError(
+            f"git cannot tell whether {relative} was ever committed "
+            f"({log.stderr.decode(errors='replace').strip()}); whether the validation window was "
+            "read first cannot be shown, so the second_use read is refused"
+        )
+    commits = log.stdout.decode().split()
+    on_disk = root / relative
+    if commits:
+        shown = registry._git(root, _NO_REPLACEMENTS, "show", f"{commits[-1]}:{relative}")
+        try:
+            named = json.loads(shown.stdout).get("window")
+        except (ValueError, AttributeError):
+            named = None
+        if shown.returncode != 0 or named != WINDOWS["validation"].name:
+            raise ValidationNotSpentError(
+                f"{relative} was committed at {commits[-1]} but does not read as a claim naming "
+                "the validation window; the ordering cannot be shown, so the second_use read is "
+                "refused"
+            )
+        return
+    if on_disk.is_file():
+        raise ValidationNotSpentError(
+            f"{on_disk.relative_to(root).as_posix()} is on disk but was never committed: a "
+            "claim that is not committed can be deleted, and the validation window read again "
+            "after 2024-2026 was seen; commit it and keep that commit in this repository's refs, "
+            "then read the second_use window"
+        )
+    raise ValidationNotSpentError(
+        "the second_use window is read only after the validation window: no committed "
+        f"{relative} exists. A 2024-2026 result seen first could still change the validation "
+        "stop rule's numbers written afterwards; read the validation window first (its "
+        "registration and stop rule committed before it), then commit its window claim"
+    )
 
 
 _NO_REPLACEMENTS: Final = "--no-replace-objects"

@@ -547,6 +547,8 @@ def test_the_second_use_window_is_claimed_once_too(repo: Path) -> None:
         )
         commit_file(repo, path, f"register {reading}", at=COMMITTED)
         paths.append(path)
+    # The second_use window waits for the validation window's committed claim (V2-P7-024 item 3).
+    write_validation_window_claim(repo, commit=True)
     run(paths[0], repo, Measure())
     measure = Measure()
 
@@ -630,22 +632,16 @@ def test_a_claim_file_that_cannot_be_read_refuses_the_read(repo: Path, committed
 
 
 def test_a_claim_of_another_window_does_not_spend_this_one(repo: Path) -> None:
-    secondary = (
-        repo / "docs" / "research" / "p7-readings" / "v2-p7-024-second-use.registration.json"
+    """A committed claim naming the second_use window does not stop the validation window's read.
+    (The second_use *reading* cannot come first any more -- V2-P7-024 item 3 -- so the claim is
+    hand-written here, which is the artifact the ordering guard reads.)"""
+    secondary_claim = repo / "docs" / "research" / "p7-readings" / "second_use.window-claim.json"
+    secondary_claim.parent.mkdir(parents=True, exist_ok=True)
+    secondary_claim.write_text(
+        json.dumps({"reading": "some-secondary", "window": "second_use"}) + "\n",
+        encoding="utf-8",
     )
-    register(
-        secondary,
-        reading="v2-p7-024-second-use",
-        role="secondary",
-        window="second_use",
-        request=SECOND_USE_REQUEST,
-        stop_rule=None,
-        code_commit=head(repo),
-    )
-    commit_file(repo, secondary, "register the secondary reading", at=COMMITTED)
-    run(secondary, repo, Measure())
-    for path in (claim_of(secondary), window_claim_of(repo, "second_use")):
-        commit_file(repo, path, f"commit {path.name}", at=COMMITTED + timedelta(minutes=30))
+    commit_file(repo, secondary_claim, "a second_use claim", at=COMMITTED)
     measure = Measure()
 
     run(registered(repo), repo, measure, hours=2)
@@ -1042,6 +1038,8 @@ def test_a_secondary_reading_of_the_spent_holdout_has_no_stop_rule_and_says_so(r
         code_commit=head(repo),
     )
     commit_file(repo, path, "register the secondary reading", at=COMMITTED)
+    # The second_use window waits for the validation window's committed claim (V2-P7-024 item 3).
+    write_validation_window_claim(repo, commit=True)
     measure = Measure()
 
     result = run(path, repo, measure)
@@ -1763,3 +1761,113 @@ def test_the_default_measure_and_preflight_refuse_a_directory_inside_the_main_ch
         p7_reading._panel_measure(repo / "runtime")
     with pytest.raises(p7_windows.RuntimeDirectoryRefusedError, match="main checkout"):
         p7_reading._panel_preflight(repo / "runtime", p7_windows.VALIDATION)
+
+
+# --- the second_use window waits for the validation window (V2-P7-024 item 3) -------------------
+
+
+def registered_second_use(repo: Path) -> Path:
+    path = repo / "docs" / "research" / "p7-readings" / "v2-p7-024-second-use.registration.json"
+    p7_reading.register_reading(
+        path=path,
+        reading="v2-p7-024-second-use",
+        issue="V2-P7-024",
+        role="secondary",
+        window="second_use",
+        request=SECOND_USE_REQUEST,
+        config=CONFIG,
+        stop_rule=None,
+        code_commit=head(repo),
+    )
+    commit_file(repo, path, "register the secondary reading", at=COMMITTED)
+    return path
+
+
+def write_validation_window_claim(repo: Path, *, commit: bool) -> Path:
+    path = repo / "docs" / "research" / "p7-readings" / "validation.window-claim.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "reading": "v2-p7-024-validation",
+                "registration_sha256": "0" * 64,
+                "window": "validation",
+                "claimed_at": COMMITTED.isoformat(),
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    if commit:
+        commit_file(repo, path, "the validation window's claim", at=COMMITTED)
+    return path
+
+
+def test_a_second_use_read_before_the_validation_windows_claim_is_refused(repo: Path) -> None:
+    """2024-2026 seen first could still change the numbers of the validation stop rule written
+    afterwards: the secondary read waits for the validation window's committed claim."""
+    registration = registered_second_use(repo)
+    measure = Measure()
+
+    with pytest.raises(p7_reading.ValidationNotSpentError, match="validation"):
+        run(registration, repo, measure)
+
+    assert measure.calls == []
+    assert not claim_of(registration).exists()
+    assert not window_claim_of(repo, "second_use").exists()
+
+
+def test_a_validation_window_claim_on_disk_but_not_committed_does_not_open_second_use(
+    repo: Path,
+) -> None:
+    """An uncommitted claim can be deleted, and the validation window read again after
+    2024-2026 was seen, so 'on disk' is not the artifact: the commit is."""
+    registration = registered_second_use(repo)
+    write_validation_window_claim(repo, commit=False)
+
+    with pytest.raises(p7_reading.ValidationNotSpentError, match="commit"):
+        run(registration, repo, Measure())
+
+
+def test_a_committed_validation_window_claim_opens_second_use(repo: Path) -> None:
+    registration = registered_second_use(repo)
+    write_validation_window_claim(repo, commit=True)
+
+    result = run(registration, repo, Measure())
+
+    assert "stop_rule" not in result
+    assert claim_of(registration).exists()
+
+
+def test_a_committed_validation_window_claim_naming_another_window_does_not_open_second_use(
+    repo: Path,
+) -> None:
+    """The file's name is not the artifact: the committed bytes must name the validation window.
+    (`research` is the other valid window name that reaches this check; a claim naming
+    `second_use` is refused earlier, by `_refuse_any_claim_of_the_window`, as a claim of
+    second_use itself.)"""
+    registration = registered_second_use(repo)
+    path = write_validation_window_claim(repo, commit=False)
+    path.write_text(
+        json.dumps({"reading": "some-other", "window": "research"}) + "\n", encoding="utf-8"
+    )
+    commit_file(repo, path, "a claim named validation but not of it", at=COMMITTED)
+
+    with pytest.raises(p7_reading.ValidationNotSpentError, match="does not read as a claim"):
+        run(registration, repo, Measure())
+
+
+def test_a_validation_read_does_not_wait_for_the_second_use_window(repo: Path) -> None:
+    """The other order needs nothing: a claim of the secondary window does not stop the
+    validation window's read (only a claim naming validation could)."""
+    claim_of_second = repo / "docs/research/p7-readings/second_use.window-claim.json"
+    claim_of_second.parent.mkdir(parents=True, exist_ok=True)
+    claim_of_second.write_text(
+        json.dumps({"reading": "some-secondary", "window": "second_use"}) + "\n",
+        encoding="utf-8",
+    )
+
+    registration = registered(repo)
+    result = run(registration, repo, Measure())
+
+    assert result["stop_rule"]["outcome"] == "not triggered"
