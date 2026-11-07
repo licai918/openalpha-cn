@@ -171,7 +171,12 @@ from openalpha_cn.domain.survivor_book import (
     SurvivorBookConfig,
     survivor_config_digest,
 )
-from openalpha_cn.domain.survivor_orders import TradeList, build_trade_list
+from openalpha_cn.domain.survivor_orders import (
+    FundingReport,
+    TradeList,
+    build_trade_list,
+    funding_report,
+)
 from openalpha_cn.domain.survivor_policy import BookDecision, decide_book
 
 __all__ = [
@@ -267,6 +272,10 @@ class EveningResult:
     the one held, and the settlement, decision and trade list are derived again from the
     snapshot before it and the inputs given -- which reproduced the held snapshot exactly, or
     the evening would have been refused.
+
+    `funding` reports what the trade list freezes at 09:15 and every entry the cash sized short
+    (`domain.survivor_orders.funding_report`); it is derived from the same plan, so an
+    `unchanged` evening derives the same report as the one it committed.
     """
 
     outcome: Outcome
@@ -274,6 +283,7 @@ class EveningResult:
     trade_list: TradeList
     decision: BookDecision
     settlement: Settlement
+    funding: FundingReport
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -455,13 +465,22 @@ def run_evening(
     )
     state = book_state(settlement, config=config)
     decision = decide_book(config=config, screen=screen, state=state)
+    reference_prices = {**entrant_prices, **ledger_reference_prices(settlement)}
     trade_list = build_trade_list(
         config=config,
         state=state,
         decision=decision,
-        reference_prices={**entrant_prices, **ledger_reference_prices(settlement)},
+        reference_prices=reference_prices,
         cash=settlement.book.cash,
         carried=tuple(item.order for item in settlement.live),
+    )
+    funding = funding_report(
+        config=config,
+        state=state,
+        decision=decision,
+        plan=trade_list,
+        reference_prices=reference_prices,
+        cash=settlement.book.cash,
     )
     snapshot = settlement.with_plan(trade_list)
     if held is not None:
@@ -473,6 +492,7 @@ def run_evening(
             trade_list=trade_list,
             decision=decision,
             settlement=settlement,
+            funding=funding,
         )
     return EveningResult(
         outcome=_commit(store=store, ledger=ledger, settlement=settlement, snapshot=snapshot),
@@ -480,6 +500,7 @@ def run_evening(
         trade_list=trade_list,
         decision=decision,
         settlement=settlement,
+        funding=funding,
     )
 
 

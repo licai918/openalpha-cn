@@ -20,6 +20,11 @@ It is not dropped silently either: the trade list names an unplaced entrant in `
 the evening's list says which decided entrants it could not buy.
 The cash cap carries the same cost reserve as the equal share, so a buy that is limited by cash
 still leaves room for the fees and slippage that will come out of it.
+
+`funding_report` recomputes the same figures from the plan it made -- what the buys freeze, what
+the carried buys reserve, what tonight's sales are expected to release after the auction, and
+every entry the cash sized short of its equal share -- so the evening can print the freeze it
+planned and name the names it could not buy in full.
 """
 
 from collections.abc import Mapping
@@ -130,6 +135,32 @@ class TradeList(BaseModel):
     @property
     def trade_list_id(self) -> str:
         return stable_model_id(prefix="trl", model=self)
+
+
+class FundingShortfall(BaseModel):
+    """One entry tonight's cash sized short of its equal share: the shares it asked for, the
+    shares placed, and what the missing shares freeze at the limit-up price."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    ts_code: str = Field(min_length=1)
+    equal_share_quantity: int = Field(ge=0)
+    placed_quantity: int = Field(ge=0)
+    missing_amount: Decimal = Field(ge=0)
+
+
+class FundingReport(BaseModel):
+    """What a plan freezes at 09:15 and what it leaves short, as the evening reports it."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    cash: Decimal = Field(ge=0)
+    sale_proceeds_pending: Decimal = Field(ge=0)
+    """Tonight's sells' estimated proceeds, which land after the auction, not before it."""
+    reserved_for_carried: Decimal = Field(ge=0)
+    frozen: Decimal = Field(ge=0)
+    freeze_ratio: Decimal = FREEZE_RATIO
+    shortfalls: tuple[FundingShortfall, ...] = ()
 
 
 def _price_of(code: str, prices: Mapping[str, Decimal]) -> Decimal:
@@ -272,4 +303,92 @@ def build_trade_list(
             sorted(carried, key=lambda order: (order.side, order.ts_code, order.order_id))
         ),
         unfunded=tuple(unfunded),
+    )
+
+
+def funding_report(
+    *,
+    config: SurvivorBookConfig,
+    state: BookState,
+    decision: BookDecision,
+    plan: TradeList,
+    reference_prices: Mapping[str, Decimal],
+    cash: Decimal,
+    freeze_prices: Mapping[str, Decimal] | None = None,
+) -> FundingReport:
+    """What `plan` freezes at 09:15 and what it leaves short, by name.
+
+    The kernel sizes every buy on the cash at 09:15 and freezes it at its limit-up price, so this
+    recomputes the same figures from the plan: `frozen` is what tonight's buys freeze,
+    `reserved_for_carried` what the buys still live from earlier sessions do, and
+    `sale_proceeds_pending` what tonight's sells are expected to release -- after the auction,
+    not before it, so it is reported and never counted as cash.
+
+    `shortfalls` names every entry whose equal share the cash sized short, in the order the
+    selection rule drew them: the shares it asked for, the shares placed, and what the missing
+    shares freeze at the limit-up. A shortfall is not only an entry with no order: one reduced to
+    fewer lots is named too.
+
+    `freeze_prices` is `build_trade_list`'s: one limit-up per buy placed tonight or carried, and
+    `None` derives it with `freeze_price`, the main board's 10% band.
+    """
+    if cash < 0:
+        raise ValueError("cash must not be negative")
+    if decision.session != state.session:
+        raise ValueError(
+            f"the decision is for session {decision.session}, the state for {state.session}"
+        )
+    buy_prices = {
+        entry.ts_code: _price_of(entry.ts_code, reference_prices) for entry in decision.entries
+    }
+    buy_prices.update(
+        {
+            order.ts_code: reference_prices.get(order.ts_code, order.reference_price)
+            for order in plan.carried
+            if order.side == "buy"
+        }
+    )
+    freeze = _freeze_prices(config, buy_prices, freeze_prices)
+    unit_budget = config.sizing_budget(state.equity)
+    placed = {order.ts_code: order.quantity for order in plan.orders if order.side == "buy"}
+    shortfalls: list[FundingShortfall] = []
+    for entry in decision.entries:
+        equal_share = lot_quantity(unit_budget, buy_prices[entry.ts_code], config.lot_size)
+        quantity = placed.get(entry.ts_code, 0)
+        if equal_share > quantity:
+            shortfalls.append(
+                FundingShortfall(
+                    ts_code=entry.ts_code,
+                    equal_share_quantity=equal_share,
+                    placed_quantity=quantity,
+                    missing_amount=freeze[entry.ts_code] * (equal_share - quantity),
+                )
+            )
+    return FundingReport(
+        cash=cash,
+        sale_proceeds_pending=sum(
+            (
+                _price_of(order.ts_code, reference_prices) * order.quantity
+                for order in plan.orders
+                if order.side == "sell"
+            ),
+            Decimal(0),
+        ),
+        reserved_for_carried=sum(
+            (
+                freeze[order.ts_code] * order.quantity
+                for order in plan.carried
+                if order.side == "buy"
+            ),
+            Decimal(0),
+        ),
+        frozen=sum(
+            (
+                freeze[order.ts_code] * order.quantity
+                for order in plan.orders
+                if order.side == "buy"
+            ),
+            Decimal(0),
+        ),
+        shortfalls=tuple(shortfalls),
     )

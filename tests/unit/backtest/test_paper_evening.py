@@ -620,6 +620,26 @@ def test_the_first_evening_after_the_opening_is_the_initial_build_of_up_to_ten_n
     assert book.ledger.list() == ()
 
 
+def test_the_evening_carries_the_funding_report_of_the_plan_it_made(tmp_path: Path) -> None:
+    book = book_at(tmp_path, cash="350000.00")
+    names = [f"6001{n:02d}.SH" for n in range(16)]
+
+    result = evening(
+        book,
+        S1,
+        NOTHING,
+        screened(*((name, "10.00") for name in names)),
+        dict.fromkeys(names, "10.00"),
+    )
+
+    assert result.funding.cash == D("350000.00")
+    assert result.funding.frozen == D("349800.00")
+    assert [item.ts_code for item in result.funding.shortfalls] == [
+        result.decision.entries[-1].ts_code
+    ]
+    assert result.funding.shortfalls[0].missing_amount == D("24200.00")
+
+
 def test_the_book_the_crash_tests_settle_is_the_one_the_fixture_describes(tmp_path: Path) -> None:
     book = through_s2(tmp_path)
     s2 = load_snapshot(book.store, S2)

@@ -33,7 +33,8 @@ prints.
   `catch_ups`. Then what the summary needs and the journal's reader may want: `outcome`
   (`created`, or `unchanged` for a rerun that wrote nothing), the `open_session` the orders are
   for, the `open_orders` in the order they are printed (sales, then tonight's buys, then the buys
-  carried from earlier sessions) and the `illiquid_exits`.
+  carried from earlier sessions), the evening's `funding` report (what the plan freezes at 09:15
+  and every entry the cash sized short) and the `illiquid_exits`.
 - **`paper: null`** is the session that ran no evening -- settled only, or refused before the paper
   step. The reason the caller gives, and the sessions it did settle, are `paper_skipped`.
 
@@ -114,9 +115,12 @@ lasts a day, and the paper book tries them again -- I3), tonight's buys. Each ca
 session's limit computed from tonight's real close by the paper book's own derivation
 (`backtest.execution.derived_price_band`: the main board's 10%, 5% for an ST name before
 2025-07-07) and labelled as what the exchange's published limit governs, or why it has none; a buy
-says its shares, what they come to at the price it was sized at and at its limit-up (M2). A buy the
-cash before the sales does not cover is marked: place it after the sales fill (I1). After the
-orders, a line on the cash, what the buys total and what tonight's sales release; that the paper
+says its shares, what they come to at the price it was sized at and at its limit-up (M2). A buy
+the cash at 09:15 does not cover at its limit-up price is marked: the plan asks for more than the
+account holds, and that is a defect of the plan, not something to place after the sales. After the
+orders, a line on the cash at 09:15, what the buys freeze at their limit-up prices and what
+tonight's sales release after the auction, and under it every buy the cash sized short, by name --
+or, for a plan filed before that block, that the shortfalls were not recorded. Then, that the paper
 book assumes every order was placed and filled at the open, and the account follows it only if it
 did exactly that; and, with a sale, to ignore a SELL of a name the account does not hold (I4). A
 buy the paper book rejected or let expire says what a real order that filled means: a holding no
@@ -242,13 +246,16 @@ _NOT_HELD: Final[str] = (
 )
 """I4: a buy the paper book rejected or let expire, which the account's real order may have
 filled -- a holding no evening will ever sell."""
-_NEEDS_SELLS: Final[str] = (
-    "    needs the sells above to fill first: place it after they have filled (the paper book "
-    "assumes it fills at the open price)"
+_UNCOVERED: Final[str] = (
+    "    is not covered by the cash at 09:15 (the plan asks for more than the account holds; do "
+    "not place it)"
 )
-"""I1: the kernel sized the buy on the cash plus tonight's sales; at 09:15 the account has the
-cash alone."""
-_UNCOVERED: Final[str] = "    is not covered by the cash even after the sells above fill"
+"""The mark under a buy that, at its limit-up price, is past the cash at 09:15: a defect of the
+plan, which sized and froze the buys on that cash alone, not an order to place later."""
+_SHORTFALLS_NOT_RECORDED: Final[str] = (
+    "; shortfalls not recorded (a plan filed before the funding block)"
+)
+"""What the funding line says of a document filed before `paper["funding"]`: never invent zeros."""
 _WRITTEN_OFF: Final[str] = (
     "the paper book wrote it off; your account may still hold the shares, and no SELL will be "
     "printed for them again"
@@ -581,6 +588,7 @@ def _paper_section(
                 for order in plan.carried
             ),
         ],
+        "funding": evening.funding.model_dump(mode="json"),
         "illiquid_exits": _illiquid_exits(facts, screen, evening, book),
     }
 
@@ -1222,40 +1230,57 @@ def _funding(
     buys: Sequence[Mapping[str, Any]],
     band_day: date,
 ) -> tuple[dict[str, str], str]:
-    """What the cash at the open covers (I1): a mark for each buy it does not, and the block's
-    line on the cash, the buys and what the sales release.
+    """What the cash at 09:15 covers and freezes (I1), and the block's line on it.
 
-    The kernel sizes tonight's buys on the cash plus the estimated proceeds of tonight's sales,
-    less the buys carried from earlier sessions, which it funds first (`domain.survivor_orders`);
-    at 09:15 the account holds the cash alone. So the buys are summed in that order -- carried,
-    then tonight's -- at the reference prices they were sized at, and a buy whose running total
-    passes the cash needs the sales to fill first; one past the cash and the sales together is
-    not covered at all. The sales are tonight's (the kernel counts no carried sale: when it fills
-    is not known), at their reference prices -- the close, in the ledger's units."""
+    The kernel sizes and freezes every buy on the cash at 09:15 alone -- tonight's sells fill in
+    the same auction, after the buys are frozen -- and reserves the buys carried from earlier
+    sessions first (`domain.survivor_orders`). So the buys are summed in exactly that order at
+    the limit-up prices they freeze at, the same total the kernel froze, printed as a cross
+    check; a buy whose running total passes the cash is not covered at 09:15, which is a defect
+    of the plan, not an order to place after the sales. A buy whose limit-up cannot be computed
+    is left out of the total and the mark (its order line says why), and the total is omitted
+    rather than printed short. The sales are tonight's (the kernel counts no carried sale: when
+    it fills is not known), at their reference prices -- the close, in the ledger's units -- and
+    they release after the auction, not before it."""
     released = sum((Decimal(item["reference_price"]) * item["quantity"] for item in sells), _ZERO)
     marks: dict[str, str] = {}
     running = _ZERO
+    ups: list[Decimal] = []
     for item in buys:
-        running += Decimal(item["reference_price"]) * item["quantity"]
-        if running > cash + released:
+        limits = _limits(item, band_day)
+        if isinstance(limits, str):
+            continue
+        ups.append(limits[0] * item["quantity"])
+        running += ups[-1]
+        if running > cash:
             marks[item["order_id"]] = _UNCOVERED
-        elif running > cash:
-            marks[item["order_id"]] = _NEEDS_SELLS
-    ups = [
-        limits[0] * item["quantity"]
-        for item in buys
-        if not isinstance(limits := _limits(item, band_day), str)
-    ]
-    # Every buy's limit-up, or none: a total that left one out would read as the whole.
-    at_limit = (
-        f" ({_money(sum(ups, _ZERO))} yuan at their limit-up prices)"
+    frozen = (
+        f"buys freeze {_money(sum(ups, _ZERO))} yuan at their limit-up prices"
         if len(ups) == len(buys)
-        else ""
+        else "buys freeze at their limit-up prices"
     )
-    return marks, (
-        f"  cash before the sells {_money(cash)} yuan; buys total {_money(running)} yuan at their "
-        f"reference prices{at_limit}; sells expected to release about {_money(released)} yuan at "
-        "the closes"
+    return marks, _row(
+        "funding",
+        f"cash at 09:15 {_money(cash)} yuan; {frozen} (1.10x the reference, the main board's "
+        f"band); sells tonight release about {_money(released)} yuan after the auction, not "
+        "before it",
+    )
+
+
+def _shortfall_line(item: Mapping[str, Any]) -> str:
+    """One entry the cash sized short, by name: the shares the equal share asked for, the shares
+    placed and what the missing ones are short at the limit-up price (`funding_report`)."""
+    missing = _money(Decimal(item["missing_amount"]))
+    equal = item["equal_share_quantity"]
+    placed = item["placed_quantity"]
+    if placed == 0:
+        return (
+            f"  {item['ts_code']}: no order; the {equal:,} shares the equal share asks are "
+            f"{missing} yuan short at the limit-up price"
+        )
+    return (
+        f"  {item['ts_code']}: {placed:,} of the {equal:,} shares the equal share asks; "
+        f"{missing} yuan short at the limit-up price"
     )
 
 
@@ -1273,9 +1298,12 @@ def _orders_lines(
 
     The orders are listed in the order the kernel funds them, every sale first: tonight's sales,
     the sales carried from earlier sessions, the buys carried (REPEAT, I3), tonight's buys -- each
-    buy the cash before the sales does not cover marked under it (I1). Then the cash line, the
-    paper book's assumption that every order above was placed (I4) and, with a sale among them,
-    what to do with a SELL of a name the account does not hold."""
+    buy the cash at 09:15 does not cover at its limit-up marked under it (I1). Then the cash
+    line, the buys freeze and what tonight's sales release after the auction, and under it every
+    buy the cash sized short, by name, from the evening's `funding` block; a plan the document
+    holds no `funding` for says the shortfalls were not recorded. Then the paper book's
+    assumption that every order above was placed (I4) and, with a sale among them, what to do
+    with a SELL of a name the account does not hold."""
     if paper is None:
         # "None planned tonight" is not "nothing is live": orders from earlier evenings -- a
         # carried sale above all, which never expires -- stay in the book and are retried at the
@@ -1337,7 +1365,12 @@ def _orders_lines(
             + (f"; {_plural(carried, 'carried order')} repeated above" if carried else "")
         )
     if buys:
-        lines.append(cash_line)
+        funding = paper.get("funding")
+        if funding is None:
+            lines.append(cash_line + _SHORTFALLS_NOT_RECORDED)
+        else:
+            lines.append(cash_line)
+            lines += [_shortfall_line(item) for item in funding["shortfalls"]]
     if orders:
         lines.append(_ASSUMED)
     if sells or repeat_sells:

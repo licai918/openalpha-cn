@@ -629,6 +629,7 @@ def test_the_document_has_its_keys_in_the_order_the_journal_files_them(s3: Writt
         "outcome",
         "open_session",
         "open_orders",
+        "funding",
         "illiquid_exits",
     ]
     assert list(document["paper"]["book"]) == [
@@ -1803,11 +1804,11 @@ NOT_HELD: Final[str] = (
     "for it"
 )
 """I4: what a buy the paper book rejected or let expire says of a real order that filled."""
-NEEDS_SELLS: Final[str] = (
-    "    needs the sells above to fill first: place it after they have filled (the paper book "
-    "assumes it fills at the open price)"
+UNCOVERED: Final[str] = (
+    "    is not covered by the cash at 09:15 (the plan asks for more than the account holds; do "
+    "not place it)"
 )
-"""I1: the mark under a buy the cash before the sells does not cover."""
+"""I1: the mark under a buy that, at its limit-up price, is past the cash at 09:15."""
 
 
 def test_the_orders_for_the_open_name_the_day_the_call_auction_and_the_trade_list(
@@ -1990,7 +1991,7 @@ def test_an_evening_that_plans_nothing_says_so_and_points_at_the_orders_carried_
     assert nothing[header + 3] == "  no new order planned tonight"
     assert line_with(nothing, "carried orders") == row("carried orders", "none")
     # With no order at all there is no cash to compare, nothing assumed placed, no SELL to ignore.
-    assert not any(line.startswith("  cash before the sells") for line in nothing)
+    assert not any(line.startswith("funding") for line in nothing)
     assert ASSUMED not in nothing and SELL_NOTE not in nothing
 
 
@@ -2238,6 +2239,56 @@ def lines_after(lines: Sequence[str], start: str) -> list[str]:
     return list(lines[index + 1 :])
 
 
+def test_the_orders_block_reports_the_freeze_and_names_a_short_buy(s3: WrittenOff) -> None:
+    document = with_orders(
+        s3,
+        cash="13400.00",
+        orders=[open_order("buy", "600199.SH", 1200, "10.00")],
+    )
+    document["paper"]["funding"] = {
+        "cash": "13400.00",
+        "sale_proceeds_pending": "0.00",
+        "reserved_for_carried": "0.00",
+        "frozen": "13200.00",
+        "freeze_ratio": "1.10",
+        "shortfalls": [
+            {
+                "ts_code": "600199.SH",
+                "equal_share_quantity": 3400,
+                "placed_quantity": 1200,
+                "missing_amount": "24200.00",
+            }
+        ],
+    }
+
+    lines = summary_lines(document)
+
+    assert (
+        row(
+            "funding",
+            "cash at 09:15 13,400.00 yuan; buys freeze 13,200.00 yuan at their limit-up prices "
+            "(1.10x the reference, the main board's band); sells tonight release about 0.00 yuan "
+            "after the auction, not before it",
+        )
+        in lines
+    )
+    assert (
+        "  600199.SH: 1,200 of the 3,400 shares the equal share asks; 24,200.00 yuan short at "
+        "the limit-up price"
+    ) in lines
+
+
+def test_a_document_filed_before_the_funding_block_says_the_shortfalls_were_not_recorded(
+    s2: Day,
+) -> None:
+    document = document_of(s2)
+    document["paper"].pop("funding", None)
+
+    assert line_with(summary_lines(document), "funding").endswith(
+        "; shortfalls not recorded (a plan filed before the funding block)"
+    )
+
+
 @pytest.mark.parametrize(
     ("cash", "sells", "buys", "marked"),
     [
@@ -2246,35 +2297,37 @@ def lines_after(lines: Sequence[str], start: str) -> list[str]:
             [("601058.SH", 500, "66.16"), ("601113.SH", 200, "126.99")],
             [("601051.SH", 500, "61.71"), ("601092.SH", 300, "97.70")],
             ["601092.SH"],
-            id="4-13: 30,855 fits, 30,855 + 29,310 does not",
+            id="4-13: 33,940 at the limit-up fits, 33,940 + 32,241 does not",
         ),
         pytest.param(
             "15110.99",
             [("601114.SH", 200, "117.01")],
             [("601081.SH", 200, "138.34")],
             ["601081.SH"],
-            id="4-15: 27,668 against 15,110.99",
+            id="4-15: 30,434 against 15,110.99",
         ),
         pytest.param(
             "12245.88",
             [("601046.SH", 600, "52.85")],
             [("601097.SH", 400, "74.90")],
             ["601097.SH"],
-            id="5-20: 29,960 against 12,245.88",
+            id="5-20: 32,956 against 12,245.88",
         ),
     ],
 )
-def test_a_buy_the_cash_before_the_sells_does_not_cover_says_to_place_it_after_they_fill(
+def test_a_buy_the_cash_at_0915_does_not_cover_says_it_is_not_covered(
     s3: WrittenOff,
     cash: str,
     sells: Sequence[tuple[str, int, str]],
     buys: Sequence[tuple[str, int, str]],
     marked: Sequence[str],
 ) -> None:
-    """I1, the reviewer's three cases: the kernel sizes tonight's buys on the cash plus the
-    proceeds of tonight's sales, and at 09:15 the account holds only the cash. Each buy whose
-    running total, in the order the kernel funds them, is past the cash says to wait for the
-    sales; the block says what the cash, the buys and the sales come to."""
+    """I1, the reviewer's three cases, recomputed at the limit-up: the kernel sizes and freezes
+    tonight's buys on the cash at 09:15 alone (tonight's sales fill in the same auction, after
+    the buys are frozen), so the buys are summed in the order the kernel funds them at the
+    prices they freeze at, and each whose running total passes the cash says it is not covered.
+    The block says what the cash is, what the buys freeze and what the sales release after the
+    auction."""
     orders = [*(open_order("sell", *sell) for sell in sells)]
     orders += [open_order("buy", *buy) for buy in buys]
 
@@ -2283,26 +2336,28 @@ def test_a_buy_the_cash_before_the_sells_does_not_cover_says_to_place_it_after_t
     for code, _quantity, _price in buys:
         line = next(line for line in lines if line.startswith(f"  BUY {code} "))
         after = lines[lines.index(line) + 1]
-        assert (after == NEEDS_SELLS) is (code in marked), (code, after)
-    spent = sum(D(price) * quantity for _code, quantity, price in buys)
+        assert (after == UNCOVERED) is (code in marked), (code, after)
     released = sum(D(price) * quantity for _code, quantity, price in sells)
     at_limit = sum(
         (D(price) * D("1.10")).quantize(D("0.01"), rounding=ROUND_HALF_UP) * quantity
         for _code, quantity, price in buys
     )
     assert (
-        f"  cash before the sells {D(cash):,.2f} yuan; buys total {spent:,.2f} yuan at their "
-        f"reference prices ({at_limit:,.2f} yuan at their limit-up prices); sells expected to "
-        f"release about {released:,.2f} yuan at the closes"
+        row(
+            "funding",
+            f"cash at 09:15 {D(cash):,.2f} yuan; buys freeze {at_limit:,.2f} yuan at their "
+            "limit-up prices (1.10x the reference, the main board's band); sells tonight release "
+            f"about {released:,.2f} yuan after the auction, not before it",
+        )
     ) in lines
 
 
-def test_the_running_total_funds_the_carried_buys_first_as_the_kernel_does(
+def test_the_running_total_funds_the_carried_buys_first_and_says_tonights_is_not_covered(
     s3: WrittenOff,
 ) -> None:
     """The kernel reserves the buys carried from earlier sessions before tonight's see any cash
-    (`domain.survivor_orders`): 8,000 of a REPEAT fits 10,000, and tonight's 5,000 after it does
-    not. A buy the sales cannot cover either says so."""
+    (`domain.survivor_orders`): 8,800 of a REPEAT (800 at its 11.00 limit-up) fits 10,000, and
+    tonight's 5,500 (500 at 11.00, after it) does not."""
     orders = [
         open_order("buy", "600071.SH", 800, "10.00", carried=True),
         open_order("buy", "600072.SH", 500, "10.00"),
@@ -2312,11 +2367,16 @@ def test_the_running_total_funds_the_carried_buys_first_as_the_kernel_does(
     repeated = next(line for line in lines if line.startswith("  REPEAT BUY 600071.SH"))
     tonight = next(line for line in lines if line.startswith("  BUY 600072.SH"))
     assert lines.index(repeated) < lines.index(tonight)
-    assert lines[lines.index(repeated) + 1] != NEEDS_SELLS
-    # No sale tonight: nothing the cash can wait for.
-    assert lines[lines.index(tonight) + 1] == (
-        "    is not covered by the cash even after the sells above fill"
-    )
+    assert lines[lines.index(repeated) + 1] != UNCOVERED
+    assert lines[lines.index(tonight) + 1] == UNCOVERED
+    assert (
+        row(
+            "funding",
+            "cash at 09:15 10,000.00 yuan; buys freeze 14,300.00 yuan at their limit-up prices "
+            "(1.10x the reference, the main board's band); sells tonight release about 0.00 yuan "
+            "after the auction, not before it",
+        )
+    ) in lines
 
 
 def test_a_limit_is_the_paper_books_own_rule_on_the_real_close_to_the_cent(s2: Day) -> None:

@@ -21,6 +21,7 @@ from openalpha_cn.domain.survivor_orders import (
     TradeOrder,
     build_trade_list,
     freeze_price,
+    funding_report,
 )
 from openalpha_cn.domain.survivor_policy import (
     BookDecision,
@@ -717,3 +718,82 @@ def test_selling_a_security_that_is_not_held_is_a_named_failure() -> None:
             reference_prices={**PRICES, "Z": Decimal("10")},
             cash=Decimal("0"),
         )
+
+
+def test_the_funding_report_names_every_entry_the_cash_sized_short() -> None:
+    names = tuple(f"6001{n:02d}.SH" for n in range(10))
+    config_ = SurvivorBookConfig(seed=7)
+    state = BookState(session=SESSION, initialized=False, equity=Decimal("350000"))
+    decision_ = decision(entries=tuple((name, "INITIAL_BUILD") for name in names))
+    prices = dict.fromkeys(names, Decimal("10"))
+    plan = build_trade_list(
+        config=config_,
+        state=state,
+        decision=decision_,
+        reference_prices=prices,
+        cash=Decimal("350000"),
+    )
+
+    report = funding_report(
+        config=config_,
+        state=state,
+        decision=decision_,
+        plan=plan,
+        reference_prices=prices,
+        cash=Decimal("350000"),
+    )
+
+    assert (report.cash, report.frozen, report.reserved_for_carried) == (
+        Decimal("350000.00"),
+        Decimal("349800.00"),
+        Decimal("0.00"),
+    )
+    assert report.sale_proceeds_pending == Decimal("0.00")
+    assert report.freeze_ratio == Decimal("1.10")
+    assert [item.model_dump() for item in report.shortfalls] == [
+        {
+            "ts_code": names[9],
+            "equal_share_quantity": 3400,
+            "placed_quantity": 1200,
+            "missing_amount": Decimal("24200.00"),
+        }
+    ]
+
+
+def test_the_funding_report_says_what_tonights_sells_release_and_what_the_cash_sized_short() -> (
+    None
+):
+    # Cash 5,000 and a sale of A for 3,000: the 3,000 lands after the auction and is reported as
+    # such; the buy of B is sized on the 5,000 alone, which buys 300 of the 700 the equal share
+    # asks, so 400 x 13.75 = 5,500.00 is the named shortfall.
+    state = book(("A", 300))
+    decision_ = decision(
+        exits=(("A", "EXIT_SURVIVOR_LOST"),), entries=(("B", "ENTRY_REPLACEMENT"),)
+    )
+    plan = build_trade_list(
+        config=config(),
+        state=state,
+        decision=decision_,
+        reference_prices=PRICES,
+        cash=Decimal("5000"),
+    )
+
+    report = funding_report(
+        config=config(),
+        state=state,
+        decision=decision_,
+        plan=plan,
+        reference_prices=PRICES,
+        cash=Decimal("5000"),
+    )
+
+    assert report.sale_proceeds_pending == Decimal("3000.00")
+    assert report.frozen == Decimal("4125.00")  # 300 B at the 13.75 limit-up
+    assert [item.model_dump() for item in report.shortfalls] == [
+        {
+            "ts_code": "B",
+            "equal_share_quantity": 700,
+            "placed_quantity": 300,
+            "missing_amount": Decimal("5500.00"),
+        }
+    ]
