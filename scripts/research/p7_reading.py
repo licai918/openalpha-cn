@@ -27,7 +27,7 @@ a failure after the claim spends the window:
   `plan_signal_days` applies and the sampling `summarize` uses; a rule above it is refused at
   registration when a `runtime_dir` is given, and before the claim by `read_once`'s default
   preflight, with the exact number in the message. A larger rule could only ever be
-  "triggered: unreadable".
+  "not measurable".
 
 `read_once` refuses, in this order, each refusal its own exception, none of them writing anything:
 
@@ -96,8 +96,9 @@ read is spent:
    that is not `p7_diagnostics.READ_ONCE_KIND`, or not bound to this claim, is refused
    (`ReadingConfigurationError`): the claim stays and no result is written;
 8. a `primary` reading's stop rule is applied as written (`evaluate_stop_rule`). A metric with
-   fewer than `minimum_periods` periods, or no summary at all, triggers it: a gate that cannot be
-   read is closed;
+   fewer than `minimum_periods` periods, or no summary at all, makes the rule `not measurable`:
+   that is its own conclusion; it means the reading cannot be read in either direction, and does
+   **not** mean there is no evidence;
 9. `<reading>.result.json` and `<reading>.result.txt` are written with `O_EXCL`.
 
 Committing the claims and the results is the caller's step, as committing the registration was,
@@ -238,7 +239,14 @@ from openalpha_cn.panel_factors import (
 )
 from openalpha_cn.panel_ingest import load_trading_calendar, session_publication_instant
 from openalpha_cn.panel_view import PANEL_SUBDIRECTORY
-from openalpha_cn.strategy_survivor_forward import LabelSource
+from openalpha_cn.strategy_survivor_forward import (
+    ADOPTED_PRIMARY_HORIZON,
+    ADOPTED_PRIMARY_METRIC,
+    ADOPTED_STOP_MEAN_AT_OR_BELOW,
+    ADOPTED_STOP_TAIL_MEAN_AT_OR_BELOW,
+    ADOPTED_STOP_TAIL_METRIC,
+    LabelSource,
+)
 
 READING_SCHEMA: Final = "openalpha-p7-reading-registration/v1"
 STOP_RULE_SCHEMA: Final = "p7-stop-rule/v1"
@@ -257,6 +265,11 @@ NOT_TRIGGERED_WORDING: Final[str] = (
     "the stop rule written before the read is not triggered: this permits V2-P7-006 to proceed "
     "and is not evidence"
 )
+NOT_MEASURABLE_WORDING: Final[str] = (
+    "the reading cannot be measured: the stop rule decided nothing, and this is not a reading of "
+    "no evidence -- it is its own conclusion, and what follows is the user's to say"
+)
+"""The third conclusion; never the 'no evidence' wording."""
 _KNOWLEDGE_LINE: Final[str] = (
     "read under the knowledge at {as_of} (-- the registrant's words: {reason}) -- every partition "
     "is read as it stood then, so a revision or name published after a session enters that "
@@ -378,6 +391,27 @@ class StopRule:
             raise ReadingError("the stop rule needs at least one clause")
         if any(not isinstance(clause, StopClause) for clause in self.any_of):
             raise ReadingError("every clause of the stop rule must be a StopClause")
+
+
+def adopted_stop_rule(*, score: str, expected_periods: int) -> StopRule:
+    """The user's adopted stop rule (2026-11-07), for the validation reading: the score's h20
+    rank IC and its worst-decile spread, at the numbers the forward protocol also uses
+    (`strategy_survivor_forward.ADOPTED_*`), with `minimum_periods` the exact count the plan
+    expects (`expected_periods`). No number is written here twice."""
+    return StopRule(
+        score=score,
+        horizon=ADOPTED_PRIMARY_HORIZON,
+        minimum_periods=expected_periods,
+        any_of=(
+            StopClause(
+                metric=ADOPTED_PRIMARY_METRIC, mean_at_or_below=ADOPTED_STOP_MEAN_AT_OR_BELOW
+            ),
+            StopClause(
+                metric=ADOPTED_STOP_TAIL_METRIC,
+                mean_at_or_below=ADOPTED_STOP_TAIL_MEAN_AT_OR_BELOW,
+            ),
+        ),
+    )
 
 
 Measure = Callable[[Mapping[str, Any], DiagnosticWindow, Mapping[str, Any]], dict[str, Any]]
@@ -598,7 +632,7 @@ def _registration_of(body: Mapping[str, Any]) -> _Registration:
                 f"{explore.first}..{explore.last} holds {_weekdays(explore.first, explore.last)} "
                 f"weekdays, so at most {most} non-overlapping signal days at stride "
                 f"{explore.stride} and h={rule.horizon}; such a rule could only ever read "
-                "'triggered: unreadable'"
+                "'not measurable'"
             )
     return _Registration(reading=reading, window=window, stop_rule=rule, settings=settings)
 
@@ -653,7 +687,7 @@ def _unreachable_minimum(
         f"h={rule.horizon} over {explore.first}..{explore.last} (a signal day whose label would "
         f"exit past {window.last} is embargoed, and the summary reads every "
         f"ceil({rule.horizon}/{explore.stride})th kept signal day); such a rule could only ever "
-        "read 'triggered: unreadable'"
+        "read 'not measurable'"
     )
 
 
@@ -858,10 +892,11 @@ def _rule_of(form: object) -> StopRule:
 def evaluate_stop_rule(rule: StopRule, document: Mapping[str, Any]) -> dict[str, Any]:
     """The rule applied as written to `document["summary"][score][f"h{horizon}"]`.
 
-    `triggered` when any clause's metric has fewer than `minimum_periods` periods (or no finite
-    mean, or the document no such summary -- a refused measurement has none): the gate cannot be
-    read, and a gate that cannot be read is closed (`reason` says so); otherwise `triggered` when
-    any clause's mean is at or below its bound, and `not triggered` when none is.
+    `not measurable` when any clause's metric has fewer than `minimum_periods` periods (or no
+    finite mean, or the document no such summary -- a refused measurement has none): the rule
+    cannot be read, and that is its own conclusion, not a reading of no evidence (`reason` says
+    which metrics were unreadable); otherwise `triggered` when any clause's mean is at or below
+    its bound, and `not triggered` when none is.
     """
     summary = document.get("summary")
     by_score = summary.get(rule.score) if isinstance(summary, Mapping) else None
@@ -902,18 +937,23 @@ def evaluate_stop_rule(rule: StopRule, document: Mapping[str, Any]) -> dict[str,
                 f"{rule.minimum_periods} with a finite mean"
             )
     if unreadable:
-        outcome = "triggered"
+        outcome = "not measurable"
         reason: str | None = (
             "unreadable: " + "; ".join(unreadable) + " -- a gate that cannot be read is closed"
         )
     else:
         outcome = "triggered" if any(clause["met"] for clause in clauses) else "not triggered"
         reason = None
+    wordings: dict[str, str] = {
+        "triggered": STOP_TRIGGERED_WORDING,
+        "not triggered": NOT_TRIGGERED_WORDING,
+        "not measurable": NOT_MEASURABLE_WORDING,
+    }
     return {
         "outcome": outcome,
         "clauses": clauses,
         "reason": reason,
-        "wording": STOP_TRIGGERED_WORDING if outcome == "triggered" else NOT_TRIGGERED_WORDING,
+        "wording": wordings[outcome],
     }
 
 

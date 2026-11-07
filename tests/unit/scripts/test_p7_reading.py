@@ -22,6 +22,7 @@ from panel_fixtures import _batch as batch
 from panel_fixtures import _midnight_shanghai as midnight_shanghai
 from research_repo import commit_file, git, head
 
+from openalpha_cn import strategy_survivor_forward as forward_module
 from openalpha_cn.domain.horizon import ResearchHorizon
 from openalpha_cn.domain.labels import LabelWindow, OutcomeLabel, WindowReturn, build_label_window
 from openalpha_cn.domain.panel_batch import PanelColumn
@@ -317,7 +318,7 @@ def test_a_preflight_problem_refuses_before_any_claim(repo: Path) -> None:
     [
         (document(ic=0.02), "triggered", "rank_ic"),
         (document(spread=0.0), "triggered", "ew_minus_worst_decile"),
-        (document(n=2), "triggered", "unreadable"),
+        (document(n=2), "not measurable", "unreadable"),
         (document(ic=0.021, spread=0.001), "not triggered", "not evidence"),
     ],
 )
@@ -420,12 +421,13 @@ def test_a_data_refusal_is_the_reads_recorded_error_and_closes_the_gate(repo: Pa
         result["binding"]["claim_sha256"]
         == hashlib.sha256(claim_of(registration).read_bytes()).hexdigest()
     )
-    assert result["stop_rule"]["outcome"] == "triggered"
+    assert result["stop_rule"]["outcome"] == "not measurable"
     assert result["stop_rule"]["reason"].startswith("unreadable")
     written = registration.with_name("v2-p7-024-validation.result.json")
     assert json.loads(written.read_text(encoding="utf-8")) == result
     text = registration.with_name("v2-p7-024-validation.result.txt").read_text(encoding="utf-8")
-    assert result["error"] in text and p7_reading.STOP_TRIGGERED_WORDING in text
+    assert result["error"] in text and p7_reading.NOT_MEASURABLE_WORDING in text
+    assert p7_reading.STOP_TRIGGERED_WORDING not in text
     with pytest.raises(p7_reading.ReadingAlreadyClaimedError, match="one read"):
         run(registration, repo, Measure(), hours=2)
 
@@ -1388,6 +1390,43 @@ def test_a_stop_rule_has_a_score_a_horizon_a_minimum_and_a_clause(
     written = {"score": "composite", "horizon": 20, "minimum_periods": 3, "any_of": RULE.any_of}
     with pytest.raises(p7_reading.ReadingError, match=said):
         p7_reading.StopRule(**{**written, **rule})
+
+
+def test_the_adopted_stop_rule_is_the_users_numbers_and_nothing_else() -> None:
+    rule = p7_reading.adopted_stop_rule(score="composite", expected_periods=24)
+
+    assert (rule.score, rule.horizon, rule.minimum_periods) == ("composite", 20, 24)
+    assert [(clause.metric, clause.mean_at_or_below) for clause in rule.any_of] == [
+        ("rank_ic", 0.02),
+        ("ew_minus_worst_decile", 0.0),
+    ]
+
+
+def test_the_reading_and_the_forward_protocol_share_every_number() -> None:
+    """One named constant per number, used by both records: the reading's rule and the forward
+    clock's block cannot drift apart."""
+    rule = p7_reading.adopted_stop_rule(score="composite", expected_periods=24)
+
+    assert (rule.horizon, rule.any_of[0].metric, rule.any_of[0].mean_at_or_below) == (
+        forward_module.ADOPTED_PRIMARY_HORIZON,
+        forward_module.ADOPTED_PRIMARY_METRIC,
+        forward_module.ADOPTED_STOP_MEAN_AT_OR_BELOW,
+    )
+    assert (rule.any_of[1].metric, rule.any_of[1].mean_at_or_below) == (
+        forward_module.ADOPTED_STOP_TAIL_METRIC,
+        forward_module.ADOPTED_STOP_TAIL_MEAN_AT_OR_BELOW,
+    )
+
+
+def test_a_rule_that_cannot_be_read_is_not_measurable_and_not_no_evidence() -> None:
+    evaluated = p7_reading.evaluate_stop_rule(RULE, document(n=2))
+
+    assert evaluated["outcome"] == "not measurable"
+    assert evaluated["reason"].startswith("unreadable")
+    assert evaluated["wording"] == p7_reading.NOT_MEASURABLE_WORDING
+    assert p7_reading.NOT_MEASURABLE_WORDING != p7_reading.STOP_TRIGGERED_WORDING
+    assert "no evidence" in p7_reading.NOT_MEASURABLE_WORDING
+    assert "not a reading of no evidence" in p7_reading.NOT_MEASURABLE_WORDING
 
 
 def committed_by_hand(
