@@ -1260,18 +1260,33 @@ def test_the_help_reads_the_research_windows_dates_from_the_window_table(
     assert "2015-02-02..2021-06-30" in explore_help()
 
 
-def test_explore_refuses_the_research_root_before_opening_anything(
+def test_explore_refuses_a_runtime_directory_inside_the_main_checkout_before_opening_anything(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    research = tmp_path / "openalpha-research"
-    (research / "panel").mkdir(parents=True)
-    monkeypatch.setattr(p7_windows, "RESEARCH_RUNTIME", research.resolve())
+    """The CLI's one store opening refuses by the runtime-directory rule, not by a later error:
+    deleting `_open_sources`'s check must fail the type assertion below, because the empty panel
+    would otherwise be refused only when the catalogue turns out to be missing."""
+    checkout = tmp_path / "checkout"
+    runtime = checkout / "runtime"
+    (runtime / "panel").mkdir(parents=True)
+    monkeypatch.setattr(p7_windows, "MAIN_CHECKOUT", checkout.resolve())
+    refusals: list[BaseException] = []
+    opens = p7._open_sources
+
+    def watched(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return opens(*args, **kwargs)
+        except BaseException as error:
+            refusals.append(error)
+            raise
+
+    monkeypatch.setattr(p7, "_open_sources", watched)
 
     code = p7.main(
         [
             *EXPLORE,
             "--runtime-dir",
-            str(research / "panel"),
+            str(runtime),
             "--first",
             "2017-01-03",
             "--last",
@@ -1281,7 +1296,11 @@ def test_explore_refuses_the_research_root_before_opening_anything(
         ]
     )
 
+    assert len(refusals) == 1
+    assert isinstance(refusals[0], p7_windows.RuntimeDirectoryRefusedError)
+    assert "main checkout" in str(refusals[0])
     assert code == 2
-    assert str((research / "panel").resolve()) in capsys.readouterr().err
-    assert list((research / "panel").iterdir()) == []
+    assert "main checkout" in capsys.readouterr().err
+    assert list((runtime / "panel").iterdir()) == []
+    assert not (runtime / "panel" / p7_windows.CATALOG_FILE).exists()
     assert not (tmp_path / "out").exists()

@@ -604,3 +604,39 @@ def test_the_two_refusals_are_the_smokes_path_policy(tmp_path: Path) -> None:
         except p7_windows.RuntimeDirectoryRefusedError:
             mine_refused = True
         assert mine_refused == smoke_refused, where
+
+
+def test_a_runtime_directory_spelled_through_dotdot_on_the_research_root_is_refused(
+    tmp_path: Path,
+) -> None:
+    """`..` is a spelling, not an exception: the runtime directory is resolved before the rule."""
+    research = tmp_path / "home" / "openalpha-research"
+    (research / "panel").mkdir(parents=True)
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+
+    with pytest.raises(p7_windows.RuntimeDirectoryRefusedError, match="openalpha-research"):
+        p7_windows.checked_runtime_directory(
+            research / "panel" / ".." / "panel",
+            research_runtime=research,
+            main_checkout=checkout,
+        )
+
+
+def test_a_research_root_spelled_through_dotdot_is_refused_even_before_it_exists(
+    tmp_path: Path,
+) -> None:
+    """A fresh machine's `~/openalpha-research` may not exist yet, so the identity branch has
+    nothing to compare. A root spelled `home/sub/../openalpha-research` and a runtime directory
+    under it must still be refused. Removing **both** `resolve()` calls together (the caller's
+    and `_within`'s) lets this path evade the rule; either one alone is enough to catch it."""
+    home = tmp_path / "home"
+    (home / "sub").mkdir(parents=True)
+    research = home / "openalpha-research"  # deliberately absent
+    checkout = tmp_path / "checkout"
+    spelled_root = home / "sub" / ".." / "openalpha-research"
+
+    with pytest.raises(p7_windows.RuntimeDirectoryRefusedError, match="openalpha-research"):
+        p7_windows.checked_runtime_directory(
+            research / "panel", research_runtime=spelled_root, main_checkout=checkout
+        )
