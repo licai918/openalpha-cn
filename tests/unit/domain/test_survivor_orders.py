@@ -151,8 +151,27 @@ def test_a_buy_is_limited_by_the_cash_that_will_be_there() -> None:
     assert [o.quantity for o in plan.orders] == [200]
 
 
-def test_the_proceeds_of_a_sell_count_towards_what_a_buy_may_spend() -> None:
-    # Cash 0; A sells 300 at 10 for 3,000, enough for 200 shares of B at 12.5.
+def test_the_proceeds_of_tonights_sells_are_not_cash_at_0915() -> None:
+    # Cash 5,000; A sells 300 at 10.00, which releases 3,000.00 in the same call auction the
+    # buys are placed in, after the broker has frozen them. Sizing on the cash alone: 4,975.00
+    # buys 300 shares of B at 12.50 (4,975 // 1,250 = 3 lots). Counting the proceeds it would
+    # buy 600 (7,960 // 1,250 = 6).
+    plan = build_trade_list(
+        config=config(),
+        state=book(("A", 300)),
+        decision=decision(
+            exits=(("A", "EXIT_SURVIVOR_LOST"),), entries=(("B", "ENTRY_REPLACEMENT"),)
+        ),
+        reference_prices=PRICES,
+        cash=Decimal("5000"),
+    )
+
+    assert [(o.side, o.quantity) for o in plan.orders] == [("sell", 300), ("buy", 300)]
+
+
+def test_a_buy_only_tonights_sale_could_fund_is_unfunded_and_named() -> None:
+    # No cash at all: the 3,000.00 A will release arrives after the auction, so B is not placed
+    # and is named instead of silently dropped.
     plan = build_trade_list(
         config=config(),
         state=book(("A", 300)),
@@ -163,7 +182,8 @@ def test_the_proceeds_of_a_sell_count_towards_what_a_buy_may_spend() -> None:
         cash=Decimal("0"),
     )
 
-    assert [(o.side, o.quantity) for o in plan.orders] == [("sell", 300), ("buy", 200)]
+    assert [(o.side, o.ts_code) for o in plan.orders] == [("sell", "A")]
+    assert plan.unfunded == ("B",)
 
 
 def test_each_buy_spends_from_what_the_one_before_left() -> None:

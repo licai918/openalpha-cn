@@ -6,9 +6,10 @@ reference prices, and its identity is a content address, so two runs on the same
 byte-identical and a stored list can be compared to a recomputed one.
 
 Sizing: a buy is `lot_quantity` of the equal share (less the cost reserve) at the signal-day
-reference price, and is further limited by the cash that will be there -- today's cash plus the
-estimated proceeds of today's sells, less what buys still live from earlier sessions will spend --
-so a book that is nearly fully invested cannot over-order.
+reference price, further limited by **the cash the account holds at 09:15** -- tonight's sales
+fill in the same auction, after the buys are frozen, so their proceeds are not this night's cash
+-- less what buys still live from earlier sessions will spend, so a book that is nearly fully
+invested cannot over-order.
 A buy that cannot be afforded even one lot with what is left is **not placed**; the name was
 drawn today and is simply not bought -- it is eligible to be drawn again in a later session.
 It is not dropped silently either: the trade list names it in `unfunded`, so the evening's list
@@ -88,9 +89,10 @@ class TradeList(BaseModel):
     unfunded: tuple[str, ...] = ()
     """The `ts_code`s of the decision's entries that produced no order, in the order the
     selection rule drew them (`V2-P7-017`): each was decided, and not one lot of it could be
-    bought with what the sizing left -- the cash after today's sells' proceeds, the buys placed
-    before it and the buys carried from earlier sessions, or the equal share itself where the
-    reference price is above the one the decision sized with. Part of `trade_list_id`.
+    bought with what the sizing left -- the cash at 09:15 (tonight's sells' proceeds arrive after
+    the auction), the buys placed before it and the buys carried from earlier sessions, or the
+    equal share itself where the reference price is above the one the decision sized with. Part
+    of `trade_list_id`.
 
     Not `BookDecision.unaffordable`: those are skipped at **decision** time, because the equal
     share of equity cannot buy a lot of them, and never become entries. An unfunded name was an
@@ -139,13 +141,11 @@ def build_trade_list(
     held = {holding.ts_code: holding.quantity for holding in state.holdings}
 
     sells: list[TradeOrder] = []
-    proceeds = Decimal(0)
     for decided in decision.exits:
         if decided.ts_code not in held:
             raise ValueError(f"cannot sell {decided.ts_code}: it is not held")
         price = _price_of(decided.ts_code, reference_prices)
         quantity = held[decided.ts_code]
-        proceeds += price * quantity
         sells.append(
             TradeOrder(
                 signal_session=state.session,
@@ -160,12 +160,13 @@ def build_trade_list(
 
     unit_budget = config.sizing_budget(state.equity)
     # A buy still live from an earlier session will fill out of the same cash, so it is spent
-    # before today's buys see any. Live sells are not counted: when they fill is not known.
+    # before today's buys see any. Tonight's sales are not counted: they fill in the same
+    # 09:15 auction the buys are placed in, after the broker has frozen the buys' cash.
     reserved = sum(
         (order.reference_price * order.quantity for order in carried if order.side == "buy"),
         Decimal(0),
     )
-    available = max(cash + proceeds - reserved, Decimal(0))
+    available = max(cash - reserved, Decimal(0))
     buys: list[TradeOrder] = []
     unfunded: list[str] = []
     for entry in decision.entries:
