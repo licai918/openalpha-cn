@@ -107,11 +107,21 @@ Before `V2-P7-021` such a session was lost: the journal pins the day's `--as-of`
 asked the same empty window. P6's `--full-update` (`FULL_UPDATE_TARGETS`) takes the same
 `panel build`; its `namechange` build is no longer refused in early January.
 
-The registry has the same gap for its own lifecycle year, which `V2-P7-021` does not close
-(`V2-P7-025`, a hard gate before 2027-01-04): a year with no listing or delisting yet has no
-`stock_basic` partition, step 4 refuses it (`partition_missing`), a retry meets the same refusal,
-and the weekly report's label read is refused as well. The year's first session completes only
-when the registry already holds an event of that year.
+The registry had the same gap for its own lifecycle year, and `V2-P7-025` closes it (`V2-P7-021`
+closed the name corpus's, not this one: they are separate rules). When a whole-registry fetch
+succeeds and carries no listing or delisting for the year it was observed in, `panel build`
+records that lifecycle year as a partition of no rows, after writing the years the fetch does
+carry, and prints `EMPTY stock_basic year=...`; every reader takes it as "no listing or
+delisting yet" only through 31 December of that year
+(`panel_ingest.record_empty_universe_year`,
+`domain.stock_universe.universe_year_empty_admissible_through`), and the year's first real event
+replaces it whole. That reached every reader at once because they all go through
+`load_stock_universe` (`panel doctor` when it is asked about `stock_basic`, step 4's factor
+build, the weekly report's label read, the survivor facts adapter). A refused or truncated
+fetch, a `no_data` whole-registry answer, an empty answer for a year past its window, and one
+over a year that already holds rows at an equal or later observation are still refused by name.
+Before this such a session was lost: the journal pins the day's `--as-of`, so every retry asked
+the same year and met the same `partition_missing`, exactly as for `namechange` above.
 
 ## The registration's kind (`V2-P7-008`)
 
