@@ -4,6 +4,37 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### P7 — development batch 2: the registry's New Year gap and the reading's four prerequisites (`V2-P7-025`, `V2-P7-024`, 2026-11-07)
+
+The second batch after the route adjustment, on `feat/v2-p7-025-batch-2` (from `587a158`; the code is
+frozen at `4b4ec94` for the controller's serial full gate, whose result is not stated here). **It is
+not pushed, and nothing in it has been run against real data or the real panel: no Tushare request
+was made, and no registration exists** (so no binding is voided). `V2-P7-025`: `panel build` records
+the whole-registry fetch's observation year as a zero-row `stock_basic` partition when the fetch
+carries no listing or delisting for it (`panel_ingest.record_empty_universe_year`,
+`cli._write_registry_year`, one `EMPTY stock_basic year=…` line on standard error after the write),
+so a year's first session no longer stops at step 4 and the weekly report's label read is served;
+readers apply the writer's window -- through 31 December of that year (Asia/Shanghai), after which
+the empty year is `stale` by rule -- through `domain.stock_universe.UNIVERSE_YEAR_EMPTY_THROUGH`, and
+the first real lifecycle row replaces the zero-row partition whole; the four refusals (not a
+successful whole-registry fetch, an observation past the year's window, a year that already holds
+rows at an at-or-later fetch, the wrong dataset) stand, and the value is **provisional, the user's to
+confirm**. The 0-request measurement over the real panel (read-only, no request): 10 of the last 14
+years had no registry event by the year's first session, the gap running to months (2009-05-06,
+2013-02-08), while every year 1990-2026 holds at least four rows -- which is what makes "empty only
+within its own year" fail-closed. `V2-P7-024`'s four prerequisites, before the one validation read: a
+runtime directory inside `~/openalpha-research` or a checkout is refused before anything is claimed;
+`minimum_periods` is bounded by the panel's own calendar, embargo and sampling included, at
+registration (given a `runtime_dir`) and in the pre-claim preflight; a `second_use` read requires the
+validation window's `window-claim.json` to be committed and reachable from a ref or reflog; and a
+registration must state `as_of_reason` in one line, repeated in the result text (`READING_SCHEMA`
+stays `.../v1`; no registration exists, so no migration). Two batch-1 tests that codified
+`minimum_periods == 26` as reachable were corrected to the calendar-exact semantics. **No gate or
+order changed** (these are prerequisites, not a new gate; 253 issues). The read itself, the stop-rule
+numbers, K and the interim rule, the primary horizon and the explicit go remain the user's; the
+batch's record, deferred items and operational prerequisites are in
+`docs/superpowers/plans/2026-11-07-p7-dev-batch-2-closeout.md`. **This is engineering, not evidence.**
+
 ### P7 — development batch 1: diagnostics, the report's power, the empty name year (`V2-P7-004`, `009`, `018`, `021`, and the new `V2-P7-025`, 2026-11-02)
 
 The first batch after the route adjustment, on `feat/v2-p7-004-dev-batch-1`. **It is not pushed, and
