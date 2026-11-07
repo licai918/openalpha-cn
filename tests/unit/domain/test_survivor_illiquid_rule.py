@@ -3,7 +3,7 @@ counts, and option (a) -- a holding below it is a forced exit.
 
 The rule is a *rank* rule, not an absolute turnover band: the design fixes "the top 70% by 20-day
 average traded amount among the names that pass every static reason", and `SecurityFacts.avg_amount`
-is only ordered (`domain/survivor_book.py:162-163`, "only its order matters"), so no unit or data
+is only ordered (`domain/survivor_book.py:185-186`, "only its order matters"), so no unit or data
 beyond the panel's own is invented here.
 """
 
@@ -57,6 +57,25 @@ def test_the_liquidity_cut_is_the_named_fraction_of_the_statically_eligible_popu
     assert len(illiquid) == floor_share(n, ILLIQUID_DROP_FRACTION) == 12
     assert set(illiquid) == {fact.ts_code for fact in facts[:12]}
     assert halted.ts_code not in illiquid
+
+
+def test_tied_amounts_at_the_cut_are_dropped_by_ts_code_smallest_first() -> None:
+    # Five eligible names share the same amount and straddle the cut: 12 names, floor(12 x 0.30) =
+    # 3 dropped. All five tied names sort ahead of the larger amounts, so the three dropped are the
+    # three smallest `ts_code`s and the two largest tied codes stay liquid. The tied facts are
+    # handed in descending code order, so a stable sort that ignored `ts_code` would keep that
+    # order and drop the largest codes instead -- the assertion names the direction the screen
+    # implements: `(avg_amount, ts_code)` ascending, smallest code dropped first.
+    tied_codes = ("600154.SH", "600153.SH", "600152.SH", "600151.SH", "600150.SH")
+    tied = [_fact(code, 50) for code in tied_codes]
+    larger = [_fact(f"6002{i:02d}.SH", 60 * i) for i in range(1, 8)]
+    result = screen([*tied, *larger], _config())
+
+    illiquid = {v.ts_code for v in result.verdicts if "illiquid" in v.reasons}
+    assert len(illiquid) == floor_share(12, ILLIQUID_DROP_FRACTION) == 3
+    assert illiquid == {"600150.SH", "600151.SH", "600152.SH"}
+    # The two largest tied codes are kept, and no larger-amount name is dropped.
+    assert {"600153.SH", "600154.SH"}.isdisjoint(illiquid)
 
 
 def test_the_named_fraction_is_what_the_shipped_configuration_already_stores() -> None:
