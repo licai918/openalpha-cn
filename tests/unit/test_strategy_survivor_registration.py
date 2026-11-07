@@ -1534,6 +1534,52 @@ def test_the_recompute_reads_at_the_readable_instant_when_its_filing_instant_can
     assert scored(recompute(late_clock_store, record)) == scored(record.batch)
 
 
+def test_the_recompute_keeps_the_original_refusal_when_nothing_readable_is_stored(
+    evening_store: PanelStore,
+    late_clock_store: PanelStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_readable_instant` answers `None` when no partition the day reads has a coverage record:
+    the refusal that sent the recompute looking is then the one to raise, not a second read."""
+    day = the_evening(evening_store)
+    record = filed(evening_store, day.batch, tmp_path / "predictions")
+    monkeypatch.setattr(registration_module, "_readable_instant", lambda *args, **kwargs: None)
+
+    with pytest.raises(PartitionNotYetKnowableError):
+        recompute(late_clock_store, record)
+
+
+def test_the_recompute_keeps_the_original_refusal_when_the_readable_instant_is_not_later(
+    evening_store: PanelStore,
+    late_clock_store: PanelStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A newest instant at or before the filing instant would re-read at the same refusing
+    clock: the original refusal stands, and the day is not read a second time."""
+    day = the_evening(evening_store)
+    record = filed(evening_store, day.batch, tmp_path / "predictions")
+    filed_at = registered_at(record)
+    attempts: list[object] = []
+    real_build_facts_day = registration_module.build_facts_day
+
+    def counting_build_facts_day(**kwargs: object) -> FactsDay:
+        attempts.append(kwargs["as_of"])
+        return real_build_facts_day(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(registration_module, "build_facts_day", counting_build_facts_day)
+    monkeypatch.setattr(registration_module, "_readable_instant", lambda *args, **kwargs: filed_at)
+
+    with pytest.raises(PartitionNotYetKnowableError):
+        recompute(late_clock_store, record)
+
+    # Both branches raise `PartitionNotYetKnowableError`, so the exception alone cannot tell
+    # "re-raise the original refusal" from "read again at the same refusing instant": the call
+    # count is what pins it. A fall-through reads the day twice; the re-raise reads it once.
+    assert attempts == [filed_at]
+
+
 def test_a_restated_build_makes_the_recompute_differ_and_is_named(
     evening_store: PanelStore, restated_store: PanelStore, tmp_path: Path
 ) -> None:
