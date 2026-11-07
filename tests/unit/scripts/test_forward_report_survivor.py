@@ -614,11 +614,13 @@ def first_session_evening(
     """The evening of 4 January 2027 -- the first session of the year, before its first rename --
     under a registration whose settings carry the test protocol (epoch 31 December 2026).
 
-    The market keeps its 4 January delisting, so 2027 has a registry (`stock_basic`) lifecycle
-    partition: step 4 of the evening and the report's label read both need one, and the
-    registry's own New Year gap -- a year with no listing or delisting yet has no partition -- is
-    not closed by `V2-P7-021` (it is `V2-P7-025`). Without the delisting this evening stops at
-    step 4, `partition_missing`."""
+    The market keeps its 4 January delisting, so 2027 holds a registry (`stock_basic`) lifecycle
+    partition with a real row; step 4 of the evening and the report's label read both read one.
+    The registry's own New Year gap -- a year with no listing or delisting yet -- is closed by
+    `V2-P7-025`: the same build records that lifecycle year empty and every reader takes it as
+    "nothing yet" within its year, so this delisting is incidental rather than what lets the
+    evening pass (`EmptyNewYear(delisted=())` in `test_daily_selection_survivor_day.py` runs the
+    first session to its evening with no registry event at all)."""
     root = tmp_path_factory.mktemp("survivor-new-year-records")
     repo, registration = _repository(
         root, survivor_day.survivor_config(epoch=date(2026, 12, 31)), settings=settings_with()

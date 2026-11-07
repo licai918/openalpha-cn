@@ -1685,8 +1685,9 @@ FIRST_2027: Final[date] = date(2027, 1, 4)
 class NewYearMarket(SurvivorMarket):
     """The survivor market across New Year, with what a real new year has from its first session:
     a rename announced (2027's first, so its name partition is not empty) and a registry event
-    (a delisting, so the registry has a 2027 lifecycle year -- every factor build reads the
-    registry through the session's year, and refuses `partition_missing` without one)."""
+    (a delisting, so the registry has a 2027 lifecycle year with a real row; since `V2-P7-025`
+    an empty lifecycle year is recorded too, so no event is required for a factor build to read
+    it)."""
 
     delisted: tuple[tuple[str, date], ...] = ((SECURITIES[-2], date(2027, 1, 4)),)
 
@@ -1748,8 +1749,10 @@ def test_the_first_session_of_a_year_runs_to_its_record_asked_about_both_years(
 class EmptyNewYear(NewYearMarket):
     """The New Year market before 2027's first rename (`V2-P7-021`): the endpoint serves no 2027
     row until a rename in `renames` is published. `renames` are `(code, name, announced,
-    effective, published)`. The registry's 4 January delisting stays, so 2027 has a lifecycle
-    partition -- the registry's own New Year gap is another issue (`V2-P7-025`)."""
+    effective, published)`. The registry's 4 January delisting stays, so 2027 holds a lifecycle
+    partition with a real row; the registry's own New Year gap is closed by `V2-P7-025` (an
+    empty lifecycle year is recorded by the same build), so a test that wants no registry event
+    can pass `delisted=()`."""
 
     renames: tuple[tuple[str, str, date, date, date], ...] = ()
 

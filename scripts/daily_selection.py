@@ -115,9 +115,10 @@ carry, and prints `EMPTY stock_basic year=...`; every reader takes it as "no lis
 delisting yet" only through 31 December of that year
 (`panel_ingest.record_empty_universe_year`,
 `domain.stock_universe.universe_year_empty_admissible_through`), and the year's first real event
-replaces it whole. That reached every reader at once because they all go through
-`load_stock_universe` (`panel doctor` when it is asked about `stock_basic`, step 4's factor
-build, the weekly report's label read, the survivor facts adapter). A refused or truncated
+replaces it whole. That reached every reader at once through the requirement they share:
+`stock_universe_requirement` states the rule and `load_stock_universe` builds it (step 4's
+factor build, the weekly report's label read, the survivor facts adapter), and `panel_doctor`
+builds the same one directly when it is asked about `stock_basic`. A refused or truncated
 fetch, a `no_data` whole-registry answer, an empty answer for a year past its window, and one
 over a year that already holds rows at an equal or later observation are still refused by name.
 Before this such a session was lost: the journal pins the day's `--as-of`, so every retry asked
