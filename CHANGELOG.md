@@ -8,8 +8,9 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 The second batch after the route adjustment, on `feat/v2-p7-025-batch-2` (from `587a158`; the code is
 frozen at `4b4ec94` for the controller's serial full gate, whose result is not stated here). **It is
-not pushed, and nothing in it has been run against real data or the real panel: no Tushare request
-was made, and no registration exists** (so no binding is voided). `V2-P7-025`: `panel build` records
+not pushed, the delivered code has run no real build, factor or reading, and no Tushare request
+was made; the only thing that opened the real panel was the read-only, zero-request measurement
+over its parquet. No registration exists** (so no binding is voided). `V2-P7-025`: `panel build` records
 the whole-registry fetch's observation year as a zero-row `stock_basic` partition when the fetch
 carries no listing or delisting for it (`panel_ingest.record_empty_universe_year`,
 `cli._write_registry_year`, one `EMPTY stock_basic year=…` line on standard error after the write),

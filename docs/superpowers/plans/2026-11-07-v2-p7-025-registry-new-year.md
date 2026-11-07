@@ -52,7 +52,7 @@
   `EMPTY stock_basic year=<Y>: no listing or delisting yet at <now>; the year may be read empty through <Y-12-31>; recorded as an empty partition`
 - **请求数**：0 次增加。整份登记簿一次请求已经带着所有有行的年份，写空年是同一批次上的本地动作。脚本化行情下：幸存者一天 2027-01-04 仍是 **11** 次；第 2 步框架（`test_daily_selection_survivor.py`）仍是 `FIRST_SESSION_OF_A_YEAR` = **12**；晨查仍是 1 次。（corrected 2026-11-07：11 是批次 1 的 `new_year` 夹具的形状；批次 2 的 T3 夹具按 12 月 31 日的名称种子建库，幸存者一天 2027-01-04 是 **12** 次——第 12 次是既有的 `V2-P7-016` 年前名称重建（`namechange` 共 2 次），不是 `V2-P7-025`；登记簿的空年本身 0 次请求。）
 - **硬规则**：两个数据平面分离（登记簿是面板平面，绝不进 `ParquetEvidenceStore`）；`domain/` 不引入 numpy/pandas/sqlite3/duckdb（新规则只用 `datetime.date`）；一个组装根（本计划不新建存储）；面板夹具测试时生成（`.parquet/.duckdb/.sqlite3/.db` 不入库）；契约不改字段（零行分区的覆盖记录是既有 `PartitionCoverage` 形状）；重放性字段真实（`as_of`/`fetched_at` 用抓取自己的时钟）；措辞"候选"，工程完成不是研究证据；本计划不产出任何收益数字。
-- **测试卫生**：隔离 worktree 里跑测试一律 `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD/src"`（venv 里的包指向主检出的 `src`），先 `python -c "import openalpha_cn; print(openalpha_cn.__file__)"` 确认；长文件只跑 `-k` 选择；**一次只跑一个 pytest 进程**；提交前跑一次 `tests/unit`（约 40 分钟，串行）；绝不在 `git --exec`/hook 里跑测试。
+- **测试卫生**：隔离 worktree 里跑测试一律 `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD/src"`（venv 里的包指向主检出的 `src`），先 `python -c "import openalpha_cn; print(openalpha_cn.__file__)"` 确认；长文件只跑 `-k` 选择；**一次只跑一个 pytest 进程**；~~提交前跑一次 `tests/unit`（约 40 分钟，串行）~~（corrected 2026-11-07: 控制者裁定：本批实现者只跑聚焦文件，整套在收尾串行跑一次）；绝不在 `git --exec`/hook 里跑测试。
 - **变异探针**：`cp <file> <scratch>/orig`；改；跑目标测试，**必须红**；`cp <scratch>/orig <file>`；`cmp <file> <scratch>/orig`；全程 `PYTHONDONTWRITEBYTECODE=1`。
 - 提交信息末尾：`Co-Authored-By: Claude Code <noreply@anthropic.com>`。不 push、不 squash/rebase。台账（`features.csv`、`summary.json`、`docs/release/openalpha-v1-feature-ledger.md`）本计划不碰（新测试只加进已有文件，不触发硬规则 9）。
 

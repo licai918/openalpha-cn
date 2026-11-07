@@ -5,8 +5,8 @@
 ## 0. 先读这几句
 
 - 批次 2 是两条计划一起做的一批：`V2-P7-025`（登记簿 `stock_basic` 的新年缺口，任务 T1–T5）与 `V2-P7-024` 的四个前置（`V2-P7-004` 收尾记录 §5 第 10 条 ①–④，任务 1–5）。计划是 `docs/superpowers/plans/2026-11-07-v2-p7-025-registry-new-year.md` 与 `docs/superpowers/plans/2026-11-07-v2-p7-024-prerequisites.md`。
-- 代码在分支 `feat/v2-p7-025-batch-2` 上（从 `main` 的 `587a158` 分出）。**批次代码在 `4b4ec94` 冻结**，控制者的串行全量闸门 `tests/unit` 在 11:49 起就跑在这一版上（日志 `.superpowers/sdd/batch-2/gate/unit-4b4ec94.log`，不在版本库里）；**它的结果不在本记录里，本文不写它通过**。冻结之后只有 docstring、注释与文档，清单见下一条。**未推送；没有对真实数据或真实面板运行过，一次 Tushare 请求也没有发过**：所有测试都跑在脚本化行情和测试时生成的夹具上。
-- 规模（`git diff --shortstat 587a158 4b4ec94`）：23 个文件、+3,977 / −75。其中 `src/` 5 个文件、`scripts/` 4 个文件、文档 3 个（两条计划 + 运行手册）、测试 11 个文件（新增 45 个测试函数，部分参数化）。**受登记绑定的文件**（`scripts/research/registry.REGISTERED_PATHS` = `src`、`scripts/research`、`pyproject.toml`、`uv.lock`；`scripts/daily_selection.py` 由 `also_bound` 加绑）都动过；**没有任何登记存在**（每日登记自 2026-10-08 暂停），所以没有绑定因此被作废。
+- 代码在分支 `feat/v2-p7-025-batch-2` 上（从 `main` 的 `587a158` 分出）。**批次代码在 `4b4ec94` 冻结**，控制者的串行闸门 `tests/unit` 跑在 `4b4ec94` 上（日志在 `.superpowers/sdd/batch-2/gate/`，不在版本库里）；**它的结果不在本记录里，本文不写它通过。** 冻结之后只有 docstring、注释与文档，清单见下一条。**未推送；交付的代码没有跑过任何真实构建、因子或读数，一次 Tushare 请求也没有发过；只有那次 0 次请求的只读测量打开过真实面板的 parquet**：所有测试都跑在脚本化行情和测试时生成的夹具上。
+- 规模（`git diff --shortstat 587a158 4b4ec94`）：23 个文件、+3,977 / −75。其中 `src/` 5 个文件、`scripts/` 4 个文件、文档 3 个（两条计划 + 运行手册）、测试 11 个文件（新增 45 个测试函数，部分参数化）。**受登记绑定的路径**（`scripts/research/registry.REGISTERED_PATHS` = `src`、`scripts/research`、`pyproject.toml`、`uv.lock`；`scripts/daily_selection.py` 由 `also_bound` 加绑）里，**改了字节的只有 `src/`（5 个文件）、`scripts/research/`（4 个文件）与 `scripts/daily_selection.py`**；`pyproject.toml` 与 `uv.lock` 没有变（`git diff --name-only 587a158 4b4ec94 -- pyproject.toml uv.lock` 为空）。**没有任何登记存在**（每日登记自 2026-10-08 暂停），所以没有绑定因此被作废。
 - **`4b4ec94` 之后动过字节的文件（本轮的文档/文本波）。** 受登记绑定的三个：`scripts/research/p7_reading.py`（一处 docstring）、`src/openalpha_cn/panel_ingest.py`（`_write_empty_partition` 的 docstring）、`src/openalpha_cn/strategy_survivor_facts.py`（两处 docstring）；三个都用 `ast.dump`（去掉 docstring）与改前逐字符相同证明**可执行 AST 不变**，脚本与哈希留在工作树外，不入库。不是绑定代码的：`tests/unit/test_survivor_facts_panel.py`（注释）、`tests/integration/panel/test_registry_ingest.py`（docstring）、`docs/runbooks/daily-selection.zh-CN.md`、`docs/specs/v2/openalpha-cn-v2-roadmap.md`、`docs/specs/v2/openalpha-cn-v2-p7-decision-chain.md`、两条计划文档、本记录、`CHANGELOG.md`、`docs/HANDOFF_CURRENT.md`、`AGENTS.md`。**没有一处行为改动。**
 - 集成分支由两条轨道逐个挑拣而成，提交在历史里交错，所以下面**列出提交**而不写区间；哈希取自 `git log 587a158..4b4ec94`，账本（不在版本库内：`.superpowers/sdd/`）里的哈希是挑拣之前的，不能直接用。
 - 各任务的"通过"数字是实现者和评审者各自最后一次**定向**运行的数字，来自账本，本轮文档没有重跑。整个 `tests/unit` 由控制者在集成分支上串行跑一次。
@@ -16,15 +16,17 @@
 
 ### `V2-P7-025` 登记簿（`stock_basic`）的新年缺口——代码已交付、本行未关闭
 
-- 提交（4 个代码与测试，另有 2 个文档：`171415f`、`4b4ec94`）：面板层 `ab93a7c`；`panel build` 接线 `a1378ee`；端到端 `0128e64`；周报跨年 `c41377e`；运行手册与模块文档 `171415f`、`4b4ec94`。
+- 提交（4 个代码与测试，另有计划 `599a942` 与 2 个文档：`171415f`、`4b4ec94`）：面板层 `ab93a7c`；`panel build` 接线 `a1378ee`；端到端 `0128e64`；周报跨年 `c41377e`；运行手册与模块文档 `171415f`、`4b4ec94`。
 - **写**：整份 `stock_basic` 抓取成功、观测年没有上市/退市时，`panel build` 用同一批次把该年记成零行生命周期分区（`panel_ingest.record_empty_universe_year`，`cli._write_registry_year`，写成功之后在 stderr 印一行 `EMPTY stock_basic year=…`）。写在整个批次的有行年份之后、且只在写入成功时才打印。零行分区的覆盖记录：`row_count` 0，`as_of`/`fetched_at`/`last_event_time` 是抓取时刻，`max_available_time` 是该年第一个瞬间，列取自**这次抓取自己的最新子批次**（不是库里的最新有行年——与 `021` 的 `write_empty_name_year` 不同）。
-- **读**：`domain.stock_universe.UNIVERSE_YEAR_EMPTY_THROUGH = (12, 31)`；`stock_universe_requirement` 把 `empty_admissible_through` 带给每个读者（唯一的构造点，`load_stock_universe` 内部会调用它，`panel doctor` 是唯一的外部调用者），目录库在窗口之后把零行分区按规则判 `stale`（`max_staleness=None` 也一样）。读者只在到该年 12 月 31 日（含，上海日历日）为止把它读作"今年还没有上市或退市"；当年第一条真实事件到来时零行分区被整份替换；同一年的更晚观测把零行分区重记一次。
+- **读**：`domain.stock_universe.UNIVERSE_YEAR_EMPTY_THROUGH = (12, 31)`；`stock_universe_requirement` 把 `empty_admissible_through` 带给每个读者（`load_stock_universe` 内的两个调用点与一个外部调用者 `panel_doctor.py:1503`，都经 `stock_universe_requirement`），目录库在窗口之后把零行分区按规则判 `stale`（`max_staleness=None` 也一样）。读者只在到该年 12 月 31 日（含，上海日历日）为止把它读作"今年还没有上市或退市"；当年第一条真实事件到来时零行分区被整份替换；同一年的更晚观测把零行分区重记一次。
 - **四条拒绝条件**：不是一次成功的整份抓取（`no_data` 的整份回答由 `write_stock_universe` 先拒）；观测日已过该年的窗口；库里该年已有行而这次抓取的 `as_of` 不早于写那些行的观测（会"退市"已存的证券）；数据集不是 `stock_basic`。更早的重放什么都不写（`write_stock_universe` 对一个从批次里整年消失的年份的既有规则）。此外 `by_year` 为空的分支对成功的整份抓取**到不了**，是防御分支（§4）。
 - **读者与端到端**：`test_a_lifecycle_year_with_no_event_yet_is_recorded_empty_and_read_across_the_history`（`years_read` 含该年、4 日的成员与 31 日的相同）；`test_the_registry_requirement_carries_the_empty_year_window_every_reader_needs`；`test_a_lifecycle_year_never_written_is_still_refused_as_missing`（没有分区仍是 `partition_missing`）；`test_the_skipped_year_refusal_still_fires_beside_an_empty_year`；`test_the_first_session_of_a_year_with_no_listing_or_delisting_runs_to_its_evening`（2027-01-04 晚间走完第 2–9 步，12 次请求，其中 `stock_basic` 1 次、`namechange` 2 次——第 12 次是既有的 `V2-P7-016` 年前名称重建）；`test_a_report_across_a_new_year_reads_the_registry_year_the_first_evening_recorded`（周报跨年，`first_session=2027-01-04`、`witnessed=1`）；两种拒绝形状 `partition_file_missing` / `partition_missing` 各有测试。
-- **0 次请求的测量（2026-11-07，只读真实面板的 parquet，无写入、无网络）**：过去 14 年（2013–2026）有 **10 年**在当年第一个会话时还没有任何登记事件，缺口可以长到几个月（2009 年第一条是 2009-05-06，2013 年是 2013-02-08）；1990–2026 **每一年都至少有 4 行**。它量的是"每年第一个会话之前该年有没有事件"，**不是**"当年第一晚那一刻库里有没有该年的分区"——现存分区是事后回填的，那一刻的状态无法从今天的库里直接读回（测量文件同样写了这一点，且不入库）。后者正是"空年只在自己那一年之内可读"之所以失败即关闭：年外一个空的登记年只可能是失败或截断的抓取。
+- **0 次请求的测量（2026-11-07，只读真实面板的 parquet，无写入、无网络）**：过去 14 年（2013–2026）有 **10 年**在当年第一个会话时还没有任何登记事件，缺口可以长到几个月（2009 年第一条是 2009-05-06，2013 年是 2013-02-08）；1990–2026 **每一年都至少有 4 行**。它量的是"每年第一个会话之前该年有没有事件"，**不是**"当年第一晚那一刻库里有没有该年的分区"——现存分区是事后回填的（**推断**：从今天的 parquet 看成这样，不是有日期的测量），那一刻的状态无法从今天的库里直接读回（测量文件同样写了这一点，且不入库）。后者正是"空年只在自己那一年之内可读"之所以失败即关闭：年外一个空的登记年只可能是失败或截断的抓取。
 - **未做 / 未关闭**：没有对真实注册表运行过，没有登记；**取值（到 12 月 31 日，含）是暂定的，待用户确认**（计划 U1）；把 `025` 列为 `006a` 的一项并加入 `006` 的依赖仍是控制者的建议、待用户确认。路线图与规格 §9 本行都保持打开。
 
 ### `V2-P7-024` 那唯一一次读数之前的四个前置——代码已交付、本行未关闭
+
+编号按 `024` 计划的 Task 顺序（① 运行目录、② `minimum_periods`、③ `second_use`、④ `as_of_reason`），与 `V2-P7-004` 收尾 §5 第 10 条的编号不同（那里 ① 是 `minimum_periods`、② 是运行目录）。
 
 - 提交（7 个代码与测试，另有计划 `bafb80d`）：运行目录 `dc5a259`、接线 `9089fc2`、测试 `322a75b`；精确上界 `54baf0c`；`second_use` 顺序 `d057664`；`as_of_reason` `f68c68a`；`_readable_instant` 两条回退分支 `9260b12`（提交标题按它所属的批次 1 issue 写成 `V2-P7-008`，内容是 `024` 的 Task 5）。
 - ①**运行目录拒绝**（`p7_windows.checked_runtime_directory`、`RESEARCH_RUNTIME`、`MAIN_CHECKOUT`、`RuntimeDirectoryRefusedError`）：运行目录若在 P6 的研究根 `~/openalpha-research` 或主检出之内，在打开任何东西、写任何认领之前按名拒绝；只读连接也会在目录库旁建 `catalog.duckdb.lock` / `.gate`（`O_RDWR | O_CREAT`），读一次的默认测量还在整个计算期间持共享侧。`p7_reading.read_once` / `_panel_measure` / `_panel_preflight` / `register_reading`（给了 `runtime_dir` 时）与 `p7_diagnostics._open_sources` 都调用它。判定有拼写、`..`、大小写与同一文件两层；只搬冒烟的两条规则（研究根、主检出），临时的克隆不被拒。
@@ -98,6 +100,8 @@
 
 ## 5. 要用户来定的事（全部还没有定）
 
+本节只列批次 2 带出或重新点名的决定；**批次 1 仍未定的各项仍在 `docs/superpowers/plans/2026-11-02-p7-dev-batch-1-closeout.md` §5**（`021` 的 U1/U2、`025` 的切法与依赖、冒烟的数值与分工、`024` 的停止规则数值、K 与中期规则、向券商确认的假设、读一次的两处是否放宽、Task 7 等），两条记录合起来才是完整的未决清单。
+
 在用户定之前，下面每一项都按"未定"处理；代码里的值只是按计划推荐值实现的默认。
 
 1. **`V2-P7-025` 的取值**：零行生命周期年只在**它自己那一年之内**（到 12 月 31 日，含，上海日历日）可读、可写——`UNIVERSE_YEAR_EMPTY_THROUGH = (12, 31)`。计划按推荐值实现；用户可改（代价：一个常量与几处文档，另需重跑定向测试）。同时待定：把 `025` 列为 `006a` 的一项并加入 `006` 的依赖（控制者的建议，批次 1 起就挂着）。
@@ -118,7 +122,7 @@
 3. 仓库里没有 grafts 文件（`info/grafts`）；替换 ref 被忽略。
 4. 读数的登记必须覆盖**整个窗口**，且已在 `HEAD` 的提交历史里、字节与 `HEAD` 所持相同；受绑定代码在 `HEAD` 与工作树里都等于登记的 `code_commit`；停止规则的数值已由用户定并随登记一起提交；登记带一行 `as_of_reason`。
 5. 从面板的 `cp -c` 克隆读；运行目录**不能**在 `~/openalpha-research` 或任何一个检出里（现在会在打开任何东西之前按名拒绝）。
-6. `minimum_periods` 必须不高于面板日历的精确上界：登记（给了 `runtime_dir` 时）与认领前的预检都会给出那个数。评审在真实日历上的算术是 24（验证窗口、步长 20、h20），**本批次没有离线复核**；若真实消息给的不是 24，停下来报告，不猜、不调参。预检会读 `trade_cal`（日历不是结果数据）；它只看目录库列了哪些年，列出但不完整的分区、或没有因子构建的信号日，仍要到认领之后的测量才暴露——那次读就花掉了。
+6. `minimum_periods` 必须不高于面板日历的精确上界：登记（给了 `runtime_dir` 时）与认领前的预检都会给出那个数。**真实日历上的数没有在本批次测过**：批次 1 的评审算术是 24（验证窗口、步长 20、h20），没有复核；本批次评审按测试日历手算的是 **25**（夹具的 519 个工作日 → 26 个信号、禁运 1 个），而两个数说的是不同的日历。运营步骤里核对消息给出的数与数据无关上界（当前窗口上是 26）的关系；若它不等于先验的 24，停下来报告，不猜、不调参。预检会读 `trade_cal`（日历不是结果数据）；它只看目录库列了哪些年，列出但不完整的分区、或没有因子构建的信号日，仍要到认领之后的测量才暴露——那次读就花掉了。
 7. 先读验证窗口、提交它的窗口认领，再读 `second_use`。
 
 **真实的冒烟（Task 6）之前**：见运行手册「真实数据冒烟（`V2-P7-019`）」。要点——先看 `git rev-parse --is-shallow-repository`（`prepare` 只印警告、不拒绝）；源面板是 `~/openalpha-research/panel`；面板的卷必须是 APFS 且与根目录同卷；根目录不含空白、不在临时目录或主检出里；纪元是第一晚的前一个交易日；每个花请求的步骤与每个真实晚上之前先得到用户的明确同意；**2027 年第一个交易日仍不跑**，除非 `V2-P7-025` 已合入主线、用户同意，且真实运行确认了它的行为——**Tushare 对一个当年还没有任何事件的年份的 `stock_basic` 回答什么，没有测过**（本批次只做 0 次请求的离线测量）；`025` 的代码在批次 2 分支上，未推送、未在真实数据上运行过。
