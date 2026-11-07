@@ -209,6 +209,35 @@ def test_the_default_preflight_finds_every_partition_the_read_opens(
     assert problems and all("[2028]" in problem for problem in problems)
 
 
+@pytest.mark.parametrize(("horizon", "most"), [(2, 6), (3, 4)])
+def test_the_preflight_refuses_a_minimum_the_windows_embargo_makes_unreachable(
+    corpus: tuple[Path, Any], fixture_facts: None, horizon: int, most: int
+) -> None:
+    """2027-01-04..2027-01-22 holds 15 weekday sessions; the day's label exits three (or four)
+    sessions later, so the tail is embargoed and the summary samples every `ceil(h/1)`th kept
+    day. The weekday bound is 8 (h=2) and 5 (h=3); the calendar makes 6 and 4, so a rule at the
+    bound passes `_registration_of` and could only read 'triggered: unreadable'."""
+    root, panel = corpus
+    registered = body(panel)
+    registered["request"]["horizons"] = [horizon]
+    registered["stop_rule"] = {
+        "schema": p7_reading.STOP_RULE_SCHEMA,
+        "score": "composite",
+        "horizon": horizon,
+        "minimum_periods": most + 1,
+        "any_of": [{"metric": "ew_minus_worst_decile", "mean_at_or_below": -1.0}],
+    }
+
+    assert p7_reading._most_periods(WINDOW.first, WINDOW.last, stride=1, horizon=horizon) > most, (
+        "the data-free bound would not have caught this rule"
+    )
+    problems = p7_reading._panel_preflight(root, WINDOW)(registered)
+    assert problems and f"at most {most}" in problems[0]
+
+    registered["stop_rule"]["minimum_periods"] = most
+    assert p7_reading._panel_preflight(root, WINDOW)(registered) == ()
+
+
 def test_the_default_measure_reads_a_generated_panel_and_logs_what_it_read(
     corpus: tuple[Path, Any], fixture_facts: None
 ) -> None:

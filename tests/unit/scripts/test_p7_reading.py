@@ -18,16 +18,22 @@ from typing import Any, Final
 from zoneinfo import ZoneInfo
 
 import pytest
+from panel_fixtures import _batch as batch
+from panel_fixtures import _midnight_shanghai as midnight_shanghai
 from research_repo import commit_file, git, head
 
 from openalpha_cn.domain.horizon import ResearchHorizon
 from openalpha_cn.domain.labels import LabelWindow, OutcomeLabel, WindowReturn, build_label_window
+from openalpha_cn.domain.panel_batch import PanelColumn
 from openalpha_cn.domain.survivor_book import SurvivorBookConfig
 from openalpha_cn.domain.trading_calendar import (
+    TRADING_CALENDAR_DATASET,
     CalendarDay,
     TradingCalendar,
     build_trading_calendar,
 )
+from openalpha_cn.panel.store import PanelStore
+from openalpha_cn.panel_ingest import write_trading_calendar
 from openalpha_cn.strategy_survivor_facts import SurvivorFactsError
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[3]
@@ -341,7 +347,7 @@ def claim_of(registration: Path) -> Path:
     return registration.with_name(registration.name.replace(".registration.json", ".claim.json"))
 
 
-def register(path: Path, **changes: Any) -> str:
+def register(path: Path, *, runtime_dir: Path | None = None, **changes: Any) -> str:
     """`register_reading` with this module's values, any of them changed."""
     arguments: dict[str, Any] = {
         "path": path,
@@ -353,6 +359,7 @@ def register(path: Path, **changes: Any) -> str:
         "config": CONFIG,
         "stop_rule": RULE,
         "code_commit": "0123456789abcdef0123456789abcdef01234567",
+        "runtime_dir": runtime_dir,
     }
     return p7_reading.register_reading(**{**arguments, **changes})  # type: ignore[no-any-return]
 
@@ -1144,9 +1151,11 @@ def test_a_registration_that_could_only_spend_the_window_badly_is_refused_before
     assert not path.exists()
 
 
-def test_a_minimum_the_plan_can_reach_is_registered(tmp_path: Path) -> None:
-    """The bound for this window: 519 weekdays, at most 26 non-overlapping periods at stride 20
-    and h20, at stride 5 and h20 (every fourth of 104 signals), and at stride 20 and h5."""
+def test_the_data_free_bound_is_the_weekday_bound(tmp_path: Path) -> None:
+    """The data-free bound for this window: 519 weekdays, at most 26 non-overlapping periods at
+    stride 20 and h20, at stride 5 and h20 (every fourth of 104 signals), and at stride 20 and h5.
+    It is a necessary bound only: with no `runtime_dir` the exact calendar bound is not read, so
+    a rule at 26 still registers here (the exact bound is checked before the claim)."""
     rule = p7_reading.StopRule(
         score="composite", horizon=20, minimum_periods=26, any_of=RULE.any_of
     )
@@ -1168,6 +1177,121 @@ def test_a_minimum_the_plan_can_reach_is_registered(tmp_path: Path) -> None:
             p7_windows.VALIDATION.first, p7_windows.VALIDATION.last, stride=20, horizon=5
         )
         == 26
+    )
+
+
+@pytest.fixture(scope="module")
+def calendar_panel(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A panel whose only dataset is `trade_cal` 2021..2023, every weekday a session: what the
+    registration's exact bound reads, written at test time (hard rule 6)."""
+    root = tmp_path_factory.mktemp("calendar")
+    store = PanelStore(root / "panel")
+    for year in (2021, 2022, 2023):
+        write_trading_calendar(store, _calendar_batch(year))
+    return root
+
+
+def _calendar_batch(year: int) -> Any:
+    days = [date(year, 1, 1) + timedelta(days=offset) for offset in range(366)]
+    days = [day for day in days if day.year == year]
+    previous: list[str | None] = []
+    seen: date | None = None
+    for day in days:
+        previous.append(None if seen is None else seen.isoformat())
+        if day.weekday() < 5:
+            seen = day
+    published = midnight_shanghai(date(year, 1, 1))
+    return batch(
+        TRADING_CALENDAR_DATASET,
+        subjects=["SSE"] * len(days),
+        columns=[
+            PanelColumn("cal_date", "string", tuple(day.isoformat() for day in days)),
+            PanelColumn("is_open", "boolean", tuple(day.weekday() < 5 for day in days)),
+            PanelColumn("pretrade_date", "string", tuple(previous)),
+        ],
+        event_time=[midnight_shanghai(day) for day in days],
+        available_time=[published] * len(days),
+        fetched_at=published,
+    )
+
+
+def test_a_minimum_above_what_the_panels_calendar_allows_is_refused_at_registration(
+    calendar_panel: Path, tmp_path: Path
+) -> None:
+    """519 weekdays at stride 20 and h=20 give the data-free bound 26; the last signal day's
+    label exits past 2023-12-29, so the calendar makes 25. 26 passes `_registration_of` and
+    would spend the one read on 'unreadable'; 25 is the most a rule may ask for."""
+    path = tmp_path / "v2-p7-024-validation.registration.json"
+    too_many = p7_reading.StopRule(
+        score="composite", horizon=20, minimum_periods=26, any_of=RULE.any_of
+    )
+    with pytest.raises(p7_reading.ReadingError, match="at most 25"):
+        register(path, runtime_dir=calendar_panel, stop_rule=too_many)
+    assert not path.exists()
+
+    reachable = p7_reading.StopRule(
+        score="composite", horizon=20, minimum_periods=25, any_of=RULE.any_of
+    )
+    register(path, runtime_dir=calendar_panel, stop_rule=reachable)
+    assert path.exists()
+
+
+def test_a_registration_whose_calendar_cannot_be_read_writes_nothing(tmp_path: Path) -> None:
+    root = tmp_path / "partial"
+    store = PanelStore(root / "panel")
+    for year in (2022, 2023):
+        write_trading_calendar(store, _calendar_batch(year))
+    path = tmp_path / "v2-p7-024-validation.registration.json"
+
+    with pytest.raises(p7_reading.ReadingError, match="2021"):
+        register(path, runtime_dir=root)
+
+    assert not path.exists()
+
+
+def test_the_preflight_refuses_when_the_calendar_cannot_be_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exact bound fails closed before the claim too: a calendar the bound needs but cannot
+    read is a problem returned to `read_once`, never a skipped check."""
+    root = tmp_path / "partial"
+    store = PanelStore(root / "panel")
+    for year in (2022, 2023):
+        write_trading_calendar(store, _calendar_batch(year))
+    # The catalogue completeness of the other datasets is another check's; this one is the
+    # calendar's, so only it is exercised here.
+    monkeypatch.setattr(p7_reading, "preflight_problems", lambda *args, **kwargs: ())
+    body = {
+        "request": REQUEST,
+        "config": CONFIG,
+        "stop_rule": p7_reading._rule_form(RULE),
+    }
+
+    problems = p7_reading._panel_preflight(root, p7_windows.VALIDATION)(body)
+
+    assert problems and "calendar" in problems[0] and "2021" in problems[0]
+
+
+@pytest.mark.parametrize(("stride", "horizon"), [(20, 20), (5, 20), (20, 5), (1, 2)])
+def test_the_data_free_bound_is_never_below_what_the_calendar_allows(
+    calendar_panel: Path, stride: int, horizon: int
+) -> None:
+    """Keeping `_most_periods` as an early refusal is sound only if it can never understate the
+    calendar's maximum: sessions <= weekdays, embargoes only drop days, and ceil is monotone."""
+    store = p7_windows.capped_panel_store(calendar_panel, p7_windows.VALIDATION)
+    settings = p7_reading._settings_of(
+        {**REQUEST, "stride": stride, "horizons": [horizon]}, CONFIG, p7_windows.VALIDATION
+    )
+
+    exact = p7_reading._exact_most_periods(
+        store, window=p7_windows.VALIDATION, settings=settings, horizon=horizon
+    )
+
+    assert (
+        p7_reading._most_periods(
+            p7_windows.VALIDATION.first, p7_windows.VALIDATION.last, stride=stride, horizon=horizon
+        )
+        >= exact
     )
 
 

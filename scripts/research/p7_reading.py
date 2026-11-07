@@ -20,9 +20,14 @@ a failure after the claim spends the window:
   `last` are the window's own days). The window is read once (step 4), so a reading of part of it
   would spend all of it, and a first day that is not a session cannot be registered;
 * the request reads the book's survivors (its `loser_decile_count` is the book's, as in `explore`);
-* a stop rule's `minimum_periods` can be reached: it is at most the bound `_most_periods` reads off
-  the weekdays of the window, the stride and the rule's horizon, with no data -- a larger one
-  could only ever be "triggered: unreadable".
+* a stop rule's `minimum_periods` can be reached. The data-free bound `_most_periods` reads off
+  the weekdays of the window, the stride and the rule's horizon is necessary but not sufficient: a
+  rule at that bound can still be unreachable. The **exact** bound is read from the panel's own
+  `trade_cal` before the claim (the calendar is not outcome data), through the same embargo
+  `plan_signal_days` applies and the sampling `summarize` uses; a rule above it is refused at
+  registration when a `runtime_dir` is given, and before the claim by `read_once`'s default
+  preflight, with the exact number in the message. A larger rule could only ever be
+  "triggered: unreadable".
 
 `read_once` refuses, in this order, each refusal its own exception, none of them writing anything:
 
@@ -61,10 +66,14 @@ a failure after the claim spends the window:
    file (`info/grafts`), which changes the parents git reports while the repository still says it
    is not shallow; replacement refs are not refused but ignored (`--no-replace-objects`).
 5. `ReadingPreflightError` -- the panel catalogue lacks a year the read opens of a dataset
-   (`preflight_problems`; it asks `registered_years` and reads no partition): the window's years
-   for every dataset, and the year before as well for those that read it
-   (`YEAR_BEFORE_DATASETS`: the calendar, the label reader's and the facts day's) -- not for
-   `stk_limit` and the factor datasets, which are read for signal days only.
+   (`preflight_problems`: it asks each dataset's `registered_years`, and for the primary reading
+   it also reads the window's years and the year before of `trade_cal` -- the calendar is not
+   outcome data -- to check the stop rule's `minimum_periods`): the window's years for every
+   dataset, and the year before as well for those that read it (`YEAR_BEFORE_DATASETS`: the
+   calendar, the label reader's and the facts day's) -- not for `stk_limit` and the factor
+   datasets, which are read for signal days only. Other datasets are still only listed: a
+   partition that is listed but incomplete, or a signal day without a factor build, is met by
+   the measurement, after the claim.
 
 It then writes the window's claim and then the reading's, `<reading>.claim.json`, each with
 `O_CREAT | O_EXCL` -- a second read racing this one loses there (`ReadingAlreadyClaimedError`) --
@@ -126,9 +135,9 @@ What this does not establish:
   window with no claim. A claim says this path was taken once; it cannot say no other path was.
 * `uv.lock` in the binding proves the lock file did not change, not that the running environment
   matches it (`registry`'s limit, unchanged).
-* The preflight sees which years the catalogue lists, nothing more: a partition that is listed but
-  incomplete, or a signal day without a factor build, is met by the measurement, after the claim --
-  and the read is spent on it.
+* The preflight sees which years the catalogue lists and, for a primary reading, the calendar's
+  rows; nothing more: a partition that is listed but incomplete, or a signal day without a factor
+  build, is met by the measurement, after the claim -- and the read is spent on it.
 * The second-use store serves 2026 whole, rows after 2026-09-24 included; keeping them out is the
   plan's label rule and the readers' (`p7_windows`), not the store's.
 
@@ -186,6 +195,7 @@ from p7_windows import (
     WINDOWS,
     DiagnosticWindow,
     DiagnosticWindowError,
+    RuntimeDirectoryRefusedError,
     SignalPlan,
     capped_panel_store,
     checked_runtime_directory,
@@ -201,7 +211,8 @@ from openalpha_cn.domain.name_history import NAMECHANGE_DATASET
 from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET, SUSPENSION_DATASET
 from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET
 from openalpha_cn.domain.survivor_book import SurvivorBookConfig
-from openalpha_cn.domain.trading_calendar import TRADING_CALENDAR_DATASET
+from openalpha_cn.domain.trading_calendar import TRADING_CALENDAR_DATASET, TradingCalendarError
+from openalpha_cn.panel.catalog import PanelStorageError
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import (
     FACTOR_DEFINITIONS,
@@ -362,6 +373,7 @@ class _Registration:
     reading: str
     window: DiagnosticWindow
     stop_rule: StopRule | None
+    settings: _Settings
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -389,6 +401,7 @@ def register_reading(
     config: Mapping[str, Any],
     stop_rule: StopRule | None,
     code_commit: str,
+    runtime_dir: Path | None = None,
 ) -> str:
     """Write the reading's registration to `path` and return the SHA-256 of its bytes.
 
@@ -402,6 +415,12 @@ def register_reading(
     same registration again returns the same digest; a different one at an existing path is
     refused. Committing it is the caller's step. Pass `code_commit` resolved once, before writing
     (`registry.register`'s reason).
+
+    `minimum_periods` is bounded twice. With no `runtime_dir` (the default) only the data-free
+    weekday bound applies; the exact calendar bound is applied by `read_once` before its claim.
+    With `runtime_dir`, the runtime-directory rule is checked, then the panel's own `trade_cal` is
+    read (the calendar is not outcome data) and a `minimum_periods` above what its embargo and the
+    summary's sampling permit is refused -- and nothing is written.
     """
     try:
         request_form = grid.to_json_value(dict(request))
@@ -419,7 +438,7 @@ def register_reading(
         "stop_rule": None if stop_rule is None else _rule_form(stop_rule),
         "code_commit": code_commit,
     }
-    _registration_of(body)
+    registered = _registration_of(body)
     expected = f"{reading}.registration.json"
     if path.name != expected:
         raise ReadingError(
@@ -432,9 +451,41 @@ def register_reading(
                 f"{path} already holds a different registration; a registration is written once"
             )
     else:
+        runtime = None if runtime_dir is None else _checked_runtime(runtime_dir)
+        if registered.stop_rule is not None and runtime is not None:
+            try:
+                store = capped_panel_store(runtime, registered.window)
+                most = _exact_most_periods(
+                    store,
+                    window=registered.window,
+                    settings=registered.settings,
+                    horizon=registered.stop_rule.horizon,
+                )
+            except (DiagnosticWindowError, TradingCalendarError, PanelStorageError) as error:
+                raise ReadingError(
+                    f"the panel at {runtime} cannot be read to check the stop rule's "
+                    f"minimum_periods: {error}"
+                ) from error
+            if registered.stop_rule.minimum_periods > most:
+                raise ReadingError(
+                    _unreachable_minimum(
+                        window=registered.window,
+                        settings=registered.settings,
+                        rule=registered.stop_rule,
+                        most=most,
+                    )
+                )
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
     return hashlib.sha256(content).hexdigest()
+
+
+def _checked_runtime(runtime_dir: Path) -> Path:
+    """`checked_runtime_directory` folded into `register_reading`'s `ReadingError` contract."""
+    try:
+        return checked_runtime_directory(runtime_dir)
+    except RuntimeDirectoryRefusedError as error:
+        raise ReadingError(str(error)) from error
 
 
 def _registration_of(body: Mapping[str, Any]) -> _Registration:
@@ -499,7 +550,7 @@ def _registration_of(body: Mapping[str, Any]) -> _Registration:
                 f"{explore.stride} and h={rule.horizon}; such a rule could only ever read "
                 "'triggered: unreadable'"
             )
-    return _Registration(reading=reading, window=window, stop_rule=rule)
+    return _Registration(reading=reading, window=window, stop_rule=rule, settings=settings)
 
 
 def _weekdays(first: date, last: date) -> int:
@@ -515,6 +566,45 @@ def _most_periods(first: date, last: date, *, stride: int, horizon: int) -> int:
     no more sessions than weekdays. Embargoed days and gaps only lower it."""
     signals = math.ceil(_weekdays(first, last) / stride)
     return math.ceil(signals / math.ceil(horizon / stride))
+
+
+def _exact_most_periods(
+    store: PanelStore, *, window: DiagnosticWindow, settings: _Settings, horizon: int
+) -> int:
+    """The most non-overlapping periods `store`'s own calendar can summarise, computed exactly as
+    the measure plans and `summarize` samples: `plan_signal_days` over the calendar (which
+    embargoes every signal day whose label would exit past `window.last`), then every
+    `ceil(horizon / stride)`-th kept signal day (`p7_diagnostics.summarize`)."""
+    explore = settings.explore
+    calendar = load_trading_calendar(
+        store,
+        exchange=EXCHANGE,
+        years=tuple(range(explore.first.year - 1, window.ceiling_year + 1)),
+        as_of=explore.as_of,
+    )
+    plan = plan_signal_days(
+        calendar,
+        window=window,
+        first=explore.first,
+        last=explore.last,
+        stride=explore.stride,
+        horizons=explore.horizons,
+    )
+    return math.ceil(len(plan.sessions) / math.ceil(horizon / explore.stride))
+
+
+def _unreachable_minimum(
+    *, window: DiagnosticWindow, settings: _Settings, rule: StopRule, most: int
+) -> str:
+    explore = settings.explore
+    return (
+        f"the stop rule's minimum_periods {rule.minimum_periods} cannot be reached: the panel's "
+        f"calendar makes at most {most} non-overlapping periods at stride {explore.stride} and "
+        f"h={rule.horizon} over {explore.first}..{explore.last} (a signal day whose label would "
+        f"exit past {window.last} is embargoed, and the summary reads every "
+        f"ceil({rule.horizon}/{explore.stride})th kept signal day); such a rule could only ever "
+        "read 'triggered: unreadable'"
+    )
 
 
 def _settings_of(request: object, config: object, window: DiagnosticWindow) -> _Settings:
@@ -820,16 +910,39 @@ def _panel_preflight(
 ) -> Callable[[Mapping[str, Any]], Sequence[str]]:
     """The default preflight: the catalogue of the panel inside `runtime_dir`, capped at `window`
     -- or, with no catalogue there, that problem, and no store opened (opening one would create its
-    root)."""
+    root). It then checks the stop rule's `minimum_periods` against the panel's own calendar,
+    reading `trade_cal` (which is not outcome data) for the window's years and the year before."""
     checked_runtime_directory(runtime_dir)
 
     def preflight(body: Mapping[str, Any]) -> Sequence[str]:
         panel = runtime_dir / PANEL_SUBDIRECTORY
         if not (panel / CATALOG_FILE).is_file():
             return (f"{panel} holds no {CATALOG_FILE}: there is no panel catalogue to read",)
-        book = _settings_of(body["request"], body["config"], window).explore.book
+        settings = _settings_of(body["request"], body["config"], window)
         store = capped_panel_store(runtime_dir, window)
-        return preflight_problems(store, window=window, datasets=_preflight_datasets(book))
+        problems = preflight_problems(
+            store, window=window, datasets=_preflight_datasets(settings.explore.book)
+        )
+        if problems:
+            return problems
+        form = body.get("stop_rule")
+        if form is None:
+            return ()
+        try:
+            rule = _rule_of(form)
+            most = _exact_most_periods(
+                store, window=window, settings=settings, horizon=rule.horizon
+            )
+        except ReadingError as error:
+            return (f"the stop rule cannot be read: {error}",)
+        except (TradingCalendarError, PanelStorageError) as error:
+            return (
+                "the calendar the stop rule's bound needs cannot be read before the claim "
+                f"({error}); the rule's minimum_periods cannot be shown reachable",
+            )
+        if rule.minimum_periods > most:
+            return (_unreachable_minimum(window=window, settings=settings, rule=rule, most=most),)
+        return ()
 
     return preflight
 
@@ -966,7 +1079,7 @@ def read_once(
     problems = tuple(check(committed.body))
     if problems:
         raise ReadingPreflightError(
-            f"the {window.name} window is not read: the catalogue check before the claim found "
+            f"the {window.name} window is not read: the check before the claim found "
             + "; ".join(problems)
             + " -- nothing was claimed"
         )
