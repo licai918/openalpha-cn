@@ -1300,30 +1300,34 @@ def test_the_preflight_refuses_when_the_calendar_cannot_be_read(
 
 
 def test_the_preflight_names_a_window_whose_first_day_is_not_a_session(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`plan_signal_days` refuses by name a first day that is not a session, and the registration
     path catches that same `DiagnosticWindowError` (`p7_reading.py:503`). The preflight must
     return it as a named problem, not let it escape as a raw exception: the window's reachability
-    cannot be shown, and the refusal has to happen before the claim."""
+    cannot be shown, and the refusal has to happen before the claim. Driven through `read_once`
+    so the claim's absence is asserted, not assumed."""
     root = tmp_path / "closed-first-day"
     store = PanelStore(root / "panel")
     closed = frozenset({date(2022, 1, 4)})
     for year in (2021, 2022, 2023):
         write_trading_calendar(store, _calendar_batch(year, closed=closed))
     monkeypatch.setattr(p7_reading, "preflight_problems", lambda *args, **kwargs: ())
-    body = {
-        "request": REQUEST,
-        "config": CONFIG,
-        "stop_rule": p7_reading._rule_form(RULE),
-    }
+    registration = registered(repo)
+    measure = Measure()
+    measure.claim = registration.with_name("v2-p7-024-validation.claim.json")
 
-    problems = p7_reading._panel_preflight(root, p7_windows.VALIDATION)(body)
+    with pytest.raises(p7_reading.ReadingPreflightError, match="cannot be planned") as refused:
+        p7_reading.read_once(
+            registration,
+            repo=repo,
+            runtime_dir=root,
+            clock=lambda: COMMITTED,
+            measure=measure,
+        )
 
-    assert problems, "the preflight returned no problem for a window it cannot plan"
-    assert "cannot be planned" in problems[0]
-    assert "reachable" in problems[0]
-    assert "2022-01-04" in problems[0]
+    assert "reachable" in str(refused.value) and "2022-01-04" in str(refused.value)
+    assert not measure.claim.exists() and measure.calls == []
 
 
 @pytest.mark.parametrize(("stride", "horizon"), [(20, 20), (5, 20), (20, 5), (1, 2)])
