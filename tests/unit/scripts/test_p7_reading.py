@@ -1613,3 +1613,29 @@ def test_the_spent_holdouts_measured_document_and_text_never_say_first_out_of_sa
     )
     assert p7_diagnostics.SECOND_USE_READ_ONCE_WORDING in text
     assert "first out-of-sample" not in (text + json.dumps(document)).lower()
+
+
+def test_read_once_refuses_a_runtime_directory_inside_the_main_checkout_before_any_claim(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registration = registered(repo)
+    measure = Measure()
+    monkeypatch.setattr(p7_windows, "MAIN_CHECKOUT", repo.resolve())
+
+    with pytest.raises(p7_windows.RuntimeDirectoryRefusedError, match="main checkout"):
+        run(registration, repo, measure)
+
+    assert measure.calls == []
+    assert not claim_of(registration).exists()
+    assert not window_claim_of(repo).exists()
+
+
+def test_the_default_measure_and_preflight_refuse_a_directory_inside_the_main_checkout(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(p7_windows, "MAIN_CHECKOUT", repo.resolve())
+
+    with pytest.raises(p7_windows.RuntimeDirectoryRefusedError, match="main checkout"):
+        p7_reading._panel_measure(repo / "runtime")
+    with pytest.raises(p7_windows.RuntimeDirectoryRefusedError, match="main checkout"):
+        p7_reading._panel_preflight(repo / "runtime", p7_windows.VALIDATION)

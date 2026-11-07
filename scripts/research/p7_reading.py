@@ -26,6 +26,11 @@ a failure after the claim spends the window:
 
 `read_once` refuses, in this order, each refusal its own exception, none of them writing anything:
 
+0. `p7_windows.RuntimeDirectoryRefusedError` -- the runtime directory is inside P6's research root
+   (`~/openalpha-research`) or inside the main checkout. A read-only connection still creates
+   `catalog.duckdb.lock` and `catalog.duckdb.gate` beside the catalogue, and a read-once
+   measurement holds the catalogue's shared lock for its whole computation: the panel read is an
+   APFS clone (`cp -c`) somewhere else. This is checked before anything is read or claimed.
 1. `registry.RegistrationNotCommittedError` -- the registration is not in the committed history of
    the repository's `HEAD`, or the bytes on disk are not the bytes `HEAD` holds.
 2. `registry.SourceChangedError` -- the bound code (`registry.REGISTERED_PATHS`: `src/`,
@@ -183,6 +188,7 @@ from p7_windows import (
     DiagnosticWindowError,
     SignalPlan,
     capped_panel_store,
+    checked_runtime_directory,
     plan_signal_days,
 )
 
@@ -815,6 +821,7 @@ def _panel_preflight(
     """The default preflight: the catalogue of the panel inside `runtime_dir`, capped at `window`
     -- or, with no catalogue there, that problem, and no store opened (opening one would create its
     root)."""
+    checked_runtime_directory(runtime_dir)
 
     def preflight(body: Mapping[str, Any]) -> Sequence[str]:
         panel = runtime_dir / PANEL_SUBDIRECTORY
@@ -840,6 +847,7 @@ def _panel_measure(runtime_dir: Path) -> Measure:
     a cloned panel can afford. The document records the registration's `code_commit`, which steps
     2 and 3 of `read_once` hold the running code to.
     """
+    checked_runtime_directory(runtime_dir)
 
     def measure(
         body: Mapping[str, Any], window: DiagnosticWindow, binding: Mapping[str, Any]
@@ -920,6 +928,7 @@ def read_once(
     reading; a refusal by the data returns `{"binding", "error"}` in its place. `measure` and
     `preflight` default to the panel inside `runtime_dir`.
     """
+    checked_runtime_directory(runtime_dir)
     now = _utc_now if clock is None else clock
     root, committed = _committed_reading(registration, repo)
     registry._refuse_a_changed_source(

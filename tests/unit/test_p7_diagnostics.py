@@ -1258,3 +1258,30 @@ def test_the_help_reads_the_research_windows_dates_from_the_window_table(
     monkeypatch.setattr(p7, "WINDOWS", {"research": moved})
 
     assert "2015-02-02..2021-06-30" in explore_help()
+
+
+def test_explore_refuses_the_research_root_before_opening_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    research = tmp_path / "openalpha-research"
+    (research / "panel").mkdir(parents=True)
+    monkeypatch.setattr(p7_windows, "RESEARCH_RUNTIME", research.resolve())
+
+    code = p7.main(
+        [
+            *EXPLORE,
+            "--runtime-dir",
+            str(research / "panel"),
+            "--first",
+            "2017-01-03",
+            "--last",
+            "2017-12-29",
+            "--out",
+            str(tmp_path / "out"),
+        ]
+    )
+
+    assert code == 2
+    assert str((research / "panel").resolve()) in capsys.readouterr().err
+    assert list((research / "panel").iterdir()) == []
+    assert not (tmp_path / "out").exists()

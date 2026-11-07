@@ -86,6 +86,7 @@ from p7_windows import (
     SignalPlan,
     WindowCappedStore,
     capped_panel_store,
+    checked_runtime_directory,
     label_exit_day,
     plan_signal_days,
 )
@@ -964,6 +965,7 @@ def _open_sources(
 ) -> tuple[TradingCalendar, ScoreSource, Callable[[int], LabelSource], WindowCappedStore]:
     """The one place the command opens a store: the panel inside `runtime_dir`, capped at
     `window`, and the calendar, scores and labels read off it."""
+    checked_runtime_directory(runtime_dir)
     store = capped_panel_store(runtime_dir, window)
     calendar = load_trading_calendar(
         store,
