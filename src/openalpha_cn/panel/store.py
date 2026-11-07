@@ -1845,10 +1845,13 @@ class PanelStore:
         `panel_ingest._write_empty_partition`, reached through the door of each of its writers,
         each with its own rule -- `write_empty_announcement_year` (a statement announcement year
         in which nothing has been filed yet, only while no statutory deadline in it has passed,
-        `V2-P6-018`) and `write_empty_name_year` (a rename announcement year in which nothing
-        has been announced yet, only through
-        `domain.name_history.name_year_empty_admissible_through`, `V2-P7-021`). Every other
-        caller still gets "cannot write an empty partition batch".
+        `V2-P6-018`), `write_empty_name_year` (a rename announcement year in which nothing has
+        been announced yet, only through
+        `domain.name_history.name_year_empty_admissible_through`, `V2-P7-021`) and
+        `record_empty_universe_year` (a lifecycle year with no listing and no delisting in it
+        yet, only through
+        `domain.stock_universe.universe_year_empty_admissible_through`, `V2-P7-025`). Every
+        other caller still gets "cannot write an empty partition batch".
 
         Raises `PanelStorageError` if `dataset` is not a single, plain path segment --
         see `_validate_dataset` and the module docstring's "Dataset name validation"

@@ -31,7 +31,7 @@ exclusive bound is claimed here, and only the exclusive bound is what the contra
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -44,6 +44,8 @@ from openalpha_cn.domain.stock_universe import (
     build_stock_universe,
     listed_universe_by_trading_day,
     stock_universe_from_panel_rows,
+    universe_year_empty_admissible_through,
+    universe_year_may_be_empty,
 )
 from openalpha_cn.domain.trading_calendar import CalendarDay, build_trading_calendar
 
@@ -443,3 +445,20 @@ def test_a_stored_subject_that_is_not_a_string_is_refused() -> None:
         stock_universe_from_panel_rows(
             ((None, "listing", "1991-04-03", "SZSE"),), snapshot_date=SNAPSHOT
         )
+
+
+# --- V2-P7-025: a lifecycle year with no listing and no delisting in it yet -------------------
+
+
+def test_a_lifecycle_year_may_be_empty_through_its_own_last_day_and_not_a_day_after() -> None:
+    """`V2-P7-025`: the registry has no announcement clock -- "nothing has listed or delisted yet
+    this year" is true on any day of the year -- and the measured gap between a year's first
+    session and its first registry event runs to months (2009's first event was 6 May, 2013's
+    8 February). So the window covers the year's first session and the whole year after it, and
+    its last day is the last day. The value is the user's (plan U1), so the test reads the
+    function rather than the date, and demands only that the longest measured gap is inside it."""
+    through = universe_year_empty_admissible_through(2027)
+    assert through.year == 2027 and through >= date(2027, 5, 6)
+    assert universe_year_may_be_empty(2027, date(2027, 1, 4))
+    assert universe_year_may_be_empty(2027, through)
+    assert not universe_year_may_be_empty(2027, through + timedelta(days=1))

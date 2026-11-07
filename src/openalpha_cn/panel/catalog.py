@@ -981,13 +981,15 @@ class ReadinessRequirement:
     A zero-row partition says "nothing here yet as of its observation", and that claim has an
     expiry the writer knows and a reader must apply too. Each writer of one states its own: a
     statement announcement year may be empty only until its first statutory disclosure deadline
-    (`panel_ingest.write_empty_announcement_year`, `V2-P6-018`), and a rename announcement year
+    (`panel_ingest.write_empty_announcement_year`, `V2-P6-018`), a rename announcement year
     only through `domain.name_history.name_year_empty_admissible_through` of its year
-    (`panel_ingest.write_empty_name_year`, `V2-P7-021`); the requirement for each dataset carries
-    the same table. Read after that day, the empty partition is refused as `stale` whatever
-    `max_staleness` says -- `None` included -- because no observation made before it can say
-    nothing was published by it. The default is the strict one, for the four checks' reason: a
-    requirement that did not say an empty partition is admissible gets `stale` for it. Days are
+    (`panel_ingest.write_empty_name_year`, `V2-P7-021`), and a registry lifecycle year only
+    through `domain.stock_universe.universe_year_empty_admissible_through` of its year
+    (`panel_ingest.record_empty_universe_year`, `V2-P7-025`); the requirement for each dataset
+    carries the same table. Read after that day, the empty partition is refused as `stale`
+    whatever `max_staleness` says -- `None` included -- because no observation made before it can
+    say nothing was published by it. The default is the strict one, for the four checks' reason:
+    a requirement that did not say an empty partition is admissible gets `stale` for it. Days are
     calendar days in each partition's own `date_timezone`.
     """
 

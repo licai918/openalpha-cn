@@ -131,6 +131,40 @@ Declared here rather than in `providers/tushare.py` for the reason `TRADING_CALE
 is: `panel_ingest` reads the rows back and is pinned to importing `domain` and `panel` only.
 """
 
+UNIVERSE_YEAR_EMPTY_THROUGH: Final[tuple[int, int]] = (12, 31)
+"""`(month, day)`: the last calendar day (Asia/Shanghai, the zone every lifecycle date is in) on
+which a lifecycle year with no listing and no delisting in it yet may be recorded and read empty
+(`V2-P7-025`).
+
+`stock_basic` is fetched whole -- no date filter -- and filed by the year each lifecycle event
+falls in (`panel_ingest.write_stock_universe`), so a year in which nothing has happened yet has no
+partition, and a year with no partition is `partition_missing` to every reader. Recorded empty,
+the year answers "no listing or delisting yet"; the first real row replaces it whole, and a stored
+empty year is recorded again at the later observation.
+
+There is no statutory deadline to borrow: "nothing has happened yet this year" is true on any day
+of the year, and the measured gap between a year's first session and its first registry event runs
+to months (2009's first event was 6 May, 2013's 8 February). So the window is the year itself.
+Past it, a whole market that has held no listing and no delisting for a year is a failed fetch --
+every year 1990..2026 has events -- and an empty partition still stored is stale by rule. The
+value is the user's (decision U1 of
+`docs/superpowers/plans/2026-11-07-v2-p7-025-registry-new-year.md`)."""
+
+
+def universe_year_empty_admissible_through(year: int) -> date:
+    """The last day on which lifecycle year `year` may be read as "nothing yet this year"."""
+    month, day = UNIVERSE_YEAR_EMPTY_THROUGH
+    return date(year, month, day)
+
+
+def universe_year_may_be_empty(year: int, day: date) -> bool:
+    """Whether a lifecycle year with no event in it yet is admissible on calendar `day` (a
+    `date_timezone` date): through `universe_year_empty_admissible_through(year)` itself, not
+    after. Whether `day` is in `year` at all is the writer's question
+    (`panel_ingest.record_empty_universe_year`)."""
+    return day <= universe_year_empty_admissible_through(year)
+
+
 LIFECYCLE_EVENT_COLUMN: Final[str] = "lifecycle_event"
 LIFECYCLE_DATE_COLUMN: Final[str] = "lifecycle_date"
 UNIVERSE_EXCHANGE_COLUMN: Final[str] = "exchange"

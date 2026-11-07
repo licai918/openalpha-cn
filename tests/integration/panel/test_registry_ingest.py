@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -34,6 +34,7 @@ from openalpha_cn.domain.stock_universe import (
     UniverseHorizonError,
     build_stock_universe,
     listed_universe_by_trading_day,
+    universe_year_empty_admissible_through,
 )
 from openalpha_cn.domain.trading_calendar import (
     TRADING_CALENDAR_DATASET,
@@ -47,6 +48,7 @@ from openalpha_cn.panel_ingest import (
     load_stock_universe,
     name_history_requirement,
     panel_partition_year,
+    record_empty_universe_year,
     split_panel_batch_by_year,
     stock_universe_requirement,
     write_empty_name_year,
@@ -157,7 +159,7 @@ def _registry_batch(as_of: datetime, items: list[list[Any]] | None = None):
         transport=_Transport(
             _response(REGISTRY_FIELDS, REGISTRY_ITEMS if items is None else items)
         ),
-        clock=lambda: FETCHED_AT,
+        clock=lambda: as_of,
     )
     return provider.fetch_panel(ProviderRequest(dataset=STOCK_BASIC_DATASET, as_of=as_of))
 
@@ -801,6 +803,226 @@ def test_an_empty_rename_year_needs_a_stored_year_to_take_its_columns_from(
 ) -> None:
     with pytest.raises(PanelBatchError, match="build the year before 2027 first"):
         write_empty_name_year(_store(tmp_path), year=2027, observed_at=FIRST_EVENING_2027)
+
+
+# --- V2-P7-025: a lifecycle year with no listing and no delisting in it yet -------------------
+
+# `FIRST_EVENING_2027` (18:30 Asia/Shanghai on 4 January 2027) and `SHANGHAI` are the `021`
+# tests' own, defined above at `:647-655`; reuse them, do not redefine them.
+LISTED_2027: Final[list[list[Any]]] = [
+    *REGISTRY_ITEMS,
+    ["600999.SH", "新名字", "SSE", "主板", "L", "20270215", None],
+]
+"""The same registry, with one security listing on 15 February 2027."""
+
+
+def test_a_lifecycle_year_with_no_event_yet_is_recorded_empty_and_read_across_the_history(
+    tmp_path: Path,
+) -> None:
+    """`V2-P7-025`: the whole-registry fetch at 4 January 2027 carries no 2027 row, so the year is
+    recorded empty -- no rows, observed at the fetch, its columns taken from the fetch's own
+    newest year -- and the read that names 2027 is served: `years_read` says 2027 was read, and
+    the membership it answers for 4 January is the one it answered for 31 December, because a
+    year with no event in it adds nothing to the universe."""
+    store = _seed_registry(tmp_path)
+    batch = _registry_batch(FIRST_EVENING_2027)
+
+    refs = record_empty_universe_year(store, batch)
+
+    assert [(ref.dataset, ref.year, ref.row_count) for ref in refs] == [
+        (STOCK_BASIC_DATASET, 2027, 0)
+    ]
+    coverage = store.read_coverage(STOCK_BASIC_DATASET, 2027)
+    template = store.read_coverage(STOCK_BASIC_DATASET, 2026)
+    assert coverage is not None and template is not None
+    assert coverage.row_count == 0
+    assert coverage.as_of == coverage.fetched_at == coverage.last_event_time == FIRST_EVENING_2027
+    assert coverage.max_available_time == datetime(2027, 1, 1, tzinfo=SHANGHAI)
+    assert coverage.fields == template.fields
+    universe = load_stock_universe(
+        store, years=(2027,), as_of=FIRST_EVENING_2027, max_staleness=None
+    )
+    assert universe.years_read[-1] == 2027
+    assert universe.listed_on(date(2027, 1, 4)) == universe.listed_on(date(2026, 12, 31))
+
+
+def test_a_lifecycle_year_never_written_is_still_refused_as_missing(tmp_path: Path) -> None:
+    """Verified empty is a partition that says so; a year with no partition is still missing."""
+    store = _seed_registry(tmp_path)
+    with pytest.raises(PanelStorageError, match="partition_missing"):
+        load_stock_universe(store, years=(2027,), as_of=FIRST_EVENING_2027, max_staleness=None)
+
+
+@pytest.mark.parametrize(("offset", "readable"), [(0, True), (1, False)])
+def test_an_empty_registry_year_is_unreadable_after_its_year_even_without_a_staleness_bound(
+    tmp_path: Path, offset: int, readable: bool
+) -> None:
+    """The writer's rule, applied at read time: recorded on 4 January, the year reads as "nothing
+    yet" through its window's last day and not a day later, with `max_staleness=None` -- a store
+    that never fetched the year again must not answer for it."""
+    store = _seed_registry(tmp_path)
+    record_empty_universe_year(store, _registry_batch(FIRST_EVENING_2027))
+    day = universe_year_empty_admissible_through(2027) + timedelta(days=offset)
+
+    def read() -> Any:
+        return load_stock_universe(store, years=(2027,), as_of=_evening(day), max_staleness=None)
+
+    if readable:
+        assert read().years_read[-1] == 2027
+    else:
+        with pytest.raises(PanelStorageError, match="stale by rule"):
+            read()
+
+
+def test_an_empty_registry_year_is_the_shanghai_year_of_its_observation(tmp_path: Path) -> None:
+    """00:30 on 1 January 2027 in Shanghai is still 31 December 2026 in UTC. The observation year
+    is the partition's own zone: the year that has only just begun has no listing, and 2026 --
+    which holds fourteen lifecycle rows in this fixture -- is never touched by an answer about
+    2027."""
+    store = _seed_registry(tmp_path)
+    early = datetime(2027, 1, 1, 0, 30, tzinfo=SHANGHAI)
+    before = store.read_coverage(STOCK_BASIC_DATASET, 2026)
+
+    refs = record_empty_universe_year(store, _registry_batch(early))
+
+    assert [ref.year for ref in refs] == [2027]
+    assert store.read_coverage(STOCK_BASIC_DATASET, 2026) == before
+
+
+def test_an_empty_registry_year_is_recorded_again_at_the_later_observation(
+    tmp_path: Path,
+) -> None:
+    """A stored empty year is not a fact that stops being observed: the evening of 1 June
+    records it again at its own clock, so a reader with a staleness bound stays served."""
+    store = _seed_registry(tmp_path)
+    record_empty_universe_year(store, _registry_batch(FIRST_EVENING_2027))
+    later = _evening(date(2027, 6, 1))
+
+    refs = record_empty_universe_year(store, _registry_batch(later))
+
+    coverage = store.read_coverage(STOCK_BASIC_DATASET, 2027)
+    assert [ref.year for ref in refs] == [2027]
+    assert coverage is not None and coverage.row_count == 0 and coverage.as_of == later
+
+
+def test_a_year_the_fetch_carries_is_never_recorded_empty(tmp_path: Path) -> None:
+    """2026 is in the fetch, so this writer has nothing to do -- and could only do harm."""
+    store = _seed_registry(tmp_path)
+    before = store.read_coverage(STOCK_BASIC_DATASET, 2026)
+
+    assert record_empty_universe_year(store, _registry_batch(_evening(date(2026, 12, 31)))) == ()
+    assert store.read_coverage(STOCK_BASIC_DATASET, 2026) == before
+
+
+def test_the_first_lifecycle_row_of_the_year_replaces_the_empty_partition_whole(
+    tmp_path: Path,
+) -> None:
+    """A security lists on 15 February 2027: the whole-registry write replaces the empty partition
+    whole, and from then on the writer has nothing to record for the year."""
+    store = _seed_registry(tmp_path)
+    record_empty_universe_year(store, _registry_batch(FIRST_EVENING_2027))
+
+    write_stock_universe(store, _registry_batch(_evening(date(2027, 2, 16)), LISTED_2027))
+
+    coverage = store.read_coverage(STOCK_BASIC_DATASET, 2027)
+    assert coverage is not None and coverage.row_count == 1
+    assert (
+        record_empty_universe_year(store, _registry_batch(_evening(date(2027, 2, 17)), LISTED_2027))
+        == ()
+    )
+
+
+def test_an_empty_answer_is_never_written_over_a_year_that_holds_securities(
+    tmp_path: Path,
+) -> None:
+    """A later fetch that carries no 2027 row while the store holds one is a lost fetch, not news
+    about the year: refused, and the stored row stays."""
+    store = _seed_registry(tmp_path)
+    write_stock_universe(store, _registry_batch(_evening(date(2027, 2, 16)), LISTED_2027))
+    before = store.read_coverage(STOCK_BASIC_DATASET, 2027)
+
+    with pytest.raises(PanelBatchError, match=r"year=2027 already holds 1 lifecycle row"):
+        record_empty_universe_year(store, _registry_batch(_evening(date(2027, 3, 1))))
+
+    assert store.read_coverage(STOCK_BASIC_DATASET, 2027) == before
+
+
+def test_a_replay_older_than_the_stored_year_writes_nothing_for_it(tmp_path: Path) -> None:
+    """A whole-registry fetch at an `as_of` older than the stored year's rows carries none of them
+    -- `write_stock_universe`'s own rule for a year that vanishes from a batch -- so replaying one
+    over a backfilled store must not replace them with an empty partition. Nothing is written and
+    nothing is refused."""
+    store = _seed_registry(tmp_path)
+    write_stock_universe(store, _registry_batch(_evening(date(2027, 2, 16)), LISTED_2027))
+    before = store.read_coverage(STOCK_BASIC_DATASET, 2027)
+
+    refs = record_empty_universe_year(store, _registry_batch(FIRST_EVENING_2027))
+
+    assert refs == ()
+    assert store.read_coverage(STOCK_BASIC_DATASET, 2027) == before
+
+
+def test_a_no_data_registry_fetch_is_not_recorded_as_an_empty_year(tmp_path: Path) -> None:
+    """A whole-registry answer with no row at all is a failed fetch -- an empty *market* -- not a
+    year in which nothing happened. Refused by name; no partition appears."""
+    store = _seed_registry(tmp_path)
+    empty = _registry_batch(FIRST_EVENING_2027, [])
+    assert empty.status == "no_data"
+
+    with pytest.raises(PanelBatchError, match="cannot record a lifecycle year empty"):
+        record_empty_universe_year(store, empty)
+
+    assert 2027 not in store.registered_years(STOCK_BASIC_DATASET)
+
+
+def test_the_registry_requirement_carries_the_empty_year_window_every_reader_needs() -> None:
+    """One requirement, built by `load_stock_universe` itself, so `factor_view`, `model_view`, the
+    doctor, the statement sweep and the shortlist all get the rule without a call site changing."""
+    requirement = stock_universe_requirement(
+        years=(2026, 2027), as_of=FIRST_EVENING_2027, max_staleness=None
+    )
+    assert requirement.empty_admissible_through == {
+        year: universe_year_empty_admissible_through(year) for year in (2026, 2027)
+    }
+
+
+def test_the_skipped_year_refusal_still_fires_beside_an_empty_year(tmp_path: Path) -> None:
+    """The gap rule is about the years a read names, not about how many rows a year holds: with
+    2027 recorded empty, a read that drops 2020 -- which the store holds -- is still refused."""
+    store = _seed_registry(tmp_path)
+    record_empty_universe_year(store, _registry_batch(FIRST_EVENING_2027))
+    years = tuple(year for year in REGISTRY_YEARS if year != 2020)
+
+    with pytest.raises(PanelBatchError, match=r"skip \[2020\], which the store holds"):
+        load_stock_universe(store, years=years, as_of=FIRST_EVENING_2027, max_staleness=None)
+
+
+def test_an_empty_year_satisfies_a_coverage_demand_but_a_hole_still_does_not(
+    tmp_path: Path,
+) -> None:
+    """`require_years_through` asks which years the read *names*, so an empty year that is named
+    satisfies it and a year that is not named is still a hole -- the demand is neither tightened
+    nor loosened by `V2-P7-025`."""
+    store = _seed_registry(tmp_path)
+    record_empty_universe_year(store, _registry_batch(FIRST_EVENING_2027))
+
+    demanded = load_stock_universe(
+        store,
+        years=(2026, 2027),
+        as_of=FIRST_EVENING_2027,
+        max_staleness=None,
+        require_years_through=2027,
+    )
+    assert demanded.years_read[-1] == 2027
+
+    with pytest.raises(PanelBatchError, match="does not read"):
+        load_stock_universe(
+            store,
+            years=(2026,),
+            as_of=FIRST_EVENING_2027,
+            max_staleness=None,
+            require_years_through=2027,
+        )
 
 
 # --- the name history and ST ---------------------------------------------------------------

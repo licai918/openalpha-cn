@@ -20,6 +20,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import Final
 
 import pytest
 
@@ -56,6 +57,7 @@ from openalpha_cn.panel_ingest import (
     UPSTREAM_DEFECTS_DATASET,
     load_stock_universe,
     load_suspensions,
+    record_empty_universe_year,
     write_adjustment_factors,
     write_daily_panel,
     write_financial_statements,
@@ -1681,6 +1683,57 @@ def test_each_dataset_can_be_asked_about_its_own_years(tmp_path: Path) -> None:
     assert [finding.datasets[0] for finding in report.findings_with_code("partition_missing")] == [
         ADJ_FACTOR_DATASET
     ]
+
+
+FIRST_EVENING_2027_UTC: Final[datetime] = datetime(2027, 1, 4, 10, 30, tzinfo=UTC)
+"""18:30 Asia/Shanghai on 2027's first session, as this file's clocks are UTC instants."""
+
+
+def _registry_batch_fetched_at(as_of: datetime) -> ColumnarPanelBatch:
+    """The seeded registry's own rows, fetched a year later: the same 2026 listings and no 2027
+    lifecycle event."""
+    batch = universe_batch()
+    return _batch(
+        STOCK_BASIC_DATASET,
+        subjects=batch.subjects,
+        columns=batch.columns,
+        event_time=batch.timeline.event_time,
+        available_time=batch.timeline.available_time,
+        fetched_at=as_of,
+    )
+
+
+def test_an_empty_registry_year_is_a_normal_state_and_the_year_after_it_is_stale(
+    tmp_path: Path,
+) -> None:
+    """`V2-P7-025`: the doctor asks the registry through `stock_universe_requirement`, the same
+    requirement every reader uses, so a lifecycle year recorded empty on its first session is
+    `ready` with no finding and no warning -- nothing was unavailable, so a `check_unavailable`
+    note would be false -- and the day after that year it is `stale` like any other read."""
+    store = seed(tmp_path)
+    record_empty_universe_year(store, _registry_batch_fetched_at(FIRST_EVENING_2027_UTC))
+
+    healthy = report_for(
+        store,
+        as_of=FIRST_EVENING_2027_UTC,
+        datasets=(STOCK_BASIC_DATASET,),
+        years_by_dataset={STOCK_BASIC_DATASET: (2027,)},
+    )
+    assert healthy.dataset(STOCK_BASIC_DATASET).readiness.state == "ready"
+    assert [
+        finding.code for finding in healthy.findings if STOCK_BASIC_DATASET in finding.datasets
+    ] == []
+
+    after = report_for(
+        store,
+        as_of=datetime(2028, 1, 4, 10, 30, tzinfo=UTC),
+        datasets=(STOCK_BASIC_DATASET,),
+        years_by_dataset={STOCK_BASIC_DATASET: (2027,)},
+    )
+    assert after.dataset(STOCK_BASIC_DATASET).readiness.state == "blocked"
+    assert [
+        finding.code for finding in after.findings if STOCK_BASIC_DATASET in finding.datasets
+    ] == ["stale"]
 
 
 def test_a_cross_check_reads_each_dataset_over_its_own_years_not_the_price_panels(

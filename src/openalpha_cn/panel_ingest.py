@@ -439,6 +439,8 @@ from openalpha_cn.domain.stock_universe import (
     UNIVERSE_PANEL_COLUMNS,
     StockUniverse,
     stock_universe_from_panel_rows,
+    universe_year_empty_admissible_through,
+    universe_year_may_be_empty,
 )
 from openalpha_cn.domain.trading_calendar import (
     CALENDAR_PANEL_COLUMNS,
@@ -1102,6 +1104,12 @@ def stock_universe_requirement(
     unlike the calendar's -- a registry whose newest lifecycle event is a year old is a
     registry that has missed a year of listings -- so leaving it to a default would be
     choosing silence.
+
+    `empty_admissible_through` is the third thing this requirement states, and it is not a
+    waiver: a lifecycle year the writer recorded empty (`record_empty_universe_year`,
+    `V2-P7-025`) is readable through its own last day and `stale` after it, because a whole
+    market with no listing and no delisting for a year is a failed fetch rather than a quiet
+    year (`catalog.ReadinessRequirement.empty_admissible_through`).
     """
     return ReadinessRequirement(
         dataset=STOCK_BASIC_DATASET,
@@ -1111,6 +1119,11 @@ def stock_universe_requirement(
         required_subjects=None,
         required_fields=UNIVERSE_PANEL_COLUMNS,
         max_staleness=max_staleness,
+        # `V2-P7-025`: a lifecycle year recorded empty is readable only within that year -- the
+        # writer's own rule (`record_empty_universe_year`).
+        empty_admissible_through={
+            year: universe_year_empty_admissible_through(year) for year in sorted(set(years))
+        },
     )
 
 
@@ -7433,8 +7446,9 @@ def _write_empty_partition(
     date_timezone: str,
 ) -> PartitionRef:
     """One zero-row partition of `dataset` for `year`, in `template`'s columns, observed at
-    `observed_at`: the write `write_empty_announcement_year` (`V2-P6-018`) and
-    `write_empty_name_year` (`V2-P7-021`) share. Every check is the caller's; this only writes.
+    `observed_at`: the write `write_empty_announcement_year` (`V2-P6-018`),
+    `write_empty_name_year` (`V2-P7-021`) and `record_empty_universe_year` (`V2-P7-025`) share.
+    Every check is the caller's; this only writes.
 
     ## What the coverage record says, and why it cannot answer stale data
 
@@ -7559,6 +7573,108 @@ def write_empty_name_year(
         template=template,
         reason=reason,
         date_timezone=date_timezone,
+    )
+
+
+def record_empty_universe_year(
+    store: PanelStore,
+    batch: ColumnarPanelBatch,
+    *,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> tuple[PartitionRef, ...]:
+    """Record the observation year of a whole-registry fetch as empty, when the fetch carries no
+    lifecycle row for it (`V2-P7-025`).
+
+    `stock_basic` has no date filter: one request is the whole registry and
+    `write_stock_universe` files it by the year each lifecycle event falls in. A year in which
+    nothing has listed and nothing has delisted is therefore simply absent from the split -- the
+    fetch succeeded and every year that did have events was written -- and a year with no
+    partition is `partition_missing` to every reader, so a year's first sessions could not build
+    factors (`factor_view._PanelInputs`) or read the weekly report's labels
+    (`model_view._LabelInputs`). "No listing or delisting yet this year" is a true answer on
+    those days, given honestly by a partition that says so and says when it was observed; the
+    first write of a real row replaces it whole, and a stored empty year is recorded again at the
+    later observation. What its coverage record says, and why it cannot answer stale data, is
+    `_write_empty_partition`'s; the writer's expiry is
+    `domain.stock_universe.universe_year_empty_admissible_through`.
+
+    **Called after `write_stock_universe`, never instead of it.** That function keeps one job --
+    write the years the fetch carries -- and its "every year vetted before any year is written"
+    pass is untouched. A refusal here therefore leaves the fetched years written, which is an
+    ordinary `panel build` outcome (the command names what it wrote) and not the hole in the
+    lifecycle years that pass exists to prevent: the empty year is the newest, and an absent
+    newest year is the state a store is in before its year's first event -- never a gap between
+    two years a read covers.
+
+    Refused (`PanelBatchError`) when it could hide something: a batch that is not a successful
+    whole-registry fetch (a `no_data` answer carries no row at all -- an empty *market*, which
+    `write_stock_universe` refuses first), a fetch whose observation day is past the year's
+    window, and a year the store already holds rows for when this fetch is at or after the
+    observation that wrote them (an empty answer over stored securities would unlist them). A
+    fetch *older* than the stored year writes nothing for it and is not refused: that is the rule
+    `write_stock_universe` states for a year that vanishes from a batch, and replaying an earlier
+    `as_of` over a backfilled store must not destroy what a later one wrote.
+
+    Returns the partitions it wrote -- none when the fetch carries the observation year, or when
+    it is older than what the store holds for it.
+    """
+    if batch.dataset != STOCK_BASIC_DATASET:
+        raise PanelBatchError(
+            f"expected the {STOCK_BASIC_DATASET!r} dataset, got {batch.dataset!r}"
+        )
+    if batch.status != "success":
+        raise PanelBatchError(
+            f"cannot record a lifecycle year empty from a {batch.status!r} batch: "
+            f"{batch.no_data_reason!r}; a whole-registry answer with no row at all is a failed "
+            "fetch, not a year in which nothing happened"
+        )
+    zone = _resolve_timezone(date_timezone)
+    day = batch.as_of.astimezone(zone).date()
+    observation_year = day.year
+    if not universe_year_may_be_empty(observation_year, day):
+        raise PanelBatchError(
+            f"{STOCK_BASIC_DATASET} lifecycle year {observation_year} would be recorded empty at "
+            f"{batch.as_of.isoformat()}, which is past the year's window "
+            f"({universe_year_empty_admissible_through(observation_year).isoformat()}); a whole "
+            "market that has held no listing and no delisting for a year is a failed fetch"
+        )
+    by_year = split_panel_batch_by_year(batch, date_timezone=date_timezone)
+    if not by_year:
+        raise PanelBatchError(
+            f"this {STOCK_BASIC_DATASET} fetch carries no lifecycle row at all, so it has no "
+            f"year to take year={observation_year}'s columns from; a whole-registry answer with "
+            "nothing in it is a failed fetch"
+        )
+    if any(year == observation_year for year, _yearly in by_year):
+        return ()
+    stored = store.read_coverage(STOCK_BASIC_DATASET, observation_year)
+    if stored is not None and stored.row_count:
+        if batch.as_of >= stored.as_of:
+            raise PanelBatchError(
+                f"{STOCK_BASIC_DATASET} year={observation_year} already holds "
+                f"{stored.row_count} lifecycle row(s) observed at {stored.as_of.isoformat()}, and "
+                f"this fetch at {batch.as_of.isoformat()} carries none for it; an empty answer "
+                "now would replace them with nothing, which is a lost fetch and not a fact about "
+                "the year"
+            )
+        return ()
+    newest_year, newest = by_year[-1]
+    template = panel_coverage(newest, year=newest_year, date_timezone=date_timezone)
+    reason = (
+        f"no {STOCK_BASIC_DATASET} listing or delisting in {observation_year} as of "
+        f"{batch.as_of.isoformat()}; the year may be read empty through "
+        f"{universe_year_empty_admissible_through(observation_year).isoformat()}"
+    )
+    return (
+        _write_empty_partition(
+            store,
+            dataset=STOCK_BASIC_DATASET,
+            year=observation_year,
+            observed_at=batch.as_of,
+            template=template,
+            reason=reason,
+            date_timezone=date_timezone,
+        ),
     )
 
 
