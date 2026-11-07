@@ -495,3 +495,112 @@ def test_a_labels_exit_is_the_planners_rule_and_none_past_the_calendar() -> None
     assert p7_windows.label_exit_day(calendar, day, 1) == date(2021, 12, 27)
     assert p7_windows.label_exit_day(calendar, day, 6) is None
     assert p7_windows.label_exit_day(calendar, date(2021, 12, 31), 1) is None
+
+
+def _smoke_env() -> ModuleType:
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    return importlib.import_module("p7_smoke_env")
+
+
+@pytest.mark.parametrize("where", ["research", "checkout"])
+def test_a_runtime_directory_on_the_research_root_or_the_main_checkout_is_refused(
+    tmp_path: Path, where: str
+) -> None:
+    """A read-only connection still creates catalog.duckdb.lock/.gate beside the catalogue
+    (panel/store.py:1309-1364), and a read-once measurement holds the catalogue's shared lock
+    for its whole computation (store.py:2206-2222): neither root may be opened in place."""
+    home = tmp_path / "home"
+    research = home / "openalpha-research"
+    checkout = tmp_path / "checkout"
+    (research / "panel").mkdir(parents=True)
+    (checkout / "runtime").mkdir(parents=True)
+    runtime = research / "panel" if where == "research" else checkout / "runtime"
+
+    with pytest.raises(p7_windows.RuntimeDirectoryRefusedError) as raised:
+        p7_windows.checked_runtime_directory(
+            runtime, research_runtime=research, main_checkout=checkout
+        )
+
+    said = str(raised.value)
+    assert str(runtime.resolve()) in said
+    assert ("openalpha-research" if where == "research" else "main checkout") in said
+    assert list((research / "panel").iterdir()) == []
+
+
+def test_a_clone_under_the_home_directory_is_not_refused(tmp_path: Path) -> None:
+    """Task 7 and the real read both run on a cp -c clone; a clone is neither P6's root nor a
+    checkout, and a name that merely starts with the research root's is another directory."""
+    home = tmp_path / "home"
+    research = home / "openalpha-research"
+    checkout = tmp_path / "checkout"
+    (research / "panel").mkdir(parents=True)
+    (checkout / "runtime").mkdir(parents=True)
+    clone = home / "p7-panel-clone"
+    (clone / "panel").mkdir(parents=True)
+
+    assert (
+        p7_windows.checked_runtime_directory(
+            clone / "panel", research_runtime=research, main_checkout=checkout
+        )
+        == (clone / "panel").resolve()
+    )
+    assert (
+        p7_windows.checked_runtime_directory(
+            home / "openalpha-research-clone", research_runtime=research, main_checkout=checkout
+        )
+        == (home / "openalpha-research-clone").resolve()
+    )
+
+
+def test_a_runtime_directory_spelled_in_another_case_on_a_case_blind_volume_is_refused(
+    tmp_path: Path,
+) -> None:
+    """APFS ignores case by default and `resolve()` keeps the case it is given: a path spelled
+    `OpenAlpha-Research` is inside `openalpha-research` (the smoke's rule, copied)."""
+    research = tmp_path / "home" / "openalpha-research"
+    (research / "panel").mkdir(parents=True)
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    spelled = tmp_path / "home" / "OpenAlpha-Research"
+    if not spelled.exists():
+        pytest.skip("this volume tells case apart: another case names another directory")
+
+    with pytest.raises(p7_windows.RuntimeDirectoryRefusedError, match="openalpha-research"):
+        p7_windows.checked_runtime_directory(
+            spelled / "panel", research_runtime=research, main_checkout=checkout
+        )
+
+
+def test_the_two_refusals_are_the_smokes_path_policy(tmp_path: Path) -> None:
+    """The rules are the smoke's, not a second copy of them: the same three paths are accepted
+    and refused by both, with the smoke's whitespace and temporary-directory rules left out."""
+    env = _smoke_env()
+    home = tmp_path / "home"
+    research = home / "openalpha-research"
+    checkout = tmp_path / "checkout"
+    (research / "panel").mkdir(parents=True)
+    (checkout / "runtime").mkdir(parents=True)
+    clone = home / "clone"
+    clone.mkdir()
+    policy = env.PathPolicy(
+        temporary_roots=(),
+        main_checkout=checkout.resolve(),
+        research_runtime=research.resolve(),
+    )
+
+    for where in (research / "panel", checkout / "runtime", clone):
+        try:
+            policy.checked("runtime directory", where)
+            smoke_refused = False
+        except env.SmokeEnvironmentError:
+            smoke_refused = True
+        try:
+            p7_windows.checked_runtime_directory(
+                where, research_runtime=research, main_checkout=checkout
+            )
+            mine_refused = False
+        except p7_windows.RuntimeDirectoryRefusedError:
+            mine_refused = True
+        assert mine_refused == smoke_refused, where

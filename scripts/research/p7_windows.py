@@ -55,6 +55,7 @@ What the code that uses this module must do (none of it is enforced here):
 
 from __future__ import annotations
 
+import os
 import threading
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -93,9 +94,74 @@ READ_ONCE_NOTE: Final[str] = (
 """What every refusal for reaching past a window says about the way past it, and about what a
 year cap does not do."""
 
+RESEARCH_RUNTIME: Final[Path] = (Path.home() / "openalpha-research").resolve()
+"""P6's run directory: its `panel` is the store a P7 diagnostic must never open in place."""
+
+MAIN_CHECKOUT: Final[Path] = Path(__file__).resolve().parents[2]
+"""The checkout this module runs from -- `daily_selection.REPOSITORY`'s rule, read off this
+file: scripts/research/p7_windows.py -> scripts/ -> the repository root."""
+
 
 class DiagnosticWindowError(ValueError):
     """A read, a write or a plan that leaves, or would leave, the window it was built for."""
+
+
+class RuntimeDirectoryRefusedError(DiagnosticWindowError):
+    """A runtime directory a P7 diagnostic may not open: P6's research root or a checkout."""
+
+
+def _within(path: Path, root: Path) -> bool:
+    """Whether `path` is `root` or under it, by spelling and, for an existing `root`, by identity
+    (`scripts/p7_smoke_env._within`, copied: APFS ignores case, and `Path.resolve()` keeps the
+    case it is given)."""
+    if any(path == base or base in path.parents for base in {root, root.resolve()}):
+        return True
+    try:
+        identity = os.stat(root)
+    except OSError:
+        return False
+    for ancestor in (path, *path.parents):
+        try:
+            if os.path.samestat(os.stat(ancestor), identity):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def checked_runtime_directory(
+    runtime_dir: Path,
+    *,
+    research_runtime: Path | None = None,
+    main_checkout: Path | None = None,
+) -> Path:
+    """`runtime_dir` resolved, or `RuntimeDirectoryRefusedError` naming the rule and the path.
+
+    A read-only connection still creates `catalog.duckdb.lock` and `catalog.duckdb.gate` beside
+    the catalogue (`panel/store.py:1309-1364` opens both `O_RDWR | O_CREAT`), and a read-once
+    measurement holds the catalogue's shared side for its whole computation
+    (`panel/store.py:2206-2222`). The panel a diagnostic opens is therefore a clone (`cp -c`),
+    never P6's research root and never a checkout.
+    """
+    research = RESEARCH_RUNTIME if research_runtime is None else research_runtime
+    checkout = MAIN_CHECKOUT if main_checkout is None else main_checkout
+    resolved = runtime_dir.expanduser().resolve()
+    if _within(resolved, research.resolve()):
+        raise RuntimeDirectoryRefusedError(
+            f"the runtime directory {resolved} is inside {research.resolve()}, P6's research "
+            "root: a read-only connection still creates catalog.duckdb.lock and "
+            "catalog.duckdb.gate beside the catalogue, and a read-once measurement holds the "
+            "catalogue's shared lock for its whole computation; read an APFS clone (`cp -c`) of "
+            "the panel instead"
+        )
+    if _within(resolved, checkout.resolve()):
+        raise RuntimeDirectoryRefusedError(
+            f"the runtime directory {resolved} is inside the main checkout "
+            f"{checkout.resolve()}: a panel never lives in the repository, and a run there "
+            "creates catalog.duckdb.lock and catalog.duckdb.gate in it; read a clone outside "
+            "every checkout"
+        )
+    return resolved
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
