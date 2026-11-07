@@ -13,6 +13,12 @@ a default (they are the user's); a `secondary` one carries none. Every rule `reg
 applies is applied again by `read_once` before its claim, so a registration written by hand is
 held to the same ones.
 
+The command for the read is `scripts/research/p7_read.py` (`register [--dry-run]` and `read`); it
+is a thin front end, and the library path stays `read_once`. Its exit codes are 0 (the
+registration or the result was written), 2 (usage, or a `ReadingError` the registration cannot be
+written with), 3 (refused before the claim) and 4 (`ExpectedPeriodsMismatch`: the calendar's count
+is not the prior -- stop and report, nothing was written or claimed).
+
 Whatever can be checked without outcome data is checked there, before anything is claimed, because
 a failure after the claim spends the window:
 
@@ -27,7 +33,13 @@ a failure after the claim spends the window:
   `plan_signal_days` applies and the sampling `summarize` uses; a rule above it is refused at
   registration when a `runtime_dir` is given, and before the claim by `read_once`'s default
   preflight, with the exact number in the message. A larger rule could only ever be
-  "not measurable".
+  "not measurable";
+* a primary registration's `expected_periods` -- the exact number of non-overlapping periods the
+  plan expects this window's calendar to hold -- is checked against that same exact bound at
+  registration (when a `runtime_dir` is given), by `_panel_preflight` before any claim, and by the
+  command's own pre-check. The tool computes the count; a count other than the prior is an
+  `ExpectedPeriodsMismatch` and stops the procedure -- it is reported, never adjusted to match the
+  calendar. A secondary reading carries no count.
 
 `read_once` refuses, in this order, each refusal its own exception, none of them writing anything:
 
@@ -76,7 +88,10 @@ a failure after the claim spends the window:
    outcome data -- to check the stop rule's `minimum_periods`): the window's years for every
    dataset, and the year before as well for those that read it (`YEAR_BEFORE_DATASETS`: the
    calendar, the label reader's and the facts day's) -- not for `stk_limit` and the factor
-   datasets, which are read for signal days only. Other datasets are still only listed: a
+   datasets, which are read for signal days only. The same preflight checks the primary
+   reading's stop rule `minimum_periods`, and the exact `expected_periods` it records, against
+   the calendar's count (one arithmetic, `_exact_most_periods`; a count other than the prior is
+   a named problem here, before the claim). Other datasets are still only listed: a
    partition that is listed but incomplete, or a signal day without a factor build, is met by
    the measurement, after the claim.
 
@@ -309,6 +324,7 @@ _BODY_KEYS: Final = frozenset(
         "request",
         "config",
         "stop_rule",
+        "expected_periods",
         "code_commit",
         "as_of_reason",
     }
@@ -336,9 +352,16 @@ class ReadingAlreadyClaimedError(registry.HoldoutRefusedError):
     """The reading was claimed already, has a result, or had its claim or result committed."""
 
 
+class ExpectedPeriodsMismatch(ReadingError):
+    """The panel's calendar does not hold the number of periods the plan expects. It is its own
+    error so the command can stop with an exit code of its own (4): a count that is not the
+    prior is reported, never adjusted to match the calendar, and nothing is written or claimed."""
+
+
 class ReadingPreflightError(registry.HoldoutRefusedError):
     """The check before the claim found a year of the window missing, a calendar the stop
-    rule's bound needs unreadable, or a `minimum_periods` the calendar cannot reach."""
+    rule's bound needs unreadable, a `minimum_periods` the calendar cannot reach, or a calendar
+    that does not make the `expected_periods` the registration records."""
 
 
 class ForeignP7ScriptsError(registry.HoldoutRefusedError):
@@ -464,6 +487,7 @@ def register_reading(
     stop_rule: StopRule | None,
     code_commit: str,
     as_of_reason: str,
+    expected_periods: int | None = None,
     runtime_dir: Path | None = None,
 ) -> str:
     """Write the reading's registration to `path` and return the SHA-256 of its bytes.
@@ -489,11 +513,20 @@ def register_reading(
     the knowledge the reading is taken under: an `as_of` may be long after the window (the year
     cap, not `as_of`, enforces the economic date), and every partition is read as it stood at
     `as_of`, so later revisions and late renames enter in-window sessions' scores. It must be a
-    non-empty single line (refused otherwise) and the result's text prints it verbatim. The body
-    this writes is a new format: no registration existed before the field, so `READING_SCHEMA`'s
-    `.../v1` is its first format and adding the field needs no migration -- this body is not one
-    of hard rule 3's contract rows (it is admitted by `_BODY_KEYS` and `_registration_of` by hand,
-    with no pydantic model and no `extra="forbid"`).
+    non-empty single line (refused otherwise) and the result's text prints it verbatim.
+
+    `expected_periods` is the exact number of non-overlapping periods the plan expects the
+    window's calendar to hold. A `primary` reading must carry it and a `secondary` one must not;
+    it is checked three times, always through the same arithmetic (`_exact_most_periods`): here
+    when a `runtime_dir` is given (a mismatch is an `ExpectedPeriodsMismatch` and nothing is
+    written), by `_panel_preflight` before any claim, and by the command's own pre-check. A
+    calendar that makes a different count stops the procedure -- the prior is reported, never
+    edited to match the calendar.
+
+    The body this writes is a new format: no registration existed before `as_of_reason` and
+    `expected_periods`, so `READING_SCHEMA`'s `.../v1` is its first format and adding the fields
+    needs no migration -- this body is not one of hard rule 3's contract rows (it is admitted by
+    `_BODY_KEYS` and `_registration_of` by hand, with no pydantic model and no `extra="forbid"`).
     """
     try:
         request_form = grid.to_json_value(dict(request))
@@ -509,6 +542,7 @@ def register_reading(
         "request": request_form,
         "config": config_form,
         "stop_rule": None if stop_rule is None else _rule_form(stop_rule),
+        "expected_periods": expected_periods,
         "code_commit": code_commit,
         "as_of_reason": as_of_reason,
     }
@@ -549,6 +583,14 @@ def register_reading(
                         most=most,
                     )
                 )
+            problem = expected_periods_problem(
+                body.get("expected_periods"),
+                most,
+                window=registered.window,
+                horizon=registered.stop_rule.horizon,
+            )
+            if problem is not None:
+                raise ExpectedPeriodsMismatch(problem)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
     return hashlib.sha256(content).hexdigest()
@@ -634,6 +676,33 @@ def _registration_of(body: Mapping[str, Any]) -> _Registration:
                 f"{explore.stride} and h={rule.horizon}; such a rule could only ever read "
                 "'not measurable'"
             )
+    expected = body.get("expected_periods")
+    if role == "primary" and rule is not None:
+        if type(expected) is not int or expected < 1:
+            raise ReadingError(
+                "a primary reading records expected_periods, the exact number of non-overlapping "
+                f"periods the plan expects this window's calendar to hold; got {expected!r}"
+            )
+        if expected < rule.minimum_periods:
+            raise ReadingError(
+                f"the stop rule's minimum_periods {rule.minimum_periods} is more than "
+                f"expected_periods {expected}: the rule could never be read at the count the "
+                "plan expects"
+            )
+        explore = settings.explore
+        most = _most_periods(
+            explore.first, explore.last, stride=explore.stride, horizon=rule.horizon
+        )
+        if expected > most:
+            raise ReadingError(
+                f"expected_periods {expected} is more than the {window.name} window's weekdays "
+                f"can hold ({most} at stride {explore.stride} and h={rule.horizon})"
+            )
+    elif expected is not None:
+        raise ReadingError(
+            "a secondary reading carries no expected_periods: it has no stop rule and no count "
+            f"to check; got {expected!r}"
+        )
     return _Registration(reading=reading, window=window, stop_rule=rule, settings=settings)
 
 
@@ -675,6 +744,40 @@ def _exact_most_periods(
         horizons=explore.horizons,
     )
     return math.ceil(len(plan.sessions) / math.ceil(horizon / explore.stride))
+
+
+def counted_periods(
+    runtime_dir: Path,
+    *,
+    window: DiagnosticWindow,
+    request: Mapping[str, Any],
+    config: Mapping[str, Any],
+    horizon: int,
+) -> int:
+    """The exact non-overlapping periods the panel's own calendar can summarise for this window,
+    read before anything is claimed (the calendar is not outcome data). The public shell of
+    `_exact_most_periods`: `register_reading`, `_panel_preflight` and the command all read the
+    count through that one arithmetic, never a second one."""
+    checked_runtime_directory(runtime_dir)
+    settings = _settings_of(request, config, window)
+    store = capped_panel_store(runtime_dir, window)
+    return _exact_most_periods(store, window=window, settings=settings, horizon=horizon)
+
+
+def expected_periods_problem(
+    expected: int | None, most: int, *, window: DiagnosticWindow, horizon: int
+) -> str | None:
+    """What is wrong when the calendar's exact count is not the registration's prior, or `None`
+    when it is (or when there is no prior to check). A mismatch stops the procedure: the message
+    says both numbers and says to report it, never to edit the prior to match the calendar."""
+    if expected is None or expected == most:
+        return None
+    return (
+        f"the panel's calendar makes exactly {most} non-overlapping periods over the "
+        f"{window.name} window {window.first}..{window.last} at h={horizon}, and the "
+        f"registration expects {expected}: the count is not what the plan expects -- stop and "
+        "report it; nothing was claimed and the window was not read"
+    )
 
 
 def _unreachable_minimum(
@@ -1037,6 +1140,11 @@ def _panel_preflight(
             )
         if rule.minimum_periods > most:
             return (_unreachable_minimum(window=window, settings=settings, rule=rule, most=most),)
+        problem = expected_periods_problem(
+            body.get("expected_periods"), most, window=window, horizon=rule.horizon
+        )
+        if problem is not None:
+            return (problem,)
         return ()
 
     return preflight

@@ -125,6 +125,8 @@ def registered(
     window: str = "validation",
     reading: str = "v2-p7-024-validation",
     as_of_reason: str = AS_OF_REASON,
+    request: Mapping[str, Any] = REQUEST,
+    expected_periods: int | None = 3,
 ) -> Path:
     path = repo / "docs" / "research" / "p7-readings" / f"{reading}.registration.json"
     p7_reading.register_reading(
@@ -133,9 +135,10 @@ def registered(
         issue="V2-P7-024",
         role=role,
         window=window,  # type: ignore[arg-type]
-        request=REQUEST,
+        request=request,
         config=CONFIG,
         stop_rule=rule,
+        expected_periods=expected_periods,
         code_commit=head(repo),
         as_of_reason=as_of_reason,
     )
@@ -209,6 +212,7 @@ def test_a_registration_is_written_once_and_names_its_code_commit(repo: Path) ->
             request={**REQUEST, "stride": 10},
             config=CONFIG,
             stop_rule=RULE,
+            expected_periods=3,
             code_commit=head(repo),
             as_of_reason=AS_OF_REASON,
         )
@@ -386,6 +390,7 @@ def register(path: Path, *, runtime_dir: Path | None = None, **changes: Any) -> 
         "request": REQUEST,
         "config": CONFIG,
         "stop_rule": RULE,
+        "expected_periods": 3,
         "code_commit": "0123456789abcdef0123456789abcdef01234567",
         "as_of_reason": AS_OF_REASON,
         "runtime_dir": runtime_dir,
@@ -573,6 +578,7 @@ def test_the_second_use_window_is_claimed_once_too(repo: Path) -> None:
             window="second_use",
             request=SECOND_USE_REQUEST,
             stop_rule=None,
+            expected_periods=None,
             code_commit=head(repo),
         )
         commit_file(repo, path, f"register {reading}", at=COMMITTED)
@@ -1065,6 +1071,7 @@ def test_a_secondary_reading_of_the_spent_holdout_has_no_stop_rule_and_says_so(r
         window="second_use",
         request=SECOND_USE_REQUEST,
         stop_rule=None,
+        expected_periods=None,
         code_commit=head(repo),
     )
     commit_file(repo, path, "register the secondary reading", at=COMMITTED)
@@ -1138,6 +1145,33 @@ def test_a_registration_the_read_could_not_use_is_refused_before_it_is_written(
 @pytest.mark.parametrize(
     ("changes", "said"),
     [
+        ({"expected_periods": None}, "expected_periods"),
+        ({"expected_periods": 2}, "minimum_periods"),
+        ({"expected_periods": 0}, "expected_periods"),
+        (
+            {
+                "role": "secondary",
+                "rule": None,
+                "window": "second_use",
+                "request": SECOND_USE_REQUEST,
+                "expected_periods": 3,
+            },
+            "expected_periods",
+        ),
+    ],
+)
+def test_a_primary_registration_records_the_period_count_the_plan_expects(
+    repo: Path, changes: dict[str, Any], said: str
+) -> None:
+    """A primary reading records the exact count it expects; a rule that could never be read at
+    that count (minimum above it) is refused; a secondary has no count."""
+    with pytest.raises(p7_reading.ReadingError, match=said):
+        registered(repo, commit=False, **changes)
+
+
+@pytest.mark.parametrize(
+    ("changes", "said"),
+    [
         # The reviewer's probe: a Saturday first day, refused by the plan only after the claim.
         ({"request": {**REQUEST, "first": "2022-01-08"}}, "after the validation window's first"),
         ({"request": {**REQUEST, "first": "2022-03-01"}}, "whole window"),
@@ -1187,7 +1221,11 @@ def test_the_data_free_bound_is_the_weekday_bound(tmp_path: Path) -> None:
     rule = p7_reading.StopRule(
         score="composite", horizon=20, minimum_periods=26, any_of=RULE.any_of
     )
-    register(tmp_path / "v2-p7-024-validation.registration.json", stop_rule=rule)
+    register(
+        tmp_path / "v2-p7-024-validation.registration.json",
+        stop_rule=rule,
+        expected_periods=26,
+    )
     assert (
         p7_reading._most_periods(
             p7_windows.VALIDATION.first, p7_windows.VALIDATION.last, stride=20, horizon=20
@@ -1255,14 +1293,32 @@ def test_a_minimum_above_what_the_panels_calendar_allows_is_refused_at_registrat
         score="composite", horizon=20, minimum_periods=26, any_of=RULE.any_of
     )
     with pytest.raises(p7_reading.ReadingError, match="at most 25"):
-        register(path, runtime_dir=calendar_panel, stop_rule=too_many)
+        register(path, runtime_dir=calendar_panel, stop_rule=too_many, expected_periods=26)
     assert not path.exists()
 
     reachable = p7_reading.StopRule(
         score="composite", horizon=20, minimum_periods=25, any_of=RULE.any_of
     )
-    register(path, runtime_dir=calendar_panel, stop_rule=reachable)
+    register(path, runtime_dir=calendar_panel, stop_rule=reachable, expected_periods=25)
     assert path.exists()
+
+
+def test_the_preflight_refuses_a_count_that_is_not_the_one_the_registration_expects(
+    repo: Path, calendar_panel: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The plan's prior is 24; this fixture's calendar makes 25. The check before the claim stops
+    the read and says both numbers -- it never adjusts the prior to match the calendar."""
+    registration = registered(repo, expected_periods=24)
+    body = json.loads(registration.read_text(encoding="utf-8"))
+    # The catalogue completeness of the other datasets is another check's; this one is the
+    # calendar's, so only it is exercised here.
+    monkeypatch.setattr(p7_reading, "preflight_problems", lambda *args, **kwargs: ())
+
+    problems = p7_reading._panel_preflight(calendar_panel, p7_windows.VALIDATION)(body)
+
+    assert problems and "exactly 25" in problems[0] and "expects 24" in problems[0]
+    assert "stop and report" in problems[0]
+    assert not claim_of(registration).exists()
 
 
 def test_a_registration_whose_calendar_cannot_be_read_writes_nothing(tmp_path: Path) -> None:
@@ -1390,6 +1446,37 @@ def test_a_stop_rule_has_a_score_a_horizon_a_minimum_and_a_clause(
     written = {"score": "composite", "horizon": 20, "minimum_periods": 3, "any_of": RULE.any_of}
     with pytest.raises(p7_reading.ReadingError, match=said):
         p7_reading.StopRule(**{**written, **rule})
+
+
+def test_the_registration_writes_the_adopted_stop_rule(repo: Path) -> None:
+    path = repo / "docs" / "research" / "p7-readings" / "v2-p7-024-validation.registration.json"
+    p7_reading.register_reading(
+        path=path,
+        reading="v2-p7-024-validation",
+        issue="V2-P7-024",
+        role="primary",
+        window="validation",
+        request=REQUEST,
+        config=CONFIG,
+        stop_rule=p7_reading.adopted_stop_rule(score="composite", expected_periods=3),
+        expected_periods=3,
+        code_commit=head(repo),
+        as_of_reason=AS_OF_REASON,
+    )
+
+    body = json.loads(path.read_text(encoding="utf-8"))
+
+    assert body["stop_rule"] == {
+        "schema": p7_reading.STOP_RULE_SCHEMA,
+        "score": "composite",
+        "horizon": 20,
+        "minimum_periods": 3,
+        "any_of": [
+            {"metric": "rank_ic", "mean_at_or_below": 0.02},
+            {"metric": "ew_minus_worst_decile", "mean_at_or_below": 0.0},
+        ],
+    }
+    assert body["expected_periods"] == 3
 
 
 def test_the_adopted_stop_rule_is_the_users_numbers_and_nothing_else() -> None:
@@ -1809,6 +1896,7 @@ def test_the_spent_holdouts_measured_document_and_text_never_say_first_out_of_sa
         window="second_use",
         request=SECOND_USE_REQUEST,
         stop_rule=None,
+        expected_periods=None,
     )
     body = json.loads(path.read_text(encoding="utf-8"))
     store = HoldingStore()
