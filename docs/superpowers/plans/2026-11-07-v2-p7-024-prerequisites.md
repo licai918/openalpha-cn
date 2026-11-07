@@ -170,12 +170,18 @@ def test_a_clone_under_the_home_directory_is_not_refused(tmp_path: Path) -> None
     clone = home / "p7-panel-clone"
     (clone / "panel").mkdir(parents=True)
 
-    assert p7_windows.checked_runtime_directory(
-        clone / "panel", research_runtime=research, main_checkout=checkout
-    ) == (clone / "panel").resolve()
-    assert p7_windows.checked_runtime_directory(
-        home / "openalpha-research-clone", research_runtime=research, main_checkout=checkout
-    ) == (home / "openalpha-research-clone").resolve()
+    assert (
+        p7_windows.checked_runtime_directory(
+            clone / "panel", research_runtime=research, main_checkout=checkout
+        )
+        == (clone / "panel").resolve()
+    )
+    assert (
+        p7_windows.checked_runtime_directory(
+            home / "openalpha-research-clone", research_runtime=research, main_checkout=checkout
+        )
+        == (home / "openalpha-research-clone").resolve()
+    )
 
 
 def test_a_runtime_directory_spelled_in_another_case_on_a_case_blind_volume_is_refused(
@@ -459,10 +465,9 @@ def test_the_preflight_refuses_a_minimum_the_windows_embargo_makes_unreachable(
         "any_of": [{"metric": "ew_minus_worst_decile", "mean_at_or_below": -1.0}],
     }
 
-    assert (
-        p7_reading._most_periods(WINDOW.first, WINDOW.last, stride=1, horizon=horizon)
-        > most
-    ), "the data-free bound would not have caught this rule"
+    assert p7_reading._most_periods(WINDOW.first, WINDOW.last, stride=1, horizon=horizon) > most, (
+        "the data-free bound would not have caught this rule"
+    )
     problems = p7_reading._panel_preflight(root, WINDOW)(registered)
     assert problems and f"at most {most}" in problems[0]
 
@@ -674,36 +679,34 @@ def _checked_runtime(runtime_dir: Path) -> Path:
 `_panel_preflight`（`:812-827`）改成：
 
 ```python
-    def preflight(body: Mapping[str, Any]) -> Sequence[str]:
-        checked_runtime_directory(runtime_dir)
-        panel = runtime_dir / PANEL_SUBDIRECTORY
-        if not (panel / CATALOG_FILE).is_file():
-            return (f"{panel} holds no {CATALOG_FILE}: there is no panel catalogue to read",)
-        settings = _settings_of(body["request"], body["config"], window)
-        store = capped_panel_store(runtime_dir, window)
-        problems = preflight_problems(
-            store, window=window, datasets=_preflight_datasets(settings.explore.book)
-        )
-        if problems:
-            return problems
-        form = body.get("stop_rule")
-        if form is None:
-            return ()
-        try:
-            rule = _rule_of(form)
-            most = _exact_most_periods(
-                store, window=window, settings=settings, horizon=rule.horizon
-            )
-        except ReadingError as error:
-            return (f"the stop rule cannot be read: {error}",)
-        except (TradingCalendarError, PanelStorageError) as error:
-            return (
-                "the calendar the stop rule's bound needs cannot be read before the claim "
-                f"({error}); the rule's minimum_periods cannot be shown reachable",
-            )
-        if rule.minimum_periods > most:
-            return (_unreachable_minimum(window=window, settings=settings, rule=rule, most=most),)
+def preflight(body: Mapping[str, Any]) -> Sequence[str]:
+    checked_runtime_directory(runtime_dir)
+    panel = runtime_dir / PANEL_SUBDIRECTORY
+    if not (panel / CATALOG_FILE).is_file():
+        return (f"{panel} holds no {CATALOG_FILE}: there is no panel catalogue to read",)
+    settings = _settings_of(body["request"], body["config"], window)
+    store = capped_panel_store(runtime_dir, window)
+    problems = preflight_problems(
+        store, window=window, datasets=_preflight_datasets(settings.explore.book)
+    )
+    if problems:
+        return problems
+    form = body.get("stop_rule")
+    if form is None:
         return ()
+    try:
+        rule = _rule_of(form)
+        most = _exact_most_periods(store, window=window, settings=settings, horizon=rule.horizon)
+    except ReadingError as error:
+        return (f"the stop rule cannot be read: {error}",)
+    except (TradingCalendarError, PanelStorageError) as error:
+        return (
+            "the calendar the stop rule's bound needs cannot be read before the claim "
+            f"({error}); the rule's minimum_periods cannot be shown reachable",
+        )
+    if rule.minimum_periods > most:
+        return (_unreachable_minimum(window=window, settings=settings, rule=rule, most=most),)
+    return ()
 ```
 
 （`settings = _settings_of(...)` 取代原来的 `book = _settings_of(...).explore.book`；其余不变。）
@@ -873,9 +876,7 @@ def _require_the_validation_window_spent(root: Path) -> None:
     prevent. The commit is looked for exactly as `_refuse_a_second_read` looks for a spent claim
     (`_LOG_EVERYTHING`): every ref, every unexpired reflog entry, every parent of every merge.
     """
-    relative = (
-        READING_DIRECTORY / f"{WINDOWS['validation'].name}{WINDOW_CLAIM_SUFFIX}"
-    ).as_posix()
+    relative = (READING_DIRECTORY / f"{WINDOWS['validation'].name}{WINDOW_CLAIM_SUFFIX}").as_posix()
     log = registry._git(root, *_LOG_EVERYTHING, "--format=%H", "--", relative)
     if log.returncode != 0:
         raise ValidationNotSpentError(
@@ -1121,9 +1122,7 @@ def test_the_recompute_keeps_the_original_refusal_when_the_readable_instant_is_n
     day = the_evening(evening_store)
     record = filed(evening_store, day.batch, tmp_path / "predictions")
     filed_at = registered_at(record)
-    monkeypatch.setattr(
-        registration_module, "_readable_instant", lambda *args, **kwargs: filed_at
-    )
+    monkeypatch.setattr(registration_module, "_readable_instant", lambda *args, **kwargs: filed_at)
 
     with pytest.raises(PartitionNotYetKnowableError):
         recompute(late_clock_store, record)

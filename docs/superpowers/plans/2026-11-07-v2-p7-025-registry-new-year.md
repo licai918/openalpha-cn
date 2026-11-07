@@ -289,9 +289,10 @@ def test_the_first_lifecycle_row_of_the_year_replaces_the_empty_partition_whole(
 
     coverage = store.read_coverage(STOCK_BASIC_DATASET, 2027)
     assert coverage is not None and coverage.row_count == 1
-    assert record_empty_universe_year(
-        store, _registry_batch(_evening(date(2027, 2, 17)), LISTED_2027)
-    ) == ()
+    assert (
+        record_empty_universe_year(store, _registry_batch(_evening(date(2027, 2, 17)), LISTED_2027))
+        == ()
+    )
 
 
 def test_an_empty_answer_is_never_written_over_a_year_that_holds_securities(
@@ -503,7 +504,7 @@ from openalpha_cn.domain.stock_universe import (
 ```
 ②`stock_universe_requirement` 的 `ReadinessRequirement(...)` 里加（`:1112-1113` 之间）：
 
-```python
+```text
         # `V2-P7-025`: a lifecycle year recorded empty is readable only within that year -- the
         # writer's own rule (`record_empty_universe_year`).
         empty_admissible_through={
@@ -788,17 +789,15 @@ def _stock_universe_year(
 `_build_targets` 的 `stock_basic` 分支改为：
 
 ```python
-    if STOCK_BASIC_DATASET in targets:
-        # `--year` does not scope this one and cannot: ... (原注释不动)
-        # `V2-P7-025`: the fetch's observation year is recorded empty when it carries no row for
-        # it -- the year has had no listing and no delisting yet -- in the same invocation, so
-        # every later step of this build (and `_stored_universe` below) reads a registry that
-        # reaches the build's own year.
-        written.setdefault(STOCK_BASIC_DATASET, []).extend(
-            _stock_universe_year(
-                store, _fetch_panel(provider, STOCK_BASIC_DATASET, as_of=now), now=now
-            )
-        )
+if STOCK_BASIC_DATASET in targets:
+    # `--year` does not scope this one and cannot: ... (原注释不动)
+    # `V2-P7-025`: the fetch's observation year is recorded empty when it carries no row for
+    # it -- the year has had no listing and no delisting yet -- in the same invocation, so
+    # every later step of this build (and `_stored_universe` below) reads a registry that
+    # reaches the build's own year.
+    written.setdefault(STOCK_BASIC_DATASET, []).extend(
+        _stock_universe_year(store, _fetch_panel(provider, STOCK_BASIC_DATASET, as_of=now), now=now)
+    )
 ```
 
 - [ ] **Step 4：运行，确认通过。** 同 Step 2 全绿；再跑本文件的 New Year 与上一年两节 `-k "new_year or year_before or first_session"`（既有测试一字不改）与 `tests/unit/scripts/test_daily_selection_survivor_day.py -k "first_session_of_a_year_runs"`（`NewYearMarket` 有 2027 退市行，空年分支不触发）。
