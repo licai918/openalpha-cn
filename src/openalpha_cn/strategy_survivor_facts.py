@@ -28,16 +28,19 @@ listing is "never heard of" (a row aged 0) to a read before that day and "known,
 row, counted) to a read after it: two reads of one signal day differ by that row and those two
 counts.
 
-**The registry's year.** `stock_basic` is filed by lifecycle year, and a fetch holds a partition
-for a year only once something listed or died in it by the fetch's `as_of`; so on a year's first
-sessions, until its first listing or delisting, the session's year has **no** registry partition
-although nothing is missing. The registry is read through the newest lifecycle year the store
-holds at or before the session's (the loader reads every stored year beneath it), which is the
-session's own year whenever that is stored. A fall-back to an earlier year is accepted only from
-a registry fetched at or after the session's 16:30 publication -- what step 2 of the daily
-command writes for the session -- and refused by name (`StaleRegistryError`) otherwise; a store
-with no lifecycle year at or before the session's has no registry and is refused too
-(`_registry_year`).
+**The registry's year.** `stock_basic` is filed by lifecycle year, and `write_stock_universe`
+holds a partition for a year only once something listed or died in it by the fetch's `as_of`. A
+year's first sessions therefore used to have no partition for the session's year although
+nothing was missing; `V2-P7-025` closed that at the writer, `panel build` recording the fetch's
+observation year as a zero-row partition when the whole-registry fetch carries no row for it
+(`panel_ingest.record_empty_universe_year`, `cli._write_registry_year`). The registry is still
+read through the newest lifecycle year the store holds at or before the session's (the loader
+reads every stored year beneath it), which is the session's own year whenever that is stored --
+the normal case now. A store without that year (one built before the record) still takes the
+fall-back, and a fall-back to an earlier year is accepted only from a registry fetched at or
+after the session's 16:30 publication -- what step 2 of the daily command writes for the
+session -- and refused by name (`StaleRegistryError`) otherwise; a store with no lifecycle year
+at or before the session's has no registry and is refused too (`_registry_year`).
 
 **A main board the adapter recognises.** `backtest.execution.security_board` files every prefix
 it does not recognise under the main board, which fails open for a main-board-only book: a new
@@ -1065,12 +1068,14 @@ def _registry_year(store: PanelStore, *, session: date, published: datetime) -> 
 
     `stock_basic` is filed by lifecycle year (`panel_ingest.write_stock_universe`), and a fetch
     holds a partition for a year only once something listed or died in it by the fetch's
-    `as_of`. On a year's first sessions, until its first listing or delisting, the store step 2
-    leaves has no partition for `session.year`, and naming that year would be refused as
-    `partition_missing` although nothing is missing. Naming the newest stored year instead reads
-    what a `session.year` partition would have added nothing to: the loader reads every stored
-    year beneath the one named, and a fetch made at or after `published` (below) that holds no
-    `session.year` row has none dated on or before the session.
+    `as_of`. Before `V2-P7-025` a year's first sessions, until its first listing or delisting,
+    left the store step 2 produces with no partition for `session.year`, and naming that year
+    was refused as `partition_missing` although nothing was missing. A `025` build records that
+    year empty (`panel_ingest.record_empty_universe_year`), so the fall-back now serves a store
+    built without that record rather than every new year. Naming the newest stored year instead
+    reads what a `session.year` partition would have added nothing to: the loader reads every
+    stored year beneath the one named, and a fetch made at or after `published` (below) that
+    holds no `session.year` row has none dated on or before the session.
 
     What the missing year used to refuse along with that -- a store no fetch has written since
     the session -- is judged on the newest year's fetch instant instead, its coverage `as_of`.

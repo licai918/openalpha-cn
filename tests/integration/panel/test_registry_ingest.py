@@ -877,7 +877,7 @@ def test_an_empty_registry_year_is_unreadable_after_its_year_even_without_a_stal
 def test_an_empty_registry_year_is_the_shanghai_year_of_its_observation(tmp_path: Path) -> None:
     """00:30 on 1 January 2027 in Shanghai is still 31 December 2026 in UTC. The observation year
     is the partition's own zone: the year that has only just begun has no listing, and 2026 --
-    which holds fourteen lifecycle rows in this fixture -- is never touched by an answer about
+    which holds one lifecycle row in this fixture -- is never touched by an answer about
     2027."""
     store = _seed_registry(tmp_path)
     early = datetime(2027, 1, 1, 0, 30, tzinfo=SHANGHAI)

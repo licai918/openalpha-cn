@@ -323,7 +323,8 @@ class ReadingAlreadyClaimedError(registry.HoldoutRefusedError):
 
 
 class ReadingPreflightError(registry.HoldoutRefusedError):
-    """The catalogue check before the claim found a year of the window missing."""
+    """The check before the claim found a year of the window missing, a calendar the stop
+    rule's bound needs unreadable, or a `minimum_periods` the calendar cannot reach."""
 
 
 class ForeignP7ScriptsError(registry.HoldoutRefusedError):

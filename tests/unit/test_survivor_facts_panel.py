@@ -1280,12 +1280,12 @@ def test_a_year_with_no_registry_event_yet_is_read_through_the_newest_stored_lif
     new_year_with_later_events_store: PanelStore,
     factor_stand_in: list[tuple[str, datetime | None]],
 ) -> None:
-    # `stock_basic` is filed by lifecycle year, and step 2's fetch has a 2026 row only once
-    # something has listed or died in 2026 by its `as_of`. On 5 January nothing has, so the store
-    # step 2 leaves holds 2025 alone, and a read that demanded a 2026 partition refused the
-    # year's first sessions until the first IPO or delisting landed. Read through the newest
-    # stored year, the day is the one a store holding 2026 gives when nothing in it is about
-    # 5 January -- byte for byte, the held statuses included.
+    # `stock_basic` is filed by lifecycle year. Since `V2-P7-025` a `panel build` whose fetch
+    # carries no row for its observation year records that year as a zero-row partition, so a
+    # 025-built store holds 2026 and reads the session's own year; this fixture is the shape a
+    # store has without that record (one built before it). Read through the newest stored year,
+    # the day is the one a store holding 2026 gives when nothing in it is about 5 January -- byte
+    # for byte, the held statuses included.
     held = (DELISTED_WITH_BARS, NEW_LISTING, UNREGISTERED)
     day = read_new_year(new_year_store, held=held)
 

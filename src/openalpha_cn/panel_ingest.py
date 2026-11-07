@@ -7458,9 +7458,11 @@ def _write_empty_partition(
     is older than it, exactly as it would be for a partition whose newest row is that old; and
     the first write of a real row replaces the partition whole. `max_available_time` is the first
     instant of the year: nothing in the partition becomes knowable later, so no reader at or after
-    the year's start is held back by it. The fields are `template`'s -- each caller passes the
-    dataset's newest stored year with rows -- so the empty partition reads back with the same
-    columns as a full one. `batch_digest` is the digest of the `no_data` batch naming `reason`.
+    the year's start is held back by it. The fields are `template`'s --
+    `write_empty_announcement_year` and `write_empty_name_year` pass the dataset's newest stored
+    year with rows, `record_empty_universe_year` the newest year of its own fetch -- so the empty
+    partition reads back with the same columns as a full one. `batch_digest` is the digest of the
+    `no_data` batch naming `reason`.
     The caller's expiry for the empty answer is applied again by every reader, through its
     requirement's `empty_admissible_through`: after it, the partition is `stale` by rule.
     """
