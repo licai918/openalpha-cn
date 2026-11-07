@@ -1873,6 +1873,101 @@ def test_a_refused_name_fetch_on_the_first_session_of_a_year_stops_the_day_at_st
     assert _aftermath(err)[0] == NO_NEW_ORDERS
 
 
+# --- V2-P7-025: the first session of a year with no listing or delisting yet -------------------
+
+
+@pytest.fixture(scope="module")
+def empty_registry_year(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The New Year market's panel through 31 December 2026, and 2027's calendar -- built on 31
+    December's clock, because the seed's own observation year must be 2026: a seed made on 4
+    January would record the empty 2027 registry year itself and the day would prove nothing.
+
+    Nothing lists and nothing delists in 2027 and no 2027 rename is announced (`V2-P7-025`): the
+    state the batch-1 fixture could only reach by removing the 4 January delisting and which the
+    existing `new_year` fixture buries. The last line asserts the property this fixture exists
+    for: the store holds no 2027 `stock_basic` partition."""
+    runtime = tmp_path_factory.mktemp("survivor-empty-registry") / "runtime"
+    market = EmptyNewYear(open_days=NEW_YEAR_DAYS, delisted=())
+    market.today = date(2026, 12, 31)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("TUSHARE_TOKEN", tds.SECRET_TOKEN)
+        patch.setattr(cli, "_panel_transport", lambda: market)
+        patch.setattr(cli, "_panel_clock", lambda: tds.WALL_CLOCK)
+        for year, targets, as_of in (
+            (2026, (*SEED_TARGETS, "namechange"), "2026-12-31T18:00:00+08:00"),
+            (2027, ("trade_cal",), "2027-01-04T12:00:00+08:00"),
+        ):
+            arguments = ["panel", "build", "--runtime-dir", str(runtime), "--year", str(year)]
+            arguments += ["--as-of", as_of, "--exchange", "SSE", "--json"]
+            for target in targets:
+                arguments += ["--dataset", target]
+            built = daily.invoke(arguments)
+            assert built.exit_code == 0, built.reason()
+    assert 2027 not in PanelStore(runtime / "panel").registered_years(STOCK_BASIC_DATASET)
+    return runtime
+
+
+def test_the_first_session_of_a_year_with_no_listing_or_delisting_runs_to_its_evening(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    empty_registry_year: Path,
+) -> None:
+    """`V2-P7-025`'s acceptance, and it is not a subset of `V2-P7-021`'s: 4 January 2027, a year
+    in which nothing has listed, delisted or been renamed. Step 2 records both corpora's years
+    empty in the same 12 requests the day makes from a 31 December evening seed: the registry's
+    costs none, because the whole-registry answer already carries every year it has rows for, and
+    the twelfth is the year before's name corpus built again past its year end (`V2-P7-016`; the
+    seed's 2026 names are that evening's build). The doctor and the gate clear, step 4 builds the
+    four factors against a registry read that names 2027 (it refused `partition_missing` without
+    the empty year, which is what the batch-1 probe measured), the facts day is served, and the
+    day runs to its record and its first evening. The next evening the empty registry year is
+    recorded again at its clock."""
+    market = EmptyNewYear(open_days=NEW_YEAR_DAYS, delisted=())
+    world = _world(
+        tmp_path,
+        monkeypatch,
+        empty_registry_year,
+        config=survivor_config(epoch=date(2026, 12, 31)),
+        market=market,
+    )
+    doctor = _calls(monkeypatch, daily, "check_panel")
+    evening = evening_of(FIRST_2027)
+
+    code, _out, err = _run(world, capsys, as_of=evening, clock=evening)
+
+    assert code == 0, err
+    assert Counter(world.market.payloads) == Counter(
+        {
+            TRADING_CALENDAR_DATASET: 1,
+            STOCK_BASIC_DATASET: 1,
+            ADJ_FACTOR_DATASET: 1,
+            SUSPENSION_DATASET: 1,
+            DAILY_DATASET: 1,
+            DAILY_BASIC_DATASET: 1,
+            PRICE_LIMIT_DATASET: 1,
+            # The session's year, and 2026's again: its names were built on the evening of 31
+            # December, so a rename announced after that build must be re-fetched (`V2-P7-016`).
+            "namechange": 2,
+            INDEX_DAILY_DATASET: 3,
+        }
+    )
+    assert [(call["session"], call["first_of_year"]) for call in doctor] == [(FIRST_2027, True)]
+    panel = PanelStore(world.runtime / "panel")
+    coverage = panel.read_coverage(STOCK_BASIC_DATASET, 2027)
+    assert coverage is not None and coverage.row_count == 0 and coverage.as_of == evening
+    journal = _journal(world, FIRST_2027)
+    assert journal["prediction"]["registered"] is True
+    assert journal["prediction"]["scored"] > 0
+    assert "result" in journal
+
+    second = date(2027, 1, 5)
+    _completed(world, capsys, second)
+    again = panel.read_coverage(STOCK_BASIC_DATASET, 2027)
+    assert again is not None and again.row_count == 0
+    assert again.as_of == evening_of(second)
+
+
 # --- V2-P7-009: a book held into the first session of a year, across an ex-rights date ---------
 # (plan B, Task B2: tests only; the block ends at the next section rule)
 
