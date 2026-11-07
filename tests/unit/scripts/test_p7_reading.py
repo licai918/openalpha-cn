@@ -72,6 +72,10 @@ CONFIG: Final[dict[str, Any]] = {
     "max_carry_sessions": 250,
     "as_of": "2026-10-09T00:00:00+08:00",
 }
+AS_OF_REASON: Final[str] = (
+    "the 2026-10-09 08:00 panel is the newest snapshot before the code freeze, and every "
+    "revision published before it is part of what the reading may know"
+)
 RULE = p7_reading.StopRule(
     score="composite",
     horizon=20,
@@ -119,6 +123,7 @@ def registered(
     rule: Any = RULE,
     window: str = "validation",
     reading: str = "v2-p7-024-validation",
+    as_of_reason: str = AS_OF_REASON,
 ) -> Path:
     path = repo / "docs" / "research" / "p7-readings" / f"{reading}.registration.json"
     p7_reading.register_reading(
@@ -131,6 +136,7 @@ def registered(
         config=CONFIG,
         stop_rule=rule,
         code_commit=head(repo),
+        as_of_reason=as_of_reason,
     )
     if commit:
         commit_file(repo, path, "register the reading", at=COMMITTED)
@@ -203,6 +209,7 @@ def test_a_registration_is_written_once_and_names_its_code_commit(repo: Path) ->
             config=CONFIG,
             stop_rule=RULE,
             code_commit=head(repo),
+            as_of_reason=AS_OF_REASON,
         )
 
 
@@ -219,6 +226,14 @@ def test_a_registration_that_could_not_be_read_once_is_refused(
 ) -> None:
     with pytest.raises(p7_reading.ReadingError, match=said):
         registered(repo, commit=False, **changes)
+
+
+@pytest.mark.parametrize("reason", ["", "   ", "one line\nand a second"])
+def test_a_registration_says_why_its_as_of_is_the_knowledge_it_reads(
+    repo: Path, reason: str
+) -> None:
+    with pytest.raises(p7_reading.ReadingError, match="as_of"):
+        registered(repo, commit=False, as_of_reason=reason)
 
 
 def test_the_claim_is_written_before_the_read_and_the_result_after(repo: Path) -> None:
@@ -322,6 +337,17 @@ def test_the_result_text_opens_with_the_read_once_banner(repo: Path) -> None:
     assert p7_reading.NOT_TRIGGERED_WORDING in text
 
 
+def test_the_result_says_which_knowledge_clock_the_reading_is_under(repo: Path) -> None:
+    registration = registered(repo)
+
+    run(registration, repo, Measure())
+
+    text = registration.with_name("v2-p7-024-validation.result.txt").read_text(encoding="utf-8")
+    assert "read under the knowledge at 2026-10-09T00:00:00+08:00" in text
+    assert AS_OF_REASON in text
+    assert "not a replay at each session's publication instant" in text
+
+
 def test_only_a_read_once_document_bound_to_this_claim_is_written(repo: Path) -> None:
     """A measure that hands back an exploratory document (or one bound to another claim) is not
     this read's result: refused by name, and the read is spent -- the claim stays."""
@@ -359,6 +385,7 @@ def register(path: Path, *, runtime_dir: Path | None = None, **changes: Any) -> 
         "config": CONFIG,
         "stop_rule": RULE,
         "code_commit": "0123456789abcdef0123456789abcdef01234567",
+        "as_of_reason": AS_OF_REASON,
         "runtime_dir": runtime_dir,
     }
     return p7_reading.register_reading(**{**arguments, **changes})  # type: ignore[no-any-return]
@@ -1778,6 +1805,7 @@ def registered_second_use(repo: Path) -> Path:
         config=CONFIG,
         stop_rule=None,
         code_commit=head(repo),
+        as_of_reason=AS_OF_REASON,
     )
     commit_file(repo, path, "register the secondary reading", at=COMMITTED)
     return path

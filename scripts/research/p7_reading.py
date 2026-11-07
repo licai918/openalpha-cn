@@ -150,6 +150,12 @@ What this does not establish:
   build, is met by the measurement, after the claim -- and the read is spent on it.
 * The second-use store serves 2026 whole, rows after 2026-09-24 included; keeping them out is the
   plan's label rule and the readers' (`p7_windows`), not the store's.
+* The reading is taken under the knowledge at its registered `as_of`, not replayed at each
+  session's publication instant: every partition is read as it stood at `as_of`, so a revision or
+  a late name announcement published after a session -- or after the window -- enters that
+  session's scores. `as_of` may be long after the window (the year cap, not `as_of`, enforces the
+  economic date); the registration says why that instant is the one, and the result's text repeats
+  it.
 
 A reading of the validation window is a first out-of-sample reading, not confirmatory evidence
 (`p7_diagnostics.READ_ONCE_WORDING`). A reading of the second-use window is not even that: the
@@ -251,6 +257,11 @@ NOT_TRIGGERED_WORDING: Final[str] = (
     "the stop rule written before the read is not triggered: this permits V2-P7-006 to proceed "
     "and is not evidence"
 )
+_KNOWLEDGE_LINE: Final[str] = (
+    "read under the knowledge at {as_of}: {reason} -- every partition is read as it stood then, "
+    "so a revision or name published after a session enters that session's scores; this is a "
+    "recomputation at that instant, not a replay at each session's publication instant"
+)
 
 YEAR_BEFORE_DATASETS: Final[tuple[str, ...]] = (
     TRADING_CALENDAR_DATASET,
@@ -285,6 +296,7 @@ _BODY_KEYS: Final = frozenset(
         "config",
         "stop_rule",
         "code_commit",
+        "as_of_reason",
     }
 )
 _REQUEST_KEYS: Final = frozenset(
@@ -415,6 +427,7 @@ def register_reading(
     config: Mapping[str, Any],
     stop_rule: StopRule | None,
     code_commit: str,
+    as_of_reason: str,
     runtime_dir: Path | None = None,
 ) -> str:
     """Write the reading's registration to `path` and return the SHA-256 of its bytes.
@@ -435,6 +448,16 @@ def register_reading(
     With `runtime_dir`, the runtime-directory rule is checked, then the panel's own `trade_cal` is
     read (the calendar is not outcome data) and a `minimum_periods` above what its embargo and the
     summary's sampling permit is refused -- and nothing is written.
+
+    `as_of_reason` is the registration's answer, in one line, to why its configuration's `as_of` is
+    the knowledge the reading is taken under: an `as_of` may be long after the window (the year
+    cap, not `as_of`, enforces the economic date), and every partition is read as it stood at
+    `as_of`, so later revisions and late renames enter in-window sessions' scores. It must be a
+    non-empty single line (refused otherwise) and the result's text prints it verbatim. The body
+    this writes is a new format: no registration existed before the field, so `READING_SCHEMA`'s
+    `.../v1` is its first format and adding the field needs no migration -- this body is not one
+    of hard rule 3's contract rows (it is admitted by `_BODY_KEYS` and `_registration_of` by hand,
+    with no pydantic model and no `extra="forbid"`).
     """
     try:
         request_form = grid.to_json_value(dict(request))
@@ -451,6 +474,7 @@ def register_reading(
         "config": config_form,
         "stop_rule": None if stop_rule is None else _rule_form(stop_rule),
         "code_commit": code_commit,
+        "as_of_reason": as_of_reason,
     }
     registered = _registration_of(body)
     expected = f"{reading}.registration.json"
@@ -515,6 +539,16 @@ def _registration_of(body: Mapping[str, Any]) -> _Registration:
     issue = body["issue"]
     if not isinstance(issue, str) or not _ISSUE.fullmatch(issue):
         raise ReadingError(f"the registration's issue {issue!r} is not a V2 issue id")
+    reason = body["as_of_reason"]
+    if not isinstance(reason, str) or not reason.strip() or reason != reason.strip():
+        raise ReadingError(
+            "the registration's as_of_reason must be one non-empty line saying why its as_of is "
+            "the knowledge the reading is taken under"
+        )
+    if "\n" in reason or "\r" in reason:
+        raise ReadingError(
+            "the registration's as_of_reason must be one line: the result text prints it as one"
+        )
     name = body["window"]
     if name == RESEARCH.name:
         raise ReadingError(
@@ -1534,6 +1568,11 @@ def reading_lines(result: Mapping[str, Any], body: Mapping[str, Any]) -> list[st
         f"{window.name}{WINDOW_CLAIM_SUFFIX}, and keep that commit in this repository's refs, or "
         "another clone or worktree can read the window again",
     ]
+    reason = body.get("as_of_reason")
+    config_form = body.get("config")
+    as_of = config_form.get("as_of") if isinstance(config_form, Mapping) else None
+    if reason is not None and as_of is not None:
+        lines.append("  " + _KNOWLEDGE_LINE.format(as_of=as_of, reason=reason))
     if "plan" not in result:
         binding = result["binding"]
         lines.append("binding: " + ", ".join(f"{key} {binding[key]}" for key in sorted(binding)))
