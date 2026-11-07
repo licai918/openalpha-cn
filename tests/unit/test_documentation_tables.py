@@ -95,3 +95,22 @@ def test_an_escaped_pipe_does_not_split_a_cell() -> None:
     """The counting rule this audit rests on, asserted rather than assumed."""
     assert _cell_count(r"| a\|b | c |") == 2
     assert _cell_count("| a|b | c |") == 3
+
+
+RUNBOOK: Final[Path] = ROOT / "docs" / "runbooks" / "daily-selection.zh-CN.md"
+
+
+def test_the_operator_runbook_does_not_state_a_merge_status() -> None:
+    """Merge status belongs to the closeout record and the roadmap, not to the runbook an
+    operator follows. `docs/runbooks/daily-selection.zh-CN.md` once said `V2-P7-025` 已合入 while
+    the branch was unpushed and the issue open; the plan that taught the sentence is corrected at
+    its source. The rule lives here because this is the one guard that already reads every
+    Markdown file under `docs/` and holds a negative content rule over them, so the runbook cannot
+    drift away from the record the merge actually happens in."""
+    text = RUNBOOK.read_text(encoding="utf-8")
+
+    assert "已合入" not in text, (
+        "docs/runbooks/daily-selection.zh-CN.md states a merge status; the runbook describes the "
+        "branch it ships with (implemented, unpushed, not run on real data), and 'merged into "
+        "main' is the closeout record's and the roadmap's to say"
+    )
