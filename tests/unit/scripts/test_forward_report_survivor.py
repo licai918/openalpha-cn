@@ -54,6 +54,7 @@ import test_daily_selection as tds
 import test_daily_selection_survivor_day as survivor_day
 from research_repo import commit_file, git, head
 from test_daily_selection_survivor_day import (  # noqa: F401  (module fixtures, reused)
+    empty_registry_year,
     new_year,
     seeded,
 )
@@ -63,6 +64,7 @@ from openalpha_cn import strategy_survivor_forward as forward
 from openalpha_cn.backtest.outcome_statistics import sign_flip_test
 from openalpha_cn.domain.alpha_model import AlphaModelArtifact, Prediction, PredictionBatch
 from openalpha_cn.domain.prediction_record import PredictionRecord
+from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET
 from openalpha_cn.domain.trading_calendar import TradingCalendar
 from openalpha_cn.model_view import LabelReach, OutcomeLabels
 from openalpha_cn.panel.store import PanelStore
@@ -683,6 +685,100 @@ def test_a_record_filed_on_the_first_session_before_any_rename_is_checked_like_a
         (item,) = records["unverifiable"]
         assert (item["session"], item["scope"]) == ("2027-01-04", "recompute_differs")
         assert item["changes"] == ["namechange:2027 (its rows through 2027-01-04 were restated)"]
+
+
+# --- a first session in a year with no listing or delisting (V2-P7-025) ----------------------
+
+EMPTY_REGISTRY_REPORT: Final[datetime] = datetime(2027, 1, 5, 10, 0, tzinfo=SHANGHAI)
+"""After 5 January's registration cutoff: the record of 4 January closed."""
+
+
+@pytest.fixture(scope="module")
+def first_session_with_an_empty_registry_year(
+    tmp_path_factory: pytest.TempPathFactory,
+    empty_registry_year: Path,  # noqa: F811
+) -> tds.World:
+    """The evening of 4 January 2027 under a registration whose epoch is 31 December 2026, on a
+    market in which nothing has listed, delisted or been renamed: the first session of a year in
+    which the registry has no lifecycle year of its own (`V2-P7-025`). The evening records the
+    year empty; the panel it leaves is what the report reads."""
+    root = tmp_path_factory.mktemp("survivor-empty-registry-report")
+    repo, registration = _repository(
+        root, survivor_day.survivor_config(epoch=date(2026, 12, 31)), settings=settings_with()
+    )
+    market = survivor_day.EmptyNewYear(open_days=survivor_day.NEW_YEAR_DAYS, delisted=())
+    runtime = root / "runtime"
+    shutil.copytree(empty_registry_year, runtime)
+    world = tds.World(repo=repo, registration=registration, runtime=runtime, market=market)
+    with pytest.MonkeyPatch.context() as patch:
+        tds._bind(patch, repo, market)
+        code, _out, err = _daily(world, survivor_day.FIRST_2027)
+        assert code == 0, err
+    return world
+
+
+def test_a_report_across_a_new_year_reads_the_registry_year_the_first_evening_recorded(
+    first_session_with_an_empty_registry_year: tds.World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`V2-P7-025`'s second reader: the report labels its records through
+    `model_view._LabelInputs`, which reads the registry over the years from the first record's
+    through the report's -- 2027 alone here -- and a year with no partition is
+    `partition_missing`. With the empty year the first evening recorded, the report runs and its
+    one record is witnessed across the year boundary."""
+    runtime = tmp_path / "runtime"
+    shutil.copytree(first_session_with_an_empty_registry_year.runtime, runtime)
+    market = survivor_day.EmptyNewYear(open_days=survivor_day.NEW_YEAR_DAYS, delisted=())
+    world = dataclasses.replace(
+        first_session_with_an_empty_registry_year, runtime=runtime, market=market
+    )
+    tds._bind(monkeypatch, world.repo, market)
+
+    code, _out, err = _report(world, capsys, as_of=EMPTY_REGISTRY_REPORT)
+
+    assert code == 0, err
+    records = _document(world, EMPTY_REGISTRY_REPORT)["records"]
+    assert (records["first_session"], records["witnessed"]) == ("2027-01-04", 1)
+
+
+@pytest.mark.parametrize(
+    ("damage", "code_word"),
+    [("file", "partition_file_missing"), ("catalog", "partition_missing")],
+    ids=["the file deleted, the catalog still naming it", "the year never registered"],
+)
+def test_a_report_across_the_year_names_a_registry_year_it_cannot_read(
+    first_session_with_an_empty_registry_year: tds.World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    damage: str,
+    code_word: str,
+) -> None:
+    """The roadmap's probe, made a test, and the state it could only infer: deleting the partition
+    file while the catalog still names it is `partition_file_missing`; forgetting the year in the
+    catalog is `partition_missing`. Either way the report is refused by name, exit 1, and writes
+    no report file."""
+    runtime = tmp_path / "runtime"
+    shutil.copytree(first_session_with_an_empty_registry_year.runtime, runtime)
+    panel = PanelStore(runtime / "panel")
+    if damage == "file":
+        (panel.root / STOCK_BASIC_DATASET / "2027" / "data.parquet").unlink()
+    else:
+        panel.remove_partition(STOCK_BASIC_DATASET, 2027)
+    market = survivor_day.EmptyNewYear(open_days=survivor_day.NEW_YEAR_DAYS, delisted=())
+    world = dataclasses.replace(
+        first_session_with_an_empty_registry_year, runtime=runtime, market=market
+    )
+    tds._bind(monkeypatch, world.repo, market)
+
+    refused, out, err = _report(world, capsys, as_of=EMPTY_REGISTRY_REPORT)
+
+    assert refused == 1
+    assert out == ""
+    assert code_word in err
+    assert not (runtime / "reports" / report_name(EMPTY_REGISTRY_REPORT)).exists()
 
 
 # --- a week on: the relative return reads the primary layer -----------------------------------
