@@ -2397,6 +2397,54 @@ def test_the_report_reads_the_power_plan_from_the_registrations_settings(
     _assert_the_wording_is_in_every_section(document)
 
 
+STOP_RULE: Final[dict[str, Any]] = {
+    "schema_version": "survivor-forward-stop-rule/v1",
+    "metric": "rank_ic",
+    "horizon": 20,
+    "mean_at_or_below": 0.02,
+    "tail_metric": "ew_minus_worst_decile",
+    "tail_mean_at_or_below": 0.0,
+    "interim_periods": 1,
+    "interim_mean_at_or_below": 0.0,
+}
+"""Test values only; the protocol here has window_periods 2, so the interim look is at 1."""
+
+
+def test_the_report_states_that_no_forward_stop_rule_was_registered(
+    world: tds.World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out, err = _report(world, capsys)
+
+    assert code == 0, err
+    assert _document(world)["stop_rule"]["status"] == forward.STOP_RULE_NOT_PRE_REGISTERED
+    assert forward.STOP_RULE_NOT_PRE_REGISTERED in out
+    _no_verdict_word(out)
+
+
+def test_the_report_reads_the_forward_stop_rule_from_the_registrations_settings(
+    world: tds.World, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = forward.read_forward_stop_rule
+
+    def registered(
+        settings: Mapping[str, Any], *, protocol: forward.SurvivorForwardProtocol
+    ) -> Any:
+        return real(
+            {**settings, forward.SURVIVOR_FORWARD_STOP_RULE_KEY: STOP_RULE}, protocol=protocol
+        )
+
+    monkeypatch.setattr(forward, "read_forward_stop_rule", registered)
+
+    code, out, err = _report(world, capsys)
+
+    assert code == 0, err
+    document = _document(world)
+    assert document["stop_rule"]["rule"]["interim_periods"] == 1
+    assert any(line.startswith("stop rule") for line in out.splitlines())
+    _no_verdict_word(out, json.dumps(document))
+    _assert_the_wording_is_in_every_section(document)
+
+
 def _world_registered_with(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, panel: Path, settings: Mapping[str, Any]
 ) -> tds.World:

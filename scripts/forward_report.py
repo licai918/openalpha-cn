@@ -515,6 +515,7 @@ def _survivor_report(
 
     protocol = forward.read_forward_protocol(admitted.settings)
     power = forward.read_forward_power(admitted.settings, protocol=protocol)
+    stop_rule = forward.read_forward_stop_rule(admitted.settings, protocol=protocol)
     adapter, book = survivor.adapter, survivor.book
     exchange, epoch = adapter.exchange, adapter.epoch_session
     calendar = _survivor_calendar(store, exchange=exchange, epoch=epoch, as_of=as_of)
@@ -593,6 +594,7 @@ def _survivor_report(
         layers=layers,
         paper=paper,
         power=power,
+        stop_rule=stop_rule,
         integrity=daily_selection.INTEGRITY,
     )
     return SurvivorForwardReport(

@@ -65,7 +65,7 @@ from openalpha_cn.backtest.power_analysis import NOT_DETECTABLE_WORDING, POWER_B
 from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
 from openalpha_cn.domain.alpha_model import AlphaModelArtifact, Prediction, PredictionBatch
 from openalpha_cn.domain.daily_prices import DAILY_BASIC_DATASET, DAILY_DATASET
-from openalpha_cn.domain.horizon import HorizonUnit, ResearchHorizon
+from openalpha_cn.domain.horizon import HorizonUnit, ResearchHorizon, parse_horizon
 from openalpha_cn.domain.index_prices import IndexBar
 from openalpha_cn.domain.labels import (
     LabelRefusal,
@@ -97,15 +97,18 @@ from openalpha_cn.strategy_survivor_check import SurvivorRecordVerdict
 from openalpha_cn.strategy_survivor_forward import (
     DESCRIPTIVE_WORDING,
     FORWARD_METRICS,
+    FORWARD_STOP_RULE_NOT_APPLIED,
     NO_VERDICT_WORDING,
     OBSERVED_WORDING,
     POWER_NOT_PRE_REGISTERED,
     PREDICTION_LAYER_WORDING,
+    STOP_RULE_NOT_PRE_REGISTERED,
     SURVIVOR_FORWARD_POWER_KEY,
     SURVIVOR_FORWARD_POWER_SCHEMA,
     SURVIVOR_FORWARD_PROTOCOL_KEY,
     SURVIVOR_FORWARD_PROTOCOL_SCHEMA,
     SURVIVOR_FORWARD_REPORT_KIND,
+    SURVIVOR_FORWARD_STOP_RULE_KEY,
     PlannedMetric,
     PredictionLayer,
     RecordOutcome,
@@ -114,12 +117,15 @@ from openalpha_cn.strategy_survivor_forward import (
     SurvivorForwardError,
     SurvivorForwardPowerPlan,
     SurvivorForwardProtocol,
+    SurvivorForwardStopRule,
     WitnessedRecord,
+    adopted_forward_stop_rule,
     check_journals_against_the_store,
     paper_refusal,
     prediction_layer,
     read_forward_power,
     read_forward_protocol,
+    read_forward_stop_rule,
     record_outcome,
     record_scope,
     report_through,
@@ -131,6 +137,7 @@ from openalpha_cn.strategy_survivor_forward import (
 )
 from openalpha_cn.strategy_survivor_market import PROTOCOL_BENCHMARK, SessionOrdinals
 from openalpha_cn.strategy_survivor_registration import (
+    SURVIVOR_HORIZON,
     survivor_batch,
     survivor_declaration,
     survivor_feature_ids,
@@ -214,6 +221,81 @@ def protocol(**changes: object) -> SurvivorForwardProtocol:
     return read_forward_protocol(
         {SURVIVOR_FORWARD_PROTOCOL_KEY: block}, record_horizon=f"{block['primary_horizon']}d"
     )
+
+
+ADOPTED_STOP: Final[dict[str, Any]] = {
+    "schema_version": "survivor-forward-stop-rule/v1",
+    "metric": "rank_ic",
+    "horizon": 20,
+    "mean_at_or_below": 0.02,
+    "tail_metric": "ew_minus_worst_decile",
+    "tail_mean_at_or_below": 0.0,
+    "interim_periods": 18,
+    "interim_mean_at_or_below": 0.0,
+}
+"""The adopted block as the 006 registration will write it (test copy; the constants are the
+source, `adopted_forward_stop_rule()`)."""
+
+
+def adopted_protocol() -> SurvivorForwardProtocol:
+    return read_forward_protocol(
+        {SURVIVOR_FORWARD_PROTOCOL_KEY: {**PROTOCOL_BLOCK, "window_periods": 36}}
+    )
+
+
+def test_the_adopted_stop_rule_is_one_constant_per_number() -> None:
+    assert parse_horizon(SURVIVOR_HORIZON).sessions == forward_module.ADOPTED_PRIMARY_HORIZON
+    assert forward_module.ADOPTED_PRIMARY_HORIZON == 20
+    assert forward_module.ADOPTED_PRIMARY_METRIC == "rank_ic"
+    assert forward_module.ADOPTED_STOP_MEAN_AT_OR_BELOW == 0.02
+    assert forward_module.ADOPTED_STOP_TAIL_METRIC == "ew_minus_worst_decile"
+    assert forward_module.ADOPTED_STOP_TAIL_MEAN_AT_OR_BELOW == 0.0
+    assert forward_module.ADOPTED_WINDOW_PERIODS == 36
+    assert forward_module.ADOPTED_INTERIM_PERIODS == 18
+    assert forward_module.ADOPTED_INTERIM_PERIODS * 2 == forward_module.ADOPTED_WINDOW_PERIODS
+    assert forward_module.ADOPTED_INTERIM_MEAN_AT_OR_BELOW == 0.0
+
+
+def test_the_adopted_block_reads_back_as_the_constants() -> None:
+    rule = read_forward_stop_rule(
+        {SURVIVOR_FORWARD_STOP_RULE_KEY: adopted_forward_stop_rule()},
+        protocol=adopted_protocol(),
+    )
+
+    assert rule == SurvivorForwardStopRule.model_validate(ADOPTED_STOP)
+    assert adopted_forward_stop_rule() == ADOPTED_STOP
+    assert (rule.metric, rule.horizon, rule.mean_at_or_below) == ("rank_ic", 20, 0.02)
+    assert (rule.tail_metric, rule.tail_mean_at_or_below) == ("ew_minus_worst_decile", 0.0)
+    assert (rule.interim_periods, rule.interim_mean_at_or_below) == (18, 0.0)
+
+
+def test_a_registration_without_the_forward_stop_rule_block_says_so() -> None:
+    """The smoke registration and every P6 registration carry no block: a missing one is `None`,
+    never a default the code invents."""
+    assert read_forward_stop_rule({}, protocol=adopted_protocol()) is None
+
+
+@pytest.mark.parametrize(
+    ("changes", "said"),
+    [
+        ({"metric": "survivors_minus_ew"}, "primary_metric"),
+        ({"horizon": 5}, "primary_horizon"),
+        ({"interim_periods": 36}, "interim"),
+        ({"interim_periods": 0}, "interim_periods"),
+        ({"mean_at_or_below": True}, "mean_at_or_below"),
+        ({"tail_metric": "rank_ic"}, "tail_metric"),
+        ({"schema_version": "survivor-forward-stop-rule/v2"}, "v1"),
+        ({"anchor_ordinal": 1}, "anchor_ordinal"),
+    ],
+)
+def test_a_forward_stop_rule_the_protocol_does_not_carry_is_refused(
+    changes: dict[str, Any], said: str
+) -> None:
+    with pytest.raises(SurvivorForwardError, match=said):
+        read_forward_stop_rule(
+            {SURVIVOR_FORWARD_STOP_RULE_KEY: {**ADOPTED_STOP, **changes}},
+            protocol=adopted_protocol(),
+        )
 
 
 # --- records ---------------------------------------------------------------------------------
@@ -1906,11 +1988,12 @@ def reported(
     through: int,
     paper: Mapping[str, Any] | None = None,
     power: SurvivorForwardPowerPlan | None = None,
+    stop_rule: SurvivorForwardStopRule | None = None,
     **changes: object,
 ) -> dict[str, Any]:
     """The document of `outcomes` (by horizon) under the test protocol with `changes`, the
     sample drawn through the session of ordinal `through` at every horizon, and the power plan
-    the registration carries (`None`: none)."""
+    and stop rule the registration carries (`None`: none)."""
     read = protocol(**changes)
     layers = tuple(
         prediction_layer(
@@ -1935,6 +2018,7 @@ def reported(
         layers=layers,
         paper=paper_refusal(NO_BOOK) if paper is None else paper,
         power=power,
+        stop_rule=stop_rule,
         integrity=INTEGRITY,
     )
 
@@ -1948,6 +2032,49 @@ def verdict_words(document: Mapping[str, Any]) -> list[str]:
     check's own scope names (`recompute_failed`, `no_provenance`) are vocabulary, not verdicts."""
     text = json.dumps(document, sort_keys=True) + "\n".join(survivor_forward_lines(document))
     return re.findall(rf"\b({'|'.join(FORBIDDEN_WORDS)})\b", text, flags=re.IGNORECASE)
+
+
+def test_the_document_states_the_forward_stop_rule_and_applies_nothing() -> None:
+    read = protocol()  # the test protocol: h20 primary, window_periods 3
+    rule = SurvivorForwardStopRule(
+        schema_version="survivor-forward-stop-rule/v1",
+        metric=read.primary_metric,
+        horizon=read.primary_horizon,
+        mean_at_or_below=0.02,
+        tail_metric="ew_minus_worst_decile",
+        tail_mean_at_or_below=0.0,
+        interim_periods=1,
+        interim_mean_at_or_below=0.0,
+    )
+    outcomes = every_session(25)
+
+    document = reported({20: outcomes, 5: ()}, checked_by(outcomes), through=25, stop_rule=rule)
+
+    section = document["stop_rule"]
+    assert section["wording"] == SURVIVOR_WORDING
+    assert section["status"].startswith("pre-registered")
+    assert section["rule"]["interim_periods"] == 1
+    assert section["interim"] == {
+        "periods": 1,
+        "window_periods": read.window_periods,
+        "positions_matured": 1,
+        "reached": True,
+    }
+    assert section["applied"] is False and section["statement"] == FORWARD_STOP_RULE_NOT_APPLIED
+    lines = survivor_forward_lines(document)
+    assert any(line.startswith("stop rule") and "interim look after 1" in line for line in lines)
+    assert "positions matured at the interim look: 1 of 1" in "\n".join(lines)
+    assert not verdict_words(document)
+
+
+def test_a_document_without_a_forward_stop_rule_states_that_none_was_registered() -> None:
+    outcomes = every_session(25)
+
+    document = reported({20: outcomes, 5: ()}, checked_by(outcomes), through=25)
+
+    assert document["stop_rule"]["status"] == STOP_RULE_NOT_PRE_REGISTERED
+    assert document["stop_rule"]["rule"] is None
+    assert STOP_RULE_NOT_PRE_REGISTERED in "\n".join(survivor_forward_lines(document))
 
 
 def test_before_the_primary_window_the_document_counts_describes_and_tests_nothing() -> None:
@@ -2444,6 +2571,7 @@ def test_a_document_needs_one_layer_per_registered_horizon() -> None:
             layers=(only,),
             paper=paper_refusal(NO_BOOK),
             power=None,
+            stop_rule=None,
             integrity=INTEGRITY,
         )
 
@@ -2958,8 +3086,10 @@ def test_the_power_lines_sit_after_the_secondary_family_and_before_the_paper_led
     def first(prefix: str) -> int:
         return next(index for index, line in enumerate(lines) if line.startswith(prefix))
 
-    assert first("  secondary family") < first("power (") < first("paper ledger")
-    assert lines[first("paper ledger") - 1] == READING_RULE_PENDING
+    assert (
+        first("  secondary family") < first("power (") < first("stop rule") < first("paper ledger")
+    )
+    assert lines[first("stop rule") - 1] == READING_RULE_PENDING
     assert survivor_forward_lines(json.loads(json.dumps(document, sort_keys=True))) == lines
     text = "\n".join(lines[first("power (") : first("paper ledger")])
     assert "test level" in text and "minimum periods" in text
@@ -2999,8 +3129,8 @@ def test_a_plan_prints_no_p_value_wording_before_the_window_and_the_reading_rule
 
     assert after["protocol"]["window_satisfied"] is True
     assert READING_RULE_PENDING not in after_lines
-    end = next(index for index, line in enumerate(after_lines) if line.startswith("paper ledger"))
-    assert after_lines[end - 1] == f"  {NOT_DETECTABLE_WORDING}"
+    stop = next(index for index, line in enumerate(after_lines) if line.startswith("stop rule"))
+    assert after_lines[stop - 1] == f"  {NOT_DETECTABLE_WORDING}"
     assert verdict_words(after) == []
 
 

@@ -173,6 +173,23 @@ library only):
   design and names no result). A plan the reader accepted is held to the document's protocol
   again: a plan read under another protocol is refused by name.
 
+## The forward stop rule (`survivor_forward_stop_rule`)
+
+The stop rule is a block **beside** the protocol, like the power plan, read from
+`settings["survivor_forward_stop_rule"]` as `survivor-forward-stop-rule/v1`
+(`read_forward_stop_rule`): `extra="forbid"` and no default for any field, so a missing block is
+`None` -- never a default this code invents -- and the smoke registration's placeholder protocol
+stays readable unchanged. It is a decision rule, not "what is tested, and when", which is why it
+is not a protocol field. Its values are the user's, adopted on 2026-11-07 and written into the
+`V2-P7-006` registration by `006b` (`adopted_forward_stop_rule()`): the primary test is `rank_ic`
+at h20, the stop is its mean at or below 0.02 or `ew_minus_worst_decile`'s at or below 0, the
+window is K = 36 non-overlapping h20 periods, and the interim futility look is at K / 2 = 18
+cumulative positions with a cumulative mean at or below 0. Each number is one named constant;
+the window's K stays the protocol's `window_periods`, not repeated in the block. The report
+**states** the rule and applies none of it (`applied` is always `False`): the forward clock's
+reading is the clock's, and until the window is satisfied the report prints no p-value and no
+conclusion word (`FORWARD_STOP_RULE_NOT_APPLIED`).
+
 ## The report's document (`survivor_forward_document`, `survivor_forward_lines`; task E4)
 
 The weekly report script (`scripts/forward_report.py`) reads everything and hands it in; this
@@ -316,19 +333,31 @@ from openalpha_cn.strategy_survivor_registration import (
 from openalpha_cn.strategy_survivor_summary import SURVIVOR_WORDING
 
 __all__ = [
+    "ADOPTED_INTERIM_MEAN_AT_OR_BELOW",
+    "ADOPTED_INTERIM_PERIODS",
+    "ADOPTED_PRIMARY_HORIZON",
+    "ADOPTED_PRIMARY_METRIC",
+    "ADOPTED_STOP_MEAN_AT_OR_BELOW",
+    "ADOPTED_STOP_TAIL_MEAN_AT_OR_BELOW",
+    "ADOPTED_STOP_TAIL_METRIC",
+    "ADOPTED_WINDOW_PERIODS",
     "DESCRIBED_QUANTITIES",
     "DESCRIPTIVE_WORDING",
     "FORWARD_METRICS",
+    "FORWARD_STOP_RULE_NOT_APPLIED",
     "NO_VERDICT_WORDING",
     "OBSERVED_WORDING",
     "OPPOSITE_SIGN_CLAUSE",
     "POWER_NOT_PRE_REGISTERED",
     "PREDICTION_LAYER_WORDING",
+    "STOP_RULE_NOT_PRE_REGISTERED",
     "SURVIVOR_FORWARD_POWER_KEY",
     "SURVIVOR_FORWARD_POWER_SCHEMA",
     "SURVIVOR_FORWARD_PROTOCOL_KEY",
     "SURVIVOR_FORWARD_PROTOCOL_SCHEMA",
     "SURVIVOR_FORWARD_REPORT_KIND",
+    "SURVIVOR_FORWARD_STOP_RULE_KEY",
+    "SURVIVOR_FORWARD_STOP_RULE_SCHEMA",
     "UNLABELLED_WORDING",
     "UNVERIFIABLE_MEANING",
     "CheckedVerdict",
@@ -350,13 +379,16 @@ __all__ = [
     "SurvivorForwardError",
     "SurvivorForwardPowerPlan",
     "SurvivorForwardProtocol",
+    "SurvivorForwardStopRule",
     "VerdictLike",
     "WitnessedRecord",
+    "adopted_forward_stop_rule",
     "check_journals_against_the_store",
     "paper_refusal",
     "prediction_layer",
     "read_forward_power",
     "read_forward_protocol",
+    "read_forward_stop_rule",
     "record_outcome",
     "record_scope",
     "report_through",
@@ -373,6 +405,22 @@ SURVIVOR_FORWARD_PROTOCOL_SCHEMA: Final = "survivor-forward-protocol/v1"
 SURVIVOR_FORWARD_POWER_KEY: Final = "survivor_forward_power"
 """The key of the registration's `settings` that holds the power plan, beside the protocol's."""
 SURVIVOR_FORWARD_POWER_SCHEMA: Final = "survivor-forward-power/v1"
+
+ADOPTED_PRIMARY_HORIZON: Final = 20
+"""The adopted primary horizon (the user, 2026-11-07): every survivor record declares `20d`
+(`SURVIVOR_HORIZON`), and the protocol's `primary_horizon` must be that."""
+
+ADOPTED_PRIMARY_METRIC: Final[ForwardMetric] = "rank_ic"
+ADOPTED_STOP_MEAN_AT_OR_BELOW: Final = 0.02
+"""The adopted stop: the primary metric's mean at or below this is "no evidence"."""
+ADOPTED_STOP_TAIL_METRIC: Final[ForwardMetric] = "ew_minus_worst_decile"
+ADOPTED_STOP_TAIL_MEAN_AT_OR_BELOW: Final = 0.0
+ADOPTED_WINDOW_PERIODS: Final = 36
+"""The adopted forward window (K) at the primary horizon: 36 non-overlapping h20 periods."""
+ADOPTED_INTERIM_PERIODS: Final = 18
+"""The adopted interim futility look: K / 2 cumulative positions."""
+ADOPTED_INTERIM_MEAN_AT_OR_BELOW: Final = 0.0
+"""The adopted interim stop: the cumulative mean at or below this."""
 
 POWER_NOT_PRE_REGISTERED: Final = (
     "the registration carries no survivor_forward_power block: no power is stated, and a result "
@@ -689,6 +737,118 @@ def _hold_the_plan_to_the_protocol(
             f"the registration's {SURVIVOR_FORWARD_POWER_KEY} has minimum_periods "
             f"{plan.minimum_periods}, more than the primary window's {positions} positions: a "
             "window that cannot reach its own minimum is not a design"
+        )
+
+
+# --- the forward stop rule ----------------------------------------------------------------------
+
+SURVIVOR_FORWARD_STOP_RULE_KEY: Final = "survivor_forward_stop_rule"
+"""The key of the registration's `settings` that holds the forward stop rule."""
+SURVIVOR_FORWARD_STOP_RULE_SCHEMA: Final = "survivor-forward-stop-rule/v1"
+STOP_RULE_NOT_PRE_REGISTERED: Final = (
+    "the registration carries no survivor_forward_stop_rule block: no stop rule was written "
+    "before the forward clock, and none is stated here"
+)
+FORWARD_STOP_RULE_NOT_APPLIED: Final = (
+    "the stop rule is stated here and applied by the forward clock, not by a report: no interim "
+    "or final reading of it is taken from this document"
+)
+
+
+class SurvivorForwardStopRule(BaseModel):
+    """The forward clock's stop rule, written before the clock; see the module docstring. No
+    field has a default. The window's K is the protocol's `window_periods`, not repeated here."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["survivor-forward-stop-rule/v1"]
+    metric: ForwardMetric
+    horizon: _Horizon
+    mean_at_or_below: Annotated[float, Field(strict=True, allow_inf_nan=False)]
+    tail_metric: ForwardMetric
+    tail_mean_at_or_below: Annotated[float, Field(strict=True, allow_inf_nan=False)]
+    interim_periods: Annotated[int, Field(strict=True, ge=1)]
+    interim_mean_at_or_below: Annotated[float, Field(strict=True, allow_inf_nan=False)]
+
+
+def adopted_forward_stop_rule() -> dict[str, Any]:
+    """The rule the user adopted on 2026-11-07, as `006b`'s registration will write it into
+    `settings[SURVIVOR_FORWARD_STOP_RULE_KEY]`.
+
+    These are the adopted values, not a default: the block is still the registration's to write,
+    and `read_forward_stop_rule` invents nothing when it is absent."""
+    return {
+        "schema_version": SURVIVOR_FORWARD_STOP_RULE_SCHEMA,
+        "metric": ADOPTED_PRIMARY_METRIC,
+        "horizon": ADOPTED_PRIMARY_HORIZON,
+        "mean_at_or_below": ADOPTED_STOP_MEAN_AT_OR_BELOW,
+        "tail_metric": ADOPTED_STOP_TAIL_METRIC,
+        "tail_mean_at_or_below": ADOPTED_STOP_TAIL_MEAN_AT_OR_BELOW,
+        "interim_periods": ADOPTED_INTERIM_PERIODS,
+        "interim_mean_at_or_below": ADOPTED_INTERIM_MEAN_AT_OR_BELOW,
+    }
+
+
+def read_forward_stop_rule(
+    settings: Mapping[str, object], *, protocol: SurvivorForwardProtocol
+) -> SurvivorForwardStopRule | None:
+    """The forward stop rule in a registration's `settings`, `None` when it carries none, or
+    `SurvivorForwardError` naming why the block does not read.
+
+    The block is held to `protocol`: its metric and horizon are the primary test's, its tail
+    metric is a different one, and its interim look falls inside the window and before its end."""
+    if not isinstance(settings, Mapping):
+        raise SurvivorForwardError(
+            f"the registration's settings are {type(settings).__name__}, not an object, so they "
+            f"carry no {SURVIVOR_FORWARD_STOP_RULE_KEY} block"
+        )
+    if SURVIVOR_FORWARD_STOP_RULE_KEY not in settings:
+        return None
+    block = settings[SURVIVOR_FORWARD_STOP_RULE_KEY]
+    if not isinstance(block, Mapping):
+        raise SurvivorForwardError(
+            f"the registration's {SURVIVOR_FORWARD_STOP_RULE_KEY} is {type(block).__name__}, not "
+            f"a {SURVIVOR_FORWARD_STOP_RULE_SCHEMA} object"
+        )
+    try:
+        rule = SurvivorForwardStopRule.model_validate(dict(block))
+    except ValidationError as error:
+        problems = "; ".join(
+            f"{'.'.join(str(part) for part in item['loc']) or 'the block'}: {item['msg']}"
+            for item in error.errors()
+        )
+        raise SurvivorForwardError(
+            f"the registration's {SURVIVOR_FORWARD_STOP_RULE_KEY} is not a valid "
+            f"{SURVIVOR_FORWARD_STOP_RULE_SCHEMA} block: {problems}"
+        ) from error
+    _hold_the_stop_rule_to_the_protocol(rule, protocol)
+    return rule
+
+
+def _hold_the_stop_rule_to_the_protocol(
+    rule: SurvivorForwardStopRule, protocol: SurvivorForwardProtocol
+) -> None:
+    if rule.metric != protocol.primary_metric:
+        raise SurvivorForwardError(
+            f"the registration's {SURVIVOR_FORWARD_STOP_RULE_KEY} names {rule.metric}, and the "
+            f"protocol's primary_metric is {protocol.primary_metric}: the stop rule is written "
+            "for the primary test"
+        )
+    if rule.horizon != protocol.primary_horizon:
+        raise SurvivorForwardError(
+            f"the registration's {SURVIVOR_FORWARD_STOP_RULE_KEY} names horizon {rule.horizon}, "
+            f"and the protocol's primary_horizon is {protocol.primary_horizon}"
+        )
+    if rule.tail_metric == rule.metric:
+        raise SurvivorForwardError(
+            f"the registration's {SURVIVOR_FORWARD_STOP_RULE_KEY} uses {rule.metric} as its "
+            "tail_metric too: a second clause on the same metric is not a second condition"
+        )
+    if not 1 <= rule.interim_periods < protocol.window_periods:
+        raise SurvivorForwardError(
+            f"the registration's {SURVIVOR_FORWARD_STOP_RULE_KEY} has interim_periods "
+            f"{rule.interim_periods} of the protocol's window_periods {protocol.window_periods}: "
+            "the interim look must fall inside the window and before its end"
         )
 
 
@@ -1764,6 +1924,7 @@ def survivor_forward_document(
     layers: Sequence[PredictionLayer],
     paper: Mapping[str, Any],
     power: SurvivorForwardPowerPlan | None,
+    stop_rule: SurvivorForwardStopRule | None,
     integrity: str,
 ) -> dict[str, Any]:
     """The `survivor_forward_report/v1` document (module docstring).
@@ -1772,8 +1933,10 @@ def survivor_forward_document(
     record id, `layers` one `prediction_layer` per horizon of the protocol (the primary and every
     secondary), `paper` `paper_record`'s `{"paper_ledger", "relative"}` or `paper_refusal`'s,
     `power` the registration's `read_forward_power` (`None`: it carries none, and the `power`
-    section says so), and `integrity` the threat model every forward report states. JSON-safe,
-    with no set iterated unsorted: the same inputs give the same document."""
+    section says so), `stop_rule` the registration's `read_forward_stop_rule` (`None`: it carries
+    none, and the `stop_rule` section says so), and `integrity` the threat model every forward
+    report states. JSON-safe, with no set iterated unsorted: the same inputs give the same
+    document."""
     horizons = (protocol.primary_horizon, *protocol.secondary_horizons)
     by_horizon = {layer.horizon: layer for layer in layers}
     if len(by_horizon) != len(layers) or sorted(by_horizon) != sorted(horizons):
@@ -1815,6 +1978,7 @@ def survivor_forward_document(
             "secondary_family": _secondary_family(by_horizon, protocol=protocol, analysis=analysis),
         },
         "power": _power_section(power, protocol=protocol, by_horizon=by_horizon, analysis=analysis),
+        "stop_rule": _stop_rule_section(stop_rule, protocol=protocol, analysis=analysis),
         "paper_ledger": dict(paper["paper_ledger"]),
         "relative": _relative_section(paper["relative"], primary),
         "cannot_be_evaluated_yet": _cannot_be_evaluated_yet(
@@ -2319,6 +2483,39 @@ def _lag1_autocorrelation(values: Sequence[float]) -> float | None:
     return steps / spread
 
 
+def _stop_rule_section(
+    stop_rule: SurvivorForwardStopRule | None,
+    *,
+    protocol: SurvivorForwardProtocol,
+    analysis: NonOverlappingSample,
+) -> dict[str, Any]:
+    """The `stop_rule` section: the pre-registered rule and the interim look's reach, or the
+    statement that none was registered. The report states the rule; the forward clock applies it,
+    so `applied` is always `False` here (module docstring)."""
+    section: dict[str, Any] = {
+        "wording": SURVIVOR_WORDING,
+        "status": STOP_RULE_NOT_PRE_REGISTERED,
+        "rule": None,
+        "window_periods": protocol.window_periods,
+        "interim": None,
+        "applied": False,
+        "statement": FORWARD_STOP_RULE_NOT_APPLIED,
+    }
+    if stop_rule is None:
+        return section
+    # A rule read under another protocol is not this document's: the reader's checks again.
+    _hold_the_stop_rule_to_the_protocol(stop_rule, protocol)
+    section["status"] = f"pre-registered ({SURVIVOR_FORWARD_STOP_RULE_SCHEMA})"
+    section["rule"] = stop_rule.model_dump(mode="json")
+    section["interim"] = {
+        "periods": stop_rule.interim_periods,
+        "window_periods": protocol.window_periods,
+        "positions_matured": min(analysis.matured, stop_rule.interim_periods),
+        "reached": analysis.matured >= stop_rule.interim_periods,
+    }
+    return section
+
+
 def _relative_section(relative: Mapping[str, Any], primary: PredictionLayer) -> dict[str, Any]:
     if "refused" in relative:
         return dict(relative)
@@ -2426,6 +2623,7 @@ def survivor_forward_lines(document: Mapping[str, Any]) -> list[str]:
         lines += _layer_lines(layer[f"h{horizon}"])
     lines += _family_lines(layer["secondary_family"])
     lines += _power_lines(document["power"], window_satisfied=protocol["window_satisfied"])
+    lines += _stop_rule_lines(document["stop_rule"])
     lines += _ledger_lines(document["paper_ledger"])
     lines += _relative_lines(document["relative"])
     lines.append("cannot be evaluated yet:")
@@ -2654,6 +2852,25 @@ _LEDGER_CAVEAT: Final = (
 )
 """What the equity line says beside the yuan (I7): the money is yuan; a holding's count and mark
 after an adjustment are the ledger's units, not the account's."""
+
+
+def _stop_rule_lines(stop_rule: Mapping[str, Any]) -> list[str]:
+    """The `stop_rule` section as lines: the rule and the interim look's reach, then the
+    statement that this report states the rule and applies none of it; or the statement that no
+    rule was registered."""
+    rule = stop_rule["rule"]
+    if rule is None:
+        return [f"stop rule -- {stop_rule['status']}"]
+    interim = stop_rule["interim"]
+    return [
+        f"stop rule ({rule['schema_version']}): primary {rule['metric']} h{rule['horizon']} mean "
+        f"at or below {rule['mean_at_or_below']:g}; tail {rule['tail_metric']} mean at or below "
+        f"{rule['tail_mean_at_or_below']:g}; window {stop_rule['window_periods']} periods; "
+        f"interim look after {interim['periods']}",
+        f"  positions matured at the interim look: {interim['positions_matured']} of "
+        f"{interim['periods']}",
+        f"  {stop_rule['statement']}",
+    ]
 
 
 def _percent(value: object) -> str:
