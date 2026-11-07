@@ -13,7 +13,10 @@ Pure functions over `SecurityFacts`. Three steps:
    means its boundary moves with the investable pool and not when some other name is halted,
    resumes, is special-treated or lists (a halted name's zero turnover would otherwise be one of
    the thinnest). Pinned by a test; a choice made after the review of the first version, which
-   counted every security on an allowed board.
+   counted every security on an allowed board. This is the `illiquid` rule `V2-P7-006a` names
+   (`ILLIQUID_DROP_FRACTION`); the weekly report counts exits whose verdict carries it
+   (`strategy_survivor_summary._illiquid_exits`), so the daily and weekly readings are the same
+   cut.
 3. **Survivors** -- of the securities with *no* reason, drop the worst `loser_decile_count` tenths
    by composite, so the cut is taken over the liquidity-and-eligibility survivors and nothing
    else. Ties break on `ts_code`, so no cut depends on input order.

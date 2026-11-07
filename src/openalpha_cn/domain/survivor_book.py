@@ -50,6 +50,29 @@ DEFAULT_COMPOSITE_FACTORS: Final[tuple[str, ...]] = (
     "downside_vol_60/v1",
 )
 
+ILLIQUID_DROP_FRACTION: Final[Decimal] = Decimal("0.30")
+"""The thinnest share of the statically eligible population the daily screen drops as `illiquid`.
+
+The design (`docs/superpowers/specs/2026-10-13-p7-step0-survivor-book-design.md` section 6) keeps
+the top 70% by 20-day average traded amount among the names that carry no static reason, so the cut
+is the bottom `floor_share(population, ILLIQUID_DROP_FRACTION)` of that population, ordered by
+`avg_amount` ascending and ties on `ts_code`. It is a rank, not an absolute turnover band:
+`avg_amount` is in whatever unit the adapter chose and only its order matters. The weekly report
+counts the exits whose verdict carries `illiquid` (`strategy_survivor_summary._illiquid_exits`), so
+the daily and the weekly readings are the same cut. Frozen by `V2-P7-006a` on 2026-11-07.
+"""
+
+ILLIQUID_POLICY: Final[str] = "forced_exit"
+"""What a holding below the liquidity line does: option (a), a forced exit.
+
+A holding the screen calls `illiquid` has lost eligibility, so the policy sells the whole holding
+at the next open with `EXIT_ELIGIBILITY_LOST`; it is never held through the line. The
+holding-hysteresis alternative (b) -- a lower line a holding must fall below before it is sold --
+is **not implemented**: it needs its own threshold chosen in advance and re-measured there, once
+the forward samples show real turnover, through the process `V2-P7-006` sets. Option (a) is the
+rule the exploratory period measured; `V2-P7-006a` froze it on 2026-11-07.
+"""
+
 
 class SurvivorBookConfig(BaseModel):
     """Every parameter of the survivor book. Frozen, versioned and content-addressed.
@@ -69,7 +92,7 @@ class SurvivorBookConfig(BaseModel):
     capital: Decimal = Field(default=Decimal("350000"), gt=0)
     boards: tuple[Board, ...] = ("main",)
     """Shanghai and Shenzhen main boards only: the account cannot trade ChiNext (decision D12)."""
-    liquidity_drop_fraction: Decimal = Field(default=Decimal("0.30"), ge=0, lt=1)
+    liquidity_drop_fraction: Decimal = Field(default=ILLIQUID_DROP_FRACTION, ge=0, lt=1)
     min_listing_sessions: int = Field(default=250, ge=0)
     loser_decile_count: int = Field(default=2, ge=0, le=9)
     entry_floor_fraction: Decimal = Field(default=Decimal("0.25"), ge=0, lt=1)

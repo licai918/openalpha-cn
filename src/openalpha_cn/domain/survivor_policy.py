@@ -42,7 +42,8 @@ it; that follows from the suspension. (A halted name is not in the liquidity pop
 never carries `illiquid`.) Anything else
 (special treatment, a board, a listing age) is a real problem and a forced exit. The adapter must
 still hand the screen a fact row for a suspended holding (its last close, `suspended=True`): a name
-the screen never saw is sold as unassessed."""
+the screen never saw is sold as unassessed. `illiquid` is a forced exit -- `V2-P7-006a` froze
+option (a) (`ILLIQUID_POLICY`); the holding-hysteresis alternative (b) is not implemented."""
 EntryReason = Literal["INITIAL_BUILD", "ENTRY_REPLACEMENT"]
 
 
