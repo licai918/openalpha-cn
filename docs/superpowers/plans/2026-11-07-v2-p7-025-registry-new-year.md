@@ -50,7 +50,7 @@
 - **`load_stock_universe` 的 gap 规则与 `require_years_through`**（`panel_ingest.py:1323-1367`）**不改**：gap 规则说的是"被点名的年之间有一个库里有、却没被读"（零行年只要被读就满足）；`require_years_through` 只看**被请求**的年（`:1338-1350`）。两条都用回归测试钉住"零行年不削弱它们"。
 - **`EMPTY` 行（照 `_write_name_year` 的形状，`cli.py:5354-5380`）**，写成功**之后**打到 stderr：
   `EMPTY stock_basic year=<Y>: no listing or delisting yet at <now>; the year may be read empty through <Y-12-31>; recorded as an empty partition`
-- **请求数**：0 次增加。整份登记簿一次请求已经带着所有有行的年份，写空年是同一批次上的本地动作。脚本化行情下：幸存者一天 2027-01-04 仍是 **11** 次；第 2 步框架（`test_daily_selection_survivor.py`）仍是 `FIRST_SESSION_OF_A_YEAR` = **12**；晨查仍是 1 次。
+- **请求数**：0 次增加。整份登记簿一次请求已经带着所有有行的年份，写空年是同一批次上的本地动作。脚本化行情下：幸存者一天 2027-01-04 仍是 **11** 次；第 2 步框架（`test_daily_selection_survivor.py`）仍是 `FIRST_SESSION_OF_A_YEAR` = **12**；晨查仍是 1 次。（corrected 2026-11-07：11 是批次 1 的 `new_year` 夹具的形状；批次 2 的 T3 夹具按 12 月 31 日的名称种子建库，幸存者一天 2027-01-04 是 **12** 次——第 12 次是既有的 `V2-P7-016` 年前名称重建（`namechange` 共 2 次），不是 `V2-P7-025`；登记簿的空年本身 0 次请求。）
 - **硬规则**：两个数据平面分离（登记簿是面板平面，绝不进 `ParquetEvidenceStore`）；`domain/` 不引入 numpy/pandas/sqlite3/duckdb（新规则只用 `datetime.date`）；一个组装根（本计划不新建存储）；面板夹具测试时生成（`.parquet/.duckdb/.sqlite3/.db` 不入库）；契约不改字段（零行分区的覆盖记录是既有 `PartitionCoverage` 形状）；重放性字段真实（`as_of`/`fetched_at` 用抓取自己的时钟）；措辞"候选"，工程完成不是研究证据；本计划不产出任何收益数字。
 - **测试卫生**：隔离 worktree 里跑测试一律 `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD/src"`（venv 里的包指向主检出的 `src`），先 `python -c "import openalpha_cn; print(openalpha_cn.__file__)"` 确认；长文件只跑 `-k` 选择；**一次只跑一个 pytest 进程**；提交前跑一次 `tests/unit`（约 40 分钟，串行）；绝不在 `git --exec`/hook 里跑测试。
 - **变异探针**：`cp <file> <scratch>/orig`；改；跑目标测试，**必须红**；`cp <scratch>/orig <file>`；`cmp <file> <scratch>/orig`；全程 `PYTHONDONTWRITEBYTECODE=1`。
@@ -922,7 +922,7 @@ def test_the_first_session_of_a_year_with_no_listing_or_delisting_runs_to_its_ev
 
 - [ ] **Step 5：变异 / 夹具探针：**
   - M1 去掉空年（T1 的 M5 或 T2 的 M1）：本测试必须回到 Step 2 的拒绝。
-  - M2 把夹具的市场改回 `EmptyNewYear(open_days=NEW_YEAR_DAYS)`（即保留 `NewYearMarket` 默认的那次 2027-01-04 退市）：夹具最后的 `assert 2027 not in registered_years` 必须变红——这是"夹具不再证明任何东西"的证人。
+  - M2 把夹具的市场改回 `EmptyNewYear(open_days=NEW_YEAR_DAYS)`（即保留 `NewYearMarket` 默认的那次 2027-01-04 退市）：夹具最后的 `assert 2027 not in registered_years` 必须变红——这是"夹具不再证明任何东西"的证人。（corrected 2026-11-07：M2 按原样**不生效**——脚本化行情按当天 `today` 过滤 `delisted`，把市场改回带 2027-01-04 退市的默认形态不会让这次退市进入当天的回答；实现者以 M2' 代替它，保留同一意图，替代探针记在实现者报告里，本计划的 M2 文字按原样不可执行。）
   - M3 把夹具的 2026 建库改成 `as_of="2027-01-04T12:00:00+08:00"`（原 `new_year` 的写法）：同一个断言必须变红，因为种子自己写了 2027 空年。**这条是本任务最容易踩的坑**，写成探针而不是注释。
 
 - [ ] **Step 6：门禁**（本文件 `-k` 跑一节；提交前 `tests/unit`）。
@@ -1046,9 +1046,9 @@ def test_a_report_across_the_year_names_a_registry_year_it_cannot_read(
 - [ ] **Step 4：运行，确认通过。** 同 Step 2 全绿；再跑 `-k "first_session_of_a_year or new_year"` 一节（`first_session_evening` 仍用 `new_year` 的夹具、仍有 2027 退市行，必须一字不改地绿）。
 
 - [ ] **Step 5：变异探针：**
-  - M1 T1 的 M5（删掉 `empty_admissible_through`）：周报被拒，`stale`。
-  - M2 T2 的 M1：周报被拒，`partition_missing`。
-  - M3 把 `EMPTY_REGISTRY_REPORT` 改成 `datetime(2028, 1, 6, …)`：第一例应是 `stale`（空年过了窗口），**不要求**，只记录：那是"一年之后仍照答"的失败模式的一个旁证。
+  - M1 T1 的 M5（删掉 `empty_admissible_through`）：**晚间的第 2 步先以 `stale` 拒绝**，周报根本不会运行（corrected 2026-11-07：原文写"周报被拒"，实测是晚间停下；三个新测试都被杀掉）。
+  - M2 T2 的 M1：**晚间的第 4 步以 `partition_missing` 拒绝**，周报根本不会运行（corrected 2026-11-07：原文写"周报被拒"；拒绝点是晚间的第 4 步）。
+  - M3 把 `EMPTY_REGISTRY_REPORT` 改成 `datetime(2028, 1, 6, …)`：第一例**到不了 `stale`**——2028 的日历检查先触发（corrected 2026-11-07：原文的预期不可达），**不要求**，只记录：那是"一年之后仍照答"的失败模式的一个旁证。
 
 - [ ] **Step 6：门禁**（本文件 `-k` 一节；提交前 `tests/unit`）。
 

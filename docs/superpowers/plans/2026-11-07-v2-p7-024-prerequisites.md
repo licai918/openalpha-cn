@@ -35,7 +35,7 @@
 - **不联网、不读真实面板、不发请求**（评审守卫 `tests/conftest.py`）：所有面板在测试时生成；`.parquet/.duckdb/.sqlite3/.db` 不提交（`scripts/verify_publication.py`）。
 - **措辞**：一切仍是「候选」；新增文本不得出现 `significant`、`effective`、`confirmed`、`alpha`、`outperform`、`passed`、`failed`、`proven`（`tests/unit/test_p7_diagnostics.py:92-101` 的禁止词表；`reading_lines` 的文本不在 `verdict_words` 扫描里，但仍照同一口径写）。
 - **受登记绑定的路径**：`src/`、`scripts/research/`、`pyproject.toml`、`uv.lock`、`scripts/daily_selection.py`、`scripts/forward_report.py`。本计划改 `scripts/research/` 里的三个文件且只改测试与 `src/` 之外的测试文件，全部发生在 `006b` 之前，允许；**今天没有任何登记**，所以没有绑定被作废。见「受绑定代码」一节。
-- 测试卫生（记忆）：worktree 里跑测试设 `PYTHONPATH=<worktree>/src`；每次提交前串行跑一次 `tests/unit`；变异探针用 `PYTHONDONTWRITEBYTECODE=1`，改前 `cp` 到草稿目录、改完恢复并 `cmp` 确认逐字节一致；绝不在 `git --exec`/hook 里跑测试。
+- 测试卫生（记忆）：worktree 里跑测试设 `PYTHONPATH=<worktree>/src`；~~每次提交前串行跑一次 `tests/unit`~~（**corrected 2026-11-07：这一条在本批次被划掉**——实现者只跑定向文件，整个 `tests/unit` 由控制者在批次末尾串行跑一次；批次 1 的七个并发全量把 40 分钟变成数小时）；变异探针用 `PYTHONDONTWRITEBYTECODE=1`，改前 `cp` 到草稿目录、改完恢复并 `cmp` 确认逐字节一致；绝不在 `git --exec`/hook 里跑测试。
 
 ## Review Focus
 
@@ -711,7 +711,7 @@ def _checked_runtime(runtime_dir: Path) -> Path:
 ### Step 2.3 — 运行
 
 - `PYTHONPATH="$PWD/src" uv run pytest tests/unit/test_p7_reading_rehearsal.py tests/unit/scripts/test_p7_reading.py -q`
-- 期望：全绿；精确数字 6/4 在演练文件、25 在日历夹具文件。
+- 期望：全绿；精确数字 6/4 在演练文件、25 在日历夹具文件。（corrected 2026-11-07：实际钉住的是——验证夹具的数据无关上界 **26**（不传 `runtime_dir` 时 26 仍可登记，`test_the_data_free_bound_is_the_weekday_bound`）、日历精确上界 **25**（26 在给了 `runtime_dir` 的登记与认领前预检都被拒，`test_a_minimum_above_what_the_panels_calendar_allows_is_refused_at_registration`、`test_the_preflight_refuses_a_minimum_the_windows_embargo_makes_unreachable`），演练夹具的精确 **6 / 4**（数据无关上界 8 / 5）；真实窗口的 24 没有离线复核，仍由 `024` 运行时核对。）
 
 ### Step 2.4 — 模块 docstring 与消息（同一提交）
 
@@ -959,7 +959,7 @@ def _require_the_validation_window_spent(root: Path) -> None:
 # scripts/research/p7_reading.py
 _BODY_KEYS = frozenset({..., "as_of_reason"})          # 新增一个键
 
-KNOWLEDGE_LINE: Final[str] = (
+KNOWLEDGE_LINE: Final[str] = (  # corrected 2026-11-07: the delivered name is `_KNOWLEDGE_LINE`
     "read under the knowledge at {as_of}: {reason} -- every partition is read as it stood then, "
     "so a revision or name published after a session enters that session's scores; this is a "
     "recomputation at that instant, not a replay at each session's publication instant"
