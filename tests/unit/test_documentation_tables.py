@@ -104,9 +104,10 @@ def test_the_operator_runbook_does_not_state_a_merge_status() -> None:
     """Merge status belongs to the closeout record and the roadmap, not to the runbook an
     operator follows. `docs/runbooks/daily-selection.zh-CN.md` once said `V2-P7-025` 已合入 while
     the branch was unpushed and the issue open; the plan that taught the sentence is corrected at
-    its source. The rule lives here because this is the one guard that already reads every
-    Markdown file under `docs/` and holds a negative content rule over them, so the runbook cannot
-    drift away from the record the merge actually happens in."""
+    its source. This audit owns the `docs/` Markdown inventory -- it walks every `docs/**/*.md`
+    for the table check -- which is why the runbook is named here. This test reads that one file
+    and is a lexical tripwire: it rejects the merge-status phrase and cannot prove the absence of
+    every wording that could state a merge status."""
     text = RUNBOOK.read_text(encoding="utf-8")
 
     assert "已合入" not in text, (
