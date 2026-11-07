@@ -147,11 +147,14 @@ def corpus(
 
 
 def body(panel: Any) -> dict[str, Any]:
-    """A registration body for the fixture window, with what `register_reading` writes (the
-    window is not a named one, so it is written here by hand)."""
+    """A registration body for the fixture window, with what `register_reading` writes, the exact
+    `expected_periods` included (the window is not a named one, so it is written here by hand;
+    the fixture's calendar makes 6 non-overlapping periods at stride 1 and h=2)."""
     book = BOOK.model_dump(mode="json")
     book.pop("config_id")
     return {
+        "stop_rule": {**NAMED["stop_rule"], "schema": p7_reading.STOP_RULE_SCHEMA},
+        "expected_periods": 6,
         "request": {
             "first": WINDOW.first.isoformat(),
             "last": WINDOW.last.isoformat(),
@@ -209,6 +212,23 @@ def test_the_default_preflight_finds_every_partition_the_read_opens(
     assert problems and all("[2028]" in problem for problem in problems)
 
 
+def test_the_rehearsal_body_carries_the_exact_count_and_a_prior_that_is_not_it_stops(
+    corpus: tuple[Path, Any], fixture_facts: None
+) -> None:
+    """The rehearsal body is what `register_reading` writes, `expected_periods` included, so it
+    exercises the preflight's count check: the fixture's calendar makes 6; a prior of 5 is
+    refused before any claim."""
+    root, panel = corpus
+    registered = body(panel)
+
+    assert registered["expected_periods"] == 6
+    assert p7_reading._panel_preflight(root, WINDOW)(registered) == ()
+
+    wrong = {**registered, "expected_periods": 5}
+    problems = p7_reading._panel_preflight(root, WINDOW)(wrong)
+    assert problems and "exactly 6" in problems[0] and "expects 5" in problems[0]
+
+
 @pytest.mark.parametrize(("horizon", "most"), [(2, 6), (3, 4)])
 def test_the_preflight_refuses_a_minimum_the_windows_embargo_makes_unreachable(
     corpus: tuple[Path, Any], fixture_facts: None, horizon: int, most: int
@@ -235,6 +255,9 @@ def test_the_preflight_refuses_a_minimum_the_windows_embargo_makes_unreachable(
     assert problems and f"at most {most}" in problems[0]
 
     registered["stop_rule"]["minimum_periods"] = most
+    # A primary body carries the exact count too; this test changes the horizon, so the count
+    # that goes with it changes as well.
+    registered["expected_periods"] = most
     assert p7_reading._panel_preflight(root, WINDOW)(registered) == ()
 
 

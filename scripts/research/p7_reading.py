@@ -475,6 +475,42 @@ class _Committed:
 # --- the registration ----------------------------------------------------------------------------
 
 
+def _body_of(
+    *,
+    reading: str,
+    issue: str,
+    role: Role,
+    window: str,
+    request: Mapping[str, Any],
+    config: Mapping[str, Any],
+    stop_rule: StopRule | None,
+    expected_periods: int | None,
+    code_commit: str,
+    as_of_reason: str,
+) -> dict[str, Any]:
+    """The registration body `register_reading` writes, before any rule is applied. The command's
+    `--dry-run` validates through this and `_registration_of`, so it exercises exactly the body a
+    real registration would write instead of a second, drifting one."""
+    try:
+        request_form = grid.to_json_value(dict(request))
+        config_form = grid.to_json_value(dict(config))
+    except grid.ResearchLedgerError as error:
+        raise ReadingError(f"the request or the configuration has no JSON form: {error}") from error
+    return {
+        "schema": READING_SCHEMA,
+        "reading": reading,
+        "issue": issue,
+        "role": role,
+        "window": window,
+        "request": request_form,
+        "config": config_form,
+        "stop_rule": None if stop_rule is None else _rule_form(stop_rule),
+        "expected_periods": expected_periods,
+        "code_commit": code_commit,
+        "as_of_reason": as_of_reason,
+    }
+
+
 def register_reading(
     *,
     path: Path,
@@ -528,24 +564,18 @@ def register_reading(
     needs no migration -- this body is not one of hard rule 3's contract rows (it is admitted by
     `_BODY_KEYS` and `_registration_of` by hand, with no pydantic model and no `extra="forbid"`).
     """
-    try:
-        request_form = grid.to_json_value(dict(request))
-        config_form = grid.to_json_value(dict(config))
-    except grid.ResearchLedgerError as error:
-        raise ReadingError(f"the request or the configuration has no JSON form: {error}") from error
-    body = {
-        "schema": READING_SCHEMA,
-        "reading": reading,
-        "issue": issue,
-        "role": role,
-        "window": window,
-        "request": request_form,
-        "config": config_form,
-        "stop_rule": None if stop_rule is None else _rule_form(stop_rule),
-        "expected_periods": expected_periods,
-        "code_commit": code_commit,
-        "as_of_reason": as_of_reason,
-    }
+    body = _body_of(
+        reading=reading,
+        issue=issue,
+        role=role,
+        window=window,
+        request=request,
+        config=config,
+        stop_rule=stop_rule,
+        expected_periods=expected_periods,
+        code_commit=code_commit,
+        as_of_reason=as_of_reason,
+    )
     registered = _registration_of(body)
     expected = f"{reading}.registration.json"
     if path.name != expected:

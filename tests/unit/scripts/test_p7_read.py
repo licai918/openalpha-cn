@@ -172,12 +172,41 @@ def _register_arguments(
         "composite",
         "--transform",
         "cross_section_standard/v1",
+        "--tails",
+        "1",
+        "2",
+        "3",
+        "--book",
+        '{"seed": 0}',
+        "--min-coverage",
+        "0.5",
+        "--max-carry-sessions",
+        "250",
+        "--exchange",
+        "SSE",
     ]
     if expected is not None:
         arguments += ["--expected-periods", str(expected)]
     if reading is not None:
         arguments += ["--reading", reading]
     return arguments
+
+
+def _without(arguments: list[str], flag: str) -> list[str]:
+    """`arguments` with `flag` and the value(s) after it removed, until the next option."""
+    kept: list[str] = []
+    skipping = False
+    for token in arguments:
+        if skipping:
+            if token.startswith("--"):
+                skipping = False
+            else:
+                continue
+        if token == flag:
+            skipping = True
+            continue
+        kept.append(token)
+    return kept
 
 
 def _read_arguments(repo: Path, runtime_dir: Path, registration: Path) -> list[str]:
@@ -360,3 +389,106 @@ def test_the_command_surfaces_a_shallow_repository_as_a_refusal(
 
     assert _command(*_read_arguments(repo, calendar_panel, registration)) == 3
     assert "git fetch --unshallow" in capsys.readouterr().err
+
+
+def test_the_command_refuses_a_missing_registration_file_as_usage(
+    repo: Path, calendar_panel: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A path that is not there is a usage error (2), never a traceback and exit 1."""
+    missing = repo / "docs" / "research" / "p7-readings" / "v2-p7-024-validation.registration.json"
+
+    code = _command(*_read_arguments(repo, calendar_panel, missing))
+
+    said = capsys.readouterr()
+    assert code == 2
+    assert str(missing) in said.err and "No such file" in said.err
+    assert "Traceback" not in said.err
+    assert not missing.exists()
+
+
+def test_the_command_refuses_a_repository_that_is_not_there_as_usage(
+    repo: Path,
+    calendar_panel: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A `--repo` that does not exist is a usage error (2) on both subcommands, not exit 1."""
+    missing_repo = tmp_path / "nowhere"
+
+    assert _command(*_register_arguments(missing_repo, calendar_panel)) == 2
+    said = capsys.readouterr()
+    assert str(missing_repo) in said.err and "Traceback" not in said.err
+
+    assert _command(*_register_arguments(repo, calendar_panel)) == 0
+    registration = (
+        repo / "docs" / "research" / "p7-readings" / "v2-p7-024-validation.registration.json"
+    )
+    commit_file(repo, registration, "the registration", at=COMMITTED)
+    capsys.readouterr()
+
+    assert _command(*_read_arguments(missing_repo, calendar_panel, registration)) == 2
+    said = capsys.readouterr()
+    assert str(missing_repo) in said.err and "Traceback" not in said.err
+
+
+@pytest.mark.parametrize(
+    "flag",
+    ["--tails", "--book", "--min-coverage", "--max-carry-sessions", "--exchange"],
+)
+def test_the_command_requires_every_request_and_config_item(
+    repo: Path, calendar_panel: Path, flag: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No request or configuration value comes from a code default: a missing one is a usage
+    error, so the registration cannot silently carry a value the user never approved."""
+    with pytest.raises(SystemExit) as exited:
+        _command(*_without(_register_arguments(repo, calendar_panel), flag))
+
+    assert exited.value.code == 2
+    assert "required" in capsys.readouterr().err
+    assert not (repo / "docs" / "research" / "p7-readings").exists()
+
+
+def test_the_command_stops_on_a_mismatch_even_when_the_registration_already_exists(
+    repo: Path,
+    calendar_panel: Path,
+    reduced_calendar_panel: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An identical registration at the same path is returned without a panel check by
+    `register_reading`; the command checks the count before that, so a panel that now makes
+    another number still stops with 4 -- and the registration already on disk is left as it was."""
+    assert _command(*_register_arguments(repo, calendar_panel)) == 0
+    registration = (
+        repo / "docs" / "research" / "p7-readings" / "v2-p7-024-validation.registration.json"
+    )
+    before = registration.read_bytes()
+    capsys.readouterr()
+
+    code = _command(*_register_arguments(repo, reduced_calendar_panel))
+
+    said = capsys.readouterr()
+    assert code == 4
+    assert "exactly 24" in said.err and "expects 25" in said.err
+    assert registration.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [("--transform", "no_such/v1"), ("--score", "momentum")],
+)
+def test_a_dry_run_validates_the_registration_a_secondary_reading_would_write(
+    repo: Path,
+    calendar_panel: Path,
+    flag: str,
+    value: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A secondary reading has no stop rule, so nothing else here would read its request and
+    configuration; the dry run validates the body register_reading would write and exits 2."""
+    arguments = _register_arguments(repo, calendar_panel, window="second_use", expected=None)
+    arguments[arguments.index(flag) + 1] = value
+
+    assert _command(*arguments, "--dry-run") == 2
+    said = capsys.readouterr()
+    assert "Traceback" not in said.err
+    assert not (repo / "docs" / "research" / "p7-readings").exists()

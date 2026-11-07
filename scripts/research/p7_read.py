@@ -9,7 +9,10 @@ calls `p7_reading.read_once`, the only library path into the window.
 Exit codes, the operator's signal:
 
 * 0 -- the registration or the result was written (the verdict is printed as usual);
-* 2 -- usage, or a `ReadingError` the registration cannot be written with;
+* 2 -- usage, or a `ReadingError` the registration cannot be written with. Every request and
+  configuration value is a required flag: there are no code defaults, so a registration cannot
+  carry a value the user never approved. A path that does not exist (the registration, the
+  repository) is a usage error with its path in the message, never a traceback;
 * 3 -- refused before the claim (runtime directory, registration not committed, code changed,
   foreign package or script, already claimed, `second_use` before the validation window, a shallow
   repository or grafts, a preflight problem): nothing was spent;
@@ -24,12 +27,11 @@ import json
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 import p7_reading
 import p7_windows
 import registry
-from p7_diagnostics import EXCHANGE
 
 from openalpha_cn.domain.survivor_book import SurvivorBookConfig
 from openalpha_cn.domain.trading_calendar import TradingCalendarError
@@ -64,6 +66,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         # `ExpectedPeriodsMismatch`, `DiagnosticWindowError` and `TradingCalendarError` are
         # ValueErrors too and are caught above, in that order.
         return _refuse(arguments.command, error, EXIT_USAGE)
+    except OSError as error:
+        # A path that is not there -- the registration, the repository, the panel -- is a usage
+        # error with its path and reason (the OSError carries both), never a traceback and exit 1.
+        return _refuse(arguments.command, error, EXIT_USAGE)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -93,12 +99,15 @@ def _parser() -> argparse.ArgumentParser:
     )
     register.add_argument("--stride", type=int, required=True)
     register.add_argument("--horizons", type=int, nargs="+", required=True)
-    register.add_argument("--tails", type=int, nargs="+", default=[1, 2, 3])
+    # Every request and configuration value is given on the command line: none has a code
+    # default, so the registration cannot carry a value the user never approved (plan R4).
+    register.add_argument("--tails", type=int, nargs="+", required=True)
     register.add_argument("--score", required=True)
-    register.add_argument("--book", default='{"seed": 0}', help="the survivor book as JSON")
+    register.add_argument("--book", required=True, help="the survivor book as JSON")
     register.add_argument("--transform", required=True)
-    register.add_argument("--min-coverage", type=float, default=0.5)
-    register.add_argument("--max-carry-sessions", type=int, default=250)
+    register.add_argument("--min-coverage", type=float, required=True)
+    register.add_argument("--max-carry-sessions", type=int, required=True)
+    register.add_argument("--exchange", required=True)
     register.add_argument("--dry-run", action="store_true", help="compute and print; write nothing")
     read = commands.add_parser("read", help="check the expected count, then read the window once")
     read.add_argument("--repo", type=Path, required=True)
@@ -127,7 +136,9 @@ def _register(arguments: argparse.Namespace) -> int:
             "the research window is not read once: it is read through p7_diagnostics explore"
         )
     window = _window_named(arguments.window)
-    role = "primary" if window.name == p7_windows.VALIDATION.name else "secondary"
+    role: Literal["primary", "secondary"] = (
+        "primary" if window.name == p7_windows.VALIDATION.name else "secondary"
+    )
     book_form: Any = json.loads(arguments.book)
     book = SurvivorBookConfig.model_validate(book_form)
     request = {
@@ -142,7 +153,7 @@ def _register(arguments: argparse.Namespace) -> int:
     config = {
         "book": book_form,
         "transform": arguments.transform,
-        "exchange": EXCHANGE,
+        "exchange": arguments.exchange,
         "min_coverage": arguments.min_coverage,
         "max_carry_sessions": arguments.max_carry_sessions,
         "as_of": arguments.as_of,
@@ -158,6 +169,33 @@ def _register(arguments: argparse.Namespace) -> int:
         stop_rule = p7_reading.adopted_stop_rule(score=arguments.score, expected_periods=expected)
     else:
         stop_rule = None
+    reading = arguments.reading
+    if reading is None:
+        reading = f"v2-p7-024-{window.name.replace('_', '-')}"
+    path = arguments.repo / p7_reading.READING_DIRECTORY / f"{reading}.registration.json"
+    # The code commit is resolved once, before anything is written. A `--repo` that is not there
+    # raises `OSError`, which `main` maps to EXIT_USAGE with the path in the message.
+    resolved = registry._git(arguments.repo, "rev-parse", "HEAD")
+    if resolved.returncode != 0:
+        said = resolved.stderr.decode(errors="replace").strip()
+        raise p7_reading.ReadingError(f"{arguments.repo} is not a git repository: {said}")
+    code_commit = resolved.stdout.decode().strip()
+    body = p7_reading._body_of(
+        reading=reading,
+        issue=arguments.issue,
+        role=role,
+        window=window.name,
+        request=request,
+        config=config,
+        stop_rule=stop_rule,
+        expected_periods=expected,
+        code_commit=code_commit,
+        as_of_reason=arguments.as_of_reason,
+    )
+    # Every path validates the whole body, the dry run included: a secondary reading has no stop
+    # rule, so nothing else would read its request and configuration, and a dry run must refuse
+    # an invalid transform or score rather than print a registration that could not be written.
+    p7_reading._registration_of(body)
     if stop_rule is not None:
         most = p7_reading.counted_periods(
             arguments.runtime_dir,
@@ -176,33 +214,26 @@ def _register(arguments: argparse.Namespace) -> int:
         print(f"the panel's calendar makes exactly {most} non-overlapping periods")
         print(f"the data-free bound is {free} periods")
         print(f"the registration expects {expected}")
-        # The dry run writes nothing, so it stops here; a real registration is held to the same
-        # count by `register_reading`, which refuses before writing (an `ExpectedPeriodsMismatch`).
-        if arguments.dry_run and problem is not None:
+        # Checked on every path, not only the dry run: an identical registration already on disk
+        # is returned by `register_reading` without a panel check, and a panel that now makes a
+        # different count must still stop the command (exit 4) before anything else happens.
+        if problem is not None:
             raise p7_reading.ExpectedPeriodsMismatch(problem)
-    reading = arguments.reading
-    if reading is None:
-        reading = f"v2-p7-024-{window.name.replace('_', '-')}"
-    path = arguments.repo / p7_reading.READING_DIRECTORY / f"{reading}.registration.json"
     if arguments.dry_run:
         print(f"the registration that would be written is {path}")
         print("dry run: nothing was written and nothing was claimed")
         return EXIT_OK
-    resolved = registry._git(arguments.repo, "rev-parse", "HEAD")
-    if resolved.returncode != 0:
-        said = resolved.stderr.decode(errors="replace").strip()
-        raise p7_reading.ReadingError(f"{arguments.repo} is not a git repository: {said}")
     digest = p7_reading.register_reading(
         path=path,
         reading=reading,
         issue=arguments.issue,
-        role=role,  # type: ignore[arg-type]
+        role=role,
         window=window.name,
         request=request,
         config=config,
         stop_rule=stop_rule,
         expected_periods=expected,
-        code_commit=resolved.stdout.decode().strip(),
+        code_commit=code_commit,
         as_of_reason=arguments.as_of_reason,
         runtime_dir=arguments.runtime_dir,
     )
