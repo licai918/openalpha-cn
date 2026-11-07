@@ -344,6 +344,7 @@ def test_the_result_says_which_knowledge_clock_the_reading_is_under(repo: Path) 
 
     text = registration.with_name("v2-p7-024-validation.result.txt").read_text(encoding="utf-8")
     assert "read under the knowledge at 2026-10-09T00:00:00+08:00" in text
+    assert f"the registrant's words: {AS_OF_REASON}" in text
     assert AS_OF_REASON in text
     assert "not a replay at each session's publication instant" in text
 
@@ -1216,14 +1217,15 @@ def calendar_panel(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return root
 
 
-def _calendar_batch(year: int) -> Any:
+def _calendar_batch(year: int, *, closed: frozenset[date] = frozenset()) -> Any:
     days = [date(year, 1, 1) + timedelta(days=offset) for offset in range(366)]
     days = [day for day in days if day.year == year]
+    is_open = [day.weekday() < 5 and day not in closed for day in days]
     previous: list[str | None] = []
     seen: date | None = None
-    for day in days:
+    for day, open_that_day in zip(days, is_open, strict=True):
         previous.append(None if seen is None else seen.isoformat())
-        if day.weekday() < 5:
+        if open_that_day:
             seen = day
     published = midnight_shanghai(date(year, 1, 1))
     return batch(
@@ -1231,7 +1233,7 @@ def _calendar_batch(year: int) -> Any:
         subjects=["SSE"] * len(days),
         columns=[
             PanelColumn("cal_date", "string", tuple(day.isoformat() for day in days)),
-            PanelColumn("is_open", "boolean", tuple(day.weekday() < 5 for day in days)),
+            PanelColumn("is_open", "boolean", tuple(is_open)),
             PanelColumn("pretrade_date", "string", tuple(previous)),
         ],
         event_time=[midnight_shanghai(day) for day in days],
@@ -1295,6 +1297,33 @@ def test_the_preflight_refuses_when_the_calendar_cannot_be_read(
     problems = p7_reading._panel_preflight(root, p7_windows.VALIDATION)(body)
 
     assert problems and "calendar" in problems[0] and "2021" in problems[0]
+
+
+def test_the_preflight_names_a_window_whose_first_day_is_not_a_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`plan_signal_days` refuses by name a first day that is not a session, and the registration
+    path catches that same `DiagnosticWindowError` (`p7_reading.py:503`). The preflight must
+    return it as a named problem, not let it escape as a raw exception: the window's reachability
+    cannot be shown, and the refusal has to happen before the claim."""
+    root = tmp_path / "closed-first-day"
+    store = PanelStore(root / "panel")
+    closed = frozenset({date(2022, 1, 4)})
+    for year in (2021, 2022, 2023):
+        write_trading_calendar(store, _calendar_batch(year, closed=closed))
+    monkeypatch.setattr(p7_reading, "preflight_problems", lambda *args, **kwargs: ())
+    body = {
+        "request": REQUEST,
+        "config": CONFIG,
+        "stop_rule": p7_reading._rule_form(RULE),
+    }
+
+    problems = p7_reading._panel_preflight(root, p7_windows.VALIDATION)(body)
+
+    assert problems, "the preflight returned no problem for a window it cannot plan"
+    assert "cannot be planned" in problems[0]
+    assert "reachable" in problems[0]
+    assert "2022-01-04" in problems[0]
 
 
 @pytest.mark.parametrize(("stride", "horizon"), [(20, 20), (5, 20), (20, 5), (1, 2)])

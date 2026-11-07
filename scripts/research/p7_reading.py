@@ -258,9 +258,10 @@ NOT_TRIGGERED_WORDING: Final[str] = (
     "and is not evidence"
 )
 _KNOWLEDGE_LINE: Final[str] = (
-    "read under the knowledge at {as_of}: {reason} -- every partition is read as it stood then, "
-    "so a revision or name published after a session enters that session's scores; this is a "
-    "recomputation at that instant, not a replay at each session's publication instant"
+    "read under the knowledge at {as_of} (-- the registrant's words: {reason}) -- every partition "
+    "is read as it stood then, so a revision or name published after a session enters that "
+    "session's scores; this is a recomputation at that instant, not a replay at each session's "
+    "publication instant"
 )
 
 YEAR_BEFORE_DATASETS: Final[tuple[str, ...]] = (
@@ -984,6 +985,11 @@ def _panel_preflight(
             )
         except ReadingError as error:
             return (f"the stop rule cannot be read: {error}",)
+        except DiagnosticWindowError as error:
+            return (
+                "the calendar the stop rule's bound needs cannot be planned before the claim "
+                f"({error}); the rule's minimum_periods cannot be shown reachable",
+            )
         except (TradingCalendarError, PanelStorageError) as error:
             return (
                 "the calendar the stop rule's bound needs cannot be read before the claim "
@@ -1358,9 +1364,9 @@ def _require_the_validation_window_spent(root: Path) -> None:
             named = None
         if shown.returncode != 0 or named != WINDOWS["validation"].name:
             raise ValidationNotSpentError(
-                f"{relative} was committed at {commits[-1]} but does not read as a claim naming "
-                "the validation window; the ordering cannot be shown, so the second_use read is "
-                "refused"
+                f"{relative} was first committed at {commits[-1]} but does not read as a claim "
+                "naming the validation window; the ordering cannot be shown, so the second_use "
+                "read is refused"
             )
         return
     if on_disk.is_file():

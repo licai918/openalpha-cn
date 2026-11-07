@@ -39,6 +39,10 @@ What the guard is, and is not:
 
 What the code that uses this module must do (none of it is enforced here):
 
+* The runtime directory is `checked_runtime_directory`'s: P6's research root and every checkout
+  are refused before anything is opened, because a read-only connection still creates the
+  catalogue's `catalog.duckdb.lock` / `.gate` beside it (and a read-once measurement holds the
+  catalogue's shared side for its whole computation) -- open an APFS clone instead.
 * The command line (`p7_diagnostics`) resolves a window by name from `WINDOWS`, defaults to
   `RESEARCH`, and refuses `VALIDATION` and `SECOND_USE` outside `p7_reading.read_once`.
 * A diagnostic's `as_of` is its **knowledge clock** -- what the panel knew when the diagnostic

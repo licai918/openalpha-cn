@@ -964,7 +964,12 @@ def _open_sources(
     runtime_dir: Path, *, window: DiagnosticWindow, config: ExploreSettings
 ) -> tuple[TradingCalendar, ScoreSource, Callable[[int], LabelSource], WindowCappedStore]:
     """The one place the command opens a store: the panel inside `runtime_dir`, capped at
-    `window`, and the calendar, scores and labels read off it."""
+    `window`, and the calendar, scores and labels read off it.
+
+    `runtime_dir` is first checked by `p7_windows.checked_runtime_directory`: P6's research root
+    and every checkout are refused before anything is opened, because a read-only connection still
+    creates the catalogue's `catalog.duckdb.lock` / `.gate` beside it, and a read-once measurement
+    holds the catalogue's shared side for its whole computation."""
     checked_runtime_directory(runtime_dir)
     store = capped_panel_store(runtime_dir, window)
     calendar = load_trading_calendar(
