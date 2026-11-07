@@ -7,9 +7,10 @@
 - 批次 2 是两条计划一起做的一批：`V2-P7-025`（登记簿 `stock_basic` 的新年缺口，任务 T1–T5）与 `V2-P7-024` 的四个前置（`V2-P7-004` 收尾记录 §5 第 10 条 ①–④，任务 1–5）。计划是 `docs/superpowers/plans/2026-11-07-v2-p7-025-registry-new-year.md` 与 `docs/superpowers/plans/2026-11-07-v2-p7-024-prerequisites.md`。
 - 代码在分支 `feat/v2-p7-025-batch-2` 上（从 `main` 的 `587a158` 分出）。**批次代码在 `4b4ec94` 冻结**，控制者的串行闸门 `tests/unit` 跑在 `4b4ec94` 上（日志在 `.superpowers/sdd/batch-2/gate/`，不在版本库里）；**它的结果不在本记录里，本文不写它通过。** 冻结之后只有 docstring、注释与文档，清单见下一条。**未推送；交付的代码没有跑过任何真实构建、因子或读数，一次 Tushare 请求也没有发过；只有那次 0 次请求的只读测量打开过真实面板的 parquet**：所有测试都跑在脚本化行情和测试时生成的夹具上。
 - 规模（`git diff --shortstat 587a158 4b4ec94`）：23 个文件、+3,977 / −75。其中 `src/` 5 个文件、`scripts/` 4 个文件、文档 3 个（两条计划 + 运行手册）、测试 11 个文件（新增 45 个测试函数，部分参数化）。**受登记绑定的路径**（`scripts/research/registry.REGISTERED_PATHS` = `src`、`scripts/research`、`pyproject.toml`、`uv.lock`；`scripts/daily_selection.py` 由 `also_bound` 加绑）里，**改了字节的只有 `src/`（5 个文件）、`scripts/research/`（3 个文件）与 `scripts/daily_selection.py`**；`pyproject.toml` 与 `uv.lock` 没有变（`git diff --name-only 587a158 4b4ec94 -- pyproject.toml uv.lock` 为空）。**没有任何登记存在**（每日登记自 2026-10-08 暂停），所以没有绑定因此被作废。
-- **`4b4ec94` 之后动过字节的文件（本轮的文档/文本波）。** 受登记绑定的三个：`scripts/research/p7_reading.py`（一处 docstring）、`src/openalpha_cn/panel_ingest.py`（`_write_empty_partition` 的 docstring）、`src/openalpha_cn/strategy_survivor_facts.py`（两处 docstring）；三个都用 `ast.dump`（去掉 docstring）与改前逐字符相同证明**可执行 AST 不变**，脚本与哈希留在工作树外，不入库。不是绑定代码的：`tests/unit/test_survivor_facts_panel.py`（注释）、`tests/integration/panel/test_registry_ingest.py`（docstring）、`docs/runbooks/daily-selection.zh-CN.md`、`docs/specs/v2/openalpha-cn-v2-roadmap.md`、`docs/specs/v2/openalpha-cn-v2-p7-decision-chain.md`、两条计划文档、本记录、`CHANGELOG.md`、`docs/HANDOFF_CURRENT.md`、`AGENTS.md`。**没有一处行为改动。**
+- **`4b4ec94` 之后动过字节的文件（本轮的文档/文本波）。** 受登记绑定的三个：`scripts/research/p7_reading.py`（一处 docstring）、`src/openalpha_cn/panel_ingest.py`（`_write_empty_partition` 的 docstring）、`src/openalpha_cn/strategy_survivor_facts.py`（两处 docstring）；三个都用 `ast.dump`（去掉 docstring）与改前逐字符相同证明**可执行 AST 不变**，脚本与哈希留在工作树外，不入库。不是绑定代码的：`tests/unit/test_survivor_facts_panel.py`（注释）、`tests/integration/panel/test_registry_ingest.py`（docstring）、`docs/runbooks/daily-selection.zh-CN.md`、`docs/specs/v2/openalpha-cn-v2-roadmap.md`、`docs/specs/v2/openalpha-cn-v2-p7-decision-chain.md`、两条计划文档、本记录、`CHANGELOG.md`、`docs/HANDOFF_CURRENT.md`、`AGENTS.md`。**该文本波没有一处行为改动。**
+- **最终评审波的改动（在本文写作之后、合并之前）。** 评审要求修的几处可执行改动——预检也接 `DiagnosticWindowError`、`universe_year_may_be_empty` 收紧到 `[当年 1 月 1 日, through]`、结果行把 `as_of_reason` 标为登记者的话、`_require_the_validation_window_spent` 的消息改为 "first committed at"——在 `4b4ec94` 之后改了可执行字节（`scripts/research/p7_reading.py`、`src/openalpha_cn/domain/stock_universe.py`）；`p7_windows.py`、`p7_diagnostics.py`、`panel_ingest.py` 的改动仍只有 docstring（去掉 docstring 的 `ast.dump` 与 `4b4ec94` 相同）。仍然没有登记，所以没有绑定被作废。
 - 集成分支由两条轨道逐个挑拣而成，提交在历史里交错，所以下面**列出提交**而不写区间；哈希取自 `git log 587a158..4b4ec94`，账本（不在版本库内：`.superpowers/sdd/`）里的哈希是挑拣之前的，不能直接用。
-- 各任务的"通过"数字是实现者和评审者各自最后一次**定向**运行的数字，来自账本，本轮文档没有重跑。整个 `tests/unit` 由控制者在集成分支上串行跑一次。
+- 各任务的"通过"数字是实现者和评审者各自最后一次**定向**运行的数字，来自账本，本轮文档没有重跑。整个 `tests/unit` 由控制者在集成分支上串行跑一次。**控制者的串行全套结果见下一条（合并前由控制者补入）。**
 - 账本、任务书与代码不一致的地方，以代码为准，见 §7。
 
 ## 1. 交付了什么（逐个 issue）
@@ -17,12 +18,12 @@
 ### `V2-P7-025` 登记簿（`stock_basic`）的新年缺口——代码已交付、本行未关闭
 
 - 提交（4 个代码与测试，另有计划 `599a942` 与 2 个文档：`171415f`、`4b4ec94`）：面板层 `ab93a7c`；`panel build` 接线 `a1378ee`；端到端 `0128e64`；周报跨年 `c41377e`；运行手册与模块文档 `171415f`、`4b4ec94`。
-- **写**：整份 `stock_basic` 抓取成功、观测年没有上市/退市时，`panel build` 用同一批次把该年记成零行生命周期分区（`panel_ingest.record_empty_universe_year`，`cli._write_registry_year`，写成功之后在 stderr 印一行 `EMPTY stock_basic year=…`）。写在整个批次的有行年份之后、且只在写入成功时才打印。零行分区的覆盖记录：`row_count` 0，`as_of`/`fetched_at`/`last_event_time` 是抓取时刻，`max_available_time` 是该年第一个瞬间，列取自**这次抓取自己的最新子批次**（不是库里的最新有行年——与 `021` 的 `write_empty_name_year` 不同）。
+- **写**：整份 `stock_basic` 抓取成功、观测年没有上市/退市时，`panel build` 用同一批次把该年记成零行生命周期分区（`panel_ingest.record_empty_universe_year`，`cli._write_registry_year`，写成功之后在 stderr 印一行 `EMPTY stock_basic year=…`）。写在整个批次的有行年份之后、且只在写入成功时才打印。登记簿的有行年份与这个空年是**两次写入，不是一次**：两次之间崩溃会让最新年缺失，直到下一次构建再记它——失败即关闭，那一晚已经失败。零行分区的覆盖记录：`row_count` 0，`as_of`/`fetched_at`/`last_event_time` 是抓取时刻，`max_available_time` 是该年第一个瞬间，列取自**这次抓取自己的最新子批次**（不是库里的最新有行年——与 `021` 的 `write_empty_name_year` 不同）。
 - **读**：`domain.stock_universe.UNIVERSE_YEAR_EMPTY_THROUGH = (12, 31)`；`stock_universe_requirement` 把 `empty_admissible_through` 带给每个读者（`load_stock_universe` 内的两个调用点与一个外部调用者 `panel_doctor.py:1503`，都经 `stock_universe_requirement`），目录库在窗口之后把零行分区按规则判 `stale`（`max_staleness=None` 也一样）。读者只在到该年 12 月 31 日（含，上海日历日）为止把它读作"今年还没有上市或退市"；当年第一条真实事件到来时零行分区被整份替换；同一年的更晚观测把零行分区重记一次。
 - **四条拒绝条件**：不是一次成功的整份抓取（`no_data` 的整份回答由 `write_stock_universe` 先拒）；观测日已过该年的窗口；库里该年已有行而这次抓取的 `as_of` 不早于写那些行的观测（会"退市"已存的证券）；数据集不是 `stock_basic`。更早的重放什么都不写（`write_stock_universe` 对一个从批次里整年消失的年份的既有规则）。此外 `by_year` 为空的分支对成功的整份抓取**到不了**，是防御分支（§4）。
 - **读者与端到端**：`test_a_lifecycle_year_with_no_event_yet_is_recorded_empty_and_read_across_the_history`（`years_read` 含该年、4 日的成员与 31 日的相同）；`test_the_registry_requirement_carries_the_empty_year_window_every_reader_needs`；`test_a_lifecycle_year_never_written_is_still_refused_as_missing`（没有分区仍是 `partition_missing`）；`test_the_skipped_year_refusal_still_fires_beside_an_empty_year`；`test_the_first_session_of_a_year_with_no_listing_or_delisting_runs_to_its_evening`（2027-01-04 晚间走完第 2–9 步，12 次请求，其中 `stock_basic` 1 次、`namechange` 2 次——第 12 次是既有的 `V2-P7-016` 年前名称重建）；`test_a_report_across_a_new_year_reads_the_registry_year_the_first_evening_recorded`（周报跨年，`first_session=2027-01-04`、`witnessed=1`）；两种拒绝形状 `partition_file_missing` / `partition_missing` 各有测试。
 - **0 次请求的测量（2026-11-07，只读真实面板的 parquet，无写入、无网络）**：过去 14 年（2013–2026）有 **10 年**在当年第一个会话时还没有任何登记事件，缺口可以长到几个月（2009 年第一条是 2009-05-06，2013 年是 2013-02-08）；1990–2026 **每一年都至少有 4 行**。它量的是"每年第一个会话之前该年有没有事件"，**不是**"当年第一晚那一刻库里有没有该年的分区"——现存分区是事后回填的（**推断**：从今天的 parquet 看成这样，不是有日期的测量），那一刻的状态无法从今天的库里直接读回（测量文件同样写了这一点，且不入库）。后者正是"空年只在自己那一年之内可读"之所以失败即关闭：年外一个空的登记年只可能是失败或截断的抓取。
-- **未做 / 未关闭**：没有对真实注册表运行过，没有登记；**取值（到 12 月 31 日，含）是暂定的，待用户确认**（计划 U1）；把 `025` 列为 `006a` 的一项并加入 `006` 的依赖仍是控制者的建议、待用户确认。路线图与规格 §9 本行都保持打开。
+- **未做 / 未关闭**：没有对真实注册表运行过，没有登记；**取值（到 12 月 31 日，含）是暂定的，待用户确认**（计划 U1）；把 `025` 列为 `006a` 的一项并加入 `006` 的依赖仍是控制者的建议、待用户确认。路线图与规格 §9 本行都保持打开。**本批次不新增台账行**：计划 §8 建议的 `OA-PANEL-044` 与 `OA-OPS-050` 没有加入能力台账——台账命名的是 v1 特性，这两项是按批次末尾处理的决定；本批次只把新单元命名，不台账化。
 
 ### `V2-P7-024` 那唯一一次读数之前的四个前置——代码已交付、本行未关闭
 
@@ -76,15 +77,15 @@
 
 **025 面板层（T1）**：`_write_empty_partition` 的 docstring 说"每个调用者传该数据集最新有行年"——对第三个调用者 `record_empty_universe_year` 是假话（它传批次自己的最新子批次）【本轮已修】；`if not by_year` 对成功的批次到不了、也没测，保留为防御；`test_registry_ingest.py:880` 的 docstring 说 2026 "holds fourteen lifecycle rows"（夹具是 1 行）【本轮已修】；一个**更早**的 `as_of` 重放到已存的零行年上会重写它、把 `as_of` 往回拨（失败即关闭，形状同 `write_empty_name_year`，无测试）；`U1=(12, 31)` 下 M9 不可达，为别的 `U1` 取值保留（计划要求）；任务书的 M1 探针描述不准（只有域测试会死，读侧由 M6 覆盖）。
 
-**024 精确上界（Task 2）**：`p7_reading.py` 里那句"The catalogue check before the claim found a year of the window missing"已过时（预检还会拒绝读不出的日历与不可达的 `minimum_periods`）【本轮已修；旧句在 :326，任务书说的 :304 已是 `_REQUEST_KEYS`】；预检的失败即关闭元组（:987）接 `TradingCalendarError` / `PanelStorageError`，但不接 `DiagnosticWindowError`，而登记那条路接（:503）——日历让窗口第一天不是会话时，预检以一个裸异常逃出（仍在认领之前，失败即关闭，只是两侧不对称）【本轮记录，不在本波】。
+**024 精确上界（Task 2）**：`p7_reading.py` 里那句"The catalogue check before the claim found a year of the window missing"已过时（预检还会拒绝读不出的日历与不可达的 `minimum_periods`）【本轮已修；旧句在 :326，任务书说的 :304 已是 `_REQUEST_KEYS`】；预检的失败即关闭元组（:987）接 `TradingCalendarError` / `PanelStorageError`，但不接 `DiagnosticWindowError`，而登记那条路接（:503）——日历让窗口第一天不是会话时，预检以一个裸异常逃出（仍在认领之前，失败即关闭，只是两侧不对称）【最终评审波已修：预检也接 `DiagnosticWindowError`，按名返回"日历无法规划、可达性无法证明"的问题】。
 
-**025 接线（T2）**：一次多年调用（`--start 2014 --end 2027`）会按 `--year` 迭代各印一行同样的 `EMPTY` 并每次重写零行分区（请求数不变）——见 §4 末"本轮明确不做"；没有测试钉住"抓取带着观测年 → 不印 `EMPTY`"这一否定面，也没有钉"被拒的写入不打印"（成功路径已钉）；`tests/unit/scripts/test_daily_selection_survivor.py:845` 的 `# --- V2-P7-025` 分隔条现在出现在四个 `V2-P7-021` 测试之前，应下移到 :997；一个更早的 `as_of` 重放到已存的零行年上会把覆盖记录的 `as_of` 往回拨（失败即关闭，无测试）；`test_survivor_facts_panel.py:1280-1291` 用 025 之前的世界讲 `_registry_year`【本轮已修】。
+**025 接线（T2）**：一次多年调用（`--start 2014 --end 2027`）会按 `--year` 迭代各印一行同样的 `EMPTY` 并每次重写零行分区（请求数不变）——见 §4 末"本轮明确不做"；没有测试钉住"抓取带着观测年 → 不印 `EMPTY`"这一否定面，也没有钉"被拒的写入不打印"（成功路径已钉）；`tests/unit/scripts/test_daily_selection_survivor.py:845` 的 `# --- V2-P7-025` 分隔条现在出现在四个 `V2-P7-021` 测试之前，应下移到 :997【本轮已修：分隔条与它的三段测试已移到那四个 `021` 测试之后】；一个更早的 `as_of` 重放到已存的零行年上会把覆盖记录的 `as_of` 往回拨（失败即关闭，无测试）；`test_survivor_facts_panel.py:1280-1291` 用 025 之前的世界讲 `_registry_year`【本轮已修】。登记簿的有行年份与空年是两次写入，两次之间崩溃会让最新年缺失到下一次构建（失败即关闭；那一晚已经失败，缺失的最新年就是该年第一个事件之前的状态）。
 
-**024 顺序（Task 3）**：`_require_the_validation_window_spent` 自己没有浅克隆/grafts 检查（唯一调用点在 `_refuse_a_second_read` 之后，那里两者都拒，方向失败即关闭）；`commits[-1]` 是**最老**一个碰过该路径的提交，而消息说"was committed at"，应说明指哪个版本；`:1334` 的 docstring 说"reachable from some ref"而实现用 refs + 未过期 reflog，应对齐；测试的 `match="commit"` 也能被"no committed … exists"满足，应改用"on disk but was never committed"；改写后的测试不再把命题与一个已提交的 `<reading>.claim.json` 文件种类配在一起（同一扫描，两种文件各有自己的测试）；只走 reflog 的分支没有测试（任务书接受，评审者直接探针验证过）。
+**024 顺序（Task 3）**：`_require_the_validation_window_spent` 自己没有浅克隆/grafts 检查（唯一调用点在 `_refuse_a_second_read` 之后，那里两者都拒，方向失败即关闭）；`commits[-1]` 是**最老**一个碰过该路径的提交，而消息说"was committed at"，应说明指哪个版本【最终评审波已修：改为 `first committed at`】；`:1334` 的 docstring 说"reachable from some ref"而实现用 refs + 未过期 reflog，应对齐；测试的 `match="commit"` 也能被"no committed … exists"满足，应改用"on disk but was never committed"；改写后的测试不再把命题与一个已提交的 `<reading>.claim.json` 文件种类配在一起（同一扫描，两种文件各有自己的测试）；只走 reflog 的分支没有测试（任务书接受，评审者直接探针验证过）。
 
 **025 端到端（T3）**：计数期望同时钉住了 `V2-P7-016` 的重建（注释已说明）；夹具重复了 `new_year` 的两构建体（约 20 行，与文件既有写法一致）；`scored > 0` / `"result" in journal` 较松（任务书自己的断言）；周报那条路由 T4 覆盖。
 
-**024 `as_of_reason`（Task 4）**：`reading_lines` 的 docstring 没提新的一行；参数化测试的 `match="as_of"` 也能被"缺键"的消息满足（变异 C 按错误理由通过；写一次那条测试抓住）；`as_of_reason` 是登记者的文字、逐字印出，`verdict_words` 只扫诊断文档，所以一个"confirmed"/"alpha" 会进结果文本（按固定模板当数据处理；过滤会拒掉合法措辞）【本轮记录，不在本波】；空白拒绝的消息没说"前后空白也拒绝"；结果测试断言三个子串，不是整句。
+**024 `as_of_reason`（Task 4）**：`reading_lines` 的 docstring 没提新的一行；参数化测试的 `match="as_of"` 也能被"缺键"的消息满足（变异 C 按错误理由通过；写一次那条测试抓住）；`as_of_reason` 是登记者的文字、逐字印出，`verdict_words` 只扫诊断文档，所以一个"confirmed"/"alpha" 会进结果文本（按固定模板当数据处理；过滤会拒掉合法措辞）【最终评审波：结果行已把它标为"the registrant's words"，仍逐字印出、仍不扫禁用词】；空白拒绝的消息没说"前后空白也拒绝"；结果测试断言三个子串，不是整句。
 
 **024 回退分支（Task 5）**：分支 1 只用类型钉住（删掉分支会 `TypeError`，现实变异体会红）；attempts 列表绑到模块全局查找与关键字调用——合法重构可能让它失败，但会**大声**失败（空列表 / `TypeError`），方向失败即关闭；一处惰性 `type: ignore` 与一个 `list[object]` 注解（外观）。
 
@@ -95,8 +96,9 @@
 **本轮明确不做（记录在案）**：
 
 - 一次多年的 `panel build --dataset stock_basic` 会按 `--year` 迭代各印一行 `EMPTY stock_basic` 并每次重写零行分区（请求数不变）。去重与"只写一次"是一个后续小任务。
-- 预检的失败即关闭元组缺 `DiagnosticWindowError`，而登记那条路有它；结果是窗口第一日不是会话时预检以裸异常逃出——仍在认领之前、失败即关闭。
-- `as_of_reason` 逐字印在结果文本里，不扫禁用词；它按固定模板当数据处理，过滤会拒掉合法措辞。
+- 预检的失败即关闭元组缺 `DiagnosticWindowError`，而登记那条路有它；结果是窗口第一日不是会话时预检以裸异常逃出——仍在认领之前、失败即关闭。【最终评审波已修】
+- `as_of_reason` 逐字印在结果文本里，不扫禁用词；它按固定模板当数据处理，过滤会拒掉合法措辞（最终评审波只在结果行标出它是登记者的话，没有加过滤）。
+- 台账行：计划 §8 建议的 `OA-PANEL-044`（面板允许空的登记簿生命周期年）与 `OA-OPS-050`（新年首晚的运行前提）**不加入能力台账**——台账命名的是 v1 特性，这两项按批次末尾处理；本批次只把新单元命名，不台账化。
 
 ## 5. 要用户来定的事（全部还没有定）
 
