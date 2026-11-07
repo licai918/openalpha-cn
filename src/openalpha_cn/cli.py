@@ -130,7 +130,11 @@ from openalpha_cn.domain.price_limits import (
 )
 from openalpha_cn.domain.risk_flag import UndeclaredRiskFlagError
 from openalpha_cn.domain.run_mode import RunMode
-from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET, StockUniverseError
+from openalpha_cn.domain.stock_universe import (
+    STOCK_BASIC_DATASET,
+    StockUniverseError,
+    universe_year_empty_admissible_through,
+)
 from openalpha_cn.domain.trading_calendar import (
     TRADING_CALENDAR_DATASET,
     TradingCalendar,
@@ -252,6 +256,7 @@ from openalpha_cn.panel_ingest import (
     reconcile_price_disagreements,
     reconcile_return_paths,
     reconcile_withdrawals,
+    record_empty_universe_year,
     served_keys,
     session_publication_instant,
     split_panel_batch_by_year,
@@ -5373,6 +5378,39 @@ def _write_name_year(
     return ref
 
 
+def _write_registry_year(
+    store: PanelStore, batch: ColumnarPanelBatch, *, now: datetime
+) -> list[PartitionRef]:
+    """Record the whole-registry fetch's observation year empty when the fetch carries no row for
+    it (`panel_ingest.record_empty_universe_year`, `V2-P7-025`), and say so.
+
+    The write of the years the fetch carries is `write_stock_universe`'s and runs before this, in
+    `_stock_universe_year`; this function is the one addition, made after it because the empty
+    year is not a year of the fetch -- a fetch that carries no row for the year is a fetch that
+    says the year has had no event yet, and that is a partition, not an absence. A refused or
+    truncated fetch never reaches here (`_fetch_panel` raises it as `provider_failure`), and a
+    `no_data` whole-registry answer is refused by the writer by name. The line is printed after
+    the write, so a refused write never prints it (`021`'s B4 ruling)."""
+    refs = record_empty_universe_year(store, batch)
+    for ref in refs:
+        typer.echo(
+            f"EMPTY {STOCK_BASIC_DATASET} year={ref.year}: no listing or delisting yet at "
+            f"{now.isoformat()}; the year may be read empty through "
+            f"{universe_year_empty_admissible_through(ref.year).isoformat()}; recorded as an "
+            "empty partition",
+            err=True,
+        )
+    return list(refs)
+
+
+def _stock_universe_year(
+    store: PanelStore, batch: ColumnarPanelBatch, *, now: datetime
+) -> list[PartitionRef]:
+    """`write_stock_universe` and then the empty observation year, as one step of `panel build`:
+    the years the fetch carries first, the year it does not carry second."""
+    return [*write_stock_universe(store, batch), *_write_registry_year(store, batch, now=now)]
+
+
 def _build_index_weights(
     store: PanelStore,
     provider: TushareProvider,
@@ -6143,8 +6181,14 @@ def _build_panel(
         # per lifecycle year. Recorded in the command's help, in
         # `_UNPINNED_PARTITION_YEAR_TARGETS` (which exempts it from the partition-year audit)
         # rather than papered over.
+        # `V2-P7-025`: the fetch's observation year is recorded empty when it carries no row for
+        # it -- the year has had no listing and no delisting yet -- in the same invocation, so
+        # every later step of this build (and `_stored_universe` below) reads a registry that
+        # reaches the build's own year.
         written.setdefault(STOCK_BASIC_DATASET, []).extend(
-            write_stock_universe(store, _fetch_panel(provider, STOCK_BASIC_DATASET, as_of=now))
+            _stock_universe_year(
+                store, _fetch_panel(provider, STOCK_BASIC_DATASET, as_of=now), now=now
+            )
         )
     if targets & _NEEDS_STORED_UNIVERSE:
         # Resolved here rather than at the top of this function, and the position is the whole
