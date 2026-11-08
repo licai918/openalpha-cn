@@ -231,6 +231,7 @@ S3_CLOSES: Final[Mapping[str, str]] = {
 }
 """The facts day of S3's evening: the real closes its fixture's bars and entrant prices say. The
 delisted 600040.SH has none."""
+AS_OF_S1: Final[datetime] = datetime(2021, 3, 2, 18, 30, tzinfo=SHANGHAI)
 AS_OF_S2: Final[datetime] = datetime(2021, 3, 3, 18, 30, tzinfo=SHANGHAI)
 AS_OF_S3: Final[datetime] = datetime(2021, 3, 4, 18, 30, tzinfo=SHANGHAI)
 AS_OF_S4: Final[datetime] = datetime(2021, 3, 5, 18, 30, tzinfo=SHANGHAI)
@@ -2276,6 +2277,47 @@ def test_the_orders_block_reports_the_freeze_and_names_a_short_buy(s3: WrittenOf
         "  600199.SH: 1,200 of the 3,400 shares the equal share asks; 24,200.00 yuan short at "
         "the limit-up price"
     ) in lines
+
+
+def test_the_initial_build_of_ten_equal_weight_buys_names_the_one_the_limit_up_freezes_short(
+    tmp_path: Path,
+) -> None:
+    """The whole chain on a real evening: 350,000.00 of cash and sixteen survivors at 10.00, so
+    the equal share 350,000.00 / 10 x 0.995 = 34,825.00 asks for 3,400 shares of each. Nine buys
+    freeze 37,400.00 at their 11.00 limit-up, 336,600.00 in all, and the 13,400.00 left freezes
+    1,200 shares of the tenth -- 24,200.00 short of the equal share. The ORDERS block prints the
+    cash at 09:15 and the frozen total it recomputes from the plan as a cross-check, names the
+    tenth by code from the evening's own funding report, and keeps the paper book's assumption
+    that every printed order is placed; nothing here is a real run, and the wording stays
+    "candidate"."""
+    names = [f"6001{n:02d}.SH" for n in range(16)]
+    screen_ = evenings.screened(*((name, "10.00") for name in names))
+    prices = dict.fromkeys(names, "10.00")
+    result = evenings.evening(
+        evenings.book_at(tmp_path, cash="350000.00"), S1, evenings.NOTHING, screen_, prices
+    )
+    day = Day(
+        result,
+        facts_of(S1, dict.fromkeys(names, D("10.00"))),
+        screen_,
+        S1,
+        1,
+        AS_OF_S1,
+    )
+
+    lines = summary_lines(document_of(day))
+
+    assert line_with(lines, "funding").startswith(
+        row("funding", "cash at 09:15 350,000.00 yuan; buys freeze 349,800.00 yuan")
+    )
+    short = result.decision.entries[-1].ts_code
+    assert (
+        f"  {short}: 1,200 of the 3,400 shares the equal share asks; 24,200.00 yuan short at "
+        "the limit-up price"
+    ) in lines
+    assert "  the paper book assumes every order above is placed and fills at the open" in (
+        " ".join(lines)
+    )
 
 
 def test_a_document_filed_before_the_funding_block_says_the_shortfalls_were_not_recorded(
