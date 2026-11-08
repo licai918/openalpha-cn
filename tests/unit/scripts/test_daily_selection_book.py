@@ -313,3 +313,103 @@ def test_show_book_carries_the_smoke_banner_of_a_smoke_registration(
     assert err[0] == err[-1] == daily.SMOKE_BANNER
     assert any("cost" in line for line in lines)
     assert "read-only" in "\n".join(lines).lower()
+
+
+def _account_record_file(
+    runtime: Path, session: Any, planned: list[dict[str, Any]], *, not_placed: list[str]
+) -> Path:
+    path = runtime / "paper" / "account-record" / f"{session.isoformat()}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "account-record/v1",
+                "session": session.isoformat(),
+                "orders": [
+                    {
+                        "order_id": order["order_id"],
+                        "ts_code": order["ts_code"],
+                        "side": order["side"],
+                        "placed": order["order_id"] not in not_placed,
+                        "filled_quantity": 0
+                        if order["order_id"] in not_placed
+                        else order["quantity"],
+                        "filled_price": None
+                        if order["order_id"] in not_placed
+                        else order["reference_price"],
+                    }
+                    for order in planned
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_a_record_of_the_orders_the_user_placed_is_filed_with_the_days_reconciliation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,  # noqa: F811  (the module-scope fixture, imported above)
+) -> None:
+    """The second evening consumes the record written for its session: every planned order is
+    accounted for, the one the user says they did not place is named, and the block is in the
+    day's result and in its journal -- the divergence is recorded, never absorbed."""
+    world = survivor_day._world(tmp_path, monkeypatch, seeded)
+    first = survivor_day._completed(world, capsys, survivor_day.DAY)
+    planned = first["paper"]["trade_list"]["orders"]
+    _account_record_file(
+        world.runtime, survivor_day.NEXT, planned, not_placed=[planned[0]["order_id"]]
+    )
+
+    second = survivor_day._completed(world, capsys, survivor_day.NEXT)
+
+    block = second["paper"]["reconciliation"]
+    assert block["session"] == survivor_day.NEXT.isoformat()
+    assert block["orders"] == len(planned)
+    named = {(item["order_id"], item["kind"]) for item in block["divergences"]}
+    assert (planned[0]["order_id"], "not_placed") in named
+    assert all(kind in {"not_placed", "price_differs"} for _, kind in named)
+    assert block["reconciled"] + len(block["divergences"]) == len(planned)
+    filed = survivor_day._journal(world, survivor_day.NEXT)["result"]["paper"]["reconciliation"]
+    assert filed == block
+
+
+def test_a_record_naming_an_order_that_was_not_due_refuses_the_day_before_the_book_advances(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,  # noqa: F811  (the module-scope fixture, imported above)
+) -> None:
+    """A record that names an order no evening planned is irreconcilable: the day stops at step 8,
+    the session has no snapshot and no ledger row, and once the record is fixed the same day
+    completes -- so nothing of the bad record was absorbed."""
+    world = survivor_day._world(tmp_path, monkeypatch, seeded)
+    first = survivor_day._completed(world, capsys, survivor_day.DAY)
+    planned = first["paper"]["trade_list"]["orders"]
+    path = _account_record_file(world.runtime, survivor_day.NEXT, planned, not_placed=[])
+    body = json.loads(path.read_text("utf-8"))
+    body["orders"].append(
+        {
+            "order_id": "an_order_no_evening_planned",
+            "ts_code": planned[0]["ts_code"],
+            "side": planned[0]["side"],
+            "placed": True,
+            "filled_quantity": 0,
+            "filled_price": None,
+        }
+    )
+    path.write_text(json.dumps(body), encoding="utf-8")
+
+    code, _out, err = survivor_day._day(world, capsys, survivor_day.NEXT)
+
+    assert code == 1
+    assert any("paper book" in line and "an_order_no_evening_planned" in line for line in err)
+    assert survivor_day._snapshots(world).get(survivor_day.NEXT) is None
+    assert survivor_day._ledger_rows(world, tmp_path) == []
+    assert not survivor_day._journal(world, survivor_day.NEXT).get("result")
+
+    _account_record_file(world.runtime, survivor_day.NEXT, planned, not_placed=[])
+    again = survivor_day._completed(world, capsys, survivor_day.NEXT)
+    assert again["paper"]["reconciliation"]["orders"] == len(planned)

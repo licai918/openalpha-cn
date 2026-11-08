@@ -474,6 +474,7 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 | `--json` | 打印当天的结果文档；被第 8 步拒绝的一天，打印到停下为止的文档 |
 | `--morning-recheck` | 清晨复核，见下 |
 | `--factor-gaps SINCE` | 不适用：幸存者登记没有 `start`，输出 `factor gaps: the registered configuration cannot be read: 'start'`，退出 1（只读，不写任何文件）；幸存者形态的因子缺口由第 4 步自己补——只补各档位最晚构建之后的，至多 20 个交易日 |
+| `--account-record PATH` | 当天账户成交对账输入（可选）：指定用户记录文件；不给时找 `<RT>/paper/account-record/<交易日>.json`。不可比的记录在第 8 步账簿推进前拒绝（见下） |
 | `--pin-worktree`、`--launchd-plist` | 不进入任何一天，与 P6 相同；`--launchd-plist` 见「定时」 |
 
 **查看账簿当前持仓（只读）。** `--show-book` 只读运行目录里 `paper/snapshots` 的最新快照（`--runtime-dir` 必填），打印现金、每只持仓的批次与成本、最后标记与账本权益，然后退出：零写入、零请求、不开面板、不加载 `build_storage`，所以能在主检出里安全运行。它不核对登记、也不推进账簿；`--registration` 只用来决定要不要带冒烟横幅，与运行目录里是哪本账簿无关。运行目录里没有快照或快照损坏时按名拒绝（退出 1），绝不把「没有账簿」当成「空账簿」开始读。**标记是账簿单位**（真实收盘价乘以自买入以来的复权比例），不是真实收盘价。冒烟登记（`settings.smoke_run`）的每一份输出——文本的首尾行与 JSON 的 `smoke` 键——都带冒烟横幅，被拒绝时也一样。例：
@@ -481,6 +482,26 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 ```bash
 uv run python scripts/daily_selection.py --runtime-dir ~/openalpha-research --registration <幸存者登记文件> --show-book
 ```
+
+**记录账户实际成交（对账输入，`V2-P7-006a`）。** 纸面账簿假设晚间印出的每张单都下了、都在开盘成交；真实账户可能不同。把用户当天的实际下单与成交写进一份 JSON，放在 `RT/paper/account-record/<交易日>.json`（用户文件，永不入库、不进 git），这一天的第 8 步会在账簿推进**之前**读它，与当天到期的订单逐张比较，把分歧**按名记进当天 journal 的 `result`**：`not_placed`、`filled_where_the_book_did_not`、`quantity_differs`、`price_differs`。分歧只**记录**，从不改写纸面账簿：账簿仍按自己的假设推进，真正的账户同步在 `006b` 之后。记录是可选输入；缺一整份记录不是一致，摘要会写明账簿的假设未核对。**在 `006b` 之后才按用户的运维纪律逐日使用**；本项不是真钱闸门，真钱闸门仍然关闭。
+
+格式（`account-record/v1`）：
+
+```json
+{"schema_version": "account-record/v1",
+ "session": "2026-04-07",
+ "orders": [
+   {"order_id": "sbo_...", "ts_code": "600000.SH", "side": "buy",
+    "placed": true, "filled_quantity": 1000, "filled_price": "10.20"}
+ ]}
+```
+
+- 一条到期订单一行：**当日在册的每张订单必须恰有一行**（缺行是拒绝，不是默认同意）；同一 `order_id` 不得出现两次；`ts_code` 与 `side` 必须与计划一致；`filled_quantity` 不得超过计划数量。
+- `placed: false` ⇒ 数量为 0、没有价格；数量为 0 ⇒ 没有价格（`filled_price` 省略或为 `null`）；有成交则必须有价格。
+- 不可比的记录——记的不是这一交易日、出现当日晚间没有计划的订单、缺行、重复、方向或代码不符、数量超过计划——是 `AccountRecordConflict`，第 8 步在账簿推进前**按名拒绝**（退出 1，不落快照、不写账本行）；修好记录后重跑同一天即可。
+- `--account-record PATH` 指定别处的一份记录（给了却不存在同样按名拒绝）；不给时找 `<RT>/paper/account-record/<交易日>.json`。
+- **没有记录不是一致**：没有文件时，摘要的 RECONCILIATION 一栏写 `no account record for <交易日>: the paper book's assumption that every printed order was placed stands unverified`（账簿假设未核对），绝不补零。
+- 一份记录的拒绝与一行分歧都只让这一天**停下**（拒绝）或**被记下**（分歧），不改变纸面账簿的推进语义。
 
 ### 九步与退出码
 

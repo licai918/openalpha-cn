@@ -150,6 +150,7 @@ from openalpha_cn.backtest.paper_evening import (
     EveningResult,
     attempt_outcomes,
 )
+from openalpha_cn.backtest.paper_reconciliation import Divergence
 from openalpha_cn.backtest.paper_settlement import Settlement
 from openalpha_cn.domain.survivor_book import (
     ELIGIBILITY_REASON_ORDER,
@@ -589,6 +590,9 @@ def _paper_section(
             ),
         ],
         "funding": evening.funding.model_dump(mode="json"),
+        "reconciliation": None
+        if evening.reconciliation is None
+        else evening.reconciliation.document(),
         "illiquid_exits": _illiquid_exits(facts, screen, evening, book),
     }
 
@@ -733,6 +737,7 @@ def catch_up_entry(item: CatchUpResult, *, rederived: bool = False) -> dict[str,
         "equity": _text(settlement.equity),
         "cash": _text(settlement.book.cash),
         "rederived": rederived,
+        "reconciliation": None if item.reconciliation is None else item.reconciliation.document(),
     }
 
 
@@ -916,6 +921,7 @@ def summary_lines(result: Mapping[str, Any]) -> list[str]:
         session=session,
         session_index=result["session_index"],
     )
+    lines += _reconciliation_lines(paper, session)
     if paper is not None:
         lines += _carried_lines(paper)
         lines += _draw_lines(paper)
@@ -1375,6 +1381,34 @@ def _orders_lines(
         lines.append(_ASSUMED)
     if sells or repeat_sells:
         lines.append(_SELL_NOTE)
+    return lines
+
+
+def _reconciliation_lines(paper: Mapping[str, Any] | None, session: date) -> list[str]:
+    """The RECONCILIATION block, after ORDERS: tonight's due orders compared with the user's
+    account record (`V2-P7-006a`), by name, or -- when no record was given -- one line saying the
+    book's assumption that every printed order was placed stands unverified. The book is never
+    changed by the comparison: a divergence is recorded, not absorbed, and none of it is a
+    verdict on which side is right."""
+    if paper is None:
+        return []
+    block = paper.get("reconciliation")
+    if block is None:
+        return [
+            _row(
+                "reconciliation",
+                f"no account record for {session.isoformat()}: the paper book's assumption that "
+                "every printed order was placed stands unverified",
+            )
+        ]
+    lines = [
+        _row(
+            "reconciliation",
+            f"reconciled {block['reconciled']} of {block['orders']} orders against the account "
+            "record",
+        )
+    ]
+    lines += [f"  {Divergence(**item).line()}" for item in block["divergences"]]
     return lines
 
 

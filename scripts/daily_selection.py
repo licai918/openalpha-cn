@@ -313,6 +313,7 @@ if TYPE_CHECKING:
     from openalpha_cn.backtest.multi_day import PortfolioLedger
     from openalpha_cn.backtest.paper import PaperPortfolio
     from openalpha_cn.backtest.paper_evening import CatchUpResult
+    from openalpha_cn.backtest.paper_reconciliation import AccountRecord
     from openalpha_cn.backtest.paper_state import PaperBookSnapshot
     from openalpha_cn.domain.factor_transform import FactorTransformSpec
     from openalpha_cn.domain.survivor_book import ScreenResult
@@ -351,6 +352,10 @@ PAPER_STATE_DIRECTORY: Final[tuple[str, str]] = ("paper", "snapshots")
 
 BOOK_VIEW_KIND: Final[str] = "paper-book-view/v1"
 """`--show-book`'s document kind: the paper book's head snapshot as a listing, read only."""
+
+ACCOUNT_RECORD_DIRECTORY: Final[tuple[str, str]] = ("paper", "account-record")
+"""Where the user's per-session account records are looked for under a runtime directory: one
+`<session>.json` per session, user data that is never committed (`V2-P7-006a`)."""
 
 BASE_TARGETS: Final[tuple[str, ...]] = (
     "trade_cal",
@@ -2057,6 +2062,11 @@ class DailyOptions:
     """`--top`, carried here only so that a survivor day can refuse it
     (`_refuse_p6_only_options`): how many candidates the P6 summary prints is read by `_main_day`
     from its own `top`, which `main` passes from `arguments.top`, never from here."""
+    account_record: Path | None = None
+    """`--account-record`: the user's record of the orders actually placed and filled for this
+    day's session. `None` looks for `<runtime>/paper/account-record/<session>.json` and treats an
+    absent file as no record -- which is not agreement: the summary then says the book's
+    assumption stands unverified."""
 
 
 def _stored_calendar(
@@ -4533,6 +4543,37 @@ class SurvivorPaperRun:
     read_at: datetime
 
 
+def _account_record(
+    runtime_dir: Path, *, session: date, explicit: Path | None
+) -> AccountRecord | None:
+    """The user's account record for `session`, or `None` when there is none.
+
+    `explicit` is `--account-record`: given, the file must exist and is refused by name when it
+    does not. Without it the day looks for `<runtime>/paper/account-record/<session>.json` and
+    treats an absent file as no record -- which is not agreement: the summary says the book's
+    assumption stands unverified. A record names its own session, and a record that names another
+    one is refused before the book advances (the day settles one session)."""
+    from openalpha_cn.backtest.paper_reconciliation import AccountRecordError, read_account_record
+
+    path = (
+        explicit or runtime_dir.joinpath(*ACCOUNT_RECORD_DIRECTORY) / f"{session.isoformat()}.json"
+    )
+    if explicit is None and not path.is_file():
+        return None
+    if explicit is not None and not path.is_file():
+        raise AccountRecordError(
+            f"--account-record {path} does not exist: write the record for "
+            f"{session.isoformat()}, or omit the option"
+        )
+    record = read_account_record(path)
+    if record.session != session:
+        raise AccountRecordError(
+            f"the account record {path} names {record.session.isoformat()}, and this day "
+            f"settles {session.isoformat()}: one record is one session's"
+        )
+    return record
+
+
 def _survivor_paper_and_summary(
     day: SurvivorDay, *, clock: Callable[[], datetime], counts: Counter[str]
 ) -> dict[str, Any]:
@@ -4600,8 +4641,14 @@ def _survivor_paper_and_summary(
         if not day.committed and not day.settle_only and now >= day.cutoff:
             raise refused(_too_late_to_decide(day, now))
         try:
+            account = _account_record(
+                day.options.runtime_dir,
+                session=day.session,
+                explicit=day.options.account_record,
+            )
             ran = _run_paper_book(
                 day,
+                account=account,
                 on_settled=lambda result: file_catch_ups((result,)),
                 on_settled_again=lambda result: file_catch_ups((result,), rederived=True),
             )
@@ -4640,6 +4687,9 @@ def _survivor_paper_and_summary(
             "snapshot_id": (own or [None])[-1]
             if evening is None
             else evening.result.snapshot.snapshot_id,
+            "reconciliation": None
+            if evening is None or evening.result.reconciliation is None
+            else evening.result.reconciliation.document(),
         }
         write_journal(day.journal_path, {**journal, "paper": paper, "result": result})
     after = None if evening is None else _after_the_call_auction(day.cutoff, clock())
@@ -4649,6 +4699,7 @@ def _survivor_paper_and_summary(
 def _run_paper_book(
     day: SurvivorDay,
     *,
+    account: AccountRecord | None,
     on_settled: Callable[[CatchUpResult], None],
     on_settled_again: Callable[[CatchUpResult], None],
 ) -> SurvivorPaperRun:
@@ -4689,6 +4740,7 @@ def _run_paper_book(
                 lock=day.lock,
                 on_settled=on_settled_again,
                 transform=day.transform,
+                account=account,
             )
         if day.settle_only:
             paper_book.settle_only(
@@ -4704,6 +4756,7 @@ def _run_paper_book(
                 lock=day.lock,
                 on_settled=on_settled,
                 transform=day.transform,
+                account=account,
             )
             return None
         paper_book.catch_up(
@@ -4719,6 +4772,7 @@ def _run_paper_book(
             lock=day.lock,
             on_settled=on_settled,
             transform=day.transform,
+            account=account,
         )
         return paper_book.evening(
             panel=day.store,
@@ -4735,6 +4789,7 @@ def _run_paper_book(
             make_portfolio=make_portfolio,
             lock=day.lock,
             transform=day.transform,
+            account=account,
         )
 
     try:
@@ -6480,6 +6535,15 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
         "last marks -- and exit. Writes nothing, opens no panel and makes no request; a runtime "
         "directory with no book is refused by name.",
     )
+    parser.add_argument(
+        "--account-record",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="The user's record of the orders actually placed and filled for this session "
+        "(default: <runtime>/paper/account-record/<session>.json when it exists). A record that "
+        "cannot be reconciled refuses the day before the book advances.",
+    )
     arguments = parser.parse_args(argv)
     if arguments.morning_recheck:
         for given, flag in (
@@ -6576,6 +6640,7 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
         max_staleness_days=arguments.max_staleness_days,
         json_output=arguments.json,
         top=arguments.top,
+        account_record=arguments.account_record,
     )
     banner = smoke_banner(arguments.registration)
     if banner is not None:

@@ -631,6 +631,7 @@ def test_the_document_has_its_keys_in_the_order_the_journal_files_them(s3: Writt
         "open_session",
         "open_orders",
         "funding",
+        "reconciliation",
         "illiquid_exits",
     ]
     assert list(document["paper"]["book"]) == [

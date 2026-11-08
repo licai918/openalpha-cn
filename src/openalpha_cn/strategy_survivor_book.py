@@ -154,6 +154,7 @@ from openalpha_cn.backtest.paper_evening import (
     run_catch_up,
     run_evening,
 )
+from openalpha_cn.backtest.paper_reconciliation import AccountRecord
 from openalpha_cn.backtest.paper_state import (
     PaperBookSnapshot,
     PaperStateDocumentStore,
@@ -773,6 +774,7 @@ def catch_up(
     lock: PaperBookLock,
     on_settled: Callable[[CatchUpResult], None] | None = None,
     transform: FactorTransformSpec | None = None,
+    account: AccountRecord | None = None,
 ) -> tuple[CatchUpResult, ...]:
     """Settle, oldest first and without a decision, every session the book is missing through
     ordinal `through_index` -- `missing_sessions`' answer -- and return what each did.
@@ -785,7 +787,9 @@ def catch_up(
     committed -- a fault of `on_settled` reaches the caller as itself and undoes nothing. A
     refusal stops the catch-up at a session: `CatchUpStalledError`, step `paper book`, carrying
     the sessions settled before it. A session already held is not missing, so it is never caught
-    up. `lock` is this run's writer-lock token; `transform` as `facts_day`'s.
+    up. `lock` is this run's writer-lock token; `transform` as `facts_day`'s. `account` is the
+    user's record of the orders actually placed and filled: it reaches a settlement only when it
+    names that settlement's session, since one record is one session's (`V2-P7-006a`).
     """
     observed_on = _observed_on(as_of)
     _require_lock(lock, "paper book")
@@ -821,6 +825,7 @@ def catch_up(
                 observed_on=observed_on,
                 make_portfolio=make_portfolio,
                 transform=transform,
+                account=account if account is not None and account.session == day else None,
             )
         except SurvivorDayError as error:
             raise _stalled(error, at=f"session index {index}", caught_up=tuple(results)) from _root(
@@ -847,6 +852,7 @@ def settle_only(
     lock: PaperBookLock,
     on_settled: Callable[[CatchUpResult], None] | None = None,
     transform: FactorTransformSpec | None = None,
+    account: AccountRecord | None = None,
 ) -> tuple[CatchUpResult, ...]:
     """`session` settled without a decision: `catch_up` through `session` itself when it has no
     snapshot yet, and -- when it is held already -- `session` derived again with `run_catch_up`.
@@ -860,6 +866,7 @@ def settle_only(
     `evening` with its pinned inputs, and the caller chooses between the two by the journal's
     `as_of`, never by the clock. The epoch is refused: no evening or catch-up settles it. Every
     refusal is step `paper book`, and one of the settlement itself is a `CatchUpStalledError`.
+    `account` as `catch_up`'s: the day's own record, passed to the settlement this call makes.
     """
     observed_on = _observed_on(as_of)
     _require_lock(lock, "paper book")
@@ -892,6 +899,7 @@ def settle_only(
             lock=lock,
             on_settled=on_settled,
             transform=transform,
+            account=account,
         )
     try:
         with _refusals("paper book", f"settling {session.isoformat()} only, settled already"):
@@ -909,6 +917,7 @@ def settle_only(
             observed_on=observed_on,
             make_portfolio=make_portfolio,
             transform=transform,
+            account=account,
         )
     except SurvivorDayError as error:
         raise _stalled(error, at=f"session index {index}", caught_up=()) from _root(error)
@@ -931,6 +940,7 @@ def catch_up_again(
     lock: PaperBookLock,
     on_settled: Callable[[CatchUpResult], None] | None = None,
     transform: FactorTransformSpec | None = None,
+    account: AccountRecord | None = None,
 ) -> tuple[CatchUpResult, ...]:
     """Derive again, oldest first, the sessions of ordinals `indices` a catch-up settled, and
     report each through `on_settled` like a session just settled -- C3's `run_catch_up` on a held
@@ -948,7 +958,8 @@ def catch_up_again(
     an earlier first decision is the same snapshot either way, and is derived again). A session
     with no snapshot is refused: it is `catch_up`'s to settle, never a derivation's. Every
     refusal is step `paper book`, a `CatchUpStalledError` carrying the sessions derived before it.
-    `lock` and `transform` as `catch_up`'s.
+    `lock` and `transform` as `catch_up`'s. `account` is passed to a settlement only when it names
+    that settlement's session, since one record is one session's (`V2-P7-006a`).
     """
     observed_on = _observed_on(as_of)
     _require_lock(lock, "paper book")
@@ -993,6 +1004,7 @@ def catch_up_again(
                 observed_on=observed_on,
                 make_portfolio=make_portfolio,
                 transform=transform,
+                account=account if account is not None and account.session == day else None,
             )
         except SurvivorDayError as error:
             raise _stalled(error, at=f"session index {index}", caught_up=tuple(results)) from _root(
@@ -1030,6 +1042,7 @@ def _settle_without_a_decision(
     observed_on: date,
     make_portfolio: Callable[[PortfolioLedger], PaperPortfolio],
     transform: FactorTransformSpec | None,
+    account: AccountRecord | None = None,
 ) -> CatchUpResult:
     """`session` settled from `before`, the book of the session before it, with no decision."""
     held = held_codes(before)
@@ -1067,6 +1080,7 @@ def _settle_without_a_decision(
             market=market,
             delisted=delisted,
             observed_on=observed_on,
+            account=account,
         )
 
 
@@ -1086,6 +1100,7 @@ def evening(
     make_portfolio: Callable[[PortfolioLedger], PaperPortfolio],
     lock: PaperBookLock,
     transform: FactorTransformSpec | None = None,
+    account: AccountRecord | None = None,
 ) -> SurvivorEvening:
     """Run `session`'s evening on the paper book: `run_evening`, always (see the module
     docstring); every refusal is step `paper book`.
@@ -1097,7 +1112,9 @@ def evening(
     must agree with `screen` on the eligible set and the ranked survivors. Then: the held statuses
     (`delisted_or_refuse`), the session's market for the names of that book, every close of the
     facts day as the entrants' prices, and `run_evening` observed on `as_of`'s Shanghai date.
-    `lock` is this run's writer-lock token; `transform` as `facts_day`'s.
+    `lock` is this run's writer-lock token; `transform` as `facts_day`'s. `account` is the day's
+    own record of the orders actually placed and filled, compared with the evening's due orders
+    before the book advances (`V2-P7-006a`); `None` when there is no record.
     """
     observed_on = _observed_on(as_of)
     pinned = _pinned(held)
@@ -1174,6 +1191,7 @@ def evening(
             entrant_prices=_closes(facts),
             delisted=delisted,
             observed_on=observed_on,
+            account=account,
         )
     return SurvivorEvening(
         result=result, held_after=held_codes(result.snapshot), facts=facts, screen=screen

@@ -147,6 +147,11 @@ from typing import Final, Literal, Protocol
 
 from openalpha_cn.backtest.multi_day import PortfolioLedger
 from openalpha_cn.backtest.paper import PaperPortfolio, refusing_outward_calls
+from openalpha_cn.backtest.paper_reconciliation import (
+    AccountRecord,
+    Reconciliation,
+    reconcile,
+)
 from openalpha_cn.backtest.paper_settlement import (
     SessionMarketLike,
     Settlement,
@@ -284,6 +289,9 @@ class EveningResult:
     decision: BookDecision
     settlement: Settlement
     funding: FundingReport
+    reconciliation: Reconciliation | None
+    """Tonight's due orders compared with the user's account record, or `None` when there was no
+    record: the book's assumption that every printed order was placed then stands unverified."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -295,6 +303,9 @@ class CatchUpResult:
     outcome: Outcome
     snapshot: PaperBookSnapshot
     settlement: Settlement
+    reconciliation: Reconciliation | None
+    """The session's due orders compared with the user's account record, or `None` when there was
+    no record: the book's assumption that every printed order was placed then stands unverified."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -427,6 +438,7 @@ def run_evening(
     entrant_prices: Mapping[str, Decimal],
     delisted: Collection[str],
     observed_on: date,
+    account: AccountRecord | None = None,
 ) -> EveningResult:
     """Settle, decide and commit the evening of `session` (ordinal `session_index`); see the
     module docstring for the transaction and why it is crash-safe.
@@ -438,7 +450,12 @@ def run_evening(
     facts day, whose survivors settle tonight's live buys and whose verdicts the decision reads;
     `entrant_prices` are the facts day's real closes of names the book does not hold (a held name
     is priced from the ledger, in its units, whatever this says); `delisted` is every held code
-    the facts day reports `delisted`; `observed_on` is the date the inputs were read.
+    the facts day reports `delisted`; `observed_on` is the date the inputs were read; `account` is
+    the user's record of the orders actually placed and filled, when there is one -- it is
+    compared with this evening's due orders before anything is written, and an irreconcilable
+    record is refused by name (`AccountRecordConflict`) before the book advances. A divergence is
+    recorded, never absorbed: the book is not rewritten from the account. `None` records nothing
+    to compare, and the result says the book's assumption stands unverified.
 
     A session already settled is answered `unchanged`, writing nothing, with the settlement,
     decision and trade list derived again from the snapshot before it; a derivation that does
@@ -462,6 +479,11 @@ def run_evening(
         delisted=delisted,
         config=config,
         observed_on=observed_on,
+    )
+    reconciliation = (
+        None
+        if account is None
+        else reconcile(account, settlement, outcomes=attempt_outcomes(settlement))
     )
     state = book_state(settlement, config=config)
     decision = decide_book(config=config, screen=screen, state=state)
@@ -493,6 +515,7 @@ def run_evening(
             decision=decision,
             settlement=settlement,
             funding=funding,
+            reconciliation=reconciliation,
         )
     return EveningResult(
         outcome=_commit(store=store, ledger=ledger, settlement=settlement, snapshot=snapshot),
@@ -501,6 +524,7 @@ def run_evening(
         decision=decision,
         settlement=settlement,
         funding=funding,
+        reconciliation=reconciliation,
     )
 
 
@@ -515,6 +539,7 @@ def run_catch_up(
     market: SessionMarketLike,
     delisted: Collection[str],
     observed_on: date,
+    account: AccountRecord | None = None,
 ) -> CatchUpResult:
     """Settle the missed session `session` (ordinal `session_index`) without a decision; see the
     module docstring.
@@ -525,7 +550,8 @@ def run_catch_up(
     snapshot -- and so is every refusal, made before anything is written (the ledger read
     included), and so is the answer for a session already settled: `unchanged`, nothing
     written, the settlement derived again and refused by name unless it reproduces the held
-    snapshot and the ledger's rows for the session.
+    snapshot and the ledger's rows for the session. `account` as `run_evening`'s: the session's
+    due orders compared with the user's record before anything is written, or `None`.
     """
     digest = survivor_config_digest(config)
     held = _settled_already(store, session=session, session_index=session_index, digest=digest)
@@ -545,15 +571,26 @@ def run_catch_up(
         config=config,
         observed_on=observed_on,
     )
+    reconciliation = (
+        None
+        if account is None
+        else reconcile(account, settlement, outcomes=attempt_outcomes(settlement))
+    )
     snapshot = settlement.without_plan()
     if held is not None:
         _refuse_unless_reproduced(held, snapshot, run="catch-up", other="an evening")
         _refuse_rows_not_the_runs(ledger, settlement, settled=True)
-        return CatchUpResult(outcome="unchanged", snapshot=held, settlement=settlement)
+        return CatchUpResult(
+            outcome="unchanged",
+            snapshot=held,
+            settlement=settlement,
+            reconciliation=reconciliation,
+        )
     return CatchUpResult(
         outcome=_commit(store=store, ledger=ledger, settlement=settlement, snapshot=snapshot),
         snapshot=snapshot,
         settlement=settlement,
+        reconciliation=reconciliation,
     )
 
 
