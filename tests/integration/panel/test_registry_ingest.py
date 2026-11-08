@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from openalpha_cn import cli
 from openalpha_cn.domain.name_history import (
     NAMECHANGE_DATASET,
     NameHistoryHorizonError,
@@ -1023,6 +1024,66 @@ def test_an_empty_year_satisfies_a_coverage_demand_but_a_hole_still_does_not(
             max_staleness=None,
             require_years_through=2027,
         )
+
+
+def test_the_same_observation_does_not_write_the_empty_year_again(tmp_path: Path) -> None:
+    """Two `--year`s of one `panel build` fetch the whole registry twice at one instant: the first
+    records the year empty, and the second is the same observation -- it writes nothing and
+    answers `()`, so `_write_registry_year` prints no second `EMPTY` line."""
+    store = _seed_registry(tmp_path)
+    batch = _registry_batch(FIRST_EVENING_2027)
+
+    first = record_empty_universe_year(store, batch)
+    second = record_empty_universe_year(store, batch)
+
+    assert [ref.year for ref in first] == [2027]
+    assert second == ()
+    coverage = store.read_coverage(STOCK_BASIC_DATASET, 2027)
+    assert coverage is not None and coverage.as_of == FIRST_EVENING_2027
+
+
+def test_a_later_observation_still_rewrites_the_empty_year(tmp_path: Path) -> None:
+    """The freshness record is the only reason to write the empty year again, and a later
+    observation must still move its `as_of` (a reader with a staleness bound stays served)."""
+    store = _seed_registry(tmp_path)
+    record_empty_universe_year(store, _registry_batch(FIRST_EVENING_2027))
+    later = _evening(date(2027, 6, 1))
+
+    refs = record_empty_universe_year(store, _registry_batch(later))
+
+    coverage = store.read_coverage(STOCK_BASIC_DATASET, 2027)
+    assert [ref.year for ref in refs] == [2027]
+    assert coverage is not None and coverage.as_of == later
+
+
+def test_a_fetch_carrying_the_observation_year_writes_nothing_and_prints_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The negative print path: `_write_registry_year` prints the `EMPTY` line only for the years
+    it wrote, so a fetch that carries 2026 -- the year of its own observation -- prints none."""
+    store = _seed_registry(tmp_path)
+    before = store.read_coverage(STOCK_BASIC_DATASET, 2026)
+
+    refs = cli._write_registry_year(
+        store, _registry_batch(_evening(date(2026, 12, 31))), now=_evening(date(2026, 12, 31))
+    )
+
+    assert refs == []
+    assert "EMPTY" not in capsys.readouterr().err
+    assert store.read_coverage(STOCK_BASIC_DATASET, 2026) == before
+
+
+def test_a_refused_write_prints_nothing(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A `no_data` whole-registry answer is a failed fetch: it is refused by name, and the line
+    that says a year was recorded empty is only printed after a write."""
+    store = _seed_registry(tmp_path)
+
+    with pytest.raises(PanelBatchError, match="cannot record a lifecycle year empty"):
+        cli._write_registry_year(
+            store, _registry_batch(FIRST_EVENING_2027, []), now=FIRST_EVENING_2027
+        )
+
+    assert "EMPTY" not in capsys.readouterr().err
 
 
 # --- the name history and ST ---------------------------------------------------------------

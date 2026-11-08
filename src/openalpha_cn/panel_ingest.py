@@ -7600,6 +7600,14 @@ def record_empty_universe_year(
     `_write_empty_partition`'s; the writer's expiry is
     `domain.stock_universe.universe_year_empty_admissible_through`.
 
+    **The same observation is one write.** A multi-year `panel build` fetches the whole registry
+    once per `--year` and calls this writer each time; at one `--as-of` every call is the same
+    observation, so the first writes the year and the rest answer `()` -- the partition and its
+    freshness record are already what this call would write, and the `EMPTY` line is printed only
+    for the years actually written. A **later** observation still rewrites it: freshness is the
+    only reason to write an empty year again (`PartitionCoverage.as_of` bounds a reader's
+    staleness).
+
     **Called after `write_stock_universe`, never instead of it.** That function keeps one job --
     write the years the fetch carries -- and its "every year vetted before any year is written"
     pass is untouched. A refusal here therefore leaves the fetched years written, which is an
@@ -7644,15 +7652,17 @@ def record_empty_universe_year(
             "market that has held no listing and no delisting for a year is a failed fetch"
         )
     by_year = split_panel_batch_by_year(batch, date_timezone=date_timezone)
-    if not by_year:
-        raise PanelBatchError(
-            f"this {STOCK_BASIC_DATASET} fetch carries no lifecycle row at all, so it has no "
-            f"year to take year={observation_year}'s columns from; a whole-registry answer with "
-            "nothing in it is a failed fetch"
-        )
+    # `by_year` cannot be empty here: `ColumnarPanelBatch` refuses `success` with no row
+    # (`domain/panel_batch.py`, "success requires at least one row") and
+    # `split_panel_batch_by_year` refuses a non-success batch, so a successful fetch carries at
+    # least one row and that row has a year. The refusal that used to stand here was
+    # unreachable; `write_stock_universe` and this writer's status guard are the two that
+    # remain.
     if any(year == observation_year for year, _yearly in by_year):
         return ()
     stored = store.read_coverage(STOCK_BASIC_DATASET, observation_year)
+    if stored is not None and stored.row_count == 0 and stored.as_of == batch.as_of:
+        return ()
     if stored is not None and stored.row_count:
         if batch.as_of >= stored.as_of:
             raise PanelBatchError(
