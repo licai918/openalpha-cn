@@ -6489,6 +6489,15 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
         ):
             if given is not None:
                 parser.error(f"--morning-recheck cannot be combined with {flag}")
+    if arguments.show_book:
+        for given, flag in (
+            (arguments.morning_recheck, "--morning-recheck"),
+            (arguments.pin_worktree, "--pin-worktree"),
+            (arguments.factor_gaps, "--factor-gaps"),
+            (arguments.launchd_plist, "--launchd-plist"),
+        ):
+            if given:
+                parser.error(f"--show-book cannot be combined with {flag}")
     uv = (arguments.uv or Path(shutil.which("uv") or "uv")).resolve()
     try:
         if arguments.pin_worktree is not None:
@@ -6506,33 +6515,26 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
     if arguments.runtime_dir is None:
         parser.error("--runtime-dir is required")
     if arguments.show_book:
-        for given, flag in (
-            (arguments.morning_recheck, "--morning-recheck"),
-            (arguments.pin_worktree, "--pin-worktree"),
-            (arguments.factor_gaps, "--factor-gaps"),
-            (arguments.launchd_plist, "--launchd-plist"),
-        ):
-            if given:
-                parser.error(f"--show-book cannot be combined with {flag}")
+        from openalpha_cn.backtest.paper_state import PaperStateError
         from openalpha_cn.storage.paper_state import PaperStateStoreError
 
-        try:
-            view = show_book(arguments.runtime_dir)
-        except (ValueError, PaperStateStoreError) as error:
-            print(f"paper book: {error}", file=sys.stderr)
-            return int(DailyExit.step_failed)
         banner = smoke_banner(arguments.registration)
         if banner is not None:
             print(banner, file=sys.stderr)
         try:
+            try:
+                view = show_book(arguments.runtime_dir)
+            except (ValueError, PaperStateStoreError, PaperStateError) as error:
+                print(f"paper book: {error}", file=sys.stderr)
+                return int(DailyExit.step_failed)
             if arguments.json:
                 print(json.dumps(with_smoke(view, banner), sort_keys=True, ensure_ascii=False))
             else:
                 print("\n".join(bannered(book_view_lines(view), banner)))
+            return int(DailyExit.done)
         finally:
             if banner is not None:
                 print(banner, file=sys.stderr)
-        return int(DailyExit.done)
     if arguments.factor_gaps is not None:
         try:
             report = factor_gaps(

@@ -15,7 +15,7 @@ import shutil
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 import pytest
 import test_daily_selection as tds
@@ -33,11 +33,12 @@ NEXT_AS_OF: Final[datetime] = datetime.fromisoformat("2026-04-07T18:30:00+08:00"
 """7 April's evening: it settles the plan 6 April's evening left for its open."""
 
 
-def _tree(root: Path) -> dict[str, bytes]:
+def _tree(root: Path) -> dict[str, bytes | None]:
+    """Every entry under `root`: a file's bytes, or `None` for a directory (so a read path that
+    creates an empty directory is caught too)."""
     return {
-        entry.relative_to(root).as_posix(): entry.read_bytes()
+        entry.relative_to(root).as_posix(): None if entry.is_dir() else entry.read_bytes()
         for entry in sorted(root.rglob("*"))
-        if entry.is_file()
     }
 
 
@@ -221,19 +222,76 @@ def test_show_book_lists_the_books_holdings_from_its_own_state_and_writes_nothin
         ["--morning-recheck"],
         ["--factor-gaps", "2026-01-01"],
         ["--launchd-plist", "logs"],
+        ["--pin-worktree", "pinned"],
     ],
-    ids=["morning-recheck", "factor-gaps", "launchd-plist"],
+    ids=["morning-recheck", "factor-gaps", "launchd-plist", "pin-worktree"],
 )
 def test_show_book_refuses_the_modes_it_cannot_be_combined_with(
-    world: tds.World, others: list[str]
+    world: tds.World, monkeypatch: pytest.MonkeyPatch, others: list[str]
 ) -> None:
-    """It is a mode of its own: another mode beside it would otherwise be silently ignored."""
+    """It is a mode of its own: another mode beside it would otherwise be silently ignored, and
+    `--pin-worktree` in particular would pin and sync before `--show-book` was even looked at."""
+    refused_calls: list[str] = []
+
+    def refused(name: str) -> Any:
+        def call(*args: object, **kwargs: object) -> None:
+            refused_calls.append(name)
+            raise AssertionError(f"--show-book ran {name} for a mode it refused")
+
+        return call
+
+    monkeypatch.setattr(daily, "pin_worktree", refused("pin_worktree"))
+    monkeypatch.setattr(daily, "sync_pinned_environment", refused("sync_pinned_environment"))
     err = io.StringIO()
     with contextlib.redirect_stderr(err), pytest.raises(SystemExit) as exited:
         daily.main(["--runtime-dir", str(world.runtime), "--show-book", *others])
 
     assert exited.value.code == 2
     assert "--show-book cannot be combined with" in err.getvalue()
+    assert refused_calls == []
+
+
+def test_a_damaged_head_snapshot_is_refused_by_name_not_read_as_an_empty_book(
+    tmp_path: Path,
+) -> None:
+    """`held_head` refuses a snapshot it cannot read (`PaperStateError`, a `RuntimeError`): a
+    damaged book is not an empty one, and the refusal is printed, not raised as a traceback."""
+    runtime = tmp_path / "runtime"
+    snapshots = runtime / "paper" / "snapshots"
+    snapshots.mkdir(parents=True)
+    (snapshots / f"2026-04-07.pbs_{'0' * 24}.json").write_text("{not json", encoding="utf-8")
+
+    out = io.StringIO()
+    err = io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = daily.main(["--runtime-dir", str(runtime), "--show-book"])
+
+    assert code == 1
+    assert out.getvalue() == ""
+    assert "paper book:" in err.getvalue()
+    assert "cannot be read" in err.getvalue()
+
+
+def test_a_smoke_registration_with_no_book_banners_the_refusal_before_and_after(
+    world: tds.World, tmp_path: Path
+) -> None:
+    """The banner opens the output, so a refusal is bannered too -- every output of a smoke
+    registration carries it, the failing ones included."""
+    smoke = _smoke_registration(tmp_path, world.registration)
+    runtime = tmp_path / "no-book"
+
+    out = io.StringIO()
+    err = io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = daily.main(
+            ["--runtime-dir", str(runtime), "--registration", str(smoke), "--show-book"]
+        )
+
+    assert code == 1
+    assert out.getvalue() == ""
+    lines = err.getvalue().splitlines()
+    assert lines[0] == lines[-1] == daily.SMOKE_BANNER
+    assert "no paper book snapshot is held at all" in "\n".join(lines)
 
 
 def test_show_book_carries_the_smoke_banner_of_a_smoke_registration(
