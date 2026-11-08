@@ -1614,7 +1614,12 @@ def test_an_option_of_the_p6_day_is_refused_before_anything_is_made(
 
 @pytest.mark.parametrize(
     "other",
-    [("--factor-gaps", "2026-04-01"), ("--pin-worktree", "pinned"), ("--launchd-plist", "logs")],
+    [
+        ("--factor-gaps", "2026-04-01"),
+        ("--pin-worktree", "pinned"),
+        ("--launchd-plist", "logs"),
+        ("--launchd-morning-plist", "logs"),
+    ],
 )
 def test_the_flag_does_not_combine_with_the_commands_that_run_no_day(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], other: tuple[str, ...]

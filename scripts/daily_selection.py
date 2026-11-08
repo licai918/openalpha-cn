@@ -6335,17 +6335,50 @@ def sync_pinned_environment(worktree: Path, *, uv: Path) -> Path:
 
 
 LAUNCHD_LABEL: Final[str] = "com.openalpha.daily-selection"
+LAUNCHD_MORNING_LABEL: Final[str] = "com.openalpha.daily-selection.morning"
+MORNING_PLIST_HOUR: Final[int] = 8
+MORNING_PLIST_MINUTE: Final[int] = 30
+"""The morning job fires at 08:30 on the machine's local time -- the start of the window
+`docs/runbooks/daily-selection.zh-CN.md` measured (08:30-09:00) for a re-check that must finish
+before the 09:15 call auction. The command itself refuses after `registration_cutoff`, so a
+machine in another time zone fails closed."""
 
 
-def launchd_plist(
+def launchd_registration(worktree: Path, registration: Path) -> Path:
+    """`registration` as the scheduled run names it, resolved and required to be inside
+    `worktree`: the pinned checkout is where the job stands, and its registration is committed
+    there (`--pin-worktree`). A relative name is joined to `worktree`; anything that resolves
+    outside it is refused rather than printed into a job that reads another checkout's file."""
+    resolved = (registration if registration.is_absolute() else worktree / registration).resolve()
+    root = worktree.resolve()
+    if resolved != root and root not in resolved.parents:
+        raise ValueError(
+            f"--registration {registration} resolves to {resolved}, which must be inside the "
+            f"pinned worktree {worktree}: the scheduled run stands there and reads the "
+            "registration committed there; name it relative to --worktree (default "
+            f"{REGISTRATION_IN_REPOSITORY})"
+        )
+    return resolved
+
+
+def _launchd_job(
     *,
+    label: str,
+    hour: int,
+    minute: int,
+    tail: Sequence[str],
+    log_stem: str,
+    when: str,
     worktree: Path,
     runtime_dir: Path,
     log_dir: Path,
-    env_file: str = ENV_FILE,
+    registration: Path,
+    env_file: str,
     uv: Path,
 ) -> str:
-    """The launchd job that runs this command from the pinned worktree at 18:30 on weekdays.
+    """A launchd job's `plist` text: the evening and morning jobs differ only in `label`, the
+    schedule (`hour`/`minute`), the arguments after `--registration` (`tail`) and the log names,
+    so one builder keeps the rest from drifting.
 
     Printed, never installed. No shell runs it: `ProgramArguments` is the argument vector itself
     and `WorkingDirectory`/`EnvironmentVariables` set the rest, so no path is ever parsed by a
@@ -6361,20 +6394,15 @@ def launchd_plist(
     **The env file is a name relative to `WorkingDirectory`, never a path** (`V2-P6-029`): uv splits
     `--env-file` on whitespace, so any path through the main checkout's directory fails (`No
     environment file found at: test/.env`). `--pin-worktree` links `<worktree>/.env` to the main
-    checkout's (`link_env_file`); `env_file` containing whitespace is refused here. launchd has
-    no exchange calendar,
-    so it fires every weekday and the command decides: on a holiday the newest closed session is
-    one whose journal is already complete, which prints the summary again with no request and no
-    write.
-    """
+    checkout's (`link_env_file`); `env_file` containing whitespace is refused here."""
     if any(character.isspace() for character in env_file):
         raise ValueError(
             f"--env-file {env_file!r} contains whitespace: uv splits --env-file on whitespace, "
-            f"so this job would fail at 18:30. Name the file relative to --worktree "
+            f"so this job would fail at {when}. Name the file relative to --worktree "
             f"(default {ENV_FILE}); --pin-worktree links {ENV_FILE} to the main checkout's"
         )
     job = {
-        "Label": LAUNCHD_LABEL,
+        "Label": label,
         "ProgramArguments": [
             str(uv),
             "run",
@@ -6388,7 +6416,8 @@ def launchd_plist(
             "--repo",
             str(worktree),
             "--registration",
-            str(worktree / REGISTRATION_IN_REPOSITORY),
+            str(registration),
+            *tail,
         ],
         "WorkingDirectory": str(worktree),
         "EnvironmentVariables": {
@@ -6396,13 +6425,78 @@ def launchd_plist(
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
         },
         "StartCalendarInterval": [
-            {"Weekday": weekday, "Hour": 18, "Minute": 30} for weekday in range(1, 6)
+            {"Weekday": weekday, "Hour": hour, "Minute": minute} for weekday in range(1, 6)
         ],
-        "StandardOutPath": str(log_dir / "daily-selection.out.log"),
-        "StandardErrorPath": str(log_dir / "daily-selection.err.log"),
+        "StandardOutPath": str(log_dir / f"{log_stem}.out.log"),
+        "StandardErrorPath": str(log_dir / f"{log_stem}.err.log"),
         "RunAtLoad": False,
     }
     return plistlib.dumps(job, sort_keys=False).decode("utf-8")
+
+
+def launchd_plist(
+    *,
+    worktree: Path,
+    runtime_dir: Path,
+    log_dir: Path,
+    registration: Path,
+    env_file: str = ENV_FILE,
+    uv: Path,
+) -> str:
+    """The launchd job that runs this command from the pinned worktree at 18:30 on weekdays.
+
+    The registration is the caller's, not P6's path: `launchd_registration` has resolved it and
+    proved it is inside `worktree`. Printed, never installed. launchd has no exchange calendar,
+    so it fires every weekday and the command decides: on a holiday the newest closed session is
+    one whose journal is already complete, which prints the summary again with no request and no
+    write."""
+    return _launchd_job(
+        label=LAUNCHD_LABEL,
+        hour=18,
+        minute=30,
+        tail=(),
+        log_stem="daily-selection",
+        when="18:30",
+        worktree=worktree,
+        runtime_dir=runtime_dir,
+        log_dir=log_dir,
+        registration=registration,
+        env_file=env_file,
+        uv=uv,
+    )
+
+
+def launchd_morning_plist(
+    *,
+    worktree: Path,
+    runtime_dir: Path,
+    log_dir: Path,
+    registration: Path,
+    env_file: str = ENV_FILE,
+    uv: Path,
+) -> str:
+    """The launchd job that runs this command's morning re-check from the pinned worktree at
+    08:30 on the machine's local time (`MORNING_PLIST_HOUR`/`MORNING_PLIST_MINUTE`), on weekdays.
+
+    The morning re-check only advises and does not change the book: it re-reads the name corpus,
+    compares it with the evening's plan and prints the differences before the 09:15 call auction.
+    The command itself refuses after `registration_cutoff`, so a machine in another time zone
+    fails closed rather than re-checking after the auction. The registration is the caller's,
+    resolved and proved inside `worktree` (`launchd_registration`). Printed, never installed."""
+    return _launchd_job(
+        label=LAUNCHD_MORNING_LABEL,
+        hour=MORNING_PLIST_HOUR,
+        minute=MORNING_PLIST_MINUTE,
+        tail=("--morning-recheck",),
+        log_stem="daily-selection.morning",
+        when="08:30",
+        worktree=worktree,
+        runtime_dir=runtime_dir,
+        log_dir=log_dir,
+        registration=registration,
+        env_file=env_file,
+        uv=uv,
+    )
 
 
 def smoke_banner(registration: Path) -> str | None:
@@ -6500,6 +6594,14 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
         help="Print the launchd job (run from --worktree), logging to LOG_DIR, and exit. "
         "Installs nothing.",
     )
+    parser.add_argument(
+        "--launchd-morning-plist",
+        type=Path,
+        default=None,
+        metavar="LOG_DIR",
+        help="Print the launchd job for the morning re-check (run from --worktree at 08:30 on "
+        "the machine's local time), logging to LOG_DIR, and exit. Installs nothing.",
+    )
     parser.add_argument("--worktree", type=Path, default=None, help="The pinned worktree.")
     parser.add_argument(
         "--env-file",
@@ -6550,6 +6652,7 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
             (arguments.pin_worktree, "--pin-worktree"),
             (arguments.factor_gaps, "--factor-gaps"),
             (arguments.launchd_plist, "--launchd-plist"),
+            (arguments.launchd_morning_plist, "--launchd-morning-plist"),
             (arguments.account_record, "--account-record"),
         ):
             if given is not None:
@@ -6560,6 +6663,7 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
             (arguments.pin_worktree, "--pin-worktree"),
             (arguments.factor_gaps, "--factor-gaps"),
             (arguments.launchd_plist, "--launchd-plist"),
+            (arguments.launchd_morning_plist, "--launchd-morning-plist"),
             (arguments.account_record, "--account-record"),
         ):
             if given:
@@ -6617,14 +6721,32 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
         else:
             print("\n".join(factor_gap_lines(report)))
         return int(DailyExit.step_failed if any(report["gaps"].values()) else DailyExit.done)
-    if arguments.launchd_plist is not None:
+    if arguments.launchd_plist is not None or arguments.launchd_morning_plist is not None:
         if arguments.worktree is None:
-            parser.error("--launchd-plist needs --worktree, the checkout pinned by --pin-worktree")
+            named = (
+                "--launchd-morning-plist"
+                if arguments.launchd_morning_plist is not None
+                else "--launchd-plist"
+            )
+            parser.error(f"{named} needs --worktree, the checkout pinned by --pin-worktree")
+        if arguments.launchd_plist is not None and arguments.launchd_morning_plist is not None:
+            parser.error(
+                "--launchd-plist and --launchd-morning-plist are two jobs; print one at a time"
+            )
+        if arguments.launchd_morning_plist is not None:
+            morning, log_dir = True, arguments.launchd_morning_plist
+        else:
+            assert arguments.launchd_plist is not None
+            morning, log_dir = False, arguments.launchd_plist
+        registration = arguments.registration
+        if registration == DEFAULT_REGISTRATION:
+            registration = Path(REGISTRATION_IN_REPOSITORY)
         try:
-            job = launchd_plist(
+            job = (launchd_morning_plist if morning else launchd_plist)(
                 worktree=arguments.worktree.resolve(),
                 runtime_dir=arguments.runtime_dir.resolve(),
-                log_dir=arguments.launchd_plist.resolve(),
+                log_dir=log_dir.resolve(),
+                registration=launchd_registration(arguments.worktree, registration),
                 env_file=arguments.env_file,
                 uv=uv,
             )

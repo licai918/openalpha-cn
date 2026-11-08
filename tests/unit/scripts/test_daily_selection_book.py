@@ -222,10 +222,18 @@ def test_show_book_lists_the_books_holdings_from_its_own_state_and_writes_nothin
         ["--morning-recheck"],
         ["--factor-gaps", "2026-01-01"],
         ["--launchd-plist", "logs"],
+        ["--launchd-morning-plist", "logs"],
         ["--pin-worktree", "pinned"],
         ["--account-record", "record.json"],
     ],
-    ids=["morning-recheck", "factor-gaps", "launchd-plist", "pin-worktree", "account-record"],
+    ids=[
+        "morning-recheck",
+        "factor-gaps",
+        "launchd-plist",
+        "launchd-morning-plist",
+        "pin-worktree",
+        "account-record",
+    ],
 )
 def test_show_book_refuses_the_modes_it_cannot_be_combined_with(
     world: tds.World, monkeypatch: pytest.MonkeyPatch, others: list[str]

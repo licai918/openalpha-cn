@@ -26,7 +26,7 @@
 | 错过的交易日 | 适用 | 第 4 步的补建规则（至多 20 个交易日、超过则给出分批命令）适用；`--factor-gaps` 不适用 |
 | 幂等 | 适用 | 不适用：幸存者形态有自己的日志与重跑规则 |
 | 每天取什么 | 适用 | 同一规则再加 `namechange`，见「幸存者形态」 |
-| 定时 | 适用 | `--pin-worktree` 适用；`--launchd-plist` 见「幸存者形态」的「定时」 |
+| 定时 | 适用 | `--pin-worktree` 适用；`--launchd-plist`/`--launchd-morning-plist` 见「幸存者形态」的「定时」 |
 | 已知局限 | 适用 | 另列，见「幸存者形态」的「已知局限」 |
 
 以下到「已知局限」为止，说的都是 P6 形态。
@@ -71,7 +71,8 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 | `--json` | 以 JSON 打印当天结果 |
 | `--pin-worktree DIR` | 在登记提交上创建或移动一个分离 HEAD 的 worktree，再用它自己的 `uv.lock` **离线**建它自己的环境 `DIR/.venv`（`uv sync --frozen --offline --no-python-downloads --all-extras --python <.python-version>`），建成后读回它的解释器版本，再在 `DIR/.env` 建指向主检出 `.env` 的符号链接（没有就只打印说明），打印提交号后退出 |
 | `--uv PATH` | 上面两个操作用的 uv，默认 `PATH` 上的 |
-| `--launchd-plist LOG_DIR` | 只打印 launchd 定时配置文本（需 `--worktree`），不安装任何东西 |
+| `--launchd-plist LOG_DIR` | 只打印晚间任务的 launchd 配置文本（工作日 18:30，需 `--worktree`），不安装任何东西 |
+| `--launchd-morning-plist LOG_DIR` | 只打印晨查任务的 launchd 配置文本（工作日 08:30 本机时间，需 `--worktree`），不安装任何东西 |
 | `--show-book` | 只读：从纸面账簿自己的状态打印最新快照——现金、持仓、每笔成本、最后标记——然后退出；零写入、零请求，没有账簿的运行目录按名拒绝（退出 1）；冒烟登记的输出首尾都带冒烟横幅 |
 
 ## 八步与失败时的行为
@@ -390,13 +391,16 @@ uv run --no-sync python scripts/daily_selection.py --pin-worktree ~/openalpha-da
 
 2026-09-28 在草稿目录里对一次性检出（`ce85333` 的导出）实测：离线建成，0.6 秒，全部来自缓存。`pyvenv.cfg` 记录 `version_info = 3.11.14`，环境里是 `numpy 2.4.6`。用这个环境的解释器做第 1 步的比对：装了 66 个包，锁对 3.11 锁定 70 个，0 处差异。`openalpha_cn` 从该检出的 `src/` 导入，没有设 `PYTHONPATH`。第 3 轮那次实测的环境同样是 3.11.14，但没带 extras，所以根本没装 numpy；那次的"0 处差异"不涉及 numpy。
 
-生成 launchd 配置文本（只打印，不安装）：
+生成 launchd 配置文本（只打印，不安装）。两个任务：**晚间**（工作日 18:30）与**晨查**（工作日 08:30，本机时间）：
 
 ```bash
 uv run --no-sync python scripts/daily_selection.py --runtime-dir ~/openalpha-research --worktree ~/openalpha-daily --launchd-plist ~/openalpha-research/logs
+uv run --no-sync python scripts/daily_selection.py --runtime-dir ~/openalpha-research --worktree ~/openalpha-daily --registration docs/research/survivor.json --launchd-morning-plist ~/openalpha-research/logs
 ```
 
-**`--launchd-plist` 必须在主检出里运行，不要在钉住的 worktree 里运行（`V2-P6-030`）。** 主检出要在含 `V2-P6-029` 修复的提交上（即上面那条命令，不带 `--pin-worktree`）。钉住的 worktree 是登记时的旧代码：它会把 `<worktree>/.env` 这个符号链接 `.resolve()` 成主检出里含空格的绝对路径写进 `--env-file`，uv 按空格拆分它，生成的定时任务每天都会失败。
+两个任务都把 `--registration` 写成参数。不给时默认仍是 `<worktree>/docs/research/p6-registration.json`（P6 的登记）；给了相对名就按 `--worktree` 解析。**登记必须落在钉住的 worktree 内**：解析后落在它之外的绝对路径按名拒绝（退出 2），不会打印出一份去读别的检出的登记的任务。`--launchd-plist` 与 `--launchd-morning-plist` 一次只能给一个。两条命令都只打印文本，没有安装路径：`--install` 是未知参数（退出 2）。
+
+**`--launchd-plist` / `--launchd-morning-plist` 必须在主检出里运行，不要在钉住的 worktree 里运行（`V2-P6-030`）。** 主检出要在含 `V2-P6-029` 修复的提交上（即上面那两条命令，不带 `--pin-worktree`）。钉住的 worktree 是登记时的旧代码：它会把 `<worktree>/.env` 这个符号链接 `.resolve()` 成主检出里含空格的绝对路径写进 `--env-file`，uv 按空格拆分它，生成的定时任务每天都会失败。
 
 配置里没有 shell：`ProgramArguments` 就是 launchd 交给 exec 的参数向量，解释器是钉住的 worktree 自己的 `<worktree>/.venv/bin/python`（`uv run --no-sync` 只用来读 `--env-file`），`WorkingDirectory` 是钉住的 worktree，`EnvironmentVariables` 只设 `UV_PROJECT_ENVIRONMENT=<worktree>/.venv` 和 `PATH`——不设 `PYTHONPATH`，也不指向任何共用环境。
 
@@ -404,9 +408,9 @@ launchd 本身不解析这些路径：路径里的空格、`"` 或 `$` 作为 `P
 
 测试 `test_the_launchd_job_loads_the_env_file_through_uv_from_a_path_with_spaces` 真的调用 uv：在含空格的目录下，按生成配置的参数和 `WorkingDirectory` 执行，读回只有那个 `.env` 定义的变量。此前的测试只比较参数向量，没有让 uv 读过这个参数，所以没发现这个缺陷。
 
-launchd 不知道交易日历，所以配置为每个工作日 18:30 触发，由命令自己判断：节假日里「最新已收盘交易日」的日志已经完整，于是只打印摘要，零请求、零写入。1 月 1 日这类假日找到的是上一年的最后一个交易日（日历按当年和上一年两年读）。
+launchd 不知道交易日历，所以两个任务都按每个工作日触发，由命令自己判断。晚间在 18:30：节假日里「最新已收盘交易日」的日志已经完整，于是只打印摘要，零请求、零写入。1 月 1 日这类假日找到的是上一年的最后一个交易日（日历按当年和上一年两年读）。晨查在 **08:30 本机时间**，对应实测窗口 08:30–09:00 的起点，必须在 09:15 集合竞价之前跑完；它只建议、不改账簿，命令自己会在 `registration_cutoff` 之后拒绝，所以生成命令的机器若不在北京时间，这个任务是失败关闭的，不会在竞价之后误跑。晨查的日志名与晚间分开（`daily-selection.morning.out.log`/`.err.log`）。
 
-launchd 不会替你创建日志目录，加载前需要先建好它。把输出保存为 `~/Library/LaunchAgents/com.openalpha.daily-selection.plist` 并用 `launchctl` 加载，是安装常驻配置，只在你明确同意后做。不同意就保留手动命令，产物完全相同。
+launchd 不会替你创建日志目录，加载前需要先建好它。把输出保存为 `~/Library/LaunchAgents/com.openalpha.daily-selection.plist`（晚间）或 `com.openalpha.daily-selection.morning.plist`（晨查）并用 `launchctl` 加载，是安装常驻配置，只在你明确同意后做。不同意就保留手动命令，产物完全相同；状态仍是本节开头的「未启用」，那之前不要安装。
 
 ## 已知局限
 
@@ -475,7 +479,7 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 | `--morning-recheck` | 清晨复核，见下 |
 | `--factor-gaps SINCE` | 不适用：幸存者登记没有 `start`，输出 `factor gaps: the registered configuration cannot be read: 'start'`，退出 1（只读，不写任何文件）；幸存者形态的因子缺口由第 4 步自己补——只补各档位最晚构建之后的，至多 20 个交易日 |
 | `--account-record PATH` | 当天账户成交对账输入（可选）：指定用户记录文件；不给时找 `<RT>/paper/account-record/<交易日>.json`。不可比的记录在第 8 步账簿推进前拒绝（见下） |
-| `--pin-worktree`、`--launchd-plist` | 不进入任何一天，与 P6 相同；`--launchd-plist` 见「定时」 |
+| `--pin-worktree`、`--launchd-plist`、`--launchd-morning-plist` | 不进入任何一天，与 P6 相同；两个 launchd 选项见「定时」 |
 
 **查看账簿当前持仓（只读）。** `--show-book` 只读运行目录里 `paper/snapshots` 的最新快照（`--runtime-dir` 必填），打印现金、每只持仓的批次与成本、最后标记与账本权益，然后退出：零写入、零请求、不开面板、不加载 `build_storage`，所以能在主检出里安全运行。它不核对登记、也不推进账簿；`--registration` 只用来决定要不要带冒烟横幅，与运行目录里是哪本账簿无关。运行目录里没有快照或快照损坏时按名拒绝（退出 1），绝不把「没有账簿」当成「空账簿」开始读。**标记是账簿单位**（真实收盘价乘以自买入以来的复权比例），不是真实收盘价。冒烟登记（`settings.smoke_run`）的每一份输出——文本的首尾行与 JSON 的 `smoke` 键——都带冒烟横幅，被拒绝时也一样。例：
 
@@ -591,7 +595,7 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 - 文件里的 `held` 是当晚钉住的持仓（当晚成交与结算之前的账簿；第一晚是 `[]`，虽然那晚的买单成交后就有持仓）；建议所说的持仓是结算之后的账簿，文件键 `holdings_compared`，打印为 `holdings compared`。
 - **重跑**：同一个日历日的已完成文件只在 09:15 之前重印，0 请求、0 写入（截止时刻在重印之前就查）；钉住之后中断的，用钉住的 `as_of` 和文件里存的晚间读取继续。
 - **退出 1**（每条都写明是第几步，并打印已花的请求；步骤是 registration、preconditions、panel update、facts、summary）：时钟或（钉住的）`--as-of` 已到 09:15；`--as-of` 不晚于当晚自己钉住的时钟；比已有的复核更早的日历日；那个交易日没有晚间日志（信息说先跑晚间：`Run the evening first -- the same command without --morning-recheck -- before 09:15 of the next session, to plan its open`）或日志没写完；那天是纪元日或只结算日（没有计划）；清晨文件是另一晚或另一登记的，或是手改过的已完成文件，或名字里的日期与它的 `as_of` 不符（原样保留）；纸面账簿的写锁被占用；漂移——库里（或沿用的那份晚间读取里）已经给不出当晚的事实，或某个计划买入、顺延买入、观察名单上的名字在重读里不再是幸存者（这种情况什么都不取）。
-- **退出 2，0 次请求**：P6 登记（P6 没有清晨计划）；`--full-update`、`--top`、`--dataset`。与 `--factor-gaps`、`--pin-worktree`、`--launchd-plist` 同用是 argparse 的退出 2。
+- **退出 2，0 次请求**：P6 登记（P6 没有清晨计划）；`--full-update`、`--top`、`--dataset`。与 `--factor-gaps`、`--pin-worktree`、`--launchd-plist`、`--launchd-morning-plist` 同用是 argparse 的退出 2。
 - 给 `V2-P7-006`：清晨取数之后，当年的 `namechange` 分区被重述，一条当天发布晚了的 ST 行在当晚自己的时钟上也看得见了，晚到记录核查于是把那一晚如实登记的记录判为 `unverifiable / recompute_differs / namechange:<年> (its rows through <交易日> were restated)`。不跑清晨复核，下一晚自己的面板更新给出同样的结论。所以每一条当天发布晚了的 ST 公告都会让那一天的记录变成 UNVERIFIABLE，协议要报告它们的占比。
 
 ### 重跑与补救
@@ -628,8 +632,10 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 ### 定时
 
 - `--pin-worktree` 不变：`--registration` 指向已提交的幸存者登记。
-- `--launchd-plist` 生成的任务**固定**传 `--registration <worktree>/docs/research/p6-registration.json`，没有改它的选项：幸存者登记若不在这个路径，按它装上的定时任务跑的是 P6 登记。登记文件放在哪里由 `V2-P7-006` 决定；那之前不要安装（本来也暂停）。
-- 清晨复核没有定时任务（生成的配置只有工作日 18:30 的晚间），要手动在 09:15 之前跑，或者等 `V2-P7-006` 定下怎么定时。像定时任务那样从别处调用钉住的 worktree 时，用它自己的解释器和脚本，并把检出与登记都写成 worktree 里的绝对路径：`<worktree>/.venv/bin/python <worktree>/scripts/daily_selection.py --runtime-dir <RT> --repo <worktree> --registration <worktree>/<幸存者登记文件> --morning-recheck`，经 `uv run --no-sync --env-file .env` 读 `.env`、工作目录是 worktree（与 `--launchd-plist` 生成的晚间任务同一个形状）。
+- `--launchd-plist` 生成**晚间**任务（工作日 18:30），`--launchd-morning-plist` 生成**晨查**任务（工作日 08:30 本机时间）；两个都只打印文本，不安装。
+- 两个任务都把 `--registration` 写成参数；不给时仍是 `<worktree>/docs/research/p6-registration.json`（P6 的登记），幸存者登记用 `--registration` 给出（相对名按 `--worktree` 解析）。**登记必须在钉住的 worktree 内**：落在它之外的绝对路径退出 2，不打印任务。
+- 晨查任务固定带 `--morning-recheck`，与晚间一样用 worktree 自己的解释器和脚本、`WorkingDirectory` 是 worktree；它在 09:15 之前跑完，只建议、不改账簿，命令自己会在 `registration_cutoff` 之后拒绝。仍是「未启用」：用户确认 `V2-P7-006` 的登记并明确同意安装之前，不要安装。
+- 手动从别处调用时形状与生成的任务相同：`<worktree>/.venv/bin/python <worktree>/scripts/daily_selection.py --runtime-dir <RT> --repo <worktree> --registration <worktree>/<幸存者登记文件> --morning-recheck`，经 `uv run --no-sync --env-file .env` 读 `.env`，工作目录是 worktree。
 
 ### 已知局限（幸存者形态）
 
@@ -645,7 +651,7 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 10. **账户与纸面账簿会分叉，而没有任何输入能把它们对上。** 纸面账簿假定每张打印的单都下了、都在开盘按开盘价成交（ORDERS 下面那一行就是这么说的）；没有「账户同步」的输入告诉它你实际下了什么、成交了什么（这是留给用户决定的产品选项，没有做；只读地列出账簿当前持仓的命令也没有）。你没下、没成交、照清晨复核没买，或者你的单成交了而账簿的被拒、过期了，从那天起两边就不同：账簿会为它持有、你没有的名字打印 SELL（照提示忽略），却永远不会为你持有、它没有的名字打印 SELL。每次分叉都记下来；纸面账簿的权益本来就不是证据。
 11. **集合竞价限价单的说法是本系统的假设，要向你的券商确认。** 摘要说：集合竞价收限价单，买单挂涨停价、卖单挂跌停价就以唯一的开盘价成交；涨跌停价是从真实收盘价按主板 10%、ST（2025-07-07 之前）5% 算的，以交易所公布的为准。券商对集合竞价的委托价格、冻结资金与撤单的规则是否如此，没有核对过。
 12. **买单只按 09:15 的现金定量，并按涨停价冻结。** 内核给今晚的买单定量用的是 **09:15 的现金**（纸面账簿结算后的数，是模型、不是账户真值），不是现金加今晚卖单的回款：卖单与买单在**同一个**集合竞价里，券商先冻结买单的钱，卖单的回款在竞价之后才到。每张买单按它的**涨停价**冻结（主板 1.10 倍、基准是信号日收盘、四舍五入到分）。350,000 元、10 只等权时十张涨停价买单要冻结约 38.5 万元、超过现金，最后一只只能买更小的股数（或整只不买），资金行下面按名字打印短少。集合竞价只收限价单、买涨停价 / 卖跌停价取单一开盘价、买单冻结约 1.1 倍名义，都是**本系统的假设**，没有向任何券商核对过（第 11 条）；下单前向你的券商确认，`FREEZE_RATIO` 待你向券商确认后改一个常量。真钱闸门仍然关闭：`006` 尚未经你确认并登记，账户成交对账输入也没有做（这次只做了现金约束的一半）。
-13. **定时只覆盖晚间，而且写死 P6 登记的路径**：`--launchd-plist` 生成的任务固定传 `--registration <worktree>/docs/research/p6-registration.json`、只在工作日 18:30 跑，没有清晨复核的任务；清晨复核要手动跑（从别处调用钉住的 worktree 时的形状见「定时」）。怎么定时、生成器要不要有 `--registration` 参数，由 `V2-P7-006` 决定；那之前不要安装。
+13. **定时任务只生成文本，不安装；晨查的 08:30 是本机时间。** `--launchd-plist`（晚间 18:30）与 `--launchd-morning-plist`（晨查 08:30 本机时间）都把 `--registration` 写成参数、要求登记在钉住的 worktree 内，且只打印文本（`--install` 是未知参数，退出 2）。生成命令的机器若不在北京时间，晨查任务会在 09:15 之后被命令自己拒绝而不是按时复核，是失败关闭的；要不要加显式时区参数，等用户确认机器的时区后再定。状态仍是未启用：用户确认 `V2-P7-006` 的登记并明确同意安装之前，不要安装。
 14. **上线之后的代码修复或 `settings` 改动，就是另一本账**（见「重跑与补救」）：要新的运行目录与新的纪元，旧目录的账簿、日志与记录留给旧登记。能不能让账簿跨登记延续（要迁移标记、日志和周报认定记录的规则），由 `V2-P7-006` 决定。
 15. 送股、拆分之后，positions 只给 `ledger/real ratio`（例如 `2.0000`），不给账户的股数，也没有「这是送股」的标记：现金分红也会动这个比值，从比值推不出是哪一种，所以不猜。卖出用 SELL ENTIRE POSITION 不受影响；要知道账户里有多少股，看你的账户。
 16. 少数拒绝信息里的时刻仍按存的样子打印，可能是 UTC（`+00:00`，例如不带 `--as-of` 运行时钉住的时钟）：已提交的晚间丢了日志那一条（第 5 步）里的钉住时刻，以及清晨复核几条拒绝里的 `as_of` 与时钟。摘要、补救命令里的 `--as-of`、「被拒的一天对账户意味着什么」那一段都是上海时间。
@@ -759,7 +765,7 @@ smoke() { ( cd ~/openalpha-smoke/r1/pinned && UV_PROJECT_ENVIRONMENT="$PWD/.venv
 | `status` | 钉住的 worktree（经 `smoke`）；从别处（例如主检出）要给 `--smoke-root <根>` | 阶段、两个上限、已花、是否丢弃、未关闭的调用、逐次调用、按接口的合计 | 无 |
 | `phase --to 2 --reason "…"` | 同 `status`：经 `smoke`，或从别处加 `--smoke-root <根>` | 阶段 1 进阶段 2，只能做一次 | 无 |
 
-`evening`、`morning`、`weekly` 的 `--` 之后是该命令自己的选项（例如 `smoke evening -- --json`；不写 `--` 的 `smoke evening --json` 是驱动的用法错误，退出 2）；`--runtime-dir`、`--registration`、`--repo`、`--morning-recheck`、`--pin-worktree`、`--launchd-plist`、`--factor-gaps` 是驱动的，不能给。
+`evening`、`morning`、`weekly` 的 `--` 之后是该命令自己的选项（例如 `smoke evening -- --json`；不写 `--` 的 `smoke evening --json` 是驱动的用法错误，退出 2）；`--runtime-dir`、`--registration`、`--repo`、`--morning-recheck`、`--pin-worktree`、`--launchd-plist`、`--launchd-morning-plist`、`--factor-gaps` 是驱动的，不能给。
 
 **退出码。**
 

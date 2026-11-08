@@ -1688,6 +1688,127 @@ def test_the_launchd_job_runs_the_pinned_checkout_with_no_shell_and_is_not_insta
     assert not odd.exists()
 
 
+def test_the_launchd_jobs_take_the_registration_and_the_morning_recheck(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Both jobs name the registration they run -- not P6's path by default -- and the morning job
+    adds `--morning-recheck`; both are weekdays, the evening at 18:30 and the morning at 08:30,
+    and both stand in the pinned worktree on its own interpreter."""
+    odd = tmp_path / "pinned daily"
+    worktree, runtime, logs = odd, odd / "runtime", odd / "logs"
+    uv = tmp_path / "bin" / "uv"
+
+    def job(*, morning: bool = False) -> dict[str, Any]:
+        arguments = [
+            "--runtime-dir",
+            str(runtime),
+            "--worktree",
+            str(worktree),
+            "--uv",
+            str(uv),
+            "--registration",
+            "docs/research/survivor.json",
+        ]
+        arguments += [
+            "--launchd-morning-plist" if morning else "--launchd-plist",
+            str(logs),
+        ]
+        assert daily.main(arguments) == 0
+        return plistlib.loads(capsys.readouterr().out.encode("utf-8"))
+
+    evening = job()
+    assert evening["Label"] == "com.openalpha.daily-selection"
+    assert evening["ProgramArguments"][-2:] == [
+        "--registration",
+        str(worktree / "docs" / "research" / "survivor.json"),
+    ]
+    assert "--morning-recheck" not in evening["ProgramArguments"]
+    assert evening["StartCalendarInterval"] == [
+        {"Weekday": weekday, "Hour": 18, "Minute": 30} for weekday in range(1, 6)
+    ]
+
+    morning = job(morning=True)
+    assert morning["Label"] == "com.openalpha.daily-selection.morning"
+    assert morning["ProgramArguments"][-3:] == [
+        "--registration",
+        str(worktree / "docs" / "research" / "survivor.json"),
+        "--morning-recheck",
+    ]
+    assert morning["StartCalendarInterval"] == [
+        {"Weekday": weekday, "Hour": 8, "Minute": 30} for weekday in range(1, 6)
+    ]
+    assert morning["StandardOutPath"].endswith("daily-selection.morning.out.log")
+    assert morning["WorkingDirectory"] == str(worktree)
+    assert morning["RunAtLoad"] is False
+    assert not odd.exists()
+
+
+def test_a_registration_outside_the_worktree_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The scheduled run stands in the worktree and reads the registration committed there: an
+    absolute path outside it is refused, not printed into a job that reads another checkout's
+    registration."""
+    arguments = [
+        "--runtime-dir",
+        str(tmp_path / "runtime"),
+        "--worktree",
+        str(tmp_path / "pinned"),
+        "--uv",
+        str(tmp_path / "uv"),
+        "--registration",
+        str(tmp_path / "main checkout" / "docs" / "research" / "survivor.json"),
+        "--launchd-plist",
+        str(tmp_path / "logs"),
+    ]
+
+    with pytest.raises(SystemExit) as refused:
+        daily.main(arguments)
+
+    assert refused.value.code == 2
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "must be inside the pinned worktree" in err
+
+
+def test_no_launchd_install_path_exists(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Printing a job installs nothing: no file, no directory, no process. And there is no option
+    that would install one -- `--install` is an unknown argument, exit 2."""
+
+    def refused(*args: object, **kwargs: object) -> None:
+        raise AssertionError("generating a launchd job ran a command")
+
+    monkeypatch.setattr(daily.subprocess, "run", refused)
+    monkeypatch.setattr(daily, "invoke", refused)
+    logs = tmp_path / "logs"
+
+    for flag in ("--launchd-plist", "--launchd-morning-plist"):
+        assert (
+            daily.main(
+                [
+                    "--runtime-dir",
+                    str(tmp_path / "runtime"),
+                    "--worktree",
+                    str(tmp_path / "pinned"),
+                    "--uv",
+                    str(tmp_path / "uv"),
+                    flag,
+                    str(logs),
+                ]
+            )
+            == 0
+        )
+        assert plistlib.loads(capsys.readouterr().out.encode("utf-8"))["RunAtLoad"] is False
+        assert not logs.exists()
+
+    with pytest.raises(SystemExit) as refused_flag:
+        daily.main(["--runtime-dir", str(tmp_path / "runtime"), "--install", str(logs)])
+    assert refused_flag.value.code == 2
+    assert "unrecognized arguments" in capsys.readouterr().err
+
+
 def test_an_env_file_uv_would_split_is_refused_instead_of_printing_a_job_that_cannot_run(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
