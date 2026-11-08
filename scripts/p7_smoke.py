@@ -155,6 +155,7 @@ PATH_FLAGS: Final[tuple[str, ...]] = (
     "--morning-recheck",
     "--pin-worktree",
     "--launchd-plist",
+    "--launchd-morning-plist",
     "--factor-gaps",
 )
 DAY_KINDS: Final[tuple[str, ...]] = ("evening", "morning", "weekly")

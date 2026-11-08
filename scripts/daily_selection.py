@@ -6352,10 +6352,11 @@ def launchd_registration(worktree: Path, registration: Path) -> Path:
     resolved = (registration if registration.is_absolute() else worktree / registration).resolve()
     root = worktree.resolve()
     if resolved != root and root not in resolved.parents:
+        resolved_note = "" if resolved == registration else f" (resolved: {resolved})"
         raise ValueError(
-            f"--registration {registration} resolves to {resolved}, which must be inside the "
-            f"pinned worktree {worktree}: the scheduled run stands there and reads the "
-            "registration committed there; name it relative to --worktree (default "
+            f"--registration {registration}{resolved_note} must be inside the pinned worktree "
+            f"{worktree}: the scheduled run stands there and reads the registration committed "
+            "there; name it relative to --worktree (default "
             f"{REGISTRATION_IN_REPOSITORY})"
         )
     return resolved

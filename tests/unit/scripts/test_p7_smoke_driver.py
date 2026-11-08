@@ -1145,6 +1145,15 @@ def test_a_path_flag_is_refused_however_it_is_spelt(
     assert [event["event"] for event in events] == ["prepared"]
 
 
+@pytest.mark.parametrize("flag", ["--launchd-plist", "--launchd-morning-plist"])
+def test_both_launchd_flags_are_the_drivers_to_set(flag: str) -> None:
+    """Either launchd flag turns the day into a mode that prints a plist and exits 0, which the
+    driver would record as a 0-request evening. Both are in `PATH_FLAGS`, so a smoke invocation
+    cannot reach that mode -- the evening flag alone was listed before."""
+    with pytest.raises(driver.SmokeDriverError, match=re.escape(flag)):
+        driver._refuse_path_flags([flag, "logs"])
+
+
 def test_a_remedy_that_joins_an_option_to_its_value_is_refused(tmp_path: Path) -> None:
     """`openalpha` takes `--runtime-dir=DIR` too, and the last one given: a remedy that adds one
     after the checked `--runtime-dir` would build another runtime directory."""

@@ -1749,6 +1749,7 @@ def test_a_registration_outside_the_worktree_is_refused(
     """The scheduled run stands in the worktree and reads the registration committed there: an
     absolute path outside it is refused, not printed into a job that reads another checkout's
     registration."""
+    registration = tmp_path / "main checkout" / "docs" / "research" / "survivor.json"
     arguments = [
         "--runtime-dir",
         str(tmp_path / "runtime"),
@@ -1757,7 +1758,7 @@ def test_a_registration_outside_the_worktree_is_refused(
         "--uv",
         str(tmp_path / "uv"),
         "--registration",
-        str(tmp_path / "main checkout" / "docs" / "research" / "survivor.json"),
+        str(registration),
         "--launchd-plist",
         str(tmp_path / "logs"),
     ]
@@ -1768,7 +1769,37 @@ def test_a_registration_outside_the_worktree_is_refused(
     assert refused.value.code == 2
     out, err = capsys.readouterr()
     assert out == ""
-    assert "must be inside the pinned worktree" in err
+    # The caller's own path is the subject; a `(resolved: …)` note follows only when resolution
+    # changed it, so it cannot displace the path the operator typed.
+    assert str(registration) in err
+    assert err.index(str(registration)) < err.index("must be inside the pinned worktree")
+
+
+def test_the_two_launchd_jobs_cannot_be_printed_at_once(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One job per invocation: printing both would give whichever branch ran first and silently
+    drop the other, so the parser refuses the pair (exit 2) before printing anything."""
+    arguments = [
+        "--runtime-dir",
+        str(tmp_path / "runtime"),
+        "--worktree",
+        str(tmp_path / "pinned"),
+        "--uv",
+        str(tmp_path / "uv"),
+        "--launchd-plist",
+        str(tmp_path / "logs"),
+        "--launchd-morning-plist",
+        str(tmp_path / "logs"),
+    ]
+
+    with pytest.raises(SystemExit) as refused:
+        daily.main(arguments)
+
+    assert refused.value.code == 2
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "--launchd-plist and --launchd-morning-plist are two jobs" in err
 
 
 def test_no_launchd_install_path_exists(
