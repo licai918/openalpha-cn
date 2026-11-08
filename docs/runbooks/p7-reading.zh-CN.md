@@ -29,7 +29,7 @@
    git replace --convert-graft-file                      # 只有上一条不成立时才需要
    ```
 
-3. **登记的 `code_commit` 与当前 `HEAD` 在四个受绑定路径上没有任何差异。** 登记记录的是 `git rev-parse HEAD`；`read_once` 比较的是 `registry.REGISTERED_PATHS` 的四个路径——`src/`、`scripts/research/`、`pyproject.toml`、`uv.lock`（`p7_reading.py:1280-1284`，调用 `registry._refuse_a_changed_source` 时**没有**传 `also_bound`）。`scripts/daily_selection.py` 与 `scripts/forward_report.py` 由每日命令/周报的准入（`also_bound`）绑定，**不由这次读数检查**（控制者已知的代码缺口，另立 issue）。
+3. **登记的 `code_commit` 与当前 `HEAD` 在四个受绑定路径上没有任何差异，且工作树干净。** 登记记录的是 `git rev-parse HEAD`；`read_once` 比较的是 `registry.REGISTERED_PATHS` 的四个路径——`src/`、`scripts/research/`、`pyproject.toml`、`uv.lock`（`p7_reading.py:1280-1284`，调用 `registry._refuse_a_changed_source` 时**没有**传 `also_bound`）。`scripts/daily_selection.py` 与 `scripts/forward_report.py` 由每日命令/周报的准入（`also_bound`）绑定，**不由这次读数检查**（控制者已知的代码缺口，另立 issue）。
 
    ```bash
    git rev-parse HEAD
@@ -94,7 +94,7 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync "$PWD/.venv/bin/python" scr
    dry run: nothing was written and nothing was claimed
    ```
 
-   打印的登记路径是**绝对路径**。**N 必须等于 24。** 24 是**计划记录的先验**：484 个会话、步长 20、h20 的算术（`ceil(484 / 20) = 25` 个信号日，最后一个信号日的标签出口越过窗口末日、被禁运，剩 24 个非重叠期）。**484 这个数在本仓库无法离线复核**（计划 §6 已说明）；工具按面板自己的日历自算，算出来不是 24 就停。`26` 只是数据无关的星期几上界，不是真实日历的期数。
+   打印的登记路径是**绝对路径**。**N 必须等于 24。** 24 是**计划记录的先验**：484 个会话、步长 20、h20 的算术（`ceil(484 / 20) = 25` 个信号日，最后一个信号日的标签出口越过窗口末日、被禁运，剩 24 个非重叠期）。**484 这个数在本仓库无法离线复核**（见 `docs/superpowers/plans/2026-11-07-v2-p7-024-stop-rule-and-reading.md` 的「矛盾与发现」第 4 条，与 `docs/superpowers/plans/2026-11-07-p7-dev-batch-2-closeout.md` §6 第 6 条）；工具按面板自己的日历自算，算出来不是 24 就停。`26` 只是数据无关的星期几上界，不是真实日历的期数。
    **N 不等于 24 就停下来报告**：面板日历与计划不一致，或面板不完整。**不得把 24 改成 N**，不得调参、不得继续登记——那会把一次不可逆的读建立在错的日历上。退出码 4 就是这种情况，什么都没写、什么都没认领。
 
 2. **正式登记**（同一条命令，去掉 `--dry-run`）。stdout 打印登记路径、它的 sha256，以及一行 `commit it before the read; the read refuses bytes not in HEAD`。
