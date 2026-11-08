@@ -4,7 +4,12 @@
 named constant) and `expected_periods`, the exact number of non-overlapping periods the plan
 expects the window's calendar to hold. `--dry-run` computes them and writes nothing. `read` checks
 the same count first -- reading the calendar, never outcome data, and claiming nothing -- and then
-calls `p7_reading.read_once`, the only library path into the window.
+calls `p7_reading.read_once`, the only library path into the window. Every flag is required except
+`--reading`, `--issue` and `--dry-run`; `--exchange` must be the calendar the diagnostics read
+(`SSE`, `p7_diagnostics.EXCHANGE`), and another is refused with exit 2. `--expected-periods` is
+the plan's prior, never a value the code fills in -- the validation window's prior is 24 (484
+sessions at stride 20 and h20, the last signal day embargoed) -- and the tool computes its own
+count from the panel's calendar and stops with exit 4 when the two differ.
 
 Exit codes, the operator's signal:
 
