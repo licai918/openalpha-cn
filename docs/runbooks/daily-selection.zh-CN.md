@@ -72,6 +72,7 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 | `--pin-worktree DIR` | 在登记提交上创建或移动一个分离 HEAD 的 worktree，再用它自己的 `uv.lock` **离线**建它自己的环境 `DIR/.venv`（`uv sync --frozen --offline --no-python-downloads --all-extras --python <.python-version>`），建成后读回它的解释器版本，再在 `DIR/.env` 建指向主检出 `.env` 的符号链接（没有就只打印说明），打印提交号后退出 |
 | `--uv PATH` | 上面两个操作用的 uv，默认 `PATH` 上的 |
 | `--launchd-plist LOG_DIR` | 只打印 launchd 定时配置文本（需 `--worktree`），不安装任何东西 |
+| `--show-book` | 只读：从纸面账簿自己的状态打印最新快照——现金、持仓、每笔成本、最后标记——然后退出；零写入、零请求，没有账簿的运行目录按名拒绝（退出 1）；冒烟登记的输出首尾都带冒烟横幅 |
 
 ## 八步与失败时的行为
 
@@ -474,6 +475,12 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 | `--morning-recheck` | 清晨复核，见下 |
 | `--factor-gaps SINCE` | 不适用：幸存者登记没有 `start`，输出 `factor gaps: the registered configuration cannot be read: 'start'`，退出 1（只读，不写任何文件）；幸存者形态的因子缺口由第 4 步自己补——只补各档位最晚构建之后的，至多 20 个交易日 |
 | `--pin-worktree`、`--launchd-plist` | 不进入任何一天，与 P6 相同；`--launchd-plist` 见「定时」 |
+
+**查看账簿当前持仓（只读）。** `--show-book` 只读运行目录里 `paper/snapshots` 的最新快照（`--runtime-dir` 必填），打印现金、每只持仓的批次与成本、最后标记与账本权益，然后退出：零写入、零请求、不开面板、不加载 `build_storage`，所以能在主检出里安全运行。它不核对登记、也不推进账簿；运行目录里没有快照时按名拒绝（退出 1），绝不把「没有账簿」当成「空账簿」开始读。**标记是账簿单位**（真实收盘价乘以自买入以来的复权比例），不是真实收盘价。冒烟登记（`settings.smoke_run`）的每一份输出——文本的首尾行与 JSON 的 `smoke` 键——都带冒烟横幅。例：
+
+```bash
+uv run python scripts/daily_selection.py --runtime-dir ~/openalpha-research --registration <幸存者登记文件> --show-book
+```
 
 ### 九步与退出码
 

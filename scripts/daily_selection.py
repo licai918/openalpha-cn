@@ -345,6 +345,13 @@ SMOKE_DOCUMENT_KEY: Final[str] = "smoke"
 """The key a printed JSON document of a smoke registration carries the banner under. Printed
 only: the journal, the morning file and the written weekly report never hold it."""
 
+PAPER_STATE_DIRECTORY: Final[tuple[str, str]] = ("paper", "snapshots")
+"""Where the paper book's snapshots live under a runtime directory
+(`runtime.composition.build_storage`: `runtime_dir / "paper" / "snapshots"`)."""
+
+BOOK_VIEW_KIND: Final[str] = "paper-book-view/v1"
+"""`--show-book`'s document kind: the paper book's head snapshot as a listing, read only."""
+
 BASE_TARGETS: Final[tuple[str, ...]] = (
     "trade_cal",
     "stock_basic",
@@ -3144,6 +3151,114 @@ def factor_gap_lines(report: Mapping[str, Any]) -> list[str]:
             if missing
             else f"{tier}: no session without a build"
         )
+    return lines
+
+
+def show_book(runtime_dir: Path) -> dict[str, Any]:
+    """The paper book's head snapshot as a listing -- cash, every holding's lots and cost basis,
+    the last mark -- read from the book's own state, writing nothing and asking the network
+    nothing (`V2-P7-006a`).
+
+    The snapshot directory is the book (`runtime.composition.build_storage`), and the reader is
+    `FilePaperStateStore`, whose reads are total and create nothing (`storage/paper_state.py`):
+    `build_storage` is deliberately not used, because it runs migrations and opens SQLite files,
+    and a P6 day must not load the paper book at all. A store holding no snapshot is refused by
+    name -- a missing book is never an empty one (`backtest.paper_state.held_head`).
+
+    Marks are in the ledger's units (the real close times the adjustment ratio since the buy), so
+    the document says so and is not read as real prices.
+    """
+    from openalpha_cn.backtest.paper_state import held_head
+    from openalpha_cn.storage.paper_state import FilePaperStateStore
+    from openalpha_cn.strategy_survivor_summary import SURVIVOR_WORDING
+
+    store = FilePaperStateStore(runtime_dir.joinpath(*PAPER_STATE_DIRECTORY))
+    snapshot = held_head(store)
+    if snapshot is None:
+        raise ValueError(
+            "no paper book snapshot is held at all under "
+            f"{runtime_dir.joinpath(*PAPER_STATE_DIRECTORY)}: a paper book is opened by saving an "
+            "opening snapshot, never started from zero by a reader; nothing is created here"
+        )
+    book = snapshot.book
+    positions = []
+    for position in book.positions:
+        # `PortfolioState` refuses a position without a mark, so this cast cannot be wrong for a
+        # snapshot this code wrote; `mark` is typed optional because the model asks by subject.
+        mark = cast(Decimal, book.mark(position.subject))
+        value = Decimal(position.quantity) * mark
+        positions.append(
+            {
+                "ts_code": position.subject,
+                "quantity": position.quantity,
+                "cost_basis": format(position.cost_basis, "f"),
+                "lots": [
+                    {
+                        "open_date": lot.open_date.isoformat(),
+                        "quantity": lot.quantity,
+                        "cost_basis": format(lot.cost_basis, "f"),
+                    }
+                    for lot in position.lots
+                ],
+                "mark": format(mark, "f"),
+                "market_value": format(value, "f"),
+                "unrealised": format(value - position.cost_basis, "f"),
+            }
+        )
+    return {
+        "kind": BOOK_VIEW_KIND,
+        "session": snapshot.session.isoformat(),
+        "session_index": snapshot.session_index,
+        "snapshot_id": snapshot.snapshot_id,
+        "config_digest": snapshot.config_digest,
+        "first_decision_session": snapshot.first_decision_session,
+        "last_settled_session": snapshot.last_settled_session,
+        "cash": format(book.cash, "f"),
+        "market_value": format(book.market_value, "f"),
+        "equity": format(book.equity, "f"),
+        "positions": positions,
+        "pending_orders": len(snapshot.pending_orders),
+        "marks": (
+            "ledger units (the real close times the adjustment ratio since the buy), not real "
+            "closes"
+        ),
+        "wording": SURVIVOR_WORDING,
+    }
+
+
+def book_view_lines(view: Mapping[str, Any]) -> list[str]:
+    """`show_book`'s document as the text an operator reads: one row per figure, one line per
+    holding, one line per lot, and a last line saying nothing was written and nothing was asked.
+    """
+    lines = [
+        f"kind               {view['kind']}",
+        f"session            {view['session']} (session index {view['session_index']})",
+        f"snapshot           {view['snapshot_id']}",
+        f"config digest      {view['config_digest']}",
+        f"first decided      {view['first_decision_session']}",
+        f"last settled       {view['last_settled_session']}",
+        f"cash               {view['cash']}",
+        f"market value       {view['market_value']}",
+        f"equity             {view['equity']}",
+        f"positions          {len(view['positions'])}",
+    ]
+    for position in view["positions"]:
+        lines.append(
+            f"  {position['ts_code']:<12} {position['quantity']} shares, cost "
+            f"{position['cost_basis']}, mark {position['mark']}, value "
+            f"{position['market_value']}, unrealised {position['unrealised']}"
+        )
+        for lot in position["lots"]:
+            lines.append(
+                f"    lot            {lot['open_date']} {lot['quantity']} shares, cost "
+                f"{lot['cost_basis']}"
+            )
+    lines += [
+        f"pending orders     {view['pending_orders']}",
+        f"marks              {view['marks']}",
+        f"wording            {view['wording']}",
+        "read-only          this listing wrote nothing and made no request",
+    ]
     return lines
 
 
@@ -6358,6 +6473,13 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
         "closed one at which a factor tier the registered configuration reads has no build, and "
         "exit 1 when there is one. Admits no code and writes nothing.",
     )
+    parser.add_argument(
+        "--show-book",
+        action="store_true",
+        help="Read only: print the paper book's head snapshot -- cash, holdings, cost basis and "
+        "last marks -- and exit. Writes nothing, opens no panel and makes no request; a runtime "
+        "directory with no book is refused by name.",
+    )
     arguments = parser.parse_args(argv)
     if arguments.morning_recheck:
         for given, flag in (
@@ -6383,6 +6505,34 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
         return int(error.exit_code)
     if arguments.runtime_dir is None:
         parser.error("--runtime-dir is required")
+    if arguments.show_book:
+        for given, flag in (
+            (arguments.morning_recheck, "--morning-recheck"),
+            (arguments.pin_worktree, "--pin-worktree"),
+            (arguments.factor_gaps, "--factor-gaps"),
+            (arguments.launchd_plist, "--launchd-plist"),
+        ):
+            if given:
+                parser.error(f"--show-book cannot be combined with {flag}")
+        from openalpha_cn.storage.paper_state import PaperStateStoreError
+
+        try:
+            view = show_book(arguments.runtime_dir)
+        except (ValueError, PaperStateStoreError) as error:
+            print(f"paper book: {error}", file=sys.stderr)
+            return int(DailyExit.step_failed)
+        banner = smoke_banner(arguments.registration)
+        if banner is not None:
+            print(banner, file=sys.stderr)
+        try:
+            if arguments.json:
+                print(json.dumps(with_smoke(view, banner), sort_keys=True, ensure_ascii=False))
+            else:
+                print("\n".join(bannered(book_view_lines(view), banner)))
+        finally:
+            if banner is not None:
+                print(banner, file=sys.stderr)
+        return int(DailyExit.done)
     if arguments.factor_gaps is not None:
         try:
             report = factor_gaps(
