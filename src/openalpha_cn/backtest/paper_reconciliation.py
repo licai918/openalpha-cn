@@ -116,7 +116,7 @@ class AccountRecord(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["account-record/v1"] = "account-record/v1"
+    schema_version: Literal["account-record/v1"]
     session: date
     orders: tuple[RecordedOrder, ...]
 
@@ -139,7 +139,7 @@ def read_account_record(path: Path) -> AccountRecord:
     """
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError as error:
+    except (OSError, UnicodeError) as error:
         raise AccountRecordError(
             f"the account record {path} cannot be read ({type(error).__name__}: {error})"
         ) from error

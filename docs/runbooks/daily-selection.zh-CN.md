@@ -498,9 +498,9 @@ uv run python scripts/daily_selection.py --runtime-dir ~/openalpha-research --re
 
 - 一条到期订单一行：**当日在册的每张订单必须恰有一行**（缺行是拒绝，不是默认同意）；同一 `order_id` 不得出现两次；`ts_code` 与 `side` 必须与计划一致；`filled_quantity` 不得超过计划数量。
 - `placed: false` ⇒ 数量为 0、没有价格；数量为 0 ⇒ 没有价格（`filled_price` 省略或为 `null`）；有成交则必须有价格。
-- 不可比的记录——记的不是这一交易日、出现当日晚间没有计划的订单、缺行、重复、方向或代码不符、数量超过计划——是 `AccountRecordConflict`，第 8 步在账簿推进前**按名拒绝**（退出 1，不落快照、不写账本行）；修好记录后重跑同一天即可。
+- 记录文件里同一条 `order_id` 出现两次，文件本身读不出（`AccountRecordError`，是 `ValueError` 的子类）；其余不可比的记录——记的不是这一交易日、出现当日晚间没有计划的订单、缺行、方向或代码不符、数量超过计划——是 `AccountRecordConflict`。两者都在第 8 步账簿推进前**按名拒绝**（退出 1，不落快照、不写账本行）；修好记录后重跑同一天即可。
 - `--account-record PATH` 指定别处的一份记录（给了却不存在同样按名拒绝）；不给时找 `<RT>/paper/account-record/<交易日>.json`。
-- **没有记录不是一致**：没有文件时，摘要的 RECONCILIATION 一栏写 `no account record for <交易日>: the paper book's assumption that every printed order was placed stands unverified`（账簿假设未核对），绝不补零。
+- **没有记录不是一致**：没有文件时，摘要的 RECONCILIATION 一栏（结账日没有晚间块，同一句印在当天 catch-up 条目下）写 `no account record for <交易日>: the paper book's assumption that every printed order was placed stands unverified`（账簿假设未核对），绝不补零。
 - 一份记录的拒绝与一行分歧都只让这一天**停下**（拒绝）或**被记下**（分歧），不改变纸面账簿的推进语义。
 
 ### 九步与退出码

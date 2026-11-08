@@ -6550,6 +6550,7 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
             (arguments.pin_worktree, "--pin-worktree"),
             (arguments.factor_gaps, "--factor-gaps"),
             (arguments.launchd_plist, "--launchd-plist"),
+            (arguments.account_record, "--account-record"),
         ):
             if given is not None:
                 parser.error(f"--morning-recheck cannot be combined with {flag}")
@@ -6559,6 +6560,7 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
             (arguments.pin_worktree, "--pin-worktree"),
             (arguments.factor_gaps, "--factor-gaps"),
             (arguments.launchd_plist, "--launchd-plist"),
+            (arguments.account_record, "--account-record"),
         ):
             if given:
                 parser.error(f"--show-book cannot be combined with {flag}")

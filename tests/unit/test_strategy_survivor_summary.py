@@ -68,6 +68,11 @@ from test_survivor_facts_panel import (
 from openalpha_cn import strategy_survivor_summary
 from openalpha_cn.backtest import execution
 from openalpha_cn.backtest.paper_evening import CatchUpResult, EveningResult
+from openalpha_cn.backtest.paper_reconciliation import (
+    NOT_PLACED,
+    Divergence,
+    Reconciliation,
+)
 from openalpha_cn.backtest.paper_state import PendingOrder
 from openalpha_cn.backtest.paper_step import NO_BAR_REASON
 from openalpha_cn.domain.survivor_book import (
@@ -2937,3 +2942,92 @@ def test_the_panel_and_factor_catch_ups_the_caller_merged_are_printed_before_the
     for nothing in ({}, {"panel": {"caught_up": []}, "factors": {"caught_up": []}}):
         quiet = summary_lines({**document_of(s3), **nothing})
         assert not any(line.startswith(("panel catch-up", "factor catch-up")) for line in quiet)
+
+
+# --- the account reconciliation's two printed forms (V2-P7-006a) ---------------------------------
+
+UNVERIFIED: Final[str] = (
+    "the paper book's assumption that every printed order was placed stands unverified"
+)
+"""The sentence a day with no record must print: no record is not agreement."""
+
+
+def _divergence() -> Divergence:
+    return Divergence(
+        order_id="tor_an_order_no_evening_placed",
+        ts_code=C,
+        side="buy",
+        kind=NOT_PLACED,
+        book={"status": "filled", "filled_quantity": "900", "filled_price": "10.00"},
+        record={"placed": "false", "filled_quantity": "0", "filled_price": ""},
+    )
+
+
+def _reconciliation(session: date, *, orders: int = 2, reconciled: int = 1) -> Reconciliation:
+    return Reconciliation(session=session, orders=orders, divergences=(_divergence(),))
+
+
+def test_an_evening_with_no_account_record_says_the_books_assumption_stands_unverified(
+    s3: Day,
+) -> None:
+    """The evening path, no record: the ORDERS block's assumption is not checked, and the summary
+    says so rather than printing zeros."""
+    line = line_with(summary_lines(document_of(s3)), "reconciliation")
+
+    assert f"no account record for {S3.isoformat()}" in line
+    assert UNVERIFIED in line
+
+
+def test_an_evening_with_a_record_names_its_reconciliation_and_every_divergence(s3: Day) -> None:
+    """The evening path, with a record: the count reconciled and each divergence run through the
+    same `line()` the module gives the journal, so the text and the document cannot drift."""
+    document = document_of(s3)
+    document["paper"]["reconciliation"] = _reconciliation(S3).document()
+
+    lines = summary_lines(document)
+
+    assert line_with(lines, "reconciliation").endswith(
+        "reconciled 1 of 2 orders against the account record"
+    )
+    assert f"  {_divergence().line()}" in lines
+
+
+def test_a_settle_only_day_with_no_account_record_says_the_books_assumption_stands_unverified(
+    settle_only: SettleOnly,
+) -> None:
+    """A settle-only day settles its own session as a catch-up, so its reconciliation lives in the
+    catch-up block -- and with no record it must say the assumption is unverified there."""
+    lines = summary_lines(settle_only_document(settle_only))
+
+    assert any(
+        f"no account record for {settle_only.session.isoformat()}" in line and UNVERIFIED in line
+        for line in lines
+    )
+
+
+def test_a_settle_only_day_with_a_record_names_its_reconciliation_and_every_divergence(
+    settle_only: SettleOnly,
+) -> None:
+    """A settle-only day with a record: the day's own catch-up entry prints it, by the same
+    `line()`, because there is no evening block to carry it."""
+    caught = dataclasses.replace(
+        settle_only.caught, reconciliation=_reconciliation(settle_only.session)
+    )
+
+    lines = summary_lines(settle_only_document(settle_only, catch_ups=(caught,)))
+
+    assert any(
+        line.endswith("reconciled 1 of 2 orders against the account record") for line in lines
+    )
+    assert f"      {_divergence().line()}" in lines
+
+
+def test_an_earlier_catch_up_says_nothing_about_the_account(caught_up: CaughtUp) -> None:
+    """Only the day's own session's entry carries the reconciliation; the earlier sessions it
+    caught up are silent, so one record is never printed against another session."""
+    lines = summary_lines(document_of(caught_up.evening, catch_ups=caught_up.caught))
+
+    said = [line for line in lines if "no account record for" in line]
+    assert len(said) == 1
+    assert f"no account record for {S5.isoformat()}" in said[0]
+    assert not any(item.settlement.session.isoformat() in said[0] for item in caught_up.caught)

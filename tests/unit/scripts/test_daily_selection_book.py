@@ -223,8 +223,9 @@ def test_show_book_lists_the_books_holdings_from_its_own_state_and_writes_nothin
         ["--factor-gaps", "2026-01-01"],
         ["--launchd-plist", "logs"],
         ["--pin-worktree", "pinned"],
+        ["--account-record", "record.json"],
     ],
-    ids=["morning-recheck", "factor-gaps", "launchd-plist", "pin-worktree"],
+    ids=["morning-recheck", "factor-gaps", "launchd-plist", "pin-worktree", "account-record"],
 )
 def test_show_book_refuses_the_modes_it_cannot_be_combined_with(
     world: tds.World, monkeypatch: pytest.MonkeyPatch, others: list[str]
@@ -413,3 +414,79 @@ def test_a_record_naming_an_order_that_was_not_due_refuses_the_day_before_the_bo
     _account_record_file(world.runtime, survivor_day.NEXT, planned, not_placed=[])
     again = survivor_day._completed(world, capsys, survivor_day.NEXT)
     assert again["paper"]["reconciliation"]["orders"] == len(planned)
+
+
+def test_a_settle_only_day_prints_and_files_the_records_reconciliation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,  # noqa: F811  (the module-scope fixture, imported above)
+) -> None:
+    """NEXT run after its own call auction settles without a decision: there is no evening block,
+    so the day's own catch-up entry carries the reconciliation and the text summary prints it --
+    the record is consumed and the divergence is named rather than absorbed."""
+    world = survivor_day._world(tmp_path, monkeypatch, seeded)
+    first = survivor_day._completed(world, capsys, survivor_day.DAY)
+    planned = first["paper"]["trade_list"]["orders"]
+    _account_record_file(
+        world.runtime, survivor_day.NEXT, planned, not_placed=[planned[0]["order_id"]]
+    )
+    late = survivor_day.after_the_auction(survivor_day.NEXT)
+
+    code, out, err = survivor_day._run(world, capsys, as_of=late, clock=late, json_output=False)
+
+    assert code == 0, err
+    text = "\n".join(out.splitlines())
+    assert "reconciled" in text and "orders against the account record" in text
+    assert planned[0]["order_id"] in text and "not_placed" in text
+    entry = next(
+        item
+        for item in survivor_day._journal(world, survivor_day.NEXT)["result"]["paper_skipped"][
+            "catch_ups"
+        ]
+        if item["session"] == survivor_day.NEXT.isoformat()
+    )
+    assert entry["reconciliation"]["orders"] == len(planned)
+    named = {(item["order_id"], item["kind"]) for item in entry["reconciliation"]["divergences"]}
+    assert (planned[0]["order_id"], "not_placed") in named
+
+
+def test_a_settle_only_day_with_no_record_says_the_books_assumption_stands_unverified(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,  # noqa: F811  (the module-scope fixture, imported above)
+) -> None:
+    """A settle-only day with no record consumes none, and says so: the book's assumption stands
+    unverified, never that it was checked."""
+    world = survivor_day._world(tmp_path, monkeypatch, seeded)
+    survivor_day._completed(world, capsys, survivor_day.DAY)
+    late = survivor_day.after_the_auction(survivor_day.NEXT)
+
+    code, out, err = survivor_day._run(world, capsys, as_of=late, clock=late, json_output=False)
+
+    assert code == 0, err
+    text = "\n".join(out.splitlines())
+    assert f"no account record for {survivor_day.NEXT.isoformat()}" in text
+    assert (
+        "the paper book's assumption that every printed order was placed stands unverified" in text
+    )
+
+
+def test_morning_recheck_refuses_an_account_record(tmp_path: Path) -> None:
+    """`--account-record` is the day's input, and the morning re-check consumes no day: it is
+    refused explicitly rather than silently ignored, as `--show-book`'s other modes are."""
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err), pytest.raises(SystemExit) as exited:
+        daily.main(
+            [
+                "--runtime-dir",
+                str(tmp_path / "runtime"),
+                "--morning-recheck",
+                "--account-record",
+                str(tmp_path / "record.json"),
+            ]
+        )
+
+    assert exited.value.code == 2
+    assert "--morning-recheck cannot be combined with --account-record" in err.getvalue()

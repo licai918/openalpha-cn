@@ -930,7 +930,7 @@ def summary_lines(result: Mapping[str, Any]) -> list[str]:
     if paper is not None:
         lines += _settled_lines(paper["settled"])
     days = (paper["catch_ups"] if paper is not None else skipped.get("catch_ups")) or []
-    lines += _catch_up_lines(days)
+    lines += _catch_up_lines(days, session=session)
     lines.append(_row("diagnostics", _DIAGNOSTICS))
     lines.append(_row("ids", _ids_text(result, paper)))
     lines += _facts_lines(facts, session)
@@ -1464,7 +1464,11 @@ def _draw_lines(paper: Mapping[str, Any]) -> list[str]:
     ]
 
 
-def _catch_up_lines(days: Sequence[Mapping[str, Any]]) -> list[str]:
+def _catch_up_lines(days: Sequence[Mapping[str, Any]], *, session: date) -> list[str]:
+    """The catch-up block. The day's own session -- a settle-only day settles its own session as
+    a catch-up -- carries the account reconciliation here, since there is no evening block to
+    print it in (`V2-P7-006a`); every earlier session is silent about it. A day with no record
+    still says the book's assumption stands unverified, never that it was checked."""
     if not days:
         return [_row("catch-up", "none")]
     # A journal filed before the D5 fix wave has no `rederived`: none of its entries was.
@@ -1488,6 +1492,25 @@ def _catch_up_lines(days: Sequence[Mapping[str, Any]]) -> list[str]:
             f"equity {day['equity']}"
         )
         lines += _settled_detail(day["settled"], "    ")
+        if str(day.get("session")) == session.isoformat():
+            lines += _reconciliation_detail(day.get("reconciliation"), session)
+    return lines
+
+
+def _reconciliation_detail(block: Mapping[str, Any] | None, session: date) -> list[str]:
+    """The day's own reconciliation inside its catch-up entry, or the line saying there was no
+    record to compare with. A filed catch-up from before this key existed reads as no record."""
+    if block is None:
+        return [
+            "    no account record for "
+            f"{session.isoformat()}: the paper book's assumption that every printed order was "
+            "placed stands unverified"
+        ]
+    lines = [
+        "    reconciled "
+        f"{block['reconciled']} of {block['orders']} orders against the account record"
+    ]
+    lines += [f"      {Divergence(**item).line()}" for item in block["divergences"]]
     return lines
 
 

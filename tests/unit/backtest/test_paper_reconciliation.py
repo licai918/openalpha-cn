@@ -88,7 +88,11 @@ def _record(
                     filled_quantity=0,
                 )
             )
-    return AccountRecord(session=settlement.session, orders=tuple(orders))
+    return AccountRecord(
+        schema_version="account-record/v1",
+        session=settlement.session,
+        orders=tuple(orders),
+    )
 
 
 def _reconciled(settlement: Any, record: AccountRecord) -> Any:
@@ -254,8 +258,8 @@ def test_a_record_file_is_read_only_when_it_is_this_schema(tmp_path: Path) -> No
 
 
 def test_a_record_that_agrees_on_no_fill_is_not_a_divergence(tmp_path: Path) -> None:
-    """The user placed nothing and the book filled nothing: the two agree, and agreement is not
-    something to report.
+    """Where the record and the book agree that an order did not fill, there is no divergence to
+    report: agreement is not something to report.
 
     The fixture's S3 settlement has three attempts -- two fills and one rejected at a limit-up
     open -- so the line the two sides agree did not fill is the rejected one; marking the fills
@@ -273,3 +277,23 @@ def test_a_record_that_agrees_on_no_fill_is_not_a_divergence(tmp_path: Path) -> 
     reconciliation = _reconciled(settlement, record)
 
     assert reconciliation.divergences == ()
+
+
+def test_a_record_without_its_schema_is_refused_by_name(tmp_path: Path) -> None:
+    """The schema has no default: a file that does not name it is not this schema, and is refused
+    rather than read as one."""
+    path = tmp_path / "record.json"
+    path.write_text(json.dumps({"session": "2026-04-07", "orders": []}), encoding="utf-8")
+
+    with pytest.raises(AccountRecordError, match="schema_version"):
+        read_account_record(path)
+
+
+def test_a_record_that_is_not_utf8_is_refused_with_its_path(tmp_path: Path) -> None:
+    """A file that cannot be decoded is unreadable, not empty: the refusal names the path and does
+    not let a `UnicodeDecodeError` (a `ValueError`) escape unwrapped."""
+    path = tmp_path / "record.json"
+    path.write_bytes(b'{"schema_version": "\xff\xfe"}')
+
+    with pytest.raises(AccountRecordError, match="cannot be read"):
+        read_account_record(path)
