@@ -9,6 +9,7 @@
 - 规模（`git diff --shortstat ba60330 403b8f5`）：**40 个文件、+8,661 / −278**。其中 `src/openalpha_cn/` 10 个文件（新增 `backtest/paper_reconciliation.py`）、`scripts/` 5 个（新增 `scripts/research/p7_read.py`）、`pyproject.toml` 1 个、测试 18 个文件（新增 4 个：`test_paper_reconciliation.py`、`test_survivor_illiquid_rule.py`、`test_daily_selection_book.py`、`test_p7_read.py`）、文档 6 个（3 份计划、新的 `docs/runbooks/p7-reading.zh-CN.md`、`docs/runbooks/daily-selection.zh-CN.md`、`docs/specs/v2/openalpha-cn-v2-p7-decision-chain.md`）。
 - **受登记绑定的路径**（`scripts/research/registry.REGISTERED_PATHS` = `src`、`scripts/research`、`pyproject.toml`、`uv.lock`；`scripts/daily_selection.py` 与 `scripts/forward_report.py` 由 `also_bound` 加绑）里改了字节的：`src/`（10 个文件）、`scripts/research/`（2 个）、`pyproject.toml`、`scripts/daily_selection.py`、`scripts/forward_report.py`；**`uv.lock` 没有变**（`git diff --name-only ba60330 403b8f5 -- uv.lock` 为空）。仍然没有登记，所以没有绑定被作废。
 - 集成分支由三条轨道逐个挑拣而成（A `024`、B `006a` 交易约束、C `006a` 运维面），提交在历史里交错，所以下面**列出提交**而不写区间；哈希取自 `git log ba60330..403b8f5`，账本（不在版本库内：`.superpowers/sdd/`）里的哈希是挑拣之前的，不能直接用。
+- **`403b8f5`、29 个提交、40 个文件是代码末端（文档波之前），不是分支的末端。** 它们是代码冻结点那个截面的数字；其后还有文档/文本波与 §2 末的终审修复波。本文引这三个数字时都指"代码交付"这个截面，不指任何一天的 tip；分支上真正的末端以 `git log` 为准。
 - 各任务的"通过"数字是实现者和评审者各自最后一次**定向**运行的数字，来自账本，本轮文档没有重跑。整个 `tests/unit` 由控制者在集成分支上串行跑一次；**那次闸门跑在最终 tip 上，结果以控制者的报告为准**，本文不写它通过。
 - 本文所在的文档/文本波在 `403b8f5` 之后：除一个提交只改两段 docstring 字符串（`panel_ingest.record_empty_universe_year`、`p7_reading.reading_lines`）外，其余只改 Markdown（把三份计划交给 `ruff format`、本记录、路线图/规格 §9、`CHANGELOG`、交接入口与 `AGENTS.md`）。两段 docstring 的可执行字节与 `403b8f5` 相同（`ast.dump` 去掉 docstring 后逐字符相等）。**该波没有一处行为改动。**
 - 账本、任务书与代码不一致的地方，以代码为准，见 §7。
@@ -33,8 +34,8 @@
 - **`illiquid` 规则与强制退出**：规则本来就在（`floor_share(总体, 0.30)` 的底部切掉、资格丧失即强制退出），本批次只把它命名、写清、钉住：`ILLIQUID_DROP_FRACTION = Decimal("0.30")`（`src/openalpha_cn/domain/survivor_book.py:53`）、`ILLIQUID_POLICY = "forced_exit"`（`:65`，选项 (b) 没实现，要它得先预登记另一个阈值）；`config_id`、`ScreenResult`/`BookDecision` 在相同输入上与改前逐字节相同（评审独立复算）。
 - **资金报告与 ORDERS**：`FundingShortfall`（`survivor_orders.py:140`）、`FundingReport`（`:152`）、`funding_report`（`:309`）；`EveningResult`/`CatchUpResult` 带 `funding`，日志的 `paper["funding"]` 打印冻结总额（按每张买单的涨停价重算作交叉核对）、今晚卖单的回款（"竞价之后才到，不是之前"）并**按名列出每一只被现金缩小的买单**；旧日志没有 `funding` 块时打印"shortfalls not recorded"，不升 schema、不加迁移（它是 dict 组装的 JSON 键，不是 pydantic 契约行）。
 - **`--show-book`（只读账簿视图，C 轨）**：`scripts/daily_selection.py:3167`（`show_book`）与 `:3239`（`book_view_lines`）；读最新快照、不创建运行目录、不建 SQLite/lock，`--pin-worktree` 在钉住之前就被拒（`4c51764`），与 `--morning-recheck` / `--factor-gaps` / `--launchd-plist` / `--launchd-morning-plist` / `--account-record` 互斥；末行是 `read-only` 加一段空白再接 `this listing wrote nothing and made no request`（`scripts/daily_selection.py:3270`）。
-- **账户记录对账（C 轨）**：新模块 `src/openalpha_cn/backtest/paper_reconciliation.py`（`account-record/v1`，`:55`）；四种分歧按名记（`:58-61`：`not_placed`、`filled_where_the_book_did_not`、`quantity_differs`、`price_differs`），对账在不一致的记录上**拒绝**（`AccountRecordConflict`，名字指出哪一条）；`--account-record PATH`（`scripts/daily_selection.py:4546`）把记录接进晚间与补跑，**拒绝先于 `_commit`**；摘要的 RECONCILIATION 块（`src/openalpha_cn/strategy_survivor_summary.py:1387`）没有记录时明写 "no account record for …: the paper book's assumption that every printed order was placed stands unverified"（`:1400-1401`），**不改写账簿**（真正的同步是 `006b` 之后的设计，§4）。
-- **launchd 生成器（C 轨）**：两个任务（晚间 18:30、早晨复查 08:30 **本机时间**；`LAUNCHD_MORNING_LABEL` `scripts/daily_selection.py:6338`、`MORNING_PLIST_HOUR` `:6339`、`launchd_registration` `:6347`、`launchd_morning_plist` `:6470`）；`--registration` 是参数、必须是钉住 worktree 内部的路径，晚间与早晨两个 flag 一次只生成一个；**只打印、不安装**（没有写 `~/Library/LaunchAgents` 的路径，`--install` 是未知参数）；`--launchd-morning-plist` 也进了冒烟驱动的保留 flag 表（`scripts/p7_smoke.py:151`），冒烟晚间不会把一个未被要求的早晨任务参数当成普通晚间跑下去。
+- **账户记录对账（C 轨）**：新模块 `src/openalpha_cn/backtest/paper_reconciliation.py`（`account-record/v1`，`:64`）；四种分歧按名记（`:67-70`：`not_placed`、`filled_where_the_book_did_not`、`quantity_differs`、`price_differs`），对账在不一致的记录上**拒绝**（`AccountRecordConflict`，名字指出哪一条）；`--account-record PATH`（`scripts/daily_selection.py:4563`）把记录接进晚间与补跑，**拒绝先于 `_commit`**；摘要的 RECONCILIATION 块（`src/openalpha_cn/strategy_survivor_summary.py:1387`）没有记录时明写 "no account record for …: the paper book's assumption that every printed order was placed stands unverified"（`:1400-1401`），**不改写账簿**（真正的同步是 `006b` 之后的设计，§4）。
+- **launchd 生成器（C 轨）**：两个任务（晚间 18:30、早晨复查 08:30 **本机时间**；`LAUNCHD_MORNING_LABEL` `scripts/daily_selection.py:6355`、`MORNING_PLIST_HOUR` `:6356`、`launchd_registration` `:6364`、`launchd_morning_plist` `:6487`）；`--registration` 是参数、必须是钉住 worktree 内部的路径，晚间与早晨两个 flag 一次只生成一个；**只打印、不安装**（没有写 `~/Library/LaunchAgents` 的路径，`--install` 是未知参数）；`--launchd-morning-plist` 也进了冒烟驱动的保留 flag 表（`scripts/p7_smoke.py:151`），冒烟晚间不会把一个未被要求的早晨任务参数当成普通晚间跑下去。
 - **未做 / 未关闭**：没有对真实账户、真实行情运行过；真钱闸门仍关着；账户同步（让账簿跟随账户）不在本批次；`--factor-gaps` 不打印冒烟横幅、`--worktree` 与 `--show-book` 同用被静默忽略等见 §4。
 
 ### `V2-P7-025` 同一观测只写一次空年、更早的观测不再改写已存零行年——代码已交付、本行未关闭
@@ -73,6 +74,17 @@
 - C5（G3/G4）：实现者 **DeepSeek Harness**，评审 Opus，1 轮通过；一处必要偏离：brief 的单一 `consequence` 写法会在 grafts 的两段消息上改变原文（见 §7），helper 因此保留 brief 的必需签名、另加两个**仅 grafts 分支使用**的可选关键字，`_refuse_a_second_read` 的三段拒绝消息逐字不变（机械对照证明）；Minor 1–3 并入 C6 的附加项 A/B/C，Minor 4 记录在案。
 - C6（G5 + 附加项 A/B/C）：实现者 **DeepSeek Harness**，评审 Opus，1 轮通过；实现者报 DONE_WITH_CONCERNS：brief 预期的红（两行 `as_of_reason` 那条）在 `a7e0a24` 上本来就是绿的（产品已把两个分支分开，测试是补钉）、brief 的 `-k` 漏选了一条 readable 测试、附加项 B/C 没有可制造的红；Minor 1（`reading_lines` docstring 不全）并入本轮的提交 2，(2)(3) 停放。
 
+### 终审修复波（2026-11-11，`V2-P7-008` / `V2-P7-006a` / `V2-P7-024`）
+
+终审（Opus）结论 "With fixes"；控制者裁决 F1–F5，本波逐条照做，改行为的两项都先看到红再改产品代码。提交在 `3ac5219` 之后，按序是：
+
+- **F1** `89c81a3` `fix(V2-P7-008): a sale is reconciled by whether it filled, never by the ledger's shares or price` —— **裁决：卖出行只比较"是否下单 / 是否成交"（成交 >0 对 0），从不比较股数和价格；买入保持现有全部比较不变。** 理由：卖出的 `order.quantity` 是账本股数、账本卖出成交价是 `open × r`（账本单位），`strategy_survivor_summary` 的 Units 一段写明送股/拆股后账本股数≠账户股数、任何复权事件（含现金分红）后账本价格≠真实价格，所以卖出永远是 "SELL ENTIRE POSITION"。后果：送股后用户卖出全部 2000 真实股、记录 `filled_quantity: 2000`，18:30 的晚间运行被 `AccountRecordConflict` 拒掉；现金分红后任何卖出都报假的 `price_differs`。现在数量上限只对 `buy` 生效，`_divergence` 对两边都成交的卖出返回无分歧（`--account-record` 的运行手册一节同步）。
+- **F2** `f3312aa` `fix(V2-P7-006a): the smoke driver refuses --show-book and --account-record` —— 两者按拒绝 `--launchd-morning-plist` 的同一机制加进 `p7_smoke.PATH_FLAGS`：`--show-book` 是打印账簿后退出 0 的模式（驱动会记成 0 请求的晚间），`--account-record` 是当天输入；参数化测试覆盖四个模式。
+- **F3** `e5cc3ef` `fix(V2-P7-008): --account-record is refused where nothing would read it` —— **裁决：survivor 晚间 / settle-only 之外（P6 登记路径、`--pin-worktree`、`--factor-gaps`、两个 launchd 打印分支）给了 `--account-record` 必须以退出 2 拒绝，消息说明它只用于 survivor 的晚间/结算日。** P6 路径按 `_refuse_p6_only_options` 的对称风格加 `_refuse_survivor_only_options`（第 1 步、取数前、无请求）；打印类分支在 `main` 里先拒绝（`--show-book` 与 `--morning-recheck` 本来就有各自的互斥检查，测试里写明）。survivor 晚间读取显式 `--account-record` 的那条路径也有测试钉住。
+- **F4** `abaa52c` `docs(V2-P7-024): the read's exit codes say a 3 may follow the claim` —— **裁决：改为与运行手册一致——退出 3 可能在认领之前也可能在之后，查认领文件。** 只改 `p7_read.py` 与 `p7_reading.py` 两个模块 docstring 的字符串；两处退出码段落的行数刻意保持不变（`p7_read.py` 的 17–26、`p7_reading.py` 的 16–20），所有指向这两个模块的行号引用继续有效。
+- **F5** `d30ef83` `test(V2-P7-024): an unreadable clause outranks a readable triggered one, and the runbook says so` —— **裁决：不改行为（这是用户的决定，见 §5b），只用测试钉住"不可测压过可读且已触发"，并在运行手册结论一节写明此优先级、以及两种结论下前向时钟都停。**
+- **M5 暂缓（失败即关闭）。** 终审的 Minor M5：`show_book` 的 `paper/snapshots` 目录由 `PAPER_STATE_DIRECTORY` 字面量给出（`scripts/daily_selection.py:349`），与组合根 `runtime.composition.build_storage` 里同样的 `runtime_dir / "paper" / "snapshots"`（`src/openalpha_cn/runtime/composition.py:291`）重复，没有单一来源。它的失败模式是**失败即关闭**：目录对不上时 `held_head` 按名拒绝（没有快照就说没有快照），不会悄悄读错一本账簿；因此本波暂缓，列入 §4 延后项。
+
 ## 3. 覆盖了计划的裁决（账本里的 `Ruling:` 与 2026-11-07 的 R 系列）
 
 这些裁决由控制者在当时做出；账本写了"Cost if wrong"的，这里照抄它的代价，账本没写的三条（C2 的 ruling 3、C3 的 I1 修复、C5 的偏差接受）标为"本记录的估计"。若用户不同意，改动的范围在括号里。
@@ -95,7 +107,7 @@
 以下都是评审或实现者提出、控制者裁定"这一批不做"的。来源写作"计划 · 任务"或账本条目（账本不在版本库内：`.superpowers/sdd/`，这份收尾用的是 `.superpowers/sdd/inputs/ledger.md`，只读）。
 
 - **`read_once` 不传 `also_bound`**：它检查 `registry.REGISTERED_PATHS` 的四个路径（`src/`、`scripts/research/`、`pyproject.toml`、`uv.lock`），**不检查** `scripts/daily_selection.py` 与 `scripts/forward_report.py`（这两个由每日命令/周报的准入绑定）。运行手册已经把这写成已知的代码缺口（`docs/runbooks/p7-reading.zh-CN.md:32`、`:170`），**后续 issue 候选**；本批次只把文档改成不再声称它拒。来源：A Task 4 评审 I3、账本"CODE GAP to ledger as a follow-up issue"。
-- **`--worktree` 与 `--show-book` 同用时被静默忽略**：`--show-book` 的互斥表没有列 `--worktree`（它列的是 `--morning-recheck`、`--pin-worktree`、`--factor-gaps`、launchd 两个 flag 与 `--account-record`，但没有 `--worktree`；`daily_selection.py:6662-6671`）；组合时 `--show-book` 仍然生效、`--worktree` 被忽略。来源：C Task 1 评审延后项、账本 C1 条目。
+- **`--worktree` 与 `--show-book` 同用时被静默忽略**：`--show-book` 的互斥表没有列 `--worktree`（它列的是 `--morning-recheck`、`--pin-worktree`、`--factor-gaps`、launchd 两个 flag 与 `--account-record`，但没有 `--worktree`；`daily_selection.py:6702-6711`）；组合时 `--show-book` 仍然生效、`--worktree` 被忽略。来源：C Task 1 评审延后项、账本 C1 条目。
 - **G1 的每个 `--year` 重抓整份登记簿的请求浪费**：去重只做到"同一观测不重写、只印一行"，`panel build` 的多 `--year` 调用仍然每年重新抓一次整份 `stock_basic`（请求数不变，因为抓取本来就每 `--year` 一次）；把这次浪费去掉是后续小任务。来源：ops-and-gaps 计划 §7 第 2 条与"本轮明确不做"。
 - **`--factor-gaps` 不打印冒烟横幅**：`scripts/daily_selection.py` 的 `--factor-gaps` 分支在 `banner = smoke_banner(...)` 之前返回，所以冒烟登记下它不印横幅。这是既有的缺口，与本批次的 `--show-book` 无关（后者会印），不在本批次范围。来源：ops-and-gaps 计划 §7 第 5 条。
 - **账户同步（让账簿跟随账户）是 `006b` 之后的设计**：本批次只做"输入 + 对照 + 按名分歧 + 冲突拒绝 + 不改写账簿"；让纸面账簿真正跟随真实账户要改账簿状态与见证规则。来源：ops-and-gaps 计划 §7 第 3 条、C2 的设计边界。
@@ -105,6 +117,7 @@
 - **C6 停放的小项 2/3**：计数测试丢掉了 filing-instant 检查；`', so whether'` 断言较窄。来源：C6 评审、账本 C6 条目。
 - **计划 Task 6 brief 的 `-k` 漏选一条测试**：`-k "… or readable_instant"` 选不中 `test_the_recompute_keeps_the_original_refusal_when_nothing_readable_is_stored`（名字不含 `readable_instant`），实现者改用 `-k "readable"`；brief 若复用要改。来源：C6 报告"偏离与疑虑"第 2 条、账本 C6 条目。
 - **其它零散 Minor**（都在账本里逐条记着，这里只列不修的原因）：A3 的 `subprocess.TimeoutExpired` 不是 `OSError`；B3 的资金行把 "1.10x" 写死在排版文本里而不是读 `FREEZE_RATIO`（计划要求的确切文本）；B4 的新测试文件没有进 `artifacts/openalpha-v1-feature-coverage/features.csv`（硬规则 9 管的是**移动**测试文件，新增文件不在已执行的检查里；要不要进台账是另一次三产物修改）。来源：账本对应条目，计划 · 任务。
+- **M5（`show_book` 的 `paper/snapshots` 字面量与组合根重复）**：终审修复波判它暂缓（理由见 §2 末），`PAPER_STATE_DIRECTORY`（`scripts/daily_selection.py:349`）与 `runtime.composition.build_storage` 的同一路径（`src/openalpha_cn/runtime/composition.py:291`）没有单一来源；失败即关闭，所以留着不修的风险是可见的拒绝，不是读错账簿。来源：终审（Opus）Minor M5、控制者裁决。
 
 ## 5. 要用户来定的事（分成"已一揽子采纳"与"仍需本人动作或决定"）
 
@@ -126,6 +139,7 @@
 3. **券商假设的确认**：上面三条仍要用户**向券商确认**；确认之前它们只是本系统的假设。
 4. **合并 / 推送方式**：批次 3 未推送；分支 `feat/v2-p7-batch-3` 怎么合入、是否推送，由用户定。
 5. **批次 1/2 里未被这次一揽子采纳覆盖的项**（`021` 的两个取值等）：仍在各自收尾记录的 §5 里，按那里的"待用户确认"处理。
+6. **F5 的优先级（"不可测" vs "可读且已触发"）**：停规则有一条读不出来、另一条可读且已触发时，当前钉住为**不可测**（测试 `tests/unit/scripts/test_p7_reading.py::test_an_unreadable_clause_outranks_a_readable_triggered_one`、运行手册的结论一节按此）；要不要改成"触发"由用户决定——停止规则及其结论是用户的（见 §5a）。
 
 ## 6. 运行前提
 

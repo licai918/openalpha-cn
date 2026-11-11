@@ -38,7 +38,19 @@ changed** (253 issues). The one read, the smoke's every step, the broker's confi
 assumptions and the merge/push remain the user's; the `025` value and its ownership were adopted in
 the 2026-11-07 blanket (provisional, the user may overturn); the batch's record, rulings, deferred
 items and prerequisites are in
-`docs/superpowers/plans/2026-11-11-p7-dev-batch-3-closeout.md`. **This is engineering, not
+`docs/superpowers/plans/2026-11-11-p7-dev-batch-3-closeout.md`. After the final review (Opus;
+"With fixes") a fix wave closed its five findings: a sale is reconciled by whether it filled,
+never by the ledger's shares or price (after a bonus issue or a cash dividend those are not
+the account's, `src/openalpha_cn/backtest/paper_reconciliation.py`), so a real 2000-share sale
+against the ledger's 900 is no conflict and a cash dividend no longer reports a false
+`price_differs`; the smoke driver refuses `--show-book` and `--account-record`; `--account-record`
+is refused with exit 2 wherever nothing would read it (a P6 day, `--pin-worktree`,
+`--factor-gaps`, the launchd printers); the read's exit-code docstrings say a 3 may follow the
+claim, so a 3 is not "nothing was spent" and the claim file must be looked for; and an
+unreadable stop-rule clause is pinned as outranking a readable triggered one (the user's
+call, currently "not measurable"). M5 (the `paper/snapshots` literal beside the composition
+root) is deferred, fail-closed. The wave's record is the closeout's
+§2 and the fixes' commits are listed there. **This is engineering, not
 evidence.**
 
 ### P7 — development batch 2: the registry's New Year gap and the reading's four prerequisites (`V2-P7-025`, `V2-P7-024`, 2026-11-07)
