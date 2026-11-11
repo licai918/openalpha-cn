@@ -24,8 +24,10 @@ never by its shares or its price. Its quantity and price are the ledger's, in th
 (`strategy_survivor_summary`'s Units): after a share event (a bonus issue, a split) the ledger's
 share count is not the account's, and after any adjustment -- a cash dividend too -- its prices
 are not the real ones. So a sale is always "SELL ENTIRE POSITION", and the account's fill of the
-real account's shares is the divergence-free answer to the same order. A **buy** is sized at its
-real close with ratio 1, so its quantity and price are real, and both are compared.
+real account's shares is the divergence-free answer to the same order. A diverging sale's
+printed line marks the book's figures "(ledger units)" (`Divergence.line`); the document keeps
+them as they are. A **buy** is sized at its real close with ratio 1, so its quantity and price
+are real, and both are compared.
 
 Agreement is not a divergence, and neither is an order both sides agree did not fill.
 
@@ -190,10 +192,11 @@ class Divergence:
         }
 
     def line(self) -> str:
+        units = " (ledger units)" if self.side == "sell" else ""
         return (
             f"{self.order_id} {self.ts_code} {self.side}: {self.kind} "
             f"(book filled {self.book['filled_quantity']} "
-            f"@ {self.book['filled_price'] or '-'}, record placed "
+            f"@ {self.book['filled_price'] or '-'}{units}, record placed "
             f"{self.record['placed']} filled {self.record['filled_quantity']} "
             f"@ {self.record['filled_price'] or '-'})"
         )

@@ -4,6 +4,7 @@ S2's ten buys, so every attempt has a verdict and a fill price to compare agains
 
 from __future__ import annotations
 
+import dataclasses
 import importlib
 import json
 import sys
@@ -21,6 +22,8 @@ evenings: Any = importlib.import_module("test_paper_evening")
 
 from openalpha_cn.backtest.paper_evening import attempt_outcomes  # noqa: E402
 from openalpha_cn.backtest.paper_reconciliation import (  # noqa: E402
+    FILLED_WHERE_THE_BOOK_DID_NOT,
+    NOT_PLACED,
     AccountRecord,
     AccountRecordConflict,
     AccountRecordError,
@@ -410,3 +413,76 @@ def test_a_buy_at_another_price_is_still_a_price_divergence(tmp_path: Path) -> N
 
     (divergence,) = reconciliation.divergences
     assert (divergence.order_id, divergence.kind) == (order.order_id, "price_differs")
+
+
+def test_a_sale_the_account_filled_and_the_book_did_not_is_filled_where_the_book_did_not(
+    tmp_path: Path,
+) -> None:
+    """The branch order of `_divergence` puts this case before the sale relaxation: the book
+    filled nothing (a limit-down open, here an injected rejection), the account sold, and the
+    divergence is named -- the relaxation is only for a sale BOTH sides filled."""
+    settlement = _settlement(tmp_path / "paper")
+    sale = _sale(settlement)
+    order = sale.attempt.order
+    book_price = _fills(settlement)[sale.attempt.attempt_id][1]
+    outcomes = tuple(
+        dataclasses.replace(outcome, status="rejected", reason="injected: no fill at the open")
+        if outcome.attempt.order.order_id == order.order_id
+        else outcome
+        for outcome in attempt_outcomes(settlement)
+    )
+    record = _with_line(
+        _record(settlement),
+        order.order_id,
+        placed=True,
+        filled_quantity=900,
+        filled_price=book_price,
+    )
+
+    reconciliation = reconcile(record, settlement, outcomes=outcomes)
+
+    (divergence,) = reconciliation.divergences
+    assert (divergence.order_id, divergence.side, divergence.kind) == (
+        order.order_id,
+        "sell",
+        FILLED_WHERE_THE_BOOK_DID_NOT,
+    )
+    assert divergence.book == {"status": "rejected", "filled_quantity": "0", "filled_price": ""}
+
+
+def test_a_diverging_sales_book_figures_are_printed_in_ledger_units(tmp_path: Path) -> None:
+    """A sale's book shares and price are the ledger's (`strategy_survivor_summary`'s Units), so
+    the printed line says so -- an operator must not read them as the account's real figures. A
+    buy's are real and are printed as before."""
+    settlement = _settlement(tmp_path / "paper")
+    sale = _sale(settlement)
+    record = _with_line(
+        _record(settlement),
+        sale.attempt.order.order_id,
+        placed=False,
+        filled_quantity=0,
+        filled_price=None,
+    )
+
+    (divergence,) = _reconciled(settlement, record).divergences
+
+    assert divergence.kind == NOT_PLACED
+    book_quantity, book_price = _fills(settlement)[sale.attempt.attempt_id]
+    assert (
+        f"(book filled {book_quantity} @ {format(book_price, 'f')} (ledger units), record placed "
+        "false filled 0 @ -)"
+    ) in divergence.line()
+    # The document is what the journal holds: unchanged.
+    assert "ledger units" not in json.dumps(divergence.document())
+
+    buy = next(
+        outcome
+        for outcome in attempt_outcomes(settlement)
+        if outcome.attempt.order.side == "buy" and outcome.status == "filled"
+    )
+    price = _fills(settlement)[buy.attempt.attempt_id][1]
+    priced = _with_line(
+        _record(settlement), buy.attempt.order.order_id, filled_price=price + Decimal("0.01")
+    )
+    (bought,) = _reconciled(settlement, priced).divergences
+    assert "ledger units" not in bought.line()
