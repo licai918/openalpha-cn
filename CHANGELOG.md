@@ -34,8 +34,9 @@ generator takes the registration as a parameter and prints an evening job and a 
 installing nothing. `V2-P7-025`: one observation writes the empty registry year once, an older
 observation no longer rewrites a stored empty year (closing the batch-2 closeout's §4 item), and an
 unreachable branch is gone; G3/G4/G5 of the batch-2 acceptance are closed. **No gate or order
-changed** (253 issues). The one read, the smoke's every step, the `025` value and its ownership,
-the broker assumptions and the merge/push remain the user's; the batch's record, rulings, deferred
+changed** (253 issues). The one read, the smoke's every step, the broker's confirmation of the
+assumptions and the merge/push remain the user's; the `025` value and its ownership were adopted in
+the 2026-11-07 blanket (provisional, the user may overturn); the batch's record, rulings, deferred
 items and prerequisites are in
 `docs/superpowers/plans/2026-11-11-p7-dev-batch-3-closeout.md`. **This is engineering, not
 evidence.**
