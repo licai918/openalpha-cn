@@ -148,6 +148,8 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync "$PWD/.venv/bin/python" scr
 
 **退出码 0 不等于通过。** 它只说读数完成并写出了结果；结论看上面三行。`不可测` 的原因是某个指标的可读期数少于 `minimum_periods`（等于 `expected_periods`）、没有有限的均值，**或者测量被数据拒绝、文档里根本没有这个汇总**；它**绝不**读成「没有证据」。
 
+**优先级：不可测压过可读且已触发。** 一条指标读不出来（可读期数少于 `minimum_periods`、没有有限均值，或测量被数据拒绝、文档里根本没有这个汇总），而另一条可读且均值已经落在界内时，整条规则的结论是**不可测**，不是**触发**——规则只要有一条读不出来，就不能说它被读完了（`scripts/research/p7_reading.py:1025-1090` 的 `evaluate_stop_rule`）。两种结论对前向时钟的后果**相同**：都**不启动前向时钟**（见上表）；区别只在措辞与它是不是「没有证据」——不可测既不是「没有证据」，也不是放行，下一步由用户说。
+
 ## 5. 顺序
 
 - **验证窗口先读。** 它的 `<validation>.window-claim.json` 必须**已提交**、并且能从某个 ref 或未过期的 reflog 到达，`second_use` 才能读；否则 `read_once` 以 `ValidationNotSpentError` 拒绝（退出码 3，`scripts/research/p7_reading.py:1517-1562`）。反方向不检查：验证窗口的读从不看 2024–2026。

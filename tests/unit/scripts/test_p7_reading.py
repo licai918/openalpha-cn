@@ -353,6 +353,34 @@ def test_the_stop_rule_is_applied_as_written(
     assert said in json.dumps(evaluated)
 
 
+def test_an_unreadable_clause_outranks_a_readable_triggered_one() -> None:
+    """The user's ruling: when one clause cannot be read (fewer than `minimum_periods` periods, no
+    finite mean, or a refused measure) and another is readable and already at or below its bound,
+    the rule's conclusion is `not measurable`, never `triggered` -- a rule with a clause that
+    cannot be read has not been read. Both conclusions stop the forward clock (the runbook's
+    conclusion table says so); `not measurable` is the reading's own third conclusion, never "no
+    evidence"."""
+    evaluated = p7_reading.evaluate_stop_rule(
+        RULE,
+        {
+            "summary": {
+                "composite": {
+                    "h20": {
+                        "rank_ic": {"n": 24, "mean": 0.02},
+                        "ew_minus_worst_decile": {"n": 2, "mean": 0.01},
+                    }
+                }
+            }
+        },
+    )
+
+    assert evaluated["outcome"] == "not measurable"
+    assert evaluated["wording"] == p7_reading.NOT_MEASURABLE_WORDING
+    readable = next(clause for clause in evaluated["clauses"] if clause["metric"] == "rank_ic")
+    assert readable["met"] is True
+    assert "ew_minus_worst_decile" in (evaluated["reason"] or "")
+
+
 def test_the_result_text_opens_with_the_read_once_banner(repo: Path) -> None:
     registration = registered(repo)
     run(registration, repo, Measure())
