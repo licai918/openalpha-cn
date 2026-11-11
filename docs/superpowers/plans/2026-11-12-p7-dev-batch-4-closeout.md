@@ -52,7 +52,7 @@
 - G2（Task 5–6）：`30e5441`、`f12657a`、`155c870`；Opus 评审要求修改（I1–I3、M1–M6）；修复轮 1 `805b0e5`、`79c6611`、`585ef00`；Opus 复审：全部解决。
 - G3（Task 7–8）：`835452f`、`cf0f8cf`；Opus 评审要求修改（I1 环/深度未测、I2 拒绝里路径错、M1–M6；M4 裁定为过渡态、由 G4 关闭）；修复轮 1 `2cffab2`；Sonnet 复审：已解决；停放 P3、P4 到最终修复波。
 - G4（Task 9）：`fa552ff`；Opus 评审要求修改（I1 窗口、I2 四种拒绝、I3 自有+并入记录、M3 零请求、M5 一天一条）；M1、M2 维持现状（理由见运行手册与 §3），M4 写进运行手册；修复轮 1 `c59ed3c`。
-- 最终全分支评审与修复波：待最终评审（由控制者在之后补写）。
+- 最终全分支评审与修复波（`b153e76` 之后）：最终评审 **Critical 0、Important 0、Minor 7**（P1–P4 已确认，另 3 条新）；7 条全部在本波修好，提交按主题为 `fix(V2-P7-006a): the CLI's prediction store opens through the composition root`、`test(V2-P7-006a): the sale relaxation's pin test credits the guard it pins`、`fix(V2-P7-023): a predecessor's journals are held against its store, a P6 continuation block is refused, and the chain's guards are pinned`、`docs(V2-P7-023,V2-P7-006a,V2-P7-024): the final fix wave's record and the runbook sync`（SHA 以控制者的报告与 `git log` 为准）。
 
 ## 3. 覆盖了计划的裁决（R1–R12 原样搬入，加实现中新产生的）
 
@@ -77,6 +77,9 @@
 - **`strategy_survivor_book.expected_binding` 公开化（G4）。** 周报要把“某个运行目录的纸面账簿标记”与链上每一环配对，标记的构造必须与 `bind_paper_book` 写出的**逐字节相同**；抽成公开函数（`src/openalpha_cn/strategy_survivor_book.py:425`），两处用同一份构造。代价：`strategy_survivor_book` 多一个公开面。
 - **周报一天两条前任记录按日期拒绝（G4 M5）。** 并入的前任记录与继任自己的记录落在同一会话时，报告按名拒绝、不挑一条（`scripts/forward_report.py:695-707`）。理由：样本里一个会话只能有一条记录，挑一条就是替用户选样本。
 - **前任目录缺失永久拒绝（M1）。** 继任登记点名前任、周报拿不到前任的运行目录时，拒绝是**永久**的，只有找回目录或另起一份不点名前任的新登记两条出路；不提供“没有目录就当没前任”的降级。理由：静默降级会让人看了结果再决定样本要不要延续。
+- **前任的日志与它的库对质（最终评审 5，取代 R8 的选择）。** 最终评审把 R8「不核对前任的日志」的选择改成 fail-closed：周报读前任的日志（`_survivor_journals` 泛化为按 `config_id` / `registration_sha256` 读，目录仍由 `daily_selection.survivor_journal_directory` 给出），按报告的 `as_of` 钉住后与**前任自己的预测库**对质（`check_journals_against_the_store`）；前任的某个记录文件丢了时按名拒绝，不会把剩下的天并进样本、只把丢掉的一天列成缺失。运行手册 `docs/runbooks/daily-selection.zh-CN.md` 的「前任的日志不读」一句随之改写。
+- **P6 登记携带 `survivor_continuation` 块按名拒绝（最终评审 6）。** 该块只在幸存者登记上读；没有 `kind` 的 P6 登记携带它时，每日命令第 1 步与周报准入都按名拒绝（退出 2 / 退出 1），不再静默忽略。键名在 `scripts/daily_selection.py` 里以字符串常量 `SURVIVOR_CONTINUATION_KEY` 重复（`src/` 不导入脚本），与 `strategy_survivor_continuation` 的拼写由分派测试 `test_the_smoke_key_the_continuation_module_spells_is_the_daily_commands` 钉住相等；P6 日与 P6 报告仍不加载任何幸存者模块。
+- **内部报告函数的 `predecessors` 改为必填关键字（最终评审 7）。** `_survivor_forward_report` 与 `_survivor_report` 的 `predecessors` 去掉 `= ()` 默认值：省略它等于静默降级成「没有前任」，而公开入口 `forward_report` 恰好拒绝这种降级；唯一调用方早已传 `paired`。
 - **截断后的前任日仍跑前任核查（M2，保守）。** 候选的 `own` 在构造候选时就对每一个前任记录做了，截断只停判定与重算；这样“前任自己拒绝了某天”这种截断原因在任何一天都可知，而不是要重跑才知道。代价：截断点之后的每一天仍付一次核查的代价。
 
 ## 4. 延后的事项（带来源）
@@ -92,7 +95,7 @@
 
 ## 5. 要用户来定的事（本计划 §0a 的 U1–U8 原样；代码按建议实现、值为暂定）
 
-代码按每条的建议实现；推翻任何一条都只是改一个常量或一处检查 + 重跑定向测试，**但必须在 `006b` 登记之前定**，因为它们决定确认性样本里有哪些天。
+代码按每条的建议实现；推翻任何一条都只是改一个常量或一处检查 + 重跑定向测试，**但必须在 `006b` 登记之前定**，因为它们决定确认性样本里有哪些天。U8 末尾一句为本批次追加。
 
 - **U1 延续是“可选”还是“强制”。** 代码层面：登记里有 `survivor_continuation` 块才延续，没有就是新样本（代码无法知道“本该有前任”）。**建议**：在协议里规定——`006b` 之后的每一份幸存者登记**必须**点名它所取代的那一份（运行手册写成硬性步骤，`006b` 的登记测试检查）；否则“看了旧样本的结果再决定要不要换个干净样本”就成了一个可以按结果挑的自由度。
 - **U2 什么算“逐字节相同”。** **建议**（代码按此）：比较批次的 `as_of`、`predicted_at`、`artifact.feature_ids`、`artifact.parameters`（权重）、`artifact.training_cutoff`、`artifact.training_example_count`、每只证券的 `(ts_code, score)`，以及声明里的 `name`、`family`、`horizon`；**不比较**声明里因登记而必然不同的 `feature_version`（`config_id`）、`seed`、`code_commit`、`hyperparameters`（登记摘要与账簿 `config_id`）。也就是说“同样的打分定义在同样的数据上给出同样的分数与范围”才算相同。
@@ -121,6 +124,6 @@
 
 - **任务书的 `git grep -n "PAPER_STATE_DIRECTORY"` 应为空，字面上做不到。** 可执行路径里它确实没有了（`git grep -n PAPER_STATE_DIRECTORY -- src scripts` 为空），但全仓还有 9 处、分三类：一条测试**断言它不存在**（`tests/unit/scripts/test_daily_selection_book.py:620` 的 `assert not hasattr(daily, "PAPER_STATE_DIRECTORY")`）；历史计划/收尾记录**引用被删掉的字面量**（6 处：`docs/superpowers/plans/2026-11-07-v2-p7-006a-ops-and-gaps.md:127`、`:292`、`:318`、`:323` 的代码片段，`docs/superpowers/plans/2026-11-11-p7-dev-batch-3-closeout.md:86`、`:120` 记录它的去留）；以及**本收尾记录自己**的两处——§3 的 R9 按计划原文搬入时照抄了这个标识符，本条 §7 为解释这条检查也点名它。这些都不在 Task 10 的改动范围内，所以本轮按“可执行路径为空 + 测试钉住属性不存在”验收；若控制者要的是全仓为空，需要另一次改动（测试与历史计划都不归本任务改）。
 - **“周报一节”被写进了 `docs/runbooks/daily-selection.zh-CN.md`，而幸存者周报的完整一节在 `docs/runbooks/forward-report.zh-CN.md`（「幸存者登记的周报」）。** 任务书只列了前者，控制者补充又明确说“运行手册 `docs/runbooks/daily-selection.zh-CN.md` 周报一节”，所以新增的 `--predecessor-runtime-dir` 一段、M1 与 M4 写在 daily-selection 的「前向周报与 `--factor-gaps`」一节；`forward-report.zh-CN.md` 不在本任务的文件清单里，本轮没有改它。**下一批应当把同一段同步进 `forward-report.zh-CN.md`**，否则从周报那一份手册读到的仍是旧的“没有延续”。（这是本轮唯一一处按任务书字面、而非按文档拓扑落笔的地方。）
-- **任务书的行号取自 `8b00c4c`，实现之后有位移。** 本文与各处文档引用的是**当前 tip** 的行号：例如 `admit_predecessors` 在 `scripts/daily_selection.py:735`、`show_book` 在 `:3304`（批次 3 记录写 `:3167`，那是批次 3 的 tip）、`--show-book` 的互斥表在 `:6842-6853`、`--factor-gaps` 的横幅在 `:6892-6906`、`forward_report` 的 `--predecessor-runtime-dir` 在 `:1190-1200`、`_paired_directories` 在 `:489-549`、`_continued` 在 `:807-879`。写之前逐条用 `grep -n` 核对。
+- **任务书的行号取自 `8b00c4c`，实现之后有位移。** 本文与各处文档引用的是**当前 tip** 的行号：例如 `admit_predecessors` 在 `scripts/daily_selection.py:735`、`show_book` 在 `:3304`（批次 3 记录写 `:3167`，那是批次 3 的 tip）、`--show-book` 的互斥表在 `:6842-6853`、`--factor-gaps` 的横幅在 `:6892-6911`、`forward_report` 的 `--predecessor-runtime-dir` 在 `:1190-1200`、`_paired_directories` 在 `:489-549`、`_continued` 在 `:807-879`。写之前逐条用 `grep -n` 核对。
 - **M2 的口径比测试更宽。** “截断后的前任日仍跑前任核查”由代码的构造顺序保证（候选的 `own` 在 `continued_sample` 之前对每一个前任记录做完，`scripts/forward_report.py:862-872`），但没有任何测试数过核查次数；测试数的是**重算**次数（`test_a_session_scored_otherwise_truncates_the_sample_and_no_later_one_is_scored_again`）。本文按代码写、不把“有测试”说成“有测试钉住核查次数”——若控制者要更硬的钉子，那是另一条测试（不在本任务的文件范围内）。
 - **批次 3 收尾 §4 记的 M5 与 `--factor-gaps` 横幅两条缺口在本批次关闭**，本文 §1 的对应条目给出了代码与测试出处；批次 3 记录保持原样作为历史，不改写。
