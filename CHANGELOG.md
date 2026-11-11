@@ -4,6 +4,42 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### P7 — development batch 3: the pre-registered stop rule and the one read, the trading constraints, the operations (`V2-P7-024`, `V2-P7-006a`, `V2-P7-025`, 2026-11-11)
+
+The third batch after the route adjustment, on `feat/v2-p7-batch-3` (from `ba60330`, tip
+`403b8f5`, 29 commits, three tracks cherry-picked in). **It is not pushed, the delivered code has
+run no real build, factor, reading or smoke, and no Tushare request was made; the one validation
+read (2022-2023, once, read-only, zero network requests) and the real smoke are not done and still
+wait for the user's explicit start; the real-money gate stays closed.** No registration exists, so
+no binding is voided; the serial full `tests/unit` gate runs on the final tip and its result is the
+controller's report, not stated here. `V2-P7-024`: the user's 2026-11-07 stop rule is one named
+constant per number (h20 rank IC mean at or below 0.02, or the worst-decile spread's mean at or
+below 0, stops; K = 36, the interim look at K/2 = 18, primary horizon 20;
+`src/openalpha_cn/strategy_survivor_forward.py:409-422`), written as the additive
+`survivor-forward-stop-rule/v1` pre-registration block beside the protocol (`:745-771`); "not
+measurable" is the reading's own third conclusion, never "no evidence"
+(`scripts/research/p7_reading.py:283`, `:1025`); the one read is a named command
+`scripts/research/p7_read.py` (`register [--dry-run]` / `read`, exit 0/2/3/4) whose
+`expected_periods` is checked against the panel's own calendar before any claim (the plan's prior
+is 24; a different count stops at 4 and is reported, never edited to match), with the G-0 three
+conclusions in §5.2 and `docs/runbooks/p7-reading.zh-CN.md`. `V2-P7-006a`: buys are sized on the
+cash at 09:15 only (tonight's sale proceeds land after the auction), frozen at the next session's
+limit-up (`FREEZE_RATIO = 1.10`, the system's assumption pending the broker) with `reduce_lots` /
+`drop_whole` shortfall policies while the sizing price stays the close; the `illiquid` rule is
+named and frozen as option (a) forced exit; the evening reports the frozen cash and names every
+buy the cash sized short; `--show-book` lists the paper book read-only; an `account-record/v1`
+input reconciles it, naming four divergence kinds and refusing conflicts before the book advances,
+and never rewrites the book (no record prints the explicit "stands unverified" line); the launchd
+generator takes the registration as a parameter and prints an evening job and a morning re-check,
+installing nothing. `V2-P7-025`: one observation writes the empty registry year once, an older
+observation no longer rewrites a stored empty year (closing the batch-2 closeout's §4 item), and an
+unreachable branch is gone; G3/G4/G5 of the batch-2 acceptance are closed. **No gate or order
+changed** (253 issues). The one read, the smoke's every step, the `025` value and its ownership,
+the broker assumptions and the merge/push remain the user's; the batch's record, rulings, deferred
+items and prerequisites are in
+`docs/superpowers/plans/2026-11-11-p7-dev-batch-3-closeout.md`. **This is engineering, not
+evidence.**
+
 ### P7 — development batch 2: the registry's New Year gap and the reading's four prerequisites (`V2-P7-025`, `V2-P7-024`, 2026-11-07)
 
 The second batch after the route adjustment, on `feat/v2-p7-025-batch-2` (from `587a158`; the code was
