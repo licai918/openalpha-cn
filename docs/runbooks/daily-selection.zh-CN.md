@@ -500,9 +500,10 @@ uv run python scripts/daily_selection.py --runtime-dir ~/openalpha-research --re
  ]}
 ```
 
-- 一条到期订单一行：**当日在册的每张订单必须恰有一行**（缺行是拒绝，不是默认同意）；同一 `order_id` 不得出现两次；`ts_code` 与 `side` 必须与计划一致；`filled_quantity` 不得超过计划数量。
+- 一条到期订单一行：**当日在册的每张订单必须恰有一行**（缺行是拒绝，不是默认同意）；同一 `order_id` 不得出现两次；`ts_code` 与 `side` 必须与计划一致；**买入**的 `filled_quantity` 不得超过计划数量。
+- **卖出只核对是否成交，不核对股数和价格**：账本里卖出的股数是**账本单位**、卖出价是 `开盘价 × 复权比例`（摘要的 Units 一段）；送股/拆股后账本股数不等于账户股数，现金分红等任何复权事件之后账本价格也不等于真实价格，而卖出永远是「SELL ENTIRE POSITION」，所以卖出行只要两边都成交（或都没成交）就是一致，账户记录的真实股数与真实价格不参与比较、也不会因此报分歧；买入按 ratio 1 用真实单位，股数与价格照旧全部核对。
 - `placed: false` ⇒ 数量为 0、没有价格；数量为 0 ⇒ 没有价格（`filled_price` 省略或为 `null`）；有成交则必须有价格。
-- 记录文件里同一条 `order_id` 出现两次，文件本身读不出（`AccountRecordError`，是 `ValueError` 的子类）；其余不可比的记录——记的不是这一交易日、出现当日晚间没有计划的订单、缺行、方向或代码不符、数量超过计划——是 `AccountRecordConflict`。两者都在第 8 步账簿推进前**按名拒绝**（退出 1，不落快照、不写账本行）；修好记录后重跑同一天即可。
+- 记录文件里同一条 `order_id` 出现两次，文件本身读不出（`AccountRecordError`，是 `ValueError` 的子类）；其余不可比的记录——记的不是这一交易日、出现当日晚间没有计划的订单、缺行、方向或代码不符、**买入**数量超过计划——是 `AccountRecordConflict`。两者都在第 8 步账簿推进前**按名拒绝**（退出 1，不落快照、不写账本行）；修好记录后重跑同一天即可。
 - `--account-record PATH` 指定别处的一份记录（给了却不存在同样按名拒绝）；不给时找 `<RT>/paper/account-record/<交易日>.json`。
 - **没有记录不是一致**：没有文件时，摘要的 RECONCILIATION 一栏（结账日没有晚间块，同一句印在当天 catch-up 条目下）写 `no account record for <交易日>: the paper book's assumption that every printed order was placed stands unverified`（账簿假设未核对），绝不补零。
 - 一份记录的拒绝与一行分歧都只让这一天**停下**（拒绝）或**被记下**（分歧），不改变纸面账簿的推进语义。

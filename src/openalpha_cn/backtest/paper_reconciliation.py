@@ -19,6 +19,14 @@ book filled it), `filled_where_the_book_did_not` (the user filled an order the b
 not rewritten from the account, and the account is not rewritten from the book. True account sync
 -- making the book follow the real account -- is another issue.
 
+A **sale** is reconciled only by whether it filled -- both sides filled, or neither, is agreement;
+never by its shares or its price. Its quantity and price are the ledger's, in the ledger's units
+(`strategy_survivor_summary`'s Units): after a share event (a bonus issue, a split) the ledger's
+share count is not the account's, and after any adjustment -- a cash dividend too -- its prices
+are not the real ones. So a sale is always "SELL ENTIRE POSITION", and the account's fill of the
+real account's shares is the divergence-free answer to the same order. A **buy** is sized at its
+real close with ratio 1, so its quantity and price are real, and both are compared.
+
 Agreement is not a divergence, and neither is an order both sides agree did not fill.
 
 ## What a record cannot say
@@ -26,9 +34,10 @@ Agreement is not a divergence, and neither is an order both sides agree did not 
 A record the settlement cannot be compared with is refused by name (`AccountRecordConflict`, a
 `ValueError`) **before the book advances**: another session's record, a line for an order no
 evening planned, a due order with no line (a missing line is a refusal, never agreement), the
-same order twice, a `side` or `ts_code` that differs from the plan, or a fill for more than the
-plan's quantity. The caller reads the record before `paper_evening` commits the session, so a
-refused record leaves the ledger and the snapshot untouched.
+same order twice, a `side` or `ts_code` that differs from the plan, or a **buy's** fill for more
+than the plan's quantity. The caller reads the record before `paper_evening` commits the session,
+so a refused record leaves the ledger and the snapshot untouched. A sale's fill over the ledger's
+quantity is not a conflict: the ledger's share count is not the account's after a share event.
 
 An **absent** record is not agreement: the record is optional, and a day without one says so --
 the book's assumption that every printed order was placed stands unverified.
@@ -72,15 +81,16 @@ class AccountRecordError(ValueError):
 class AccountRecordConflict(AccountRecordError):
     """The record is this schema and readable, and it cannot be reconciled with the book's plan:
     another session, an order no evening planned, a due order with no line, the same order twice,
-    a side or code that differs from the plan, or a fill over the plan's quantity."""
+    a side or code that differs from the plan, or a buy's fill over the plan's quantity."""
 
 
 class RecordedOrder(BaseModel):
     """One order the book had due on the session, as the user's account records it.
 
     A line the user says was not placed carries no fill; a placed line that did not fill carries
-    zero shares and no price; a filled line carries the shares and the price it filled at, no
-    more than the plan's quantity.
+    zero shares and no price; a filled line carries the shares and the price it filled at. More
+    than the plan's quantity is a conflict for a **buy** only: a sale's ledger quantity is not the
+    account's after a share event, so its shares are not bounded by the plan's (`Units`).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -224,10 +234,12 @@ def reconcile(
     name every divergence.
 
     An irreconcilable record -- another session, a line no evening planned, a due order with no
-    line, the same order twice, a side or code unlike the plan, a fill over the plan's quantity --
-    is an `AccountRecordConflict` (a `ValueError`): the caller must refuse the day before its book
-    advances, never reconcile a substituted record. Nothing here writes: the book keeps its
-    settlement and the account keeps its record; the comparison is the whole of it.
+    line, the same order twice, a side or code unlike the plan, a **buy's** fill over the plan's
+    quantity -- is an `AccountRecordConflict` (a `ValueError`): the caller must refuse the day
+    before its book advances, never reconcile a substituted record. A sale's shares and price are
+    the ledger's, in the ledger's units, so a sale is compared only by whether it filled. Nothing
+    here writes: the book keeps its settlement and the account keeps its record; the comparison is
+    the whole of it.
     """
     _require_the_same_orders(record, settlement, outcomes)
     verdicts = {item.order.order_id: item for item in settlement.runner_record.transitions}
@@ -283,7 +295,7 @@ def _require_the_same_orders(
                 f"the account record's line {line.order_id} says {line.side} {line.ts_code}, and "
                 f"the plan's order is {order.side} {order.ts_code}"
             )
-        if line.filled_quantity > order.quantity:
+        if order.side == "buy" and line.filled_quantity > order.quantity:
             raise AccountRecordConflict(
                 f"the account record fills {line.filled_quantity} shares of {line.order_id}, more "
                 f"than the plan's {order.quantity}"
@@ -296,21 +308,28 @@ def _divergence(
     transition: Any,
 ) -> Divergence | None:
     """The divergence between one attempt and the account's line for it, or `None` when the two
-    agree -- which includes both saying the order did not fill."""
+    agree -- which includes both saying the order did not fill.
+
+    A sell agrees whenever both sides filled it, whatever their shares and price: the ledger's
+    are ledgers' units (`Units`), the account's are real, and the order is "SELL ENTIRE POSITION".
+    A buy's shares and price are real, so both are compared.
+    """
     book_filled, book_price = _book_fill(outcome, transition)
+    order = outcome.attempt.order
     if not line.placed and book_filled == 0:
         return None
     if not line.placed:
         kind = NOT_PLACED
     elif book_filled == 0 and line.filled_quantity > 0:
         kind = FILLED_WHERE_THE_BOOK_DID_NOT
+    elif order.side == "sell" and book_filled > 0 and line.filled_quantity > 0:
+        return None
     elif book_filled != line.filled_quantity:
         kind = QUANTITY_DIFFERS
     elif _cents(line.filled_price) != _cents(book_price):
         kind = PRICE_DIFFERS
     else:
         return None
-    order = outcome.attempt.order
     return Divergence(
         order_id=order.order_id,
         ts_code=order.ts_code,
