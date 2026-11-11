@@ -32,7 +32,7 @@
 - **按涨停价（1.10 倍参考价，系统假设）冻结**：一个具名常量 `FREEZE_RATIO = Decimal("1.10")`（`survivor_orders.py:48`）、`FREEZE_SHORTFALL_POLICY`（`:58`，`reduce_lots` / `drop_whole` 两种都实现）、`freeze_price`（`:66`）；现金上限与在途买单的预留按涨停价，**定量价仍是收盘价**（计划 U5 的裁决）；非主板配置必须自己传 `freeze_prices`。冻结价与主板的 `derived_price_band` 逐分一致（测试 `test_the_freeze_price_is_the_main_boards_derived_limit_up`）。
 - **`illiquid` 规则与强制退出**：规则本来就在（`floor_share(总体, 0.30)` 的底部切掉、资格丧失即强制退出），本批次只把它命名、写清、钉住：`ILLIQUID_DROP_FRACTION = Decimal("0.30")`（`src/openalpha_cn/domain/survivor_book.py:53`）、`ILLIQUID_POLICY = "forced_exit"`（`:65`，选项 (b) 没实现，要它得先预登记另一个阈值）；`config_id`、`ScreenResult`/`BookDecision` 在相同输入上与改前逐字节相同（评审独立复算）。
 - **资金报告与 ORDERS**：`FundingShortfall`（`survivor_orders.py:140`）、`FundingReport`（`:152`）、`funding_report`（`:309`）；`EveningResult`/`CatchUpResult` 带 `funding`，日志的 `paper["funding"]` 打印冻结总额（按每张买单的涨停价重算作交叉核对）、今晚卖单的回款（"竞价之后才到，不是之前"）并**按名列出每一只被现金缩小的买单**；旧日志没有 `funding` 块时打印"shortfalls not recorded"，不升 schema、不加迁移（它是 dict 组装的 JSON 键，不是 pydantic 契约行）。
-- **`--show-book`（只读账簿视图，C 轨）**：`scripts/daily_selection.py:3167`（`show_book`）与 `:3239`（`book_view_lines`）；读最新快照、不创建运行目录、不建 SQLite/lock，`--pin-worktree` 在钉住之前就被拒（`4c51764`），与 `--morning-recheck` / `--factor-gaps` / `--launchd-plist` / `--launchd-morning-plist` 互斥；末行写明 `read-only  this listing wrote nothing and made no request`。
+- **`--show-book`（只读账簿视图，C 轨）**：`scripts/daily_selection.py:3167`（`show_book`）与 `:3239`（`book_view_lines`）；读最新快照、不创建运行目录、不建 SQLite/lock，`--pin-worktree` 在钉住之前就被拒（`4c51764`），与 `--morning-recheck` / `--factor-gaps` / `--launchd-plist` / `--launchd-morning-plist` 互斥；末行是 `read-only` 加一段空白再接 `this listing wrote nothing and made no request`（`scripts/daily_selection.py:3270`）。
 - **账户记录对账（C 轨）**：新模块 `src/openalpha_cn/backtest/paper_reconciliation.py`（`account-record/v1`，`:55`）；四种分歧按名记（`:58-61`：`not_placed`、`filled_where_the_book_did_not`、`quantity_differs`、`price_differs`），对账在不一致的记录上**拒绝**（`AccountRecordConflict`，名字指出哪一条）；`--account-record PATH`（`scripts/daily_selection.py:4546`）把记录接进晚间与补跑，**拒绝先于 `_commit`**；摘要的 RECONCILIATION 块（`src/openalpha_cn/strategy_survivor_summary.py:1387`）没有记录时明写 "no account record for …: the paper book's assumption that every printed order was placed stands unverified"（`:1400-1401`），**不改写账簿**（真正的同步是 `006b` 之后的设计，§4）。
 - **launchd 生成器（C 轨）**：两个任务（晚间 18:30、早晨复查 08:30 **本机时间**；`LAUNCHD_MORNING_LABEL` `scripts/daily_selection.py:6338`、`MORNING_PLIST_HOUR` `:6339`、`launchd_registration` `:6347`、`launchd_morning_plist` `:6470`）；`--registration` 是参数、必须是钉住 worktree 内部的路径，晚间与早晨两个 flag 一次只生成一个；**只打印、不安装**（没有写 `~/Library/LaunchAgents` 的路径，`--install` 是未知参数）；`--launchd-morning-plist` 也进了冒烟驱动的保留 flag 表（`scripts/p7_smoke.py:151`），冒烟晚间不会把一个未被要求的早晨任务参数当成普通晚间跑下去。
 - **未做 / 未关闭**：没有对真实账户、真实行情运行过；真钱闸门仍关着；账户同步（让账簿跟随账户）不在本批次；`--factor-gaps` 不打印冒烟横幅、`--worktree` 与 `--show-book` 同用被静默忽略等见 §4。
@@ -47,6 +47,8 @@
 - **未做 / 未关闭**：没有真实运行（尤其 2027-01-04）；取值（空年只在它自己那一年之内可读，到 12 月 31 日含）仍是**暂定的、待用户确认**；把 `025` 列为 `006a` 的一项并加入 `006` 的依赖仍是控制者的建议、待用户确认。
 
 ### `V2-P7-008` `_readable_instant` 回退的两条测试——只改测试，代码未动
+
+**状态写法：**任务书要求 §1 的每个 issue 写"代码已交付、本行未关闭"；**这一行不适用**——这次改动没有代码可交付（`V2-P7-008` 的提交对 `src/` 的改动为零，逐字节不变；批次 3 的 `src/` 改动全部来自其他任务），且 `V2-P7-008` 是 Step 0 的每日入口、在路线图里已于 2026-10-14 标为完成。照实写成"只改测试、行已关闭"，与路线图一致。
 
 - 提交 `a5a2ba6`：两条回退分支的测试改成按**原来的拒绝消息**与**调用次数**钉住，而不是按调用形状（`tests/unit/test_strategy_survivor_registration.py`，三条 `…_readable…` 测试）；`src/` 逐字节不变（`src/openalpha_cn/strategy_survivor_registration.py` 的 `if readable is None or readable <= filed:` 在 `:981`，`_readable_instant` 在 `:1214`）。
 
@@ -93,7 +95,7 @@
 以下都是评审或实现者提出、控制者裁定"这一批不做"的。来源写作"计划 · 任务"或账本条目（账本不在版本库内：`.superpowers/sdd/`，这份收尾用的是 `.superpowers/sdd/inputs/ledger.md`，只读）。
 
 - **`read_once` 不传 `also_bound`**：它检查 `registry.REGISTERED_PATHS` 的四个路径（`src/`、`scripts/research/`、`pyproject.toml`、`uv.lock`），**不检查** `scripts/daily_selection.py` 与 `scripts/forward_report.py`（这两个由每日命令/周报的准入绑定）。运行手册已经把这写成已知的代码缺口（`docs/runbooks/p7-reading.zh-CN.md:32`、`:170`），**后续 issue 候选**；本批次只把文档改成不再声称它拒。来源：A Task 4 评审 I3、账本"CODE GAP to ledger as a follow-up issue"。
-- **`--worktree` 与 `--show-book` 同用时被静默忽略**：`--show-book` 的互斥表没有列 `--worktree`（它只列 `--morning-recheck`、`--pin-worktree`、`--factor-gaps`、launchd 两个 flag）；组合时 `--show-book` 仍然生效、`--worktree` 被忽略。来源：C Task 1 评审延后项、账本 C1 条目。
+- **`--worktree` 与 `--show-book` 同用时被静默忽略**：`--show-book` 的互斥表没有列 `--worktree`（它列的是 `--morning-recheck`、`--pin-worktree`、`--factor-gaps`、launchd 两个 flag 与 `--account-record`，但没有 `--worktree`；`daily_selection.py:6662-6671`）；组合时 `--show-book` 仍然生效、`--worktree` 被忽略。来源：C Task 1 评审延后项、账本 C1 条目。
 - **G1 的每个 `--year` 重抓整份登记簿的请求浪费**：去重只做到"同一观测不重写、只印一行"，`panel build` 的多 `--year` 调用仍然每年重新抓一次整份 `stock_basic`（请求数不变，因为抓取本来就每 `--year` 一次）；把这次浪费去掉是后续小任务。来源：ops-and-gaps 计划 §7 第 2 条与"本轮明确不做"。
 - **`--factor-gaps` 不打印冒烟横幅**：`scripts/daily_selection.py` 的 `--factor-gaps` 分支在 `banner = smoke_banner(...)` 之前返回，所以冒烟登记下它不印横幅。这是既有的缺口，与本批次的 `--show-book` 无关（后者会印），不在本批次范围。来源：ops-and-gaps 计划 §7 第 5 条。
 - **账户同步（让账簿跟随账户）是 `006b` 之后的设计**：本批次只做"输入 + 对照 + 按名分歧 + 冲突拒绝 + 不改写账簿"；让纸面账簿真正跟随真实账户要改账簿状态与见证规则。来源：ops-and-gaps 计划 §7 第 3 条、C2 的设计边界。
@@ -146,4 +148,4 @@
 - **B4 brief 的 M3 变异是 no-op**：`illiquid` 加进 `FREEZE_COMPATIBLE_REASONS` 不会让测试红——`decide_book` 的 `frozen` 只从带 `suspended` 的持仓构造；按 brief 括号里的**意图**变异（让 `forced` 排除任何带 `illiquid` 的判断）才被杀。记录在案，brief 复用时要改。
 - **`test_source_cited_tests.py` 的旧失败已消失**：A Task 4 当时报的 10 条未解析引用全部来自 ops-and-gaps 计划（指向当时还不存在的 `test_daily_selection_book.py` 与 `test_paper_reconciliation.py`）；那两个文件在本批次实现后存在，文档波里 `tests/unit/test_source_cited_tests.py` 与 `tests/unit/test_source_counts_match_the_tree.py` 13 passed。
 - **C4 修正轮点名的 docstring 遗漏已补**：评审停车一条"Returns 行漏了同一观测覆盖已存空年"；本轮提交 2 把 `record_empty_universe_year` 的 Returns 末段补全（`src/openalpha_cn/panel_ingest.py:7632`），`reading_lines` 的 docstring 也在同一提交里按实际输出顺序写全。
-- **账本里的提交哈希是挑拣前的**；本文只用 `git log ba60330..403b8f5` 上的哈希。账本把 A Task 5 的提交标成 `V2-P7-008`（它关的是批次 1 的延后项）；本文按任务写，提交标题原样不改。
+- **账本里的提交哈希是挑拣前的**：§1 的集成哈希取自 `git log ba60330..403b8f5`；§2 写修复轮时引的是**挑拣前的 worktree 哈希**（账本记的就是这些，例如 `82b7668`、`cf41b3c`、`f417b10`），两者不能混用。另：`a5a2ba6`（挑拣前的 `d677286`）是 C6 的 `V2-P7-008` 两条测试，关的是批次 1/批次 2 留下的延后项；A Task 5 是那次**未做**的真实读数，两者不是一件事。B5 还为补 Task 3 挑过一个 `0607906`（它是 `1a0bab4` 的 worktree 前置挑拣；集成时跳过，见 §2 的 B5）。提交标题原样不改。
