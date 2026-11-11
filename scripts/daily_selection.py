@@ -278,7 +278,10 @@ from openalpha_cn.providers.tushare import (  # noqa: E402
     TRADING_CALENDAR_DEFAULT_EXCHANGE,
     TushareTransport,
 )
-from openalpha_cn.runtime.composition import build_storage  # noqa: E402
+from openalpha_cn.runtime.composition import (  # noqa: E402
+    build_storage,
+    paper_state_store_at,
+)
 from openalpha_cn.runtime.provenance import resolve_code_commit  # noqa: E402
 from openalpha_cn.strategy_registration import (  # noqa: E402
     UNVERIFIABLE,
@@ -345,10 +348,6 @@ SMOKE_BANNER: Final[str] = (
 SMOKE_DOCUMENT_KEY: Final[str] = "smoke"
 """The key a printed JSON document of a smoke registration carries the banner under. Printed
 only: the journal, the morning file and the written weekly report never hold it."""
-
-PAPER_STATE_DIRECTORY: Final[tuple[str, str]] = ("paper", "snapshots")
-"""Where the paper book's snapshots live under a runtime directory
-(`runtime.composition.build_storage`: `runtime_dir / "paper" / "snapshots"`)."""
 
 BOOK_VIEW_KIND: Final[str] = "paper-book-view/v1"
 """`--show-book`'s document kind: the paper book's head snapshot as a listing, read only."""
@@ -3169,25 +3168,25 @@ def show_book(runtime_dir: Path) -> dict[str, Any]:
     the last mark -- read from the book's own state, writing nothing and asking the network
     nothing (`V2-P7-006a`).
 
-    The snapshot directory is the book (`runtime.composition.build_storage`), and the reader is
-    `FilePaperStateStore`, whose reads are total and create nothing (`storage/paper_state.py`):
-    `build_storage` is deliberately not used, because it runs migrations and opens SQLite files,
-    and a P6 day must not load the paper book at all. A store holding no snapshot is refused by
-    name -- a missing book is never an empty one (`backtest.paper_state.held_head`).
+    The snapshot directory is the book (`runtime.composition.paper_state_store_at`, the path
+    `build_storage` opens too), and the reader is `FilePaperStateStore`, whose reads are total and
+    create nothing (`storage/paper_state.py`): `build_storage` is deliberately not used, because
+    it runs migrations and opens SQLite files, and a P6 day must not load the paper book at all. A
+    store holding no snapshot is refused by name -- a missing book is never an empty one
+    (`backtest.paper_state.held_head`).
 
     Marks are in the ledger's units (the real close times the adjustment ratio since the buy), so
     the document says so and is not read as real prices.
     """
     from openalpha_cn.backtest.paper_state import held_head
-    from openalpha_cn.storage.paper_state import FilePaperStateStore
     from openalpha_cn.strategy_survivor_summary import SURVIVOR_WORDING
 
-    store = FilePaperStateStore(runtime_dir.joinpath(*PAPER_STATE_DIRECTORY))
+    store = paper_state_store_at(runtime_dir)
     snapshot = held_head(store)
     if snapshot is None:
         raise ValueError(
             "no paper book snapshot is held at all under "
-            f"{runtime_dir.joinpath(*PAPER_STATE_DIRECTORY)}: a paper book is opened by saving an "
+            f"{store.path}: a paper book is opened by saving an "
             "opening snapshot, never started from zero by a reader; nothing is created here"
         )
     book = snapshot.book

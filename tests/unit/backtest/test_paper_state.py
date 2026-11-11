@@ -54,7 +54,12 @@ from openalpha_cn.domain.portfolio import (
 from openalpha_cn.domain.survivor_book import SurvivorBookConfig, survivor_config_digest
 from openalpha_cn.domain.survivor_orders import TradeOrder
 from openalpha_cn.domain.survivor_policy import Cooldown
-from openalpha_cn.runtime.composition import build_storage
+from openalpha_cn.runtime.composition import (
+    PAPER_SNAPSHOT_DIRECTORY,
+    build_storage,
+    paper_state_store_at,
+    prediction_store_at,
+)
 from openalpha_cn.storage.paper_state import FilePaperStateStore, PaperStateStoreError
 from openalpha_cn.storage.portfolio import SQLitePortfolioLedger
 
@@ -1505,3 +1510,33 @@ def test_the_composition_root_wires_the_paper_snapshot_store(
         == held_snapshot()
     )
     assert os.path.isfile(_document(reopened.paper_state_store, S2))
+
+
+def test_the_paper_snapshot_store_opened_alone_is_the_composition_roots_and_creates_nothing(
+    tmp_path: Path, migration_clock: Callable[[], datetime]
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+
+    alone = paper_state_store_at(runtime_dir)
+
+    assert not runtime_dir.exists()
+    assert alone.path == runtime_dir.joinpath(*PAPER_SNAPSHOT_DIRECTORY)
+    assert alone.path == runtime_dir / "paper" / "snapshots"
+    assert build_storage(runtime_dir=runtime_dir, clock=migration_clock).paper_state_store.path == (
+        alone.path
+    )
+
+
+def test_the_prediction_store_opened_alone_is_the_composition_roots_and_creates_nothing(
+    tmp_path: Path, migration_clock: Callable[[], datetime]
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+
+    alone = prediction_store_at(runtime_dir, clock=migration_clock)
+
+    assert not runtime_dir.exists()
+    assert alone.list_ids() == ()
+    assert alone.path == runtime_dir / "predictions"
+    assert build_storage(runtime_dir=runtime_dir, clock=migration_clock).prediction_store.path == (
+        alone.path
+    )

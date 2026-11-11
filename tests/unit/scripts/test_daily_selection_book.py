@@ -610,3 +610,21 @@ def test_morning_recheck_refuses_an_account_record(tmp_path: Path) -> None:
 
     assert exited.value.code == 2
     assert "--morning-recheck cannot be combined with --account-record" in err.getvalue()
+
+
+def test_show_book_reads_the_snapshot_directory_the_composition_root_names(
+    world: tds.World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One source for the path (hard rule 5): the script keeps no literal of its own, and the
+    view follows whatever the composition root's opener names."""
+    assert not hasattr(daily, "PAPER_STATE_DIRECTORY")
+    moved = world.runtime / "elsewhere"
+    shutil.move(str(world.runtime / "paper" / "snapshots"), str(moved))
+    monkeypatch.setattr(
+        daily, "paper_state_store_at", lambda runtime_dir: FilePaperStateStore(moved)
+    )
+
+    code, out, _err = _show(world)
+
+    assert code == 0
+    assert json.loads(out)["kind"] == daily.BOOK_VIEW_KIND

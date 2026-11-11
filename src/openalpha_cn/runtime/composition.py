@@ -44,6 +44,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Final
 
 from openalpha_cn.backtest.validation import ValidationStore
 from openalpha_cn.evidence.service import EvidenceStore
@@ -244,6 +245,29 @@ class StorageContainer:
     migration_result: MigrationRunResult
 
 
+PAPER_SNAPSHOT_DIRECTORY: Final[tuple[str, str]] = ("paper", "snapshots")
+"""Where a runtime directory's paper-book snapshots live (`V2-P7-017`)."""
+
+PREDICTION_DIRECTORY: Final[str] = "predictions"
+"""Where a runtime directory's registered predictions live (`V2-P4-017`)."""
+
+
+def paper_state_store_at(runtime_dir: Path) -> FilePaperStateStore:
+    """The paper book's snapshot store under `runtime_dir`, opened alone: no migration, no
+    directory created (`FilePaperStateStore`'s reads are total on a missing directory). For a
+    reader that must not run `build_storage` -- `--show-book`. `build_storage` opens the same
+    path through this function, so there is one source for it (hard rule 5)."""
+    return FilePaperStateStore(runtime_dir.joinpath(*PAPER_SNAPSHOT_DIRECTORY))
+
+
+def prediction_store_at(runtime_dir: Path, *, clock: Callable[[], datetime]) -> FilePredictionStore:
+    """The prediction store under `runtime_dir`, opened alone: no migration, no directory
+    created. For a reader of another registration's runtime directory, which it must not write
+    (`V2-P7-023`: a predecessor's records). `build_storage` opens the same path through this
+    function."""
+    return FilePredictionStore(runtime_dir / PREDICTION_DIRECTORY, clock=clock)
+
+
 def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> StorageContainer:
     """Run pending schema migrations, then assemble every storage component once.
 
@@ -286,9 +310,9 @@ def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> Storag
     shortlist_store = FileShortlistStore(runtime_dir / "shortlists")
     job_store = SQLiteJobStore(runtime_dir / "state.sqlite3")
     model_usage_store = SQLiteModelUsageStore(runtime_dir / "state.sqlite3")
-    prediction_store = FilePredictionStore(runtime_dir / "predictions", clock=clock)
+    prediction_store = prediction_store_at(runtime_dir, clock=clock)
     paper_ledger = open_paper_ledger(runtime_dir / "paper" / "ledger.sqlite3")
-    paper_state_store = FilePaperStateStore(runtime_dir / "paper" / "snapshots")
+    paper_state_store = paper_state_store_at(runtime_dir)
     batch_store.recover_interrupted(now=clock())
     logger.info(
         "storage_initialized",
