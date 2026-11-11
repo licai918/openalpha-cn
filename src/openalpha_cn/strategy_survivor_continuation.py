@@ -39,9 +39,9 @@ blocks make (`survivor_forward_power`, `survivor_forward_stop_rule` in
 
 No migration is needed, and no stored shape moves: `PredictionRecord`, snapshots, ledger rows,
 source files and verdict caches keep their exact shapes. A predecessor written by an earlier
-build whose survivor block this build cannot read is refused by name at the chain's reader (see
-the next section), rather than read through a widened reader; that would be a migration
-task of its own.
+build whose survivor block this build cannot read is refused by name when a caller reads the
+chain (plan R4, R12), rather than read through a widened reader; that would be a migration task
+of its own.
 
 ## The chain
 
@@ -154,8 +154,9 @@ SURVIVOR_CONTINUATION_KEY: Final = "survivor_continuation"
 SURVIVOR_CONTINUATION_SCHEMA: Final = "survivor-continuation/v1"
 MAX_CONTINUATION_DEPTH: Final = 16
 SMOKE_SETTINGS_KEY: Final = "smoke_run"
-"""`scripts/daily_selection.SMOKE_SETTINGS_KEY`, spelled here because `src/` imports no script;
-`tests/unit/scripts/test_daily_selection_dispatch.py` holds the two equal."""
+"""`scripts/daily_selection.SMOKE_SETTINGS_KEY`, spelled here because `src/` imports no script. The
+two spellings are one string, held equal by the dispatch test when the survivor path is wired
+into the script (`V2-P7-023`'s later half); this module may not import it."""
 _CONTINUED_BLOCKS: Final[tuple[str, ...]] = (
     SURVIVOR_FORWARD_PROTOCOL_KEY,
     SURVIVOR_FORWARD_POWER_KEY,
@@ -394,7 +395,7 @@ def require_continuable(successor: ChainLink, predecessor: ChainLink) -> None:
             successor=successor,
             predecessor=predecessor,
             what=(
-                "the predecessor is a smoke registration (its settings.name the "
+                "the predecessor is a smoke registration (its settings name the "
                 f"{SMOKE_SETTINGS_KEY} block) and the successor is not"
             ),
             why="smoke output is not a test of the protocol and never enters a registration "
