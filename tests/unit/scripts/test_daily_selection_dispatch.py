@@ -24,11 +24,14 @@ each run in a child interpreter (`modules_a_day_loads`), as
 from __future__ import annotations
 
 import contextlib
+import dataclasses
+import hashlib
 import io
 import json
 import os
 import subprocess
 import sys
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Final
 
@@ -36,6 +39,7 @@ import pytest
 import test_daily_selection as tds
 from daily_market import Market
 from offline_guard import refusing_outbound_traffic
+from research_repo import commit_file, head
 
 from openalpha_cn.domain.survivor_book import SurvivorBookConfig
 
@@ -402,3 +406,201 @@ def test_a_survivor_dispatch_loads_both_which_is_what_the_p6_probe_would_see(
     assert report["stderr"].splitlines()[0].startswith(SURVIVOR_REFUSED)
     assert report["before"] == []
     assert report["after"] == list(WATCHED)
+
+
+# --- the predecessor chain (`V2-P7-023`) -------------------------------------------------------
+
+
+def test_the_smoke_key_the_continuation_module_spells_is_the_daily_commands() -> None:
+    """`strategy_survivor_continuation.SMOKE_SETTINGS_KEY` is `src/`'s spelling of the smoke
+    marker the daily command reads: `src/` imports no script, so the two string literals are held
+    equal here, where the survivor path is wired in, and a rename on either side is red."""
+    from openalpha_cn import strategy_survivor_continuation as continuation
+
+    assert continuation.SMOKE_SETTINGS_KEY == daily.SMOKE_SETTINGS_KEY
+
+
+def _register(
+    world: tds.World,
+    name: str,
+    *,
+    epoch: str,
+    settings: dict[str, Any],
+    at_days: int,
+) -> Path:
+    """A committed registration of a survivor configuration at `epoch`, `at_days` after the
+    world's own registration."""
+    config = {**SURVIVOR_CONFIG, "adapter": {**SURVIVOR_CONFIG["adapter"], "epoch_session": epoch}}
+    path = world.repo / "docs" / "research" / name
+    tds.registry.register(
+        config, tds.CRITERIA, path, code_commit=head(world.repo), settings=settings
+    )
+    commit_file(world.repo, path, f"register {name}", at=tds.COMMITTED + timedelta(days=at_days))
+    return path
+
+
+def _successor_of(
+    world: tds.World,
+    predecessor: Path,
+    *,
+    epoch: str = "2026-01-20",
+    sha256: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> tds.World:
+    """A world whose registration names `predecessor` as the one it continues."""
+    from openalpha_cn import strategy_survivor_continuation as continuation
+
+    block = continuation.continuation_block(
+        path=predecessor.relative_to(world.repo).as_posix(),
+        sha256=sha256 or hashlib.sha256(predecessor.read_bytes()).hexdigest(),
+        config_id=json.loads(predecessor.read_text(encoding="utf-8"))["config_id"],
+    )
+    successor = _register(
+        world,
+        "successor.json",
+        epoch=epoch,
+        settings={
+            **tds.grid.protocol_settings(),
+            **(extra or {}),
+            continuation.SURVIVOR_CONTINUATION_KEY: block,
+        },
+        at_days=2,
+    )
+    return dataclasses.replace(world, registration=successor)
+
+
+def test_a_successor_naming_its_predecessor_by_other_bytes_exits_2_before_any_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world = _survivor_world(tmp_path, monkeypatch, SURVIVOR_CONFIG)
+    successor = _successor_of(world, world.registration, sha256="0" * 64)
+
+    code, err = _stopped_at_registration(successor, capsys)
+
+    assert code == 2
+    assert "step 1 (registration) failed" in err
+    assert "0" * 64 in err and "p6-registration.json" in err
+
+
+def test_a_successor_naming_a_file_that_is_not_committed_exits_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world = _survivor_world(tmp_path, monkeypatch, SURVIVOR_CONFIG)
+    loose = world.repo / "docs" / "research" / "loose.json"
+    loose.write_bytes(world.registration.read_bytes())
+
+    code, err = _stopped_at_registration(_successor_of(world, loose), capsys)
+
+    assert code == 2
+    assert "loose.json" in err and "is not a committed registration" in err
+
+
+def test_a_successor_continuing_a_smoke_registration_exits_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world = _survivor_world(tmp_path, monkeypatch, SURVIVOR_CONFIG)
+    smoke = _register(
+        world,
+        "smoke.json",
+        epoch="2026-01-16",
+        settings={**tds.grid.protocol_settings(), "smoke_run": {"issue": "V2-P7-019"}},
+        at_days=1,
+    )
+
+    code, err = _stopped_at_registration(_successor_of(world, smoke), capsys)
+
+    assert code == 2
+    assert "smoke registration" in err
+
+
+def test_a_successor_whose_epoch_is_not_after_its_predecessors_exits_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world = _survivor_world(tmp_path, monkeypatch, SURVIVOR_CONFIG)
+
+    code, err = _stopped_at_registration(
+        _successor_of(world, world.registration, epoch="2026-01-16"), capsys
+    )
+
+    assert code == 2
+    assert "is not before" in err
+
+
+def test_a_chain_that_returns_to_a_registration_is_refused_as_a_cycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A registration cannot name a file whose bytes name it back (the sha would change), so the
+    cycle is checked on the function with a predecessor that names the successor's own bytes."""
+    world = _survivor_world(tmp_path, monkeypatch, SURVIVOR_CONFIG)
+    successor = _successor_of(world, world.registration)
+    admitted = daily.admit_registration(successor.registration, successor.repo)
+    survivor = daily.survivor_registration(admitted)
+    assert survivor is not None
+    looped = dataclasses.replace(
+        admitted, sha256=hashlib.sha256(world.registration.read_bytes()).hexdigest()
+    )
+
+    with pytest.raises(daily.StepFailedError, match=r"cycle|names itself"):
+        daily.admit_predecessors(looped, survivor, successor.repo)
+
+
+def test_a_registration_with_no_block_has_no_predecessors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world = _survivor_world(tmp_path, monkeypatch, SURVIVOR_CONFIG)
+    admitted = daily.admit_registration(world.registration, world.repo)
+    survivor = daily.survivor_registration(admitted)
+    assert survivor is not None
+
+    assert daily.admit_predecessors(admitted, survivor, world.repo) == ()
+
+
+def test_a_successor_reads_its_predecessor_root_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world = _survivor_world(tmp_path, monkeypatch, SURVIVOR_CONFIG)
+    successor = _successor_of(world, world.registration)
+    admitted = daily.admit_registration(successor.registration, successor.repo)
+    survivor = daily.survivor_registration(admitted)
+    assert survivor is not None
+
+    (predecessor,) = daily.admit_predecessors(admitted, survivor, successor.repo)
+
+    assert (
+        predecessor.registration_sha256
+        == hashlib.sha256(world.registration.read_bytes()).hexdigest()
+    )
+    assert predecessor.epoch.isoformat() == "2026-01-16"
+
+
+def test_a_chain_of_two_predecessors_is_read_root_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The successor's own predecessor may name a predecessor in turn: the chain is read to its
+    root and handed over root first, so the report's `chain[0]` is the registration's epoch."""
+    from openalpha_cn import strategy_survivor_continuation as continuation
+
+    world = _survivor_world(tmp_path, monkeypatch, SURVIVOR_CONFIG)
+    root = json.loads(world.registration.read_text(encoding="utf-8"))
+    middle = _register(
+        world,
+        "middle.json",
+        epoch="2026-01-17",
+        settings={
+            **tds.grid.protocol_settings(),
+            continuation.SURVIVOR_CONTINUATION_KEY: continuation.continuation_block(
+                path=world.registration.relative_to(world.repo).as_posix(),
+                sha256=hashlib.sha256(world.registration.read_bytes()).hexdigest(),
+                config_id=root["config_id"],
+            ),
+        },
+        at_days=1,
+    )
+    successor = _successor_of(world, middle)
+    admitted = daily.admit_registration(successor.registration, successor.repo)
+    survivor = daily.survivor_registration(admitted)
+    assert survivor is not None
+
+    chain = daily.admit_predecessors(admitted, survivor, successor.repo)
+
+    assert [link.epoch.isoformat() for link in chain] == ["2026-01-16", "2026-01-17"]

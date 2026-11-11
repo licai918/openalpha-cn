@@ -270,6 +270,15 @@ def _committed_registration(registration: Path, repo: Path) -> tuple[Path, _Admi
     )
 
 
+def committed_registration(registration: Path, repo: Path) -> tuple[Path, _Admitted]:
+    """The repository root and the registration as `HEAD` holds it -- its bytes (read once and
+    equal to `HEAD`'s), its body and the last commit that touched it -- without binding the code
+    that runs now: for a successor reading the registration it supersedes, whose code commit is
+    not this checkout's (`V2-P7-023`). The same refusals as the guard's first check
+    (`RegistrationNotCommittedError`, `HoldoutConfigurationError`)."""
+    return _committed_registration(registration, repo)
+
+
 def _refuse_a_changed_source(
     root: Path,
     code_commit: object,

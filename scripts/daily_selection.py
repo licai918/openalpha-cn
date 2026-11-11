@@ -323,6 +323,7 @@ if TYPE_CHECKING:
     from openalpha_cn.runtime.composition import StorageContainer
     from openalpha_cn.strategy_survivor import SurvivorRegistration
     from openalpha_cn.strategy_survivor_book import PaperBookLock, PaperHead, SurvivorEvening
+    from openalpha_cn.strategy_survivor_continuation import ChainLink
     from openalpha_cn.strategy_survivor_facts import FactsDay
     from openalpha_cn.strategy_survivor_market import SessionOrdinals
 
@@ -708,6 +709,136 @@ def survivor_registration(registration: Registration) -> SurvivorRegistration | 
             exit_code=DailyExit.no_registration,
             steps=SURVIVOR_STEPS,
         ) from error
+
+
+def chain_link(registration: Registration, survivor: SurvivorRegistration) -> ChainLink:
+    """The admitted registration as a link of its own chain (`V2-P7-023`)."""
+    from openalpha_cn.strategy_survivor_continuation import ChainLink
+
+    return ChainLink(
+        registration_sha256=registration.sha256,
+        config_id=registration.config_id,
+        code_commit=registration.code_commit,
+        settings=registration.settings,
+        survivor=survivor,
+    )
+
+
+def _predecessor_refused(message: str) -> StepFailedError:
+    """A predecessor a successor names cannot be read, or cannot be continued into it: step 1's
+    refusal, before any request or write (`V2-P7-023`)."""
+    return StepFailedError(
+        "registration", message, exit_code=DailyExit.no_registration, steps=SURVIVOR_STEPS
+    )
+
+
+def admit_predecessors(
+    registration: Registration, survivor: SurvivorRegistration, repo: Path
+) -> tuple[ChainLink, ...]:
+    """Step 1 for a survivor registration that names a predecessor (`V2-P7-023`): every
+    registration up its chain, root first; `()` when it names none.
+
+    Each predecessor is read from the path its successor's `survivor_continuation` block names,
+    inside this repository: committed at `HEAD` with exactly the bytes the block's
+    `supersedes_sha256` names (`registry.committed_registration`), its `config_id` re-derived
+    and equal to its body's and to the block's `supersedes_config_id`, read as a survivor
+    registration by this build (`strategy_survivor.read_survivor_registration`, the seed rule of
+    `admit_registration`), and continuable into its successor
+    (`strategy_survivor_continuation.require_continuable`). At most `MAX_CONTINUATION_DEPTH`
+    predecessors; a registration met twice is a cycle. Every refusal is
+    `StepFailedError("registration", ..., exit_code=DailyExit.no_registration,
+    steps=SURVIVOR_STEPS)`, naming the predecessor's path and what is wrong -- before any
+    request or write.
+    """
+    from openalpha_cn import strategy_survivor
+    from openalpha_cn import strategy_survivor_continuation as continuation
+
+    root, _ = registry.committed_registration(registration.path, repo)
+    current = chain_link(registration, survivor)
+    chain: list[ChainLink] = []
+    seen: set[str] = {current.registration_sha256}
+    while True:
+        try:
+            block = continuation.read_survivor_continuation(current.settings)
+        except continuation.SurvivorContinuationError as error:
+            raise _predecessor_refused(
+                f"{registration.path}'s survivor_continuation cannot be read: {error}"
+            ) from error
+        if block is None:
+            # Read from the successor up; the chain is handed over root first.
+            return tuple(reversed(chain))
+        if len(chain) == continuation.MAX_CONTINUATION_DEPTH:
+            raise _predecessor_refused(
+                f"the chain above {registration.path} names more than "
+                f"{continuation.MAX_CONTINUATION_DEPTH} predecessors, the most a chain may have"
+            )
+        path = root / block.supersedes_path
+        try:
+            _, admitted = registry.committed_registration(path, repo)
+        except registry.HoldoutRefusedError as error:
+            raise _predecessor_refused(
+                f"the predecessor {block.supersedes_path} is not a committed registration: {error}"
+            ) from error
+        sha = hashlib.sha256(admitted.content).hexdigest()
+        if sha != block.supersedes_sha256:
+            raise _predecessor_refused(
+                f"the predecessor {block.supersedes_path} holds {sha}, not the "
+                f"{block.supersedes_sha256} its successor names"
+            )
+        if sha in seen:
+            raise _predecessor_refused(
+                f"the chain above {registration.path} reaches {block.supersedes_path} twice (the "
+                f"registration sha256 {sha}); a chain is a line, not a cycle"
+            )
+        seen.add(sha)
+        body = admitted.registered
+        config = body.get("config")
+        if not isinstance(config, dict):
+            raise _predecessor_refused(
+                f"the predecessor {block.supersedes_path} registers no configuration object"
+            )
+        config_id = grid.config_id(config)
+        if config_id != body.get("config_id"):
+            raise _predecessor_refused(
+                f"the predecessor {block.supersedes_path}'s config_id "
+                f"{body.get('config_id')!r} does not match its own config (re-derived: "
+                f"{config_id!r})"
+            )
+        if config_id != block.supersedes_config_id:
+            raise _predecessor_refused(
+                f"the predecessor {block.supersedes_path}'s config_id {config_id!r} is not the "
+                f"{block.supersedes_config_id!r} its successor names"
+            )
+        settings = body.get("settings")
+        settings = dict(settings) if isinstance(settings, dict) else {}
+        named = settings.get("random_seed")
+        seed = named if type(named) is int else None
+        try:
+            read = strategy_survivor.read_survivor_registration(config, seed=seed)
+        except strategy_survivor.SurvivorRegistrationError as error:
+            raise _predecessor_refused(
+                f"the predecessor {block.supersedes_path} is not a survivor registration this "
+                f"build reads: {error}"
+            ) from error
+        predecessor = chain_link(
+            Registration(
+                path=path,
+                sha256=sha,
+                commit=admitted.commit,
+                code_commit=str(body.get("code_commit")),
+                config=config,
+                config_id=config_id,
+                seed=seed if seed is not None else 0,
+                settings=settings,
+            ),
+            read,
+        )
+        try:
+            continuation.require_continuable(current, predecessor)
+        except continuation.SurvivorContinuationError as error:
+            raise _predecessor_refused(str(error)) from error
+        chain.append(predecessor)
+        current = predecessor
 
 
 LOCKFILE: Final[str] = "uv.lock"
@@ -3429,6 +3560,10 @@ def _run_daily_selection(
     with _step("registration"):
         registration = admit_registration(options.registration, options.repo)
         survivor = survivor_registration(registration)
+        if survivor is not None:
+            # A successor names the registration it supersedes; the whole chain is read and
+            # checked here, before any request or write (`V2-P7-023`, plan R4).
+            admit_predecessors(registration, survivor, options.repo)
     if survivor is not None:
         # The registration's `kind` decides the day (`V2-P7-008`); the survivor day numbers and
         # reports its own steps, so it runs outside this step's fault handler.
