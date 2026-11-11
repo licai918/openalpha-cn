@@ -52,7 +52,12 @@ a failure after the claim spends the window:
    the repository's `HEAD`, or the bytes on disk are not the bytes `HEAD` holds.
 2. `registry.SourceChangedError` -- the bound code (`registry.REGISTERED_PATHS`: `src/`,
    `scripts/research/`, `pyproject.toml`, `uv.lock`) at `HEAD` or in the working tree is not what
-   it was at the registration's `code_commit`.
+   it was at the registration's `code_commit`. `scripts/daily_selection.py` and
+   `scripts/forward_report.py` are not bound here, by ruling (`V2-P7-024`, batch 4): no module this
+   read imports or runs is either of them (`test_no_research_script_imports_a_daily_script`), so a
+   later change to them cannot change a number this read wrote, and must not void its claim. The
+   daily registration binds them; the tie between this reading and that registration is the
+   configuration, which `V2-P7-006`'s registration test holds.
 3. `registry.ForeignPackageError`, `registry.ForeignScriptsError`, `ForeignP7ScriptsError` -- the
    `openalpha_cn`, the `grid` and `registry`, or the `p7_windows`, `p7_diagnostics` and this module
    this process imported are not the repository's own. Then `ReadingConfigurationError`: the

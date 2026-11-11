@@ -29,7 +29,7 @@
    git replace --convert-graft-file                      # 只有上一条不成立时才需要
    ```
 
-3. **登记的 `code_commit` 与当前 `HEAD` 在四个受绑定路径上没有任何差异，且工作树干净。** 登记记录的是 `git rev-parse HEAD`；`read_once` 比较的是 `registry.REGISTERED_PATHS` 的四个路径——`src/`、`scripts/research/`、`pyproject.toml`、`uv.lock`（`p7_reading.py:1280-1284`，调用 `registry._refuse_a_changed_source` 时**没有**传 `also_bound`）。`scripts/daily_selection.py` 与 `scripts/forward_report.py` 由每日命令/周报的准入（`also_bound`）绑定，**不由这次读数检查**（控制者已知的代码缺口，另立 issue）。
+3. **登记的 `code_commit` 与当前 `HEAD` 在四个受绑定路径上没有任何差异，且工作树干净。** 登记记录的是 `git rev-parse HEAD`；`read_once` 比较的是 `registry.REGISTERED_PATHS` 的四个路径——`src/`、`scripts/research/`、`pyproject.toml`、`uv.lock`（`p7_reading.py:1280-1284`，调用 `registry._refuse_a_changed_source` 时**没有**传 `also_bound`）。`scripts/daily_selection.py` 与 `scripts/forward_report.py` 由每日命令/周报的准入（`also_bound`）绑定，**不由这次读数检查——这是裁决，不是缺口**：读数工具不导入、不执行这两个脚本的任何一行（测试 `tests/unit/scripts/test_p7_reading.py::test_no_research_script_imports_a_daily_script` 守住），它们之后的改动改变不了已读出的数，所以不作废读数的认领；读数与每日登记之间的联系是同一个配置，由 `V2-P7-006` 的登记测试负责（批次 4，`V2-P7-024`；用户确认见批次 4 收尾记录 §5）。
 
    ```bash
    git rev-parse HEAD
@@ -169,7 +169,7 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync "$PWD/.venv/bin/python" scr
 | 认领提交后文件被删 | 窗口仍算已读 | `git log --all`、reflog、merge 的每个父提交都能找到它；只有认领的提交不再被任何 ref 或未过期 reflog 到达、或被 prune、或历史被改写并 gc 之后才会丢 |
 | 某个认领文件读不出来 | 只要它的提交还被任何 ref 或未过期 reflog 到达，**每个窗口**都读不了 | 它可能点名任何一个窗口；今天没有逃生口（设计中的办法尚未实现，`scripts/research/p7_reading.py:143-151`） |
 | 登记未提交、或磁盘字节与 `HEAD` 不同 | 退出码 3，什么都没花掉 | 读只接受 `HEAD` 里的登记字节 |
-| 登记之后受绑定代码变了 | 退出码 3，什么都没花掉 | `src/`、`scripts/research/`、`pyproject.toml`、`uv.lock` 必须与登记的 `code_commit` 一致；两个 `also_bound` 脚本只由每日/周报准入绑定，**不由这次读数检查** |
+| 登记之后受绑定代码变了 | 退出码 3，什么都没花掉 | `src/`、`scripts/research/`、`pyproject.toml`、`uv.lock` 必须与登记的 `code_commit` 一致；两个 `also_bound` 脚本只由每日/周报准入绑定，按裁决**不由这次读数检查**（见第 3 条） |
 | 运行目录在 P6 研究根或任何检出里 | 退出码 3，什么都没花掉 | 只读连接也会在目录库旁写锁与 gate 文件；用 `cp -c` 的克隆 |
 | 这个窗口已经被认领过 | 退出码 3，不能再读 | 一个窗口只读一次，不论读数叫什么名字；磁盘上、或任何 ref 或未过期 reflog 上曾经提交过的认领都算 |
 | 预检发现面板缺年、或停止规则不可达 | 退出码 3，什么都没花掉 | 这些检查都在认领之前；缺分区、信号日没有因子构建等留给测量，测量之后读就算花掉了 |
