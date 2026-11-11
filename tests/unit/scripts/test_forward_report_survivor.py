@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import hashlib
 import io
 import json
 import os
@@ -60,11 +61,13 @@ from test_daily_selection_survivor_day import (  # noqa: F401  (module fixtures,
 )
 
 from openalpha_cn import cli, strategy_survivor_check
+from openalpha_cn import strategy_survivor_continuation as continuation_module
 from openalpha_cn import strategy_survivor_forward as forward
 from openalpha_cn.backtest.outcome_statistics import sign_flip_test
 from openalpha_cn.domain.alpha_model import AlphaModelArtifact, Prediction, PredictionBatch
 from openalpha_cn.domain.prediction_record import PredictionRecord
 from openalpha_cn.domain.stock_universe import STOCK_BASIC_DATASET
+from openalpha_cn.domain.survivor_book import SurvivorBookConfig
 from openalpha_cn.domain.trading_calendar import TradingCalendar
 from openalpha_cn.model_view import LabelReach, OutcomeLabels
 from openalpha_cn.panel.store import PanelStore
@@ -216,10 +219,12 @@ def _report(
     *,
     as_of: datetime = REPORT_AS_OF,
     json_output: bool = False,
+    extra: Sequence[str] = (),
 ) -> tuple[int, str, str]:
     """The weekly report through `forward_report.main`, at `as_of`."""
     arguments = ["--runtime-dir", str(world.runtime), "--registration", str(world.registration)]
     arguments += ["--repo", str(world.repo), "--as-of", as_of.isoformat()]
+    arguments += [*extra]
     if json_output:
         arguments.append("--json")
     code = forward_report.main(arguments)
@@ -2506,3 +2511,265 @@ def test_a_registered_power_block_is_stated_in_the_report_as_registered(
     assert forward.POWER_NOT_PRE_REGISTERED not in out
     assert not any("one-sided p" in line for line in out.splitlines())
     _no_verdict_word(out)
+
+
+# --- a successor continuing the three evenings (`V2-P7-023`) ------------------------------------
+
+
+def _book_with(**changes: Any) -> SurvivorBookConfig:
+    return SurvivorBookConfig.model_validate(
+        {**BOOK.model_dump(mode="json", exclude_computed_fields=True), **changes}
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class Continued:
+    world: tds.World
+    predecessor: Path
+    """The three evenings' runtime directory, a copy: their records, provenance and paper book."""
+    records: tuple[str, ...]
+    """The predecessor's record ids, by session."""
+
+
+def _successor(
+    evenings: tds.World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    book: SurvivorBookConfig = BOOK,
+) -> Continued:
+    """A copy of the evenings' repository with a successor registration committed beside theirs:
+    epoch 8 April (every evening is on or before it), the same protocol, the evenings'
+    registration named by its path, bytes and config_id. Its runtime directory holds the panel
+    alone -- a new registration opens a new book -- and the evenings' is the predecessor's."""
+    repo = tmp_path / "repo"
+    shutil.copytree(evenings.repo, repo)
+    predecessor_registration = repo / evenings.registration.relative_to(evenings.repo)
+    body = json.loads(predecessor_registration.read_text(encoding="utf-8"))
+    block = continuation_module.continuation_block(
+        path=predecessor_registration.relative_to(repo).as_posix(),
+        sha256=hashlib.sha256(predecessor_registration.read_bytes()).hexdigest(),
+        config_id=body["config_id"],
+    )
+    successor = repo / "docs" / "research" / "successor.json"
+    tds.registry.register(
+        survivor_day.survivor_config(epoch=survivor_day.THIRD, book=book),
+        tds.CRITERIA,
+        successor,
+        code_commit=head(repo),
+        settings={**settings_with(), continuation_module.SURVIVOR_CONTINUATION_KEY: block},
+    )
+    commit_file(repo, successor, "register the successor", at=tds.COMMITTED + timedelta(days=1))
+    predecessor = tmp_path / "predecessor"
+    shutil.copytree(evenings.runtime, predecessor)
+    runtime = tmp_path / "successor"
+    shutil.copytree(evenings.runtime / "panel", runtime / "panel")
+    tds._bind(monkeypatch, repo, evenings.market)
+    store = FilePredictionStore(predecessor / "predictions", clock=lambda: REPORT_AS_OF)
+    by_session = sorted(
+        (record.batch.as_of.astimezone(SHANGHAI).date(), record_id)
+        for record_id in store.list_ids()
+        if (record := store.get(record_id)) is not None
+    )
+    return Continued(
+        world=tds.World(repo=repo, registration=successor, runtime=runtime, market=evenings.market),
+        predecessor=predecessor,
+        records=tuple(record_id for _session, record_id in by_session),
+    )
+
+
+def _continued_report(
+    continued: Continued, capsys: pytest.CaptureFixture[str]
+) -> tuple[int, str, str, dict[str, Any]]:
+    code, out, err = _report(
+        continued.world,
+        capsys,
+        extra=("--predecessor-runtime-dir", str(continued.predecessor)),
+    )
+    document = _document(continued.world) if code == 0 else {}
+    return code, out, err, document
+
+
+def test_a_successor_merges_every_predecessor_session_its_configuration_scores_the_same(
+    evenings: tds.World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The identical case: a successor whose book differs only in its capital scores 6, 7 and 8
+    April the same, so the three records -- their ids, sessions and ordinals as the predecessor's
+    store witnessed them -- are the successor's sample, counted from the predecessor's epoch."""
+    continued = _successor(evenings, tmp_path, monkeypatch, book=_book_with(capital="400000"))
+
+    code, out, err, document = _continued_report(continued, capsys)
+
+    assert code == 0, err
+    section = document["continuation"]
+    assert section["sample_epoch"] == EPOCH.isoformat()
+    assert [day["session"] for day in section["days"]] == [day.isoformat() for day in EVENINGS]
+    assert [day["outcome"] for day in section["days"]] == ["identical"] * 3
+    assert [day["record_id"] for day in section["days"]] == list(continued.records)
+    assert (section["merged"], section["truncated_at"]) == (3, None)
+    assert document["records"]["witnessed"] == 3
+    assert document["records"]["first_session"] == EVENINGS[0].isoformat()
+    assert "continuation: 3 of 3 predecessor sessions merged from 1 registration(s)" in out
+    _assert_the_wording_is_in_every_section(document)
+    _no_verdict_word(out)
+
+
+def test_a_successor_that_scores_the_first_predecessor_session_otherwise_merges_nothing(
+    evenings: tds.World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The different case: three of the four composite factors give 6 April other scores; the
+    sample is truncated there and neither 7 nor 8 April is scored again or merged."""
+    continued = _successor(
+        evenings,
+        tmp_path,
+        monkeypatch,
+        book=_book_with(composite_factors=list(BOOK.composite_factors[:3])),
+    )
+
+    code, out, err, document = _continued_report(continued, capsys)
+
+    assert code == 0, err
+    section = document["continuation"]
+    assert [day["outcome"] for day in section["days"]] == [
+        "differs",
+        "after_truncation",
+        "after_truncation",
+    ]
+    assert (section["merged"], section["truncated_at"]) == (0, EVENINGS[0].isoformat())
+    assert document["records"]["witnessed"] == 0
+    assert f"  TRUNCATED at {EVENINGS[0].isoformat()} (differs):" in out
+
+
+def test_a_session_scored_otherwise_truncates_the_sample_and_no_later_one_is_scored_again(
+    evenings: tds.World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The mixed case: 7 April scored again gives one name another score. 6 April joins; 7 April
+    is the truncation; 8 April -- which would be identical -- is never scored again and never
+    joins."""
+    continued = _successor(evenings, tmp_path, monkeypatch)
+    real = continuation_module.recompute_survivor_batch
+    scored: list[date] = []
+
+    def perturbed(store: PanelStore, record: PredictionRecord, **arguments: Any) -> Any:
+        batch = real(store, record, **arguments)
+        session = batch.as_of.astimezone(SHANGHAI).date()
+        scored.append(session)
+        if session != survivor_day.NEXT:
+            return batch
+        first, *rest = batch.predictions
+        changed = first.model_copy(update={"score": first.score + 1.0})
+        return batch.model_copy(update={"predictions": (changed, *rest)})
+
+    monkeypatch.setattr(continuation_module, "recompute_survivor_batch", perturbed)
+
+    code, _out, err, document = _continued_report(continued, capsys)
+
+    assert code == 0, err
+    section = document["continuation"]
+    assert [day["outcome"] for day in section["days"]] == [
+        "identical",
+        "differs",
+        "after_truncation",
+    ]
+    assert scored == [EVENINGS[0], EVENINGS[1]]
+    assert document["records"]["witnessed"] == 1
+    assert section["truncated_at"] == EVENINGS[1].isoformat()
+
+
+def test_a_successor_report_without_its_predecessors_directory_is_refused_by_name(
+    evenings: tds.World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    continued = _successor(evenings, tmp_path, monkeypatch)
+    sha = hashlib.sha256(
+        (continued.world.repo / evenings.registration.relative_to(evenings.repo)).read_bytes()
+    ).hexdigest()
+
+    code, _out, err = _report(continued.world, capsys)
+
+    assert code == 1
+    assert sha[:16] in err and "--predecessor-runtime-dir" in err
+    assert not (continued.world.runtime / "reports").exists()
+
+
+def test_a_predecessor_directory_another_registrations_book_binds_is_refused(
+    evenings: tds.World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    continued = _successor(evenings, tmp_path, monkeypatch)
+    marker = continued.predecessor / "paper" / "registration.json"
+    body = json.loads(marker.read_text(encoding="utf-8"))
+    marker.write_text(json.dumps({**body, "registration_sha256": "f" * 64}), encoding="utf-8")
+
+    code, _out, err, _document = _continued_report(continued, capsys)
+
+    assert code == 1
+    assert "binds no registration of this chain" in err
+
+
+def test_a_predecessor_directory_given_to_a_registration_that_names_none_is_refused(
+    world: tds.World, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, _out, err = _report(
+        world, capsys, extra=("--predecessor-runtime-dir", str(tmp_path / "anything"))
+    )
+
+    assert code == 1
+    assert "names no predecessor" in err
+
+
+def test_the_predecessors_directory_is_read_only(
+    evenings: tds.World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    continued = _successor(evenings, tmp_path, monkeypatch, book=_book_with(capital="400000"))
+    before = {
+        path.relative_to(continued.predecessor).as_posix(): path.read_bytes()
+        for path in sorted(continued.predecessor.rglob("*"))
+        if path.is_file() and "panel" not in path.relative_to(continued.predecessor).parts
+    }
+
+    code, _out, err, _document = _continued_report(continued, capsys)
+
+    assert code == 0, err
+    after = {
+        path.relative_to(continued.predecessor).as_posix(): path.read_bytes()
+        for path in sorted(continued.predecessor.rglob("*"))
+        if path.is_file() and "panel" not in path.relative_to(continued.predecessor).parts
+    }
+    assert after == before
+
+
+def test_a_successor_that_names_its_predecessor_never_prints_that_it_names_none(
+    evenings: tds.World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The M4 the batch-3 review left open: the successor's report prints the continuation
+    section its chain gives it, never the no-predecessor statement whose wording says "this
+    registration names no predecessor"."""
+    continued = _successor(evenings, tmp_path, monkeypatch)
+
+    code, out, err, document = _continued_report(continued, capsys)
+
+    assert code == 0, err
+    assert "names no predecessor" not in out
+    assert "continuation: none" not in out
+    assert document["continuation"]["chain"]
+    assert document["continuation"]["merged"] == 3

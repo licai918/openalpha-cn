@@ -195,6 +195,7 @@ __all__ = [
     "decided_by_an_evening",
     "delisted_or_refuse",
     "evening",
+    "expected_binding",
     "facts_day",
     "held_codes",
     "paper_book_lock",
@@ -419,6 +420,20 @@ def bind_paper_book(
     if not marker.exists() and _link_once(marker, text):
         return
     _refuse_another_binding(marker, binding)
+
+
+def expected_binding(
+    registration: SurvivorRegistration, *, config_id: str, registration_sha256: str
+) -> dict[str, str]:
+    """The paper-book marker a runtime directory of this registration holds
+    (`PAPER_BOOK_MARKER`): what `bind_paper_book` writes -- for a reader matching another
+    registration's runtime directory to it (`V2-P7-023`)."""
+    return _binding(
+        config_id=config_id,
+        config_digest=registration.digest,
+        epoch=registration.adapter.epoch_session,
+        registration_sha256=registration_sha256,
+    )
 
 
 def _binding(

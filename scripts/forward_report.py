@@ -75,6 +75,30 @@ branch: they load `backtest/paper.py`, whose audit hook a P6 report never instal
 are `SurvivorReportError`, a `ForwardReportError`, so the command's exits are P6's: 0 written, 1
 refused; a busy panel catalog is no refusal and stops the command as it is.
 
+### A successor registration (`V2-P7-023`)
+
+A survivor registration may name the registration it supersedes
+(`settings.survivor_continuation`, `strategy_survivor_continuation`), and the report then
+continues the predecessor's confirmatory sample. The chain is read at admission
+(`daily_selection.admit_predecessors`, the daily command's step 1), root first, and every refusal
+there is the report's. `--predecessor-runtime-dir` gives the runtime directory each predecessor
+wrote its records in, once per predecessor and repeatable: a predecessor's records and provenance
+are in another directory, because a new registration opens a new runtime directory and a new book.
+Directories are paired to the chain by the paper book's marker
+(`strategy_survivor_book.expected_binding`), an unpaired predecessor and a directory binding no
+link of the chain are both refused by name, and the predecessor's directory is read only -- its
+prediction store through the composition root's `prediction_store_at`, its late-record check
+without a verdict cache, so nothing is written beside it.
+
+A predecessor record the predecessor's own check refused is the truncation and is not scored
+again; every other is scored again from the stored panel under this registration and compared
+byte for byte with what the record holds (`strategy_survivor_continuation.continuation_bytes`, the
+registration's identity aside). The identical sessions join the sample with their own ids, and the
+first session that is not identical is marked and the sample is truncated there: no later
+predecessor session is scored again or merged. The sample counts its sessions from the chain
+root's epoch. The paper book is not continued: a new registration opens a new book, and the
+relative return reads only this registration's own sampled periods.
+
 ### The order it reads in, and the instant it reads at
 
 No lock is taken, so a daily evening may be writing beside the report. An evening writes its
@@ -130,7 +154,7 @@ from openalpha_cn.panel_ingest import (
 )
 from openalpha_cn.panel_view import panel_store
 from openalpha_cn.providers.tushare import TRADING_CALENDAR_DEFAULT_EXCHANGE
-from openalpha_cn.runtime.composition import build_storage
+from openalpha_cn.runtime.composition import build_storage, paper_state_store_at
 from openalpha_cn.storage.predictions import FilePredictionStore, PredictionStoreError
 from openalpha_cn.strategy_registration import (
     StrategyRegistrationError,
@@ -149,11 +173,13 @@ if TYPE_CHECKING:
     from openalpha_cn.domain.survivor_book import SurvivorBookConfig
     from openalpha_cn.runtime.composition import StorageContainer
     from openalpha_cn.strategy_survivor import SurvivorRegistration
+    from openalpha_cn.strategy_survivor_continuation import ChainLink, ContinuationResult
     from openalpha_cn.strategy_survivor_forward import (
         PredictionLayer,
         RecordOutcome,
         WitnessedRecord,
     )
+    from openalpha_cn.strategy_survivor_market import SessionOrdinals
 
 _THIS_SCRIPT: Final[str] = "scripts/forward_report.py"
 """This file's repository-relative path, added to what a registration binds, beside
@@ -298,6 +324,7 @@ def forward_report(
     registration: Path,
     repo: Path,
     as_of: datetime,
+    predecessor_runtime_dirs: Sequence[Path] = (),
 ) -> ForwardReport | SurvivorForwardReport:
     """The weekly forward-tracking report: the registered configuration's continuous book over
     every session the daily command actually rebalanced on, and the evidence summary behind it.
@@ -309,11 +336,27 @@ def forward_report(
     capped by what the panel has published.
 
     A survivor registration (`kind: "survivor_book/v1"`) is dispatched right after the admission
-    to `_survivor_forward_report` (module docstring).
+    to `_survivor_forward_report` (module docstring). `predecessor_runtime_dirs` are the runtime
+    directories of the registrations its own chain names (`V2-P7-023`), paired to the chain by
+    their paper book's marker; a P6 registration and a survivor registration that names no
+    predecessor are both refused one, because a directory is never read for nothing.
     """
     admitted = _admit(registration, repo)
     survivor = _survivor_of(admitted)
-    if survivor is not None:
+    if survivor is None:
+        if predecessor_runtime_dirs:
+            raise ForwardReportError(
+                "--predecessor-runtime-dir is read for a survivor registration that names a "
+                "predecessor; this registration is the P6 book"
+            )
+    else:
+        predecessors = _predecessors_of(admitted, survivor, repo)
+        if not predecessors and predecessor_runtime_dirs:
+            raise ForwardReportError(
+                f"{registration} names no predecessor, and --predecessor-runtime-dir was given: "
+                "a directory is never read for nothing"
+            )
+        paired = _paired_directories(predecessors, predecessor_runtime_dirs, own=runtime_dir)
         return _survivor_forward_report(
             store,
             prediction_store,
@@ -321,6 +364,7 @@ def forward_report(
             admitted=admitted,
             survivor=survivor,
             as_of=as_of,
+            predecessors=paired,
         )
     config = admitted.config
     exchange = str(config.get("exchange", TRADING_CALENDAR_DEFAULT_EXCHANGE))
@@ -427,6 +471,81 @@ def admitted_anchor_year(admitted: daily_selection.Registration) -> int:
     return daily_selection.anchor_of(admitted.config).year
 
 
+def _predecessors_of(
+    admitted: daily_selection.Registration, survivor: SurvivorRegistration, repo: Path
+) -> tuple[ChainLink, ...]:
+    """The registrations `admitted` names above itself, root first (`V2-P7-023`): the daily
+    command's own step-1 read (`daily_selection.admit_predecessors`), so a chain this report
+    cannot read is refused by the same names it would be refused from the first evening on."""
+    try:
+        return daily_selection.admit_predecessors(admitted, survivor, repo)
+    except daily_selection.StepFailedError as error:
+        raise ForwardReportError(str(error)) from error
+
+
+def _paired_directories(
+    predecessors: Sequence[ChainLink], directories: Sequence[Path], *, own: Path
+) -> tuple[tuple[ChainLink, Path], ...]:
+    """`predecessors` paired with the runtime directories given for them (`V2-P7-023`), in chain
+    order.
+
+    A directory is matched to the chain by the paper book's write-once marker: the marker a
+    registration's own book writes when it opens (`strategy_survivor_book.expected_binding`), so
+    a directory another registration's book opened can never be read as one link's. A predecessor
+    with no directory, a directory binding no link of the chain, a predecessor with two
+    directories and this registration's own runtime directory are each refused by name.
+    """
+    from openalpha_cn import strategy_survivor_book
+
+    expected = [
+        (
+            link,
+            strategy_survivor_book.expected_binding(
+                link.survivor,
+                config_id=link.config_id,
+                registration_sha256=link.registration_sha256,
+            ),
+        )
+        for link in predecessors
+    ]
+    resolved_own = own.resolve()
+    paired: dict[str, tuple[ChainLink, Path]] = {}
+    for directory in directories:
+        if directory.resolve() == resolved_own:
+            raise SurvivorReportError(
+                f"{directory} is this registration's own runtime directory; a predecessor's "
+                "records are read from the directory its own registration wrote them in"
+            )
+        marker = (
+            paper_state_store_at(directory).path.parent / strategy_survivor_book.PAPER_BOOK_MARKER
+        )
+        try:
+            body = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise SurvivorReportError(
+                f"{directory}'s paper book marker cannot be read: {error}"
+            ) from error
+        matched = [link for link, binding in expected if body == binding]
+        if not matched:
+            raise SurvivorReportError(f"{directory} binds no registration of this chain")
+        [link] = matched
+        if link.registration_sha256 in paired:
+            raise SurvivorReportError(
+                f"the predecessor {link.registration_sha256[:16]} ({link.config_id}) is paired "
+                f"with two runtime directories ({paired[link.registration_sha256][1]} and "
+                f"{directory}); one registration's records are in one directory"
+            )
+        paired[link.registration_sha256] = (link, directory)
+    for link, _binding in expected:
+        if link.registration_sha256 not in paired:
+            raise SurvivorReportError(
+                f"the predecessor {link.registration_sha256[:16]} ({link.config_id}) has no "
+                "--predecessor-runtime-dir whose paper book it binds; its records cannot be "
+                "witnessed"
+            )
+    return tuple(paired[link.registration_sha256] for link in predecessors)
+
+
 # --- the survivor report (`V2-P7-018`) -----------------------------------------------------------
 
 
@@ -438,6 +557,7 @@ def _survivor_forward_report(
     admitted: daily_selection.Registration,
     survivor: SurvivorRegistration,
     as_of: datetime,
+    predecessors: Sequence[tuple[ChainLink, Path]] = (),
 ) -> SurvivorForwardReport:
     """A survivor registration's weekly report (module docstring); glue only.
 
@@ -461,6 +581,7 @@ def _survivor_forward_report(
     """
     # Imported here, never for a P6 report: they load `backtest/paper.py` and its audit hook.
     from openalpha_cn import strategy_survivor_check as check
+    from openalpha_cn import strategy_survivor_continuation as continuation
     from openalpha_cn import strategy_survivor_forward as forward
     from openalpha_cn.model_view import ModelPanelUnreadableError, ModelRunBlockedError
     from openalpha_cn.panel_factors import FactorEngineError
@@ -478,6 +599,7 @@ def _survivor_forward_report(
             admitted=admitted,
             survivor=survivor,
             as_of=as_of,
+            predecessors=predecessors,
         )
     except (
         forward.SurvivorForwardError,
@@ -487,6 +609,7 @@ def _survivor_forward_report(
         ModelPanelUnreadableError,
         SessionOrdinalError,
         PredictionStoreError,
+        continuation.SurvivorContinuationError,
         # The late-record check's cache key and change census run outside the recompute's
         # refusal set (seams review 6): a 16:30 tier holding two builds, a blocked manifest
         # read, a catalog that refuses the read. A busy catalog (`PanelCatalogBusyError`, no
@@ -506,8 +629,14 @@ def _survivor_report(
     admitted: daily_selection.Registration,
     survivor: SurvivorRegistration,
     as_of: datetime,
+    predecessors: Sequence[tuple[ChainLink, Path]] = (),
 ) -> SurvivorForwardReport:
-    """`_survivor_forward_report`'s steps, its refusals unmapped."""
+    """`_survivor_forward_report`'s steps, its refusals unmapped.
+
+    `predecessors` are the chain's registrations paired with their runtime directories
+    (`_paired_directories`); empty when this registration names none, and then every read below
+    is the report's own, exactly as before (`V2-P7-023`).
+    """
     from openalpha_cn import strategy_survivor_check as check
     from openalpha_cn import strategy_survivor_forward as forward
     from openalpha_cn.panel_factors import FACTOR_TRANSFORMS
@@ -519,8 +648,12 @@ def _survivor_report(
     stop_rule = forward.read_forward_stop_rule(admitted.settings, protocol=protocol)
     adapter, book = survivor.adapter, survivor.book
     exchange, epoch = adapter.exchange, adapter.epoch_session
-    calendar = _survivor_calendar(store, exchange=exchange, epoch=epoch, as_of=as_of)
-    ordinals = SessionOrdinals(calendar, epoch)
+    successor = daily_selection.chain_link(admitted, survivor)
+    # The sample counts its sessions from the chain root's epoch, which owns the first sessions
+    # the successor continues; with no predecessor that is this registration's own (`V2-P7-023`).
+    sample_epoch = predecessors[0][0].epoch if predecessors else epoch
+    calendar = _survivor_calendar(store, exchange=exchange, epoch=sample_epoch, as_of=as_of)
+    ordinals = SessionOrdinals(calendar, sample_epoch)
     registered = admitted.declared
     reported = as_of.astimezone(SHANGHAI).date()
     # The evening's writes, read in reverse (module docstring): the snapshots, the journals, the
@@ -540,8 +673,23 @@ def _survivor_report(
         ordinals=ordinals,
         through=reported,
     )
-    sessions = tuple(item.session for item in witnessed)
     forward.check_journals_against_the_store(witnessed, journals, through=reported)
+    continued = (
+        _continued(
+            store,
+            predecessors,
+            successor=successor,
+            calendar=calendar,
+            ordinals=ordinals,
+            reported=reported,
+            as_of=as_of,
+        )
+        if predecessors
+        else None
+    )
+    merged = () if continued is None else continued.merged
+    every = tuple(sorted((*(c.item for c in merged), *witnessed), key=lambda item: item.session))
+    sessions = tuple(item.session for item in every)
     through = forward.report_through(calendar, ordinals, as_of=as_of, witnessed=sessions)
 
     # Every witnessed record is checked, mature or not: an unchecked record is not evidence, and
@@ -559,11 +707,13 @@ def _survivor_report(
         ),
         verdicts=check.FileSurvivorVerdicts(runtime_dir, clock=_utc_now),
     )
-    verdicts = {item.record_id: record_check(item.record) for item in witnessed}
+    # A merged predecessor record keeps the verdict its own registration's check gave it.
+    verdicts = {candidate.item.record_id: candidate.own for candidate in merged}
+    verdicts.update({item.record_id: record_check(item.record) for item in witnessed})
 
     horizons = (protocol.primary_horizon, *protocol.secondary_horizons)
     outcomes = _survivor_outcomes(
-        store, witnessed, horizons=horizons, book=book, exchange=exchange, as_of=as_of
+        store, every, horizons=horizons, book=book, exchange=exchange, as_of=as_of
     )
     layers = tuple(
         forward.prediction_layer(
@@ -582,6 +732,7 @@ def _survivor_report(
         book=book,
         layer=layers[0],
         outcomes=outcomes[protocol.primary_horizon],
+        own=frozenset(item.record_id for item in witnessed),
     )
     document = forward.survivor_forward_document(
         as_of=as_of,
@@ -596,7 +747,7 @@ def _survivor_report(
         paper=paper,
         power=power,
         stop_rule=stop_rule,
-        continuation=no_continuation_section(),
+        continuation=(no_continuation_section() if continued is None else continued.document()),
         integrity=daily_selection.INTEGRITY,
     )
     return SurvivorForwardReport(
@@ -635,6 +786,81 @@ def _survivor_calendar(
             f"the {exchange} calendar of {list(years)} cannot be read at {as_of.isoformat()}: "
             f"{error}"
         ) from error
+
+
+def _continued(
+    store: PanelStore,
+    predecessors: Sequence[tuple[ChainLink, Path]],
+    *,
+    successor: ChainLink,
+    calendar: TradingCalendar,
+    ordinals: SessionOrdinals,
+    reported: date,
+    as_of: datetime,
+) -> ContinuationResult:
+    """This registration's continued sample (`V2-P7-023`): every predecessor's on-time bound
+    record in the sessions it was the current registration for -- `(its own epoch, the next
+    link's epoch]` -- with the verdict its own late-record check gave it, judged against this
+    registration's configuration.
+
+    A predecessor's directory is read only: its prediction store is opened through the
+    composition root (`prediction_store_at`, no migration and no directory), and its own check
+    runs without a verdict cache (`verdicts=None`), so nothing of the predecessor's is written
+    beside it. The provenance its own run wrote is read for the holdings the session was scored
+    with; the successor's stored panel is what the day is scored again from.
+    """
+    from openalpha_cn import strategy_survivor_check as check
+    from openalpha_cn import strategy_survivor_continuation as continuation
+    from openalpha_cn import strategy_survivor_forward as forward
+    from openalpha_cn.panel_factors import FACTOR_TRANSFORMS
+    from openalpha_cn.runtime.composition import prediction_store_at
+    from openalpha_cn.strategy_registration import batch_digest
+
+    links = [link for link, _directory in predecessors]
+    uppers = [*(link.epoch for link in links[1:]), successor.epoch]
+    candidates = []
+    for (link, directory), upper in zip(predecessors, uppers, strict=True):
+        adapter = link.survivor.adapter
+        index = check.survivor_provenance_index(
+            directory, registration_sha256=link.registration_sha256
+        )
+        own_check = check.SurvivorRecordCheck(
+            store,
+            book=link.survivor.book,
+            transform=FACTOR_TRANSFORMS.get(adapter.transform),
+            exchange=adapter.exchange,
+            min_coverage=adapter.min_coverage,
+            max_carry_sessions=adapter.max_carry_sessions,
+            registered=link.declared,
+            provenance=index,
+            verdicts=None,  # a predecessor's directory is read only
+        )
+        items = forward.witnessed_survivor_records(
+            _FiledBy(prediction_store_at(directory, clock=lambda: as_of), as_of=as_of),
+            book=link.survivor.book,
+            registered=link.declared,
+            calendar=calendar,
+            ordinals=ordinals,
+            through=min(reported, upper),
+        )
+        for item in items:
+            if item.session <= link.epoch:
+                continue
+            candidates.append(
+                continuation.ContinuationCandidate(
+                    item=item,
+                    registration_sha256=link.registration_sha256,
+                    own=own_check(item.record),
+                    provenance=index.get((item.session, batch_digest(item.record.batch))),
+                )
+            )
+    target = continuation.continuation_target(successor)
+    return continuation.continued_sample(
+        candidates,
+        judge=lambda candidate: continuation.judge_continued_day(store, candidate, target=target),
+        chain=tuple(links),
+        sample_epoch=ordinals.epoch,
+    )
 
 
 def _survivor_outcomes(
@@ -718,6 +944,7 @@ def _paper_section(
     book: SurvivorBookConfig,
     layer: PredictionLayer,
     outcomes: Sequence[RecordOutcome],
+    own: frozenset[str],
 ) -> dict[str, Any]:
     """The paper book's record (`paper_record`'s two blocks), or its refusal in both
     (`paper_refusal`): every refusal of the record -- the record's own, a snapshot that does not
@@ -731,7 +958,9 @@ def _paper_section(
     the listing, and the ledger rows and journals of sessions after the head, which an evening
     may be writing beside the report, are left out. Since a journal is read only as it stood at
     the report's instant, the head is an evening that had filed by then. The relative return's
-    windows are the primary layer's sampled periods (`sampled_benchmarks`)."""
+    windows are the primary layer's sampled periods (`sampled_benchmarks`) whose record is
+    `own` -- a merged predecessor record's window is left out: it is before this registration's
+    book opened (`V2-P7-023`)."""
     import sqlite3
 
     from pydantic import ValidationError
@@ -764,6 +993,7 @@ def _paper_section(
                 csi500=item.csi500,
             )
             for item in forward.sampled_benchmarks(layer, outcomes)
+            if item.record_id in own
         ]
         return paper.paper_record(
             [load_snapshot(state, session) for session in listing.sessions if session <= head],
@@ -941,6 +1171,17 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
         default=None,
         help="Pin the report's clock (default: now).",
     )
+    parser.add_argument(
+        "--predecessor-runtime-dir",
+        type=Path,
+        action="append",
+        default=None,
+        metavar="PATH",
+        help=(
+            "A runtime directory of a registration this one supersedes (V2-P7-023): read only, "
+            "matched to the chain by its paper book's marker. Repeat once per predecessor."
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="Print the report as JSON.")
     arguments = parser.parse_args(argv)
     banner = daily_selection.smoke_banner(arguments.registration)
@@ -970,6 +1211,9 @@ def _main_report(
             registration=arguments.registration.resolve(),
             repo=arguments.repo.resolve(),
             as_of=as_of,
+            predecessor_runtime_dirs=tuple(
+                path.resolve() for path in arguments.predecessor_runtime_dir or ()
+            ),
         )
     except (
         ForwardReportError,
