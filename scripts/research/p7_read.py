@@ -15,13 +15,13 @@ stops with exit 4 when the two differ.
 Exit codes, the operator's signal:
 
 * 0 -- the registration or the result was written (the verdict is printed as usual);
-* 2 -- usage, or a `ReadingError` the registration cannot be written with. Every request and
-  configuration value is a required flag: there are no code defaults, so a registration cannot
-  carry a value the user never approved. A path that does not exist (the registration, the
-  repository) is a usage error with its path in the message, never a traceback;
-* 3 -- refused before the claim (runtime directory, registration not committed, code changed,
-  foreign package or script, already claimed, `second_use` before the validation window, a shallow
-  repository or grafts, a preflight problem): nothing was spent;
+* 2 -- usage, or a `ReadingError` the registration cannot be written with: every request and
+  configuration value is a required flag (no code defaults, so a value the user never approved
+  cannot enter one); a missing path is a usage error with its path, never a traceback;
+* 3 -- refused: before the claim (runtime directory, registration, bound code, foreign package or
+  script, already claimed, `second_use` too early, shallow or grafts, a preflight problem) or
+  after it (an unbound document, an unreadable calendar or panel, a read that got there first):
+  a 3 may follow the claim -- look for a claim file, and do not delete one;
 * 4 -- the calendar's exact count is not the `expected_periods` the registration records: stop and
   report it. Nothing is written and nothing is claimed; the prior is never edited to match.
 """

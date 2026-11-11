@@ -16,8 +16,8 @@ held to the same ones.
 The command for the read is `scripts/research/p7_read.py` (`register [--dry-run]` and `read`); it
 is a thin front end, and the library path stays `read_once`. Its exit codes are 0 (the
 registration or the result was written), 2 (usage, or a `ReadingError` the registration cannot be
-written with), 3 (refused before the claim) and 4 (`ExpectedPeriodsMismatch`: the calendar's count
-is not the prior -- stop and report, nothing was written or claimed).
+written with), 3 (refused -- before the claim or after it: look for a claim file) and 4
+(`ExpectedPeriodsMismatch`: the calendar's count is not the prior -- stop and report it).
 
 Whatever can be checked without outcome data is checked there, before anything is claimed, because
 a failure after the claim spends the window:
