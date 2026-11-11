@@ -327,7 +327,9 @@ def test_the_report_reads_the_forward_stop_rule_from_the_registrations_settings(
     def registered(
         settings: Mapping[str, Any], *, protocol: forward.SurvivorForwardProtocol
     ) -> Any:
-        return real({**settings, forward.SURVIVOR_FORWARD_STOP_RULE_KEY: STOP_RULE}, protocol=protocol)
+        return real(
+            {**settings, forward.SURVIVOR_FORWARD_STOP_RULE_KEY: STOP_RULE}, protocol=protocol
+        )
 
     monkeypatch.setattr(forward, "read_forward_stop_rule", registered)
 
@@ -475,7 +477,8 @@ NOT_MEASURABLE_WORDING: Final[str]
 """The third conclusion; never the 'no evidence' wording."""
 
 
-def adopted_stop_rule(*, score: str, expected_periods: int) -> StopRule: ...
+def adopted_stop_rule(*, score: str, expected_periods: int) -> StopRule:
+    ...
     # horizon = strategy_survivor_forward.ADOPTED_PRIMARY_HORIZON
     # minimum_periods = expected_periods  (R1's recommendation)
     # any_of = (StopClause(ADOPTED_PRIMARY_METRIC, ADOPTED_STOP_MEAN_AT_OR_BELOW),
@@ -696,8 +699,16 @@ def main(argv: Sequence[str] | None = None) -> int: ...   # 0 / 2 / 3 / 4
         ({"expected_periods": None}, "expected_periods"),
         ({"expected_periods": 2}, "minimum_periods"),
         ({"expected_periods": 0}, "expected_periods"),
-        ({"role": "secondary", "rule": None, "window": "second_use",
-          "request": SECOND_USE_REQUEST, "expected_periods": 3}, "expected_periods"),
+        (
+            {
+                "role": "secondary",
+                "rule": None,
+                "window": "second_use",
+                "request": SECOND_USE_REQUEST,
+                "expected_periods": 3,
+            },
+            "expected_periods",
+        ),
     ],
 )
 def test_a_primary_registration_records_the_period_count_the_plan_expects(
@@ -860,7 +871,7 @@ def test_the_command_surfaces_a_shallow_repository_as_a_refusal(
 
 1. `p7_reading.py`：`_BODY_KEYS` 加 `"expected_periods"`；`_registration_of` 在停止规则之后加（顺序让「primary 没带」先于「secondary 带了」报出来）：
 
-```python
+```text
     expected = body.get("expected_periods")
     if role == "primary":
         if type(expected) is not int or expected < 1:
@@ -896,8 +907,12 @@ def test_the_command_surfaces_a_shallow_repository_as_a_refusal(
 
 ```python
 def counted_periods(
-    runtime_dir: Path, *, window: DiagnosticWindow, request: Mapping[str, Any],
-    config: Mapping[str, Any], horizon: int,
+    runtime_dir: Path,
+    *,
+    window: DiagnosticWindow,
+    request: Mapping[str, Any],
+    config: Mapping[str, Any],
+    horizon: int,
 ) -> int:
     """The exact non-overlapping periods the panel's own calendar can summarise for this window,
     read before anything is claimed (the calendar is not outcome data)."""
@@ -982,7 +997,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 `_read`：
 
-```python
+```text
     body = json.loads(arguments.registration.read_text(encoding="utf-8"))
     window = p7_windows.WINDOWS[body["window"]]
     rule = body.get("stop_rule")

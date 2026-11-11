@@ -211,9 +211,11 @@ FAILED tests/unit/domain/test_survivor_orders.py::test_a_buy_only_tonights_sale_
 ```python
 # src/openalpha_cn/domain/survivor_orders.py
 FREEZE_RATIO: Final[Decimal] = Decimal("1.10")
-FREEZE_SHORTFALL_POLICY: Final[str] = "reduce_lots"   # or "drop_whole"
+FREEZE_SHORTFALL_POLICY: Final[str] = "reduce_lots"  # or "drop_whole"
+
 
 def freeze_price(reference_price: Decimal) -> Decimal: ...
+
 
 def build_trade_list(
     *,
@@ -369,7 +371,7 @@ def freeze_price(reference_price: Decimal) -> Decimal:
 
 `build_trade_list` 里：
 
-```python
+```text
     buy_prices = {
         entry.ts_code: _price_of(entry.ts_code, reference_prices) for entry in decision.entries
     }
@@ -482,14 +484,16 @@ class FundingShortfall(BaseModel):
     placed_quantity: int = Field(ge=0)
     missing_amount: Decimal = Field(ge=0)
 
+
 class FundingReport(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     cash: Decimal = Field(ge=0)
-    sale_proceeds_pending: Decimal = Field(ge=0)   # lands after the auction, not before it
+    sale_proceeds_pending: Decimal = Field(ge=0)  # lands after the auction, not before it
     reserved_for_carried: Decimal = Field(ge=0)
     frozen: Decimal = Field(ge=0)
     freeze_ratio: Decimal = FREEZE_RATIO
     shortfalls: tuple[FundingShortfall, ...] = ()
+
 
 def funding_report(
     *,
@@ -501,6 +505,7 @@ def funding_report(
     cash: Decimal,
     freeze_prices: Mapping[str, Decimal] | None = None,
 ) -> FundingReport: ...
+
 
 # src/openalpha_cn/backtest/paper_evening.py
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -558,7 +563,9 @@ def test_the_funding_report_names_every_entry_the_cash_sized_short() -> None:
     ]
 
 
-def test_the_funding_report_says_what_tonights_sells_release_and_what_the_cash_sized_short() -> None:
+def test_the_funding_report_says_what_tonights_sells_release_and_what_the_cash_sized_short() -> (
+    None
+):
     # Cash 5,000 and a sale of A for 3,000: the 3,000 lands after the auction and is reported as
     # such; the buy of B is sized on the 5,000 alone, which buys 300 of the 700 the equal share
     # asks, so 400 x 13.75 = 5,500.00 is the named shortfall.
@@ -584,7 +591,7 @@ def test_the_funding_report_says_what_tonights_sells_release_and_what_the_cash_s
     )
 
     assert report.sale_proceeds_pending == Decimal("3000.00")
-    assert report.frozen == Decimal("4125.00")   # 300 B at the 13.75 limit-up
+    assert report.frozen == Decimal("4125.00")  # 300 B at the 13.75 limit-up
     assert [item.model_dump() for item in report.shortfalls] == [
         {
             "ts_code": "B",
@@ -709,11 +716,10 @@ def test_a_document_filed_before_the_funding_block_says_the_shortfalls_were_not_
 ILLIQUID_DROP_FRACTION: Final[Decimal] = Decimal("0.30")
 ILLIQUID_POLICY: Final[str] = "forced_exit"
 
+
 class SurvivorBookConfig(BaseModel):
     ...
-    liquidity_drop_fraction: Decimal = Field(
-        default=ILLIQUID_DROP_FRACTION, ge=0, lt=1
-    )
+    liquidity_drop_fraction: Decimal = Field(default=ILLIQUID_DROP_FRACTION, ge=0, lt=1)
 ```
 
 **Steps:**
