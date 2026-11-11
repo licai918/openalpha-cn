@@ -2059,3 +2059,25 @@ def test_a_validation_read_does_not_wait_for_the_second_use_window(repo: Path) -
     result = run(registration, repo, Measure())
 
     assert result["stop_rule"]["outcome"] == "not triggered"
+
+
+def test_the_spent_check_refuses_a_shallow_repository_by_itself(repo: Path) -> None:
+    """`_require_the_validation_window_spent` is called after `_refuse_a_second_read` today, but
+    its guarantee must not depend on that: a shallow history hides a claim before its cut, so the
+    check refuses by itself, whatever the caller did first."""
+    (repo / ".git" / "shallow").write_text(head(repo) + "\n", encoding="utf-8")
+
+    with pytest.raises(p7_reading.ValidationNotSpentError, match="git fetch --unshallow"):
+        p7_reading._require_the_validation_window_spent(repo)
+
+
+def test_the_spent_check_refuses_a_grafts_file_by_itself(repo: Path) -> None:
+    """A grafts file changes the parents git reports while the repository still says it is not
+    shallow: the check refuses it by itself, naming the file."""
+    merge = head(repo)
+    grafts = repo / ".git" / "info" / "grafts"
+    grafts.parent.mkdir(parents=True, exist_ok=True)
+    grafts.write_text(f"{merge} {merge}\n", encoding="utf-8")
+
+    with pytest.raises(p7_reading.ValidationNotSpentError, match="grafts"):
+        p7_reading._require_the_validation_window_spent(repo)

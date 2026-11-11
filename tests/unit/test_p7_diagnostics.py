@@ -1304,3 +1304,45 @@ def test_explore_refuses_a_runtime_directory_inside_the_main_checkout_before_ope
     assert list((runtime / "panel").iterdir()) == []
     assert not (runtime / "panel" / p7_windows.CATALOG_FILE).exists()
     assert not (tmp_path / "out").exists()
+
+
+def test_the_runtime_directory_is_checked_before_the_store_is_opened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deleting the check would not merely change the error: the store would be opened first.
+    The order is recorded at both seams, so a check moved after the open fails here even though
+    the run would still refuse."""
+    checkout = tmp_path / "checkout"
+    runtime = checkout / "runtime"
+    (runtime / "panel").mkdir(parents=True)
+    told: list[str] = []
+    check = p7_windows.checked_runtime_directory
+
+    def checked(*args: Any, **kwargs: Any) -> Path:
+        told.append("checked")
+        return check(*args, **kwargs)
+
+    def opened(*args: Any, **kwargs: Any) -> Any:
+        told.append("opened")
+        raise AssertionError("the runtime-directory check did not run first")
+
+    monkeypatch.setattr(p7_windows, "MAIN_CHECKOUT", checkout.resolve())
+    monkeypatch.setattr(p7, "checked_runtime_directory", checked)
+    monkeypatch.setattr(p7, "capped_panel_store", opened)
+
+    code = p7.main(
+        [
+            *EXPLORE,
+            "--runtime-dir",
+            str(runtime),
+            "--first",
+            "2017-01-03",
+            "--last",
+            "2017-12-29",
+            "--out",
+            str(tmp_path / "out"),
+        ]
+    )
+
+    assert code == 2
+    assert told == ["checked"]

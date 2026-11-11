@@ -510,13 +510,16 @@ def test_a_runtime_directory_on_the_research_root_or_the_main_checkout_is_refuse
 ) -> None:
     """A read-only connection still creates catalog.duckdb.lock/.gate beside the catalogue
     (panel/store.py:1309-1364), and a read-once measurement holds the catalogue's shared lock
-    for its whole computation (store.py:2206-2222): neither root may be opened in place."""
+    for its whole computation (store.py:2206-2222): neither root may be opened in place, and the
+    refusal creates nothing beside the catalogue."""
     home = tmp_path / "home"
     research = home / "openalpha-research"
     checkout = tmp_path / "checkout"
-    (research / "panel").mkdir(parents=True)
+    panel = research / "panel"
+    panel.mkdir(parents=True)
+    (panel / "a-sentinel").write_text("stored by the panel's last build\n", encoding="utf-8")
     (checkout / "runtime").mkdir(parents=True)
-    runtime = research / "panel" if where == "research" else checkout / "runtime"
+    runtime = panel if where == "research" else checkout / "runtime"
 
     with pytest.raises(p7_windows.RuntimeDirectoryRefusedError) as raised:
         p7_windows.checked_runtime_directory(
@@ -526,7 +529,10 @@ def test_a_runtime_directory_on_the_research_root_or_the_main_checkout_is_refuse
     said = str(raised.value)
     assert str(runtime.resolve()) in said
     assert ("openalpha-research" if where == "research" else "main checkout") in said
-    assert list((research / "panel").iterdir()) == []
+    # Non-vacuous: the catalogue's directory is the one the check must leave alone, and it holds
+    # something to be left alone -- a lock or a gate file written there would fail this.
+    assert sorted(entry.name for entry in panel.iterdir()) == ["a-sentinel"]
+    assert not (runtime / p7_windows.CATALOG_FILE).exists()
 
 
 def test_a_clone_under_the_home_directory_is_not_refused(tmp_path: Path) -> None:
@@ -574,8 +580,11 @@ def test_a_runtime_directory_spelled_in_another_case_on_a_case_blind_volume_is_r
 
 
 def test_the_two_refusals_are_the_smokes_path_policy(tmp_path: Path) -> None:
-    """The rules are the smoke's, not a second copy of them: the same three paths are accepted
-    and refused by both, with the smoke's whitespace and temporary-directory rules left out."""
+    """The rules are the smoke's, not a second copy of them: the same paths are accepted and
+    refused by both, over the spellings that can drift -- the roots themselves, their
+    subdirectories, a name that merely starts with the research root's, `..` through it, and
+    another case of it on a case-blind volume. The smoke's own whitespace and temporary-directory
+    rules are left out: they are stricter, not different, and these paths break neither."""
     env = _smoke_env()
     home = tmp_path / "home"
     research = home / "openalpha-research"
@@ -584,13 +593,26 @@ def test_the_two_refusals_are_the_smokes_path_policy(tmp_path: Path) -> None:
     (checkout / "runtime").mkdir(parents=True)
     clone = home / "clone"
     clone.mkdir()
+    paths = [
+        research,
+        research / "panel",
+        research / "panel" / ".." / "panel",
+        checkout,
+        checkout / "runtime",
+        clone,
+        home / "openalpha-research-clone",
+        home / "openalpha-research-clone" / "panel",
+    ]
+    spelled = home / "OpenAlpha-Research" / "panel"
+    if spelled.exists() or spelled.parent.resolve() == research.resolve():
+        paths.append(spelled)
     policy = env.PathPolicy(
         temporary_roots=(),
         main_checkout=checkout.resolve(),
         research_runtime=research.resolve(),
     )
 
-    for where in (research / "panel", checkout / "runtime", clone):
+    for where in paths:
         try:
             policy.checked("runtime directory", where)
             smoke_refused = False

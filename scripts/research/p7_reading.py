@@ -1444,6 +1444,45 @@ def _refuse_foreign_p7_scripts(root: Path) -> None:
             ) from error
 
 
+def _refuse_a_shaped_history(
+    root: Path,
+    *,
+    refusal: type[RuntimeError],
+    consequence: str,
+    grafts_unreadable: str | None = None,
+    grafts_present: str | None = None,
+) -> None:
+    """Refuse a repository whose history git reports reshaped -- shallow, or holding an
+    `info/grafts` file -- naming the remedy and `consequence` (why the caller's question cannot
+    be answered from the repository). The two grafts branches default to `consequence`;
+    `_refuse_a_second_read` passes the wordings its grafts messages have always used, so those
+    messages do not move. Both entry points call this first: the guarantee is the function's, not
+    its caller's order."""
+    shallow = registry._git(root, "rev-parse", "--is-shallow-repository")
+    if shallow.returncode != 0 or shallow.stdout.strip() != b"false":
+        said = (shallow.stdout or shallow.stderr).decode(errors="replace").strip()
+        raise refusal(
+            f"{root} is a shallow repository, or git cannot say that it is not ({said!r}): its "
+            f"history stops at the cut, so {consequence}; run `git fetch --unshallow` first"
+        )
+    grafts = registry._git(root, "rev-parse", "--git-path", "info/grafts")
+    if grafts.returncode != 0:
+        raise refusal(
+            f"git cannot say where {root}'s grafts file would be "
+            f"({grafts.stderr.decode(errors='replace').strip()}); "
+            f"{grafts_unreadable or consequence}"
+        )
+    named = Path(grafts.stdout.decode().strip())
+    grafts_file = named if named.is_absolute() else root / named
+    if grafts_file.exists():
+        raise refusal(
+            f"{grafts_file} is a grafts file: it changes the parents git reports for every "
+            f"reader (and the repository still says it is not shallow), so "
+            f"{grafts_present or consequence}; remove it, or convert it with `git replace "
+            "--convert-graft-file`, whose replacement refs this module ignores"
+        )
+
+
 def _refuse_a_second_read(
     root: Path,
     reading: str,
@@ -1455,32 +1494,17 @@ def _refuse_a_second_read(
 ) -> None:
     """Refuse when the reading's claim, the window's claim or a result is on disk, or was ever
     committed on any ref. Every path is under `root` (built from the filed registration). A
-    shallow repository is refused first: its history stops at the cut, and a claim committed
-    before it would be invisible to every check below."""
-    shallow = registry._git(root, "rev-parse", "--is-shallow-repository")
-    if shallow.returncode != 0 or shallow.stdout.strip() != b"false":
-        said = (shallow.stdout or shallow.stderr).decode(errors="replace").strip()
-        raise ReadingAlreadyClaimedError(
-            f"{root} is a shallow repository, or git cannot say that it is not ({said!r}): its "
-            "history stops at the cut, so a claim committed before it cannot be seen and the "
-            "window cannot be shown unread; run `git fetch --unshallow` first"
-        )
-    grafts = registry._git(root, "rev-parse", "--git-path", "info/grafts")
-    if grafts.returncode != 0:
-        raise ReadingAlreadyClaimedError(
-            f"git cannot say where {root}'s grafts file would be "
-            f"({grafts.stderr.decode(errors='replace').strip()}); a read that cannot be shown to "
-            "be the first is refused"
-        )
-    named = Path(grafts.stdout.decode().strip())
-    grafts_file = named if named.is_absolute() else root / named
-    if grafts_file.exists():
-        raise ReadingAlreadyClaimedError(
-            f"{grafts_file} is a grafts file: it changes the parents git reports for every "
-            "reader (and the repository still says it is not shallow), so a claim it hides "
-            "cannot be seen; remove it, or convert it with `git replace --convert-graft-file`, "
-            "whose replacement refs this module ignores"
-        )
+    shallow repository, or one holding a grafts file, is refused first: its history stops at the
+    cut, and a claim committed before it would be invisible to every check below."""
+    _refuse_a_shaped_history(
+        root,
+        refusal=ReadingAlreadyClaimedError,
+        consequence=(
+            "a claim committed before it cannot be seen and the window cannot be shown unread"
+        ),
+        grafts_unreadable="a read that cannot be shown to be the first is refused",
+        grafts_present="a claim it hides cannot be seen",
+    )
     whose = f"the {window.name} window"
     files = (
         (claim, "a claim", reading),
@@ -1524,6 +1548,14 @@ def _require_the_validation_window_spent(root: Path) -> None:
     looked for exactly as `_refuse_a_second_read` looks for a spent claim (`_LOG_EVERYTHING`):
     every ref, every unexpired reflog entry, every parent of every merge.
     """
+    _refuse_a_shaped_history(
+        root,
+        refusal=ValidationNotSpentError,
+        consequence=(
+            "whether the validation window was read first cannot be shown, so the second_use read "
+            "is refused"
+        ),
+    )
     relative = (READING_DIRECTORY / f"{WINDOWS['validation'].name}{WINDOW_CLAIM_SUFFIX}").as_posix()
     log = registry._git(root, *_LOG_EVERYTHING, "--format=%H", "--", relative)
     if log.returncode != 0:
