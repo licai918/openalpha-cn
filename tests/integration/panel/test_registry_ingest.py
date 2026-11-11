@@ -1056,6 +1056,22 @@ def test_a_later_observation_still_rewrites_the_empty_year(tmp_path: Path) -> No
     assert coverage is not None and coverage.as_of == later
 
 
+def test_an_older_observation_does_not_move_the_empty_year_back(tmp_path: Path) -> None:
+    """A replay at an earlier `as_of` knows less than the stored empty year: it writes nothing
+    and answers `()`, so the year's freshness record only ever moves forward -- the same rule as
+    an older fetch over a year that holds rows."""
+    store = _seed_registry(tmp_path)
+    later = _evening(date(2027, 6, 1))
+    record_empty_universe_year(store, _registry_batch(later))
+    before = store.read_coverage(STOCK_BASIC_DATASET, 2027)
+
+    refs = record_empty_universe_year(store, _registry_batch(FIRST_EVENING_2027))
+
+    assert refs == ()
+    assert store.read_coverage(STOCK_BASIC_DATASET, 2027) == before
+    assert before is not None and before.as_of == later
+
+
 def test_a_fetch_carrying_the_observation_year_writes_nothing_and_prints_nothing(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1084,6 +1100,21 @@ def test_a_refused_write_prints_nothing(tmp_path: Path, capsys: pytest.CaptureFi
         )
 
     assert "EMPTY" not in capsys.readouterr().err
+
+
+def test_one_observation_prints_one_empty_line_however_many_years_ask(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Every `--year` of one `panel build` fetches the whole registry at one instant: the empty
+    year is written once, so its `EMPTY` line is printed once."""
+    store = _seed_registry(tmp_path)
+    batch = _registry_batch(FIRST_EVENING_2027)
+
+    cli._write_registry_year(store, batch, now=FIRST_EVENING_2027)
+    cli._write_registry_year(store, batch, now=FIRST_EVENING_2027)
+
+    err = capsys.readouterr().err
+    assert err.count("EMPTY") == 1
 
 
 # --- the name history and ST ---------------------------------------------------------------

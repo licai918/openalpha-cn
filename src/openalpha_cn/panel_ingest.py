@@ -7604,9 +7604,10 @@ def record_empty_universe_year(
     once per `--year` and calls this writer each time; at one `--as-of` every call is the same
     observation, so the first writes the year and the rest answer `()` -- the partition and its
     freshness record are already what this call would write, and the `EMPTY` line is printed only
-    for the years actually written. A **later** observation still rewrites it: freshness is the
-    only reason to write an empty year again (`PartitionCoverage.as_of` bounds a reader's
-    staleness).
+    for the years actually written. An **older** observation writes nothing for a stored empty year
+    either -- freshness only moves forward, the rule a stored year with rows already follows -- and
+    answers `()`. A **later** observation still rewrites it: freshness is the only reason to write
+    an empty year again (`PartitionCoverage.as_of` bounds a reader's staleness).
 
     **Called after `write_stock_universe`, never instead of it.** That function keeps one job --
     write the years the fetch carries -- and its "every year vetted before any year is written"
@@ -7661,7 +7662,9 @@ def record_empty_universe_year(
     if any(year == observation_year for year, _yearly in by_year):
         return ()
     stored = store.read_coverage(STOCK_BASIC_DATASET, observation_year)
-    if stored is not None and stored.row_count == 0 and stored.as_of == batch.as_of:
+    # One observation is one write; an older one knows less and must not move freshness back --
+    # the same "an older fetch writes nothing" rule a stored year with rows follows below.
+    if stored is not None and stored.row_count == 0 and stored.as_of >= batch.as_of:
         return ()
     if stored is not None and stored.row_count:
         if batch.as_of >= stored.as_of:
