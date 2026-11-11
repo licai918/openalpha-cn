@@ -511,6 +511,7 @@ def _survivor_report(
     from openalpha_cn import strategy_survivor_check as check
     from openalpha_cn import strategy_survivor_forward as forward
     from openalpha_cn.panel_factors import FACTOR_TRANSFORMS
+    from openalpha_cn.strategy_survivor_continuation import no_continuation_section
     from openalpha_cn.strategy_survivor_market import SessionOrdinals
 
     protocol = forward.read_forward_protocol(admitted.settings)
@@ -595,6 +596,7 @@ def _survivor_report(
         paper=paper,
         power=power,
         stop_rule=stop_rule,
+        continuation=no_continuation_section(),
         integrity=daily_selection.INTEGRITY,
     )
     return SurvivorForwardReport(

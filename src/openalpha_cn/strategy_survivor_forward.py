@@ -200,6 +200,9 @@ does on its own:
   section 2(a)): a daily journal whose `prediction` stage names a record must name the one the
   store witnesses for its session, and one that filed none must have none; a disagreement
   refuses the report, naming the session.
+- **The continuation section** (`V2-P7-023`): handed in whole by the report script --
+  `strategy_survivor_continuation`'s result or its no-predecessor section -- and printed after
+  the records; this module reads it and decides nothing about it.
 - **Where the report runs through** (`report_through`): the newest session whose record can no
   longer be filed -- its registration cutoff, 09:15 of the next session, is at or before the
   report's `as_of` -- or a newer session that already carries a witnessed record. A session after
@@ -1926,6 +1929,7 @@ def survivor_forward_document(
     power: SurvivorForwardPowerPlan | None,
     stop_rule: SurvivorForwardStopRule | None,
     integrity: str,
+    continuation: Mapping[str, Any],
 ) -> dict[str, Any]:
     """The `survivor_forward_report/v1` document (module docstring).
 
@@ -1934,9 +1938,11 @@ def survivor_forward_document(
     secondary), `paper` `paper_record`'s `{"paper_ledger", "relative"}` or `paper_refusal`'s,
     `power` the registration's `read_forward_power` (`None`: it carries none, and the `power`
     section says so), `stop_rule` the registration's `read_forward_stop_rule` (`None`: it carries
-    none, and the `stop_rule` section says so), and `integrity` the threat model every forward
-    report states. JSON-safe, with no set iterated unsorted: the same inputs give the same
-    document."""
+    none, and the `stop_rule` section says so), `integrity` the threat model every forward
+    report states, and `continuation` the report's continuation section --
+    `strategy_survivor_continuation`'s result document or its no-predecessor section, a mapping
+    that must carry the shared `wording`. JSON-safe, with no set iterated unsorted: the same
+    inputs give the same document."""
     horizons = (protocol.primary_horizon, *protocol.secondary_horizons)
     by_horizon = {layer.horizon: layer for layer in layers}
     if len(by_horizon) != len(layers) or sorted(by_horizon) != sorted(horizons):
@@ -1950,6 +1956,12 @@ def survivor_forward_document(
                 f"the paper record hands in no {section} section: it is paper_record's two "
                 "sections or paper_refusal's"
             )
+    if not isinstance(continuation, Mapping) or "wording" not in continuation:
+        raise SurvivorForwardError(
+            "the continuation section hands in no wording: the report script hands in "
+            "strategy_survivor_continuation's result document or its no-predecessor section, "
+            "and this module only prints it"
+        )
     primary = by_horizon[protocol.primary_horizon]
     analysis = primary.headline.non_overlapping
     sessions = tuple(sorted(witnessed))
@@ -1968,6 +1980,7 @@ def survivor_forward_document(
         "records": _records_section(
             sessions, verdicts, ordinals=ordinals, through=through, primary=primary
         ),
+        "continuation": dict(continuation),
         "prediction_layer": {
             "wording": SURVIVOR_WORDING,
             "forecast_wording": PREDICTION_LAYER_WORDING,
@@ -2600,9 +2613,9 @@ def _cannot_be_evaluated_yet(
 
 def survivor_forward_lines(document: Mapping[str, Any]) -> list[str]:
     """`document` as the lines the report prints: the records and their refusals first, then
-    the prediction layer, the paper ledger, the relative return, what cannot be evaluated yet,
-    the wording and the integrity statement. Read from the document alone, so a document read
-    back from its file prints the same lines."""
+    the continuation section, then the prediction layer, the paper ledger, the relative return,
+    what cannot be evaluated yet, the wording and the integrity statement. Read from the document
+    alone, so a document read back from its file prints the same lines."""
     protocol = document["protocol"]
     records = document["records"]
     horizons = (protocol["primary_horizon"], *protocol["secondary_horizons"])
@@ -2617,6 +2630,7 @@ def survivor_forward_lines(document: Mapping[str, Any]) -> list[str]:
         f"window {protocol['window_periods']} periods, {protocol['periods_matured']} matured",
     ]
     lines += _records_lines(records)
+    lines += _continuation_lines(document["continuation"])
     layer = document["prediction_layer"]
     lines.append(f"prediction layer -- {layer['forecast_wording']}")
     for horizon in horizons:
@@ -2671,6 +2685,40 @@ def _records_lines(records: Mapping[str, Any]) -> list[str]:
         f"{overall['refused']} of {overall['checked']}, {sampled['refused']} of "
         f"{sampled['checked']} in the sample; {records['headline_basis']}"
     )
+    return lines
+
+
+def _continuation_lines(section: Mapping[str, Any]) -> list[str]:
+    """The continuation section as the report prints it (`V2-P7-023`): the no-predecessor
+    statement alone, or the merge count and chain root, the truncation when there is one, one
+    line per merged or left-behind predecessor day, and the rule -- read from the section alone,
+    so this module decides nothing about a chain."""
+    chain = section["chain"]
+    if not chain:
+        return [f"continuation: none -- {section['statement']}"]
+    root = chain[0]
+    lines = [
+        f"continuation: {section['merged']} of {section['candidates']} predecessor sessions "
+        f"merged from {len(chain)} registration(s) (root {root['registration_sha256'][:16]}, "
+        f"epoch {root['epoch_session']}); the sample counts from {section['sample_epoch']}"
+    ]
+    truncation = section["truncation"]
+    if truncation is not None:
+        lines.append(
+            f"  TRUNCATED at {truncation['session']} ({truncation['outcome']}): "
+            f"{truncation['reason']}"
+        )
+    for day in section["days"]:
+        if day["outcome"] == "identical":
+            lines.append(
+                f"  MERGED {day['record_id']} ({day['session']}, registration "
+                f"{day['registration_sha256'][:16]}, own check {day['own_verdict']})"
+            )
+        elif day["outcome"] == "after_truncation":
+            lines.append(
+                f"  NOT MERGED {day['record_id']} ({day['session']}): after the truncation"
+            )
+    lines.append(f"  rule: {section['rule']}")
     return lines
 
 

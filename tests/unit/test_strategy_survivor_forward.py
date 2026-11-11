@@ -94,6 +94,7 @@ from openalpha_cn.strategy_registration import (
     registration_cutoff,
 )
 from openalpha_cn.strategy_survivor_check import SurvivorRecordVerdict
+from openalpha_cn.strategy_survivor_continuation import no_continuation_section
 from openalpha_cn.strategy_survivor_forward import (
     DESCRIPTIVE_WORDING,
     FORWARD_METRICS,
@@ -1989,11 +1990,13 @@ def reported(
     paper: Mapping[str, Any] | None = None,
     power: SurvivorForwardPowerPlan | None = None,
     stop_rule: SurvivorForwardStopRule | None = None,
+    continuation: Mapping[str, Any] | None = None,
     **changes: object,
 ) -> dict[str, Any]:
     """The document of `outcomes` (by horizon) under the test protocol with `changes`, the
-    sample drawn through the session of ordinal `through` at every horizon, and the power plan
-    and stop rule the registration carries (`None`: none)."""
+    sample drawn through the session of ordinal `through` at every horizon, the power plan and
+    stop rule the registration carries (`None`: none), and the continuation section (`None`:
+    `no_continuation_section()`, the registration that names no predecessor)."""
     read = protocol(**changes)
     layers = tuple(
         prediction_layer(
@@ -2019,6 +2022,7 @@ def reported(
         paper=paper_refusal(NO_BOOK) if paper is None else paper,
         power=power,
         stop_rule=stop_rule,
+        continuation=no_continuation_section() if continuation is None else continuation,
         integrity=INTEGRITY,
     )
 
@@ -2572,8 +2576,91 @@ def test_a_document_needs_one_layer_per_registered_horizon() -> None:
             paper=paper_refusal(NO_BOOK),
             power=None,
             stop_rule=None,
+            continuation=no_continuation_section(),
             integrity=INTEGRITY,
         )
+
+
+CONTINUED: Final[dict[str, Any]] = {
+    "wording": SURVIVOR_WORDING,
+    "rule": "the rule",
+    "chain": [
+        {"registration_sha256": "a" * 64, "config_id": "rcf_old", "epoch_session": "2026-04-03"}
+    ],
+    "sample_epoch": "2026-04-03",
+    "candidates": 3,
+    "merged": 1,
+    "truncated_at": "2026-04-07",
+    "truncation": {
+        "session": "2026-04-07",
+        "record_id": "prd_b",
+        "outcome": "differs",
+        "reason": "scored again under this registration, 2026-04-07 gives 1 of 40 "
+        "names another score",
+    },
+    "days": [
+        {
+            "session": "2026-04-06",
+            "record_id": "prd_a",
+            "registration_sha256": "a" * 64,
+            "outcome": "identical",
+            "own_verdict": "verified",
+            "reason": None,
+        },
+        {
+            "session": "2026-04-07",
+            "record_id": "prd_b",
+            "registration_sha256": "a" * 64,
+            "outcome": "differs",
+            "own_verdict": "verified",
+            "reason": "scored again under this registration, 2026-04-07 gives 1 of 40 "
+            "names another score",
+        },
+        {
+            "session": "2026-04-08",
+            "record_id": "prd_c",
+            "registration_sha256": "a" * 64,
+            "outcome": "after_truncation",
+            "own_verdict": "verified",
+            "reason": "after the truncation at 2026-04-07",
+        },
+    ],
+}
+
+
+def test_the_document_carries_the_continuation_section_and_prints_it_after_the_records() -> None:
+    document = reported({}, {}, through=3)
+    assert document["continuation"]["statement"].startswith(
+        "this registration names no predecessor"
+    )
+    lines = survivor_forward_lines(document)
+    assert any(
+        line.startswith("continuation: none -- this registration names no predecessor")
+        for line in lines
+    )
+
+    continued = reported({}, {}, through=3, continuation=CONTINUED)
+    lines = survivor_forward_lines(continued)
+    first = next(index for index, line in enumerate(lines) if line.startswith("continuation:"))
+    assert lines[first] == (
+        "continuation: 1 of 3 predecessor sessions merged from 1 registration(s) (root "
+        f"{'a' * 16}, epoch 2026-04-03); the sample counts from 2026-04-03"
+    )
+    assert lines[first + 1] == (
+        "  TRUNCATED at 2026-04-07 (differs): scored again under this registration, 2026-04-07 "
+        "gives 1 of 40 names another score"
+    )
+    assert f"  MERGED prd_a (2026-04-06, registration {'a' * 16}, own check verified)" in lines
+    assert "  NOT MERGED prd_c (2026-04-08): after the truncation" in lines
+    assert "  rule: the rule" in lines
+    assert lines.index(lines[first]) > max(
+        index for index, line in enumerate(lines) if line.startswith("records:")
+    )
+
+
+def test_a_continuation_section_without_its_wording_is_refused() -> None:
+    with pytest.raises(SurvivorForwardError, match="continuation"):
+        reported({}, {}, through=3, continuation={"chain": []})
 
 
 def seeded_document() -> dict[str, Any]:
