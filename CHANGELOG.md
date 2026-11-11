@@ -4,6 +4,42 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### P7 — development batch 4: the confirmatory sample continued by recompute equivalence, four small gaps, one ruling (`V2-P7-023`, `V2-P7-006a`, `V2-P7-024`, 2026-11-12)
+
+The fourth batch after the route adjustment, on `feat/v2-p7-batch-4` (from `8b00c4c`, tip
+`c59ed3c`, 16 commits). **It is not pushed, the delivered code has run no real build, factor,
+reading or smoke, and no Tushare request was made; the one validation read (2022-2023, once,
+read-only, zero network requests) and the real smoke are not done and still wait for the user's
+explicit start; the real-money gate stays closed. No registration exists, so no binding is
+voided; no registration uses the new continuation block yet (`006b` has not happened).** The
+serial full `tests/unit` gate runs on the final tip and its result is the controller's report, not
+stated here. `V2-P7-023`: a registration may name the one it supersedes in
+`settings.survivor_continuation` (`survivor-continuation/v1`, `extra="forbid"`, no defaults;
+absent means no predecessor, unreadable is refused by field; not a `config` key and no migration,
+because a registration file is not a stored row) -- the daily command's step 1 reads the whole
+chain root first, before any request, and refuses by name every link it cannot continue (not
+committed, bytes other than the named sha256, another `config_id`, a cycle, the depth cap 16,
+another exchange, horizon, benchmark, protocol block, epoch order, or a smoke predecessor into a
+non-smoke registration); the weekly report takes `--predecessor-runtime-dir` once per predecessor,
+pairs each directory to the chain by its paper book's write-once marker, reads the predecessor's
+directory read only (prediction store through the composition root, its late-record check with no
+verdict cache), recomputes each on-time bound predecessor record from the stored panel under the
+successor's configuration (zero requests) and merges the sessions whose batch is byte-identical
+(the registration's identity fields aside) with their own timestamps and ordinals; the first
+different session is marked and the sample is truncated there, and no later predecessor session
+is scored again. The paper book still reopens with a new registration and no longer decides
+whether the sample continues. `V2-P7-006a`: `--show-book` refuses `--worktree` instead of ignoring
+it; `--factor-gaps` carries the smoke banner; the composition root opens the paper snapshot and
+prediction stores alone (`paper_state_store_at`, `prediction_store_at`) and the script's own
+snapshot-path literal is gone (the composition root is the one source); a diverging sale prints the book's figures in ledger
+units. `V2-P7-024`: `read_once` binding the four registered paths and not the two daily scripts is
+a ruling, not a code gap -- no research script imports either daily script (a static test holds
+the premise), so a later change to them cannot change a number the read wrote. U1-U8 are the
+user's, implemented as recommended and provisional; the record, rulings (R1-R12 plus five new
+ones), deferred items and prerequisites are in
+`docs/superpowers/plans/2026-11-12-p7-dev-batch-4-closeout.md`. **No gate or order changed**
+(253 issues). **This is engineering, not evidence.**
+
 ### P7 — development batch 3: the pre-registered stop rule and the one read, the trading constraints, the operations (`V2-P7-024`, `V2-P7-006a`, `V2-P7-025`, 2026-11-11)
 
 The third batch after the route adjustment, on `feat/v2-p7-batch-3` (from `ba60330`, tip
