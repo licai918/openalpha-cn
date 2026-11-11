@@ -4,10 +4,12 @@ and what may be continued into what."""
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Final
 
 import pytest
@@ -30,6 +32,7 @@ from test_survivor_facts_panel import IDENTITY, SIGNAL
 from openalpha_cn import strategy_survivor_continuation as continuation_module
 from openalpha_cn.domain.survivor_book import SurvivorBookConfig
 from openalpha_cn.panel.store import PanelStore
+from openalpha_cn.panel_factors import FACTOR_TRANSFORMS
 from openalpha_cn.strategy_registration import RegisteredConfiguration
 from openalpha_cn.strategy_survivor import read_survivor_registration
 from openalpha_cn.strategy_survivor_check import SurvivorRecordVerdict
@@ -48,6 +51,7 @@ from openalpha_cn.strategy_survivor_continuation import (
     SurvivorContinuationError,
     continuation_block,
     continuation_bytes,
+    continuation_target,
     continued_sample,
     judge_continued_day,
     no_continuation_section,
@@ -223,6 +227,41 @@ def test_a_smoke_predecessor_never_enters_a_registration_that_is_not_one() -> No
     )
 
 
+def test_another_exchange_is_refused_before_a_later_epoch_or_a_smoke_predecessor() -> None:
+    """Three refusals would fire here; the exchange is the one named, because the order is the
+    contract (the first check a reader can rely on is the one that speaks)."""
+    predecessor = with_adapter(link(OLD), exchange="SZSE", epoch_session=date(2026, 5, 8))
+    predecessor = dataclasses.replace(
+        predecessor, settings={**predecessor.settings, "smoke_run": {"issue": "V2-P7-019"}}
+    )
+
+    with pytest.raises(SurvivorContinuationError, match=r"adapter\.exchange") as raised:
+        require_continuable(link(NEW, epoch="2026-05-08"), predecessor)
+
+    message = str(raised.value)
+    assert "epoch_session" not in message and "smoke registration" not in message
+
+
+def test_another_protocol_block_is_refused_before_a_later_epoch() -> None:
+    predecessor = link(
+        OLD,
+        epoch="2026-05-08",
+        settings={"survivor_forward_power": {"schema_version": "x", "v": 1}},
+    )
+    successor = link(
+        NEW,
+        epoch="2026-05-08",
+        settings={"survivor_forward_power": {"schema_version": "x", "v": 2}},
+    )
+
+    with pytest.raises(
+        SurvivorContinuationError, match=r"settings\.survivor_forward_power"
+    ) as raised:
+        require_continuable(successor, predecessor)
+
+    assert "is not before" not in str(raised.value)
+
+
 def test_a_links_declaration_is_its_registrations() -> None:
     declared = link(OLD).declared
     assert (declared.registration_sha256, declared.config_id, declared.seed) == (
@@ -285,6 +324,25 @@ def recomputed(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return called
 
 
+# --- the target ---------------------------------------------------------------------------------
+
+
+def test_a_target_is_read_off_the_successor_registration() -> None:
+    successor = link(NEW, epoch="2026-05-08")
+    adapter = successor.survivor.adapter
+
+    read = continuation_target(successor)
+
+    assert read.transform is FACTOR_TRANSFORMS.get("cross_section_standard/v1")
+    assert read.registered == successor.declared
+    assert (read.book, read.exchange, read.min_coverage, read.max_carry_sessions) == (
+        successor.survivor.book,
+        adapter.exchange,
+        adapter.min_coverage,
+        adapter.max_carry_sessions,
+    )
+
+
 # --- the bytes ---------------------------------------------------------------------------------
 
 
@@ -297,6 +355,7 @@ def test_two_batches_differing_only_in_the_registrations_identity_have_the_same_
         update={
             "feature_version": SUCCESSOR.config_id,
             "code_commit": SUCCESSOR.code_commit,
+            "seed": batch.artifact.declaration.seed + 1,
             "hyperparameters": (("registration_sha256", SUCCESSOR.registration_sha256),),
         }
     )
@@ -320,6 +379,32 @@ def test_two_batches_differing_only_in_the_registrations_identity_have_the_same_
         }
     )
     assert continuation_bytes(rehorizoned) != continuation_bytes(batch)
+
+
+def test_two_batches_whose_declarations_name_another_model_have_other_bytes(
+    evening_store: PanelStore,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    batch = filing(evening_store, tmp_path).record.batch
+    declaration = batch.artifact.declaration.model_copy(update={"name": "another-model"})
+    renamed = batch.model_copy(
+        update={"artifact": batch.artifact.model_copy(update={"declaration": declaration})}
+    )
+
+    assert continuation_bytes(renamed) != continuation_bytes(batch)
+
+
+def test_two_batches_whose_declarations_are_another_family_have_other_bytes(
+    evening_store: PanelStore,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    batch = filing(evening_store, tmp_path).record.batch
+    declaration = batch.artifact.declaration.model_copy(update={"family": "another-family"})
+    renamed = batch.model_copy(
+        update={"artifact": batch.artifact.model_copy(update={"declaration": declaration})}
+    )
+
+    assert continuation_bytes(renamed) != continuation_bytes(batch)
 
 
 # --- one day, on the frame: identical, different, cannot be scored --------------------------
@@ -356,6 +441,31 @@ def test_a_day_the_successor_scores_otherwise_differs(
     assert day.reason is not None and "differ" in day.reason
 
 
+def test_a_day_whose_scores_are_equal_but_whose_training_cutoff_moved_differs(
+    evening_store: PanelStore,  # noqa: F811
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The comparison is the whole batch, not the scores: the same names and numbers scored off
+    another training history are another batch."""
+    held = filing(evening_store, tmp_path)
+    real = continuation_module.recompute_survivor_batch
+
+    def shifted(store: PanelStore, record: Any, **arguments: Any) -> Any:
+        again = real(store, record, **arguments)
+        artifact = again.artifact.model_copy(
+            update={"training_cutoff": again.artifact.training_cutoff - timedelta(days=1)}
+        )
+        return again.model_copy(update={"artifact": artifact})
+
+    monkeypatch.setattr(continuation_module, "recompute_survivor_batch", shifted)
+
+    day = judge_continued_day(evening_store, candidate_of(held), target=target())
+
+    assert day.outcome == DIFFERS
+    assert day.reason is not None and "differ" in day.reason
+
+
 def test_a_day_the_successor_cannot_score_again_is_recompute_failed(
     evening_store: PanelStore,  # noqa: F811
     tmp_path: Path,
@@ -381,6 +491,61 @@ def test_a_day_its_own_check_refused_is_never_scored_again(
     day = judge_continued_day(evening_store, candidate_of(held, own="refused"), target=target())
 
     assert (day.outcome, day.reason) == (PREDECESSOR_REFUSED, "scripted refusal")
+    assert recomputed == []
+
+
+def test_a_candidate_without_a_provenance_is_a_callers_error_and_is_not_scored(
+    evening_store: PanelStore,  # noqa: F811
+    tmp_path: Path,
+    recomputed: list[str],
+) -> None:
+    """Only a refused record may be judged without the holdings its evening read."""
+    held = filing(evening_store, tmp_path)
+    candidate = dataclasses.replace(candidate_of(held), provenance=None)
+
+    with pytest.raises(ValueError, match="carries no provenance"):
+        judge_continued_day(evening_store, candidate, target=target())
+
+    assert recomputed == []
+
+
+def test_a_provenance_that_names_another_batch_is_a_callers_error(
+    evening_store: PanelStore,  # noqa: F811
+    tmp_path: Path,
+    recomputed: list[str],
+) -> None:
+    held = filing(evening_store, tmp_path)
+    candidate = dataclasses.replace(
+        candidate_of(held),
+        provenance=dataclasses.replace(held.provenance, batch_digest="0" * 64),
+    )
+
+    with pytest.raises(ValueError, match="provenance does not belong to") as raised:
+        judge_continued_day(evening_store, candidate, target=target())
+
+    assert candidate.item.session.isoformat() in str(raised.value)
+    assert recomputed == []
+
+
+def test_a_refused_day_without_a_reason_says_the_check_refused_it(
+    evening_store: PanelStore,  # noqa: F811
+    tmp_path: Path,
+    recomputed: list[str],
+) -> None:
+    """A refused verdict names a reason in this build; a caller's stub that does not still gets
+    a stated reason rather than a day with none."""
+    held = filing(evening_store, tmp_path)
+    candidate = dataclasses.replace(
+        candidate_of(held, own="refused"),
+        own=SimpleNamespace(verdict="refused", reason=None),
+    )
+
+    day = judge_continued_day(evening_store, candidate, target=target())
+
+    assert (day.outcome, day.reason) == (
+        PREDECESSOR_REFUSED,
+        f"the predecessor's own check refused {held.record.record_id}",
+    )
     assert recomputed == []
 
 

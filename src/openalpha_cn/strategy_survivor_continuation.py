@@ -45,11 +45,13 @@ of its own.
 
 ## The chain
 
-A predecessor may itself name a predecessor. The chain is read root first, every link through
-this build's reader, to `MAX_CONTINUATION_DEPTH` at most; a sha256 appearing twice in it is a
-cycle and is refused. Each predecessor contributes only the records of sessions in `(its own
-epoch, the next link's epoch]` -- the sessions it was the current registration for -- so the
-links' sessions tile the chain without overlapping (plan R3).
+A predecessor may itself name a predecessor. The CALLER reads the chain, root first, every
+link through this build's reader, and refuses a sha256 appearing twice in it as a cycle (plan
+R4); this module fixes only the depth a chain may have, `MAX_CONTINUATION_DEPTH`, and leaves
+the reading to `admit_predecessors` and the report. Each predecessor contributes only the
+records of sessions in `(its own epoch, the next link's epoch]` -- the sessions it was the
+current registration for -- so the links' sessions tile the chain without overlapping (plan
+R3).
 
 ## What may be continued into what
 
@@ -73,10 +75,11 @@ sample; a refusal in `SURVIVOR_RECOMPUTE_REFUSALS` is `recompute_failed`; anythi
 
 `continued_sample` sorts the candidates by session and asks the judge of each, oldest first,
 until the first day it does not call `identical`. That day is marked, the sample is truncated
-there, every later day is `after_truncation` and is never scored again -- so a corrected panel
-can only move the truncation earlier, and the earlier `identical` days are recomputed by every
-report rather than frozen once (plan U5, U7). A session carrying two predecessor records, or a
-record on or before the sample's own epoch, is refused.
+there, every later day is `after_truncation` and is never scored again (route adjustment
+section 2.5; plan Review Focus 2) -- so a corrected panel can only move the truncation earlier
+-- and the earlier `identical` days are recomputed by every report rather than frozen once (plan
+U7). A session carrying two predecessor records, or a record on or before the sample's own
+epoch, is refused.
 
 ## Wording
 
@@ -104,6 +107,7 @@ from openalpha_cn.panel_factors import FACTOR_TRANSFORMS
 from openalpha_cn.strategy_registration import (
     RegisteredConfiguration,
     StrategyRegistrationError,
+    batch_digest,
 )
 from openalpha_cn.strategy_survivor import SurvivorRegistration
 from openalpha_cn.strategy_survivor_check import VERDICT_REFUSED, SurvivorRecordVerdict
@@ -179,7 +183,7 @@ PREDECESSOR_REFUSED: Final[ContinuationOutcome] = "predecessor_refused"
 truncated, and the day is never scored again."""
 AFTER_TRUNCATION: Final[ContinuationOutcome] = "after_truncation"
 """A later predecessor session: the sample was already truncated before it, and it is never asked
-of the judge or scored again (plan U5)."""
+of the judge or scored again (route adjustment section 2.5; plan Review Focus 2)."""
 
 CONTINUATION_RULE_WORDING: Final = (
     "a predecessor's on-time bound record joins this registration's confirmatory sample only "
@@ -303,8 +307,11 @@ def _name(link: ChainLink) -> str:
 
 
 def _block_text(settings: Mapping[str, Any], key: str) -> str:
-    """A pre-registered block's JSON text (`null` when the settings name none). Two blocks are
-    equal when their texts are, so a difference in a key's order is not a difference (plan U3)."""
+    """A pre-registered block's JSON text. Two blocks are equal when their texts are, so a
+    difference in a key's order is not a difference (plan U3). The one asymmetry: because this
+    reads `settings.get(key)`, a key written as an explicit `null` and a key that is absent are
+    both the text `null` here, and so compare equal -- a block named as null is a block the
+    registration does not have."""
     return json.dumps(settings.get(key), sort_keys=True, ensure_ascii=False)
 
 
@@ -506,8 +513,9 @@ def judge_continued_day(
       `SURVIVOR_RECOMPUTE_REFUSALS` -> `recompute_failed` (reason names the refusal); equal
       `continuation_bytes` -> `identical`; else `differs` (reason names how many scores, and
       whether the scope, differ).
-    A `provenance` of `None` with an own verdict that is not refused is a caller's error:
-    `ValueError`. Anything outside the refusal set propagates."""
+    A `provenance` of `None` with an own verdict that is not refused is a caller's error, and so
+    is a provenance whose `batch_digest` is not the record's: `ValueError` naming the session.
+    Anything outside the refusal set propagates."""
     if candidate.own.verdict == VERDICT_REFUSED:
         return ContinuedDay(
             candidate=candidate,
@@ -523,6 +531,14 @@ def judge_continued_day(
             "it; only a refused record may be judged without the holdings its evening read"
         )
     session = candidate.item.session
+    record = candidate.item.record.batch
+    if batch_digest(record) != candidate.provenance.batch_digest:
+        raise ValueError(
+            f"the provenance of {session.isoformat()}'s record {candidate.item.record_id} "
+            f"provenance does not belong to it: it names the batch "
+            f"{candidate.provenance.batch_digest} and the record holds {batch_digest(record)}; a "
+            "day is compared with the provenance its own run wrote"
+        )
     try:
         again = recompute_survivor_batch(
             store,
@@ -542,7 +558,6 @@ def judge_continued_day(
             outcome=RECOMPUTE_FAILED,
             reason=f"{session.isoformat()} cannot be scored again from the stored panel: {error}",
         )
-    record = candidate.item.record.batch
     if continuation_bytes(again) == continuation_bytes(record):
         return ContinuedDay(candidate=candidate, outcome=IDENTICAL, reason=None)
     before, after = _score_rows(record), _score_rows(again)
