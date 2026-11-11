@@ -1768,11 +1768,27 @@ def _measured(
 
 
 def reading_lines(result: Mapping[str, Any], body: Mapping[str, Any]) -> list[str]:
-    """The result as text: the read-once banner (from the registration), the registration's
-    knowledge clock -- `_KNOWLEDGE_LINE`: the registered `as_of` and, verbatim, the registrant's
-    `as_of_reason` for why it is the knowledge the reading is under -- the stop rule's outcome and
-    wording, and then, for a real measurement, `p7_diagnostics.diagnostic_lines` after its own
-    banner."""
+    """The result as text, in the order this function appends it:
+
+    - the read-once banner (from the registration, through `read_once_banner`);
+    - the indented registration line, `the <role> reading registered for <issue>`, and the
+      indented line naming the claim files that witness this window's one read and the refs to
+      keep that commit in;
+    - the knowledge clock, `_KNOWLEDGE_LINE` -- the registered `as_of` and, verbatim, the
+      registrant's `as_of_reason` for why that is the knowledge the reading is under -- only
+      when the registration carries both;
+    - for a result with no `plan` (the measurement was refused), the `binding:` line naming
+      what that refusal was bound to;
+    - the `error` line when the measurement was refused, saying the refused read spent the one
+      read;
+    - the stop rule when the result carries one: the rule as written before the read, one
+      indented `  <metric>: n ..., mean ..., at or below ...` line per clause, the
+      `stop rule <outcome>` line (with its reason when it has one), and the conclusion's
+      wording; or, when it carries none, the one line saying a reading with no stop rule
+      decides nothing;
+    - for a real measurement (`plan` present), `p7_diagnostics.diagnostic_lines` after its own
+      banner -- the banner printed first above is that function's line 0.
+    """
     window = WINDOWS[body["window"]]
     lines = [
         read_once_banner(

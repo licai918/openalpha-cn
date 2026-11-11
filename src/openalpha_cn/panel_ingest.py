@@ -7629,8 +7629,10 @@ def record_empty_universe_year(
     `write_stock_universe` states for a year that vanishes from a batch, and replaying an earlier
     `as_of` over a backfilled store must not destroy what a later one wrote.
 
-    Returns the partitions it wrote -- none when the fetch carries the observation year, or when
-    it is older than what the store holds for it.
+    Returns the partitions it wrote -- none when the fetch carries the observation year, when it
+    is older than what the store holds for it, or when the store already holds a zero-row year
+    for it observed at the same instant or later (this fetch is the same observation, or an
+    earlier one that knows no more, so writing would move freshness back).
     """
     if batch.dataset != STOCK_BASIC_DATASET:
         raise PanelBatchError(
