@@ -1541,13 +1541,27 @@ def test_the_recompute_keeps_the_original_refusal_when_nothing_readable_is_store
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`_readable_instant` answers `None` when no partition the day reads has a coverage record:
-    the refusal that sent the recompute looking is then the one to raise, not a second read."""
+    the refusal that sent the recompute looking is then **the one to raise, unchanged** -- so the
+    message is compared with the original refusal's, not merely its type (the other branch raises
+    the same type)."""
     day = the_evening(evening_store)
     record = filed(evening_store, day.batch, tmp_path / "predictions")
+    with pytest.raises(PartitionNotYetKnowableError) as original:
+        build_facts_day(
+            store=late_clock_store,
+            session=SIGNAL,
+            as_of=registered_at(record),
+            config=BOOK,
+            factor_ids=FACTORS,
+            transform=IDENTITY,
+            exchange=EXCHANGE,
+        )
     monkeypatch.setattr(registration_module, "_readable_instant", lambda *args, **kwargs: None)
 
-    with pytest.raises(PartitionNotYetKnowableError):
+    with pytest.raises(PartitionNotYetKnowableError) as again:
         recompute(late_clock_store, record)
+
+    assert str(again.value) == str(original.value)
 
 
 def test_the_recompute_keeps_the_original_refusal_when_the_readable_instant_is_not_later(
@@ -1557,16 +1571,18 @@ def test_the_recompute_keeps_the_original_refusal_when_the_readable_instant_is_n
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A newest instant at or before the filing instant would re-read at the same refusing
-    clock: the original refusal stands, and the day is not read a second time."""
+    clock: the original refusal stands, and the day is not read a second time. The count is what
+    pins it (both branches raise the same type), and it is counted independently of how the call
+    is shaped -- `build_facts_day` is called with keywords today, and a refactor may not be."""
     day = the_evening(evening_store)
     record = filed(evening_store, day.batch, tmp_path / "predictions")
     filed_at = registered_at(record)
-    attempts: list[object] = []
+    calls: list[int] = []
     real_build_facts_day = registration_module.build_facts_day
 
-    def counting_build_facts_day(**kwargs: object) -> FactsDay:
-        attempts.append(kwargs["as_of"])
-        return real_build_facts_day(**kwargs)  # type: ignore[arg-type]
+    def counting_build_facts_day(*args: object, **kwargs: object) -> FactsDay:
+        calls.append(1)
+        return real_build_facts_day(*args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(registration_module, "build_facts_day", counting_build_facts_day)
     monkeypatch.setattr(registration_module, "_readable_instant", lambda *args, **kwargs: filed_at)
@@ -1574,10 +1590,10 @@ def test_the_recompute_keeps_the_original_refusal_when_the_readable_instant_is_n
     with pytest.raises(PartitionNotYetKnowableError):
         recompute(late_clock_store, record)
 
-    # Both branches raise `PartitionNotYetKnowableError`, so the exception alone cannot tell
-    # "re-raise the original refusal" from "read again at the same refusing instant": the call
-    # count is what pins it. A fall-through reads the day twice; the re-raise reads it once.
-    assert attempts == [filed_at]
+    # The re-raise reads the day once; a fall-through reads it twice. The module-global seam is
+    # the only one there is, and a refactor that localises the lookup fails loudly here (an empty
+    # list) rather than silently.
+    assert len(calls) == 1
 
 
 def test_a_restated_build_makes_the_recompute_differ_and_is_named(
