@@ -1630,6 +1630,59 @@ def test_a_registration_committed_with_a_change_to_bound_code_has_no_checkout_to
         registry.registered_checkout(registration, repo)
 
 
+def test_a_p6_day_refuses_an_account_record_before_anything_is_read(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--account-record` is the survivor evening's input (and its settle-only day's): the paper
+    book reads it before it advances. A P6 day has no paper book, so it never reads one -- and a
+    P6 day given one exits 2 at step 1, before a request, rather than silently ignoring it.
+
+    The survivor day's acceptance is pinned in `test_daily_selection_book.py`
+    (`test_an_explicit_account_record_is_the_evening_s_input`); the two modes this option is
+    already refused with -- `--show-book` and `--morning-recheck` -- say so in their own
+    mutual-exclusion checks, also exit 2."""
+    code, _body, err = _run(world, capsys, extra=("--account-record", "record.json"))
+
+    assert code == 2
+    assert "--account-record" in err
+    assert "survivor" in err
+    assert world.market.payloads == []
+
+
+@pytest.mark.parametrize(
+    "flag",
+    ["--pin-worktree", "--factor-gaps", "--launchd-plist", "--launchd-morning-plist"],
+)
+def test_a_print_only_mode_refuses_an_account_record(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], flag: str
+) -> None:
+    """None of the print-only modes reaches a day, so none would ever read the record: given one
+    they exit 2 and say it is the survivor evening's, rather than silently ignoring it."""
+    value = {
+        "--pin-worktree": str(tmp_path / "pinned"),
+        "--factor-gaps": "2026-01-05",
+        "--launchd-plist": str(tmp_path / "logs"),
+        "--launchd-morning-plist": str(tmp_path / "logs"),
+    }[flag]
+    arguments = [
+        "--runtime-dir",
+        str(tmp_path / "runtime"),
+        flag,
+        value,
+        "--account-record",
+        str(tmp_path / "record.json"),
+    ]
+
+    with pytest.raises(SystemExit) as refused:
+        daily.main(arguments)
+
+    assert refused.value.code == 2
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "--account-record" in err
+    assert "survivor" in err
+
+
 def test_the_launchd_job_runs_the_pinned_checkout_with_no_shell_and_is_not_installed(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

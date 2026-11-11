@@ -3435,6 +3435,7 @@ def _run_daily_selection(
         # reports its own steps, so it runs outside this step's fault handler.
         return _run_survivor_day(options, registration, survivor, clock=clock, counts=counts)
     with _step("registration"):
+        _refuse_survivor_only_options(options)
         store = panel_store(runtime_dir)
         directory = journal_directory(runtime_dir, registration)
         first_as_of = options.as_of or clock()
@@ -3826,6 +3827,22 @@ def survivor_journal_complete(journal: Mapping[str, Any] | None) -> bool:
     and no write: it has filed its `result`. A day refused before its paper step files none and
     keeps its stages (D4 review, rule 2), so a rerun after a fix runs its evening."""
     return journal is not None and "result" in journal
+
+
+def _refuse_survivor_only_options(options: DailyOptions) -> None:
+    """Refuse the survivor day's options that mean nothing on a P6 day, before anything is made
+    (exit 2, no request, no directory): only the survivor day's paper book reads the account
+    record, before the book advances -- on its evening or on its settle-only day -- and a P6 day
+    has no paper book that would read it, so accepting the option would silently ignore it."""
+    if options.account_record is not None:
+        raise StepFailedError(
+            "registration",
+            "--account-record is the survivor day's input: its paper book reads the record before "
+            "it advances, on the evening or on the settle-only day, and a P6 day has no paper book "
+            "that would read it. Nothing was run",
+            exit_code=DailyExit.no_registration,
+            steps=STEPS,
+        )
 
 
 def _refuse_p6_only_options(options: DailyOptions, survivor: SurvivorRegistration) -> None:
@@ -6551,6 +6568,29 @@ def _instant(value: str) -> datetime:
     return parsed
 
 
+def _refuse_an_unread_account_record(
+    arguments: argparse.Namespace, parser: argparse.ArgumentParser
+) -> None:
+    """Refuse `--account-record` on a mode that never reaches a day (exit 2): the pin, the factor
+    gaps and the two launchd printers read no account record, and an option that is silently
+    ignored reads as one that was checked. The survivor evening and its settle-only day are the
+    option's only readers; the P6 day refuses it by name too (`_refuse_survivor_only_options`),
+    and `--show-book` and `--morning-recheck` have their own refusals above."""
+    if arguments.account_record is None:
+        return
+    for given, flag in (
+        (arguments.pin_worktree, "--pin-worktree"),
+        (arguments.factor_gaps, "--factor-gaps"),
+        (arguments.launchd_plist, "--launchd-plist"),
+        (arguments.launchd_morning_plist, "--launchd-morning-plist"),
+    ):
+        if given is not None:
+            parser.error(
+                f"--account-record is the survivor evening's input (or its settle-only day's), "
+                f"and {flag} never reaches a day: it would read no record"
+            )
+
+
 def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _utc_now) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
     parser.add_argument("--runtime-dir", type=Path, default=None)
@@ -6669,6 +6709,7 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
         ):
             if given:
                 parser.error(f"--show-book cannot be combined with {flag}")
+    _refuse_an_unread_account_record(arguments, parser)
     uv = (arguments.uv or Path(shutil.which("uv") or "uv")).resolve()
     try:
         if arguments.pin_worktree is not None:

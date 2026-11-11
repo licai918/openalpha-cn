@@ -12,7 +12,7 @@ import contextlib
 import io
 import json
 import shutil
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final
@@ -383,6 +383,41 @@ def test_a_record_of_the_orders_the_user_placed_is_filed_with_the_days_reconcili
     assert block["reconciled"] + len(block["divergences"]) == len(planned)
     filed = survivor_day._journal(world, survivor_day.NEXT)["result"]["paper"]["reconciliation"]
     assert filed == block
+
+
+def test_an_explicit_account_record_is_the_evening_s_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: Path,  # noqa: F811  (the module-scope fixture, imported above)
+) -> None:
+    """`--account-record PATH` names the record itself, and the survivor evening reads it: the
+    default `<runtime>/paper/account-record/<session>.json` is removed, so only the flag can find
+    the record, and its divergence is filed. This is the one reader -- the P6 day and the
+    print-only modes refuse the option (`test_daily_selection.py`)."""
+    world = survivor_day._world(tmp_path, monkeypatch, seeded)
+    first = survivor_day._completed(world, capsys, survivor_day.DAY)
+    planned = first["paper"]["trade_list"]["orders"]
+    filed = _account_record_file(
+        world.runtime, survivor_day.NEXT, planned, not_placed=[planned[0]["order_id"]]
+    )
+    explicit = tmp_path / "the-record.json"
+    filed.replace(explicit)
+    at = survivor_day.evening_of(survivor_day.NEXT)
+
+    code, out, err = survivor_day._run(
+        world,
+        capsys,
+        as_of=at,
+        clock=at + timedelta(minutes=5),
+        extra=("--account-record", str(explicit)),
+    )
+
+    assert code == 0, err
+    block = json.loads(out)["paper"]["reconciliation"]
+    assert block["session"] == survivor_day.NEXT.isoformat()
+    named = {(item["order_id"], item["kind"]) for item in block["divergences"]}
+    assert (planned[0]["order_id"], "not_placed") in named
 
 
 def test_a_record_naming_an_order_that_was_not_due_refuses_the_day_before_the_book_advances(
