@@ -225,6 +225,7 @@ def test_show_book_lists_the_books_holdings_from_its_own_state_and_writes_nothin
         ["--launchd-morning-plist", "logs"],
         ["--pin-worktree", "pinned"],
         ["--account-record", "record.json"],
+        ["--worktree", "pinned"],
     ],
     ids=[
         "morning-recheck",
@@ -233,6 +234,7 @@ def test_show_book_lists_the_books_holdings_from_its_own_state_and_writes_nothin
         "launchd-morning-plist",
         "pin-worktree",
         "account-record",
+        "worktree",
     ],
 )
 def test_show_book_refuses_the_modes_it_cannot_be_combined_with(
@@ -322,6 +324,81 @@ def test_show_book_carries_the_smoke_banner_of_a_smoke_registration(
     assert err[0] == err[-1] == daily.SMOKE_BANNER
     assert any("cost" in line for line in lines)
     assert "read-only" in "\n".join(lines).lower()
+
+
+def _factor_gaps(
+    world: tds.World, registration: Path, *, as_json: bool
+) -> tuple[int, str, list[str]]:
+    arguments = [
+        "--runtime-dir",
+        str(world.runtime),
+        "--registration",
+        str(registration),
+        "--repo",
+        str(world.repo),
+        "--as-of",
+        "2026-04-07T18:30:00+08:00",
+        "--factor-gaps",
+        "2026-04-01",
+    ]
+    if as_json:
+        arguments.append("--json")
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = daily.main(arguments)
+    return code, out.getvalue(), err.getvalue().splitlines()
+
+
+REPORTED_GAPS: Final[dict[str, Any]] = {
+    "since": "2026-04-01",
+    "through": "2026-04-07",
+    "gaps": {"reversal_1d/v1@processed": []},
+}
+
+
+def test_factor_gaps_carries_the_smoke_banner_of_a_smoke_registration(
+    world: tds.World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--factor-gaps` used to return before the banner was printed: under a smoke registration
+    every output carries it -- stderr's first and last line, the text's first and last line and
+    the JSON's `smoke` key -- and a registration that is not a smoke one prints exactly as
+    before."""
+    smoke = _smoke_registration(tmp_path, world.registration)
+    monkeypatch.setattr(daily, "factor_gaps", lambda *args, **kwargs: dict(REPORTED_GAPS))
+
+    code, out, err = _factor_gaps(world, smoke, as_json=False)
+    assert code == 0
+    lines = out.splitlines()
+    assert lines[0] == lines[-1] == daily.SMOKE_BANNER
+    assert lines[1:-1] == daily.factor_gap_lines(REPORTED_GAPS)
+    assert err[0] == err[-1] == daily.SMOKE_BANNER
+
+    code, out, err = _factor_gaps(world, smoke, as_json=True)
+    assert code == 0
+    assert json.loads(out)["smoke"] == daily.SMOKE_BANNER
+    assert err[0] == err[-1] == daily.SMOKE_BANNER
+
+    code, out, err = _factor_gaps(world, world.registration, as_json=False)
+    assert code == 0
+    assert out.splitlines() == daily.factor_gap_lines(REPORTED_GAPS)
+    assert daily.SMOKE_BANNER not in "\n".join(err)
+
+
+def test_a_factor_gaps_refusal_under_a_smoke_registration_is_bannered(
+    world: tds.World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    smoke = _smoke_registration(tmp_path, world.registration)
+
+    def refused(*args: object, **kwargs: object) -> dict[str, Any]:
+        raise daily.FactorGapError("an injected refusal")
+
+    monkeypatch.setattr(daily, "factor_gaps", refused)
+    code, out, err = _factor_gaps(world, smoke, as_json=False)
+
+    assert code == 1
+    assert out == ""
+    assert err[0] == err[-1] == daily.SMOKE_BANNER
+    assert "factor gaps: an injected refusal" in err
 
 
 def _account_record_file(

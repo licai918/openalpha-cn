@@ -6706,6 +6706,7 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
             (arguments.launchd_plist, "--launchd-plist"),
             (arguments.launchd_morning_plist, "--launchd-morning-plist"),
             (arguments.account_record, "--account-record"),
+            (arguments.worktree, "--worktree"),
         ):
             if given:
                 parser.error(f"--show-book cannot be combined with {flag}")
@@ -6748,21 +6749,28 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
             if banner is not None:
                 print(banner, file=sys.stderr)
     if arguments.factor_gaps is not None:
+        banner = smoke_banner(arguments.registration)
+        if banner is not None:
+            print(banner, file=sys.stderr)
         try:
-            report = factor_gaps(
-                arguments.runtime_dir,
-                arguments.registration,
-                since=arguments.factor_gaps,
-                as_of=arguments.as_of or clock(),
-            )
-        except FactorGapError as error:
-            print(f"factor gaps: {error}", file=sys.stderr)
-            return int(DailyExit.step_failed)
-        if arguments.json:
-            print(json.dumps(report, sort_keys=True))
-        else:
-            print("\n".join(factor_gap_lines(report)))
-        return int(DailyExit.step_failed if any(report["gaps"].values()) else DailyExit.done)
+            try:
+                report = factor_gaps(
+                    arguments.runtime_dir,
+                    arguments.registration,
+                    since=arguments.factor_gaps,
+                    as_of=arguments.as_of or clock(),
+                )
+            except FactorGapError as error:
+                print(f"factor gaps: {error}", file=sys.stderr)
+                return int(DailyExit.step_failed)
+            if arguments.json:
+                print(json.dumps(with_smoke(report, banner), sort_keys=True))
+            else:
+                print("\n".join(bannered(factor_gap_lines(report), banner)))
+            return int(DailyExit.step_failed if any(report["gaps"].values()) else DailyExit.done)
+        finally:
+            if banner is not None:
+                print(banner, file=sys.stderr)
     if arguments.launchd_plist is not None or arguments.launchd_morning_plist is not None:
         if arguments.worktree is None:
             named = (
