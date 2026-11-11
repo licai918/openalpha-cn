@@ -445,15 +445,16 @@ def _successor_of(
     *,
     epoch: str = "2026-01-20",
     sha256: str | None = None,
-    extra: dict[str, Any] | None = None,
+    config_id: str | None = None,
 ) -> tds.World:
-    """A world whose registration names `predecessor` as the one it continues."""
+    """A world whose registration names `predecessor` as the one it continues; `sha256` and
+    `config_id` forge the two fields the successor's block carries by default."""
     from openalpha_cn import strategy_survivor_continuation as continuation
 
     block = continuation.continuation_block(
         path=predecessor.relative_to(world.repo).as_posix(),
         sha256=sha256 or hashlib.sha256(predecessor.read_bytes()).hexdigest(),
-        config_id=json.loads(predecessor.read_text(encoding="utf-8"))["config_id"],
+        config_id=config_id or json.loads(predecessor.read_text(encoding="utf-8"))["config_id"],
     )
     successor = _register(
         world,
@@ -461,12 +462,44 @@ def _successor_of(
         epoch=epoch,
         settings={
             **tds.grid.protocol_settings(),
-            **(extra or {}),
             continuation.SURVIVOR_CONTINUATION_KEY: block,
         },
         at_days=2,
     )
     return dataclasses.replace(world, registration=successor)
+
+
+def _middle_of(world: tds.World, *, settings: dict[str, Any] | None = None) -> Path:
+    """A committed registration between the world's own and the successor, naming the world's
+    as the one it continues -- the middle link of a two-predecessor chain. `settings` overrides
+    its own `survivor_continuation` block, for a link whose block cannot be read."""
+    from openalpha_cn import strategy_survivor_continuation as continuation
+
+    root = json.loads(world.registration.read_text(encoding="utf-8"))
+    return _register(
+        world,
+        "middle.json",
+        epoch="2026-01-17",
+        settings={
+            **tds.grid.protocol_settings(),
+            continuation.SURVIVOR_CONTINUATION_KEY: continuation.continuation_block(
+                path=world.registration.relative_to(world.repo).as_posix(),
+                sha256=hashlib.sha256(world.registration.read_bytes()).hexdigest(),
+                config_id=root["config_id"],
+            ),
+            **(settings or {}),
+        },
+        at_days=1,
+    )
+
+
+def _committed_body(world: tds.World, name: str, body: dict[str, Any], *, at_days: int) -> Path:
+    """A committed file at `docs/research/<name>` holding `body` verbatim -- a registration
+    whose body the reader refuses before any of its fields is trusted."""
+    path = world.repo / "docs" / "research" / name
+    path.write_text(json.dumps(body), encoding="utf-8")
+    commit_file(world.repo, path, f"register {name}", at=tds.COMMITTED + timedelta(days=at_days))
+    return path
 
 
 def test_a_successor_naming_its_predecessor_by_other_bytes_exits_2_before_any_request(
@@ -511,6 +544,7 @@ def test_a_successor_continuing_a_smoke_registration_exits_2(
 
     assert code == 2
     assert "smoke registration" in err
+    assert "smoke.json" in err
 
 
 def test_a_successor_whose_epoch_is_not_after_its_predecessors_exits_2(
@@ -529,10 +563,12 @@ def test_a_successor_whose_epoch_is_not_after_its_predecessors_exits_2(
 def test_a_chain_that_returns_to_a_registration_is_refused_as_a_cycle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A registration cannot name a file whose bytes name it back (the sha would change), so the
-    cycle is checked on the function with a predecessor that names the successor's own bytes."""
+    """The `seen` set, not `require_continuable`'s self-check: a registration cannot name a file
+    whose bytes name it back (the sha would change), so a two-link chain is forged instead --
+    the successor's sha is the root's, and the root is met a second time. The refusal must say a
+    cycle; `require_continuable` would only ever say "names itself" for adjacent links."""
     world = _survivor_world(tmp_path, monkeypatch, SURVIVOR_CONFIG)
-    successor = _successor_of(world, world.registration)
+    successor = _successor_of(world, _middle_of(world))
     admitted = daily.admit_registration(successor.registration, successor.repo)
     survivor = daily.survivor_registration(admitted)
     assert survivor is not None
@@ -540,8 +576,45 @@ def test_a_chain_that_returns_to_a_registration_is_refused_as_a_cycle(
         admitted, sha256=hashlib.sha256(world.registration.read_bytes()).hexdigest()
     )
 
-    with pytest.raises(daily.StepFailedError, match=r"cycle|names itself"):
+    with pytest.raises(daily.StepFailedError, match=r"not a cycle"):
         daily.admit_predecessors(looped, survivor, successor.repo)
+
+
+def test_a_chain_of_exactly_the_depth_cap_is_read_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """At the cap the chain is read whole: two predecessors under a cap of two."""
+    from openalpha_cn import strategy_survivor_continuation as continuation
+
+    monkeypatch.setattr(continuation, "MAX_CONTINUATION_DEPTH", 2)
+    world = _survivor_world(tmp_path, monkeypatch, SURVIVOR_CONFIG)
+    successor = _successor_of(world, _middle_of(world))
+    admitted = daily.admit_registration(successor.registration, successor.repo)
+    survivor = daily.survivor_registration(admitted)
+    assert survivor is not None
+
+    chain = daily.admit_predecessors(admitted, survivor, successor.repo)
+
+    assert [link.epoch.isoformat() for link in chain] == ["2026-01-16", "2026-01-17"]
+
+
+def test_a_chain_longer_than_the_depth_cap_is_refused_by_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One predecessor too many is refused at step 1, by name and with exit 2."""
+    from openalpha_cn import strategy_survivor_continuation as continuation
+
+    monkeypatch.setattr(continuation, "MAX_CONTINUATION_DEPTH", 1)
+    world = _survivor_world(tmp_path, monkeypatch, SURVIVOR_CONFIG)
+    successor = _successor_of(world, _middle_of(world))
+    admitted = daily.admit_registration(successor.registration, successor.repo)
+    survivor = daily.survivor_registration(admitted)
+    assert survivor is not None
+
+    with pytest.raises(daily.StepFailedError, match="more than 1 predecessors") as refused:
+        daily.admit_predecessors(admitted, survivor, successor.repo)
+
+    assert refused.value.exit_code == daily.DailyExit.no_registration
 
 
 def test_a_registration_with_no_block_has_no_predecessors(
@@ -578,25 +651,8 @@ def test_a_chain_of_two_predecessors_is_read_root_first(
 ) -> None:
     """The successor's own predecessor may name a predecessor in turn: the chain is read to its
     root and handed over root first, so the report's `chain[0]` is the registration's epoch."""
-    from openalpha_cn import strategy_survivor_continuation as continuation
-
     world = _survivor_world(tmp_path, monkeypatch, SURVIVOR_CONFIG)
-    root = json.loads(world.registration.read_text(encoding="utf-8"))
-    middle = _register(
-        world,
-        "middle.json",
-        epoch="2026-01-17",
-        settings={
-            **tds.grid.protocol_settings(),
-            continuation.SURVIVOR_CONTINUATION_KEY: continuation.continuation_block(
-                path=world.registration.relative_to(world.repo).as_posix(),
-                sha256=hashlib.sha256(world.registration.read_bytes()).hexdigest(),
-                config_id=root["config_id"],
-            ),
-        },
-        at_days=1,
-    )
-    successor = _successor_of(world, middle)
+    successor = _successor_of(world, _middle_of(world))
     admitted = daily.admit_registration(successor.registration, successor.repo)
     survivor = daily.survivor_registration(admitted)
     assert survivor is not None
@@ -604,3 +660,109 @@ def test_a_chain_of_two_predecessors_is_read_root_first(
     chain = daily.admit_predecessors(admitted, survivor, successor.repo)
 
     assert [link.epoch.isoformat() for link in chain] == ["2026-01-16", "2026-01-17"]
+
+
+# --- the chain's refusals the review found untested (`V2-P7-023`, G3) ------------------------
+
+
+def test_a_predecessor_whose_block_cannot_be_read_is_refused_by_its_own_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The middle link's block does not validate: the refusal names `middle.json`, the file to
+    fix, not `successor.json`, the one the user has just registered."""
+    from openalpha_cn import strategy_survivor_continuation as continuation
+
+    world = _survivor_world(tmp_path, monkeypatch, SURVIVOR_CONFIG)
+    middle = _middle_of(
+        world,
+        settings={
+            continuation.SURVIVOR_CONTINUATION_KEY: {
+                "schema_version": continuation.SURVIVOR_CONTINUATION_SCHEMA
+            }
+        },
+    )
+
+    code, err = _stopped_at_registration(_successor_of(world, middle), capsys)
+
+    assert code == 2 == daily.DailyExit.no_registration
+    first = err.splitlines()[0]
+    assert "middle.json" in first
+    assert "successor.json" not in first
+
+
+def test_a_valid_successor_passes_the_chain_check_and_the_day_goes_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The command-level success path: the chain is admitted, and the day stops at the next
+    refusal (`--dataset` narrowing the panel), not at a predecessor refusal. A wiring bug that
+    refused every successor would stop this test from reading the `--dataset` refusal."""
+    world = _survivor_world(tmp_path, monkeypatch, SURVIVOR_CONFIG)
+    successor = _successor_of(world, world.registration)
+
+    code, _body, err = tds._run(successor, capsys)
+
+    assert code == 2 == daily.DailyExit.no_registration
+    first, *rest = err.splitlines()
+    assert first.startswith("step 1 (registration) failed: --dataset names")
+    assert rest == [NO_REQUEST]
+    assert successor.market.payloads == []
+    assert not successor.runtime.exists()
+    for refusal in (
+        "is not a committed registration",
+        "cannot be continued",
+        "not a cycle",
+        "survivor_continuation cannot be read",
+    ):
+        assert refusal not in err
+
+
+def test_a_successor_naming_another_config_id_for_its_predecessor_exits_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world = _survivor_world(tmp_path, monkeypatch, SURVIVOR_CONFIG)
+
+    code, err = _stopped_at_registration(
+        _successor_of(world, world.registration, config_id="rcf_wrong"), capsys
+    )
+
+    assert code == 2
+    assert "is not the 'rcf_wrong' its successor names" in err
+
+
+def test_a_predecessor_that_registers_no_configuration_object_exits_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world = _survivor_world(tmp_path, monkeypatch, SURVIVOR_CONFIG)
+    broken = _committed_body(
+        world,
+        "broken.json",
+        {
+            "schema": tds.registry.REGISTRATION_SCHEMA,
+            "config": 1,
+            "config_id": "rcf_broken",
+            "code_commit": head(world.repo),
+            "settings": {},
+        },
+        at_days=1,
+    )
+
+    code, err = _stopped_at_registration(_successor_of(world, broken), capsys)
+
+    assert code == 2
+    assert "registers no configuration object" in err
+
+
+def test_a_predecessor_that_is_not_a_survivor_registration_exits_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A committed P6 configuration names no `kind`: this build's survivor reader refuses it by
+    name (plan R12), rather than reading it through a widened reader."""
+    world = _survivor_world(tmp_path, monkeypatch, SURVIVOR_CONFIG)
+    p6 = world.repo / "docs" / "research" / "p6-other.json"
+    tds.registry.register(tds.CONFIG, tds.CRITERIA, p6, code_commit=head(world.repo))
+    commit_file(world.repo, p6, "register a P6 configuration", at=tds.COMMITTED + timedelta(days=1))
+
+    code, err = _stopped_at_registration(_successor_of(world, p6), capsys)
+
+    assert code == 2
+    assert "is not a survivor registration this build reads" in err

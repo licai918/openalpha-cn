@@ -57,6 +57,7 @@ from panel_fixtures import _halted_key as halted_key
 from panel_fixtures import _timed_key as timed_key
 from strategy_fixtures import INDEX_LEVELS
 from strategy_fixtures import _index_batch as index_batch
+from test_strategy_survivor_continuation import link as continuation_link
 from test_survivor_facts_panel import CONFIG, SIGNAL_INDEX, TRIMMED, evening, read_day, write_panel
 
 from openalpha_cn import strategy_survivor_forward as forward_module
@@ -94,7 +95,15 @@ from openalpha_cn.strategy_registration import (
     registration_cutoff,
 )
 from openalpha_cn.strategy_survivor_check import SurvivorRecordVerdict
-from openalpha_cn.strategy_survivor_continuation import no_continuation_section
+from openalpha_cn.strategy_survivor_continuation import (
+    AFTER_TRUNCATION,
+    DIFFERS,
+    IDENTICAL,
+    ContinuationCandidate,
+    ContinuedDay,
+    continued_sample,
+    no_continuation_section,
+)
 from openalpha_cn.strategy_survivor_forward import (
     DESCRIPTIVE_WORDING,
     FORWARD_METRICS,
@@ -2646,16 +2655,75 @@ def test_the_document_carries_the_continuation_section_and_prints_it_after_the_r
         "continuation: 1 of 3 predecessor sessions merged from 1 registration(s) (root "
         f"{'a' * 16}, epoch 2026-04-03); the sample counts from 2026-04-03"
     )
-    assert lines[first + 1] == (
+    # The block, pinned whole: a second line for the truncation day, a reordered day or a
+    # missing `rule:` fails here.
+    assert lines[first : first + 5] == [
+        "continuation: 1 of 3 predecessor sessions merged from 1 registration(s) (root "
+        f"{'a' * 16}, epoch 2026-04-03); the sample counts from 2026-04-03",
         "  TRUNCATED at 2026-04-07 (differs): scored again under this registration, 2026-04-07 "
-        "gives 1 of 40 names another score"
-    )
-    assert f"  MERGED prd_a (2026-04-06, registration {'a' * 16}, own check verified)" in lines
-    assert "  NOT MERGED prd_c (2026-04-08): after the truncation" in lines
-    assert "  rule: the rule" in lines
+        "gives 1 of 40 names another score",
+        f"  MERGED prd_a (2026-04-06, registration {'a' * 16}, own check verified)",
+        "  NOT MERGED prd_c (2026-04-08): after the truncation",
+        "  rule: the rule",
+    ]
+    # Only the `TRUNCATED` line names the truncation session. The day's record appears on no
+    # line: the truncation line names the session, not the record id, so printing the day again
+    # (`  NOT MERGED prd_b ...`) is the only way `prd_b` could be printed -- and it is not.
+    assert "prd_b" not in "\n".join(lines[first:])
     assert lines.index(lines[first]) > max(
         index for index, line in enumerate(lines) if line.startswith("records:")
     )
+
+    # The real producer: `continued_sample(...).document()` through the printer. A key the
+    # producer writes and this module does not read -- or reads and the producer does not write
+    # -- fails here, rather than in Task 9's wiring.
+    days = [date(2026, 4, 6), date(2026, 4, 7), date(2026, 4, 8)]
+    scripted = {days[0]: IDENTICAL, days[1]: DIFFERS}
+    candidates = []
+    for day in days:
+        item = witnessed_on(day, {"600000.SH": 1.0})
+        candidates.append(
+            ContinuationCandidate(
+                item=item,
+                registration_sha256="a" * 64,
+                own=SurvivorRecordVerdict(
+                    record_id=item.record_id,
+                    session=day,
+                    verdict="verified",
+                    scope=None,
+                    reason=None,
+                ),
+                provenance=None,
+            )
+        )
+
+    def judge(candidate: ContinuationCandidate) -> ContinuedDay:
+        outcome = scripted.get(candidate.item.session, AFTER_TRUNCATION)
+        return ContinuedDay(
+            candidate=candidate,
+            outcome=outcome,
+            reason=None if outcome == IDENTICAL else f"scripted {outcome}",
+        )
+
+    produced = continued_sample(
+        tuple(candidates),
+        judge=judge,
+        chain=(continuation_link("a" * 64),),
+        sample_epoch=date(2026, 4, 3),
+    ).document()
+    produced_lines = survivor_forward_lines(reported({}, {}, through=3, continuation=produced))
+    produced_first = next(
+        index for index, line in enumerate(produced_lines) if line.startswith("continuation:")
+    )
+    assert produced_lines[produced_first : produced_first + 5] == [
+        "continuation: 1 of 3 predecessor sessions merged from 1 registration(s) "
+        f"(root {'a' * 16}, epoch 2026-04-03); the sample counts from 2026-04-03",
+        "  TRUNCATED at 2026-04-07 (differs): scripted differs",
+        f"  MERGED {candidates[0].item.record_id} (2026-04-06, registration {'a' * 16}, own "
+        "check verified)",
+        f"  NOT MERGED {candidates[2].item.record_id} (2026-04-08): after the truncation",
+        f"  rule: {produced['rule']}",
+    ]
 
 
 def test_a_continuation_section_without_its_wording_is_refused() -> None:

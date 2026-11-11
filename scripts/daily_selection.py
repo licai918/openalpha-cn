@@ -755,14 +755,18 @@ def admit_predecessors(
 
     root, _ = registry.committed_registration(registration.path, repo)
     current = chain_link(registration, survivor)
+    current_path = registration.path
     chain: list[ChainLink] = []
     seen: set[str] = {current.registration_sha256}
     while True:
         try:
             block = continuation.read_survivor_continuation(current.settings)
         except continuation.SurvivorContinuationError as error:
+            # The file whose block cannot be read, which is a predecessor's after the first link:
+            # a chain C -> B -> A with B's block unreadable names B, never C, the file just
+            # registered. `ChainLink` carries no path, so the loop tracks it beside `current`.
             raise _predecessor_refused(
-                f"{registration.path}'s survivor_continuation cannot be read: {error}"
+                f"{current_path}'s survivor_continuation cannot be read: {error}"
             ) from error
         if block is None:
             # Read from the successor up; the chain is handed over root first.
@@ -836,9 +840,12 @@ def admit_predecessors(
         try:
             continuation.require_continuable(current, predecessor)
         except continuation.SurvivorContinuationError as error:
-            raise _predecessor_refused(str(error)) from error
+            raise _predecessor_refused(
+                f"the predecessor {block.supersedes_path} cannot be continued: {error}"
+            ) from error
         chain.append(predecessor)
         current = predecessor
+        current_path = path
 
 
 LOCKFILE: Final[str] = "uv.lock"
