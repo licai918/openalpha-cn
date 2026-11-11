@@ -534,10 +534,10 @@ def judge_continued_day(
     record = candidate.item.record.batch
     if batch_digest(record) != candidate.provenance.batch_digest:
         raise ValueError(
-            f"the provenance of {session.isoformat()}'s record {candidate.item.record_id} "
-            f"provenance does not belong to it: it names the batch "
-            f"{candidate.provenance.batch_digest} and the record holds {batch_digest(record)}; a "
-            "day is compared with the provenance its own run wrote"
+            f"for {session.isoformat()}'s record {candidate.item.record_id} the provenance does "
+            f"not belong to it: it names the batch {candidate.provenance.batch_digest} and the "
+            f"record holds {batch_digest(record)}; a day is compared with the provenance its own "
+            "run wrote"
         )
     try:
         again = recompute_survivor_batch(
