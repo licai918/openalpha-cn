@@ -5,6 +5,7 @@ panel is read here."""
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib
 import json
@@ -318,6 +319,31 @@ def test_changed_bound_code_refuses_the_read(repo: Path) -> None:
     commit_file(repo, repo / BOUND[0], "change the code", at=COMMITTED + timedelta(minutes=5))
     with pytest.raises(registry.SourceChangedError):
         run(registration, repo, Measure())
+
+
+DAILY_SCRIPTS: Final[frozenset[str]] = frozenset({"daily_selection", "forward_report"})
+
+
+def test_no_research_script_imports_a_daily_script() -> None:
+    """The ruling that `read_once` binds `registry.REGISTERED_PATHS` and not the two daily
+    scripts stands on this: nothing under `scripts/research/` imports either of them, at module
+    level or inside a function, by statement or by name. If a reading tool ever needs one, this
+    turns red and the read must bind it (`also_bound`)."""
+    found: list[str] = []
+    for path in sorted(RESEARCH.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = [alias.name.split(".")[0] for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [(node.module or "").split(".")[0]]
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                names = [node.value]
+            else:
+                continue
+            found += [f"{path.name}:{node.lineno}" for name in names if name in DAILY_SCRIPTS]
+    assert found == []
+    assert len(list(RESEARCH.glob("*.py"))) >= 5  # not vacuous: the research scripts were read
 
 
 def test_a_preflight_problem_refuses_before_any_claim(repo: Path) -> None:
