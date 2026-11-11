@@ -84,6 +84,7 @@ from openalpha_cn.strategy_survivor_forward import (
     NO_VERDICT_WORDING,
     PREDICTION_LAYER_WORDING,
     SURVIVOR_FORWARD_REPORT_KIND,
+    SampledBenchmark,
     WitnessedRecord,
     record_outcome,
 )
@@ -2537,9 +2538,10 @@ def _successor(
     monkeypatch: pytest.MonkeyPatch,
     *,
     book: SurvivorBookConfig = BOOK,
+    epoch: date = survivor_day.THIRD,
 ) -> Continued:
     """A copy of the evenings' repository with a successor registration committed beside theirs:
-    epoch 8 April (every evening is on or before it), the same protocol, the evenings'
+    epoch 8 April by default (every evening is on or before it), the same protocol, the evenings'
     registration named by its path, bytes and config_id. Its runtime directory holds the panel
     alone -- a new registration opens a new book -- and the evenings' is the predecessor's."""
     repo = tmp_path / "repo"
@@ -2553,7 +2555,7 @@ def _successor(
     )
     successor = repo / "docs" / "research" / "successor.json"
     tds.registry.register(
-        survivor_day.survivor_config(epoch=survivor_day.THIRD, book=book),
+        survivor_day.survivor_config(epoch=epoch, book=book),
         tds.CRITERIA,
         successor,
         code_commit=head(repo),
@@ -2773,3 +2775,310 @@ def test_a_successor_that_names_its_predecessor_never_prints_that_it_names_none(
     assert "continuation: none" not in out
     assert document["continuation"]["chain"]
     assert document["continuation"]["merged"] == 3
+
+
+# --- G4 fix round 1: the window's ends, the refusals, own records, zero requests, duplicates ----
+
+
+def test_the_predecessors_window_ends_at_the_successors_epoch(
+    evenings: tds.World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`(predecessor epoch, successor epoch]` at the report (I1): a successor registered with its
+    epoch on 7 April merges the predecessor's 6 and 7 April records -- 7 April is exactly its
+    epoch, the window's upper end -- and 8 April, a session after the successor took over, is
+    never witnessed, never scored again and never merged."""
+    continued = _successor(evenings, tmp_path, monkeypatch, epoch=survivor_day.NEXT)
+
+    code, _out, err, document = _continued_report(continued, capsys)
+
+    assert code == 0, err
+    section = document["continuation"]
+    assert [day["session"] for day in section["days"]] == [
+        EVENINGS[0].isoformat(),
+        EVENINGS[1].isoformat(),
+    ]
+    assert [day["outcome"] for day in section["days"]] == ["identical", "identical"]
+    assert section["days"][-1]["record_id"] == continued.records[1]
+    assert (section["merged"], section["truncated_at"]) == (2, None)
+    assert continued.records[2] not in {day["record_id"] for day in section["days"]}
+    assert document["records"]["witnessed"] == 2
+
+
+def test_a_predecessor_record_on_or_before_its_epoch_never_joins_the_sample(
+    evenings: tds.World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The window's lower end (I1): a session the witness hands in at the predecessor's own epoch
+    is never a candidate. A real fixture cannot reach this -- the witness skips sessions at or
+    before the sample's epoch, which is the chain root's, and for one link that is the
+    predecessor's -- so the witness is wrapped to hand the 6 April record in again under the root
+    epoch's date: only `forward_report`'s own `session <= link.epoch` filter can drop it."""
+    continued = _successor(evenings, tmp_path, monkeypatch)
+    real = forward.witnessed_survivor_records
+    handed: list[date] = []
+
+    def witness(*arguments: Any, **keywords: Any) -> Any:
+        items = real(*arguments, **keywords)
+        if items:
+            handed.append(items[0].session)
+            return (*items, dataclasses.replace(items[0], session=EPOCH))
+        return items
+
+    monkeypatch.setattr(forward, "witnessed_survivor_records", witness)
+
+    code, _out, err, document = _continued_report(continued, capsys)
+
+    assert code == 0, err
+    assert handed == [EVENINGS[0]]
+    section = document["continuation"]
+    assert EPOCH.isoformat() not in [day["session"] for day in section["days"]]
+    assert section["candidates"] == 3
+    assert section["merged"] == 3
+
+
+def test_a_p6_registration_given_a_predecessor_directory_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """I2: only a survivor registration that names a predecessor reads a directory; the P6 book is
+    refused one by name, before anything of it is read."""
+    repo, registration = tds._repository(tmp_path, tds.CONFIG)
+    market = survivor_day.SurvivorMarket(open_days=tds.OPEN_2026)
+    tds._bind(monkeypatch, repo, market)
+    world = tds.World(
+        repo=repo, registration=registration, runtime=tmp_path / "runtime", market=market
+    )
+
+    code, _out, err = _report(
+        world, capsys, extra=("--predecessor-runtime-dir", str(tmp_path / "anything"))
+    )
+
+    assert code == 1
+    assert "this registration is the P6 book" in err
+    assert not (world.runtime / "reports").exists()
+
+
+def test_the_reports_own_runtime_directory_is_refused_as_a_predecessor(
+    evenings: tds.World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """I2: the report's own runtime directory is not a predecessor's -- the chain's records are in
+    other directories -- and giving it is refused by name, naming the directory."""
+    continued = _successor(evenings, tmp_path, monkeypatch)
+
+    code, _out, err = _report(
+        continued.world,
+        capsys,
+        extra=("--predecessor-runtime-dir", str(continued.world.runtime)),
+    )
+
+    assert code == 1
+    assert "is this registration's own runtime directory" in err
+    assert str(continued.world.runtime.resolve()) in err
+    assert not (continued.world.runtime / "reports").exists()
+
+
+@pytest.mark.parametrize("name", ["missing", "empty"])
+def test_a_predecessor_directory_whose_paper_book_marker_cannot_be_read_is_refused(
+    evenings: tds.World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    name: str,
+) -> None:
+    """I2: a directory that does not exist and a directory that exists but holds no paper book are
+    both refusals by name -- the marker cannot be read -- naming the directory and the reason."""
+    continued = _successor(evenings, tmp_path, monkeypatch)
+    directory = tmp_path / name
+    if name == "empty":
+        directory.mkdir()
+
+    code, _out, err = _report(
+        continued.world, capsys, extra=("--predecessor-runtime-dir", str(directory))
+    )
+
+    assert code == 1
+    assert "paper book marker cannot be read" in err
+    assert str(directory.resolve()) in err
+    assert not (continued.world.runtime / "reports").exists()
+
+
+def test_a_predecessor_paired_with_two_runtime_directories_is_refused(
+    evenings: tds.World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """I2: the same path given twice would otherwise keep the last directory silently. One
+    registration's records are in one directory, and the second one is refused by name."""
+    continued = _successor(evenings, tmp_path, monkeypatch)
+    path = str(continued.predecessor)
+
+    code, _out, err = _report(
+        continued.world,
+        capsys,
+        extra=("--predecessor-runtime-dir", path, "--predecessor-runtime-dir", path),
+    )
+
+    assert code == 1
+    assert "is paired with two runtime directories" in err
+    assert str(continued.predecessor.resolve()) in err
+    assert not (continued.world.runtime / "reports").exists()
+
+
+I3_AS_OF: Final[datetime] = datetime(2026, 4, 10, 10, 0, tzinfo=SHANGHAI)
+"""After 9 April's registration cutoff: the successor's one evening has filed, and the three
+predecessor sessions have not matured at h=20."""
+
+
+@pytest.fixture(scope="module")
+def continued_own(evenings: tds.World, tmp_path_factory: pytest.TempPathFactory) -> Continued:
+    """The successor of `_successor`, with one evening of its own run on 9 April: four records in
+    the sample -- the predecessor's three and the successor's own -- and a paper book that opened
+    on 8 April."""
+    root = tmp_path_factory.mktemp("survivor-continued-own")
+    market = survivor_day.SurvivorMarket(open_days=tds.OPEN_2026)
+    with pytest.MonkeyPatch.context() as patch:
+        continued = _successor(evenings, root, patch)
+        tds._bind(patch, continued.world.repo, market)
+        world = dataclasses.replace(continued.world, market=market)
+        code, _out, err = _daily(world, survivor_day.FOURTH)
+        assert code == 0, err
+    return dataclasses.replace(continued, world=world)
+
+
+def test_a_successor_with_own_records_keeps_merged_verdicts_and_own_windows(
+    continued_own: Continued,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """I3: the first report after the successor's first evening. The predecessor's three records
+    keep the verdicts their own registration's check gave them (a successor check would refuse
+    them for having no provenance of its own), the successor's own record is counted, the sample's
+    ordinals count from the chain root, and the paper book is handed no merged record's relative
+    window -- `sampled_benchmarks` is wrapped to hand in the 6 April record's window, which the
+    own filter must drop (building twenty sessions of panel would supply the same window)."""
+    tds._bind(monkeypatch, continued_own.world.repo, continued_own.world.market)
+    own = _journal(continued_own.world, survivor_day.FOURTH)[1]["prediction"]["record_id"]
+    merged = continued_own.records
+    handed: list[str] = []
+    real = forward.sampled_benchmarks
+
+    def benchmarks(layer: Any, outcomes: Any) -> tuple[SampledBenchmark, ...]:
+        handed.append(merged[0])
+        return (
+            *real(layer, outcomes),
+            SampledBenchmark(
+                record_id=merged[0],
+                entry=date(2026, 4, 7),
+                exit=date(2026, 5, 5),
+                investable_ew=0.0,
+                csi500=0.0,
+            ),
+        )
+
+    monkeypatch.setattr(forward, "sampled_benchmarks", benchmarks)
+
+    code, _out, err = _report(
+        continued_own.world,
+        capsys,
+        as_of=I3_AS_OF,
+        extra=("--predecessor-runtime-dir", str(continued_own.predecessor)),
+    )
+
+    assert code == 0, err
+    document = _document(continued_own.world, I3_AS_OF)
+    records = document["records"]
+    assert records["witnessed"] == 4
+    assert records["checked"] == 4
+    assert records["by_verdict"]["verified"] == 4
+    assert records["by_verdict"]["refused"] == 0
+    assert own not in merged
+    assert document["prediction_layer"]["h20"]["non_overlapping"]["sampled"] == [
+        EVENINGS[0].isoformat()
+    ]
+    assert "refused" not in document["paper_ledger"]
+    assert handed == [merged[0]]
+    assert document["relative"]["windows_given"] == 0
+    assert merged[0] not in [row["record_id"] for row in document["relative"]["windows"]]
+
+
+def test_the_continued_report_never_constructs_a_request_channel(
+    evenings: tds.World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """M3: nothing on the continuation path -- the predecessor's records witnessed from its store,
+    its own check, the successor's recompute and comparison -- asks for a request channel. The
+    panel transport's factory and the HTTP transport class are replaced by stubs that fail if they
+    are reached (the market `_bind` installs is what a request would otherwise be served from)."""
+    continued = _successor(evenings, tmp_path, monkeypatch, book=_book_with(capital="400000"))
+    asked: list[str] = []
+
+    def no_transport() -> Any:
+        asked.append("cli._panel_transport")
+        raise AssertionError("the continued report asked for a request channel")
+
+    class NoTransport:
+        def __init__(self, *arguments: Any, **keywords: Any) -> None:
+            asked.append("cli.UrllibTushareTransport")
+            raise AssertionError("the continued report constructed the HTTP transport")
+
+    monkeypatch.setattr(cli, "_panel_transport", no_transport)
+    monkeypatch.setattr(cli, "UrllibTushareTransport", NoTransport)
+
+    code, _out, err, document = _continued_report(continued, capsys)
+
+    assert code == 0, err
+    assert asked == []
+    assert document["continuation"]["merged"] == 3
+
+
+def test_a_session_carried_by_both_a_merged_and_an_own_record_refuses_the_report(
+    evenings: tds.World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """M5: `every` is checked to carry one record per session. The successor's own scan is wrapped
+    to hand in the predecessor's 6 April record, so the merged 6 April record and this "own" one
+    are one session with two records: the report refuses by name, naming the session, instead of
+    handing a sample with a duplicated session downstream."""
+    continued = _successor(evenings, tmp_path, monkeypatch)
+    real = forward.witnessed_survivor_records
+
+    def witness(*arguments: Any, **keywords: Any) -> Any:
+        items = real(*arguments, **keywords)
+        if items:
+            return items
+        store = FilePredictionStore(
+            continued.predecessor / "predictions", clock=lambda: REPORT_AS_OF
+        )
+        record = store.get(continued.records[0])
+        assert record is not None
+        session = record.batch.as_of.astimezone(SHANGHAI).date()
+        return (
+            WitnessedRecord(session=session, ordinal=1, record_id=record.record_id, record=record),
+        )
+
+    monkeypatch.setattr(forward, "witnessed_survivor_records", witness)
+
+    code, _out, err = _report(
+        continued.world,
+        capsys,
+        extra=("--predecessor-runtime-dir", str(continued.predecessor)),
+    )
+
+    assert code == 1
+    assert "more than one record" in err
+    assert EVENINGS[0].isoformat() in err
+    assert not (continued.world.runtime / "reports").exists()

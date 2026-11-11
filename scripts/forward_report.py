@@ -96,8 +96,10 @@ byte for byte with what the record holds (`strategy_survivor_continuation.contin
 registration's identity aside). The identical sessions join the sample with their own ids, and the
 first session that is not identical is marked and the sample is truncated there: no later
 predecessor session is scored again or merged. The sample counts its sessions from the chain
-root's epoch. The paper book is not continued: a new registration opens a new book, and the
-relative return reads only this registration's own sampled periods.
+root's epoch. One session carries one record: a merged predecessor record and this
+registration's own record for the same session are refused by name, never preferred one over the
+other. The paper book is not continued: a new registration opens a new book, and the relative
+return reads only this registration's own sampled periods.
 
 ### The order it reads in, and the instant it reads at
 
@@ -132,6 +134,7 @@ import json
 import os
 import sys
 import tempfile
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -689,6 +692,19 @@ def _survivor_report(
     )
     merged = () if continued is None else continued.merged
     every = tuple(sorted((*(c.item for c in merged), *witnessed), key=lambda item: item.session))
+    # One session carries one record: a merged predecessor record and this registration's own
+    # record for the same session are two answers to one question, and the report does not choose
+    # between them (`V2-P7-023`; the daily command cannot produce one today, and this keeps the
+    # sample fail-closed if that rule moves).
+    counted = Counter(item.session for item in every)
+    repeated = sorted(session for session, count in counted.items() if count > 1)
+    if repeated:
+        raise ForwardReportError(
+            "the sample carries more than one record for "
+            f"{', '.join(session.isoformat() for session in repeated)}: a merged predecessor "
+            "record and this registration's own record of one session cannot both be the "
+            "sample's, and the report does not choose between them"
+        )
     sessions = tuple(item.session for item in every)
     through = forward.report_through(calendar, ordinals, as_of=as_of, witnessed=sessions)
 
