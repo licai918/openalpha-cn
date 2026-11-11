@@ -418,9 +418,11 @@ def test_a_buy_at_another_price_is_still_a_price_divergence(tmp_path: Path) -> N
 def test_a_sale_the_account_filled_and_the_book_did_not_is_filled_where_the_book_did_not(
     tmp_path: Path,
 ) -> None:
-    """The branch order of `_divergence` puts this case before the sale relaxation: the book
-    filled nothing (a limit-down open, here an injected rejection), the account sold, and the
-    divergence is named -- the relaxation is only for a sale BOTH sides filled."""
+    """The sale relaxation in `_divergence` applies only when `book_filled > 0`: the book filled
+    nothing (a limit-down open, here an injected rejection), the account sold, and the divergence
+    is named `filled_where_the_book_did_not` -- the relaxation is only for a sale BOTH sides
+    filled. It is that guard this test pins, not the order of the two branches: swapping them
+    leaves it green, and dropping `book_filled > 0` turns it red."""
     settlement = _settlement(tmp_path / "paper")
     sale = _sale(settlement)
     order = sale.attempt.order
