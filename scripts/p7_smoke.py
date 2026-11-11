@@ -157,6 +157,8 @@ PATH_FLAGS: Final[tuple[str, ...]] = (
     "--launchd-plist",
     "--launchd-morning-plist",
     "--factor-gaps",
+    "--show-book",
+    "--account-record",
 )
 DAY_KINDS: Final[tuple[str, ...]] = ("evening", "morning", "weekly")
 OPENALPHA_KINDS: Final[tuple[str, ...]] = ("panel-build", "factor-build")
@@ -396,8 +398,10 @@ def _day_remedy(
 
 
 def _refuse_path_flags(extra: Sequence[str]) -> None:
-    """Refuse an extra argument that names a path flag, an abbreviation of one (argparse takes
-    `--runtime` for `--runtime-dir`) or either joined to its value."""
+    """Refuse an extra argument that names a flag the driver sets itself -- a path flag, or a mode
+    that would make the evening something other than the evening it records (the launchd printers,
+    `--show-book`, `--account-record`) -- an abbreviation of one (argparse takes `--runtime` for
+    `--runtime-dir`) or either joined to its value."""
     for word in extra:
         if not word.startswith("--") or word == "--":
             continue

@@ -1145,11 +1145,16 @@ def test_a_path_flag_is_refused_however_it_is_spelt(
     assert [event["event"] for event in events] == ["prepared"]
 
 
-@pytest.mark.parametrize("flag", ["--launchd-plist", "--launchd-morning-plist"])
-def test_both_launchd_flags_are_the_drivers_to_set(flag: str) -> None:
+@pytest.mark.parametrize(
+    "flag",
+    ["--launchd-plist", "--launchd-morning-plist", "--show-book", "--account-record"],
+)
+def test_a_read_only_or_print_only_flag_is_the_drivers_to_set(flag: str) -> None:
     """Either launchd flag turns the day into a mode that prints a plist and exits 0, which the
-    driver would record as a 0-request evening. Both are in `PATH_FLAGS`, so a smoke invocation
-    cannot reach that mode -- the evening flag alone was listed before."""
+    driver would record as a 0-request evening. `--show-book` and `--account-record` are the same
+    kind of mode -- printing the book and exiting 0, or reading the day's account record -- and a
+    smoke invocation must not reach any of it. All four are in `PATH_FLAGS`; the evening launchd
+    flag alone was listed before, then the morning one."""
     with pytest.raises(driver.SmokeDriverError, match=re.escape(flag)):
         driver._refuse_path_flags([flag, "logs"])
 
