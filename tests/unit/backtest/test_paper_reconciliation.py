@@ -322,13 +322,14 @@ def test_a_record_that_is_not_utf8_is_refused_with_its_path(tmp_path: Path) -> N
         read_account_record(path)
 
 
-# ---- a sale is reconciled by whether it filled, never by the ledger's shares or price -------------
+# ---- a sale is reconciled by whether it filled, never by its shares or price -------------------
 
 
 def test_a_sale_after_a_bonus_issue_is_reconciled_by_whether_it_filled(tmp_path: Path) -> None:
-    """After a bonus issue the ledger's share count is not the account's (`strategy_survivor_summary`
-    Units), so the account's 2000 real shares sold against the ledger's 900 is no conflict and no
-    quantity divergence: a sale is reconciled by whether it filled, never by the ledger's shares.
+    """After a bonus issue the ledger's share count is not the account's
+    (`strategy_survivor_summary`'s Units), so the account's 2000 real shares sold against the
+    ledger's 900 is no conflict and no quantity divergence: a sale is reconciled by whether it
+    filled, never by the ledger's shares.
     """
     settlement = _settlement(tmp_path / "paper")
     sale = _sale(settlement)
@@ -386,9 +387,7 @@ def test_a_buy_over_the_plan_is_still_a_conflict(tmp_path: Path) -> None:
         if outcome.attempt.order.side == "buy" and outcome.status == "filled"
     )
     order = buy.attempt.order
-    record = _with_line(
-        _record(settlement), order.order_id, filled_quantity=order.quantity + 1
-    )
+    record = _with_line(_record(settlement), order.order_id, filled_quantity=order.quantity + 1)
 
     with pytest.raises(AccountRecordConflict, match="more than the plan"):
         _reconciled(settlement, record)
@@ -405,9 +404,7 @@ def test_a_buy_at_another_price_is_still_a_price_divergence(tmp_path: Path) -> N
     )
     order = buy.attempt.order
     price = _fills(settlement)[buy.attempt.attempt_id][1]
-    record = _with_line(
-        _record(settlement), order.order_id, filled_price=price + Decimal("0.01")
-    )
+    record = _with_line(_record(settlement), order.order_id, filled_price=price + Decimal("0.01"))
 
     reconciliation = _reconciled(settlement, record)
 
