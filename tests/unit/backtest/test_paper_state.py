@@ -13,6 +13,7 @@ never having stopped.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -1540,3 +1541,43 @@ def test_the_prediction_store_opened_alone_is_the_composition_roots_and_creates_
     assert build_storage(runtime_dir=runtime_dir, clock=migration_clock).prediction_store.path == (
         alone.path
     )
+
+
+def test_only_the_composition_root_constructs_a_prediction_or_snapshot_store() -> None:
+    """The two file stores are built by the composition root and nowhere else (hard rule 5).
+
+    `cli.py` built `FilePredictionStore(runtime_dir / "predictions")` by hand four times; if
+    `composition.PREDICTION_DIRECTORY` ever moved, `model run-daily`, `model prediction`,
+    `model predictions` and `strategy backtest` would read and write an empty store at the old
+    path while every other reader moved -- the drift hard rule 5 exists to stop. The AST is the
+    check: a call to either store class outside `runtime/composition.py` and `storage/` is the
+    second construction, whatever the path expression, so a rename of the directory cannot leave
+    a hand-built store behind.
+    """
+    root = Path(__file__).resolve().parents[3]
+    composition = root / "src" / "openalpha_cn" / "runtime" / "composition.py"
+    storage = root / "src" / "openalpha_cn" / "storage"
+    sources = sorted(
+        path
+        for base in (root / "src" / "openalpha_cn", root / "scripts")
+        for path in base.rglob("*.py")
+        if path != composition and storage not in path.parents
+    )
+    offenders: list[str] = []
+    for path in sources:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = (
+                func.id
+                if isinstance(func, ast.Name)
+                else func.attr
+                if isinstance(func, ast.Attribute)
+                else None
+            )
+            if name in {"FilePredictionStore", "FilePaperStateStore"}:
+                offenders.append(f"{path.relative_to(root).as_posix()}:{node.lineno}")
+
+    assert offenders == []

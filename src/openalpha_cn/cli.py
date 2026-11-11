@@ -319,7 +319,7 @@ from openalpha_cn.research_result_io import (
     parse_research_result,
     research_refusal_detail,
 )
-from openalpha_cn.runtime.composition import build_storage
+from openalpha_cn.runtime.composition import build_storage, prediction_store_at
 from openalpha_cn.runtime.contracts import (
     ResearchRunRequest,
     ResearchRunResult,
@@ -353,7 +353,7 @@ from openalpha_cn.storage.migrations import (
     read_status,
 )
 from openalpha_cn.storage.parquet import read_parquet_records
-from openalpha_cn.storage.predictions import FilePredictionStore, PredictionStoreError
+from openalpha_cn.storage.predictions import PredictionStoreError
 from openalpha_cn.storage.shortlists import FileShortlistStore, ShortlistStoreError
 from openalpha_cn.storage.sqlite import SQLiteRunRepository
 from openalpha_cn.strategy_view import (
@@ -10096,7 +10096,7 @@ def model_daily_run_command(
             result = run_daily(
                 _panel_store(runtime_dir),
                 request,
-                predictions=FilePredictionStore(runtime_dir / "predictions", clock=_panel_clock),
+                predictions=prediction_store_at(runtime_dir, clock=_panel_clock),
                 runs=SQLiteRunRepository(runtime_dir / "state.sqlite3"),
                 predicted_at=now,
                 started_at=now,
@@ -10150,7 +10150,7 @@ def model_prediction_command(
     with _panel_command("model prediction"):
         try:
             record = held_prediction(
-                FilePredictionStore(runtime_dir / "predictions", clock=_panel_clock), record_id
+                prediction_store_at(runtime_dir, clock=_panel_clock), record_id
             )
         except ModelViewError as error:
             raise _model_fail(error) from error
@@ -10191,9 +10191,7 @@ def model_predictions_command(
 
     with _panel_command("model predictions", json_output=json_output):
         try:
-            held = held_predictions(
-                FilePredictionStore(runtime_dir / "predictions", clock=_panel_clock)
-            )
+            held = held_predictions(prediction_store_at(runtime_dir, clock=_panel_clock))
         except PredictionStoreError as error:
             raise _panel_fail(PanelExit.unhealthy, str(error)) from error
         if json_output:
@@ -11928,7 +11926,7 @@ def strategy_backtest_command(
                 slippage_rate=_strategy_decimal(slippage_rate, flag="--slippage-rate"),
                 benchmarks=tuple(benchmark or PROTOCOL_BENCHMARKS),
             )
-            predictions = FilePredictionStore(runtime_dir / "predictions", clock=_panel_clock)
+            predictions = prediction_store_at(runtime_dir, clock=_panel_clock)
             result = backtest_strategy(
                 _panel_store(runtime_dir), request, predictions=predictions.get
             )
