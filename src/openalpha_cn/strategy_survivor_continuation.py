@@ -48,10 +48,10 @@ of its own.
 A predecessor may itself name a predecessor. The CALLER reads the chain, root first, every
 link through this build's reader, and refuses a sha256 appearing twice in it as a cycle (plan
 R4); this module fixes only the depth a chain may have, `MAX_CONTINUATION_DEPTH`, and leaves
-the reading to `admit_predecessors` and the report. Each predecessor contributes only the
-records of sessions in `(its own epoch, the next link's epoch]` -- the sessions it was the
-current registration for -- so the links' sessions tile the chain without overlapping (plan
-R3).
+the reading to the caller (the daily command's admission and the report). Each predecessor
+contributes only the records of sessions in `(its own epoch, the next link's epoch]` -- the
+sessions it was the current registration for -- so the links' sessions tile the chain without
+overlapping (plan R3).
 
 ## What may be continued into what
 
