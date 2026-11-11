@@ -10,8 +10,9 @@ The fourth batch after the route adjustment, on `feat/v2-p7-batch-4` (from `8b00
 `c59ed3c`, 16 commits). **It is not pushed, the delivered code has run no real build, factor,
 reading or smoke, and no Tushare request was made; the one validation read (2022-2023, once,
 read-only, zero network requests) and the real smoke are not done and still wait for the user's
-explicit start; the real-money gate stays closed. No registration exists, so no binding is
-voided; no registration uses the new continuation block yet (`006b` has not happened).** The
+explicit start; the real-money gate stays closed. No P7 registration exists (only the retired
+P6 files under `docs/research/`), so no binding is voided; no registration uses the new
+continuation block yet (`006b` has not happened).** The
 serial full `tests/unit` gate runs on the final tip and its result is the controller's report, not
 stated here. `V2-P7-023`: a registration may name the one it supersedes in
 `settings.survivor_continuation` (`survivor-continuation/v1`, `extra="forbid"`, no defaults;
