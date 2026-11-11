@@ -81,7 +81,8 @@ class AccountRecordError(ValueError):
 class AccountRecordConflict(AccountRecordError):
     """The record is this schema and readable, and it cannot be reconciled with the book's plan:
     another session, an order no evening planned, a due order with no line, the same order twice,
-    a side or code that differs from the plan, or a buy's fill over the plan's quantity."""
+    a side or code that differs from the plan, or a buy's fill over the plan's quantity -- a sale's
+    shares and price are the ledger's, in the ledger's units (`Units`), so never the plan's."""
 
 
 class RecordedOrder(BaseModel):
@@ -237,9 +238,9 @@ def reconcile(
     line, the same order twice, a side or code unlike the plan, a **buy's** fill over the plan's
     quantity -- is an `AccountRecordConflict` (a `ValueError`): the caller must refuse the day
     before its book advances, never reconcile a substituted record. A sale's shares and price are
-    the ledger's, in the ledger's units, so a sale is compared only by whether it filled. Nothing
-    here writes: the book keeps its settlement and the account keeps its record; the comparison is
-    the whole of it.
+    the ledger's, in the ledger's units (`strategy_survivor_summary`'s Units), so a sale is
+    compared only by whether it filled. Nothing here writes: the book keeps its settlement, the
+    account its record; the comparison is the whole of it.
     """
     _require_the_same_orders(record, settlement, outcomes)
     verdicts = {item.order.order_id: item for item in settlement.runner_record.transitions}
