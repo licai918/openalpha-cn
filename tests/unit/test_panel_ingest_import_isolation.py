@@ -625,6 +625,38 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "strategy_registration.batch_digest",
         }
     ),
+    "openalpha_cn.strategy_survivor_continuation": frozenset(
+        {
+            # V2-P7-023. The confirmatory sample continued across registrations. One read:
+            # `recompute_survivor_batch` scores a predecessor's day again from the stored panel
+            # under the successor's configuration; nothing else in the module fetches or reads ...
+            "strategy_survivor_registration.recompute_survivor_batch",
+            # ... and the provenance that recompute is compared with, and the refusals that
+            # mean a day cannot be recomputed: one type and one tuple of exceptions, not reads.
+            "strategy_survivor_registration.SurvivorInputProvenance",
+            "strategy_survivor_registration.SURVIVOR_RECOMPUTE_REFUSALS",
+            # The batch digest a candidate's provenance must carry, and P6's registration and
+            # refusal vocabulary a link declares itself in -- declarations and a digest.
+            "strategy_registration.RegisteredConfiguration",
+            "strategy_registration.StrategyRegistrationError",
+            "strategy_registration.batch_digest",
+            # The registration a link holds, the verdict its own check gave a candidate and
+            # whether that verdict was a refusal: a type, a type and one constant.
+            "strategy_survivor.SurvivorRegistration",
+            "strategy_survivor_check.SurvivorRecordVerdict",
+            "strategy_survivor_check.VERDICT_REFUSED",
+            # The three pre-registered blocks a chain keeps identical, compared as JSON text
+            # (declarations), and the witnessed record a candidate carries (a type).
+            "strategy_survivor_forward.SURVIVOR_FORWARD_POWER_KEY",
+            "strategy_survivor_forward.SURVIVOR_FORWARD_PROTOCOL_KEY",
+            "strategy_survivor_forward.SURVIVOR_FORWARD_STOP_RULE_KEY",
+            "strategy_survivor_forward.WitnessedRecord",
+            # The transform a successor's target is read with, and the survivor wording every
+            # document carries: both declarations, neither a read.
+            "panel_factors.FACTOR_TRANSFORMS",
+            "strategy_survivor_summary.SURVIVOR_WORDING",
+        }
+    ),
     "openalpha_cn.strategy_survivor_facts": frozenset(
         {
             # V2-P7-016. The survivor book's eligibility facts: one row per listed security,
@@ -1079,6 +1111,29 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
         # recompute's `build_facts_day` and the catalog questions the provenance asks) and
         # through `stored_rows_digest`, a fingerprint of the registry, the names and the
         # calendar, never a read answered with.
+        named=frozenset(),
+        reached=frozenset(
+            {
+                "balancesheet",
+                "cashflow",
+                "daily",
+                "daily_basic",
+                "fina_indicator",
+                "income",
+                "index_daily",
+                "namechange",
+                "stk_limit",
+                "stock_basic",
+                "suspend_d",
+                "trade_cal",
+            }
+        ),
+    ),
+    "openalpha_cn.strategy_survivor_continuation": DatasetReach(
+        # V2-P7-023. It names no dataset: a predecessor's day is scored again through
+        # `recompute_survivor_batch`, and the twelve it reaches are that reader's -- the stored
+        # processed factor tiers' inputs and the facts day's datasets. The rest of its row is
+        # declarations and types, which reach none.
         named=frozenset(),
         reached=frozenset(
             {
