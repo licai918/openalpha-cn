@@ -233,12 +233,31 @@ def test_a_registration_that_could_not_be_read_once_is_refused(
         registered(repo, commit=False, **changes)
 
 
-@pytest.mark.parametrize("reason", ["", "   ", "one line\nand a second"])
+@pytest.mark.parametrize(
+    ("reason", "said"),
+    [
+        ("", "one non-empty line"),
+        ("   ", "one non-empty line"),
+        ("one line\nand a second", "must be one line"),
+    ],
+)
 def test_a_registration_says_why_its_as_of_is_the_knowledge_it_reads(
-    repo: Path, reason: str
+    repo: Path, reason: str, said: str
 ) -> None:
-    with pytest.raises(p7_reading.ReadingError, match="as_of"):
+    """Each refusal names its own branch: the empty/blank one and the two-line one are different
+    rules, and a `match="as_of"` would be satisfied by both -- and by the missing-key refusal."""
+    with pytest.raises(p7_reading.ReadingError, match=said):
         registered(repo, commit=False, as_of_reason=reason)
+
+
+def test_a_registration_without_an_as_of_reason_is_refused_by_the_missing_key(repo: Path) -> None:
+    """The missing key is `_require_keys`' refusal, not the one-line rule's: the test that pins
+    the one-line rule must not be satisfied by it."""
+    body = json.loads(registered(repo, commit=False).read_text(encoding="utf-8"))
+    del body["as_of_reason"]
+
+    with pytest.raises(p7_reading.ReadingError, match=r"lacks \['as_of_reason'\]"):
+        p7_reading._registration_of(body)
 
 
 def test_the_claim_is_written_before_the_read_and_the_result_after(repo: Path) -> None:

@@ -1769,9 +1769,11 @@ def _measured(
 
 
 def reading_lines(result: Mapping[str, Any], body: Mapping[str, Any]) -> list[str]:
-    """The result as text: the read-once banner (from the registration), the stop rule's outcome
-    and wording, and then -- for a real measurement -- `p7_diagnostics.diagnostic_lines` after its
-    own banner."""
+    """The result as text: the read-once banner (from the registration), the registration's
+    knowledge clock -- `_KNOWLEDGE_LINE`: the registered `as_of` and, verbatim, the registrant's
+    `as_of_reason` for why it is the knowledge the reading is under -- the stop rule's outcome and
+    wording, and then, for a real measurement, `p7_diagnostics.diagnostic_lines` after its own
+    banner."""
     window = WINDOWS[body["window"]]
     lines = [
         read_once_banner(
