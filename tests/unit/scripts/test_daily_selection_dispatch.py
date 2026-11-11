@@ -321,11 +321,26 @@ _IN_A_FRESH_INTERPRETER: Final[str] = (
 )
 
 
+def _p6_world_naming_a_predecessor(root: Path, monkeypatch: pytest.MonkeyPatch) -> tds.World:
+    """A committed P6 registration whose `settings` carry a `survivor_continuation` block -- a
+    registration someone committed believing it continues a sample. No panel: every day here
+    stops at step 1."""
+    world = _survivor_world(root, monkeypatch, tds.CONFIG)
+    body = json.loads(world.registration.read_text(encoding="utf-8"))
+    body["settings"] = {
+        **(body.get("settings") or {}),
+        daily.SURVIVOR_CONTINUATION_KEY: {"schema_version": "survivor-continuation/v1"},
+    }
+    registration = _committed_body(world, "p6-names-a-predecessor.json", body, at_days=1)
+    return dataclasses.replace(world, registration=registration)
+
+
 def modules_a_day_loads(form: str, root: str) -> dict[str, Any]:
-    """Run one day of `form` -- `"p6"` end to end on `test_daily_selection`'s January world, or
-    `"survivor"` up to its dispatch (and its refusal of `--top`) -- under `root`, and say which of
-    `WATCHED` the process held before it and after. Meant for a fresh interpreter: in the test
-    process both are loaded."""
+    """Run one day of `form` -- `"p6"` end to end on `test_daily_selection`'s January world,
+    `"p6_continuation"` on a P6 registration naming a predecessor (refused at step 1), or
+    `"survivor"` up to its dispatch (and its refusal of `--top`) -- under `root`, and say which
+    of `WATCHED` the process held before it and after. Meant for a fresh interpreter: in the
+    test process both are loaded."""
     before = [name for name in WATCHED if name in sys.modules]
     monkeypatch = pytest.MonkeyPatch()
     out, err = io.StringIO(), io.StringIO()
@@ -335,18 +350,19 @@ def modules_a_day_loads(form: str, root: str) -> dict[str, Any]:
             contextlib.redirect_stdout(out),
             contextlib.redirect_stderr(err),
         ):
-            world = (
-                tds._world(Path(root), monkeypatch, Market(open_days=tds.OPEN_2026))
-                if form == "p6"
-                else _survivor_world(Path(root), monkeypatch, SURVIVOR_CONFIG)
-            )
+            if form == "p6":
+                world = tds._world(Path(root), monkeypatch, Market(open_days=tds.OPEN_2026))
+            elif form == "p6_continuation":
+                world = _p6_world_naming_a_predecessor(Path(root), monkeypatch)
+            else:
+                world = _survivor_world(Path(root), monkeypatch, SURVIVOR_CONFIG)
             world.market.today = tds.DAY_AS_OF.astimezone(daily.SHANGHAI).date()
             arguments = ["--runtime-dir", str(world.runtime)]
             arguments += ["--registration", str(world.registration), "--repo", str(world.repo)]
             arguments += ["--as-of", tds.DAY_AS_OF.isoformat(), "--json"]
             for target in tds.TARGETS:
                 arguments += ["--dataset", target]
-            if form != "p6":
+            if form == "survivor":
                 arguments += SURVIVOR_ONLY
             code = daily.main(arguments, clock=lambda: tds.RUN_CLOCK)
     finally:
@@ -408,6 +424,28 @@ def test_a_survivor_dispatch_loads_both_which_is_what_the_p6_probe_would_see(
     assert report["after"] == list(WATCHED)
 
 
+def test_a_p6_registration_naming_a_predecessor_exits_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A P6 registration carrying `settings.survivor_continuation` would run as P6 and never
+    mention the block, which the continuation contract forbids; it is refused at step 1 by name,
+    before any request, and the P6 day still loads neither survivor module -- the key is read as
+    the string constant, never through the continuation module (the fresh interpreter is what
+    can see that)."""
+    world = _p6_world_naming_a_predecessor(tmp_path, monkeypatch)
+
+    code, err = _stopped_at_registration(world, capsys)
+
+    assert code == 2
+    assert "names a predecessor in settings.survivor_continuation" in err
+    assert "only a survivor registration continues a sample" in err
+    report = _in_a_fresh_interpreter("p6_continuation", tmp_path / "p6-continuation")
+    assert report["exit"] == 2
+    assert "only a survivor registration continues a sample" in report["stderr"]
+    assert report["before"] == []
+    assert report["after"] == []
+
+
 # --- the predecessor chain (`V2-P7-023`) -------------------------------------------------------
 
 
@@ -418,6 +456,7 @@ def test_the_smoke_key_the_continuation_module_spells_is_the_daily_commands() ->
     from openalpha_cn import strategy_survivor_continuation as continuation
 
     assert continuation.SMOKE_SETTINGS_KEY == daily.SMOKE_SETTINGS_KEY
+    assert continuation.SURVIVOR_CONTINUATION_KEY == daily.SURVIVOR_CONTINUATION_KEY
 
 
 def _register(
@@ -727,6 +766,25 @@ def test_a_successor_naming_another_config_id_for_its_predecessor_exits_2(
 
     assert code == 2
     assert "is not the 'rcf_wrong' its successor names" in err
+
+
+def test_a_predecessor_whose_config_id_is_not_its_own_configs_exits_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The predecessor's body claims a config_id its config does not re-derive to; the block
+    names that same claimed id, so only the predecessor's own re-derivation can refuse it."""
+    world = _survivor_world(tmp_path, monkeypatch, SURVIVOR_CONFIG)
+    body = json.loads(world.registration.read_text(encoding="utf-8"))
+    body["config_id"] = "rcf_forged"
+    forged = _committed_body(world, "forged.json", body, at_days=1)
+
+    code, err = _stopped_at_registration(
+        _successor_of(world, forged, config_id="rcf_forged"), capsys
+    )
+
+    assert code == 2
+    assert "forged.json's config_id 'rcf_forged' does not match its own config" in err
+    assert "its successor names" not in err
 
 
 def test_a_predecessor_that_registers_no_configuration_object_exits_2(

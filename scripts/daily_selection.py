@@ -340,6 +340,12 @@ registration. Any value at all marks it. Never a key of the configuration, which
 (`strategy_survivor.REGISTRATION_KEYS`) and whose `config_id` it would change; the settings are
 open, and the day reads only `random_seed` from them."""
 
+SURVIVOR_CONTINUATION_KEY: Final[str] = "survivor_continuation"
+"""`strategy_survivor_continuation.SURVIVOR_CONTINUATION_KEY`'s spelling of the key a survivor
+registration names its predecessor in (`V2-P7-023`), repeated because a P6 registration carrying
+it is refused here and `src/` imports no script; the two spellings are held equal by the dispatch
+test (`test_the_smoke_key_the_continuation_module_spells_is_the_daily_commands`)."""
+
 SMOKE_BANNER: Final[str] = (
     "smoke: do not place these orders -- a V2-P7-019 smoke registration, not the V2-P7-006 "
     "registration; nothing it prints is evidence"
@@ -3571,6 +3577,17 @@ def _run_daily_selection(
             # A successor names the registration it supersedes; the whole chain is read and
             # checked here, before any request or write (`V2-P7-023`, plan R4).
             admit_predecessors(registration, survivor, options.repo)
+        elif SURVIVOR_CONTINUATION_KEY in registration.settings:
+            # The block is only read for a survivor registration; a P6 book carrying one would
+            # otherwise run as P6 and never mention it, which its contract forbids ("never
+            # defaulted and never ignored", `V2-P7-023` final review 6).
+            raise StepFailedError(
+                "registration",
+                f"{registration.path} names a predecessor in "
+                f"settings.{SURVIVOR_CONTINUATION_KEY}, and it is the P6 book; only a survivor "
+                "registration continues a sample",
+                exit_code=DailyExit.no_registration,
+            )
     if survivor is not None:
         # The registration's `kind` decides the day (`V2-P7-008`); the survivor day numbers and
         # reports its own steps, so it runs outside this step's fault handler.
@@ -3902,8 +3919,10 @@ def survivor_panel_update(survivor: SurvivorRegistration) -> SurvivorPanelUpdate
     return SurvivorPanelUpdate(max_catch_up_sessions=survivor.adapter.max_panel_catch_up_sessions)
 
 
-def survivor_journal_directory(runtime_dir: Path, registration: Registration) -> Path:
-    return runtime_dir / SURVIVOR_JOURNAL_DIRECTORY / registration.config_id[:16]
+def survivor_journal_directory(runtime_dir: Path, config_id: str) -> Path:
+    """Where a registration's survivor journals live: its `config_id`, not its path, because a
+    chain reads a predecessor's journals by the `config_id` its successor names (`V2-P7-023`)."""
+    return runtime_dir / SURVIVOR_JOURNAL_DIRECTORY / config_id[:16]
 
 
 def read_survivor_journal(path: Path) -> dict[str, Any] | None:
@@ -5440,7 +5459,10 @@ def _survivor_day(
             as_of=first_as_of,
             runtime_dir=runtime_dir,
         )
-        path = survivor_journal_directory(runtime_dir, registration) / f"{session.isoformat()}.json"
+        path = (
+            survivor_journal_directory(runtime_dir, registration.config_id)
+            / f"{session.isoformat()}.json"
+        )
         journal = read_survivor_journal(path)
         if journal is not None and journal.get("registration", {}).get("sha256") not in (
             None,
@@ -5976,7 +5998,7 @@ def _run_morning_recheck(
                 f"{first_as_of.isoformat()}: no evening has run here. Nothing was fetched or "
                 "written",
             )
-        directory = survivor_journal_directory(runtime_dir, registration)
+        directory = survivor_journal_directory(runtime_dir, registration.config_id)
         journal = _read_evening_journal(
             directory / f"{session.isoformat()}.json", session=session, registration=registration
         )

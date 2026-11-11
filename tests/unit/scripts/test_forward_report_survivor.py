@@ -76,7 +76,7 @@ from openalpha_cn.panel_ingest import (
     load_trading_calendar,
     session_publication_instant,
 )
-from openalpha_cn.storage.predictions import FilePredictionStore
+from openalpha_cn.storage.predictions import PREDICTION_DOCUMENT_SUFFIX, FilePredictionStore
 from openalpha_cn.strategy_registration import RegisteredConfiguration
 from openalpha_cn.strategy_survivor_check import SurvivorRecordVerdict
 from openalpha_cn.strategy_survivor_forward import (
@@ -2757,6 +2757,28 @@ def test_the_predecessors_directory_is_read_only(
     assert after == before
 
 
+def test_a_predecessor_record_its_journal_names_and_its_store_lost_refuses_the_report(
+    evenings: tds.World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The predecessor's journals are held against its own store, as this registration's are
+    (`forward.check_journals_against_the_store`): the record file of one evening is lost (a
+    partial copy, a sync conflict) and the remaining days would otherwise merge silently, the
+    lost session listed only as missing. Fail closed: the report refuses, naming the session,
+    and writes nothing."""
+    continued = _successor(evenings, tmp_path, monkeypatch, book=_book_with(capital="400000"))
+    lost = continued.predecessor / "predictions"
+    (lost / f"{continued.records[1]}{PREDICTION_DOCUMENT_SUFFIX}").unlink()
+
+    code, _out, err, _document = _continued_report(continued, capsys)
+
+    assert code == 1
+    assert survivor_day.NEXT.isoformat() in err
+    assert not (continued.world.runtime / "reports").exists()
+
+
 def test_a_successor_that_names_its_predecessor_never_prints_that_it_names_none(
     evenings: tds.World,
     tmp_path: Path,
@@ -2861,6 +2883,39 @@ def test_a_p6_registration_given_a_predecessor_directory_is_refused(
 
     assert code == 1
     assert "this registration is the P6 book" in err
+    assert not (world.runtime / "reports").exists()
+
+
+def test_a_p6_report_naming_a_predecessor_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A P6 registration carrying `settings.survivor_continuation` is refused by name rather than
+    reported as P6, which would never mention the block (final review 6); nothing is written."""
+    repo, registration = tds._repository(tmp_path, tds.CONFIG)
+    body = json.loads(registration.read_text(encoding="utf-8"))
+    body["settings"] = {
+        **(body.get("settings") or {}),
+        daily.SURVIVOR_CONTINUATION_KEY: {"schema_version": "survivor-continuation/v1"},
+    }
+    named = repo / "docs" / "research" / "p6-names-a-predecessor.json"
+    named.write_text(json.dumps(body), encoding="utf-8")
+    commit_file(
+        repo,
+        named,
+        "register a P6 config that names a predecessor",
+        at=tds.COMMITTED + timedelta(days=1),
+    )
+    market = survivor_day.SurvivorMarket(open_days=tds.OPEN_2026)
+    tds._bind(monkeypatch, repo, market)
+    world = tds.World(repo=repo, registration=named, runtime=tmp_path / "runtime", market=market)
+
+    code, _out, err = _report(world, capsys)
+
+    assert code == 1
+    assert "names a predecessor in settings.survivor_continuation" in err
+    assert "only a survivor registration continues a sample" in err
     assert not (world.runtime / "reports").exists()
 
 

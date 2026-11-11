@@ -1223,7 +1223,13 @@ def test_the_journal_readers_take_neither_check_for_a_sessions_journal(
     ]
     report = tds._script("forward_report", ROOT / "scripts")
     admitted = daily.admit_registration(world.registration, world.repo)
-    assert list(report._survivor_journals(world.runtime, admitted)) == [FRIDAY]
+    assert list(
+        report._survivor_journals(
+            world.runtime,
+            config_id=admitted.config_id,
+            registration_sha256=admitted.sha256,
+        )
+    ) == [FRIDAY]
 
 
 # --- New Year -------------------------------------------------------------------------------------

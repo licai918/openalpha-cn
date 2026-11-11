@@ -347,6 +347,14 @@ def forward_report(
     admitted = _admit(registration, repo)
     survivor = _survivor_of(admitted)
     if survivor is None:
+        if daily_selection.SURVIVOR_CONTINUATION_KEY in admitted.settings:
+            # A P6 registration is never a continuation: the block is only read for a survivor
+            # registration, so it would be silently ignored (final review 6).
+            raise ForwardReportError(
+                f"{registration} names a predecessor in "
+                f"settings.{daily_selection.SURVIVOR_CONTINUATION_KEY}, and it is the P6 book; "
+                "only a survivor registration continues a sample"
+            )
         if predecessor_runtime_dirs:
             raise ForwardReportError(
                 "--predecessor-runtime-dir is read for a survivor registration that names a "
@@ -560,7 +568,7 @@ def _survivor_forward_report(
     admitted: daily_selection.Registration,
     survivor: SurvivorRegistration,
     as_of: datetime,
-    predecessors: Sequence[tuple[ChainLink, Path]] = (),
+    predecessors: Sequence[tuple[ChainLink, Path]],
 ) -> SurvivorForwardReport:
     """A survivor registration's weekly report (module docstring); glue only.
 
@@ -632,7 +640,7 @@ def _survivor_report(
     admitted: daily_selection.Registration,
     survivor: SurvivorRegistration,
     as_of: datetime,
-    predecessors: Sequence[tuple[ChainLink, Path]] = (),
+    predecessors: Sequence[tuple[ChainLink, Path]],
 ) -> SurvivorForwardReport:
     """`_survivor_forward_report`'s steps, its refusals unmapped.
 
@@ -664,7 +672,13 @@ def _survivor_report(
     listing = _paper_listing(runtime_dir, as_of=as_of)
     try:
         journals = _journals_at(
-            _survivor_journals(runtime_dir, admitted), prediction_store, as_of=as_of
+            _survivor_journals(
+                runtime_dir,
+                config_id=admitted.config_id,
+                registration_sha256=admitted.sha256,
+            ),
+            prediction_store,
+            as_of=as_of,
         )
     except daily_selection.StepFailedError as error:
         raise SurvivorReportError(f"a survivor journal cannot be read: {error}") from error
@@ -820,10 +834,11 @@ def _continued(
     registration's configuration.
 
     A predecessor's directory is read only: its prediction store is opened through the
-    composition root (`prediction_store_at`, no migration and no directory), and its own check
-    runs without a verdict cache (`verdicts=None`), so nothing of the predecessor's is written
-    beside it. The provenance its own run wrote is read for the holdings the session was scored
-    with; the successor's stored panel is what the day is scored again from.
+    composition root (`prediction_store_at`, no migration and no directory), its own check runs
+    without a verdict cache (`verdicts=None`), and its journals are read and held against that
+    store (`check_journals_against_the_store`), so nothing of the predecessor's is written beside
+    it. The provenance its own run wrote is read for the holdings the session was scored with;
+    the successor's stored panel is what the day is scored again from.
     """
     from openalpha_cn import strategy_survivor_check as check
     from openalpha_cn import strategy_survivor_continuation as continuation
@@ -851,14 +866,32 @@ def _continued(
             provenance=index,
             verdicts=None,  # a predecessor's directory is read only
         )
+        records = prediction_store_at(directory, clock=lambda: as_of)
         items = forward.witnessed_survivor_records(
-            _FiledBy(prediction_store_at(directory, clock=lambda: as_of), as_of=as_of),
+            _FiledBy(records, as_of=as_of),
             book=link.survivor.book,
             registered=link.declared,
             calendar=calendar,
             ordinals=ordinals,
             through=min(reported, upper),
         )
+        # The predecessor's own journals are read and held against its store, as this
+        # registration's are (`forward.check_journals_against_the_store`): a record file lost
+        # from its `predictions/` makes a journal name a record the store does not witness, and
+        # the report refuses rather than merging the remaining days around the hole.
+        try:
+            journals = _journals_at(
+                _survivor_journals(
+                    directory,
+                    config_id=link.config_id,
+                    registration_sha256=link.registration_sha256,
+                ),
+                records,
+                as_of=as_of,
+            )
+        except daily_selection.StepFailedError as error:
+            raise SurvivorReportError(f"a predecessor journal cannot be read: {error}") from error
+        forward.check_journals_against_the_store(items, journals, through=min(reported, upper))
         for item in items:
             if item.session <= link.epoch:
                 continue
@@ -1094,13 +1127,15 @@ def _journals_at(
 
 
 def _survivor_journals(
-    runtime_dir: Path, admitted: daily_selection.Registration
+    runtime_dir: Path, *, config_id: str, registration_sha256: str
 ) -> dict[date, Mapping[str, Any]]:
-    """This registration's survivor journals by session (`daily_selection.read_survivor_journal`,
+    """A registration's survivor journals by session (`daily_selection.read_survivor_journal`,
     which refuses one that is not, `StepFailedError`), skipping every file whose name is not a
     session's -- the morning re-check's advice beside them, say. A journal another registration
-    wrote is refused: the journals are what the store is held against."""
-    directory = daily_selection.survivor_journal_directory(runtime_dir, admitted)
+    wrote is refused: the journals are what the store is held against. `config_id` and
+    `registration_sha256` name the registration, so a predecessor's journals are read the same
+    way this registration's are (`V2-P7-023`)."""
+    directory = daily_selection.survivor_journal_directory(runtime_dir, config_id)
     journals: dict[date, Mapping[str, Any]] = {}
     for path in sorted(directory.glob("*.json")) if directory.is_dir() else ():
         try:
@@ -1112,10 +1147,10 @@ def _survivor_journals(
             continue
         registration = body.get("registration")
         stated = registration.get("sha256") if isinstance(registration, Mapping) else None
-        if stated not in (None, admitted.sha256):
+        if stated not in (None, registration_sha256):
             raise SurvivorReportError(
                 f"{path.name} was written under another registration of this configuration "
-                f"({stated}, not {admitted.sha256})"
+                f"({stated}, not {registration_sha256})"
             )
         journals[session] = body
     return journals

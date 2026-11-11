@@ -95,4 +95,8 @@ def test_the_same_configuration_registered_again_is_refused_before_any_request_n
     report = tds._script("forward_report", ROOT / "scripts")
     admitted = daily.admit_registration(again.registration, again.repo)
     with pytest.raises(report.SurvivorReportError, match="another registration"):
-        report._survivor_journals(world.runtime, admitted)
+        report._survivor_journals(
+            world.runtime,
+            config_id=admitted.config_id,
+            registration_sha256=admitted.sha256,
+        )

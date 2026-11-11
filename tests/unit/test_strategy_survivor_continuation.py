@@ -644,3 +644,9 @@ def test_a_registration_with_no_predecessor_says_so() -> None:
     assert section["chain"] == [] and section["merged"] == 0 and section["days"] == []
     assert section["statement"].startswith("this registration names no predecessor")
     assert section["wording"] and section["rule"]
+
+
+def test_a_chain_may_name_at_most_sixteen_predecessors() -> None:
+    """The registered cap the runbook states; the dispatch tests exercise the rule under a
+    monkeypatched cap, so this pins the production value."""
+    assert continuation_module.MAX_CONTINUATION_DEPTH == 16
