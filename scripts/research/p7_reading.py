@@ -1552,8 +1552,7 @@ def _require_the_validation_window_spent(root: Path) -> None:
         root,
         refusal=ValidationNotSpentError,
         consequence=(
-            "whether the validation window was read first cannot be shown, so the second_use read "
-            "is refused"
+            "the validation window cannot be shown read first and the second_use read is refused"
         ),
     )
     relative = (READING_DIRECTORY / f"{WINDOWS['validation'].name}{WINDOW_CLAIM_SUFFIX}").as_posix()

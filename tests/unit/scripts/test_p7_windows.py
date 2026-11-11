@@ -602,9 +602,11 @@ def test_the_two_refusals_are_the_smokes_path_policy(tmp_path: Path) -> None:
         clone,
         home / "openalpha-research-clone",
         home / "openalpha-research-clone" / "panel",
+        research / ".." / "openalpha-research-clone",
     ]
     spelled = home / "OpenAlpha-Research" / "panel"
-    if spelled.exists() or spelled.parent.resolve() == research.resolve():
+    # The spelling exists only on a case-blind volume; resolve() keeps the case it is given.
+    if spelled.exists():
         paths.append(spelled)
     policy = env.PathPolicy(
         temporary_roots=(),

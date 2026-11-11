@@ -2086,8 +2086,10 @@ def test_the_spent_check_refuses_a_shallow_repository_by_itself(repo: Path) -> N
     check refuses by itself, whatever the caller did first."""
     (repo / ".git" / "shallow").write_text(head(repo) + "\n", encoding="utf-8")
 
-    with pytest.raises(p7_reading.ValidationNotSpentError, match="git fetch --unshallow"):
+    with pytest.raises(p7_reading.ValidationNotSpentError, match="git fetch --unshallow") as raised:
         p7_reading._require_the_validation_window_spent(repo)
+
+    assert ", so whether" not in str(raised.value)
 
 
 def test_the_spent_check_refuses_a_grafts_file_by_itself(repo: Path) -> None:
@@ -2098,5 +2100,7 @@ def test_the_spent_check_refuses_a_grafts_file_by_itself(repo: Path) -> None:
     grafts.parent.mkdir(parents=True, exist_ok=True)
     grafts.write_text(f"{merge} {merge}\n", encoding="utf-8")
 
-    with pytest.raises(p7_reading.ValidationNotSpentError, match="grafts"):
+    with pytest.raises(p7_reading.ValidationNotSpentError, match="grafts") as raised:
         p7_reading._require_the_validation_window_spent(repo)
+
+    assert ", so whether" not in str(raised.value)
