@@ -5,22 +5,56 @@ and what may be continued into what."""
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, timedelta
+from decimal import Decimal
+from pathlib import Path
 from typing import Any, Final
 
 import pytest
+from panel_fixtures import EXCHANGE
+from test_strategy_survivor_check import (
+    evening_store,  # noqa: F401  (module fixture, reused)
+    filing,
+    frame_root,  # noqa: F401  (module fixture, reused)
+)
+from test_strategy_survivor_registration import (
+    BOOK,
+    MAX_CARRY_SESSIONS,
+    MIN_COVERAGE,
+    REGISTERED,
+    SECOND_TRANSFORM,
+    book_with,
+)
+from test_survivor_facts_panel import IDENTITY, SIGNAL
 
+from openalpha_cn import strategy_survivor_continuation as continuation_module
 from openalpha_cn.domain.survivor_book import SurvivorBookConfig
+from openalpha_cn.panel.store import PanelStore
+from openalpha_cn.strategy_registration import RegisteredConfiguration
 from openalpha_cn.strategy_survivor import read_survivor_registration
+from openalpha_cn.strategy_survivor_check import SurvivorRecordVerdict
 from openalpha_cn.strategy_survivor_continuation import (
+    AFTER_TRUNCATION,
+    DIFFERS,
+    IDENTICAL,
+    PREDECESSOR_REFUSED,
+    RECOMPUTE_FAILED,
     SURVIVOR_CONTINUATION_KEY,
     SURVIVOR_CONTINUATION_SCHEMA,
     ChainLink,
+    ContinuationCandidate,
+    ContinuationTarget,
+    ContinuedDay,
     SurvivorContinuationError,
     continuation_block,
+    continuation_bytes,
+    continued_sample,
+    judge_continued_day,
+    no_continuation_section,
     read_survivor_continuation,
     require_continuable,
 )
+from openalpha_cn.strategy_survivor_forward import WitnessedRecord
 
 SEED: Final[int] = 7
 ADAPTER: Final[dict[str, Any]] = {
@@ -198,3 +232,250 @@ def test_a_links_declaration_is_its_registrations() -> None:
     )
     assert link(OLD).epoch == date(2026, 4, 3)
     assert json.loads(json.dumps(continuation_block(path="a.json", sha256=OLD, config_id="r")))
+
+
+SUCCESSOR: Final[RegisteredConfiguration] = RegisteredConfiguration(
+    config_id="rcf_0000successor0000000000",
+    registration_sha256="ab" * 32,
+    code_commit="1234567abcdef",
+    seed=REGISTERED.seed,
+)
+
+
+def target(*, book: SurvivorBookConfig = BOOK, transform: Any = IDENTITY) -> ContinuationTarget:
+    return ContinuationTarget(
+        book=book,
+        transform=transform,
+        exchange=EXCHANGE,
+        min_coverage=MIN_COVERAGE,
+        max_carry_sessions=MAX_CARRY_SESSIONS,
+        registered=SUCCESSOR,
+    )
+
+
+def candidate_of(
+    held: Any, *, own: str = "verified", session: date = SIGNAL
+) -> ContinuationCandidate:
+    record = held.record
+    verdict = SurvivorRecordVerdict(
+        record_id=record.record_id,
+        session=session,
+        verdict=own,  # type: ignore[arg-type]
+        scope=None if own == "verified" else "no_provenance",
+        reason=None if own == "verified" else "scripted refusal",
+    )
+    return ContinuationCandidate(
+        item=WitnessedRecord(session=session, ordinal=1, record_id=record.record_id, record=record),
+        registration_sha256=REGISTERED.registration_sha256,
+        own=verdict,
+        provenance=held.provenance,
+    )
+
+
+@pytest.fixture
+def recomputed(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    called: list[str] = []
+    real = continuation_module.recompute_survivor_batch
+
+    def counted(store: PanelStore, record: Any, **arguments: Any) -> Any:
+        called.append(record.record_id)
+        return real(store, record, **arguments)
+
+    monkeypatch.setattr(continuation_module, "recompute_survivor_batch", counted)
+    return called
+
+
+# --- the bytes ---------------------------------------------------------------------------------
+
+
+def test_two_batches_differing_only_in_the_registrations_identity_have_the_same_bytes(
+    evening_store: PanelStore,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    batch = filing(evening_store, tmp_path).record.batch
+    declaration = batch.artifact.declaration.model_copy(
+        update={
+            "feature_version": SUCCESSOR.config_id,
+            "code_commit": SUCCESSOR.code_commit,
+            "hyperparameters": (("registration_sha256", SUCCESSOR.registration_sha256),),
+        }
+    )
+    renamed = batch.model_copy(
+        update={"artifact": batch.artifact.model_copy(update={"declaration": declaration})}
+    )
+    assert continuation_bytes(renamed) == continuation_bytes(batch)
+
+    first, *rest = batch.predictions
+    rescored = batch.model_copy(
+        update={"predictions": (first.model_copy(update={"score": first.score + 1e-12}), *rest)}
+    )
+    assert continuation_bytes(rescored) != continuation_bytes(batch)
+    rehorizoned = batch.model_copy(
+        update={
+            "artifact": batch.artifact.model_copy(
+                update={
+                    "declaration": batch.artifact.declaration.model_copy(update={"horizon": "5d"})
+                }
+            )
+        }
+    )
+    assert continuation_bytes(rehorizoned) != continuation_bytes(batch)
+
+
+# --- one day, on the frame: identical, different, cannot be scored --------------------------
+
+
+def test_a_day_the_successor_scores_the_same_is_identical(
+    evening_store: PanelStore,  # noqa: F811
+    tmp_path: Path,
+    recomputed: list[str],
+) -> None:
+    """Another registration and another book that scores the same (only its capital differs):
+    the day is the same batch, so it joins the successor's sample."""
+    held = filing(evening_store, tmp_path)
+    successor_book = book_with(capital=Decimal("400000"))
+    assert successor_book.config_id != BOOK.config_id
+
+    day = judge_continued_day(evening_store, candidate_of(held), target=target(book=successor_book))
+
+    assert (day.outcome, day.reason) == (IDENTICAL, None)
+    assert recomputed == [held.record.record_id]
+
+
+def test_a_day_the_successor_scores_otherwise_differs(
+    evening_store: PanelStore,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    """Three of the four composite factors: other scores for the same names."""
+    held = filing(evening_store, tmp_path)
+    fewer = book_with(composite_factors=list(BOOK.composite_factors[:3]))
+
+    day = judge_continued_day(evening_store, candidate_of(held), target=target(book=fewer))
+
+    assert day.outcome == DIFFERS
+    assert day.reason is not None and "differ" in day.reason
+
+
+def test_a_day_the_successor_cannot_score_again_is_recompute_failed(
+    evening_store: PanelStore,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    """A transform the evening's store holds no 16:30 build of: a named refusal of the data."""
+    held = filing(evening_store, tmp_path)
+
+    day = judge_continued_day(
+        evening_store, candidate_of(held), target=target(transform=SECOND_TRANSFORM)
+    )
+
+    assert day.outcome == RECOMPUTE_FAILED
+    assert day.reason is not None
+
+
+def test_a_day_its_own_check_refused_is_never_scored_again(
+    evening_store: PanelStore,  # noqa: F811
+    tmp_path: Path,
+    recomputed: list[str],
+) -> None:
+    held = filing(evening_store, tmp_path)
+
+    day = judge_continued_day(evening_store, candidate_of(held, own="refused"), target=target())
+
+    assert (day.outcome, day.reason) == (PREDECESSOR_REFUSED, "scripted refusal")
+    assert recomputed == []
+
+
+# --- the order and the truncation --------------------------------------------------------------
+
+
+def _scripted(outcomes: dict[date, str]) -> tuple[list[date], Any]:
+    asked: list[date] = []
+
+    def judge(candidate: ContinuationCandidate) -> ContinuedDay:
+        asked.append(candidate.item.session)
+        outcome = outcomes[candidate.item.session]
+        return ContinuedDay(
+            candidate=candidate,
+            outcome=outcome,  # type: ignore[arg-type]
+            reason=None if outcome == IDENTICAL else f"scripted {outcome}",
+        )
+
+    return asked, judge
+
+
+def test_the_first_day_that_is_not_identical_truncates_and_nothing_after_it_is_asked(
+    evening_store: PanelStore,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    held = filing(evening_store, tmp_path)
+    days = [SIGNAL - timedelta(days=3), SIGNAL - timedelta(days=2), SIGNAL]
+    candidates = [candidate_of(held, session=day) for day in reversed(days)]  # any order in
+    asked, judge = _scripted({days[0]: IDENTICAL, days[1]: DIFFERS, days[2]: IDENTICAL})
+
+    result = continued_sample(
+        candidates, judge=judge, chain=(), sample_epoch=SIGNAL - timedelta(days=10)
+    )
+
+    assert asked == days[:2]
+    assert [day.outcome for day in result.days] == [IDENTICAL, DIFFERS, AFTER_TRUNCATION]
+    assert [c.item.session for c in result.merged] == [days[0]]
+    assert result.truncated_at is not None and result.truncated_at.candidate.item.session == days[1]
+    document = result.document()
+    assert document["merged"] == 1 and document["candidates"] == 3
+    assert document["truncated_at"] == days[1].isoformat()
+    assert document["truncation"]["outcome"] == DIFFERS
+    assert document["days"][2]["reason"] == f"after the truncation at {days[1].isoformat()}"
+
+
+def test_every_identical_day_joins_and_nothing_is_truncated(
+    evening_store: PanelStore,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    held = filing(evening_store, tmp_path)
+    days = [SIGNAL - timedelta(days=1), SIGNAL]
+    asked, judge = _scripted({day: IDENTICAL for day in days})
+
+    result = continued_sample(
+        [candidate_of(held, session=day) for day in days],
+        judge=judge,
+        chain=(),
+        sample_epoch=SIGNAL - timedelta(days=10),
+    )
+
+    assert asked == days
+    assert [c.item.session for c in result.merged] == days
+    assert result.truncated_at is None and result.document()["truncation"] is None
+
+
+def test_two_records_for_one_session_or_one_before_the_epoch_refuse(
+    evening_store: PanelStore,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    held = filing(evening_store, tmp_path)
+    _asked, judge = _scripted({SIGNAL: IDENTICAL})
+    with pytest.raises(SurvivorContinuationError, match="two predecessor records for"):
+        continued_sample(
+            [candidate_of(held), candidate_of(held)],
+            judge=judge,
+            chain=(),
+            sample_epoch=SIGNAL - timedelta(days=10),
+        )
+    with pytest.raises(SurvivorContinuationError, match="is not after the sample's epoch"):
+        continued_sample([candidate_of(held)], judge=judge, chain=(), sample_epoch=SIGNAL)
+
+
+def test_a_day_names_its_reason_exactly_when_it_is_not_identical(
+    evening_store: PanelStore,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    held = filing(evening_store, tmp_path)
+    with pytest.raises(ValueError):
+        ContinuedDay(candidate=candidate_of(held), outcome=IDENTICAL, reason="why")
+    with pytest.raises(ValueError):
+        ContinuedDay(candidate=candidate_of(held), outcome=DIFFERS, reason=None)
+
+
+def test_a_registration_with_no_predecessor_says_so() -> None:
+    section = no_continuation_section()
+    assert section["chain"] == [] and section["merged"] == 0 and section["days"] == []
+    assert section["statement"].startswith("this registration names no predecessor")
+    assert section["wording"] and section["rule"]
