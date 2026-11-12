@@ -1,3 +1,4 @@
+import json
 from typing import Any
 
 import pytest
@@ -104,3 +105,112 @@ def test_openai_compatible_provider_rejects_malformed_or_non_object_content(
 
     with pytest.raises(ModelResponseError, match="choices"):
         malformed.generate_json(system="system", user="user", schema={"type": "object"})
+
+
+def test_default_payload_is_byte_identical_to_before(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """V2-P7-012 Task 4: the new knobs are opt-in; an unset provider sends what it always did.
+
+    Pinned as bytes (not just dict equality) because the request digest of every stored
+    `model-exchange/v1` document is sha256 over this JSON, and a key-order or default-value
+    drift would silently re-address every recorded exchange.
+    """
+    monkeypatch.setenv("TEST_MODEL_KEY", "secret-value")
+    transport = FakePostJsonTransport(
+        {"choices": [{"message": {"content": '{"direction":"abstain"}'}}]}
+    )
+    provider = OpenAICompatibleProvider(
+        provider_id="deepseek.compatible",
+        model="deepseek-chat",
+        base_url="https://example.invalid/v1",
+        api_key_env="TEST_MODEL_KEY",
+        transport=transport,
+    )
+
+    provider.generate_json(system="system", user="user", schema={"type": "object"})
+
+    assert transport.request is not None
+    payload = transport.request["payload"]
+    assert payload == {
+        "model": "deepseek-chat",
+        "messages": [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "user"},
+        ],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "openalpha_structured_payload",
+                "strict": True,
+                "schema": {"type": "object"},
+            },
+        },
+    }
+    assert json.dumps(payload, ensure_ascii=False) == (
+        '{"model": "deepseek-chat", "messages": [{"role": "system", "content": "system"}, '
+        '{"role": "user", "content": "user"}], "response_format": {"type": "json_schema", '
+        '"json_schema": {"name": "openalpha_structured_payload", "strict": true, '
+        '"schema": {"type": "object"}}}}'
+    )
+
+
+def test_temperature_and_max_tokens_reach_the_payload_when_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEST_MODEL_KEY", "secret-value")
+    transport = FakePostJsonTransport(
+        {"choices": [{"message": {"content": '{"direction":"abstain"}'}}]}
+    )
+    provider = OpenAICompatibleProvider(
+        provider_id="deepseek.compatible",
+        model="deepseek-chat",
+        base_url="https://example.invalid/v1",
+        api_key_env="TEST_MODEL_KEY",
+        temperature=0.0,
+        max_tokens=512,
+        transport=transport,
+    )
+
+    provider.generate_json(system="system", user="user", schema={"type": "object"})
+
+    assert transport.request is not None
+    # 0.0 must reach the payload: it is a real setting (deterministic sampling), not "unset".
+    assert transport.request["payload"]["temperature"] == 0.0
+    assert transport.request["payload"]["max_tokens"] == 512
+
+
+def test_require_usage_refuses_a_response_without_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEST_MODEL_KEY", "secret-value")
+    no_usage = OpenAICompatibleProvider(
+        provider_id="deepseek.compatible",
+        model="deepseek-chat",
+        base_url="https://example.invalid/v1",
+        api_key_env="TEST_MODEL_KEY",
+        require_usage=True,
+        transport=FakePostJsonTransport(
+            {"id": "chatcmpl-1", "choices": [{"message": {"content": '{"direction":"up"}'}}]}
+        ),
+    )
+
+    with pytest.raises(ModelResponseError, match="usage"):
+        no_usage.generate_json(system="system", user="user", schema={"type": "object"})
+
+    no_id = OpenAICompatibleProvider(
+        provider_id="deepseek.compatible",
+        model="deepseek-chat",
+        base_url="https://example.invalid/v1",
+        api_key_env="TEST_MODEL_KEY",
+        require_usage=True,
+        transport=FakePostJsonTransport(
+            {
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                "choices": [{"message": {"content": '{"direction":"up"}'}}],
+            }
+        ),
+    )
+
+    with pytest.raises(ModelResponseError, match="id"):
+        no_id.generate_json(system="system", user="user", schema={"type": "object"})

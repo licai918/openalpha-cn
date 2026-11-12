@@ -113,6 +113,9 @@ class OpenAICompatibleProvider:
         output_price_per_million: Decimal = Decimal("0"),
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         capabilities: ModelCapabilities | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        require_usage: bool = False,
     ) -> None:
         if not base_url.startswith(("https://", "http://127.0.0.1", "http://localhost")):
             raise ModelConfigurationError(
@@ -131,6 +134,9 @@ class OpenAICompatibleProvider:
         self.input_price_per_million = input_price_per_million
         self.output_price_per_million = output_price_per_million
         self.clock = clock
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.require_usage = require_usage
         self._metadata = ModelMetadata(
             provider_id=provider_id,
             model=model,
@@ -175,7 +181,7 @@ class OpenAICompatibleProvider:
             }
         else:
             response_format = {"type": "json_object"}
-        payload = {
+        payload: dict[str, Any] = {
             "model": self.metadata.model,
             "messages": [
                 {"role": "system", "content": system},
@@ -183,6 +189,12 @@ class OpenAICompatibleProvider:
             ],
             "response_format": response_format,
         }
+        # Opt-in, and absent unless set: an unset provider's payload is byte-identical to
+        # before these options existed, because that JSON is what `model-exchange/v1` pins.
+        if self.temperature is not None:
+            payload["temperature"] = self.temperature
+        if self.max_tokens is not None:
+            payload["max_tokens"] = self.max_tokens
         raw: dict[str, Any] | None = None
         attempts = 0
         while raw is None:
@@ -212,8 +224,22 @@ class OpenAICompatibleProvider:
             raise ModelResponseError("model response content is not valid JSON") from error
         if not isinstance(decoded, dict):
             raise ModelResponseError("model response content must be a JSON object")
+        if self.require_usage:
+            self._require_provider_identity(raw)
         self._record_usage(raw=raw, attempts=attempts)
         return decoded
+
+    def _require_provider_identity(self, raw: dict[str, Any]) -> None:
+        """Refuse a response that names neither its request nor its token usage.
+
+        A recorded exchange without `id` cannot be idempotently accounted for, and one
+        without `usage` makes the cost figure a silent zero; both are contract violations
+        when the caller asked for usage, not a reason to record a partial row.
+        """
+        if not isinstance(raw.get("id"), str):
+            raise ModelResponseError("model response id is missing (require_usage=True)")
+        if not isinstance(raw.get("usage"), dict):
+            raise ModelResponseError("model response usage is missing (require_usage=True)")
 
     def _record_usage(self, *, raw: dict[str, Any], attempts: int) -> None:
         if self.usage_store is None:
