@@ -104,3 +104,12 @@
 - **F8（`V2-P7-011`）**：`evidence limit-events --json` 在区间中途被拒时，错误文档仍在 `status`/`exit_code`/`detail` 之外带上已经写出的 `events` 与 `sessions`；命令 docstring 写明"重跑同一区间是幂等的"。
 
 同一轮还修了两处本轮改动暴露出的既有守卫（都不是评审 1 的条目，但不修则闸门红）：`models/base.ModelProvider.generate_json` 新增的可选 `attempt: int = 1` 让 `test_alpha_model_boundary.py` 的协议形状断言需要确认它是重试序号而不是数据槽；`runtime/composition.llm_provider` 是 `src/` 里第一个构造 `OpenAICompatibleProvider` 与用量存储的地方，`test_usage_claims_match_the_shipped_paths.py` 的 `USAGE_SITES` 与控制断言、台账 `OA-MODEL-001`/`003`/`004` 的说明随之改成"组装但不调用/不入账"。本轮不改 §5 的顺序，也不改 §5.2 的闸门；issue 总数仍是 253。
+
+## 9. Fix round 2（评审 2 之后，2026-11-12）
+
+评审 2（`review-2.md`：F1–F8 全部通过，0 critical / 0 important / N1–N3 三条 minor）与控制器裁决之后的一轮。N1 有代码改动，N2、N3 只补记录：
+
+- **N1（`V2-P7-012`）**：`StructuredSignalAgent` 在构造时**按 provider 的 `generate_json` 签名决定一次**是否传 `attempt`（签名命名了 `attempt` 或声明 `**kwargs` 才传；签名不可读时按"不传"处理，即安全方向）。老签名的 provider 与本批次之前**完全一样地工作**，但**它的重试无法被区分**：每次尝试都是同一个已记录的请求，记录型传输会回放被拒的答案而不是重新向厂商请求——这一点写进了 `ModelProvider` 的协议 docstring（provider 是用户代码，`attempt` 是 opt-in 的）。测试：`test_an_old_signature_provider_keeps_working`、`test_a_kwargs_provider_still_receives_the_attempt_number`。
+- **N2**：`put` 返回 `unchanged` 时不再重新读取存储；写入方保留自己的响应（两个响应摘要按 store 自己的规则相等，答案相同），可见差别只有磁盘上的 `recorded_at` 可能是第一次写入的那个。
+- **N3**：记录模式在交换 `put` 与用量追加之间崩溃，会**少记那一笔**——重跑是存储命中，按 F1 的规则不再追加用量行。这是用量账本少记，不是崩溃；旧设计在该情形下会崩，所以这是改进。记在这里，让读账本的人知道这条界线。
+- 本轮不改 §5 的顺序，也不改 §5.2 的闸门；issue 总数仍是 253。
