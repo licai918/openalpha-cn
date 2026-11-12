@@ -1800,6 +1800,43 @@ def test_the_launchd_jobs_take_the_registration_and_the_morning_recheck(
     assert not odd.exists()
 
 
+def test_an_explicit_absolute_p6_registration_is_still_printed_inside_the_pinned_worktree(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The kept branch (`V2-P7-006a` fix round: `main` around `:6964`): passing the absolute
+    main-checkout P6 path -- exactly `DEFAULT_REGISTRATION` -- is still accepted by the launchd
+    printer and resolved to the same file inside `--worktree`, as the old default was. Without
+    that branch the absolute path is outside the pinned worktree and refused (exit 2), so the
+    branch is not dead and this pins it."""
+    worktree = tmp_path / "pinned daily"
+
+    code = daily.main(
+        [
+            "--runtime-dir",
+            str(tmp_path / "runtime"),
+            "--registration",
+            str(daily.DEFAULT_REGISTRATION),
+            "--launchd-plist",
+            str(tmp_path / "logs"),
+            "--worktree",
+            str(worktree),
+            "--uv",
+            str(tmp_path / "bin" / "uv"),
+        ]
+    )
+    out, _err = capsys.readouterr()
+    job = plistlib.loads(out.encode("utf-8"))
+
+    assert code == 0
+    passed = job["ProgramArguments"]
+    assert passed[-2:] == [
+        "--registration",
+        str((worktree / daily.REGISTRATION_IN_REPOSITORY).resolve()),
+    ]
+    assert passed[-1].endswith(Path(daily.REGISTRATION_IN_REPOSITORY).as_posix())
+    assert job["WorkingDirectory"] == str(worktree)
+
+
 def test_a_registration_outside_the_worktree_is_refused(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
