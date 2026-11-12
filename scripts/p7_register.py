@@ -101,6 +101,10 @@ class ChainRefusedError(RegistrationWriterError):
     """The registration chain would stop being one rooted chain."""
 
 
+class RegistrationRefusedError(RegistrationWriterError):
+    """`registry.register` refused for a reason other than an existing, different registration."""
+
+
 EPOCH_LOOKBACK_DAYS: Final[int] = 16
 """The most calendar days an epoch may precede today (plan section 2): 11 sessions is the bound the
 daily command's own calendar check makes exactly, and this is its conservative calendar upper
@@ -156,7 +160,10 @@ CRITERIA: Final[dict[str, str]] = {
         "秩 IC 均值 ≤ 0.02 或 ew_minus_worst_decile 均值 ≤ 0 即停止，中期在第 18 个累积位置、"
         "累积均值 ≤ 0 即停止。"
     ),
-    "interim": "第 18 个累积位置只报计数与描述性均值，K = 36 个位置到齐之前不做检验、不给结论词。",
+    "interim": (
+        "第 18 个累积位置报计数与描述性均值，同时中期无效性停止规则生效"
+        "（累积均值 ≤ 0 即停止，见 stop_rule），K = 36 个位置到齐之前不做主检验、不给结论词。"
+    ),
     "secondary_family": (
         "族大小 3：h20 survivors_minus_ew、h20 ew_minus_worst_decile、h5 rank_ic，"
         "BY 任意相依，q = 0.10。"
@@ -563,14 +570,20 @@ def _write(arguments: argparse.Namespace) -> None:
         print(f"sha256 {digest}")
         print("未写入：--dry-run only prints; nothing was written")
         return
+    existed = path.exists()
     try:
         written = registry.register(config, criteria, path, code_commit=head, settings=settings)
     except registry.RegistrationError as error:
-        raise ExistingRegistrationError(str(error)) from error
+        if existed:
+            raise ExistingRegistrationError(str(error)) from error
+        raise RegistrationRefusedError(f"the registry refused the registration: {error}") from error
     if written != digest:
+        if not existed:
+            path.unlink(missing_ok=True)
         raise CheckoutRefusedError(
             f"the canonical document registry.register wrote ({written}) is not the one this "
-            f"writer printed ({digest}); refusing to claim a digest the file does not have"
+            f"writer printed ({digest}): digest mismatch, so the file just written is removed "
+            "and nothing is registered"
         )
     print(f"wrote {path.relative_to(repo).as_posix()}")
     print(f"config_id {config_id}")
