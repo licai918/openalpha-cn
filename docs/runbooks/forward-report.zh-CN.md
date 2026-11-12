@@ -23,8 +23,10 @@
 ## 手动运行
 
 ```bash
-UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv/bin/python" scripts/forward_report.py --runtime-dir ~/openalpha-research
+UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv/bin/python" scripts/forward_report.py --runtime-dir ~/openalpha-research --registration docs/research/p6-registration.json
 ```
+
+**`--registration` 是必填的：它没有默认值，因为 P6 的登记已暂停（`V2-P7-006a`），忘记这个参数时命令按用法错误退出 2。**
 
 在每日命令的那个钉住的 worktree 里运行；`.env` 是 `--pin-worktree` 在那里建的、指向主检出 `.env` 的符号链接。不要把主检出的绝对路径传给 `--env-file`：路径含空格，uv 会按空格拆分它（见 `daily-selection.zh-CN.md` 的「手动运行」）。
 
@@ -33,7 +35,7 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 | 选项 | 作用 |
 |---|---|
 | `--runtime-dir DIR` | 运行目录：面板在 `DIR/panel`，预测库在 `DIR/predictions`，报告写到 `DIR/reports` |
-| `--registration PATH` | 登记文件，默认 `docs/research/p6-registration.json` |
+| `--registration PATH` | 登记文件；必填，没有默认值（P6 的登记已暂停，`V2-P7-006a`） |
 | `--repo DIR` | 校验登记与代码绑定所用的 git 检出，默认脚本所在的检出 |
 | `--as-of ISO` | 固定报告的时钟（默认现在） |
 | `--json` | 以 JSON 打印本次报告 |

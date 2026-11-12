@@ -50,8 +50,10 @@
 在钉住的 worktree 里（路径以你的为准），用它自己的环境 `.venv`（`--pin-worktree` 建的）：
 
 ```bash
-UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv/bin/python" scripts/daily_selection.py --runtime-dir ~/openalpha-research
+UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv/bin/python" scripts/daily_selection.py --runtime-dir ~/openalpha-research --registration docs/research/p6-registration.json
 ```
+
+**`--registration` 是必填的：它没有默认值，因为 P6 的登记已暂停（`V2-P7-006a`），忘记这个参数时命令按用法错误拒绝（退出 2），不会转而跑 P6 的账簿。**
 
 不需要 `PYTHONPATH`：这个环境里的项目是指向本 worktree `src/` 的可编辑安装。`uv run` 只用来读 `--env-file`。
 
@@ -61,7 +63,7 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 
 | 选项 | 作用 |
 |---|---|
-| `--registration PATH` | 登记文件，默认 `docs/research/p6-registration.json` |
+| `--registration PATH` | 登记文件；必填，没有默认值（P6 的登记已暂停，`V2-P7-006a`） |
 | `--repo DIR` | 校验登记与代码绑定所用的 git 检出，默认脚本所在的检出 |
 | `--as-of ISO` | 固定当天的时钟（默认现在）；该时刻已发布的最新交易日就是「当天」 |
 | `--dataset T`（可重复） | 用这些面板目标代替按配置推导的目标（读行业的当天仍会加上行业目标） |
@@ -272,7 +274,7 @@ launchd 漏触发（关机、睡眠）、或节假日后第一次运行时，「
 **怎样判断有没有缺口（只读）**：每日命令新增 `--factor-gaps SINCE`。对配置读到的每个档位，它列出从 `SINCE` 到最新已收盘交易日之间、库里没有构建的每个开市日：拿各档位构建清单（`factor_manifest_*` 及其上面两档的清单）里的信号时点，与 `trade_cal` 的开市日逐日对比。较高一档只在同一时点有较低档位的清单时才算已构建。有缺口时退出 1，没有时退出 0；加 `--json` 输出 JSON。它不准入代码，只从登记文件读配置（并核对文件里的 `config_id`），不发请求，不写任何文件。所以可以在主检出里运行，例如：
 
 ```bash
-uv run python scripts/daily_selection.py --runtime-dir ~/openalpha-research --factor-gaps 2026-09-01
+uv run python scripts/daily_selection.py --runtime-dir ~/openalpha-research --registration docs/research/p6-registration.json --factor-gaps 2026-09-01
 ```
 
 钉住的 worktree 是登记时的代码，没有这个选项。选它而不是一段手写的 Python/duckdb 片段，是因为它与第 4 步共用同一个「某档位在某时点是否已构建」的判断（`_built_instants`），并有测试覆盖（`test_the_factor_gap_check_names_every_session_without_a_build_and_writes_nothing`）。只读的是构建清单，不读因子值；从 2015 年查起，要读每个因子每一年的清单。
@@ -370,7 +372,7 @@ uv run python scripts/daily_selection.py --runtime-dir ~/openalpha-research --fa
 定时运行从一个**钉在登记提交上的专用 worktree** 里跑，不从开发检出跑：
 
 ```bash
-uv run --no-sync python scripts/daily_selection.py --pin-worktree ~/openalpha-daily
+uv run --no-sync python scripts/daily_selection.py --pin-worktree ~/openalpha-daily --registration docs/research/p6-registration.json
 ```
 
 `--pin-worktree` 读主检出里已提交的登记文件，找到最后一次提交它的那个提交，核对那里的受约束代码与登记的 `code_commit` 完全相同，然后在那个提交上创建（或把已有的、干净的 worktree 移到）一个分离 HEAD 的 worktree。它从不改动有未提交改动的 worktree。登记换了（新的一次研究）就再跑一次它。
@@ -394,11 +396,11 @@ uv run --no-sync python scripts/daily_selection.py --pin-worktree ~/openalpha-da
 生成 launchd 配置文本（只打印，不安装）。两个任务：**晚间**（工作日 18:30）与**晨查**（工作日 08:30，本机时间）：
 
 ```bash
-uv run --no-sync python scripts/daily_selection.py --runtime-dir ~/openalpha-research --worktree ~/openalpha-daily --launchd-plist ~/openalpha-research/logs
+uv run --no-sync python scripts/daily_selection.py --runtime-dir ~/openalpha-research --worktree ~/openalpha-daily --registration docs/research/survivor.json --launchd-plist ~/openalpha-research/logs
 uv run --no-sync python scripts/daily_selection.py --runtime-dir ~/openalpha-research --worktree ~/openalpha-daily --registration docs/research/survivor.json --launchd-morning-plist ~/openalpha-research/logs
 ```
 
-两个任务都把 `--registration` 写成参数。不给时默认仍是 `<worktree>/docs/research/p6-registration.json`（P6 的登记）；给了相对名就按 `--worktree` 解析。**登记必须落在钉住的 worktree 内**：解析后落在它之外的绝对路径按名拒绝（退出 2），不会打印出一份去读别的检出的登记的任务。`--launchd-plist` 与 `--launchd-morning-plist` 一次只能给一个。两条命令都只打印文本，没有安装路径：`--install` 是未知参数（退出 2）。
+两个任务都要求 `--registration` 并把它写成参数——它没有默认值（P6 的登记已暂停），不给时按用法错误退出 2；给了相对名就按 `--worktree` 解析。**登记必须落在钉住的 worktree 内**：解析后落在它之外的绝对路径按名拒绝（退出 2），不会打印出一份去读别的检出的登记的任务。`--launchd-plist` 与 `--launchd-morning-plist` 一次只能给一个。两条命令都只打印文本，没有安装路径：`--install` 是未知参数（退出 2）。
 
 **`--launchd-plist` / `--launchd-morning-plist` 必须在主检出里运行，不要在钉住的 worktree 里运行（`V2-P6-030`）。** 主检出要在含 `V2-P6-029` 修复的提交上（即上面那两条命令，不带 `--pin-worktree`）。钉住的 worktree 是登记时的旧代码：它会把 `<worktree>/.env` 这个符号链接 `.resolve()` 成主检出里含空格的绝对路径写进 `--env-file`，uv 按空格拆分它，生成的定时任务每天都会失败。
 
@@ -453,7 +455,7 @@ launchd 不会替你创建日志目录，加载前需要先建好它。把输出
 
 ### 前提
 
-1. 同 P6 前提 1–3、5，登记文件用 `--registration` 指向幸存者登记（默认仍是 `docs/research/p6-registration.json`）。
+1. 同 P6 前提 1–3、5，登记文件用 `--registration` 指向幸存者登记（没有默认值：P6 的登记已暂停）。
 2. 面板里 `namechange` 与 `trade_cal` 从各自第一个已存年起逐年连续；面板落后最新已收盘交易日不超过 `max_panel_catch_up_sessions` 个交易日，否则第 2 步拒绝（见「重启」）。
 3. `adapter.epoch_session` 是第一次计划运行的**前一个**交易日，必须是已存日历里的开市日；还没有纸面账簿时，纪元到当天最多相隔 `1 + max_panel_catch_up_sessions` 个交易日。
 4. 运行目录在本地文件系统上（纸面账簿的写锁是建议锁，NFS、SMB 上只和服务器的锁管理一样可靠），当前账户可写，支持硬链接：纸面账簿的标记 `RT/paper/registration.json` 与每条记录的输入溯源 `RT/daily_survivor_provenance/<摘要>.json` 都按「写本次运行自己的临时文件、同步、硬链接到名字、再同步目录」写入，所以要么整份在、要么不在；FAT、exFAT 和很多网络盘做不到，按名拒绝（标记在第 5 步，溯源在第 7 步，见下表）。
@@ -646,7 +648,7 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 
 - `--pin-worktree` 不变：`--registration` 指向已提交的幸存者登记。
 - `--launchd-plist` 生成**晚间**任务（工作日 18:30），`--launchd-morning-plist` 生成**晨查**任务（工作日 08:30 本机时间）；两个都只打印文本，不安装。
-- 两个任务都把 `--registration` 写成参数；不给时仍是 `<worktree>/docs/research/p6-registration.json`（P6 的登记），幸存者登记用 `--registration` 给出（相对名按 `--worktree` 解析）。**登记必须在钉住的 worktree 内**：落在它之外的绝对路径退出 2，不打印任务。
+- 两个任务都要求 `--registration` 并把它写成参数；它没有默认值（P6 的登记已暂停），不给时按用法错误退出 2。幸存者登记用 `--registration` 给出（相对名按 `--worktree` 解析）。**登记必须在钉住的 worktree 内**：落在它之外的绝对路径退出 2，不打印任务。
 - 晨查任务固定带 `--morning-recheck`，与晚间一样用 worktree 自己的解释器和脚本、`WorkingDirectory` 是 worktree；它在 09:15 之前跑完，只建议、不改账簿，命令自己会在 `registration_cutoff` 之后拒绝。仍是「未启用」：用户确认 `V2-P7-006` 的登记并明确同意安装之前，不要安装。
 - 手动从别处调用时形状与生成的任务相同：`<worktree>/.venv/bin/python <worktree>/scripts/daily_selection.py --runtime-dir <RT> --repo <worktree> --registration <worktree>/<幸存者登记文件> --morning-recheck`，经 `uv run --no-sync --env-file .env` 读 `.env`，工作目录是 worktree。
 

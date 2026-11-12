@@ -4,6 +4,24 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### P7 — development batch 5: `--registration` has no default (`V2-P7-006a`, 2026-11-11)
+
+A small batch on `feat/v2-p7-006a-registration-required`, from `fc0ab17`. **It is not pushed; no
+real build, factor, reading or smoke ran and no Tushare request was made.** The daily command and
+the weekly report now **require** `--registration`: omitting it is an argparse usage error (exit 2)
+whose message says the flag has no default because the P6 book's registration is paused, instead
+of running the P6 book (whose holdout did not pass). Every mode of the daily command -- the evening
+day, `--morning-recheck`, `--show-book`, `--pin-worktree`, `--launchd-plist`,
+`--launchd-morning-plist` and `--factor-gaps` -- goes through the same check: the launchd printers
+would otherwise print a job that schedules the paused book (and `--show-book` reads the flag only
+to decide the smoke banner). `scripts/p7_smoke.py` already passed the flag on every call.
+`DailyOptions` keeps its P6 default (a library dataclass, not the command line);
+`DEFAULT_REGISTRATION` and `REGISTRATION_IN_REPOSITORY` stay for that default and for the
+refusals that name the P6 file, and the `arguments.registration == DEFAULT_REGISTRATION` branch in
+the launchd mode stays because an explicitly passed absolute P6 path still reaches it. Both
+runbooks show the flag on every command and say why it is required. **This is engineering, not
+evidence.**
+
 ### P7 — development batch 4: the confirmatory sample continued by recompute equivalence, four small gaps, one ruling (`V2-P7-023`, `V2-P7-006a`, `V2-P7-024`, 2026-11-12)
 
 The fourth batch after the route adjustment, on `feat/v2-p7-batch-4` (from `8b00c4c`, tip
