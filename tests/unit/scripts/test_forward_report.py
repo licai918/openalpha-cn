@@ -982,6 +982,25 @@ def test_forward_reports_own_file_is_bound_the_way_daily_selections_own_file_is(
 # --- a runnable entry: main() -----------------------------------------------------------------
 
 
+def test_a_report_without_a_registration_is_a_usage_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--registration` has no default (`V2-P7-006a`): the P6 book's registration is paused, so a
+    forgotten flag must be refused (exit 2) before the report reads anything, and nothing is
+    written under the runtime directory."""
+    runtime = tmp_path / "runtime"
+
+    with pytest.raises(SystemExit) as refused:
+        forward_report.main(["--runtime-dir", str(runtime)])
+
+    assert refused.value.code == 2
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "--registration" in err
+    assert "no default" in err and "paused" in err
+    assert not runtime.exists()
+
+
 def test_main_writes_a_json_report_under_the_runtime_directory(tmp_path: Path, repo: Path) -> None:
     panel_root, admitted, _sessions, signal_days = build_static_fixture(tmp_path, repo)
 

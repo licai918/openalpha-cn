@@ -824,3 +824,51 @@ def test_a_predecessor_that_is_not_a_survivor_registration_exits_2(
 
     assert code == 2
     assert "is not a survivor registration this build reads" in err
+
+
+# --- the registration is required (`V2-P7-006a`) -----------------------------------------------
+
+MODES: Final[tuple[tuple[str, ...], ...]] = (
+    (),
+    ("--morning-recheck",),
+    ("--show-book",),
+    ("--pin-worktree",),
+    ("--launchd-plist",),
+    ("--launchd-morning-plist",),
+    ("--factor-gaps",),
+)
+"""One invocation per mode of `main`, each with its own flag and none with `--registration`: a
+mode that never reads a registration would still schedule the paused P6 book if it defaulted.
+The value each flag takes is under `tmp_path`, so a mode that ran would create nothing here."""
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_day_without_a_registration_is_a_usage_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], mode: tuple[str, ...]
+) -> None:
+    """`--registration` has no default (`V2-P7-006a`): the P6 book's registration is paused, so a
+    forgotten flag must be refused (exit 2) before any mode runs, and nothing is written."""
+    runtime = tmp_path / "runtime"
+    value = {
+        "--pin-worktree": str(tmp_path / "pinned"),
+        "--launchd-plist": str(tmp_path / "logs"),
+        "--launchd-morning-plist": str(tmp_path / "logs"),
+        "--factor-gaps": "2026-01-05",
+    }
+    arguments = ["--runtime-dir", str(runtime)]
+    for flag in mode:
+        arguments.append(flag)
+        if flag in value:
+            arguments.append(value[flag])
+
+    with pytest.raises(SystemExit) as refused:
+        daily.main(arguments)
+
+    assert refused.value.code == 2
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "--registration" in err
+    assert "no default" in err and "paused" in err
+    assert not runtime.exists()
+    assert not (tmp_path / "pinned").exists()
+    assert not (tmp_path / "logs").exists()
