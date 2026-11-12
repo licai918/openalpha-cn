@@ -165,11 +165,15 @@ def _forbidden_modules(contract_id: str) -> set[str]:
 def _strategy_registration_modules_on_disk(package_root: Path) -> set[str]:
     """The forward contract's source set, read off the directory.
 
-    Exactly the set plan section 4 T2.1 defines, so it is the same whether it is asked of the
-    real `src/openalpha_cn/` or of a probe copy: `strategy_registration`,
-    `strategy_forward_session`, and every `strategy_survivor*.py` beside them.
+    Exactly the set plan section 4 T2.1 defines, widened by plan C task 2.4's
+    `strategy_agent_forward` (and task 2.7's `strategy_agent_evaluation`): the registration
+    protocol, its two consumers, and every `strategy_survivor*.py` beside them.
     """
-    names = {"strategy_registration", "strategy_forward_session"}
+    names = {
+        "strategy_registration",
+        "strategy_forward_session",
+        "strategy_agent_forward",
+    }
     names |= {path.stem for path in package_root.glob("strategy_survivor*.py")}
     return {f"openalpha_cn.{name}" for name in names}
 

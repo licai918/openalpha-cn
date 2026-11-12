@@ -910,6 +910,19 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "strategy_registration.session_record",
         }
     ),
+    "openalpha_cn.strategy_agent_forward": frozenset(
+        {
+            # V2-P7-013 (plan C task 2.4). The agent family's filing glue: the publication
+            # instant its batches stand at, the forward-session protocol's filing call and
+            # journal block, the store Protocol it takes injected, and the registration value
+            # its declaration is built from. No loader and no panel read of its own.
+            "panel_ingest.session_publication_instant",
+            "strategy_forward_session.ForwardRecordStore",
+            "strategy_forward_session.file_forward_record",
+            "strategy_forward_session.prediction_block",
+            "strategy_registration.RegisteredConfiguration",
+        }
+    ),
     "openalpha_cn.shortlist_compare": frozenset(
         {
             "shortlist_view.SHORTLIST_VIEW_SCHEMA_VERSION",
@@ -1344,6 +1357,15 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
         # and none of those names reaches a dataset.
         named=frozenset({"trade_cal"}),
         reached=frozenset({"trade_cal"}),
+    ),
+    "openalpha_cn.strategy_agent_forward": DatasetReach(
+        # V2-P7-013 (plan C task 2.4). It names no dataset: its publication instant is a
+        # constant, its filing call takes the calendar from its caller, and the registration
+        # value it declares from is a digest and a seed. Followed through its seam it reaches
+        # nothing either -- the same empty row the document store's comparer has, for the same
+        # reason: it composes what somebody else already produced.
+        named=frozenset(),
+        reached=frozenset(),
     ),
     "openalpha_cn.shortlist_compare": DatasetReach(
         # V2-P4-007. The only row in this table that is empty in both directions, and the
