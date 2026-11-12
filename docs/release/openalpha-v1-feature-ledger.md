@@ -4,8 +4,8 @@
 
 ## 对账结论
 
-- 功能总数: 237
-- 当前真实完成: 232 (97.89%)
+- 功能总数: 240
+- 当前真实完成: 235 (97.92%)
 - `UNREVIEWED=0`
 - `UNKNOWN=0`
 - `legacy_acceptance_rows=26` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
@@ -18,7 +18,7 @@
 | `DEFERRED` | 1 |
 | `ENHANCED_REPLACEMENT` | 20 |
 | `EXCLUDED` | 4 |
-| `NATIVE_COMPLETE` | 211 |
+| `NATIVE_COMPLETE` | 214 |
 
 ## 功能明细
 
@@ -261,6 +261,9 @@
 | `OA-MODEL-006` | model | A named vendor endpoint behind one placeholder constant and one provider assembly | `NATIVE_COMPLETE` | `src/openalpha_cn/models/deepseek.py#DEEPSEEK_V4_1_FLASH;src/openalpha_cn/models/deepseek.py#VendorEndpoint;src/openalpha_cn/runtime/composition.py#llm_provider;src/openalpha_cn/runtime/composition.py#model_exchange_store_at;src/openalpha_cn/runtime/composition.py#model_usage_store_at` | `tests/unit/test_composition_llm_provider.py` | `pytest` | `tests/unit/test_composition_llm_provider.py::test_an_unverified_endpoint_refuses_a_live_provider_by_name` |
 | `OA-AGENT-010` | agent | Prompts as content-addressed artifacts, recorded in the run manifest and the decision | `NATIVE_COMPLETE` | `src/openalpha_cn/agents/prompts.py#PromptTemplate;src/openalpha_cn/agents/prompts.py#STRUCTURED_SIGNAL_PROMPT_V1;src/openalpha_cn/agents/model.py#StructuredSignalAgent;src/openalpha_cn/domain/run.py#AgentProvenance;src/openalpha_cn/runtime/engine.py#ResearchEngine` | `tests/unit/agents/test_prompt_versions.py;tests/integration/test_manifest_model_provenance.py` | `pytest` | `tests/integration/test_manifest_model_provenance.py::test_an_llm_run_records_its_prompt_version_in_the_manifest_and_the_decision` |
 | `OA-OPS-051` | operations | Historical LLM-contamination guard: an LLM-backed agent is refused by name on every history-evaluating path | `NATIVE_COMPLETE` | `src/openalpha_cn/domain/llm_contamination.py#refuse_llm_agents_in_history;src/openalpha_cn/domain/llm_contamination.py#refuse_llm_prediction_in_backtest;src/openalpha_cn/domain/llm_contamination.py#HistoricalLLMRefusedError;src/openalpha_cn/runtime/engine.py#ResearchEngine;src/openalpha_cn/backtest/validation.py#OutcomeValidator;src/openalpha_cn/strategy_view.py#_prediction_rows` | `tests/unit/runtime/test_llm_history_guard.py;tests/integration/test_llm_history_guard_paths.py` | `pytest` | `tests/integration/test_llm_history_guard_paths.py::test_validation_record_refuses_an_llm_backed_replay_result_by_name` |
+| `OA-OPS-052` | operations | Capped, dry-run-first probe of the Tushare event interfaces | `NATIVE_COMPLETE` | `scripts/p7_event_probe.py#main;scripts/p7_event_probe.py#probe_plan;scripts/p7_event_probe.py#run_probe;scripts/p7_event_probe.py#render_report;scripts/p7_event_probe.py#PROBE_CAP;scripts/p7_event_probe.py#ProbeCall;scripts/p7_event_probe.py#ProbeFinding` | `tests/unit/scripts/test_p7_event_probe.py` | `pytest` | `tests/unit/scripts/test_p7_event_probe.py::test_the_cap_stops_the_301st_request_unsent` |
+| `OA-AGENT-011` | agent | Agent evening: score Step 0's survivors and file agent_* prediction records, never trading | `NATIVE_COMPLETE` | `scripts/agent_evening.py#main;scripts/agent_evening.py#_rule_family;scripts/agent_evening.py#_llm_family;scripts/agent_evening.py#_write_journal;scripts/agent_evening.py#AGENT_STEPS;src/openalpha_cn/strategy_agent_forward.py#file_agent_batch;src/openalpha_cn/strategy_agent_forward.py#agent_declaration;src/openalpha_cn/domain/agent_forward.py#primary_sample;src/openalpha_cn/domain/agent_forward.py#coverage_set;src/openalpha_cn/domain/agent_forward.py#score_of;src/openalpha_cn/runtime/composition.py#agent_journal_dir_at` | `tests/unit/scripts/test_agent_evening.py;tests/unit/test_strategy_agent_forward.py;tests/unit/domain/test_agent_forward.py` | `pytest` | `tests/unit/scripts/test_agent_evening.py::test_coverage_and_primary_are_filed_separately_and_overlap_reuses_one_run_id` |
+| `OA-EVAL-001` | evaluation | Incremental-IC evaluator: partial rank IC over Step 0's composite, inside the survivor set, one primary statistic | `NATIVE_COMPLETE` | `src/openalpha_cn/strategy_agent_evaluation.py#evaluate;src/openalpha_cn/strategy_agent_evaluation.py#read_agent_protocol;src/openalpha_cn/strategy_agent_evaluation.py#AgentProtocol;src/openalpha_cn/strategy_agent_evaluation.py#AgentEvaluation;src/openalpha_cn/strategy_agent_evaluation.py#AGENT_FORWARD_PROTOCOL_KEY;src/openalpha_cn/domain/incremental_ic.py#partial_rank_ic;src/openalpha_cn/domain/incremental_ic.py#non_overlapping;src/openalpha_cn/domain/incremental_ic.py#detectable_mean` | `tests/integration/test_agent_incremental_ic.py;tests/unit/domain/test_incremental_ic.py` | `pytest` | `tests/integration/test_agent_incremental_ic.py::test_known_increment_is_detected_and_none_is_not` |
 
 ## 边界
 
