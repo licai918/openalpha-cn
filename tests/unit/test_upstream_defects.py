@@ -2640,19 +2640,21 @@ def test_a_history_that_does_not_cover_the_stored_year_is_refused(
 ) -> None:
     """A range answer missing a session between the security's first stored row and its closing
     anchor is a partial fetch: nothing is written and the refusal names the hole."""
-    stored, _ = _build(tmp_path, Frame(), monkeypatch, "adj_factor", "price", "stk_limit")
+    # `tmp_path` is shared by both parametrizations, so each case gets its own runtime root.
+    runtime = tmp_path / omitted.isoformat()
+    stored, _ = _build(runtime, Frame(), monkeypatch, "adj_factor", "price", "stk_limit")
     assert stored.exit_code == PanelExit.ok, stored.output
-    before = _factor_partition(tmp_path)
+    before = _factor_partition(runtime)
 
     refused, _ = _restate(
-        tmp_path,
+        runtime,
         Frame(restated_days=(SESSIONS[2],), restated_history_omits=(omitted,)),
         monkeypatch,
     )
 
     assert refused.exit_code == PanelExit.unhealthy, refused.output
     assert omitted.isoformat() in refused.output
-    assert _factor_partition(tmp_path) == before
+    assert _factor_partition(runtime) == before
 
 
 def test_a_confirmation_that_disagrees_with_the_history_refuses_the_restatement(
