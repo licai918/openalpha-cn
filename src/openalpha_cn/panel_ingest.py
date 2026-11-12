@@ -460,11 +460,13 @@ from openalpha_cn.domain.upstream_defects import (
     UPSTREAM_DEFECT_PANEL_COLUMNS,
     DefectKind,
     UpstreamDefect,
+    UpstreamDefectError,
     before_listing,
     close_disagreement_kind,
     limit_placeholder_kind,
     recorded_return_paths,
     repeats_previous_close,
+    restated_sessions,
     return_path_kind,
     upstream_defects_from_panel_rows,
     valuation_placeholder_kind,
@@ -4637,6 +4639,51 @@ def reconcile_return_paths(
     )
 
 
+class AdjustmentRestatementError(PanelBatchError):
+    """A disputed return path whose only unreproduced rows are `adj_factor` values the upstream
+    now serves differently (`V2-P7-026`).
+
+    Raised by `_reproduce_return_path` exactly where every `daily` value reproduced and only
+    `adj_factor` values differ, each with a served answer: the store holds a factor the upstream
+    has since restated, which no rebuild of the stored rows can reproduce and which is not a
+    fetch fault. The caller (`cli._judge_return_paths`) turns it into the narrow
+    `--restate-subject` remedy; the whole-year rebuild still heals the year and is what every
+    other mismatch is refused with.
+
+    `sessions` are the differing sessions, `served` what the re-fetch answered and `stored` what
+    the store held -- one entry per session, in `served`/`stored` the same keys.
+    """
+
+    def __init__(
+        self,
+        *,
+        ts_code: str,
+        year: int,
+        sessions: Sequence[date],
+        served: Mapping[date, float],
+        stored: Mapping[date, float],
+    ) -> None:
+        self.ts_code = ts_code
+        self.year = year
+        self.sessions = tuple(sessions)
+        self.served = MappingProxyType(dict(served))
+        self.stored = MappingProxyType(dict(stored))
+        shown = ", ".join(
+            f"{day.isoformat()} stored {stored[day]!r} served {served[day]!r}"
+            for day in self.sessions[:3]
+        )
+        if len(self.sessions) > 3:
+            shown += f" and {len(self.sessions) - 3} more"
+        super().__init__(
+            f"{ts_code}: every daily row of {year}'s disputed pair reproduced, and only "
+            f"{len(self.sessions)} adj_factor session(s) differ -- {shown}. That is a restatement "
+            "of the stored factor, not a fetch fault: no rebuild of the stored rows reproduces "
+            "it, and a whole-year rebuild would store the same changed values again. Restate "
+            "that security's year with the restatement remedy (one security's year is re-fetched "
+            "and each differing session confirmed); a full rebuild of the year also heals it"
+        )
+
+
 def _reproduce_return_path(
     subject: str,
     *,
@@ -4663,7 +4710,8 @@ def _reproduce_return_path(
             ).items()
         },
     }
-    for (dataset, when), values in stored.items():
+    mismatches: list[tuple[str, date, tuple[object, ...] | None, tuple[float, ...]]] = []
+    for (dataset, when), expected in stored.items():
         answer = served.get((dataset, when))
         if answer is None and dataset == ADJ_FACTOR_DATASET and (subject, when) not in factor_rows:
             # The stored factor there is an earlier step carried forward -- the partition is
@@ -4671,15 +4719,39 @@ def _reproduce_return_path(
             # such a session when it withdrew the step (`V2-P6-016`). Only a served value can
             # contradict a carried one.
             continue
-        if answer is None or answer[: len(values)] != values:
-            raise PanelBatchError(
-                f"{subject} on {day.isoformat()}: the stored {DAILY_DATASET} pre_close "
-                f"{pre_close!r} and the one {ADJ_FACTOR_DATASET} implies from "
-                f"{previous_day.isoformat()}'s close disagree, and a re-fetch of {dataset} on "
-                f"{when.isoformat()} answered {answer!r} where the store holds {values!r}. A "
-                "disagreement is recorded only once the upstream publishes it twice; rebuild "
-                f"{dataset} for the year, whose stored rows are not what the upstream now serves"
-            )
+        if answer is None or answer[: len(expected)] != expected:
+            mismatches.append((dataset, when, answer, expected))
+    if not mismatches:
+        return
+    # Every stored value reproduced -- except the factors, which the upstream serves differently
+    # on at least one session. No other row can explain that, so this is a restatement of the
+    # stored factor rather than a fetch fault (`V2-P7-026`); the caller names its own remedy.
+    differing = sorted(
+        when
+        for dataset, when, answer, values in mismatches
+        if dataset == ADJ_FACTOR_DATASET and answer is not None and answer[: len(values)] != values
+    )
+    only_factors = all(
+        dataset == ADJ_FACTOR_DATASET and answer is not None for dataset, _, answer, _ in mismatches
+    )
+    if only_factors and differing:
+        raise AdjustmentRestatementError(
+            ts_code=subject,
+            year=differing[0].year,
+            sessions=differing,
+            served={when: cast(float, served[(ADJ_FACTOR_DATASET, when)][0]) for when in differing},
+            stored={when: stored[(ADJ_FACTOR_DATASET, when)][0] for when in differing},
+        )
+    mismatch_dataset, mismatch_when, mismatch_answer, mismatch_values = mismatches[0]
+    raise PanelBatchError(
+        f"{subject} on {day.isoformat()}: the stored {DAILY_DATASET} pre_close "
+        f"{pre_close!r} and the one {ADJ_FACTOR_DATASET} implies from "
+        f"{previous_day.isoformat()}'s close disagree, and a re-fetch of {mismatch_dataset} on "
+        f"{mismatch_when.isoformat()} answered {mismatch_answer!r} where the store holds "
+        f"{mismatch_values!r}. A disagreement is recorded only once the upstream publishes it "
+        f"twice; rebuild {mismatch_dataset} for the year, whose stored rows are not what the "
+        "upstream now serves"
+    )
 
 
 def _refetched_return_path_rows(
@@ -4698,6 +4770,425 @@ def _refetched_return_path_rows(
             if code == subject:
                 found[day] = tuple(column[index] for column in values)
     return found
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AdjustmentRestatement:
+    """One security's stored `adj_factor` year and the answered one, split into what differs.
+
+    The read half of the `V2-P7-026` remedy -- `restated_adjustment_sessions` builds it, the CLI
+    states the request budget from `sessions`, then `restate_adjustment_subject` confirms and
+    writes it. `history` is the served rows that replace `stored_subject`'s (the subject's span,
+    its first stored row through its closing anchor); `others` are every other security's stored
+    rows, carried forward unchanged.
+    """
+
+    ts_code: str
+    year: int
+    sessions: tuple[date, ...]
+    """The differing sessions, in date order -- the stored change rows the upstream re-served."""
+    served: Mapping[date, float]
+    """The factor the year history answered, over every required session of the span."""
+    stored: Mapping[date, float]
+    """The store's factor over the same sessions, expanded from its compressed step function."""
+    history: ColumnarPanelBatch
+    stored_subject: ColumnarPanelBatch
+    others: ColumnarPanelBatch | None
+    observed_at: datetime
+    date_timezone: str
+
+
+def restated_adjustment_sessions(
+    store: PanelStore,
+    *,
+    ts_code: str,
+    history: ColumnarPanelBatch,
+    calendar: TradingCalendar,
+    year: int,
+    observed_at: datetime,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> AdjustmentRestatement:
+    """Compare one security's stored `adj_factor` year with its re-fetched year, or refuse
+    (`V2-P7-026`).
+
+    `history` is the `V2-P7-026` provider route's answer: every session of the Shanghai year for
+    one security, as per-session rows indistinguishable from the ones a build fetches. Nothing is
+    written here. The refusals, each by name and before any confirmation request is spent:
+
+    - **no stored year**: the remedy rewrites a stored partition; without one there is nothing to
+      restate, and a build is the command that creates it;
+    - **the history does not cover the subject's span** -- every open session from
+      `max(1 January, its first stored row)` to its stored closing anchor: a partial answer is not
+      evidence about the sessions it lacks;
+    - **a stored change row the upstream no longer serves**: that is a withdrawal (`V2-P6-016`'s
+      path), never a restatement -- a fetch fault that drops a row must not be healed as one;
+    - **nothing differs**: the store is right and there is nothing to record.
+
+    Returns the differing sessions, the answers on both sides, and the batches the write needs.
+    """
+    if history.dataset != ADJ_FACTOR_DATASET:
+        raise PanelBatchError(
+            f"the year history offered for {ts_code} is a {history.dataset} batch, not "
+            f"{ADJ_FACTOR_DATASET}"
+        )
+    if history.status != "success":
+        raise PanelBatchError(
+            f"the {ADJ_FACTOR_DATASET} year history for {ts_code} answered no rows: a subject "
+            "with no stored observation in the year has nothing to restate"
+        )
+    carried = carry_stored_sessions_forward(
+        store,
+        (),
+        dataset=ADJ_FACTOR_DATASET,
+        year=year,
+        before=date(year + 1, 1, 1),
+        observed_at=observed_at,
+        date_timezone=date_timezone,
+    )
+    if not carried:
+        raise PanelBatchError(
+            f"no stored {ADJ_FACTOR_DATASET} year={year} to restate: the remedy rewrites a stored "
+            "partition's rows for one security, and this store holds none. Build the year first"
+        )
+    stored = carried[0]
+    subject_at = [index for index, subject in enumerate(stored.subjects) if subject == ts_code]
+    if not subject_at:
+        raise PanelBatchError(
+            f"the stored {ADJ_FACTOR_DATASET} year={year} holds no row for {ts_code}; there is "
+            "nothing to restate"
+        )
+    others_at = [index for index, subject in enumerate(stored.subjects) if subject != ts_code]
+    stored_subject = _select_rows(stored, subject_at)
+    others = _select_rows(stored, others_at) if others_at else None
+    stored_dates = _adjustment_dates(_column_values(stored_subject, ADJUSTMENT_DATE_COLUMN))
+    stored_factors = _column_values(stored_subject, ADJUSTMENT_FACTOR_COLUMN)
+    first_stored, anchor = min(stored_dates), max(stored_dates)
+
+    history_at = [index for index, subject in enumerate(history.subjects) if subject == ts_code]
+    served = {
+        day: cast(float, factor)
+        for day, factor in zip(
+            _adjustment_dates(
+                _column_values(_select_rows(history, history_at), ADJUSTMENT_DATE_COLUMN)
+            ),
+            _column_values(_select_rows(history, history_at), ADJUSTMENT_FACTOR_COLUMN),
+            strict=True,
+        )
+    }
+    span = calendar.trading_days_between(max(date(year, 1, 1), first_stored), anchor)
+    missing = [day for day in span if day not in served]
+    if missing:
+        raise PanelBatchError(
+            f"the {ADJ_FACTOR_DATASET} year history for {ts_code} does not cover {len(missing)} "
+            f"open session(s) between {max(date(year, 1, 1), first_stored).isoformat()} and "
+            f"{anchor.isoformat()}: {_date_sample(missing)}. A partial answer is not a "
+            "restatement, and rewriting the year from it would store a hole; nothing was "
+            "written. Fetch the whole year in one range request"
+        )
+    factor_table = [
+        (subject, day.isoformat(), factor)
+        for subject, day, factor in zip(
+            stored_subject.subjects, stored_dates, stored_factors, strict=True
+        )
+    ]
+    histories = adjustment_histories_from_panel_rows(factor_table, answerable_through=anchor)
+    stored_history = histories[ts_code]
+    stored_map: dict[date, float] = {}
+    for day in span:
+        try:
+            stored_map[day] = stored_history.factor_on(day)
+        except AdjustmentError as error:
+            raise PanelBatchError(
+                f"the stored {ADJ_FACTOR_DATASET} year={year} cannot answer {ts_code} on "
+                f"{day.isoformat()}: {error}"
+            ) from error
+    served_map = {day: served[day] for day in span}
+    try:
+        differing = restated_sessions(stored_map, served_map)
+    except UpstreamDefectError as error:
+        raise PanelBatchError(
+            f"{error}. Rebuild {ADJ_FACTOR_DATASET} for the year instead of restating it"
+        ) from error
+    if not differing:
+        raise PanelBatchError(
+            f"nothing to restate: the stored {ADJ_FACTOR_DATASET} year={year} and the upstream "
+            f"agree on every session of {ts_code} from {first_stored.isoformat()} to "
+            f"{anchor.isoformat()}"
+        )
+    kept = [
+        index
+        for index, day in enumerate(
+            _adjustment_dates(_column_values(history, ADJUSTMENT_DATE_COLUMN))
+        )
+        if index in history_at and first_stored <= day <= anchor
+    ]
+    history_kept = _select_rows(history, kept)
+    return AdjustmentRestatement(
+        ts_code=ts_code,
+        year=year,
+        sessions=differing,
+        served=MappingProxyType(served_map),
+        stored=MappingProxyType(stored_map),
+        history=history_kept,
+        stored_subject=stored_subject,
+        others=others,
+        observed_at=observed_at,
+        date_timezone=date_timezone,
+    )
+
+
+def previous_year_restated_factor(
+    store: PanelStore,
+    *,
+    ts_code: str,
+    year: int,
+    observed_at: datetime,
+    date_timezone: str = DEFAULT_DATE_TIMEZONE,
+) -> tuple[date, float] | None:
+    """The previous year's stored closing anchor and the factor it holds for `ts_code`, or `None`
+    (`V2-P7-026`).
+
+    The restatement remedy refuses to change one year while the year before it is silently
+    restated too: the first return pair of `year` is judged from the previous year's last factor,
+    so a restated boundary session would leave the pair wrong whichever year is healed first. The
+    caller compares this stored value with what one one-session request serves -- one request,
+    never a write. `None` when the previous year is not stored or holds no row for the security:
+    there is nothing to compare, and `panel build` is what creates a missing year.
+    """
+    previous = year - 1
+    anchor = store.read_coverage(ADJ_FACTOR_DATASET, previous)
+    if anchor is None or not anchor.dates:
+        return None
+    closing = max(entry.event_date for entry in anchor.dates)
+    carried = carry_stored_sessions_forward(
+        store,
+        (),
+        dataset=ADJ_FACTOR_DATASET,
+        year=previous,
+        before=date(year, 1, 1),
+        observed_at=observed_at,
+        keep=lambda row: row[SUBJECT_COLUMN_NAME] == ts_code,
+        date_timezone=date_timezone,
+    )
+    if not carried:
+        return None
+    batch = carried[0]
+    if batch.status != "success":
+        return None
+    table = list(
+        zip(
+            batch.subjects,
+            _column_values(batch, ADJUSTMENT_DATE_COLUMN),
+            _column_values(batch, ADJUSTMENT_FACTOR_COLUMN),
+            strict=True,
+        )
+    )
+    try:
+        history = adjustment_histories_from_panel_rows(table, answerable_through=closing)[ts_code]
+        return closing, history.factor_on(closing)
+    except (AdjustmentError, KeyError) as error:
+        raise PanelBatchError(
+            f"the stored {ADJ_FACTOR_DATASET} year={previous} cannot answer {ts_code} on "
+            f"{closing.isoformat()}: {error}"
+        ) from error
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RestatedRows:
+    """What one security's restatement rewrote and recorded (`V2-P7-026`)."""
+
+    ts_code: str
+    year: int
+    sessions: tuple[date, ...]
+    served: Mapping[date, float]
+    stored: Mapping[date, float]
+    record: ColumnarPanelBatch
+    written: PartitionRef
+
+
+def restate_adjustment_subject(
+    store: PanelStore,
+    *,
+    restatement: AdjustmentRestatement,
+    confirmations: Mapping[date, ColumnarPanelBatch],
+    calendar: TradingCalendar,
+    before_write: Callable[[ColumnarPanelBatch], None],
+) -> RestatedRows:
+    """Confirm and write one security's restatement, recording each differing session
+    (`V2-P7-026`).
+
+    **Each differing session is confirmed by a differently-shaped request** -- one one-session
+    `ts_code` fetch, not the range that found it -- and must answer the same factor the history
+    served. A second answer that differs is a fetch fault and refuses the whole thing ("a
+    disagreement is recorded only once the upstream publishes it twice"); an absent answer is a
+    withdrawal and names the full rebuild. Nothing is written until every session passed.
+
+    Then one `restated_after_publication` record per session -- the served factor in `bar_close`,
+    the stored one in `valuation_close`, the stored row's clocks and the confirmation instant as
+    `revision_time` -- and one `write_adjustment_factors` call over the subject's served rows
+    plus every other security's stored rows. `before_write` is handed the record batch and runs
+    after the writer's guards pass and before the partition is written, so a refused write leaves
+    no record. The partition's census starts the day after the stored closing anchor: the stored
+    sessions were censused when the partition was written, and `restated_adjustment_sessions` has
+    already refused a history shorter than that span.
+    """
+    confirmed_at = max(
+        (batch.fetched_at for batch in confirmations.values() if batch.status == "success"),
+        default=restatement.observed_at,
+    )
+    stored_dates = _adjustment_dates(
+        _column_values(restatement.stored_subject, ADJUSTMENT_DATE_COLUMN)
+    )
+    timeline = restatement.stored_subject.timeline
+    row_clocks = {
+        day: (
+            timeline.event_time[index],
+            timeline.available_time[index],
+            timeline.ingested_time[index],
+        )
+        for index, day in enumerate(stored_dates)
+    }
+    zone = _resolve_timezone(restatement.date_timezone)
+    defects: list[UpstreamDefect] = []
+    clocks: list[tuple[datetime, datetime, datetime, datetime]] = []
+    for day in restatement.sessions:
+        batch = confirmations.get(day)
+        if batch is None or batch.status != "success":
+            raise PanelBatchError(
+                f"{restatement.ts_code} on {day.isoformat()}: the restatement was not confirmed "
+                "by a one-session re-fetch; nothing was written"
+            )
+        answered = _refetched_return_path_rows(
+            [batch],
+            restatement.ts_code,
+            ADJUSTMENT_DATE_COLUMN,
+            (ADJUSTMENT_FACTOR_COLUMN,),
+        ).get(day)
+        expected = restatement.served[day]
+        if answered is None:
+            raise PanelBatchError(
+                f"{restatement.ts_code} on {day.isoformat()}: the one-session confirmation "
+                f"served no {ADJ_FACTOR_DATASET} row where the year history served {expected!r}. A "
+                "stored row the upstream no longer serves is a withdrawal (V2-P6-016's path), not "
+                f"a restatement; nothing was written. Rebuild {ADJ_FACTOR_DATASET} for the year"
+            )
+        if answered[0] != expected:
+            raise PanelBatchError(
+                f"{restatement.ts_code} on {day.isoformat()}: the year history served "
+                f"{ADJ_FACTOR_DATASET} {expected!r} and a one-session re-fetch answered "
+                f"{answered[0]!r}. A restatement is recorded only once the upstream publishes it "
+                "twice, and a second answer that differs is a fetch fault; nothing was written. "
+                f"Rebuild {ADJ_FACTOR_DATASET} for the year instead"
+            )
+        event, available, ingested = row_clocks.get(
+            day,
+            (
+                datetime.combine(day, DAILY_AVAILABILITY_TIME, tzinfo=zone),
+                datetime.combine(day, DAILY_AVAILABILITY_TIME, tzinfo=zone),
+                restatement.observed_at,
+            ),
+        )
+        defects.append(
+            UpstreamDefect(
+                ts_code=restatement.ts_code,
+                trade_date=day,
+                source_dataset=ADJ_FACTOR_DATASET,
+                kind=RESTATED_KIND,
+                bar_close=expected,
+                valuation_close=restatement.stored[day],
+            )
+        )
+        clocks.append((event, available, ingested, max(confirmed_at, available)))
+    record = _restated_record_batch(
+        defects=defects,
+        clocks=clocks,
+        observed_at=restatement.observed_at,
+        provider_id=restatement.history.provider_id,
+    )
+    anchor = max(
+        _adjustment_dates(_column_values(restatement.stored_subject, ADJUSTMENT_DATE_COLUMN))
+    )
+    batches = [batch for batch in (restatement.others, restatement.history) if batch is not None]
+    written = write_adjustment_factors(
+        store,
+        batches,
+        calendar=calendar,
+        date_timezone=restatement.date_timezone,
+        census_from=anchor + timedelta(days=1),
+        before_write=lambda: before_write(record),
+    )
+    return RestatedRows(
+        ts_code=restatement.ts_code,
+        year=restatement.year,
+        sessions=restatement.sessions,
+        served=restatement.served,
+        stored=restatement.stored,
+        record=record,
+        written=written,
+    )
+
+
+def _restated_record_batch(
+    *,
+    defects: Sequence[UpstreamDefect],
+    clocks: Sequence[tuple[datetime, datetime, datetime, datetime]],
+    observed_at: datetime,
+    provider_id: str,
+) -> ColumnarPanelBatch:
+    """The `upstream_defects` batch for `defects`, with the given per-record clocks.
+
+    `_defect_record` does this from a source batch's row positions; the remedy's records have no
+    stored row to point at for every session (a restatement can add a change point), so the
+    clocks are supplied per record instead.
+    """
+    events, availables, ingesteds, revisions = (
+        tuple(clock[position] for clock in clocks) for position in range(4)
+    )
+    return ColumnarPanelBatch(
+        provider_id=provider_id,
+        dataset=UPSTREAM_DEFECTS_DATASET,
+        kind=UPSTREAM_DEFECTS_DATASET,
+        as_of=observed_at,
+        fetched_at=observed_at,
+        status="success",
+        subjects=tuple(defect.ts_code for defect in defects),
+        timeline=TimelineColumns(
+            event_time=events,
+            available_time=availables,
+            ingested_time=ingesteds,
+            revision_time=revisions,
+        ),
+        columns=(
+            PanelColumn(
+                PRICE_DATE_COLUMN,
+                "string",
+                tuple(defect.trade_date.isoformat() for defect in defects),
+            ),
+            PanelColumn(
+                SOURCE_DATASET_COLUMN,
+                "string",
+                tuple(defect.source_dataset for defect in defects),
+            ),
+            PanelColumn(DEFECT_KIND_COLUMN, "string", tuple(defect.kind for defect in defects)),
+            *(
+                PanelColumn(name, "float", tuple(defect.values()[offset] for defect in defects))
+                for offset, name in enumerate(UPSTREAM_DEFECT_NUMBER_COLUMNS)
+            ),
+            PanelColumn(
+                REPEATS_PREVIOUS_CLOSE_COLUMN,
+                "boolean",
+                tuple(defect.valuation_repeats_previous_close for defect in defects),
+            ),
+            PanelColumn(
+                LIST_DATE_COLUMN,
+                "string",
+                tuple(
+                    None if defect.list_date is None else defect.list_date.isoformat()
+                    for defect in defects
+                ),
+            ),
+        ),
+    )
 
 
 def load_return_path_records(
@@ -4767,6 +5258,31 @@ def _refuse_zero_upper_limits(batch: ColumnarPanelBatch) -> None:
 
 WITHDRAWN_KIND: Final[DefectKind] = "withdrawn_after_publication"
 """`V2-P6-016`'s kind, named once for the carry below and the CLI's report."""
+
+RESTATED_KIND: Final[DefectKind] = "restated_after_publication"
+"""`V2-P7-026`'s kind: an `adj_factor` row the upstream re-served under a different value.
+
+Nothing is dropped under it -- the restatement remedy rewrites the row itself -- and, like a
+withdrawal, it records a fact no later build can reproduce from the stored rows, so every later
+`adj_factor` build carries it (`CARRIED_KINDS`)."""
+
+CARRIED_KINDS: Final[frozenset[str]] = frozenset({WITHDRAWN_KIND, RESTATED_KIND})
+"""The defect kinds a later build cannot rebuild and therefore carries.
+
+`withdrawn_after_publication`'s row left the partition, and `restated_after_publication`'s row is
+now the stored one, so neither can be found again by dropping it. They are carried whole by
+`stored_withdrawal_records` on every build of the target that owns their source; a newer
+restatement of the same key replaces the older, and a withdrawal is retired when the row is
+served again exactly as before."""
+
+RESTATEMENT_CONFIRM_LIMIT: Final[int] = 20
+"""The most differing sessions one restatement confirms, or the whole-year rebuild is named.
+
+`V2-P7-026` ruling D-3. One one-session request confirms each differing session ("the upstream
+published it twice"), so the remedy costs `1 + k` requests; twenty is the same bound
+`WITHDRAWAL_RECHECK_LIMIT` uses for the same reason -- a restatement is rare (measured: one
+session, 2026-11-12), and a year whose answer differs on more sessions is better served by the
+full rebuild, which needs no confirmation because it stores the answer itself."""
 
 WITHDRAWN_ROWS_DATASETS: Final[Mapping[str, str]] = MappingProxyType(
     {
@@ -5240,16 +5756,19 @@ def stored_withdrawal_records(
     observed_at: datetime,
     date_timezone: str = DEFAULT_DATE_TIMEZONE,
 ) -> ColumnarPanelBatch | None:
-    """The stored `withdrawn_after_publication` records of `sources` through `through`
-    (`V2-P6-016`), re-observed at `observed_at` for the carry.
+    """The stored `CARRIED_KINDS` records of `sources` through `through`, re-observed at
+    `observed_at` for the carry (`V2-P6-016`, `V2-P7-026`).
 
     Every other `upstream_defects` row is rebuilt from the drops a build performs, and a build
-    cannot perform this one again: the withdrawn row left the partition, so there is nothing
-    stored to find missing a second time. These records are therefore **carried by every later
-    build, full or incremental** -- `ingested_time` restamped to `max(observed_at,
-    available_time)`, `V2-P6-003`'s convention for every carried row, and `revision_time`, the
-    confirmation instant, kept. `keep_withdrawal_records` then removes the ones this build
-    retires. Read once per target, before anything is written.
+    cannot perform one of these again: the withdrawn row left the partition, and the restated
+    row is the one the remedy wrote, so there is nothing stored to find changed a second time.
+    These records are therefore **carried by every later build, full or incremental** --
+    `ingested_time` restamped to `max(observed_at, available_time)`, `V2-P6-003`'s convention for
+    every carried row, and `revision_time`, the confirmation instant, kept.
+    `keep_withdrawal_records`
+    then removes the withdrawals this build retires; a restatement is retired only by a newer
+    restatement of the same key, which the remedy itself replaces. Read once per target, before
+    anything is written.
     """
     carried = carry_stored_sessions_forward(
         store,
@@ -5259,7 +5778,7 @@ def stored_withdrawal_records(
         before=through + timedelta(days=1),
         observed_at=observed_at,
         keep=lambda row: (
-            row[SOURCE_DATASET_COLUMN] in sources and row[DEFECT_KIND_COLUMN] == WITHDRAWN_KIND
+            row[SOURCE_DATASET_COLUMN] in sources and row[DEFECT_KIND_COLUMN] in CARRIED_KINDS
         ),
         date_timezone=date_timezone,
     )
@@ -5267,12 +5786,20 @@ def stored_withdrawal_records(
 
 
 def withdrawal_keys(records: ColumnarPanelBatch | None) -> dict[str, frozenset[tuple[str, date]]]:
-    """The `(subject, session)` of every record in `records`, by source dataset."""
+    """The `(subject, session)` of every **withdrawal** record in `records`, by source dataset.
+
+    A restated record's key is a session whose row the upstream still serves, so it must never
+    enter a withdrawal's watch/retire arithmetic: every fetched session would "serve it again"
+    and retire a record that is not a withdrawal at all.
+    """
     if records is None:
         return {}
     sources = _column_values(records, SOURCE_DATASET_COLUMN)
+    kinds = _column_values(records, DEFECT_KIND_COLUMN)
     found: dict[str, set[tuple[str, date]]] = {}
-    for source, key in zip(sources, _row_keys(records), strict=True):
+    for source, kind, key in zip(sources, kinds, _row_keys(records), strict=True):
+        if kind != WITHDRAWN_KIND:
+            continue
         found.setdefault(str(source), set()).add(key)
     return {source: frozenset(keys) for source, keys in found.items()}
 
@@ -5280,26 +5807,54 @@ def withdrawal_keys(records: ColumnarPanelBatch | None) -> dict[str, frozenset[t
 def keep_withdrawal_records(
     records: ColumnarPanelBatch | None, *, retired: Mapping[str, Set[tuple[str, date]]]
 ) -> ColumnarPanelBatch | None:
-    """`records` without the ones this build retires (`V2-P6-016`).
+    """`records` without the withdrawals this build retires (`V2-P6-016`).
 
     A record is retired when its key is in `retired[source]`, which the caller fills with three
     kinds of key: the upstream **serves the row again** (it is stored again from that answer);
     this build **confirms the same withdrawal again** (the new record replaces it, so the record
     is never duplicated); or the **stored partition still holds the row**, which a record of its
     withdrawal can never truthfully describe -- the state a build refused after its record was
-    written used to leave behind.
+    written used to leave behind. `retired` is applied to `withdrawn_after_publication` rows only:
+    a `restated_after_publication` row's key is a served session, so none of the three can retire
+    it, and it is replaced only by a newer restatement of the same key.
     """
     if records is None:
         return None
     sources = _column_values(records, SOURCE_DATASET_COLUMN)
+    kinds = _column_values(records, DEFECT_KIND_COLUMN)
     kept = [
         index
-        for index, (source, key) in enumerate(zip(sources, _row_keys(records), strict=True))
-        if key not in retired.get(str(source), frozenset())
+        for index, (source, kind, key) in enumerate(
+            zip(sources, kinds, _row_keys(records), strict=True)
+        )
+        if kind != WITHDRAWN_KIND or key not in retired.get(str(source), frozenset())
     ]
     if not kept:
         return None
     return records if len(kept) == records.row_count else _select_rows(records, kept)
+
+
+def without_restated_records(
+    records: ColumnarPanelBatch | None, *, keys: Set[tuple[str, date]]
+) -> ColumnarPanelBatch | None:
+    """`records` without the `restated_after_publication` rows whose key is in `keys`
+    (`V2-P7-026`).
+
+    A newer restatement of one `(security, session)` replaces the older record rather than
+    joining it: two records for one key would be two answers to "what did it change from and to".
+    Every other kind, and every restatement of another key, is kept.
+    """
+    if records is None:
+        return None
+    kinds = _column_values(records, DEFECT_KIND_COLUMN)
+    kept = [
+        index
+        for index, (kind, key) in enumerate(zip(kinds, _row_keys(records), strict=True))
+        if kind != RESTATED_KIND or key not in keys
+    ]
+    if len(kept) == records.row_count:
+        return records
+    return _select_rows(records, kept) if kept else None
 
 
 def carry_withdrawn_rows(

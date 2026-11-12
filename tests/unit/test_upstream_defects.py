@@ -42,7 +42,7 @@ from typer.testing import CliRunner
 
 from openalpha_cn import cli
 from openalpha_cn.cli import PanelExit, app
-from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
+from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET, ADJUSTMENT_PANEL_COLUMNS
 from openalpha_cn.domain.daily_prices import (
     DAILY_BASIC_DATASET,
     DAILY_BASIC_PANEL_COLUMNS,
@@ -50,6 +50,7 @@ from openalpha_cn.domain.daily_prices import (
     RecordedReturnPath,
 )
 from openalpha_cn.domain.panel_batch import (
+    CLOCK_COLUMN_NAMES,
     ColumnarPanelBatch,
     PanelBatchError,
     PanelColumn,
@@ -84,6 +85,7 @@ from openalpha_cn.domain.upstream_defects import (
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_doctor import panel_health_report
 from openalpha_cn.panel_ingest import (
+    RESTATEMENT_CONFIRM_LIMIT,
     UPSTREAM_DEFECTS_DATASET,
     load_upstream_defects,
     reconcile_price_disagreements,
@@ -277,6 +279,28 @@ class Frame:
     """What a per-security `adj_factor` re-fetch answers for `RETURN_PATH_CODE` on
     `SESSIONS[2]`; `None`: what the whole-market fetch served."""
     """`FILLERS[5]` is halted all of `SESSIONS[-1]`, so its last 2013 bar is on `SESSIONS[-2]`."""
+    restated_days: tuple[date, ...] = ()
+    """`V2-P7-026`: the upstream now serves `restated_factor` for `restated_code` on these
+    sessions -- on the whole-market fetch, a per-security re-fetch and the year history alike --
+    where an earlier build stored `1.0`. `002851.SZ` 2026-09-30's shape: stored 2.3361, served
+    2.3356."""
+    restated_code: str = RETURN_PATH_CODE
+    restated_factor: float = 1.1
+    restated_from: date | None = None
+    """The restatement as a **change point**: from this session on, every answer serves
+    `restated_factor`, including on sessions a later slice does not fetch again -- the shape that
+    makes a stored `pre_close`/`adj_factor` pair disputed after the `adj_factor` slice is written
+    (`002851.SZ`'s 2026-09-30, four sessions before the slice that met it)."""
+    previous_year_restated: tuple[date, float] | None = None
+    """The year before's closing session, if the upstream restated it too: (date, served)."""
+    restated_history_omits: tuple[date, ...] = ()
+    """Sessions the year-history answer leaves out of `restated_code`'s rows."""
+    restated_confirmation: float | None = None
+    """What the one-session confirmation answers on a differing session instead of the history's
+    value; `None`: the history's own answer (the upstream published it twice)."""
+    restated_daily_refetch_pre_close: float | None = None
+    """The one-session `daily` re-fetch of the disputed session answers this `pre_close` instead
+    of the stored one, i.e. the disagreement is a fetch fault, not a restatement."""
 
 
 class ScriptedUpstream:
@@ -286,14 +310,22 @@ class ScriptedUpstream:
         self.frame = frame
         self.payloads: list[dict[str, Any]] = []
         self.served: set[tuple[str, str]] = set()
+        self._refetch = False
 
     def refetches(self) -> list[tuple[str, str, str]]:
-        """Every per-security request, as `(api_name, ts_code, trade_date)`."""
-        return [
-            (str(p["api_name"]), str(p["params"]["ts_code"]), str(p["params"]["trade_date"]))
-            for p in self.payloads
-            if "ts_code" in p["params"]
-        ]
+        """Every per-security request, as `(api_name, ts_code, trade_date)`.
+
+        A year-history request (`V2-P7-026`) names a `ts_code` and a date window rather than one
+        session, and is reported with the window's last day.
+        """
+        found: list[tuple[str, str, str]] = []
+        for payload in self.payloads:
+            params = payload["params"]
+            if "ts_code" not in params:
+                continue
+            asked = params.get("trade_date") or params.get("end_date")
+            found.append((str(payload["api_name"]), str(params["ts_code"]), str(asked)))
+        return found
 
     def _close(self, code: str, day: date) -> float:
         if code == STALE:
@@ -303,6 +335,12 @@ class ScriptedUpstream:
         return 13.75 if code == NO_BAR else 10.0
 
     def _pre_close(self, code: str, day: date) -> float:
+        if (
+            self.frame.restated_daily_refetch_pre_close is not None
+            and self._refetch
+            and self._restated(code, day)
+        ):
+            return self.frame.restated_daily_refetch_pre_close
         if self.frame.return_path == "unknowable" and (code, day) == (
             RETURN_PATH_CODE,
             SESSIONS[2],
@@ -433,7 +471,21 @@ class ScriptedUpstream:
             rows.append([HALTED, _compact(day), "S", None])
         return rows
 
-    def _factor(self, code: str, day: date, *, refetch: bool) -> float:
+    def _restated(self, code: str, day: date) -> bool:
+        if code != self.frame.restated_code:
+            return False
+        if day in self.frame.restated_days:
+            return True
+        return self.frame.restated_from is not None and day >= self.frame.restated_from
+
+    def _factor(self, code: str, day: date, *, refetch: bool, confirmation: bool = False) -> float:
+        previous = self.frame.previous_year_restated
+        if previous is not None and code == self.frame.restated_code and day == previous[0]:
+            return previous[1]
+        if self._restated(code, day):
+            if confirmation and self.frame.restated_confirmation is not None:
+                return self.frame.restated_confirmation
+            return self.frame.restated_factor
         if code != RETURN_PATH_CODE or self.frame.return_path is None:
             return 1.0
         if refetch and day == SESSIONS[2] and self.frame.return_path_refetch_factor is not None:
@@ -444,12 +496,24 @@ class ScriptedUpstream:
 
     def _factors(self, day: date, *, refetch: bool = False) -> list[list[Any]]:
         rows = [
-            [code, _compact(day), self._factor(code, day, refetch=refetch)]
+            [code, _compact(day), self._factor(code, day, refetch=refetch, confirmation=refetch)]
             for code in self._codes()
         ]
         if self._prelisted(day):
             rows.append([PRELISTED, _compact(day), 1.0])
         return rows
+
+    def _factor_history(self, params: Mapping[str, str]) -> list[list[Any]]:
+        """One security's sessions in the year window, one row per open session, as the range
+        request serves them (`V2-P7-026`)."""
+        code = str(params["ts_code"])
+        first = datetime.strptime(str(params["start_date"]), "%Y%m%d").date()
+        last = datetime.strptime(str(params["end_date"]), "%Y%m%d").date()
+        return [
+            [code, _compact(day), self._factor(code, day, refetch=True, confirmation=False)]
+            for day in sorted(self.frame.sessions)
+            if first <= day <= last and day not in self.frame.restated_history_omits
+        ]
 
     def _registry(self) -> list[list[Any]]:
         rows = [
@@ -495,10 +559,15 @@ class ScriptedUpstream:
             return _response(CALENDAR_FIELDS, items)
         if api_name == "stock_basic":
             return _response(REGISTRY_FIELDS, self._registry())
+        if api_name == "adj_factor" and "trade_date" not in params:
+            # `V2-P7-026`: the restatement remedy's one year-history request, `ts_code` plus a
+            # date window. Rows are per session and indistinguishable from the one-session ones.
+            return _response(FACTOR_FIELDS, self._factor_history(params))
         day = datetime.strptime(params["trade_date"], "%Y%m%d").date()
         # A second request for the same (dataset, session) is a re-fetch, whether it names a
         # security or asks for the whole session again.
         refetch = "ts_code" in params or (api_name, params["trade_date"]) in self.served
+        self._refetch = refetch
         self.served.add((api_name, params["trade_date"]))
         if api_name == DAILY_DATASET:
             rows = self._bars(day, refetch=refetch)
@@ -1976,12 +2045,17 @@ def test_a_disagreement_a_re_fetch_does_not_reproduce_refuses_the_limit_year(
 ) -> None:
     """A disagreement is recorded only once the upstream publishes it twice. A per-security
     re-fetch answering another factor says the stored `adj_factor` is not what the upstream now
-    serves, and the `stk_limit` year -- whose record would decide from it -- is refused."""
+    serves: since `V2-P7-026` that shape is a restatement, so the year is still refused and
+    nothing is recorded, but the remedy named is the narrow one-security restatement rather than
+    the whole-year rebuild (the confirmation is what separates it from a fetch fault)."""
     frame = Frame(return_path="published", return_path_refetch_factor=1.2)
     result, _ = _build(tmp_path, frame, monkeypatch, "adj_factor", "price", "stk_limit")
 
     assert result.exit_code == PanelExit.unhealthy, result.output
-    assert "a re-fetch of adj_factor on 2013-11-13 answered (1.2,)" in result.output
+    assert "a re-fetch of adj_factor on 2013-11-13 answered (1.2,)" not in result.output
+    assert "restatement of the stored factor, not a fetch fault" in result.output
+    assert "REMEDY openalpha panel build" in result.output
+    assert "--restate-subject" in result.output
     assert _store(tmp_path).registered_years(PRICE_LIMIT_DATASET) == ()
     assert _store(tmp_path).registered_years(UPSTREAM_DEFECTS_DATASET) == ()
 
@@ -2361,3 +2435,294 @@ def test_a_restatement_record_is_not_a_return_path_decision() -> None:
         "adj_factor_corroborated_over_pre_close": "adjusted",
         "pre_close_contradicts_adj_factor": None,
     }
+
+
+# --- V2-P7-026: the restatement remedy (Task 3) ------------------------------------------------
+#
+# The measured case: `002851.SZ`'s 2026-09-30 `adj_factor` was stored as 2.3361 and the upstream
+# now serves 2.3356. A build cannot reproduce the disagreement -- the stored row is not what the
+# upstream publishes -- so it used to refuse with a whole-year `adj_factor` rebuild. The remedy
+# re-fetches the one security's Shanghai year (`fetch_panel_history`), confirms each differing
+# session with a one-session `ts_code` request, rewrites only that security's rows through
+# `write_adjustment_factors`, and records each session as `restated_after_publication`.
+#
+# This frame: `RESTATED_CODE` stores factor 1.0 on every session; the corrected upstream serves
+# `restated_factor` on `restated_days` and 1.0 elsewhere, so the stored `pre_close`/`adj_factor`
+# pair disagrees exactly as one restated factor makes it.
+
+RESTATE_PAGE = SESSIONS[2]
+
+
+def _restate(
+    runtime_dir: Path,
+    frame: Frame,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    code: str = RETURN_PATH_CODE,
+    year: int = YEAR,
+    as_of: str = AS_OF,
+    extra: tuple[str, ...] = (),
+) -> tuple[Any, ScriptedUpstream]:
+    """Run `panel build --dataset adj_factor --restate-subject CODE` through the real app."""
+    upstream = ScriptedUpstream(frame)
+    monkeypatch.setenv("TUSHARE_TOKEN", SECRET_TOKEN)
+    monkeypatch.setattr(cli, "_panel_transport", lambda: upstream)
+    monkeypatch.setattr(cli, "_panel_clock", lambda: CLOCK)
+    arguments = ["panel", "build", "--runtime-dir", str(runtime_dir), "--year", str(year)]
+    arguments += ["--as-of", as_of, "--json", "--dataset", ADJ_FACTOR_DATASET]
+    arguments += ["--restate-subject", code, *extra]
+    return runner.invoke(app, arguments), upstream
+
+
+def _factor_partition(runtime_dir: Path) -> list[tuple[object, ...]]:
+    """Every stored `adj_factor` row of the year, values and clocks, in stored order."""
+    return _store(runtime_dir).query(
+        ADJ_FACTOR_DATASET,
+        year=YEAR,
+        columns=(*ADJUSTMENT_PANEL_COLUMNS, *CLOCK_COLUMN_NAMES),
+    )
+
+
+def _restated_records(runtime_dir: Path) -> list[UpstreamDefect]:
+    return [d for d in _defects(runtime_dir) if d.kind == "restated_after_publication"]
+
+
+def _stored_factor(runtime_dir: Path, code: str, day: date) -> float | None:
+    rows = _store(runtime_dir).query(
+        ADJ_FACTOR_DATASET, year=YEAR, columns=ADJUSTMENT_PANEL_COLUMNS
+    )
+    answered = [
+        factor for subject, when, factor in rows if subject == code and when == day.isoformat()
+    ]
+    return answered[0] if answered else None
+
+
+# The year the fixture's partial build covers first, and the corrected upstream's own clock.
+PARTIAL_AS_OF = "2013-11-13T16:30:00+08:00"
+FULL_AS_OF = "2013-11-15T16:30:00+08:00"
+OLD_STEP = Frame(restated_days=(SESSIONS[1], SESSIONS[2]))
+"""The old upstream: 1.0, then a published step to 1.1 on the 12th and 13th."""
+CORRECTED_STEP = Frame(restated_from=SESSIONS[1], restated_factor=1.05)
+"""The corrected upstream: the step's value is restated to 1.05, from the 12th on."""
+
+
+def _restated_year(tmp_path: Path, corrected: Frame, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Build 2013 through the 13th from the old upstream, then fetch the rest incrementally.
+
+    `V2-P7-026`'s measured sequence (`T10` §6): the slice starts at the stored horizon, so the
+    restated session -- four sessions before it in 2026, here the 12th -- is not fetched again;
+    the corrected factors the slice *does* write make the stored pair that spans it disputed,
+    and the `stk_limit` build meets a stored factor that is no longer what the upstream serves."""
+    first, _ = _build(
+        tmp_path, OLD_STEP, monkeypatch, "adj_factor", "price", as_of=PARTIAL_AS_OF, year=YEAR
+    )
+    assert first.exit_code == PanelExit.ok, first.output
+    return _build(
+        tmp_path,
+        corrected,
+        monkeypatch,
+        "adj_factor",
+        "price",
+        "stk_limit",
+        as_of=FULL_AS_OF,
+        year=YEAR,
+        extra=("--incremental",),
+    )
+
+
+def test_a_restated_factor_only_mismatch_names_the_narrow_remedy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stored year was built from the old upstream; the corrected one restates the factor
+    from one session on, and the slice writes the corrected values for its own sessions. The
+    disputed pair's previous session still holds the old factor, so the re-fetch answers a
+    different factor and the same `daily` rows: a restatement, named with the narrow remedy."""
+    refused, _upstream = _restated_year(tmp_path, CORRECTED_STEP, monkeypatch)
+
+    assert refused.exit_code == PanelExit.unhealthy, refused.output
+    assert "restatement" in refused.output
+    assert "REMEDY openalpha panel build" in refused.output
+    assert "--restate-subject" in refused.output
+    assert f"--year {YEAR}" in refused.output
+    # The whole-year rebuild is no longer the remedy for this shape.
+    assert "rebuild adj_factor for the year" not in refused.output
+
+
+def test_a_daily_mismatch_at_the_same_pair_keeps_the_whole_year_remedy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A re-fetch that answers another `pre_close` is a fetch fault, not a restatement: the
+    stronger witness failed, so the year is refused exactly as before."""
+    corrected = Frame(
+        restated_from=SESSIONS[1],
+        restated_factor=1.05,
+        restated_daily_refetch_pre_close=10.5,
+    )
+    refused, _ = _restated_year(tmp_path, corrected, monkeypatch)
+
+    assert refused.exit_code == PanelExit.unhealthy, refused.output
+    assert "a re-fetch of daily on" in refused.output
+    assert "REMEDY " not in refused.output
+
+
+def test_the_restatement_rewrites_one_security_and_matches_a_full_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the restated security's rows change; every other row is what it was, and the healed
+    year equals a full rebuild against the same corrected upstream at the same clock."""
+    stored, _ = _build(tmp_path, Frame(), monkeypatch, "adj_factor", "price", "stk_limit")
+    assert stored.exit_code == PanelExit.ok, stored.output
+    before = _factor_partition(tmp_path)
+
+    restated, upstream = _restate(tmp_path, Frame(restated_days=(RESTATE_PAGE,)), monkeypatch)
+
+    assert restated.exit_code == PanelExit.ok, restated.output
+    assert _stored_factor(tmp_path, RETURN_PATH_CODE, RESTATE_PAGE) == 1.1
+    # The history request, then one differently-shaped confirmation request.
+    assert upstream.refetches() == [
+        (ADJ_FACTOR_DATASET, RETURN_PATH_CODE, _compact(SESSIONS[-1])),
+        (ADJ_FACTOR_DATASET, RETURN_PATH_CODE, _compact(RESTATE_PAGE)),
+    ]
+    healed = _factor_partition(tmp_path)
+    # Every subject but the restated one is byte-for-byte what it was (clocks included).
+    untouched = lambda row: row[0] != RETURN_PATH_CODE  # noqa: E731 - a one-line filter
+    assert [row for row in healed if untouched(row)] == [row for row in before if untouched(row)]
+
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    rebuilt, _ = _build(fresh, Frame(restated_days=(RESTATE_PAGE,)), monkeypatch, "adj_factor")
+    assert rebuilt.exit_code == PanelExit.ok, rebuilt.output
+    assert healed == _factor_partition(fresh)
+
+
+def test_each_restated_session_is_recorded_with_its_row_clocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One `restated_after_publication` record per differing session: the served factor in
+    `bar_close`, the stored factor in `valuation_close`, the stored row's clocks, and the
+    confirmation instant as `revision_time`, so the record is not knowable before the remedy."""
+    stored, _ = _build(tmp_path, Frame(), monkeypatch, "adj_factor", "price", "stk_limit")
+    assert stored.exit_code == PanelExit.ok, stored.output
+    last = SESSIONS[-1]
+
+    restated, _ = _restate(tmp_path, Frame(restated_days=(last,)), monkeypatch)
+
+    assert restated.exit_code == PanelExit.ok, restated.output
+    assert _restated_records(tmp_path) == [
+        UpstreamDefect(
+            ts_code=RETURN_PATH_CODE,
+            trade_date=last,
+            source_dataset=ADJ_FACTOR_DATASET,
+            kind="restated_after_publication",
+            bar_close=1.1,
+            valuation_close=1.0,
+        )
+    ]
+    (clocks,) = _store(tmp_path).query(
+        UPSTREAM_DEFECTS_DATASET, year=YEAR, columns=CLOCK_COLUMN_NAMES
+    )
+    event, available, ingested, revised = clocks
+    # The stored row's own clocks: 15:00 close (`event_time`), 16:30 availability.
+    assert event.astimezone(UTC) == datetime(YEAR, 11, 15, 7, 0, tzinfo=UTC)
+    assert available.astimezone(UTC) == datetime(YEAR, 11, 15, 8, 30, tzinfo=UTC)
+    assert ingested.astimezone(UTC) == CLOCK
+    assert revised.astimezone(UTC) == CLOCK
+    # Not knowable before the build that confirmed it.
+    assert (
+        load_upstream_defects(_store(tmp_path), years=(YEAR,), as_of=CLOCK - timedelta(minutes=1))
+        == ()
+    )
+
+
+@pytest.mark.parametrize("omitted", [SESSIONS[0], SESSIONS[-1]], ids=["late", "short"])
+def test_a_history_that_does_not_cover_the_stored_year_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, omitted: date
+) -> None:
+    """A range answer missing a session between the security's first stored row and its closing
+    anchor is a partial fetch: nothing is written and the refusal names the hole."""
+    stored, _ = _build(tmp_path, Frame(), monkeypatch, "adj_factor", "price", "stk_limit")
+    assert stored.exit_code == PanelExit.ok, stored.output
+    before = _factor_partition(tmp_path)
+
+    refused, _ = _restate(
+        tmp_path,
+        Frame(restated_days=(SESSIONS[2],), restated_history_omits=(omitted,)),
+        monkeypatch,
+    )
+
+    assert refused.exit_code == PanelExit.unhealthy, refused.output
+    assert omitted.isoformat() in refused.output
+    assert _factor_partition(tmp_path) == before
+
+
+def test_a_confirmation_that_disagrees_with_the_history_refuses_the_restatement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restatement is recorded only once the upstream publishes it twice. A one-session
+    request answering another factor is a fetch fault, and nothing is written."""
+    stored, _ = _build(tmp_path, Frame(), monkeypatch, "adj_factor", "price", "stk_limit")
+    assert stored.exit_code == PanelExit.ok, stored.output
+    before = _factor_partition(tmp_path)
+
+    refused, _ = _restate(
+        tmp_path,
+        Frame(restated_days=(RESTATE_PAGE,), restated_confirmation=1.2),
+        monkeypatch,
+    )
+
+    assert refused.exit_code == PanelExit.unhealthy, refused.output
+    assert "publishes it twice" in refused.output
+    assert "1.2" in refused.output
+    assert _factor_partition(tmp_path) == before
+
+
+def test_a_subject_the_upstream_already_agrees_with_refuses_to_restate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing differs, so there is nothing to record or rewrite -- the store is right."""
+    stored, _ = _build(tmp_path, Frame(), monkeypatch, "adj_factor")
+    assert stored.exit_code == PanelExit.ok, stored.output
+
+    refused, upstream = _restate(tmp_path, Frame(), monkeypatch)
+
+    assert refused.exit_code == PanelExit.unhealthy, refused.output
+    assert "nothing to restate" in refused.output
+    # One history request asked; no confirmation was spent on a subject that agrees.
+    assert [call[2] for call in upstream.refetches()] == [_compact(SESSIONS[-1])]
+
+
+def test_a_full_rebuild_carries_the_restatement_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The record describes a row a build cannot drop again, so every later `adj_factor` build
+    carries it rather than erasing it from the target's record."""
+    stored, _ = _build(tmp_path, Frame(), monkeypatch, "adj_factor")
+    assert stored.exit_code == PanelExit.ok, stored.output
+    restated, _ = _restate(tmp_path, Frame(restated_days=(SESSIONS[2],)), monkeypatch)
+    assert restated.exit_code == PanelExit.ok, restated.output
+    (record,) = _restated_records(tmp_path)
+
+    again, _ = _build(tmp_path, Frame(restated_days=(SESSIONS[2],)), monkeypatch, "adj_factor")
+
+    assert again.exit_code == PanelExit.ok, again.output
+    assert _restated_records(tmp_path) == [record]
+
+
+def test_another_targets_defect_survives_the_restatement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The record is the `adj_factor` target's; the price target's rows are the price target's,
+    and a rewrite of one target's source must not erase the other's."""
+    stored, _ = _build(tmp_path, Frame(stale_valuation=True), monkeypatch, "adj_factor", "price")
+    assert stored.exit_code == PanelExit.ok, stored.output
+    price = [d for d in _defects(tmp_path) if d.source_dataset == DAILY_BASIC_DATASET]
+    assert price
+
+    restated, _ = _restate(
+        tmp_path, Frame(stale_valuation=True, restated_days=(SESSIONS[2],)), monkeypatch
+    )
+
+    assert restated.exit_code == PanelExit.ok, restated.output
+    surviving = _defects(tmp_path)
+    assert [d for d in surviving if d.source_dataset == DAILY_BASIC_DATASET] == price
+    assert len(_restated_records(tmp_path)) == 1
