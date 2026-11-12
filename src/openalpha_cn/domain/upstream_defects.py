@@ -74,6 +74,21 @@ a withdrawal is: its own clocks, the confirmation instant as `revision_time`. On
 `(ts_code, ann_date)` -- the key this record has -- with every superseded report kept whole in
 `superseded_fina_indicator`.
 
+## A factor the upstream restated (`V2-P7-026`)
+
+`adj_factor` carries no revision label either: the upstream can re-serve a stored session under a
+different factor without saying that it changed. Measured 2026-11-12: `002851.SZ`'s 2026-09-30
+`adj_factor` was stored as 2.3361 and the upstream served 2.3356. An incremental build refuses
+that as a disagreement and today's only remedy is a whole-year rebuild of the dataset; the
+restatement remedy re-fetches the one security's Shanghai year, confirms each differing session
+with a differently-shaped request, and rewrites only those rows. `restated_after_publication`
+records one such session and is written by that remedy -- nothing is dropped by the rule, and the
+factor values are kept in `bar_close` (served) and `valuation_close` (stored), the numeric columns
+the record already has. `restated_sessions` is the pure split of the two answers into the sessions
+that changed, and refuses a stored change row the upstream no longer serves at all: that is a
+withdrawal, `V2-P6-016`'s path, and a fetch fault that drops a row must never be healed as a
+restatement.
+
 Every dropped row is recorded in the `upstream_defects` panel dataset
 (`panel_ingest.UPSTREAM_DEFECTS_DATASET`), one partition per year,
 with the values that disagreed and the dropped row's own four clocks, so a reader can see
@@ -113,12 +128,14 @@ DefectKind = Literal[
     "bar_before_listing",
     "withdrawn_after_publication",
     "superseded_after_publication",
+    "restated_after_publication",
     "pre_close_corroborated_over_adj_factor",
     "adj_factor_corroborated_over_pre_close",
     "pre_close_contradicts_adj_factor",
 ]
 """The named rules. See `close_disagreement_kind`, `valuation_placeholder_kind`,
-`limit_placeholder_kind`, `withdrawn_subjects`, `superseded_versions` and `return_path_kind`."""
+`limit_placeholder_kind`, `withdrawn_subjects`, `superseded_versions`, `restated_sessions` and
+`return_path_kind`."""
 
 DEFECT_KINDS: Final[frozenset[str]] = frozenset(get_args(DefectKind))
 
@@ -132,10 +149,13 @@ DEFECT_SOURCE_DATASETS: Final[frozenset[str]] = frozenset(
         FINANCIAL_INDICATOR_DATASET,
     }
 )
-"""The datasets a record may name. `daily` and `adj_factor` only under `bar_before_listing` or
-`withdrawn_after_publication`, `suspend_d` only under the latter, and `fina_indicator` only under
-`superseded_after_publication` (`V2-P6-018`): no rule drops a bar or a halt the upstream still
-serves, and none drops a report whose current version is not stored in its place.
+"""The datasets a record may name. `daily` and `adj_factor` only under `bar_before_listing`,
+`withdrawn_after_publication` or `restated_after_publication`, `suspend_d` only under the
+withdrawal kind, and `fina_indicator` only under `superseded_after_publication` (`V2-P6-018`): no
+rule drops a bar or a halt the upstream still serves, and none drops a report whose current version
+is not stored in its place. `restated_after_publication` drops nothing: it records an `adj_factor`
+row the upstream re-served under a different value, and the restatement remedy rewrites that row
+itself.
 
 The three `RETURN_PATH_KINDS` (`V2-P6-020`) name `stk_limit`: nothing is dropped under them, the
 record is the `stk_limit` target's judgement of a `daily`/`adj_factor` disagreement, and its
@@ -190,6 +210,11 @@ the two shapes of a contradicted valuation apart:
   an `adj_factor` row records only the date.
 - `withdrawn_after_publication`: the withdrawn stored row's own close or band, in the same
   columns `bar_before_listing` uses; an `adj_factor` or `suspend_d` row records only the date.
+- `restated_after_publication` (`V2-P7-026`): `bar_close` is the factor the re-fetch **served**,
+  `valuation_close` the factor the store **held**, and every other value column is `None`. No
+  column is added for the restatement (hard rule 3): the kind and these two numbers carry it, and
+  the remedy that rewrites the row is what writes the record. Nothing is dropped by the rule --
+  the record is the proof that the stored session changed and what it changed from and to.
 - `pre_close_corroborated_over_adj_factor`, `adj_factor_corroborated_over_pre_close` and
   `pre_close_contradicts_adj_factor` (`V2-P6-020`): `bar_close` is the session's close and
   `previous_bar_close` the previous stored bar's close -- the two rows the disagreement was
@@ -391,6 +416,37 @@ def superseded_versions(
         if (version[0], version[1]) in latest and latest[(version[0], version[1])] > version[2]
     )
     return superseded, frozenset(lost) - superseded
+
+
+def restated_sessions(
+    stored: Mapping[date, float], served: Mapping[date, float]
+) -> tuple[date, ...]:
+    """The sessions of one security's `adj_factor` the upstream re-served under a different value,
+    in date order (`V2-P7-026`, `restated_after_publication`).
+
+    `stored` is the store's factor expanded over the sessions compared, `served` what a re-fetch
+    of the same sessions answered. A session in both with different values is restated; one in
+    both with the same value is not, and a session only `served` holds is ignored here -- whether
+    a range answered enough sessions is the ingest layer's coverage question, not this rule's.
+
+    **A session in `stored` with no answer in `served` is refused, not restated.** That is a
+    withdrawal -- the upstream no longer serves a row it once did, `V2-P6-016`'s path -- and the
+    caller names the full rebuild instead. Two reasons it must be refused here rather than read as
+    "no change": a fetch fault that drops a row from its answer would otherwise be healed as a
+    restatement of the sessions it kept, and a missing answer carries no value to compare, so
+    reading it as unchanged would let a withdrawal pass silently. The message names every stored
+    session the answer lacks.
+    """
+    missing = sorted(day for day in stored if day not in served)
+    if missing:
+        named = ", ".join(day.isoformat() for day in missing)
+        raise UpstreamDefectError(
+            f"the stored adj_factor for {named} has no answer from the re-fetch; a stored change "
+            "row the upstream no longer serves is a withdrawal (V2-P6-016's path), not a "
+            "restatement, and this rule does not read an absent answer as no change -- name the "
+            "full rebuild of the dataset instead"
+        )
+    return tuple(sorted(day for day, value in stored.items() if served[day] != value))
 
 
 RETURN_PATH_KINDS: Final[Mapping[str, ReturnPath | None]] = MappingProxyType(

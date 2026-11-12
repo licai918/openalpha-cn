@@ -2475,6 +2475,33 @@ def _earliest_stored_horizon(store: PanelStore, census: Sequence[str], year: int
     return min(stored) if len(stored) == len(horizons) else None
 
 
+REMEDY_LINE_PREFIX: Final[str] = "REMEDY "
+"""The machine-readable line `panel build` prints beside a refusal that has a narrow remedy.
+
+`cli._judge_return_paths` prints it for a restated `adj_factor` (`V2-P7-026`), and the nightly
+step pins that command the way it pins every other printed remedy: the line is a shell command
+already (`shlex.join`), so only the worktree's own environment has to be put in front of it.
+"""
+
+
+def printed_remedy(invocation: Invocation) -> str | None:
+    """The command a refusal printed on its `REMEDY` line, or `None` (`V2-P7-026`).
+
+    Read off stderr, the channel `panel build` refuses on; the last such line wins, so a target
+    that printed two names only the later. The prefix is stripped because the value is an
+    `openalpha ...` command line, not a `REMEDY` command. A line with nothing after the prefix is
+    no remedy at all and reads as `None` -- it must not become an empty command that crashes the
+    step that pins it (`V2-P7-026`, fix round 1).
+    """
+    found: str | None = None
+    for line in invocation.stderr.splitlines():
+        if line.startswith(REMEDY_LINE_PREFIX):
+            value = line[len(REMEDY_LINE_PREFIX) :].strip()
+            if value:
+                found = value
+    return found
+
+
 def pinned_command(arguments: Sequence[str]) -> str:
     """`arguments` -- an `openalpha ...` or `scripts/...py ...` command -- as the runbook runs it in
     the pinned worktree (`docs/runbooks/daily-selection.zh-CN.md`, 手动运行): its own environment
@@ -2749,9 +2776,25 @@ def update_panel(
         runtime_dir, year=session.year, as_of=as_of, exchange=exchange, targets=yearly
     )
     if built.exit_code != 0:
-        raise StepFailedError(
-            "panel update", f"`panel build` exited {built.exit_code}: {built.reason()}"
-        )
+        message = f"`panel build` exited {built.exit_code}: {built.reason()}"
+        remedy = printed_remedy(built)
+        if remedy is not None:
+            # `V2-P7-026`: a refusal that names a narrow command (`--restate-subject`) gets it
+            # pinned, exactly as `_previous_year_refusal` and `_panel_catch_up_refusal` print
+            # their remedies; the bare `openalpha` line `panel build` prints is not runnable from
+            # this worktree's environment as it stands. A line that is not a readable shell
+            # command stays a named step-2 failure: the panel's own refusal is what matters, and
+            # an unparsable remedy is reported on it rather than raised as a crash (fix round 1).
+            try:
+                pinned = pinned_command(shlex.split(remedy))
+            except ValueError as unreadable:
+                message += (
+                    "\n  (the panel build printed a REMEDY line that cannot be read as a shell "
+                    f"command: {unreadable})"
+                )
+            else:
+                message += "\n  " + pinned
+        raise StepFailedError("panel update", message)
     payloads = [body for body in built.payloads() if isinstance(body, dict)]
     report = payloads[-1] if payloads else {}
     budget = _budget(built)

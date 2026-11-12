@@ -1600,3 +1600,103 @@ def test_a_refusal_states_the_sessions_the_run_would_have_fetched_and_the_run_fe
     assert {api: counts[api] for api in SESSION_SCOPED_APIS} == dict.fromkeys(
         SESSION_SCOPED_APIS, fetched
     )
+
+
+# --- V2-P7-026: the restatement remedy the panel build prints ----------------------------------
+
+
+def test_a_restatement_remedy_is_printed_pinned_after_the_panel_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refused panel build that prints the narrow restatement remedy (`V2-P7-026`) gets that
+    command in the pinned form on the step's message, as every other printed remedy does: the
+    evening's human remedy has to be the one the runbook can run, not the bare `openalpha` line."""
+    runtime = tmp_path / "runtime"
+    command = [
+        "openalpha",
+        "panel",
+        "build",
+        "--runtime-dir",
+        str(runtime),
+        "--year",
+        "2026",
+        "--exchange",
+        "SSE",
+        "--as-of",
+        "2026-11-12T16:30:00+08:00",
+        "--dataset",
+        ADJ_FACTOR_DATASET,
+        "--restate-subject",
+        "002851.SZ",
+    ]
+    refusal = daily.Invocation(
+        exit_code=1,
+        stdout="",
+        stderr=(
+            "the panel refused this build: 002851.SZ's adj_factor was restated; nothing was "
+            "written\n"
+            f"REMEDY {' '.join(command)}\n"
+        ),
+    )
+    monkeypatch.setattr(daily, "_panel_build", lambda *args, **kwargs: refusal)
+
+    with pytest.raises(daily.StepFailedError) as error:
+        daily.update_panel(
+            runtime,
+            session=date(2026, 11, 12),
+            as_of=datetime(2026, 11, 12, 16, 30, tzinfo=daily.SHANGHAI),
+            exchange="SSE",
+            targets=(ADJ_FACTOR_DATASET,),
+            next_year=False,
+        )
+
+    assert daily.pinned_command(command) in str(error.value)
+
+
+def _update_with_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stderr: str,
+) -> None:
+    """Drive step 2 with a refused panel build whose stderr is `stderr`."""
+    runtime = tmp_path / "runtime"
+    refusal = daily.Invocation(exit_code=1, stdout="", stderr=stderr)
+    monkeypatch.setattr(daily, "_panel_build", lambda *args, **kwargs: refusal)
+    daily.update_panel(
+        runtime,
+        session=date(2026, 11, 12),
+        as_of=datetime(2026, 11, 12, 16, 30, tzinfo=daily.SHANGHAI),
+        exchange="SSE",
+        targets=(ADJ_FACTOR_DATASET,),
+        next_year=False,
+    )
+
+
+def test_an_empty_remedy_line_is_a_named_step_failure_not_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 1, finding 6: a `REMEDY ` line with nothing after it is treated as no remedy at
+    all (the step still fails by name with the panel's own refusal); it must not raise the
+    `ValueError` an empty `pinned_command([])` produces, which would escape as a crash."""
+    with pytest.raises(daily.StepFailedError) as error:
+        _update_with_refusal(
+            tmp_path, monkeypatch, "the panel refused this build: restated factor\nREMEDY \n"
+        )
+
+    assert "the panel refused this build" in str(error.value)
+
+
+def test_an_unparsable_remedy_line_is_a_named_step_failure_not_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 1, finding 6: a `REMEDY` line whose shell quoting cannot be read is named on the
+    step-2 failure that already reports the panel's refusal; it must not escape as `ValueError`."""
+    with pytest.raises(daily.StepFailedError) as error:
+        unreadable = (
+            "the panel refused this build: restated factor\n"
+            'REMEDY openalpha panel build "unclosed\n'
+        )
+        _update_with_refusal(tmp_path, monkeypatch, unreadable)
+
+    assert "the panel refused this build" in str(error.value)
+    assert "REMEDY" in str(error.value)

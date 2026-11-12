@@ -360,12 +360,27 @@ def _openalpha_remedy(arguments: Sequence[str], *, runtime: Path) -> Remedy:
         )
     datasets = {str(dataset) for dataset in parameters.get("dataset") or ()}
     if kind == "panel-build" and not parameters.get("incremental") and datasets != {"trade_cal"}:
-        raise RemedyError(
-            "this is the full rebuild of the session-scoped targets -- the whole-year rebuild "
-            "remedy, about 1,200 requests at live scale -- which the smoke never runs: the "
-            "panel copy is in a state only a discard repairs. Stop, ask the user, and prepare "
-            "a new root from the original panel"
+        # `V2-P7-026`: one narrow non-incremental `panel build` is a remedy the smoke does run --
+        # the restatement command, which rewrites one security's stored year of `adj_factor`
+        # (one range request and one confirmation per differing session), not the whole year.
+        restated = tuple(str(code) for code in parameters.get("restate_subject") or ())
+        years = tuple(parameters.get("year") or ())
+        # Mirror the CLI's exclusivity, not only its dataset/year shape (fix round 1, finding 7):
+        # a restate-shaped line that adds a mode the CLI refuses is not the narrow restatement.
+        refused_modes = ("resume", "subject", "return_paths_from_store", "start", "end")
+        narrow_restatement = (
+            bool(restated)
+            and datasets == {"adj_factor"}
+            and len(years) == 1
+            and not any(parameters.get(flag) for flag in refused_modes)
         )
+        if not narrow_restatement:
+            raise RemedyError(
+                "this is the full rebuild of the session-scoped targets -- the whole-year "
+                "rebuild remedy, about 1,200 requests at live scale -- which the smoke never "
+                "runs: the panel copy is in a state only a discard repairs. Stop, ask the "
+                "user, and prepare a new root from the original panel"
+            )
     _parse(arguments, resilient=False)
     return Remedy(kind=kind, arguments=tuple(arguments))
 

@@ -65,6 +65,7 @@ from openalpha_cn.config import ConfigError, load_config, load_dotenv, load_log_
 from openalpha_cn.domain.adjustment import (
     ADJ_FACTOR_DATASET,
     ADJUSTMENT_DATE_COLUMN,
+    ADJUSTMENT_FACTOR_COLUMN,
     AdjustmentError,
 )
 from openalpha_cn.domain.daily_prices import (
@@ -233,13 +234,17 @@ from openalpha_cn.panel_gate import (
     require_datasets,
 )
 from openalpha_cn.panel_ingest import (
+    CARRIED_KINDS,
+    RESTATEMENT_CONFIRM_LIMIT,
     SUPERSEDED_INDICATOR_DATASET,
     UPSTREAM_DEFECTS_DATASET,
     WITHDRAWN_KIND,
     WITHDRAWN_ROWS_DATASETS,
     AbsenceWitness,
+    AdjustmentRestatementError,
     ReconciledRows,
     Withdrawals,
+    _refetched_return_path_rows,
     _sessions_published_through,
     carry_stored_rows_forward,
     carry_stored_sessions_forward,
@@ -257,12 +262,15 @@ from openalpha_cn.panel_ingest import (
     load_trading_calendar,
     load_upstream_defects,
     merge_panel_batches,
+    previous_year_restated_factor,
     reconcile_limit_placeholders,
     reconcile_pre_listing_rows,
     reconcile_price_disagreements,
     reconcile_return_paths,
     reconcile_withdrawals,
     record_empty_universe_year,
+    restate_adjustment_subject,
+    restated_adjustment_sessions,
     served_keys,
     session_publication_instant,
     split_panel_batch_by_year,
@@ -272,6 +280,8 @@ from openalpha_cn.panel_ingest import (
     superseded_indicator_rows,
     withdrawal_date_column,
     withdrawal_keys,
+    withdrawal_only_keys,
+    without_restated_records,
     write_adjustment_factors,
     write_daily_panel,
     write_empty_announcement_year,
@@ -3174,6 +3184,7 @@ def _fetch_panel(
     sweep: bool = False,
     codes: tuple[str, ...] = (),
     floor: Mapping[date, int] | None = None,
+    history: bool = False,
 ) -> ColumnarPanelBatch:
     """One panel-plane fetch, reporting a refusal without ever echoing its message.
 
@@ -3184,12 +3195,16 @@ def _fetch_panel(
 
     `sweep` sends the request down `TushareProvider.fetch_panel_sweep`, the statement datasets'
     whole-market route, and through this same boundary rather than a second copy of it; `codes`
-    are the securities that route may chunk a capped window by.
+    are the securities that route may chunk a capped window by. `history`
+    (`V2-P7-026`) sends it down `TushareProvider.fetch_panel_history`, one security's Shanghai
+    year in one range request, through the same boundary for the same reason.
     """
     request = ProviderRequest(dataset=dataset, as_of=as_of, subjects=subjects)
     try:
         if sweep:
             return provider.fetch_panel_sweep(request, codes=codes, floor=floor)
+        if history:
+            return provider.fetch_panel_history(request)
         return provider.fetch_panel(request)
     except ProviderFailure as failure:
         logger.warning(
@@ -3573,7 +3588,7 @@ def _carried_defects(
 
     def keep(row: Mapping[str, object]) -> bool:
         source = row[SOURCE_DATASET_COLUMN]
-        if source not in sources or row[DEFECT_KIND_COLUMN] == WITHDRAWN_KIND:
+        if source not in sources or row[DEFECT_KIND_COLUMN] in CARRIED_KINDS:
             return False
         if row[DEFECT_KIND_COLUMN] in RETURN_PATH_KINDS:
             # `V2-P6-020`: every build judges the whole year's return paths from the stored rows
@@ -3757,7 +3772,10 @@ def _settle_withdrawals(
         through=through,
         observed_at=now,
     )
-    watch = withdrawal_keys(records)
+    # `V2-P7-026`: the carry now also returns restatement records; only withdrawals have a
+    # retirement rule (served again / confirmed again / still stored), and a restated key is a
+    # session the upstream still serves -- so the arithmetic names withdrawals alone.
+    watch = withdrawal_only_keys(records)
     found = {
         dataset: _confirm_withdrawals(
             store,
@@ -4031,6 +4049,23 @@ def _full_rebuild_command(
     for target in PANEL_BUILD_TARGETS:
         if target in targets:
             parts += ["--dataset", target]
+    return shlex.join(parts)
+
+
+def _restatement_command(
+    runtime_dir: Path, *, code: str, year: int, exchange: str, as_of: datetime
+) -> str:
+    """The narrow `panel build` a restated-factor refusal offers (`V2-P7-026`).
+
+    One security's year re-fetched and rewritten, plus each differing session confirmed, instead
+    of the whole year's ~243 whole-market requests: `--dataset adj_factor`, exactly one `--year`,
+    one `--restate-subject`. It is passed down to `_judge_return_paths` the way
+    `_full_rebuild_command` is, and printed on its own `REMEDY` line so the daily command can run
+    it pinned (`daily_selection` appends the pinned form to the refusal).
+    """
+    parts = ["openalpha", "panel", "build", "--runtime-dir", str(runtime_dir)]
+    parts += ["--year", str(year), "--exchange", exchange, "--as-of", as_of.isoformat()]
+    parts += ["--dataset", ADJ_FACTOR_DATASET, "--restate-subject", code]
     return shlex.join(parts)
 
 
@@ -4528,6 +4563,7 @@ def _judge_stored_return_paths(
     year: int,
     sessions: Sequence[date],
     now: datetime,
+    restatement: Callable[[str, int], str],
 ) -> None:
     """`--return-paths-from-store` (`V2-P6-020`, review round 1): the year's return-path decisions
     from the **stored** `daily`, `adj_factor` and `stk_limit`, with no band fetched again.
@@ -4564,7 +4600,14 @@ def _judge_stored_return_paths(
         observed_at=now,
     )
     paths = _judge_return_paths(
-        store, provider, limits=bands, year=year, sessions=sessions, now=now, fresh=None
+        store,
+        provider,
+        limits=bands,
+        year=year,
+        sessions=sessions,
+        now=now,
+        fresh=None,
+        restatement=restatement,
     )
     ref = write_upstream_defects(
         store,
@@ -4603,6 +4646,7 @@ def _judge_return_paths(
     sessions: Sequence[date],
     now: datetime,
     fresh: Callable[[date], bool] | None,
+    restatement: Callable[[str, int], str],
 ) -> ReconciledRows:
     """`panel_ingest.reconcile_return_paths` over the **stored** `daily` and `adj_factor` years
     (`V2-P6-020`), from the `stk_limit` target, which is built after both.
@@ -4676,26 +4720,35 @@ def _judge_return_paths(
             )
         )
     }
-    reconciled = reconcile_return_paths(
-        limits,
-        bars=stored(DAILY_DATASET, year, after),
-        factors=stored(ADJ_FACTOR_DATASET, year, after),
-        earlier=earlier if {year - 1} <= daily_years & factor_years else None,
-        answerable_through=sessions[-1],
-        refetch=lambda code, previous_day, day: _refetch_return_path(
-            provider, code, previous_day, day
-        ),
-        fresh=fresh,
-        stored_decisions=stored_decisions,
-        budget=lambda pairs: _echo_budget(
-            "return-path-reproduction",
-            4 * pairs,
-            "requests",
-            f"{pairs} disputed pre_close/adj_factor pair(s) of {year} x 2 bars and 2 factors, one "
-            "security at a time; a pair whose stored decision the stored rows still give is not "
-            "asked again",
-        ),
-    )
+    try:
+        reconciled = reconcile_return_paths(
+            limits,
+            bars=stored(DAILY_DATASET, year, after),
+            factors=stored(ADJ_FACTOR_DATASET, year, after),
+            earlier=earlier if {year - 1} <= daily_years & factor_years else None,
+            answerable_through=sessions[-1],
+            refetch=lambda code, previous_day, day: _refetch_return_path(
+                provider, code, previous_day, day
+            ),
+            fresh=fresh,
+            stored_decisions=stored_decisions,
+            budget=lambda pairs: _echo_budget(
+                "return-path-reproduction",
+                4 * pairs,
+                "requests",
+                f"{pairs} disputed pre_close/adj_factor pair(s) of {year} x 2 bars and 2 factors, "
+                "one security at a time; a pair whose stored decision the stored rows still give "
+                "is not asked again",
+            ),
+        )
+    except AdjustmentRestatementError as error:
+        # `V2-P7-026`: every daily row reproduced and only the stored factors changed, so this is
+        # a restatement, not a fetch fault or a stale store. Name the narrow remedy on its own
+        # machine-readable `REMEDY` line (`daily_selection` pins and prints it) and refuse with
+        # it rather than the whole-year rebuild, which every other mismatch keeps.
+        command = restatement(error.ts_code, error.year)
+        typer.echo(f"REMEDY {command}", err=True)
+        raise PanelBatchError(f"{error}. Restate it with: `{command}`") from error
     _echo_retired_decisions(stored_decisions, reconciled.defects)
     return reconciled
 
@@ -6314,6 +6367,7 @@ def _build_panel(
     registry_cache: dict[object, RegistryDates] | None = None,
     incremental: bool = False,
     rebuild: str = "",
+    restatement: Callable[[str, int], str],
     withdrawn: list[UpstreamDefect] | None = None,
     return_paths_from_store: bool = False,
 ) -> tuple[tuple[date, ...], str]:
@@ -6537,6 +6591,7 @@ def _build_panel(
             year=year,
             sessions=sessions,
             now=now,
+            restatement=restatement,
         )
     elif PRICE_LIMIT_DATASET in targets:
         assert calendar is not None  # guaranteed by `_NEEDS_STORED_CALENDAR` above
@@ -6593,6 +6648,7 @@ def _build_panel(
                 if limit_start is None
                 else _fetched_from(limit_start, again=frozenset(asked_limits))
             ),
+            restatement=restatement,
         )
         limit_refs = written.setdefault(PRICE_LIMIT_DATASET, [])
         limit_index = combine_defect_records(
@@ -7464,6 +7520,253 @@ _BUILD_RETURN_PATHS_FROM_STORE_HELP = (
 )
 
 
+_BUILD_RESTATE_SUBJECT_HELP = (
+    "With --dataset adj_factor and exactly one --year: restate one security's stored year of "
+    "adj_factor after the upstream re-served a historical factor (V2-P7-026), repeatable. "
+    "Re-fetches that security's year in one range request, confirms each differing session with "
+    "a one-session request, rewrites only its rows through write_adjustment_factors, and records "
+    "each session as restated_after_publication. Exclusive with --incremental, --resume, "
+    "--subject and --return-paths-from-store. This is the remedy a restated-factor refusal names."
+)
+
+
+def _restate_adjustment(
+    store: PanelStore,
+    provider: TushareProvider,
+    *,
+    subjects: Sequence[str],
+    year: int,
+    now: datetime,
+    exchange: str,
+    halts: bool,
+    calendar: TradingCalendar,
+    runtime_dir: Path,
+    written: list[PartitionRef],
+) -> list[dict[str, object]]:
+    """The `--restate-subject` remedy (`V2-P7-026`): one security's year re-fetched, confirmed,
+    rewritten and recorded, for each named security.
+
+    Nothing here bypasses a writer: the rows go through `write_adjustment_factors` (whose session
+    census, subject guard and `before_write` seam all run) and the records through
+    `write_upstream_defects`. The records this target already owned for the year -- a
+    `bar_before_listing` drop, a carried withdrawal, an older restatement -- are put back with the
+    new ones, and an older restatement of a rewritten session is replaced rather than duplicated.
+
+    **The cost is stated before each kind of request, not after it.** The one year range request
+    is stated first; then, once the differing sessions are known, the one one-session
+    confirmation each and the optional compare-only year-before request are stated before the
+    first of them goes out. Nothing is fetched before the line that counts it.
+
+    The stored `adj_factor` partition is what this write replaces, so it is also the write's
+    horizon: sessions the calendar publishes past it belong to the incremental build (or the
+    whole-year rebuild), and the remedy refuses by name rather than writing a partition it was
+    never asked to extend. Past `RESTATEMENT_CONFIRM_LIMIT` differing sessions the whole-year
+    rebuild is named instead.
+    """
+    horizon = _stored_horizon(store, ADJ_FACTOR_DATASET, year)
+    if horizon is None:
+        raise _panel_fail(
+            PanelExit.unhealthy,
+            f"there is no stored {ADJ_FACTOR_DATASET} year={year} to restate: the remedy rewrites "
+            "one security's rows of a stored partition, and this store holds none. Build the "
+            "year first",
+        )
+    # Fix round 1, finding 1: the census closes at the stored partition's horizon, so an
+    # `--as-of` that publishes a later session is refused by name instead of being misread as a
+    # fetches session the batch was never meant to carry.
+    published = _sessions_published_through(now, PANEL_DATE_ZONE)
+    closes_on = min(date(year, 12, 31), published)
+    pending = (
+        calendar.trading_days_between(horizon + timedelta(days=1), closes_on)
+        if horizon < closes_on
+        else ()
+    )
+    if pending:
+        raise _panel_fail(
+            PanelExit.unhealthy,
+            f"the stored {ADJ_FACTOR_DATASET} year={year} reaches {horizon.isoformat()} and the "
+            f"{exchange} calendar publishes {pending[-1].isoformat()} at this --as-of "
+            f"({now.isoformat()}). The restatement rewrites only the sessions the partition "
+            "already holds; the sessions between are the incremental panel build's. Run the "
+            "incremental panel build first (it advances the stored cache), then restate",
+        )
+    rebuild = _full_rebuild_command(
+        runtime_dir,
+        year=year,
+        targets=frozenset({ADJ_FACTOR_DATASET}),
+        exchange=exchange,
+        halts=halts,
+        as_of=now,
+    )
+    carried = carry_stored_sessions_forward(
+        store,
+        (),
+        dataset=UPSTREAM_DEFECTS_DATASET,
+        year=year,
+        before=date(year + 1, 1, 1),
+        observed_at=now,
+        keep=lambda row: row[SOURCE_DATASET_COLUMN] == ADJ_FACTOR_DATASET,
+    )
+    carried_records = carried[0] if carried else None
+    records: list[ColumnarPanelBatch] = []
+    retired: set[tuple[str, date]] = set()
+    restated: list[dict[str, object]] = []
+    for code in subjects:
+        # The year-before applicability is a store read, so its one optional request is known --
+        # and can be stated -- before any request is spent.
+        previous = previous_year_restated_factor(store, ts_code=code, year=year, observed_at=now)
+        _echo_budget(
+            "adj-factor-restatement",
+            1,
+            "requests",
+            f"{code} year={year}: the one year range request (the security's Shanghai year)",
+        )
+        history = _fetch_panel(
+            provider,
+            ADJ_FACTOR_DATASET,
+            as_of=_session_as_of(horizon),
+            subjects=(code,),
+            history=True,
+        )
+        restatement = restated_adjustment_sessions(
+            store,
+            ts_code=code,
+            history=history,
+            calendar=calendar,
+            year=year,
+            rebuild=rebuild,
+            observed_at=now,
+        )
+        if len(restatement.sessions) > RESTATEMENT_CONFIRM_LIMIT:
+            raise _panel_fail(
+                PanelExit.unhealthy,
+                f"{code} differs from the stored {ADJ_FACTOR_DATASET} year={year} on "
+                f"{len(restatement.sessions)} session(s), over RESTATEMENT_CONFIRM_LIMIT "
+                f"({RESTATEMENT_CONFIRM_LIMIT}); confirming each would spend more requests than "
+                f"the data is worth. Rebuild the year instead: `{rebuild}`",
+            )
+        follow_up = len(restatement.sessions) + (0 if previous is None else 1)
+        _echo_budget(
+            "adj-factor-restatement",
+            follow_up,
+            "requests",
+            f"{code} year={year}: {len(restatement.sessions)} one-session confirmation(s)"
+            + (
+                ""
+                if previous is None
+                else " and the one-session year-before closing-anchor compare"
+            ),
+        )
+        if previous is not None:
+            before_day, stored_factor = previous
+            answer = _fetch_panel(
+                provider,
+                ADJ_FACTOR_DATASET,
+                as_of=_session_as_of(before_day),
+                subjects=(code,),
+            )
+            served_before = _refetched_return_path_rows(
+                [answer], code, ADJUSTMENT_DATE_COLUMN, (ADJUSTMENT_FACTOR_COLUMN,)
+            ).get(before_day)
+            if served_before is None:
+                raise _panel_fail(
+                    PanelExit.unhealthy,
+                    f"the stored {ADJ_FACTOR_DATASET} year={year - 1} closing anchor "
+                    f"{before_day.isoformat()} holds {code}, and the upstream no longer serves "
+                    "the row; that is a withdrawal (V2-P6-016), not a restatement. Nothing was "
+                    f"written. Rebuild {ADJ_FACTOR_DATASET} for {year - 1}",
+                )
+            if served_before[0] != stored_factor:
+                command = _restatement_command(
+                    runtime_dir, code=code, year=year - 1, exchange=exchange, as_of=now
+                )
+                typer.echo(f"REMEDY {command}", err=True)
+                raise _panel_fail(
+                    PanelExit.unhealthy,
+                    f"the year before is restated too: {code}'s stored "
+                    f"{ADJ_FACTOR_DATASET} for {before_day.isoformat()} is {stored_factor!r} and "
+                    f"the upstream serves {served_before[0]!r}. Restating {year} cannot heal "
+                    f"{year - 1}'s boundary session, so nothing was written; restate {year - 1} "
+                    f"first with: `{command}`",
+                )
+        confirmations: dict[date, ColumnarPanelBatch] = {}
+        for day in restatement.sessions:
+            typer.echo(
+                f"REFETCH {day.isoformat()} {code} ({ADJ_FACTOR_DATASET} confirmation, a "
+                "restatement of the stored factor)",
+                err=True,
+            )
+            confirmations[day] = _fetch_panel(
+                provider,
+                ADJ_FACTOR_DATASET,
+                as_of=_session_as_of(day),
+                subjects=(code,),
+            )
+
+        # Fix round 1, finding 8: each security's report names its own two writes -- its
+        # `upstream_defects` record and its `adj_factor` partition -- not every earlier
+        # security's as well; the top-level list still names all of them.
+        mine: list[PartitionRef] = []
+
+        def write_index(
+            record: ColumnarPanelBatch,
+            *,
+            _code: str = code,
+            _sessions: tuple[date, ...] = restatement.sessions,
+            _mine: list[PartitionRef] = mine,
+        ) -> None:
+            """Write the `adj_factor` target's defect record for the year (`before_write`)."""
+            records.append(record)
+            retired.update((_code, day) for day in _sessions)
+            index = combine_defect_records(
+                without_restated_records(carried_records, keys=retired), *records
+            )
+            ref = write_upstream_defects(
+                store,
+                index,
+                year=year,
+                source_datasets=frozenset({ADJ_FACTOR_DATASET}),
+            )
+            if ref is not None:
+                written.append(ref)
+                _mine.append(ref)
+
+        result = restate_adjustment_subject(
+            store,
+            restatement=restatement,
+            confirmations=confirmations,
+            calendar=calendar,
+            rebuild=rebuild,
+            before_write=write_index,
+        )
+        written.append(result.written)
+        mine.append(result.written)
+        if not _PANEL_JSON.get():
+            typer.echo(
+                f"RESTATED {ADJ_FACTOR_DATASET} year={year} {code}: "
+                f"{len(result.sessions)} session(s) {result.sessions[0].isoformat()} to "
+                f"{result.sessions[-1].isoformat()}"
+            )
+        restated.append(
+            {
+                "ts_code": code,
+                "year": year,
+                "sessions": [day.isoformat() for day in result.sessions],
+                "served": {day.isoformat(): value for day, value in result.served.items()},
+                "stored": {day.isoformat(): value for day, value in result.stored.items()},
+                "partitions": [
+                    {
+                        "dataset": ref.dataset,
+                        "year": ref.year,
+                        "row_count": ref.row_count,
+                    }
+                    for ref in mine
+                ],
+            }
+        )
+    return restated
+
+
 @panel_app.command("build")
 def panel_build(
     dataset: Annotated[list[str], typer.Option("--dataset", help=_BUILD_DATASET_HELP)],
@@ -7502,6 +7805,10 @@ def panel_build(
         bool,
         typer.Option("--return-paths-from-store", help=_BUILD_RETURN_PATHS_FROM_STORE_HELP),
     ] = False,
+    restate_subject: Annotated[
+        list[str] | None,
+        typer.Option("--restate-subject", help=_BUILD_RESTATE_SUBJECT_HELP),
+    ] = None,
     json_output: Annotated[
         bool, typer.Option("--json", help="Emit a machine-readable build report.")
     ] = False,
@@ -7621,6 +7928,28 @@ def panel_build(
             )
         subjects = _build_subjects(subject or (), targets)
         years = _build_years(year or (), start, end)
+        codes = tuple(dict.fromkeys(restate_subject or ()))
+        if codes:
+            # `V2-P7-026`: the restatement remedy is one narrow shape, and every way out of it is
+            # a usage error rather than something one of the other targets could rescue.
+            if targets != frozenset({ADJ_FACTOR_DATASET}):
+                raise _panel_fail(
+                    PanelExit.bad_request,
+                    "--restate-subject rewrites stored adj_factor rows only: pass --dataset "
+                    f"{ADJ_FACTOR_DATASET} and no other dataset",
+                )
+            if len(years) != 1:
+                raise _panel_fail(
+                    PanelExit.bad_request,
+                    "--restate-subject restates one stored year: pass exactly one --year (not "
+                    "--start/--end)",
+                )
+            if incremental or resume or subject or return_paths_from_store:
+                raise _panel_fail(
+                    PanelExit.bad_request,
+                    "--restate-subject is exclusive with --incremental, --resume, --subject and "
+                    "--return-paths-from-store: it fetches one security's whole year itself",
+                )
         year_targets = targets - PANEL_BUILD_SPAN_TARGETS
         span_targets = targets & PANEL_BUILD_SPAN_TARGETS
         store = _panel_store(runtime_dir)
@@ -7662,6 +7991,50 @@ def panel_build(
         # fetch may know. `_panel_clock` rather than the provider's own default so that a test
         # which moves this module's clock moves the provider's too.
         provider = TushareProvider(transport=_panel_transport(), clock=_panel_clock, stamped_at=now)
+        if codes:
+            # `V2-P7-026`: the printed remedy, run. It has its own report rather than a `builds`
+            # entry: it restores one security's rows of a stored year, it is not a year build.
+            calendar = _stored_calendar(store, exchange=exchange, years=(years[0],), as_of=now)
+            restated_written: list[PartitionRef] = []
+            try:
+                restated = _restate_adjustment(
+                    store,
+                    provider,
+                    subjects=codes,
+                    year=years[0],
+                    now=now,
+                    exchange=exchange,
+                    halts=halts,
+                    calendar=calendar,
+                    runtime_dir=runtime_dir,
+                    written=restated_written,
+                )
+            except _PANEL_WRITE_REFUSALS as error:
+                raise _panel_fail(
+                    PanelExit.unhealthy,
+                    f"the panel refused this restatement: {error}. "
+                    f"{_stored_so_far(restated_written)}",
+                ) from error
+            restate_payload = {
+                "years": [years[0]],
+                "exchange": exchange,
+                "targets": [ADJ_FACTOR_DATASET],
+                "as_of": now.isoformat(),
+                # The remedy's own answer: what was rewritten and recorded, per security.
+                "restated": restated,
+                "partitions": [
+                    {"dataset": ref.dataset, "year": ref.year, "row_count": ref.row_count}
+                    for ref in restated_written
+                ],
+            }
+            if json_output:
+                typer.echo(json.dumps(restate_payload, ensure_ascii=False, sort_keys=True))
+                return
+            for partition in restated_written:
+                typer.echo(
+                    f"WROTE {partition.dataset} year={partition.year} rows={partition.row_count}"
+                )
+            return
         stored: list[PartitionRef] = []
         builds: list[dict[str, object]] = []
         # One registry read per invocation (`V2-P6-013`), re-read only if a year rewrites it.
@@ -7702,6 +8075,9 @@ def panel_build(
                             exchange=exchange,
                             halts=halts,
                             as_of=now,
+                        ),
+                        restatement=lambda code, of: _restatement_command(
+                            runtime_dir, code=code, year=of, exchange=exchange, as_of=now
                         ),
                     )
                     sessions = sessions or covered

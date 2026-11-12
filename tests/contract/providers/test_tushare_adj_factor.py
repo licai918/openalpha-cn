@@ -25,12 +25,16 @@ and it is exactly why the row-count witness is kept beside it rather than replac
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 import pytest
 
-from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
+from openalpha_cn.domain.adjustment import (
+    ADJ_FACTOR_DATASET,
+    ADJUSTMENT_DATE_COLUMN,
+    ADJUSTMENT_FACTOR_COLUMN,
+)
 from openalpha_cn.domain.financial_statements import FINANCIAL_STATEMENT_DATASETS
 from openalpha_cn.domain.index_membership import INDEX_WEIGHT_DATASET
 from openalpha_cn.domain.index_prices import INDEX_DAILY_DATASET
@@ -49,6 +53,7 @@ from openalpha_cn.providers.tushare import (
     TUSHARE_DATASETS,
     TUSHARE_RESPONSE_TRUNCATION_FLAG,
     TushareProvider,
+    _adjustment_factor,
 )
 
 FIELDS = ["ts_code", "trade_date", "adj_factor"]
@@ -718,3 +723,159 @@ def test_a_panel_batch_error_is_not_dressed_up_as_a_tushare_outage(
             fetched_at=batch.fetched_at,
             status="success",
         )
+
+
+# --- V2-P7-026: one security's year of adj_factor, in one range request -------------------------
+#
+# The restatement remedy (`panel build --restate-subject`) cannot compare a stored factor with
+# what a page-based full rebuild would serve: it needs one security's history of the `as_of`'s
+# Shanghai year in **one** request. The rows are the same rows the per-session route decodes --
+# same dataset, kind and projection -- and the answer is judged by the same completeness
+# witnesses, so a truncated history is refused rather than paged.
+
+HISTORY_AS_OF = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)
+"""2026-08-07 20:00 in Asia/Shanghai: inside 2026, and after that session's 16:30 close."""
+
+HISTORY_SESSIONS = ("20260105", "20260302", "20260630", "20260807")
+HISTORY_FACTORS = (1.0, 1.2, 1.25, 139.008)
+HISTORY_ITEMS: list[list[Any]] = [
+    [PING_AN, session, factor]
+    for session, factor in zip(HISTORY_SESSIONS, HISTORY_FACTORS, strict=True)
+]
+
+
+def _history_request(as_of: datetime, subjects: tuple[str, ...] = (PING_AN,)) -> ProviderRequest:
+    return ProviderRequest(dataset=ADJ_FACTOR_DATASET, as_of=as_of, subjects=subjects)
+
+
+def _per_session_as_of(session: str) -> datetime:
+    """The same clock shape the file's per-session fetches use: midday UTC on the session."""
+    return datetime(int(session[:4]), int(session[4:6]), int(session[6:]), 12, 0, tzinfo=UTC)
+
+
+def test_a_history_request_asks_for_one_securitys_shanghai_year(
+    fake_tushare_transport,
+) -> None:
+    """`ts_code` plus a date window -- never `trade_date`, which would answer one session."""
+    provider, transport = _provider(fake_tushare_transport, _response([]), clock=HISTORY_AS_OF)
+
+    provider.fetch_panel_history(_history_request(HISTORY_AS_OF))
+
+    assert transport.payload is not None
+    assert transport.payload["api_name"] == ADJ_FACTOR_DATASET
+    assert transport.payload["params"] == {
+        "ts_code": PING_AN,
+        "start_date": "20260101",
+        "end_date": "20260807",
+    }
+
+
+def test_the_history_year_is_shanghais_at_the_new_year_boundary(fake_tushare_transport) -> None:
+    """2025-12-31 16:30 UTC is already 2026-01-01 00:30 in Shanghai: the year asked for is
+    2026's, not UTC 2025's."""
+    as_of = datetime(2025, 12, 31, 16, 30, tzinfo=UTC)
+    provider, transport = _provider(fake_tushare_transport, _response([]), clock=as_of)
+
+    provider.fetch_panel_history(_history_request(as_of))
+
+    assert transport.payload is not None
+    assert transport.payload["params"] == {
+        "ts_code": PING_AN,
+        "start_date": "20260101",
+        "end_date": "20260101",
+    }
+
+
+@pytest.mark.parametrize("subjects", [(), (PING_AN, "600519.SH")])
+def test_a_history_request_names_exactly_one_security(
+    fake_tushare_transport, subjects: tuple[str, ...]
+) -> None:
+    """A history is one security's; zero or several is a malformed request, refused before any
+    transport call rather than comma-joined or truncated."""
+    provider, transport = _provider(
+        fake_tushare_transport, _response(HISTORY_ITEMS), clock=HISTORY_AS_OF
+    )
+
+    with pytest.raises(ProviderFailure, match="one security") as failure:
+        provider.fetch_panel_history(_history_request(HISTORY_AS_OF, subjects))
+
+    assert failure.value.category == "configuration"
+    assert failure.value.retryable is False
+    assert transport.payload is None
+
+
+def test_a_range_answer_carries_every_session_as_the_per_session_route_would(
+    fake_tushare_transport,
+) -> None:
+    """The rows cannot tell which route fetched them. A four-session range answer carries all
+    four in date order, with exactly the values a `trade_date` request for that session decodes,
+    and the untouched `_adjustment_factor` parse -- so the remedy compares like with like."""
+    provider, _ = _provider(fake_tushare_transport, _response(HISTORY_ITEMS), clock=HISTORY_AS_OF)
+
+    history = provider.fetch_panel_history(_history_request(HISTORY_AS_OF))
+
+    assert history.status == "success"
+    assert history.dataset == ADJ_FACTOR_DATASET
+    assert history.kind == ADJ_FACTOR_DATASET
+    assert history.subjects == (PING_AN,) * len(HISTORY_SESSIONS)
+    assert history.row_count == len(HISTORY_SESSIONS)
+    assert [column.name for column in history.columns] == [
+        ADJUSTMENT_DATE_COLUMN,
+        ADJUSTMENT_FACTOR_COLUMN,
+    ]
+    assert history.columns[0].values == tuple(
+        date(int(session[:4]), int(session[4:6]), int(session[6:])).isoformat()
+        for session in HISTORY_SESSIONS
+    )
+    assert history.columns[1].values == tuple(_adjustment_factor(row[2]) for row in HISTORY_ITEMS)
+
+    for index, session in enumerate(HISTORY_SESSIONS):
+        as_of = _per_session_as_of(session)
+        # The same fetch instant as the history fetch: `ingested_time` is the observation, not
+        # the session, and the two routes are being compared as answers observed at one moment.
+        single_provider, _ = _provider(
+            fake_tushare_transport, _response([HISTORY_ITEMS[index]]), clock=HISTORY_AS_OF
+        )
+        single = single_provider.fetch_panel(_request(as_of))
+        assert single.subjects == (history.subjects[index],)
+        assert [column.name for column in single.columns] == [
+            column.name for column in history.columns
+        ]
+        assert [column.kind for column in single.columns] == [
+            column.kind for column in history.columns
+        ]
+        for single_column, history_column in zip(single.columns, history.columns, strict=True):
+            assert single_column.values[0] == history_column.values[index]
+        assert single.timeline.event_time[0] == history.timeline.event_time[index]
+        assert single.timeline.available_time[0] == history.timeline.available_time[index]
+        assert single.timeline.ingested_time[0] == history.timeline.ingested_time[index]
+        assert single.timeline.revision_time[0] == history.timeline.revision_time[index]
+
+
+def test_a_truncated_history_answer_is_refused_rather_than_paged(
+    fake_tushare_transport,
+) -> None:
+    """`has_more=True` keeps its meaning on the history route: a capped factor series is
+    silently wrong, so it is refused, not paged and not swallowed."""
+    provider, transport = _provider(
+        fake_tushare_transport, _response(HISTORY_ITEMS, has_more=True), clock=HISTORY_AS_OF
+    )
+
+    with pytest.raises(ProviderFailure, match="reports that it has more rows to give") as failure:
+        provider.fetch_panel_history(_history_request(HISTORY_AS_OF))
+
+    assert failure.value.category == "upstream"
+    assert failure.value.retryable is False
+    assert transport.payload is not None
+
+
+def test_a_history_answer_without_the_truncation_flag_is_refused(
+    fake_tushare_transport,
+) -> None:
+    """The stronger witness the `adj_factor` descriptor carries stays in force for history."""
+    provider, _ = _provider(
+        fake_tushare_transport, _response(HISTORY_ITEMS, omit_flag=True), clock=HISTORY_AS_OF
+    )
+
+    with pytest.raises(ProviderFailure, match="carries no has_more flag"):
+        provider.fetch_panel_history(_history_request(HISTORY_AS_OF))
