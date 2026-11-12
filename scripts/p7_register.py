@@ -39,6 +39,7 @@ for _root in (_SCRIPTS, _SCRIPTS / "research"):
     if str(_root) not in sys.path:
         sys.path.insert(0, str(_root))
 
+import daily_selection  # noqa: E402
 import grid  # noqa: E402
 import p7_smoke_env  # noqa: E402
 import registry  # noqa: E402
@@ -188,6 +189,127 @@ def registration_body(epoch: date) -> tuple[dict[str, Any], dict[str, str], dict
         "survivor_forward_stop_rule": strategy_survivor_forward.adopted_forward_stop_rule(),
     }
     return config, copy.deepcopy(CRITERIA), settings
+
+
+# --- Task 3: the registration chain (U1) ----------------------------------------------------------
+
+_SURVIVOR_KIND: Final[str] = strategy_survivor.SURVIVOR_KIND
+_KIND_KEY: Final[str] = strategy_survivor.KIND_KEY
+_SMOKE_KEY: Final[str] = daily_selection.SMOKE_SETTINGS_KEY
+_CONTINUATION_KEY: Final[str] = strategy_survivor_continuation.SURVIVOR_CONTINUATION_KEY
+
+
+def committed_survivor_registrations(repo: Path) -> dict[str, dict[str, Any]]:
+    """The non-smoke survivor registrations git holds under `docs/research/*.json`, by their
+    repository-relative path, read from `HEAD`'s bytes.
+
+    The path filter is the plan's (`git ls-files 'docs/research/*.json'`, which matches only that
+    one directory); a file it lists that `HEAD` does not hold (staged and never committed) is not
+    a committed registration and is skipped. A P6 configuration (no `kind`) and a smoke
+    registration (`settings.smoke_run`) are not part of the chain: the first is the paused book,
+    the second is never evidence and never merges into a non-smoke sample (U6)."""
+    listing = _git(repo, "ls-files", f"{RESEARCH_DIRECTORY}/*.json")
+    registrations: dict[str, dict[str, Any]] = {}
+    for relative in listing.splitlines():
+        if not relative:
+            continue
+        shown = _git_process(repo, "show", f"HEAD:{relative}")
+        if shown.returncode != 0:
+            continue
+        try:
+            body = json.loads(shown.stdout)
+        except ValueError:
+            continue
+        if not isinstance(body, dict):
+            continue
+        config = body.get("config")
+        settings = body.get("settings")
+        if not isinstance(config, Mapping) or not isinstance(settings, Mapping):
+            continue
+        if config.get(_KIND_KEY) != _SURVIVOR_KIND:
+            continue
+        if _SMOKE_KEY in settings:
+            continue
+        registrations[relative] = body
+    return registrations
+
+
+def _chain_roots(registrations: Mapping[str, Mapping[str, Any]]) -> list[str]:
+    """The registrations whose settings carry no `survivor_continuation`: the chain's root."""
+    return sorted(
+        path
+        for path, body in registrations.items()
+        if isinstance(body.get("settings"), Mapping) and _CONTINUATION_KEY not in body["settings"]
+    )
+
+
+def chain_problems(registrations: Mapping[str, Mapping[str, Any]]) -> list[str]:
+    """Why `registrations` is not one rooted chain; `[]` when it is (plan section 4, Task 3).
+
+    Exactly one registration is a root (none when the set is empty); every other registration's
+    `survivor_continuation` block reads, and names a registration in the set; and no two name the
+    same predecessor -- a fork is a second chain nobody declared."""
+    problems: list[str] = []
+    roots: list[str] = []
+    successors: dict[str, list[str]] = {}
+    for path in sorted(registrations):
+        settings = registrations[path].get("settings")
+        if not isinstance(settings, Mapping):
+            problems.append(f"{path}: its settings are not an object, so its chain is unreadable")
+            continue
+        try:
+            continuation = strategy_survivor_continuation.read_survivor_continuation(settings)
+        except strategy_survivor_continuation.SurvivorContinuationError as error:
+            problems.append(f"{path}: {error}")
+            continue
+        if continuation is None:
+            roots.append(path)
+            continue
+        successor = continuation.supersedes_path
+        successors.setdefault(successor, []).append(path)
+        if successor not in registrations:
+            problems.append(
+                f"{path}: it names {successor}, which is not a committed survivor registration"
+            )
+    if len(roots) > 1:
+        problems.append(f"more than one chain root: {roots}")
+    elif registrations and not roots:
+        problems.append(
+            "no chain root: every registration names a predecessor, so the chain is a cycle or "
+            "leaves the set"
+        )
+    for predecessor, named in sorted(successors.items()):
+        if len(named) > 1:
+            problems.append(f"{len(named)} registrations name {predecessor}: {named}")
+    return problems
+
+
+def _with_predecessor(repo: Path, settings: Mapping[str, Any], value: str) -> dict[str, Any]:
+    """`settings` plus the `survivor_continuation` block naming the committed predecessor
+    `--supersedes` gave."""
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        candidate = repo / candidate
+    try:
+        root, admitted = registry.committed_registration(candidate, repo)
+    except (registry.RegistrationNotCommittedError, registry.HoldoutConfigurationError) as error:
+        raise SupersedesRefusedError(f"{value}: {error}") from error
+    try:
+        relative = candidate.resolve().relative_to(Path(root).resolve()).as_posix()
+    except ValueError as error:
+        raise SupersedesRefusedError(
+            f"{value} is outside the repository {root}: only a committed registration in this "
+            "repository can be superseded"
+        ) from error
+    config_id = admitted.registered.get("config_id")
+    if not isinstance(config_id, str) or not config_id:
+        raise SupersedesRefusedError(f"{value}: the predecessor names no config_id")
+    block = strategy_survivor_continuation.continuation_block(
+        path=relative,
+        sha256=hashlib.sha256(admitted.content).hexdigest(),
+        config_id=config_id,
+    )
+    return {**settings, _CONTINUATION_KEY: block}
 
 
 def read_back(
@@ -406,7 +528,25 @@ def _write(arguments: argparse.Namespace) -> None:
     path = _checked_path(repo, arguments.path)
     epoch = _checked_epoch(arguments.epoch, _today())
     config, criteria, settings = registration_body(epoch)
+    committed = committed_survivor_registrations(repo)
+    if arguments.supersedes is not None:
+        settings = _with_predecessor(repo, settings, arguments.supersedes)
+    else:
+        roots = _chain_roots(committed)
+        if roots:
+            raise ChainRefusedError(
+                f"{roots[0]} is a committed survivor registration and no --supersedes was "
+                "given: every survivor registration after the first must name the one it "
+                "supersedes (U1)"
+            )
     read_back(config, criteria, settings)
+    proposed = {
+        **committed,
+        path.relative_to(repo).as_posix(): {"config": config, "settings": settings},
+    }
+    problems = chain_problems(proposed)
+    if problems:
+        raise ChainRefusedError("; ".join(problems))
     content = _document(config, criteria, settings, head)
     config_id = grid.config_id(config)
     digest = hashlib.sha256(content).hexdigest()
