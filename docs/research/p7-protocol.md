@@ -94,7 +94,8 @@
 **(a) 强制退出**（`src/openalpha_cn/domain/survivor_book.py:65` 的 `ILLIQUID_POLICY =
 "forced_exit"`；`V2-P7-006a` 冻结，2026-11-07）。名称状态 `unknown` 按普通处理并逐日计数
 （`src/openalpha_cn/strategy_survivor_facts.py:150-155`；Part D 回答 (7)，决策链 `:348`）；
-2025-07-07 之后主板风险警示股的 5% 涨跌停带宽证人恒为 0，这一条也逐日打印。
+2025-07-07 之后主板风险警示股的 5% 涨跌停带宽证人恒为 0（`BAND_WITNESS_ENDS`，
+`src/openalpha_cn/strategy_survivor_summary.py:191`；`inert_from` `:530`），这一条也逐日打印。
 
 ### 3.5 成本、现金与涨停价冻结
 
@@ -120,8 +121,9 @@
 ## 4. 判据
 
 - **主检验**：h20 秩 IC，单侧符号翻转，均值 > 0，p ≤ 0.05，族大小 1，锚点序号 1，
-  K = 36 个非重叠位置。符号翻转 100000 次；窗口达到 K 之前只报计数与描述性均值，不给 p 值、
-  不给结论词。
+  K = 36 个非重叠位置。符号翻转 100000 次（`bootstrap_samples`，上限 100000，
+  `src/openalpha_cn/strategy_survivor_forward.py:514`；取值 `scripts/research/grid.py:137`）；窗口达到
+  K 之前只报计数与描述性均值，不给 p 值、不给结论词。
 - **次要族**（{h20 `survivors_minus_ew`、h20 `ew_minus_worst_decile`、h5 `rank_ic`}，大小 3）用
   Benjamini–Yekutieli（任意相依），q = 0.10；次要族等主窗口满足后才检验，打印为“q 值 ≤ q”，
   从不当作结论。**本登记的主检验只有一条**，族大小 1。
@@ -150,7 +152,8 @@ minimum_periods 30；planned 只有 h20 rank_ic：planning_sd 0.18、planning_me
 单次观测不是规划值”。
 ```
 
-`minimum_periods` = 30 是 D-2：36 个位置里至多丢 6 个（约 1/6）；它只给结果贴标签，不阻止检验。
+`minimum_periods` = 30 是 D-2：36 个位置里至多丢 6 个（约 1/6）；它只给结果贴标签，不阻止检验
+（`src/openalpha_cn/strategy_survivor_forward.py:652-673` 的模型文档；登记读取 `:676-745`）。
 `planning_sd` = 0.18 是 D-1：研究期实测约 0.14（工具默认 0.15，决策链 §3.6），验证读观测 0.182
 （读数文本自己说“单独一次的观测值不是规划值”），取较大者向下取两位，偏保守。只规划主检验
 （D-3）：h5 的离散度从未测过，写一个没有来源的 sd 等于编造。
@@ -174,10 +177,12 @@ minimum_periods 30；planned 只有 h20 rank_ic：planning_sd 0.18、planning_me
 
 **纪元规则**：`epoch_session` = 第一次计划运行的**前一个**交易日，必须是已存日历的开市日；
 第一晚距纪元最多 `1 + max_panel_catch_up_sessions = 11` 个会话，否则第 1 步按名拒绝、0 次请求
-（`scripts/daily_selection.py` 的纪元检查；决策链 `:348`）。所以纪元在登记当天才定，登记与第一晚
+（`scripts/daily_selection.py:4166` 的 `bound = 1 + adapter.max_panel_catch_up_sessions`；
+决策链 `:348`）。所以纪元在登记当天才定，登记与第一晚
 相隔不得超过约两周；目标在 2027-01-04 之前（`V2-P7-025` 的硬闸门）。
 
-**磨合期**：登记后约前 22 个会话为预声明磨合期。发现受绑定代码缺陷则换运行目录与纪元、重新登记
+**磨合期**：登记后约前 22 个会话为预声明磨合期（`docs/superpowers/plans/2026-11-01-p7-route-adjustment.md:98`；
+决策链 §9 2026-11-01 行）。发现受绑定代码缺陷则换运行目录与纪元、重新登记
 （必须点名本登记）；无缺陷则这些会话直接属于确认样本。磨合期内的缺陷清单写在运行手册
 `docs/runbooks/daily-selection.zh-CN.md` 的「正式登记（`V2-P7-006b`）」一节。
 
@@ -213,8 +218,9 @@ minimum_periods 30；planned 只有 h20 rank_ic：planning_sd 0.18、planning_me
 
 - T8 的仅主板、N=10、样本内：净超额 +6.1–6.3%/年、跟踪误差 11.7%、单年跑输约 27%
   （`docs/research/p7-step0-validation/T8-main-board-remeasure.md`）。**不是证据。**
-- T9 的无前视口径重测把 T8 的期望数字下调约 0.9pp/年；路线文档的口径是“样本内 +5.9%，
-  抽样 se 约 ±2.9pp”（`docs/superpowers/plans/2026-11-01-p7-route-adjustment.md:77`）。
+- T9 的无前视口径重测把 T8 的期望数字下调约 0.9pp/年（−0.91pp/年，样本 se 0.30；
+  `docs/research/p7-step0-validation/T9-delisted-while-held.md:21`）；路线文档的口径是
+  “样本内 +5.9%，抽样 se 约 ±2.9pp”（`docs/superpowers/plans/2026-11-01-p7-route-adjustment.md:77`）。
   **不是证据。**
 - 验证期的一次读数：h20 秩 IC 均值 0.09459（sd 0.1821、n 24、t 2.544），
   `ew_minus_worst_decile` 均值 0.008688
