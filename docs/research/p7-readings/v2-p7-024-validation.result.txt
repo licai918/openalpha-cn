@@ -1,0 +1,25 @@
+PRE-REGISTERED READ-ONCE v2-p7-024-validation -- A FIRST OUT-OF-SAMPLE READING, NOT CONFIRMATORY EVIDENCE: validation window 2022-01-04..2023-12-29
+  the primary reading registered for V2-P7-024
+  this window's one read is witnessed by every claim file naming it in docs/research/p7-readings: commit v2-p7-024-validation.claim.json and validation.window-claim.json, and keep that commit in this repository's refs, or another clone or worktree can read the window again
+  read under the knowledge at 2026-10-08T19:48:00+08:00 (-- the registrant's words: 读数所用的知识即 ~/openalpha-research/panel 这份存储面板，它最后一次写入是 2026-10-08 19:48（上海时间）) -- every partition is read as it stood then, so a revision or name published after a session enters that session's scores; this is a recomputation at that instant, not a replay at each session's publication instant
+stop rule, written before the read: composite at h=20, at least 24 periods, triggered if any of: rank_ic mean at or below 0.02; ew_minus_worst_decile mean at or below 0
+  rank_ic: n 24, mean 0.09459, at or below 0.02: no
+  ew_minus_worst_decile: n 24, mean 0.008688, at or below 0: no
+stop rule not triggered
+  the stop rule written before the read is not triggered: this permits V2-P7-006 to proceed and is not evidence
+  the one pre-registered read of this window: a first out-of-sample reading, not confirmatory evidence; confirmatory evidence comes only from forward records registered under V2-P7-006
+  every score is a candidate research signal (候选), never a verdict
+plan 2022-01-04..2023-12-29, one signal day every 20 sessions, horizons 20: 24 signal days, 1 embargoed (a label that would end past the window)
+code e346222b87b15d710e0adcef2332d9cc50716f21, config 53199e777d5881825227398907ce32e7d13ba9aae3232380dda105779b0dd83c, random component none, 87 partition(s) read
+binding: claim_sha256 6bfd846b7a32665badd4bd45f363642e36d8c07b1fe3ff4e9efa9fb43ed050b7, reading v2-p7-024-validation, registration_commit 75a6f6e976aff6b27f6b1f3bcc7bc555035267f5, registration_sha256 da70e806edd48c1f2b89ea89897346d1e26ec5fd2b36ba72875f5dab46ded056
+composite at h=20: 24 non-overlapping signal days (every 1 of the plan's), 24 read, 0 gap(s); gap and unlabelled counts cover the sampled days only
+  rank_ic: n 24, mean 0.09459, sd 0.1821, t 2.544, share above zero 0.7083, lag-1 autocorrelation -0.3202, by year 2022 0.08965 (n 13), 2023 0.1004 (n 11)
+  ew_minus_worst_decile: n 24, mean 0.008688, sd 0.03163, t 1.345, share above zero 0.5833, lag-1 autocorrelation 0.09993, by year 2022 0.01149 (n 13), 2023 0.005373 (n 11)
+  survivors_minus_ew: n 24, mean 0.001732, sd 0.005536, t 1.533, share above zero 0.625, lag-1 autocorrelation -0.1559, by year 2022 0.00197 (n 13), 2023 0.00145 (n 11)
+  top_minus_bottom: n 24, mean 0.01323, sd 0.05353, t 1.211, share above zero 0.625, lag-1 autocorrelation -0.284, by year 2022 0.01135 (n 13), 2023 0.01545 (n 11)
+  decile mean excess over equal weight (0 = worst): 0 -0.008688; 1 -0.005392; 2 -0.001247; 3 -0.002975; 4 0.001938; 5 0.0006919; 6 0.001993; 7 0.004262; 8 0.004681; 9 0.004543
+  mean excess after dropping the worst k tenths: k=1 0.0009455 (n 24); k=2 0.001732 (n 24); k=3 0.002171 (n 24)
+  unlabelled names: halted_session 247, locked_at_limit 140, missing_bar 247
+  rank_ic power if the planning sd were this value measured in the one reading of this window: an observed value of that reading, never a planning value by itself: sd 0.1821, one-sided test level 0.05
+    normal: K=12 mean 0.037 power 0.173; K=12 mean 0.05 power 0.244; K=12 mean 0.1 power 0.602; K=36 mean 0.037 power 0.335; K=36 mean 0.05 power 0.501; K=36 mean 0.1 power 0.950; K=56 mean 0.037 power 0.450; K=56 mean 0.05 power 0.659; K=56 mean 0.1 power 0.993; periods for 0.8: mean 0.037 150, mean 0.05 83, mean 0.1 21
+    t: K=12 mean 0.037 power 0.137; K=12 mean 0.05 power 0.199; K=12 mean 0.1 power 0.542; K=36 mean 0.037 power 0.319; K=36 mean 0.05 power 0.483; K=36 mean 0.1 power 0.946; K=56 mean 0.037 power 0.439; K=56 mean 0.05 power 0.649; K=56 mean 0.1 power 0.993; periods for 0.8: mean 0.037 152, mean 0.05 84, mean 0.1 22
