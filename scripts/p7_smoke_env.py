@@ -324,6 +324,9 @@ def _check_commit(source: Path, commit: str) -> None:
         )
 
 
+check_commit = _check_commit
+
+
 def _checked_caps(caps: Mapping[int, int]) -> dict[int, int]:
     """Step 2's caps: `{1: phase 1's, 2: the whole smoke's}`, whole numbers, 0 or more, the
     second no smaller than the first."""

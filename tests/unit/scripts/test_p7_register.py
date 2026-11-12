@@ -446,7 +446,7 @@ def test_writes_once_and_never_commits(
 
     dry = _run(capsys, *_arguments(smoke=smoke, dry_run=True))
     assert dry[0] == 0
-    dry_digest = next(token for token in dry[1].split() if len(token) == 64)
+    dry_digest = dry[1].split("sha256 ")[1].split()[0]
 
     code, out, err = _run(capsys, *_arguments(smoke=smoke))
     assert code == 0, err

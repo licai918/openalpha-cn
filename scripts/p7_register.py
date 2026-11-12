@@ -20,11 +20,16 @@ Every refusal is its own exception and exits 2 with nothing written; `main` is t
 
 from __future__ import annotations
 
+import argparse
 import copy
+import hashlib
+import json
+import os
 import re
+import subprocess
 import sys
-from collections.abc import Mapping
-from datetime import date
+from collections.abc import Mapping, Sequence
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Final
 from zoneinfo import ZoneInfo
@@ -36,6 +41,7 @@ for _root in (_SCRIPTS, _SCRIPTS / "research"):
 
 import grid  # noqa: E402
 import p7_smoke_env  # noqa: E402
+import registry  # noqa: E402
 
 from openalpha_cn import (  # noqa: E402
     strategy_survivor,
@@ -54,6 +60,42 @@ _SHANGHAI: Final[ZoneInfo] = ZoneInfo("Asia/Shanghai")
 class RegistrationWriterError(ValueError):
     """A registration that cannot be written as asked; the message names the reason and nothing
     is written."""
+
+
+class CheckoutRefusedError(RegistrationWriterError):
+    """The checkout cannot be read, or does not stand where the writer needs it."""
+
+
+class BoundTreeRefusedError(RegistrationWriterError):
+    """The bound code is not clean: the registration's code would not be the tree's."""
+
+
+class HeadNotOnMainError(RegistrationWriterError):
+    """`HEAD` is not on `main`'s history, so the smoke did not stand on a `main` commit."""
+
+
+class SmokeCommitRefusedError(RegistrationWriterError):
+    """The smoke commit is not a full commit, or its bound bytes are not `HEAD`'s."""
+
+
+class PathRefusedError(RegistrationWriterError):
+    """The registration path is not a `.json` file under `docs/research/`."""
+
+
+class EpochRefusedError(RegistrationWriterError):
+    """The epoch is not a weekday, is in the future, or is older than the bound allows."""
+
+
+class ExistingRegistrationError(RegistrationWriterError):
+    """The path already holds a different registration; a registration is written once."""
+
+
+class SupersedesRefusedError(RegistrationWriterError):
+    """The predecessor is not a committed registration of this repository."""
+
+
+class ChainRefusedError(RegistrationWriterError):
+    """The registration chain would stop being one rooted chain."""
 
 
 EPOCH_LOOKBACK_DAYS: Final[int] = 16
@@ -163,3 +205,243 @@ def read_back(
     strategy_survivor_continuation.read_survivor_continuation(settings)
     if not criteria:
         raise RegistrationWriterError("the registration's criteria are empty")
+
+
+# --- Task 2: the command line and its refusals ---------------------------------------------------
+
+GIT_TIMEOUT_SECONDS: Final[float] = 60
+"""Each git call's bound, as `p7_smoke_env`'s: the repository is small, so a slow call is stuck."""
+_NEXT_STEP: Final[str] = (
+    "next: stage and commit only this one file yourself -- the message names V2-P7-006b -- and "
+    "then run the registration test; this writer never stages, commits or pushes anything."
+)
+"""What to do after a successful write. It names the step in words rather than as a shell line: the
+writer is the only thing here that touches a registration, and it is not a commit helper."""
+
+
+def _today() -> date:
+    """Today on the Shanghai calendar: the epoch is a Shanghai session date."""
+    return datetime.now(_SHANGHAI).date()
+
+
+def _git_process(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """git in `repo`, hermetic: no inherited `GIT_*`, no global or system configuration, no
+    optional lock, no prompt, no stdin -- as `p7_smoke_env._git` runs it."""
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    environment |= {
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    try:
+        return subprocess.run(
+            ["git", *args],
+            cwd=repo,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=GIT_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise CheckoutRefusedError(
+            f"git {' '.join(args)} in {repo} could not run: {error}"
+        ) from error
+
+
+def _git(repo: Path, *args: str) -> str:
+    finished = _git_process(repo, *args)
+    if finished.returncode != 0:
+        raise CheckoutRefusedError(
+            f"git {' '.join(args)} in {repo} failed: {finished.stderr.strip() or 'no message'}"
+        )
+    return finished.stdout.strip()
+
+
+def _repository() -> Path:
+    """The top of the checkout the writer runs in."""
+    try:
+        top = _git(Path.cwd(), "rev-parse", "--show-toplevel")
+    except CheckoutRefusedError as error:
+        raise CheckoutRefusedError(f"{Path.cwd()} is not a git checkout: {error}") from error
+    return Path(top).resolve()
+
+
+def _refuse_an_unwritable_checkout(repo: Path, head: str) -> None:
+    """The writer's first step, `p7_smoke_env.check_commit`'s checks in the writer's own order."""
+    if not _FULL_COMMIT.fullmatch(head):
+        raise CheckoutRefusedError(f"HEAD {head!r} is not a full 40-character commit id")
+    dirty = _git(repo, "status", "--porcelain", "--untracked-files=all", "--", *p7_smoke_env.BOUND)
+    if dirty:
+        raise BoundTreeRefusedError(
+            f"the bound code of {repo} has uncommitted changes ({dirty.splitlines()[0]} ...): "
+            "the registration would name a commit whose bytes are not the tree's"
+        )
+    on_main = _git_process(repo, "merge-base", "--is-ancestor", head, "refs/heads/main")
+    if on_main.returncode != 0:
+        raise HeadNotOnMainError(
+            f"HEAD {head} is not on main's history: a registration is written from main's code"
+        )
+    try:
+        p7_smoke_env.check_commit(repo, head)
+    except p7_smoke_env.SmokeEnvironmentError as error:
+        raise CheckoutRefusedError(str(error)) from error
+
+
+def _refuse_a_smoke_commit(repo: Path, smoke: str) -> None:
+    """The smoke commit must exist and bind the same bytes as `HEAD` (plan section 2, step 2)."""
+    if not _FULL_COMMIT.fullmatch(smoke):
+        raise SmokeCommitRefusedError(
+            f"the smoke commit {smoke!r} is not a full 40-character commit id; the smoke commit "
+            "is the commit the smoke's phase 1 ran on"
+        )
+    exists = _git_process(repo, "cat-file", "-e", f"{smoke}^{{commit}}")
+    if exists.returncode != 0:
+        raise SmokeCommitRefusedError(
+            f"the smoke commit {smoke} is not a commit this repository holds"
+        )
+    compared = _git_process(repo, "diff", "--quiet", smoke, "HEAD", "--", *p7_smoke_env.BOUND)
+    head = _git(repo, "rev-parse", "HEAD")
+    if compared.returncode != 0:
+        raise SmokeCommitRefusedError(
+            f"the bound code differs between the smoke commit {smoke} and HEAD {head}: the "
+            "registration must name the bytes the smoke tested, or the smoke would be rerun"
+        )
+
+
+def _checked_path(repo: Path, value: str) -> Path:
+    """The registration path, resolved and held to `docs/research/*.json`."""
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        candidate = repo / candidate
+    try:
+        resolved = candidate.resolve()
+    except OSError as error:
+        raise PathRefusedError(f"{value} cannot be resolved: {error}") from error
+    research = (repo / RESEARCH_DIRECTORY).resolve()
+    try:
+        resolved.relative_to(research)
+    except ValueError as error:
+        raise PathRefusedError(
+            f"{value} is not under {RESEARCH_DIRECTORY}/: a registration is written there and "
+            "nowhere else"
+        ) from error
+    if resolved.suffix != ".json":
+        raise PathRefusedError(
+            f"{value} is not a .json file under {RESEARCH_DIRECTORY}/: a registration is a "
+            ".json file"
+        )
+    return resolved
+
+
+def _checked_epoch(epoch: date, today: date) -> date:
+    """The planned epoch: a weekday, not in the future (Shanghai), and at most 16 calendar days
+    before today (the 11-session bound's conservative calendar upper bound)."""
+    if epoch.weekday() >= 5:
+        raise EpochRefusedError(
+            f"{epoch} is not a weekday: the epoch is the trading session before the first planned "
+            "evening, and the exact check is the first evening's step 1"
+        )
+    if epoch > today:
+        raise EpochRefusedError(
+            f"{epoch} is later than today ({today}, Shanghai): the epoch is in the future"
+        )
+    age = (today - epoch).days
+    if age > EPOCH_LOOKBACK_DAYS:
+        raise EpochRefusedError(
+            f"{epoch} is {age} calendar days before today ({today}): more than the "
+            f"{EPOCH_LOOKBACK_DAYS}-day upper bound (11 sessions is the exact bound the first "
+            "evening's step 1 checks)"
+        )
+    return epoch
+
+
+def _document(
+    config: Mapping[str, Any],
+    criteria: Mapping[str, str],
+    settings: Mapping[str, Any],
+    code_commit: str,
+) -> bytes:
+    """The registration's canonical bytes, as `registry.register` writes them: a dry run prints
+    these and their sha256, so a reviewer sees exactly what the write would produce."""
+    body = {
+        "schema": registry.REGISTRATION_SCHEMA,
+        "config": grid.to_json_value(config),
+        "config_id": grid.config_id(config),
+        "criteria": grid.to_json_value(criteria),
+        "code_commit": code_commit,
+        "settings": grid.to_json_value(settings),
+        "false_discovery_rate": grid.PROTOCOL_FALSE_DISCOVERY_RATE,
+        "dependence": grid.PROTOCOL_DEPENDENCE,
+    }
+    return (json.dumps(body, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode()
+
+
+def _date_argument(value: str) -> date:
+    try:
+        return date.fromisoformat(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a YYYY-MM-DD date") from error
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Write the V2-P7-006b survivor registration, once, after the smoke's phase 1."
+    )
+    parser.add_argument("--epoch", type=_date_argument, required=True)
+    parser.add_argument("--smoke-commit", required=True)
+    parser.add_argument("--path", default=REGISTRATION_PATH)
+    parser.add_argument("--supersedes")
+    parser.add_argument("--dry-run", action="store_true")
+    return parser
+
+
+def _write(arguments: argparse.Namespace) -> None:
+    repo = _repository()
+    head = _git(repo, "rev-parse", "HEAD")
+    _refuse_an_unwritable_checkout(repo, head)
+    _refuse_a_smoke_commit(repo, arguments.smoke_commit)
+    path = _checked_path(repo, arguments.path)
+    epoch = _checked_epoch(arguments.epoch, _today())
+    config, criteria, settings = registration_body(epoch)
+    read_back(config, criteria, settings)
+    content = _document(config, criteria, settings, head)
+    config_id = grid.config_id(config)
+    digest = hashlib.sha256(content).hexdigest()
+    if arguments.dry_run:
+        sys.stdout.write(content.decode("utf-8"))
+        print(f"config_id {config_id}")
+        print(f"sha256 {digest}")
+        print("未写入：--dry-run only prints; nothing was written")
+        return
+    try:
+        written = registry.register(config, criteria, path, code_commit=head, settings=settings)
+    except registry.RegistrationError as error:
+        raise ExistingRegistrationError(str(error)) from error
+    if written != digest:
+        raise CheckoutRefusedError(
+            f"the canonical document registry.register wrote ({written}) is not the one this "
+            f"writer printed ({digest}); refusing to claim a digest the file does not have"
+        )
+    print(f"wrote {path.relative_to(repo).as_posix()}")
+    print(f"config_id {config_id}")
+    print(f"sha256 {written}")
+    print(_NEXT_STEP)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """The command line: 0 when written or printed, 2 on every named refusal with nothing
+    written."""
+    arguments = _parser().parse_args(None if argv is None else list(argv))
+    try:
+        _write(arguments)
+    except RegistrationWriterError as error:
+        print(f"refused: {error}", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
