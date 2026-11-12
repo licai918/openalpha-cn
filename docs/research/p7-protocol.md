@@ -38,7 +38,7 @@
 |---|---|---|---|
 | 研究期 | 2015-01-05..2021-12-31 | 本登记之前的研究数据，不是样本外证据 | `scripts/research/grid.py:125-133` 的 `PROTOCOL_STAGE_WINDOWS` |
 | 验证期 | 2022-01-04..2023-12-29 | **第一次样本外读数，已读过一次**；结果是原样引用的描述，不是确认性证据（见第 11 节） | `scripts/research/grid.py:128`；读数登记 `docs/research/p7-readings/v2-p7-024-validation.registration.json` 的 `window` |
-| 二次使用 | 2024-01-02..本登记提交日 | 二次使用、非确认性（决策链 §7.2） | `scripts/research/grid.py:130`；决策链 §7.2 |
+| 二次使用 | 2024-01-02..本登记提交日 | 二次使用、非确认性（决策链 §7.2） | `scripts/research/grid.py:129`（`holdout` 行）；决策链 §7.2 |
 | 确认期 | 本登记提交之后的前向记录 | 唯一的确认性来源 | 决策链 §5.2 G-0（`:231`） |
 
 确认性证据只来自本登记**提交之后**的前向记录；2022–2023 的读数是第一次样本外读数，它用掉
@@ -227,7 +227,8 @@ minimum_periods 30；planned 只有 h20 rank_ic：planning_sd 0.18、planning_me
   **不是证据。**
 - 验证期的一次读数：h20 秩 IC 均值 0.09459（sd 0.1821、n 24、t 2.544），
   `ew_minus_worst_decile` 均值 0.008688
-  （`docs/research/p7-readings/v2-p7-024-validation.result.txt:6-9`）。它是一次读数，
+  （`docs/research/p7-readings/v2-p7-024-validation.result.txt:6` 的均值、`:16` 的 sd 0.1821 与 t 2.544）。
+  它是一次读数，
   **不是证据**，也不是规划值。
 - 停止规则的“未触发”只允许 `V2-P7-006` 继续，**不是证据**。
 
