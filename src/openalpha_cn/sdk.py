@@ -114,9 +114,8 @@ from openalpha_cn.product.research import (
 from openalpha_cn.providers.base import ProviderMetadata, utc_now
 from openalpha_cn.providers.file import FileProvider
 from openalpha_cn.runtime.batch import BatchResearchService, BatchResearchTask
-from openalpha_cn.runtime.composition import build_storage
+from openalpha_cn.runtime.composition import build_storage, research_engine
 from openalpha_cn.runtime.contracts import ResearchRunRequest, ResearchRunResult
-from openalpha_cn.runtime.engine import ResearchEngine
 from openalpha_cn.runtime.memory import MemoryEntry
 from openalpha_cn.shortlist_compare import compare_held_shortlists
 from openalpha_cn.shortlist_view import (
@@ -221,7 +220,7 @@ class OpenAlphaSDK:
 
     def run_research(self, request: ResearchRunRequest) -> ResearchRunResult:
         """Execute and persist one shared-path research run."""
-        engine = ResearchEngine(
+        engine = research_engine(
             repository=self.repository,
             memory=self.memory,
             clock=self.clock,

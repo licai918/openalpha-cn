@@ -124,9 +124,8 @@ from openalpha_cn.runtime.batch import (
     BatchResearchTask,
     BatchTaskPage,
 )
-from openalpha_cn.runtime.composition import build_storage
+from openalpha_cn.runtime.composition import build_storage, research_engine
 from openalpha_cn.runtime.contracts import ResearchRunRequest, ResearchRunResult
-from openalpha_cn.runtime.engine import ResearchEngine
 from openalpha_cn.runtime.memory import MemoryEntry
 from openalpha_cn.runtime.provenance import compute_config_digest, resolve_code_commit
 from openalpha_cn.shortlist_view import (
@@ -1844,7 +1843,9 @@ def create_app(
     job_store = storage.job_store
 
     def run_one(request: ResearchRunRequest) -> ResearchRunResult:
-        return ResearchEngine(
+        # No agents and no features: the REST face composes neither, and `research_engine`'s
+        # defaults are `None`, which is what this call passed before (V2-P7-013).
+        return research_engine(
             repository=run_repository,
             memory=memory,
             clock=clock,
@@ -1947,7 +1948,9 @@ def create_app(
         reaches Starlette and is still a `500`, which for a genuine internal defect is the
         honest answer.
         """
-        engine = ResearchEngine(
+        # No agents and no features: the REST face composes neither, and `research_engine`'s
+        # defaults are `None`, which is what this call passed before (V2-P7-013).
+        engine = research_engine(
             repository=run_repository,
             memory=memory,
             clock=clock,
