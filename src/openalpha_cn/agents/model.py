@@ -1,6 +1,9 @@
 """Schema-validated optional model-backed research agent."""
 
 import json
+from collections.abc import Callable
+from inspect import Parameter, signature
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -13,6 +16,26 @@ from openalpha_cn.models.base import ModelProvider
 
 class ModelProviderFailure(RuntimeError):
     """Raised when structured output remains invalid after the retry budget."""
+
+
+def _accepts_attempt(generate_json: Callable[..., dict[str, Any]]) -> bool:
+    """Whether a provider's `generate_json` can be handed the attempt number (fix round 2, N1).
+
+    `attempt` is opt-in on the protocol because providers are user code: a `ModelProvider`
+    written before `V2-P7-012` has the original three-keyword `generate_json`, and handing it
+    `attempt=` raised `TypeError`, which this agent's `except (ValidationError, ValueError)`
+    never caught. The decision is made **once per agent**, at construction, from the callable's
+    own signature; `**kwargs` is accepted as declaring support for it. A callable whose signature
+    cannot be read (a C function, a mock's `__call__`) is treated as not accepting it, which is
+    the safe direction: the request is still made, only the recorder cannot tell retries apart.
+    """
+    try:
+        parameters = signature(generate_json).parameters
+    except (TypeError, ValueError):
+        return False
+    if "attempt" in parameters:
+        return True
+    return any(parameter.kind is Parameter.VAR_KEYWORD for parameter in parameters.values())
 
 
 class StructuredAgentPayload(BaseModel):
@@ -51,6 +74,10 @@ class StructuredSignalAgent:
         # to run when a factor build is available can say so, and the router will enforce it.
         self.feature_dependencies = feature_dependencies
         self.provider = provider
+        # Fix round 2, N1: decided once, from the provider's own callable. A provider with the
+        # pre-`V2-P7-012` three-keyword `generate_json` is called exactly as it was before this
+        # batch -- its retries still happen, they simply cannot be told apart by a recorder.
+        self._provider_accepts_attempt = _accepts_attempt(provider.generate_json)
         self.max_attempts = max_attempts
         self.prompt = prompt
         # V2-P4-010: read off the provider at construction, not restated by the caller.
@@ -94,16 +121,19 @@ class StructuredSignalAgent:
         last_error: Exception | None = None
         for attempt in range(1, self.max_attempts + 1):
             try:
-                raw = self.provider.generate_json(
-                    system=self.prompt.system,
-                    user=self.prompt.user_format.format(
+                call: dict[str, Any] = {
+                    "system": self.prompt.system,
+                    "user": self.prompt.user_format.format(
                         payload_json=json.dumps(user_payload, ensure_ascii=False, sort_keys=True)
                     ),
-                    schema=schema,
+                    "schema": schema,
+                }
+                if self._provider_accepts_attempt:
                     # A retry is a fresh question for the recorder, never a replay of the
-                    # answer that failed validation (`V2-P7-012`, fix round 1).
-                    attempt=attempt,
-                )
+                    # answer that failed validation (`V2-P7-012`, fix round 1). Only a provider
+                    # that declares the parameter receives it (fix round 2, N1).
+                    call["attempt"] = attempt
+                raw = self.provider.generate_json(**call)
                 payload = StructuredAgentPayload.model_validate(raw)
                 self._validate_context(
                     payload=payload,

@@ -206,3 +206,111 @@ def test_the_default_prompt_sends_exactly_the_previous_system_text(
             sort_keys=True,
         )
     ]
+
+
+# --- fix round 2, N1: a provider written before the attempt argument still works -------------
+
+
+class OldSignatureModelProvider:
+    """A user-written provider whose `generate_json` predates `attempt` (`V2-P7-012`).
+
+    The SDK accepts user agents and providers, so this signature is a real extension point;
+    handing it `attempt=` raised `TypeError`, which the agent's `except (ValidationError,
+    ValueError)` does not catch and the cycle died unnamed.
+    """
+
+    metadata = ModelMetadata(
+        provider_id="legacy.model",
+        model="legacy-v1",
+        credential_env_vars=(),
+        structured_output=True,
+    )
+
+    def __init__(self, outputs: list[dict[str, Any]]) -> None:
+        self.outputs = outputs
+        self.calls = 0
+
+    def generate_json(
+        self,
+        *,
+        system: str,
+        user: str,
+        schema: dict[str, Any],
+    ) -> dict[str, Any]:
+        output = self.outputs[self.calls]
+        self.calls += 1
+        return output
+
+
+class KwargsModelProvider(OldSignatureModelProvider):
+    """The same, but with `**kwargs`: the attempt is accepted and observable."""
+
+    def __init__(self, outputs: list[dict[str, Any]]) -> None:
+        super().__init__(outputs)
+        self.attempts: list[int] = []
+
+    def generate_json(
+        self,
+        *,
+        system: str,
+        user: str,
+        schema: dict[str, Any],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        self.attempts.append(int(kwargs.get("attempt", 1)))
+        return super().generate_json(system=system, user=user, schema=schema)
+
+
+def test_an_old_signature_provider_keeps_working(
+    theme_evidence, valid_output, frozen_now: datetime
+) -> None:
+    """The old three-keyword `generate_json` is called exactly as it was before this batch."""
+    item = theme_evidence()
+    invalid = valid_output(item)
+    invalid["signal"]["subject"] = "999999.SH"
+    provider = OldSignatureModelProvider([invalid, valid_output(item)])
+    agent = StructuredSignalAgent(
+        agent_id="model-theme-agent",
+        evidence_families=frozenset({"theme"}),
+        provider=provider,
+        max_attempts=2,
+    )
+
+    result = agent.analyze(
+        AgentContext(
+            run_id="run_model",
+            subject="000001.SZ",
+            as_of=frozen_now,
+            evidence=(item,),
+        )
+    )
+
+    assert provider.calls == 2, "the old provider still retries; its retries are just unlabelled"
+    assert result.signal.subject == "000001.SZ"
+
+
+def test_a_kwargs_provider_still_receives_the_attempt_number(
+    theme_evidence, valid_output, frozen_now: datetime
+) -> None:
+    """`**kwargs` counts as accepting `attempt`: the retry stays distinguishable."""
+    item = theme_evidence()
+    invalid = valid_output(item)
+    invalid["signal"]["subject"] = "999999.SH"
+    provider = KwargsModelProvider([invalid, valid_output(item)])
+    agent = StructuredSignalAgent(
+        agent_id="model-theme-agent",
+        evidence_families=frozenset({"theme"}),
+        provider=provider,
+        max_attempts=2,
+    )
+
+    agent.analyze(
+        AgentContext(
+            run_id="run_model",
+            subject="000001.SZ",
+            as_of=frozen_now,
+            evidence=(item,),
+        )
+    )
+
+    assert provider.attempts == [1, 2]

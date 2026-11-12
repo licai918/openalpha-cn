@@ -49,4 +49,12 @@ class ModelProvider(Protocol):
         `attempt` is the caller's 1-based retry number, for providers that record their
         exchanges: a retry must be a fresh request, not a replay of the answer that was already
         rejected. It is not part of what the vendor is asked.
+
+        **It is opt-in, because providers are user code** (`V2-P7-012`, fix round 2). A
+        provider written before this batch keeps its original three-keyword `generate_json`;
+        `StructuredSignalAgent` inspects the callable once at construction and passes `attempt`
+        only when the signature names it or declares `**kwargs`. Such an old provider keeps
+        working exactly as it did, but **its retries cannot be told apart**: every attempt is
+        the same recorded request, so a recording transport replays the rejected answer instead
+        of asking again. A provider that records exchanges should declare `attempt`.
         """
