@@ -714,6 +714,33 @@ def _trade_date_params(request: ProviderRequest) -> dict[str, str]:
     return parameters
 
 
+def _subject_year_params(request: ProviderRequest) -> dict[str, str]:
+    """Build ``{ts_code, start_date, end_date}`` for one security's Shanghai-year history.
+
+    The range builder for `adj_factor`'s history route (`V2-P7-026`): the endpoint allows
+    ``ts_code`` beside a date window, which is the one shape that answers several sessions in
+    one response, and the restatement remedy needs exactly that -- one security's stored year
+    compared against one answer.
+
+    The year is the ``as_of``'s year *in Asia/Shanghai*, and ``end_date`` its Shanghai date, for
+    `_trade_cal_params`' reason: 2025-12-31 16:30Z is already 2026-01-01 00:30 in Shanghai, and
+    an ``as_of`` is a knowability instant, not a UTC calendar date. ``start_date`` is the
+    year's 1 January rather than the security's first stored row because a stored year has no
+    trusted start to ask from -- the comparison against the stored partition decides what is
+    kept.
+
+    **The request names exactly one security.** `TushareProvider.fetch_panel_history` refuses
+    zero or several subjects before building this, because a whole-market cross section is
+    `_trade_date_params`' request and a comma-joined list here would be a different question.
+    """
+    local = request.as_of.astimezone(_CHINA_TZ)
+    return {
+        "ts_code": request.subjects[0],
+        "start_date": f"{local.year}0101",
+        "end_date": local.strftime("%Y%m%d"),
+    }
+
+
 def _refuse_rows_off_the_requested_session(
     descriptor: TushareDatasetDescriptor,
     rows: Sequence[Mapping[str, Any]],
@@ -3092,6 +3119,34 @@ _TUSHARE_SWEEPS_BY_NAME: dict[str, TushareDatasetDescriptor] = {
 }
 
 
+def _adjustment_history_descriptor() -> TushareDatasetDescriptor:
+    """`adj_factor`'s own descriptor, re-pointed at one security's Shanghai-year window.
+
+    `_statement_sweep_descriptor`'s shape (`V2-P6-002`): everything a stored row carries --
+    `dataset`, `kind`, the projection, the clock, `response_fields`, `source_uri_template` -- is
+    inherited unchanged, because the rows are the same rows. Only `params_builder` changes, and
+    unlike a statement sweep the endpoint does not: `adj_factor` accepts `ts_code` beside a
+    `start_date`/`end_date` window, so the history route is the same API asked a different
+    question (`V2-P7-026`).
+
+    The two completeness witnesses come along with the descriptor, deliberately. A capped
+    factor series does not look short, it looks **wrong** -- the step function answers the
+    missing sessions from an older level -- so a history answer that reaches the measured
+    6,000-row cap or reports `has_more` is refused by `_check_response_completeness` exactly as
+    a one-session answer is. There is no paging and no halving either: the descriptor declares
+    no `page_size`, and `_request_rows` re-raises `TushareResponseTruncated` rather than paging
+    it. One restored security's year fits (an individual security's whole history, 8,627 rows,
+    does not), and a year that somehow did not would be a fact to refuse on.
+
+    Deliberately **not** in `TUSHARE_DATASETS`: like `TUSHARE_STATEMENT_SWEEPS`, this is a
+    *route* to `adj_factor`, not a dataset, and adding it to the table would change
+    `supported_datasets`, every table-wide census and `doctor --probe`.
+    """
+    return _TUSHARE_DATASETS_BY_NAME[ADJ_FACTOR_DATASET].model_copy(
+        update={"params_builder": _subject_year_params}
+    )
+
+
 def _parse_tushare_date(value: object) -> date:
     """Parse one of Tushare's ``YYYYMMDD`` date columns."""
     return datetime.strptime(str(value), "%Y%m%d").date()
@@ -4180,6 +4235,41 @@ class TushareProvider:
                 retryable=False,
             )
         return self._panel_batch(descriptor, request, self._request_rows)
+
+    def fetch_panel_history(self, request: ProviderRequest) -> ColumnarPanelBatch:
+        """One security's `adj_factor` history of the `as_of`'s Shanghai year (`V2-P7-026`).
+
+        `fetch_panel`'s contract with a range question: `request.subjects` is the one security
+        whose stored year a restatement is being checked against, the endpoint is asked
+        `ts_code` + `start_date`/`end_date` (`_subject_year_params`) instead of `trade_date`, and
+        the rows come back decoded, point-in-time filtered and projected by the same code -- so
+        a row cannot tell which route fetched it and the remedy compares like with like. The
+        answer is a whole range rather than one session, which is the point: the stored year and
+        the current one are compared session by session in one request.
+
+        **Exactly one security.** A history is one security's; zero or several subjects is a
+        malformed request, refused before any transport call rather than comma-joined into a
+        filter this route never asked for or silently narrowed to the first. A whole-market
+        cross section stays `fetch_panel`'s `trade_date` request.
+
+        A truncated answer is refused, not repaired: the cloned descriptor keeps `adj_factor`'s
+        measured 6,000-row cap and its `has_more` demand, and declares no `page_size`, so
+        `_request_rows` re-raises `TushareResponseTruncated` instead of paging it. A silent
+        suffix of a factor series is a wrong series, not a short one. An empty year is
+        `no_data`, as one security's empty fetch always was.
+        """
+        if len(request.subjects) != 1:
+            raise ProviderFailure(
+                provider_id=self.metadata.provider_id,
+                category="configuration",
+                message=(
+                    f"a Tushare {ADJ_FACTOR_DATASET} history request names exactly one security "
+                    f"whose year to fetch; got {list(request.subjects)}"
+                ),
+                retryable=False,
+            )
+        self._require_token()
+        return self._panel_batch(_adjustment_history_descriptor(), request, self._request_rows)
 
     def fetch_panel_sweep(
         self,
