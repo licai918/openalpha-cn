@@ -1793,3 +1793,38 @@ def test_a_remedy_asking_for_help_is_refused_by_name_and_prints_nothing(
 
     out, err = capsys.readouterr()
     assert (out, err) == ("", "")
+
+
+# --- V2-P7-026: the restatement remedy -----------------------------------------------------------
+
+
+def test_a_restatement_remedy_is_a_remedy_the_smoke_runs(tmp_path: Path) -> None:
+    """The restated-factor refusal's printed command (`V2-P7-026`) rewrites one security's stored
+    year of `adj_factor` -- no whole-year rebuild -- so the driver runs it, as it runs an
+    incremental build. Its shape is judged by the command that will parse it."""
+    paths = _paths(tmp_path)
+    runtime = str(paths["runtime"])
+    restate = [
+        "openalpha", "panel", "build", "--runtime-dir", runtime, "--year", "2026",
+        "--as-of", "2026-11-12T16:30:00+08:00", "--exchange", "SSE",
+        "--dataset", "adj_factor", "--restate-subject", "002851.SZ",
+    ]  # fmt: skip
+
+    assert driver.parse_remedy(daily.pinned_command(restate), **paths) == driver.Remedy(
+        kind="panel-build", arguments=tuple(restate[1:])
+    )
+
+
+def test_a_restate_shaped_rebuild_that_is_not_narrow_is_still_refused(tmp_path: Path) -> None:
+    """The exception is the narrow shape only: a restate-shaped command that also names another
+    dataset is the whole-year rebuild the smoke never runs, and is refused by name."""
+    paths = _paths(tmp_path)
+    runtime = str(paths["runtime"])
+    wider = [
+        "openalpha", "panel", "build", "--runtime-dir", runtime, "--year", "2026",
+        "--as-of", "2026-11-12T16:30:00+08:00", "--exchange", "SSE",
+        "--dataset", "adj_factor", "--dataset", "price", "--restate-subject", "002851.SZ",
+    ]  # fmt: skip
+
+    with pytest.raises(driver.RemedyError, match="whole-year rebuild"):
+        driver.parse_remedy(daily.pinned_command(wider), **paths)
