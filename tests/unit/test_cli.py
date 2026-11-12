@@ -11,7 +11,7 @@ import pytest
 from typer.testing import CliRunner
 
 from openalpha_cn import cli
-from openalpha_cn.cli import app
+from openalpha_cn.cli import PanelExit, app
 from openalpha_cn.providers.akshare import AKShareProvider
 from openalpha_cn.providers.base import (
     ProviderBatch,
@@ -1255,3 +1255,61 @@ def test_the_second_subject_researched_under_the_default_run_id_names_that_flag(
         ],
     )
     assert resolved.exit_code == 0, resolved.stdout + resolved.stderr
+
+
+def test_the_strategy_backtest_command_maps_an_llm_backed_prediction_to_a_bad_request(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`V2-P7-015` D5: the guard's refusal is the caller's fault, not the service's.
+
+    A prediction an `agent_*` declaration produced cannot rank a historical evaluation, and the
+    person who asked can change the request. Without this mapping the typed refusal falls into
+    `_panel_command`'s catch-all and exits 5 -- "this command broke" -- which is the wrong
+    remedy by five whole exit codes (`PanelExit.bad_request` is 3). The command is driven with
+    `backtest_strategy` replaced by a function that raises exactly the type, because what is
+    under test is the mapping and not the guard, which
+    `tests/integration/test_llm_history_guard_paths.py` already drives end to end over a real
+    panel.
+    """
+    from openalpha_cn.domain.llm_contamination import HistoricalLLMRefusedError
+
+    prediction_id = "prd_" + "0" * 24
+
+    def refuse(*_args: Any, **_kwargs: Any) -> Any:
+        raise HistoricalLLMRefusedError(
+            f"strategy backtest refuses prediction {prediction_id}: its declaration names the "
+            "agent family 'agent_judgement' declaring agent_kind='llm_backed', and only a "
+            "deterministic agent's prediction may drive a historical evaluation (D5)"
+        )
+
+    monkeypatch.setattr(cli, "backtest_strategy", refuse)
+
+    outcome = runner.invoke(
+        app,
+        [
+            "strategy",
+            "backtest",
+            "--component",
+            "reversal_1d/v1@raw",
+            "--combine",
+            "zscore_sum",
+            "--start",
+            "2026-01-06",
+            "--end",
+            "2026-01-16",
+            "--rebalance-every-sessions",
+            "3",
+            "--holding-count",
+            "3",
+            "--as-of",
+            "2026-01-17T04:00:00+00:00",
+            "--exchange",
+            "SZSE",
+            "--runtime-dir",
+            str(tmp_path),
+        ],
+    )
+
+    assert outcome.exit_code == int(PanelExit.bad_request), outcome.output
+    assert prediction_id in outcome.output
+    assert "agent_kind='llm_backed'" in outcome.output

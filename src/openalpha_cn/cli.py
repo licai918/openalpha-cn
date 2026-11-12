@@ -111,6 +111,7 @@ from openalpha_cn.domain.industry_classification import (
     IndustryAssignment,
     IndustryClassificationError,
 )
+from openalpha_cn.domain.llm_contamination import HistoricalLLMRefusedError
 from openalpha_cn.domain.name_history import (
     NAMECHANGE_DATASET,
     name_year_empty_admissible_through,
@@ -11652,9 +11653,16 @@ def validation_record_command(
                 PanelExit.bad_request, f"--observation is not an outcome observation: {error}"
             ) from error
 
-        validation = OpenAlphaSDK(runtime_dir=runtime_dir).validate_outcome(
-            research=result, observation=observed
-        )
+        try:
+            validation = OpenAlphaSDK(runtime_dir=runtime_dir).validate_outcome(
+                research=result, observation=observed
+            )
+        except HistoricalLLMRefusedError as error:
+            # `V2-P7-015`: a finished result may name a model-backed agent, and no engine guard
+            # is in this command's stack -- the file is read straight into the validator. A
+            # request whose contents cannot be validated is `bad_request` (3), never the
+            # `internal_error` (5) that an unanticipated exception becomes.
+            raise _panel_fail(PanelExit.bad_request, str(error)) from error
 
         if json_output:
             typer.echo(validation.model_dump_json())
@@ -12072,6 +12080,11 @@ def strategy_backtest_command(
             )
         except StrategyViewError as error:
             raise _strategy_fail(error) from error
+        except HistoricalLLMRefusedError as error:
+            # `V2-P7-015` D5: an `agent_*` declaration's prediction may not rank a historical
+            # evaluation. The request can be changed (name a deterministic or fitted source), so
+            # this is a bad request rather than a verdict about the panel.
+            raise _panel_fail(PanelExit.bad_request, str(error)) from error
         except PredictionStoreError as error:
             raise _panel_fail(PanelExit.unhealthy, str(error)) from error
 

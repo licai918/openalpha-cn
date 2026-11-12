@@ -201,6 +201,7 @@ from openalpha_cn.domain.labels import (
     WindowReturn,
     halt_corpus_for_years,
 )
+from openalpha_cn.domain.llm_contamination import refuse_llm_prediction_in_backtest
 from openalpha_cn.domain.prediction_record import PredictionRecord
 from openalpha_cn.domain.price_limits import (
     PRICE_LIMIT_DATASET,
@@ -1112,6 +1113,14 @@ def _prediction_rows(
         record = predictions(identifier)
         if record is None:
             raise StrategyRunBlockedError(f"no prediction is held under {identifier}")
+        # `V2-P7-015` D5: a stored prediction an `agent_*` family produced is refused here,
+        # between the lookup and the first row. This is the face the plan names because it is
+        # the one place a record becomes scores the book ranks on; refusing before the loop's
+        # timing checks keeps the refusal about the producer rather than about when it was filed.
+        refuse_llm_prediction_in_backtest(
+            prediction_id=identifier,
+            declaration=record.batch.artifact.declaration,
+        )
         batch = record.batch
         day = batch.as_of.astimezone(SHANGHAI).date()
         registered = max(batch.predicted_at, record.recorded_at)

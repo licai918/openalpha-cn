@@ -52,6 +52,7 @@ from openalpha_cn.backtest.validation import OutcomeObservation, OutcomeValidato
 from openalpha_cn.config import load_config
 from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.domain.factor import FactorError, FactorNote
+from openalpha_cn.domain.llm_contamination import HistoricalLLMRefusedError
 from openalpha_cn.domain.risk_flag import UndeclaredRiskFlagError
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.domain.validation import ValidationResult
@@ -2360,10 +2361,16 @@ def create_app(
             research = _parse_research_result(request.research)
         except (KeyError, TypeError, ValueError) as error:
             raise _research_refusal(error, index=None) from error
-        result = OutcomeValidator().validate(
-            research=research,
-            observation=request.observation,
-        )
+        try:
+            result = OutcomeValidator().validate(
+                research=research,
+                observation=request.observation,
+            )
+        except HistoricalLLMRefusedError as error:
+            # `V2-P7-015`: the row names a model-backed agent on a path that evaluates history.
+            # 422 and the guard's own sentence -- a caller can change the result or the mode, and
+            # a 500 would say this service broke instead of this request.
+            raise HTTPException(status_code=422, detail=str(error)) from error
         validation_store.append(result)
         return result
 

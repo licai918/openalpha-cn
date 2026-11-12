@@ -7,6 +7,7 @@ from typing import Final, Protocol, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from openalpha_cn.domain.labels import LabelError, OutcomeLabel
+from openalpha_cn.domain.llm_contamination import refuse_llm_agents_in_history
 from openalpha_cn.domain.time import ensure_aware
 from openalpha_cn.domain.validation import AttributionTerm, ValidationResult
 from openalpha_cn.runtime.contracts import ResearchRunResult
@@ -260,6 +261,20 @@ class OutcomeValidator:
         two actions would remove the only record of which of the three return paths the two
         prices came from, which is the one thing the note exists for.
         """
+        # `V2-P7-015`: the first statement, and the first *type* the method may raise. The two
+        # writer faces (`openalpha validation record`, `POST /api/v1/backtests/validate`) take a
+        # finished result from a file or a body, so no engine guard is in their call stack and
+        # this is the only place the row's own manifest can be read. Before the arithmetic, not
+        # after it: a term computed from a row that is then refused is work nobody can use, and
+        # putting the refusal last would make "refused" and "refused after persisting" the same
+        # observation from outside.
+        refuse_llm_agents_in_history(
+            path="validation",
+            mode=research.manifest.mode,
+            as_of=research.manifest.as_of,
+            ran_at=research.manifest.started_at,
+            agents=[(item.agent_id, item.kind) for item in research.manifest.agent_versions],
+        )
         took_position = research.decision.final_action == "watch"
         realized_return = 0.0
         if took_position:
