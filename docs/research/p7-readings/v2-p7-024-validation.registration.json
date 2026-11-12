@@ -1,0 +1,53 @@
+{
+  "as_of_reason": "读数所用的知识即 ~/openalpha-research/panel 这份存储面板，它最后一次写入是 2026-10-08 19:48（上海时间）",
+  "code_commit": "e346222b87b15d710e0adcef2332d9cc50716f21",
+  "config": {
+    "as_of": "2026-10-08T19:48:00+08:00",
+    "book": {
+      "seed": 0
+    },
+    "exchange": "SSE",
+    "max_carry_sessions": 250,
+    "min_coverage": 0.5,
+    "transform": "cross_section_standard/v1"
+  },
+  "expected_periods": 24,
+  "issue": "V2-P7-024",
+  "reading": "v2-p7-024-validation",
+  "request": {
+    "first": "2022-01-04",
+    "horizons": [
+      20
+    ],
+    "last": "2023-12-29",
+    "loser_decile_count": 2,
+    "scores": [
+      "composite"
+    ],
+    "stride": 20,
+    "tails": [
+      1,
+      2,
+      3
+    ]
+  },
+  "role": "primary",
+  "schema": "openalpha-p7-reading-registration/v1",
+  "stop_rule": {
+    "any_of": [
+      {
+        "mean_at_or_below": 0.02,
+        "metric": "rank_ic"
+      },
+      {
+        "mean_at_or_below": 0.0,
+        "metric": "ew_minus_worst_decile"
+      }
+    ],
+    "horizon": 20,
+    "minimum_periods": 24,
+    "schema": "p7-stop-rule/v1",
+    "score": "composite"
+  },
+  "window": "validation"
+}
