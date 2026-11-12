@@ -141,7 +141,7 @@ class ResearchEngine:
             ),
             agent_versions=self._agent_versions(selected=selected, results=agent_results),
             model_versions=self._model_versions(selected=selected, results=agent_results),
-            prompt_versions=(),
+            prompt_versions=self._prompt_versions(selected=selected, results=agent_results),
             alpha_model_versions=(),
             random_seed=request.random_seed,
             environment=(VersionRef(component="python", version=platform.python_version()),),
@@ -270,6 +270,27 @@ class ResearchEngine:
                 provenance.model
                 for _, provenance in cls._provenance(selected=selected, results=results)
                 if provenance.model is not None
+            )
+        )
+
+    @classmethod
+    def _prompt_versions(
+        cls,
+        *,
+        selected: tuple[ResearchAgent, ...],
+        results: tuple[AgentResult, ...],
+    ) -> tuple[VersionRef, ...]:
+        """The prompt plane: which prompt artifacts this run actually used.
+
+        De-duplicated while keeping first-use order, for `_model_versions`' reason: two agents
+        built from the same prompt artifact are one prompt version, and the manifest records
+        what the run depended on rather than how many times.
+        """
+        return tuple(
+            dict.fromkeys(
+                provenance.prompt
+                for _, provenance in cls._provenance(selected=selected, results=results)
+                if provenance.prompt is not None
             )
         )
 
