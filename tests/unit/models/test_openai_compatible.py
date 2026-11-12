@@ -3,6 +3,7 @@ from typing import Any
 
 import pytest
 
+from openalpha_cn.models.deepseek import DEEPSEEK_V4_1_FLASH
 from openalpha_cn.models.openai_compatible import (
     ModelConfigurationError,
     ModelResponseError,
@@ -214,3 +215,125 @@ def test_require_usage_refuses_a_response_without_usage(
 
     with pytest.raises(ModelResponseError, match="id"):
         no_id.generate_json(system="system", user="user", schema={"type": "object"})
+
+
+# --- V2-P7-012 Task 2.1: the endpoint's extra payload, merged last -------------------------
+
+
+def test_default_payload_is_byte_identical_without_extra_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The new field is empty by default, and an unset provider sends the pinned bytes.
+
+    The request digest of every stored `model-exchange/v1` document is sha256 over this JSON, so
+    a default that added one key -- even an empty `extra_payload` wrapper -- would re-address
+    every recorded exchange. Pinned as bytes rather than dict equality for that reason.
+    """
+    monkeypatch.setenv("TEST_MODEL_KEY", "secret-value")
+    transport = FakePostJsonTransport(
+        {"choices": [{"message": {"content": '{"direction":"abstain"}'}}]}
+    )
+    provider = OpenAICompatibleProvider(
+        provider_id="deepseek.compatible",
+        model="deepseek-chat",
+        base_url="https://example.invalid/v1",
+        api_key_env="TEST_MODEL_KEY",
+        transport=transport,
+    )
+
+    provider.generate_json(system="system", user="user", schema={"type": "object"})
+
+    assert transport.request is not None
+    payload = transport.request["payload"]
+    assert json.dumps(payload, ensure_ascii=False) == (
+        '{"model": "deepseek-chat", "messages": [{"role": "system", "content": "system"}, '
+        '{"role": "user", "content": "user"}], "response_format": {"type": "json_schema", '
+        '"json_schema": {"name": "openalpha_structured_payload", "strict": true, '
+        '"schema": {"type": "object"}}}}'
+    )
+    # The vendor endpoint's field exists and defaults to empty: the composition root passes it
+    # through, so its empty default is what keeps the exchanged bytes unchanged.
+    assert dict(DEEPSEEK_V4_1_FLASH.extra_payload) == {}
+
+
+def test_extra_payload_thinking_disabled_reaches_the_request_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DeepSeek's thinking switch is a vendor dial the provider has no keyword for.
+
+    Thinking mode is on by default and ignores `temperature`, so the endpoint must be able to
+    send `thinking: {"type": "disabled"}`. The mapping is merged *last*: the provider's three
+    required keys stay as the provider set them, and a non-reserved key the endpoint names wins
+    over the provider keyword that also set it -- that is what "last" means.
+    """
+    monkeypatch.setenv("TEST_MODEL_KEY", "secret-value")
+    transport = FakePostJsonTransport(
+        {"choices": [{"message": {"content": '{"direction":"abstain"}'}}]}
+    )
+    provider = OpenAICompatibleProvider(
+        provider_id="deepseek.compatible",
+        model="deepseek-chat",
+        base_url="https://example.invalid/v1",
+        api_key_env="TEST_MODEL_KEY",
+        temperature=0.5,
+        extra_payload={"thinking": {"type": "disabled"}, "temperature": 0.0},
+        transport=transport,
+    )
+
+    provider.generate_json(system="system", user="user", schema={"type": "object"})
+
+    assert transport.request is not None
+    payload = transport.request["payload"]
+    assert payload["thinking"] == {"type": "disabled"}
+    assert payload["temperature"] == 0.0
+    # The provider-owned keys are untouched and still come first in the serialized payload.
+    assert list(payload) == ["model", "messages", "response_format", "temperature", "thinking"]
+    assert payload["model"] == "deepseek-chat"
+    assert payload["messages"] == [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "user"},
+    ]
+    assert payload["response_format"]["type"] == "json_schema"
+
+
+def test_extra_payload_cannot_override_model_or_messages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The three contract keys belong to the provider, refused at construction, before network."""
+    monkeypatch.setenv("TEST_MODEL_KEY", "secret-value")
+    for reserved in ("model", "messages", "response_format"):
+        transport = FakePostJsonTransport({})
+        with pytest.raises(ModelConfigurationError, match=reserved):
+            OpenAICompatibleProvider(
+                provider_id="deepseek.compatible",
+                model="deepseek-chat",
+                base_url="https://example.invalid/v1",
+                api_key_env="TEST_MODEL_KEY",
+                extra_payload={reserved: "caller-supplied"},
+                transport=transport,
+            )
+        assert transport.request is None, "the refusal happens before any request"
+
+
+def test_blank_content_is_an_invalid_answer_not_an_empty_object(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DeepSeek's json mode can return only spaces even with `finish_reason=stop`.
+
+    A blank answer is an invalid answer to retry -- never an empty object the agent would accept
+    and score. The refusal happens before any JSON decode, so its reason names what happened
+    instead of the parser's column number.
+    """
+    monkeypatch.setenv("TEST_MODEL_KEY", "secret-value")
+    for blank in ("", " ", "   \n\t  "):
+        transport = FakePostJsonTransport({"choices": [{"message": {"content": blank}}]})
+        provider = OpenAICompatibleProvider(
+            provider_id="deepseek.compatible",
+            model="deepseek-chat",
+            base_url="https://example.invalid/v1",
+            api_key_env="TEST_MODEL_KEY",
+            transport=transport,
+        )
+
+        with pytest.raises(ModelResponseError, match="blank"):
+            provider.generate_json(system="system", user="user", schema={"type": "object"})

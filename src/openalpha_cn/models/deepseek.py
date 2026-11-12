@@ -27,10 +27,13 @@ Then set `verified_on` to the date of that reading. `api_key_env` is an environm
 recording transport excludes headers from the stored exchange, so the key never reaches disk.
 """
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 from typing import Final, Literal
+
+from pydantic import JsonValue
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -55,15 +58,29 @@ class VendorEndpoint:
     output_price_per_million: Decimal
     documentation_url: str
     verified_on: date | None
+    extra_payload: Mapping[str, JsonValue] = field(default_factory=dict)
+    """Endpoint-specific JSON merged last into every request payload (`V2-P7-012` follow-up).
+
+    This is where a vendor dial that the provider has no first-class keyword for lives -- for
+    DeepSeek that is the thinking switch, `{"thinking": {"type": "disabled"}}`, which must be
+    sent explicitly because thinking mode is on by default and makes `temperature` inert.
+
+    Empty by default **on purpose**: `OpenAICompatibleProvider` merges this mapping after its own
+    required keys and adds nothing when it is empty, so an endpoint that sets no extra payload
+    sends exactly the bytes `V2-P7-012` pinned. The provider refuses a mapping that would
+    override `model`, `messages` or `response_format`.
+    """
 
 
 DEEPSEEK_V4_1_FLASH: Final[VendorEndpoint] = VendorEndpoint(
     name="DEEPSEEK_V4_1_FLASH",
     provider_id="deepseek",
     # PLACEHOLDERS. A human fills `model`, `base_url`, `structured_output_mode`,
-    # `max_output_tokens` and both prices from https://api-docs.deepseek.com/, then sets
-    # `verified_on` to the date of that reading. Deliberately not guessed here: a plausible
-    # real-looking model id or URL is how an unverified endpoint comes to look verified.
+    # `max_output_tokens`, both prices and -- once the reading confirms the thinking switch --
+    # `extra_payload` (for this vendor, `{"thinking": {"type": "disabled"}}`) from
+    # https://api-docs.deepseek.com/, then sets `verified_on` to the date of that reading.
+    # Deliberately not guessed here: a plausible real-looking model id or URL is how an
+    # unverified endpoint comes to look verified.
     model="PLACEHOLDER-set-from-api-docs.deepseek.com",
     base_url="https://placeholder.invalid/deepseek/v1",
     api_key_env="DEEPSEEK_API_KEY",

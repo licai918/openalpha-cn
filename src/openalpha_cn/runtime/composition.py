@@ -396,6 +396,10 @@ def llm_provider(
         structured_output_mode=endpoint.structured_output_mode,
         temperature=endpoint.temperature,
         max_tokens=endpoint.max_output_tokens,
+        # The endpoint's vendor-specific JSON (DeepSeek's `thinking: {"type": "disabled"}`, the
+        # switch that makes its temperature effective). Empty by default, and the provider adds
+        # nothing for an empty mapping, so an endpoint that sets none keeps the recorded bytes.
+        extra_payload=endpoint.extra_payload,
         require_usage=True,
         transport=recording,
         usage_store=None if replay else model_usage_store_at(runtime_dir),

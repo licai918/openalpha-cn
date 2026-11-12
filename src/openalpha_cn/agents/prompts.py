@@ -17,6 +17,11 @@ is the exact value the agent sends.
 The default below is the literal the agent sent before this issue, verbatim. That matters for
 the same reason the model-exchange digest exists: a recorded exchange is addressed by the
 request bytes, so "the prompt became versioned" may not quietly mean "the prompt was rewritten".
+
+`STRUCTURED_SIGNAL_PROMPT_V2_JSON_OBJECT` is the second artifact, not a rewrite of the first: a
+vendor whose structured-output mode is only `json_object` (no schema in the request) documents
+that the prompt itself must contain the word "json" and a worked example. V1 stays
+byte-identical because the exchanges already recorded under it are addressed by those bytes.
 """
 
 import hashlib
@@ -106,3 +111,29 @@ STRUCTURED_SIGNAL_PROMPT_V1: Final[PromptTemplate] = PromptTemplate(
 )
 """The default prompt, byte-for-byte the system text `StructuredSignalAgent` sent before
 `V2-P7-012`, plus the rendering that produced the same user message."""
+
+STRUCTURED_SIGNAL_PROMPT_V2_JSON_OBJECT: Final[PromptTemplate] = PromptTemplate(
+    name="structured-signal/v2-json-object",
+    system=(
+        "Return exactly one json object and nothing else -- no prose and no code fences. "
+        'The object has two keys: "signal" (one structured research signal) and "rationale" '
+        "(one short sentence explaining it). The signal has subject, as_of, direction (one of "
+        '"bullish", "bearish", "neutral", "abstain"), strength, confidence, horizon, '
+        "evidence_ids, confirmation_conditions, invalidation_conditions and risk_flags. Cite "
+        "only supplied evidence IDs and abstain when insufficient; the evidence facts in the "
+        "user payload are the only facts to reason about. Example: "
+        '{"signal": {"subject": "000001.SZ", "as_of": "2026-11-12T15:00:00+00:00", '
+        '"direction": "abstain", "strength": 0.0, "confidence": 0.0, "horizon": "5d", '
+        '"evidence_ids": [], "confirmation_conditions": [], '
+        '"invalidation_conditions": [], "risk_flags": []}, '
+        '"rationale": "No usable evidence was supplied."}'
+    ),
+    user_format="{payload_json}",
+)
+"""The `json_object` prompt (`V2-P7-012` Task 2.1), for a vendor that accepts no schema.
+
+Distinct from V1 in exactly the two ways that mode needs: the system text contains the word
+"json" and one worked JSON object showing the whole answer shape. V1 remains the default; a
+caller opts in by passing this template, and `StructuredSignalAgent(include_facts=True)` is what
+fills the user payload with the evidence facts the example refers to.
+"""

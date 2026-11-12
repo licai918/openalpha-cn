@@ -6,9 +6,11 @@ import pytest
 
 from openalpha_cn.agents.base import AgentContext
 from openalpha_cn.agents.model import ModelProviderFailure, StructuredSignalAgent
+from openalpha_cn.agents.prompts import STRUCTURED_SIGNAL_PROMPT_V2_JSON_OBJECT
 from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.domain.time import Timeline
 from openalpha_cn.models.base import ModelMetadata
+from openalpha_cn.models.openai_compatible import ModelResponseError
 
 
 @pytest.fixture
@@ -314,3 +316,105 @@ def test_a_kwargs_provider_still_receives_the_attempt_number(
     )
 
     assert provider.attempts == [1, 2]
+
+
+# --- V2-P7-012 Task 2.1: the json_object prompt carries the evidence facts -------------------
+
+
+def test_include_facts_adds_the_evidence_facts_to_the_user_payload(
+    theme_evidence, valid_output, frozen_now: datetime
+) -> None:
+    """A `json_object` deployment may set `include_facts`, and the facts actually arrive.
+
+    The default payload carries only `evidence_id`/`kind`/`summary`, which gives the model no
+    number to reason about. `include_facts=True` adds the frozen evidence payload's `facts` to
+    each item; the default stays byte-identical (pinned by
+    `test_the_default_prompt_sends_exactly_the_previous_system_text`).
+    """
+    item = theme_evidence()
+    provider = FakeModelProvider([valid_output(item)])
+    agent = StructuredSignalAgent(
+        agent_id="model-theme-agent",
+        evidence_families=frozenset({"theme"}),
+        provider=provider,
+        max_attempts=2,
+        prompt=STRUCTURED_SIGNAL_PROMPT_V2_JSON_OBJECT,
+        include_facts=True,
+    )
+
+    agent.analyze(
+        AgentContext(
+            run_id="run_model",
+            subject="000001.SZ",
+            as_of=frozen_now,
+            evidence=(item,),
+        )
+    )
+
+    user = json.loads(provider.users[0])
+    assert user["evidence"] == [
+        {
+            "evidence_id": item.evidence_id,
+            "kind": "theme",
+            "summary": "Synthetic theme evidence.",
+            "facts": {"theme": "机器人", "score": 0.8},
+        }
+    ]
+    assert agent.include_facts is True
+
+
+class BlankContentProvider:
+    """A provider that refuses every answer as blank, exactly as the real one now does."""
+
+    metadata = ModelMetadata(
+        provider_id="fake.model",
+        model="fake-v1",
+        credential_env_vars=(),
+        structured_output=True,
+    )
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate_json(
+        self, *, system: str, user: str, schema: dict[str, Any], attempt: int = 1
+    ) -> dict[str, Any]:
+        self.calls += 1
+        raise ModelResponseError(
+            "model response content is blank: an empty or whitespace-only answer is not a JSON "
+            "object"
+        )
+
+
+def test_blank_content_is_retried_up_to_max_attempts_and_never_accepted(
+    theme_evidence, frozen_now: datetime
+) -> None:
+    """`ModelResponseError` is a `ValueError`, so the blank refusal walks the retry path (D6).
+
+    The agent must spend its budget re-asking, then raise `ModelProviderFailure` naming the
+    answer's own reason -- an invalid answer becomes a coded abstention upstream, never a score
+    of zero and never an accepted empty object.
+    """
+    item = theme_evidence()
+    provider = BlankContentProvider()
+    agent = StructuredSignalAgent(
+        agent_id="model-theme-agent",
+        evidence_families=frozenset({"theme"}),
+        provider=provider,
+        max_attempts=2,
+    )
+
+    with pytest.raises(ModelProviderFailure) as raised:
+        agent.analyze(
+            AgentContext(
+                run_id="run_model",
+                subject="000001.SZ",
+                as_of=frozen_now,
+                evidence=(item,),
+            )
+        )
+
+    message = str(raised.value)
+    assert provider.calls == 2, "each blank answer is retried, up to max_attempts"
+    assert "2 attempts" in message
+    assert "blank" in message

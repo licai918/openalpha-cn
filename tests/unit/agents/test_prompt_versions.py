@@ -9,12 +9,18 @@ takes a `PromptTemplate`. The template's addressed content is
 `AgentProvenance.prompt`, and the engine lifts it into the manifest.
 """
 
+import json
+import string
 from typing import Any, Final
 
 import pytest
 
 from openalpha_cn.agents.model import StructuredAgentPayload, StructuredSignalAgent
-from openalpha_cn.agents.prompts import STRUCTURED_SIGNAL_PROMPT_V1, PromptTemplate
+from openalpha_cn.agents.prompts import (
+    STRUCTURED_SIGNAL_PROMPT_V1,
+    STRUCTURED_SIGNAL_PROMPT_V2_JSON_OBJECT,
+    PromptTemplate,
+)
 from openalpha_cn.domain.run import AgentProvenance, VersionRef
 from openalpha_cn.models.base import ModelMetadata
 
@@ -24,6 +30,9 @@ PREVIOUS_SYSTEM: Final[str] = (
 )
 
 RESPONSE_SCHEMA: Final[dict[str, Any]] = StructuredAgentPayload.model_json_schema(mode="validation")
+
+V1_PROMPT_VERSION: Final[str] = "9b70f97590a18bbd91416010985b3c8bbed70b853d24091237b05345e7bbcf2b"
+"""The content address `STRUCTURED_SIGNAL_PROMPT_V1` had before V2 existed."""
 
 
 class _NeverCalledProvider:
@@ -160,3 +169,46 @@ def test_a_custom_template_that_cannot_be_rendered_is_refused_at_construction() 
 def test_the_default_template_is_accepted_and_renderable() -> None:
     rendered = STRUCTURED_SIGNAL_PROMPT_V1.user_format.format(payload_json='{"run_id": "r"}')
     assert rendered == '{"run_id": "r"}'
+
+
+# --- V2-P7-012 Task 2.1: the json_object prompt, beside an unchanged V1 ----------------------
+
+
+def test_v2_prompt_mentions_json_and_carries_an_example() -> None:
+    """`response_format={"type": "json_object"}` needs the prompt to say "json" and show one.
+
+    The example is the only description of the output contract the vendor gets in `json_object`
+    mode -- the response schema is not sent -- so it must be one parseable JSON object, and the
+    rendering must still be exactly one bare `{payload_json}`.
+    """
+    prompt = STRUCTURED_SIGNAL_PROMPT_V2_JSON_OBJECT
+
+    assert "json" in prompt.system.lower()
+    assert prompt.name != STRUCTURED_SIGNAL_PROMPT_V1.name
+
+    fields = [
+        (field_name, format_spec, conversion)
+        for _, field_name, format_spec, conversion in string.Formatter().parse(prompt.user_format)
+        if field_name is not None
+    ]
+    assert fields == [("payload_json", "", None)]
+
+    start = prompt.system.index("{")
+    example, _ = json.JSONDecoder().raw_decode(prompt.system[start:])
+    assert isinstance(example, dict)
+    assert set(example) == {"signal", "rationale"}
+    assert isinstance(example["signal"], dict)
+    assert prompt.user_format.format(payload_json='{"subject": "000001.SZ"}') == (
+        '{"subject": "000001.SZ"}'
+    )
+
+
+def test_v1_prompt_bytes_unchanged() -> None:
+    """V2 is a new artifact; it may not rewrite the one recorded exchanges already address."""
+    assert STRUCTURED_SIGNAL_PROMPT_V1.name == "structured-signal/v1"
+    assert STRUCTURED_SIGNAL_PROMPT_V1.system == PREVIOUS_SYSTEM
+    assert STRUCTURED_SIGNAL_PROMPT_V1.user_format == "{payload_json}"
+    assert (
+        STRUCTURED_SIGNAL_PROMPT_V1.version_ref(response_schema=RESPONSE_SCHEMA).version
+        == V1_PROMPT_VERSION
+    )

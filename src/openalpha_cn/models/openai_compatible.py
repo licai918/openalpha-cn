@@ -3,12 +3,14 @@
 import json
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Final, Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+from pydantic import JsonValue
 
 from openalpha_cn.models.base import ModelCapabilities, ModelMetadata
 from openalpha_cn.models.governance import (
@@ -41,6 +43,16 @@ class ModelTransportError(RuntimeError):
 
 class ModelResponseError(ValueError):
     """Raised when a successful endpoint response violates the provider contract."""
+
+
+RESERVED_PAYLOAD_KEYS: Final[frozenset[str]] = frozenset({"model", "messages", "response_format"})
+"""The request-payload keys the provider itself owns and an extra payload may not override.
+
+`model` names the endpoint's model identity, `messages` carries the prompt the caller asked for,
+and `response_format` is the structured-output contract; an endpoint-specific mapping that
+replaced any of them would silently answer a different question than the one recorded in the
+model-exchange digest.
+"""
 
 
 class JsonTransport(Protocol):
@@ -94,7 +106,16 @@ class UrllibJsonTransport:
 
 
 class OpenAICompatibleProvider:
-    """Call a user-selected compatible endpoint and require structured JSON."""
+    """Call a user-selected compatible endpoint and require structured JSON.
+
+    `extra_payload` is the endpoint's own JSON, merged last into every request payload so a
+    vendor dial this class has no keyword for can be sent (DeepSeek's thinking switch is the one
+    this repository needs). It is empty by default and adds no bytes then, keeping the recorded
+    request digests stable. A mapping that names a `RESERVED_PAYLOAD_KEYS` entry is refused with
+    `ModelConfigurationError` at construction -- a `ValueError` subclass, the same shape as this
+    constructor's `base_url`/`timeout_seconds` refusals -- because an answer to a payload whose
+    `model` or `messages` were overridden is not the exchange the store addressed.
+    """
 
     def __init__(
         self,
@@ -115,6 +136,7 @@ class OpenAICompatibleProvider:
         capabilities: ModelCapabilities | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        extra_payload: Mapping[str, JsonValue] | None = None,
         require_usage: bool = False,
     ) -> None:
         if not base_url.startswith(("https://", "http://127.0.0.1", "http://localhost")):
@@ -123,6 +145,16 @@ class OpenAICompatibleProvider:
             )
         if timeout_seconds <= 0:
             raise ModelConfigurationError("timeout_seconds must be positive")
+        extra = {} if extra_payload is None else dict(extra_payload)
+        collisions = RESERVED_PAYLOAD_KEYS.intersection(extra)
+        if collisions:
+            # A configuration error, refused at construction like `base_url`/`timeout_seconds`
+            # above: an endpoint mapping that replaced one of these three keys would change the
+            # question being asked, so it is a broken deployment, not a bad answer to retry.
+            raise ModelConfigurationError(
+                "extra_payload must not override the provider's required payload keys: "
+                f"{', '.join(sorted(collisions))}"
+            )
         self.base_url = base_url.rstrip("/")
         self.api_key_env = api_key_env
         self.structured_output_mode = structured_output_mode
@@ -136,6 +168,7 @@ class OpenAICompatibleProvider:
         self.clock = clock
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.extra_payload: Mapping[str, JsonValue] = extra
         self.require_usage = require_usage
         self._metadata = ModelMetadata(
             provider_id=provider_id,
@@ -204,6 +237,12 @@ class OpenAICompatibleProvider:
             payload["temperature"] = self.temperature
         if self.max_tokens is not None:
             payload["max_tokens"] = self.max_tokens
+        # Merged LAST, and only when non-empty: this is where an endpoint-specific vendor dial
+        # (DeepSeek's `thinking: {"type": "disabled"}`) reaches a payload the provider has no
+        # keyword for. The empty default must add nothing, because the stored exchange's request
+        # digest is sha256 over these bytes.
+        if self.extra_payload:
+            payload.update(self.extra_payload)
         raw: dict[str, Any] | None = None
         attempts = 0
         while raw is None:
@@ -227,6 +266,14 @@ class OpenAICompatibleProvider:
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, str):
             raise ModelResponseError("model response content is missing")
+        if not content.strip():
+            # DeepSeek's json mode documents that content may come back as only spaces even with
+            # `finish_reason=stop`. Refuse it as *blank* before the decoder runs: the parser's
+            # column number hides what happened, and an empty answer must never become `{}`.
+            raise ModelResponseError(
+                "model response content is blank: an empty or whitespace-only answer is not a "
+                "JSON object"
+            )
         try:
             decoded = json.loads(content)
         except json.JSONDecodeError as error:
