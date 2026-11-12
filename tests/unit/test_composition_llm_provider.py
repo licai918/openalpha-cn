@@ -141,6 +141,12 @@ def test_replay_needs_no_key_and_makes_zero_transport_calls(
 def test_a_fake_transport_run_records_usage_once_and_a_replay_adds_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A single recorded request costs one row and its replay adds none.
+
+    It does not measure a *repeated* record-mode request (it never repeats one); that gap --
+    review 1's finding 1 -- is pinned by
+    `test_two_identical_record_mode_calls_write_one_usage_row_and_call_once` below.
+    """
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-record")
     fake = FakeJsonTransport(RESPONSE)
     record = llm_provider(

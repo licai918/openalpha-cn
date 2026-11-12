@@ -141,7 +141,18 @@ def test_a_custom_template_that_cannot_be_rendered_is_refused_at_construction() 
     `version_ref` and then raise `KeyError`/`IndexError` inside the agent, where the retry
     `except (ValidationError, ValueError)` does not catch it and the cycle dies unnamed.
     """
-    for user_format in ('{"example": true}', "{payload}", "{payload_json} {payload_json}", ""):
+    for user_format in (
+        '{"example": true}',
+        "{payload}",
+        "{payload_json} {payload_json}",
+        "",
+        # A nested format spec and a conversion both render to a `KeyError`/a value the agent
+        # never validates (review 1's F7 residue): the template must be refused here, not at
+        # call time.
+        "{payload_json:{width}}",
+        "{payload_json!r}",
+        "{payload_json.upper}",
+    ):
         with pytest.raises(ValueError, match="payload_json"):
             PromptTemplate(name="custom/v1", system="Return JSON.", user_format=user_format)
 

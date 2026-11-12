@@ -2,7 +2,8 @@
 
 The contract of this module is one sentence: **a model request is identified by its bytes and
 answered by what was recorded under them.** The request digest is sha256 over the canonical
-JSON of `{"url", "payload"}` -- headers are deliberately *excluded*, because the header
+JSON of `{"url", "payload", "attempt"}` -- headers are deliberately *excluded*, because the
+header
 carrying the credential is not part of the question being asked and must never reach a stored
 document; the whole payload *is* included (model, messages, `response_format`, `temperature`,
 `max_tokens`), so pinning a different temperature addresses a different exchange rather than

@@ -6,7 +6,8 @@ what a stored exchange is; this is the store, and it is responsible for the thre
 contract cannot do for itself: turning the address into a filename, writing it atomically,
 and refusing to hand back a document whose content no longer matches the addresses it claims.
 That last check is the one that makes "content-addressed" a property rather than a naming
-convention: `get` re-derives the request digest from `{"url", "request"}` and the response
+convention: `get` re-derives the request digest from `{"url", "request", "attempt"}` and the
+response
 digest from the decoded `response`, and refuses a document edited outside this store with
 `ModelExchangeIntegrityError` naming which address moved.
 

@@ -1156,8 +1156,10 @@ def test_the_premise_does_not_see_a_partial_bound_to_a_name_first() -> None:
         sdk: sources[sdk] + "\n\nfrom openalpha_cn.models import DEFAULT_PROVIDER\n\n"
         "_PROBE = DEFAULT_PROVIDER()\n",
     }
-    # The blind spot is real when the swap adds no site; today's tree has sites of its own
-    # (`V2-P7-012`'s two in `runtime/composition.py`), so compare sets rather than emptiness.
+    # The blind spot is real when the swap adds no *new* site. Compare against the current
+    # tree's recorded problems rather than requiring none: today that set is empty (every
+    # site, `V2-P7-012`'s included, is in USAGE_SITES), and the comparison still measures that
+    # the swap adds nothing.
     baseline = set(_premise_problems(_usage_sites(sources.items())))
     assert set(_premise_problems(_usage_sites(swapped.items()))) == baseline, (
         "a partial bound to a name is now seen: update the module docstring and delete this test"

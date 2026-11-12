@@ -52,9 +52,11 @@ class PromptTemplate:
         template as an artifact. Validation belongs where the artifact is created.
         """
         try:
-            fields = [
-                field_name
-                for _, field_name, _, _ in string.Formatter().parse(self.user_format)
+            parsed = [
+                (field_name, format_spec, conversion)
+                for _, field_name, format_spec, conversion in string.Formatter().parse(
+                    self.user_format
+                )
                 if field_name is not None
             ]
         except ValueError as error:
@@ -62,10 +64,20 @@ class PromptTemplate:
                 f"prompt {self.name!r}: user_format must contain exactly one "
                 f"{{payload_json}} field; its braces are not a legal template ({error})"
             ) from error
-        if fields != ["payload_json"]:
+        # A nested format spec (`{payload_json:{width}}`) or an attribute/conversion
+        # (`{payload_json.upper}`, `{payload_json!r}`) parses as one field but renders to a
+        # `KeyError` or to a value the agent never validated: the field must be exactly
+        # `payload_json`, with nothing after it. Review 1's F7 residue.
+        strict = [
+            (field_name, format_spec, conversion)
+            for field_name, format_spec, conversion in parsed
+            if field_name != "payload_json" or format_spec or conversion is not None
+        ]
+        if len(parsed) != 1 or strict:
             raise ValueError(
-                f"prompt {self.name!r}: user_format must contain exactly one "
-                f"{{payload_json}} field; it declares {fields!r}"
+                f"prompt {self.name!r}: user_format must contain exactly one bare "
+                f"{{payload_json}} field (no attribute, conversion or format spec); it "
+                f"declares {parsed!r}"
             )
 
     def version_ref(self, *, response_schema: Mapping[str, Any]) -> VersionRef:
