@@ -58,6 +58,8 @@ _FULL_COMMIT: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{40}")
 _SHANGHAI: Final[ZoneInfo] = ZoneInfo("Asia/Shanghai")
 
 
+# 用户按建议采纳（2026-11-12）：D-5 正式运行目录是新的（只写在运行手册里），D-6 受绑定代码的两处
+# 接缝接受并列为协议文档的已知局限，D-8 写入器在 scripts/p7_register.py（受绑定路径之外）。
 class RegistrationWriterError(ValueError):
     """A registration that cannot be written as asked; the message names the reason and nothing
     is written."""
@@ -120,6 +122,8 @@ FORWARD_PROTOCOL: Final[dict[str, Any]] = {
 the primary horizon, window, seed and test are the adopted constants; the two secondaries are the
 family Part E defined."""
 
+# 用户按建议采纳（2026-11-12）：D-1 planning_sd = 0.18，D-2 minimum_periods = 30，
+# D-3 只规划主检验（h5 的离散度从未测过，不写没有来源的 sd）。
 FORWARD_POWER: Final[dict[str, Any]] = {
     "schema_version": strategy_survivor_forward.SURVIVOR_FORWARD_POWER_SCHEMA,
     "test_level": 0.05,
@@ -182,6 +186,7 @@ def registration_body(epoch: date) -> tuple[dict[str, Any], dict[str, str], dict
 
     Pure: returns fresh copies, so a caller changing one cannot move the frozen literals."""
     config = p7_smoke_env.smoke_configuration(epoch)
+    # 用户按建议采纳（2026-11-12）：D-4 本登记不带任何 agent_* 块，方案 C 的映射只在协议文档里占位。
     settings: dict[str, Any] = {
         **grid.protocol_settings(),
         "survivor_forward_protocol": copy.deepcopy(FORWARD_PROTOCOL),
