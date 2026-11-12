@@ -1216,6 +1216,14 @@ def evidence_limit_events(
     already wrote. A session whose **stored** limit events disagree with this run's by id set is
     refused by name (`LimitEvidenceConflictError`) instead of joined by a second, contradictory
     partition: two id sets for one session are two answers to one question.
+
+    **A refusal partway through a range keeps the progress record** (fix round 1, finding 8).
+    Sessions before the failing one are already written -- the append happens per session -- so
+    the `--json` refusal document carries the same `status`/`exit_code`/`detail` fields as any
+    other panel refusal **plus** `events` and `sessions` for what was written before it; a
+    caller can tell whether it needs to re-run the range at all. Re-running is idempotent: a
+    session already written appends nothing new, so the safe recovery from any non-zero exit is
+    to run the same range again.
     """
     runtime_dir = _resolved_runtime_dir(runtime_dir)
     with _panel_command("evidence limit-events", json_output=json_output):
@@ -1250,12 +1258,14 @@ def evidence_limit_events(
         evidence = None
         written = 0
         records: list[dict[str, object]] = []
+        refusal: tuple[PanelExit, str] | None = None
         for day in days:
             published = session_publication_instant(day)
             try:
                 events = limit_events_on(store, session=day, as_of=published, exchange=exchange)
             except LimitEventReadError as error:
-                raise _panel_fail(PanelExit.bad_request, str(error)) from error
+                refusal = (PanelExit.bad_request, str(error))
+                break
             except (
                 PanelStorageError,
                 TradingCalendarError,
@@ -1263,11 +1273,12 @@ def evidence_limit_events(
                 PriceDataError,
                 SuspensionError,
             ) as error:
-                raise _panel_fail(
+                refusal = (
                     PanelExit.unhealthy,
                     f"the limit events of {day.isoformat()} could not be read out of "
                     f"{store.root}: {error}",
-                ) from error
+                )
+                break
             if not events:
                 if not json_output:
                     typer.echo(f"NO limit events session={day.isoformat()}")
@@ -1281,7 +1292,8 @@ def evidence_limit_events(
             try:
                 refuse_a_restated_session(evidence, session=day, arriving=snapshots)
             except LimitEvidenceConflictError as error:
-                raise _panel_fail(PanelExit.unhealthy, str(error)) from error
+                refusal = (PanelExit.unhealthy, str(error))
+                break
             partition = evidence.append(snapshots)
             written += len(snapshots)
             if not json_output:
@@ -1296,6 +1308,27 @@ def evidence_limit_events(
                     "evidence_ids": [snapshot.evidence_id for snapshot in snapshots],
                 }
             )
+        if refusal is not None:
+            code, message = refusal
+            if json_output:
+                # The written sessions are part of the record, so a machine caller is not told
+                # only that the run failed: `_panel_fail`'s three fields plus what landed.
+                typer.echo(
+                    json.dumps(
+                        {
+                            "status": "refused",
+                            "exit_code": int(code),
+                            "detail": message,
+                            "events": written,
+                            "sessions": records,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                )
+                typer.echo(message, err=True)
+                raise typer.Exit(code=int(code))
+            raise _panel_fail(code, message)
         if json_output:
             typer.echo(
                 json.dumps(

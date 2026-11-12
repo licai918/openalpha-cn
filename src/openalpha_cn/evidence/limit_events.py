@@ -171,6 +171,14 @@ def refuse_a_restated_session(
     this run derived none, the panel was restated (or the store holds a claim this run cannot
     reproduce) and that is the same refusal.
 
+    **Only this producer's rows are compared** (fix round 1, finding 2). `limit_up`,
+    `consecutive_board` and `broken_board` are also emitted by other providers -- `chainlin`
+    declares the same three kinds -- so a foreign row stamped at the same instant is not a claim
+    this producer made. Counting it would refuse a legitimate first write into a mixed store,
+    and in the other direction a foreign-only store would make the panel-derived writer refuse
+    a session it has never written. The comparison is scoped by
+    `source_id == PANEL_DERIVED_PROVIDER_ID`, and a foreign row is left untouched.
+
     The parameter is named `evidence`, not `store`, deliberately: the **evidence** store is a
     different door from `PanelStore.query`, and `tests/unit/test_source_counts_match_the_tree.py`
     counts `.query(...)` calls on a store-named receiver as callers of the panel door. Naming
@@ -188,7 +196,10 @@ def refuse_a_restated_session(
     stored: dict[str, EvidenceSnapshot] = {}
     for kind in _LIMIT_EVENT_KINDS:
         for snapshot in evidence.query(as_of=published, kind=kind):
-            if snapshot.timeline.available_time == published:
+            if (
+                snapshot.timeline.available_time == published
+                and snapshot.source_id == PANEL_DERIVED_PROVIDER_ID
+            ):
                 stored[snapshot.evidence_id] = snapshot
     arriving_ids = {snapshot.evidence_id for snapshot in arriving}
     if not stored or set(stored) == arriving_ids:

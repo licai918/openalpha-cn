@@ -30,8 +30,9 @@ No network: the panel is generated at test time and every read is from disk.
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -47,6 +48,7 @@ from typer.testing import CliRunner
 
 from openalpha_cn.cli import app
 from openalpha_cn.domain.evidence import EvidenceSnapshot
+from openalpha_cn.domain.time import Timeline
 from openalpha_cn.evidence.limit_events import (
     PANEL_DERIVED_METADATA,
     LimitEvidenceConflictError,
@@ -232,3 +234,100 @@ def test_a_session_with_no_event_writes_nothing_and_says_so(tmp_path: Path) -> N
     assert result.exit_code == 0, result.output
     assert f"NO limit events session={day.isoformat()}" in result.output
     assert not list((runtime_dir / "evidence").glob("part-*.parquet"))
+
+
+# --- fix round 1, finding 2: another provider's limit evidence is not this store's ------------
+
+
+def _foreign_limit_evidence(day: date) -> EvidenceSnapshot:
+    """A `limit_up` row of another provider (Chainlin emits the same kind), same instant."""
+    published = session_publication_instant(day)
+    return EvidenceSnapshot(
+        subject="600000.SH",
+        kind="limit_up",
+        timeline=Timeline(
+            event_time=datetime(day.year, day.month, day.day, 7, 0, tzinfo=UTC),
+            available_time=published,
+            ingested_time=FETCHED_AT,
+            revision_time=published,
+        ),
+        source_id="chainlin",
+        source_uri="fixture://chainlin",
+        source_license="fixture",
+        redistribution="allowed",
+        summary="A chainlin limit-up row.",
+        payload={
+            "schema": "a-share-evidence/v1",
+            "family": "market_event",
+            "facts": {"close": 11.0, "pct_change": 10.0, "board_count": 1},
+            "quality_flags": [],
+        },
+    )
+
+
+def test_a_foreign_providers_limit_evidence_at_the_same_instant_is_ignored(tmp_path: Path) -> None:
+    panel, store = _panel(tmp_path)
+    day, events = _events(panel, store, LIMIT_STREAK_FIRST_SESSION_INDEX + 1)
+    snapshots = limit_event_snapshots(events, session=day, fetched_at=FETCHED_AT)
+    evidence = ParquetEvidenceStore(tmp_path / "evidence")
+    evidence.append((_foreign_limit_evidence(day),))
+
+    # The panel-derived writer must not read a Chainlin row as its own restatement.
+    refuse_a_restated_session(evidence, session=day, arriving=snapshots)
+    evidence.append(snapshots)
+
+    stored = evidence.query(as_of=session_publication_instant(day))
+    assert {snapshot.source_id for snapshot in stored} == {"chainlin", "openalpha-panel-derived"}
+
+
+# --- fix round 1, finding 8: a partial --json run keeps its progress record --------------------
+
+
+def test_a_failing_multi_session_json_run_lists_the_sessions_it_already_wrote(
+    tmp_path: Path,
+) -> None:
+    panel = generate_limit_streak_panel()
+    runtime_dir = tmp_path / "runtime"
+    store = PanelStore(runtime_dir / "panel")
+    write_generated_panel(store, panel)
+    first = LIMIT_STREAK_FIRST_SESSION_INDEX
+    start = panel.sessions[first + 1]  # an event
+    middle = panel.sessions[first + 2]  # a halt: writes nothing, still a progress record
+    failing = panel.sessions[first + 3]  # an event; seeded with a contradicting id set
+
+    day = failing
+    published = session_publication_instant(day)
+    events = limit_events_on(store, session=day, as_of=published, exchange=EXCHANGE)
+    restated = limit_event_snapshots(
+        (replace(events[0], pct_chg=events[0].pct_chg + 1.0),),
+        session=day,
+        fetched_at=FETCHED_AT,
+    )
+    ParquetEvidenceStore(runtime_dir / "evidence").append(restated)
+
+    result = runner.invoke(
+        app,
+        [
+            "evidence",
+            "limit-events",
+            "--session",
+            start.isoformat(),
+            "--through",
+            failing.isoformat(),
+            "--runtime-dir",
+            str(runtime_dir),
+            "--exchange",
+            EXCHANGE,
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 1, result.output
+    document = json.loads(result.stdout)
+    assert document["status"] == "refused"
+    assert document["exit_code"] == 1
+    assert document["events"] == 1, "the session before the refusal was written"
+    assert [record["session"] for record in document["sessions"]] == [
+        start.isoformat(),
+        middle.isoformat(),
+    ]

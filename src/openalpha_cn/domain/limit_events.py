@@ -91,9 +91,10 @@ class BoardStreak:
     """How many consecutive closed-at-limit sessions a walk found, and how far it looked.
 
     `count` is the number of consecutive `closed_at_up` sessions immediately before the target,
-    reaching back across halts. `halted_sessions_skipped` is how many of the walked sessions had
-    no bar. `truncated` says the walk stopped at the lookback cap while the streak was still
-    alive, so a caller must not report `count` as exact.
+    reaching back across halts. `halted_sessions_skipped` is how many halts the streak was
+    actually carried across: a halt below the first `closed_at_up` it reaches bridged nothing
+    and is not counted (fix round 1, finding 6). `truncated` says the walk stopped at the
+    lookback cap while the streak was still alive, so a caller must not report `count` as exact.
     """
 
     count: int
@@ -219,7 +220,10 @@ def board_streak(
 
     The walk ends at the first of: a session with no band for this security (not listed), a
     session where it traded and did not close at its limit, or the lookback cap. A halted
-    session (band published, no bar) is stepped over and counted in `halted_sessions_skipped`.
+    session (band published, no bar) is stepped over; it is **counted only if a later
+    `closed_at_up` session carries the streak across it** (fix round 1, finding 6) -- a halt
+    immediately below a break bridged nothing, and the event must not claim one was skipped
+    inside a streak that never crossed it.
     """
     if max_lookback < 0:
         raise LimitEventError(f"max_lookback cannot be negative; got {max_lookback}")
@@ -227,6 +231,7 @@ def board_streak(
         return BoardStreak(count=0, halted_sessions_skipped=0, truncated=len(earlier) > 0)
     count = 0
     skipped = 0
+    pending_halts = 0
     examined = 0
     alive = True
     for state in earlier:
@@ -238,12 +243,15 @@ def board_streak(
             break
         touch = state.touches.get(ts_code)
         if touch is None:
-            skipped += 1
+            pending_halts += 1
             continue
         if not touch.closed_at_up:
+            # The pending halts sit below a break; the streak never reached them.
             alive = False
             break
         count += 1
+        skipped += pending_halts
+        pending_halts = 0
     return BoardStreak(
         count=count,
         halted_sessions_skipped=skipped,
@@ -257,6 +265,7 @@ def session_limit_events(
     earlier: Sequence[SessionLimitState],
     *,
     max_lookback: int = MAX_BOARD_LOOKBACK_SESSIONS,
+    truncated_alive: frozenset[str] = frozenset(),
 ) -> tuple[LimitEvent, ...]:
     """Every limit event `today` carries, ordered by `ts_code`.
 
@@ -264,6 +273,11 @@ def session_limit_events(
     holds touches, which do not carry the prices an event reports); `earlier` is the prior
     sessions newest-first. Only securities with a touch today can produce an event, so the
     result is bounded by the day's events rather than by the cross section.
+
+    `truncated_alive` names the candidates whose walk ended at the **edge of the stored panel**
+    while their streak was still alive (fix round 1, finding 3) -- the panel adapter reports it
+    when a prior year's calendar or prices cannot be read. Their count is a lower bound for the
+    same reason the lookback cap's is, and the session's other events are still produced.
     """
     events: list[LimitEvent] = []
     for ts_code in sorted(today.touches):
@@ -294,7 +308,7 @@ def session_limit_events(
                 high=bar.high,
                 pct_chg=bar.pct_chg,
                 halted_sessions_skipped=streak.halted_sessions_skipped,
-                board_count_is_lower_bound=streak.truncated,
+                board_count_is_lower_bound=streak.truncated or ts_code in truncated_alive,
             )
         )
     return tuple(events)

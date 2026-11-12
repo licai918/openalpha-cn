@@ -14,10 +14,11 @@ honest rather than merely correct on one panel.
 4. **A streak crossing a year boundary reads the prior year's calendar.** A January session's
    walk must reach December of the year before; the panel holds two partition years and the
    fixture is built here rather than generated, because the generator prices one year.
-5. **A restated earlier bar is invisible to a replay at the original `as_of`.** The restatement
+5. **A restated earlier bar is refused at the original `as_of`.** The restatement
    is written with a later revision instant, so the earlier session is withheld at the original
-   evening: the producer refuses by name instead of answering from bytes that did not exist yet,
-   and a *late* read sees the restated bar and reports the different event it now implies.
+   evening: the producer refuses by name instead of answering from bytes that did not exist yet
+   (the panel store keeps no earlier version, so the original event cannot be reproduced), and
+   a *late* read sees the restated bar and reports the different event it now implies.
 6. **Only securities with an event come back.** The panel prices eight securities a session and
    the scripted one walks the eight-session table, so the answer is a handful of rows out of
    eighty -- hard rule 1's "events only, never panel rows", as a count.
@@ -413,7 +414,7 @@ def _rewritten(
     )
 
 
-def test_a_restated_earlier_bar_is_invisible_to_a_replay_at_the_original_as_of(
+def test_a_restated_earlier_bar_is_refused_at_the_original_as_of(
     tmp_path: Path,
 ) -> None:
     panel = generate_limit_streak_panel()
@@ -503,3 +504,41 @@ def test_only_securities_with_an_event_are_returned_and_the_count_is_bounded(
 def test_the_default_exchange_is_the_providers_default() -> None:
     """The local literal is a restatement of one constant, so a move on either side is red."""
     assert DEFAULT_EXCHANGE == TRADING_CALENDAR_DEFAULT_EXCHANGE
+
+
+# --- fix round 1, finding 3: the panel's first stored year is the edge of what it can know ---
+
+
+def _first_year_store(tmp_path: Path) -> PanelStore:
+    """A store whose calendar and prices begin at 2026-01-01: no prior year exists."""
+    store = PanelStore(tmp_path / "panel")
+    days = _days(date(2026, 1, 1), date(2026, 1, 8))
+    write_trading_calendar(store, _calendar_batch(days))
+    calendar = _calendar(days)
+    sessions = tuple(day for day in days if _is_open(day))
+    fetched_at = datetime(2026, 1, 8, 9, 0, tzinfo=UTC)
+    daily, basic, limits = _price_batches(sessions, fetched_at=fetched_at)
+    write_daily_panel(store, bars=[daily], fundamentals=[basic], calendar=calendar, halts=None)
+    write_price_limits(store, [limits], calendar=calendar)
+    return store
+
+
+def test_a_walk_that_reaches_the_panels_first_stored_year_reports_a_lower_bound(
+    tmp_path: Path,
+) -> None:
+    """Finding 3: the edge of the stored panel ends the walk, it does not lose the session.
+
+    Security A closes at its band on 2026-01-05, the panel's first stored year. The streak walk
+    needs 2025-12-31, whose calendar and partitions are not stored; before this fix that raised
+    and lost every event of the session. The count it can prove is now reported as a lower
+    bound, the same rule `MAX_BOARD_LOOKBACK_SESSIONS` already uses.
+    """
+    store = _first_year_store(tmp_path)
+    target = date(2026, 1, 5)
+
+    events = limit_events_on(store, session=target, as_of=_published(target), exchange=EXCHANGE)
+
+    event = _only(events)
+    assert (event.ts_code, event.kind) == (A, "limit_up")
+    assert event.board_count == 1
+    assert event.board_count_is_lower_bound is True

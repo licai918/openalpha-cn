@@ -36,6 +36,15 @@ That is exact rather than generous: a January session's streak may genuinely hav
 December, and a calendar that stopped at 1 January would report a one-session board for a
 three-session one.
 
+**The edge of the stored panel ends the walk and lowers the bound, it does not lose the day**
+(fix round 1, finding 3). On a January session of the earliest year the panel stores, a
+candidate still alive at 1 January needs a prior year that may not be stored at all; that used
+to raise and cost every event of the session, including the ones whose walk never went near the
+boundary. A prior-year calendar or price partition that cannot be read now ends the walk and
+marks the still-alive candidates' `board_count_is_lower_bound` -- the same "report the bound"
+rule `MAX_BOARD_LOOKBACK_SESSIONS` already follows. A partition missing **inside** the stored
+range is still a refusal: the panel claims that year and cannot answer for it.
+
 `stk_limit`'s band is read for every walked session too, because the halt rule is a fact about
 the pair -- a published band with no bar is a halt (skipped, D2), while no band at all means the
 security is not listed and the walk ends. See `domain/limit_events.py`.
@@ -62,8 +71,12 @@ from openalpha_cn.domain.limit_events import (
     session_state,
 )
 from openalpha_cn.domain.time import ensure_aware
-from openalpha_cn.domain.trading_calendar import CalendarHorizonError, TradingCalendar
-from openalpha_cn.panel.store import PanelStore
+from openalpha_cn.domain.trading_calendar import (
+    CalendarHorizonError,
+    TradingCalendar,
+    TradingCalendarError,
+)
+from openalpha_cn.panel.store import PanelStorageError, PanelStore
 from openalpha_cn.panel_ingest import (
     load_daily_bars,
     load_price_limits,
@@ -126,7 +139,7 @@ def limit_events_on(
     candidates = frozenset(
         ts_code for ts_code, touch in today.touches.items() if touch.closed_at_up or touch.at_up
     )
-    earlier, calendar = _walk_earlier_sessions(
+    earlier, truncated_alive = _walk_earlier_sessions(
         store,
         today=today,
         candidates=candidates,
@@ -136,7 +149,13 @@ def limit_events_on(
         exchange=exchange,
         max_lookback=max_lookback,
     )
-    return session_limit_events(today, bars, earlier, max_lookback=max_lookback)
+    return session_limit_events(
+        today,
+        bars,
+        earlier,
+        max_lookback=max_lookback,
+        truncated_alive=truncated_alive,
+    )
 
 
 def _walk_earlier_sessions(
@@ -149,15 +168,17 @@ def _walk_earlier_sessions(
     as_of: datetime,
     exchange: str,
     max_lookback: int,
-) -> tuple[tuple[SessionLimitState, ...], TradingCalendar]:
+) -> tuple[tuple[SessionLimitState, ...], frozenset[str]]:
     """Prior sessions newest-first, read lazily while a candidate can still extend its streak.
 
-    Returns the states read and the calendar they were read against -- the caller no longer
-    needs it, but a future walk-until-exhausted reader does, and returning it keeps this
-    function's calendar reloading visible instead of a hidden second load.
+    Returns the states read and the candidates whose streak was still alive when the walk ended
+    at the **edge of the stored panel** (a prior year whose calendar or prices cannot be read).
+    The caller reports those candidates' board count as a lower bound instead of losing the
+    session; a partition missing **inside the target year** is still raised, because there the
+    panel claims the year and cannot answer for it.
     """
     if not candidates or max_lookback == 0:
-        return (), calendar
+        return (), frozenset()
     earlier: list[SessionLimitState] = []
     alive = candidates
     current = session
@@ -168,25 +189,37 @@ def _walk_earlier_sessions(
         except CalendarHorizonError:
             first_year -= 1
             if first_year < date.min.year:
-                break
-            calendar = load_trading_calendar(
-                store,
-                exchange=exchange,
-                years=tuple(range(first_year, session.year + 1)),
-                as_of=as_of,
-            )
+                return tuple(earlier), frozenset(alive)
+            try:
+                calendar = load_trading_calendar(
+                    store,
+                    exchange=exchange,
+                    years=tuple(range(first_year, session.year + 1)),
+                    as_of=as_of,
+                )
+            except (TradingCalendarError, PanelStorageError):
+                # The panel does not store (or cannot read) the year before the target year:
+                # the walk has reached the edge of what exists, not a corrupt stretch inside it.
+                return tuple(earlier), frozenset(alive)
             previous = calendar.previous_trading_day(current)
-        bars = load_daily_bars(
-            store, day=previous, calendar=calendar, as_of=as_of, max_staleness=None
-        )
-        limits = load_price_limits(
-            store, day=previous, calendar=calendar, as_of=as_of, max_staleness=None
-        )
+        try:
+            bars = load_daily_bars(
+                store, day=previous, calendar=calendar, as_of=as_of, max_staleness=None
+            )
+            limits = load_price_limits(
+                store, day=previous, calendar=calendar, as_of=as_of, max_staleness=None
+            )
+        except (PanelStorageError, TradingCalendarError):
+            if previous.year < session.year:
+                # A prior-year partition the calendar knows about but the store cannot read:
+                # still the year-boundary edge, so the count is a lower bound rather than lost.
+                return tuple(earlier), frozenset(alive)
+            raise
         state = session_state(bars, limits, trade_date=previous)
         earlier.append(state)
         alive = frozenset(ts_code for ts_code in alive if _still_alive(ts_code, state))
         current = previous
-    return tuple(earlier), calendar
+    return tuple(earlier), frozenset()
 
 
 def _still_alive(ts_code: str, state: SessionLimitState) -> bool:

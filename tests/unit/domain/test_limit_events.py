@@ -392,3 +392,39 @@ def test_limit_events_imports_nothing_numeric() -> None:
         or (module.startswith("openalpha_cn.") and not module.startswith("openalpha_cn.domain"))
     }
     assert not offenders, f"domain.limit_events reaches {sorted(offenders)}"
+
+
+# --- fix round 1, finding 6: a halt that bridged no streak is not "skipped" --------------------
+
+
+def test_a_halt_that_bridged_no_streak_is_not_counted() -> None:
+    """`halted_sessions_skipped` names halts a streak was carried across, nothing else.
+
+    History newest-first below the target: a halt and then an ordinary session. The streak
+    starts at today, so the halt bridged nothing and must not be counted (the old walk added
+    every halt it stepped over, wherever it sat).
+    """
+    halt_day = date(2024, 6, 21)
+    flat_day = date(2024, 6, 20)
+    up_day = date(2024, 6, 19)
+    target_day = date(2024, 6, 24)
+    halt = session_state({}, {A: _band(A, halt_day, pre_close=10.0)}, trade_date=halt_day)
+    flat_bar = _bar(A, flat_day, high=10.2, low=9.9, close=10.0, pre_close=10.0)
+    flat = session_state(
+        {A: flat_bar}, {A: _band(A, flat_day, pre_close=10.0)}, trade_date=flat_day
+    )
+    up_bar = _limit_up_bar(A, up_day, pre_close=10.0)
+    up = session_state({A: up_bar}, {A: _band(A, up_day, pre_close=10.0)}, trade_date=up_day)
+    today_bar = _limit_up_bar(A, target_day, pre_close=up_bar.close)
+    today = session_state(
+        {A: today_bar}, {A: _band(A, target_day, pre_close=up_bar.close)}, trade_date=target_day
+    )
+
+    after_a_break = _only(session_limit_events(today, {A: today_bar}, (halt, flat)))
+    assert (after_a_break.kind, after_a_break.board_count) == ("limit_up", 1)
+    assert after_a_break.halted_sessions_skipped == 0
+
+    # The same halt immediately below a limit-up *is* bridged by the streak and is counted.
+    across_a_halt = _only(session_limit_events(today, {A: today_bar}, (halt, up)))
+    assert (across_a_halt.kind, across_a_halt.board_count) == ("consecutive_board", 2)
+    assert across_a_halt.halted_sessions_skipped == 1
