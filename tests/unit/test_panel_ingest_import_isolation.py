@@ -196,6 +196,16 @@ _ALLOWED_NEUTRALIZATION_DEPENDENCIES = _ALLOWED_INTERNAL_DEPENDENCIES | {
     "openalpha_cn.panel_ingest",
     "openalpha_cn.panel_factors",
 }
+_ALLOWED_LIMIT_EVENT_DEPENDENCIES = _ALLOWED_INTERNAL_DEPENDENCIES | {"openalpha_cn.panel_ingest"}
+"""`openalpha_cn.panel_limit_events` (`V2-P7-011`), stated in full for the reason above.
+
+It is the narrowest reader in the family: it reaches `domain` for the limit-event rule and the
+calendar, `panel` for `PanelStore`, and `panel_ingest` for exactly the three loaders and the one
+publication clock that own the datasets it joins -- `load_daily_bars`, `load_price_limits`,
+`load_trading_calendar` and `session_publication_instant`. No writer, no requirement builder of
+its own, and no second door onto a session. `RESEARCH_PLANE_SEAM_IMPORTS` below names those four
+and `RESEARCH_PLANE_DATASETS` records the three datasets they bring.
+"""
 """`openalpha_cn.panel_neutralization` (`V2-P3-004`), stated in full for the reason above.
 
 **It is the first row in this table with an edge to another top-level `panel_*` module, and that
@@ -240,19 +250,20 @@ PANEL_MODULE_DEPENDENCIES: dict[str, set[str]] = {
     "openalpha_cn.panel_view": _ALLOWED_VIEW_DEPENDENCIES,
     "openalpha_cn.panel_factors": _ALLOWED_FACTOR_DEPENDENCIES,
     "openalpha_cn.panel_neutralization": _ALLOWED_NEUTRALIZATION_DEPENDENCIES,
+    "openalpha_cn.panel_limit_events": _ALLOWED_LIMIT_EVENT_DEPENDENCIES,
 }
 """Every top-level `panel_*` module and the sibling packages it may join.
 
-The six of them are 20,000-odd lines that sit *outside* `openalpha_cn/panel/` precisely so the
+The seven of them are 21,000-odd lines that sit *outside* `openalpha_cn/panel/` precisely so the
 package can keep its zero-sibling-edge guarantee, which makes "which packages may this one
 join" the whole justification for each of them being top-level at all. No `lint-imports`
 contract has a `panel_*` module as a *source* -- `backtest`'s contracts name them only as
-forbidden targets, which constrains `backtest` and says nothing about these six -- so this table
+forbidden targets, which constrains `backtest` and says nothing about these seven -- so this table
 and the tests below are the only thing standing there.
 
 `test_every_top_level_panel_module_is_in_this_table_and_stays_inside_its_row` keeps it from
 being the hand-maintained enumeration it looks like: the modules are discovered from the
-directory, so a seventh one arrives red rather than unguarded.
+directory, so an eighth one arrives red rather than unguarded.
 
 What it does **not** do is see a dataset; `RESEARCH_PLANE_SEAM_IMPORTS` and
 `RESEARCH_PLANE_DATASETS` below are the two instruments that do, and this module's docstring says
@@ -406,6 +417,14 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             # content each merge was made on. A write door, so it reaches no dataset.
             "panel_ingest.BatchWrite",
             "panel_ingest.write_panel_batches",
+        }
+    ),
+    "openalpha_cn.panel_limit_events": frozenset(
+        {
+            "panel_ingest.load_daily_bars",
+            "panel_ingest.load_price_limits",
+            "panel_ingest.load_trading_calendar",
+            "panel_ingest.session_publication_instant",
         }
     ),
     "openalpha_cn.panel_neutralization": frozenset(
@@ -1007,6 +1026,10 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
     "openalpha_cn.panel_neutralization": DatasetReach(
         named=frozenset(),
         reached=frozenset({"daily_basic", "index_member_all"}),
+    ),
+    "openalpha_cn.panel_limit_events": DatasetReach(
+        named=frozenset(),
+        reached=frozenset({"daily", "stk_limit", "trade_cal"}),
     ),
     "openalpha_cn.factor_view": DatasetReach(
         named=frozenset(
@@ -1750,7 +1773,7 @@ def _research_plane_dataset_reach(sources: Mapping[str, str]) -> dict[str, Datas
 def _row_shape_violations(table: Mapping[str, object], sources: Mapping[str, str]) -> list[str]:
     """The two ways a table stops covering the modules that exist, in one place for both tables.
 
-    A seventh `panel_*.py` with no row is the gap
+    An eighth `panel_*.py` with no row is the gap
     `test_every_top_level_panel_module_is_in_this_table_and_stays_inside_its_row` closed for
     `PANEL_MODULE_DEPENDENCIES`; both tables below have to close it too, and neither may keep a
     row for a module that has been deleted.
@@ -2276,7 +2299,7 @@ def test_every_name_each_research_plane_module_takes_across_the_seam_is_declared
     `PANEL_MODULE_DEPENDENCIES` cannot see, since `openalpha_cn.panel_ingest` is already inside
     `_ALLOWED_FACTOR_DEPENDENCIES` and inside `_ALLOWED_NEUTRALIZATION_DEPENDENCIES`.
 
-    Modules are discovered rather than listed, so a seventh `panel_*.py` arrives with no row and
+    Modules are discovered rather than listed, so an eighth `panel_*.py` arrives with no row and
     fails here as well as in
     `test_every_top_level_panel_module_is_in_this_table_and_stays_inside_its_row`.
     """

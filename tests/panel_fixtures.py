@@ -3062,3 +3062,232 @@ def _selected_datasets(
             "session as having no halts; add it, or pass halts=False"
         )
     return asked
+
+
+# --- the limit-streak panel (`V2-P7-011`) --------------------------------------------------
+
+
+LIMIT_STREAK_SECURITY_INDEX: Final[int] = 6
+"""`securities[6]`, whose bars, bands and one halt this panel scripts.
+
+The index no price-shaped generator writes: `securities[0]` carries the ex-rights step, the
+limit-free sentinel and the timed halt, `[1]` the factor step-down and the reform-marked rename,
+`[2]` the uncorroborated restatement and the unbanded bar, `[3]` the locked band, `[-1]` the
+whole-day halt and the resumption, and `[5]` the newest halt. `securities[6]` appears only in
+`name_history.announcement_on_the_newest_session`, a `namechange` row on another dataset, so
+scripting its price path composes with every shape that reads bars.
+"""
+
+LIMIT_STREAK_FIRST_SESSION_INDEX: Final[int] = 1
+"""The default window's second session.
+
+`sessions[0]` is left as the unscripted paper bar, so the first scripted row has a session
+before it to be the day after.
+"""
+
+LIMIT_STREAK_SESSIONS: Final[tuple[tuple[float, float | None, float | None, float | None], ...]] = (
+    (10.00, 11.00, 11.00, 10.20),
+    (11.00, 12.10, 12.10, 12.10),
+    (12.10, None, None, None),
+    (12.10, 13.31, 13.31, 12.50),
+    (13.31, 13.90, 14.64, 13.50),
+    (13.90, 15.29, 15.29, 14.20),
+    (15.29, 15.50, 15.60, 15.40),
+    (15.50, 17.05, 17.05, 16.00),
+)
+"""(pre_close, close, high, low) per scripted session; a halt when `close` is `None`.
+
+The eight rows of `tests/unit/domain/test_limit_events.py`'s hand-labelled table, in the
+panel's encoding. d1 closes at its band; d2 is a one-price session (`high == low == close ==
+up`); d3 is a halt -- the band is published and `daily` has no bar; d4, d6 and d8 close at
+their band; d5 touches the band (high at the limit) and closes below it; d7 is ordinary.
+"""
+
+
+def _arrayed_rows(
+    batch: ColumnarPanelBatch,
+    *,
+    date_column: str,
+    drops: frozenset[tuple[str, str]] = frozenset(),
+    overrides: Mapping[tuple[str, str], Mapping[str, object]] = MappingProxyType({}),
+) -> ColumnarPanelBatch:
+    """`batch` with named `(subject, day)` rows dropped and named cells replaced.
+
+    The timeline is carried across untouched, because every shape here scripts *prices* on rows
+    the generator already dated; a restated row would have to move its revision clock and that is
+    `_rewritten` in the consumer's own test, not a fixture form.
+    """
+    dates = None
+    for column in batch.columns:
+        if column.name == date_column:
+            dates = tuple(str(value) for value in column.values)
+            break
+    if dates is None:
+        raise PanelFixtureError(
+            f"{batch.dataset!r} has no {date_column!r} column; it has "
+            f"{[column.name for column in batch.columns]}"
+        )
+    kept = tuple(
+        index
+        for index, (subject, day_text) in enumerate(zip(batch.subjects, dates, strict=True))
+        if (subject, day_text) not in drops
+    )
+    columns: list[PanelColumn] = []
+    for column in batch.columns:
+        columns.append(
+            PanelColumn(
+                column.name,
+                column.kind,
+                tuple(
+                    overrides.get((batch.subjects[index], dates[index]), {}).get(
+                        column.name, column.values[index]
+                    )
+                    for index in kept
+                ),
+            )
+        )
+    timeline = batch.timeline
+    return ColumnarPanelBatch(
+        provider_id=batch.provider_id,
+        dataset=batch.dataset,
+        kind=batch.kind,
+        as_of=batch.as_of,
+        fetched_at=batch.fetched_at,
+        status="success",
+        subjects=tuple(batch.subjects[index] for index in kept),
+        timeline=TimelineColumns(
+            event_time=tuple(timeline.event_time[index] for index in kept),
+            available_time=tuple(timeline.available_time[index] for index in kept),
+            ingested_time=tuple(timeline.ingested_time[index] for index in kept),
+            revision_time=tuple(timeline.revision_time[index] for index in kept),
+        ),
+        columns=tuple(columns),
+    )
+
+
+def _with_a_halt(batch: ColumnarPanelBatch, *, code: str, day: date) -> ColumnarPanelBatch:
+    """`batch` plus one untimed `S` row -- the shape a whole-day halt is stored as."""
+    return ColumnarPanelBatch(
+        provider_id=batch.provider_id,
+        dataset=batch.dataset,
+        kind=batch.kind,
+        as_of=max(batch.as_of, _published_time(day)),
+        fetched_at=max(batch.fetched_at, _published_time(day)),
+        status="success",
+        subjects=(*batch.subjects, code),
+        timeline=TimelineColumns(
+            event_time=(*batch.timeline.event_time, _close_time(day)),
+            available_time=(*batch.timeline.available_time, _published_time(day)),
+            ingested_time=(*batch.timeline.ingested_time, _published_time(day)),
+            revision_time=(*batch.timeline.revision_time, _published_time(day)),
+        ),
+        columns=tuple(
+            PanelColumn(
+                column.name,
+                column.kind,
+                (*column.values, _halt_cell(column.name, day)),
+            )
+            for column in batch.columns
+        ),
+    )
+
+
+def _halt_cell(column: str, day: date) -> object:
+    if column == "trade_date":
+        return day.isoformat()
+    if column == "suspend_type":
+        return "S"
+    if column == "suspend_timing":
+        return None
+    raise PanelFixtureError(f"the halt row has no value for {column!r}")
+
+
+def generate_limit_streak_panel(*, window: tuple[date, date] | None = None) -> GeneratedPanel:
+    """A generated panel whose `securities[LIMIT_STREAK_SECURITY_INDEX]` walks the streak table.
+
+    **Opt-in rather than a row in `PANEL_SHAPES`.** The shape table's closed set is asserted by
+    `tests/unit/test_panel_fixtures.py` and by
+    `tests/integration/panel/test_panel_shape_coverage.py`, which are not this issue's files;
+    its detectors also sweep every shape against every other, so a ninth session-dependent
+    price form would be a table-wide diff rather than a fixture a reader can pick up. Nothing
+    here is hidden by that choice: the constructor is public, the script is a literal, and
+    `tests/integration/panel/test_limit_event_producer.py` writes it through the real writers
+    before reading it through the real loaders.
+
+    The script replaces `daily` and `daily_basic` rows (and drops `daily`'s bar on the halt
+    session, adding the matching untimed `suspend_d` row) and restates `stk_limit`'s band as
+    `pre_close * 1.1 / 0.9`, so each scripted session is judged against the band it published.
+    Everything else the generator built is carried across untouched.
+    """
+    panel = generate_panel(window=window)
+    code = panel.securities[LIMIT_STREAK_SECURITY_INDEX]
+    scripted = panel.sessions[
+        LIMIT_STREAK_FIRST_SESSION_INDEX : LIMIT_STREAK_FIRST_SESSION_INDEX
+        + len(LIMIT_STREAK_SESSIONS)
+    ]
+    if len(scripted) != len(LIMIT_STREAK_SESSIONS):
+        raise PanelFixtureError(
+            f"the limit-streak script needs {len(LIMIT_STREAK_SESSIONS)} sessions from index "
+            f"{LIMIT_STREAK_FIRST_SESSION_INDEX}, and this window prices {len(panel.sessions)}"
+        )
+
+    bars: dict[tuple[str, str], dict[str, object]] = {}
+    valuations: dict[tuple[str, str], dict[str, object]] = {}
+    bands: dict[tuple[str, str], dict[str, object]] = {}
+    dropped: set[tuple[str, str]] = set()
+    for day, (pre_close, close, high, low) in zip(scripted, LIMIT_STREAK_SESSIONS, strict=True):
+        key = (code, day.isoformat())
+        bands[key] = {
+            "up_limit": round(pre_close * 1.1, 2),
+            "down_limit": round(pre_close * 0.9, 2),
+        }
+        if close is None:
+            dropped.add(key)
+            continue
+        assert high is not None and low is not None
+        bars[key] = {
+            "open": close,
+            "high": high,
+            "low": low,
+            "close": close,
+            "pre_close": pre_close,
+            "pct_chg": (close / pre_close - 1.0) * 100.0,
+        }
+        valuations[key] = {"close": close}
+
+    updates: dict[str, ColumnarPanelBatch] = {
+        DAILY_DATASET: _arrayed_rows(
+            panel.batch(DAILY_DATASET),
+            date_column="trade_date",
+            drops=frozenset(dropped),
+            overrides=bars,
+        ),
+        DAILY_BASIC_DATASET: _arrayed_rows(
+            panel.batch(DAILY_BASIC_DATASET),
+            date_column="trade_date",
+            drops=frozenset(dropped),
+            overrides=valuations,
+        ),
+        PRICE_LIMIT_DATASET: _arrayed_rows(
+            panel.batch(PRICE_LIMIT_DATASET),
+            date_column="trade_date",
+            overrides=bands,
+        ),
+        SUSPENSION_DATASET: _with_a_halt(
+            panel.batch(SUSPENSION_DATASET), code=code, day=scripted[2]
+        ),
+    }
+    batches = dict(panel.batches)
+    batches.update(updates)
+    return GeneratedPanel(
+        shapes=panel.shapes,
+        calendar_days=panel.calendar_days,
+        sessions=panel.sessions,
+        securities=panel.securities,
+        batches=MappingProxyType(batches),
+        name_records=panel.name_records,
+        industry_assignments=panel.industry_assignments,
+        year=panel.year,
+        as_of=panel.as_of,
+        exchange=panel.exchange,
+    )

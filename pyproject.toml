@@ -270,6 +270,7 @@ forbidden_modules = [
   "openalpha_cn.panel_factors",
   "openalpha_cn.panel_gate",
   "openalpha_cn.panel_ingest",
+  "openalpha_cn.panel_limit_events",
   "openalpha_cn.panel_neutralization",
   "openalpha_cn.panel_view",
   "openalpha_cn.factor_view",
