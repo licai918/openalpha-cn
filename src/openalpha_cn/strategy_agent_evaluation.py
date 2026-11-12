@@ -102,6 +102,14 @@ AGENT_FORWARD_PROTOCOL_SCHEMA: Final = "agent-forward-protocol/v1"
 PRIMARY_SCORING_SET: Final = "primary"
 """The registered primary set (D2). The coverage set is permanently exploratory."""
 
+PRIMARY_HORIZON: Final[int] = 1
+"""The registered primary horizon (D2): the partial rank IC is read at one session.
+
+The stored record's horizon is 5d (one record serves h=1 and h=5), but the *test* is the h=1
+read: a 5-session primary would overlap its own labels and would be a second statistic. The
+protocol reader and the public dataclass both refuse it; `h=5` may only appear as an exploratory
+arm."""
+
 DETECTABLE_AT_POWER: Final[float] = 0.8
 """The target power the detectable mean is stated at: the P7 route's own 0.8."""
 
@@ -197,6 +205,13 @@ class AgentProtocol:
                 f"the protocol's primary_set is {self.primary_set!r}; the primary statistic is "
                 "made on the primary set, and the coverage set is exploratory"
             )
+        if self.primary_horizon != PRIMARY_HORIZON:
+            raise AgentEvaluationError(
+                f"the protocol's primary_horizon is {self.primary_horizon!r}; D2 registers the "
+                f"one primary statistic at h={PRIMARY_HORIZON} (the stored record's 5d horizon "
+                "is read at h=1), and a longer primary horizon would overlap its own labels and "
+                "be a second statistic; h>1 belongs in `secondary` and is exploratory"
+            )
 
     @property
     def arms(self) -> tuple[ExploratoryArm, ...]:
@@ -246,6 +261,12 @@ class _ProtocolBlock(BaseModel):
             raise ValueError(
                 f"primary_set is {self.primary_set!r}; the primary statistic is made on the "
                 "primary set, and the coverage set is exploratory"
+            )
+        if self.primary_horizon != PRIMARY_HORIZON:
+            raise ValueError(
+                f"primary_horizon is {self.primary_horizon!r}; D2's one primary statistic is "
+                f"the h={PRIMARY_HORIZON} read (the stored record's 5d horizon is read at h=1); "
+                "h>1 may only appear as an exploratory arm in `secondary`"
             )
         if self.window_sessions < MINIMUM_TEST_SAMPLE:
             raise ValueError(

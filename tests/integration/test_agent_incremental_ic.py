@@ -182,6 +182,41 @@ def test_the_primary_arm_is_pinned_to_the_registered_llm_primary_set() -> None:
         )
 
 
+def test_the_primary_horizon_is_pinned_to_one_session() -> None:
+    """D2's h=1 is part of the ONE statistic: h=5 is exploratory only.
+
+    The registered record's horizon is 5d and one record is read at both h=1 and h=5, so a block
+    that names `primary_horizon: 5` would make the primary statistic the overlapping reading and
+    leave the h=1 read unreported. Both the settings reader and the public dataclass refuse it.
+    """
+    with pytest.raises(AgentEvaluationError, match="primary_horizon"):
+        protocol(primary_horizon=5)
+
+    read = read_agent_protocol({AGENT_FORWARD_PROTOCOL_KEY: dict(PROTOCOL_BLOCK)})
+    with pytest.raises(AgentEvaluationError, match="primary_horizon"):
+        AgentProtocol(
+            primary_family=read.primary_family,
+            primary_set=read.primary_set,
+            primary_horizon=5,
+            secondary=read.secondary,
+            window_sessions=read.window_sessions,
+            min_scored=read.min_scored,
+            min_measurable_sessions=read.min_measurable_sessions,
+            interim_session=read.interim_session,
+            level=read.level,
+            q=read.q,
+            bootstrap_samples=read.bootstrap_samples,
+            random_seed=read.random_seed,
+        )
+    # h=5 stays legal where D2 puts it: an exploratory arm.
+    assert (
+        protocol(secondary=[{"family": AGENT_RULE_FAMILY, "scoring_set": "coverage", "horizon": 5}])
+        .secondary[0]
+        .horizon
+        == 5
+    )
+
+
 # --- the stored records, the labels, and the evaluator ---------------------------------------
 
 SECURITIES: Final[tuple[str, ...]] = (
