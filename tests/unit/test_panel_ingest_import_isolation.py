@@ -874,6 +874,23 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "strategy_view.FitCache",
         }
     ),
+    "openalpha_cn.strategy_forward_session": frozenset(
+        {
+            # V2-P7-013 (R1). The forward-registration protocol, moved out of
+            # `scripts/daily_selection.py` so a research step files through `src/`. One read:
+            # `load_trading_calendar` gives `outcome_calendar` the year(s) a session's outcome
+            # instant is placed on. Everything else is P6's registration vocabulary -- the
+            # calibration constant, the held-record lookup, its refusal, the 09:15 cutoff, the
+            # session lookup and a filing's digest -- declarations and a digest, not reads.
+            "panel_ingest.load_trading_calendar",
+            "strategy_registration.HeldRecordLookup",
+            "strategy_registration.SHANGHAI",
+            "strategy_registration.StrategyRegistrationError",
+            "strategy_registration.batch_digest",
+            "strategy_registration.registration_cutoff",
+            "strategy_registration.session_record",
+        }
+    ),
     "openalpha_cn.shortlist_compare": frozenset(
         {
             "shortlist_view.SHORTLIST_VIEW_SCHEMA_VERSION",
@@ -1297,6 +1314,13 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
                 "trade_cal",
             }
         ),
+    ),
+    "openalpha_cn.strategy_forward_session": DatasetReach(
+        # V2-P7-013 (R1). It names the calendar a record's outcome instant is placed on, so it
+        # names and reaches `trade_cal`; the rest of its seam is P6's registration vocabulary,
+        # and none of those names reaches a dataset.
+        named=frozenset({"trade_cal"}),
+        reached=frozenset({"trade_cal"}),
     ),
     "openalpha_cn.shortlist_compare": DatasetReach(
         # V2-P4-007. The only row in this table that is empty in both directions, and the

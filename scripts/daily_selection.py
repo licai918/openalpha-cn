@@ -220,6 +220,7 @@ from click import ClickException  # noqa: E402
 from typer.main import get_command  # noqa: E402
 
 from openalpha_cn import cli  # noqa: E402
+from openalpha_cn import strategy_forward_session as forward_session  # noqa: E402
 from openalpha_cn.backtest.strategy_backtest import (  # noqa: E402
     StrategyBacktestError,
     target_holdings,
@@ -233,10 +234,7 @@ from openalpha_cn.domain.index_membership import (  # noqa: E402
 )
 from openalpha_cn.domain.index_prices import INDEX_DAILY_DATASET  # noqa: E402
 from openalpha_cn.domain.name_history import NAMECHANGE_DATASET  # noqa: E402
-from openalpha_cn.domain.prediction_record import (  # noqa: E402
-    PredictionRecord,
-    outcome_known_at_for,
-)
+from openalpha_cn.domain.prediction_record import PredictionRecord  # noqa: E402
 from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET, SUSPENSION_DATASET  # noqa: E402
 from openalpha_cn.domain.trading_calendar import (  # noqa: E402
     TRADING_CALENDAR_DATASET,
@@ -296,7 +294,6 @@ from openalpha_cn.strategy_registration import (  # noqa: E402
     batch_digest,
     input_provenance,
     registration_cutoff,
-    session_record,
     signal_day_batch,
     witnessed_days,
 )
@@ -2896,7 +2893,7 @@ def check_panel(
         exchange=exchange,
     )
     if announced:
-        store = PanelStore(runtime_dir / "panel")
+        store = panel_store(runtime_dir)
         stored = [
             year
             for year in years
@@ -3499,14 +3496,10 @@ def candidates(signal: SignalDay, request: StrategyRequest, config_id: str) -> d
     }
 
 
-def _outcome_calendar(
-    store: PanelStore, exchange: str, session: date, as_of: datetime
-) -> TradingCalendar:
-    """The calendar the record's outcome instant is derived on: the session's year, and the
-    next when it is stored, so a window crossing New Year can be placed."""
-    stored = set(store.registered_years(TRADING_CALENDAR_DATASET))
-    years = tuple(year for year in (session.year, session.year + 1) if year in stored)
-    return load_trading_calendar(store, exchange=exchange, years=years, as_of=as_of)
+# The forward-registration protocol lives in `strategy_forward_session` (`V2-P7-013`, R1). The
+# names below stay assigned here because the capability ledger resolves them at this script
+# (`scripts/build_feature_coverage.py::_module_symbols` reads top-level `def`/`Assign` only).
+_outcome_calendar = forward_session.outcome_calendar
 
 
 def register_prediction(
@@ -3532,25 +3525,9 @@ def register_prediction(
     """
     store = build_storage(runtime_dir=runtime_dir, clock=clock).prediction_store
     try:
-        held = session_record(store, batch)
-    except StrategyRegistrationError as error:
-        raise StepFailedError("prediction", str(error)) from error
-    if held is not None:
-        return held, "unchanged"
-    day = batch.as_of.astimezone(SHANGHAI).date()
-    cutoff = registration_cutoff(calendar, day)
-    deadline = outcome_known_at_for(batch, calendar=calendar, zone=SHANGHAI)
-    now = clock()
-    if now >= cutoff:
-        raise StepFailedError(
-            "prediction",
-            f"the scores of {day.isoformat()} are traded at the next session's open, whose call "
-            f"auction starts {cutoff.isoformat()}, and it is {now.isoformat()}: part of their "
-            f"outcome is published already (all of it by {deadline.isoformat()}), so registered "
-            "now they would not be a prediction made before its outcome. Nothing was filed",
-        )
-    written = store.put(batch=batch, calendar=calendar, zone=SHANGHAI)
-    return written.record, written.outcome
+        return forward_session.file_forward_record(store, batch, calendar=calendar, clock=clock)
+    except forward_session.ForwardSessionRefused as refusal:
+        raise StepFailedError("prediction", refusal.detail) from refusal.__cause__
 
 
 # --- the whole run -----------------------------------------------------------------------------
@@ -4577,69 +4554,63 @@ def _survivor_prediction(
         )
     except forward.SurvivorRegistrationError as error:
         raise StepFailedError("prediction", str(error), steps=SURVIVOR_STEPS) from error
-    try:
-        held = session_record(
-            build_storage(runtime_dir=runtime_dir, clock=clock).prediction_store, batch
-        )
-    except StrategyRegistrationError as error:
-        raise StepFailedError("prediction", str(error), steps=SURVIVOR_STEPS) from error
-    if held is not None:
-        return _prediction_block(
-            held,
-            "unchanged",
-            provenance=_held_provenance(runtime_dir, registration, held, session=session),
-        )
-    if now >= cutoff:
-        raise StepFailedError(
-            "prediction",
+    prediction_store = build_storage(runtime_dir=runtime_dir, clock=clock).prediction_store
+
+    def held_provenance(held: PredictionRecord) -> str:
+        return _held_provenance(runtime_dir, registration, held, session=session)
+
+    def late(at: datetime) -> str:
+        return (
             f"the scores of {session.isoformat()} are traded at the next session's open, whose "
-            f"call auction starts {_shanghai(cutoff)}, and it is {_shanghai(now)}: this session "
+            f"call auction starts {_shanghai(cutoff)}, and it is {_shanghai(at)}: this session "
             "can no longer be registered or decided -- its record would not precede its outcome "
             "-- and the next session's run settles it without a decision. Nothing was filed; "
-            "there is nothing to do",
-            steps=SURVIVOR_STEPS,
+            "there is nothing to do"
         )
+
+    def write_provenance() -> str:
+        try:
+            provenance = forward.survivor_input_provenance(
+                store,
+                facts=facts,
+                batch=batch,
+                registered=declared,
+                transform=transform,
+                exchange=exchange,
+                recorded_at=clock(),
+            )
+            forward.write_survivor_provenance(runtime_dir, provenance)
+        except forward.SurvivorRegistrationError as error:
+            raise StepFailedError("prediction", str(error), steps=SURVIVOR_STEPS) from error
+        return provenance.digest
+
+    def register(queued: PredictionBatch) -> tuple[PredictionRecord, str]:
+        return register_prediction(
+            runtime_dir,
+            queued,
+            calendar=_outcome_calendar(store, exchange, session, as_of),
+            clock=clock,
+        )
+
     try:
-        provenance = forward.survivor_input_provenance(
-            store,
-            facts=facts,
+        return forward_session.file_with_provenance(
+            store=prediction_store,
             batch=batch,
-            registered=declared,
-            transform=transform,
-            exchange=exchange,
-            recorded_at=clock(),
+            now=now,
+            cutoff=cutoff,
+            late=late,
+            held_provenance=held_provenance,
+            write_provenance=write_provenance,
+            register=register,
         )
-        forward.write_survivor_provenance(runtime_dir, provenance)
-    except forward.SurvivorRegistrationError as error:
-        raise StepFailedError("prediction", str(error), steps=SURVIVOR_STEPS) from error
-    record, outcome = register_prediction(
-        runtime_dir,
-        batch,
-        calendar=_outcome_calendar(store, exchange, session, as_of),
-        clock=clock,
-    )
-    return _prediction_block(record, outcome, provenance=provenance.digest)
+    except forward_session.ForwardSessionRefused as refusal:
+        raise StepFailedError(
+            "prediction", refusal.detail, steps=SURVIVOR_STEPS
+        ) from refusal.__cause__
 
 
-def _prediction_block(record: PredictionRecord, outcome: str, *, provenance: str) -> dict[str, Any]:
-    """The journal's `prediction` stage for `record`: what it is, how this run came by it
-    (`created`, or `unchanged` for a record held already), and its provenance's digest."""
-    declaration = record.batch.artifact.declaration
-    return {
-        "registered": True,
-        "record_id": record.record_id,
-        "family": declaration.family,
-        "horizon": declaration.horizon,
-        "outcome": outcome,
-        "standing": record.standing,
-        "as_of": record.batch.as_of.isoformat(),
-        "outcome_known_at": record.outcome_known_at.isoformat(),
-        "recorded_at": record.recorded_at.isoformat(),
-        "scored": len(record.batch.scored),
-        "abstained": len(record.batch.abstained),
-        "batch_digest": batch_digest(record.batch),
-        "provenance": provenance,
-    }
+# The journal's `prediction` stage, from `strategy_forward_session` (`V2-P7-013`, R1).
+_prediction_block = forward_session.prediction_block
 
 
 def _held_provenance(
