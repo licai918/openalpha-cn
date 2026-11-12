@@ -623,3 +623,34 @@ def test_the_writer_names_the_predecessor_it_supersedes(
     }
     assert register.chain_problems(register.committed_survivor_registrations(repo)) == []
     assert _status(repo).strip() == f"?? {REGISTRATION}"
+
+
+def test_the_writer_never_invokes_a_staging_or_committing_step() -> None:
+    source = (ROOT / "scripts/p7_register.py").read_text(encoding="utf-8")
+
+    assert "git add" not in source
+    assert "git commit" not in source
+
+
+def test_refuses_an_uncommitted_or_edited_predecessor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _repository(tmp_path)
+    _pin_the_clock(monkeypatch)
+    monkeypatch.chdir(repo)
+    _commit_a_survivor_registration(repo)
+    smoke = research_repo.head(repo)
+
+    missing = _run(
+        capsys,
+        *_arguments(smoke=smoke, supersedes="docs/research/not-a-registration.json"),
+    )
+    assert missing[0] == 2
+    assert "not-a-registration.json" in missing[2]
+
+    (repo / FIRST).write_text("{}\n", encoding="utf-8")
+    edited = _run(capsys, *_arguments(smoke=smoke, supersedes=FIRST))
+    assert edited[0] == 2
+    assert FIRST in edited[2]
+    assert "HEAD holds" in edited[2]
+    assert not (repo / REGISTRATION).exists()
