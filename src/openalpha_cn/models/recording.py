@@ -19,6 +19,22 @@ write-once, not signatures; the credential boundary is that headers are never st
 transport only on a miss, stores what came back, and returns it; replay mode (`inner=None`)
 looks up only and raises `ModelExchangeNotStoredError` on a miss. A replay therefore makes
 zero inner calls and needs no key.
+
+## The attempt number is a storage key, not part of the question (fix round 1)
+
+A structured agent retries a model answer it could not use. The same prompt sent again must get
+a *fresh* answer -- otherwise `max_attempts` is inert, and a stored answer that failed
+validation is replayed once per attempt. So the 1-based attempt number joins the request digest
+as its own field: attempt 1 and attempt 2 are two exchanges, each recorded once, and a replay
+walks the same sequence. It is **not** added to the payload sent to the vendor: the vendor is
+asked the same bytes every time, and a recorded exchange whose text began to carry a local
+retry counter would no longer be a record of the question.
+
+**A store hit is not a bill.** `RecordingJsonTransport.last_answer_was_replayed` is true when
+the answer came from the store rather than from the inner transport, and the provider accounts
+usage only when it is false. A repeated request in record mode -- a rerun, a crash-and-retry, a
+second agent sending identical bytes -- therefore costs no second usage row, and an agent retry
+at a new attempt number is a real second request that is billed once.
 """
 
 import copy
@@ -44,8 +60,16 @@ class ModelExchange(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: Literal["model-exchange/v1"] = MODEL_EXCHANGE_SCHEMA_VERSION
+    attempt: int = Field(ge=1)
+    """Which attempt of this request this exchange is, 1-based; part of the address only.
+
+    A retry is a different stored exchange with the same vendor payload (see the module
+    docstring). The field is stored so a read-back can re-derive `request_digest` from the
+    document itself; the contract has never been written outside this batch's tests, so adding
+    it before any stored row exists needs no migration and stays `model-exchange/v1`.
+    """
     request_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
-    """sha256 of canonical JSON `{"url", "payload"}`; headers are excluded by design."""
+    """sha256 of canonical JSON `{"url", "payload", "attempt"}`; headers are excluded."""
     url: str = Field(min_length=1)
     request: JsonValue
     response: JsonValue
@@ -89,9 +113,16 @@ class ModelExchangeStore(Protocol):
         """Hold `exchange`; `unchanged` when an equal-response exchange is already held."""
 
 
-def exchange_request_digest(*, url: str, payload: Mapping[str, Any]) -> str:
-    """The content address of one request: url plus the whole payload, headers excluded."""
-    canonical = canonical_json_bytes({"url": url, "payload": dict(payload)})
+def exchange_request_digest(*, url: str, payload: Mapping[str, Any], attempt: int = 1) -> str:
+    """The content address of one request: url, the whole payload and the attempt number.
+
+    Headers are excluded by design (the credential is not part of the question). `attempt` is
+    the agent's 1-based retry number; it is a storage key only and never reaches the vendor
+    payload. Attempt 1 is the default so a caller that does not retry says nothing new.
+    """
+    if attempt < 1:
+        raise ValueError(f"attempt is 1-based; got {attempt}")
+    canonical = canonical_json_bytes({"attempt": attempt, "payload": dict(payload), "url": url})
     return hashlib.sha256(canonical).hexdigest()
 
 
@@ -113,6 +144,13 @@ class RecordingJsonTransport:
         self.store = store
         self.inner = inner
         self.clock = clock
+        self.last_answer_was_replayed = False
+        """True when the last answer came from the store, so the provider must not bill it.
+
+        Set on every call: a store hit (or an unchanged re-put of a hit) leaves it true and a
+        request that actually reached the inner transport leaves it false. The provider reads
+        it right after a successful call; see this module's docstring.
+        """
 
     def post_json(
         self,
@@ -121,24 +159,64 @@ class RecordingJsonTransport:
         headers: dict[str, str],
         payload: dict[str, Any],
         timeout_seconds: float,
+        attempt: int = 1,
     ) -> dict[str, Any]:
-        """Answer from the store when the request is held; otherwise record with `inner`.
+        """Answer from the store when this attempt is held; otherwise record with `inner`.
 
-        The lookup precedes every other step, so recording the same request twice calls the
-        inner transport exactly once -- a run that repeats a prompt is answered by the first
-        answer. `headers` are forwarded to `inner` and never stored: they are the credential
-        channel, not part of the request's identity.
+        The optional `attempt` keeps this object usable as a plain `JsonTransport`: the provider
+        passes the agent's attempt through `post_json_for_attempt` when it has one, and a direct
+        caller gets attempt 1.
         """
-        request_digest = exchange_request_digest(url=url, payload=payload)
+        return self._answer(
+            url=url,
+            headers=headers,
+            payload=payload,
+            timeout_seconds=timeout_seconds,
+            attempt=attempt,
+        )
+
+    def post_json_for_attempt(
+        self,
+        *,
+        attempt: int,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+        timeout_seconds: float,
+    ) -> dict[str, Any]:
+        """The provider's entry point: the attempt number is part of the lookup address.
+
+        A retry is a different exchange with the same vendor payload, so a retry after an
+        invalid answer gets a fresh answer instead of replaying the one that was rejected.
+        """
+        return self._answer(
+            url=url,
+            headers=headers,
+            payload=payload,
+            timeout_seconds=timeout_seconds,
+            attempt=attempt,
+        )
+
+    def _answer(
+        self,
+        *,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+        timeout_seconds: float,
+        attempt: int,
+    ) -> dict[str, Any]:
+        request_digest = exchange_request_digest(url=url, payload=payload, attempt=attempt)
         held = self.store.get(request_digest)
         if held is not None:
+            self.last_answer_was_replayed = True
             return self._replayed(held)
         if self.inner is None:
             raise ModelExchangeNotStoredError(
-                f"no model exchange is stored under request digest {request_digest} for {url}. "
-                "Replay mode has no transport by design: record the exchange first, or run "
-                "with a live transport; answering an unrecorded request would require the "
-                "network call this mode exists to remove"
+                f"no model exchange is stored under request digest {request_digest} for {url} "
+                f"(attempt {attempt}). Replay mode has no transport by design: record the "
+                "exchange first, or run with a live transport; answering an unrecorded request "
+                "would require the network call this mode exists to remove"
             )
         response = self.inner.post_json(
             url=url,
@@ -147,6 +225,7 @@ class RecordingJsonTransport:
             timeout_seconds=timeout_seconds,
         )
         exchange = ModelExchange(
+            attempt=attempt,
             request_digest=request_digest,
             url=url,
             request=payload,
@@ -154,11 +233,8 @@ class RecordingJsonTransport:
             response_digest=exchange_response_digest(response=response),
             recorded_at=self.clock(),
         )
-        outcome = self.store.put(exchange)
-        if outcome == "unchanged":
-            held = self.store.get(request_digest)
-            if held is not None:
-                return self._replayed(held)
+        self.store.put(exchange)
+        self.last_answer_was_replayed = False
         return copy.deepcopy(response)
 
     @staticmethod

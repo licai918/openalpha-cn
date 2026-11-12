@@ -6,7 +6,7 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -156,8 +156,17 @@ class OpenAICompatibleProvider:
         system: str,
         user: str,
         schema: dict[str, Any],
+        attempt: int = 1,
     ) -> dict[str, Any]:
-        """Generate a JSON object through the documented structured-output shape."""
+        """Generate a JSON object through the documented structured-output shape.
+
+        `attempt` is the caller's 1-based retry number. It never reaches the vendor payload: it
+        is handed to an attempt-aware transport (`post_json_for_attempt`) as a storage key, so a
+        retry after an unusable answer is a distinct recorded exchange and gets a fresh answer
+        instead of replaying the rejected one. See `models/recording.py`.
+        """
+        if attempt < 1:
+            raise ValueError(f"attempt is 1-based; got {attempt}")
         headers = {"Content-Type": "application/json"}
         if self.api_key_env is not None:
             api_key = os.getenv(self.api_key_env, "").strip()
@@ -200,11 +209,11 @@ class OpenAICompatibleProvider:
         while raw is None:
             attempts += 1
             try:
-                raw = self.transport.post_json(
+                raw = self._post(
                     url=f"{self.base_url}/chat/completions",
                     headers=headers,
                     payload=payload,
-                    timeout_seconds=self.timeout_seconds,
+                    attempt=attempt,
                 )
             except ModelTransportError as error:
                 if not error.retryable or attempts >= self.retry_policy.max_attempts:
@@ -226,8 +235,44 @@ class OpenAICompatibleProvider:
             raise ModelResponseError("model response content must be a JSON object")
         if self.require_usage:
             self._require_provider_identity(raw)
-        self._record_usage(raw=raw, attempts=attempts)
+        # A store hit is not a bill: `RecordingJsonTransport` says whether the answer came from
+        # the vendor or from the store, and only the former may append a usage row.
+        if not getattr(self.transport, "last_answer_was_replayed", False):
+            self._record_usage(raw=raw, attempts=attempts)
         return decoded
+
+    def _post(
+        self,
+        *,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+        attempt: int,
+    ) -> dict[str, Any]:
+        """Send one request, passing the attempt number to a transport that stores exchanges.
+
+        A plain `JsonTransport` (the urllib one, a test double) has no attempt dimension and is
+        called exactly as before; an attempt-aware one is asked through
+        `post_json_for_attempt`, so the storage key moves while the vendor payload does not.
+        """
+        attempt_poster = getattr(self.transport, "post_json_for_attempt", None)
+        if callable(attempt_poster):
+            return cast(
+                "dict[str, Any]",
+                attempt_poster(
+                    attempt=attempt,
+                    url=url,
+                    headers=headers,
+                    payload=payload,
+                    timeout_seconds=self.timeout_seconds,
+                ),
+            )
+        return self.transport.post_json(
+            url=url,
+            headers=headers,
+            payload=payload,
+            timeout_seconds=self.timeout_seconds,
+        )
 
     def _require_provider_identity(self, raw: dict[str, Any]) -> None:
         """Refuse a response that names neither its request nor its token usage.

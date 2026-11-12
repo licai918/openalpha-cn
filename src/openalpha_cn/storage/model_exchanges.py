@@ -135,7 +135,9 @@ class FileModelExchangeStore:
                 f"document {requested}: request_digest cannot be re-derived from a request "
                 "that is not a JSON object"
             )
-        recomputed_request = exchange_request_digest(url=exchange.url, payload=request)
+        recomputed_request = exchange_request_digest(
+            url=exchange.url, payload=request, attempt=exchange.attempt
+        )
         if recomputed_request != exchange.request_digest:
             raise ModelExchangeIntegrityError(
                 f"document {requested}: request_digest {exchange.request_digest} does not "

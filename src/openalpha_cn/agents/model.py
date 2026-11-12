@@ -92,7 +92,7 @@ class StructuredSignalAgent:
             ],
         }
         last_error: Exception | None = None
-        for _attempt in range(1, self.max_attempts + 1):
+        for attempt in range(1, self.max_attempts + 1):
             try:
                 raw = self.provider.generate_json(
                     system=self.prompt.system,
@@ -100,6 +100,9 @@ class StructuredSignalAgent:
                         payload_json=json.dumps(user_payload, ensure_ascii=False, sort_keys=True)
                     ),
                     schema=schema,
+                    # A retry is a fresh question for the recorder, never a replay of the
+                    # answer that failed validation (`V2-P7-012`, fix round 1).
+                    attempt=attempt,
                 )
                 payload = StructuredAgentPayload.model_validate(raw)
                 self._validate_context(

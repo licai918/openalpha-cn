@@ -65,6 +65,7 @@ class FakeModelProvider:
         system: str,
         user: str,
         schema: dict[str, Any],
+        attempt: int = 1,
     ) -> dict[str, Any]:
         assert system
         assert "ev_" in user

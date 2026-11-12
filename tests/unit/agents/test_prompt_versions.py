@@ -36,7 +36,9 @@ class _NeverCalledProvider:
         structured_output=True,
     )
 
-    def generate_json(self, *, system: str, user: str, schema: dict[str, Any]) -> dict[str, Any]:
+    def generate_json(
+        self, *, system: str, user: str, schema: dict[str, Any], attempt: int = 1
+    ) -> dict[str, Any]:
         raise AssertionError("the provenance tests never run the agent")
 
 
@@ -127,3 +129,23 @@ def test_a_deterministic_agent_may_not_declare_a_prompt() -> None:
             kind="deterministic",
             prompt=VersionRef(component="prompt:structured-signal/v1", version="a" * 64),
         )
+
+
+# --- fix round 1: a template that cannot be rendered is not a prompt artifact -------------------
+
+
+def test_a_custom_template_that_cannot_be_rendered_is_refused_at_construction() -> None:
+    """Fix round 1, F7: a bad template must fail here, named, not as a `KeyError` mid-cycle.
+
+    A literal-brace JSON example or another placeholder name used to be accepted by
+    `version_ref` and then raise `KeyError`/`IndexError` inside the agent, where the retry
+    `except (ValidationError, ValueError)` does not catch it and the cycle dies unnamed.
+    """
+    for user_format in ('{"example": true}', "{payload}", "{payload_json} {payload_json}", ""):
+        with pytest.raises(ValueError, match="payload_json"):
+            PromptTemplate(name="custom/v1", system="Return JSON.", user_format=user_format)
+
+
+def test_the_default_template_is_accepted_and_renderable() -> None:
+    rendered = STRUCTURED_SIGNAL_PROMPT_V1.user_format.format(payload_json='{"run_id": "r"}')
+    assert rendered == '{"run_id": "r"}'

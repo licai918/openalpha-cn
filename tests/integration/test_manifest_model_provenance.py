@@ -73,7 +73,9 @@ class _FixedProvider:
             capabilities=ModelCapabilities(),
         )
 
-    def generate_json(self, *, system: str, user: str, schema: dict[str, Any]) -> dict[str, Any]:
+    def generate_json(
+        self, *, system: str, user: str, schema: dict[str, Any], attempt: int = 1
+    ) -> dict[str, Any]:
         return {
             "signal": {
                 "subject": "000001.SZ",

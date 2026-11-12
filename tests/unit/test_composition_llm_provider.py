@@ -12,6 +12,7 @@ Three properties are asserted here and each has a failure it exists to stop:
 """
 
 import ast
+import json
 from dataclasses import asdict, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -19,10 +20,15 @@ from typing import Any
 
 import pytest
 
+from openalpha_cn.agents.base import AgentContext
+from openalpha_cn.agents.model import ModelProviderFailure, StructuredSignalAgent
+from openalpha_cn.domain.evidence import EvidenceSnapshot
+from openalpha_cn.domain.time import Timeline
 from openalpha_cn.models.deepseek import DEEPSEEK_V4_1_FLASH, VendorEndpoint
 from openalpha_cn.models.openai_compatible import (
     ModelConfigurationError,
     OpenAICompatibleProvider,
+    UrllibJsonTransport,
 )
 from openalpha_cn.models.recording import RecordingJsonTransport
 from openalpha_cn.runtime.composition import (
@@ -271,3 +277,228 @@ def test_the_endpoint_carries_the_limits_the_batch_was_asked_for() -> None:
     assert endpoint.input_price_per_million == 0
     assert endpoint.output_price_per_million == 0
     assert endpoint.verified_on is None
+
+
+# --- fix round 1: usage is billed only for a request that reached the vendor ------------------
+
+
+class QueuedJsonTransport:
+    """`JsonTransport` double that answers a scripted sequence and counts calls."""
+
+    def __init__(self, responses: list[dict[str, Any]]) -> None:
+        self.responses = list(responses)
+        self.calls: list[dict[str, Any]] = []
+
+    def post_json(
+        self,
+        *,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+        timeout_seconds: float,
+    ) -> dict[str, Any]:
+        self.calls.append({"url": url, "headers": headers, "payload": payload})
+        return self.responses[len(self.calls) - 1]
+
+
+def _response(*, answer: dict[str, Any], request_id: str, prompt_tokens: int = 3) -> dict[str, Any]:
+    return {
+        "id": request_id,
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": 2,
+            "total_tokens": prompt_tokens + 2,
+        },
+        "choices": [{"message": {"content": json.dumps(answer)}}],
+    }
+
+
+def _evidence_item() -> EvidenceSnapshot:
+    return EvidenceSnapshot(
+        subject="000001.SZ",
+        kind="theme",
+        timeline=Timeline(
+            event_time=CLOCK,
+            available_time=CLOCK,
+            ingested_time=CLOCK,
+            revision_time=CLOCK,
+        ),
+        source_id="synthetic",
+        source_uri="fixture://theme",
+        source_license="CC0-1.0",
+        redistribution="allowed",
+        summary="Synthetic theme evidence.",
+        payload={
+            "schema": "a-share-evidence/v1",
+            "family": "theme",
+            "facts": {"theme": "机器人", "score": 0.8},
+            "quality_flags": [],
+        },
+    )
+
+
+def _valid_answer(item: EvidenceSnapshot) -> dict[str, Any]:
+    return {
+        "signal": {
+            "subject": "000001.SZ",
+            "as_of": CLOCK.isoformat(),
+            "direction": "bullish",
+            "strength": 0.5,
+            "confidence": 0.7,
+            "horizon": "5d",
+            "evidence_ids": [item.evidence_id],
+            "confirmation_conditions": ["Theme score remains elevated."],
+            "invalidation_conditions": ["Theme score falls below 0.5."],
+            "risk_flags": [],
+        },
+        "rationale": "The visible theme evidence supports a cautious bullish view.",
+    }
+
+
+def _invalid_answer(item: EvidenceSnapshot) -> dict[str, Any]:
+    answer = _valid_answer(item)
+    answer["signal"]["subject"] = "999999.SH"
+    return answer
+
+
+def _agent(provider: OpenAICompatibleProvider, *, max_attempts: int = 2) -> StructuredSignalAgent:
+    return StructuredSignalAgent(
+        agent_id="model-theme-agent",
+        evidence_families=frozenset({"theme"}),
+        provider=provider,
+        max_attempts=max_attempts,
+    )
+
+
+def _context(item: EvidenceSnapshot) -> AgentContext:
+    return AgentContext(
+        run_id="run_model",
+        subject="000001.SZ",
+        as_of=CLOCK,
+        evidence=(item,),
+    )
+
+
+def test_two_identical_record_mode_calls_write_one_usage_row_and_call_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 1, F1(a): a store hit is not a bill.
+
+    The advancing clock is what makes this a regression test: the second use of the same
+    request is answered from the store, so no second usage row may be written (a second row
+    with the same provider request id and a later `occurred_at` used to raise).
+    """
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-record")
+    times = iter((CLOCK, LATER))
+    fake = FakeJsonTransport(RESPONSE)
+    record = llm_provider(
+        DEEPSEEK_V4_1_FLASH,
+        runtime_dir=tmp_path,
+        clock=lambda: next(times),
+        replay=False,
+        transport=fake,
+    )
+
+    assert record.generate_json(**GENERATE) == {"direction": "up"}
+    assert record.generate_json(**GENERATE) == {"direction": "up"}
+
+    assert len(fake.calls) == 1, "the second call is a store hit"
+    usage = model_usage_store_at(tmp_path).list()
+    assert len(usage) == 1
+    assert usage[0].request_id == "chatcmpl-deepseek-1"
+    # The recording transport takes the first clock value for `recorded_at` and the provider
+    # the next for the usage row; what matters is one row and no conflict.
+    assert usage[0].occurred_at in {CLOCK, LATER}
+
+
+def test_an_unverified_endpoint_refuses_an_explicit_urllib_transport(tmp_path: Path) -> None:
+    """Fix round 1, F5: an injected real transport is still a real request."""
+    with pytest.raises(ModelConfigurationError) as raised:
+        llm_provider(
+            DEEPSEEK_V4_1_FLASH,
+            runtime_dir=tmp_path,
+            clock=lambda: CLOCK,
+            replay=False,
+            transport=UrllibJsonTransport(),
+        )
+
+    message = str(raised.value)
+    assert "DEEPSEEK_V4_1_FLASH" in message
+    assert "verified" in message.lower()
+
+
+def test_a_retry_after_an_invalid_answer_gets_a_fresh_answer_and_the_real_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 1, F1(b): each attempt is its own exchange; a retry is not inert.
+
+    Both recorded answers are invalid for the agent's context, so the run still fails -- but
+    it fails with the agent's own validation reason after two vendor calls, not with a usage
+    conflict whose text hides what the model actually answered.
+    """
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-record")
+    item = _evidence_item()
+    fake = QueuedJsonTransport(
+        [
+            _response(answer=_invalid_answer(item), request_id="chatcmpl-1"),
+            _response(answer=_invalid_answer(item), request_id="chatcmpl-2"),
+        ]
+    )
+    record = llm_provider(
+        DEEPSEEK_V4_1_FLASH,
+        runtime_dir=tmp_path,
+        clock=lambda: CLOCK,
+        replay=False,
+        transport=fake,
+    )
+
+    with pytest.raises(ModelProviderFailure) as raised:
+        _agent(record).analyze(_context(item))
+
+    message = str(raised.value)
+    assert "2 attempts" in message
+    assert "does not match context" in message
+    assert "request_id conflicts" not in message
+    assert len(fake.calls) == 2
+    assert len(model_usage_store_at(tmp_path).list()) == 2
+    exchanges = sorted(model_exchange_store_at(tmp_path).root.glob("*.json"))
+    assert len(exchanges) == 2, "each attempt is its own stored exchange"
+    attempts = {json.loads(path.read_text(encoding="utf-8"))["attempt"] for path in exchanges}
+    assert attempts == {1, 2}
+
+
+def test_the_recorded_retry_sequence_replays_both_attempts_with_zero_inner_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 1, F1: replay reproduces the attempt sequence, not just the first answer."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-record")
+    item = _evidence_item()
+    fake = QueuedJsonTransport(
+        [
+            _response(answer=_invalid_answer(item), request_id="chatcmpl-1"),
+            _response(answer=_invalid_answer(item), request_id="chatcmpl-2"),
+        ]
+    )
+    record = llm_provider(
+        DEEPSEEK_V4_1_FLASH,
+        runtime_dir=tmp_path,
+        clock=lambda: CLOCK,
+        replay=False,
+        transport=fake,
+    )
+    with pytest.raises(ModelProviderFailure) as recorded:
+        _agent(record).analyze(_context(item))
+
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    replay = llm_provider(
+        DEEPSEEK_V4_1_FLASH,
+        runtime_dir=tmp_path,
+        clock=lambda: LATER,
+        replay=True,
+    )
+
+    with pytest.raises(ModelProviderFailure) as replayed:
+        _agent(replay).analyze(_context(item))
+
+    assert str(replayed.value) == str(recorded.value)
+    assert len(fake.calls) == 2, "replay must reach neither the fake nor a real transport"

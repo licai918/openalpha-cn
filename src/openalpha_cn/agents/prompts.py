@@ -20,6 +20,7 @@ request bytes, so "the prompt became versioned" may not quietly mean "the prompt
 """
 
 import hashlib
+import string
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Final
@@ -40,6 +41,32 @@ class PromptTemplate:
     system: str
     user_format: str
     """The user message template; `{payload_json}` is the rendered user payload."""
+
+    def __post_init__(self) -> None:
+        """Refuse a template that cannot be rendered, at construction, by name.
+
+        Fix round 1, F7: `StructuredSignalAgent` renders this with
+        `.format(payload_json=...)`, so a literal-brace JSON example or another placeholder name
+        raised `KeyError`/`IndexError` *inside the cycle* -- not caught by the agent's
+        `except (ValidationError, ValueError)` -- after `version_ref` had already accepted the
+        template as an artifact. Validation belongs where the artifact is created.
+        """
+        try:
+            fields = [
+                field_name
+                for _, field_name, _, _ in string.Formatter().parse(self.user_format)
+                if field_name is not None
+            ]
+        except ValueError as error:
+            raise ValueError(
+                f"prompt {self.name!r}: user_format must contain exactly one "
+                f"{{payload_json}} field; its braces are not a legal template ({error})"
+            ) from error
+        if fields != ["payload_json"]:
+            raise ValueError(
+                f"prompt {self.name!r}: user_format must contain exactly one "
+                f"{{payload_json}} field; it declares {fields!r}"
+            )
 
     def version_ref(self, *, response_schema: Mapping[str, Any]) -> VersionRef:
         """The content address of this template as it will be sent with `response_schema`."""

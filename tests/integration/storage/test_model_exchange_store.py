@@ -40,6 +40,7 @@ RESPONSE: dict[str, Any] = {
 def _exchange(*, response: dict[str, Any] = RESPONSE) -> ModelExchange:
     digest = exchange_request_digest(url=URL, payload=PAYLOAD)
     return ModelExchange(
+        attempt=1,
         request_digest=digest,
         url=URL,
         request=PAYLOAD,

@@ -81,7 +81,9 @@ class _StubLlmProvider:
             structured_output=True,
         )
 
-    def generate_json(self, *, system: str, user: str, schema: dict[str, Any]) -> dict[str, Any]:
+    def generate_json(
+        self, *, system: str, user: str, schema: dict[str, Any], attempt: int = 1
+    ) -> dict[str, Any]:
         self.calls.append((system, user))
         return {"scores": dict(self._scores)}
 
@@ -106,6 +108,9 @@ def test_the_llm_boundary_declares_no_member_that_could_receive_a_panel_fit() ->
         ("system", "str"),
         ("user", "str"),
         ("schema", "dict[str, Any]"),
+        # `V2-P7-012` (fix round 1): the 1-based retry ordinal a recording provider uses as a
+        # storage key. An integer, not a data slot -- see the test below.
+        ("attempt", "int"),
     )
     assert members["generate_json"].returns is not None
     assert ast.unparse(members["generate_json"].returns) == "dict[str, Any]"
@@ -122,7 +127,7 @@ def test_no_parameter_of_the_llm_boundary_can_carry_an_as_of_or_a_security() -> 
     generate_json = _protocol_members("ModelProvider")["generate_json"]
     annotations = dict(_annotations(generate_json))
 
-    assert set(annotations.values()) == {"str", "dict[str, Any]"}
+    assert set(annotations.values()) == {"str", "dict[str, Any]", "int"}
     assert not any(
         "date" in annotation or "time" in annotation for annotation in annotations.values()
     ), "no parameter is dated, so an as_of can only be passed as prose"

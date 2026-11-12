@@ -201,3 +201,50 @@ def test_the_response_digest_covers_the_decoded_response_not_the_wire_bytes() ->
     )
     changed = dict(RESPONSE, id="chatcmpl-2")
     assert exchange_response_digest(response=RESPONSE) != exchange_response_digest(response=changed)
+
+
+# --- the attempt number (fix round 1, finding 1) ------------------------------------------------
+
+
+def test_the_attempt_number_joins_the_request_address_and_never_the_payload() -> None:
+    """A retry is a different question; the vendor is asked the same bytes."""
+    first = exchange_request_digest(url=URL, payload=PAYLOAD, attempt=1)
+    second = exchange_request_digest(url=URL, payload=PAYLOAD, attempt=2)
+    assert first != second
+    assert exchange_request_digest(url=URL, payload=PAYLOAD) == first, "attempt 1 is the default"
+
+    store = MemoryModelExchangeStore()
+    inner = CountingJsonTransport(RESPONSE)
+    _record(store, inner).post_json(
+        url=URL, headers={}, payload=PAYLOAD, timeout_seconds=30.0, attempt=2
+    )
+
+    stored = next(iter(store.exchanges.values()))
+    assert stored.attempt == 2
+    assert stored.request_digest == second
+    assert [call["payload"] for call in inner.calls] == [PAYLOAD], (
+        "the attempt is a storage key; the vendor payload is unchanged"
+    )
+    # The same bytes at attempt 2 replay; attempt 1 was never recorded.
+    assert (
+        _replay(store).post_json(
+            url=URL, headers={}, payload=PAYLOAD, timeout_seconds=30.0, attempt=2
+        )
+        == RESPONSE
+    )
+    with pytest.raises(ModelExchangeNotStoredError):
+        _replay(store).post_json(url=URL, headers={}, payload=PAYLOAD, timeout_seconds=30.0)
+
+
+def test_a_record_mode_store_hit_reports_that_it_did_not_call_the_inner_transport() -> None:
+    """The provider accounts usage only for a request that actually reached the vendor."""
+    store = MemoryModelExchangeStore()
+    inner = CountingJsonTransport(RESPONSE)
+    transport = _record(store, inner)
+
+    transport.post_json(url=URL, headers={}, payload=PAYLOAD, timeout_seconds=30.0)
+    assert transport.last_answer_was_replayed is False
+
+    transport.post_json(url=URL, headers={}, payload=PAYLOAD, timeout_seconds=30.0)
+    assert transport.last_answer_was_replayed is True
+    assert len(inner.calls) == 1

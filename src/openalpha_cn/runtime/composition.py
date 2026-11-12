@@ -361,17 +361,26 @@ def llm_provider(
       endpoint and its documentation URL; an injected transport (tests) and replay are allowed,
       because neither reaches the vendor.
 
-    Usage is attached in record mode only: the row is billed when the request was made, and a
-    replay must not append a second one -- `SQLiteModelUsageStore.append` is idempotent only for
-    a byte-identical payload, and a replayed `occurred_at` is a different wall clock.
+    Usage is attached in record mode only: the provider appends a row only when the inner
+    transport was actually called, so a store hit (a rerun, a crash-and-retry, a second agent
+    sending identical bytes) and a replay add none. The vendor is billed once, when it answered.
+
+    **An unverified endpoint may only be reached through a test transport** (fix round 1). A
+    real request is the default transport (`transport=None` becomes `UrllibJsonTransport`) or
+    one the caller passes explicitly, and both are refused while `verified_on is None`. Writing
+    `transport=UrllibJsonTransport()` used to bypass the gate, which is exactly how a future
+    probe script would spend a request against the placeholder model id.
     """
-    if not replay and transport is None and endpoint.verified_on is None:
+    live_transport = transport is None or isinstance(transport, UrllibJsonTransport)
+    if not replay and endpoint.verified_on is None and live_transport:
         raise ModelConfigurationError(
             f"{endpoint.name} ({endpoint.provider_id}/{endpoint.model}) has not been verified: "
             "its model id, base URL, structured-output mode and prices must be filled from "
             f"{endpoint.documentation_url} and `verified_on` set to the date of that reading "
-            "before a live request is spent. Replay and an injected transport are allowed while "
-            "it is unverified; this refusal is the difference between configured and verified"
+            "before a live request is spent. Replay and an explicitly injected test transport "
+            "are allowed while it is unverified; a real transport (None or "
+            "UrllibJsonTransport) is not. This refusal is the difference between configured and "
+            "verified"
         )
     inner: JsonTransport | None = None if replay else (transport or UrllibJsonTransport())
     recording = RecordingJsonTransport(

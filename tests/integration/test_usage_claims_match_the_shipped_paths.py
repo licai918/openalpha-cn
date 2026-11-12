@@ -7,10 +7,12 @@ SDK -- creates its `model_usage` table in `state.sqlite3`. Nothing shipped write
 one writer is `OpenAICompatibleProvider._record_usage`, which appends a `ModelUsageRecord`
 (tokens, attempts, and a cost estimated from user-configured prices) when the provider was built
 with a `usage_store` and the endpoint reported usage. No module under `src/` or `scripts/`
-constructs that provider -- only `tests/unit/models/` does -- and no CLI command, REST route or
-SDK method reads or writes the ledger. Beneath that sits a wider fact: no shipped path calls a
-model at all. The one model call under `src/` is `StructuredSignalAgent.analyze`'s
-`generate_json`, and nothing under `src/` or `scripts/` constructs that agent or a
+constructs that provider except `V2-P7-012`'s `runtime/composition.llm_provider`, which
+*assembles* it (around the exchange recorder and, in record mode, the usage store) without making
+a request; no CLI command, REST route or SDK method invokes that assembly or reads or writes the
+ledger. Beneath that sits a wider fact: no shipped path calls a model at all. The one model
+call under `src/` is `StructuredSignalAgent.analyze`'s `generate_json`, and nothing under
+`src/` or `scripts/` constructs that agent or a
 `ModelRegistry`; a model is reached only through code a user writes -- an agent they build and
 pass in, as `OpenAlphaSDK(agents=...)` accepts. So "Token and estimated cost are recorded" is
 true of a component a deployer can wire, and false of the product as it ships.
@@ -641,6 +643,26 @@ USAGE_SITES: Final[dict[UsageSite, Counted]] = {
     _site("storage/models.py", "SQLiteModelUsageStore.list", TABLE_NAMED): Counted(
         2, "The two `SELECT`s that read rows back."
     ),
+    _site("runtime/composition.py", "<module>", PROVIDER_NAMED): Counted(
+        1,
+        "The import that lets `llm_provider` name the class (`V2-P7-012`). An import statement: "
+        "it constructs nothing and calls nothing.",
+    ),
+    _site("runtime/composition.py", "llm_provider", PROVIDER_NAMED): Counted(
+        2,
+        "`llm_provider`'s return annotation and the `OpenAICompatibleProvider(...)` it returns "
+        "(`V2-P7-012`). It assembles the provider and posts nothing; calling it needs a caller "
+        "with a transport, and no shipped command, route or SDK method calls it.",
+    ),
+    _site("runtime/composition.py", "llm_provider", CALLED_KINDS[PROVIDER_NAMED]): Counted(
+        1, "The same construction, counted again as a call (`V2-P7-012`)."
+    ),
+    _site("runtime/composition.py", "llm_provider", PROVIDER_STORE_NAMED): Counted(
+        1,
+        "`llm_provider` hands the provider the usage store in record mode (`V2-P7-012`). "
+        "Constructing a provider posts nothing; a row is written only when a caller invokes it "
+        "against a vendor, and no shipped command, route or SDK method does.",
+    ),
 }
 """Every `UsageSite` outside `tests/`, with how often it occurs and why it neither calls a model
 nor records usage."""
@@ -1134,7 +1156,10 @@ def test_the_premise_does_not_see_a_partial_bound_to_a_name_first() -> None:
         sdk: sources[sdk] + "\n\nfrom openalpha_cn.models import DEFAULT_PROVIDER\n\n"
         "_PROBE = DEFAULT_PROVIDER()\n",
     }
-    assert not _premise_problems(_usage_sites(swapped.items())), (
+    # The blind spot is real when the swap adds no site; today's tree has sites of its own
+    # (`V2-P7-012`'s two in `runtime/composition.py`), so compare sets rather than emptiness.
+    baseline = set(_premise_problems(_usage_sites(sources.items())))
+    assert set(_premise_problems(_usage_sites(swapped.items()))) == baseline, (
         "a partial bound to a name is now seen: update the module docstring and delete this test"
     )
 
@@ -1160,7 +1185,8 @@ def test_the_premise_scans_stated_blind_spot_is_real() -> None:
         "_PROBE = PROVIDERS['openai-compatible'](provider_id='p', model='m',\n"
         "    base_url='https://example.test', api_key_env=None)\n",
     }
-    assert not _premise_problems(_usage_sites(swapped.items())), (
+    baseline = set(_premise_problems(_usage_sites(sources.items())))
+    assert set(_premise_problems(_usage_sites(swapped.items()))) == baseline, (
         "the table swap is now seen: update the module docstring and delete this test"
     )
 

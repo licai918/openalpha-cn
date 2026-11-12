@@ -42,5 +42,11 @@ class ModelProvider(Protocol):
         system: str,
         user: str,
         schema: dict[str, Any],
+        attempt: int = 1,
     ) -> dict[str, Any]:
-        """Generate one JSON object conforming to the requested schema."""
+        """Generate one JSON object conforming to the requested schema.
+
+        `attempt` is the caller's 1-based retry number, for providers that record their
+        exchanges: a retry must be a fresh request, not a replay of the answer that was already
+        rejected. It is not part of what the vendor is asked.
+        """
