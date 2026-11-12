@@ -5,7 +5,7 @@
 ## 0. 先读这几句
 
 - 本批次做的是方案 C 的三个 issue：`V2-P7-011`（面板推导的涨停 / 炸板 / 连板证据生产者）、`V2-P7-012`（DeepSeek 模型接入：Provider 配置、用量记账、提示词版本化、原始响应内容寻址存储）、`V2-P7-015`（LLM 历史污染护栏）。实施计划是任务书，**不在版本库内**：`.superpowers/sdd/c-batch-1/plan.md`（`.superpowers/` 不入库），本文是它的版本化记录。
-- 代码在分支 `feat/v2-p7-c-batch-1` 上（从 `main` 的 `5e5218e` 分出）。**代码提交 16 个**（`git log --format='%h %s' 5e5218e..HEAD` 里除文档提交外的全部）；代码改动 38 个文件、+5,301 / −93（`git diff --stat 5e5218e..60328b2`；其后只有一个测试改名提交 `f645950` 触及代码）。文档提交另计（本文初版、其提交清单更正与路线图/§9/台账），最终的 tip 与完整清单以控制者的报告与 `git log` 为准。
+- 代码在分支 `feat/v2-p7-c-batch-1` 上（从 `main` 的 `5e5218e` 分出）。**到 `60328b2`（评审与修复轮之前）为止的代码提交是 16 个**；修复轮又加了三个改代码的提交（`fa41fdc`、`3549f2d`、`9a5f5ef`），所以到本文写作时的 tip 共有 19 个非文档提交。**38 个文件、+5,301 / −93 是 `5e5218e..60328b2` 的截面（修复轮之前）**；完整的 tip 与整体差异请以 `git log --format='%h %s' 5e5218e..HEAD` 与 `git diff --stat 5e5218e..HEAD` 为准。文档提交另计（本文初版、其提交清单更正、路线图/§9/台账与修复轮的记录）。
 - **未推送、未合并。** 交付的代码**没有跑过任何真实构建、因子、读数或冒烟，一次 Tushare 请求也没有发过，一次 DeepSeek（或任何 LLM）请求也没有发过**：所有测试都跑在测试时生成的夹具、已存的假记录和注入的假传输上。计划里那次 ≤5 次请求的联网探针**没有做**，等用户明确授权。
 - **没有任何 P7 登记存在，`docs/research/p7-registration.json` 没有写出，也没有任何绑定被作废**；issue 总数仍是 253（本批次只关闭三行的代码部分，不关闭任何一行）。
 - `DEEPSEEK_V4_1_FLASH` 是**占位**：model、base_url、structured_output_mode、价格都等人从 `api-docs.deepseek.com` 填，`verified_on=None`，`api_key_env="DEEPSEEK_API_KEY"` 是变量名而不是密钥。**没有一处把占位写成已核实**，也没有任何模型 id / endpoint 被当成“已核实”引用。
@@ -21,7 +21,7 @@
 - **面板适配器**（`src/openalpha_cn/panel_limit_events.py`）：`limit_events_on(store, *, session, as_of, exchange="SSE", max_lookback=60)`。目标会话先读，只有当日有触及的证券才回看；更早的开放会话**惰性**读，直到没有候选还能延续；每条会话（含更早的）都用调用者的同一个 `as_of` 经 `load_daily_bars` / `load_price_limits` 的点时门读；1 月的连板跨年时加载上一年的 `trade_cal` 再继续；`session` 的 16:30 之前按名拒绝（点名的是事件生产者，不是底层 loader）。模块的依赖行、跨缝 import 名与可达数据集写进了 `tests/unit/test_panel_ingest_import_isolation.py`，top-level 模块也进了 `pyproject.toml` 的 `backtest-no-numeric-stack-or-panel-plane` 禁止表。
 - **证据平面**（`src/openalpha_cn/evidence/limit_events.py`）：`limit_event_snapshots` 经 `EvidenceBuilder.build` 生成 `EvidenceSnapshot`，用 builder 已经声明的 `limit_up` / `consecutive_board` / `broken_board` 三个 `market_event` 种类（没有新证据种类，也没有改任何已存行的字段）；`event_time` 是会话当日 15:00 上海、`available_time` = `revision_time` = 当日 16:30（`panel_ingest.session_publication_instant`）、`ingested_time` 是本次写入时刻；`evidence_id` 不含入库时刻，所以重跑是同一批内容寻址证据。`refuse_a_restated_session` 在 append 之前查会话发布时刻可见的 limit-kind 证据，id 集合不同就按名拒绝（`LimitEvidenceConflictError`），不写第二个互相矛盾的版本。
 - **组合根与 CLI**：`runtime/composition.py` 新增 `EVIDENCE_DIRECTORY` 与 `evidence_store_at(runtime_dir)`，`build_storage` 经它打开同一路径（硬规则 5），没有给 `StorageContainer` 加字段（仍是 16 个）。`openalpha evidence limit-events --session D [--through E] [--runtime-dir] [--exchange] [--json]` 逐个开放会话在**各自的 16:30** 读、经 opener append；零事件写为空、打印 `NO limit events session=D`。台账行 `OA-EVID-010`。
-- **测试**：`tests/unit/domain/test_limit_events.py`（9）、`tests/integration/panel/test_limit_event_producer.py`（7）、`tests/integration/test_limit_event_evidence.py`（6）；另有隔离表的行、`tests/panel_fixtures.py` 的 opt-in 生成器 `generate_limit_streak_panel()`（**面板夹具在测试时生成**，没有入库 `.parquet`/`.duckdb`/`.sqlite3`）。
+- **测试**：`tests/unit/domain/test_limit_events.py`（10）、`tests/integration/panel/test_limit_event_producer.py`（8）、`tests/integration/test_limit_event_evidence.py`（8）——修复轮各加了测试（停牌计数、面板边缘、别的 provider 的行与 `--json` 的部分记录）；另有隔离表的行、`tests/panel_fixtures.py` 的 opt-in 生成器 `generate_limit_streak_panel()`（**面板夹具在测试时生成**，没有入库 `.parquet`/`.duckdb`/`.sqlite3`）。
 - **未做 / 未关闭**：没有读真实面板、没有真实数据验收；本行保持打开。**偏离**：计划说夹具是 `PANEL_SHAPES` 的一个 opt-in 行，实际做成了 opt-in 构造函数——形状表有闭合性守卫（`tests/unit/test_panel_fixtures.py` 的 `EXPECTED_SHAPE_IDS`、触发矩阵，`tests/integration/panel/test_panel_shape_coverage.py`），修改它们不在本任务的写范围；构造函数是追加式、公开的，面板仍在测试时生成并经真实 writer 写入。另：CLI 多了一个 `--exchange`（默认 `TRADING_CALENDAR_DEFAULT_EXCHANGE`），计划方括号列表没写，但其它 `panel` 命令都有。
 
 ### `V2-P7-012` DeepSeek 模型接入——代码已交付、本行未关闭
@@ -94,7 +94,7 @@
 
 评审 1（`/Users/licai918me.com/Documents/OpenAlpha cn/.superpowers/sdd/c-batch-1/review-1.md`，0 critical / 1 important / 7 minor）与控制器裁决（`ledger.md`）之后的一轮修复。每条都先写失败测试、看到正确的失败原因，再修：
 
-- **F1（`V2-P7-012`，important）用量与重试**：`RecordingJsonTransport` 现在把 1-based 尝试号作为**请求摘要（存储键）**的一部分（`ModelExchange.attempt`，不进厂商 payload），每次尝试是独立存储的交换，回放复现同一串尝试；`last_answer_was_replayed` 让 provider 只在**内层传输真的被调用**时入账，所以记录模式的存储命中与回放都不写第二行用量；`StructuredSignalAgent` 的重试把尝试号交给 provider，第一次答案校验失败后的重试拿到的是新答案，全败时报告真实的校验错误而不是用量冲突。
+- **F1（`V2-P7-012`，important）用量与重试**：评审复现的缺陷是记录模式的一次存储命中仍会为同一请求再追加一行用量（推进的时钟下就是 `ValueError: model usage request_id conflicts`）；本批次把它钉成"第二次相同的记录模式调用不得再入账"。`RecordingJsonTransport` 现在把 1-based 尝试号作为**请求摘要（存储键）**的一部分（`ModelExchange.attempt`，不进厂商 payload），每次尝试是独立存储的交换，回放复现同一串尝试；`last_answer_was_replayed` 让 provider 只在**内层传输真的被调用**时入账，所以记录模式的存储命中与回放都不写第二行用量；`StructuredSignalAgent` 的重试把尝试号交给 provider，第一次答案校验失败后的重试拿到的是新答案，全败时报告真实的校验错误而不是用量冲突。
 - **F2（`V2-P7-011`）**：`refuse_a_restated_session` 只比较本生产者（`source_id == "openalpha-panel-derived"`）的限价事件，别的 provider（如 `chainlin` 的同三种 kind）同一时刻的行不再被读成"被改写"。
 - **F3（`V2-P7-011`）**：连板回看走到面板存下的最早年份边缘（上一年日历/分区读不出）时，结束回看并把仍活着的候选的 `board_count_is_lower_bound` 标真，不再丢掉整场的所有事件；目标年之内缺分区仍是拒绝。
 - **F4（`V2-P7-011`）**：测试改名为 `test_a_restated_earlier_bar_is_refused_at_the_original_as_of`；上一节（§6）补上"被改写的会话不能按原样重放"和"规则/摘要编辑会冻结已写出会话的重跑"两条后果。
