@@ -51,3 +51,27 @@ def test_every_committed_survivor_registration_is_frozen_and_chained() -> None:
         assert body["criteria"] == criteria, path
         assert body["settings"] == settings, path
         assert body["config_id"] == grid.config_id(config), path
+
+
+PROTOCOL: Final[Path] = ROOT / "docs/research/p7-protocol.md"
+"""The protocol document the registration is read against (plan section 3)."""
+
+
+def test_the_protocol_states_the_frozen_numbers() -> None:
+    assert PROTOCOL.is_file(), f"{PROTOCOL} is not written yet"
+    text = PROTOCOL.read_text(encoding="utf-8")
+
+    for token in (
+        "0.02",
+        "K = 36",
+        "18",
+        "20260926",
+        "seeded_hash/v1",
+        "350,000",
+        "±2.9pp",
+        "不是证据",
+        "候选",
+    ):
+        assert token in text, f"the protocol does not state {token!r}"
+    for forbidden in ("已验证", "证实有效", "proven"):
+        assert forbidden not in text, f"the protocol claims {forbidden!r}"
