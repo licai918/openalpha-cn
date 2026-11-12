@@ -365,7 +365,15 @@ def _openalpha_remedy(arguments: Sequence[str], *, runtime: Path) -> Remedy:
         # (one range request and one confirmation per differing session), not the whole year.
         restated = tuple(str(code) for code in parameters.get("restate_subject") or ())
         years = tuple(parameters.get("year") or ())
-        narrow_restatement = bool(restated) and datasets == {"adj_factor"} and len(years) == 1
+        # Mirror the CLI's exclusivity, not only its dataset/year shape (fix round 1, finding 7):
+        # a restate-shaped line that adds a mode the CLI refuses is not the narrow restatement.
+        refused_modes = ("resume", "subject", "return_paths_from_store", "start", "end")
+        narrow_restatement = (
+            bool(restated)
+            and datasets == {"adj_factor"}
+            and len(years) == 1
+            and not any(parameters.get(flag) for flag in refused_modes)
+        )
         if not narrow_restatement:
             raise RemedyError(
                 "this is the full rebuild of the session-scoped targets -- the whole-year "

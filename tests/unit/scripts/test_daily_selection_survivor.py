@@ -1651,3 +1651,52 @@ def test_a_restatement_remedy_is_printed_pinned_after_the_panel_refusal(
         )
 
     assert daily.pinned_command(command) in str(error.value)
+
+
+def _update_with_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stderr: str,
+) -> None:
+    """Drive step 2 with a refused panel build whose stderr is `stderr`."""
+    runtime = tmp_path / "runtime"
+    refusal = daily.Invocation(exit_code=1, stdout="", stderr=stderr)
+    monkeypatch.setattr(daily, "_panel_build", lambda *args, **kwargs: refusal)
+    daily.update_panel(
+        runtime,
+        session=date(2026, 11, 12),
+        as_of=datetime(2026, 11, 12, 16, 30, tzinfo=daily.SHANGHAI),
+        exchange="SSE",
+        targets=(ADJ_FACTOR_DATASET,),
+        next_year=False,
+    )
+
+
+def test_an_empty_remedy_line_is_a_named_step_failure_not_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 1, finding 6: a `REMEDY ` line with nothing after it is treated as no remedy at
+    all (the step still fails by name with the panel's own refusal); it must not raise the
+    `ValueError` an empty `pinned_command([])` produces, which would escape as a crash."""
+    with pytest.raises(daily.StepFailedError) as error:
+        _update_with_refusal(
+            tmp_path, monkeypatch, "the panel refused this build: restated factor\nREMEDY \n"
+        )
+
+    assert "the panel refused this build" in str(error.value)
+
+
+def test_an_unparsable_remedy_line_is_a_named_step_failure_not_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 1, finding 6: a `REMEDY` line whose shell quoting cannot be read is named on the
+    step-2 failure that already reports the panel's refusal; it must not escape as `ValueError`."""
+    with pytest.raises(daily.StepFailedError) as error:
+        unreadable = (
+            "the panel refused this build: restated factor\n"
+            'REMEDY openalpha panel build "unclosed\n'
+        )
+        _update_with_refusal(tmp_path, monkeypatch, unreadable)
+
+    assert "the panel refused this build" in str(error.value)
+    assert "REMEDY" in str(error.value)

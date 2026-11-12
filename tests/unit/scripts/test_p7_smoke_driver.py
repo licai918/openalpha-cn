@@ -1816,15 +1816,32 @@ def test_a_restatement_remedy_is_a_remedy_the_smoke_runs(tmp_path: Path) -> None
 
 
 def test_a_restate_shaped_rebuild_that_is_not_narrow_is_still_refused(tmp_path: Path) -> None:
-    """The exception is the narrow shape only: a restate-shaped command that also names another
-    dataset is the whole-year rebuild the smoke never runs, and is refused by name."""
+    """The exception is the narrow shape only, and the driver checks the whole shape the CLI
+    enforces: a restate-shaped command that adds a dataset, a second year, or a mode the CLI
+    refuses (`--resume` here) is not the narrow restatement, and is refused by name."""
     paths = _paths(tmp_path)
     runtime = str(paths["runtime"])
-    wider = [
-        "openalpha", "panel", "build", "--runtime-dir", runtime, "--year", "2026",
+    head = [
+        "openalpha", "panel", "build", "--runtime-dir", runtime,
         "--as-of", "2026-11-12T16:30:00+08:00", "--exchange", "SSE",
-        "--dataset", "adj_factor", "--dataset", "price", "--restate-subject", "002851.SZ",
     ]  # fmt: skip
+    narrow = ["--dataset", "adj_factor", "--year", "2026", "--restate-subject", "002851.SZ"]
+    variants = {
+        "another dataset": [
+            *head,
+            "--dataset",
+            "adj_factor",
+            "--dataset",
+            "price",
+            "--year",
+            "2026",
+            "--restate-subject",
+            "002851.SZ",
+        ],
+        "two years": [*head, *narrow, "--year", "2025"],
+        "resume": [*head, *narrow, "--resume"],
+    }
 
-    with pytest.raises(driver.RemedyError, match="whole-year rebuild"):
-        driver.parse_remedy(daily.pinned_command(wider), **paths)
+    for command in variants.values():
+        with pytest.raises(driver.RemedyError, match="whole-year rebuild"):
+            driver.parse_remedy(daily.pinned_command(command), **paths)

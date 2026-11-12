@@ -4786,7 +4786,12 @@ class AdjustmentRestatement:
     ts_code: str
     year: int
     sessions: tuple[date, ...]
-    """The differing sessions, in date order -- the stored change rows the upstream re-served."""
+    """The differing sessions, in date order.
+
+    **Every expanded session** whose stored step value differs from the served one -- not only the
+    stored change rows. Restating a factor level the store held across many sessions therefore
+    yields one differing session per session, so the confirmation limit counts sessions, not
+    change points (D-3)."""
     served: Mapping[date, float]
     """The factor the year history answered, over every required session of the span."""
     stored: Mapping[date, float]
@@ -4794,6 +4799,14 @@ class AdjustmentRestatement:
     history: ColumnarPanelBatch
     stored_subject: ColumnarPanelBatch
     others: ColumnarPanelBatch | None
+    partition_horizon: date
+    """The stored year's closing session -- the last session the whole partition covers.
+
+    The write's session census starts the day after this, and closes at it: every session up to
+    here is either carried from the stored partition or answered by the history, and no fetched
+    session past it exists (the history is pinned to it). Anchoring on the security's own closing
+    row instead would misrefuse a security whose last stored row is before the partition's -- a
+    delisting, for instance."""
     observed_at: datetime
     date_timezone: str
 
@@ -4805,6 +4818,7 @@ def restated_adjustment_sessions(
     history: ColumnarPanelBatch,
     calendar: TradingCalendar,
     year: int,
+    rebuild: str,
     observed_at: datetime,
     date_timezone: str = DEFAULT_DATE_TIMEZONE,
 ) -> AdjustmentRestatement:
@@ -4818,8 +4832,9 @@ def restated_adjustment_sessions(
     - **no stored year**: the remedy rewrites a stored partition; without one there is nothing to
       restate, and a build is the command that creates it;
     - **the history does not cover the subject's span** -- every open session from
-      `max(1 January, its first stored row)` to its stored closing anchor: a partial answer is not
-      evidence about the sessions it lacks;
+      `max(1 January, its first stored row)` to its stored closing anchor: a missing session can
+      be a partial answer or a withdrawal, so the refusal names the rebuild rather than telling
+      the caller to fetch the year it just fetched;
     - **a stored change row the upstream no longer serves**: that is a withdrawal (`V2-P6-016`'s
       path), never a restatement -- a fetch fault that drops a row must not be healed as one;
     - **nothing differs**: the store is right and there is nothing to record.
@@ -4863,6 +4878,7 @@ def restated_adjustment_sessions(
             "no longer serves is a withdrawal (V2-P6-016's path), not a restatement, and nothing "
             f"was written. Rebuild {ADJ_FACTOR_DATASET} for the year"
         )
+    partition_horizon = max(_adjustment_dates(_column_values(stored, ADJUSTMENT_DATE_COLUMN)))
     others_at = [index for index, subject in enumerate(stored.subjects) if subject != ts_code]
     stored_subject = _select_rows(stored, subject_at)
     others = _select_rows(stored, others_at) if others_at else None
@@ -4887,9 +4903,11 @@ def restated_adjustment_sessions(
         raise PanelBatchError(
             f"the {ADJ_FACTOR_DATASET} year history for {ts_code} does not cover {len(missing)} "
             f"open session(s) between {max(date(year, 1, 1), first_stored).isoformat()} and "
-            f"{anchor.isoformat()}: {_date_sample(missing)}. A partial answer is not a "
-            "restatement, and rewriting the year from it would store a hole; nothing was "
-            "written. Fetch the whole year in one range request"
+            f"{anchor.isoformat()}: {_date_sample(missing)}. A missing session can be a partial "
+            "answer or a withdrawal -- the upstream no longer serving a row the store holds is "
+            "`V2-P6-016`'s path, not a restatement -- so retry the range request, and if it keeps "
+            "coming back short the year must be rebuilt in full. Nothing was written. Rebuild: "
+            f"`{rebuild}`"
         )
     factor_table = [
         (subject, day.isoformat(), factor)
@@ -4938,6 +4956,7 @@ def restated_adjustment_sessions(
         history=history_kept,
         stored_subject=stored_subject,
         others=others,
+        partition_horizon=partition_horizon,
         observed_at=observed_at,
         date_timezone=date_timezone,
     )
@@ -5018,6 +5037,7 @@ def restate_adjustment_subject(
     restatement: AdjustmentRestatement,
     confirmations: Mapping[date, ColumnarPanelBatch],
     calendar: TradingCalendar,
+    rebuild: str,
     before_write: Callable[[ColumnarPanelBatch], None],
 ) -> RestatedRows:
     """Confirm and write one security's restatement, recording each differing session
@@ -5034,9 +5054,10 @@ def restate_adjustment_subject(
     `revision_time` -- and one `write_adjustment_factors` call over the subject's served rows
     plus every other security's stored rows. `before_write` is handed the record batch and runs
     after the writer's guards pass and before the partition is written, so a refused write leaves
-    no record. The partition's census starts the day after the stored closing anchor: the stored
-    sessions were censused when the partition was written, and `restated_adjustment_sessions` has
-    already refused a history shorter than that span.
+    no record. The partition's census starts the day after the stored partition's closing session
+    (`AdjustmentRestatement.partition_horizon`): the stored sessions were censused when the
+    partition was written, and `restated_adjustment_sessions` has already refused a history
+    shorter than the subject's span.
     """
     confirmed_at = max(
         (batch.fetched_at for batch in confirmations.values() if batch.status == "success"),
@@ -5061,8 +5082,10 @@ def restate_adjustment_subject(
         batch = confirmations.get(day)
         if batch is None or batch.status != "success":
             raise PanelBatchError(
-                f"{restatement.ts_code} on {day.isoformat()}: the restatement was not confirmed "
-                "by a one-session re-fetch; nothing was written"
+                f"{restatement.ts_code} on {day.isoformat()}: the one-session confirmation "
+                "answered no row where the year history served one. A stored row the upstream no "
+                "longer serves is a withdrawal (V2-P6-016's path), not a restatement; nothing was "
+                f"written. Rebuild {ADJ_FACTOR_DATASET} for the year: `{rebuild}`"
             )
         answered = _refetched_return_path_rows(
             [batch],
@@ -5076,7 +5099,8 @@ def restate_adjustment_subject(
                 f"{restatement.ts_code} on {day.isoformat()}: the one-session confirmation "
                 f"served no {ADJ_FACTOR_DATASET} row where the year history served {expected!r}. A "
                 "stored row the upstream no longer serves is a withdrawal (V2-P6-016's path), not "
-                f"a restatement; nothing was written. Rebuild {ADJ_FACTOR_DATASET} for the year"
+                f"a restatement; nothing was written. Rebuild {ADJ_FACTOR_DATASET} for the year: "
+                f"`{rebuild}`"
             )
         if answered[0] != expected:
             raise PanelBatchError(
@@ -5084,7 +5108,7 @@ def restate_adjustment_subject(
                 f"{ADJ_FACTOR_DATASET} {expected!r} and a one-session re-fetch answered "
                 f"{answered[0]!r}. A restatement is recorded only once the upstream publishes it "
                 "twice, and a second answer that differs is a fetch fault; nothing was written. "
-                f"Rebuild {ADJ_FACTOR_DATASET} for the year instead"
+                f"Rebuild {ADJ_FACTOR_DATASET} for the year instead: `{rebuild}`"
             )
         event, available, ingested = row_clocks.get(
             day,
@@ -5111,16 +5135,13 @@ def restate_adjustment_subject(
         observed_at=restatement.observed_at,
         provider_id=restatement.history.provider_id,
     )
-    anchor = max(
-        _adjustment_dates(_column_values(restatement.stored_subject, ADJUSTMENT_DATE_COLUMN))
-    )
     batches = [batch for batch in (restatement.others, restatement.history) if batch is not None]
     written = write_adjustment_factors(
         store,
         batches,
         calendar=calendar,
         date_timezone=restatement.date_timezone,
-        census_from=anchor + timedelta(days=1),
+        census_from=restatement.partition_horizon + timedelta(days=1),
         before_write=lambda: before_write(record),
     )
     return RestatedRows(

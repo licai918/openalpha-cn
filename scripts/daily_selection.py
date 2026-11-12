@@ -2489,12 +2489,16 @@ def printed_remedy(invocation: Invocation) -> str | None:
 
     Read off stderr, the channel `panel build` refuses on; the last such line wins, so a target
     that printed two names only the later. The prefix is stripped because the value is an
-    `openalpha ...` command line, not a `REMEDY` command.
+    `openalpha ...` command line, not a `REMEDY` command. A line with nothing after the prefix is
+    no remedy at all and reads as `None` -- it must not become an empty command that crashes the
+    step that pins it (`V2-P7-026`, fix round 1).
     """
     found: str | None = None
     for line in invocation.stderr.splitlines():
         if line.startswith(REMEDY_LINE_PREFIX):
-            found = line[len(REMEDY_LINE_PREFIX) :].strip()
+            value = line[len(REMEDY_LINE_PREFIX) :].strip()
+            if value:
+                found = value
     return found
 
 
@@ -2778,8 +2782,18 @@ def update_panel(
             # `V2-P7-026`: a refusal that names a narrow command (`--restate-subject`) gets it
             # pinned, exactly as `_previous_year_refusal` and `_panel_catch_up_refusal` print
             # their remedies; the bare `openalpha` line `panel build` prints is not runnable from
-            # this worktree's environment as it stands.
-            message += "\n  " + pinned_command(shlex.split(remedy))
+            # this worktree's environment as it stands. A line that is not a readable shell
+            # command stays a named step-2 failure: the panel's own refusal is what matters, and
+            # an unparsable remedy is reported on it rather than raised as a crash (fix round 1).
+            try:
+                pinned = pinned_command(shlex.split(remedy))
+            except ValueError as unreadable:
+                message += (
+                    "\n  (the panel build printed a REMEDY line that cannot be read as a shell "
+                    f"command: {unreadable})"
+                )
+            else:
+                message += "\n  " + pinned
         raise StepFailedError("panel update", message)
     payloads = [body for body in built.payloads() if isinstance(body, dict)]
     report = payloads[-1] if payloads else {}

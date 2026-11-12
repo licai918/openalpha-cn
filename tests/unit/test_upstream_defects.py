@@ -301,6 +301,10 @@ class Frame:
     restated_daily_refetch_pre_close: float | None = None
     """The one-session `daily` re-fetch of the disputed session answers this `pre_close` instead
     of the stored one, i.e. the disagreement is a fetch fault, not a restatement."""
+    also_restated_codes: tuple[str, ...] = ()
+    """More securities the upstream restated too, on `restated_days`/from `restated_from`."""
+    confirmation_absent: tuple[date, ...] = ()
+    """Sessions whose one-session confirmation answers no row at all (a withdrawal)."""
 
 
 class ScriptedUpstream:
@@ -472,8 +476,12 @@ class ScriptedUpstream:
         return rows
 
     def _restated(self, code: str, day: date) -> bool:
-        if code != self.frame.restated_code:
+        if code != self.frame.restated_code and code not in self.frame.also_restated_codes:
             return False
+        if code != self.frame.restated_code:
+            return day in self.frame.restated_days or (
+                self.frame.restated_from is not None and day >= self.frame.restated_from
+            )
         if day in self.frame.restated_days:
             return True
         return self.frame.restated_from is not None and day >= self.frame.restated_from
@@ -584,6 +592,8 @@ class ScriptedUpstream:
             rows = self._limits(day)
             fields = LIMIT_FIELDS
         elif api_name == "adj_factor":
+            if "ts_code" in params and day in self.frame.confirmation_absent:
+                return _response(FACTOR_FIELDS, [])
             rows = self._factors(day, refetch="ts_code" in params)
             fields = FACTOR_FIELDS
         else:
@@ -2654,6 +2664,12 @@ def test_a_history_that_does_not_cover_the_stored_year_is_refused(
 
     assert refused.exit_code == PanelExit.unhealthy, refused.output
     assert omitted.isoformat() in refused.output
+    # Plan item (e): a missing session can be a partial answer or a withdrawal, and the refusal
+    # must name the full rebuild -- retrying the same range request is not a remedy for a
+    # withdrawal, and "fetch the whole year" is not advice the command has not already taken.
+    assert "partial answer or a withdrawal" in refused.output
+    assert "--dataset adj_factor" in refused.output
+    assert f"--year {YEAR}" in refused.output
     assert _factor_partition(runtime) == before
 
 
@@ -2876,7 +2892,10 @@ def test_the_restatement_states_one_plus_k_requests_and_spends_exactly_them(
     )
 
     assert restated.exit_code == PanelExit.ok, restated.output
-    assert "BUDGET adj-factor-restatement 3 requests" in restated.output
+    # One line before the range request (`1 request`), one before the confirmations (k here).
+    assert "BUDGET adj-factor-restatement 1 request" in restated.output
+    assert "BUDGET adj-factor-restatement 2 requests" in restated.output
+    assert "BUDGET adj-factor-restatement 3 requests" not in restated.output
     assert len(upstream.payloads) == 3
     assert [call[2] for call in upstream.refetches()] == [
         _compact(SESSIONS[-1]),
@@ -3030,3 +3049,104 @@ def test_a_history_that_serves_nothing_for_a_stored_security_is_a_withdrawal(
     # One year range request, no confirmation spent on an answer with nothing to confirm.
     assert len(upstream.payloads) == 1
     assert _factor_partition(tmp_path) == before
+
+
+# --- V2-P7-026, fix round 1: the census horizon, partial answers and per-subject reports -------
+
+
+def test_a_restatement_past_the_stored_horizon_names_the_incremental_build_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 1, finding 1: the census is anchored on the stored partition horizon, not on the
+    subject's closing row or on `now`. A remedy run with an `--as-of` whose calendar publishes a
+    session past that horizon must say so and point at the incremental build (which advances the
+    cache), not be misrefused for a "missing session" the batch was never meant to carry."""
+    partial = "2013-11-14T16:30:00+08:00"
+    stored, _ = _build(tmp_path, Frame(), monkeypatch, "adj_factor", as_of=partial)
+    assert stored.exit_code == PanelExit.ok, stored.output
+    before = _factor_partition(tmp_path)
+
+    refused, upstream = _restate(
+        tmp_path, Frame(restated_days=(SESSIONS[2],)), monkeypatch, as_of=FULL_AS_OF
+    )
+
+    assert refused.exit_code == PanelExit.unhealthy, refused.output
+    assert "incremental panel build" in refused.output
+    assert SESSIONS[-1].isoformat() in refused.output
+    assert upstream.payloads == []
+    assert _factor_partition(tmp_path) == before
+
+    # The named incremental build advances the stored horizon; the same remedy then heals.
+    advanced, _ = _build(
+        tmp_path, Frame(), monkeypatch, "adj_factor", as_of=FULL_AS_OF, extra=("--incremental",)
+    )
+    assert advanced.exit_code == PanelExit.ok, advanced.output
+    healed, _ = _restate(
+        tmp_path, Frame(restated_days=(SESSIONS[2],)), monkeypatch, as_of=FULL_AS_OF
+    )
+
+    assert healed.exit_code == PanelExit.ok, healed.output
+    assert _stored_factor(tmp_path, RETURN_PATH_CODE, SESSIONS[2]) == 1.1
+
+
+def test_a_confirmation_that_answers_nothing_is_a_withdrawal_and_names_the_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 1, finding 2: the absent one-session confirmation (`restate_adjustment_subject`)
+    is a withdrawal and must name the rebuild, not just say "not confirmed"."""
+    stored, _ = _build(tmp_path, Frame(), monkeypatch, "adj_factor")
+    assert stored.exit_code == PanelExit.ok, stored.output
+    before = _factor_partition(tmp_path)
+
+    refused, upstream = _restate(
+        tmp_path,
+        Frame(restated_days=(RESTATE_PAGE,), confirmation_absent=(RESTATE_PAGE,)),
+        monkeypatch,
+    )
+
+    assert refused.exit_code == PanelExit.unhealthy, refused.output
+    assert "withdrawal" in refused.output
+    assert f"Rebuild {ADJ_FACTOR_DATASET} for the year" in refused.output
+    # The range request, then the one-session confirmation that answered nothing.
+    assert len(upstream.payloads) == 2
+    assert _factor_partition(tmp_path) == before
+
+
+def test_each_restated_subject_reports_only_its_own_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 1, finding 8: with several `--restate-subject` codes, each JSON entry's
+    `partitions` names only that security's own writes (its `adj_factor` write and its
+    `upstream_defects` write); the top level still names all of them."""
+    stored, _ = _build(tmp_path, Frame(), monkeypatch, "adj_factor")
+    assert stored.exit_code == PanelExit.ok, stored.output
+    other = FILLERS[7]
+    frame = Frame(restated_days=(RESTATE_PAGE,), also_restated_codes=(other,))
+
+    restated, _ = _restate_raw(
+        tmp_path,
+        frame,
+        monkeypatch,
+        [
+            "--json",
+            "--dataset",
+            ADJ_FACTOR_DATASET,
+            "--year",
+            str(YEAR),
+            "--restate-subject",
+            RETURN_PATH_CODE,
+            "--restate-subject",
+            other,
+        ],
+    )
+
+    assert restated.exit_code == PanelExit.ok, restated.output
+    payload = json.loads(restated.stdout)
+    entries = payload["restated"]
+    assert [entry["ts_code"] for entry in entries] == [RETURN_PATH_CODE, other]
+    for entry in entries:
+        assert [partition["dataset"] for partition in entry["partitions"]] == [
+            UPSTREAM_DEFECTS_DATASET,
+            ADJ_FACTOR_DATASET,
+        ]
+    assert len(payload["partitions"]) == 4

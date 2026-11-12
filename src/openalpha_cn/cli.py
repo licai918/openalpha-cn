@@ -6194,7 +6194,7 @@ def _build_panel(
     registry_cache: dict[object, RegistryDates] | None = None,
     incremental: bool = False,
     rebuild: str = "",
-    restatement: Callable[[str, int], str] = lambda code, of: "",
+    restatement: Callable[[str, int], str],
     withdrawn: list[UpstreamDefect] | None = None,
     return_paths_from_store: bool = False,
 ) -> tuple[tuple[date, ...], str]:
@@ -7379,11 +7379,16 @@ def _restate_adjustment(
     `bar_before_listing` drop, a carried withdrawal, an older restatement -- are put back with the
     new ones, and an older restatement of a rewritten session is replaced rather than duplicated.
 
-    Costs, stated before they are spent: one year range request per security, one one-session
-    confirmation per differing session ("the upstream published it twice"), and one one-session
-    compare of the year before's closing anchor when that year is stored -- never a write, and
-    nothing at all if it cannot differ. Past `RESTATEMENT_CONFIRM_LIMIT` differing sessions the
-    whole-year rebuild is named instead.
+    **The cost is stated before each kind of request, not after it.** The one year range request
+    is stated first; then, once the differing sessions are known, the one one-session
+    confirmation each and the optional compare-only year-before request are stated before the
+    first of them goes out. Nothing is fetched before the line that counts it.
+
+    The stored `adj_factor` partition is what this write replaces, so it is also the write's
+    horizon: sessions the calendar publishes past it belong to the incremental build (or the
+    whole-year rebuild), and the remedy refuses by name rather than writing a partition it was
+    never asked to extend. Past `RESTATEMENT_CONFIRM_LIMIT` differing sessions the whole-year
+    rebuild is named instead.
     """
     horizon = _stored_horizon(store, ADJ_FACTOR_DATASET, year)
     if horizon is None:
@@ -7393,6 +7398,33 @@ def _restate_adjustment(
             "one security's rows of a stored partition, and this store holds none. Build the "
             "year first",
         )
+    # Fix round 1, finding 1: the census closes at the stored partition's horizon, so an
+    # `--as-of` that publishes a later session is refused by name instead of being misread as a
+    # fetches session the batch was never meant to carry.
+    published = _sessions_published_through(now, PANEL_DATE_ZONE)
+    closes_on = min(date(year, 12, 31), published)
+    pending = (
+        calendar.trading_days_between(horizon + timedelta(days=1), closes_on)
+        if horizon < closes_on
+        else ()
+    )
+    if pending:
+        raise _panel_fail(
+            PanelExit.unhealthy,
+            f"the stored {ADJ_FACTOR_DATASET} year={year} reaches {horizon.isoformat()} and the "
+            f"{exchange} calendar publishes {pending[-1].isoformat()} at this --as-of "
+            f"({now.isoformat()}). The restatement rewrites only the sessions the partition "
+            "already holds; the sessions between are the incremental panel build's. Run the "
+            "incremental panel build first (it advances the stored cache), then restate",
+        )
+    rebuild = _full_rebuild_command(
+        runtime_dir,
+        year=year,
+        targets=frozenset({ADJ_FACTOR_DATASET}),
+        exchange=exchange,
+        halts=halts,
+        as_of=now,
+    )
     carried = carry_stored_sessions_forward(
         store,
         (),
@@ -7407,6 +7439,15 @@ def _restate_adjustment(
     retired: set[tuple[str, date]] = set()
     restated: list[dict[str, object]] = []
     for code in subjects:
+        # The year-before applicability is a store read, so its one optional request is known --
+        # and can be stated -- before any request is spent.
+        previous = previous_year_restated_factor(store, ts_code=code, year=year, observed_at=now)
+        _echo_budget(
+            "adj-factor-restatement",
+            1,
+            "requests",
+            f"{code} year={year}: the one year range request (the security's Shanghai year)",
+        )
         history = _fetch_panel(
             provider,
             ADJ_FACTOR_DATASET,
@@ -7420,17 +7461,10 @@ def _restate_adjustment(
             history=history,
             calendar=calendar,
             year=year,
+            rebuild=rebuild,
             observed_at=now,
         )
         if len(restatement.sessions) > RESTATEMENT_CONFIRM_LIMIT:
-            rebuild = _full_rebuild_command(
-                runtime_dir,
-                year=year,
-                targets=frozenset({ADJ_FACTOR_DATASET}),
-                exchange=exchange,
-                halts=halts,
-                as_of=now,
-            )
             raise _panel_fail(
                 PanelExit.unhealthy,
                 f"{code} differs from the stored {ADJ_FACTOR_DATASET} year={year} on "
@@ -7438,15 +7472,17 @@ def _restate_adjustment(
                 f"({RESTATEMENT_CONFIRM_LIMIT}); confirming each would spend more requests than "
                 f"the data is worth. Rebuild the year instead: `{rebuild}`",
             )
-        previous = previous_year_restated_factor(store, ts_code=code, year=year, observed_at=now)
-        total = 1 + len(restatement.sessions) + (0 if previous is None else 1)
+        follow_up = len(restatement.sessions) + (0 if previous is None else 1)
         _echo_budget(
             "adj-factor-restatement",
-            total,
+            follow_up,
             "requests",
-            f"{code} year={year}: one year range"
-            f"{'' if previous is None else ', the year before closing anchor compared'}"
-            f", {len(restatement.sessions)} one-session confirmation(s)",
+            f"{code} year={year}: {len(restatement.sessions)} one-session confirmation(s)"
+            + (
+                ""
+                if previous is None
+                else " and the one-session year-before closing-anchor compare"
+            ),
         )
         if previous is not None:
             before_day, stored_factor = previous
@@ -7494,11 +7530,17 @@ def _restate_adjustment(
                 subjects=(code,),
             )
 
+        # Fix round 1, finding 8: each security's report names its own two writes -- its
+        # `upstream_defects` record and its `adj_factor` partition -- not every earlier
+        # security's as well; the top-level list still names all of them.
+        mine: list[PartitionRef] = []
+
         def write_index(
             record: ColumnarPanelBatch,
             *,
             _code: str = code,
             _sessions: tuple[date, ...] = restatement.sessions,
+            _mine: list[PartitionRef] = mine,
         ) -> None:
             """Write the `adj_factor` target's defect record for the year (`before_write`)."""
             records.append(record)
@@ -7514,19 +7556,24 @@ def _restate_adjustment(
             )
             if ref is not None:
                 written.append(ref)
+                _mine.append(ref)
 
         result = restate_adjustment_subject(
             store,
             restatement=restatement,
             confirmations=confirmations,
             calendar=calendar,
+            rebuild=rebuild,
             before_write=write_index,
         )
         written.append(result.written)
-        typer.echo(
-            f"RESTATED {ADJ_FACTOR_DATASET} year={year} {code}: {len(result.sessions)} session(s) "
-            f"{result.sessions[0].isoformat()} to {result.sessions[-1].isoformat()}"
-        )
+        mine.append(result.written)
+        if not _PANEL_JSON.get():
+            typer.echo(
+                f"RESTATED {ADJ_FACTOR_DATASET} year={year} {code}: "
+                f"{len(result.sessions)} session(s) {result.sessions[0].isoformat()} to "
+                f"{result.sessions[-1].isoformat()}"
+            )
         restated.append(
             {
                 "ts_code": code,
@@ -7540,7 +7587,7 @@ def _restate_adjustment(
                         "year": ref.year,
                         "row_count": ref.row_count,
                     }
-                    for ref in written
+                    for ref in mine
                 ],
             }
         )
