@@ -4652,36 +4652,51 @@ class AdjustmentRestatementError(PanelBatchError):
 
     `sessions` are the differing sessions, `served` what the re-fetch answered and `stored` what
     the store held -- one entry per session, in `served`/`stored` the same keys.
+
+    **No `__init__`, deliberately** (`V2-P4-074`): the visibility audit resolves a bare `__init__`
+    call to *every* `__init__` in this module, one of which (`StockUniverseReader.__init__`)
+    legitimately reaches the filtered read -- so a constructor here would be named as a new
+    filtered-read caller and trip the allowlist. `_adjustment_restatement_error` builds the
+    message and sets these attributes on an already-constructed exception, so this class only
+    carries values computed elsewhere and takes no read itself.
     """
 
-    def __init__(
-        self,
-        *,
-        ts_code: str,
-        year: int,
-        sessions: Sequence[date],
-        served: Mapping[date, float],
-        stored: Mapping[date, float],
-    ) -> None:
-        self.ts_code = ts_code
-        self.year = year
-        self.sessions = tuple(sessions)
-        self.served = MappingProxyType(dict(served))
-        self.stored = MappingProxyType(dict(stored))
-        shown = ", ".join(
-            f"{day.isoformat()} stored {stored[day]!r} served {served[day]!r}"
-            for day in self.sessions[:3]
-        )
-        if len(self.sessions) > 3:
-            shown += f" and {len(self.sessions) - 3} more"
-        super().__init__(
-            f"{ts_code}: every daily row of {year}'s disputed pair reproduced, and only "
-            f"{len(self.sessions)} adj_factor session(s) differ -- {shown}. That is a restatement "
-            "of the stored factor, not a fetch fault: no rebuild of the stored rows reproduces "
-            "it, and a whole-year rebuild would store the same changed values again. Restate "
-            "that security's year with the restatement remedy (one security's year is re-fetched "
-            "and each differing session confirmed); a full rebuild of the year also heals it"
-        )
+    ts_code: str
+    year: int
+    sessions: tuple[date, ...]
+    served: Mapping[date, float]
+    stored: Mapping[date, float]
+
+
+def _adjustment_restatement_error(
+    *,
+    ts_code: str,
+    year: int,
+    sessions: Sequence[date],
+    served: Mapping[date, float],
+    stored: Mapping[date, float],
+) -> AdjustmentRestatementError:
+    """Build the `AdjustmentRestatementError` for one disputed pair, message included."""
+    ordered = tuple(sessions)
+    shown = ", ".join(
+        f"{day.isoformat()} stored {stored[day]!r} served {served[day]!r}" for day in ordered[:3]
+    )
+    if len(ordered) > 3:
+        shown += f" and {len(ordered) - 3} more"
+    error = AdjustmentRestatementError(
+        f"{ts_code}: every daily row of {year}'s disputed pair reproduced, and only "
+        f"{len(ordered)} adj_factor session(s) differ -- {shown}. That is a restatement "
+        "of the stored factor, not a fetch fault: no rebuild of the stored rows reproduces "
+        "it, and a whole-year rebuild would store the same changed values again. Restate "
+        "that security's year with the restatement remedy (one security's year is re-fetched "
+        "and each differing session confirmed); a full rebuild of the year also heals it"
+    )
+    error.ts_code = ts_code
+    error.year = year
+    error.sessions = ordered
+    error.served = MappingProxyType(dict(served))
+    error.stored = MappingProxyType(dict(stored))
+    return error
 
 
 def _reproduce_return_path(
@@ -4735,7 +4750,7 @@ def _reproduce_return_path(
         dataset == ADJ_FACTOR_DATASET and answer is not None for dataset, _, answer, _ in mismatches
     )
     if only_factors and differing:
-        raise AdjustmentRestatementError(
+        raise _adjustment_restatement_error(
             ts_code=subject,
             year=differing[0].year,
             sessions=differing,
@@ -5813,11 +5828,31 @@ def stored_withdrawal_records(
 
 
 def withdrawal_keys(records: ColumnarPanelBatch | None) -> dict[str, frozenset[tuple[str, date]]]:
-    """The `(subject, session)` of every **withdrawal** record in `records`, by source dataset.
+    """The `(subject, session)` of every record in `records`, by source dataset.
 
-    A restated record's key is a session whose row the upstream still serves, so it must never
-    enter a withdrawal's watch/retire arithmetic: every fetched session would "serve it again"
-    and retire a record that is not a withdrawal at all.
+    A key index, not a rule. The supersession path (`cli._supersessions`) retires its
+    `superseded_after_publication` records through it exactly as the withdrawal path retires its
+    own, so it must name every kind (`V2-P6-018`). The withdrawal arithmetic that must never
+    retire a restatement filters with `withdrawal_only_keys` instead.
+    """
+    if records is None:
+        return {}
+    sources = _column_values(records, SOURCE_DATASET_COLUMN)
+    found: dict[str, set[tuple[str, date]]] = {}
+    for source, key in zip(sources, _row_keys(records), strict=True):
+        found.setdefault(str(source), set()).add(key)
+    return {source: frozenset(keys) for source, keys in found.items()}
+
+
+def withdrawal_only_keys(
+    records: ColumnarPanelBatch | None,
+) -> dict[str, frozenset[tuple[str, date]]]:
+    """The `(subject, session)` of the **withdrawal** records in `records`, by source dataset.
+
+    The `_settle_withdrawals` arithmetic (`V2-P6-016`) retires a record when the upstream serves
+    its row again, so a restated record's key -- a session whose row the upstream still serves --
+    must not enter it: every fetched session would "serve it again" and retire a record that is
+    not a withdrawal at all (`V2-P7-026`).
     """
     if records is None:
         return {}

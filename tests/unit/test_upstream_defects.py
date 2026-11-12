@@ -3150,3 +3150,33 @@ def test_each_restated_subject_reports_only_its_own_writes(
             ADJ_FACTOR_DATASET,
         ]
     assert len(payload["partitions"]) == 4
+
+
+def test_a_carried_restatement_record_does_not_keep_alive_a_year_that_has_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 2: restarting a year with the carry generalised (`CARRIED_KINDS`).
+
+    A restatement recorded in 2013 is carried by 2013's builds -- the carry reads the records of
+    the year being written. A later year whose own build has no defects must not gain (or keep)
+    an `upstream_defects` partition from that carried record, exactly as a year with none was
+    retired before: the source's write for it is `record=None`, and with nothing of its own left
+    the partition is absent while 2013's record survives untouched.
+    """
+    stored, _ = _build(tmp_path, Frame(), monkeypatch, "adj_factor")
+    assert stored.exit_code == PanelExit.ok, stored.output
+    restated, _ = _restate(tmp_path, Frame(restated_days=(RESTATE_PAGE,)), monkeypatch)
+    assert restated.exit_code == PanelExit.ok, restated.output
+    assert _store(tmp_path).registered_years(UPSTREAM_DEFECTS_DATASET) == (YEAR,)
+    recorded = _restated_records(tmp_path)
+
+    later = Frame(sessions=tuple(date(2014, 1, day) for day in (6, 7, 8)))
+    built, _ = _build(
+        tmp_path, later, monkeypatch, "adj_factor", year=2014, as_of="2014-01-08T16:30:00+08:00"
+    )
+
+    assert built.exit_code == PanelExit.ok, built.output
+    assert 2014 not in _store(tmp_path).registered_years(UPSTREAM_DEFECTS_DATASET)
+    # The 2013 record is untouched: nothing was carried into a year it does not belong to.
+    assert _store(tmp_path).registered_years(UPSTREAM_DEFECTS_DATASET) == (YEAR,)
+    assert _restated_records(tmp_path) == recorded

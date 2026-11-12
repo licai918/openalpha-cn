@@ -274,6 +274,7 @@ from openalpha_cn.panel_ingest import (
     superseded_indicator_rows,
     withdrawal_date_column,
     withdrawal_keys,
+    withdrawal_only_keys,
     without_restated_records,
     write_adjustment_factors,
     write_daily_panel,
@@ -3602,7 +3603,10 @@ def _settle_withdrawals(
         through=through,
         observed_at=now,
     )
-    watch = withdrawal_keys(records)
+    # `V2-P7-026`: the carry now also returns restatement records; only withdrawals have a
+    # retirement rule (served again / confirmed again / still stored), and a restated key is a
+    # session the upstream still serves -- so the arithmetic names withdrawals alone.
+    watch = withdrawal_only_keys(records)
     found = {
         dataset: _confirm_withdrawals(
             store,
