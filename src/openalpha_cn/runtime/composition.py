@@ -49,6 +49,14 @@ from typing import Final
 from openalpha_cn.agents.base import FeaturePlane, ResearchAgent
 from openalpha_cn.backtest.validation import ValidationStore
 from openalpha_cn.evidence.service import EvidenceStore
+from openalpha_cn.models.deepseek import VendorEndpoint
+from openalpha_cn.models.openai_compatible import (
+    JsonTransport,
+    ModelConfigurationError,
+    OpenAICompatibleProvider,
+    UrllibJsonTransport,
+)
+from openalpha_cn.models.recording import RecordingJsonTransport
 from openalpha_cn.product.research import ReportStore, WatchlistStore
 from openalpha_cn.runtime.engine import ResearchEngine
 from openalpha_cn.runtime.memory import ResearchMemory
@@ -59,6 +67,7 @@ from openalpha_cn.storage.factor_experiments import FileExperimentStore
 from openalpha_cn.storage.jobs import SQLiteJobStore
 from openalpha_cn.storage.memory import SQLiteResearchMemory
 from openalpha_cn.storage.migrations import MigrationRunResult, run_migrations
+from openalpha_cn.storage.model_exchanges import FileModelExchangeStore
 from openalpha_cn.storage.models import SQLiteModelUsageStore
 from openalpha_cn.storage.paper_state import FilePaperStateStore
 from openalpha_cn.storage.parquet import ParquetEvidenceStore
@@ -192,7 +201,8 @@ class StorageContainer:
     missing entries -- registered there before this field existed, so it has been checked for
     `PRAGMA foreign_keys` all along, construction site or not -- and again here, where
     `grep -rn "SQLiteModelUsageStore(" src/` found no construction site anywhere in this
-    package until this field and the line in `build_storage` below.
+    package until this field, the `model_usage_store_at` opener, and `llm_provider` beside it
+    (`V2-P7-012`).
 
     Concrete rather than Protocol-typed, but not for `batch_store`'s or `job_store`'s reason --
     neither has a wider surface here to narrow against. `models.governance.ModelUsageStore`,
@@ -201,9 +211,10 @@ class StorageContainer:
     nothing wider a Protocol here would need to hide. It stays concrete because, measured
     rather than assumed, nothing inside `openalpha_cn` calls through this field to narrow
     against in the first place: `OpenAICompatibleProvider` -- the one class that would ever
-    call `.append()` on it -- is constructed only in `tests/unit/models/test_model_governance.py`
-    and `tests/unit/models/test_openai_compatible.py`, never in `src/`. The real caller this
-    field exists for is external: a deployer who builds their own LLM-backed agent through
+    call `.append()` on it -- was constructed only in tests until `llm_provider` above became
+    its one `src/` construction site (`V2-P7-012`), and `llm_provider` passes this store as the
+    `usage_store` parameter rather than reaching through the container. The caller this field
+    also serves is external: a deployer who builds their own LLM-backed agent through
     `models/openai_compatible.py` and wants the same `runtime_dir`-scoped `state.sqlite3`
     every other store here already shares, rather than hand-rolling a separate path the way
     this file's own opening paragraph says `sdk.py`/`api/app.py` used to, by hand, before
@@ -255,6 +266,14 @@ The one spelling of the literal that `build_storage` used to write by hand; see
 `evidence_store_at`.
 """
 
+MODEL_EXCHANGE_DIRECTORY: Final[str] = "model_exchanges"
+"""Where a runtime directory's content-addressed model exchanges live (`V2-P7-012`).
+
+The one spelling of the literal; see `model_exchange_store_at`. No `StorageContainer` field
+names this store: it is not a stage of a run but the recorder around the one network call, so
+`llm_provider` opens it at the point of use and there is nothing for `build_storage` to assemble.
+"""
+
 PAPER_SNAPSHOT_DIRECTORY: Final[tuple[str, str]] = ("paper", "snapshots")
 """Where a runtime directory's paper-book snapshots live (`V2-P7-017`)."""
 
@@ -278,8 +297,9 @@ The one spelling of the literal `cli.py`'s `factor experiment` command used to w
 STATE_DATABASE: Final[str] = "state.sqlite3"
 """The SQLite file ten of the sixteen stores share at a runtime directory's root.
 
-Named once for `run_repository_at`, the one of those ten that a face opens without a
-`build_storage`; the other nine stay inline in `build_storage`, which is already their one source.
+Named once for `run_repository_at` and `model_usage_store_at`, the two of those ten that a
+caller opens without a `build_storage`; the other eight stay inline in `build_storage`, which is
+already their one source.
 """
 
 
@@ -293,6 +313,87 @@ def evidence_store_at(runtime_dir: Path) -> ParquetEvidenceStore:
     opens `runtime_dir / "evidence"` through this function, so there is one source for it (hard
     rule 5)."""
     return ParquetEvidenceStore(runtime_dir / EVIDENCE_DIRECTORY)
+
+
+def model_exchange_store_at(runtime_dir: Path) -> FileModelExchangeStore:
+    """The model-exchange documents under `runtime_dir`, opened alone: no migration, no directory
+    created (`FileModelExchangeStore`'s reads are total on a missing directory; `put` creates it).
+
+    For `llm_provider`, which wraps an endpoint's transport in the record/replay decorator. This
+    store is deliberately not a `StorageContainer` field: it lives around a network call rather
+    than inside a run, so the container stays at sixteen and `llm_provider` is its one opener in
+    this composition root (hard rule 5)."""
+    return FileModelExchangeStore(runtime_dir / MODEL_EXCHANGE_DIRECTORY)
+
+
+def model_usage_store_at(runtime_dir: Path) -> SQLiteModelUsageStore:
+    """The per-request LLM usage ledger at `runtime_dir / "state.sqlite3"`, opened alone: no
+    migration (the caller that must run migrations is `build_storage`), and the store's own
+    `CREATE TABLE IF NOT EXISTS` is its only schema work, exactly as inside `build_storage`.
+
+    For `llm_provider`, which records usage when a request is actually made; `build_storage`
+    opens the same path through this function, so there is one source for it (hard rule 5)."""
+    return SQLiteModelUsageStore(runtime_dir / STATE_DATABASE)
+
+
+def llm_provider(
+    endpoint: VendorEndpoint,
+    *,
+    runtime_dir: Path,
+    clock: Callable[[], datetime],
+    replay: bool,
+    transport: JsonTransport | None = None,
+) -> OpenAICompatibleProvider:
+    """The one assembly of a vendor endpoint's provider (`V2-P7-012`).
+
+    Every model the research path can call goes through here, so three facts are true in one
+    place rather than at each call site:
+
+    - **The exchange is recorded.** The provider's transport is a `RecordingJsonTransport` over
+      `model_exchange_store_at(runtime_dir)`; in `replay` it has no inner transport at all, so an
+      unrecorded request raises `ModelExchangeNotStoredError` instead of touching a network.
+    - **The credential is a name.** `api_key_env` is passed in record mode and `None` in replay,
+      so a replayed run needs no key; the value is read from the process environment by the
+      provider and never stored (`models/recording.py` excludes headers from the request digest).
+    - **An unverified endpoint cannot spend a real request.** When `verified_on` is `None` and
+      the caller supplied no transport, the shipped placeholder would otherwise call the
+      vendor's endpoint with an invented model id. That is a `ModelConfigurationError` naming the
+      endpoint and its documentation URL; an injected transport (tests) and replay are allowed,
+      because neither reaches the vendor.
+
+    Usage is attached in record mode only: the row is billed when the request was made, and a
+    replay must not append a second one -- `SQLiteModelUsageStore.append` is idempotent only for
+    a byte-identical payload, and a replayed `occurred_at` is a different wall clock.
+    """
+    if not replay and transport is None and endpoint.verified_on is None:
+        raise ModelConfigurationError(
+            f"{endpoint.name} ({endpoint.provider_id}/{endpoint.model}) has not been verified: "
+            "its model id, base URL, structured-output mode and prices must be filled from "
+            f"{endpoint.documentation_url} and `verified_on` set to the date of that reading "
+            "before a live request is spent. Replay and an injected transport are allowed while "
+            "it is unverified; this refusal is the difference between configured and verified"
+        )
+    inner: JsonTransport | None = None if replay else (transport or UrllibJsonTransport())
+    recording = RecordingJsonTransport(
+        store=model_exchange_store_at(runtime_dir),
+        inner=inner,
+        clock=clock,
+    )
+    return OpenAICompatibleProvider(
+        provider_id=endpoint.provider_id,
+        model=endpoint.model,
+        base_url=endpoint.base_url,
+        api_key_env=None if replay else endpoint.api_key_env,
+        structured_output_mode=endpoint.structured_output_mode,
+        temperature=endpoint.temperature,
+        max_tokens=endpoint.max_output_tokens,
+        require_usage=True,
+        transport=recording,
+        usage_store=None if replay else model_usage_store_at(runtime_dir),
+        input_price_per_million=endpoint.input_price_per_million,
+        output_price_per_million=endpoint.output_price_per_million,
+        clock=clock,
+    )
 
 
 def paper_state_store_at(runtime_dir: Path) -> FilePaperStateStore:
@@ -415,7 +516,7 @@ def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> Storag
     experiment_store = experiment_store_at(runtime_dir)
     shortlist_store = shortlist_store_at(runtime_dir)
     job_store = SQLiteJobStore(runtime_dir / "state.sqlite3")
-    model_usage_store = SQLiteModelUsageStore(runtime_dir / "state.sqlite3")
+    model_usage_store = model_usage_store_at(runtime_dir)
     prediction_store = prediction_store_at(runtime_dir, clock=clock)
     paper_ledger = open_paper_ledger(runtime_dir / "paper" / "ledger.sqlite3")
     paper_state_store = paper_state_store_at(runtime_dir)
