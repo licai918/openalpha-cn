@@ -158,7 +158,7 @@ def limit_event_snapshots(
 
 
 def refuse_a_restated_session(
-    store: EvidenceStore,
+    evidence: EvidenceStore,
     *,
     session: date,
     arriving: tuple[EvidenceSnapshot, ...],
@@ -170,6 +170,12 @@ def refuse_a_restated_session(
     An empty arrival is a legitimate comparison: if the store holds events for the session and
     this run derived none, the panel was restated (or the store holds a claim this run cannot
     reproduce) and that is the same refusal.
+
+    The parameter is named `evidence`, not `store`, deliberately: the **evidence** store is a
+    different door from `PanelStore.query`, and `tests/unit/test_source_counts_match_the_tree.py`
+    counts `.query(...)` calls on a store-named receiver as callers of the panel door. Naming
+    this one `store` would have made that count say five where panel_ingest's own sentence (and
+    the allowlist test behind it) says four panel callers.
     """
     published = session_publication_instant(session)
     for snapshot in arriving:
@@ -181,7 +187,7 @@ def refuse_a_restated_session(
             )
     stored: dict[str, EvidenceSnapshot] = {}
     for kind in _LIMIT_EVENT_KINDS:
-        for snapshot in store.query(as_of=published, kind=kind):
+        for snapshot in evidence.query(as_of=published, kind=kind):
             if snapshot.timeline.available_time == published:
                 stored[snapshot.evidence_id] = snapshot
     arriving_ids = {snapshot.evidence_id for snapshot in arriving}
