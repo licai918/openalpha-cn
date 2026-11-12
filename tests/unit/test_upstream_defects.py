@@ -2726,3 +2726,285 @@ def test_another_targets_defect_survives_the_restatement(
     surviving = _defects(tmp_path)
     assert [d for d in surviving if d.source_dataset == DAILY_BASIC_DATASET] == price
     assert len(_restated_records(tmp_path)) == 1
+
+
+# --- V2-P7-026: the restatement command's shape (Task 4) ---------------------------------------
+
+RESTATE_CODE = RETURN_PATH_CODE
+
+
+def _restate_raw(
+    runtime_dir: Path,
+    frame: Frame,
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: Sequence[str],
+    *,
+    as_of: str = AS_OF,
+) -> tuple[Any, ScriptedUpstream]:
+    """Run `panel build` with the caller's own arguments, for the flag-shape refusals."""
+    upstream = ScriptedUpstream(frame)
+    monkeypatch.setenv("TUSHARE_TOKEN", SECRET_TOKEN)
+    monkeypatch.setattr(cli, "_panel_transport", lambda: upstream)
+    monkeypatch.setattr(cli, "_panel_clock", lambda: CLOCK)
+    base = ["panel", "build", "--runtime-dir", str(runtime_dir), "--as-of", as_of]
+    return runner.invoke(app, [*base, *arguments]), upstream
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        (
+            ["--dataset", "price", "--year", "2013", "--restate-subject", RESTATE_CODE],
+            "--dataset adj_factor",
+        ),
+        (
+            [
+                "--dataset",
+                "adj_factor",
+                "--dataset",
+                "price",
+                "--year",
+                "2013",
+                "--restate-subject",
+                RESTATE_CODE,
+            ],
+            "--dataset adj_factor",
+        ),
+        (
+            [
+                "--dataset",
+                "adj_factor",
+                "--year",
+                "2012",
+                "--year",
+                "2013",
+                "--restate-subject",
+                RESTATE_CODE,
+            ],
+            "exactly one --year",
+        ),
+        (
+            [
+                "--dataset",
+                "adj_factor",
+                "--year",
+                "2013",
+                "--restate-subject",
+                RESTATE_CODE,
+                "--incremental",
+            ],
+            "--incremental",
+        ),
+        (
+            [
+                "--dataset",
+                "adj_factor",
+                "--year",
+                "2013",
+                "--restate-subject",
+                RESTATE_CODE,
+                "--resume",
+            ],
+            "--resume",
+        ),
+        (
+            [
+                "--dataset",
+                "adj_factor",
+                "--year",
+                "2013",
+                "--restate-subject",
+                RESTATE_CODE,
+                "--subject",
+                RETURN_PATH_CODE,
+            ],
+            "--subject",
+        ),
+        (
+            [
+                "--dataset",
+                "adj_factor",
+                "--year",
+                "2013",
+                "--restate-subject",
+                RESTATE_CODE,
+                "--return-paths-from-store",
+            ],
+            "--return-paths-from-store",
+        ),
+    ],
+    ids=[
+        "not-adj_factor",
+        "several-datasets",
+        "two-years",
+        "incremental",
+        "resume",
+        "subject",
+        "return-paths-from-store",
+    ],
+)
+def test_the_restate_flag_accepts_one_narrow_shape_and_refuses_every_other(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: Sequence[str],
+    expected: str,
+) -> None:
+    """`--restate-subject` rewrites one security's stored year of one dataset: it refuses a
+    dataset that is not `adj_factor`, anything but exactly one year, and every mode that would
+    fetch or rebuild something else -- as a bad request, before any fetch."""
+    result, upstream = _restate_raw(tmp_path, Frame(), monkeypatch, arguments)
+
+    assert result.exit_code == int(PanelExit.bad_request), result.output
+    assert expected in result.output
+    assert upstream.payloads == []
+
+
+def test_the_restatement_states_one_plus_k_requests_and_spends_exactly_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`1 + k`: one year range request plus one one-session confirmation per differing session
+    -- here two sessions differ, so three requests, and the run asks for exactly three."""
+    stored, _ = _build(tmp_path, Frame(), monkeypatch, "adj_factor")
+    assert stored.exit_code == PanelExit.ok, stored.output
+
+    restated, upstream = _restate(
+        tmp_path,
+        Frame(restated_days=(SESSIONS[2], SESSIONS[3])),
+        monkeypatch,
+    )
+
+    assert restated.exit_code == PanelExit.ok, restated.output
+    assert "BUDGET adj-factor-restatement 3 requests" in restated.output
+    assert len(upstream.payloads) == 3
+    assert [call[2] for call in upstream.refetches()] == [
+        _compact(SESSIONS[-1]),
+        _compact(SESSIONS[2]),
+        _compact(SESSIONS[3]),
+    ]
+
+
+def test_more_differing_sessions_than_the_confirmation_limit_names_the_full_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Past `RESTATEMENT_CONFIRM_LIMIT` differing sessions the confirmation requests would cost
+    more than the year is worth, so the whole-year rebuild is named instead -- before any
+    confirmation is spent, and with nothing written."""
+    sessions = tuple(date(2013, 11, day) for day in range(4, 29))  # 25 open sessions
+    stored, _ = _build(tmp_path, Frame(sessions=sessions), monkeypatch, "adj_factor", year=YEAR)
+    assert stored.exit_code == PanelExit.ok, stored.output
+    before = _factor_partition(tmp_path)
+
+    refused, upstream = _restate(
+        tmp_path,
+        Frame(sessions=sessions, restated_days=sessions),
+        monkeypatch,
+    )
+
+    assert refused.exit_code == PanelExit.unhealthy, refused.output
+    assert f"{len(sessions)} session(s)" in refused.output
+    assert "RESTATEMENT_CONFIRM_LIMIT" in refused.output or "over 20" in refused.output
+    assert "Rebuild the year instead" in refused.output
+    assert len(sessions) > RESTATEMENT_CONFIRM_LIMIT
+    # Only the year range was asked: no confirmation request went out.
+    assert len(upstream.payloads) == 1
+    assert _factor_partition(tmp_path) == before
+
+
+def test_a_store_with_no_adj_factor_year_is_refused_before_any_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The remedy rewrites a stored partition, so a store without one is refused by name and
+    no fetch is spent looking for something to restate."""
+    calendar_only, _ = _build(tmp_path, Frame(), monkeypatch)
+    assert calendar_only.exit_code == PanelExit.ok, calendar_only.output
+
+    refused, upstream = _restate(tmp_path, Frame(), monkeypatch)
+
+    assert refused.exit_code == PanelExit.unhealthy, refused.output
+    assert "no stored adj_factor year=2013" in refused.output
+    assert upstream.payloads == []
+
+
+def test_the_next_incremental_build_passes_after_the_restatement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The remedy is complete only if the year it healed builds again: the same incremental
+    command that refused now re-judges the pair from the rewritten rows and passes."""
+    refused, _ = _restated_year(tmp_path, CORRECTED_STEP, monkeypatch)
+    assert refused.exit_code == PanelExit.unhealthy, refused.output
+    healed, _ = _restate(tmp_path, CORRECTED_STEP, monkeypatch, as_of=FULL_AS_OF)
+    assert healed.exit_code == PanelExit.ok, healed.output
+
+    again, _upstream = _build(
+        tmp_path,
+        CORRECTED_STEP,
+        monkeypatch,
+        "adj_factor",
+        "price",
+        "stk_limit",
+        as_of=FULL_AS_OF,
+        extra=("--incremental",),
+    )
+
+    assert again.exit_code == PanelExit.ok, again.output
+    assert "REMEDY " not in again.output
+    # The record survives the next build: it is carried, not rebuilt (`CARRIED_KINDS`).
+    assert len(_restated_records(tmp_path)) == 1
+
+
+def test_the_year_before_is_compared_and_a_restated_boundary_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restatement often reaches back across the year boundary, and healing one year while the
+    year before's closing session changed would leave the first pair of the year wrong either
+    way: one one-session compare, refused by name with that year's own command."""
+    previous = date(2012, 12, 31)
+    first, _ = _build(
+        tmp_path,
+        Frame(sessions=(previous,)),
+        monkeypatch,
+        "adj_factor",
+        year=2012,
+        as_of="2012-12-31T16:30:00+08:00",
+    )
+    assert first.exit_code == PanelExit.ok, first.output
+    stored, _ = _build(tmp_path, Frame(), monkeypatch, "adj_factor")
+    assert stored.exit_code == PanelExit.ok, stored.output
+    before = _factor_partition(tmp_path)
+    boundary = Frame(
+        restated_days=(RESTATE_PAGE,),
+        previous_year_restated=(previous, 1.05),
+    )
+
+    refused, upstream = _restate(tmp_path, boundary, monkeypatch)
+
+    assert refused.exit_code == PanelExit.unhealthy, refused.output
+    assert previous.isoformat() in refused.output
+    assert "--year 2012" in refused.output
+    assert "REMEDY openalpha panel build" in refused.output
+    # The range, then the one-session year-before compare; no confirmation was spent.
+    assert len(upstream.payloads) == 2
+    assert _factor_partition(tmp_path) == before
+
+
+def test_a_newer_restatement_replaces_the_older_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One key has one record: restating the same session again rewrites the row and replaces
+    the older record rather than joining it."""
+    stored, _ = _build(tmp_path, Frame(), monkeypatch, "adj_factor")
+    assert stored.exit_code == PanelExit.ok, stored.output
+    first, _ = _restate(tmp_path, Frame(restated_days=(RESTATE_PAGE,)), monkeypatch)
+    assert first.exit_code == PanelExit.ok, first.output
+    (old,) = _restated_records(tmp_path)
+
+    second, _ = _restate(
+        tmp_path,
+        Frame(restated_days=(RESTATE_PAGE,), restated_factor=1.15),
+        monkeypatch,
+    )
+
+    assert second.exit_code == PanelExit.ok, second.output
+    (new,) = _restated_records(tmp_path)
+    assert new == dataclasses.replace(old, bar_close=1.15, valuation_close=1.1)
+    assert _stored_factor(tmp_path, RETURN_PATH_CODE, RESTATE_PAGE) == 1.15
