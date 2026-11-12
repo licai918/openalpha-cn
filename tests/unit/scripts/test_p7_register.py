@@ -9,6 +9,7 @@ variables and pins the commit time.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib
 import json
@@ -168,7 +169,10 @@ def test_the_registration_body_is_the_frozen_one() -> None:
     assert config["survivor_book"] == BOOK
     assert config["adapter"] == ADAPTER
     assert settings == {
-        **grid.protocol_settings(),
+        "bootstrap_samples": 100_000,
+        "random_seed": 20_260_926,
+        "excess_benchmark": "equal_weight_all_a_held",
+        "sessions_per_year": 244,
         "survivor_forward_protocol": PROTOCOL,
         "survivor_forward_power": POWER,
         "survivor_forward_stop_rule": STOP_RULE,
@@ -221,6 +225,9 @@ def test_the_criteria_name_the_run_in_and_the_unknown_rule() -> None:
     assert set(criteria) == CRITERIA_KEYS
     assert "22" in criteria["run_in"]
     assert "unknown" in criteria["eligibility"]
+    assert "18" in criteria["interim"]
+    assert "停止" in criteria["interim"]
+    assert "描述性均值" in criteria["interim"]
     for value in criteria.values():
         for forbidden in FORBIDDEN_WORDING:
             assert forbidden not in value
@@ -632,6 +639,29 @@ def test_the_writer_never_invokes_a_staging_or_committing_step() -> None:
     assert "git commit" not in source
 
 
+def test_no_git_call_asks_for_staging_or_a_commit() -> None:
+    tree = ast.parse((ROOT / "scripts/p7_register.py").read_text(encoding="utf-8"))
+
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        called = node.func
+        name = called.attr if isinstance(called, ast.Attribute) else getattr(called, "id", "")
+        if name not in {"_git", "_git_process", "run"}:
+            continue
+        for argument in node.args:
+            values: list[ast.expr]
+            if isinstance(argument, ast.List | ast.Tuple):
+                values = list(argument.elts)
+            else:
+                values = [argument]
+            for value in values:
+                if isinstance(value, ast.Constant) and value.value in {"add", "commit"}:
+                    offenders.append(str(value.value))
+    assert offenders == []
+
+
 def test_refuses_an_uncommitted_or_edited_predecessor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -660,4 +690,99 @@ def test_refuses_an_uncommitted_or_edited_predecessor(
     assert edited[0] == 2
     assert FIRST in edited[2]
     assert "HEAD holds" in edited[2]
+    assert not (repo / REGISTRATION).exists()
+
+
+def test_a_digest_mismatch_removes_the_file_it_just_wrote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _repository(tmp_path)
+    _pin_the_clock(monkeypatch)
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(register, "_document", lambda *arguments, **keywords: b"{}\n")
+
+    code, _, err = _run(capsys, *_arguments(smoke=research_repo.head(repo)))
+
+    assert code == 2
+    assert "digest" in err
+    assert not (repo / REGISTRATION).exists()
+    assert _status(repo) == ""
+
+
+def test_another_registration_error_is_its_own_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _repository(tmp_path)
+    _pin_the_clock(monkeypatch)
+    monkeypatch.chdir(repo)
+
+    def refuse(*arguments: Any, **keywords: Any) -> str:
+        raise registry.RegistrationError("the registry said no")
+
+    monkeypatch.setattr(registry, "register", refuse)
+
+    code, _, err = _run(capsys, *_arguments(smoke=research_repo.head(repo)))
+
+    assert code == 2
+    assert "the registry said no" in err
+    assert "the registry refused the registration" in err
+    assert "already holds" not in err
+    assert not (repo / REGISTRATION).exists()
+
+
+@pytest.mark.parametrize(
+    ("epoch", "accepted"),
+    [
+        (date(2026, 10, 27), True),
+        (date(2026, 10, 26), False),
+    ],
+)
+def test_an_epoch_sixteen_days_old_is_accepted_and_seventeen_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    epoch: date,
+    accepted: bool,
+) -> None:
+    repo = _repository(tmp_path)
+    _pin_the_clock(monkeypatch)  # today = 2026-11-12, a Thursday; both epochs are weekdays
+    monkeypatch.chdir(repo)
+
+    code, _, err = _run(capsys, *_arguments(smoke=research_repo.head(repo), epoch=epoch))
+
+    if accepted:
+        assert code == 0, err
+        assert (repo / REGISTRATION).is_file()
+    else:
+        assert code == 2
+        assert "16" in err
+        assert not (repo / REGISTRATION).exists()
+
+
+def _commit_a_smoke_registration(repo: Path) -> str:
+    """A committed registration that carries `settings.smoke_run`: never part of the chain (U6)."""
+    path = "docs/research/p7-smoke-registration.json"
+    config, criteria, settings = register.registration_body(VALID_EPOCH)
+    settings["smoke_run"] = {"issue": "V2-P7-019", "note": "not evidence"}
+    registry.register(
+        config, criteria, repo / path, code_commit=research_repo.head(repo), settings=settings
+    )
+    research_repo.commit_file(repo, repo / path, "a smoke registration", at=tds.COMMITTED)
+    return path
+
+
+def test_superseding_a_smoke_registration_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _repository(tmp_path)
+    _pin_the_clock(monkeypatch)
+    monkeypatch.chdir(repo)
+    _commit_a_survivor_registration(repo)
+    smoke = _commit_a_smoke_registration(repo)
+
+    code, _, err = _run(capsys, *_arguments(smoke=research_repo.head(repo), supersedes=smoke))
+
+    assert code == 2
+    assert smoke in err
+    assert "committed survivor registration" in err
     assert not (repo / REGISTRATION).exists()

@@ -8,11 +8,14 @@ the set is empty, and an empty set is one rooted chain; the loop below never ass
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import subprocess
 import sys
 from datetime import date
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 _SCRIPTS: Final[Path] = ROOT / "scripts"
@@ -71,7 +74,71 @@ def test_the_protocol_states_the_frozen_numbers() -> None:
         "±2.9pp",
         "不是证据",
         "候选",
+        "result.txt:23",
+        "σ = 0.18",  # noqa: RUF001
+        "49%",
+        "推算，不是证据",
+        "中期无效性停止规则",
     ):
         assert token in text, f"the protocol does not state {token!r}"
     for forbidden in ("已验证", "证实有效", "proven"):
         assert forbidden not in text, f"the protocol claims {forbidden!r}"
+
+
+GIT: Final[tuple[str, ...]] = (
+    "-c",
+    "user.name=Audit",
+    "-c",
+    "user.email=audit@example.invalid",
+    "-c",
+    "commit.gpgsign=false",
+)
+
+
+def _git(repo: Path, *arguments: str) -> str:
+    """git in `repo`, hermetic: no inherited `GIT_*`, no global or system configuration."""
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    environment |= {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+    finished = subprocess.run(
+        ["git", *GIT, *arguments],
+        cwd=repo,
+        env=environment,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert finished.returncode == 0, finished.stderr
+    return finished.stdout.strip()
+
+
+def _registration(**keywords: Any) -> dict[str, Any]:
+    body: dict[str, Any] = {"schema": "openalpha-research-registration/v1"}
+    body.update(keywords)
+    return body
+
+
+def test_only_non_smoke_survivor_registrations_are_chain_candidates(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "--template=", "-b", "main")
+    files = {
+        "docs/research/survivor.json": _registration(
+            config={"kind": "survivor_book/v1"}, settings={}
+        ),
+        "docs/research/smoke.json": _registration(
+            config={"kind": "survivor_book/v1"}, settings={"smoke_run": {"issue": "V2-P7-019"}}
+        ),
+        "docs/research/p6.json": _registration(config={"start": "2026-01-12"}, settings={}),
+    }
+    for relative, body in files.items():
+        target = repo / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(body) + "\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "registrations")
+
+    selected = committed_survivor_registrations(repo)
+
+    assert set(selected) == {"docs/research/survivor.json"}
+    assert selected["docs/research/survivor.json"]["config"]["kind"] == "survivor_book/v1"
