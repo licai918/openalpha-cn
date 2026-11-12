@@ -225,11 +225,9 @@ minimum_periods 30；planned 只有 h20 rank_ic：planning_sd 0.18、planning_me
   `docs/research/p7-step0-validation/T9-delisted-while-held.md:21`）；路线文档的口径是
   “样本内 +5.9%，抽样 se 约 ±2.9pp”（`docs/superpowers/plans/2026-11-01-p7-route-adjustment.md:77`）。
   **不是证据。**
-- 验证期的一次读数：h20 秩 IC 均值 0.09459（sd 0.1821、n 24、t 2.544），
-  `ew_minus_worst_decile` 均值 0.008688
-  （`docs/research/p7-readings/v2-p7-024-validation.result.txt:6` 的均值、`:16` 的 sd 0.1821 与 t 2.544）。
-  它是一次读数，
-  **不是证据**，也不是规划值。
+- 验证期的一次读数：h20 秩 IC 均值 0.09459（`docs/research/p7-readings/v2-p7-024-validation.result.txt:6`；
+  sd 0.1821、n 24、t 2.544 在 `:16`）与 `ew_minus_worst_decile` 均值 0.008688（`:7`、`:17`）。
+  它是一次读数，**不是证据**，也不是规划值。
 - 停止规则的“未触发”只允许 `V2-P7-006` 继续，**不是证据**。
 
 ## 12. 版本记录（只追加）
