@@ -123,7 +123,8 @@
 - **主检验**：h20 秩 IC，单侧符号翻转，均值 > 0，p ≤ 0.05，族大小 1，锚点序号 1，
   K = 36 个非重叠位置。符号翻转 100000 次（`bootstrap_samples`，上限 100000，
   `src/openalpha_cn/strategy_survivor_forward.py:514`；取值 `scripts/research/grid.py:137`）；窗口达到
-  K 之前只报计数与描述性均值，不给 p 值、不给结论词。
+  K 之前只报计数与描述性均值，不给 p 值、不给结论词；第 18 个累积位置同时适用**中期无效性停止规则**
+  （累积均值 ≤ 0 即停止，见 §5）。
 - **次要族**（{h20 `survivors_minus_ew`、h20 `ew_minus_worst_decile`、h5 `rank_ic`}，大小 3）用
   Benjamini–Yekutieli（任意相依），q = 0.10（`PROTOCOL_FALSE_DISCOVERY_RATE`，`scripts/research/grid.py:139`；
   协议的 `q` 字段 `src/openalpha_cn/strategy_survivor_forward.py:517`）；次要族等主窗口满足后才检验，
@@ -136,7 +137,7 @@
 
 用户 2026-11-07 采纳的停止规则，一个数字一个具名常量（`src/openalpha_cn/strategy_survivor_forward.py:412-425`）：
 主统计量 h20 秩 IC（`:412`、`:416`）；秩 IC 均值 ≤ 0.02 或 `ew_minus_worst_decile` 均值 ≤ 0
-即停止（`:417`、`:419-420`）；前向窗口 K = 36（`:421`）；中期无效性在 K / 2 = **18** 个累积
+即停止（`:417`、`:419-420`）；**中期无效性停止规则**：前向窗口 K = 36（`:421`）；中期无效性在 K / 2 = **18** 个累积
 位置、累积均值 ≤ 0 即停止（`:423`、`:425`）。登记块是 `adopted_forward_stop_rule()` 原样
 （`src/openalpha_cn/strategy_survivor_forward.py:777-792`）。
 
@@ -157,12 +158,17 @@ minimum_periods 30；planned 只有 h20 rank_ic：planning_sd 0.18、planning_me
 `minimum_periods` = 30 是 D-2：36 个位置里至多丢 6 个（约 1/6）；它只给结果贴标签，不阻止检验
 （`src/openalpha_cn/strategy_survivor_forward.py:652-673` 的模型文档；登记读取 `:676-745`）。
 `planning_sd` = 0.18 是 D-1：研究期实测约 0.14（工具默认 0.15，决策链 §3.6），验证读观测 0.182
-（读数文本自己说“单独一次的观测值不是规划值”），取较大者向下取两位，偏保守。只规划主检验
+（读数文本自己说“单独一次的观测值不是规划值”，
+`docs/research/p7-readings/v2-p7-024-validation.result.txt:23`），取较大者向下取两位，偏保守。只规划主检验
 （D-3）：h5 的离散度从未测过，写一个没有来源的 sd 等于编造。
 
-**推算**（不是测量）：在这个设计下，K = 36、单侧 α = 0.05，IC = 0.05 时功效约 64%（σ = 0.15）
-或约 48%（σ = 0.182，验证读的观测值）；IC = 0.037 时更低。读法是：**在这个设计下检测不到**
-大不等于“没有效应”。这些数字是设计性质的推算，不是任何读数。
+**推算，不是证据**（不是测量）：在这个设计下，K = 36、单侧 α = 0.05。按登记块自己的
+`critical_value "t"`（`src/openalpha_cn/backtest/power_analysis.py:181-189` 的
+`power_of_mean_test`，`kind="t"`、K = 36、检验水平 0.05、无序列相关），IC = 0.037 / 0.05 / 0.10
+时：σ = 0.18（登记的 planning_sd）约 32% / 49% / 95%；σ = 0.182（验证读的观测值）约
+32% / 48% / 95%。用同一函数的正态近似（`kind="normal"`，计划 §3.6 的“约 64%”是这一约定）：
+σ = 0.15、IC = 0.05 约 64%，σ = 0.18 约 34% / 51% / 95%。读法是：**在这个设计下检测不到**
+大不等于“没有效应”。这些数字是设计性质的推算，不是任何读数，也不是证据。
 
 ## 7. 缺口、UNVERIFIABLE 与未贴标签
 
