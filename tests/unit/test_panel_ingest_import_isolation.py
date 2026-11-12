@@ -923,6 +923,19 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "strategy_registration.RegisteredConfiguration",
         }
     ),
+    "openalpha_cn.strategy_agent_evaluation": frozenset(
+        {
+            # V2-P7-013 (plan C task 2.7). The evaluator reads the two stored record planes and
+            # the panel: the publication instant a session's step 0 record stands at, the
+            # registration's zone, Step 0's scope reader and its family name. It names no
+            # dataset of its own -- every read is a stored record or a label through the
+            # caller's `model_view.OutcomeLabels`.
+            "panel_ingest.session_publication_instant",
+            "strategy_registration.SHANGHAI",
+            "strategy_survivor_forward.record_scope",
+            "strategy_survivor_registration.SURVIVOR_FAMILY",
+        }
+    ),
     "openalpha_cn.shortlist_compare": frozenset(
         {
             "shortlist_view.SHORTLIST_VIEW_SCHEMA_VERSION",
@@ -1364,6 +1377,16 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
         # value it declares from is a digest and a seed. Followed through its seam it reaches
         # nothing either -- the same empty row the document store's comparer has, for the same
         # reason: it composes what somebody else already produced.
+        named=frozenset(),
+        reached=frozenset(),
+    ),
+    "openalpha_cn.strategy_agent_evaluation": DatasetReach(
+        # V2-P7-013 (plan C task 2.7). It names no dataset and its seam reaches none: the
+        # evaluator is handed labels and reads stored prediction records, and `record_scope` is
+        # a reader of a stored batch, not of a panel partition. What it does reach -- the
+        # labels the caller reads through `model_view.OutcomeLabels` -- is the same seam the
+        # forward report stands on, and this table's dataset half is about `src/` modules
+        # naming or reading an upstream dataset themselves.
         named=frozenset(),
         reached=frozenset(),
     ),

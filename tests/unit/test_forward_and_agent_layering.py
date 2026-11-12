@@ -173,6 +173,7 @@ def _strategy_registration_modules_on_disk(package_root: Path) -> set[str]:
         "strategy_registration",
         "strategy_forward_session",
         "strategy_agent_forward",
+        "strategy_agent_evaluation",
     }
     names |= {path.stem for path in package_root.glob("strategy_survivor*.py")}
     return {f"openalpha_cn.{name}" for name in names}

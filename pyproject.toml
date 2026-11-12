@@ -285,6 +285,7 @@ forbidden_modules = [
   "openalpha_cn.shortlist_view",
   "openalpha_cn.model_view",
   "openalpha_cn.strategy_view",
+  "openalpha_cn.strategy_agent_evaluation",
   "openalpha_cn.strategy_agent_forward",
   "openalpha_cn.strategy_forward_session",
   "openalpha_cn.strategy_registration",
@@ -570,6 +571,7 @@ id = "forward-registration-reaches-no-face"
 name = "the forward-registration modules reach no face, no shortlist view and no runtime composition"
 type = "forbidden"
 source_modules = [
+  "openalpha_cn.strategy_agent_evaluation",
   "openalpha_cn.strategy_agent_forward",
   "openalpha_cn.strategy_forward_session",
   "openalpha_cn.strategy_registration",
@@ -597,11 +599,18 @@ forbidden_modules = [
   "openalpha_cn.shortlist_view",
 ]
 
-# V2-P7-013 (plan C task 2.4). `strategy_agent_forward` is the agent family's filing glue: it
-# declares an `agent_*` family and files batches through `strategy_forward_session`. It joins the
-# forward contract because filing must not reach a face, the engine or the composition root
-# (stores are injected), and it joins the agent contract because a module that writes the agent
-# family's records must not be able to reach a paper book either. Both edges are KEPT on arrival.
+# V2-P7-013 (plan C tasks 2.4 and 2.7). `strategy_agent_forward` is the agent family's filing
+# glue: it declares an `agent_*` family and files batches through `strategy_forward_session`. It
+# joins the forward contract because filing must not reach a face, the engine or the composition
+# root (stores are injected), and it joins the agent contract because a module that writes the
+# agent family's records must not be able to reach a paper book either. Both edges are KEPT on
+# arrival. `strategy_agent_evaluation` joins the forward contract for the same face/engine/
+# composition reason, but it is deliberately NOT a source of the agent contract: it reads
+# `SurvivorBookConfig` (and reaches `domain.survivor_book` through `record_scope`) to reproduce
+# Step 0's survivor set, and the agent contract's forbidden list names that module -- a full-
+# transitive forbidden contract cannot hold it. Task 2.7's own rule ("reads stored records and the
+# panel, imports no agents and no models") is pinned by the evaluator's grimp test instead, and
+# this is the plan sentence's correction (closeout §3).
 #
 # V2-P7-013. ADR-0005 decision 2 is that the daily agent family "does not trade", and V2-P7-013 is
 # the issue that registers an `agent_*` prediction family from the candidate top 300; this is the
