@@ -34,12 +34,12 @@
 
 ## 2. 窗口
 
-| 段 | 日期 | 性质 |
-|---|---|---|
-| 研究期 | 2015-01-05..2021-12-31 | 本登记之前的研究数据，不是样本外证据 |
-| 验证期 | 2022-01-04..2023-12-29 | **第一次样本外读数，已读过一次**；结果是原样引用的描述，不是确认性证据（见第 11 节） |
-| 二次使用 | 2024-01-02..本登记提交日 | 二次使用、非确认性（决策链 §7.2） |
-| 确认期 | 本登记提交之后的前向记录 | 唯一的确认性来源 |
+| 段 | 日期 | 性质 | 出处 |
+|---|---|---|---|
+| 研究期 | 2015-01-05..2021-12-31 | 本登记之前的研究数据，不是样本外证据 | `scripts/research/grid.py:125-133` 的 `PROTOCOL_STAGE_WINDOWS` |
+| 验证期 | 2022-01-04..2023-12-29 | **第一次样本外读数，已读过一次**；结果是原样引用的描述，不是确认性证据（见第 11 节） | `scripts/research/grid.py:128`；读数登记 `docs/research/p7-readings/v2-p7-024-validation.registration.json` 的 `window` |
+| 二次使用 | 2024-01-02..本登记提交日 | 二次使用、非确认性（决策链 §7.2） | `scripts/research/grid.py:130`；决策链 §7.2 |
+| 确认期 | 本登记提交之后的前向记录 | 唯一的确认性来源 | 决策链 §5.2 G-0（`:231`） |
 
 确认性证据只来自本登记**提交之后**的前向记录；2022–2023 的读数是第一次样本外读数，它用掉
 了那个窗口，但**不是**确认性证据。研究期 2015–2021 是研究窗口，不是本登记的前向证据。
@@ -125,7 +125,9 @@
   `src/openalpha_cn/strategy_survivor_forward.py:514`；取值 `scripts/research/grid.py:137`）；窗口达到
   K 之前只报计数与描述性均值，不给 p 值、不给结论词。
 - **次要族**（{h20 `survivors_minus_ew`、h20 `ew_minus_worst_decile`、h5 `rank_ic`}，大小 3）用
-  Benjamini–Yekutieli（任意相依），q = 0.10；次要族等主窗口满足后才检验，打印为“q 值 ≤ q”，
+  Benjamini–Yekutieli（任意相依），q = 0.10（`PROTOCOL_FALSE_DISCOVERY_RATE`，`scripts/research/grid.py:139`；
+  协议的 `q` 字段 `src/openalpha_cn/strategy_survivor_forward.py:517`）；次要族等主窗口满足后才检验，
+  打印为“q 值 ≤ q”，
   从不当作结论。**本登记的主检验只有一条**，族大小 1。
 - 被拒绝的记录排除并列出；样本内出现拒绝记录时检验标“受损”。
 - 缺口只减少期数 n，不移动窗口（§7）。
@@ -217,7 +219,8 @@ minimum_periods 30；planned 只有 h20 rank_ic：planning_sd 0.18、planning_me
 以下每个数字都**不是证据**，引用时必须带抽样 se，且不得用来支持本登记的结论：
 
 - T8 的仅主板、N=10、样本内：净超额 +6.1–6.3%/年、跟踪误差 11.7%、单年跑输约 27%
-  （`docs/research/p7-step0-validation/T8-main-board-remeasure.md`）。**不是证据。**
+  （`docs/research/p7-step0-validation/T8-main-board-remeasure.md:16` 的 +6.33%/+6.06%、11.70%、27%）。
+  **不是证据。**
 - T9 的无前视口径重测把 T8 的期望数字下调约 0.9pp/年（−0.91pp/年，样本 se 0.30；
   `docs/research/p7-step0-validation/T9-delisted-while-held.md:21`）；路线文档的口径是
   “样本内 +5.9%，抽样 se 约 ±2.9pp”（`docs/superpowers/plans/2026-11-01-p7-route-adjustment.md:77`）。

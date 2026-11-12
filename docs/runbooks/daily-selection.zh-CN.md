@@ -684,7 +684,12 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
      --smoke-commit <冒烟阶段 1 的提交>
    ```
 
-   然后只提交这一个文件（提交信息含 `V2-P7-006b`，登记提交必须先于任何前向运行）。
+   然后只提交这一个文件（登记提交必须先于任何前向运行）：
+
+   ```bash
+   git add docs/research/p7-registration.json
+   git commit -m "docs(V2-P7-006b): the survivor book's registration, before any forward run"
+   ```
 6. **跑登记测试**（它此时覆盖真实文件）：`uv run pytest tests/unit/test_p7_registration_chain.py`。
    链测试会核对：恰好一个链根、每一环指向集合内、没有分叉；链根的 `config`/`criteria`/
    `settings`/`config_id` 与写入器的构造一致。
