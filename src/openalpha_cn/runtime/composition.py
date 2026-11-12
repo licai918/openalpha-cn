@@ -560,3 +560,23 @@ def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> Storag
         paper_state_store=paper_state_store,
         migration_result=migration_result,
     )
+
+
+AGENT_JOURNAL_DIRECTORY: Final[str] = "agent_evening"
+"""Where a runtime directory's agent-evening journals live (`V2-P7-013`, plan C Task 2.5).
+
+The one spelling of the literal; see `agent_journal_dir_at`. One JSON document per session,
+written once: the evening command is the only writer, and it writes the day's journal with a
+temporary file plus `os.replace`, so a reader never sees half of one.
+"""
+
+
+def agent_journal_dir_at(runtime_dir: Path) -> Path:
+    """The agent evening's journal directory under `runtime_dir`, opened alone: no migration, no
+    directory created (the command creates it on the one write, at step 6, after every filing).
+
+    For `scripts/agent_evening.py`, which journals one session's account of its two families
+    without assembling sixteen stores and without adding a `StorageContainer` field: the journal
+    is not a stage of a run but the command's own record of one evening, so it is an `*_at`
+    opener beside `paper_state_store_at` rather than a sixteenth store (hard rule 5)."""
+    return runtime_dir / AGENT_JOURNAL_DIRECTORY
