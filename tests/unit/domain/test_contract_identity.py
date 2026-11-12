@@ -873,6 +873,18 @@ DECLARED_PLAIN_DIGESTS: Final[dict[str, str]] = {
         "key: compared for equality inside one process, never stored and never an id "
         "(V2-P6-026)"
     ),
+    "agents/prompts.py::PromptTemplate.version_ref": (
+        "the whole 64 hex of one prompt artifact's name/system/user_format/response-schema, "
+        "the version half of a `VersionRef`; never prefixed, never truncated (V2-P7-012)"
+    ),
+    "models/recording.py::exchange_request_digest": (
+        "the whole 64 hex of one model request's canonical JSON, the name of its write-once "
+        "exchange document and the replay key; never prefixed, never truncated (V2-P7-012)"
+    ),
+    "models/recording.py::exchange_response_digest": (
+        "the whole 64 hex of one decoded model response, stored beside the exchange and "
+        "re-derived on read; never prefixed, never truncated (V2-P7-012)"
+    ),
 }
 """Every function under `src/` that hashes and does **not** narrow the result.
 
