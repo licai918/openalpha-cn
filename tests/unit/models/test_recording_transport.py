@@ -1,8 +1,8 @@
 """Tests for the content-addressed model-exchange recorder (`V2-P7-012`, plan Task 5).
 
 The store here is an in-memory double that satisfies `ModelExchangeStore`; the real
-`FileModelExchangeStore` is exercised in `tests/integration/storage/
-test_model_exchange_store.py`. What these tests pin is the *transport* behaviour: one lookup
+`FileModelExchangeStore` is exercised in `tests/integration/storage/test_model_exchange_store.py`.
+What these tests pin is the *transport* behaviour: one lookup
 before any call, replay reads only the store, a stored request can never be reached by a
 different credential, and no path in this module opens a socket.
 """
