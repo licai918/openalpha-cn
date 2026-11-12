@@ -220,6 +220,9 @@ body can carry), and genuine CLI/SDK twins whose route has not been written.
 CLI_ONLY: Final[MappingProxyType[str, str]] = MappingProxyType(
     {
         "doctor": "probes provider credentials on this machine; deliberately not remote",
+        "evidence limit-events": "`V2-P7-011`'s panel-derived producer: it reads the runtime "
+        "directory's stored panel and appends to its evidence store, so it runs where the panel "
+        "is; the REST `evidence build` route takes supplied records instead",
         "factor build": "writes factor partitions; `build_factor_panels` is the SDK twin",
         "factor describe": "`describe_factor` is the SDK twin; no route",
         "factor stale-return-paths": "`V2-P6-020`'s repair list for a stored research store: it "
@@ -660,6 +663,10 @@ def test_the_measured_surface_counts_are_the_ones_this_file_was_written_against(
     stale-statement-builds`, which lists the stored statement-factor builds the full-history
     read and the recency rule answer differently, with the rebuild commands -- declared in
     `CLI_ONLY`.
+
+    `V2-P7-011` moved `cli_commands` by one and nothing else: `openalpha evidence
+    limit-events`, the panel-derived limit-event producer -- declared in `CLI_ONLY` because it
+    reads this machine's stored panel and appends to its evidence store.
     """
     measured = {
         "routes": len(_routes()),
@@ -672,7 +679,7 @@ def test_the_measured_surface_counts_are_the_ones_this_file_was_written_against(
     assert measured == {
         "routes": 48,
         "sdk_methods": 58,
-        "cli_commands": 38,
+        "cli_commands": 39,
         "without_sdk": 11,
         "rest_only": 9,
     }
