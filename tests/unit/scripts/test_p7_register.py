@@ -285,10 +285,13 @@ def _arguments(
     smoke: str,
     path: str = REGISTRATION,
     dry_run: bool = False,
+    supersedes: str | None = None,
 ) -> list[str]:
     arguments = ["--epoch", epoch.isoformat(), "--smoke-commit", smoke, "--path", path]
     if dry_run:
         arguments.append("--dry-run")
+    if supersedes is not None:
+        arguments.extend(["--supersedes", supersedes])
     return arguments
 
 
@@ -486,3 +489,137 @@ def test_code_commit_is_head_passed_explicitly(
     assert captures == [head]
     written = json.loads((repo / REGISTRATION).read_text(encoding="utf-8"))
     assert written["code_commit"] == head
+
+
+# --- Task 3: U1 -- a successor names the registration it supersedes ------------------------------
+
+FIRST: Final[str] = "docs/research/p7-first-registration.json"
+"""The first committed survivor registration in the throwaway repository, when a test needs one."""
+
+
+def _survivor_body(**settings: Any) -> dict[str, Any]:
+    return {
+        "config": {"kind": "survivor_book/v1", "survivor_book": {}, "adapter": {}},
+        "settings": dict(settings),
+    }
+
+
+def _continuation(path: str) -> dict[str, str]:
+    return strategy_survivor_continuation.continuation_block(
+        path=path, sha256="0" * 64, config_id="config-id"
+    )
+
+
+def test_an_empty_registration_set_has_no_chain_problems() -> None:
+    assert register.chain_problems({}) == []
+
+
+def test_one_chain_root_has_no_chain_problems() -> None:
+    assert register.chain_problems({"docs/research/a.json": _survivor_body()}) == []
+    assert (
+        register.chain_problems(
+            {
+                "docs/research/a.json": _survivor_body(),
+                "docs/research/b.json": _survivor_body(
+                    survivor_continuation=_continuation("docs/research/a.json")
+                ),
+            }
+        )
+        == []
+    )
+
+
+def test_two_chain_roots_are_refused_naming_both() -> None:
+    problems = register.chain_problems(
+        {
+            "docs/research/a.json": _survivor_body(),
+            "docs/research/b.json": _survivor_body(),
+        }
+    )
+
+    assert problems
+    assert any("a.json" in problem and "b.json" in problem for problem in problems)
+
+
+def test_a_successor_naming_a_path_outside_the_set_is_refused() -> None:
+    problems = register.chain_problems(
+        {
+            "docs/research/a.json": _survivor_body(),
+            "docs/research/b.json": _survivor_body(
+                survivor_continuation=_continuation("docs/research/missing.json")
+            ),
+        }
+    )
+
+    assert problems
+    assert any("b.json" in problem and "missing.json" in problem for problem in problems)
+
+
+def test_two_successors_naming_one_predecessor_are_refused() -> None:
+    problems = register.chain_problems(
+        {
+            "docs/research/a.json": _survivor_body(),
+            "docs/research/b.json": _survivor_body(
+                survivor_continuation=_continuation("docs/research/a.json")
+            ),
+            "docs/research/c.json": _survivor_body(
+                survivor_continuation=_continuation("docs/research/a.json")
+            ),
+        }
+    )
+
+    assert problems
+    assert any(
+        "a.json" in problem and "b.json" in problem and "c.json" in problem for problem in problems
+    )
+
+
+def _commit_a_survivor_registration(repo: Path, path: str = FIRST) -> str:
+    """A committed, non-smoke survivor registration at `path`, built by the writer's own body."""
+    config, criteria, settings = register.registration_body(VALID_EPOCH)
+    target = repo / path
+    registry.register(
+        config, criteria, target, code_commit=research_repo.head(repo), settings=settings
+    )
+    research_repo.commit_file(repo, target, "the first registration", at=tds.COMMITTED)
+    return research_repo.head(repo)
+
+
+def test_the_writer_refuses_a_chain_root_without_a_predecessor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _repository(tmp_path)
+    _pin_the_clock(monkeypatch)
+    monkeypatch.chdir(repo)
+    _commit_a_survivor_registration(repo)
+
+    code, _, err = _run(capsys, *_arguments(smoke=research_repo.head(repo)))
+
+    assert code == 2
+    assert FIRST in err
+    assert "--supersedes" in err
+    assert not (repo / REGISTRATION).exists()
+
+
+def test_the_writer_names_the_predecessor_it_supersedes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _repository(tmp_path)
+    _pin_the_clock(monkeypatch)
+    monkeypatch.chdir(repo)
+    _commit_a_survivor_registration(repo)
+    predecessor_bytes = (repo / FIRST).read_bytes()
+    predecessor = json.loads(predecessor_bytes)
+
+    code, _, err = _run(capsys, *_arguments(smoke=research_repo.head(repo), supersedes=FIRST))
+
+    assert code == 0, err
+    written = json.loads((repo / REGISTRATION).read_text(encoding="utf-8"))
+    assert written["settings"]["survivor_continuation"] == {
+        "schema_version": "survivor-continuation/v1",
+        "supersedes_path": FIRST,
+        "supersedes_sha256": hashlib.sha256(predecessor_bytes).hexdigest(),
+        "supersedes_config_id": predecessor["config_id"],
+    }
+    assert register.chain_problems(register.committed_survivor_registrations(repo)) == []
+    assert _status(repo).strip() == f"?? {REGISTRATION}"
