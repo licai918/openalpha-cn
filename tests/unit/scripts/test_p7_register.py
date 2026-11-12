@@ -648,6 +648,13 @@ def test_refuses_an_uncommitted_or_edited_predecessor(
     assert missing[0] == 2
     assert "not-a-registration.json" in missing[2]
 
+    uncommitted = "docs/research/p7-uncommitted-registration.json"
+    (repo / uncommitted).write_text("{}\n", encoding="utf-8")
+    never_committed = _run(capsys, *_arguments(smoke=smoke, supersedes=uncommitted))
+    assert never_committed[0] == 2
+    assert uncommitted in never_committed[2]
+    assert "committed history" in never_committed[2]
+
     (repo / FIRST).write_text("{}\n", encoding="utf-8")
     edited = _run(capsys, *_arguments(smoke=smoke, supersedes=FIRST))
     assert edited[0] == 2

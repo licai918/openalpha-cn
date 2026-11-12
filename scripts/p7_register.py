@@ -153,7 +153,7 @@ CRITERIA: Final[dict[str, str]] = {
         "这是候选判据，不是已经成立的结论。"
     ),
     "stop_rule": (
-        "秩 IC 均值 ≤ 0.02 或 ew_minus_worst_decile 均值 ≤ 0 即停止，中期在第 18 个累积位置、表"
+        "秩 IC 均值 ≤ 0.02 或 ew_minus_worst_decile 均值 ≤ 0 即停止，中期在第 18 个累积位置、"
         "累积均值 ≤ 0 即停止。"
     ),
     "interim": "第 18 个累积位置只报计数与描述性均值，K = 36 个位置到齐之前不做检验、不给结论词。",
@@ -208,9 +208,11 @@ def committed_survivor_registrations(repo: Path) -> dict[str, dict[str, Any]]:
     """The non-smoke survivor registrations git holds under `docs/research/*.json`, by their
     repository-relative path, read from `HEAD`'s bytes.
 
-    The path filter is the plan's (`git ls-files 'docs/research/*.json'`, which matches only that
-    one directory); a file it lists that `HEAD` does not hold (staged and never committed) is not
-    a committed registration and is skipped. A P6 configuration (no `kind`) and a smoke
+    The path filter is the plan's (`git ls-files 'docs/research/*.json'`); git's wildcard crosses
+    `/`, so the listing also carries that directory's subtree (`docs/research/p7-readings/`), and
+    the `kind`/smoke filters below are what choose the chain's members. A file the listing gives
+    that `HEAD` does not hold (staged or untracked and never committed) is not a committed
+    registration and is skipped. A P6 configuration (no `kind`) and a smoke
     registration (`settings.smoke_run`) are not part of the chain: the first is the paused book,
     the second is never evidence and never merges into a non-smoke sample (U6)."""
     listing = _git(repo, "ls-files", f"{RESEARCH_DIRECTORY}/*.json")
