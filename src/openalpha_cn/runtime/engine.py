@@ -17,6 +17,7 @@ from openalpha_cn.agents.baseline import baseline_agents
 from openalpha_cn.decisions.risk import RiskGate
 from openalpha_cn.domain.decision import AgentDecision, DecisionLedger
 from openalpha_cn.domain.json_value import canonical_json_bytes
+from openalpha_cn.domain.llm_contamination import refuse_llm_agents_in_history
 from openalpha_cn.domain.run import AgentVersion, ArtifactDigest, RunManifest, VersionRef
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.domain.time import ensure_aware
@@ -100,6 +101,13 @@ class ResearchEngine:
         )
         selected = self.router.route(
             agents=self.agents, evidence=request.evidence, features=self.features
+        )
+        refuse_llm_agents_in_history(
+            path="engine",
+            mode=request.mode,
+            as_of=request.as_of,
+            ran_at=ensure_aware(self.clock()),
+            agents=[(agent.agent_id, agent.provenance.kind) for agent in selected],
         )
         recovery = self._load_or_start_recovery(
             request=request,
