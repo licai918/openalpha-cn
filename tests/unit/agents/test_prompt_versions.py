@@ -119,7 +119,7 @@ def test_an_llm_backed_agent_may_declare_a_prompt() -> None:
     assert provenance.prompt == reference
 
 
-def test_a_deterministic_provenance_refuses_a_prompt() -> None:
+def test_a_deterministic_agent_may_not_declare_a_prompt() -> None:
     """Constrained in both directions, like the vendor model beside it: a prompt nothing ran
     is a fabricated provenance row, not a stricter declaration."""
     with pytest.raises(ValueError, match="only an llm_backed agent may name a prompt"):

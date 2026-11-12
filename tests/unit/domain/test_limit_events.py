@@ -287,7 +287,7 @@ def test_a_limit_free_session_produces_no_event_and_breaks_a_streak() -> None:
     assert (third.kind, third.board_count) == ("limit_up", 1)
 
 
-def test_an_st_five_percent_band_is_judged_by_its_published_limit() -> None:
+def test_a_st_five_percent_band_is_judged_by_its_published_limit() -> None:
     """The published band decides, not a nominal 10% ratio: an ST name closes `limit_up` at +5%.
 
     The same +5% close on a 10%-band name touches nothing -- judging by a constant ratio would
