@@ -542,3 +542,35 @@ def test_a_walk_that_reaches_the_panels_first_stored_year_reports_a_lower_bound(
     assert (event.ts_code, event.kind) == (A, "limit_up")
     assert event.board_count == 1
     assert event.board_count_is_lower_bound is True
+
+
+def test_an_in_year_missing_daily_partition_is_still_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 3's other half: the edge rule must not swallow a fault inside the year.
+
+    The walk ends with a lower bound only when the prior *year* is unreadable (the panel's edge).
+    A session missing from a year the calendar covers means the panel claims that year and cannot
+    answer for it, so the producer still refuses by name rather than lowering a bound it has no
+    reason to lower.
+    """
+    import openalpha_cn.panel_limit_events as adapter
+
+    panel = generate_limit_streak_panel()
+    store = _stored(tmp_path, panel)
+    first = LIMIT_STREAK_FIRST_SESSION_INDEX
+    target = panel.sessions[first + 1]
+    missing = panel.sessions[first]
+    assert missing.year == target.year, "this test pins the in-year branch"
+    original = adapter.load_daily_bars
+
+    def _load(store: PanelStore, *, day: date, **kwargs: object) -> object:
+        if day == missing:
+            raise PanelStorageError(f"no daily partition for {day.isoformat()}")
+        return original(store, day=day, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(adapter, "load_daily_bars", _load)
+
+    with pytest.raises(PanelStorageError) as raised:
+        limit_events_on(store, session=target, as_of=_published(target), exchange=EXCHANGE)
+    assert missing.isoformat() in str(raised.value)
