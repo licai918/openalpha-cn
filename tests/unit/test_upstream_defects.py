@@ -42,6 +42,7 @@ from typer.testing import CliRunner
 
 from openalpha_cn import cli
 from openalpha_cn.cli import PanelExit, app
+from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
 from openalpha_cn.domain.daily_prices import (
     DAILY_BASIC_DATASET,
     DAILY_BASIC_PANEL_COLUMNS,
@@ -65,6 +66,8 @@ from openalpha_cn.domain.trading_calendar import (
     build_trading_calendar,
 )
 from openalpha_cn.domain.upstream_defects import (
+    DEFECT_KINDS,
+    DEFECT_SOURCE_DATASETS,
     RETURN_PATH_KINDS,
     UpstreamDefect,
     UpstreamDefectError,
@@ -72,6 +75,7 @@ from openalpha_cn.domain.upstream_defects import (
     limit_placeholder_kind,
     recorded_return_paths,
     repeats_previous_close,
+    restated_sessions,
     return_path_kind,
     upstream_defects_from_panel_rows,
     valuation_placeholder_kind,
@@ -2253,3 +2257,107 @@ def test_a_decision_the_stored_rows_no_longer_support_is_named_as_retired(
         f"RETIRED-RETURN-PATH {RETURN_PATH_CODE} {SESSIONS[2].isoformat()} was "
         "pre_close_contradicts_adj_factor"
     ) in result.output
+
+
+# --- V2-P7-026: a factor the upstream restated (Task 2) ----------------------------------------
+#
+# Measured 2026-11-12: 002851.SZ's 2026-09-30 `adj_factor` is stored as 2.3361 and the upstream
+# now serves 2.3356. The remedy re-fetches that security's Shanghai year, confirms every differing
+# session with a differently-shaped request, rewrites the rows, and records each session as
+# `restated_after_publication`. This section is pure: the row decoder, the session splitter and
+# the return-path reader, with no build, store or transport involved.
+
+RESTATED_CODE = "002851.SZ"
+RESTATED_DAY = date(2026, 9, 30)
+RESTATED_STORED = 2.3361
+RESTATED_SERVED = 2.3356
+
+
+def _restated_row(code: str, day: date, *, served: float, stored: float) -> tuple[object, ...]:
+    """A row shaped like `UPSTREAM_DEFECT_PANEL_COLUMNS`: the served factor in `bar_close`, the
+    stored factor in `valuation_close`, every other value column null."""
+    return (
+        code,
+        day.isoformat(),
+        ADJ_FACTOR_DATASET,
+        "restated_after_publication",
+        served,
+        stored,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+
+def test_a_restatement_record_round_trips_through_the_stored_row_decoder() -> None:
+    """`restated_after_publication` is a `DefectKind` of the `adj_factor` source, decoded whole:
+    the served factor in `bar_close`, the stored factor in `valuation_close`, nothing else."""
+    (defect,) = upstream_defects_from_panel_rows(
+        [_restated_row(RESTATED_CODE, RESTATED_DAY, served=RESTATED_SERVED, stored=RESTATED_STORED)]
+    )
+
+    assert defect.ts_code == RESTATED_CODE
+    assert defect.trade_date == RESTATED_DAY
+    assert defect.source_dataset == ADJ_FACTOR_DATASET
+    assert defect.kind == "restated_after_publication"
+    assert defect.bar_close == RESTATED_SERVED
+    assert defect.valuation_close == RESTATED_STORED
+    assert defect.values() == (RESTATED_SERVED, RESTATED_STORED, None, None, None)
+    assert defect.valuation_repeats_previous_close is None
+    assert defect.list_date is None
+    assert "restated_after_publication" in DEFECT_KINDS
+    assert ADJ_FACTOR_DATASET in DEFECT_SOURCE_DATASETS
+
+
+def test_restated_sessions_names_the_differing_sessions_sorted_and_ignores_the_rest() -> None:
+    """Exactly the sessions both answers hold with different values, in date order. Equal
+    sessions are not restatements, and a session only the re-fetch answered is the ingest
+    layer's coverage question, not this rule's."""
+    earlier, middle, later = date(2026, 9, 29), RESTATED_DAY, date(2026, 10, 8)
+    served_only = date(2026, 10, 9)
+    stored = {later: RESTATED_STORED, earlier: 1.0, middle: 2.0}
+    served = {earlier: 1.0, middle: 2.1, later: RESTATED_SERVED, served_only: 4.0}
+
+    assert restated_sessions(stored, served) == (middle, later)
+    assert restated_sessions({earlier: 1.0}, {earlier: 1.0}) == ()
+    assert restated_sessions({}, {earlier: 1.0}) == ()
+
+
+def test_restated_sessions_refuses_a_stored_session_the_upstream_no_longer_serves() -> None:
+    """A stored change row with no answer is a withdrawal, `V2-P6-016`'s path, and is refused by
+    name rather than healed: a fetch fault that drops a row must never become a restatement, and
+    an absent answer must never be read as "no change"."""
+    held = RESTATED_DAY
+    withdrawn = date(2026, 8, 28)
+
+    with pytest.raises(UpstreamDefectError) as error:
+        restated_sessions({held: RESTATED_STORED, withdrawn: 1.5}, {held: RESTATED_SERVED})
+
+    message = str(error.value)
+    assert withdrawn.isoformat() in message
+    assert held.isoformat() not in message
+    assert "withdraw" in message.lower()
+    assert "restatement" in message
+
+
+def test_a_restatement_record_is_not_a_return_path_decision() -> None:
+    """The record carries `bar_close` and `valuation_close`, but it is not the `V2-P6-020`
+    judgement of a `pre_close`/`adj_factor` disagreement: a reader looking for the session's
+    return must neither find it nor read the two factors as closes."""
+    record = UpstreamDefect(
+        ts_code=RESTATED_CODE,
+        trade_date=RESTATED_DAY,
+        source_dataset=ADJ_FACTOR_DATASET,
+        kind="restated_after_publication",
+        bar_close=RESTATED_SERVED,
+        valuation_close=RESTATED_STORED,
+    )
+
+    assert recorded_return_paths([record]) == {}
+    assert dict(RETURN_PATH_KINDS) == {
+        "pre_close_corroborated_over_adj_factor": "published",
+        "adj_factor_corroborated_over_pre_close": "adjusted",
+        "pre_close_contradicts_adj_factor": None,
+    }
