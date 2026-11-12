@@ -5,7 +5,7 @@
 ## 0. 先读这几句
 
 - 本批次做的是方案 C 的第 2 批四个任务：`V2-P7-010` 的探针工具、`V2-P7-012` 的后续（thinking 开关 / json_object 提示词 / 空白内容）、`V2-P7-013` 的智能体家族（纯领域规则、前向登记胶水、晚间命令）、`V2-P7-014` 的增量 IC 评估器（纯算术、读取已存记录的评估器）。实施计划是任务书，**不在版本库内**：`.superpowers/sdd/plan-c/plan.md`（`.superpowers/` 不入库），事实文件 `.superpowers/sdd/plan-c/deepseek-endpoint-facts.md`；本文是它的版本化记录。
-- 代码在分支 `feat/v2-p7-c-batch-2` 上（从 `main` 的 `d2b74f7` 分出，`d2b74f7` 已并入 `V2-P7-026`）。**7 个代码提交 + 1 个修复提交 + 1 个文档提交**：`6b6f047`（2.1）、`75dff34`（2.2）、`49737d3`（2.3）、`c425bb0`（2.4）、`708f0c8`（2.5）、`5703f78`（2.6）、`b8702d3`（2.7）、`f4e7380`（修复：晚间命令拒绝与 Step 0 种子耦合的盐），然后是本文的文档提交。截面：`git diff --stat d2b74f7..HEAD`（以 tip 为准）；到 `b8702d3` 为止 25 个文件、+7,134 / −22。
+- 代码在分支 `feat/v2-p7-c-batch-2` 上（从 `main` 的 `d2b74f7` 分出，`d2b74f7` 已并入 `V2-P7-026`）。**7 个代码提交 + 3 个修复/守卫提交 + 1 个文档提交 + 本记录的更正提交**：`6b6f047`（2.1）、`75dff34`（2.2）、`49737d3`（2.3）、`c425bb0`（2.4）、`708f0c8`（2.5）、`5703f78`（2.6）、`b8702d3`（2.7）、`f4e7380`（修复：晚间命令拒绝与 Step 0 种子耦合的盐）、`5271beb`（修复：主 horizon 钉成 h=1）、`a7b6238`（守卫：用量站点普查记录受闸的晚间模型家族），然后是 `ba758e2` 文档提交与本记录的更正提交。截面：`git diff --stat d2b74f7..HEAD`（以 tip 为准）；到 `b8702d3` 为止 25 个文件、+7,134 / −22。
 - **未推送、未合并。** 交付的代码**没有跑过任何真实面板、真实因子、真实读数或冒烟，一次 Tushare 请求也没有发过，一次 DeepSeek（或任何 LLM）请求也没有发过**：所有测试跑在测试时生成的面板、构造的已存记录、脚本化传输与已存模型交换上；socket 守卫全程开着。计划里的两个联网步骤（L1 的 010 探针 ≤300 次请求、L3 的模型探针 ≤5 次请求）**都没有做**，各等用户明确 go。
 - `DEEPSEEK_V4_1_FLASH` 仍是**占位**：model、base_url、structured_output_mode 与价格一个没填，`verified_on=None`（`L2` 是受闸步骤），`api_key_env="DEEPSEEK_API_KEY"` 是变量名。本批次只加了候选值的载体（`VendorEndpoint.extra_payload`）与提示词 V2，没有把占位写成已核实。
 - **没有任何 P7 登记存在**，`docs/research/p7-registration.json` 没有写出，也没有任何绑定被作废；`docs/research/p7-registration.json`、`docs/research/p7-protocol.md`、`scripts/daily_selection.py`、`scripts/forward_report.py`、`scripts/p7_register.py` 与任何 `strategy_survivor_*` 模块的字节都没有被本批次改动（晚间命令只 import `daily_selection` 的辅助函数）。
@@ -71,7 +71,7 @@
 
 - 新 `src/openalpha_cn/strategy_agent_evaluation.py`：`AGENT_FORWARD_PROTOCOL_KEY="agent_forward_protocol"`、`AGENT_FORWARD_PROTOCOL_SCHEMA="agent-forward-protocol/v1"`；`AgentProtocol`（计划点名的 12 个字段，`__post_init__` 钉 D2：主家族必须是 `agent_llm_structured/v1`、主集必须是 `primary`）；`ExploratoryArm`；`read_agent_protocol(settings)` 读无默认值、键缺失/多余/越界都按名拒绝；`evaluate(*, protocol, agent_store, step0_store, labels, book, through, as_of)`（存储与标签都是结构 Protocol，`FilePredictionStore` 与 `model_view.OutcomeLabels` 结构满足）。每次会话：域 = Step 0 存储的 `record_scope` 幸存者 ∩ 该臂记分名；factor = Step 0 存储的合成分；标签只在自身退出会话 16:30 之后经 `labels.label` 读，未到期只计数不打标签。主臂 = 登记的 LLM/主集/h=1；其余登记臂合成 **一个** Benjamini-Yekutieli 家族（`q` 来自协议、`dependence="arbitrary"`）并永远标探索性；主集与覆盖集永不混池。窗口满足且每个位置都到期才做一次 `outcome_statistics.sign_flip_test`；单侧读数按 `strategy_survivor_forward` 的先例从双侧导出。五种结论：`not_yet`（窗口未满或位置未到期，只印计数与描述性均值、无 p 值）、`futility_stop`（中期位置累计均值 ≤ 0）、`not_measurable`（完整窗口内可测会话 < `min_measurable_sessions`，与“没有证据”分开的措辞）、`candidate_increment`（均值 > 0 且单侧读数 ≤ level）、`no_increment_detected`。样本数与可检出均值总是存在（`DetectableIC`，说明是设计性质、不是观测功效）。不 import `agents`、不 import `models`（grimp 测试钉住）。
 - `pyproject.toml`：`strategy_agent_evaluation` 进 `forward-registration-reaches-no-face` 的 `source_modules`、进 `backtest-no-numeric-stack-or-panel-plane` 的禁止表；**不进** `agent-layer-reaches-no-paper-book`（见 §3 的更正）；`tests/unit/test_forward_and_agent_layering.py` 的目录相等辅助函数加入该模块；`tests/unit/test_panel_ingest_import_isolation.py` 补两行（seam 四个名字、数据集空行）。
-- 测试 26 条（`tests/integration/test_agent_incremental_ic.py`）：8 条计划点名的行为 + 协议读取（13 个缺键参数化）、D2 主臂、futility、真实面板 + `model_view.OutcomeLabels` 接线、grimp 层测试。
+- 测试 27 条（`tests/integration/test_agent_incremental_ic.py`）：8 条计划点名的行为 + 协议读取（13 个缺键参数化）、D2 主臂、futility、真实面板 + `model_view.OutcomeLabels` 接线、grimp 层测试；`5271beb` 之后还有 `test_the_primary_horizon_is_pinned_to_one_session`（见 §3 的评审发现）。
 
 ## 2. TDD 与并行实现
 
@@ -108,6 +108,8 @@
   21. 2.7：`power` 的 sd 用窗口内测得的离散度（只描述、不进 p 值），目标功效是常量 0.8；将来若登记规划 sd/功效块，只改 `_power_of`。
   22. 2.7：Step 0 只用声明家族 `survivor_book_composite/v1` 识别（不做登记绑定）；同一会话两条 Step 0 记录按名拒绝；智能体记录按家族 ∈ 两个 C 家族且带 `scoring_set` 过滤，同 (family, set, session) 重复按名拒绝。续任链（`V2-P7-023`）的登记绑定规则是以后的事。
 - **Review Focus 2 的运行侧加固**：任务 2.3 的 `refuse_a_salt_tied_to_the_book` 由任务 2.5 的晚间命令在读完两份登记后、读或写当天之前调用（`f4e7380`），所以即使登记写入器（批次 3）出了问题，运行时也不会用与 Step 0 种子耦合的盐抽样；测试 `test_a_salt_tied_to_step0s_registered_seed_is_refused_and_writes_nothing` 钉住「step 1 拒绝、零写入」。计划 2.5 没有写这一步，它按 Review Focus 2 的句子补上，属于更保守的一侧。
+- **主 horizon 钉成 h=1（`5271beb`，评审发现）**：D2 把唯一主统计量登记为 LLM 家族在主集上的 h=1 偏秩 IC，但 `read_agent_protocol` 与公开的 `AgentProtocol` 只钉了家族与集合、没钉 horizon，于是 `primary_horizon: 5` 会被接受——那会把重叠的 h=5 读数变成主统计量、把 h=1 读数漏掉，等于从后门多一个统计量。现在两处都拒绝 1 以外的 `primary_horizon` 并说明理由；h=5 仍可作 `secondary` 里的探索性臂（测试钉住）。这是只读验收子代理对照 D2/Review Focus 5 找到的，交付时它不在计划点名的测试清单里。
+- **用量站点普查的守卫扩展（`a7b6238`，评审发现）**：`scripts/agent_evening.py` 是第一条「能调用模型」的出厂命令，四份面向用户文档的「出厂路径不调用模型」两句守卫的前提不能再是一个空的静态扫描。今天该陈述仍然成立，理由更窄：智能体只在 `_llm_family` 里、在 `runtime/composition.llm_provider` 之后构造，而 `DEEPSEEK_V4_1_FLASH.verified_on is None` 时该装配按名拒绝真实调用。`USAGE_SITES` 现在记录晚间命令的 5 个受闸站点与批次 1 修复轮留下的 2 个 `agents/model.py` 站点（它们只是命名可调用对象、不调用），各自带次数与理由；新增的 `test_the_agent_evening_model_family_is_gated_on_the_unverified_endpoint` 钉住闸门：L2 填 `verified_on` 的那天它会失败，并要求改写四份文档的模型/用量措辞、退役或反转这两个守卫。没有改任何文档措辞，也没有把「其实会调用」写成「不调用」——闸门是被断言而不是被假定。
 - **本批次没有覆盖、按保守一侧选择并记录的**：`AGENTS.md` 的 “Current work pointer” 与 `docs/HANDOFF_CURRENT.md` 没有改（批次 1 同一先例）；`CHANGELOG.md` 没有改（发布波维护）；四份面向用户文档的模型/用量措辞没有改（见 §6 开放项 1）。
 
 ## 4. 顺序与闸门不变
@@ -126,8 +128,8 @@
 
 ## 6. 已知局限 / 开放问题
 
-1. **本批次让一条仓库级陈述在代码结构上不再成立**：`tests/integration/test_usage_claims_match_the_shipped_paths.py` 的前提测试（“没有出厂路径调用模型 / 写用量”）在 base `d2b74f7` 上已因批次 1 修复轮 2 的两个 `agents/model.py` 站点而红；本批次新增的 `scripts/agent_evening.py` 又构造 `StructuredSignalAgent` 并在 `--no-llm` 关闭时调用 `generate_json`，于是该前提在结构上不再为真（哪怕 `verified_on=None` 时真实调用仍被拒）。按该守卫自己的说明，要把它变真需要改写四份面向用户文档（`README.md`、`README.en.md`、`docs/why-openalpha-cn.zh-CN.md`、`docs/marketing/openalpha-cn-100-promotion-plans.zh-CN.md`）里“出厂路径不调用模型/不产生账单”的措辞，并退役或反转其中两个守卫——这是跨批次的文档/裁决波，**不在批次 2 的计划内**，本文只记录，不自行改写营销措辞。控制者需裁决何时做（建议在 L4 干跑周之前）。
-2. **模型别名移动时的回放**：模型 id 是记录请求地址的一部分，所以模型 id 一变，旧交换回放不中；重跑会花新请求，随后 `file_agent_batch` 返回已持有记录 `unchanged`，而写一次的日志会因为交换不同按名拒绝（失败即关闭）。加固方向（该会话 LLM 批次已持有则跳过模型步骤、回放日志里的交换块）只记录、未实现。
+1. **“没有出厂路径调用模型 / 写用量”这条仓库级陈述现在靠一道闸门成立，而不是靠空的静态扫描**（`a7b6238`）：`scripts/agent_evening.py` 是第一条能调用模型的出厂命令，但智能体只在 `_llm_family` 里、在 `llm_provider` 之后构造，而 `DEEPSEEK_V4_1_FLASH.verified_on is None` 时 `llm_provider` 按名拒绝真实调用，所以今天仍然没有出厂路径能花掉一次模型请求。基线 `d2b74f7` 的红（批次 1 修复轮留下的两个 `agents/model.py` 站点）也在同一提交里按实记录。`test_the_agent_evening_model_family_is_gated_on_the_unverified_endpoint` 是绊线：**L2 填 `verified_on` 的提交必须同时**改写四份面向用户文档（`README.md`、`README.en.md`、`docs/why-openalpha-cn.zh-CN.md`、`docs/marketing/openalpha-cn-100-promotion-plans.zh-CN.md`）里“出厂路径不调用模型/不产生账单”的措辞，并退役或反转两个散文守卫。本批次没有改写营销措辞；它在守卫文件里把闸门写成断言、每条站点都带真实理由，并把这个义务交给 L2 的同一次提交。
+2. **模型别名移动时的记录身份**（已由只读验收子代理实测更正）：模型 id 是**声明**的一部分（`agent_declaration` 的 `model` hyperparameter）也是记录请求地址的一部分。别名一变，声明就变，`session_record` 会把它当作另一个声明：`put` 会写**第二条**记录（`created`），旧记录不被改写；随后写一次的日志因为块不同按名拒绝，评估器也会按名拒绝同一会话同一 (family, set) 的两条记录（失败即关闭）。所以已登记的答案不会被改掉，但库里可能多出一条重复记录——加固方向（该会话 LLM 批次已持有则跳过模型步骤并回放日志的交换块，或把记录绑到登记+模型身份）只记录、未实现。
 3. **未核实/配置错误的端点**：规则家族已 file、日志不写，修好部署后重跑补完；这不是数据错误，但读者要按此理解“缺失的一天”。
 4. `scripts/agent_evening.py` 的 14 个测试约 49 s（每个测试自己生成面板）；可优化为模块级面板副本，但不是正确性问题。
 5. `--step0-runtime-dir` 经 `PanelStore`/loaders 读，本进程不取写锁，但 DuckDB 只读连接会创建 `panel/catalog.duckdb.lock` 侧写文件；只读测试只排除这一类侧写/锁文件（不排除任何数据）。
