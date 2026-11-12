@@ -149,6 +149,11 @@ from openalpha_cn.domain.upstream_defects import (
     superseded_versions,
     upstream_defects_from_panel_rows,
 )
+from openalpha_cn.evidence.limit_events import (
+    LimitEvidenceConflictError,
+    limit_event_snapshots,
+    refuse_a_restated_session,
+)
 from openalpha_cn.evidence.service import build_provider_evidence, parse_serialized_evidence
 from openalpha_cn.factor_view import (
     ACCEPTANCE_STEP,
@@ -284,6 +289,7 @@ from openalpha_cn.panel_ingest import (
     write_upstream_defects,
     write_withdrawn_rows,
 )
+from openalpha_cn.panel_limit_events import LimitEventReadError, limit_events_on
 from openalpha_cn.panel_view import (
     PanelRequestError,
     PanelUnreadableError,
@@ -321,6 +327,7 @@ from openalpha_cn.research_result_io import (
 )
 from openalpha_cn.runtime.composition import (
     build_storage,
+    evidence_store_at,
     experiment_store_at,
     prediction_store_at,
     run_repository_at,
@@ -1168,6 +1175,134 @@ def evidence_build(
             response.items
         )
     typer.echo(response.model_dump_json())
+
+
+@evidence_app.command("limit-events")
+def evidence_limit_events(
+    session: Annotated[
+        str,
+        typer.Option("--session", help="First open session (YYYY-MM-DD) to derive events for."),
+    ],
+    through: Annotated[
+        str,
+        typer.Option("--through", help="Last open session, inclusive; defaults to --session."),
+    ] = "",
+    runtime_dir: Annotated[
+        Path | None, typer.Option("--runtime-dir", help=_RUNTIME_DIR_HELP)
+    ] = None,
+    exchange: Annotated[str, typer.Option("--exchange")] = TRADING_CALENDAR_DEFAULT_EXCHANGE,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit one record per session as data.")
+    ] = False,
+) -> None:
+    """Derive limit-up/连板/炸板 evidence from the stored panel, one session at a time.
+
+    Each open session in `--session`..`--through` is read at **its own 16:30**
+    (`panel_ingest.session_publication_instant`), so a session is answered with what a reader
+    standing on that evening could have seen: a later restatement of the panel is not visible,
+    and replaying history session by session is what `panel_limit_events.limit_events_on`
+    defines. The snapshots are appended through the composition root's one evidence opener
+    (`runtime.composition.evidence_store_at`), so this command cannot become a second spelling
+    of `runtime_dir / "evidence"` (v2 hard rule 5).
+
+    **A session with no event writes nothing and says `NO limit events session=D`.** That is a
+    fact worth printing rather than silence, because "the panel had no limit event" and "the
+    command did not run" must be distinguishable. The line is on the human channel only: a
+    `--json` caller gets one document on stdout and nothing else.
+
+    Re-running a session appends nothing new -- `evidence_id` excludes the ingest clock, so the
+    same session is the same content-addressed batch and the store returns the partition it
+    already wrote. A session whose **stored** limit events disagree with this run's by id set is
+    refused by name (`LimitEvidenceConflictError`) instead of joined by a second, contradictory
+    partition: two id sets for one session are two answers to one question.
+    """
+    runtime_dir = _resolved_runtime_dir(runtime_dir)
+    with _panel_command("evidence limit-events", json_output=json_output):
+        first = _panel_sessions([session])[0]
+        last = _panel_sessions([through])[0] if through else first
+        if last < first:
+            raise _panel_fail(
+                PanelExit.bad_request,
+                f"--through {last.isoformat()} is before --session {first.isoformat()}; a "
+                "session range runs forwards",
+            )
+        store = _panel_store(runtime_dir)
+        try:
+            calendar = load_trading_calendar(
+                store,
+                exchange=exchange,
+                years=tuple(range(first.year, last.year + 1)),
+                as_of=_panel_clock(),
+            )
+        except (TradingCalendarError, PanelStorageError) as error:
+            raise _panel_fail(
+                PanelExit.unhealthy,
+                f"the {exchange} calendar could not be read out of {store.root}: {error}. "
+                "Build it first: `openalpha panel build --dataset trade_cal --year <year>`",
+            ) from error
+        try:
+            days = calendar.trading_days_between(first, last)
+        except TradingCalendarError as error:
+            raise _panel_fail(PanelExit.bad_request, str(error)) from error
+
+        fetched_at = _panel_clock()
+        evidence = None
+        written = 0
+        records: list[dict[str, object]] = []
+        for day in days:
+            published = session_publication_instant(day)
+            try:
+                events = limit_events_on(store, session=day, as_of=published, exchange=exchange)
+            except LimitEventReadError as error:
+                raise _panel_fail(PanelExit.bad_request, str(error)) from error
+            except (
+                PanelStorageError,
+                TradingCalendarError,
+                PanelBatchError,
+                PriceDataError,
+                SuspensionError,
+            ) as error:
+                raise _panel_fail(
+                    PanelExit.unhealthy,
+                    f"the limit events of {day.isoformat()} could not be read out of "
+                    f"{store.root}: {error}",
+                ) from error
+            if not events:
+                if not json_output:
+                    typer.echo(f"NO limit events session={day.isoformat()}")
+                records.append({"session": day.isoformat(), "events": 0, "evidence_ids": []})
+                continue
+            snapshots = limit_event_snapshots(events, session=day, fetched_at=fetched_at)
+            if evidence is None:
+                # One opener, and opened only when there is something to write: a session with
+                # no event must not create an empty evidence directory as a side effect.
+                evidence = evidence_store_at(runtime_dir)
+            try:
+                refuse_a_restated_session(evidence, session=day, arriving=snapshots)
+            except LimitEvidenceConflictError as error:
+                raise _panel_fail(PanelExit.unhealthy, str(error)) from error
+            partition = evidence.append(snapshots)
+            written += len(snapshots)
+            if not json_output:
+                typer.echo(
+                    f"OK limit events session={day.isoformat()} events={len(snapshots)} "
+                    f"partition={partition.name}"
+                )
+            records.append(
+                {
+                    "session": day.isoformat(),
+                    "events": len(snapshots),
+                    "evidence_ids": [snapshot.evidence_id for snapshot in snapshots],
+                }
+            )
+        if json_output:
+            typer.echo(
+                json.dumps(
+                    {"status": "ok", "events": written, "sessions": records},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
 
 
 _CODE_COMMIT_HELP = (

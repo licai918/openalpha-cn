@@ -248,6 +248,13 @@ class StorageContainer:
     migration_result: MigrationRunResult
 
 
+EVIDENCE_DIRECTORY: Final[str] = "evidence"
+"""Where a runtime directory's point-in-time evidence partitions live (`V2-P7-011`).
+
+The one spelling of the literal that `build_storage` used to write by hand; see
+`evidence_store_at`.
+"""
+
 PAPER_SNAPSHOT_DIRECTORY: Final[tuple[str, str]] = ("paper", "snapshots")
 """Where a runtime directory's paper-book snapshots live (`V2-P7-017`)."""
 
@@ -274,6 +281,18 @@ STATE_DATABASE: Final[str] = "state.sqlite3"
 Named once for `run_repository_at`, the one of those ten that a face opens without a
 `build_storage`; the other nine stay inline in `build_storage`, which is already their one source.
 """
+
+
+def evidence_store_at(runtime_dir: Path) -> ParquetEvidenceStore:
+    """The point-in-time evidence store under `runtime_dir`, opened alone: no migration, and the
+    directory is created by `ParquetEvidenceStore.__init__` exactly as it is inside
+    `build_storage`.
+
+    For `openalpha evidence limit-events`, which appends one session's derived events without
+    assembling sixteen stores, and for any later reader with the same need. `build_storage`
+    opens `runtime_dir / "evidence"` through this function, so there is one source for it (hard
+    rule 5)."""
+    return ParquetEvidenceStore(runtime_dir / EVIDENCE_DIRECTORY)
 
 
 def paper_state_store_at(runtime_dir: Path) -> FilePaperStateStore:
@@ -384,7 +403,7 @@ def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> Storag
     """
     runtime_dir.mkdir(parents=True, exist_ok=True)
     migration_result = run_migrations(runtime_dir / "state.sqlite3", clock=clock)
-    evidence_store: EvidenceStore = ParquetEvidenceStore(runtime_dir / "evidence")
+    evidence_store: EvidenceStore = evidence_store_at(runtime_dir)
     repository = run_repository_at(runtime_dir)
     memory: ResearchMemory = SQLiteResearchMemory(runtime_dir / "state.sqlite3")
     recovery_store: RecoveryStore = SQLiteRecoveryStore(runtime_dir / "state.sqlite3")
